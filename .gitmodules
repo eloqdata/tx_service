@@ -1,0 +1,6 @@
+[submodule "abseil-cpp"]
+	path = abseil-cpp
+	url = https://github.com/abseil/abseil-cpp.git
+[submodule "tx-log-protos"]
+	path = tx-log-protos
+	url = git@github.com:eloqdata/tx-log-protos.git
