@@ -1,0 +1,117 @@
+/**
+ *    Copyright (C) 2025 EloqData Inc.
+ *
+ *    This program is free software: you can redistribute it and/or  modify
+ *    it under either of the following two licenses:
+ *    1. GNU Affero General Public License, version 3, as published by the Free
+ *    Software Foundation.
+ *    2. GNU General Public License as published by the Free Software
+ *    Foundation; version 2 of the License.
+ *
+ *    This program is distributed in the hope that it will be useful,
+ *    but WITHOUT ANY WARRANTY; without even the implied warranty of
+ *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ *    GNU Affero General Public License or GNU General Public License for more
+ *    details.
+ *
+ *    You should have received a copy of the GNU Affero General Public License
+ *    and GNU General Public License V2 along with this program.  If not, see
+ *    <http://www.gnu.org/licenses/>.
+ *
+ */
+#pragma once
+
+#include <chrono>
+#include <iostream>
+#include <memory>
+#include <string>
+#include <thread>
+#include <unordered_map>
+#include <vector>
+
+#include "cc/cc_entry.h"
+#include "cc/cc_request.h"
+#include "cc/local_cc_shards.h"
+#include "txlog.h"
+#include "util.h"
+
+using namespace std::chrono;
+
+namespace txservice
+{
+
+class Checkpointer
+{
+public:
+    Checkpointer(LocalCcShards &shards,
+                 store::DataStoreHandler *write_hd,
+                 const uint32_t &checkpoint_interval,
+                 TxLog *log_agent,
+                 uint32_t ckpt_delay_seconds);
+
+    ~Checkpointer() = default;
+
+    void Ckpt(bool is_last_ckpt);
+
+    std::pair<uint64_t, uint64_t> GetNewCheckpointTs(uint32_t node_group_id,
+                                                     bool is_last_ckpt);
+
+    /**
+     * @brief Checkpoint one Entry to KvStore synchronously.
+     * Now, only used for test.
+     */
+    bool CkptEntryForTest(const TableName &tbl_name,
+                          const TableSchema *tbl_schema,
+                          std::vector<FlushRecord> &ckpt_vec);
+
+    bool FlushArchiveForTest(const TableName &tbl_name,
+                             const TableSchema *tbl_schema,
+                             std::vector<FlushRecord> &archives);
+
+    void Run();
+
+    /**
+     * @brief Called by TxProcessor thread to notify checkpointer thread
+     * to do checkpoint if there is no freeable entries to be kicked out
+     * from ccmap. This will also be called by data sync worker thread when
+     * it runs out of task.
+     * @param  request_ckpt  If true, will request checkpoint immediately.
+     */
+    void Notify(bool request_ckpt = true);
+
+    bool IsTerminated();
+
+    /**
+     * @brief When TxService is stopping, this function will be called and
+     * triggers checkpoint to flush data to KvStore.
+     *
+     */
+    void Terminate();
+
+    void Join();
+
+private:
+    enum struct Status
+    {
+        Active,
+        Terminating,
+        Terminated
+    };
+
+    LocalCcShards &local_shards_;
+    // protects request_ckpt_ and status_
+    std::mutex ckpt_mux_;
+    std::condition_variable ckpt_cv_;
+    bool request_ckpt_;
+    store::DataStoreHandler *store_hd_;
+    std::thread thd_;
+    Status ckpt_thd_status_;
+    const uint32_t checkpoint_interval_;
+    std::chrono::system_clock::time_point last_checkpoint_ts_;
+    uint32_t ckpt_delay_time_;  // unit: Microsecond
+    TxService *tx_service_;
+    TxLog *log_agent_;
+
+    void NotifyLogOfCkptTs(uint32_t node_group, int64_t term, uint64_t ckpt_ts);
+};
+}  // namespace txservice
