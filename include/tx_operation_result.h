@@ -25,6 +25,7 @@
 #include <memory>  //unique_ptr
 #include <shared_mutex>
 #include <utility>
+#include <vector>
 
 #include "cc/cc_entry.h"
 #include "proto/cc_request.pb.h"
@@ -59,7 +60,7 @@ struct AcquireKeyResult
         commit_ts_ = 0;
         cce_addr_ = {};
         remote_ack_cnt_ = nullptr;
-        remote_hd_result_is_set_ = nullptr;
+        remote_hd_result_is_set_ = false;
     }
 
     uint64_t last_vali_ts_{0};
@@ -72,10 +73,28 @@ struct AcquireKeyResult
     // blocked. An acknowledgement is a special response notifying the sender
     // the address and the term of the cc entry on which the request is blocked.
     std::atomic<int32_t> *remote_ack_cnt_{nullptr};
-    // Use this flag to indicate wheatear the hd_result of remote request has
-    // been called SetFinish()/SetError(). Local request always set this flag to
-    // `true`.
-    std::unique_ptr<std::atomic<bool>> remote_hd_result_is_set_{nullptr};
+
+    bool IsRemoteHdResultSet(std::memory_order order) const
+    {
+        return reinterpret_cast<const std::atomic<bool> &>(
+                   remote_hd_result_is_set_)
+            .load(order);
+    }
+
+    void SetRemoteHdResult(bool value, std::memory_order order)
+    {
+        reinterpret_cast<std::atomic<bool> &>(remote_hd_result_is_set_)
+            .store(value, order);
+    }
+
+private:
+    // Use this atomic flag to indicate whether the hd_result of remote request
+    // has been called SetFinish()/SetError(). Local request always set this
+    // flag to `true`.
+    //
+    // std::vector<std::atomic<T>>.resize() compiles error. C++17 lack of
+    // std::atomic_ref<T>. Wrap load/store operation as member methods.
+    bool remote_hd_result_is_set_{false};
 };
 
 struct AcquireAllResult
@@ -231,7 +250,10 @@ struct RemoteScanSliceCache
     static constexpr size_t MetaDataSize = 8;
 
     RemoteScanSliceCache(uint16_t shard_cnt)
-        : cache_mem_size_(0), mem_max_bytes_(0), shard_cnt_(shard_cnt)
+        : cache_mem_size_(0),
+          mem_max_bytes_(0),
+          shard_cnt_(shard_cnt),
+          trailing_cnt_(0)
     {
     }
 
@@ -255,53 +277,31 @@ struct RemoteScanSliceCache
         rec_status_.clear();
         keys_.clear();
         records_.clear();
-        key_off_vec_.clear();
-        rec_off_vec_.clear();
         cache_mem_size_ = 0;
+        trailing_cnt_ = 0;
         mem_max_bytes_ = 0;
         shard_cnt_ = shard_cnt;
     }
 
-    /**
-     * Sender remove trailing records.
-     *
-     * It is hard for the receiver to remove trailing records, since Key might
-     * not transferred.
-     */
     void RemoveLast()
     {
-        uint32_t cache_mem_size = cache_mem_size_;
-        (void) cache_mem_size;
-        cache_mem_size_ -= keys_.size() - key_off_vec_.back();
-        cache_mem_size_ -= records_.size() - rec_off_vec_.back();
-        assert(cache_mem_size_ <= cache_mem_size);
-        (void) cache_mem_size;
-
-        key_ts_.pop_back();
-        gap_ts_.pop_back();
-        cce_ptr_.pop_back();
-        cce_lock_ptr_.pop_back();
-        term_.pop_back();
-        rec_status_.pop_back();
-        keys_.erase(key_off_vec_.back());
-        records_.erase(rec_off_vec_.back());
-        key_off_vec_.pop_back();
-        rec_off_vec_.pop_back();
+        trailing_cnt_++;
     }
 
     uint64_t LastCce()
     {
-        return cce_ptr_.at(cce_ptr_.size() - 1);
+        return cce_ptr_.at(cce_ptr_.size() - 1 - trailing_cnt_);
     }
 
     size_t Size() const
     {
-        return cce_ptr_.size();
+        return cce_ptr_.size() - trailing_cnt_;
     }
 
     void SetLastCceLock(uint64_t lock_ptr)
     {
-        cce_lock_ptr_.back() = lock_ptr;
+        assert(Size() > 0);
+        cce_lock_ptr_[Size() - 1] = lock_ptr;
     }
 
     std::vector<uint64_t> key_ts_;
@@ -312,11 +312,10 @@ struct RemoteScanSliceCache
     std::vector<remote::RecordStatusType> rec_status_;
     std::string keys_;
     std::string records_;
-    std::vector<size_t> key_off_vec_;  // Used to remove trailing keys.
-    std::vector<size_t> rec_off_vec_;  // Used to remove trailing records.
     uint32_t cache_mem_size_;
     uint32_t mem_max_bytes_;
     uint16_t shard_cnt_;
+    size_t trailing_cnt_;
 };
 
 struct RangeScanSliceResult
@@ -524,13 +523,9 @@ struct PostProcessResult
 {
     PostProcessResult() = default;
 
-    PostProcessResult(const PostProcessResult &rhs)
-        : conflicting_txs_(rhs.conflicting_txs_)
-    {
-    }
-
-    PostProcessResult(PostProcessResult &&rhs)
-        : conflicting_txs_(std::move(rhs.conflicting_txs_))
+    PostProcessResult(PostProcessResult &&rhs) noexcept
+        : conflicting_tx_cnt_(
+              rhs.conflicting_tx_cnt_.load(std::memory_order_relaxed))
     {
     }
 
@@ -541,31 +536,32 @@ struct PostProcessResult
             return *this;
         }
 
-        conflicting_txs_ = rhs.conflicting_txs_;
+        conflicting_tx_cnt_.store(
+            rhs.conflicting_tx_cnt_.load(std::memory_order_relaxed),
+            std::memory_order_relaxed);
         return *this;
     }
 
-    void AddConflictingTx(TxNumber txn)
+    void IncrConflictingTx(int32_t cnt = 1)
     {
-        std::lock_guard<std::mutex> lk(mux_);
-        conflicting_txs_.emplace_back(txn);
+        if (cnt > 0)
+        {
+            conflicting_tx_cnt_.fetch_add(cnt, std::memory_order_relaxed);
+        }
     }
 
-    size_t Size()
+    size_t Size() const
     {
-        std::lock_guard<std::mutex> lk(mux_);
-        return conflicting_txs_.size();
+        return conflicting_tx_cnt_.load(std::memory_order_relaxed);
     }
 
     void Clear()
     {
-        std::lock_guard<std::mutex> lk(mux_);
-        conflicting_txs_.clear();
+        conflicting_tx_cnt_.store(0, std::memory_order_relaxed);
         is_local_ = true;
     }
 
-    std::vector<TxNumber> conflicting_txs_;
-    std::mutex mux_;
+    std::atomic<int32_t> conflicting_tx_cnt_{0};
     bool is_local_{true};
 };
 
@@ -609,7 +605,8 @@ struct ObjectCommandResult
 
     // TTL expired
     bool ttl_expired_{false};
-    // TTL if expired
+    // TTL of this key after command is executed. This written to log to decide
+    // if commands from this tx still need to be replayed during recovery.
     uint64_t ttl_{UINT64_MAX};
     // TTL reset
     bool ttl_reset_{false};
@@ -648,4 +645,139 @@ struct UploadBatchResult
     NodeGroupId node_group_id_{0};
 };
 
+struct GenerateSkParallelResult
+{
+    GenerateSkParallelResult() = default;
+    GenerateSkParallelResult(const GenerateSkParallelResult &rhs) = delete;
+    GenerateSkParallelResult(GenerateSkParallelResult &&rhs) noexcept = default;
+
+    GenerateSkParallelResult &operator=(GenerateSkParallelResult &&rhs) =
+        default;
+
+    void Reset()
+    {
+        indexes_multikey_attr_.clear();
+        pack_sk_error_.Reset();
+    }
+
+    void IndexesMergeMultiKeyAttr(
+        const std::vector<TableName> &indexes_name,
+        const std::vector<bool> &indexes_multikey,
+        const std::vector<const MultiKeyPaths *> &indexes_multikey_paths)
+    {
+        if (indexes_multikey_attr_.empty())
+        {
+            indexes_multikey_attr_.reserve(indexes_name.size());
+            for (uint16_t idx = 0; idx < indexes_name.size(); ++idx)
+            {
+                const TableName *index_name = &indexes_name[idx];
+                bool multikey = indexes_multikey[idx];
+                if (multikey)
+                {
+                    const MultiKeyPaths *multikey_paths =
+                        indexes_multikey_paths[idx];
+                    assert(multikey_paths);
+                    indexes_multikey_attr_.emplace_back(
+                        index_name, true, multikey_paths->Clone());
+                }
+                else
+                {
+                    indexes_multikey_attr_.emplace_back(
+                        index_name, false, nullptr);
+                }
+            }
+        }
+        else
+        {
+            for (uint16_t idx = 0; idx < indexes_name.size(); ++idx)
+            {
+                assert(*indexes_multikey_attr_[idx].index_name_ ==
+                       indexes_name[idx]);
+
+                bool multikey = indexes_multikey[idx];
+                if (multikey)
+                {
+                    indexes_multikey_attr_[idx].multikey_ = true;
+
+                    const MultiKeyPaths *multikey_paths =
+                        indexes_multikey_paths[idx];
+                    assert(multikey_paths);
+                    if (indexes_multikey_attr_[idx].multikey_paths_)
+                    {
+                        indexes_multikey_attr_[idx].multikey_paths_->MergeWith(
+                            *multikey_paths);
+                    }
+                    else
+                    {
+                        indexes_multikey_attr_[idx].multikey_paths_ =
+                            multikey_paths->Clone();
+                    }
+                }
+            }
+        }
+    }
+
+    void IndexesMergeMultiKeyAttr(
+        const std::vector<TableName> &indexes_name,
+        const std::vector<bool> &indexes_multikey,
+        std::vector<MultiKeyPaths::Uptr> &indexes_multikey_paths)
+    {
+        if (indexes_multikey_attr_.empty())
+        {
+            indexes_multikey_attr_.reserve(indexes_name.size());
+            for (uint16_t idx = 0; idx < indexes_name.size(); ++idx)
+            {
+                const TableName *index_name = &indexes_name[idx];
+                bool multikey = indexes_multikey[idx];
+                if (multikey)
+                {
+                    MultiKeyPaths::Uptr &multikey_paths =
+                        indexes_multikey_paths[idx];
+                    assert(multikey_paths);
+                    indexes_multikey_attr_.emplace_back(
+                        index_name, true, std::move(multikey_paths));
+                }
+                else
+                {
+                    indexes_multikey_attr_.emplace_back(
+                        index_name, false, nullptr);
+                }
+            }
+        }
+        else
+        {
+            for (uint16_t idx = 0; idx < indexes_name.size(); ++idx)
+            {
+                assert(*indexes_multikey_attr_[idx].index_name_ ==
+                       indexes_name[idx]);
+
+                bool multikey = indexes_multikey[idx];
+                if (multikey)
+                {
+                    indexes_multikey_attr_[idx].multikey_ = true;
+
+                    MultiKeyPaths::Uptr &multikey_paths =
+                        indexes_multikey_paths[idx];
+                    assert(multikey_paths);
+                    if (indexes_multikey_attr_[idx].multikey_paths_)
+                    {
+                        indexes_multikey_attr_[idx].multikey_paths_->MergeWith(
+                            *multikey_paths);
+                    }
+                    else
+                    {
+                        indexes_multikey_attr_[idx].multikey_paths_ =
+                            std::move(multikey_paths);
+                    }
+                }
+            }
+        }
+    }
+
+    std::vector<MultiKeyAttr> indexes_multikey_attr_;
+
+    // When creating index violates some constraint, reports the concrete reason
+    // to calculation engine.
+    PackSkError pack_sk_error_;
+};
 }  // namespace txservice

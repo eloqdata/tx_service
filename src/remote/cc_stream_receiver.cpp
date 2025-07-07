@@ -316,6 +316,7 @@ void CcStreamReceiver::PreProcessScanResp(
     CcHandlerResult<RangeScanSliceResult> *hd_res = nullptr;
     uint32_t tx_node_id = (msg->tx_number() >> 32L) >> 10;
     int64_t tx_term = msg->tx_term();
+    TransactionExecution *txm = nullptr;
 
     if (!Sharder::Instance().CheckLeaderTerm(tx_node_id, tx_term))
     {
@@ -328,23 +329,18 @@ void CcStreamReceiver::PreProcessScanResp(
         hd_res = reinterpret_cast<CcHandlerResult<RangeScanSliceResult> *>(
             msg->handler_addr());
 
-        if (!hd_res->SetResultByStreamThread())
-        {
-            scan_resp_pool_.enqueue(std::move(msg));
-            return;
-        }
+        txm = reinterpret_cast<TransactionExecution *>(msg->txm_addr());
 
-        if (hd_res->Txm()->TxNumber() != msg->tx_number() ||
-            hd_res->Txm()->CommandId() != msg->command_id())
+        txm->AcquireSharedForwardLatch();
+
+        if (txm->TxNumber() != msg->tx_number() ||
+            txm->CommandId() != msg->command_id() || hd_res->IsFinished())
         {
             // The original tx has terminated and the tx machine has been
             // recycled. The response message is directed to an obsolete tx.
             // Skips setting the cc handler result.
             scan_resp_pool_.enqueue(std::move(msg));
-            // Decrease the falsely added response count when it is added by a
-            // outdated msg. (ABA problem: result_status_==0 -> timeout
-            // result_status_==1 -> timeout finished result_status_==0)
-            hd_res->DecreaseCurrentHandlingResponse();
+            txm->ReleaseSharedForwardLatch();
             return;
         }
     }
@@ -416,8 +412,7 @@ void CcStreamReceiver::PreProcessScanResp(
             hd_res->SetFinished();
         }
 
-        hd_res->DecreaseCurrentHandlingResponse();
-
+        txm->ReleaseSharedForwardLatch();
         RecycleScanSliceResp(std::move(msg));
         return;
     }
@@ -476,6 +471,7 @@ void CcStreamReceiver::OnReceiveCcMsg(std::unique_ptr<CcMessage> msg)
         assert(msg->has_acquire_resp());
 
         CcHandlerResult<std::vector<AcquireKeyResult>> *hd_res = nullptr;
+        TransactionExecution *txm = nullptr;
 
         uint32_t tx_node_id = (msg->tx_number() >> 32L) >> 10;
         int64_t tx_term = msg->tx_term();
@@ -487,25 +483,23 @@ void CcStreamReceiver::OnReceiveCcMsg(std::unique_ptr<CcMessage> msg)
         }
         else
         {
+            txm = reinterpret_cast<TransactionExecution *>(msg->txm_addr());
+
+            txm->AcquireSharedForwardLatch();
+
             hd_res = reinterpret_cast<
                 CcHandlerResult<std::vector<AcquireKeyResult>> *>(
                 msg->handler_addr());
 
-            if (!hd_res->SetResultByStreamThread())
-            {
-                LOG(INFO) << "AcquireResponse rejected due to txm timeout ";
-                msg_pool_.enqueue(std::move(msg));
-                break;
-            }
-
-            if (hd_res->Txm()->TxNumber() != msg->tx_number() ||
-                hd_res->Txm()->CommandId() != msg->command_id())
+            assert(txm == hd_res->Txm());
+            if (txm->TxNumber() != msg->tx_number() ||
+                txm->CommandId() != msg->command_id() || hd_res->IsFinished())
             {
                 // The original tx has terminated and the tx machine has been
                 // recycled. The response message is directed to an obsolete tx.
                 // Skips setting the cc handler result.
                 msg_pool_.enqueue(std::move(msg));
-                hd_res->DecreaseCurrentHandlingResponse();
+                txm->ReleaseSharedForwardLatch();
                 break;
             }
         }
@@ -514,10 +508,10 @@ void CcStreamReceiver::OnReceiveCcMsg(std::unique_ptr<CcMessage> msg)
         const CceAddr_msg &cce_addr_res = cc_res.cce_addr();
         AcquireKeyResult &acq_res = hd_res->Value()[cc_res.vec_idx()];
 
-        if (acq_res.remote_hd_result_is_set_->load(std::memory_order_acquire))
+        if (acq_res.IsRemoteHdResultSet(std::memory_order_acquire))
         {
             msg_pool_.enqueue(std::move(msg));
-            hd_res->DecreaseCurrentHandlingResponse();
+            txm->ReleaseSharedForwardLatch();
             break;
         }
 
@@ -528,11 +522,10 @@ void CcStreamReceiver::OnReceiveCcMsg(std::unique_ptr<CcMessage> msg)
                 acq_res.remote_ack_cnt_->fetch_sub(1);
             }
 
-            acq_res.remote_hd_result_is_set_->store(true,
-                                                    std::memory_order_release);
-            hd_res->SetError(
+            acq_res.SetRemoteHdResult(true, std::memory_order_release);
+            hd_res->SetRemoteError(
                 ToLocalType::ConvertCcErrorCode(cc_res.error_code()));
-            hd_res->DecreaseCurrentHandlingResponse();
+            txm->ReleaseSharedForwardLatch();
         }
         else
         {
@@ -562,10 +555,9 @@ void CcStreamReceiver::OnReceiveCcMsg(std::unique_ptr<CcMessage> msg)
                 // of the key.
                 acq_res.last_vali_ts_ = cc_res.vali_ts();
                 acq_res.commit_ts_ = cc_res.commit_ts();
-                acq_res.remote_hd_result_is_set_->store(
-                    true, std::memory_order_release);
+                acq_res.SetRemoteHdResult(true, std::memory_order_release);
 
-                hd_res->SetFinished();
+                hd_res->SetRemoteFinished();
             }
             else
             {
@@ -573,7 +565,7 @@ void CcStreamReceiver::OnReceiveCcMsg(std::unique_ptr<CcMessage> msg)
                 acq_res.commit_ts_ = 0;
             }
 
-            hd_res->DecreaseCurrentHandlingResponse();
+            txm->ReleaseSharedForwardLatch();
         }
 
         msg_pool_.enqueue(std::move(msg));
@@ -592,6 +584,7 @@ void CcStreamReceiver::OnReceiveCcMsg(std::unique_ptr<CcMessage> msg)
         assert(msg->has_acquire_all_resp());
 
         CcHandlerResult<AcquireAllResult> *hd_res = nullptr;
+        TransactionExecution *txm = nullptr;
 
         uint32_t tx_node_id = (msg->tx_number() >> 32L) >> 10;
         int64_t tx_term = msg->tx_term();
@@ -603,24 +596,37 @@ void CcStreamReceiver::OnReceiveCcMsg(std::unique_ptr<CcMessage> msg)
         }
         else
         {
-            hd_res = reinterpret_cast<CcHandlerResult<AcquireAllResult> *>(
-                msg->handler_addr());
+            txm = reinterpret_cast<TransactionExecution *>(msg->txm_addr());
 
-            if (!hd_res->SetResultByStreamThread())
-            {
-                LOG(INFO) << "AcquireAllResponse rejected due to txm timeout ";
-                msg_pool_.enqueue(std::move(msg));
-                break;
-            }
+            txm->AcquireSharedForwardLatch();
 
-            if (hd_res->Txm()->TxNumber() != msg->tx_number() ||
-                hd_res->Txm()->CommandId() != msg->command_id())
+            // Check txm before accessing hd_res which might be invalid if the
+            // txm has already been reused.
+            if (txm->TxNumber() != msg->tx_number() ||
+                txm->CommandId() != msg->command_id())
             {
                 // The original tx has terminated and the tx machine has been
                 // recycled. The response message is directed to an obsolete tx.
                 // Skips setting the cc handler result.
                 msg_pool_.enqueue(std::move(msg));
-                hd_res->DecreaseCurrentHandlingResponse();
+                txm->ReleaseSharedForwardLatch();
+                break;
+            }
+
+            hd_res = reinterpret_cast<CcHandlerResult<AcquireAllResult> *>(
+                msg->handler_addr());
+
+            // Double-check the txm status since it could have timed out and
+            // been reused after the first check.
+            assert(txm == hd_res->Txm());
+            if (txm->TxNumber() != msg->tx_number() ||
+                txm->CommandId() != msg->command_id())
+            {
+                // The original tx has terminated and the tx machine has been
+                // recycled. The response message is directed to an obsolete tx.
+                // Skips setting the cc handler result.
+                msg_pool_.enqueue(std::move(msg));
+                txm->ReleaseSharedForwardLatch();
                 break;
             }
         }
@@ -632,7 +638,7 @@ void CcStreamReceiver::OnReceiveCcMsg(std::unique_ptr<CcMessage> msg)
         {
             hd_res->SetError(
                 ToLocalType::ConvertCcErrorCode(cc_res.error_code()));
-            hd_res->DecreaseCurrentHandlingResponse();
+            txm->ReleaseSharedForwardLatch();
         }
         else
         {
@@ -674,7 +680,7 @@ void CcStreamReceiver::OnReceiveCcMsg(std::unique_ptr<CcMessage> msg)
                 hd_res->SetFinished();
             }
 
-            hd_res->DecreaseCurrentHandlingResponse();
+            txm->ReleaseSharedForwardLatch();
         }
 
         msg_pool_.enqueue(std::move(msg));
@@ -706,6 +712,7 @@ void CcStreamReceiver::OnReceiveCcMsg(std::unique_ptr<CcMessage> msg)
 
             return_msg.set_tx_number(msg->tx_number());
             return_msg.set_handler_addr(msg->handler_addr());
+            return_msg.set_txm_addr(msg->txm_addr());
             return_msg.set_tx_term(msg->tx_term());
             return_msg.set_command_id(msg->command_id());
 
@@ -733,6 +740,7 @@ void CcStreamReceiver::OnReceiveCcMsg(std::unique_ptr<CcMessage> msg)
         assert(msg->has_validate_resp());
 
         CcHandlerResult<PostProcessResult> *hd_res = nullptr;
+        TransactionExecution *txm = nullptr;
 
         uint32_t tx_node_id = (msg->tx_number() >> 32L) >> 10;
         int64_t tx_term = msg->tx_term();
@@ -744,24 +752,22 @@ void CcStreamReceiver::OnReceiveCcMsg(std::unique_ptr<CcMessage> msg)
         }
         else
         {
+            txm = reinterpret_cast<TransactionExecution *>(msg->txm_addr());
+
+            txm->AcquireSharedForwardLatch();
+
             hd_res = reinterpret_cast<CcHandlerResult<PostProcessResult> *>(
                 msg->handler_addr());
 
-            if (!hd_res->SetResultByStreamThread())
-            {
-                LOG(INFO) << "ValidateResponse rejected due to txm timeout ";
-                msg_pool_.enqueue(std::move(msg));
-                break;
-            }
-
-            if (hd_res->Txm()->TxNumber() != msg->tx_number() ||
-                hd_res->Txm()->CommandId() != msg->command_id())
+            assert(txm == hd_res->Txm());
+            if (txm->TxNumber() != msg->tx_number() ||
+                txm->CommandId() != msg->command_id())
             {
                 // The original tx has terminated and the tx machine has been
                 // recycled. The response message is directed to an obsolete tx.
                 // Skips setting the cc handler result.
                 msg_pool_.enqueue(std::move(msg));
-                hd_res->DecreaseCurrentHandlingResponse();
+                txm->ReleaseSharedForwardLatch();
                 break;
             }
         }
@@ -769,22 +775,19 @@ void CcStreamReceiver::OnReceiveCcMsg(std::unique_ptr<CcMessage> msg)
         const ValidateResponse &cc_res = msg->validate_resp();
 
         PostProcessResult &conflicting_txs = hd_res->Value();
-        for (int i = 0; i < cc_res.txs_size(); i++)
-        {
-            conflicting_txs.AddConflictingTx(cc_res.txs(i));
-        }
+        conflicting_txs.IncrConflictingTx(cc_res.conflicting_tx_cnt());
 
         if (cc_res.error_code() != 0)
         {
-            hd_res->SetError(
+            hd_res->SetRemoteError(
                 ToLocalType::ConvertCcErrorCode(cc_res.error_code()));
         }
         else
         {
-            hd_res->SetFinished();
+            hd_res->SetRemoteFinished();
         }
 
-        hd_res->DecreaseCurrentHandlingResponse();
+        txm->ReleaseSharedForwardLatch();
 
         msg_pool_.enqueue(std::move(msg));
         break;
@@ -794,6 +797,7 @@ void CcStreamReceiver::OnReceiveCcMsg(std::unique_ptr<CcMessage> msg)
         assert(msg->has_post_resp());
 
         CcHandlerResult<PostProcessResult> *hd_res = nullptr;
+        TransactionExecution *txm = nullptr;
 
         uint32_t tx_node_id = (msg->tx_number() >> 32L) >> 10;
         int64_t tx_term = msg->tx_term();
@@ -805,24 +809,22 @@ void CcStreamReceiver::OnReceiveCcMsg(std::unique_ptr<CcMessage> msg)
         }
         else
         {
+            txm = reinterpret_cast<TransactionExecution *>(msg->txm_addr());
+
+            txm->AcquireSharedForwardLatch();
+
             hd_res = reinterpret_cast<CcHandlerResult<PostProcessResult> *>(
                 msg->handler_addr());
 
-            if (!hd_res->SetResultByStreamThread())
-            {
-                LOG(INFO) << "PostprocessResponse rejected due to txm timeout ";
-                msg_pool_.enqueue(std::move(msg));
-                break;
-            }
-
-            if (hd_res->Txm()->TxNumber() != msg->tx_number() ||
-                hd_res->Txm()->CommandId() != msg->command_id())
+            assert(txm == hd_res->Txm());
+            if (txm->TxNumber() != msg->tx_number() ||
+                txm->CommandId() != msg->command_id())
             {
                 // The original tx has terminated and the tx machine has been
                 // recycled. The response message is directed to an obsolete tx.
                 // Skips setting the cc handler result.
                 msg_pool_.enqueue(std::move(msg));
-                hd_res->DecreaseCurrentHandlingResponse();
+                txm->ReleaseSharedForwardLatch();
                 break;
             }
         }
@@ -839,7 +841,7 @@ void CcStreamReceiver::OnReceiveCcMsg(std::unique_ptr<CcMessage> msg)
             hd_res->SetRemoteFinished();
         }
 
-        hd_res->DecreaseCurrentHandlingResponse();
+        txm->ReleaseSharedForwardLatch();
 
         msg_pool_.enqueue(std::move(msg));
         break;
@@ -869,6 +871,7 @@ void CcStreamReceiver::OnReceiveCcMsg(std::unique_ptr<CcMessage> msg)
         assert(msg->has_read_resp());
 
         CcHandlerResult<ReadKeyResult> *hd_res = nullptr;
+        TransactionExecution *txm = nullptr;
 
         uint32_t tx_node_id = (msg->tx_number() >> 32L) >> 10;
         int64_t tx_term = msg->tx_term();
@@ -880,24 +883,23 @@ void CcStreamReceiver::OnReceiveCcMsg(std::unique_ptr<CcMessage> msg)
         }
         else
         {
+            txm = reinterpret_cast<TransactionExecution *>(msg->txm_addr());
+
+            txm->AcquireSharedForwardLatch();
+
             hd_res = reinterpret_cast<CcHandlerResult<ReadKeyResult> *>(
                 msg->handler_addr());
 
-            if (!hd_res->SetResultByStreamThread())
-            {
-                LOG(INFO) << "ReadResponse rejected due to txm timeout ";
-                msg_pool_.enqueue(std::move(msg));
-                break;
-            }
-
-            if (hd_res->Txm()->TxNumber() != msg->tx_number() ||
-                hd_res->Txm()->CommandId() != msg->command_id())
+            // Check txm before accessing hd_res which might be invalid if the
+            // txm has already been reused.
+            if (txm->TxNumber() != msg->tx_number() ||
+                txm->CommandId() != msg->command_id() || hd_res->IsFinished())
             {
                 // The original tx has terminated and the tx machine has been
                 // recycled. The response message is directed to an obsolete tx.
                 // Skips setting the cc handler result.
                 msg_pool_.enqueue(std::move(msg));
-                hd_res->DecreaseCurrentHandlingResponse();
+                txm->ReleaseSharedForwardLatch();
                 break;
             }
         }
@@ -908,7 +910,7 @@ void CcStreamReceiver::OnReceiveCcMsg(std::unique_ptr<CcMessage> msg)
         {
             hd_res->SetError(
                 ToLocalType::ConvertCcErrorCode(read_res.error_code()));
-            hd_res->DecreaseCurrentHandlingResponse();
+            txm->ReleaseSharedForwardLatch();
         }
         else
         {
@@ -944,7 +946,7 @@ void CcStreamReceiver::OnReceiveCcMsg(std::unique_ptr<CcMessage> msg)
                 hd_res->SetFinished();
             }
 
-            hd_res->DecreaseCurrentHandlingResponse();
+            txm->ReleaseSharedForwardLatch();
         }
         msg_pool_.enqueue(std::move(msg));
         break;
@@ -975,6 +977,7 @@ void CcStreamReceiver::OnReceiveCcMsg(std::unique_ptr<CcMessage> msg)
                                     CcMessage_MessageType_PostprocessResponse);
             return_msg.set_tx_number(msg->tx_number());
             return_msg.set_handler_addr(msg->handler_addr());
+            return_msg.set_txm_addr(msg->txm_addr());
             return_msg.set_tx_term(msg->tx_term());
             return_msg.set_command_id(msg->command_id());
 
@@ -1009,6 +1012,7 @@ void CcStreamReceiver::OnReceiveCcMsg(std::unique_ptr<CcMessage> msg)
                                     CcMessage_MessageType_PostprocessResponse);
             return_msg.set_tx_number(msg->tx_number());
             return_msg.set_handler_addr(msg->handler_addr());
+            return_msg.set_txm_addr(msg->txm_addr());
             return_msg.set_tx_term(msg->tx_term());
             return_msg.set_command_id(msg->command_id());
 
@@ -1070,6 +1074,7 @@ void CcStreamReceiver::OnReceiveCcMsg(std::unique_ptr<CcMessage> msg)
         assert(msg->has_scan_open_resp());
 
         CcHandlerResult<ScanOpenResult> *hd_res = nullptr;
+        TransactionExecution *txm = nullptr;
         uint32_t tx_node_id = (msg->tx_number() >> 32L) >> 10;
         int64_t tx_term = msg->tx_term();
         if (!Sharder::Instance().CheckLeaderTerm(tx_node_id, tx_term))
@@ -1080,24 +1085,22 @@ void CcStreamReceiver::OnReceiveCcMsg(std::unique_ptr<CcMessage> msg)
         }
         else
         {
+            txm = reinterpret_cast<TransactionExecution *>(msg->txm_addr());
+
+            txm->AcquireSharedForwardLatch();
+
             hd_res = reinterpret_cast<CcHandlerResult<ScanOpenResult> *>(
                 msg->handler_addr());
 
-            if (!hd_res->SetResultByStreamThread())
-            {
-                LOG(INFO) << "ScanOpenResponse rejected due to txm timeout";
-                msg_pool_.enqueue(std::move(msg));
-                break;
-            }
-
-            if (hd_res->Txm()->TxNumber() != msg->tx_number() ||
-                hd_res->Txm()->CommandId() != msg->command_id())
+            assert(txm == hd_res->Txm());
+            if (txm->TxNumber() != msg->tx_number() ||
+                txm->CommandId() != msg->command_id())
             {
                 // The original tx has terminated and the tx machine has been
                 // recycled. The response message is directed to an obsolete tx.
                 // Skips setting the cc handler result.
                 msg_pool_.enqueue(std::move(msg));
-                hd_res->DecreaseCurrentHandlingResponse();
+                txm->ReleaseSharedForwardLatch();
                 break;
             }
         }
@@ -1154,15 +1157,15 @@ void CcStreamReceiver::OnReceiveCcMsg(std::unique_ptr<CcMessage> msg)
 
         if (scan_open_res.error_code() != 0)
         {
-            hd_res->SetError(
+            hd_res->SetRemoteError(
                 ToLocalType::ConvertCcErrorCode(scan_open_res.error_code()));
         }
         else
         {
-            hd_res->SetFinished();
+            hd_res->SetRemoteFinished();
         }
 
-        hd_res->DecreaseCurrentHandlingResponse();
+        txm->ReleaseSharedForwardLatch();
 
         msg_pool_.enqueue(std::move(msg));
         break;
@@ -1189,7 +1192,7 @@ void CcStreamReceiver::OnReceiveCcMsg(std::unique_ptr<CcMessage> msg)
         assert(msg->has_scan_next_resp());
 
         CcHandlerResult<ScanNextResult> *hd_res = nullptr;
-
+        TransactionExecution *txm = nullptr;
         uint32_t tx_node_id = (msg->tx_number() >> 32L) >> 10;
         int64_t tx_term = msg->tx_term();
         if (!Sharder::Instance().CheckLeaderTerm(tx_node_id, tx_term))
@@ -1200,24 +1203,22 @@ void CcStreamReceiver::OnReceiveCcMsg(std::unique_ptr<CcMessage> msg)
         }
         else
         {
+            txm = reinterpret_cast<TransactionExecution *>(msg->txm_addr());
+
+            txm->AcquireSharedForwardLatch();
+
             hd_res = reinterpret_cast<CcHandlerResult<ScanNextResult> *>(
                 msg->handler_addr());
 
-            if (!hd_res->SetResultByStreamThread())
-            {
-                LOG(INFO) << "ScanNextResponse rejected due to txm timeout";
-                msg_pool_.enqueue(std::move(msg));
-                break;
-            }
-
-            if (hd_res->Txm()->TxNumber() != msg->tx_number() ||
-                hd_res->Txm()->CommandId() != msg->command_id())
+            assert(txm == hd_res->Txm());
+            if (txm->TxNumber() != msg->tx_number() ||
+                txm->CommandId() != msg->command_id())
             {
                 // The original tx has terminated and the tx machine has been
                 // recycled. The response message is directed to an obsolete tx.
                 // Skips setting the cc handler result.
                 msg_pool_.enqueue(std::move(msg));
-                hd_res->DecreaseCurrentHandlingResponse();
+                txm->ReleaseSharedForwardLatch();
                 break;
             }
         }
@@ -1268,7 +1269,7 @@ void CcStreamReceiver::OnReceiveCcMsg(std::unique_ptr<CcMessage> msg)
             hd_res->SetFinished();
         }
 
-        hd_res->DecreaseCurrentHandlingResponse();
+        txm->ReleaseSharedForwardLatch();
 
         msg_pool_.enqueue(std::move(msg));
         break;
@@ -1299,7 +1300,7 @@ void CcStreamReceiver::OnReceiveCcMsg(std::unique_ptr<CcMessage> msg)
         assert(msg->has_reload_cache_resp());
 
         CcHandlerResult<Void> *hd_res = nullptr;
-
+        TransactionExecution *txm = nullptr;
         uint32_t tx_node_id = (msg->tx_number() >> 32L) >> 10;
         int64_t tx_term = msg->tx_term();
         if (!Sharder::Instance().CheckLeaderTerm(tx_node_id, tx_term))
@@ -1309,24 +1310,22 @@ void CcStreamReceiver::OnReceiveCcMsg(std::unique_ptr<CcMessage> msg)
         }
         else
         {
+            txm = reinterpret_cast<TransactionExecution *>(msg->txm_addr());
+
+            txm->AcquireSharedForwardLatch();
+
             hd_res =
                 reinterpret_cast<CcHandlerResult<Void> *>(msg->handler_addr());
 
-            if (!hd_res->SetResultByStreamThread())
-            {
-                LOG(INFO) << "ReloadCacheResponse rejected due to txm timeout";
-                msg_pool_.enqueue(std::move(msg));
-                break;
-            }
-
-            if (hd_res->Txm()->TxNumber() != msg->tx_number() ||
-                hd_res->Txm()->CommandId() != msg->command_id())
+            assert(txm == hd_res->Txm());
+            if (txm->TxNumber() != msg->tx_number() ||
+                txm->CommandId() != msg->command_id())
             {
                 // The original tx has terminated and the tx machine has been
                 // recycled. The response message is directed to an obsolete tx.
                 // Skips setting the cc handler result.
                 msg_pool_.enqueue(std::move(msg));
-                hd_res->DecreaseCurrentHandlingResponse();
+                txm->ReleaseSharedForwardLatch();
                 break;
             }
         }
@@ -1342,7 +1341,7 @@ void CcStreamReceiver::OnReceiveCcMsg(std::unique_ptr<CcMessage> msg)
             hd_res->SetRemoteFinished();
         }
 
-        hd_res->DecreaseCurrentHandlingResponse();
+        txm->ReleaseSharedForwardLatch();
         msg_pool_.enqueue(std::move(msg));
         break;
     }
@@ -1372,6 +1371,23 @@ void CcStreamReceiver::OnReceiveCcMsg(std::unique_ptr<CcMessage> msg)
         CcHandlerResult<bool> *hd_res =
             reinterpret_cast<CcHandlerResult<bool> *>(msg->handler_addr());
 
+        TransactionExecution *txm =
+            reinterpret_cast<TransactionExecution *>(msg->txm_addr());
+
+        txm->AcquireSharedForwardLatch();
+
+        assert(txm == hd_res->Txm());
+        if (txm->TxNumber() != msg->tx_number() ||
+            txm->CommandId() != msg->command_id())
+        {
+            // The original tx has terminated and the tx machine has been
+            // recycled. The response message is directed to an obsolete tx.
+            // Skips setting the cc handler result.
+            msg_pool_.enqueue(std::move(msg));
+            txm->ReleaseSharedForwardLatch();
+            break;
+        }
+
         const FaultInjectResponse &fi_res = msg->fault_inject_resp();
 
         if (fi_res.error_code() != 0)
@@ -1383,6 +1399,7 @@ void CcStreamReceiver::OnReceiveCcMsg(std::unique_ptr<CcMessage> msg)
         {
             hd_res->SetFinished();
         }
+        txm->ReleaseSharedForwardLatch();
 
         msg_pool_.enqueue(std::move(msg));
         break;
@@ -1401,6 +1418,7 @@ void CcStreamReceiver::OnReceiveCcMsg(std::unique_ptr<CcMessage> msg)
         assert(msg->has_analyze_table_all_resp());
 
         CcHandlerResult<Void> *hd_res = nullptr;
+        TransactionExecution *txm = nullptr;
 
         uint32_t tx_node_id = (msg->tx_number() >> 32L) >> 10;
         int64_t tx_term = msg->tx_term();
@@ -1411,25 +1429,22 @@ void CcStreamReceiver::OnReceiveCcMsg(std::unique_ptr<CcMessage> msg)
         }
         else
         {
+            txm = reinterpret_cast<TransactionExecution *>(msg->txm_addr());
+
+            txm->AcquireSharedForwardLatch();
+
             hd_res =
                 reinterpret_cast<CcHandlerResult<Void> *>(msg->handler_addr());
 
-            if (!hd_res->SetResultByStreamThread())
-            {
-                LOG(INFO)
-                    << "AnalyzeTableAllResponse rejected due to txm timeout ";
-                msg_pool_.enqueue(std::move(msg));
-                break;
-            }
-
-            if (hd_res->Txm()->TxNumber() != msg->tx_number() ||
-                hd_res->Txm()->CommandId() != msg->command_id())
+            assert(txm == hd_res->Txm());
+            if (txm->TxNumber() != msg->tx_number() ||
+                txm->CommandId() != msg->command_id())
             {
                 // The original tx has terminated and the tx machine has been
                 // recycled. The response message is directed to an obsolete tx.
                 // Skips setting the cc handler result.
                 msg_pool_.enqueue(std::move(msg));
-                hd_res->DecreaseCurrentHandlingResponse();
+                txm->ReleaseSharedForwardLatch();
                 break;
             }
         }
@@ -1446,7 +1461,7 @@ void CcStreamReceiver::OnReceiveCcMsg(std::unique_ptr<CcMessage> msg)
             hd_res->SetRemoteFinished();
         }
 
-        hd_res->DecreaseCurrentHandlingResponse();
+        txm->ReleaseSharedForwardLatch();
         msg_pool_.enqueue(std::move(msg));
         break;
     }
@@ -1626,6 +1641,10 @@ void CcStreamReceiver::OnReceiveCcMsg(std::unique_ptr<CcMessage> msg)
 
         const BlockedCcReqCheckResponse &resp = msg->blocked_check_resp();
         ResultTemplateType type = (ResultTemplateType) resp.result_temp_type();
+        TransactionExecution *txm =
+            reinterpret_cast<TransactionExecution *>(msg->txm_addr());
+
+        txm->AcquireSharedForwardLatch();
 
         if (type == ResultTemplateType::AcquireKeyResult)
         {
@@ -1634,36 +1653,29 @@ void CcStreamReceiver::OnReceiveCcMsg(std::unique_ptr<CcMessage> msg)
                     CcHandlerResult<std::vector<AcquireKeyResult>> *>(
                     msg->handler_addr());
 
-            if (!hd_res->SetResultByStreamThread())
-            {
-                LOG(INFO) << "BlockedCcReqCheck rejected due to txm timeout ";
-                msg_pool_.enqueue(std::move(msg));
-                break;
-            }
-
-            if (hd_res->Txm()->TxNumber() != msg->tx_number() ||
-                hd_res->Txm()->CommandId() != msg->command_id())
+            assert(txm == hd_res->Txm());
+            if (txm->TxNumber() != msg->tx_number() ||
+                txm->CommandId() != msg->command_id() || hd_res->IsFinished())
             {
                 // The original tx has terminated and the tx machine has been
                 // recycled. The response message is directed to an obsolete tx.
                 // Skips setting the cc handler result.
                 msg_pool_.enqueue(std::move(msg));
-                hd_res->DecreaseCurrentHandlingResponse();
+                txm->ReleaseSharedForwardLatch();
                 break;
             }
 
             auto &acq_key_result_vec = hd_res->Value();
             if (acq_key_result_vec.at(resp.acq_key_result_vec_idx())
-                    .remote_hd_result_is_set_->load(std::memory_order_acquire))
+                    .IsRemoteHdResultSet(std::memory_order_acquire))
             {
                 msg_pool_.enqueue(std::move(msg));
-                hd_res->DecreaseCurrentHandlingResponse();
+                txm->ReleaseSharedForwardLatch();
                 break;
             }
 
             acq_key_result_vec.at(resp.acq_key_result_vec_idx())
-                .remote_hd_result_is_set_->store(true,
-                                                 std::memory_order_release);
+                .SetRemoteHdResult(true, std::memory_order_release);
 
             AckStatus status = (AckStatus) resp.req_status();
             if (status == AckStatus::ErrorTerm)
@@ -1672,32 +1684,35 @@ void CcStreamReceiver::OnReceiveCcMsg(std::unique_ptr<CcMessage> msg)
             }
             else if (status == AckStatus::Finished)
             {
+                // The cc request has been executed or aborted on the remote
+                // node, the result is unknown. Treat it as the response is
+                // lost otherwise txm might block forever if the response is
+                // really lost.
                 hd_res->SetError(CcErrorCode::REQUEST_LOST);
             }
-
-            hd_res->DecreaseCurrentHandlingResponse();
-        }
-        else if (type == ResultTemplateType::ReadKeyResult)
-        {
-            CcHandlerResult<ReadKeyResult> *hd_res =
-                reinterpret_cast<CcHandlerResult<ReadKeyResult> *>(
-                    msg->handler_addr());
-
-            if (!hd_res->SetResultByStreamThread())
+            else if (status == AckStatus::BlockQueue)
             {
-                LOG(INFO) << "BlockedCcReqCheck rejected due to txm timeout ";
-                msg_pool_.enqueue(std::move(msg));
-                break;
+                // The cc request is still in blocking queue. The txm
+                // should keep waiting.
             }
+            hd_res->UnsetBlockReqCheckTs();
 
-            if (hd_res->Txm()->TxNumber() != msg->tx_number() ||
-                hd_res->Txm()->CommandId() != msg->command_id())
+            txm->ReleaseSharedForwardLatch();
+        }
+        else if (type == ResultTemplateType::ReadKeyResult ||
+                 type == ResultTemplateType::AcquireAllResult)
+        {
+            CcHandlerResultBase *hd_res =
+                reinterpret_cast<CcHandlerResultBase *>(msg->handler_addr());
+
+            if (txm->TxNumber() != msg->tx_number() ||
+                txm->CommandId() != msg->command_id() || hd_res->IsFinished())
             {
                 // The original tx has terminated and the tx machine has been
                 // recycled. The response message is directed to an obsolete tx.
                 // Skips setting the cc handler result.
                 msg_pool_.enqueue(std::move(msg));
-                hd_res->DecreaseCurrentHandlingResponse();
+                txm->ReleaseSharedForwardLatch();
                 break;
             }
 
@@ -1709,46 +1724,20 @@ void CcStreamReceiver::OnReceiveCcMsg(std::unique_ptr<CcMessage> msg)
             }
             else if (status == AckStatus::Finished)
             {
+                // The cc request has been executed or aborted on the remote
+                // node, the result is unknown. Treat it as the response is
+                // lost otherwise txm might block forever if the response is
+                // really lost.
                 hd_res->SetError(CcErrorCode::REQUEST_LOST);
             }
-
-            hd_res->DecreaseCurrentHandlingResponse();
-        }
-        else if (type == ResultTemplateType::AcquireAllResult)
-        {
-            CcHandlerResult<AcquireAllResult> *hd_res =
-                reinterpret_cast<CcHandlerResult<AcquireAllResult> *>(
-                    msg->handler_addr());
-
-            if (!hd_res->SetResultByStreamThread())
+            else if (status == AckStatus::BlockQueue)
             {
-                LOG(INFO) << "BlockedCcReqCheck rejected due to txm timeout ";
-                msg_pool_.enqueue(std::move(msg));
-                break;
+                // The cc request is still in blocking queue. The txm should
+                // keep waiting.
             }
+            hd_res->UnsetBlockReqCheckTs();
 
-            if (hd_res->Txm()->TxNumber() != msg->tx_number() ||
-                hd_res->Txm()->CommandId() != msg->command_id())
-            {
-                // The original tx has terminated and the tx machine has been
-                // recycled. The response message is directed to an obsolete tx.
-                // Skips setting the cc handler result.
-                msg_pool_.enqueue(std::move(msg));
-                hd_res->DecreaseCurrentHandlingResponse();
-                break;
-            }
-
-            AckStatus status = (AckStatus) resp.req_status();
-            if (status == AckStatus::ErrorTerm)
-            {
-                hd_res->SetError(CcErrorCode::NG_TERM_CHANGED);
-            }
-            else if (status == AckStatus::Finished)
-            {
-                hd_res->SetError(CcErrorCode::REQUEST_LOST);
-            }
-
-            hd_res->DecreaseCurrentHandlingResponse();
+            txm->ReleaseSharedForwardLatch();
         }
 
         msg_pool_.enqueue(std::move(msg));
@@ -1784,7 +1773,7 @@ void CcStreamReceiver::OnReceiveCcMsg(std::unique_ptr<CcMessage> msg)
         assert(msg->has_kickout_data_resp());
 
         CcHandlerResult<Void> *hd_res = nullptr;
-
+        TransactionExecution *txm = nullptr;
         // Firstly, check whether the tx coordinator node is healthy, and
         // the original tx is healthy, if not, throw away this ccmessage.
         uint32_t tx_node_id = (msg->tx_number() >> 32L) >> 10;
@@ -1800,24 +1789,22 @@ void CcStreamReceiver::OnReceiveCcMsg(std::unique_ptr<CcMessage> msg)
         }
         else
         {
+            txm = reinterpret_cast<TransactionExecution *>(msg->txm_addr());
+
+            txm->AcquireSharedForwardLatch();
+
             hd_res =
                 reinterpret_cast<CcHandlerResult<Void> *>(msg->handler_addr());
 
-            if (!hd_res->SetResultByStreamThread())
-            {
-                LOG(INFO) << "KickoutDataResponse rejected due to txm timeout ";
-                msg_pool_.enqueue(std::move(msg));
-                break;
-            }
-
-            if (hd_res->Txm()->TxNumber() != msg->tx_number() ||
-                hd_res->Txm()->CommandId() != msg->command_id())
+            assert(txm == hd_res->Txm());
+            if (txm->TxNumber() != msg->tx_number() ||
+                txm->CommandId() != msg->command_id())
             {
                 // The original tx has terminated and the tx state machine has
                 // been recycled. The response message is directed to an
                 // obsolete tx.
                 msg_pool_.enqueue(std::move(msg));
-                hd_res->DecreaseCurrentHandlingResponse();
+                txm->ReleaseSharedForwardLatch();
                 break;
             }
         }
@@ -1835,7 +1822,7 @@ void CcStreamReceiver::OnReceiveCcMsg(std::unique_ptr<CcMessage> msg)
             hd_res->SetRemoteFinished();
         }
 
-        hd_res->DecreaseCurrentHandlingResponse();
+        txm->ReleaseSharedForwardLatch();
 
         // Recycle the cc message
         msg_pool_.enqueue(std::move(msg));
@@ -1854,6 +1841,7 @@ void CcStreamReceiver::OnReceiveCcMsg(std::unique_ptr<CcMessage> msg)
         assert(msg->has_apply_cc_resp());
 
         CcHandlerResult<ObjectCommandResult> *hd_res = nullptr;
+        TransactionExecution *txm = nullptr;
 
         uint32_t tx_node_id = (msg->tx_number() >> 32L) >> 10;
         int64_t tx_term = msg->tx_term();
@@ -1865,16 +1853,21 @@ void CcStreamReceiver::OnReceiveCcMsg(std::unique_ptr<CcMessage> msg)
         }
         else
         {
+            // Check txm before accessing hd_res which might be invalid if the
+            // txm has already been reused.
+            txm = reinterpret_cast<TransactionExecution *>(msg->txm_addr());
+            txm->AcquireSharedForwardLatch();
+
             hd_res = reinterpret_cast<CcHandlerResult<ObjectCommandResult> *>(
                 msg->handler_addr());
-
-            if (hd_res->Txm()->TxNumber() != msg->tx_number() ||
-                hd_res->Txm()->CommandId() != msg->command_id())
+            if (txm->TxNumber() != msg->tx_number() ||
+                txm->CommandId() != msg->command_id() || hd_res->IsFinished())
             {
                 // The original tx has terminated and the tx machine has been
                 // recycled. The response message is directed to an obsolete tx.
                 // Skips setting the cc handler result.
                 msg_pool_.enqueue(std::move(msg));
+                txm->ReleaseSharedForwardLatch();
                 break;
             }
         }
@@ -1924,6 +1917,7 @@ void CcStreamReceiver::OnReceiveCcMsg(std::unique_ptr<CcMessage> msg)
                 hd_res->SetFinished();
             }
         }
+        txm->ReleaseSharedForwardLatch();
         msg_pool_.enqueue(std::move(msg));
         break;
     }
@@ -1961,6 +1955,7 @@ void CcStreamReceiver::OnReceiveCcMsg(std::unique_ptr<CcMessage> msg)
     }
     case CcMessage::MessageType::CcMessage_MessageType_DBSizeResponse:
     {
+        // TODO: fix the concurrency issue when the DBSizeCc::Wait() times out.
         const DBSizeResponse &resp = msg->db_size_resp();
         DbSizeCc *dbcc = reinterpret_cast<DbSizeCc *>(msg->handler_addr());
 
@@ -2004,6 +1999,7 @@ void CcStreamReceiver::OnReceiveCcMsg(std::unique_ptr<CcMessage> msg)
         assert(msg->has_invalidate_table_cache_resp());
 
         CcHandlerResult<Void> *hd_res = nullptr;
+        TransactionExecution *txm = nullptr;
 
         uint32_t tx_node_id = (msg->tx_number() >> 32L) >> 10;
         int64_t tx_term = msg->tx_term();
@@ -2014,22 +2010,19 @@ void CcStreamReceiver::OnReceiveCcMsg(std::unique_ptr<CcMessage> msg)
         }
         else
         {
+            txm = reinterpret_cast<TransactionExecution *>(msg->txm_addr());
+
+            txm->AcquireSharedForwardLatch();
+
             hd_res =
                 reinterpret_cast<CcHandlerResult<Void> *>(msg->handler_addr());
 
-            if (!hd_res->SetResultByStreamThread())
-            {
-                LOG(INFO) << "InvalidateTableCacheResponse rejected due to txm "
-                             "timeout";
-                msg_pool_.enqueue(std::move(msg));
-                break;
-            }
-
-            if (hd_res->Txm()->TxNumber() != msg->tx_number() ||
-                hd_res->Txm()->CommandId() != msg->command_id())
+            assert(txm == hd_res->Txm());
+            if (txm->TxNumber() != msg->tx_number() ||
+                txm->CommandId() != msg->command_id())
             {
                 msg_pool_.enqueue(std::move(msg));
-                hd_res->DecreaseCurrentHandlingResponse();
+                txm->ReleaseSharedForwardLatch();
                 break;
             }
         }
@@ -2046,7 +2039,7 @@ void CcStreamReceiver::OnReceiveCcMsg(std::unique_ptr<CcMessage> msg)
             hd_res->SetRemoteFinished();
         }
 
-        hd_res->DecreaseCurrentHandlingResponse();
+        txm->ReleaseSharedForwardLatch();
         msg_pool_.enqueue(std::move(msg));
         break;
     }

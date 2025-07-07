@@ -23,6 +23,9 @@
 
 #include <memory>
 
+#include "tx_id.h"
+#include "type.h"
+
 namespace txservice
 {
 /*

@@ -30,43 +30,47 @@
 
 namespace txservice
 {
-class RangeBucketCcMap : public TemplateCcMap<RangeBucketKey, RangeBucketRecord>
+class RangeBucketCcMap
+    : public TemplateCcMap<RangeBucketKey, RangeBucketRecord, true, false>
 {
 public:
     RangeBucketCcMap(const RangeBucketCcMap &rhs) = delete;
     ~RangeBucketCcMap() = default;
 
-    using TemplateCcMap<RangeBucketKey, RangeBucketRecord>::Execute;
-    using TemplateCcMap<RangeBucketKey, RangeBucketRecord>::FindEmplace;
-    using TemplateCcMap<RangeBucketKey, RangeBucketRecord>::Emplace;
-    using TemplateCcMap<RangeBucketKey, RangeBucketRecord>::Find;
-    using TemplateCcMap<RangeBucketKey, RangeBucketRecord>::AcquireCceKeyLock;
-    using TemplateCcMap<RangeBucketKey,
-                        RangeBucketRecord>::LockHandleForResumedRequest;
+    using TemplateCcMap<RangeBucketKey, RangeBucketRecord, true, false>::
+        Execute;
+    using TemplateCcMap<RangeBucketKey, RangeBucketRecord, true, false>::
+        FindEmplace;
+    using TemplateCcMap<RangeBucketKey, RangeBucketRecord, true, false>::Find;
+    using TemplateCcMap<RangeBucketKey, RangeBucketRecord, true, false>::
+        AcquireCceKeyLock;
+    using TemplateCcMap<RangeBucketKey, RangeBucketRecord, true, false>::
+        LockHandleForResumedRequest;
 
     RangeBucketCcMap(CcShard *shard,
                      NodeGroupId cc_ng_id,
                      const TableName &table_name)
-        : TemplateCcMap<RangeBucketKey, RangeBucketRecord>(
+        : TemplateCcMap<RangeBucketKey, RangeBucketRecord, true, false>(
               shard, cc_ng_id, table_name, 1, nullptr, true)
     {
         auto bucket_map = shard->GetAllBucketInfos(cc_ng_id);
         assert(bucket_map != nullptr);
-        for (auto &bucket : *bucket_map)
+
+        // Fill bucket keys as slice items to batch load bucket records
+        std::deque<SliceDataItem> slice_items;
+        std::vector<RangeBucketKey> bucket_keys;
+        bucket_keys.reserve(bucket_map->size());
+        for (size_t i = 0; i < bucket_map->size(); ++i)
         {
-            RangeBucketKey bucket_key(bucket.first);
-            auto cce_it = FindEmplace(bucket_key);
-            CcEntry<RangeBucketKey, RangeBucketRecord> *cce = cce_it->second;
-            cce->SetCommitTsPayloadStatus(bucket.second->Version(),
-                                          RecordStatus::Normal);
-#ifndef ON_KEY_OBJECT
-            cce->payload_ =
-                std::make_shared<RangeBucketRecord>(bucket.second.get());
-#else
-            cce->payload_ =
-                std::make_unique<RangeBucketRecord>(bucket.second.get());
-#endif
+            auto &bucket = bucket_map->at(i);
+            bucket_keys.emplace_back(i);
+            slice_items.emplace_back(
+                TxKey(&bucket_keys.back()),
+                std::make_unique<RangeBucketRecord>(bucket.get()),
+                bucket->Version(),
+                false);
         }
+        BatchFillSlice(slice_items, true, 0, slice_items.size());
     }
 
     bool Execute(ReadCc &req) override
@@ -106,8 +110,10 @@ public:
             static_cast<const RangeBucketKey *>(req.Key());
 
         Iterator it = Find(*bucket_key);
-        CcEntry<RangeBucketKey, RangeBucketRecord> *cce = it->second;
-        CcPage<RangeBucketKey, RangeBucketRecord> *ccp = it.GetPage();
+        CcEntry<RangeBucketKey, RangeBucketRecord, true, false> *cce =
+            it->second;
+        CcPage<RangeBucketKey, RangeBucketRecord, true, false> *ccp =
+            it.GetPage();
         assert(cce != nullptr && ccp != nullptr);
         auto hd_result = req.Result();
         LockType acquired_lock;
@@ -121,6 +127,7 @@ public:
                                                  : CcOperation::Read;
             std::tie(acquired_lock, err_code) =
                 LockHandleForResumedRequest(cce,
+                                            cce->CommitTs(),
                                             cce->PayloadStatus(),
                                             &req,
                                             req.NodeGroupId(),
@@ -143,6 +150,7 @@ public:
                                                  : CcOperation::Read;
             std::tie(acquired_lock, err_code) =
                 AcquireCceKeyLock(cce,
+                                  cce->CommitTs(),
                                   ccp,
                                   cce->PayloadStatus(),
                                   &req,
@@ -178,7 +186,7 @@ public:
 
             RangeBucketRecord *bucket_rec =
                 static_cast<RangeBucketRecord *>(req.Record());
-            *bucket_rec = *(cce->payload_);
+            *bucket_rec = *(cce->payload_.cur_payload_);
             hd_result->Value().ts_ = cce->CommitTs();
             hd_result->Value().rec_status_ = RecordStatus::Normal;
             hd_result->Value().lock_type_ = acquired_lock;
@@ -239,7 +247,8 @@ public:
         }
 
         Iterator it = Find(*target_key);
-        CcEntry<RangeBucketKey, RangeBucketRecord> *cce = it->second;
+        CcEntry<RangeBucketKey, RangeBucketRecord, true, false> *cce =
+            it->second;
         assert(cce != nullptr);
 
         // Check whether cce key lock holder is the given tx of the
@@ -494,8 +503,8 @@ public:
                     RangeBucketKey key(bucket_process.bucket_id());
                     Iterator it = Find(key);
                     auto bucket_cce = it->second;
-                    CcPage<RangeBucketKey, RangeBucketRecord> *bucket_ccp =
-                        it.GetPage();
+                    CcPage<RangeBucketKey, RangeBucketRecord, true, false>
+                        *bucket_ccp = it.GetPage();
                     assert(bucket_cce != nullptr && bucket_ccp != nullptr);
                     // We need to set the req txn to the data migrate txn so
                     // that the acquired lock records the correct lock owner tx.
@@ -503,6 +512,7 @@ public:
                     assert(bucket_process.migration_txn() != 0);
                     auto lock_pair =
                         AcquireCceKeyLock(bucket_cce,
+                                          bucket_cce->CommitTs(),
                                           bucket_ccp,
                                           RecordStatus::Normal,
                                           &req,
@@ -580,24 +590,24 @@ public:
                 {
                     bucket_ids_per_task.emplace_back();
                     new_owner_ngs_per_task.emplace_back();
-                    std::vector<uint16_t> *cur_task_bucekt_ids =
+                    std::vector<uint16_t> *cur_task_bucket_ids =
                         &bucket_ids_per_task.back();
                     std::vector<NodeGroupId> *cur_task_new_owner_ngs =
                         &new_owner_ngs_per_task.back();
                     for (size_t i = 0; i < pending_buckets.size(); i++)
                     {
-                        cur_task_bucekt_ids->push_back(
+                        cur_task_bucket_ids->push_back(
                             pending_buckets[i]->bucket_id());
                         cur_task_new_owner_ngs->push_back(
                             pending_buckets[i]->new_owner());
-                        if (cur_task_bucekt_ids->size() == 10 &&
+                        if (cur_task_bucket_ids->size() == 10 &&
                             i != pending_buckets.size() - 1)
                         {
                             bucket_ids_per_task.push_back(
                                 std::vector<uint16_t>());
                             new_owner_ngs_per_task.push_back(
                                 std::vector<NodeGroupId>());
-                            cur_task_bucekt_ids = &bucket_ids_per_task.back();
+                            cur_task_bucket_ids = &bucket_ids_per_task.back();
                             cur_task_new_owner_ngs =
                                 &new_owner_ngs_per_task.back();
                         }

@@ -22,7 +22,7 @@
 #pragma once
 
 #include <assert.h>
-#include <mimalloc.h>
+#include <mimalloc-2.1/mimalloc.h>
 
 #include <memory>
 #include <string>
@@ -77,7 +77,6 @@ enum struct RecordStatus : uint8_t
 
     Invalid,
 
-#ifdef ON_KEY_OBJECT
     /// <summary>
     /// Used only to indicate the status of temporary object. The temporary
     /// object does not exist.(no dirty_payload, no pending_cmd)
@@ -88,7 +87,6 @@ enum struct RecordStatus : uint8_t
     /// hasn't been created yet.(no dirty_payload, has pending_cmd)
     /// </summary>
     Uncreated,
-#endif
 };
 
 struct TxRecord
@@ -466,6 +464,7 @@ struct BlobTxRecord : public TxRecord
     {
         assert(false);
     }
+
     void Serialize(std::string &str) const override
     {
         str.append(value_);
@@ -498,6 +497,7 @@ struct BlobTxRecord : public TxRecord
      */
     size_t SerializedLength() const override
     {
+        assert(false);
         return value_.size();
     };
 
@@ -524,6 +524,26 @@ struct BlobTxRecord : public TxRecord
     uint64_t GetTTL() const override
     {
         return ttl_;
+    }
+
+    const char *EncodedBlobData() const override
+    {
+        return value_.data();
+    }
+
+    size_t EncodedBlobSize() const override
+    {
+        return value_.size();
+    }
+
+    size_t UnpackInfoSize() const override
+    {
+        return 0;
+    }
+
+    size_t Length() const override
+    {
+        return value_.size();
     }
 
     std::string value_;

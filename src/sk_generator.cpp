@@ -39,7 +39,7 @@ void SkGenerator::Reset(const TxKey *start_key,
                         int32_t partition_id,
                         uint64_t tx_number,
                         int64_t tx_term,
-                        std::vector<TableName> &new_indexes_name)
+                        const std::vector<TableName> &new_indexes_name)
 {
     base_table_name_ = &base_table_name;
     task_status_ = nullptr;
@@ -68,6 +68,7 @@ void SkGenerator::Reset(const TxKey *start_key,
     upload_index_ctx_.Reset(node_group_id_);
     scan_batch_size_ = LocalCcShards::DATA_SYNC_SCAN_BATCH_SIZE;
     task_result_ = CcErrorCode::NO_ERROR;
+    pack_sk_err_.Reset();
     scanned_items_count_ = 0;
     table_schema_ = nullptr;
 }
@@ -80,7 +81,7 @@ void SkGenerator::Reset(const std::string &start_key_str,
                         int32_t partition_id,
                         uint64_t tx_number,
                         int64_t tx_term,
-                        std::vector<TableName> &new_indexes_name)
+                        const std::vector<TableName> &new_indexes_name)
 {
     base_table_name_ = &base_table_name;
     task_status_ = nullptr;
@@ -109,6 +110,7 @@ void SkGenerator::Reset(const std::string &start_key_str,
     upload_index_ctx_.Reset(node_group_id_);
     scan_batch_size_ = LocalCcShards::DATA_SYNC_SCAN_BATCH_SIZE;
     task_result_ = CcErrorCode::NO_ERROR;
+    pack_sk_err_.Reset();
     scanned_items_count_ = 0;
     table_schema_ = nullptr;
 }
@@ -178,7 +180,9 @@ void SkGenerator::ProcessTask()
     });
 
     const TableName &range_table_name =
-        TableName(base_table_name_->StringView(), TableType::RangePartition);
+        TableName(base_table_name_->StringView(),
+                  TableType::RangePartition,
+                  base_table_name_->Engine());
     TransactionExecution *acq_range_lock_txm =
         txservice::NewTxInit(cc_shards->GetTxService(),
                              IsolationLevel::RepeatableRead,
@@ -373,6 +377,7 @@ void SkGenerator::ScanAndEncodeIndex(const TxKey *start_key,
             if (scan_res == CcErrorCode::REQUESTED_NODE_NOT_LEADER ||
                 scan_res == CcErrorCode::NG_TERM_CHANGED)
             {
+                task_result_ = scan_res;
                 break;
             }
             else if (scan_res == CcErrorCode::OUT_OF_MEMORY ||
@@ -383,7 +388,7 @@ void SkGenerator::ScanAndEncodeIndex(const TxKey *start_key,
                 // Reset the paused key.
                 for (size_t i = 0; i < core_cnt; ++i)
                 {
-                    auto &paused_key = scan_req.PausePos(i).first;
+                    const TxKey &paused_key = scan_req.PausePos(i).first;
                     if (!scan_req.IsDrained(i))
                     {
 #ifdef RANGE_PARTITION_ENABLED
@@ -415,12 +420,13 @@ void SkGenerator::ScanAndEncodeIndex(const TxKey *start_key,
              tbl_name_it != new_indexes_name_->cend();
              ++tbl_name_it)
         {
-            auto &index_set =
+            std::vector<WriteEntry> &index_set =
                 new_index_set
                     .emplace(std::piecewise_construct,
                              std::forward_as_tuple(tbl_name_it->StringView(),
-                                                   tbl_name_it->Type()),
-                             std::forward_as_tuple(std::vector<WriteEntry>()))
+                                                   tbl_name_it->Type(),
+                                                   tbl_name_it->Engine()),
+                             std::forward_as_tuple())
                     .first->second;
             index_set.reserve(reserve_size);
 
@@ -451,8 +457,9 @@ void SkGenerator::ScanAndEncodeIndex(const TxKey *start_key,
                     assert(target_key.KeyPtr() != nullptr &&
                            target_rec != nullptr);
 
-                    if (!sk_encoder->AppendPackedSk(
-                            &target_key, target_rec, version_ts, index_set))
+                    int32_t appended_sk_size = sk_encoder->AppendPackedSk(
+                        &target_key, target_rec, version_ts, index_set);
+                    if (appended_sk_size < 0)
                     {
                         LOG(ERROR)
                             << "ScanAndEncodeIndex: Failed to encode "
@@ -466,7 +473,6 @@ void SkGenerator::ScanAndEncodeIndex(const TxKey *start_key,
 #endif
                         return;
                     }
-
                 } /* End of each key */
 
                 if (tbl_name_it == new_indexes_name_->cbegin())
@@ -686,7 +692,8 @@ CcErrorCode UploadIndexContext::UploadEncodedIndex(UploadIndexTask &upload_task)
             auto ins_it = ng_index_set.emplace(
                 std::piecewise_construct,
                 std::forward_as_tuple(table_it->first.StringView(),
-                                      table_it->first.Type()),
+                                      table_it->first.Type(),
+                                      table_it->first.Engine()),
                 std::forward_as_tuple(NGIndexSet()));
             ng_write_entry_it = ins_it.first;
         }
@@ -874,6 +881,8 @@ void UploadIndexContext::SendIndexes(
         req_ptr->set_table_name_str(table_name.String());
         req_ptr->set_table_type(
             remote::ToRemoteType::ConvertTableType(table_name.Type()));
+        req_ptr->set_table_engine(
+            remote::ToRemoteType::ConvertTableEngine(table_name.Engine()));
         size_t end_key_idx = start_key_idx + batch_size;
         req_ptr->set_kind(remote::UploadBatchKind::SK_DATA);
         req_ptr->set_batch_size(batch_size);
@@ -924,7 +933,9 @@ CcErrorCode UploadIndexContext::AcquireRangeReadLocks(
          ++table_it)
     {
         const TableName &range_table_name =
-            TableName(table_it->first.StringView(), TableType::RangePartition);
+            TableName(table_it->first.StringView(),
+                      TableType::RangePartition,
+                      table_it->first.Engine());
 
         auto &table_write_entrys = table_it->second;
         auto [it, inserted] = ng_index_set.try_emplace(table_it->first);

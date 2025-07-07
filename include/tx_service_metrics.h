@@ -41,6 +41,8 @@ inline const metrics::Name NAME_CACHE_HIT_OR_MISS_TOTAL{
     "cache_hit_or_miss_total"};
 inline const metrics::Name NAME_MEMORY_USAGE{"memory_usage"};
 
+inline const metrics::Name NAME_FRAGMENT_RATIO{"memory_fragment_ratio"};
+
 inline const metrics::Name NAME_BUSY_ROUND_DURATION{"busy_round_duration"};
 inline const metrics::Name NAME_BUSY_ROUND_ACTIVE_TX_COUNT{
     "busy_round_active_tx_count"};
@@ -55,6 +57,15 @@ inline const metrics::Name NAME_REMOTE_REQUEST_DURATION{
 inline const metrics::Name NAME_IN_FLIGHT_REMOTE_REQUEST_COUNT{
     "remote_request_in_flight_count"};
 inline const metrics::Name NAME_STANDBY_LAGGING_MESGS{"standby_lagging_msgs"};
+inline const metrics::Name NAME_MAX_STANDBY_LAG{"max_standby_lag"};
+inline const metrics::Name NAME_STANDBY_OUT_OF_SYNC_COUNT{
+    "standby_out_of_sync_count"};
+
+inline const metrics::Name NAME_IS_CONTINUOUS_CHECKPOINT_FAILURES{
+    "is_continuous_checkpoint_failures"};
+
+inline const metrics::Name NAME_LEADER_CHANGES{"leader_changes_seen_total"};
+inline const metrics::Name NAME_IS_LEADER{"is_leader"};
 
 inline bool enable_memory_usage{false};
 inline bool enable_cache_hit_rate{false};

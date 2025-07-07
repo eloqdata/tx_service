@@ -52,6 +52,7 @@ class TxWorkerPool;
 struct TableName;
 struct CcRequestBase;
 class CcShard;
+class Checkpointer;
 
 namespace store
 {
@@ -295,6 +296,7 @@ public:
              LocalCcShards *local_shards,
              std::unique_ptr<TxLog> log_agent,
              const std::string &local_path,
+             const std::string &cluster_config_path,
              const uint16_t rep_group_cnt,
              bool enable_brpc_builtin_services,
              bool fork_host_manager);
@@ -364,6 +366,10 @@ public:
 
     bool OnLeaderStop(uint32_t ng_id, int64_t term);
 
+    bool Failover(const std::string &target_host,
+                  const uint16_t target_port,
+                  std::string &error_message);
+
     void OnStartFollowing(uint32_t ng_id,
                           int64_t term,
                           uint32_t leader_node,
@@ -432,6 +438,11 @@ public:
     void WaitClusterReady();
 
     /**
+     * @brief Wait for the node become native node group leader.
+     */
+    void WaitNodeBecomeNativeGroupLeader();
+
+    /**
      * @brief Recovers the input orphan lock held for an extended period of
      * time.
      *
@@ -479,6 +490,8 @@ public:
 
     void NotifyCheckPointer();
 
+    Checkpointer *GetCheckpointer();
+
     std::vector<uint32_t> LocalNodeGroups();
 
     /**
@@ -516,7 +529,7 @@ public:
      * cluster.
      * @return New cluster node group configs.
      */
-    std::unordered_map<uint32_t, std::vector<NodeConfig>> AddNodeToCluster(
+    std::unordered_map<uint32_t, std::vector<NodeConfig>> AddNodeGroupToCluster(
         const std::vector<std::pair<std::string, uint16_t>> &new_nodes);
 
     /**
@@ -528,9 +541,21 @@ public:
         const std::vector<std::pair<std::string, uint16_t>> &removed_nodes);
 
     /**
+     * @brief Calculate new node group config after adding new peers to
+     * specified node group.
+     * @return New cluster node group configs.
+     */
+    std::unordered_map<uint32_t, std::vector<NodeConfig>>
+    AddNodeGroupPeersToCluster(
+        uint32_t ng_id,
+        const std::vector<std::pair<std::string, uint16_t>> &new_nodes,
+        const std::vector<bool> &is_candidate);
+
+    /**
      * @brief Update current cluster config to the new_ng_configs. The
      * config will only be updated if current config version is older than
-     * given version.
+     * given version. This is an async call and cc_req will be reenqueued
+     * when the update finishes.
      */
     void UpdateClusterConfig(
         const std::unordered_map<NodeGroupId, std::vector<NodeConfig>>
@@ -538,6 +563,16 @@ public:
         uint64_t version,
         CcRequestBase *cc_req,
         CcShard *cc_shard);
+
+    /**
+     * @brief Update the in-memory cluster config in sharder.
+     */
+    void UpdateInMemoryClusterConfig(
+        const std::unordered_map<NodeGroupId, std::vector<NodeConfig>>
+            &new_ng_configs,
+        std::shared_ptr<std::unordered_map<uint32_t, NodeConfig>>
+            new_nodes_sptr,
+        uint64_t version);
 
     uint64_t ClusterConfigVersion()
     {
@@ -656,6 +691,10 @@ public:
 
     brpc::Channel *GetHostManagerChannel()
     {
+        if (!hm_channel_init_.load(std::memory_order_acquire))
+        {
+            return nullptr;
+        }
         return &hm_channel_;
     }
 
@@ -688,12 +727,13 @@ private:
     // Ng leader cache. We preallocate it to the max cluster size so that we
     // don't need to modify the size of it.
     std::atomic<uint32_t> ng_leader_cache_[1000];
+
     std::atomic<int64_t> leader_term_cache_[1000];
     std::atomic<int64_t> candidate_leader_term_cache_[1000];
 
     // The term that standby is subsribed to. Only used on standby node.
-    std::atomic<int64_t> candidate_standby_node_term_cache_;
     std::atomic<int64_t> standby_node_term_cache_;
+    std::atomic<int64_t> candidate_standby_node_term_cache_;
 
     std::atomic<uint32_t> subscribe_counter_{0};
 
@@ -767,6 +807,7 @@ private:
     std::string hm_ip_{""};
     uint16_t hm_port_{0};
     brpc::Channel hm_channel_;
+    std::atomic<bool> hm_channel_init_{false};
 
     // To stop the cluster, it should perform a checkpoint before any node is
     // terminated (as the final checkpoint will fail if the majority of nodes

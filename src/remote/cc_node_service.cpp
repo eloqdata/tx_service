@@ -25,7 +25,9 @@
 #include <bthread/condition_variable.h>
 #include <bthread/mutex.h>
 
+#include <memory>
 #include <mutex>
+#include <utility>
 
 #include "cc/local_cc_shards.h"
 #include "cc_handler_result.h"
@@ -40,7 +42,7 @@
 #include "tx_operation_result.h"
 #include "tx_request.h"
 #include "tx_service.h"
-#include "tx_util.h"  // BackupUtil
+#include "tx_util.h"
 #include "type.h"
 #include "util.h"
 
@@ -63,6 +65,40 @@ void CcNodeService::OnLeaderStart(::google::protobuf::RpcController *controller,
     brpc::ClosureGuard done_guard(done);
     NodeGroupId ng_id = request->node_group_id();
     int64_t term = request->node_group_term();
+
+    // Parse latest cluster config
+    std::shared_ptr<std::unordered_map<uint32_t, NodeConfig>> node_configs =
+        std::make_shared<std::unordered_map<uint32_t, NodeConfig>>();
+    std::unordered_map<NodeGroupId, std::vector<NodeConfig>> ng_configs;
+    for (const auto &node_config : request->node_configs())
+    {
+        node_configs->try_emplace(node_config.node_id());
+        node_configs->at(node_config.node_id()).node_id_ =
+            node_config.node_id();
+        node_configs->at(node_config.node_id()).host_name_ =
+            node_config.host_name();
+        node_configs->at(node_config.node_id()).port_ = node_config.port() - 1;
+    }
+    for (const auto &ng_config : request->cluster_config())
+    {
+        ng_configs.try_emplace(ng_config.ng_id());
+        for (const auto &node : ng_config.member_nodes())
+        {
+            ng_configs.at(ng_config.ng_id()).emplace_back();
+            ng_configs.at(ng_config.ng_id()).back().node_id_ = node.node_id();
+            ng_configs.at(ng_config.ng_id()).back().host_name_ =
+                node_configs->at(node.node_id()).host_name_;
+            ng_configs.at(ng_config.ng_id()).back().port_ =
+                node_configs->at(node.node_id()).port_;
+            ng_configs.at(ng_config.ng_id()).back().is_candidate_ =
+                node.is_candidate();
+        }
+    }
+
+    // Update cluster config
+    Sharder::Instance().UpdateInMemoryClusterConfig(
+        ng_configs, std::move(node_configs), request->config_version());
+
     uint64_t replay_start_ts = 0;
     uint32_t next_leader_node = UINT32_MAX;
     bool retry = false;
@@ -217,10 +253,111 @@ void CcNodeService::GetMinTxStartTs(
     }
 }
 
-void CcNodeService::ClusterAddNode(
+void CcNodeService::NodeGroupAddPeers(
     ::google::protobuf::RpcController *controller,
-    const ::txservice::remote::ClusterAddNodeRequest *request,
-    ::txservice::remote::ClusterAddNodeResponse *response,
+    const ::txservice::remote::NodeGroupAddPeersRequest *request,
+    ::txservice::remote::ClusterScaleResponse *response,
+    ::google::protobuf::Closure *done)
+{
+    brpc::ClosureGuard done_guard(done);
+    using namespace txservice;
+
+    if (Sharder::Instance().LeaderTerm(Sharder::Instance().NativeNodeGroup()) <
+        0)
+    {
+        // Node is not leader of requested node group.
+        response->set_result(
+            ::txservice::remote::ClusterScaleWriteLogResult::FAIL);
+        return;
+    }
+
+    // Start cluster scale tx and wait for the log is written before
+    // returning.
+    TxService *tx_service =
+        Sharder::Instance().GetLocalCcShards()->GetTxservice();
+    TransactionExecution *txm = tx_service->NewTx();
+    InitTxRequest init_req;
+    // Set isolation level to RepeatableRead to ensure the readlock
+    // will be set during the execution of the following
+    // ReadTxRequest.
+    init_req.iso_level_ = IsolationLevel::RepeatableRead;
+    init_req.protocol_ = CcProtocol::Locking;
+    // Write all cluster scale log to log group 0. Log group will check
+    // if there's another cluster scale event in progress and reject
+    // the prepare log request if so.
+    init_req.log_group_id_ = 0;
+    init_req.Reset();
+    txm->Execute(&init_req);
+    init_req.Wait();
+
+    if (init_req.IsError())
+    {
+        LOG(ERROR) << "Failed to init tx for cluster scale event.";
+        response->set_result(
+            ::txservice::remote::ClusterScaleWriteLogResult::FAIL);
+        return;
+    }
+
+    std::vector<std::pair<std::string, uint16_t>> delta_nodes;
+    for (int i = 0; i < request->host_list_size(); i++)
+    {
+        delta_nodes.emplace_back(request->host_list(i), request->port_list(i));
+    }
+    std::vector<bool> is_candidate;
+    for (int i = 0; i < request->is_candidate_size(); i++)
+    {
+        is_candidate.push_back(request->is_candidate(i));
+    }
+
+    ClusterScaleTxRequest scale_req(request->id(),
+                                    ClusterScaleOpType::AddNodeGroupPeers,
+                                    &delta_nodes,
+                                    request->ng_id(),
+                                    &is_candidate);
+    txm->Execute(&scale_req);
+    scale_req.Wait();
+
+    if (scale_req.IsError())
+    {
+        if (scale_req.ErrorCode() == TxErrorCode::LOG_SERVICE_UNREACHABLE)
+        {
+            // write log result unkown, need to query new leader later.
+            response->set_result(
+                ::txservice::remote::ClusterScaleWriteLogResult::UNKOWN);
+        }
+        else if (scale_req.ErrorCode() ==
+                 TxErrorCode::DUPLICATE_CLUSTER_SCALE_TX_ERROR)
+        {
+            response->set_result(
+                ::txservice::remote::ClusterScaleWriteLogResult::SUCCESS);
+            response->set_cluster_config(scale_req.Result());
+        }
+        else if (scale_req.ErrorCode() ==
+                 TxErrorCode::INVALID_CLUSTER_SCALE_REQUEST)
+        {
+            response->set_result(
+                ::txservice::remote::ClusterScaleWriteLogResult::
+                    INVALID_REQUEST);
+            txservice::AbortTx(txm);
+        }
+        else
+        {
+            response->set_result(
+                ::txservice::remote::ClusterScaleWriteLogResult::FAIL);
+        }
+
+        return;
+    }
+
+    response->set_result(
+        ::txservice::remote::ClusterScaleWriteLogResult::SUCCESS);
+    response->set_cluster_config(scale_req.Result());
+}
+
+void CcNodeService::ClusterAddNodeGroup(
+    ::google::protobuf::RpcController *controller,
+    const ::txservice::remote::ClusterAddNodeGroupRequest *request,
+    ::txservice::remote::ClusterScaleResponse *response,
     ::google::protobuf::Closure *done)
 {
     brpc::ClosureGuard done_guard(done);
@@ -268,7 +405,7 @@ void CcNodeService::ClusterAddNode(
     }
 
     ClusterScaleTxRequest scale_req(
-        request->id(), ClusterScaleOpType::AddNode, &delta_nodes);
+        request->id(), ClusterScaleOpType::AddNodeGroup, &delta_nodes);
     txm->Execute(&scale_req);
     scale_req.Wait();
 
@@ -285,7 +422,15 @@ void CcNodeService::ClusterAddNode(
         {
             response->set_result(
                 ::txservice::remote::ClusterScaleWriteLogResult::SUCCESS);
-            response->set_tx_number(scale_req.Result());
+            response->set_cluster_config(scale_req.Result());
+        }
+        else if (scale_req.ErrorCode() ==
+                 TxErrorCode::INVALID_CLUSTER_SCALE_REQUEST)
+        {
+            response->set_result(
+                ::txservice::remote::ClusterScaleWriteLogResult::
+                    INVALID_REQUEST);
+            txservice::AbortTx(txm);
         }
         else
         {
@@ -298,13 +443,13 @@ void CcNodeService::ClusterAddNode(
 
     response->set_result(
         ::txservice::remote::ClusterScaleWriteLogResult::SUCCESS);
-    response->set_tx_number(scale_req.Result());
+    response->set_cluster_config(scale_req.Result());
 }
 
 void CcNodeService::ClusterRemoveNode(
     ::google::protobuf::RpcController *controller,
     const ::txservice::remote::ClusterRemoveNodeRequest *request,
-    ::txservice::remote::ClusterRemoveNodeResponse *response,
+    ::txservice::remote::ClusterScaleResponse *response,
     ::google::protobuf::Closure *done)
 {
     brpc::ClosureGuard done_guard(done);
@@ -388,6 +533,7 @@ void CcNodeService::ClusterRemoveNode(
     {
         response->set_result(
             ::txservice::remote::ClusterScaleWriteLogResult::FAIL);
+        txservice::AbortTx(txm);
         return;
     }
 
@@ -409,7 +555,17 @@ void CcNodeService::ClusterRemoveNode(
         {
             response->set_result(
                 ::txservice::remote::ClusterScaleWriteLogResult::SUCCESS);
-            response->set_tx_number(scale_req.Result());
+            response->set_cluster_config(scale_req.Result());
+        }
+        else if (scale_req.ErrorCode() ==
+                 TxErrorCode::INVALID_CLUSTER_SCALE_REQUEST)
+        {
+            // The cluster scale request is invalid, the removed node is not
+            // in the cluster.
+            response->set_result(
+                ::txservice::remote::ClusterScaleWriteLogResult::
+                    INVALID_REQUEST);
+            txservice::AbortTx(txm);
         }
         else
         {
@@ -421,7 +577,7 @@ void CcNodeService::ClusterRemoveNode(
 
     response->set_result(
         ::txservice::remote::ClusterScaleWriteLogResult::SUCCESS);
-    response->set_tx_number(scale_req.Result());
+    response->set_cluster_config(scale_req.Result());
 }
 
 /**
@@ -443,7 +599,9 @@ void CcNodeService::FlushDataAll(::google::protobuf::RpcController *controller,
     std::string_view table_name_sv{request->table_name_str()};
     TableType table_type =
         ToLocalType::ConvertCcTableType(request->table_type());
-    TableName table_name = TableName(table_name_sv, table_type);
+    txservice::TableEngine table_engine =
+        ToLocalType::ConvertTableEngine(request->table_engine());
+    TableName table_name = TableName(table_name_sv, table_type, table_engine);
 
     uint64_t data_sync_ts = request->data_sync_ts();
     bool is_dirty = request->is_dirty();
@@ -496,7 +654,7 @@ void CcNodeService::FlushDataAll(::google::protobuf::RpcController *controller,
 
             uint64_t table_last_synced_ts = 0;
             std::shared_ptr<DataSyncStatus> status =
-                std::make_shared<DataSyncStatus>(false);
+                std::make_shared<DataSyncStatus>(ng_id, ng_term, false);
 
             local_shards.EnqueueDataSyncTaskForTable(table_name,
                                                      ng_id,
@@ -513,6 +671,7 @@ void CcNodeService::FlushDataAll(::google::protobuf::RpcController *controller,
             status->cv_.wait(
                 lk, [&status] { return status->unfinished_tasks_ == 0; });
 
+            status->PersistKV();
             error_code = status->err_code_;
 
             std::unique_lock b_thd_lk(b_thd_mu);
@@ -577,18 +736,18 @@ void CcNodeService::InitDataMigration(
     // Each worker processes 10 buckets at a time.
     std::vector<std::vector<uint16_t>> bucket_ids_per_task(1);
     std::vector<std::vector<NodeGroupId>> new_owner_ngs_per_task(1);
-    std::vector<uint16_t> *cur_task_bucekt_ids = &bucket_ids_per_task.back();
+    std::vector<uint16_t> *cur_task_bucket_ids = &bucket_ids_per_task.back();
     std::vector<NodeGroupId> *cur_task_new_owner_ngs =
         &new_owner_ngs_per_task.back();
     for (size_t i = 0; i < bucket_ids.size(); i++)
     {
-        cur_task_bucekt_ids->push_back(bucket_ids[i]);
+        cur_task_bucket_ids->push_back(bucket_ids[i]);
         cur_task_new_owner_ngs->push_back(new_owner_ngs[i]);
-        if (cur_task_bucekt_ids->size() == 10 && i != bucket_ids.size() - 1)
+        if (cur_task_bucket_ids->size() == 10 && i != bucket_ids.size() - 1)
         {
             bucket_ids_per_task.push_back(std::vector<uint16_t>());
             new_owner_ngs_per_task.push_back(std::vector<NodeGroupId>());
-            cur_task_bucekt_ids = &bucket_ids_per_task.back();
+            cur_task_bucket_ids = &bucket_ids_per_task.back();
             cur_task_new_owner_ngs = &new_owner_ngs_per_task.back();
         }
     }
@@ -752,34 +911,6 @@ void CcNodeService::CheckClusterScaleStatus(
     }
 }
 
-void CcNodeService::CheckClusterConfigIsUpdated(
-    ::google::protobuf::RpcController *controller,
-    const ::txservice::remote::CheckClusterConfigIsUpdatedRequest *request,
-    ::txservice::remote::CheckClusterConfigIsUpdatedResponse *response,
-    ::google::protobuf::Closure *done)
-{
-    brpc::ClosureGuard done_guard(done);
-    auto *store_hd = Sharder::Instance().GetLocalCcShards()->store_hd_;
-    std::unordered_map<uint32_t, std::vector<NodeConfig>> ng_configs;
-    uint64_t version;
-    bool uninitialized = false;
-    if (!store_hd->ReadClusterConfig(ng_configs, version, uninitialized))
-    {
-        assert(uninitialized == false);
-        // cannot read cluster config. just set `finished` to false. cp will
-        // retry.
-        response->set_finished(false);
-
-        LOG(ERROR)
-            << "RPC#CheckClusterConfigIsUpdated cannot read cluster "
-               "config. Please check whether the storage engine is working";
-        return;
-    }
-
-    bool updated = ng_configs.size() == request->cluster_size();
-    response->set_finished(updated);
-}
-
 void CcNodeService::GetClusterNodes(
     ::google::protobuf::RpcController *controller,
     const ::txservice::remote::GetClusterNodesRequest *request,
@@ -863,7 +994,10 @@ void CcNodeService::GenerateSkFromPk(
     uint64_t scan_ts = request->scan_ts();
 
     std::string_view table_name_sv{request->table_name_str()};
-    TableName base_table_name = TableName(table_name_sv, TableType::Primary);
+    txservice::TableEngine table_engine =
+        ToLocalType::ConvertTableEngine(request->table_engine());
+    TableName base_table_name =
+        TableName(table_name_sv, TableType::Primary, table_engine);
 
     int32_t partition_id = request->partition_id();
     const std::string &end_key_str = request->end_key();
@@ -876,7 +1010,8 @@ void CcNodeService::GenerateSkFromPk(
         std::string_view table_name_sv{request->new_sk_name_str(idx)};
         new_indexes_name.emplace_back(TableName(
             table_name_sv,
-            ToLocalType::ConvertCcTableType(request->new_sk_type(idx))));
+            ToLocalType::ConvertCcTableType(request->new_sk_type(idx)),
+            table_engine));
     }
 
     uint64_t tx_number = request->tx_number();
@@ -888,6 +1023,10 @@ void CcNodeService::GenerateSkFromPk(
     size_t scanned_pk_items_count = 0;
     CcErrorCode task_res = CcErrorCode::NO_ERROR;
     PackSkError pack_sk_err;
+    std::vector<bool> new_indexes_multikey;
+    new_indexes_multikey.reserve(new_indexes_name.size());
+    std::vector<std::string> new_indexes_multikey_paths;
+    new_indexes_multikey_paths.reserve(new_indexes_name.size());
     std::vector<int64_t> ng_terms_vec;
     std::thread worker_thd = std::thread(
         [&base_table_name,
@@ -903,6 +1042,8 @@ void CcNodeService::GenerateSkFromPk(
          &scanned_pk_items_count,
          &task_res,
          &pack_sk_err,
+         &new_indexes_multikey,
+         &new_indexes_multikey_paths,
          &ng_terms_vec,
          tx_number,
          tx_term]()
@@ -985,7 +1126,18 @@ void CcNodeService::GenerateSkFromPk(
 
             std::unique_lock<bthread::Mutex> lk(bthd_mux);
             task_res = cc_err;
-            if (task_res == CcErrorCode::PACK_SK_ERR)
+            if (task_res == CcErrorCode::NO_ERROR)
+            {
+                for (uint16_t idx = 0; idx < new_indexes_name.size(); ++idx)
+                {
+                    // The multikey attribute in SkGenerator is accumulated.
+                    new_indexes_multikey.push_back(
+                        sk_generator->IsMultiKey(idx));
+                    new_indexes_multikey_paths.push_back(
+                        sk_generator->SerializeMultiKeyPaths(idx));
+                }
+            }
+            else if (task_res == CcErrorCode::PACK_SK_ERR)
             {
                 pack_sk_err = std::move(sk_generator->GetPackSkError());
             }
@@ -1009,15 +1161,22 @@ void CcNodeService::GenerateSkFromPk(
 
     response->set_error_code(static_cast<int>(task_res));
     response->set_pk_items_count(scanned_pk_items_count);
-    if (task_res == CcErrorCode::PACK_SK_ERR)
+    if (task_res == CcErrorCode::NO_ERROR)
+    {
+        for (uint16_t idx = 0; idx < new_indexes_name.size(); ++idx)
+        {
+            remote::MultiKeyAttr *e = response->add_indexes_multikey_attr();
+            e->set_multikey(new_indexes_multikey[idx]);
+            e->set_multikey_paths(std::move(new_indexes_multikey_paths[idx]));
+        }
+    }
+    else if (task_res == CcErrorCode::PACK_SK_ERR)
     {
         response->set_pack_err_code(pack_sk_err.code_);
         response->set_pack_err_msg(pack_sk_err.message_);
     }
-    for (size_t idx = 0; idx < ng_terms_vec.size(); ++idx)
-    {
-        response->add_ng_terms(ng_terms_vec.at(idx));
-    }
+    response->mutable_ng_terms()->Add(ng_terms_vec.cbegin(),
+                                      ng_terms_vec.cend());
 
     worker_thd.join();
     DLOG(INFO) << "CcNodeService GenerateSkFromPk RPC of ng#" << ng_id
@@ -1042,7 +1201,9 @@ void CcNodeService::UploadBatch(
     std::string_view table_name_sv{request->table_name_str()};
     TableType table_type =
         ToLocalType::ConvertCcTableType(request->table_type());
-    TableName table_name = TableName(table_name_sv, table_type);
+    txservice::TableEngine table_engine =
+        ToLocalType::ConvertTableEngine(request->table_engine());
+    TableName table_name = TableName(table_name_sv, table_type, table_engine);
     UploadBatchType data_type =
         ToLocalType::ConvertUploadBatchType(request->kind());
 
@@ -1156,7 +1317,10 @@ void CcNodeService::UploadRangeSlices(
     brpc::ClosureGuard done_guard(done);
 
     std::string_view table_name_sv{request->table_name_str()};
-    TableName table_name = TableName(table_name_sv, TableType::RangePartition);
+    txservice::TableEngine table_engine =
+        ToLocalType::ConvertTableEngine(request->table_engine());
+    TableName table_name =
+        TableName(table_name_sv, TableType::RangePartition, table_engine);
     NodeGroupId ng_id = request->node_group_id();
     int32_t old_partition_id = request->old_partition_id();
     uint64_t version_ts = request->version_ts();
@@ -1172,6 +1336,7 @@ void CcNodeService::UploadRangeSlices(
     uint16_t rand_core = std::rand() % core_cnt;
     // upload range slices info
     UploadRangeSlicesCc req;
+    req.Use();
     req.Reset(table_name,
               ng_id,
               old_partition_id,
@@ -1220,7 +1385,9 @@ void CcNodeService::UploadBatchSlices(
     std::string_view table_name_sv{request->table_name_str()};
     TableType table_type =
         ToLocalType::ConvertCcTableType(request->table_type());
-    TableName table_name = TableName(table_name_sv, table_type);
+    txservice::TableEngine table_engine =
+        ToLocalType::ConvertTableEngine(request->table_engine());
+    TableName table_name = TableName(table_name_sv, table_type, table_engine);
 
     LocalCcShards *cc_shards = Sharder::Instance().GetLocalCcShards();
     size_t core_cnt = cc_shards->Count();
@@ -1301,7 +1468,8 @@ void CcNodeService::FetchPayload(
 
     TableName table_name(
         request->table_name_str(),
-        ToLocalType::ConvertCcTableType(request->table_type()));
+        ToLocalType::ConvertCcTableType(request->table_type()),
+        ToLocalType::ConvertTableEngine(request->table_engine()));
     // The first 32bits of standby term is the primary node ng term.
     read_cc->Reset(
         &table_name,
@@ -1310,7 +1478,7 @@ void CcNodeService::FetchPayload(
         request->key_shard_code(),
         response->mutable_payload(),
         ReadType::Inside,
-        FetchRecordCc::GetFetchRecordTxNumber(request->node_group_id()),
+        0,  // this request won't acquire any lock. Just a place holder.
         primary_term,
         0,
         &res,
@@ -1384,7 +1552,8 @@ void CcNodeService::FetchCatalog(
     };
     TableName table_name(
         request->table_name_str(),
-        ToLocalType::ConvertCcTableType(request->table_type()));
+        ToLocalType::ConvertCcTableType(request->table_type()),
+        ToLocalType::ConvertTableEngine(request->table_engine()));
     CatalogKey catalog_key;
     const std::string key_str = request->key_str();
     size_t offset = 0;
@@ -1399,7 +1568,7 @@ void CcNodeService::FetchCatalog(
         request->key_shard_code(),
         &catalog_rec,
         ReadType::Inside,
-        FetchRecordCc::GetFetchRecordTxNumber(request->node_group_id()),
+        0,  // this request won't acquire any lock. Just a place holder.
         primary_term,
         0,
         &res,
@@ -1984,18 +2153,15 @@ void CcNodeService::NotifyShutdownCkpt(
         std::chrono::duration_cast<std::chrono::microseconds>(
             std::chrono::system_clock::now().time_since_epoch())
             .count();
-    for (uint32_t ng_id : Sharder::Instance().LocalNodeGroups())
-    {
-        if (Sharder::Instance().LeaderTerm(ng_id) < 0)
-        {
-            LOG(WARNING) << "This node is no longer leader.";
-            response->set_trigger_ckpt_ts(0);
-            response->set_status(ShutdownStatus::ShutdownFailed);
-            return;
-        }
 
-        assert(Sharder::Instance().LeaderNodeId(ng_id) ==
-               Sharder::Instance().NodeId());
+    uint32_t native_ng_id = Sharder::Instance().NativeNodeGroup();
+    if (Sharder::Instance().LeaderTerm(native_ng_id) < 0)
+    {
+        LOG(WARNING) << "This node is no longer leader. ng_id: "
+                     << native_ng_id;
+        response->set_trigger_ckpt_ts(0);
+        response->set_status(ShutdownStatus::ShutdownFailed);
+        return;
     }
 
     local_shards_.GetTxService()->ckpt_.Terminate();
@@ -2012,65 +2178,62 @@ void CcNodeService::CheckCkptStatus(
 {
     brpc::ClosureGuard done_guard(done);
 
-    for (uint32_t ng_id : Sharder::Instance().LocalNodeGroups())
+    uint32_t native_ng_id = Sharder::Instance().NativeNodeGroup();
+    if (Sharder::Instance().LeaderTerm(native_ng_id) < 0)
     {
-        if (Sharder::Instance().LeaderTerm(ng_id) < 0)
-        {
-            LOG(WARNING) << "Leader transfer during shutdown checkpoint.";
-            response->set_status(CkptStatus::CkptFailed);
-            return;
-        }
+        LOG(WARNING) << "This node is no longer leader. ng_id: "
+                     << native_ng_id;
+        response->set_status(CkptStatus::CkptFailed);
+        return;
+    }
 
-        if (Sharder::Instance().GetNodeGroupCkptTs(ng_id) <=
-            request->trigger_ckpt_ts())
-        {
-            response->set_status(CkptStatus::CkptRunning);
-            return;
-        }
+    if (Sharder::Instance().GetNodeGroupCkptTs(native_ng_id) <=
+        request->trigger_ckpt_ts())
+    {
+        response->set_status(CkptStatus::CkptRunning);
+        return;
     }
 
     response->set_status(CkptStatus::CkptFinished);
     return;
 }
 
-void CcNodeService::UpdateLogGroupConfig(
+void CcNodeService::UpdateClusterConfig(
     ::google::protobuf::RpcController *controller,
-    const ::txservice::remote::UpdateLogGroupConfigRequest *request,
-    ::txservice::remote::UpdateLogGroupConfigResponse *response,
+    const ::txservice::remote::UpdateClusterConfigRequest *request,
+    ::google::protobuf::Empty *response,
     ::google::protobuf::Closure *done)
 {
     brpc::ClosureGuard done_guard(done);
-    std::vector<std::string> ips;
-    std::vector<uint16_t> ports;
-    for (const auto &ip : request->ips())
+    auto node_configs =
+        std::make_shared<std::unordered_map<uint32_t, NodeConfig>>();
+    for (int i = 0; i < request->new_node_configs_size(); i++)
     {
-        ips.push_back(ip);
+        auto node_config_buf = request->new_node_configs(i);
+        node_configs->try_emplace(node_config_buf.node_id(),
+                                  node_config_buf.node_id(),
+                                  node_config_buf.host_name(),
+                                  node_config_buf.port() - 1);
     }
-    for (const auto &port : request->ports())
-    {
-        ports.push_back(port);
-    }
-    if (Sharder::Instance().GetLogAgent()->UpdateLogGroupConfig(
-            ips, ports, request->log_group_id()))
-    {
-        // Update the log group config in the raft host manager
-        brpc::Channel *channel = Sharder::Instance().GetHostManagerChannel();
-        if (!channel)
-        {
-            LOG(ERROR) << "Failed to get host manager channel";
-            response->set_error(true);
-            return;
-        }
-        remote::HostMangerService_Stub stub(channel);
-        brpc::Controller cntl;
-        // RPC call to host manager will set the response for us.
-        stub.UpdateLogGroupConfig(&cntl, request, response, nullptr);
-    }
-    else
-    {
-        response->set_error(true);
-    }
-}
 
+    std::unordered_map<uint32_t, std::vector<NodeConfig>> new_ng_configs;
+    for (int idx = 0; idx < request->new_cluster_config_size(); idx++)
+    {
+        auto ng_config_buf = request->new_cluster_config(idx);
+
+        std::vector<NodeConfig> members;
+        for (int nid = 0; nid < ng_config_buf.member_nodes_size(); nid++)
+        {
+            NodeConfig tmp_node_conf =
+                node_configs->at(ng_config_buf.member_nodes(nid).node_id());
+            tmp_node_conf.is_candidate_ =
+                ng_config_buf.member_nodes(nid).is_candidate();
+            members.push_back(std::move(tmp_node_conf));
+        }
+        new_ng_configs.try_emplace(ng_config_buf.ng_id(), std::move(members));
+    }
+    Sharder::Instance().UpdateInMemoryClusterConfig(
+        new_ng_configs, std::move(node_configs), request->config_version());
+}
 }  // namespace remote
 }  // namespace txservice

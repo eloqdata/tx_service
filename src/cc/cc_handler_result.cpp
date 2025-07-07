@@ -79,7 +79,7 @@ bool CcHandlerResult<T>::SetFinished()
                     post_lambda_(this);
                 }
 #ifdef EXT_TX_PROC_ENABLED
-                if (resume_func)
+                if (resume_func && is_blocking)
                 {
                     (*resume_func)();
                 }
@@ -104,7 +104,7 @@ bool CcHandlerResult<T>::SetFinished()
             }
 
 #ifdef EXT_TX_PROC_ENABLED
-            if (resume_func)
+            if (resume_func && is_blocking)
             {
                 (*resume_func)();
             }
@@ -193,7 +193,7 @@ bool CcHandlerResult<T>::ForceError()
         }
 
 #ifdef EXT_TX_PROC_ENABLED
-        if (resume_func)
+        if (resume_func && is_blocking)
         {
             (*resume_func)();
         }
@@ -224,5 +224,5 @@ template class CcHandlerResult<std::string>;
 template class CcHandlerResult<ObjectCommandResult>;
 template class CcHandlerResult<std::vector<int64_t>>;
 template class CcHandlerResult<UploadBatchResult>;
-template class CcHandlerResult<PackSkError>;
+template class CcHandlerResult<GenerateSkParallelResult>;
 }  // namespace txservice

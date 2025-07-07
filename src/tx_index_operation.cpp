@@ -25,9 +25,13 @@
 
 #include <algorithm>
 #include <memory>
+#include <string>
+#include <utility>
+#include <vector>
 
 #include "error_messages.h"
 #include "local_cc_shards.h"
+#include "log_type.h"
 #include "remote/remote_type.h"
 #include "sk_generator.h"
 #include "tx_execution.h"
@@ -40,6 +44,7 @@ namespace txservice
 
 UpsertTableIndexOp::UpsertTableIndexOp(
     const std::string_view table_name_sv,
+    TableEngine table_engine,
     const std::string &current_image,
     uint64_t curr_schema_ts,
     const std::string &dirty_image,
@@ -47,20 +52,30 @@ UpsertTableIndexOp::UpsertTableIndexOp(
     OperationType op_type,
     PackSkError *store_pack_sk_err,
     TransactionExecution *txm)
-    : SchemaOp(
-          table_name_sv, current_image, dirty_image, curr_schema_ts, op_type),
+    : SchemaOp(table_name_sv,
+               table_engine,
+               current_image,
+               dirty_image,
+               curr_schema_ts,
+               op_type),
       lock_cluster_config_op_(),
       acquire_all_intent_op_(txm),
       upgrade_all_intent_to_lock_op_(txm),
       prepare_log_op_(txm),
       downgrade_all_lock_to_intent_op_(txm),
       unlock_cluster_config_op_(txm),
-      upsert_kv_table_op_(&table_key_.Name(), op_type, txm),
+      kv_create_index_op_(&table_key_.Name(), OperationType::AddIndex, txm),
       generate_sk_parallel_op_(txm),
       flush_all_old_tuples_sk_op_(txm),
       prepare_data_log_op_(txm),
+      broadcast_dirty_schema_image_op_(txm),
       acquire_all_lock_op_(txm),
       commit_log_op_(txm),
+      kv_drop_index_op_(&table_key_.Name(), OperationType::DropIndex, txm),
+      kv_rollback_create_index_op_(
+          &table_key_.Name(), OperationType::DropIndex, txm),
+      kv_update_schema_image_op_(
+          &table_key_.Name(), OperationType::Update, txm),
       clean_ccm_op_(txm),
       post_all_lock_op_(txm),
       clean_log_op_(txm),
@@ -71,8 +86,9 @@ UpsertTableIndexOp::UpsertTableIndexOp(
     assert(op_type_ == OperationType::AddIndex ||
            op_type_ == OperationType::DropIndex);
 
-    lock_cluster_config_op_.table_name_ =
-        TableName(cluster_config_ccm_name_sv, TableType::ClusterConfig);
+    lock_cluster_config_op_.table_name_ = TableName(cluster_config_ccm_name_sv,
+                                                    TableType::ClusterConfig,
+                                                    TableEngine::None);
     lock_cluster_config_op_.key_ = VoidKey::NegInfTxKey();
     lock_cluster_config_op_.rec_ = &cluster_conf_rec_;
     lock_cluster_config_op_.hd_result_ = &read_cluster_result_;
@@ -93,6 +109,12 @@ UpsertTableIndexOp::UpsertTableIndexOp(
     downgrade_all_lock_to_intent_op_.op_type_ = op_type_;
     downgrade_all_lock_to_intent_op_.write_type_ = PostWriteType::PrepareCommit;
 
+    broadcast_dirty_schema_image_op_.table_name_ = &catalog_ccm_name;
+    broadcast_dirty_schema_image_op_.keys_.emplace_back(&table_key_);
+    broadcast_dirty_schema_image_op_.recs_.push_back(&catalog_rec_);
+    broadcast_dirty_schema_image_op_.op_type_ = op_type_;
+    broadcast_dirty_schema_image_op_.write_type_ = PostWriteType::UpdateDirty;
+
     acquire_all_lock_op_.table_name_ = &catalog_ccm_name;
     acquire_all_lock_op_.keys_.emplace_back(&table_key_);
     acquire_all_lock_op_.cc_op_ = CcOperation::Write;
@@ -106,7 +128,8 @@ UpsertTableIndexOp::UpsertTableIndexOp(
 
     clean_ccm_op_.Clear();
 
-    alter_table_info_.DeserializeAlteredTableInfo(alter_table_info_image_str_);
+    alter_table_info_.DeserializeAlteredTableInfo(alter_table_info_image_str_,
+                                                  table_engine);
 
     is_force_finished_ = false;
 
@@ -116,7 +139,8 @@ UpsertTableIndexOp::UpsertTableIndexOp(
          ++index_it)
     {
         new_indexes_name_.emplace_back(index_it->first.StringView(),
-                                       index_it->first.Type());
+                                       index_it->first.Type(),
+                                       index_it->first.Engine());
     }
 
     TxKey neg_key = Sharder::Instance()
@@ -132,11 +156,9 @@ UpsertTableIndexOp::UpsertTableIndexOp(
     is_last_finished_key_str_ = false;
     finished_pk_range_count_ = 0;
     total_scanned_pk_items_count_ = 0;
-#ifdef NDEBUG
-    scan_batch_range_size_ = 10;
-#else
-    scan_batch_range_size_ = 3;
-#endif
+
+    indexes_multikey_attr_ = InitIndexesMultiKeyAttr(new_indexes_name_);
+
     ResetLeaderTerms();
 
     TX_TRACE_ASSOCIATE(this, &acquire_all_intent_op_, "acquire_all_intent_op_");
@@ -147,7 +169,7 @@ UpsertTableIndexOp::UpsertTableIndexOp(
     TX_TRACE_ASSOCIATE(this,
                        &downgrade_all_lock_to_intent_op_,
                        "downgrade_all_lock_to_intent_op_");
-    TX_TRACE_ASSOCIATE(this, &upsert_kv_table_op_, "upsert_kv_table_op_");
+    TX_TRACE_ASSOCIATE(this, &kv_create_index_op_, "kv_create_index_op_");
     TX_TRACE_ASSOCIATE(
         this, &generate_sk_parallel_op_, "generate_sk_parallel_op_");
     TX_TRACE_ASSOCIATE(
@@ -155,6 +177,11 @@ UpsertTableIndexOp::UpsertTableIndexOp(
     TX_TRACE_ASSOCIATE(this, &prepare_data_log_op_, "prepare_data_log_op_");
     TX_TRACE_ASSOCIATE(this, &acquire_all_lock_op_, "acquire_all_lock_op_");
     TX_TRACE_ASSOCIATE(this, &commit_log_op_, "commit_log_op_");
+    TX_TRACE_ASSOCIATE(this, &kv_drop_index_op_, "kv_drop_index_op_");
+    TX_TRACE_ASSOCIATE(
+        this, &kv_rollback_create_index_op_, "kv_rollback_create_index_op_");
+    TX_TRACE_ASSOCIATE(
+        this, &kv_update_schema_image_op_, "kv_update_schema_image_op_");
     TX_TRACE_ASSOCIATE(this, &clean_ccm_op_, "clean_ccm_op_");
     TX_TRACE_ASSOCIATE(this, &post_all_lock_op_, "post_all_lock_op_");
     TX_TRACE_ASSOCIATE(this, &clean_log_op_, "clean_log_op_");
@@ -369,11 +396,18 @@ void UpsertTableIndexOp::Forward(TransactionExecution *txm)
                 catalog_rec_.SetSchemaImage(image_str_);
                 catalog_rec_.SetDirtySchemaImage(dirty_image_str_);
 
+                DLOG(INFO) << "downgrade_all_lock_to_intent_op_ txn: "
+                           << txm->TxNumber()
+                           << ", table: " << table_key_.Name().StringView();
                 txm->PushOperation(&downgrade_all_lock_to_intent_op_);
                 txm->Process(downgrade_all_lock_to_intent_op_);
             }
             else
             {
+                DLOG(INFO)
+                    << "downgrade_all_lock_to_intent_op_ ForceToFinish txn: "
+                    << txm->TxNumber()
+                    << ", table: " << table_key_.Name().StringView();
                 ForceToFinish(txm);
             }
         }
@@ -396,13 +430,21 @@ void UpsertTableIndexOp::Forward(TransactionExecution *txm)
             // Release cluster config op before doing data store op.
             op_ = &unlock_cluster_config_op_;
             // Get cce addr of cluster config read lock from rset.
-            auto &rset = txm->rw_set_.ReadSet();
-            auto &cluster_config_rset = rset.at(cluster_config_ccm_name);
-            assert(cluster_config_rset.size() == 1);
-            for (const auto &[cce_addr, rset_entry] : cluster_config_rset)
+            const CcEntryAddr *cluster_config_addr = nullptr;
+            const ReadSetEntry *cluster_config_entry = nullptr;
+            const auto &meta_rset = txm->rw_set_.MetaDataReadSet();
+            for (const auto &[cce_addr, read_entry_pair] : meta_rset)
             {
-                unlock_cluster_config_op_.Reset(&cce_addr, &rset_entry);
+                if (read_entry_pair.second == cluster_config_ccm_name_sv)
+                {
+                    cluster_config_addr = &cce_addr;
+                    cluster_config_entry = &read_entry_pair.first;
+                    break;
+                }
             }
+            assert(cluster_config_addr && cluster_config_entry);
+            unlock_cluster_config_op_.Reset(cluster_config_addr,
+                                            cluster_config_entry);
             LOG(INFO) << "Alter Table Index transaction release cluster config "
                          "lock, txn: "
                       << txm->TxNumber();
@@ -425,26 +467,29 @@ void UpsertTableIndexOp::Forward(TransactionExecution *txm)
                 return;
             }
         }
-        assert(op_type_ == OperationType::AddIndex);
-        LOG(INFO) << "Alter Table Index transaction upsert data store"
-                  << " info for base table: " << table_key_.Name().Trace()
-                  << ", txn: " << txm->TxNumber();
-        uint16_t retry_times = 100;
-        CODE_FAULT_INJECTOR("trigger_flush_kv_error", { retry_times = 3; });
-        op_ = &upsert_kv_table_op_;
-        // The post write request right after flushing the prepare log
-        // installs the dirty schema in the tx service and returns a
-        // local view (pointer) of the committed and dirty schema.
-        upsert_kv_table_op_.table_schema_old_ = catalog_rec_.Schema();
-        upsert_kv_table_op_.table_schema_ = catalog_rec_.DirtySchema();
-        upsert_kv_table_op_.alter_table_info_ = &alter_table_info_;
-        upsert_kv_table_op_.write_time_ = txm->commit_ts_;
-        txm->PushOperation(&upsert_kv_table_op_, retry_times);
-        txm->Process(upsert_kv_table_op_);
+        else
+        {
+            assert(op_type_ == OperationType::AddIndex);
+            LOG(INFO) << "Alter Table Index transaction upsert data store"
+                      << " info for base table: " << table_key_.Name().Trace()
+                      << ", txn: " << txm->TxNumber();
+            uint16_t retry_times = 100;
+            CODE_FAULT_INJECTOR("trigger_flush_kv_error", { retry_times = 3; });
+            op_ = &kv_create_index_op_;
+            // The post write request right after flushing the prepare log
+            // installs the dirty schema in the tx service and returns a
+            // local view (pointer) of the committed and dirty schema.
+            kv_create_index_op_.table_schema_old_ = catalog_rec_.Schema();
+            kv_create_index_op_.table_schema_ = catalog_rec_.DirtySchema();
+            kv_create_index_op_.alter_table_info_ = &alter_table_info_;
+            kv_create_index_op_.write_time_ = txm->commit_ts_;
+            txm->PushOperation(&kv_create_index_op_, retry_times);
+            txm->Process(kv_create_index_op_);
+        }
     }
-    else if (op_ == &upsert_kv_table_op_)
+    else if (op_ == &kv_create_index_op_)
     {
-        if (upsert_kv_table_op_.hd_result_.IsError())
+        if (kv_create_index_op_.hd_result_.IsError())
         {
             // The data store operation failed. Retries the operation if the
             // tx node is the leader or the tx is in the recovery mode and
@@ -453,82 +498,44 @@ void UpsertTableIndexOp::Forward(TransactionExecution *txm)
             {
                 // NOTE: The logic of this part is consistent with the logic in
                 // UpsertTableOp::Forward.
-                // Keep retrying if it is DropIndex or rollback AddIndex.
-                if (op_type_ == OperationType::DropIndex ||
-                    generate_sk_parallel_op_.hd_result_.IsError())
-                {
-                    txm->PushOperation(&upsert_kv_table_op_);
-                    txm->Process(upsert_kv_table_op_);
-                }
-                else
-                {
-                    LOG(ERROR) << "Alter Table Index for table: "
-                               << table_key_.Name().Trace()
-                               << ", Failed to create tables in kv store"
-                               << ". Txn: " << txm->TxNumber();
+                LOG(ERROR) << "Alter Table Index for table: "
+                           << table_key_.Name().Trace()
+                           << ", Failed to create tables in kv store"
+                           << ". Txn: " << txm->TxNumber();
+                // Set txm->commit_ts_ to 0 to indicate there is a flush
+                // error during upsert_kv_table_op_.
+                txm->commit_ts_ = tx_op_failed_ts_;
 
-                    /*
-                    After upsert kv fails, we need to flush a commit log to
-                    indicate this error.
-                    If we skip this commit log and jump to post_all_lock_op_
-                    directly, once the participant crashes at the point between
-                    it releases write intent and the coordinator flushes
-                    clean_log, then during recovery, the participant sees a
-                    prepare_log(whose commit_ts is not 0) and recovers write
-                    lock and dirty_catalog.
-                    Since the coordinator has finished its job, the write
-                    lock recovered by participant becomes orphan lock, and the
-                    dirty catalog can not be rejected either.
-                    Also, in the current design, post_all_intent_op_ does not
-                    release the write intent, which means the write intent is
-                    still being held after upsert_kv_table_op_(during
-                    CreateTable or AddIndex). If create table or add index in kv
-                    fails, the only thing we should do after writing commit_log
-                    is to reject dirty schema. So there is no need to upgrade
-                    write intent to write lock, and it is safe to skip
-                    acquire_all_lock_op_ and jump directly to commit_log_op_.
-                    */
-                    op_ = &commit_log_op_;
-                    FillCommitLogRequest(txm);
-                    txm->PushOperation(&commit_log_op_);
-                    txm->Process(commit_log_op_);
-                }
+                /*
+                After upsert kv fails, we need to flush a commit log to
+                indicate this error.
+                If we skip this commit log and jump to post_all_lock_op_
+                directly, once the participant crashes at the point between
+                it releases write intent and the coordinator flushes
+                clean_log, then during recovery, the participant sees a
+                prepare_log(whose commit_ts is not 0) and recovers write
+                lock and dirty_catalog.
+                Since the coordinator has finished its job, the write
+                lock recovered by participant becomes orphan lock, and the
+                dirty catalog can not be rejected either.
+                Also, in the current design, post_all_intent_op_ does not
+                release the write intent, which means the write intent is
+                still being held after upsert_kv_table_op_(during
+                CreateTable or AddIndex). If create table or add index in kv
+                fails, the only thing we should do after writing commit_log
+                is to reject dirty schema. So there is no need to upgrade
+                write intent to write lock, and it is safe to skip
+                acquire_all_lock_op_ and jump directly to commit_log_op_.
+                */
+                op_ = &commit_log_op_;
+                FillCommitLogRequest(txm);
+                txm->PushOperation(&commit_log_op_);
+                txm->Process(commit_log_op_);
             }
             else
             {
                 ForceToFinish(txm);
             }
-        }
-        else if (op_type_ == OperationType::DropIndex ||
-                 generate_sk_parallel_op_.hd_result_.IsError())
-        {
-            assert(clean_ccm_op_.table_names_.empty());
-            for (const auto &index_drop_name :
-                 alter_table_info_.index_drop_names_)
-            {
-                clean_ccm_op_.table_names_.emplace_back(
-                    index_drop_name.first.StringView().data(),
-                    index_drop_name.first.StringView().size(),
-                    index_drop_name.first.Type());
-            }
-
-            if (op_type_ == OperationType::DropIndex)
-            {
-                clean_ccm_op_.commit_ts_ = txm->CommitTs();
-            }
-            else
-            {
-                assert(op_type_ == OperationType::AddIndex &&
-                       txm->commit_ts_ == tx_op_failed_ts_);
-                clean_ccm_op_.commit_ts_ = upsert_kv_table_op_.write_time_;
-            }
-            clean_ccm_op_.clean_type_ = CleanType::CleanCcm;
-
-            LOG(INFO) << "Alter Table Index transaction clean cc map, txn: "
-                      << txm->TxNumber();
-            op_ = &clean_ccm_op_;
-            txm->PushOperation(&clean_ccm_op_);
-            txm->Process(clean_ccm_op_);
         }
         else
         {
@@ -556,16 +563,16 @@ void UpsertTableIndexOp::Forward(TransactionExecution *txm)
                 last_scanned_end_key_ = last_finished_end_key_.GetShallowCopy();
             }
             is_last_scanned_key_str_ = is_last_finished_key_str_;
+            indexes_changed_within_round_ = false;
             ResetLeaderTerms();
             generate_sk_parallel_op_.Reset();
             generate_sk_parallel_op_.hd_result_.Value().Reset();
-            generate_sk_parallel_op_.op_func_ = [this, txm]()
+            generate_sk_parallel_op_.op_func_ =
+                [this, txm](AsyncOp<GenerateSkParallelResult> &async_op)
             {
-                generate_sk_parallel_op_.worker_thread_ = std::thread(
-                    [this, txm]()
+                async_op.worker_thread_ = std::thread(
+                    [this, txm, &hd_res = async_op.hd_result_]()
                     {
-                        auto &hd_res = generate_sk_parallel_op_.hd_result_;
-                        hd_res.Reset();
 #ifdef EXT_TX_PROC_ENABLED
                         hd_res.SetToBlock();
 #endif
@@ -580,7 +587,8 @@ void UpsertTableIndexOp::Forward(TransactionExecution *txm)
     else if (op_ == &clean_ccm_op_)
     {
         assert(op_type_ == OperationType::DropIndex ||
-               generate_sk_parallel_op_.hd_result_.IsError());
+               (op_type_ == OperationType::AddIndex &&
+                txm->CommitTs() == tx_op_failed_ts_));
 
         if (clean_ccm_op_.hd_result_.IsError())
         {
@@ -644,7 +652,7 @@ void UpsertTableIndexOp::Forward(TransactionExecution *txm)
                     //
                     // Besides generate_sk_parallel_op_ set commit_ts to
                     // tx_op_failed_ts_ when constrains violation,
-                    // upsert_kv_table_op_ also set commit_ts to
+                    // kv_create_index_op_ also set commit_ts to
                     // tx_op_failed_ts_ when flush kv failed. As a result,
                     // `op_type == Operation::AddIndex && txm->commit_ts_ ==
                     // tx_op_failed_ts_` doesn't means abort by constrains
@@ -653,14 +661,13 @@ void UpsertTableIndexOp::Forward(TransactionExecution *txm)
 
                     txm->upsert_resp_->SetErrorCode(
                         TransactionExecution::ConvertCcError(err_code));
-                    if (err_code == CcErrorCode::PACK_SK_ERR)
+                    if (err_code == CcErrorCode::PACK_SK_ERR &&
+                        store_pack_sk_err_)
                     {
-                        if (store_pack_sk_err_)
-                        {
-                            PackSkError &pack_sk_err =
-                                generate_sk_parallel_op_.hd_result_.Value();
-                            *store_pack_sk_err_ = std::move(pack_sk_err);
-                        }
+                        PackSkError &pack_sk_err =
+                            generate_sk_parallel_op_.hd_result_.Value()
+                                .pack_sk_error_;
+                        *store_pack_sk_err_ = std::move(pack_sk_err);
                     }
 
                     op_ = &acquire_all_lock_op_;
@@ -735,9 +742,20 @@ void UpsertTableIndexOp::Forward(TransactionExecution *txm)
                   << " pk ranges. Txn: " << txm->TxNumber()
                   << ", and commit ts: " << txm->commit_ts_;
 
-        flush_all_old_tuples_sk_op_.op_func_ =
-            [this, txm, &hd_res = flush_all_old_tuples_sk_op_.hd_result_]
+        indexes_changed_within_round_ = IndexesMergeMultiKeyAttr(
+            generate_sk_parallel_op_.hd_result_.Value().indexes_multikey_attr_,
+            indexes_multikey_attr_);
+        if (indexes_changed_within_round_)
         {
+            std::string dirty_image = RebuildSchemaImage(
+                catalog_rec_.DirtySchema(), indexes_multikey_attr_);
+            catalog_rec_.SetDirtySchemaImage(std::move(dirty_image));
+        }
+
+        flush_all_old_tuples_sk_op_.op_func_ =
+            [this, txm](AsyncOp<Void> &async_op)
+        {
+            CcHandlerResult<Void> &hd_res = async_op.hd_result_;
             store::DataStoreHandler *const store_hd =
                 Sharder::Instance().GetLocalCcShards()->store_hd_;
             if (store_hd->ByPassDataStore())
@@ -892,6 +910,15 @@ void UpsertTableIndexOp::Forward(TransactionExecution *txm)
             return;
         }
 
+        if (indexes_changed_within_round_ ||
+            txm->TxStatus() == TxnStatus::Recovering)
+        {
+            op_ = &broadcast_dirty_schema_image_op_;
+            txm->PushOperation(&broadcast_dirty_schema_image_op_);
+            txm->Process(broadcast_dirty_schema_image_op_);
+            return;
+        }
+
         if (!is_last_finished_key_str_ &&
             (last_finished_end_key_.Type() == KeyType::PositiveInf))
         {
@@ -919,15 +946,77 @@ void UpsertTableIndexOp::Forward(TransactionExecution *txm)
                 last_scanned_end_key_ = last_finished_end_key_.GetShallowCopy();
             }
             is_last_scanned_key_str_ = is_last_finished_key_str_;
+            indexes_changed_within_round_ = false;
             ResetLeaderTerms();
             generate_sk_parallel_op_.Reset();
-            generate_sk_parallel_op_.op_func_ = [this, txm]()
+            generate_sk_parallel_op_.hd_result_.Value().Reset();
+            generate_sk_parallel_op_.op_func_ =
+                [this, txm](AsyncOp<GenerateSkParallelResult> &async_op)
             {
-                generate_sk_parallel_op_.worker_thread_ = std::thread(
-                    [this, txm]()
+                async_op.worker_thread_ = std::thread(
+                    [this, txm, &hd_res = async_op.hd_result_]()
                     {
-                        auto &hd_res = generate_sk_parallel_op_.hd_result_;
-                        hd_res.Reset();
+#ifdef EXT_TX_PROC_ENABLED
+                        hd_res.SetToBlock();
+#endif
+                        this->DispatchRangeTask(txm, hd_res);
+                    });
+            };
+            op_ = &generate_sk_parallel_op_;
+            txm->PushOperation(&generate_sk_parallel_op_);
+            txm->Process(generate_sk_parallel_op_);
+        }
+    }
+    else if (op_ == &broadcast_dirty_schema_image_op_)
+    {
+        if (!txm->CheckLeaderTerm())
+        {
+            ForceToFinish(txm);
+            return;
+        }
+        if (broadcast_dirty_schema_image_op_.hd_result_.IsError())
+        {
+            txm->PushOperation(&broadcast_dirty_schema_image_op_);
+            txm->Process(broadcast_dirty_schema_image_op_);
+            return;
+        }
+        if (!is_last_finished_key_str_ &&
+            (last_finished_end_key_.Type() == KeyType::PositiveInf))
+        {
+            // Reach the end.
+            LOG(INFO) << "Alter Table Index transaction lock cluster config"
+                      << ", txn: " << txm->TxNumber();
+            op_ = &lock_cluster_config_op_;
+            txm->PushOperation(&lock_cluster_config_op_);
+            txm->Process(lock_cluster_config_op_);
+        }
+        else
+        {
+            // Next batch range task
+            LOG(INFO) << "Alter Table Index transaction continue to generate "
+                      << "sk parallel for table: " << table_key_.Name().Trace()
+                      << " with the start key: "
+                      << ". Txn: " << txm->TxNumber();
+            // Reset last end key.
+            if (is_last_finished_key_str_)
+            {
+                last_scanned_end_key_str_ = last_finished_end_key_str_;
+            }
+            else
+            {
+                last_scanned_end_key_ = last_finished_end_key_.GetShallowCopy();
+            }
+            is_last_scanned_key_str_ = is_last_finished_key_str_;
+            indexes_changed_within_round_ = false;
+            ResetLeaderTerms();
+            generate_sk_parallel_op_.Reset();
+            generate_sk_parallel_op_.hd_result_.Value().Reset();
+            generate_sk_parallel_op_.op_func_ =
+                [this, txm](AsyncOp<GenerateSkParallelResult> &async_op)
+            {
+                async_op.worker_thread_ = std::thread(
+                    [this, txm, &hd_res = async_op.hd_result_]()
+                    {
 #ifdef EXT_TX_PROC_ENABLED
                         hd_res.SetToBlock();
 #endif
@@ -1011,34 +1100,99 @@ void UpsertTableIndexOp::Forward(TransactionExecution *txm)
             ACTION_FAULT_INJECTOR("term_AlterTableDropIndex_PostCommitAllWLOp");
             LOG(INFO) << "Drop Index transaction upsert data store"
                       << " info, txn: " << txm->TxNumber();
-            op_ = &upsert_kv_table_op_;
-            upsert_kv_table_op_.table_schema_ = catalog_rec_.DirtySchema();
-            upsert_kv_table_op_.alter_table_info_ = &alter_table_info_;
-            upsert_kv_table_op_.write_time_ = txm->commit_ts_;
-            txm->PushOperation(&upsert_kv_table_op_);
-            txm->Process(upsert_kv_table_op_);
+            op_ = &kv_drop_index_op_;
+            kv_drop_index_op_.table_schema_old_ = catalog_rec_.Schema();
+            kv_drop_index_op_.table_schema_ = catalog_rec_.DirtySchema();
+            kv_drop_index_op_.alter_table_info_ = &alter_table_info_;
+            kv_drop_index_op_.write_time_ = txm->commit_ts_;
+            txm->PushOperation(&kv_drop_index_op_);
+            txm->Process(kv_drop_index_op_);
         }
-        else if (generate_sk_parallel_op_.hd_result_.IsError())
+        else if (op_type_ == OperationType::AddIndex &&
+                 txm->CommitTs() == tx_op_failed_ts_)
         {
-            LOG(WARNING) << "Rollback Index transaction generate sk op, txm: "
-                         << txm->TxNumber();
+            if (txm->TxStatus() == TxnStatus::Recovering ||
+                generate_sk_parallel_op_.hd_result_.IsError())
+            {
+                // Rollback due to generate_sk_parallel_op_ break violations.
+                LOG(WARNING)
+                    << "Rollback Index transaction, txm: " << txm->TxNumber();
 
-            // Undo the CREATE INDEX operation with a DROP INDEX op.
-            op_ = &upsert_kv_table_op_;
+                op_ = &kv_rollback_create_index_op_;
+                kv_rollback_create_index_op_.table_schema_old_ =
+                    catalog_rec_.Schema();
+                kv_rollback_create_index_op_.table_schema_ =
+                    catalog_rec_.DirtySchema();
+                kv_rollback_create_index_op_.alter_table_info_ =
+                    &alter_table_info_;
 
-            upsert_kv_table_op_.op_type_ = OperationType::DropIndex;
-            std::swap(upsert_kv_table_op_.table_schema_old_,
-                      upsert_kv_table_op_.table_schema_);
-            std::swap(upsert_kv_table_op_.alter_table_info_->index_add_names_,
-                      upsert_kv_table_op_.alter_table_info_->index_drop_names_);
-            std::swap(upsert_kv_table_op_.alter_table_info_->index_add_count_,
-                      upsert_kv_table_op_.alter_table_info_->index_drop_count_);
-            upsert_kv_table_op_.write_time_ =
-                std::max(upsert_kv_table_op_.write_time_,
-                         txm->commit_ts_bound_) +
-                1;
-            txm->PushOperation(&upsert_kv_table_op_);
-            txm->Process(upsert_kv_table_op_);
+                // Undo the CREATE INDEX operation with a DROP INDEX op.
+                assert(kv_rollback_create_index_op_.op_type_ ==
+                       OperationType::DropIndex);
+                std::swap(kv_rollback_create_index_op_.table_schema_old_,
+                          kv_rollback_create_index_op_.table_schema_);
+                std::swap(kv_rollback_create_index_op_.alter_table_info_
+                              ->index_add_names_,
+                          kv_rollback_create_index_op_.alter_table_info_
+                              ->index_drop_names_);
+                std::swap(kv_rollback_create_index_op_.alter_table_info_
+                              ->index_add_count_,
+                          kv_rollback_create_index_op_.alter_table_info_
+                              ->index_drop_count_);
+                if (txm->TxStatus() != TxnStatus::Recovering)
+                {
+                    kv_rollback_create_index_op_.write_time_ =
+                        std::max(kv_create_index_op_.write_time_,
+                                 txm->commit_ts_bound_) +
+                        1;
+                }
+                else
+                {
+                    kv_rollback_create_index_op_.write_time_ =
+                        static_cast<LocalCcHandler *>(txm->cc_handler_)
+                            ->GetTsBaseValue();
+                }
+                txm->PushOperation(&kv_rollback_create_index_op_);
+                txm->Process(kv_rollback_create_index_op_);
+            }
+            else
+            {
+                ACTION_FAULT_INJECTOR("term_AlterTableIndex_PostCommitAllWLOp");
+                LOG(INFO) << "Alter Table Index transaction commit dirty table"
+                          << " schema, txn: " << txm->TxNumber();
+
+                assert(kv_create_index_op_.hd_result_.IsError());
+                assert(post_all_lock_op_.write_type_ ==
+                       PostWriteType::PostCommit);
+                op_ = &post_all_lock_op_;
+                txm->PushOperation(&post_all_lock_op_);
+                txm->Process(post_all_lock_op_);
+            }
+        }
+        else if (op_type_ == OperationType::AddIndex && txm->CommitTs() > 0 &&
+                 AnyMultiKeyIndex(indexes_multikey_attr_))
+        {
+            op_ = &kv_update_schema_image_op_;
+            kv_update_schema_image_op_.table_schema_old_ =
+                catalog_rec_.Schema();
+            kv_update_schema_image_op_.table_schema_ =
+                catalog_rec_.DirtySchema();
+            if (txm->TxStatus() != TxnStatus::Recovering)
+            {
+                kv_update_schema_image_op_.write_time_ =
+                    std::max({kv_update_schema_image_op_.write_time_,
+                              kv_create_index_op_.write_time_,
+                              txm->commit_ts_bound_}) +
+                    1;
+            }
+            else
+            {
+                kv_update_schema_image_op_.write_time_ =
+                    static_cast<LocalCcHandler *>(txm->cc_handler_)
+                        ->GetTsBaseValue();
+            }
+            txm->PushOperation(&kv_update_schema_image_op_);
+            txm->Process(kv_update_schema_image_op_);
         }
         else
         {
@@ -1046,6 +1200,103 @@ void UpsertTableIndexOp::Forward(TransactionExecution *txm)
             LOG(INFO) << "Alter Table Index transaction commit dirty table"
                       << " schema, txn: " << txm->TxNumber();
 
+            assert(post_all_lock_op_.write_type_ == PostWriteType::PostCommit);
+            op_ = &post_all_lock_op_;
+            txm->PushOperation(&post_all_lock_op_);
+            txm->Process(post_all_lock_op_);
+        }
+    }
+    else if (op_ == &kv_drop_index_op_)
+    {
+        if (kv_drop_index_op_.hd_result_.IsError())
+        {
+            if (txm->CheckLeaderTerm())
+            {
+                txm->PushOperation(&kv_drop_index_op_);
+                txm->Process(kv_drop_index_op_);
+            }
+            else
+            {
+                ForceToFinish(txm);
+            }
+        }
+        else
+        {
+            LOG(INFO) << "Drop Table Index transaction clean cc map, txn: "
+                      << txm->TxNumber();
+            op_ = &clean_ccm_op_;
+
+            assert(clean_ccm_op_.table_names_.empty());
+            for (const auto &[index_drop_name, kv_index_drop_name] :
+                 alter_table_info_.index_drop_names_)
+            {
+                clean_ccm_op_.table_names_.emplace_back(
+                    index_drop_name.StringView().data(),
+                    index_drop_name.StringView().size(),
+                    index_drop_name.Type(),
+                    index_drop_name.Engine());
+            }
+            clean_ccm_op_.clean_type_ = CleanType::CleanCcm;
+            clean_ccm_op_.commit_ts_ = txm->CommitTs();
+            txm->PushOperation(&clean_ccm_op_);
+            txm->Process(clean_ccm_op_);
+        }
+    }
+    else if (op_ == &kv_rollback_create_index_op_)
+    {
+        if (kv_rollback_create_index_op_.hd_result_.IsError())
+        {
+            if (txm->CheckLeaderTerm())
+            {
+                txm->PushOperation(&kv_rollback_create_index_op_);
+                txm->Process(kv_rollback_create_index_op_);
+            }
+            else
+            {
+                ForceToFinish(txm);
+            }
+        }
+        else
+        {
+            LOG(INFO) << "Rollback Table Index transaction clean cc map, txn: "
+                      << txm->TxNumber();
+            op_ = &clean_ccm_op_;
+
+            assert(clean_ccm_op_.table_names_.empty());
+            for (const auto &[index_drop_name, kv_index_drop_name] :
+                 alter_table_info_.index_drop_names_)
+            {
+                clean_ccm_op_.table_names_.emplace_back(
+                    index_drop_name.StringView().data(),
+                    index_drop_name.StringView().size(),
+                    index_drop_name.Type(),
+                    index_drop_name.Engine());
+            }
+            clean_ccm_op_.clean_type_ = CleanType::CleanCcm;
+            clean_ccm_op_.commit_ts_ = kv_rollback_create_index_op_.write_time_;
+            txm->PushOperation(&clean_ccm_op_);
+            txm->Process(clean_ccm_op_);
+        }
+    }
+    else if (op_ == &kv_update_schema_image_op_)
+    {
+        if (kv_update_schema_image_op_.hd_result_.IsError())
+        {
+            if (txm->CheckLeaderTerm())
+            {
+                txm->PushOperation(&kv_update_schema_image_op_);
+                txm->Process(kv_update_schema_image_op_);
+            }
+            else
+            {
+                ForceToFinish(txm);
+            }
+        }
+        else
+        {
+            LOG(INFO) << "Alter Table Index transaction commit dirty table "
+                         "schema, txn: "
+                      << txm->TxNumber();
             assert(post_all_lock_op_.write_type_ == PostWriteType::PostCommit);
             op_ = &post_all_lock_op_;
             txm->PushOperation(&post_all_lock_op_);
@@ -1205,6 +1456,7 @@ void UpsertTableIndexOp::Forward(TransactionExecution *txm)
 }
 
 void UpsertTableIndexOp::Reset(const std::string_view table_name_str,
+                               TableEngine table_engine,
                                const std::string &current_image,
                                uint64_t curr_schema_ts,
                                const std::string &dirty_image,
@@ -1221,8 +1473,10 @@ void UpsertTableIndexOp::Reset(const std::string_view table_name_str,
     is_running_ = false;
 
     // 2. Reset SchemaOp
-    table_key_.Name() = TableName(
-        table_name_str.data(), table_name_str.size(), TableType::Primary);
+    table_key_.Name() = TableName(table_name_str.data(),
+                                  table_name_str.size(),
+                                  TableType::Primary,
+                                  table_engine);
     catalog_rec_.Reset();
     catalog_rec_.SetSchemaImage(current_image);
     catalog_rec_.SetDirtySchemaImage(dirty_image);
@@ -1240,22 +1494,29 @@ void UpsertTableIndexOp::Reset(const std::string_view table_name_str,
     cluster_conf_rec_.Reset();
     lock_cluster_config_op_.Reset();
     lock_cluster_config_op_.key_ = VoidKey::NegInfTxKey();
-    lock_cluster_config_op_.table_name_ =
-        TableName(cluster_config_ccm_name_sv, TableType::ClusterConfig);
+    lock_cluster_config_op_.table_name_ = TableName(cluster_config_ccm_name_sv,
+                                                    TableType::ClusterConfig,
+                                                    TableEngine::None);
     lock_cluster_config_op_.rec_ = &cluster_conf_rec_;
     lock_cluster_config_op_.hd_result_ = &read_cluster_result_;
 
     alter_table_info_image_str_ = alter_table_image;
     alter_table_info_.Reset();
-    alter_table_info_.DeserializeAlteredTableInfo(alter_table_info_image_str_);
+    alter_table_info_.DeserializeAlteredTableInfo(alter_table_info_image_str_,
+                                                  table_engine);
+
+    indexes_multikey_attr_.clear();
 
     prepare_log_op_.Reset();
     unlock_cluster_config_op_.Reset();
-    upsert_kv_table_op_.Reset();
+    kv_create_index_op_.Reset();
     generate_sk_parallel_op_.Reset();
     flush_all_old_tuples_sk_op_.Reset();
     prepare_data_log_op_.Reset();
     commit_log_op_.Reset();
+    kv_drop_index_op_.Reset();
+    kv_rollback_create_index_op_.Reset();
+    kv_update_schema_image_op_.Reset();
     clean_log_op_.Reset();
 
     clean_ccm_op_.Clear();
@@ -1281,15 +1542,35 @@ void UpsertTableIndexOp::Reset(const std::string_view table_name_str,
     downgrade_all_lock_to_intent_op_.op_type_ = op_type_;
     downgrade_all_lock_to_intent_op_.write_type_ = PostWriteType::PrepareCommit;
 
-    upsert_kv_table_op_.alter_table_info_ = &alter_table_info_;
-    upsert_kv_table_op_.op_type_ = op_type_;
-    upsert_kv_table_op_.write_time_ = 0;
+    kv_create_index_op_.alter_table_info_ = &alter_table_info_;
+    kv_create_index_op_.op_type_ = op_type_;
+    kv_create_index_op_.write_time_ = 0;
+
+    broadcast_dirty_schema_image_op_.table_name_ = &catalog_ccm_name;
+    broadcast_dirty_schema_image_op_.keys_.clear();
+    broadcast_dirty_schema_image_op_.keys_.emplace_back(&table_key_);
+    broadcast_dirty_schema_image_op_.recs_.clear();
+    broadcast_dirty_schema_image_op_.recs_.push_back(&catalog_rec_);
+    broadcast_dirty_schema_image_op_.op_type_ = op_type_;
+    broadcast_dirty_schema_image_op_.write_type_ = PostWriteType::UpdateDirty;
 
     acquire_all_lock_op_.table_name_ = &catalog_ccm_name;
     acquire_all_lock_op_.keys_.clear();
     acquire_all_lock_op_.keys_.emplace_back(&table_key_);
     acquire_all_lock_op_.cc_op_ = CcOperation::Write;
     acquire_all_lock_op_.protocol_ = CcProtocol::Locking;
+
+    kv_drop_index_op_.alter_table_info_ = &alter_table_info_;
+    kv_drop_index_op_.op_type_ = OperationType::DropIndex;
+    kv_drop_index_op_.write_time_ = 0;
+
+    kv_rollback_create_index_op_.alter_table_info_ = &alter_table_info_;
+    kv_rollback_create_index_op_.op_type_ = OperationType::DropIndex;
+    kv_rollback_create_index_op_.write_time_ = 0;
+
+    kv_update_schema_image_op_.alter_table_info_ = nullptr;
+    kv_update_schema_image_op_.op_type_ = OperationType::Update;
+    kv_update_schema_image_op_.write_time_ = 0;
 
     post_all_lock_op_.table_name_ = &catalog_ccm_name;
     post_all_lock_op_.keys_.clear();
@@ -1305,12 +1586,16 @@ void UpsertTableIndexOp::Reset(const std::string_view table_name_str,
     prepare_log_op_.ResetHandlerTxm(txm);
     downgrade_all_lock_to_intent_op_.ResetHandlerTxm(txm);
     unlock_cluster_config_op_.ResetHandlerTxm(txm);
-    upsert_kv_table_op_.ResetHandlerTxm(txm);
+    kv_create_index_op_.ResetHandlerTxm(txm);
     generate_sk_parallel_op_.ResetHandlerTxm(txm);
     flush_all_old_tuples_sk_op_.ResetHandlerTxm(txm);
     prepare_data_log_op_.ResetHandlerTxm(txm);
+    broadcast_dirty_schema_image_op_.ResetHandlerTxm(txm);
     acquire_all_lock_op_.ResetHandlerTxm(txm);
     commit_log_op_.ResetHandlerTxm(txm);
+    kv_drop_index_op_.ResetHandlerTxm(txm);
+    kv_rollback_create_index_op_.ResetHandlerTxm(txm);
+    kv_update_schema_image_op_.ResetHandlerTxm(txm);
     clean_ccm_op_.ResetHandlerTxm(txm);
     post_all_lock_op_.ResetHandlerTxm(txm);
     clean_log_op_.ResetHandlerTxm(txm);
@@ -1323,7 +1608,8 @@ void UpsertTableIndexOp::Reset(const std::string_view table_name_str,
          ++index_it)
     {
         new_indexes_name_.emplace_back(index_it->first.StringView(),
-                                       index_it->first.Type());
+                                       index_it->first.Type(),
+                                       index_it->first.Engine());
     }
 
     ResetLeaderTerms();
@@ -1338,13 +1624,9 @@ void UpsertTableIndexOp::Reset(const std::string_view table_name_str,
     is_last_finished_key_str_ = false;
     finished_pk_range_count_ = 0;
     total_scanned_pk_items_count_ = 0;
-#ifdef NDEBUG
-    scan_batch_range_size_ = 10;
-#else
-    scan_batch_range_size_ = 3;
-#endif
 
     store_pack_sk_err_ = store_pack_sk_err;
+    indexes_multikey_attr_ = InitIndexesMultiKeyAttr(new_indexes_name_);
 }
 
 void UpsertTableIndexOp::FillPrepareLogRequest(TransactionExecution *txm)
@@ -1386,6 +1668,9 @@ void UpsertTableIndexOp::FillPrepareDataLogRequest(TransactionExecution *txm)
 
     ::txlog::SchemaOpMessage *prepare_data_msg =
         prepare_data_log_rec->mutable_log_content()->mutable_schema_log();
+    prepare_data_msg->set_table_name_str(table_key_.Name().String());
+    prepare_data_msg->set_table_type(
+        ::txlog::ToRemoteType::ConvertTableType(table_key_.Name().Type()));
     prepare_data_msg->set_stage(::txlog::SchemaOpMessage_Stage_PrepareData);
 
     if (last_finished_end_key_.Type() == KeyType::PositiveInf)
@@ -1405,6 +1690,9 @@ void UpsertTableIndexOp::FillPrepareDataLogRequest(TransactionExecution *txm)
             *prepare_data_msg->mutable_last_key_value());
     }
 
+    // create multikey-index overwrites dirty schema image.
+    prepare_data_msg->set_new_catalog_blob(catalog_rec_.DirtySchemaImage());
+
     prepare_data_log_rec->mutable_node_terms()->clear();
 }
 
@@ -1416,7 +1704,7 @@ void UpsertTableIndexOp::FillCommitLogRequest(TransactionExecution *txm)
         commit_log_op_.log_closure_.LogRequest().mutable_write_log_request();
 
     assert(txm->commit_ts_ != tx_op_failed_ts_ ||
-           upsert_kv_table_op_.hd_result_.IsError() ||
+           kv_create_index_op_.hd_result_.IsError() ||
            generate_sk_parallel_op_.hd_result_.IsError());
     commit_log_rec->set_commit_timestamp(txm->commit_ts_);
 }
@@ -1465,7 +1753,7 @@ void UpsertTableIndexOp::FlushDataIntoDataStore(const TableName &table_name,
         }
         assert(ng_term > 0);
         uint64_t table_last_synced_ts = 0;
-        auto status = std::make_shared<DataSyncStatus>(false);
+        auto status = std::make_shared<DataSyncStatus>(ng_id, ng_term, false);
         local_cc_shards->EnqueueDataSyncTaskForTable(table_name,
                                                      ng_id,
                                                      ng_term,
@@ -1502,6 +1790,8 @@ void UpsertTableIndexOp::FlushDataIntoDataStore(const TableName &table_name,
         req_ptr->set_table_name_str(table_name.String());
         req_ptr->set_table_type(
             remote::ToRemoteType::ConvertTableType(table_name.Type()));
+        req_ptr->set_table_engine(
+            remote::ToRemoteType::ConvertTableEngine(table_name.Engine()));
         req_ptr->set_node_group_id(ng_id);
         req_ptr->set_node_group_term(ng_term);
         req_ptr->set_data_sync_ts(data_sync_ts);
@@ -1530,12 +1820,13 @@ void UpsertTableIndexOp::ResetLeaderTerms()
 
 void UpsertTableIndexOp::DispatchRangeTask(
     TransactionExecution *upsert_index_txm,
-    CcHandlerResult<PackSkError> &hd_res)
+    CcHandlerResult<GenerateSkParallelResult> &hd_res)
 {
     LocalCcShards *cc_shards = Sharder::Instance().GetLocalCcShards();
     const TableName &base_table_name = table_key_.Name();
-    const TableName &range_table_name =
-        TableName(base_table_name.StringView(), TableType::RangePartition);
+    const TableName &range_table_name = TableName(base_table_name.StringView(),
+                                                  TableType::RangePartition,
+                                                  base_table_name.Engine());
     uint32_t local_ng_id = Sharder::Instance().NativeNodeGroup();
     uint64_t tx_number = upsert_index_txm->TxNumber();
     int64_t tx_term = upsert_index_txm->TxTerm();
@@ -1551,7 +1842,7 @@ void UpsertTableIndexOp::DispatchRangeTask(
     bool all_task_started = false;
     uint32_t unfinished_task_cnt = 1;
     CcErrorCode task_res = CcErrorCode::NO_ERROR;
-    PackSkError pack_sk_err;
+    GenerateSkParallelResult task_value;
     uint32_t pk_items_count = 0;
     uint32_t dispatched_task_count = 0;
 
@@ -1579,7 +1870,7 @@ void UpsertTableIndexOp::DispatchRangeTask(
          &all_task_started,
          &unfinished_task_cnt,
          &task_res,
-         &pack_sk_err,
+         &task_value,
          &pk_items_count,
          &dispatched_task_count,
          &dispatch_batch_tasks](TxKey batch_range_start_key,
@@ -1699,7 +1990,7 @@ void UpsertTableIndexOp::DispatchRangeTask(
                             pk_items_count,
                             dispatched_task_count,
                             task_res,
-                            pack_sk_err,
+                            task_value,
                             dispatch_batch_tasks);
             ++actual_task_cnt;
 
@@ -1755,11 +2046,11 @@ void UpsertTableIndexOp::DispatchRangeTask(
         target_range_start_key = last_scanned_end_key_.GetShallowCopy();
         all_task_started = false;
         unfinished_task_cnt = 1;
-        task_res = CcErrorCode::NO_ERROR;
         pk_items_count = 0;
         dispatched_task_count = 0;
         uint32_t actual_task_cnt = 0;
 
+        assert(task_res == CcErrorCode::NO_ERROR);
         dispatch_batch_tasks(
             target_range_start_key.GetShallowCopy(),
             target_range_end_key.GetShallowCopy(),
@@ -1790,10 +2081,8 @@ void UpsertTableIndexOp::DispatchRangeTask(
             LOG(ERROR) << "Generate sk task failed for table: "
                        << base_table_name.Trace()
                        << ", with error: " << CcErrorMessage(task_res);
-            if (task_res == CcErrorCode::PACK_SK_ERR)
-            {
-                hd_res.SetValue(std::move(pack_sk_err));
-            }
+            // Return detail pack sk error.
+            hd_res.SetValue(std::move(task_value));
             hd_res.SetError(task_res);
             return;
         }
@@ -1809,6 +2098,9 @@ void UpsertTableIndexOp::DispatchRangeTask(
     } while (!NeedTriggerFlushSkOp());
     DLOG(INFO) << "Generate sk batch task finished."
                << " Base table: " << base_table_name.Trace();
+
+    // Return the indexes_multikey_attr_.
+    hd_res.SetValue(std::move(task_value));
     hd_res.SetFinished();
 }
 
@@ -1828,7 +2120,7 @@ void UpsertTableIndexOp::HandleRangeTask(
     uint32_t &total_pk_items_count,
     uint32_t &dispatched_task_count,
     CcErrorCode &task_res,
-    PackSkError &pack_sk_err,
+    GenerateSkParallelResult &task_value,
     std::function<void(TxKey batch_range_start_key,
                        TxKey batch_range_end_key,
                        const std::string *batch_range_start_key_str,
@@ -1843,8 +2135,7 @@ void UpsertTableIndexOp::HandleRangeTask(
     if (dest_node_id == local_node_id)
     {
         local_task_workers_.push_back(std::thread(
-            [this,
-             &base_table_name,
+            [&base_table_name,
              partition_id,
              range_start_key = std::move(range_start_key),
              range_end_key = std::move(range_end_key),
@@ -1861,7 +2152,7 @@ void UpsertTableIndexOp::HandleRangeTask(
              &total_pk_items_count,
              &dispatched_task_count,
              &task_res,
-             &pack_sk_err,
+             &task_value,
              &dispatch_func]()
             {
                 while (Sharder::Instance().LeaderTerm(range_owner) < 0 &&
@@ -2013,9 +2304,29 @@ void UpsertTableIndexOp::HandleRangeTask(
                 if (task_res == CcErrorCode::NO_ERROR)
                 {
                     task_res = res_code;
-                    if (res_code == CcErrorCode::PACK_SK_ERR)
+                    if (res_code == CcErrorCode::NO_ERROR)
                     {
-                        pack_sk_err = std::move(sk_generator->GetPackSkError());
+                        std::vector<bool> indexes_multikey;
+                        std::vector<const MultiKeyPaths *>
+                            indexes_multikey_paths;
+                        indexes_multikey.reserve(sk_names.size());
+                        indexes_multikey_paths.reserve(sk_names.size());
+                        for (uint16_t idx = 0; idx < sk_names.size(); ++idx)
+                        {
+                            // The multikey attribute in SkGenerator has
+                            // accumulated.
+                            indexes_multikey.push_back(
+                                sk_generator->IsMultiKey(idx));
+                            indexes_multikey_paths.push_back(
+                                sk_generator->MultiKeyPaths(idx));
+                        }
+                        task_value.IndexesMergeMultiKeyAttr(
+                            sk_names, indexes_multikey, indexes_multikey_paths);
+                    }
+                    else if (res_code == CcErrorCode::PACK_SK_ERR)
+                    {
+                        task_value.pack_sk_error_ =
+                            std::move(sk_generator->GetPackSkError());
                     }
                 }
                 task_cv.notify_one();
@@ -2051,23 +2362,27 @@ void UpsertTableIndexOp::HandleRangeTask(
 
         remote::CcRpcService_Stub stub(channel.get());
 
-        GenerateSkFromPkClosure *closure =
-            new GenerateSkFromPkClosure(task_mux,
-                                        task_cv,
-                                        leader_terms_,
-                                        unfinished_task_cnt,
-                                        all_task_started,
-                                        total_pk_items_count,
-                                        dispatched_task_count,
-                                        task_res,
-                                        pack_sk_err,
-                                        dispatch_func);
+        GenerateSkFromPkClosure *closure = new GenerateSkFromPkClosure(
+            task_mux,
+            task_cv,
+            leader_terms_,
+            new_indexes_name_,
+            GetIndexesSchema(catalog_rec_.DirtySchema(), new_indexes_name_),
+            unfinished_task_cnt,
+            all_task_started,
+            total_pk_items_count,
+            dispatched_task_count,
+            task_res,
+            task_value,
+            dispatch_func);
         closure->SetChannel(dest_node_id, channel);
 
         brpc::Controller *cntl_ptr = closure->Controller();
         cntl_ptr->set_timeout_ms(-1);
         auto req_ptr = closure->GenerateSkFromPkRequest();
         req_ptr->set_table_name_str(base_table_name.String());
+        req_ptr->set_table_engine(
+            remote::ToRemoteType::ConvertTableEngine(base_table_name.Engine()));
         req_ptr->set_node_group_id(range_owner);
         req_ptr->set_tx_number(tx_number);
         req_ptr->set_tx_term(tx_term);
@@ -2106,4 +2421,102 @@ void UpsertTableIndexOp::HandleRangeTask(
     }
 }
 
+void UpsertTableIndexOp::RecoveryIndexesMultiKeyAttr(
+    const TableSchema *dirty_schema)
+{
+    for (uint16_t idx = 0; idx < new_indexes_name_.size(); ++idx)
+    {
+        const TableName &index_name = new_indexes_name_[idx];
+        const KeySchema *key_schema = dirty_schema->IndexKeySchema(index_name);
+        assert(index_name == *indexes_multikey_attr_[idx].index_name_);
+        if (key_schema->MultiKeyPaths())
+        {
+            indexes_multikey_attr_[idx].multikey_ = key_schema->IsMultiKey();
+            indexes_multikey_attr_[idx].multikey_paths_ =
+                key_schema->IsMultiKey() ? key_schema->MultiKeyPaths()->Clone()
+                                         : nullptr;
+        }
+        else
+        {
+            // The index type doesn't support multikey index.
+        }
+    }
+}
+
+std::vector<MultiKeyAttr> UpsertTableIndexOp::InitIndexesMultiKeyAttr(
+    const std::vector<TableName> &new_indexes_name)
+{
+    std::vector<MultiKeyAttr> new_indexes_multikey_attr;
+    new_indexes_multikey_attr.reserve(new_indexes_name.size());
+    for (const TableName &index_name : new_indexes_name)
+    {
+        new_indexes_multikey_attr.emplace_back(&index_name, false, nullptr);
+    }
+    return new_indexes_multikey_attr;
+}
+
+bool UpsertTableIndexOp::IndexesMergeMultiKeyAttr(
+    std::vector<MultiKeyAttr> &from, std::vector<MultiKeyAttr> &to)
+{
+    assert(from.size() == to.size());
+
+    bool changed = false;
+    for (uint16_t idx = 0; idx < to.size(); ++idx)
+    {
+        if (from[idx].multikey_)
+        {
+            if (!to[idx].multikey_)
+            {
+                to[idx].multikey_ = true;
+                changed = true;
+            }
+
+            if (to[idx].multikey_paths_)
+            {
+                changed |= to[idx].multikey_paths_->MergeWith(
+                    *from[idx].multikey_paths_);
+            }
+            else
+            {
+                to[idx].multikey_paths_ = std::move(from[idx].multikey_paths_);
+                changed = true;
+            }
+        }
+    }
+    return changed;
+}
+
+bool UpsertTableIndexOp::AnyMultiKeyIndex(
+    const std::vector<MultiKeyAttr> &indexes_multikey_attr)
+{
+    return std::any_of(indexes_multikey_attr.begin(),
+                       indexes_multikey_attr.end(),
+                       [](const MultiKeyAttr &attr) { return attr.multikey_; });
+}
+
+std::string UpsertTableIndexOp::RebuildSchemaImage(
+    const TableSchema *dirty_schema,
+    const std::vector<MultiKeyAttr> &indexes_multikey_attr)
+{
+    assert(!indexes_multikey_attr.empty());
+
+    TableSchema::uptr clone_dirty_schema = dirty_schema->Clone();
+    clone_dirty_schema->IndexesSetMultiKeyAttr(indexes_multikey_attr);
+    return clone_dirty_schema->SchemaImage();
+}
+
+std::vector<const KeySchema *> UpsertTableIndexOp::GetIndexesSchema(
+    const TableSchema *dirty_schema,
+    const std::vector<TableName> &new_indexes_name)
+{
+    std::vector<const KeySchema *> new_indexes_schema;
+    new_indexes_schema.reserve(new_indexes_name.size());
+    for (const TableName &index_name : new_indexes_name)
+    {
+        const KeySchema *index_schema =
+            dirty_schema->IndexKeySchema(index_name)->sk_schema_.get();
+        new_indexes_schema.push_back(index_schema);
+    }
+    return new_indexes_schema;
+}
 }  // namespace txservice

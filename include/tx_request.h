@@ -47,21 +47,6 @@ public:
     virtual void Process(TransactionExecution *txm) = 0;
     // virtual bool Finish() const = 0;
 
-    static const std::string &ErrorMessage(TxErrorCode err_code)
-    {
-        if (err_code != TxErrorCode::NO_ERROR)
-        {
-            auto it = tx_error_messages.find(err_code);
-            if (it != tx_error_messages.end())
-            {
-                return it->second;
-            }
-        }
-
-        static std::string empty_err_msg;
-        return empty_err_msg;
-    }
-
     virtual void SetError(
         TxErrorCode err_code = TxErrorCode::UNDEFINED_ERR) = 0;
 };
@@ -100,7 +85,7 @@ struct TemplateTxRequest : TxRequest
 
     const std::string &ErrorMsg() const
     {
-        return TxRequest::ErrorMessage(ErrorCode());
+        return TxErrorMessage(ErrorCode());
     }
 
 #if defined ON_KEY_OBJECT && defined EXT_TX_PROC_ENABLED
@@ -112,25 +97,11 @@ struct TemplateTxRequest : TxRequest
         // fails.
 
         bool allow_enlist_txm = false;
-        int round = 1;
-        int64_t start_ns = 0;
-        while (tx_result_.status_ == TxResultStatus::Unknown &&
+        while (tx_result_.Status() == TxResultStatus::Unknown &&
                !txm->ExternalForward(allow_enlist_txm))
         {
-            if (round == 1)
-            {
-                start_ns = butil::cpuwide_time_ns();
-            }
-            round++;
-            (*tx_result_.resume_func_)();
-            (*tx_result_.yield_func_)();
-        }
-        if (round != 1)
-        {
-            DLOG(WARNING) << "txm: " << txm
-                          << " ForceExternalForwardOnce round: " << round
-                          << ", takes " << butil::cpuwide_time_ns() - start_ns
-                          << " ns";
+            (*tx_result_.GetResume())();
+            (*tx_result_.GetYield())();
         }
     }
 #endif
@@ -138,7 +109,7 @@ struct TemplateTxRequest : TxRequest
     void Wait()
     {
 #if defined ON_KEY_OBJECT && defined EXT_TX_PROC_ENABLED
-        if (tx_result_.yield_func_)
+        if (tx_result_.HasYieldResume())
         {
             assert(txm_ != nullptr);
             ForceExternalForwardOnce(txm_);
@@ -146,18 +117,18 @@ struct TemplateTxRequest : TxRequest
             // have already finished, no matter, always wait once so that we
             // don't need lock and condition variable (which is costly compared
             // to bthread block and resume).
-            (*tx_result_.yield_func_)();
+            (*tx_result_.GetYield())();
 
             // No need for lock when accessing tx_result_.status_ since the txm
             // can only be externally forwarded and the reader and writer are
             // the same thread.
-            if (tx_result_.status_ == TxResultStatus::Unknown)
+            if (tx_result_.Status() == TxResultStatus::Unknown)
             {
                 // Forward the txm again, after the second forward, the tx
                 // result must be finished.
                 ForceExternalForwardOnce(txm_);
             }
-            assert(tx_result_.status_ != TxResultStatus::Unknown);
+            assert(tx_result_.Status() != TxResultStatus::Unknown);
             return;
         }
 #endif
@@ -435,13 +406,9 @@ struct ScanOpenTxRequest : public TemplateTxRequest<ScanOpenTxRequest, size_t>
                       bool is_read_local = false,
                       const std::function<void()> *yield_fptr = nullptr,
                       const std::function<void()> *resume_fptr = nullptr,
-                      TransactionExecution *txm = nullptr
-#ifdef ON_KEY_OBJECT
-                      ,
+                      TransactionExecution *txm = nullptr,
                       int32_t obj_type = -1,
-                      std::string_view scan_pattern = {}
-#endif
-                      )
+                      std::string_view scan_pattern = {})
         : TemplateTxRequest(yield_fptr, resume_fptr, txm),
           tab_name_(tabname),
           indx_type_(index_type),
@@ -459,12 +426,9 @@ struct ScanOpenTxRequest : public TemplateTxRequest<ScanOpenTxRequest, size_t>
           is_require_sort_(is_require_sort),
           read_local_(is_read_local),
           scan_alias_(UINT64_MAX),
-          schema_version_(schema_version)
-#ifdef ON_KEY_OBJECT
-          ,
+          schema_version_(schema_version),
           obj_type_(obj_type),
           scan_pattern_(scan_pattern)
-#endif
     {
     }
 
@@ -486,13 +450,9 @@ struct ScanOpenTxRequest : public TemplateTxRequest<ScanOpenTxRequest, size_t>
                bool is_read_local = false,
                const std::function<void()> *yield_fptr = nullptr,
                const std::function<void()> *resume_fptr = nullptr,
-               TransactionExecution *txm = nullptr
-#ifdef ON_KEY_OBJECT
-               ,
+               TransactionExecution *txm = nullptr,
                int32_t obj_type = -1,
-               std::string_view scan_pattern = {}
-#endif
-    )
+               std::string_view scan_pattern = {})
     {
         tx_result_.Reset(yield_fptr, resume_fptr);
         txm_ = txm;
@@ -513,10 +473,8 @@ struct ScanOpenTxRequest : public TemplateTxRequest<ScanOpenTxRequest, size_t>
         read_local_ = is_read_local;
         scan_alias_ = UINT64_MAX;
         schema_version_ = schema_version;
-#ifdef ON_KEY_OBJECT
         obj_type_ = obj_type;
         scan_pattern_ = scan_pattern;
-#endif
     }
 
     const TxKey *StartKey() const
@@ -547,10 +505,8 @@ struct ScanOpenTxRequest : public TemplateTxRequest<ScanOpenTxRequest, size_t>
     uint64_t scan_alias_{UINT64_MAX};
     uint64_t schema_version_{0};
 
-#ifdef ON_KEY_OBJECT
     int32_t obj_type_{-1};
     std::string_view scan_pattern_;
-#endif
 };
 
 struct ScanBatchTuple
@@ -673,7 +629,8 @@ struct ScanCloseTxRequest : public TemplateTxRequest<ScanCloseTxRequest, Void>
           alias_(alias),
           table_name_(table_name.StringView().data(),
                       table_name.StringView().size(),
-                      table_name.Type()),
+                      table_name.Type(),
+                      table_name.Engine()),
           in_use_(true)
     {
     }
@@ -689,7 +646,8 @@ struct ScanCloseTxRequest : public TemplateTxRequest<ScanCloseTxRequest, Void>
           alias_(alias),
           table_name_(table_name.StringView().data(),
                       table_name.StringView().size(),
-                      table_name.Type()),
+                      table_name.Type(),
+                      table_name.Engine()),
           in_use_(true)
     {
         for (size_t idx = scan_batch_idx; idx < scan_batch.size(); ++idx)
@@ -709,7 +667,8 @@ struct ScanCloseTxRequest : public TemplateTxRequest<ScanCloseTxRequest, Void>
 
         table_name_ = TableName(table_name.StringView().data(),
                                 table_name.StringView().size(),
-                                table_name.Type());
+                                table_name.Type(),
+                                table_name.Engine());
         in_use_.store(true, std::memory_order_relaxed);
     }
 
@@ -775,7 +734,8 @@ struct UpsertTableTxRequest
     txservice::OperationType op_type_;
     const std::string *alter_table_info_image_;
 
-    // Available when create index raise pack sk error.
+    // Available when create index raise pack sk error. Alloctes a PackSkError
+    // object to store error message raised by SkGenerator.
     std::unique_ptr<PackSkError> pack_sk_err_;
 };
 
@@ -861,6 +821,7 @@ struct ObjectCommandTxRequest
                            const KeyT *key,
                            TxCommand *command,
                            bool auto_commit = true,
+                           bool always_redirect = false,
                            TransactionExecution *txm = nullptr,
                            const std::function<void()> *yield_fptr = nullptr,
                            const std::function<void()> *resume_fptr = nullptr)
@@ -869,6 +830,7 @@ struct ObjectCommandTxRequest
           key_(key),
           command_(command),
           auto_commit_(auto_commit),
+          always_redirect_(always_redirect),
           is_cmd_owner_(false)
     {
     }
@@ -878,12 +840,14 @@ struct ObjectCommandTxRequest
                            const KeyT *key,
                            std::unique_ptr<TxCommand> command,
                            bool auto_commit = true,
+                           bool always_redirect = false,
                            TransactionExecution *txm = nullptr)
         : TemplateTxRequest(nullptr, nullptr, txm),
           table_name_(table_name),
           key_(key),
           command_uptr_(std::move(command)),
           auto_commit_(auto_commit),
+          always_redirect_(always_redirect),
           is_cmd_owner_(true)
     {
     }
@@ -893,12 +857,14 @@ struct ObjectCommandTxRequest
                            std::unique_ptr<KeyT> key,
                            std::unique_ptr<TxCommand> command,
                            bool auto_commit = true,
+                           bool always_redirect = false,
                            TransactionExecution *txm = nullptr)
         : TemplateTxRequest(nullptr, nullptr, txm),
           table_name_(table_name),
           key_(std::move(key)),
           command_uptr_(std::move(command)),
           auto_commit_(auto_commit),
+          always_redirect_(always_redirect),
           is_cmd_owner_(true)
     {
     }
@@ -908,6 +874,7 @@ struct ObjectCommandTxRequest
           table_name_(rhs.table_name_),
           key_(std::move(rhs.key_)),
           auto_commit_(rhs.auto_commit_),
+          always_redirect_(rhs.always_redirect_),
           is_cmd_owner_(rhs.is_cmd_owner_)
     {
         if (rhs.is_cmd_owner_)
@@ -947,6 +914,9 @@ struct ObjectCommandTxRequest
     };
 
     bool auto_commit_{};
+    // Whether to always redirect the command if data is not on local node
+    // This is true for non-simple command to avoid cross slot error
+    bool always_redirect_{};
     // whether this object is pointer owner
     bool is_cmd_owner_{};
 
@@ -969,11 +939,14 @@ struct MultiObjectCommandTxRequest
     MultiObjectCommandTxRequest(const TableName *table_name,
                                 MultiObjectTxCommand *cmd,
                                 bool auto_commit = true,
+                                bool always_redirect = false,
                                 TransactionExecution *txm = nullptr,
                                 bool is_watch_keys = false)
         : TemplateTxRequest(nullptr, nullptr, txm),
           table_name_(table_name),
           auto_commit_(auto_commit),
+          always_redirect_(always_redirect || cmd->KeyPointers()->size() > 1 ||
+                           cmd->CmdSteps() > 1),
           multi_obj_cmd_(cmd),
           is_cmd_owner_(false),
           is_watch_keys_(is_watch_keys)
@@ -983,11 +956,15 @@ struct MultiObjectCommandTxRequest
     MultiObjectCommandTxRequest(const TableName *table_name,
                                 std::unique_ptr<MultiObjectTxCommand> cmd_uptr,
                                 bool auto_commit = true,
+                                bool always_redirect = false,
                                 TransactionExecution *txm = nullptr,
                                 bool is_watch_keys = false)
         : TemplateTxRequest(nullptr, nullptr, txm),
           table_name_(table_name),
           auto_commit_(auto_commit),
+          always_redirect_(always_redirect ||
+                           cmd_uptr->KeyPointers()->size() > 1 ||
+                           cmd_uptr->CmdSteps() > 1),
           multi_obj_cmd_uptr_(std::move(cmd_uptr)),
           is_cmd_owner_(true),
           is_watch_keys_(is_watch_keys)
@@ -1001,6 +978,7 @@ struct MultiObjectCommandTxRequest
         : TemplateTxRequest(nullptr, nullptr, rhs.txm_),
           table_name_(rhs.table_name_),
           auto_commit_(rhs.auto_commit_),
+          always_redirect_(rhs.always_redirect_),
           is_watch_keys_(rhs.is_watch_keys_)
     {
         if (is_cmd_owner_)
@@ -1081,6 +1059,7 @@ struct MultiObjectCommandTxRequest
 
     const TableName *table_name_;
     bool auto_commit_{};
+    bool always_redirect_{};
     union
     {
         MultiObjectTxCommand *multi_obj_cmd_{};
@@ -1118,16 +1097,20 @@ struct PublishTxRequest : public TemplateTxRequest<PublishTxRequest, Void>
 };
 
 struct ClusterScaleTxRequest
-    : public TemplateTxRequest<ClusterScaleTxRequest, uint64_t>
+    : public TemplateTxRequest<ClusterScaleTxRequest, std::string>
 {
     ClusterScaleTxRequest(
         const std::string &id,
         ClusterScaleOpType scale_type,
-        const std::vector<std::pair<std::string, uint16_t>> *delta_nodes)
+        const std::vector<std::pair<std::string, uint16_t>> *delta_nodes,
+        uint32_t ng_id = UINT32_MAX,
+        const std::vector<bool> *is_candidate = nullptr)
         : TemplateTxRequest(nullptr, nullptr),
           id_(id),
           scale_type_(scale_type),
-          delta_nodes_(delta_nodes)
+          delta_nodes_(delta_nodes),
+          ng_id_(ng_id),
+          is_candidate_(is_candidate)
     {
     }
 
@@ -1137,6 +1120,15 @@ struct ClusterScaleTxRequest
     // Case adding node, to indicate added node info;
     // Case removing node, to indicate removed node info;
     const std::vector<std::pair<std::string, uint16_t>> *delta_nodes_;
+
+    // For add node group peers, to indicate the node group id to add peers to;
+    // For remove node group peers, to indicate the node group id to remove
+    // peers from;
+    uint32_t ng_id_{UINT32_MAX};
+
+    // For add node group peers, to indicate the is_candidate for each added
+    // node;
+    const std::vector<bool> *is_candidate_{nullptr};
 };
 
 struct SchemaRecoveryTxRequest

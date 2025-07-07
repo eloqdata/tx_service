@@ -38,6 +38,7 @@
 #include "cc_request.pb.h"
 #include "checkpointer.h"
 #include "error_messages.h"
+#include "metrics.h"
 #include "range_slice.h"
 #include "remote_type.h"
 #include "rpc_closure.h"
@@ -96,55 +97,24 @@ CcShard::CcShard(
       active_si_txs_()
 {
     // memory_limit_ and log_limit_ are calculated at shard level.
-#ifdef RANGE_PARTITION_ENABLED
     // reserve 5% for range slice info, 10% for data sync heap, 5% for key cache
     memory_limit_ = (uint64_t) MB(node_memory_limit_mb) *
                     (txservice_enable_key_cache ? 0.9 : 0.95);
-#else
-    memory_limit_ = (uint64_t) MB(node_memory_limit_mb);
-#endif
+
     memory_limit_ /= core_cnt_;
     log_limit_ = (uint64_t) MB(node_log_limit_mb);
     log_limit_ /= core_cnt_;
-
-    tx_vec_.reserve(128);
-    for (int idx = 0; idx < 128; ++idx)
-    {
-        tx_vec_.emplace_back(idx);
-    }
-
-    lock_vec_.reserve(LOCK_ARRAY_INIT_SIZE);
-    for (uint32_t idx = 0; idx < LOCK_ARRAY_INIT_SIZE; ++idx)
-    {
-        lock_vec_.emplace_back(std::make_unique<KeyGapLockAndExtraData>());
-    }
 
     head_ccp_.lru_prev_ = nullptr;
     head_ccp_.lru_next_ = &tail_ccp_;
     tail_ccp_.lru_prev_ = &head_ccp_;
     tail_ccp_.lru_next_ = nullptr;
 
-    standby_fwd_vec_.reserve(txservice_max_standby_lag);
-    for (uint32_t idx = 0; idx < txservice_max_standby_lag; idx++)
-    {
-        standby_fwd_vec_.emplace_back(std::make_unique<StandbyForwardEntry>());
-    }
-    standby_fwded_msg_buffer_.resize(txservice_max_standby_lag, nullptr);
-
-    thd_token_.reserve((size_t) core_cnt + 1);
-    for (size_t idx = 0; idx < core_cnt; ++idx)
+    thd_token_.reserve((size_t) core_cnt_ + 1);
+    for (size_t idx = 0; idx < core_cnt_; ++idx)
     {
         thd_token_.emplace_back(moodycamel::ProducerToken(cc_queue_));
     }
-
-    native_ccms_.try_emplace(
-        catalog_ccm_name,
-        std::make_unique<CatalogCcMap>(this, ng_id_, catalog_ccm_name));
-
-    // range bucket map is replicated on every core
-    native_ccms_.try_emplace(range_bucket_ccm_name,
-                             std::make_unique<RangeBucketCcMap>(
-                                 this, ng_id_, range_bucket_ccm_name));
 
     // cluster config map is only created on core 0.
     if (core_id_ == 0)
@@ -179,6 +149,7 @@ CcShard::CcShard(
     if (metrics::enable_memory_usage)
     {
         meter_->Register(metrics::NAME_MEMORY_USAGE, metrics::Type::Gauge);
+        meter_->Register(metrics::NAME_FRAGMENT_RATIO, metrics::Type::Gauge);
     }
 
     if (metrics::enable_standby_metrics)
@@ -194,15 +165,66 @@ CcShard::CcShard(
             node_ids.emplace_back(std::to_string(node.node_id_));
         }
 
+        std::vector<metrics::LabelGroup> max_standby_lag_labels = labels;
+
         meter_->Register(metrics::NAME_STANDBY_LAGGING_MESGS,
                          metrics::Type::Gauge,
                          std::move(labels));
+
+        meter_->Register(metrics::NAME_MAX_STANDBY_LAG,
+                         metrics::Type::Gauge,
+                         std::move(max_standby_lag_labels));
+
+        for (const auto &node : member_nodes)
+        {
+            meter_->Collect(metrics::NAME_MAX_STANDBY_LAG,
+                            txservice_max_standby_lag,
+                            std::to_string(node.node_id_));
+        }
+
+        meter_->Register(metrics::NAME_STANDBY_OUT_OF_SYNC_COUNT,
+                         metrics::Type::Counter);
     }
 
     last_read_ts_ = Now();
 
     retry_fwd_msg_cc_ = std::make_unique<RetryFailedStandbyMsgCc>();
     shard_clean_cc_ = std::make_unique<ShardCleanCc>();
+}
+
+void CcShard::Init()
+{
+    InitializeShardHeap();
+    mi_heap_t *prev_heap = shard_heap_->SetAsDefaultHeap();
+    lock_vec_.resize(LOCK_ARRAY_INIT_SIZE);
+    for (size_t i = 0; i < LOCK_ARRAY_INIT_SIZE; ++i)
+    {
+        lock_vec_[i] = std::make_unique<KeyGapLockAndExtraData>();
+    }
+    standby_fwd_vec_.resize(txservice_max_standby_lag);
+    for (size_t i = 0; i < txservice_max_standby_lag; ++i)
+    {
+        standby_fwd_vec_[i] = std::make_unique<StandbyForwardEntry>();
+    }
+
+    assert(standby_fwded_msg_buffer_.empty());
+    standby_fwded_msg_buffer_.resize(txservice_max_standby_lag, nullptr);
+
+    tx_vec_.reserve(128);
+    for (int idx = 0; idx < 128; ++idx)
+    {
+        tx_vec_.emplace_back(idx);
+    }
+
+    native_ccms_.try_emplace(
+        catalog_ccm_name,
+        std::make_unique<CatalogCcMap>(this, ng_id_, catalog_ccm_name));
+
+    // range bucket map is replicated on every core
+    native_ccms_.try_emplace(range_bucket_ccm_name,
+                             std::make_unique<RangeBucketCcMap>(
+                                 this, ng_id_, range_bucket_ccm_name));
+    mi_heap_set_default(prev_heap);
 }
 
 CcMap *CcShard::GetCcm(const TableName &table_name, uint32_t node_group)
@@ -327,6 +349,10 @@ void CcShard::Enqueue(uint32_t thd_id, CcRequestBase *req)
     assert(ret == true);
     (void) ret;
 
+    // Wakes up the tx processor dedicated to this shard when it is asleep. The
+    // notify function internally uses a std::mutex before notifying via the
+    // condition variable. This is to create a barrier such that the prior queue
+    // size update and the enqueue of the cc request precedes notify().
     NotifyTxProcessor();
 }
 
@@ -393,7 +419,64 @@ void CcShard::Enqueue(CcRequestBase *req)
     // overhead.
     (void) ret;
 
+    // Wakes up the tx processor dedicated to this shard when it is asleep. The
+    // notify function internally uses a std::mutex before notifying via the
+    // condition variable. This is to create a barrier such that the prior queue
+    // size update and the enqueue of the cc request precedes notify().
     NotifyTxProcessor();
+}
+
+size_t CcShard::ProcessRequests()
+{
+    uint32_t queue_size = cc_queue_size_.load(std::memory_order_relaxed);
+
+    if (metrics::enable_memory_usage)
+    {
+        if (memory_usage_round_++ % metrics::collect_memory_usage_round == 0)
+        {
+            int64_t allocated, committed;
+            mi_thread_stats(&allocated, &committed);
+            meter_->Collect(metrics::NAME_MEMORY_USAGE, allocated);
+            meter_->Collect(metrics::NAME_FRAGMENT_RATIO,
+                            (100 * (static_cast<float>(committed - allocated) /
+                                    committed)));
+        }
+    }
+
+    if (metrics::enable_standby_metrics)
+    {
+        if (standby_metrics_round_++ > metrics::collect_standby_metrics_round)
+        {
+            standby_metrics_round_ = 0;
+            CollectStandbyMetrics();
+        }
+    }
+
+    if (queue_size == 0)
+    {
+        return 0;
+    }
+
+    size_t total = 0;
+    size_t req_cnt = 0;
+    do
+    {
+        req_cnt = cc_queue_.try_dequeue_bulk(req_buf_.begin(), req_buf_.size());
+        total += req_cnt;
+        assert(cc_queue_size_.load(std::memory_order_relaxed) >= req_cnt);
+        cc_queue_size_.fetch_sub(req_cnt, std::memory_order_acq_rel);
+
+        for (size_t i = 0; i < req_cnt; ++i)
+        {
+            bool finish = req_buf_[i]->Execute(*this);
+            if (finish)
+            {
+                req_buf_[i]->Free();
+            }
+        }
+    } while (req_cnt > (req_buf_.size() >> 1) && total < 1000);
+
+    return total;
 }
 
 void CcShard::AbortCcRequests(std::vector<CcRequestBase *> &&reqs,
@@ -641,19 +724,23 @@ TxLockInfo *CcShard::UpsertLockHoldingTx(TxNumber txn,
                                          NodeGroupId cc_ng_id,
                                          TableType table_type)
 {
-    auto ng_em_it = lock_holding_txs_.try_emplace(cc_ng_id);
-    auto tx_em_it = ng_em_it.first->second.try_emplace(txn, tx_term);
-    tx_em_it.first->second.cce_list_.emplace(cce_ptr);
-    tx_em_it.first->second.last_recover_ts_ = Now();
-    tx_em_it.first->second.table_type_ = table_type;
+    auto [ng_it, is_new_ng] = lock_holding_txs_.try_emplace(cc_ng_id);
+    auto [tx_it, is_new_tx] = ng_it->second.try_emplace(txn);
+    if (is_new_tx)
+    {
+        tx_it->second = GetTxLockInfo(tx_term);
+    }
+    tx_it->second->cce_list_.emplace(cce_ptr);
+    tx_it->second->last_recover_ts_ = Now();
+    tx_it->second->table_type_ = table_type;
 
     if (is_key_write_lock)
     {
         // write lock should update ts if the txn exists, or the CkptTsCc
         // request may get an older ckpt_ts.
-        tx_em_it.first->second.wlock_ts_ = Now();
+        tx_it->second->wlock_ts_ = Now();
     }
-    return &tx_em_it.first->second;
+    return tx_it->second.get();
 }
 
 void CcShard::DeleteLockHoldingTx(TxNumber txn,
@@ -671,13 +758,29 @@ void CcShard::DeleteLockHoldingTx(TxNumber txn,
     {
         return;
     }
-    TxLockInfo &lk_info = tx_it->second;
-    lk_info.cce_list_.erase(cce_ptr);
+    TxLockInfo::uptr &lk_info = tx_it->second;
+    lk_info->cce_list_.erase(cce_ptr);
 
-    if (lk_info.cce_list_.empty())
+    if (lk_info->cce_list_.empty())
     {
+        RecycleTxLockInfo(std::move(lk_info));
         ng_it->second.erase(tx_it);
     }
+}
+
+void CcShard::DropLockHoldingTxs(NodeGroupId cc_ng_id)
+{
+    auto it = lock_holding_txs_.find(cc_ng_id);
+    if (it == lock_holding_txs_.end())
+    {
+        return;
+    }
+    for (auto &[txn, lk_info] : it->second)
+    {
+        RecycleTxLockInfo(std::move(lk_info));
+    }
+
+    lock_holding_txs_.erase(cc_ng_id);
 }
 
 void CcShard::CheckRecoverTx(TxNumber lock_holding_txn,
@@ -695,7 +798,7 @@ void CcShard::CheckRecoverTx(TxNumber lock_holding_txn,
         return;
     }
 
-    CheckRecoverTx(lock_holding_txn, tx_it->second, cc_ng_id, cc_ng_term);
+    CheckRecoverTx(lock_holding_txn, *tx_it->second, cc_ng_id, cc_ng_term);
 }
 
 void CcShard::CheckRecoverTx(TxNumber lock_holding_txn,
@@ -739,7 +842,7 @@ void CcShard::CheckRecoverTx(TxNumber lock_holding_txn,
                 << lock_holding_txn
                 << ", txn is initiated by this machine, try to recover";
 
-            std::unordered_map<std::string_view, std::unordered_set<LockType>>
+            std::unordered_map<std::string, std::unordered_set<LockType>>
                 tbl_set;
             for (const auto &lru : lk_info.cce_list_)
             {
@@ -750,7 +853,7 @@ void CcShard::CheckRecoverTx(TxNumber lock_holding_txn,
                     assert(lk != nullptr);
                     LockType lk_type = lk->SearchLock(lock_holding_txn);
                     auto [it, is_insert] =
-                        tbl_set.try_emplace(ccm->table_name_.StringView());
+                        tbl_set.try_emplace(ccm->table_name_.Trace());
                     it->second.emplace(lk_type);
                 }
             }
@@ -796,9 +899,12 @@ void CcShard::ClearTx(TxNumber txn)
             continue;
         }
 
-        TxLockInfo &lk_info = tx_it->second;
-        for (auto &lru_ptr : lk_info.cce_list_)
+        TxLockInfo::uptr &lk_info = tx_it->second;
+        for (auto &lru_ptr : lk_info->cce_list_)
         {
+            // This is only called when a tx is aborted after asking log/tx
+            // owner, so the cce is not updated in this case. So we do not need
+            // to worry about needing to pop blocking commands from cce.
             NonBlockingLock *lock = lru_ptr->GetKeyLock();
             if (lock != nullptr)
             {
@@ -810,7 +916,7 @@ void CcShard::ClearTx(TxNumber txn)
 
 #ifdef ON_KEY_OBJECT
                 if (FLAGS_cmd_read_catalog &&
-                    lk_info.table_type_ == TableType::Catalog)
+                    lk_info->table_type_ == TableType::Catalog)
                 {
                     // Do not recycle the lock on Catalog since it's frequently
                     // accessed.
@@ -821,6 +927,7 @@ void CcShard::ClearTx(TxNumber txn)
                 lru_ptr->RecycleKeyLock(*this);
             }
         }
+        RecycleTxLockInfo(std::move(lk_info));
         ng_pair.second.erase(tx_it);
     }
 }
@@ -849,14 +956,9 @@ void CcShard::VerifyLruList()
  */
 std::pair<size_t, bool> CcShard::Clean()
 {
-    // See if there's any invalid cce that we can expire
-    CleanUpInvalidCce();
-#ifdef ON_KEY_OBJECT
     LruPage *ccp = !txservice_skip_kv && clean_start_ccp_ ? clean_start_ccp_
                                                           : head_ccp_.lru_next_;
-#else
-    LruPage *ccp = clean_start_ccp_ ? clean_start_ccp_ : head_ccp_.lru_next_;
-#endif
+
     size_t free_cnt = 0;
     bool yield = false;
 
@@ -891,9 +993,6 @@ std::pair<size_t, bool> CcShard::Clean()
 
     yield = ccp != &tail_ccp_;
 #else
-    // tx_service ctest does not call tx_service->Start(), so shard_heap_ is not
-    // initialized.
-    assert(shard_heap_ == nullptr);
     ccp = head_ccp_.lru_next_;
     while (ccp != &tail_ccp_)
     {
@@ -994,10 +1093,12 @@ CatalogEntry *CcShard::CreateDirtyCatalog(const TableName &table_name,
         table_name, cc_ng_id, catalog_image, commit_ts);
 }
 
-void CcShard::CommitDirtyCatalog(const TableName &table_name,
-                                 NodeGroupId cc_ng_id)
+void CcShard::UpdateDirtyCatalog(const TableName &table_name,
+                                 const std::string &catalog_image,
+                                 CatalogEntry *catalog_entry)
 {
-    local_shards_.CommitDirtyCatalog(table_name, cc_ng_id);
+    return local_shards_.UpdateDirtyCatalog(
+        table_name, catalog_image, catalog_entry);
 }
 
 CatalogEntry *CcShard::GetCatalog(const TableName &table_name,
@@ -1070,10 +1171,13 @@ void CcShard::FetchCatalog(const TableName &table_name,
             req->set_key_str(std::move(key_str));
             req->set_node_group_id(cc_ng_id);
             req->set_table_name_str(catalog_ccm_name.String());
-            int64_t primary_node_term = PrimaryTermFromStandbyTerm(cc_ng_term);
-            req->set_primary_leader_term(primary_node_term);
             req->set_table_type(remote::ToRemoteType::ConvertTableType(
                 catalog_ccm_name.Type()));
+            req->set_table_engine(remote::ToRemoteType::ConvertTableEngine(
+                catalog_ccm_name.Engine()));
+
+            int64_t primary_node_term = PrimaryTermFromStandbyTerm(cc_ng_term);
+            req->set_primary_leader_term(primary_node_term);
             req->set_key_shard_code(cc_ng_id << 10);
             closure->Controller()->set_timeout_ms(5000);
             closure->Controller()->set_write_to_socket_in_background(true);
@@ -1253,7 +1357,8 @@ const StatisticsEntry *CcShard::LoadRangesAndStatisticsNx(
     // statistics.
     TableName base_range_table_name(
         curr_schema->GetBaseTableName().StringView(),
-        TableType::RangePartition);
+        TableType::RangePartition,
+        curr_schema->GetBaseTableName().Engine());
     const auto *ranges =
         GetTableRangesForATable(base_range_table_name, cc_ng_id);
     if (ranges == nullptr)
@@ -1267,7 +1372,8 @@ const StatisticsEntry *CcShard::LoadRangesAndStatisticsNx(
     for (const TableName &index_name : index_names)
     {
         TableName index_range_table_name(index_name.StringView(),
-                                         TableType::RangePartition);
+                                         TableType::RangePartition,
+                                         index_name.Engine());
         const auto *ranges =
             GetTableRangesForATable(index_range_table_name, cc_ng_id);
         if (ranges == nullptr)
@@ -1345,24 +1451,23 @@ void CcShard::RemoveFetchRequest(const TableName &table_name)
     fetch_reqs_.erase(table_name);
 }
 
-void CcShard::FetchRecord(const TableName &table_name,
-                          const TableSchema *tbl_schema,
-                          TxKey key,
-                          LruEntry *cce,
-                          CcMap *ccm,
-                          NodeGroupId cc_ng_id,
-                          int64_t cc_ng_term,
-                          CcRequestBase *requester,
-                          int32_t range_id,
-                          bool fetch_from_primary,
-                          uint32_t key_shard_code)
+store::DataStoreHandler::DataStoreOpStatus CcShard::FetchRecord(
+    const TableName &table_name,
+    const TableSchema *tbl_schema,
+    TxKey key,
+    LruEntry *cce,
+    NodeGroupId cc_ng_id,
+    int64_t cc_ng_term,
+    CcRequestBase *requester,
+    int32_t range_id,
+    bool fetch_from_primary,
+    uint32_t key_shard_code)
 {
     auto tab_it = fetch_record_reqs_.try_emplace(cce,
                                                  &table_name,
                                                  tbl_schema,
                                                  std::move(key),
                                                  cce,
-                                                 ccm,
                                                  *this,
                                                  cc_ng_id,
                                                  cc_ng_term,
@@ -1377,11 +1482,13 @@ void CcShard::FetchRecord(const TableName &table_name,
         fetch_req->rec_status_ = RecordStatus::Deleted;
         fetch_req->rec_ts_ = 1;
         fetch_req->SetFinish(static_cast<int>(CcErrorCode::NO_ERROR));
-        return;
+        return store::DataStoreHandler::DataStoreOpStatus::Success;
     });
 
     if (fetch_req->RequesterCount() == 1)
     {
+        // The responsibility of releasing this pin is the FetchRecordCc.
+        cce->GetKeyGapLockAndExtraData()->AddPin();
         if (txservice_skip_kv || fetch_from_primary)
         {
             int64_t primary_node_id = Sharder::Instance().GetPrimaryNodeId();
@@ -1392,13 +1499,11 @@ void CcShard::FetchRecord(const TableName &table_name,
                 // channel is not established, retry later.
                 // Remove fetch req
                 RemoveFetchRecordRequest(cce);
-                if (requester)
-                {
-                    // Renqueue the requester to retry.
-                    Enqueue(core_id_, requester);
-                }
-                return;
+                cce->GetKeyGapLockAndExtraData()->ReleasePin();
+                cce->RecycleKeyLock(*this);
+                return store::DataStoreHandler::DataStoreOpStatus::Retry;
             }
+
             FetchRecordClosure *closure = new FetchRecordClosure(fetch_req);
             closure->SetChannel(primary_node_id, channel);
             auto req = closure->FetchPayloadRequest();
@@ -1407,11 +1512,14 @@ void CcShard::FetchRecord(const TableName &table_name,
             req->set_key_str(std::move(key_str));
             req->set_node_group_id(cc_ng_id);
             req->set_table_name_str(table_name.String());
+            req->set_table_type(
+                remote::ToRemoteType::ConvertTableType(table_name.Type()));
+            req->set_table_engine(
+                remote::ToRemoteType::ConvertTableEngine(table_name.Engine()));
+
             int64_t primary_leader_term =
                 PrimaryTermFromStandbyTerm(cc_ng_term);
             req->set_primary_leader_term(primary_leader_term);
-            req->set_table_type(
-                remote::ToRemoteType::ConvertTableType(table_name.Type()));
             req->set_key_shard_code(key_shard_code);
             closure->Controller()->set_timeout_ms(5000);
             closure->Controller()->set_write_to_socket_in_background(true);
@@ -1428,14 +1536,24 @@ void CcShard::FetchRecord(const TableName &table_name,
             {
                 // Remove fetch req
                 RemoveFetchRecordRequest(cce);
-                if (requester)
-                {
-                    // Renqueue the requester to retry.
-                    Enqueue(core_id_, requester);
-                }
+                cce->GetKeyGapLockAndExtraData()->ReleasePin();
+                cce->RecycleKeyLock(*this);
+
+                return store::DataStoreHandler::DataStoreOpStatus::Retry;
             }
         }
     }
+
+    if (requester != nullptr)
+    {
+        // Use pins to prevent the cce from being recycled before the request
+        // be processed. We will release the pin when the request be processed
+        // again or be aborted.
+        // The responsibility of releasing this pin is the ccrequest.
+        cce->GetKeyGapLockAndExtraData()->AddPin();
+    }
+
+    return store::DataStoreHandler::DataStoreOpStatus::Success;
 }
 
 void CcShard::RemoveFetchRecordRequest(LruEntry *cce)
@@ -1527,7 +1645,8 @@ const CatalogEntry *CcShard::InitCcm(const TableName &table_name,
                                      CcRequestBase *requester)
 {
     const TableName base_table_name{table_name.GetBaseTableNameSV(),
-                                    TableType::Primary};
+                                    TableType::Primary,
+                                    table_name.Engine()};
 
     const CatalogEntry *catalog_entry = GetCatalog(base_table_name, cc_ng_id);
     if (catalog_entry == nullptr)
@@ -1552,7 +1671,9 @@ const CatalogEntry *CcShard::InitCcm(const TableName &table_name,
 #endif
 
         std::vector<TableName> index_names = curr_schema->IndexNames();
-        CreateOrUpdatePkCcMap(base_table_name, curr_schema, cc_ng_id);
+        bool ccm_has_full_entries = txservice_skip_kv;
+        CreateOrUpdatePkCcMap(
+            base_table_name, curr_schema, cc_ng_id, true, ccm_has_full_entries);
 
         for (const TableName &index_name : index_names)
         {
@@ -1812,7 +1933,8 @@ void CcShard::CreateOrUpdateRangeCcMap(const TableName &table_name,
                                        bool is_create)
 {
     TableName range_table_name(table_name.StringView(),
-                               TableType::RangePartition);
+                               TableType::RangePartition,
+                               table_name.Engine());
     if (IsNative(ng_id))
     {
         auto ccm_it = native_ccms_.try_emplace(
@@ -2014,9 +2136,9 @@ void CcShard::CollectLockWaitingInfo(CheckDeadLockResult &dlr)
              it_tx++)
         {
             dlr.txid_ety_lock_count_[core_id_].insert(
-                {it_tx->first, it_tx->second.cce_list_.size()});
-            for (auto it_cce = it_tx->second.cce_list_.begin();
-                 it_cce != it_tx->second.cce_list_.end();
+                {it_tx->first, it_tx->second->cce_list_.size()});
+            for (auto it_cce = it_tx->second->cce_list_.begin();
+                 it_cce != it_tx->second->cce_list_.end();
                  it_cce++)
             {
                 NonBlockingLock *key_lock = (*it_cce)->GetKeyLock();
@@ -2237,18 +2359,16 @@ void CcShard::ForwardStandbyMessage(StandbyForwardEntry *entry)
     {
         bool write_succ = false;
         uint64_t &last_sent_seq_id = last_sent_seq_id_and_term.first;
+
+        CODE_FAULT_INJECTOR("discard_forward_standby_message", {
+            LOG(INFO) << "FaultInject  "
+                         "discard_forward_standby_message, seq_id:"
+                      << seq_id;
+            continue;
+        });
+
         if (last_sent_seq_id == seq_id - 1)
         {
-            CODE_FAULT_INJECTOR("discard_forward_standby_message", {
-                if (seq_id % 2 == 0)
-                {
-                    LOG(INFO) << "FaultInject  "
-                                 "discard_forward_standby_message, seq_id:"
-                              << seq_id;
-                    last_sent_seq_id++;
-                    continue;
-                }
-            });
             CODE_FAULT_INJECTOR("forward_standby_message_eagain", {
                 if (seq_id % 2 == 0)
                 {
@@ -2402,9 +2522,21 @@ void CcShard::CollectStandbyMetrics()
         {
             unsent_msgs_count = (next_forward_sequence_id_ - 1 - seq_id);
         }
+
         meter_->Collect(metrics::NAME_STANDBY_LAGGING_MESGS,
                         unsent_msgs_count,
                         std::to_string(node_id));
+    }
+}
+
+void CcShard::RemoveSubscribedStandby(uint32_t node_id)
+{
+    auto seq_id_and_term = subscribed_standby_nodes_.find(node_id);
+    if (seq_id_and_term != subscribed_standby_nodes_.end())
+    {
+        local_shards_.RemoveHeartbeatTargetNode(node_id,
+                                                seq_id_and_term->second.second);
+        subscribed_standby_nodes_.erase(node_id);
     }
 }
 
@@ -2443,8 +2575,14 @@ bool CcShard::UpdateLastReceivedStandbySequenceId(
                 Sharder::Instance().LeaderNodeId(native_ng),
                 true);
         }
+
         // remove this seq grp from subscribed seq grps
         seq_grp_info.Unsubscribe();
+
+        if (metrics::enable_metrics)
+        {
+            meter_->Collect(metrics::NAME_STANDBY_OUT_OF_SYNC_COUNT, 1);
+        }
         return false;
     }
 
@@ -2558,9 +2696,6 @@ void CcShard::DequeueWaitListAfterSchemaUpdated()
 
 void CcShard::UpdateBufferedCommandCnt(int64_t delta)
 {
-    DLOG(INFO) << "Shard: " << core_id_
-               << " update buffer cmd cnt from: " << buffered_cmd_cnt_
-               << ", to: " << (buffered_cmd_cnt_ + delta);
     buffered_cmd_cnt_ += delta;
 }
 
@@ -2571,6 +2706,9 @@ void CcShard::CheckLagAndResubscribe() const
         // Resubscribe to the leader.
         NodeGroupId native_ng = Sharder::Instance().NativeNodeGroup();
         int64_t cur_prim_term = Sharder::Instance().PrimaryNodeTerm();
+        LOG(WARNING) << "Resubscribe to the leader at term " << cur_prim_term
+                     << ", since buffered cmd cnt has exceeded the threshold: "
+                     << buffered_cmd_cnt_;
         Sharder::Instance().OnStartFollowing(
             native_ng,
             cur_prim_term,
@@ -2590,38 +2728,85 @@ void CcShard::NotifyTxProcessor()
     {
         return;
     }
-    // Wakes up the tx processor dedicated to this shard when it is asleep. The
-    // notify function internally uses a std::mutex before notifying via the
-    // condition variable. This is to create a barrier such that the prior queue
-    // size update and the enqueue of the cc request precedes notify().
-    TxProcessorStatus tx_proc_status =
-        tx_proc_status_ != nullptr
-            ? tx_proc_status_->load(std::memory_order_relaxed)
-            : TxProcessorStatus::Busy;
-#ifdef EXT_TX_PROC_ENABLED
-    int16_t ext_processor_cnt =
-        tx_coordi_->ext_processor_cnt_.load(std::memory_order_relaxed);
-#ifdef ON_KEY_OBJECT
-    if (ext_processor_cnt == 0)
+    TxProcessor *processor =
+        tx_coordi_->tx_processor_.load(std::memory_order_relaxed);
+    if (processor != nullptr)
     {
-        // Notify the external processor directly.
-        tx_coordi_->NotifyExternalProcessor();
+        processor->NotifyTxProcessor();
     }
-#endif
-    if (tx_proc_status == TxProcessorStatus::Sleep ||
-        (tx_proc_status == TxProcessorStatus::Standby &&
-         ext_processor_cnt == 0))
+}
+
+std::shared_ptr<ReaderWriterObject<TableSchema>> CcShard::FindSchemaCntl(
+    const TableName &tbl_name)
+{
+    auto it = catalog_rw_cntl_.find(tbl_name);
+    return it == catalog_rw_cntl_.end() ? nullptr : it->second;
+}
+
+std::shared_ptr<ReaderWriterObject<TableSchema>> CcShard::FindEmplaceSchemaCntl(
+    const TableName &tbl_name)
+{
+    auto [it, insert] = catalog_rw_cntl_.try_emplace(tbl_name);
+    if (insert)
     {
-        std::unique_lock<std::mutex> lk(tx_coordi_->sleep_mux_);
-        tx_coordi_->sleep_cv_.notify_one();
+        it->second = std::make_shared<ReaderWriterObject<TableSchema>>(this);
     }
-#else
-    if (tx_proc_status == TxProcessorStatus::Sleep)
+
+    return it->second;
+}
+
+void CcShard::DeleteSchemaCntl(const TableName &tbl_name)
+{
+    catalog_rw_cntl_.erase(tbl_name);
+}
+
+void CcShard::ClearNativeSchemaCntl()
+{
+    // When the native cc shard fails over, invalidates all schema reader-writer
+    // control blocks. Invalidation ensures that future runtime queries will not
+    // use cached schema and falls back to reading the schema via concurrency
+    // control. Ongoing runtime queries will continue to use the old schema.
+    for (auto &[tbl_name, cntl] : catalog_rw_cntl_)
     {
-        std::unique_lock<std::mutex> lk(tx_coordi_->sleep_mux_);
-        tx_coordi_->sleep_cv_.notify_one();
+        cntl->Invalidate();
     }
-#endif
+    catalog_rw_cntl_.clear();
+}
+
+TxLockInfo::uptr CcShard::GetTxLockInfo(int64_t tx_term)
+{
+    TxLockInfo::uptr first_lock_info = std::move(tx_lock_info_head_.next_);
+
+    if (first_lock_info == nullptr)
+    {
+        first_lock_info = std::make_unique<TxLockInfo>(tx_term);
+    }
+    else
+    {
+        tx_lock_info_head_.next_ = std::move(first_lock_info->next_);
+        first_lock_info->Reset(tx_term);
+    }
+    assert(first_lock_info->next_ == nullptr);
+    return first_lock_info;
+}
+
+void CcShard::RecycleTxLockInfo(TxLockInfo::uptr lock_info)
+{
+    assert(lock_info->next_ == nullptr);
+    lock_info->next_ = std::move(tx_lock_info_head_.next_);
+    tx_lock_info_head_.next_ = std::move(lock_info);
+}
+
+void CcShard::CollectCacheHit()
+{
+    assert(metrics::enable_cache_hit_rate);
+    meter_->Collect(metrics::NAME_CACHE_HIT_OR_MISS_TOTAL, 1, "hits");
+}
+
+void CcShard::CollectCacheMiss()
+{
+    assert(metrics::enable_cache_hit_rate);
+    meter_->Collect(metrics::NAME_CACHE_HIT_OR_MISS_TOTAL, 1, "miss");
 }
 
 }  // namespace txservice

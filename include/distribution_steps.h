@@ -85,7 +85,7 @@ public:
             }
         }
 
-        std::is_sorted(step_values_.begin(), step_values_.end());
+        assert(std::is_sorted(step_values_.begin(), step_values_.end()));
     }
 
     bool Available() const

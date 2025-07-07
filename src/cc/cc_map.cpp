@@ -38,40 +38,7 @@ void CcMap::MoveRequest(CcRequestBase *cc_req, uint32_t target_core_id)
 
 std::pair<LockType, CcErrorCode> CcMap::AcquireCceKeyLock(
     LruEntry *cce,
-    LruPage *page,
-    RecordStatus cce_payload_status,
-    CcRequestBase *req,
-    uint32_t ng_id,
-    int64_t ng_term,
-    int64_t tx_term,
-    CcOperation cc_op,
-    IsolationLevel iso_level,
-    CcProtocol protocol,
-    uint64_t read_ts,
-    bool is_covering_keys,
-    CcMap *ccm)
-{
-    // deduce the lock type to acquire
-    LockType lock_type = LockTypeUtil::DeduceLockType(
-        cc_op, iso_level, protocol, is_covering_keys);
-
-    return AcquireCceKeyLock(cce,
-                             page,
-                             cce_payload_status,
-                             req,
-                             ng_id,
-                             ng_term,
-                             tx_term,
-                             lock_type,
-                             cc_op,
-                             iso_level,
-                             protocol,
-                             read_ts,
-                             ccm);
-}
-
-std::pair<LockType, CcErrorCode> CcMap::AcquireCceKeyLock(
-    LruEntry *cce,
+    uint64_t commit_ts,
     LruPage *page,
     RecordStatus cce_payload_status,
     CcRequestBase *req,
@@ -87,7 +54,7 @@ std::pair<LockType, CcErrorCode> CcMap::AcquireCceKeyLock(
 {
     if (iso_level == IsolationLevel::Snapshot)
     {
-        if (cc_op == CcOperation::ReadForWrite && read_ts < cce->CommitTs())
+        if (cc_op == CcOperation::ReadForWrite && read_ts < commit_ts)
         {
             LOG(WARNING) << "SI ReadForWrite, latest version not fits the read "
                             "timestamp. tx:"
@@ -258,6 +225,7 @@ std::pair<LockType, CcErrorCode> CcMap::AcquireCceKeyLock(
 
 std::pair<LockType, CcErrorCode> CcMap::LockHandleForResumedRequest(
     LruEntry *cce,
+    uint64_t commit_ts,
     RecordStatus cce_payload_status,
     CcRequestBase *req,
     uint32_t ng_id,
@@ -291,7 +259,7 @@ std::pair<LockType, CcErrorCode> CcMap::LockHandleForResumedRequest(
         shard_->DeleteLockHoldingTx(tx_number, cce, ng_id);
     }
     else if (acquired_lock == LockType::WriteIntent &&
-             iso_level == IsolationLevel::Snapshot && read_ts < cce->CommitTs())
+             iso_level == IsolationLevel::Snapshot && read_ts < commit_ts)
     {
         // The write intent has been acquired. Does not keep the write intent if
         // this tx under Snapshot Isolation (SI) is destined to fail. For
@@ -355,11 +323,10 @@ void CcMap::RecoverTxForLockConfilct(NonBlockingLock &lock,
         }
         else
         {
-            const std::unordered_set<TxNumber> &read_locks = lock.ReadLocks();
             // If the request fails to acquire the write lock
             // because of read locks, checks each read lock and
             // recovers if needed.
-            for (const auto &read_tx : read_locks)
+            for (const auto &read_tx : lock.ReadLocks())
             {
                 shard_->CheckRecoverTx(read_tx, ng_id, ng_term);
             }
@@ -402,7 +369,8 @@ void CcMap::ReleaseCceLock(NonBlockingLock *lock,
                            TxNumber tx_number,
                            uint32_t ng_id,
                            LockType lk_type,
-                           bool recycle_lock) const
+                           bool recycle_lock,
+                           TxObject *object) const
 {
     if (lock == nullptr)
     {
@@ -432,7 +400,7 @@ void CcMap::ReleaseCceLock(NonBlockingLock *lock,
     }
     case LockType::WriteLock:
     {
-        bool success = lock->ReleaseWriteLock(tx_number, shard_);
+        bool success = lock->ReleaseWriteLock(tx_number, shard_, object);
         if (success)
         {
             unlock_type = LockType::WriteLock;
@@ -440,7 +408,7 @@ void CcMap::ReleaseCceLock(NonBlockingLock *lock,
         break;
     }
     default:
-        unlock_type = lock->ClearTx(tx_number, shard_);
+        unlock_type = lock->ClearTx(tx_number, shard_, object);
         break;
     }
 

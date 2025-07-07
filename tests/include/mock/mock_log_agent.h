@@ -145,13 +145,6 @@ public:
         return log_agent_.CheckClusterScaleStatus(log_group_id, id);
     }
 
-    bool UpdateLogGroupConfig(std::vector<std::string> &ips,
-                              std::vector<uint16_t> &ports,
-                              uint32_t log_group_id) override
-    {
-        return log_agent_.UpdateLogGroupConfig(ips, ports, log_group_id);
-    }
-
 private:
     ::txlog::LogAgent log_agent_;
 };

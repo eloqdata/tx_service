@@ -68,6 +68,7 @@ void txservice::remote::RemoteCcHandler::AcquireWrite(
         CcMessage::MessageType::CcMessage_MessageType_AcquireRequest);
     send_msg.set_tx_number(txn);
     send_msg.set_handler_addr(reinterpret_cast<uint64_t>(&hres));
+    send_msg.set_txm_addr(reinterpret_cast<uint64_t>(hres.Txm()));
     send_msg.set_tx_term(tx_term);
     send_msg.set_command_id(command_id);
 
@@ -75,6 +76,8 @@ void txservice::remote::RemoteCcHandler::AcquireWrite(
     acq->set_src_node_id(src_id);
     acq->set_table_name_str(table_name.String());
     acq->set_table_type(ToRemoteType::ConvertTableType(table_name.Type()));
+    acq->set_table_engine(
+        ToRemoteType::ConvertTableEngine(table_name.Engine()));
     acq->clear_key();
     key.Serialize(*acq->mutable_key());
 
@@ -108,6 +111,7 @@ void txservice::remote::RemoteCcHandler::AcquireWriteAll(
         CcMessage::MessageType::CcMessage_MessageType_AcquireAllRequest);
     send_msg.set_tx_number(tx_number);
     send_msg.set_handler_addr(reinterpret_cast<uint64_t>(&hres));
+    send_msg.set_txm_addr(reinterpret_cast<uint64_t>(hres.Txm()));
     send_msg.set_tx_term(tx_term);
     send_msg.set_command_id(command_id);
 
@@ -115,6 +119,8 @@ void txservice::remote::RemoteCcHandler::AcquireWriteAll(
     acq_all->set_src_node_id(src_node_id);
     acq_all->set_table_name_str(table_name.String());
     acq_all->set_table_type(ToRemoteType::ConvertTableType(table_name.Type()));
+    acq_all->set_table_engine(
+        ToRemoteType::ConvertTableEngine(table_name.Engine()));
     switch (key.Type())
     {
     case KeyType::NegativeInf:
@@ -157,6 +163,7 @@ void txservice::remote::RemoteCcHandler::PostWrite(
         CcMessage::MessageType::CcMessage_MessageType_PostCommitRequest);
     send_msg.set_tx_number(tx_number);
     send_msg.set_handler_addr(reinterpret_cast<uint64_t>(&hres));
+    send_msg.set_txm_addr(reinterpret_cast<uint64_t>(hres.Txm()));
     send_msg.set_tx_term(tx_term);
     send_msg.set_command_id(command_id);
 
@@ -207,6 +214,7 @@ void txservice::remote::RemoteCcHandler::UploadRecord(
         CcMessage::MessageType::CcMessage_MessageType_ForwardPostCommitRequest);
     send_msg.set_tx_number(tx_number);
     send_msg.set_handler_addr(reinterpret_cast<uint64_t>(&hres));
+    send_msg.set_txm_addr(reinterpret_cast<uint64_t>(hres.Txm()));
     send_msg.set_tx_term(tx_term);
     send_msg.set_command_id(command_id);
 
@@ -220,6 +228,8 @@ void txservice::remote::RemoteCcHandler::UploadRecord(
     post_commit->set_table_name_str(table_name.String());
     post_commit->set_table_type(
         ToRemoteType::ConvertTableType(table_name.Type()));
+    post_commit->set_table_engine(
+        ToRemoteType::ConvertTableEngine(table_name.Engine()));
     post_commit->clear_record();
     if (commit_ts > 0 && operation_type != OperationType::Delete)
     {
@@ -258,6 +268,7 @@ void txservice::remote::RemoteCcHandler::PostWriteAll(
         CcMessage::MessageType::CcMessage_MessageType_PostWriteAllRequest);
     send_msg.set_tx_number(tx_number);
     send_msg.set_handler_addr(reinterpret_cast<uint64_t>(&hres));
+    send_msg.set_txm_addr(reinterpret_cast<uint64_t>(hres.Txm()));
     send_msg.set_tx_term(tx_term);
     send_msg.set_command_id(command_id);
 
@@ -266,6 +277,8 @@ void txservice::remote::RemoteCcHandler::PostWriteAll(
     post_write_all->set_table_name_str(table_name.String());
     post_write_all->set_table_type(
         ToRemoteType::ConvertTableType(table_name.Type()));
+    post_write_all->set_table_engine(
+        ToRemoteType::ConvertTableEngine(table_name.Engine()));
     post_write_all->set_node_group_id(ng_id);
 
     switch (key.Type())
@@ -322,6 +335,7 @@ void txservice::remote::RemoteCcHandler::PostRead(
         CcMessage::MessageType::CcMessage_MessageType_ValidateRequest);
     send_msg.set_tx_number(tx_number);
     send_msg.set_handler_addr(reinterpret_cast<uint64_t>(&hres));
+    send_msg.set_txm_addr(reinterpret_cast<uint64_t>(hres.Txm()));
     send_msg.set_tx_term(tx_term);
     send_msg.set_command_id(command_id);
 
@@ -366,6 +380,7 @@ void txservice::remote::RemoteCcHandler::Read(
         CcMessage::MessageType::CcMessage_MessageType_ReadRequest);
     send_msg.set_tx_number(tx_number);
     send_msg.set_handler_addr(reinterpret_cast<uint64_t>(&hres));
+    send_msg.set_txm_addr(reinterpret_cast<uint64_t>(hres.Txm()));
     send_msg.set_tx_term(tx_term);
     send_msg.set_command_id(command_id);
 
@@ -373,6 +388,8 @@ void txservice::remote::RemoteCcHandler::Read(
     read->set_src_node_id(src_node_id);
     read->set_table_name_str(table_name.String());
     read->set_table_type(ToRemoteType::ConvertTableType(table_name.Type()));
+    read->set_table_engine(
+        ToRemoteType::ConvertTableEngine(table_name.Engine()));
     read->clear_key();
     key.Serialize(*read->mutable_key());
     read->set_key_shard_code(key_shard_code);
@@ -484,13 +501,12 @@ void txservice::remote::RemoteCcHandler::ScanOpen(
     CcProtocol proto,
     bool is_for_write,
     bool is_ckpt,
-    bool is_covering_keys
-#ifdef ON_KEY_OBJECT
-    ,
+    bool is_covering_keys,
+    bool is_require_keys,
+    bool is_require_recs,
+    bool is_require_sort,
     int32_t obj_type,
-    const std::string_view &scan_pattern
-#endif
-)
+    const std::string_view &scan_pattern)
 {
     CcMessage send_msg;
 
@@ -498,6 +514,7 @@ void txservice::remote::RemoteCcHandler::ScanOpen(
         CcMessage::MessageType::CcMessage_MessageType_ScanOpenRequest);
     send_msg.set_tx_number(tx_number);
     send_msg.set_handler_addr(reinterpret_cast<uint64_t>(&hd_res));
+    send_msg.set_txm_addr(reinterpret_cast<uint64_t>(hd_res.Txm()));
     send_msg.set_tx_term(tx_term);
     send_msg.set_command_id(command_id);
 
@@ -506,6 +523,8 @@ void txservice::remote::RemoteCcHandler::ScanOpen(
     scan_open->set_table_name_str(table_name.String());
     scan_open->set_table_type(
         ToRemoteType::ConvertTableType(table_name.Type()));
+    scan_open->set_table_engine(
+        ToRemoteType::ConvertTableEngine(table_name.Engine()));
     scan_open->set_shard_id(node_group_id);
 
     switch (start_key.Type())
@@ -530,11 +549,12 @@ void txservice::remote::RemoteCcHandler::ScanOpen(
     scan_open->set_is_for_write(is_for_write);
     scan_open->set_ckpt(is_ckpt);
     scan_open->set_is_covering_keys(is_covering_keys);
-#ifdef ON_KEY_OBJECT
+    scan_open->set_is_require_keys(is_require_keys);
+    scan_open->set_is_require_recs(is_require_recs);
+    scan_open->set_is_require_sort(is_require_sort);
     scan_open->set_obj_type(obj_type);
     scan_open->set_scan_pattern(std::string(scan_pattern));
     scan_open->set_schema_version(schema_version);
-#endif
 
     stream_sender_.SendMessageToNg(node_group_id, send_msg, &hd_res);
 }
@@ -552,13 +572,12 @@ void txservice::remote::RemoteCcHandler::ScanNext(
     CcProtocol proto,
     bool is_for_write,
     bool is_ckpt,
-    bool is_covering_keys
-#ifdef ON_KEY_OBJECT
-    ,
+    bool is_covering_keys,
+    bool is_require_keys,
+    bool is_require_recs,
+    bool is_require_sort,
     int32_t obj_type,
-    const std::string_view &scan_pattern
-#endif
-)
+    const std::string_view &scan_pattern)
 {
     CcMessage send_msg;
 
@@ -566,6 +585,7 @@ void txservice::remote::RemoteCcHandler::ScanNext(
         CcMessage::MessageType::CcMessage_MessageType_ScanNextRequest);
     send_msg.set_tx_number(tx_number);
     send_msg.set_handler_addr(reinterpret_cast<uint64_t>(&hd_res));
+    send_msg.set_txm_addr(reinterpret_cast<uint64_t>(hd_res.Txm()));
     send_msg.set_tx_term(tx_term);
     send_msg.set_command_id(command_id);
 
@@ -587,11 +607,11 @@ void txservice::remote::RemoteCcHandler::ScanNext(
     scan_next->set_is_for_write(is_for_write);
     scan_next->set_ckpt(is_ckpt);
     scan_next->set_is_covering_keys(is_covering_keys);
-
-#ifdef ON_KEY_OBJECT
+    scan_next->set_is_require_keys(is_require_keys);
+    scan_next->set_is_require_recs(is_require_recs);
+    scan_next->set_is_require_sort(is_require_sort);
     scan_next->set_obj_type(obj_type);
     scan_next->set_scan_pattern(std::string(scan_pattern));
-#endif
 
     stream_sender_.SendMessageToNg(ng_id, send_msg, &hd_res);
 }
@@ -622,6 +642,7 @@ void txservice::remote::RemoteCcHandler::ScanNext(
         CcMessage::MessageType::CcMessage_MessageType_ScanSliceRequest);
     send_msg.set_tx_number(tx_number);
     send_msg.set_handler_addr(reinterpret_cast<uint64_t>(&hd_res));
+    send_msg.set_txm_addr(reinterpret_cast<uint64_t>(hd_res.Txm()));
     send_msg.set_tx_term(tx_term);
     send_msg.set_command_id(command_id);
 
@@ -631,6 +652,8 @@ void txservice::remote::RemoteCcHandler::ScanNext(
     scan_slice->set_cc_ng_term(cc_ng_term);
     scan_slice->set_table_name_str(tbl_name.StringView().data());
     scan_slice->set_table_type(ToRemoteType::ConvertTableType(tbl_name.Type()));
+    scan_slice->set_table_engine(
+        ToRemoteType::ConvertTableEngine(tbl_name.Engine()));
     scan_slice->set_schema_version(schema_version);
     scan_slice->set_range_id(range_id);
     scan_slice->clear_start_key();
@@ -696,6 +719,7 @@ void txservice::remote::RemoteCcHandler::ReloadCache(
     send_msg.set_type(
         CcMessage::MessageType::CcMessage_MessageType_ReloadCacheRequest);
     send_msg.set_handler_addr(reinterpret_cast<uint64_t>(&hres));
+    send_msg.set_txm_addr(reinterpret_cast<uint64_t>(hres.Txm()));
     send_msg.set_tx_term(tx_term);
     send_msg.set_command_id(command_id);
     send_msg.set_tx_number(tx_number);
@@ -721,6 +745,7 @@ void txservice::remote::RemoteCcHandler::FaultInject(
     send_msg.set_type(
         CcMessage::MessageType::CcMessage_MessageType_FaultInjectRequest);
     send_msg.set_handler_addr(reinterpret_cast<uint64_t>(&hres));
+    send_msg.set_txm_addr(reinterpret_cast<uint64_t>(hres.Txm()));
     send_msg.set_tx_term(tx_term);
     send_msg.set_command_id(command_id);
     send_msg.set_tx_number(txid.TxNumber());
@@ -747,6 +772,7 @@ void txservice::remote::RemoteCcHandler::AnalyzeTableAll(
     send_msg.set_type(
         CcMessage::MessageType::CcMessage_MessageType_AnalyzeTableAllRequest);
     send_msg.set_handler_addr(reinterpret_cast<uint64_t>(&hres));
+    send_msg.set_txm_addr(reinterpret_cast<uint64_t>(hres.Txm()));
     send_msg.set_tx_term(tx_term);
     send_msg.set_command_id(command_id);
     send_msg.set_tx_number(tx_number);
@@ -758,6 +784,8 @@ void txservice::remote::RemoteCcHandler::AnalyzeTableAll(
     analyze_req->set_table_name_str(table_name.String());
     analyze_req->set_table_type(
         ToRemoteType::ConvertTableType(table_name.Type()));
+    analyze_req->set_table_engine(
+        ToRemoteType::ConvertTableEngine(table_name.Engine()));
 
     stream_sender_.SendMessageToNg(ng_id, send_msg, &hres);
 }
@@ -778,6 +806,7 @@ void txservice::remote::RemoteCcHandler::BroadcastStatistics(
     send_msg.set_type(CcMessage::MessageType::
                           CcMessage_MessageType_BroadcastStatisticsRequest);
     send_msg.set_handler_addr(reinterpret_cast<uint64_t>(&hres));
+    send_msg.set_txm_addr(reinterpret_cast<uint64_t>(hres.Txm()));
     send_msg.set_tx_term(tx_term);
     send_msg.set_command_id(command_id);
     send_msg.set_tx_number(tx_number);
@@ -788,6 +817,8 @@ void txservice::remote::RemoteCcHandler::BroadcastStatistics(
     broadcast_stat_req->set_node_group_id(ng_id);
     broadcast_stat_req->set_table_type(
         remote::ToRemoteType::ConvertTableType(table_name.Type()));
+    broadcast_stat_req->set_table_engine(
+        remote::ToRemoteType::ConvertTableEngine(table_name.Engine()));
     broadcast_stat_req->set_table_name_str(table_name.String());
     broadcast_stat_req->set_schema_version(schema_ts);
     broadcast_stat_req->mutable_node_group_sample_pool()->CopyFrom(sample_pool);
@@ -816,6 +847,7 @@ void txservice::remote::RemoteCcHandler::CleanCcEntryForTest(
     send_msg.set_type(CcMessage::MessageType::
                           CcMessage_MessageType_CleanCcEntryForTestRequest);
     send_msg.set_handler_addr(reinterpret_cast<uint64_t>(&hres));
+    send_msg.set_txm_addr(reinterpret_cast<uint64_t>(hres.Txm()));
     send_msg.set_tx_term(tx_term);
     send_msg.set_command_id(command_id);
     send_msg.set_tx_number(tx_number);
@@ -826,6 +858,8 @@ void txservice::remote::RemoteCcHandler::CleanCcEntryForTest(
     clean_req->set_table_name_str(table_name.String());
     clean_req->set_table_type(
         ToRemoteType::ConvertTableType(table_name.Type()));
+    clean_req->set_table_engine(
+        ToRemoteType::ConvertTableEngine(table_name.Engine()));
     clean_req->clear_key();
     key.Serialize(*clean_req->mutable_key());
     clean_req->set_key_shard_code(key_shard_code);
@@ -851,6 +885,7 @@ void txservice::remote::RemoteCcHandler::BlockCcReqCheck(
     send_msg.set_type(
         CcMessage::MessageType::CcMessage_MessageType_BlockedCcReqCheckRequest);
     send_msg.set_handler_addr(reinterpret_cast<uint64_t>(hres));
+    send_msg.set_txm_addr(reinterpret_cast<uint64_t>(hres->Txm()));
     send_msg.set_tx_term(tx_term);
     send_msg.set_command_id(command_id);
     send_msg.set_tx_number(tx_number);
@@ -890,6 +925,7 @@ void txservice::remote::RemoteCcHandler::BlockAcquireAllCcReqCheck(
     send_msg.set_type(
         CcMessage::MessageType::CcMessage_MessageType_BlockedCcReqCheckRequest);
     send_msg.set_handler_addr(reinterpret_cast<uint64_t>(hres));
+    send_msg.set_txm_addr(reinterpret_cast<uint64_t>(hres->Txm()));
     send_msg.set_tx_term(tx_term);
     send_msg.set_command_id(command_id);
     send_msg.set_tx_number(tx_number);
@@ -936,6 +972,7 @@ void txservice::remote::RemoteCcHandler::KickoutData(
     send_msg.set_tx_term(tx_term);
     send_msg.set_command_id(command_id);
     send_msg.set_handler_addr(reinterpret_cast<uint64_t>(&hres));
+    send_msg.set_txm_addr(reinterpret_cast<uint64_t>(hres.Txm()));
 
     // Construct request body
     KickoutDataRequest *kickout_data_req = send_msg.mutable_kickout_data_req();
@@ -943,6 +980,8 @@ void txservice::remote::RemoteCcHandler::KickoutData(
     kickout_data_req->set_table_name_str(table_name.String());
     kickout_data_req->set_table_type(
         ToRemoteType::ConvertTableType(table_name.Type()));
+    kickout_data_req->set_table_engine(
+        ToRemoteType::ConvertTableEngine(table_name.Engine()));
     kickout_data_req->set_node_group_id(ng_id);
     kickout_data_req->set_clean_ts(clean_ts);
     kickout_data_req->clear_start_key();
@@ -984,6 +1023,7 @@ void txservice::remote::RemoteCcHandler::ObjectCommand(
         CcMessage::MessageType::CcMessage_MessageType_ApplyRequest);
     send_msg.set_tx_number(tx_number);
     send_msg.set_handler_addr(reinterpret_cast<uint64_t>(&hres));
+    send_msg.set_txm_addr(reinterpret_cast<uint64_t>(hres.Txm()));
     send_msg.set_tx_term(tx_term);
     send_msg.set_command_id(command_id);
 
@@ -992,6 +1032,8 @@ void txservice::remote::RemoteCcHandler::ObjectCommand(
     apply_req->set_table_name_str(table_name.String());
     apply_req->set_table_type(
         ToRemoteType::ConvertTableType(table_name.Type()));
+    apply_req->set_table_engine(
+        ToRemoteType::ConvertTableEngine(table_name.Engine()));
     apply_req->clear_key();
     key.Serialize(*apply_req->mutable_key());
     apply_req->set_key_shard_code(key_shard_code);
@@ -1044,6 +1086,7 @@ void txservice::remote::RemoteCcHandler::UploadTxCommands(
         CcMessage::MessageType::CcMessage_MessageType_UploadTxCommandsRequest);
     send_msg.set_tx_number(tx_number);
     send_msg.set_handler_addr(reinterpret_cast<uint64_t>(&hres));
+    send_msg.set_txm_addr(reinterpret_cast<uint64_t>(hres.Txm()));
     send_msg.set_tx_term(tx_term);
     send_msg.set_command_id(command_id);
 
@@ -1085,6 +1128,7 @@ void txservice::remote::RemoteCcHandler::InvalidateTableCache(
     send_msg.set_type(CcMessage::MessageType::
                           CcMessage_MessageType_InvalidateTableCacheRequest);
     send_msg.set_handler_addr(reinterpret_cast<uint64_t>(&hres));
+    send_msg.set_txm_addr(reinterpret_cast<uint64_t>(hres.Txm()));
     send_msg.set_tx_term(tx_term);
     send_msg.set_command_id(command_id);
     send_msg.set_tx_number(tx_number);
@@ -1096,5 +1140,7 @@ void txservice::remote::RemoteCcHandler::InvalidateTableCache(
     invalidate_req->set_table_name_str(table_name.String());
     invalidate_req->set_table_type(
         ToRemoteType::ConvertTableType(table_name.Type()));
+    invalidate_req->set_table_engine(
+        ToRemoteType::ConvertTableEngine(table_name.Engine()));
     stream_sender_.SendMessageToNg(ng_id, send_msg, &hres);
 }

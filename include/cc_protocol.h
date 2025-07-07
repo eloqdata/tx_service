@@ -46,7 +46,7 @@ enum class CcProtocol
     Locking,  // Pessimistic Read + Pessimistic Write
 };
 
-enum class CcOperation
+enum class CcOperation : uint8_t
 {
     Read = 0,
     ReadForWrite,

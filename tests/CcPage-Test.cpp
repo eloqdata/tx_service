@@ -29,15 +29,18 @@
 #include "template_cc_map.h"
 #include "tx_key.h"     // CompositeKey
 #include "tx_record.h"  // CompositeRecord
+#include "type.h"
 
 namespace txservice
 {
 
-void PrepareCcMap(
-    TemplateCcMap<CompositeKey<std::string, int>, CompositeRecord<int>> &cc_map,
-    size_t cnt,
-    std::string &table_name,
-    bool random = true)
+void PrepareCcMap(TemplateCcMap<CompositeKey<std::string, int>,
+                                CompositeRecord<int>,
+                                true,
+                                true> &cc_map,
+                  size_t cnt,
+                  std::string &table_name,
+                  bool random = true)
 {
     LOG(INFO) << "preparing ccmap of table: " << table_name;
     std::vector<CompositeKey<std::string, int>> t1_keys;
@@ -93,6 +96,7 @@ TEST_CASE("CcPage clean tests", "[cc-page]")
                   nullptr,
                   &ng_configs,
                   2);
+    shard.Init();
     std::string raft_path("");
     Sharder::Instance(0,
                       &ng_configs,
@@ -107,8 +111,10 @@ TEST_CASE("CcPage clean tests", "[cc-page]")
     const size_t MAP_SIZE = 10000;
     std::vector<std::string> tables;
     std::vector<TableName> table_names;
-    std::vector<std::unique_ptr<
-        TemplateCcMap<CompositeKey<std::string, int>, CompositeRecord<int>>>>
+    std::vector<std::unique_ptr<TemplateCcMap<CompositeKey<std::string, int>,
+                                              CompositeRecord<int>,
+                                              true,
+                                              true>>>
         ccmaps;
     std::vector<std::vector<CompositeKey<std::string, int>>> map_keys;
     std::vector<std::vector<CompositeKey<std::string, int> *>> map_key_ptrs;
@@ -116,10 +122,13 @@ TEST_CASE("CcPage clean tests", "[cc-page]")
     for (size_t i = 0; i < MAP_NUM; i++)
     {
         tables.emplace_back("t" + std::to_string(i));
-        table_names.emplace_back(tables[i], TableType::Primary);
+        table_names.emplace_back(
+            tables[i], TableType::Primary, TableEngine::EloqSql);
         ccmaps.emplace_back(
             std::make_unique<TemplateCcMap<CompositeKey<std::string, int>,
-                                           CompositeRecord<int>>>(
+                                           CompositeRecord<int>,
+                                           true,
+                                           true>>(
                 &shard, 0, table_names[i], 1, nullptr, true));
     }
 

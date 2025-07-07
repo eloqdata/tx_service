@@ -53,7 +53,7 @@ struct WriteSetEntry
     {
     }
 
-    WriteSetEntry &operator=(WriteSetEntry &&other)
+    WriteSetEntry &operator=(WriteSetEntry &&other) noexcept
     {
         rec_ = std::move(other.rec_);
         op_ = other.op_;
@@ -70,6 +70,18 @@ struct WriteSetEntry
     uint32_t key_shard_code_{};
     // Used in double write scenarios during online DDL.
     std::unordered_map<uint32_t, CcEntryAddr> forward_addr_;
+};
+
+/**
+ * @brief Meta table is replication table. Most meta table update is done by
+ * 2-PC, even DML trigger DDL.
+ */
+struct ReplicaWriteSetEntry
+{
+    using Uptr = std::unique_ptr<ReplicaWriteSetEntry>;
+
+    TxRecord::Uptr rec_;
+    OperationType op_;
 };
 
 struct ReadSetEntry
@@ -140,7 +152,7 @@ struct CmdSetEntry
     {
     }
 
-    void AddCommand(const TxCommand *cmd)
+    void AddCommand(const TxCommand *cmd, uint64_t ttl)
     {
         assert(cmd != nullptr);
         if (cmd->IsOverwrite())
@@ -149,6 +161,8 @@ struct CmdSetEntry
             cmd_str_list_.clear();
             ignore_previous_version_ = true;
         }
+
+        ttl_ = ttl;
 
         std::string cmd_str;
         cmd->Serialize(cmd_str);
@@ -166,6 +180,8 @@ struct CmdSetEntry
     uint64_t object_version_{};
     // The cce's last_validation ts, for setting commit ts of this txn.
     uint64_t last_vali_ts_{};
+    // TTL of the object after the commands apply to it.
+    uint64_t ttl_{UINT64_MAX};
     // Whether the cc entry's object is modified by the cmd.
     bool object_modified_{};
     // serialized key, for writing log

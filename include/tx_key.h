@@ -320,7 +320,8 @@ public:
         obj_addr_ = obj_addr_ | 1;
     }
 
-    TxKey(TxKey &&rhs) : interface_(rhs.interface_), obj_addr_(rhs.obj_addr_)
+    TxKey(TxKey &&rhs) noexcept
+        : interface_(rhs.interface_), obj_addr_(rhs.obj_addr_)
     {
         // The ownership, if there is any, is transferred to this object. So,
         // the input's ownership bit is 0 thereafter.
@@ -342,7 +343,7 @@ public:
 
     TxKey &operator=(const TxKey &) = delete;
 
-    TxKey &operator=(TxKey &&rhs)
+    TxKey &operator=(TxKey &&rhs) noexcept
     {
         if (this == &rhs)
         {
@@ -870,7 +871,7 @@ template <typename... Types>
 CompositeKey<Types...> CompositeKey<Types...>::pos_inf =
     CompositeKey<Types...>();
 
-struct VoidKey
+struct alignas(2) VoidKey
 {
     VoidKey()
     {
@@ -1076,6 +1077,7 @@ struct VoidKey
 class TxKeyFactory
 {
     using CreateTxKeyFunc = TxKey (*)(const char *, size_t);
+    using CreateDefaultTxKeyFunc = TxKey (*)();
 
 public:
     static void RegisterNegInfTxKey(const TxKey *neg_inf_tx_key)
@@ -1127,6 +1129,19 @@ public:
         return Instance().create_tx_key_func_(data, size);
     }
 
+    static void RegisterCreateDefaultTxKeyFunc(
+        CreateDefaultTxKeyFunc create_default_tx_key_func)
+    {
+        assert(Instance().create_default_tx_key_func_ == nullptr);
+        Instance().create_default_tx_key_func_ = create_default_tx_key_func;
+    }
+
+    static TxKey CreateDefaultTxKey()
+    {
+        assert(Instance().create_default_tx_key_func_ != nullptr);
+        return Instance().create_default_tx_key_func_();
+    }
+
 private:
     static TxKeyFactory &Instance()
     {
@@ -1135,9 +1150,12 @@ private:
     }
 
     CreateTxKeyFunc create_tx_key_func_{nullptr};
+    CreateDefaultTxKeyFunc create_default_tx_key_func_{nullptr};
 
     const TxKey *neg_inf_tx_key_{nullptr};
     const TxKey *pos_inf_tx_key_{nullptr};
+    // TODO(lzx): merge neg_inf_tx_key_ and packed_negative_infinity_key_ to
+    // single
     const TxKey *packed_negative_infinity_key_{nullptr};
 };
 

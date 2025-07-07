@@ -57,7 +57,7 @@ message GetMinTxStartTsResponse {
     bool error = 3;
 }
 
-message ClusterAddNodeRequest {
+message ClusterAddNodeGroupRequest {
     repeated string host_list = 1;
     repeated int32 port_list = 2;
     string id = 3;
@@ -73,21 +73,26 @@ message ClusterRemoveNodeRequest
     repeated int32 port_list = 4;
 }
 
+message NodeGroupAddPeersRequest
+{
+    uint32 ng_id = 1;
+    repeated string host_list = 2;
+    repeated int32 port_list = 3;
+    repeated bool is_candidate = 4;
+    string id = 5;
+}
+
 enum ClusterScaleWriteLogResult
 {
     SUCCESS = 0;
     FAIL = 1;
     UNKOWN = 2;
+    INVALID_REQUEST = 3;
 }
 
-message ClusterAddNodeResponse{
-    uint64 tx_number = 1;
-    ClusterScaleWriteLogResult result = 2;
-}
-
-message ClusterRemoveNodeResponse{
-    uint64 tx_number = 1;
-    ClusterScaleWriteLogResult result = 2;
+message ClusterScaleResponse{
+    ClusterScaleWriteLogResult result = 1;
+    string cluster_config = 2;
 }
 
 enum ClusterScaleStatus
@@ -106,16 +111,6 @@ message ClusterScaleStatusRequest
 message ClusterScaleStatusResponse
 {
     ClusterScaleStatus status = 1;
-}
-
-message CheckClusterConfigIsUpdatedRequest
-{
-    uint64 cluster_size = 1;
-}
-
-message CheckClusterConfigIsUpdatedResponse
-{
-    bool finished = 1;
 }
 
 message GetClusterNodesRequest{
@@ -139,18 +134,26 @@ message GenerateSkFromPkRequest
     bytes end_key = 8;
     repeated string new_sk_name_str = 9;
     repeated CcTableType new_sk_type = 10;
+    TableEngine table_engine = 11;
+}
+
+
+message MultiKeyAttr {
+  bool multikey = 1;
+  string multikey_paths = 2;
 }
 
 message GenerateSkFromPkResponse
 {
     uint32 error_code = 1;
     uint32 pk_items_count = 2;
- 
+
     // Available if CcErrorCode::PACK_SK_ERR
     int32 pack_err_code = 3;
     string pack_err_msg = 4;
 
     repeated int64 ng_terms = 5;
+    repeated MultiKeyAttr indexes_multikey_attr = 6;
 }
 
 enum UploadBatchKind 
@@ -163,33 +166,34 @@ message UploadBatchRequest
 {
     string table_name_str = 1;
     CcTableType table_type = 2;
-    uint32 node_group_id = 3;
-    int64 node_group_term = 4;
-    uint32 batch_size = 5;
-    bytes keys = 6;
-    bytes records = 7;
-    bytes commit_ts = 8;
-    bytes rec_status = 9;
-    UploadBatchKind kind = 10;
+    TableEngine table_engine = 3;
+    uint32 node_group_id = 4;
+    int64 node_group_term = 5;
+    uint32 batch_size = 6;
+    bytes keys = 7;
+    bytes records = 8;
+    bytes commit_ts = 9;
+    bytes rec_status = 10;
+    UploadBatchKind kind = 11;
 }
 
 message UploadBatchSlicesRequest
 {
     string table_name_str = 1;
     CcTableType table_type = 2;
-    uint32 node_group_id = 3;
-    int64 node_group_term = 4;
+    TableEngine table_engine = 3;
+    uint32 node_group_id = 4;
+    int64 node_group_term = 5;
     // count of items in this batch
-    uint32 batch_size = 5;
-    bytes keys = 6;
-    bytes records = 7;
-    bytes commit_ts = 8;
-    bytes rec_status = 9;
-
-    int32 partition_id = 10;
-    int32 new_partition_id = 11;
-    repeated uint32 slices_idxs = 12;
-    uint64 version_ts = 13;
+    uint32 batch_size = 6;
+    bytes keys = 7;
+    bytes records = 8;
+    bytes commit_ts = 9;
+    bytes rec_status = 10;
+    int32 partition_id = 11;
+    int32 new_partition_id = 12;
+    repeated uint32 slices_idxs = 13;
+    uint64 version_ts = 14;
 }
 
 message UploadBatchResponse
@@ -202,6 +206,9 @@ message OnLeaderStartRequest
 {
 	uint32 node_group_id = 1;
 	int64 node_group_term = 2;
+	repeated NodegroupConfigBuf cluster_config = 3;
+	repeated NodeConfigBuf node_configs = 4;
+	uint64 config_version = 5;
 }
 
 message OnLeaderStartResponse
@@ -249,17 +256,18 @@ message UploadRangeSlicesRequest
 	uint32 node_group_id = 1;
     int64 ng_term = 2;
     string table_name_str = 3;
-    int32 old_partition_id = 4;
-    uint64 version_ts = 5;
-    int32 new_partition_id = 6;
+    TableEngine table_engine = 4;
+    int32 old_partition_id = 5;
+    uint64 version_ts = 6;
+    int32 new_partition_id = 7;
     // all keys serialized to one field.
-    bytes new_slices_keys = 7;
+    bytes new_slices_keys = 8;
     // [uint32_t,....]
-    bytes new_slices_sizes = 8;
+    bytes new_slices_sizes = 9;
     // [int8_t,....]
-    bytes new_slices_status = 9;
-    uint32 new_slices_num = 10;
-    bool has_dml_since_ddl = 11;
+    bytes new_slices_status = 10;
+    uint32 new_slices_num = 11;
+    bool has_dml_since_ddl = 12;
 }
 
 message UploadRangeSlicesResponse
@@ -276,7 +284,8 @@ message FetchPayloadRequest
     string key_str = 4;
     uint32 key_shard_code = 5;
     CcTableType table_type = 6;
-    uint32 src_node_id = 7;
+    TableEngine table_engine = 7;
+    uint32 src_node_id = 8;
 }
 
 message FetchPayloadResponse
@@ -336,11 +345,12 @@ message KeyObjectStandbyForwardRequest {
     uint32 forward_seq_grp = 9;
     string table_name = 10;
     CcTableType table_type = 11;
-    uint32 key_shard_code = 12;
-    int64 primary_leader_term = 13;
-    uint64 schema_version = 14;
-    uint64 tx_number = 15;
-    bool out_of_sync = 16;
+    TableEngine table_engine = 12;
+    uint32 key_shard_code = 13;
+    int64 primary_leader_term = 14;
+    uint64 schema_version = 15;
+    uint64 tx_number = 16;
+    bool out_of_sync = 17;
 }
 
 message StorageSnapshotSyncRequest {
@@ -472,18 +482,6 @@ message FetchClusterBackupRequest{
     string backup_name = 1;
 }
 
-message UpdateLogGroupConfigRequest{
-    repeated string ips = 1;
-    repeated uint32 ports = 2;
-    uint32 log_group_id = 3;
-}
-
-message UpdateLogGroupConfigResponse{
-    bool error = 1;
-    string error_msg = 2;
-}
-
-
 service CcStreamService {
   rpc Connect(ConnectRequest) returns (ConnectResponse);
 };
@@ -495,10 +493,10 @@ service CcRpcService {
     rpc CheckTxStatus(CheckTxStatusRequest) returns (CheckTxStatusResponse);
     rpc NotifyNewLeaderStart(NotifyNewLeaderStartRequest) returns (NotifyNewLeaderStartResponse);
     rpc GetMinTxStartTs(GetMinTxStartTsRequest) returns (GetMinTxStartTsResponse);
-    rpc ClusterAddNode(ClusterAddNodeRequest) returns (ClusterAddNodeResponse);
-    rpc ClusterRemoveNode(ClusterRemoveNodeRequest) returns (ClusterRemoveNodeResponse);
+    rpc ClusterAddNodeGroup(ClusterAddNodeGroupRequest) returns (ClusterScaleResponse);
+    rpc ClusterRemoveNode(ClusterRemoveNodeRequest) returns (ClusterScaleResponse);
+    rpc NodeGroupAddPeers(NodeGroupAddPeersRequest) returns (ClusterScaleResponse);
     rpc CheckClusterScaleStatus(ClusterScaleStatusRequest) returns (ClusterScaleStatusResponse);
-    rpc CheckClusterConfigIsUpdated(CheckClusterConfigIsUpdatedRequest) returns (CheckClusterConfigIsUpdatedResponse);
     rpc GetClusterNodes(GetClusterNodesRequest) returns (GetClusterNodesResponse);
     rpc FlushDataAll(FlushDataAllRequest) returns (FlushDataAllResponse);
     rpc InitDataMigration(InitMigrationRequest) returns (InitMigrationResponse);
@@ -523,7 +521,7 @@ service CcRpcService {
     rpc FetchClusterBackup(FetchClusterBackupRequest) returns (ClusterBackupResponse);
     rpc NotifyShutdownCkpt(NotifyShutdownCkptRequest) returns (NotifyShutdownCkptResponse);
     rpc CheckCkptStatus(CheckCkptStatusRequest) returns (CheckCkptStatusResponse);
-    rpc UpdateLogGroupConfig(UpdateLogGroupConfigRequest) returns (UpdateLogGroupConfigResponse);
+    rpc UpdateClusterConfig(UpdateClusterConfigRequest) returns (google.protobuf.Empty);
 }
 
 enum ShutdownStatus{
@@ -620,7 +618,7 @@ message GetLeaderResponse
 	bool error = 2;
 }
 
-message UpdateNodeGroupConfigRequest
+message UpdateClusterConfigRequest
 {
 	uint32 ng_id = 1;
 	repeated NodegroupConfigBuf new_cluster_config = 2;
@@ -628,7 +626,7 @@ message UpdateNodeGroupConfigRequest
 	uint64 config_version = 4;
 }
 
-message UpdateNodeGroupConfigResponse
+message UpdateClusterConfigResponse
 {
 	bool error = 1;
 }
@@ -671,9 +669,8 @@ message HmHealthzHttpResponse {
 
 service HostMangerService {
 	rpc StartNode(StartNodeRequest) returns (StartNodeResponse);
-	rpc UpdateNodeGroupConfigs(UpdateNodeGroupConfigRequest) returns (UpdateNodeGroupConfigResponse);
+	rpc UpdateClusterConfig(UpdateClusterConfigRequest) returns (UpdateClusterConfigResponse);
 	rpc GetLeader(GetLeaderRequest) returns (GetLeaderResponse);
-    rpc UpdateLogGroupConfig(UpdateLogGroupConfigRequest) returns (UpdateLogGroupConfigResponse);
 	
 	// Transfer API should only be exposed to raft host manager implementation
 	rpc Transfer(TransferRequest) returns (TransferResponse);
@@ -737,6 +734,7 @@ enum CommitType {
     PostCommit = 1;
     Commit = 2;
 	DowngradeLock = 3;
+    UpdateDirty = 4;
 }
 
 enum CcTableType {
@@ -747,6 +745,13 @@ enum CcTableType {
     UniqueSecondary = 4;
     RangeBucket = 5;
     ClusterConfig = 6;
+}
+
+enum TableEngine {
+    None = 0;
+    EloqSql = 1;
+    EloqKv = 2;
+    EloqDoc = 3;
 }
 
 enum RemoteKeyType {
@@ -774,15 +779,16 @@ enum CleanType {
 message AcquireRequest {
     uint32 src_node_id = 1;
     string table_name_str = 2;
-    CcTableType table_type = 3;
-    bytes key = 4;
-    uint32 key_shard_code = 5;
-    uint32 vec_idx = 6;
-    uint64 ts = 7;
-    bool insert = 8;
-    CcProtocolType protocol = 9;
-    IsolationType iso_level = 10;
-    uint64 schema_version = 11;
+    TableEngine table_engine = 3;
+    CcTableType table_type = 4;
+    bytes key = 5;
+    uint32 key_shard_code = 6;
+    uint32 vec_idx = 7;
+    uint64 ts = 8;
+    bool insert = 9;
+    CcProtocolType protocol = 10;
+    IsolationType iso_level = 11;
+    uint64 schema_version = 12;
 }
 
 message AcquireResponse {
@@ -798,17 +804,18 @@ message AcquireResponse {
 message AcquireAllRequest {
     uint32 src_node_id = 1;
     string table_name_str = 2;
-    CcTableType table_type = 3;
+    TableEngine table_engine = 3;
+    CcTableType table_type = 4;
     oneof acq_all_key
     {
-        bytes key = 4;
-        bool neg_inf = 5;
-        bool pos_inf = 6;
+        bytes key = 5;
+        bool neg_inf = 6;
+        bool pos_inf = 7;
     }
-    uint32 node_group_id = 7;
-    bool insert = 8;
-    CcProtocolType protocol = 9;
-    CcOperationType cc_op = 10;
+    uint32 node_group_id = 8;
+    bool insert = 9;
+    CcProtocolType protocol = 10;
+    CcOperationType cc_op = 11;
 }
 
 message AcquireAllResponse {
@@ -834,7 +841,7 @@ message ValidateRequest {
 
 message ValidateResponse {
     int32 error_code = 1;
-    repeated uint64 txs = 2;
+    int32 conflicting_tx_cnt = 2;
 }
 
 message PostprocessResponse {
@@ -850,23 +857,24 @@ message VersionTxRecord_msg {
 message ReadRequest {
     uint32 src_node_id = 1;
     string table_name_str = 2;
-    CcTableType table_type = 3;
-    bytes key = 4;
-    uint32 key_shard_code = 5;
-    bytes record = 6;
+    TableEngine table_engine = 3;
+    CcTableType table_type = 4;
+    bytes key = 5;
+    uint32 key_shard_code = 6;
+    bytes record = 7;
     enum ReadType {
         INSIDE = 0;
         OUTSIDE_NORMAL = 1;
         OUTSIDE_DELETED = 2;
     }
-    ReadType read_type = 7;
-    uint64 ts = 8;
-    IsolationType iso_level = 9;
-    CcProtocolType protocol = 10;
-    bool is_for_write = 11;
-    bool is_covering_keys = 12;
-    bool point_read_on_miss = 13;
-    uint64 schema_version = 14;
+    ReadType read_type = 8;
+    uint64 ts = 9;
+    IsolationType iso_level = 10;
+    CcProtocolType protocol = 11;
+    bool is_for_write = 12;
+    bool is_covering_keys = 13;
+    bool point_read_on_miss = 14;
+    uint64 schema_version = 15;
 }
 
 message ReadResponse {
@@ -905,28 +913,30 @@ message ForwardPostCommitRequest {
     int64 node_group_term = 3;
     bytes key = 4;
     string table_name_str = 5;
-    CcTableType table_type = 6;
-    uint64 commit_ts = 7;
-    bytes record = 8;
-    uint32 operation_type = 9;
-    uint32 key_shard_code = 10;
+    TableEngine table_engine = 6;
+    CcTableType table_type = 7;
+    uint64 commit_ts = 8;
+    bytes record = 9;
+    uint32 operation_type = 10;
+    uint32 key_shard_code = 11;
 }
 
 message PostWriteAllRequest {
     uint32 src_node_id = 1;
     string table_name_str = 2;
-    CcTableType table_type = 3;
-    uint32 node_group_id = 4;
+    TableEngine table_engine = 3;
+    CcTableType table_type = 4;
+    uint32 node_group_id = 5;
     oneof post_write_key
     {
-        bytes key = 5;
-        bool neg_inf = 6;
-        bool pos_inf = 7;
+        bytes key = 6;
+        bool neg_inf = 7;
+        bool pos_inf = 8;
     }
-    uint64 commit_ts = 8;
-    bytes record = 9;
-    uint32 operation_type = 10;
-    CommitType commit_type = 11;
+    uint64 commit_ts = 9;
+    bytes record = 10;
+    uint32 operation_type = 11;
+    CommitType commit_type = 12;
 }
 
 message ScanTuple_msg {
@@ -942,23 +952,27 @@ message ScanOpenRequest {
     uint32 src_node_id = 1;
     uint32 shard_id = 2;
     string table_name_str = 3;
-    CcTableType table_type = 4;
+    TableEngine table_engine = 4;
+    CcTableType table_type = 5;
     oneof start_key {
-        bytes key = 5;
-        bool neg_inf = 6;
-        bool pos_inf = 7;
+        bytes key = 6;
+        bool neg_inf = 7;
+        bool pos_inf = 8;
     }
-    bool inclusive = 8;
-    bool direction = 9;
-    uint64 ts = 10;
-    bool ckpt = 11;
-    IsolationType iso_level = 12;
-    CcProtocolType protocol = 13;
-    bool is_for_write = 14;
-    bool is_covering_keys = 15;
-    int32 obj_type = 16; // Only used for redis scan command
-    string scan_pattern = 17; // Only used for redis scan command
-    uint64 schema_version = 18;
+    bool inclusive = 9;
+    bool direction = 10;
+    uint64 ts = 11;
+    bool ckpt = 12;
+    IsolationType iso_level = 13;
+    CcProtocolType protocol = 14;
+    bool is_for_write = 15;
+    bool is_covering_keys = 16;
+    int32 obj_type = 17; // Only used for redis scan command
+    string scan_pattern = 18; // Only used for redis scan command
+    uint64 schema_version = 19;
+    bool is_require_keys = 20;
+    bool is_require_recs = 21;
+    bool is_require_sort = 22;
 }
 
 message ScanCache_msg {
@@ -985,6 +999,9 @@ message ScanNextRequest {
     bool is_covering_keys = 11;
     int32 obj_type = 12; // Only used for redis scan command
     string scan_pattern = 13; // Only used for redis scan command
+    bool is_require_keys = 14;
+    bool is_require_recs = 15;
+    bool is_require_sort = 16;
 }
 
 message ScanNextResponse {
@@ -1001,9 +1018,10 @@ message ScanSliceRequest {
     // (and therefore its term is unknown).
     int64 cc_ng_term = 3;
     string table_name_str = 4;
-    CcTableType table_type = 5;
-    uint32 range_id = 6;
-    bytes start_key = 7;
+    TableEngine table_engine = 5;
+    CcTableType table_type = 6;
+    uint32 range_id = 7;
+    bytes start_key = 8;
     bool start_inclusive = 9;
     bytes end_key = 10;
     bool end_inclusive = 11;
@@ -1039,6 +1057,8 @@ message ScanSliceResponse {
     bytes term = 15;
     bytes key_start_offsets = 16;
     bytes record_start_offsets = 17;
+    bytes trailing_cnts = 18;
+    uint64 txm_addr = 19;
 }
 
 message ReloadCacheRequest {
@@ -1063,7 +1083,8 @@ message AnalyzeTableAllRequest {
   uint32 src_node_id = 1;
   uint32 node_group_id = 2;
   string table_name_str = 3;
-  CcTableType table_type = 4;
+  TableEngine table_engine = 4;
+  CcTableType table_type = 5;
 }
 
 message AnalyzeTableAllResponse {
@@ -1073,11 +1094,12 @@ message AnalyzeTableAllResponse {
 message CleanCcEntryForTestRequest {
   uint32 src_node_id = 1;
   string table_name_str = 2;
-  CcTableType table_type = 3;
-  bytes key = 4;
-  uint32 key_shard_code = 5;
-  bool only_archives=6;
-  bool flush=7;
+  TableEngine table_engine = 3;
+  CcTableType table_type = 4;
+  bytes key = 5;
+  uint32 key_shard_code = 6;
+  bool only_archives=7;
+  bool flush=8;
 }
 
 message CleanCcEntryForTestResponse {
@@ -1102,10 +1124,11 @@ message NodeGroupSamplePool
 }
 
 message IndexStatistics {
-  CcTableType table_type = 1;
-  string table_name = 2;
-  uint64 total_keys = 3;
-  repeated bytes samples = 4;
+  TableEngine table_engine = 1;
+  CcTableType table_type = 2;
+  string table_name = 3;
+  uint64 total_keys = 4;
+  repeated bytes samples = 5;
 }
 
 message Statistics {
@@ -1115,10 +1138,11 @@ message Statistics {
 message BroadcastStatisticsRequest {
   uint32 src_node_id = 1;
   uint32 node_group_id = 2;
-  CcTableType table_type = 3;
-  string table_name_str = 4;
-  uint64 schema_version = 5;
-  NodeGroupSamplePool node_group_sample_pool = 6;
+  TableEngine table_engine = 3;
+  CcTableType table_type = 4;
+  string table_name_str = 5;
+  uint64 schema_version = 6;
+  NodeGroupSamplePool node_group_sample_pool = 7;
 }
 
 message BlockEntry {
@@ -1141,6 +1165,7 @@ message TxEntrys {
 
 message DeadLockRequest {
   uint32 src_node_id = 1;
+  uint64 check_round = 2;
 }
 
 message DeadLockResponse {
@@ -1148,8 +1173,9 @@ message DeadLockResponse {
   uint32 node_id = 1;
   // error code
   int32 error_code = 2;
-  repeated BlockEntry block_entry = 3;
-  repeated TxEntrys tx_etys = 4;
+  uint64 check_round = 3;
+  repeated BlockEntry block_entry = 4;
+  repeated TxEntrys tx_etys = 5;
 }
 
 message AbortTransactionRequest {
@@ -1186,9 +1212,10 @@ message BlockedCcReqCheckResponse {
 
 message FlushDataAllRequest {
     string table_name_str = 4;
-    CcTableType table_type = 5;
-    uint32 node_group_id = 6;
-    int64 node_group_term = 7;
+    TableEngine table_engine = 5;
+    CcTableType table_type = 6;
+    uint32 node_group_id = 7;
+    int64 node_group_term = 8;
     uint64 data_sync_ts = 9;
     bool is_dirty = 10;
 }
@@ -1216,11 +1243,12 @@ message KickoutDataRequest {
     uint32 src_node_id = 1;
     uint32 node_group_id = 2;
     string table_name_str = 3;
-    CcTableType table_type = 4;
-    uint64 clean_ts = 5;
-    CleanType clean_type = 6;
-    bytes start_key = 7;
-    bytes end_key = 8;
+    TableEngine table_engine = 4;
+    CcTableType table_type = 5;
+    uint64 clean_ts = 6;
+    CleanType clean_type = 7;
+    bytes start_key = 8;
+    bytes end_key = 9;
 }
 
 message KickoutDataResponse {
@@ -1230,15 +1258,16 @@ message KickoutDataResponse {
 message ApplyRequest {
     uint32 src_node_id = 1;
     string table_name_str = 2;
-    CcTableType table_type = 3;
-    bytes key = 4;
-    uint32 key_shard_code = 5;
-    bytes cmd = 6;
-    uint64 tx_ts = 7;
-    IsolationType iso_level = 8;
-    CcProtocolType protocol = 9;
-    bool apply_and_commit = 10;
-    uint64 schema_version = 11;
+    TableEngine table_engine = 3;
+    CcTableType table_type = 4;
+    bytes key = 5;
+    uint32 key_shard_code = 6;
+    bytes cmd = 7;
+    uint64 tx_ts = 8;
+    IsolationType iso_level = 9;
+    CcProtocolType protocol = 10;
+    bool apply_and_commit = 11;
+    uint64 schema_version = 12;
 }
 
 message ApplyResponse {
@@ -1265,16 +1294,17 @@ message UploadTxCommandsRequest {
 }
 
 message PublishRequest {
-    string chan = 1;
-    string message = 2;
+    bytes chan = 1;
+    bytes message = 2;
 }
 
 message DBSizeRequest {
     uint32 src_node_id = 1;
     repeated string table_name_str = 2;
     repeated CcTableType table_type = 3;
-    uint32 node_group_id = 4;
-    int32 dbsize_term = 5;
+    repeated TableEngine table_engine = 4;
+    uint32 node_group_id = 5;
+    int32 dbsize_term = 6;
 }
 
 message DBSizeResponse {
@@ -1286,7 +1316,8 @@ message InvalidateTableCacheRequest {
   uint32 src_node_id = 1;
   uint32 node_group_id = 2;
   string table_name_str = 3;
-  CcTableType table_type = 4;
+  TableEngine table_engine = 4;
+  CcTableType table_type = 5;
 }
 
 message InvalidateTableCacheResponse {
@@ -1349,6 +1380,7 @@ message CcMessage {
     uint64 handler_addr = 3;
     int64 tx_term = 4;
     uint32 command_id = 5;
+    uint64 txm_addr = 6;
 
     oneof content {
         AcquireRequest acquire_req = 10;

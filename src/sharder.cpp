@@ -22,6 +22,7 @@
 #include "sharder.h"
 
 #include <brpc/channel.h>
+#include <spawn.h>
 #include <unistd.h>
 
 #include <atomic>
@@ -30,6 +31,7 @@
 #include <shared_mutex>
 
 #include "cc_req_base.h"
+#include "cc_req_misc.h"
 #include "cc_request.pb.h"
 #include "cc_shard.h"
 #include "fault/cc_node.h"
@@ -78,11 +80,8 @@ void Sharder::Shutdown()
     {
         recovery_service_->Shutdown();
     }
-    if (!txservice_skip_wal)
-    {
-        log_replay_server_.Stop(0);
-        log_replay_server_.Join();
-    }
+    log_replay_server_.Stop(0);
+    log_replay_server_.Join();
 
     cc_node_server_.Stop(0);
     cc_node_server_.Join();
@@ -148,6 +147,7 @@ int Sharder::Init(
     LocalCcShards *local_shards,
     std::unique_ptr<TxLog> log_agent,
     const std::string &local_path,
+    const std::string &cluster_config_path,
     const uint16_t rep_group_cnt,
     bool enable_brpc_builtin_services,
     bool fork_host_manager)
@@ -234,8 +234,7 @@ int Sharder::Init(
             GetLogAgent(),
             node_conf.host_name_,
             GET_LOG_REPLAY_RPC_PORT(node_conf.port_));
-        if (!txservice_skip_wal &&
-            log_replay_server_.AddService(recovery_service_.get(),
+        if (log_replay_server_.AddService(recovery_service_.get(),
                                           brpc::SERVER_DOESNT_OWN_SERVICE) != 0)
         {
             LOG(ERROR)
@@ -309,8 +308,7 @@ int Sharder::Init(
     // The log replay server uses local_port+3 for receiving streams from log
     // groups.
 
-    if (!txservice_skip_wal &&
-        log_replay_server_.Start(GET_LOG_REPLAY_RPC_PORT(port_),
+    if (log_replay_server_.Start(GET_LOG_REPLAY_RPC_PORT(port_),
                                  &server_options) != 0)
     {
         LOG(ERROR) << "Failed to start the log replay server.";
@@ -331,37 +329,46 @@ int Sharder::Init(
             DLOG(INFO) << "Forking host manager process with " << *hm_bin_path
                        << ", the hm will be listening on " << hm_ip_ << ":"
                        << hm_port_;
-            int pid = fork();
-            if (pid == -1)
+
+            std::string log_path = local_path + "/tx_service";
+            std::string arg_ip = "--hm_ip=" + hm_ip_;
+            std::string arg_port = "--hm_port=" + std::to_string(hm_port_);
+            std::string arg_raft_log = "--hm_raft_log_path=" + log_path;
+            std::string arg_brpc_builtin =
+                "--enable_brpc_builtin_services=" +
+                (enable_brpc_builtin_services ? std::string("true")
+                                              : std::string("false"));
+            std::string arg_cluster_config_path =
+                "--cluster_config_path=" + cluster_config_path;
+#if BRPC_WITH_GLOG
+            std::string arg_log_dir = "--log_dir=" + FLAGS_log_dir;
+#endif
+
+            char *argv[] = {
+                const_cast<char *>("host_manager"),
+                const_cast<char *>(arg_ip.c_str()),
+                const_cast<char *>(arg_port.c_str()),
+                const_cast<char *>(arg_raft_log.c_str()),
+                const_cast<char *>(arg_brpc_builtin.c_str()),
+                const_cast<char *>(arg_cluster_config_path.c_str()),
+#if BRPC_WITH_GLOG
+                const_cast<char *>(arg_log_dir.c_str()),
+#endif
+                nullptr
+            };
+
+            pid_t pid;
+            int ret = posix_spawn(
+                &pid, hm_bin_path->c_str(), nullptr, nullptr, argv, environ);
+            if (ret != 0)
             {
-                LOG(FATAL) << "Failed to fork host manager process";
+                LOG(FATAL) << "Failed to spawn host manager process, errno: "
+                           << ret << " (" << strerror(ret) << ")";
                 return -1;
             }
-            if (pid == 0)
+            else
             {
-                std::string log_path = local_path + "/tx_service";
-
-                if (execl(
-                        hm_bin_path->c_str(),
-                        "host_manager",
-                        ("--hm_ip=" + hm_ip_).c_str(),
-                        ("--hm_port=" + std::to_string(hm_port_)).c_str(),
-                        ("--hm_raft_log_path=" + log_path).c_str(),
-                        ("--enable_brpc_builtin_services=" +
-                         (enable_brpc_builtin_services ? std::string("true")
-                                                       : std::string("false")))
-                            .c_str(),
-#if BRPC_WITH_GLOG
-                        ("--log_dir=" + FLAGS_log_dir).c_str(),
-#endif
-                        (char *) 0) == -1)
-                {
-                    LOG(ERROR)
-                        << "Failed to start host manager process, errno: "
-                        << errno;
-                }
-                // Should not reach here if exec succeeds.
-                std::exit(0);
+                DLOG(INFO) << "Spawned host manager process with PID: " << pid;
             }
         }
 #endif
@@ -469,6 +476,8 @@ int Sharder::Init(
             LOG(ERROR) << "Failed to notify host manager on node start.";
             return -1;
         }
+
+        hm_channel_init_.store(true, std::memory_order_release);
     }
     else
     {
@@ -487,6 +496,13 @@ int Sharder::Init(
                                   -1,
                                   start_ts,
                                   log_agent_interrupt_);
+        }
+        else
+        {
+            // Test env. Directly finish log replay.
+            Sharder::Instance().SetLeaderTerm(native_ng_, 1);
+            Sharder::Instance().SetCandidateTerm(native_ng_, -1);
+            Sharder::Instance().NodeGroupFinishRecovery(native_ng_);
         }
     }
 
@@ -746,12 +762,10 @@ void Sharder::WaitClusterReady()
                     recover_req->set_src_node_id(node_id_);
                     recover_req->set_node_group_id(ng_id);
 
-                    bool res =
-                        cc_stream_sender_->SendMessageToNg(ng_id, send_msg);
-                    if (!res)
-                    {
-                        UpdateLeaders();
-                    }
+                    cc_stream_sender_->SendMessageToNg(ng_id, send_msg);
+                    // Keep updating leaders to make sure that the request is
+                    // sent to the leader of each node group.
+                    UpdateLeaders();
                 }
             }
         }
@@ -764,6 +778,24 @@ void Sharder::WaitClusterReady()
             [this, ng_cnt]()
             { return recovered_leader_set_.size() == ng_cnt; });
     } while (!recovery_all_finished);
+}
+
+void Sharder::WaitNodeBecomeNativeGroupLeader()
+{
+    std::shared_lock<std::shared_mutex> cnf_lk(cluster_cnf_mux_);
+    uint32_t dest_node_id = Sharder::Instance().LeaderNodeId(native_ng_);
+    while (dest_node_id != node_id_)
+    {
+        DLOG(INFO) << "Waiting for node #" << node_id_
+                   << " to become the leader of native group " << native_ng_
+                   << " Current leader is node #" << dest_node_id << ".";
+        cnf_lk.unlock();
+        std::this_thread::sleep_for(std::chrono::milliseconds(100));
+        cnf_lk.lock();
+        dest_node_id = Sharder::Instance().LeaderNodeId(native_ng_);
+    }
+    DLOG(INFO) << "Node #" << node_id_ << " is now the leader of native group "
+               << native_ng_ << ".";
 }
 
 void Sharder::RecoverTx(uint64_t lock_tx_number,
@@ -814,6 +846,23 @@ bool Sharder::OnLeaderStop(uint32_t ng_id, int64_t term)
     return node->OnLeaderStop(term);
 }
 
+bool Sharder::Failover(const std::string &target_host,
+                       const uint16_t target_port,
+                       std::string &error_message)
+{
+    uint32_t node_group = txservice::Sharder::Instance().NativeNodeGroup();
+    std::shared_ptr<fault::CcNode> node;
+    {
+        std::shared_lock<std::shared_mutex> lk(cluster_cnf_mux_);
+        auto find_it = cluster_config_.cc_nodes_.find(node_group);
+        // TODO: is this always true when cluster config is changed?
+        assert(find_it != cluster_config_.cc_nodes_.end());
+        node = find_it->second;
+    }
+
+    return node->Failover(target_host, target_port, error_message);
+}
+
 bool Sharder::OnSnapshotReceived(const remote::OnSnapshotSyncedRequest *req)
 {
     std::shared_ptr<fault::CcNode> node;
@@ -858,6 +907,11 @@ void Sharder::CleanCcTable(const TableName &tabname)
 void Sharder::NotifyCheckPointer()
 {
     return local_shards_->NotifyCheckPointer();
+}
+
+Checkpointer *Sharder::GetCheckpointer()
+{
+    return local_shards_->GetTxService()->GetCheckpointer();
 }
 
 store::DataStoreHandler *Sharder::GetDataStoreHandler()
@@ -950,7 +1004,8 @@ size_t Sharder::GetLocalCcShardsCount()
     return local_shards_->Count();
 }
 
-std::unordered_map<uint32_t, std::vector<NodeConfig>> Sharder::AddNodeToCluster(
+std::unordered_map<uint32_t, std::vector<NodeConfig>>
+Sharder::AddNodeGroupToCluster(
     const std::vector<std::pair<std::string, uint16_t>> &new_nodes)
 {
     std::shared_lock<std::shared_mutex> lk(cluster_cnf_mux_);
@@ -961,8 +1016,22 @@ std::unordered_map<uint32_t, std::vector<NodeConfig>> Sharder::AddNodeToCluster(
     uint32_t new_node_id = 0;
     if (cluster_config_.nodes_configs_ != nullptr)
     {
-        for (auto &[nid, _] : *cluster_config_.nodes_configs_)
+        for (auto &[nid, node] : *cluster_config_.nodes_configs_)
         {
+            for (auto &new_node : new_nodes)
+            {
+                if (new_node.first == node.host_name_ &&
+                    new_node.second == node.port_)
+                {
+                    // The new added node is already in the cluster. Return
+                    // empty map to indicate the add node group to cluster
+                    // fails.
+                    LOG(ERROR) << "Add node group to cluster fails since the "
+                               << "new added node is already in the cluster";
+                    return std::unordered_map<uint32_t,
+                                              std::vector<NodeConfig>>();
+                }
+            }
             new_node_id = std::max(new_node_id, nid);
         }
         new_node_id++;
@@ -1009,23 +1078,49 @@ Sharder::RemoveNodeFromCluster(
 
     std::unordered_set<uint32_t> removed_ng_ids;
     std::unordered_set<uint32_t> removed_node_ids;
+
+    for (auto &it : *cluster_config_.nodes_configs_)
+    {
+        for (auto &rm_node : removed_nodes)
+        {
+            if (rm_node.first == it.second.host_name_ &&
+                rm_node.second == it.second.port_)
+            {
+                removed_node_ids.emplace(it.first);
+                break;
+            }
+        }
+    }
+    if (removed_node_ids.size() != removed_nodes.size())
+    {
+        LOG(ERROR) << "Remove node from cluster fails since some nodes are not "
+                   << "found in the cluster";
+        return std::unordered_map<uint32_t, std::vector<NodeConfig>>();
+    }
     for (auto &it : new_ng_configs)
     {
+        size_t remaining_candidate_node = 0;
         for (const NodeConfig &member : it.second)
         {
             if (member.is_candidate_)
             {
+                remaining_candidate_node++;
                 for (const auto &rm_node : removed_nodes)
                 {
                     if (rm_node.first == member.host_name_ &&
                         rm_node.second == member.port_)
                     {
-                        removed_ng_ids.emplace(it.first);
-                        removed_node_ids.emplace(member.node_id_);
+                        remaining_candidate_node--;
                         break;
                     }
                 }
             }
+        }
+
+        // If there's no remaining candidate node, remove the node group.
+        if (remaining_candidate_node == 0)
+        {
+            removed_ng_ids.emplace(it.first);
         }
     }
 
@@ -1038,8 +1133,8 @@ Sharder::RemoveNodeFromCluster(
 
     for (auto &ng_config : new_ng_configs)
     {
-        // Remove these nodes from other node groups where they are members.
-        for (auto member_it = std::next(ng_config.second.begin());
+        // Remove these nodes from node groups where they are members.
+        for (auto member_it = ng_config.second.begin();
              member_it != ng_config.second.end();)
         {
             if (removed_node_ids.find(member_it->node_id_) !=
@@ -1125,6 +1220,168 @@ void Sharder::RebalanceNgMembers(
     }
 }
 
+std::unordered_map<uint32_t, std::vector<NodeConfig>>
+Sharder::AddNodeGroupPeersToCluster(
+    uint32_t ng_id,
+    const std::vector<std::pair<std::string, uint16_t>> &new_nodes,
+    const std::vector<bool> &is_candidate)
+{
+    std::shared_lock<std::shared_mutex> lk(cluster_cnf_mux_);
+    // Make a copy of the current ng configs.
+    std::unordered_map<uint32_t, std::vector<NodeConfig>> new_ng_configs(
+        cluster_config_.ng_configs_);
+    uint32_t new_node_id = 0;
+    auto ng_it = new_ng_configs.find(ng_id);
+    assert(ng_it != new_ng_configs.end());
+    auto &members = ng_it->second;
+    for (size_t i = 0; i < new_nodes.size(); i++)
+    {
+        for (auto &node : members)
+        {
+            if (node.host_name_ == new_nodes[i].first &&
+                node.port_ == new_nodes[i].second)
+            {
+                LOG(ERROR) << "Add peers to node group fails since the "
+                           << "new added node is already in the node group";
+                return std::unordered_map<uint32_t, std::vector<NodeConfig>>();
+            }
+        }
+        while (cluster_config_.nodes_configs_->find(new_node_id) !=
+               cluster_config_.nodes_configs_->end())
+        {
+            new_node_id += 1;
+        }
+        members.emplace_back(new_node_id,
+                             new_nodes[i].first,
+                             new_nodes[i].second,
+                             is_candidate[i]);
+        new_node_id += 1;
+    }
+    return new_ng_configs;
+}
+
+void Sharder::UpdateInMemoryClusterConfig(
+    const std::unordered_map<NodeGroupId, std::vector<NodeConfig>>
+        &new_ng_configs,
+    std::shared_ptr<std::unordered_map<uint32_t, NodeConfig>> new_nodes_sptr,
+    uint64_t version)
+{
+    {
+        std::unique_lock<std::shared_mutex> lk(cluster_cnf_mux_);
+        if (cluster_config_.version_ >= version)
+        {
+            return;
+        }
+
+        LOG(INFO) << "Updating in memory cluster config to version " << version;
+        // print out new_ng_configs
+        LOG(INFO) << "new_ng_configs:";
+        for (const auto &[ng_id, nodes] : new_ng_configs)
+        {
+            LOG(INFO) << "ng_id: " << ng_id;
+            for (const auto &node : nodes)
+            {
+                LOG(INFO) << "node_id: " << node.node_id_
+                          << ", host_name: " << node.host_name_
+                          << ", port: " << node.port_;
+            }
+        }
+
+        // First remove node groups that are removed from the cluster.
+        std::unordered_set<uint32_t> removed_ngs;
+        for (const auto &[ng_id, _] : cluster_config_.ng_configs_)
+        {
+            if (new_ng_configs.find(ng_id) == new_ng_configs.end())
+            {
+                // This ng is removed from new cluster configs
+                removed_ngs.emplace(ng_id);
+            }
+        }
+        for (auto ng_id : removed_ngs)
+        {
+            cluster_config_.ng_configs_.erase(ng_id);
+        }
+
+        for (auto &ng_pair : new_ng_configs)
+        {
+            bool is_member = false;
+            for (auto &node : ng_pair.second)
+            {
+                if (node.node_id_ == node_id_)
+                {
+                    is_member = true;
+                    break;
+                }
+            }
+            if (is_member)
+            {
+                // If this node is a member of a new node group, create
+                // cc node for it.
+                auto cc_node_it = cluster_config_.cc_nodes_.find(ng_pair.first);
+                if (cc_node_it == cluster_config_.cc_nodes_.end())
+                {
+                    cluster_config_.cc_nodes_.try_emplace(
+                        ng_pair.first,
+                        std::make_shared<fault::CcNode>(
+                            ng_pair.first,
+                            node_id_,
+                            *local_shards_,
+                            log_agent_->LogGroupCount()));
+                }
+            }
+
+            // Update ng config in cluster config
+            auto ng_cnf_it =
+                cluster_config_.ng_configs_.try_emplace(ng_pair.first);
+            ng_cnf_it.first->second = ng_pair.second;
+        }
+        cluster_config_.version_ = version;
+        cluster_config_.nodes_configs_ = std::move(new_nodes_sptr);
+        if (cluster_config_.ng_ids_.use_count() == 1)
+        {
+            cluster_config_.ng_ids_->clear();
+        }
+        else
+        {
+            cluster_config_.ng_ids_ = std::make_shared<std::set<NodeGroupId>>();
+        }
+        for (auto &[ng_id, _] : cluster_config_.ng_configs_)
+        {
+            cluster_config_.ng_ids_->emplace(ng_id);
+        }
+    }
+
+    assert(cluster_config_.nodes_configs_->size() > 0);
+    cc_stream_sender_->UpdateRemoteNodes(*cluster_config_.nodes_configs_);
+    cc_stream_sender_->NotifyConnectStream();
+
+    // remove node if it is in subscribed standby node list.
+    WaitableCc remove_subscribed_standby_cc(
+        [](CcShard &ccs)
+        {
+            auto nodes_configs = Sharder::Instance().GetAllNodesConfigs();
+            std::vector<uint32_t> subscribed_standby_nodes =
+                ccs.GetSubscribedStandbys();
+            for (auto node_id : subscribed_standby_nodes)
+            {
+                if (nodes_configs->find(node_id) == nodes_configs->end())
+                {
+                    ccs.RemoveSubscribedStandby(node_id);
+                }
+            }
+
+            return true;
+        },
+        local_shards_->Count());
+
+    for (size_t i = 0; i < local_shards_->Count(); i++)
+    {
+        local_shards_->EnqueueToCcShard(i, &remove_subscribed_standby_cc);
+    }
+
+    remove_subscribed_standby_cc.Wait();
+}
+
 void Sharder::UpdateClusterConfig(
     const std::unordered_map<NodeGroupId, std::vector<NodeConfig>>
         &new_ng_configs,
@@ -1143,12 +1400,19 @@ void Sharder::UpdateClusterConfig(
     // Since sharder worker is a single thread worker, we don't need to worry
     // about cluster config being updated by multiple threads at the same time.
     sharder_worker_->SubmitWork(
-        [this, &new_ng_configs, cc_req, cc_shard, version]
+        [this, new_ng_configs, cc_req, cc_shard, version]
         {
+            if (ClusterConfigVersion() >= version)
+            {
+                // If the given version is older than current version, do
+                // nothing.
+                cc_shard->Enqueue(cc_req);
+                return;
+            }
             remote::HostMangerService_Stub stub(&hm_channel_);
             brpc::Controller cntl;
-            remote::UpdateNodeGroupConfigRequest req;
-            remote::UpdateNodeGroupConfigResponse resp;
+            remote::UpdateClusterConfigRequest req;
+            remote::UpdateClusterConfigResponse resp;
 
             for (const auto &ng_config : new_ng_configs)
             {
@@ -1179,11 +1443,10 @@ void Sharder::UpdateClusterConfig(
             // auto last_term = LeaderTerm(node_id_);
             // assert(node_id_ == native_ng_);
             // req.set_ng_id(node_id_);
-            auto last_term = LeaderTerm(native_ng_);
             req.set_ng_id(native_ng_);
             req.set_config_version(version);
             cntl.set_timeout_ms(10000);
-            stub.UpdateNodeGroupConfigs(&cntl, &req, &resp, nullptr);
+            stub.UpdateClusterConfig(&cntl, &req, &resp, nullptr);
             if (cntl.Failed())
             {
                 LOG(ERROR) << "RPC to host manager to update node group "
@@ -1200,87 +1463,8 @@ void Sharder::UpdateClusterConfig(
                 return;
             }
 
-            {
-                std::unique_lock<std::shared_mutex> lk(cluster_cnf_mux_);
-                bool truncate_log = false;
-                // First remove node groups that are removed from the cluster.
-                std::unordered_set<uint32_t> removed_ngs;
-                for (const auto &[ng_id, _] : cluster_config_.ng_configs_)
-                {
-                    if (new_ng_configs.find(ng_id) == new_ng_configs.end())
-                    {
-                        // This ng is removed from new cluster configs
-                        if (ng_id == native_ng_)
-                        {
-                            // Truncate previous log if this ng is also removed.
-                            truncate_log = true;
-                        }
-                        removed_ngs.emplace(ng_id);
-                    }
-                }
-                for (auto ng_id : removed_ngs)
-                {
-                    cluster_config_.ng_configs_.erase(ng_id);
-                }
-
-                if (truncate_log)
-                {
-                    log_agent_->RemoveCcNodeGroup(native_ng_, last_term);
-                }
-
-                for (auto &ng_pair : new_ng_configs)
-                {
-                    bool is_member = false;
-                    for (auto &node : ng_pair.second)
-                    {
-                        if (node.node_id_ == node_id_)
-                        {
-                            is_member = true;
-                            break;
-                        }
-                    }
-                    if (is_member)
-                    {
-                        // If this node is a member of a new node group, create
-                        // cc node for it.
-                        auto cc_node_it =
-                            cluster_config_.cc_nodes_.find(ng_pair.first);
-                        if (cc_node_it == cluster_config_.cc_nodes_.end())
-                        {
-                            cluster_config_.cc_nodes_.try_emplace(
-                                ng_pair.first,
-                                std::make_shared<fault::CcNode>(
-                                    ng_pair.first,
-                                    node_id_,
-                                    *local_shards_,
-                                    log_agent_->LogGroupCount()));
-                        }
-                    }
-
-                    // Update ng config in cluster config
-                    auto ng_cnf_it =
-                        cluster_config_.ng_configs_.try_emplace(ng_pair.first);
-                    ng_cnf_it.first->second = ng_pair.second;
-                }
-                cluster_config_.version_ = version;
-                cluster_config_.nodes_configs_ = std::move(new_nodes_sptr);
-                if (cluster_config_.ng_ids_.use_count() == 1)
-                {
-                    cluster_config_.ng_ids_->clear();
-                }
-                else
-                {
-                    cluster_config_.ng_ids_ =
-                        std::make_shared<std::set<NodeGroupId>>();
-                }
-                for (auto &[ng_id, _] : cluster_config_.ng_configs_)
-                {
-                    cluster_config_.ng_ids_->emplace(ng_id);
-                }
-            }
-
-            cc_stream_sender_->UpdateRemoteNodes(new_nodes_configs);
-            cc_stream_sender_->NotifyConnectStream();
+            UpdateInMemoryClusterConfig(
+                new_ng_configs, std::move(new_nodes_sptr), version);
 
             cc_shard->Enqueue(cc_req);
         });

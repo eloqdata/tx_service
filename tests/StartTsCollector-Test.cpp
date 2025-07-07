@@ -23,9 +23,7 @@
 #include <filesystem>
 #include <iostream>
 
-#include "../../log_service/include/log_server.h"
-#include "mock/mock_catalog_factory.h"
-#include "mock/mock_log_agent.h"
+#include "include/mock/mock_catalog_factory.h"
 #include "store/int_mem_store.h"
 #include "tx_execution.h"
 #include "tx_service.h"
@@ -48,9 +46,13 @@ uint64_t cluster_config_version = 2;
 TEST_CASE("TxStartTsCollector GlobalMinSiTxStartTs unit test",
           "[start-ts-collector]")
 {
+    std::cout << "===== TEST STARTING =====" << std::endl;
+
     //== Create and start TxService
     std::filesystem::path output_dir = std::filesystem::path("/tmp/");
     output_dir.append("test_output");
+    std::string cluster_config_path =
+        output_dir.string() + "/cluster_config.json";
     std::filesystem::create_directory(output_dir);
     // braft need: must add protocol
     std::string local_path = "local://" + output_dir.string();
@@ -108,7 +110,8 @@ TEST_CASE("TxStartTsCollector GlobalMinSiTxStartTs unit test",
                        nullptr,
                        tx_service_conf,
                        nullptr,
-                       local_path);
+                       local_path,
+                       cluster_config_path);
 
     TxStartTsCollector::Instance().SetDelaySeconds(2);
 

@@ -22,6 +22,7 @@
 #pragma once
 
 #include <cstdint>
+#include <map>
 #include <memory>
 #include <string>
 #include <unordered_map>
@@ -41,7 +42,6 @@
 #include "tx_key.h"
 #include "tx_operation_result.h"
 #include "tx_record.h"
-#include "tx_service_metrics.h"
 #include "type.h"
 
 namespace txservice
@@ -148,7 +148,8 @@ public:
 
     // in-parameters
     const TxKey *key_{};
-    TableName table_name_{empty_sv, TableType::RangePartition};
+    TableName table_name_{
+        empty_sv, TableType::RangePartition, TableEngine::None};
     TxRecord *rec_{};
     bool execute_immediately_{true};
 
@@ -271,7 +272,8 @@ public:
      */
     void Advance(TransactionExecution *txm);
 
-    TableName range_table_name_{empty_sv, TableType::RangePartition};
+    TableName range_table_name_{
+        empty_sv, TableType::RangePartition, TableEngine::None};
     // RangeRecord range_rec_;
     CcHandlerResult<ReadKeyResult> *lock_range_result_{nullptr};
 
@@ -382,16 +384,28 @@ struct UpdateTxnStatus : TransactionOperation
 
 struct PostProcessOp : TransactionOperation
 {
-    PostProcessOp(TransactionExecution *txm);
+    explicit PostProcessOp(TransactionExecution *txm);
     void Reset(size_t write_cnt,
                size_t data_read_cnt,
-               size_t catalog_range_read_cnt,
+               size_t meta_data_read_cnt,
+               size_t catalog_write_all_cnt,
                bool forward_to_update_txn_op);
     void Forward(TransactionExecution *txm) override;
 
+    CcHandlerResult<PostProcessResult> *stage_;
+
     bool forward_to_update_txn_op_{true};
+
+    // Release data read lock.
     CcHandlerResult<PostProcessResult> hd_result_;
-    CcHandlerResult<PostProcessResult> catalog_range_hd_result_;
+
+    // Release meta data read lock. AcquireAll/PostAcquireAll should be nested
+    // inside cluster config lock.
+    CcHandlerResult<PostProcessResult> meta_data_hd_result_;
+
+    // Release catalog all write lock (Alter table inside a DML transaction).
+    size_t catalog_write_all_cnt_{0};
+    CcHandlerResult<PostProcessResult> catalog_post_all_hd_result_;
 };
 
 struct InitTxnOperation : TransactionOperation
@@ -535,7 +549,8 @@ struct ScanNextOperation : TransactionOperation
     }
 
     CcHandlerResult<RangeScanSliceResult> slice_hd_result_;
-    TableName range_table_name_{empty_sv, TableType::RangePartition};
+    TableName range_table_name_{
+        empty_sv, TableType::RangePartition, TableEngine::None};
     RangeRecord range_rec_;
     CcHandlerResult<ReadKeyResult> lock_range_result_;
     CcHandlerResult<PostProcessResult> unlock_range_result_;
@@ -555,7 +570,7 @@ struct AcquireAllOp : public TransactionOperation
     /**
      * @brief Get the max commit/validate ts of the all result
      */
-    uint64_t MaxTs();
+    uint64_t MaxTs() const;
 
     bool IsDeadlock() const;
 
@@ -589,6 +604,34 @@ struct PostWriteAllOp : public TransactionOperation
     std::vector<TxRecord *> recs_;
     OperationType op_type_{OperationType::Upsert};
     PostWriteType write_type_{PostWriteType::PrepareCommit};
+};
+
+/**
+ * Used in DML commit context. Combine {lock cluster, acquire all intent,
+ * acquire all lock} together.
+ *
+ * Here acquire all intent serves two purposes: 1) Prevent dead lock on single
+ * catalog key; 2) Prepare for post all intent. Post all intent is used to build
+ * TableSchema object.
+ */
+struct CatalogAcquireAllOp : public TransactionOperation
+{
+    explicit CatalogAcquireAllOp(TransactionExecution *txm);
+    void Reset();
+    void SetCatalogWriteSet(const std::map<TxKey, ReplicaWriteSetEntry> &wset);
+    uint64_t MaxTs() const;
+    void Forward(TransactionExecution *txm) override;
+
+    bool succeed_;
+    TransactionOperation *op_;
+
+    ReadLocalOperation lock_cluster_config_op_;
+    AcquireAllOp acquire_all_intent_op_;
+    AcquireAllOp acquire_all_lock_op_;
+
+private:
+    CcHandlerResult<ReadKeyResult> read_cluster_result_;
+    ClusterConfigRecord cluster_conf_rec_;
 };
 
 struct KickoutDataOp : public TransactionOperation
@@ -667,8 +710,13 @@ struct AsyncOp : public TransactionOperation
     void Forward(TransactionExecution *txm) override;
     void Reset();
 
-    std::function<void()> op_func_;
+    std::function<void(AsyncOp<ResultType> &async_op)> op_func_;
+
+    // hd_result_ represents the async result, and op_func_ should finish it
+    // after completes its work.
     CcHandlerResult<ResultType> hd_result_;
+
+    // An optional executor.
     std::thread worker_thread_;
 };
 
@@ -676,6 +724,7 @@ struct SchemaOp : public TransactionOperation
 {
     SchemaOp() = delete;
     SchemaOp(const std::string_view table_name_sv,
+             txservice::TableEngine table_engine,
              const std::string &current_image,
              const std::string &dirty_image,
              uint64_t schema_ts,
@@ -700,6 +749,7 @@ struct UpsertTableOp : public SchemaOp
 {
     UpsertTableOp() = delete;
     UpsertTableOp(const std::string_view table_name_str,
+                  txservice::TableEngine table_engine,
                   const std::string &current_image,
                   uint64_t curr_schema_ts,
                   const std::string &dirty_image,
@@ -707,6 +757,7 @@ struct UpsertTableOp : public SchemaOp
                   TransactionExecution *txm);
 
     void Reset(const std::string_view table_name_str,
+               txservice::TableEngine table_engine,
                const std::string &current_image,
                uint64_t curr_schema_ts,
                const std::string &dirty_image,
@@ -807,6 +858,33 @@ private:
     // Due to term or other error, called ForceToFinish to terminate this
     // operation
     bool is_force_finished;
+};
+
+/**
+ * Used in DML commit context to flush updated schema images to storage, and
+ * clean schema log. Its function is similar to Checkpoint. However, since there
+ * is not a periodic retry thread, the commit thread should **keep retry** until
+ * succeed or leader changed.
+ */
+struct FlushUpdateTableOp : public TransactionOperation
+{
+    explicit FlushUpdateTableOp(TransactionExecution *txm);
+
+    void Reset();
+    void Forward(TransactionExecution *txm) override;
+
+    TransactionOperation *op_;
+
+    // Build and install dirty table schemas.
+    PostWriteAllOp post_all_intent_op_;
+
+    AsyncOp<Void> update_kv_table_op_;
+
+    bool need_write_log_;  // Disable wal log to speedup jstests.
+
+    WriteToLogOp commit_log_op_;
+
+    WriteToLogOp clean_log_op_;
 };
 
 struct SleepOperation : TransactionOperation
@@ -1035,7 +1113,8 @@ struct ObjectCommandOp : TransactionOperation
     void Reset(const TableName *table_name,
                const TxKey *key,
                TxCommand *command,
-               bool auto_commit = false);
+               bool auto_commit = false,
+               bool always_redirect = false);
     void Forward(TransactionExecution *txm) override;
 
     const TableName *table_name_{};
@@ -1045,7 +1124,7 @@ struct ObjectCommandOp : TransactionOperation
     CcHandlerResult<ObjectCommandResult> hd_result_;
 
     bool auto_commit_{};
-
+    bool always_redirect_{};
 #ifdef RANGE_PARTITION_ENABLED
     CcHandlerResult<ReadKeyResult> *lock_range_result_;
 #else
@@ -1249,7 +1328,6 @@ public:
                TransactionExecution *txm);
     void Forward(TransactionExecution *txm) override;
 
-#ifndef RANGE_PARTITION_ENABLED
     /**
      * Publish is_migrating to all node groups.
      * And finish handler_result after receiving all rpc responses.
@@ -1257,7 +1335,6 @@ public:
     static void SendBucketsMigratingRpc(bool is_migrating,
                                         bool &result,
                                         bool &rpc_failed);
-#endif
 
     std::unordered_map<NodeGroupId, BucketMigrateInfo> bucket_migrate_infos_;
     /**
@@ -1267,12 +1344,11 @@ public:
      * == pub_buckets_migrate_begin_op_ #HashPartition
      * 2. acquire_cluster_config_write_op_
      * 3. update_cluster_config_log_op_
-     * 4. flush_new_cluster_config_op_
-     * 5. install_cluster_config_op_
-     * 6. notify_migration_op_
-     * 7. check_migration_is_finished_op_
+     * 4. install_cluster_config_op_
+     * 5. notify_migration_op_
+     * 6. check_migration_is_finished_op_
      * ==  pub_buckets_migrate_end_op_ #HashPartition
-     * 8. clean_log_op_
+     * 7. clean_log_op_
      *
      * For remove node, the order is
      * 1. prepare_log_op_
@@ -1281,10 +1357,9 @@ public:
      * 3. check_migration_is_finished_op_
      * 4. acquire_cluster_config_write_op_
      * 5. update_cluster_config_log_op_
-     * 6. flush_new_cluster_config_op_
-     * 7. install_cluster_config_op_
+     * 6. install_cluster_config_op_
      * ==  pub_buckets_migrate_end_op_ #HashPartition
-     * 8. clean_log_op_
+     * 7. clean_log_op_
      *
      * Basically for add node we're adding new nodes into the cluster first,
      * then migrate data to the new nodes. For remove node we're migrating data
@@ -1316,12 +1391,6 @@ public:
     WriteToLogOp update_cluster_config_log_op_;
 
     /**
-     * Flush the new cluster config to kv storage. When the new nodes are
-     * started, they be starting with the new cluster config.
-     */
-    AsyncOp<Void> flush_new_cluster_config_op_;
-
-    /**
      * Release the cluster config lock. Install the new cluster config on all
      * ngs. This will establish new cc streams and raft nodes. After this stage,
      * the CP will be able to start new nodes or remove old nodes.
@@ -1329,7 +1398,7 @@ public:
     PostWriteAllOp install_cluster_config_op_;
 
     /**
-     * @brief Notify all node group to start bucekt migration.
+     * @brief Notify all node group to start bucket migration.
      */
     NotifyStartMigrateOp notify_migration_op_;
 
@@ -1340,7 +1409,6 @@ public:
 
     WriteToLogOp clean_log_op_;
 
-#ifndef RANGE_PARTITION_ENABLED
     /**
      * @brief Before buckets migrating, notify all nodes that reading bucket
      * info from RangeBucketCcMap instead of no-lock reading
@@ -1355,7 +1423,6 @@ public:
      * bucket info from buckets_infos directly.
      */
     AsyncOp<Void> pub_buckets_migrate_end_op_;
-#endif
 
 private:
     void FillPrepareLogRequest(TransactionExecution *txm);
@@ -1491,7 +1558,8 @@ private:
     std::unordered_map<TableName, std::unordered_set<int32_t>>::const_iterator
         kickout_tbl_it_;
     std::unordered_set<int32_t>::const_iterator kickout_range_it_;
-    TableName kickout_table_{std::string(""), TableType::Primary};
+    TableName kickout_table_{
+        std::string(""), TableType::Primary, TableEngine::None};
 #else
     std::unordered_map<TableName, bool> table_snapshot_;
     std::unordered_map<TableName, bool>::const_iterator kickout_tbl_it_;

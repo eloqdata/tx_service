@@ -146,7 +146,7 @@ public:
         return is_ptr_ ? *rec_ptr_ : *rec_obj_;
     }
 
-    void SetRecord(std::shared_ptr<ValueT> &ptr)
+    void SetRecord(std::shared_ptr<ValueT> ptr)
     {
         is_ptr_ = true;
         rec_ptr_ = ptr;

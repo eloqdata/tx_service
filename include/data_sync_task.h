@@ -24,9 +24,14 @@
 #include <bthread/condition_variable.h>
 
 #include <condition_variable>
+#include <cstdint>
+#include <deque>
 #include <functional>
 #include <mutex>
+#include <unordered_map>
 
+#include "absl/container/flat_hash_map.h"
+#include "catalog_factory.h"
 #include "cc_handler_result.h"
 #include "cc_req_misc.h"
 #include "sharder.h"
@@ -37,10 +42,16 @@ namespace txservice
 {
 extern bool txservice_skip_wal;
 
+struct DataSyncTask;
+
 struct DataSyncStatus
 {
-    explicit DataSyncStatus(bool need_truncate_log)
-        : need_truncate_log_(need_truncate_log)
+    explicit DataSyncStatus(NodeGroupId node_group_id,
+                            int64_t node_group_term,
+                            bool need_truncate_log)
+        : node_group_id_(node_group_id),
+          node_group_term_(node_group_term),
+          need_truncate_log_(need_truncate_log)
     {
     }
 
@@ -50,18 +61,47 @@ struct DataSyncStatus
         need_truncate_log_ = false;
     }
 
+    void PersistKV();
+
+    bool PersistKV(
+        const std::string &kv_table_name,
+        absl::flat_hash_map<size_t, std::vector<UpdateCceCkptTsCc::CkptTsEntry>>
+            &&cce_entries,
+        std::shared_ptr<DataSyncTask> task,
+        bool all_task_finished);
+
+    NodeGroupId node_group_id_;
+    int64_t node_group_term_;
     int32_t unfinished_tasks_{0};
     bool all_task_started_{false};
     CcErrorCode err_code_{CcErrorCode::NO_ERROR};
     // True if need to truncate redo log when all tasks succeed.
     bool need_truncate_log_{true};
     uint64_t truncate_log_ts_{0};
+    // Collect from each data sync task.
+    size_t total_entry_cnt_{0};
+
+    // If kvstore need do PersistKV after PutAll, we must update ccentry's
+    // ckpt_ts after PersistKV done. Since we do data sync in small baches and
+    // if PersistKV is called every time PutAll is done, it will cause excessive
+    // write pressure on KVStore. So, we can accumulate a large batch of data
+    // and then call PersistKV at once.
+    std::mutex task_mux_;
+    std::vector<std::shared_ptr<DataSyncTask>> tasks_;
+    absl::flat_hash_map<
+        size_t,
+        std::vector<std::vector<UpdateCceCkptTsCc::CkptTsEntry>>>
+        cce_entries_;
+    std::unordered_set<std::string> dedup_kv_table_names_;
+
     std::mutex mux_;
     std::condition_variable cv_;
 };
 
 struct TableRangeEntry;
 
+// On HashPartition, we handle DataSyncTask separatelly by core.
+// On RangePartition, we handle DataSyncTask separatelly by range.
 struct DataSyncTask
 {
 public:
@@ -79,7 +119,8 @@ public:
                  ,
                  std::function<bool(size_t)> filter_lambda,
                  bool forward_cache,
-                 bool is_standby_node_ckpt
+                 bool is_standby_node_ckpt,
+                 size_t worker_idx
 #endif
                  )
         : table_name_(table_name),
@@ -92,6 +133,7 @@ public:
           filter_lambda_(filter_lambda),
           forward_cache_(forward_cache),
           is_standby_node_ckpt_(is_standby_node_ckpt),
+          worker_idx_(worker_idx),
 #endif
           status_(status),
           is_dirty_(is_dirty),
@@ -150,6 +192,10 @@ public:
         SCAN_ERROR,
         // Failed on flush data
         FLUSH_ERROR,
+        // Term mismatch
+        TERM_MISMATCH,
+        // Failed to persist data
+        PERSIST_KV_ERROR,
     };
 
     bthread::Mutex flight_task_mux_;
@@ -160,6 +206,7 @@ public:
     std::function<bool(size_t)> filter_lambda_;
     bool forward_cache_{false};
     bool is_standby_node_ckpt_{false};
+    size_t worker_idx_;
 #endif
 
     std::shared_ptr<DataSyncStatus> status_{nullptr};
@@ -183,6 +230,12 @@ public:
     bool export_base_table_items_{false};
     uint64_t tx_number_{0};
 #endif
+
+    bthread::Mutex update_cce_mux_;
+    std::string kv_table_name_;
+    absl::flat_hash_map<size_t, std::vector<UpdateCceCkptTsCc::CkptTsEntry>>
+        cce_entries_;
+    // std::vector<UpdateCceCkptTsCc::FlushTaskEntry> flush_task_entries_;
 };
 
 }  // namespace txservice

@@ -33,7 +33,7 @@ using namespace std::chrono_literals;
 namespace txservice
 {
 DeadLockCheck *DeadLockCheck::inst_ = nullptr;
-uint64_t DeadLockCheck::time_interval_ = 5 * 1000000;
+uint64_t DeadLockCheck::time_interval_ = 5 * 1000000;  // 5 seconds
 CcRequestPool<AbortTransactionCc> abort_tran_pool;
 
 DeadLockCheck::DeadLockCheck(LocalCcShards &local_shards)
@@ -57,6 +57,11 @@ void DeadLockCheck::MergeRemoteWaitingLockInfo(const tr::DeadLockResponse *rsp)
 {
     uint32_t node_id = rsp->node_id();
     std::unique_lock<std::mutex> lock(inst_->mutex_);
+    // check round match
+    if (rsp->check_round() != inst_->check_round_)
+    {
+        return;
+    }
 
     for (int i = 0; i < rsp->block_entry_size(); i++)
     {
@@ -164,6 +169,9 @@ void DeadLockCheck::GatherLockDependancy()
     entry_locked_txid_map_.clear();
     txid_waited_entry_map_.clear();
     txid_ety_count_map_.clear();
+    // pass round to remote node and match the round when processing response
+    check_round_++;
+    CheckDeadLockResult &local_result = dead_lock_cc_->GetDeadLockResult();
 
     // Send dead lock request to local and remote nodes
     for (uint32_t ng_id : *all_node_groups)
@@ -179,7 +187,7 @@ void DeadLockCheck::GatherLockDependancy()
         if (node_id == Sharder::Instance().NodeId())
         {
             reply_map_.try_emplace(node_id, false);
-            dead_lock_cc_->GetDeadLockResult().Reset();
+            local_result.Reset();
             for (size_t i = 0; i < local_shards_.Count(); i++)
             {
                 local_shards_.EnqueueCcRequest(i, dead_lock_cc_.get());
@@ -197,6 +205,7 @@ void DeadLockCheck::GatherLockDependancy()
 
             tr::DeadLockRequest *dl = send_msg.mutable_dead_lock_request();
             dl->set_src_node_id(Sharder::Instance().NodeId());
+            dl->set_check_round(check_round_);
             bool hr =
                 Sharder::Instance().GetCcStreamSender()->SendMessageToNode(
                     node_id, send_msg);
@@ -210,9 +219,20 @@ void DeadLockCheck::GatherLockDependancy()
 
     // Wait all nodes to finish dead check and return data. If exceed the half
     // of interval time, this time for dead lock will be neglect
-    con_var_.wait_for(lk,
-                      std::chrono::microseconds(time_interval_ / 2),
-                      [this]() { return node_unfinished_ == 0 || stop_; });
+    do
+    {
+        con_var_.wait_for(lk,
+                          std::chrono::microseconds(time_interval_ / 2),
+                          [&]()
+                          {
+                              return local_result.unfinish_count_.load(
+                                         std::memory_order_relaxed) == 0 &&
+                                         node_unfinished_ == 0 ||
+                                     stop_;
+                          });
+    } while (local_result.unfinish_count_.load(std::memory_order_relaxed) !=
+                 0 &&
+             !stop_);
 
     if (stop_)
     {
@@ -222,7 +242,7 @@ void DeadLockCheck::GatherLockDependancy()
     if (node_unfinished_ > 0)
     {
         LOG(INFO) << "[Global dead lock detector]: fails to receive lock "
-                     "waiting information from node. Failed nodes: "
+                     "waiting information from node. Failed nodes count: "
                   << node_unfinished_;
         return;
     }
@@ -280,142 +300,134 @@ std::map<TxEdge, int32_t, EdgeLess> DeadLockCheck::GenerateTxWaitGraph()
     return map_edge;
 }
 
-// This method will traverse all edge and find if there has circle from one edge
-// to other edge and reback to the visited edge.
-// The input map is the edges and the sign that show if the edge has been
-// visited.
-// The return value is the multi groups of edges that make the dead lock circle.
+// Traverse the wait-for graph to detect deadlock cycles using depth-first
+// search.
+//
+// In the transaction semantics:
+// - A "TxEdge" represents a waiting relationship where:
+//   tx_wait_ = ID of transaction that is waiting to acquire a lock on an entry
+//   tx_lock_ = ID of transaction that currently holds the lock on that entry
+// - The wait-for graph maps these relationships where an edge from tx_wait_ to
+//   tx_lock_ means "transaction tx_wait_ is waiting for a lock held by
+//   transaction tx_lock_"
+// - A cycle in this graph represents a deadlock situation
 std::vector<std::vector<TxEdge>> DeadLockCheck::DetectDeadLock(
-    std::map<TxEdge, int32_t, EdgeLess> &map_edge)
+    std::map<TxEdge, int32_t, EdgeLess> &graph)
 {
-    // iround used to show it is which time to traverse map_edge from the first
-    // edge to last edge. this value will save it into the second parameter in
-    // map_edge. Its usage is to show if the edge has been visited at his time.
-    // If not, it can not be a dead lock cycle. If same, it will judge it has
-    // multi paths or dead lock cycle.
-    int32_t iround = 1;
-    std::vector<std::vector<TxEdge>> vct_v_edge;
-    for (auto it_edge = map_edge.begin(); it_edge != map_edge.end(); it_edge++)
+    // Iterator type for edges
+    using EdgeIt = std::map<TxEdge, int32_t, EdgeLess>::iterator;
+
+    int visit_round = 1;
+    std::vector<std::vector<TxEdge>> cycles;
+
+    // Try each edge in the wait-for graph as a DFS root
+    for (EdgeIt root_it = graph.begin(); root_it != graph.end(); ++root_it)
     {
-        // If this edge has been visited, continue.
-        if (it_edge->second > 0)
+        // Unpack the edge and its visit marker
+        const TxEdge &root_edge = root_it->first;
+        int32_t &root_visit_mark = root_it->second;
+
+        // Skip if already visited in a previous round
+        if (root_visit_mark > 0)
         {
             continue;
         }
 
-        // To Judge if here has circle or only it has multi paths from an edge
-        // to other edges.
-        std::unordered_set<TxEdge, EdgeHash, EdgeEqual> set_dup;
-        // Here the traverse is depth-first, this vector will be used as stack
-        // and save the iterators of every layer. It will got to the depth layer
-        // until no edges or visited edges. Then reback upper layer and move to
-        // next edge until all related edges have been visited.
-        std::vector<std::map<TxEdge, int32_t, EdgeLess>::iterator> vct_iter;
-        it_edge->second = iround;
-        // Push the first layer
-        vct_iter.push_back(it_edge);
-        set_dup.insert(it_edge->first);
-        // The current layer's locked transaction will be as the waiting
-        // transaction of next layer.
-        TxNumber tx_id = it_edge->first.tx_lock_;
-        // Get the first edge's iterator of its waiting txid = tx_id
-        auto iter = map_edge.lower_bound(TxEdge(tx_id, 0));
+        // Mark this edge in the current DFS round
+        root_visit_mark = visit_round;
 
-        while (true)
+        // This tracks the chain of lock dependencies we're exploring
+        std::unordered_set<TxEdge, EdgeHash, EdgeEqual> visited_path;
+        visited_path.insert(root_edge);
+        std::vector<EdgeIt> dfs_stack{root_it};
+
+        // Start exploring children whose tx_wait_ matches this tx_lock_
+        uint64_t cur_node = root_edge.tx_lock_;
+        EdgeIt child_it = graph.lower_bound(TxEdge(cur_node, 0));
+
+        // Perform explicit DFS
+        while (!dfs_stack.empty())
         {
-            // If the iterator has go to the map's end or edge's waiting txid
-            // has not equal tx_id, it mean it has visited all related edges
-            // with tx_id and need to go to upper layer.
-            if (iter == map_edge.end() || iter->first.tx_wait_ != tx_id)
+            // If no valid child edge, backtrack
+            if (child_it == graph.end() || child_it->first.tx_wait_ != cur_node)
             {
-                vct_iter.pop_back();
-                if (vct_iter.size() <= 1)
+                // Pop last edge from DFS stack
+                EdgeIt popped_it = dfs_stack.back();
+                dfs_stack.pop_back();
+                visited_path.erase(popped_it->first);
+
+                // If stack empty, this DFS session ends
+                if (dfs_stack.empty())
                 {
                     break;
                 }
 
-                iter = *vct_iter.rbegin();
-                set_dup.erase(iter->first);
-                tx_id = iter->first.tx_wait_;
-                iter++;
+                // Move up to parent and resume
+                EdgeIt parent_it = dfs_stack.back();
+                cur_node = parent_it->first.tx_wait_;
+                child_it = parent_it;
+                ++child_it;
                 continue;
             }
 
-            // iter->second saved which time to visit this edge, if it is not
-            // equal iround, it means that it has been visited previous. If
-            // iter->second < 0, it means it is a new edge and not visit.
-            if (iter->second == iround)
+            // Process current child edge
+            const TxEdge &child_edge = child_it->first;
+            int32_t &child_visit_mark = child_it->second;
+
+            if (child_visit_mark == visit_round)
             {
-                // It maybe has multi paths from one edge to other edge, so if
-                // it meet visited edge with same sign, it does not mean here
-                // has dead lock circle. This judgement will dicide is is only
-                // multi paths or dead lock cycle.
-                if (set_dup.find(iter->first) == set_dup.end())
+                // Back-edge within this round -> potential cycle
+                if (visited_path.count(child_edge))
                 {
-                    // Due to it is not circle, it will move next edge and judge
-                    // again, do not need go to next layer.
-                    iter++;
-                }
-                else
-                {
-                    // If find current edge from set_dup, it will make sure here
-                    // has dead lock cycle. Then here will copy the edges into a
-                    // v_e from end of vct_iter, until meet the current edge.
-                    // All edges that make up the cycle will be saved into v_e.
-                    std::vector<TxEdge> v_e;
-                    v_e.push_back(iter->first);
-                    for (auto it = vct_iter.rbegin(); it != vct_iter.rend();
-                         it++)
+                    // Build the detected cycle
+                    std::vector<TxEdge> cycle{child_edge};
+                    for (auto path_it = dfs_stack.rbegin();
+                         path_it != dfs_stack.rend();
+                         ++path_it)
                     {
-                        if ((*it)->first == iter->first)
+                        TxEdge path_edge = (*path_it)->first;
+                        if (path_edge == child_edge)
                         {
                             break;
                         }
-
-                        v_e.push_back((*it)->first);
+                        cycle.push_back(path_edge);
                     }
-
-                    vct_v_edge.push_back(v_e);
-                    // Save the cycle and move next edge.
-                    iter++;
-                    continue;
+                    cycles.push_back(cycle);
                 }
+                ++child_it;
             }
-            else if (iter->second > 0)
+            else if (child_visit_mark > 0)
             {
-                // This edge has been visited previous time, so it does not need
-                // to go to deep layer.
-                iter++;
+                // Already handled in a previous round, skip
+                ++child_it;
             }
             else
             {
-                // Save current layer's information into set_dup for dead lock
-                // cycle check and vct_iter and move into
-                // next layer.
-                iter->second = iround;
-                set_dup.insert(iter->first);
-                vct_iter.push_back(iter);
-                tx_id = iter->first.tx_lock_;
-                iter = map_edge.lower_bound(TxEdge(tx_id, 0));
+                // First visit in this round: descend deeper
+                child_visit_mark = visit_round;
+                visited_path.insert(child_edge);
+                dfs_stack.push_back(child_it);
+                cur_node = child_edge.tx_lock_;
+                child_it = graph.lower_bound(TxEdge(cur_node, 0));
             }
         }
 
-        // Next traverse, counter++
-        iround++;
+        // Move to the next DFS round
+        ++visit_round;
     }
 
-    return vct_v_edge;
+    return cycles;
 }
 
 void DeadLockCheck::RemoveDeadTransaction(
     std::vector<std::vector<TxEdge>> &vct_dead)
 {
-    for (std::vector<TxEdge> &dead : vct_dead)
+    for (std::vector<TxEdge> &deadlock_edges : vct_dead)
     {
         uint64_t tx_id = 0;
         uint32_t min_ety = UINT32_MAX;
 
-        for (TxEdge &edge : dead)
+        for (TxEdge &edge : deadlock_edges)
         {
             auto it = txid_ety_count_map_.find(edge.tx_wait_);
             if (it == txid_ety_count_map_.end())
@@ -520,13 +532,11 @@ void DeadLockCheck::Run()
             continue;
         }
 
-#ifdef ON_KEY_OBJECT
-        if (Sharder::Instance().PrimaryNodeTerm() > 0)
+        if (Sharder::Instance().LeaderTerm(
+                Sharder::Instance().NativeNodeGroup()) < 0)
         {
             continue;
         }
-#endif
-
         // If the last check riser is this node, it will call dead lock check
         // again. Or if the time spend more than two times than interval time
         // due to last check riser crashed, this node will rise the check. To

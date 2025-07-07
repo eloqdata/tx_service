@@ -31,7 +31,6 @@
 #include "absl/container/flat_hash_map.h"
 #include "cc_entry.h"
 #include "read_write_entry.h"
-#include "tx_command.h"
 
 namespace txservice
 {
@@ -52,10 +51,10 @@ class ReadWriteSet
 
 public:
     ReadWriteSet()
-        : rset_(),
+        : data_rset_(),
+          meta_data_rset_(),
           wset_(),
           wset_cnt_(0),
-          data_rset_cnt_(0),
           wset_bytes_cnt_(0),
           forward_write_cnt_(0)
     {
@@ -65,17 +64,12 @@ public:
     {
         wset_cnt_ = 0;
         wset_.clear();
-        rset_.clear();
+        data_rset_.clear();
+        meta_data_rset_.clear();
         read_lock_ng_terms_.clear();
         wset_bytes_cnt_ = 0;
-        data_rset_cnt_ = 0;
         forward_write_cnt_ = 0;
-
-#ifdef ON_KEY_OBJECT
-        cmd_set_.clear();
-        cce_with_writelock_size_ = 0;
-        need_forward_cmd_cnt_ = 0;
-#endif
+        catalog_wset_.clear();
     }
 
     /**
@@ -83,30 +77,24 @@ public:
      *
      * @return size_t
      */
-    size_t ReadSetSize() const
+    size_t DataReadSetSize() const
     {
-        return data_rset_cnt_;
+        return data_rset_.size();
     }
 
-    size_t CatalogRangeSetSize() const
+    size_t MetaDataReadSetSize() const
     {
-        size_t set_size = 0;
-        for (auto &[tbl_name, rset] : rset_)
-        {
-            if (tbl_name.Type() == TableType::Catalog ||
-                tbl_name.Type() == TableType::RangePartition ||
-                tbl_name.Type() == TableType::RangeBucket)
-            {
-                set_size += rset.size();
-            }
-        }
-
-        return set_size;
+        return meta_data_rset_.size();
     }
 
     size_t WriteSetSize() const
     {
         return wset_cnt_;
+    }
+
+    size_t CatalogWriteSetSize() const
+    {
+        return catalog_wset_.size();
     }
 
     size_t ForwardWriteCnt() const
@@ -119,11 +107,18 @@ public:
         forward_write_cnt_ += cnt;
     }
 
-    const std::unordered_map<TableName,
-                             std::unordered_map<CcEntryAddr, ReadSetEntry>>
-        &ReadSet() const
+    const absl::flat_hash_map<CcEntryAddr,
+                              std::pair<ReadSetEntry, const std::string_view>>
+        &DataReadSet() const
     {
-        return rset_;
+        return data_rset_;
+    }
+
+    const absl::flat_hash_map<CcEntryAddr,
+                              std::pair<ReadSetEntry, const std::string_view>>
+        &MetaDataReadSet() const
+    {
+        return meta_data_rset_;
     }
 
     const absl::flat_hash_map<uint32_t, int64_t> &ReadLockNgTerms() const
@@ -143,25 +138,36 @@ public:
                  uint64_t read_ts,
                  const TableName *table_name)
     {
-        auto iter = rset_.find(*table_name);
-        if (iter == rset_.end())
+        bool inserted = false;
+        absl::flat_hash_map<
+            CcEntryAddr,
+            std::pair<ReadSetEntry, const std::string_view>>::iterator it;
+        if (table_name->IsMeta())
         {
-            auto insert_it =
-                rset_.emplace(std::piecewise_construct,
-                              std::forward_as_tuple(table_name->StringView(),
-                                                    table_name->Type()),
-                              std::forward_as_tuple());
-            iter = insert_it.first;
+            std::tie(it, inserted) = meta_data_rset_.try_emplace(
+                cce_addr,
+                std::piecewise_construct,
+                std::forward_as_tuple(read_ts),
+                std::forward_as_tuple(table_name->StringView()));
+        }
+        else
+        {
+            assert(table_name->Type() == TableType::Primary ||
+                   table_name->Type() == TableType::Secondary ||
+                   table_name->Type() == TableType::UniqueSecondary);
+            std::tie(it, inserted) = data_rset_.try_emplace(
+                cce_addr,
+                std::piecewise_construct,
+                std::forward_as_tuple(read_ts),
+                std::forward_as_tuple(table_name->StringView()));
         }
 
-        assert(!iter->first.IsStringOwner());
-
-        auto [it, inserted] = iter->second.try_emplace(cce_addr, read_ts);
         if (!inserted)
         {
             // (read_ts == 0) means it is a boundary key added gap lock or its
             // payload status is Unkonwn.
-            if (it->second.version_ts_ < read_ts && it->second.version_ts_ != 0)
+            if (it->second.first.version_ts_ < read_ts &&
+                it->second.first.version_ts_ != 0)
             {
                 // breaks repeatable read isolation level under
                 // Occ/OccRead protocol, return error.
@@ -169,16 +175,10 @@ public:
             }
             else if (read_ts > 0)
             {
-                it->second.version_ts_ = read_ts;
+                it->second.first.version_ts_ = read_ts;
             }
 
-            it->second.read_cnt_++;
-        }
-        else if (!(*table_name == catalog_ccm_name) &&
-                 (table_name->Type() != TableType::RangePartition) &&
-                 (table_name->Type() != TableType::RangeBucket))
-        {
-            ++data_rset_cnt_;
+            it->second.first.read_cnt_++;
         }
         return true;
     }
@@ -197,15 +197,11 @@ public:
      */
     void UpdateRead(const CcEntryAddr &cce_addr, uint64_t version_ts)
     {
-        for (auto &table_key_it : rset_)
+        auto read_it = data_rset_.find(cce_addr);
+        if (read_it != data_rset_.end())
         {
-            auto read_it = table_key_it.second.find(cce_addr);
-            if (read_it != table_key_it.second.end())
-            {
-                ReadSetEntry &rs_entry = read_it->second;
-                rs_entry.version_ts_ = version_ts;
-                break;
-            }
+            ReadSetEntry &rs_entry = read_it->second.first;
+            rs_entry.version_ts_ = version_ts;
         }
     }
 
@@ -220,23 +216,21 @@ public:
     uint64_t DedupRead(const CcEntryAddr &cce_addr)
     {
         uint64_t read_ts = 0;
-        for (auto &[table_name, tbl_read_set] : rset_)
+        // Check the data read set
+        auto read_it = data_rset_.find(cce_addr);
+        if (read_it != data_rset_.end())
         {
-            auto cce_it = tbl_read_set.find(cce_addr);
-            if (cce_it != tbl_read_set.end())
-            {
-                if (!(table_name == catalog_ccm_name) &&
-                    (table_name.Type() != TableType::RangePartition) &&
-                    (table_name.Type() != TableType::RangeBucket))
-                {
-                    --data_rset_cnt_;
-                }
+            read_ts = read_it->second.first.version_ts_;
+            data_rset_.erase(read_it);
+            return read_ts;
+        }
 
-                read_ts = cce_it->second.version_ts_;
-                tbl_read_set.erase(cce_it);
-
-                break;
-            }
+        // Check the meta data read set
+        read_it = meta_data_rset_.find(cce_addr);
+        if (read_it != meta_data_rset_.end())
+        {
+            read_ts = read_it->second.first.version_ts_;
+            meta_data_rset_.erase(read_it);
         }
 
         return read_ts;
@@ -244,59 +238,55 @@ public:
 
     uint64_t DedupRead(const TableName &tbl_name, const CcEntryAddr &cce_addr)
     {
-        auto tbl_it = rset_.find(tbl_name);
-        if (tbl_it == rset_.end())
+        uint64_t read_ts = 0;
+        if (tbl_name.Type() == TableType::Primary ||
+            tbl_name.Type() == TableType::Secondary ||
+            tbl_name.Type() == TableType::UniqueSecondary)
         {
-            return 0;
-        }
-
-        std::unordered_map<CcEntryAddr, ReadSetEntry> &tbl_read_set =
-            tbl_it->second;
-        auto cce_it = tbl_read_set.find(cce_addr);
-        if (cce_it != tbl_read_set.end())
-        {
-            if (!(tbl_name == catalog_ccm_name) &&
-                (tbl_name.Type() != TableType::RangePartition) &&
-                (tbl_name.Type() != TableType::RangeBucket))
+            auto cce_it = data_rset_.find(cce_addr);
+            if (cce_it != data_rset_.end())
             {
-                --data_rset_cnt_;
+                read_ts = cce_it->second.first.version_ts_;
+                data_rset_.erase(cce_it);
             }
-
-            uint64_t read_ts = cce_it->second.version_ts_;
-            tbl_read_set.erase(cce_it);
-
-            if (tbl_it->second.empty())
-            {
-                rset_.erase(tbl_it);
-            }
-
-            return read_ts;
         }
         else
         {
-            return 0;
+            assert(tbl_name.IsMeta());
+            auto cce_it = meta_data_rset_.find(cce_addr);
+            if (cce_it != meta_data_rset_.end())
+            {
+                read_ts = cce_it->second.first.version_ts_;
+                meta_data_rset_.erase(cce_it);
+            }
         }
+
+        return read_ts;
     }
 
     uint16_t GetReadCnt(const TableName &tbl_name, const CcEntryAddr &cce_addr)
     {
-        auto tbl_it = rset_.find(tbl_name);
-        if (tbl_it == rset_.end())
+        uint16_t read_cnt = 0;
+        if (tbl_name.Type() == TableType::Primary ||
+            tbl_name.Type() == TableType::Secondary ||
+            tbl_name.Type() == TableType::UniqueSecondary)
         {
-            return 0;
-        }
-
-        std::unordered_map<CcEntryAddr, ReadSetEntry> &tbl_read_set =
-            tbl_it->second;
-        auto cce_it = tbl_read_set.find(cce_addr);
-        if (cce_it != tbl_read_set.end())
-        {
-            return cce_it->second.read_cnt_;
+            auto cce_it = data_rset_.find(cce_addr);
+            if (cce_it != data_rset_.end())
+            {
+                read_cnt = cce_it->second.first.read_cnt_;
+            }
         }
         else
         {
-            return 0;
+            assert(tbl_name.IsMeta());
+            auto cce_it = meta_data_rset_.find(cce_addr);
+            if (cce_it != meta_data_rset_.end())
+            {
+                read_cnt = cce_it->second.first.read_cnt_;
+            }
         }
+        return read_cnt;
     }
 
     TxErrorCode AddWrite(const TableName &table_name,
@@ -320,7 +310,8 @@ public:
             auto insert_it = wset_.emplace(
                 std::piecewise_construct,
                 std::forward_as_tuple(table_name.StringView(),
-                                      table_name.Type()),
+                                      table_name.Type(),
+                                      table_name.Engine()),
                 std::forward_as_tuple(schema_version, TableWriteSet()));
             iter = insert_it.first;
         }
@@ -344,6 +335,16 @@ public:
                 wset_entry, op_type, std::move(rec), check_unique);
             return succeed ? TxErrorCode::NO_ERROR : TxErrorCode::DUPLICATE_KEY;
         }
+    }
+
+    void AddCatalogWrite(TxKey tx_key, TxRecord::Uptr rec)
+    {
+        assert(rec->Size() > 0);
+        auto [iter, inserted] = catalog_wset_.try_emplace(std::move(tx_key));
+        ReplicaWriteSetEntry &wset_entry = iter->second;
+        assert(inserted || wset_entry.op_ == OperationType::Update);
+        wset_entry.rec_ = std::move(rec);
+        wset_entry.op_ = OperationType::Update;
     }
 
     const WriteSetEntry *FindWrite(const TableName &table_name,
@@ -423,47 +424,31 @@ public:
      * range read entries.
      *
      */
-    void ClearReadSet()
+    bool ClearDataReadSet()
     {
-        for (auto tbl_it = rset_.begin(); tbl_it != rset_.end();)
+        bool read_lock_term_valid = true;
+        for (auto cce_it = data_rset_.begin(); cce_it != data_rset_.end();
+             ++cce_it)
         {
-            if (tbl_it->first == catalog_ccm_name ||
-                tbl_it->first.Type() == TableType::RangePartition ||
-                tbl_it->first.Type() == TableType::RangeBucket)
+            // Keep the read lock terms to check them when writing log.
+            const CcEntryAddr cce_addr = cce_it->first;
+            uint32_t ng_id = cce_addr.NodeGroupId();
+            int64_t ng_term = cce_addr.Term();
+            auto [it, success] =
+                read_lock_ng_terms_.try_emplace(ng_id, ng_term);
+            if (!success && it->second != ng_term)
             {
-                ++tbl_it;
-            }
-            else
-            {
-                data_rset_cnt_ -= tbl_it->second.size();
-                // Keep the read lock terms to check them when writing log.
-                for (const auto &[cce_addr, read_entry] : tbl_it->second)
-                {
-                    uint32_t ng_id = cce_addr.NodeGroupId();
-                    int64_t ng_term = cce_addr.Term();
-                    auto [it, success] =
-                        read_lock_ng_terms_.try_emplace(ng_id, ng_term);
-                    if (!success && it->second != ng_term)
-                    {
-                        LOG(ERROR) << "two reads on the same node group have "
-                                      "different terms, ng: "
-                                   << ng_id << ", terms: " << it->second << ", "
-                                   << ng_term;
-                        // TODO(zkl): abort txn and return error
-                        assert(false);
-                    }
-                }
-                tbl_it = rset_.erase(tbl_it);
+                LOG(ERROR) << "two reads on the same node group have "
+                              "different terms, ng: "
+                           << ng_id << ", terms: " << it->second << ", "
+                           << ng_term;
+                read_lock_term_valid = false;
             }
         }
+        data_rset_.clear();
 
-        assert(data_rset_cnt_ == 0);
-    }
-
-    void ClearScanSet()
-    {
-        /*sset_cnt_ = 0;
-        sset_.clear();*/
+        assert(data_rset_.empty());
+        return read_lock_term_valid;
     }
 
     void ClearWriteSet()
@@ -474,7 +459,7 @@ public:
         forward_write_cnt_ = 0;
     }
 
-    void ClearTable(const TableName &table_name)
+    void ClearWriteSet(const TableName &table_name)
     {
         auto tab_it = wset_.find(table_name);
         if (tab_it != wset_.end())
@@ -500,197 +485,70 @@ public:
         return wset_;
     }
 
-    void ClearReadSet(const TableName &table_name)
+    const std::map<TxKey, ReplicaWriteSetEntry> &CatalogWriteSet() const
     {
-        auto tbl_it = rset_.find(table_name);
-        if (tbl_it != rset_.end())
-        {
-            if (!(table_name == catalog_ccm_name))
-            {
-                data_rset_cnt_ -= tbl_it->second.size();
-            }
-
-            rset_.erase(tbl_it);
-        }
-
-#ifdef RANGE_PARTITION_ENABLED
-        TableName range_tbl_name(table_name.StringView(),
-                                 TableType::RangePartition);
-        tbl_it = rset_.find(range_tbl_name);
-        if (tbl_it != rset_.end())
-        {
-            rset_.erase(tbl_it);
-        }
-#endif
+        return catalog_wset_;
     }
 
-    uint16_t RemoveReadEntry(const TableName &table_name,
-                             const CcEntryAddr &addr)
+    void ClearCatalogWriteSet()
     {
-        assert(table_name.Type() != TableType::Catalog ||
-               table_name.Type() != TableType::RangePartition ||
-               table_name.Type() != TableType::RangeBucket);
+        catalog_wset_.clear();
+    }
 
-        auto iter = rset_.find(table_name);
-        if (iter == rset_.end())
+    void ClearReadSet(const TableName &table_name)
+    {
+        assert(table_name.Type() == TableType::Primary ||
+               table_name.Type() == TableType::UniqueSecondary);
+        for (auto cce_it = data_rset_.begin(); cce_it != data_rset_.end();)
         {
-            return 0;
+            if (cce_it->second.second == table_name.StringView())
+            {
+                data_rset_.erase(cce_it++);
+            }
+            else
+            {
+                ++cce_it;
+            }
         }
 
-        auto it_addr = iter->second.find(addr);
-        if (it_addr == iter->second.end())
+        for (auto cce_it = meta_data_rset_.begin();
+             cce_it != meta_data_rset_.end();)
         {
-            return 0;
+            if (cce_it->second.second == table_name.StringView())
+            {
+                meta_data_rset_.erase(cce_it++);
+            }
+            else
+            {
+                ++cce_it;
+            }
         }
+    }
 
-        assert(it_addr->second.read_cnt_ > 0);
-        it_addr->second.read_cnt_--;
-        uint16_t read_cnt = it_addr->second.read_cnt_;
-        if (read_cnt == 0)
+    uint16_t RemoveDataReadEntry(const TableName &table_name,
+                                 const CcEntryAddr &addr)
+    {
+        assert(!table_name.IsMeta());
+
+        uint16_t read_cnt = 0;
+        auto cce_it = data_rset_.find(addr);
+        if (cce_it != data_rset_.end())
         {
-            --data_rset_cnt_;
-            iter->second.erase(it_addr);
+            ReadSetEntry &read_entry = cce_it->second.first;
+            assert(read_entry.read_cnt_ > 0);
+            read_cnt = --read_entry.read_cnt_;
+            if (read_cnt == 0)
+            {
+                data_rset_.erase(cce_it);
+            }
         }
 
         return read_cnt;
     }
 
-    void AddObjectCommand(const TableName &table_name,
-                          const CcEntryAddr &cce_addr,
-                          RecordStatus payload_status,
-                          uint64_t cce_version,
-                          uint64_t last_vali_ts,
-                          const TxKey *key,
-                          const TxCommand *cmd,
-                          uint32_t forward_key_shard = UINT32_MAX)
-    {
-#ifdef ON_KEY_OBJECT
-        auto [table_it, success] = cmd_set_.try_emplace(table_name);
-        auto &table_cmd_set = table_it->second;
-
-        auto cce_it = table_cmd_set.find(cce_addr);
-        if (cce_it == table_cmd_set.end())
-        {
-            std::string key_str;
-            key->Serialize(key_str);
-            bool inserted = false;
-            bool cmd_apply_on_deleted =
-                (payload_status == RecordStatus::Deleted);
-
-            std::tie(cce_it, inserted) =
-                table_cmd_set.try_emplace(cce_addr,
-                                          cce_version,
-                                          last_vali_ts,
-                                          std::move(key_str),
-                                          cmd_apply_on_deleted);
-            assert(inserted);
-            cce_with_writelock_size_++;
-        }
-
-        CmdSetEntry &entry = cce_it->second;
-        assert(cce_version >= entry.object_version_);
-        entry.object_version_ = cce_version;
-        if (cmd != nullptr)
-        {
-            entry.object_modified_ = true;
-            // The command modifies the object and wal is enabled. Put it
-            // into the command set for writing log and post-processing. If
-            // the command fails, only to release the write lock.
-            if (!txservice_skip_wal)
-            {
-                entry.AddCommand(cmd);
-            }
-
-            if (forward_key_shard != UINT32_MAX &&
-                entry.forward_entry_ == nullptr)
-            {
-                assert(cmd != nullptr);
-                entry.forward_entry_ = std::make_unique<CmdForwardEntry>(
-                    key->Clone(), forward_key_shard);
-                need_forward_cmd_cnt_++;
-            }
-        }
-#endif
-    }
-
-    const CmdSetEntry *FindObjectCommand(const TableName &table_name,
-                                         const CcEntryAddr &cce_addr) const
-    {
-        const CmdSetEntry *obj_cmd_entry = nullptr;
-#ifdef ON_KEY_OBJECT
-        const auto iter = cmd_set_.find(table_name);
-        if (iter != cmd_set_.end())
-        {
-            const auto &[table_name, obj_cmd_set] = *iter;
-            const auto it = obj_cmd_set.find(cce_addr);
-            if (it != obj_cmd_set.end())
-            {
-                obj_cmd_entry = &it->second;
-            }
-        }
-#endif
-        return obj_cmd_entry;
-    }
-
-    const std::unordered_map<TableName,
-                             std::unordered_map<CcEntryAddr, CmdSetEntry>>
-        *ObjectCommandSet() const
-    {
-#ifdef ON_KEY_OBJECT
-        return &cmd_set_;
-#else
-        return nullptr;
-#endif
-    }
-
-    // The number of objects(cce) that already acquired write lock.
-    uint32_t ObjectCntWithWriteLock() const
-    {
-#ifdef ON_KEY_OBJECT
-        return cce_with_writelock_size_;
-#else
-        return 0;
-#endif
-    }
-
-    void IncreaseObjectCntWithWriteLock()
-    {
-#ifdef ON_KEY_OBJECT
-        cce_with_writelock_size_++;
-#endif
-    }
-
-    bool ObjectModified() const
-    {
-#ifdef ON_KEY_OBJECT
-        for (const auto &[table_name, obj_cmd_set] : cmd_set_)
-        {
-            for (const auto &[cce_addr, obj_cmd_entry] : obj_cmd_set)
-            {
-                if (obj_cmd_entry.HasSuccessfulCommand())
-                {
-                    return true;
-                }
-            }
-        }
-        return false;
-#else
-        return WriteSetSize() > 0;
-#endif
-    }
-
     void ResetForwardWriteCount()
     {
         forward_write_cnt_ = 0;
-    }
-
-    size_t ObjectCountToForwardWrite()
-    {
-#ifdef ON_KEY_OBJECT
-        return need_forward_cmd_cnt_;
-#else
-        return 0;
-#endif
     }
 
 private:
@@ -797,28 +655,21 @@ private:
 
 private:
     // rset_, wset_cnt_, read_cache_ are not string owner.
-    std::unordered_map<TableName, std::unordered_map<CcEntryAddr, ReadSetEntry>>
-        rset_;
+    // data read entry map
+    absl::flat_hash_map<CcEntryAddr,
+                        std::pair<ReadSetEntry, const std::string_view>>
+        data_rset_;
+    absl::flat_hash_map<CcEntryAddr,
+                        std::pair<ReadSetEntry, const std::string_view>>
+        meta_data_rset_;
     // the terms of read locks, for write log term check
     absl::flat_hash_map<uint32_t, int64_t> read_lock_ng_terms_;
     std::unordered_map<TableName, std::pair<uint64_t, TableWriteSet>> wset_;
     size_t wset_cnt_;
-    size_t data_rset_cnt_;
     size_t wset_bytes_cnt_;
     size_t forward_write_cnt_;
 
-#ifdef ON_KEY_OBJECT
-    /**
-     * Collection of object keys and commands on each object.
-     */
-    std::unordered_map<TableName, std::unordered_map<CcEntryAddr, CmdSetEntry>>
-        cmd_set_;
-
-    // the count of different cc entries the command set contains that acquires
-    // writelock
-    uint32_t cce_with_writelock_size_{};
-    // the count of cmd keys to acquire write lock on forward node group
-    uint32_t need_forward_cmd_cnt_{0};
-#endif
+    // Logically alter a table inside a DML transaction.
+    std::map<TxKey, ReplicaWriteSetEntry> catalog_wset_;
 };
 }  // namespace txservice

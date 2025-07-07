@@ -48,7 +48,6 @@ class StoreRange;
 class StoreSlice;
 template <typename KeyT>
 class TemplateStoreRange;
-struct LoadRangeSliceRequest;
 class LocalCcShards;
 struct KVCatalogInfo;
 struct CcRequestBase;
@@ -458,14 +457,15 @@ public:
         return cache_validity_[core_id] & (1 << 1);
     }
 
-    void InitKeyCache(StoreRange *range,
+    void InitKeyCache(CcShard *cc_shard,
+                      StoreRange *range,
                       const TableName *tbl_name,
                       NodeGroupId ng_id,
                       int64_t term);
 
     InitKeyCacheCc *InitKeyCacheRequest()
     {
-        return init_key_cache_cc_.get();
+        return init_key_cache_cc_;
     }
 
 protected:
@@ -487,8 +487,8 @@ protected:
     uint16_t pins_{0};
     bool to_alter_{false};
 
-    std::unique_ptr<FillStoreSliceCc> fetch_slice_cc_{nullptr};
-    std::unique_ptr<InitKeyCacheCc> init_key_cache_cc_{nullptr};
+    FillStoreSliceCc *fetch_slice_cc_{nullptr};
+    InitKeyCacheCc *init_key_cache_cc_{nullptr};
 
     /**
      * @brief A queue of cc requests waiting for the slice to be loaded into
@@ -801,8 +801,6 @@ protected:
     virtual void UpdateSlice(StoreSlice *slice,
                              std::vector<SliceChangeInfo> &split_info) = 0;
 
-    void CollectCacheHit(CcShard &ccs);
-    void CollectCacheMiss(CcShard &ccs);
     bool SetLastInitKeyCacheTs();
 
     /**
@@ -1041,7 +1039,8 @@ public:
         size_t start_slice_idx = SearchSlice(*typed_key, true);
 
         typed_key = end_key.GetKey<KeyT>();
-        size_t end_slice_idx = SearchSlice(*typed_key, inclusive);
+        bool inclusive_slice = inclusive;
+        size_t end_slice_idx = SearchSlice(*typed_key, inclusive_slice);
 
         slice_vec.reserve(end_slice_idx - start_slice_idx + 1);
         for (size_t idx = start_slice_idx; idx <= end_slice_idx; ++idx)
@@ -1191,7 +1190,8 @@ public:
         // A shared lock on the range to prevent concurrent splitting or merging
         // of slices.
         std::shared_lock<std::shared_mutex> s_lk(mux_);
-        size_t slice_idx = SearchSlice(search_key, inclusive);
+        bool inclusive_slice = forward_pin || inclusive;
+        size_t slice_idx = SearchSlice(search_key, inclusive_slice);
         StoreSlice *slice = slices_[slice_idx].get();
         std::unique_lock<std::mutex> slice_lk(slice->slice_mux_);
 
@@ -1220,9 +1220,6 @@ public:
         });
         if (slice->status_ == SliceStatus::FullyCached)
         {
-            // collect metrics: slice cache hits
-            CollectCacheHit(*cc_shard);
-
             ++slice->pins_;
             ++pin_slice_cnt;
             pin_status = RangeSliceOpStatus::Successful;
@@ -1313,7 +1310,6 @@ public:
                 bool found = ContainsKey(search_key, shard_id);
                 if (!found)
                 {
-                    CollectCacheHit(*cc_shard);
                     // If the key is not found in range, directly return and
                     // skip loading slice from kv
                     pin_status = RangeSliceOpStatus::KeyNotExists;
@@ -1342,9 +1338,6 @@ public:
 
         if (slice->status_ != SliceStatus::FullyCached)
         {
-            // collect metrics: slice cache miss
-            CollectCacheMiss(*cc_shard);
-
             if (!no_load_on_miss)
             {
                 LoadSliceController load_ctrl =
@@ -1704,7 +1697,8 @@ public:
         }
     }
 
-    void InitKeyCache(const TableName *tbl_name,
+    void InitKeyCache(CcShard *cc_shard,
+                      const TableName *tbl_name,
                       NodeGroupId ng_id,
                       int64_t term,
                       bool force = false)
@@ -1718,7 +1712,7 @@ public:
         std::shared_lock<std::shared_mutex> lk(mux_);
         for (auto &slice : slices_)
         {
-            slice->InitKeyCache(this, tbl_name, ng_id, term);
+            slice->InitKeyCache(cc_shard, this, tbl_name, ng_id, term);
         }
     }
 
@@ -1788,7 +1782,40 @@ private:
         const std::vector<std::unique_ptr<KeyT>> &slice_keys,
         const KeyT &search_key);
 
-    size_t SearchSlice(const KeyT &search_key, bool inclusive) const
+    // ------------|----------|----------|----------|----------|----------->
+    // -00/BK     K0         K1         K2         K3         K4       +00/EK
+    // [    S0    )[   S1    )[    S2   )[    S3   )[    S4   )[    S5     )
+    //
+    // Suppose there are SIX slices, with FIVE boundary keys. Also Ki is both
+    // slice[i]'s end_key and slice[i+1]'s start_key.
+    //
+    // - Case search_key is above K4, certainly lower_bound_idx = 5:
+    //   For scan [search_key, +00): return slice[5]
+    //   For scan (search_key, +00): return slice[5]
+    //   For scan (-00, search_key]: return slice[5]
+    //   For scan (-00, search_key): return slice[5]
+    //
+    // - Case search_key is between (K1, K2), certainly lower_bound_idx = 2:
+    //   For scan [search_key, +00): return slice[2]
+    //   For scan (search_key, +00): return slice[2]
+    //   For scan (-00, search_key]: return slice[2]
+    //   For scan (-00, search_key): return slice[2]
+    //
+    // - Case search_key is equal to K2, certainly lower_bound_idx = 2:
+    //   For scan [search_key, +00): return slice[3]
+    //   For scan (search_key, +00): return slice[3]
+    //   For scan (-00, search_key]: return slice[3]
+    //   For scan (-00, search_key): return slice[2] <<---- Special Case
+    //
+    //  From above analyze, the last case is special. For an index scan with
+    //  `where i < K2`, the method should return the slice just before the
+    //  located slice. The bool flag `inclusive_slice` is used to distinguish it
+    //  from common cases.
+    //
+    //  WARNING: the semantic of `inclusive_slice` is quite different from
+    //  inclusive scan, which is passed from ScanSliceCc.
+    //
+    size_t SearchSlice(const KeyT &search_key, bool inclusive_slice) const
     {
         size_t slice_idx = 0;
         size_t lower_bound_idx = LowerBound(boundary_keys_, search_key);
@@ -1797,34 +1824,15 @@ private:
         {
             // The search key is greater than or equal to the last slice's
             // starting key.
-
-            if (boundary_keys_.empty())
-            {
-                // The range contains a single slice. The slice ending with
-                // range_end_key_ is the slice [range_start_key,
-                // range_end_key_).
-                slice_idx = 0;
-            }
-            else if (*boundary_keys_.back() == search_key && !inclusive)
-            {
-                // The search key equals to the last boundary key and the
-                // inclusive flag is false, the containing slice is the second
-                // to last slice.
-                slice_idx = boundary_keys_.size() - 1;
-            }
-            else
-            {
-                // The search key falls into the slice [slice_key_.last,
-                // range_end_key_).
-                slice_idx = boundary_keys_.size();
-            }
+            slice_idx = lower_bound_idx;
         }
         else
         {
             // The search key equals to or is less than
             // slice_key_[lower_bound_idx].
 
-            if (*boundary_keys_[lower_bound_idx] == search_key && inclusive)
+            if (*boundary_keys_[lower_bound_idx] == search_key &&
+                inclusive_slice)
             {
                 // If the search key equals to slice_key_[lower_bound_idx], the
                 // containing slice is [lower_bound_idx, lower_bound_idx + 1),

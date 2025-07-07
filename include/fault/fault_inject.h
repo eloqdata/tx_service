@@ -232,6 +232,8 @@ private:
     std::mutex mux_;
 };
 
+#ifndef FAULT_INJECT_MACROS_DEFINED
+#define FAULT_INJECT_MACROS_DEFINED
 #ifdef WITH_FAULT_INJECT
 #define ACTION_FAULT_INJECTOR(FaultName) \
     FaultInject::Instance().TriggerAction(FaultName)
@@ -247,5 +249,6 @@ private:
 #define ACTION_FAULT_INJECTOR(FaultName)
 #define CODE_FAULT_INJECTOR(FaultName, code)
 #define FAULT_INJECTOR_CONDITION_WRAP(FaultName, code) (code)
+#endif
 #endif
 }  // namespace txservice

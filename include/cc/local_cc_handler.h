@@ -91,15 +91,15 @@ public:
     /// <param name=""></param>
     /// <param name="record"></param>
     /// <param name="is_deleted"></param>
-    void PostWrite(uint64_t tx_number,
-                   int64_t tx_term,
-                   uint16_t command_id,
-                   uint64_t commit_ts,
-                   const CcEntryAddr &ccentry_addr,
-                   const TxRecord *record,
-                   OperationType operation_type,
-                   uint32_t key_shard_code,
-                   CcHandlerResult<PostProcessResult> &hres) override;
+    CcReqStatus PostWrite(uint64_t tx_number,
+                          int64_t tx_term,
+                          uint16_t command_id,
+                          uint64_t commit_ts,
+                          const CcEntryAddr &ccentry_addr,
+                          const TxRecord *record,
+                          OperationType operation_type,
+                          uint32_t key_shard_code,
+                          CcHandlerResult<PostProcessResult> &hres) override;
 
     /// <summary>
     /// Installs the committed write and releases the write intention/lock after
@@ -129,26 +129,16 @@ public:
                       CcHandlerResult<PostProcessResult> &hres,
                       int64_t expected_term = SKIP_CHECK_TERM) override;
 
-    /// <summary>
-    /// For OCC, validates whether or not the key has changed since the
-    /// prior read.
-    /// </summary>
-    /// <param name="table_name"></param>
-    /// <param name="key"></param>
-    /// <param name="version_ts"></param>
-    /// <param name="commit_ts"></param>
-    /// <param name="extension"></param>
-    /// <param name=""></param>
-    void PostRead(uint64_t tx_number,
-                  int64_t tx_term,
-                  uint16_t command_id,
-                  uint64_t key_ts,
-                  uint64_t gap_ts,
-                  uint64_t commit_ts,
-                  const CcEntryAddr &ccentry_addr,
-                  CcHandlerResult<PostProcessResult> &hres,
-                  bool is_local = false,
-                  bool need_remote_resp = true) override;
+    CcReqStatus PostRead(uint64_t tx_number,
+                         int64_t tx_term,
+                         uint16_t command_id,
+                         uint64_t key_ts,
+                         uint64_t gap_ts,
+                         uint64_t commit_ts,
+                         const CcEntryAddr &ccentry_addr,
+                         CcHandlerResult<PostProcessResult> &hres,
+                         bool is_local = false,
+                         bool need_remote_resp = true) override;
 
     /// <summary>
     /// Starts concurrency control for the input key and returns the key's
@@ -243,13 +233,9 @@ public:
                   bool is_covering_keys = false,
                   bool is_require_keys = true,
                   bool is_require_recs = true,
-                  bool is_require_sort = true
-#ifdef ON_KEY_OBJECT
-                  ,
+                  bool is_require_sort = true,
                   int32_t obj_type = -1,
-                  const std::string_view &scan_pattern = {}
-#endif
-                  ) override;
+                  const std::string_view &scan_pattern = {}) override;
 
     void ScanOpenLocal(const TableName &table_name,
                        ScanIndexType index_type,
@@ -271,13 +257,9 @@ public:
                        uint16_t command_id,
                        uint64_t start_ts,
                        CcScanner &scanner,
-                       CcHandlerResult<ScanNextResult> &hd_res
-#ifdef ON_KEY_OBJECT
-                       ,
+                       CcHandlerResult<ScanNextResult> &hd_res,
                        int32_t obj_type = -1,
-                       const std::string_view &scan_pattern = {}
-#endif
-                       ) override;
+                       const std::string_view &scan_pattern = {}) override;
 
     void ScanNextBatch(const TableName &tbl_name,
                        const uint64_t schema_version,
@@ -407,22 +389,24 @@ public:
                        CcHandlerResult<ObjectCommandResult> &hres,
                        IsolationLevel iso_level,
                        CcProtocol proto,
-                       bool commit) override;
+                       bool commit,
+                       bool always_redirect) override;
 
     void PublishMessage(uint64_t ng_id,
                         int64_t tx_term,
                         std::string_view chan,
                         std::string_view message) override;
 
-    void UploadTxCommands(uint64_t tx_number,
-                          int64_t tx_term,
-                          uint16_t command_id,
-                          const CcEntryAddr &cce_addr,
-                          uint64_t obj_version,
-                          uint64_t commit_ts,
-                          const std::vector<std::string> *cmd_list,
-                          bool has_overwrite,
-                          CcHandlerResult<PostProcessResult> &hres) override;
+    CcReqStatus UploadTxCommands(
+        uint64_t tx_number,
+        int64_t tx_term,
+        uint16_t command_id,
+        const CcEntryAddr &cce_addr,
+        uint64_t obj_version,
+        uint64_t commit_ts,
+        const std::vector<std::string> *cmd_list,
+        bool has_overwrite,
+        CcHandlerResult<PostProcessResult> &hres) override;
 
     void CleanCcEntryForTest(const TableName &table_name,
                              const TxKey &key,
@@ -510,6 +494,15 @@ public:
                               CcHandlerResult<Void> &hres) override;
 
 private:
+    enum struct BlockCheckStatus
+    {
+        Normal,
+        Ongoing,
+        TimeOut,
+    };
+
+    static BlockCheckStatus PreBlockCcReqCheck(CcHandlerResultBase *hres);
+
     /// <summary>
     /// Thread Id is the local offset of the core to which the handler is
     /// pinned.

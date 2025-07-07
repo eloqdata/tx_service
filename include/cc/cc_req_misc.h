@@ -42,7 +42,11 @@
 #include "cc_req_base.h"
 #include "error_messages.h"
 // #include "range_slice.h"
+#include <absl/container/flat_hash_map.h>
+
+#include "metrics.h"
 #include "range_slice_type.h"
+#include "schema.h"
 #include "slice_data_item.h"
 #include "tx_key.h"
 #include "tx_record.h"
@@ -319,178 +323,43 @@ private:
 
 struct FillStoreSliceCc;
 
-struct LoadRangeSliceRequest
-
-{
-public:
-    LoadRangeSliceRequest() = delete;
-
-    LoadRangeSliceRequest(const TableName &tbl_name,
-                          const KeySchema *key_schema,
-                          const RecordSchema *rec_schema,
-                          uint64_t schema_ts,
-                          TxKey start_key,
-                          TxKey end_key,
-                          uint64_t snapshot_ts,
-                          NodeGroupId cc_ng_id,
-                          int64_t cc_ng_term)
-        : table_name_(&tbl_name),
-          key_schema_(key_schema),
-          rec_schema_(rec_schema),
-          schema_ts_(schema_ts),
-          start_key_(std::move(start_key)),
-          end_key_(std::move(end_key)),
-          snapshot_ts_(snapshot_ts),
-          slice_size_(0),
-          rec_cnt_(0),
-          cc_ng_id_(cc_ng_id),
-          cc_ng_term_(cc_ng_term)
-    {
-    }
-
-    void Reset()
-    {
-        failed_ = false;
-        slice_size_ = 0;
-        rec_cnt_ = 0;
-        slice_data_.clear();
-    }
-
-    void AddDataItem(txservice::TxKey key,
-                     std::unique_ptr<txservice::TxRecord> &&record,
-                     uint64_t version_ts,
-                     bool is_deleted)
-    {
-        slice_size_ += key.Size();
-        slice_size_ += record->Size();
-        slice_data_.emplace_back(
-            std::move(key), std::move(record), version_ts, is_deleted);
-        if (!is_deleted)
-        {
-            rec_cnt_++;
-        }
-    }
-
-    std::deque<SliceDataItem> &SliceData()
-    {
-        return slice_data_;
-    }
-
-    void SetFinish();
-    void SetError();
-
-    const TableName &TblName() const
-    {
-        return *table_name_;
-    }
-
-    const KeySchema *GetKeySchema() const
-    {
-        return key_schema_;
-    }
-
-    const RecordSchema *GetRecordSchema() const
-    {
-        return rec_schema_;
-    }
-
-    uint64_t SchemaTs() const
-    {
-        return schema_ts_;
-    }
-
-    const TxKey &StartKey() const
-    {
-        return start_key_;
-    }
-
-    const TxKey &EndKey() const
-    {
-        return end_key_;
-    }
-
-    uint32_t SliceSize() const
-    {
-        return slice_size_;
-    }
-
-    uint64_t SnapshotTs() const
-    {
-        return snapshot_ts_;
-    }
-
-    NodeGroupId GetNodeGroupId() const
-    {
-        return cc_ng_id_;
-    }
-
-    int64_t LeaderTerm() const
-    {
-        return cc_ng_term_;
-    }
-
-    bool IsError() const
-    {
-        return failed_;
-    }
-
-    size_t RecordCnt() const
-    {
-        return rec_cnt_;
-    }
-
-    std::function<void(LoadRangeSliceRequest *)> post_lambda_;
-    metrics::TimePoint start_;
-
-private:
-    const TableName *table_name_;
-
-    std::deque<SliceDataItem> slice_data_;
-    const KeySchema *key_schema_;
-    const RecordSchema *rec_schema_;
-    const uint64_t schema_ts_;
-    TxKey start_key_;
-    TxKey end_key_;
-    uint64_t snapshot_ts_;
-    uint32_t slice_size_;
-    uint32_t rec_cnt_;
-    NodeGroupId cc_ng_id_;
-    int64_t cc_ng_term_;
-    bool failed_{false};
-};
-
 struct InitKeyCacheCc : public CcRequestBase
 {
 public:
     static constexpr size_t MaxScanBatchSize = 64;
-    InitKeyCacheCc() = delete;
-    InitKeyCacheCc(StoreRange *range,
-                   StoreSlice *slice,
-                   uint16_t core_cnt,
-                   const TableName *tbl_name,
-                   int64_t term,
-                   NodeGroupId ng_id)
-        : tbl_name_(
-              tbl_name->String(),
-              TableType::Primary),  // key cache is only used on primary table
-          term_(term),
-          ng_id_(ng_id),
-          range_(range),
-          slice_(slice),
-          unfinished_cnt_(core_cnt)
+
+    InitKeyCacheCc() = default;
+
+    void Reset(StoreRange *range,
+               StoreSlice *slice,
+               uint16_t core_cnt,
+               const TableName &tbl_name,
+               int64_t term,
+               NodeGroupId ng_id)
     {
-        assert(tbl_name->IsBase());
+        assert(tbl_name.IsBase());
+        // key cache is only used on primary table
+        tbl_name_ =
+            TableName(tbl_name.String(), TableType::Primary, tbl_name.Engine());
+        term_ = term;
+        ng_id_ = ng_id;
+        range_ = range;
+        slice_ = slice;
+        unfinished_cnt_ = core_cnt;
+
+        pause_pos_.clear();
         pause_pos_.resize(core_cnt);
     }
+
     bool Execute(CcShard &ccs) override;
-    void SetFinish(uint16_t core, bool succ);
+    bool SetFinish(uint16_t core, bool succ);
     StoreSlice &Slice();
     StoreRange &Range();
     void SetPauseKey(TxKey &key, uint16_t core_id);
     TxKey &PauseKey(uint16_t core_id);
 
 private:
-    const TableName tbl_name_;
+    TableName tbl_name_{std::string(""), TableType::Primary, TableEngine::None};
     int64_t term_;
     NodeGroupId ng_id_;
     StoreRange *range_;
@@ -504,17 +373,19 @@ struct FillStoreSliceCc : public CcRequestBase
 public:
     static constexpr size_t MaxScanBatchSize = 64;
 
-    FillStoreSliceCc(const TableName &table_name,
-                     NodeGroupId cc_ng_id,
-                     int64_t cc_ng_term,
-                     const KeySchema *key_schema,
-                     const RecordSchema *rec_schema,
-                     uint64_t schema_ts,
-                     StoreSlice &slice,
-                     StoreRange &range,
-                     bool force_load,
-                     uint64_t snapshot_ts,
-                     LocalCcShards &cc_shards);
+    FillStoreSliceCc() = default;
+
+    void Reset(const TableName &table_name,
+               NodeGroupId cc_ng_id,
+               int64_t cc_ng_term,
+               const KeySchema *key_schema,
+               const RecordSchema *rec_schema,
+               uint64_t schema_ts,
+               StoreSlice *slice,
+               StoreRange *range,
+               bool force_load,
+               uint64_t snapshot_ts,
+               LocalCcShards &cc_shards);
 
     ~FillStoreSliceCc() = default;
 
@@ -531,15 +402,22 @@ public:
                      uint64_t version_ts,
                      bool is_deleted);
 
-    void SetFinish();
-    void SetError(CcErrorCode err_code);
+    bool SetFinish(CcShard *cc_shard);
+    bool SetError(CcErrorCode err_code);
+
+    void SetKvFinish(bool success);
 
     void AbortCcRequest(CcErrorCode err_code) override
     {
         assert(err_code != CcErrorCode::NO_ERROR);
         DLOG(ERROR) << "Abort this FillStoreSliceCc request with error: "
                     << CcErrorMessage(err_code);
-        SetError(err_code);
+        bool finish_all = SetError(err_code);
+        // Recycle request
+        if (finish_all)
+        {
+            Free();
+        }
     }
 
     const TableName &TblName() const
@@ -547,23 +425,18 @@ public:
         return *table_name_;
     }
 
+    const KeySchema *GetKeySchema() const
+    {
+        return key_schema_;
+    }
+
+    const RecordSchema *GetRecordSchema() const
+    {
+        return rec_schema_;
+    }
+
     void StartFilling();
     void TerminateFilling();
-
-    StoreRange &Range()
-    {
-        return range_;
-    }
-
-    StoreSlice &Slice()
-    {
-        return range_slice_;
-    }
-
-    LoadRangeSliceRequest *LoadRequest()
-    {
-        return &load_slice_req_;
-    }
 
     bool ForceLoad()
     {
@@ -600,22 +473,52 @@ public:
         return cc_ng_term_;
     }
 
+    uint64_t SnapshotTs() const
+    {
+        return snapshot_ts_;
+    }
+
+    uint64_t SchemaTs() const
+    {
+        return schema_ts_;
+    }
+
+    const TxKey &StartKey() const
+    {
+        return start_key_;
+    }
+
+    const TxKey &EndKey() const
+    {
+        return end_key_;
+    }
+
+    metrics::TimePoint start_;
+
 private:
     const TableName *table_name_;
     NodeGroupId cc_ng_id_;
     int64_t cc_ng_term_;
     bool force_load_;
     uint16_t finish_cnt_;
+    uint16_t core_cnt_;
     std::mutex mux_;
     CcErrorCode err_code_{CcErrorCode::NO_ERROR};
 
     std::vector<size_t> next_idxs_;
     std::vector<std::deque<SliceDataItem>> partitioned_slice_data_;
-    LoadRangeSliceRequest load_slice_req_;
 
-    StoreSlice &range_slice_;
-    StoreRange &range_;
-    LocalCcShards &local_cc_shards_;
+    StoreSlice *range_slice_ = nullptr;
+    StoreRange *range_ = nullptr;
+
+    const KeySchema *key_schema_;
+    const RecordSchema *rec_schema_;
+    TxKey start_key_;
+    TxKey end_key_;
+    uint64_t schema_ts_;
+    uint64_t snapshot_ts_;
+    uint32_t slice_size_{0};
+    uint32_t rec_cnt_{0};
 };
 
 struct FetchRecordCc : public FetchCc
@@ -626,7 +529,6 @@ public:
                   const TableSchema *tbl_schema,
                   TxKey tx_key,
                   LruEntry *cce,
-                  CcMap *ccm,
                   CcShard &ccs,
                   NodeGroupId cc_ng_id,
                   int64_t cc_ng_term,
@@ -640,22 +542,17 @@ public:
 
     void SetFinish(int err);
 
-    static uint64_t GetFetchRecordTxNumber(uint32_t node_id)
-    {
-        // Use a special local tx num for fetch record read intent lock
-        return ((uint64_t) node_id << 10) << 32L | UINT32_MAX;
-    }
-
-    uint16_t &RetryCnt()
-    {
-        return retry_cnt_;
-    }
-
-    const TableName *table_name_{nullptr};
+    // table_name is a string view, cannot access it outside TxProcessor.
+    TableName table_name_;
     const TableSchema *table_schema_{nullptr};
+#if defined(DATA_STORE_TYPE_ELOQDSS_ROCKSDB_CLOUD_S3) ||  \
+    defined(DATA_STORE_TYPE_ELOQDSS_ROCKSDB_CLOUD_GCS) || \
+    defined(DATA_STORE_TYPE_ELOQDSS_ELOQSTORE)
+    std::string kv_table_name_;
+#endif
     TxKey tx_key_;
     LruEntry *cce_{nullptr};
-    CcMap *ccm_;
+    KeyGapLockAndExtraData *lock_{nullptr};
     uint64_t rec_ts_{0};
     RecordStatus rec_status_{RecordStatus::Unknown};
     std::string rec_str_;
@@ -663,10 +560,10 @@ public:
     // Only used in range partition
     int range_id_;
     bool fetch_from_primary_{false};
-    // Only used for fetch record from primary
-    int64_t standby_term_;
-    std::function<void(CcShard &)> handle_resp_;
-    uint16_t retry_cnt_{0};
+
+    // Process the kv result on TxProcessor if the data on CcShard (table
+    // schema) needs to be accessed.
+    std::function<void()> handle_kv_res_;
 };
 
 struct RunOnTxProcessorCc : public CcRequestBase
@@ -787,42 +684,48 @@ public:
     static constexpr size_t SCAN_BATCH_SIZE = 64;
 #endif
 
-#ifdef RANGE_PARTITION_ENABLED
-    UpdateCceCkptTsCc(
-        std::vector<std::vector<FlushRecord *>> &&flush_records_per_core,
-        size_t core_cnt,
-        NodeGroupId node_group,
-        int64_t term)
-        : flush_records_per_core_(std::move(flush_records_per_core)),
-          unfinished_core_cnt_(core_cnt),
-          node_group_(node_group),
-          term_(term)
+    struct CkptTsEntry
     {
-        idxs_.resize(core_cnt, 0);
-    }
-#else
-    UpdateCceCkptTsCc(std::vector<FlushRecord> *flush_records,
-                      size_t core_cnt,
-                      NodeGroupId node_group,
-                      int64_t term)
-        : flush_records_(flush_records),
-          idx_(0),
-          unfinished_core_cnt_(core_cnt),
-          node_group_(node_group),
-          term_(term)
-    {
-    }
+        CkptTsEntry() = default;
+        CkptTsEntry(LruEntry *cce, uint64_t commit_ts, size_t post_flush_size)
+            : cce_(cce),
+              commit_ts_(commit_ts),
+              post_flush_size_(post_flush_size)
 
-#endif
+        {
+        }
+
+        LruEntry *cce_;
+        uint64_t commit_ts_;
+        size_t post_flush_size_;
+    };
+
+    UpdateCceCkptTsCc(
+        NodeGroupId node_group_id,
+        int64_t term,
+        absl::flat_hash_map<size_t, std::vector<std::vector<CkptTsEntry>>>
+            &&cce_entries)
+        : cce_entries_(std::move(cce_entries)),
+          node_group_id_(node_group_id),
+          term_(term)
+    {
+        unfinished_core_cnt_ = cce_entries_.size();
+        assert(unfinished_core_cnt_ > 0);
+
+        for (const auto &entry : cce_entries_)
+        {
+            indices_[entry.first] = {0, 0};
+        }
+    }
 
     UpdateCceCkptTsCc(const UpdateCceCkptTsCc &) = delete;
     UpdateCceCkptTsCc &operator=(const UpdateCceCkptTsCc &) = delete;
 
     bool Execute(CcShard &ccs) override;
 
-    void SetFinished(CcErrorCode error_code)
+    void SetFinished()
     {
-        std::lock_guard<std::mutex> lk(mux_);
+        std::lock_guard<bthread::Mutex> lk(mux_);
         unfinished_core_cnt_--;
         if (unfinished_core_cnt_ == 0)
         {
@@ -830,32 +733,32 @@ public:
         }
     }
 
-    bool IsError()
-    {
-        std::lock_guard<std::mutex> lk(mux_);
-        return error_code_ != CcErrorCode::NO_ERROR;
-    }
-
     void Wait()
     {
-        std::unique_lock<std::mutex> lk(mux_);
-        cv_.wait(lk, [&]() { return unfinished_core_cnt_ == 0; });
+        std::unique_lock<bthread::Mutex> lk(mux_);
+        while (unfinished_core_cnt_ > 0)
+        {
+            cv_.wait_for(lk, 10000);
+        }
+    }
+
+    const absl::flat_hash_map<size_t, std::vector<std::vector<CkptTsEntry>>>
+        &EntriesRef() const
+    {
+        return cce_entries_;
     }
 
 private:
-#ifdef RANGE_PARTITION_ENABLED
-    std::vector<std::vector<FlushRecord *>> flush_records_per_core_;
-    std::vector<size_t> idxs_;
-#else
-    std::vector<FlushRecord> *flush_records_{nullptr};
-    size_t idx_{0};
-#endif
+    absl::flat_hash_map<size_t, std::vector<std::vector<CkptTsEntry>>>
+        cce_entries_;
+    // key: core_idx, value: pair<vec_idx, entry_index>
+    absl::flat_hash_map<size_t, std::pair<size_t, size_t>> indices_;
+
     size_t unfinished_core_cnt_;
-    NodeGroupId node_group_;
+    NodeGroupId node_group_id_;
     int64_t term_;
-    std::mutex mux_;
-    std::condition_variable cv_;
-    CcErrorCode error_code_{CcErrorCode::NO_ERROR};
+    bthread::Mutex mux_;
+    bthread::ConditionVariable cv_;
 };
 
 struct WaitNoNakedBucketRefCc : public CcRequestBase

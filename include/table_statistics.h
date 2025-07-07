@@ -21,11 +21,10 @@
  */
 #pragma once
 
-#include <assert.h>
-#include <math.h>
-
 #include <algorithm>
 #include <atomic>
+#include <cassert>
+#include <cmath>
 #include <functional>
 #include <map>
 #include <memory>
@@ -38,18 +37,14 @@
 #include <vector>
 
 #include "catalog_factory.h"
-#include "cc_request.h"
 #include "distribution_steps.h"
 #include "local_cc_shards.h"
 #include "proto/cc_request.pb.h"
 #include "random_pairing.h"
-#include "remote_type.h"
 #include "schema.h"
 #include "sharder.h"
 #include "statistics.h"
-#include "store/data_store_handler.h"
 #include "tx_key.h"
-#include "tx_worker_pool.h"
 #include "type.h"
 
 namespace txservice
@@ -164,7 +159,7 @@ public:
                   const KeyT &key,
                   const KeySchema *key_schema)
     {
-        std::optional<std::unique_lock<std::mutex>> optional_lk;
+        std::unique_lock<std::mutex> lk(sample_pool_mux_, std::defer_lock);
 
         bool on_all =
             RunOnAllCcShards(records_.load(std::memory_order_acquire));
@@ -174,7 +169,7 @@ public:
         {
             // As long as there is no contention, there are no system calls
             // made. Just a few atomic instructs.
-            optional_lk.emplace(sample_pool_mux_);
+            lk.lock();
         }
 
         PerCcShardVar &v = cc_shards_var_[ccs.core_id_];
@@ -185,7 +180,8 @@ public:
         if (on_all)
         {
             // For small table, alter atomic counter directly.
-            records_++;
+            assert(lk.owns_lock());
+            records_.fetch_add(1, std::memory_order_relaxed);
             statistics_->AccumulateRecords(*table_or_index_name_);
         }
         else
@@ -207,7 +203,7 @@ public:
 
         if (on_all || on_leader)
         {
-            sample_pool_.Insert(key, records_);
+            sample_pool_.Insert(key, records_.load(std::memory_order_acquire));
 
             if (NeedRebuildDistribution(
                     records_.load(std::memory_order_acquire),
@@ -230,7 +226,7 @@ public:
                   const KeyT &key,
                   const KeySchema *key_schema)
     {
-        std::optional<std::unique_lock<std::mutex>> lk;
+        std::unique_lock<std::mutex> lk(sample_pool_mux_, std::defer_lock);
 
         bool on_all =
             RunOnAllCcShards(records_.load(std::memory_order_acquire));
@@ -240,7 +236,7 @@ public:
         {
             // As long as there is no contention, there are no system calls
             // made. Just a few atomic instructs.
-            lk.emplace(sample_pool_mux_);
+            lk.lock();
         }
 
         PerCcShardVar &v = cc_shards_var_[ccs.core_id_];
@@ -254,9 +250,10 @@ public:
             if (on_all)
             {
                 // For small table, alter atomic counter directly.
+                assert(lk.owns_lock());
                 if (records_ > 0)
                 {
-                    records_--;
+                    records_.fetch_sub(1, std::memory_order_relaxed);
                     statistics_->AccumulateRecords(*table_or_index_name_);
                 }
             }
@@ -279,7 +276,8 @@ public:
 
             if (on_all || on_leader)
             {
-                sample_pool_.Delete(key);
+                sample_pool_.Delete(key,
+                                    records_.load(std::memory_order_acquire));
 
                 if (NeedRebuildDistribution(
                         records_.load(std::memory_order_acquire),
@@ -367,7 +365,7 @@ public:
         int64_t records = records_.load(std::memory_order_acquire);
         for (const KeyT &sample_key : param.sample_keys_)
         {
-            sample_pool_.Delete(sample_key);
+            sample_pool_.Delete(sample_key, records);
         }
         records -= std::min(records, static_cast<int64_t>(param.records_));
         sample_pool_.ClearCounter();
@@ -809,16 +807,18 @@ public:
                      const KeySchema *key_schema,
                      NodeGroupId cc_ng_id) override
     {
-        // No lock is required. Because Transaction already acquire write lock
-        // on table catalog
+        // Lock is required. Because apply DDL Operation and release catalog
+        // lock are interleaved.
+        std::unique_lock<std::shared_mutex> ulk(index_sample_pool_map_mutex_);
         InitSamplePool(index_name, cc_ng_id);
         InitDistribution(index_name, key_schema);
     }
 
     void DropIndex(const TableName &index_name) override
     {
-        // No lock is required. Because Transaction already acquire write lock
-        // on table catalog
+        // Lock is required. Because apply DDL Operation and release catalog
+        // lock are interleaved.
+        std::unique_lock<std::shared_mutex> ulk(index_sample_pool_map_mutex_);
         index_distribution_map_.erase(index_name);
         index_sample_pool_map_.erase(index_name);
     }
@@ -1201,8 +1201,6 @@ private:
     void InitDistribution(const TableName &table_or_index_name,
                           const KeySchema *key_schema)
     {
-        std::shared_lock<std::shared_mutex> slk(index_sample_pool_map_mutex_);
-
         std::set<const KeyT *, PtrLessThan<KeyT>> index_sample_keys;
         uint64_t index_total_keys = 0;
 

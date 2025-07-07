@@ -28,11 +28,11 @@
 #include <atomic>
 #include <condition_variable>
 #include <mutex>
+#include <utility>
+#include <vector>
 
 #include "cc/cc_handler_result.h"
 #include "cc_req_misc.h"
-#include "cc_request.h"
-#include "data_sync_task.h"
 #include "error_messages.h"
 #include "local_cc_shards.h"
 #include "proto/cc_request.pb.h"
@@ -273,12 +273,14 @@ public:
         std::mutex &mux,
         std::condition_variable &cv,
         std::vector<int64_t> &leader_terms,
+        const std::vector<TableName> &new_indexes_name,
+        std::vector<const KeySchema *> new_indexes_schema,
         uint32_t &unfinished_task_cnt,
         bool &all_task_started,
         uint32_t &total_pk_items_count,
         uint32_t &dispatched_task_count,
         CcErrorCode &task_res,
-        PackSkError &pack_sk_err,
+        GenerateSkParallelResult &task_value,
         std::function<void(TxKey batch_range_start_key,
                            TxKey batch_range_end_key,
                            const std::string *batch_range_start_key_str,
@@ -290,12 +292,14 @@ public:
         : mux_(mux),
           cv_(cv),
           leader_terms_(leader_terms),
+          new_indexes_name_(new_indexes_name),
+          new_indexes_schema_(std::move(new_indexes_schema)),
           unfinished_task_cnt_(unfinished_task_cnt),
           all_task_started_(all_task_started),
           total_pk_items_count_(total_pk_items_count),
           dispatched_task_count_(dispatched_task_count),
           task_res_(task_res),
-          pack_sk_err_(pack_sk_err),
+          task_value_(task_value),
           dispatch_func_(dispatch_func)
     {
     }
@@ -458,8 +462,10 @@ public:
                 task_res_ = res_code;
                 if (res_code == CcErrorCode::PACK_SK_ERR)
                 {
-                    pack_sk_err_.code_ = response_.pack_err_code();
-                    pack_sk_err_.message_ = response_.pack_err_msg();
+                    task_value_.pack_sk_error_.code_ =
+                        response_.pack_err_code();
+                    task_value_.pack_sk_error_.message_ =
+                        response_.pack_err_msg();
                 }
             }
             cv_.notify_one();
@@ -513,6 +519,15 @@ public:
         // Finished
         --unfinished_task_cnt_;
         total_pk_items_count_ += response_.pk_items_count();
+
+        const std::vector<bool> &new_indexes_multikey =
+            StoreIndexesMultiKey(response_.indexes_multikey_attr());
+        std::vector<MultiKeyPaths::Uptr> &new_indexes_multikey_paths =
+            StoreIndexesMultiKeyPaths(response_.indexes_multikey_attr());
+        task_value_.IndexesMergeMultiKeyAttr(new_indexes_name_,
+                                             new_indexes_multikey,
+                                             new_indexes_multikey_paths);
+
         cv_.notify_one();
     }
 
@@ -537,6 +552,51 @@ public:
         channel_ = channel;
     }
 
+    const std::vector<bool> &StoreIndexesMultiKey(
+        const google::protobuf::RepeatedPtrField<remote::MultiKeyAttr>
+            &indexes_multikey_attr)
+    {
+        assert(indexes_multikey_attr.size() ==
+               static_cast<int>(new_indexes_name_.size()));
+        new_indexes_multikey_.clear();
+        new_indexes_multikey_.reserve(new_indexes_name_.size());
+        for (uint16_t idx = 0; idx < indexes_multikey_attr.size(); ++idx)
+        {
+            const remote::MultiKeyAttr &attr = indexes_multikey_attr.Get(idx);
+            new_indexes_multikey_.push_back(attr.multikey());
+        }
+        return new_indexes_multikey_;
+    }
+
+    std::vector<MultiKeyPaths::Uptr> &StoreIndexesMultiKeyPaths(
+        const google::protobuf::RepeatedPtrField<remote::MultiKeyAttr>
+            &indexes_multikey_attr)
+    {
+        assert(indexes_multikey_attr.size() ==
+               static_cast<int>(new_indexes_name_.size()));
+        new_indexes_multikey_paths_.clear();
+        new_indexes_multikey_paths_.reserve(new_indexes_name_.size());
+        for (uint16_t idx = 0; idx < new_indexes_name_.size(); ++idx)
+        {
+            const remote::MultiKeyAttr &attr = indexes_multikey_attr.Get(idx);
+            const KeySchema *key_schema = new_indexes_schema_[idx];
+            if (key_schema->MultiKeyPaths())
+            {
+                MultiKeyPaths::Uptr multikey_paths =
+                    key_schema->MultiKeyPaths()->Clone();
+                multikey_paths->Deserialize(key_schema, attr.multikey_paths());
+                new_indexes_multikey_paths_.push_back(
+                    std::move(multikey_paths));
+            }
+            else
+            {
+                // The index type doesn't support multikey index.
+                new_indexes_multikey_paths_.push_back(nullptr);
+            }
+        }
+        return new_indexes_multikey_paths_;
+    }
+
 private:
     brpc::Controller cntl_;
     remote::GenerateSkFromPkRequest request_;
@@ -547,12 +607,16 @@ private:
     std::mutex &mux_;
     std::condition_variable &cv_;
     std::vector<int64_t> &leader_terms_;
+    const std::vector<TableName> &new_indexes_name_;
+    std::vector<const KeySchema *> new_indexes_schema_;
+    std::vector<bool> new_indexes_multikey_;
+    std::vector<MultiKeyPaths::Uptr> new_indexes_multikey_paths_;
     uint32_t &unfinished_task_cnt_;
     bool &all_task_started_;
     uint32_t &total_pk_items_count_;
     uint32_t &dispatched_task_count_;
     CcErrorCode &task_res_;
-    PackSkError &pack_sk_err_;
+    GenerateSkParallelResult &task_value_;
     std::function<void(TxKey batch_range_start_key,
                        TxKey batch_range_end_key,
                        const std::string *batch_range_start_key_str,
@@ -722,6 +786,7 @@ public:
             channel_ = nullptr;
             return;
         }
+        CcErrorCode err_code = CcErrorCode::NO_ERROR;
         if (cntl_.Failed())
         {
             // RPC failed.
@@ -763,10 +828,11 @@ public:
                 return;
             }
             Sharder::Instance().UpdateCcNodeServiceChannel(node_id_, channel_);
+            err_code = CcErrorCode::RPC_CALL_ERR;
         }
         else
         {
-            CcErrorCode err_code =
+            err_code =
                 remote::ToLocalType::ConvertCcErrorCode(response_.error_code());
             if (err_code == CcErrorCode::NO_ERROR)
             {
@@ -797,9 +863,8 @@ public:
                 stub.FetchPayload(&cntl_, &request_, &response_, this);
                 return;
             }
-
-            fetch_cc_->SetFinish((int) err_code);
         }
+        fetch_cc_->SetFinish((int) err_code);
         channel_ = nullptr;
     }
 

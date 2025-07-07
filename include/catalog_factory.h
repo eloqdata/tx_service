@@ -42,8 +42,91 @@ struct KVCatalogInfo
 
     KVCatalogInfo() = default;
     virtual ~KVCatalogInfo() = default;
-    virtual std::string Serialize() const = 0;
-    virtual void Deserialize(const char *buf, size_t &offset) = 0;
+    virtual std::string Serialize() const
+    {
+        std::string str;
+        size_t len_sizeof = sizeof(uint32_t);
+        uint32_t len_val = static_cast<uint32_t>(kv_table_name_.size());
+        char *len_ptr = reinterpret_cast<char *>(&len_val);
+        str.append(len_ptr, len_sizeof);
+        str.append(kv_table_name_.data(), len_val);
+
+        std::string index_names;
+        if (kv_index_names_.size() != 0)
+        {
+            for (auto it = kv_index_names_.cbegin();
+                 it != kv_index_names_.cend();
+                 ++it)
+            {
+                index_names.append(it->first.StringView())
+                    .append(" ")
+                    .append(it->second)
+                    .append(" ")
+                    .append(1, static_cast<char>(it->first.Engine()))
+                    .append(" ");
+            }
+            // index_names.substr(0, index_names.size() - 1);
+            index_names.erase(index_names.size() - 1);
+        }
+        else
+        {
+            index_names.clear();
+        }
+        len_val = static_cast<uint32_t>(index_names.size());
+        str.append(len_ptr, len_sizeof);
+        str.append(index_names.data(), len_val);
+
+        return str;
+    }
+
+    virtual void Deserialize(const char *buf, size_t &offset)
+    {
+        if (buf[0] == '\0')
+        {
+            return;
+        }
+        const uint32_t *len_ptr =
+            reinterpret_cast<const uint32_t *>(buf + offset);
+        uint32_t len_val = *len_ptr;
+        offset += sizeof(uint32_t);
+
+        kv_table_name_ = std::string(buf + offset, len_val);
+        offset += len_val;
+
+        len_ptr = reinterpret_cast<const uint32_t *>(buf + offset);
+        len_val = *len_ptr;
+        offset += sizeof(uint32_t);
+        if (len_val != 0)
+        {
+            std::string index_names(buf + offset, len_val);
+            offset += len_val;
+            std::stringstream ss(index_names);
+            std::istream_iterator<std::string> begin(ss);
+            std::istream_iterator<std::string> end;
+            std::vector<std::string> tokens(begin, end);
+            for (auto it = tokens.begin(); it != tokens.end(); ++it)
+            {
+                TableType table_type = TableName::Type(*it);
+                assert(table_type == txservice::TableType::Secondary ||
+                       table_type == txservice::TableType::UniqueSecondary);
+
+                const std::string &index_name_str = *it;
+                const std::string &kv_index_name_str = *(++it);
+                const std::string &table_engine_str = *(++it);
+                assert(table_engine_str.size() == 1);
+
+                txservice::TableEngine table_engine =
+                    static_cast<txservice::TableEngine>(table_engine_str[0]);
+                txservice::TableName index_table_name(
+                    index_name_str, table_type, table_engine);
+                kv_index_names_.emplace(index_table_name, kv_index_name_str);
+            }
+        }
+        else
+        {
+            kv_index_names_.clear();
+        }
+    }
 
     virtual const std::string &GetKvTableName(const TableName &table_name) const
     {
@@ -108,20 +191,52 @@ struct SkEncoder
     using uptr = std::unique_ptr<SkEncoder>;
 
     virtual ~SkEncoder() = default;
+
     /**
-     * @brief Generate packed secondary key using TxKey and TxRecord.
-     * @note It is a non-const method, and subclass should call SetError() to
-     * store self-defined exception.
+     * @brief Generate packed secondary key(s) using the primary key and record.
+     * @note This is a non-const method. Subclasses should call SetError() to
+     * store any errors encountered during generation and ClearError() to reset
+     * the error state.
+     * @param pk The primary key.
+     * @param record The record data.
+     * @param version_ts The version timestamp for the new secondary key
+     * entries.
+     * @param dest_vec The vector to which generated secondary key WriteEntry
+     * objects will be appended.
+     * @return An `int32_t`:
+     *         - A non-negative value representing the number of secondary key
+     *           `WriteEntry` objects appended to `dest_vec` if the key
+     *           generation was successful. This count can be zero if no
+     *           secondary keys were generated for the given record (e.g.,
+     *           MongoDB partial or sparse indexes). It can also be greater
+     *           than one if the record generates multiple secondary keys
+     *           (e.g., MongoDB multikey indexes on array fields).
+     *         - `-1` if the key generation failed (check `GetError()` for
+     *           details on the failure).
      */
-    virtual bool AppendPackedSk(const TxKey *pk,
-                                const TxRecord *record,
-                                uint64_t version_ts,
-                                std::vector<WriteEntry> &dest_vec) = 0;
+    virtual int32_t AppendPackedSk(const TxKey *pk,
+                                   const TxRecord *record,
+                                   uint64_t version_ts,
+                                   std::vector<WriteEntry> &dest_vec) = 0;
 
     virtual void Reset()
     {
-        err_.code_ = 0;
-        err_.message_.clear();
+        ClearError();
+    }
+
+    virtual bool IsMultiKey() const
+    {
+        return false;
+    }
+
+    virtual const txservice::MultiKeyPaths *MultiKeyPaths() const
+    {
+        return nullptr;
+    }
+
+    virtual std::string SerializeMultiKeyPaths() const
+    {
+        return "";
     }
 
     const PackSkError &GetError() const
@@ -141,6 +256,11 @@ protected:
         err_.message_ = std::move(message);
     }
 
+    void ClearError()
+    {
+        err_.Reset();
+    }
+
 private:
     PackSkError err_;
 };
@@ -150,12 +270,13 @@ struct TableSchema
     using uptr = std::unique_ptr<TableSchema>;
 
     virtual ~TableSchema() = default;
+    virtual TableSchema::uptr Clone() const = 0;
     virtual const TableName &GetBaseTableName() const = 0;
     virtual const txservice::KeySchema *KeySchema() const = 0;
     virtual const txservice::RecordSchema *RecordSchema() const = 0;
     virtual const std::string &SchemaImage() const = 0;
     virtual const std::unordered_map<
-        uint,
+        uint16_t,
         std::pair<txservice::TableName, txservice::SecondaryKeySchema>>
         *GetIndexes() const = 0;
     virtual KVCatalogInfo *GetKVCatalogInfo() const = 0;
@@ -166,6 +287,7 @@ struct TableSchema
     virtual size_t IndexesSize() const = 0;
     virtual const SecondaryKeySchema *IndexKeySchema(
         const TableName &index_name) const = 0;
+    virtual uint16_t IndexOffset(const TableName &index_name) const = 0;
     virtual void BindStatistics(std::shared_ptr<Statistics> statistics) = 0;
     virtual std::shared_ptr<Statistics> StatisticsObject() const = 0;
 
@@ -192,6 +314,10 @@ struct TableSchema
     virtual const TableName *GetSequenceTableName() const = 0;
     virtual std::pair<TxKey, TxRecord::Uptr> GetSequenceKeyAndInitRecord(
         const TableName &table_name) const = 0;
+
+    // Rebuild table schema image by setting multikey.
+    virtual void IndexesSetMultiKeyAttr(
+        const std::vector<MultiKeyAttr> &indexes){};
 };
 
 class CatalogFactory

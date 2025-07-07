@@ -88,7 +88,7 @@ public:
     // If this commands does not need previous object value. Note that
     // this is different with IsOverwrite since some of the commands overwrites
     // old value but need to return the status / value of the old object.
-    virtual bool IgnoreKvValue() const
+    virtual bool IgnoreOldValue() const
     {
         return false;
     }
@@ -104,7 +104,7 @@ public:
     }
 
     // This command for restoring ttl object from wal
-    virtual std::unique_ptr<TxCommand> RecoverTTLObjectCommand()
+    virtual TxCommand *RecoverTTLObjectCommand()
     {
         assert(false);
         return nullptr;
@@ -194,6 +194,8 @@ struct MultiObjectTxCommand
 
     virtual std::vector<TxKey> *KeyPointers() = 0;
 
+    virtual std::vector<txservice::TxKey> *KeyPointers(size_t step) = 0;
+
     virtual std::vector<TxCommand *> *CommandPointers() = 0;
 
     // For block commands, it need to rewrite below 4 methods to support
@@ -262,10 +264,12 @@ struct TxnCmd
     TxnCmd(uint64_t obj_ver,
            uint64_t commit_ts,
            bool ignore_previous_version,
+           uint64_t valid_scope,
            std::vector<std::unique_ptr<TxCommand>> &&cmd_list)
         : obj_version_(obj_ver),
           new_version_(commit_ts),
           ignore_previous_version_(ignore_previous_version),
+          valid_scope_(valid_scope),
           cmd_list_(std::move(cmd_list))
     {
     }
@@ -275,7 +279,7 @@ struct TxnCmd
         os << "TxnCmd object version: " << txn.obj_version_
            << ", new version: " << txn.new_version_
            << ", ignore previous version: " << txn.ignore_previous_version_
-           << "\n commands:";
+           << ", valid scope: " << txn.valid_scope_ << "\n commands:";
 
         for (const auto &cmd : txn.cmd_list_)
         {
@@ -292,6 +296,11 @@ struct TxnCmd
     uint64_t new_version_{};
     // whether this txn can ignore the previous version of this object
     bool ignore_previous_version_{};
+    // the valid scope of the txn cmd. This is the TTL of this key after
+    // the txn cmd is applied to this key. If we're already beyond the valid
+    // scope when trying to reapply the txn cmd, all txn cmds before this txn
+    // cmd can be discarded.
+    uint64_t valid_scope_{};
     // the commands the txn applies to this object
     std::vector<std::unique_ptr<TxCommand>> cmd_list_;
 };
@@ -329,7 +338,7 @@ struct BufferedTxnCmdList
         return os;
     }
 
-    void EmplaceTxnCmd(TxnCmd &txn_cmd)
+    void EmplaceTxnCmd(TxnCmd &txn_cmd, uint64_t now_ts)
     {
         auto cmp = [](const TxnCmd &lhs, const TxnCmd &rhs) -> bool
         { return lhs.new_version_ < rhs.new_version_; };
@@ -357,132 +366,14 @@ struct BufferedTxnCmdList
             return;
         }
 
-        if (txn_cmd.ignore_previous_version_)
+        if (txn_cmd.ignore_previous_version_ || txn_cmd.valid_scope_ < now_ts)
         {
-            // For commands that overwrite objects or commit on deleted objects,
+            // For commands that overwrite objects or already expired,
             // remove the txn commands before this txn.
             lb_it = txn_cmd_list.erase(txn_cmd_list.begin(), lb_it);
         }
         txn_cmd_list.insert(lb_it, std::move(txn_cmd));
     }
 };
-
-/**
- * Commit replay txn commands in version order and update cur_ver.
- *
- * @tparam T
- * @param payload
- * @param buffered_cmd_list
- * @param cur_ver
- */
-template <class T>
-void TryCommitBufferedCommands(std::unique_ptr<T> &payload,
-                               BufferedTxnCmdList &buffered_cmd_list,
-                               uint64_t &cur_ver)
-{
-    std::deque<TxnCmd> &txn_cmd_list = buffered_cmd_list.txn_cmd_list_;
-    // iterate the list and apply the commands in version order
-    auto it = txn_cmd_list.begin();
-    while (it != txn_cmd_list.end())
-    {
-        if (it->ignore_previous_version_)
-        {
-            // If a TxnCmd ignores previous version, the TxnCmds before it
-            // must have been discarded in EmplaceTxnCmd.
-            assert(it == txn_cmd_list.begin());
-
-            assert(it->obj_version_ >= cur_ver || it->obj_version_ == 1);
-            cur_ver = it->obj_version_;
-        }
-
-        // check version match
-        if (it->obj_version_ != cur_ver)
-        {
-            break;
-        }
-
-        if (!it->cmd_list_.empty())
-        {
-            auto &first_cmd = it->cmd_list_.front();
-
-            // If a command was applied on deleted record, we set
-            // `has_overwrite` flag to true in the log. If the first command
-            // doesn't have an overwrite property, we need to create an
-            // empty object.
-            if (it->ignore_previous_version_ && !first_cmd->IsOverwrite())
-            {
-                payload.reset(nullptr);
-            }
-        }
-
-        // apply the commands of this txn
-        for (auto &cmd : it->cmd_list_)
-        {
-            if (payload == nullptr)
-            {
-                std::unique_ptr<TxRecord> obj_ptr = cmd->CreateObject(nullptr);
-                payload.reset(reinterpret_cast<T *>(obj_ptr.release()));
-            }
-            TxObject *obj_ptr = reinterpret_cast<TxObject *>(payload.get());
-            TxObject *new_obj_ptr =
-                reinterpret_cast<TxObject *>(cmd->CommitOn(obj_ptr));
-            if (new_obj_ptr != obj_ptr)
-            {
-                TxObject *old_payload_obj =
-                    reinterpret_cast<TxObject *>(payload.release());
-                // FIXME(lzx): should we use "new_obj_ptr->Clone()" ?
-                payload.reset(reinterpret_cast<T *>(new_obj_ptr));
-                if (old_payload_obj != nullptr)
-                {
-                    // Explicitly delete the old object to prevent memory leak
-                    delete old_payload_obj;
-                }
-            }
-        }
-        cur_ver = it->new_version_;
-        ++it;
-    }
-    txn_cmd_list.erase(txn_cmd_list.begin(), it);
-
-    if (txn_cmd_list.empty())
-    {
-        DLOG(INFO) << "destruct buffered_cmd_list_ on object";
-        buffered_cmd_list.Clear();
-    }
-    else
-    {
-        DLOG(INFO) << "replay not finished, current ver: " << cur_ver
-                   << ", msg expect ver: " << txn_cmd_list.front().obj_version_
-                   << ", msg commit ts: " << txn_cmd_list.front().new_version_;
-    }
-}
-
-/**
- * The replayed commands must apply in order. Replayed commands are first
- * stored in buffered_cmd_list_ and committed in order.
- * @param obj_ver
- * @param commit_ts
- * @param cmd_list
- * @param cur_ver
- */
-template <class T>
-void EmplaceAndCommitBufferedTxnCommand(std::unique_ptr<T> &payload,
-                                        BufferedTxnCmdList &buffered_cmd_list,
-                                        TxnCmd &txn_cmd,
-                                        uint64_t &cur_ver,
-                                        RecordStatus &status)
-{
-    bool waiting_for_fetch = status == RecordStatus::Unknown;
-    bool try_commit = txn_cmd.ignore_previous_version_ || !waiting_for_fetch;
-
-    buffered_cmd_list.EmplaceTxnCmd(txn_cmd);
-
-    if (try_commit)
-    {
-        TryCommitBufferedCommands(payload, buffered_cmd_list, cur_ver);
-        status =
-            payload == nullptr ? RecordStatus::Deleted : RecordStatus::Normal;
-    }
-}
 
 }  // namespace txservice
