@@ -165,13 +165,12 @@ public:
                   CcProtocol proto = CcProtocol::OCC,
                   bool is_for_write = false,
                   bool is_ckpt = false,
-                  bool is_covering_keys = false
-#ifdef ON_KEY_OBJECT
-                  ,
+                  bool is_covering_keys = false,
+                  bool is_require_keys = true,
+                  bool is_require_recs = true,
+                  bool is_require_sort = true,
                   int32_t obj_type = -1,
-                  const std::string_view &scan_pattern = {}
-#endif
-    );
+                  const std::string_view &scan_pattern = {});
 
     void ScanNext(uint32_t src_node_id,
                   uint32_t ng_id,
@@ -185,13 +184,12 @@ public:
                   CcProtocol proto = CcProtocol::OCC,
                   bool is_for_write = false,
                   bool is_ckpt = false,
-                  bool is_covering_keys = false
-#ifdef ON_KEY_OBJECT
-                  ,
+                  bool is_covering_keys = false,
+                  bool is_require_keys = true,
+                  bool is_require_recs = true,
+                  bool is_require_sort = true,
                   int32_t obj_type = -1,
-                  const std::string_view &scan_pattern = {}
-#endif
-    );
+                  const std::string_view &scan_pattern = {});
 
     void ScanNext(uint32_t src_node_id,
                   const TableName &tbl_name,

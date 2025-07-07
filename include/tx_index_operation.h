@@ -21,7 +21,10 @@
  */
 #pragma once
 
+#include <vector>
+
 #include "tx_operation.h"
+#include "type.h"
 
 namespace txservice
 {
@@ -29,6 +32,7 @@ struct UpsertTableIndexOp : public SchemaOp
 {
     UpsertTableIndexOp() = delete;
     UpsertTableIndexOp(const std::string_view table_name_sv,
+                       TableEngine table_engine,
                        const std::string &current_image,
                        uint64_t curr_schema_ts,
                        const std::string &dirty_image,
@@ -48,6 +52,7 @@ struct UpsertTableIndexOp : public SchemaOp
     void Forward(TransactionExecution *txm) override;
 
     void Reset(const std::string_view table_name_str,
+               TableEngine table_engine,
                const std::string &current_image,
                uint64_t curr_schema_ts,
                const std::string &dirty_image,
@@ -95,12 +100,12 @@ struct UpsertTableIndexOp : public SchemaOp
      * @brief Creates/deletes the data store table and persists/removes the
      * binary representation of the catalog in the data store.
      */
-    DsUpsertTableOp upsert_kv_table_op_;
+    DsUpsertTableOp kv_create_index_op_;
     /**
      * @brief Generate sk record from pk record parallelly. The parallel
      * granularity of the operation is range.
      */
-    AsyncOp<PackSkError> generate_sk_parallel_op_;
+    AsyncOp<GenerateSkParallelResult> generate_sk_parallel_op_;
     /**
      * @brief Flush the index data of the old tuples into data store. Consist of
      * scan, flush.
@@ -116,6 +121,11 @@ struct UpsertTableIndexOp : public SchemaOp
      */
     WriteToLogOp prepare_data_log_op_;
     /**
+     * @brief Broadcast the dirty schema image to all node groups if it is
+     * changed.
+     */
+    PostWriteAllOp broadcast_dirty_schema_image_op_;
+    /**
      * @brief Upgrades acquired write intents to write locks in all nodes.
      */
     AcquireAllOp acquire_all_lock_op_;
@@ -125,16 +135,20 @@ struct UpsertTableIndexOp : public SchemaOp
      * failures.
      */
     WriteToLogOp commit_log_op_;
-
     /**
-     * @brief Rollback the create index transaction if any constraints violated.
-     * @note We reuse upsert_kv_table_op_ instead of define another
-     * DsUpsertTableOp, because DsUpsertTableOp holds some pointers to members
-     * of UpsertIndexOp.
-     *
-     * DsUpsertTableOp upsert_kv_table_op_;
+     * @brief Drop index from kv storage.
      */
-
+    DsUpsertTableOp kv_drop_index_op_;
+    /**
+     * @brief For creating index, rollback the create index transaction if any
+     * constraints violated.
+     */
+    DsUpsertTableOp kv_rollback_create_index_op_;
+    /**
+     * @brief For creating index, update the schema image inside kv-storage.
+     * Optional operation.
+     */
+    DsUpsertTableOp kv_update_schema_image_op_;
     /**
      * @brief Clean ccmap on all node groups
      *
@@ -163,6 +177,9 @@ struct UpsertTableIndexOp : public SchemaOp
     };
     bool is_last_finished_key_str_;
 
+public:
+    void RecoveryIndexesMultiKeyAttr(const TableSchema *dirty_schema);
+
 private:
     void FillPrepareLogRequest(TransactionExecution *txm);
     void FillPrepareDataLogRequest(TransactionExecution *txm);
@@ -184,7 +201,7 @@ private:
                (last_scanned_end_key_.Type() == KeyType::PositiveInf);
     }
     void DispatchRangeTask(TransactionExecution *upsert_index_txm,
-                           CcHandlerResult<PackSkError> &hd_res);
+                           CcHandlerResult<GenerateSkParallelResult> &hd_res);
     void HandleRangeTask(
         const TableName &base_table_name,
         int32_t partition_id,
@@ -201,7 +218,7 @@ private:
         uint32_t &total_pk_items_count,
         uint32_t &dispatched_task_count,
         CcErrorCode &task_res,
-        PackSkError &pack_sk_err,
+        GenerateSkParallelResult &task_value,
         std::function<void(TxKey batch_range_start_key,
                            TxKey batch_range_end_key,
                            const std::string *batch_range_start_key_str,
@@ -211,6 +228,24 @@ private:
                            size_t batch_range_cnt,
                            uint32_t &actual_task_cnt)> &dispatch_func);
 
+    static std::vector<MultiKeyAttr> InitIndexesMultiKeyAttr(
+        const std::vector<TableName> &new_indexes_name);
+
+    static bool IndexesMergeMultiKeyAttr(std::vector<MultiKeyAttr> &from,
+                                         std::vector<MultiKeyAttr> &to);
+
+    static bool AnyMultiKeyIndex(
+        const std::vector<MultiKeyAttr> &indexes_multikey_attr);
+
+    static std::string RebuildSchemaImage(
+        const TableSchema *dirty_schema,
+        const std::vector<MultiKeyAttr> &indexes_multikey_attr);
+
+    static std::vector<const KeySchema *> GetIndexesSchema(
+        const TableSchema *dirty_schema,
+        const std::vector<TableName> &new_indexes_name);
+
+private:
     // This variable have two roles:
     // 1) deserialize as AlterTableInfo object. 2) save into log.
     std::string alter_table_info_image_str_{""};
@@ -224,9 +259,9 @@ private:
     bool is_force_finished_{false};
 
 #ifdef NDEBUG
-    uint8_t scan_batch_range_size_{10};
+    static constexpr uint8_t scan_batch_range_size_{10};
 #else
-    uint8_t scan_batch_range_size_{3};
+    static constexpr uint8_t scan_batch_range_size_{3};
 #endif
 
     union
@@ -241,8 +276,18 @@ private:
     size_t finished_pk_range_count_{0};
     size_t total_scanned_pk_items_count_{0};
 
-    // Points to UpsertTableTxRequest::pack_sk_err or nullptr.
+    // - Points to UpsertTableTxRequest::pack_sk_err.
+    // - Points to nullptr when recovering.
     PackSkError *store_pack_sk_err_{nullptr};
+
+    // Within one [generate sk -> flush -> prepare data log] round, does index
+    // schema changed due to meeting multikey records? Reset to false before
+    // each round start.
+    bool indexes_changed_within_round_;
+
+    // - Merge multikey attribute to indexes_multikey_attr_ round by round.
+    // - Overwrite multikey attribute in dirty schema.
+    std::vector<MultiKeyAttr> indexes_multikey_attr_;
 };
 
 }  // namespace txservice

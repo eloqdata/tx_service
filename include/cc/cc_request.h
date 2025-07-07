@@ -72,6 +72,7 @@
 #include "sharder.h"
 #include "statistics.h"
 #include "tx_command.h"
+#include "tx_execution.h"
 #include "tx_id.h"
 #include "tx_key.h"
 #include "tx_operation_result.h"
@@ -86,7 +87,10 @@ thread_local inline CcRequestPool<ReplayLogCc> replay_cc_pool_;
 thread_local inline CcRequestPool<KeyObjectStandbyForwardCc>
     key_obj_standby_forward_pool_;
 
-template <typename KeyT, typename ValueT>
+template <typename KeyT,
+          typename ValueT,
+          bool VersionedRecord,
+          bool RangePartitioned>
 class TemplateCcMap;
 
 template <typename SkT, typename PkT>
@@ -148,7 +152,9 @@ public:
                 {
                     // Get original table name for the range table name
                     const TableName base_table_name{
-                        table_name_->GetBaseTableNameSV(), TableType::Primary};
+                        table_name_->GetBaseTableNameSV(),
+                        TableType::Primary,
+                        table_name_->Engine()};
                     const CatalogEntry *catalog_entry =
                         ccs.GetCatalog(base_table_name, node_group_id_);
                     if (catalog_entry == nullptr ||
@@ -617,13 +623,13 @@ private:
     TxKey decoded_key_{};
     bool is_insert_{false};
     CcOperation cc_op_{CcOperation::Write};
+    bool is_local_{true};
     // The pointer of the cc entry to which this request is directed. The
     // pointer is set, when the request locates the cc entry but is
     // blocked due to conflicts in 2PL. After the request is unblocked and
     // acquires the lock, the request's execution resumes without further lookup
     // of the cc entry.
     std::vector<LruEntry *> cce_ptr_;
-    bool is_local_{true};
 };
 
 struct PostWriteCc : public TemplatedCcRequest<PostWriteCc, PostProcessResult>
@@ -664,11 +670,6 @@ public:
             }
             else
             {
-                const LruEntry *lru_entry = lock->GetCcEntry();
-                if (lru_entry->PayloadStatus() == RecordStatus::Invalid)
-                {
-                    return false;
-                }
                 ccm_ = lock->GetCcMap();
             }
 
@@ -1081,11 +1082,6 @@ public:
         }
         else
         {
-            const LruEntry *lru_entry = lock->GetCcEntry();
-            if (lru_entry->PayloadStatus() == RecordStatus::Invalid)
-            {
-                return false;
-            }
             ccm_ = lock->GetCcMap();
         }
 
@@ -1149,7 +1145,9 @@ public:
         // "PkReadCorrespondingSk" or "SnapshotRead", there must be a
         // PostWriteCc request has not done, then, this read should wait until
         // it is completed.
-        BlockByPostWrite
+        BlockByPostWrite,
+        // Blocked by FetchRecord
+        BlockByFetch
     };
     ReadCc()
         : key_ptr_(nullptr),
@@ -1199,11 +1197,6 @@ public:
             }
             else
             {
-                const LruEntry *lru_entry = lock->GetCcEntry();
-                if (lru_entry->PayloadStatus() == RecordStatus::Invalid)
-                {
-                    return false;
-                }
                 ccm_ = lock->GetCcMap();
             }
 
@@ -1267,6 +1260,7 @@ public:
         is_covering_keys_ = is_covering_keys;
         point_read_on_cache_miss_ = point_read_on_miss;
         blk_type_ = NotBlocked;
+        cache_hit_miss_collected_ = false;
 
         ccm_ = nullptr;
         if (!res->Value().cce_addr_.Empty())
@@ -1316,6 +1310,7 @@ public:
         is_covering_keys_ = is_covering_keys;
         point_read_on_cache_miss_ = point_read_on_miss;
         blk_type_ = NotBlocked;
+        cache_hit_miss_collected_ = false;
 
         ccm_ = nullptr;
         if (!res->Value().cce_addr_.Empty())
@@ -1365,6 +1360,7 @@ public:
         is_covering_keys_ = is_covering_keys;
         point_read_on_cache_miss_ = point_read_on_miss;
         blk_type_ = NotBlocked;
+        cache_hit_miss_collected_ = false;
 
         ccm_ = nullptr;
         if (!res->Value().cce_addr_.Empty())
@@ -1482,6 +1478,16 @@ public:
         return schema_version_;
     }
 
+    bool CacheHitMissCollected() const
+    {
+        return cache_hit_miss_collected_;
+    }
+
+    void SetCacheHitMissCollected()
+    {
+        cache_hit_miss_collected_ = true;
+    }
+
 private:
     const void *key_ptr_;
     const std::string *key_str_;
@@ -1521,6 +1527,9 @@ private:
     BlockType blk_type_{BlockType::NotBlocked};
 
     std::vector<VersionTxRecord> *archives_{nullptr};
+
+    // Request will be executed more than once when FetchRecord.
+    bool cache_hit_miss_collected_{false};
 };
 
 struct ScanOpenBatchCc
@@ -1546,13 +1555,12 @@ public:
                bool is_for_write,
                bool is_delta,
                bool is_covering_keys,
-               bool is_include_floor_cce = false
-#ifdef ON_KEY_OBJECT
-               ,
+               bool is_require_keys,
+               bool is_require_recs,
+               bool is_require_sort,
+               bool is_include_floor_cce = false,
                int32_t obj_type = -1,
-               const std::string_view &scan_pattern = {}
-#endif
-    )
+               const std::string_view &scan_pattern = {})
     {
         TemplatedCcRequest<ScanOpenBatchCc, ScanOpenResult>::Reset(
             tn, res, ng_id, tx_number, term, protocol, iso_level);
@@ -1568,12 +1576,13 @@ public:
         is_ckpt_delta_ = is_delta;
         is_covering_keys_ = is_covering_keys;
         is_include_floor_cce_ = is_include_floor_cce;
+        is_require_keys_ = is_require_keys;
+        is_require_recs_ = is_require_recs;
+        is_require_sort_ = is_require_sort;
         cce_ptr_ = nullptr;
         cce_ptr_scan_type_ = ScanType::ScanUnknow;
-#ifdef ON_KEY_OBJECT
         obj_type_ = obj_type;
         scan_pattern_ = scan_pattern;
-#endif
     }
     bool ValidTermCheck() override
     {
@@ -1612,6 +1621,21 @@ public:
     bool IsCoveringKeys() const
     {
         return is_covering_keys_;
+    }
+
+    bool IsRequireKeys() const
+    {
+        return is_require_keys_;
+    }
+
+    bool IsRequireRecs() const
+    {
+        return is_require_recs_;
+    }
+
+    bool IsRequireSort() const
+    {
+        return is_require_sort_;
     }
 
     uint64_t ReadTimestamp() const
@@ -1653,7 +1677,6 @@ public:
     {
         return is_wait_for_post_write_;
     }
-#ifdef ON_KEY_OBJECT
     int32_t GetRedisObjectType() const
     {
         return obj_type_;
@@ -1662,7 +1685,6 @@ public:
     {
         return scan_pattern_;
     }
-#endif
 
 private:
     ScanIndexType index_type_{ScanIndexType::Primary};
@@ -1674,6 +1696,9 @@ private:
     ScanCache *scan_cache_{nullptr};
     bool is_for_write_{false};
     bool is_covering_keys_{false};
+    bool is_require_keys_{true};
+    bool is_require_recs_{true};
+    bool is_require_sort_{true};
     bool is_ckpt_delta_{false};
     // If always include floor_cce in scan result
     bool is_include_floor_cce_{false};
@@ -1690,12 +1715,13 @@ private:
     LruEntry *cce_ptr_{nullptr};
 
     bool is_wait_for_post_write_{false};
-#ifdef ON_KEY_OBJECT
     int32_t obj_type_{-1};
     std::string_view scan_pattern_;
-#endif
 
-    template <typename KeyT, typename ValueT>
+    template <typename KeyT,
+              typename ValueT,
+              bool VersionedRecord,
+              bool RangePartitioned>
     friend class TemplateCcMap;
 
     template <typename SkT, typename PkT>
@@ -1745,11 +1771,6 @@ public:
         }
         else
         {
-            const LruEntry *lru_entry = lock->GetCcEntry();
-            if (lru_entry->PayloadStatus() == RecordStatus::Invalid)
-            {
-                return false;
-            }
             ccm_ = lock->GetCcMap();
         }
 
@@ -1767,13 +1788,12 @@ public:
                CcProtocol protocol,
                bool is_for_write,
                bool is_delta,
-               bool is_covering_keys
-#ifdef ON_KEY_OBJECT
-               ,
+               bool is_covering_keys,
+               bool is_require_keys,
+               bool is_require_recs,
+               bool is_require_sort,
                int32_t obj_type = -1,
-               const std::string_view &scan_pattern = {}
-#endif
-    )
+               const std::string_view &scan_pattern = {})
     {
         TemplatedCcRequest<ScanNextBatchCc, ScanNextResult>::Reset(
             nullptr, next_res, ng_id, tx_number, tx_term, protocol, iso_level);
@@ -1783,16 +1803,17 @@ public:
         is_for_write_ = is_for_write;
         is_ckpt_delta_ = is_delta;
         is_covering_keys_ = is_covering_keys;
+        is_require_keys_ = is_require_keys;
+        is_require_recs_ = is_require_recs;
+        is_require_sort_ = is_require_sort;
         cce_ptr_ = nullptr;
         cce_ptr_scan_type_ = ScanType::ScanUnknow;
 
         const ScanTuple *last_tuple = cache->LastTuple();
         cce_addr_ = &last_tuple->cce_addr_;
         ccm_ = nullptr;
-#ifdef ON_KEY_OBJECT
         obj_type_ = obj_type;
         scan_pattern_ = scan_pattern;
-#endif
     }
 
     bool IsForWrite() const
@@ -1803,6 +1824,21 @@ public:
     bool IsCoveringKeys() const
     {
         return is_covering_keys_;
+    }
+
+    bool IsRequireKeys() const
+    {
+        return is_require_keys_;
+    }
+
+    bool IsRequireRecs() const
+    {
+        return is_require_recs_;
+    }
+
+    bool IsRequireSort() const
+    {
+        return is_require_sort_;
     }
 
     uint64_t ReadTimestamp() const
@@ -1840,7 +1876,6 @@ public:
         return is_wait_for_post_write_;
     }
 
-#ifdef ON_KEY_OBJECT
     int32_t GetRedisObjectType() const
     {
         return obj_type_;
@@ -1849,7 +1884,6 @@ public:
     {
         return scan_pattern_;
     }
-#endif
 
 private:
     const CcEntryAddr *cce_addr_;
@@ -1859,6 +1893,9 @@ private:
     bool is_for_write_{false};
     bool is_covering_keys_{false};
     bool is_ckpt_delta_{false};
+    bool is_require_keys_{true};
+    bool is_require_recs_{true};
+    bool is_require_sort_{true};
     // Record the scan type of the blocked cce
     ScanType cce_ptr_scan_type_{ScanType::ScanUnknow};
 
@@ -1873,11 +1910,12 @@ private:
 
     bool is_wait_for_post_write_{false};
 
-#ifdef ON_KEY_OBJECT
     int32_t obj_type_{-1};
     std::string_view scan_pattern_;
-#endif
-    template <typename KeyT, typename ValueT>
+    template <typename KeyT,
+              typename ValueT,
+              bool VersionedRecord,
+              bool RangePartitioned>
     friend class TemplateCcMap;
 
     template <typename SkT, typename PkT>
@@ -1993,6 +2031,7 @@ public:
         last_pinned_slice_ = nullptr;
         prefetch_size_ = prefetch_size;
         err_ = CcErrorCode::NO_ERROR;
+        cache_hit_miss_collected_ = false;
     }
 
     void Set(const TableName &tbl_name,
@@ -2056,6 +2095,7 @@ public:
         range_slice_id_.Reset();
         last_pinned_slice_ = nullptr;
         err_ = CcErrorCode::NO_ERROR;
+        cache_hit_miss_collected_ = false;
     }
 
     bool Execute(CcShard &ccs) override
@@ -2482,6 +2522,16 @@ public:
         return schema_version_;
     }
 
+    bool CacheHitMissCollected() const
+    {
+        return cache_hit_miss_collected_;
+    }
+
+    void SetCacheHitMissCollected()
+    {
+        cache_hit_miss_collected_ = true;
+    }
+
 private:
     enum struct RangeKeyType : uint8_t
     {
@@ -2547,6 +2597,9 @@ private:
     std::vector<ScanBlockingInfo> blocking_vec_;
 
     RangeSliceId range_slice_id_;
+
+    // Request will be executed more than once.
+    bool cache_hit_miss_collected_{false};
 };
 
 struct CkptTsCc : public CcRequestBase
@@ -2657,7 +2710,7 @@ public:
         return standby_msg_seq_id_vec_;
     }
 
-    void ShardMemoryUsageReport(LocalCcShards &local_shards)
+    void ShardMemoryUsageReport()
     {
         for (uint16_t core_id = 0; core_id < memory_allocated_vec_.size();
              core_id++)
@@ -2665,6 +2718,7 @@ public:
             uint64_t &allocated = memory_allocated_vec_[core_id];
             uint64_t &committed = memory_committed_vec_[core_id];
             bool heap_full = heap_full_vec_[core_id];
+
             LOG(INFO) << "ccs " << core_id << " memory usage report, committed "
                       << committed << ", allocated " << allocated
                       << ", frag ratio " << std::setprecision(2)
@@ -2828,6 +2882,12 @@ public:
 
             if (tuple_idx == tuple_cnt)
             {
+                size_t trailing_cnt = TrailingCnt(remote_core_idx);
+                while (trailing_cnt-- > 0)
+                {
+                    shard_cache->RemoveLast();
+                }
+
                 range_scanner.CommitAtCore(remote_core_idx);
 
                 if (!MoveForward(ccs.core_id_))
@@ -2864,7 +2924,9 @@ public:
                 hd_res_->SetFinished();
             }
 
-            hd_res_->DecreaseCurrentHandlingResponse();
+            TransactionExecution *txm =
+                reinterpret_cast<TransactionExecution *>(resp_msg_->txm_addr());
+            txm->ReleaseSharedForwardLatch();
 
             // Recycle message
             receiver_->RecycleScanSliceResp(std::move(resp_msg_));
@@ -2922,6 +2984,14 @@ private:
         // tuple count
         tuple_cnt_info += remote_core_idx * sizeof(size_t);
         return *(reinterpret_cast<const size_t *>(tuple_cnt_info));
+    }
+
+    size_t TrailingCnt(size_t remote_core_idx) const
+    {
+        const size_t *ptr =
+            reinterpret_cast<const size_t *>(resp_msg_->trailing_cnts().data());
+        ptr += remote_core_idx;
+        return *ptr;
     }
 
     uint16_t RemoteCoreCnt() const
@@ -3048,7 +3118,8 @@ public:
                     tables_.push_back(table.first);
                     // also need to defrag range cc map
                     TableName range_table_name{table.first.String(),
-                                               TableType::RangePartition};
+                                               TableType::RangePartition,
+                                               table.first.Engine()};
                     tables_.push_back(std::move(range_table_name));
                 }
                 current_table_idx_ = 0;
@@ -3215,6 +3286,14 @@ public:
 #else
     static constexpr size_t DataSyncScanBatchSize = 128;
 #endif
+
+    enum struct OpType : uint8_t
+    {
+        // For normal scan
+        Normal = 0,
+        // For release read intent on the paused key.
+        Terminated
+    };
 
     DataSyncScanCc() = delete;
     DataSyncScanCc(const DataSyncScanCc &) = delete;
@@ -3391,7 +3470,7 @@ public:
 #ifdef RANGE_PARTITION_ENABLED
     std::pair<TxKey, bool> &PausePos(size_t core_idx)
 #else
-    std::pair<LruEntry *, bool> &PausePos(size_t core_idx)
+    std::pair<KeyGapLockAndExtraData *, bool> &PausePos(size_t core_idx)
 #endif
     {
         return pause_pos_[core_idx];
@@ -3403,7 +3482,7 @@ public:
         cv_.wait(lk, [this] { return unfinished_cnt_ == 0; });
     }
 
-    void Reset()
+    void Reset(OpType op_type = OpType::Normal)
     {
         std::lock_guard<std::mutex> lk(mux_);
         unfinished_cnt_ = core_cnt_;
@@ -3433,6 +3512,7 @@ public:
 #endif
         err_ = CcErrorCode::NO_ERROR;
         scan_heap_is_full_ = false;
+        op_type_ = op_type;
     }
 
     void SetError(CcErrorCode err)
@@ -3523,6 +3603,11 @@ public:
         err_ = CcErrorCode::LOG_NOT_TRUNCATABLE;
     }
 
+    bool IsTerminated() const
+    {
+        return op_type_ == OpType::Terminated;
+    }
+
 #ifdef RANGE_PARTITION_ENABLED
     void UnpinSlices()
     {
@@ -3583,7 +3668,7 @@ private:
 #ifdef RANGE_PARTITION_ENABLED
     std::vector<std::pair<TxKey, bool>> pause_pos_;
 #else
-    std::vector<std::pair<LruEntry *, bool>> pause_pos_;
+    std::vector<std::pair<KeyGapLockAndExtraData *, bool>> pause_pos_;
 #endif
     size_t scan_batch_size_;
 
@@ -3623,7 +3708,12 @@ private:
     // TODO(xxx) general solution for #1130
     const uint64_t schema_version_{0};
 
-    template <typename KeyT, typename ValueT>
+    OpType op_type_{OpType::Normal};
+
+    template <typename KeyT,
+              typename ValueT,
+              bool VersionedRecord,
+              bool RangePartitioned>
     friend class TemplateCcMap;
 
     friend std::ostream &operator<<(std::ostream &outs,
@@ -3839,6 +3929,7 @@ public:
         int64_t ng_term,
         std::string_view table_name_view,
         TableType table_type,
+        TableEngine table_engine,
         std::string_view blob,
         uint64_t commit_ts,
         uint64_t txn,
@@ -3851,7 +3942,8 @@ public:
         uint16_t first_core = 0)
     {
         table_name_str_ = table_name_view;
-        table_name_holder_ = TableName(table_name_str_, table_type);
+        table_name_holder_ =
+            TableName(table_name_str_, table_type, table_engine);
         TemplatedCcRequest<ReplayLogCc, Void>::Reset(
             &table_name_holder_,
             &result_,
@@ -3905,7 +3997,9 @@ public:
                 if (table_name_->Type() == TableType::RangePartition)
                 {
                     const txservice::TableName base_table_name{
-                        table_name_->GetBaseTableNameSV(), TableType::Primary};
+                        table_name_->GetBaseTableNameSV(),
+                        TableType::Primary,
+                        table_name_->Engine()};
                     const CatalogEntry *catalog_entry =
                         ccs.GetCatalog(base_table_name, node_group_id_);
                     if (catalog_entry == nullptr)
@@ -3935,7 +4029,8 @@ public:
                         // If the range table corresponds to a dirty table (such
                         // as dirty index), should use the dirty table schema.
                         TableName index_name(table_name_->StringView(),
-                                             table_type);
+                                             table_type,
+                                             table_name_->Engine());
                         if (!table_schema_->IndexKeySchema(index_name))
                         {
                             table_schema_ = catalog_entry->dirty_schema_.get();
@@ -4130,7 +4225,8 @@ private:
     TableName table_name_holder_{
         "",
         0,
-        TableType::Primary};  //  not string owner, sv -> protobuf message.
+        TableType::Primary,
+        TableEngine::None};  //  not string owner, sv -> protobuf message.
     std::string table_name_str_;
     std::string log_blob_str_;
     // Temporarily store the currently parsed offset when fetch record from
@@ -4215,6 +4311,9 @@ public:
                 std::string_view table_name_view(blob.data() + blob_offset,
                                                  table_name_len);
                 blob_offset += table_name_len;
+                TableEngine table_engine =
+                    static_cast<TableEngine>(blob.data()[blob_offset]);
+                blob_offset += sizeof(uint8_t);
 #ifdef ON_KEY_OBJECT
                 TableType table_type = TableType::Primary;
                 // 4-byte integer for the length of the serialized object keys
@@ -4264,6 +4363,7 @@ public:
                     cc_ng_term_,
                     table_name_view,
                     table_type,
+                    table_engine,
                     std::string_view(blob.data() + blob_offset, kv_len),
                     commit_ts,
                     0,
@@ -4411,7 +4511,8 @@ public:
         bool all_pinned = true;
 
         TableName range_table_name(table_name_->StringView(),
-                                   TableType::RangePartition);
+                                   TableType::RangePartition,
+                                   table_name_->Engine());
         std::map<TxKey, TableRangeEntry::uptr> *range_map =
             shard->GetTableRangesForATable(range_table_name, node_group_id_);
 
@@ -4707,9 +4808,9 @@ struct CheckDeadLockResult
      */
     struct EntryLockInfo
     {
-        // The txids that locked the ccentry
+        // The txids that has acquired the lock on the ccentry
         std::unordered_set<uint64_t> lock_txids;
-        // The txids that waited the ccentry
+        // The txids that is waiting the lock on the ccentry
         std::unordered_set<uint64_t> wait_txids;
     };
 
@@ -4810,8 +4911,9 @@ public:
         // Can not sure the entry is in memory, so here verify by
         // ccs.GetLockHoldingTxs
         LruEntry *lru_entry = reinterpret_cast<LruEntry *>(entry_addr_);
-        std::unordered_map<NodeGroupId,
-                           std::unordered_map<TxNumber, TxLockInfo>> &ltxs =
+        const std::unordered_map<
+            NodeGroupId,
+            absl::flat_hash_map<TxNumber, TxLockInfo::uptr>> &ltxs =
             ccs.GetLockHoldingTxs();
 
         auto it_ng = ltxs.find(node_id_);
@@ -4822,8 +4924,8 @@ public:
             // Maybe the tx has taken part in more than dead lock cycles, and
             // it has been release in other cycle.
             if (it_info != it_ng->second.end() &&
-                it_info->second.cce_list_.find(lru_entry) !=
-                    it_info->second.cce_list_.end())
+                it_info->second->cce_list_.find(lru_entry) !=
+                    it_info->second->cce_list_.end())
             {
                 NonBlockingLock *key_lock = lru_entry->GetKeyLock();
                 if (key_lock != nullptr)
@@ -5227,10 +5329,14 @@ public:
         return SetFinish();
     }
 
-    template <typename KeyT, typename ValueT>
-    bool IsCleanTarget(const KeyT &key,
-                       const CcEntry<KeyT, ValueT> *entry,
-                       CcShard *ccs) const
+    template <typename KeyT,
+              typename ValueT,
+              bool VersionedRecord,
+              bool RangePartitioned>
+    bool IsCleanTarget(
+        const KeyT &key,
+        const CcEntry<KeyT, ValueT, VersionedRecord, RangePartitioned> *entry,
+        CcShard *ccs) const
     {
         switch (clean_type_)
         {
@@ -5273,16 +5379,16 @@ public:
             {
                 return true;
             }
-#ifdef ON_KEY_OBJECT
             // Expired object is also treated as deleted object.
-            if (entry->payload_ && entry->payload_->HasTTL())
+            if (entry->payload_.cur_payload_ &&
+                entry->payload_.cur_payload_->HasTTL())
             {
-                if (entry->payload_->GetTTL() < ccs->NowInMilliseconds())
+                if (entry->payload_.cur_payload_->GetTTL() <
+                    ccs->NowInMilliseconds())
                 {
                     return true;
                 }
             }
-#endif
             return false;
         }
         default:
@@ -5291,7 +5397,9 @@ public:
         }
     }
 
-    bool CanBeCleaned(const LruEntry *entry) const
+    bool CanBeCleaned(const LruEntry *entry,
+                      bool versioned_cce,
+                      bool range_partitioned) const
     {
         switch (clean_type_)
         {
@@ -5301,18 +5409,127 @@ public:
             // All data in the target range/bucket can be cleaned.
             return true;
         case CleanType::CleanForAlterTable:
-            return entry->IsFree() && !entry->GetBeingCkpt();
+        {
+            if (versioned_cce)
+            {
+                if (range_partitioned)
+                {
+                    const VersionedLruEntry<true, true> *versioned_entry =
+                        static_cast<const VersionedLruEntry<true, true> *>(
+                            entry);
+                    return versioned_entry->IsFree() &&
+                           !versioned_entry->GetBeingCkpt();
+                }
+                else
+                {
+                    const VersionedLruEntry<true, false> *versioned_entry =
+                        static_cast<const VersionedLruEntry<true, false> *>(
+                            entry);
+                    return versioned_entry->IsFree() &&
+                           !versioned_entry->GetBeingCkpt();
+                }
+            }
+            else
+            {
+                if (range_partitioned)
+                {
+                    const VersionedLruEntry<false, true> *versioned_entry =
+                        static_cast<const VersionedLruEntry<false, true> *>(
+                            entry);
+                    return versioned_entry->IsFree() &&
+                           !versioned_entry->GetBeingCkpt();
+                }
+                else
+                {
+                    const VersionedLruEntry<false, false> *versioned_entry =
+                        static_cast<const VersionedLruEntry<false, false> *>(
+                            entry);
+                    return versioned_entry->IsFree() &&
+                           !versioned_entry->GetBeingCkpt();
+                }
+            }
+        }
         case CleanType::CleanDeletedData:
         {
             if (txservice_skip_kv)
             {
                 // If no kv is attached, we can evict this entry as long as
                 // there's no one trying to access it.
-                return entry->GetKeyLock() == nullptr;
+                if (versioned_cce)
+                {
+                    if (range_partitioned)
+                    {
+                        const VersionedLruEntry<true, true> *versioned_entry =
+                            static_cast<const VersionedLruEntry<true, true> *>(
+                                entry);
+                        return versioned_entry->GetKeyLock() == nullptr;
+                    }
+                    else
+                    {
+                        const VersionedLruEntry<true, false> *versioned_entry =
+                            static_cast<const VersionedLruEntry<true, false> *>(
+                                entry);
+                        return versioned_entry->GetKeyLock() == nullptr;
+                    }
+                }
+                else
+                {
+                    if (range_partitioned)
+                    {
+                        const VersionedLruEntry<false, true> *versioned_entry =
+                            static_cast<const VersionedLruEntry<false, true> *>(
+                                entry);
+                        return versioned_entry->GetKeyLock() == nullptr;
+                    }
+                    else
+                    {
+                        const VersionedLruEntry<false, false> *versioned_entry =
+                            static_cast<
+                                const VersionedLruEntry<false, false> *>(entry);
+                        return versioned_entry->GetKeyLock() == nullptr;
+                    }
+                }
             }
             else
             {
-                return entry->IsFree() && !entry->GetBeingCkpt();
+                if (versioned_cce)
+                {
+                    if (range_partitioned)
+                    {
+                        const VersionedLruEntry<true, true> *versioned_entry =
+                            static_cast<const VersionedLruEntry<true, true> *>(
+                                entry);
+                        return versioned_entry->IsFree() &&
+                               !versioned_entry->GetBeingCkpt();
+                    }
+                    else
+                    {
+                        const VersionedLruEntry<true, false> *versioned_entry =
+                            static_cast<const VersionedLruEntry<true, false> *>(
+                                entry);
+                        return versioned_entry->IsFree() &&
+                               !versioned_entry->GetBeingCkpt();
+                    }
+                }
+                else
+                {
+                    if (range_partitioned)
+                    {
+                        const VersionedLruEntry<false, true> *versioned_entry =
+                            static_cast<const VersionedLruEntry<false, true> *>(
+                                entry);
+                        return versioned_entry->IsFree() &&
+                               !versioned_entry->GetBeingCkpt();
+                    }
+                    else
+                    {
+                        const VersionedLruEntry<false, false> *versioned_entry =
+                            static_cast<
+                                const VersionedLruEntry<false, false> *>(entry);
+                        return versioned_entry->IsFree() &&
+                               !versioned_entry->GetBeingCkpt();
+                    }
+                }
             }
         }
         default:
@@ -5732,6 +5949,7 @@ public:
         cce_ptr_ = nullptr;
         apply_and_commit_ = commit;
         block_type_ = ApplyBlockType::NoBlocking;
+        cache_hit_miss_collected_ = false;
     }
 
     // for remote
@@ -5778,6 +5996,7 @@ public:
         cce_ptr_ = nullptr;
         block_type_ = ApplyBlockType::NoBlocking;
         apply_and_commit_ = commit;
+        cache_hit_miss_collected_ = false;
     }
 
     bool IsLocal() const
@@ -5919,6 +6138,9 @@ public:
         BlockOnCondition  // for blocking commands like blpop
     };
     ApplyBlockType block_type_{ApplyBlockType::NoBlocking};
+
+    // Request will be executed more than once when FetchRecord.
+    bool cache_hit_miss_collected_{false};
 };
 
 struct UploadTxCommandsCc
@@ -5960,11 +6182,6 @@ public:
         }
         else
         {
-            const LruEntry *lru_entry = lock->GetCcEntry();
-            if (lru_entry->PayloadStatus() == RecordStatus::Invalid)
-            {
-                return false;
-            }
             ccm_ = lock->GetCcMap();
         }
 
@@ -6043,7 +6260,7 @@ public:
         ReleasePhase
     };
     KeyObjectStandbyForwardCc()
-        : remote_table_name_(empty_sv, TableType::Primary),
+        : remote_table_name_(empty_sv, TableType::Primary, TableEngine::None),
           key_str_(nullptr),
           object_version_(0),
           commit_ts_(0),
@@ -6187,8 +6404,12 @@ public:
         }
         TableType table_type =
             remote::ToLocalType::ConvertCcTableType(fwd_req_->table_type());
-        remote_table_name_ = TableName(
-            std::string_view(fwd_req_->table_name().data()), table_type);
+        TableEngine table_engine =
+            remote::ToLocalType::ConvertTableEngine(fwd_req_->table_engine());
+        remote_table_name_ =
+            TableName(std::string_view(fwd_req_->table_name().data()),
+                      table_type,
+                      table_engine);
         uint32_t ng_id = fwd_req_->key_shard_code() >> 10;
 
         uint64_t txn = fwd_req_->tx_number();
@@ -6780,7 +7001,8 @@ public:
 
             // Get original table name for the range table name
             const TableName base_table_name{table_name_->GetBaseTableNameSV(),
-                                            TableType::Primary};
+                                            TableType::Primary,
+                                            table_name_->Engine()};
             const CatalogEntry *catalog_entry =
                 ccs.GetCatalog(base_table_name, node_group_id_);
             if (catalog_entry == nullptr || catalog_entry->schema_ == nullptr)
@@ -6848,9 +7070,9 @@ public:
     void Wait()
     {
         std::unique_lock<bthread::Mutex> lk(mutex_);
-        while (!finish_)
+        while (!finish_ || InUse())
         {
-            cv_.wait(lk);
+            cv_.wait_for(lk, 500000);
         }
     }
 
@@ -7110,9 +7332,9 @@ public:
     void Wait()
     {
         std::unique_lock<bthread::Mutex> lk(req_mux_);
-        while (unfinished_cnt_ != 0)
+        while (unfinished_cnt_ != 0 || InUse())
         {
-            req_cv_.wait(lk);
+            req_cv_.wait_for(lk, 500000);
         }
     }
 
@@ -7255,11 +7477,7 @@ public:
 
         total_ref_cnt_ = local_ref_cnt + remote_ref_cnt;
         remote_ref_cnt_ = remote_ref_cnt;
-        for (size_t idx = 0; idx < table_names_->size(); ++idx)
-        {
-            total_obj_sizes_.push_back(
-                std::make_unique<std::atomic<int64_t>>(0));
-        }
+        total_obj_sizes_.resize(table_names_->size(), 0);
     }
 
     bool Execute(CcShard &ccs) override
@@ -7273,8 +7491,9 @@ public:
                 CcMap *map = ccs.GetCcm(table_names_->at(idx), ng_id);
                 if (map != nullptr)
                 {
-                    total_obj_sizes_[idx]->fetch_add(map->NormalObjectSize(),
-                                                     std::memory_order_relaxed);
+                    TotalObjSizesFetchAdd(idx,
+                                          map->NormalObjectSize(),
+                                          std::memory_order_relaxed);
                 }
             }
         }
@@ -7294,7 +7513,7 @@ public:
         for (size_t idx = 0; idx < total_obj_sizes_.size(); ++idx)
         {
             results.push_back(
-                total_obj_sizes_[idx]->load(std::memory_order_relaxed));
+                TotalObjSizesLoad(idx, std::memory_order_relaxed));
         }
 
         return results;
@@ -7315,8 +7534,8 @@ public:
 
         for (size_t idx = 0; idx < total_obj_sizes.size(); ++idx)
         {
-            total_obj_sizes_[idx]->fetch_add(total_obj_sizes[idx],
-                                             std::memory_order_relaxed);
+            TotalObjSizesFetchAdd(
+                idx, total_obj_sizes[idx], std::memory_order_relaxed);
         }
 
         std::unique_lock lk(mux_);
@@ -7364,11 +7583,33 @@ public:
         }
     }
 
+    void TotalObjSizesFetchAdd(size_t idx,
+                               int64_t size,
+                               std::memory_order order)
+    {
+        reinterpret_cast<std::atomic_int64_t &>(total_obj_sizes_[idx])
+            .fetch_add(size, order);
+    }
+
+    int64_t TotalObjSizesLoad(size_t idx, std::memory_order order) const
+    {
+        return reinterpret_cast<const std::atomic_int64_t &>(
+                   total_obj_sizes_[idx])
+            .load(order);
+    }
+
+    size_t TotalObjSizesCount() const
+    {
+        return total_obj_sizes_.size();
+    }
+
     bthread::Mutex mux_;
     bthread::ConditionVariable cv_;
 
+private:
+    std::vector<int64_t /*atomic*/> total_obj_sizes_;
+
 protected:
-    std::vector<std::unique_ptr<std::atomic<int64_t>>> total_obj_sizes_;
     size_t total_ref_cnt_{0};
     size_t remote_ref_cnt_{0};
     int32_t term_{0};

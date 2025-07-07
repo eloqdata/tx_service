@@ -48,9 +48,9 @@
 #include "cc_page_clean_guard.h"
 #include "cc_shard.h"
 #include "data_sync_task.h"
-#include "error_messages.h"
 #include "local_cc_handler.h"
 #include "log.pb.h"
+#include "meter.h"
 #include "range_record.h"
 #include "range_slice.h"
 #include "store/data_store_handler.h"
@@ -264,6 +264,7 @@ public:
         return tx_service_;
     }
 
+    // Testing purpose only.
     template <typename KeyT, typename ValueT>
     void CreateCcTable(const TableName &tabname,
                        const KeySchema *key_schema = nullptr,
@@ -277,7 +278,7 @@ public:
             {
                 cc_shards_[id]->native_ccms_.try_emplace(
                     tabname,
-                    std::make_unique<TemplateCcMap<KeyT, ValueT>>(
+                    std::make_unique<TemplateCcMap<KeyT, ValueT, true, true>>(
                         cc_shards_[id].get(), key_schema, rec_schema));
             }
         }
@@ -353,7 +354,8 @@ public:
                     mapsizes.emplace(
                         std::piecewise_construct,
                         std::forward_as_tuple(tab_name.StringView(),
-                                              tab_name.Type()),
+                                              tab_name.Type(),
+                                              tab_name.Engine()),
                         std::forward_as_tuple(map_iter->second->size()));
                 }
 
@@ -401,14 +403,12 @@ public:
      */
     void InitializeTableRangesHeap()
     {
-#ifdef RANGE_PARTITION_ENABLED
         std::unique_lock<std::mutex> lk(table_ranges_heap_mux_);
         if (!table_ranges_heap_)
         {
             table_ranges_thread_id_ = mi_thread_id();
             table_ranges_heap_ = mi_heap_new();
         }
-#endif
     }
 
     mi_threadid_t GetTableRangesHeapThreadId() const
@@ -519,6 +519,10 @@ public:
                                      const std::string &catalog_image,
                                      uint64_t commit_ts);
 
+    void UpdateDirtyCatalog(const TableName &table_name,
+                            const std::string &catalog_image,
+                            CatalogEntry *catalog_entry);
+
     /**
      * Returns false if catalog entry of higher version already exists.
      * @param table_name
@@ -535,8 +539,6 @@ public:
         const std::string &new_catalog_image,
         uint64_t old_schema_ts,
         uint64_t dirty_schema_ts);
-
-    void CommitDirtyCatalog(const TableName &table_name, NodeGroupId cc_ng_id);
 
     CatalogEntry *GetCatalog(const TableName &table_name, NodeGroupId cc_ng_id);
     CatalogEntry *GetCatalogInternal(const TableName &table_name,
@@ -764,6 +766,11 @@ public:
             KickoutRangeSlices();
         }
         return new_range_entries;
+    }
+
+    void FreeCcShard(size_t idx)
+    {
+        cc_shards_[idx] = nullptr;
     }
 
     /**
@@ -1014,7 +1021,8 @@ public:
         std::shared_lock<std::shared_mutex> lk(meta_data_mux_);
 
         TableName range_table_name(table_name.StringView(),
-                                   TableType::RangePartition);
+                                   TableType::RangePartition,
+                                   table_name.Engine());
         TxKey search_key(&key);
 
         TemplateTableRangeEntry<KeyT> *range_entry =
@@ -1063,7 +1071,8 @@ public:
         std::shared_lock<std::shared_mutex> lk(meta_data_mux_);
 
         TableName range_table_name(table_name.StringView(),
-                                   TableType::RangePartition);
+                                   TableType::RangePartition,
+                                   table_name.Engine());
         TxKey slice_key(&key);
 
         TemplateTableRangeEntry<KeyT> *range_entry =
@@ -1161,7 +1170,8 @@ public:
         std::shared_lock<std::shared_mutex> lk(meta_data_mux_);
 
         TableName range_table_name(table_name.StringView(),
-                                   TableType::RangePartition);
+                                   TableType::RangePartition,
+                                   table_name.Engine());
 
         TemplateTableRangeEntry<KeyT> *range_entry =
             static_cast<TemplateTableRangeEntry<KeyT> *>(
@@ -1281,7 +1291,8 @@ public:
     {
         std::shared_lock<std::shared_mutex> lk(meta_data_mux_);
         TableName range_table_name(table_name.StringView(),
-                                   TableType::RangePartition);
+                                   TableType::RangePartition,
+                                   table_name.Engine());
         // TxKey tx_key(&slice_key);
         TemplateTableRangeEntry<KeyT> *range_entry =
             static_cast<TemplateTableRangeEntry<KeyT> *>(
@@ -1303,7 +1314,8 @@ public:
     {
         std::shared_lock<std::shared_mutex> lk(meta_data_mux_);
         TableName range_table_name(table_name.StringView(),
-                                   TableType::RangePartition);
+                                   TableType::RangePartition,
+                                   table_name.Engine());
 
         TemplateTableRangeEntry<KeyT> *range_entry =
             static_cast<TemplateTableRangeEntry<KeyT> *>(
@@ -1381,128 +1393,130 @@ public:
     std::shared_ptr<TableSchema> GetSharedDirtyTableSchema(
         const TableName &table_name, NodeGroupId ng_id);
 
-#ifdef RANGE_PARTITION_ENABLED
     /**
      * @brief Kickout a page assigned by clean_guard.
      *
      * LocalCcShards doesn't want to expose meta_data_mux_, so the kickout
      * detail have to be implemented at here.
-     *
-     * A key is not cleanable if the pin count of its belonged slice is not 0.
-     *
-     * Consider a page that contains three ranges, and each range contains three
-     * slices. To clean the page, the method iterate over ranges. And in each
-     * range, it iterate over slices. This is to reduce frequently searching for
-     * ranges and slices.
-     *
-     * |______._______._______|_______._______._______|_______._______._______|
      */
-    template <typename KeyT, typename ValueT>
-    void KickoutPage(CcPageCleanGuard<KeyT, ValueT> *clean_guard)
-    {
-        const TableName &table_name = clean_guard->table_name_;
-        TableName range_table_name(table_name.StringView(),
-                                   TableType::RangePartition);
-        NodeGroupId cc_ng_id = clean_guard->cc_ng_id_;
-        CcPage<KeyT, ValueT> *page = clean_guard->page_;
-
-        size_t idx = 0;
-        size_t page_size = page->Size();
-        do
-        {
-            std::shared_lock<std::shared_mutex> meta_data_lk(meta_data_mux_);
-
-            const KeyT &key = page->keys_[idx];
-
-            // Clean next range.
-            auto range_entry = static_cast<TemplateTableRangeEntry<KeyT> *>(
-                GetTableRangeEntryInternal(
-                    range_table_name, cc_ng_id, TxKey(&key)));
-            if (range_entry == nullptr)
-            {
-                clean_guard->MarkCleanForOrphanKey(idx);
-                idx++;
-                continue;
-            }
-
-            // PinStoreRange: Prevent range_slices_from being kicked out.
-            auto store_range = static_cast<TemplateStoreRange<KeyT> *>(
-                range_entry->PinStoreRange());
-            if (store_range == nullptr)
-            {
-                clean_guard->MarkCleanForOrphanKey(idx);
-                idx++;
-                continue;
-            }
-
-            range_entry->SetAcceptsDirtyRangeData(false);
-
-            bool kickout_any = false;
-            uint64_t dirty_range_version =
-                range_entry->GetRangeInfo()->DirtyTs();
-            idx = clean_guard->MarkCleanInRange(
-                store_range,
-                idx,
-                kickout_any,
-                (range_entry->GetRangeInfo()->IsDirty() ? &dirty_range_version
-                                                        : nullptr));
-            if (kickout_any)
-            {
-                // If the key is kicked out, we need to update the bucket
-                // info to disallow upload batch cc since we might already
-                // have kicked out newer version from cc map.
-                uint32_t partition_id =
-                    range_entry->GetRangeInfo()->PartitionId();
-                uint16_t bucket_id =
-                    Sharder::Instance().MapRangeIdToBucketId(partition_id);
-                BucketInfo *bucket_info =
-                    GetBucketInfoInternal(bucket_id, cc_ng_id);
-                bucket_info->SetAcceptsUploadBatch(false);
-            }
-
-            range_entry->UnPinStoreRange();
-        } while (idx != page_size);
-    }
-#else
-    template <typename KeyT, typename ValueT>
-    void KickoutPage(CcPageCleanGuard<KeyT, ValueT> *clean_guard)
+    template <typename KeyT,
+              typename ValueT,
+              bool VersionedRecord,
+              bool RangePartitioned>
+    void KickoutPage(
+        CcPageCleanGuard<KeyT, ValueT, VersionedRecord, RangePartitioned>
+            *clean_guard)
     {
         const TableName &table_name = clean_guard->table_name_;
         NodeGroupId cc_ng_id = clean_guard->cc_ng_id_;
-        CcPage<KeyT, ValueT> *page = clean_guard->page_;
+        CcPage<KeyT, ValueT, VersionedRecord, RangePartitioned> *page =
+            clean_guard->page_;
 
         size_t page_size = page->Size();
-        for (size_t idx = 0; idx < page_size; idx++)
+        if (RangePartitioned)
         {
-            clean_guard->MarkCleanForOrphanKey(idx);
-        }
-
-        if (clean_guard->cc_shard_->IsBucketsMigrating())
-        {
-            // This will disallow this bucket from accepting upload batch
-            // request during cluster scale since we might already have kicked
-            // out newer version from cc map.
-            for (size_t idx = 0; idx < page_size; ++idx)
+            // For range partitioned table, we need to verify range and slice
+            // info to check if the key is cleanable.
+            //
+            // A key is not cleanable if the pin count of its belonged slice is
+            // not 0.
+            //
+            // Consider a page that contains three ranges, and each range
+            // contains three slices. To clean the page, the method iterate over
+            // ranges. And in each range, it iterate over slices. This is to
+            // reduce frequently searching for ranges and slices.
+            //
+            // |______._______._______|_______._______._______|_______._______._______|
+            TableName range_table_name(table_name.StringView(),
+                                       TableType::RangePartition,
+                                       table_name.Engine());
+            size_t idx = 0;
+            do
             {
+                std::shared_lock<std::shared_mutex> meta_data_lk(
+                    meta_data_mux_);
+
                 const KeyT &key = page->keys_[idx];
-                const auto &cce = page->entries_[idx];
-                if (cce.get() == nullptr)
+
+                // Clean next range.
+                auto range_entry = static_cast<TemplateTableRangeEntry<KeyT> *>(
+                    GetTableRangeEntryInternal(
+                        range_table_name, cc_ng_id, TxKey(&key)));
+                if (range_entry == nullptr)
                 {
-                    KickoutKeyInBucket(table_name, cc_ng_id, key);
+                    clean_guard->MarkCleanForOrphanKey(idx);
+                    idx++;
+                    continue;
+                }
+
+                // PinStoreRange: Prevent range_slices_from being kicked out.
+                auto store_range = static_cast<TemplateStoreRange<KeyT> *>(
+                    range_entry->PinStoreRange());
+                if (store_range == nullptr)
+                {
+                    clean_guard->MarkCleanForOrphanKey(idx);
+                    idx++;
+                    continue;
+                }
+
+                range_entry->SetAcceptsDirtyRangeData(false);
+
+                bool kickout_any = false;
+                uint64_t dirty_range_version =
+                    range_entry->GetRangeInfo()->DirtyTs();
+                idx = clean_guard->MarkCleanInRange(
+                    store_range,
+                    idx,
+                    kickout_any,
+                    (range_entry->GetRangeInfo()->IsDirty()
+                         ? &dirty_range_version
+                         : nullptr));
+                if (kickout_any && clean_guard->cc_shard_->IsBucketsMigrating())
+                {
+                    // If the key is kicked out, we need to update the bucket
+                    // info to disallow upload batch cc since we might already
+                    // have kicked out newer version from cc map.
+                    uint32_t partition_id =
+                        range_entry->GetRangeInfo()->PartitionId();
+                    uint16_t bucket_id =
+                        Sharder::Instance().MapRangeIdToBucketId(partition_id);
+                    BucketInfo *bucket_info =
+                        GetBucketInfoInternal(bucket_id, cc_ng_id);
+                    bucket_info->SetAcceptsUploadBatch(false);
+                }
+
+                range_entry->UnPinStoreRange();
+            } while (idx != page_size);
+        }
+        else
+        {
+            // For non-range partitioned table, we just need to check if the cce
+            // cleanable.
+            for (size_t idx = 0; idx < page_size; idx++)
+            {
+                clean_guard->MarkCleanForOrphanKey(idx);
+            }
+            if (clean_guard->cc_shard_->IsBucketsMigrating())
+            {
+                // This will disallow this bucket from accepting upload batch
+                // request during cluster scale since we might already have
+                // kicked out newer version from cc map.
+                for (size_t idx = 0; idx < page_size; ++idx)
+                {
+                    const KeyT &key = page->keys_[idx];
+                    const auto &cce = page->entries_[idx];
+                    if (cce.get() == nullptr)
+                    {
+                        uint16_t bucket_id =
+                            Sharder::MapKeyHashToBucketId(key.Hash());
+                        std::shared_lock<std::shared_mutex> s_lk(
+                            meta_data_mux_);
+                        GetBucketInfoInternal(bucket_id, cc_ng_id)
+                            ->SetAcceptsUploadBatch(false);
+                    }
                 }
             }
         }
-    }
-#endif
-
-    template <typename KeyT>
-    void KickoutKeyInBucket(const TableName &tbl_name,
-                            const NodeGroupId ng_id,
-                            const KeyT &key)
-    {
-        uint16_t bucket_id = Sharder::MapKeyHashToBucketId(key.Hash());
-        std::shared_lock<std::shared_mutex> s_lk(meta_data_mux_);
-        GetBucketInfoInternal(bucket_id, ng_id)->SetAcceptsUploadBatch(false);
     }
 
     /**
@@ -1539,21 +1553,12 @@ public:
 
     void SetBucketMigrating(bool is_migrating)
     {
-#ifdef RANGE_PARTITION_ENABLED
-        assert(false);
-#else
         buckets_migrating_.store(is_migrating, std::memory_order_release);
-#endif
     }
 
     bool IsBucketsMigrating()
     {
-#ifdef RANGE_PARTITION_ENABLED
-        assert(false);
-        return false;
-#else
         return buckets_migrating_.load(std::memory_order_relaxed);
-#endif
     }
 
     const BucketInfo *GetBucketInfo(const uint16_t bucket_id,
@@ -1646,6 +1651,7 @@ public:
         const TxKey &start_key,
         CcRequestBase *cc_request,
         CcShard *cc_shard);
+
 #endif
 
     void InitPrebuiltTables(NodeGroupId ng_id, int64_t term);
@@ -1687,6 +1693,13 @@ public:
     void ClearGenerateSkStatus(NodeGroupId ng_id,
                                uint64_t tx_number,
                                int32_t partition_id);
+
+    metrics::Meter *GetNodeMeter()
+    {
+        return node_meter_.get();
+    }
+
+    void PostProcessCkpt(std::shared_ptr<DataSyncTask> &task, bool flush_ret);
 
     store::DataStoreHandler *const store_hd_;
 
@@ -1822,9 +1835,7 @@ private:
     );
 
     void PostProcessDataSyncTask(std::shared_ptr<DataSyncTask> task,
-#ifndef RANGE_PARTITION_ENABLED
                                  const TableSchema *table_schema,
-#endif
                                  TransactionExecution *data_sync_txm,
                                  DataSyncTask::CkptErrorCode ckpt_err
 #ifndef RANGE_PARTITION_ENABLED
@@ -1907,9 +1918,7 @@ private:
 
     // Protects meta data (table_ranges_ and table_catalogs_)
     mutable std::shared_mutex meta_data_mux_;
-#ifndef RANGE_PARTITION_ENABLED
     std::atomic_bool buckets_migrating_{false};
-#endif
 
     std::unordered_map<TableName, std::string> prebuilt_tables_;
 
@@ -1919,7 +1928,6 @@ private:
 
     bool realtime_sampling_;
 
-#ifdef RANGE_PARTITION_ENABLED
     struct RangeSplitTask
     {
         RangeSplitTask(std::shared_ptr<DataSyncTask> data_sync_task,
@@ -2070,7 +2078,6 @@ private:
         std::shared_ptr<std::vector<UploadBatchSlicesClosure *>> closure_vec_{
             nullptr};
     };
-#endif
 
     /**
      * DataSync Operation Interface
@@ -2199,10 +2206,11 @@ private:
                                 int64_t node_group_term,
                                 std::string_view table_name,
                                 TableType table_type,
+                                TableEngine table_engine,
                                 uint32_t range_id)
             : node_group_id_(node_group_id),
               node_group_term_(node_group_term),
-              table_name_(table_name, table_type),
+              table_name_(table_name, table_type, table_engine),
               range_id_(range_id)
         {
         }
@@ -2211,10 +2219,11 @@ private:
                                 int64_t node_group_term,
                                 std::string_view table_name,
                                 TableType table_type,
+                                TableEngine table_engine,
                                 uint16_t core_id)
             : node_group_id_(node_group_id),
               node_group_term_(node_group_term),
-              table_name_(table_name, table_type),
+              table_name_(table_name, table_type, table_engine),
               core_id_(core_id)
         {
         }
@@ -2226,7 +2235,8 @@ private:
               // deep copy
               table_name_(rhs.table_name_.StringView().data(),
                           rhs.table_name_.StringView().size(),
-                          rhs.table_name_.Type())
+                          rhs.table_name_.Type(),
+                          rhs.table_name_.Engine())
 #ifdef RANGE_PARTITION_ENABLED
               ,
               range_id_(rhs.range_id_)
@@ -2297,7 +2307,6 @@ private:
     void DataSync(std::unique_lock<std::mutex> &task_worker_lk,
                   size_t worker_idx);
 
-#ifdef RANGE_PARTITION_ENABLED
     /**
      * Range & Slice Update Interface
      */
@@ -2355,7 +2364,6 @@ private:
                           const TxKey *start_key,
                           const TxKey *end_key,
                           bool flush_res);
-#endif
 
     /**
      * FlushData Operation Interface
@@ -2363,14 +2371,15 @@ private:
     struct FlushDataTask
     {
     public:
-        FlushDataTask(std::shared_ptr<DataSyncTask> data_sync_task,
-                      std::shared_ptr<const TableSchema> schema,
-                      std::unique_ptr<std::vector<FlushRecord>> data_sync_vec,
-                      std::unique_ptr<std::vector<FlushRecord>> archive_vec,
-                      std::unique_ptr<std::vector<TxKey>> mv_base_vec,
-                      uint64_t vec_mem_usage,
-                      TransactionExecution *data_sync_txm,
-                      size_t scan_task_worker_idx)
+        FlushDataTask(
+            std::shared_ptr<DataSyncTask> data_sync_task,
+            std::shared_ptr<const TableSchema> schema,
+            std::unique_ptr<std::vector<FlushRecord>> data_sync_vec,
+            std::unique_ptr<std::vector<FlushRecord>> archive_vec,
+            std::unique_ptr<std::vector<std::pair<TxKey, int32_t>>> mv_base_vec,
+            uint64_t vec_mem_usage,
+            TransactionExecution *data_sync_txm,
+            size_t scan_task_worker_idx)
             : schema_(schema),
               data_sync_vec_(std::move(data_sync_vec)),
               archive_vec_(std::move(archive_vec)),
@@ -2385,7 +2394,8 @@ private:
         std::shared_ptr<const TableSchema> schema_{nullptr};
         std::unique_ptr<std::vector<FlushRecord>> data_sync_vec_{nullptr};
         std::unique_ptr<std::vector<FlushRecord>> archive_vec_{nullptr};
-        std::unique_ptr<std::vector<TxKey>> mv_base_vec_{nullptr};
+        std::unique_ptr<std::vector<std::pair<TxKey, int32_t>>> mv_base_vec_{
+            nullptr};
         uint64_t vec_mem_usage_{0};
         size_t scan_task_worker_idx_{0};
         // Increased by worker after finishing the retrieved work.
@@ -2412,6 +2422,9 @@ private:
     WorkerThreadContext purge_deleted_worker_ctx_;
     void PurgeDeletedData();
 
+    WorkerThreadContext kickout_data_test_worker_ctx_;
+    void KickoutDataForTest();
+
     /**
      * Generate sk from pk
      */
@@ -2426,6 +2439,8 @@ private:
 
     // If enable/disable shard heap defragment
     bool enable_shard_heap_defragment_{false};
+
+    std::unique_ptr<metrics::Meter> node_meter_{nullptr};
 
     friend class LocalCcHandler;
     friend class remote::RemoteCcHandler;

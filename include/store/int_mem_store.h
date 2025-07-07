@@ -87,23 +87,6 @@ public:
         return true;
     }
 
-    bool InitializeClusterConfig(
-        const std::unordered_map<uint32_t, std::vector<NodeConfig>> &ng_configs)
-        override
-    {
-        assert(false);
-        return false;
-    }
-
-    bool ReadClusterConfig(
-        std::unordered_map<uint32_t, std::vector<NodeConfig>> &ng_configs,
-        uint64_t &version,
-        bool &uninitialized) override
-    {
-        assert(false);
-        return false;
-    }
-
     void UpsertTable(
         const txservice::TableSchema *old_table_schema,
         const txservice::TableSchema *table_schema,
@@ -156,7 +139,7 @@ public:
     bool FetchTable(const txservice::TableName &table_name,
                     std::string &schema_image,
                     bool &found,
-                    uint64_t &version_ts) const override
+                    uint64_t &version_ts) override
     {
         assert(false);
         return false;
@@ -165,7 +148,7 @@ public:
     bool DiscoverAllTableNames(
         std::vector<std::string> &norm_name_vec,
         const std::function<void()> *yield_fptr = nullptr,
-        const std::function<void()> *resume_fptr = nullptr) const override
+        const std::function<void()> *resume_fptr = nullptr) override
     {
         assert(false);
         return false;
@@ -173,12 +156,12 @@ public:
 
     //-- database
     bool UpsertDatabase(std::string_view db,
-                        std::string_view definition) const override
+                        std::string_view definition) override
     {
         assert(false);
         return false;
     }
-    bool DropDatabase(std::string_view db) const override
+    bool DropDatabase(std::string_view db) override
     {
         assert(false);
         return false;
@@ -188,7 +171,7 @@ public:
         std::string &definition,
         bool &found,
         const std::function<void()> *yield_fptr = nullptr,
-        const std::function<void()> *resume_fptr = nullptr) const override
+        const std::function<void()> *resume_fptr = nullptr) override
     {
         assert(false);
         return false;
@@ -196,18 +179,18 @@ public:
     bool FetchAllDatabase(
         std::vector<std::string> &dbnames,
         const std::function<void()> *yield_fptr = nullptr,
-        const std::function<void()> *resume_fptr = nullptr) const override
+        const std::function<void()> *resume_fptr = nullptr) override
     {
         assert(false);
         return false;
     }
 
-    bool DropKvTable(const std::string &kv_table_name) const override
+    bool DropKvTable(const std::string &kv_table_name) override
     {
         return true;
     }
 
-    void DropKvTableAsync(const std::string &kv_table_name) const override
+    void DropKvTableAsync(const std::string &kv_table_name) override
     {
     }
 
@@ -256,6 +239,7 @@ public:
     }
 
     bool GetNextRangePartitionId(const txservice::TableName &tablename,
+                                 const TableSchema *table_schema,
                                  uint32_t range_cnt,
                                  int32_t &out_next_partition_id,
                                  int retry_count = 5) override
@@ -278,7 +262,7 @@ public:
     /**
      * @brief Copy record from base/sk table to mvcc_archives.
      */
-    bool CopyBaseToArchive(std::vector<TxKey> &batch,
+    bool CopyBaseToArchive(std::vector<std::pair<TxKey, int32_t>> &batch,
                            uint32_t node_group,
                            const txservice::TableName &table_name,
                            const txservice::TableSchema *table_schema) override
@@ -380,13 +364,6 @@ public:
     {
         assert(false);
         return std::string("");
-    }
-
-    bool UpdateClusterConfig(
-        const std::unordered_map<uint32_t, std::vector<NodeConfig>> &new_cnf,
-        uint64_t version) override
-    {
-        return false;
     }
 
     bool NeedCopyRange() const override

@@ -19,7 +19,7 @@
  *    <http://www.gnu.org/licenses/>.
  *
  */
-﻿// ©2013-2016 Cameron Desrochers.
+﻿  // ©2013-2016 Cameron Desrochers.
 // Distributed under the simplified BSD license (see the license file that
 // should have come with this header).
 // Uses Jeff Preshing's semaphore implementation (under the terms of its
@@ -69,9 +69,9 @@
 #if defined(__has_feature)
 #if __has_feature(thread_sanitizer)
 #if __cplusplus >= 201703L  // inline variables require C++17
-namespace moodycamel
+    namespace moodycamel
 {
-inline int ae_tsan_global;
+    inline int ae_tsan_global;
 }
 #define AE_TSAN_ANNOTATE_RELEASE() \
     AnnotateHappensBefore(         \

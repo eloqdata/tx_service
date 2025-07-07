@@ -30,16 +30,15 @@
 #include <cstdint>
 #include <functional>
 #include <iostream>
-#include <list>
 #include <map>
 #include <memory>
 #include <string>
 #include <unordered_map>
-#include <unordered_set>
 #include <utility>
 #include <vector>
 
 #include "absl/container/flat_hash_map.h"
+#include "absl/container/flat_hash_set.h"
 #include "catalog_factory.h"
 #include "catalog_key_record.h"
 #include "cc/non_blocking_lock.h"
@@ -55,14 +54,13 @@
 #include "metrics.h"
 #include "range_bucket_key_record.h"
 #include "range_record.h"
+#include "reader_writer_cntl.h"
 #include "sharder.h"
 #include "standby.h"
 #include "store/data_store_handler.h"
 #include "system_handler.h"
 #include "tentry.h"
-#include "tx_record.h"
 #include "tx_service_common.h"
-#include "tx_service_metrics.h"
 
 namespace txservice
 {
@@ -103,14 +101,37 @@ public:
 
 struct TxLockInfo
 {
+    using uptr = std::unique_ptr<TxLockInfo>;
+
     TxLockInfo() = delete;
     explicit TxLockInfo(int64_t tx_coord_term)
         : tx_coord_term_(tx_coord_term),
           wlock_ts_(0),
           last_recover_ts_(0),
           cce_list_(),
-          table_type_(TableType::Primary)
+          table_type_(TableType::Primary),
+          next_(nullptr)
     {
+    }
+
+    ~TxLockInfo()
+    {
+        // Uses the loop to deallocate the list to avoid recursive deallocation
+        // and stack overflow.
+        while (next_ != nullptr)
+        {
+            next_ = std::move(next_->next_);
+        }
+    }
+
+    void Reset(int64_t tx_term)
+    {
+        tx_coord_term_ = tx_term;
+        wlock_ts_ = 0;
+        last_recover_ts_ = 0;
+        cce_list_.clear();
+        table_type_ = TableType::Primary;
+        next_ = nullptr;
     }
 
     // tx coordinator's term.
@@ -122,10 +143,12 @@ struct TxLockInfo
     // lock.
     uint64_t last_recover_ts_;
     // A list of cc entries on which the tx has acquired write/read locks.
-    std::unordered_set<LruEntry *> cce_list_;
+    absl::flat_hash_set<LruEntry *> cce_list_;
     // This cc map type is used to skip the meta table(such as: catalog, range)
     // during get ActiveTxMinTs()
     TableType table_type_;
+
+    std::unique_ptr<TxLockInfo> next_{nullptr};
 };
 
 class CcShardHeap
@@ -202,6 +225,8 @@ public:
             uint64_t cluster_config_version,
             metrics::MetricsRegistry *metrics_registry = nullptr,
             metrics::CommonLabels common_labels = {});
+
+    void Init();
 
     /**
      * @brief Returns the cc map at this shard given the table name and the cc
@@ -302,57 +327,7 @@ public:
         return cc_queue_size_.load(std::memory_order_relaxed) == 0;
     }
 
-    size_t ProcessRequests()
-    {
-        uint32_t queue_size = cc_queue_size_.load(std::memory_order_relaxed);
-
-        if (metrics::enable_memory_usage)
-        {
-            if (memory_usage_round_++ % metrics::collect_memory_usage_round ==
-                0)
-            {
-                int64_t allocated, committed;
-                mi_thread_stats(&allocated, &committed);
-                meter_->Collect(metrics::NAME_MEMORY_USAGE, allocated);
-            }
-        }
-
-        if (metrics::enable_standby_metrics)
-        {
-            if (standby_metrics_round_++ >
-                metrics::collect_standby_metrics_round)
-            {
-                standby_metrics_round_ = 0;
-                CollectStandbyMetrics();
-            }
-        }
-
-        if (queue_size == 0)
-        {
-            return 0;
-        }
-
-        size_t total = 0;
-        size_t req_cnt = 0;
-        do
-        {
-            req_cnt = cc_queue_.try_dequeue_bulk(req_buf_, 100);
-            total += req_cnt;
-            assert(cc_queue_size_.load(std::memory_order_relaxed) >= req_cnt);
-            cc_queue_size_.fetch_sub(req_cnt, std::memory_order_acq_rel);
-
-            for (size_t i = 0; i < req_cnt; ++i)
-            {
-                bool finish = req_buf_[i]->Execute(*this);
-                if (finish)
-                {
-                    req_buf_[i]->Free();
-                }
-            }
-        } while (req_cnt > 50 && total < 1000);
-
-        return total;
-    }
+    size_t ProcessRequests();
 
     /**
      * @brief Find an available TEntry in tranaction array and initialize it.
@@ -468,10 +443,7 @@ public:
                              LruEntry *cce_ptr,
                              NodeGroupId cc_ng_id);
 
-    void DropLockHoldingTxs(NodeGroupId cc_ng_id)
-    {
-        lock_holding_txs_.erase(cc_ng_id);
-    }
+    void DropLockHoldingTxs(NodeGroupId cc_ng_id);
 
     void VerifyOrphanLock(NodeGroupId cc_ng_id, TxNumber txn)
     {
@@ -525,15 +497,15 @@ public:
             {
                 // Skip meta table because there is no need to do
                 // checkpoint for these type table.
-                if (!TableName::IsMeta(tx_pair.second.table_type_) &&
-                    tx_pair.second.wlock_ts_ != 0)
+                if (!TableName::IsMeta(tx_pair.second->table_type_) &&
+                    tx_pair.second->wlock_ts_ != 0)
                 {
-                    min_ts = std::min(min_ts, tx_pair.second.wlock_ts_ - 1);
+                    min_ts = std::min(min_ts, tx_pair.second->wlock_ts_ - 1);
                 }
 
                 // check and recover holding write lock transactions.
                 CheckRecoverTx(
-                    tx_pair.first, tx_pair.second, cc_ng_id, cc_ng_term);
+                    tx_pair.first, *tx_pair.second, cc_ng_id, cc_ng_term);
             }
         }
 
@@ -585,6 +557,10 @@ public:
                                      const std::string &catalog_image,
                                      uint64_t commit_ts);
 
+    void UpdateDirtyCatalog(const TableName &table_name,
+                            const std::string &catalog_image,
+                            CatalogEntry *catalog_entry);
+
     std::pair<bool, const CatalogEntry *> CreateReplayCatalog(
         const TableName &table_name,
         NodeGroupId cc_ng_id,
@@ -592,8 +568,6 @@ public:
         const std::string &new_schema_image,
         uint64_t old_schema_ts,
         uint64_t dirty_schema_ts);
-
-    void CommitDirtyCatalog(const TableName &table_name, NodeGroupId cc_ng_id);
 
     CatalogEntry *GetCatalog(const TableName &table_name, NodeGroupId cc_ng_id);
 
@@ -731,17 +705,17 @@ public:
                           NodeGroupId cc_ng_id,
                           int64_t cc_ng_term);
 
-    void FetchRecord(const TableName &table_name,
-                     const TableSchema *tbl_schema,
-                     TxKey key,
-                     LruEntry *cce,
-                     CcMap *ccm,
-                     NodeGroupId cc_ng_id,
-                     int64_t cc_ng_term,
-                     CcRequestBase *requester,
-                     int32_t range_id = -1,
-                     bool fetch_from_primary = false,
-                     uint32_t key_shard_code = 0);
+    store::DataStoreHandler::DataStoreOpStatus FetchRecord(
+        const TableName &table_name,
+        const TableSchema *tbl_schema,
+        TxKey key,
+        LruEntry *cce,
+        NodeGroupId cc_ng_id,
+        int64_t cc_ng_term,
+        CcRequestBase *requester,
+        int32_t range_id,
+        bool fetch_from_primary = false,
+        uint32_t key_shard_code = 0);
 
     void RemoveFetchRecordRequest(LruEntry *cce);
 
@@ -854,8 +828,9 @@ public:
     // Search lock_holding_txs_, find the entrys with waited transactions and
     // save them into CheckDeadLockResult.
     void CollectLockWaitingInfo(CheckDeadLockResult &dlr);
-    std::unordered_map<NodeGroupId, std::unordered_map<TxNumber, TxLockInfo>>
-        &GetLockHoldingTxs()
+    const std::unordered_map<NodeGroupId,
+                             absl::flat_hash_map<TxNumber, TxLockInfo::uptr>>
+        &GetLockHoldingTxs() const
     {
         return lock_holding_txs_;
     }
@@ -895,23 +870,6 @@ public:
         return meter_.get();
     };
 
-    void AddInvalidCce(std::unique_ptr<LruEntry> entry)
-    {
-        entry->SetCommitTsPayloadStatus(0, RecordStatus::Invalid);
-        invalid_cces_.emplace_back(Now(), std::move(entry));
-    }
-
-    void CleanUpInvalidCce()
-    {
-        // free invalid cces after 2 hours
-        auto now = Now();
-        while (!invalid_cces_.empty() &&
-               now - invalid_cces_.front().first > invalid_cce_expire_time_)
-        {
-            invalid_cces_.pop_front();
-        }
-    }
-
     // Called on primary node
     StandbyForwardEntry *GetNextStandbyForwardEntry();
     void ForwardStandbyMessage(StandbyForwardEntry *entry);
@@ -948,6 +906,8 @@ public:
         return next_forward_sequence_id_;
     }
 
+    void RemoveSubscribedStandby(uint32_t node_id);
+
     std::vector<uint32_t> GetSubscribedStandbys()
     {
         std::vector<uint32_t> node_ids;
@@ -959,6 +919,13 @@ public:
         return node_ids;
     }
     void ResetStandbySequence();
+
+    uint64_t GetStandbyLag(uint32_t node_id) const
+    {
+        auto it = subscribed_standby_nodes_.find(node_id);
+        assert(it != subscribed_standby_nodes_.end());
+        return it->second.first;
+    }
 
     // called on follower node
     bool UpdateLastReceivedStandbySequenceId(
@@ -991,6 +958,28 @@ public:
         }
     }
 
+    FillStoreSliceCc *NewFillStoreSliceCc()
+    {
+        return fill_store_slice_cc_pool_.NextRequest();
+    }
+
+    InitKeyCacheCc *NewInitKeyCacheCc()
+    {
+        return init_key_cache_cc_pool_.NextRequest();
+    }
+
+    std::shared_ptr<ReaderWriterObject<TableSchema>> FindSchemaCntl(
+        const TableName &tbl_name);
+
+    std::shared_ptr<ReaderWriterObject<TableSchema>> FindEmplaceSchemaCntl(
+        const TableName &tbl_name);
+
+    void DeleteSchemaCntl(const TableName &tbl_name);
+
+    void ClearNativeSchemaCntl();
+    void CollectCacheHit();
+    void CollectCacheMiss();
+
 private:
     void SetTxProcNotifier(std::atomic<TxProcessorStatus> *tx_proc_status,
                            TxProcCoordinator *tx_coordi)
@@ -1000,6 +989,9 @@ private:
     }
 
     void NotifyTxProcessor();
+
+    TxLockInfo::uptr GetTxLockInfo(int64_t tx_term);
+    void RecycleTxLockInfo(TxLockInfo::uptr lock_info);
 
     size_t memory_usage_round_ = 1;
 
@@ -1024,8 +1016,11 @@ private:
      * cc entries containing the tx's locks/intentions.
      *
      */
-    std::unordered_map<NodeGroupId, std::unordered_map<TxNumber, TxLockInfo>>
+    std::unordered_map<NodeGroupId,
+                       absl::flat_hash_map<TxNumber, TxLockInfo::uptr>>
         lock_holding_txs_;
+
+    TxLockInfo tx_lock_info_head_{0};
 
     // below are all string owners
     absl::flat_hash_map<TableName, CcMap::uptr> native_ccms_;
@@ -1040,10 +1035,13 @@ private:
     // For concurrency execution of cpu-bound tasks.
     CcRequestPool<RunOnTxProcessorCc> run_on_tx_processor_cc_pool_;
 
+    CcRequestPool<FillStoreSliceCc> fill_store_slice_cc_pool_;
+    CcRequestPool<InitKeyCacheCc> init_key_cache_cc_pool_;
+
     // CcRequest queue on this shard/core.
     moodycamel::ConcurrentQueue<CcRequestBase *> cc_queue_;
     std::atomic<uint32_t> cc_queue_size_{0};
-    CcRequestBase *req_buf_[100];
+    std::array<CcRequestBase *, 64> req_buf_;
     std::vector<moodycamel::ProducerToken> thd_token_;
     std::deque<CcRequestBase *> cc_wait_list_for_memory_;
 
@@ -1119,6 +1117,10 @@ private:
 
     SystemHandler *const system_handler_;
 
+    absl::flat_hash_map<TableName,
+                        std::shared_ptr<ReaderWriterObject<TableSchema>>>
+        catalog_rw_cntl_;
+
     // The max number of cc page to scan in one invocation of Clean().
     static constexpr uint64_t freeBatchSize = 10;
     // The maximum allowed duration(us) of one invocation of Clean().
@@ -1154,8 +1156,6 @@ private:
     // The number of active tx reading buckets without adding readlock on
     // ccentry in RangeBucketCcMap.
     uint32_t tx_cnt_reading_naked_buckets_{0};
-
-    std::list<std::pair<uint64_t, std::unique_ptr<LruEntry>>> invalid_cces_;
 
     remote::CcStreamSender *stream_sender_{nullptr};
 

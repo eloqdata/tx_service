@@ -24,7 +24,11 @@
 #include <bthread/condition_variable.h>
 #include <bthread/mutex.h>
 
+#include <cassert>
+#include <functional>
 #include <mutex>
+#include <utility>
+#include <variant>
 
 #include "error_messages.h"
 
@@ -45,6 +49,33 @@ enum class UpsertResult
                 // from log recover
 };
 
+struct StatusCombo
+{
+    TxResultStatus status_;
+    bool waiting_;
+};
+
+struct YieldResume
+{
+    YieldResume() = delete;
+    YieldResume(const std::function<void()> *yield,
+                const std::function<void()> *resume)
+        : yield_(yield), resume_(resume)
+    {
+    }
+
+    const std::function<void()> *yield_{nullptr};
+    const std::function<void()> *resume_{nullptr};
+};
+
+struct MutexCond
+{
+    MutexCond() = default;
+
+    bthread::Mutex mux_;
+    bthread::ConditionVariable cv_;
+};
+
 /**
  * @brief The result of a transaction request, i.e., begin, read, write,
  * scan_begin, scan_next, scan_end, commit and abort. The sender of the request
@@ -58,32 +89,32 @@ template <typename T>
 class TxResult
 {
 public:
+    TxResult() = delete;
+
     TxResult(const std::function<void()> *yield_fp,
              const std::function<void()> *resume_fp)
         : value_(),
-          status_(TxResultStatus::Unknown),
+          status_combo_({TxResultStatus::Unknown, false}),
           error_code_(TxErrorCode::NO_ERROR),
-          mutex_(),
-          cv_(),
-          waiting_(false),
-          yield_func_(yield_fp),
-          resume_func_(resume_fp)
-#if defined ON_KEY_OBJECT && defined EXT_TX_PROC_ENABLED
-          ,
-          allow_resume_call_(resume_fp != nullptr)
-#endif
+          allow_resume_call_(resume_fp != nullptr),
+          control_(
+              yield_fp != nullptr
+                  ? std::variant<YieldResume, MutexCond>(
+                        std::in_place_type<YieldResume>, yield_fp, resume_fp)
+                  : std::variant<YieldResume, MutexCond>(
+                        std::in_place_type<MutexCond>))
     {
     }
 
     TxResultStatus Status()
     {
-        std::lock_guard<bthread::Mutex> lk(mutex_);
-        return status_;
+        return status_combo_.load(std::memory_order_relaxed).status_;
     }
 
     bool IsError() const
     {
-        return status_ == TxResultStatus::Error;
+        return status_combo_.load(std::memory_order_relaxed).status_ ==
+               TxResultStatus::Error;
     }
 
     T &Value()
@@ -101,95 +132,69 @@ public:
         return error_code_;
     }
 
-    void Finish(const T &val)
+    template <typename U>
+    void Finish(U &&val)
     {
 #if defined ON_KEY_OBJECT && defined EXT_TX_PROC_ENABLED
-        if (resume_func_ != nullptr)
+        if (HasYieldResume())
         {
             // No need for lock since the txrequest sender bthread and the
             // txm forward thread are the same thread or coordinated
             // already.
-            value_ = val;
-            status_ = TxResultStatus::Finished;
+            value_ = std::forward<U>(val);
+            StatusCombo state = status_combo_.load(std::memory_order_relaxed);
+            status_combo_.store({TxResultStatus::Finished, state.waiting_},
+                                std::memory_order_relaxed);
 
             // The yield func and resume func can only be called once each.
             if (allow_resume_call_)
             {
+                const std::function<void()> *resume = GetResume();
+                assert(resume != nullptr);
                 allow_resume_call_ = false;
-                (*resume_func_)();
+                (*resume)();
             }
             // resume_func_ = nullptr;
             return;
         }
 #endif
+        value_ = std::forward<U>(val);
 
-        std::unique_lock<bthread::Mutex> lk(mutex_);
-
-        value_ = val;
-        status_ = TxResultStatus::Finished;
-
-        if (waiting_)
+        if (HasYieldResume())
         {
-            if (resume_func_ != nullptr)
+            StatusCombo state = status_combo_.load(std::memory_order_relaxed);
+
+            while (!status_combo_.compare_exchange_weak(
+                state,
+                {TxResultStatus::Finished, state.waiting_},
+                std::memory_order_acq_rel))
+                ;
+
+            if (state.waiting_ && allow_resume_call_)
             {
-                lk.unlock();
+                const std::function<void()> *resume = GetResume();
                 // The resume functor schedules the coroutine waiting for the
                 // result to re-run/resume from the point it yields, i.e.,
                 // inside Wait().
-                (*resume_func_)();
-            }
-            else if (yield_func_ == nullptr)
-            {
-                // cv notification needs to be in the lock scope. This is
-                // because the tx request is owned by the sender and the sending
-                // thread may wake up spuriously before notify_one() is called.
-                // If so, the sending thread moves forward and de-allocate the
-                // tx request, before notify_one() is called, causing invalid
-                // memory access.
-                cv_.notify_one();
+                (*resume)();
             }
         }
-    }
-
-    void Finish(T &&val)
-    {
-#if defined ON_KEY_OBJECT && defined EXT_TX_PROC_ENABLED
-        if (resume_func_ != nullptr)
+        else
         {
-            // No need for lock since the txrequest sender bthread and the
-            // txm forward thread are the same thread or coordinated
-            // already.
-            value_ = val;
-            status_ = TxResultStatus::Finished;
-
-            // The yield func and resume func can only be called once each.
-            if (allow_resume_call_)
+            bthread::Mutex &mux = GetMutex();
+            bthread::ConditionVariable &cv = GetCond();
+            // cv notification needs to be in the lock scope. This is because
+            // the tx request is owned by the sender and the sending thread may
+            // wake up spuriously before notify_one() is called. If so, the
+            // sending thread moves forward and de-allocate the tx request,
+            // before notify_one() is called, causing invalid memory access.
+            std::unique_lock<bthread::Mutex> lk(mux);
+            StatusCombo state = status_combo_.load(std::memory_order_relaxed);
+            status_combo_.store({TxResultStatus::Finished, state.waiting_},
+                                std::memory_order_relaxed);
+            if (state.waiting_)
             {
-                allow_resume_call_ = false;
-                (*resume_func_)();
-            }
-            return;
-        }
-#endif
-
-        std::unique_lock<bthread::Mutex> lk(mutex_);
-
-        value_ = std::move(val);
-        status_ = TxResultStatus::Finished;
-
-        if (waiting_)
-        {
-            if (resume_func_ != nullptr)
-            {
-                lk.unlock();
-                // The resume functor schedules the waiting coroutine to
-                // re-run/resume from the point it is blocking for the result,
-                // i.e., inside Wait().
-                (*resume_func_)();
-            }
-            else if (yield_func_ == nullptr)
-            {
-                cv_.notify_one();
+                cv.notify_one();
             }
         }
     }
@@ -197,39 +202,60 @@ public:
     void FinishError(TxErrorCode err_code = TxErrorCode::UNDEFINED_ERR)
     {
 #if defined ON_KEY_OBJECT && defined EXT_TX_PROC_ENABLED
-        if (resume_func_ != nullptr)
+        if (HasYieldResume())
         {
             // No need for lock since the txrequest sender bthread and the
             // txm forward thread are the same thread or coordinated
             // already.
-            status_ = TxResultStatus::Error;
+            StatusCombo state = status_combo_.load(std::memory_order_relaxed);
+            status_combo_.store({TxResultStatus::Error, state.waiting_},
+                                std::memory_order_relaxed);
             error_code_ = err_code;
 
             // The yield func and resume func can only be called once each.
             if (allow_resume_call_)
             {
+                const std::function<void()> *resume = GetResume();
                 allow_resume_call_ = false;
-                (*resume_func_)();
+                (*resume)();
             }
             return;
         }
 #endif
-
-        std::unique_lock<bthread::Mutex> lk(mutex_);
-
-        status_ = TxResultStatus::Error;
         error_code_ = err_code;
 
-        if (waiting_)
+        if (HasYieldResume())
         {
-            if (resume_func_ != nullptr)
+            StatusCombo state = status_combo_.load(std::memory_order_relaxed);
+
+            while (!status_combo_.compare_exchange_weak(
+                state,
+                {TxResultStatus::Error, state.waiting_},
+                std::memory_order_acq_rel))
+                ;
+
+            if (state.waiting_ && allow_resume_call_)
             {
-                lk.unlock();
-                (*resume_func_)();
+                const std::function<void()> *resume = GetResume();
+                (*resume)();
             }
-            else if (yield_func_ == nullptr)
+        }
+        else
+        {
+            bthread::Mutex &mux = GetMutex();
+            bthread::ConditionVariable &cv = GetCond();
+            // cv notification needs to be in the lock scope. This is because
+            // the tx request is owned by the sender and the sending thread may
+            // wake up spuriously before notify_one() is called. If so, the
+            // sending thread moves forward and de-allocate the tx request,
+            // before notify_one() is called, causing invalid memory access.
+            std::unique_lock<bthread::Mutex> lk(mux);
+            StatusCombo state = status_combo_.load(std::memory_order_relaxed);
+            status_combo_.store({TxResultStatus::Error, state.waiting_},
+                                std::memory_order_relaxed);
+            if (state.waiting_)
             {
-                cv_.notify_one();
+                cv.notify_one();
             }
         }
     }
@@ -248,17 +274,21 @@ public:
     void Reset(const std::function<void()> *yield_fptr = nullptr,
                const std::function<void()> *resume_fptr = nullptr)
     {
-        std::lock_guard<bthread::Mutex> lk(mutex_);
-
-        status_ = TxResultStatus::Unknown;
+        status_combo_.store({TxResultStatus::Unknown, false},
+                            std::memory_order_relaxed);
         error_code_ = TxErrorCode::NO_ERROR;
-        waiting_ = false;
-        yield_func_ = yield_fptr;
-        resume_func_ = resume_fptr;
 
-#ifdef ON_KEY_OBJECT
+        if (yield_fptr != nullptr)
+        {
+            assert(resume_fptr != nullptr);
+            control_.template emplace<YieldResume>(yield_fptr, resume_fptr);
+        }
+        else if (HasYieldResume())
+        {
+            control_.template emplace<MutexCond>();
+        }
+
         allow_resume_call_ = resume_fptr != nullptr;
-#endif
     }
 
     /**
@@ -273,42 +303,56 @@ public:
      */
     const std::function<void()> *ReleaseResumeFunc()
     {
-#if defined ON_KEY_OBJECT && defined EXT_TX_PROC_ENABLED
         if (allow_resume_call_)
         {
+            const std::function<void()> *resume = GetResume();
             allow_resume_call_ = false;
-            return resume_func_;
+            return resume;
         }
-#endif
-        return nullptr;
+        else
+        {
+            return nullptr;
+        }
     }
 
     int Wait()
     {
-        if (yield_func_ != nullptr)
+        if (HasYieldResume())
         {
-            std::unique_lock<bthread::Mutex> lk(mutex_);
-
-            if (status_ == TxResultStatus::Unknown)
+            StatusCombo state = status_combo_.load(std::memory_order_acquire);
+            while (state.status_ == TxResultStatus::Unknown)
             {
-                waiting_ = true;
-                lk.unlock();
+                bool success = status_combo_.compare_exchange_weak(
+                    state,
+                    {TxResultStatus::Unknown, true},
+                    std::memory_order_acq_rel);
 
-                // The yield functor invokes the coroutine's resume() and
-                // returns the control to the caller of the coroutine that sends
-                // the tx request, i.e., the runtime thread executing the query.
-                // The runtime thread skips the blocking coroutine and moves on
-                // to process the next command.
-                (*yield_func_)();
+                if (success)
+                {
+                    const std::function<void()> *yield = GetYield();
+                    // The yield functor invokes the coroutine's resume() and
+                    // returns the control to the caller of the coroutine that
+                    // sends the tx request, i.e., the runtime thread executing
+                    // the query. The runtime thread skips the blocking
+                    // coroutine and moves on to process the next command.
+                    (*yield)();
+                    break;
+                }
             }
         }
         else
         {
-            std::unique_lock<bthread::Mutex> lk(mutex_);
-            waiting_ = true;
-            while (status_ == TxResultStatus::Unknown)
+            bthread::Mutex &mux = GetMutex();
+            bthread::ConditionVariable &cv = GetCond();
+
+            std::unique_lock<bthread::Mutex> lk(mux);
+            StatusCombo state = status_combo_.load(std::memory_order_relaxed);
+            while (state.status_ == TxResultStatus::Unknown)
             {
-                cv_.wait(lk);
+                status_combo_.store({TxResultStatus::Unknown, true},
+                                    std::memory_order_relaxed);
+                cv.wait(lk);
+                state = status_combo_.load(std::memory_order_relaxed);
             }
         }
 
@@ -316,23 +360,40 @@ public:
     }
 
 private:
+    bool HasYieldResume() const
+    {
+        return std::holds_alternative<YieldResume>(control_);
+    }
+
+    const std::function<void()> *GetYield() const
+    {
+        return std::get<YieldResume>(control_).yield_;
+    }
+
+    const std::function<void()> *GetResume() const
+    {
+        return std::get<YieldResume>(control_).resume_;
+    }
+
+    bthread::Mutex &GetMutex()
+    {
+        return std::get<MutexCond>(control_).mux_;
+    }
+
+    bthread::ConditionVariable &GetCond()
+    {
+        return std::get<MutexCond>(control_).cv_;
+    }
+
     T value_;
-    TxResultStatus status_;
+    std::atomic<StatusCombo> status_combo_;
     TxErrorCode error_code_;
-    bthread::Mutex mutex_;
-    bthread::ConditionVariable cv_;
+    bool allow_resume_call_{true};
 
-    bool waiting_{false};
-    const std::function<void()> *yield_func_;
-    // the resume func might be passed to cc handler result
-    const std::function<void()> *resume_func_;
-
-#ifdef ON_KEY_OBJECT
-    bool allow_resume_call_{};
+    std::variant<YieldResume, MutexCond> control_;
 
     inline static int initial_wait_time_us_ = 100;
     inline static int max_wait_time_us_ = 20000;
-#endif
 
     template <typename Subtype, typename ResultType>
     friend struct TemplateTxRequest;

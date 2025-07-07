@@ -32,8 +32,8 @@
 #include <string>
 #include <unordered_set>
 
-#include "braft/util.h"
 #include "sharder.h"
+#include "tx_execution.h"
 #include "tx_trace.h"
 
 namespace txservice
@@ -181,7 +181,7 @@ bool CcStreamSender::SendMessageToNode(uint32_t dest_node_id,
     if (stream_it == outbound_streams_.end())
     {
         // SendMessage error return -1 to indicate the request needs retry.
-        if (res != nullptr && res->SetResultByStreamThread())
+        if (res != nullptr)
         {
             res->SetLocalOrRemoteError(CcErrorCode::REQUESTED_NODE_NOT_LEADER);
         }
@@ -215,6 +215,8 @@ bool CcStreamSender::SendMessageToNode(uint32_t dest_node_id,
     }
 
     brpc::StreamId stream_id = std::get<0>(stream_it->second);
+
+    outbound_lk.unlock();
 
     butil::IOBuf iobuf;
     butil::IOBufAsZeroCopyOutputStream wrapper(&iobuf);
@@ -297,10 +299,24 @@ bool CcStreamSender::SendMessageToNode(uint32_t dest_node_id,
 
                 // SendMessage error return -1 to indicate the request needs
                 // retry.
-                if (res != nullptr && res->SetResultByStreamThread())
+                if (res != nullptr)
                 {
+                    TransactionExecution *txm =
+                        reinterpret_cast<TransactionExecution *>(
+                            msg.txm_addr());
+                    if (txm != nullptr)
+                    {
+                        // Resend is called in a separate resend thread, so it
+                        // won't cause deadlock with txm.Forward() on txm
+                        // forward_latch_.
+                        txm->AcquireSharedForwardLatch();
+                    }
                     res->SetLocalOrRemoteError(
                         CcErrorCode::REQUESTED_NODE_NOT_LEADER);
+                    if (txm != nullptr)
+                    {
+                        txm->ReleaseSharedForwardLatch();
+                    }
                 }
 
                 return false;
@@ -349,7 +365,6 @@ bool CcStreamSender::SendMessageToNode(uint32_t dest_node_id,
 
 bool CcStreamSender::SendScanRespToNode(uint32_t dest_node_id,
                                         const ScanSliceResponse &msg,
-                                        CcHandlerResultBase *res,
                                         bool resend)
 {
     TX_TRACE_ACTION_WITH_CONTEXT(
@@ -368,12 +383,6 @@ bool CcStreamSender::SendScanRespToNode(uint32_t dest_node_id,
     auto stream_it = long_msg_outbound_streams_.find(dest_node_id);
     if (stream_it == long_msg_outbound_streams_.end())
     {
-        // SendMessage error return -1 to indicate the request needs retry.
-        if (res != nullptr && res->SetResultByStreamThread())
-        {
-            res->SetLocalOrRemoteError(CcErrorCode::REQUESTED_NODE_NOT_LEADER);
-        }
-
         LOG(ERROR) << "Trying to connect to an unknown remote node. Node Id: "
                    << dest_node_id;
         return false;
@@ -391,7 +400,7 @@ bool CcStreamSender::SendScanRespToNode(uint32_t dest_node_id,
             dest_node_id,
             moodycamel::ConcurrentQueue<ResendScanSliceResp::Uptr>());
         resend_message_list.first->second.enqueue(
-            std::make_unique<ResendScanSliceResp>(msg, res));
+            std::make_unique<ResendScanSliceResp>(msg));
 
         // always wake up connector thread to either reconnect streams or
         // resend messages.
@@ -423,7 +432,7 @@ bool CcStreamSender::SendScanRespToNode(uint32_t dest_node_id,
             {
                 eagain_resend_long_message_cnt_ += 1;
                 bg_resend_long_msg_list->second.enqueue(
-                    std::make_unique<ResendScanSliceResp>(msg, res));
+                    std::make_unique<ResendScanSliceResp>(msg));
                 if (resend_thread_status_ == ResendThreadStatus::Sleeping)
                 {
                     resend_thread_status_ = ResendThreadStatus::Running;
@@ -440,7 +449,7 @@ bool CcStreamSender::SendScanRespToNode(uint32_t dest_node_id,
 
                 eagain_resend_long_message_cnt_ += 1;
                 bg_resend_long_msg_list.first->second.enqueue(
-                    std::make_unique<ResendScanSliceResp>(msg, res));
+                    std::make_unique<ResendScanSliceResp>(msg));
                 if (resend_thread_status_ == ResendThreadStatus::Sleeping)
                 {
                     resend_thread_status_ = ResendThreadStatus::Running;
@@ -457,14 +466,6 @@ bool CcStreamSender::SendScanRespToNode(uint32_t dest_node_id,
             // remote node is dead. We should skip resend the message again.
             if (resend)
             {
-                // SendMessage error return -1 to indicate the request needs
-                // retry.
-                if (res != nullptr && res->SetResultByStreamThread())
-                {
-                    res->SetLocalOrRemoteError(
-                        CcErrorCode::REQUESTED_NODE_NOT_LEADER);
-                }
-
                 return false;
             }
             else
@@ -488,7 +489,7 @@ bool CcStreamSender::SendScanRespToNode(uint32_t dest_node_id,
                         moodycamel::ConcurrentQueue<
                             ResendScanSliceResp::Uptr>());
                 resend_message_list.first->second.enqueue(
-                    std::make_unique<ResendScanSliceResp>(msg, res));
+                    std::make_unique<ResendScanSliceResp>(msg));
 
                 // wake up connector thread to reconnect streams
                 to_connect_flag_ = true;
@@ -750,10 +751,7 @@ void CcStreamSender::ResendMessageToNode()
 
                 for (size_t idx = 0; idx < msg_cnt; ++idx)
                 {
-                    if (SendScanRespToNode(nid,
-                                           messages[idx]->msg_,
-                                           messages[idx]->res_,
-                                           false))
+                    if (SendScanRespToNode(nid, messages[idx]->msg_, false))
                     {
                         send_cnt += 1;
                     }
@@ -874,8 +872,7 @@ void CcStreamSender::ConnectStreams()
                     lk.unlock();
                     for (size_t i = 0; i < msg_cnt; ++i)
                     {
-                        SendScanRespToNode(
-                            nid, messages[i]->msg_, messages[i]->res_, true);
+                        SendScanRespToNode(nid, messages[i]->msg_, true);
                     }
                     lk.lock();
                     // Update the message list since the node might be

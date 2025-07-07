@@ -30,20 +30,21 @@
 #include <variant>
 #include <vector>
 
+#include "absl/container/flat_hash_set.h"
 #include "cc_protocol.h"
 #include "cc_req_base.h"
 #include "circular_queue.h"
 #include "error_messages.h"
-#include "tx_id.h"
-
-#ifdef ON_KEY_OBJECT
 #include "tx_command.h"
+#include "tx_id.h"
 #include "tx_object.h"
-#endif
 
 namespace txservice
 {
-template <typename KeyT, typename ValueT>
+template <typename KeyT,
+          typename ValueT,
+          bool VersionedRecord,
+          bool RangePartitioned>
 struct CcEntry;
 
 class CcMap;
@@ -83,6 +84,7 @@ public:
         write_lk_type_ = WriteLockType::NoWritelock;
         write_txn_ = 0;
         blocking_queue_.Reset();
+        queue_block_cmds_.Reset();
         wlock_ts_ = 0;
     }
 
@@ -101,7 +103,9 @@ public:
      */
     bool AcquireWriteLock(CcRequestBase *cc_req, CcProtocol protocol);
 
-    bool ReleaseWriteLock(TxNumber tx_number, CcShard *ccs);
+    bool ReleaseWriteLock(TxNumber tx_number,
+                          CcShard *ccs,
+                          TxObject *object = nullptr);
 
     /**
      *  @brief Release the write lock and add the write intent, take effect only
@@ -187,10 +191,12 @@ public:
         return write_lk_type_ == WriteLockType::WriteLock && write_txn_ == txn;
     }
 
-    LockType ClearTx(TxNumber tx_number, CcShard *ccs);
+    LockType ClearTx(TxNumber tx_number,
+                     CcShard *ccs,
+                     TxObject *object = nullptr);
 
-    const std::unordered_set<TxNumber> &ReadLocks() const;
-    const std::unordered_set<TxNumber> &ReadIntents() const;
+    const absl::flat_hash_set<TxNumber> &ReadLocks() const;
+    const absl::flat_hash_set<TxNumber> &ReadIntents() const;
 
     uint64_t WLockTs() const
     {
@@ -250,6 +256,13 @@ public:
     void AbortAllQueuedRequests(CcErrorCode err = CcErrorCode::DEAD_LOCK_ABORT);
 
     LockType SearchLock(TxNumber txn);
+
+    void PushBlockCmdRequest(CcRequestBase *req)
+    {
+        queue_block_cmds_.Enqueue(std::move(req));
+    }
+
+    void AbortBlockCmdRequest(TxNumber txid, CcErrorCode err);
 
 private:
     struct LockQueueEntry
@@ -326,14 +339,18 @@ private:
                write_txn_ == txn;
     }
 
+    // Pop a blocked command request from the waiting queue and reenqueue it to
+    // cc request queue. Returns true if a command request is popped.
+    bool PopBlockCmdRequest(CcShard *ccs, TxObject *object);
+
     // Read intentions do not block writes. They are used by a tx under
     // OCC/MVCC protocols to mark that the tx is accessing the data item and
     // to prevent the cache replacement algorithm from kicking out the
     // item's concurrency control (cc) entry from the cc map before the tx
     // finishes.
-    std::unordered_set<TxNumber> read_intentions_;
+    absl::flat_hash_set<TxNumber> read_intentions_;
     // Tx's who have acquired read locks
-    std::unordered_set<TxNumber> read_locks_;
+    absl::flat_hash_set<TxNumber> read_locks_;
     // How many readers has acquired read locks. Only used for Catalog read fast
     // path.
     int read_cnt_{};
@@ -359,10 +376,19 @@ private:
     // tansactions.
     CircularQueue<LockQueueEntry> blocking_queue_;
 
-    template <typename KeyT, typename ValueT>
+    // blocked commands that wait to pop and execute after the conditions are
+    // satisfied.
+    CircularQueue<CcRequestBase *> queue_block_cmds_;
+
+    template <typename KeyT,
+              typename ValueT,
+              bool VersionedRecord,
+              bool RangePartitioned>
     friend struct CcEntry;
 };
 
+// TODO(liunyl): Lock structure needs to be separated for versioned and
+// non-versioned payloads.
 /**
  * The lock structure and extra data fields that are accessed with lock
  * acquired. This structure is assigned on-demand to reduce CcEntry's memory
@@ -382,14 +408,12 @@ public:
         page_ = page;
         entry_ = entry;
 
-#ifdef ON_KEY_OBJECT
         dirty_payload_ = nullptr;
         dirty_payload_status_ = RecordStatus::NonExistent;
         pending_cmd_ = nullptr;
-        queue_block_cmds_.Reset();
         buffered_cmd_list_.Clear();
         forward_entry_ = nullptr;
-#endif
+        pin_count_ = 0;
     }
 
     void SetUsedStatus(bool is_used);
@@ -435,7 +459,6 @@ public:
 
     bool IsEmpty()
     {
-#ifdef ON_KEY_OBJECT
         if (key_lock_.IsEmpty())
         {
             // There must be no pending command and dirty payload if lock is
@@ -447,17 +470,14 @@ public:
                    dirty_payload_ == nullptr &&
                    (dirty_payload_status_ == RecordStatus::NonExistent ||
                     dirty_payload_status_ == RecordStatus::Deleted));
-            return queue_block_cmds_.Size() == 0 && !HasBufferedCommandList();
+            return !HasBufferedCommandList() && pin_count_ == 0;
         }
         else
         {
             return false;
         }
-#endif
-        return key_lock_.IsEmpty();
     }
 
-#ifdef ON_KEY_OBJECT
     std::variant<TxCommand *, std::unique_ptr<TxCommand>> PendingCmd()
     {
         return std::move(pending_cmd_);
@@ -491,6 +511,14 @@ public:
                    ? std::get<TxCommand *>(pending_cmd_) == nullptr
                    : std::get<std::unique_ptr<TxCommand>>(pending_cmd_) ==
                          nullptr;
+    }
+    void AddPin()
+    {
+        pin_count_++;
+    }
+    void ReleasePin()
+    {
+        pin_count_--;
     }
     std::unique_ptr<TxObject> DirtyPayload()
     {
@@ -528,27 +556,15 @@ public:
             return false;
         }
     }
-
-    void PushBlockRequest(CcRequestBase *req)
-    {
-        queue_block_cmds_.Enqueue(std::move(req));
-    }
-
-    void PopBlockRequest(CcShard *ccs, txservice::TxObject *object);
-    void AbortBlockRequest(TxNumber txid, CcErrorCode err);
     StandbyForwardEntry *ForwardEntry();
     void SetForwardEntry(StandbyForwardEntry *entry);
 
-#endif
-
     void ClearTx()
     {
-#ifdef ON_KEY_OBJECT
         pending_cmd_ = nullptr;
         dirty_payload_ = nullptr;
         dirty_payload_status_ = RecordStatus::NonExistent;
         forward_entry_ = nullptr;
-#endif
     }
 
 private:
@@ -562,18 +578,18 @@ private:
     LruPage *page_{nullptr};
     LruEntry *entry_{nullptr};
 
-#ifdef ON_KEY_OBJECT
     std::variant<TxCommand *, std::unique_ptr<TxCommand>> pending_cmd_{nullptr};
     // temporary object to process subsequent commands in the same txn
     std::unique_ptr<TxObject> dirty_payload_;
     // status of temporary object
     RecordStatus dirty_payload_status_{RecordStatus::NonExistent};
-    // blocked commands that wait to pop and execute after the conditions are
-    // satisfied.
-    CircularQueue<CcRequestBase *> queue_block_cmds_;
+
     BufferedTxnCmdList buffered_cmd_list_;
     StandbyForwardEntry *forward_entry_;
-#endif
+    // The pins on the cce. For cases that we need to keep the cce in memory
+    // for a while and we are not in a transaction context, we use pins to
+    // prevent the cce from being recycled.
+    uint32_t pin_count_{0};
 };
 
 }  // namespace txservice

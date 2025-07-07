@@ -50,6 +50,14 @@ void StandbyForwardEntry::AddTxCommand(ApplyCc &cc_req)
     }
 }
 
+void StandbyForwardEntry::AddTxCommand(TxCommand *cmd)
+{
+    auto &req = Request();
+    std::string cmd_str;
+    cmd->Serialize(cmd_str);
+    req.add_cmd_list(std::move(cmd_str));
+}
+
 void BrocastPrimaryCkptTs(NodeGroupId node_group_id,
                           int64_t node_group_term,
                           uint64_t primary_ckpt_ts)

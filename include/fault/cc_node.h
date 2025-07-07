@@ -24,8 +24,8 @@
 #include <brpc/channel.h>
 
 #include <cstdint>
+#include <string>
 #include <unordered_set>
-#include <vector>
 
 #include "cc_request.pb.h"
 #include "log_replay_service.h"
@@ -94,6 +94,11 @@ public:
                        bool &retry,
                        uint32_t *next_leader_node = nullptr);
     bool OnLeaderStop(int64_t term);
+    bool Failover(const std::string &target_host,
+                  const uint16_t target_port,
+                  std::string &error_message);
+
+    void RecoverLeaderTerm(int64_t leader_term);
     // Only called when a standby node starts following
     void OnStartFollowing(uint32_t node_id, int64_t term, bool resubscribe);
     bool OnSnapshotReceived(const remote::OnSnapshotSyncedRequest *req);
@@ -102,6 +107,9 @@ private:
     void NotifyNewLeaderStart(uint32_t leader_ng_id, uint32_t leader_node_id);
     void SubscribePrimaryNode(uint32_t node_id, int64_t term, bool resubscribe);
     void ClearCcNodeGroupData();
+    bool WaitForShardSyncWithRetry(const size_t shard_idx,
+                                   const uint32_t target_node_id,
+                                   std::string &error_message);
 
     //  CcNode belongs to node group: ng_id_.
     const uint32_t ng_id_;

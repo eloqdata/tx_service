@@ -30,6 +30,7 @@
 #include "cc/cc_handler.h"
 #include "cc/ccm_scanner.h"
 #include "cc_protocol.h"
+#include "command_set.h"
 #include "metrics.h"
 #include "read_write_set.h"
 #include "spinlock.h"
@@ -76,12 +77,20 @@ enum struct TxmStatus
 {
     Idle = 0,
     Busy,
-    Finished
+    Finished,
+    ForwardFailed
 };
 
 static const uint64_t RedisDBCnt = 16;
 
-class TransactionExecution
+class LinkedTransaction
+{
+public:
+    LinkedTransaction *prev_{nullptr};
+    LinkedTransaction *next_{nullptr};
+};
+
+class TransactionExecution : public LinkedTransaction
 {
 public:
     using uptr = std::unique_ptr<TransactionExecution>;
@@ -172,7 +181,9 @@ public:
     void InitTx(IsolationLevel iso_level,
                 CcProtocol protocol,
                 NodeGroupId tx_ng_id = UINT32_MAX,
-                bool start_now = false);
+                bool start_now = false,
+                const std::function<void()> *yield_func = nullptr,
+                const std::function<void()> *resume_func = nullptr);
     std::unique_ptr<InitTxRequest> init_tx_req_;
     bool CommitTx(CommitTxRequest &commit_req);
     std::unique_ptr<CommitTxRequest> commit_tx_req_;
@@ -236,6 +247,15 @@ public:
         start_ts_ = ts;
     }
 
+    /**
+     * @brief EloqDoc use data write_set size to decide whether it is inside a
+     * DML transaction.
+     */
+    size_t DataWriteSetSize() const
+    {
+        return rw_set_.WriteSetSize();
+    }
+
     TxProcessor *GetTxProcessor()
     {
         return tx_processor_;
@@ -280,6 +300,59 @@ public:
     void RecoverClusterScale(const ::txlog::ClusterScaleOpMessage &scale_msg,
                              bool dm_started,
                              bool dm_finished);
+
+    /**
+     * @brief Acquires the exclusive forward latch.
+     *
+     * This should only be called by txm.Forward() to avoid hd_res being freed
+     * or timed out when CcStreamReceiver is accessing hd_res in txm.
+     */
+    bool AcquireExclusiveForwardLatch()
+    {
+        int32_t expect = 0;
+        return forward_latch_.compare_exchange_strong(
+            expect, -1, std::memory_order_acquire, std::memory_order_relaxed);
+    }
+
+    void ReleaseExclusiveForwardLatch()
+    {
+        forward_latch_.store(0, std::memory_order_release);
+    }
+
+    /**
+     * @brief Acquires the shared forward latch.
+     *
+     * This should only be called by CcStreamReceiver to avoid hd_res being
+     * freed or timed out by txm.Forward().
+     */
+    void AcquireSharedForwardLatch()
+    {
+        int32_t expect = 0;
+        while (
+            !forward_latch_.compare_exchange_strong(expect,
+                                                    expect + 1,
+                                                    std::memory_order_acquire,
+                                                    std::memory_order_relaxed))
+        {
+            if (expect == -1)
+            {
+                // txm is being forwarded.
+                expect = 0;
+                // yeild this bthread for now since txm forward might take a
+                // while
+                bthread_usleep(1000);
+            }
+        }
+    }
+
+    void ReleaseSharedForwardLatch()
+    {
+        int32_t res = forward_latch_.fetch_sub(1, std::memory_order_release);
+        assert(res > 0);
+        // This silences the -Wunused-but-set-variable warning without any
+        // runtime overhead.
+        (void) res;
+    }
 
 private:
     /**
@@ -326,6 +399,8 @@ private:
     void PostProcess(LockWriteBucketsOp &lock_write_ranges);
     void Process(AcquireWriteOperation &acquire_write);
     void PostProcess(AcquireWriteOperation &acquire_write);
+    void Process(CatalogAcquireAllOp &acquire_catalog_write);
+    void PostProcess(CatalogAcquireAllOp &acquire_catalog_write);
     void Process(SetCommitTsOperation &set_ts);
     void PostProcess(SetCommitTsOperation &set_ts);
     void Process(ValidateOperation &validate);
@@ -368,8 +443,8 @@ private:
     template <typename ResultType>
     void PostProcess(AsyncOp<ResultType> &ds_op);
 
-    void Process(ReleaseScanExtraLockOp &lock_op);
-    void PostProcess(ReleaseScanExtraLockOp &lock_op);
+    void Process(ReleaseScanExtraLockOp &unlock_op);
+    void PostProcess(ReleaseScanExtraLockOp &unlock_op);
 
     void Process(ObjectCommandOp &obj_cmd_op);
     void PostProcess(ObjectCommandOp &obj_cmd_op);
@@ -408,13 +483,16 @@ private:
     void Abort();
 
     bool FillDataLogRequest(WriteToLogOp &write_log);
+    bool FillCommitCatalogsLogRequest(WriteToLogOp &write_log);
+    bool FillCleanCatalogsLogRequest(WriteToLogOp &write_log);
 
     bool FillCommandLogRequest(WriteToLogOp &write_log);
 
     bool IsTimeOut(int wait_secs = 10);
     void StartTiming();
 
-    void ReleaseCatalogRangeLock(CcHandlerResult<PostProcessResult> &hd_result);
+    void ReleaseMetaDataReadLock(CcHandlerResult<PostProcessResult> &hd_result);
+    void ReleaseCatalogWriteAll(CcHandlerResult<PostProcessResult> &hd_result);
     void DrainScanner(CcScanner *scanner, const TableName &table_name);
 
     static TxErrorCode ConvertCcError(CcErrorCode error);
@@ -520,6 +598,15 @@ private:
     // send remote cc requests.
     std::atomic<uint16_t> command_id_;
 
+    // This latch is used to avoid concurrent update of txm status between
+    // txm.Forward() and CcStreamReceiver. CcStreamReceiver will update hd_res
+    // in txm, when hd_res is being modified, txm.Forward() will be blocked to
+    // avoid hd_res being freed or timed out.
+    // Positive numbers(1,2,3...) denotes how many responses are being handled
+    // by stream thread, and txm can not timeout when result_status_>0. Negative
+    // number(-1) denotes txm is being forwarded.
+    std::atomic<int32_t> forward_latch_{0};
+
     // The number of calls to Forward() at a given state.
     uint32_t state_forward_cnt_;
 
@@ -531,6 +618,8 @@ private:
 
     // local cache of read/write entries.
     ReadWriteSet rw_set_;
+    // local cache of command entries.
+    CommandSet cmd_set_;
     // when read an entry, it may not exist in ccmap. In this case, we create a
     // empty record in ccmap and add read intention for it. Then we read the
     // entry from data store and backfill the ccmap. cache_miss_read_cce_addr_
@@ -588,6 +677,8 @@ private:
     TxResult<std::vector<int64_t>> *int64_vec_resp_;
     // Response for UpsertTableTxRequest or UpsertTableIndexOp
     TxResult<UpsertResult> *upsert_resp_;
+    // Response for ClusterScaleTxRequest
+    TxResult<std::string> *string_resp_;
 
     // tx_req_queue_ is used to exchange request between runtime and
     // TxProcessor.
@@ -656,11 +747,13 @@ private:
     CmdForwardAcquireWriteOp cmd_forward_write_;
 #endif
     AcquireWriteOperation acquire_write_;
+    CatalogAcquireAllOp catalog_acquire_all_;
     SetCommitTsOperation set_ts_;
     ValidateOperation validate_;
     UpdateTxnStatus update_txn_;
     PostProcessOp post_process_;
     WriteToLogOp write_log_;
+    FlushUpdateTableOp flush_update_table_;
     SleepOperation sleep_op_;
 
     // analyze table
@@ -709,8 +802,10 @@ private:
     friend struct FaultInjectOp;
     friend struct AcquireAllOp;
     friend struct PostWriteAllOp;
+    friend struct CatalogAcquireAllOp;
     friend struct UpsertTableOp;
     friend struct DsUpsertTableOp;
+    friend struct FlushUpdateTableOp;
     friend struct SleepOperation;
     friend struct CleanCcEntryForTestOp;
     friend struct CleanArchivesOp;

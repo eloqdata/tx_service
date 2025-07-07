@@ -64,13 +64,11 @@ struct ResendScanSliceResp
 public:
     using Uptr = std::unique_ptr<ResendScanSliceResp>;
     ResendScanSliceResp();
-    ResendScanSliceResp(const ScanSliceResponse &msg, CcHandlerResultBase *res)
-        : msg_(msg), res_(res)
+    ResendScanSliceResp(const ScanSliceResponse &msg) : msg_(msg)
     {
     }
 
     ScanSliceResponse msg_;
-    CcHandlerResultBase *res_;
 };
 
 class CcStreamSender
@@ -93,7 +91,6 @@ public:
                            bool log_verbose = false);
     bool SendScanRespToNode(uint32_t dest_node_id,
                             const ScanSliceResponse &msg,
-                            CcHandlerResultBase *res = nullptr,
                             bool resend = false);
     void UpdateRemoteNodes(
         const std::unordered_map<NodeId, NodeConfig> &nodes_configs);

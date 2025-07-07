@@ -127,6 +127,8 @@ public:
             return CommitType::Commit;
         case PostWriteType::DowngradeLock:
             return CommitType::DowngradeLock;
+        case PostWriteType::UpdateDirty:
+            return CommitType::UpdateDirty;
         default:
             assert(false);
             return CommitType::PostCommit;
@@ -180,6 +182,25 @@ public:
         default:
             assert(false);
             return CcTableType::Primary;
+        }
+    }
+
+    static txservice::remote::TableEngine ConvertTableEngine(
+        txservice::TableEngine table_engine)
+    {
+        switch (table_engine)
+        {
+        case txservice::TableEngine::None:
+            return txservice::remote::TableEngine::None;
+        case txservice::TableEngine::EloqSql:
+            return txservice::remote::TableEngine::EloqSql;
+        case txservice::TableEngine::EloqDoc:
+            return txservice::remote::TableEngine::EloqDoc;
+        case txservice::TableEngine::EloqKv:
+            return txservice::remote::TableEngine::EloqKv;
+        default:
+            assert(false);
+            return TableEngine::EloqSql;
         }
     }
 
@@ -316,6 +337,8 @@ public:
             return PostWriteType::Commit;
         case CommitType::DowngradeLock:
             return PostWriteType::DowngradeLock;
+        case CommitType::UpdateDirty:
+            return PostWriteType::UpdateDirty;
         default:
             assert(false);
             return PostWriteType::PostCommit;
@@ -367,6 +390,25 @@ public:
         default:
             assert(false);
             return TableType::Primary;
+        }
+    }
+
+    static txservice::TableEngine ConvertTableEngine(
+        txservice::remote::TableEngine table_engine)
+    {
+        switch (table_engine)
+        {
+        case txservice::remote::TableEngine::None:
+            return txservice::TableEngine::None;
+        case txservice::remote::TableEngine::EloqDoc:
+            return txservice::TableEngine::EloqDoc;
+        case txservice::remote::TableEngine::EloqKv:
+            return txservice::TableEngine::EloqKv;
+        case txservice::remote::TableEngine::EloqSql:
+            return txservice::TableEngine::EloqSql;
+        default:
+            assert(false);
+            return txservice::TableEngine::None;
         }
     }
 

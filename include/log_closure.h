@@ -91,6 +91,11 @@ public:
         {
             hd_result_->SetError(CcErrorCode::WRITE_LOG_FAILED);
         }
+        else if (response_.response_status() ==
+                 ::txlog::LogResponse_ResponseStatus_NotLeader)
+        {
+            hd_result_->SetError(CcErrorCode::LOG_NODE_NOT_LEADER);
+        }
         else
         {
             hd_result_->SetError(CcErrorCode::UNDEFINED_ERR);

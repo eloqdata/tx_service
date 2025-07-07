@@ -53,6 +53,7 @@ txservice::remote::RemoteAcquire::RemoteAcquire()
 
         output_msg_.set_tx_number(input_msg_->tx_number());
         output_msg_.set_handler_addr(input_msg_->handler_addr());
+        output_msg_.set_txm_addr(input_msg_->txm_addr());
         output_msg_.set_tx_term(input_msg_->tx_term());
         output_msg_.set_command_id(input_msg_->command_id());
 
@@ -103,8 +104,10 @@ void txservice::remote::RemoteAcquire::Reset(
 
     std::string_view table_name_sv{req.table_name_str()};
     // Need to parse the string if not include table type in protobuf
-    remote_table_name_ = TableName(
-        table_name_sv, ToLocalType::ConvertCcTableType(req.table_type()));
+    remote_table_name_ =
+        TableName(table_name_sv,
+                  ToLocalType::ConvertCcTableType(req.table_type()),
+                  ToLocalType::ConvertTableEngine(req.table_engine()));
 
     AcquireCc::Reset(&remote_table_name_,
                      req.schema_version(),
@@ -131,6 +134,7 @@ void txservice::remote::RemoteAcquire::Acknowledge()
 {
     output_msg_.set_tx_number(input_msg_->tx_number());
     output_msg_.set_handler_addr(input_msg_->handler_addr());
+    output_msg_.set_txm_addr(input_msg_->txm_addr());
     output_msg_.set_tx_term(input_msg_->tx_term());
     output_msg_.set_command_id(input_msg_->command_id());
 
@@ -163,6 +167,7 @@ txservice::remote::RemoteAcquireAll::RemoteAcquireAll()
     {
         output_msg_.set_tx_number(input_msg_->tx_number());
         output_msg_.set_handler_addr(input_msg_->handler_addr());
+        output_msg_.set_txm_addr(input_msg_->txm_addr());
         output_msg_.set_tx_term(input_msg_->tx_term());
         output_msg_.set_command_id(input_msg_->command_id());
 
@@ -201,8 +206,10 @@ void txservice::remote::RemoteAcquireAll::Reset(
 
     const AcquireAllRequest &req = input_msg->acquire_all_req();
     std::string_view table_name_sv{req.table_name_str()};
-    remote_table_name_ = TableName(
-        table_name_sv, ToLocalType::ConvertCcTableType(req.table_type()));
+    remote_table_name_ =
+        TableName(table_name_sv,
+                  ToLocalType::ConvertCcTableType(req.table_type()),
+                  ToLocalType::ConvertTableEngine(req.table_engine()));
 
     if (req.acq_all_key_case() == AcquireAllRequest::AcqAllKeyCase::kNegInf)
     {
@@ -244,6 +251,7 @@ void txservice::remote::RemoteAcquireAll::Acknowledge()
 
     output_msg_.set_tx_number(input_msg_->tx_number());
     output_msg_.set_handler_addr(input_msg_->handler_addr());
+    output_msg_.set_txm_addr(input_msg_->txm_addr());
     output_msg_.set_tx_term(input_msg_->tx_term());
     output_msg_.set_command_id(input_msg_->command_id());
 
@@ -282,6 +290,7 @@ txservice::remote::RemotePostRead::RemotePostRead()
         {
             output_msg_.set_tx_number(input_msg_->tx_number());
             output_msg_.set_handler_addr(input_msg_->handler_addr());
+            output_msg_.set_txm_addr(input_msg_->txm_addr());
             output_msg_.set_tx_term(input_msg_->tx_term());
             output_msg_.set_command_id(input_msg_->command_id());
 
@@ -295,10 +304,7 @@ txservice::remote::RemotePostRead::RemotePostRead()
                 // locates in a single shard. Hence, there are no concurrent
                 // modifications of PostReadResult. It is safe to access the
                 // result's array without the mutex protection.
-                for (TxNumber &txn : res->Value().conflicting_txs_)
-                {
-                    resp->add_txs(txn);
-                }
+                resp->set_conflicting_tx_cnt(res->Value().Size());
             }
 
             const ValidateRequest &req = input_msg_->validate_req();
@@ -363,6 +369,7 @@ txservice::remote::RemoteRead::RemoteRead()
 
         output_msg_.set_tx_number(input_msg_->tx_number());
         output_msg_.set_handler_addr(input_msg_->handler_addr());
+        output_msg_.set_txm_addr(input_msg_->txm_addr());
         output_msg_.set_tx_term(input_msg_->tx_term());
         output_msg_.set_command_id(input_msg_->command_id());
 
@@ -405,8 +412,10 @@ void txservice::remote::RemoteRead::Reset(std::unique_ptr<CcMessage> input_msg)
 
     const ReadRequest &req = input_msg->read_req();
     std::string_view table_name_sv{req.table_name_str()};
-    remote_table_name_ = TableName(
-        table_name_sv, ToLocalType::ConvertCcTableType(req.table_type()));
+    remote_table_name_ =
+        TableName(table_name_sv,
+                  ToLocalType::ConvertCcTableType(req.table_type()),
+                  ToLocalType::ConvertTableEngine(req.table_engine()));
 
     ReadType read_type = ReadType::Inside;
     switch (req.read_type())
@@ -483,6 +492,7 @@ void txservice::remote::RemoteRead::Acknowledge()
 {
     output_msg_.set_tx_number(input_msg_->tx_number());
     output_msg_.set_handler_addr(input_msg_->handler_addr());
+    output_msg_.set_txm_addr(input_msg_->txm_addr());
     output_msg_.set_tx_term(input_msg_->tx_term());
     output_msg_.set_command_id(input_msg_->command_id());
 
@@ -513,6 +523,7 @@ txservice::remote::RemotePostWrite::RemotePostWrite()
     {
         output_msg_.set_tx_number(input_msg_->tx_number());
         output_msg_.set_handler_addr(input_msg_->handler_addr());
+        output_msg_.set_txm_addr(input_msg_->txm_addr());
         output_msg_.set_tx_term(input_msg_->tx_term());
         output_msg_.set_command_id(input_msg_->command_id());
 
@@ -581,7 +592,8 @@ void txservice::remote::RemotePostWrite::Reset(
         std::string_view table_name_sv{post_commit.table_name_str()};
         remote_table_name_ = TableName(
             table_name_sv,
-            ToLocalType::ConvertCcTableType(post_commit.table_type()));
+            ToLocalType::ConvertCcTableType(post_commit.table_type()),
+            ToLocalType::ConvertTableEngine(post_commit.table_engine()));
         OperationType op_type =
             static_cast<OperationType>(post_commit.operation_type());
         PostWriteCc::Reset(&remote_table_name_,
@@ -616,6 +628,7 @@ txservice::remote::RemotePostWriteAll::RemotePostWriteAll()
     {
         output_msg_.set_tx_number(input_msg_->tx_number());
         output_msg_.set_handler_addr(input_msg_->handler_addr());
+        output_msg_.set_txm_addr(input_msg_->txm_addr());
         output_msg_.set_tx_term(input_msg_->tx_term());
         output_msg_.set_command_id(input_msg_->command_id());
 
@@ -644,9 +657,10 @@ void txservice::remote::RemotePostWriteAll::Reset(
     const PostWriteAllRequest &post_write_all = input_msg->post_write_all_req();
 
     std::string_view table_name_sv{post_write_all.table_name_str()};
-    remote_table_name_ =
-        TableName(table_name_sv,
-                  ToLocalType::ConvertCcTableType(post_write_all.table_type()));
+    remote_table_name_ = TableName(
+        table_name_sv,
+        ToLocalType::ConvertCcTableType(post_write_all.table_type()),
+        ToLocalType::ConvertTableEngine(post_write_all.table_engine()));
 
     uint64_t commit_ts = post_write_all.commit_ts();
     const std::string *rec_str =
@@ -704,6 +718,7 @@ txservice::remote::RemoteScanOpen::RemoteScanOpen()
     {
         output_msg_.set_tx_number(input_msg_->tx_number());
         output_msg_.set_handler_addr(input_msg_->handler_addr());
+        output_msg_.set_txm_addr(input_msg_->txm_addr());
         output_msg_.set_tx_term(input_msg_->tx_term());
         output_msg_.set_command_id(input_msg_->command_id());
 
@@ -773,14 +788,19 @@ void txservice::remote::RemoteScanOpen::Reset(
     const ScanOpenRequest &scan_open = input_msg->scan_open_req();
 
     std::string_view table_name_sv{scan_open.table_name_str()};
-    remote_table_name_ = TableName(
-        table_name_sv, ToLocalType::ConvertCcTableType(scan_open.table_type()));
+    remote_table_name_ =
+        TableName(table_name_sv,
+                  ToLocalType::ConvertCcTableType(scan_open.table_type()),
+                  ToLocalType::ConvertTableEngine(scan_open.table_engine()));
 
     node_group_id_ = scan_open.shard_id();
     table_name_ = &remote_table_name_;
     tx_term_ = input_msg->tx_term();
     is_for_write_ = scan_open.is_for_write();
     is_covering_keys_ = scan_open.is_covering_keys();
+    is_require_keys_ = scan_open.is_require_keys();
+    is_require_recs_ = scan_open.is_require_recs();
+    is_require_sort_ = scan_open.is_require_sort();
     isolation_level_ = ToLocalType::ConvertIsolation(scan_open.iso_level());
     proto_ = ToLocalType::ConvertProtocol(scan_open.protocol());
     tx_number_ = input_msg->tx_number();
@@ -873,6 +893,7 @@ txservice::remote::RemoteScanNextBatch::RemoteScanNextBatch()
     {
         output_msg_.set_tx_number(input_msg_->tx_number());
         output_msg_.set_handler_addr(input_msg_->handler_addr());
+        output_msg_.set_txm_addr(input_msg_->txm_addr());
         output_msg_.set_tx_term(input_msg_->tx_term());
         output_msg_.set_command_id(input_msg_->command_id());
 
@@ -952,6 +973,9 @@ void txservice::remote::RemoteScanNextBatch::Reset(
     tx_term_ = input_msg->tx_term();
     is_for_write_ = scan_next.is_for_write();
     is_covering_keys_ = scan_next.is_covering_keys();
+    is_require_keys_ = scan_next.is_require_keys();
+    is_require_recs_ = scan_next.is_require_recs();
+    is_require_sort_ = scan_next.is_require_sort();
     isolation_level_ = ToLocalType::ConvertIsolation(scan_next.iso_level());
     proto_ = ToLocalType::ConvertProtocol(scan_next.protocol());
     tx_number_ = input_msg->tx_number();
@@ -1107,10 +1131,13 @@ txservice::remote::RemoteScanSlice::RemoteScanSlice()
                 output_msg_.mutable_rec_status()->append(
                     (const char *) cache.rec_status_.data(),
                     cache.rec_status_.size() * sizeof(RecordStatusType));
+
+                output_msg_.mutable_trailing_cnts()->append(
+                    (const char *) &cache.trailing_cnt_, sizeof(size_t));
             }
         }
         const ScanSliceRequest &req = input_msg_->scan_slice_req();
-        hd_->SendScanRespToNode(req.src_node_id(), output_msg_, nullptr, false);
+        hd_->SendScanRespToNode(req.src_node_id(), output_msg_, false);
         hd_->RecycleCcMsg(std::move(input_msg_));
     };
 }
@@ -1126,9 +1153,10 @@ void txservice::remote::RemoteScanSlice::Reset(
 
     const ScanSliceRequest &scan_slice_req = input_msg->scan_slice_req();
     std::string_view tbl_name_view(scan_slice_req.table_name_str());
-    remote_tbl_name_ =
-        TableName(tbl_name_view,
-                  ToLocalType::ConvertCcTableType(scan_slice_req.table_type()));
+    remote_tbl_name_ = TableName(
+        tbl_name_view,
+        ToLocalType::ConvertCcTableType(scan_slice_req.table_type()),
+        ToLocalType::ConvertTableEngine(scan_slice_req.table_engine()));
 
     ScanSliceCc::Set(remote_tbl_name_,
                      scan_slice_req.schema_version(),
@@ -1156,6 +1184,7 @@ void txservice::remote::RemoteScanSlice::Reset(
 
     output_msg_.set_tx_number(input_msg->tx_number());
     output_msg_.set_handler_addr(input_msg->handler_addr());
+    output_msg_.set_txm_addr(input_msg->txm_addr());
     output_msg_.set_tx_term(input_msg->tx_term());
     output_msg_.set_command_id(input_msg->command_id());
 
@@ -1234,6 +1263,7 @@ txservice::remote::RemoteReloadCacheCc::RemoteReloadCacheCc() : cc_res_(nullptr)
         output_msg_.set_tx_term(input_msg_->tx_term());
         output_msg_.set_command_id(input_msg_->command_id());
         output_msg_.set_handler_addr(input_msg_->handler_addr());
+        output_msg_.set_txm_addr(input_msg_->txm_addr());
 
         ReloadCacheResponse *resp = output_msg_.mutable_reload_cache_resp();
         resp->set_error_code(
@@ -1278,6 +1308,7 @@ txservice::remote::RemoteFaultInjectCC::RemoteFaultInjectCC() : cc_res_(nullptr)
         output_msg_.set_tx_term(input_msg_->tx_term());
         output_msg_.set_command_id(input_msg_->command_id());
         output_msg_.set_handler_addr(input_msg_->handler_addr());
+        output_msg_.set_txm_addr(input_msg_->txm_addr());
 
         FaultInjectResponse *resp = output_msg_.mutable_fault_inject_resp();
         resp->set_error_code(
@@ -1332,7 +1363,8 @@ void txservice::remote::RemoteBroadcastStatisticsCc::Reset(
         input_msg->broadcast_statistics_req();
     remote_table_name_ =
         TableName(req.table_name_str(),
-                  ToLocalType::ConvertCcTableType(req.table_type()));
+                  ToLocalType::ConvertCcTableType(req.table_type()),
+                  ToLocalType::ConvertTableEngine(req.table_engine()));
 
     BroadcastStatisticsCc::Reset(req.node_group_id(),
                                  &remote_table_name_,
@@ -1361,6 +1393,7 @@ txservice::remote::RemoteAnalyzeTableAllCc::RemoteAnalyzeTableAllCc()
         output_msg_.set_tx_term(input_msg_->tx_term());
         output_msg_.set_command_id(input_msg_->command_id());
         output_msg_.set_handler_addr(input_msg_->handler_addr());
+        output_msg_.set_txm_addr(input_msg_->txm_addr());
 
         AnalyzeTableAllResponse *resp =
             output_msg_.mutable_analyze_table_all_resp();
@@ -1386,8 +1419,10 @@ void txservice::remote::RemoteAnalyzeTableAllCc::Reset(
 
     const AnalyzeTableAllRequest &req = input_msg->analyze_table_all_req();
     std::string_view table_name_sv(req.table_name_str());
-    remote_table_name_ = TableName(
-        table_name_sv, ToLocalType::ConvertCcTableType(req.table_type()));
+    remote_table_name_ =
+        TableName(table_name_sv,
+                  ToLocalType::ConvertCcTableType(req.table_type()),
+                  ToLocalType::ConvertTableEngine(req.table_engine()));
 
     AnalyzeTableAllCc::Reset(&remote_table_name_,
                              req.node_group_id(),
@@ -1416,6 +1451,7 @@ txservice::remote::RemoteCleanCcEntryForTestCc::RemoteCleanCcEntryForTestCc()
         output_msg_.set_tx_term(input_msg_->tx_term());
         output_msg_.set_command_id(input_msg_->command_id());
         output_msg_.set_handler_addr(input_msg_->handler_addr());
+        output_msg_.set_txm_addr(input_msg_->txm_addr());
 
         CleanCcEntryForTestResponse *resp =
             output_msg_.mutable_clean_cc_entry_resp();
@@ -1442,8 +1478,10 @@ void txservice::remote::RemoteCleanCcEntryForTestCc::Reset(
 
     const CleanCcEntryForTestRequest &req = input_msg->clean_cc_entry_req();
     std::string_view table_name_sv{req.table_name_str()};
-    remote_table_name_ = TableName(
-        table_name_sv, ToLocalType::ConvertCcTableType(req.table_type()));
+    remote_table_name_ =
+        TableName(table_name_sv,
+                  ToLocalType::ConvertCcTableType(req.table_type()),
+                  ToLocalType::ConvertTableEngine(req.table_engine()));
 
     CleanCcEntryForTestCc::Reset(&remote_table_name_,
                                  &req.key(),
@@ -1493,12 +1531,15 @@ bool txservice::remote::RemoteCheckDeadLockCc::Execute(CcShard &ccs)
             tr::CcMessage::MessageType::CcMessage_MessageType_DeadLockResponse);
         output_msg_.set_tx_number(0);
         output_msg_.set_handler_addr(0);
+        output_msg_.set_txm_addr(input_msg_->txm_addr());
         output_msg_.set_tx_term(0);
         output_msg_.set_command_id(0);
 
         DeadLockResponse *resp = output_msg_.mutable_dead_lock_response();
         resp->set_error_code(0);
         resp->set_node_id(Sharder::Instance().NodeId());
+        const DeadLockRequest &req = input_msg_->dead_lock_request();
+        resp->set_check_round(req.check_round());
 
         for (size_t i = 0; i < dead_lock_result_.entry_lock_info_vec_.size();
              i++)
@@ -1538,7 +1579,6 @@ bool txservice::remote::RemoteCheckDeadLockCc::Execute(CcShard &ccs)
             te->set_ety_count(iter.second);
         }
 
-        const DeadLockRequest &req = input_msg_->dead_lock_request();
         hd_->SendMessageToNode(req.src_node_id(), output_msg_);
         hd_->RecycleCcMsg(std::move(input_msg_));
     }
@@ -1568,7 +1608,8 @@ void txservice::remote::RemoteAbortTransactionCc::Reset(
 bool txservice::remote::RemoteAbortTransactionCc::Execute(CcShard &ccs)
 {
     LruEntry *lru_entry = reinterpret_cast<LruEntry *>(entry_addr_);
-    std::unordered_map<NodeGroupId, std::unordered_map<TxNumber, TxLockInfo>>
+    const std::unordered_map<NodeGroupId,
+                             absl::flat_hash_map<TxNumber, TxLockInfo::uptr>>
         &ltxs = ccs.GetLockHoldingTxs();
     int32_t err = 1;
 
@@ -1577,8 +1618,8 @@ bool txservice::remote::RemoteAbortTransactionCc::Execute(CcShard &ccs)
     {
         auto it_info = it_ng->second.find(tx_id_lock_);
         if (it_info != it_ng->second.end() &&
-            it_info->second.cce_list_.find(lru_entry) !=
-                it_info->second.cce_list_.end())
+            it_info->second->cce_list_.find(lru_entry) !=
+                it_info->second->cce_list_.end())
         {
             NonBlockingLock *key_lock = lru_entry->GetKeyLock();
             if (key_lock != nullptr)
@@ -1593,6 +1634,7 @@ bool txservice::remote::RemoteAbortTransactionCc::Execute(CcShard &ccs)
                              CcMessage_MessageType_AbortTransactionResponse);
     output_msg_.set_tx_number(0);
     output_msg_.set_handler_addr(0);
+    output_msg_.set_txm_addr(input_msg_->txm_addr());
     output_msg_.set_tx_term(0);
     output_msg_.set_command_id(0);
 
@@ -1682,6 +1724,7 @@ bool txservice::remote::RemoteBlockReqCheckCc::Execute(CcShard &ccs)
 
         output_msg_.set_tx_number(input_msg_->tx_number());
         output_msg_.set_handler_addr(input_msg_->handler_addr());
+        output_msg_.set_txm_addr(input_msg_->txm_addr());
         output_msg_.set_tx_term(input_msg_->tx_term());
         output_msg_.set_command_id(input_msg_->command_id());
 
@@ -1726,6 +1769,7 @@ txservice::remote::RemoteKickoutCcEntry::RemoteKickoutCcEntry()
         output_msg_.set_tx_term(input_msg_->tx_term());
         output_msg_.set_command_id(input_msg_->command_id());
         output_msg_.set_handler_addr(input_msg_->handler_addr());
+        output_msg_.set_txm_addr(input_msg_->txm_addr());
 
         // Construct response body
         KickoutDataResponse *resp = output_msg_.mutable_kickout_data_resp();
@@ -1758,8 +1802,11 @@ void txservice::remote::RemoteKickoutCcEntry::Reset(
     const KickoutDataRequest &req = input_msg->kickout_data_req();
 
     std::string_view table_name_sv{req.table_name_str()};
+    txservice::TableEngine table_engine =
+        ToLocalType::ConvertTableEngine(req.table_engine());
     table_name_ = TableName(table_name_sv,
-                            ToLocalType::ConvertCcTableType(req.table_type()));
+                            ToLocalType::ConvertCcTableType(req.table_type()),
+                            table_engine);
 
     size_t core_cnt = 0;
     if (req.clean_type() == remote::CleanType::CleanCcm)
@@ -1800,6 +1847,7 @@ txservice::remote::RemoteApplyCc::RemoteApplyCc() : ApplyCc(false)
     {
         output_msg_.set_tx_number(input_msg_->tx_number());
         output_msg_.set_handler_addr(input_msg_->handler_addr());
+        output_msg_.set_txm_addr(input_msg_->txm_addr());
         output_msg_.set_tx_term(input_msg_->tx_term());
         output_msg_.set_command_id(input_msg_->command_id());
 
@@ -1854,8 +1902,10 @@ void txservice::remote::RemoteApplyCc::Reset(
 
     const ApplyRequest &req = input_msg->apply_cc_req();
     std::string_view table_name_sv{req.table_name_str()};
-    remote_table_name_ = TableName(
-        table_name_sv, ToLocalType::ConvertCcTableType(req.table_type()));
+    remote_table_name_ =
+        TableName(table_name_sv,
+                  ToLocalType::ConvertCcTableType(req.table_type()),
+                  ToLocalType::ConvertTableEngine(req.table_engine()));
 
     cc_res_.Value().cce_addr_.SetCceLock(0, -1, req.key_shard_code() >> 10, 0);
 
@@ -1886,6 +1936,7 @@ void txservice::remote::RemoteApplyCc::Acknowledge()
 {
     output_msg_.set_tx_number(input_msg_->tx_number());
     output_msg_.set_handler_addr(input_msg_->handler_addr());
+    output_msg_.set_txm_addr(input_msg_->txm_addr());
     output_msg_.set_tx_term(input_msg_->tx_term());
     output_msg_.set_command_id(input_msg_->command_id());
 
@@ -1916,6 +1967,7 @@ txservice::remote::RemoteUploadTxCommandsCc::RemoteUploadTxCommandsCc()
     {
         output_msg_.set_tx_number(input_msg_->tx_number());
         output_msg_.set_handler_addr(input_msg_->handler_addr());
+        output_msg_.set_txm_addr(input_msg_->txm_addr());
         output_msg_.set_tx_term(input_msg_->tx_term());
         output_msg_.set_command_id(input_msg_->command_id());
 
@@ -1988,13 +2040,14 @@ txservice::remote::RemoteDbSizeCc::RemoteDbSizeCc()
     {
         assert(total_ref_cnt_ == 0);
         output_msg_.set_handler_addr(input_msg_->handler_addr());
+        output_msg_.set_txm_addr(input_msg_->txm_addr());
 
         const DBSizeRequest &req = input_msg_->dbsize_req();
         DBSizeResponse *resp = output_msg_.mutable_db_size_resp();
-        for (size_t idx = 0; idx < total_obj_sizes_.size(); ++idx)
+        for (size_t idx = 0; idx < TotalObjSizesCount(); ++idx)
         {
             resp->add_node_obj_size(
-                total_obj_sizes_[idx]->load(std::memory_order_relaxed));
+                TotalObjSizesLoad(idx, std::memory_order_relaxed));
         }
 
         resp->set_dbsize_term(req.dbsize_term());
@@ -2024,7 +2077,8 @@ void txservice::remote::RemoteDbSizeCc::Reset(
         std::string_view table_name_sv{cmds_req.table_name_str(idx)};
         redis_table_names_.emplace_back(
             table_name_sv,
-            ToLocalType::ConvertCcTableType(cmds_req.table_type(idx)));
+            ToLocalType::ConvertCcTableType(cmds_req.table_type(idx)),
+            ToLocalType::ConvertTableEngine(cmds_req.table_engine(idx)));
     }
 
     DbSizeCc::Reset(&redis_table_names_, core_cnt, 0);
@@ -2050,8 +2104,8 @@ bool txservice::remote::RemoteDbSizeCc::Execute(CcShard &ccs)
         CcMap *map = ccs.GetCcm(table_names_->at(idx), vct_ng_id_[0]);
         if (map != nullptr)
         {
-            total_obj_sizes_[idx]->fetch_add(map->NormalObjectSize(),
-                                             std::memory_order_relaxed);
+            TotalObjSizesFetchAdd(
+                idx, map->NormalObjectSize(), std::memory_order_relaxed);
         }
     }
 
@@ -2084,6 +2138,7 @@ txservice::remote::RemoteInvalidateTableCacheCc::RemoteInvalidateTableCacheCc()
         output_msg_.set_tx_term(input_msg_->tx_term());
         output_msg_.set_command_id(input_msg_->command_id());
         output_msg_.set_handler_addr(input_msg_->handler_addr());
+        output_msg_.set_txm_addr(input_msg_->txm_addr());
 
         InvalidateTableCacheResponse *resp =
             output_msg_.mutable_invalidate_table_cache_resp();
@@ -2111,8 +2166,10 @@ void txservice::remote::RemoteInvalidateTableCacheCc::Reset(
     const InvalidateTableCacheRequest &req =
         input_msg->invalidate_table_cache_req();
     std::string_view table_name_sv(req.table_name_str());
-    remote_table_name_ = TableName(
-        table_name_sv, ToLocalType::ConvertCcTableType(req.table_type()));
+    remote_table_name_ =
+        TableName(table_name_sv,
+                  ToLocalType::ConvertCcTableType(req.table_type()),
+                  ToLocalType::ConvertTableEngine(req.table_engine()));
 
     InvalidateTableCacheCc::Reset(&remote_table_name_,
                                   req.node_group_id(),

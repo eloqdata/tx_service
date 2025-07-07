@@ -21,6 +21,7 @@
  */
 #pragma once
 
+#include <fstream>
 #include <queue>
 #include <sstream>
 #include <string>
@@ -335,6 +336,54 @@ static inline bool ParseNgConfig(
     }
 
     return AjustNgConfigs(ng_configs, replica_num);
+}
+
+static inline bool ReadClusterConfigFile(
+    std::string &cluster_config_file_path,
+    std::unordered_map<NodeGroupId, std::vector<NodeConfig>> &ng_configs,
+    uint64_t &config_version)
+{
+    std::ifstream ifs(cluster_config_file_path);
+    if (ifs.good())
+    {
+        std::string line;
+        std::getline(ifs, line);
+        size_t ng_cnt = std::stoul(line);
+        for (size_t i = 0; i < ng_cnt; i++)
+        {
+            std::getline(ifs, line);
+            std::istringstream iss(line);
+            uint32_t ng_id;
+            iss >> ng_id;
+
+            std::vector<NodeConfig> nodes;
+            uint32_t node_id;
+            std::string host_name;
+            uint16_t port;
+            bool is_candidate;
+
+            // Parse all nodes in this node group
+            while (iss >> node_id >> host_name >> port >> is_candidate)
+            {
+                NodeConfig node_config(node_id, host_name, port, is_candidate);
+                nodes.push_back(std::move(node_config));
+            }
+
+            ng_configs[ng_id] = std::move(nodes);
+        }
+
+        // Parse configuration version
+        std::getline(ifs, line);
+        config_version = std::stoull(line);
+        LOG(INFO)
+            << "Successfully loaded cluster config from file with version "
+            << config_version;
+        return true;
+    }
+    else
+    {
+        return false;
+    }
 }
 
 static inline void ExtractNodesConfigs(

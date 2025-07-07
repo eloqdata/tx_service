@@ -43,9 +43,14 @@ inline uint64_t txservice_max_standby_lag = 400000;
 // off, all data will be cached in memory.
 inline bool txservice_enable_cache_replacement = true;
 
+// Whether to automatically redirect redis command to the leader node when the
+// data is not on the local node.
+inline bool txservice_auto_redirect_redis_cmd = true;
+
 enum struct TxShardStatus
 {
-    Free = 0,
+    Uninitialized = 0,
+    Free,
     Occupied,
     Deconstructed
 };
@@ -58,27 +63,21 @@ struct TxProcCoordinator
     {
     }
 
-    void NotifyExternalProcessor()
-    {
-#ifdef ON_KEY_OBJECT
-        if (core_id_ != -1)
-        {
-            bthread_notify_worker(core_id_);
-        }
+#ifdef ELOQ_MODULE_ENABLED
+    void NotifyExternalProcessor() const;
 #endif
-    }
+
+    void UpdateExtTxProcessorCnt(int16_t delta);
 
     int32_t core_id_{-1};
     std::mutex sleep_mux_;
     std::condition_variable sleep_cv_;
-    std::atomic<TxShardStatus> shard_status_{TxShardStatus::Free};
+    std::atomic<TxShardStatus> shard_status_{TxShardStatus::Uninitialized};
     std::atomic<TxProcessor *> tx_processor_{nullptr};
 #ifdef EXT_TX_PROC_ENABLED
-#ifdef ON_KEY_OBJECT
     // The external txm count. If it's not zero, the external processor
     // shouldn't sleep.
     std::atomic<int16_t> external_txm_cnt_{0};
-#endif
     std::atomic<int16_t> ext_processor_cnt_{0};
     // Original thread default heap for external tx processor.
     // This is only set when external tx processor occupies the shard,

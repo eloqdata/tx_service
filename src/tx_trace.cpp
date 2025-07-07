@@ -2014,7 +2014,7 @@ template std::string tx_trace_dump(std::vector<txservice::AcquireKeyResult> *,
                                    std::function<std::string()>);
 template std::string tx_trace_dump(txservice::PostProcessResult *,
                                    std::function<std::string()>);
-template std::string tx_trace_dump(txservice::PackSkError *,
+template std::string tx_trace_dump(txservice::GenerateSkParallelResult *,
                                    std::function<std::string()>);
 // CcRequest
 template std::string tx_trace_dump(txservice::AcquireCc *,

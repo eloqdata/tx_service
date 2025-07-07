@@ -22,11 +22,9 @@
 #pragma once
 
 #include <algorithm>
-#include <map>
 #include <memory>  // make_shared
 #include <string>
 #include <tuple>
-#include <unordered_map>
 #include <utility>
 #include <vector>
 
@@ -41,7 +39,7 @@
 #include "log.pb.h"
 #include "log_type.h"
 #include "non_blocking_lock.h"
-#include "range_cc_map.h"
+#include "reader_writer_cntl.h"
 #include "sharder.h"
 #include "template_cc_map.h"
 #include "tx_command.h"
@@ -51,7 +49,8 @@
 
 namespace txservice
 {
-class CatalogCcMap : public TemplateCcMap<CatalogKey, CatalogRecord>
+class CatalogCcMap
+    : public TemplateCcMap<CatalogKey, CatalogRecord, true, false>
 {
 public:
     CatalogCcMap(const CatalogCcMap &rhs) = delete;
@@ -66,7 +65,7 @@ public:
     CatalogCcMap(CcShard *shard,
                  NodeGroupId cc_ng_id,
                  const TableName &table_name)
-        : TemplateCcMap<CatalogKey, CatalogRecord>(
+        : TemplateCcMap<CatalogKey, CatalogRecord, true, false>(
               shard, cc_ng_id, table_name, 1, nullptr, false)
     {
     }
@@ -78,6 +77,71 @@ public:
     }
 
     using TemplateCcMap::Execute;
+
+    bool Execute(AcquireAllCc &req) override
+    {
+        // For the first AcuireWriteAll request (which acquires write intents),
+        // sets the reader-writer-control block to coordinate with runtime
+        // queries that are accessing the schema w/o concurrency control and
+        // blocks future runtime queries from accessing the schema via the
+        // control block.
+        if (req.CcOp() == CcOperation::ReadForWrite)
+        {
+            uint32_t ng_id = req.NodeGroupId();
+            int64_t ng_term = Sharder::Instance().LeaderTerm(ng_id);
+            CcHandlerResult<AcquireAllResult> *hd_res = req.Result();
+            if (ng_term < 0)
+            {
+                return hd_res->SetError(CcErrorCode::REQUESTED_NODE_NOT_LEADER);
+            }
+
+            const CatalogKey *catalog_key = nullptr;
+            if (req.Key() != nullptr)
+            {
+                catalog_key = static_cast<const CatalogKey *>(req.Key());
+            }
+            else
+            {
+                assert(*req.KeyStrType() == KeyType::Normal);
+
+                const std::string *key_str = req.KeyStr();
+                assert(key_str != nullptr);
+                std::unique_ptr<CatalogKey> decoded_key =
+                    std::make_unique<CatalogKey>();
+                size_t offset = 0;
+                decoded_key->Deserialize(key_str->data(), offset, KeySchema());
+                catalog_key = decoded_key.get();
+                req.SetDecodedKey(TxKey(std::move(decoded_key)));
+            }
+
+            const TableName &tbl_name = catalog_key->Name();
+            std::shared_ptr<ReaderWriterObject<TableSchema>> schema_cntl =
+                shard_->FindEmplaceSchemaCntl(tbl_name);
+            AddWriterResult ret = schema_cntl->AddWriter(&req);
+            switch (ret)
+            {
+            case AddWriterResult::WriteConflict:
+                // There is a write-write conflict
+                return hd_res->SetError(
+                    CcErrorCode::ACQUIRE_KEY_LOCK_FAILED_FOR_WW_CONFLICT);
+            case AddWriterResult::WritePending:
+                // There are readers accessing the schema. Blocks the
+                // request until all existing readers finish.
+                return false;
+            case AddWriterResult::Invalid:
+                // The control block is invalid. Deletes it from the shard.
+                shard_->DeleteSchemaCntl(tbl_name);
+                schema_cntl = shard_->FindEmplaceSchemaCntl(tbl_name);
+                ret = schema_cntl->AddWriter(&req);
+                assert(ret == AddWriterResult::Success);
+                break;
+            default:
+                break;
+            }
+        }
+
+        return TemplateCcMap::Execute(req);
+    }
 
     bool Execute(PostWriteAllCc &req) override
     {
@@ -175,8 +239,9 @@ public:
         }
 
         Iterator it =
-            TemplateCcMap<CatalogKey, CatalogRecord>::Find(*table_key);
-        CcEntry<CatalogKey, CatalogRecord> *cce_ptr = it->second;
+            TemplateCcMap<CatalogKey, CatalogRecord, true, false>::Find(
+                *table_key);
+        CcEntry<CatalogKey, CatalogRecord, true, false> *cce_ptr = it->second;
 
         // Check whether cce key lock holder is the given tx of the
         // PostWriteAllCc before applying change.
@@ -314,7 +379,8 @@ public:
                             {
                                 dirty_index_names.emplace_back(
                                     new_index_name.StringView(),
-                                    new_index_name.Type());
+                                    new_index_name.Type(),
+                                    new_index_name.Engine());
                             }
                         }
 
@@ -327,7 +393,8 @@ public:
                         {
                             TableName index_range_name{
                                 index_name.StringView(),
-                                TableType::RangePartition};
+                                TableType::RangePartition,
+                                index_name.Engine()};
 
                             auto ranges = shard_->GetTableRangesForATable(
                                 index_range_name, req.NodeGroupId());
@@ -417,16 +484,77 @@ public:
 
             break;
         }
+        case PostWriteType::UpdateDirty:
+        {
+            assert(req.OpType() == OperationType::AddIndex);
+            assert(req.CommitTs() != TransactionOperation::tx_op_failed_ts_);
+            if (shard_->core_id_ == 0)
+            {
+                // For update dirty, retrieves the current and dirty schema pair
+                // from the current shard.
+                if (req.Payload() != nullptr)
+                {
+                    // When the request comes from a tx in the same node, the
+                    // request references a schema record in the tx's space.
+                    schema_rec = static_cast<CatalogRecord *>(req.Payload());
+                }
+                else
+                {
+                    assert(req.PayloadStr() != nullptr);
+                    // When the request comes from a remote tx, allocates a
+                    // schema record, which acts as a container referencing the
+                    // current and dirty schema pair.
+                    std::unique_ptr<CatalogRecord> decoded_rec =
+                        std::make_unique<CatalogRecord>();
+                    size_t offset = 0;
+                    decoded_rec->Deserialize(req.PayloadStr()->data(), offset);
+
+                    schema_rec = decoded_rec.get();
+                    req.SetDecodedPayload(std::move(decoded_rec));
+                }
+
+                catalog_entry =
+                    shard_->GetCatalog(table_key->Name(), req.NodeGroupId());
+                if (catalog_entry->dirty_schema_->SchemaImage() !=
+                    schema_rec->DirtySchemaImage())
+                {
+                    assert(catalog_entry->dirty_schema_version_ ==
+                           req.CommitTs());
+                    std::shared_ptr<TableSchema> old_dirty_schema =
+                        catalog_entry->dirty_schema_;
+                    shard_->UpdateDirtyCatalog(table_key->Name(),
+                                               schema_rec->DirtySchemaImage(),
+                                               catalog_entry);
+                    catalog_entry->dirty_schema_->BindStatistics(
+                        old_dirty_schema->StatisticsObject());
+                }
+
+                schema_rec->Set(catalog_entry->schema_,
+                                catalog_entry->dirty_schema_,
+                                catalog_entry->schema_version_);
+            }
+            else
+            {
+                assert(req.Payload() != nullptr);
+                schema_rec = static_cast<CatalogRecord *>(req.Payload());
+                catalog_entry =
+                    shard_->GetCatalog(table_key->Name(), req.NodeGroupId());
+            }
+            break;
+        }
         case PostWriteType::PostCommit:
         {
+            const TableName &tbl_name = table_key->Name();
+            std::shared_ptr<ReaderWriterObject<TableSchema>> schema_cntl =
+                shard_->FindSchemaCntl(tbl_name);
+            if (schema_cntl != nullptr)
+            {
+                schema_cntl->FinishWriter();
+                shard_->DeleteSchemaCntl(tbl_name);
+            }
+
             catalog_entry =
                 shard_->GetCatalog(table_key->Name(), req.NodeGroupId());
-            if (catalog_entry == nullptr)
-            {
-                req.Result()->SetFinished();
-                req.SetDecodedPayload(nullptr);
-                return true;
-            }
 
             if (req.CommitTs() == TransactionOperation::tx_op_failed_ts_)
             {
@@ -453,7 +581,8 @@ public:
                             // Clean up table ranges for new sk.
                             const TableName index_range_name{
                                 new_index_name.StringView(),
-                                TableType::RangePartition};
+                                TableType::RangePartition,
+                                new_index_name.Engine()};
                             shard_->DropCcm(index_range_name,
                                             req.NodeGroupId());
 #endif
@@ -479,10 +608,10 @@ public:
                     catalog_entry->RejectDirtySchema();
                 }
 
-                if (cce_ptr->payload_)
+                if (cce_ptr->payload_.cur_payload_)
                 {
-                    cce_ptr->payload_->ClearDirtySchema();
-                    cce_ptr->payload_->SetDirtySchemaImage("");
+                    cce_ptr->payload_.cur_payload_->ClearDirtySchema();
+                    cce_ptr->payload_.cur_payload_->SetDirtySchemaImage("");
                 }
                 return TemplateCcMap::Execute(req);
             }
@@ -534,7 +663,8 @@ public:
                         TxKey(), init_partition_id, req.CommitTs());
 
                     TableName range_table_name(table_name_view,
-                                               TableType::RangePartition);
+                                               TableType::RangePartition,
+                                               table_key->Name().Engine());
                     shard_->local_shards_.InitTableRanges(range_table_name,
                                                           range_init_vec,
                                                           req.NodeGroupId(),
@@ -546,7 +676,9 @@ public:
                     {
                         // Create range table for each sk index
                         TableName index_range_table_name{
-                            index_name.StringView(), TableType::RangePartition};
+                            index_name.StringView(),
+                            TableType::RangePartition,
+                            index_name.Engine()};
 
                         size_t tbl_name_hash = std::hash<std::string_view>()(
                             index_name.StringView());
@@ -642,6 +774,9 @@ public:
                     forward_req->set_table_type(
                         remote::ToRemoteType::ConvertTableType(
                             table_name_.Type()));
+                    forward_req->set_table_engine(
+                        remote::ToRemoteType::ConvertTableEngine(
+                            table_name_.Engine()));
                     forward_req->set_key_shard_code(cc_ng_id_ << 10);
                     std::string key_str;
                     table_key->Serialize(key_str);
@@ -682,7 +817,8 @@ public:
 #ifdef RANGE_PARTITION_ENABLED
                 // Drop range table if exist
                 TableName range_table_name{table_key->Name().StringView(),
-                                           TableType::RangePartition};
+                                           TableType::RangePartition,
+                                           table_key->Name().Engine()};
 #ifndef ON_KEY_OBJECT
                 shard_->DropCcm(range_table_name, req.NodeGroupId());
 #else
@@ -700,7 +836,9 @@ public:
 #ifdef RANGE_PARTITION_ENABLED
                         // Drop range table if exist
                         TableName index_range_table_name{
-                            index_name.StringView(), TableType::RangePartition};
+                            index_name.StringView(),
+                            TableType::RangePartition,
+                            index_name.Engine()};
                         shard_->DropCcm(index_range_table_name,
                                         req.NodeGroupId());
 #endif
@@ -738,7 +876,8 @@ public:
 #ifdef RANGE_PARTITION_ENABLED
                 // Update pk range table if exist.
                 TableName base_range_table_name{table_key->Name().StringView(),
-                                                TableType::RangePartition};
+                                                TableType::RangePartition,
+                                                table_key->Name().Engine()};
                 auto ranges = shard_->GetTableRangesForATable(
                     base_range_table_name, req.NodeGroupId());
                 if (ranges != nullptr)
@@ -776,7 +915,8 @@ public:
                             // Update current sk range table if exist.
                             TableName index_range_table_name{
                                 old_index_name.StringView(),
-                                TableType::RangePartition};
+                                TableType::RangePartition,
+                                old_index_name.Engine()};
                             auto ranges = shard_->GetTableRangesForATable(
                                 index_range_table_name, req.NodeGroupId());
                             if (ranges != nullptr)
@@ -801,7 +941,8 @@ public:
                             // Drop range table if exist
                             TableName old_index_range_table_name{
                                 old_index_name.StringView(),
-                                TableType::RangePartition};
+                                TableType::RangePartition,
+                                old_index_name.Engine()};
                             shard_->DropCcm(old_index_range_table_name,
                                             req.NodeGroupId());
 #endif
@@ -814,7 +955,8 @@ public:
                              catalog_entry->dirty_schema_version_,
                              cce_ptr->GetKeyLock());
         }
-        else if (req.CommitType() == PostWriteType::PrepareCommit &&
+        else if ((req.CommitType() == PostWriteType::PrepareCommit ||
+                  req.CommitType() == PostWriteType::UpdateDirty) &&
                  catalog_entry->dirty_schema_version_ > 0)
         {
             // Prepare commit. For certain schema operations, e.g., create
@@ -844,18 +986,24 @@ public:
                     {
                         // In this step, just create cc map for new sk.
                         // We will update current sk ccmap in PostCommit.
-                        shard_->CreateOrUpdateSkCcMap(
-                            new_index_name, new_schema, req.NodeGroupId());
+                        bool is_create =
+                            req.CommitType() == PostWriteType::PrepareCommit;
+                        shard_->CreateOrUpdateSkCcMap(new_index_name,
+                                                      new_schema,
+                                                      req.NodeGroupId(),
+                                                      is_create);
 
                         // New sk range cc map should use the dirty schema
                         const TableName new_index_range_name{
                             new_index_name.StringView(),
-                            TableType::RangePartition};
+                            TableType::RangePartition,
+                            new_index_name.Engine()};
                         shard_->CreateOrUpdateRangeCcMap(
                             new_index_range_name,
                             new_schema,
                             req.NodeGroupId(),
-                            catalog_entry->dirty_schema_version_);
+                            catalog_entry->dirty_schema_version_,
+                            is_create);
                     }
                 }
             }
@@ -872,7 +1020,8 @@ public:
                 shard_->CleanTableStatistics(table_key->Name(), cc_ng_id_);
 #ifdef RANGE_PARTITION_ENABLED
                 TableName range_table_name{table_key->Name().StringView(),
-                                           TableType::RangePartition};
+                                           TableType::RangePartition,
+                                           table_key->Name().Engine()};
                 shard_->CleanTableRange(range_table_name, req.NodeGroupId());
                 if (old_schema != nullptr)
                 {
@@ -882,14 +1031,15 @@ public:
                     {
                         // Drop range table if exist
                         TableName index_range_table_name{
-                            index_name.StringView(), TableType::RangePartition};
+                            index_name.StringView(),
+                            TableType::RangePartition,
+                            index_name.Engine()};
                         shard_->CleanTableRange(index_range_table_name,
                                                 req.NodeGroupId());
                     }
                 }
 #endif
             }
-
             else if (req.OpType() == OperationType::AddIndex ||
                      req.OpType() == OperationType::DropIndex)
             {
@@ -907,7 +1057,8 @@ public:
 #ifdef RANGE_PARTITION_ENABLED
                         TableName old_index_range_table_name{
                             old_index_name.StringView(),
-                            TableType::RangePartition};
+                            TableType::RangePartition,
+                            old_index_name.Engine()};
                         shard_->CleanTableRange(old_index_range_table_name,
                                                 req.NodeGroupId());
 #endif
@@ -917,7 +1068,7 @@ public:
                     }
                 }
             }
-            shard_->CommitDirtyCatalog(table_key->Name(), req.NodeGroupId());
+            catalog_entry->CommitDirtySchema();
         }
 
         return TemplateCcMap::Execute(req);
@@ -968,7 +1119,7 @@ public:
             static_cast<const CatalogKey *>(req.Key());
         bool emplace = false;
         Iterator it = FindEmplace(*table_key, emplace, true, false);
-        CcEntry<CatalogKey, CatalogRecord> *cce = it->second;
+        CcEntry<CatalogKey, CatalogRecord, true, false> *cce = it->second;
         if (cce->PayloadStatus() == RecordStatus::Unknown)
         {
             const CatalogEntry *catalog_entry =
@@ -998,10 +1149,12 @@ public:
                     }
 
                     // upload catalog record
-                    cce->payload_ = std::make_unique<CatalogRecord>();
-                    cce->payload_->Set(catalog_entry->schema_,
-                                       catalog_entry->dirty_schema_,
-                                       catalog_entry->schema_version_);
+                    cce->payload_.PassInCurrentPayload(
+                        std::make_unique<CatalogRecord>());
+                    cce->payload_.cur_payload_->Set(
+                        catalog_entry->schema_,
+                        catalog_entry->dirty_schema_,
+                        catalog_entry->schema_version_);
                     cce->SetCommitTsPayloadStatus(
                         catalog_entry->schema_version_, RecordStatus::Normal);
                 }
@@ -1019,7 +1172,38 @@ public:
             }
         }
 
-        return TemplateCcMap::Execute(req);
+        // Increase ref cnt so that when setFinish is called in
+        // TemplateCcMap::Execute, the waiters cannot be woken up. We still need
+        // to access sch_rec which is owned by the caller.
+        CcHandlerResult<ReadKeyResult> *hd_res = req.Result();
+        hd_res->SetRefCnt(2);
+        bool success = TemplateCcMap::Execute(req);
+
+        ReadKeyResult &result = req.Result()->Value();
+        CatalogRecord *sch_rec = static_cast<CatalogRecord *>(req.Record());
+
+        // Returns the reader-writer control block to runtime when there is no
+        // writer and no pending dirty schema. The control block provides a fast
+        // path for runtime to keep a cache of the schema and to coordinate
+        // modifications of the schema.
+        if (success && shard_->IsNative(ng_id) &&
+            result.rec_status_ == RecordStatus::Normal &&
+            sch_rec->DirtySchema() == nullptr)
+        {
+            std::shared_ptr<ReaderWriterObject<TableSchema>> sch_cntl =
+                shard_->FindEmplaceSchemaCntl(table_key->Name());
+            if (sch_cntl->HasNoWriter())
+            {
+                if (sch_cntl->GetObjectPtr() == nullptr)
+                {
+                    sch_cntl->SetObject(sch_rec->CopySchema());
+                }
+                sch_rec->SetSchemaCntl(std::move(sch_cntl));
+            }
+        }
+        hd_res->SetFinished();
+
+        return success;
     }
 
     bool Execute(ReplayLogCc &req) override
@@ -1055,14 +1239,16 @@ public:
         // Need to parse the string if not include table type in protobuf
         TableType table_type = ::txlog::ToLocalType::ConvertCcTableType(
             schema_op_msg.table_type());
+        TableEngine table_engine = ::txlog::ToLocalType::ConvertTableEngine(
+            schema_op_msg.table_engine());
         std::string_view table_name_sv{schema_op_msg.table_name_str()};
-        TableName table_name{table_name_sv, table_type};
+        TableName table_name{table_name_sv, table_type, table_engine};
 
         if (shard_->core_id_ == 0)
         {
             CatalogKey table_key(table_name);
             Iterator it = Find(table_key);
-            CcEntry<CatalogKey, CatalogRecord> *cce = it->second;
+            CcEntry<CatalogKey, CatalogRecord, true, false> *cce = it->second;
             if (cce != nullptr)
             {
                 req.SetFinish();
@@ -1149,7 +1335,7 @@ public:
 
             if (catalog_entry->schema_)
             {
-#ifndef ON_KEY_OBJECT
+#ifdef RANGE_PARTITION_ENABLED
                 if (!shard_->LoadRangesAndStatisticsNx(
                         catalog_entry->schema_.get(),
                         req.NodeGroupId(),
@@ -1175,7 +1361,8 @@ public:
                         {
                             TableName index_range_name{
                                 new_index_name.StringView(),
-                                TableType::RangePartition};
+                                TableType::RangePartition,
+                                new_index_name.Engine()};
                             auto ranges = shard_->GetTableRangesForATable(
                                 index_range_name, req.NodeGroupId());
                             if (ranges == nullptr)
@@ -1224,7 +1411,8 @@ public:
 #ifdef RANGE_PARTITION_ENABLED
                 // Pk range table ccmap
                 const TableName base_range_name{table_name.StringView(),
-                                                TableType::RangePartition};
+                                                TableType::RangePartition,
+                                                table_name.Engine()};
                 shard_->CreateOrUpdateRangeCcMap(
                     base_range_name,
                     old_schema,
@@ -1242,7 +1430,9 @@ public:
 #ifdef RANGE_PARTITION_ENABLED
                     // old sk range table ccmap
                     const TableName old_index_range_name{
-                        old_index_name.StringView(), TableType::RangePartition};
+                        old_index_name.StringView(),
+                        TableType::RangePartition,
+                        old_index_name.Engine()};
                     shard_->CreateOrUpdateRangeCcMap(
                         old_index_range_name,
                         old_schema,
@@ -1267,7 +1457,8 @@ public:
                         // New sk range cc maps should use the dirty schema
                         const TableName new_index_range_name{
                             new_index_name.StringView(),
-                            TableType::RangePartition};
+                            TableType::RangePartition,
+                            new_index_name.Engine()};
                         shard_->CreateOrUpdateRangeCcMap(
                             new_index_range_name,
                             new_schema,
@@ -1281,8 +1472,8 @@ public:
 
         CatalogKey table_key(table_name);
         Iterator it = FindEmplace(table_key);
-        CcEntry<CatalogKey, CatalogRecord> *cce = it->second;
-        CcPage<CatalogKey, CatalogRecord> *ccp = it.GetPage();
+        CcEntry<CatalogKey, CatalogRecord, true, false> *cce = it->second;
+        CcPage<CatalogKey, CatalogRecord, true, false> *ccp = it.GetPage();
 
         if (cce == nullptr)
         {
@@ -1293,7 +1484,8 @@ public:
         // 3. Replay the table write intent/lock.
         LockType lock_type = LockType::NoLock;
         TableName base_table_name(table_name.GetBaseTableNameSV(),
-                                  TableType::Primary);
+                                  TableType::Primary,
+                                  table_name.Engine());
         OperationType op_type =
             static_cast<OperationType>(schema_op_msg.table_op().op_type());
         switch (schema_op_msg.stage())
@@ -1347,6 +1539,7 @@ public:
         if (lock_type == LockType::WriteIntent)
         {
             auto lock_pair = AcquireCceKeyLock(cce,
+                                               cce->CommitTs(),
                                                ccp,
                                                cce->PayloadStatus(),
                                                &req,
@@ -1367,6 +1560,7 @@ public:
         else if (lock_type == LockType::WriteLock)
         {
             auto lock_pair = AcquireCceKeyLock(cce,
+                                               cce->CommitTs(),
                                                ccp,
                                                cce->PayloadStatus(),
                                                &req,
@@ -1387,13 +1581,14 @@ public:
             (void) lock_pair;
         }
 
-        if (cce->payload_ == nullptr)
+        if (cce->payload_.cur_payload_ == nullptr)
         {
-            cce->payload_ = std::make_unique<CatalogRecord>();
+            cce->payload_.PassInCurrentPayload(
+                std::make_unique<CatalogRecord>());
         }
-        cce->payload_->Set(catalog_entry->schema_,
-                           catalog_entry->dirty_schema_,
-                           catalog_entry->schema_version_);
+        cce->payload_.cur_payload_->Set(catalog_entry->schema_,
+                                        catalog_entry->dirty_schema_,
+                                        catalog_entry->schema_version_);
 
         if (shard_->core_id_ < shard_->core_cnt_ - 1)
         {
@@ -1444,10 +1639,11 @@ public:
                    << ", ng_samples: " << req.SamplePool()->samples_size();
 
         TableName base_table_name(table_name.GetBaseTableNameSV(),
-                                  TableType::Primary);
+                                  TableType::Primary,
+                                  table_name.Engine());
         CatalogKey table_key(base_table_name);
         Iterator it = FindEmplace(table_key);
-        CcEntry<CatalogKey, CatalogRecord> *cce = it->second;
+        CcEntry<CatalogKey, CatalogRecord, true, false> *cce = it->second;
         if (cce->PayloadStatus() == RecordStatus::Unknown)
         {
             const CatalogEntry *catalog_entry =
@@ -1456,7 +1652,7 @@ public:
             {
                 if (catalog_entry->schema_ != nullptr)
                 {
-#ifndef ON_KEY_OBJECT
+#ifdef RANGE_PARTITION_ENABLED
                     // Initialize table statistics before create ccmap.
                     if (!shard_->LoadRangesAndStatisticsNx(
                             catalog_entry->schema_.get(),
@@ -1469,10 +1665,12 @@ public:
 #endif
 
                     // upload catalog record
-                    cce->payload_ = std::make_unique<CatalogRecord>();
-                    cce->payload_->Set(catalog_entry->schema_,
-                                       catalog_entry->dirty_schema_,
-                                       catalog_entry->schema_version_);
+                    cce->payload_.PassInCurrentPayload(
+                        std::make_unique<CatalogRecord>());
+                    cce->payload_.cur_payload_->Set(
+                        catalog_entry->schema_,
+                        catalog_entry->dirty_schema_,
+                        catalog_entry->schema_version_);
                     cce->SetCommitTsPayloadStatus(
                         catalog_entry->schema_version_, RecordStatus::Normal);
                 }
@@ -1506,16 +1704,17 @@ public:
             assert(statistics_entry && statistics_entry->statistics_);
             const auto table_schema = [&req, cce]() -> const TableSchema *
             {
-                if (cce->payload_->Schema() &&
-                    cce->payload_->Schema()->Version() == req.SchemaVersion())
+                if (cce->payload_.cur_payload_->Schema() &&
+                    cce->payload_.cur_payload_->Schema()->Version() ==
+                        req.SchemaVersion())
                 {
-                    return cce->payload_->Schema();
+                    return cce->payload_.cur_payload_->Schema();
                 }
-                else if (cce->payload_->DirtySchema() &&
-                         cce->payload_->DirtySchema()->Version() ==
+                else if (cce->payload_.cur_payload_->DirtySchema() &&
+                         cce->payload_.cur_payload_->DirtySchema()->Version() ==
                              req.SchemaVersion())
                 {
-                    return cce->payload_->DirtySchema();
+                    return cce->payload_.cur_payload_->DirtySchema();
                 }
                 else
                 {
@@ -1547,13 +1746,14 @@ public:
         decoded_key->Deserialize(key_str->data(), offset, KeySchema());
         table_key = decoded_key.get();
 
-        CcEntry<CatalogKey, CatalogRecord> *cce;
-        CcPage<CatalogKey, CatalogRecord> *ccp;
+        CcEntry<CatalogKey, CatalogRecord, true, false> *cce;
+        CcPage<CatalogKey, CatalogRecord, true, false> *ccp;
         if (req.CcePtr())
         {
             cce =
-                static_cast<CcEntry<CatalogKey, CatalogRecord> *>(req.CcePtr());
-            ccp = static_cast<CcPage<CatalogKey, CatalogRecord> *>(
+                static_cast<CcEntry<CatalogKey, CatalogRecord, true, false> *>(
+                    req.CcePtr());
+            ccp = static_cast<CcPage<CatalogKey, CatalogRecord, true, false> *>(
                 cce->GetCcPage());
         }
         else
@@ -1574,10 +1774,12 @@ public:
                 if (catalog_entry->schema_ != nullptr)
                 {
                     // upload catalog record
-                    cce->payload_ = std::make_unique<CatalogRecord>();
-                    cce->payload_->Set(catalog_entry->schema_,
-                                       catalog_entry->dirty_schema_,
-                                       catalog_entry->schema_version_);
+                    cce->payload_.PassInCurrentPayload(
+                        std::make_unique<CatalogRecord>());
+                    cce->payload_.cur_payload_->Set(
+                        catalog_entry->schema_,
+                        catalog_entry->dirty_schema_,
+                        catalog_entry->schema_version_);
                     // update commit ts
                     cce->SetCommitTsPayloadStatus(
                         catalog_entry->schema_version_, RecordStatus::Normal);
@@ -1645,6 +1847,7 @@ public:
                 // resumed req.
                 std::tie(acquired_lock, err_code) = LockHandleForResumedRequest(
                     cce,
+                    cce->CommitTs(),
                     cce->PayloadStatus(),
                     &req,
                     Sharder::Instance().NativeNodeGroup(),
@@ -1663,6 +1866,7 @@ public:
             {
                 std::tie(acquired_lock, err_code) =
                     AcquireCceKeyLock(cce,
+                                      cce->CommitTs(),
                                       ccp,
                                       cce->PayloadStatus(),
                                       &req,
@@ -1797,13 +2001,15 @@ public:
             // Install new schema image in record and release the lock
             if (cce->PayloadStatus() == RecordStatus::Unknown)
             {
-                cce->payload_ = std::make_unique<CatalogRecord>();
+                cce->payload_.PassInCurrentPayload(
+                    std::make_unique<CatalogRecord>());
             }
             CatalogEntry *catalog_entry =
                 shard_->GetCatalog(table_key->Name(), req.NodeGroupId());
             catalog_entry->CommitDirtySchema();
 
-            cce->payload_->Set(catalog_entry->schema_, nullptr, commit_ts);
+            cce->payload_.cur_payload_->Set(
+                catalog_entry->schema_, nullptr, commit_ts);
             cce->SetCommitTsPayloadStatus(commit_ts, RecordStatus::Normal);
             // clean up data in ccm
             CcMap *ccm = shard_->GetCcm(table_key->Name(), cc_ng_id_);
@@ -1855,8 +2061,9 @@ public:
         const TableName &base_table_name = *req.invalidate_table_name_;
         CatalogKey catalog_key(base_table_name);
         Iterator it =
-            TemplateCcMap<CatalogKey, CatalogRecord>::Find(catalog_key);
-        CcEntry<CatalogKey, CatalogRecord> *cce = it->second;
+            TemplateCcMap<CatalogKey, CatalogRecord, true, false>::Find(
+                catalog_key);
+        CcEntry<CatalogKey, CatalogRecord, true, false> *cce = it->second;
         assert(cce->GetKeyLock()->HasWriteLock(req.Txn()));
 
         if (cce->PayloadStatus() == RecordStatus::Unknown)
@@ -1867,10 +2074,11 @@ public:
             {
                 assert(catalog_entry->schema_);
                 // upload catalog record
-                cce->payload_ = std::make_unique<CatalogRecord>();
-                cce->payload_->Set(catalog_entry->schema_,
-                                   catalog_entry->dirty_schema_,
-                                   catalog_entry->schema_version_);
+                cce->payload_.PassInCurrentPayload(
+                    std::make_unique<CatalogRecord>());
+                cce->payload_.cur_payload_->Set(catalog_entry->schema_,
+                                                catalog_entry->dirty_schema_,
+                                                catalog_entry->schema_version_);
                 cce->SetCommitTsPayloadStatus(catalog_entry->schema_version_,
                                               RecordStatus::Normal);
             }
@@ -1882,18 +2090,20 @@ public:
             }
         }
 
-        CatalogRecord *catalog_rec = cce->payload_.get();
+        CatalogRecord *catalog_rec = cce->payload_.cur_payload_.get();
         const TableSchema *table_schema = catalog_rec->Schema();
 
         TableName base_range_name(base_table_name.StringView(),
-                                  TableType::RangePartition);
+                                  TableType::RangePartition,
+                                  base_table_name.Engine());
         shard_->DropCcm(base_table_name, cc_ng_id_);
         shard_->DropCcm(base_range_name, cc_ng_id_);
 
         for (TableName index_table_name : table_schema->IndexNames())
         {
             TableName index_range_name(index_table_name.StringView(),
-                                       TableType::RangePartition);
+                                       TableType::RangePartition,
+                                       index_table_name.Engine());
             shard_->DropCcm(index_table_name, cc_ng_id_);
             shard_->DropCcm(index_range_name, cc_ng_id_);
         }
@@ -1912,7 +2122,8 @@ public:
             for (TableName index_table_name : table_schema->IndexNames())
             {
                 TableName index_range_name(index_table_name.StringView(),
-                                           TableType::RangePartition);
+                                           TableType::RangePartition,
+                                           index_table_name.Engine());
                 shard_->CleanTableRange(index_range_name, cc_ng_id_);
                 shard_->CleanTableStatistics(index_table_name, cc_ng_id_);
             }
@@ -1940,13 +2151,17 @@ public:
         auto lock_it = table_locks_.find(table_name.StringView());
         if (lock_it == table_locks_.end())
         {
-            CatalogKey table_key{txservice::TableName{
-                table_name.StringView(), txservice::TableType::Primary}};
+            CatalogKey table_key{
+                txservice::TableName{table_name.StringView(),
+                                     txservice::TableType::Primary,
+                                     table_name.Engine()}};
             TxKey catalog_tx_key(&table_key);
             auto it = FindEmplace(table_key);
 
-            CcEntry<CatalogKey, CatalogRecord> *catalog_cce = it->second;
-            CcPage<CatalogKey, CatalogRecord> *catalog_ccp = it.GetPage();
+            CcEntry<CatalogKey, CatalogRecord, true, false> *catalog_cce =
+                it->second;
+            CcPage<CatalogKey, CatalogRecord, true, false> *catalog_ccp =
+                it.GetPage();
 
             const CatalogEntry *catalog_entry =
                 shard_->GetCatalog(table_key.Name(), node_group_id);
@@ -1978,10 +2193,12 @@ public:
             {
                 assert(schema_version == new_lock_it->second.second);
                 // upload catalog record
-                catalog_cce->payload_ = std::make_unique<CatalogRecord>();
-                catalog_cce->payload_->Set(catalog_entry->schema_,
-                                           catalog_entry->dirty_schema_,
-                                           schema_version);
+                catalog_cce->payload_.PassInCurrentPayload(
+                    std::make_unique<CatalogRecord>());
+                catalog_cce->payload_.cur_payload_->Set(
+                    catalog_entry->schema_,
+                    catalog_entry->dirty_schema_,
+                    schema_version);
                 catalog_cce->SetCommitTsPayloadStatus(schema_version,
                                                       RecordStatus::Normal);
             }

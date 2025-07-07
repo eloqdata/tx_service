@@ -36,6 +36,7 @@
 #include "range_slice.h"
 #include "sharder.h"
 #include "statistics.h"
+#include "tx_id.h"
 #include "tx_record.h"
 #include "tx_service.h"
 #include "type.h"
@@ -75,7 +76,8 @@ FetchCatalogCc::FetchCatalogCc(const TableName &table_name,
     : FetchCc(ccs, cc_ng_id, cc_ng_term),
       table_name_(table_name.StringView().data(),
                   table_name.StringView().size(),
-                  table_name.Type()),
+                  table_name.Type(),
+                  table_name.Engine()),
       fetch_from_primary_(fetch_from_primary)
 {
 }
@@ -184,7 +186,8 @@ FetchTableStatisticsCc::FetchTableStatisticsCc(const TableName &table_name,
     : FetchCc(ccs, cc_ng_id, cc_ng_term),
       table_name_(table_name.StringView().data(),
                   table_name.StringView().size(),
-                  table_name.Type())
+                  table_name.Type(),
+                  table_name.Engine())
 {
 }
 
@@ -331,7 +334,9 @@ void FetchRangeSlicesReq::SetFinish(CcErrorCode err)
         {
             // Get estiamte record size for key cache
             auto schema = shards->GetSharedTableSchema(
-                TableName(table_name_.GetBaseTableNameSV(), TableType::Primary),
+                TableName(table_name_.GetBaseTableNameSV(),
+                          TableType::Primary,
+                          table_name_.Engine()),
                 cc_ng_id_);
             auto stats = schema->StatisticsObject();
             if (stats)
@@ -409,6 +414,7 @@ bool ClearCcNodeGroup::Execute(CcShard &ccs)
     if (ccs.IsNative(cc_ng_id_))
     {
         ccs.ClearActvieSiTxs();
+        ccs.ClearNativeSchemaCntl();
     }
 
     std::unique_lock lk(mux_);
@@ -432,34 +438,7 @@ bool ClearCcNodeGroup::Execute(CcShard &ccs)
     return false;
 }
 
-void LoadRangeSliceRequest::SetFinish()
-{
-    CODE_FAULT_INJECTOR("LoadRangeSliceRequest_SetFinish_Error", {
-        failed_ = true;
-        slice_data_.clear();
-        slice_size_ = 0;
-        snapshot_ts_ = 0;
-    });
-
-    if (post_lambda_)
-    {
-        post_lambda_(this);
-    }
-    if (metrics::enable_kv_metrics)
-    {
-        metrics::kv_meter->Collect(metrics::NAME_KV_LOAD_SLICE_TOTAL, 1);
-        metrics::kv_meter->CollectDuration(metrics::NAME_KV_LOAD_SLICE_DURATION,
-                                           start_);
-    }
-}
-
-void LoadRangeSliceRequest::SetError()
-{
-    failed_ = true;
-    SetFinish();
-}
-
-void InitKeyCacheCc::SetFinish(uint16_t core, bool succ)
+bool InitKeyCacheCc::SetFinish(uint16_t core, bool succ)
 {
     if (succ)
     {
@@ -469,11 +448,17 @@ void InitKeyCacheCc::SetFinish(uint16_t core, bool succ)
 
     if (unfinished_cnt_.fetch_sub(1, std::memory_order_relaxed) == 1)
     {
+        pause_pos_.clear();
+
         // Unpin the slice.
         range_->UnpinSlice(slice_, true);
         std::unique_lock<std::mutex> slice_lk(slice_->slice_mux_);
         slice_->init_key_cache_cc_ = nullptr;
+
+        return true;
     }
+
+    return false;
 }
 
 bool InitKeyCacheCc::Execute(CcShard &ccs)
@@ -482,8 +467,7 @@ bool InitKeyCacheCc::Execute(CcShard &ccs)
     int64_t cc_ng_term = Sharder::Instance().LeaderTerm(ng_id_);
     if (std::max(cc_ng_candid_term, cc_ng_term) != term_)
     {
-        SetFinish(ccs.core_id_, false);
-        return false;
+        return SetFinish(ccs.core_id_, false);
     }
 
     CcMap *ccm = ccs.GetCcm(tbl_name_, ng_id_);
@@ -491,12 +475,10 @@ bool InitKeyCacheCc::Execute(CcShard &ccs)
     {
         // ccm is empty when slice is fully cached. That means this slice is
         // empty on this core.
-        SetFinish(ccs.core_id_, true);
+        return SetFinish(ccs.core_id_, true);
     }
 
-    ccm->Execute(*this);
-
-    return false;
+    return ccm->Execute(*this);
 }
 StoreRange &InitKeyCacheCc::Range()
 {
@@ -518,58 +500,81 @@ TxKey &InitKeyCacheCc::PauseKey(uint16_t core_id)
     return pause_pos_[core_id];
 }
 
-FillStoreSliceCc::FillStoreSliceCc(const TableName &table_name,
-                                   NodeGroupId cc_ng_id,
-                                   int64_t cc_ng_term,
-                                   const KeySchema *key_schema,
-                                   const RecordSchema *rec_schema,
-                                   uint64_t schema_ts,
-                                   StoreSlice &slice,
-                                   StoreRange &range,
-                                   bool force_load,
-                                   uint64_t snapshot_ts,
-                                   LocalCcShards &cc_shards)
-    : table_name_(&table_name),
-      cc_ng_id_(cc_ng_id),
-      cc_ng_term_(cc_ng_term),
-      force_load_(force_load),
-      finish_cnt_(0),
-      next_idxs_(cc_shards.Count(), 0),
-      partitioned_slice_data_(cc_shards.Count()),
-      load_slice_req_(table_name,
-                      key_schema,
-                      rec_schema,
-                      schema_ts,
-                      slice.StartTxKey(),
-                      slice.EndTxKey(),
-                      snapshot_ts,
-                      cc_ng_id,
-                      cc_ng_term),
-      range_slice_(slice),
-      range_(range),
-      local_cc_shards_(cc_shards)
+void FillStoreSliceCc::Reset(const TableName &table_name,
+                             NodeGroupId cc_ng_id,
+                             int64_t cc_ng_term,
+                             const KeySchema *key_schema,
+                             const RecordSchema *rec_schema,
+                             uint64_t schema_ts,
+                             StoreSlice *slice,
+                             StoreRange *range,
+                             bool force_load,
+                             uint64_t snapshot_ts,
+                             LocalCcShards &cc_shards)
 {
-    load_slice_req_.post_lambda_ = [this](LoadRangeSliceRequest *req)
+    assert(slice != nullptr);
+    assert(range != nullptr);
+
+    table_name_ = &table_name;
+    cc_ng_id_ = cc_ng_id;
+    cc_ng_term_ = cc_ng_term;
+    force_load_ = force_load;
+    finish_cnt_ = 0;
+    core_cnt_ = cc_shards.Count();
+
+    next_idxs_.clear();
+    next_idxs_.resize(cc_shards.Count(), 0);
+
+    partitioned_slice_data_.clear();
+    partitioned_slice_data_.resize(cc_shards.Count());
+
+    range_slice_ = slice;
+    range_ = range;
+
+    key_schema_ = key_schema;
+    rec_schema_ = rec_schema;
+    start_key_ = slice->StartTxKey();
+    end_key_ = slice->EndTxKey();
+    schema_ts_ = schema_ts;
+    snapshot_ts_ = snapshot_ts;
+    cc_ng_id_ = cc_ng_id;
+    cc_ng_term_ = cc_ng_term;
+    slice_size_ = 0;
+    rec_cnt_ = 0;
+}
+
+void FillStoreSliceCc::SetKvFinish(bool success)
+{
+    CODE_FAULT_INJECTOR("LoadRangeSliceRequest_SetFinish_Error", {
+        success = false;
+        partitioned_slice_data_.clear();
+        slice_size_ = 0;
+        snapshot_ts_ = 0;
+    });
+
+    if (metrics::enable_kv_metrics)
     {
-        // Update the slice's last load ts.
-        uint64_t cur_ts = LocalCcShards::ClockTs();
-        this->range_slice_.UpdateLastLoadTs(cur_ts);
-        if (req->IsError())
-        {
-            TerminateFilling();
-        }
-        else
-        {
-            for (SliceDataItem &data_item : req->SliceData())
-            {
-                AddDataItem(std::move(data_item.key_),
-                            std::move(data_item.record_),
-                            data_item.version_ts_,
-                            data_item.is_deleted_);
-            }
-            StartFilling();
-        }
-    };
+        metrics::kv_meter->Collect(metrics::NAME_KV_LOAD_SLICE_TOTAL, 1);
+        metrics::kv_meter->CollectDuration(metrics::NAME_KV_LOAD_SLICE_DURATION,
+                                           start_);
+    }
+
+    // Update the slice's last load ts.
+    uint64_t cur_ts = LocalCcShards::ClockTs();
+    range_slice_->UpdateLastLoadTs(cur_ts);
+    if (success)
+    {
+        StartFilling();
+    }
+    else
+    {
+        // We need to abort and recycle this request explicitly if
+        // `FillStoreSliceCc::SetKvFinished` called by
+        // `DataStoreHandler::OnLoadRangeSlice()`. Because this request already
+        // resides in the `slice.cc_queue` at this point.
+        TerminateFilling();
+        Free();
+    }
 }
 
 bool FillStoreSliceCc::Execute(CcShard &ccs)
@@ -579,8 +584,7 @@ bool FillStoreSliceCc::Execute(CcShard &ccs)
     int64_t cc_ng_term = Sharder::Instance().LeaderTerm(cc_ng_id_);
     if (std::max(cc_ng_candid_term, cc_ng_term) != cc_ng_term_)
     {
-        SetError(CcErrorCode::NG_TERM_CHANGED);
-        return false;
+        return SetError(CcErrorCode::NG_TERM_CHANGED);
     }
 
     CcMap *ccm = ccs.GetCcm(*table_name_, cc_ng_id_);
@@ -611,13 +615,12 @@ bool FillStoreSliceCc::Execute(CcShard &ccs)
             // The table's schema is not available yet. Cannot initialize the cc
             // map. The request will be re-executed after the schema is fetched
             // from the data store.
+
             return false;
         }
     }
 
-    ccm->Execute(*this);
-
-    return false;
+    return ccm->Execute(*this);
 }
 
 void FillStoreSliceCc::AddDataItem(
@@ -626,17 +629,25 @@ void FillStoreSliceCc::AddDataItem(
     uint64_t version_ts,
     bool is_deleted)
 {
+    slice_size_ += key.Size();
+    slice_size_ += record->Size();
+
+    if (!is_deleted)
+    {
+        rec_cnt_++;
+    }
+
     size_t hash = key.Hash();
     // Uses the lower 10 bits of the hash code to shard the key across
     // CPU cores at this node.
     uint16_t core_code = hash & 0x3FF;
-    uint16_t core_id = core_code % local_cc_shards_.Count();
+    uint16_t core_id = core_code % core_cnt_;
 
     partitioned_slice_data_[core_id].emplace_back(
         std::move(key), std::move(record), version_ts, is_deleted);
 }
 
-void FillStoreSliceCc::SetFinish()
+bool FillStoreSliceCc::SetFinish(CcShard *cc_shard)
 {
     bool finish_all = false;
     CcErrorCode err_code;
@@ -644,7 +655,7 @@ void FillStoreSliceCc::SetFinish()
         std::lock_guard<std::mutex> lk(mux_);
         ++finish_cnt_;
 
-        if (finish_cnt_ == local_cc_shards_.Count())
+        if (finish_cnt_ == core_cnt_)
         {
             finish_all = true;
             err_code = err_code_;
@@ -659,12 +670,11 @@ void FillStoreSliceCc::SetFinish()
                 txservice_enable_key_cache && table_name_->IsBase();
             // Cache  the pointer since FillStoreSliceCc will be freed after
             // CommitLoading.
-            StoreRange *range = &range_;
-            StoreSlice *slice = &range_slice_;
+
             const TableName *tbl_name = table_name_;
             auto cc_ng_id = cc_ng_id_;
             auto cc_ng_term = cc_ng_term_;
-            if (init_key_cache && load_slice_req_.RecordCnt() > 0)
+            if (init_key_cache && rec_cnt_ > 0)
             {
                 LocalCcShards *shards = Sharder::Instance().GetLocalCcShards();
                 size_t estimate_rec_size = UINT64_MAX;
@@ -672,12 +682,12 @@ void FillStoreSliceCc::SetFinish()
                 // Get estiamte record size for key cache
                 auto schema = shards->GetSharedTableSchema(
                     TableName(table_name_->GetBaseTableNameSV(),
-                              TableType::Primary),
+                              TableType::Primary,
+                              table_name_->Engine()),
                     cc_ng_id_);
                 auto stats = schema->StatisticsObject();
-                assert(load_slice_req_.SliceSize() > 0);
-                estimate_rec_size =
-                    load_slice_req_.SliceSize() / load_slice_req_.RecordCnt();
+                assert(slice_size_ > 0);
+                estimate_rec_size = slice_size_ / rec_cnt_;
                 if (stats)
                 {
                     // Update estimate size in table stats with the loaded
@@ -685,20 +695,26 @@ void FillStoreSliceCc::SetFinish()
                     stats->SetEstimateRecordSize(estimate_rec_size);
                 }
             }
-            range_slice_.CommitLoading(range_, load_slice_req_.SliceSize());
+            range_slice_->CommitLoading(*range_, slice_size_);
             if (init_key_cache)
             {
-                slice->InitKeyCache(range, tbl_name, cc_ng_id, cc_ng_term);
+                range_slice_->InitKeyCache(
+                    cc_shard, range_, tbl_name, cc_ng_id, cc_ng_term);
             }
         }
         else
         {
-            range_slice_.SetLoadingError(range_, err_code);
+            range_slice_->SetLoadingError(*range_, err_code);
         }
+
+        next_idxs_.clear();
+        partitioned_slice_data_.clear();
     }
+
+    return finish_all;
 }
 
-void FillStoreSliceCc::SetError(CcErrorCode err_code)
+bool FillStoreSliceCc::SetError(CcErrorCode err_code)
 {
     bool finish_all = false;
     {
@@ -706,7 +722,7 @@ void FillStoreSliceCc::SetError(CcErrorCode err_code)
         ++finish_cnt_;
         err_code_ = err_code;
 
-        if (finish_cnt_ == local_cc_shards_.Count())
+        if (finish_cnt_ == core_cnt_)
         {
             finish_all = true;
         }
@@ -714,13 +730,18 @@ void FillStoreSliceCc::SetError(CcErrorCode err_code)
 
     if (finish_all)
     {
-        range_slice_.SetLoadingError(range_, err_code_);
+        range_slice_->SetLoadingError(*range_, err_code_);
+
+        next_idxs_.clear();
+        partitioned_slice_data_.clear();
     }
+
+    return finish_all;
 }
 
 void FillStoreSliceCc::StartFilling()
 {
-    range_slice_.StartLoading(this, local_cc_shards_);
+    range_slice_->StartLoading(this, *Sharder::Instance().GetLocalCcShards());
 }
 
 void FillStoreSliceCc::TerminateFilling()
@@ -728,28 +749,34 @@ void FillStoreSliceCc::TerminateFilling()
     // The method is called when there is an error of reading the data store.
     // The slice has not been filled into memory. So, the out-of-memory flag is
     // false.
-    range_slice_.SetLoadingError(range_, CcErrorCode::DATA_STORE_ERR);
+    range_slice_->SetLoadingError(*range_, CcErrorCode::DATA_STORE_ERR);
+    next_idxs_.clear();
+    partitioned_slice_data_.clear();
 }
 
 FetchRecordCc::FetchRecordCc(const TableName *tbl_name,
                              const TableSchema *tbl_schema,
                              TxKey tx_key,
                              LruEntry *cce,
-                             CcMap *ccm,
                              CcShard &ccs,
                              NodeGroupId cc_ng_id,
                              int64_t cc_ng_term,
                              int32_t range_id,
                              bool fetch_from_primary)
     : FetchCc(ccs, cc_ng_id, cc_ng_term),
-      table_name_(tbl_name),
+      table_name_(tbl_name->StringView(), tbl_name->Type(), tbl_name->Engine()),
       table_schema_(tbl_schema),
+#if defined(DATA_STORE_TYPE_ELOQDSS_ROCKSDB_CLOUD_S3) ||  \
+    defined(DATA_STORE_TYPE_ELOQDSS_ROCKSDB_CLOUD_GCS) || \
+    defined(DATA_STORE_TYPE_ELOQDSS_ELOQSTORE)
+      kv_table_name_(
+          table_schema_->GetKVCatalogInfo()->GetKvTableName(table_name_)),
+#endif
       tx_key_(std::move(tx_key)),
       cce_(cce),
-      ccm_(ccm),
+      lock_(cce->GetKeyGapLockAndExtraData()),
       range_id_(range_id),
-      fetch_from_primary_(fetch_from_primary),
-      retry_cnt_(0)
+      fetch_from_primary_(fetch_from_primary)
 {
 }
 
@@ -793,17 +820,23 @@ bool FetchRecordCc::Execute(CcShard &ccs)
                 req->AbortCcRequest(CcErrorCode::NG_TERM_CHANGED);
             }
         }
+        ccs.RemoveFetchRecordRequest(cce_);
+        return false;
     }
-    else if (cce_->PayloadStatus() != RecordStatus::Invalid)
+    if (handle_kv_res_)
     {
-        if (handle_resp_)
-        {
-            handle_resp_(ccs);
-        }
+        handle_kv_res_();
+        handle_kv_res_ = nullptr;
+    }
+    if (lock_->GetCcEntry() != nullptr)
+    {
+        assert(lock_->GetCcMap() != nullptr);
+        assert(lock_->GetCcEntry() == cce_);
         // if the referenced cce is already invalid, we do not need to care
         // about the fetch result and pending reqs since they are all
         // invalid.
-        bool succ = ccm_->BackFill(cce_, rec_ts_, rec_status_, rec_str_);
+        bool succ =
+            lock_->GetCcMap()->BackFill(cce_, rec_ts_, rec_status_, rec_str_);
         if (!succ)
         {
             // Retry if backfill failed.
@@ -828,6 +861,10 @@ bool FetchRecordCc::Execute(CcShard &ccs)
                 // term changes. retry if data store op failed.
                 if (req)
                 {
+                    // Release the pin added by the ccrequest.
+                    cce_->GetKeyGapLockAndExtraData()->ReleasePin();
+                    cce_->RecycleKeyLock(ccs);
+
                     req->AbortCcRequest(CcErrorCode::DATA_STORE_ERR);
                 }
             }
@@ -841,7 +878,6 @@ bool FetchRecordCc::Execute(CcShard &ccs)
 void FetchRecordCc::SetFinish(int err)
 {
     error_code_ = err;
-    retry_cnt_ = 0;
     ccs_.Enqueue(this);
 }
 
@@ -861,42 +897,66 @@ bool RunOnTxProcessorCc::Execute(CcShard &ccs)
 
 bool UpdateCceCkptTsCc::Execute(CcShard &ccs)
 {
-    int64_t ng_leader_term = Sharder::Instance().LeaderTerm(node_group_);
+    assert(indices_.count(ccs.core_id_) > 0);
+
+    auto &this_core_current_idxs = indices_[ccs.core_id_];
+    auto &this_core_cce_entries = cce_entries_[ccs.core_id_];
+    assert(this_core_current_idxs.first < this_core_cce_entries.size());
+
+    if (this_core_current_idxs.first >= this_core_cce_entries.size())
+    {
+        // Set finished. We don't care error code.
+        SetFinished();
+        return false;
+    }
+
+    int64_t ng_leader_term = Sharder::Instance().LeaderTerm(node_group_id_);
     int64_t standby_node_term = Sharder::Instance().StandbyNodeTerm();
     int64_t current_term = std::max(ng_leader_term, standby_node_term);
 
     if (current_term < 0 || current_term != term_)
     {
-        SetFinished(CcErrorCode::NG_TERM_CHANGED);
+        SetFinished();
         return false;
     }
 
-#ifdef RANGE_PARTITION_ENABLED
-    auto &records = flush_records_per_core_[ccs.core_id_];
-    auto &index = idxs_[ccs.core_id_];
-#else
-    auto &records = *flush_records_;
-    auto &index = idx_;
-#endif
+    auto &records = this_core_cce_entries[this_core_current_idxs.first];
+    auto &index = this_core_current_idxs.second;
 
     size_t last_index = std::min(index + SCAN_BATCH_SIZE, records.size());
 
     for (; index < last_index; ++index)
     {
 #ifdef RANGE_PARTITION_ENABLED
-        FlushRecord *ref = records[index];
-        ref->cce_->SetCkptTs(ref->commit_ts_);
-        ref->cce_->data_store_size_ = ref->post_flush_size_;
+        const CkptTsEntry &ref = records[index];
+        VersionedLruEntry<true, true> *v_entry =
+            static_cast<VersionedLruEntry<true, true> *>(ref.cce_);
+        v_entry->entry_info_.SetDataStoreSize(ref.post_flush_size_);
+
+        v_entry->SetCkptTs(ref.commit_ts_);
+        v_entry->ClearBeingCkpt();
 #else
-        FlushRecord *ref = &records[index];
-        ref->cce_->SetCkptTs(ref->commit_ts_);
+        const CkptTsEntry &ref = records[index];
+        VersionedLruEntry<false, false> *v_entry =
+            static_cast<VersionedLruEntry<false, false> *>(ref.cce_);
+
+        v_entry->SetCkptTs(ref.commit_ts_);
+        v_entry->ClearBeingCkpt();
 #endif
-        ref->cce_->ClearBeingCkpt();
     }
 
     if (index == records.size())
     {
-        SetFinished(CcErrorCode::NO_ERROR);
+        this_core_current_idxs.first++;
+        this_core_current_idxs.second = 0;
+        if (this_core_current_idxs.first >= this_core_cce_entries.size())
+        {
+            SetFinished();
+        }
+        else
+        {
+            ccs.Enqueue(ccs.core_id_, this);
+        }
     }
     else
     {

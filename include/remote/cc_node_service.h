@@ -74,16 +74,22 @@ public:
         ::txservice::remote::GetMinTxStartTsResponse *response,
         ::google::protobuf::Closure *done) override;
 
-    void ClusterAddNode(
+    void ClusterAddNodeGroup(
         ::google::protobuf::RpcController *controller,
-        const ::txservice::remote::ClusterAddNodeRequest *request,
-        ::txservice::remote::ClusterAddNodeResponse *response,
+        const ::txservice::remote::ClusterAddNodeGroupRequest *request,
+        ::txservice::remote::ClusterScaleResponse *response,
         ::google::protobuf::Closure *done) override;
 
     void ClusterRemoveNode(
         ::google::protobuf::RpcController *controller,
         const ::txservice::remote::ClusterRemoveNodeRequest *request,
-        ::txservice::remote::ClusterRemoveNodeResponse *response,
+        ::txservice::remote::ClusterScaleResponse *response,
+        ::google::protobuf::Closure *done) override;
+
+    void NodeGroupAddPeers(
+        ::google::protobuf::RpcController *controller,
+        const ::txservice::remote::NodeGroupAddPeersRequest *request,
+        ::txservice::remote::ClusterScaleResponse *response,
         ::google::protobuf::Closure *done) override;
 
     void GetClusterNodes(
@@ -96,12 +102,6 @@ public:
         ::google::protobuf::RpcController *controller,
         const ::txservice::remote::ClusterScaleStatusRequest *request,
         ::txservice::remote::ClusterScaleStatusResponse *response,
-        ::google::protobuf::Closure *done) override;
-
-    void CheckClusterConfigIsUpdated(
-        ::google::protobuf::RpcController *controller,
-        const ::txservice::remote::CheckClusterConfigIsUpdatedRequest *request,
-        ::txservice::remote::CheckClusterConfigIsUpdatedResponse *response,
         ::google::protobuf::Closure *done) override;
 
     void FlushDataAll(::google::protobuf::RpcController *controller,
@@ -235,10 +235,10 @@ public:
         ::txservice::remote::CheckCkptStatusResponse *response,
         ::google::protobuf::Closure *done) override;
 
-    void UpdateLogGroupConfig(
+    void UpdateClusterConfig(
         ::google::protobuf::RpcController *controller,
-        const ::txservice::remote::UpdateLogGroupConfigRequest *request,
-        ::txservice::remote::UpdateLogGroupConfigResponse *response,
+        const ::txservice::remote::UpdateClusterConfigRequest *request,
+        ::google::protobuf::Empty *response,
         ::google::protobuf::Closure *done) override;
 
 private:

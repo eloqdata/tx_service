@@ -27,15 +27,16 @@
 #include <condition_variable>
 #include <cstdint>
 #include <iostream>
+#include <map>
 #include <mutex>
 #include <string>
 #include <unordered_map>
+#include <utility>
 #include <vector>
 
 #include "cc/cc_handler_result.h"
 #include "cc_handler.h"
 #include "cc_map.h"
-#include "cc_req_misc.h"
 #include "error_messages.h"  //CcErrorCode
 #include "fault/fault_inject.h"
 #include "local_cc_shards.h"
@@ -241,86 +242,77 @@ void ReadOperation::Forward(TransactionExecution *txm)
     }
     else
     {
-        bool fault_inject = false;
         CODE_FAULT_INJECTOR("read_operation_timeout", {
             LOG(INFO) << "FaultInject  read_operation_timeout";
-            fault_inject = true;
             FaultInject::Instance().InjectFault("read_operation_timeout",
                                                 "remove");
-        });
 
-        bool timeout = false;
-
-        if (!fault_inject)
-        {
-            if (txm->IsTimeOut() && hd_result_.SetResultByTimeoutThread())
-            {
-                timeout = true;
-            }
-        }
-        else
-        {
-            // Note: Only test will enter this branch
-            // Loop until set timeout flag successfully
-            while (!hd_result_.SetResultByTimeoutThread())
-            {
-                LOG(INFO) << "Retry to SetResultByTimeoutThread, Only test "
-                             "will enter this branch";
-            }
-            timeout = true;
-        }
-
-        if (cce_addr.Term() < 0 && timeout)
-        {
-            TX_TRACE_ACTION_WITH_CONTEXT(
-                this,
-                "Forward.Term<0,IsTimeout || TxNodeFail",
-                txm,
-                (
-                    [txm]() -> std::string
-                    {
-                        return std::string(",\"tx_number\":")
-                            .append(std::to_string(txm->TxNumber()))
-                            .append(",\"term\":")
-                            .append(std::to_string(txm->TxTerm()));
-                    }));
-            // For non-blocking concurrency control protocols, the read
-            // request is expected to return instantly. For lock-based
-            // protocols, if the read request is blocked, the cc node will
-            // send an acknowledgement to update the key's term. In either
-            // case, if the read key's term is not set, the tx has not
-            // received any response or acknowledgement from the key's cc
-            // node group. The read request is forced to be errored upon
-            // timeout.
-            // FIXME(lzx): Is it more appropriate to retry?
-            // If the tx node fails, also force the tx to abort instantly.
             bool force_error = hd_result_.ForceError();
             if (force_error)
             {
                 txm->PostProcess(*this);
             }
-            // If forcing error fails, it means that the remote response
-            // returns normally and the tx has been moved from the waiting
-            // queue to the execution queue. Does not continue execution.
-            // The tx will be re-executed when the tx processor visits it in
-            // the execution queue.
-        }
-        else if (cce_addr.Term() > 0 && timeout)
+            return;
+        });
+
+        if (txm->IsTimeOut())
         {
-            // Unset timeout status. So the cc_stream_reciver can handle
-            // response.
-            hd_result_.UnsetByTimeoutThread();
+            if (!hd_result_.Value().is_local_)
+            {
+                if (!txm->CheckLeaderTerm())
+                {
+                    hd_result_.SetError(CcErrorCode::TX_NODE_NOT_LEADER);
+                    txm->PostProcess(*this);
+                    return;
+                }
 
-            // Trigger deadlock check.
-            DeadLockCheck::RequestCheck();
+                if (cce_addr.Term() > 0)
+                {
+                    // ack is received, but timeout happens.
 
-            txm->cc_handler_->BlockCcReqCheck(
-                txm->TxNumber(),
-                txm->TxTerm(),
-                txm->CommandId(),
-                cce_addr,
-                &hd_result_,
-                ResultTemplateType::ReadKeyResult);
+                    // Trigger deadlock check.
+                    DeadLockCheck::RequestCheck();
+
+                    txm->cc_handler_->BlockCcReqCheck(
+                        txm->TxNumber(),
+                        txm->TxTerm(),
+                        txm->CommandId(),
+                        cce_addr,
+                        &hd_result_,
+                        ResultTemplateType::ReadKeyResult);
+                }
+                else
+                {
+                    // ack is not received, but timeout happens.
+
+                    // For non-blocking concurrency control protocols, the read
+                    // request is expected to return instantly. For lock-based
+                    // protocols, if the read request is blocked, the cc node
+                    // will send an acknowledgement to update the key's term. In
+                    // either case, if the read key's term is not set, the tx
+                    // has not received any response or acknowledgement from the
+                    // key's cc node group. The read request is forced to be
+                    // errored upon timeout.
+                    // FIXME(lzx): Is it more appropriate to retry?
+                    // If the tx node fails, also force the tx to abort
+                    // instantly.
+                    bool force_error = hd_result_.ForceError();
+                    if (force_error)
+                    {
+                        txm->PostProcess(*this);
+                    }
+                    // If forcing error fails, it means that the remote response
+                    // returns normally and the tx has been moved from the
+                    // waiting queue to the execution queue. Does not continue
+                    // execution. The tx will be re-executed when the tx
+                    // processor visits it in the execution queue.
+                }
+            }
+            else
+            {
+                // local request timeout
+                DeadLockCheck::RequestCheck();
+            }
         }
     }
     // TODO: for locking-based protocols, even though the tx may be blocked
@@ -332,7 +324,8 @@ void ReadOperation::Forward(TransactionExecution *txm)
 void ReadLocalOperation::Reset()
 {
     key_ = nullptr;
-    table_name_ = TableName{empty_sv, TableType::RangePartition};
+    table_name_ =
+        TableName{empty_sv, TableType::RangePartition, TableEngine::None};
     rec_ = nullptr;
     hd_result_ = nullptr;
     execute_immediately_ = true;
@@ -351,17 +344,17 @@ void ReadLocalOperation::Forward(txservice::TransactionExecution *txm)
         else if (hd_result_->IsError())
         {
             assert(hd_result_->ErrorCode() ==
-                   CcErrorCode::ACQUIRE_KEY_LOCK_FAILED_FOR_RW_CONFLICT);
+                       CcErrorCode::ACQUIRE_KEY_LOCK_FAILED_FOR_RW_CONFLICT ||
+                   hd_result_->ErrorCode() == CcErrorCode::DATA_STORE_ERR);
             // If acquire range read lock blocked by DDL, check if tx has
             // already acquired other range read lock. If so we need to abort
             // tx since it might cause dead lock with range split. If this tx
             // has not acquired any range read lock, we can safely retry here.
-            const auto &rset = txm->rw_set_.ReadSet();
-            for (const auto &[table, tbl_rset] : rset)
+            const auto &rset = txm->rw_set_.MetaDataReadSet();
+            for (const auto &[cce_addr, read_entry_pair] : rset)
             {
-                if ((table.Type() == TableType::RangePartition ||
-                     table.Type() == TableType::RangeBucket) &&
-                    !tbl_rset.empty())
+                if (read_entry_pair.second != catalog_ccm_name_sv &&
+                    read_entry_pair.second != cluster_config_ccm_name_sv)
                 {
                     // Abort tx.
                     txm->PostProcess(*this);
@@ -441,8 +434,6 @@ void AcquireWriteOperation::Reset(size_t acquire_write_cnt, size_t wentry_cnt)
     for (size_t idx = old_size; idx < acquire_write_cnt; ++idx)
     {
         acquire_key_vec[idx].remote_ack_cnt_ = &remote_ack_cnt_;
-        acquire_key_vec[idx].remote_hd_result_is_set_ =
-            std::make_unique<std::atomic<bool>>(false);
     }
 
     remote_ack_cnt_.store(0, std::memory_order_relaxed);
@@ -555,82 +546,87 @@ void AcquireWriteOperation::Forward(TransactionExecution *txm)
     }
     else
     {
-        bool fault_inject = false;
         CODE_FAULT_INJECTOR("acquire_operation_timeout", {
             LOG(INFO)
                 << "FaultInject  acquire_operation_timeout remote_ack_cnt_:"
                 << remote_ack_cnt_;
-            fault_inject = true;
             FaultInject::Instance().InjectFault("acquire_operation_timeout",
                                                 "remove");
-        });
 
-        bool timeout = false;
-
-        if (!fault_inject)
-        {
-            if (txm->IsTimeOut() && hd_result_.SetResultByTimeoutThread())
-            {
-                timeout = true;
-            }
-        }
-        else
-        {
-            // Note: Only test will enter this branch
-            // Loop until set timeout flag successfully
-            while (!hd_result_.SetResultByTimeoutThread())
-            {
-                LOG(INFO) << "Retry to SetResultByTimeoutThread, Only test "
-                             "will enter this branch";
-            }
-            timeout = true;
-        }
-
-        if (remote_ack_cnt_.load(std::memory_order_acquire) > 0 && timeout)
-        {
-            // FIXME(lzx): Is it more appropriate to retry if
-            // remote_ack_cnt_>0 ? If the tx node fails, force the tx to
-            // abort instantly.
             bool success = hd_result_.ForceError();
             if (success)
             {
                 AggregateAcquiredKeys(txm);
                 txm->PostProcess(*this);
             }
-            // Else, all acquire-write requests finish normally. The tx must
-            // have been moved from the waiting queue to the execution
-            // queue. Does not forword the tx now, as it will be re-executed
-            // when the tx processor visits the execution queue.
-        }
-        else if (timeout)
+            return;
+        });
+
+        // TODO(zkl): AcquireWriteOp should wait for local requests to finish
+        if (txm->IsTimeOut())
         {
-            // Unset timeout status. So the cc_stream_reciver can handle
-            // response.
-            hd_result_.UnsetByTimeoutThread();
-
-            // Trigger deadlock check.
-            DeadLockCheck::RequestCheck();
-
-            // Check if the blocked keys are still blocked in the lock queue.
-            std::vector<AcquireKeyResult> &vct_akr = hd_result_.Value();
-            for (size_t i = 0; i < vct_akr.size(); i++)
+            if (hd_result_.LocalRefCnt() != 0)
             {
-                AcquireKeyResult &akr = vct_akr[i];
-
-                if (akr.remote_hd_result_is_set_->load(
-                        std::memory_order_acquire) == false &&
-                    akr.cce_addr_.Term() > 0 /*&& akr.commit_ts_ == 0*/)
+                // Local requests haven't finished. Trigger deadlock check.
+                DeadLockCheck::RequestCheck();
+            }
+            else if (!txm->CheckLeaderTerm())
+            {
+                bool success = hd_result_.ForceError();
+                if (success)
                 {
-                    txm->cc_handler_->BlockCcReqCheck(
-                        txm->TxNumber(),
-                        txm->TxTerm(),
-                        txm->CommandId(),
-                        akr.cce_addr_,
-                        &hd_result_,
-                        ResultTemplateType::AcquireKeyResult,
-                        i);
+                    AggregateAcquiredKeys(txm);
+                    txm->PostProcess(*this);
                 }
             }
+            else if (remote_ack_cnt_.load(std::memory_order_acquire) == 0)
+            {
+                // All remote acks are received, but timeout still happens.
+
+                // Trigger deadlock check.
+                DeadLockCheck::RequestCheck();
+
+                // Check if the blocked keys are still blocked in the lock
+                // queue.
+                std::vector<AcquireKeyResult> &vct_akr = hd_result_.Value();
+                for (size_t i = 0; i < vct_akr.size(); i++)
+                {
+                    AcquireKeyResult &akr = vct_akr[i];
+
+                    if (!akr.IsRemoteHdResultSet(std::memory_order_acquire) &&
+                        akr.cce_addr_.Term() > 0 /*&& akr.commit_ts_ == 0*/)
+                    {
+                        txm->cc_handler_->BlockCcReqCheck(
+                            txm->TxNumber(),
+                            txm->TxTerm(),
+                            txm->CommandId(),
+                            akr.cce_addr_,
+                            &hd_result_,
+                            ResultTemplateType::AcquireKeyResult,
+                            i);
+                    }
+                }
+            }
+            else
+            {
+                // Some of the acks are not received, but timeout happens.
+
+                // FIXME(lzx): Is it more appropriate to retry if
+                // remote_ack_cnt_>0 ? If the tx node fails, force the tx to
+                // abort instantly.
+                bool success = hd_result_.ForceError();
+                if (success)
+                {
+                    AggregateAcquiredKeys(txm);
+                    txm->PostProcess(*this);
+                }
+                // Else, all acquire-write requests finish normally. The tx must
+                // have been moved from the waiting queue to the execution
+                // queue. Does not forword the tx now, as it will be re-executed
+                // when the tx processor visits the execution queue.
+            }
+            // else, hd_result_ is being set by stream thread, do nothing in
+            // this turn.
         }
     }
 }
@@ -661,11 +657,12 @@ void LockWriteRangesOp::Forward(TransactionExecution *txm)
             // already acquired other range read lock. If so we need to abort
             // tx since it might cause dead lock with range split. If this tx
             // has not acquired any range read lock, we can safely retry here.
-            const auto &rset = txm->rw_set_.ReadSet();
-            for (const auto &[table, tbl_rset] : rset)
+            const auto &rset = txm->rw_set_.MetaDataReadSet();
+            for (const auto &[cce_addr, read_set_pair] : rset)
             {
-                if (table.Type() == TableType::RangePartition &&
-                    !tbl_rset.empty())
+                if (read_set_pair.second != catalog_ccm_name_sv &&
+                    read_set_pair.second != range_bucket_ccm_name_sv &&
+                    read_set_pair.second != cluster_config_ccm_name_sv)
                 {
                     // Abort tx.
                     txm->PostProcess(*this);
@@ -804,10 +801,10 @@ void LockWriteBucketsOp::Forward(TransactionExecution *txm)
             // tx since it might cause dead lock with bucket migration. If this
             // tx has not acquired any buckets read lock, we can safely retry
             // here.
-            const auto &rset = txm->rw_set_.ReadSet();
-            for (const auto &[table, tbl_rset] : rset)
+            const auto &rset = txm->rw_set_.MetaDataReadSet();
+            for (const auto &[cce_addr, read_entry_pair] : rset)
             {
-                if (table.Type() == TableType::RangeBucket && !tbl_rset.empty())
+                if (read_entry_pair.second == range_bucket_ccm_name_sv)
                 {
                     // Abort tx.
                     txm->PostProcess(*this);
@@ -899,6 +896,11 @@ void ValidateOperation::Reset(size_t read_cnt)
     hd_result_.Reset();
     hd_result_.SetRefCnt(read_cnt);
     hd_result_.Value().Clear();
+    if (read_cnt == 0)
+    {
+        hd_result_.SetFinished();
+    }
+
     op_start_ = metrics::TimePoint::max();
 }
 
@@ -930,16 +932,20 @@ void ValidateOperation::Forward(TransactionExecution *txm)
     {
         // All validation requests have returned, either successfully or
         // with error codes. Post-processing skips read-set keys.
-        txm->rw_set_.ClearReadSet();
-        txm->rw_set_.ClearScanSet();
+        bool read_lock_term_valid = txm->rw_set_.ClearDataReadSet();
+        if (!read_lock_term_valid)
+        {
+            // Two read locks on the same node group have different term, the
+            // Validate Op must have failed.
+            assert(hd_result_.IsError());
+        }
 
         // validation cannot re-run since the remote locks of the readset
         // are lost during auto-failover, we should abort the transaction if
         // remote node, which contains read entries, is dead.
         txm->PostProcess(*this);
     }
-    else if (hd_result_.LocalRefCnt() == 0 && txm->IsTimeOut() &&
-             hd_result_.SetResultByTimeoutThread())
+    else if (hd_result_.LocalRefCnt() == 0 && txm->IsTimeOut())
     {
         bool success = hd_result_.ForceError();
         if (success)
@@ -1014,18 +1020,13 @@ void WriteToLogOp::Forward(TransactionExecution *txm)
                 }
                 return;
             }
-            else if (hd_result_.ErrorCode() == CcErrorCode::WRITE_LOG_FAILED)
+            else if (hd_result_.ErrorCode() == CcErrorCode::LOG_NODE_NOT_LEADER)
             {
                 // Log group leader might be outdated. Wait for the leader
                 // refresh and retry.
-                CODE_FAULT_INJECTOR("upsert_table_prepare_log_fail", {
-                    LOG(INFO) << "FaultInject  upsert_table_prepare_log_fail";
-                    txm->PostProcess(*this);
-                    return;
-                });
-
                 if (retry_num_ > 0)
                 {
+                    txm->txlog_->RequestRefreshLeader(log_group_id_);
                     ReRunOp(txm);
                 }
                 else
@@ -1111,20 +1112,25 @@ void InitTxnOperation::Forward(TransactionExecution *txm)
 }
 
 PostProcessOp::PostProcessOp(TransactionExecution *txm)
-    : hd_result_(txm), catalog_range_hd_result_(txm)
+    : stage_(&hd_result_),
+      hd_result_(txm),
+      meta_data_hd_result_(txm),
+      catalog_post_all_hd_result_(txm)
 {
 }
 
 void PostProcessOp::Reset(size_t write_cnt,
                           size_t data_read_cnt,
-                          size_t catalog_range_read_cnt,
+                          size_t meta_data_read_cnt,
+                          size_t catalog_write_all_cnt,
                           bool forward_to_update_txn_op)
 {
+    stage_ = &hd_result_;
+
     forward_to_update_txn_op_ = forward_to_update_txn_op;
 
     hd_result_.Reset();
     hd_result_.Value().Clear();
-
     if (write_cnt + data_read_cnt == 0)
     {
         hd_result_.SetFinished();
@@ -1134,61 +1140,113 @@ void PostProcessOp::Reset(size_t write_cnt,
         hd_result_.SetRefCnt(write_cnt + data_read_cnt);
     }
 
-    catalog_range_hd_result_.Reset();
-    catalog_range_hd_result_.Value().Clear();
-
-    if (catalog_range_read_cnt == 0)
+    meta_data_hd_result_.Reset();
+    meta_data_hd_result_.Value().Clear();
+    if (meta_data_read_cnt == 0)
     {
-        catalog_range_hd_result_.SetFinished();
+        meta_data_hd_result_.SetFinished();
     }
     else
     {
-        catalog_range_hd_result_.SetRefCnt(catalog_range_read_cnt);
+        meta_data_hd_result_.SetRefCnt(meta_data_read_cnt);
     }
+
+    catalog_write_all_cnt_ = catalog_write_all_cnt;
+    catalog_post_all_hd_result_.Reset();
+    catalog_post_all_hd_result_.Value().Clear();
+    if (catalog_write_all_cnt == 0)
+    {
+        catalog_post_all_hd_result_.SetFinished();
+    }
+    else
+    {
+        catalog_post_all_hd_result_.SetRefCnt(catalog_write_all_cnt);
+    }
+
     op_start_ = metrics::TimePoint::max();
 }
 
 void PostProcessOp::Forward(TransactionExecution *txm)
 {
-    if (hd_result_.IsFinished())
+    // start the state machine if not running.
+    if (!is_running_)
     {
-        if (catalog_range_hd_result_.IsFinished())
-        {
-            txm->PostProcess(*this);
-        }
-        else if (!is_running_)
-        {
-            is_running_ = true;
-            txm->ReleaseCatalogRangeLock(catalog_range_hd_result_);
-        }
+        txm->Process(*this);
     }
-    else if (hd_result_.LocalRefCnt() == 0 && txm->IsTimeOut() &&
-             hd_result_.SetResultByTimeoutThread())
-    {
-        TX_TRACE_ACTION_WITH_CONTEXT(
-            this,
-            "Forward.IsTimeout",
-            txm,
-            [txm]() -> std::string
-            {
-                return std::string(",\"tx_number\":")
-                    .append(std::to_string(txm->TxNumber()))
-                    .append(",\"term\":")
-                    .append(std::to_string(txm->TxTerm()));
-            });
 
-        bool force_error = hd_result_.ForceError();
-        if (force_error)
+    if (stage_ == &hd_result_)
+    {
+        if (hd_result_.IsFinished())
         {
-            if (!catalog_range_hd_result_.IsFinished())
+            stage_ = &catalog_post_all_hd_result_;
+            if (catalog_post_all_hd_result_.IsFinished())
             {
-                is_running_ = true;
-                txm->ReleaseCatalogRangeLock(catalog_range_hd_result_);
+                Forward(txm);  // Immediately Forward.
             }
             else
             {
-                txm->PostProcess(*this);
+                txm->ReleaseCatalogWriteAll(catalog_post_all_hd_result_);
             }
+        }
+        else if (hd_result_.LocalRefCnt() == 0 && txm->IsTimeOut())
+        {
+            bool force_error = hd_result_.ForceError();
+            if (force_error)
+            {
+                stage_ = &catalog_post_all_hd_result_;
+                if (catalog_post_all_hd_result_.IsFinished())
+                {
+                    Forward(txm);  // Immediately Forward.
+                }
+                else
+                {
+                    txm->ReleaseCatalogWriteAll(catalog_post_all_hd_result_);
+                }
+            }
+        }
+    }
+    else if (stage_ == &catalog_post_all_hd_result_)
+    {
+        if (catalog_post_all_hd_result_.IsFinished())
+        {
+            stage_ = &meta_data_hd_result_;
+            if (meta_data_hd_result_.IsFinished())
+            {
+                Forward(txm);  // Immediately Forward.
+            }
+            else
+            {
+                txm->ReleaseMetaDataReadLock(meta_data_hd_result_);
+            }
+        }
+        else if (catalog_post_all_hd_result_.LocalRefCnt() == 0 &&
+                 txm->IsTimeOut())
+        {
+            if (txm->CheckLeaderTerm())
+            {
+                // The orphan lock recovery mechanism doesn't handle catalog
+                // orphan wlock. It depends on the coordinator to guarantee
+                // release catalog wlock.
+                catalog_post_all_hd_result_.Reset();
+                catalog_post_all_hd_result_.SetRefCnt(catalog_write_all_cnt_);
+                txm->ReleaseCatalogWriteAll(catalog_post_all_hd_result_);
+            }
+            else
+            {
+                bool force_error = catalog_post_all_hd_result_.ForceError();
+                if (force_error)
+                {
+                    txm->PostProcess(*this);  // Immediately PostProcess.
+                }
+            }
+        }
+    }
+    else
+    {
+        assert(stage_ == &meta_data_hd_result_);
+        if (meta_data_hd_result_.IsFinished())
+        {
+            txm->PostProcess(*this);
         }
     }
 }
@@ -1217,8 +1275,7 @@ void ReloadCacheOperation::Forward(TransactionExecution *txm)
     {
         txm->PostProcess(*this);
     }
-    else if (hd_result_.LocalRefCnt() == 0 && txm->IsTimeOut() &&
-             hd_result_.SetResultByTimeoutThread())
+    else if (hd_result_.LocalRefCnt() == 0 && txm->IsTimeOut())
     {
         TX_TRACE_ACTION_WITH_CONTEXT(
             this,
@@ -1270,7 +1327,7 @@ void FaultInjectOp::Forward(TransactionExecution *txm)
             txm->PostProcess(*this);
         }
     }
-    else if (txm->IsTimeOut() && hd_result_.SetResultByTimeoutThread())
+    else if (txm->IsTimeOut())
     {
         bool force_success = hd_result_.ForceError();
         if (force_success)
@@ -1314,19 +1371,15 @@ void ScanOpenOperation::Forward(TransactionExecution *txm)
             txm->PostProcess(*this);
         }
     }
-    else if (txm->IsTimeOut() && hd_result_.SetResultByTimeoutThread())
+    else if (txm->IsTimeOut())
     {
-        TX_TRACE_ACTION_WITH_CONTEXT(
-            this,
-            "Forward.IsTimeout",
-            txm,
-            [txm]() -> std::string
-            {
-                return std::string(",\"tx_number\":")
-                    .append(std::to_string(txm->TxNumber()))
-                    .append(",\"term\":")
-                    .append(std::to_string(txm->TxTerm()));
-            });
+        DeadLockCheck::RequestCheck();
+
+        if (hd_result_.LocalRefCnt() > 0)
+        {
+            // Never force error for local request.
+            return;
+        }
 
         if (retry_num_ > 0 &&
             (txm->CheckLeaderTerm() || txm->CheckStandbyTerm()))
@@ -1334,13 +1387,11 @@ void ScanOpenOperation::Forward(TransactionExecution *txm)
             ReRunOp(txm);
             return;
         }
-        else
+
+        bool force_error = hd_result_.ForceError();
+        if (force_error)
         {
-            bool force_error = hd_result_.ForceError();
-            if (force_error)
-            {
-                txm->PostProcess(*this);
-            }
+            txm->PostProcess(*this);
         }
     }
 }
@@ -1362,7 +1413,8 @@ void ScanNextOperation::Reset()
     alias_ = 0;
     scan_state_ = nullptr;
 #ifdef RANGE_PARTITION_ENABLED
-    range_table_name_ = TableName(empty_sv, TableType::RangePartition);
+    range_table_name_ =
+        TableName(empty_sv, TableType::RangePartition, TableEngine::None);
 #endif
     op_start_ = metrics::TimePoint::max();
     ResetResult();
@@ -1501,35 +1553,48 @@ void ScanNextOperation::Forward(TransactionExecution *txm)
             // the tx's isolation level is less than Repeatable Read,
             // unlocks the range now.
             if (scan_slice_result.slice_position_ != SlicePosition::Middle &&
-                txm->iso_level_ < IsolationLevel::RepeatableRead &&
                 scan_state_->range_cce_addr_.CceLockPtr() != 0)
             {
-                if (lock_range_result_.IsFinished())
+                if (txm->iso_level_ < IsolationLevel::RepeatableRead)
                 {
-                    txm->rw_set_.DedupRead(range_table_name_,
-                                           scan_state_->range_cce_addr_);
+                    if (lock_range_result_.IsFinished())
+                    {
+                        txm->rw_set_.DedupRead(range_table_name_,
+                                               scan_state_->range_cce_addr_);
 
-                    txm->cc_handler_->PostRead(txm->TxNumber(),
-                                               txm->TxTerm(),
-                                               txm->CommandId(),
-                                               0,
-                                               0,
-                                               0,
-                                               scan_state_->range_cce_addr_,
-                                               unlock_range_result_,
-                                               true);
+                        CcReqStatus ret = txm->cc_handler_->PostRead(
+                            txm->TxNumber(),
+                            txm->TxTerm(),
+                            txm->CommandId(),
+                            0,
+                            0,
+                            0,
+                            scan_state_->range_cce_addr_,
+                            unlock_range_result_,
+                            true);
+                        if (ret == CcReqStatus::Processed)
+                        {
+                            txm->AdvanceCommand();
+                        }
 
-                    // After the unlock range request is sent,
-                    // lock_range_result_ is reset. When the tx machine is
-                    // re-executed, its status is unfinished, indicating
-                    // that the scan next operation is waiting for the
-                    // response of unlocking the current range.
-                    lock_range_result_.Reset();
-                    return;
+                        // After the unlock range request is sent,
+                        // lock_range_result_ is reset. When the tx machine is
+                        // re-executed, its status is unfinished, indicating
+                        // that the scan next operation is waiting for the
+                        // response of unlocking the current range.
+                        lock_range_result_.Reset();
+                        return;
+                    }
+                    else if (!unlock_range_result_.IsFinished())
+                    {
+                        return;
+                    }
                 }
-                else if (!unlock_range_result_.IsFinished())
+                else
                 {
-                    return;
+                    // Reset lock_range_result_ for acquire lock on the next
+                    // range if necessary
+                    lock_range_result_.Reset();
                 }
             }
 
@@ -1542,10 +1607,8 @@ void ScanNextOperation::Forward(TransactionExecution *txm)
         scanner.SetStatus(ScannerStatus::Open);
         txm->PostProcess(*this);
     }
-    else if (txm->IsTimeOut())
-#else
-    else if (txm->IsTimeOut() && hd_result_.SetResultByTimeoutThread())
 #endif
+    else if (txm->IsTimeOut())
     {
         TX_TRACE_ACTION_WITH_CONTEXT(
             this,
@@ -1559,11 +1622,10 @@ void ScanNextOperation::Forward(TransactionExecution *txm)
                     .append(std::to_string(txm->TxTerm()));
             });
 
+        DeadLockCheck::RequestCheck();
 #ifdef RANGE_PARTITION_ENABLED
         // When timeout in RANGE_PARTITION, check deadlock first, then force
         // error.
-        DeadLockCheck::RequestCheck();
-
         if (slice_hd_result_.Value().is_local_)
         {
             // For local request, just rely on the result of the deadlock
@@ -1571,29 +1633,33 @@ void ScanNextOperation::Forward(TransactionExecution *txm)
             return;
         }
 
-        if (slice_hd_result_.SetResultByTimeoutThread())
+        if (retry_num_ > 0 &&
+            (txm->CheckLeaderTerm() || txm->CheckStandbyTerm()))
         {
-            if (retry_num_ > 0 &&
-                (txm->CheckLeaderTerm() || txm->CheckStandbyTerm()))
-            {
-                ReRunOp(txm);
-                // Unset timeout status. So the cc_stream_reciver can handle
-                // response.
-                slice_hd_result_.UnsetByTimeoutThread();
-                return;
-            }
-            else
-            {
-                bool force_error = slice_hd_result_.ForceError();
-                if (force_error)
-                {
-                    txm->PostProcess(*this);
-                }
-            }
+            ReRunOp(txm);
+            return;
         }
-        // else: the remote response is received.
+
+        bool force_error = slice_hd_result_.ForceError();
+        if (force_error)
+        {
+            txm->PostProcess(*this);
+        }
 
 #else
+        if (hd_result_.Value().is_local_)
+        {
+            // Never force error for local request.
+            return;
+        }
+
+        if (retry_num_ > 0 &&
+            (txm->CheckLeaderTerm() || txm->CheckStandbyTerm()))
+        {
+            ReRunOp(txm);
+            return;
+        }
+
         bool force_error = hd_result_.ForceError();
         if (force_error)
         {
@@ -1704,13 +1770,11 @@ void AcquireAllOp::Forward(TransactionExecution *txm)
             {
                 continue;
             }
-
-            if (!hd_res.SetResultByTimeoutThread())
+            else
             {
-                continue;
+                hd_res.SetError(CcErrorCode::TX_NODE_NOT_LEADER);
+                hd_res.ForceError();
             }
-            hd_res.SetError(CcErrorCode::TX_NODE_NOT_LEADER);
-            hd_res.ForceError();
         }
         txm->PostProcess(*this);
         return;
@@ -1743,10 +1807,6 @@ void AcquireAllOp::Forward(TransactionExecution *txm)
             for (size_t idx = 0; idx < upload_cnt_; ++idx)
             {
                 CcHandlerResult<AcquireAllResult> &hd_result = hd_results_[idx];
-                if (!hd_result.SetResultByTimeoutThread())
-                {
-                    continue;
-                }
 
                 const AcquireAllResult &acquire_res = hd_result.Value();
 
@@ -1892,18 +1952,10 @@ void AcquireAllOp::Forward(TransactionExecution *txm)
                 continue;
             }
 
-            if (!hd_res.SetResultByTimeoutThread())
-            {
-                continue;
-            }
-
             AcquireAllResult &ac_res = hd_results_[hd_idx].Value();
 
             bool has_blocked_remote_cce =
                 ac_res.blocked_remote_cce_addr_.size() > 0;
-            // Unset timeout status. So the cc_stream_reciver can handle
-            // response.
-            hd_res.UnsetByTimeoutThread();
 
             if (ac_res.node_term_ > 0 && has_blocked_remote_cce)
             {
@@ -1922,7 +1974,7 @@ void AcquireAllOp::Forward(TransactionExecution *txm)
     }
 }
 
-uint64_t AcquireAllOp::MaxTs()
+uint64_t AcquireAllOp::MaxTs() const
 {
     uint64_t max_ts = 0;
     for (size_t idx = 0; idx < upload_cnt_; ++idx)
@@ -1983,13 +2035,7 @@ void PostWriteAllOp::Forward(TransactionExecution *txm)
     }
     else if (hd_result_.LocalRefCnt() == 0)
     {
-        bool timeout = false;
-        if (txm->IsTimeOut(4) && hd_result_.SetResultByTimeoutThread())
-        {
-            timeout = true;
-        }
-
-        if (timeout)
+        if (txm->IsTimeOut(4))
         {
             TX_TRACE_ACTION_WITH_CONTEXT(
                 this,
@@ -2016,6 +2062,119 @@ bool PostWriteAllOp::IsFailed()
 {
     assert(hd_result_.IsFinished());
     return hd_result_.IsError();
+}
+
+CatalogAcquireAllOp::CatalogAcquireAllOp(TransactionExecution *txm)
+    : succeed_(false),
+      op_(nullptr),
+      lock_cluster_config_op_(),
+      acquire_all_intent_op_(txm),
+      acquire_all_lock_op_(txm),
+      read_cluster_result_(txm),
+      cluster_conf_rec_()
+{
+    lock_cluster_config_op_.table_name_ = TableName(cluster_config_ccm_name_sv,
+                                                    TableType::ClusterConfig,
+                                                    TableEngine::None);
+    lock_cluster_config_op_.key_ = VoidKey::NegInfTxKey();
+    lock_cluster_config_op_.hd_result_ = &read_cluster_result_;
+    lock_cluster_config_op_.rec_ = &cluster_conf_rec_;
+
+    acquire_all_intent_op_.table_name_ = &catalog_ccm_name;
+    acquire_all_intent_op_.cc_op_ = CcOperation::ReadForWrite;
+    acquire_all_intent_op_.protocol_ = CcProtocol::OCC;
+
+    acquire_all_lock_op_.table_name_ = &catalog_ccm_name;
+    acquire_all_lock_op_.cc_op_ = CcOperation::Write;
+    acquire_all_lock_op_.protocol_ = CcProtocol::Locking;
+}
+
+void CatalogAcquireAllOp::Reset()
+{
+    succeed_ = false;
+    op_ = nullptr;
+
+    read_cluster_result_.Reset();
+
+    acquire_all_intent_op_.Reset(0);
+    acquire_all_intent_op_.keys_.clear();
+
+    acquire_all_lock_op_.Reset(0);
+    acquire_all_lock_op_.keys_.clear();
+}
+
+void CatalogAcquireAllOp::SetCatalogWriteSet(
+    const std::map<TxKey, ReplicaWriteSetEntry> &wset)
+{
+    acquire_all_intent_op_.keys_.reserve(wset.size());
+    acquire_all_lock_op_.keys_.reserve(wset.size());
+    for (const auto &[write_key, write_entry] : wset)
+    {
+        acquire_all_intent_op_.keys_.push_back(write_key.GetShallowCopy());
+        acquire_all_lock_op_.keys_.push_back(write_key.GetShallowCopy());
+    }
+}
+
+uint64_t CatalogAcquireAllOp::MaxTs() const
+{
+    return acquire_all_lock_op_.MaxTs();
+}
+
+void CatalogAcquireAllOp::Forward(TransactionExecution *txm)
+{
+    if (op_ == nullptr)
+    {
+        op_ = &lock_cluster_config_op_;
+        txm->PushOperation(&lock_cluster_config_op_);
+        txm->Process(lock_cluster_config_op_);
+    }
+    else if (op_ == &lock_cluster_config_op_)
+    {
+        if (lock_cluster_config_op_.hd_result_->IsError())
+        {
+            LOG(ERROR) << "Upsert table read cluster config failed, tx_number:"
+                       << txm->TxNumber();
+            txm->PostProcess(*this);
+        }
+        else
+        {
+            op_ = &acquire_all_intent_op_;
+            txm->PushOperation(&acquire_all_intent_op_);
+            txm->Process(acquire_all_intent_op_);
+        }
+    }
+    else if (op_ == &acquire_all_intent_op_)
+    {
+        if (acquire_all_intent_op_.fail_cnt_.load(std::memory_order_relaxed) >
+            0)
+        {
+            LOG(ERROR) << "Upsert table acquire write intent failed, tx_number:"
+                       << txm->TxNumber();
+            txm->PostProcess(*this);
+        }
+        else
+        {
+            op_ = &acquire_all_lock_op_;
+            txm->PushOperation(&acquire_all_lock_op_);
+            txm->Process(acquire_all_lock_op_);
+        }
+    }
+    else
+    {
+        assert(op_ == &acquire_all_lock_op_);
+        if (acquire_all_lock_op_.fail_cnt_.load(std::memory_order_relaxed) > 0)
+        {
+            LOG(ERROR) << "Upsert table schema transaction failed to "
+                          "acquire write lock, tx_number:"
+                       << txm->TxNumber();
+            txm->PostProcess(*this);
+        }
+        else
+        {
+            succeed_ = true;
+            txm->PostProcess(*this);
+        }
+    }
 }
 
 DsUpsertTableOp::DsUpsertTableOp(const TableName *table_name,
@@ -2055,10 +2214,6 @@ void DsUpsertTableOp::Forward(TransactionExecution *txm)
                                "in kv store";
 
                 txm->upsert_resp_->SetErrorCode(TxErrorCode::DATA_STORE_ERROR);
-
-                // Set txm->commit_ts_ to 0 to indicate there is a flush
-                // error during upsert_kv_table_op_.
-                txm->commit_ts_ = tx_op_failed_ts_;
                 txm->PostProcess(*this);
             }
             else if (retry_num_ > 0)
@@ -2075,12 +2230,15 @@ void DsUpsertTableOp::Forward(TransactionExecution *txm)
 }
 
 SchemaOp::SchemaOp(const std::string_view table_name_sv,
+                   TableEngine table_engine,
                    const std::string &current_image,
                    const std::string &dirty_image,
                    uint64_t schema_ts,
                    OperationType op_type)
-    : table_key_(TableName(
-          table_name_sv.data(), table_name_sv.size(), TableType::Primary))
+    : table_key_(TableName(table_name_sv.data(),
+                           table_name_sv.size(),
+                           TableType::Primary,
+                           table_engine))
 {
     catalog_rec_.SetSchemaImage(current_image);
     catalog_rec_.SetDirtySchemaImage(dirty_image);
@@ -2109,6 +2267,8 @@ void SchemaOp::FillPrepareLogRequestCommon(TransactionExecution *txm,
     prepare_schema_msg->set_table_name_str(table_key_.Name().String());
     prepare_schema_msg->set_table_type(
         ::txlog::ToRemoteType::ConvertTableType(table_key_.Name().Type()));
+    prepare_schema_msg->set_table_engine(
+        ::txlog::ToRemoteType::ConvertTableEngine(table_key_.Name().Engine()));
     prepare_schema_msg->set_old_catalog_blob(catalog_rec_.SchemaImage());
     prepare_schema_msg->set_catalog_ts(curr_schema_ts_);
     prepare_schema_msg->set_new_catalog_blob(catalog_rec_.DirtySchemaImage());
@@ -2133,6 +2293,9 @@ void SchemaOp::FillCommitLogRequestCommon(TransactionExecution *txm,
     ::txlog::SchemaOpMessage *commit_schema_msg =
         commit_log_rec->mutable_log_content()->mutable_schema_log();
 
+    commit_schema_msg->set_table_name_str(table_key_.Name().String());
+    commit_schema_msg->set_table_type(
+        ::txlog::ToRemoteType::ConvertTableType(table_key_.Name().Type()));
     commit_schema_msg->set_stage(::txlog::SchemaOpMessage_Stage_CommitSchema);
 
     // The prepare log keeps all cc nodes' terms and match them in the log
@@ -2164,18 +2327,26 @@ void SchemaOp::FillCleanLogRequestCommon(TransactionExecution *txm,
     ::txlog::SchemaOpMessage *clean_schema_msg =
         clean_log_rec->mutable_log_content()->mutable_schema_log();
 
+    clean_schema_msg->set_table_name_str(table_key_.Name().String());
+    clean_schema_msg->set_table_type(
+        ::txlog::ToRemoteType::ConvertTableType(table_key_.Name().Type()));
     clean_schema_msg->set_stage(::txlog::SchemaOpMessage_Stage_CleanSchema);
     clean_log_rec->mutable_node_terms()->clear();
 }
 
 UpsertTableOp::UpsertTableOp(const std::string_view table_name_str,
+                             TableEngine table_engine,
                              const std::string &current_image,
                              uint64_t curr_schema_ts,
                              const std::string &dirty_image,
                              OperationType op_type,
                              TransactionExecution *txm)
-    : SchemaOp(
-          table_name_str, current_image, dirty_image, curr_schema_ts, op_type),
+    : SchemaOp(table_name_str,
+               table_engine,
+               current_image,
+               dirty_image,
+               curr_schema_ts,
+               op_type),
       lock_cluster_config_op_(),
       acquire_all_intent_op_(txm),
       prepare_log_op_(txm),
@@ -2196,8 +2367,9 @@ UpsertTableOp::UpsertTableOp(const std::string_view table_name_str,
            op_type_ == OperationType::TruncateTable ||
            op_type_ == OperationType::Update);
 
-    lock_cluster_config_op_.table_name_ =
-        TableName(cluster_config_ccm_name_sv, TableType::ClusterConfig);
+    lock_cluster_config_op_.table_name_ = TableName(cluster_config_ccm_name_sv,
+                                                    TableType::ClusterConfig,
+                                                    TableEngine::None);
     lock_cluster_config_op_.key_ = VoidKey::NegInfTxKey();
     lock_cluster_config_op_.rec_ = &cluster_conf_rec_;
     lock_cluster_config_op_.hd_result_ = &read_cluster_result_;
@@ -2331,8 +2503,7 @@ void UpsertTableOp::Forward(TransactionExecution *txm)
             prepare_log_op_.hd_result_.SetError(CcErrorCode::WRITE_LOG_FAILED);
             return;
         });
-        DLOG(INFO) << "txn: " << txm->TxNumber()
-                   << " process acquire_all_intent_op_";
+        DLOG(INFO) << "txn: " << txm->TxNumber() << " process prepare_log_op_";
         txm->Process(prepare_log_op_);
     }
     else if (op_ == &prepare_log_op_)
@@ -2460,13 +2631,21 @@ void UpsertTableOp::Forward(TransactionExecution *txm)
             // Release cluster config op before doing data store op.
             op_ = &unlock_cluster_config_op_;
             // Get cce addr of cluster config read lock from rset.
-            auto &rset = txm->rw_set_.ReadSet();
-            auto &cluster_config_rset = rset.at(cluster_config_ccm_name);
-            assert(cluster_config_rset.size() == 1);
-            for (const auto &[cce_addr, rset_entry] : cluster_config_rset)
+            const CcEntryAddr *cluster_config_addr = nullptr;
+            const ReadSetEntry *cluster_config_entry = nullptr;
+            const auto &meta_rset = txm->rw_set_.MetaDataReadSet();
+            for (const auto &[cce_addr, read_entry_pair] : meta_rset)
             {
-                unlock_cluster_config_op_.Reset(&cce_addr, &rset_entry);
+                if (read_entry_pair.second == cluster_config_ccm_name_sv)
+                {
+                    cluster_config_addr = &cce_addr;
+                    cluster_config_entry = &read_entry_pair.first;
+                    break;
+                }
             }
+            assert(cluster_config_addr && cluster_config_entry);
+            unlock_cluster_config_op_.Reset(cluster_config_addr,
+                                            cluster_config_entry);
             txm->PushOperation(&unlock_cluster_config_op_);
             txm->Process(unlock_cluster_config_op_);
         }
@@ -2505,7 +2684,7 @@ void UpsertTableOp::Forward(TransactionExecution *txm)
         {
             if (txm->CheckLeaderTerm())
             {
-                // Keep retrying if it is DropTable or TruncateTable.
+                // Keep retrying if it is DropTable, TruncateTable.
                 if (op_type_ == OperationType::DropTable ||
                     op_type_ == OperationType::TruncateTable)
                 {
@@ -2516,8 +2695,11 @@ void UpsertTableOp::Forward(TransactionExecution *txm)
                 }
                 else
                 {
-                    /*
+                    // Set txm->commit_ts_ to 0 to indicate there is a flush
+                    // error during upsert_kv_table_op_.
+                    txm->commit_ts_ = tx_op_failed_ts_;
 
+                    /*
                     After upsert kv fails, we need to flush a commit log to
                     indicate this error.
 
@@ -2554,8 +2736,9 @@ void UpsertTableOp::Forward(TransactionExecution *txm)
                 ForceToFinish(txm);
             }
         }
-        else if (op_type_ == OperationType::DropTable ||
-                 op_type_ == OperationType::TruncateTable)
+        else if ((op_type_ == OperationType::DropTable ||
+                  op_type_ == OperationType::TruncateTable) &&
+                 !catalog_rec_.Schema()->HasAutoIncrement())
         {
             const TableSchema *table_old_schema = catalog_rec_.Schema();
             assert(table_old_schema->GetBaseTableName() == table_key_.Name());
@@ -2568,7 +2751,8 @@ void UpsertTableOp::Forward(TransactionExecution *txm)
             clean_ccm_names.emplace_back(
                 table_old_schema->GetBaseTableName().StringView().data(),
                 table_old_schema->GetBaseTableName().StringView().size(),
-                table_old_schema->GetBaseTableName().Type());
+                table_old_schema->GetBaseTableName().Type(),
+                table_old_schema->GetBaseTableName().Engine());
             clean_ccm_op_.table_names_ = std::move(clean_ccm_names);
 
             clean_ccm_op_.clean_type_ = CleanType::CleanCcm;
@@ -2584,29 +2768,52 @@ void UpsertTableOp::Forward(TransactionExecution *txm)
                        << " process clean_ccm_op_";
             txm->Process(clean_ccm_op_);
         }
-        else if (op_type_ == OperationType::CreateTable &&
-                 catalog_rec_.DirtySchema()->HasAutoIncrement())
+        else if ((op_type_ == OperationType::CreateTable &&
+                  catalog_rec_.DirtySchema()->HasAutoIncrement()) ||
+                 ((op_type_ == OperationType::DropTable ||
+                   op_type_ == OperationType::TruncateTable) &&
+                  catalog_rec_.Schema()->HasAutoIncrement()))
         {
-            // For CREATE TABLE, if this table has auto increment column, should
-            // reset the sequence record whose key is the new table's table name
-            // in the sequence ccmap. Firstly, write the sequence data log,
-            // which can ensure the data in the sequence table is correct even
-            // if failover occurs. Secondly, post write the record into sequence
-            // ccmap. It doesn't matter whether perform these two operations
-            // with a write intent or with a write lock, because the table is
-            // inavailable until table is successfully created.
-            const TableName *seq_table_name =
-                catalog_rec_.DirtySchema()->GetSequenceTableName();
-            auto seq_key_rec =
-                catalog_rec_.DirtySchema()->GetSequenceKeyAndInitRecord(
-                    table_key_.Name());
+            // For CREATE or DROP TABLE, if this table has auto increment
+            // column, should init or delete the sequence record whose key is
+            // the table's table name in the sequence table ccmap. Firstly,
+            // write the sequence data log, which can ensure the data in the
+            // sequence table is correct even if failover occurs. Secondly, post
+            // write the record into sequence ccmap. It doesn't matter whether
+            // perform these two operations with a write intent or with a write
+            // lock, because the table is inavailable until table is
+            // successfully created.
 
-            // Upsert sequence record of this table in the sequence ccmap.
-            txm->rw_set_.AddWrite(*seq_table_name,
-                                  0,
-                                  std::move(seq_key_rec.first),
-                                  std::move(seq_key_rec.second),
-                                  OperationType::Update);
+            const TableName *seq_table_name;
+            if (op_type_ == OperationType::CreateTable)
+            {
+                seq_table_name =
+                    catalog_rec_.DirtySchema()->GetSequenceTableName();
+                auto seq_key_rec =
+                    catalog_rec_.DirtySchema()->GetSequenceKeyAndInitRecord(
+                        table_key_.Name());
+                // Upsert sequence record of this table in the sequence
+                // ccmap.
+                txm->rw_set_.AddWrite(*seq_table_name,
+                                      0,
+                                      std::move(seq_key_rec.first),
+                                      std::move(seq_key_rec.second),
+                                      OperationType::Update);
+            }
+            else
+            {
+                seq_table_name = catalog_rec_.Schema()->GetSequenceTableName();
+                auto seq_key_rec =
+                    catalog_rec_.Schema()->GetSequenceKeyAndInitRecord(
+                        table_key_.Name());
+                // Upsert sequence record of this table in the sequence
+                // ccmap.
+                txm->rw_set_.AddWrite(*seq_table_name,
+                                      0,
+                                      std::move(seq_key_rec.first),
+                                      nullptr,
+                                      OperationType::Delete);
+            }
 
             std::unordered_map<TableName, std::pair<uint64_t, TableWriteSet>>
                 &wset = txm->rw_set_.WriteSet();
@@ -2673,7 +2880,9 @@ void UpsertTableOp::Forward(TransactionExecution *txm)
     }
     else if (op_ == &sequence_data_log_op_)
     {
-        assert(op_type_ == OperationType::CreateTable);
+        assert(op_type_ == OperationType::CreateTable ||
+               op_type_ == OperationType::DropTable ||
+               op_type_ == OperationType::TruncateTable);
         if (sequence_data_log_op_.hd_result_.IsError())
         {
             // Fails to flush the data log. Retries the operation if the
@@ -2700,7 +2909,9 @@ void UpsertTableOp::Forward(TransactionExecution *txm)
         else
         {
             const TableName *seq_table_name =
-                catalog_rec_.DirtySchema()->GetSequenceTableName();
+                op_type_ == OperationType::CreateTable
+                    ? catalog_rec_.DirtySchema()->GetSequenceTableName()
+                    : catalog_rec_.Schema()->GetSequenceTableName();
             std::unordered_map<TableName, std::pair<uint64_t, TableWriteSet>>
                 &wset = txm->rw_set_.WriteSet();
             auto wset_it = wset.find(*seq_table_name);
@@ -2711,11 +2922,8 @@ void UpsertTableOp::Forward(TransactionExecution *txm)
             const TxKey &tx_key = write_entry_it->first;
 
             reset_sequence_record_op_.op_func_ =
-                [txm,
-                 seq_table_name,
-                 &tx_key,
-                 &write_entry,
-                 &hd_res = reset_sequence_record_op_.hd_result_]
+                [txm, seq_table_name, &tx_key, &write_entry](
+                    AsyncOp<PostProcessResult> &async_op)
             {
                 txm->cc_handler_->UploadRecord(
                     txm->tx_number_.load(std::memory_order_relaxed),
@@ -2727,7 +2935,7 @@ void UpsertTableOp::Forward(TransactionExecution *txm)
                     write_entry.rec_.get(),
                     write_entry.op_,
                     write_entry.key_shard_code_,
-                    hd_res);
+                    async_op.hd_result_);
             };
 
             op_ = &reset_sequence_record_op_;
@@ -2737,7 +2945,7 @@ void UpsertTableOp::Forward(TransactionExecution *txm)
     }
     else if (op_ == &reset_sequence_record_op_)
     {
-        assert(op_type_ == OperationType::CreateTable);
+        // assert(op_type_ == OperationType::CreateTable);
         if (reset_sequence_record_op_.hd_result_.IsError())
         {
             if (txm->CheckLeaderTerm())
@@ -2757,14 +2965,55 @@ void UpsertTableOp::Forward(TransactionExecution *txm)
             return;
         }
 
-        // Remove the record for sequence table from write set.
-        const TableName *seq_table_name =
-            catalog_rec_.DirtySchema()->GetSequenceTableName();
-        txm->rw_set_.ClearTable(*seq_table_name);
+        if (op_type_ == OperationType::CreateTable)
+        {
+            // Remove the record for sequence table from write set.
+            const TableName *seq_table_name =
+                catalog_rec_.DirtySchema()->GetSequenceTableName();
+            txm->rw_set_.ClearWriteSet(*seq_table_name);
 
-        op_ = &lock_cluster_config_op_;
-        txm->PushOperation(&lock_cluster_config_op_);
-        txm->Process(lock_cluster_config_op_);
+            op_ = &lock_cluster_config_op_;
+            txm->PushOperation(&lock_cluster_config_op_);
+            txm->Process(lock_cluster_config_op_);
+        }
+        else
+        {
+            assert(op_type_ == OperationType::DropTable ||
+                   op_type_ == OperationType::TruncateTable);
+
+            const TableSchema *table_old_schema = catalog_rec_.Schema();
+            assert(table_old_schema->GetBaseTableName() == table_key_.Name());
+            assert(clean_ccm_op_.table_names_.empty());
+
+            // Remove the record for sequence table from write set.
+            const TableName *seq_table_name =
+                table_old_schema->GetSequenceTableName();
+            txm->rw_set_.ClearWriteSet(*seq_table_name);
+
+            auto clean_ccm_names = table_old_schema->IndexNames();
+#ifdef ON_KEY_OBJECT
+            assert(clean_ccm_names.empty());
+#endif
+            clean_ccm_names.emplace_back(
+                table_old_schema->GetBaseTableName().StringView().data(),
+                table_old_schema->GetBaseTableName().StringView().size(),
+                table_old_schema->GetBaseTableName().Type(),
+                table_old_schema->GetBaseTableName().Engine());
+            clean_ccm_op_.table_names_ = std::move(clean_ccm_names);
+
+            clean_ccm_op_.clean_type_ = CleanType::CleanCcm;
+            clean_ccm_op_.commit_ts_ = txm->CommitTs();
+
+            LOG(INFO)
+                << "UpsertTableOp: Clean all ccmap on all node groups, txn: "
+                << txm->TxNumber();
+
+            op_ = &clean_ccm_op_;
+            txm->PushOperation(&clean_ccm_op_);
+            DLOG(INFO) << "txn: " << txm->TxNumber()
+                       << " process clean_ccm_op_";
+            txm->Process(clean_ccm_op_);
+        }
     }
     else if (op_ == &acquire_all_lock_op_)
     {
@@ -2856,7 +3105,8 @@ void UpsertTableOp::Forward(TransactionExecution *txm)
                     clean_ccm_op_.table_names_.emplace_back(
                         table_key_.Name().StringView().data(),
                         table_key_.Name().StringView().size(),
-                        table_key_.Name().Type());
+                        table_key_.Name().Type(),
+                        table_key_.Name().Engine());
                     clean_ccm_op_.clean_type_ = CleanType::CleanCcm;
                     clean_ccm_op_.commit_ts_ = txm->CommitTs();
 
@@ -2926,7 +3176,7 @@ void UpsertTableOp::Forward(TransactionExecution *txm)
         clean_ccm_op_.Clear();
 
         // Clear write set before commit dirty schema.
-        txm->rw_set_.ClearTable(table_key_.Name());
+        txm->rw_set_.ClearWriteSet(table_key_.Name());
         txm->rw_set_.ClearReadSet(table_key_.Name());
 
         // Update catalog record to the latest schema.
@@ -2996,7 +3246,8 @@ void UpsertTableOp::Forward(TransactionExecution *txm)
             // this step to reject dirty schema and remove write locks.
             txm->PushOperation(&post_all_lock_op_);
             DLOG(INFO) << "txn: " << txm->TxNumber()
-                       << " process post_all_lock_op_";
+                       << " process post_all_lock_op_, "
+                       << post_all_lock_op_.hd_result_.ErrorMsg();
             txm->Process(post_all_lock_op_);
             return;
         }
@@ -3091,6 +3342,7 @@ void UpsertTableOp::Forward(TransactionExecution *txm)
 }
 
 void UpsertTableOp::Reset(const std::string_view table_name_str,
+                          TableEngine table_engine,
                           const std::string &current_image,
                           uint64_t curr_schema_ts,
                           const std::string &dirty_image,
@@ -3107,8 +3359,10 @@ void UpsertTableOp::Reset(const std::string_view table_name_str,
     is_running_ = false;
 
     // reset SchemaOp
-    table_key_.Name() = TableName(
-        table_name_str.data(), table_name_str.size(), TableType::Primary);
+    table_key_.Name() = TableName(table_name_str.data(),
+                                  table_name_str.size(),
+                                  TableType::Primary,
+                                  table_engine);
     catalog_rec_.SetSchemaImage(current_image);
     catalog_rec_.SetDirtySchemaImage(dirty_image);
     image_str_ = current_image;
@@ -3124,8 +3378,9 @@ void UpsertTableOp::Reset(const std::string_view table_name_str,
     cluster_conf_rec_.Reset();
     lock_cluster_config_op_.Reset();
     lock_cluster_config_op_.key_ = VoidKey::NegInfTxKey();
-    lock_cluster_config_op_.table_name_ =
-        TableName(cluster_config_ccm_name_sv, TableType::ClusterConfig);
+    lock_cluster_config_op_.table_name_ = TableName(cluster_config_ccm_name_sv,
+                                                    TableType::ClusterConfig,
+                                                    TableEngine::None);
     lock_cluster_config_op_.rec_ = &cluster_conf_rec_;
     lock_cluster_config_op_.hd_result_ = &read_cluster_result_;
     prepare_log_op_.Reset();
@@ -3226,6 +3481,192 @@ void UpsertTableOp::ForceToFinish(TransactionExecution *txm)
     Forward(txm);
 }
 
+FlushUpdateTableOp::FlushUpdateTableOp(TransactionExecution *txm)
+    : op_(nullptr),
+      post_all_intent_op_(txm),
+      update_kv_table_op_(txm),
+      need_write_log_(false),
+      commit_log_op_(txm),
+      clean_log_op_(txm)
+{
+    post_all_intent_op_.table_name_ = &catalog_ccm_name;
+    post_all_intent_op_.op_type_ = OperationType::Update;
+    post_all_intent_op_.write_type_ = PostWriteType::PrepareCommit;
+
+    update_kv_table_op_.op_func_ = [txm](AsyncOp<Void> &async_op)
+    {
+        CcHandlerResult<Void> &hd_res = async_op.hd_result_;
+        hd_res.SetRefCnt(txm->rw_set_.CatalogWriteSetSize());
+        for (const auto &[write_key, write_entry] :
+             txm->rw_set_.CatalogWriteSet())
+        {
+            const CatalogRecord *catalog_rec =
+                static_cast<const CatalogRecord *>(write_entry.rec_.get());
+            assert(catalog_rec->DirtySchema());
+
+            txm->cc_handler_->DataStoreUpsertTable(catalog_rec->Schema(),
+                                                   catalog_rec->DirtySchema(),
+                                                   OperationType::Update,
+                                                   txm->CommitTs(),
+                                                   txm->TxCcNodeId(),
+                                                   txm->TxTerm(),
+                                                   hd_res,
+                                                   nullptr);
+        }
+    };
+}
+
+void FlushUpdateTableOp::Reset()
+{
+    op_ = nullptr;
+
+    post_all_intent_op_.Reset(0);
+    post_all_intent_op_.keys_.clear();
+    post_all_intent_op_.recs_.clear();
+
+    update_kv_table_op_.Reset();
+
+    need_write_log_ = false;
+    commit_log_op_.Reset();
+    clean_log_op_.Reset();
+}
+
+void FlushUpdateTableOp::Forward(TransactionExecution *txm)
+{
+    if (op_ == nullptr)
+    {
+        op_ = &post_all_intent_op_;
+        post_all_intent_op_.keys_.reserve(txm->rw_set_.CatalogWriteSetSize());
+        post_all_intent_op_.recs_.reserve(txm->rw_set_.CatalogWriteSetSize());
+        for (const auto &[write_key, write_entry] :
+             txm->rw_set_.CatalogWriteSet())
+        {
+            post_all_intent_op_.keys_.push_back(write_key.GetShallowCopy());
+            post_all_intent_op_.recs_.push_back(write_entry.rec_.get());
+        }
+        txm->PushOperation(&post_all_intent_op_);
+        txm->Process(post_all_intent_op_);
+    }
+    else if (op_ == &post_all_intent_op_)
+    {
+        if (post_all_intent_op_.IsFailed())
+        {
+            if (txm->CheckLeaderTerm())
+            {
+                txm->PushOperation(&post_all_intent_op_);
+                txm->Process(post_all_intent_op_);
+            }
+            else
+            {
+                LOG(ERROR) << "txm: " << txm->TxNumber()
+                           << " failed to post all intent. error: "
+                           << post_all_intent_op_.hd_result_.ErrorMsg();
+                Reset();
+                txm->state_stack_.clear();
+                txm->Abort();
+            }
+        }
+        else
+        {
+            op_ = &update_kv_table_op_;
+            txm->PushOperation(&update_kv_table_op_);
+            txm->Process(update_kv_table_op_);
+        }
+    }
+    else if (op_ == &update_kv_table_op_)
+    {
+        if (update_kv_table_op_.hd_result_.IsError())
+        {
+            if (txm->CheckLeaderTerm())
+            {
+                txm->PushOperation(&update_kv_table_op_);
+                txm->Process(update_kv_table_op_);
+            }
+            else
+            {
+                LOG(ERROR) << "txm: " << txm->TxNumber()
+                           << " failed to update kv table. error: "
+                           << update_kv_table_op_.hd_result_.ErrorMsg();
+                Reset();
+                txm->state_stack_.clear();
+                txm->Abort();
+            }
+        }
+        else
+        {
+            if (need_write_log_)
+            {
+                txm->FillCommitCatalogsLogRequest(commit_log_op_);
+                op_ = &commit_log_op_;
+                txm->PushOperation(&commit_log_op_);
+                txm->Process(commit_log_op_);
+            }
+            else
+            {
+                Reset();
+                txm->state_stack_.pop_back();
+                assert(txm->state_stack_.back() == &txm->post_process_);
+            }
+        }
+    }
+    else if (op_ == &commit_log_op_)
+    {
+        if (commit_log_op_.hd_result_.IsError())
+        {
+            if (txm->CheckLeaderTerm())
+            {
+                // set retry flag and retry commit log
+                ::txlog::WriteLogRequest *log_req =
+                    commit_log_op_.log_closure_.LogRequest()
+                        .mutable_write_log_request();
+                log_req->set_retry(true);
+                txm->PushOperation(&commit_log_op_);
+                DLOG(INFO) << "txn: " << txm->TxNumber()
+                           << " process commit_log_op_";
+                txm->Process(commit_log_op_);
+            }
+        }
+        else
+        {
+            txm->FillCleanCatalogsLogRequest(clean_log_op_);
+            op_ = &clean_log_op_;
+            txm->PushOperation(&clean_log_op_);
+            txm->Process(clean_log_op_);
+        }
+    }
+    else
+    {
+        assert(op_ == &clean_log_op_);
+        if (clean_log_op_.hd_result_.IsError())
+        {
+            if (txm->CheckLeaderTerm())
+            {
+                // set retry flag and retry clean log
+                ::txlog::WriteLogRequest *log_req =
+                    clean_log_op_.log_closure_.LogRequest()
+                        .mutable_write_log_request();
+                log_req->set_retry(true);
+                txm->PushOperation(&clean_log_op_);
+                DLOG(INFO) << "txn: " << txm->TxNumber()
+                           << " process clean_log_op_";
+                txm->Process(clean_log_op_);
+            }
+            else
+            {
+                Reset();
+                txm->state_stack_.clear();
+                txm->Abort();
+            }
+        }
+        else
+        {
+            Reset();
+            txm->state_stack_.pop_back();
+            assert(txm->state_stack_.back() == &txm->post_process_);
+        }
+    }
+}
+
 SleepOperation::SleepOperation(TransactionExecution *txm)
 {
 }
@@ -3299,7 +3740,7 @@ void NoOp::Forward(TransactionExecution *txm)
     {
         txm->PostProcess(*this);
     }
-    else if (txm->IsTimeOut() && hd_result_.SetResultByTimeoutThread())
+    else if (txm->IsTimeOut())
     {
         TX_TRACE_ACTION_WITH_CONTEXT(
             this,
@@ -3359,7 +3800,7 @@ void AsyncOp<ResultType>::Forward(TransactionExecution *txm)
         }
         txm->PostProcess(*this);
     }
-    else if (txm->IsTimeOut() && hd_result_.SetResultByTimeoutThread())
+    else if (txm->IsTimeOut())
     {
         TX_TRACE_ACTION_WITH_CONTEXT(
             this,
@@ -3397,7 +3838,7 @@ void AsyncOp<ResultType>::Reset()
 
 template struct AsyncOp<PostProcessResult>;
 template struct AsyncOp<Void>;
-template struct AsyncOp<PackSkError>;
+template struct AsyncOp<GenerateSkParallelResult>;
 
 CompositeTransactionOperation::CompositeTransactionOperation() : op_(nullptr)
 {
@@ -3473,7 +3914,7 @@ void KickoutDataOp::Forward(TransactionExecution *txm)
     }
     else if (hd_result_.LocalRefCnt() == 0)
     {
-        if (txm->IsTimeOut(10) && hd_result_.SetResultByTimeoutThread())
+        if (txm->IsTimeOut(10))
         {
             LOG(WARNING) << "Kickout data operation timeout 10s";
             bool force_error = hd_result_.ForceError();
@@ -3533,8 +3974,7 @@ void KickoutDataAllOp::Forward(TransactionExecution *txm)
         return;
     }
 
-    if (hd_result_.LocalRefCnt() == 0 && txm->IsTimeOut(10) &&
-        hd_result_.SetResultByTimeoutThread())
+    if (hd_result_.LocalRefCnt() == 0 && txm->IsTimeOut(10))
     {
         LOG(WARNING) << "Kickout data all operation timeout 10s";
         bool force_error = hd_result_.ForceError();
@@ -3558,8 +3998,10 @@ SplitFlushRangeOp::SplitFlushRangeOp(
     bool is_dirty)
     : CompositeTransactionOperation(),
       table_schema_(std::move(table_schema)),
-      table_name_(table_name.String(), table_name.Type()),
-      range_table_name_(table_name_.StringView(), TableType::RangePartition),
+      table_name_(table_name.String(), table_name.Type(), table_name.Engine()),
+      range_table_name_(table_name_.StringView(),
+                        TableType::RangePartition,
+                        table_name_.Engine()),
       read_cluster_result_(txm),
       range_entry_(range_entry),
       new_range_info_(std::move(new_range_info)),
@@ -3590,8 +4032,9 @@ SplitFlushRangeOp::SplitFlushRangeOp(
 
     range_record_ = std::make_unique<RangeRecord>(range_info_.get(), nullptr);
 
-    lock_cluster_config_op_.table_name_ =
-        TableName(cluster_config_ccm_name_sv, TableType::ClusterConfig);
+    lock_cluster_config_op_.table_name_ = TableName(cluster_config_ccm_name_sv,
+                                                    TableType::ClusterConfig,
+                                                    TableEngine::None);
     lock_cluster_config_op_.key_ = VoidKey::NegInfTxKey();
     lock_cluster_config_op_.rec_ = &cluster_conf_rec_;
     lock_cluster_config_op_.hd_result_ = &read_cluster_result_;
@@ -3654,10 +4097,12 @@ void SplitFlushRangeOp::Reset(
     op_ = nullptr;
 
     // Reset SplitFlushRangeOp
-    table_name_ = TableName(table_name.String(), table_name.Type());
+    table_name_ =
+        TableName(table_name.String(), table_name.Type(), table_name.Engine());
     table_schema_ = std::move(table_schema);
-    range_table_name_ =
-        TableName(table_name_.StringView(), TableType::RangePartition);
+    range_table_name_ = TableName(table_name_.StringView(),
+                                  TableType::RangePartition,
+                                  table_name_.Engine());
 
     range_entry_ = range_entry;
     range_info_ = range_entry_->GetRangeInfo()->Clone();
@@ -3712,8 +4157,9 @@ void SplitFlushRangeOp::Reset(
     read_cluster_result_.ResetTxm(txm);
     cluster_conf_rec_.Reset();
     lock_cluster_config_op_.key_ = VoidKey::NegInfTxKey();
-    lock_cluster_config_op_.table_name_ =
-        TableName(cluster_config_ccm_name_sv, TableType::ClusterConfig);
+    lock_cluster_config_op_.table_name_ = TableName(cluster_config_ccm_name_sv,
+                                                    TableType::ClusterConfig,
+                                                    TableEngine::None);
     lock_cluster_config_op_.rec_ = &cluster_conf_rec_;
     lock_cluster_config_op_.hd_result_ = &read_cluster_result_;
 
@@ -3968,13 +4414,21 @@ void SplitFlushRangeOp::Forward(TransactionExecution *txm)
                             { return; });
 
         // Get cce addr of cluster config read lock from rset.
-        auto &rset = txm->rw_set_.ReadSet();
-        auto &cluster_config_rset = rset.at(cluster_config_ccm_name);
-        assert(cluster_config_rset.size() == 1);
-        for (const auto &[cce_addr, rset_entry] : cluster_config_rset)
+        const CcEntryAddr *cluster_config_addr = nullptr;
+        const ReadSetEntry *cluster_config_entry = nullptr;
+        const auto &meta_rset = txm->rw_set_.MetaDataReadSet();
+        for (const auto &[cce_addr, read_entry_pair] : meta_rset)
         {
-            unlock_cluster_config_op_.Reset(&cce_addr, &rset_entry);
+            if (read_entry_pair.second == cluster_config_ccm_name_sv)
+            {
+                cluster_config_addr = &cce_addr;
+                cluster_config_entry = &read_entry_pair.first;
+                break;
+            }
         }
+        assert(cluster_config_addr && cluster_config_entry);
+        unlock_cluster_config_op_.Reset(cluster_config_addr,
+                                        cluster_config_entry);
 
         LOG(INFO) << "Split Flush transaction unlock cluster config, range id "
                   << range_info_->PartitionId() << ", txn: " << txm->TxNumber();
@@ -4004,9 +4458,10 @@ void SplitFlushRangeOp::Forward(TransactionExecution *txm)
                 [partition_id = range_info_->partition_id_,
                  &start_key = new_range_info_.front().first,
                  &table_name = table_name_,
-                 table_schema = table_schema_.get(),
-                 &hd_res = ds_clean_old_range_op_.hd_result_]
+                 table_schema = table_schema_.get()](AsyncOp<Void> &async_op)
             {
+                CcHandlerResult<Void> &hd_res = async_op.hd_result_;
+
                 TxWorkerPool *tx_worker_pool =
                     Sharder::Instance().GetTxWorkerPool();
                 store::DataStoreHandler *const store_hd =
@@ -4045,17 +4500,18 @@ void SplitFlushRangeOp::Forward(TransactionExecution *txm)
             assert(prepare_log_op_.hd_result_.IsFinished());
 
             auto local_cc_shards = Sharder::Instance().GetLocalCcShards();
-            data_sync_op_.op_func_ =
-                [this,
-                 table_schema = table_schema_,
-                 txn = txm->TxNumber(),
-                 tx_term = txm->tx_term_,
-                 node_group = txm->TxCcNodeId(),
-                 ckpt_ts = txm->commit_ts_,
-                 &local_cc_shards = *local_cc_shards]() mutable
+            data_sync_op_.op_func_ = [this,
+                                      table_schema = table_schema_,
+                                      txn = txm->TxNumber(),
+                                      tx_term = txm->tx_term_,
+                                      node_group = txm->TxCcNodeId(),
+                                      ckpt_ts = txm->commit_ts_,
+                                      &local_cc_shards = *local_cc_shards](
+                                         AsyncOp<Void> &async_op) mutable
             {
+                CcHandlerResult<Void> &hd_res = async_op.hd_result_;
 #ifdef EXT_TX_PROC_ENABLED
-                data_sync_op_.hd_result_.SetToBlock();
+                hd_res.SetToBlock();
 #endif
                 // Enqueue DataSyncTask for subranges.
                 local_cc_shards.EnqueueDataSyncTaskForSplittingRange(
@@ -4067,7 +4523,7 @@ void SplitFlushRangeOp::Forward(TransactionExecution *txm)
                     ckpt_ts,
                     is_dirty_,
                     txn,
-                    &data_sync_op_.hd_result_);
+                    &hd_res);
             };
 
             LOG(INFO) << "Split Flush transaction data sync, range id "
@@ -4149,8 +4605,7 @@ void SplitFlushRangeOp::Forward(TransactionExecution *txm)
                 [this,
                  txm,
                  &old_end_key = old_end_key_,
-                 &new_ranges = new_range_info_,
-                 &hd_result = update_key_cache_op_.hd_result_]
+                 &new_ranges = new_range_info_](AsyncOp<Void> &async_op)
             {
                 NodeGroupId node_group = txm->TxCcNodeId();
                 int64_t tx_term = txm->TxTerm();
@@ -4178,6 +4633,7 @@ void SplitFlushRangeOp::Forward(TransactionExecution *txm)
                     }
                 }
 
+                CcHandlerResult<Void> &hd_result = async_op.hd_result_;
                 if (ranges.size() == 0)
                 {
                     hd_result.SetFinished();
@@ -4263,10 +4719,9 @@ void SplitFlushRangeOp::Forward(TransactionExecution *txm)
         ds_upsert_range_op_.op_func_ =
             [&table_name = table_name_,
              range_info = std::move(splitted_range_info),
-             tx_ts = txm->commit_ts_,
-             &hd_res = ds_upsert_range_op_.hd_result_,
-             &worker = ds_upsert_range_op_.worker_thread_]
+             tx_ts = txm->commit_ts_](AsyncOp<Void> &async_op) mutable
         {
+            CcHandlerResult<Void> &hd_res = async_op.hd_result_;
 #ifdef EXT_TX_PROC_ENABLED
             hd_res.SetToBlock();
             // The memory fence ensures that the block flag is set before the
@@ -4275,8 +4730,11 @@ void SplitFlushRangeOp::Forward(TransactionExecution *txm)
 #endif
             // Launch a new thread instead of sending it to workerpool to
             // avoid being blocked during write lock is held.
-            worker = std::thread(
-                [table_name, range_info = std::move(range_info), tx_ts, &hd_res]
+            async_op.worker_thread_ = std::thread(
+                [table_name,
+                 range_info = std::move(range_info),
+                 tx_ts,
+                 &hd_res]() mutable
                 {
                     store::DataStoreHandler *const store_hd =
                         Sharder::Instance().GetLocalCcShards()->store_hd_;
@@ -4420,13 +4878,21 @@ void SplitFlushRangeOp::Forward(TransactionExecution *txm)
             return;
         }
 
-        auto &rset = txm->rw_set_.ReadSet();
-        auto &cluster_config_rset = rset.at(cluster_config_ccm_name);
-        assert(cluster_config_rset.size() == 1);
-        for (const auto &[cce_addr, rset_entry] : cluster_config_rset)
+        const CcEntryAddr *cluster_config_addr = nullptr;
+        const ReadSetEntry *cluster_config_entry = nullptr;
+        const auto &meta_rset = txm->rw_set_.MetaDataReadSet();
+        for (const auto &[cce_addr, read_entry_pair] : meta_rset)
         {
-            unlock_cluster_config_op_.Reset(&cce_addr, &rset_entry);
+            if (read_entry_pair.second == cluster_config_ccm_name_sv)
+            {
+                cluster_config_addr = &cce_addr;
+                cluster_config_entry = &read_entry_pair.first;
+                break;
+            }
         }
+        assert(cluster_config_addr && cluster_config_entry);
+        unlock_cluster_config_op_.Reset(cluster_config_addr,
+                                        cluster_config_entry);
 
         LOG(INFO) << "Split Flush transaction unlock cluster config, range id "
                   << range_info_->PartitionId() << ", txn: " << txm->TxNumber();
@@ -4530,6 +4996,8 @@ void SplitFlushRangeOp::FillPrepareLogRequest(TransactionExecution *txm)
     ::txlog::SplitRangeOpMessage *prepare_split_msg =
         prepare_log_rec->mutable_log_content()->mutable_split_range_log();
     prepare_split_msg->set_table_name(range_table_name_.String());
+    prepare_split_msg->set_table_engine(
+        ::txlog::ToRemoteType::ConvertTableEngine(range_table_name_.Engine()));
     prepare_split_msg->set_stage(
         ::txlog::SplitRangeOpMessage_Stage_PrepareSplit);
     // Set range info for splitting range
@@ -4809,8 +5277,7 @@ void AnalyzeTableAllOp::Forward(TransactionExecution *txm)
     {
         txm->PostProcess(*this);
     }
-    else if (hd_result_.LocalRefCnt() == 0 && txm->IsTimeOut(600) &&
-             hd_result_.SetResultByTimeoutThread())
+    else if (hd_result_.LocalRefCnt() == 0 && txm->IsTimeOut(600))
     {
         TX_TRACE_ACTION_WITH_CONTEXT(
             this,
@@ -4856,8 +5323,7 @@ void BroadcastStatisticsOp::Forward(TransactionExecution *txm)
     {
         txm->PostProcess(*this);
     }
-    else if (hd_result_.LocalRefCnt() == 0 && txm->IsTimeOut(600) &&
-             hd_result_.SetResultByTimeoutThread())
+    else if (hd_result_.LocalRefCnt() == 0 && txm->IsTimeOut(600))
     {
         TX_TRACE_ACTION_WITH_CONTEXT(
             this,
@@ -4897,7 +5363,8 @@ ObjectCommandOp::ObjectCommandOp(
 void ObjectCommandOp::Reset(const TableName *table_name,
                             const TxKey *key,
                             TxCommand *command,
-                            bool auto_commit)
+                            bool auto_commit,
+                            bool always_redirect)
 {
     table_name_ = table_name;
     key_ = key;
@@ -4905,6 +5372,7 @@ void ObjectCommandOp::Reset(const TableName *table_name,
     hd_result_.Reset();
     hd_result_.Value().Reset();
     auto_commit_ = auto_commit;
+    always_redirect_ = always_redirect;
 #ifdef RANGE_PARTITION_ENABLED
     lock_range_result_->Value().Reset();
     lock_range_result_->Reset();
@@ -4927,11 +5395,20 @@ void ObjectCommandOp::Forward(TransactionExecution *txm)
             const CcHandlerResult<ReadKeyResult> &read_catalog_result =
                 txm->read_catalog_result_;
             assert(read_catalog_result.IsFinished());
-            if (read_catalog_result.IsError())
+            if (read_catalog_result.IsError() ||
+                read_catalog_result.Value().rec_status_ != RecordStatus::Normal)
             {
+                if (read_catalog_result.Value().rec_status_ !=
+                    RecordStatus::Normal)
+                {
+                    LOG(ERROR) << "ReadCatalogOp record status not normal: "
+                               << int(read_catalog_result.Value().rec_status_);
+                }
                 // There is an error when read the catalog. The read operation
                 // is set to be errored.
-                hd_result_.SetError(read_catalog_result.ErrorCode());
+                hd_result_.SetError(read_catalog_result.IsError()
+                                        ? read_catalog_result.ErrorCode()
+                                        : CcErrorCode::READ_CATALOG_FAIL);
 
                 txm->PostProcess(*this);
                 return;
@@ -5016,39 +5493,22 @@ void ObjectCommandOp::Forward(TransactionExecution *txm)
         return;
     }
 
-    if (!hd_result_.Value().is_local_)
+    if (txm->IsTimeOut())
     {
-        bool timeout = false;
-        if (txm->IsTimeOut() && hd_result_.SetResultByTimeoutThread())
+        if (!hd_result_.Value().is_local_)
         {
-            timeout = true;
-        }
+            const CcEntryAddr &cce_addr = hd_result_.Value().cce_addr_;
 
-        const CcEntryAddr &cce_addr = hd_result_.Value().cce_addr_;
-
-        if (timeout)
-        {
-            if (cce_addr.Term() < 0)
+            if (cce_addr.Term() < 0 ||
+                (!txm->CheckLeaderTerm() && !txm->CheckStandbyTerm()))
             {
-                TX_TRACE_ACTION_WITH_CONTEXT(
-                    this,
-                    "Forward.Term<0.IsTimeout",
-                    txm,
-                    (
-                        [txm]() -> std::string
-                        {
-                            return std::string(",\"tx_number\":")
-                                .append(std::to_string(txm->TxNumber()))
-                                .append(",\"term\":")
-                                .append(std::to_string(txm->TxTerm()));
-                        }));
                 // For non-blocking concurrency control protocols, the object
                 // command is expected to return instantly. For 2PL, if the
-                // request is blocked, the cc node will send an acknowledgement
-                // to update the key's term. In either case, if the object's
-                // term is not set, the tx has not received any response or
-                // acknowledgement from the key's cc node group. The request is
-                // forced to be errored upon timeout.
+                // request is blocked, the cc node will send an
+                // acknowledgement to update the key's term. In either case, if
+                // the object's term is not set, the tx has not received any
+                // response or acknowledgement from the key's cc node group.
+                // The request is forced to be errored upon timeout.
 
                 bool force_error = hd_result_.ForceError();
                 if (force_error)
@@ -5056,11 +5516,9 @@ void ObjectCommandOp::Forward(TransactionExecution *txm)
                     txm->PostProcess(*this);
                 }
             }
-            else if (cce_addr.Term() > 0)
+            else
             {
-                // Unset timeout status. So the cc_stream_reciver can handle
-                // response.
-                hd_result_.UnsetByTimeoutThread();
+                DeadLockCheck::RequestCheck();
 
                 // Check if the blocked keys are still blocked in the lock
                 // queue.
@@ -5072,6 +5530,11 @@ void ObjectCommandOp::Forward(TransactionExecution *txm)
                     &hd_result_,
                     ResultTemplateType::ReadKeyResult);
             }
+        }
+        else
+        {
+            // local request timeout
+            DeadLockCheck::RequestCheck();
         }
     }
 }
@@ -5098,8 +5561,8 @@ bool MultiObjectCommandOp::IsBlockCommand()
 void MultiObjectCommandOp::Reset(MultiObjectCommandTxRequest *req)
 {
     tx_req_ = req;
-    size_t len = req->VctKey()->size();
-    size_t min_len = std::min(len, vct_hd_result_.size());
+    size_t new_size = req->VctKey()->size();
+    size_t min_len = std::min(new_size, vct_hd_result_.size());
 
     for (size_t i = 0; i < min_len; i++)
     {
@@ -5108,16 +5571,16 @@ void MultiObjectCommandOp::Reset(MultiObjectCommandTxRequest *req)
         hr.Value().Reset();
     }
 
-    if (len < vct_hd_result_.size())
+    if (new_size < vct_hd_result_.size())
     {
-        for (size_t i = min_len; i < vct_hd_result_.size();)
+        while (min_len < vct_hd_result_.size())
         {
             vct_hd_result_.pop_back();
         }
     }
-    else if (min_len < len)
+    else if (min_len < new_size)
     {
-        for (size_t i = min_len; i < len; i++)
+        for (size_t i = min_len; i < new_size; i++)
         {
             CcHandlerResult<ObjectCommandResult> hr(txm_);
             hr.Value().Reset();
@@ -5137,6 +5600,7 @@ void MultiObjectCommandOp::Reset(MultiObjectCommandTxRequest *req)
                 }
 
                 atm_block_cnt_.fetch_sub(1, std::memory_order_relaxed);
+
                 atm_cnt_.fetch_sub(1, std::memory_order_release);
             };
 
@@ -5150,27 +5614,25 @@ void MultiObjectCommandOp::Reset(MultiObjectCommandTxRequest *req)
     if (num > 0)
     {
         vct_abort_hd_result_.clear();
-        for (size_t i = 0; i < len; i++)
+        for (size_t i = 0; i < new_size; i++)
         {
             CcHandlerResult<ObjectCommandResult> hr(txm_);
             hr.Value().Reset();
             hr.Reset();
             hr.post_lambda_ = [this](CcHandlerResult<ObjectCommandResult> *res)
             {
-                if (res->Value().is_local_)
-                {
-                    atm_local_cnt_.fetch_sub(1, std::memory_order_relaxed);
-                }
-
                 CcErrorCode err = res->ErrorCode();
                 if (err != CcErrorCode::NO_ERROR &&
                     err != CcErrorCode::TASK_EXPIRED)
                 {
                     atm_err_code_.store(err, std::memory_order_relaxed);
                 }
-
-                atm_block_cnt_.fetch_sub(1, std::memory_order_relaxed);
-                atm_cnt_.fetch_sub(1, std::memory_order_release);
+                if (res->Value().is_local_)
+                {
+                    // We only increased atm_cnt_ for local discard requests.
+                    atm_cnt_.fetch_sub(1, std::memory_order_release);
+                    atm_local_cnt_.fetch_sub(1, std::memory_order_relaxed);
+                }
             };
 
             vct_abort_hd_result_.emplace_back(std::move(hr));
@@ -5182,19 +5644,19 @@ void MultiObjectCommandOp::Reset(MultiObjectCommandTxRequest *req)
     else
     {
         is_block_command_ = false;
-        atm_block_cnt_.store(len, std::memory_order_relaxed);
+        atm_block_cnt_.store(new_size, std::memory_order_relaxed);
     }
 
-    atm_cnt_.store(len, std::memory_order_relaxed);
+    atm_cnt_.store(new_size, std::memory_order_relaxed);
 
 #ifdef RANGE_PARTITION_ENABLED
-    vct_key_shard_code_.resize(len);
+    vct_key_shard_code_.resize(new_size);
     range_lock_cur_ = 0;
     lock_range_result_->Value().Reset();
     lock_range_result_->Reset();
 #else
     vct_key_shard_code_.clear();
-    vct_key_shard_code_.resize(len);
+    vct_key_shard_code_.resize(new_size);
     for (auto &shard_code : vct_key_shard_code_)
     {
         shard_code.second = UINT32_MAX;
@@ -5314,7 +5776,7 @@ void MultiObjectCommandOp::Forward(TransactionExecution *txm)
 
         if (!mcmd->ForwardResult())
         {
-            if (atm_cnt_.load(std::memory_order_relaxed) == 0)
+            if (atm_cnt_.load(std::memory_order_acquire) == 0)
             {
                 txm->PostProcess(*this);
             }
@@ -5367,7 +5829,8 @@ void MultiObjectCommandOp::Forward(TransactionExecution *txm)
                 hd_res,
                 txm->iso_level_,
                 txm->protocol_,
-                commit);
+                commit,
+                tx_req_->always_redirect_);
 
             if (hd_res.Value().is_local_)
             {
@@ -5380,8 +5843,10 @@ void MultiObjectCommandOp::Forward(TransactionExecution *txm)
             // For abort commands, only local commands need to call SetFinished
             // to avoid to visit freed memory.
             atm_local_cnt_.fetch_add(local_cnt, std::memory_order_relaxed);
-            atm_cnt_.fetch_add(local_cnt, std::memory_order_release);
+            atm_cnt_.fetch_add(local_cnt, std::memory_order_relaxed);
         }
+        // Reset timeout timer after discard commands are sent.
+        txm->StartTiming();
     }
     else if (atm_cnt_.load(std::memory_order_acquire) == 0)
     {
@@ -5389,86 +5854,71 @@ void MultiObjectCommandOp::Forward(TransactionExecution *txm)
     }
     else if (txm->IsTimeOut())
     {
-        if (atm_err_code_.load(std::memory_order_acquire) !=
-                CcErrorCode::NO_ERROR &&
-            atm_local_cnt_.load(std::memory_order_relaxed) == 0)
+        if (atm_local_cnt_.load(std::memory_order_relaxed) == 0)
         {
-            txm->PostProcess(*this);
-            return;
-        }
-
-        bool force_error = false;
-        for (auto &hd_result : vct_hd_result_)
-        {
-            if (hd_result.IsFinished())
+            // Fast path check - if any error exists, we need to verify all
+            // hd_results are either finished or can be force-errored
+            if (atm_err_code_.load(std::memory_order_acquire) ==
+                    CcErrorCode::NO_ERROR &&
+                (txm->CheckLeaderTerm() || txm->CheckStandbyTerm()))
             {
-                continue;
-            }
+                DeadLockCheck::RequestCheck();
 
-            // Here should consider 2 cases, 1. cce_addr.Term() < 0 does
-            // not receiver the response from server. 2. cce_addr.Term() > 0 the
-            // ccentry has been blocked by other transaction.
-            const CcEntryAddr &cce_addr = hd_result.Value().cce_addr_;
-            if (cce_addr.Term() < 0)
-            {
-                TX_TRACE_ACTION_WITH_CONTEXT(
-                    this,
-                    "Forward.Term<0.IsTimeout",
-                    txm,
-                    (
-                        [txm]() -> std::string
-                        {
-                            return std::string(",\"tx_number\":")
-                                .append(std::to_string(txm->TxNumber()))
-                                .append(",\"term\":")
-                                .append(std::to_string(txm->TxTerm()));
-                        }));
-                // For non-blocking concurrency control protocols, the object
-                // command is expected to return instantly. For 2PL, if the
-                // request is blocked, the cc node will send an acknowledgement
-                // to update the key's term. In either case, if the object's
-                // term is not set, the tx has not received any response or
-                // acknowledgement from the key's cc node group. The request is
-                // forced to be errored upon timeout.
-                force_error = true;
-                break;
+                for (auto &hd_result : vct_hd_result_)
+                {
+                    if (hd_result.IsFinished())
+                    {
+                        // Already finished, continue to next
+                        continue;
+                    }
+
+                    const CcEntryAddr &cce_addr = hd_result.Value().cce_addr_;
+                    if (cce_addr.Term() > 0)
+                    {
+                        // Received an ack message that the ApplyCc was received
+                        // but was blockedd by lock. We need to check if the
+                        // remote node is still alive.
+
+                        txm->cc_handler_->BlockCcReqCheck(
+                            txm->TxNumber(),
+                            txm->TxTerm(),
+                            txm->CommandId(),
+                            cce_addr,
+                            &hd_result,
+                            ResultTemplateType::ReadKeyResult);
+                    }
+                }
             }
             else
             {
-                // Received an ack message that the ApplyCc was received but
-                // was blockedd by lock. We need to check if the remote node
-                // is still alive.
-                txm->cc_handler_->BlockCcReqCheck(
-                    txm->TxNumber(),
-                    txm->TxTerm(),
-                    txm->CommandId(),
-                    cce_addr,
-                    &hd_result,
-                    ResultTemplateType::ReadKeyResult);
-            }
-        }
+                // found error, force error the unfinished requests
 
-        if (force_error)
-        {
-            CcErrorCode expected = CcErrorCode::NO_ERROR;
-            if (atm_err_code_.compare_exchange_strong(
-                    expected,
-                    CcErrorCode::FORCE_FAIL,
-                    std::memory_order_acq_rel))
-            {
                 for (auto &hd_result : vct_hd_result_)
                 {
-                    if (hd_result.IsFinished() || hd_result.Value().is_local_)
+                    if (hd_result.IsFinished())
                     {
+                        // Already finished, continue to next
                         continue;
                     }
+
+                    // For non-blocking CC, commands return instantly. For
+                    // 2PL, blocked requests send an acknowledgement to
+                    // update the key's term. If the object's term is not
+                    // set, it means no response or acknowledgement has been
+                    // received from the key's CC node group, leading to a
+                    // timeout error.
                     hd_result.ForceError();
                 }
+
+                if (atm_cnt_.load(std::memory_order_acquire) == 0)
+                {
+                    txm->PostProcess(*this);
+                }
             }
-            txm->PostProcess(*this);
         }
         else
         {
+            // local request timeout
             DeadLockCheck::RequestCheck();
         }
     }
@@ -5491,8 +5941,6 @@ void CmdForwardAcquireWriteOp::Reset(size_t acquire_write_cnt)
     for (size_t idx = old_size; idx < acquire_write_cnt; ++idx)
     {
         acquire_key_vec[idx].remote_ack_cnt_ = &remote_ack_cnt_;
-        acquire_key_vec[idx].remote_hd_result_is_set_ =
-            std::make_unique<std::atomic<bool>>(false);
     }
 
     remote_ack_cnt_.store(0, std::memory_order_relaxed);
@@ -5519,7 +5967,7 @@ void CmdForwardAcquireWriteOp::AggregateAcquiredKeys(TransactionExecution *txm)
         {
             assert(forward_entry->cce_addr_.Empty());
             forward_entry->cce_addr_ = addr;
-            txm_->rw_set_.IncreaseObjectCntWithWriteLock();
+            txm_->cmd_set_.IncreaseObjectCntWithWriteLock();
         }
     }
 }
@@ -5549,46 +5997,41 @@ void CmdForwardAcquireWriteOp::Forward(TransactionExecution *txm)
     }
     else
     {
-        bool timeout = false;
-        if (txm->IsTimeOut() && hd_result_.SetResultByTimeoutThread())
+        if (txm->IsTimeOut())
         {
-            timeout = true;
-        }
-
-        if (remote_ack_cnt_.load(std::memory_order_acquire) > 0 && timeout)
-        {
-            bool success = hd_result_.ForceError();
-            if (success)
+            if (remote_ack_cnt_.load(std::memory_order_acquire) == 0 &&
+                txm->CheckLeaderTerm())
             {
-                AggregateAcquiredKeys(txm);
-                txm->PostProcess(*this);
-            }
-        }
-        else if (timeout)
-        {
-            // Unset timeout status. So the cc_stream_reciver can handle
-            // response.
-            hd_result_.UnsetByTimeoutThread();
+                // All remote acks are received, but timeout still happens.
+                DeadLockCheck::RequestCheck();
 
-            DeadLockCheck::RequestCheck();
-
-            std::vector<AcquireKeyResult> &vct_akr = hd_result_.Value();
-            for (size_t i = 0; i < vct_akr.size(); i++)
-            {
-                AcquireKeyResult &akr = vct_akr[i];
-
-                if (akr.remote_hd_result_is_set_->load(
-                        std::memory_order_acquire) == false &&
-                    akr.cce_addr_.Term() > 0 /*&& akr.commit_ts_ == 0*/)
+                std::vector<AcquireKeyResult> &vct_akr = hd_result_.Value();
+                for (size_t i = 0; i < vct_akr.size(); i++)
                 {
-                    txm->cc_handler_->BlockCcReqCheck(
-                        txm->TxNumber(),
-                        txm->TxTerm(),
-                        txm->CommandId(),
-                        akr.cce_addr_,
-                        &hd_result_,
-                        ResultTemplateType::AcquireKeyResult,
-                        i);
+                    AcquireKeyResult &akr = vct_akr[i];
+
+                    if (!akr.IsRemoteHdResultSet(std::memory_order_acquire) &&
+                        akr.cce_addr_.Term() > 0 /*&& akr.commit_ts_ == 0*/)
+                    {
+                        txm->cc_handler_->BlockCcReqCheck(
+                            txm->TxNumber(),
+                            txm->TxTerm(),
+                            txm->CommandId(),
+                            akr.cce_addr_,
+                            &hd_result_,
+                            ResultTemplateType::AcquireKeyResult,
+                            i);
+                    }
+                }
+            }
+            else
+            {
+                // Some of the acks are not received, but timeout happens.
+                bool success = hd_result_.ForceError();
+                if (success)
+                {
+                    AggregateAcquiredKeys(txm);
+                    txm->PostProcess(*this);
                 }
             }
         }
@@ -5604,15 +6047,12 @@ ClusterScaleOp::ClusterScaleOp(
       prepare_log_op_(txm),
       acquire_cluster_config_write_op_(txm),
       update_cluster_config_log_op_(txm),
-      flush_new_cluster_config_op_(txm),
       install_cluster_config_op_(txm),
       notify_migration_op_(txm),
       check_migration_is_finished_op_(txm),
       clean_log_op_(txm),
-#ifndef RANGE_PARTITION_ENABLED
       pub_buckets_migrate_begin_op_(txm),
       pub_buckets_migrate_end_op_(txm),
-#endif
       id_(id),
       event_type_(event_type),
       new_ng_config_(std::move(new_ng_config)),
@@ -5649,9 +6089,6 @@ void ClusterScaleOp::Reset(
 
     prepare_log_op_.Reset();
     prepare_log_op_.ResetHandlerTxm(txm);
-
-    flush_new_cluster_config_op_.Reset();
-    flush_new_cluster_config_op_.ResetHandlerTxm(txm);
 
     acquire_cluster_config_write_op_.ResetHandlerTxm(txm);
 
@@ -5705,14 +6142,20 @@ void ClusterScaleOp::Forward(TransactionExecution *txm)
                   << txm->TxNumber();
 
         txm->commit_ts_ = txm->commit_ts_bound_ + 1;
-        std::set<NodeGroupId> new_ng_set;
-        for (const auto &it : new_ng_config_)
+
+        if (event_type_ == ClusterScaleOpType::AddNodeGroup ||
+            event_type_ == ClusterScaleOpType::RemoveNode)
         {
-            new_ng_set.emplace(it.first);
+            std::set<NodeGroupId> new_ng_set;
+            for (const auto &it : new_ng_config_)
+            {
+                new_ng_set.emplace(it.first);
+            }
+            bucket_migrate_infos_ =
+                Sharder::Instance()
+                    .GetLocalCcShards()
+                    ->GenerateBucketMigrationPlan(new_ng_set);
         }
-        bucket_migrate_infos_ =
-            Sharder::Instance().GetLocalCcShards()->GenerateBucketMigrationPlan(
-                new_ng_set);
 
         FillPrepareLogRequest(txm);
         LOG(INFO) << "Cluster scale transaction write prepare log, txn: "
@@ -5726,11 +6169,48 @@ void ClusterScaleOp::Forward(TransactionExecution *txm)
             // Failed before write log succeed due to leader transfer.
             // Notify caller.
 
-            txm->uint64_resp_->FinishError(
+            txm->string_resp_->FinishError(
                 TxErrorCode::TRANSACTION_NODE_NOT_LEADER);
             ForceToFinish(txm);
             return;
         }
+        // prepare cluster config string for tx result
+        std::string config_str;
+        // total ngs
+        config_str.append(std::to_string(new_ng_config_.size()));
+        config_str.append("\n");
+
+        for (const auto &pair : new_ng_config_)
+        {
+            // ng id
+            config_str.append(std::to_string(pair.first));
+            config_str.append(" ");
+
+            // member nodes
+            for (const auto &node : pair.second)
+            {
+                // node id
+                config_str.append(std::to_string(node.node_id_));
+                config_str.append(" ");
+
+                // host name
+                config_str.append(node.host_name_);
+                config_str.append(" ");
+
+                // port
+                config_str.append(std::to_string(node.port_));
+                config_str.append(" ");
+
+                // is candidate
+                config_str.append(std::to_string(node.is_candidate_));
+                config_str.append(" ");
+            }
+            config_str.append("\n");
+        }
+
+        config_str.append(std::to_string(txm->commit_ts_));
+        config_str.append("\n");
+
         if (prepare_log_op_.hd_result_.IsError())
         {
             if (prepare_log_op_.hd_result_.ErrorCode() ==
@@ -5762,7 +6242,7 @@ void ClusterScaleOp::Forward(TransactionExecution *txm)
                     // whether prepare log succeeds and continue the rest if
                     // it does. Caller need to query new leader of node
                     // group to know if write log has succeeded.
-                    txm->uint64_resp_->FinishError(
+                    txm->string_resp_->FinishError(
                         TxErrorCode::LOG_SERVICE_UNREACHABLE);
                     ForceToFinish(txm);
                 }
@@ -5770,11 +6250,8 @@ void ClusterScaleOp::Forward(TransactionExecution *txm)
             else if (prepare_log_op_.hd_result_.ErrorCode() ==
                      CcErrorCode::DUPLICATE_CLUSTER_SCALE_TX_ERR)
             {
-                txm->uint64_resp_->Value() =
-                    prepare_log_op_.log_closure_.LogResponse()
-                        .write_log_response()
-                        .newest_cluster_scale_txn();
-                txm->uint64_resp_->FinishError(
+                txm->string_resp_->Value() = config_str;
+                txm->string_resp_->FinishError(
                     TxErrorCode::DUPLICATE_CLUSTER_SCALE_TX_ERROR);
                 ForceToFinish(txm);
             }
@@ -5783,7 +6260,7 @@ void ClusterScaleOp::Forward(TransactionExecution *txm)
                 LOG(ERROR) << "Failed to write cluster scale prepare log, txn: "
                            << txm->TxNumber();
                 // Notify called that the operation has failed
-                txm->uint64_resp_->FinishError(TxErrorCode::WRITE_LOG_FAIL);
+                txm->string_resp_->FinishError(TxErrorCode::WRITE_LOG_FAIL);
                 ForceToFinish(txm);
             }
             return;
@@ -5792,41 +6269,21 @@ void ClusterScaleOp::Forward(TransactionExecution *txm)
         // Notify caller that log has been written.
         if (txm->TxStatus() != TxnStatus::Recovering)
         {
-            txm->uint64_resp_->Finish(prepare_log_op_.log_closure_.LogResponse()
-                                          .write_log_response()
-                                          .newest_cluster_scale_txn());
+            txm->string_resp_->Finish(config_str);
         }
 
-#ifdef RANGE_PARTITION_ENABLED
-        if (event_type_ == ClusterScaleOpType::AddNode)
+        if (bucket_migrate_infos_.empty())
         {
-            // If we're adding new nodes, add new nodes into cluster
-            // before migrating data
-            LOG(INFO) << "Cluster scale transaction acquire write lock on all "
-                         "nodes, txn "
-                      << txm->TxNumber();
+            // Skip bucket migration subops and directly forward to update
+            // cluster config.
             ForwardToSubOperation(txm, &acquire_cluster_config_write_op_);
+            return;
         }
-        else
-        {
-            // For remove nodes, just start migration right away. We will
-            // update cluster config and remove nodes when migration is
-            // done.
 
-            notify_migration_op_.migrate_plans_ = bucket_migrate_infos_;
-
-            LOG(INFO)
-                << "Cluster scale transaction notify data migration, txn: "
-                << txm->TxNumber();
-            ForwardToSubOperation(txm, &notify_migration_op_);
-        }
-#else
-        pub_buckets_migrate_begin_op_.op_func_ =
-            [&hd_res = pub_buckets_migrate_begin_op_.hd_result_,
-             &worker = pub_buckets_migrate_begin_op_.worker_thread_]
+        pub_buckets_migrate_begin_op_.op_func_ = [](AsyncOp<Void> &async_op)
         {
-            worker = std::thread(
-                [&hd_res]
+            async_op.worker_thread_ = std::thread(
+                [&hd_res = async_op.hd_result_]
                 {
                     bool result = true;
                     bool rpc_fail = false;
@@ -5849,9 +6306,7 @@ void ClusterScaleOp::Forward(TransactionExecution *txm)
                      "bucket_migrating_begin to all node groups ,txn: "
                   << txm->TxNumber();
         ForwardToSubOperation(txm, &pub_buckets_migrate_begin_op_);
-#endif
     }
-#ifndef RANGE_PARTITION_ENABLED
     else if (op_ == &pub_buckets_migrate_begin_op_)
     {
         if (!txm->CheckLeaderTerm())
@@ -5871,7 +6326,7 @@ void ClusterScaleOp::Forward(TransactionExecution *txm)
             return;
         }
 
-        if (event_type_ == ClusterScaleOpType::AddNode)
+        if (event_type_ == ClusterScaleOpType::AddNodeGroup)
         {
             // If we're adding new nodes, add new nodes into cluster
             // before migrating data
@@ -5894,7 +6349,6 @@ void ClusterScaleOp::Forward(TransactionExecution *txm)
             ForwardToSubOperation(txm, &notify_migration_op_);
         }
     }
-#endif
     else if (op_ == &acquire_cluster_config_write_op_)
     {
         if (!txm->CheckLeaderTerm())
@@ -5958,48 +6412,6 @@ void ClusterScaleOp::Forward(TransactionExecution *txm)
         }
 
         ACTION_FAULT_INJECTOR("cluster_config_after_cluster_config_log");
-        // flush the new cluster config to kv storage
-        flush_new_cluster_config_op_.op_func_ =
-            [&ng_config = new_ng_config_,
-             version = txm->commit_ts_,
-             &hd_res = flush_new_cluster_config_op_.hd_result_,
-             &worker = flush_new_cluster_config_op_.worker_thread_]
-        {
-            worker = std::thread(
-                [&ng_config, version, &hd_res]
-                {
-                    store::DataStoreHandler *const store_hd =
-                        Sharder::Instance().GetLocalCcShards()->store_hd_;
-                    bool succ =
-                        store_hd->UpdateClusterConfig(ng_config, version);
-                    if (succ)
-                    {
-                        hd_res.SetFinished();
-                    }
-                    else
-                    {
-                        hd_res.SetError(CcErrorCode::DATA_STORE_ERR);
-                    }
-                });
-        };
-        LOG(INFO) << "Cluster scale transaction updating cluster config in "
-                     "data store, txn: "
-                  << txm->TxNumber();
-        ForwardToSubOperation(txm, &flush_new_cluster_config_op_);
-    }
-    else if (op_ == &flush_new_cluster_config_op_)
-    {
-        if (!txm->CheckLeaderTerm())
-        {
-            ForceToFinish(txm);
-            return;
-        }
-
-        if (flush_new_cluster_config_op_.hd_result_.IsError())
-        {
-            RetrySubOperation(txm, &flush_new_cluster_config_op_);
-            return;
-        }
 
         //  Broadcast the new cluster config to all nodes through post write
         //  all.
@@ -6040,7 +6452,7 @@ void ClusterScaleOp::Forward(TransactionExecution *txm)
             return;
         }
 
-        if (event_type_ == ClusterScaleOpType::AddNode)
+        if (event_type_ == ClusterScaleOpType::AddNodeGroup)
         {
             // We should not start the data migration process.
             LOG(INFO)
@@ -6053,22 +6465,20 @@ void ClusterScaleOp::Forward(TransactionExecution *txm)
         }
         else
         {
-            LOG(INFO) << "Cluster scale transaction write clean log, txn "
-                      << txm->TxNumber();
-            // Now the deleted nodes are removed from cluster. We can
-            // write clean log and finish the tx.
-#ifdef RANGE_PARTITION_ENABLED
-            FillCleanLogRequest(txm);
-            ForwardToSubOperation(txm, &clean_log_op_);
-#else
+            if (bucket_migrate_infos_.empty())
+            {
+                LOG(INFO) << "Cluster scale transaction write clean log, txn "
+                          << txm->TxNumber();
+                FillCleanLogRequest(txm);
+                ForwardToSubOperation(txm, &clean_log_op_);
+                return;
+            }
             // Before writing clean log, we notify all nodes set
             // "LocalCcShards::buckets_migrating_" to false.
-            pub_buckets_migrate_end_op_.op_func_ =
-                [&hd_res = pub_buckets_migrate_end_op_.hd_result_,
-                 &worker = pub_buckets_migrate_end_op_.worker_thread_]
+            pub_buckets_migrate_end_op_.op_func_ = [](AsyncOp<Void> &async_op)
             {
-                worker = std::thread(
-                    [&hd_res]
+                async_op.worker_thread_ = std::thread(
+                    [&hd_res = async_op.hd_result_]
                     {
                         bool result = true;
                         bool rpc_fail = false;
@@ -6091,7 +6501,6 @@ void ClusterScaleOp::Forward(TransactionExecution *txm)
                          "bucket_migrating_end to all node groups ,txn: "
                       << txm->TxNumber();
             ForwardToSubOperation(txm, &pub_buckets_migrate_end_op_);
-#endif
         }
     }
     else if (op_ == &notify_migration_op_)
@@ -6142,21 +6551,12 @@ void ClusterScaleOp::Forward(TransactionExecution *txm)
             return;
         }
 
-        if (event_type_ == ClusterScaleOpType::AddNode)
+        if (event_type_ == ClusterScaleOpType::AddNodeGroup)
         {
-#ifdef RANGE_PARTITION_ENABLED
-            LOG(INFO) << "Cluster scale transaction write clean log, txn: "
-                      << txm->TxNumber() << ", tx_term: " << txm->TxTerm()
-                      << ", tx_ng_id: " << txm->TxCcNodeId();
-            FillCleanLogRequest(txm);
-            ForwardToSubOperation(txm, &clean_log_op_);
-#else
-            pub_buckets_migrate_end_op_.op_func_ =
-                [&hd_res = pub_buckets_migrate_end_op_.hd_result_,
-                 &worker = pub_buckets_migrate_end_op_.worker_thread_]
+            pub_buckets_migrate_end_op_.op_func_ = [](AsyncOp<Void> &async_op)
             {
-                worker = std::thread(
-                    [&hd_res]
+                async_op.worker_thread_ = std::thread(
+                    [&hd_res = async_op.hd_result_]
                     {
                         bool result = true;
                         bool rpc_fail = false;
@@ -6179,7 +6579,6 @@ void ClusterScaleOp::Forward(TransactionExecution *txm)
                          "bucket_migrating_end to all node groups ,txn: "
                       << txm->TxNumber();
             ForwardToSubOperation(txm, &pub_buckets_migrate_end_op_);
-#endif
         }
         else
         {
@@ -6191,7 +6590,6 @@ void ClusterScaleOp::Forward(TransactionExecution *txm)
             ForwardToSubOperation(txm, &acquire_cluster_config_write_op_);
         }
     }
-#ifndef RANGE_PARTITION_ENABLED
     else if (op_ == &pub_buckets_migrate_end_op_)
     {
         if (!txm->CheckLeaderTerm())
@@ -6214,7 +6612,6 @@ void ClusterScaleOp::Forward(TransactionExecution *txm)
         FillCleanLogRequest(txm);
         ForwardToSubOperation(txm, &clean_log_op_);
     }
-#endif
     else if (op_ == &clean_log_op_)
     {
         if (clean_log_op_.hd_result_.IsError() && txm->CheckLeaderTerm())
@@ -6287,13 +6684,17 @@ void ClusterScaleOp::FillPrepareLogRequest(TransactionExecution *txm)
         prepare_log_rec->mutable_log_content()->mutable_cluster_scale_log();
     switch (event_type_)
     {
-    case ClusterScaleOpType::AddNode:
+    case ClusterScaleOpType::AddNodeGroup:
         cluster_scale_msg->set_event_type(
-            ::txlog::ClusterScaleOpMessage_ScaleOpType_AddNode);
+            ::txlog::ClusterScaleOpMessage_ScaleOpType_AddNodeGroup);
         break;
     case ClusterScaleOpType::RemoveNode:
         cluster_scale_msg->set_event_type(
             ::txlog::ClusterScaleOpMessage_ScaleOpType_RemoveNode);
+        break;
+    case ClusterScaleOpType::AddNodeGroupPeers:
+        cluster_scale_msg->set_event_type(
+            ::txlog::ClusterScaleOpMessage_ScaleOpType_AddNodeGroupPeers);
         break;
     default:
         assert(false);
@@ -6392,7 +6793,6 @@ void ClusterScaleOp::FillCleanLogRequest(TransactionExecution *txm)
     log_rec->mutable_node_terms()->clear();
 }
 
-#ifndef RANGE_PARTITION_ENABLED
 void ClusterScaleOp::SendBucketsMigratingRpc(bool is_migrating,
                                              bool &result,
                                              bool &rpc_error)
@@ -6442,7 +6842,6 @@ void ClusterScaleOp::SendBucketsMigratingRpc(bool is_migrating,
     {
         if (cntl_vec.at(idx)->Failed())
         {
-            LOG(INFO) << "SendBucketsMigratingRpc rpc call error, ng#" << ng_id;
             rpc_error = true;
         }
         else if (!resp_vec.at(idx).success())
@@ -6456,7 +6855,6 @@ void ClusterScaleOp::SendBucketsMigratingRpc(bool is_migrating,
                << ",res:" << static_cast<int>(result)
                << ",rpcfailed:" << static_cast<int>(rpc_error);
 }
-#endif
 
 CheckMigrationIsFinishedOp::CheckMigrationIsFinishedOp(
     TransactionExecution *txm)
@@ -6602,21 +7000,21 @@ void NotifyStartMigrateOp::InitDataMigration(TxNumber tx_number,
                 // Each worker processes 10 buckets at a time.
                 std::vector<std::vector<uint16_t>> bucket_ids_per_task(1);
                 std::vector<std::vector<NodeGroupId>> new_owner_ngs_per_task(1);
-                std::vector<uint16_t> *cur_task_bucekt_ids =
+                std::vector<uint16_t> *cur_task_bucket_ids =
                     &bucket_ids_per_task.back();
                 std::vector<NodeGroupId> *cur_task_new_owner_ngs =
                     &new_owner_ngs_per_task.back();
                 for (size_t i = 0; i < bucket_ids.size(); i++)
                 {
-                    cur_task_bucekt_ids->push_back(bucket_ids[i]);
+                    cur_task_bucket_ids->push_back(bucket_ids[i]);
                     cur_task_new_owner_ngs->push_back(new_owner_ngs[i]);
-                    if (cur_task_bucekt_ids->size() == 10 &&
+                    if (cur_task_bucket_ids->size() == 10 &&
                         i != bucket_ids.size() - 1)
                     {
                         bucket_ids_per_task.push_back(std::vector<uint16_t>());
                         new_owner_ngs_per_task.push_back(
                             std::vector<NodeGroupId>());
-                        cur_task_bucekt_ids = &bucket_ids_per_task.back();
+                        cur_task_bucket_ids = &bucket_ids_per_task.back();
                         cur_task_new_owner_ngs = &new_owner_ngs_per_task.back();
                     }
                 }
@@ -7295,17 +7693,17 @@ void DataMigrationOp::Forward(TransactionExecution *txm)
         // Test drop table t1 concurrently. See eloq_test repo. table
         // name need to keep consistent
 
-        data_sync_op_.op_func_ = [this, txm]
+        data_sync_op_.op_func_ = [this, txm](AsyncOp<Void> &async_op)
         {
             LocalCcShards *shard = Sharder::Instance().GetLocalCcShards();
             shard->EnqueueDataSyncTaskForBucket(ranges_in_bucket_snapshot_,
                                                 txm->TxCcNodeId(),
                                                 txm->TxTerm(),
                                                 txm->CommitTs(),
-                                                &data_sync_op_.hd_result_);
+                                                &async_op.hd_result_);
         };
 #else
-        data_sync_op_.op_func_ = [this, txm]
+        data_sync_op_.op_func_ = [this, txm](AsyncOp<Void> &async_op)
         {
             LocalCcShards *shard = Sharder::Instance().GetLocalCcShards();
             shard->EnqueueDataSyncTaskForBucket(
@@ -7314,7 +7712,7 @@ void DataMigrationOp::Forward(TransactionExecution *txm)
                 txm->TxCcNodeId(),
                 txm->TxTerm(),
                 txm->CommitTs(),
-                &data_sync_op_.hd_result_);
+                &async_op.hd_result_);
         };
 #endif
 
@@ -7441,7 +7839,8 @@ void DataMigrationOp::Forward(TransactionExecution *txm)
         // name need to keep consistent
         CODE_FAULT_INJECTOR("add_dropped_table_for_test", {
             std::string t1_table_name = "./test/t1";
-            TableName t1_tbl(t1_table_name, TableType::Primary);
+            TableName t1_tbl(
+                t1_table_name, TableType::Primary, TableEngine::EloqSql);
             for (auto id : status_->bucket_ids_[migrate_bucket_idx_])
             {
                 if (id == 1109)
@@ -7478,8 +7877,9 @@ void DataMigrationOp::Forward(TransactionExecution *txm)
             {
                 type = TableType::Secondary;
             }
-            kickout_table_ =
-                TableName{kickout_tbl_it_->first.StringView(), type};
+            kickout_table_ = TableName{kickout_tbl_it_->first.StringView(),
+                                       type,
+                                       kickout_tbl_it_->first.Engine()};
             kickout_data_op_.table_name_ = &kickout_table_;
             // All data in this range is clean target.
             kickout_data_op_.clean_type_ =
@@ -7526,7 +7926,9 @@ void DataMigrationOp::Forward(TransactionExecution *txm)
                         type = TableType::Secondary;
                     }
                     kickout_table_ =
-                        TableName{kickout_tbl_it_->first.StringView(), type};
+                        TableName{kickout_tbl_it_->first.StringView(),
+                                  type,
+                                  kickout_tbl_it_->first.Engine()};
                     kickout_data_op_.table_name_ = &kickout_table_;
                     kickout_range_it_ = kickout_tbl_it_->second.cbegin();
                 }
@@ -7630,8 +8032,9 @@ void DataMigrationOp::Forward(TransactionExecution *txm)
             {
                 type = TableType::Secondary;
             }
-            kickout_table_ =
-                TableName{kickout_tbl_it_->first.StringView(), type};
+            kickout_table_ = TableName{kickout_tbl_it_->first.StringView(),
+                                       type,
+                                       kickout_tbl_it_->first.Engine()};
             kickout_data_op_.table_name_ = &kickout_table_;
             kickout_range_it_ = kickout_tbl_it_->second.cbegin();
         }
@@ -7676,8 +8079,9 @@ void DataMigrationOp::Forward(TransactionExecution *txm)
                 {
                     type = TableType::Secondary;
                 }
-                kickout_table_ =
-                    TableName{kickout_tbl_it_->first.StringView(), type};
+                kickout_table_ = TableName{kickout_tbl_it_->first.StringView(),
+                                           type,
+                                           kickout_tbl_it_->first.Engine()};
                 kickout_data_op_.table_name_ = &kickout_table_;
                 kickout_range_it_ = kickout_tbl_it_->second.cbegin();
             }
@@ -8044,61 +8448,68 @@ void BatchReadOperation::Forward(TransactionExecution *txm)
     if (IsFinished())
     {
         uint32_t err_cnt = 0;
-        if (retry_num_ == 0)
+        std::unordered_set<uint32_t> update_leader_set;
+#ifndef RANGE_PARTITION_ENABLED
+        bool out_of_memory_error = false;
+#endif
+        for (auto &hd_result : hd_result_vec_)
         {
-            std::unordered_set<uint32_t> update_leader_set;
-            for (const CcHandlerResult<ReadKeyResult> &hd_result :
-                 hd_result_vec_)
+            if (hd_result.ErrorCode() == CcErrorCode::PIN_RANGE_SLICE_FAILED ||
+                hd_result.ErrorCode() ==
+                    CcErrorCode::REQUESTED_NODE_NOT_LEADER ||
+                hd_result.ErrorCode() == CcErrorCode::DATA_STORE_ERR)
             {
-                if (hd_result.IsError())
+                ++err_cnt;
+                if (hd_result.ErrorCode() ==
+                    CcErrorCode::REQUESTED_NODE_NOT_LEADER)
                 {
-                    ++err_cnt;
-                    if (hd_result.ErrorCode() ==
-                        CcErrorCode::REQUESTED_NODE_NOT_LEADER)
+                    const CcEntryAddr &cce_addr = hd_result.Value().cce_addr_;
+                    auto insert_it =
+                        update_leader_set.emplace(cce_addr.NodeGroupId());
+                    if (insert_it.second)
                     {
-                        const CcEntryAddr &cce_addr =
-                            hd_result.Value().cce_addr_;
-                        auto insert_it =
-                            update_leader_set.emplace(cce_addr.NodeGroupId());
-                        if (insert_it.second)
-                        {
-                            Sharder::Instance().UpdateLeader(
-                                cce_addr.NodeGroupId());
-                        }
+                        Sharder::Instance().UpdateLeader(
+                            cce_addr.NodeGroupId());
                     }
                 }
+                // Failed read requests will be retried. Resets their
+                // handler results.
+                hd_result.Value().Reset();
+                hd_result.Reset();
             }
-        }
-        else
-        {
-            for (auto &hd_result : hd_result_vec_)
+#ifndef RANGE_PARTITION_ENABLED
+            else if (hd_result.ErrorCode() == CcErrorCode::OUT_OF_MEMORY)
             {
-                if (hd_result.IsError())
-                {
-                    ++err_cnt;
-                    // Failed read requests will be retried. Resets their
-                    // handler results.
-                    hd_result.Value().Reset();
-                    hd_result.Reset();
-                }
+                ++err_cnt;
+                out_of_memory_error = true;
+                hd_result.Value().Reset();
+                hd_result.Reset();
             }
+#endif
         }
 
-        if (err_cnt > 0)
+#ifndef RANGE_PARTITION_ENABLED
+        if (out_of_memory_error)
+        {
+            retry_num_++;
+            unfinished_cnt_.store(err_cnt, std::memory_order_relaxed);
+            ReRunOp(txm);
+            return;
+        }
+#endif
+        if (err_cnt > 0 && retry_num_ > 0)
         {
             unfinished_cnt_.store(err_cnt, std::memory_order_relaxed);
             ReRunOp(txm);
+            return;
         }
-        else
-        {
-            txm->PostProcess(*this);
-        }
+        txm->PostProcess(*this);
     }
     else if (txm->IsTimeOut())
     {
         for (CcHandlerResult<ReadKeyResult> &hd_result : hd_result_vec_)
         {
-            if (hd_result.IsFinished() || !hd_result.SetResultByTimeoutThread())
+            if (hd_result.IsFinished())
             {
                 continue;
             }
@@ -8106,16 +8517,10 @@ void BatchReadOperation::Forward(TransactionExecution *txm)
             if (!hd_result.Value().is_local_)
             {
                 const CcEntryAddr &cce_addr = hd_result.Value().cce_addr_;
-                if (cce_addr.Term() < 0)
+                if (cce_addr.Term() > 0 && txm->CheckLeaderTerm())
                 {
-                    hd_result.ForceError();
-                    assert(hd_result.IsFinished());
-                }
-                else
-                {
-                    // Unset timeout status. So the cc_stream_reciver can handle
-                    // response.
-                    hd_result.UnsetByTimeoutThread();
+                    DeadLockCheck::RequestCheck();
+
                     txm->cc_handler_->BlockCcReqCheck(
                         txm->TxNumber(),
                         txm->TxTerm(),
@@ -8124,6 +8529,16 @@ void BatchReadOperation::Forward(TransactionExecution *txm)
                         &hd_result,
                         ResultTemplateType::ReadKeyResult);
                 }
+                else
+                {
+                    hd_result.ForceError();
+                    assert(hd_result.IsFinished());
+                }
+            }
+            else
+            {
+                // local request timeout
+                DeadLockCheck::RequestCheck();
             }
         }
 
@@ -8177,12 +8592,7 @@ void InvalidateTableCacheOp::Forward(TransactionExecution *txm)
     }
     else if (hd_result_.LocalRefCnt() == 0)
     {
-        bool timeout = false;
-        if (txm->IsTimeOut() && hd_result_.SetResultByTimeoutThread())
-        {
-            timeout = true;
-        }
-        if (timeout)
+        if (txm->IsTimeOut())
         {
             TX_TRACE_ACTION_WITH_CONTEXT(
                 this,

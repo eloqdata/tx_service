@@ -29,6 +29,8 @@
 
 #include "catalog_key_record.h"
 #include "cc_request.h"
+#include "error_messages.h"
+#include "metrics.h"
 #include "range_slice.h"
 #include "sharder.h"
 #include "standby.h"
@@ -96,11 +98,9 @@ std::pair<uint64_t, uint64_t> Checkpointer::GetNewCheckpointTs(
     ckpt_req.Wait();
     if (FLAGS_report_ckpt)
     {
-        ckpt_req.ShardMemoryUsageReport(local_shards_);
+        ckpt_req.ShardMemoryUsageReport();
     }
-#ifdef RANGE_PARTITION_ENABLED
     local_shards_.TableRangeHeapUsageReport();
-#endif
 
     ckpt_req.UpdateStandbyConsistentTs();
 
@@ -201,11 +201,6 @@ void Checkpointer::Ckpt(bool is_last_ckpt)
 
     for (uint32_t node_group : node_groups)
     {
-#ifdef RANGE_PARTITION_ENABLED
-        // check whether this node is group leader, pin its data if it is
-        int64_t leader_term =
-            Sharder::Instance().TryPinNodeGroupData(node_group);
-#else
         int64_t leader_term = -1;
         if (!is_standby_node)
         {
@@ -214,7 +209,6 @@ void Checkpointer::Ckpt(bool is_last_ckpt)
             int64_t ng_leader_term = Sharder::Instance().LeaderTerm(node_group);
             leader_term = std::max(ng_candidate_leader_term, ng_leader_term);
         }
-#endif
 
         if (!is_standby_node && leader_term < 0)
         {
@@ -228,10 +222,6 @@ void Checkpointer::Ckpt(bool is_last_ckpt)
 
         if (ckpt_ts <= last_ckpt_ts)
         {
-#ifdef RANGE_PARTITION_ENABLED
-            // skip checkpoint for this node group
-            Sharder::Instance().UnpinNodeGroupData(node_group);
-#endif
             continue;
         }
 
@@ -245,7 +235,10 @@ void Checkpointer::Ckpt(bool is_last_ckpt)
             local_shards_.GetCatalogTableNameSnapshot(node_group, ckpt_ts);
 
         std::shared_ptr<DataSyncStatus> status =
-            std::make_shared<DataSyncStatus>(true);
+            std::make_shared<DataSyncStatus>(
+                node_group,
+                is_standby_node ? standby_node_term : leader_term,
+                true);
 
         uint64_t last_succ_ckpt_ts = UINT64_MAX;
         bool can_be_skipped = !is_last_ckpt;
@@ -255,20 +248,12 @@ void Checkpointer::Ckpt(bool is_last_ckpt)
         // ckpt_vec.
         for (auto it = tables.begin(); it != tables.end(); ++it)
         {
-#ifdef RANGE_PARTITION_ENABLED
-            if (Sharder::Instance().LeaderTerm(node_group) != leader_term)
-            {
-                break;
-            }
-#else
             // Check leader term for leader node
             if (!is_standby_node &&
                 Sharder::Instance().LeaderTerm(node_group) != leader_term)
             {
                 break;
             }
-
-#endif
 
             const TableName &table_name = it->first;
             bool is_dirty = it->second;
@@ -318,21 +303,12 @@ void Checkpointer::Ckpt(bool is_last_ckpt)
             }
         }
 
-#ifdef RANGE_PARTITION_ENABLED
-        if (Sharder::Instance().LeaderTerm(node_group) != leader_term)
-        {
-            // Skip the node groups that are no longer on this node.
-            Sharder::Instance().UnpinNodeGroupData(node_group);
-            continue;
-        }
-#else
         // Check leadter term for leader node
         if (!is_standby_node &&
             Sharder::Instance().LeaderTerm(node_group) != leader_term)
         {
-            break;
+            continue;
         }
-#endif
 
         if (last_succ_ckpt_ts != UINT64_MAX && last_succ_ckpt_ts > last_ckpt_ts)
         {
@@ -365,56 +341,61 @@ void Checkpointer::Ckpt(bool is_last_ckpt)
                                  [&status]
                                  { return status->unfinished_tasks_ == 0; });
             }
-            if (status->need_truncate_log_ && status->unfinished_tasks_ == 0 &&
-                status->err_code_ == CcErrorCode::NO_ERROR)
+
+            if (status->unfinished_tasks_ == 0)
             {
-                if (status->truncate_log_ts_ == 0)
+                status->PersistKV();
+
+                if (status->need_truncate_log_ &&
+                    status->err_code_ == CcErrorCode::NO_ERROR)
                 {
-                    // Since no table has been modified since the last sync
-                    // timestamp, update status->truncate_log_ts_ to mark the
-                    // completion of this checkpoint.
-                    //
-                    // This update is crucial during a graceful shutdown in a
-                    // cluster with a standby node using `eloqctl stop`. The
-                    // updated node group checkpoint ts is used by eloqctl to
-                    // verify that the final round of checkpointing has been
-                    // completed.
-                    status->truncate_log_ts_ = ckpt_ts;
-                }
-
-                // Truncate redo log
-                LOG_IF(INFO, FLAGS_report_ckpt)
-                    << "Checkpoint of node group #" << node_group
-                    << " succeeded with timestamp: "
-                    << status->truncate_log_ts_;
-
-                // Note: `status->truncate_log_ts_ may be larger than `ckpt_ts`.
-                // So we use `status->truncate_log_ts_` to truncate log.
-                if (status->truncate_log_ts_ != UINT64_MAX &&
-                    status->truncate_log_ts_ > last_ckpt_ts)
-                {
-                    assert(status->truncate_log_ts_ >= ckpt_ts);
-                    Sharder::Instance().UpdateNodeGroupCkptTs(
-                        node_group, status->truncate_log_ts_);
-
-                    if (!is_standby_node)
+                    if (status->truncate_log_ts_ == 0)
                     {
-                        assert(standby_node_term < 0 && leader_term >= 0);
-                        NotifyLogOfCkptTs(
-                            node_group, leader_term, status->truncate_log_ts_);
+                        // Since no table has been modified since the last sync
+                        // timestamp, update status->truncate_log_ts_ to mark
+                        // the completion of this checkpoint.
+                        //
+                        // This update is crucial during a graceful shutdown in
+                        // a cluster with a standby node using `eloqctl stop`.
+                        // The updated node group checkpoint ts is used by
+                        // eloqctl to verify that the final round of
+                        // checkpointing has been completed.
+                        status->truncate_log_ts_ = ckpt_ts;
+                    }
 
-                        BrocastPrimaryCkptTs(
-                            node_group, leader_term, status->truncate_log_ts_);
+                    // Truncate redo log
+                    LOG_IF(INFO, FLAGS_report_ckpt)
+                        << "Checkpoint of node group #" << node_group
+                        << " succeeded with timestamp: "
+                        << status->truncate_log_ts_;
+
+                    // Note: `status->truncate_log_ts_ may be larger than
+                    // `ckpt_ts`. So we use `status->truncate_log_ts_` to
+                    // truncate log.
+                    if (status->truncate_log_ts_ != UINT64_MAX &&
+                        status->truncate_log_ts_ > last_ckpt_ts)
+                    {
+                        assert(status->truncate_log_ts_ >= ckpt_ts);
+                        Sharder::Instance().UpdateNodeGroupCkptTs(
+                            node_group, status->truncate_log_ts_);
+
+                        if (!is_standby_node)
+                        {
+                            assert(standby_node_term < 0 && leader_term >= 0);
+                            NotifyLogOfCkptTs(node_group,
+                                              leader_term,
+                                              status->truncate_log_ts_);
+
+                            BrocastPrimaryCkptTs(node_group,
+                                                 leader_term,
+                                                 status->truncate_log_ts_);
+                        }
                     }
                 }
+
+                CollectCkptMetric(status->err_code_ == CcErrorCode::NO_ERROR);
             }
         }
-
-#ifdef RANGE_PARTITION_ENABLED
-        // finish checkpoint on this node group, unpin its data and clear its
-        // ccmaps and catalogs if it is no longer leader
-        Sharder::Instance().UnpinNodeGroupData(node_group);
-#endif
     }
 }
 
@@ -530,10 +511,6 @@ void Checkpointer::NotifyLogOfCkptTs(uint32_t node_group,
     {
         assert(log_agent_ != nullptr);
         log_agent_->UpdateCheckpointTs(node_group, term, ckpt_ts);
-    }
-    else
-    {
-        assert(log_agent_ == nullptr);
     }
 }
 

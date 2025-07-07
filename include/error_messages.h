@@ -76,12 +76,10 @@ enum struct TxErrorCode
     // Acquire range read lock
     GET_RANGE_ID_ERROR,
 
-    // Acquire leader term
-    ACQUIRE_LEADER_TERM_FAIL,
-
     //-- NotifyStartMigrationOp
     DUPLICATE_MIGRATION_TX_ERROR,
     DUPLICATE_CLUSTER_SCALE_TX_ERROR,
+    INVALID_CLUSTER_SCALE_REQUEST,
 
     DATA_NOT_ON_LOCAL_NODE,
 
@@ -138,17 +136,33 @@ static const std::unordered_map<TxErrorCode, std::string> tx_error_messages{
     {TxErrorCode::CKPT_PIN_RANGE_SLICE_FAIL,
      "The checkpoint error due to pin range slice failed."},
     {TxErrorCode::GET_RANGE_ID_ERROR, "Acquire range read lock failed."},
-    {TxErrorCode::ACQUIRE_LEADER_TERM_FAIL, "Acquire leader term failed."},
     {TxErrorCode::DUPLICATE_MIGRATION_TX_ERROR,
      "Duplicate migration tx error."},
     {TxErrorCode::DUPLICATE_CLUSTER_SCALE_TX_ERROR,
      "Duplicate cluster scale tx error."},
+    {TxErrorCode::INVALID_CLUSTER_SCALE_REQUEST,
+     "Invalid cluster scale request."},
     {TxErrorCode::DATA_NOT_ON_LOCAL_NODE, "Data not on local node."},
     {TxErrorCode::TX_REQUEST_TO_COMMITTED_ABORTED_TX,
      "Execute TxRequest failed, transaction has committed/aborted"},
     {TxErrorCode::READ_CATALOG_FAIL, "Current db has not been initialized"},
     {TxErrorCode::READ_CATALOG_CONFLICT,
      "Current db is being modified by FLUSHDB"}};
+
+static inline const std::string &TxErrorMessage(TxErrorCode err_code)
+{
+    if (err_code != TxErrorCode::NO_ERROR)
+    {
+        auto it = tx_error_messages.find(err_code);
+        if (it != tx_error_messages.end())
+        {
+            return it->second;
+        }
+    }
+
+    static std::string empty_err_msg;
+    return empty_err_msg;
+}
 
 enum struct CcErrorCode : uint8_t
 {
@@ -207,6 +221,7 @@ enum struct CcErrorCode : uint8_t
     // log service
     LOG_CLOSURE_RESULT_UNKNOWN_ERR,
     WRITE_LOG_FAILED,
+    LOG_NODE_NOT_LEADER,
     DUPLICATE_MIGRATION_TX_ERR,
     DUPLICATE_CLUSTER_SCALE_TX_ERR,
 
@@ -219,8 +234,6 @@ enum struct CcErrorCode : uint8_t
     // Shard memory full
     OUT_OF_MEMORY,
 
-    // Leader term
-    ACQUIRE_LEADER_TERM_ERR,
     ESTABLISH_NODE_CHANNEL_FAILED,
     //
     PACK_SK_ERR,
@@ -244,6 +257,9 @@ enum struct CcErrorCode : uint8_t
 
     // Read catalog conflict.
     READ_CATALOG_CONFLICT,
+
+    // RPC failed that can not retry
+    RPC_CALL_ERR,
 
     // NOTICE: please keep this variable at tail.
     LAST_ERROR_CODE,
@@ -301,7 +317,6 @@ static const std::unordered_map<CcErrorCode, std::string> cc_error_messages{
     {CcErrorCode::REQUEST_LOST, "REQUEST_LOST"},
 
     // acquire leader term
-    {CcErrorCode::ACQUIRE_LEADER_TERM_ERR, "ACQUIRE_LEADER_TERM_ERROR"},
     {CcErrorCode::ESTABLISH_NODE_CHANNEL_FAILED,
      "ESTABLISH_NODE_CHANNEL_FAILED"},
 
@@ -319,6 +334,9 @@ static const std::unordered_map<CcErrorCode, std::string> cc_error_messages{
     {CcErrorCode::UPLOAD_BATCH_REJECTED, "UPLOAD_BATCH_REJECTED"},
 
     {CcErrorCode::READ_CATALOG_FAIL, "READ_CATALOG_FAIL"},
+
+    {CcErrorCode::WRITE_LOG_FAILED, "WRITE_LOG_FAIL"},
+    {CcErrorCode::LOG_NODE_NOT_LEADER, "LOG_NODE_NOT_LEADER"},
 
     {CcErrorCode::READ_CATALOG_CONFLICT, "READ_CATALOG_CONFLICT"},
 

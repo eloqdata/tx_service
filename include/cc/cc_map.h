@@ -42,6 +42,7 @@ struct RemoteReadOutside;
 
 struct LruEntry;
 struct LruPage;
+struct TxObject;
 
 struct AcquireCc;
 struct AcquireAllCc;
@@ -132,6 +133,8 @@ enum struct CleanType
      * replacement when memory is full.
      */
     CleanDeletedData,
+
+    CleanDataForTest,
 };
 
 class CcShard;
@@ -155,7 +158,8 @@ public:
           cc_ng_id_(cc_ng_id),
           table_name_(table_name.StringView().data(),
                       table_name.StringView().size(),
-                      table_name.Type()),
+                      table_name.Type(),
+                      table_name.Engine()),
           ccm_has_full_entries_(ccm_has_full_entries),
           schema_ts_(schema_ts),
           table_schema_(table_schema)
@@ -226,7 +230,7 @@ public:
     virtual bool BackFill(LruEntry *cce,
                           uint64_t commit_ts,
                           RecordStatus status,
-                          std::string &rec_str)
+                          const std::string &rec_str)
     {
         assert(false);
         return false;
@@ -304,6 +308,7 @@ protected:
      */
     std::pair<LockType, CcErrorCode> AcquireCceKeyLock(
         LruEntry *cce,
+        uint64_t commit_ts,
         LruPage *page,
         RecordStatus cce_payload_status,
         CcRequestBase *req,
@@ -315,10 +320,31 @@ protected:
         CcProtocol protocol,
         uint64_t read_ts,
         bool is_covering_keys,
-        CcMap *ccm = nullptr);
+        CcMap *ccm = nullptr)
+    {
+        // deduce the lock type to acquire
+        LockType lock_type = LockTypeUtil::DeduceLockType(
+            cc_op, iso_level, protocol, is_covering_keys);
+
+        return AcquireCceKeyLock(cce,
+                                 commit_ts,
+                                 page,
+                                 cce_payload_status,
+                                 req,
+                                 ng_id,
+                                 ng_term,
+                                 tx_term,
+                                 lock_type,
+                                 cc_op,
+                                 iso_level,
+                                 protocol,
+                                 read_ts,
+                                 ccm);
+    }
 
     std::pair<LockType, CcErrorCode> AcquireCceKeyLock(
         LruEntry *cce,
+        uint64_t commit_ts,
         LruPage *page,
         RecordStatus cce_payload_status,
         CcRequestBase *req,
@@ -339,6 +365,7 @@ protected:
      */
     std::pair<LockType, CcErrorCode> LockHandleForResumedRequest(
         LruEntry *cce,
+        uint64_t commit_ts,
         RecordStatus cce_payload_status,
         CcRequestBase *req,
         uint32_t ng_id,
@@ -370,7 +397,8 @@ protected:
                         TxNumber tx_number,
                         uint32_t ng_id,
                         LockType lk_type = LockType::NoLock,
-                        bool recycle_lock = true) const;
+                        bool recycle_lock = true,
+                        TxObject *object = nullptr) const;
 
     /**
      * @brief The version of this ccmap. It is the version of the corresponding

@@ -29,7 +29,6 @@
 #include <vector>
 
 #include "catalog_factory.h"
-#include "cc/cc_entry.h"
 #include "cc_handler_result.h"
 #include "cc_req_base.h"
 #include "cc_req_misc.h"  // FetchRangeSlicesReq
@@ -51,8 +50,8 @@ struct FetchTableStatisticsCc;
 struct FetchTableRangesCc;
 struct SliceDataItem;
 class StoreSlice;
-struct LoadRangeSliceRequest;
 struct FetchRecordCc;
+struct FlushRecord;
 
 namespace store
 {
@@ -98,23 +97,6 @@ public:
     virtual bool Connect() = 0;
 
     virtual void ScheduleTimerTasks(){};
-
-    /**
-     * Initialize cluster config based on the based in ips and ports. This
-     * should only be called during bootstrap.
-     */
-    virtual bool InitializeClusterConfig(
-        const std::unordered_map<uint32_t, std::vector<NodeConfig>>
-            &ng_configs) = 0;
-
-    /**
-     * Read cluster config from kv store cluster config table.
-     */
-    virtual bool ReadClusterConfig(
-        std::unordered_map<uint32_t, std::vector<NodeConfig>> &ng_configs,
-        uint64_t &version,
-        bool &uninitialized) = 0;
-
     /**
      * @brief flush entries in \@param batch to base table or skindex table in
      * data store, stop and return false if node_group is not longer leader.
@@ -137,12 +119,14 @@ public:
      * @param node_group
      * @return whether all entries are written to data store successfully
      */
-    virtual bool CkptEnd(const txservice::TableName &table_name,
-                         const txservice::TableSchema *schema,
-                         uint32_t node_group,
-                         uint64_t version)
+    virtual bool PersistKV(const std::vector<std::string> &kv_table_names)
     {
         return true;
+    }
+
+    virtual bool NeedPersistKV()
+    {
+        return false;
     }
 
     /**
@@ -195,11 +179,11 @@ public:
     virtual bool FetchTable(const TableName &table_name,
                             std::string &schema_image,
                             bool &found,
-                            uint64_t &version_ts) const = 0;
+                            uint64_t &version_ts) = 0;
 
     bool FetchTable(const txservice::TableName &table_name,
                     std::string &schema_image,
-                    bool &found) const
+                    bool &found)
     {
         uint64_t version_ts;
         return FetchTable(table_name, schema_image, found, version_ts);
@@ -218,11 +202,10 @@ public:
             &sample_pool_map,
         uint64_t version) = 0;
 
-    virtual DataStoreOpStatus LoadRangeSlice(
-        const TableName &table_name,
-        const KVCatalogInfo *kv_info,
-        uint32_t partition_id,
-        LoadRangeSliceRequest *load_slice_req)
+    virtual DataStoreOpStatus LoadRangeSlice(const TableName &table_name,
+                                             const KVCatalogInfo *kv_info,
+                                             uint32_t partition_id,
+                                             FillStoreSliceCc *load_slice_req)
     {
         return DataStoreOpStatus::Error;
     }
@@ -252,26 +235,26 @@ public:
     virtual bool DiscoverAllTableNames(
         std::vector<std::string> &norm_name_vec,
         const std::function<void()> *yield_fptr = nullptr,
-        const std::function<void()> *resume_fptr = nullptr) const = 0;
+        const std::function<void()> *resume_fptr = nullptr) = 0;
 
     //-- database
     virtual bool UpsertDatabase(std::string_view db,
-                                std::string_view definition) const = 0;
-    virtual bool DropDatabase(std::string_view db) const = 0;
+                                std::string_view definition) = 0;
+    virtual bool DropDatabase(std::string_view db) = 0;
     virtual bool FetchDatabase(
         std::string_view db,
         std::string &definition,
         bool &found,
         const std::function<void()> *yield_fptr = nullptr,
-        const std::function<void()> *resume_fptr = nullptr) const = 0;
+        const std::function<void()> *resume_fptr = nullptr) = 0;
     virtual bool FetchAllDatabase(
         std::vector<std::string> &dbnames,
         const std::function<void()> *yield_fptr = nullptr,
-        const std::function<void()> *resume_fptr = nullptr) const = 0;
+        const std::function<void()> *resume_fptr = nullptr) = 0;
 
-    virtual bool DropKvTable(const std::string &kv_table_name) const = 0;
+    virtual bool DropKvTable(const std::string &kv_table_name) = 0;
 
-    virtual void DropKvTableAsync(const std::string &kv_table_name) const = 0;
+    virtual void DropKvTableAsync(const std::string &kv_table_name) = 0;
 
     virtual std::unique_ptr<DataStoreScanner> ScanForward(
         const TableName &table_name,
@@ -296,7 +279,7 @@ public:
      * @brief Copy record from base/sk table to mvcc_archives.
      */
     virtual bool CopyBaseToArchive(
-        std::vector<TxKey> &batch,
+        std::vector<std::pair<TxKey, int32_t>> &batch,
         uint32_t node_group,
         const txservice::TableName &table_name,
         const txservice::TableSchema *table_schema) = 0;
@@ -334,6 +317,7 @@ public:
                                       const TableSchema *table_schema) = 0;
 
     virtual bool GetNextRangePartitionId(const TableName &tablename,
+                                         const TableSchema *table_schema,
                                          uint32_t range_cnt,
                                          int32_t &out_next_partition_id,
                                          int retry_count = 5) = 0;
@@ -370,10 +354,6 @@ public:
                                         metrics::Type::Histogram);
         }
     };
-
-    virtual bool UpdateClusterConfig(
-        const std::unordered_map<uint32_t, std::vector<NodeConfig>> &new_cnf,
-        uint64_t version) = 0;
 
     virtual bool NeedCopyRange() const = 0;
 

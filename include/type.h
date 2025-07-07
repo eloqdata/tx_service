@@ -28,6 +28,7 @@
 #include <functional>
 #include <iterator>
 #include <mutex>
+#include <set>
 #include <sstream>
 #include <string>
 #include <string_view>
@@ -55,6 +56,8 @@ constexpr Void void_ = Void();
 // @brief OperationType contain SQL DML and SQL DDL.
 enum class OperationType
 {
+    // Update is mainly used in DML. When used in DDL, it represents logically
+    // alter a table, e.g change a singlekey index to multikey index.
     Update = 1,
     Delete,
     Insert,
@@ -87,8 +90,9 @@ enum class DsOperation
 
 enum class ClusterScaleOpType
 {
-    AddNode = 1,
-    RemoveNode
+    AddNodeGroup = 1,
+    RemoveNode,
+    AddNodeGroupPeers
 };
 
 enum class TxnStatus
@@ -149,28 +153,43 @@ enum class TableType : uint8_t
     ClusterConfig
 };
 
+enum class TableEngine : uint8_t
+{
+    None = 'M',  // table that does not belong to any engine like bucket table.
+    EloqSql = 'S',
+    EloqKv = 'K',
+    EloqDoc = 'D',
+};
+
 struct TableName
 {
     TableName() = delete;
     TableName &operator=(const TableName &) = delete;
 
-    explicit TableName(std::string_view name_view, TableType type)
-        : name_view_(name_view), own_string_(false), type_(type)
+    TableName(std::string_view name_view, TableType type, TableEngine engine)
+        : name_view_(name_view),
+          own_string_(false),
+          type_(type),
+          engine_(engine)
     {
     }
 
-    explicit TableName(const char *name_ptr, size_t name_len, TableType type)
-        : name_str_(name_ptr, name_len), own_string_(true), type_(type)
+    TableName(const char *name_ptr,
+              size_t name_len,
+              TableType type,
+              TableEngine engine)
+        : name_str_(name_ptr, name_len),
+          own_string_(true),
+          type_(type),
+          engine_(engine)
     {
     }
 
-    explicit TableName(const std::string &name_str, TableType type)
-        : name_str_(name_str), own_string_(true), type_(type)
-    {
-    }
-
-    explicit TableName(std::string &&name_str, TableType type)
-        : name_str_(std::move(name_str)), own_string_(true), type_(type)
+    TableName(std::string name_str, TableType type, TableEngine engine)
+        : name_str_(std::move(name_str)),
+          own_string_(true),
+          type_(type),
+          engine_(engine)
     {
     }
 
@@ -178,17 +197,18 @@ struct TableName
     TableName(const TableName &rhs)
         : name_str_(rhs.StringView().data(), rhs.StringView().size()),
           own_string_(true),
-          type_(rhs.type_)
+          type_(rhs.type_),
+          engine_(rhs.engine_)
     {
     }
 
     // TableName needs to be MoveInsertable in case like
     // std::vector<txservice::TableName>
-    TableName(TableName &&rhs)
+    TableName(TableName &&rhs) noexcept
     {
         if (rhs.own_string_)
         {
-            new (&name_str_) std::string(rhs.name_str_);
+            new (&name_str_) std::string(std::move(rhs.name_str_));
         }
         else
         {
@@ -196,9 +216,11 @@ struct TableName
         }
         type_ = rhs.type_;
         own_string_ = rhs.own_string_;
+        rhs.own_string_ = false;
+        engine_ = rhs.engine_;
     }
 
-    TableName &operator=(TableName &&rhs)
+    TableName &operator=(TableName &&rhs) noexcept
     {
         if (this == &rhs)
         {
@@ -209,7 +231,15 @@ struct TableName
         {
             if (own_string_)
             {
-                name_str_ = std::move(rhs.name_str_);
+                // Notice: If we only use MoveAssignment operator here
+                // ("name_str_=std::move(rhs.name_str_);") ,
+                // a "memory leak" error will be throwed when asan enabled.
+                // So, we must free old value of "name_str_" before assign it.
+                name_str_.~basic_string();
+                // Here must re-create "name_str_" to string object instead of
+                // assign it like ("name_str_=std::move(rhs.name_str_);").
+                // Otherwise, a "heap-use-after-free" error will be exposed.
+                new (&name_str_) std::string(std::move(rhs.name_str_));
             }
             else
             {
@@ -228,7 +258,8 @@ struct TableName
 
         type_ = rhs.type_;
         own_string_ = rhs.own_string_;
-
+        rhs.own_string_ = false;
+        engine_ = rhs.engine_;
         return *this;
     }
 
@@ -242,7 +273,8 @@ struct TableName
 
     bool operator==(const TableName &rhs) const
     {
-        return type_ == rhs.type_ && this->StringView() == rhs.StringView();
+        return type_ == rhs.type_ && this->StringView() == rhs.StringView() &&
+               engine_ == rhs.engine_;
     }
 
     bool operator!=(const TableName &rhs) const
@@ -252,8 +284,10 @@ struct TableName
 
     bool operator<(const TableName &rhs) const
     {
-        return type_ < rhs.type_ ||
-               (type_ == rhs.type_ && this->StringView() < rhs.StringView());
+        return engine_ < rhs.engine_ ||
+               (engine_ == rhs.engine_ &&
+                (type_ < rhs.type_ || (type_ == rhs.type_ &&
+                                       this->StringView() < rhs.StringView())));
     }
 
     std::string_view StringView() const
@@ -306,6 +340,26 @@ struct TableName
         }
     }
 
+    std::string Serialize() const
+    {
+        std::string str;
+        if (own_string_)
+        {
+            str.reserve(name_str_.size() + sizeof(char));
+            str = name_str_;
+        }
+        else
+        {
+            str.reserve(name_view_.size() + sizeof(char));
+            str = name_view_;
+        }
+
+        int8_t engine_type = static_cast<int8_t>(engine_);
+        assert(engine_type != 0);
+        str.append(1, engine_type);
+        return str;
+    }
+
     void CopyFrom(const TableName &other)
     {
         if (other.own_string_)
@@ -331,6 +385,7 @@ struct TableName
 
         type_ = other.type_;
         own_string_ = other.own_string_;
+        engine_ = other.engine_;
     }
 
     const std::string_view GetBaseTableNameSV() const
@@ -370,9 +425,7 @@ struct TableName
 
     bool IsMeta() const
     {
-        return type_ == TableType::RangeBucket || type_ == TableType::Catalog ||
-               type_ == TableType::RangePartition ||
-               type_ == TableType::ClusterConfig;
+        return TableName::IsMeta(type_);
     }
 
     static bool IsMeta(TableType type)
@@ -404,6 +457,11 @@ struct TableName
         return type_;
     }
 
+    const TableEngine &Engine() const
+    {
+        return engine_;
+    }
+
     // @brief Get table type base on table name, only return Primary and
     // Secondary
     static TableType Type(const std::string_view &table_name_sv)
@@ -432,6 +490,7 @@ private:
 
     bool own_string_;
     TableType type_;
+    TableEngine engine_;
 };
 
 enum struct ReadType
@@ -490,24 +549,30 @@ enum class PostWriteType
     // DowngradeLock is used to downgrade write lock to write intent. We use
     // this flag to resolve deadlock problem on DDL.
     DowngradeLock,
+    // Update dirty value. Takes no effect on lock. An optional medium stage
+    // between PrepareCommit and PostCommit.
+    UpdateDirty,
 };
 
-inline static std::string_view empty_sv{"__empty"};
-inline static std::string_view catalog_ccm_name_sv{"__catalog"};
-inline static std::string_view redis_table_name_sv{"redis_table"};
-inline static std::string_view range_bucket_ccm_name_sv{"__range_bucekt"};
-inline static std::string_view cluster_config_ccm_name_sv{"__cluster_config"};
+constexpr static std::string_view empty_sv{"__empty"};
+constexpr static std::string_view catalog_ccm_name_sv{"__catalog"};
+constexpr static std::string_view redis_table_name_sv{"redis_table"};
+constexpr static std::string_view range_bucket_ccm_name_sv{"__range_bucket"};
+constexpr static std::string_view cluster_config_ccm_name_sv{
+    "__cluster_config"};
+constexpr static std::string_view sequence_table_name_sv{"__sequence_table"};
 
 inline static TableName catalog_ccm_name{
-    catalog_ccm_name_sv.data(), catalog_ccm_name_sv.size(), TableType::Catalog};
-
-inline static TableName range_bucket_ccm_name{range_bucket_ccm_name_sv.data(),
-                                              range_bucket_ccm_name_sv.size(),
-                                              TableType::RangeBucket};
+    catalog_ccm_name_sv, TableType::Catalog, TableEngine::None};
+inline static TableName range_bucket_ccm_name{
+    range_bucket_ccm_name_sv, TableType::RangeBucket, TableEngine::None};
 inline static TableName cluster_config_ccm_name{
-    cluster_config_ccm_name_sv.data(),
-    cluster_config_ccm_name_sv.size(),
-    TableType::ClusterConfig};
+    cluster_config_ccm_name_sv, TableType::ClusterConfig, TableEngine::None};
+
+inline static TableName sequence_table_name{sequence_table_name_sv.data(),
+                                            sequence_table_name_sv.size(),
+                                            TableType::Primary,
+                                            TableEngine::None};
 
 #ifdef ON_KEY_OBJECT
 // Set buckets count to be the same as the slots count. (16384)
@@ -611,10 +676,10 @@ struct hash<txservice::TableName>
 
 namespace txservice
 {
-template <typename KeyT>
+template <typename T>
 struct Copy
 {
-    constexpr void operator()(KeyT &lhs, const KeyT &rhs) const
+    constexpr void operator()(T &lhs, const T &rhs) const
     {
         lhs = rhs;
     }
@@ -689,7 +754,7 @@ struct AlterTableInfo
     }
 
     void DeserializeAlteredTableInfo(
-        const std::string &altered_table_info_image)
+        const std::string &altered_table_info_image, TableEngine table_engine)
     {
         if (altered_table_info_image.length() <= 0)
         {
@@ -720,8 +785,8 @@ struct AlterTableInfo
                 assert(table_type == TableType::Secondary ||
                        table_type == TableType::UniqueSecondary);
 
-                txservice::TableName add_index_name(std::string_view(*it),
-                                                    table_type);
+                txservice::TableName add_index_name(
+                    std::string_view(*it), table_type, table_engine);
                 const std::string &add_index_kv_name = *(++it);
                 index_add_names_.emplace(add_index_name, add_index_kv_name);
             }
@@ -752,8 +817,8 @@ struct AlterTableInfo
                 assert(table_type == TableType::Secondary ||
                        table_type == TableType::UniqueSecondary);
 
-                txservice::TableName drop_index_name(std::string_view(*it),
-                                                     table_type);
+                txservice::TableName drop_index_name(
+                    std::string_view(*it), table_type, table_engine);
                 const std::string &drop_index_kv_name = *(++it);
                 index_drop_names_.emplace(drop_index_name, drop_index_kv_name);
             }

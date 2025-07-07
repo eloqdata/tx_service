@@ -40,6 +40,26 @@ struct UpsertTableOp;
 struct SplitFlushRangeOp;
 struct UpsertTableIndexOp;
 
+enum struct CcReqStatus
+{
+    /**
+     * @brief The cc request is sent to a shard at the local node.
+     *
+     */
+    SentLocal = 0,
+    /**
+     * @brief The cc request is sent to a shard at a remote node.
+     *
+     */
+    SentRemote,
+    /**
+     * @brief The cc request is sent to the shard to which the handler is bound
+     * and has been processed.
+     *
+     */
+    Processed
+};
+
 class CcHandler
 {
 public:
@@ -133,15 +153,15 @@ public:
      * @param is_deleted Whether or not the write deletes a record
      * @param hres Result handler of the request
      */
-    virtual void PostWrite(TxNumber tx_number,
-                           int64_t tx_term,
-                           uint16_t command_id,
-                           uint64_t commit_ts,
-                           const CcEntryAddr &ccentry_addr,
-                           const TxRecord *record,
-                           OperationType operation_type,
-                           uint32_t key_shard_code,
-                           CcHandlerResult<PostProcessResult> &hres) = 0;
+    virtual CcReqStatus PostWrite(TxNumber tx_number,
+                                  int64_t tx_term,
+                                  uint16_t command_id,
+                                  uint64_t commit_ts,
+                                  const CcEntryAddr &ccentry_addr,
+                                  const TxRecord *record,
+                                  OperationType operation_type,
+                                  uint32_t key_shard_code,
+                                  CcHandlerResult<PostProcessResult> &hres) = 0;
 
     /**
      * @brief Directly upload a rec into cc map using post write cc. Currently
@@ -176,7 +196,7 @@ public:
                               int64_t expected_term = SKIP_CHECK_TERM) = 0;
 
     /**
-     * @brief Post-processes a read/scan key. Post-processing clears the read
+     * @briefPost-processes a read/scan key. Post-processing clears the read
      * lock or intention on the key's cc entry, matches the input key/gap
      * timestamps against those of the cc entry and updates the cc entry's
      * last_vali_ts field. The last_vali_ts field forces future transactions
@@ -194,17 +214,20 @@ public:
      * @param commit_ts Commit timestamp of the tx. 0, if the tx aborts.
      * @param ccentry_addr Address of the cc entry
      * @param hres Result handler of the request
+     * @param is_local
+     * @param need_remote_resp
+     * @return CcReqStatus
      */
-    virtual void PostRead(uint64_t tx_number,
-                          int64_t tx_term,
-                          uint16_t command_id,
-                          uint64_t key_ts,
-                          uint64_t gap_ts,
-                          uint64_t commit_ts,
-                          const CcEntryAddr &ccentry_addr,
-                          CcHandlerResult<PostProcessResult> &hres,
-                          bool is_local = false,
-                          bool need_remote_resp = true) = 0;
+    virtual CcReqStatus PostRead(uint64_t tx_number,
+                                 int64_t tx_term,
+                                 uint16_t command_id,
+                                 uint64_t key_ts,
+                                 uint64_t gap_ts,
+                                 uint64_t commit_ts,
+                                 const CcEntryAddr &ccentry_addr,
+                                 CcHandlerResult<PostProcessResult> &hres,
+                                 bool is_local = false,
+                                 bool need_remote_resp = true) = 0;
 
     /**
      * @brief Reads the input key and returns the key's record. The request puts
@@ -333,13 +356,9 @@ public:
         bool is_covering_keys = false,
         bool is_require_keys = true,
         bool is_require_recs = true,
-        bool is_require_sort = true
-#ifdef ON_KEY_OBJECT
-        ,
+        bool is_require_sort = true,
         int32_t obj_type = -1,
-        const std::string_view &scan_pattern = {}
-#endif
-        ) = 0;
+        const std::string_view &scan_pattern = {}) = 0;
 
     virtual void ScanOpenLocal(
         const TableName &table_name,
@@ -362,13 +381,9 @@ public:
                                uint16_t command_id,
                                uint64_t start_ts,
                                CcScanner &scanner,
-                               CcHandlerResult<ScanNextResult> &hd_res
-#ifdef ON_KEY_OBJECT
-                               ,
+                               CcHandlerResult<ScanNextResult> &hd_res,
                                int32_t obj_type = -1,
-                               const std::string_view &scan_pattern = {}
-#endif
-                               ) = 0;
+                               const std::string_view &scan_pattern = {}) = 0;
 
     virtual void ScanNextBatch(
         const TableName &tbl_name,
@@ -466,7 +481,7 @@ public:
         const TableSchema *old_schema,
         const TableSchema *schema,
         OperationType op_type,
-        uint64_t commit_ts,
+        uint64_t write_time,
         NodeGroupId ng_id,
         int64_t tx_term,
         CcHandlerResult<Void> &hres,
@@ -520,7 +535,8 @@ public:
                                CcHandlerResult<ObjectCommandResult> &hres,
                                IsolationLevel iso_level,
                                CcProtocol proto,
-                               bool commit) = 0;
+                               bool commit,
+                               bool always_redirect) = 0;
 
     virtual void PublishMessage(uint64_t ng_id,
                                 int64_t tx_term,
@@ -532,15 +548,16 @@ public:
      * group cc map. (Double write)
      *
      */
-    virtual void UploadTxCommands(uint64_t tx_number,
-                                  int64_t tx_term,
-                                  uint16_t command_id,
-                                  const CcEntryAddr &cce_addr,
-                                  uint64_t obj_version,
-                                  uint64_t commit_ts,
-                                  const std::vector<std::string> *cmd_list,
-                                  bool has_overwrite,
-                                  CcHandlerResult<PostProcessResult> &hres) = 0;
+    virtual CcReqStatus UploadTxCommands(
+        uint64_t tx_number,
+        int64_t tx_term,
+        uint16_t command_id,
+        const CcEntryAddr &cce_addr,
+        uint64_t obj_version,
+        uint64_t commit_ts,
+        const std::vector<std::string> *cmd_list,
+        bool has_overwrite,
+        CcHandlerResult<PostProcessResult> &hres) = 0;
 
     virtual void CleanCcEntryForTest(const TableName &table_name,
                                      const TxKey &key,

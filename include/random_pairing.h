@@ -25,18 +25,16 @@
 // *A Dip in the Reservoir: Maintaining Sample Synopses of Evolving Datasets*
 // https://www.vldb.org/conf/2006/p595-gemulla.pdf
 
-#include <assert.h>
-
 #include <algorithm>
+#include <cassert>
 #include <random>
 #include <vector>
 
-#include "tx_key.h"
-#include "type.h"
+#include "type.h"  // Default Copy function.
 
 namespace txservice
 {
-template <typename KeyT, typename CopyKey>
+template <typename T, typename CopyT = Copy<T>>
 class RandomPairing
 {
 public:
@@ -44,14 +42,14 @@ public:
     {
     }
 
-    RandomPairing(const std::vector<KeyT> &keys, uint32_t capacity)
+    RandomPairing(const std::vector<T> &keys, uint32_t capacity)
         : capacity_(capacity)
     {
         sample_pool_.reserve(capacity_);
 
         for (size_t i = 0; i < keys.size(); ++i)
         {
-            const KeyT &key = keys[i];
+            const T &key = keys[i];
 
             // keys.size() maybe larger than capacity_, in case like shrink node
             // groups. By calling Insert, re-sample from the original sample
@@ -60,7 +58,7 @@ public:
         }
     }
 
-    void Insert(const KeyT &key, uint64_t dataset)
+    void Insert(const T &key, uint64_t dataset)
     {
         if (c1_ + c2_ <= 0)
         {
@@ -107,32 +105,39 @@ public:
         }
     }
 
-    void Delete(const KeyT &key)
+    void Delete(const T &key, uint64_t dataset)
     {
         auto iter =
             std::lower_bound(sample_pool_.begin(), sample_pool_.end(), key);
         if (iter != sample_pool_.end() && *iter == key)
         {
             c1_ += 1;
-
-            while (iter != sample_pool_.end() - 1)
-            {
-                *iter = std::move(*(iter + 1));
-                iter++;
-            }
-
-            sample_pool_.resize(sample_pool_.size() - 1);
+            sample_pool_.erase(iter);
 
             assert(std::is_sorted(sample_pool_.begin(), sample_pool_.end()));
             assert(sample_pool_.size() < capacity_);
         }
         else
         {
-            c2_ += 1;
+            if (!sample_pool_.empty())
+            {
+                if (dataset >= sample_pool_.size())
+                {
+                    c2_ += 1;
+                }
+                else
+                {
+                    std::uniform_int_distribution<uint64_t> random_dis(0,
+                                                                       dataset);
+
+                    uint64_t random = random_dis(random_dev_);
+                    sample_pool_.erase(sample_pool_.begin() + random);
+                }
+            }
         }
     }
 
-    const std::vector<KeyT> &SampleKeys() const
+    const std::vector<T> &SampleKeys() const
     {
         return sample_pool_;
     }
@@ -160,7 +165,7 @@ public:
     }
 
 private:
-    void Insert(const KeyT &key)
+    void Insert(const T &key)
     {
         assert(sample_pool_.size() < capacity_);
 
@@ -171,15 +176,9 @@ private:
         {
             if (key < *iter)
             {
-                uint64_t i = std::distance(sample_pool_.begin(), iter);
-                sample_pool_.resize(sample_pool_.size() + 1);
-
-                for (uint64_t j = sample_pool_.size() - 1; j > i; --j)
-                {
-                    sample_pool_[j] = std::move(sample_pool_[j - 1]);
-                }
-
-                CopyKey()(sample_pool_[i], key);
+                T dup_key;
+                CopyT()(dup_key, key);
+                sample_pool_.insert(iter, std::move(dup_key));
             }
         }
         else
@@ -190,7 +189,7 @@ private:
         assert(sample_pool_.size() <= capacity_);
     }
 
-    void Replace(uint64_t random, const KeyT &key)
+    void Replace(uint64_t random, const T &key)
     {
         auto iter =
             std::lower_bound(sample_pool_.begin(), sample_pool_.end(), key);
@@ -199,7 +198,7 @@ private:
             return;
         }
 
-        CopyKey()(sample_pool_[random], key);
+        CopyT()(sample_pool_[random], key);
 
         for (uint64_t i = random; i < sample_pool_.size() - 1 &&
                                   sample_pool_[i + 1] < sample_pool_[i];
@@ -224,7 +223,7 @@ private:
     uint32_t c2_{0};
 
     // order array
-    std::vector<KeyT> sample_pool_;
+    std::vector<T> sample_pool_;
 
     std::mt19937_64 random_dev_;
 

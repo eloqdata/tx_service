@@ -362,7 +362,9 @@ bool NonBlockingLock::ReleaseReadLock(TxNumber tx_number, CcShard *ccs)
  * @param tx_number
  * @param ccs
  */
-bool NonBlockingLock::ReleaseWriteLock(TxNumber tx_number, CcShard *ccs)
+bool NonBlockingLock::ReleaseWriteLock(TxNumber tx_number,
+                                       CcShard *ccs,
+                                       TxObject *object)
 {
     if (write_lk_type_ != WriteLockType::WriteLock || write_txn_ != tx_number)
     {
@@ -375,6 +377,11 @@ bool NonBlockingLock::ReleaseWriteLock(TxNumber tx_number, CcShard *ccs)
     if (ccs == nullptr)
     {
         return true;  // warning: just for unit-tests.
+    }
+
+    if (object != nullptr && PopBlockCmdRequest(ccs, object))
+    {
+        return true;
     }
 
     TryPopBlockingQueue(ccs);
@@ -499,7 +506,7 @@ bool NonBlockingLock::IsEmpty() const
 {
     return read_intentions_.empty() && read_locks_.empty() && read_cnt_ == 0 &&
            write_lk_type_ == WriteLockType::NoWritelock &&
-           blocking_queue_.Size() == 0;
+           blocking_queue_.Size() == 0 && queue_block_cmds_.Size() == 0;
 }
 
 TxNumber NonBlockingLock::WriteLockTx() const
@@ -512,7 +519,9 @@ bool NonBlockingLock::HasWriteLock() const
     return write_lk_type_ == WriteLockType::WriteLock;
 }
 
-LockType NonBlockingLock::ClearTx(TxNumber tx_number, CcShard *ccs)
+LockType NonBlockingLock::ClearTx(TxNumber tx_number,
+                                  CcShard *ccs,
+                                  TxObject *object)
 {
     if (ReleaseReadLock(tx_number, ccs))
     {
@@ -531,6 +540,11 @@ LockType NonBlockingLock::ClearTx(TxNumber tx_number, CcShard *ccs)
 
         write_lk_type_ = WriteLockType::NoWritelock;
         write_txn_ = 0;
+        if (object != nullptr && return_type == LockType::WriteLock &&
+            PopBlockCmdRequest(ccs, object))
+        {
+            return return_type;
+        }
 
         TryPopBlockingQueue(ccs);
 
@@ -542,12 +556,12 @@ LockType NonBlockingLock::ClearTx(TxNumber tx_number, CcShard *ccs)
     }
 }
 
-const std::unordered_set<TxNumber> &NonBlockingLock::ReadLocks() const
+const absl::flat_hash_set<TxNumber> &NonBlockingLock::ReadLocks() const
 {
     return read_locks_;
 }
 
-const std::unordered_set<TxNumber> &NonBlockingLock::ReadIntents() const
+const absl::flat_hash_set<TxNumber> &NonBlockingLock::ReadIntents() const
 {
     return read_intentions_;
 }
@@ -628,25 +642,7 @@ LockType NonBlockingLock::SearchLock(TxNumber txn)
     }
 }
 
-void KeyGapLockAndExtraData::SetUsedStatus(bool is_used)
-{
-    in_use_ = is_used;
-    if (!in_use_)
-    {
-        last_used_ts_ = Sharder::Instance().GetLocalCcShards()->TsBase();
-    }
-}
-
-bool KeyGapLockAndExtraData::SafeToRecycle() const
-{
-    return !in_use_ &&
-           Sharder::Instance().GetLocalCcShards()->TsBase() - last_used_ts_ >=
-               recycle_interval_us_;
-}
-
-#ifdef ON_KEY_OBJECT
-void KeyGapLockAndExtraData::PopBlockRequest(CcShard *ccs,
-                                             txservice::TxObject *object)
+bool NonBlockingLock::PopBlockCmdRequest(CcShard *ccs, TxObject *object)
 {
     for (size_t i = 0; i < queue_block_cmds_.Size(); i++)
     {
@@ -666,14 +662,19 @@ void KeyGapLockAndExtraData::PopBlockRequest(CcShard *ccs,
 
         if (cmd->AblePopBlockRequest(object))
         {
+            // Upgrade lock for blocked command request so that no one can be
+            // executed before it.
+            UpgradeLock(req->Txn(), LockType::WriteLock);
             ccs->Enqueue(ccs->LocalCoreId(), req);
             queue_block_cmds_.Erase(i);
-            break;
+            return true;
         }
     }
+
+    return false;
 }
 
-void KeyGapLockAndExtraData::AbortBlockRequest(TxNumber txid, CcErrorCode err)
+void NonBlockingLock::AbortBlockCmdRequest(TxNumber txid, CcErrorCode err)
 {
     for (size_t i = 0; i < queue_block_cmds_.Size(); i++)
     {
@@ -686,6 +687,22 @@ void KeyGapLockAndExtraData::AbortBlockRequest(TxNumber txid, CcErrorCode err)
     }
 }
 
+void KeyGapLockAndExtraData::SetUsedStatus(bool is_used)
+{
+    in_use_ = is_used;
+    if (!in_use_)
+    {
+        last_used_ts_ = Sharder::Instance().GetLocalCcShards()->TsBase();
+    }
+}
+
+bool KeyGapLockAndExtraData::SafeToRecycle() const
+{
+    return !in_use_ &&
+           Sharder::Instance().GetLocalCcShards()->TsBase() - last_used_ts_ >=
+               recycle_interval_us_;
+}
+
 void KeyGapLockAndExtraData::SetForwardEntry(StandbyForwardEntry *entry)
 {
     forward_entry_ = entry;
@@ -695,5 +712,4 @@ StandbyForwardEntry *KeyGapLockAndExtraData::ForwardEntry()
 {
     return forward_entry_;
 }
-#endif
 }  // namespace txservice

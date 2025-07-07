@@ -21,7 +21,6 @@
  */
 #include "log_replay_service.h"
 
-#include <braft/util.h>  //braft::HostNameAddr2NSUrl
 #include <brpc/stream.h>
 
 #include <memory>
@@ -31,6 +30,7 @@
 #include "cc/cc_request.h"
 #include "cc/local_cc_shards.h"
 #include "log.pb.h"
+#include "log_type.h"
 #include "proto/cc_request.pb.h"
 #include "sharder.h"
 #include "type.h"
@@ -78,7 +78,6 @@ RecoveryService::RecoveryService(LocalCcShards &local_shards,
       ip_(std::move(ip)),
       port_(port)
 {
-    CHECK((log_agent == nullptr) == txservice_skip_wal);
     notify_thread_ = std::thread(
         [this]
         {
@@ -383,12 +382,21 @@ int RecoveryService::on_received_messages(brpc::StreamId stream_id,
                 // Table name string
                 std::string_view table_name_view(
                     split_range_op_blob.data() + blob_offset, table_name_len);
+                blob_offset += table_name_len;
+
+                TableEngine table_engine =
+                    ::txlog::ToLocalType::ConvertTableEngine(
+                        ::txlog::TableEngine(*reinterpret_cast<const uint8_t *>(
+                            split_range_op_blob.data() + blob_offset)));
+                blob_offset += sizeof(uint8_t);
 
                 // Add read lock on catalog
                 TableName table_name{table_name_view,
-                                     TableName::Type(table_name_view)};
+                                     TableName::Type(table_name_view),
+                                     table_engine};
                 TableName base_table_name{table_name.GetBaseTableNameSV(),
-                                          TableType::Primary};
+                                          TableType::Primary,
+                                          table_engine};
                 range_split_tables.insert(base_table_name);
             }
         }
@@ -412,6 +420,7 @@ int RecoveryService::on_received_messages(brpc::StreamId stream_id,
                 cc_ng_term,
                 cluster_config_ccm_name_sv,
                 TableType::ClusterConfig,
+                TableEngine::None,
                 std::string_view(scale_op_blob.data(), scale_op_blob.length()),
                 msg.cluster_scale_op_msg().commit_ts(),
                 msg.cluster_scale_op_msg().txn(),
@@ -436,6 +445,7 @@ int RecoveryService::on_received_messages(brpc::StreamId stream_id,
                 cc_ng_term,
                 range_bucket_ccm_name_sv,
                 TableType::RangeBucket,
+                TableEngine::None,
                 std::string_view(scale_op_blob.data(), scale_op_blob.length()),
                 msg.cluster_scale_op_msg().commit_ts(),
                 msg.cluster_scale_op_msg().txn(),
@@ -465,6 +475,7 @@ int RecoveryService::on_received_messages(brpc::StreamId stream_id,
                           cc_ng_term,
                           catalog_ccm_name_sv,
                           TableType::Catalog,
+                          TableEngine::None,
                           std::string_view(schema_op_blob.data(),
                                            schema_op_blob.length()),
                           schema_op_msg.commit_ts(),
@@ -506,23 +517,31 @@ int RecoveryService::on_received_messages(brpc::StreamId stream_id,
             // Table name string
             std::string_view table_name_view(
                 split_range_op_blob.data() + blob_offset, table_name_len);
+            blob_offset += table_name_len;
+
+            TableEngine table_engine = ::txlog::ToLocalType::ConvertTableEngine(
+                ::txlog::TableEngine(*reinterpret_cast<const uint8_t *>(
+                    split_range_op_blob.data() + blob_offset)));
+            blob_offset += sizeof(uint8_t);
 
             TableName table_name{table_name_view,
-                                 TableName::Type(table_name_view)};
+                                 TableName::Type(table_name_view),
+                                 table_engine};
             TableName base_table_name{table_name.GetBaseTableNameSV(),
-                                      TableType::Primary};
+                                      TableType::Primary,
+                                      table_engine};
 
             auto res_pair = table_range_split_cnt.try_emplace(
                 base_table_name, std::make_shared<std::atomic_uint32_t>(0));
 
             // Replay Split
-            blob_offset += table_name_len;
             ReplayLogCc *cc_req = replay_cc_pool_.NextRequest();
             cc_req->Reset(
                 cc_ng_id,
                 cc_ng_term,
                 table_name_view,
                 TableType::RangePartition,
+                table_engine,
                 std::string_view(split_range_op_blob.data() + blob_offset,
                                  split_range_op_blob.length() - blob_offset),
                 ts,
@@ -939,7 +958,8 @@ void RecoveryService::ProcessRecoverTxTask(RecoverTxTask &task)
             {
                 LOG(INFO) << "The tx " << task.tx_number_
                           << " is to be cleared, after asking "
-                             "the log group.";
+                             "the log group. status: "
+                          << int(status);
 
                 // If the tx is not committed, sends a cc request to
                 // local cc shards to clear write intentions left by
@@ -977,7 +997,6 @@ void RecoveryService::ProcessRecoverTxTask(RecoverTxTask &task)
             // no log service we have no way to know whether the txn
             // committed or aborted, just treat it as aborted. User will
             // experience some data loss but it's enevitable without logs.
-            assert(log_agent_ == nullptr);
             ClearTx(task.tx_number_);
         }
     }

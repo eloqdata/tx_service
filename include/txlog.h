@@ -111,13 +111,11 @@ public:
 
     virtual void RefreshLeader(uint32_t log_group_id) = 0;
 
+    virtual void RequestRefreshLeader(uint32_t log_group_id) = 0;
+
     virtual void Init(std::vector<std::string> &ips,
                       std::vector<uint16_t> &ports,
                       const uint32_t start_log_group_id) = 0;
     virtual void UpdateLeaderCache(uint32_t lg_id, uint32_t node_id) = 0;
-
-    virtual bool UpdateLogGroupConfig(std::vector<std::string> &ips,
-                                      std::vector<uint16_t> &ports,
-                                      uint32_t log_group_id) = 0;
 };
 }  // namespace txservice

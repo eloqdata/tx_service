@@ -30,12 +30,14 @@
 #include <vector>
 
 #include "catalog_factory.h"
+#include "cc_map.h"
 #include "cc_req_misc.h"
 #include "cc_shard.h"
 #include "error_messages.h"
 #include "local_cc_shards.h"
 #include "sharder.h"
 #include "store/data_store_handler.h"
+#include "tx_id.h"
 #include "tx_key.h"
 #include "tx_service_metrics.h"
 #include "tx_start_ts_collector.h"
@@ -101,7 +103,7 @@ void StoreSlice::CommitLoading(StoreRange &range, uint32_t slice_size)
 
 FillStoreSliceCc *StoreSlice::FillCcRequest()
 {
-    return fetch_slice_cc_.get();
+    return fetch_slice_cc_;
 }
 
 void StoreSlice::SetLoadingError(StoreRange &range, CcErrorCode err_code)
@@ -142,7 +144,8 @@ bool StoreSlice::IsRecentLoad() const
     return delta < 4000000;
 }
 
-void StoreSlice::InitKeyCache(StoreRange *range,
+void StoreSlice::InitKeyCache(CcShard *cc_shard,
+                              StoreRange *range,
                               const TableName *tbl_name,
                               NodeGroupId ng_id,
                               int64_t term)
@@ -154,18 +157,20 @@ void StoreSlice::InitKeyCache(StoreRange *range,
         range->pins_.fetch_add(1, std::memory_order_acquire);
         // Pin the slice so that it won't be kicked out during key cache init.
         pins_++;
-        init_key_cache_cc_ =
-            std::make_unique<InitKeyCacheCc>(range,
-                                             this,
-                                             range->local_cc_shards_.Count(),
-                                             tbl_name,
-                                             term,
-                                             ng_id);
+
+        init_key_cache_cc_ = cc_shard->NewInitKeyCacheCc();
+        init_key_cache_cc_->Reset(range,
+                                  this,
+                                  range->local_cc_shards_.Count(),
+                                  *tbl_name,
+                                  term,
+                                  ng_id);
+
         uint16_t core_cnt = range->local_cc_shards_.Count();
         for (uint16_t core_id = 0; core_id < core_cnt; core_id++)
         {
             Sharder::Instance().GetLocalCcShards()->EnqueueToCcShard(
-                core_id, init_key_cache_cc_.get());
+                core_id, init_key_cache_cc_);
         }
     }
 }
@@ -597,18 +602,18 @@ StoreRange::LoadSliceStatus StoreRange::LoadSlice(
 
         // Calls the data store's async API to load the slice
         // [slice_start, slice_end) into memory.
-        slice.fetch_slice_cc_ =
-            std::make_unique<FillStoreSliceCc>(tbl_name,
-                                               cc_ng_id_,
-                                               ng_term,
-                                               key_schema,
-                                               rec_schema,
-                                               schema_ts,
-                                               slice,
-                                               *this,
-                                               ctrl.ForceLoad(),
-                                               snapshot_ts,
-                                               local_cc_shards_);
+        slice.fetch_slice_cc_ = cc_shard->NewFillStoreSliceCc();
+        slice.fetch_slice_cc_->Reset(tbl_name,
+                                     cc_ng_id_,
+                                     ng_term,
+                                     key_schema,
+                                     rec_schema,
+                                     schema_ts,
+                                     &slice,
+                                     this,
+                                     ctrl.ForceLoad(),
+                                     snapshot_ts,
+                                     local_cc_shards_);
 
         if (cc_request != nullptr)
         {
@@ -625,18 +630,16 @@ StoreRange::LoadSliceStatus StoreRange::LoadSlice(
 
             auto task = [this, store_hd, &tbl_name, &slice, kv_info](CcShard &)
             {
-                slice.fetch_slice_cc_->LoadRequest()->start_ =
-                    metrics::Clock::now();
+                slice.fetch_slice_cc_->start_ = metrics::Clock::now();
 
                 // fetch_slice_cc_.load_slice_req_ holds a copy of slice's
                 // start_key and slice's end_key. Thus it is safe to execute in
                 // a seperate TxProcessor.
                 store::DataStoreHandler::DataStoreOpStatus kv_load_status =
-                    store_hd->LoadRangeSlice(
-                        tbl_name,
-                        kv_info,
-                        partition_id_,
-                        slice.fetch_slice_cc_->LoadRequest());
+                    store_hd->LoadRangeSlice(tbl_name,
+                                             kv_info,
+                                             partition_id_,
+                                             slice.fetch_slice_cc_);
 
                 std::unique_lock<std::mutex> lk(slice.slice_mux_,
                                                 std::defer_lock);
@@ -652,6 +655,7 @@ StoreRange::LoadSliceStatus StoreRange::LoadSlice(
                         cc_shard->Enqueue(cc_req);
                     }
                     slice.cc_queue_.clear();
+                    slice.fetch_slice_cc_->Free();
                     slice.fetch_slice_cc_ = nullptr;
                     pins_.fetch_sub(1, std::memory_order_release);
                     break;
@@ -676,6 +680,7 @@ StoreRange::LoadSliceStatus StoreRange::LoadSlice(
                                                   CcErrorCode::DATA_STORE_ERR);
                     }
                     slice.cc_queue_.clear();
+                    slice.fetch_slice_cc_->Free();
                     slice.fetch_slice_cc_ = nullptr;
                     pins_.fetch_sub(1, std::memory_order_release);
                     break;
@@ -690,14 +695,11 @@ StoreRange::LoadSliceStatus StoreRange::LoadSlice(
         }
         else
         {
-            slice.fetch_slice_cc_->LoadRequest()->start_ =
-                metrics::Clock::now();
+            slice.fetch_slice_cc_->start_ = metrics::Clock::now();
 
             store::DataStoreHandler::DataStoreOpStatus kv_load_status =
-                store_hd->LoadRangeSlice(tbl_name,
-                                         kv_info,
-                                         partition_id_,
-                                         slice.fetch_slice_cc_->LoadRequest());
+                store_hd->LoadRangeSlice(
+                    tbl_name, kv_info, partition_id_, slice.fetch_slice_cc_);
 
             // By the time LoadRangeSlice() returns, the slice's status is
             // either BeingLoaded or PartiallyCached. This is because this
@@ -721,6 +723,7 @@ StoreRange::LoadSliceStatus StoreRange::LoadSlice(
                     cc_shard->Enqueue(cc_req);
                 }
                 slice.cc_queue_.clear();
+                slice.fetch_slice_cc_->Free();
                 slice.fetch_slice_cc_ = nullptr;
                 pins_.fetch_sub(1, std::memory_order_release);
                 return LoadSliceStatus::Retry;
@@ -746,6 +749,7 @@ StoreRange::LoadSliceStatus StoreRange::LoadSlice(
                                               CcErrorCode::DATA_STORE_ERR);
                 }
                 slice.cc_queue_.clear();
+                slice.fetch_slice_cc_->Free();
                 slice.fetch_slice_cc_ = nullptr;
                 pins_.fetch_sub(1, std::memory_order_release);
                 return LoadSliceStatus::Error;
@@ -777,26 +781,6 @@ StoreRange::LoadSliceStatus StoreRange::LoadSlice(
         }
 
         return LoadSliceStatus::Success;
-    }
-}
-
-void StoreRange::CollectCacheHit(CcShard &ccs)
-{
-    // collect metrics: slice cache hits
-    if (metrics::enable_cache_hit_rate)
-    {
-        auto meter = ccs.GetMeter();
-        meter->Collect(metrics::NAME_CACHE_HIT_OR_MISS_TOTAL, 1, "hits");
-    }
-}
-
-void StoreRange::CollectCacheMiss(CcShard &ccs)
-{
-    // collect metrics: slice cache miss
-    if (metrics::enable_cache_hit_rate)
-    {
-        auto meter = ccs.GetMeter();
-        meter->Collect(metrics::NAME_CACHE_HIT_OR_MISS_TOTAL, 1, "miss");
     }
 }
 

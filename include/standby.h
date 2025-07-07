@@ -25,6 +25,7 @@
 
 #include "glog/logging.h"
 #include "proto/cc_request.pb.h"
+#include "tx_command.h"
 #include "tx_id.h"
 #include "type.h"
 
@@ -40,6 +41,8 @@ struct StandbyForwardEntry
     }
 
     void AddTxCommand(ApplyCc &cc_req);
+
+    void AddTxCommand(TxCommand *cmd);
 
     void Free()
     {

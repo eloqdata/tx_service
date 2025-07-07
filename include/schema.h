@@ -25,6 +25,7 @@
 
 #include <memory>
 #include <string>
+#include <utility>
 
 #include "type.h"
 
@@ -33,11 +34,50 @@ namespace txservice
 class TxKey;
 struct TxRecord;
 
+struct KeySchema;
 struct RecordSchema
 {
 public:
     using Uptr = std::unique_ptr<RecordSchema>;
     virtual ~RecordSchema() = default;
+
+    virtual int AutoIncrementIndex() const
+    {
+        // The index for auto increment field. -1 if not exist,
+        return -1;
+    }
+
+#if defined(DATA_STORE_TYPE_CASSANDRA)
+    virtual void EncodeToSerializeFormat(TableType table_type,
+                                         const void *row,
+                                         std::string &buf) const
+    {
+        assert(false);
+    }
+
+    virtual void EncodeToTxRecord(const txservice::TableName &table_name,
+                                  const void *row,
+                                  TxRecord &tx_record) const
+    {
+        assert(false);
+    }
+#endif
+};
+
+struct MultiKeyPaths
+{
+    using Uptr = std::unique_ptr<MultiKeyPaths>;
+    virtual ~MultiKeyPaths() = default;
+
+    // Prototype Pattern. KeySchema or SkEncoder returns a pointer to the
+    // abstract class, which can be used to create a new instance.
+    virtual MultiKeyPaths::Uptr Clone() const = 0;
+
+    virtual std::string Serialize(const KeySchema *key_schema) const = 0;
+    virtual bool Deserialize(const KeySchema *key_schema,
+                             const std::string &str) = 0;
+    virtual bool Contain(const MultiKeyPaths &rhs) const = 0;
+    virtual bool MergeWith(const MultiKeyPaths &rhs) = 0;
 };
 
 struct KeySchema
@@ -50,6 +90,20 @@ struct KeySchema
 
     virtual uint16_t ExtendKeyParts() const = 0;
     virtual uint64_t SchemaTs() const = 0;
+
+    virtual bool IsMultiKey() const
+    {
+        return false;
+    }
+
+    /**
+     * @return Return an valid object if the index type support multikey index.
+     * @return Return nullptr if the index type doesn't support multikey index.
+     */
+    virtual const txservice::MultiKeyPaths *MultiKeyPaths() const
+    {
+        return nullptr;
+    };
 };
 
 struct SecondaryKeySchema : public KeySchema
@@ -88,9 +142,15 @@ public:
 
 struct TableKeySchemaTs
 {
-    TableKeySchemaTs() = default;
-    explicit TableKeySchemaTs(const std::string &key_schemas_ts_str)
+    explicit TableKeySchemaTs(TableEngine table_engine)
+        : table_engine_(table_engine)
     {
+    }
+
+    TableKeySchemaTs(const std::string &key_schemas_ts_str,
+                     TableEngine table_engine)
+    {
+        table_engine_ = table_engine;
         std::stringstream ts_ss(key_schemas_ts_str);
         std::istream_iterator<std::string> ts_b(ts_ss);
         std::istream_iterator<std::string> ts_e;
@@ -113,7 +173,8 @@ struct TableKeySchemaTs
             {
                 assert(false && "Unknown secondary key type.");
             }
-            txservice::TableName table_name(schemas_ts[idx], table_type);
+            txservice::TableName table_name(
+                schemas_ts[idx], table_type, table_engine_);
             ++idx;
             sk_schemas_ts_.try_emplace(std::move(table_name),
                                        std::stoull(schemas_ts[idx]));
@@ -197,7 +258,7 @@ struct TableKeySchemaTs
                 {
                     assert(false && "Unknown secondary key type.");
                 }
-                txservice::TableName table_name(*it, table_type);
+                txservice::TableName table_name(*it, table_type, table_engine_);
                 sk_schemas_ts_.try_emplace(std::move(table_name),
                                            std::stoull(*(++it)));
             }
@@ -229,8 +290,28 @@ struct TableKeySchemaTs
         }
     }
 
+    TableEngine table_engine_{TableEngine::None};
     uint64_t pk_schema_ts_{1};
     std::unordered_map<txservice::TableName, uint64_t> sk_schemas_ts_;
 };
 
+struct MultiKeyAttr
+{
+    MultiKeyAttr(const TableName *index_name,
+                 bool multikey,
+                 MultiKeyPaths::Uptr multikey_paths)
+        : index_name_(index_name),
+          multikey_(multikey),
+          multikey_paths_(std::move(multikey_paths))
+    {
+    }
+
+    const TableName *index_name_{nullptr};
+    bool multikey_{false};
+
+    // Points to nullptr if:
+    // - The calculation engine has no multikey index concept.
+    // - The multikey attribute is false.
+    MultiKeyPaths::Uptr multikey_paths_{nullptr};
+};
 }  // namespace txservice

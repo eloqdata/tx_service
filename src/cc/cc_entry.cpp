@@ -27,38 +27,38 @@
 
 namespace txservice
 {
-LruEntry::LruEntry()
+
+template <bool Versioned, bool RangePartitioned>
+RecordStatus VersionedLruEntry<Versioned, RangePartitioned>::PayloadStatus()
+    const
 {
-    uint8_t unknown_status = (uint8_t) RecordStatus::Unknown;
-    uint64_t init_ts = 0;
-    commit_ts_and_status_ = (init_ts << 8) | unknown_status;
+    // The lowest 4 bits encode the record status.
+    RecordStatus status =
+        static_cast<RecordStatus>(entry_info_.commit_ts_and_status_ & 0x0F);
+    return status;
 }
 
-uint64_t LruEntry::CommitTs() const
+template <bool Versioned, bool RangePartitioned>
+void VersionedLruEntry<Versioned, RangePartitioned>::SetCommitTsPayloadStatus(
+    uint64_t ts, RecordStatus status)
 {
-    return commit_ts_and_status_ >> 8;
-}
+    uint8_t stat = static_cast<uint8_t>(status);
+    uint64_t curr_ts = entry_info_.commit_ts_and_status_ >> 8;
 
-void LruEntry::SetCkptTs(uint64_t ts)
-{
-#ifndef ON_KEY_OBJECT
-    if (ckpt_ts_ <= ts)
+    if (curr_ts < ts)
     {
-        ckpt_ts_ = ts;
+        entry_info_.commit_ts_and_status_ = (ts << 8) | stat;
     }
 
-#else
-    uint64_t curr_val = commit_ts_and_status_;
-    uint64_t curr_commit_ts = curr_val >> 8;
-    if (curr_commit_ts <= ts)
+    if (!Versioned && txservice_skip_kv && status == RecordStatus::Deleted)
     {
-        commit_ts_and_status_ = curr_val | 0x10;
+        // Mark entry as flushed on skip_kv mode.
+        entry_info_.commit_ts_and_status_ |= 0x10;
     }
-
-#endif
 }
 
-bool LruEntry::IsPersistent() const
+template <bool Versioned, bool RangePartitioned>
+bool VersionedLruEntry<Versioned, RangePartitioned>::IsPersistent() const
 {
     if (Sharder::Instance().StandbyNodeTerm() >= 0 &&
         Sharder::Instance().GetDataStoreHandler()->IsSharedStorage())
@@ -68,43 +68,19 @@ bool LruEntry::IsPersistent() const
         return true;
     }
 
-#ifndef ON_KEY_OBJECT
-    return CommitTs() <= ckpt_ts_;
-#else
-    // The fifth bit represents if the latest version has been flushed.
-    return commit_ts_and_status_ & 0x10;
-
-#endif
-}
-
-RecordStatus LruEntry::PayloadStatus() const
-{
-    // The lowest 4 bits encode the record status.
-    RecordStatus status =
-        static_cast<RecordStatus>(commit_ts_and_status_ & 0x0F);
-    return status;
-}
-
-void LruEntry::SetCommitTsPayloadStatus(uint64_t ts, RecordStatus status)
-{
-    uint8_t stat = static_cast<uint8_t>(status);
-    uint64_t curr_ts = commit_ts_and_status_ >> 8;
-
-    if (curr_ts < ts)
+    if (Versioned)
     {
-        commit_ts_and_status_ = (ts << 8) | stat;
+        return CommitTs() <= CkptTs();
     }
-
-#ifdef ON_KEY_OBJECT
-    if (txservice_skip_kv && status == RecordStatus::Deleted)
+    else
     {
-        // Mark entry as flushed on skip_kv mode.
-        commit_ts_and_status_ |= 0x10;
+        // The fifth bit represents if the latest version has been flushed.
+        return entry_info_.commit_ts_and_status_ & 0x10;
     }
-#endif
 }
 
-bool LruEntry::IsFree() const
+template <bool Versioned, bool RangePartitioned>
+bool VersionedLruEntry<Versioned, RangePartitioned>::IsFree() const
 {
     // As long as all locks are released, the lock associated with this cc entry
     // should be recycled.
@@ -179,8 +155,7 @@ void LruEntry::ClearLocks(CcShard &ccs,
     }
 
     // Deletes key read locks.
-    const std::unordered_set<TxNumber> &key_read_locks = key_lock->ReadLocks();
-    for (const TxNumber &txn : key_read_locks)
+    for (const TxNumber &txn : key_lock->ReadLocks())
     {
         ccs.DeleteLockHoldingTx(txn, this, ng_id);
     }
@@ -192,11 +167,9 @@ void LruEntry::ClearLocks(CcShard &ccs,
     // clean up blocked cc reqs
     key_lock->AbortAllQueuedRequests(CcErrorCode::REQUESTED_NODE_NOT_LEADER);
 
-#ifdef ON_KEY_OBJECT
     int64_t buffered_cmd_cnt_decr =
         cc_lock_and_extra_->BufferedCommandList().Size();
     ccs.UpdateBufferedCommandCnt(-buffered_cmd_cnt_decr);
-#endif
     cc_lock_and_extra_->Reset(nullptr, nullptr, nullptr);
     // reset lock entry in ccshard lock array to make it reusable.
     cc_lock_and_extra_->SetUsedStatus(false);
@@ -204,46 +177,31 @@ void LruEntry::ClearLocks(CcShard &ccs,
     ccs.DecreaseLockCount();
 }
 
-CcMap *LruEntry::GetCcMap() const
-{
-    return cc_lock_and_extra_ != nullptr ? cc_lock_and_extra_->GetCcMap()
-                                         : nullptr;
-}
-
-LruPage *LruEntry::GetCcPage() const
-{
-    return cc_lock_and_extra_ != nullptr ? cc_lock_and_extra_->GetCcPage()
-                                         : nullptr;
-}
-
-void LruEntry::UpdateCcPage(LruPage *page)
-{
-    if (cc_lock_and_extra_ != nullptr)
-    {
-        cc_lock_and_extra_->UpdateCcPage(page);
-    }
-}
-
 void LruEntry::UpdateBufferedCommandCnt(CcShard *shard, int64_t delta)
 {
     shard->UpdateBufferedCommandCnt(delta);
 }
 
-void LruEntry::SetBeingCkpt()
+template <bool Versioned, bool RangePartitioned>
+void VersionedLruEntry<Versioned, RangePartitioned>::SetBeingCkpt()
 {
-    commit_ts_and_status_ = commit_ts_and_status_ | 0x20;
+    entry_info_.commit_ts_and_status_ =
+        entry_info_.commit_ts_and_status_ | 0x20;
 }
 
-void LruEntry::ClearBeingCkpt()
+template <bool Versioned, bool RangePartitioned>
+void VersionedLruEntry<Versioned, RangePartitioned>::ClearBeingCkpt()
 {
     uint64_t mask = UINT64_MAX;  // All bits set to 1
     mask &= ~(1ULL << 5);        // Clear the 6th bit
-    commit_ts_and_status_ = commit_ts_and_status_ & mask;
+    entry_info_.commit_ts_and_status_ =
+        entry_info_.commit_ts_and_status_ & mask;
 }
 
-bool LruEntry::GetBeingCkpt() const
+template <bool Versioned, bool RangePartitioned>
+bool VersionedLruEntry<Versioned, RangePartitioned>::GetBeingCkpt() const
 {
-    return commit_ts_and_status_ & 0x20;
+    return entry_info_.commit_ts_and_status_ & 0x20;
 }
 
 TxKey FlushRecord::Key() const
@@ -260,5 +218,10 @@ TxKey FlushRecord::Key() const
         return TxKey();
     }
 }
+
+template struct VersionedLruEntry<true, true>;
+template struct VersionedLruEntry<true, false>;
+template struct VersionedLruEntry<false, true>;
+template struct VersionedLruEntry<false, false>;
 
 }  // namespace txservice

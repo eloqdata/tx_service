@@ -64,7 +64,9 @@ static inline TransactionExecution *NewTxInit(
     txservice::CcProtocol proto = txservice::CcProtocol::Locking,
     NodeGroupId tx_owner = UINT32_MAX,
     int16_t group_id = -1,
-    bool start_now = false)
+    bool start_now = false,
+    const std::function<void()> *yield_fptr = nullptr,
+    const std::function<void()> *resume_fptr = nullptr)
 {
     assert(tx_service != nullptr);
     txservice::TransactionExecution *txm = nullptr;
@@ -73,7 +75,7 @@ static inline TransactionExecution *NewTxInit(
 #else
     txm = tx_service->NewTx();
 #endif
-    txm->InitTx(level, proto, tx_owner, start_now);
+    txm->InitTx(level, proto, tx_owner, start_now, yield_fptr, resume_fptr);
 
     return txm;
 }

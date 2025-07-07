@@ -33,7 +33,10 @@
 
 namespace txservice
 {
-template <typename KeyT, typename ValueT>
+template <typename KeyT,
+          typename ValueT,
+          bool VersionedRecord,
+          bool RangePartitioned>
 class TemplateCcMap;
 
 template <typename SkT, typename PkT>
@@ -69,7 +72,8 @@ private:
     CcMessage output_msg_;
     std::unique_ptr<CcMessage> input_msg_{nullptr};
     CcStreamSender *hd_{nullptr};
-    TableName remote_table_name_{empty_sv, TableType::Primary};
+    TableName remote_table_name_{
+        empty_sv, TableType::Primary, txservice::TableEngine::None};
 
     CcHandlerResult<std::vector<AcquireKeyResult>> cc_res_{nullptr};
 };
@@ -127,7 +131,8 @@ private:
     CcMessage output_msg_;
     std::unique_ptr<CcMessage> input_msg_{nullptr};
     CcStreamSender *hd_{nullptr};
-    TableName remote_table_name_{empty_sv, TableType::Primary};
+    TableName remote_table_name_{
+        empty_sv, TableType::Primary, txservice::TableEngine::None};
     KeyType key_type_{KeyType::Normal};
 
     size_t core_cnt_{0};
@@ -158,7 +163,8 @@ private:
     CcMessage output_msg_;
     std::unique_ptr<CcMessage> input_msg_{nullptr};
     CcStreamSender *hd_{nullptr};
-    TableName remote_table_name_{empty_sv, TableType::Primary};
+    TableName remote_table_name_{
+        empty_sv, TableType::Primary, txservice::TableEngine::None};
 
     CcEntryAddr cce_addr_;
     CcHandlerResult<PostProcessResult> cc_res_{nullptr};
@@ -187,7 +193,8 @@ private:
     CcMessage output_msg_;
     std::unique_ptr<CcMessage> input_msg_{nullptr};
     CcStreamSender *hd_{nullptr};
-    TableName remote_table_name_{empty_sv, TableType::Primary};
+    TableName remote_table_name_{
+        empty_sv, TableType::Primary, txservice::TableEngine::None};
     CcHandlerResult<ReadKeyResult> cc_res_{nullptr};
 };
 
@@ -257,7 +264,10 @@ private:
     uint64_t commit_ts_{0};
     CcEntryAddr cce_addr_;
 
-    template <typename KeyT, typename ValueT>
+    template <typename KeyT,
+              typename ValueT,
+              bool VersionedRecord,
+              bool RangePartitioned>
     friend class ::txservice::TemplateCcMap;
 
     template <typename SkT, typename PkT>
@@ -285,7 +295,8 @@ private:
     CcMessage output_msg_;
     std::unique_ptr<CcMessage> input_msg_{nullptr};
     CcStreamSender *hd_{nullptr};
-    TableName remote_table_name_{empty_sv, TableType::Primary};
+    TableName remote_table_name_{
+        empty_sv, TableType::Primary, txservice::TableEngine::None};
 
     CcEntryAddr cce_addr_;
     CcHandlerResult<PostProcessResult> cc_res_{nullptr};
@@ -312,7 +323,8 @@ private:
     CcMessage output_msg_;
     std::unique_ptr<CcMessage> input_msg_{nullptr};
     CcStreamSender *hd_{nullptr};
-    TableName remote_table_name_{empty_sv, TableType::Primary};
+    TableName remote_table_name_{
+        empty_sv, TableType::Primary, txservice::TableEngine::None};
     KeyType key_type_{KeyType::Normal};
 
     CcHandlerResult<PostProcessResult> cc_res_{nullptr};
@@ -392,7 +404,6 @@ public:
         return schema_version_;
     }
 
-#ifdef ON_KEY_OBJECT
     int32_t GetRedisObjectType() const
     {
         return obj_type_;
@@ -402,13 +413,12 @@ public:
         return scan_pattern_;
     }
 
-#endif
-
 private:
     CcMessage output_msg_;
     std::unique_ptr<CcMessage> input_msg_{nullptr};
     CcStreamSender *hd_{nullptr};
-    TableName remote_table_name_{empty_sv, TableType::Primary};
+    TableName remote_table_name_{
+        empty_sv, TableType::Primary, txservice::TableEngine::None};
 
     KeyType key_type_{KeyType::Normal};
     const std::string *start_key_str_{nullptr};
@@ -420,7 +430,9 @@ private:
     std::atomic<uint32_t> unfinish_cnt_{0};
     bool is_for_write_{false};
     bool is_covering_keys_{false};
-
+    bool is_require_keys_{true};
+    bool is_require_recs_{true};
+    bool is_require_sort_{true};
     uint64_t snapshot_ts_{0};
     std::vector<bool> is_wait_for_post_write_;
 
@@ -434,12 +446,13 @@ private:
     std::vector<ScanType> cce_ptr_scan_type_;
     uint64_t schema_version_{0};
 
-#ifdef ON_KEY_OBJECT
     int32_t obj_type_{-1};
     std::string_view scan_pattern_;
-#endif
 
-    template <typename KeyT, typename ValueT>
+    template <typename KeyT,
+              typename ValueT,
+              bool VersionedRecord,
+              bool RangePartitioned>
     friend class ::txservice::TemplateCcMap;
 
     friend class ::txservice::CcMap;
@@ -503,7 +516,6 @@ public:
         return prior_cce_addr_;
     }
 
-#ifdef ON_KEY_OBJECT
     int32_t GetRedisObjectType() const
     {
         return obj_type_;
@@ -512,7 +524,6 @@ public:
     {
         return scan_pattern_;
     }
-#endif
 
 private:
     CcMessage output_msg_;
@@ -536,17 +547,21 @@ private:
     bool is_ckpt_delta_{false};
     bool is_for_write_{false};
     bool is_covering_keys_{false};
+    bool is_require_keys_{true};
+    bool is_require_recs_{true};
+    bool is_require_sort_{true};
     bool is_wait_for_post_write_{false};
     // scan type for above cce_ptr_
     ScanType cce_ptr_scan_type_{ScanType::ScanUnknow};
     TableType tbl_type_;
 
-#ifdef ON_KEY_OBJECT
     int32_t obj_type_{-1};
     std::string_view scan_pattern_;
-#endif
 
-    template <typename KeyT, typename ValueT>
+    template <typename KeyT,
+              typename ValueT,
+              bool VersionedRecord,
+              bool RangePartitioned>
     friend class ::txservice::TemplateCcMap;
 
     friend class ::txservice::CcMap;
@@ -563,7 +578,8 @@ private:
     std::unique_ptr<CcMessage> input_msg_{nullptr};
     CcStreamSender *hd_{nullptr};
 
-    TableName remote_tbl_name_{empty_sv, TableType::Primary};
+    TableName remote_tbl_name_{
+        empty_sv, TableType::Primary, txservice::TableEngine::None};
     CcHandlerResult<RangeScanSliceResult> cc_res_{nullptr};
     std::vector<RemoteScanSliceCache> scan_cache_vec_;
 };
@@ -645,7 +661,8 @@ public:
 private:
     std::unique_ptr<CcMessage> input_msg_;
     CcStreamSender *hd_{nullptr};
-    TableName remote_table_name_{empty_sv, TableType::Primary};
+    TableName remote_table_name_{
+        empty_sv, TableType::Primary, txservice::TableEngine::None};
     CcHandlerResult<Void> cc_res_{nullptr};
 
     friend class RemoteCcHandler;
@@ -676,7 +693,8 @@ private:
     CcMessage output_msg_;
     std::unique_ptr<CcMessage> input_msg_;
     CcStreamSender *hd_{nullptr};
-    TableName remote_table_name_{empty_sv, TableType::Primary};
+    TableName remote_table_name_{
+        empty_sv, TableType::Primary, txservice::TableEngine::None};
     CcHandlerResult<Void> cc_res_{nullptr};
 
     friend class RemoteCcHandler;
@@ -709,7 +727,8 @@ private:
     CcMessage output_msg_;
     std::unique_ptr<CcMessage> input_msg_;
     CcStreamSender *hd_{nullptr};
-    TableName remote_table_name_{empty_sv, TableType::Primary};
+    TableName remote_table_name_{
+        empty_sv, TableType::Primary, txservice::TableEngine::None};
 
     CcHandlerResult<bool> cc_res_{nullptr};
 
@@ -788,7 +807,8 @@ public:
 private:
     CcMessage output_msg_;
     std::unique_ptr<CcMessage> input_msg_;
-    TableName table_name_{empty_sv, TableType::Primary};
+    TableName table_name_{
+        empty_sv, TableType::Primary, txservice::TableEngine::None};
     CcStreamSender *hd_{nullptr};
     CcHandlerResult<Void> cc_res_{nullptr};
 };
@@ -815,7 +835,8 @@ protected:
     CcMessage output_msg_;
     std::unique_ptr<CcMessage> input_msg_{nullptr};
     CcStreamSender *hd_{nullptr};
-    TableName remote_table_name_{empty_sv, TableType::Primary};
+    TableName remote_table_name_{
+        empty_sv, TableType::Primary, txservice::TableEngine::None};
     CcHandlerResult<ObjectCommandResult> cc_res_{nullptr};
 };
 
@@ -840,7 +861,8 @@ private:
     CcMessage output_msg_;
     std::unique_ptr<CcMessage> input_msg_{nullptr};
     CcStreamSender *hd_{nullptr};
-    // TableName remote_table_name_{empty_sv, TableType::Primary};
+    // TableName remote_table_name_{empty_sv, TableType::Primary,
+    // txservice::TableEngine::None};
 
     CcEntryAddr cce_addr_;
     std::vector<std::string> cmds_vec_;
@@ -888,7 +910,8 @@ private:
     CcMessage output_msg_;
     std::unique_ptr<CcMessage> input_msg_;
     CcStreamSender *hd_{nullptr};
-    TableName remote_table_name_{empty_sv, TableType::Primary};
+    TableName remote_table_name_{
+        empty_sv, TableType::Primary, txservice::TableEngine::None};
     CcHandlerResult<Void> cc_res_{nullptr};
 
     friend class RemoteCcHandler;

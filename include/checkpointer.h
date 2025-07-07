@@ -21,6 +21,7 @@
  */
 #pragma once
 
+#include <atomic>
 #include <chrono>
 #include <iostream>
 #include <memory>
@@ -32,6 +33,8 @@
 #include "cc/cc_entry.h"
 #include "cc/cc_request.h"
 #include "cc/local_cc_shards.h"
+#include "metrics.h"
+#include "sharder.h"
 #include "txlog.h"
 #include "util.h"
 
@@ -43,6 +46,8 @@ namespace txservice
 class Checkpointer
 {
 public:
+    static constexpr size_t continuous_ckpt_fail_threshold = 3;
+
     Checkpointer(LocalCcShards &shards,
                  store::DataStoreHandler *write_hd,
                  const uint32_t &checkpoint_interval,
@@ -90,6 +95,39 @@ public:
 
     void Join();
 
+    void CollectCkptMetric(bool success)
+    {
+        if (metrics::enable_metrics)
+        {
+            if (success)
+            {
+                if (consecutive_fail_cnt_ > 0)
+                {
+                    Sharder::Instance()
+                        .GetLocalCcShards()
+                        ->GetNodeMeter()
+                        ->Collect(
+                            metrics::NAME_IS_CONTINUOUS_CHECKPOINT_FAILURES, 0);
+                }
+                // reset value
+                consecutive_fail_cnt_.store(0, std::memory_order_relaxed);
+            }
+            else
+            {
+                size_t fail_cnt = consecutive_fail_cnt_.fetch_add(
+                    1, std::memory_order_relaxed);
+                if (fail_cnt + 1 >= continuous_ckpt_fail_threshold)
+                {
+                    Sharder::Instance()
+                        .GetLocalCcShards()
+                        ->GetNodeMeter()
+                        ->Collect(
+                            metrics::NAME_IS_CONTINUOUS_CHECKPOINT_FAILURES, 1);
+                }
+            }
+        }
+    }
+
 private:
     enum struct Status
     {
@@ -111,6 +149,8 @@ private:
     uint32_t ckpt_delay_time_;  // unit: Microsecond
     TxService *tx_service_;
     TxLog *log_agent_;
+
+    std::atomic<size_t> consecutive_fail_cnt_{0};
 
     void NotifyLogOfCkptTs(uint32_t node_group, int64_t term, uint64_t ckpt_ts);
 };

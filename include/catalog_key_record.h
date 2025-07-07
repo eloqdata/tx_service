@@ -21,18 +21,20 @@
  */
 #pragma once
 
-#include <condition_variable>
 #include <memory>
-#include <queue>
 #include <shared_mutex>
 #include <string>
 #include <utility>
 #include <vector>
 
 #include "catalog_factory.h"
-#include "sharder.h"
+#include "reader_writer_cntl.h"
 #include "tx_key.h"
 #include "tx_record.h"
+
+#ifndef RANGE_PARTITION_ENABLED
+#include "sharder.h"
+#endif
 
 namespace txservice
 {
@@ -49,7 +51,7 @@ struct CatalogKey
 public:
     CatalogKey();
     CatalogKey(const TableName &name);
-    CatalogKey(CatalogKey &&rhs);
+    CatalogKey(CatalogKey &&rhs) noexcept;
     CatalogKey(const CatalogKey &rhs);
     CatalogKey &operator=(CatalogKey &&) = default;
     ~CatalogKey() = default;
@@ -62,7 +64,6 @@ public:
     void Serialize(std::string &str) const;
     size_t SerializedLength() const;
     void Deserialize(const char *buf, size_t &offset, const KeySchema *);
-#ifdef ON_KEY_OBJECT
     std::string_view KVSerialize() const
     {
         assert(false);
@@ -72,7 +73,6 @@ public:
     {
         assert(false);
     }
-#endif
     TxKey CloneTxKey() const;
     std::string ToString() const;
     void Copy(const CatalogKey &rhs);
@@ -180,7 +180,7 @@ struct CatalogEntry
                         uint64_t dirty_version_ts)
     {
         std::unique_lock<std::shared_mutex> lk(s_mux_);
-        if (dirty_version_ts > dirty_schema_version_ &&
+        if (dirty_version_ts >= dirty_schema_version_ &&
             dirty_version_ts > schema_version_)
         {
             dirty_schema_ = std::move(dirty_schema);
@@ -284,7 +284,7 @@ struct CatalogRecord : public TxRecord
 {
 public:
     CatalogRecord() = default;
-    CatalogRecord(CatalogRecord &&rhs);
+    CatalogRecord(CatalogRecord &&rhs) noexcept;
     CatalogRecord(const CatalogRecord &rhs);
     ~CatalogRecord() = default;
 
@@ -306,15 +306,15 @@ public:
     void SetDirtySchemaImage(std::string &&schema_image);
     void SetDirtySchemaImage(const std::string &schema_image);
     const TableSchema *Schema() const;
-    std::shared_ptr<const TableSchema> CopySchema();
+    std::shared_ptr<const TableSchema> CopySchema() const;
     const TableSchema *DirtySchema() const;
-    std::shared_ptr<const TableSchema> CopyDirtySchema();
+    std::shared_ptr<const TableSchema> CopyDirtySchema() const;
     void ClearDirtySchema();
     void Reset();
     uint64_t SchemaTs() const;
 
     CatalogRecord &operator=(const CatalogRecord &rhs);
-    CatalogRecord &operator=(CatalogRecord &&rhs);
+    CatalogRecord &operator=(CatalogRecord &&rhs) noexcept;
 
     size_t Size() const override
     {
@@ -340,6 +340,16 @@ public:
         return mem_usage;
     }
 
+    void SetSchemaCntl(std::shared_ptr<ReaderWriterObject<TableSchema>> cntl)
+    {
+        cntl_ = cntl;
+    }
+
+    std::shared_ptr<ReaderWriterObject<TableSchema>> GetSchemaCntl() const
+    {
+        return cntl_;
+    }
+
 private:
     /**
      * @brief The CatalogRecord serves three purposes:
@@ -360,5 +370,6 @@ private:
     uint64_t schema_ts_{0};
     std::string schema_image_{""};
     std::string dirty_schema_image_{""};
+    std::shared_ptr<ReaderWriterObject<TableSchema>> cntl_{nullptr};
 };
 }  // namespace txservice

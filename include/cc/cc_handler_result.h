@@ -67,9 +67,6 @@ public:
 
     virtual bool ForceError() = 0;
 
-    virtual bool SetResultByStreamThread() = 0;
-    virtual bool SetResultByTimeoutThread() = 0;
-
     bool IsFinished() const
     {
         return is_finished_.load(std::memory_order_acquire);
@@ -77,7 +74,7 @@ public:
 
     bool IsError() const
     {
-        return error_code_.load(std::memory_order_relaxed) !=
+        return error_code_.load(std::memory_order_acquire) !=
                CcErrorCode::NO_ERROR;
     }
 
@@ -110,14 +107,9 @@ public:
         return error_code_.load(std::memory_order_relaxed);
     }
 
-    const std::string ErrorMsg() const
+    const std::string &ErrorMsg() const
     {
-        auto it = cc_error_messages.find(ErrorCode());
-        if (it != cc_error_messages.end())
-        {
-            return it->second;
-        }
-        return "CcErrorCode:" + std::to_string(static_cast<int>(ErrorCode()));
+        return cc_error_messages.at(ErrorCode());
     }
 
     void SetRefCnt(uint32_t cnt)
@@ -144,7 +136,7 @@ public:
         return ref_cnt_.load(std::memory_order_relaxed);
     }
 
-    void IncrementRemoteRef()
+    void IncreaseRemoteRef()
     {
         remote_ref_cnt_.fetch_add(1, std::memory_order_acquire);
     }
@@ -170,11 +162,7 @@ public:
 #endif
         is_finished_.store(false, std::memory_order_release);
 
-        // Reset `result_status_` to `0` if `result_status_` == `-1 (Timeout)
-        // Otherwise, Nothing to do.
-        int32_t expect = -1;
-        result_status_.compare_exchange_strong(
-            expect, expect + 1, std::memory_order_release);
+        block_req_check_ts_.store(0, std::memory_order_relaxed);
     }
 
     void ResetTxm(TransactionExecution *txm)
@@ -186,6 +174,22 @@ public:
     TransactionExecution *Txm()
     {
         return txm_;
+    }
+
+    uint64_t BlockReqCheckTs() const
+    {
+        return block_req_check_ts_.load(std::memory_order_relaxed);
+    }
+
+    void SetBlockReqCheckTs(uint64_t last_block_check_ts)
+    {
+        block_req_check_ts_.store(last_block_check_ts,
+                                  std::memory_order_relaxed);
+    }
+
+    void UnsetBlockReqCheckTs()
+    {
+        block_req_check_ts_.store(0, std::memory_order_relaxed);
     }
 
 #ifdef EXT_TX_PROC_ENABLED
@@ -207,13 +211,6 @@ protected:
 protected:
     std::atomic<bool> is_finished_{false};
 
-    // Use this variable to guarantee only one thread can set the
-    // CcHandlerResult once remote response is received. Positive
-    // numbers(1,2,3...) denotes how many responses are being handled by stream
-    // thread, and txm can not timeout when result_status_>0. Negative
-    // number(-1) denotes timeout thread is going to set CcHandlerResult.
-    std::atomic<int32_t> result_status_{0};
-
     std::atomic<CcErrorCode> error_code_{CcErrorCode::NO_ERROR};
     bool ref_cnted_{false};
     std::atomic<uint32_t> ref_cnt_{0};
@@ -223,6 +220,10 @@ protected:
     // machine, however, may be re-used repeatedly for different user-level
     // tx's.
     TransactionExecution *txm_{nullptr};
+
+    // The local time when block req check is sent. Will be set to 0 when the
+    // result arrives.
+    std::atomic<uint64_t> block_req_check_ts_{0};
 };
 
 template <typename T>
@@ -242,7 +243,6 @@ public:
           post_lambda_(std::move(rhs.post_lambda_))
     {
         is_finished_ = rhs.is_finished_.load(std::memory_order_relaxed);
-        result_status_ = rhs.result_status_.load(std::memory_order_relaxed);
         error_code_ = rhs.error_code_.load(std::memory_order_relaxed);
         ref_cnted_ = rhs.ref_cnted_;
         ref_cnt_ = rhs.ref_cnt_.load(std::memory_order_relaxed);
@@ -280,51 +280,6 @@ public:
     bool SetFinished() override;
 
     bool SetError(CcErrorCode err_code) override;
-
-    bool SetResultByStreamThread() override
-    {
-        int32_t expect = 0;
-        while (
-            !result_status_.compare_exchange_strong(expect,
-                                                    expect + 1,
-                                                    std::memory_order_acquire,
-                                                    std::memory_order_relaxed))
-        {
-            if (expect == -1)
-            {
-                // Txm being timeout, reject this response message.
-                return false;
-            }
-        }
-        return true;
-    }
-
-    bool SetResultByTimeoutThread() override
-    {
-        if (result_status_.load(std::memory_order_acquire) == -1)
-        {
-            return true;
-        }
-
-        int32_t expect = 0;
-        bool succeed = result_status_.compare_exchange_strong(
-            expect, -1, std::memory_order_acquire, std::memory_order_relaxed);
-        return succeed;
-    }
-
-    void DecreaseCurrentHandlingResponse()
-    {
-        uint32_t res = result_status_.fetch_sub(1, std::memory_order_release);
-        assert(res > 0);
-        // This silences the -Wunused-but-set-variable warning without any
-        // runtime overhead.
-        (void) res;
-    }
-
-    void UnsetByTimeoutThread()
-    {
-        result_status_.store(0, std::memory_order_release);
-    }
 
     /**
      * @brief Forces the handler result to an error state.

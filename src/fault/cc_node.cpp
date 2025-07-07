@@ -19,6 +19,8 @@
  *    <http://www.gnu.org/licenses/>.
  *
  */
+#include "fault/cc_node.h"
+
 #include <brpc/controller.h>
 #include <brpc/errno.pb.h>
 #include <bthread/bthread.h>
@@ -33,11 +35,8 @@
 #include "cc_node_service.h"
 #include "cc_req_misc.h"
 #include "cc_request.pb.h"
-#ifdef KV_DATA_STORE_TYPE
-#include "kv_store.h"
-#endif
-#include "fault/cc_node.h"
 #include "local_cc_shards.h"
+#include "metrics.h"
 #include "sharder.h"
 #include "tx_service.h"
 #include "tx_service_common.h"
@@ -337,6 +336,14 @@ bool CcNode::OnLeaderStart(int64_t term,
         recovered_log_groups_.clear();
     }
 
+    if (metrics::enable_metrics)
+    {
+        Sharder::Instance().GetLocalCcShards()->GetNodeMeter()->Collect(
+            metrics::NAME_LEADER_CHANGES, 1, std::to_string(ng_id_));
+        Sharder::Instance().GetLocalCcShards()->GetNodeMeter()->Collect(
+            metrics::NAME_IS_LEADER, 1, std::to_string(ng_id_));
+    }
+
     LOG(INFO) << "CC node " << node_id_ << " becomes the leader of ng#"
               << ng_id_ << ". Term: " << term;
 
@@ -407,48 +414,11 @@ bool CcNode::OnLeaderStart(int64_t term,
 
     if (!local_cc_shards_.IsRangeBucketsInitialized(ng_id_))
     {
-        if (txservice_skip_kv || !local_cc_shards_.store_hd_->IsSharedStorage())
-        {
-            // TODO: HARDCORE SEED
-            // If kv is not enabled, just copy bucket info from preferred ng.
-            auto ng_ids = Sharder::Instance().AllNodeGroups();
-            local_cc_shards_.InitRangeBuckets(
-                ng_id_, *ng_ids, Sharder::Instance().ClusterConfigVersion());
-        }
-        else
-        {
-            // We need to initialize range bucket info for new ng
-            // before replaying.
-            std::unordered_map<uint32_t, std::vector<NodeConfig>> ng_configs;
-            uint64_t version;
-            bool uninitialized;
-            // read ng config from kv store
-            uint32_t retry_cnt = 0;
-            while (!local_cc_shards_.store_hd_->ReadClusterConfig(
-                ng_configs, version, uninitialized))
-            {
-                ng_configs.clear();
-                assert(!uninitialized);
-                LOG(WARNING) << "Retry to ReadClusterConfig from data store.";
-                retry_cnt++;
-                bthread_usleep(std::min(200000U * retry_cnt, 1000000U));
-            }
-            std::set<NodeGroupId> ng_ids;
-            for (auto &[ng_id, _] : ng_configs)
-            {
-                ng_ids.emplace(ng_id);
-            }
-            local_cc_shards_.InitRangeBuckets(ng_id_, ng_ids, version);
-            if (Sharder::Instance().ClusterConfigVersion() < version)
-            {
-                // Use a dummy cc request that returns once it's put into cc
-                // queue.
-                WaitableCc cc;
-                Sharder::Instance().UpdateClusterConfig(
-                    ng_configs, version, &cc, local_cc_shards_.GetCcShard(0));
-                cc.Wait();
-            }
-        }
+        // TODO: HARDCORE SEED
+        // If kv is not enabled, just copy bucket info from preferred ng.
+        auto ng_ids = Sharder::Instance().AllNodeGroups();
+        local_cc_shards_.InitRangeBuckets(
+            ng_id_, *ng_ids, Sharder::Instance().ClusterConfigVersion());
     }
 
     local_cc_shards_.InitPrebuiltTables(ng_id_, term);
@@ -459,22 +429,6 @@ bool CcNode::OnLeaderStart(int64_t term,
         !cache_survivied)
     {
         local_cc_shards_.store_hd_->RestoreTxCache(ng_id_, term);
-    }
-
-    if (txservice_skip_wal)
-    {
-        {
-            // replay thread and leader election thread may update
-            // candidate_leader_term_, leader_term_ and recovered_log_groups_
-            // concurrently.
-            std::lock_guard<std::mutex> lk(recovery_mux_);
-            Sharder::Instance().SetLeaderTerm(ng_id_, term);
-            LOG(INFO) << "Skipped log replay for cc node group #" << ng_id_
-                      << " with the term " << term;
-            Sharder::Instance().SetCandidateTerm(ng_id_, -1);
-            Sharder::Instance().NodeGroupFinishRecovery(ng_id_);
-        }
-        NotifyNewLeaderStart(ng_id_, node_id_);
     }
 
     return true;
@@ -504,6 +458,12 @@ bool CcNode::OnLeaderStop(int64_t term)
         Sharder::Instance().SetCandidateTerm(ng_id_, -1);
     }
 
+    if (metrics::enable_metrics)
+    {
+        Sharder::Instance().GetLocalCcShards()->GetNodeMeter()->Collect(
+            metrics::NAME_IS_LEADER, 0, std::to_string(ng_id_));
+    }
+
     LOG(INFO) << "CC node " << node_id_ << " steps down as the leader of ng#"
               << ng_id_ << ".";
 
@@ -514,6 +474,175 @@ bool CcNode::OnLeaderStop(int64_t term)
     }
     ClearCcNodeGroupData();
     return true;
+}
+
+bool CcNode::Failover(const std::string &target_host,
+                      const uint16_t target_port,
+                      std::string &error_message)
+{
+    // Concurrent control on term changing.
+    bool expected = false;
+    while (!is_processing_.compare_exchange_strong(
+        expected, true, std::memory_order_acq_rel))
+    {
+        bthread_usleep(100);
+        expected = false;
+    }
+
+    int64_t leader_term = Sharder::Instance().LeaderTerm(ng_id_);
+    // CHECK #1: Verify the current node is a leader
+    if (leader_term > 0)
+    {
+        // Reject all requests until failover command finishes.
+        Sharder::Instance().SetLeaderTerm(ng_id_, -1);
+    }
+    else
+    {
+        error_message =
+            "ERR failover failed because this node is no longer leader";
+        return false;
+    }
+    is_processing_.store(false, std::memory_order_release);
+
+    // Get all node configs for this node group
+    std::unordered_map<NodeGroupId, std::vector<NodeConfig>> ng_configs =
+        Sharder::Instance().GetNodeGroupConfigs();
+
+    // Look for both nodes only in the current node group
+    auto current_group_it = ng_configs.find(ng_id_);
+    assert(current_group_it != ng_configs.end());
+
+    // Check if target node and local node are both in this node group
+    uint32_t target_node_id = UINT32_MAX;
+    std::string local_host;
+    uint16_t local_port = 0;
+
+    for (const auto &node_config : current_group_it->second)
+    {
+        // Check for target node
+        if (target_node_id == UINT32_MAX &&
+            node_config.host_name_ == target_host &&
+            node_config.port_ == target_port + 10000)
+        {
+            // CHECK #2: Target node must be a candidate node
+            if (!node_config.is_candidate_)
+            {
+                error_message = "ERR target node is not a candidate";
+                RecoverLeaderTerm(leader_term);
+                return false;
+            }
+            target_node_id = node_config.node_id_;
+        }
+
+        // Check for local node
+        if (node_config.node_id_ == node_id_)
+        {
+            local_port = node_config.port_;
+            local_host = node_config.host_name_;
+        }
+
+        // Stop if we found both nodes
+        if (target_node_id != UINT32_MAX && local_port != 0)
+            break;
+    }
+
+    // Validate both nodes were found
+    assert(local_port != 0 && !local_host.empty());
+
+    if (target_node_id == UINT32_MAX)
+    {
+        error_message = "ERR target node not found in current node group";
+        RecoverLeaderTerm(leader_term);
+        return false;
+    }
+
+    // CHECK #3: Cannot failover to self
+    if (target_node_id == node_id_)
+    {
+        error_message = "ERR cannot failover to self";
+        RecoverLeaderTerm(leader_term);
+        return false;
+    }
+
+    // CHECK #4: Target candidate should have caught up with leader
+    auto local_shards = Sharder::Instance().GetLocalCcShards();
+    size_t core_count = local_shards->Count();
+    for (size_t core_idx = 0; core_idx < core_count; ++core_idx)
+    {
+        if (!WaitForShardSyncWithRetry(core_idx, target_node_id, error_message))
+        {
+            RecoverLeaderTerm(leader_term);
+            return false;
+        }
+    }
+
+    DLOG(INFO) << "All shards are fully in sync.";
+
+    // Create RPC channel to the host manager
+    brpc::Channel channel;
+    brpc::ChannelOptions options;
+    options.timeout_ms = 10000;
+    options.max_retry = 3;
+
+    // Calculate host manager port and initialize connection
+    uint16_t local_hm_port = local_port + 4;
+    if (channel.Init(local_host.c_str(), local_hm_port, &options) != 0)
+    {
+        error_message = "ERR failed to connect to local host manager";
+        RecoverLeaderTerm(leader_term);
+        return false;
+    }
+
+    // Send leadership transfer request
+    remote::TransferRequest request;
+    request.set_ng_id(ng_id_);
+    request.set_node_id(target_node_id);
+    request.set_term(leader_term);
+
+    remote::TransferResponse response;
+    brpc::Controller cntl;
+
+    remote::HostMangerService_Stub stub(&channel);
+    stub.Transfer(&cntl, &request, &response, NULL);
+
+    // Handle RPC errors
+    if (cntl.Failed())
+    {
+        error_message =
+            "ERR failed to transfer leadership: " + cntl.ErrorText();
+        RecoverLeaderTerm(leader_term);
+        return false;
+    }
+
+    // Check for application-level errors
+    int32_t error_code = response.error_code();
+    if (error_code != 0)
+    {
+        error_message = "ERR leader transfer failed with error code: " +
+                        std::to_string(error_code);
+        RecoverLeaderTerm(leader_term);
+        return false;
+    }
+
+    // Success - respond with confirmation message
+    std::string status_message =
+        "OK Leader transfer initiated to " + target_host + ":" +
+        std::to_string(target_port) +
+        " (node ID: " + std::to_string(target_node_id) + ")";
+    return true;
+}
+
+void CcNode::RecoverLeaderTerm(int64_t leader_term)
+{
+    bool expected = false;
+    while (!is_processing_.compare_exchange_strong(
+        expected, true, std::memory_order_acq_rel))
+    {
+        bthread_usleep(100);
+        expected = false;
+    }
+    Sharder::Instance().SetLeaderTerm(ng_id_, leader_term);
+    is_processing_.store(false, std::memory_order_release);
 }
 
 void CcNode::OnStartFollowing(uint32_t node_id, int64_t term, bool resubscribe)
@@ -850,16 +979,9 @@ void CcNode::SubscribePrimaryNode(uint32_t leader_node_id,
     }
     else
     {
-        std::unordered_map<uint32_t, std::vector<NodeConfig>> ng_configs;
-        uint64_t version;
-        bool uninitialized;
-        // read ng config from kv store
-        while (!local_cc_shards_.store_hd_->ReadClusterConfig(
-            ng_configs, version, uninitialized))
-        {
-            ng_configs.clear();
-            assert(!uninitialized);
-        }
+        std::unordered_map<uint32_t, std::vector<NodeConfig>> ng_configs =
+            Sharder::Instance().GetNodeGroupConfigs();
+        uint64_t version = Sharder::Instance().ClusterConfigVersion();
         std::set<NodeGroupId> ng_ids;
         for (auto &[ng_id, _] : ng_configs)
         {
@@ -961,7 +1083,7 @@ void CcNode::SubscribePrimaryNode(uint32_t leader_node_id,
         std::array<char, 128> buffer;
         std::string username;
         FILE *output_stream = popen("echo $USER", "r");
-        while (fgets(buffer.data(), 200, output_stream) != nullptr)
+        while (fgets(buffer.data(), 128, output_stream) != nullptr)
         {
             username.append(buffer.data());
         }
@@ -986,5 +1108,87 @@ void CcNode::SubscribePrimaryNode(uint32_t leader_node_id,
             LOG(ERROR) << "snapshot sync failed";
         }
     }
+}
+
+bool CcNode::WaitForShardSyncWithRetry(const size_t shard_idx,
+                                       const uint32_t target_node_id,
+                                       std::string &error_message)
+{
+    const int MAX_RETRY_COUNT = 10;
+    const int RETRY_INTERVAL_MS = 500;  // 500ms between retries
+    bool is_shard_in_sync = false;
+
+    auto CheckShardSync = [&](CcShard &shard)
+    {
+        auto standby_nodes = shard.GetSubscribedStandbys();
+
+        // Check if the target node is in the subscribed standbys
+        bool target_found = false;
+        for (auto &node_id : standby_nodes)
+        {
+            if (node_id == target_node_id)
+            {
+                target_found = true;
+                break;
+            }
+        }
+
+        if (!target_found)
+        {
+            error_message = "ERR target node is not subscribed to shard " +
+                            std::to_string(shard_idx);
+            is_shard_in_sync = false;
+            return true;
+        }
+
+        uint64_t standby_seq_id = shard.GetStandbyLag(target_node_id);
+        uint64_t leader_latest_seq = shard.GetNextForwardSequnceId() - 1;
+
+        // Check if standby is lagging
+        is_shard_in_sync = (standby_seq_id == leader_latest_seq ||
+                            standby_seq_id == UINT64_MAX);
+        return true;
+    };
+
+    // Initial check
+    WaitableCc check_sync_cc(CheckShardSync);
+    auto local_shards = Sharder::Instance().GetLocalCcShards();
+    local_shards->EnqueueCcRequest(shard_idx, &check_sync_cc);
+    check_sync_cc.Wait();
+
+    // If not in sync, retry with backoff
+    if (!is_shard_in_sync)
+    {
+        for (int retry = 0; retry < MAX_RETRY_COUNT; retry++)
+        {
+            // Yield current bthread to allow other tasks to run
+            bthread_usleep(RETRY_INTERVAL_MS * 1000);
+
+            DLOG(INFO) << "Waiting for standby node " << target_node_id
+                       << " to sync with leader on shard " << shard_idx
+                       << ", retry " << (retry + 1) << "/" << MAX_RETRY_COUNT;
+
+            check_sync_cc.Reset(CheckShardSync, 1);
+            local_shards->EnqueueCcRequest(shard_idx, &check_sync_cc);
+            check_sync_cc.Wait();
+
+            if (is_shard_in_sync)
+            {
+                break;
+            }
+        }
+
+        if (!is_shard_in_sync)
+        {
+            error_message =
+                "ERR target node has not caught up with the leader's data "
+                "on shard " +
+                std::to_string(shard_idx) + " after " +
+                std::to_string(MAX_RETRY_COUNT) + " retries";
+            return false;
+        }
+    }
+
+    return true;
 }
 }  // namespace txservice::fault

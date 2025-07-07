@@ -31,30 +31,29 @@
 
 namespace txservice
 {
-class ClusterConfigCcMap : public TemplateCcMap<VoidKey, ClusterConfigRecord>
+class ClusterConfigCcMap
+    : public TemplateCcMap<VoidKey, ClusterConfigRecord, true, false>
 {
 public:
     ClusterConfigCcMap(const ClusterConfigCcMap &rhs) = delete;
 
-    using TemplateCcMap<VoidKey, ClusterConfigRecord>::Execute;
-    using TemplateCcMap<VoidKey, ClusterConfigRecord>::AcquireCceKeyLock;
-    using TemplateCcMap<VoidKey,
-                        ClusterConfigRecord>::LockHandleForResumedRequest;
-    using TemplateCcMap<VoidKey, ClusterConfigRecord>::neg_inf_;
+    using TemplateCcMap<VoidKey, ClusterConfigRecord, true, false>::Execute;
+    using TemplateCcMap<VoidKey, ClusterConfigRecord, true, false>::
+        AcquireCceKeyLock;
+    using TemplateCcMap<VoidKey, ClusterConfigRecord, true, false>::
+        LockHandleForResumedRequest;
+    using TemplateCcMap<VoidKey, ClusterConfigRecord, true, false>::neg_inf_;
 
     ClusterConfigCcMap(CcShard *shard,
                        NodeGroupId cc_ng_id,
                        uint64_t config_version)
-        : TemplateCcMap<VoidKey, ClusterConfigRecord>(
+        : TemplateCcMap<VoidKey, ClusterConfigRecord, true, false>(
               shard, cc_ng_id, cluster_config_ccm_name, 1, nullptr, true)
     {
         // We only store one record in ClusterConfigCcMap as neg_inf_ key. It is
         // is only used for concurrency control purpose.
-#ifndef ON_KEY_OBJECT
-        neg_inf_.payload_ = std::make_shared<ClusterConfigRecord>();
-#else
-        neg_inf_.payload_ = std::make_unique<ClusterConfigRecord>();
-#endif
+        neg_inf_.payload_.PassInCurrentPayload(
+            std::make_unique<ClusterConfigRecord>());
         assert(config_version > 0);
         neg_inf_.SetCommitTsPayloadStatus(config_version, RecordStatus::Normal);
     }
@@ -78,16 +77,18 @@ public:
 
         LockType acquired_lock = LockType::NoLock;
         CcErrorCode err_code = CcErrorCode::NO_ERROR;
-        CcEntry<VoidKey, ClusterConfigRecord> *cce_ptr = nullptr;
+        CcEntry<VoidKey, ClusterConfigRecord, true, false> *cce_ptr = nullptr;
         bool resume = false;
         if (req.CcePtr(shard_->core_id_) != nullptr)
         {
             // The request was blocked before and is now unblocked.
             resume = true;
-            cce_ptr = static_cast<CcEntry<VoidKey, ClusterConfigRecord> *>(
+            cce_ptr = static_cast<
+                CcEntry<VoidKey, ClusterConfigRecord, true, false> *>(
                 req.CcePtr(shard_->core_id_));
             std::tie(acquired_lock, err_code) =
                 LockHandleForResumedRequest(cce_ptr,
+                                            cce_ptr->CommitTs(),
                                             neg_inf_.PayloadStatus(),
                                             &req,
                                             ng_id,
@@ -110,7 +111,7 @@ public:
 
         // On execution resumption, the write lock has been acquired when
         // being unblocked.
-        CcEntry<VoidKey, ClusterConfigRecord> &cc_entry = neg_inf_;
+        CcEntry<VoidKey, ClusterConfigRecord, true, false> &cc_entry = neg_inf_;
         if (!resume)
         {
             int64_t tx_term = req.TxTerm();
@@ -119,6 +120,7 @@ public:
             CcOperation cc_op = req.CcOp();
             std::tie(acquired_lock, err_code) =
                 AcquireCceKeyLock(&cc_entry,
+                                  cc_entry.CommitTs(),
                                   &neg_inf_page_,
                                   cc_entry.PayloadStatus(),
                                   &req,
@@ -292,9 +294,7 @@ public:
             req.AbortCcRequest(CcErrorCode::REQUESTED_NODE_NOT_LEADER);
             return false;
         }
-#ifndef RANGE_PARTITION_ENABLED
         shard_->SetBucketMigrating(true);
-#endif
         const std::string_view &content = req.LogContentView();
         ::txlog::ClusterScaleOpMessage scale_op_msg;
         scale_op_msg.ParseFromArray(content.data(), content.length());
@@ -305,20 +305,30 @@ public:
 
         auto &migrate_process =
             scale_op_msg.node_group_bucket_migrate_process();
-        // Check the data migrate process of each node group.
-        for (auto &[ng_id, ng_process] : migrate_process)
+        if (migrate_process.empty())
         {
-            // If any node group has started migration, we will replay from
-            // the data migrate stage.
-            dm_started =
-                ng_process.stage() !=
-                    ::txlog::NodeGroupMigrateMessage_Stage_NotStarted ||
-                dm_started;
-
-            if (ng_process.stage() !=
-                ::txlog::NodeGroupMigrateMessage_Stage_Cleaned)
+            // If there's no data migrate process, we should treat it as
+            // data migration is finished.
+            dm_started = true;
+            dm_finished = true;
+        }
+        else
+        {
+            // Check the data migrate process of each node group.
+            for (auto &[ng_id, ng_process] : migrate_process)
             {
-                dm_finished = false;
+                // If any node group has started migration, we will replay from
+                // the data migrate stage.
+                dm_started =
+                    ng_process.stage() !=
+                        ::txlog::NodeGroupMigrateMessage_Stage_NotStarted ||
+                    dm_started;
+
+                if (ng_process.stage() !=
+                    ::txlog::NodeGroupMigrateMessage_Stage_Cleaned)
+                {
+                    dm_finished = false;
+                }
             }
         }
 
@@ -326,8 +336,17 @@ public:
         bool is_bucket_migrating = false;
         if (is_coordinator)
         {
-            if (scale_op_msg.event_type() ==
-                ::txlog::ClusterScaleOpMessage_ScaleOpType_AddNode)
+            if (scale_op_msg.node_group_bucket_migrate_process_size() == 0)
+            {
+                // No bucket migration is needed.
+                if (scale_op_msg.stage() ==
+                    ::txlog::ClusterScaleStage::ConfigUpdate)
+                {
+                    locked = true;
+                }
+            }
+            else if (scale_op_msg.event_type() ==
+                     ::txlog::ClusterScaleOpMessage_ScaleOpType_AddNodeGroup)
             {
                 // If we see cluster config log and data migration has not
                 // started on any node group, we should replay from cluster
@@ -351,8 +370,21 @@ public:
                     locked = true;
                 }
             }
+            else if (scale_op_msg.event_type() ==
+                     ::txlog::
+                         ClusterScaleOpMessage_ScaleOpType_AddNodeGroupPeers)
+            {
+                // Add node group peers does not need to do bucket migration.
+                assert(false);
+            }
+            else
+            {
+                assert(false);
+            }
 
-            if (scale_op_msg.stage() != ::txlog::ClusterScaleStage::CleanScale)
+            if (scale_op_msg.stage() !=
+                    ::txlog::ClusterScaleStage::CleanScale &&
+                scale_op_msg.node_group_bucket_migrate_process_size() != 0)
             {
                 is_bucket_migrating = true;
             }
@@ -362,7 +394,7 @@ public:
             // As coordinator we should recover the state of right before
             // writing the next log.
             if (scale_op_msg.event_type() ==
-                ::txlog::ClusterScaleOpMessage_ScaleOpType_AddNode)
+                ::txlog::ClusterScaleOpMessage_ScaleOpType_AddNodeGroup)
             {
                 if (scale_op_msg.stage() ==
                     ::txlog::ClusterScaleStage::PrepareScale)
@@ -408,14 +440,13 @@ public:
             }
         }
 
-#ifndef RANGE_PARTITION_ENABLED
         shard_->SetBucketMigrating(is_bucket_migrating);
-#endif
         (void)
             is_bucket_migrating;  // Silence compiler warning in range partition
         if (locked)
         {
             auto lock_pair = AcquireCceKeyLock(&neg_inf_,
+                                               neg_inf_.CommitTs(),
                                                &neg_inf_page_,
                                                RecordStatus::Normal,
                                                &req,
@@ -476,7 +507,8 @@ public:
             }
             // This will update cluster config in sharder asynchronouslly
             // Temporarily cache the new_ng_configs in neg_inf_.payload_
-            ClusterConfigRecord *config_rec = neg_inf_.payload_.get();
+            ClusterConfigRecord *config_rec =
+                neg_inf_.payload_.cur_payload_.get();
             config_rec->SetNodeGroupConfigs(std::move(new_ng_configs_uptr));
             Sharder::Instance().UpdateClusterConfig(
                 new_ng_configs, req.CommitTs(), &req, shard_);

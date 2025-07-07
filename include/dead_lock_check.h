@@ -223,6 +223,8 @@ protected:
     std::unordered_map<uint32_t, bool> reply_map_;
     // The count of nodes without relay
     int32_t node_unfinished_ = 0;
+    // The deadlock check round.
+    uint64_t check_round_ = 0;
 
     std::thread thd_;
     // If process has been closed and this thread need to stop;
