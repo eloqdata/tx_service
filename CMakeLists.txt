@@ -207,6 +207,7 @@ SET(TxService_SOURCES
     ${TX_SERVICE_SOURCE_DIR}/src/cc/non_blocking_lock.cpp
     ${TX_SERVICE_SOURCE_DIR}/src/cc/cc_req_misc.cpp
     ${TX_SERVICE_SOURCE_DIR}/src/cc/range_slice.cpp
+    ${TX_SERVICE_SOURCE_DIR}/src/cc/reader_writer_cntl.cpp
     ${TX_SERVICE_SOURCE_DIR}/src/remote/remote_cc_handler.cpp
     ${TX_SERVICE_SOURCE_DIR}/src/remote/remote_cc_request.cpp
     ${TX_SERVICE_SOURCE_DIR}/src/remote/cc_node_service.cpp
@@ -222,6 +223,7 @@ SET(TxService_SOURCES
     ${TX_SERVICE_SOURCE_DIR}/src/data_sync_task.cpp
     ${TX_SERVICE_SOURCE_DIR}/src/standby.cpp
     ${TX_SERVICE_SOURCE_DIR}/src/store/snapshot_manager.cpp
+    ${TX_SERVICE_SOURCE_DIR}/src/sequences/sequences.cpp
     ${METRICS_SERVICE_SOURCE_DIR}/src/metrics.cc
 )
 
@@ -236,6 +238,17 @@ target_include_directories(txservice PUBLIC ${INCLUDE_DIR})
 
 target_link_libraries(txservice PUBLIC mimalloc ${LINK_LIB} ${PROTOBUF_LIBRARIES} ${ABSEIL})
 
+include(FetchContent)
+    # Import yaml-cpp library used by host manager
+FetchContent_Declare(
+    yaml-cpp
+    GIT_REPOSITORY https://github.com/jbeder/yaml-cpp.git
+    GIT_TAG yaml-cpp-0.7.0 # Can be a tag (yaml-cpp-x.x.x), a commit hash, or a branch name (master)
+)
+FetchContent_MakeAvailable(yaml-cpp)
+
+# add_executable(hello ${CMAKE_SOURCE_DIR}/hello.cpp)
+# target_link_libraries(hello PRIVATE txservice ${CMAKE_THREAD_LIBS_INIT})
 SET(HOST_MANAGER_SOURCE_DIR ${CMAKE_CURRENT_SOURCE_DIR}/raft_host_manager)
 set(HOST_MANAGER_INCLUDE_DIR
     ${HOST_MANAGER_SOURCE_DIR}/include
@@ -292,7 +305,7 @@ SET(RaftHM_SOURCES
 
 include_directories(${HOST_MANAGER_INCLUDE_DIR})
 add_executable(host_manager ${RaftHM_SOURCES})
-target_link_libraries(host_manager ${HOST_MANAGER_LINK_LIB})
+target_link_libraries(host_manager ${HOST_MANAGER_LINK_LIB} yaml-cpp::yaml-cpp)
 
 install(TARGETS host_manager
     RUNTIME DESTINATION bin)
