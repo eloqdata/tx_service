@@ -2879,6 +2879,35 @@ void LocalCcShards::PostProcessCkpt(std::shared_ptr<DataSyncTask> &task,
 {
     assert(task->flight_task_cnt_ == 0);
 
+    int64_t ng_term =
+        Sharder::Instance().TryPinNodeGroupData(task->node_group_id_);
+    if (ng_term != task->node_group_term_)
+    {
+        LOG(ERROR) << "PostProcessDCkpt: term mismatch ng#"
+                   << task->node_group_id_ << ", leader term: " << ng_term
+                   << ", expected term: " << task->node_group_term_;
+#ifdef RANGE_PARTITION_ENABLED
+        if (!task->during_split_range_)
+        {
+            PopPendingTask(task->node_group_id_,
+                           task->node_group_term_,
+                           task->table_name_,
+                           task->range_id_);
+        }
+#else
+        PopPendingTask(task->node_group_id_,
+                       task->node_group_term_,
+                       task->table_name_,
+                       task->worker_idx_);
+#endif
+
+        if (ng_term >= 0)
+        {
+            Sharder::Instance().UnpinNodeGroupData(task->node_group_id_);
+        }
+        return;
+    }
+
 #ifdef RANGE_PARTITION_ENABLED
     TableRangeEntry *range_entry = nullptr;
     const TxKey *start_key = nullptr;
@@ -2887,6 +2916,23 @@ void LocalCcShards::PostProcessCkpt(std::shared_ptr<DataSyncTask> &task,
     {
         range_entry = const_cast<TableRangeEntry *>(GetTableRangeEntry(
             task->table_name_, task->node_group_id_, task->range_id_));
+        if (range_entry == nullptr)
+        {
+            // table has been dropped.
+            LOG(ERROR)
+                << "PostProcessCkpt: range entry is null, ckpt error code is "
+                << static_cast<size_t>(task->status_->err_code_);
+            assert(task->status_->err_code_ != CcErrorCode::NO_ERROR);
+            PopPendingTask(task->node_group_id_,
+                           task->node_group_term_,
+                           task->table_name_,
+                           task->range_id_);
+            if (ng_term >= 0)
+            {
+                Sharder::Instance().UnpinNodeGroupData(task->node_group_id_);
+            }
+            return;
+        }
     }
     else
     {
@@ -2970,6 +3016,11 @@ void LocalCcShards::PostProcessCkpt(std::shared_ptr<DataSyncTask> &task,
                        task->worker_idx_);
     }
 #endif
+
+    if (ng_term >= 0)
+    {
+        Sharder::Instance().UnpinNodeGroupData(task->node_group_id_);
+    }
 }
 
 #ifdef RANGE_PARTITION_ENABLED
