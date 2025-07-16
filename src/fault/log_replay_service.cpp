@@ -942,62 +942,51 @@ void RecoveryService::ProcessRecoverTxTask(RecoverTxTask &task)
         // the tx's log record to the cc node to recover the
         // committed record. Or, the tx must have aborted.
 
-        if (!txservice_skip_wal)
+        assert(log_agent_ != nullptr);
+        RecoverTxStatus status = log_agent_->RecoverTx(task.tx_number_,
+                                                       task.tx_term_,
+                                                       task.write_lock_ts_,
+                                                       task.cc_ng_id_,
+                                                       task.cc_ng_term_,
+                                                       ip_,
+                                                       port_);
+
+        if (status == RecoverTxStatus::NotCommitted ||
+            status == RecoverTxStatus::Alive)
         {
-            assert(log_agent_ != nullptr);
-            RecoverTxStatus status = log_agent_->RecoverTx(task.tx_number_,
-                                                           task.tx_term_,
-                                                           task.write_lock_ts_,
-                                                           task.cc_ng_id_,
-                                                           task.cc_ng_term_,
-                                                           ip_,
-                                                           port_);
+            LOG(INFO) << "The tx " << task.tx_number_
+                      << " is to be cleared, after asking "
+                         "the log group. status: "
+                      << int(status);
 
-            if (status == RecoverTxStatus::NotCommitted ||
-                status == RecoverTxStatus::Alive)
-            {
-                LOG(INFO) << "The tx " << task.tx_number_
-                          << " is to be cleared, after asking "
-                             "the log group. status: "
-                          << int(status);
-
-                // If the tx is not committed, sends a cc request to
-                // local cc shards to clear write intentions left by
-                // the tx. If the tx node is still alive according
-                // to the log group, and yet no log record is found,
-                // given that the prior inquiry of the tx status is
-                // inconclusive, the tx must have aborted
-                // proactively. Clears the tx's locks.
-                ClearTx(task.tx_number_);
-            }
-            else if (status == RecoverTxStatus::RecoverError)
-            {
-                LOG(INFO) << "There is a tx recovery error when asking "
-                             "the log group. Tx number "
-                          << task.tx_number_;
-            }
-            else
-            {
-                LOG(INFO) << "The tx " << task.tx_number_
-                          << " to be recovered has committed.";
-                // For DML transactions, if the tx has committed,
-                // the log group will ship the tx's committed
-                // records to the cc node. If there is an error,
-                // does nothing. The next conflicting tx will try a
-                // new recovery.
-                // For multi-stage transactions, the tx has written
-                // log and is guaranteed to succeed and release the
-                // lock, do nothing and the lock will be released by
-                // the coordinator.
-            }
+            // If the tx is not committed, sends a cc request to
+            // local cc shards to clear write intentions left by
+            // the tx. If the tx node is still alive according
+            // to the log group, and yet no log record is found,
+            // given that the prior inquiry of the tx status is
+            // inconclusive, the tx must have aborted
+            // proactively. Clears the tx's locks.
+            ClearTx(task.tx_number_);
+        }
+        else if (status == RecoverTxStatus::RecoverError)
+        {
+            LOG(INFO) << "There is a tx recovery error when asking "
+                         "the log group. Tx number "
+                      << task.tx_number_;
         }
         else
         {
-            // ClearTx. The orphan lock must be cleared. Since there is
-            // no log service we have no way to know whether the txn
-            // committed or aborted, just treat it as aborted. User will
-            // experience some data loss but it's enevitable without logs.
-            ClearTx(task.tx_number_);
+            LOG(INFO) << "The tx " << task.tx_number_
+                      << " to be recovered has committed.";
+            // For DML transactions, if the tx has committed,
+            // the log group will ship the tx's committed
+            // records to the cc node. If there is an error,
+            // does nothing. The next conflicting tx will try a
+            // new recovery.
+            // For multi-stage transactions, the tx has written
+            // log and is guaranteed to succeed and release the
+            // lock, do nothing and the lock will be released by
+            // the coordinator.
         }
     }
 }
