@@ -7070,9 +7070,9 @@ public:
     void Wait()
     {
         std::unique_lock<bthread::Mutex> lk(mutex_);
-        while (!finish_ || InUse())
+        while (!finish_)
         {
-            cv_.wait_for(lk, 500000);
+            cv_.wait(lk);
         }
     }
 
@@ -7296,8 +7296,10 @@ public:
         std::unique_lock<bthread::Mutex> req_lk(req_mux_);
         if (--unfinished_cnt_ == 0)
         {
+            // Make a copy of slices_info_ to avoid race condition.
+            std::shared_ptr<SliceUpdation> slices_info = slices_info_;
             req_cv_.notify_one();
-            return {true, slices_info_};
+            return {true, std::move(slices_info)};
         }
         return {false, nullptr};
     }
@@ -7332,9 +7334,9 @@ public:
     void Wait()
     {
         std::unique_lock<bthread::Mutex> lk(req_mux_);
-        while (unfinished_cnt_ != 0 || InUse())
+        while (unfinished_cnt_ != 0)
         {
-            req_cv_.wait_for(lk, 500000);
+            req_cv_.wait(lk);
         }
     }
 
