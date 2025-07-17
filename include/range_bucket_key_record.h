@@ -23,6 +23,9 @@
 
 #include <atomic>
 #include <cstdint>
+#include <memory>
+#include <utility>
+#include <variant>
 
 #include "tx_key.h"
 #include "tx_record.h"
@@ -277,33 +280,30 @@ public:
 struct RangeBucketRecord : public TxRecord
 {
 public:
-    RangeBucketRecord() : bucket_info_(nullptr), is_owner_(false)
+    RangeBucketRecord() : bucket_info_(nullptr)
     {
     }
-    RangeBucketRecord(BucketInfo *bucket_info)
-        : bucket_info_(bucket_info), is_owner_(false)
+    explicit RangeBucketRecord(BucketInfo *bucket_info)
+        : bucket_info_(bucket_info)
     {
     }
-    RangeBucketRecord(RangeBucketRecord &&rhs) : is_owner_(rhs.is_owner_)
+    RangeBucketRecord(RangeBucketRecord &&rhs) noexcept
+        : bucket_info_(std::move(rhs.bucket_info_))
     {
-        if (is_owner_)
+    }
+    RangeBucketRecord(const RangeBucketRecord &rhs)
+    {
+        if (std::holds_alternative<std::unique_ptr<BucketInfo>>(
+                rhs.bucket_info_))
         {
-            bucket_info_uptr_ = std::move(rhs.bucket_info_uptr_);
+            const auto &rhs_ptr =
+                std::get<std::unique_ptr<BucketInfo>>(rhs.bucket_info_);
+            assert(rhs_ptr != nullptr);
+            bucket_info_ = rhs_ptr->Clone();
         }
         else
         {
-            bucket_info_ = rhs.bucket_info_;
-        }
-    }
-    RangeBucketRecord(const RangeBucketRecord &rhs) : is_owner_(rhs.is_owner_)
-    {
-        if (is_owner_)
-        {
-            bucket_info_uptr_ = rhs.bucket_info_uptr_->Clone();
-        }
-        else
-        {
-            bucket_info_ = rhs.bucket_info_;
+            bucket_info_ = std::get<const BucketInfo *>(rhs.bucket_info_);
         }
     }
     RangeBucketRecord &operator=(const RangeBucketRecord &rhs)
@@ -312,37 +312,21 @@ public:
         {
             return *this;
         }
-        if (!is_owner_)
+        if (std::holds_alternative<std::unique_ptr<BucketInfo>>(
+                rhs.bucket_info_))
         {
-            // clear pointer so that we don't accidently frees the bucket info
-            // when moving in unique ptr.
-            bucket_info_ = nullptr;
-        }
-        else if (bucket_info_uptr_)
-        {
-            // Free the bucket info since we might not call destructor of bucket
-            // info if rhs is not owner.
-            bucket_info_uptr_.reset();
-        }
-
-        is_owner_ = rhs.is_owner_;
-        if (is_owner_)
-        {
-            bucket_info_uptr_ = rhs.bucket_info_uptr_->Clone();
+            const auto &rhs_ptr =
+                std::get<std::unique_ptr<BucketInfo>>(rhs.bucket_info_);
+            assert(rhs_ptr != nullptr);
+            bucket_info_ = rhs_ptr->Clone();
         }
         else
         {
-            bucket_info_ = rhs.bucket_info_;
+            bucket_info_ = std::get<const BucketInfo *>(rhs.bucket_info_);
         }
         return *this;
     }
-    ~RangeBucketRecord()
-    {
-        if (is_owner_ && bucket_info_uptr_)
-        {
-            bucket_info_uptr_.reset();
-        }
-    }
+    ~RangeBucketRecord() = default;
 
     void Serialize(std::vector<char> &buf, size_t &offset) const override;
     void Serialize(std::string &str) const override;
@@ -354,7 +338,11 @@ public:
 
     const BucketInfo *GetBucketInfo() const
     {
-        return is_owner_ ? bucket_info_uptr_.get() : bucket_info_;
+        if (std::holds_alternative<std::unique_ptr<BucketInfo>>(bucket_info_))
+        {
+            return std::get<std::unique_ptr<BucketInfo>>(bucket_info_).get();
+        }
+        return std::get<const BucketInfo *>(bucket_info_);
     }
 
     size_t Size() const override
@@ -369,31 +357,17 @@ public:
 
     void SetBucketInfo(const BucketInfo *bucket_info)
     {
-        if (is_owner_ && bucket_info_uptr_)
-        {
-            bucket_info_uptr_.reset();
-        }
-        is_owner_ = false;
         bucket_info_ = bucket_info;
     }
 
     void SetBucketInfo(std::unique_ptr<BucketInfo> bucket_info)
     {
-        if (!is_owner_)
-        {
-            bucket_info_ = nullptr;
-        }
-        is_owner_ = true;
-        bucket_info_uptr_ = std::move(bucket_info);
+        bucket_info_ = std::move(bucket_info);
     }
 
 private:
-    union
-    {
-        const BucketInfo *bucket_info_;
-        std::unique_ptr<BucketInfo> bucket_info_uptr_;
-    };
-
-    bool is_owner_{false};
+    // Uses std::unique_ptr<BucketInfo> when owning the object, otherwise uses
+    // const BucketInfo*.
+    std::variant<const BucketInfo *, std::unique_ptr<BucketInfo>> bucket_info_;
 };
 }  // namespace txservice

@@ -567,7 +567,7 @@ public:
      */
     void Release()
     {
-        obj_addr_ = obj_addr_ & mask;
+        obj_addr_ &= mask;
     }
 
 private:
