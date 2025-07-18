@@ -87,6 +87,11 @@ public:
         assert(false && "Unimplemented virtual method");
     }
 
+    virtual uint64_t SchemaVersion() const
+    {
+        return 0;
+    }
+
 protected:
     CcRequestBase() = default;
 

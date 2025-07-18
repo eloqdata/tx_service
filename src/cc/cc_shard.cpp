@@ -1425,8 +1425,8 @@ const BucketInfo *CcShard::GetRangeOwner(int32_t range_id,
     return local_shards_.GetRangeOwner(range_id, ng_id);
 }
 
-const std::unordered_map<uint16_t, std::unique_ptr<BucketInfo>>
-    *CcShard::GetAllBucketInfos(NodeGroupId ng_id) const
+const std::unordered_map<uint16_t, std::unique_ptr<BucketInfo>> *
+CcShard::GetAllBucketInfos(NodeGroupId ng_id) const
 {
     return local_shards_.GetAllBucketInfos(ng_id);
 }
@@ -1662,6 +1662,21 @@ const CatalogEntry *CcShard::InitCcm(const TableName &table_name,
     const TableSchema *curr_schema = catalog_entry->schema_.get();
     if (curr_schema != nullptr && catalog_entry->schema_version_ > 0)
     {
+        if (const auto request_schema_version = requester->SchemaVersion();
+            request_schema_version != 0 &&
+            request_schema_version != catalog_entry->schema_version_)
+        {
+            // For DDL operations (e.g., `flushdb` in Redis protocol), if one tx
+            // processor completes the operation earlier, it could potentially
+            // read data from other tx processors by simply acquiring a read
+            // lock on itself. However, other processors might not have
+            // completed the DDL operation yet, meaning their schema version
+            // could still be old. Initiating ccm with the old version leads to
+            // conflicts. Therefore, we explicitly verify the schema version
+            // here to prevent such cases.
+            requester->AbortCcRequest(CcErrorCode::FORCE_FAIL);
+            return nullptr;
+        }
 #ifdef STATISTICS
         if (!LoadRangesAndStatisticsNx(
                 curr_schema, cc_ng_id, cc_ng_term, requester))
