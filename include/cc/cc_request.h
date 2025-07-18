@@ -420,7 +420,7 @@ public:
         return ts_;
     }
 
-    uint64_t SchemaVersion() const
+    uint64_t SchemaVersion() const override
     {
         return schema_version_;
     }
@@ -1473,7 +1473,7 @@ public:
         blk_type_ = blk;
     }
 
-    uint64_t SchemaVersion() const
+    uint64_t SchemaVersion() const override
     {
         return schema_version_;
     }
@@ -1643,7 +1643,7 @@ public:
         return ts_;
     }
 
-    uint64_t SchemaVersion() const
+    uint64_t SchemaVersion() const override
     {
         return schema_version_;
     }
@@ -2517,7 +2517,7 @@ public:
             direction_ == ScanDirection::Forward);
     }
 
-    uint64_t SchemaVersion() const
+    uint64_t SchemaVersion() const override
     {
         return schema_version_;
     }
@@ -4431,7 +4431,7 @@ public:
         return sampling_table_name_;
     }
 
-    uint64_t SchemaVersion() const
+    uint64_t SchemaVersion() const override
     {
         return schema_version_;
     }
@@ -6091,7 +6091,7 @@ public:
         return tx_ts_;
     }
 
-    uint64_t SchemaVersion() const
+    uint64_t SchemaVersion() const override
     {
         return schema_version_;
     }
@@ -6460,7 +6460,7 @@ public:
         return commit_ts_;
     }
 
-    uint64_t SchemaVersion() const
+    uint64_t SchemaVersion() const override
     {
         return schema_version_;
     }
