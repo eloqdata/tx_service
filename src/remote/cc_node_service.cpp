@@ -1336,7 +1336,6 @@ void CcNodeService::UploadRangeSlices(
     uint16_t rand_core = std::rand() % core_cnt;
     // upload range slices info
     UploadRangeSlicesCc req;
-    req.Use();
     req.Reset(table_name,
               ng_id,
               old_partition_id,
@@ -1409,7 +1408,6 @@ void CcNodeService::UploadBatchSlices(
     }
 
     UploadBatchSlicesCc req;
-    req.Use();
     req.Reset(
         table_name, ng_id, ng_term, core_cnt, write_entry_tuple, slices_info);
 

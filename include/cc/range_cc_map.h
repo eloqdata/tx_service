@@ -1291,7 +1291,7 @@ public:
             req.SetError(CcErrorCode::UPLOAD_BATCH_REJECTED);
         }
 
-        return true;
+        return false;
     }
 
     TableType Type() const override
