@@ -626,7 +626,7 @@ std::unordered_map<TableName, bool> LocalCcShards::GetCatalogTableNameSnapshot(
                         }
                     }
                 } /* End of dirty index table schema */
-            }     /* End of this base table */
+            } /* End of this base table */
         }
     }
     return tables;
@@ -1121,9 +1121,9 @@ void LocalCcShards::PublishMessage(const std::string &chan,
     }
 }
 
-std::map<TxKey, TableRangeEntry::uptr>
-    *LocalCcShards::GetTableRangesForATableInternal(
-        const TableName &range_table_name, const NodeGroupId ng_id)
+std::map<TxKey, TableRangeEntry::uptr> *
+LocalCcShards::GetTableRangesForATableInternal(
+    const TableName &range_table_name, const NodeGroupId ng_id)
 {
     auto table_it = table_ranges_.find(range_table_name);
     if (table_it == table_ranges_.end())
@@ -1171,9 +1171,9 @@ std::optional<std::vector<uint32_t>> LocalCcShards::GetTableRangeIds(
     return table_range_ids;
 }
 
-std::unordered_map<uint32_t, TableRangeEntry *>
-    *LocalCcShards::GetTableRangeIdsForATableInternal(
-        const TableName &range_table_name, const NodeGroupId ng_id)
+std::unordered_map<uint32_t, TableRangeEntry *> *
+LocalCcShards::GetTableRangeIdsForATableInternal(
+    const TableName &range_table_name, const NodeGroupId ng_id)
 {
     auto table_it = table_range_ids_.find(range_table_name);
     if (table_it == table_range_ids_.end())
@@ -1856,8 +1856,8 @@ std::vector<std::pair<uint16_t, NodeGroupId>> LocalCcShards::GetAllBucketOwners(
     return bucket_owners;
 }
 
-const std::unordered_map<uint16_t, std::unique_ptr<BucketInfo>>
-    *LocalCcShards::GetAllBucketInfos(NodeGroupId ng_id) const
+const std::unordered_map<uint16_t, std::unique_ptr<BucketInfo>> *
+LocalCcShards::GetAllBucketInfos(NodeGroupId ng_id) const
 {
     std::shared_lock<std::shared_mutex> lk(meta_data_mux_);
     auto ng_bucket_it = bucket_infos_.find(ng_id);
@@ -1868,8 +1868,8 @@ const std::unordered_map<uint16_t, std::unique_ptr<BucketInfo>>
     return &ng_bucket_it->second;
 }
 
-const std::unordered_map<uint16_t, std::unique_ptr<BucketInfo>>
-    *LocalCcShards::GetAllBucketInfosNoLocking(const NodeGroupId ng_id) const
+const std::unordered_map<uint16_t, std::unique_ptr<BucketInfo>> *
+LocalCcShards::GetAllBucketInfosNoLocking(const NodeGroupId ng_id) const
 {
     auto ng_bucket_it = bucket_infos_.find(ng_id);
     if (ng_bucket_it == bucket_infos_.end())
@@ -2914,10 +2914,17 @@ void LocalCcShards::PostProcessCkpt(std::shared_ptr<DataSyncTask> &task,
     const TxKey *end_key = nullptr;
     if (!task->during_split_range_)
     {
-        range_entry = const_cast<TableRangeEntry *>(GetTableRangeEntry(
-            task->table_name_, task->node_group_id_, task->range_id_));
+        TableName range_tbl_name{task->table_name_.StringView(),
+                                 TableType::RangePartition,
+                                 task->table_name_.Engine()};
+
+        std::shared_lock<std::shared_mutex> lk(meta_data_mux_);
+        range_entry = const_cast<TableRangeEntry *>(GetTableRangeEntryInternal(
+            range_tbl_name, task->node_group_id_, task->range_id_));
         if (range_entry == nullptr)
         {
+            lk.unlock();
+
             // table has been dropped.
             LOG(ERROR)
                 << "PostProcessCkpt: range entry is null, ckpt error code is "
@@ -2933,53 +2940,49 @@ void LocalCcShards::PostProcessCkpt(std::shared_ptr<DataSyncTask> &task,
             }
             return;
         }
+
+        assert(range_entry);
+
+        if (flush_ret)
+        {
+            // Update the task status for this range.
+            range_entry->UpdateLastDataSyncTS(task->data_sync_ts_);
+        }
+        else
+        {
+            // Reset the post ckpt size if flush failed
+            UpdateStoreSlice(task->table_name_,
+                             task->data_sync_ts_,
+                             range_entry,
+                             start_key,
+                             end_key,
+                             false);
+        }
+
+        range_entry->UnPinStoreRange();
+
+        lk.unlock();
+
+        PopPendingTask(task->node_group_id_,
+                       task->node_group_term_,
+                       task->table_name_,
+                       task->range_id_);
     }
     else
     {
         range_entry = task->range_entry_;
         start_key = &task->start_key_;
         end_key = &task->end_key_;
-    }
-    assert(range_entry);
 
-    bool reset_waiting_ckpt = false;
-    if (flush_ret)
-    {
-        if (!task->during_split_range_)
+        if (!flush_ret)
         {
-            // Update the task status for this range.
-            range_entry->UpdateLastDataSyncTS(task->data_sync_ts_);
-
-            range_entry->UnPinStoreRange();
-
-            PopPendingTask(task->node_group_id_,
-                           task->node_group_term_,
-                           task->table_name_,
-                           task->range_id_);
-
-            // reset_waiting_ckpt = true;
-        }
-    }
-    else
-    {
-        // Reset the post ckpt size if flush failed
-        UpdateStoreSlice(task->table_name_,
-                         task->data_sync_ts_,
-                         range_entry,
-                         start_key,
-                         end_key,
-                         false);
-
-        if (!task->during_split_range_)
-        {
-            range_entry->UnPinStoreRange();
-
-            PopPendingTask(task->node_group_id_,
-                           task->node_group_term_,
-                           task->table_name_,
-                           task->range_id_);
-
-            // reset_waiting_ckpt = true;
+            // Reset the post ckpt size if flush failed
+            UpdateStoreSlice(task->table_name_,
+                             task->data_sync_ts_,
+                             range_entry,
+                             start_key,
+                             end_key,
+                             false);
         }
     }
 
@@ -2987,11 +2990,6 @@ void LocalCcShards::PostProcessCkpt(std::shared_ptr<DataSyncTask> &task,
 
     if (flush_ret)
     {
-        PopPendingTask(task->node_group_id_,
-                       task->node_group_term_,
-                       task->table_name_,
-                       task->worker_idx_);
-
         {
             std::shared_lock<std::shared_mutex> meta_data_lk(meta_data_mux_);
             const TableName base_table_name{
@@ -3007,6 +3005,11 @@ void LocalCcShards::PostProcessCkpt(std::shared_ptr<DataSyncTask> &task,
                                                     task->worker_idx_);
             }
         }
+
+        PopPendingTask(task->node_group_id_,
+                       task->node_group_term_,
+                       task->table_name_,
+                       task->worker_idx_);
     }
     else
     {

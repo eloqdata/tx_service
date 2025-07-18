@@ -1702,7 +1702,7 @@ public:
             TxnCmd txn_cmd(obj_version,
                            commit_ts,
                            has_overwrite,
-                           false,
+                           UINT64_MAX,
                            std::move(cmd_list));
 
             BufferedTxnCmdList &buffered_cmd_list = cce->BufferedCommandList();
