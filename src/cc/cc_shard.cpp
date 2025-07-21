@@ -1674,7 +1674,7 @@ const CatalogEntry *CcShard::InitCcm(const TableName &table_name,
             // could still be old. Initiating ccm with the old version leads to
             // conflicts. Therefore, we explicitly verify the schema version
             // here to prevent such cases.
-            requester->AbortCcRequest(CcErrorCode::FORCE_FAIL);
+            requester->AbortCcRequest(CcErrorCode::REQUESTED_TABLE_SCHEMA_MISMATCH);
             return nullptr;
         }
 #ifdef STATISTICS
