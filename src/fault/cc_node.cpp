@@ -288,6 +288,39 @@ bool CcNode::OnLeaderStart(int64_t term,
 
     if (prev_standby_term > 0)
     {
+        size_t core_cnt = local_cc_shards_.Count();
+        WaitableCc sub_cc(
+            [](CcShard &ccs)
+            {
+                auto &grps = ccs.GetStandbysequenceGrps();
+                for (auto &[grp_id, grp_info] : grps)
+                {
+                    if (grp_info.subscribed_)
+                    {
+                        // Unsubscribe to reject incoming data.
+                        grp_info.Unsubscribe();
+                    }
+                }
+
+                return true;
+            },
+            core_cnt);
+
+        for (uint32_t core_id = 0; core_id < core_cnt; core_id++)
+        {
+            local_cc_shards_.EnqueueCcRequest(core_id, &sub_cc);
+        }
+        sub_cc.Wait();
+
+        uint64_t inflight_stanbdy_req_cnt =
+            Sharder::Instance().InflightStandbyReqCount();
+        while (inflight_stanbdy_req_cnt > 0)
+        {
+            bthread_usleep(100);
+            inflight_stanbdy_req_cnt =
+                Sharder::Instance().InflightStandbyReqCount();
+        }
+
         // Standby pins the node group when processing DDL to avoid leaving
         // inconsistent state caused by term change during DDL. Wait until all
         // pins are cleared on this ng before clearing the standby term.

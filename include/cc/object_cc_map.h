@@ -452,6 +452,7 @@ public:
                             }
                         }
                     });
+
                     // Create key lock and extra struct for the cce. Fetch
                     // record will pin the cce to prevent it from being recycled
                     // before fetch record returns.
@@ -1777,8 +1778,7 @@ public:
         if (schema_version < schema_ts_)
         {
             // Discard message since it expired.
-            req.SetFinish();
-            return true;
+            return req.SetFinish(*shard_);
         }
         else if (schema_version > schema_ts_)
         {
@@ -1813,8 +1813,7 @@ public:
         if (commit_ts <= cce->CommitTs())
         {
             // Discard message since cce has a newer version.
-            req.SetFinish();
-            return true;
+            return req.SetFinish(*shard_);
         }
         else
         {
@@ -1960,8 +1959,7 @@ public:
             }
         }
 
-        req.SetFinish();
-        return true;
+        return req.SetFinish(*shard_);
     }
 
     bool Execute(RestoreCcMapCc &req) override

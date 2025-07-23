@@ -197,11 +197,19 @@ int CcStreamReceiver::on_received_messages(brpc::StreamId stream_id,
         assert(!long_msg);
         if (Sharder::Instance().PrimaryNodeTerm() > 0)
         {
+            bool success =
+                Sharder::Instance().IncrInflightStandbyReqCount(size);
+            while (!success)
+            {
+                bthread_usleep(100);
+                success = Sharder::Instance().IncrInflightStandbyReqCount(size);
+            }
+
             // For standby node, all msgs are redirected from one stream
             // by primary node. To maximize throughput, offload parsing
             // to tx processor.
             ParseCcMsgCc *cc = parse_standby_forward_pool_.NextRequest();
-            cc->Reset(messages, size, this);
+            cc->Reset(true, messages, size, this);
             uint16_t first_core = next_core_;
             // Do not send this task to overloaded core.
             while (local_shards_.GetCcShard(next_core_)->QueueSize() > 1000)
@@ -231,6 +239,14 @@ int CcStreamReceiver::on_received_messages(brpc::StreamId stream_id,
                 std::unique_ptr<CcMessage> cc_msg = GetCcMsg();
                 butil::IOBufAsZeroCopyInputStream wrapper(*messages[i]);
                 cc_msg->ParseFromZeroCopyStream(&wrapper);
+
+                if (cc_msg->type() ==
+                    remote::CcMessage::MessageType::
+                        CcMessage_MessageType_KeyObjectStandbyForwardRequest)
+                {
+                    msg_pool_.enqueue(std::move(cc_msg));
+                    continue;
+                }
                 OnReceiveCcMsg(std::move(cc_msg));
             }
         }

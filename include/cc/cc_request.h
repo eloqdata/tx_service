@@ -6259,12 +6259,20 @@ public:
         KvOpPhase,
         ReleasePhase
     };
+
+    enum Status
+    {
+        Ongoing = 0,
+        Finished = 1,
+    };
+
     KeyObjectStandbyForwardCc()
         : remote_table_name_(empty_sv, TableType::Primary, TableEngine::None),
           key_str_(nullptr),
           object_version_(0),
           commit_ts_(0),
-          has_overwrite_(false)
+          has_overwrite_(false),
+          status_(Status::Ongoing)
     {
     }
 
@@ -6302,16 +6310,23 @@ public:
 
     void AbortCcRequest(CcErrorCode err_code) override
     {
-        SetFinish();
-        Free();
+        size_t shard_idx =
+            forward_msg_grp_ % Sharder::Instance().GetLocalCcShardsCount();
+        status_ = Status::Finished;
+        Sharder::Instance().GetCcShard(shard_idx)->Enqueue(this);
     }
 
     bool Execute(CcShard &ccs) override
     {
+        if (status_ == Finished)
+        {
+            Finish(ccs);
+            return true;
+        }
+
         if (!ValidTermCheck())
         {
-            SetFinish();
-            return true;
+            return SetFinish(ccs);
         }
 
         if (!updated_local_seq_id_)
@@ -6319,8 +6334,7 @@ public:
             if (!ccs.UpdateLastReceivedStandbySequenceId(*fwd_req_))
             {
                 // No need to process msg
-                SetFinish();
-                return true;
+                return SetFinish(ccs);
             }
             updated_local_seq_id_ = true;
             if (table_name_->IsMeta())
@@ -6330,8 +6344,7 @@ public:
                 int64_t term = Sharder::Instance().TryPinStandbyNodeGroupData();
                 if (term < 0)
                 {
-                    SetFinish();
-                    return true;
+                    return SetFinish(ccs);
                 }
             }
             uint16_t data_core_id = (key_shard_code_ & 0x3FF) % ccs.core_cnt_;
@@ -6371,8 +6384,7 @@ public:
                     // The local node (LocalCcShards) contains a schema
                     // instance, which indicates that the table has been
                     // dropped. Returns the request with an error.
-                    res_->SetError(CcErrorCode::REQUESTED_TABLE_NOT_EXISTS);
-                    return true;
+                    return SetFinish(ccs);
                 }
 
                 ccm = ccs.GetCcm(*table_name_, node_group_id_);
@@ -6392,6 +6404,7 @@ public:
         updated_local_seq_id_ = false;
         cce_ptr_ = nullptr;
         input_msg_ = std::move(msg);
+        status_ = Status::Ongoing;
         if (hd_ == nullptr)
         {
             hd_ = Sharder::Instance().GetCcStreamSender();
@@ -6432,16 +6445,36 @@ public:
         ddl_kv_op_err_code_ = CcErrorCode::NO_ERROR;
     }
 
-    void SetFinish()
+    void Finish(CcShard &shard)
     {
         if (updated_local_seq_id_ && table_name_->IsMeta())
         {
             // Unpin ng after ddl op is done.
             Sharder::Instance().UnpinNodeGroupData(node_group_id_);
         }
+
+        shard.DecrInflightStandbyReqCount(forward_msg_grp_);
+
         if (input_msg_)
         {
             hd_->RecycleCcMsg(std::move(input_msg_));
+        }
+    }
+
+    bool SetFinish(CcShard &shard)
+    {
+        size_t shard_idx =
+            forward_msg_grp_ % Sharder::Instance().GetLocalCcShardsCount();
+        if (shard_idx != shard.core_id_)
+        {
+            status_ = Status::Finished;
+            shard.Enqueue(shard.core_id_, shard_idx, this);
+            return false;
+        }
+        else
+        {
+            Finish(shard);
+            return true;
         }
     }
 
@@ -6548,6 +6581,8 @@ private:
     // Used by DDL msg.
     DDLPhase ddl_phase_{DDLPhase::AcquirePhase};
     CcErrorCode ddl_kv_op_err_code_{CcErrorCode::NO_ERROR};
+
+    Status status_{Status::Ongoing};
     LruEntry *cce_ptr_{nullptr};
 };
 
@@ -6555,14 +6590,17 @@ struct ParseCcMsgCc : public CcRequestBase
 {
     ParseCcMsgCc()
     {
+        is_standby_ = false;
         sender_ = Sharder::Instance().GetCcStreamSender();
         messages_.reserve(128);
     }
 
-    void Reset(butil::IOBuf *const messages[],
+    void Reset(bool is_standby,
+               butil::IOBuf *const messages[],
                size_t size,
                remote::CcStreamReceiver *receiver)
     {
+        is_standby_ = is_standby;
         receiver_ = receiver;
         assert(messages_.empty());
         for (size_t i = 0; i < size; i++)
@@ -6573,17 +6611,34 @@ struct ParseCcMsgCc : public CcRequestBase
 
     bool Execute(CcShard &ccs) override
     {
+        uint64_t not_standby_message_cnt = 0;
         for (auto &msg : messages_)
         {
             std::unique_ptr<remote::CcMessage> cc_msg = receiver_->GetCcMsg();
             butil::IOBufAsZeroCopyInputStream wrapper(msg);
             cc_msg->ParseFromZeroCopyStream(&wrapper);
+            if (is_standby_ &&
+                cc_msg->type() !=
+                    remote::CcMessage::MessageType::
+                        CcMessage_MessageType_KeyObjectStandbyForwardRequest)
+            {
+                not_standby_message_cnt++;
+            }
+
             receiver_->OnReceiveCcMsg(std::move(cc_msg));
         }
+
+        if (is_standby_ && not_standby_message_cnt > 0)
+        {
+            Sharder::Instance().DecrInflightStandbyReqCount(
+                not_standby_message_cnt);
+        }
+
         messages_.clear();
         return true;
     }
 
+    bool is_standby_{false};
     remote::CcStreamReceiver *receiver_;
     remote::CcStreamSender *sender_;
     std::vector<butil::IOBuf> messages_;

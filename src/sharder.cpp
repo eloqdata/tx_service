@@ -344,18 +344,16 @@ int Sharder::Init(
             std::string arg_log_dir = "--log_dir=" + FLAGS_log_dir;
 #endif
 
-            char *argv[] = {
-                const_cast<char *>("host_manager"),
-                const_cast<char *>(arg_ip.c_str()),
-                const_cast<char *>(arg_port.c_str()),
-                const_cast<char *>(arg_raft_log.c_str()),
-                const_cast<char *>(arg_brpc_builtin.c_str()),
-                const_cast<char *>(arg_cluster_config_path.c_str()),
+            char *argv[] = {const_cast<char *>("host_manager"),
+                            const_cast<char *>(arg_ip.c_str()),
+                            const_cast<char *>(arg_port.c_str()),
+                            const_cast<char *>(arg_raft_log.c_str()),
+                            const_cast<char *>(arg_brpc_builtin.c_str()),
+                            const_cast<char *>(arg_cluster_config_path.c_str()),
 #if BRPC_WITH_GLOG
-                const_cast<char *>(arg_log_dir.c_str()),
+                            const_cast<char *>(arg_log_dir.c_str()),
 #endif
-                nullptr
-            };
+                            nullptr};
 
             pid_t pid;
             int ret = posix_spawn(
@@ -917,6 +915,11 @@ Checkpointer *Sharder::GetCheckpointer()
 store::DataStoreHandler *Sharder::GetDataStoreHandler()
 {
     return local_shards_->store_hd_;
+}
+
+CcShard *Sharder::GetCcShard(size_t core_idx)
+{
+    return local_shards_->GetCcShard(core_idx);
 }
 
 std::vector<uint32_t> Sharder::LocalNodeGroups()

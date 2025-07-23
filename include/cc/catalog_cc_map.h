@@ -1806,8 +1806,7 @@ public:
             // discard outdate request
             if (shard_->core_id_ + 1 == shard_->core_cnt_)
             {
-                req.SetFinish();
-                return true;
+                return req.SetFinish(*shard_);
             }
             else
             {
@@ -1834,8 +1833,7 @@ public:
                 Sharder::Instance().LeaderNodeId(native_ng),
                 true);
 
-            req.SetFinish();
-            return true;
+            return req.SetFinish(*shard_);
         });
 
         if (req.GetDDLPhase() ==
@@ -2032,8 +2030,7 @@ public:
 
             if (shard_->core_id_ == (shard_->core_cnt_ - 1))
             {
-                req.SetFinish();
-                return true;
+                return req.SetFinish(*shard_);
             }
             else
             {
