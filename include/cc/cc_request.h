@@ -3968,6 +3968,7 @@ public:
         range_splitting_ = range_splitting;
         local_on_fly_cnt_ = nullptr;
         is_lock_recovery_ = is_lock_recovery;
+        upsert_kv_err_code_ = {false, CcErrorCode::NO_ERROR};
     }
 
     ReplayLogCc(const ReplayLogCc &rhs) = delete;
@@ -4229,6 +4230,11 @@ public:
         return is_lock_recovery_;
     }
 
+    std::pair<bool, CcErrorCode> &UpsertKvErrCode()
+    {
+        return upsert_kv_err_code_;
+    }
+
 private:
     TableName table_name_holder_{
         "",
@@ -4258,6 +4264,9 @@ private:
 
     // Reserved for schema op log replay
     const std::unordered_set<TableName> *range_splitting_;
+
+    std::pair<bool, CcErrorCode> upsert_kv_err_code_{false,
+                                                     CcErrorCode::NO_ERROR};
 
     friend std::ostream &operator<<(std::ostream &outs,
                                     txservice::ReplayLogCc *r);

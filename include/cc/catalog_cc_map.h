@@ -1407,7 +1407,6 @@ public:
                                          SchemaOpMessage_Stage_PrepareSchema ||
             schema_op_msg.stage() == ::txlog::SchemaOpMessage_Stage::
                                          SchemaOpMessage_Stage_PrepareData)
-
         {
             const TableSchema *old_schema = catalog_entry->schema_.get();
             const TableSchema *new_schema = catalog_entry->dirty_schema_.get();
@@ -1600,6 +1599,10 @@ public:
                                         catalog_entry->dirty_schema_,
                                         catalog_entry->schema_version_);
 
+        std::pair<bool, CcErrorCode> &upsert_kv_err_code =
+            req.UpsertKvErrCode();
+        bool need_to_upsert_kv_table = upsert_kv_err_code.first == false;
+
         if (shard_->core_id_ < shard_->core_cnt_ - 1)
         {
             req.ResetCcm();
@@ -1608,10 +1611,11 @@ public:
         else
         {
             uint32_t tx_node_id = (req.Txn() >> 32L) >> 10;
+            bool is_coordinator = tx_node_id == req.NodeGroupId();
             int64_t tx_candidate_term =
                 Sharder::Instance().CandidateLeaderTerm(tx_node_id);
 
-            if (tx_node_id == req.NodeGroupId() && tx_candidate_term >= 0)
+            if (is_coordinator && tx_candidate_term >= 0)
             {
                 // If the coordinating tx is bound to the recoverying cc
                 // node, resumes the tx. This will spawn
@@ -1620,9 +1624,51 @@ public:
                 shard_->local_shards_.CreateSchemaRecoveryTx(
                     req, schema_op_msg, tx_candidate_term);
             }
+            else if (!is_coordinator && tx_candidate_term >= 0 &&
+                     need_to_upsert_kv_table)
+            {
+                // When not using shared storage, the participant must
+                // upsert the KV table during its recovery process.
+                //
+                // This prevents a race condition where the participant
+                // could start accepting external requests before the
+                // coordinator completes its own recovery and updates the
+                // table schema. During this timing gap, in participant
+                // nodes, the in-memory schema would be stale and
+                // inconsistent with the KV store, potentially causing
+                // requests to read outdated data.
+
+                if (catalog_entry->dirty_schema_ && !Sharder::Instance()
+                                                         .GetDataStoreHandler()
+                                                         ->IsSharedStorage())
+                {
+                    upsert_kv_err_code = {true, CcErrorCode::NO_ERROR};
+                    shard_->local_shards_.store_hd_->UpsertTable(
+                        catalog_entry->schema_.get(),
+                        catalog_entry->dirty_schema_.get(),
+                        op_type,
+                        req.CommitTs(),
+                        cc_ng_id_,
+                        ng_term,
+                        nullptr,
+                        nullptr,
+                        &req,
+                        shard_,
+                        &upsert_kv_err_code.second);
+
+                    return false;
+                }
+            }
             else
             {
-                req.SetFinish();
+                if (upsert_kv_err_code.second != CcErrorCode::NO_ERROR)
+                {
+                    req.Result()->SetError(upsert_kv_err_code.second);
+                }
+                else
+                {
+                    req.SetFinish();
+                }
             }
         }
 
