@@ -1674,7 +1674,8 @@ const CatalogEntry *CcShard::InitCcm(const TableName &table_name,
             // could still be old. Initiating ccm with the old version leads to
             // conflicts. Therefore, we explicitly verify the schema version
             // here to prevent such cases.
-            requester->AbortCcRequest(CcErrorCode::REQUESTED_TABLE_SCHEMA_MISMATCH);
+            requester->AbortCcRequest(
+                CcErrorCode::REQUESTED_TABLE_SCHEMA_MISMATCH);
             return nullptr;
         }
         auto cc_map = GetCcm(catalog_ccm_name, cc_ng_id);
@@ -1687,7 +1688,8 @@ const CatalogEntry *CcShard::InitCcm(const TableName &table_name,
             // should still be aborted. We verify this by checking whether the
             // table is being updated, using the write lock as an indicator,
             // since a table is being changed under write lock.
-            requester->AbortCcRequest(CcErrorCode::REQUESTED_TABLE_SCHEMA_MISMATCH);
+            requester->AbortCcRequest(
+                CcErrorCode::REQUESTED_TABLE_SCHEMA_MISMATCH);
             return nullptr;
         }
 #ifdef STATISTICS
