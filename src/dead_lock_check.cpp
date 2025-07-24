@@ -146,22 +146,22 @@ void DeadLockCheck::MergeLocalWaitingLockInfo(const CheckDeadLockResult &dlres)
 
 void DeadLockCheck::UpdateCheckNodeId(uint32_t node_id)
 {
-    if (inst_->check_node_id_ > node_id ||
-        LocalCcShards::ClockTs() - inst_->last_check_time_ > time_interval_ * 5)
-    {
-        inst_->check_node_id_ = node_id;
-    }
-
-    if (inst_->check_node_id_ == node_id)
-    {
-        inst_->last_check_time_ = LocalCcShards::ClockTs();
-    }
+    assert(inst_ != nullptr);
+    std::unique_lock<std::mutex> lk(inst_->mutex_);
+    DLOG(INFO) << "[Global dead lock detector]: update check node id to "
+               << node_id;
+    inst_->check_node_id_ = node_id;
+    inst_->last_check_time_ = LocalCcShards::ClockTs();
 }
 
 void DeadLockCheck::GatherLockDependancy()
 {
     std::unique_lock<std::mutex> lk(mutex_);
-    UpdateCheckNodeId(Sharder::Instance().NodeId());
+    DLOG(INFO) << "[Global dead lock detector]: gather lock "
+                  "dependancy information";
+    inst_->check_node_id_ = Sharder::Instance().NodeId();
+    inst_->last_check_time_ = LocalCcShards::ClockTs();
+
     reply_map_.clear();
     auto all_node_groups = Sharder::Instance().AllNodeGroups();
 
@@ -522,12 +522,29 @@ void DeadLockCheck::Run()
         });
 
         std::unique_lock<std::mutex> lk(mutex_);
-        con_var_.wait_for(
-            lk, 1s, [this]() { return stop_ || requested_check_; });
+        con_var_.wait_for(lk,
+                          1s,
+                          [this]()
+                          {
+                              if (stop_)
+                              {
+                                  return true;
+                              }
 
-        // Proceeds on ival >= interval OR requested_check_
-        uint64_t ival = LocalCcShards::ClockTs() - last_check_time_;
-        if (stop_ || (ival < time_interval_ && !requested_check_))
+                              if (requested_check_)
+                              {
+                                  uint64_t ival = LocalCcShards::ClockTs() -
+                                                  last_check_time_;
+                                  if (ival >= time_interval_)
+                                  {
+                                      return true;
+                                  }
+                              }
+
+                              return false;
+                          });
+
+        if (stop_)
         {
             continue;
         }
@@ -537,18 +554,17 @@ void DeadLockCheck::Run()
         {
             continue;
         }
-        // If the last check riser is this node, it will call dead lock check
-        // again. Or if the time spend more than two times than interval time
-        // due to last check riser crashed, this node will rise the check. To
-        // avoid multi nodes rise the check at the same time, here add
-        // local_shards_.NodeId() * MICRO_SECOND to make more waitting seconds
-        // according the node id.
-        if (ival < time_interval_ * 2 + local_shards_.NodeId() * MICRO_SECOND &&
-            check_node_id_ != local_shards_.NodeId())
+
+        if (!requested_check_)
+        {
+            continue;
+        }
+        else if (LocalCcShards::ClockTs() - last_check_time_ < time_interval_)
         {
             continue;
         }
 
+        // Reset the check flag brefore gather lock dependancy
         requested_check_ = false;
         lk.unlock();
         GatherLockDependancy();
