@@ -237,11 +237,11 @@ protected:
 
     LocalCcShards &local_shards_;
     std::unique_ptr<CheckDeadLockCc> dead_lock_cc_;
-    // The last time to receive check command
+    // The last time to check dead lock.
     uint64_t last_check_time_;
     // The node to rise dead lock check.
     uint32_t check_node_id_;
-
+    // If the dead lock check is requested by this node.
     bool requested_check_{false};
 };
 }  // namespace txservice
