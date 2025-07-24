@@ -3356,7 +3356,8 @@ public:
             slices_to_scan_.reserve(old_slices_delta_size->size());
             std::for_each(old_slices_delta_size->begin(),
                           old_slices_delta_size->end(),
-                          [&](decltype(*old_slices_delta_size->begin()) &elem) {
+                          [&](decltype(*old_slices_delta_size->begin()) &elem)
+                          {
                               slices_to_scan_.emplace_back(
                                   std::move(elem.first.GetShallowCopy()));
                           });
@@ -5130,6 +5131,23 @@ public:
 
             if (!resume_from_upsert_kv)
             {
+                const CatalogEntry *catalog_entry =
+                    ccs.GetCatalog(*table_name_, node_group_id_);
+                if (catalog_entry == nullptr)
+                {
+                    //  Fetch catalog
+                    ccs.FetchCatalog(
+                        *table_name_, node_group_id_, ng_term, this);
+                    return false;
+                }
+                if (catalog_entry->schema_version_ >= clean_ts_)
+                {
+                    // This is an out-dated request. The table has already been
+                    // cleaned and updated.
+                    return SetFinish();
+                }
+                assert(catalog_entry->dirty_schema_version_ == clean_ts_);
+
                 if (!CleanCcMap(ccs))
                 {
                     // Current ccmap has more page
@@ -5138,8 +5156,6 @@ public:
                     return false;
                 }
 
-                const CatalogEntry *catalog_entry =
-                    ccs.GetCatalog(*table_name_, node_group_id_);
                 if (catalog_entry != nullptr &&
                     catalog_entry->dirty_schema_ != nullptr)
                 {
@@ -5162,7 +5178,8 @@ public:
                         return false;
                     }
 
-                    if (catalog_entry->schema_ != nullptr)
+                    if (catalog_entry->schema_ != nullptr &&
+                        catalog_entry->dirty_schema_ != nullptr)
                     {
                         assert(ccs.core_id_ == 0);
                         // Enter ddl phase, update the value of
