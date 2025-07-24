@@ -1677,6 +1677,11 @@ const CatalogEntry *CcShard::InitCcm(const TableName &table_name,
             requester->AbortCcRequest(CcErrorCode::REQUESTED_TABLE_SCHEMA_MISMATCH);
             return nullptr;
         }
+        if (catalog_entry->dirty_schema_version_ != 0)
+        {
+            requester->AbortCcRequest(CcErrorCode::REQUESTED_TABLE_SCHEMA_MISMATCH);
+            return nullptr;
+        }
 #ifdef STATISTICS
         if (!LoadRangesAndStatisticsNx(
                 curr_schema, cc_ng_id, cc_ng_term, requester))
