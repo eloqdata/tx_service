@@ -1681,6 +1681,12 @@ const CatalogEntry *CcShard::InitCcm(const TableName &table_name,
         CatalogCcMap *catalog_ccm = reinterpret_cast<CatalogCcMap *>(cc_map);
         if (catalog_ccm->HasWriteLock(table_name, cc_ng_id))
         {
+            // This verification is used in cases where this node receives a
+            // request from an old leader with an outdated schema version,
+            // which happens to match the current schema version. Such a request
+            // should still be aborted. We verify this by checking whether the
+            // table is being updated, using the write lock as an indicator,
+            // since a table is being changed under write lock.
             requester->AbortCcRequest(CcErrorCode::REQUESTED_TABLE_SCHEMA_MISMATCH);
             return nullptr;
         }
