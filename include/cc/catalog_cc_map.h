@@ -22,8 +22,10 @@
 #pragma once
 
 #include <algorithm>
+#include <chrono>
 #include <memory>  // make_shared
 #include <string>
+#include <thread>
 #include <tuple>
 #include <utility>
 #include <vector>
@@ -1735,6 +1737,16 @@ public:
 
     bool Execute(KeyObjectStandbyForwardCc &req) override
     {
+        if (req.debug_cnt_ < 6)
+        {
+            std::this_thread::sleep_for(std::chrono::seconds(10));
+            req.debug_cnt_++;
+            shard_->Enqueue(&req);
+            LOG(INFO) << "== yield standby requests, debug cnt = "
+                      << req.debug_cnt_;
+            return false;
+        }
+
         uint64_t commit_ts = req.CommitTs();
 
         const CatalogKey *table_key = nullptr;
@@ -1801,7 +1813,7 @@ public:
             }
         }
 
-        if (commit_ts <= cce->CommitTs())
+        if (commit_ts < cce->CommitTs())
         {
             // discard outdate request
             if (shard_->core_id_ + 1 == shard_->core_cnt_)
@@ -1814,6 +1826,13 @@ public:
                 return false;
             }
         }
+
+        // The catalog entry might be directly fetched from the
+        // primary node, so we still need to execute UpsertTable in the store
+        // handler.
+        bool same_commit_ts = (commit_ts == cce->CommitTs());
+        LOG(INFO) << "== same commit ts = " << same_commit_ts
+                  << ", commit ts = " << commit_ts;
 
         LockType acquired_lock = LockType::NoLock;
         CcErrorCode err_code = CcErrorCode::NO_ERROR;
@@ -1920,26 +1939,47 @@ public:
                 // If dirty schema is created successfully, it means that the
                 // schema needs to be updated in kv store.
                 if (!txservice_skip_kv &&
-                    !shard_->local_shards_.store_hd_->IsSharedStorage() &&
-                    catalog_entry->dirty_schema_)
+                    !shard_->local_shards_.store_hd_->IsSharedStorage())
                 {
-                    // If using non-shared kv, we need to perform kv op on
-                    // standby node as well.
-                    req.SetDDLPhase(
-                        KeyObjectStandbyForwardCc::DDLPhase::KvOpPhase);
-                    shard_->local_shards_.store_hd_->UpsertTable(
-                        catalog_entry->schema_.get(),
-                        catalog_entry->dirty_schema_.get(),
-                        OperationType::TruncateTable,
-                        commit_ts,
-                        cc_ng_id_,
-                        req.StandbyNodeTerm(),
-                        nullptr,
-                        nullptr,
-                        &req,
-                        shard_,
-                        &req.DDLKvOpErrorCode());
-                    return false;
+                    if (same_commit_ts &&
+                        catalog_entry->schema_version_ == commit_ts)
+                    {
+                        req.SetDDLPhase(
+                            KeyObjectStandbyForwardCc::DDLPhase::KvOpPhase);
+                        shard_->local_shards_.store_hd_->UpsertTable(
+                            nullptr,
+                            catalog_entry->schema_.get(),
+                            OperationType::TruncateTable,
+                            commit_ts,
+                            cc_ng_id_,
+                            req.StandbyNodeTerm(),
+                            nullptr,
+                            nullptr,
+                            &req,
+                            shard_,
+                            &req.DDLKvOpErrorCode());
+                        return false;
+                    }
+                    else if (catalog_entry->dirty_schema_)
+                    {
+                        // If using non-shared kv, we need to perform kv op on
+                        // standby node as well.
+                        req.SetDDLPhase(
+                            KeyObjectStandbyForwardCc::DDLPhase::KvOpPhase);
+                        shard_->local_shards_.store_hd_->UpsertTable(
+                            catalog_entry->schema_.get(),
+                            catalog_entry->dirty_schema_.get(),
+                            OperationType::TruncateTable,
+                            commit_ts,
+                            cc_ng_id_,
+                            req.StandbyNodeTerm(),
+                            nullptr,
+                            nullptr,
+                            &req,
+                            shard_,
+                            &req.DDLKvOpErrorCode());
+                        return false;
+                    }
                 }
                 // If there's no need to update kv store, move to install &
                 // release phase and move the req back to core 0.
@@ -1957,21 +1997,43 @@ public:
                 {
                     auto catalog_entry =
                         shard_->GetCatalog(table_key->Name(), cc_ng_id_);
-                    // retry kv op
-                    req.DDLKvOpErrorCode() = CcErrorCode::NO_ERROR;
-                    shard_->local_shards_.store_hd_->UpsertTable(
-                        catalog_entry->schema_.get(),
-                        catalog_entry->dirty_schema_.get(),
-                        OperationType::TruncateTable,
-                        commit_ts,
-                        cc_ng_id_,
-                        req.StandbyNodeTerm(),
-                        nullptr,
-                        nullptr,
-                        &req,
-                        shard_,
-                        &req.DDLKvOpErrorCode());
-                    return false;
+                    if (same_commit_ts &&
+                        catalog_entry->schema_version_ == commit_ts)
+                    {
+                        // retry kv op
+                        req.DDLKvOpErrorCode() = CcErrorCode::NO_ERROR;
+                        shard_->local_shards_.store_hd_->UpsertTable(
+                            nullptr,
+                            catalog_entry->schema_.get(),
+                            OperationType::TruncateTable,
+                            commit_ts,
+                            cc_ng_id_,
+                            req.StandbyNodeTerm(),
+                            nullptr,
+                            nullptr,
+                            &req,
+                            shard_,
+                            &req.DDLKvOpErrorCode());
+                        return false;
+                    }
+                    else
+                    {
+                        // retry kv op
+                        req.DDLKvOpErrorCode() = CcErrorCode::NO_ERROR;
+                        shard_->local_shards_.store_hd_->UpsertTable(
+                            catalog_entry->schema_.get(),
+                            catalog_entry->dirty_schema_.get(),
+                            OperationType::TruncateTable,
+                            commit_ts,
+                            cc_ng_id_,
+                            req.StandbyNodeTerm(),
+                            nullptr,
+                            nullptr,
+                            &req,
+                            shard_,
+                            &req.DDLKvOpErrorCode());
+                        return false;
+                    }
                 }
                 else if (req.DDLKvOpErrorCode() == CcErrorCode::NO_ERROR)
                 {
