@@ -1677,7 +1677,9 @@ const CatalogEntry *CcShard::InitCcm(const TableName &table_name,
             requester->AbortCcRequest(CcErrorCode::REQUESTED_TABLE_SCHEMA_MISMATCH);
             return nullptr;
         }
-        if (catalog_entry->dirty_schema_version_ != 0)
+        auto cc_map = GetCcm(catalog_ccm_name, cc_ng_id);
+        CatalogCcMap *catalog_ccm = reinterpret_cast<CatalogCcMap *>(cc_map);
+        if (catalog_ccm->HasWriteLock(table_name, cc_ng_id))
         {
             requester->AbortCcRequest(CcErrorCode::REQUESTED_TABLE_SCHEMA_MISMATCH);
             return nullptr;
