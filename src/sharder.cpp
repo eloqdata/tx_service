@@ -482,7 +482,7 @@ int Sharder::Init(
     else
     {
         bool retry = false;
-        uint64_t start_ts;
+        uint64_t start_ts = 0;
         cluster_config_.cc_nodes_.at(native_ng_)
             ->OnLeaderStart(1, start_ts, retry);
         assert(!retry);

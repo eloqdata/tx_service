@@ -436,7 +436,7 @@ std::pair<bool, const CatalogEntry *> LocalCcShards::CreateReplayCatalog(
     uint64_t old_schema_ts,
     uint64_t dirty_schema_ts)
 {
-    std::unique_lock<std::shared_mutex> lk(meta_data_mux_);
+    std::unique_lock lk(meta_data_mux_);
 
     auto ng_catalog_it = table_catalogs_.try_emplace(table_name);
     auto catalog_it = ng_catalog_it.first->second.try_emplace(cc_ng_id);
@@ -467,22 +467,19 @@ std::pair<bool, const CatalogEntry *> LocalCcShards::CreateReplayCatalog(
             dirty_schema_ts);
         return {true, &catalog_entry};
     }
-    else if (catalog_entry.schema_version_ == old_schema_ts &&
-             catalog_entry.dirty_schema_version_ == dirty_schema_ts)
+    if (catalog_entry.schema_version_ == old_schema_ts &&
+        catalog_entry.dirty_schema_version_ == dirty_schema_ts)
     {
         // Rerun ReplayLogCc req.
         return {true, &catalog_entry};
     }
-    else if (dirty_schema_ts == 0)
+    if (dirty_schema_ts == 0)
     {
         // It is kv_store_failure and is restoring old schema, treat as
         // create successfully.
         return {true, &catalog_entry};
     }
-    else
-    {
-        return {false, &catalog_entry};
-    }
+    return {false, &catalog_entry};
 }
 
 CatalogEntry *LocalCcShards::CreateDirtyCatalog(
@@ -626,7 +623,7 @@ std::unordered_map<TableName, bool> LocalCcShards::GetCatalogTableNameSnapshot(
                         }
                     }
                 } /* End of dirty index table schema */
-            } /* End of this base table */
+            }     /* End of this base table */
         }
     }
     return tables;
@@ -1121,9 +1118,9 @@ void LocalCcShards::PublishMessage(const std::string &chan,
     }
 }
 
-std::map<TxKey, TableRangeEntry::uptr> *
-LocalCcShards::GetTableRangesForATableInternal(
-    const TableName &range_table_name, const NodeGroupId ng_id)
+std::map<TxKey, TableRangeEntry::uptr>
+    *LocalCcShards::GetTableRangesForATableInternal(
+        const TableName &range_table_name, const NodeGroupId ng_id)
 {
     auto table_it = table_ranges_.find(range_table_name);
     if (table_it == table_ranges_.end())
@@ -1171,9 +1168,9 @@ std::optional<std::vector<uint32_t>> LocalCcShards::GetTableRangeIds(
     return table_range_ids;
 }
 
-std::unordered_map<uint32_t, TableRangeEntry *> *
-LocalCcShards::GetTableRangeIdsForATableInternal(
-    const TableName &range_table_name, const NodeGroupId ng_id)
+std::unordered_map<uint32_t, TableRangeEntry *>
+    *LocalCcShards::GetTableRangeIdsForATableInternal(
+        const TableName &range_table_name, const NodeGroupId ng_id)
 {
     auto table_it = table_range_ids_.find(range_table_name);
     if (table_it == table_range_ids_.end())
@@ -1856,8 +1853,8 @@ std::vector<std::pair<uint16_t, NodeGroupId>> LocalCcShards::GetAllBucketOwners(
     return bucket_owners;
 }
 
-const std::unordered_map<uint16_t, std::unique_ptr<BucketInfo>> *
-LocalCcShards::GetAllBucketInfos(NodeGroupId ng_id) const
+const std::unordered_map<uint16_t, std::unique_ptr<BucketInfo>>
+    *LocalCcShards::GetAllBucketInfos(NodeGroupId ng_id) const
 {
     std::shared_lock<std::shared_mutex> lk(meta_data_mux_);
     auto ng_bucket_it = bucket_infos_.find(ng_id);
@@ -1868,8 +1865,8 @@ LocalCcShards::GetAllBucketInfos(NodeGroupId ng_id) const
     return &ng_bucket_it->second;
 }
 
-const std::unordered_map<uint16_t, std::unique_ptr<BucketInfo>> *
-LocalCcShards::GetAllBucketInfosNoLocking(const NodeGroupId ng_id) const
+const std::unordered_map<uint16_t, std::unique_ptr<BucketInfo>>
+    *LocalCcShards::GetAllBucketInfosNoLocking(const NodeGroupId ng_id) const
 {
     auto ng_bucket_it = bucket_infos_.find(ng_id);
     if (ng_bucket_it == bucket_infos_.end())
