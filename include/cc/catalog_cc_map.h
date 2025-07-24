@@ -2151,7 +2151,12 @@ public:
 
         CcEntry<CatalogKey, CatalogRecord, true, false> *catalog_cce =
             it->second;
-        return catalog_cce->GetKeyLock()->HasWriteLock();
+        const auto keylock = catalog_cce->GetKeyLock();
+        if (keylock == nullptr)
+        {
+            return false;
+        }
+        return keylock->HasWriteLock();
     }
 
     std::tuple<CcErrorCode, NonBlockingLock *, uint64_t> ReadTable(
