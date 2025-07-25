@@ -2138,6 +2138,27 @@ public:
         return TableType::Catalog;
     }
 
+    bool HasWriteLock(const TableName &table_name, uint32_t node_group_id)
+    {
+        CatalogKey table_key{TableName{
+            table_name.StringView(), TableType::Primary, table_name.Engine()}};
+        TxKey catalog_tx_key(&table_key);
+        auto it = Find(table_key);
+        if (it == End())
+        {
+            return false;
+        }
+
+        CcEntry<CatalogKey, CatalogRecord, true, false> *catalog_cce =
+            it->second;
+        const auto keylock = catalog_cce->GetKeyLock();
+        if (keylock == nullptr)
+        {
+            return false;
+        }
+        return keylock->HasWriteLock();
+    }
+
     std::tuple<CcErrorCode, NonBlockingLock *, uint64_t> ReadTable(
         const TableName &table_name,
         uint32_t node_group_id,
