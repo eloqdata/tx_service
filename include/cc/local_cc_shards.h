@@ -1702,6 +1702,8 @@ public:
 
     void PostProcessCkpt(std::shared_ptr<DataSyncTask> &task, bool flush_ret);
 
+    void FlushCurrentFlushBuffer();
+
     store::DataStoreHandler *const store_hd_;
 
     /*
@@ -2422,8 +2424,6 @@ private:
      * task.
      */
     void AddFlushTaskEntry(std::unique_ptr<FlushTaskEntry> &&entry);
-
-    void FlushCurrentFlushBuffer();
 
     // The flush task that has not reached the max pending flush size.
     // New flush task entry will be added to this buffer. This task will

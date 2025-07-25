@@ -157,6 +157,8 @@ public:
 
     void SetError(CcErrorCode err_code = CcErrorCode::DATA_STORE_ERR);
 
+    void SetScanTaskFinished();
+
     void SetErrorCode(CcErrorCode err_code)
     {
         std::unique_lock<std::mutex> lk(status_->mux_);
@@ -231,7 +233,7 @@ public:
     absl::flat_hash_map<size_t, std::vector<UpdateCceCkptTsCc::CkptTsEntry>>
         cce_entries_;
 
-    bool need_update_ckpt_ts_{false};
+    bool need_update_ckpt_ts_{true};
 };
 
 struct FlushTaskEntry

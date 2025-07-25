@@ -201,4 +201,18 @@ void DataSyncTask::SetError(CcErrorCode err_code)
     }
 }
 
+void DataSyncTask::SetScanTaskFinished()
+{
+    std::unique_lock<std::mutex> task_sender_lk(status_->mux_);
+    status_->unfinished_scan_tasks_--;
+
+    if (status_->unfinished_scan_tasks_ == 0 && status_->all_task_started_ && status_->unfinished_tasks_ != 0)
+    {
+        // If all scan tasks are finished, but there are still unfinished data sync task due to pending flush,
+        // flush the current flush buffer.
+        DLOG(INFO) << "Flushing current flush buffer after all scan tasks are finished";
+        Sharder::Instance().GetLocalCcShards()->FlushCurrentFlushBuffer();
+    }
+}
+
 }  // namespace txservice
