@@ -6084,7 +6084,8 @@ public:
 
         for (size_t scan_cnt = 0;
              scan_cnt < DataSyncScanCc::DataSyncScanBatchSize &&
-             req.accumulated_mem_usage_[vec_idx] + mem_usage < req.max_pending_flush_size_ &&
+             req.accumulated_mem_usage_[vec_idx] + mem_usage <
+                 req.max_pending_flush_size_ &&
              it != end_it && it != end_it_next_page_it;
              scan_cnt++)
         {
@@ -6297,7 +6298,8 @@ public:
                 req.SetFinish(vec_idx);
                 return false;
             }
-            else if (req.accumulated_mem_usage_[vec_idx] + mem_usage < req.max_pending_flush_size_)
+            else if (req.accumulated_mem_usage_[vec_idx] + mem_usage <
+                     req.max_pending_flush_size_)
             {
                 // Put DataSyncScanCc request into CcQueue again.
                 shard_->Enqueue(&req);
@@ -7191,11 +7193,52 @@ public:
                         tmp_mv_base_key_vec.emplace_back(std::move(key_raw));
                     }
 
-                    bool res = shard_->FlushEntryForTest(table_name_,
-                                                         table_schema_,
-                                                         tmp_ckpt_vec,
-                                                         tmp_akv_vec,
+                    std::shared_ptr<TableSchema> table_schema =
+                        shard_->local_shards_.GetSharedTableSchema(table_name_,
+                                                                   cc_ng_id_);
+
+                    std::shared_ptr<DataSyncTask> data_sync_task =
+                        std::make_shared<DataSyncTask>(
+                            table_name_,
+                            1,
+                            1,
+                            cc_ng_id_,
+                            Sharder::Instance().LeaderTerm(cc_ng_id_),
+                            1,
+                            nullptr,
+                            false,
+                            false,
+                            nullptr);
+
+                    std::unique_ptr<FlushTaskEntry> flush_task_entry =
+                        std::make_unique<FlushTaskEntry>(
+                            std::make_unique<std::vector<FlushRecord>>(
+                                std::move(tmp_ckpt_vec)),
+                            std::make_unique<std::vector<FlushRecord>>(
+                                std::move(tmp_akv_vec)),
+                            std::make_unique<
+                                std::vector<std::pair<TxKey, int32_t>>>(),
+                            nullptr,
+                            data_sync_task,
+                            table_schema,
+                            mem_usage);
+
+                    std::unordered_map<
+                        std::string_view,
+                        std::vector<std::unique_ptr<FlushTaskEntry>>>
+                        flush_task_entries;
+                    std::string_view kv_table_name =
+                        table_schema->GetKVCatalogInfo()->GetKvTableName(
+                            table_name_);
+                    flush_task_entries.try_emplace(
+                        kv_table_name,
+                        std::vector<std::unique_ptr<FlushTaskEntry>>());
+                    flush_task_entries[kv_table_name].emplace_back(
+                        std::move(flush_task_entry));
+
+                    bool res = shard_->FlushEntryForTest(flush_task_entries,
                                                          only_archives);
+
                     assert(res == true);
                     // This silences the -Wunused-but-set-variable
                     // warning without any runtime overhead.

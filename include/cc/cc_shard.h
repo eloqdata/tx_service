@@ -359,11 +359,7 @@ public:
      */
     std::pair<size_t, bool> Clean();
 
-    bool FlushEntryForTest(const TableName &tbl_name,
-                           const TableSchema *tbl_schema,
-                           std::vector<FlushRecord> &ckpt_vec,
-                           std::vector<FlushRecord> &archives,
-                           bool only_archives);
+    bool FlushEntryForTest(std::unordered_map<std::string_view, std::vector<std::unique_ptr<FlushTaskEntry>>> &flush_task_entries, bool only_archives);
 
     void NotifyCkpt(bool request_ckpt = true);
 
