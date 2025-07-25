@@ -1737,6 +1737,7 @@ public:
 
     bool Execute(KeyObjectStandbyForwardCc &req) override
     {
+        /*
         if (req.debug_cnt_ < 6)
         {
             std::this_thread::sleep_for(std::chrono::seconds(10));
@@ -1746,6 +1747,7 @@ public:
                       << req.debug_cnt_;
             return false;
         }
+        */
 
         uint64_t commit_ts = req.CommitTs();
 
@@ -1829,7 +1831,7 @@ public:
 
         // The catalog entry might be directly fetched from the
         // primary node, so we still need to execute UpsertTable in the store
-        // handler.
+        // handler. Otherwise, the kv storage will not have the latest kv table.
         bool same_commit_ts = (commit_ts == cce->CommitTs());
         LOG(INFO) << "== same commit ts = " << same_commit_ts
                   << ", commit ts = " << commit_ts;
