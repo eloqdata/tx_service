@@ -447,6 +447,11 @@ struct TableName
         return (pos != std::string_view::npos) ? true : false;
     }
 
+    bool IsHashPartitioned() const
+    {
+        return engine_ == TableEngine::EloqKv;
+    }
+
     bool IsStringOwner() const
     {
         return own_string_;

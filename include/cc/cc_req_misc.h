@@ -703,9 +703,9 @@ public:
     UpdateCceCkptTsCc(
         NodeGroupId node_group_id,
         int64_t term,
-        absl::flat_hash_map<size_t, std::vector<std::vector<CkptTsEntry>>>
-            &&cce_entries)
-        : cce_entries_(std::move(cce_entries)),
+        absl::flat_hash_map<size_t, std::vector<CkptTsEntry>>
+            &cce_entries)
+        : cce_entries_(cce_entries),
           node_group_id_(node_group_id),
           term_(term)
     {
@@ -714,7 +714,7 @@ public:
 
         for (const auto &entry : cce_entries_)
         {
-            indices_[entry.first] = {0, 0};
+            indices_[entry.first] = 0;
         }
     }
 
@@ -742,17 +742,17 @@ public:
         }
     }
 
-    const absl::flat_hash_map<size_t, std::vector<std::vector<CkptTsEntry>>> &
-    EntriesRef() const
+    const absl::flat_hash_map<size_t, std::vector<CkptTsEntry>>
+        &EntriesRef() const
     {
         return cce_entries_;
     }
 
 private:
-    absl::flat_hash_map<size_t, std::vector<std::vector<CkptTsEntry>>>
-        cce_entries_;
-    // key: core_idx, value: pair<vec_idx, entry_index>
-    absl::flat_hash_map<size_t, std::pair<size_t, size_t>> indices_;
+    absl::flat_hash_map<size_t, std::vector<CkptTsEntry>>
+        &cce_entries_;
+    // key: core_idx, value: entry_index
+    absl::flat_hash_map<size_t, size_t> indices_;
 
     size_t unfinished_core_cnt_;
     NodeGroupId node_group_id_;
