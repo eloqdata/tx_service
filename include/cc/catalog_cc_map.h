@@ -1754,7 +1754,6 @@ public:
 
     bool Execute(KeyObjectStandbyForwardCc &req) override
     {
-        /*
         if (req.debug_cnt_ < 6)
         {
             std::this_thread::sleep_for(std::chrono::seconds(10));
@@ -1764,7 +1763,6 @@ public:
                       << req.debug_cnt_;
             return false;
         }
-        */
 
         uint64_t commit_ts = req.CommitTs();
 
