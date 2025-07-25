@@ -800,15 +800,6 @@ public:
                     temp_rec.Serialize(rec_str);
                     forward_req->add_cmd_list(std::move(rec_str));
 
-                    LOG(INFO)
-                        << "==== CatalogCcMap, schema image = "
-                        << catalog_entry->schema_->SchemaImage()
-                        << ", version = " << catalog_entry->schema_version_;
-                    LOG(INFO) << "==== CatalogCcMap, dirt schema image = "
-                              << catalog_entry->dirty_schema_->SchemaImage()
-                              << ", dirty version = "
-                              << catalog_entry->dirty_schema_version_;
-
                     forward_req->set_commit_ts(
                         catalog_entry->dirty_schema_version_);
                     forward_req->set_schema_version(
@@ -1754,16 +1745,6 @@ public:
 
     bool Execute(KeyObjectStandbyForwardCc &req) override
     {
-        if (req.debug_cnt_ < 6)
-        {
-            std::this_thread::sleep_for(std::chrono::seconds(10));
-            req.debug_cnt_++;
-            shard_->Enqueue(&req);
-            LOG(INFO) << "== yield standby requests, debug cnt = "
-                      << req.debug_cnt_;
-            return false;
-        }
-
         uint64_t commit_ts = req.CommitTs();
 
         const CatalogKey *table_key = nullptr;
@@ -1848,8 +1829,6 @@ public:
         // primary node, so we still need to execute UpsertTable in the store
         // handler. Otherwise, the kv storage will not have the latest kv table.
         bool same_commit_ts = (commit_ts == cce->CommitTs());
-        LOG(INFO) << "== same commit ts = " << same_commit_ts
-                  << ", commit ts = " << commit_ts;
 
         LockType acquired_lock = LockType::NoLock;
         CcErrorCode err_code = CcErrorCode::NO_ERROR;
@@ -1948,12 +1927,6 @@ public:
                 const std::string_view payload_sv = req.CommandList()->front();
                 size_t offset = 0;
                 tmp_rec.Deserialize(payload_sv.data(), offset);
-                LOG(INFO) << "=== FlushDB standby request: schema version = "
-                          << req.SchemaVersion()
-                          << ", commit ts = " << req.CommitTs()
-                          << ", schema image = " << tmp_rec.SchemaImage()
-                          << ", dirty schema image = "
-                          << tmp_rec.DirtySchemaImage();
                 auto res =
                     shard_->CreateDirtyCatalog(table_key->Name(),
                                                cc_ng_id_,
@@ -1974,10 +1947,6 @@ public:
                                                       table_key->Name(),
                                                       tmp_rec.SchemaImage(),
                                                       req.SchemaVersion()));
-                        LOG(INFO) << "== req old schema, scheam version = "
-                                  << req.GetOldTableSchema()->Version()
-                                  << ", image = "
-                                  << req.GetOldTableSchema()->SchemaImage();
                         req.SetDDLPhase(
                             KeyObjectStandbyForwardCc::DDLPhase::KvOpPhase);
                         shard_->local_shards_.store_hd_->UpsertTable(
