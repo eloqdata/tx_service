@@ -52,6 +52,7 @@ struct SliceDataItem;
 class StoreSlice;
 struct FetchRecordCc;
 struct FlushRecord;
+struct FlushTaskEntry;
 
 namespace store
 {
@@ -106,11 +107,10 @@ public:
      * @param node_group
      * @return whether all entries are written to data store successfully
      */
-    virtual bool PutAll(std::vector<txservice::FlushRecord> &batch,
-                        const txservice::TableName &table_name,
-                        const txservice::TableSchema *table_schema,
-                        uint32_t node_group) = 0;
-
+    virtual bool PutAll(std::unordered_map<std::string_view,
+                       std::vector<std::unique_ptr<txservice::FlushTaskEntry>>>
+        &flush_task) = 0;
+        
     /**
      * @brief indicate end of flush entries in a single ckpt for \@param batch
      * to base table or skindex table in data store, stop and return false if
@@ -271,18 +271,16 @@ public:
     /**
      * @brief Write batch historical versions into DataStore.
      */
-    virtual bool PutArchivesAll(uint32_t node_group,
-                                const txservice::TableName &table_name,
-                                const txservice::KVCatalogInfo *kv_info,
-                                std::vector<txservice::FlushRecord> &batch) = 0;
+    virtual bool PutArchivesAll(std::unordered_map<std::string_view,
+                       std::vector<std::unique_ptr<txservice::FlushTaskEntry>>>
+        &flush_task) = 0;
     /**
      * @brief Copy record from base/sk table to mvcc_archives.
      */
     virtual bool CopyBaseToArchive(
-        std::vector<std::pair<TxKey, int32_t>> &batch,
-        uint32_t node_group,
-        const txservice::TableName &table_name,
-        const txservice::TableSchema *table_schema) = 0;
+        std::unordered_map<std::string_view,
+                       std::vector<std::unique_ptr<txservice::FlushTaskEntry>>>
+        &flush_task) = 0;
 
     /**
      * @brief  Get the latest visible(commit_ts <= upper_bound_ts) historical

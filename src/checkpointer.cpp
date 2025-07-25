@@ -333,6 +333,10 @@ void Checkpointer::Ckpt(bool is_last_ckpt)
         {
             std::unique_lock<std::mutex> task_sender_lk(status->mux_);
             status->all_task_started_ = true;
+            if (status->unfinished_scan_tasks_ == 0 && status->unfinished_tasks_ != 0)
+            {
+                local_shards_.FlushCurrentFlushBuffer();
+            }
             if (is_last_ckpt)
             {
                 // Wait for all tasks to be done if this is last checkpoint
@@ -344,8 +348,6 @@ void Checkpointer::Ckpt(bool is_last_ckpt)
 
             if (status->unfinished_tasks_ == 0)
             {
-                status->PersistKV();
-
                 if (status->need_truncate_log_ &&
                     status->err_code_ == CcErrorCode::NO_ERROR)
                 {
@@ -520,7 +522,20 @@ bool Checkpointer::CkptEntryForTest(const TableName &tbl_name,
 {
     bool ckpt_ret = false;
     uint32_t ng = Sharder::Instance().NativeNodeGroup();
-    ckpt_ret = store_hd_->PutAll(ckpt_vec, tbl_name, tbl_schema, ng);
+    std::unordered_map<TableName, std::vector<std::unique_ptr<FlushTaskEntry>>>
+        flush_task_entries;
+    flush_task_entries.try_emplace(
+        tbl_name, std::vector<std::unique_ptr<FlushTaskEntry>>());
+    // flush_task_entries[tbl_name].emplace_back(std::make_unique<FlushTaskEntry>(
+    //     std::make_unique<std::vector<FlushRecord>>(std::move(ckpt_vec)),
+    //     nullptr,
+    //     nullptr,
+    //     nullptr,
+    //     nullptr,
+    //     std::make_shared<TableSchema>(*tbl_schema),
+    //     0));
+
+    // ckpt_ret = store_hd_->PutAll(flush_task_entries);
 
     return ckpt_ret;
 }
@@ -531,8 +546,8 @@ bool Checkpointer::FlushArchiveForTest(const TableName &tbl_name,
 {
     bool ckpt_ret = false;
     uint32_t ng = Sharder::Instance().NativeNodeGroup();
-    ckpt_ret = store_hd_->PutArchivesAll(
-        ng, tbl_name, tbl_schema->GetKVCatalogInfo(), archives);
+    // ckpt_ret = store_hd_->PutArchivesAll(
+    //     ng, tbl_name, tbl_schema->GetKVCatalogInfo(), archives);
     return ckpt_ret;
 }
 }  // namespace txservice

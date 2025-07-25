@@ -3672,6 +3672,9 @@ private:
 #endif
     size_t scan_batch_size_;
 
+    // TODO(liunyl): make it configurable based on total memory size
+    size_t max_pending_flush_size_{64 * 1024 * 1024};
+
     CcErrorCode err_{CcErrorCode::NO_ERROR};
     uint32_t unfinished_cnt_;
     std::mutex mux_;

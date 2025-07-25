@@ -61,17 +61,11 @@ struct DataSyncStatus
         need_truncate_log_ = false;
     }
 
-    void PersistKV();
-
-    bool PersistKV(
-        const std::string &kv_table_name,
-        absl::flat_hash_map<size_t, std::vector<UpdateCceCkptTsCc::CkptTsEntry>>
-            &&cce_entries,
-        std::shared_ptr<DataSyncTask> task,
-        bool all_task_finished);
-
     NodeGroupId node_group_id_;
     int64_t node_group_term_;
+    // TODO(LIUNYL): data sync tasks during range split? How
+    // do we trigger data flush?
+    int32_t unfinished_scan_tasks_{0};
     int32_t unfinished_tasks_{0};
     bool all_task_started_{false};
     CcErrorCode err_code_{CcErrorCode::NO_ERROR};
@@ -138,7 +132,8 @@ public:
           status_(status),
           is_dirty_(is_dirty),
           sync_ts_adjustable_(need_adjust_ts),
-          task_res_(hres)
+          task_res_(hres),
+          need_update_ckpt_ts_(true)
     {
     }
 
@@ -155,7 +150,7 @@ public:
                  bool export_base_table_items,
                  uint64_t txn,
                  std::shared_ptr<DataSyncStatus> status,
-                 CcHandlerResult<Void> *hres);
+                 CcHandlerResult<Void> *hress);
 #endif
 
     void SetFinish();
@@ -235,7 +230,76 @@ public:
     std::string kv_table_name_;
     absl::flat_hash_map<size_t, std::vector<UpdateCceCkptTsCc::CkptTsEntry>>
         cce_entries_;
-    // std::vector<UpdateCceCkptTsCc::FlushTaskEntry> flush_task_entries_;
+
+    bool need_update_ckpt_ts_{false};
+};
+
+struct FlushTaskEntry
+{
+public:
+    FlushTaskEntry(std::unique_ptr<std::vector<FlushRecord>> &&data_sync_vec,
+                   std::unique_ptr<std::vector<FlushRecord>> &&archive_vec,
+                   std::unique_ptr<std::vector<std::pair<TxKey, int32_t>>> &&mv_base_vec,
+                   TransactionExecution *data_sync_txm,
+                   std::shared_ptr<DataSyncTask> data_sync_task,
+                   std::shared_ptr<const TableSchema> table_schema,
+                   size_t size)
+        : data_sync_vec_(std::move(data_sync_vec)),
+          archive_vec_(std::move(archive_vec)),
+          mv_base_vec_(std::move(mv_base_vec)),
+          data_sync_txm_(data_sync_txm),
+          data_sync_task_(std::move(data_sync_task)),
+          table_schema_(std::move(table_schema)),
+          size_(size)
+    {
+    }
+
+    ~FlushTaskEntry() = default;
+
+    std::unique_ptr<std::vector<FlushRecord>> data_sync_vec_;
+    std::unique_ptr<std::vector<FlushRecord>> archive_vec_;
+    std::unique_ptr<std::vector<std::pair<TxKey, int32_t>>> mv_base_vec_;
+    TransactionExecution *data_sync_txm_{nullptr};
+    std::shared_ptr<DataSyncTask> data_sync_task_{nullptr};
+    std::shared_ptr<const TableSchema> table_schema_{nullptr};
+    size_t size_{0};
+};
+
+struct FlushDataTask
+{
+public:
+    FlushDataTask(size_t max_pending_flush_size = 100 * 1024 * 1024)
+        : max_pending_flush_size_(max_pending_flush_size)
+    {
+    }
+    ~FlushDataTask() = default;
+
+    /**
+     * @brief Add a flush task entry to the flush task.
+     * @param entry The flush task entry to add.
+     */
+    void AddFlushTaskEntry(std::unique_ptr<FlushTaskEntry> &&entry)
+    {
+        std::lock_guard<bthread::Mutex> lk(flush_task_entries_mux_);
+        pending_flush_size_ += entry->size_;
+        auto table_flush_entries_it = flush_task_entries_.try_emplace(entry->table_schema_->GetKVCatalogInfo()->GetKvTableName(entry->data_sync_task_->table_name_));
+        table_flush_entries_it.first->second.emplace_back(std::move(entry));
+    }
+
+    bool IsFull() const
+    {
+        return pending_flush_size_ > max_pending_flush_size_;
+    }
+
+    bool IsEmpty() const
+    {
+        return pending_flush_size_ == 0;
+    }
+
+    std::unordered_map<std::string_view, std::vector<std::unique_ptr<FlushTaskEntry>>> flush_task_entries_;
+    size_t pending_flush_size_{0};
+    size_t max_pending_flush_size_{0};
+    bthread::Mutex flush_task_entries_mux_;
 };
 
 }  // namespace txservice
