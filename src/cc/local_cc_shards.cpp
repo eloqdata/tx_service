@@ -3160,6 +3160,8 @@ void LocalCcShards::PostProcessDataSyncTask(std::shared_ptr<DataSyncTask> task,
                 txservice::AbortTx(data_sync_txm);
                 range_entry->UnPinStoreRange();
             }
+
+            data_sync_task->ckpt_err_ = DataSyncTask::CkptErrorCode::NO_ERROR;
             std::lock_guard<std::mutex> task_worker_lk(
                 data_sync_worker_ctx_.mux_);
             data_sync_task_queue_.emplace_front(task);
@@ -4144,6 +4146,8 @@ void LocalCcShards::PostProcessDataSyncTask(std::shared_ptr<DataSyncTask> task,
             LOG(INFO) << "== PostProcessDataSyncTask: scan error";
             txservice::AbortTx(data_sync_txm);
 
+            // reset error code
+            task->ckpt_err_ = DataSyncTask::CkptErrorCode::NO_ERROR;
             std::lock_guard<std::mutex> task_worker_lk(
                 data_sync_worker_ctx_.mux_);
             data_sync_task_queue_[worker_idx].emplace_front(task);
