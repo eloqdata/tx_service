@@ -75,18 +75,8 @@ struct FlushRecord
 private:
     std::variant<std::shared_ptr<TxRecord>, BlobTxRecord> payload_;
 
-    enum class FlushKeyType : uint8_t
-    {
-        TxKey = 0,
-        KeyIndex
-    };
-
-    union
-    {
-        TxKey tx_key_;
-        size_t key_idx_;
-    };
-    FlushKeyType key_type_;
+    // Variant holds either TxKey or key index.
+    std::variant<TxKey, size_t> flush_key_;
 
 public:
     RecordStatus payload_status_{RecordStatus::Unknown};
@@ -106,9 +96,7 @@ public:
 
     int32_t partition_id_{-1};
 
-    FlushRecord() : tx_key_(), key_type_(FlushKeyType::TxKey)
-    {
-    }
+    FlushRecord() = default;
 
     // Only used by "data_sync_vec->emplace_back()" in
     // LocalCcShards::DataSync().
@@ -120,9 +108,7 @@ public:
                 int32_t post_flush_size,
                 int32_t partition_id)
     {
-        tx_key_.Release();
-        tx_key_ = std::move(key);
-        key_type_ = FlushKeyType::TxKey;
+        flush_key_ = std::move(key);
         payload_ = std::move(payload);
         payload_status_ = payload_status;
         commit_ts_ = commit_ts;
@@ -138,9 +124,7 @@ public:
                 int32_t post_flush_size,
                 int32_t partition_id)
     {
-        tx_key_.Release();
-        tx_key_ = std::move(key);
-        key_type_ = FlushKeyType::TxKey;
+        flush_key_ = std::move(key);
         // use copy constructor to avoid re-allocatting memory in DataSyncScanCc
         payload_ = payload;
         payload_status_ = payload_status;
@@ -150,13 +134,7 @@ public:
         partition_id_ = partition_id;
     }
 
-    ~FlushRecord()
-    {
-        if (key_type_ == FlushKeyType::TxKey)
-        {
-            tx_key_.~TxKey();
-        }
-    }
+    ~FlushRecord() = default;
 
     FlushRecord &operator=(FlushRecord &&rhs) noexcept
     {
@@ -165,22 +143,7 @@ public:
             return *this;
         }
 
-        switch (rhs.key_type_)
-        {
-        case FlushKeyType::TxKey:
-            SetKey(std::move(rhs.tx_key_));
-            break;
-        case FlushKeyType::KeyIndex:
-            if (key_type_ == FlushKeyType::TxKey)
-            {
-                tx_key_.~TxKey();
-            }
-            key_idx_ = rhs.key_idx_;
-            key_type_ = FlushKeyType::KeyIndex;
-            break;
-        default:
-            break;
-        }
+        flush_key_ = std::move(rhs.flush_key_);
 
         payload_ = std::move(rhs.payload_);
         payload_status_ = rhs.payload_status_;
@@ -193,20 +156,7 @@ public:
 
     FlushRecord(FlushRecord &&rhs) noexcept
     {
-        switch (rhs.key_type_)
-        {
-        case FlushKeyType::TxKey:
-            tx_key_.Release();
-            tx_key_ = std::move(rhs.tx_key_);
-            key_type_ = FlushKeyType::TxKey;
-            break;
-        case FlushKeyType::KeyIndex:
-            key_idx_ = rhs.key_idx_;
-            key_type_ = FlushKeyType::KeyIndex;
-            break;
-        default:
-            break;
-        }
+        flush_key_ = std::move(rhs.flush_key_);
 
         payload_ = std::move(rhs.payload_);
         payload_status_ = rhs.payload_status_;
@@ -220,46 +170,41 @@ public:
 
     void CloneOrCopyKey(const TxKey &key)
     {
-        if (key_type_ == FlushKeyType::TxKey && tx_key_.IsOwner())
+        // Check if the variant already holds TxKey, if so copy it
+        if (std::holds_alternative<TxKey>(flush_key_))
         {
-            tx_key_.Copy(key);
+            if (auto &stored_key = std::get<TxKey>(flush_key_);
+                stored_key.IsOwner())
+            {
+                stored_key.Copy(key);
+            }
+            else
+            {
+                stored_key = key.Clone();
+            }
         }
         else
         {
-            tx_key_.Release();
-            tx_key_ = key.Clone();
-            key_type_ = FlushKeyType::TxKey;
+            // If the variant does not hold TxKey, assign it a cloned version of
+            // key
+            flush_key_ = key.Clone();  // This will store TxKey in the variant
         }
     }
 
     void SetKeyIndex(size_t offset)
     {
-        if (key_type_ == FlushKeyType::TxKey)
-        {
-            tx_key_.~TxKey();
-        }
-
-        key_idx_ = offset;
-        key_type_ = FlushKeyType::KeyIndex;
+        flush_key_ = offset;
     }
 
     size_t GetKeyIndex() const
     {
-        assert(key_type_ == FlushKeyType::KeyIndex);
-        return key_idx_;
+        assert(std::holds_alternative<size_t>(flush_key_));
+        return std::get<size_t>(flush_key_);
     }
 
     void SetKey(TxKey key)
     {
-        if (key_type_ != FlushKeyType::TxKey)
-        {
-            // Ensures that if "this" union is not of type TxKey, the ownership
-            // bit of tx_key_ is 0 and the following move assignment does not
-            // trigger de-allocation accidentally.
-            tx_key_.Release();
-        }
-        tx_key_ = std::move(key);
-        key_type_ = FlushKeyType::TxKey;
+        flush_key_ = std::move(key);
     }
 
     void SetVersionedPayload(std::shared_ptr<TxRecord> sptr)
@@ -334,13 +279,14 @@ public:
     uint64_t MemUsage()
     {
         uint64_t mem_usage = 0;
-        if (key_type_ == FlushKeyType::TxKey)
+        if (std::holds_alternative<TxKey>(flush_key_))
         {
-            mem_usage += tx_key_.MemUsage();
+            mem_usage += std::get<TxKey>(flush_key_)
+                             .MemUsage();  // Get MemUsage of TxKey
         }
         else
         {
-            mem_usage += sizeof(key_idx_);
+            mem_usage += sizeof(size_t);  // Size of key index (which is size_t)
         }
 
         if (payload_.index() == 1)

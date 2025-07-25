@@ -206,17 +206,14 @@ bool VersionedLruEntry<Versioned, RangePartitioned>::GetBeingCkpt() const
 
 TxKey FlushRecord::Key() const
 {
-    if (key_type_ == FlushKeyType::TxKey)
+    if (std::holds_alternative<TxKey>(flush_key_))
     {
-        return tx_key_.GetShallowCopy();
+        return std::get<TxKey>(flush_key_).GetShallowCopy();
     }
-    else
-    {
-        assert(
-            "The flush key is of type KeyIndex and cannot return the key "
-            "pointer.");
-        return TxKey();
-    }
+    assert(false &&
+           "The flush key is of type KeyIndex and cannot return the key "
+           "pointer.");
+    return TxKey();
 }
 
 template struct VersionedLruEntry<true, true>;
