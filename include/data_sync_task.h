@@ -239,13 +239,14 @@ public:
 struct FlushTaskEntry
 {
 public:
-    FlushTaskEntry(std::unique_ptr<std::vector<FlushRecord>> &&data_sync_vec,
-                   std::unique_ptr<std::vector<FlushRecord>> &&archive_vec,
-                   std::unique_ptr<std::vector<std::pair<TxKey, int32_t>>> &&mv_base_vec,
-                   TransactionExecution *data_sync_txm,
-                   std::shared_ptr<DataSyncTask> data_sync_task,
-                   std::shared_ptr<const TableSchema> table_schema,
-                   size_t size)
+    FlushTaskEntry(
+        std::unique_ptr<std::vector<FlushRecord>> &&data_sync_vec,
+        std::unique_ptr<std::vector<FlushRecord>> &&archive_vec,
+        std::unique_ptr<std::vector<std::pair<TxKey, int32_t>>> &&mv_base_vec,
+        TransactionExecution *data_sync_txm,
+        std::shared_ptr<DataSyncTask> data_sync_task,
+        std::shared_ptr<const TableSchema> table_schema,
+        size_t size)
         : data_sync_vec_(std::move(data_sync_vec)),
           archive_vec_(std::move(archive_vec)),
           mv_base_vec_(std::move(mv_base_vec)),
@@ -284,7 +285,9 @@ public:
     {
         std::lock_guard<bthread::Mutex> lk(flush_task_entries_mux_);
         pending_flush_size_ += entry->size_;
-        auto table_flush_entries_it = flush_task_entries_.try_emplace(entry->table_schema_->GetKVCatalogInfo()->GetKvTableName(entry->data_sync_task_->table_name_));
+        auto table_flush_entries_it = flush_task_entries_.try_emplace(
+            entry->table_schema_->GetKVCatalogInfo()->GetKvTableName(
+                entry->data_sync_task_->table_name_));
         table_flush_entries_it.first->second.emplace_back(std::move(entry));
     }
 
@@ -298,7 +301,9 @@ public:
         return pending_flush_size_ == 0;
     }
 
-    std::unordered_map<std::string_view, std::vector<std::unique_ptr<FlushTaskEntry>>> flush_task_entries_;
+    std::unordered_map<std::string_view,
+                       std::vector<std::unique_ptr<FlushTaskEntry>>>
+        flush_task_entries_;
     size_t pending_flush_size_{0};
     size_t max_pending_flush_size_{0};
     bthread::Mutex flush_task_entries_mux_;

@@ -1845,9 +1845,8 @@ private:
                                  ,
                                  uint16_t worker_idx
 #endif
-,
-                                bool is_scan_task = true
-    );
+                                 ,
+                                 bool is_scan_task = true);
 
     const uint32_t node_id_;
     // Native node group
@@ -2141,10 +2140,12 @@ private:
             if (!has_enough_memory())
             {
                 DLOG(INFO) << "Flush data memory quota is full "
-                             << flush_data_mem_usage_
-                             << " ,request quota: " << quota
-                             << " total quota: " << flush_data_mem_quota_;
-                Sharder::Instance().GetLocalCcShards()->FlushCurrentFlushBuffer();
+                           << flush_data_mem_usage_
+                           << " ,request quota: " << quota
+                           << " total quota: " << flush_data_mem_quota_;
+                Sharder::Instance()
+                    .GetLocalCcShards()
+                    ->FlushCurrentFlushBuffer();
             }
 
             // Wait until enough memory is available
@@ -2197,7 +2198,6 @@ private:
         uint64_t flush_data_mem_quota_{0};
     };
 
-    DataSyncMemoryController data_sync_mem_controller_;
 
     struct DataSyncTaskLimiter
     {
@@ -2436,6 +2436,9 @@ private:
 
     void FlushDataWorker();
     void FlushData(std::unique_lock<std::mutex> &flush_worker_lk);
+
+    // Memory controller for data sync.
+    DataSyncMemoryController data_sync_mem_controller_;
 
     WorkerThreadContext statistics_worker_ctx_;
     void SyncTableStatisticsWorker();

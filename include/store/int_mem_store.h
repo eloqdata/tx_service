@@ -55,34 +55,35 @@ public:
      * @param node_group
      * @return whether all entries are written to data store successfully
      */
-    bool PutAll(std::vector<txservice::FlushRecord> &batch,
-                const txservice::TableName &table_name,
-                const txservice::TableSchema *table_schema,
-                uint32_t node_group) override
+    bool PutAll(std::unordered_map<
+                std::string_view,
+                std::vector<std::unique_ptr<txservice::FlushTaskEntry>>>
+                    &flush_task) override
     {
-        for (const auto &ref : batch)
-        {
-            const CompositeKey<int> *key =
-                ref.Key().GetKey<CompositeKey<int>>();
+        assert(false);
+        // for (const auto &ref : batch)
+        // {
+        //     const CompositeKey<int> *key =
+        //         ref.Key().GetKey<CompositeKey<int>>();
 
-            const CompositeRecord<int> &rec = *ref.Payload();
+        //     const CompositeRecord<int> &rec = *ref.Payload();
 
-            int key_val = std::get<0>(key->Tuple());
-            if (ref.payload_status_ == RecordStatus::Deleted)
-            {
-                int_store_.erase(key_val);
-            }
-            else
-            {
-                int rec_val = std::get<0>(rec.Tuple());
-                int_store_.insert_or_assign(key_val, rec_val);
-            }
+        //     int key_val = std::get<0>(key->Tuple());
+        //     if (ref.payload_status_ == RecordStatus::Deleted)
+        //     {
+        //         int_store_.erase(key_val);
+        //     }
+        //     else
+        //     {
+        //         int rec_val = std::get<0>(rec.Tuple());
+        //         int_store_.insert_or_assign(key_val, rec_val);
+        //     }
 
-            if (int_store_.size() > 1000)
-            {
-                int_store_.erase(int_store_.begin());
-            }
-        }
+        //     if (int_store_.size() > 1000)
+        //     {
+        //         int_store_.erase(int_store_.begin());
+        //     }
+        // }
 
         return true;
     }
@@ -251,10 +252,10 @@ public:
      * @brief Write batch historical versions into DataStore.
      *
      */
-    bool PutArchivesAll(uint32_t node_group,
-                        const txservice::TableName &table_name,
-                        const txservice::KVCatalogInfo *kv_info,
-                        std::vector<txservice::FlushRecord> &batch) override
+    bool PutArchivesAll(std::unordered_map<
+                        std::string_view,
+                        std::vector<std::unique_ptr<txservice::FlushTaskEntry>>>
+                            &flush_task) override
     {
         assert(false);
         return true;
@@ -262,10 +263,11 @@ public:
     /**
      * @brief Copy record from base/sk table to mvcc_archives.
      */
-    bool CopyBaseToArchive(std::vector<std::pair<TxKey, int32_t>> &batch,
-                           uint32_t node_group,
-                           const txservice::TableName &table_name,
-                           const txservice::TableSchema *table_schema) override
+    bool CopyBaseToArchive(
+        std::unordered_map<
+            std::string_view,
+            std::vector<std::unique_ptr<txservice::FlushTaskEntry>>>
+                &flush_task) override
     {
         assert(false);
         return true;
