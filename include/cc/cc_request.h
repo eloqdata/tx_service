@@ -6397,7 +6397,6 @@ public:
 
     void Reset(std::unique_ptr<remote::CcMessage> msg)
     {
-        debug_cnt_ = 0;
         fwd_req_ = &msg->key_obj_standby_forward_req();
         forward_msg_grp_ = fwd_req_->forward_seq_grp();
         primary_leader_term_ = fwd_req_->primary_leader_term();
@@ -6571,8 +6570,6 @@ public:
     {
         temp_old_table_schema_owner_ = std::move(old_schema);
     }
-
-    size_t debug_cnt_{0};
 
 private:
     TableName remote_table_name_;

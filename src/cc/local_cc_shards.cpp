@@ -4143,7 +4143,6 @@ void LocalCcShards::PostProcessDataSyncTask(std::shared_ptr<DataSyncTask> task,
         }
         else if (task_ckpt_err == DataSyncTask::CkptErrorCode::SCAN_ERROR)
         {
-            LOG(INFO) << "== PostProcessDataSyncTask: scan error";
             txservice::AbortTx(data_sync_txm);
 
             // reset error code
@@ -4644,10 +4643,6 @@ void LocalCcShards::DataSync(std::unique_lock<std::mutex> &task_worker_lk,
                 DLOG(INFO) << "scan_cc: "
                            << reinterpret_cast<uint64_t>(&scan_cc)
                            << "  scan data cnt is 0";
-                DLOG(INFO) << "== scan data drained = " << scan_data_drained
-                           << ", worker idx = " << worker_idx
-                           << ", data sync ts = "
-                           << data_sync_task->data_sync_ts_;
                 scan_cc.Reset();
                 continue;
             }
@@ -4790,8 +4785,6 @@ void LocalCcShards::DataSync(std::unique_lock<std::mutex> &task_worker_lk,
             scan_cc.Reset();
         }
     }
-
-    LOG(INFO) << "== break ";
 
     // release scan heap memory after scan finish
     auto &data_sync_vec_ref = scan_cc.DataSyncVec(0);
