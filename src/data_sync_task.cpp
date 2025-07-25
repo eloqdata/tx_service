@@ -80,10 +80,12 @@ DataSyncTask::DataSyncTask(const TableName &table_name,
         range_id_ = range_entry_->GetRangeInfo()->GetKeyNewRangeId(start_key_);
     }
 
-    // For a data sync task during range split, we only need to update the ckpt ts
-    // if the new range owner is the current node group.
-    NodeGroupId range_owner =
-        Sharder::Instance().GetLocalCcShards()->GetRangeOwner(range_id_, ng_id)->BucketOwner();
+    // For a data sync task during range split, we only need to update the ckpt
+    // ts if the new range owner is the current node group.
+    NodeGroupId range_owner = Sharder::Instance()
+                                  .GetLocalCcShards()
+                                  ->GetRangeOwner(range_id_, ng_id)
+                                  ->BucketOwner();
     need_update_ckpt_ts_ = range_owner == ng_id;
 }
 #endif
@@ -206,11 +208,13 @@ void DataSyncTask::SetScanTaskFinished()
     std::unique_lock<std::mutex> task_sender_lk(status_->mux_);
     status_->unfinished_scan_tasks_--;
 
-    if (status_->unfinished_scan_tasks_ == 0 && status_->all_task_started_ && status_->unfinished_tasks_ != 0)
+    if (status_->unfinished_scan_tasks_ == 0 && status_->all_task_started_ &&
+        status_->unfinished_tasks_ != 0)
     {
-        // If all scan tasks are finished, but there are still unfinished data sync task due to pending flush,
-        // flush the current flush buffer.
-        DLOG(INFO) << "Flushing current flush buffer after all scan tasks are finished";
+        // If all scan tasks are finished, but there are still unfinished data
+        // sync task due to pending flush, flush the current flush buffer.
+        DLOG(INFO) << "Flushing current flush buffer after all scan tasks are "
+                      "finished";
         Sharder::Instance().GetLocalCcShards()->FlushCurrentFlushBuffer();
     }
 }

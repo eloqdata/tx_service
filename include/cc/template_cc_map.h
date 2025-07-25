@@ -7208,7 +7208,15 @@ public:
                             nullptr,
                             false,
                             false,
-                            nullptr);
+                            nullptr
+#ifndef RANGE_PARTITION_ENABLED
+                            ,
+                            nullptr,
+                            false,
+                            false,
+                            shard_->core_id_
+#endif
+                        );
 
                     std::unique_ptr<FlushTaskEntry> flush_task_entry =
                         std::make_unique<FlushTaskEntry>(

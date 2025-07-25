@@ -116,8 +116,6 @@ LocalCcShards::LocalCcShards(
 #else
       data_sync_worker_ctx_(conf.at("core_num")),
 #endif
-      data_sync_mem_controller_(
-          static_cast<uint64_t>(MB(conf.at("node_memory_limit_mb")) * 0.075)),
       flush_data_worker_ctx_(
           conf.at("core_num") >= 2
               ? std::min(conf.at("core_num") / 2, (uint32_t) 10)
@@ -127,6 +125,8 @@ LocalCcShards::LocalCcShards(
       flush_data_worker_ctx_(
           std::min(static_cast<int>(conf.at("core_num")), 10)),
 #endif
+      data_sync_mem_controller_(
+          static_cast<uint64_t>(MB(conf.at("node_memory_limit_mb")) * 0.075)),
       statistics_worker_ctx_(1),
       heartbeat_worker_ctx_(1),
       purge_deleted_worker_ctx_(1),
@@ -2684,9 +2684,6 @@ void LocalCcShards::EnqueueDataSyncTaskForTable(
         if (status->unfinished_scan_tasks_ == 0 &&
             status->unfinished_tasks_ != 0 && status->all_task_started_)
         {
-            LOG(INFO) << "All scan tasks are finished, but there are still "
-                         "unfinished data sync tasks due to pending flush, "
-                         "flush the current flush buffer";
             FlushCurrentFlushBuffer();
             return;
         }
@@ -2765,9 +2762,6 @@ void LocalCcShards::EnqueueDataSyncTaskForBucket(
         if (status->unfinished_scan_tasks_ == 0 &&
             status->unfinished_tasks_ != 0 && status->all_task_started_)
         {
-            LOG(INFO) << "All scan tasks are finished, but there are still "
-                         "unfinished data sync tasks due to pending flush, "
-                         "flush the current flush buffer";
             FlushCurrentFlushBuffer();
             return;
         }
@@ -3813,7 +3807,7 @@ void LocalCcShards::DataSync(std::unique_lock<std::mutex> &task_worker_lk,
     // same Key can be generated. Our subsequent algorithms are based on this
     // assumption.
 
-    //TODO(liunyl): use bigger batch limit
+    // TODO(liunyl): use bigger batch limit
     DataSyncScanCc scan_cc(table_name,
                            data_sync_task->data_sync_ts_,
                            ng_id,
@@ -5323,7 +5317,8 @@ void LocalCcShards::FlushCurrentFlushBuffer()
     }
 
     std::lock_guard<std::mutex> worker_lk(flush_data_worker_ctx_.mux_);
-    DLOG(INFO) << "Flushing current flush buffer, buffer size: " << cur_flush_buffer_->pending_flush_size_;
+    DLOG(INFO) << "Flushing current flush buffer, buffer size: "
+               << cur_flush_buffer_->pending_flush_size_;
     pending_flush_work_.emplace_back(std::move(cur_flush_buffer_));
     flush_data_worker_ctx_.cv_.notify_one();
     cur_flush_buffer_ = std::make_unique<FlushDataTask>();
@@ -5479,7 +5474,9 @@ void LocalCcShards::FlushData(std::unique_lock<std::mutex> &flush_worker_lk)
                             key_core_idx = entry->data_sync_task_->worker_idx_;
 #endif
                         }
-                        auto insert_it = cce_entries_map.try_emplace(key_core_idx, std::vector<UpdateCceCkptTsCc::CkptTsEntry>());
+                        auto insert_it = cce_entries_map.try_emplace(
+                            key_core_idx,
+                            std::vector<UpdateCceCkptTsCc::CkptTsEntry>());
                         insert_it.first->second.emplace_back(
                             cce, rec.commit_ts_, rec.post_flush_size_);
                     }
