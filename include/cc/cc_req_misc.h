@@ -547,6 +547,7 @@ public:
     const TableSchema *table_schema_{nullptr};
 #if defined(DATA_STORE_TYPE_ELOQDSS_ROCKSDB_CLOUD_S3) ||  \
     defined(DATA_STORE_TYPE_ELOQDSS_ROCKSDB_CLOUD_GCS) || \
+    defined(DATA_STORE_TYPE_ELOQDSS_ROCKSDB) ||           \
     defined(DATA_STORE_TYPE_ELOQDSS_ELOQSTORE)
     std::string kv_table_name_;
 #endif
