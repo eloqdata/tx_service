@@ -2718,6 +2718,7 @@ void CcShard::DecrInflightStandbyReqCount(uint32_t seq_grp)
     }
     else
     {
+        // update local counter to reduce modify global atomic variable
         auto &seq_grp_info = iter->second;
         assert(seq_grp_info.subscribed_);
         seq_grp_info.finished_stanbdy_req_count_++;

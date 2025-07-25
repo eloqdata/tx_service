@@ -312,6 +312,8 @@ bool CcNode::OnLeaderStart(int64_t term,
         }
         sub_cc.Wait();
 
+        // We need to wait for all received standby requests to complete
+        // execution, so that no buffered command is left on the cc entry.
         uint64_t inflight_stanbdy_req_cnt =
             Sharder::Instance().InflightStandbyReqCount();
         while (inflight_stanbdy_req_cnt > 0)

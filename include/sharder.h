@@ -772,6 +772,8 @@ private:
     std::atomic<int64_t> candidate_standby_node_term_cache_;
 
     std::atomic<uint32_t> subscribe_counter_{0};
+    // The number of standby requests that have been received but not yet
+    // execute finished.
     std::atomic<uint64_t> inflight_standby_req_cnt_{0};
 
     std::vector<std::string> txlog_ips_;
