@@ -784,18 +784,35 @@ public:
                     table_key->Serialize(key_str);
                     forward_req->set_key(std::move(key_str));
                     std::string rec_str;
-                    schema_rec->Serialize(rec_str);
+
+                    assert(catalog_entry->schema_ != nullptr);
+                    assert(catalog_entry->dirty_schema_ != nullptr);
+                    assert(catalog_entry->dirty_schema_version_ > 0);
+
+                    CatalogRecord temp_rec;
+                    temp_rec.SetSchemaImage(
+                        catalog_entry->schema_->SchemaImage());
+                    temp_rec.SetDirtySchemaImage(
+                        catalog_entry->dirty_schema_->SchemaImage());
+                    assert(!temp_rec.SchemaImage().empty());
+                    assert(!temp_rec.DirtySchemaImage().empty());
+
+                    temp_rec.Serialize(rec_str);
                     forward_req->add_cmd_list(std::move(rec_str));
-                    assert(schema_rec != nullptr);
-                    assert(schema_rec->SchemaTs() ==
-                           catalog_entry->dirty_schema_version_);
-                    assert(schema_rec->Schema() != nullptr);
-                    assert(schema_rec->SchemaImage().size() > 0);
+
+                    LOG(INFO)
+                        << "==== CatalogCcMap, schema image = "
+                        << catalog_entry->schema_->SchemaImage()
+                        << ", version = " << catalog_entry->schema_version_;
+                    LOG(INFO) << "==== CatalogCcMap, dirt schema image = "
+                              << catalog_entry->dirty_schema_->SchemaImage()
+                              << ", dirty version = "
+                              << catalog_entry->dirty_schema_version_;
 
                     forward_req->set_commit_ts(
                         catalog_entry->dirty_schema_version_);
                     forward_req->set_schema_version(
-                        catalog_entry->dirty_schema_version_);
+                        catalog_entry->schema_version_);
                     shard_->ForwardStandbyMessage(forward_entry);
                 }
 #endif
@@ -1933,10 +1950,17 @@ public:
                 const std::string_view payload_sv = req.CommandList()->front();
                 size_t offset = 0;
                 tmp_rec.Deserialize(payload_sv.data(), offset);
-                auto res = shard_->CreateDirtyCatalog(table_key->Name(),
-                                                      cc_ng_id_,
-                                                      tmp_rec.SchemaImage(),
-                                                      commit_ts);
+                LOG(INFO) << "=== FlushDB standby request: schema version = "
+                          << req.SchemaVersion()
+                          << ", commit ts = " << req.CommitTs()
+                          << ", schema image = " << tmp_rec.SchemaImage()
+                          << ", dirty schema image = "
+                          << tmp_rec.DirtySchemaImage();
+                auto res =
+                    shard_->CreateDirtyCatalog(table_key->Name(),
+                                               cc_ng_id_,
+                                               tmp_rec.DirtySchemaImage(),
+                                               commit_ts);
                 const CatalogEntry *catalog_entry = res;
                 // If dirty schema is created successfully, it means that the
                 // schema needs to be updated in kv store.
@@ -1946,10 +1970,20 @@ public:
                     if (same_commit_ts &&
                         catalog_entry->schema_version_ == commit_ts)
                     {
+                        req.SetOldTableSchema(Sharder::Instance()
+                                                  .GetLocalCcShards()
+                                                  ->CreateTableSchemaFromImage(
+                                                      table_key->Name(),
+                                                      tmp_rec.SchemaImage(),
+                                                      req.SchemaVersion()));
+                        LOG(INFO) << "== req old schema, scheam version = "
+                                  << req.GetOldTableSchema()->Version()
+                                  << ", image = "
+                                  << req.GetOldTableSchema()->SchemaImage();
                         req.SetDDLPhase(
                             KeyObjectStandbyForwardCc::DDLPhase::KvOpPhase);
                         shard_->local_shards_.store_hd_->UpsertTable(
-                            nullptr,
+                            req.GetOldTableSchema(),
                             catalog_entry->schema_.get(),
                             OperationType::TruncateTable,
                             commit_ts,
@@ -2005,7 +2039,7 @@ public:
                         // retry kv op
                         req.DDLKvOpErrorCode() = CcErrorCode::NO_ERROR;
                         shard_->local_shards_.store_hd_->UpsertTable(
-                            nullptr,
+                            req.GetOldTableSchema(),
                             catalog_entry->schema_.get(),
                             OperationType::TruncateTable,
                             commit_ts,
