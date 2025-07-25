@@ -191,27 +191,27 @@ private:
 
     void Replace(uint64_t random, const T &key)
     {
-        auto iter =
+        auto target_iter =
             std::lower_bound(sample_pool_.begin(), sample_pool_.end(), key);
-        if (iter != sample_pool_.end() && *iter == key)
+        if (target_iter != sample_pool_.end() && *target_iter == key)
         {
             return;
         }
 
-        CopyT()(sample_pool_[random], key);
+        auto random_iter = sample_pool_.begin() + random;
+        CopyT()(*random_iter, key);
 
-        for (uint64_t i = random; i < sample_pool_.size() - 1 &&
-                                  sample_pool_[i + 1] < sample_pool_[i];
-             ++i)
+        if (target_iter < random_iter)
         {
-            std::swap(sample_pool_[i], sample_pool_[i + 1]);
+            std::rotate(target_iter, random_iter, random_iter + 1);
         }
-
-        for (uint64_t i = random;
-             i > 0 && sample_pool_[i] < sample_pool_[i - 1];
-             --i)
+        else if (target_iter > random_iter + 1)
         {
-            std::swap(sample_pool_[i], sample_pool_[i - 1]);
+            std::rotate(random_iter, random_iter + 1, target_iter);
+        }
+        else
+        {
+            // key already in correct position.
         }
     }
 

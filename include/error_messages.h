@@ -27,7 +27,7 @@
 
 namespace txservice
 {
-enum struct TxErrorCode
+enum struct TxErrorCode : uint16_t
 {
     NO_ERROR = 0,
     UNDEFINED_ERR,

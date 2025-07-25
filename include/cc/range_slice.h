@@ -1183,7 +1183,7 @@ public:
         uint16_t shard_id = 0,  // only used if check_key_cache = true
         bool no_load_on_miss = false,
         bool prefetch_force_load = false,
-        std::function<int32_t(int32_t, bool)> next_prefetch_slice =
+        const std::function<int32_t(int32_t, bool)> &next_prefetch_slice =
             [](int32_t idx, bool forward)
         { return forward ? (idx + 1) : (idx - 1); })
     {

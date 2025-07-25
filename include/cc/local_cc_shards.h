@@ -1064,7 +1064,7 @@ public:
         bool check_key_cache = false,
         bool no_load_on_miss = false,
         bool prefetch_force_load = false,
-        std::function<int32_t(int32_t, bool)> next_prefetch_slice =
+        const std::function<int32_t(int32_t, bool)> &next_prefetch_slice =
             [](int32_t idx, bool forward)
         { return forward ? (idx + 1) : (idx - 1); })
     {
