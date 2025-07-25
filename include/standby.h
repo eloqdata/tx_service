@@ -25,6 +25,7 @@
 
 #include "glog/logging.h"
 #include "proto/cc_request.pb.h"
+#include "sharder.h"
 #include "tx_command.h"
 #include "tx_id.h"
 #include "type.h"
@@ -103,11 +104,25 @@ struct StandbySequenceGroup
         }
 
         last_standby_consistent_ts_ = 0;
+        if (finished_stanbdy_req_count_ > 0)
+        {
+            Sharder::Instance().DecrInflightStandbyReqCount(
+                finished_stanbdy_req_count_);
+            finished_stanbdy_req_count_ = 0;
+        }
+
         subscribed_ = true;
     }
 
     void Unsubscribe()
     {
+        if (finished_stanbdy_req_count_ > 0)
+        {
+            Sharder::Instance().DecrInflightStandbyReqCount(
+                finished_stanbdy_req_count_);
+            finished_stanbdy_req_count_ = 0;
+        }
+
         subscribed_ = false;
     }
 
@@ -123,6 +138,8 @@ struct StandbySequenceGroup
     uint64_t last_standby_consistent_ts_{0};
     // The pending ts that are not consistent yet.
     std::queue<std::pair<uint64_t, uint64_t>> pending_standby_consistent_ts_;
+
+    uint64_t finished_stanbdy_req_count_{0};
     bool subscribed_{false};
 };
 

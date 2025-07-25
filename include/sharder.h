@@ -486,6 +486,8 @@ public:
 
     store::DataStoreHandler *GetDataStoreHandler();
 
+    CcShard *GetCcShard(size_t core_idx);
+
     void CleanCcTable(const TableName &tabname);
 
     void NotifyCheckPointer();
@@ -664,6 +666,40 @@ public:
             std::memory_order_acquire);
     }
 
+    bool IncrInflightStandbyReqCount(uint64_t cnt)
+    {
+        uint64_t value =
+            inflight_standby_req_cnt_.load(std::memory_order_relaxed);
+
+        if (value > std::numeric_limits<uint64_t>::max() - cnt)
+        {
+            return false;
+        }
+
+        inflight_standby_req_cnt_.fetch_add(cnt);
+        return true;
+    }
+
+    void DecrInflightStandbyReqCount(uint64_t cnt)
+    {
+        uint64_t value =
+            inflight_standby_req_cnt_.load(std::memory_order_relaxed);
+        if (value < cnt)
+        {
+            LOG(ERROR) << "Failed to decrease, inflight standby req count = "
+                       << value << ",decrease cnt = " << cnt;
+            assert(false && "bug");
+            return;
+        }
+
+        inflight_standby_req_cnt_.fetch_sub(cnt);
+    }
+
+    uint64_t InflightStandbyReqCount() const
+    {
+        return inflight_standby_req_cnt_.load();
+    }
+
     uint32_t GetNextSubscribeId()
     {
         uint32_t subscribe_id =
@@ -736,6 +772,9 @@ private:
     std::atomic<int64_t> candidate_standby_node_term_cache_;
 
     std::atomic<uint32_t> subscribe_counter_{0};
+    // The number of standby requests that have been received but not yet
+    // execute finished.
+    std::atomic<uint64_t> inflight_standby_req_cnt_{0};
 
     std::vector<std::string> txlog_ips_;
     std::vector<uint16_t> txlog_ports_;

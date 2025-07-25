@@ -1425,8 +1425,8 @@ const BucketInfo *CcShard::GetRangeOwner(int32_t range_id,
     return local_shards_.GetRangeOwner(range_id, ng_id);
 }
 
-const std::unordered_map<uint16_t, std::unique_ptr<BucketInfo>>
-    *CcShard::GetAllBucketInfos(NodeGroupId ng_id) const
+const std::unordered_map<uint16_t, std::unique_ptr<BucketInfo>> *
+CcShard::GetAllBucketInfos(NodeGroupId ng_id) const
 {
     return local_shards_.GetAllBucketInfos(ng_id);
 }
@@ -2578,7 +2578,8 @@ bool CcShard::UpdateLastReceivedStandbySequenceId(
     assert(seq_id != UINT64_MAX);
 
     auto &seq_grp_info = standby_sequence_grps_.at(sequence_grp_id);
-    if (!seq_grp_info.subscribed_)
+    if (!seq_grp_info.subscribed_ &&
+        seq_id >= seq_grp_info.last_consistent_standby_sequence_id_)
     {
         return false;
     }
@@ -2647,6 +2648,12 @@ void CcShard::ResetStandbySequence()
         entry->SetSequenceId(UINT64_MAX);
     }
     subscribed_standby_nodes_.clear();
+
+    for (auto &[grp_id, grp_info] : standby_sequence_grps_)
+    {
+        grp_info.Unsubscribe();
+    }
+
     standby_sequence_grps_.clear();
 }
 
@@ -2694,6 +2701,34 @@ void CcShard::UpdateStandbyConsistentTs(uint32_t seq_grp,
                    << seq_grp_info.last_consistent_standby_sequence_id_;
         seq_grp_info.pending_standby_consistent_ts_.emplace(seq_id,
                                                             consistent_ts);
+    }
+}
+
+void CcShard::DecrInflightStandbyReqCount(uint32_t seq_grp)
+{
+    auto iter = standby_sequence_grps_.find(seq_grp);
+    if (iter == standby_sequence_grps_.end() ||
+        iter->second.subscribed_ == false)
+    {
+        assert(iter == standby_sequence_grps_.end() ||
+               iter->second.finished_stanbdy_req_count_ == 0);
+        // update global counter immediately.
+        Sharder::Instance().DecrInflightStandbyReqCount(1);
+        return;
+    }
+    else
+    {
+        // update local counter to reduce modify global atomic variable
+        auto &seq_grp_info = iter->second;
+        assert(seq_grp_info.subscribed_);
+        seq_grp_info.finished_stanbdy_req_count_++;
+
+        if (seq_grp_info.finished_stanbdy_req_count_ >= 10000)
+        {
+            Sharder::Instance().DecrInflightStandbyReqCount(
+                seq_grp_info.finished_stanbdy_req_count_);
+            seq_grp_info.finished_stanbdy_req_count_ = 0;
+        }
     }
 }
 
