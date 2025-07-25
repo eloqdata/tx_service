@@ -4212,9 +4212,6 @@ void LocalCcShards::DataSync(std::unique_lock<std::mutex> &task_worker_lk,
     std::shared_ptr<DataSyncTask> data_sync_task =
         data_sync_task_queue_[worker_idx].front();
     data_sync_task_queue_[worker_idx].pop_front();
-    LOG(INFO) << "== DataSync: queue size = " << data_sync_task_queue_.size()
-              << ", worker idx = " << worker_idx
-              << ", ckpt err = " << (int32_t) data_sync_task->ckpt_err_;
     // Release `worker ctx mux`
     task_worker_lk.unlock();
 
