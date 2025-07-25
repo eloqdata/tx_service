@@ -96,7 +96,7 @@ public:
 
     virtual bool Connect() = 0;
 
-    virtual void ScheduleTimerTasks(){};
+    virtual void ScheduleTimerTasks() {};
     /**
      * @brief flush entries in \@param batch to base table or skindex table in
      * data store, stop and return false if node_group is not longer leader.
