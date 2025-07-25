@@ -6991,6 +6991,21 @@ public:
             CcPage<KeyT, ValueT, VersionedRecord, RangePartitioned> *ccp =
                 it.GetPage();
 
+            // For orphan lock recovery, verify if the transaction still holds
+            // the lock on this CC entry.
+            if (req.IsLockRecovery())
+            {
+                const bool no_lock = cce == nullptr ||
+                                     cce->GetKeyLock() == nullptr ||
+                                     cce->GetKeyLock()->SearchLock(req.Txn()) ==
+                                         LockType::NoLock;
+
+                if (no_lock)
+                {
+                    continue;
+                }
+            }
+
             if (cce == nullptr)
             {
                 // Since we're not holding any range lock that would

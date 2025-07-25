@@ -628,18 +628,15 @@ LockType NonBlockingLock::SearchLock(TxNumber txn)
                    ? LockType::WriteLock
                    : LockType::WriteIntent;
     }
-    else if (read_locks_.find(txn) != read_locks_.end())
+    if (read_locks_.find(txn) != read_locks_.end())
     {
         return LockType::ReadLock;
     }
-    else if (read_intentions_.find(txn) != read_intentions_.end())
+    if (read_intentions_.find(txn) != read_intentions_.end())
     {
         return LockType::ReadIntent;
     }
-    else
-    {
-        return LockType::NoLock;
-    }
+    return LockType::NoLock;
 }
 
 bool NonBlockingLock::PopBlockCmdRequest(CcShard *ccs, TxObject *object)

@@ -3830,6 +3830,8 @@ void TransactionExecution::Process(AcquireWriteOperation &acquire_write)
     auto &wset = rw_set_.WriteSet();
     for (auto &[table_name, pair] : wset)
     {
+        LOG(INFO) << "Process AcquireWriteOperation:"
+                  << table_name.StringView();
         uint64_t schema_version = pair.first;
         for (auto &[write_key, write_entry] : pair.second)
         {
@@ -4869,6 +4871,7 @@ void TransactionExecution::Process(WriteToLogOp &write_log)
     write_log.hd_result_.SetToBlock();
     std::atomic_thread_fence(std::memory_order_release);
 #endif
+    LOG(INFO) << "WriteLog";
     txlog_->WriteLog(write_log.log_group_id_,
                      write_log.log_closure_.Controller(),
                      write_log.log_closure_.LogRequest(),

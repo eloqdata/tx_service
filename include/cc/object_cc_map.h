@@ -636,10 +636,7 @@ public:
                 hd_res->SetFinished();
                 return true;
             }
-            else
-            {
-                obj_result.ttl_expired_ = true;
-            }
+            obj_result.ttl_expired_ = true;
         }
         // if ttl exist, not expired, cmd will not overwrite object values and
         // the cmd will reset ttl
@@ -905,8 +902,8 @@ public:
                 {
                     if (s_obj_exist)
                     {
-                        TemplateCcMap<KeyT, ValueT, false, false>::
-                            normal_obj_sz_--;
+                        --TemplateCcMap<KeyT, ValueT, false, false>::
+                            normal_obj_sz_;
                     }
                     cce->payload_.cur_payload_ = nullptr;
                     const uint64_t commit_ts = std::max(
@@ -1101,7 +1098,7 @@ public:
             req.block_type_ = ApplyCc::ApplyBlockType::BlockOnCondition;
             return false;
         }
-        else if (exec_rst == ExecResult::Unlock)
+        if (exec_rst == ExecResult::Unlock)
         {
             assert(!req.apply_and_commit_);
             if (forward_entry)
@@ -1121,11 +1118,12 @@ public:
             hd_res->SetFinished();
             return true;
         }
-        else if (req.apply_and_commit_)
+        if (req.apply_and_commit_)
         {
             if (object_modified)
             {
-                // Skipping writing log, do the PostWrite and release the lock.
+                // Skipping writing log, do the PostWrite and release the
+                // lock.
                 assert(acquired_lock == LockType::WriteLock);
                 RecordStatus status = cce->PayloadStatus();
                 if (dirty_payload_status == RecordStatus::Normal ||
@@ -1146,13 +1144,13 @@ public:
                 cce->SetDirtyPayloadStatus(RecordStatus::NonExistent);
                 cce->SetPendingCmd(nullptr);
                 // It's possible that the cce HasBufferedCommandList and is
-                // still in unknown status (because FetchRecord fails) and this
-                // command ignores kv value. Need to clear the buffered
+                // still in unknown status (because FetchRecord fails) and
+                // this command ignores kv value. Need to clear the buffered
                 // commands.
                 cce->BufferedCommandList().Clear();
 
-                // Set commit ts based on the TxTs since there is no PostWriteCc
-                // if apply_and_commit_.
+                // Set commit ts based on the TxTs since there is no
+                // PostWriteCc if apply_and_commit_.
                 const uint64_t commit_ts =
                     std::max({cce->CommitTs() + 1, req.TxTs(), shard_->Now()});
                 cce->SetCommitTsPayloadStatus(commit_ts, status);
@@ -2093,8 +2091,8 @@ public:
         while (offset < log_blob.size())
         {
             size_t prev_offset = offset;
-            // the format of log_blob is: key_str, object_version, commands str
-            // length, commands str
+            // the format of log_blob is: key_str, object_version, valid scope
+            // (ttl), commands str length, commands str
             key.Deserialize(log_blob.data(), offset, KeySchema());
             const uint64_t obj_version =
                 *reinterpret_cast<decltype(obj_version) *>(log_blob.data() +
@@ -2136,6 +2134,21 @@ public:
             CcEntry<KeyT, ValueT, false, false> *cce = it->second;
             CcPage<KeyT, ValueT, false, false> *ccp = it.GetPage();
 
+            // For orphan lock recovery, verify if the transaction still holds
+            // the lock on this CC entry.
+            if (req.IsLockRecovery())
+            {
+                const bool no_lock = cce == nullptr ||
+                                     cce->GetKeyLock() == nullptr ||
+                                     cce->GetKeyLock()->SearchLock(req.Txn()) ==
+                                         LockType::NoLock;
+
+                if (no_lock)
+                {
+                    continue;
+                }
+            }
+
             if (cce == nullptr)
             {
                 // The cc map has
@@ -2158,139 +2171,33 @@ public:
                 offset += cmds_len;
                 continue;
             }
-            else
+            bool acquired_extra_data = false;
+            BufferedTxnCmdList *buffered_cmd_list = nullptr;
+            if (cce->GetKeyLock() == nullptr)
             {
-                bool acquired_extra_data = false;
-                BufferedTxnCmdList *buffered_cmd_list = nullptr;
-                if (cce->GetKeyLock() == nullptr)
+                cce->GetOrCreateKeyLock(shard_, this, ccp);
+                assert(cce->GetKeyLock() != nullptr);
+                acquired_extra_data = true;
+            }
+            if (txn_expired)
+            {
+                offset += cmds_len;
+                DLOG(INFO) << "replay log key: " << key.ToString()
+                           << "txn expired, commit_ts: " << commit_ts
+                           << ", valid scope: " << valid_scope;
+
+                // Skip commands before this tx since they are already
+                // expired.
+                if (cce->HasBufferedCommandList())
                 {
-                    cce->GetOrCreateKeyLock(shard_, this, ccp);
-                    assert(cce->GetKeyLock() != nullptr);
-                    acquired_extra_data = true;
-                }
-                if (txn_expired)
-                {
-                    offset += cmds_len;
-                    DLOG(INFO) << "replay log key: " << key.ToString()
-                               << "txn expired, commit_ts: " << commit_ts
-                               << ", valid scope: " << valid_scope;
-
-                    // Skip commands before this tx since they are already
-                    // expired.
-                    if (cce->HasBufferedCommandList())
-                    {
-                        // Create a txn command. We do not care about the actual
-                        // commands since they have already expired.
-                        std::vector<std::unique_ptr<TxCommand>> cmd_list;
-                        TxnCmd txn_cmd(
-                            1,  // we do not care about previous version
-                            commit_ts,
-                            true,
-                            valid_scope,
-                            std::move(cmd_list));
-                        buffered_cmd_list = &cce->BufferedCommandList();
-                        int64_t buffered_cmd_cnt_old =
-                            buffered_cmd_list->Size();
-                        cce->EmplaceAndCommitBufferedTxnCommand(
-                            txn_cmd, shard_->NowInMilliseconds());
-                        int64_t buffered_cmd_cnt_new =
-                            buffered_cmd_list->Size();
-                        shard_->UpdateBufferedCommandCnt(buffered_cmd_cnt_new -
-                                                         buffered_cmd_cnt_old);
-                    }
-                    else
-                    {
-                        // No buffered commands, directly set cce commit ts.
-                        cce->payload_.cur_payload_ = nullptr;
-                        cce->SetCommitTsPayloadStatus(commit_ts,
-                                                      RecordStatus::Deleted);
-                    }
-                }
-                else
-                {
-                    bool ignore_previous_version =
-                        *reinterpret_cast<const uint8_t *>(log_blob.data() +
-                                                           offset);
-                    offset += sizeof(uint8_t);
-
-                    DLOG(INFO)
-                        << "replay log key: " << key.ToString()
-                        << ", obj_ver: " << obj_version
-                        << ", commit ts: " << commit_ts
-                        << ", cmds len: " << cmds_len << ", cmds str: "
-                        << std::string_view(log_blob.data() + offset, cmds_len)
-                        << " has_overwrite: " << ignore_previous_version
-                        << ", valid scope: " << valid_scope
-                        << ", expired: " << txn_expired
-                        << ", cce version: " << cce->CommitTs();
-
-                    // load payload from kvstore before committing pending
-                    // commands. If there's already read intent on cce, that
-                    // means a previous replay cc has already sent fetch record.
-                    if (!ignore_previous_version &&
-                        cce->PayloadStatus() == RecordStatus::Unknown &&
-                        (!cce->GetKeyLock() || cce->GetKeyLock()->IsEmpty()))
-                    {
-                        int64_t cc_ng_candid_term =
-                            Sharder::Instance().CandidateLeaderTerm(cc_ng_id_);
-                        int64_t cc_ng_term =
-                            Sharder::Instance().LeaderTerm(cc_ng_id_);
-                        int64_t ng_term =
-                            std::max(cc_ng_candid_term, cc_ng_term);
-                        if (ng_term < 0)
-                        {
-                            req.SetFinish();
-                            return true;
-                        }
-
-                        // If kv is skipped then log should always be skipped
-                        // too.
-                        assert(!txservice_skip_kv);
-                        // Create key lock and extra struct for the cce. Fetch
-                        // record will pin the cce to prevent it from being
-                        // recycled before fetch record returns.
-                        cce->GetOrCreateKeyLock(shard_, this, ccp);
-                        // load payload asynchronously, pass in null as
-                        // requester cc since we will buffer the cmd in replay
-                        // cmd list so there's no need to put this req back in
-                        // queue after record is fetched.
-
-                        int32_t part_id = (key.Hash() >> 10) & 0x3FF;
-                        shard_->FetchRecord(table_name_,
-                                            table_schema_,
-                                            TxKey(&key),
-                                            cce,
-                                            cc_ng_id_,
-                                            ng_term,
-                                            nullptr,
-                                            part_id);
-                    }
-                    // extract command list
-                    const uint16_t cmd_cnt =
-                        *reinterpret_cast<decltype(cmd_cnt) *>(log_blob.data() +
-                                                               offset);
-                    offset += sizeof(cmd_cnt);
+                    // Create a txn command. We do not care about the actual
+                    // commands since they have already expired.
                     std::vector<std::unique_ptr<TxCommand>> cmd_list;
-                    for (size_t i = 0; i < cmd_cnt; i++)
-                    {
-                        const uint32_t cmd_len =
-                            *reinterpret_cast<decltype(cmd_len) *>(
-                                log_blob.data() + offset);
-                        offset += sizeof(cmd_len);
-                        std::unique_ptr<TxCommand> tx_cmd =
-                            CreateTxCommand(std::string_view(
-                                log_blob.data() + offset, cmd_len));
-                        offset += cmd_len;
-                        cmd_list.emplace_back(std::move(tx_cmd));
-                    }
-
-                    // Emplace txn_cmd and try to commit all pending commands.
-                    TxnCmd txn_cmd(obj_version,
+                    TxnCmd txn_cmd(1,  // we do not care about previous version
                                    commit_ts,
-                                   ignore_previous_version,
+                                   true,
                                    valid_scope,
                                    std::move(cmd_list));
-
                     buffered_cmd_list = &cce->BufferedCommandList();
                     int64_t buffered_cmd_cnt_old = buffered_cmd_list->Size();
                     cce->EmplaceAndCommitBufferedTxnCommand(
@@ -2299,59 +2206,156 @@ public:
                     shard_->UpdateBufferedCommandCnt(buffered_cmd_cnt_new -
                                                      buffered_cmd_cnt_old);
                 }
-
-                if (buffered_cmd_list != nullptr && buffered_cmd_list->Empty())
+                else
                 {
-                    // Recycles the lock if this and prior commands have been
-                    // applied and there is no pending command.
-                    bool lock_recycled = cce->RecycleKeyLock(*shard_);
-                    if (acquired_extra_data)
+                    // No buffered commands, directly set cce commit ts.
+                    cce->payload_.cur_payload_ = nullptr;
+                    cce->SetCommitTsPayloadStatus(commit_ts,
+                                                  RecordStatus::Deleted);
+                }
+            }
+            else
+            {
+                bool ignore_previous_version =
+                    *reinterpret_cast<const uint8_t *>(log_blob.data() +
+                                                       offset);
+                offset += sizeof(uint8_t);
+
+                DLOG(INFO) << "replay log key: " << key.ToString()
+                           << ", obj_ver: " << obj_version
+                           << ", commit ts: " << commit_ts
+                           << ", cmds len: " << cmds_len << ", cmds str: "
+                           << std::string_view(log_blob.data() + offset,
+                                               cmds_len)
+                           << " has_overwrite: " << ignore_previous_version
+                           << ", valid scope: " << valid_scope
+                           << ", expired: " << txn_expired
+                           << ", cce version: " << cce->CommitTs();
+
+                // load payload from kvstore before committing pending
+                // commands. If there's already read intent on cce, that
+                // means a previous replay cc has already sent fetch record.
+                if (!ignore_previous_version &&
+                    cce->PayloadStatus() == RecordStatus::Unknown &&
+                    (!cce->GetKeyLock() || cce->GetKeyLock()->IsEmpty()))
+                {
+                    int64_t cc_ng_candid_term =
+                        Sharder::Instance().CandidateLeaderTerm(cc_ng_id_);
+                    int64_t cc_ng_term =
+                        Sharder::Instance().LeaderTerm(cc_ng_id_);
+                    int64_t ng_term = std::max(cc_ng_candid_term, cc_ng_term);
+                    if (ng_term < 0)
                     {
-                        // The lock is newly assigned, recycle must succeed.
-                        assert(lock_recycled);
+                        req.SetFinish();
+                        return true;
                     }
-                    (void) lock_recycled;
+
+                    // If kv is skipped then log should always be skipped
+                    // too.
+                    assert(!txservice_skip_kv);
+                    // Create key lock and extra struct for the cce. Fetch
+                    // record will pin the cce to prevent it from being
+                    // recycled before fetch record returns.
+                    cce->GetOrCreateKeyLock(shard_, this, ccp);
+                    // load payload asynchronously, pass in null as
+                    // requester cc since we will buffer the cmd in replay
+                    // cmd list so there's no need to put this req back in
+                    // queue after record is fetched.
+
+                    int32_t part_id = (key.Hash() >> 10) & 0x3FF;
+                    shard_->FetchRecord(table_name_,
+                                        table_schema_,
+                                        TxKey(&key),
+                                        cce,
+                                        cc_ng_id_,
+                                        ng_term,
+                                        nullptr,
+                                        part_id);
+                }
+                // extract command list
+                const uint16_t cmd_cnt = *reinterpret_cast<decltype(cmd_cnt) *>(
+                    log_blob.data() + offset);
+                offset += sizeof(cmd_cnt);
+                std::vector<std::unique_ptr<TxCommand>> cmd_list;
+                for (size_t i = 0; i < cmd_cnt; i++)
+                {
+                    const uint32_t cmd_len =
+                        *reinterpret_cast<decltype(cmd_len) *>(log_blob.data() +
+                                                               offset);
+                    offset += sizeof(cmd_len);
+                    std::unique_ptr<TxCommand> tx_cmd = CreateTxCommand(
+                        std::string_view(log_blob.data() + offset, cmd_len));
+                    offset += cmd_len;
+                    cmd_list.emplace_back(std::move(tx_cmd));
                 }
 
-                payload_status = cce->PayloadStatus();
+                // Emplace txn_cmd and try to commit all pending commands.
+                TxnCmd txn_cmd(obj_version,
+                               commit_ts,
+                               ignore_previous_version,
+                               valid_scope,
+                               std::move(cmd_list));
 
-                if (s_obj_exist && payload_status != RecordStatus::Normal)
-                {
-                    TemplateCcMap<KeyT, ValueT, false, false>::normal_obj_sz_--;
-                }
-                else if (!s_obj_exist && payload_status == RecordStatus::Normal)
-                {
-                    TemplateCcMap<KeyT, ValueT, false, false>::normal_obj_sz_++;
-                }
+                buffered_cmd_list = &cce->BufferedCommandList();
+                int64_t buffered_cmd_cnt_old = buffered_cmd_list->Size();
+                cce->EmplaceAndCommitBufferedTxnCommand(
+                    txn_cmd, shard_->NowInMilliseconds());
+                int64_t buffered_cmd_cnt_new = buffered_cmd_list->Size();
+                shard_->UpdateBufferedCommandCnt(buffered_cmd_cnt_new -
+                                                 buffered_cmd_cnt_old);
+            }
 
-                // Must update dirty_commit_ts. Otherwise, this entry may be
-                // skipped by checkpointer.
-                if (commit_ts > last_dirty_commit_ts_)
+            if (buffered_cmd_list != nullptr && buffered_cmd_list->Empty())
+            {
+                // Recycles the lock if this and prior commands have been
+                // applied and there is no pending command.
+                bool lock_recycled = cce->RecycleKeyLock(*shard_);
+                if (acquired_extra_data)
                 {
-                    last_dirty_commit_ts_ = commit_ts;
+                    // The lock is newly assigned, recycle must succeed.
+                    assert(lock_recycled);
                 }
-                if (commit_ts > ccp->last_dirty_commit_ts_)
-                {
-                    ccp->last_dirty_commit_ts_ = commit_ts;
-                }
+                (void) lock_recycled;
+            }
 
-                if (ccp->smallest_ttl_ != 0)
+            payload_status = cce->PayloadStatus();
+
+            if (s_obj_exist && payload_status != RecordStatus::Normal)
+            {
+                --TemplateCcMap<KeyT, ValueT, false, false>::normal_obj_sz_;
+            }
+            else if (!s_obj_exist && payload_status == RecordStatus::Normal)
+            {
+                ++TemplateCcMap<KeyT, ValueT, false, false>::normal_obj_sz_;
+            }
+
+            // Must update dirty_commit_ts. Otherwise, this entry may be
+            // skipped by checkpointer.
+            if (commit_ts > last_dirty_commit_ts_)
+            {
+                last_dirty_commit_ts_ = commit_ts;
+            }
+            if (commit_ts > ccp->last_dirty_commit_ts_)
+            {
+                ccp->last_dirty_commit_ts_ = commit_ts;
+            }
+
+            if (ccp->smallest_ttl_ != 0)
+            {
+                if (payload_status == RecordStatus::Normal)
                 {
-                    if (payload_status == RecordStatus::Normal)
+                    if (cce->payload_.cur_payload_ &&
+                        cce->payload_.cur_payload_->HasTTL() &&
+                        ccp->smallest_ttl_ >
+                            cce->payload_.cur_payload_->GetTTL())
                     {
-                        if (cce->payload_.cur_payload_ &&
-                            cce->payload_.cur_payload_->HasTTL() &&
-                            ccp->smallest_ttl_ >
-                                cce->payload_.cur_payload_->GetTTL())
-                        {
-                            ccp->smallest_ttl_ =
-                                cce->payload_.cur_payload_->GetTTL();
-                        }
+                        ccp->smallest_ttl_ =
+                            cce->payload_.cur_payload_->GetTTL();
                     }
-                    else if (payload_status == RecordStatus::Deleted)
-                    {
-                        ccp->smallest_ttl_ = 0;
-                    }
+                }
+                else if (payload_status == RecordStatus::Deleted)
+                {
+                    ccp->smallest_ttl_ = 0;
                 }
             }
 

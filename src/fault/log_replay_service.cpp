@@ -362,6 +362,7 @@ int RecoveryService::on_received_messages(brpc::StreamId stream_id,
     {
         ::txlog::ReplayMessage &msg = msg_vec->at(idx);
         butil::IOBufAsZeroCopyInputStream wrapper(*messages[idx]);
+        const bool is_lock_recovery = msg.is_lock_recovery();
         msg.ParseFromZeroCopyStream(&wrapper);
         if (idx == 0)
         {
@@ -427,7 +428,8 @@ int RecoveryService::on_received_messages(brpc::StreamId stream_id,
                 mux,
                 status,
                 on_fly_cnt,
-                recovery_error);
+                recovery_error,
+                is_lock_recovery);
 
             on_fly_cnt.fetch_add(1, std::memory_order_release);
             local_shards_.EnqueueCcRequest(0, cc_req);
@@ -452,7 +454,8 @@ int RecoveryService::on_received_messages(brpc::StreamId stream_id,
                 mux,
                 status,
                 on_fly_cnt,
-                recovery_error);
+                recovery_error,
+                is_lock_recovery);
 
             on_fly_cnt.fetch_add(1, std::memory_order_release);
             local_shards_.EnqueueCcRequest(0, cc_req);
@@ -484,6 +487,7 @@ int RecoveryService::on_received_messages(brpc::StreamId stream_id,
                           status,
                           on_fly_cnt,
                           recovery_error,
+                          is_lock_recovery,
                           nullptr,
                           &range_split_tables);
 
@@ -550,6 +554,7 @@ int RecoveryService::on_received_messages(brpc::StreamId stream_id,
                 status,
                 on_fly_cnt,
                 recovery_error,
+                is_lock_recovery,
                 res_pair.first->second);
 
             on_fly_cnt.fetch_add(1, std::memory_order_release);
@@ -573,7 +578,8 @@ int RecoveryService::on_received_messages(brpc::StreamId stream_id,
                       mux,
                       status,
                       on_fly_cnt,
-                      recovery_error);
+                      recovery_error,
+                      is_lock_recovery);
         on_fly_cnt.fetch_add(1, std::memory_order_release);
         local_shards_.EnqueueCcRequest(next_core, cc_req);
         next_core = (next_core + 1) % local_shards_.Count();
