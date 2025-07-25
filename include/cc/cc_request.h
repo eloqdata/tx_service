@@ -6405,6 +6405,7 @@ public:
         cce_ptr_ = nullptr;
         input_msg_ = std::move(msg);
         status_ = Status::Ongoing;
+        temp_old_table_schema_owner_ = nullptr;
         if (hd_ == nullptr)
         {
             hd_ = Sharder::Instance().GetCcStreamSender();
@@ -6454,6 +6455,7 @@ public:
         }
 
         shard.DecrInflightStandbyReqCount(forward_msg_grp_);
+        temp_old_table_schema_owner_ = nullptr;
 
         if (input_msg_)
         {
@@ -6559,6 +6561,16 @@ public:
         return cce_ptr_;
     }
 
+    TableSchema *GetOldTableSchema() const
+    {
+        return temp_old_table_schema_owner_.get();
+    }
+
+    void SetOldTableSchema(std::unique_ptr<TableSchema> old_schema)
+    {
+        temp_old_table_schema_owner_ = std::move(old_schema);
+    }
+
 private:
     TableName remote_table_name_;
     const std::string *key_str_;
@@ -6579,6 +6591,7 @@ private:
     bool updated_local_seq_id_{false};
 
     // Used by DDL msg.
+    std::unique_ptr<TableSchema> temp_old_table_schema_owner_{nullptr};
     DDLPhase ddl_phase_{DDLPhase::AcquirePhase};
     CcErrorCode ddl_kv_op_err_code_{CcErrorCode::NO_ERROR};
 
