@@ -742,8 +742,8 @@ public:
         }
     }
 
-    const absl::flat_hash_map<size_t, std::vector<std::vector<CkptTsEntry>>>
-        &EntriesRef() const
+    const absl::flat_hash_map<size_t, std::vector<std::vector<CkptTsEntry>>> &
+    EntriesRef() const
     {
         return cce_entries_;
     }

@@ -1579,11 +1579,11 @@ public:
     std::vector<std::pair<uint16_t, NodeGroupId>> GetAllBucketOwners(
         NodeGroupId node_group_id);
 
-    const std::unordered_map<uint16_t, std::unique_ptr<BucketInfo>>
-        *GetAllBucketInfos(const NodeGroupId ng_id) const;
+    const std::unordered_map<uint16_t, std::unique_ptr<BucketInfo>> *
+    GetAllBucketInfos(const NodeGroupId ng_id) const;
 
-    const std::unordered_map<uint16_t, std::unique_ptr<BucketInfo>>
-        *GetAllBucketInfosNoLocking(const NodeGroupId ng_id) const;
+    const std::unordered_map<uint16_t, std::unique_ptr<BucketInfo>> *
+    GetAllBucketInfosNoLocking(const NodeGroupId ng_id) const;
 
     void DropBucketInfo(NodeGroupId ng_id);
 
@@ -1762,9 +1762,9 @@ private:
         const NodeGroupId ng_id,
         int32_t range_id);
 
-    std::unordered_map<uint32_t, TableRangeEntry *>
-        *GetTableRangeIdsForATableInternal(const TableName &range_table_name,
-                                           const NodeGroupId ng_id);
+    std::unordered_map<uint32_t, TableRangeEntry *> *
+    GetTableRangeIdsForATableInternal(const TableName &range_table_name,
+                                      const NodeGroupId ng_id);
 
     std::map<TxKey, TableRangeEntry::uptr> *GetTableRangesForATableInternal(
         const TableName &range_table_name, const NodeGroupId ng_id);

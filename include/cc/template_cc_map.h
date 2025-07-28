@@ -1000,7 +1000,7 @@ public:
                 return hd_res->SetError(err_code);
             }
             }  //-- end: switch
-        }      //-- end: acquire lock
+        }  //-- end: acquire lock
 
         return true;
     }
