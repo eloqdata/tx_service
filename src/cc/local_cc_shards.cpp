@@ -3161,7 +3161,7 @@ void LocalCcShards::PostProcessDataSyncTask(std::shared_ptr<DataSyncTask> task,
                 range_entry->UnPinStoreRange();
             }
 
-            data_sync_task->ckpt_err_ = DataSyncTask::CkptErrorCode::NO_ERROR;
+            task->ckpt_err_ = DataSyncTask::CkptErrorCode::NO_ERROR;
             std::lock_guard<std::mutex> task_worker_lk(
                 data_sync_worker_ctx_.mux_);
             data_sync_task_queue_.emplace_front(task);
