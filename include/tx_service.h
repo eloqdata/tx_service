@@ -751,20 +751,18 @@ public:
 
     void CheckResumeTx()
     {
-        size_t backup_queue_idx = 0;
-        std::array<TransactionExecution *, 100> &backup_queue = txm_buffers_[0];
-        std::array<TransactionExecution *, 100> &tx_bulk = txm_buffers_[1];
-
+        assert(txm_backup_.empty());
+        txm_backup_.reserve(100);
         size_t resume_cnt = resume_tx_queue_.SizeApprox();
-        while (resume_cnt > 0 && backup_queue_idx < backup_queue.size())
+        while (resume_cnt > 0)
         {
-            size_t deque_cap = std::min(resume_cnt, tx_bulk.size());
+            size_t deque_cap = std::min(resume_cnt, txm_buffer_.size());
             size_t deque_size =
-                resume_tx_queue_.TryDequeueBulk(tx_bulk.begin(), deque_cap);
+                resume_tx_queue_.TryDequeueBulk(txm_buffer_.begin(), deque_cap);
 
             for (size_t idx = 0; idx < deque_size; ++idx)
             {
-                TransactionExecution *tx_ptr = tx_bulk[idx];
+                TransactionExecution *tx_ptr = txm_buffer_[idx];
                 if (tx_ptr->TxStatus() == TxnStatus::Finished)
                 {
                     continue;
@@ -777,20 +775,18 @@ public:
                 }
                 else if (txm_status == TxmStatus::ForwardFailed)
                 {
-                    backup_queue[backup_queue_idx++] = tx_ptr;
-                    if (backup_queue_idx >= backup_queue.size())
-                    {
-                        break;
-                    }
+                    txm_backup_.push_back(tx_ptr);
                 }
             }
 
             resume_cnt = resume_tx_queue_.SizeApprox();
         }
 
-        if (backup_queue_idx > 0)
+        if (txm_backup_.size() > 0)
         {
-            resume_tx_queue_.EnqueueBulk(backup_queue.data(), backup_queue_idx);
+            resume_tx_queue_.EnqueueBulk(txm_backup_.data(),
+                                         txm_backup_.size());
+            txm_backup_.clear();
         }
     }
 
@@ -1009,10 +1005,10 @@ private:
 
     /**
      * @brief Replacement for stack array. It should be regards as local
-     * variable. e.g CheckResumeTx uses 2 buffers. Grow stack 1600 bytes might
-     * lead cache thrashing.
+     * variable.
      */
-    std::array<TransactionExecution *, 100> txm_buffers_[2];
+    std::vector<TransactionExecution *> txm_backup_;
+    std::array<TransactionExecution *, 100> txm_buffer_;
     std::array<TransactionExecution::uptr, 100> utxm_buffer_;
 
     metrics::TimePoint busy_round_start_;
