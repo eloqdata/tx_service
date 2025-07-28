@@ -341,6 +341,7 @@ int RecoveryService::on_received_messages(brpc::StreamId stream_id,
                                           butil::IOBuf *const messages[],
                                           size_t size)
 {
+    DLOG(INFO) << "RecoveryService::on_received_messages";
     std::shared_ptr<std::vector<::txlog::ReplayMessage>> msg_vec =
         std::make_shared<std::vector<::txlog::ReplayMessage>>(size);
     std::unordered_map<TableName, std::shared_ptr<std::atomic_uint32_t>>

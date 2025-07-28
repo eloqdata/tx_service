@@ -108,6 +108,7 @@ public:
 
     bool Execute(ApplyCc &req) override
     {
+        LOG(INFO) << "ApplyCc";
         TX_TRACE_ACTION_WITH_CONTEXT(
             (txservice::CcMap *) this,
             &req,
@@ -729,6 +730,7 @@ public:
                 // Release and try to recycle the lock.
                 if (acquired_lock != LockType::NoLock)
                 {
+                    DLOG(INFO) << "Release Lock";
                     assert(req.Isolation() > IsolationLevel::ReadCommitted);
                     ReleaseCceLock(
                         cce->GetKeyLock(), cce, txn, ng_id, acquired_lock);
@@ -1272,6 +1274,13 @@ public:
 
     bool Execute(PostWriteCc &req) override
     {
+        DLOG(INFO) << "PostWriteCc";
+        CODE_FAULT_INJECTOR(
+            "term_ObjectCcMap_PostWriteCc_SkipLockRelease", {
+                req.Result()->SetFinished();
+                DLOG(INFO) << "return without releasing the lock";
+                return true;
+            });
         TX_TRACE_ACTION_WITH_CONTEXT(
             (txservice::CcMap *) this,
             &req,
