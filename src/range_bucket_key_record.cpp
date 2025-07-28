@@ -22,6 +22,7 @@
 #include "range_bucket_key_record.h"
 
 #include <cstdint>
+#include <utility>
 
 namespace txservice
 {
@@ -112,12 +113,14 @@ void RangeBucketRecord::Serialize(std::vector<char> &buf, size_t &offset) const
 void RangeBucketRecord::Serialize(std::string &str) const
 {
     const BucketInfo *bucket_info =
-        is_owner_ ? bucket_info_uptr_.get() : bucket_info_;
+        std::holds_alternative<std::unique_ptr<BucketInfo>>(bucket_info_)
+            ? std::get<std::unique_ptr<BucketInfo>>(bucket_info_).get()
+            : std::get<const BucketInfo *>(bucket_info_);
     assert(bucket_info != nullptr);
     SerializeToStr(&bucket_info->bucket_owner_, str);
     SerializeToStr(&bucket_info->version_, str);
-    SerializeToStr(&bucket_info_->dirty_bucket_owner_, str);
-    SerializeToStr(&bucket_info_->dirty_version_, str);
+    SerializeToStr(&bucket_info->dirty_bucket_owner_, str);
+    SerializeToStr(&bucket_info->dirty_version_, str);
 }
 
 size_t RangeBucketRecord::SerializedLength() const
@@ -127,20 +130,20 @@ size_t RangeBucketRecord::SerializedLength() const
 
 void RangeBucketRecord::Deserialize(const char *buf, size_t &offset)
 {
-    if (!is_owner_)
+    if (!std::holds_alternative<std::unique_ptr<BucketInfo>>(bucket_info_))
     {
         bucket_info_ = nullptr;
     }
 
-    is_owner_ = true;
     NodeGroupId bucket_owner, dirty_owner;
     uint64_t version, dirty_version;
     DesrializeFrom(buf, offset, &bucket_owner);
     DesrializeFrom(buf, offset, &version);
     DesrializeFrom(buf, offset, &dirty_owner);
     DesrializeFrom(buf, offset, &dirty_version);
-    bucket_info_uptr_ = std::make_unique<BucketInfo>(bucket_owner, version);
-    bucket_info_uptr_->SetDirty(dirty_owner, dirty_version);
+    auto bucket_info = std::make_unique<BucketInfo>(bucket_owner, version);
+    bucket_info->SetDirty(dirty_owner, dirty_version);
+    bucket_info_ = std::move(bucket_info);
 }
 
 TxRecord::Uptr RangeBucketRecord::Clone() const
