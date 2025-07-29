@@ -5736,6 +5736,7 @@ public:
         bool succ = false;
         const KeyT *slice_end_key = req_end_key;
         bool is_last_slice = false;
+        bool is_scan_mem_full = false;
         std::tie(key_it,
                  slice_end_it,
                  slice_end_key,
@@ -5821,7 +5822,7 @@ public:
             {
                 assert(cce->entry_info_.DataStoreSize() != INT32_MAX);
                 uint64_t flush_size = 0;
-                ExportForCkpt(cce,
+                auto export_result = ExportForCkpt(cce,
                               *key,
                               req.DataSyncVec(shard_->core_id_),
                               req.ArchiveVec(shard_->core_id_),
@@ -5835,7 +5836,14 @@ public:
                               export_persisted_key_only,
                               flush_size);
 
-                req.accumulated_flush_data_size_[shard_->core_id_] += flush_size;
+                req.accumulated_flush_data_size_[shard_->core_id_] +=
+                    flush_size;
+
+                if (export_result.second)
+                {
+                    is_scan_mem_full = true;
+                    break;
+                }
             }
 
             // Forward the iterator
@@ -5891,6 +5899,13 @@ public:
 
         // Set the pause_pos_ to mark resume position.
         pause_key_and_is_drained = {std::move(next_pause_key), no_more_data};
+
+        if (is_scan_mem_full)
+        {
+            req.scan_heap_is_full_[shard_->core_id_] = 1;
+            req.SetFinish(shard_->core_id_);
+            return false;
+        }
 
         if (no_more_data ||
             req.accumulated_scan_cnt_[shard_->core_id_] >= req.scan_batch_size_)
@@ -6078,12 +6093,10 @@ public:
 
         size_t export_data_cnt = 0;
         auto l_start = std::chrono::high_resolution_clock::now();
-        uint64_t mem_usage = 0;
 
         for (size_t scan_cnt = 0;
              scan_cnt < DataSyncScanCc::DataSyncScanBatchSize &&
-             req.accumulated_flush_data_size_[vec_idx] + mem_usage <
-                 req.max_pending_flush_size_ &&
+             req.accumulated_scan_cnt_[vec_idx] < req.scan_batch_size_ &&
              it != end_it && it != end_it_next_page_it;
              scan_cnt++)
         {
@@ -6131,6 +6144,7 @@ public:
                 if ((!req.filter_lambda_ || req.filter_lambda_(key->Hash())) &&
                     (cce->NeedCkpt() || req.include_persisted_data_))
                 {
+                    uint64_t flush_data_size = 0;
                     auto export_result =
                         ExportForCkpt(cce,
                                       *key,
@@ -6144,8 +6158,8 @@ public:
                                       req.include_persisted_data_,
                                       false,
                                       false,
-                                      mem_usage);
-                    req.accumulated_flush_data_size_[vec_idx] += mem_usage;
+                                      flush_data_size);
+                    req.accumulated_flush_data_size_[vec_idx] += flush_data_size;
 
                     if (export_result.second)
                     {
@@ -6292,12 +6306,11 @@ public:
             {
                 //  scan memory is full and there are
                 //  data for flush
-                req.scan_heap_is_full_ = true;
+                req.scan_heap_is_full_[0] = 1;
                 req.SetFinish(vec_idx);
                 return false;
             }
-            else if (req.accumulated_flush_data_size_[vec_idx] + mem_usage <
-                     req.max_pending_flush_size_)
+            else if (req.accumulated_scan_cnt_[vec_idx] < req.scan_batch_size_)
             {
                 // Put DataSyncScanCc request into CcQueue again.
                 shard_->Enqueue(&req);

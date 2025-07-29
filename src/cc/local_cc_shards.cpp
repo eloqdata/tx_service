@@ -3870,9 +3870,11 @@ void LocalCcShards::DataSync(std::unique_lock<std::mutex> &task_worker_lk,
         else
         {
             scan_data_drained = true;
-            assert(scan_cc.accumulated_flush_data_size_.size() == cc_shards_.size());
+            assert(scan_cc.accumulated_flush_data_size_.size() ==
+                   cc_shards_.size());
             uint64_t flush_data_size = 0;
-            for (size_t flush_data_size_per_core : scan_cc.accumulated_flush_data_size_)
+            for (size_t flush_data_size_per_core :
+                 scan_cc.accumulated_flush_data_size_)
             {
                 flush_data_size += flush_data_size_per_core;
             }
@@ -4073,6 +4075,20 @@ void LocalCcShards::DataSync(std::unique_lock<std::mutex> &task_worker_lk,
                                                  table_schema,
                                                  flush_data_size));
 
+            for (size_t i = 0; i < cc_shards_.size(); ++i)
+            {
+                if (scan_cc.scan_heap_is_full_[i] == 1)
+                {
+                    // Clear the FlushRecords' memory of scan cc since the
+                    // DataSyncScan heap is full.
+                    auto &data_sync_vec_ref = scan_cc.DataSyncVec(i);
+                    auto &archive_vec_ref = scan_cc.ArchiveVec(i);
+                    ReleaseDataSyncScanHeapCc release_scan_heap_cc(
+                        &data_sync_vec_ref, &archive_vec_ref);
+                    EnqueueCcRequest(i, &release_scan_heap_cc);
+                    release_scan_heap_cc.Wait();
+                }
+            }
             // Reset
             scan_cc.Reset();
             for (size_t i = 0; i < cc_shards_.size(); ++i)
@@ -4773,8 +4789,7 @@ void LocalCcShards::DataSync(std::unique_lock<std::mutex> &task_worker_lk,
 
             vec_mem_usage = 0;
 
-#ifdef ON_KEY_OBJECT
-            if (scan_cc.scan_heap_is_full_)
+            if (scan_cc.scan_heap_is_full_[0] == 1)
             {
                 // Clear the FlushRecords' memory of scan cc since the
                 // DataSyncScan heap is full.
@@ -4785,7 +4800,6 @@ void LocalCcShards::DataSync(std::unique_lock<std::mutex> &task_worker_lk,
                 EnqueueCcRequest(worker_idx, &release_scan_heap_cc);
                 release_scan_heap_cc.Wait();
             }
-#endif
 
             scan_cc.Reset();
         }

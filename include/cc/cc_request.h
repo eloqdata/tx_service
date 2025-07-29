@@ -3500,16 +3500,16 @@ public:
 
             accumulated_scan_cnt_.at(i) = 0;
             accumulated_flush_data_size_.at(i) = 0;
+            if (scan_heap_is_full_[i] == 1)
+            {
+                // vec has been cleared during ReleaseDataSyncScanHeapCc,
+                // resize to prepared size
+                data_sync_vec_[i].resize(scan_batch_size_);
+                scan_heap_is_full_[i] = 0;
+            }
         }
 
-        if (scan_heap_is_full_)
-        {
-            // vec has been cleared during ReleaseDataSyncScanHeapCc,
-            // resize to prepared size
-            data_sync_vec_[0].resize(scan_batch_size_);
-        }
         err_ = CcErrorCode::NO_ERROR;
-        scan_heap_is_full_ = false;
         op_type_ = op_type;
     }
 
@@ -3639,9 +3639,9 @@ public:
 
     std::vector<size_t> accumulated_scan_cnt_;
     std::vector<uint64_t> accumulated_flush_data_size_;
-    // TODO(liunyl): make this a vector and return early when scan mem is full
-    // in range partitioned scan.
-    bool scan_heap_is_full_{false};
+
+    // std::vector<bool> is not safe to use in multi-threaded environment,
+    std::vector<uint32_t> scan_heap_is_full_{0};
 
     size_t scan_count_{0};
 
