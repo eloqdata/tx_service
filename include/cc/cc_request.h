@@ -4300,6 +4300,14 @@ public:
             uint64_t commit_ts = *reinterpret_cast<const uint64_t *>(
                 log_records_.data() + offset);
             offset += sizeof(uint64_t);
+            uint64_t tx_number = 0;
+            if (is_lock_recovery_)
+            {
+                // 8-byte for tx_number
+                tx_number = *reinterpret_cast<const uint64_t *>(
+                    log_records_.data() + offset);
+                offset += sizeof(uint64_t);
+            }
             // 4-byte for log_blob length
             uint32_t blob_length = *reinterpret_cast<const uint32_t *>(
                 log_records_.data() + offset);
@@ -4376,7 +4384,7 @@ public:
                     table_engine,
                     std::string_view(blob.data() + blob_offset, kv_len),
                     commit_ts,
-                    0,
+                    tx_number,
                     *mux_,
                     *status_,
                     *on_fly_cnt_,

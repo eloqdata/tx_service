@@ -341,7 +341,6 @@ int RecoveryService::on_received_messages(brpc::StreamId stream_id,
                                           butil::IOBuf *const messages[],
                                           size_t size)
 {
-    DLOG(INFO) << "RecoveryService::on_received_messages";
     std::shared_ptr<std::vector<::txlog::ReplayMessage>> msg_vec =
         std::make_shared<std::vector<::txlog::ReplayMessage>>(size);
     std::unordered_map<TableName, std::shared_ptr<std::atomic_uint32_t>>
@@ -363,8 +362,8 @@ int RecoveryService::on_received_messages(brpc::StreamId stream_id,
     {
         ::txlog::ReplayMessage &msg = msg_vec->at(idx);
         butil::IOBufAsZeroCopyInputStream wrapper(*messages[idx]);
-        const bool is_lock_recovery = msg.is_lock_recovery();
         msg.ParseFromZeroCopyStream(&wrapper);
+        const bool is_lock_recovery = msg.is_lock_recovery();
         if (idx == 0)
         {
             // All of the shema and range split logs should be in the first msg.

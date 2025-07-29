@@ -787,7 +787,6 @@ void CcShard::CheckRecoverTx(TxNumber lock_holding_txn,
                              uint32_t cc_ng_id,
                              int64_t cc_ng_term)
 {
-    DLOG(INFO) << "CheckRecoverTx lock_holding_txn=" << lock_holding_txn;
     auto ng_it = lock_holding_txs_.find(cc_ng_id);
     if (ng_it == lock_holding_txs_.end())
     {
