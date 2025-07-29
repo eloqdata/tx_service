@@ -654,8 +654,8 @@ public:
     NodeGroupId GetBucketOwner(const uint16_t bucket_id,
                                const NodeGroupId ng_id) const;
 
-    const std::unordered_map<uint16_t, std::unique_ptr<BucketInfo>> *
-    GetAllBucketInfos(NodeGroupId ng_id) const;
+    const std::unordered_map<uint16_t, std::unique_ptr<BucketInfo>>
+        *GetAllBucketInfos(NodeGroupId ng_id) const;
 
     const BucketInfo *GetRangeOwner(int32_t range_id, NodeGroupId ng_id) const;
 
@@ -830,8 +830,8 @@ public:
     // save them into CheckDeadLockResult.
     void CollectLockWaitingInfo(CheckDeadLockResult &dlr);
     const std::unordered_map<NodeGroupId,
-                             absl::flat_hash_map<TxNumber, TxLockInfo::uptr>> &
-    GetLockHoldingTxs() const
+                             absl::flat_hash_map<TxNumber, TxLockInfo::uptr>>
+        &GetLockHoldingTxs() const
     {
         return lock_holding_txs_;
     }
@@ -923,8 +923,8 @@ public:
 
     void DecrInflightStandbyReqCount(uint32_t seq_grp);
 
-    absl::flat_hash_map<uint32_t, StandbySequenceGroup> &
-    GetStandbysequenceGrps()
+    absl::flat_hash_map<uint32_t, StandbySequenceGroup>
+        &GetStandbysequenceGrps()
     {
         return standby_sequence_grps_;
     }

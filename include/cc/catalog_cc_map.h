@@ -1266,6 +1266,10 @@ public:
             }
         }
 
+        std::pair<bool, CcErrorCode> &upsert_kv_err_code =
+            req.UpsertKvErrCode();
+        bool need_to_upsert_kv_table = upsert_kv_err_code.first;
+
         // 1. Replay the table catalog and table schema.
         // The first shard is in charge of creating catalog_entry.
         if (shard_->core_id_ == 0)
@@ -1318,6 +1322,58 @@ public:
 
                 uint64_t dirty_schema_commit_ts = req.CommitTs();
                 uint64_t old_schema_commit_ts = schema_op_msg.catalog_ts();
+
+                // upsert kv store first, then create catalog entry
+                if (need_to_upsert_kv_table && dirty_schema_commit_ts > 0 &&
+                    !Sharder::Instance()
+                         .GetDataStoreHandler()
+                         ->IsSharedStorage())
+                {
+                    // When not using shared storage, the coordinator and
+                    // participants must upsert the KV table during recovery
+                    // process. Otherwise, there may be inconsistency between
+                    // in-memory schema and kv store schema.
+
+                    TableSchema::uptr schema_ptr =
+                        Sharder::Instance()
+                            .GetLocalCcShards()
+                            ->CreateTableSchemaFromImage(
+                                table_name,
+                                schema_op_msg.old_catalog_blob(),
+                                old_schema_commit_ts);
+                    TableSchema::uptr dirty_schema_ptr =
+                        Sharder::Instance()
+                            .GetLocalCcShards()
+                            ->CreateTableSchemaFromImage(
+                                table_name,
+                                schema_op_msg.new_catalog_blob(),
+                                dirty_schema_commit_ts);
+
+                    OperationType op_type = static_cast<OperationType>(
+                        schema_op_msg.table_op().op_type());
+
+                    upsert_kv_err_code = {false, CcErrorCode::NO_ERROR};
+                    shard_->local_shards_.store_hd_->UpsertTable(
+                        schema_ptr.get(),
+                        dirty_schema_ptr.get(),
+                        op_type,
+                        req.CommitTs(),
+                        cc_ng_id_,
+                        ng_term,
+                        nullptr,
+                        nullptr,
+                        &req,
+                        shard_,
+                        &upsert_kv_err_code.second);
+
+                    return false;
+                }
+                else if (!need_to_upsert_kv_table &&
+                         upsert_kv_err_code.second != CcErrorCode::NO_ERROR)
+                {
+                    req.Result()->SetError(upsert_kv_err_code.second);
+                    return false;
+                }
 
                 auto [success, new_catalog_entry] = shard_->CreateCatalog(
                     table_name,
@@ -1599,10 +1655,6 @@ public:
                                         catalog_entry->dirty_schema_,
                                         catalog_entry->schema_version_);
 
-        std::pair<bool, CcErrorCode> &upsert_kv_err_code =
-            req.UpsertKvErrCode();
-        bool need_to_upsert_kv_table = upsert_kv_err_code.first == false;
-
         if (shard_->core_id_ < shard_->core_cnt_ - 1)
         {
             req.ResetCcm();
@@ -1624,51 +1676,9 @@ public:
                 shard_->local_shards_.CreateSchemaRecoveryTx(
                     req, schema_op_msg, tx_candidate_term);
             }
-            else if (!is_coordinator && tx_candidate_term >= 0 &&
-                     need_to_upsert_kv_table)
-            {
-                // When not using shared storage, the participant must
-                // upsert the KV table during its recovery process.
-                //
-                // This prevents a race condition where the participant
-                // could start accepting external requests before the
-                // coordinator completes its own recovery and updates the
-                // table schema. During this timing gap, in participant
-                // nodes, the in-memory schema would be stale and
-                // inconsistent with the KV store, potentially causing
-                // requests to read outdated data.
-
-                if (catalog_entry->dirty_schema_ && !Sharder::Instance()
-                                                         .GetDataStoreHandler()
-                                                         ->IsSharedStorage())
-                {
-                    upsert_kv_err_code = {true, CcErrorCode::NO_ERROR};
-                    shard_->local_shards_.store_hd_->UpsertTable(
-                        catalog_entry->schema_.get(),
-                        catalog_entry->dirty_schema_.get(),
-                        op_type,
-                        req.CommitTs(),
-                        cc_ng_id_,
-                        ng_term,
-                        nullptr,
-                        nullptr,
-                        &req,
-                        shard_,
-                        &upsert_kv_err_code.second);
-
-                    return false;
-                }
-            }
             else
             {
-                if (upsert_kv_err_code.second != CcErrorCode::NO_ERROR)
-                {
-                    req.Result()->SetError(upsert_kv_err_code.second);
-                }
-                else
-                {
-                    req.SetFinish();
-                }
+                req.SetFinish();
             }
         }
 
