@@ -169,6 +169,7 @@ public:
         }
 
         coordi_ = std::make_shared<TxProcCoordinator>(thd_id, this);
+        txm_backup_.reserve(100);
     }
 
     ~TxProcessor()
@@ -752,7 +753,6 @@ public:
     void CheckResumeTx()
     {
         assert(txm_backup_.empty());
-        txm_backup_.reserve(100);
         size_t resume_cnt = resume_tx_queue_.SizeApprox();
         while (resume_cnt > 0)
         {
