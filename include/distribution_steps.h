@@ -25,9 +25,10 @@
 // *ACCURATE ESTIMATION OF THE NUMBER OF TUPLES SATISFYING A CONDITION*
 // https://dl.acm.org/doi/pdf/10.1145/971697.602294
 
-#include <assert.h>
+#include <absl/container/btree_set.h>
 
 #include <algorithm>
+#include <cassert>
 #include <memory>
 #include <set>
 #include <sstream>
@@ -62,7 +63,7 @@ public:
     DistributionSteps() = default;
 
     explicit DistributionSteps(
-        const std::set<const KeyT *, PtrLessThan<KeyT>> &keys)
+        const absl::btree_set<const KeyT *, PtrLessThan<KeyT>> &keys)
     {
         size_t sz = keys.size();
         if (sz > most_steps_)

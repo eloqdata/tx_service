@@ -21,6 +21,8 @@
  */
 #pragma once
 
+#include <absl/container/btree_set.h>
+
 #include <algorithm>
 #include <atomic>
 #include <cassert>
@@ -28,8 +30,6 @@
 #include <functional>
 #include <map>
 #include <memory>
-#include <optional>
-#include <set>
 #include <shared_mutex>
 #include <string>
 #include <unordered_map>
@@ -173,9 +173,9 @@ public:
         }
 
         PerCcShardVar &v = cc_shards_var_[ccs.core_id_];
-        v.records_++;
-        v.upserts_++;
-        v.updated_since_sync_ = true;
+        v.records_.fetch_add(1, std::memory_order_relaxed);
+        v.upserts_.fetch_add(1, std::memory_order_relaxed);
+        v.updated_since_sync_.store(true, std::memory_order_relaxed);
 
         if (on_all)
         {
@@ -187,7 +187,8 @@ public:
         else
         {
             // For large table, accumulate per core counter.
-            if (NeedAccumulateRecords(v.records_))
+            if (NeedAccumulateRecords(
+                    v.records_.load(std::memory_order_relaxed)))
             {
                 int64_t records = AccumulateRecords(cc_shards_var_);
                 records_.store(records, std::memory_order_release);
@@ -195,7 +196,8 @@ public:
             }
         }
 
-        if (NeedAccumulateUpserts(v.records_, v.upserts_))
+        if (NeedAccumulateUpserts(v.records_.load(std::memory_order_relaxed),
+                                  v.upserts_.load(std::memory_order_relaxed)))
         {
             int64_t upserts = AccumulateUpserts(cc_shards_var_);
             upserts_.store(upserts, std::memory_order_release);
@@ -206,8 +208,8 @@ public:
             sample_pool_.Insert(key, records_.load(std::memory_order_acquire));
 
             if (NeedRebuildDistribution(
-                    records_.load(std::memory_order_acquire),
-                    upserts_.load(std::memory_order_acquire)))
+                    records_.load(std::memory_order_relaxed),
+                    upserts_.load(std::memory_order_relaxed)))
             {
                 std::vector<std::unique_lock<std::mutex>> lk_others =
                     statistics_->TryLockSamplePoolsBesides(
@@ -241,11 +243,11 @@ public:
 
         PerCcShardVar &v = cc_shards_var_[ccs.core_id_];
 
-        if (v.records_ > 0)
+        if (v.records_.load(std::memory_order_relaxed) > 0)
         {
-            v.records_--;
-            v.upserts_++;
-            v.updated_since_sync_ = true;
+            v.records_.fetch_sub(1, std::memory_order_relaxed);
+            v.upserts_.fetch_add(1, std::memory_order_relaxed);
+            v.updated_since_sync_.store(true, std::memory_order_relaxed);
 
             if (on_all)
             {
@@ -260,7 +262,8 @@ public:
             else
             {
                 // For large table, accumulate per core counter.
-                if (NeedAccumulateRecords(v.records_))
+                if (NeedAccumulateRecords(
+                        v.records_.load(std::memory_order_relaxed)))
                 {
                     int64_t records = AccumulateRecords(cc_shards_var_);
                     records_.store(records, std::memory_order_release);
@@ -268,7 +271,9 @@ public:
                 }
             }
 
-            if (NeedAccumulateUpserts(v.records_, v.upserts_))
+            if (NeedAccumulateUpserts(
+                    v.records_.load(std::memory_order_relaxed),
+                    v.upserts_.load(std::memory_order_relaxed)))
             {
                 int64_t upserts = AccumulateUpserts(cc_shards_var_);
                 upserts_.store(upserts, std::memory_order_release);
@@ -280,8 +285,8 @@ public:
                                     records_.load(std::memory_order_acquire));
 
                 if (NeedRebuildDistribution(
-                        records_.load(std::memory_order_acquire),
-                        upserts_.load(std::memory_order_acquire)))
+                        records_.load(std::memory_order_relaxed),
+                        upserts_.load(std::memory_order_relaxed)))
                 {
                     std::vector<std::unique_lock<std::mutex>> lk_others =
                         statistics_->TryLockSamplePoolsBesides(
@@ -543,9 +548,10 @@ public:
     {
     }
 
-    IndexDistribution(const KeySchema *key_schema,
-                      uint64_t records,
-                      const std::set<const KeyT *, PtrLessThan<KeyT>> &keys)
+    IndexDistribution(
+        const KeySchema *key_schema,
+        uint64_t records,
+        const absl::btree_set<const KeyT *, PtrLessThan<KeyT>> &keys)
         : records_(std::max(records, keys.size())),
           distribution_steps_(keys),
           rec_per_key_(key_schema->ExtendKeyParts(), 0.0)
@@ -588,7 +594,7 @@ public:
 
     void Rebuild(const KeySchema *key_schema,
                  uint64_t records,
-                 const std::set<const KeyT *, PtrLessThan<KeyT>> &keys)
+                 const absl::btree_set<const KeyT *, PtrLessThan<KeyT>> &keys)
     {
         std::unique_lock<std::shared_mutex> ulk(shared_mutex_);
         records_.store(std::max(records, keys.size()),
@@ -607,7 +613,7 @@ private:
     // The algorithm is modified from rocksdb/Rdb_tbl_card_coll::ProcessKey()
     void CalRecordsPerKey(
         const KeySchema *key_schema,
-        const std::set<const KeyT *, PtrLessThan<KeyT>> &sample_keys)
+        const absl::btree_set<const KeyT *, PtrLessThan<KeyT>> &sample_keys)
     {
         size_t key_parts = key_schema->ExtendKeyParts();
         std::vector<size_t> distinct_keys_per_prefix(key_parts, 0);
@@ -1083,7 +1089,7 @@ public:
                              const KeySchema *key_schema)
     {
         uint64_t records = 0;
-        std::set<const KeyT *, PtrLessThan<KeyT>> keys;
+        absl::btree_set<const KeyT *, PtrLessThan<KeyT>> keys;
         for (const auto &[ng_id, ccmap_sample_pool] :
              index_sample_pool_map_.at(table_or_index_name))
         {
@@ -1201,7 +1207,7 @@ private:
     void InitDistribution(const TableName &table_or_index_name,
                           const KeySchema *key_schema)
     {
-        std::set<const KeyT *, PtrLessThan<KeyT>> index_sample_keys;
+        absl::btree_set<const KeyT *, PtrLessThan<KeyT>> index_sample_keys;
         uint64_t index_total_keys = 0;
 
         for (const auto &[ng_id, ccmap_sample_pool] :

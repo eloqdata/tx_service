@@ -169,6 +169,7 @@ public:
         }
 
         coordi_ = std::make_shared<TxProcCoordinator>(thd_id, this);
+        txm_backup_.reserve(100);
     }
 
     ~TxProcessor()
@@ -304,7 +305,7 @@ public:
         size_t new_tx_cnt = new_tx_cnt_.load(std::memory_order_relaxed);
         if (new_tx_cnt > 0)
         {
-            std::array<TransactionExecution::uptr, 100> txs;
+            std::array<TransactionExecution::uptr, 100> &txs = utxm_buffer_;
             size_t dq_cnt = std::min(txs.size(), new_tx_cnt);
 
             new_tx_cnt = new_txs_.try_dequeue_bulk(
@@ -751,20 +752,17 @@ public:
 
     void CheckResumeTx()
     {
-        size_t backup_queue_idx = 0;
-        std::array<TransactionExecution *, 100> backup_queue;
-
+        assert(txm_backup_.empty());
         size_t resume_cnt = resume_tx_queue_.SizeApprox();
         while (resume_cnt > 0)
         {
-            std::array<TransactionExecution *, 100> tx_bulk{};
-            size_t deque_cap = std::min(resume_cnt, tx_bulk.size());
+            size_t deque_cap = std::min(resume_cnt, txm_buffer_.size());
             size_t deque_size =
-                resume_tx_queue_.TryDequeueBulk(tx_bulk.begin(), deque_cap);
+                resume_tx_queue_.TryDequeueBulk(txm_buffer_.begin(), deque_cap);
 
             for (size_t idx = 0; idx < deque_size; ++idx)
             {
-                TransactionExecution *tx_ptr = tx_bulk[idx];
+                TransactionExecution *tx_ptr = txm_buffer_[idx];
                 if (tx_ptr->TxStatus() == TxnStatus::Finished)
                 {
                     continue;
@@ -777,14 +775,19 @@ public:
                 }
                 else if (txm_status == TxmStatus::ForwardFailed)
                 {
-                    backup_queue[backup_queue_idx++] = tx_ptr;
+                    txm_backup_.push_back(tx_ptr);
                 }
             }
 
             resume_cnt = resume_tx_queue_.SizeApprox();
         }
 
-        resume_tx_queue_.EnqueueBulk(backup_queue.data(), backup_queue_idx);
+        if (txm_backup_.size() > 0)
+        {
+            resume_tx_queue_.EnqueueBulk(txm_backup_.data(),
+                                         txm_backup_.size());
+            txm_backup_.clear();
+        }
     }
 
     void EnlistWaitingTx(TransactionExecution *txm)
@@ -999,6 +1002,14 @@ private:
     absl::flat_hash_map<TransactionExecution *, TxProgress> tx_progress_;
     uint64_t progress_check_ts_{0};
 #endif
+
+    /**
+     * @brief Replacement for stack array. It should be regards as local
+     * variable.
+     */
+    std::vector<TransactionExecution *> txm_backup_;
+    std::array<TransactionExecution *, 100> txm_buffer_;
+    std::array<TransactionExecution::uptr, 100> utxm_buffer_;
 
     metrics::TimePoint busy_round_start_;
     bool is_busy_round_{false};
