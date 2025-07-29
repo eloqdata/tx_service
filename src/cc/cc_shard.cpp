@@ -1425,8 +1425,8 @@ const BucketInfo *CcShard::GetRangeOwner(int32_t range_id,
     return local_shards_.GetRangeOwner(range_id, ng_id);
 }
 
-const std::unordered_map<uint16_t, std::unique_ptr<BucketInfo>> *
-CcShard::GetAllBucketInfos(NodeGroupId ng_id) const
+const std::unordered_map<uint16_t, std::unique_ptr<BucketInfo>>
+    *CcShard::GetAllBucketInfos(NodeGroupId ng_id) const
 {
     return local_shards_.GetAllBucketInfos(ng_id);
 }

@@ -4265,7 +4265,7 @@ private:
     // Reserved for schema op log replay
     const std::unordered_set<TableName> *range_splitting_;
 
-    std::pair<bool, CcErrorCode> upsert_kv_err_code_{false,
+    std::pair<bool, CcErrorCode> upsert_kv_err_code_{true,
                                                      CcErrorCode::NO_ERROR};
 
     friend std::ostream &operator<<(std::ostream &outs,
