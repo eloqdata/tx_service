@@ -207,6 +207,10 @@ void DataSyncTask::SetScanTaskFinished()
 {
     std::unique_lock<std::mutex> task_sender_lk(status_->mux_);
     status_->unfinished_scan_tasks_--;
+    DLOG(INFO) << "SetScanTaskFinished, unfinished_scan_tasks_: "
+               << status_->unfinished_scan_tasks_ << ", all_task_started_: "
+               << status_->all_task_started_ << ", unfinished_tasks_: "
+               << status_->unfinished_tasks_;
 
     if (status_->unfinished_scan_tasks_ == 0 && status_->all_task_started_ &&
         status_->unfinished_tasks_ != 0)

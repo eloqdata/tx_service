@@ -3387,7 +3387,7 @@ public:
             pause_pos_.emplace_back(nullptr, false);
 #endif
             accumulated_scan_cnt_.emplace_back(0);
-            accumulated_mem_usage_.emplace_back(0);
+            accumulated_flush_data_size_.emplace_back(0);
         }
 
 #ifdef RANGE_PARTITION_ENABLED
@@ -3499,17 +3499,15 @@ public:
             }
 
             accumulated_scan_cnt_.at(i) = 0;
-            accumulated_mem_usage_.at(i) = 0;
+            accumulated_flush_data_size_.at(i) = 0;
         }
 
-#ifdef ON_KEY_OBJECT
         if (scan_heap_is_full_)
         {
             // vec has been cleared during ReleaseDataSyncScanHeapCc,
             // resize to prepared size
             data_sync_vec_[0].resize(scan_batch_size_);
         }
-#endif
         err_ = CcErrorCode::NO_ERROR;
         scan_heap_is_full_ = false;
         op_type_ = op_type;
@@ -3640,7 +3638,9 @@ public:
 #endif
 
     std::vector<size_t> accumulated_scan_cnt_;
-    std::vector<uint64_t> accumulated_mem_usage_;
+    std::vector<uint64_t> accumulated_flush_data_size_;
+    // TODO(liunyl): make this a vector and return early when scan mem is full
+    // in range partitioned scan.
     bool scan_heap_is_full_{false};
 
     size_t scan_count_{0};
@@ -3671,9 +3671,6 @@ private:
     std::vector<std::pair<KeyGapLockAndExtraData *, bool>> pause_pos_;
 #endif
     size_t scan_batch_size_;
-
-    // TODO(liunyl): make it configurable based on total memory size
-    size_t max_pending_flush_size_{64 * 1024 * 1024};
 
     CcErrorCode err_{CcErrorCode::NO_ERROR};
     uint32_t unfinished_cnt_;

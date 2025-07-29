@@ -5330,7 +5330,7 @@ public:
         bool export_base_table_item_if_need,
         bool export_base_table_item_only,
         bool export_base_table_key_only,
-        uint64_t &mem_usage) const
+        uint64_t &flush_size) const
     {
         // This override heap thread call is not necessary, since the thread is
         // alreay be overrided before cc_request execution
@@ -5343,9 +5343,7 @@ public:
         std::pair<size_t, bool> export_size = {0, true};
         // Do not try to call mi_heap_collect, since it is expensive, flush data
         // will return the memory anyway when it done
-#ifndef RANGE_PARTITION_ENABLED
         if (!scan_heap->Full())
-#endif
         {
             export_size.first =
                 cce->ExportForCkpt(key,
@@ -5359,7 +5357,7 @@ public:
                                    export_base_table_item_if_need,
                                    export_base_table_item_only,
                                    export_base_table_key_only,
-                                   mem_usage);
+                                   flush_size);
             export_size.second = false;
         }
 
@@ -5822,7 +5820,7 @@ public:
             if (need_export)
             {
                 assert(cce->entry_info_.DataStoreSize() != INT32_MAX);
-                uint64_t mem_usage = 0;
+                uint64_t flush_size = 0;
                 ExportForCkpt(cce,
                               *key,
                               req.DataSyncVec(shard_->core_id_),
@@ -5835,9 +5833,9 @@ public:
                               req.export_base_table_item_,
                               req.export_base_table_item_only_,
                               export_persisted_key_only,
-                              mem_usage);
+                              flush_size);
 
-                req.accumulated_mem_usage_[shard_->core_id_] += mem_usage;
+                req.accumulated_flush_data_size_[shard_->core_id_] += flush_size;
             }
 
             // Forward the iterator
@@ -6084,7 +6082,7 @@ public:
 
         for (size_t scan_cnt = 0;
              scan_cnt < DataSyncScanCc::DataSyncScanBatchSize &&
-             req.accumulated_mem_usage_[vec_idx] + mem_usage <
+             req.accumulated_flush_data_size_[vec_idx] + mem_usage <
                  req.max_pending_flush_size_ &&
              it != end_it && it != end_it_next_page_it;
              scan_cnt++)
@@ -6147,7 +6145,7 @@ public:
                                       false,
                                       false,
                                       mem_usage);
-                    req.accumulated_mem_usage_[vec_idx] += mem_usage;
+                    req.accumulated_flush_data_size_[vec_idx] += mem_usage;
 
                     if (export_result.second)
                     {
@@ -6237,7 +6235,7 @@ public:
                                           false,
                                           false,
                                           mem_usage);
-                        req.accumulated_mem_usage_[vec_idx] += mem_usage;
+                        req.accumulated_flush_data_size_[vec_idx] += mem_usage;
                         if (export_result.second)
                         {
                             is_scan_mem_full = true;
@@ -6298,7 +6296,7 @@ public:
                 req.SetFinish(vec_idx);
                 return false;
             }
-            else if (req.accumulated_mem_usage_[vec_idx] + mem_usage <
+            else if (req.accumulated_flush_data_size_[vec_idx] + mem_usage <
                      req.max_pending_flush_size_)
             {
                 // Put DataSyncScanCc request into CcQueue again.
@@ -7156,7 +7154,7 @@ public:
                 if (req.WithFlush())
                 {
                     std::vector<FlushRecord> tmp_ckpt_vec(1);
-                    uint64_t mem_usage = 0;
+                    size_t flush_size = 0;
                     size_t tmp_ckpt_vec_size = 0;
 
                     std::vector<FlushRecord> tmp_akv_vec;
@@ -7175,7 +7173,7 @@ public:
                                   false,
                                   false,
                                   false,
-                                  mem_usage);
+                                  flush_size);
 
                     assert(tmp_ckpt_vec_size <= 1);
                     size_t offset = 0;
@@ -7229,7 +7227,7 @@ public:
                             nullptr,
                             data_sync_task,
                             table_schema,
-                            mem_usage);
+                            flush_size);
 
                     std::unordered_map<
                         std::string_view,

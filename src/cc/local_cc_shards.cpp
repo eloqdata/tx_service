@@ -3070,6 +3070,9 @@ void LocalCcShards::PostProcessDataSyncTask(std::shared_ptr<DataSyncTask> task,
     }
     std::unique_lock<bthread::Mutex> flight_task_lk(task->flight_task_mux_);
     int64_t flight_task_cnt = --task->flight_task_cnt_;
+    LOG(INFO) << "PostProcessDataSyncTask, flight_task_cnt: " << flight_task_cnt
+              << ", is_scan_task: " << is_scan_task
+              << ", table: " << task->table_name_.Trace();
 
     if (task->ckpt_err_ == DataSyncTask::CkptErrorCode::NO_ERROR)
     {
@@ -3165,6 +3168,8 @@ void LocalCcShards::PostProcessDataSyncTask(std::shared_ptr<DataSyncTask> task,
         }
         else if (task_ckpt_err == DataSyncTask::CkptErrorCode::SCAN_ERROR)
         {
+            // TODO(liunyl): Should not decrease on flight task and scan
+            // finished task?
             if (!task->during_split_range_)
             {
                 txservice::AbortTx(data_sync_txm);
@@ -3333,6 +3338,7 @@ void LocalCcShards::DataSync(std::unique_lock<std::mutex> &task_worker_lk,
                 if (data_sync_task->data_sync_ts_ <= last_sync_ts && !is_dirty)
                 {
                     data_sync_task->SetFinish();
+                    data_sync_task->SetScanTaskFinished();
                     PopPendingTask(
                         ng_id, expected_ng_term, table_name, range_id);
                     assert(need_process == false);
@@ -3864,19 +3870,19 @@ void LocalCcShards::DataSync(std::unique_lock<std::mutex> &task_worker_lk,
         else
         {
             scan_data_drained = true;
-            assert(scan_cc.accumulated_mem_usage_.size() == cc_shards_.size());
-            uint64_t scan_mem_usage = 0;
-            for (size_t mem_usage : scan_cc.accumulated_mem_usage_)
+            assert(scan_cc.accumulated_flush_data_size_.size() == cc_shards_.size());
+            uint64_t flush_data_size = 0;
+            for (size_t flush_data_size_per_core : scan_cc.accumulated_flush_data_size_)
             {
-                scan_mem_usage += mem_usage;
+                flush_data_size += flush_data_size_per_core;
             }
             // This thread will wait in AllocatePendingFlushDataMemQuota if
             // quota is not available
             uint64_t old_usage =
                 data_sync_mem_controller_.AllocateFlushDataMemQuota(
-                    scan_mem_usage);
+                    flush_data_size);
             DLOG(INFO) << "AllocateFlushDataMemQuota old_usage: " << old_usage
-                       << " new_usage: " << old_usage + scan_mem_usage
+                       << " new_usage: " << old_usage + flush_data_size
                        << " quota: "
                        << data_sync_mem_controller_.FlushMemoryQuota()
                        << " flight_tasks: " << data_sync_task->flight_task_cnt_
@@ -4065,7 +4071,7 @@ void LocalCcShards::DataSync(std::unique_lock<std::mutex> &task_worker_lk,
                                                  data_sync_txm,
                                                  data_sync_task,
                                                  table_schema,
-                                                 scan_mem_usage));
+                                                 flush_data_size));
 
             // Reset
             scan_cc.Reset();
@@ -4640,7 +4646,7 @@ void LocalCcShards::DataSync(std::unique_lock<std::mutex> &task_worker_lk,
                 }
             }
 
-            uint64_t scan_mem_usage = scan_cc.accumulated_mem_usage_[0];
+            uint64_t flush_data_size = scan_cc.accumulated_flush_data_size_[0];
 
             // nothing to flush
             if (scan_cc.accumulated_scan_cnt_[0] == 0)
@@ -4656,9 +4662,9 @@ void LocalCcShards::DataSync(std::unique_lock<std::mutex> &task_worker_lk,
             // quota is not available
             uint64_t old_usage =
                 data_sync_mem_controller_.AllocateFlushDataMemQuota(
-                    scan_mem_usage);
+                    flush_data_size);
             DLOG(INFO) << "AllocateFlushDataMemQuota old_usage: " << old_usage
-                       << " new_usage: " << old_usage + scan_mem_usage
+                       << " new_usage: " << old_usage + flush_data_size
                        << " quota: "
                        << data_sync_mem_controller_.FlushMemoryQuota()
                        << " flight_tasks: " << data_sync_task->flight_task_cnt_
@@ -4712,7 +4718,7 @@ void LocalCcShards::DataSync(std::unique_lock<std::mutex> &task_worker_lk,
                       scan_cc.ArchiveVec(0).end(),
                       std::back_inserter(*archive_vec));
 
-            vec_mem_usage += scan_mem_usage;
+            vec_mem_usage += flush_data_size;
 
             scan_data_drained = scan_cc.IsDrained(0) && scan_data_drained;
 
@@ -5502,16 +5508,19 @@ void LocalCcShards::FlushData(std::unique_lock<std::mutex> &flush_worker_lk)
                     }
                 }
 
-                UpdateCceCkptTsCc update_cce_req(
-                    entry->data_sync_task_->node_group_id_,
-                    entry->data_sync_task_->node_group_term_,
-                    cce_entries_map);
-                for (auto &[core_idx, cce_entries] : cce_entries_map)
+                if (cce_entries_map.size() > 0)
                 {
-                    updated_ckpt_ts_core_ids.insert(core_idx);
-                    EnqueueToCcShard(core_idx, &update_cce_req);
+                    UpdateCceCkptTsCc update_cce_req(
+                        entry->data_sync_task_->node_group_id_,
+                        entry->data_sync_task_->node_group_term_,
+                        cce_entries_map);
+                    for (auto &[core_idx, cce_entries] : cce_entries_map)
+                    {
+                        updated_ckpt_ts_core_ids.insert(core_idx);
+                        EnqueueToCcShard(core_idx, &update_cce_req);
+                    }
+                    update_cce_req.Wait();
                 }
-                update_cce_req.Wait();
             }
         }
     }
