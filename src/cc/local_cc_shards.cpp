@@ -3296,6 +3296,7 @@ void LocalCcShards::DataSync(std::unique_lock<std::mutex> &task_worker_lk,
         {
             // table dropped
             data_sync_task->SetError(CcErrorCode::REQUESTED_TABLE_NOT_EXISTS);
+            data_sync_task->SetScanTaskFinished();
             ClearAllPendingTasks(ng_id, expected_ng_term, table_name, range_id);
         }
         else
@@ -3346,6 +3347,7 @@ void LocalCcShards::DataSync(std::unique_lock<std::mutex> &task_worker_lk,
                 // range no longer belong to this ng.
                 data_sync_task->SetError(
                     CcErrorCode::REQUESTED_NODE_NOT_LEADER);
+                data_sync_task->SetScanTaskFinished();
                 PopPendingTask(ng_id, expected_ng_term, table_name, range_id);
             }
         }
@@ -3370,6 +3372,7 @@ void LocalCcShards::DataSync(std::unique_lock<std::mutex> &task_worker_lk,
 
             // Finish this task and notify the caller.
             data_sync_task->SetError(CcErrorCode::REQUESTED_NODE_NOT_LEADER);
+            data_sync_task->SetScanTaskFinished();
             PopPendingTask(ng_id, expected_ng_term, table_name, range_id);
 
             if (ng_term >= 0)
@@ -3454,6 +3457,7 @@ void LocalCcShards::DataSync(std::unique_lock<std::mutex> &task_worker_lk,
                 // If table is deleted(!Normal), skip the table. Return finish
                 // directly.
                 data_sync_task->SetError();
+                data_sync_task->SetScanTaskFinished();
 
                 ClearAllPendingTasks(
                     ng_id, expected_ng_term, table_name, range_id);
@@ -3513,6 +3517,7 @@ void LocalCcShards::DataSync(std::unique_lock<std::mutex> &task_worker_lk,
                           << table_name.Trace() << ". Return finish directly.";
 
                 data_sync_task->SetFinish();
+                data_sync_task->SetScanTaskFinished();
                 PopPendingTask(ng_id, expected_ng_term, table_name, range_id);
 
                 return;
@@ -3567,6 +3572,7 @@ void LocalCcShards::DataSync(std::unique_lock<std::mutex> &task_worker_lk,
             txservice::AbortTx(data_sync_txm);
 
             data_sync_task->SetError();
+            data_sync_task->SetScanTaskFinished();
             PopPendingTask(ng_id, expected_ng_term, table_name, range_id);
 
             return;
@@ -3580,6 +3586,7 @@ void LocalCcShards::DataSync(std::unique_lock<std::mutex> &task_worker_lk,
                 << "DataSync range version mismatch with data sync ts: "
                 << data_sync_task->data_sync_ts_;
             data_sync_task->SetErrorCode(CcErrorCode::GET_RANGE_ID_ERR);
+            data_sync_task->SetScanTaskFinished();
         }
 
         assert(!store_range);
@@ -3717,6 +3724,7 @@ void LocalCcShards::DataSync(std::unique_lock<std::mutex> &task_worker_lk,
                        << table_name.StringView();
 
             data_sync_task->SetError();
+            data_sync_task->SetScanTaskFinished();
             // Handle the pending tasks for the same range
             PopPendingTask(ng_id, expected_ng_term, table_name, range_id);
 
@@ -4231,7 +4239,7 @@ void LocalCcShards::DataSync(std::unique_lock<std::mutex> &task_worker_lk,
     if (catalog_entry == nullptr)
     {
         data_sync_task->SetError(CcErrorCode::REQUESTED_TABLE_NOT_EXISTS);
-
+        data_sync_task->SetScanTaskFinished();
         ClearAllPendingTasks(ng_id, expected_ng_term, table_name, worker_idx);
     }
     else
@@ -4264,6 +4272,7 @@ void LocalCcShards::DataSync(std::unique_lock<std::mutex> &task_worker_lk,
         if (data_sync_task->data_sync_ts_ <= last_sync_ts && !is_dirty)
         {
             data_sync_task->SetFinish();
+            data_sync_task->SetScanTaskFinished();
 
             PopPendingTask(ng_id, expected_ng_term, table_name, worker_idx);
 
@@ -4315,6 +4324,7 @@ void LocalCcShards::DataSync(std::unique_lock<std::mutex> &task_worker_lk,
                    << ", and the expected leader term: " << expected_ng_term;
         // Finish this task and notify the caller.
         data_sync_task->SetError(CcErrorCode::REQUESTED_NODE_NOT_LEADER);
+        data_sync_task->SetScanTaskFinished();
 
         ClearAllPendingTasks(ng_id, expected_ng_term, table_name, worker_idx);
 
@@ -4376,6 +4386,7 @@ void LocalCcShards::DataSync(std::unique_lock<std::mutex> &task_worker_lk,
             // If table is deleted(!Normal), skip the table. Return finish
             // directly.
             data_sync_task->SetError(CcErrorCode::REQUESTED_TABLE_NOT_EXISTS);
+            data_sync_task->SetScanTaskFinished();
 
             ClearAllPendingTasks(
                 ng_id, expected_ng_term, table_name, worker_idx);
@@ -4907,6 +4918,7 @@ void LocalCcShards::ClearAllPendingTasks(NodeGroupId ng_id,
     {
         auto &task = iter->second->pending_tasks_.front();
         task->SetError(CcErrorCode::REQUESTED_TABLE_NOT_EXISTS);
+        task->SetScanTaskFinished();
         iter->second->pending_tasks_.pop();
     }
 
@@ -5207,6 +5219,7 @@ void LocalCcShards::SplitFlushRange(
 
         range_entry->UnPinStoreRange();
         data_sync_task->SetError(CcErrorCode::DATA_STORE_ERR);
+        data_sync_task->SetScanTaskFinished();
 
         PopPendingTask(node_group,
                        data_sync_task->node_group_term_,
@@ -5264,6 +5277,7 @@ void LocalCcShards::SplitFlushRange(
         range_entry->UnPinStoreRange();
 
         data_sync_task->SetError();
+        data_sync_task->SetScanTaskFinished();
 
         PopPendingTask(node_group,
                        data_sync_task->node_group_term_,
@@ -5278,7 +5292,7 @@ void LocalCcShards::SplitFlushRange(
     range_entry->UnPinStoreRange();
 
     data_sync_task->SetFinish();
-
+    data_sync_task->SetScanTaskFinished();
     PopPendingTask(node_group,
                    data_sync_task->node_group_term_,
                    table_name,

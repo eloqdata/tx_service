@@ -157,6 +157,8 @@ public:
 
     void SetError(CcErrorCode err_code = CcErrorCode::DATA_STORE_ERR);
 
+    // TODO(liunyl)Put this into post process data sync task? SetFinish/SetError should not be called in
+    // DataSync(). It should only call post process data sync task, which handles everything.
     void SetScanTaskFinished();
 
     void SetErrorCode(CcErrorCode err_code)
