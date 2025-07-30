@@ -623,7 +623,7 @@ std::unordered_map<TableName, bool> LocalCcShards::GetCatalogTableNameSnapshot(
                         }
                     }
                 } /* End of dirty index table schema */
-            }     /* End of this base table */
+            } /* End of this base table */
         }
     }
     return tables;
@@ -1118,9 +1118,9 @@ void LocalCcShards::PublishMessage(const std::string &chan,
     }
 }
 
-std::map<TxKey, TableRangeEntry::uptr>
-    *LocalCcShards::GetTableRangesForATableInternal(
-        const TableName &range_table_name, const NodeGroupId ng_id)
+std::map<TxKey, TableRangeEntry::uptr> *
+LocalCcShards::GetTableRangesForATableInternal(
+    const TableName &range_table_name, const NodeGroupId ng_id)
 {
     auto table_it = table_ranges_.find(range_table_name);
     if (table_it == table_ranges_.end())
@@ -1168,9 +1168,9 @@ std::optional<std::vector<uint32_t>> LocalCcShards::GetTableRangeIds(
     return table_range_ids;
 }
 
-std::unordered_map<uint32_t, TableRangeEntry *>
-    *LocalCcShards::GetTableRangeIdsForATableInternal(
-        const TableName &range_table_name, const NodeGroupId ng_id)
+std::unordered_map<uint32_t, TableRangeEntry *> *
+LocalCcShards::GetTableRangeIdsForATableInternal(
+    const TableName &range_table_name, const NodeGroupId ng_id)
 {
     auto table_it = table_range_ids_.find(range_table_name);
     if (table_it == table_range_ids_.end())
@@ -1853,8 +1853,8 @@ std::vector<std::pair<uint16_t, NodeGroupId>> LocalCcShards::GetAllBucketOwners(
     return bucket_owners;
 }
 
-const std::unordered_map<uint16_t, std::unique_ptr<BucketInfo>>
-    *LocalCcShards::GetAllBucketInfos(NodeGroupId ng_id) const
+const std::unordered_map<uint16_t, std::unique_ptr<BucketInfo>> *
+LocalCcShards::GetAllBucketInfos(NodeGroupId ng_id) const
 {
     std::shared_lock<std::shared_mutex> lk(meta_data_mux_);
     auto ng_bucket_it = bucket_infos_.find(ng_id);
@@ -1865,8 +1865,8 @@ const std::unordered_map<uint16_t, std::unique_ptr<BucketInfo>>
     return &ng_bucket_it->second;
 }
 
-const std::unordered_map<uint16_t, std::unique_ptr<BucketInfo>>
-    *LocalCcShards::GetAllBucketInfosNoLocking(const NodeGroupId ng_id) const
+const std::unordered_map<uint16_t, std::unique_ptr<BucketInfo>> *
+LocalCcShards::GetAllBucketInfosNoLocking(const NodeGroupId ng_id) const
 {
     auto ng_bucket_it = bucket_infos_.find(ng_id);
     if (ng_bucket_it == bucket_infos_.end())
@@ -3160,6 +3160,8 @@ void LocalCcShards::PostProcessDataSyncTask(std::shared_ptr<DataSyncTask> task,
                 txservice::AbortTx(data_sync_txm);
                 range_entry->UnPinStoreRange();
             }
+
+            task->ckpt_err_ = DataSyncTask::CkptErrorCode::NO_ERROR;
             std::lock_guard<std::mutex> task_worker_lk(
                 data_sync_worker_ctx_.mux_);
             data_sync_task_queue_.emplace_front(task);
@@ -4143,6 +4145,8 @@ void LocalCcShards::PostProcessDataSyncTask(std::shared_ptr<DataSyncTask> task,
         {
             txservice::AbortTx(data_sync_txm);
 
+            // reset error code
+            task->ckpt_err_ = DataSyncTask::CkptErrorCode::NO_ERROR;
             std::lock_guard<std::mutex> task_worker_lk(
                 data_sync_worker_ctx_.mux_);
             data_sync_task_queue_[worker_idx].emplace_front(task);
