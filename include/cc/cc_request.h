@@ -3388,6 +3388,7 @@ public:
 #endif
             accumulated_scan_cnt_.emplace_back(0);
             accumulated_flush_data_size_.emplace_back(0);
+            scan_heap_is_full_.emplace_back(0);
         }
 
 #ifdef RANGE_PARTITION_ENABLED

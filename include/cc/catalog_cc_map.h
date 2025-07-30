@@ -142,7 +142,17 @@ public:
             }
         }
 
-        return TemplateCcMap::Execute(req);
+        bool ret = TemplateCcMap::Execute(req);
+        if (!ret)
+        {
+            // Acquire lock blocked. We need to flush the data sync
+            // flush buffer so that catalog read lock held by the 
+            // data sync tx can be released.
+            shard_->local_shards_.FlushCurrentFlushBuffer();
+        }
+
+        return ret;
+
     }
 
     bool Execute(PostWriteAllCc &req) override

@@ -278,7 +278,14 @@ public:
 
     uint64_t FlushSize()
     {
-        return Key().Size() + PayloadSize();
+        if (std::holds_alternative<TxKey>(flush_key_))
+        {
+            return Key().Size() + PayloadSize();
+        }
+        else
+        {
+            return sizeof(size_t) + PayloadSize();
+        }
     }
 };
 
