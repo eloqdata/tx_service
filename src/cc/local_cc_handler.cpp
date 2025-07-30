@@ -303,65 +303,6 @@ txservice::CcReqStatus txservice::LocalCcHandler::PostWrite(
     return req_status;
 }
 
-void txservice::LocalCcHandler::UploadRecord(
-    TxNumber tx_number,
-    int64_t tx_term,
-    uint16_t command_id,
-    uint64_t commit_ts,
-    const TableName &table_name,
-    const TxKey &key,
-    const TxRecord *record,
-    OperationType operation_type,
-    uint32_t key_shard_code,
-    CcHandlerResult<PostProcessResult> &hres,
-    int64_t expected_term)
-{
-    uint32_t ng_id = Sharder::Instance().ShardToCcNodeGroup(key_shard_code);
-    uint32_t dest_node_id = Sharder::Instance().LeaderNodeId(ng_id);
-#ifdef EXT_TX_PROC_ENABLED
-    hres.SetToBlock();
-#endif
-
-    if (dest_node_id == cc_shards_.node_id_)
-    {
-        PostWriteCc *req = postwrite_pool.NextRequest();
-        req->Reset(&key,
-                   table_name,
-                   ng_id,
-                   tx_number,
-                   tx_term,
-                   commit_ts,
-                   record,
-                   operation_type,
-                   key_shard_code,
-                   &hres,
-                   (operation_type == OperationType::Insert),
-                   expected_term);
-
-        TX_TRACE_ACTION(this, req);
-        TX_TRACE_DUMP(req);
-        cc_shards_.EnqueueCcRequest(key_shard_code, req);
-    }
-    else
-    {
-        hres.Value().is_local_ = false;
-        hres.IncreaseRemoteRef();
-
-        remote_hd_.UploadRecord(cc_shards_.node_id_,
-                                tx_number,
-                                tx_term,
-                                command_id,
-                                commit_ts,
-                                expected_term,
-                                key,
-                                table_name,
-                                record,
-                                operation_type,
-                                key_shard_code,
-                                hres);
-    }
-}
-
 txservice::CcReqStatus txservice::LocalCcHandler::PostRead(
     uint64_t tx_number,
     int64_t tx_term,

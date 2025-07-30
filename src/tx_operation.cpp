@@ -43,6 +43,7 @@
 #include "log_type.h"
 #include "range_record.h"
 #include "range_slice.h"
+#include "sequences/sequences.h"
 #include "sharder.h"
 #include "store/data_store_handler.h"
 #include "tx_execution.h"
@@ -2353,8 +2354,7 @@ UpsertTableOp::UpsertTableOp(const std::string_view table_name_str,
       post_all_intent_op_(txm),
       unlock_cluster_config_op_(txm),
       upsert_kv_table_op_(&table_key_.Name(), op_type, txm),
-      sequence_data_log_op_(txm),
-      reset_sequence_record_op_(txm),
+      update_sequence_table_op_(txm),
       acquire_all_lock_op_(txm),
       commit_log_op_(txm),
       clean_ccm_op_(txm),
@@ -2402,9 +2402,8 @@ UpsertTableOp::UpsertTableOp(const std::string_view table_name_str,
     TX_TRACE_ASSOCIATE(this, &prepare_log_op_, "prepare_log_op_");
     TX_TRACE_ASSOCIATE(this, &post_all_intent_op_, "post_all_intent_op_");
     TX_TRACE_ASSOCIATE(this, &upsert_kv_table_op_, "upsert_kv_table_op_");
-    TX_TRACE_ASSOCIATE(this, &sequence_data_log_op_, "sequence_data_log_op_");
     TX_TRACE_ASSOCIATE(
-        this, &reset_sequence_record_op_, "reset_sequence_record_op_");
+        this, &update_sequence_table_op_, "update_sequence_table_op_");
     TX_TRACE_ASSOCIATE(this, &acquire_all_lock_op_, "acquire_all_lock_op_");
     TX_TRACE_ASSOCIATE(this, &commit_log_op_, "commit_log_op_");
     TX_TRACE_ASSOCIATE(this, &post_all_lock_op_, "post_all_lock_op_");
@@ -2736,227 +2735,160 @@ void UpsertTableOp::Forward(TransactionExecution *txm)
                 ForceToFinish(txm);
             }
         }
-        else if ((op_type_ == OperationType::DropTable ||
-                  op_type_ == OperationType::TruncateTable) &&
-                 !catalog_rec_.Schema()->HasAutoIncrement())
+        else if (op_type_ == OperationType::CreateTable ||
+                 op_type_ == OperationType::DropTable ||
+                 op_type_ == OperationType::TruncateTable)
         {
-            const TableSchema *table_old_schema = catalog_rec_.Schema();
-            assert(table_old_schema->GetBaseTableName() == table_key_.Name());
-            assert(clean_ccm_op_.table_names_.empty());
+            bool need_update_sequence_table = false;
 
-            auto clean_ccm_names = table_old_schema->IndexNames();
-#ifdef ON_KEY_OBJECT
-            assert(clean_ccm_names.empty());
+#ifdef RANGE_PARTITION_ENABLED
+            need_update_sequence_table = true;
+#else
+            need_update_sequence_table =
+                op_type_ == OperationType::CreateTable
+                    ? catalog_rec_.DirtySchema()->HasAutoIncrement()
+                    : catalog_rec_.Schema()->HasAutoIncrement();
 #endif
-            clean_ccm_names.emplace_back(
-                table_old_schema->GetBaseTableName().StringView().data(),
-                table_old_schema->GetBaseTableName().StringView().size(),
-                table_old_schema->GetBaseTableName().Type(),
-                table_old_schema->GetBaseTableName().Engine());
-            clean_ccm_op_.table_names_ = std::move(clean_ccm_names);
-
-            clean_ccm_op_.clean_type_ = CleanType::CleanCcm;
-            clean_ccm_op_.commit_ts_ = txm->CommitTs();
-
-            LOG(INFO)
-                << "UpsertTableOp: Clean all ccmap on all node groups, txn: "
-                << txm->TxNumber();
-
-            op_ = &clean_ccm_op_;
-            txm->PushOperation(&clean_ccm_op_);
-            DLOG(INFO) << "txn: " << txm->TxNumber()
-                       << " process clean_ccm_op_";
-            txm->Process(clean_ccm_op_);
-        }
-        else if ((op_type_ == OperationType::CreateTable &&
-                  catalog_rec_.DirtySchema()->HasAutoIncrement()) ||
-                 ((op_type_ == OperationType::DropTable ||
-                   op_type_ == OperationType::TruncateTable) &&
-                  catalog_rec_.Schema()->HasAutoIncrement()))
-        {
-            // For CREATE or DROP TABLE, if this table has auto increment
-            // column, should init or delete the sequence record whose key is
-            // the table's table name in the sequence table ccmap. Firstly,
-            // write the sequence data log, which can ensure the data in the
-            // sequence table is correct even if failover occurs. Secondly, post
-            // write the record into sequence ccmap. It doesn't matter whether
-            // perform these two operations with a write intent or with a write
-            // lock, because the table is inavailable until table is
-            // successfully created.
-
-            const TableName *seq_table_name;
-            if (op_type_ == OperationType::CreateTable)
+            if (need_update_sequence_table)
             {
-                seq_table_name =
-                    catalog_rec_.DirtySchema()->GetSequenceTableName();
-                auto seq_key_rec =
-                    catalog_rec_.DirtySchema()->GetSequenceKeyAndInitRecord(
-                        table_key_.Name());
-                // Upsert sequence record of this table in the sequence
-                // ccmap.
-                txm->rw_set_.AddWrite(*seq_table_name,
-                                      0,
-                                      std::move(seq_key_rec.first),
-                                      std::move(seq_key_rec.second),
-                                      OperationType::Update);
+                update_sequence_table_op_.op_func_ =
+                    [this](AsyncOp<Void> &async_op) mutable
+                {
+                    CcHandlerResult<Void> &hd_res = async_op.hd_result_;
+#ifdef EXT_TX_PROC_ENABLED
+                    hd_res.SetToBlock();
+                    // The memory fence ensures that the block flag is set
+                    // before the background thread is executed.
+                    std::atomic_thread_fence(std::memory_order_release);
+#endif
+                    assert(txservice::Sequences::Initialized());
+                    // Launch a new thread instead of sending it to workerpool
+                    // to avoid being blocked during write lock is held.
+                    async_op.worker_thread_ = std::thread(
+                        [this, &hd_res]() mutable
+                        {
+                            bool succ = true;
+                            const TableName &table_name = table_key_.Name();
+#ifdef RANGE_PARTITION_ENABLED
+                            // Update sequence table about the range id info.
+                            if (op_type_ == OperationType::CreateTable ||
+                                op_type_ == OperationType::TruncateTable)
+                            {
+                                int32_t init_range_id =
+                                    Sequences::InitialRangePartitionIdOf(
+                                        table_name);
+                                succ = Sequences::InitIdOfTableRangePartition(
+                                    table_name, init_range_id);
+                            }
+                            else if (op_type_ == OperationType::DropTable)
+                            {
+                                succ = Sequences::DeleteSequence(
+                                    table_name, SequenceType::RangePartitionId);
+                            }
+#endif
+
+                            bool has_auto_increment =
+                                op_type_ == OperationType::CreateTable
+                                    ? catalog_rec_.DirtySchema()
+                                          ->HasAutoIncrement()
+                                    : catalog_rec_.Schema()->HasAutoIncrement();
+                            if (succ && has_auto_increment)
+                            {
+                                // Update sequence table about the auto
+                                // increment info.
+                                if (op_type_ == OperationType::CreateTable ||
+                                    op_type_ == OperationType::TruncateTable)
+                                {
+                                    succ =
+                                        Sequences::InitIdOfAutoIncrementColumn(
+                                            table_name);
+                                }
+                                else if (op_type_ == OperationType::DropTable)
+                                {
+                                    succ = Sequences::DeleteSequence(
+                                        table_name,
+                                        SequenceType::AutoIncrementColumn);
+                                }
+                            }
+
+                            if (succ)
+                            {
+                                hd_res.SetFinished();
+                            }
+                            else
+                            {
+                                LOG(ERROR) << "UpsertTableOp: failed to update"
+                                              " sequence info for table: "
+                                           << table_name.StringView();
+                                hd_res.SetError(
+                                    CcErrorCode::UPDATE_SEQUENCE_TABLE_FAIL);
+                            }
+                        });
+                };
+
+                DLOG(INFO) << "txn: " << txm->TxNumber()
+                           << " process update_sequence_table_op_";
+                op_ = &update_sequence_table_op_;
+                txm->PushOperation(&update_sequence_table_op_);
+                txm->Process(update_sequence_table_op_);
+            }
+            else if (op_type_ == OperationType::DropTable ||
+                     op_type_ == OperationType::TruncateTable)
+            {
+                const TableSchema *table_old_schema = catalog_rec_.Schema();
+                assert(table_old_schema->GetBaseTableName() ==
+                       table_key_.Name());
+                assert(clean_ccm_op_.table_names_.empty());
+
+                auto clean_ccm_names = table_old_schema->IndexNames();
+#ifdef ON_KEY_OBJECT
+                assert(clean_ccm_names.empty());
+#endif
+                clean_ccm_names.emplace_back(
+                    table_old_schema->GetBaseTableName().StringView().data(),
+                    table_old_schema->GetBaseTableName().StringView().size(),
+                    table_old_schema->GetBaseTableName().Type(),
+                    table_old_schema->GetBaseTableName().Engine());
+                clean_ccm_op_.table_names_ = std::move(clean_ccm_names);
+                clean_ccm_op_.clean_type_ = CleanType::CleanCcm;
+                clean_ccm_op_.commit_ts_ = txm->CommitTs();
+
+                LOG(INFO) << "UpsertTableOp: Clean all ccmap on all node "
+                             "groups, txn: "
+                          << txm->TxNumber();
+
+                op_ = &clean_ccm_op_;
+                txm->PushOperation(&clean_ccm_op_);
+                txm->Process(clean_ccm_op_);
             }
             else
             {
-                seq_table_name = catalog_rec_.Schema()->GetSequenceTableName();
-                auto seq_key_rec =
-                    catalog_rec_.Schema()->GetSequenceKeyAndInitRecord(
-                        table_key_.Name());
-                // Upsert sequence record of this table in the sequence
-                // ccmap.
-                txm->rw_set_.AddWrite(*seq_table_name,
-                                      0,
-                                      std::move(seq_key_rec.first),
-                                      nullptr,
-                                      OperationType::Delete);
+                op_ = &lock_cluster_config_op_;
+                txm->PushOperation(&lock_cluster_config_op_);
+                txm->Process(lock_cluster_config_op_);
             }
-
-            std::unordered_map<TableName, std::pair<uint64_t, TableWriteSet>>
-                &wset = txm->rw_set_.WriteSet();
-            auto wset_it = wset.find(*seq_table_name);
-            TableWriteSet &table_write_set = wset_it->second.second;
-            assert(table_write_set.size() == 1);
-            auto write_entry_it = table_write_set.begin();
-            const TxKey &write_key = write_entry_it->first;
-            WriteSetEntry &write_entry = write_entry_it->second;
-
-            size_t hash = write_key.Hash();
-            NodeGroupId ng_id;
-#ifdef RANGE_PARTITION_ENABLED
-            // Make sure current node is still ng leader before visiting range
-            // and bucket meta data.
-            if (!txm->CheckLeaderTerm())
-            {
-                ForceToFinish(txm);
-                return;
-            }
-            // Assign fixed range partition id for sequences table. map range
-            // partition id to range owner.
-            int32_t range_id = 0;
-            // Transaction always started from the preferred leader node, which
-            // mean the cc node group id is equal to the cc node id.
-            NodeGroupId tx_ng_id = txm->TxCcNodeId();
-            auto bucket_info =
-                Sharder::Instance().GetLocalCcShards()->GetRangeOwner(range_id,
-                                                                      tx_ng_id);
-            ng_id = bucket_info->BucketOwner();
-            write_entry.key_shard_code_ = (ng_id << 10) | (hash & 0x3FF);
-#else
-            auto bucket_id = Sharder::Instance().MapKeyHashToBucketId(hash);
-            auto *bucket_info = txm->FastToGetBucket(bucket_id);
-            // ClusterScaling and UpsertTable never be executed at same time,
-            // bucket_info never be nullptr.
-            assert(bucket_info != nullptr);
-            ng_id = bucket_info->BucketOwner();
-            write_entry.key_shard_code_ = (ng_id << 10) | (hash & 0x3FF);
-#endif
-
-            write_entry.cce_addr_.SetNodeGroupId(ng_id);
-            // There are no concurrent transactions to access this table, so
-            // there is no need to acquire write lock before write this data
-            // log, and this record is guaranteed to be written successfully,
-            // and further, there is no need to check the term when writing the
-            // data log.
-            write_entry.cce_addr_.SetTerm(SKIP_CHECK_TERM);
-
-            // Write data log.
-            op_ = &sequence_data_log_op_;
-            txm->FillDataLogRequest(sequence_data_log_op_);
-            txm->PushOperation(&sequence_data_log_op_);
-            txm->Process(sequence_data_log_op_);
         }
         else
         {
-            assert(op_type_ == OperationType::CreateTable ||
-                   op_type_ == OperationType::Update);
+            assert(op_type_ == OperationType::Update);
             op_ = &lock_cluster_config_op_;
             txm->PushOperation(&lock_cluster_config_op_);
             txm->Process(lock_cluster_config_op_);
         }
     }
-    else if (op_ == &sequence_data_log_op_)
+    else if (op_ == &update_sequence_table_op_)
     {
-        assert(op_type_ == OperationType::CreateTable ||
-               op_type_ == OperationType::DropTable ||
-               op_type_ == OperationType::TruncateTable);
-        if (sequence_data_log_op_.hd_result_.IsError())
-        {
-            // Fails to flush the data log. Retries the operation if the
-            // tx node is still the leader or the tx is in the  recovery
-            // mode and the cc node is a leader candidate.
-            if (txm->CheckLeaderTerm())
-            {
-                // set retry flag and retry data log
-                LOG(WARNING) << "Upsert table schema transaction retry to write"
-                                " sequence data log, tx_number:"
-                             << txm->TxNumber();
-                ::txlog::WriteLogRequest *log_req =
-                    sequence_data_log_op_.log_closure_.LogRequest()
-                        .mutable_write_log_request();
-                log_req->set_retry(true);
-                txm->PushOperation(&sequence_data_log_op_);
-                txm->Process(sequence_data_log_op_);
-            }
-            else
-            {
-                ForceToFinish(txm);
-            }
-        }
-        else
-        {
-            const TableName *seq_table_name =
-                op_type_ == OperationType::CreateTable
-                    ? catalog_rec_.DirtySchema()->GetSequenceTableName()
-                    : catalog_rec_.Schema()->GetSequenceTableName();
-            std::unordered_map<TableName, std::pair<uint64_t, TableWriteSet>>
-                &wset = txm->rw_set_.WriteSet();
-            auto wset_it = wset.find(*seq_table_name);
-            TableWriteSet &table_write_set = wset_it->second.second;
-            assert(table_write_set.size() == 1);
-            auto write_entry_it = table_write_set.begin();
-            auto &write_entry = write_entry_it->second;
-            const TxKey &tx_key = write_entry_it->first;
-
-            reset_sequence_record_op_.op_func_ =
-                [txm, seq_table_name, &tx_key, &write_entry](
-                    AsyncOp<PostProcessResult> &async_op)
-            {
-                txm->cc_handler_->UploadRecord(
-                    txm->tx_number_.load(std::memory_order_relaxed),
-                    txm->tx_term_,
-                    txm->command_id_.load(std::memory_order_relaxed),
-                    txm->commit_ts_,
-                    *seq_table_name,
-                    tx_key,
-                    write_entry.rec_.get(),
-                    write_entry.op_,
-                    write_entry.key_shard_code_,
-                    async_op.hd_result_);
-            };
-
-            op_ = &reset_sequence_record_op_;
-            txm->PushOperation(&reset_sequence_record_op_);
-            txm->Process(reset_sequence_record_op_);
-        }
-    }
-    else if (op_ == &reset_sequence_record_op_)
-    {
-        // assert(op_type_ == OperationType::CreateTable);
-        if (reset_sequence_record_op_.hd_result_.IsError())
+        if (update_sequence_table_op_.hd_result_.IsError())
         {
             if (txm->CheckLeaderTerm())
             {
                 // Retry
                 LOG(WARNING)
-                    << "Upsert table schema transaction retry to initialze"
-                       " sequence record in ccmap, tx_number:"
+                    << "Upsert table schema transaction retry to update"
+                       " sequence table, tx_number:"
                     << txm->TxNumber();
-                txm->PushOperation(&reset_sequence_record_op_);
-                txm->Process(reset_sequence_record_op_);
+                txm->PushOperation(&update_sequence_table_op_);
+                txm->Process(update_sequence_table_op_);
             }
             else
             {
@@ -2967,11 +2899,6 @@ void UpsertTableOp::Forward(TransactionExecution *txm)
 
         if (op_type_ == OperationType::CreateTable)
         {
-            // Remove the record for sequence table from write set.
-            const TableName *seq_table_name =
-                catalog_rec_.DirtySchema()->GetSequenceTableName();
-            txm->rw_set_.ClearWriteSet(*seq_table_name);
-
             op_ = &lock_cluster_config_op_;
             txm->PushOperation(&lock_cluster_config_op_);
             txm->Process(lock_cluster_config_op_);
@@ -2984,11 +2911,6 @@ void UpsertTableOp::Forward(TransactionExecution *txm)
             const TableSchema *table_old_schema = catalog_rec_.Schema();
             assert(table_old_schema->GetBaseTableName() == table_key_.Name());
             assert(clean_ccm_op_.table_names_.empty());
-
-            // Remove the record for sequence table from write set.
-            const TableName *seq_table_name =
-                table_old_schema->GetSequenceTableName();
-            txm->rw_set_.ClearWriteSet(*seq_table_name);
 
             auto clean_ccm_names = table_old_schema->IndexNames();
 #ifdef ON_KEY_OBJECT
@@ -3386,8 +3308,7 @@ void UpsertTableOp::Reset(const std::string_view table_name_str,
     prepare_log_op_.Reset();
     unlock_cluster_config_op_.Reset();
     upsert_kv_table_op_.Reset();
-    sequence_data_log_op_.Reset();
-    reset_sequence_record_op_.Reset();
+    update_sequence_table_op_.Reset();
     commit_log_op_.Reset();
     clean_log_op_.Reset();
 
@@ -3433,8 +3354,7 @@ void UpsertTableOp::Reset(const std::string_view table_name_str,
     post_all_intent_op_.ResetHandlerTxm(txm);
     unlock_cluster_config_op_.ResetHandlerTxm(txm);
     upsert_kv_table_op_.ResetHandlerTxm(txm);
-    sequence_data_log_op_.ResetHandlerTxm(txm);
-    reset_sequence_record_op_.ResetHandlerTxm(txm);
+    update_sequence_table_op_.ResetHandlerTxm(txm);
     acquire_all_lock_op_.ResetHandlerTxm(txm);
     commit_log_op_.ResetHandlerTxm(txm);
     clean_ccm_op_.ResetHandlerTxm(txm);

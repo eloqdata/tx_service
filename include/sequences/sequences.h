@@ -136,6 +136,7 @@ public:
             coro_functors,
         int16_t group_id);
 
+    static int32_t InitialRangePartitionIdOf(const TableName &table);
     static bool InitIdOfTableRangePartition(const TableName &table,
                                             int32_t last_range_id);
 
@@ -168,6 +169,7 @@ public:
         return std::pair<txservice::TxKey, txservice::TxRecord::Uptr>(
             std::move(seq_tx_key), std::move(seq_tx_rec));
     }
+    static bool InitIdOfAutoIncrementColumn(const TableName &table);
 
     Sequences(TxService *tx_service, store::DataStoreHandler *storage_hd);
     ~Sequences() = default;  // { delete tableSchema_.release(); }

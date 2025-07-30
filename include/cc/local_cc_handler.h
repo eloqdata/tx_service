@@ -101,34 +101,6 @@ public:
                           uint32_t key_shard_code,
                           CcHandlerResult<PostProcessResult> &hres) override;
 
-    /// <summary>
-    /// Installs the committed write and releases the write intention/lock after
-    /// the tx commits. The operation unblocks the pending requests, if there
-    /// are any, on the key.
-    /// </summary>
-    /// <param name="tx_number"></param>
-    /// <param name="tx_term"></param>
-    /// <param name="command_id"></param>
-    /// <param name="commit_ts"></param>
-    /// <param name="table_name"></param>
-    /// <param name="key"></param>
-    /// <param name="record"></param>
-    /// <param name="operation_type"></param>
-    /// <param name="expected_term">If this value is SKIP_CHECK_TERM, it means
-    /// that the caller does not care the term, and there is no need to check
-    /// the term</param>
-    void UploadRecord(TxNumber tx_number,
-                      int64_t tx_term,
-                      uint16_t command_id,
-                      uint64_t commit_ts,
-                      const TableName &table_name,
-                      const TxKey &key,
-                      const TxRecord *record,
-                      OperationType operation_type,
-                      uint32_t key_shard_code,
-                      CcHandlerResult<PostProcessResult> &hres,
-                      int64_t expected_term = SKIP_CHECK_TERM) override;
-
     CcReqStatus PostRead(uint64_t tx_number,
                          int64_t tx_term,
                          uint16_t command_id,

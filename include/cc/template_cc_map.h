@@ -488,7 +488,6 @@ public:
         });
 
         const CcEntryAddr *cce_addr = req.CceAddr();
-        bool is_upload = cce_addr == nullptr;
 
         CODE_FAULT_INJECTOR("term_TemplateCcMap_Execute_PostWriteCc", {
             if (table_name_.Type() == TableType::Primary)
@@ -500,8 +499,8 @@ public:
             }
         });
 
-        if (!is_upload && !Sharder::Instance().CheckLeaderTerm(
-                              cce_addr->NodeGroupId(), cce_addr->Term()))
+        if (!Sharder::Instance().CheckLeaderTerm(cce_addr->NodeGroupId(),
+                                                 cce_addr->Term()))
         {
             req.Result()->SetError(CcErrorCode::REQUESTED_NODE_NOT_LEADER);
             return true;
@@ -514,7 +513,7 @@ public:
         OperationType op_type = req.GetOperationType();
         bool is_del = op_type == OperationType::Delete;
 
-        if (!is_upload && cce_addr->InsertPtr() != 0)
+        if (cce_addr->InsertPtr() != 0)
         {
             assert("Unsupported insert for phantom reads.");
             return true;
@@ -527,64 +526,23 @@ public:
             CcPage<KeyT, ValueT, VersionedRecord, RangePartitioned> *cc_page =
                 nullptr;
 
-            if (is_upload)
+            cce = reinterpret_cast<
+                CcEntry<KeyT, ValueT, VersionedRecord, RangePartitioned> *>(
+                cce_addr->ExtractCce());
+
+            NonBlockingLock *lk = cce->GetKeyLock();
+            if (lk == nullptr || !lk->HasWriteLock() ||
+                lk->WriteLockTx() != txn)
             {
-                // Find the cce location first
-                const KeyT *key = static_cast<const KeyT *>(req.Key());
-                KeyT decoded_key;
-                if (key == nullptr)
-                {
-                    const std::string *key_str = req.KeyStr();
-
-                    assert(key_str != nullptr);
-
-                    size_t offset = 0;
-                    decoded_key.Deserialize(
-                        key_str->data(), offset, KeySchema());
-                    key = &decoded_key;
-                }
-
-                // Since the uploaded record might not be the latest version
-                // of this record, we need to mark data_store_size_ of cce as
-                // unknown. The operation type for the uploaded records should
-                // be Upsert.
-                Iterator it = FindEmplace(*key);
-                cce = it->second;
-                cc_page = it.GetPage();
-                if (cce == nullptr)
-                {
-                    LOG(WARNING)
-                        << "!!!WARNING!!! PostWriteCc have no"
-                        << " enough memory. Txn: " << txn
-                        << ", table name trace: " << this->table_name_.Trace();
-                    shard_->EnqueueWaitListIfMemoryFull(&req);
-                    return false;
-                }
-                write_key = it->first;
-
-                // Since this is a forward req, we assume this entry is not
-                // visible on this ng yet so no need to check for lock.
+                req.Result()->SetFinished();
+                return true;
             }
-            else
-            {
-                cce = reinterpret_cast<
-                    CcEntry<KeyT, ValueT, VersionedRecord, RangePartitioned> *>(
-                    cce_addr->ExtractCce());
 
-                NonBlockingLock *lk = cce->GetKeyLock();
-                if (lk == nullptr || !lk->HasWriteLock() ||
-                    lk->WriteLockTx() != txn)
-                {
-                    req.Result()->SetFinished();
-                    return true;
-                }
-
-                cc_page = static_cast<
-                    CcPage<KeyT, ValueT, VersionedRecord, RangePartitioned> *>(
-                    cce->GetCcPage());
-                assert(cc_page != nullptr);
-                write_key = cc_page->KeyOfEntry(cce);
-            }
+            cc_page = static_cast<
+                CcPage<KeyT, ValueT, VersionedRecord, RangePartitioned> *>(
+                cce->GetCcPage());
+            assert(cc_page != nullptr);
+            write_key = cc_page->KeyOfEntry(cce);
 
             if (commit_ts > 0)
             {
@@ -619,20 +577,6 @@ public:
                     cce->ArchiveBeforeUpdate();
                 }
 
-                if (commit_ts < cce->CommitTs())
-                {
-                    // Concurrent upsert_tx has write the latest value, so
-                    // discard the old value directly. For example, during add
-                    // index transaction, we will write the packed sk data that
-                    // generate from old pk records into the new sk ccmap, and
-                    // before this post write request, we do not acquire the
-                    // write lock on this TxKey, so this value has been updated
-                    // by a concurrent transaction.
-                    assert(is_upload);
-                    req.Result()->SetFinished();
-                    return true;
-                }
-
                 if (is_del)
                 {
                     cce->payload_.SetCurrentPayload(nullptr);
@@ -653,7 +597,7 @@ public:
                     is_del ? RecordStatus::Deleted : RecordStatus::Normal;
                 cce->SetCommitTsPayloadStatus(commit_ts, new_status);
 
-                if (is_upload && req.IsInitialInsert())
+                if (req.IsInitialInsert())
                 {
                     // Updates the ckpt ts after commit ts is set.
                     cce->SetCkptTs(1U);

@@ -164,38 +164,6 @@ public:
                                   CcHandlerResult<PostProcessResult> &hres) = 0;
 
     /**
-     * @brief Directly upload a rec into cc map using post write cc. Currently
-     * used during create index to upload sk for old pk data. Unlike regular
-     * post write, we did not write log for it. Post write cc needs to return an
-     * error if upload failed.
-     *
-     * @param tx_number
-     * @param tx_term
-     * @param command_id
-     * @param commit_ts
-     * @param table_name
-     * @param key
-     * @param record
-     * @param operation_type
-     * @param key_shard_code
-     * @param hres
-     * @param expected_term When the value is not SKIP_CHECK_TERM, should
-     * compare this value with target node group's current term, if not match
-     * which means leader transfer occurred, will reject this operation.
-     */
-    virtual void UploadRecord(TxNumber tx_number,
-                              int64_t tx_term,
-                              uint16_t command_id,
-                              uint64_t commit_ts,
-                              const TableName &table_name,
-                              const TxKey &key,
-                              const TxRecord *record,
-                              OperationType operation_type,
-                              uint32_t key_shard_code,
-                              CcHandlerResult<PostProcessResult> &hres,
-                              int64_t expected_term = SKIP_CHECK_TERM) = 0;
-
-    /**
      * @briefPost-processes a read/scan key. Post-processing clears the read
      * lock or intention on the key's cc entry, matches the input key/gap
      * timestamps against those of the cc entry and updates the cc entry's

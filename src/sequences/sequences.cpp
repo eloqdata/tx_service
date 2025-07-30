@@ -679,6 +679,13 @@ bool Sequences::ApplyIdOfTableRangePartition(const TableName &table,
     return success;
 }
 
+int32_t Sequences::InitialRangePartitionIdOf(const TableName &table)
+{
+    assert(table.Engine() != txservice::TableEngine::EloqKv);
+    std::string_view sv = table.StringView();
+    return (std::hash<std::string_view>()(sv)) & 0xFFF;
+}
+
 bool Sequences::InitIdOfTableRangePartition(const TableName &table,
                                             int32_t last_range_partition_id)
 {
@@ -788,6 +795,65 @@ bool Sequences::InitIdOfTableRangePartition(const TableName &table,
                         seq_schema_version_,
                         TxKey(std::move(mkey)),
                         std::move(mrec),
+                        OperationType::Update);
+
+    if (err != TxErrorCode::NO_ERROR)
+    {
+        txservice::AbortTx(txm, nullptr, nullptr);
+        return false;
+    }
+
+    auto [success, commit_err] = txservice::CommitTx(txm, nullptr, nullptr);
+    assert(success);
+    return success;
+}
+
+bool Sequences::InitIdOfAutoIncrementColumn(const TableName &table_name)
+{
+    TransactionExecution *txm =
+        NewTxInit(instance_->tx_service_,
+                  txservice::IsolationLevel::RepeatableRead,
+                  txservice::CcProtocol::Locking);
+
+    if (txm == nullptr)
+    {
+        return false;
+    }
+
+    CatalogKey table_key(table_name_);
+    TxKey tbl_tx_key(&table_key);
+    CatalogRecord catalog_rec;
+    ReadTxRequest read_catalog_req(&txservice::catalog_ccm_name,
+                                   0,
+                                   &tbl_tx_key,
+                                   &catalog_rec,
+                                   false,
+                                   false,
+                                   true,
+                                   0,
+                                   false,
+                                   false,
+                                   false,
+                                   nullptr,
+                                   nullptr,
+                                   txm);
+
+    bool exists = false;
+    TxErrorCode err = TxReadCatalog(txm, read_catalog_req, exists);
+
+    if (err != TxErrorCode::NO_ERROR || !exists)
+    {
+        txservice::AbortTx(txm);
+        return false;
+    }
+
+    auto [seq_tx_key, seq_tx_rec] = GetSequenceKeyAndInitRecord(
+        table_name, SequenceType::AutoIncrementColumn);
+
+    err = txm->TxUpsert(table_name_,
+                        seq_schema_version_,
+                        TxKey(std::move(seq_tx_key)),
+                        std::move(seq_tx_rec),
                         OperationType::Update);
 
     if (err != TxErrorCode::NO_ERROR)
