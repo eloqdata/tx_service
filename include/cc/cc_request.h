@@ -3968,7 +3968,7 @@ public:
         range_splitting_ = range_splitting;
         local_on_fly_cnt_ = nullptr;
         is_lock_recovery_ = is_lock_recovery;
-        upsert_kv_err_code_ = {false, CcErrorCode::NO_ERROR};
+        upsert_kv_err_code_ = {true, CcErrorCode::NO_ERROR};
     }
 
     ReplayLogCc(const ReplayLogCc &rhs) = delete;
@@ -5163,24 +5163,11 @@ public:
 
             if (!resume_from_upsert_kv)
             {
-                LOG(INFO)
-                    << "zxlog: first time in KickoutCcEntryCc, table_name: "
-                    << table_name_->String()
-                    << ", node_group_id: " << node_group_id_
-                    << ", ng_term: " << ng_term
-                    << "; this->Txn(): " << this->Txn();  // zxlog
-
                 const CatalogEntry *catalog_entry =
                     ccs.GetCatalog(*table_name_, node_group_id_);
 
                 if (catalog_entry == nullptr)
                 {
-                    LOG(INFO) << "zxlog: catalog_entry == nullptr, table_name: "
-                              << table_name_->String()
-                              << ", node_group_id: " << node_group_id_
-                              << ", ng_term: " << ng_term
-                              << "; this->Txn(): " << this->Txn();  // zxlog
-
                     //  Fetch catalog
                     ccs.FetchCatalog(
                         *table_name_, node_group_id_, ng_term, this);
@@ -5189,13 +5176,6 @@ public:
 
                 if (catalog_entry->schema_version_ >= clean_ts_)
                 {
-                    LOG(INFO) << "catalog_entry->schema_version_ >= clean_ts_, "
-                                 "table_name: "
-                              << table_name_->String()
-                              << ", node_group_id: " << node_group_id_
-                              << ", ng_term: " << ng_term
-                              << "; this->Txn(): " << this->Txn();  // zxlog
-
                     // This is an out-dated request. The table has already been
                     // cleaned and updated.
                     return SetFinish();
@@ -5259,12 +5239,6 @@ public:
             }
             else
             {
-                LOG(INFO) << "zxlog: resume_from_upsert_kv in "
-                             "KickoutCcEntryCc, table_name: "
-                          << table_name_->String()
-                          << ", node_group_id: " << node_group_id_
-                          << ", ng_term: " << ng_term
-                          << "; this->Txn(): " << this->Txn();  // zxlog
                 assert(ccs.core_id_ == 0);
                 if (upsert_kv_err_code_.second != CcErrorCode::NO_ERROR)
                 {
