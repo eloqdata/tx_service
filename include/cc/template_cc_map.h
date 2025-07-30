@@ -6995,15 +6995,22 @@ public:
             // the lock on this CC entry.
             if (req.IsLockRecovery())
             {
-                const bool no_lock = cce == nullptr ||
-                                     cce->GetKeyLock() == nullptr ||
-                                     cce->GetKeyLock()->SearchLock(req.Txn()) ==
-                                         LockType::NoLock;
-
-                if (no_lock)
+                auto *key_lock = cce != nullptr ? cce->GetKeyLock() : nullptr;
+                if (key_lock == nullptr)
                 {
                     continue;
                 }
+
+                const auto lock_type = key_lock->SearchLock(req.Txn());
+
+                if (lock_type == LockType::NoLock)
+                {
+                    continue;
+                }
+
+                // Reads don't write log, hence shouldn't recover by log.
+                assert(lock_type != LockType::ReadLock &&
+                       lock_type != LockType::ReadIntent);
             }
 
             if (cce == nullptr)
