@@ -1038,6 +1038,12 @@ void WriteToLogOp::Forward(TransactionExecution *txm)
             }
         }
 
+        // Q? fault injection
+        if (log_type_ == TxLogType::COMMIT)
+        {
+            assert(false);
+        }
+
         txm->PostProcess(*this);
     }
 }
