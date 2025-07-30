@@ -63,9 +63,11 @@ struct DataSyncStatus
 
     NodeGroupId node_group_id_;
     int64_t node_group_term_;
-    // TODO(LIUNYL): data sync tasks during range split? How
-    // do we trigger data flush?
+    // Number of unfinished scan tasks. We keep track of this separately since
+    // we need to flush the flush data buffer when all scan tasks are finished.
     int32_t unfinished_scan_tasks_{0};
+    // Number of unfinished data sync tasks. A data sync task is finished when
+    // the data are scanned and flushed to kvstore.
     int32_t unfinished_tasks_{0};
     bool all_task_started_{false};
     CcErrorCode err_code_{CcErrorCode::NO_ERROR};
@@ -157,8 +159,10 @@ public:
 
     void SetError(CcErrorCode err_code = CcErrorCode::DATA_STORE_ERR);
 
-    // TODO(liunyl)Put this into post process data sync task? SetFinish/SetError should not be called in
-    // DataSync(). It should only call post process data sync task, which handles everything.
+    // Decrease unfinished_scan_tasks_ by 1. If all scan tasks are finished,
+    // and there are still unfinished data sync tasks, that means there might
+    // be in flight flush task in the flush data buffer. Manually flush the
+    // flush data buffer.
     void SetScanTaskFinished();
 
     void SetErrorCode(CcErrorCode err_code)
@@ -293,7 +297,7 @@ public:
         table_flush_entries_it.first->second.emplace_back(std::move(entry));
     }
 
-    bool IsFull() 
+    bool IsFull()
     {
         std::lock_guard<bthread::Mutex> lk(flush_task_entries_mux_);
         return pending_flush_size_ > max_pending_flush_size_;
@@ -314,9 +318,11 @@ public:
     std::unique_ptr<FlushDataTask> MoveFlushData(bool force)
     {
         std::lock_guard<bthread::Mutex> lk(flush_task_entries_mux_);
-        if ((force && pending_flush_size_ > 0) || pending_flush_size_ > max_pending_flush_size_)
+        if ((force && pending_flush_size_ > 0) ||
+            pending_flush_size_ > max_pending_flush_size_)
         {
-            std::unique_ptr<FlushDataTask> ret = std::make_unique<FlushDataTask>(max_pending_flush_size_);
+            std::unique_ptr<FlushDataTask> ret =
+                std::make_unique<FlushDataTask>(max_pending_flush_size_);
             ret->pending_flush_size_ = pending_flush_size_;
             ret->flush_task_entries_ = std::move(flush_task_entries_);
             pending_flush_size_ = 0;

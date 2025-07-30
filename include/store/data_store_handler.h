@@ -99,12 +99,11 @@ public:
 
     virtual void ScheduleTimerTasks() {};
     /**
-     * @brief flush entries in \@param batch to base table or skindex table in
-     * data store, stop and return false if node_group is not longer leader.
-     * @param batch
-     * @param table_name base table name or sk index name
-     * @param table_schema
-     * @param node_group
+     * @brief flush entries in \@param flush_task to base table or skindex table in
+     * data store, stop and return false if the flush failed after max retry times.
+     * @param flush_task - the flush task to be flushed. Map key is the kv table name,
+     * value is the vector of flush task entries. PutAll only flushes the data_sync_vec_
+     * in each flush task entry.
      * @return whether all entries are written to data store successfully
      */
     virtual bool PutAll(std::unordered_map<std::string_view,

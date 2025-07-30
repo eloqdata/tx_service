@@ -576,7 +576,7 @@ class StoreRange
 public:
     /**
      * @brief Max number of slices in range. The total size of a range
-     * is (8*1024) * (16*1024) = 128MB
+     * is (16*1024) * (16*1024) = 256MB
      *
      */
 #ifdef SMALL_RANGE

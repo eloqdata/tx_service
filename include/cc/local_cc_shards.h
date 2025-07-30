@@ -1853,9 +1853,6 @@ private:
     const NodeGroupId ng_id_;
     std::vector<std::unique_ptr<CcShard>> cc_shards_;
 
-    // The memory quota of data sync work
-    uint64_t data_sync_worker_memory_usage_quota_{0};
-
     // The background thread that periodically advances the timers of the local
     // shards to the current wall clock.
     std::thread timer_thd_;
@@ -2097,7 +2094,7 @@ private:
 
     struct DataSyncMemoryController
     {
-        DataSyncMemoryController(uint64_t mem_quota)
+        explicit DataSyncMemoryController(uint64_t mem_quota)
             : flush_data_mem_usage_(0), flush_data_mem_quota_(mem_quota)
         {
         }
@@ -2197,7 +2194,6 @@ private:
         uint64_t flush_data_mem_usage_{0};
         uint64_t flush_data_mem_quota_{0};
     };
-
 
     struct DataSyncTaskLimiter
     {
@@ -2379,43 +2375,6 @@ private:
                           const TxKey *end_key,
                           bool flush_res);
 
-    // /**
-    //  * FlushData Operation Interface
-    //  */
-    // struct FlushDataTask
-    // {
-    // public:
-    //     FlushDataTask(
-    //         std::shared_ptr<DataSyncTask> data_sync_task,
-    //         std::shared_ptr<const TableSchema> schema,
-    //         std::unique_ptr<std::vector<FlushRecord>> data_sync_vec,
-    //         std::unique_ptr<std::vector<FlushRecord>> archive_vec,
-    //         std::unique_ptr<std::vector<std::pair<TxKey, int32_t>>>
-    //         mv_base_vec, uint64_t vec_mem_usage, TransactionExecution
-    //         *data_sync_txm, size_t scan_task_worker_idx) : schema_(schema),
-    //           data_sync_vec_(std::move(data_sync_vec)),
-    //           archive_vec_(std::move(archive_vec)),
-    //           mv_base_vec_(std::move(mv_base_vec)),
-    //           vec_mem_usage_(vec_mem_usage),
-    //           scan_task_worker_idx_(scan_task_worker_idx),
-    //           data_sync_task_(data_sync_task),
-    //           data_sync_txm_(data_sync_txm)
-    //     {
-    //     }
-
-    //     std::shared_ptr<const TableSchema> schema_{nullptr};
-    //     std::unique_ptr<std::vector<FlushRecord>> data_sync_vec_{nullptr};
-    //     std::unique_ptr<std::vector<FlushRecord>> archive_vec_{nullptr};
-    //     std::unique_ptr<std::vector<std::pair<TxKey, int32_t>>> mv_base_vec_{
-    //         nullptr};
-    //     uint64_t vec_mem_usage_{0};
-    //     size_t scan_task_worker_idx_{0};
-    //     // Increased by worker after finishing the retrieved work.
-    //     std::shared_ptr<DataSyncTask> data_sync_task_{nullptr};
-    //     TransactionExecution *data_sync_txm_{nullptr};
-    // };
-    // For flush data work
-
     /**
      * @brief Add a flush task entry to the flush task. If the there's no
      * pending flush task, create a new flush task and add the entry to it.
@@ -2425,14 +2384,13 @@ private:
      */
     void AddFlushTaskEntry(std::unique_ptr<FlushTaskEntry> &&entry);
 
+    WorkerThreadContext flush_data_worker_ctx_;
+
     // The flush task that has not reached the max pending flush size.
     // New flush task entry will be added to this buffer. This task will
     // be appended to pending_flush_work_ when it reaches the max pending flush
     // size, which will then be processed by flush data worker.
-
-    //TODO(liunyl): protect with mutex
-    std::unique_ptr<FlushDataTask> cur_flush_buffer_;
-    WorkerThreadContext flush_data_worker_ctx_;
+    FlushDataTask cur_flush_buffer_;
     // Flush task queue for flush data worker to process.
     std::vector<std::unique_ptr<FlushDataTask>> pending_flush_work_;
 

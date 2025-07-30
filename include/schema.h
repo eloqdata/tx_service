@@ -27,6 +27,7 @@
 #include <string>
 #include <utility>
 
+#include "glog/logging.h"
 #include "type.h"
 
 namespace txservice
@@ -158,7 +159,7 @@ struct TableKeySchemaTs
         pk_schema_ts_ = std::stoull(schemas_ts.at(0));
         for (size_t idx = 1; idx < schemas_ts.size(); ++idx)
         {
-            txservice::TableType table_type;
+            txservice::TableType table_type = txservice::TableType::Secondary;
             if (schemas_ts[idx].find(txservice::UNIQUE_INDEX_NAME_PREFIX) !=
                 std::string::npos)
             {
@@ -171,6 +172,7 @@ struct TableKeySchemaTs
             }
             else
             {
+                LOG(FATAL) << "Unknown secondary key type: " << schemas_ts[idx];
                 assert(false && "Unknown secondary key type.");
             }
             txservice::TableName table_name(
@@ -243,7 +245,7 @@ struct TableKeySchemaTs
             std::vector<std::string> sk_iter(sk_b, sk_e);
             for (auto it = sk_iter.begin(); it != sk_iter.end(); ++it)
             {
-                txservice::TableType table_type;
+                txservice::TableType table_type = txservice::TableType::Secondary;
                 if (it->find(txservice::UNIQUE_INDEX_NAME_PREFIX) !=
                     std::string::npos)
                 {
@@ -256,6 +258,7 @@ struct TableKeySchemaTs
                 }
                 else
                 {
+                    LOG(FATAL) << "Unknown secondary key type: " << *it;
                     assert(false && "Unknown secondary key type.");
                 }
                 txservice::TableName table_name(*it, table_type, table_engine_);

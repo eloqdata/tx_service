@@ -5822,19 +5822,20 @@ public:
             {
                 assert(cce->entry_info_.DataStoreSize() != INT32_MAX);
                 uint64_t flush_size = 0;
-                auto export_result = ExportForCkpt(cce,
-                              *key,
-                              req.DataSyncVec(shard_->core_id_),
-                              req.ArchiveVec(shard_->core_id_),
-                              req.MoveBaseIdxVec(shard_->core_id_),
-                              req.data_sync_ts_,
-                              recycle_ts,
-                              shard_->EnableMvcc(),
-                              req.accumulated_scan_cnt_[shard_->core_id_],
-                              req.export_base_table_item_,
-                              req.export_base_table_item_only_,
-                              export_persisted_key_only,
-                              flush_size);
+                auto export_result =
+                    ExportForCkpt(cce,
+                                  *key,
+                                  req.DataSyncVec(shard_->core_id_),
+                                  req.ArchiveVec(shard_->core_id_),
+                                  req.MoveBaseIdxVec(shard_->core_id_),
+                                  req.data_sync_ts_,
+                                  recycle_ts,
+                                  shard_->EnableMvcc(),
+                                  req.accumulated_scan_cnt_[shard_->core_id_],
+                                  req.export_base_table_item_,
+                                  req.export_base_table_item_only_,
+                                  export_persisted_key_only,
+                                  flush_size);
 
                 req.accumulated_flush_data_size_[shard_->core_id_] +=
                     flush_size;
@@ -6159,7 +6160,8 @@ public:
                                       false,
                                       false,
                                       flush_data_size);
-                    req.accumulated_flush_data_size_[vec_idx] += flush_data_size;
+                    req.accumulated_flush_data_size_[vec_idx] +=
+                        flush_data_size;
 
                     if (export_result.second)
                     {

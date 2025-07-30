@@ -5430,6 +5430,7 @@ void ObjectCommandOp::Forward(TransactionExecution *txm)
 
             bool force_error = hd_result_.ForceError();
             assert(force_error);
+            (void) force_error;
 
             txm->PostProcess(*this);
             return;

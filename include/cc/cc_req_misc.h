@@ -703,11 +703,8 @@ public:
     UpdateCceCkptTsCc(
         NodeGroupId node_group_id,
         int64_t term,
-        absl::flat_hash_map<size_t, std::vector<CkptTsEntry>>
-            &cce_entries)
-        : cce_entries_(cce_entries),
-          node_group_id_(node_group_id),
-          term_(term)
+        absl::flat_hash_map<size_t, std::vector<CkptTsEntry>> &cce_entries)
+        : cce_entries_(cce_entries), node_group_id_(node_group_id), term_(term)
     {
         unfinished_core_cnt_ = cce_entries_.size();
         assert(unfinished_core_cnt_ > 0);
@@ -742,15 +739,14 @@ public:
         }
     }
 
-    const absl::flat_hash_map<size_t, std::vector<CkptTsEntry>>
-        &EntriesRef() const
+    const absl::flat_hash_map<size_t, std::vector<CkptTsEntry>> &EntriesRef()
+        const
     {
         return cce_entries_;
     }
 
 private:
-    absl::flat_hash_map<size_t, std::vector<CkptTsEntry>>
-        &cce_entries_;
+    absl::flat_hash_map<size_t, std::vector<CkptTsEntry>> &cce_entries_;
     // key: core_idx, value: entry_index
     absl::flat_hash_map<size_t, size_t> indices_;
 

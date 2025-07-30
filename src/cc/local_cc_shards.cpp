@@ -125,6 +125,8 @@ LocalCcShards::LocalCcShards(
       flush_data_worker_ctx_(
           std::min(static_cast<int>(conf.at("core_num")), 10)),
 #endif
+      cur_flush_buffer_(
+          static_cast<uint64_t>(MB(conf.at("node_memory_limit_mb")) * 0.05)),
       data_sync_mem_controller_(
           static_cast<uint64_t>(MB(conf.at("node_memory_limit_mb")) * 0.075)),
       statistics_worker_ctx_(1),
@@ -232,12 +234,6 @@ LocalCcShards::LocalCcShards(
                                       metrics_registry,
                                       common_labels));
     }
-    node_memory_limit_mb = static_cast<uint64_t>(MB(node_memory_limit_mb));
-    node_memory_limit_mb /= data_sync_worker_ctx_.worker_num_;
-    data_sync_worker_memory_usage_quota_ = node_memory_limit_mb * 0.075;
-    cur_flush_buffer_ = std::make_unique<FlushDataTask>();
-    DLOG(INFO) << "Data sync work memory usage quota: "
-               << data_sync_worker_memory_usage_quota_;
 }
 
 LocalCcShards::~LocalCcShards()
@@ -2619,7 +2615,6 @@ void LocalCcShards::EnqueueDataSyncTaskForTable(
             status->all_task_started_ = true;
             if (status->unfinished_tasks_ == 0)
             {
-                // status->PersistKV();
                 hres->SetFinished();
                 return;
             }
@@ -3071,9 +3066,6 @@ void LocalCcShards::PostProcessDataSyncTask(std::shared_ptr<DataSyncTask> task,
     }
     std::unique_lock<bthread::Mutex> flight_task_lk(task->flight_task_mux_);
     int64_t flight_task_cnt = --task->flight_task_cnt_;
-    LOG(INFO) << "PostProcessDataSyncTask, flight_task_cnt: " << flight_task_cnt
-              << ", is_scan_task: " << is_scan_task
-              << ", table: " << task->table_name_.Trace();
 
     if (task->ckpt_err_ == DataSyncTask::CkptErrorCode::NO_ERROR)
     {
@@ -3169,13 +3161,15 @@ void LocalCcShards::PostProcessDataSyncTask(std::shared_ptr<DataSyncTask> task,
         }
         else if (task_ckpt_err == DataSyncTask::CkptErrorCode::SCAN_ERROR)
         {
-            // TODO(liunyl): Should not decrease on flight task and scan
-            // finished task?
             if (!task->during_split_range_)
             {
                 txservice::AbortTx(data_sync_txm);
                 range_entry->UnPinStoreRange();
             }
+
+            // Should not decrease unfinished scan task in this case since the
+            // task is re-added to the queue.
+            is_scan_task = false;
 
             task->ckpt_err_ = DataSyncTask::CkptErrorCode::NO_ERROR;
             std::lock_guard<std::mutex> task_worker_lk(
@@ -3822,7 +3816,6 @@ void LocalCcShards::DataSync(std::unique_lock<std::mutex> &task_worker_lk,
     // same Key can be generated. Our subsequent algorithms are based on this
     // assumption.
 
-    // TODO(liunyl): use bigger batch limit
     DataSyncScanCc scan_cc(table_name,
                            data_sync_task->data_sync_ts_,
                            ng_id,
@@ -4160,7 +4153,6 @@ void LocalCcShards::PostProcessDataSyncTask(std::shared_ptr<DataSyncTask> task,
             // ckpt again if no cc entries can be kicked out.
             SetWaitingCkpt(false);
 
-            // TODO(liunyl): move this to flush data, before persist kv.
             PostProcessCkpt(task, true);
 
             task->SetFinish();
@@ -5328,9 +5320,10 @@ void LocalCcShards::SplitFlushRange(
 
 void LocalCcShards::AddFlushTaskEntry(std::unique_ptr<FlushTaskEntry> &&entry)
 {
-    cur_flush_buffer_->AddFlushTaskEntry(std::move(entry));
+    cur_flush_buffer_.AddFlushTaskEntry(std::move(entry));
 
-    std::unique_ptr<FlushDataTask> flush_data_task = cur_flush_buffer_->MoveFlushData(false);
+    std::unique_ptr<FlushDataTask> flush_data_task =
+        cur_flush_buffer_.MoveFlushData(false);
     if (flush_data_task != nullptr)
     {
         std::lock_guard<std::mutex> worker_lk(flush_data_worker_ctx_.mux_);
@@ -5341,7 +5334,8 @@ void LocalCcShards::AddFlushTaskEntry(std::unique_ptr<FlushTaskEntry> &&entry)
 
 void LocalCcShards::FlushCurrentFlushBuffer()
 {
-    std::unique_ptr<FlushDataTask> flush_data_task = cur_flush_buffer_->MoveFlushData(true);
+    std::unique_ptr<FlushDataTask> flush_data_task =
+        cur_flush_buffer_.MoveFlushData(true);
     if (flush_data_task != nullptr)
     {
         std::lock_guard<std::mutex> worker_lk(flush_data_worker_ctx_.mux_);
@@ -5429,7 +5423,7 @@ void LocalCcShards::FlushData(std::unique_lock<std::mutex> &flush_worker_lk)
                     auto cce = rec.cce_;
                     if (cce != nullptr)
                     {
-                        size_t key_core_idx;
+                        size_t key_core_idx = 0;
                         if (!table_name.IsHashPartitioned())
                         {
                             key_core_idx = (rec.Key().Hash() & 0x3FF) % Count();
@@ -5438,6 +5432,8 @@ void LocalCcShards::FlushData(std::unique_lock<std::mutex> &flush_worker_lk)
                         {
 #ifndef RANGE_PARTITION_ENABLED
                             key_core_idx = entry->data_sync_task_->worker_idx_;
+#else
+                            assert(false);
 #endif
                         }
                         auto insert_it = cce_entries_map.try_emplace(
@@ -5535,26 +5531,26 @@ void LocalCcShards::FlushDataWorker()
                     return true;
                 }
                 auto current_time = std::chrono::steady_clock::now();
-                LOG(INFO) << "current_time - previous_size_update_time: " << (current_time - previous_size_update_time).count();
                 if (current_time - previous_size_update_time > 10s)
                 {
                     size_t current_flush_size =
-                        cur_flush_buffer_->GetPendingFlushSize();
+                        cur_flush_buffer_.GetPendingFlushSize();
                     bool flush_size_changed =
                         current_flush_size != previous_flush_size;
-                    LOG(INFO) << "flush_size_changed: " << flush_size_changed << " current_flush_size: " << current_flush_size << " previous_flush_size: " << previous_flush_size;
                     previous_flush_size = current_flush_size;
                     previous_size_update_time = current_time;
-                    if (!flush_size_changed)
+                    if (!flush_size_changed && current_flush_size > 0)
                     {
                         // data sync might be stuck due to lock conflict with
                         // DDL. Flush current flush buffer to release catalog
                         // read lock held by ongoing data sync tx, which might
                         // block the DDL.
-                        std::unique_ptr<FlushDataTask> flush_data_task = cur_flush_buffer_->MoveFlushData(true);
+                        std::unique_ptr<FlushDataTask> flush_data_task =
+                            cur_flush_buffer_.MoveFlushData(true);
                         if (flush_data_task != nullptr)
                         {
-                            pending_flush_work_.emplace_back(std::move(flush_data_task));
+                            pending_flush_work_.emplace_back(
+                                std::move(flush_data_task));
                         }
                         return true;
                     }
