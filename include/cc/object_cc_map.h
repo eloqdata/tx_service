@@ -2138,10 +2138,10 @@ public:
             // the lock on this CC entry.
             if (req.IsLockRecovery())
             {
-                auto key_lock = cce != nullptr ? cce->GetKeyLock() : nullptr;
-                if (key_lock == nullptr ||
-                    !key_lock->HasWriteLockOrWriteIntent() ||
-                    key_lock->WriteLockTx() != req.Txn())
+                if (const NonBlockingLock *key_lock =
+                        cce != nullptr ? cce->GetKeyLock() : nullptr;
+                    key_lock == nullptr ||
+                    !key_lock->HasWriteLockOrWriteIntent(req.Txn()))
                 {
                     continue;
                 }
