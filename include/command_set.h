@@ -131,8 +131,8 @@ public:
     }
 
     const std::unordered_map<TableName,
-                             std::unordered_map<CcEntryAddr, CmdSetEntry>>
-        *ObjectCommandSet() const
+                             std::unordered_map<CcEntryAddr, CmdSetEntry>> *
+    ObjectCommandSet() const
     {
         return &cmd_set_internal_;
     }

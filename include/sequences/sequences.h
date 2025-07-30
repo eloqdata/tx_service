@@ -28,9 +28,9 @@ namespace txservice
 // A batch of consecutive ids prefetched at once.
 struct SequenceBatch
 {
-    explicit SequenceBatch(std::string name) : seq_name_(name){};
+    explicit SequenceBatch(std::string name) : seq_name_(name) {};
     SequenceBatch(std::string name, uint64_t key_schema_version)
-        : seq_name_(name), key_schema_version_(key_schema_version){};
+        : seq_name_(name), key_schema_version_(key_schema_version) {};
 
     // lock when insert a record and need to apply an id
     bthread::Mutex mutex_id_;
@@ -310,8 +310,8 @@ public:
 
     const std::unordered_map<
         uint16_t,
-        std::pair<txservice::TableName, txservice::SecondaryKeySchema>>
-        *GetIndexes() const override
+        std::pair<txservice::TableName, txservice::SecondaryKeySchema>> *
+    GetIndexes() const override
     {
         assert(false);
         return nullptr;

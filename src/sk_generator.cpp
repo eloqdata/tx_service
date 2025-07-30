@@ -514,7 +514,7 @@ void SkGenerator::ScanAndEncodeIndex(const TxKey *start_key,
                         scan_req.IsDrained(core_idx) && scan_data_drained;
                 }
             } /* End of each core */
-        }     /* End of foreach new_indexes_name */
+        } /* End of foreach new_indexes_name */
 
         scan_pk_finished = scan_data_drained;
         scan_req.Reset();
@@ -985,7 +985,7 @@ CcErrorCode UploadIndexContext::AcquireRangeReadLocks(
                                           ng_table_write_entrys);
 
         } /* End of table write entrys */
-    }     /* End of tables */
+    } /* End of tables */
     return CcErrorCode::NO_ERROR;
 }
 

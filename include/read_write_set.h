@@ -108,15 +108,15 @@ public:
     }
 
     const absl::flat_hash_map<CcEntryAddr,
-                              std::pair<ReadSetEntry, const std::string_view>>
-        &DataReadSet() const
+                              std::pair<ReadSetEntry, const std::string_view>> &
+    DataReadSet() const
     {
         return data_rset_;
     }
 
     const absl::flat_hash_map<CcEntryAddr,
-                              std::pair<ReadSetEntry, const std::string_view>>
-        &MetaDataReadSet() const
+                              std::pair<ReadSetEntry, const std::string_view>> &
+    MetaDataReadSet() const
     {
         return meta_data_rset_;
     }
@@ -479,8 +479,8 @@ public:
         }
     }
 
-    std::unordered_map<TableName, std::pair<uint64_t, TableWriteSet>>
-        &WriteSet()
+    std::unordered_map<TableName, std::pair<uint64_t, TableWriteSet>> &
+    WriteSet()
     {
         return wset_;
     }

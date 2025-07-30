@@ -277,8 +277,8 @@ struct TableSchema
     virtual const std::string &SchemaImage() const = 0;
     virtual const std::unordered_map<
         uint16_t,
-        std::pair<txservice::TableName, txservice::SecondaryKeySchema>>
-        *GetIndexes() const = 0;
+        std::pair<txservice::TableName, txservice::SecondaryKeySchema>> *
+    GetIndexes() const = 0;
     virtual KVCatalogInfo *GetKVCatalogInfo() const = 0;
     virtual void SetKVCatalogInfo(const std::string &kv_info_str) = 0;
     virtual uint64_t Version() const = 0;
@@ -317,7 +317,7 @@ struct TableSchema
 
     // Rebuild table schema image by setting multikey.
     virtual void IndexesSetMultiKeyAttr(
-        const std::vector<MultiKeyAttr> &indexes){};
+        const std::vector<MultiKeyAttr> &indexes) {};
 };
 
 class CatalogFactory

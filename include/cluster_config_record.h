@@ -297,8 +297,8 @@ public:
         is_config_owner_ = false;
     }
 
-    const std::unordered_map<NodeGroupId, std::vector<NodeConfig>>
-        &GetNodeGroupConfigs() const
+    const std::unordered_map<NodeGroupId, std::vector<NodeConfig>> &
+    GetNodeGroupConfigs() const
     {
         return is_config_owner_ ? *node_group_configs_uptr_
                                 : *node_group_configs_ptr_;
