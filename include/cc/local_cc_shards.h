@@ -2429,6 +2429,8 @@ private:
     // New flush task entry will be added to this buffer. This task will
     // be appended to pending_flush_work_ when it reaches the max pending flush
     // size, which will then be processed by flush data worker.
+
+    //TODO(liunyl): protect with mutex
     std::unique_ptr<FlushDataTask> cur_flush_buffer_;
     WorkerThreadContext flush_data_worker_ctx_;
     // Flush task queue for flush data worker to process.

@@ -293,14 +293,37 @@ public:
         table_flush_entries_it.first->second.emplace_back(std::move(entry));
     }
 
-    bool IsFull() const
+    bool IsFull() 
     {
+        std::lock_guard<bthread::Mutex> lk(flush_task_entries_mux_);
         return pending_flush_size_ > max_pending_flush_size_;
     }
 
-    bool IsEmpty() const
+    bool IsEmpty()
     {
+        std::lock_guard<bthread::Mutex> lk(flush_task_entries_mux_);
         return pending_flush_size_ == 0;
+    }
+
+    size_t GetPendingFlushSize()
+    {
+        std::lock_guard<bthread::Mutex> lk(flush_task_entries_mux_);
+        return pending_flush_size_;
+    }
+
+    std::unique_ptr<FlushDataTask> MoveFlushData(bool force)
+    {
+        std::lock_guard<bthread::Mutex> lk(flush_task_entries_mux_);
+        if ((force && pending_flush_size_ > 0) || pending_flush_size_ > max_pending_flush_size_)
+        {
+            std::unique_ptr<FlushDataTask> ret = std::make_unique<FlushDataTask>(max_pending_flush_size_);
+            ret->pending_flush_size_ = pending_flush_size_;
+            ret->flush_task_entries_ = std::move(flush_task_entries_);
+            pending_flush_size_ = 0;
+            flush_task_entries_.clear();
+            return ret;
+        }
+        return nullptr;
     }
 
     std::unordered_map<std::string_view,

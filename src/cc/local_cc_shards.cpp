@@ -235,6 +235,7 @@ LocalCcShards::LocalCcShards(
     node_memory_limit_mb = static_cast<uint64_t>(MB(node_memory_limit_mb));
     node_memory_limit_mb /= data_sync_worker_ctx_.worker_num_;
     data_sync_worker_memory_usage_quota_ = node_memory_limit_mb * 0.075;
+    cur_flush_buffer_ = std::make_unique<FlushDataTask>();
     DLOG(INFO) << "Data sync work memory usage quota: "
                << data_sync_worker_memory_usage_quota_;
 }
@@ -5327,35 +5328,26 @@ void LocalCcShards::SplitFlushRange(
 
 void LocalCcShards::AddFlushTaskEntry(std::unique_ptr<FlushTaskEntry> &&entry)
 {
-    if (cur_flush_buffer_ == nullptr)
-    {
-        cur_flush_buffer_ = std::make_unique<FlushDataTask>();
-    }
-
     cur_flush_buffer_->AddFlushTaskEntry(std::move(entry));
 
-    if (cur_flush_buffer_->IsFull())
+    std::unique_ptr<FlushDataTask> flush_data_task = cur_flush_buffer_->MoveFlushData(false);
+    if (flush_data_task != nullptr)
     {
         std::lock_guard<std::mutex> worker_lk(flush_data_worker_ctx_.mux_);
-        pending_flush_work_.emplace_back(std::move(cur_flush_buffer_));
+        pending_flush_work_.emplace_back(std::move(flush_data_task));
         flush_data_worker_ctx_.cv_.notify_one();
-        cur_flush_buffer_ = std::make_unique<FlushDataTask>();
     }
 }
 
 void LocalCcShards::FlushCurrentFlushBuffer()
 {
-    if (cur_flush_buffer_ == nullptr || cur_flush_buffer_->IsEmpty())
+    std::unique_ptr<FlushDataTask> flush_data_task = cur_flush_buffer_->MoveFlushData(true);
+    if (flush_data_task != nullptr)
     {
-        return;
+        std::lock_guard<std::mutex> worker_lk(flush_data_worker_ctx_.mux_);
+        pending_flush_work_.emplace_back(std::move(flush_data_task));
+        flush_data_worker_ctx_.cv_.notify_one();
     }
-
-    std::lock_guard<std::mutex> worker_lk(flush_data_worker_ctx_.mux_);
-    DLOG(INFO) << "Flushing current flush buffer, buffer size: "
-               << cur_flush_buffer_->pending_flush_size_;
-    pending_flush_work_.emplace_back(std::move(cur_flush_buffer_));
-    flush_data_worker_ctx_.cv_.notify_one();
-    cur_flush_buffer_ = std::make_unique<FlushDataTask>();
 }
 
 void LocalCcShards::FlushData(std::unique_lock<std::mutex> &flush_worker_lk)
@@ -5368,67 +5360,7 @@ void LocalCcShards::FlushData(std::unique_lock<std::mutex> &flush_worker_lk)
 
     auto &flush_task_entries = cur_work->flush_task_entries_;
 
-    // const TableSchema *schema = cur_work->schema_.get();
-    // assert(schema != nullptr);
-
-    // std::vector<size_t> &scan_task_worker_idx =
-    // cur_work->scan_task_worker_idx_; std::vector<FlushRecord> &data_sync_vec
-    // = cur_work->data_sync_vecs_; std::vector<FlushRecord> &archive_vec =
-    // cur_work->archive_vec_; std::vector<std::pair<TxKey, int32_t>>
-    // &mv_base_vec =
-    //     cur_work->mv_base_vec_;
-
-    // std::shared_ptr<DataSyncTask> data_sync_task = cur_work->data_sync_task_;
-    // uint32_t node_group = data_sync_task->node_group_id_;
-    // int64_t leader_term = data_sync_task->node_group_term_;
-    // TableName table_name = data_sync_task->table_name_;
-
-    // TransactionExecution *data_sync_txm = cur_work->data_sync_txm_;
-
     bool succ = true;
-
-#ifdef RANGE_PARTITION_ENABLED
-    // Check the leader
-    // Try to pin node group data to avoid the potentail heap-use-after-free
-    // error about the cc entry and table ranges info. NOTE: The
-    // `RangeRecord.range_info_` which will be used during PutAll is a raw
-    // pointer that points to range info in TableRangeEntry stored in local
-    // cc shards.
-    // int64_t ng_term = Sharder::Instance().TryPinNodeGroupData(node_group);
-    // // Defer unpin node group data.
-    // std::shared_ptr<void> defer_unpin(
-    //     nullptr,
-    //     [node_group, ng_term](void *)
-    //     {
-    //         if (ng_term >= 0)
-    //         {
-    //             Sharder::Instance().UnpinNodeGroupData(node_group);
-    //         }
-    //     });
-#else
-    // int64_t ng_term = -1;
-    // if (data_sync_task->is_standby_node_ckpt_)
-    // {
-    //     ng_term = Sharder::Instance().StandbyNodeTerm();
-    // }
-    // else
-    // {
-    //     int64_t ng_candidate_leader_term =
-    //         Sharder::Instance().CandidateLeaderTerm(node_group);
-    //     int64_t ng_leader_term = Sharder::Instance().LeaderTerm(node_group);
-    //     ng_term = std::max(ng_candidate_leader_term, ng_leader_term);
-    // }
-#endif
-
-    // if (ng_term < 0 || ng_term != leader_term)
-    // {
-    //     LOG(ERROR) << "FlushData: node is not the leader of ng#" <<
-    //     node_group
-    //                << ", with current leader term: " << ng_term
-    //                << ", and the expected leader term: " << leader_term;
-    //     succ = false;
-    // }
-    // else
     // Flushes to the data store
     if (EnableMvcc())
     {
@@ -5587,16 +5519,48 @@ void LocalCcShards::FlushData(std::unique_lock<std::mutex> &flush_worker_lk)
 
 void LocalCcShards::FlushDataWorker()
 {
+    size_t previous_flush_size = 0;
+    auto previous_size_update_time = std::chrono::steady_clock::now();
     std::unique_lock<std::mutex> flush_worker_lk(flush_data_worker_ctx_.mux_);
     while (flush_data_worker_ctx_.status_ == WorkerStatus::Active)
     {
-        flush_data_worker_ctx_.cv_.wait(
+        flush_data_worker_ctx_.cv_.wait_for(
             flush_worker_lk,
-            [this]
+            10s,
+            [this, &previous_flush_size, &previous_size_update_time]
             {
-                return !pending_flush_work_.empty() ||
-                       flush_data_worker_ctx_.status_ ==
-                           WorkerStatus::Terminated;
+                if (!pending_flush_work_.empty() ||
+                    flush_data_worker_ctx_.status_ == WorkerStatus::Terminated)
+                {
+                    return true;
+                }
+                auto current_time = std::chrono::steady_clock::now();
+                LOG(INFO) << "current_time - previous_size_update_time: " << (current_time - previous_size_update_time).count();
+                if (current_time - previous_size_update_time > 10s)
+                {
+                    size_t current_flush_size =
+                        cur_flush_buffer_->GetPendingFlushSize();
+                    bool flush_size_changed =
+                        current_flush_size != previous_flush_size;
+                    LOG(INFO) << "flush_size_changed: " << flush_size_changed << " current_flush_size: " << current_flush_size << " previous_flush_size: " << previous_flush_size;
+                    previous_flush_size = current_flush_size;
+                    previous_size_update_time = current_time;
+                    if (!flush_size_changed)
+                    {
+                        // data sync might be stuck due to lock conflict with
+                        // DDL. Flush current flush buffer to release catalog
+                        // read lock held by ongoing data sync tx, which might
+                        // block the DDL.
+                        std::unique_ptr<FlushDataTask> flush_data_task = cur_flush_buffer_->MoveFlushData(true);
+                        if (flush_data_task != nullptr)
+                        {
+                            pending_flush_work_.emplace_back(std::move(flush_data_task));
+                        }
+                        return true;
+                    }
+                }
+
+                return false;
             });
 
         if (pending_flush_work_.empty())
