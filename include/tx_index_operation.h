@@ -102,6 +102,10 @@ struct UpsertTableIndexOp : public SchemaOp
      */
     DsUpsertTableOp kv_create_index_op_;
     /**
+     * @brief Update the sequence table for range id info.
+     */
+    AsyncOp<Void> update_sequence_table_op_;
+    /**
      * @brief Generate sk record from pk record parallelly. The parallel
      * granularity of the operation is range.
      */

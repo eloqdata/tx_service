@@ -261,6 +261,9 @@ enum struct CcErrorCode : uint8_t
     // RPC failed that can not retry
     RPC_CALL_ERR,
 
+    // Update sequence table fail
+    UPDATE_SEQUENCE_TABLE_FAIL,
+
     // NOTICE: please keep this variable at tail.
     LAST_ERROR_CODE,
 

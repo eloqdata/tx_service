@@ -237,15 +237,6 @@ public:
         return true;
     }
 
-    bool GetNextRangePartitionId(const txservice::TableName &tablename,
-                                 const TableSchema *table_schema,
-                                 uint32_t range_cnt,
-                                 int32_t &out_next_partition_id,
-                                 int retry_count = 5) override
-    {
-        return true;
-    }
-
     /**
      * @brief Write batch historical versions into DataStore.
      *

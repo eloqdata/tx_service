@@ -33,6 +33,7 @@
 #include "local_cc_shards.h"
 #include "log_type.h"
 #include "remote/remote_type.h"
+#include "sequences/sequences.h"
 #include "sk_generator.h"
 #include "tx_execution.h"
 #include "tx_request.h"
@@ -65,6 +66,7 @@ UpsertTableIndexOp::UpsertTableIndexOp(
       downgrade_all_lock_to_intent_op_(txm),
       unlock_cluster_config_op_(txm),
       kv_create_index_op_(&table_key_.Name(), OperationType::AddIndex, txm),
+      update_sequence_table_op_(txm),
       generate_sk_parallel_op_(txm),
       flush_all_old_tuples_sk_op_(txm),
       prepare_data_log_op_(txm),
@@ -170,6 +172,8 @@ UpsertTableIndexOp::UpsertTableIndexOp(
                        &downgrade_all_lock_to_intent_op_,
                        "downgrade_all_lock_to_intent_op_");
     TX_TRACE_ASSOCIATE(this, &kv_create_index_op_, "kv_create_index_op_");
+    TX_TRACE_ASSOCIATE(
+        this, &update_sequence_table_op_, "update_sequence_table_op_");
     TX_TRACE_ASSOCIATE(
         this, &generate_sk_parallel_op_, "generate_sk_parallel_op_");
     TX_TRACE_ASSOCIATE(
@@ -328,7 +332,7 @@ void UpsertTableIndexOp::Forward(TransactionExecution *txm)
                 if (txm->CheckLeaderTerm())
                 {
                     LOG(WARNING) << "Alter Table Index for table: "
-                                 << table_key_.Name().Trace()
+                                 << table_key_.Name().StringView()
                                  << ", write prepare log result unknown, txn: "
                                  << txm->TxNumber() << ", keep retrying";
                     // set retry flag and retry prepare log
@@ -348,7 +352,7 @@ void UpsertTableIndexOp::Forward(TransactionExecution *txm)
             else
             {
                 LOG(ERROR) << "Alter Table Index for table: "
-                           << table_key_.Name().Trace()
+                           << table_key_.Name().StringView()
                            << ", write prepare log failed with error message: "
                            << prepare_log_op_.hd_result_.ErrorMsg()
                            << ", txn: " << txm->TxNumber();
@@ -471,7 +475,8 @@ void UpsertTableIndexOp::Forward(TransactionExecution *txm)
         {
             assert(op_type_ == OperationType::AddIndex);
             LOG(INFO) << "Alter Table Index transaction upsert data store"
-                      << " info for base table: " << table_key_.Name().Trace()
+                      << " info for base table: "
+                      << table_key_.Name().StringView()
                       << ", txn: " << txm->TxNumber();
             uint16_t retry_times = 100;
             CODE_FAULT_INJECTOR("trigger_flush_kv_error", { retry_times = 3; });
@@ -499,7 +504,7 @@ void UpsertTableIndexOp::Forward(TransactionExecution *txm)
                 // NOTE: The logic of this part is consistent with the logic in
                 // UpsertTableOp::Forward.
                 LOG(ERROR) << "Alter Table Index for table: "
-                           << table_key_.Name().Trace()
+                           << table_key_.Name().StringView()
                            << ", Failed to create tables in kv store"
                            << ". Txn: " << txm->TxNumber();
                 // Set txm->commit_ts_ to 0 to indicate there is a flush
@@ -539,6 +544,77 @@ void UpsertTableIndexOp::Forward(TransactionExecution *txm)
         }
         else
         {
+            LOG(INFO) << "Alter Table Index transaction init range id "
+                      << "for table: " << table_key_.Name().StringView()
+                      << ", txn: " << txm->TxNumber();
+            update_sequence_table_op_.op_func_ = [this](AsyncOp<Void> &async_op)
+            {
+                CcHandlerResult<Void> &hd_res = async_op.hd_result_;
+#ifdef EXT_TX_PROC_ENABLED
+                hd_res.SetToBlock();
+                // The memory fence ensures that the block flag is set
+                // before the background thread is executed.
+                std::atomic_thread_fence(std::memory_order_release);
+#endif
+
+                async_op.worker_thread_ = std::thread(
+                    [this, &hd_res]()
+                    {
+                        bool succ = std::all_of(
+                            alter_table_info_.index_add_names_.begin(),
+                            alter_table_info_.index_add_names_.end(),
+                            [this](const std::pair<TableName, std::string> &p)
+                            {
+                                int32_t init_range_id =
+                                    Sequences::InitialRangePartitionIdOf(
+                                        p.first);
+                                return Sequences::InitIdOfTableRangePartition(
+                                    p.first, init_range_id);
+                            });
+
+                        if (succ)
+                        {
+                            hd_res.SetFinished();
+                        }
+                        else
+                        {
+                            LOG(ERROR) << "Alter Table Index transaction "
+                                          "failed to init range id";
+                            hd_res.SetError(
+                                CcErrorCode::UPDATE_SEQUENCE_TABLE_FAIL);
+                        }
+                    });
+            };
+
+            op_ = &update_sequence_table_op_;
+            txm->PushOperation(&update_sequence_table_op_);
+            txm->Process(update_sequence_table_op_);
+        }
+    }
+    else if (op_ == &update_sequence_table_op_)
+    {
+        if (update_sequence_table_op_.hd_result_.IsError())
+        {
+            if (txm->CheckLeaderTerm())
+            {
+                DLOG(INFO) << "Alter Table Index transaction retry update "
+                              "sequence table, base table: "
+                           << table_key_.Name().StringView()
+                           << ", txn: " << txm->TxNumber();
+                txm->PushOperation(&update_sequence_table_op_);
+                txm->Process(update_sequence_table_op_);
+            }
+            else
+            {
+                DLOG(INFO) << "Alter Table Index transaction ForceToFinish "
+                              "update sequence table, base table: "
+                           << table_key_.Name().StringView()
+                           << ", txn: " << txm->TxNumber();
+                ForceToFinish(txm);
+            }
+        }
+        else if (op_type_ == OperationType::AddIndex)
+        {
             if (txm->TxStatus() == TxnStatus::Recovering &&
                 Sharder::Instance().CandidateLeaderTerm(txm->TxCcNodeId()) > 0)
             {
@@ -551,7 +627,7 @@ void UpsertTableIndexOp::Forward(TransactionExecution *txm)
                       << "with the parallelism: "
                       << static_cast<uint32_t>(scan_batch_range_size_)
                       << " of each node group for table: "
-                      << table_key_.Name().Trace() << " with the start key: "
+                      << table_key_.Name().StringView()
                       << ", txn: " << txm->TxNumber();
 
             if (is_last_finished_key_str_)
@@ -582,6 +658,32 @@ void UpsertTableIndexOp::Forward(TransactionExecution *txm)
             op_ = &generate_sk_parallel_op_;
             txm->PushOperation(&generate_sk_parallel_op_);
             txm->Process(generate_sk_parallel_op_);
+        }
+        else if (op_type_ == OperationType::DropIndex ||
+                 (op_type_ == OperationType::AddIndex &&
+                  txm->CommitTs() == tx_op_failed_ts_))
+        {
+            LOG(INFO) << "Alter Table Index transaction clean cc map, txn: "
+                      << txm->TxNumber();
+            op_ = &clean_ccm_op_;
+
+            assert(clean_ccm_op_.table_names_.empty());
+            for (const auto &[index_drop_name, kv_index_drop_name] :
+                 alter_table_info_.index_drop_names_)
+            {
+                clean_ccm_op_.table_names_.emplace_back(
+                    index_drop_name.StringView().data(),
+                    index_drop_name.StringView().size(),
+                    index_drop_name.Type(),
+                    index_drop_name.Engine());
+            }
+            clean_ccm_op_.clean_type_ = CleanType::CleanCcm;
+            uint64_t commit_ts = op_type_ == OperationType::DropIndex
+                                     ? txm->CommitTs()
+                                     : kv_rollback_create_index_op_.write_time_;
+            clean_ccm_op_.commit_ts_ = commit_ts;
+            txm->PushOperation(&clean_ccm_op_);
+            txm->Process(clean_ccm_op_);
         }
     }
     else if (op_ == &clean_ccm_op_)
@@ -626,11 +728,11 @@ void UpsertTableIndexOp::Forward(TransactionExecution *txm)
     {
         if (generate_sk_parallel_op_.hd_result_.IsError())
         {
-            LOG(ERROR)
-                << "Alter Table Index generate sk parallel failed for table: "
-                << table_key_.Name().Trace() << " with error: "
-                << generate_sk_parallel_op_.hd_result_.ErrorMsg()
-                << ", txn:" << txm->TxNumber();
+            LOG(ERROR) << "Alter Table Index generate sk parallel failed "
+                          "for table: "
+                       << table_key_.Name().StringView() << " with error: "
+                       << generate_sk_parallel_op_.hd_result_.ErrorMsg()
+                       << ", txn: " << txm->TxNumber();
             if (txm->CheckLeaderTerm())
             {
                 CcErrorCode err_code =
@@ -714,7 +816,7 @@ void UpsertTableIndexOp::Forward(TransactionExecution *txm)
             finished_pk_range_count_ = scanned_pk_range_count_;
             DLOG(INFO) << "Alter Table Indedx no need to perform flush sk "
                        << "operation for this batch range task for base table: "
-                       << table_key_.Name().Trace()
+                       << table_key_.Name().StringView()
                        << ". Txn: " << txm->TxNumber();
             Forward(txm);
             return;
@@ -737,7 +839,7 @@ void UpsertTableIndexOp::Forward(TransactionExecution *txm)
                alter_table_info_.index_add_names_.size());
 
         LOG(INFO) << "Alter Table Index transaction flush old sk record "
-                  << "for base table: " << table_key_.Name().Trace()
+                  << "for base table: " << table_key_.Name().StringView()
                   << ". Already scanned " << scanned_pk_range_count_
                   << " pk ranges. Txn: " << txm->TxNumber()
                   << ", and commit ts: " << txm->commit_ts_;
@@ -811,7 +913,7 @@ void UpsertTableIndexOp::Forward(TransactionExecution *txm)
                 {
                     LOG(WARNING)
                         << "Alter table index flush all old sk tuples failed "
-                        << "for table: " << table_key_.Name().Trace()
+                        << "for table: " << table_key_.Name().StringView()
                         << " because of leader transferred. Retry generate "
                         << "packed sk data, txn: " << txm->TxNumber();
                     // For this stage, should re-execute from the previous stage
@@ -840,7 +942,7 @@ void UpsertTableIndexOp::Forward(TransactionExecution *txm)
                 {
                     LOG(WARNING)
                         << "Alter table index flush all old sk tuples failed "
-                        << "for table: " << table_key_.Name().Trace()
+                        << "for table: " << table_key_.Name().StringView()
                         << " with error message: "
                         << flush_all_old_tuples_sk_op_.hd_result_.ErrorMsg()
                         << ". Retry flush old sk operation, txn: "
@@ -869,7 +971,7 @@ void UpsertTableIndexOp::Forward(TransactionExecution *txm)
             finished_pk_range_count_ = scanned_pk_range_count_;
             LOG(INFO) << "Alter Table Index transaction write prepare index"
                       << " log with last finished end key: "
-                      << ". Base table: " << table_key_.Name().Trace()
+                      << ". Base table: " << table_key_.Name().StringView()
                       << ". Txn: " << txm->TxNumber();
             op_ = &prepare_data_log_op_;
             FillPrepareDataLogRequest(txm);
@@ -882,8 +984,8 @@ void UpsertTableIndexOp::Forward(TransactionExecution *txm)
         if (prepare_data_log_op_.hd_result_.IsError())
         {
             // Fails to flush the prepare flush log. Retries the operation if
-            // the tx node is still the leader or the tx is in the recovery
-            // mode and the cc node is a leader candidate.
+            // the tx node is still the leader or the tx is in the recovery mode
+            // and the cc node is a leader candidate.
             if (txm->CheckLeaderTerm())
             {
                 // set retry flag and retry commit log
@@ -933,8 +1035,8 @@ void UpsertTableIndexOp::Forward(TransactionExecution *txm)
         {
             // Next batch range task
             LOG(INFO) << "Alter Table Index transaction continue to generate "
-                      << "sk parallel for table: " << table_key_.Name().Trace()
-                      << " with the start key: "
+                      << "sk parallel for table: "
+                      << table_key_.Name().StringView()
                       << ". Txn: " << txm->TxNumber();
             // Reset last end key.
             if (is_last_finished_key_str_)
@@ -994,8 +1096,8 @@ void UpsertTableIndexOp::Forward(TransactionExecution *txm)
         {
             // Next batch range task
             LOG(INFO) << "Alter Table Index transaction continue to generate "
-                      << "sk parallel for table: " << table_key_.Name().Trace()
-                      << " with the start key: "
+                      << "sk parallel for table: "
+                      << table_key_.Name().StringView()
                       << ". Txn: " << txm->TxNumber();
             // Reset last end key.
             if (is_last_finished_key_str_)
@@ -1222,24 +1324,45 @@ void UpsertTableIndexOp::Forward(TransactionExecution *txm)
         }
         else
         {
-            LOG(INFO) << "Drop Table Index transaction clean cc map, txn: "
-                      << txm->TxNumber();
-            op_ = &clean_ccm_op_;
-
-            assert(clean_ccm_op_.table_names_.empty());
-            for (const auto &[index_drop_name, kv_index_drop_name] :
-                 alter_table_info_.index_drop_names_)
+            LOG(INFO)
+                << "Drop Table Index transaction delete range id info, txn: "
+                << txm->TxNumber();
+            update_sequence_table_op_.op_func_ = [this](AsyncOp<Void> &async_op)
             {
-                clean_ccm_op_.table_names_.emplace_back(
-                    index_drop_name.StringView().data(),
-                    index_drop_name.StringView().size(),
-                    index_drop_name.Type(),
-                    index_drop_name.Engine());
-            }
-            clean_ccm_op_.clean_type_ = CleanType::CleanCcm;
-            clean_ccm_op_.commit_ts_ = txm->CommitTs();
-            txm->PushOperation(&clean_ccm_op_);
-            txm->Process(clean_ccm_op_);
+                CcHandlerResult<Void> &hd_res = async_op.hd_result_;
+#ifdef EXT_TX_PROC_ENABLED
+                hd_res.SetToBlock();
+                // The memory fence ensures that the block flag is set
+                // before the background thread is executed.
+                std::atomic_thread_fence(std::memory_order_release);
+#endif
+                async_op.worker_thread_ = std::thread(
+                    [this, &hd_res]()
+                    {
+                        bool succ = std::all_of(
+                            alter_table_info_.index_drop_names_.begin(),
+                            alter_table_info_.index_drop_names_.end(),
+                            [this](const std::pair<TableName, std::string> &p) {
+                                return Sequences::DeleteSequence(
+                                    p.first, SequenceType::RangePartitionId);
+                            });
+
+                        if (succ)
+                        {
+                            hd_res.SetFinished();
+                        }
+                        else
+                        {
+                            LOG(ERROR) << "Drop Table Index transaction "
+                                          "failed to delete range id info";
+                            hd_res.SetError(
+                                CcErrorCode::UPDATE_SEQUENCE_TABLE_FAIL);
+                        }
+                    });
+            };
+            op_ = &update_sequence_table_op_;
+            txm->PushOperation(&update_sequence_table_op_);
+            txm->Process(update_sequence_table_op_);
         }
     }
     else if (op_ == &kv_rollback_create_index_op_)
@@ -1258,24 +1381,45 @@ void UpsertTableIndexOp::Forward(TransactionExecution *txm)
         }
         else
         {
-            LOG(INFO) << "Rollback Table Index transaction clean cc map, txn: "
+            LOG(INFO) << "Rollback Table Index transaction delete range id "
+                         "info, txn: "
                       << txm->TxNumber();
-            op_ = &clean_ccm_op_;
-
-            assert(clean_ccm_op_.table_names_.empty());
-            for (const auto &[index_drop_name, kv_index_drop_name] :
-                 alter_table_info_.index_drop_names_)
+            update_sequence_table_op_.op_func_ = [this](AsyncOp<Void> &async_op)
             {
-                clean_ccm_op_.table_names_.emplace_back(
-                    index_drop_name.StringView().data(),
-                    index_drop_name.StringView().size(),
-                    index_drop_name.Type(),
-                    index_drop_name.Engine());
-            }
-            clean_ccm_op_.clean_type_ = CleanType::CleanCcm;
-            clean_ccm_op_.commit_ts_ = kv_rollback_create_index_op_.write_time_;
-            txm->PushOperation(&clean_ccm_op_);
-            txm->Process(clean_ccm_op_);
+                CcHandlerResult<Void> &hd_res = async_op.hd_result_;
+#ifdef EXT_TX_PROC_ENABLED
+                hd_res.SetToBlock();
+                // The memory fence ensures that the block flag is set
+                // before the background thread is executed.
+                std::atomic_thread_fence(std::memory_order_release);
+#endif
+                async_op.worker_thread_ = std::thread(
+                    [this, &hd_res]()
+                    {
+                        bool succ = std::all_of(
+                            alter_table_info_.index_drop_names_.begin(),
+                            alter_table_info_.index_drop_names_.end(),
+                            [this](const std::pair<TableName, std::string> &p) {
+                                return Sequences::DeleteSequence(
+                                    p.first, SequenceType::RangePartitionId);
+                            });
+
+                        if (succ)
+                        {
+                            hd_res.SetFinished();
+                        }
+                        else
+                        {
+                            LOG(ERROR) << "Drop Table Index transaction "
+                                          "failed to delete range id info";
+                            hd_res.SetError(
+                                CcErrorCode::UPDATE_SEQUENCE_TABLE_FAIL);
+                        }
+                    });
+            };
+            op_ = &update_sequence_table_op_;
+            txm->PushOperation(&update_sequence_table_op_);
+            txm->Process(update_sequence_table_op_);
         }
     }
     else if (op_ == &kv_update_schema_image_op_)
@@ -1510,6 +1654,7 @@ void UpsertTableIndexOp::Reset(const std::string_view table_name_str,
     prepare_log_op_.Reset();
     unlock_cluster_config_op_.Reset();
     kv_create_index_op_.Reset();
+    update_sequence_table_op_.Reset();
     generate_sk_parallel_op_.Reset();
     flush_all_old_tuples_sk_op_.Reset();
     prepare_data_log_op_.Reset();
@@ -1587,6 +1732,7 @@ void UpsertTableIndexOp::Reset(const std::string_view table_name_str,
     downgrade_all_lock_to_intent_op_.ResetHandlerTxm(txm);
     unlock_cluster_config_op_.ResetHandlerTxm(txm);
     kv_create_index_op_.ResetHandlerTxm(txm);
+    update_sequence_table_op_.ResetHandlerTxm(txm);
     generate_sk_parallel_op_.ResetHandlerTxm(txm);
     flush_all_old_tuples_sk_op_.ResetHandlerTxm(txm);
     prepare_data_log_op_.ResetHandlerTxm(txm);

@@ -806,16 +806,10 @@ struct UpsertTableOp : public SchemaOp
      */
     DsUpsertTableOp upsert_kv_table_op_;
     /**
-     * @brief Flush sequence data log to the log service. This data log ensures
-     * that even in the case of failover, the values in the sequence ccmap are
-     * up-to-date.
+     * @brief Update the sequence table for range id info and the auto increment
+     * value if this table has auto_increment column.
      */
-    WriteToLogOp sequence_data_log_op_;
-    /**
-     * @brief Reset the sequence record in the sequence table if this table has
-     * auto_increment column during create table.
-     */
-    AsyncOp<PostProcessResult> reset_sequence_record_op_;
+    AsyncOp<Void> update_sequence_table_op_;
     /**
      * @brief Upgrades acquired write intents to write locks in all nodes.
      *

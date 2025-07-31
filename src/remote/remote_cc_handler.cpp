@@ -194,60 +194,6 @@ void txservice::remote::RemoteCcHandler::PostWrite(
     stream_sender_.SendMessageToNg(cce_addr.NodeGroupId(), send_msg, &hres);
 }
 
-void txservice::remote::RemoteCcHandler::UploadRecord(
-    uint32_t src_node_id,
-    uint64_t tx_number,
-    int64_t tx_term,
-    uint16_t command_id,
-    uint64_t commit_ts,
-    int64_t ng_term,
-    const TxKey &key,
-    const TableName &table_name,
-    const TxRecord *record,
-    OperationType operation_type,
-    uint32_t key_shard_code,
-    CcHandlerResult<PostProcessResult> &hres)
-{
-    CcMessage send_msg;
-
-    send_msg.set_type(
-        CcMessage::MessageType::CcMessage_MessageType_ForwardPostCommitRequest);
-    send_msg.set_tx_number(tx_number);
-    send_msg.set_handler_addr(reinterpret_cast<uint64_t>(&hres));
-    send_msg.set_txm_addr(reinterpret_cast<uint64_t>(hres.Txm()));
-    send_msg.set_tx_term(tx_term);
-    send_msg.set_command_id(command_id);
-
-    ForwardPostCommitRequest *post_commit =
-        send_msg.mutable_forward_post_commit_req();
-    post_commit->set_src_node_id(src_node_id);
-    uint32_t ng_id = Sharder::Instance().ShardToCcNodeGroup(key_shard_code);
-    post_commit->set_node_group_id(ng_id);
-    post_commit->set_node_group_term(ng_term);
-    key.Serialize(*post_commit->mutable_key());
-    post_commit->set_table_name_str(table_name.String());
-    post_commit->set_table_type(
-        ToRemoteType::ConvertTableType(table_name.Type()));
-    post_commit->set_table_engine(
-        ToRemoteType::ConvertTableEngine(table_name.Engine()));
-    post_commit->clear_record();
-    if (commit_ts > 0 && operation_type != OperationType::Delete)
-    {
-        // The commit ts is 0, if the post-write request is used to clear the
-        // write lock when the tx aborts.
-        if (record != nullptr)
-        {
-            record->Serialize(*post_commit->mutable_record());
-        }
-    }
-
-    post_commit->set_commit_ts(commit_ts);
-    post_commit->set_operation_type(static_cast<uint32_t>(operation_type));
-    post_commit->set_key_shard_code(key_shard_code);
-
-    stream_sender_.SendMessageToNg(ng_id, send_msg, &hres);
-}
-
 void txservice::remote::RemoteCcHandler::PostWriteAll(
     uint32_t src_node_id,
     const TableName &table_name,

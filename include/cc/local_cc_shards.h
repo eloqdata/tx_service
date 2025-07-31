@@ -2375,6 +2375,11 @@ private:
                           const TxKey *end_key,
                           bool flush_res);
 
+    bool GetNextRangePartitionId(const TableName &tablename,
+                                 const TableSchema *table_schema,
+                                 uint32_t range_cnt,
+                                 int32_t &out_next_partition_id);
+
     /**
      * @brief Add a flush task entry to the flush task. If the there's no
      * pending flush task, create a new flush task and add the entry to it.
