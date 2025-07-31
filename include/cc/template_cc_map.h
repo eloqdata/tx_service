@@ -5786,17 +5786,40 @@ public:
 
             // Check whether need export this ccentry and fix the data store
             // size.
-            bool need_export = slice_pinned || cce->NeedCkpt();
+            bool need_export = cce->CommitTs() <= req.data_sync_ts_ &&
+                               (slice_pinned || cce->NeedCkpt());
             if (RangePartitioned &&
-                cce->entry_info_.DataStoreSize() == INT32_MAX && slice_pinned)
+                cce->entry_info_.DataStoreSize() == INT32_MAX && need_export)
             {
-                // Update unknown data store size since slice is already pinned
-                cce->entry_info_.SetDataStoreSize(0);
+                if (slice_pinned)
+                {
+                    // Update unknown data store size since slice is already
+                    // pinned
+                    cce->entry_info_.SetDataStoreSize(0);
+                }
+                else if ((table_name_.Type() == TableType::Secondary ||
+                          table_name_.Type() == TableType::UniqueSecondary) &&
+                         cce->CommitTs() <= SchemaTs() && cce->NeedCkpt())
+                {
+                    // `cce->CommitTs() <= SchemaTs() && cce->NeedCkpt()` means
+                    // the secondary index is in dirty state.
+                    // If the data store size of the cce is unknown at this
+                    // time, it means the cce was inserted into the ccmap
+                    // between the execution of the `ScanSliceDeltaSizeCc` and
+                    // `DataSyncScanCc` requests. Just skip this cce in this
+                    // round ckpt.
+                    need_export = false;
+                }
+                else
+                {
+                    LOG(ERROR)
+                        << "Dead branch with data store size is unknown.";
+                    assert(false);
+                }
             }
 
-            // Export this item if need and the commit ts is not greater than
-            // datasyc task ts
-            if (need_export && cce->CommitTs() <= req.data_sync_ts_)
+            // Export this item if need.
+            if (need_export)
             {
                 assert(cce->entry_info_.DataStoreSize() != INT32_MAX);
                 uint64_t mem_usage = 0;
