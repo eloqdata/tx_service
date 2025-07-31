@@ -924,7 +924,7 @@ public:
     void DecrInflightStandbyReqCount(uint32_t seq_grp);
 
     absl::flat_hash_map<uint32_t, StandbySequenceGroup> &
-GetStandbysequenceGrps()
+    GetStandbysequenceGrps()
     {
         return standby_sequence_grps_;
     }
