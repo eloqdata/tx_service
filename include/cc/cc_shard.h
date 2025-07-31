@@ -720,6 +720,19 @@ public:
         uint64_t snapshot_read_ts = 0,
         bool only_fetch_archives = false);
 
+    store::DataStoreHandler::DataStoreOpStatus FetchSnapshot(
+        const TableName &table_name,
+        const TableSchema *tbl_schema,
+        TxKey key,
+        NodeGroupId cc_ng_id,
+        int64_t cc_ng_term,
+        uint64_t snapshot_read_ts,
+        bool only_fetch_archive,
+        CcRequestBase *requester,
+        size_t tuple_idx,
+        OnFetchedSnapshot backfill_func,
+        int32_t range_id = -1);
+
     void RemoveFetchRecordRequest(LruEntry *cce);
 
     CcMap *CreateOrUpdatePkCcMap(const TableName &table_name,
@@ -1042,6 +1055,9 @@ private:
 
     // For load record from kvstore asynchronously
     std::unordered_map<LruEntry *, FetchRecordCc> fetch_record_reqs_;
+
+    // For load snapshot from kvstore asynchronously
+    CcRequestPool<FetchSnapshotCc> fetch_snapshot_cc_pool_;
 
     // For concurrency execution of cpu-bound tasks.
     CcRequestPool<RunOnTxProcessorCc> run_on_tx_processor_cc_pool_;

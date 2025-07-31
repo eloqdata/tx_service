@@ -2328,7 +2328,8 @@ public:
     {
         NoBlocking = 0,
         BlockOnLock,
-        BlockOnFuture
+        BlockOnFuture,
+        BlockOnWaitSnapshots,
     };
 
     uint64_t BlockingCceLockAddr(uint16_t core_id)
@@ -2356,6 +2357,18 @@ public:
     void SetShardCount(uint16_t shard_cnt)
     {
         blocking_vec_.resize(shard_cnt);
+        for (auto &it : blocking_vec_)
+        {
+            it.cce_lock_addr_ = 0;
+            it.scan_type_ = ScanType::ScanUnknow;
+            it.type_ = ScanBlockingType::NoBlocking;
+        }
+
+        wait_for_snapshot_cnt_.resize(shard_cnt);
+        for (uint16_t i = 0; i < shard_cnt; ++i)
+        {
+            wait_for_snapshot_cnt_[i] = 0;
+        }
     }
 
     uint64_t GetShardCount() const
@@ -2532,6 +2545,32 @@ public:
         cache_hit_miss_collected_ = true;
     }
 
+    bool IsWaitForSnapshot(uint16_t core_id) const
+    {
+        return blocking_vec_[core_id].type_ ==
+               ScanBlockingType::BlockOnWaitSnapshots;
+    }
+
+    void SetIsWaitForSnapshot(uint16_t core_id)
+    {
+        blocking_vec_[core_id].type_ = ScanBlockingType::BlockOnWaitSnapshots;
+    }
+
+    size_t WaitForSnapshotCnt(uint16_t core_id) const
+    {
+        return wait_for_snapshot_cnt_[core_id];
+    }
+
+    void DecreaseWaitForSnapshotCnt(uint16_t core_id)
+    {
+        wait_for_snapshot_cnt_[core_id]--;
+    }
+
+    void IncreaseWaitForSnapshotCnt(uint16_t core_id)
+    {
+        wait_for_snapshot_cnt_[core_id]++;
+    }
+
 private:
     enum struct RangeKeyType : uint8_t
     {
@@ -2595,6 +2634,8 @@ private:
         ScanBlockingType type_;
     };
     std::vector<ScanBlockingInfo> blocking_vec_;
+
+    std::vector<size_t> wait_for_snapshot_cnt_;
 
     RangeSliceId range_slice_id_;
 

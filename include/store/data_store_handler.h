@@ -51,6 +51,7 @@ struct FetchTableRangesCc;
 struct SliceDataItem;
 class StoreSlice;
 struct FetchRecordCc;
+struct FetchSnapshotCc;
 struct FlushRecord;
 struct FlushTaskEntry;
 
@@ -172,6 +173,12 @@ public:
 
     // Fetch record from datastore asynchronously.
     virtual DataStoreOpStatus FetchRecord(FetchRecordCc *fetch_cc)
+    {
+        assert(false);
+        return DataStoreOpStatus::Error;
+    }
+
+    virtual DataStoreOpStatus FetchSnapshot(FetchSnapshotCc *fetch_cc)
     {
         assert(false);
         return DataStoreOpStatus::Error;

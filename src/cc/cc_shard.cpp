@@ -1560,6 +1560,39 @@ store::DataStoreHandler::DataStoreOpStatus CcShard::FetchRecord(
     return store::DataStoreHandler::DataStoreOpStatus::Success;
 }
 
+store::DataStoreHandler::DataStoreOpStatus CcShard::FetchSnapshot(
+    const TableName &table_name,
+    const TableSchema *tbl_schema,
+    TxKey key,
+    NodeGroupId cc_ng_id,
+    int64_t cc_ng_term,
+    uint64_t snapshot_read_ts,
+    bool only_fetch_archive,
+    CcRequestBase *requester,
+    size_t tuple_idx,
+    OnFetchedSnapshot backfill_func,
+    int32_t range_id)
+{
+    FetchSnapshotCc *fetch_cc = fetch_snapshot_cc_pool_.NextRequest();
+    fetch_cc->Reset(&table_name,
+                    tbl_schema,
+                    std::move(key),
+                    *this,
+                    cc_ng_id,
+                    cc_ng_term,
+                    snapshot_read_ts,
+                    only_fetch_archive,
+                    requester,
+                    tuple_idx,
+                    backfill_func,
+                    range_id);
+
+    store::DataStoreHandler::DataStoreOpStatus res =
+        local_shards_.store_hd_->FetchSnapshot(fetch_cc);
+
+    return store::DataStoreHandler::DataStoreOpStatus::Success;
+}
+
 void CcShard::RemoveFetchRecordRequest(LruEntry *cce)
 {
     fetch_record_reqs_.erase(cce);

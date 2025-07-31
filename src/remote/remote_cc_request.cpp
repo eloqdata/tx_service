@@ -1115,7 +1115,30 @@ txservice::remote::RemoteScanSlice::RemoteScanSlice()
 
                 output_msg_.mutable_keys()->append(cache.keys_);
 
-                output_msg_.mutable_records()->append(cache.records_);
+                if (cache.archive_positions_.size() > 0)
+                {
+                    // Merge the backfilled archive records.
+                    size_t rec_offset = 0;
+                    for (size_t j = 0; j < cache.archive_positions_.size(); j++)
+                    {
+                        output_msg_.mutable_records()->append(
+                            cache.records_.data() + rec_offset,
+                            cache.records_.data() +
+                                cache.archive_positions_[j].second);
+                        rec_offset = cache.archive_positions_[j].second;
+                        assert(cache.archive_records_[j].size() > 0);
+                        output_msg_.mutable_records()->append(
+                            cache.archive_records_[j]);
+                    }
+                    output_msg_.mutable_records()->append(
+                        cache.records_.data() + rec_offset,
+                        cache.records_.data() + cache.records_.size());
+                }
+                else
+                {
+                    output_msg_.mutable_records()->append(cache.records_);
+                }
+
                 output_msg_.mutable_key_ts()->append(
                     (const char *) cache.key_ts_.data(),
                     cache.key_ts_.size() * sizeof(uint64_t));
