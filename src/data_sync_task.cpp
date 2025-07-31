@@ -79,6 +79,14 @@ DataSyncTask::DataSyncTask(const TableName &table_name,
     {
         range_id_ = range_entry_->GetRangeInfo()->GetKeyNewRangeId(start_key_);
     }
+
+    // For a data sync task during range split, we only need to update the ckpt
+    // ts if the new range owner is the current node group.
+    NodeGroupId range_owner = Sharder::Instance()
+                                  .GetLocalCcShards()
+                                  ->GetRangeOwner(range_id_, ng_id)
+                                  ->BucketOwner();
+    need_update_ckpt_ts_ = range_owner == ng_id;
 }
 #endif
 
@@ -101,8 +109,6 @@ void DataSyncTask::SetFinish()
 
     if (status_->unfinished_tasks_ == 0 && status_->all_task_started_)
     {
-        status_->PersistKV();
-
         if (status_->need_truncate_log_)
         {
             if (status_->err_code_ == CcErrorCode::NO_ERROR)
@@ -189,8 +195,6 @@ void DataSyncTask::SetError(CcErrorCode err_code)
 
     if (status_->unfinished_tasks_ == 0 && status_->all_task_started_)
     {
-        status_->PersistKV();
-
         if (task_res_)
         {
             task_res_->SetError(status_->err_code_);
@@ -199,112 +203,19 @@ void DataSyncTask::SetError(CcErrorCode err_code)
     }
 }
 
-void DataSyncStatus::PersistKV()
+void DataSyncTask::SetScanTaskFinished()
 {
-    store::DataStoreHandler *store_hd =
-        Sharder::Instance().GetDataStoreHandler();
-    if (store_hd != nullptr && store_hd->NeedPersistKV())
+    std::unique_lock<std::mutex> task_sender_lk(status_->mux_);
+    status_->unfinished_scan_tasks_--;
+    if (status_->unfinished_scan_tasks_ == 0 && status_->all_task_started_ &&
+        status_->unfinished_tasks_ != 0)
     {
-        // set `force` flag.
-        bool res = PersistKV("", {}, nullptr, true);
-        if (!res && err_code_ == CcErrorCode::NO_ERROR)
-        {
-            err_code_ = CcErrorCode::DATA_STORE_ERR;
-        }
+        // If all scan tasks are finished, but there are still unfinished data
+        // sync task due to pending flush, flush the current flush buffer.
+        DLOG(INFO) << "Flushing current flush buffer after all scan tasks are "
+                      "finished";
+        Sharder::Instance().GetLocalCcShards()->FlushCurrentFlushBuffer();
     }
-}
-
-bool DataSyncStatus::PersistKV(
-    const std::string &kv_table_name,
-    absl::flat_hash_map<size_t, std::vector<UpdateCceCkptTsCc::CkptTsEntry>>
-        &&cce_entries,
-    std::shared_ptr<DataSyncTask> task,
-    bool all_task_finished)
-{
-    static constexpr uint64_t CKPT_END_BATCH_SIZE = 1000000;
-
-    bool flush_ret = true;
-
-    store::DataStoreHandler *store_hd =
-        Sharder::Instance().GetDataStoreHandler();
-
-    if (store_hd && store_hd->NeedPersistKV())
-    {
-        std::unique_lock<std::mutex> task_lk(task_mux_);
-
-        if (task != nullptr)
-        {
-            tasks_.push_back(std::move(task));
-        }
-
-        if (!kv_table_name.empty())
-        {
-            dedup_kv_table_names_.insert(kv_table_name);
-        }
-
-        for (auto &[core_idx, entry] : cce_entries)
-        {
-            total_entry_cnt_ += entry.size();
-            cce_entries_[core_idx].push_back(std::move(entry));
-        }
-
-        if (total_entry_cnt_ >= CKPT_END_BATCH_SIZE || all_task_finished)
-        {
-            auto tmp_flush_task_entries = std::move(cce_entries_);
-            auto tmp_tasks = std::move(tasks_);
-            std::vector<std::string> kv_table_names(
-                dedup_kv_table_names_.begin(), dedup_kv_table_names_.end());
-
-            size_t entry_cnt = total_entry_cnt_;
-            total_entry_cnt_ = 0;
-            cce_entries_.clear();
-            dedup_kv_table_names_.clear();
-            assert(tasks_.empty());
-            assert(cce_entries_.empty());
-            assert(dedup_kv_table_names_.empty());
-
-            task_lk.unlock();
-
-            if (entry_cnt != 0 && !tmp_flush_task_entries.empty())
-            {
-                flush_ret = store_hd->PersistKV(kv_table_names);
-                DLOG(INFO) << "ckpt_end, res:" << static_cast<int>(flush_ret);
-
-                if (flush_ret)
-                {
-                    UpdateCceCkptTsCc update_cce_ckpt_req(
-                        node_group_id_,
-                        node_group_term_,
-                        std::move(tmp_flush_task_entries));
-
-                    LocalCcShards *local_shards =
-                        Sharder::Instance().GetLocalCcShards();
-
-                    for (const auto &entry : update_cce_ckpt_req.EntriesRef())
-                    {
-                        local_shards->EnqueueToCcShard(entry.first,
-                                                       &update_cce_ckpt_req);
-                    }
-                    update_cce_ckpt_req.Wait();
-
-                    // Reset waiting ckpt flag. Shards should be able to request
-                    // ckpt
-                    // again if no cc entries can be kicked out.
-                    local_shards->SetWaitingCkpt(false);
-                }
-            }
-
-            LocalCcShards *local_shards =
-                Sharder::Instance().GetLocalCcShards();
-
-            for (auto &task : tmp_tasks)
-            {
-                local_shards->PostProcessCkpt(task, flush_ret);
-            }
-        }
-    }
-
-    return flush_ret;
 }
 
 }  // namespace txservice

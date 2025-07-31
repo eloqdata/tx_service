@@ -1012,21 +1012,21 @@ std::pair<size_t, bool> CcShard::Clean()
  * @brief Flush Entry to KvStore. Now, only used for test.
  *
  */
-bool CcShard::FlushEntryForTest(const TableName &tbl_name,
-                                const TableSchema *tbl_schema,
-                                std::vector<FlushRecord> &ckpt_vec,
-                                std::vector<FlushRecord> &archives,
-                                bool only_archives)
+bool CcShard::FlushEntryForTest(
+    std::unordered_map<std::string_view,
+                       std::vector<std::unique_ptr<FlushTaskEntry>>>
+        &flush_task_entries,
+    bool only_archives)
 {
     // TODO(lzx): Now, only flush archives synchronously for test.
     if (only_archives)
     {
-        return ckpter_->FlushArchiveForTest(tbl_name, tbl_schema, archives);
+        return ckpter_->FlushArchiveForTest(flush_task_entries);
     }
     else
     {
-        return (ckpter_->CkptEntryForTest(tbl_name, tbl_schema, ckpt_vec)) &&
-               (ckpter_->FlushArchiveForTest(tbl_name, tbl_schema, archives));
+        return (ckpter_->CkptEntryForTest(flush_task_entries)) &&
+               (ckpter_->FlushArchiveForTest(flush_task_entries));
     }
 }
 

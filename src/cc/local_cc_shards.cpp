@@ -125,6 +125,10 @@ LocalCcShards::LocalCcShards(
       flush_data_worker_ctx_(
           std::min(static_cast<int>(conf.at("core_num")), 10)),
 #endif
+      cur_flush_buffer_(
+          static_cast<uint64_t>(MB(conf.at("node_memory_limit_mb")) * 0.05)),
+      data_sync_mem_controller_(
+          static_cast<uint64_t>(MB(conf.at("node_memory_limit_mb")) * 0.075)),
       statistics_worker_ctx_(1),
       heartbeat_worker_ctx_(1),
       purge_deleted_worker_ctx_(1),
@@ -230,11 +234,6 @@ LocalCcShards::LocalCcShards(
                                       metrics_registry,
                                       common_labels));
     }
-    node_memory_limit_mb = static_cast<uint64_t>(MB(node_memory_limit_mb));
-    node_memory_limit_mb /= data_sync_worker_ctx_.worker_num_;
-    data_sync_worker_memory_usage_quota_ = node_memory_limit_mb * 0.1 * 0.75;
-    DLOG(INFO) << "Data sync work memory usage quota: "
-               << data_sync_worker_memory_usage_quota_;
 }
 
 LocalCcShards::~LocalCcShards()
@@ -271,12 +270,8 @@ void LocalCcShards::StartBackgroudWorkers()
     data_sync_task_queue_.resize(data_sync_worker_ctx_.worker_num_);
 #endif
 
-    data_sync_mem_controllers_.reserve(data_sync_worker_ctx_.worker_num_);
-    // Starts datasync worker threads.
     for (int id = 0; id < data_sync_worker_ctx_.worker_num_; id++)
     {
-        data_sync_mem_controllers_.emplace_back(
-            data_sync_worker_memory_usage_quota_);
         data_sync_worker_ctx_.worker_thd_.push_back(
             std::thread([this, id] { DataSyncWorker(id); }));
     }
@@ -2416,12 +2411,19 @@ void LocalCcShards::EnqueueDataSyncTaskForSplittingRange(
 
     {
         std::lock_guard<std::mutex> status_lk(status->mux_);
+
         status->unfinished_tasks_ += (new_keys->size() + 1);
+        status->unfinished_scan_tasks_ += (new_keys->size() + 1);
         status->all_task_started_ = true;
         if (status->unfinished_tasks_ == 0)
         {
-            status->PersistKV();
             hres->SetFinished();
+            return;
+        }
+        else if (status->unfinished_scan_tasks_ == 0)
+        {
+            FlushCurrentFlushBuffer();
+            return;
         }
     }
 }
@@ -2607,15 +2609,20 @@ void LocalCcShards::EnqueueDataSyncTaskForTable(
     {
         std::lock_guard<std::mutex> status_lk(status->mux_);
         status->unfinished_tasks_ += task_cnt;
+        status->unfinished_scan_tasks_ += task_cnt;
         if (hres)
         {
             status->all_task_started_ = true;
             if (status->unfinished_tasks_ == 0)
             {
-                status->PersistKV();
                 hres->SetFinished();
                 return;
             }
+        }
+        if (status->unfinished_scan_tasks_ == 0 &&
+            status->unfinished_tasks_ != 0 && status->all_task_started_)
+        {
+            FlushCurrentFlushBuffer();
         }
     }
 
@@ -2659,20 +2666,27 @@ void LocalCcShards::EnqueueDataSyncTaskForTable(
     {
         std::lock_guard<std::mutex> status_lk(status->mux_);
         status->unfinished_tasks_ += unfinished_task_cnt;
+        status->unfinished_scan_tasks_ += unfinished_task_cnt;
         if (hres)
         {
             status->all_task_started_ = true;
             if (status->unfinished_tasks_ == 0)
             {
-                status->PersistKV();
                 hres->SetFinished();
                 return;
             }
         }
+
+        if (status->unfinished_scan_tasks_ == 0 &&
+            status->unfinished_tasks_ != 0 && status->all_task_started_)
+        {
+            FlushCurrentFlushBuffer();
+            return;
+        }
     }
 
-    data_sync_worker_ctx_.cv_.notify_all();
 #endif
+    data_sync_worker_ctx_.cv_.notify_all();
 }
 
 void LocalCcShards::EnqueueDataSyncTaskForBucket(
@@ -2734,11 +2748,17 @@ void LocalCcShards::EnqueueDataSyncTaskForBucket(
     {
         std::lock_guard<std::mutex> status_lk(status->mux_);
         status->unfinished_tasks_ += unfinished_task_cnt;
+        status->unfinished_scan_tasks_ += unfinished_task_cnt;
         status->all_task_started_ = true;
         if (status->unfinished_tasks_ == 0)
         {
-            status->PersistKV();
             hres->SetFinished();
+            return;
+        }
+        if (status->unfinished_scan_tasks_ == 0 &&
+            status->unfinished_tasks_ != 0 && status->all_task_started_)
+        {
+            FlushCurrentFlushBuffer();
             return;
         }
     }
@@ -2795,10 +2815,15 @@ void LocalCcShards::EnqueueDataSyncTaskForBucket(
         std::lock_guard<std::mutex> status_lk(status->mux_);
         status->all_task_started_ = true;
         status->unfinished_tasks_ += task_cnt;
+        status->unfinished_scan_tasks_ += task_cnt;
         if (status->unfinished_tasks_ == 0)
         {
-            status->PersistKV();
             hres->SetFinished();
+            return;
+        }
+        else if (status->unfinished_scan_tasks_ == 0)
+        {
+            FlushCurrentFlushBuffer();
             return;
         }
     }
@@ -3027,7 +3052,8 @@ void LocalCcShards::PostProcessCkpt(std::shared_ptr<DataSyncTask> &task,
 void LocalCcShards::PostProcessDataSyncTask(std::shared_ptr<DataSyncTask> task,
                                             const TableSchema *table_schema,
                                             TransactionExecution *data_sync_txm,
-                                            DataSyncTask::CkptErrorCode err)
+                                            DataSyncTask::CkptErrorCode err,
+                                            bool is_scan_task)
 {
     int64_t ng_term =
         Sharder::Instance().TryPinNodeGroupData(task->node_group_id_);
@@ -3119,22 +3145,6 @@ void LocalCcShards::PostProcessDataSyncTask(std::shared_ptr<DataSyncTask> task,
             }
         }
 
-        bool need_ckpt_end = store_hd_ != nullptr && store_hd_->NeedPersistKV();
-        if (need_ckpt_end &&
-            task_ckpt_err == DataSyncTask::CkptErrorCode::NO_ERROR)
-        {
-            bool res = task->status_->PersistKV(
-                table_schema->GetKVCatalogInfo()->GetKvTableName(
-                    task->table_name_),
-                std::move(task->cce_entries_),
-                task,
-                false);
-            if (!res)
-            {
-                task_ckpt_err = DataSyncTask::CkptErrorCode::PERSIST_KV_ERROR;
-            }
-        }
-
         bool reset_waiting_ckpt = false;
         if (task_ckpt_err == DataSyncTask::CkptErrorCode::NO_ERROR)
         {
@@ -3142,13 +3152,9 @@ void LocalCcShards::PostProcessDataSyncTask(std::shared_ptr<DataSyncTask> task,
             {
                 // Commit the data sync txm
                 txservice::CommitTx(data_sync_txm);
-
-                if (!need_ckpt_end)
-                {
-                    // Update the task status for this range.
-                    PostProcessCkpt(task, true);
-                    reset_waiting_ckpt = true;
-                }
+                // Update the task status for this range.
+                PostProcessCkpt(task, true);
+                reset_waiting_ckpt = true;
             }
 
             task->SetFinish();
@@ -3160,6 +3166,10 @@ void LocalCcShards::PostProcessDataSyncTask(std::shared_ptr<DataSyncTask> task,
                 txservice::AbortTx(data_sync_txm);
                 range_entry->UnPinStoreRange();
             }
+
+            // Should not decrease unfinished scan task in this case since the
+            // task is re-added to the queue.
+            is_scan_task = false;
 
             task->ckpt_err_ = DataSyncTask::CkptErrorCode::NO_ERROR;
             std::lock_guard<std::mutex> task_worker_lk(
@@ -3221,6 +3231,12 @@ void LocalCcShards::PostProcessDataSyncTask(std::shared_ptr<DataSyncTask> task,
             SetWaitingCkpt(false);
         }
     }
+
+    if (is_scan_task)
+    {
+        task->SetScanTaskFinished();
+    }
+
     if (ng_term > 0)
     {
         Sharder::Instance().UnpinNodeGroupData(task->node_group_id_);
@@ -3280,6 +3296,7 @@ void LocalCcShards::DataSync(std::unique_lock<std::mutex> &task_worker_lk,
         {
             // table dropped
             data_sync_task->SetError(CcErrorCode::REQUESTED_TABLE_NOT_EXISTS);
+            data_sync_task->SetScanTaskFinished();
             ClearAllPendingTasks(ng_id, expected_ng_term, table_name, range_id);
         }
         else
@@ -3316,6 +3333,7 @@ void LocalCcShards::DataSync(std::unique_lock<std::mutex> &task_worker_lk,
                 if (data_sync_task->data_sync_ts_ <= last_sync_ts && !is_dirty)
                 {
                     data_sync_task->SetFinish();
+                    data_sync_task->SetScanTaskFinished();
                     PopPendingTask(
                         ng_id, expected_ng_term, table_name, range_id);
                     assert(need_process == false);
@@ -3330,6 +3348,7 @@ void LocalCcShards::DataSync(std::unique_lock<std::mutex> &task_worker_lk,
                 // range no longer belong to this ng.
                 data_sync_task->SetError(
                     CcErrorCode::REQUESTED_NODE_NOT_LEADER);
+                data_sync_task->SetScanTaskFinished();
                 PopPendingTask(ng_id, expected_ng_term, table_name, range_id);
             }
         }
@@ -3354,6 +3373,7 @@ void LocalCcShards::DataSync(std::unique_lock<std::mutex> &task_worker_lk,
 
             // Finish this task and notify the caller.
             data_sync_task->SetError(CcErrorCode::REQUESTED_NODE_NOT_LEADER);
+            data_sync_task->SetScanTaskFinished();
             PopPendingTask(ng_id, expected_ng_term, table_name, range_id);
 
             if (ng_term >= 0)
@@ -3438,6 +3458,7 @@ void LocalCcShards::DataSync(std::unique_lock<std::mutex> &task_worker_lk,
                 // If table is deleted(!Normal), skip the table. Return finish
                 // directly.
                 data_sync_task->SetError();
+                data_sync_task->SetScanTaskFinished();
 
                 ClearAllPendingTasks(
                     ng_id, expected_ng_term, table_name, range_id);
@@ -3497,6 +3518,7 @@ void LocalCcShards::DataSync(std::unique_lock<std::mutex> &task_worker_lk,
                           << table_name.Trace() << ". Return finish directly.";
 
                 data_sync_task->SetFinish();
+                data_sync_task->SetScanTaskFinished();
                 PopPendingTask(ng_id, expected_ng_term, table_name, range_id);
 
                 return;
@@ -3551,6 +3573,7 @@ void LocalCcShards::DataSync(std::unique_lock<std::mutex> &task_worker_lk,
             txservice::AbortTx(data_sync_txm);
 
             data_sync_task->SetError();
+            data_sync_task->SetScanTaskFinished();
             PopPendingTask(ng_id, expected_ng_term, table_name, range_id);
 
             return;
@@ -3564,6 +3587,7 @@ void LocalCcShards::DataSync(std::unique_lock<std::mutex> &task_worker_lk,
                 << "DataSync range version mismatch with data sync ts: "
                 << data_sync_task->data_sync_ts_;
             data_sync_task->SetErrorCode(CcErrorCode::GET_RANGE_ID_ERR);
+            data_sync_task->SetScanTaskFinished();
         }
 
         assert(!store_range);
@@ -3669,6 +3693,7 @@ void LocalCcShards::DataSync(std::unique_lock<std::mutex> &task_worker_lk,
             PopPendingTask(ng_id, expected_ng_term, table_name, range_id);
         }
         data_sync_task->SetFinish();
+        data_sync_task->SetScanTaskFinished();
         return;
     }
     assert(slices_delta_size.size() > 0 || export_base_table_items);
@@ -3700,6 +3725,7 @@ void LocalCcShards::DataSync(std::unique_lock<std::mutex> &task_worker_lk,
                        << table_name.StringView();
 
             data_sync_task->SetError();
+            data_sync_task->SetScanTaskFinished();
             // Handle the pending tasks for the same range
             PopPendingTask(ng_id, expected_ng_term, table_name, range_id);
 
@@ -3789,6 +3815,7 @@ void LocalCcShards::DataSync(std::unique_lock<std::mutex> &task_worker_lk,
     // Note: `DataSyncScanCc` needs to ensure that no two ckpt_rec with the
     // same Key can be generated. Our subsequent algorithms are based on this
     // assumption.
+
     DataSyncScanCc scan_cc(table_name,
                            data_sync_task->data_sync_ts_,
                            ng_id,
@@ -3812,9 +3839,6 @@ void LocalCcShards::DataSync(std::unique_lock<std::mutex> &task_worker_lk,
             data_sync_task->flight_task_mux_);
         data_sync_task->flight_task_cnt_ += 1;
     }
-
-    DataSyncMemoryController &mem_controller =
-        data_sync_mem_controllers_[worker_idx];
 
     while (!scan_data_drained)
     {
@@ -3840,19 +3864,23 @@ void LocalCcShards::DataSync(std::unique_lock<std::mutex> &task_worker_lk,
         else
         {
             scan_data_drained = true;
-            assert(scan_cc.accumulated_mem_usage_.size() == cc_shards_.size());
-            uint64_t scan_mem_usage = 0;
-            for (size_t mem_usage : scan_cc.accumulated_mem_usage_)
+            assert(scan_cc.accumulated_flush_data_size_.size() ==
+                   cc_shards_.size());
+            uint64_t flush_data_size = 0;
+            for (size_t flush_data_size_per_core :
+                 scan_cc.accumulated_flush_data_size_)
             {
-                scan_mem_usage += mem_usage;
+                flush_data_size += flush_data_size_per_core;
             }
             // This thread will wait in AllocatePendingFlushDataMemQuota if
             // quota is not available
             uint64_t old_usage =
-                mem_controller.AllocateFlushDataMemQuota(scan_mem_usage);
+                data_sync_mem_controller_.AllocateFlushDataMemQuota(
+                    flush_data_size);
             DLOG(INFO) << "AllocateFlushDataMemQuota old_usage: " << old_usage
-                       << " new_usage: " << old_usage + scan_mem_usage
-                       << " quota: " << mem_controller.FlushMemoryQuota()
+                       << " new_usage: " << old_usage + flush_data_size
+                       << " quota: "
+                       << data_sync_mem_controller_.FlushMemoryQuota()
                        << " flight_tasks: " << data_sync_task->flight_task_cnt_
                        << " of range: " << range_id
                        << " for table: " << table_name.StringView();
@@ -4032,22 +4060,29 @@ void LocalCcShards::DataSync(std::unique_lock<std::mutex> &task_worker_lk,
                 data_sync_task->flight_task_cnt_ += 1;
             }
 
+            AddFlushTaskEntry(
+                std::make_unique<FlushTaskEntry>(std::move(data_sync_vec),
+                                                 std::move(archive_vec),
+                                                 std::move(mv_base_vec),
+                                                 data_sync_txm,
+                                                 data_sync_task,
+                                                 table_schema,
+                                                 flush_data_size));
+
+            for (size_t i = 0; i < cc_shards_.size(); ++i)
             {
-                std::lock_guard<std::mutex> worker_lk(
-                    flush_data_worker_ctx_.mux_);
-                pending_flush_work_.emplace_back(
-                    std::make_unique<FlushDataTask>(data_sync_task,
-                                                    table_schema,
-                                                    std::move(data_sync_vec),
-                                                    std::move(archive_vec),
-                                                    std::move(mv_base_vec),
-                                                    scan_mem_usage,
-                                                    data_sync_txm,
-                                                    worker_idx));
-
-                flush_data_worker_ctx_.cv_.notify_one();
+                if (scan_cc.scan_heap_is_full_[i] == 1)
+                {
+                    // Clear the FlushRecords' memory of scan cc since the
+                    // DataSyncScan heap is full.
+                    auto &data_sync_vec_ref = scan_cc.DataSyncVec(i);
+                    auto &archive_vec_ref = scan_cc.ArchiveVec(i);
+                    ReleaseDataSyncScanHeapCc release_scan_heap_cc(
+                        &data_sync_vec_ref, &archive_vec_ref);
+                    EnqueueCcRequest(i, &release_scan_heap_cc);
+                    release_scan_heap_cc.Wait();
+                }
             }
-
             // Reset
             scan_cc.Reset();
             for (size_t i = 0; i < cc_shards_.size(); ++i)
@@ -4091,7 +4126,8 @@ void LocalCcShards::PostProcessDataSyncTask(std::shared_ptr<DataSyncTask> task,
                                             const TableSchema *table_schema,
                                             TransactionExecution *data_sync_txm,
                                             DataSyncTask::CkptErrorCode err,
-                                            uint16_t worker_idx)
+                                            uint16_t worker_idx,
+                                            bool is_scan_task)
 {
     std::unique_lock<bthread::Mutex> flight_task_lk(task->flight_task_mux_);
     int64_t flight_task_cnt = --task->flight_task_cnt_;
@@ -4108,36 +4144,16 @@ void LocalCcShards::PostProcessDataSyncTask(std::shared_ptr<DataSyncTask> task,
     // All flush tasks of this task are finished (flight_task_cnt == 0)
     if (flight_task_cnt == 0)
     {
-        bool need_ckpt_end = store_hd_ != nullptr && store_hd_->NeedPersistKV();
-        if (need_ckpt_end &&
-            task_ckpt_err == DataSyncTask::CkptErrorCode::NO_ERROR)
-        {
-            // we don't need to acquire `task->update_cce_mutex_`
-            bool res = task->status_->PersistKV(
-                table_schema->GetKVCatalogInfo()->GetKvTableName(
-                    task->table_name_),
-                std::move(task->cce_entries_),
-                task,
-                false);
-            if (!res)
-            {
-                task_ckpt_err = DataSyncTask::CkptErrorCode::PERSIST_KV_ERROR;
-            }
-        }
-
         if (task_ckpt_err == DataSyncTask::CkptErrorCode::NO_ERROR)
         {
             // Commit the data sync txm
             txservice::CommitTx(data_sync_txm);
 
-            if (!need_ckpt_end)
-            {
-                // Reset waiting ckpt flag. Shards should be able to request
-                // ckpt again if no cc entries can be kicked out.
-                SetWaitingCkpt(false);
+            // Reset waiting ckpt flag. Shards should be able to request
+            // ckpt again if no cc entries can be kicked out.
+            SetWaitingCkpt(false);
 
-                PostProcessCkpt(task, true);
-            }
+            PostProcessCkpt(task, true);
 
             task->SetFinish();
         }
@@ -4192,6 +4208,10 @@ void LocalCcShards::PostProcessDataSyncTask(std::shared_ptr<DataSyncTask> task,
             SetWaitingCkpt(false);
         }
     }
+    if (is_scan_task)
+    {
+        task->SetScanTaskFinished();
+    }
 }
 
 void LocalCcShards::DataSync(std::unique_lock<std::mutex> &task_worker_lk,
@@ -4234,7 +4254,7 @@ void LocalCcShards::DataSync(std::unique_lock<std::mutex> &task_worker_lk,
     if (catalog_entry == nullptr)
     {
         data_sync_task->SetError(CcErrorCode::REQUESTED_TABLE_NOT_EXISTS);
-
+        data_sync_task->SetScanTaskFinished();
         ClearAllPendingTasks(ng_id, expected_ng_term, table_name, worker_idx);
     }
     else
@@ -4267,6 +4287,7 @@ void LocalCcShards::DataSync(std::unique_lock<std::mutex> &task_worker_lk,
         if (data_sync_task->data_sync_ts_ <= last_sync_ts && !is_dirty)
         {
             data_sync_task->SetFinish();
+            data_sync_task->SetScanTaskFinished();
 
             PopPendingTask(ng_id, expected_ng_term, table_name, worker_idx);
 
@@ -4318,6 +4339,7 @@ void LocalCcShards::DataSync(std::unique_lock<std::mutex> &task_worker_lk,
                    << ", and the expected leader term: " << expected_ng_term;
         // Finish this task and notify the caller.
         data_sync_task->SetError(CcErrorCode::REQUESTED_NODE_NOT_LEADER);
+        data_sync_task->SetScanTaskFinished();
 
         ClearAllPendingTasks(ng_id, expected_ng_term, table_name, worker_idx);
 
@@ -4379,6 +4401,7 @@ void LocalCcShards::DataSync(std::unique_lock<std::mutex> &task_worker_lk,
             // If table is deleted(!Normal), skip the table. Return finish
             // directly.
             data_sync_task->SetError(CcErrorCode::REQUESTED_TABLE_NOT_EXISTS);
+            data_sync_task->SetScanTaskFinished();
 
             ClearAllPendingTasks(
                 ng_id, expected_ng_term, table_name, worker_idx);
@@ -4632,7 +4655,7 @@ void LocalCcShards::DataSync(std::unique_lock<std::mutex> &task_worker_lk,
                 }
             }
 
-            uint64_t scan_mem_usage = scan_cc.accumulated_mem_usage_[0];
+            uint64_t flush_data_size = scan_cc.accumulated_flush_data_size_[0];
 
             // nothing to flush
             if (scan_cc.accumulated_scan_cnt_[0] == 0)
@@ -4644,15 +4667,15 @@ void LocalCcShards::DataSync(std::unique_lock<std::mutex> &task_worker_lk,
                 continue;
             }
 
-            DataSyncMemoryController &mem_controller =
-                data_sync_mem_controllers_[worker_idx];
             // this thread will wait in AllocatePendingFlushDataMemQuota if
             // quota is not available
             uint64_t old_usage =
-                mem_controller.AllocateFlushDataMemQuota(scan_mem_usage);
+                data_sync_mem_controller_.AllocateFlushDataMemQuota(
+                    flush_data_size);
             DLOG(INFO) << "AllocateFlushDataMemQuota old_usage: " << old_usage
-                       << " new_usage: " << old_usage + scan_mem_usage
-                       << " quota: " << mem_controller.FlushMemoryQuota()
+                       << " new_usage: " << old_usage + flush_data_size
+                       << " quota: "
+                       << data_sync_mem_controller_.FlushMemoryQuota()
                        << " flight_tasks: " << data_sync_task->flight_task_cnt_
                        << " record count: " << scan_cc.accumulated_scan_cnt_[0];
 
@@ -4704,7 +4727,7 @@ void LocalCcShards::DataSync(std::unique_lock<std::mutex> &task_worker_lk,
                       scan_cc.ArchiveVec(0).end(),
                       std::back_inserter(*archive_vec));
 
-            vec_mem_usage += scan_mem_usage;
+            vec_mem_usage += flush_data_size;
 
             scan_data_drained = scan_cc.IsDrained(0) && scan_data_drained;
 
@@ -4731,7 +4754,8 @@ void LocalCcShards::DataSync(std::unique_lock<std::mutex> &task_worker_lk,
                     data_sync_vec->clear();
                     archive_vec->clear();
                     mv_base_vec->clear();
-                    mem_controller.DeallocateFlushMemQuota(vec_mem_usage);
+                    data_sync_mem_controller_.DeallocateFlushMemQuota(
+                        vec_mem_usage);
                     break;
                 }
 
@@ -4740,21 +4764,14 @@ void LocalCcShards::DataSync(std::unique_lock<std::mutex> &task_worker_lk,
                 data_sync_task->flight_task_cnt_ += 1;
             }
 
-            {
-                std::lock_guard<std::mutex> worker_lk(
-                    flush_data_worker_ctx_.mux_);
-                pending_flush_work_.emplace_back(
-                    std::make_unique<FlushDataTask>(data_sync_task,
-                                                    catalog_rec.CopySchema(),
-                                                    std::move(data_sync_vec),
-                                                    std::move(archive_vec),
-                                                    std::move(mv_base_vec),
-                                                    vec_mem_usage,
-                                                    data_sync_txm,
-                                                    worker_idx));
-
-                flush_data_worker_ctx_.cv_.notify_one();
-            }
+            AddFlushTaskEntry(
+                std::make_unique<FlushTaskEntry>(std::move(data_sync_vec),
+                                                 std::move(archive_vec),
+                                                 std::move(mv_base_vec),
+                                                 data_sync_txm,
+                                                 data_sync_task,
+                                                 catalog_rec.CopySchema(),
+                                                 vec_mem_usage));
 
             data_sync_vec = std::make_unique<std::vector<FlushRecord>>();
 
@@ -4765,8 +4782,7 @@ void LocalCcShards::DataSync(std::unique_lock<std::mutex> &task_worker_lk,
 
             vec_mem_usage = 0;
 
-#ifdef ON_KEY_OBJECT
-            if (scan_cc.scan_heap_is_full_)
+            if (scan_cc.scan_heap_is_full_[0] == 1)
             {
                 // Clear the FlushRecords' memory of scan cc since the
                 // DataSyncScan heap is full.
@@ -4777,7 +4793,6 @@ void LocalCcShards::DataSync(std::unique_lock<std::mutex> &task_worker_lk,
                 EnqueueCcRequest(worker_idx, &release_scan_heap_cc);
                 release_scan_heap_cc.Wait();
             }
-#endif
 
             scan_cc.Reset();
         }
@@ -4801,25 +4816,20 @@ void LocalCcShards::DataSync(std::unique_lock<std::mutex> &task_worker_lk,
             data_sync_task->flight_task_cnt_ += 1;
             flight_task_lk.unlock();
 
-            std::lock_guard<std::mutex> worker_lk(flush_data_worker_ctx_.mux_);
-            pending_flush_work_.emplace_back(
-                std::make_unique<FlushDataTask>(data_sync_task,
-                                                catalog_rec.CopySchema(),
-                                                std::move(data_sync_vec),
-                                                std::move(archive_vec),
-                                                std::move(mv_base_vec),
-                                                vec_mem_usage,
-                                                data_sync_txm,
-                                                worker_idx));
-            flush_data_worker_ctx_.cv_.notify_one();
+            AddFlushTaskEntry(
+                std::make_unique<FlushTaskEntry>(std::move(data_sync_vec),
+                                                 std::move(archive_vec),
+                                                 std::move(mv_base_vec),
+                                                 data_sync_txm,
+                                                 data_sync_task,
+                                                 catalog_rec.CopySchema(),
+                                                 vec_mem_usage));
         }
         else
         {
             // There are error during flush, and if we do not put the current
             // batch data into flush worker, should release the memory usage.
-            DataSyncMemoryController &mem_controller =
-                data_sync_mem_controllers_[worker_idx];
-            mem_controller.DeallocateFlushMemQuota(vec_mem_usage);
+            data_sync_mem_controller_.DeallocateFlushMemQuota(vec_mem_usage);
         }
     }
 
@@ -4921,6 +4931,7 @@ void LocalCcShards::ClearAllPendingTasks(NodeGroupId ng_id,
     {
         auto &task = iter->second->pending_tasks_.front();
         task->SetError(CcErrorCode::REQUESTED_TABLE_NOT_EXISTS);
+        task->SetScanTaskFinished();
         iter->second->pending_tasks_.pop();
     }
 
@@ -5221,6 +5232,7 @@ void LocalCcShards::SplitFlushRange(
 
         range_entry->UnPinStoreRange();
         data_sync_task->SetError(CcErrorCode::DATA_STORE_ERR);
+        data_sync_task->SetScanTaskFinished();
 
         PopPendingTask(node_group,
                        data_sync_task->node_group_term_,
@@ -5278,6 +5290,7 @@ void LocalCcShards::SplitFlushRange(
         range_entry->UnPinStoreRange();
 
         data_sync_task->SetError();
+        data_sync_task->SetScanTaskFinished();
 
         PopPendingTask(node_group,
                        data_sync_task->node_group_term_,
@@ -5292,7 +5305,7 @@ void LocalCcShards::SplitFlushRange(
     range_entry->UnPinStoreRange();
 
     data_sync_task->SetFinish();
-
+    data_sync_task->SetScanTaskFinished();
     PopPendingTask(node_group,
                    data_sync_task->node_group_term_,
                    table_name,
@@ -5305,6 +5318,32 @@ void LocalCcShards::SplitFlushRange(
 }
 #endif
 
+void LocalCcShards::AddFlushTaskEntry(std::unique_ptr<FlushTaskEntry> &&entry)
+{
+    cur_flush_buffer_.AddFlushTaskEntry(std::move(entry));
+
+    std::unique_ptr<FlushDataTask> flush_data_task =
+        cur_flush_buffer_.MoveFlushData(false);
+    if (flush_data_task != nullptr)
+    {
+        std::lock_guard<std::mutex> worker_lk(flush_data_worker_ctx_.mux_);
+        pending_flush_work_.emplace_back(std::move(flush_data_task));
+        flush_data_worker_ctx_.cv_.notify_one();
+    }
+}
+
+void LocalCcShards::FlushCurrentFlushBuffer()
+{
+    std::unique_ptr<FlushDataTask> flush_data_task =
+        cur_flush_buffer_.MoveFlushData(true);
+    if (flush_data_task != nullptr)
+    {
+        std::lock_guard<std::mutex> worker_lk(flush_data_worker_ctx_.mux_);
+        pending_flush_work_.emplace_back(std::move(flush_data_task));
+        flush_data_worker_ctx_.cv_.notify_one();
+    }
+}
+
 void LocalCcShards::FlushData(std::unique_lock<std::mutex> &flush_worker_lk)
 {
     // Retrieve first pending work and pop it.
@@ -5313,444 +5352,211 @@ void LocalCcShards::FlushData(std::unique_lock<std::mutex> &flush_worker_lk)
     pending_flush_work_.pop_back();
     flush_worker_lk.unlock();
 
-    const TableSchema *schema = cur_work->schema_.get();
-    assert(schema != nullptr);
-
-    size_t scan_task_worker_idx = cur_work->scan_task_worker_idx_;
-    std::vector<FlushRecord> *data_sync_vec = cur_work->data_sync_vec_.get();
-    std::vector<FlushRecord> *archive_vec = cur_work->archive_vec_.get();
-    std::vector<std::pair<TxKey, int32_t>> *mv_base_vec =
-        cur_work->mv_base_vec_.get();
-
-    std::shared_ptr<DataSyncTask> data_sync_task = cur_work->data_sync_task_;
-    uint32_t node_group = data_sync_task->node_group_id_;
-    int64_t leader_term = data_sync_task->node_group_term_;
-    TableName table_name = data_sync_task->table_name_;
-
-    TransactionExecution *data_sync_txm = cur_work->data_sync_txm_;
+    auto &flush_task_entries = cur_work->flush_task_entries_;
 
     bool succ = true;
-    bool flush_ret = true;
-
-#ifdef RANGE_PARTITION_ENABLED
-    // Check the leader
-    // Try to pin node group data to avoid the potentail heap-use-after-free
-    // error about the cc entry and table ranges info. NOTE: The
-    // `RangeRecord.range_info_` which will be used during PutAll is a raw
-    // pointer that points to range info in TableRangeEntry stored in local
-    // cc shards.
-    int64_t ng_term = Sharder::Instance().TryPinNodeGroupData(node_group);
-    // Defer unpin node group data.
-    std::shared_ptr<void> defer_unpin(
-        nullptr,
-        [node_group, ng_term](void *)
+    // Flushes to the data store
+    if (EnableMvcc())
+    {
+        succ = store_hd_->CopyBaseToArchive(flush_task_entries);
+        if (!succ)
         {
-            if (ng_term >= 0)
-            {
-                Sharder::Instance().UnpinNodeGroupData(node_group);
-            }
-        });
-    bool during_split_range = data_sync_task->during_split_range_;
-#else
-    int64_t ng_term = -1;
-    if (data_sync_task->is_standby_node_ckpt_)
-    {
-        ng_term = Sharder::Instance().StandbyNodeTerm();
-    }
-    else
-    {
-        int64_t ng_candidate_leader_term =
-            Sharder::Instance().CandidateLeaderTerm(node_group);
-        int64_t ng_leader_term = Sharder::Instance().LeaderTerm(node_group);
-        ng_term = std::max(ng_candidate_leader_term, ng_leader_term);
-    }
-#endif
-
-    if (ng_term < 0 || ng_term != leader_term)
-    {
-        LOG(ERROR) << "FlushData: node is not the leader of ng#" << node_group
-                   << ", with current leader term: " << ng_term
-                   << ", and the expected leader term: " << leader_term;
-        succ = false;
-    }
-    else
-    {
-        bool has_data = !data_sync_vec->empty();
-        if (EnableMvcc())
-        {
-            has_data =
-                has_data || !archive_vec->empty() || !mv_base_vec->empty();
+            LOG(ERROR) << "DataSync CopyBaseToArchive flush to kv "
+                          "storage failed";
         }
+    }
 
-        // Flush to data store if this node group leader term does not
-        // change
-        if (has_data)
+    if (succ)
+    {
+        succ = store_hd_->PutAll(flush_task_entries);
+        if (!succ)
         {
-            // Flushes to the data store
-            if (EnableMvcc() && mv_base_vec->size() > 0)
-            {
-                flush_ret = store_hd_->CopyBaseToArchive(
-                    *mv_base_vec, node_group, table_name, schema);
-                if (!flush_ret)
-                {
-                    LOG(ERROR) << "DataSync CopyBaseToArchive flush to kv "
-                                  "storage failed";
-                }
-            }
+            LOG(ERROR) << "DataSync PutAll flush to kv "
+                          "storage failed";
+        }
+    }
 
-            if (flush_ret && !data_sync_vec->empty())
-            {
-                flush_ret = store_hd_->PutAll(
-                    *data_sync_vec, table_name, schema, node_group);
-                if (!flush_ret)
-                {
-                    LOG(ERROR) << "DataSync PutAll flush to kv "
-                                  "storage failed";
-                }
-            }
+    if (succ && EnableMvcc())
+    {
+        succ = store_hd_->PutArchivesAll(flush_task_entries);
+        if (!succ)
+        {
+            LOG(ERROR) << "DataSync PutArchivesAll flush to "
+                          "kv storage failed";
+        }
+    }
 
-            if (flush_ret && EnableMvcc())
-            {
-                flush_ret =
-                    store_hd_->PutArchivesAll(node_group,
-                                              table_name,
-                                              schema->GetKVCatalogInfo(),
-                                              *archive_vec);
-                if (!flush_ret)
-                {
-                    LOG(ERROR) << "DataSync PutArchivesAll flush to "
-                                  "kv storage failed";
-                }
-            }
+    // Persist data in kv store if needed
+    if (succ && store_hd_->NeedPersistKV())
+    {
+        std::vector<std::string> kv_table_names;
+        for (auto &[table_name, entries] : flush_task_entries)
+        {
+            kv_table_names.push_back(table_name.data());
+        }
+        succ = store_hd_->PersistKV(kv_table_names);
+    }
 
-            // If flush to data store succeeds, update the ckpt_ts for each
-            // entry in ccmap to latest checkpoint version's commit_ts.
-            if (flush_ret)
+    std::unordered_set<uint16_t> updated_ckpt_ts_core_ids;
+
+    // Update cce ckpt ts in memory
+    if (succ)
+    {
+        for (auto &[kv_table_name, entries] : flush_task_entries)
+        {
+            for (auto &entry : entries)
             {
-#ifdef RANGE_PARTITION_ENABLED
-                bool need_update_ckpt_ts = true;
-                if (during_split_range)
+                if (!entry->data_sync_task_->need_update_ckpt_ts_)
                 {
-                    assert(data_sync_task->range_entry_ != nullptr &&
-                           data_sync_task->data_sync_ts_ ==
-                               data_sync_task->range_entry_->GetRangeInfo()
-                                   ->DirtyTs());
-                    // Only update the ckpt ts if the owner of the current
-                    // subrange still falls on the current node. Because the
-                    // data in the subranges that fall on other nodes will be
-                    // forcibly evicted from the current node, there is no need
-                    // to update ckpt ts.
-                    // NOTE: Even if the ckpt ts of these data are updated, they
-                    // will not be kicked out from memory until the dirty state
-                    // of the old range is reset.
-                    NodeGroupId range_owner =
-                        GetRangeOwner(data_sync_task->range_id_, node_group)
-                            ->BucketOwner();
-                    need_update_ckpt_ts = range_owner == node_group;
+                    continue;
                 }
 
-                if (need_update_ckpt_ts)
+                absl::flat_hash_map<size_t,
+                                    std::vector<UpdateCceCkptTsCc::CkptTsEntry>>
+                    cce_entries_map;
+
+                auto &table_name =
+                    entries.front()->data_sync_task_->table_name_;
+
+                for (auto &rec : *(entry->data_sync_vec_))
                 {
-                    if (store_hd_->NeedPersistKV())
+                    auto cce = rec.cce_;
+                    if (cce != nullptr)
                     {
-                        std::unique_lock<bthread::Mutex> update_cce_ckptts_lk(
-                            data_sync_task->update_cce_mux_);
-
-                        if (data_sync_task->cce_entries_.empty())
+                        size_t key_core_idx = 0;
+                        if (!table_name.IsHashPartitioned())
                         {
-                            for (size_t core_idx = 0; core_idx < Count();
-                                 ++core_idx)
-                            {
-                                data_sync_task->cce_entries_.try_emplace(
-                                    core_idx,
-                                    std::vector<
-                                        UpdateCceCkptTsCc::CkptTsEntry>());
-                            }
+                            key_core_idx = (rec.Key().Hash() & 0x3FF) % Count();
                         }
-
-                        assert(!data_sync_task->cce_entries_.empty());
-
-                        auto &entries_ref = data_sync_task->cce_entries_;
-
-                        // In the real world, the amount of data on all cores is
-                        // not exactly equal. So we reserve 512 extra spaces to
-                        // avoid resize
-                        size_t reserve_size =
-                            (data_sync_vec->size() / Count()) + 512;
-                        for (size_t core_idx = 0; core_idx < Count();
-                             ++core_idx)
+                        else
                         {
-                            entries_ref[core_idx].reserve(
-                                entries_ref[core_idx].size() + reserve_size);
+#ifndef RANGE_PARTITION_ENABLED
+                            key_core_idx = entry->data_sync_task_->worker_idx_;
+#else
+                            assert(false);
+#endif
                         }
-
-                        for (size_t i = 0; i < data_sync_vec->size(); ++i)
-                        {
-                            auto &ref = data_sync_vec->at(i);
-                            if (ref.cce_ == nullptr)
-                            {
-                                assert(during_split_range);
-                                // This record was load from storage. We don't
-                                // need to update data store size.
-                                continue;
-                            }
-                            assert(ref.HoldsVersionedPayload());
-                            size_t key_core_idx =
-                                (ref.Key().Hash() & 0x3FF) % Count();
-                            entries_ref[key_core_idx].emplace_back(
-                                ref.cce_, ref.commit_ts_, ref.post_flush_size_);
-                        }
-
-                        size_t entrys_cnt = 0;
-                        for (const auto &entries : entries_ref)
-                        {
-                            entrys_cnt += entries.second.size();
-                        }
-
-                        if (entrys_cnt >= 100000)
-                        {
-                            auto tmp_flush_task_entries =
-                                std::move(data_sync_task->cce_entries_);
-                            assert(data_sync_task->cce_entries_.empty());
-                            update_cce_ckptts_lk.unlock();
-
-                            if (!data_sync_task->status_->PersistKV(
-                                    schema->GetKVCatalogInfo()->GetKvTableName(
-                                        data_sync_task->table_name_),
-                                    std::move(tmp_flush_task_entries),
-                                    nullptr,
-                                    false))
-                            {
-                                succ = false;
-                            }
-                        }
+                        auto insert_it = cce_entries_map.try_emplace(
+                            key_core_idx,
+                            std::vector<UpdateCceCkptTsCc::CkptTsEntry>());
+                        insert_it.first->second.emplace_back(
+                            cce, rec.commit_ts_, rec.post_flush_size_);
                     }
                     else
                     {
-                        absl::flat_hash_map<
-                            size_t,
-                            std::vector<
-                                std::vector<UpdateCceCkptTsCc::CkptTsEntry>>>
-                            cce_entries_map;
-
-                        std::vector<std::vector<UpdateCceCkptTsCc::CkptTsEntry>>
-                            entries;
-                        entries.resize(Count());
-
-                        // In the real world, the amount of data on all cores is
-                        // not exactly equal. So we reserve 512 extra spaces to
-                        // avoid resize
-                        size_t reserve_size =
-                            (data_sync_vec->size() / Count()) + 512;
-                        for (size_t core_idx = 0; core_idx < Count();
-                             ++core_idx)
-                        {
-                            entries[core_idx].reserve(entries[core_idx].size() +
-                                                      reserve_size);
-                        }
-
-                        for (size_t i = 0; i < data_sync_vec->size(); ++i)
-                        {
-                            auto &ref = data_sync_vec->at(i);
-                            if (ref.cce_ == nullptr)
-                            {
-                                assert(during_split_range);
-                                // This record was load from storage. We don't
-                                // need to update data store size.
-                                continue;
-                            }
-                            assert(ref.HoldsVersionedPayload());
-                            size_t key_core_idx =
-                                (ref.Key().Hash() & 0x3FF) % Count();
-
-                            entries[key_core_idx].emplace_back(
-                                ref.cce_, ref.commit_ts_, ref.post_flush_size_);
-                        }
-
-                        for (size_t core_idx = 0; core_idx < Count();
-                             ++core_idx)
-                        {
-                            cce_entries_map[core_idx].push_back(
-                                std::move(entries[core_idx]));
-                        }
-
-                        UpdateCceCkptTsCc update_cce_req(
-                            node_group,
-                            leader_term,
-                            std::move(cce_entries_map));
-
-                        for (size_t core_idx = 0; core_idx < Count();
-                             ++core_idx)
-                        {
-                            EnqueueToCcShard(core_idx, &update_cce_req);
-                        }
-                        update_cce_req.Wait();
+#ifdef RANGE_PARTITION_ENABLED
+                        assert(entry->data_sync_task_->during_split_range_);
+#endif
                     }
                 }
-#else
 
-                if (store_hd_->NeedPersistKV())
+                if (cce_entries_map.size() > 0)
                 {
-                    std::unique_lock<bthread::Mutex> update_cce_ckptts_lk(
-                        data_sync_task->update_cce_mux_);
-
-                    if (data_sync_task->cce_entries_.empty())
-                    {
-                        data_sync_task->cce_entries_.try_emplace(
-                            scan_task_worker_idx,
-                            std::vector<UpdateCceCkptTsCc::CkptTsEntry>());
-                    }
-
-                    auto &entrys_ref =
-                        data_sync_task->cce_entries_[scan_task_worker_idx];
-                    entrys_ref.reserve(entrys_ref.size() +
-                                       data_sync_vec->size());
-
-                    for (size_t i = 0; i < data_sync_vec->size(); ++i)
-                    {
-                        auto &ref = data_sync_vec->at(i);
-                        assert(ref.cce_ != nullptr);
-                        assert(!ref.HoldsVersionedPayload());
-
-                        entrys_ref.emplace_back(
-                            ref.cce_, ref.commit_ts_, ref.post_flush_size_);
-                    }
-
-                    size_t entrys_cnt = entrys_ref.size();
-
-                    if (entrys_cnt >= 100000)
-                    {
-                        auto tmp_cce_entries =
-                            std::move(data_sync_task->cce_entries_);
-                        assert(data_sync_task->cce_entries_.empty());
-                        update_cce_ckptts_lk.unlock();
-
-                        if (!data_sync_task->status_->PersistKV(
-                                schema->GetKVCatalogInfo()->GetKvTableName(
-                                    data_sync_task->table_name_),
-                                std::move(tmp_cce_entries),
-                                nullptr,
-                                false))
-                        {
-                            succ = false;
-                        }
-                    }
-                }
-                else
-                {
-                    std::vector<UpdateCceCkptTsCc::CkptTsEntry> entries;
-
-                    entries.reserve(entries.size() + data_sync_vec->size());
-
-                    for (size_t i = 0; i < data_sync_vec->size(); ++i)
-                    {
-                        auto &ref = data_sync_vec->at(i);
-                        assert(ref.cce_ != nullptr);
-                        assert(!ref.HoldsVersionedPayload());
-
-                        entries.emplace_back(
-                            ref.cce_, ref.commit_ts_, ref.post_flush_size_);
-                    }
-
-                    absl::flat_hash_map<size_t,
-                                        std::vector<std::vector<
-                                            UpdateCceCkptTsCc::CkptTsEntry>>>
-                        cce_entries_map;
-                    cce_entries_map[scan_task_worker_idx].push_back(
-                        std::move(entries));
-
                     UpdateCceCkptTsCc update_cce_req(
-                        node_group, leader_term, std::move(cce_entries_map));
-                    EnqueueToCcShard(scan_task_worker_idx, &update_cce_req);
+                        entry->data_sync_task_->node_group_id_,
+                        entry->data_sync_task_->node_group_term_,
+                        cce_entries_map);
+                    for (auto &[core_idx, cce_entries] : cce_entries_map)
+                    {
+                        updated_ckpt_ts_core_ids.insert(core_idx);
+                        EnqueueToCcShard(core_idx, &update_cce_req);
+                    }
                     update_cce_req.Wait();
                 }
-#endif
             }
-            else
-            {
-                succ = false;
-            }
-        } /* End of PutAll */
-
-#ifdef RANGE_PARTITION_ENABLED
-        // other wise, split flush operation will do the work
-        if (!during_split_range)
-        {
-            WaitableCc reset_cc(
-                [&](CcShard &ccs)
-                {
-                    ccs.OnDirtyDataFlushed();
-                    return true;
-                },
-                Count());
-            for (size_t core_idx = 0; core_idx < Count(); ++core_idx)
-            {
-                EnqueueToCcShard(core_idx, &reset_cc);
-            }
-            reset_cc.Wait();
         }
-#else
-        WaitableCc reset_cc(
-            [&](CcShard &ccs)
-            {
-                ccs.OnDirtyDataFlushed();
-                return true;
-            },
-            1);
-        EnqueueToCcShard(scan_task_worker_idx, &reset_cc);
-        reset_cc.Wait();
-#endif
-    } /* End of leader */
+    }
 
-    assert(
-        [&]()
+    // Notify cc shards that dirty data has been flushed. This will re-enqueue
+    // kickout data cc reqs if there are any.
+    WaitableCc reset_cc(
+        [&](CcShard &ccs)
         {
-#ifdef RANGE_PARTITION_ENABLED
-            return data_sync_task != nullptr &&
-                   (during_split_range || data_sync_txm != nullptr);
-#else
-            return data_sync_task != nullptr && data_sync_txm != nullptr;
-#endif
-        }());
+            ccs.OnDirtyDataFlushed();
+            return true;
+        },
+        updated_ckpt_ts_core_ids.size());
+    for (uint16_t core_idx : updated_ckpt_ts_core_ids)
+    {
+        EnqueueToCcShard(core_idx, &reset_cc);
+    }
+    reset_cc.Wait();
 
     auto ckpt_err = succ ? DataSyncTask::CkptErrorCode::NO_ERROR
                          : DataSyncTask::CkptErrorCode::FLUSH_ERROR;
 
     // notify waiting data sync scan thread
-    DataSyncMemoryController &mem_controller =
-        data_sync_mem_controllers_[scan_task_worker_idx];
-    uint64_t old_usage =
-        mem_controller.DeallocateFlushMemQuota(cur_work->vec_mem_usage_);
+    uint64_t old_usage = data_sync_mem_controller_.DeallocateFlushMemQuota(
+        cur_work->pending_flush_size_);
 
     DLOG(INFO) << "DelocateFlushDataMemQuota old_usage: " << old_usage
-               << " new_usage: " << old_usage - cur_work->vec_mem_usage_
-               << " quota: " << mem_controller.FlushMemoryQuota()
-               << " flight_tasks: " << data_sync_task->flight_task_cnt_;
-    PostProcessDataSyncTask(std::move(data_sync_task),
-                            schema,
-                            data_sync_txm,
-                            ckpt_err
+               << " new_usage: " << old_usage - cur_work->pending_flush_size_
+               << " quota: " << data_sync_mem_controller_.FlushMemoryQuota();
+
+    for (auto &[table_name, entries] : flush_task_entries)
+    {
+        for (auto &entry : entries)
+        {
+            PostProcessDataSyncTask(std::move(entry->data_sync_task_),
+                                    entry->table_schema_.get(),
+                                    entry->data_sync_txm_,
+                                    ckpt_err
 #ifndef RANGE_PARTITION_ENABLED
-                            ,
-                            scan_task_worker_idx
+                                    ,
+                                    entry->data_sync_task_->worker_idx_
 #endif
-    );
+                                    ,
+                                    false);
+        }
+    }
 
     flush_worker_lk.lock();
 }
 
 void LocalCcShards::FlushDataWorker()
 {
+    size_t previous_flush_size = 0;
+    auto previous_size_update_time = std::chrono::steady_clock::now();
     std::unique_lock<std::mutex> flush_worker_lk(flush_data_worker_ctx_.mux_);
     while (flush_data_worker_ctx_.status_ == WorkerStatus::Active)
     {
-        flush_data_worker_ctx_.cv_.wait(
+        flush_data_worker_ctx_.cv_.wait_for(
             flush_worker_lk,
-            [this]
+            10s,
+            [this, &previous_flush_size, &previous_size_update_time]
             {
-                return !pending_flush_work_.empty() ||
-                       flush_data_worker_ctx_.status_ ==
-                           WorkerStatus::Terminated;
+                if (!pending_flush_work_.empty() ||
+                    flush_data_worker_ctx_.status_ == WorkerStatus::Terminated)
+                {
+                    return true;
+                }
+                auto current_time = std::chrono::steady_clock::now();
+                if (current_time - previous_size_update_time > 10s)
+                {
+                    size_t current_flush_size =
+                        cur_flush_buffer_.GetPendingFlushSize();
+                    bool flush_size_changed =
+                        current_flush_size != previous_flush_size;
+                    previous_flush_size = current_flush_size;
+                    previous_size_update_time = current_time;
+                    if (!flush_size_changed && current_flush_size > 0)
+                    {
+                        // data sync might be stuck due to lock conflict with
+                        // DDL. Flush current flush buffer to release catalog
+                        // read lock held by ongoing data sync tx, which might
+                        // block the DDL.
+                        std::unique_ptr<FlushDataTask> flush_data_task =
+                            cur_flush_buffer_.MoveFlushData(true);
+                        if (flush_data_task != nullptr)
+                        {
+                            pending_flush_work_.emplace_back(
+                                std::move(flush_data_task));
+                        }
+                        return true;
+                    }
+                }
+
+                return false;
             });
 
         if (pending_flush_work_.empty())

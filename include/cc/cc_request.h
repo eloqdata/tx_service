@@ -3387,7 +3387,8 @@ public:
             pause_pos_.emplace_back(nullptr, false);
 #endif
             accumulated_scan_cnt_.emplace_back(0);
-            accumulated_mem_usage_.emplace_back(0);
+            accumulated_flush_data_size_.emplace_back(0);
+            scan_heap_is_full_.emplace_back(0);
         }
 
 #ifdef RANGE_PARTITION_ENABLED
@@ -3499,19 +3500,17 @@ public:
             }
 
             accumulated_scan_cnt_.at(i) = 0;
-            accumulated_mem_usage_.at(i) = 0;
+            accumulated_flush_data_size_.at(i) = 0;
+            if (scan_heap_is_full_[i] == 1)
+            {
+                // vec has been cleared during ReleaseDataSyncScanHeapCc,
+                // resize to prepared size
+                data_sync_vec_[i].resize(scan_batch_size_);
+                scan_heap_is_full_[i] = 0;
+            }
         }
 
-#ifdef ON_KEY_OBJECT
-        if (scan_heap_is_full_)
-        {
-            // vec has been cleared during ReleaseDataSyncScanHeapCc,
-            // resize to prepared size
-            data_sync_vec_[0].resize(scan_batch_size_);
-        }
-#endif
         err_ = CcErrorCode::NO_ERROR;
-        scan_heap_is_full_ = false;
         op_type_ = op_type;
     }
 
@@ -3640,8 +3639,10 @@ public:
 #endif
 
     std::vector<size_t> accumulated_scan_cnt_;
-    std::vector<uint64_t> accumulated_mem_usage_;
-    bool scan_heap_is_full_{false};
+    std::vector<uint64_t> accumulated_flush_data_size_;
+
+    // std::vector<bool> is not safe to use in multi-threaded environment,
+    std::vector<uint32_t> scan_heap_is_full_{0};
 
     size_t scan_count_{0};
 
@@ -4358,6 +4359,8 @@ public:
                     break;
                 default:
                     // Should not have meta table in data log.
+                    table_type = TableType::Primary;
+                    LOG(FATAL) << "Invalid table type in data log: " << table_type_number;
                     assert(false);
                     break;
                 }

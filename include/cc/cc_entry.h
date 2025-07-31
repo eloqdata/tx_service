@@ -274,29 +274,16 @@ public:
 
     TxKey Key() const;
 
-    uint64_t MemUsage()
+    uint64_t FlushSize()
     {
-        uint64_t mem_usage = 0;
         if (std::holds_alternative<TxKey>(flush_key_))
         {
-            mem_usage += std::get<TxKey>(flush_key_)
-                             .MemUsage();  // Get MemUsage of TxKey
+            return Key().Size() + PayloadSize();
         }
         else
         {
-            mem_usage += sizeof(size_t);  // Size of key index (which is size_t)
+            return sizeof(size_t) + PayloadSize();
         }
-
-        if (payload_.index() == 1)
-        {
-            mem_usage += std::get<1>(payload_).MemUsage();
-        }
-        else
-        {
-            mem_usage += sizeof(payload_);
-        }
-
-        return mem_usage;
     }
 };
 
@@ -1387,7 +1374,7 @@ public:
                          bool export_persisted_item_to_ckpt_vec,
                          bool export_base_table_item_only,
                          bool export_persisted_key_only,
-                         uint64_t &mem_usage)
+                         uint64_t &flush_size)
     {
         // `export_store_record_if_need` - True means If no larger version needs
         // to be flushed(commit_ts > ckpt_ts && commit_ts <= to_ts), we need to
@@ -1408,6 +1395,7 @@ public:
             // But we need to migrate data to new range on
             // base table. So we need to export this record
             // for range migration
+            assert(RangePartitioned);
             if ((export_persisted_item_to_ckpt_vec) && commit_ts != 1 &&
                 commit_ts <= to_ts &&
                 (rec_status == RecordStatus::Normal ||
@@ -1436,11 +1424,10 @@ public:
                     ref.SetVersionedPayload(nullptr);
                 }
 
-                mem_usage += ref.MemUsage();
-
                 ref.post_flush_size_ = (rec_status == RecordStatus::Normal)
                                            ? (key.Size() + ref.PayloadSize())
                                            : 0;
+                flush_size += ref.FlushSize();
 
                 exported_count++;
             }
@@ -1462,12 +1449,11 @@ public:
                 ref.payload_status_ = rec_status;
                 ref.commit_ts_ = commit_ts;
 
-                mem_usage += ref.MemUsage();
-
                 ref.post_flush_size_ =
                     (rec_status == RecordStatus::Normal)
                         ? (key.Size() + payload_.cur_payload_->Size())
                         : 0;
+                flush_size += ref.FlushSize();
 
                 ++exported_count;
             }
@@ -1510,7 +1496,6 @@ public:
 
             ref.payload_status_ = rec_status;
             ref.commit_ts_ = commit_ts;
-            mem_usage += ref.MemUsage();
 
             if (RangePartitioned)
             {
@@ -1520,6 +1505,7 @@ public:
                         ? key.Size() + ref.PayloadSize()
                         : 0;
             }
+            flush_size += ref.FlushSize();
             exported_count++;
         }
 
@@ -1573,7 +1559,7 @@ public:
                                 }
                                 ref.payload_status_ = it->payload_status_;
                                 ref.commit_ts_ = it->commit_ts_;
-                                mem_usage += ref.MemUsage();
+                                flush_size += ref.FlushSize();
                                 exported_count++;
                             }
                             else
@@ -1617,7 +1603,7 @@ public:
                                             ? (key.Size() + ref.PayloadSize())
                                             : 0;
 
-                                    mem_usage += ref.MemUsage();
+                                    flush_size += ref.FlushSize();
                                     exported_count++;
                                 }
                                 else if (RangePartitioned &&
@@ -1651,7 +1637,7 @@ public:
                                             ? (key.Size() + payload_size)
                                             : 0;
 
-                                    mem_usage += ref.MemUsage();
+                                    flush_size += ref.FlushSize();
                                     exported_count++;
                                 }
                             }
@@ -1680,7 +1666,6 @@ public:
                                 }
                                 ref.payload_status_ = it->payload_status_;
                                 ref.commit_ts_ = it->commit_ts_;
-                                mem_usage += ref.MemUsage();
 
                                 if (RangePartitioned)
                                 {
@@ -1692,6 +1677,8 @@ public:
                                             ? (key.Size() + ref.PayloadSize())
                                             : 0;
                                 }
+                                flush_size += ref.FlushSize();
+
                             }
                             else
                             {
@@ -1709,9 +1696,9 @@ public:
                                 {
                                     ref.SetVersionedPayload(nullptr);
                                 }
-                                mem_usage += ref.MemUsage();
                                 ref.payload_status_ = it->payload_status_;
                                 ref.commit_ts_ = it->commit_ts_;
+                                flush_size += ref.FlushSize();
                             }
 
                             exported_count++;
@@ -1728,7 +1715,6 @@ public:
                 // sure if an older version exists, need to copy record from
                 // "base table" into "mvcc_archives table".
                 mv_base_vec.push_back(ckpt_idx);
-                mem_usage += sizeof(ckpt_idx);
             }
         }
 

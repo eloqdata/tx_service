@@ -899,11 +899,11 @@ bool UpdateCceCkptTsCc::Execute(CcShard &ccs)
 {
     assert(indices_.count(ccs.core_id_) > 0);
 
-    auto &this_core_current_idxs = indices_[ccs.core_id_];
-    auto &this_core_cce_entries = cce_entries_[ccs.core_id_];
-    assert(this_core_current_idxs.first < this_core_cce_entries.size());
+    auto &index = indices_[ccs.core_id_];
+    auto &records = cce_entries_[ccs.core_id_];
+    assert(index < records.size());
 
-    if (this_core_current_idxs.first >= this_core_cce_entries.size())
+    if (index >= records.size())
     {
         // Set finished. We don't care error code.
         SetFinished();
@@ -919,9 +919,6 @@ bool UpdateCceCkptTsCc::Execute(CcShard &ccs)
         SetFinished();
         return false;
     }
-
-    auto &records = this_core_cce_entries[this_core_current_idxs.first];
-    auto &index = this_core_current_idxs.second;
 
     size_t last_index = std::min(index + SCAN_BATCH_SIZE, records.size());
 
@@ -947,16 +944,7 @@ bool UpdateCceCkptTsCc::Execute(CcShard &ccs)
 
     if (index == records.size())
     {
-        this_core_current_idxs.first++;
-        this_core_current_idxs.second = 0;
-        if (this_core_current_idxs.first >= this_core_cce_entries.size())
-        {
-            SetFinished();
-        }
-        else
-        {
-            ccs.Enqueue(ccs.core_id_, this);
-        }
+        SetFinished();
     }
     else
     {

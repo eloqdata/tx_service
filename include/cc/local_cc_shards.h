@@ -73,6 +73,7 @@ struct DataMigrationOp;
 struct InvalidateTableCacheCompositeOp;
 class SkGenerator;
 class UploadBatchSlicesClosure;
+struct FlushDataTask;
 
 struct DataMigrationStatus
 {
@@ -1701,6 +1702,8 @@ public:
 
     void PostProcessCkpt(std::shared_ptr<DataSyncTask> &task, bool flush_ret);
 
+    void FlushCurrentFlushBuffer();
+
     store::DataStoreHandler *const store_hd_;
 
     /*
@@ -1842,15 +1845,13 @@ private:
                                  ,
                                  uint16_t worker_idx
 #endif
-    );
+                                 ,
+                                 bool is_scan_task = true);
 
     const uint32_t node_id_;
     // Native node group
     const NodeGroupId ng_id_;
     std::vector<std::unique_ptr<CcShard>> cc_shards_;
-
-    // The memory quota of data sync work
-    uint64_t data_sync_worker_memory_usage_quota_{0};
 
     // The background thread that periodically advances the timers of the local
     // shards to the current wall clock.
@@ -2133,6 +2134,17 @@ private:
                 return false;
             };
 
+            if (!has_enough_memory())
+            {
+                DLOG(INFO) << "Flush data memory quota is full "
+                           << flush_data_mem_usage_
+                           << " ,request quota: " << quota
+                           << " total quota: " << flush_data_mem_quota_;
+                Sharder::Instance()
+                    .GetLocalCcShards()
+                    ->FlushCurrentFlushBuffer();
+            }
+
             // Wait until enough memory is available
             while (!has_enough_memory())
             {
@@ -2180,10 +2192,8 @@ private:
         bthread::ConditionVariable mem_cv_;
         // Memory usage tracking
         uint64_t flush_data_mem_usage_{0};
-        const uint64_t flush_data_mem_quota_{0};
+        uint64_t flush_data_mem_quota_{0};
     };
-
-    std::vector<DataSyncMemoryController> data_sync_mem_controllers_;
 
     struct DataSyncTaskLimiter
     {
@@ -2366,49 +2376,29 @@ private:
                           bool flush_res);
 
     /**
-     * FlushData Operation Interface
+     * @brief Add a flush task entry to the flush task. If the there's no
+     * pending flush task, create a new flush task and add the entry to it.
+     * Otherwise, add the entry to the current flush task. If the current flush
+     * task is full, append it to pending_flush_work_ and create a new flush
+     * task.
      */
-    struct FlushDataTask
-    {
-    public:
-        FlushDataTask(
-            std::shared_ptr<DataSyncTask> data_sync_task,
-            std::shared_ptr<const TableSchema> schema,
-            std::unique_ptr<std::vector<FlushRecord>> data_sync_vec,
-            std::unique_ptr<std::vector<FlushRecord>> archive_vec,
-            std::unique_ptr<std::vector<std::pair<TxKey, int32_t>>> mv_base_vec,
-            uint64_t vec_mem_usage,
-            TransactionExecution *data_sync_txm,
-            size_t scan_task_worker_idx)
-            : schema_(schema),
-              data_sync_vec_(std::move(data_sync_vec)),
-              archive_vec_(std::move(archive_vec)),
-              mv_base_vec_(std::move(mv_base_vec)),
-              vec_mem_usage_(vec_mem_usage),
-              scan_task_worker_idx_(scan_task_worker_idx),
-              data_sync_task_(data_sync_task),
-              data_sync_txm_(data_sync_txm)
-        {
-        }
+    void AddFlushTaskEntry(std::unique_ptr<FlushTaskEntry> &&entry);
 
-        std::shared_ptr<const TableSchema> schema_{nullptr};
-        std::unique_ptr<std::vector<FlushRecord>> data_sync_vec_{nullptr};
-        std::unique_ptr<std::vector<FlushRecord>> archive_vec_{nullptr};
-        std::unique_ptr<std::vector<std::pair<TxKey, int32_t>>> mv_base_vec_{
-            nullptr};
-        uint64_t vec_mem_usage_{0};
-        size_t scan_task_worker_idx_{0};
-        // Increased by worker after finishing the retrieved work.
-        std::shared_ptr<DataSyncTask> data_sync_task_{nullptr};
-        TransactionExecution *data_sync_txm_{nullptr};
-    };
-    // For flush data work
     WorkerThreadContext flush_data_worker_ctx_;
-    // Flush work from data sync, and split range
+
+    // The flush task that has not reached the max pending flush size.
+    // New flush task entry will be added to this buffer. This task will
+    // be appended to pending_flush_work_ when it reaches the max pending flush
+    // size, which will then be processed by flush data worker.
+    FlushDataTask cur_flush_buffer_;
+    // Flush task queue for flush data worker to process.
     std::vector<std::unique_ptr<FlushDataTask>> pending_flush_work_;
 
     void FlushDataWorker();
     void FlushData(std::unique_lock<std::mutex> &flush_worker_lk);
+
+    // Memory controller for data sync.
+    DataSyncMemoryController data_sync_mem_controller_;
 
     WorkerThreadContext statistics_worker_ctx_;
     void SyncTableStatisticsWorker();

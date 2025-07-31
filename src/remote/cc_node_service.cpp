@@ -671,7 +671,6 @@ void CcNodeService::FlushDataAll(::google::protobuf::RpcController *controller,
             status->cv_.wait(
                 lk, [&status] { return status->unfinished_tasks_ == 0; });
 
-            status->PersistKV();
             error_code = status->err_code_;
 
             std::unique_lock b_thd_lk(b_thd_mu);

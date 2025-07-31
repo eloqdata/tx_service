@@ -5330,7 +5330,7 @@ public:
         bool export_base_table_item_if_need,
         bool export_base_table_item_only,
         bool export_base_table_key_only,
-        uint64_t &mem_usage) const
+        uint64_t &flush_size) const
     {
         // This override heap thread call is not necessary, since the thread is
         // alreay be overrided before cc_request execution
@@ -5343,9 +5343,7 @@ public:
         std::pair<size_t, bool> export_size = {0, true};
         // Do not try to call mi_heap_collect, since it is expensive, flush data
         // will return the memory anyway when it done
-#ifndef RANGE_PARTITION_ENABLED
         if (!scan_heap->Full())
-#endif
         {
             export_size.first =
                 cce->ExportForCkpt(key,
@@ -5359,7 +5357,7 @@ public:
                                    export_base_table_item_if_need,
                                    export_base_table_item_only,
                                    export_base_table_key_only,
-                                   mem_usage);
+                                   flush_size);
             export_size.second = false;
         }
 
@@ -5738,6 +5736,7 @@ public:
         bool succ = false;
         const KeyT *slice_end_key = req_end_key;
         bool is_last_slice = false;
+        bool is_scan_mem_full = false;
         std::tie(key_it,
                  slice_end_it,
                  slice_end_key,
@@ -5822,22 +5821,30 @@ public:
             if (need_export)
             {
                 assert(cce->entry_info_.DataStoreSize() != INT32_MAX);
-                uint64_t mem_usage = 0;
-                ExportForCkpt(cce,
-                              *key,
-                              req.DataSyncVec(shard_->core_id_),
-                              req.ArchiveVec(shard_->core_id_),
-                              req.MoveBaseIdxVec(shard_->core_id_),
-                              req.data_sync_ts_,
-                              recycle_ts,
-                              shard_->EnableMvcc(),
-                              req.accumulated_scan_cnt_[shard_->core_id_],
-                              req.export_base_table_item_,
-                              req.export_base_table_item_only_,
-                              export_persisted_key_only,
-                              mem_usage);
+                uint64_t flush_size = 0;
+                auto export_result =
+                    ExportForCkpt(cce,
+                                  *key,
+                                  req.DataSyncVec(shard_->core_id_),
+                                  req.ArchiveVec(shard_->core_id_),
+                                  req.MoveBaseIdxVec(shard_->core_id_),
+                                  req.data_sync_ts_,
+                                  recycle_ts,
+                                  shard_->EnableMvcc(),
+                                  req.accumulated_scan_cnt_[shard_->core_id_],
+                                  req.export_base_table_item_,
+                                  req.export_base_table_item_only_,
+                                  export_persisted_key_only,
+                                  flush_size);
 
-                req.accumulated_mem_usage_[shard_->core_id_] += mem_usage;
+                req.accumulated_flush_data_size_[shard_->core_id_] +=
+                    flush_size;
+
+                if (export_result.second)
+                {
+                    is_scan_mem_full = true;
+                    break;
+                }
             }
 
             // Forward the iterator
@@ -5893,6 +5900,13 @@ public:
 
         // Set the pause_pos_ to mark resume position.
         pause_key_and_is_drained = {std::move(next_pause_key), no_more_data};
+
+        if (is_scan_mem_full)
+        {
+            req.scan_heap_is_full_[shard_->core_id_] = 1;
+            req.SetFinish(shard_->core_id_);
+            return false;
+        }
 
         if (no_more_data ||
             req.accumulated_scan_cnt_[shard_->core_id_] >= req.scan_batch_size_)
@@ -6131,7 +6145,7 @@ public:
                 if ((!req.filter_lambda_ || req.filter_lambda_(key->Hash())) &&
                     (cce->NeedCkpt() || req.include_persisted_data_))
                 {
-                    uint64_t mem_usage = 0;
+                    uint64_t flush_data_size = 0;
                     auto export_result =
                         ExportForCkpt(cce,
                                       *key,
@@ -6145,8 +6159,9 @@ public:
                                       req.include_persisted_data_,
                                       false,
                                       false,
-                                      mem_usage);
-                    req.accumulated_mem_usage_[vec_idx] += mem_usage;
+                                      flush_data_size);
+                    req.accumulated_flush_data_size_[vec_idx] +=
+                        flush_data_size;
 
                     if (export_result.second)
                     {
@@ -6236,7 +6251,7 @@ public:
                                           false,
                                           false,
                                           mem_usage);
-                        req.accumulated_mem_usage_[vec_idx] += mem_usage;
+                        req.accumulated_flush_data_size_[vec_idx] += mem_usage;
                         if (export_result.second)
                         {
                             is_scan_mem_full = true;
@@ -6293,7 +6308,7 @@ public:
             {
                 //  scan memory is full and there are
                 //  data for flush
-                req.scan_heap_is_full_ = true;
+                req.scan_heap_is_full_[0] = 1;
                 req.SetFinish(vec_idx);
                 return false;
             }
@@ -7167,7 +7182,7 @@ public:
                 if (req.WithFlush())
                 {
                     std::vector<FlushRecord> tmp_ckpt_vec(1);
-                    uint64_t mem_usage = 0;
+                    size_t flush_size = 0;
                     size_t tmp_ckpt_vec_size = 0;
 
                     std::vector<FlushRecord> tmp_akv_vec;
@@ -7186,7 +7201,7 @@ public:
                                   false,
                                   false,
                                   false,
-                                  mem_usage);
+                                  flush_size);
 
                     assert(tmp_ckpt_vec_size <= 1);
                     size_t offset = 0;
@@ -7204,11 +7219,60 @@ public:
                         tmp_mv_base_key_vec.emplace_back(std::move(key_raw));
                     }
 
-                    bool res = shard_->FlushEntryForTest(table_name_,
-                                                         table_schema_,
-                                                         tmp_ckpt_vec,
-                                                         tmp_akv_vec,
+                    std::shared_ptr<TableSchema> table_schema =
+                        shard_->local_shards_.GetSharedTableSchema(table_name_,
+                                                                   cc_ng_id_);
+
+                    std::shared_ptr<DataSyncTask> data_sync_task =
+                        std::make_shared<DataSyncTask>(
+                            table_name_,
+                            1,
+                            1,
+                            cc_ng_id_,
+                            Sharder::Instance().LeaderTerm(cc_ng_id_),
+                            1,
+                            nullptr,
+                            false,
+                            false,
+                            nullptr
+#ifndef RANGE_PARTITION_ENABLED
+                            ,
+                            nullptr,
+                            false,
+                            false,
+                            shard_->core_id_
+#endif
+                        );
+
+                    std::unique_ptr<FlushTaskEntry> flush_task_entry =
+                        std::make_unique<FlushTaskEntry>(
+                            std::make_unique<std::vector<FlushRecord>>(
+                                std::move(tmp_ckpt_vec)),
+                            std::make_unique<std::vector<FlushRecord>>(
+                                std::move(tmp_akv_vec)),
+                            std::make_unique<
+                                std::vector<std::pair<TxKey, int32_t>>>(),
+                            nullptr,
+                            data_sync_task,
+                            table_schema,
+                            flush_size);
+
+                    std::unordered_map<
+                        std::string_view,
+                        std::vector<std::unique_ptr<FlushTaskEntry>>>
+                        flush_task_entries;
+                    std::string_view kv_table_name =
+                        table_schema->GetKVCatalogInfo()->GetKvTableName(
+                            table_name_);
+                    flush_task_entries.try_emplace(
+                        kv_table_name,
+                        std::vector<std::unique_ptr<FlushTaskEntry>>());
+                    flush_task_entries[kv_table_name].emplace_back(
+                        std::move(flush_task_entry));
+
+                    bool res = shard_->FlushEntryForTest(flush_task_entries,
                                                          only_archives);
+
                     assert(res == true);
                     // This silences the -Wunused-but-set-variable
                     // warning without any runtime overhead.
