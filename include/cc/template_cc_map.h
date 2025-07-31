@@ -7082,8 +7082,11 @@ public:
                     {
                         rec_status = RecordStatus::Deleted;
                     }
-                    cce->AddArchiveRecord(
-                        std::move(rec_ptr), rec_status, req.CommitTs());
+                    if (cce->CommitTs() > req.CommitTs())
+                    {
+                        cce->AddArchiveRecord(
+                            std::move(rec_ptr), rec_status, req.CommitTs());
+                    }
                 }
                 else if (op_type == OperationType::Insert ||
                          op_type == OperationType::Update)
