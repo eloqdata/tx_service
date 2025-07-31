@@ -72,6 +72,9 @@
 
 namespace txservice
 {
+template <typename KeyT, typename ValueT>
+void BackfillSnapshotForScanSlice(FetchSnapshotCc *fetch_cc,
+                                  CcRequestBase *requester);
 template <typename KeyT,
           typename ValueT,
           bool VersionedRecord,
@@ -2212,6 +2215,7 @@ public:
         TxNumber txn,
         uint64_t read_ts,
         bool is_read_snapshot,
+        bool &need_fetch_snapshot,
         bool keep_deleted = true,
         bool is_ckpt_delta = false,
         bool is_require_keys = true,
@@ -2223,6 +2227,7 @@ public:
         {
         case ScanType::ScanGap:
         {
+            need_fetch_snapshot = false;
             TemplateScanTuple<KeyT, ValueT> *scan_tuple =
                 typed_cache->AddScanTuple();
             ScanGap(key, cce, scan_tuple, ng_id, ng_term);
@@ -2239,6 +2244,7 @@ public:
                 txn,
                 read_ts,
                 is_read_snapshot,
+                need_fetch_snapshot,
                 keep_deleted,
                 (table_name_.Type() != TableType::Secondary) && is_ckpt_delta,
                 is_require_keys,
@@ -2255,6 +2261,7 @@ public:
                 txn,
                 read_ts,
                 is_read_snapshot,
+                need_fetch_snapshot,
                 keep_deleted,
                 (table_name_.Type() != TableType::Secondary) && is_ckpt_delta,
                 is_require_keys,
@@ -2327,6 +2334,7 @@ public:
         CcProtocol cc_proto = req.Protocol();
         CcOperation cc_op;
         bool is_read_snapshot;
+        bool need_fetch_snapshot = false;
         if (table_name_.Type() == TableType::Secondary ||
             table_name_.Type() == TableType::UniqueSecondary)
         {
@@ -2404,6 +2412,7 @@ public:
                          req.Txn(),
                          req.ReadTimestamp(),
                          is_read_snapshot,
+                         need_fetch_snapshot,
                          true,
                          req.is_ckpt_delta_,
                          req.is_require_keys_,
@@ -2492,6 +2501,7 @@ public:
                              req.Txn(),
                              req.ReadTimestamp(),
                              is_read_snapshot,
+                             need_fetch_snapshot,
                              true,
                              req.is_ckpt_delta_,
                              req.is_require_keys_,
@@ -2569,6 +2579,7 @@ public:
                              req.Txn(),
                              req.ReadTimestamp(),
                              is_read_snapshot,
+                             need_fetch_snapshot,
                              true,
                              req.is_ckpt_delta_,
                              req.is_require_keys_,
@@ -2646,6 +2657,7 @@ public:
                              req.Txn(),
                              req.ReadTimestamp(),
                              is_read_snapshot,
+                             need_fetch_snapshot,
                              true,
                              req.is_ckpt_delta_,
                              req.is_require_keys_,
@@ -2721,6 +2733,7 @@ public:
         CcProtocol cc_proto = req.Protocol();
         CcOperation cc_op;
         bool is_read_snapshot;
+        bool need_fetch_snapshot = false;
         if (table_name_.Type() == TableType::Secondary ||
             table_name_.Type() == TableType::UniqueSecondary)
         {
@@ -2803,6 +2816,7 @@ public:
                          req.Txn(),
                          req.ReadTimestamp(),
                          is_read_snapshot,
+                         need_fetch_snapshot,
                          true,
                          req.is_ckpt_delta_,
                          req.is_require_keys_,
@@ -2922,6 +2936,7 @@ public:
                              req.Txn(),
                              req.ReadTimestamp(),
                              is_read_snapshot,
+                             need_fetch_snapshot,
                              true,
                              req.is_ckpt_delta_,
                              req.is_require_keys_,
@@ -3003,6 +3018,7 @@ public:
                              req.Txn(),
                              req.ReadTimestamp(),
                              is_read_snapshot,
+                             need_fetch_snapshot,
                              true,
                              req.is_ckpt_delta_,
                              req.is_require_keys_,
@@ -3048,6 +3064,7 @@ public:
         TxNumber txn,
         uint64_t read_ts,
         bool is_read_snapshot,
+        bool &need_fetch_snapshot,
         bool keep_deleted = true,
         bool is_ckpt_delta = false,
         bool is_require_keys = true,
@@ -3058,6 +3075,7 @@ public:
         switch (scan_type)
         {
         case ScanType::ScanGap:
+            need_fetch_snapshot = false;
             if (!is_ckpt_delta)
             {
                 remote::ScanTuple_msg *tuple =
@@ -3075,6 +3093,7 @@ public:
                 txn,
                 read_ts,
                 is_read_snapshot,
+                need_fetch_snapshot,
                 keep_deleted,
                 (table_name_.Type() != TableType::Secondary) && is_ckpt_delta,
                 is_require_keys,
@@ -3090,6 +3109,7 @@ public:
                 txn,
                 read_ts,
                 is_read_snapshot,
+                need_fetch_snapshot,
                 keep_deleted,
                 (table_name_.Type() != TableType::Secondary) && is_ckpt_delta,
                 is_require_keys,
@@ -3108,6 +3128,7 @@ public:
         int64_t ng_term,
         uint64_t read_ts,
         bool is_read_snapshot,
+        bool &need_fetch_snapshot,
         bool keep_deleted = true,
         bool is_ckpt_delta = false,
         bool is_require_keys = true,
@@ -3118,6 +3139,7 @@ public:
         switch (scan_type)
         {
         case ScanType::ScanGap:
+            need_fetch_snapshot = false;
             if (!is_ckpt_delta)
             {
                 ScanGap(key, cce, remote_cache, ng_term);
@@ -3132,6 +3154,7 @@ public:
                 ng_term,
                 read_ts,
                 is_read_snapshot,
+                need_fetch_snapshot,
                 keep_deleted,
                 (table_name_.Type() != TableType::Secondary) && is_ckpt_delta,
                 is_require_keys,
@@ -3146,6 +3169,7 @@ public:
                 ng_term,
                 read_ts,
                 is_read_snapshot,
+                need_fetch_snapshot,
                 keep_deleted,
                 (table_name_.Type() != TableType::Secondary) && is_ckpt_delta,
                 is_require_keys,
@@ -3198,6 +3222,7 @@ public:
         CcProtocol cc_proto = req.Protocol();
         CcOperation cc_op;
         bool is_read_snapshot;
+        bool need_fetch_snapshot = false;
         if (table_name_.Type() == TableType::Secondary ||
             table_name_.Type() == TableType::UniqueSecondary)
         {
@@ -3296,6 +3321,7 @@ public:
                             req.Txn(),
                             req.ReadTimestamp(),
                             is_read_snapshot,
+                            need_fetch_snapshot,
                             true,
                             req.is_ckpt_delta_,
                             req.is_require_keys_,
@@ -3378,6 +3404,7 @@ public:
                                 req.Txn(),
                                 req.ReadTimestamp(),
                                 is_read_snapshot,
+                                need_fetch_snapshot,
                                 true,
                                 req.is_ckpt_delta_,
                                 req.is_require_keys_,
@@ -3463,6 +3490,7 @@ public:
                                 req.Txn(),
                                 req.ReadTimestamp(),
                                 is_read_snapshot,
+                                need_fetch_snapshot,
                                 true,
                                 req.is_ckpt_delta_,
                                 req.is_require_keys_,
@@ -3548,6 +3576,7 @@ public:
                                 req.Txn(),
                                 req.ReadTimestamp(),
                                 is_read_snapshot,
+                                need_fetch_snapshot,
                                 true,
                                 req.is_ckpt_delta_,
                                 req.is_require_keys_,
@@ -3611,6 +3640,7 @@ public:
         CcProtocol cc_proto = req.Protocol();
         CcOperation cc_op;
         bool is_read_snapshot;
+        bool need_fetch_snapshot = false;
         if (table_name_.Type() == TableType::Secondary ||
             table_name_.Type() == TableType::UniqueSecondary)
         {
@@ -3689,6 +3719,7 @@ public:
                             req.Txn(),
                             req.ReadTimestamp(),
                             is_read_snapshot,
+                            need_fetch_snapshot,
                             true,
                             req.is_ckpt_delta_,
                             req.is_require_keys_,
@@ -3797,6 +3828,7 @@ public:
                                 req.Txn(),
                                 req.ReadTimestamp(),
                                 is_read_snapshot,
+                                need_fetch_snapshot,
                                 true,
                                 req.is_ckpt_delta_,
                                 req.is_require_keys_,
@@ -3875,6 +3907,7 @@ public:
                                 req.Txn(),
                                 req.ReadTimestamp(),
                                 is_read_snapshot,
+                                need_fetch_snapshot,
                                 true,
                                 req.is_ckpt_delta_,
                                 req.is_require_keys_,
@@ -3929,6 +3962,35 @@ public:
         {
             req.UnpinSlices();
             return true;
+        }
+
+        if (req.IsWaitForSnapshot(shard_->core_id_))
+        {
+            assert(req.WaitForSnapshotCnt(shard_->core_id_) == 0);
+            if (req.SetFinish())
+            {
+                if (req.Result()->Value().is_local_)
+                {
+                    req.UnpinSlices();
+                    return true;
+                }
+                else if (req.IsResponseSender(shard_->core_id_))
+                {
+                    req.SendResponseIfFinished();
+                    req.UnpinSlices();
+                    return true;
+                }
+                else
+                {
+                    shard_->local_shards_.EnqueueCcRequest(
+                        shard_->core_id_, req.Txn(), &req);
+                    return false;
+                }
+            }
+            else
+            {
+                return false;
+            }
         }
 
         CcOperation cc_op;
@@ -4230,6 +4292,7 @@ public:
                 is_locked = lock_pair.first != LockType::NoLock;
             }
 
+            bool need_fetch_snapshot = false;
             if (req.IsLocal())
             {
                 AddScanTuple(cce_key,
@@ -4241,10 +4304,37 @@ public:
                              req.Txn(),
                              req.ReadTimestamp(),
                              is_read_snapshot,
+                             need_fetch_snapshot,
                              is_locked,
                              false,
                              is_require_keys,
                              is_require_recs);
+
+                if (need_fetch_snapshot)
+                {
+                    assert(!is_locked);
+                    size_t last_tuple_idx = scan_cache->Size() - 1;
+                    auto *last_tuple = scan_cache->At(last_tuple_idx);
+                    auto fetch_ret_status = shard_->FetchSnapshot(
+                        this->table_name_,
+                        this->table_schema_,
+                        TxKey(cce_key),
+                        this->cc_ng_id_,
+                        ng_term,
+                        req.ReadTimestamp(),
+                        last_tuple->rec_status_ ==
+                            RecordStatus::ArchiveVersionMiss,
+                        &req,
+                        last_tuple_idx,
+                        &BackfillSnapshotForScanSlice<KeyT, ValueT>,
+                        req.RangeId());
+
+                    if (fetch_ret_status ==
+                        store::DataStoreHandler::DataStoreOpStatus::Success)
+                    {
+                        req.IncreaseWaitForSnapshotCnt(shard_->core_id_);
+                    }
+                }
             }
             else
             {
@@ -4255,10 +4345,47 @@ public:
                                 ng_term,
                                 req.ReadTimestamp(),
                                 is_read_snapshot,
+                                need_fetch_snapshot,
                                 is_locked,
                                 false,
                                 is_require_keys,
                                 is_require_recs);
+
+                if (need_fetch_snapshot)
+                {
+                    assert(!is_locked);
+
+                    auto last_rec_status =
+                        remote_scan_cache->rec_status_.back();
+                    assert(last_rec_status ==
+                               remote::RecordStatusType::VERSIONUNDEFIND ||
+                           last_rec_status ==
+                               remote::RecordStatusType::ArchiveVersionMiss ||
+                           last_rec_status ==
+                               remote::RecordStatusType::BaseVersionMiss);
+
+                    size_t last_tuple_idx =
+                        remote_scan_cache->archive_positions_.size() - 1;
+                    auto fetch_ret_status = shard_->FetchSnapshot(
+                        this->table_name_,
+                        this->table_schema_,
+                        TxKey(cce_key),
+                        this->cc_ng_id_,
+                        ng_term,
+                        req.ReadTimestamp(),
+                        last_rec_status ==
+                            remote::RecordStatusType::ArchiveVersionMiss,
+                        &req,
+                        last_tuple_idx,
+                        &BackfillSnapshotForScanSlice<KeyT, ValueT>,
+                        req.RangeId());
+
+                    if (fetch_ret_status ==
+                        store::DataStoreHandler::DataStoreOpStatus::Success)
+                    {
+                        req.IncreaseWaitForSnapshotCnt(shard_->core_id_);
+                    }
+                }
             }
 
             return {ScanReturnType::Success, CcErrorCode::NO_ERROR};
@@ -4347,6 +4474,7 @@ public:
                     is_locked = lock_pair.first != LockType::NoLock;
                 }
 
+                bool need_fetch_snapshot = false;
                 if (req.IsLocal())
                 {
                     AddScanTuple(cce_key,
@@ -4358,10 +4486,36 @@ public:
                                  req.Txn(),
                                  req.ReadTimestamp(),
                                  is_read_snapshot,
+                                 need_fetch_snapshot,
                                  is_locked,
                                  false,
                                  is_require_keys,
                                  is_require_recs);
+                    if (need_fetch_snapshot)
+                    {
+                        assert(!is_locked);
+                        size_t last_tuple_idx = scan_cache->Size() - 1;
+                        auto *last_tuple = scan_cache->At(last_tuple_idx);
+                        auto fetch_ret_status = shard_->FetchSnapshot(
+                            this->table_name_,
+                            this->table_schema_,
+                            TxKey(cce_key),
+                            this->cc_ng_id_,
+                            ng_term,
+                            req.ReadTimestamp(),
+                            last_tuple->rec_status_ ==
+                                RecordStatus::ArchiveVersionMiss,
+                            &req,
+                            last_tuple_idx,
+                            &BackfillSnapshotForScanSlice<KeyT, ValueT>,
+                            req.RangeId());
+
+                        if (fetch_ret_status ==
+                            store::DataStoreHandler::DataStoreOpStatus::Success)
+                        {
+                            req.IncreaseWaitForSnapshotCnt(shard_->core_id_);
+                        }
+                    }
                 }
                 else
                 {
@@ -4372,10 +4526,47 @@ public:
                                     ng_term,
                                     req.ReadTimestamp(),
                                     is_read_snapshot,
+                                    need_fetch_snapshot,
                                     is_locked,
                                     false,
                                     is_require_keys,
                                     is_require_recs);
+                    if (need_fetch_snapshot)
+                    {
+                        assert(!is_locked);
+
+                        auto last_rec_status =
+                            remote_scan_cache->rec_status_.back();
+                        assert(
+                            last_rec_status ==
+                                remote::RecordStatusType::VERSIONUNDEFIND ||
+                            last_rec_status ==
+                                remote::RecordStatusType::ArchiveVersionMiss ||
+                            last_rec_status ==
+                                remote::RecordStatusType::BaseVersionMiss);
+
+                        size_t last_tuple_idx =
+                            remote_scan_cache->archive_positions_.size() - 1;
+                        auto fetch_ret_status = shard_->FetchSnapshot(
+                            this->table_name_,
+                            this->table_schema_,
+                            TxKey(cce_key),
+                            this->cc_ng_id_,
+                            ng_term,
+                            req.ReadTimestamp(),
+                            last_rec_status ==
+                                remote::RecordStatusType::ArchiveVersionMiss,
+                            &req,
+                            last_tuple_idx,
+                            &BackfillSnapshotForScanSlice<KeyT, ValueT>,
+                            req.RangeId());
+
+                        if (fetch_ret_status ==
+                            store::DataStoreHandler::DataStoreOpStatus::Success)
+                        {
+                            req.IncreaseWaitForSnapshotCnt(shard_->core_id_);
+                        }
+                    }
                 }
             }
             if (req.Direction() == ScanDirection::Forward)
@@ -5286,6 +5477,12 @@ public:
         if (req.IsLocal())
         {
             req.GetLocalScanner()->CommitAtCore(core_id);
+        }
+
+        if (is_read_snapshot && req.WaitForSnapshotCnt(shard_->core_id_) > 0)
+        {
+            req.SetIsWaitForSnapshot(shard_->core_id_);
+            return false;
         }
 
         if (req.SetFinish())
@@ -10763,6 +10960,7 @@ protected:
                  TxNumber txn,
                  uint64_t read_ts,
                  bool is_read_snapshot,
+                 bool &need_fetch_snapshot,
                  bool keep_deleted,
                  bool is_ckpt_delta = false,
                  bool is_require_keys = true,
@@ -10770,7 +10968,7 @@ protected:
     {
         TemplateScanTuple<KeyT, ValueT> *tuple = nullptr;
         uint32_t tuple_size = ScanCache::MetaDataSize;
-
+        need_fetch_snapshot = false;
         if (is_read_snapshot)
         {
             assert(VersionedRecord);
@@ -10820,6 +11018,9 @@ protected:
 
             tuple->key_ts_ = v_rec.commit_ts_;
             tuple->rec_status_ = v_rec.payload_status_;
+            need_fetch_snapshot =
+                (v_rec.payload_status_ != RecordStatus::Normal &&
+                 v_rec.payload_status_ != RecordStatus::Deleted);
         }
         else
         {
@@ -10928,6 +11129,7 @@ protected:
                  int64_t ng_term,
                  uint64_t read_ts,
                  bool is_read_snapshot,
+                 bool &need_fetch_snapshot,
                  bool keep_deleted,
                  bool is_ckpt_delta = false,
                  bool is_require_keys = true,
@@ -10939,9 +11141,9 @@ protected:
         static KeyT empty_key;
         static ValueT empty_val;
         const ValueT *payload = &empty_val;
+        need_fetch_snapshot = false;
 
         uint32_t tuple_size = RemoteScanSliceCache::MetaDataSize;
-
         if (is_read_snapshot)
         {
             assert(VersionedRecord);
@@ -10981,8 +11183,40 @@ protected:
                 }
             }
 
-            payload->Serialize(remote_cache->records_);
-            tuple_size += payload->SerializedLength();
+            if (v_rec.payload_status_ != RecordStatus::Normal &&
+                v_rec.payload_status_ != RecordStatus::Deleted)
+            {
+                need_fetch_snapshot = true;
+
+                remote_cache->archive_positions_.emplace_back(
+                    remote_cache->key_ts_.size(),
+                    remote_cache->records_.size());
+                auto &ref = remote_cache->archive_records_.emplace_back();
+                payload->Serialize(ref);
+
+                // Estimate the size of archive record based on current payload
+                // size or average payload size.
+                if (cce->payload_.cur_payload_ != nullptr)
+                {
+                    tuple_size +=
+                        cce->payload_.cur_payload_->SerializedLength();
+                }
+                else if (remote_cache->records_.size() > 0 &&
+                         remote_cache->key_ts_.size() > 0)
+                {
+                    tuple_size += (remote_cache->records_.size() /
+                                   remote_cache->key_ts_.size());
+                }
+                else
+                {
+                    tuple_size += payload->SerializedLength();
+                }
+            }
+            else
+            {
+                payload->Serialize(remote_cache->records_);
+                tuple_size += payload->SerializedLength();
+            }
 
             remote_cache->rec_status_.push_back(
                 remote::ToRemoteType::ConvertRecordStatus(
@@ -11059,6 +11293,7 @@ protected:
                  TxNumber txn,
                  uint64_t read_ts,
                  bool is_read_snapshot,
+                 bool &need_fetch_snapshot,
                  bool keep_deleted,
                  bool is_ckpt_delta = false,
                  bool is_require_keys = true,
@@ -11066,7 +11301,7 @@ protected:
     {
         static ValueT empty_val;
         const ValueT *payload = &empty_val;
-
+        need_fetch_snapshot = false;
         remote::ScanTuple_msg *tuple = nullptr;
         uint32_t tuple_size = 0;
 
@@ -11119,6 +11354,10 @@ protected:
             tuple->set_rec_status(remote::ToRemoteType::ConvertRecordStatus(
                 v_rec.payload_status_));
             tuple->set_key_ts(v_rec.commit_ts_);
+
+            need_fetch_snapshot =
+                (v_rec.payload_status_ != RecordStatus::Normal &&
+                 v_rec.payload_status_ != RecordStatus::Deleted);
         }
         else
         {
@@ -11728,4 +11967,62 @@ protected:
     size_t normal_obj_sz_{
         0};  // The count of all normal status objects, only used for redis
 };
+
+template <typename KeyT, typename ValueT>
+void BackfillSnapshotForScanSlice(FetchSnapshotCc *fetch_cc,
+                                  CcRequestBase *requester)
+{
+    ScanSliceCc *req = static_cast<ScanSliceCc *>(requester);
+    CcShard &shard = *fetch_cc->ccs_;
+    auto core_id = shard.LocalCoreId();
+    size_t tuple_idx = fetch_cc->tuple_idx_;
+    // backfill fetched snapshot
+    if (req->IsLocal())
+    {
+        TemplateScanCache<KeyT, ValueT> *scan_cache =
+            static_cast<TemplateScanCache<KeyT, ValueT> *>(
+                req->GetLocalScanCache(core_id));
+        assert(scan_cache != nullptr);
+        auto *scan_tuple = const_cast<TemplateScanTuple<KeyT, ValueT> *>(
+            scan_cache->At(tuple_idx));
+        assert(scan_tuple->rec_status_ != RecordStatus::Normal &&
+               scan_tuple->rec_status_ != RecordStatus::Deleted);
+
+        if (fetch_cc->rec_status_ == RecordStatus::Normal)
+        {
+            auto payload = std::make_shared<ValueT>();
+            size_t offset = 0;
+            payload->Deserialize(fetch_cc->rec_str_.data(), offset);
+            scan_tuple->SetRecord(payload);
+        }
+        scan_tuple->key_ts_ = fetch_cc->rec_ts_;
+        scan_tuple->rec_status_ = fetch_cc->rec_status_;
+    }
+    else
+    {
+        RemoteScanSliceCache *remote_scan_cache =
+            req->GetRemoteScanCache(core_id);
+        assert(remote_scan_cache != nullptr);
+        assert(remote_scan_cache->archive_records_.size() >= tuple_idx);
+        auto &tmp_pair = remote_scan_cache->archive_positions_[tuple_idx];
+        remote_scan_cache->key_ts_[tmp_pair.first] = fetch_cc->rec_ts_;
+        remote_scan_cache->rec_status_[tmp_pair.first] =
+            remote::ToRemoteType::ConvertRecordStatus(fetch_cc->rec_status_);
+        if (fetch_cc->rec_str_.size() > 0)
+        {
+            remote_scan_cache->archive_records_[tuple_idx] =
+                std::move(fetch_cc->rec_str_);
+        }
+        assert(remote_scan_cache->archive_records_[tuple_idx].size() > 0);
+    }
+
+    // trigger request
+    req->DecreaseWaitForSnapshotCnt(core_id);
+    if (req->IsWaitForSnapshot(core_id) &&
+        req->WaitForSnapshotCnt(core_id) == 0)
+    {
+        shard.Enqueue(core_id, req);
+    }
+}
+
 }  // namespace txservice
