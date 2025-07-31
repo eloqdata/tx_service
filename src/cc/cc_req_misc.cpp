@@ -762,7 +762,9 @@ FetchRecordCc::FetchRecordCc(const TableName *tbl_name,
                              NodeGroupId cc_ng_id,
                              int64_t cc_ng_term,
                              int32_t range_id,
-                             bool fetch_from_primary)
+                             bool fetch_from_primary,
+                             uint64_t snapshot_read_ts,
+                             bool only_fetch_archives)
     : FetchCc(ccs, cc_ng_id, cc_ng_term),
       table_name_(tbl_name->StringView(), tbl_name->Type(), tbl_name->Engine()),
       table_schema_(tbl_schema),
@@ -776,7 +778,9 @@ FetchRecordCc::FetchRecordCc(const TableName *tbl_name,
       cce_(cce),
       lock_(cce->GetKeyGapLockAndExtraData()),
       range_id_(range_id),
-      fetch_from_primary_(fetch_from_primary)
+      fetch_from_primary_(fetch_from_primary),
+      snapshot_read_ts_(snapshot_read_ts),
+      only_fetch_archives_(only_fetch_archives)
 {
 }
 
@@ -835,8 +839,25 @@ bool FetchRecordCc::Execute(CcShard &ccs)
         // if the referenced cce is already invalid, we do not need to care
         // about the fetch result and pending reqs since they are all
         // invalid.
-        bool succ =
-            lock_->GetCcMap()->BackFill(cce_, rec_ts_, rec_status_, rec_str_);
+        bool succ;
+        if (only_fetch_archives_)
+        {
+            succ = lock_->GetCcMap()->BackFillArchives(
+                cce_, *archive_records_, true);
+        }
+        else
+        {
+            if (snapshot_read_ts_ > 0 && archive_records_ != nullptr &&
+                archive_records_->size() > 0)
+            {
+                succ = lock_->GetCcMap()->BackFillArchives(
+                    cce_, *archive_records_, false);
+            }
+
+            succ = lock_->GetCcMap()->BackFill(
+                cce_, rec_ts_, rec_status_, rec_str_);
+        }
+
         if (!succ)
         {
             // Retry if backfill failed.

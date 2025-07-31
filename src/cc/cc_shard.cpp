@@ -1461,7 +1461,9 @@ store::DataStoreHandler::DataStoreOpStatus CcShard::FetchRecord(
     CcRequestBase *requester,
     int32_t range_id,
     bool fetch_from_primary,
-    uint32_t key_shard_code)
+    uint32_t key_shard_code,
+    uint64_t snapshot_read_ts,
+    bool only_fetch_archives)
 {
     auto tab_it = fetch_record_reqs_.try_emplace(cce,
                                                  &table_name,
@@ -1472,7 +1474,9 @@ store::DataStoreHandler::DataStoreOpStatus CcShard::FetchRecord(
                                                  cc_ng_id,
                                                  cc_ng_term,
                                                  range_id,
-                                                 fetch_from_primary);
+                                                 fetch_from_primary,
+                                                 snapshot_read_ts,
+                                                 only_fetch_archives);
     FetchRecordCc *fetch_req = &(tab_it.first->second);
     fetch_req->AddRequester(requester);
 
