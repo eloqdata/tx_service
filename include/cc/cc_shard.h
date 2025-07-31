@@ -716,7 +716,9 @@ public:
         CcRequestBase *requester,
         int32_t range_id,
         bool fetch_from_primary = false,
-        uint32_t key_shard_code = 0);
+        uint32_t key_shard_code = 0,
+        uint64_t snapshot_read_ts = 0,
+        bool only_fetch_archives = false);
 
     void RemoveFetchRecordRequest(LruEntry *cce);
 

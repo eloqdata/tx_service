@@ -533,7 +533,9 @@ public:
                   NodeGroupId cc_ng_id,
                   int64_t cc_ng_term,
                   int32_t range_id_ = -1,
-                  bool fetch_from_primary = false);
+                  bool fetch_from_primary = false,
+                  uint64_t snapshot_read_ts = 0,
+                  bool only_fetch_archives = false);
     ~FetchRecordCc() = default;
 
     bool ValidTermCheck();
@@ -561,6 +563,15 @@ public:
     // Only used in range partition
     int range_id_;
     bool fetch_from_primary_{false};
+
+    // If set snapshot_read_ts_ (not equal 0), the snapshot_read_ts_ will be
+    // used to fetch record from archives table.
+    uint64_t snapshot_read_ts_{0};
+    // If set only_fetch_archives_ (true), don't fetch record from base table.
+    bool only_fetch_archives_{false};
+    std::unique_ptr<
+        std::vector<std::tuple<uint64_t, RecordStatus, std::string>>>
+        archive_records_{nullptr};
 
     // Process the kv result on TxProcessor if the data on CcShard (table
     // schema) needs to be accessed.
