@@ -4007,7 +4007,7 @@ public:
                 (1 + req.PrefetchSize() / shard_->core_cnt_) * 125 / 100);
         }
 
-        auto is_cache_full = [&req, scan_cache, remote_scan_cache]() {
+        auto is_cache_full = [&req, scan_cache, remote_scan_cache] {
             return req.IsLocal() ? scan_cache->IsFull()
                                  : remote_scan_cache->IsFull();
         };
@@ -7013,6 +7013,19 @@ public:
                 it->second;
             CcPage<KeyT, ValueT, VersionedRecord, RangePartitioned> *ccp =
                 it.GetPage();
+
+            // For orphan lock recovery, verify if the transaction still holds
+            // the lock on this CC entry.
+            if (req.IsLockRecovery())
+            {
+                if (const NonBlockingLock *key_lock =
+                        cce != nullptr ? cce->GetKeyLock() : nullptr;
+                    key_lock == nullptr ||
+                    !key_lock->HasWriteLockOrWriteIntent(req.Txn()))
+                {
+                    continue;
+                }
+            }
 
             if (cce == nullptr)
             {

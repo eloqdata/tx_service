@@ -3937,6 +3937,7 @@ public:
         std::atomic<fault::RecoveryService::WaitingStatus> &status,
         std::atomic<size_t> &on_fly_cnt,
         bool &recovery_error,
+        const bool is_lock_recovery = false,
         std::shared_ptr<std::atomic_uint32_t> range_split_started = nullptr,
         std::unordered_set<TableName> *range_splitting = nullptr,
         uint16_t first_core = 0)
@@ -3965,6 +3966,7 @@ public:
         range_split_started_ = range_split_started;
         range_splitting_ = range_splitting;
         local_on_fly_cnt_ = nullptr;
+        is_lock_recovery_ = is_lock_recovery;
     }
 
     ReplayLogCc(const ReplayLogCc &rhs) = delete;
@@ -4221,6 +4223,11 @@ public:
         local_on_fly_cnt_ = local_on_fly_cnt;
     }
 
+    bool IsLockRecovery() const
+    {
+        return is_lock_recovery_;
+    }
+
 private:
     TableName table_name_holder_{
         "",
@@ -4241,6 +4248,7 @@ private:
     // on_fly_cnt. Only last ReplayLogCc decreases global on_fly_cnt.
     std::atomic_uint32_t *local_on_fly_cnt_{nullptr};
     bool *recovery_error_;
+    bool is_lock_recovery_;
     uint16_t first_core_;
     uint16_t next_core_{UINT16_MAX};
     const struct TableSchema *table_schema_{nullptr};
@@ -4265,7 +4273,8 @@ public:
                bthread::Mutex &mux,
                std::atomic<fault::RecoveryService::WaitingStatus> &status,
                std::atomic<uint64_t> &on_fly_cnt,
-               bool &recovery_error)
+               bool &recovery_error,
+               const bool is_lock_recovery = false)
     {
         log_records_ = log_records;
         cc_ng_id_ = cc_ng_id;
@@ -4275,6 +4284,7 @@ public:
         status_ = &status;
         on_fly_cnt_ = &on_fly_cnt;
         recovery_error_ = &recovery_error;
+        is_lock_recovery_ = is_lock_recovery;
     }
 
     bool Execute(CcShard &ccs) override
@@ -4290,6 +4300,14 @@ public:
             uint64_t commit_ts = *reinterpret_cast<const uint64_t *>(
                 log_records_.data() + offset);
             offset += sizeof(uint64_t);
+            uint64_t tx_number = 0;
+            if (is_lock_recovery_)
+            {
+                // 8-byte for tx_number
+                tx_number = *reinterpret_cast<const uint64_t *>(
+                    log_records_.data() + offset);
+                offset += sizeof(uint64_t);
+            }
             // 4-byte for log_blob length
             uint32_t blob_length = *reinterpret_cast<const uint32_t *>(
                 log_records_.data() + offset);
@@ -4366,11 +4384,12 @@ public:
                     table_engine,
                     std::string_view(blob.data() + blob_offset, kv_len),
                     commit_ts,
-                    0,
+                    tx_number,
                     *mux_,
                     *status_,
                     *on_fly_cnt_,
                     *recovery_error_,
+                    is_lock_recovery_,
                     nullptr,
                     nullptr,
                     dest_core);
@@ -4402,6 +4421,7 @@ private:
     std::atomic<fault::RecoveryService::WaitingStatus> *status_;
     std::atomic<uint64_t> *on_fly_cnt_;
     bool *recovery_error_;
+    bool is_lock_recovery_;
 };
 
 struct BroadcastStatisticsCc

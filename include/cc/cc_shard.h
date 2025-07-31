@@ -504,6 +504,7 @@ public:
                 }
 
                 // check and recover holding write lock transactions.
+
                 CheckRecoverTx(
                     tx_pair.first, *tx_pair.second, cc_ng_id, cc_ng_term);
             }

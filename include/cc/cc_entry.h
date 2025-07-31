@@ -21,8 +21,6 @@
  */
 #pragma once
 
-#include <butil/logging.h>
-
 #include <algorithm>  // std::max
 #include <atomic>
 #include <cassert>
