@@ -1157,10 +1157,10 @@ public:
                           uint64_t commit_ts)
     {
         assert(VersionedRecord);
-        if (commit_ts == 1U && payload_status == RecordStatus::Deleted)
-        {
-            return;
-        }
+        // if (commit_ts == 1U && payload_status == RecordStatus::Deleted)
+        // {
+        //     return;
+        // }
         if (payload_.GetArchives() == nullptr)
         {
             payload_.SetArchives(

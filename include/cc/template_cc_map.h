@@ -1750,7 +1750,11 @@ public:
                                 this->cc_ng_id_,
                                 ng_term,
                                 &req,
-                                slice_id.Range()->PartitionId());
+                                slice_id.Range()->PartitionId(),
+                                false,
+                                0,
+                                is_read_snapshot ? req.ReadTimestamp() : 0,
+                                false);
 
                             if (fetch_ret_status ==
                                 store::DataStoreHandler::DataStoreOpStatus::
@@ -1831,15 +1835,19 @@ public:
                     cce->GetOrCreateKeyLock(shard_, this, ccp);
 
                     int32_t part_id = (look_key->Hash() >> 10) & 0x3FF;
-                    auto fetch_ret_status =
-                        shard_->FetchRecord(this->table_name_,
-                                            this->table_schema_,
-                                            TxKey(look_key),
-                                            cce,
-                                            this->cc_ng_id_,
-                                            ng_term,
-                                            &req,
-                                            part_id);
+                    auto fetch_ret_status = shard_->FetchRecord(
+                        this->table_name_,
+                        this->table_schema_,
+                        TxKey(look_key),
+                        cce,
+                        this->cc_ng_id_,
+                        ng_term,
+                        &req,
+                        part_id,
+                        false,
+                        0U,
+                        is_read_snapshot ? req.ReadTimestamp() : 0,
+                        false);
                     if (fetch_ret_status ==
                         store::DataStoreHandler::DataStoreOpStatus::Retry)
                     {
@@ -2028,6 +2036,63 @@ public:
                 }
                 req.SetCacheHitMissCollected();
             }
+            assert(v_rec.payload_status_ != RecordStatus::Unknown);
+
+            if (v_rec.payload_status_ == RecordStatus::VersionUnknown ||
+                v_rec.payload_status_ == RecordStatus::BaseVersionMiss ||
+                v_rec.payload_status_ == RecordStatus::ArchiveVersionMiss)
+            {
+                cce->GetOrCreateKeyLock(shard_, this, ccp);
+#ifdef RANGE_PARTITION_ENABLED
+                TxKey tx_key(look_key);
+                const TableRangeEntry *range_entry =
+                    shard_->GetTableRangeEntry(table_name_, cc_ng_id_, tx_key);
+                int32_t part_id = range_entry->GetRangeInfo()->PartitionId();
+                auto fetch_ret_status = shard_->FetchRecord(
+                    this->table_name_,
+                    this->table_schema_,
+                    TxKey(look_key),
+                    cce,
+                    this->cc_ng_id_,
+                    ng_term,
+                    &req,
+                    part_id,
+                    false,
+                    0,
+                    req.ReadTimestamp(),
+                    v_rec.payload_status_ == RecordStatus::ArchiveVersionMiss);
+#else
+                int32_t part_id = (look_key->Hash() >> 10) & 0x3FF;
+                auto fetch_ret_status = shard_->FetchRecord(
+                    this->table_name_,
+                    this->table_schema_,
+                    TxKey(look_key),
+                    cce,
+                    this->cc_ng_id_,
+                    ng_term,
+                    &req,
+                    part_id,
+                    false,
+                    0U,
+                    req.ReadTimestamp(),
+                    v_rec.payload_status_ == RecordStatus::ArchiveVersionMiss);
+
+#endif
+                if (fetch_ret_status ==
+                    store::DataStoreHandler::DataStoreOpStatus::Retry)
+                {
+                    // Yield and retry
+                    shard_->Enqueue(shard_->core_id_, &req);
+                }
+                else
+                {
+                    req.SetBlockType(ReadCc::BlockByFetch);
+                    req.SetCcePtr(cce);
+                }
+
+                return false;
+            }
+
             hd_res->Value().ts_ = v_rec.commit_ts_;
             hd_res->Value().rec_status_ = v_rec.payload_status_;
             hd_res->SetFinished();
@@ -4335,7 +4400,7 @@ public:
                         }
                     }
 
-                    is_locked = true;
+                    is_locked = lock_pair.first != LockType::NoLock;
                 }
 
                 if (req.IsLocal())
@@ -10291,6 +10356,48 @@ protected:
 
         cce->GetKeyGapLockAndExtraData()->ReleasePin();
         cce->RecycleKeyLock(*shard_);
+
+        return true;
+    }
+
+    bool BackFillArchives(
+        LruEntry *entry,
+        const std::vector<std::tuple<uint64_t, RecordStatus, std::string>>
+            &archive_records,
+        bool need_unpin = false) override
+    {
+        CcEntry<KeyT, ValueT, VersionedRecord, RangePartitioned> *cce =
+            static_cast<
+                CcEntry<KeyT, ValueT, VersionedRecord, RangePartitioned> *>(
+                entry);
+
+        assert(shard_->EnableMvcc());
+        for (auto &archive_record : archive_records)
+        {
+            RecordStatus rec_st = std::get<1>(archive_record);
+            if (rec_st == RecordStatus::Normal)
+            {
+                auto payload = std::make_shared<ValueT>();
+                size_t offset = 0;
+                auto &rec_str = std::get<2>(archive_record);
+                payload->Deserialize(rec_str.c_str(), offset);
+                cce->AddArchiveRecord(payload,
+                                      std::get<1>(archive_record),
+                                      std::get<0>(archive_record));
+            }
+            else
+            {
+                cce->AddArchiveRecord(nullptr,
+                                      std::get<1>(archive_record),
+                                      std::get<0>(archive_record));
+            }
+        }
+
+        if (need_unpin)
+        {
+            cce->GetKeyGapLockAndExtraData()->ReleasePin();
+            cce->RecycleKeyLock(*shard_);
+        }
 
         return true;
     }
