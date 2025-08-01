@@ -360,12 +360,14 @@ struct LruEntry
             cc_lock_and_extra_->KeyLock()->PushBlockCmdRequest(req);
         }
     }
-    void AbortBlockCmdRequest(TxNumber txid, CcErrorCode err)
+    bool AbortBlockCmdRequest(TxNumber txid, CcErrorCode err, CcShard *ccs)
     {
         if (cc_lock_and_extra_ != nullptr)
         {
-            cc_lock_and_extra_->KeyLock()->AbortBlockCmdRequest(txid, err);
+            return cc_lock_and_extra_->KeyLock()->AbortBlockCmdRequest(
+                txid, err, ccs);
         }
+        return true;
     }
 
     StandbyForwardEntry *ForwardEntry()
@@ -1678,7 +1680,6 @@ public:
                                             : 0;
                                 }
                                 flush_size += ref.FlushSize();
-
                             }
                             else
                             {
