@@ -172,13 +172,8 @@ public:
                       const txservice::TableSchema *table_schema) = 0;
 
     // Fetch record from datastore asynchronously.
-    virtual DataStoreOpStatus FetchRecord(FetchRecordCc *fetch_cc)
-    {
-        assert(false);
-        return DataStoreOpStatus::Error;
-    }
-
-    virtual DataStoreOpStatus FetchSnapshot(FetchSnapshotCc *fetch_cc)
+    virtual DataStoreOpStatus FetchRecord(
+        FetchRecordCc *fetch_cc, FetchSnapshotCc *fetch_snapshot_cc = nullptr)
     {
         assert(false);
         return DataStoreOpStatus::Error;

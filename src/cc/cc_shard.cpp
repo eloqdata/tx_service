@@ -1588,7 +1588,7 @@ store::DataStoreHandler::DataStoreOpStatus CcShard::FetchSnapshot(
                     range_id);
 
     store::DataStoreHandler::DataStoreOpStatus res =
-        local_shards_.store_hd_->FetchSnapshot(fetch_cc);
+        local_shards_.store_hd_->FetchRecord(nullptr, fetch_cc);
 
     return store::DataStoreHandler::DataStoreOpStatus::Success;
 }
