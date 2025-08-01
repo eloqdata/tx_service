@@ -2091,7 +2091,6 @@ void txservice::LocalCcHandler::InvalidateTableCache(
     }
 }
 
-#ifdef RANGE_PARTITION_ENABLED
 void txservice::LocalCcHandler::UpdateKeyCache(const TableName &table_name,
                                                NodeGroupId ng_id,
                                                int64_t tx_term,
@@ -2119,7 +2118,6 @@ void txservice::LocalCcHandler::UpdateKeyCache(const TableName &table_name,
         cc_shards_.EnqueueCcRequest(idx, req);
     }
 }
-#endif
 
 /*
  * Get the node id which runs the current transaction.

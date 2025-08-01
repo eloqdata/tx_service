@@ -1335,24 +1335,24 @@ public:
      * Cluster scale tx has different op processing order based on the event
      * type. For add node, the order is
      * 1. prepare_log_op_
-     * == pub_buckets_migrate_begin_op_ #HashPartition
+     * == pub_buckets_migrate_begin_op_
      * 2. acquire_cluster_config_write_op_
      * 3. update_cluster_config_log_op_
      * 4. install_cluster_config_op_
      * 5. notify_migration_op_
      * 6. check_migration_is_finished_op_
-     * ==  pub_buckets_migrate_end_op_ #HashPartition
+     * ==  pub_buckets_migrate_end_op_
      * 7. clean_log_op_
      *
      * For remove node, the order is
      * 1. prepare_log_op_
-     * == pub_buckets_migrate_begin_op_ #HashPartition
+     * == pub_buckets_migrate_begin_op_
      * 2. notify_migration_op_
      * 3. check_migration_is_finished_op_
      * 4. acquire_cluster_config_write_op_
      * 5. update_cluster_config_log_op_
      * 6. install_cluster_config_op_
-     * ==  pub_buckets_migrate_end_op_ #HashPartition
+     * ==  pub_buckets_migrate_end_op_
      * 7. clean_log_op_
      *
      * Basically for add node we're adding new nodes into the cluster first,

@@ -1625,7 +1625,6 @@ public:
         uint64_t data_sync_ts,
         CcHandlerResult<Void> *hres);
 
-#ifdef RANGE_PARTITION_ENABLED
     /**
      * @brief Construct one DataSyncTask for each sub-ranges of this range
      * identified by @@range_entry, and enqueue to the datasync task queue.
@@ -1652,8 +1651,6 @@ public:
         const TxKey &start_key,
         CcRequestBase *cc_request,
         CcShard *cc_shard);
-
-#endif
 
     void InitPrebuiltTables(NodeGroupId ng_id, int64_t term);
 
@@ -1699,8 +1696,6 @@ public:
     {
         return node_meter_.get();
     }
-
-    void PostProcessCkpt(std::shared_ptr<DataSyncTask> &task, bool flush_ret);
 
     void FlushCurrentFlushBuffer();
 
@@ -1790,7 +1785,6 @@ private:
     BucketInfo *GetRangeOwnerInternal(int32_t range_id,
                                       const NodeGroupId ng_id) const;
 
-#ifdef RANGE_PARTITION_ENABLED
     bool EnqueueRangeDataSyncTask(const TableName &table_name,
                                   uint32_t ng_id,
                                   int64_t ng_term,
@@ -1801,7 +1795,6 @@ private:
                                   uint64_t &last_sync_ts,
                                   std::shared_ptr<DataSyncStatus> status,
                                   CcHandlerResult<Void> *hres);
-#else
     bool EnqueueDataSyncTaskToCore(
         const TableName &table_name,
         uint32_t ng_id,
@@ -1815,38 +1808,30 @@ private:
         CcHandlerResult<Void> *hres = nullptr,
         bool send_cache_for_migration = false,
         std::function<bool(size_t)> filter_lambda = nullptr);
-#endif
 
     void PopPendingTask(NodeGroupId ng_id,
                         int64_t ng_term,
                         const TableName &table_name,
-#ifdef RANGE_PARTITION_ENABLED
-                        uint32_t range_id
-#else
-                        uint16_t core_idx
-#endif
-    );
+                        uint32_t id);
 
     void ClearAllPendingTasks(NodeGroupId ng_id,
                               int64_t ng_term,
                               const TableName &table_name,
-#ifdef RANGE_PARTITION_ENABLED
-                              uint32_t range_id
-#else
-                              uint16_t core_idx
-#endif
-    );
+                              uint32_t id);
 
-    void PostProcessDataSyncTask(std::shared_ptr<DataSyncTask> task,
-                                 const TableSchema *table_schema,
-                                 TransactionExecution *data_sync_txm,
-                                 DataSyncTask::CkptErrorCode ckpt_err
-#ifndef RANGE_PARTITION_ENABLED
-                                 ,
-                                 uint16_t worker_idx
-#endif
-                                 ,
-                                 bool is_scan_task = true);
+    void PostProcessHashPartitionDataSyncTask(
+        std::shared_ptr<DataSyncTask> task,
+        const TableSchema *table_schema,
+        TransactionExecution *data_sync_txm,
+        DataSyncTask::CkptErrorCode ckpt_err,
+        bool is_scan_task = true);
+
+    void PostProcessRangePartitionDataSyncTask(
+        std::shared_ptr<DataSyncTask> task,
+        const TableSchema *table_schema,
+        TransactionExecution *data_sync_txm,
+        DataSyncTask::CkptErrorCode ckpt_err,
+        bool is_scan_task = true);
 
     const uint32_t node_id_;
     // Native node group
@@ -2085,12 +2070,8 @@ private:
      */
     WorkerThreadContext data_sync_worker_ctx_;
 
-#ifdef RANGE_PARTITION_ENABLED
-    std::deque<std::shared_ptr<DataSyncTask>> data_sync_task_queue_;
-#else
     std::vector<std::deque<std::shared_ptr<DataSyncTask>>>
         data_sync_task_queue_;
-#endif
 
     struct DataSyncMemoryController
     {
@@ -2211,33 +2192,18 @@ private:
 
     struct TaskLimiterKey
     {
-#ifdef RANGE_PARTITION_ENABLED
         explicit TaskLimiterKey(NodeGroupId node_group_id,
                                 int64_t node_group_term,
                                 std::string_view table_name,
                                 TableType table_type,
                                 TableEngine table_engine,
-                                uint32_t range_id)
+                                uint32_t id)
             : node_group_id_(node_group_id),
               node_group_term_(node_group_term),
               table_name_(table_name, table_type, table_engine),
-              range_id_(range_id)
+              id_(id)
         {
         }
-#else
-        explicit TaskLimiterKey(NodeGroupId node_group_id,
-                                int64_t node_group_term,
-                                std::string_view table_name,
-                                TableType table_type,
-                                TableEngine table_engine,
-                                uint16_t core_id)
-            : node_group_id_(node_group_id),
-              node_group_term_(node_group_term),
-              table_name_(table_name, table_type, table_engine),
-              core_id_(core_id)
-        {
-        }
-#endif
 
         TaskLimiterKey(const TaskLimiterKey &rhs)
             : node_group_id_(rhs.node_group_id_),
@@ -2246,14 +2212,8 @@ private:
               table_name_(rhs.table_name_.StringView().data(),
                           rhs.table_name_.StringView().size(),
                           rhs.table_name_.Type(),
-                          rhs.table_name_.Engine())
-#ifdef RANGE_PARTITION_ENABLED
-              ,
-              range_id_(rhs.range_id_)
-#else
-              ,
-              core_id_(rhs.core_id_)
-#endif
+                          rhs.table_name_.Engine()),
+              id_(rhs.id_)
         {
         }
 
@@ -2263,46 +2223,26 @@ private:
 
         bool operator==(const TaskLimiterKey &other) const
         {
-#ifdef RANGE_PARTITION_ENABLED
             return node_group_id_ == other.node_group_id_ &&
                    node_group_term_ == other.node_group_term_ &&
-                   table_name_ == other.table_name_ &&
-                   range_id_ == other.range_id_;
-#else
-            return node_group_id_ == other.node_group_id_ &&
-                   node_group_term_ == other.node_group_term_ &&
-                   table_name_ == other.table_name_ &&
-                   core_id_ == other.core_id_;
-#endif
+                   table_name_ == other.table_name_ && id_ == other.id_;
         }
 
         NodeGroupId node_group_id_;
         int64_t node_group_term_;
         TableName table_name_;
-#ifdef RANGE_PARTITION_ENABLED
-        uint32_t range_id_;
-#else
-        uint16_t core_id_;
-#endif
+        uint32_t id_;
     };
 
     struct LimiterKeyHasher
     {
         size_t operator()(const TaskLimiterKey &key) const
         {
-#ifdef RANGE_PARTITION_ENABLED
             size_t h1 = std::hash<NodeGroupId>()(key.node_group_id_);
             size_t h2 = std::hash<int64_t>()(key.node_group_term_);
             size_t h3 = std::hash<TableName>()(key.table_name_);
-            size_t h4 = std::hash<uint32_t>()(key.range_id_);
+            size_t h4 = std::hash<uint32_t>()(key.id_);
             return h1 ^ (h2 << 1) ^ (h3 << 3) ^ (h4 << 5);
-#else
-            size_t h1 = std::hash<NodeGroupId>()(key.node_group_id_);
-            size_t h2 = std::hash<int64_t>()(key.node_group_term_);
-            size_t h3 = std::hash<TableName>()(key.table_name_);
-            size_t h4 = std::hash<uint16_t>()(key.core_id_);
-            return h1 ^ (h2 << 1) ^ (h3 << 3) ^ (h4 << 5);
-#endif
         }
     };
 
@@ -2314,7 +2254,10 @@ private:
 
     void DataSyncWorker(size_t worker_idx);
 
-    void DataSync(std::unique_lock<std::mutex> &task_worker_lk,
+    void DataSyncForHashPartition(std::shared_ptr<DataSyncTask> data_sync_task,
+                                  size_t worker_idx);
+
+    void DataSyncForRangePartition(std::shared_ptr<DataSyncTask> data_sync_task,
                   size_t worker_idx);
 
     /**

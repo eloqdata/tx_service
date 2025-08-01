@@ -589,7 +589,6 @@ public:
                                       uint64_t command_id,
                                       CcHandlerResult<Void> &hres) = 0;
 
-#ifdef RANGE_PARTITION_ENABLED
     /**
      * @brief Delete key that are between start_key and end_key from key cache.
      *
@@ -608,7 +607,6 @@ public:
                                 const TxKey &end_key,
                                 StoreRange *store_range,
                                 CcHandlerResult<Void> &hres) = 0;
-#endif
 };
 
 }  // namespace txservice

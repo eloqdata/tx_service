@@ -4179,7 +4179,6 @@ void SplitFlushRangeOp::ClearInfos()
 
 void SplitFlushRangeOp::Forward(TransactionExecution *txm)
 {
-#ifdef RANGE_PARTITION_ENABLED
     if (txm->TxStatus() == TxnStatus::Recovering &&
         Sharder::Instance().LeaderTerm(txm->TxCcNodeId()) < 0)
     {
@@ -4914,7 +4913,6 @@ void SplitFlushRangeOp::Forward(TransactionExecution *txm)
             assert(txm->split_flush_op_ == nullptr);
         }
     }
-#endif
 }
 
 /**
@@ -6062,12 +6060,10 @@ void ClusterScaleOp::Reset(
     clean_log_op_.Reset();
     clean_log_op_.ResetHandlerTxm(txm);
 
-#ifndef RANGE_PARTITION_ENABLED
     pub_buckets_migrate_begin_op_.Reset();
     pub_buckets_migrate_begin_op_.ResetHandlerTxm(txm);
     pub_buckets_migrate_end_op_.Reset();
     pub_buckets_migrate_end_op_.ResetHandlerTxm(txm);
-#endif
 
     assert(bucket_migrate_infos_.empty());
 

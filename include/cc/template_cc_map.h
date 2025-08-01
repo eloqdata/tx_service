@@ -49,6 +49,7 @@
 #include "mimalloc.h"
 #include "non_blocking_lock.h"
 #include "proto/cc_request.pb.h"
+#include "range_slice.h"
 #include "remote/remote_cc_handler.h"  //RemoteCcHandler
 #include "remote/remote_cc_request.h"
 #include "remote/remote_type.h"
@@ -65,10 +66,6 @@
 #include "tx_service_metrics.h"
 #include "tx_trace.h"
 #include "type.h"
-
-#ifdef RANGE_PARTITION_ENABLED
-#include "range_slice.h"
-#endif
 
 namespace txservice
 {
@@ -5550,8 +5547,7 @@ public:
         return export_size;
     }
 
-#ifdef RANGE_PARTITION_ENABLED
-    bool Execute(DataSyncScanCc &req) override
+    bool Execute(RangePartitionDataSyncScanCc &req) override
     {
         TX_TRACE_ACTION_WITH_CONTEXT(
             (txservice::CcMap *) this,
@@ -5954,7 +5950,7 @@ public:
         // CkptScanBatch number of pages in each round.
         for (size_t scan_cnt = 0;
              key_it != slice_end_it &&
-             scan_cnt < DataSyncScanCc::DataSyncScanBatchSize &&
+             scan_cnt < RangePartitionDataSyncScanCc::DataSyncScanBatchSize &&
              req.accumulated_scan_cnt_.at(shard_->core_id_) <
                  req.scan_batch_size_;
              ++scan_cnt)
@@ -6108,9 +6104,8 @@ public:
         // SetFinished(...).
         return false;
     }
-#else
 
-    bool Execute(DataSyncScanCc &req) override
+    bool Execute(HashPartitionDataSyncScanCc &req) override
     {
         TX_TRACE_ACTION_WITH_CONTEXT(
             (txservice::CcMap *) this,
@@ -6138,30 +6133,10 @@ public:
             return false;
         }
 
-        const KeyT *const req_start_key = req.start_key_ != nullptr
-                                              ? req.start_key_->GetKey<KeyT>()
-                                              : KeyT::NegativeInfinity();
-        const KeyT *const req_end_key = req.end_key_ != nullptr
-                                            ? req.end_key_->GetKey<KeyT>()
-                                            : KeyT::PositiveInfinity();
-
-        size_t vec_idx;
-        if (!req.only_scan_one_core_)
-        {
-            vec_idx = shard_->core_id_;
-        }
-        else
-        {
-            assert(req.unfinished_cnt_ == 1);
-            vec_idx = 0;
-        }
-
-        Iterator it;
-        Iterator end_it;
-        if (req.IsDrained(vec_idx))
+        if (req.IsDrained())
         {
             // scan is already finished on this core
-            req.SetFinish(vec_idx);
+            req.SetFinish();
             return false;
         }
 
@@ -6174,26 +6149,15 @@ public:
             req.SetError(CcErrorCode::TX_NODE_NOT_LEADER);
             return false;
         }
+        Iterator it;
+        Iterator end_it = End();
 
-        auto &pause_pos_and_is_drained = req.PausePos(vec_idx);
+        auto &pause_pos_and_is_drained = req.PausePos();
 
         if (pause_pos_and_is_drained.first == nullptr)
         {
-            // If this is a new scan cc, start from the specified start
-            // key or negative inf.
-            if (req_start_key == KeyT::NegativeInfinity())
-            {
-                it = Begin();
-                it++;
-            }
-            else
-            {
-                it = LowerBound(*req_start_key);
-                if (it->first == KeyT::NegativeInfinity())
-                {
-                    it++;
-                }
-            }
+            // If this is a new scan cc, start from the negative inf.
+            it = Begin();
         }
         else
         {
@@ -6221,25 +6185,8 @@ public:
             if (req.IsTerminated())
             {
                 // Just release this read intent.
-                req.SetFinish(vec_idx);
+                req.SetFinish();
                 return false;
-            }
-        }
-
-        const KeyT *search_end_key = req_end_key;
-
-        if (search_end_key == KeyT::PositiveInfinity())
-        {
-            end_it = End();
-        }
-        else
-        {
-            std::pair<Iterator, ScanType> end_pair =
-                ForwardScanStart(*search_end_key, true);
-            end_it = end_pair.first;
-            if (end_pair.second == ScanType::ScanGap)
-            {
-                ++end_it;
             }
         }
 
@@ -6281,9 +6228,9 @@ public:
         auto l_start = std::chrono::high_resolution_clock::now();
 
         for (size_t scan_cnt = 0;
-             scan_cnt < DataSyncScanCc::DataSyncScanBatchSize &&
-             req.accumulated_scan_cnt_[vec_idx] < req.scan_batch_size_ &&
-             it != end_it && it != end_it_next_page_it;
+             scan_cnt < HashPartitionDataSyncScanCc::DataSyncScanBatchSize &&
+             req.accumulated_scan_cnt_ < req.scan_batch_size_ && it != end_it &&
+             it != end_it_next_page_it;
              scan_cnt++)
         {
             if (export_data_cnt > 0 && export_data_cnt % 4 == 0)
@@ -6334,19 +6281,18 @@ public:
                     auto export_result =
                         ExportForCkpt(cce,
                                       *key,
-                                      req.DataSyncVec(vec_idx),
-                                      req.ArchiveVec(vec_idx),
-                                      req.MoveBaseIdxVec(vec_idx),
+                                      req.DataSyncVec(),
+                                      req.ArchiveVec(),
+                                      req.MoveBaseIdxVec(),
                                       req.data_sync_ts_,
                                       recycle_ts,
                                       shard_->EnableMvcc(),
-                                      req.accumulated_scan_cnt_[vec_idx],
+                                      req.accumulated_scan_cnt_,
                                       req.include_persisted_data_,
                                       false,
                                       false,
                                       flush_data_size);
-                    req.accumulated_flush_data_size_[vec_idx] +=
-                        flush_data_size;
+                    req.accumulated_flush_data_size_ += flush_data_size;
 
                     if (export_result.second)
                     {
@@ -6421,22 +6367,22 @@ public:
                     }
                     else if (cce->NeedCkpt())
                     {
-                        uint64_t mem_usage = 0;
+                        uint64_t flush_data_size = 0;
                         auto export_result =
                             ExportForCkpt(cce,
                                           *key,
-                                          req.DataSyncVec(vec_idx),
-                                          req.ArchiveVec(vec_idx),
-                                          req.MoveBaseIdxVec(vec_idx),
+                                          req.DataSyncVec(),
+                                          req.ArchiveVec(),
+                                          req.MoveBaseIdxVec(),
                                           req.data_sync_ts_,
                                           recycle_ts,
                                           shard_->EnableMvcc(),
-                                          req.accumulated_scan_cnt_[vec_idx],
+                                          req.accumulated_scan_cnt_,
                                           false,
                                           false,
                                           false,
-                                          mem_usage);
-                        req.accumulated_flush_data_size_[vec_idx] += mem_usage;
+                                          flush_data_size);
+                        req.accumulated_flush_data_size_ += flush_data_size;
                         if (export_result.second)
                         {
                             is_scan_mem_full = true;
@@ -6464,7 +6410,7 @@ public:
         {
             pause_pos_and_is_drained = {nullptr, true};
             // scan data drained
-            req.SetFinish(vec_idx);
+            req.SetFinish();
             // Access DataSyncScanCc member variable is unsafe after
             // SetFinished(...).
             return false;
@@ -6493,11 +6439,11 @@ public:
             {
                 //  scan memory is full and there are
                 //  data for flush
-                req.scan_heap_is_full_[0] = 1;
-                req.SetFinish(vec_idx);
+                req.scan_heap_is_full_ = 1;
+                req.SetFinish();
                 return false;
             }
-            else if (req.accumulated_scan_cnt_[vec_idx] < req.scan_batch_size_)
+            else if (req.accumulated_scan_cnt_ < req.scan_batch_size_)
             {
                 // Put DataSyncScanCc request into CcQueue again.
                 shard_->Enqueue(&req);
@@ -6505,14 +6451,13 @@ public:
             else
             {
                 // scan data is not drained
-                req.SetFinish(vec_idx);
+                req.SetFinish();
                 return false;
             }
         }
 
         return false;
     }
-#endif
 
     bool Execute(DefragShardHeapCc &req) override
     {
@@ -7422,15 +7367,10 @@ public:
                             nullptr,
                             false,
                             false,
-                            nullptr
-#ifndef RANGE_PARTITION_ENABLED
-                            ,
+                            nullptr,
                             nullptr,
                             false,
-                            false,
-                            shard_->core_id_
-#endif
-                        );
+                            false);
 
                     std::unique_ptr<FlushTaskEntry> flush_task_entry =
                         std::make_unique<FlushTaskEntry>(
@@ -8108,11 +8048,6 @@ public:
 
     bool Execute(UploadBatchSlicesCc &req) override
     {
-#ifndef RANGE_PARTITION_ENABLED
-        assert(false);
-        return true;
-#else
-
         if (!shard_->local_shards_.template AcceptsDirtyRangeData<KeyT>(
                 table_name_, cc_ng_id_, req.RangeId(), req.DirtyVersion()))
         {
@@ -8235,8 +8170,6 @@ public:
             shard_->Enqueue(shard_->LocalCoreId(), &req);
         }
         return false;
-
-#endif
     }
 
     bool Execute(EscalateStandbyCcmCc &req) override
@@ -8284,7 +8217,6 @@ public:
         return true;
     }
 
-#ifdef RANGE_PARTITION_ENABLED
     bool Execute(ScanSliceDeltaSizeCc &req) override
     {
         TX_TRACE_ACTION_WITH_CONTEXT(
@@ -8733,7 +8665,6 @@ public:
 
         return false;
     }
-#endif
 
     bool Execute(ApplyCc &req) override
     {

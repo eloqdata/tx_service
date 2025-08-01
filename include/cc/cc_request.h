@@ -3316,17 +3316,301 @@ public:
     size_t run_count_{0};
 };
 
-struct DataSyncScanCc : public CcRequestBase
+struct HashPartitionDataSyncScanCc : public CcRequestBase
 {
 public:
     // how many pages to scan one time
-#ifdef ON_KEY_OBJECT
-    // Yield more often on redis since any run one round
-    // latency increase cause significant peformance impact.
     static constexpr size_t DataSyncScanBatchSize = 32;
-#else
-    static constexpr size_t DataSyncScanBatchSize = 128;
-#endif
+    enum struct OpType : uint8_t
+    {
+        // For normal scan
+        Normal = 0,
+        // For release read intent on the paused key.
+        Terminated
+    };
+
+    HashPartitionDataSyncScanCc() = delete;
+    HashPartitionDataSyncScanCc(const HashPartitionDataSyncScanCc &) = delete;
+    HashPartitionDataSyncScanCc &operator=(
+        const HashPartitionDataSyncScanCc &) = delete;
+
+    ~HashPartitionDataSyncScanCc() = default;
+
+    HashPartitionDataSyncScanCc(const TableName &table_name,
+                                uint64_t data_sync_ts,
+                                uint64_t node_group_id,
+                                int64_t node_group_term,
+                                size_t scan_batch_size,
+                                uint64_t txn,
+                                bool include_persisted_data,
+                                bool previous_ckpt_ts,
+                                std::function<bool(size_t hash_code)> filter,
+                                uint64_t schema_version = 0)
+        : scan_heap_is_full_(false),
+          table_name_(&table_name),
+          node_group_id_(node_group_id),
+          node_group_term_(node_group_term),
+          data_sync_ts_(data_sync_ts),
+          scan_batch_size_(scan_batch_size),
+          err_(CcErrorCode::NO_ERROR),
+          finished_(false),
+          mux_(),
+          cv_(),
+          include_persisted_data_(include_persisted_data),
+          previous_ckpt_ts_(previous_ckpt_ts),
+          filter_lambda_(filter),
+          schema_version_(schema_version)
+    {
+        tx_number_ = txn;
+        assert(scan_batch_size_ > DataSyncScanBatchSize);
+        data_sync_vec_.resize(scan_batch_size);
+
+        archive_vec_.reserve(scan_batch_size);
+        mv_base_idx_vec_.resize(scan_batch_size);
+
+        pause_pos_ = {nullptr, false};
+        accumulated_scan_cnt_ = 0;
+        accumulated_flush_data_size_ = 0;
+    }
+
+    bool ValidTermCheck()
+    {
+        int64_t cc_ng_term = Sharder::Instance().LeaderTerm(node_group_id_);
+        int64_t standby_node_term = Sharder::Instance().StandbyNodeTerm();
+        int64_t current_term = std::max(cc_ng_term, standby_node_term);
+
+        if (node_group_term_ < 0)
+        {
+            node_group_term_ = current_term;
+        }
+
+        if (current_term < 0 || current_term != node_group_term_)
+        {
+            return false;
+        }
+        else
+        {
+            return true;
+        }
+    }
+
+    // DataSyncScanCc is always stack object and won't be reused, worse, it
+    // might be destructed before Execute returns, so always return false as
+    // callershould never access this object after Execute returns
+    bool Execute(CcShard &ccs) override
+    {
+        if (!ValidTermCheck())
+        {
+            SetError(CcErrorCode::REQUESTED_NODE_NOT_LEADER);
+            return false;
+        }
+        scan_count_++;
+        CcMap *ccm = ccs.GetCcm(*table_name_, node_group_id_);
+        if (ccm == nullptr)
+        {
+            assert(!table_name_->IsMeta());
+            const CatalogEntry *catalog_entry = ccs.InitCcm(
+                *table_name_, node_group_id_, node_group_term_, this);
+            if (catalog_entry == nullptr)
+            {
+                // The local node does not contain the table's schema
+                // instance. The FetchCatalog() method will send an
+                // async request toward the data store to fetch the
+                // catalog. After fetching is finished, this cc request
+                // is re-enqueued for re-execution.
+                return false;
+            }
+            else
+            {
+                if (catalog_entry->schema_ == nullptr)
+                {
+                    // The local node (LocalCcShards) contains a schema
+                    // instance, which indicates that the table has been
+                    // dropped. Returns the request with an error.
+                    SetError(CcErrorCode::REQUESTED_TABLE_NOT_EXISTS);
+                    return false;
+                }
+                ccm = ccs.GetCcm(*table_name_, node_group_id_);
+            }
+        }
+        assert(ccm != nullptr);
+        ccm->Execute(*this);
+        // return false since DataSyncScanCc is not re-used and does not need to
+        // call CcRequestBase::Free
+        return false;
+    }
+
+    bool IsDrained() const
+    {
+        return pause_pos_.second;
+    }
+
+    std::pair<KeyGapLockAndExtraData *, bool> &PausePos()
+    {
+        return pause_pos_;
+    }
+
+    void Wait()
+    {
+        std::unique_lock<std::mutex> lk(mux_);
+        cv_.wait(lk, [this] { return finished_; });
+    }
+
+    void Reset(OpType op_type = OpType::Normal)
+    {
+        std::lock_guard<std::mutex> lk(mux_);
+        finished_ = false;
+        archive_vec_.clear();
+        archive_vec_.reserve(scan_batch_size_);
+        mv_base_idx_vec_.clear();
+        mv_base_idx_vec_.reserve(scan_batch_size_);
+
+        accumulated_scan_cnt_ = 0;
+        accumulated_flush_data_size_ = 0;
+
+        if (scan_heap_is_full_)
+        {
+            // vec has been cleared during ReleaseDataSyncScanHeapCc,
+            // resize to prepared size
+            data_sync_vec_.resize(scan_batch_size_);
+        }
+        err_ = CcErrorCode::NO_ERROR;
+        scan_heap_is_full_ = false;
+        op_type_ = op_type;
+    }
+
+    void SetError(CcErrorCode err)
+    {
+        std::lock_guard<std::mutex> lk(mux_);
+        err_ = err;
+        finished_ = true;
+        cv_.notify_one();
+    }
+
+    void AbortCcRequest(CcErrorCode err_code) override
+    {
+        assert(err_code != CcErrorCode::NO_ERROR);
+        std::lock_guard<std::mutex> lk(mux_);
+        err_ = err_code;
+        finished_ = true;
+        cv_.notify_one();
+    }
+
+    bool IsError()
+    {
+        std::lock_guard<std::mutex> lk(mux_);
+        return err_ != CcErrorCode::NO_ERROR;
+    }
+
+    CcErrorCode ErrorCode()
+    {
+        std::lock_guard<std::mutex> lk(mux_);
+        return err_;
+    }
+
+    void SetFinish()
+    {
+        std::unique_lock<std::mutex> lk(mux_);
+        finished_ = true;
+        cv_.notify_one();
+    }
+
+    uint32_t NodeGroupId()
+    {
+        return node_group_id_;
+    }
+
+    std::vector<FlushRecord> &DataSyncVec()
+    {
+        return data_sync_vec_;
+    }
+
+    std::vector<FlushRecord> &ArchiveVec()
+    {
+        return archive_vec_;
+    }
+
+    std::vector<size_t> &MoveBaseIdxVec()
+    {
+        return mv_base_idx_vec_;
+    }
+
+    int64_t NodeGroupTerm() const
+    {
+        return node_group_term_;
+    }
+
+    void SetNotTruncateLog()
+    {
+        std::lock_guard<std::mutex> lk(mux_);
+        err_ = CcErrorCode::LOG_NOT_TRUNCATABLE;
+    }
+
+    bool IsTerminated() const
+    {
+        return op_type_ == OpType::Terminated;
+    }
+
+    size_t accumulated_scan_cnt_;
+    uint64_t accumulated_flush_data_size_{0};
+    bool scan_heap_is_full_{false};
+    OpType op_type_{OpType::Normal};
+
+    size_t scan_count_{0};
+
+private:
+    const TableName *table_name_{nullptr};
+    uint32_t node_group_id_;
+    int64_t node_group_term_;
+    // Target ts. Collect all data changes committed before this ts into data
+    // sync vec.
+    uint64_t data_sync_ts_;
+    std::vector<FlushRecord> data_sync_vec_;
+    std::vector<FlushRecord> archive_vec_;
+    // Cache the entries to move record from "base" table to "archive" table
+    std::vector<size_t> mv_base_idx_vec_;
+
+    // Position that we left off during last round of ckpt scan.
+    // pause_pos_.first is the key that we stopped at (has not been scanned
+    // though), bool is if this core has finished scanning all keys already.
+    std::pair<KeyGapLockAndExtraData *, bool> pause_pos_;
+    size_t scan_batch_size_;
+
+    CcErrorCode err_{CcErrorCode::NO_ERROR};
+    bool finished_{false};
+    std::mutex mux_;
+    std::condition_variable cv_;
+
+    // True means If no larger version exists, we need to export the data which
+    // commit_ts same as ckpt_ts.
+    bool include_persisted_data_;
+    // Used during regular data sync scan. It is used as a hint to decide if a
+    // page has dirty data since last round of checkpoint. It is guaranteed that
+    // all entries committed before this ts are synced into data store.
+    uint64_t previous_ckpt_ts_;
+    std::function<bool(size_t hash_code)> filter_lambda_;
+    // keep schema vesion after acquire read lock on catalog, to prevent the
+    // concurrency issue with Truncate Table, detail ref to tx issue #1130
+    // If schema_version_ is 0, the check will be bypassed, since this data sync
+    // scan is part of range split which block the schema change
+    // TODO(xxx) general solution for #1130
+    const uint64_t schema_version_{0};
+
+    template <typename KeyT,
+              typename ValueT,
+              bool VersionedRecord,
+              bool RangePartitioned>
+    friend class TemplateCcMap;
+
+    friend std::ostream &operator<<(std::ostream &outs,
+                                    txservice::HashPartitionDataSyncScanCc *r);
+};
+
+struct RangePartitionDataSyncScanCc : public CcRequestBase
+{
+public:
+    // how many pages to scan one time
+    static constexpr size_t DataSyncScanBatchSize = 32;
 
     enum struct OpType : uint8_t
     {
@@ -3336,13 +3620,13 @@ public:
         Terminated
     };
 
-    DataSyncScanCc() = delete;
-    DataSyncScanCc(const DataSyncScanCc &) = delete;
-    DataSyncScanCc &operator=(const DataSyncScanCc &) = delete;
+    RangePartitionDataSyncScanCc() = delete;
+    RangePartitionDataSyncScanCc(const RangePartitionDataSyncScanCc &) = delete;
+    RangePartitionDataSyncScanCc &operator=(const RangePartitionDataSyncScanCc &) = delete;
 
-    ~DataSyncScanCc() = default;
+    ~RangePartitionDataSyncScanCc() = default;
 
-    DataSyncScanCc(
+    RangePartitionDataSyncScanCc(
         const TableName &table_name,
         uint64_t data_sync_ts,
         uint64_t node_group_id,
@@ -3353,16 +3637,10 @@ public:
         const TxKey *target_start_key,
         const TxKey *target_end_key,
         bool include_persisted_data,
-#ifdef RANGE_PARTITION_ENABLED
         bool export_base_table_item = false,
         bool export_base_table_item_only = false,
         StoreRange *store_range = nullptr,
         const std::map<TxKey, int64_t> *old_slices_delta_size = nullptr,
-#else
-        uint64_t previous_ckpt_ts,
-        bool only_one_core,
-        std::function<bool(size_t hash_code)> filter,
-#endif
         uint64_t schema_version = 0)
         : scan_heap_is_full_(false),
           table_name_(&table_name),
@@ -3378,20 +3656,13 @@ public:
           mux_(),
           cv_(),
           include_persisted_data_(include_persisted_data),
-#ifdef RANGE_PARTITION_ENABLED
           export_base_table_item_(export_base_table_item),
           export_base_table_item_only_(export_base_table_item_only),
           store_range_(store_range),
-#else
-          previous_ckpt_ts_(previous_ckpt_ts),
-          only_scan_one_core_(only_one_core),
-          filter_lambda_(filter),
-#endif
           schema_version_(schema_version)
     {
         tx_number_ = txn;
         assert(scan_batch_size_ > DataSyncScanBatchSize);
-#ifdef RANGE_PARTITION_ENABLED
         if (!export_base_table_item_)
         {
             slices_to_scan_.reserve(old_slices_delta_size->size());
@@ -3402,14 +3673,11 @@ public:
                                   std::move(elem.first.GetShallowCopy()));
                           });
         }
-#endif
         for (size_t i = 0; i < core_cnt; i++)
         {
             data_sync_vec_.emplace_back();
             data_sync_vec_.back().resize(scan_batch_size);
-#ifdef RANGE_PARTITION_ENABLED
             if (!export_base_table_item_only_)
-#endif
             {
                 archive_vec_.emplace_back();
                 archive_vec_.back().reserve(scan_batch_size);
@@ -3417,24 +3685,18 @@ public:
                 mv_base_idx_vec_.back().reserve(scan_batch_size);
             }
 
-#ifdef RANGE_PARTITION_ENABLED
             pause_pos_.emplace_back(TxKey(), false);
             if (!export_base_table_item_)
             {
                 assert(slices_to_scan_.size() > 0);
                 curr_slice_it_.emplace_back(slices_to_scan_.begin());
             }
-#else
-            pause_pos_.emplace_back(nullptr, false);
-#endif
             accumulated_scan_cnt_.emplace_back(0);
             accumulated_flush_data_size_.emplace_back(0);
             scan_heap_is_full_.emplace_back(0);
         }
 
-#ifdef RANGE_PARTITION_ENABLED
         slice_ids_.resize(core_cnt_);
-#endif
     }
 
     bool ValidTermCheck()
@@ -3509,11 +3771,7 @@ public:
         return pause_pos_[core_idx].second;
     }
 
-#ifdef RANGE_PARTITION_ENABLED
     std::pair<TxKey, bool> &PausePos(size_t core_idx)
-#else
-    std::pair<KeyGapLockAndExtraData *, bool> &PausePos(size_t core_idx)
-#endif
     {
         return pause_pos_[core_idx];
     }
@@ -3530,9 +3788,7 @@ public:
         unfinished_cnt_ = core_cnt_;
         for (size_t i = 0; i < core_cnt_; i++)
         {
-#ifdef RANGE_PARTITION_ENABLED
             if (!export_base_table_item_only_)
-#endif
             {
                 archive_vec_.at(i).clear();
                 archive_vec_.at(i).reserve(scan_batch_size_);
@@ -3562,9 +3818,7 @@ public:
         --unfinished_cnt_;
         if (unfinished_cnt_ == 0)
         {
-#ifdef RANGE_PARTITION_ENABLED
             UnpinSlices();
-#endif
             cv_.notify_one();
         }
     }
@@ -3577,9 +3831,7 @@ public:
         --unfinished_cnt_;
         if (unfinished_cnt_ == 0)
         {
-#ifdef RANGE_PARTITION_ENABLED
             UnpinSlices();
-#endif
             cv_.notify_one();
         }
     }
@@ -3602,12 +3854,10 @@ public:
         --unfinished_cnt_;
         if (unfinished_cnt_ == 0)
         {
-#ifdef RANGE_PARTITION_ENABLED
             if (err_ != CcErrorCode::NO_ERROR)
             {
                 UnpinSlices();
             }
-#endif
             cv_.notify_one();
         }
     }
@@ -3648,7 +3898,6 @@ public:
         return op_type_ == OpType::Terminated;
     }
 
-#ifdef RANGE_PARTITION_ENABLED
     void UnpinSlices()
     {
         for (size_t i = 0; i < slice_ids_.size(); ++i)
@@ -3677,7 +3926,6 @@ public:
         assert(!export_base_table_item_);
         return slices_to_scan_.end();
     }
-#endif
 
     std::vector<size_t> accumulated_scan_cnt_;
     std::vector<uint64_t> accumulated_flush_data_size_;
@@ -3707,11 +3955,7 @@ private:
     // Position that we left off during last round of ckpt scan.
     // pause_pos_.first is the key that we stopped at (has not been scanned
     // though), bool is if this core has finished scanning all keys already.
-#ifdef RANGE_PARTITION_ENABLED
     std::vector<std::pair<TxKey, bool>> pause_pos_;
-#else
-    std::vector<std::pair<KeyGapLockAndExtraData *, bool>> pause_pos_;
-#endif
     size_t scan_batch_size_;
 
     CcErrorCode err_{CcErrorCode::NO_ERROR};
@@ -3722,7 +3966,6 @@ private:
     // commit_ts same as ckpt_ts.
     bool include_persisted_data_{false};
 
-#ifdef RANGE_PARTITION_ENABLED
     // True means we need to export the data in memory and in kv to ckpt vec.
     // Note: This is only used in range partition.
     bool export_base_table_item_{false};
@@ -3735,14 +3978,6 @@ private:
     std::vector<TxKey> slices_to_scan_;
     // Slice TxKey currently being scanned.
     std::vector<std::vector<TxKey>::const_iterator> curr_slice_it_;
-#else
-    // Used during regular data sync scan. It is used as a hint to decide if a
-    // page has dirty data since last round of checkpoint. It is guaranteed that
-    // all entries committed before this ts are synced into data store.
-    uint64_t previous_ckpt_ts_;
-    bool only_scan_one_core_{false};
-    std::function<bool(size_t hash_code)> filter_lambda_;
-#endif
     // keep schema vesion after acquire read lock on catalog, to prevent the
     // concurrency issue with Truncate Table, detail ref to tx issue #1130
     // If schema_version_ is 0, the check will be bypassed, since this data sync
@@ -3759,7 +3994,7 @@ private:
     friend class TemplateCcMap;
 
     friend std::ostream &operator<<(std::ostream &outs,
-                                    txservice::DataSyncScanCc *r);
+                                    txservice::RangePartitionDataSyncScanCc *r);
 };
 
 struct NegotiateCc : public CcRequestBase
@@ -7930,7 +8165,6 @@ private:
     size_t free_count_{0};
 };
 
-#ifdef RANGE_PARTITION_ENABLED
 struct ScanSliceDeltaSizeCc : public CcRequestBase
 {
     static constexpr size_t ScanBatchSize = 128;
@@ -8356,6 +8590,5 @@ private:
     bool finished_{false};
     CcErrorCode err_code_{CcErrorCode::NO_ERROR};
 };
-#endif
 
 }  // namespace txservice

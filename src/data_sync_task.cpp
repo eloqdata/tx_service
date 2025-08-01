@@ -41,7 +41,6 @@
 namespace txservice
 {
 
-#ifdef RANGE_PARTITION_ENABLED
 DataSyncTask::DataSyncTask(const TableName &table_name,
                            uint32_t ng_id,
                            int64_t ng_term,
@@ -70,25 +69,25 @@ DataSyncTask::DataSyncTask(const TableName &table_name,
       export_base_table_items_(export_base_table_items),
       tx_number_(txn)
 {
+    assert(!table_name_.IsHashPartitioned());
     if (start_key_.KeyPtr() ==
         range_entry->GetRangeInfo()->StartTxKey().KeyPtr())
     {
-        range_id_ = range_entry->GetRangeInfo()->PartitionId();
+        id_ = range_entry->GetRangeInfo()->PartitionId();
     }
     else
     {
-        range_id_ = range_entry_->GetRangeInfo()->GetKeyNewRangeId(start_key_);
+        id_ = range_entry_->GetRangeInfo()->GetKeyNewRangeId(start_key_);
     }
 
     // For a data sync task during range split, we only need to update the ckpt
     // ts if the new range owner is the current node group.
     NodeGroupId range_owner = Sharder::Instance()
                                   .GetLocalCcShards()
-                                  ->GetRangeOwner(range_id_, ng_id)
+                                  ->GetRangeOwner(id_, ng_id)
                                   ->BucketOwner();
     need_update_ckpt_ts_ = range_owner == ng_id;
 }
-#endif
 
 void DataSyncTask::SetFinish()
 {
@@ -124,9 +123,7 @@ void DataSyncTask::SetFinish()
 
                     if (!txservice_skip_wal)
                     {
-#ifndef RANGE_PARTITION_ENABLED
                         if (!is_standby_node_ckpt_)
-#endif
                         {
                             Sharder::Instance()
                                 .GetLogAgent()
@@ -136,7 +133,6 @@ void DataSyncTask::SetFinish()
                         }
                     }
 
-#ifndef RANGE_PARTITION_ENABLED
                     if (!is_standby_node_ckpt_ && Sharder::Instance()
                                                       .GetDataStoreHandler()
                                                       ->IsSharedStorage())
@@ -145,7 +141,6 @@ void DataSyncTask::SetFinish()
                                              node_group_term_,
                                              status_->truncate_log_ts_);
                     }
-#endif
                 }
             }
             else
