@@ -5163,14 +5163,18 @@ public:
 
             if (!resume_from_upsert_kv)
             {
+                const TableName base_table_name{
+                    table_name_->GetBaseTableNameSV(),
+                    TableType::Primary,
+                    table_name_->Engine()};
                 const CatalogEntry *catalog_entry =
-                    ccs.GetCatalog(*table_name_, node_group_id_);
+                    ccs.GetCatalog(base_table_name, node_group_id_);
 
                 if (catalog_entry == nullptr)
                 {
                     //  Fetch catalog
                     ccs.FetchCatalog(
-                        *table_name_, node_group_id_, ng_term, this);
+                        base_table_name, node_group_id_, ng_term, this);
                     return false;
                 }
 
@@ -5208,7 +5212,7 @@ public:
                     {
                         //  Fetch catalog
                         ccs.FetchCatalog(
-                            *table_name_, node_group_id_, ng_term, this);
+                            base_table_name, node_group_id_, ng_term, this);
                         return false;
                     }
 
