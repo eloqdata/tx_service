@@ -46,11 +46,12 @@ public:
     }
 
     /**
-     * @brief flush entries in \@param flush_task to base table or skindex table in
-     * data store, stop and return false if the flush failed after max retry times.
-     * @param flush_task - the flush task to be flushed. Map key is the kv table name,
-     * value is the vector of flush task entries. PutAll only flushes the data_sync_vec_
-     * in each flush task entry.
+     * @brief flush entries in \@param flush_task to base table or skindex table
+     * in data store, stop and return false if the flush failed after max retry
+     * times.
+     * @param flush_task - the flush task to be flushed. Map key is the kv table
+     * name, value is the vector of flush task entries. PutAll only flushes the
+     * data_sync_vec_ in each flush task entry.
      * @return whether all entries are written to data store successfully
      */
     bool PutAll(std::unordered_map<
@@ -256,7 +257,7 @@ public:
         std::unordered_map<
             std::string_view,
             std::vector<std::unique_ptr<txservice::FlushTaskEntry>>>
-                &flush_task) override
+            &flush_task) override
     {
         assert(false);
         return true;

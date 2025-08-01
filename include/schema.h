@@ -245,7 +245,8 @@ struct TableKeySchemaTs
             std::vector<std::string> sk_iter(sk_b, sk_e);
             for (auto it = sk_iter.begin(); it != sk_iter.end(); ++it)
             {
-                txservice::TableType table_type = txservice::TableType::Secondary;
+                txservice::TableType table_type =
+                    txservice::TableType::Secondary;
                 if (it->find(txservice::UNIQUE_INDEX_NAME_PREFIX) !=
                     std::string::npos)
                 {
