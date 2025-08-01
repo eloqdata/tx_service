@@ -359,7 +359,11 @@ public:
      */
     std::pair<size_t, bool> Clean();
 
-    bool FlushEntryForTest(std::unordered_map<std::string_view, std::vector<std::unique_ptr<FlushTaskEntry>>> &flush_task_entries, bool only_archives);
+    bool FlushEntryForTest(
+        std::unordered_map<std::string_view,
+                           std::vector<std::unique_ptr<FlushTaskEntry>>>
+            &flush_task_entries,
+        bool only_archives);
 
     void NotifyCkpt(bool request_ckpt = true);
 
@@ -813,6 +817,14 @@ public:
     uint64_t LocalMinSiTxStartTs();
     uint64_t GlobalMinSiTxStartTs() const;
 
+    // Active blocking transaction management functions
+    void UpsertActiveBlockingTx(TxNumber txn, uint64_t timestamp);
+    void RemoveActiveBlockingTx(TxNumber txn);
+    bool FindActiveBlockingTx(TxNumber txn) const;
+    uint64_t GetActiveBlockingTx(TxNumber txn) const;
+    void ClearActiveBlockingTxs();
+    size_t ActiveBlockingTxSize() const;
+
     // shard level memory limit.
     uint64_t memory_limit_{0};
     // shard level log limit. Note that RocksDB engine based log service
@@ -1166,6 +1178,12 @@ private:
 
     // free invalid cces after 2 hours.
     static const uint64_t invalid_cce_expire_time_ = 7200000000;
+
+    // Keep track of all active blocking transactions(e.g. BLMOVE, BLMPOP) whose
+    // abort ApplyCc fails to discard the corresponding blocking
+    // ApplyCc(exec_rst == ExecResult::Block), uint64_t here is the timestamp
+    // when the transaction was inserted into this map.
+    std::unordered_map<TxNumber, uint64_t> active_blocking_txs_;
 
     friend class LocalCcHandler;
     friend class LocalCcShards;

@@ -2030,6 +2030,44 @@ void CcShard::ClearActvieSiTxs()
     min_si_tx_start_ts_.store(Now());
 }
 
+void CcShard::UpsertActiveBlockingTx(TxNumber txn, uint64_t timestamp)
+{
+    active_blocking_txs_[txn] = timestamp;
+}
+
+void CcShard::RemoveActiveBlockingTx(TxNumber txn)
+{
+    active_blocking_txs_.erase(txn);
+}
+
+bool CcShard::FindActiveBlockingTx(TxNumber txn) const
+{
+    auto it = active_blocking_txs_.find(txn);
+    if (it != active_blocking_txs_.end())
+    {
+        return true;
+    }
+    return false;
+}
+
+uint64_t CcShard::GetActiveBlockingTx(TxNumber txn) const
+{
+    auto it = active_blocking_txs_.find(txn);
+    assert(it != active_blocking_txs_.end());
+
+    return it->second;
+}
+
+void CcShard::ClearActiveBlockingTxs()
+{
+    active_blocking_txs_.clear();
+}
+
+size_t CcShard::ActiveBlockingTxSize() const
+{
+    return active_blocking_txs_.size();
+}
+
 void CcShard::UpdateLocalMinSiTxStartTs()
 {
     uint64_t now_ts = Now();
