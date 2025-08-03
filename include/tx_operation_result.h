@@ -281,6 +281,8 @@ struct RemoteScanSliceCache
         trailing_cnt_ = 0;
         mem_max_bytes_ = 0;
         shard_cnt_ = shard_cnt;
+        archive_positions_.clear();
+        archive_records_.clear();
     }
 
     void RemoveLast()

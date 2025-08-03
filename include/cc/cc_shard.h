@@ -714,7 +714,7 @@ public:
         NodeGroupId cc_ng_id,
         int64_t cc_ng_term,
         CcRequestBase *requester,
-        int32_t range_id,
+        int32_t partition_id,
         bool fetch_from_primary = false,
         uint32_t key_shard_code = 0,
         uint64_t snapshot_read_ts = 0,
@@ -731,7 +731,7 @@ public:
         CcRequestBase *requester,
         size_t tuple_idx,
         OnFetchedSnapshot backfill_func,
-        int32_t range_id = -1);
+        int32_t partition_id);
 
     void RemoveFetchRecordRequest(LruEntry *cce);
 
