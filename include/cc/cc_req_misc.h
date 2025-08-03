@@ -532,7 +532,7 @@ public:
                   CcShard &ccs,
                   NodeGroupId cc_ng_id,
                   int64_t cc_ng_term,
-                  int32_t range_id_ = -1,
+                  int32_t partition_id,
                   bool fetch_from_primary = false,
                   uint64_t snapshot_read_ts = 0,
                   bool only_fetch_archives = false);
@@ -560,8 +560,7 @@ public:
     RecordStatus rec_status_{RecordStatus::Unknown};
     std::string rec_str_;
     int error_code_{0};
-    // Only used in range partition
-    int range_id_;
+    int partition_id_;
     bool fetch_from_primary_{false};
 
     // If set snapshot_read_ts_ (not equal 0), the snapshot_read_ts_ will be
@@ -601,7 +600,7 @@ public:
                CcRequestBase *requester,
                size_t tuple_idx,
                OnFetchedSnapshot backfill_func,
-               int32_t range_id = -1);
+               int32_t partition_id);
 
     bool ValidTermCheck();
 
@@ -639,8 +638,7 @@ public:
     uint64_t rec_ts_{0};
     RecordStatus rec_status_{RecordStatus::Unknown};
     int error_code_{0};
-    // Only used in range partition
-    int range_id_;
+    int partition_id_;
 
     // Used to fetch record from archives table.
     uint64_t snapshot_read_ts_{0};

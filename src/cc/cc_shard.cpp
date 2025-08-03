@@ -1459,7 +1459,7 @@ store::DataStoreHandler::DataStoreOpStatus CcShard::FetchRecord(
     NodeGroupId cc_ng_id,
     int64_t cc_ng_term,
     CcRequestBase *requester,
-    int32_t range_id,
+    int32_t partition_id,
     bool fetch_from_primary,
     uint32_t key_shard_code,
     uint64_t snapshot_read_ts,
@@ -1473,7 +1473,7 @@ store::DataStoreHandler::DataStoreOpStatus CcShard::FetchRecord(
                                                  *this,
                                                  cc_ng_id,
                                                  cc_ng_term,
-                                                 range_id,
+                                                 partition_id,
                                                  fetch_from_primary,
                                                  snapshot_read_ts,
                                                  only_fetch_archives);
@@ -1571,7 +1571,7 @@ store::DataStoreHandler::DataStoreOpStatus CcShard::FetchSnapshot(
     CcRequestBase *requester,
     size_t tuple_idx,
     OnFetchedSnapshot backfill_func,
-    int32_t range_id)
+    int32_t partition_id)
 {
     FetchSnapshotCc *fetch_cc = fetch_snapshot_cc_pool_.NextRequest();
     fetch_cc->Reset(&table_name,
@@ -1585,7 +1585,7 @@ store::DataStoreHandler::DataStoreOpStatus CcShard::FetchSnapshot(
                     requester,
                     tuple_idx,
                     backfill_func,
-                    range_id);
+                    partition_id);
 
     store::DataStoreHandler::DataStoreOpStatus res =
         local_shards_.store_hd_->FetchRecord(nullptr, fetch_cc);

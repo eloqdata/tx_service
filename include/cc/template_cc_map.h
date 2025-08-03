@@ -1995,21 +1995,9 @@ public:
                 const TableRangeEntry *range_entry =
                     shard_->GetTableRangeEntry(table_name_, cc_ng_id_, tx_key);
                 int32_t part_id = range_entry->GetRangeInfo()->PartitionId();
-                auto fetch_ret_status = shard_->FetchRecord(
-                    this->table_name_,
-                    this->table_schema_,
-                    TxKey(look_key),
-                    cce,
-                    this->cc_ng_id_,
-                    ng_term,
-                    &req,
-                    part_id,
-                    false,
-                    0,
-                    req.ReadTimestamp(),
-                    v_rec.payload_status_ == RecordStatus::ArchiveVersionMiss);
 #else
                 int32_t part_id = (look_key->Hash() >> 10) & 0x3FF;
+#endif
                 auto fetch_ret_status = shard_->FetchRecord(
                     this->table_name_,
                     this->table_schema_,
@@ -2024,18 +2012,11 @@ public:
                     req.ReadTimestamp(),
                     v_rec.payload_status_ == RecordStatus::ArchiveVersionMiss);
 
-#endif
-                if (fetch_ret_status ==
-                    store::DataStoreHandler::DataStoreOpStatus::Retry)
-                {
-                    // Yield and retry
-                    shard_->Enqueue(shard_->core_id_, &req);
-                }
-                else
-                {
-                    req.SetBlockType(ReadCc::BlockByFetch);
-                    req.SetCcePtr(cce);
-                }
+                assert(fetch_ret_status ==
+                       store::DataStoreHandler::DataStoreOpStatus::Success);
+                (void) fetch_ret_status;
+                req.SetBlockType(ReadCc::BlockByFetch);
+                req.SetCcePtr(cce);
 
                 return false;
             }
@@ -4329,11 +4310,10 @@ public:
                         &BackfillSnapshotForScanSlice<KeyT, ValueT>,
                         req.RangeId());
 
-                    if (fetch_ret_status ==
-                        store::DataStoreHandler::DataStoreOpStatus::Success)
-                    {
-                        req.IncreaseWaitForSnapshotCnt(shard_->core_id_);
-                    }
+                    assert(fetch_ret_status ==
+                           store::DataStoreHandler::DataStoreOpStatus::Success);
+                    (void) fetch_ret_status;
+                    req.IncreaseWaitForSnapshotCnt(shard_->core_id_);
                 }
             }
             else
@@ -4380,11 +4360,10 @@ public:
                         &BackfillSnapshotForScanSlice<KeyT, ValueT>,
                         req.RangeId());
 
-                    if (fetch_ret_status ==
-                        store::DataStoreHandler::DataStoreOpStatus::Success)
-                    {
-                        req.IncreaseWaitForSnapshotCnt(shard_->core_id_);
-                    }
+                    assert(fetch_ret_status ==
+                           store::DataStoreHandler::DataStoreOpStatus::Success);
+                    (void) fetch_ret_status;
+                    req.IncreaseWaitForSnapshotCnt(shard_->core_id_);
                 }
             }
 
@@ -4510,11 +4489,11 @@ public:
                             &BackfillSnapshotForScanSlice<KeyT, ValueT>,
                             req.RangeId());
 
-                        if (fetch_ret_status ==
-                            store::DataStoreHandler::DataStoreOpStatus::Success)
-                        {
-                            req.IncreaseWaitForSnapshotCnt(shard_->core_id_);
-                        }
+                        assert(fetch_ret_status ==
+                               store::DataStoreHandler::DataStoreOpStatus::
+                                   Success);
+                        (void) fetch_ret_status;
+                        req.IncreaseWaitForSnapshotCnt(shard_->core_id_);
                     }
                 }
                 else
@@ -4561,11 +4540,11 @@ public:
                             &BackfillSnapshotForScanSlice<KeyT, ValueT>,
                             req.RangeId());
 
-                        if (fetch_ret_status ==
-                            store::DataStoreHandler::DataStoreOpStatus::Success)
-                        {
-                            req.IncreaseWaitForSnapshotCnt(shard_->core_id_);
-                        }
+                        assert(fetch_ret_status ==
+                               store::DataStoreHandler::DataStoreOpStatus::
+                                   Success);
+                        (void) fetch_ret_status;
+                        req.IncreaseWaitForSnapshotCnt(shard_->core_id_);
                     }
                 }
             }

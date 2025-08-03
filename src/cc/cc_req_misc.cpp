@@ -761,7 +761,7 @@ FetchRecordCc::FetchRecordCc(const TableName *tbl_name,
                              CcShard &ccs,
                              NodeGroupId cc_ng_id,
                              int64_t cc_ng_term,
-                             int32_t range_id,
+                             int32_t partition_id,
                              bool fetch_from_primary,
                              uint64_t snapshot_read_ts,
                              bool only_fetch_archives)
@@ -778,7 +778,7 @@ FetchRecordCc::FetchRecordCc(const TableName *tbl_name,
       tx_key_(std::move(tx_key)),
       cce_(cce),
       lock_(cce->GetKeyGapLockAndExtraData()),
-      range_id_(range_id),
+      partition_id_(partition_id),
       fetch_from_primary_(fetch_from_primary),
       snapshot_read_ts_(snapshot_read_ts),
       only_fetch_archives_(only_fetch_archives)
@@ -914,7 +914,7 @@ void FetchSnapshotCc::Reset(const TableName *tbl_name,
                             CcRequestBase *requester,
                             size_t tuple_idx,
                             OnFetchedSnapshot backfill_func,
-                            int32_t range_id)
+                            int32_t partition_id)
 
 {
     ccs_ = &ccs;
@@ -930,7 +930,7 @@ void FetchSnapshotCc::Reset(const TableName *tbl_name,
         table_schema_->GetKVCatalogInfo()->GetKvTableName(table_name_);
 #endif
     tx_key_ = std::move(tx_key);
-    range_id_ = range_id;
+    partition_id_ = partition_id;
     snapshot_read_ts_ = snapshot_read_ts;
     only_fetch_archives_ = only_fetch_archive;
     requester_ = requester;
