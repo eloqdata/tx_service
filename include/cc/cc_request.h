@@ -876,14 +876,6 @@ struct PostWriteAllCc
     : public TemplatedCcRequest<PostWriteAllCc, PostProcessResult>
 {
 public:
-    enum MiniStage
-    {
-        Init,
-        ModifyState,
-        ReleaseLock,
-    };
-
-public:
     PostWriteAllCc() = default;
     PostWriteAllCc(const PostWriteAllCc &rhs) = delete;
     PostWriteAllCc(PostWriteAllCc &&rhs) = delete;

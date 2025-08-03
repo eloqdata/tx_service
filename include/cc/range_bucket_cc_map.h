@@ -217,6 +217,11 @@ public:
 
         assert(req.CommitTs() != 0);
 
+        if (req.FirstPhaseFinished())
+        {
+            return TemplateCcMap::Execute(req);
+        }
+
         if (req.Key() != nullptr)
         {
             // Local request
