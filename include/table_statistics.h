@@ -21,8 +21,6 @@
  */
 #pragma once
 
-#include <absl/container/btree_set.h>
-
 #include <algorithm>
 #include <atomic>
 #include <cassert>
@@ -87,6 +85,7 @@ public:
                             NodeGroupId ng_id,
                             TableStatistics<KeyT> *statistics)
         : table_or_index_name_(table_or_index_name),
+          leader_core_(Statistics::LeaderCore(*table_or_index_name)),
           ng_id_(ng_id),
           cc_shards_var_(Sharder::Instance().GetLocalCcShardsCount()),
           sample_pool_(sample_pool_capacity),
@@ -99,6 +98,7 @@ public:
                             const SamplePoolParam<KeyT> &param,
                             TableStatistics<KeyT> *statistics)
         : table_or_index_name_(table_or_index_name),
+          leader_core_(Statistics::LeaderCore(*table_or_index_name)),
           ng_id_(ng_id),
           cc_shards_var_(Sharder::Instance().GetLocalCcShardsCount()),
           sample_pool_(param.sample_keys_, sample_pool_capacity),
@@ -113,8 +113,9 @@ public:
      * TemplateCcMapSamplePool into unordered_map, move-constructor or
      * move-assignment is required.
      */
-    TemplateCcMapSamplePool(TemplateCcMapSamplePool &&rhs)
+    TemplateCcMapSamplePool(TemplateCcMapSamplePool &&rhs) noexcept
         : table_or_index_name_(rhs.table_or_index_name_),
+          leader_core_(rhs.leader_core_),
           ng_id_(rhs.ng_id_),
           records_(rhs.records_.load(std::memory_order_acquire)),
           cc_shards_var_(std::move(rhs.cc_shards_var_)),
@@ -122,10 +123,11 @@ public:
     {
     }
 
-    TemplateCcMapSamplePool &operator=(TemplateCcMapSamplePool &&rhs)
+    TemplateCcMapSamplePool &operator=(TemplateCcMapSamplePool &&rhs) noexcept
     {
         if (this != &rhs)
         {
+            assert(*table_or_index_name_ == *rhs.table_or_index_name_);
             table_or_index_name_ = rhs.table_or_index_name_;
             ng_id_ = rhs.ng_id_;
             cc_shards_var_ = std::move(rhs.cc_shards_var_);
@@ -163,8 +165,7 @@ public:
 
         bool on_all =
             RunOnAllCcShards(records_.load(std::memory_order_acquire));
-        bool on_leader =
-            Statistics::LeaderCore(*table_or_index_name_) == ccs.core_id_;
+        bool on_leader = leader_core_ == ccs.core_id_;
         if (on_all || on_leader)
         {
             // As long as there is no contention, there are no system calls
@@ -232,8 +233,7 @@ public:
 
         bool on_all =
             RunOnAllCcShards(records_.load(std::memory_order_acquire));
-        bool on_leader =
-            Statistics::LeaderCore(*table_or_index_name_) == ccs.core_id_;
+        bool on_leader = leader_core_ == ccs.core_id_;
         if (on_all || on_leader)
         {
             // As long as there is no contention, there are no system calls
@@ -511,6 +511,8 @@ private:
     // Points to key of index_sample_pool_map_.
     const TableName *table_or_index_name_;
 
+    const uint16_t leader_core_;
+
     NodeGroupId ng_id_{0};
 
     // Table records sharding to the node group.
@@ -548,10 +550,9 @@ public:
     {
     }
 
-    IndexDistribution(
-        const KeySchema *key_schema,
-        uint64_t records,
-        const absl::btree_set<const KeyT *, PtrLessThan<KeyT>> &keys)
+    IndexDistribution(const KeySchema *key_schema,
+                      uint64_t records,
+                      const std::vector<const KeyT *> &keys)
         : records_(std::max(records, keys.size())),
           distribution_steps_(keys),
           rec_per_key_(key_schema->ExtendKeyParts(), 0.0)
@@ -594,7 +595,7 @@ public:
 
     void Rebuild(const KeySchema *key_schema,
                  uint64_t records,
-                 const absl::btree_set<const KeyT *, PtrLessThan<KeyT>> &keys)
+                 const std::vector<const KeyT *> &keys)
     {
         std::unique_lock<std::shared_mutex> ulk(shared_mutex_);
         records_.store(std::max(records, keys.size()),
@@ -611,9 +612,8 @@ public:
 
 private:
     // The algorithm is modified from rocksdb/Rdb_tbl_card_coll::ProcessKey()
-    void CalRecordsPerKey(
-        const KeySchema *key_schema,
-        const absl::btree_set<const KeyT *, PtrLessThan<KeyT>> &sample_keys)
+    void CalRecordsPerKey(const KeySchema *key_schema,
+                          const std::vector<const KeyT *> &sample_keys)
     {
         size_t key_parts = key_schema->ExtendKeyParts();
         std::vector<size_t> distinct_keys_per_prefix(key_parts, 0);
@@ -1089,16 +1089,17 @@ public:
                              const KeySchema *key_schema)
     {
         uint64_t records = 0;
-        absl::btree_set<const KeyT *, PtrLessThan<KeyT>> keys;
-        for (const auto &[ng_id, ccmap_sample_pool] :
-             index_sample_pool_map_.at(table_or_index_name))
+        std::vector<const std::vector<KeyT> *> vecs;
+        const NodeGroupSamplePoolMap &ng_sample_pool_map =
+            index_sample_pool_map_.at(table_or_index_name);
+        vecs.reserve(ng_sample_pool_map.size());
+        for (const auto &[ng, ccmap_sample_pool] : ng_sample_pool_map)
         {
             records += ccmap_sample_pool.Records();
-            for (const KeyT &key : ccmap_sample_pool.SampleKeys())
-            {
-                keys.insert(&key);
-            }
+            vecs.push_back(&ccmap_sample_pool.SampleKeys());
         }
+
+        std::vector<const KeyT *> keys = MergeSort(vecs);
 
         index_distribution_map_.at(table_or_index_name)
             .Rebuild(key_schema, records, keys);
@@ -1207,25 +1208,21 @@ private:
     void InitDistribution(const TableName &table_or_index_name,
                           const KeySchema *key_schema)
     {
-        absl::btree_set<const KeyT *, PtrLessThan<KeyT>> index_sample_keys;
-        uint64_t index_total_keys = 0;
-
-        for (const auto &[ng_id, ccmap_sample_pool] :
-             index_sample_pool_map_.at(table_or_index_name))
+        uint64_t records = 0;
+        std::vector<const std::vector<KeyT> *> vecs;
+        const NodeGroupSamplePoolMap &ng_sample_pool_map =
+            index_sample_pool_map_.at(table_or_index_name);
+        vecs.reserve(ng_sample_pool_map.size());
+        for (const auto &[ng_id, ccmap_sample_pool] : ng_sample_pool_map)
         {
-            const std::vector<KeyT> &sample_keys =
-                ccmap_sample_pool.SampleKeys();
-            for (const KeyT &key : sample_keys)
-            {
-                index_sample_keys.insert(&key);
-            }
-            index_total_keys += ccmap_sample_pool.Records();
+            records += ccmap_sample_pool.Records();
+            vecs.push_back(&ccmap_sample_pool.SampleKeys());
         }
 
-        index_distribution_map_.try_emplace(table_or_index_name,
-                                            key_schema,
-                                            index_total_keys,
-                                            index_sample_keys);
+        std::vector<const KeyT *> keys = MergeSort(vecs);
+
+        index_distribution_map_.try_emplace(
+            table_or_index_name, key_schema, records, keys);
     }
 
     // Get value of updated_since_sync_, and set it to false atomically.
@@ -1361,7 +1358,7 @@ private:
     // Deliver task to tx_processor to avoid lock contention.
     void RunOnBindingCcShard(Task task) const
     {
-        auto core_idx = LeaderCore(base_table_name_);
+        uint16_t core_idx = LeaderCore(base_table_name_);
 
         WaitableCc cc_req(std::move(task));
         Sharder::Instance().GetLocalCcShards()->EnqueueCcRequest(core_idx,
@@ -1519,6 +1516,71 @@ private:
                                     .at(old_ng_id)
                                     .Records();
         return ng_key_count / ng_range_count;
+    }
+
+private:
+    static std::vector<const KeyT *> MergeSort(
+        const std::vector<const std::vector<KeyT> *> &vecs)
+    {
+        struct Input
+        {
+            explicit Input(const std::vector<KeyT> *vec) : vec(vec), off(0)
+            {
+            }
+
+            const std::vector<KeyT> *vec;
+            size_t off;
+        };
+
+        struct PQEntry
+        {
+            PQEntry(const KeyT *key, Input input) : key(key), input(input)
+            {
+            }
+
+            bool operator>(const PQEntry &that) const
+            {
+                return PtrLessThan<KeyT>{}(that.key, key);
+            }
+
+            const KeyT *key;
+            Input input;
+        };
+
+        using PQ = std::priority_queue<PQEntry,
+                                       std::vector<PQEntry>,
+                                       std::greater<PQEntry>>;
+
+        PQ pq;
+        size_t total = 0;
+        std::vector<const KeyT *> output;
+        for (const std::vector<KeyT> *vec : vecs)
+        {
+            total += vec->size();
+            if (!vec->empty())
+            {
+                pq.emplace(&vec->front(), Input(vec));
+            }
+        }
+        output.reserve(total);
+
+        while (!pq.empty())
+        {
+            const PQEntry &entry = pq.top();
+            if (output.empty() || *output.back() != *entry.key)
+            {
+                output.push_back(entry.key);
+            }
+            Input input = entry.input;
+            pq.pop();
+            if (input.off < input.vec->size())
+            {
+                const KeyT &key = input.vec->at(++input.off);
+                pq.emplace(&key, input);
+            }
+        }
+
+        return output;
     }
 
 private:
