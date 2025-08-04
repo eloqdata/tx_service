@@ -613,7 +613,8 @@ void UpsertTableIndexOp::Forward(TransactionExecution *txm)
                 ForceToFinish(txm);
             }
         }
-        else if (op_type_ == OperationType::AddIndex)
+        else if ((op_type_ == OperationType::AddIndex &&
+                  txm->CommitTs() != tx_op_failed_ts_))
         {
             if (txm->TxStatus() == TxnStatus::Recovering &&
                 Sharder::Instance().CandidateLeaderTerm(txm->TxCcNodeId()) > 0)

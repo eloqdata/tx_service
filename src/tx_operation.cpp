@@ -2771,6 +2771,10 @@ void UpsertTableOp::Forward(TransactionExecution *txm)
                             const TableName &table_name = table_key_.Name();
 #ifdef RANGE_PARTITION_ENABLED
                             // Update sequence table about the range id info.
+                            std::vector<TableName> index_names =
+                                op_type_ == OperationType::CreateTable
+                                    ? catalog_rec_.DirtySchema()->IndexNames()
+                                    : catalog_rec_.Schema()->IndexNames();
                             if (op_type_ == OperationType::CreateTable ||
                                 op_type_ == OperationType::TruncateTable)
                             {
@@ -2779,11 +2783,41 @@ void UpsertTableOp::Forward(TransactionExecution *txm)
                                         table_name);
                                 succ = Sequences::InitIdOfTableRangePartition(
                                     table_name, init_range_id);
+
+                                // secondary index
+                                if (succ && index_names.size() > 0)
+                                {
+                                    succ = std::all_of(
+                                        index_names.begin(),
+                                        index_names.end(),
+                                        [](const TableName &index_name)
+                                        {
+                                            int32_t init_range_id = Sequences::
+                                                InitialRangePartitionIdOf(
+                                                    index_name);
+                                            return Sequences::
+                                                InitIdOfTableRangePartition(
+                                                    index_name, init_range_id);
+                                        });
+                                }
                             }
                             else if (op_type_ == OperationType::DropTable)
                             {
                                 succ = Sequences::DeleteSequence(
                                     table_name, SequenceType::RangePartitionId);
+
+                                if (succ && index_names.size() > 0)
+                                {
+                                    succ = std::all_of(
+                                        index_names.begin(),
+                                        index_names.end(),
+                                        [](const TableName &index_name)
+                                        {
+                                            return Sequences::DeleteSequence(
+                                                index_name,
+                                                SequenceType::RangePartitionId);
+                                        });
+                                }
                             }
 #endif
 
