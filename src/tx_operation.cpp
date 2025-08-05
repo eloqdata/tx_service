@@ -5300,14 +5300,7 @@ void BroadcastStatisticsOp::Forward(TransactionExecution *txm)
 ObjectCommandOp::ObjectCommandOp(
     TransactionExecution *txm,
     CcHandlerResult<ReadKeyResult> *lock_range_bucket_result)
-    : hd_result_(txm)
-#ifdef RANGE_PARTITION_ENABLED
-      ,
-      lock_range_result_(lock_range_bucket_result)
-#else
-      ,
-      lock_bucket_result_(lock_range_bucket_result)
-#endif
+    : hd_result_(txm), lock_bucket_result_(lock_range_bucket_result)
 {
     TX_TRACE_ASSOCIATE(this, &hd_result_);
 }
@@ -5325,14 +5318,9 @@ void ObjectCommandOp::Reset(const TableName *table_name,
     hd_result_.Value().Reset();
     auto_commit_ = auto_commit;
     always_redirect_ = always_redirect;
-#ifdef RANGE_PARTITION_ENABLED
-    lock_range_result_->Value().Reset();
-    lock_range_result_->Reset();
-#else
     lock_bucket_result_->Value().Reset();
     lock_bucket_result_->Reset();
     forward_key_shard_ = UINT32_MAX;
-#endif
     catalog_read_success_ = false;
 }
 
@@ -5370,34 +5358,6 @@ void ObjectCommandOp::Forward(TransactionExecution *txm)
             return;
         }
 #endif
-
-#ifdef RANGE_PARTITION_ENABLED
-        // Just returned from LockReadRangeOp, check lock_range_result_.
-        assert(lock_range_result_->IsFinished());
-        if (lock_range_result_->IsError())
-        {
-            // There is an error when getting the input key's range. The
-            // read operation is set to be errored.
-            hd_result_.SetError(lock_range_result_->ErrorCode());
-
-            bool force_error = hd_result_.ForceError();
-            assert(force_error);
-            (void) force_error;
-
-            txm->PostProcess(*this);
-            return;
-        }
-        // Need to make sure current node is still leader since we will visit
-        // bucket meta data which is only valid if current node is still ng
-        // leader.
-        if (!txm->CheckLeaderTerm())
-        {
-            hd_result_.SetError(CcErrorCode::TX_NODE_NOT_LEADER);
-            hd_result_.ForceError();
-            txm->PostProcess(*this);
-            return;
-        }
-#else
         // Just returned from lock_bucket_op_, check lock_bucket_result_.
         assert(lock_bucket_result_->IsFinished());
         if (lock_bucket_result_->IsError())
@@ -5420,7 +5380,6 @@ void ObjectCommandOp::Forward(TransactionExecution *txm)
             return;
         }
 
-#endif
         txm->Process(*this);
     }
 

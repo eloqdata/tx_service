@@ -554,11 +554,9 @@ private:
         command_id_.fetch_add(1, std::memory_order_relaxed);
     }
 
-#ifndef RANGE_PARTITION_ENABLED
     const BucketInfo *FastToGetBucket(uint16_t bucket_id);
 
     void ClearCachedBucketInfos();
-#endif
 
     void ReleaseCatalogsRead();
 
@@ -694,11 +692,9 @@ private:
     InitTxnOperation init_txn_;
 
     // Execution phase.
-#ifdef RANGE_PARTITION_ENABLED
+    CcHandlerResult<ReadKeyResult> lock_range_bucket_result_;
     ReadLocalOperation lock_range_op_;
     RangeRecord range_rec_;
-    CcHandlerResult<ReadKeyResult> lock_range_result_;
-#else
     // TODO(lzx): decrease these member fields.
     ReadLocalOperation lock_bucket_op_;
     RangeBucketKey bucket_key_;
@@ -706,13 +702,11 @@ private:
     // because ReadLocalOperation::key_ is a TxKey pointer.
     TxKey bucket_tx_key_;
     RangeBucketRecord bucket_rec_;
-    CcHandlerResult<ReadKeyResult> lock_bucket_result_;
     // Cache locked bucket infos: {bucket_id->BucketInfo*}
     std::unordered_map<uint16_t, const BucketInfo *> locked_buckets_;
     // Fast path to fetch bucket if no bucket is migrating.
     const std::unordered_map<uint16_t, std::unique_ptr<BucketInfo>>
         *all_bucket_infos_{nullptr};
-#endif
     ReadOperation read_;
     ScanOpenOperation scan_open_;
     ScanNextOperation scan_next_;
@@ -740,12 +734,9 @@ private:
     MultiObjectCommandOp multi_obj_cmd_;
 
     // Committing phase.
-#ifdef RANGE_PARTITION_ENABLED
     LockWriteRangesOp lock_write_ranges_;
-#else
     LockWriteBucketsOp lock_write_buckets_;
     CmdForwardAcquireWriteOp cmd_forward_write_;
-#endif
     AcquireWriteOperation acquire_write_;
     CatalogAcquireAllOp catalog_acquire_all_;
     SetCommitTsOperation set_ts_;
@@ -781,10 +772,8 @@ private:
     friend struct CompositeTransactionOperation;
     friend struct ReadOperation;
     friend struct ReadLocalOperation;
-#ifdef RANGE_PARTITION_ENABLED
     friend struct UnlockReadRangeOperation;
     friend struct LockReadRangesOp;
-#endif
     friend struct ReadOutsideOperation;
     friend struct LockWriteRangesOp;
     friend struct LockWriteBucketsOp;

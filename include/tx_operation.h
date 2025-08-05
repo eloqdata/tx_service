@@ -1119,14 +1119,10 @@ struct ObjectCommandOp : TransactionOperation
 
     bool auto_commit_{};
     bool always_redirect_{};
-#ifdef RANGE_PARTITION_ENABLED
-    CcHandlerResult<ReadKeyResult> *lock_range_result_;
-#else
     // TODO(lzx): remove "lock_bucket_result_" and "lock_range_result_", just
     // use TxExecution::lock_bucket_result_ to set lock_bucket_op_->hd_result_.
     CcHandlerResult<ReadKeyResult> *lock_bucket_result_;
     uint32_t forward_key_shard_{UINT32_MAX};
-#endif
     bool catalog_read_success_{};
 };
 
@@ -1160,18 +1156,10 @@ struct MultiObjectCommandOp : TransactionOperation
     // The op is blocking when running block commands
     bool is_block_command_;
 
-#ifdef RANGE_PARTITION_ENABLED
-    // The current position of TxKey* to get key_shard_code in
-    // ReadLocalOperation
-    size_t range_lock_cur_{0};
-    std::vector<uint32_t> vct_key_shard_code_;
-    CcHandlerResult<ReadKeyResult> *lock_range_result_;
-#else
     size_t bucket_lock_cur_{0};
     CcHandlerResult<ReadKeyResult> *lock_bucket_result_;
     // [{key shard code, forward key shard code}, ...]
     std::vector<std::pair<uint32_t, uint32_t>> vct_key_shard_code_;
-#endif
     bool catalog_read_success_{};
 };
 

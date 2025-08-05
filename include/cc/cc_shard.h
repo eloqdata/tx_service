@@ -1140,7 +1140,7 @@ private:
 
     // Catalog handler which is used to execute catalog related callback
     // function at runtime side.
-    CatalogFactory *const catalog_factory_;
+    CatalogFactory *const catalog_factory_[4];
 
     SystemHandler *const system_handler_;
 

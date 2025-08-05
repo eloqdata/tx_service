@@ -2874,7 +2874,6 @@ void LocalCcShards::DataSyncWorker(size_t worker_idx)
 
 void LocalCcShards::PostProcessRangePartitionDataSyncTask(
     std::shared_ptr<DataSyncTask> task,
-    const TableSchema *table_schema,
     TransactionExecution *data_sync_txm,
     DataSyncTask::CkptErrorCode err,
     bool is_scan_task)
@@ -3669,7 +3668,6 @@ void LocalCcShards::DataSyncForRangePartition(
 
             PostProcessRangePartitionDataSyncTask(
                 std::move(data_sync_task),
-                table_schema.get(),
                 data_sync_txm,
                 DataSyncTask::CkptErrorCode::SCAN_ERROR);
             return;
@@ -3930,7 +3928,6 @@ void LocalCcShards::DataSyncForRangePartition(
     }
 
     PostProcessRangePartitionDataSyncTask(std::move(data_sync_task),
-                                          table_schema.get(),
                                           data_sync_txm,
                                           DataSyncTask::CkptErrorCode::NO_ERROR,
                                           true);
@@ -3938,7 +3935,6 @@ void LocalCcShards::DataSyncForRangePartition(
 
 void LocalCcShards::PostProcessHashPartitionDataSyncTask(
     std::shared_ptr<DataSyncTask> task,
-    const TableSchema *table_schema,
     TransactionExecution *data_sync_txm,
     DataSyncTask::CkptErrorCode err,
     bool is_scan_task)
@@ -4312,7 +4308,6 @@ void LocalCcShards::DataSyncForHashPartition(
 
             PostProcessHashPartitionDataSyncTask(
                 std::move(data_sync_task),
-                catalog_rec.Schema(),
                 data_sync_txm,
                 DataSyncTask::CkptErrorCode::SCAN_ERROR);
 
@@ -4340,7 +4335,6 @@ void LocalCcShards::DataSyncForHashPartition(
                                << ng_id;
                     PostProcessHashPartitionDataSyncTask(
                         std::move(data_sync_task),
-                        catalog_rec.Schema(),
                         data_sync_txm,
                         DataSyncTask::CkptErrorCode::SCAN_ERROR);
                     return;
@@ -4384,7 +4378,6 @@ void LocalCcShards::DataSyncForHashPartition(
                                 new UploadBatchClosure(
                                     [this,
                                      data_sync_task,
-                                     catalog_rec,
                                      data_sync_txm](CcErrorCode res_code,
                                                     int32_t dest_ng_term)
                                     {
@@ -4398,7 +4391,6 @@ void LocalCcShards::DataSyncForHashPartition(
                                         // failure.
                                         PostProcessHashPartitionDataSyncTask(
                                             std::move(data_sync_task),
-                                            catalog_rec.Schema(),
                                             data_sync_txm,
                                             DataSyncTask::CkptErrorCode::
                                                 NO_ERROR);
@@ -4668,7 +4660,6 @@ void LocalCcShards::DataSyncForHashPartition(
     }
 
     PostProcessHashPartitionDataSyncTask(std::move(data_sync_task),
-                                         catalog_rec.Schema(),
                                          data_sync_txm,
                                          DataSyncTask::CkptErrorCode::NO_ERROR);
 }
@@ -5288,7 +5279,6 @@ void LocalCcShards::FlushData(std::unique_lock<std::mutex> &flush_worker_lk)
             {
                 PostProcessHashPartitionDataSyncTask(
                     std::move(entry->data_sync_task_),
-                    entry->table_schema_.get(),
                     entry->data_sync_txm_,
                     ckpt_err,
                     false);
@@ -5297,7 +5287,6 @@ void LocalCcShards::FlushData(std::unique_lock<std::mutex> &flush_worker_lk)
             {
                 PostProcessRangePartitionDataSyncTask(
                     std::move(entry->data_sync_task_),
-                    entry->table_schema_.get(),
                     entry->data_sync_txm_,
                     ckpt_err,
                     false);
