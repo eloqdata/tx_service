@@ -1678,7 +1678,6 @@ public:
                                             : 0;
                                 }
                                 flush_size += ref.FlushSize();
-
                             }
                             else
                             {

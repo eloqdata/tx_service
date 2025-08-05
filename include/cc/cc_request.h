@@ -4360,7 +4360,8 @@ public:
                 default:
                     // Should not have meta table in data log.
                     table_type = TableType::Primary;
-                    LOG(FATAL) << "Invalid table type in data log: " << table_type_number;
+                    LOG(FATAL) << "Invalid table type in data log: "
+                               << table_type_number;
                     assert(false);
                     break;
                 }
