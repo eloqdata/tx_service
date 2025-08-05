@@ -547,12 +547,7 @@ public:
     // table_name is a string view, cannot access it outside TxProcessor.
     TableName table_name_;
     const TableSchema *table_schema_{nullptr};
-#if defined(DATA_STORE_TYPE_ELOQDSS_ROCKSDB_CLOUD_S3) ||  \
-    defined(DATA_STORE_TYPE_ELOQDSS_ROCKSDB_CLOUD_GCS) || \
-    defined(DATA_STORE_TYPE_ELOQDSS_ROCKSDB) ||           \
-    defined(DATA_STORE_TYPE_ELOQDSS_ELOQSTORE)
     std::string kv_table_name_;
-#endif
     TxKey tx_key_;
     LruEntry *cce_{nullptr};
     KeyGapLockAndExtraData *lock_{nullptr};
@@ -628,11 +623,7 @@ public:
     TableName table_name_{
         std::string(""), TableType::Primary, TableEngine::None};
     const TableSchema *table_schema_{nullptr};
-#if defined(DATA_STORE_TYPE_ELOQDSS_ROCKSDB_CLOUD_S3) ||  \
-    defined(DATA_STORE_TYPE_ELOQDSS_ROCKSDB_CLOUD_GCS) || \
-    defined(DATA_STORE_TYPE_ELOQDSS_ELOQSTORE)
     std::string kv_table_name_;
-#endif
     TxKey tx_key_;
     std::string rec_str_;
     uint64_t rec_ts_{0};

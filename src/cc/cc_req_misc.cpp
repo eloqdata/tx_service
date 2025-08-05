@@ -768,13 +768,8 @@ FetchRecordCc::FetchRecordCc(const TableName *tbl_name,
     : FetchCc(ccs, cc_ng_id, cc_ng_term),
       table_name_(tbl_name->StringView(), tbl_name->Type(), tbl_name->Engine()),
       table_schema_(tbl_schema),
-#if defined(DATA_STORE_TYPE_ELOQDSS_ROCKSDB_CLOUD_S3) ||  \
-    defined(DATA_STORE_TYPE_ELOQDSS_ROCKSDB_CLOUD_GCS) || \
-    defined(DATA_STORE_TYPE_ELOQDSS_ROCKSDB) ||           \
-    defined(DATA_STORE_TYPE_ELOQDSS_ELOQSTORE)
       kv_table_name_(
           table_schema_->GetKVCatalogInfo()->GetKvTableName(table_name_)),
-#endif
       tx_key_(std::move(tx_key)),
       cce_(cce),
       lock_(cce->GetKeyGapLockAndExtraData()),
@@ -923,12 +918,8 @@ void FetchSnapshotCc::Reset(const TableName *tbl_name,
     table_name_ =
         TableName(tbl_name->StringView(), tbl_name->Type(), tbl_name->Engine());
     table_schema_ = tbl_schema;
-#if defined(DATA_STORE_TYPE_ELOQDSS_ROCKSDB_CLOUD_S3) ||  \
-    defined(DATA_STORE_TYPE_ELOQDSS_ROCKSDB_CLOUD_GCS) || \
-    defined(DATA_STORE_TYPE_ELOQDSS_ELOQSTORE)
     kv_table_name_ =
         table_schema_->GetKVCatalogInfo()->GetKvTableName(table_name_);
-#endif
     tx_key_ = std::move(tx_key);
     partition_id_ = partition_id;
     snapshot_read_ts_ = snapshot_read_ts;
