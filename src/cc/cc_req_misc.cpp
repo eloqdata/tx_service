@@ -768,6 +768,7 @@ FetchRecordCc::FetchRecordCc(const TableName *tbl_name,
       table_schema_(tbl_schema),
 #if defined(DATA_STORE_TYPE_ELOQDSS_ROCKSDB_CLOUD_S3) ||  \
     defined(DATA_STORE_TYPE_ELOQDSS_ROCKSDB_CLOUD_GCS) || \
+    defined(DATA_STORE_TYPE_ELOQDSS_ROCKSDB) ||           \
     defined(DATA_STORE_TYPE_ELOQDSS_ELOQSTORE)
       kv_table_name_(
           table_schema_->GetKVCatalogInfo()->GetKvTableName(table_name_)),
