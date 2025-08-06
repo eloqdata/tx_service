@@ -1666,6 +1666,7 @@ const CatalogEntry *CcShard::InitCcm(const TableName &table_name,
             request_schema_version != 0 &&
             request_schema_version != catalog_entry->schema_version_)
         {
+            LOG(INFO) << "=== InitCcm: req schema version = " << request_schema_version << ", catalog entry schema version = " << catalog_entry->schema_version_;
             // For DDL operations (e.g., `flushdb` in Redis protocol), if one tx
             // processor completes the operation earlier, it could potentially
             // read data from other tx processors by simply acquiring a read
@@ -1682,6 +1683,7 @@ const CatalogEntry *CcShard::InitCcm(const TableName &table_name,
         CatalogCcMap *catalog_ccm = reinterpret_cast<CatalogCcMap *>(cc_map);
         if (catalog_ccm->HasWriteLock(table_name, cc_ng_id))
         {
+            LOG(INFO) << "=== InitCcm: no lock, req schema version = " << requester->SchemaVersion() << ", catalog entry schema version = " << catalog_entry->schema_version_;
             // This verification is used in cases where this node receives a
             // request from an old leader with an outdated schema version,
             // which happens to match the current schema version. Such a request
