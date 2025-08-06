@@ -674,7 +674,6 @@ StoreRange::LoadSliceStatus StoreRange::LoadSlice(
                         waiting_reqs[cc_shard].push_back(cc_req);
                     }
 
-                    LOG(INFO) << "=== DATA STORE ERROR";
                     for (auto &[cc_shard, reqs] : waiting_reqs)
                     {
                         cc_shard->AbortCcRequests(std::move(reqs),
@@ -744,7 +743,6 @@ StoreRange::LoadSliceStatus StoreRange::LoadSlice(
                     waiting_reqs[cc_shard].push_back(cc_req);
                 }
 
-                LOG(INFO) << "=== DATA STORE ERROR";
                 for (auto &[cc_shard, reqs] : waiting_reqs)
                 {
                     cc_shard->AbortCcRequests(std::move(reqs),

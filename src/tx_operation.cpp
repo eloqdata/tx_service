@@ -4439,7 +4439,6 @@ void SplitFlushRangeOp::Forward(TransactionExecution *txm)
                         }
                         else
                         {
-                            LOG(INFO) << "=== DATA STORE ERROR";
                             hd_res.SetError(CcErrorCode::DATA_STORE_ERR);
                         }
                     });
@@ -4701,7 +4700,6 @@ void SplitFlushRangeOp::Forward(TransactionExecution *txm)
                     }
                     else
                     {
-                        LOG(INFO) << "=== DATA STORE ERROR";
                         hd_res.SetError(CcErrorCode::DATA_STORE_ERR);
                     }
                 });
