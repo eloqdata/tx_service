@@ -2107,6 +2107,7 @@ void TransactionExecution::PostProcess(ReadOperation &read)
     {
         DLOG(ERROR) << "ReadOperation failed for cc error:"
                     << read_.hd_result_.ErrorMsg() << "; txn: " << TxNumber();
+        LOG(INFO) << "=== ReadOpeartion failed for cc error: " << read_.hd_result_.ErrorMsg();
         rtp_resp_->FinishError(ConvertCcError(read_.hd_result_.ErrorCode()));
         rtp_resp_ = nullptr;
     }
