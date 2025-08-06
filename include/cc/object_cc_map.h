@@ -737,7 +737,7 @@ public:
             }
 
             assert(obj_result.rec_status_ != RecordStatus::Unknown);
-            obj_result.commit_ts_ = cce->CommitTs();
+            obj_result.commit_ts_ = std::max(cce->CommitTs(), shard_->Now());
             hd_res->SetFinished();
             return true;
         }
@@ -788,7 +788,8 @@ public:
                                              ? RecordStatus::Deleted
                                              : RecordStatus::Normal;
 
-                obj_result.commit_ts_ = cce->CommitTs();
+                obj_result.commit_ts_ =
+                    std::max(cce->CommitTs(), shard_->Now());
                 obj_result.ttl_ = ttl;
                 hd_res->SetFinished();
                 return true;
@@ -935,7 +936,8 @@ public:
                     obj_result.lock_acquired_ = LockType::NoLock;
                 }
                 obj_result.rec_status_ = RecordStatus::Deleted;
-                obj_result.commit_ts_ = cce->CommitTs();
+                obj_result.commit_ts_ =
+                    std::max(cce->CommitTs(), shard_->Now());
                 obj_result.ttl_ = UINT64_MAX;
                 hd_res->SetFinished();
                 return true;
@@ -1248,7 +1250,7 @@ public:
         }
         else
         {
-            obj_result.commit_ts_ = cce->CommitTs();
+            obj_result.commit_ts_ = std::max(cce->CommitTs(), shard_->Now());
             obj_result.rec_status_ = cce->PayloadStatus();
         }
 
