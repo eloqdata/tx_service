@@ -236,6 +236,16 @@ public:
         return false;
     }
 
+    virtual bool BackFillArchives(
+        LruEntry *cce,
+        const std::vector<std::tuple<uint64_t, RecordStatus, std::string>>
+            &archive_records,
+        bool need_unpin = false)
+    {
+        assert(false);
+        return false;
+    }
+
     /**
      * Used for debug to verify the map_link is complete.
      */

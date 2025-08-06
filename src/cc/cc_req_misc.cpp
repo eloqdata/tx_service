@@ -761,23 +761,22 @@ FetchRecordCc::FetchRecordCc(const TableName *tbl_name,
                              CcShard &ccs,
                              NodeGroupId cc_ng_id,
                              int64_t cc_ng_term,
-                             int32_t range_id,
-                             bool fetch_from_primary)
+                             int32_t partition_id,
+                             bool fetch_from_primary,
+                             uint64_t snapshot_read_ts,
+                             bool only_fetch_archives)
     : FetchCc(ccs, cc_ng_id, cc_ng_term),
       table_name_(tbl_name->StringView(), tbl_name->Type(), tbl_name->Engine()),
       table_schema_(tbl_schema),
-#if defined(DATA_STORE_TYPE_ELOQDSS_ROCKSDB_CLOUD_S3) ||  \
-    defined(DATA_STORE_TYPE_ELOQDSS_ROCKSDB_CLOUD_GCS) || \
-    defined(DATA_STORE_TYPE_ELOQDSS_ROCKSDB) ||           \
-    defined(DATA_STORE_TYPE_ELOQDSS_ELOQSTORE)
       kv_table_name_(
           table_schema_->GetKVCatalogInfo()->GetKvTableName(table_name_)),
-#endif
       tx_key_(std::move(tx_key)),
       cce_(cce),
       lock_(cce->GetKeyGapLockAndExtraData()),
-      range_id_(range_id),
-      fetch_from_primary_(fetch_from_primary)
+      partition_id_(partition_id),
+      fetch_from_primary_(fetch_from_primary),
+      snapshot_read_ts_(snapshot_read_ts),
+      only_fetch_archives_(only_fetch_archives)
 {
 }
 
@@ -836,8 +835,25 @@ bool FetchRecordCc::Execute(CcShard &ccs)
         // if the referenced cce is already invalid, we do not need to care
         // about the fetch result and pending reqs since they are all
         // invalid.
-        bool succ =
-            lock_->GetCcMap()->BackFill(cce_, rec_ts_, rec_status_, rec_str_);
+        bool succ;
+        if (only_fetch_archives_)
+        {
+            succ = lock_->GetCcMap()->BackFillArchives(
+                cce_, *archive_records_, true);
+        }
+        else
+        {
+            if (snapshot_read_ts_ > 0 && archive_records_ != nullptr &&
+                archive_records_->size() > 0)
+            {
+                succ = lock_->GetCcMap()->BackFillArchives(
+                    cce_, *archive_records_, false);
+            }
+
+            succ = lock_->GetCcMap()->BackFill(
+                cce_, rec_ts_, rec_status_, rec_str_);
+        }
+
         if (!succ)
         {
             // Retry if backfill failed.
@@ -880,6 +896,78 @@ void FetchRecordCc::SetFinish(int err)
 {
     error_code_ = err;
     ccs_.Enqueue(this);
+}
+
+void FetchSnapshotCc::Reset(const TableName *tbl_name,
+                            const TableSchema *tbl_schema,
+                            TxKey tx_key,
+                            CcShard &ccs,
+                            NodeGroupId cc_ng_id,
+                            int64_t cc_ng_term,
+                            uint64_t snapshot_read_ts,
+                            bool only_fetch_archive,
+                            CcRequestBase *requester,
+                            size_t tuple_idx,
+                            OnFetchedSnapshot backfill_func,
+                            int32_t partition_id)
+
+{
+    ccs_ = &ccs;
+    cc_ng_id_ = cc_ng_id;
+    cc_ng_term_ = cc_ng_term;
+    table_name_ =
+        TableName(tbl_name->StringView(), tbl_name->Type(), tbl_name->Engine());
+    table_schema_ = tbl_schema;
+    kv_table_name_ =
+        table_schema_->GetKVCatalogInfo()->GetKvTableName(table_name_);
+    tx_key_ = std::move(tx_key);
+    partition_id_ = partition_id;
+    snapshot_read_ts_ = snapshot_read_ts;
+    only_fetch_archives_ = only_fetch_archive;
+    requester_ = requester;
+    tuple_idx_ = tuple_idx;
+    backfill_func_ = backfill_func;
+    rec_str_.clear();
+}
+
+bool FetchSnapshotCc::ValidTermCheck()
+{
+    int64_t cc_ng_term = Sharder::Instance().LeaderTerm(cc_ng_id_);
+
+    if (cc_ng_term != cc_ng_term_)
+    {
+        return false;
+    }
+
+    return true;
+}
+
+bool FetchSnapshotCc::Execute(CcShard &ccs)
+{
+    if (!ValidTermCheck())
+    {
+        // term has changed and the ccm has been erased already. It is no
+        // longer safe to access cce. Just abort all the reqs.
+        requester_->AbortCcRequest(CcErrorCode::NG_TERM_CHANGED);
+        error_code_ = static_cast<int>(CcErrorCode::NG_TERM_CHANGED);
+    }
+    else if (error_code_ != 0)
+    {
+        requester_->AbortCcRequest(CcErrorCode::DATA_STORE_ERR);
+    }
+    else
+    {
+        assert(backfill_func_ != nullptr && requester_ != nullptr);
+        (*backfill_func_)(this, requester_);
+    }
+
+    return true;
+}
+
+void FetchSnapshotCc::SetFinish(int err)
+{
+    error_code_ = err;
+    ccs_->Enqueue(this);
 }
 
 bool RunOnTxProcessorCc::Execute(CcShard &ccs)

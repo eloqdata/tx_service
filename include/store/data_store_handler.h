@@ -51,6 +51,7 @@ struct FetchTableRangesCc;
 struct SliceDataItem;
 class StoreSlice;
 struct FetchRecordCc;
+struct FetchSnapshotCc;
 struct FlushRecord;
 struct FlushTaskEntry;
 
@@ -171,7 +172,8 @@ public:
                       const txservice::TableSchema *table_schema) = 0;
 
     // Fetch record from datastore asynchronously.
-    virtual DataStoreOpStatus FetchRecord(FetchRecordCc *fetch_cc)
+    virtual DataStoreOpStatus FetchRecord(
+        FetchRecordCc *fetch_cc, FetchSnapshotCc *fetch_snapshot_cc = nullptr)
     {
         assert(false);
         return DataStoreOpStatus::Error;

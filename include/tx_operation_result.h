@@ -281,6 +281,8 @@ struct RemoteScanSliceCache
         trailing_cnt_ = 0;
         mem_max_bytes_ = 0;
         shard_cnt_ = shard_cnt;
+        archive_positions_.clear();
+        archive_records_.clear();
     }
 
     void RemoveLast()
@@ -316,6 +318,12 @@ struct RemoteScanSliceCache
     uint32_t mem_max_bytes_;
     uint16_t shard_cnt_;
     size_t trailing_cnt_;
+
+    // The first element of archive_positions_ is the index of key_ts_ to
+    // backfill and the second element is the position in records_ to be
+    // backfilled after snapshot being fetched.
+    std::vector<std::pair<size_t, size_t>> archive_positions_;
+    std::vector<std::string> archive_records_;
 };
 
 struct RangeScanSliceResult

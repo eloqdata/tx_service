@@ -532,8 +532,10 @@ public:
                   CcShard &ccs,
                   NodeGroupId cc_ng_id,
                   int64_t cc_ng_term,
-                  int32_t range_id_ = -1,
-                  bool fetch_from_primary = false);
+                  int32_t partition_id,
+                  bool fetch_from_primary = false,
+                  uint64_t snapshot_read_ts = 0,
+                  bool only_fetch_archives = false);
     ~FetchRecordCc() = default;
 
     bool ValidTermCheck();
@@ -545,12 +547,7 @@ public:
     // table_name is a string view, cannot access it outside TxProcessor.
     TableName table_name_;
     const TableSchema *table_schema_{nullptr};
-#if defined(DATA_STORE_TYPE_ELOQDSS_ROCKSDB_CLOUD_S3) ||  \
-    defined(DATA_STORE_TYPE_ELOQDSS_ROCKSDB_CLOUD_GCS) || \
-    defined(DATA_STORE_TYPE_ELOQDSS_ROCKSDB) ||           \
-    defined(DATA_STORE_TYPE_ELOQDSS_ELOQSTORE)
     std::string kv_table_name_;
-#endif
     TxKey tx_key_;
     LruEntry *cce_{nullptr};
     KeyGapLockAndExtraData *lock_{nullptr};
@@ -558,13 +555,93 @@ public:
     RecordStatus rec_status_{RecordStatus::Unknown};
     std::string rec_str_;
     int error_code_{0};
-    // Only used in range partition
-    int range_id_;
+    int partition_id_;
     bool fetch_from_primary_{false};
+
+    // If set snapshot_read_ts_ (not equal 0), the snapshot_read_ts_ will be
+    // used to fetch record from archives table.
+    uint64_t snapshot_read_ts_{0};
+    // If set only_fetch_archives_ (true), don't fetch record from base table.
+    bool only_fetch_archives_{false};
+    std::unique_ptr<
+        std::vector<std::tuple<uint64_t, RecordStatus, std::string>>>
+        archive_records_{nullptr};
 
     // Process the kv result on TxProcessor if the data on CcShard (table
     // schema) needs to be accessed.
     std::function<void()> handle_kv_res_;
+};
+
+struct FetchSnapshotCc;
+typedef void (*OnFetchedSnapshot)(FetchSnapshotCc *fetch_cc,
+                                  CcRequestBase *requester);
+
+struct FetchSnapshotCc : public CcRequestBase
+{
+public:
+    FetchSnapshotCc()
+    {
+    }
+    ~FetchSnapshotCc() = default;
+
+    void Reset(const TableName *tbl_name,
+               const TableSchema *tbl_schema,
+               TxKey tx_key,
+               CcShard &ccs,
+               NodeGroupId cc_ng_id,
+               int64_t cc_ng_term,
+               uint64_t snapshot_read_ts,
+               bool only_fetch_archive,
+               CcRequestBase *requester,
+               size_t tuple_idx,
+               OnFetchedSnapshot backfill_func,
+               int32_t partition_id);
+
+    bool ValidTermCheck();
+
+    bool Execute(CcShard &ccs) override;
+
+    void SetFinish(int err);
+
+    NodeGroupId GetNodeGroupId() const
+    {
+        return cc_ng_id_;
+    }
+
+    int64_t LeaderTerm() const
+    {
+        return cc_ng_term_;
+    }
+
+    metrics::TimePoint start_;
+
+    CcShard *ccs_;
+    NodeGroupId cc_ng_id_;
+    int64_t cc_ng_term_;
+
+    // table_name is a string view, cannot access it outside TxProcessor.
+    TableName table_name_{
+        std::string(""), TableType::Primary, TableEngine::None};
+    const TableSchema *table_schema_{nullptr};
+    std::string kv_table_name_;
+    TxKey tx_key_;
+    std::string rec_str_;
+    uint64_t rec_ts_{0};
+    RecordStatus rec_status_{RecordStatus::Unknown};
+    int error_code_{0};
+    int partition_id_;
+
+    // Used to fetch record from archives table.
+    uint64_t snapshot_read_ts_{0};
+    // If set only_fetch_archives_ (true), don't fetch record from base table.
+    bool only_fetch_archives_{false};
+
+    CcRequestBase *requester_{nullptr};
+    // Now only used by Scan.
+    size_t tuple_idx_{UINT64_MAX};
+    // On fetched archive record, call backfill_func_ to backfill the record (to
+    // request).
+    OnFetchedSnapshot backfill_func_{nullptr};
 };
 
 struct RunOnTxProcessorCc : public CcRequestBase

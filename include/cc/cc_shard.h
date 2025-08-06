@@ -714,9 +714,24 @@ public:
         NodeGroupId cc_ng_id,
         int64_t cc_ng_term,
         CcRequestBase *requester,
-        int32_t range_id,
+        int32_t partition_id,
         bool fetch_from_primary = false,
-        uint32_t key_shard_code = 0);
+        uint32_t key_shard_code = 0,
+        uint64_t snapshot_read_ts = 0,
+        bool only_fetch_archives = false);
+
+    store::DataStoreHandler::DataStoreOpStatus FetchSnapshot(
+        const TableName &table_name,
+        const TableSchema *tbl_schema,
+        TxKey key,
+        NodeGroupId cc_ng_id,
+        int64_t cc_ng_term,
+        uint64_t snapshot_read_ts,
+        bool only_fetch_archive,
+        CcRequestBase *requester,
+        size_t tuple_idx,
+        OnFetchedSnapshot backfill_func,
+        int32_t partition_id);
 
     void RemoveFetchRecordRequest(LruEntry *cce);
 
@@ -1040,6 +1055,9 @@ private:
 
     // For load record from kvstore asynchronously
     std::unordered_map<LruEntry *, FetchRecordCc> fetch_record_reqs_;
+
+    // For load snapshot from kvstore asynchronously
+    CcRequestPool<FetchSnapshotCc> fetch_snapshot_cc_pool_;
 
     // For concurrency execution of cpu-bound tasks.
     CcRequestPool<RunOnTxProcessorCc> run_on_tx_processor_cc_pool_;
