@@ -391,9 +391,53 @@ public:
                     assert(!req.apply_and_commit_);
                     if (cce != nullptr)
                     {
-                        cce->AbortBlockCmdRequest(txn,
-                                                  CcErrorCode::TASK_EXPIRED);
-                        cce->RecycleKeyLock(*shard_);
+                        bool succeed = cce->AbortBlockCmdRequest(
+                            txn, CcErrorCode::TASK_EXPIRED, shard_);
+                        if (!succeed)
+                        {
+                            DLOG(WARNING)
+                                << "AbortBlockCmdRequest fail to find "
+                                   "tx in queue_block_cmds_ and "
+                                   "blocking_queue_, tx: "
+                                << req.Txn() << "; req: " << &req;
+
+                            if (shard_->FindActiveBlockingTx(req.Txn()))
+                            {
+                                uint64_t timestamp =
+                                    shard_->GetActiveBlockingTx(req.Txn());
+
+                                if (shard_->Now() - timestamp > 1000000)
+                                {
+                                    // abort ccreq has expired(1s), remove this
+                                    // entry.
+                                    shard_->RemoveActiveBlockingTx(req.Txn());
+                                }
+                                else
+                                {
+                                    // the blocking ccreq may be in req_buf_ or
+                                    // fetch record request, reenqueue this
+                                    // abort ccreq and research in the next
+                                    // round.
+                                    req.SetCcePtr(nullptr);
+                                    shard_->Enqueue(shard_->core_id_, &req);
+                                    return false;
+                                }
+                            }
+                            else
+                            {
+                                shard_->UpsertActiveBlockingTx(req.Txn(),
+                                                               shard_->Now());
+
+                                req.SetCcePtr(nullptr);
+                                shard_->Enqueue(shard_->core_id_, &req);
+                                return false;
+                            }
+                        }
+                        else
+                        {
+                            // abort succeeds, remove this entry if it exists.
+                            shard_->RemoveActiveBlockingTx(req.Txn());
+                        }
                     }
 
                     if (req.is_local_)

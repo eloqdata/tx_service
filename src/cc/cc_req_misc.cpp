@@ -415,6 +415,7 @@ bool ClearCcNodeGroup::Execute(CcShard &ccs)
     {
         ccs.ClearActvieSiTxs();
         ccs.ClearNativeSchemaCntl();
+        ccs.ClearActiveBlockingTxs();
     }
 
     std::unique_lock lk(mux_);
