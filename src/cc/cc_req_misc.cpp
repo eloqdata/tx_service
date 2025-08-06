@@ -155,6 +155,7 @@ bool FetchCatalogCc::Execute(CcShard &ccs)
     }
     else
     {
+        LOG(INFO) << "=== DATA STORE ERROR";
         for (CcRequestBase *req : requesters_)
         {
             req->AbortCcRequest(CcErrorCode::DATA_STORE_ERR);
@@ -226,6 +227,7 @@ bool FetchTableStatisticsCc::Execute(CcShard &ccs)
     }
     else
     {
+        LOG(INFO) << "=== DATA STORE ERROR";
         for (CcRequestBase *req : requesters_)
         {
             req->AbortCcRequest(CcErrorCode::DATA_STORE_ERR);
@@ -286,6 +288,7 @@ bool FetchTableRangesCc::Execute(CcShard &ccs)
     }
     else
     {
+        LOG(INFO) << "=== DATA STORE ERROR";
         for (CcRequestBase *req : requesters_)
         {
             req->AbortCcRequest(CcErrorCode::DATA_STORE_ERR);
@@ -746,6 +749,7 @@ void FillStoreSliceCc::StartFilling()
 
 void FillStoreSliceCc::TerminateFilling()
 {
+    LOG(INFO) << "=== DATA STORE ERROR";
     // The method is called when there is an error of reading the data store.
     // The slice has not been filled into memory. So, the out-of-memory flag is
     // false.
@@ -865,6 +869,7 @@ bool FetchRecordCc::Execute(CcShard &ccs)
                     // Release the pin added by the ccrequest.
                     cce_->GetKeyGapLockAndExtraData()->ReleasePin();
                     cce_->RecycleKeyLock(ccs);
+                    LOG(INFO) << "=== DATA STORE ERROR";
 
                     req->AbortCcRequest(CcErrorCode::DATA_STORE_ERR);
                 }
