@@ -1660,13 +1660,19 @@ const CatalogEntry *CcShard::InitCcm(const TableName &table_name,
     }
 
     const TableSchema *curr_schema = catalog_entry->schema_.get();
+    auto index_names = curr_schema->IndexNames();
+    for (const auto &name : index_names)
+    {
+        LOG(INFO) << "sk ts " << curr_schema->IndexKeySchema(name)->SchemaTs();
+    }
+
     if (curr_schema != nullptr && catalog_entry->schema_version_ > 0)
     {
         if (const auto request_schema_version = requester->SchemaVersion();
             request_schema_version != 0 &&
             request_schema_version != catalog_entry->schema_version_)
         {
-            LOG(INFO) << "=== InitCcm: req schema version = " << request_schema_version << ", catalog entry schema version = " << catalog_entry->schema_version_;
+            LOG(INFO) << "=== InitCcm: req schema version = " << request_schema_version << ", catalog entry schema version = " << catalog_entry->schema_version_ << ", key st = " << curr_schema->KeySchema()->SchemaTs();
             // For DDL operations (e.g., `flushdb` in Redis protocol), if one tx
             // processor completes the operation earlier, it could potentially
             // read data from other tx processors by simply acquiring a read
