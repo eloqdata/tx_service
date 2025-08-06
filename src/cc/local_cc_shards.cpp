@@ -5498,7 +5498,7 @@ void LocalCcShards::FlushData(std::unique_lock<std::mutex> &flush_worker_lk)
     {
         for (auto &entry : entries)
         {
-            PostProcessDataSyncTask(std::move(entry->data_sync_task_),
+            PostProcessDataSyncTask(entry->data_sync_task_,
                                     entry->table_schema_.get(),
                                     entry->data_sync_txm_,
                                     ckpt_err
