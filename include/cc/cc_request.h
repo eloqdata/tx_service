@@ -5184,7 +5184,6 @@ public:
                     // cleaned and updated.
                     return SetFinish();
                 }
-                assert(catalog_entry->dirty_schema_version_ == clean_ts_);
 
                 if (!CleanCcMap(ccs))
                 {
