@@ -1396,6 +1396,7 @@ public:
 
         if (req.SchemaVersion() != 0 && req.SchemaVersion() != schema_ts_)
         {
+            LOG(INFO) << "=== req schema version = " << req.SchemaVersion() << ", schema ts = " << schema_ts_;
             hd_res->SetError(CcErrorCode::REQUESTED_TABLE_SCHEMA_MISMATCH);
             return true;
         }
