@@ -1996,7 +1996,6 @@ void TransactionExecution::Process(ReadOperation &read)
                 read_ts = ts;
             }
 
-            LOG(INFO) << "== ReadOperation";
             cc_handler_->Read(table_name,
                               read.read_tx_req_->schema_version_,
                               key,
