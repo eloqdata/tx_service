@@ -1266,6 +1266,10 @@ public:
             }
         }
 
+        std::pair<bool, CcErrorCode> &upsert_kv_err_code =
+            req.UpsertKvErrCode();
+        bool need_to_upsert_kv_table = upsert_kv_err_code.first;
+
         // 1. Replay the table catalog and table schema.
         // The first shard is in charge of creating catalog_entry.
         if (shard_->core_id_ == 0)
@@ -1318,6 +1322,58 @@ public:
 
                 uint64_t dirty_schema_commit_ts = req.CommitTs();
                 uint64_t old_schema_commit_ts = schema_op_msg.catalog_ts();
+
+                // upsert kv store first, then create catalog entry
+                if (need_to_upsert_kv_table && dirty_schema_commit_ts > 0 &&
+                    !Sharder::Instance()
+                         .GetDataStoreHandler()
+                         ->IsSharedStorage())
+                {
+                    // When not using shared storage, the coordinator and
+                    // participants must upsert the KV table during recovery
+                    // process. Otherwise, there may be inconsistency between
+                    // in-memory schema and kv store schema.
+
+                    TableSchema::uptr schema_ptr =
+                        Sharder::Instance()
+                            .GetLocalCcShards()
+                            ->CreateTableSchemaFromImage(
+                                table_name,
+                                schema_op_msg.old_catalog_blob(),
+                                old_schema_commit_ts);
+                    TableSchema::uptr dirty_schema_ptr =
+                        Sharder::Instance()
+                            .GetLocalCcShards()
+                            ->CreateTableSchemaFromImage(
+                                table_name,
+                                schema_op_msg.new_catalog_blob(),
+                                dirty_schema_commit_ts);
+
+                    OperationType op_type = static_cast<OperationType>(
+                        schema_op_msg.table_op().op_type());
+
+                    upsert_kv_err_code = {false, CcErrorCode::NO_ERROR};
+                    shard_->local_shards_.store_hd_->UpsertTable(
+                        schema_ptr.get(),
+                        dirty_schema_ptr.get(),
+                        op_type,
+                        req.CommitTs(),
+                        cc_ng_id_,
+                        ng_term,
+                        nullptr,
+                        nullptr,
+                        &req,
+                        shard_,
+                        &upsert_kv_err_code.second);
+
+                    return false;
+                }
+                else if (!need_to_upsert_kv_table &&
+                         upsert_kv_err_code.second != CcErrorCode::NO_ERROR)
+                {
+                    req.Result()->SetError(upsert_kv_err_code.second);
+                    return false;
+                }
 
                 auto [success, new_catalog_entry] = shard_->CreateCatalog(
                     table_name,
@@ -1407,7 +1463,6 @@ public:
                                          SchemaOpMessage_Stage_PrepareSchema ||
             schema_op_msg.stage() == ::txlog::SchemaOpMessage_Stage::
                                          SchemaOpMessage_Stage_PrepareData)
-
         {
             const TableSchema *old_schema = catalog_entry->schema_.get();
             const TableSchema *new_schema = catalog_entry->dirty_schema_.get();
@@ -1608,10 +1663,11 @@ public:
         else
         {
             uint32_t tx_node_id = (req.Txn() >> 32L) >> 10;
+            bool is_coordinator = tx_node_id == req.NodeGroupId();
             int64_t tx_candidate_term =
                 Sharder::Instance().CandidateLeaderTerm(tx_node_id);
 
-            if (tx_node_id == req.NodeGroupId() && tx_candidate_term >= 0)
+            if (is_coordinator && tx_candidate_term >= 0)
             {
                 // If the coordinating tx is bound to the recoverying cc
                 // node, resumes the tx. This will spawn

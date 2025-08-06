@@ -3968,6 +3968,7 @@ public:
         range_splitting_ = range_splitting;
         local_on_fly_cnt_ = nullptr;
         is_lock_recovery_ = is_lock_recovery;
+        upsert_kv_err_code_ = {true, CcErrorCode::NO_ERROR};
     }
 
     ReplayLogCc(const ReplayLogCc &rhs) = delete;
@@ -4229,6 +4230,11 @@ public:
         return is_lock_recovery_;
     }
 
+    std::pair<bool, CcErrorCode> &UpsertKvErrCode()
+    {
+        return upsert_kv_err_code_;
+    }
+
 private:
     TableName table_name_holder_{
         "",
@@ -4258,6 +4264,9 @@ private:
 
     // Reserved for schema op log replay
     const std::unordered_set<TableName> *range_splitting_;
+
+    std::pair<bool, CcErrorCode> upsert_kv_err_code_{true,
+                                                     CcErrorCode::NO_ERROR};
 
     friend std::ostream &operator<<(std::ostream &outs,
                                     txservice::ReplayLogCc *r);
@@ -5154,6 +5163,28 @@ public:
 
             if (!resume_from_upsert_kv)
             {
+                const TableName base_table_name{
+                    table_name_->GetBaseTableNameSV(),
+                    TableType::Primary,
+                    table_name_->Engine()};
+                const CatalogEntry *catalog_entry =
+                    ccs.GetCatalog(base_table_name, node_group_id_);
+
+                if (catalog_entry == nullptr)
+                {
+                    //  Fetch catalog
+                    ccs.FetchCatalog(
+                        base_table_name, node_group_id_, ng_term, this);
+                    return false;
+                }
+
+                if (catalog_entry->schema_version_ >= clean_ts_)
+                {
+                    // This is an out-dated request. The table has already been
+                    // cleaned and updated.
+                    return SetFinish();
+                }
+
                 if (!CleanCcMap(ccs))
                 {
                     // Current ccmap has more page
@@ -5162,8 +5193,6 @@ public:
                     return false;
                 }
 
-                const CatalogEntry *catalog_entry =
-                    ccs.GetCatalog(*table_name_, node_group_id_);
                 if (catalog_entry != nullptr &&
                     catalog_entry->dirty_schema_ != nullptr)
                 {
@@ -5182,11 +5211,12 @@ public:
                     {
                         //  Fetch catalog
                         ccs.FetchCatalog(
-                            *table_name_, node_group_id_, ng_term, this);
+                            base_table_name, node_group_id_, ng_term, this);
                         return false;
                     }
 
-                    if (catalog_entry->schema_ != nullptr)
+                    if (catalog_entry->schema_ != nullptr &&
+                        catalog_entry->dirty_schema_ != nullptr)
                     {
                         assert(ccs.core_id_ == 0);
                         // Enter ddl phase, update the value of
