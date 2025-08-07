@@ -834,11 +834,10 @@ public:
 
     // Active blocking transaction management functions
     void UpsertActiveBlockingTx(TxNumber txn, uint64_t timestamp);
-    void RemoveActiveBlockingTx(TxNumber txn);
-    bool FindActiveBlockingTx(TxNumber txn) const;
-    uint64_t GetActiveBlockingTx(TxNumber txn) const;
+    bool RemoveActiveBlockingTx(TxNumber txn);
     void ClearActiveBlockingTxs();
     size_t ActiveBlockingTxSize() const;
+    void RemoveExpiredActiveBlockingTxs();
 
     // shard level memory limit.
     uint64_t memory_limit_{0};

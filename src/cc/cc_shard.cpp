@@ -2072,23 +2072,15 @@ void CcShard::UpsertActiveBlockingTx(TxNumber txn, uint64_t timestamp)
     active_blocking_txs_[txn] = timestamp;
 }
 
-void CcShard::RemoveActiveBlockingTx(TxNumber txn)
-{
-    active_blocking_txs_.erase(txn);
-}
-
-bool CcShard::FindActiveBlockingTx(TxNumber txn) const
+bool CcShard::RemoveActiveBlockingTx(TxNumber txn)
 {
     auto it = active_blocking_txs_.find(txn);
-    return (it != active_blocking_txs_.end());
-}
-
-uint64_t CcShard::GetActiveBlockingTx(TxNumber txn) const
-{
-    auto it = active_blocking_txs_.find(txn);
-    assert(it != active_blocking_txs_.end());
-
-    return it->second;
+    if (it != active_blocking_txs_.end())
+    {
+        active_blocking_txs_.erase(it);
+        return true;
+    }
+    return false;
 }
 
 void CcShard::ClearActiveBlockingTxs()
@@ -2099,6 +2091,23 @@ void CcShard::ClearActiveBlockingTxs()
 size_t CcShard::ActiveBlockingTxSize() const
 {
     return active_blocking_txs_.size();
+}
+
+void CcShard::RemoveExpiredActiveBlockingTxs()
+{
+    for (auto it = active_blocking_txs_.begin();
+         it != active_blocking_txs_.end();)
+    {
+        // fail to discrad entry expires after 1s
+        if (Now() - it->second > 1000000)
+        {
+            active_blocking_txs_.erase(it++);
+        }
+        else
+        {
+            ++it;
+        }
+    }
 }
 
 void CcShard::UpdateLocalMinSiTxStartTs()

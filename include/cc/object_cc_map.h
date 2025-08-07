@@ -401,42 +401,8 @@ public:
                                    "blocking_queue_, tx: "
                                 << req.Txn() << "; req: " << &req;
 
-                            if (shard_->FindActiveBlockingTx(req.Txn()))
-                            {
-                                uint64_t timestamp =
-                                    shard_->GetActiveBlockingTx(req.Txn());
-
-                                if (shard_->Now() - timestamp > 1000000)
-                                {
-                                    // abort ccreq has expired(1s), remove this
-                                    // entry.
-                                    shard_->RemoveActiveBlockingTx(req.Txn());
-                                }
-                                else
-                                {
-                                    // the blocking ccreq may be in req_buf_ or
-                                    // fetch record request, reenqueue this
-                                    // abort ccreq and research in the next
-                                    // round.
-                                    req.SetCcePtr(nullptr);
-                                    shard_->Enqueue(shard_->core_id_, &req);
-                                    return false;
-                                }
-                            }
-                            else
-                            {
-                                shard_->UpsertActiveBlockingTx(req.Txn(),
-                                                               shard_->Now());
-
-                                req.SetCcePtr(nullptr);
-                                shard_->Enqueue(shard_->core_id_, &req);
-                                return false;
-                            }
-                        }
-                        else
-                        {
-                            // abort succeeds, remove this entry if it exists.
-                            shard_->RemoveActiveBlockingTx(req.Txn());
+                            shard_->UpsertActiveBlockingTx(req.Txn(),
+                                                           shard_->Now());
                         }
                     }
 
@@ -1142,6 +1108,7 @@ public:
             req.block_type_ = ApplyCc::ApplyBlockType::BlockOnCondition;
             return false;
         }
+
         if (exec_rst == ExecResult::Unlock)
         {
             assert(!req.apply_and_commit_);
@@ -1162,6 +1129,7 @@ public:
             hd_res->SetFinished();
             return true;
         }
+
         if (req.apply_and_commit_)
         {
             if (object_modified)
@@ -1269,6 +1237,20 @@ public:
             {
                 TemplateCcMap<KeyT, ValueT, false, false>::normal_obj_sz_++;
             }
+        }
+        else if (exec_rst == ExecResult::Read)
+        {
+            assert(req.block_type_ == ApplyCc::ApplyBlockType::NoBlocking);
+            assert(req.CcePtr() != nullptr);
+            // rerun from blocking cmd
+            if (shard_->RemoveActiveBlockingTx(req.Txn()))
+            {
+                hd_res->SetFinished();
+            }
+
+            // also check if there are expired entries in active_blocking_txs_
+            // and remove them
+            shard_->RemoveExpiredActiveBlockingTxs();
         }
 
         // Updates last_vali_ts after successfully acquiring the write
