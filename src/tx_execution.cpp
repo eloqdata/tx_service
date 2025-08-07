@@ -1872,6 +1872,7 @@ void TransactionExecution::Process(ReadOperation &read)
             read.iso_level_ = iso_level_;
 
             uint32_t key_shard_code = 0;
+            int32_t range_id = -1;
 #ifdef RANGE_PARTITION_ENABLED
             if (!lock_range_result_.IsFinished())
             {
@@ -1909,6 +1910,7 @@ void TransactionExecution::Process(ReadOperation &read)
                 NodeGroupId range_ng =
                     range_rec_.GetRangeOwnerNg()->BucketOwner();
                 key_shard_code = range_ng << 10 | residual;
+                range_id = range_rec_.GetRangeInfo()->PartitionId();
             }
 #else
             // Make sure current node is still ng leader since we may visit
@@ -2011,7 +2013,8 @@ void TransactionExecution::Process(ReadOperation &read)
                               read.protocol_,
                               read.read_tx_req_->is_for_write_,
                               is_covering_keys,
-                              read.read_tx_req_->point_read_on_cache_miss_);
+                              read.read_tx_req_->point_read_on_cache_miss_,
+                              range_id);
 
             if (!read.hd_result_.Value().is_local_)
             {
