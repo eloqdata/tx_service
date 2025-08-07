@@ -1245,7 +1245,7 @@ public:
             // rerun from blocking cmd
             if (shard_->RemoveActiveBlockingTx(req.Txn()))
             {
-                hd_res->SetFinished();
+                hd_res->SetError(CcErrorCode::TASK_EXPIRED);
             }
 
             // also check if there are expired entries in active_blocking_txs_
