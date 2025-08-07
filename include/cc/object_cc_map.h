@@ -1246,6 +1246,7 @@ public:
             if (shard_->RemoveActiveBlockingTx(req.Txn()))
             {
                 hd_res->SetError(CcErrorCode::TASK_EXPIRED);
+                return true;
             }
 
             // also check if there are expired entries in active_blocking_txs_
