@@ -1697,11 +1697,26 @@ const CatalogEntry *CcShard::InitCcm(const TableName &table_name,
     }
 
     const TableSchema *curr_schema = catalog_entry->schema_.get();
-    if (curr_schema != nullptr && catalog_entry->schema_version_ > 0)
+    uint64_t schema_ts = 0;
+    if (table_name.Type() == TableType::Primary)
+    {
+        schema_ts = curr_schema->KeySchema()->SchemaTs();
+    }
+    else if (table_name.Type() == TableType::Secondary || table_name.Type() == TableType::UniqueSecondary)
+    {
+        schema_ts = curr_schema->IndexKeySchema(table_name)->SchemaTs();
+    }
+    else
+    {
+        assert(false);
+        schema_ts = curr_schema->Version();
+    }
+
+    if (curr_schema != nullptr && schema_ts > 0)
     {
         if (const auto request_schema_version = requester->SchemaVersion();
             request_schema_version != 0 &&
-            request_schema_version != catalog_entry->schema_version_)
+            request_schema_version != schema_ts)
         {
             // For DDL operations (e.g., `flushdb` in Redis protocol), if one tx
             // processor completes the operation earlier, it could potentially
