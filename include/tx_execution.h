@@ -393,10 +393,8 @@ private:
     void PostProcess(ScanOpenOperation &scan_open);
     void Process(ScanNextOperation &scan_next);
     void PostProcess(ScanNextOperation &scan_next);
-    void Process(LockWriteRangesOp &lock_write_ranges);
-    void PostProcess(LockWriteRangesOp &lock_write_ranges);
-    void Process(LockWriteBucketsOp &lock_write_ranges);
-    void PostProcess(LockWriteBucketsOp &lock_write_ranges);
+    void Process(LockWriteRangeBucketsOp &lock_write_range_buckets);
+    void PostProcess(LockWriteRangeBucketsOp &lock_write_range_buckets);
     void Process(AcquireWriteOperation &acquire_write);
     void PostProcess(AcquireWriteOperation &acquire_write);
     void Process(CatalogAcquireAllOp &acquire_catalog_write);
@@ -485,8 +483,6 @@ private:
     bool FillDataLogRequest(WriteToLogOp &write_log);
     bool FillCommitCatalogsLogRequest(WriteToLogOp &write_log);
     bool FillCleanCatalogsLogRequest(WriteToLogOp &write_log);
-
-    bool FillCommandLogRequest(WriteToLogOp &write_log);
 
     bool IsTimeOut(int wait_secs = 10);
     void StartTiming();
@@ -734,8 +730,7 @@ private:
     MultiObjectCommandOp multi_obj_cmd_;
 
     // Committing phase.
-    LockWriteRangesOp lock_write_ranges_;
-    LockWriteBucketsOp lock_write_buckets_;
+    LockWriteRangeBucketsOp lock_write_range_buckets_;
     CmdForwardAcquireWriteOp cmd_forward_write_;
     AcquireWriteOperation acquire_write_;
     CatalogAcquireAllOp catalog_acquire_all_;
@@ -775,8 +770,7 @@ private:
     friend struct UnlockReadRangeOperation;
     friend struct LockReadRangesOp;
     friend struct ReadOutsideOperation;
-    friend struct LockWriteRangesOp;
-    friend struct LockWriteBucketsOp;
+    friend struct LockWriteRangeBucketsOp;
     friend struct AcquireWriteOperation;
     friend struct SetCommitTsOperation;
     friend struct WriteToLogOp;

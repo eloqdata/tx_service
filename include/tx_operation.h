@@ -248,51 +248,12 @@ public:
     bool rset_has_expired_{false};
 };
 
-struct LockWriteRangesOp : public TransactionOperation
+struct LockWriteRangeBucketsOp : public TransactionOperation
 {
 public:
-    LockWriteRangesOp(CcHandlerResult<ReadKeyResult> *lock_range_result)
-        : lock_range_result_(lock_range_result)
-    {
-    }
-
-    void Forward(TransactionExecution *txm) override;
-
-    void Reset()
-    {
-        init_ = false;
-        is_running_ = false;
-        execute_immediately_ = true;
-    }
-
-    /**
-     * @brief Advances the internal iterator to the next range to acquire a
-     * write lock.
-     *
-     */
-    void Advance(TransactionExecution *txm);
-
-    TableName range_table_name_{
-        empty_sv, TableType::RangePartition, TableEngine::None};
-    // RangeRecord range_rec_;
-    CcHandlerResult<ReadKeyResult> *lock_range_result_{nullptr};
-
-    std::unordered_map<TableName, std::pair<uint64_t, TableWriteSet>>::iterator
-        table_it_;
-    std::unordered_map<TableName, std::pair<uint64_t, TableWriteSet>>::iterator
-        table_end_;
-    TableWriteSet::iterator write_key_it_;
-    TableWriteSet::iterator write_key_end_;
-    bool init_;
-    bool execute_immediately_{true};
-};
-
-struct LockWriteBucketsOp : public TransactionOperation
-{
-public:
-    explicit LockWriteBucketsOp(
-        CcHandlerResult<ReadKeyResult> *lock_bucket_result)
-        : lock_bucket_result_(lock_bucket_result)
+    explicit LockWriteRangeBucketsOp(
+        CcHandlerResult<ReadKeyResult> *lock_result)
+        : lock_result_(lock_result)
     {
     }
 
@@ -310,11 +271,10 @@ public:
      * write lock. Also Check if current write key needs to be forward written
      * (bucket is migrating).
      */
-    void Advance(TransactionExecution *txm, const BucketInfo *bucket_info);
+    void Advance(TransactionExecution *txm);
 
-    // TableName range_table_name_{empty_sv, TableType::RangePartition};
-    // RangeRecord range_rec_;
-    CcHandlerResult<ReadKeyResult> *lock_bucket_result_{nullptr};
+    TableName range_table_name_{empty_sv, TableType::RangePartition, TableEngine::None};
+    CcHandlerResult<ReadKeyResult> *lock_result_{nullptr};
 
     std::unordered_map<TableName, std::pair<uint64_t, TableWriteSet>>::iterator
         table_it_;
@@ -1570,10 +1530,8 @@ public:
     bool local_cache_checked_;  // If checked local cache for this op
     std::atomic<uint32_t> unfinished_cnt_{0};
 
-#ifdef RANGE_PARTITION_ENABLED
-    CcHandlerResult<ReadKeyResult> *lock_range_result_{nullptr};
+    CcHandlerResult<ReadKeyResult> *lock_range_bucket_result_{nullptr};
     std::vector<ScanBatchTuple>::iterator lock_it_;
-#endif
 };
 
 struct InvalidateTableCacheOp : TransactionOperation
