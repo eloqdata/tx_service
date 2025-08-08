@@ -38,7 +38,6 @@
 #include "local_cc_shards.h"
 #include "metrics.h"
 #include "sharder.h"
-#include "tx_service.h"
 #include "tx_service_common.h"
 #include "util.h"
 
@@ -81,7 +80,8 @@ bool CcNode::CheckLogGroupReplayFinished(uint32_t log_group_id, int64_t ng_term)
 void CcNode::FinishLogGroupReplay(uint32_t log_group_id,
                                   int64_t ng_term,
                                   uint32_t latest_committed_txn_no,
-                                  uint64_t last_ckpt_ts)
+                                  uint64_t last_ckpt_ts,
+                                  uint64_t max_ts_in_log)
 {
     // recovery_mux_ is used to protect recovered_log_groups_, since raft
     // service thread will also modify it concurrently.

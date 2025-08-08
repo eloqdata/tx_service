@@ -30,7 +30,6 @@
 #include "cc_request.pb.h"
 #include "log_replay_service.h"
 #include "sharder.h"
-#include "type.h"
 
 namespace txservice::fault
 {
@@ -62,7 +61,8 @@ public:
     void FinishLogGroupReplay(uint32_t log_group_id,
                               int64_t ng_term,
                               uint32_t latest_committed_txn_no,
-                              uint64_t last_ckpt_ts);
+                              uint64_t last_ckpt_ts,
+                              uint64_t max_ts_in_log);
 
     /**
      * Pin data of this node group if this ccnode is group leader.

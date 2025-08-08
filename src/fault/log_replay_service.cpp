@@ -612,11 +612,13 @@ int RecoveryService::on_received_messages(brpc::StreamId stream_id,
                     uint32_t lg_id = finish_msg.log_group_id();
                     uint32_t latest_txn_no = finish_msg.latest_txn_no();
                     uint64_t last_ckpt_ts = finish_msg.last_ckpt_ts();
+                    uint64_t max_ts_in_log = finish_msg.max_ts_in_log();
                     Sharder::Instance().FinishLogReplay(cc_ng_id,
                                                         cc_ng_term,
                                                         lg_id,
                                                         latest_txn_no,
-                                                        last_ckpt_ts);
+                                                        last_ckpt_ts,
+                                                        max_ts_in_log);
                 }
 
                 LOG(INFO) << "replay connection: cc node group: "
