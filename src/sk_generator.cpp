@@ -318,7 +318,7 @@ void SkGenerator::ScanAndEncodeIndex(const TxKey *start_key,
     }
     size_t core_cnt = cc_shards->Count();
 
-    DataSyncScanCc scan_req(*base_table_name_,
+    RangePartitionDataSyncScanCc scan_req(*base_table_name_,
                             scan_ts_,
                             node_group_id_,
                             ng_term,
@@ -328,15 +328,8 @@ void SkGenerator::ScanAndEncodeIndex(const TxKey *start_key,
                             start_key,
                             end_key,
                             false,
-#ifdef RANGE_PARTITION_ENABLED
                             true,
                             true
-#else
-                            0,
-                            false,
-                            [](size_t hash_code) { return true; }
-
-#endif
     );
 
     CcErrorCode scan_res = CcErrorCode::NO_ERROR;
@@ -384,23 +377,19 @@ void SkGenerator::ScanAndEncodeIndex(const TxKey *start_key,
                      scan_res == CcErrorCode::DATA_STORE_ERR)
             {
                 std::this_thread::sleep_for(std::chrono::seconds(30));
-#ifndef ON_KEY_OBJECT
                 // Reset the paused key.
                 for (size_t i = 0; i < core_cnt; ++i)
                 {
                     const TxKey &paused_key = scan_req.PausePos(i).first;
                     if (!scan_req.IsDrained(i))
                     {
-#ifdef RANGE_PARTITION_ENABLED
                         // Should use one copy of the key, instead of move the
                         // ownership of the key, because this round of scan may
                         // failed again.
                         assert(paused_key.IsOwner());
                         paused_key.Copy(last_finished_pos[i]);
-#endif
                     }
                 }
-#endif
                 scan_req.Reset();
                 scan_pk_finished = false;
                 scan_res = CcErrorCode::NO_ERROR;
@@ -468,9 +457,7 @@ void SkGenerator::ScanAndEncodeIndex(const TxKey *start_key,
                         // Finish the pack sk operation
                         task_result_ = CcErrorCode::PACK_SK_ERR;
                         pack_sk_err_ = std::move(sk_encoder->GetError());
-#ifdef RANGE_PARTITION_ENABLED
                         scan_req.UnpinSlices();
-#endif
                         return;
                     }
                 } /* End of each key */
@@ -487,17 +474,13 @@ void SkGenerator::ScanAndEncodeIndex(const TxKey *start_key,
                             << node_group_id_;
                         task_status_->TerminateGenerateSk();
                         task_result_ = CcErrorCode::TX_NODE_NOT_LEADER;
-#ifdef RANGE_PARTITION_ENABLED
                         scan_req.UnpinSlices();
-#endif
                         return;
                     }
-#ifndef ON_KEY_OBJECT
                     // Update the last finished key.
                     auto &paused_key = scan_req.PausePos(core_idx).first;
                     if (!scan_req.IsDrained(core_idx))
                     {
-#ifdef RANGE_PARTITION_ENABLED
                         if (last_finished_pos[core_idx].IsOwner())
                         {
                             last_finished_pos[core_idx].Copy(paused_key);
@@ -506,9 +489,7 @@ void SkGenerator::ScanAndEncodeIndex(const TxKey *start_key,
                         {
                             last_finished_pos[core_idx] = paused_key.Clone();
                         }
-#endif
                     }
-#endif
                     // If the data is drained
                     scan_data_drained =
                         scan_req.IsDrained(core_idx) && scan_data_drained;
@@ -542,9 +523,7 @@ void SkGenerator::ScanAndEncodeIndex(const TxKey *start_key,
                        << "of ng#" << node_group_id_
                        << " caused by upload task failed."
                        << static_cast<uint32_t>(upload_res);
-#ifdef RANGE_PARTITION_ENABLED
             scan_req.UnpinSlices();
-#endif
             task_result_ = upload_res;
         }
     } while (!scan_pk_finished);
@@ -657,7 +636,6 @@ CcErrorCode UploadIndexContext::UploadEncodedIndex(UploadIndexTask &upload_task)
     // for the specific node group, which TxKeys belong to it.
     std::unordered_map<TableName, NGIndexSet> ng_index_set;
     CcErrorCode res = CcErrorCode::NO_ERROR;
-#ifdef RANGE_PARTITION_ENABLED
     LocalCcShards *cc_shards = Sharder::Instance().GetLocalCcShards();
     TransactionExecution *acq_range_lock_txm =
         txservice::NewTxInit(cc_shards->GetTxService(),
@@ -680,39 +658,10 @@ CcErrorCode UploadIndexContext::UploadEncodedIndex(UploadIndexTask &upload_task)
     DLOG(INFO) << "UploadEncodedIndex: Upload encoded indexes of ng#"
                << node_group_id_
                << " with txn: " << acq_range_lock_txm->TxNumber();
-#else
-    for (auto table_it = upload_task.table_index_set_.begin();
-         table_it != upload_task.table_index_set_.end();
-         ++table_it)
-    {
-        auto &table_write_entrys = table_it->second;
-        auto ng_write_entry_it = ng_index_set.find(table_it->first);
-        if (ng_write_entry_it == ng_index_set.end())
-        {
-            auto ins_it = ng_index_set.emplace(
-                std::piecewise_construct,
-                std::forward_as_tuple(table_it->first.StringView(),
-                                      table_it->first.Type(),
-                                      table_it->first.Engine()),
-                std::forward_as_tuple(NGIndexSet()));
-            ng_write_entry_it = ins_it.first;
-        }
-        // auto &ng_table_write_entrys = ng_write_entry_it->second;
-        for (auto item_it = table_write_entrys.begin();
-             item_it != table_write_entrys.end();
-             ++item_it)
-        {
-            // TODO(lzx): read bucket to get node group.
-            assert(false);
-        }
-    }
-#endif
 
     res = UploadIndexInternal(ng_index_set);
 
-#ifdef RANGE_PARTITION_ENABLED
     ReleaseRangeReadLocks(acq_range_lock_txm, true);
-#endif
 
     DLOG(INFO) << "UploadEncodedIndex: Finished of ng#" << node_group_id_
                << " with result: " << CcErrorMessage(res);
@@ -1125,7 +1074,6 @@ void UploadIndexContext::UploadIndexWorker()
         pending_head_ = (pending_head_ + 1) % UploadIndexWorkerSize;
         lk.unlock();
 
-#ifdef RANGE_PARTITION_ENABLED
         for (auto table_it = upload_task.table_index_set_.begin();
              table_it != upload_task.table_index_set_.end();
              ++table_it)
@@ -1136,7 +1084,6 @@ void UploadIndexContext::UploadIndexWorker()
                       [](const WriteEntry &e1, const WriteEntry &e2)
                       { return e1.key_ < e2.key_; });
         }
-#endif
 
         CcErrorCode res_code = CcErrorCode::NO_ERROR;
         do

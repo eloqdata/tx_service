@@ -32,9 +32,7 @@
 #include "tx_key.h"
 #include "tx_record.h"
 
-#ifndef RANGE_PARTITION_ENABLED
 #include "sharder.h"
-#endif
 
 namespace txservice
 {
@@ -210,7 +208,6 @@ struct CatalogEntry
         dirty_schema_version_ = 0;
     }
 
-#ifndef RANGE_PARTITION_ENABLED
     // FIXME(lokax):
     std::vector<uint64_t> last_sync_ts_;
 
@@ -259,7 +256,6 @@ struct CatalogEntry
         }
     }
 
-#endif
 
     std::shared_ptr<TableSchema> schema_{nullptr};
     std::shared_ptr<TableSchema> dirty_schema_{nullptr};

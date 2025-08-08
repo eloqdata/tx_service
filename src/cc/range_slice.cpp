@@ -424,7 +424,6 @@ bool StoreRange::SampleSubRangeKeys(StoreSlice *slice,
                                     size_t key_cnt,
                                     std::vector<TxKey> &new_range_keys)
 {
-#ifdef RANGE_PARTITION_ENABLED
     TxKey start_key = slice->StartTxKey();
     TxKey end_key = slice->EndTxKey();
 
@@ -462,7 +461,6 @@ bool StoreRange::SampleSubRangeKeys(StoreSlice *slice,
             new_range_keys.emplace_back(key.Clone());
         }
     }
-#endif
 
     return true;
 }

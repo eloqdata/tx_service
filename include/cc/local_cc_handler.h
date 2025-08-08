@@ -438,7 +438,6 @@ public:
                      uint64_t range_version = UINT64_MAX) override;
 
     void VerifyOrphanLock(TxNumber txn) override;
-#ifdef RANGE_PARTITION_ENABLED
     /// <summary>
     /// Delete key that are between start_key and end_key from key cache.
     /// </summary>
@@ -456,7 +455,6 @@ public:
                                 const TxKey &end_key,
                                 StoreRange *store_range,
                                 CcHandlerResult<Void> &hres) override;
-#endif
 
     void InvalidateTableCache(const TableName &table_name,
                               uint32_t ng_id,
@@ -501,10 +499,7 @@ private:
     CcRequestPool<ApplyCc> apply_pool;
     CcRequestPool<UploadTxCommandsCc> cmd_commit_pool;
     CcRequestPool<InvalidateTableCacheCc> invalidate_table_cache_pool;
-#ifdef RANGE_PARTITION_ENABLED
     CcRequestPool<UpdateKeyCacheCc> update_key_cache_pool_;
-#endif
-
     CircularQueue<std::unique_ptr<CcScanner>> pk_forward_scanner_{64};
     CircularQueue<std::unique_ptr<CcScanner>> pk_backward_scanner_{64};
     CircularQueue<std::unique_ptr<CcScanner>> sk_forward_scanner_{64};

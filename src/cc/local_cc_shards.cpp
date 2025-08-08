@@ -107,22 +107,13 @@ LocalCcShards::LocalCcShards(
                                   : conf.at("core_num")),
 #endif
 
-#ifdef EXT_TX_PROC_ENABLED
-#ifdef RANGE_PARTITION_ENABLED
-      // If range partition is enabled, we use half of the cores for data sync
-      // workers. At least 3 data sync workers are created to ensure no thread
-      // starves.
-      data_sync_worker_ctx_(
-          std::max(static_cast<int>(conf.at("core_num") / 2), 3)),
-#else
       data_sync_worker_ctx_(conf.at("core_num")),
-#endif
+#ifdef EXT_TX_PROC_ENABLED
       flush_data_worker_ctx_(
           conf.at("core_num") >= 2
               ? std::min(conf.at("core_num") / 2, (uint32_t) 10)
               : 1),
 #else
-      data_sync_worker_ctx_(conf.at("core_num")),
       flush_data_worker_ctx_(
           std::min(static_cast<int>(conf.at("core_num")), 10)),
 #endif
@@ -257,7 +248,6 @@ void LocalCcShards::StartBackgroudWorkers()
             std::thread([this] { FlushDataWorker(); }));
     }
 
-#ifdef RANGE_PARTITION_ENABLED
     LOG(INFO) << "Range Split Worker Num: "
               << range_split_worker_ctx_.worker_num_;
     for (int id = 0; id < range_split_worker_ctx_.worker_num_; id++)
@@ -265,11 +255,8 @@ void LocalCcShards::StartBackgroudWorkers()
         range_split_worker_ctx_.worker_thd_.push_back(
             std::thread([this] { RangeSplitWorker(); }));
     }
-#endif
 
-#ifndef RANGE_PARTITION_ENABLED
     data_sync_task_queue_.resize(data_sync_worker_ctx_.worker_num_);
-#endif
 
     for (int id = 0; id < data_sync_worker_ctx_.worker_num_; id++)
     {
@@ -702,7 +689,6 @@ void LocalCcShards::CreateSplitRangeRecoveryTx(
          txn = replay_log_cc.Txn(),
          tx_term,
          commit_ts = replay_log_cc.CommitTs(),
-         range_info,
          new_range_keys = std::move(new_range_keys),
          new_partition_ids = std::move(new_partition_ids),
          node_group_id,
@@ -843,14 +829,12 @@ void LocalCcShards::CreateSplitRangeRecoveryTx(
                                                    table_name.Type(),
                                                    table_name.Engine(),
                                                    partition_id);
-        // Checkpoint cannot start at `tx_term` until recover is finished,
-        // we should be the only one trying to sync the range.
-#ifdef RANGE_PARTITION_ENABLED
+            // Checkpoint cannot start at `tx_term` until recover is finished,
+            // we should be the only one trying to sync the range.
             auto limiter = task_limiters_.emplace(
                 task_limiter_key, std::make_shared<DataSyncTaskLimiter>());
             assert(limiter.second == true);
             (void) limiter;
-#endif
 
             replay_log_cc.SetFinish();
 
@@ -1764,13 +1748,11 @@ void LocalCcShards::BroadcastIndexStatistics(
 const BucketInfo *LocalCcShards::GetBucketInfo(const uint16_t bucket_id,
                                                const NodeGroupId ng_id) const
 {
-#ifndef RANGE_PARTITION_ENABLED
     if (!buckets_migrating_.load(std::memory_order_relaxed))
     {
         return GetBucketInfoInternal(bucket_id, ng_id);
     }
     else
-#endif
     {
         std::shared_lock<std::shared_mutex> lk(meta_data_mux_);
         return GetBucketInfoInternal(bucket_id, ng_id);
@@ -2148,7 +2130,6 @@ LocalCcShards::GenerateBucketMigrationPlan(
     return migrate_plan;
 }
 
-#ifdef RANGE_PARTITION_ENABLED
 std::pair<TableRangeEntry *, StoreRange *> LocalCcShards::PinStoreRange(
     const TableName &table_name,
     const NodeGroupId ng_id,
@@ -2236,17 +2217,19 @@ bool LocalCcShards::EnqueueRangeDataSyncTask(
             // Push task to worker task queue.
             std::lock_guard<std::mutex> task_worker_lk(
                 data_sync_worker_ctx_.mux_);
-            data_sync_task_queue_.emplace_back(
-                std::make_shared<DataSyncTask>(table_name,
-                                               range_info->PartitionId(),
-                                               range_info->VersionTs(),
-                                               ng_id,
-                                               ng_term,
-                                               data_sync_ts,
-                                               status,
-                                               is_dirty,
-                                               can_be_skipped,
-                                               hres));
+            data_sync_task_queue_[range_info->PartitionId() %
+                                  data_sync_task_queue_.size()]
+                .emplace_back(
+                    std::make_shared<DataSyncTask>(table_name,
+                                                   range_info->PartitionId(),
+                                                   range_info->VersionTs(),
+                                                   ng_id,
+                                                   ng_term,
+                                                   data_sync_ts,
+                                                   status,
+                                                   is_dirty,
+                                                   can_be_skipped,
+                                                   hres));
             return true;
         }
         else
@@ -2355,7 +2338,9 @@ void LocalCcShards::EnqueueDataSyncTaskForSplittingRange(
     std::shared_ptr<DataSyncStatus> status =
         std::make_shared<DataSyncStatus>(ng_id, ng_term, false);
     const std::vector<TxKey> *new_keys = range_entry->GetRangeInfo()->NewKey();
-    assert(new_keys);
+    const std::vector<int32_t> *new_range_ids =
+        range_entry->GetRangeInfo()->NewPartitionId();
+    assert(new_keys->size() == new_range_ids->size());
 
     // Push task to worker task queue.
     // There is no need to construct DataSyncTaskLimiter for those subrange
@@ -2370,41 +2355,45 @@ void LocalCcShards::EnqueueDataSyncTaskForSplittingRange(
     TxKey old_start_key = range_entry->GetRangeInfo()->StartTxKey();
     TxKey old_end_key = range_entry->GetRangeInfo()->EndTxKey();
     // The old range
-    data_sync_task_queue_.emplace_back(std::make_shared<DataSyncTask>(
-        table_name,
-        ng_id,
-        ng_term,
-        table_schema,
-        range_entry,
-        range_entry->GetRangeInfo()->StartTxKey(),
-        *new_keys->begin(),
-        data_sync_ts,
-        is_dirty,
-        false,
-        txn,
-        status,
-        hres));
+    data_sync_task_queue_[range_entry->GetRangeInfo()->PartitionId() %
+                          data_sync_task_queue_.size()]
+        .emplace_back(std::make_shared<DataSyncTask>(
+            table_name,
+            ng_id,
+            ng_term,
+            table_schema,
+            range_entry,
+            range_entry->GetRangeInfo()->StartTxKey(),
+            *new_keys->begin(),
+            data_sync_ts,
+            is_dirty,
+            false,
+            txn,
+            status,
+            hres));
 
     bool need_copy_range = store_hd_->NeedCopyRange();
-    for (auto iter = new_keys->begin(); iter != new_keys->end(); ++iter)
+
+    for (size_t i = 0; i < new_keys->size(); ++i)
     {
-        TxKey end_key = (std::next(iter) == new_keys->end()
-                             ? range_entry->GetRangeInfo()->EndTxKey()
-                             : std::next(iter)->GetShallowCopy());
-        data_sync_task_queue_.emplace_back(
-            std::make_shared<DataSyncTask>(table_name,
-                                           ng_id,
-                                           ng_term,
-                                           table_schema,
-                                           range_entry,
-                                           *iter,
-                                           end_key,
-                                           data_sync_ts,
-                                           is_dirty,
-                                           need_copy_range,
-                                           txn,
-                                           status,
-                                           hres));
+        int32_t new_range_id = (*new_range_ids)[i];
+        TxKey end_key =
+            (i == new_keys->size() - 1 ? range_entry->GetRangeInfo()->EndTxKey()
+                                       : (*new_keys)[i + 1].GetShallowCopy());
+        data_sync_task_queue_[new_range_id % data_sync_task_queue_.size()]
+            .emplace_back(std::make_shared<DataSyncTask>(table_name,
+                                                         ng_id,
+                                                         ng_term,
+                                                         table_schema,
+                                                         range_entry,
+                                                         (*new_keys)[i],
+                                                         end_key,
+                                                         data_sync_ts,
+                                                         is_dirty,
+                                                         need_copy_range,
+                                                         txn,
+                                                         status,
+                                                         hres));
     }
 
     data_sync_worker_ctx_.cv_.notify_all();
@@ -2428,7 +2417,6 @@ void LocalCcShards::EnqueueDataSyncTaskForSplittingRange(
         }
     }
 }
-#else
 bool LocalCcShards::EnqueueDataSyncTaskToCore(
     const TableName &table_name,
     uint32_t ng_id,
@@ -2467,7 +2455,7 @@ bool LocalCcShards::EnqueueDataSyncTaskToCore(
         task_limiter_lk.unlock();
 
         auto task = std::make_shared<DataSyncTask>(table_name,
-                                                   0,
+                                                   core_idx,
                                                    0,
                                                    ng_id,
                                                    ng_term,
@@ -2478,8 +2466,7 @@ bool LocalCcShards::EnqueueDataSyncTaskToCore(
                                                    hres,
                                                    filter_lambda,
                                                    send_cache_for_migration,
-                                                   is_standby_node,
-                                                   core_idx);
+                                                   is_standby_node);
 
         // Push task to worker task queue.
         {
@@ -2502,7 +2489,7 @@ bool LocalCcShards::EnqueueDataSyncTaskToCore(
                 iter->second->latest_pending_task_ts_ = data_sync_ts;
                 iter->second->pending_tasks_.push(
                     std::make_shared<DataSyncTask>(table_name,
-                                                   0,
+                                                   core_idx,
                                                    0,
                                                    ng_id,
                                                    ng_term,
@@ -2513,8 +2500,7 @@ bool LocalCcShards::EnqueueDataSyncTaskToCore(
                                                    hres,
                                                    filter_lambda,
                                                    send_cache_for_migration,
-                                                   is_standby_node,
-                                                   core_idx));
+                                                   is_standby_node));
                 enqueued_task = true;
             }
             else
@@ -2534,7 +2520,7 @@ bool LocalCcShards::EnqueueDataSyncTaskToCore(
             // checkpoint tasks.
             iter->second->pending_tasks_.push(
                 std::make_shared<DataSyncTask>(table_name,
-                                               0,
+                                               core_idx,
                                                0,
                                                ng_id,
                                                ng_term,
@@ -2545,14 +2531,12 @@ bool LocalCcShards::EnqueueDataSyncTaskToCore(
                                                hres,
                                                filter_lambda,
                                                send_cache_for_migration,
-                                               is_standby_node,
-                                               core_idx));
+                                               is_standby_node));
             enqueued_task = true;
         }
     }
     return enqueued_task;
 }
-#endif
 
 void LocalCcShards::EnqueueDataSyncTaskForTable(
     const TableName &table_name,
@@ -2570,99 +2554,79 @@ void LocalCcShards::EnqueueDataSyncTaskForTable(
 
     std::shared_lock<std::shared_mutex> meta_lk(meta_data_mux_);
     last_data_sync_ts = UINT64_MAX;
-
-#ifndef RANGE_PARTITION_ENABLED
-    CatalogEntry *catalog_entry = GetCatalogInternal(table_name, ng_id);
-    if (!catalog_entry)
-    {
-        if (hres)
-        {
-            hres->SetFinished();
-        }
-
-        return;
-    }
-
-    last_data_sync_ts = catalog_entry->GetMinLastSyncTs();
-    // Release `meta_data_mux_`
-    meta_lk.unlock();
-
-    auto core_count = cc_shards_.size();
-    size_t task_cnt = 0;
-
-    for (size_t core_idx = 0; core_idx < core_count; ++core_idx)
-    {
-        if (EnqueueDataSyncTaskToCore(table_name,
-                                      ng_id,
-                                      ng_term,
-                                      data_sync_ts,
-                                      core_idx,
-                                      is_standby_node,
-                                      is_dirty,
-                                      can_be_skipped,
-                                      status,
-                                      hres))
-        {
-            task_cnt++;
-        }
-    }
-
-    {
-        std::lock_guard<std::mutex> status_lk(status->mux_);
-        status->unfinished_tasks_ += task_cnt;
-        status->unfinished_scan_tasks_ += task_cnt;
-        if (hres)
-        {
-            status->all_task_started_ = true;
-            if (status->unfinished_tasks_ == 0)
-            {
-                hres->SetFinished();
-                return;
-            }
-        }
-        if (status->unfinished_scan_tasks_ == 0 &&
-            status->unfinished_tasks_ != 0 && status->all_task_started_)
-        {
-            FlushCurrentFlushBuffer();
-        }
-    }
-
-#else
-
-    TableName range_table_name(table_name.StringView(),
-                               TableType::RangePartition,
-                               table_name.Engine());
-    auto ranges = GetTableRangesForATableInternal(range_table_name, ng_id);
-    if (ranges == nullptr)
-    {
-        if (hres)
-        {
-            hres->SetFinished();
-        }
-        return;
-    }
-
     uint32_t unfinished_task_cnt = 0;
 
-    for (auto &range : *ranges)
+    if (table_name.IsHashPartitioned())
     {
-        if (EnqueueRangeDataSyncTask(table_name,
-                                     ng_id,
-                                     ng_term,
-                                     range.second.get(),
-                                     data_sync_ts,
-                                     is_dirty,
-                                     can_be_skipped,
-                                     last_data_sync_ts,
-                                     status,
-                                     hres))
+        CatalogEntry *catalog_entry = GetCatalogInternal(table_name, ng_id);
+        if (!catalog_entry)
         {
-            // Increment local variable to reduce lock contention.
-            unfinished_task_cnt++;
+            if (hres)
+            {
+                hres->SetFinished();
+            }
+
+            return;
+        }
+
+        last_data_sync_ts = catalog_entry->GetMinLastSyncTs();
+        // Release `meta_data_mux_`
+        meta_lk.unlock();
+
+        auto core_count = cc_shards_.size();
+
+        for (size_t core_idx = 0; core_idx < core_count; ++core_idx)
+        {
+            if (EnqueueDataSyncTaskToCore(table_name,
+                                          ng_id,
+                                          ng_term,
+                                          data_sync_ts,
+                                          core_idx,
+                                          is_standby_node,
+                                          is_dirty,
+                                          can_be_skipped,
+                                          status,
+                                          hres))
+            {
+                unfinished_task_cnt++;
+            }
         }
     }
+    else
+    {
+        TableName range_table_name(table_name.StringView(),
+                                   TableType::RangePartition,
+                                   table_name.Engine());
+        auto ranges = GetTableRangesForATableInternal(range_table_name, ng_id);
+        if (ranges == nullptr)
+        {
+            if (hres)
+            {
+                hres->SetFinished();
+            }
+            return;
+        }
 
-    meta_lk.unlock();
+        for (auto &range : *ranges)
+        {
+            if (EnqueueRangeDataSyncTask(table_name,
+                                         ng_id,
+                                         ng_term,
+                                         range.second.get(),
+                                         data_sync_ts,
+                                         is_dirty,
+                                         can_be_skipped,
+                                         last_data_sync_ts,
+                                         status,
+                                         hres))
+            {
+                // Increment local variable to reduce lock contention.
+                unfinished_task_cnt++;
+            }
+        }
+
+        meta_lk.unlock();
+    }
 
     {
         std::lock_guard<std::mutex> status_lk(status->mux_);
@@ -2685,8 +2649,6 @@ void LocalCcShards::EnqueueDataSyncTaskForTable(
             return;
         }
     }
-
-#endif
     data_sync_worker_ctx_.cv_.notify_all();
 }
 
@@ -2839,9 +2801,7 @@ void LocalCcShards::Terminate()
     // Terminate the flush worker thds.
     flush_data_worker_ctx_.Terminate();
 
-#ifdef RANGE_PARTITION_ENABLED
     range_split_worker_ctx_.Terminate();
-#endif
 
     if (realtime_sampling_)
     {
@@ -2864,14 +2824,7 @@ void LocalCcShards::Terminate()
 void LocalCcShards::DataSyncWorker(size_t worker_idx)
 {
     std::unique_lock<std::mutex> task_worker_lk(data_sync_worker_ctx_.mux_);
-
-#ifdef RANGE_PARTITION_ENABLED
-    auto &task_queue = data_sync_task_queue_;
-    (void) worker_idx;
-#else
     auto &task_queue = data_sync_task_queue_[worker_idx];
-#endif
-
     while (data_sync_worker_ctx_.status_ == WorkerStatus::Active)
     {
         data_sync_worker_ctx_.cv_.wait(
@@ -2887,174 +2840,44 @@ void LocalCcShards::DataSyncWorker(size_t worker_idx)
             continue;
         }
 
-        DataSync(task_worker_lk, worker_idx);
+        std::shared_ptr<DataSyncTask> task = task_queue.front();
+        task_queue.pop_front();
+        task_worker_lk.unlock();
+        if (task->table_name_.IsHashPartitioned())
+        {
+            DataSyncForHashPartition(std::move(task), worker_idx);
+        }
+        else
+        {
+            DataSyncForRangePartition(std::move(task), worker_idx);
+        }
+        task_worker_lk.lock();
     }
 
     // Handle pending tasks.
     while (!task_queue.empty())
     {
-        DataSync(task_worker_lk, worker_idx);
-    }
-}
-
-void LocalCcShards::PostProcessCkpt(std::shared_ptr<DataSyncTask> &task,
-                                    bool flush_ret)
-{
-    assert(task->flight_task_cnt_ == 0);
-
-    int64_t ng_term =
-        Sharder::Instance().TryPinNodeGroupData(task->node_group_id_);
-    if (ng_term != task->node_group_term_)
-    {
-        LOG(ERROR) << "PostProcessDCkpt: term mismatch ng#"
-                   << task->node_group_id_ << ", leader term: " << ng_term
-                   << ", expected term: " << task->node_group_term_;
-#ifdef RANGE_PARTITION_ENABLED
-        if (!task->during_split_range_)
+        std::shared_ptr<DataSyncTask> task = task_queue.front();
+        task_queue.pop_front();
+        task_worker_lk.unlock();
+        if (task->table_name_.IsHashPartitioned())
         {
-            PopPendingTask(task->node_group_id_,
-                           task->node_group_term_,
-                           task->table_name_,
-                           task->range_id_);
-        }
-#else
-        PopPendingTask(task->node_group_id_,
-                       task->node_group_term_,
-                       task->table_name_,
-                       task->worker_idx_);
-#endif
-
-        if (ng_term >= 0)
-        {
-            Sharder::Instance().UnpinNodeGroupData(task->node_group_id_);
-        }
-        return;
-    }
-
-#ifdef RANGE_PARTITION_ENABLED
-    TableRangeEntry *range_entry = nullptr;
-    const TxKey *start_key = nullptr;
-    const TxKey *end_key = nullptr;
-    if (!task->during_split_range_)
-    {
-        TableName range_tbl_name{task->table_name_.StringView(),
-                                 TableType::RangePartition,
-                                 task->table_name_.Engine()};
-
-        std::shared_lock<std::shared_mutex> lk(meta_data_mux_);
-        range_entry = const_cast<TableRangeEntry *>(GetTableRangeEntryInternal(
-            range_tbl_name, task->node_group_id_, task->range_id_));
-        if (range_entry == nullptr)
-        {
-            lk.unlock();
-
-            // table has been dropped.
-            LOG(ERROR)
-                << "PostProcessCkpt: range entry is null, ckpt error code is "
-                << static_cast<size_t>(task->status_->err_code_);
-            assert(task->status_->err_code_ != CcErrorCode::NO_ERROR);
-            PopPendingTask(task->node_group_id_,
-                           task->node_group_term_,
-                           task->table_name_,
-                           task->range_id_);
-            if (ng_term >= 0)
-            {
-                Sharder::Instance().UnpinNodeGroupData(task->node_group_id_);
-            }
-            return;
-        }
-
-        assert(range_entry);
-
-        if (flush_ret)
-        {
-            // Update the task status for this range.
-            range_entry->UpdateLastDataSyncTS(task->data_sync_ts_);
+            DataSyncForHashPartition(std::move(task), worker_idx);
         }
         else
         {
-            // Reset the post ckpt size if flush failed
-            UpdateStoreSlice(task->table_name_,
-                             task->data_sync_ts_,
-                             range_entry,
-                             start_key,
-                             end_key,
-                             false);
+            DataSyncForRangePartition(std::move(task), worker_idx);
         }
-
-        range_entry->UnPinStoreRange();
-
-        lk.unlock();
-
-        PopPendingTask(task->node_group_id_,
-                       task->node_group_term_,
-                       task->table_name_,
-                       task->range_id_);
-    }
-    else
-    {
-        range_entry = task->range_entry_;
-        start_key = &task->start_key_;
-        end_key = &task->end_key_;
-
-        if (!flush_ret)
-        {
-            // Reset the post ckpt size if flush failed
-            UpdateStoreSlice(task->table_name_,
-                             task->data_sync_ts_,
-                             range_entry,
-                             start_key,
-                             end_key,
-                             false);
-        }
-    }
-
-#else
-
-    if (flush_ret)
-    {
-        {
-            std::shared_lock<std::shared_mutex> meta_data_lk(meta_data_mux_);
-            const TableName base_table_name{
-                task->table_name_.GetBaseTableNameSV(),
-                TableType::Primary,
-                task->table_name_.Engine()};
-            CatalogEntry *catalog_entry =
-                GetCatalogInternal(base_table_name, task->node_group_id_);
-            if (catalog_entry && task->data_sync_ts_ != UINT64_MAX &&
-                !task->filter_lambda_)
-            {
-                catalog_entry->UpdateLastDataSyncTS(task->data_sync_ts_,
-                                                    task->worker_idx_);
-            }
-        }
-
-        PopPendingTask(task->node_group_id_,
-                       task->node_group_term_,
-                       task->table_name_,
-                       task->worker_idx_);
-    }
-    else
-    {
-        PopPendingTask(task->node_group_id_,
-                       task->node_group_term_,
-                       task->table_name_,
-                       task->worker_idx_);
-    }
-#endif
-
-    if (ng_term >= 0)
-    {
-        Sharder::Instance().UnpinNodeGroupData(task->node_group_id_);
+        task_worker_lk.lock();
     }
 }
 
-#ifdef RANGE_PARTITION_ENABLED
-void LocalCcShards::PostProcessDataSyncTask(std::shared_ptr<DataSyncTask> task,
-                                            const TableSchema *table_schema,
-                                            TransactionExecution *data_sync_txm,
-                                            DataSyncTask::CkptErrorCode err,
-                                            bool is_scan_task)
+void LocalCcShards::PostProcessRangePartitionDataSyncTask(
+    std::shared_ptr<DataSyncTask> task,
+    const TableSchema *table_schema,
+    TransactionExecution *data_sync_txm,
+    DataSyncTask::CkptErrorCode err,
+    bool is_scan_task)
 {
     int64_t ng_term =
         Sharder::Instance().TryPinNodeGroupData(task->node_group_id_);
@@ -3089,7 +2912,7 @@ void LocalCcShards::PostProcessDataSyncTask(std::shared_ptr<DataSyncTask> task,
                 PopPendingTask(task->node_group_id_,
                                task->node_group_term_,
                                task->table_name_,
-                               task->range_id_);
+                               task->id_);
             }
             task->SetError(CcErrorCode::REQUESTED_NODE_NOT_LEADER);
             SetWaitingCkpt(false);
@@ -3106,7 +2929,7 @@ void LocalCcShards::PostProcessDataSyncTask(std::shared_ptr<DataSyncTask> task,
         if (!task->during_split_range_)
         {
             range_entry = const_cast<TableRangeEntry *>(GetTableRangeEntry(
-                task->table_name_, task->node_group_id_, task->range_id_));
+                task->table_name_, task->node_group_id_, task->id_));
         }
         else
         {
@@ -3130,7 +2953,7 @@ void LocalCcShards::PostProcessDataSyncTask(std::shared_ptr<DataSyncTask> task,
                 // already, it's too expensive to start from the beginning
                 // all over again.
                 LOG(ERROR) << "DataSync failed to update store slice of range#"
-                           << task->range_id_ << " on table "
+                           << task->id_ << " on table "
                            << task->table_name_.Trace() << ", retrying.";
                 std::this_thread::sleep_for(1s);
                 if (!Sharder::Instance().CheckLeaderTerm(
@@ -3151,10 +2974,14 @@ void LocalCcShards::PostProcessDataSyncTask(std::shared_ptr<DataSyncTask> task,
         {
             if (!task->during_split_range_)
             {
+                range_entry->UpdateLastDataSyncTS(task->data_sync_ts_);
+                range_entry->UnPinStoreRange();
                 // Commit the data sync txm
                 txservice::CommitTx(data_sync_txm);
-                // Update the task status for this range.
-                PostProcessCkpt(task, true);
+                PopPendingTask(task->node_group_id_,
+                               task->node_group_term_,
+                               task->table_name_,
+                               task->id_);
                 reset_waiting_ckpt = true;
             }
 
@@ -3164,8 +2991,8 @@ void LocalCcShards::PostProcessDataSyncTask(std::shared_ptr<DataSyncTask> task,
         {
             if (!task->during_split_range_)
             {
-                txservice::AbortTx(data_sync_txm);
                 range_entry->UnPinStoreRange();
+                txservice::AbortTx(data_sync_txm);
             }
 
             // Should not decrease unfinished scan task in this case since the
@@ -3175,7 +3002,8 @@ void LocalCcShards::PostProcessDataSyncTask(std::shared_ptr<DataSyncTask> task,
             task->ckpt_err_ = DataSyncTask::CkptErrorCode::NO_ERROR;
             std::lock_guard<std::mutex> task_worker_lk(
                 data_sync_worker_ctx_.mux_);
-            data_sync_task_queue_.emplace_front(task);
+            data_sync_task_queue_[task->id_ % data_sync_task_queue_.size()]
+                .emplace_front(task);
             data_sync_worker_ctx_.cv_.notify_all();
         }
         else if (task_ckpt_err == DataSyncTask::CkptErrorCode::FLUSH_ERROR)
@@ -3193,14 +3021,13 @@ void LocalCcShards::PostProcessDataSyncTask(std::shared_ptr<DataSyncTask> task,
             if (!task->during_split_range_)
             {
                 // Abort the data sync txm
-                txservice::AbortTx(data_sync_txm);
-
                 range_entry->UnPinStoreRange();
+                txservice::AbortTx(data_sync_txm);
 
                 PopPendingTask(task->node_group_id_,
                                task->node_group_term_,
                                task->table_name_,
-                               task->range_id_);
+                               task->id_);
 
                 reset_waiting_ckpt = true;
             }
@@ -3244,30 +3071,14 @@ void LocalCcShards::PostProcessDataSyncTask(std::shared_ptr<DataSyncTask> task,
     }
 }
 
-void LocalCcShards::DataSync(std::unique_lock<std::mutex> &task_worker_lk,
-                             size_t worker_idx)
+void LocalCcShards::DataSyncForRangePartition(
+    std::shared_ptr<DataSyncTask> data_sync_task, size_t worker_idx)
 {
-    std::shared_ptr<void> lock_task_worker(nullptr,
-                                           [&task_worker_lk](void *)
-                                           {
-                                               if (!task_worker_lk.owns_lock())
-                                               {
-                                                   // Need to gain ownership
-                                                   // before returnning back to
-                                                   // caller.
-                                                   task_worker_lk.lock();
-                                               }
-                                           });
-    std::shared_ptr<DataSyncTask> data_sync_task =
-        data_sync_task_queue_.front();
-    data_sync_task_queue_.pop_front();
-    task_worker_lk.unlock();
-
     // Whether other task worker is processing this table.
     const TableName &table_name = data_sync_task->table_name_;
     uint32_t ng_id = data_sync_task->node_group_id_;
     int64_t expected_ng_term = data_sync_task->node_group_term_;
-    int32_t range_id = data_sync_task->range_id_;
+    int32_t range_id = data_sync_task->id_;
     bool is_dirty = data_sync_task->is_dirty_;
     bool during_split_range = data_sync_task->during_split_range_;
     bool export_base_table_items = data_sync_task->export_base_table_items_;
@@ -3414,7 +3225,7 @@ void LocalCcShards::DataSync(std::unique_lock<std::mutex> &task_worker_lk,
 
             std::lock_guard<std::mutex> task_worker_lk(
                 data_sync_worker_ctx_.mux_);
-            data_sync_task_queue_.emplace_front(data_sync_task);
+            data_sync_task_queue_[worker_idx].emplace_front(data_sync_task);
             data_sync_worker_ctx_.cv_.notify_one();
             return;
         }
@@ -3475,7 +3286,7 @@ void LocalCcShards::DataSync(std::unique_lock<std::mutex> &task_worker_lk,
 
                 std::lock_guard<std::mutex> task_worker_lk(
                     data_sync_worker_ctx_.mux_);
-                data_sync_task_queue_.emplace_front(data_sync_task);
+                data_sync_task_queue_[worker_idx].emplace_front(data_sync_task);
                 data_sync_worker_ctx_.cv_.notify_one();
             }
             return;
@@ -3556,7 +3367,7 @@ void LocalCcShards::DataSync(std::unique_lock<std::mutex> &task_worker_lk,
             // Put back into the beginning.
             std::lock_guard<std::mutex> task_worker_lk(
                 data_sync_worker_ctx_.mux_);
-            data_sync_task_queue_.emplace_front(data_sync_task);
+            data_sync_task_queue_[worker_idx].emplace_front(data_sync_task);
             data_sync_worker_ctx_.cv_.notify_one();
             return;
         }
@@ -3646,7 +3457,7 @@ void LocalCcShards::DataSync(std::unique_lock<std::mutex> &task_worker_lk,
             }
         }
         std::lock_guard<std::mutex> task_worker_lk(data_sync_worker_ctx_.mux_);
-        data_sync_task_queue_.emplace_front(data_sync_task);
+        data_sync_task_queue_[worker_idx].emplace_front(data_sync_task);
         data_sync_worker_ctx_.cv_.notify_one();
         return;
     }
@@ -3817,21 +3628,21 @@ void LocalCcShards::DataSync(std::unique_lock<std::mutex> &task_worker_lk,
     // same Key can be generated. Our subsequent algorithms are based on this
     // assumption.
 
-    DataSyncScanCc scan_cc(table_name,
-                           data_sync_task->data_sync_ts_,
-                           ng_id,
-                           ng_term,
-                           cc_shards_.size(),
-                           DATA_SYNC_SCAN_BATCH_SIZE,
-                           tx_number,
-                           &start_tx_key,
-                           &end_tx_key,
-                           false,
-                           export_base_table_items,
-                           false,
-                           store_range,
-                           &slices_delta_size,
-                           schema_version);
+    RangePartitionDataSyncScanCc scan_cc(table_name,
+                                         data_sync_task->data_sync_ts_,
+                                         ng_id,
+                                         ng_term,
+                                         cc_shards_.size(),
+                                         DATA_SYNC_SCAN_BATCH_SIZE,
+                                         tx_number,
+                                         &start_tx_key,
+                                         &end_tx_key,
+                                         false,
+                                         export_base_table_items,
+                                         false,
+                                         store_range,
+                                         &slices_delta_size,
+                                         schema_version);
 
     {
         // DataSync Worker will call PostProcessDataSyncTask() to decrement
@@ -3856,10 +3667,11 @@ void LocalCcShards::DataSync(std::unique_lock<std::mutex> &task_worker_lk,
                        << " with error code: "
                        << static_cast<uint32_t>(scan_cc.ErrorCode());
 
-            PostProcessDataSyncTask(std::move(data_sync_task),
-                                    table_schema.get(),
-                                    data_sync_txm,
-                                    DataSyncTask::CkptErrorCode::SCAN_ERROR);
+            PostProcessRangePartitionDataSyncTask(
+                std::move(data_sync_task),
+                table_schema.get(),
+                data_sync_txm,
+                DataSyncTask::CkptErrorCode::SCAN_ERROR);
             return;
         }
         else
@@ -4117,18 +3929,19 @@ void LocalCcShards::DataSync(std::unique_lock<std::mutex> &task_worker_lk,
         req_vec.pop_back();
     }
 
-    PostProcessDataSyncTask(std::move(data_sync_task),
-                            table_schema.get(),
-                            data_sync_txm,
-                            DataSyncTask::CkptErrorCode::NO_ERROR);
+    PostProcessRangePartitionDataSyncTask(std::move(data_sync_task),
+                                          table_schema.get(),
+                                          data_sync_txm,
+                                          DataSyncTask::CkptErrorCode::NO_ERROR,
+                                          true);
 }
-#else
-void LocalCcShards::PostProcessDataSyncTask(std::shared_ptr<DataSyncTask> task,
-                                            const TableSchema *table_schema,
-                                            TransactionExecution *data_sync_txm,
-                                            DataSyncTask::CkptErrorCode err,
-                                            uint16_t worker_idx,
-                                            bool is_scan_task)
+
+void LocalCcShards::PostProcessHashPartitionDataSyncTask(
+    std::shared_ptr<DataSyncTask> task,
+    const TableSchema *table_schema,
+    TransactionExecution *data_sync_txm,
+    DataSyncTask::CkptErrorCode err,
+    bool is_scan_task)
 {
     std::unique_lock<bthread::Mutex> flight_task_lk(task->flight_task_mux_);
     int64_t flight_task_cnt = --task->flight_task_cnt_;
@@ -4147,6 +3960,20 @@ void LocalCcShards::PostProcessDataSyncTask(std::shared_ptr<DataSyncTask> task,
     {
         if (task_ckpt_err == DataSyncTask::CkptErrorCode::NO_ERROR)
         {
+            if (task->data_sync_ts_ != UINT64_MAX && !task->filter_lambda_)
+            {
+                std::shared_lock<std::shared_mutex> meta_data_lk(
+                    meta_data_mux_);
+                const TableName base_table_name{
+                    task->table_name_.GetBaseTableNameSV(),
+                    TableType::Primary,
+                    task->table_name_.Engine()};
+                CatalogEntry *catalog_entry =
+                    GetCatalogInternal(base_table_name, task->node_group_id_);
+                catalog_entry->UpdateLastDataSyncTS(task->data_sync_ts_,
+                                                    task->id_);
+            }
+
             // Commit the data sync txm
             txservice::CommitTx(data_sync_txm);
 
@@ -4154,7 +3981,10 @@ void LocalCcShards::PostProcessDataSyncTask(std::shared_ptr<DataSyncTask> task,
             // ckpt again if no cc entries can be kicked out.
             SetWaitingCkpt(false);
 
-            PostProcessCkpt(task, true);
+            PopPendingTask(task->node_group_id_,
+                           task->node_group_term_,
+                           task->table_name_,
+                           task->id_);
 
             task->SetFinish();
         }
@@ -4166,7 +3996,7 @@ void LocalCcShards::PostProcessDataSyncTask(std::shared_ptr<DataSyncTask> task,
             task->ckpt_err_ = DataSyncTask::CkptErrorCode::NO_ERROR;
             std::lock_guard<std::mutex> task_worker_lk(
                 data_sync_worker_ctx_.mux_);
-            data_sync_task_queue_[worker_idx].emplace_front(task);
+            data_sync_task_queue_[task->id_].emplace_front(task);
             data_sync_worker_ctx_.cv_.notify_all();
         }
         else if (task_ckpt_err == DataSyncTask::CkptErrorCode::FLUSH_ERROR)
@@ -4196,7 +4026,7 @@ void LocalCcShards::PostProcessDataSyncTask(std::shared_ptr<DataSyncTask> task,
             PopPendingTask(task->node_group_id_,
                            task->node_group_term_,
                            task->table_name_,
-                           worker_idx);
+                           task->id_);
 
             SetWaitingCkpt(false);
         }
@@ -4215,27 +4045,9 @@ void LocalCcShards::PostProcessDataSyncTask(std::shared_ptr<DataSyncTask> task,
     }
 }
 
-void LocalCcShards::DataSync(std::unique_lock<std::mutex> &task_worker_lk,
-                             size_t worker_idx)
+void LocalCcShards::DataSyncForHashPartition(
+    std::shared_ptr<DataSyncTask> data_sync_task, size_t worker_idx)
 {
-    std::shared_ptr<void> lock_task_worker(nullptr,
-                                           [&task_worker_lk](void *)
-                                           {
-                                               if (!task_worker_lk.owns_lock())
-                                               {
-                                                   // Need to gain ownership
-                                                   // before returnning back to
-                                                   // caller.
-                                                   task_worker_lk.lock();
-                                               }
-                                           });
-
-    std::shared_ptr<DataSyncTask> data_sync_task =
-        data_sync_task_queue_[worker_idx].front();
-    data_sync_task_queue_[worker_idx].pop_front();
-    // Release `worker ctx mux`
-    task_worker_lk.unlock();
-
     // Whether other task worker is processing this table.
     const TableName &table_name = data_sync_task->table_name_;
     uint32_t ng_id = data_sync_task->node_group_id_;
@@ -4437,20 +4249,16 @@ void LocalCcShards::DataSync(std::unique_lock<std::mutex> &task_worker_lk,
     // Note: `DataSyncScanCc` needs to ensure that no two ckpt_rec with the
     // same Key can be generated. Our subsequent algorithms are based on this
     // assumption.
-    DataSyncScanCc scan_cc(table_name,
-                           data_sync_task->data_sync_ts_,
-                           ng_id,
-                           ng_term,
-                           1,
-                           DATA_SYNC_SCAN_BATCH_SIZE,
-                           data_sync_txm->TxNumber(),
-                           nullptr,
-                           nullptr,
-                           data_sync_task->forward_cache_,
-                           last_sync_ts,
-                           true,
-                           data_sync_task->filter_lambda_,
-                           catalog_rec.Schema()->Version());
+    HashPartitionDataSyncScanCc scan_cc(table_name,
+                                        data_sync_task->data_sync_ts_,
+                                        ng_id,
+                                        ng_term,
+                                        DATA_SYNC_SCAN_BATCH_SIZE,
+                                        data_sync_txm->TxNumber(),
+                                        data_sync_task->forward_cache_,
+                                        last_sync_ts,
+                                        data_sync_task->filter_lambda_,
+                                        catalog_rec.Schema()->Version());
 
     {
         // DataSync Worker will call PostProcessDataSyncTask() to decrement
@@ -4474,11 +4282,11 @@ void LocalCcShards::DataSync(std::unique_lock<std::mutex> &task_worker_lk,
                        << table_name.StringView() << " with error code: "
                        << static_cast<int>(scan_cc.ErrorCode());
 
-            PostProcessDataSyncTask(std::move(data_sync_task),
-                                    catalog_rec.Schema(),
-                                    data_sync_txm,
-                                    DataSyncTask::CkptErrorCode::SCAN_ERROR,
-                                    worker_idx);
+            PostProcessHashPartitionDataSyncTask(
+                std::move(data_sync_task),
+                catalog_rec.Schema(),
+                data_sync_txm,
+                DataSyncTask::CkptErrorCode::SCAN_ERROR);
 
             return;
         }
@@ -4502,21 +4310,20 @@ void LocalCcShards::DataSync(std::unique_lock<std::mutex> &task_worker_lk,
                     LOG(ERROR) << "DataSync: Failed to get bucket infos for "
                                   "ng#"
                                << ng_id;
-                    PostProcessDataSyncTask(
+                    PostProcessHashPartitionDataSyncTask(
                         std::move(data_sync_task),
                         catalog_rec.Schema(),
                         data_sync_txm,
-                        DataSyncTask::CkptErrorCode::SCAN_ERROR,
-                        worker_idx);
+                        DataSyncTask::CkptErrorCode::SCAN_ERROR
+                        );
                     return;
                 }
 
                 std::unordered_map<NodeGroupId, UploadBatchClosure *>
                     send_cache_closures;
-                for (size_t idx = 0; idx < scan_cc.accumulated_scan_cnt_[0];
-                     idx++)
+                for (size_t idx = 0; idx < scan_cc.accumulated_scan_cnt_; idx++)
                 {
-                    FlushRecord &ref = scan_cc.DataSyncVec(0)[idx];
+                    FlushRecord &ref = scan_cc.DataSyncVec()[idx];
                     uint16_t bucket_id =
                         Sharder::MapKeyHashToBucketId(ref.Key().Hash());
                     NodeGroupId dest_ng =
@@ -4551,8 +4358,7 @@ void LocalCcShards::DataSync(std::unique_lock<std::mutex> &task_worker_lk,
                                     [this,
                                      data_sync_task,
                                      catalog_rec,
-                                     data_sync_txm,
-                                     worker_idx](CcErrorCode res_code,
+                                     data_sync_txm](CcErrorCode res_code,
                                                  int32_t dest_ng_term)
                                     {
                                         // We don't care if
@@ -4563,13 +4369,12 @@ void LocalCcShards::DataSync(std::unique_lock<std::mutex> &task_worker_lk,
                                         // move. Just pass in no error
                                         // so that it won't cause data sync
                                         // failure.
-                                        PostProcessDataSyncTask(
+                                        PostProcessHashPartitionDataSyncTask(
                                             std::move(data_sync_task),
                                             catalog_rec.Schema(),
                                             data_sync_txm,
                                             DataSyncTask::CkptErrorCode::
-                                                NO_ERROR,
-                                            worker_idx);
+                                                NO_ERROR);
                                     },
                                     10000,
                                     false);
@@ -4656,10 +4461,10 @@ void LocalCcShards::DataSync(std::unique_lock<std::mutex> &task_worker_lk,
                 }
             }
 
-            uint64_t flush_data_size = scan_cc.accumulated_flush_data_size_[0];
+            uint64_t flush_data_size = scan_cc.accumulated_flush_data_size_;
 
             // nothing to flush
-            if (scan_cc.accumulated_scan_cnt_[0] == 0)
+            if (scan_cc.accumulated_scan_cnt_ == 0)
             {
                 DLOG(INFO) << "scan_cc: "
                            << reinterpret_cast<uint64_t>(&scan_cc)
@@ -4678,11 +4483,11 @@ void LocalCcShards::DataSync(std::unique_lock<std::mutex> &task_worker_lk,
                        << " quota: "
                        << data_sync_mem_controller_.FlushMemoryQuota()
                        << " flight_tasks: " << data_sync_task->flight_task_cnt_
-                       << " record count: " << scan_cc.accumulated_scan_cnt_[0];
+                       << " record count: " << scan_cc.accumulated_scan_cnt_;
 
-            for (size_t j = 0; j < scan_cc.accumulated_scan_cnt_[0]; ++j)
+            for (size_t j = 0; j < scan_cc.accumulated_scan_cnt_; ++j)
             {
-                auto &rec = scan_cc.DataSyncVec(0)[j];
+                auto &rec = scan_cc.DataSyncVec()[j];
 #ifdef ON_KEY_OBJECT
                 assert(rec.cce_ != nullptr);
 #endif
@@ -4707,30 +4512,30 @@ void LocalCcShards::DataSync(std::unique_lock<std::mutex> &task_worker_lk,
                 }
             }
 
-            for (size_t j = 0; j < scan_cc.ArchiveVec(0).size(); ++j)
+            for (size_t j = 0; j < scan_cc.ArchiveVec().size(); ++j)
             {
-                auto &rec = scan_cc.ArchiveVec(0)[j];
+                auto &rec = scan_cc.ArchiveVec()[j];
                 // Note. We need to ensure the copy constructor of
                 // FlushRecord could not be called.
                 rec.SetKey((*data_sync_vec)[rec.GetKeyIndex()].Key());
             }
 
-            for (size_t j = 0; j < scan_cc.MoveBaseIdxVec(0).size(); ++j)
+            for (size_t j = 0; j < scan_cc.MoveBaseIdxVec().size(); ++j)
             {
-                size_t key_idx = scan_cc.MoveBaseIdxVec(0)[j];
+                size_t key_idx = scan_cc.MoveBaseIdxVec()[j];
                 TxKey key_raw = (*data_sync_vec)[key_idx].Key();
 
                 int32_t part_id = (key_raw.Hash() >> 10) & 0x3FF;
                 mv_base_vec->emplace_back(std::move(key_raw), part_id);
             }
 
-            std::move(scan_cc.ArchiveVec(0).begin(),
-                      scan_cc.ArchiveVec(0).end(),
+            std::move(scan_cc.ArchiveVec().begin(),
+                      scan_cc.ArchiveVec().end(),
                       std::back_inserter(*archive_vec));
 
             vec_mem_usage += flush_data_size;
 
-            scan_data_drained = scan_cc.IsDrained(0) && scan_data_drained;
+            scan_data_drained = scan_cc.IsDrained() && scan_data_drained;
 
             {
                 std::unique_lock<bthread::Mutex> flight_task_lk(
@@ -4745,9 +4550,10 @@ void LocalCcShards::DataSync(std::unique_lock<std::mutex> &task_worker_lk,
                         << data_sync_txm->TxNumber() << " on worker#"
                         << worker_idx << ". Terminal this datasync task.";
                     // 1. Release read intent on paused key
-                    if (!scan_cc.IsDrained(0))
+                    if (!scan_cc.IsDrained())
                     {
-                        scan_cc.Reset(DataSyncScanCc::OpType::Terminated);
+                        scan_cc.Reset(
+                            HashPartitionDataSyncScanCc::OpType::Terminated);
                         EnqueueToCcShard(worker_idx, &scan_cc);
                         scan_cc.Wait();
                     }
@@ -4783,12 +4589,12 @@ void LocalCcShards::DataSync(std::unique_lock<std::mutex> &task_worker_lk,
 
             vec_mem_usage = 0;
 
-            if (scan_cc.scan_heap_is_full_[0] == 1)
+            if (scan_cc.scan_heap_is_full_ == 1)
             {
                 // Clear the FlushRecords' memory of scan cc since the
                 // DataSyncScan heap is full.
-                auto &data_sync_vec_ref = scan_cc.DataSyncVec(0);
-                auto &archive_vec_ref = scan_cc.ArchiveVec(0);
+                auto &data_sync_vec_ref = scan_cc.DataSyncVec();
+                auto &archive_vec_ref = scan_cc.ArchiveVec();
                 ReleaseDataSyncScanHeapCc release_scan_heap_cc(
                     &data_sync_vec_ref, &archive_vec_ref);
                 EnqueueCcRequest(worker_idx, &release_scan_heap_cc);
@@ -4800,8 +4606,8 @@ void LocalCcShards::DataSync(std::unique_lock<std::mutex> &task_worker_lk,
     }
 
     // release scan heap memory after scan finish
-    auto &data_sync_vec_ref = scan_cc.DataSyncVec(0);
-    auto &archive_vec_ref = scan_cc.ArchiveVec(0);
+    auto &data_sync_vec_ref = scan_cc.DataSyncVec();
+    auto &archive_vec_ref = scan_cc.ArchiveVec();
     ReleaseDataSyncScanHeapCc release_scan_heap_cc(&data_sync_vec_ref,
                                                    &archive_vec_ref);
     EnqueueCcRequest(worker_idx, &release_scan_heap_cc);
@@ -4834,40 +4640,24 @@ void LocalCcShards::DataSync(std::unique_lock<std::mutex> &task_worker_lk,
         }
     }
 
-    PostProcessDataSyncTask(std::move(data_sync_task),
-                            catalog_rec.Schema(),
-                            data_sync_txm,
-                            DataSyncTask::CkptErrorCode::NO_ERROR,
-                            worker_idx);
+    PostProcessHashPartitionDataSyncTask(std::move(data_sync_task),
+                                         catalog_rec.Schema(),
+                                         data_sync_txm,
+                                         DataSyncTask::CkptErrorCode::NO_ERROR);
 }
-#endif
 
 void LocalCcShards::PopPendingTask(NodeGroupId ng_id,
                                    int64_t ng_term,
                                    const TableName &table_name,
-#ifdef RANGE_PARTITION_ENABLED
-                                   uint32_t range_id
-#else
-                                   uint16_t core_idx
-#endif
-)
+                                   uint32_t id)
 {
     assert(!table_name.IsMeta());
-#ifdef RANGE_PARTITION_ENABLED
     auto task_limiter_key = TaskLimiterKey(ng_id,
                                            ng_term,
                                            table_name.StringView(),
                                            table_name.Type(),
                                            table_name.Engine(),
-                                           range_id);
-#else
-    auto task_limiter_key = TaskLimiterKey(ng_id,
-                                           ng_term,
-                                           table_name.StringView(),
-                                           TableType::Primary,
-                                           table_name.Engine(),
-                                           core_idx);
-#endif
+                                           id);
 
     std::unique_lock<std::mutex> task_limiter_lk(task_limiter_mux_);
     auto iter = task_limiters_.find(task_limiter_key);
@@ -4881,14 +4671,9 @@ void LocalCcShards::PopPendingTask(NodeGroupId ng_id,
         task_limiter_lk.unlock();
 
         std::lock_guard<std::mutex> task_worker_lk(data_sync_worker_ctx_.mux_);
-#ifdef RANGE_PARTITION_ENABLED
-        data_sync_task_queue_.push_back(std::move(task));
-        data_sync_worker_ctx_.cv_.notify_one();
-#else
-
-        data_sync_task_queue_[core_idx].push_back(std::move(task));
+        data_sync_task_queue_[id % data_sync_task_queue_.size()].push_back(
+            std::move(task));
         data_sync_worker_ctx_.cv_.notify_all();
-#endif
     }
     else
     {
@@ -4899,30 +4684,16 @@ void LocalCcShards::PopPendingTask(NodeGroupId ng_id,
 void LocalCcShards::ClearAllPendingTasks(NodeGroupId ng_id,
                                          int64_t ng_term,
                                          const TableName &table_name,
-#ifdef RANGE_PARTITION_ENABLED
-                                         uint32_t range_id
-#else
-                                         uint16_t core_idx
-#endif
-)
+                                         uint32_t id)
 {
     assert(!table_name.IsMeta());
 
-#ifdef RANGE_PARTITION_ENABLED
     auto task_limiter_key = TaskLimiterKey(ng_id,
                                            ng_term,
                                            table_name.StringView(),
                                            table_name.Type(),
                                            table_name.Engine(),
-                                           range_id);
-#else
-    auto task_limiter_key = TaskLimiterKey(ng_id,
-                                           ng_term,
-                                           table_name.StringView(),
-                                           TableType::Primary,
-                                           table_name.Engine(),
-                                           core_idx);
-#endif
+                                           id);
 
     std::lock_guard<std::mutex> task_limiter_lk(task_limiter_mux_);
     auto iter = task_limiters_.find(task_limiter_key);
@@ -4939,7 +4710,6 @@ void LocalCcShards::ClearAllPendingTasks(NodeGroupId ng_id,
     task_limiters_.erase(iter);
 }
 
-#ifdef RANGE_PARTITION_ENABLED
 void LocalCcShards::UpdateSlicePostCkptSize(
     StoreRange *store_range, const std::map<TxKey, int64_t> &slices_delta_size)
 {
@@ -5238,7 +5008,7 @@ void LocalCcShards::SplitFlushRange(
         PopPendingTask(node_group,
                        data_sync_task->node_group_term_,
                        table_name,
-                       data_sync_task->range_id_);
+                       data_sync_task->id_);
         txservice::AbortTx(split_txm);
 
         return;
@@ -5296,7 +5066,7 @@ void LocalCcShards::SplitFlushRange(
         PopPendingTask(node_group,
                        data_sync_task->node_group_term_,
                        table_name,
-                       data_sync_task->range_id_);
+                       data_sync_task->id_);
         txservice::AbortTx(split_txm);
 
         return;
@@ -5310,14 +5080,13 @@ void LocalCcShards::SplitFlushRange(
     PopPendingTask(node_group,
                    data_sync_task->node_group_term_,
                    table_name,
-                   data_sync_task->range_id_);
+                   data_sync_task->id_);
 
     LOG(INFO) << "Split range on table " << range_table_name.StringView()
               << " partition " << range_entry->GetRangeInfo()->PartitionId()
               << " succeeded.";
     txservice::CommitTx(split_txm);
 }
-#endif
 
 void LocalCcShards::AddFlushTaskEntry(std::unique_ptr<FlushTaskEntry> &&entry)
 {
@@ -5431,23 +5200,13 @@ void LocalCcShards::FlushData(std::unique_lock<std::mutex> &flush_worker_lk)
                         }
                         else
                         {
-#ifndef RANGE_PARTITION_ENABLED
-                            key_core_idx = entry->data_sync_task_->worker_idx_;
-#else
-                            assert(false);
-#endif
+                            key_core_idx = entry->data_sync_task_->id_;
                         }
                         auto insert_it = cce_entries_map.try_emplace(
                             key_core_idx,
                             std::vector<UpdateCceCkptTsCc::CkptTsEntry>());
                         insert_it.first->second.emplace_back(
                             cce, rec.commit_ts_, rec.post_flush_size_);
-                    }
-                    else
-                    {
-#ifdef RANGE_PARTITION_ENABLED
-                        assert(entry->data_sync_task_->during_split_range_);
-#endif
                     }
                 }
 
@@ -5498,16 +5257,24 @@ void LocalCcShards::FlushData(std::unique_lock<std::mutex> &flush_worker_lk)
     {
         for (auto &entry : entries)
         {
-            PostProcessDataSyncTask(entry->data_sync_task_,
-                                    entry->table_schema_.get(),
-                                    entry->data_sync_txm_,
-                                    ckpt_err
-#ifndef RANGE_PARTITION_ENABLED
-                                    ,
-                                    entry->data_sync_task_->worker_idx_
-#endif
-                                    ,
-                                    false);
+            if (entry->data_sync_task_->table_name_.IsHashPartitioned())
+            {
+                PostProcessHashPartitionDataSyncTask(
+                    std::move(entry->data_sync_task_),
+                    entry->table_schema_.get(),
+                    entry->data_sync_txm_,
+                    ckpt_err,
+                    false);
+            }
+            else
+            {
+                PostProcessRangePartitionDataSyncTask(
+                    std::move(entry->data_sync_task_),
+                    entry->table_schema_.get(),
+                    entry->data_sync_txm_,
+                    ckpt_err,
+                    false);
+            }
         }
     }
 
@@ -5574,7 +5341,6 @@ void LocalCcShards::FlushDataWorker()
     }
 }
 
-#ifdef RANGE_PARTITION_ENABLED
 void LocalCcShards::RangeSplitWorker()
 {
     std::unique_lock<std::mutex> range_split_worker_lk(
@@ -5632,7 +5398,6 @@ bool LocalCcShards::UpdateStoreSlice(const TableName &table_name,
     // else: SplitFlushRangeOp will update range slice in store
     return success;
 }
-#endif
 
 void LocalCcShards::SyncTableStatisticsWorker()
 {
@@ -6208,7 +5973,6 @@ bool LocalCcShards::GetNextRangePartitionId(const TableName &tablename,
     return true;
 }
 
-#ifdef RANGE_PARTITION_ENABLED
 void LocalCcShards::RangeCacheSender::FindSliceKeys(
     const std::vector<FlushRecord> &batch_records,
     const UpdateSliceStatus &update_slice_status)
@@ -6604,6 +6368,5 @@ void LocalCcShards::RangeCacheSender::SendRangeCacheRequest(
                                head);
     }
 }
-#endif
 
 }  // namespace txservice
