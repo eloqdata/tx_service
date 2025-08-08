@@ -1531,6 +1531,7 @@ public:
                                 RecordSchema(),
                                 schema_ts_,
                                 table_schema_->GetKVCatalogInfo(),
+                                req.RangeId(),
                                 *look_key,
                                 true,
                                 &req,
@@ -1694,7 +1695,7 @@ public:
                                 this->cc_ng_id_,
                                 ng_term,
                                 &req,
-                                slice_id.Range()->PartitionId(),
+                                req.RangeId(),
                                 false,
                                 0,
                                 is_read_snapshot ? req.ReadTimestamp() : 0,
@@ -1988,10 +1989,7 @@ public:
             {
                 cce->GetOrCreateKeyLock(shard_, this, ccp);
 #ifdef RANGE_PARTITION_ENABLED
-                TxKey tx_key(look_key);
-                const TableRangeEntry *range_entry =
-                    shard_->GetTableRangeEntry(table_name_, cc_ng_id_, tx_key);
-                int32_t part_id = range_entry->GetRangeInfo()->PartitionId();
+                int32_t part_id = req.RangeId();
 #else
                 int32_t part_id = (look_key->Hash() >> 10) & 0x3FF;
 #endif
@@ -5632,6 +5630,7 @@ public:
                 RecordSchema(),
                 schema_ts_,
                 table_schema_->GetKVCatalogInfo(),
+                -1,
                 search_key,
                 true,
                 &req,
@@ -8422,6 +8421,7 @@ public:
                         RecordSchema(),
                         schema_ts_,
                         table_schema_->GetKVCatalogInfo(),
+                        -1,
                         *key,
                         true,
                         &req,

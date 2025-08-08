@@ -1152,6 +1152,7 @@ public:
     ReadCc()
         : key_ptr_(nullptr),
           key_str_(nullptr),
+          range_id_(-1),
           rec_(nullptr),
           rec_str_(nullptr),
           ts_(0),
@@ -1238,7 +1239,8 @@ public:
                bool is_covering_keys = false,
                std::vector<VersionTxRecord> *archives = nullptr,
                bool is_in_recovering = false,
-               bool point_read_on_miss = false)
+               bool point_read_on_miss = false,
+               int32_t range_id = -1)
     {
         uint32_t ng_id = Sharder::Instance().ShardToCcNodeGroup(key_shard_code);
         TemplatedCcRequest<ReadCc, ReadKeyResult>::Reset(
@@ -1247,6 +1249,7 @@ public:
         key_ptr_ = key->KeyPtr();
         key_str_ = nullptr;
         key_shard_code_ = key_shard_code;
+        range_id_ = range_id;
         rec_ = rec;
         rec_str_ = nullptr;
         ts_ = ts;
@@ -1288,7 +1291,8 @@ public:
                bool is_for_write = false,
                bool is_covering_keys = false,
                std::vector<VersionTxRecord> *archives = nullptr,
-               bool point_read_on_miss = false)
+               bool point_read_on_miss = false,
+               int32_t range_id = -1)
     {
         uint32_t ng_id = Sharder::Instance().ShardToCcNodeGroup(key_shard_code);
         TemplatedCcRequest<ReadCc, ReadKeyResult>::Reset(
@@ -1296,6 +1300,7 @@ public:
 
         key_ptr_ = nullptr;
         key_str_ = key_str;
+        range_id_ = range_id;
         key_shard_code_ = key_shard_code;
         rec_ = nullptr;
         rec_str_ = rec_str;
@@ -1338,7 +1343,8 @@ public:
                bool is_for_write = false,
                bool is_covering_keys = false,
                std::vector<VersionTxRecord> *archives = nullptr,
-               bool point_read_on_miss = false)
+               bool point_read_on_miss = false,
+               int32_t range_id = -1)
     {
         uint32_t ng_id = Sharder::Instance().ShardToCcNodeGroup(key_shard_code);
         TemplatedCcRequest<ReadCc, ReadKeyResult>::Reset(
@@ -1347,6 +1353,7 @@ public:
         key_ptr_ = nullptr;
         key_str_ = &key_str;
         key_shard_code_ = key_shard_code;
+        range_id_ = range_id;
         rec_ = rec;
         rec_str_ = nullptr;
         ts_ = ts;
@@ -1376,6 +1383,11 @@ public:
     uint32_t KeyShardCode() const
     {
         return key_shard_code_;
+    }
+
+    int32_t RangeId() const
+    {
+        return range_id_;
     }
 
     const void *Key() const
@@ -1503,6 +1515,7 @@ private:
      *
      */
     uint32_t key_shard_code_;
+    int32_t range_id_{-1};
     TxRecord *rec_;
     std::string *rec_str_;
     uint64_t ts_;
