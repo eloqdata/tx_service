@@ -768,12 +768,13 @@ void TransactionExecution::ProcessTxRequest(ScanBatchTxRequest &scan_batch_req)
     scan_next_.Reset();
     scan_next_.tx_req_ = &scan_batch_req;
     scan_next_.alias_ = scan_batch_req.alias_;
-#ifdef RANGE_PARTITION_ENABLED
-    scan_next_.range_table_name_ =
-        TableName(scan_batch_req.table_name_.StringView(),
-                  TableType::RangePartition,
-                  scan_batch_req.table_name_.Engine());
-#endif
+    if (!scan_batch_req.table_name_.IsHashPartitioned())
+    {
+        scan_next_.range_table_name_ =
+            TableName(scan_batch_req.table_name_.StringView(),
+                      TableType::RangePartition,
+                      scan_batch_req.table_name_.Engine());
+    }
     PushOperation(&scan_next_);
     Process(scan_next_);
 }
@@ -2338,9 +2339,10 @@ void TransactionExecution::Process(ScanOpenOperation &scan_open)
                               scan_open.tx_req_->scan_pattern_);
     }
 
-#ifndef RANGE_PARTITION_ENABLED
-    StartTiming();
-#endif
+    if (table_name.IsHashPartitioned())
+    {
+        StartTiming();
+    }
 }
 
 void TransactionExecution::PostProcess(ScanOpenOperation &scan_open)
@@ -2357,6 +2359,7 @@ void TransactionExecution::PostProcess(ScanOpenOperation &scan_open)
         });
     state_stack_.pop_back();
     assert(state_stack_.empty());
+    const TableName &table_name = *scan_open.table_name_;
 
     ScanOpenResult &open_result = scan_open.hd_result_.Value();
 
@@ -2371,7 +2374,7 @@ void TransactionExecution::PostProcess(ScanOpenOperation &scan_open)
 
         if (open_result.scanner_ != nullptr)
         {
-            DrainScanner(open_result.scanner_.get(), *scan_open.table_name_);
+            DrainScanner(open_result.scanner_.get(), table_name);
 
             abundant_lock_op_.Reset();
             PushOperation(&abundant_lock_op_);
@@ -2382,7 +2385,7 @@ void TransactionExecution::PostProcess(ScanOpenOperation &scan_open)
         return;
     }
 
-    auto table_iter = rw_set_.WriteSet().find(*scan_open.table_name_);
+    auto table_iter = rw_set_.WriteSet().find(table_name);
     if (table_iter != rw_set_.WriteSet().end())
     {
         if (scan_open.direction_ == ScanDirection::Forward)
@@ -2414,28 +2417,31 @@ void TransactionExecution::PostProcess(ScanOpenOperation &scan_open)
 
     assert(scans_.find(open_result.scan_alias_) == scans_.end());
 
-#ifdef RANGE_PARTITION_ENABLED
-    // Constructs a pseudo slice prior to the first slice of the scan. And sets
-    // the status of the scanner "Blocked".
-    open_result.scanner_->SetStatus(ScannerStatus::Blocked);
-    scans_.try_emplace(open_result.scan_alias_,
-                       std::move(open_result.scanner_),
-                       scan_open.tx_req_->schema_version_,
-                       scan_open.tx_req_->EndKey(),
-                       scan_open.tx_req_->end_inclusive_,
-                       UINT32_MAX,
-                       UINT32_MAX,
-                       scan_open.tx_req_->StartKey()->GetShallowCopy(),
-                       !scan_open.tx_req_->start_inclusive_,
-                       scan_open.direction_ == ScanDirection::Forward
-                           ? SlicePosition::LastSliceInRange
-                           : SlicePosition::FirstSliceInRange);
-#else
-    scans_.try_emplace(open_result.scan_alias_,
-                       std::move(open_result.scanner_),
-                       scan_open.tx_req_->EndKey(),
-                       scan_open.tx_req_->end_inclusive_);
-#endif
+    if (!table_name.IsHashPartitioned())
+    {
+        // Constructs a pseudo slice prior to the first slice of the scan. And
+        // sets the status of the scanner "Blocked".
+        open_result.scanner_->SetStatus(ScannerStatus::Blocked);
+        scans_.try_emplace(open_result.scan_alias_,
+                           std::move(open_result.scanner_),
+                           scan_open.tx_req_->schema_version_,
+                           scan_open.tx_req_->EndKey(),
+                           scan_open.tx_req_->end_inclusive_,
+                           UINT32_MAX,
+                           UINT32_MAX,
+                           scan_open.tx_req_->StartKey()->GetShallowCopy(),
+                           !scan_open.tx_req_->start_inclusive_,
+                           scan_open.direction_ == ScanDirection::Forward
+                               ? SlicePosition::LastSliceInRange
+                               : SlicePosition::FirstSliceInRange);
+    }
+    else
+    {
+        scans_.try_emplace(open_result.scan_alias_,
+                           std::move(open_result.scanner_),
+                           scan_open.tx_req_->EndKey(),
+                           scan_open.tx_req_->end_inclusive_);
+    }
 
     if (uint64_resp_ != nullptr)
     {
@@ -2515,7 +2521,6 @@ void TransactionExecution::Process(ScanNextOperation &scan_next)
 
         is_local = scan_next.hd_result_.Value().is_local_;
     }
-#ifdef RANGE_PARTITION_ENABLED
     else if (to_scan_next && scanner.Type() == CcmScannerType::RangePartition)
     {
         ScanState &scan_state = *scan_next.scan_state_;
@@ -2662,20 +2667,17 @@ void TransactionExecution::Process(ScanNextOperation &scan_next)
             }
         }
     }
-#endif
     else if (scanner.Type() == CcmScannerType::HashPartition)
     {
         scan_next.hd_result_.SetFinished();
         return;
     }
-#ifdef RANGE_PARTITION_ENABLED
     else if (scanner.Type() == CcmScannerType::RangePartition)
     {
         scan_next.unlock_range_result_.SetFinished();
         scan_next.slice_hd_result_.SetFinished();
         return;
     }
-#endif
 
     if (!is_local ||
         DeduceReadLockType(scanner.IndexType() == ScanIndexType::Primary
@@ -2691,25 +2693,6 @@ void TransactionExecution::Process(ScanNextOperation &scan_next)
 
 void TransactionExecution::PostProcess(ScanNextOperation &scan_next)
 {
-#ifdef RANGE_PARTITION_ENABLED
-    if (metrics::enable_remote_request_metrics &&
-        !scan_next.slice_hd_result_.Value().is_local_)
-    {
-        metrics::Meter *meter;
-        meter = tx_processor_->GetMeter();
-        if (is_collecting_duration_round_)
-        {
-            meter->CollectDuration(metrics::NAME_REMOTE_REQUEST_DURATION,
-                                   scan_next.op_start_,
-                                   "scan_next");
-        }
-        meter = tx_processor_->GetMeter();
-        meter->Collect(metrics::NAME_IN_FLIGHT_REMOTE_REQUEST_COUNT,
-                       metrics::Value::IncDecValue::Decrement,
-                       "scan_next");
-    }
-#endif
-
     TX_TRACE_ACTION_WITH_CONTEXT(
         this,
         &scan_next,
@@ -2725,6 +2708,23 @@ void TransactionExecution::PostProcess(ScanNextOperation &scan_next)
 
     const TableName &table_name = scan_next.tx_req_->table_name_;
     CcScanner &scanner = *scan_next.scan_state_->scanner_;
+    if (scanner.Type() == CcmScannerType::RangePartition &&
+        metrics::enable_remote_request_metrics &&
+        !scan_next.slice_hd_result_.Value().is_local_)
+    {
+        metrics::Meter *meter;
+        meter = tx_processor_->GetMeter();
+        if (is_collecting_duration_round_)
+        {
+            meter->CollectDuration(metrics::NAME_REMOTE_REQUEST_DURATION,
+                                   scan_next.op_start_,
+                                   "scan_next");
+        }
+        meter = tx_processor_->GetMeter();
+        meter->Collect(metrics::NAME_IN_FLIGHT_REMOTE_REQUEST_COUNT,
+                       metrics::Value::IncDecValue::Decrement,
+                       "scan_next");
+    }
 
     if (scanner.Type() == CcmScannerType::HashPartition &&
         scan_next.hd_result_.IsError())
@@ -2739,7 +2739,6 @@ void TransactionExecution::PostProcess(ScanNextOperation &scan_next)
         scan_next.Reset();
         return;
     }
-#ifdef RANGE_PARTITION_ENABLED
     else if (scanner.Type() == CcmScannerType::RangePartition &&
              scan_next.slice_hd_result_.IsError())
     {
@@ -2753,7 +2752,6 @@ void TransactionExecution::PostProcess(ScanNextOperation &scan_next)
         bool_resp_ = nullptr;
         return;
     }
-#endif
 
     enum struct AdvanceType
     {
@@ -2884,28 +2882,8 @@ void TransactionExecution::PostProcess(ScanNextOperation &scan_next)
                 {
                     if (cc_scan_tuple->key_ts_ > 0)
                     {
-#ifndef RANGE_PARTITION_ENABLED
-                        if (cc_scan_tuple->rec_status_ == RecordStatus::Normal)
-                        {
-                            scan_batch.emplace_back(
-                                cc_scan_tuple->Key(),
-                                const_cast<TxRecord *>(cc_scan_tuple->Record()),
-                                RecordStatus::Normal,
-                                cc_scan_tuple->key_ts_,
-                                cc_scan_tuple->cce_addr_);
-                        }
-                        else if (cc_scan_tuple->rec_status_ ==
-                                 RecordStatus::Deleted)
-                        {
-                            // When the record status is not Normal, the record
-                            // is set to null in the returned result.
-                            scan_batch.emplace_back(cc_scan_tuple->Key(),
-                                                    nullptr,
-                                                    cc_scan_tuple->rec_status_,
-                                                    cc_scan_tuple->key_ts_,
-                                                    cc_scan_tuple->cce_addr_);
-                        }
-#else
+                        assert(cc_scan_tuple->rec_status_ !=
+                               RecordStatus::Unknown);
                         // When the record status is not Normal, the record
                         // is set to null in the scan result.
                         const TxRecord *rec =
@@ -2918,7 +2896,6 @@ void TransactionExecution::PostProcess(ScanNextOperation &scan_next)
                                                 cc_scan_tuple->rec_status_,
                                                 cc_scan_tuple->key_ts_,
                                                 cc_scan_tuple->cce_addr_);
-#endif
                     }
 
                     scanner.MoveNext();
@@ -2957,13 +2934,17 @@ void TransactionExecution::PostProcess(ScanNextOperation &scan_next)
             const TxKey *batch_end_key = nullptr;
             if (scanner.Status() == ScannerStatus::Blocked)
             {
-#ifdef RANGE_PARTITION_ENABLED
-                batch_end_key = scan_next.scan_state_->SliceLastKey();
-#else
-                batch_end_key = scan_batch.empty()
-                                    ? nullptr
-                                    : &scan_batch[scan_batch.size() - 1].key_;
-#endif
+                if (scanner.Type() == CcmScannerType::RangePartition)
+                {
+                    batch_end_key = scan_next.scan_state_->SliceLastKey();
+                }
+                else
+                {
+                    batch_end_key =
+                        scan_batch.empty()
+                            ? nullptr
+                            : &scan_batch[scan_batch.size() - 1].key_;
+                }
             }
 
             while (wset_it != wset_end &&
@@ -3110,28 +3091,9 @@ void TransactionExecution::PostProcess(ScanNextOperation &scan_next)
                 {
                     if (cc_scan_tuple->key_ts_ > 0)
                     {
-#ifndef RANGE_PARTITION_ENABLED
-                        if (cc_scan_tuple->rec_status_ == RecordStatus::Normal)
-                        {
-                            scan_batch.emplace_back(
-                                cc_scan_tuple->Key(),
-                                const_cast<TxRecord *>(cc_scan_tuple->Record()),
-                                RecordStatus::Normal,
-                                cc_scan_tuple->key_ts_,
-                                cc_scan_tuple->cce_addr_);
-                        }
-                        else if (cc_scan_tuple->rec_status_ ==
-                                 RecordStatus::Deleted)
-                        {
-                            // When the record status is not Normal, the record
-                            // is set to null in the returned result.
-                            scan_batch.emplace_back(cc_scan_tuple->Key(),
-                                                    nullptr,
-                                                    cc_scan_tuple->rec_status_,
-                                                    cc_scan_tuple->key_ts_,
-                                                    cc_scan_tuple->cce_addr_);
-                        }
-#else
+                        assert(cc_scan_tuple->rec_status_ !=
+                               RecordStatus::Unknown);
+
                         // When the record status is not Normal, the record
                         // is set to null in the scan result.
                         const TxRecord *rec =
@@ -3144,7 +3106,6 @@ void TransactionExecution::PostProcess(ScanNextOperation &scan_next)
                                                 cc_scan_tuple->rec_status_,
                                                 cc_scan_tuple->key_ts_,
                                                 cc_scan_tuple->cce_addr_);
-#endif
                     }
 
                     scanner.MoveNext();
@@ -3183,12 +3144,15 @@ void TransactionExecution::PostProcess(ScanNextOperation &scan_next)
             const TxKey *batch_start_key = nullptr;
             if (scanner.Status() == ScannerStatus::Blocked)
             {
-#ifdef RANGE_PARTITION_ENABLED
-                batch_start_key = scan_next.scan_state_->SliceLastKey();
-#else
-                batch_start_key =
-                    scan_batch.empty() ? nullptr : &scan_batch[0].key_;
-#endif
+                if (scanner.Type() == CcmScannerType::RangePartition)
+                {
+                    batch_start_key = scan_next.scan_state_->SliceLastKey();
+                }
+                else
+                {
+                    batch_start_key =
+                        scan_batch.empty() ? nullptr : &scan_batch[0].key_;
+                }
             }
 
             while (wset_it != wset_end &&
@@ -3220,33 +3184,37 @@ void TransactionExecution::PostProcess(ScanNextOperation &scan_next)
         }
     }
 
-#ifdef RANGE_PARTITION_ENABLED
-    ScanDirection dir = scan_next.Direction();
-    SlicePosition slice_pos = scan_next.scan_state_->slice_position_;
-    bool scan_finished = (dir == ScanDirection::Forward &&
-                          slice_pos == SlicePosition::LastSlice) ||
-                         (dir == ScanDirection::Backward &&
-                          slice_pos == SlicePosition::FirstSlice);
-
-    if (scanner.Type() == CcmScannerType::RangePartition && scan_batch.empty())
+    if (scanner.Type() == CcmScannerType::RangePartition)
     {
-        // Scan next batch in range partition scans a slice at a time.
-        // Keep scanning until we reach the last slice in last range or
-        // we get something from the last slice scanned.
-        if (!scan_finished)
-        {
-            scan_next.slice_hd_result_.Value().Reset();
-            scan_next.slice_hd_result_.Reset();
-            PushOperation(&scan_next);
-            Process(scan_next);
-            return;
-        }
-    }
+        ScanDirection dir = scan_next.Direction();
+        SlicePosition slice_pos = scan_next.scan_state_->slice_position_;
+        bool scan_finished = (dir == ScanDirection::Forward &&
+                              slice_pos == SlicePosition::LastSlice) ||
+                             (dir == ScanDirection::Backward &&
+                              slice_pos == SlicePosition::FirstSlice);
 
-    bool_resp_->Finish(scan_finished);
-#else
-    bool_resp_->Finish(false);
-#endif
+        if (scanner.Type() == CcmScannerType::RangePartition &&
+            scan_batch.empty())
+        {
+            // Scan next batch in range partition scans a slice at a time.
+            // Keep scanning until we reach the last slice in last range or
+            // we get something from the last slice scanned.
+            if (!scan_finished)
+            {
+                scan_next.slice_hd_result_.Value().Reset();
+                scan_next.slice_hd_result_.Reset();
+                PushOperation(&scan_next);
+                Process(scan_next);
+                return;
+            }
+        }
+
+        bool_resp_->Finish(scan_finished);
+    }
+    else
+    {
+        bool_resp_->Finish(false);
+    }
     bool_resp_ = nullptr;
     scan_next.Reset();
 }
@@ -3292,8 +3260,8 @@ void TransactionExecution::ScanClose(
         }
     }
 
-#ifdef RANGE_PARTITION_ENABLED
-    if (scan_it->second.slice_position_ == SlicePosition::Middle)
+    if (scanner->Type() == CcmScannerType::RangePartition &&
+        scan_it->second.slice_position_ == SlicePosition::Middle)
     {
         // Append last tuple of each ScanCache which has acquired ReadIntent to
         // the drain_batch_.
@@ -3319,30 +3287,32 @@ void TransactionExecution::ScanClose(
             }
         }
     }
-#else
-    // In hash partition, cross every channel of scanner and get the last tuple,
-    // then add it into drain_batch_ to ensure the ReadIntent lock to be
-    // released if added.
-    std::vector<const ScanTuple *> last_tuples;
-    last_tuples.reserve(scanner->CacheCount());
-    scanner->ShardCacheLastTuples(&last_tuples);
-    for (const ScanTuple *last_tuple : last_tuples)
+    else if (scanner->Type() == CcmScannerType::HashPartition)
     {
-        if (last_tuple)
+        // In hash partition, cross every channel of scanner and get the last
+        // tuple, then add it into drain_batch_ to ensure the ReadIntent lock to
+        // be released if added.
+        std::vector<const ScanTuple *> last_tuples;
+        last_tuples.reserve(scanner->CacheCount());
+        scanner->ShardCacheLastTuples(&last_tuples);
+        for (const ScanTuple *last_tuple : last_tuples)
         {
-            LockType lk_type =
-                scanner->DeduceScanTupleLockType(last_tuple->rec_status_);
-            // key ts == 0 means the lock is on the gap. So the read intent is
-            // acquired on the last cce during last scan batch.
-            if ((lk_type == LockType::NoLock || last_tuple->key_ts_ == 0) &&
-                !cmd_set_.FindObjectCommand(table_name, last_tuple->cce_addr_))
+            if (last_tuple)
             {
-                drain_batch_.emplace_back(last_tuple->cce_addr_,
-                                          last_tuple->key_ts_);
+                LockType lk_type =
+                    scanner->DeduceScanTupleLockType(last_tuple->rec_status_);
+                // key ts == 0 means the lock is on the gap. So the read intent
+                // is acquired on the last cce during last scan batch.
+                if ((lk_type == LockType::NoLock || last_tuple->key_ts_ == 0) &&
+                    !cmd_set_.FindObjectCommand(table_name,
+                                                last_tuple->cce_addr_))
+                {
+                    drain_batch_.emplace_back(last_tuple->cce_addr_,
+                                              last_tuple->key_ts_);
+                }
             }
         }
     }
-#endif
 
     // Release trailing tuple locks acquired during scan. These tuples are
     // tuples scanned beyond scan end key and are not intended to be locked.
@@ -3360,12 +3330,10 @@ void TransactionExecution::ScanClose(
         }
     }
 
-#ifndef RANGE_PARTITION_ENABLED
-    if (scanner != nullptr)
+    if (scanner->Type() == CcmScannerType::HashPartition)
     {
         DrainScanner(scanner, table_name);
     }
-#endif
 
     cc_handler_->ScanClose(
         table_name, scanner->Direction(), std::move(scan_it->second.scanner_));
@@ -7246,7 +7214,6 @@ void TransactionExecution::Process(BatchReadOperation &batch_read_op)
         }
     }
 
-
     while (batch_read_op.lock_it_ < read_batch.end())
     {
         // The key is found in the write set. No need to lock its range.
@@ -7380,9 +7347,10 @@ void TransactionExecution::PostProcess(BatchReadOperation &batch_read_op)
 
     if (lock_range_bucket_result_.IsError())
     {
-        DLOG(ERROR) << "BatchReadOperation failed when acquire range bucket locks. "
-                       "Error code: "
-                    << (int) lock_range_bucket_result_.ErrorCode();
+        DLOG(ERROR)
+            << "BatchReadOperation failed when acquire range bucket locks. "
+               "Error code: "
+            << (int) lock_range_bucket_result_.ErrorCode();
         void_resp_->FinishError(
             ConvertCcError(lock_range_bucket_result_.ErrorCode()));
         void_resp_ = nullptr;

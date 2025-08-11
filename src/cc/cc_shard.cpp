@@ -49,9 +49,7 @@
 #include "type.h"
 #include "util.h"
 
-#ifdef ON_KEY_OBJECT
 DECLARE_bool(cmd_read_catalog);
-#endif
 
 namespace txservice
 {
@@ -914,7 +912,6 @@ void CcShard::ClearTx(TxNumber txn)
                     lru_ptr->GetKeyGapLockAndExtraData()->ClearTx();
                 }
 
-#ifdef ON_KEY_OBJECT
                 if (FLAGS_cmd_read_catalog &&
                     lk_info->table_type_ == TableType::Catalog)
                 {
@@ -922,7 +919,6 @@ void CcShard::ClearTx(TxNumber txn)
                     // accessed.
                     continue;
                 }
-#endif
 
                 lru_ptr->RecycleKeyLock(*this);
             }
@@ -1587,10 +1583,7 @@ store::DataStoreHandler::DataStoreOpStatus CcShard::FetchSnapshot(
                     backfill_func,
                     partition_id);
 
-    store::DataStoreHandler::DataStoreOpStatus res =
-        local_shards_.store_hd_->FetchRecord(nullptr, fetch_cc);
-
-    return store::DataStoreHandler::DataStoreOpStatus::Success;
+    return local_shards_.store_hd_->FetchRecord(nullptr, fetch_cc);
 }
 
 void CcShard::RemoveFetchRecordRequest(LruEntry *cce)

@@ -56,9 +56,7 @@
 #include "tx_worker_pool.h"
 #include "type.h"
 
-#ifdef ON_KEY_OBJECT
 DECLARE_bool(cmd_read_catalog);
-#endif
 
 namespace txservice
 {
@@ -121,14 +119,7 @@ void TransactionOperation::ReRunOp(TransactionExecution *txm)
 ReadOperation::ReadOperation(
     TransactionExecution *txm,
     CcHandlerResult<ReadKeyResult> *lock_range_bucket_result)
-    : hd_result_(txm)
-#ifdef RANGE_PARTITION_ENABLED
-      ,
-      lock_range_result_(lock_range_bucket_result)
-#else
-      ,
-      lock_bucket_result_(lock_range_bucket_result)
-#endif
+    : hd_result_(txm), lock_range_bucket_result_(lock_range_bucket_result)
 {
     TX_TRACE_ASSOCIATE(this, &hd_result_);
 }
@@ -138,13 +129,9 @@ void ReadOperation::Reset()
     hd_result_.Value().Reset();
     hd_result_.Reset();
     local_cache_miss_ = false;
-#ifdef RANGE_PARTITION_ENABLED
-    lock_range_result_->Value().Reset();
-    lock_range_result_->Reset();
-#else
-    lock_bucket_result_->Value().Reset();
-    lock_bucket_result_->Reset();
-#endif
+    lock_range_bucket_result_->Value().Reset();
+    lock_range_bucket_result_->Reset();
+
     op_start_ = metrics::TimePoint::max();
 
     is_running_ = false;
@@ -154,39 +141,21 @@ void ReadOperation::Forward(TransactionExecution *txm)
 {
     if (!is_running_)
     {
-#ifdef RANGE_PARTITION_ENABLED
-        if (!read_tx_req_->read_local_)
-        {
-            // Just returned from LockReadRangeOp, check lock_range_result_.
-            assert(lock_range_result_->IsFinished());
-            if (lock_range_result_->IsError())
-            {
-                // There is an error when getting the input key's range. The
-                // read operation is set to be errored.
-                hd_result_.SetError(lock_range_result_->ErrorCode());
-                hd_result_.ForceError();
-
-                txm->PostProcess(*this);
-                return;
-            }
-        }
-#else
         if (!read_tx_req_->read_local_)
         {
             // Just returned from lock_bucket_op_, check lock_bucket_result_.
-            assert(lock_bucket_result_->IsFinished());
-            if (lock_bucket_result_->IsError())
+            assert(lock_range_bucket_result_->IsFinished());
+            if (lock_range_bucket_result_->IsError())
             {
-                // There is an error when getting the input key's bucket. The
-                // read operation is set to be errored.
-                hd_result_.SetError(lock_bucket_result_->ErrorCode());
+                // There is an error when getting the input key's bucket or
+                // range. The read operation is set to be errored.
+                hd_result_.SetError(lock_range_bucket_result_->ErrorCode());
                 hd_result_.ForceError();
 
                 txm->PostProcess(*this);
                 return;
             }
         }
-#endif
 
         // Need to make sure current node is still leader since we will visit
         // bucket meta data which is only valid if current node is still ng
@@ -227,18 +196,20 @@ void ReadOperation::Forward(TransactionExecution *txm)
             }
         }
 
-#ifndef RANGE_PARTITION_ENABLED
-        if (hd_result_.ErrorCode() == CcErrorCode::OUT_OF_MEMORY)
+        if (read_tx_req_->tab_name_->IsHashPartitioned() &&
+            hd_result_.ErrorCode() == CcErrorCode::OUT_OF_MEMORY)
         {
-            // If shard is full, keep retrying since checkpoint will
+            // For hash partition, keep retrying since checkpoint will
             // clean up memory for new insert.
+            // For range partition, keep retrying with range read lock might
+            // block checkpoint, which will cause dirty data fail to flush, and
+            // we will keep getting OOM error.
             retry_num_++;
             hd_result_.Value().Reset();
             hd_result_.Reset();
             ReRunOp(txm);
             return;
         }
-#endif
         txm->PostProcess(*this);
     }
     else
@@ -1363,13 +1334,10 @@ void ScanOpenOperation::Forward(TransactionExecution *txm)
 }
 
 ScanNextOperation::ScanNextOperation(TransactionExecution *txm)
-    : hd_result_(txm)
-#ifdef RANGE_PARTITION_ENABLED
-      ,
+    : hd_result_(txm),
       slice_hd_result_(txm),
       lock_range_result_(txm),
       unlock_range_result_(txm)
-#endif
 {
     TX_TRACE_ASSOCIATE(this, &hd_result_);
 }
@@ -1378,24 +1346,19 @@ void ScanNextOperation::Reset()
 {
     alias_ = 0;
     scan_state_ = nullptr;
-#ifdef RANGE_PARTITION_ENABLED
     range_table_name_ =
         TableName(empty_sv, TableType::RangePartition, TableEngine::None);
-#endif
     op_start_ = metrics::TimePoint::max();
     ResetResult();
 }
 
 void ScanNextOperation::ResetResult()
 {
-#ifdef RANGE_PARTITION_ENABLED
     slice_hd_result_.Value().Reset();
     slice_hd_result_.Reset();
     unlock_range_result_.Reset();
     lock_range_result_.Reset();
-#else
     hd_result_.Reset();
-#endif
 }
 
 void ScanNextOperation::Forward(TransactionExecution *txm)
@@ -1409,8 +1372,7 @@ void ScanNextOperation::Forward(TransactionExecution *txm)
         {
             txm->Process(*this);
         }
-#ifdef RANGE_PARTITION_ENABLED
-        else
+        else if (scanner.Type() == CcmScannerType::RangePartition)
         {
             if (!lock_range_result_.IsFinished())
             {
@@ -1463,7 +1425,6 @@ void ScanNextOperation::Forward(TransactionExecution *txm)
                 return;
             }
         }
-#endif
     }
 
     if (scanner.Type() == CcmScannerType::HashPartition &&
@@ -1485,7 +1446,6 @@ void ScanNextOperation::Forward(TransactionExecution *txm)
         scanner.SetStatus(ScannerStatus::Open);
         txm->PostProcess(*this);
     }
-#ifdef RANGE_PARTITION_ENABLED
     else if (scanner.Type() == CcmScannerType::RangePartition &&
              slice_hd_result_.IsFinished())
     {
@@ -1573,7 +1533,6 @@ void ScanNextOperation::Forward(TransactionExecution *txm)
         scanner.SetStatus(ScannerStatus::Open);
         txm->PostProcess(*this);
     }
-#endif
     else if (txm->IsTimeOut())
     {
         TX_TRACE_ACTION_WITH_CONTEXT(
@@ -1589,49 +1548,50 @@ void ScanNextOperation::Forward(TransactionExecution *txm)
             });
 
         DeadLockCheck::RequestCheck();
-#ifdef RANGE_PARTITION_ENABLED
-        // When timeout in RANGE_PARTITION, check deadlock first, then force
-        // error.
-        if (slice_hd_result_.Value().is_local_)
-        {
-            // For local request, just rely on the result of the deadlock
-            // checking.
-            return;
-        }
 
-        if (retry_num_ > 0 &&
-            (txm->CheckLeaderTerm() || txm->CheckStandbyTerm()))
+        if (scanner.Type() == CcmScannerType::RangePartition)
         {
-            ReRunOp(txm);
-            return;
-        }
+            if (slice_hd_result_.Value().is_local_)
+            {
+                // For local request, just rely on the result of the deadlock
+                // checking.
+                return;
+            }
 
-        bool force_error = slice_hd_result_.ForceError();
-        if (force_error)
-        {
-            txm->PostProcess(*this);
-        }
+            if (retry_num_ > 0 &&
+                (txm->CheckLeaderTerm() || txm->CheckStandbyTerm()))
+            {
+                ReRunOp(txm);
+                return;
+            }
 
-#else
-        if (hd_result_.Value().is_local_)
-        {
-            // Never force error for local request.
-            return;
+            bool force_error = slice_hd_result_.ForceError();
+            if (force_error)
+            {
+                txm->PostProcess(*this);
+            }
         }
+        else
+        {
+            if (hd_result_.Value().is_local_)
+            {
+                // Never force error for local request.
+                return;
+            }
 
-        if (retry_num_ > 0 &&
-            (txm->CheckLeaderTerm() || txm->CheckStandbyTerm()))
-        {
-            ReRunOp(txm);
-            return;
-        }
+            if (retry_num_ > 0 &&
+                (txm->CheckLeaderTerm() || txm->CheckStandbyTerm()))
+            {
+                ReRunOp(txm);
+                return;
+            }
 
-        bool force_error = hd_result_.ForceError();
-        if (force_error)
-        {
-            txm->PostProcess(*this);
+            bool force_error = hd_result_.ForceError();
+            if (force_error)
+            {
+                txm->PostProcess(*this);
+            }
         }
-#endif
     }
 }
 
@@ -5293,7 +5253,6 @@ void ObjectCommandOp::Forward(TransactionExecution *txm)
 {
     if (!is_running_)
     {
-#ifdef ON_KEY_OBJECT
         if (FLAGS_cmd_read_catalog && !catalog_read_success_)
         {
             // Just returned from read_catalog_op_, check read_catalog_result_.
@@ -5322,7 +5281,6 @@ void ObjectCommandOp::Forward(TransactionExecution *txm)
             txm->Process(*this);
             return;
         }
-#endif
         // Just returned from lock_bucket_op_, check lock_bucket_result_.
         assert(lock_bucket_result_->IsFinished());
         if (lock_bucket_result_->IsError())
@@ -5535,7 +5493,6 @@ void MultiObjectCommandOp::Forward(TransactionExecution *txm)
 {
     if (!is_running_)
     {
-#ifdef ON_KEY_OBJECT
         if (FLAGS_cmd_read_catalog && !catalog_read_success_)
         {
             // Just returned from read_catalog_op_, check read_catalog_result_.
@@ -5556,7 +5513,6 @@ void MultiObjectCommandOp::Forward(TransactionExecution *txm)
             txm->Process(*this);
             return;
         }
-#endif
         // Just returned from lock_bucket_op_, check lock_bucket_result_.
         assert(lock_bucket_result_->IsFinished());
         if (lock_bucket_result_->IsError())

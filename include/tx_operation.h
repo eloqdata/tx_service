@@ -175,13 +175,7 @@ public:
     CcHandlerResult<ReadKeyResult> hd_result_;
     bool local_cache_miss_{false};
 
-// TODO(lzx): remove "lock_bucket_result_" and "lock_range_result_", just
-// use TxExecution::lock_bucket_result_ to set lock_bucket_op_->hd_result_.
-#ifdef RANGE_PARTITION_ENABLED
-    CcHandlerResult<ReadKeyResult> *lock_range_result_{nullptr};
-#else
-    CcHandlerResult<ReadKeyResult> *lock_bucket_result_{nullptr};
-#endif
+    CcHandlerResult<ReadKeyResult> *lock_range_bucket_result_{nullptr};
 };
 
 struct PostReadOperation : TransactionOperation
@@ -273,7 +267,8 @@ public:
      */
     void Advance(TransactionExecution *txm);
 
-    TableName range_table_name_{empty_sv, TableType::RangePartition, TableEngine::None};
+    TableName range_table_name_{
+        empty_sv, TableType::RangePartition, TableEngine::None};
     CcHandlerResult<ReadKeyResult> *lock_result_{nullptr};
 
     std::unordered_map<TableName, std::pair<uint64_t, TableWriteSet>>::iterator
@@ -428,7 +423,6 @@ struct ScanState
     const TxKey *scan_end_key_;
     bool scan_end_inclusive_;
 
-#ifdef RANGE_PARTITION_ENABLED
     ScanState(std::unique_ptr<CcScanner> scanner,
               uint64_t schema_version,
               const TxKey *end_key,
@@ -469,7 +463,6 @@ struct ScanState
     bool inclusive_;
     SlicePosition slice_position_;
     CcEntryAddr range_cce_addr_;
-#endif
 };
 
 struct ScanNextOperation : TransactionOperation
@@ -489,15 +482,12 @@ struct ScanNextOperation : TransactionOperation
     void UpdateScanState(ScanState *scan_state)
     {
         scan_state_ = scan_state;
-#ifdef RANGE_PARTITION_ENABLED
         slice_hd_result_.Value().ccm_scanner_ = scan_state->scanner_.get();
-#endif
     }
 
     ScanState *scan_state_;
     CcHandlerResult<ScanNextResult> hd_result_;
 
-#ifdef RANGE_PARTITION_ENABLED
     int64_t RangeNgTerm() const
     {
         return slice_hd_result_.Value().ccm_scanner_->PartitionNgTerm();
@@ -514,7 +504,6 @@ struct ScanNextOperation : TransactionOperation
     RangeRecord range_rec_;
     CcHandlerResult<ReadKeyResult> lock_range_result_;
     CcHandlerResult<PostProcessResult> unlock_range_result_;
-#endif
 
     size_t alias_{0};
     ScanBatchTxRequest *tx_req_{nullptr};
@@ -1079,8 +1068,6 @@ struct ObjectCommandOp : TransactionOperation
 
     bool auto_commit_{};
     bool always_redirect_{};
-    // TODO(lzx): remove "lock_bucket_result_" and "lock_range_result_", just
-    // use TxExecution::lock_bucket_result_ to set lock_bucket_op_->hd_result_.
     CcHandlerResult<ReadKeyResult> *lock_bucket_result_;
     uint32_t forward_key_shard_{UINT32_MAX};
     bool catalog_read_success_{};

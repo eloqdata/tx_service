@@ -756,11 +756,7 @@ private:
 struct UpdateCceCkptTsCc : public CcRequestBase
 {
 public:
-#ifdef RANGE_PARTITION_ENABLED
-    static constexpr size_t SCAN_BATCH_SIZE = 1024;
-#else
-    static constexpr size_t SCAN_BATCH_SIZE = 64;
-#endif
+    static constexpr size_t SCAN_BATCH_SIZE = 128;
 
     struct CkptTsEntry
     {

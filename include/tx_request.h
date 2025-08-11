@@ -592,9 +592,8 @@ struct ScanBatchTxRequest : public TemplateTxRequest<ScanBatchTxRequest, bool>
     const TableName &table_name_;
     std::vector<ScanBatchTuple> *batch_;
 
-#ifdef RANGE_PARTITION_ENABLED
+    // Used for range partition scanner.
     uint32_t prefetch_slice_cnt_{0};
-#endif
 
 #ifdef ON_KEY_OBJECT
     int32_t obj_type_{-1};

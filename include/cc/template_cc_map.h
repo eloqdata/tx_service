@@ -2007,8 +2007,8 @@ public:
                 {
                     TxKey tx_key(look_key);
                     const TableRangeEntry *range_entry =
-                        shard_->GetTableRangeEntry(table_name_, cc_ng_id_,
-                                                   tx_key);
+                        shard_->GetTableRangeEntry(
+                            table_name_, cc_ng_id_, tx_key);
                     part_id = range_entry->GetRangeInfo()->PartitionId();
                 }
                 else
@@ -10475,9 +10475,8 @@ protected:
 
         if (cce_version < commit_ts)
         {
-#ifdef RANGE_PARTITION_ENABLED
-            if (txservice_enable_key_cache && table_name_.IsBase() &&
-                status == RecordStatus::Deleted &&
+            if (RangePartitioned && txservice_enable_key_cache &&
+                table_name_.IsBase() && status == RecordStatus::Deleted &&
                 cce->PayloadStatus() == RecordStatus::Unknown)
             {
                 // Addking a new key to the ccm. If the key is in Normal rec
@@ -10494,7 +10493,6 @@ protected:
                     return false;
                 }
             }
-#endif
             cce->SetCommitTsPayloadStatus(commit_ts, status);
 
             if (status == RecordStatus::Deleted)
@@ -10905,7 +10903,6 @@ protected:
             VersionResultRecord<ValueT> v_rec;
             cce->MvccGet(read_ts, shard_->LastReadTs(), v_rec);
 
-#ifdef RANGE_PARTITION_ENABLED
             // For snapshot reads, only if the visible version's record
             // status is deleted and no lock has been put on it, should
             // the record be skipped in the result set. Note that if the
@@ -10916,13 +10913,7 @@ protected:
             {
                 return;
             }
-            else
-            {
-                tuple = typed_cache->AddScanTuple();
-            }
-#else
             tuple = typed_cache->AddScanTuple();
-#endif
 
             if (is_require_keys ||
                 v_rec.payload_status_ != RecordStatus::Normal)
@@ -10997,7 +10988,6 @@ protected:
             else
             {
                 const RecordStatus rec_status = cce->PayloadStatus();
-#ifdef RANGE_PARTITION_ENABLED
                 if (rec_status == RecordStatus::Normal ||
                     (rec_status == RecordStatus::Deleted && keep_deleted))
                 {
@@ -11007,9 +10997,6 @@ protected:
                 {
                     return;
                 }
-#else
-                tuple = typed_cache->AddScanTuple();
-#endif
                 if (is_require_keys)
                 {
                     tuple->KeyObj().Copy(*key);
@@ -11241,7 +11228,6 @@ protected:
             VersionResultRecord<ValueT> v_rec;
             cce->MvccGet(read_ts, shard_->LastReadTs(), v_rec);
 
-#ifdef RANGE_PARTITION_ENABLED
             // For snapshot reads, only if the visible version's record
             // status is deleted and no lock has been put on it, should
             // the record be skipped in the result set. Note that if the
@@ -11252,13 +11238,7 @@ protected:
             {
                 return;
             }
-            else
-            {
-                tuple = remote_cache->cache_msg_->add_scan_tuple();
-            }
-#else
             tuple = remote_cache->cache_msg_->add_scan_tuple();
-#endif
             if (is_require_keys)
             {
                 key->Serialize(*tuple->mutable_key());
@@ -11340,7 +11320,6 @@ protected:
             else
             {
                 const RecordStatus rec_status = cce->PayloadStatus();
-#ifdef RANGE_PARTITION_ENABLED
                 if (rec_status == RecordStatus::Normal ||
                     (rec_status == RecordStatus::Deleted && keep_deleted))
                 {
@@ -11350,9 +11329,6 @@ protected:
                 {
                     return;
                 }
-#else
-                tuple = remote_cache->cache_msg_->add_scan_tuple();
-#endif
                 if (is_require_keys)
                 {
                     key->Serialize(*tuple->mutable_key());
