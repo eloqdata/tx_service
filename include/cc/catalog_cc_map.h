@@ -213,6 +213,11 @@ public:
             return true;
         }
 
+        if (req.FirstPhaseFinished())
+        {
+            return TemplateCcMap::Execute(req);
+        }
+
         const CatalogKey *table_key = nullptr;
         if (req.Key() != nullptr)
         {
@@ -287,6 +292,8 @@ public:
             {
                 // When the commit ts is 0, the request commits nothing and only
                 // removes the write intents/locks acquired earlier.
+                req.FinishFirstPhase();
+                assert(shard_->core_id_ == 0);
                 return TemplateCcMap::Execute(req);
             }
 
@@ -615,7 +622,19 @@ public:
                     cce_ptr->payload_.cur_payload_->ClearDirtySchema();
                     cce_ptr->payload_.cur_payload_->SetDirtySchemaImage("");
                 }
-                return TemplateCcMap::Execute(req);
+                if (shard_->core_id_ < shard_->core_cnt_ - 1)
+                {
+                    req.ResetCcm();
+                    MoveRequest(&req, shard_->core_id_ + 1);
+                    return false;
+                }
+                else
+                {
+                    req.FinishFirstPhase();
+                    req.ResetCcm();
+                    MoveRequest(&req, 0);
+                    return false;
+                }
             }
 
             if (shard_->core_id_ == 0)
@@ -730,6 +749,8 @@ public:
         {
             // the request commits nothing and only downgrade the write
             // locks to write intent.
+            req.FinishFirstPhase();
+            assert(shard_->core_id_ == 0);
             return TemplateCcMap::Execute(req);
         }
         default:
@@ -1081,7 +1102,19 @@ public:
             catalog_entry->CommitDirtySchema();
         }
 
-        return TemplateCcMap::Execute(req);
+        if (shard_->core_id_ < shard_->core_cnt_ - 1)
+        {
+            req.ResetCcm();
+            MoveRequest(&req, shard_->core_id_ + 1);
+            return false;
+        }
+        else
+        {
+            req.FinishFirstPhase();
+            req.ResetCcm();
+            MoveRequest(&req, 0);
+            return false;
+        }
     }
 
     bool Execute(ReadCc &req) override

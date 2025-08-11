@@ -365,7 +365,19 @@ public:
             // locks to write intent.
         }
 
-        return TemplateCcMap::Execute(req);
+        if (shard_->core_id_ < shard_->core_cnt_ - 1)
+        {
+            req.ResetCcm();
+            MoveRequest(&req, shard_->core_id_ + 1);
+            return false;
+        }
+        else
+        {
+            req.FinishFirstPhase();
+            req.ResetCcm();
+            MoveRequest(&req, 0);
+            return false;
+        }
     }
 
     bool Execute(ReplayLogCc &req) override

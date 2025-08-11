@@ -876,6 +876,14 @@ struct PostWriteAllCc
     : public TemplatedCcRequest<PostWriteAllCc, PostProcessResult>
 {
 public:
+    enum MiniStage
+    {
+        Init,
+        ModifyState,
+        ReleaseLock,
+    };
+
+public:
     PostWriteAllCc() = default;
     PostWriteAllCc(const PostWriteAllCc &rhs) = delete;
     PostWriteAllCc(PostWriteAllCc &&rhs) = delete;
@@ -904,6 +912,7 @@ public:
         decoded_payload_ = nullptr;
         op_type_ = op_type;
         commit_type_ = commit_type;
+        modify_phase_finished_ = false;
     }
 
     void Reset(const TableName *tname,
@@ -930,6 +939,7 @@ public:
         decoded_payload_ = std::move(rec);
         op_type_ = op_type;
         commit_type_ = commit_type;
+        modify_phase_finished_ = false;
     }
 
     void Reset(const TableName *tname,
@@ -957,6 +967,7 @@ public:
         decoded_payload_ = nullptr;
         op_type_ = op_type;
         commit_type_ = commit_type;
+        modify_phase_finished_ = false;
     }
 
     uint64_t CommitTs() const
@@ -1026,6 +1037,16 @@ public:
         ccm_ = nullptr;
     }
 
+    bool FirstPhaseFinished() const
+    {
+        return modify_phase_finished_;
+    }
+
+    void FinishFirstPhase()
+    {
+        modify_phase_finished_ = true;
+    }
+
 private:
     const void *key_{nullptr};
     const std::string *key_str_{nullptr};
@@ -1047,6 +1068,12 @@ private:
     std::unique_ptr<TxRecord> decoded_payload_{nullptr};
     OperationType op_type_{OperationType::Update};
     PostWriteType commit_type_;
+
+    /**
+     * Phase 1. Modify state.
+     * Phase 2. Set payload status and handle lock.
+     */
+    bool modify_phase_finished_{false};
 };
 
 struct PostReadCc : public TemplatedCcRequest<PostReadCc, PostProcessResult>
@@ -3622,7 +3649,8 @@ public:
 
     RangePartitionDataSyncScanCc() = delete;
     RangePartitionDataSyncScanCc(const RangePartitionDataSyncScanCc &) = delete;
-    RangePartitionDataSyncScanCc &operator=(const RangePartitionDataSyncScanCc &) = delete;
+    RangePartitionDataSyncScanCc &operator=(
+        const RangePartitionDataSyncScanCc &) = delete;
 
     ~RangePartitionDataSyncScanCc() = default;
 

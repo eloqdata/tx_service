@@ -406,12 +406,19 @@ public:
             return false;
         }
 
+        if (req.FirstPhaseFinished())
+        {
+            return TemplateCcMap<KeyT, RangeRecord, true, false>::Execute(req);
+        }
+
         // When the commit ts is 0 or the commit type is DowngradeLock, the
         // request commits nothing and only removes the write intents/locks
         // acquired earlier.
         if (req.CommitTs() == TransactionOperation::tx_op_failed_ts_ ||
             req.CommitType() == PostWriteType::DowngradeLock)
         {
+            req.FinishFirstPhase();
+            assert(shard_->core_id_ == 0);
             return TemplateCcMap<KeyT, RangeRecord, true, false>::Execute(req);
         }
 
@@ -735,7 +742,19 @@ public:
             }
         }
 
-        return TemplateCcMap<KeyT, RangeRecord, true, false>::Execute(req);
+        if (shard_->core_id_ < shard_->core_cnt_ - 1)
+        {
+            req.ResetCcm();
+            MoveRequest(&req, shard_->core_id_ + 1);
+            return false;
+        }
+        else
+        {
+            req.FinishFirstPhase();
+            req.ResetCcm();
+            MoveRequest(&req, 0);
+            return false;
+        }
     }
 
     bool Execute(ReplayLogCc &req) override
