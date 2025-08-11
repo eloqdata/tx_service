@@ -3960,22 +3960,49 @@ void LocalCcShards::PostProcessHashPartitionDataSyncTask(
     {
         if (task_ckpt_err == DataSyncTask::CkptErrorCode::NO_ERROR)
         {
+            CcErrorCode err_code = CcErrorCode::NO_ERROR;
             if (task->data_sync_ts_ != UINT64_MAX && !task->filter_lambda_)
             {
                 std::shared_lock<std::shared_mutex> meta_data_lk(
                     meta_data_mux_);
-                const TableName base_table_name{
-                    task->table_name_.GetBaseTableNameSV(),
-                    TableType::Primary,
-                    task->table_name_.Engine()};
-                CatalogEntry *catalog_entry =
-                    GetCatalogInternal(base_table_name, task->node_group_id_);
-                catalog_entry->UpdateLastDataSyncTS(task->data_sync_ts_,
-                                                    task->id_);
+                // Make sure that the term has not changed so that catalog entry
+                // is still valid.
+                if (!Sharder::Instance().CheckLeaderTerm(
+                        task->node_group_id_, task->node_group_term_))
+                {
+                    LOG(ERROR) << "DataSync: node is not the leader of ng#"
+                               << task->node_group_id_ << " with leader term: "
+                               << Sharder::Instance().CandidateLeaderTerm(
+                                      task->node_group_id_)
+                               << ", and the expected leader term: "
+                               << task->node_group_term_;
+                    err_code = CcErrorCode::NG_TERM_CHANGED;
+                }
+                else
+                {
+                    const TableName base_table_name{
+                        task->table_name_.GetBaseTableNameSV(),
+                        TableType::Primary,
+                        task->table_name_.Engine()};
+                    CatalogEntry *catalog_entry = GetCatalogInternal(
+                        base_table_name, task->node_group_id_);
+                    // We're still holding catalog read lock here, and the term
+                    // has not changed. catalog entry should not be nullptr.
+                    assert(catalog_entry);
+                    catalog_entry->UpdateLastDataSyncTS(task->data_sync_ts_,
+                                                        task->id_);
+                }
             }
 
-            // Commit the data sync txm
-            txservice::CommitTx(data_sync_txm);
+            if (err_code != CcErrorCode::NO_ERROR)
+            {
+                txservice::AbortTx(data_sync_txm);
+            }
+            else
+            {
+                // Commit the data sync txm
+                txservice::CommitTx(data_sync_txm);
+            }
 
             // Reset waiting ckpt flag. Shards should be able to request
             // ckpt again if no cc entries can be kicked out.
@@ -3986,7 +4013,14 @@ void LocalCcShards::PostProcessHashPartitionDataSyncTask(
                            task->table_name_,
                            task->id_);
 
-            task->SetFinish();
+            if (err_code == CcErrorCode::NO_ERROR)
+            {
+                task->SetFinish();
+            }
+            else
+            {
+                task->SetError(err_code);
+            }
         }
         else if (task_ckpt_err == DataSyncTask::CkptErrorCode::SCAN_ERROR)
         {
@@ -4314,8 +4348,7 @@ void LocalCcShards::DataSyncForHashPartition(
                         std::move(data_sync_task),
                         catalog_rec.Schema(),
                         data_sync_txm,
-                        DataSyncTask::CkptErrorCode::SCAN_ERROR
-                        );
+                        DataSyncTask::CkptErrorCode::SCAN_ERROR);
                     return;
                 }
 
@@ -4359,7 +4392,7 @@ void LocalCcShards::DataSyncForHashPartition(
                                      data_sync_task,
                                      catalog_rec,
                                      data_sync_txm](CcErrorCode res_code,
-                                                 int32_t dest_ng_term)
+                                                    int32_t dest_ng_term)
                                     {
                                         // We don't care if
                                         // the cache send
