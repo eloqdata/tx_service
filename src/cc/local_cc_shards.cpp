@@ -3970,12 +3970,6 @@ void LocalCcShards::PostProcessHashPartitionDataSyncTask(
                 if (!Sharder::Instance().CheckLeaderTerm(
                         task->node_group_id_, task->node_group_term_))
                 {
-                    LOG(ERROR) << "DataSync: node is not the leader of ng#"
-                               << task->node_group_id_ << " with leader term: "
-                               << Sharder::Instance().CandidateLeaderTerm(
-                                      task->node_group_id_)
-                               << ", and the expected leader term: "
-                               << task->node_group_term_;
                     err_code = CcErrorCode::NG_TERM_CHANGED;
                 }
                 else
