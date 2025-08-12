@@ -386,7 +386,6 @@ public:
                             }
                         }
 
-#ifdef RANGE_PARTITION_ENABLED
                         // Load ranges for the new added indexes. We cannot
                         // simply initialize it with empty range table since we
                         // might have pre-defined range table based on the data
@@ -459,7 +458,6 @@ public:
                                 }
                             }
                         }
-#endif
 
                         for (const TableName &index_name : dirty_index_names)
                         {
@@ -579,7 +577,6 @@ public:
                                       new_index_name) == old_index_names.end())
                         {
                             shard_->DropCcm(new_index_name, req.NodeGroupId());
-#ifdef RANGE_PARTITION_ENABLED
                             // Clean up table ranges for new sk.
                             const TableName index_range_name{
                                 new_index_name.StringView(),
@@ -587,13 +584,10 @@ public:
                                 new_index_name.Engine()};
                             shard_->DropCcm(index_range_name,
                                             req.NodeGroupId());
-#endif
                             if (shard_->core_id_ == shard_->core_cnt_ - 1)
                             {
-#ifdef RANGE_PARTITION_ENABLED
                                 shard_->CleanTableRange(index_range_name,
                                                         req.NodeGroupId());
-#endif
                                 Statistics *statistics =
                                     catalog_entry->dirty_schema_
                                         ->StatisticsObject()
@@ -824,17 +818,14 @@ public:
                 // associated with the table in the final commit step.
                 shard_->DropCcm(table_key->Name(), req.NodeGroupId());
 
-#ifdef RANGE_PARTITION_ENABLED
-                // Drop range table if exist
-                TableName range_table_name{table_key->Name().StringView(),
-                                           TableType::RangePartition,
-                                           table_key->Name().Engine()};
-#ifndef ON_KEY_OBJECT
-                shard_->DropCcm(range_table_name, req.NodeGroupId());
-#else
-                shard_->CleanCcm(table_key->Name(), req.NodeGroupId());
-#endif
-#endif
+                if (!table_key->Name().IsHashPartitioned())
+                {
+                    // Drop range table if exist
+                    TableName range_table_name{table_key->Name().StringView(),
+                                               TableType::RangePartition,
+                                               table_key->Name().Engine()};
+                    shard_->DropCcm(range_table_name, req.NodeGroupId());
+                }
 
                 if (old_schema != nullptr)
                 {
@@ -843,7 +834,6 @@ public:
                     for (const TableName &index_name : index_names)
                     {
                         shard_->DropCcm(index_name, req.NodeGroupId());
-#ifdef RANGE_PARTITION_ENABLED
                         // Drop range table if exist
                         TableName index_range_table_name{
                             index_name.StringView(),
@@ -851,7 +841,6 @@ public:
                             index_name.Engine()};
                         shard_->DropCcm(index_range_table_name,
                                         req.NodeGroupId());
-#endif
                     }
                 }
             }
@@ -883,23 +872,25 @@ public:
                 shard_->CreateOrUpdatePkCcMap(
                     table_key->Name(), new_schema, req.NodeGroupId(), false);
 
-#ifdef RANGE_PARTITION_ENABLED
-                // Update pk range table if exist.
-                TableName base_range_table_name{table_key->Name().StringView(),
-                                                TableType::RangePartition,
-                                                table_key->Name().Engine()};
-                auto ranges = shard_->GetTableRangesForATable(
-                    base_range_table_name, req.NodeGroupId());
-                if (ranges != nullptr)
+                if (!table_key->Name().IsHashPartitioned())
                 {
-                    shard_->CreateOrUpdateRangeCcMap(
-                        base_range_table_name,
-                        new_schema,
-                        req.NodeGroupId(),
-                        catalog_entry->dirty_schema_version_,
-                        false);
+                    // Update pk range table if exist.
+                    TableName base_range_table_name{
+                        table_key->Name().StringView(),
+                        TableType::RangePartition,
+                        table_key->Name().Engine()};
+                    auto ranges = shard_->GetTableRangesForATable(
+                        base_range_table_name, req.NodeGroupId());
+                    if (ranges != nullptr)
+                    {
+                        shard_->CreateOrUpdateRangeCcMap(
+                            base_range_table_name,
+                            new_schema,
+                            req.NodeGroupId(),
+                            catalog_entry->dirty_schema_version_,
+                            false);
+                    }
                 }
-#endif
 
                 if (req.OpType() == OperationType::AddIndex ||
                     req.OpType() == OperationType::DropIndex ||
@@ -921,7 +912,6 @@ public:
                                                           new_schema,
                                                           req.NodeGroupId(),
                                                           false);
-#ifdef RANGE_PARTITION_ENABLED
                             // Update current sk range table if exist.
                             TableName index_range_table_name{
                                 old_index_name.StringView(),
@@ -938,7 +928,6 @@ public:
                                     catalog_entry->dirty_schema_version_,
                                     false);
                             }
-#endif
                         }
                         else
                         {
@@ -946,8 +935,7 @@ public:
                             // Remove sk cc map for dropped index.
                             shard_->DropCcm(old_index_name, req.NodeGroupId());
 
-// range table operation.
-#ifdef RANGE_PARTITION_ENABLED
+                            // range table operation.
                             // Drop range table if exist
                             TableName old_index_range_table_name{
                                 old_index_name.StringView(),
@@ -955,7 +943,6 @@ public:
                                 old_index_name.Engine()};
                             shard_->DropCcm(old_index_range_table_name,
                                             req.NodeGroupId());
-#endif
                         }
                     }
                 }  // End of alter table index
@@ -1028,27 +1015,29 @@ public:
             if (req.OpType() == OperationType::DropTable)
             {
                 shard_->CleanTableStatistics(table_key->Name(), cc_ng_id_);
-#ifdef RANGE_PARTITION_ENABLED
-                TableName range_table_name{table_key->Name().StringView(),
-                                           TableType::RangePartition,
-                                           table_key->Name().Engine()};
-                shard_->CleanTableRange(range_table_name, req.NodeGroupId());
-                if (old_schema != nullptr)
+                if (!table_key->Name().IsHashPartitioned())
                 {
-                    std::vector<TableName> index_names =
-                        old_schema->IndexNames();
-                    for (const TableName &index_name : index_names)
+                    TableName range_table_name{table_key->Name().StringView(),
+                                               TableType::RangePartition,
+                                               table_key->Name().Engine()};
+                    shard_->CleanTableRange(range_table_name,
+                                            req.NodeGroupId());
+                    if (old_schema != nullptr)
                     {
-                        // Drop range table if exist
-                        TableName index_range_table_name{
-                            index_name.StringView(),
-                            TableType::RangePartition,
-                            index_name.Engine()};
-                        shard_->CleanTableRange(index_range_table_name,
-                                                req.NodeGroupId());
+                        std::vector<TableName> index_names =
+                            old_schema->IndexNames();
+                        for (const TableName &index_name : index_names)
+                        {
+                            // Drop range table if exist
+                            TableName index_range_table_name{
+                                index_name.StringView(),
+                                TableType::RangePartition,
+                                index_name.Engine()};
+                            shard_->CleanTableRange(index_range_table_name,
+                                                    req.NodeGroupId());
+                        }
                     }
                 }
-#endif
             }
             else if (req.OpType() == OperationType::AddIndex ||
                      req.OpType() == OperationType::DropIndex)
@@ -1064,14 +1053,12 @@ public:
                                   new_index_names.end(),
                                   old_index_name) == new_index_names.end())
                     {
-#ifdef RANGE_PARTITION_ENABLED
                         TableName old_index_range_table_name{
                             old_index_name.StringView(),
                             TableType::RangePartition,
                             old_index_name.Engine()};
                         shard_->CleanTableRange(old_index_range_table_name,
                                                 req.NodeGroupId());
-#endif
                         Statistics *statistics =
                             old_schema->StatisticsObject().get();
                         statistics->DropIndex(old_index_name);
@@ -1401,8 +1388,8 @@ public:
 
             if (catalog_entry->schema_)
             {
-#ifdef RANGE_PARTITION_ENABLED
-                if (!shard_->LoadRangesAndStatisticsNx(
+                if (!table_name.IsHashPartitioned() &&
+                    !shard_->LoadRangesAndStatisticsNx(
                         catalog_entry->schema_.get(),
                         req.NodeGroupId(),
                         ng_term,
@@ -1410,7 +1397,6 @@ public:
                 {
                     return false;
                 }
-#endif
 
                 // Load range and stats for the new added indexes.
                 if (catalog_entry->dirty_schema_)
@@ -1473,17 +1459,18 @@ public:
                 shard_->CreateOrUpdatePkCcMap(
                     table_name, old_schema, req.NodeGroupId());
 
-#ifdef RANGE_PARTITION_ENABLED
-                // Pk range table ccmap
-                const TableName base_range_name{table_name.StringView(),
-                                                TableType::RangePartition,
-                                                table_name.Engine()};
-                shard_->CreateOrUpdateRangeCcMap(
-                    base_range_name,
-                    old_schema,
-                    req.NodeGroupId(),
-                    catalog_entry->schema_version_);
-#endif
+                if (!table_name.IsHashPartitioned())
+                {
+                    // Pk range table ccmap
+                    const TableName base_range_name{table_name.StringView(),
+                                                    TableType::RangePartition,
+                                                    table_name.Engine()};
+                    shard_->CreateOrUpdateRangeCcMap(
+                        base_range_name,
+                        old_schema,
+                        req.NodeGroupId(),
+                        catalog_entry->schema_version_);
+                }
 
                 // Old sk table ccmap using old schema.
                 std::vector<TableName> old_index_names =
@@ -1492,7 +1479,6 @@ public:
                 {
                     shard_->CreateOrUpdateSkCcMap(
                         old_index_name, old_schema, req.NodeGroupId());
-#ifdef RANGE_PARTITION_ENABLED
                     // old sk range table ccmap
                     const TableName old_index_range_name{
                         old_index_name.StringView(),
@@ -1503,7 +1489,6 @@ public:
                         old_schema,
                         req.NodeGroupId(),
                         catalog_entry->schema_version_);
-#endif
                 }
 
                 // New sk table ccmap using new schema
@@ -1518,7 +1503,6 @@ public:
                         shard_->CreateOrUpdateSkCcMap(
                             new_index_name, new_schema, req.NodeGroupId());
 
-#ifdef RANGE_PARTITION_ENABLED
                         // New sk range cc maps should use the dirty schema
                         const TableName new_index_range_name{
                             new_index_name.StringView(),
@@ -1529,7 +1513,6 @@ public:
                             new_schema,
                             req.NodeGroupId(),
                             catalog_entry->dirty_schema_version_);
-#endif
                     }
                 }
             }
@@ -1718,9 +1701,9 @@ public:
             {
                 if (catalog_entry->schema_ != nullptr)
                 {
-#ifdef RANGE_PARTITION_ENABLED
                     // Initialize table statistics before create ccmap.
-                    if (!shard_->LoadRangesAndStatisticsNx(
+                    if (!table_name.IsHashPartitioned() &&
+                        !shard_->LoadRangesAndStatisticsNx(
                             catalog_entry->schema_.get(),
                             req.NodeGroupId(),
                             ng_term,
@@ -1728,7 +1711,6 @@ public:
                     {
                         return false;  // Loading...
                     }
-#endif
 
                     // upload catalog record
                     cce->payload_.PassInCurrentPayload(

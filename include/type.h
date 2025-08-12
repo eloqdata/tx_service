@@ -449,7 +449,7 @@ struct TableName
 
     bool IsHashPartitioned() const
     {
-        return engine_ == TableEngine::EloqKv;
+        return engine_ == TableEngine::EloqKv || engine_ == TableEngine::None;
     }
 
     bool IsStringOwner() const
@@ -574,10 +574,13 @@ inline static TableName range_bucket_ccm_name{
 inline static TableName cluster_config_ccm_name{
     cluster_config_ccm_name_sv, TableType::ClusterConfig, TableEngine::None};
 
+// Sequence table is a special table for auto increment id and range partition
+// id. It is used to generate auto increment id and range partition id for
+// tables. It is treated as a eloqsql table since it is range partitioned.
 inline static TableName sequence_table_name{sequence_table_name_sv.data(),
                                             sequence_table_name_sv.size(),
                                             TableType::Primary,
-                                            TableEngine::None};
+                                            TableEngine::EloqSql};
 
 #ifdef ON_KEY_OBJECT
 // Set buckets count to be the same as the slots count. (16384)

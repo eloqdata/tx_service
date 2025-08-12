@@ -1821,14 +1821,12 @@ private:
 
     void PostProcessHashPartitionDataSyncTask(
         std::shared_ptr<DataSyncTask> task,
-        const TableSchema *table_schema,
         TransactionExecution *data_sync_txm,
         DataSyncTask::CkptErrorCode ckpt_err,
         bool is_scan_task = true);
 
     void PostProcessRangePartitionDataSyncTask(
         std::shared_ptr<DataSyncTask> task,
-        const TableSchema *table_schema,
         TransactionExecution *data_sync_txm,
         DataSyncTask::CkptErrorCode ckpt_err,
         bool is_scan_task = true);

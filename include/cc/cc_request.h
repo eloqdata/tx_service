@@ -4618,15 +4618,6 @@ public:
                 TableEngine table_engine =
                     static_cast<TableEngine>(blob.data()[blob_offset]);
                 blob_offset += sizeof(uint8_t);
-#ifdef ON_KEY_OBJECT
-                TableType table_type = TableType::Primary;
-                // 4-byte integer for the length of the serialized object keys
-                // and commands of this tx.
-                uint32_t kv_len = *reinterpret_cast<const uint32_t *>(
-                    blob.data() + blob_offset);
-                blob_offset += sizeof(uint32_t);
-#else
-
                 // 1-byte integer for the type of table
                 uint8_t table_type_number = *reinterpret_cast<const uint8_t *>(
                     blob.data() + blob_offset);
@@ -4657,7 +4648,6 @@ public:
                 uint32_t kv_len = *reinterpret_cast<const uint32_t *>(
                     blob.data() + blob_offset);
                 blob_offset += sizeof(uint32_t);
-#endif
                 size_t hash = ccs.GetCatalogFactory()->KeyHash(
                     blob.data(), blob_offset, nullptr);
                 dest_core = hash ? (hash & 0x3FF) % ccs.core_cnt_

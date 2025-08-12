@@ -872,20 +872,21 @@ void txservice::LocalCcHandler::ScanOpen(
     }
     else
     {
-#ifdef ON_KEY_OBJECT
         const KeySchema *key_schema = nullptr;
-#else
-        const CatalogEntry *catalog_entry =
-            local_shard.GetCatalog(table_name, cc_ng_id);
-
-        if (catalog_entry == nullptr || catalog_entry->schema_ == nullptr)
+        // We don't need key schema for eloqkv for serialize/deserialize.
+        if (table_name.Engine() == TableEngine::EloqKv)
         {
-            hd_res.SetError(CcErrorCode::REQUESTED_TABLE_NOT_EXISTS);
-            return;
-        }
+            const CatalogEntry *catalog_entry =
+                local_shard.GetCatalog(table_name, cc_ng_id);
 
-        const KeySchema *key_schema = catalog_entry->schema_->KeySchema();
-#endif
+            if (catalog_entry == nullptr || catalog_entry->schema_ == nullptr)
+            {
+                hd_res.SetError(CcErrorCode::REQUESTED_TABLE_NOT_EXISTS);
+                return;
+            }
+
+            key_schema = catalog_entry->schema_->KeySchema();
+        }
         if (direction == ScanDirection::Forward &&
             pk_forward_scanner_.Size() > 0)
         {
@@ -928,9 +929,15 @@ void txservice::LocalCcHandler::ScanOpen(
     scanner_ptr->lock_type_ = LockTypeUtil::DeduceLockType(
         scanner_ptr->cc_op_, iso_level, proto, is_covering_keys);
 
-#ifdef RANGE_PARTITION_ENABLED
-    hd_res.SetFinished();
-#else
+    if (scanner_ptr->Type() == CcmScannerType::RangePartition)
+    {
+        // scan open for range partition just initialize the scanner. Actual
+        // scan is done in scan next.
+        hd_res.SetFinished();
+        return;
+    }
+
+    // For hash partition, scan open will do the first scan batch.
     auto all_node_groups = Sharder::Instance().AllNodeGroups();
     open_result.Reset(*all_node_groups);
     size_t core_cnt = cc_shards_.Count();
@@ -1066,7 +1073,6 @@ void txservice::LocalCcHandler::ScanOpen(
                                 scan_pattern);
         }
     }
-#endif
 }
 
 void txservice::LocalCcHandler::ScanOpenLocal(

@@ -56,9 +56,7 @@
 #include "tx_worker_pool.h"
 #include "type.h"
 
-#ifdef ON_KEY_OBJECT
 DECLARE_bool(cmd_read_catalog);
-#endif
 
 namespace txservice
 {
@@ -121,14 +119,7 @@ void TransactionOperation::ReRunOp(TransactionExecution *txm)
 ReadOperation::ReadOperation(
     TransactionExecution *txm,
     CcHandlerResult<ReadKeyResult> *lock_range_bucket_result)
-    : hd_result_(txm)
-#ifdef RANGE_PARTITION_ENABLED
-      ,
-      lock_range_result_(lock_range_bucket_result)
-#else
-      ,
-      lock_bucket_result_(lock_range_bucket_result)
-#endif
+    : hd_result_(txm), lock_range_bucket_result_(lock_range_bucket_result)
 {
     TX_TRACE_ASSOCIATE(this, &hd_result_);
 }
@@ -138,13 +129,9 @@ void ReadOperation::Reset()
     hd_result_.Value().Reset();
     hd_result_.Reset();
     local_cache_miss_ = false;
-#ifdef RANGE_PARTITION_ENABLED
-    lock_range_result_->Value().Reset();
-    lock_range_result_->Reset();
-#else
-    lock_bucket_result_->Value().Reset();
-    lock_bucket_result_->Reset();
-#endif
+    lock_range_bucket_result_->Value().Reset();
+    lock_range_bucket_result_->Reset();
+
     op_start_ = metrics::TimePoint::max();
 
     is_running_ = false;
@@ -154,39 +141,21 @@ void ReadOperation::Forward(TransactionExecution *txm)
 {
     if (!is_running_)
     {
-#ifdef RANGE_PARTITION_ENABLED
-        if (!read_tx_req_->read_local_)
-        {
-            // Just returned from LockReadRangeOp, check lock_range_result_.
-            assert(lock_range_result_->IsFinished());
-            if (lock_range_result_->IsError())
-            {
-                // There is an error when getting the input key's range. The
-                // read operation is set to be errored.
-                hd_result_.SetError(lock_range_result_->ErrorCode());
-                hd_result_.ForceError();
-
-                txm->PostProcess(*this);
-                return;
-            }
-        }
-#else
         if (!read_tx_req_->read_local_)
         {
             // Just returned from lock_bucket_op_, check lock_bucket_result_.
-            assert(lock_bucket_result_->IsFinished());
-            if (lock_bucket_result_->IsError())
+            assert(lock_range_bucket_result_->IsFinished());
+            if (lock_range_bucket_result_->IsError())
             {
-                // There is an error when getting the input key's bucket. The
-                // read operation is set to be errored.
-                hd_result_.SetError(lock_bucket_result_->ErrorCode());
+                // There is an error when getting the input key's bucket or
+                // range. The read operation is set to be errored.
+                hd_result_.SetError(lock_range_bucket_result_->ErrorCode());
                 hd_result_.ForceError();
 
                 txm->PostProcess(*this);
                 return;
             }
         }
-#endif
 
         // Need to make sure current node is still leader since we will visit
         // bucket meta data which is only valid if current node is still ng
@@ -227,18 +196,20 @@ void ReadOperation::Forward(TransactionExecution *txm)
             }
         }
 
-#ifndef RANGE_PARTITION_ENABLED
-        if (hd_result_.ErrorCode() == CcErrorCode::OUT_OF_MEMORY)
+        if (read_tx_req_->tab_name_->IsHashPartitioned() &&
+            hd_result_.ErrorCode() == CcErrorCode::OUT_OF_MEMORY)
         {
-            // If shard is full, keep retrying since checkpoint will
+            // For hash partition, keep retrying since checkpoint will
             // clean up memory for new insert.
+            // For range partition, keep retrying with range read lock might
+            // block checkpoint, which will cause dirty data fail to flush, and
+            // we will keep getting OOM error.
             retry_num_++;
             hd_result_.Value().Reset();
             hd_result_.Reset();
             ReRunOp(txm);
             return;
         }
-#endif
         txm->PostProcess(*this);
     }
     else
@@ -632,188 +603,46 @@ void AcquireWriteOperation::Forward(TransactionExecution *txm)
     }
 }
 
-#ifdef RANGE_PARTITION_ENABLED
-void LockWriteRangesOp::Forward(TransactionExecution *txm)
+void LockWriteRangeBucketsOp::Forward(TransactionExecution *txm)
 {
     if (!is_running_)
     {
         txm->Process(*this);
     }
-    else if (lock_range_result_->IsFinished())
-    {
-        // Make sure current node is still ng leader since we will visit
-        // range info meta data in post process which is only valid when current
-        // node is still ng leader.
-        if (!txm->CheckLeaderTerm())
-        {
-            lock_range_result_->SetError(CcErrorCode::TX_NODE_NOT_LEADER);
-            lock_range_result_->ForceError();
-            txm->PostProcess(*this);
-        }
-        else if (lock_range_result_->IsError())
-        {
-            assert(lock_range_result_->ErrorCode() ==
-                   CcErrorCode::ACQUIRE_KEY_LOCK_FAILED_FOR_RW_CONFLICT);
-            // If acquire range read lock blocked by DDL, check if tx has
-            // already acquired other range read lock. If so we need to abort
-            // tx since it might cause dead lock with range split. If this tx
-            // has not acquired any range read lock, we can safely retry here.
-            const auto &rset = txm->rw_set_.MetaDataReadSet();
-            for (const auto &[cce_addr, read_set_pair] : rset)
-            {
-                if (read_set_pair.second != catalog_ccm_name_sv &&
-                    read_set_pair.second != range_bucket_ccm_name_sv &&
-                    read_set_pair.second != cluster_config_ccm_name_sv)
-                {
-                    // Abort tx.
-                    txm->PostProcess(*this);
-                    return;
-                }
-            }
-            lock_range_result_->Value().Reset();
-            lock_range_result_->Reset();
-            is_running_ = false;
-            execute_immediately_ = false;
-            txm->Process(*this);
-            return;
-        }
-        else
-        {
-            txm->PostProcess(*this);
-        }
-    }
-}
-
-void LockWriteRangesOp::Advance(TransactionExecution *txm)
-{
-#ifdef RANGE_PARTITION_ENABLED
-    // Advances the write key iterator such that it points to the first key
-    // belonging to the next range.
-    TxKey range_end_key = txm->range_rec_.GetRangeInfo()->EndTxKey();
-    auto next_range_start = write_key_it_;
-    if (range_end_key.Type() == KeyType::PositiveInf)
-    {
-        next_range_start = write_key_end_;
-    }
-    else
-    {
-        TableWriteSet &table_write_set = table_it_->second.second;
-        next_range_start = table_write_set.lower_bound(range_end_key);
-    }
-
-    NodeGroupId range_ng = txm->range_rec_.GetRangeOwnerNg()->BucketOwner();
-    NodeGroupId new_bucket_ng =
-        txm->range_rec_.GetRangeOwnerNg()->DirtyBucketOwner();
-
-    const std::vector<const BucketInfo *> *splitting_range_ngs =
-        txm->range_rec_.GetNewRangeOwnerNgs();
-
-    // Updates the sharding codes of the write-set keys belonging to this
-    // range. The higher 22 bits represent the range ID.
-    NodeGroupId new_range_ng = UINT32_MAX;
-    NodeGroupId new_range_new_bucket_ng = UINT32_MAX;
-    size_t new_range_idx = 0;
-
-    auto *range_info = txm->range_rec_.GetRangeInfo();
-    while (write_key_it_ != next_range_start)
-    {
-        const TxKey &write_tx_key = write_key_it_->first;
-        WriteSetEntry &write_entry = write_key_it_->second;
-        size_t hash = write_tx_key.Hash();
-        write_entry.key_shard_code_ = (range_ng << 10) | (hash & 0x3FF);
-        // If current range is migrating, forward to new range owner.
-        if (new_bucket_ng != UINT32_MAX)
-        {
-            write_entry.forward_addr_.try_emplace((new_bucket_ng << 10) |
-                                                  (hash & 0x3FF));
-        }
-
-        // If range is splitting and the key will fall on a new range after
-        // split is finished, register forward_addr_ to indicate
-        // entry needs to be double written.
-        while (range_info->IsDirty() &&
-               new_range_idx < range_info->NewKey()->size() &&
-               !(write_tx_key < range_info->NewKey()->at(new_range_idx)))
-        {
-            new_range_ng =
-                splitting_range_ngs->at(new_range_idx)->BucketOwner();
-            new_range_new_bucket_ng =
-                splitting_range_ngs->at(new_range_idx++)->DirtyBucketOwner();
-        }
-        if (new_range_ng != UINT32_MAX)
-        {
-            if (new_range_ng != range_ng)
-            {
-                write_entry.forward_addr_.try_emplace((new_range_ng << 10) |
-                                                      (hash & 0x3FF));
-            }
-            // If the new range is migrating, forward to the new owner of new
-            // range.
-            if (new_range_new_bucket_ng != UINT32_MAX &&
-                new_range_new_bucket_ng != range_ng)
-            {
-                write_entry.forward_addr_.try_emplace(
-                    (new_range_new_bucket_ng << 10) | (hash & 0x3FF));
-            }
-        }
-
-        txm->rw_set_.IncreaseFowardWriteCnt(write_entry.forward_addr_.size());
-        ++write_key_it_;
-    }
-
-    if (write_key_it_ == write_key_end_)
-    {
-        // Has acquired range locks for all write keys in the current table.
-        // Moves to the next table, if there are any.
-        ++table_it_;
-        if (table_it_ != table_end_)
-        {
-            write_key_it_ = table_it_->second.second.begin();
-            write_key_end_ = table_it_->second.second.end();
-        }
-    }
-#endif
-}
-#endif
-
-void LockWriteBucketsOp::Forward(TransactionExecution *txm)
-{
-    if (!is_running_)
-    {
-        txm->Process(*this);
-    }
-    else if (lock_bucket_result_->IsFinished())
+    else if (lock_result_->IsFinished())
     {
         // Make sure current node is still ng leader since we will visit
         // bucket info meta data in post process which is only valid when
         // current node is still ng leader.
         if (!txm->CheckLeaderTerm())
         {
-            lock_bucket_result_->SetError(CcErrorCode::TX_NODE_NOT_LEADER);
-            lock_bucket_result_->ForceError();
+            lock_result_->SetError(CcErrorCode::TX_NODE_NOT_LEADER);
+            lock_result_->ForceError();
             txm->PostProcess(*this);
         }
-        else if (lock_bucket_result_->IsError())
+        else if (lock_result_->IsError())
         {
-            assert(lock_bucket_result_->ErrorCode() ==
+            assert(lock_result_->ErrorCode() ==
                    CcErrorCode::ACQUIRE_KEY_LOCK_FAILED_FOR_RW_CONFLICT);
-            // If acquire bucket read lock blocked by DDL, check if tx has
-            // already acquired other bucket read lock. If so we need to abort
-            // tx since it might cause dead lock with bucket migration. If this
-            // tx has not acquired any buckets read lock, we can safely retry
-            // here.
+            // If acquire range/bucket read lock blocked by DDL, check if tx has
+            // already acquired other range/bucket read lock. If so we need to
+            // abort tx since it might cause dead lock with bucket migration. If
+            // this tx has not acquired any range/buckets read lock, we can
+            // safely retry here.
             const auto &rset = txm->rw_set_.MetaDataReadSet();
             for (const auto &[cce_addr, read_entry_pair] : rset)
             {
-                if (read_entry_pair.second == range_bucket_ccm_name_sv)
+                if (read_entry_pair.second != catalog_ccm_name_sv &&
+                    read_entry_pair.second != range_bucket_ccm_name_sv &&
+                    read_entry_pair.second != cluster_config_ccm_name_sv)
                 {
                     // Abort tx.
                     txm->PostProcess(*this);
                     return;
                 }
             }
-            lock_bucket_result_->Value().Reset();
-            lock_bucket_result_->Reset();
+            lock_result_->Value().Reset();
+            lock_result_->Reset();
             is_running_ = false;
             execute_immediately_ = false;
             txm->Process(*this);
@@ -827,26 +656,133 @@ void LockWriteBucketsOp::Forward(TransactionExecution *txm)
 }
 
 // Check if the write key needs to be forward written.
-void LockWriteBucketsOp::Advance(TransactionExecution *txm,
-                                 const BucketInfo *bucket_info)
+void LockWriteRangeBucketsOp::Advance(TransactionExecution *txm)
 {
-    assert(bucket_info != nullptr);
-    NodeGroupId bucket_ng = bucket_info->BucketOwner();
-    NodeGroupId new_bucket_ng = bucket_info->DirtyBucketOwner();
-
-    // Updates the sharding codes of this key according to bucket info.
-    const TxKey &write_tx_key = write_key_it_->first;
-    size_t hash = write_tx_key.Hash();
-    WriteSetEntry &write_entry = write_key_it_->second;
-    write_entry.key_shard_code_ = (bucket_ng << 10) | (hash & 0x3FF);
-    // If current bucket is migrating, forward to new range owner.
-    if (new_bucket_ng != UINT32_MAX)
+    if (table_it_->first.IsHashPartitioned())
     {
-        write_entry.forward_addr_.try_emplace((new_bucket_ng << 10) |
-                                              (hash & 0x3FF));
-        txm->rw_set_.IncreaseFowardWriteCnt(1);
+        if (!txm->CheckLeaderTerm())
+        {
+            lock_result_->SetError(CcErrorCode::TX_NODE_NOT_LEADER);
+            lock_result_->ForceError();
+            txm->PostProcess(*this);
+            return;
+        }
+        const BucketInfo *bucket_info = nullptr;
+        while (write_key_it_ != write_key_end_)
+        {
+            // Check whether the bucket of this write key has been locked
+            // before locking bucket. If yes, just use it.
+            const TxKey &write_key = write_key_it_->first;
+            uint16_t bucket_id =
+                Sharder::MapKeyHashToBucketId(write_key.Hash());
+            bucket_info = txm->FastToGetBucket(bucket_id);
+            if (bucket_info != nullptr)
+            {
+                write_key_it_++;
+            }
+            else
+            {
+                break;
+            }
+        }
+        if (write_key_it_ != write_key_end_)
+        {
+            assert(bucket_info != nullptr);
+            NodeGroupId bucket_ng = bucket_info->BucketOwner();
+            NodeGroupId new_bucket_ng = bucket_info->DirtyBucketOwner();
+
+            // Updates the sharding codes of this key according to bucket info.
+            const TxKey &write_tx_key = write_key_it_->first;
+            size_t hash = write_tx_key.Hash();
+            WriteSetEntry &write_entry = write_key_it_->second;
+            write_entry.key_shard_code_ = (bucket_ng << 10) | (hash & 0x3FF);
+            // If current bucket is migrating, forward to new range owner.
+            if (new_bucket_ng != UINT32_MAX)
+            {
+                write_entry.forward_addr_.try_emplace((new_bucket_ng << 10) |
+                                                      (hash & 0x3FF));
+                txm->rw_set_.IncreaseFowardWriteCnt(1);
+            }
+        }
     }
-    ++write_key_it_;
+    else
+    {
+        // Advances the write key iterator such that it points to the first key
+        // belonging to the next range.
+        TxKey range_end_key = txm->range_rec_.GetRangeInfo()->EndTxKey();
+        auto next_range_start = write_key_it_;
+        if (range_end_key.Type() == KeyType::PositiveInf)
+        {
+            next_range_start = write_key_end_;
+        }
+        else
+        {
+            TableWriteSet &table_write_set = table_it_->second.second;
+            next_range_start = table_write_set.lower_bound(range_end_key);
+        }
+
+        NodeGroupId range_ng = txm->range_rec_.GetRangeOwnerNg()->BucketOwner();
+        NodeGroupId new_bucket_ng =
+            txm->range_rec_.GetRangeOwnerNg()->DirtyBucketOwner();
+
+        const std::vector<const BucketInfo *> *splitting_range_ngs =
+            txm->range_rec_.GetNewRangeOwnerNgs();
+
+        // Updates the sharding codes of the write-set keys belonging to this
+        // range. The higher 22 bits represent the range ID.
+        NodeGroupId new_range_ng = UINT32_MAX;
+        NodeGroupId new_range_new_bucket_ng = UINT32_MAX;
+        size_t new_range_idx = 0;
+
+        auto *range_info = txm->range_rec_.GetRangeInfo();
+        while (write_key_it_ != next_range_start)
+        {
+            const TxKey &write_tx_key = write_key_it_->first;
+            WriteSetEntry &write_entry = write_key_it_->second;
+            size_t hash = write_tx_key.Hash();
+            write_entry.key_shard_code_ = (range_ng << 10) | (hash & 0x3FF);
+            // If current range is migrating, forward to new range owner.
+            if (new_bucket_ng != UINT32_MAX)
+            {
+                write_entry.forward_addr_.try_emplace((new_bucket_ng << 10) |
+                                                      (hash & 0x3FF));
+            }
+
+            // If range is splitting and the key will fall on a new range after
+            // split is finished, register forward_addr_ to indicate
+            // entry needs to be double written.
+            while (range_info->IsDirty() &&
+                   new_range_idx < range_info->NewKey()->size() &&
+                   !(write_tx_key < range_info->NewKey()->at(new_range_idx)))
+            {
+                new_range_ng =
+                    splitting_range_ngs->at(new_range_idx)->BucketOwner();
+                new_range_new_bucket_ng =
+                    splitting_range_ngs->at(new_range_idx++)
+                        ->DirtyBucketOwner();
+            }
+            if (new_range_ng != UINT32_MAX)
+            {
+                if (new_range_ng != range_ng)
+                {
+                    write_entry.forward_addr_.try_emplace((new_range_ng << 10) |
+                                                          (hash & 0x3FF));
+                }
+                // If the new range is migrating, forward to the new owner of
+                // new range.
+                if (new_range_new_bucket_ng != UINT32_MAX &&
+                    new_range_new_bucket_ng != range_ng)
+                {
+                    write_entry.forward_addr_.try_emplace(
+                        (new_range_new_bucket_ng << 10) | (hash & 0x3FF));
+                }
+            }
+
+            txm->rw_set_.IncreaseFowardWriteCnt(
+                write_entry.forward_addr_.size());
+            ++write_key_it_;
+        }
+    }
 
     if (write_key_it_ == write_key_end_)
     {
@@ -1398,13 +1334,10 @@ void ScanOpenOperation::Forward(TransactionExecution *txm)
 }
 
 ScanNextOperation::ScanNextOperation(TransactionExecution *txm)
-    : hd_result_(txm)
-#ifdef RANGE_PARTITION_ENABLED
-      ,
+    : hd_result_(txm),
       slice_hd_result_(txm),
       lock_range_result_(txm),
       unlock_range_result_(txm)
-#endif
 {
     TX_TRACE_ASSOCIATE(this, &hd_result_);
 }
@@ -1413,24 +1346,19 @@ void ScanNextOperation::Reset()
 {
     alias_ = 0;
     scan_state_ = nullptr;
-#ifdef RANGE_PARTITION_ENABLED
     range_table_name_ =
         TableName(empty_sv, TableType::RangePartition, TableEngine::None);
-#endif
     op_start_ = metrics::TimePoint::max();
     ResetResult();
 }
 
 void ScanNextOperation::ResetResult()
 {
-#ifdef RANGE_PARTITION_ENABLED
     slice_hd_result_.Value().Reset();
     slice_hd_result_.Reset();
     unlock_range_result_.Reset();
     lock_range_result_.Reset();
-#else
     hd_result_.Reset();
-#endif
 }
 
 void ScanNextOperation::Forward(TransactionExecution *txm)
@@ -1444,8 +1372,7 @@ void ScanNextOperation::Forward(TransactionExecution *txm)
         {
             txm->Process(*this);
         }
-#ifdef RANGE_PARTITION_ENABLED
-        else
+        else if (scanner.Type() == CcmScannerType::RangePartition)
         {
             if (!lock_range_result_.IsFinished())
             {
@@ -1498,7 +1425,6 @@ void ScanNextOperation::Forward(TransactionExecution *txm)
                 return;
             }
         }
-#endif
     }
 
     if (scanner.Type() == CcmScannerType::HashPartition &&
@@ -1520,7 +1446,6 @@ void ScanNextOperation::Forward(TransactionExecution *txm)
         scanner.SetStatus(ScannerStatus::Open);
         txm->PostProcess(*this);
     }
-#ifdef RANGE_PARTITION_ENABLED
     else if (scanner.Type() == CcmScannerType::RangePartition &&
              slice_hd_result_.IsFinished())
     {
@@ -1608,7 +1533,6 @@ void ScanNextOperation::Forward(TransactionExecution *txm)
         scanner.SetStatus(ScannerStatus::Open);
         txm->PostProcess(*this);
     }
-#endif
     else if (txm->IsTimeOut())
     {
         TX_TRACE_ACTION_WITH_CONTEXT(
@@ -1624,49 +1548,50 @@ void ScanNextOperation::Forward(TransactionExecution *txm)
             });
 
         DeadLockCheck::RequestCheck();
-#ifdef RANGE_PARTITION_ENABLED
-        // When timeout in RANGE_PARTITION, check deadlock first, then force
-        // error.
-        if (slice_hd_result_.Value().is_local_)
-        {
-            // For local request, just rely on the result of the deadlock
-            // checking.
-            return;
-        }
 
-        if (retry_num_ > 0 &&
-            (txm->CheckLeaderTerm() || txm->CheckStandbyTerm()))
+        if (scanner.Type() == CcmScannerType::RangePartition)
         {
-            ReRunOp(txm);
-            return;
-        }
+            if (slice_hd_result_.Value().is_local_)
+            {
+                // For local request, just rely on the result of the deadlock
+                // checking.
+                return;
+            }
 
-        bool force_error = slice_hd_result_.ForceError();
-        if (force_error)
-        {
-            txm->PostProcess(*this);
-        }
+            if (retry_num_ > 0 &&
+                (txm->CheckLeaderTerm() || txm->CheckStandbyTerm()))
+            {
+                ReRunOp(txm);
+                return;
+            }
 
-#else
-        if (hd_result_.Value().is_local_)
-        {
-            // Never force error for local request.
-            return;
+            bool force_error = slice_hd_result_.ForceError();
+            if (force_error)
+            {
+                txm->PostProcess(*this);
+            }
         }
+        else
+        {
+            if (hd_result_.Value().is_local_)
+            {
+                // Never force error for local request.
+                return;
+            }
 
-        if (retry_num_ > 0 &&
-            (txm->CheckLeaderTerm() || txm->CheckStandbyTerm()))
-        {
-            ReRunOp(txm);
-            return;
-        }
+            if (retry_num_ > 0 &&
+                (txm->CheckLeaderTerm() || txm->CheckStandbyTerm()))
+            {
+                ReRunOp(txm);
+                return;
+            }
 
-        bool force_error = hd_result_.ForceError();
-        if (force_error)
-        {
-            txm->PostProcess(*this);
+            bool force_error = hd_result_.ForceError();
+            if (force_error)
+            {
+                txm->PostProcess(*this);
+            }
         }
-#endif
     }
 }
 
@@ -5300,14 +5225,7 @@ void BroadcastStatisticsOp::Forward(TransactionExecution *txm)
 ObjectCommandOp::ObjectCommandOp(
     TransactionExecution *txm,
     CcHandlerResult<ReadKeyResult> *lock_range_bucket_result)
-    : hd_result_(txm)
-#ifdef RANGE_PARTITION_ENABLED
-      ,
-      lock_range_result_(lock_range_bucket_result)
-#else
-      ,
-      lock_bucket_result_(lock_range_bucket_result)
-#endif
+    : hd_result_(txm), lock_bucket_result_(lock_range_bucket_result)
 {
     TX_TRACE_ASSOCIATE(this, &hd_result_);
 }
@@ -5325,14 +5243,9 @@ void ObjectCommandOp::Reset(const TableName *table_name,
     hd_result_.Value().Reset();
     auto_commit_ = auto_commit;
     always_redirect_ = always_redirect;
-#ifdef RANGE_PARTITION_ENABLED
-    lock_range_result_->Value().Reset();
-    lock_range_result_->Reset();
-#else
     lock_bucket_result_->Value().Reset();
     lock_bucket_result_->Reset();
     forward_key_shard_ = UINT32_MAX;
-#endif
     catalog_read_success_ = false;
 }
 
@@ -5340,7 +5253,6 @@ void ObjectCommandOp::Forward(TransactionExecution *txm)
 {
     if (!is_running_)
     {
-#ifdef ON_KEY_OBJECT
         if (FLAGS_cmd_read_catalog && !catalog_read_success_)
         {
             // Just returned from read_catalog_op_, check read_catalog_result_.
@@ -5369,35 +5281,6 @@ void ObjectCommandOp::Forward(TransactionExecution *txm)
             txm->Process(*this);
             return;
         }
-#endif
-
-#ifdef RANGE_PARTITION_ENABLED
-        // Just returned from LockReadRangeOp, check lock_range_result_.
-        assert(lock_range_result_->IsFinished());
-        if (lock_range_result_->IsError())
-        {
-            // There is an error when getting the input key's range. The
-            // read operation is set to be errored.
-            hd_result_.SetError(lock_range_result_->ErrorCode());
-
-            bool force_error = hd_result_.ForceError();
-            assert(force_error);
-            (void) force_error;
-
-            txm->PostProcess(*this);
-            return;
-        }
-        // Need to make sure current node is still leader since we will visit
-        // bucket meta data which is only valid if current node is still ng
-        // leader.
-        if (!txm->CheckLeaderTerm())
-        {
-            hd_result_.SetError(CcErrorCode::TX_NODE_NOT_LEADER);
-            hd_result_.ForceError();
-            txm->PostProcess(*this);
-            return;
-        }
-#else
         // Just returned from lock_bucket_op_, check lock_bucket_result_.
         assert(lock_bucket_result_->IsFinished());
         if (lock_bucket_result_->IsError())
@@ -5420,7 +5303,6 @@ void ObjectCommandOp::Forward(TransactionExecution *txm)
             return;
         }
 
-#endif
         txm->Process(*this);
     }
 
@@ -5495,14 +5377,7 @@ void ObjectCommandOp::Forward(TransactionExecution *txm)
 MultiObjectCommandOp::MultiObjectCommandOp(
     TransactionExecution *txm,
     CcHandlerResult<ReadKeyResult> *lock_range_bucket_result)
-    : txm_(txm)
-#ifdef RANGE_PARTITION_ENABLED
-      ,
-      lock_range_result_(lock_range_bucket_result)
-#else
-      ,
-      lock_bucket_result_(lock_range_bucket_result)
-#endif
+    : txm_(txm), lock_bucket_result_(lock_range_bucket_result)
 {
 }
 
@@ -5602,12 +5477,6 @@ void MultiObjectCommandOp::Reset(MultiObjectCommandTxRequest *req)
 
     atm_cnt_.store(new_size, std::memory_order_relaxed);
 
-#ifdef RANGE_PARTITION_ENABLED
-    vct_key_shard_code_.resize(new_size);
-    range_lock_cur_ = 0;
-    lock_range_result_->Value().Reset();
-    lock_range_result_->Reset();
-#else
     vct_key_shard_code_.clear();
     vct_key_shard_code_.resize(new_size);
     for (auto &shard_code : vct_key_shard_code_)
@@ -5617,7 +5486,6 @@ void MultiObjectCommandOp::Reset(MultiObjectCommandTxRequest *req)
     bucket_lock_cur_ = 0;
     lock_bucket_result_->Reset();
     lock_bucket_result_->Value().Reset();
-#endif
     catalog_read_success_ = false;
 }
 
@@ -5625,7 +5493,6 @@ void MultiObjectCommandOp::Forward(TransactionExecution *txm)
 {
     if (!is_running_)
     {
-#ifdef ON_KEY_OBJECT
         if (FLAGS_cmd_read_catalog && !catalog_read_success_)
         {
             // Just returned from read_catalog_op_, check read_catalog_result_.
@@ -5646,52 +5513,6 @@ void MultiObjectCommandOp::Forward(TransactionExecution *txm)
             txm->Process(*this);
             return;
         }
-#endif
-
-#ifdef RANGE_PARTITION_ENABLED
-        assert(lock_range_result_->IsFinished());
-        const std::vector<TxKey> *vct_key = tx_req_->VctKey();
-        if (lock_range_result_->IsError())
-        {
-            txm->PostProcess(*this);
-        }
-        else if (!txm->CheckLeaderTerm())
-        {
-            // If the current node is not the leader of the node group, the
-            // range and bucket info returned by the lock-range request should
-            // not be accessed. Hence, the lock range result is reset to be
-            // errored.
-            lock_range_result_->Reset();
-            lock_range_result_->SetError(CcErrorCode::TX_NODE_NOT_LEADER);
-            txm->PostProcess(*this);
-        }
-        else if (range_lock_cur_ < vct_key->size())
-        {
-            // A range has been locked. Assigns the range's node group to all
-            // keys belonging to this range.
-            const RangeRecord *range_rec =
-                static_cast<RangeRecord *>(lock_range_result_->Value().rec_);
-            TxKey range_end_key = range_rec->GetRangeInfo()->EndTxKey();
-            uint32_t key_shard = range_rec->GetRangeOwnerNg()->BucketOwner();
-
-            auto cmp = [](const TxKey &start_key, const TxKey &end_key)
-            { return start_key < end_key; };
-
-            for (; range_lock_cur_ < vct_key->size() &&
-                   cmp(vct_key->at(range_lock_cur_), range_end_key);
-                 ++range_lock_cur_)
-            {
-                vct_key_shard_code_[range_lock_cur_] = key_shard;
-            }
-
-            txm->Process(*this);
-        }
-        else
-        {
-            // Range locks have been acquired and go to next step
-            txm->Process(*this);
-        }
-#else
         // Just returned from lock_bucket_op_, check lock_bucket_result_.
         assert(lock_bucket_result_->IsFinished());
         if (lock_bucket_result_->IsError())
@@ -5711,7 +5532,6 @@ void MultiObjectCommandOp::Forward(TransactionExecution *txm)
             txm->PostProcess(*this);
             return;
         }
-#endif
         txm->Process(*this);
         return;
     }
@@ -5758,12 +5578,7 @@ void MultiObjectCommandOp::Forward(TransactionExecution *txm)
             const TxKey &key = vct_key->at(i);
             uint32_t key_shard_code = 0;
 
-#ifdef RANGE_PARTITION_ENABLED
-            uint32_t residual = key.Hash() & 0x3FF;
-            key_shard_code = vct_key_shard_code_[i] << 10 | residual;
-#else
             key_shard_code = vct_key_shard_code_[i].first;
-#endif
             bool commit = false;
 
             int db_idx = GetDbIndex(tx_req_->table_name_);
@@ -8272,10 +8087,8 @@ void DataMigrationOp::Clear()
 
 BatchReadOperation::BatchReadOperation(
     TransactionExecution *txm,
-    CcHandlerResult<ReadKeyResult> *lock_range_result)
-#ifdef RANGE_PARTITION_ENABLED
-    : lock_range_result_(lock_range_result)
-#endif
+    CcHandlerResult<ReadKeyResult> *lock_range_bucket_result)
+    : lock_range_bucket_result_(lock_range_bucket_result)
 {
     CcHandlerResult<ReadKeyResult> &hd_res = hd_result_vec_.emplace_back(txm);
     hd_res.post_lambda_ = [this](CcHandlerResult<ReadKeyResult> *res)
@@ -8297,11 +8110,9 @@ void BatchReadOperation::Reset()
 {
     std::vector<ScanBatchTuple> &read_batch = batch_read_tx_req_->read_batch_;
     size_t cnt = read_batch.size();
-#ifdef RANGE_PARTITION_ENABLED
-    lock_range_result_->Value().Reset();
-    lock_range_result_->Reset();
+    lock_range_bucket_result_->Value().Reset();
+    lock_range_bucket_result_->Reset();
     lock_it_ = read_batch.begin();
-#endif
 
     if (cnt > hd_result_vec_.size())
     {
@@ -8340,12 +8151,11 @@ void BatchReadOperation::Forward(TransactionExecution *txm)
 {
     if (!is_running_)
     {
-#ifdef RANGE_PARTITION_ENABLED
-        assert(lock_range_result_->IsFinished());
+        assert(lock_range_bucket_result_->IsFinished());
         std::vector<ScanBatchTuple> &read_batch =
             batch_read_tx_req_->read_batch_;
 
-        if (lock_range_result_->IsError())
+        if (lock_range_bucket_result_->IsError())
         {
             txm->PostProcess(*this);
         }
@@ -8355,33 +8165,47 @@ void BatchReadOperation::Forward(TransactionExecution *txm)
             // range and bucket info returned by the lock-range request
             // should not be accessed. Hence, the lock range result is reset
             // to be errored.
-            lock_range_result_->Reset();
-            lock_range_result_->SetError(CcErrorCode::TX_NODE_NOT_LEADER);
+            lock_range_bucket_result_->Reset();
+            lock_range_bucket_result_->SetError(
+                CcErrorCode::TX_NODE_NOT_LEADER);
             txm->PostProcess(*this);
         }
         else if (lock_it_ != read_batch.end())
         {
-            // A range has been locked. Assigns the range's node group to
-            // all keys belonging to this range.
-            const RangeRecord *range_rec =
-                static_cast<RangeRecord *>(lock_range_result_->Value().rec_);
-            TxKey range_end_key = range_rec->GetRangeInfo()->EndTxKey();
-            NodeGroupId range_ng = range_rec->GetRangeOwnerNg()->BucketOwner();
-
-            auto cmp = [](const ScanBatchTuple &tuple, const TxKey &end_key)
-            { return tuple.key_ < end_key; };
-
-            for (;
-                 lock_it_ != read_batch.end() && cmp(*lock_it_, range_end_key);
-                 ++lock_it_)
+            if (!batch_read_tx_req_->tab_name_->IsHashPartitioned())
             {
-                if (lock_it_->status_ != RecordStatus::Unknown)
-                {
-                    continue;
-                }
-                lock_it_->cce_addr_.SetNodeGroupId(range_ng);
-            }
+                // A range has been locked. Assigns the range's node group to
+                // all keys belonging to this range.
+                const RangeRecord *range_rec = static_cast<RangeRecord *>(
+                    lock_range_bucket_result_->Value().rec_);
+                TxKey range_end_key = range_rec->GetRangeInfo()->EndTxKey();
+                NodeGroupId range_ng =
+                    range_rec->GetRangeOwnerNg()->BucketOwner();
 
+                auto cmp = [](const ScanBatchTuple &tuple, const TxKey &end_key)
+                { return tuple.key_ < end_key; };
+
+                for (; lock_it_ != read_batch.end() &&
+                       cmp(*lock_it_, range_end_key);
+                     ++lock_it_)
+                {
+                    if (lock_it_->status_ != RecordStatus::Unknown)
+                    {
+                        continue;
+                    }
+                    lock_it_->cce_addr_.SetNodeGroupId(range_ng);
+                }
+            }
+            else
+            {
+                const RangeBucketRecord *bucket_rec =
+                    static_cast<RangeBucketRecord *>(
+                        lock_range_bucket_result_->Value().rec_);
+                NodeGroupId bucket_ng =
+                    bucket_rec->GetBucketInfo()->BucketOwner();
+                lock_it_->cce_addr_.SetNodeGroupId(bucket_ng);
+                ++lock_it_;
+            }
             txm->Process(*this);
         }
         else
@@ -8390,9 +8214,6 @@ void BatchReadOperation::Forward(TransactionExecution *txm)
             // Retry reads.
             txm->Process(*this);
         }
-#else
-        txm->Process(*this);
-#endif
         return;
     }
 
@@ -8400,9 +8221,7 @@ void BatchReadOperation::Forward(TransactionExecution *txm)
     {
         uint32_t err_cnt = 0;
         std::unordered_set<uint32_t> update_leader_set;
-#ifndef RANGE_PARTITION_ENABLED
         bool out_of_memory_error = false;
-#endif
         for (auto &hd_result : hd_result_vec_)
         {
             if (hd_result.ErrorCode() == CcErrorCode::PIN_RANGE_SLICE_FAILED ||
@@ -8428,7 +8247,6 @@ void BatchReadOperation::Forward(TransactionExecution *txm)
                 hd_result.Value().Reset();
                 hd_result.Reset();
             }
-#ifndef RANGE_PARTITION_ENABLED
             else if (hd_result.ErrorCode() == CcErrorCode::OUT_OF_MEMORY)
             {
                 ++err_cnt;
@@ -8436,10 +8254,8 @@ void BatchReadOperation::Forward(TransactionExecution *txm)
                 hd_result.Value().Reset();
                 hd_result.Reset();
             }
-#endif
         }
 
-#ifndef RANGE_PARTITION_ENABLED
         if (out_of_memory_error)
         {
             retry_num_++;
@@ -8447,7 +8263,6 @@ void BatchReadOperation::Forward(TransactionExecution *txm)
             ReRunOp(txm);
             return;
         }
-#endif
         if (err_cnt > 0 && retry_num_ > 0)
         {
             unfinished_cnt_.store(err_cnt, std::memory_order_relaxed);

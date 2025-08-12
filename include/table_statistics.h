@@ -1168,12 +1168,16 @@ private:
         {
             std::unique_ptr<KeyT> key = samplekey.MoveKey<KeyT>();
             assert(key != nullptr);
-#ifdef RANGE_PARTITION_ENABLED
-            NodeGroupId dest_ng_id =
-                RouteKeyByRange(*ccs, table_or_index_name, cc_ng_id, *key);
-#else
-            NodeGroupId dest_ng_id = RouteKeyByHash(*ccs, cc_ng_id, *key);
-#endif
+            NodeGroupId dest_ng_id;
+            if (!table_or_index_name.IsHashPartitioned())
+            {
+                dest_ng_id =
+                    RouteKeyByRange(*ccs, table_or_index_name, cc_ng_id, *key);
+            }
+            else
+            {
+                dest_ng_id = RouteKeyByHash(*ccs, cc_ng_id, *key);
+            }
             sample_pool_vec[dest_ng_id].emplace_back(std::move(*key));
         }
 
@@ -1275,17 +1279,20 @@ private:
         }
 
         std::vector<uint64_t> ng_weight_vec;
-#ifdef RANGE_PARTITION_ENABLED
-        for (NodeGroupId ng_id = 0; ng_id < ng_cnt; ++ng_id)
+        if (table_or_index_name.IsHashPartitioned())
         {
-            // Lock has been acquired in LocalCcShards::InitTableStatistic.
-            uint64_t range_cnt =
-                ccs.CountRangesLockless(table_or_index_name, cc_ng_id, ng_id);
-            ng_weight_vec.emplace_back(range_cnt);
+            ng_weight_vec.resize(ng_cnt, 1);
         }
-#else
-        ng_weight_vec.resize(ng_cnt, 1);
-#endif
+        else
+        {
+            for (NodeGroupId ng_id = 0; ng_id < ng_cnt; ++ng_id)
+            {
+                // Lock has been acquired in LocalCcShards::InitTableStatistic.
+                uint64_t range_cnt = ccs.CountRangesLockless(
+                    table_or_index_name, cc_ng_id, ng_id);
+                ng_weight_vec.emplace_back(range_cnt);
+            }
+        }
 
         records_vec = DivideRecordsByNodeGroupWeight(records, ng_weight_vec);
         bool no_conflict =
