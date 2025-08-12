@@ -1587,10 +1587,7 @@ store::DataStoreHandler::DataStoreOpStatus CcShard::FetchSnapshot(
                     backfill_func,
                     partition_id);
 
-    store::DataStoreHandler::DataStoreOpStatus res =
-        local_shards_.store_hd_->FetchRecord(nullptr, fetch_cc);
-
-    return store::DataStoreHandler::DataStoreOpStatus::Success;
+    return local_shards_.store_hd_->FetchRecord(nullptr, fetch_cc);
 }
 
 void CcShard::RemoveFetchRecordRequest(LruEntry *cce)
