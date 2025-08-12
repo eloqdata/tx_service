@@ -142,10 +142,12 @@ struct CmdForwardEntry
 struct CmdSetEntry
 {
     CmdSetEntry(uint64_t object_version,
+                uint64_t lock_ts,
                 uint64_t last_vali_ts,
                 std::string &&key,
                 bool apply_on_deleted)
         : object_version_(object_version),
+          lock_ts_(lock_ts),
           last_vali_ts_(last_vali_ts),
           obj_key_str_(std::move(key)),
           ignore_previous_version_(apply_on_deleted)
@@ -178,6 +180,8 @@ struct CmdSetEntry
     // commit_ts of the object cce when the commands apply to it, commands on
     // the same object must apply in commit_ts order
     uint64_t object_version_{};
+    // node clock when the lock is acquired, for setting commit ts of this txn.
+    uint64_t lock_ts_{};
     // The cce's last_validation ts, for setting commit ts of this txn.
     uint64_t last_vali_ts_{};
     // TTL of the object after the commands apply to it.

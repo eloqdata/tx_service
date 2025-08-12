@@ -4012,6 +4012,7 @@ void TransactionExecution::Process(SetCommitTsOperation &set_ts)
         {
             candidate = std::max(candidate, cmd_set_entry.last_vali_ts_ + 1);
             candidate = std::max(candidate, cmd_set_entry.object_version_ + 1);
+            candidate = std::max(candidate, cmd_set_entry.lock_ts_ + 1);
         }
     }
 
@@ -6630,6 +6631,7 @@ void TransactionExecution::PostProcess(ObjectCommandOp &obj_cmd_op)
         const TableName *table_name = obj_cmd_op.table_name_;
         const CcEntryAddr &cce_addr = cmd_result.cce_addr_;
         uint64_t commit_ts = cmd_result.commit_ts_;
+        uint64_t lock_ts = cmd_result.lock_ts_;
         uint64_t last_vali_ts = cmd_result.last_vali_ts_;
         uint64_t ttl = cmd_result.ttl_;
         bool ttl_expired = cmd_result.ttl_expired_;
@@ -6654,6 +6656,7 @@ void TransactionExecution::PostProcess(ObjectCommandOp &obj_cmd_op)
                                           cce_addr,
                                           obj_status,
                                           commit_ts,
+                                          lock_ts,
                                           last_vali_ts,
                                           obj_cmd_.key_,
                                           retire_command.get(),
@@ -6678,6 +6681,7 @@ void TransactionExecution::PostProcess(ObjectCommandOp &obj_cmd_op)
                                           cce_addr,
                                           obj_status,
                                           commit_ts,
+                                          lock_ts,
                                           last_vali_ts,
                                           obj_cmd_.key_,
                                           recover_command,
@@ -6697,6 +6701,7 @@ void TransactionExecution::PostProcess(ObjectCommandOp &obj_cmd_op)
                 cce_addr,
                 obj_status,
                 commit_ts,
+                lock_ts,
                 last_vali_ts,
                 obj_cmd_op.key_,
                 object_modified ? obj_cmd_op.command_ : nullptr,
@@ -7080,6 +7085,7 @@ void TransactionExecution::PostProcess(MultiObjectCommandOp &obj_cmd_op)
                                           cmd_res.cce_addr_,
                                           cmd_res.rec_status_,
                                           cmd_res.commit_ts_,
+                                          cmd_res.lock_ts_,
                                           cmd_res.last_vali_ts_,
                                           &vct_key->at(i),
                                           nullptr,
@@ -7139,6 +7145,7 @@ void TransactionExecution::PostProcess(MultiObjectCommandOp &obj_cmd_op)
                             cmd_res.cce_addr_,
                             cmd_res.rec_status_,
                             cmd_res.commit_ts_,
+                            cmd_res.lock_ts_,
                             cmd_res.last_vali_ts_,
                             &vct_key->at(i),
                             retire_command.get(),
@@ -7157,6 +7164,7 @@ void TransactionExecution::PostProcess(MultiObjectCommandOp &obj_cmd_op)
                         cmd_res.cce_addr_,
                         cmd_res.rec_status_,
                         cmd_res.commit_ts_,
+                        cmd_res.lock_ts_,
                         cmd_res.last_vali_ts_,
                         &vct_key->at(i),
                         cmd_res.object_modified_ ? vct_cmd->at(i) : nullptr,

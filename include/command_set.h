@@ -60,6 +60,7 @@ public:
                           const CcEntryAddr &cce_addr,
                           RecordStatus payload_status,
                           uint64_t cce_version,
+                          uint64_t lock_ts,
                           uint64_t last_vali_ts,
                           const TxKey *key,
                           const TxCommand *cmd,
@@ -81,6 +82,7 @@ public:
             std::tie(cce_it, inserted) =
                 table_cmd_set.try_emplace(cce_addr,
                                           cce_version,
+                                          lock_ts,
                                           last_vali_ts,
                                           std::move(key_str),
                                           cmd_apply_on_deleted);
