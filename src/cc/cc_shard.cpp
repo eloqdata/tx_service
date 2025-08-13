@@ -1348,20 +1348,22 @@ const StatisticsEntry *CcShard::LoadRangesAndStatisticsNx(
         return statistics_entry;
     }
 
-#ifdef RANGE_PARTITION_ENABLED
-    // Initialize table ranges before create table
-    // statistics.
-    TableName base_range_table_name(
-        curr_schema->GetBaseTableName().StringView(),
-        TableType::RangePartition,
-        curr_schema->GetBaseTableName().Engine());
-    const auto *ranges =
-        GetTableRangesForATable(base_range_table_name, cc_ng_id);
-    if (ranges == nullptr)
+    if (!curr_schema->GetBaseTableName().IsHashPartitioned())
     {
-        FetchTableRanges(
-            base_range_table_name, requester, cc_ng_id, cc_ng_term);
-        return nullptr;
+        // Initialize table ranges before create table
+        // statistics.
+        TableName base_range_table_name(
+            curr_schema->GetBaseTableName().StringView(),
+            TableType::RangePartition,
+            curr_schema->GetBaseTableName().Engine());
+        const auto *ranges =
+            GetTableRangesForATable(base_range_table_name, cc_ng_id);
+        if (ranges == nullptr)
+        {
+            FetchTableRanges(
+                base_range_table_name, requester, cc_ng_id, cc_ng_term);
+            return nullptr;
+        }
     }
 
     std::vector<TableName> index_names = curr_schema->IndexNames();
@@ -1379,7 +1381,6 @@ const StatisticsEntry *CcShard::LoadRangesAndStatisticsNx(
             return nullptr;
         }
     }
-#endif
 
     statistics_entry =
         GetTableStatistics(curr_schema->GetBaseTableName(), cc_ng_id);

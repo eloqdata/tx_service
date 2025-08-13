@@ -1569,11 +1569,7 @@ public:
         }
         case ::txlog::SchemaOpMessage_Stage::SchemaOpMessage_Stage_PrepareData:
         {
-#ifdef RANGE_PARTITION_ENABLED
             lock_type = LockType::WriteIntent;
-#else
-            lock_type = LockType::WriteLock;
-#endif
             break;
         }
         case ::txlog::SchemaOpMessage_Stage::SchemaOpMessage_Stage_CommitSchema:

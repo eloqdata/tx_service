@@ -28,13 +28,6 @@ set_property(CACHE WITH_ROCKSDB_CLOUD PROPERTY STRINGS "S3" "GCS")
 message(NOTICE "With RocksDB Cloud: ${WITH_ROCKSDB_CLOUD}")
 option(BRPC_WITH_GLOG "With glog" ON)
 option(RUN_TX_SERVICE_TESTS "Run unit-tests" ON)
-option(RANGE_PARTITION_ENABLED "Whether enable range partition" ON)
-message(NOTICE "RANGE_PARTITION_ENABLED : ${RANGE_PARTITION_ENABLED}")
-
-if(RANGE_PARTITION_ENABLED)
-    add_definitions(-DRANGE_PARTITION_ENABLED)
-endif()
-
 option(FORK_HM_PROCESS "Whether fork host manager process" ON)
 message(NOTICE "FORK_HM_PROCESS : ${FORK_HM_PROCESS}")
 

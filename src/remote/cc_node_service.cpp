@@ -728,30 +728,6 @@ void CcNodeService::InitDataMigration(
         bucket_ids.push_back(migrate_info.bucket_id());
         new_owner_ngs.push_back(migrate_info.new_owner());
     }
-#ifdef RANGE_PARTITION_ENABLED
-    // Each worker processes 10 buckets at a time.
-    int worker_tx_cnt =
-        bucket_ids.size() > 100 ? 10 : (bucket_ids.size() / 10) + 1;
-    // Each worker processes 10 buckets at a time.
-    std::vector<std::vector<uint16_t>> bucket_ids_per_task(1);
-    std::vector<std::vector<NodeGroupId>> new_owner_ngs_per_task(1);
-    std::vector<uint16_t> *cur_task_bucket_ids = &bucket_ids_per_task.back();
-    std::vector<NodeGroupId> *cur_task_new_owner_ngs =
-        &new_owner_ngs_per_task.back();
-    for (size_t i = 0; i < bucket_ids.size(); i++)
-    {
-        cur_task_bucket_ids->push_back(bucket_ids[i]);
-        cur_task_new_owner_ngs->push_back(new_owner_ngs[i]);
-        if (cur_task_bucket_ids->size() == 10 && i != bucket_ids.size() - 1)
-        {
-            bucket_ids_per_task.push_back(std::vector<uint16_t>());
-            new_owner_ngs_per_task.push_back(std::vector<NodeGroupId>());
-            cur_task_bucket_ids = &bucket_ids_per_task.back();
-            cur_task_new_owner_ngs = &new_owner_ngs_per_task.back();
-        }
-    }
-
-#else
     // Each worker processes all buckets that is on a specific core.
     int worker_tx_cnt = Sharder::Instance().GetLocalCcShards()->Count();
     // Put all buckets on the same core to the same task.
@@ -779,7 +755,6 @@ void CcNodeService::InitDataMigration(
             task_it++;
         }
     }
-#endif
     for (int i = 0; i < worker_tx_cnt; i++)
     {
         TransactionExecution *txm = tx_service->NewTx();

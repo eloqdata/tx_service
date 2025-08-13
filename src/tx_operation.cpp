@@ -2664,16 +2664,11 @@ void UpsertTableOp::Forward(TransactionExecution *txm)
                  op_type_ == OperationType::DropTable ||
                  op_type_ == OperationType::TruncateTable)
         {
-            bool need_update_sequence_table = false;
-
-#ifdef RANGE_PARTITION_ENABLED
-            need_update_sequence_table = true;
-#else
-            need_update_sequence_table =
-                op_type_ == OperationType::CreateTable
-                    ? catalog_rec_.DirtySchema()->HasAutoIncrement()
-                    : catalog_rec_.Schema()->HasAutoIncrement();
-#endif
+            bool need_update_sequence_table =
+                !table_key_.Name().IsHashPartitioned() ||
+                (op_type_ == OperationType::CreateTable
+                     ? catalog_rec_.DirtySchema()->HasAutoIncrement()
+                     : catalog_rec_.Schema()->HasAutoIncrement());
             if (need_update_sequence_table)
             {
                 update_sequence_table_op_.op_func_ =
@@ -2694,7 +2689,6 @@ void UpsertTableOp::Forward(TransactionExecution *txm)
                         {
                             bool succ = true;
                             const TableName &table_name = table_key_.Name();
-#ifdef RANGE_PARTITION_ENABLED
                             // Update sequence table about the range id info.
                             std::vector<TableName> index_names =
                                 op_type_ == OperationType::CreateTable
@@ -2703,13 +2697,17 @@ void UpsertTableOp::Forward(TransactionExecution *txm)
                             if (op_type_ == OperationType::CreateTable ||
                                 op_type_ == OperationType::TruncateTable)
                             {
-                                int32_t init_range_id =
-                                    Sequences::InitialRangePartitionIdOf(
-                                        table_name);
-                                succ = Sequences::InitIdOfTableRangePartition(
-                                    table_name, init_range_id);
+                                if (!table_name.IsHashPartitioned())
+                                {
+                                    int32_t init_range_id =
+                                        Sequences::InitialRangePartitionIdOf(
+                                            table_name);
+                                    succ =
+                                        Sequences::InitIdOfTableRangePartition(
+                                            table_name, init_range_id);
+                                }
 
-                                // secondary index
+                                // secondary index are always range partitioned.
                                 if (succ && index_names.size() > 0)
                                 {
                                     succ = std::all_of(
@@ -2728,8 +2726,12 @@ void UpsertTableOp::Forward(TransactionExecution *txm)
                             }
                             else if (op_type_ == OperationType::DropTable)
                             {
-                                succ = Sequences::DeleteSequence(
-                                    table_name, SequenceType::RangePartitionId);
+                                if (!table_name.IsHashPartitioned())
+                                {
+                                    succ = Sequences::DeleteSequence(
+                                        table_name,
+                                        SequenceType::RangePartitionId);
+                                }
 
                                 if (succ && index_names.size() > 0)
                                 {
@@ -2744,7 +2746,6 @@ void UpsertTableOp::Forward(TransactionExecution *txm)
                                         });
                                 }
                             }
-#endif
 
                             bool has_auto_increment =
                                 op_type_ == OperationType::CreateTable
@@ -6759,33 +6760,34 @@ void NotifyStartMigrateOp::InitDataMigration(TxNumber tx_number,
                     Sharder::Instance().GetLocalCcShards()->GetTxservice();
                 std::vector<TransactionExecution *> txms;
                 std::vector<TxNumber> txns;
-#ifdef RANGE_PARTITION_ENABLED
                 // Each worker processes 10 buckets at a time.
-                int worker_tx_cnt =
-                    bucket_ids.size() > 100 ? 10 : (bucket_ids.size() / 10) + 1;
-                // Each worker processes 10 buckets at a time.
-                std::vector<std::vector<uint16_t>> bucket_ids_per_task(1);
-                std::vector<std::vector<NodeGroupId>> new_owner_ngs_per_task(1);
-                std::vector<uint16_t> *cur_task_bucket_ids =
-                    &bucket_ids_per_task.back();
-                std::vector<NodeGroupId> *cur_task_new_owner_ngs =
-                    &new_owner_ngs_per_task.back();
-                for (size_t i = 0; i < bucket_ids.size(); i++)
-                {
-                    cur_task_bucket_ids->push_back(bucket_ids[i]);
-                    cur_task_new_owner_ngs->push_back(new_owner_ngs[i]);
-                    if (cur_task_bucket_ids->size() == 10 &&
-                        i != bucket_ids.size() - 1)
-                    {
-                        bucket_ids_per_task.push_back(std::vector<uint16_t>());
-                        new_owner_ngs_per_task.push_back(
-                            std::vector<NodeGroupId>());
-                        cur_task_bucket_ids = &bucket_ids_per_task.back();
-                        cur_task_new_owner_ngs = &new_owner_ngs_per_task.back();
-                    }
-                }
+                // int worker_tx_cnt =
+                //     bucket_ids.size() > 100 ? 10 : (bucket_ids.size() / 10) +
+                //     1;
+                // // Each worker processes 10 buckets at a time.
+                // std::vector<std::vector<uint16_t>> bucket_ids_per_task(1);
+                // std::vector<std::vector<NodeGroupId>>
+                // new_owner_ngs_per_task(1); std::vector<uint16_t>
+                // *cur_task_bucket_ids =
+                //     &bucket_ids_per_task.back();
+                // std::vector<NodeGroupId> *cur_task_new_owner_ngs =
+                //     &new_owner_ngs_per_task.back();
+                // for (size_t i = 0; i < bucket_ids.size(); i++)
+                // {
+                //     cur_task_bucket_ids->push_back(bucket_ids[i]);
+                //     cur_task_new_owner_ngs->push_back(new_owner_ngs[i]);
+                //     if (cur_task_bucket_ids->size() == 10 &&
+                //         i != bucket_ids.size() - 1)
+                //     {
+                //         bucket_ids_per_task.push_back(std::vector<uint16_t>());
+                //         new_owner_ngs_per_task.push_back(
+                //             std::vector<NodeGroupId>());
+                //         cur_task_bucket_ids = &bucket_ids_per_task.back();
+                //         cur_task_new_owner_ngs =
+                //         &new_owner_ngs_per_task.back();
+                //     }
+                // }
 
-#else
                 // Each worker processes all buckets that are on a specific
                 // core.
                 int worker_tx_cnt =
@@ -6818,7 +6820,6 @@ void NotifyStartMigrateOp::InitDataMigration(TxNumber tx_number,
                         task_it++;
                     }
                 }
-#endif
                 for (int i = 0; i < worker_tx_cnt; i++)
                 {
                     TransactionExecution *txm = tx_service->NewTx();
@@ -7053,12 +7054,6 @@ void DataMigrationOp::Reset(TransactionExecution *txm,
     post_all_bucket_lock_op_.table_name_ = &range_bucket_ccm_name;
     post_all_bucket_lock_op_.write_type_ = PostWriteType::PostCommit;
     post_all_bucket_lock_op_.op_type_ = OperationType::Update;
-
-#ifdef RANGE_PARTITION_ENABLED
-    assert(ranges_in_bucket_snapshot_.empty());
-#else
-    assert(table_snapshot_.empty());
-#endif
 }
 
 void DataMigrationOp::PrepareNextRoundBuckets()
@@ -7286,17 +7281,10 @@ void DataMigrationOp::Forward(TransactionExecution *txm)
             RetrySubOperation(txm, &write_before_locking_log_op_);
             return;
         }
-#ifdef RANGE_PARTITION_ENABLED
         if (migrate_bucket_idx_ == 20)
         {
             ACTION_FAULT_INJECTOR("data_migrate_before_prepare_log");
         }
-#else
-        if (migrate_bucket_idx_ == 0)
-        {
-            ACTION_FAULT_INJECTOR("data_migrate_before_prepare_log");
-        }
-#endif
 
         LOG(INFO) << "Data migration: prepare bucket lock"
                   << ", txn: " << txm->TxNumber();
@@ -7367,7 +7355,6 @@ void DataMigrationOp::Forward(TransactionExecution *txm)
             return;
         }
 
-#ifdef RANGE_PARTITION_ENABLED
         auto local_shards = Sharder::Instance().GetLocalCcShards();
         ranges_in_bucket_snapshot_.clear();
         for (auto id : status_->bucket_ids_[migrate_bucket_idx_])
@@ -7381,7 +7368,20 @@ void DataMigrationOp::Forward(TransactionExecution *txm)
             }
         }
 
-        if (ranges_in_bucket_snapshot_.empty())
+        hash_partitioned_tables_snapshot_.clear();
+        auto all_catalog_snapshot = local_shards->GetCatalogTableNameSnapshot(
+            txm->TxCcNodeId(), txm->CommitTs());
+        for (auto &[tbl, is_dirty] : all_catalog_snapshot)
+        {
+            if (tbl.IsHashPartitioned())
+            {
+                assert(!is_dirty);
+                hash_partitioned_tables_snapshot_.insert(tbl);
+            }
+        }
+
+        if (ranges_in_bucket_snapshot_.empty() &&
+            hash_partitioned_tables_snapshot_.empty())
         {
             // There's no range that needs to be flushed to data store.
             // Commit the new bucket info directly.
@@ -7401,7 +7401,6 @@ void DataMigrationOp::Forward(TransactionExecution *txm)
             ForwardToSubOperation(txm, &post_all_bucket_lock_op_);
         }
         else
-#endif
         {
             LOG(INFO) << "Data migration: install dirty bucket, "
                       << ", txn: " << txm->TxNumber();
@@ -7455,24 +7454,12 @@ void DataMigrationOp::Forward(TransactionExecution *txm)
         LOG(INFO) << "Data migration: flush data in bucket"
                   << ", txn: " << txm->TxNumber();
 
-#ifdef RANGE_PARTITION_ENABLED
-        // Test drop table t1 concurrently. See eloq_test repo. table
-        // name need to keep consistent
-
-        data_sync_op_.op_func_ = [this, txm](AsyncOp<Void> &async_op)
-        {
-            LocalCcShards *shard = Sharder::Instance().GetLocalCcShards();
-            shard->EnqueueDataSyncTaskForBucket(ranges_in_bucket_snapshot_,
-                                                txm->TxCcNodeId(),
-                                                txm->TxTerm(),
-                                                txm->CommitTs(),
-                                                &async_op.hd_result_);
-        };
-#else
         data_sync_op_.op_func_ = [this, txm](AsyncOp<Void> &async_op)
         {
             LocalCcShards *shard = Sharder::Instance().GetLocalCcShards();
             shard->EnqueueDataSyncTaskForBucket(
+                ranges_in_bucket_snapshot_,
+                hash_partitioned_tables_snapshot_,
                 status_->bucket_ids_[migrate_bucket_idx_],
                 true,
                 txm->TxCcNodeId(),
@@ -7480,7 +7467,6 @@ void DataMigrationOp::Forward(TransactionExecution *txm)
                 txm->CommitTs(),
                 &async_op.hd_result_);
         };
-#endif
 
         ACTION_FAULT_INJECTOR("data_migrate_after_install_dirty");
         ForwardToSubOperation(txm, &data_sync_op_);
@@ -7587,9 +7573,8 @@ void DataMigrationOp::Forward(TransactionExecution *txm)
             bucket_records_[i].SetBucketInfo(&bucket_info_[i]);
         }
 
-#ifdef RANGE_PARTITION_ENABLED
-        ranges_in_bucket_snapshot_.clear();
         auto local_shards = Sharder::Instance().GetLocalCcShards();
+        ranges_in_bucket_snapshot_.clear();
         for (auto id : status_->bucket_ids_[migrate_bucket_idx_])
         {
             auto range_ids =
@@ -7600,6 +7585,22 @@ void DataMigrationOp::Forward(TransactionExecution *txm)
                 tbl_it.first->second.insert(ranges.begin(), ranges.end());
             }
         }
+        kickout_range_tbl_it_ = ranges_in_bucket_snapshot_.cbegin();
+        //  For hash partition, send kickout cc to each cc map to kickout
+        //  data in this bucket.
+        hash_partitioned_tables_snapshot_.clear();
+        auto all_catalog_snapshot = local_shards->GetCatalogTableNameSnapshot(
+            txm->TxCcNodeId(), txm->CommitTs());
+        for (auto &[tbl, is_dirty] : all_catalog_snapshot)
+        {
+            if (tbl.IsHashPartitioned())
+            {
+                assert(!is_dirty);
+                hash_partitioned_tables_snapshot_.insert(tbl);
+            }
+        }
+        kickout_hash_partitioned_tbl_it_ =
+            hash_partitioned_tables_snapshot_.cbegin();
 
         // Test drop table t1 concurrently. See eloq_test repo. table
         // name need to keep consistent
@@ -7621,21 +7622,30 @@ void DataMigrationOp::Forward(TransactionExecution *txm)
             }
         });
 
-        if (ranges_in_bucket_snapshot_.size())
+        if (hash_partitioned_tables_snapshot_.empty() &&
+            ranges_in_bucket_snapshot_.empty())
+        {
+            LOG(INFO) << "Data migration: post write all"
+                      << ", txn: " << txm->TxNumber();
+            post_all_bucket_lock_op_.write_type_ = PostWriteType::PostCommit;
+            ForwardToSubOperation(txm, &post_all_bucket_lock_op_);
+            return;
+        }
+
+        if (kickout_range_tbl_it_ != ranges_in_bucket_snapshot_.cend())
         {
             kickout_data_op_.node_group_ = txm->TxCcNodeId();
-            kickout_tbl_it_ = ranges_in_bucket_snapshot_.cbegin();
-            kickout_range_it_ = kickout_tbl_it_->second.cbegin();
+            kickout_range_it_ = kickout_range_tbl_it_->second.cbegin();
 
             // Table name is ranges_in_bucket_snapshot_ is of type range
             // partition, need to convert it first.
             TableType type;
-            if (TableName::IsBase(kickout_tbl_it_->first.StringView()))
+            if (TableName::IsBase(kickout_range_tbl_it_->first.StringView()))
             {
                 type = TableType::Primary;
             }
             else if (TableName::IsUniqueSecondary(
-                         kickout_tbl_it_->first.StringView()))
+                         kickout_range_tbl_it_->first.StringView()))
             {
                 type = TableType::UniqueSecondary;
             }
@@ -7643,10 +7653,11 @@ void DataMigrationOp::Forward(TransactionExecution *txm)
             {
                 type = TableType::Secondary;
             }
-            kickout_table_ = TableName{kickout_tbl_it_->first.StringView(),
-                                       type,
-                                       kickout_tbl_it_->first.Engine()};
-            kickout_data_op_.table_name_ = &kickout_table_;
+            kickout_range_table_ =
+                TableName{kickout_range_tbl_it_->first.StringView(),
+                          type,
+                          kickout_range_tbl_it_->first.Engine()};
+            kickout_data_op_.table_name_ = &kickout_range_table_;
             // All data in this range is clean target.
             kickout_data_op_.clean_type_ =
                 CleanType::CleanRangeDataForMigration;
@@ -7667,23 +7678,20 @@ void DataMigrationOp::Forward(TransactionExecution *txm)
                 if (!table_exist)
                 {
                     // Move to next table
-                    if (++kickout_tbl_it_ == ranges_in_bucket_snapshot_.cend())
+                    if (++kickout_range_tbl_it_ ==
+                        ranges_in_bucket_snapshot_.cend())
                     {
-                        LOG(INFO) << "Data migration: post write all"
-                                  << ", txn: " << txm->TxNumber();
-                        post_all_bucket_lock_op_.write_type_ =
-                            PostWriteType::PostCommit;
-                        ForwardToSubOperation(txm, &post_all_bucket_lock_op_);
-                        return;
+                        break;
                     }
 
                     TableType type;
-                    if (TableName::IsBase(kickout_tbl_it_->first.StringView()))
+                    if (TableName::IsBase(
+                            kickout_range_tbl_it_->first.StringView()))
                     {
                         type = TableType::Primary;
                     }
                     else if (TableName::IsUniqueSecondary(
-                                 kickout_tbl_it_->first.StringView()))
+                                 kickout_range_tbl_it_->first.StringView()))
                     {
                         type = TableType::UniqueSecondary;
                     }
@@ -7691,12 +7699,12 @@ void DataMigrationOp::Forward(TransactionExecution *txm)
                     {
                         type = TableType::Secondary;
                     }
-                    kickout_table_ =
-                        TableName{kickout_tbl_it_->first.StringView(),
+                    kickout_range_table_ =
+                        TableName{kickout_range_tbl_it_->first.StringView(),
                                   type,
-                                  kickout_tbl_it_->first.Engine()};
-                    kickout_data_op_.table_name_ = &kickout_table_;
-                    kickout_range_it_ = kickout_tbl_it_->second.cbegin();
+                                  kickout_range_tbl_it_->first.Engine()};
+                    kickout_data_op_.table_name_ = &kickout_range_table_;
+                    kickout_range_it_ = kickout_range_tbl_it_->second.cbegin();
                 }
                 else
                 {
@@ -7710,49 +7718,31 @@ void DataMigrationOp::Forward(TransactionExecution *txm)
                         std::move(std::get<2>(range_keys.value()));
                 }
             }
-
-            LOG(INFO) << "Data migration: kickout bucket data"
-                      << ", txn: " << txm->TxNumber();
-            ForwardToSubOperation(txm, &kickout_data_op_);
         }
-        else
+        if (kickout_range_tbl_it_ == ranges_in_bucket_snapshot_.cend())
         {
-            LOG(INFO) << "Data migration: post write all"
-                      << ", txn: " << txm->TxNumber();
-            post_all_bucket_lock_op_.write_type_ = PostWriteType::PostCommit;
-            ForwardToSubOperation(txm, &post_all_bucket_lock_op_);
+            if (kickout_hash_partitioned_tbl_it_ ==
+                hash_partitioned_tables_snapshot_.cend())
+            {
+                LOG(INFO) << "Data migration: post write all"
+                          << ", txn: " << txm->TxNumber();
+                post_all_bucket_lock_op_.write_type_ =
+                    PostWriteType::PostCommit;
+                ForwardToSubOperation(txm, &post_all_bucket_lock_op_);
+                return;
+            }
+            kickout_data_op_.node_group_ = txm->TxCcNodeId();
+            kickout_data_op_.table_name_ = &(*kickout_hash_partitioned_tbl_it_);
+            kickout_data_op_.start_key_ = TxKey();
+            kickout_data_op_.end_key_ = TxKey();
+            kickout_data_op_.bucket_ids_ =
+                &status_->bucket_ids_[migrate_bucket_idx_];
+            // Check if the key is hashed to this bucket
+            kickout_data_op_.clean_type_ = CleanType::CleanBucketData;
         }
-
-#else
-        //  For hash partition, send kickout cc to each cc map to kickout
-        //  data in this bucket.
-        table_snapshot_ =
-            Sharder::Instance().GetLocalCcShards()->GetCatalogTableNameSnapshot(
-                txm->TxCcNodeId(), txm->CommitTs());
-        kickout_tbl_it_ = table_snapshot_.cbegin();
-
-        if (kickout_tbl_it_ == table_snapshot_.cend())
-        {
-            LOG(INFO) << "Data migration: post write all"
-                      << ", txn: " << txm->TxNumber();
-            post_all_bucket_lock_op_.write_type_ = PostWriteType::PostCommit;
-            ForwardToSubOperation(txm, &post_all_bucket_lock_op_);
-            return;
-        }
-
-        kickout_data_op_.node_group_ = txm->TxCcNodeId();
-        kickout_data_op_.table_name_ = &kickout_tbl_it_->first;
-        kickout_data_op_.start_key_ = TxKey();
-        kickout_data_op_.end_key_ = TxKey();
-        kickout_data_op_.bucket_ids_ =
-            &status_->bucket_ids_[migrate_bucket_idx_];
-        // Check if the key is hashed to this bucket
-        kickout_data_op_.clean_type_ = CleanType::CleanBucketData;
         LOG(INFO) << "Data migration: kickout bucket data"
                   << ", txn: " << txm->TxNumber();
         ForwardToSubOperation(txm, &kickout_data_op_);
-
-#endif
     }
     else if (op_ == &kickout_data_op_)
     {
@@ -7765,64 +7755,20 @@ void DataMigrationOp::Forward(TransactionExecution *txm)
         if (kickout_data_op_.hd_result_.IsError())
         {
             LOG(ERROR) << "Data migration: fail to kickout range data"
-                       << ", table name " << kickout_tbl_it_->first.StringView()
+                       << ", table name "
+                       << kickout_range_tbl_it_->first.StringView()
                        << ", tx_number:" << txm->TxNumber()
                        << ", keep retrying";
             RetrySubOperation(txm, &kickout_data_op_);
             return;
         }
 
-#ifdef RANGE_PARTITION_ENABLED
-        if (++kickout_range_it_ == kickout_tbl_it_->second.cend())
+        if (kickout_range_tbl_it_ != ranges_in_bucket_snapshot_.cend())
         {
-            if (++kickout_tbl_it_ == ranges_in_bucket_snapshot_.cend())
+            if (++kickout_range_it_ == kickout_range_tbl_it_->second.cend())
             {
-                LOG(INFO) << "Data migration: post write all"
-                          << ", txn: " << txm->TxNumber();
-                post_all_bucket_lock_op_.write_type_ =
-                    PostWriteType::PostCommit;
-                ForwardToSubOperation(txm, &post_all_bucket_lock_op_);
-                return;
-            }
-            TableType type;
-            if (TableName::IsBase(kickout_tbl_it_->first.StringView()))
-            {
-                type = TableType::Primary;
-            }
-            else if (TableName::IsUniqueSecondary(
-                         kickout_tbl_it_->first.StringView()))
-            {
-                type = TableType::UniqueSecondary;
-            }
-            else
-            {
-                type = TableType::Secondary;
-            }
-            kickout_table_ = TableName{kickout_tbl_it_->first.StringView(),
-                                       type,
-                                       kickout_tbl_it_->first.Engine()};
-            kickout_data_op_.table_name_ = &kickout_table_;
-            kickout_range_it_ = kickout_tbl_it_->second.cbegin();
-        }
-
-        bool table_exist = false;
-
-        while (!table_exist)
-        {
-            auto range_keys =
-                Sharder::Instance().GetLocalCcShards()->GetTableRangeKeys(
-                    *kickout_data_op_.table_name_,
-                    kickout_data_op_.node_group_,
-                    *kickout_range_it_);
-
-            table_exist = range_keys.has_value();
-
-            // Table has been dropped. So we don't need to kickout data on
-            // this table
-            if (!table_exist)
-            {
-                // Move to next table
-                if (++kickout_tbl_it_ == ranges_in_bucket_snapshot_.cend())
+                if (++kickout_range_tbl_it_ ==
+                    ranges_in_bucket_snapshot_.cend())
                 {
                     LOG(INFO) << "Data migration: post write all"
                               << ", txn: " << txm->TxNumber();
@@ -7832,12 +7778,13 @@ void DataMigrationOp::Forward(TransactionExecution *txm)
                     return;
                 }
                 TableType type;
-                if (TableName::IsBase(kickout_tbl_it_->first.StringView()))
+                if (TableName::IsBase(
+                        kickout_range_tbl_it_->first.StringView()))
                 {
                     type = TableType::Primary;
                 }
                 else if (TableName::IsUniqueSecondary(
-                             kickout_tbl_it_->first.StringView()))
+                             kickout_range_tbl_it_->first.StringView()))
                 {
                     type = TableType::UniqueSecondary;
                 }
@@ -7845,36 +7792,88 @@ void DataMigrationOp::Forward(TransactionExecution *txm)
                 {
                     type = TableType::Secondary;
                 }
-                kickout_table_ = TableName{kickout_tbl_it_->first.StringView(),
-                                           type,
-                                           kickout_tbl_it_->first.Engine()};
-                kickout_data_op_.table_name_ = &kickout_table_;
-                kickout_range_it_ = kickout_tbl_it_->second.cbegin();
+                kickout_range_table_ =
+                    TableName{kickout_range_tbl_it_->first.StringView(),
+                              type,
+                              kickout_range_tbl_it_->first.Engine()};
+                kickout_data_op_.table_name_ = &kickout_range_table_;
+                kickout_range_it_ = kickout_range_tbl_it_->second.cbegin();
             }
-            else
+
+            bool table_exist = false;
+
+            while (!table_exist)
             {
-                assert(range_keys.has_value());
-                kickout_data_op_.range_id_ = *kickout_range_it_;
-                kickout_data_op_.range_version_ =
-                    std::get<0>(range_keys.value());
-                kickout_data_op_.start_key_ =
-                    std::move(std::get<1>(range_keys.value()));
-                kickout_data_op_.end_key_ =
-                    std::move(std::get<2>(range_keys.value()));
+                auto range_keys =
+                    Sharder::Instance().GetLocalCcShards()->GetTableRangeKeys(
+                        *kickout_data_op_.table_name_,
+                        kickout_data_op_.node_group_,
+                        *kickout_range_it_);
+
+                table_exist = range_keys.has_value();
+
+                // Table has been dropped. So we don't need to kickout data on
+                // this table
+                if (!table_exist)
+                {
+                    // Move to next table
+                    if (++kickout_range_tbl_it_ ==
+                        ranges_in_bucket_snapshot_.cend())
+                    {
+                        // Move to hash partitioned tables
+                        break;
+                    }
+                    TableType type;
+                    if (TableName::IsBase(
+                            kickout_range_tbl_it_->first.StringView()))
+                    {
+                        type = TableType::Primary;
+                    }
+                    else if (TableName::IsUniqueSecondary(
+                                 kickout_range_tbl_it_->first.StringView()))
+                    {
+                        type = TableType::UniqueSecondary;
+                    }
+                    else
+                    {
+                        type = TableType::Secondary;
+                    }
+                    kickout_range_table_ =
+                        TableName{kickout_range_tbl_it_->first.StringView(),
+                                  type,
+                                  kickout_range_tbl_it_->first.Engine()};
+                    kickout_data_op_.table_name_ = &kickout_range_table_;
+                    kickout_range_it_ = kickout_range_tbl_it_->second.cbegin();
+                }
+                else
+                {
+                    assert(range_keys.has_value());
+                    kickout_data_op_.range_id_ = *kickout_range_it_;
+                    kickout_data_op_.range_version_ =
+                        std::get<0>(range_keys.value());
+                    kickout_data_op_.start_key_ =
+                        std::move(std::get<1>(range_keys.value()));
+                    kickout_data_op_.end_key_ =
+                        std::move(std::get<2>(range_keys.value()));
+                }
             }
         }
 
-#else
-        if (++kickout_tbl_it_ == table_snapshot_.cend())
+        if (kickout_range_tbl_it_ == ranges_in_bucket_snapshot_.cend())
         {
-            LOG(INFO) << "Data migration: post write all"
-                      << ", txn: " << txm->TxNumber();
-            post_all_bucket_lock_op_.write_type_ = PostWriteType::PostCommit;
-            ForwardToSubOperation(txm, &post_all_bucket_lock_op_);
-            return;
+            // Kickout hash partitioned tables after range partitioned tables.
+            if (++kickout_hash_partitioned_tbl_it_ ==
+                hash_partitioned_tables_snapshot_.cend())
+            {
+                LOG(INFO) << "Data migration: post write all"
+                          << ", txn: " << txm->TxNumber();
+                post_all_bucket_lock_op_.write_type_ =
+                    PostWriteType::PostCommit;
+                ForwardToSubOperation(txm, &post_all_bucket_lock_op_);
+                return;
+            }
+            kickout_data_op_.table_name_ = &(*kickout_hash_partitioned_tbl_it_);
         }
-        kickout_data_op_.table_name_ = &kickout_tbl_it_->first;
-#endif
 
         ForwardToSubOperation(txm, &kickout_data_op_);
     }
@@ -8078,11 +8077,8 @@ void DataMigrationOp::Clear()
 
     status_ = nullptr;
 
-#ifdef RANGE_PARTITION_ENABLED
     ranges_in_bucket_snapshot_.clear();
-#else
-    table_snapshot_.clear();
-#endif
+    hash_partitioned_tables_snapshot_.clear();
 }
 
 BatchReadOperation::BatchReadOperation(
