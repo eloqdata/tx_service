@@ -262,7 +262,7 @@ public:
         queue_block_cmds_.Enqueue(std::move(req));
     }
 
-    void AbortBlockCmdRequest(TxNumber txid, CcErrorCode err);
+    bool AbortBlockCmdRequest(TxNumber txid, CcErrorCode err, CcShard *ccs);
 
 private:
     struct LockQueueEntry
