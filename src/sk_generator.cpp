@@ -597,8 +597,7 @@ void UploadIndexContext::EnqueueNewIndexes(TableIndexSet &&new_indexes)
     {
         // Wait until get free task slot.
         producer_cv_.wait(lk,
-                          [this]()
-                          {
+                          [this]() {
                               return (pending_task_cnt_ + ongoing_task_cnt_) <
                                      UploadIndexWorkerSize;
                           });
@@ -1045,8 +1044,7 @@ void UploadIndexContext::UploadIndexWorker()
     while (status_ == WorkerStatus::Active)
     {
         consumer_cv_.wait(lk,
-                          [this]()
-                          {
+                          [this]() {
                               return pending_task_cnt_ > 0 ||
                                      status_ != WorkerStatus::Active;
                           });

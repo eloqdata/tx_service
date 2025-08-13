@@ -2258,7 +2258,7 @@ private:
                                   size_t worker_idx);
 
     void DataSyncForRangePartition(std::shared_ptr<DataSyncTask> data_sync_task,
-                  size_t worker_idx);
+                                   size_t worker_idx);
 
     /**
      * Range & Slice Update Interface

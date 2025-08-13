@@ -29,10 +29,9 @@
 
 #include "catalog_factory.h"
 #include "reader_writer_cntl.h"
+#include "sharder.h"
 #include "tx_key.h"
 #include "tx_record.h"
-
-#include "sharder.h"
 
 namespace txservice
 {
@@ -255,7 +254,6 @@ struct CatalogEntry
             last_sync_ts_[worker_idx] = last_sync_ts;
         }
     }
-
 
     std::shared_ptr<TableSchema> schema_{nullptr};
     std::shared_ptr<TableSchema> dirty_schema_{nullptr};
