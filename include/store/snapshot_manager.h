@@ -38,7 +38,6 @@ namespace store
 {
 
 // Now, standby and backup features only be enabled in EloqKV.
-#ifdef ON_KEY_OBJECT
 
 // used on primary node
 class SnapshotManager
@@ -104,7 +103,6 @@ private:
     txservice::TxWorkerPool backup_worker_{1};
 };
 
-#endif
 
 }  // namespace store
 }  // namespace txservice

@@ -4473,27 +4473,35 @@ void LocalCcShards::DataSyncForHashPartition(
             for (size_t j = 0; j < scan_cc.accumulated_scan_cnt_; ++j)
             {
                 auto &rec = scan_cc.DataSyncVec()[j];
-#ifdef ON_KEY_OBJECT
-                assert(rec.cce_ != nullptr);
-#endif
                 // Note. Clone key instead of move key. The memory of
                 // rec.Key() will be reused to avoid memory allocation.
                 if (rec.cce_)
                 {
                     // cce_ is null means the key is already persisted on kv, so
                     // we don't need to put it into the flush vec.
-                    int32_t part_id = (rec.Key().Hash() >> 10) & 0x3FF;
-                    data_sync_vec->emplace_back(rec.Key().Clone(),
-#ifdef ON_KEY_OBJECT
-                                                rec.GetNonVersionedPayload(),
-#else
-                                                rec.ReleaseVersionedPayload(),
-#endif
-                                                rec.payload_status_,
-                                                rec.commit_ts_,
-                                                rec.cce_,
-                                                rec.post_flush_size_,
-                                                part_id);
+                    int32_t part_id = 0;
+                    if (table_name.Engine() == TableEngine::EloqKv)
+                    {
+                        data_sync_vec->emplace_back(
+                            rec.Key().Clone(),
+                            rec.GetNonVersionedPayload(),
+                            rec.payload_status_,
+                            rec.commit_ts_,
+                            rec.cce_,
+                            rec.post_flush_size_,
+                            part_id);
+                    }
+                    else
+                    {
+                        data_sync_vec->emplace_back(
+                            rec.Key().Clone(),
+                            rec.ReleaseVersionedPayload(),
+                            rec.payload_status_,
+                            rec.commit_ts_,
+                            rec.cce_,
+                            rec.post_flush_size_,
+                            part_id);
+                    }
                 }
             }
 
