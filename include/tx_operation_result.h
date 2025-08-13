@@ -578,6 +578,7 @@ struct ObjectCommandResult
     void Reset()
     {
         commit_ts_ = 0;
+        lock_ts_ = 0;
         last_vali_ts_ = 0;
         cce_addr_ = CcEntryAddr{};
         rec_status_ = RecordStatus::Unknown;
@@ -590,9 +591,12 @@ struct ObjectCommandResult
         ttl_reset_ = false;
     }
 
-    // cce commit_ts, for validation?
+    // cce commit_ts, used to set transaction's commit_ts.
     uint64_t commit_ts_{};
-    // currently not used, used to set commit_ts_, only write cmd needs it?
+    // The node's local clock when lock is acquired, used to set transaction's
+    // commit_ts.
+    uint64_t lock_ts_{};
+    // cce last read ts, used to set transaction's commit_ts.
     uint64_t last_vali_ts_{};
     // add read write set
     CcEntryAddr cce_addr_{};
