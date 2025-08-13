@@ -157,12 +157,29 @@ public:
                         table_name_->Engine()};
                     const CatalogEntry *catalog_entry =
                         ccs.GetCatalog(base_table_name, node_group_id_);
-                    if (catalog_entry == nullptr ||
-                        catalog_entry->schema_ == nullptr)
+                    if (catalog_entry == nullptr)
                     {
                         ccs.FetchCatalog(
                             base_table_name, node_group_id_, ng_term_, this);
                         return false;
+                    }
+                    if (catalog_entry->schema_ == nullptr)
+                    {
+                        if (catalog_entry->dirty_schema_ == nullptr)
+                        {
+                            res_->SetError(
+                                CcErrorCode::REQUESTED_TABLE_NOT_EXISTS);
+                            return true;
+                        }
+                        else
+                        {
+                            DLOG(INFO) << "PostWriteAllCc is executing, retry "
+                                       << catalog_entry->dirty_schema_
+                                              ->GetBaseTableName()
+                                              .StringView();
+                            ccs.Enqueue(this);
+                            return false;
+                        }
                     }
                     TableSchema *table_schema = catalog_entry->schema_.get();
 
@@ -3622,7 +3639,8 @@ public:
 
     RangePartitionDataSyncScanCc() = delete;
     RangePartitionDataSyncScanCc(const RangePartitionDataSyncScanCc &) = delete;
-    RangePartitionDataSyncScanCc &operator=(const RangePartitionDataSyncScanCc &) = delete;
+    RangePartitionDataSyncScanCc &operator=(
+        const RangePartitionDataSyncScanCc &) = delete;
 
     ~RangePartitionDataSyncScanCc() = default;
 
