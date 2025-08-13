@@ -1011,22 +1011,47 @@ bool UpdateCceCkptTsCc::Execute(CcShard &ccs)
 
     for (; index < last_index; ++index)
     {
-#ifdef RANGE_PARTITION_ENABLED
         const CkptTsEntry &ref = records[index];
-        VersionedLruEntry<true, true> *v_entry =
-            static_cast<VersionedLruEntry<true, true> *>(ref.cce_);
-        v_entry->entry_info_.SetDataStoreSize(ref.post_flush_size_);
+        if (range_partitioned_)
+        {
+            if (versioned_payload_)
+            {
+                VersionedLruEntry<true, true> *v_entry =
+                    static_cast<VersionedLruEntry<true, true> *>(ref.cce_);
+                v_entry->entry_info_.SetDataStoreSize(ref.post_flush_size_);
 
-        v_entry->SetCkptTs(ref.commit_ts_);
-        v_entry->ClearBeingCkpt();
-#else
-        const CkptTsEntry &ref = records[index];
-        VersionedLruEntry<false, false> *v_entry =
-            static_cast<VersionedLruEntry<false, false> *>(ref.cce_);
+                v_entry->SetCkptTs(ref.commit_ts_);
+                v_entry->ClearBeingCkpt();
+            }
+            else
+            {
+                VersionedLruEntry<false, true> *v_entry =
+                    static_cast<VersionedLruEntry<false, true> *>(ref.cce_);
+                v_entry->entry_info_.SetDataStoreSize(ref.post_flush_size_);
 
-        v_entry->SetCkptTs(ref.commit_ts_);
-        v_entry->ClearBeingCkpt();
-#endif
+                v_entry->SetCkptTs(ref.commit_ts_);
+                v_entry->ClearBeingCkpt();
+            }
+        }
+        else
+        {
+            if (versioned_payload_)
+            {
+                VersionedLruEntry<true, false> *v_entry =
+                    static_cast<VersionedLruEntry<true, false> *>(ref.cce_);
+
+                v_entry->SetCkptTs(ref.commit_ts_);
+                v_entry->ClearBeingCkpt();
+            }
+            else
+            {
+                VersionedLruEntry<false, false> *v_entry =
+                    static_cast<VersionedLruEntry<false, false> *>(ref.cce_);
+
+                v_entry->SetCkptTs(ref.commit_ts_);
+                v_entry->ClearBeingCkpt();
+            }
+        }
     }
 
     if (index == records.size())

@@ -1479,20 +1479,20 @@ private:
     void ForceToFinish(TransactionExecution *txm);
     void Clear();
 
-#ifdef RANGE_PARTITION_ENABLED
     // the snapshot of the ranges that we need to migrate for current bucket.
     // Note that the table name here is of type range partition.
     std::unordered_map<TableName, std::unordered_set<int32_t>>
         ranges_in_bucket_snapshot_;
+
     std::unordered_map<TableName, std::unordered_set<int32_t>>::const_iterator
-        kickout_tbl_it_;
+        kickout_range_tbl_it_;
     std::unordered_set<int32_t>::const_iterator kickout_range_it_;
-    TableName kickout_table_{
+    TableName kickout_range_table_{
         std::string(""), TableType::Primary, TableEngine::None};
-#else
-    std::unordered_map<TableName, bool> table_snapshot_;
-    std::unordered_map<TableName, bool>::const_iterator kickout_tbl_it_;
-#endif
+
+
+    std::unordered_set<TableName> hash_partitioned_tables_snapshot_;
+    std::unordered_set<TableName>::const_iterator kickout_hash_partitioned_tbl_it_;
 
     std::shared_ptr<DataMigrationStatus> status_;
 };

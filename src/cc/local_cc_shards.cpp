@@ -2047,6 +2047,7 @@ LocalCcShards::GetRangesInBucket(uint16_t bucket_id, NodeGroupId ng_id)
             }
             if (!tbl_snapshot.empty())
             {
+                assert(!tbl_name.IsHashPartitioned());
                 snapshot.try_emplace(TableName{tbl_name.StringView(),
                                                tbl_name.Type(),
                                                tbl_name.Engine()},
@@ -2653,19 +2654,16 @@ void LocalCcShards::EnqueueDataSyncTaskForTable(
 }
 
 void LocalCcShards::EnqueueDataSyncTaskForBucket(
-#ifdef RANGE_PARTITION_ENABLED
     const std::unordered_map<TableName, std::unordered_set<int32_t>>
         &ranges_in_bucket_snapshot,
-#else
+    const std::unordered_set<TableName> &hash_partitioned_tables,
     const std::vector<uint16_t> &bucket_ids,
     bool send_cache_for_migration,
-#endif
     uint32_t ng_id,
     int64_t ng_term,
     uint64_t data_sync_ts,
     CcHandlerResult<Void> *hres)
 {
-#ifdef RANGE_PARTITION_ENABLED
     std::shared_lock<std::shared_mutex> meta_lk(meta_data_mux_);
     std::shared_ptr<DataSyncStatus> status =
         std::make_shared<DataSyncStatus>(ng_id, ng_term, false);
@@ -2708,42 +2706,11 @@ void LocalCcShards::EnqueueDataSyncTaskForBucket(
         }
     }
 
-    {
-        std::lock_guard<std::mutex> status_lk(status->mux_);
-        status->unfinished_tasks_ += unfinished_task_cnt;
-        status->unfinished_scan_tasks_ += unfinished_task_cnt;
-        status->all_task_started_ = true;
-        if (status->unfinished_tasks_ == 0)
-        {
-            hres->SetFinished();
-            return;
-        }
-        if (status->unfinished_scan_tasks_ == 0 &&
-            status->unfinished_tasks_ != 0 && status->all_task_started_)
-        {
-            FlushCurrentFlushBuffer();
-            return;
-        }
-    }
-
-    data_sync_worker_ctx_.cv_.notify_all();
-
-#else
-    std::shared_lock<std::shared_mutex> meta_lk(meta_data_mux_);
-    std::shared_ptr<DataSyncStatus> status =
-        std::make_shared<DataSyncStatus>(ng_id, ng_term, false);
-    size_t task_cnt = 0;
     assert(!bucket_ids.empty());
-    for (auto &catalog_ng : table_catalogs_)
+    for (auto &table_name : hash_partitioned_tables)
     {
-        auto catalog_it = catalog_ng.second.find(ng_id);
-        if (catalog_it == catalog_ng.second.end())
-        {
-            // Skip the table if it is not initialized in this ng.
-            continue;
-        }
         if (EnqueueDataSyncTaskToCore(
-                catalog_ng.first,
+                table_name,
                 ng_id,
                 ng_term,
                 data_sync_ts,
@@ -2770,15 +2737,15 @@ void LocalCcShards::EnqueueDataSyncTaskForBucket(
                     return false;
                 }))
         {
-            task_cnt++;
+            unfinished_task_cnt++;
         }
     }
 
     {
         std::lock_guard<std::mutex> status_lk(status->mux_);
         status->all_task_started_ = true;
-        status->unfinished_tasks_ += task_cnt;
-        status->unfinished_scan_tasks_ += task_cnt;
+        status->unfinished_tasks_ += unfinished_task_cnt;
+        status->unfinished_scan_tasks_ += unfinished_task_cnt;
         if (status->unfinished_tasks_ == 0)
         {
             hres->SetFinished();
@@ -2790,7 +2757,7 @@ void LocalCcShards::EnqueueDataSyncTaskForBucket(
             return;
         }
     }
-#endif
+    data_sync_worker_ctx_.cv_.notify_all();
 }
 
 void LocalCcShards::Terminate()
@@ -4376,10 +4343,9 @@ void LocalCcShards::DataSyncForHashPartition(
                             // Create a closure for the first time.
                             UploadBatchClosure *upload_batch_closure =
                                 new UploadBatchClosure(
-                                    [this,
-                                     data_sync_task,
-                                     data_sync_txm](CcErrorCode res_code,
-                                                    int32_t dest_ng_term)
+                                    [this, data_sync_task, data_sync_txm](
+                                        CcErrorCode res_code,
+                                        int32_t dest_ng_term)
                                     {
                                         // We don't care if
                                         // the cache send
@@ -5233,7 +5199,9 @@ void LocalCcShards::FlushData(std::unique_lock<std::mutex> &flush_worker_lk)
                     UpdateCceCkptTsCc update_cce_req(
                         entry->data_sync_task_->node_group_id_,
                         entry->data_sync_task_->node_group_term_,
-                        cce_entries_map);
+                        cce_entries_map,
+                        !table_name.IsHashPartitioned(),
+                        table_name.Engine() != TableEngine::EloqKv);
                     for (auto &[core_idx, cce_entries] : cce_entries_map)
                     {
                         updated_ckpt_ts_core_ids.insert(core_idx);

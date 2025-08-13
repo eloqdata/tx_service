@@ -580,40 +580,6 @@ public:
                 }
                 // Idle migrate tx should fetch bucket from next_bucket_idx.
                 size_t next_bucket_idx = bucket_ids_per_task.size();
-
-#ifdef RANGE_PARTITION_ENABLED
-                // Now put buckets that have not been picked up by any migrate
-                // tx into the todo list.
-                // Each worker processes 10 buckets at a time, so each task
-                // should contain up to 10 buckets.
-                if (!pending_buckets.empty())
-                {
-                    bucket_ids_per_task.emplace_back();
-                    new_owner_ngs_per_task.emplace_back();
-                    std::vector<uint16_t> *cur_task_bucket_ids =
-                        &bucket_ids_per_task.back();
-                    std::vector<NodeGroupId> *cur_task_new_owner_ngs =
-                        &new_owner_ngs_per_task.back();
-                    for (size_t i = 0; i < pending_buckets.size(); i++)
-                    {
-                        cur_task_bucket_ids->push_back(
-                            pending_buckets[i]->bucket_id());
-                        cur_task_new_owner_ngs->push_back(
-                            pending_buckets[i]->new_owner());
-                        if (cur_task_bucket_ids->size() == 10 &&
-                            i != pending_buckets.size() - 1)
-                        {
-                            bucket_ids_per_task.push_back(
-                                std::vector<uint16_t>());
-                            new_owner_ngs_per_task.push_back(
-                                std::vector<NodeGroupId>());
-                            cur_task_bucket_ids = &bucket_ids_per_task.back();
-                            cur_task_new_owner_ngs =
-                                &new_owner_ngs_per_task.back();
-                        }
-                    }
-                }
-#else
                 // Put all buckets on the same core to the same task.
                 std::unordered_map<
                     uint16_t,
@@ -642,8 +608,6 @@ public:
                             bucket_msg->new_owner());
                     }
                 }
-
-#endif
 
                 std::shared_ptr<DataMigrationStatus> status =
                     std::make_shared<DataMigrationStatus>(

@@ -1613,13 +1613,11 @@ public:
                                             uint16_t bucket_id);
 
     void EnqueueDataSyncTaskForBucket(
-#ifdef RANGE_PARTITION_ENABLED
         const std::unordered_map<TableName, std::unordered_set<int32_t>>
             &ranges_in_bucket_snapshot,
-#else
+        const std::unordered_set<TableName> &hash_partitioned_tables,
         const std::vector<uint16_t> &bucket_id,
         bool send_cache_for_migration,
-#endif
         uint32_t ng_id,
         int64_t ng_term,
         uint64_t data_sync_ts,
