@@ -582,12 +582,8 @@ inline static TableName sequence_table_name{sequence_table_name_sv.data(),
                                             TableType::Primary,
                                             TableEngine::EloqSql};
 
-#ifdef ON_KEY_OBJECT
 // Set buckets count to be the same as the slots count. (16384)
 inline static const uint16_t total_range_buckets = 0x4000;
-#else
-inline static const uint16_t total_range_buckets = 4096;
-#endif
 
 enum struct SlicePosition
 {

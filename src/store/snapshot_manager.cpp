@@ -31,7 +31,6 @@ namespace txservice
 namespace store
 {
 
-#ifdef ON_KEY_OBJECT
 
 void SnapshotManager::Start()
 {
@@ -675,8 +674,6 @@ void SnapshotManager::TerminateBackup(txservice::NodeGroupId ng_id,
         }
     }
 }
-
-#endif
 
 }  // namespace store
 }  // namespace txservice

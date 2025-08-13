@@ -119,13 +119,11 @@ void CcStreamReceiver::Connect(::google::protobuf::RpcController *controller,
     brpc::StreamOptions stream_options;
     stream_options.idle_timeout_ms = 100000;
 
-#ifdef ON_KEY_OBJECT
     if (request->type() == remote::StreamType::RegularCcStream)
     {
         // 5s
         stream_options.idle_timeout_ms = 5000;
     }
-#endif
 
     stream_options.handler = this;
     if (brpc::StreamAccept(&stream_socket, *cntl, &stream_options) != 0)

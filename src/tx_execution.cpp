@@ -2514,13 +2514,9 @@ void TransactionExecution::Process(ScanNextOperation &scan_next)
                 command_id_.load(std::memory_order_relaxed),
                 start_ts_,
                 scanner,
-                scan_next.hd_result_
-#ifdef ON_KEY_OBJECT
-                ,
+                scan_next.hd_result_,
                 scan_next.tx_req_->obj_type_,
-                scan_next.tx_req_->scan_pattern_
-#endif
-            );
+                scan_next.tx_req_->scan_pattern_);
         }
 
         is_local = scan_next.hd_result_.Value().is_local_;

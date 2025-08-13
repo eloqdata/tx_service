@@ -83,14 +83,12 @@ public:
                   const T *key = static_cast<const T *>(this_obj);
                   key->Serialize(str);
               }),
-#ifdef ON_KEY_OBJECT
           kv_serialize_func_(
               [](const void *this_obj)
               {
                   const T *key = static_cast<const T *>(this_obj);
                   return key->KVSerialize();
               }),
-#endif
           serialize_len_func_(
               [](const void *this_obj)
               {
@@ -182,12 +180,10 @@ public:
         serialize_str_func_(this_obj, str);
     }
 
-#ifdef ON_KEY_OBJECT
     std::string_view KVSerialize(const void *this_obj) const
     {
         return kv_serialize_func_(this_obj);
     }
-#endif
 
     size_t SerializedLen(const void *this_obj) const
     {
@@ -254,10 +250,8 @@ protected:
     typedef void (*SerializeStrFunc)(const void *this_obj, std::string &str);
     SerializeStrFunc const serialize_str_func_;
 
-#ifdef ON_KEY_OBJECT
     typedef std::string_view (*KvSerializeFunc)(const void *this_obj);
     KvSerializeFunc const kv_serialize_func_;
-#endif
 
     typedef size_t (*SerializeLenFunc)(const void *this_obj);
     SerializeLenFunc const serialize_len_func_;
@@ -406,7 +400,6 @@ public:
         return interface_->ToString(GetConstPtr());
     }
 
-#ifdef ON_KEY_OBJECT
     // Only used for single string field key, they do not need create a new
     // buffer and convert the value's type, then copy into new buffer.
     std::string_view KVSerialize() const
@@ -416,7 +409,6 @@ public:
     // Deserialize the key from buffer. The buffer does not include the length
     // of key's . Here should use len as buffer's length.
     // void KVDeserialize(const char *buf, size_t len);
-#endif
 
     /**
      * To estimate log length.
@@ -956,7 +948,6 @@ struct alignas(2) VoidKey
     {
     }
 
-#ifdef ON_KEY_OBJECT
     std::string_view KVSerialize() const
     {
         assert(false);
@@ -966,7 +957,6 @@ struct alignas(2) VoidKey
     {
         assert(false);
     }
-#endif
 
     TxKey CloneTxKey() const
     {

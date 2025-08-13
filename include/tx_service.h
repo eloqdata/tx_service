@@ -62,9 +62,7 @@
 #include "tx_start_ts_collector.h"
 #include "txlog.h"
 
-#ifdef ON_KEY_OBJECT
 #include "store/snapshot_manager.h"  // SnapshotManager
-#endif
 
 using namespace std::chrono_literals;
 namespace bthread

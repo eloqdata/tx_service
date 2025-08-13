@@ -741,9 +741,7 @@ public:
         {
             if (req.OpType() == OperationType::TruncateTable)
             {
-#ifndef ON_KEY_OBJECT
-                assert(false && "Only implement for redis");
-#else
+                assert(table_key->Name().Engine() == TableEngine::EloqKv);
                 // A remote tx is allowed to acquire write intents/locks and
                 // drop a table, even if the table's schema has not been
                 // initialized at this node. The earlier acquiring-write-intent
@@ -800,7 +798,6 @@ public:
                         catalog_entry->schema_version_);
                     shard_->ForwardStandbyMessage(forward_entry);
                 }
-#endif
             }
             else if (req.OpType() == OperationType::DropTable)
             {
