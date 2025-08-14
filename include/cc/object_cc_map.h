@@ -27,7 +27,6 @@
 #include <deque>
 #include <memory>
 #include <string>
-#include <unordered_map>
 #include <utility>
 #include <vector>
 
@@ -39,7 +38,6 @@
 #include "cc_request.pb.h"
 #include "cc_shard.h"
 #include "error_messages.h"
-#include "local_cc_shards.h"
 #include "non_blocking_lock.h"
 #include "sharder.h"
 #include "standby.h"
@@ -292,6 +290,18 @@ public:
                 req.block_type_ == ApplyCc::ApplyBlockType::BlockOnWriteLock ||
                 req.block_type_ == ApplyCc::ApplyBlockType::BlockOnCondition)
             {
+                if (req.block_type_ ==
+                    ApplyCc::ApplyBlockType::BlockOnCondition)
+                {
+                    shard_->RemoveExpiredActiveBlockingTxs();
+                    if (shard_->RemoveActiveBlockingTx(req.Txn()))
+                    {
+                        // remove succeeds, means the txn is expired
+                        hd_res->SetError(CcErrorCode::TASK_EXPIRED);
+                        return true;
+                    }
+                }
+
                 // FetchRecord (if need to) happens before lock acquisition. So
                 // if the request resumes from lock block, the PayloadStatus
                 // must not be Unknown, or this request doesn't need to
@@ -332,6 +342,7 @@ public:
                 cce->RecycleKeyLock(*shard_);
             }
         }
+
         if (cce_addr.ExtractCce() == nullptr)
         {
             // Lock hasn't been acquired. For blocking commands, the lock is
@@ -391,9 +402,19 @@ public:
                     assert(!req.apply_and_commit_);
                     if (cce != nullptr)
                     {
-                        cce->AbortBlockCmdRequest(txn,
-                                                  CcErrorCode::TASK_EXPIRED);
-                        cce->RecycleKeyLock(*shard_);
+                        bool succeed = cce->AbortBlockCmdRequest(
+                            txn, CcErrorCode::TASK_EXPIRED, shard_);
+                        if (!succeed)
+                        {
+                            DLOG(WARNING)
+                                << "AbortBlockCmdRequest fail to find "
+                                   "tx in queue_block_cmds_ and "
+                                   "blocking_queue_, tx: "
+                                << req.Txn() << "; req: " << &req;
+
+                            shard_->UpsertActiveBlockingTx(req.Txn(),
+                                                           shard_->Now());
+                        }
                     }
 
                     if (req.is_local_)
@@ -1101,6 +1122,7 @@ public:
             req.block_type_ = ApplyCc::ApplyBlockType::BlockOnCondition;
             return false;
         }
+
         if (exec_rst == ExecResult::Unlock)
         {
             assert(!req.apply_and_commit_);
@@ -1121,6 +1143,7 @@ public:
             hd_res->SetFinished();
             return true;
         }
+
         if (req.apply_and_commit_)
         {
             if (object_modified)

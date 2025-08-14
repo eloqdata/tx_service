@@ -2073,6 +2073,60 @@ void CcShard::ClearActvieSiTxs()
     min_si_tx_start_ts_.store(Now());
 }
 
+void CcShard::UpsertActiveBlockingTx(TxNumber txn, uint64_t timestamp)
+{
+    active_blocking_txs_[txn] = timestamp;
+}
+
+bool CcShard::RemoveActiveBlockingTx(TxNumber txn)
+{
+    auto it = active_blocking_txs_.find(txn);
+    if (it != active_blocking_txs_.end())
+    {
+        active_blocking_txs_.erase(it);
+        return true;
+    }
+    return false;
+}
+
+void CcShard::ClearActiveBlockingTxs()
+{
+    active_blocking_txs_.clear();
+}
+
+size_t CcShard::ActiveBlockingTxSize() const
+{
+    return active_blocking_txs_.size();
+}
+
+void CcShard::RemoveExpiredActiveBlockingTxs()
+{
+    // 5s, tune as needed
+    static constexpr uint64_t kCleanupPeriodUs = 5000000;
+    static thread_local uint64_t last_run_ts = 0;
+
+    uint64_t now_ts = Now();
+    if (now_ts - last_run_ts < kCleanupPeriodUs)
+    {
+        return;
+    }
+
+    last_run_ts = now_ts;
+
+    for (auto it = active_blocking_txs_.begin();
+         it != active_blocking_txs_.end();)
+    {
+        if (now_ts - it->second > kCleanupPeriodUs)
+        {
+            active_blocking_txs_.erase(it++);
+        }
+        else
+        {
+            ++it;
+        }
+    }
+}
+
 void CcShard::UpdateLocalMinSiTxStartTs()
 {
     uint64_t now_ts = Now();

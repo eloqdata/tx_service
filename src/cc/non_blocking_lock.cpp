@@ -671,7 +671,9 @@ bool NonBlockingLock::PopBlockCmdRequest(CcShard *ccs, TxObject *object)
     return false;
 }
 
-void NonBlockingLock::AbortBlockCmdRequest(TxNumber txid, CcErrorCode err)
+bool NonBlockingLock::AbortBlockCmdRequest(TxNumber txid,
+                                           CcErrorCode err,
+                                           CcShard *ccs)
 {
     for (size_t i = 0; i < queue_block_cmds_.Size(); i++)
     {
@@ -679,9 +681,24 @@ void NonBlockingLock::AbortBlockCmdRequest(TxNumber txid, CcErrorCode err)
         {
             queue_block_cmds_.Get(i)->AbortCcRequest(err);
             queue_block_cmds_.Erase(i);
-            return;
+            return true;
         }
     }
+
+    // If not found in queue_block_cmds_, also check blocking_queue_
+    // as the request might be blocked on lock acquisition
+    for (int64_t i = 0; i < (int64_t) blocking_queue_.Size(); i++)
+    {
+        const LockQueueEntry &ety = blocking_queue_.Get(i);
+        if (ety.req_->Txn() == txid)
+        {
+            ety.req_->AbortCcRequest(err);
+            blocking_queue_.Erase(i);
+            return true;
+        }
+    }
+
+    return false;
 }
 
 void KeyGapLockAndExtraData::SetUsedStatus(bool is_used)

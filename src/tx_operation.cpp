@@ -5687,6 +5687,11 @@ void MultiObjectCommandOp::Forward(TransactionExecution *txm)
         }
         else
         {
+            DLOG(WARNING) << "MultiObjectCommandOp::Forward txm->IsTimeOut() "
+                             "request deadlock check, tx: "
+                          << txm->TxNumber() << " atm_local_cnt_: "
+                          << atm_local_cnt_.load(std::memory_order_relaxed);
+
             // local request timeout
             DeadLockCheck::RequestCheck();
         }

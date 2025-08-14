@@ -319,18 +319,17 @@ void SkGenerator::ScanAndEncodeIndex(const TxKey *start_key,
     size_t core_cnt = cc_shards->Count();
 
     RangePartitionDataSyncScanCc scan_req(*base_table_name_,
-                            scan_ts_,
-                            node_group_id_,
-                            ng_term,
-                            core_cnt,
-                            scan_batch_size_,
-                            tx_number,
-                            start_key,
-                            end_key,
-                            false,
-                            true,
-                            true
-    );
+                                          scan_ts_,
+                                          node_group_id_,
+                                          ng_term,
+                                          core_cnt,
+                                          scan_batch_size_,
+                                          tx_number,
+                                          start_key,
+                                          end_key,
+                                          false,
+                                          true,
+                                          true);
 
     CcErrorCode scan_res = CcErrorCode::NO_ERROR;
     bool scan_data_drained = false;
