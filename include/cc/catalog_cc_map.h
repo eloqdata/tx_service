@@ -480,6 +480,14 @@ public:
                 schema_rec = static_cast<CatalogRecord *>(req.Payload());
                 catalog_entry =
                     shard_->GetCatalog(table_key->Name(), req.NodeGroupId());
+
+                if (catalog_entry == nullptr)
+                {
+                    // The table catalog haven't been initialized. Just return.
+                    req.Result()->SetError(
+                        CcErrorCode::REQUESTED_TABLE_NOT_EXISTS);
+                    return true;
+                }
             }
 
             break;
@@ -515,6 +523,16 @@ public:
 
                 catalog_entry =
                     shard_->GetCatalog(table_key->Name(), req.NodeGroupId());
+
+                if (catalog_entry == nullptr)
+                {
+                    // The target table catalog haven't been initialized. Just
+                    // return.
+                    req.Result()->SetError(
+                        CcErrorCode::REQUESTED_TABLE_NOT_EXISTS);
+                    return true;
+                }
+
                 if (catalog_entry->dirty_schema_->SchemaImage() !=
                     schema_rec->DirtySchemaImage())
                 {
@@ -539,6 +557,14 @@ public:
                 schema_rec = static_cast<CatalogRecord *>(req.Payload());
                 catalog_entry =
                     shard_->GetCatalog(table_key->Name(), req.NodeGroupId());
+
+                if (catalog_entry == nullptr)
+                {
+                    // The table catalog haven't been initialized. Just return.
+                    req.Result()->SetError(
+                        CcErrorCode::REQUESTED_TABLE_NOT_EXISTS);
+                    return true;
+                }
             }
             break;
         }
@@ -555,6 +581,14 @@ public:
 
             catalog_entry =
                 shard_->GetCatalog(table_key->Name(), req.NodeGroupId());
+
+            if (catalog_entry == nullptr)
+            {
+                // The target table catalog haven't been initialized. Just
+                // return.
+                req.Result()->SetError(CcErrorCode::REQUESTED_TABLE_NOT_EXISTS);
+                return true;
+            }
 
             if (req.CommitTs() == TransactionOperation::tx_op_failed_ts_)
             {
