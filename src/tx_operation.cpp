@@ -2801,9 +2801,7 @@ void UpsertTableOp::Forward(TransactionExecution *txm)
                 assert(clean_ccm_op_.table_names_.empty());
 
                 auto clean_ccm_names = table_old_schema->IndexNames();
-#ifdef ON_KEY_OBJECT
-                assert(clean_ccm_names.empty());
-#endif
+
                 clean_ccm_names.emplace_back(
                     table_old_schema->GetBaseTableName().StringView().data(),
                     table_old_schema->GetBaseTableName().StringView().size(),
@@ -2873,9 +2871,7 @@ void UpsertTableOp::Forward(TransactionExecution *txm)
             assert(clean_ccm_op_.table_names_.empty());
 
             auto clean_ccm_names = table_old_schema->IndexNames();
-#ifdef ON_KEY_OBJECT
-            assert(clean_ccm_names.empty());
-#endif
+
             clean_ccm_names.emplace_back(
                 table_old_schema->GetBaseTableName().StringView().data(),
                 table_old_schema->GetBaseTableName().StringView().size(),

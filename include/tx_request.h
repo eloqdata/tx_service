@@ -568,22 +568,15 @@ struct ScanBatchTxRequest : public TemplateTxRequest<ScanBatchTxRequest, bool>
                        std::vector<ScanBatchTuple> *batch_vec,
                        const std::function<void()> *yield_fptr = nullptr,
                        const std::function<void()> *resume_fptr = nullptr,
-                       TransactionExecution *txm = nullptr
-#ifdef ON_KEY_OBJECT
-                       ,
+                       TransactionExecution *txm = nullptr,
                        int32_t obj_type = -1,
-                       std::string_view scan_pattern = {}
-#endif
-                       )
+                       std::string_view scan_pattern = {})
         : TemplateTxRequest(yield_fptr, resume_fptr, txm),
           alias_(alias),
           table_name_(table_name),
-          batch_(batch_vec)
-#ifdef ON_KEY_OBJECT
-          ,
+          batch_(batch_vec),
           obj_type_(obj_type),
           scan_pattern_(scan_pattern)
-#endif
     {
         batch_->clear();
     }
@@ -595,10 +588,8 @@ struct ScanBatchTxRequest : public TemplateTxRequest<ScanBatchTxRequest, bool>
     // Used for range partition scanner.
     uint32_t prefetch_slice_cnt_{0};
 
-#ifdef ON_KEY_OBJECT
     int32_t obj_type_{-1};
     std::string_view scan_pattern_;
-#endif
 };
 
 struct UnlockTuple

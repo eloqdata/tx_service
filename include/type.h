@@ -155,10 +155,10 @@ enum class TableType : uint8_t
 
 enum class TableEngine : uint8_t
 {
-    None = 'M',  // table that does not belong to any engine like bucket table.
-    EloqSql = 'S',
-    EloqKv = 'K',
-    EloqDoc = 'D',
+    EloqSql = 0,
+    EloqKv = 1,
+    EloqDoc = 2,
+    None = 3,  // table that does not belong to any engine like bucket table.
 };
 
 struct TableName
@@ -582,12 +582,8 @@ inline static TableName sequence_table_name{sequence_table_name_sv.data(),
                                             TableType::Primary,
                                             TableEngine::EloqSql};
 
-#ifdef ON_KEY_OBJECT
 // Set buckets count to be the same as the slots count. (16384)
 inline static const uint16_t total_range_buckets = 0x4000;
-#else
-inline static const uint16_t total_range_buckets = 4096;
-#endif
 
 enum struct SlicePosition
 {
