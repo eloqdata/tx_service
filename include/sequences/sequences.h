@@ -259,22 +259,6 @@ struct SequenceRecordSchema : public txservice::RecordSchema
 public:
     SequenceRecordSchema() = default;
 
-private:
-#if defined(DATA_STORE_TYPE_CASSANDRA)
-    void EncodeToSerializeFormat(TableType table_type,
-                                 const void *row,
-                                 std::string &buf) const override
-    {
-        assert(false);
-    }
-
-    void EncodeToTxRecord(const txservice::TableName &table_name,
-                          const void *row,
-                          txservice::TxRecord &tx_record) const override
-    {
-        assert(false);
-    }
-#endif
 };
 
 struct SequenceTableSchema : public txservice::TableSchema
