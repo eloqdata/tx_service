@@ -1490,9 +1490,9 @@ private:
     TableName kickout_range_table_{
         std::string(""), TableType::Primary, TableEngine::None};
 
-
     std::unordered_set<TableName> hash_partitioned_tables_snapshot_;
-    std::unordered_set<TableName>::const_iterator kickout_hash_partitioned_tbl_it_;
+    std::unordered_set<TableName>::const_iterator
+        kickout_hash_partitioned_tbl_it_;
 
     std::shared_ptr<DataMigrationStatus> status_;
 };

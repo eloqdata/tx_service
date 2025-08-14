@@ -101,21 +101,20 @@ struct TableRangeEntry;
 struct DataSyncTask
 {
 public:
-    DataSyncTask(const TableName &table_name,
-                 int32_t id, // range_id on RangePartition, core_idx on HashPartition
-                 uint64_t range_version, // only used on RangePartition table
-                 uint32_t ng_id,
-                 int64_t ng_term,
-                 uint64_t data_sync_ts,
-                 std::shared_ptr<DataSyncStatus> status,
-                 bool is_dirty,
-                 bool need_adjust_ts,
-                 CcHandlerResult<Void> *hres
-                 ,
-                 std::function<bool(size_t)> filter_lambda = nullptr,
-                 bool forward_cache = false,
-                 bool is_standby_node_ckpt = false
-                 )
+    DataSyncTask(
+        const TableName &table_name,
+        int32_t id,  // range_id on RangePartition, core_idx on HashPartition
+        uint64_t range_version,  // only used on RangePartition table
+        uint32_t ng_id,
+        int64_t ng_term,
+        uint64_t data_sync_ts,
+        std::shared_ptr<DataSyncStatus> status,
+        bool is_dirty,
+        bool need_adjust_ts,
+        CcHandlerResult<Void> *hres,
+        std::function<bool(size_t)> filter_lambda = nullptr,
+        bool forward_cache = false,
+        bool is_standby_node_ckpt = false)
         : table_name_(table_name),
           id_(id),
           range_version_(range_version),
