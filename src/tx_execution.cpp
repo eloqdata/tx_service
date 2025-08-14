@@ -1456,11 +1456,14 @@ void TransactionExecution::ProcessTxRequest(
                     ::txlog::SchemaOpMessage::LastKeyType::
                         SchemaOpMessage_LastKeyType_PosInfKey)
                 {
+                TableEngine table_engine =
+                    ::txlog::ToLocalType::ConvertTableEngine(
+                        schema_op_msg.table_engine());
                     // The positive inf key
                     index_op_->last_finished_end_key_ =
                         Sharder::Instance()
                             .GetLocalCcShards()
-                            ->GetCatalogFactory()
+                            ->GetCatalogFactory(table_engine)
                             ->PositiveInfKey();
                     index_op_->is_last_finished_key_str_ = false;
                 }
