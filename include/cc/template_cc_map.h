@@ -1406,6 +1406,7 @@ public:
         CcOperation cc_op;
         if (table_name_.Type() == TableType::Secondary)
         {
+            assert(false);
             cc_op = CcOperation::ReadSkIndex;
             is_read_snapshot = (iso_lvl == IsolationLevel::Snapshot);
         }
@@ -3997,7 +3998,8 @@ public:
         if (table_name_.Type() == TableType::Secondary ||
             table_name_.Type() == TableType::UniqueSecondary)
         {
-            cc_op = CcOperation::ReadSkIndex;
+            cc_op = req.IsForWrite() ? CcOperation::ReadForWrite
+                                     : CcOperation::ReadSkIndex;
         }
         else
         {
