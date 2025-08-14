@@ -155,10 +155,10 @@ enum class TableType : uint8_t
 
 enum class TableEngine : uint8_t
 {
-    None = 'M',  // table that does not belong to any engine like bucket table.
-    EloqSql = 'S',
-    EloqKv = 'K',
-    EloqDoc = 'D',
+    EloqSql = 0,
+    EloqKv = 1,
+    EloqDoc = 2,
+    None = 3,  // table that does not belong to any engine like bucket table.
 };
 
 struct TableName

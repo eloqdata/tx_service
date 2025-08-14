@@ -68,7 +68,7 @@ LocalCcShards::LocalCcShards(
     uint32_t node_id,
     uint32_t ng_id,
     const std::map<std::string, uint32_t> &conf,
-    CatalogFactory *catalog_factory,
+    CatalogFactory *catalog_factory[3],
     SystemHandler *system_handler,
     std::unordered_map<uint32_t, std::vector<NodeConfig>> *ng_configs,
     uint64_t cluster_config_version,
@@ -90,7 +90,8 @@ LocalCcShards::LocalCcShards(
       ng_id_(ng_id),
       timer_terminate_(false),
       is_waiting_ckpt_(false),
-      catalog_factory_(catalog_factory),
+      catalog_factory_{
+          catalog_factory[0], catalog_factory[1], catalog_factory[2]},
       system_handler_(system_handler),
       tx_service_(tx_service),
       enable_mvcc_(enable_mvcc),
@@ -367,7 +368,7 @@ std::pair<bool, const CatalogEntry *> LocalCcShards::CreateCatalog(
         // A new catalog entry is created in LocalCcShards.
         catalog_entry.InitSchema(
             catalog_image.empty() ? nullptr
-                                  : catalog_factory_->CreateTableSchema(
+                                  : GetCatalogFactory(table_name.Engine())->CreateTableSchema(
                                         table_name, catalog_image, commit_ts),
             commit_ts);
     }
@@ -380,7 +381,7 @@ std::pair<bool, const CatalogEntry *> LocalCcShards::CreateCatalog(
             catalog_entry.InitSchema(
                 catalog_image.empty()
                     ? nullptr
-                    : catalog_factory_->CreateTableSchema(
+                    : GetCatalogFactory(table_name.Engine())->CreateTableSchema(
                           table_name, catalog_image, commit_ts),
                 commit_ts);
         }
@@ -407,7 +408,7 @@ TableSchema::uptr LocalCcShards::CreateTableSchemaFromImage(
     {
         return nullptr;
     }
-    return catalog_factory_->CreateTableSchema(
+    return GetCatalogFactory(table_name.Engine())->CreateTableSchema(
         table_name, catalog_image, version);
 }
 
@@ -432,7 +433,7 @@ std::pair<bool, const CatalogEntry *> LocalCcShards::CreateReplayCatalog(
         catalog_entry.InitSchema(
             old_catalog_image.empty()
                 ? nullptr
-                : catalog_factory_->CreateTableSchema(
+                : GetCatalogFactory(table_name.Engine())->CreateTableSchema(
                       table_name, old_catalog_image, old_schema_ts),
             old_schema_ts);
     }
@@ -445,7 +446,7 @@ std::pair<bool, const CatalogEntry *> LocalCcShards::CreateReplayCatalog(
         catalog_entry.SetDirtySchema(
             new_catalog_image.empty()
                 ? nullptr
-                : catalog_factory_->CreateTableSchema(
+                : GetCatalogFactory(table_name.Engine())->CreateTableSchema(
                       table_name, new_catalog_image, dirty_schema_ts),
             dirty_schema_ts);
         return {true, &catalog_entry};
@@ -484,7 +485,7 @@ CatalogEntry *LocalCcShards::CreateDirtyCatalog(
         // greater than the existing version and dirty version.
         catalog_entry.SetDirtySchema(
             catalog_image.empty() ? nullptr
-                                  : catalog_factory_->CreateTableSchema(
+                                  : GetCatalogFactory(table_name.Engine())->CreateTableSchema(
                                         table_name, catalog_image, commit_ts),
             commit_ts);
     }
@@ -499,7 +500,7 @@ void LocalCcShards::UpdateDirtyCatalog(const TableName &table_name,
     assert(catalog_entry && !catalog_image.empty());
     std::unique_lock<std::shared_mutex> lk(meta_data_mux_);
     catalog_entry->SetDirtySchema(
-        catalog_factory_->CreateTableSchema(
+        GetCatalogFactory(table_name.Engine())->CreateTableSchema(
             table_name, catalog_image, catalog_entry->dirty_schema_version_),
         catalog_entry->dirty_schema_version_);
 }
@@ -987,8 +988,10 @@ void LocalCcShards::InitTableRanges(const TableName &range_table_name,
 
         // The first range's start is negative infinity.
         assert(pidx == 0 || range_entry.key_.IsOwner());
-        TxKey range_start_key = pidx == 0 ? catalog_factory_->NegativeInfKey()
-                                          : std::move(range_entry.key_);
+        TxKey range_start_key =
+            pidx == 0
+                ? GetCatalogFactory(range_table_name.Engine())->NegativeInfKey()
+                : std::move(range_entry.key_);
         // The tx key in the map is a shallow copy of the start key in the
         // to-be-created range entry.
         TxKey map_key = range_start_key.GetShallowCopy();
@@ -997,9 +1000,10 @@ void LocalCcShards::InitTableRanges(const TableName &range_table_name,
         if (range_it == ranges.end())
         {
             TableRangeEntry::uptr new_range =
-                catalog_factory_->CreateTableRange(std::move(range_start_key),
-                                                   range_entry.version_ts_,
-                                                   range_entry.partition_id_);
+                GetCatalogFactory(range_table_name.Engine())
+                    ->CreateTableRange(std::move(range_start_key),
+                                       range_entry.version_ts_,
+                                       range_entry.partition_id_);
             range_it = ranges
                            .try_emplace(new_range->RangeStartTxKey(),
                                         std::move(new_range))
@@ -1024,7 +1028,7 @@ void LocalCcShards::InitTableRanges(const TableName &range_table_name,
         ids.insert_or_assign(range_entry.partition_id_, range_it->second.get());
     }
     ranges.rbegin()->second->SetRangeEndTxKey(
-        catalog_factory_->PositiveInfKey());
+        GetCatalogFactory(range_table_name.Engine())->PositiveInfKey());
 
     if (empty_table)
     {
@@ -1037,9 +1041,10 @@ void LocalCcShards::InitTableRanges(const TableName &range_table_name,
             // The store range is only initialized on the node group that owns
             // this range.
             std::vector<SliceInitInfo> slices;
-            slices.emplace_back(catalog_factory_->NegativeInfKey(),
-                                0,
-                                SliceStatus::FullyCached);
+            slices.emplace_back(
+                GetCatalogFactory(range_table_name.Engine())->NegativeInfKey(),
+                0,
+                SliceStatus::FullyCached);
             ranges.begin()->second->InitRangeSlices(std::move(slices),
                                                     ng_id,
                                                     range_table_name.IsBase(),
@@ -1071,7 +1076,7 @@ void LocalCcShards::InitPrebuiltTables(NodeGroupId ng_id, int64_t term)
             if (ng_it.second)
             {
                 ng_it.first->second.InitSchema(
-                    catalog_factory_->CreateTableSchema(table, image, 2), 2);
+                    GetCatalogFactory(table.Engine())->CreateTableSchema(table, image, 2), 2);
             }
         }
     }
@@ -1643,7 +1648,8 @@ std::pair<std::shared_ptr<Statistics>, bool> LocalCcShards::InitTableStatistics(
         StatisticsEntry &statistics_entry = statistics_it.first->second;
 
         statistics_entry.statistics_ =
-            catalog_factory_->CreateTableStatistics(table_schema, ng_id);
+            GetCatalogFactory(table_schema->GetBaseTableName().Engine())
+                ->CreateTableStatistics(table_schema, ng_id);
 
         table_schema->BindStatistics(statistics_entry.statistics_);
     }
@@ -1668,8 +1674,10 @@ std::pair<std::shared_ptr<Statistics>, bool> LocalCcShards::InitTableStatistics(
     {
         StatisticsEntry &statistics_entry = statistics_it.first->second;
 
-        statistics_entry.statistics_ = catalog_factory_->CreateTableStatistics(
-            table_schema, std::move(sample_pool_map), ccs, ng_id);
+        statistics_entry.statistics_ =
+            GetCatalogFactory(table_schema->GetBaseTableName().Engine())
+                ->CreateTableStatistics(
+                    table_schema, std::move(sample_pool_map), ccs, ng_id);
 
         table_schema->BindStatistics(statistics_entry.statistics_);
         if (dirty_table_schema)
@@ -3664,7 +3672,8 @@ void LocalCcShards::DataSyncForRangePartition(
                        << " for table: " << table_name.StringView();
 
             // The minimum end key of this batch data between all the cores.
-            TxKey min_scanned_end_key = catalog_factory_->PositiveInfKey();
+            TxKey min_scanned_end_key =
+                GetCatalogFactory(table_name.Engine())->PositiveInfKey();
             for (size_t i = 0; i < cc_shards_.size(); ++i)
             {
                 for (size_t j = 0; j < scan_cc.accumulated_scan_cnt_[i]; ++j)
