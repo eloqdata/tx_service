@@ -8114,6 +8114,12 @@ void BatchReadOperation::Reset()
     lock_range_bucket_result_->Value().Reset();
     lock_range_bucket_result_->Reset();
     lock_it_ = read_batch.begin();
+    range_ids_index_ = 0;
+
+    if (cnt > range_ids_.size())
+    {
+        range_ids_.resize(cnt);
+    }
 
     if (cnt > hd_result_vec_.size())
     {
@@ -8195,6 +8201,8 @@ void BatchReadOperation::Forward(TransactionExecution *txm)
                         continue;
                     }
                     lock_it_->cce_addr_.SetNodeGroupId(range_ng);
+                    range_ids_[range_ids_index_++] =
+                        range_rec->GetRangeInfo()->PartitionId();
                 }
             }
             else

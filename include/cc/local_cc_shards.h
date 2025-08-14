@@ -1055,6 +1055,7 @@ public:
         const RecordSchema *rec_schema,
         uint64_t schema_ts,
         const KVCatalogInfo *kv_info,
+        int32_t range_id,
         const KeyT &key,
         bool inclusive,
         CcRequestBase *cc_request,
@@ -1076,10 +1077,20 @@ public:
                                    table_name.Engine());
         TxKey slice_key(&key);
 
-        TemplateTableRangeEntry<KeyT> *range_entry =
-            static_cast<TemplateTableRangeEntry<KeyT> *>(
+        TemplateTableRangeEntry<KeyT> *range_entry;
+        if (range_id >= 0)
+        {
+            range_entry = static_cast<TemplateTableRangeEntry<KeyT> *>(
+                GetTableRangeEntryInternal(
+                    range_table_name, cc_ng_id, range_id));
+        }
+        else
+        {
+            range_entry = static_cast<TemplateTableRangeEntry<KeyT> *>(
                 GetTableRangeEntryInternal(
                     range_table_name, cc_ng_id, slice_key));
+        }
+
         if (!range_entry)
         {
             // Table range info not initialized, initialize range info first

@@ -318,7 +318,8 @@ void txservice::remote::RemoteCcHandler::Read(
     CcProtocol proto,
     bool is_for_write,
     bool is_covering_keys,
-    bool point_read_on_miss)
+    bool point_read_on_miss,
+    int32_t partition_id)
 {
     CcMessage send_msg;
 
@@ -344,6 +345,7 @@ void txservice::remote::RemoteCcHandler::Read(
     read->set_is_for_write(is_for_write);
     read->set_is_covering_keys(is_covering_keys);
     read->set_point_read_on_miss(point_read_on_miss);
+    read->set_partition_id(partition_id);
 
     read->clear_record();
     switch (read_type)

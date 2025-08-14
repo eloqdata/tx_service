@@ -1519,6 +1519,8 @@ public:
 
     CcHandlerResult<ReadKeyResult> *lock_range_bucket_result_{nullptr};
     std::vector<ScanBatchTuple>::iterator lock_it_;
+    std::vector<int32_t> range_ids_;
+    size_t range_ids_index_{0};
 };
 
 struct InvalidateTableCacheOp : TransactionOperation

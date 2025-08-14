@@ -231,7 +231,8 @@ public:
                       CcProtocol proto = CcProtocol::OCC,
                       bool is_for_write = false,
                       bool is_covering_keys = false,
-                      bool point_read_on_miss = false) = 0;
+                      bool point_read_on_miss = false,
+                      int32_t partition_id = -1) = 0;
 
     /**
      * @brief Brings the previously-read key's record into the cc map for
