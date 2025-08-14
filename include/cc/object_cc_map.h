@@ -291,12 +291,15 @@ public:
                 req.block_type_ == ApplyCc::ApplyBlockType::BlockOnCondition)
             {
                 if (req.block_type_ ==
-                        ApplyCc::ApplyBlockType::BlockOnCondition &&
-                    shard_->RemoveActiveBlockingTx(req.Txn()))
+                    ApplyCc::ApplyBlockType::BlockOnCondition)
                 {
-                    hd_res->SetError(CcErrorCode::TASK_EXPIRED);
                     shard_->RemoveExpiredActiveBlockingTxs();
-                    return true;
+                    if (shard_->RemoveActiveBlockingTx(req.Txn()))
+                    {
+                        // remove succeeds, means the txn is expired
+                        hd_res->SetError(CcErrorCode::TASK_EXPIRED);
+                        return true;
+                    }
                 }
 
                 // FetchRecord (if need to) happens before lock acquisition. So
@@ -339,6 +342,7 @@ public:
                 cce->RecycleKeyLock(*shard_);
             }
         }
+
         if (cce_addr.ExtractCce() == nullptr)
         {
             // Lock hasn't been acquired. For blocking commands, the lock is

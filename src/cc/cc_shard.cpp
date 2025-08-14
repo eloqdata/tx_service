@@ -2101,12 +2101,22 @@ size_t CcShard::ActiveBlockingTxSize() const
 
 void CcShard::RemoveExpiredActiveBlockingTxs()
 {
+    // 5s, tune as needed
+    static constexpr uint64_t kCleanupPeriodUs = 5000000;
+    static thread_local uint64_t last_run_ts = 0;
+
     uint64_t now_ts = Now();
+    if (now_ts - last_run_ts < kCleanupPeriodUs)
+    {
+        return;
+    }
+
+    last_run_ts = now_ts;
+
     for (auto it = active_blocking_txs_.begin();
          it != active_blocking_txs_.end();)
     {
-        // fail to discrad entry expires after 1s
-        if (now_ts - it->second > 1000000)
+        if (now_ts - it->second > kCleanupPeriodUs)
         {
             active_blocking_txs_.erase(it++);
         }
