@@ -454,7 +454,8 @@ void txservice::remote::RemoteRead::Reset(std::unique_ptr<CcMessage> input_msg)
                       req.is_for_write(),
                       req.is_covering_keys(),
                       nullptr,
-                      req.point_read_on_miss());
+                      req.point_read_on_miss(),
+                      req.partition_id());
     }
     else
     {

@@ -875,6 +875,7 @@ message ReadRequest {
     bool is_covering_keys = 13;
     bool point_read_on_miss = 14;
     uint64 schema_version = 15;
+    int32 partition_id = 16;
 }
 
 message ReadResponse {

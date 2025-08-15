@@ -8113,7 +8113,12 @@ void BatchReadOperation::Reset()
     size_t cnt = read_batch.size();
     lock_range_bucket_result_->Value().Reset();
     lock_range_bucket_result_->Reset();
-    lock_it_ = read_batch.begin();
+    lock_index_ = 0;
+
+    if (cnt > range_ids_.size())
+    {
+        range_ids_.resize(cnt);
+    }
 
     if (cnt > hd_result_vec_.size())
     {
@@ -8171,7 +8176,7 @@ void BatchReadOperation::Forward(TransactionExecution *txm)
                 CcErrorCode::TX_NODE_NOT_LEADER);
             txm->PostProcess(*this);
         }
-        else if (lock_it_ != read_batch.end())
+        else if (lock_index_ < read_batch.size())
         {
             if (!batch_read_tx_req_->tab_name_->IsHashPartitioned())
             {
@@ -8186,15 +8191,18 @@ void BatchReadOperation::Forward(TransactionExecution *txm)
                 auto cmp = [](const ScanBatchTuple &tuple, const TxKey &end_key)
                 { return tuple.key_ < end_key; };
 
-                for (; lock_it_ != read_batch.end() &&
-                       cmp(*lock_it_, range_end_key);
-                     ++lock_it_)
+                for (; lock_index_ < read_batch.size() &&
+                       cmp(read_batch[lock_index_], range_end_key);
+                     ++lock_index_)
                 {
-                    if (lock_it_->status_ != RecordStatus::Unknown)
+                    if (read_batch[lock_index_].status_ !=
+                        RecordStatus::Unknown)
                     {
                         continue;
                     }
-                    lock_it_->cce_addr_.SetNodeGroupId(range_ng);
+                    read_batch[lock_index_].cce_addr_.SetNodeGroupId(range_ng);
+                    range_ids_[lock_index_] =
+                        range_rec->GetRangeInfo()->PartitionId();
                 }
             }
             else
@@ -8204,8 +8212,9 @@ void BatchReadOperation::Forward(TransactionExecution *txm)
                         lock_range_bucket_result_->Value().rec_);
                 NodeGroupId bucket_ng =
                     bucket_rec->GetBucketInfo()->BucketOwner();
-                lock_it_->cce_addr_.SetNodeGroupId(bucket_ng);
-                ++lock_it_;
+
+                read_batch[lock_index_].cce_addr_.SetNodeGroupId(bucket_ng);
+                ++lock_index_;
             }
             txm->Process(*this);
         }
