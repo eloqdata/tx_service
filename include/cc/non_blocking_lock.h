@@ -21,7 +21,7 @@
  */
 #pragma once
 
-#include <butil/logging.h>
+#include <glog/logging.h>
 
 #include <memory>
 #include <string>
