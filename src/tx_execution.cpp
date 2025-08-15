@@ -7226,12 +7226,13 @@ void TransactionExecution::Process(BatchReadOperation &batch_read_op)
         }
     }
 
-    while (batch_read_op.lock_it_ < read_batch.end())
+    size_t &lock_key_index = batch_read_op.lock_index_;
+    while (lock_key_index < read_batch.size())
     {
         // The key is found in the write set. No need to lock its range.
-        if (batch_read_op.lock_it_->status_ != RecordStatus::Unknown)
+        if (read_batch[lock_key_index].status_ != RecordStatus::Unknown)
         {
-            ++batch_read_op.lock_it_;
+            ++lock_key_index;
             continue;
         }
         if (!table_name.IsHashPartitioned())
@@ -7244,7 +7245,7 @@ void TransactionExecution::Process(BatchReadOperation &batch_read_op)
             lock_range_op_.Reset(TableName(table_name.StringView(),
                                            TableType::RangePartition,
                                            table_name.Engine()),
-                                 &batch_read_op.lock_it_->key_,
+                                 &read_batch[lock_key_index].key_,
                                  &range_rec_,
                                  &lock_range_bucket_result_);
             PushOperation(&lock_range_op_);
@@ -7253,15 +7254,15 @@ void TransactionExecution::Process(BatchReadOperation &batch_read_op)
         }
         else
         {
-            const TxKey &key = batch_read_op.lock_it_->key_;
+            const TxKey &key = read_batch[lock_key_index].key_;
             uint64_t key_hash = key.Hash();
             uint16_t bucket_id = Sharder::MapKeyHashToBucketId(key_hash);
             const BucketInfo *bucket_info = FastToGetBucket(bucket_id);
             if (bucket_info != nullptr)
             {
                 NodeGroupId bucket_ng = bucket_info->BucketOwner();
-                batch_read_op.lock_it_->cce_addr_.SetNodeGroupId(bucket_ng);
-                ++batch_read_op.lock_it_;
+                read_batch[lock_key_index].cce_addr_.SetNodeGroupId(bucket_ng);
+                ++lock_key_index;
             }
             else
             {
