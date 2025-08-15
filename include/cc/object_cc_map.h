@@ -481,7 +481,8 @@ public:
 
                     // Fetch record from storage
                     // TODO(lokax):
-                    int32_t part_id = (look_key->Hash() >> 10) & 0x3FF;
+                    int32_t part_id =
+                        Sharder::MapKeyHashToBucketId(look_key->Hash()) & 0x3FF;
                     auto fetch_ret_status = shard_->FetchRecord(table_name_,
                                                                 table_schema_,
                                                                 TxKey(look_key),
@@ -1854,7 +1855,9 @@ public:
                         // it from kv store if kv is synced with primary.
                         cce->GetOrCreateKeyLock(shard_, this, ccp);
                         // TODO(lokax):
-                        int32_t part_id = (look_key->Hash() >> 10) & 0x3FF;
+                        int32_t part_id =
+                            Sharder::MapKeyHashToBucketId(look_key->Hash()) &
+                            0x3FF;
                         shard_->FetchRecord(table_name_,
                                             table_schema_,
                                             TxKey(look_key),
@@ -2290,7 +2293,8 @@ public:
                     // queue after record is fetched.
 
                     // TODO(lokax):
-                    int32_t part_id = (key.Hash() >> 10) & 0x3FF;
+                    int32_t part_id =
+                        Sharder::MapKeyHashToBucketId(key.Hash()) & 0x3FF;
                     shard_->FetchRecord(table_name_,
                                         table_schema_,
                                         TxKey(&key),

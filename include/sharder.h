@@ -220,6 +220,11 @@ public:
         return bucket_id;
     }
 
+    static inline uint16_t ToTalRangeBuckets()
+    {
+        return total_range_buckets;
+    }
+
     uint32_t NativeNodeGroup() const
     {
         return native_ng_;
