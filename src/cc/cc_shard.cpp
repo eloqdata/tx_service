@@ -1742,7 +1742,7 @@ const CatalogEntry *CcShard::InitCcm(const TableName &table_name,
             return nullptr;
         }
 #endif
-
+        // TODO(lokax):
         std::vector<TableName> index_names = curr_schema->IndexNames();
         bool ccm_has_full_entries = txservice_skip_kv;
         CreateOrUpdatePkCcMap(
