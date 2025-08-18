@@ -596,6 +596,13 @@ public:
                 RecordStatus new_status =
                     is_del ? RecordStatus::Deleted : RecordStatus::Normal;
                 cce->SetCommitTsPayloadStatus(commit_ts, new_status);
+                if (table_name_.StringView() ==
+                    "tpcc.DISTRICT*$$D_W_ID_1_D_ID_1_D_NEXT_O_ID_1_D_TAX_1")
+                {
+                    LOG(INFO) << ">> PostWriteCc txn: " << req.Txn()
+                              << ", cce: " << cce
+                              << ", payload status: " << (int) new_status;
+                }
 
                 if (req.IsInitialInsert())
                 {
