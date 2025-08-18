@@ -68,7 +68,7 @@ LocalCcShards::LocalCcShards(
     uint32_t node_id,
     uint32_t ng_id,
     const std::map<std::string, uint32_t> &conf,
-    CatalogFactory *catalog_factory[3],
+    CatalogFactory *catalog_factory[4],
     SystemHandler *system_handler,
     std::unordered_map<uint32_t, std::vector<NodeConfig>> *ng_configs,
     uint64_t cluster_config_version,
@@ -91,7 +91,7 @@ LocalCcShards::LocalCcShards(
       timer_terminate_(false),
       is_waiting_ckpt_(false),
       catalog_factory_{
-          catalog_factory[0], catalog_factory[1], catalog_factory[2]},
+          catalog_factory[0], catalog_factory[1], catalog_factory[2], catalog_factory[3]},
       system_handler_(system_handler),
       tx_service_(tx_service),
       enable_mvcc_(enable_mvcc),

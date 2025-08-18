@@ -198,6 +198,8 @@ public:
             return txservice::remote::TableEngine::EloqDoc;
         case txservice::TableEngine::EloqKv:
             return txservice::remote::TableEngine::EloqKv;
+        case txservice::TableEngine::Sequence:
+            return txservice::remote::TableEngine::Sequence;
         default:
             assert(false);
             return TableEngine::EloqSql;
@@ -406,6 +408,8 @@ public:
             return txservice::TableEngine::EloqKv;
         case txservice::remote::TableEngine::EloqSql:
             return txservice::TableEngine::EloqSql;
+        case txservice::remote::TableEngine::Sequence:
+            return txservice::TableEngine::Sequence;
         default:
             assert(false);
             return txservice::TableEngine::None;

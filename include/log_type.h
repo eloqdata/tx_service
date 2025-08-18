@@ -66,6 +66,8 @@ public:
             return TableEngine::EloqDoc;
         case txservice::TableEngine::EloqKv:
             return TableEngine::EloqKv;
+        case txservice::TableEngine::Sequence:
+            return TableEngine::Sequence;
         default:
             assert(false);
             return TableEngine::None;
@@ -111,6 +113,8 @@ public:
             return txservice::TableEngine::EloqKv;
         case TableEngine::EloqDoc:
             return txservice::TableEngine::EloqDoc;
+        case TableEngine::Sequence:
+            return txservice::TableEngine::Sequence;
         default:
             assert(false);
             return txservice::TableEngine::None;
