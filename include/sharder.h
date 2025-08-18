@@ -220,6 +220,11 @@ public:
         return bucket_id;
     }
 
+    static inline int32_t MapKeyHashToHashPartitionId(uint64_t hash_code)
+    {
+        return (hash_code >> 10) & 0x3FF;
+    }
+
     uint32_t NativeNodeGroup() const
     {
         return native_ng_;

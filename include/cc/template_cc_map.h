@@ -1533,6 +1533,7 @@ public:
                                     RecordSchema(),
                                     schema_ts_,
                                     table_schema_->GetKVCatalogInfo(),
+                                    req.PartitionId(),
                                     *look_key,
                                     true,
                                     &req,
@@ -1706,7 +1707,7 @@ public:
                                     this->cc_ng_id_,
                                     ng_term,
                                     &req,
-                                    slice_id.Range()->PartitionId(),
+                                    req.PartitionId(),
                                     false,
                                     0,
                                     is_read_snapshot ? req.ReadTimestamp() : 0,
@@ -1793,8 +1794,6 @@ public:
                         // record will pin the cce to prevent it from being
                         // recycled before fetch record returns.
                         cce->GetOrCreateKeyLock(shard_, this, ccp);
-
-                        int32_t part_id = (look_key->Hash() >> 10) & 0x3FF;
                         auto fetch_ret_status = shard_->FetchRecord(
                             this->table_name_,
                             this->table_schema_,
@@ -1803,7 +1802,7 @@ public:
                             this->cc_ng_id_,
                             ng_term,
                             &req,
-                            part_id,
+                            req.PartitionId(),
                             false,
                             0U,
                             is_read_snapshot ? req.ReadTimestamp() : 0,
@@ -2003,19 +2002,6 @@ public:
                 v_rec.payload_status_ == RecordStatus::ArchiveVersionMiss)
             {
                 cce->GetOrCreateKeyLock(shard_, this, ccp);
-                int32_t part_id = 0;
-                if (RangePartitioned)
-                {
-                    TxKey tx_key(look_key);
-                    const TableRangeEntry *range_entry =
-                        shard_->GetTableRangeEntry(
-                            table_name_, cc_ng_id_, tx_key);
-                    part_id = range_entry->GetRangeInfo()->PartitionId();
-                }
-                else
-                {
-                    part_id = (look_key->Hash() >> 10) & 0x3FF;
-                }
                 auto fetch_ret_status = shard_->FetchRecord(
                     this->table_name_,
                     this->table_schema_,
@@ -2024,7 +2010,7 @@ public:
                     this->cc_ng_id_,
                     ng_term,
                     &req,
-                    part_id,
+                    req.PartitionId(),
                     false,
                     0U,
                     req.ReadTimestamp(),
@@ -5654,6 +5640,7 @@ public:
                 RecordSchema(),
                 schema_ts_,
                 table_schema_->GetKVCatalogInfo(),
+                -1,
                 search_key,
                 true,
                 &req,
@@ -8444,6 +8431,7 @@ public:
                         RecordSchema(),
                         schema_ts_,
                         table_schema_->GetKVCatalogInfo(),
+                        -1,
                         *key,
                         true,
                         &req,

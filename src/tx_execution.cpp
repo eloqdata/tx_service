@@ -1851,6 +1851,7 @@ void TransactionExecution::Process(ReadOperation &read)
             read.iso_level_ = iso_level_;
 
             uint32_t key_shard_code = 0;
+            int32_t partition_id = -1;
             // Find the key shard code and lock meta data.
             if (!table_name.IsHashPartitioned())
             {
@@ -1890,6 +1891,7 @@ void TransactionExecution::Process(ReadOperation &read)
                     NodeGroupId range_ng =
                         range_rec_.GetRangeOwnerNg()->BucketOwner();
                     key_shard_code = range_ng << 10 | residual;
+                    partition_id = range_rec_.GetRangeInfo()->PartitionId();
                 }
             }
             else
@@ -1908,6 +1910,7 @@ void TransactionExecution::Process(ReadOperation &read)
                 uint64_t key_hash = key.Hash();
                 uint16_t bucket_id = Sharder::MapKeyHashToBucketId(key_hash);
                 const BucketInfo *bucket_info = FastToGetBucket(bucket_id);
+                partition_id = Sharder::MapKeyHashToHashPartitionId(key_hash);
                 if (bucket_info != nullptr)
                 {
                     // Uses the lower 10 bits of the key's hash code to shard
@@ -1995,7 +1998,8 @@ void TransactionExecution::Process(ReadOperation &read)
                               read.protocol_,
                               read.read_tx_req_->is_for_write_,
                               is_covering_keys,
-                              read.read_tx_req_->point_read_on_cache_miss_);
+                              read.read_tx_req_->point_read_on_cache_miss_,
+                              partition_id);
 
             if (!read.hd_result_.Value().is_local_)
             {
@@ -7222,12 +7226,13 @@ void TransactionExecution::Process(BatchReadOperation &batch_read_op)
         }
     }
 
-    while (batch_read_op.lock_it_ < read_batch.end())
+    size_t &lock_key_index = batch_read_op.lock_index_;
+    while (lock_key_index < read_batch.size())
     {
         // The key is found in the write set. No need to lock its range.
-        if (batch_read_op.lock_it_->status_ != RecordStatus::Unknown)
+        if (read_batch[lock_key_index].status_ != RecordStatus::Unknown)
         {
-            ++batch_read_op.lock_it_;
+            ++lock_key_index;
             continue;
         }
         if (!table_name.IsHashPartitioned())
@@ -7240,7 +7245,7 @@ void TransactionExecution::Process(BatchReadOperation &batch_read_op)
             lock_range_op_.Reset(TableName(table_name.StringView(),
                                            TableType::RangePartition,
                                            table_name.Engine()),
-                                 &batch_read_op.lock_it_->key_,
+                                 &read_batch[lock_key_index].key_,
                                  &range_rec_,
                                  &lock_range_bucket_result_);
             PushOperation(&lock_range_op_);
@@ -7249,15 +7254,15 @@ void TransactionExecution::Process(BatchReadOperation &batch_read_op)
         }
         else
         {
-            const TxKey &key = batch_read_op.lock_it_->key_;
+            const TxKey &key = read_batch[lock_key_index].key_;
             uint64_t key_hash = key.Hash();
             uint16_t bucket_id = Sharder::MapKeyHashToBucketId(key_hash);
             const BucketInfo *bucket_info = FastToGetBucket(bucket_id);
             if (bucket_info != nullptr)
             {
                 NodeGroupId bucket_ng = bucket_info->BucketOwner();
-                batch_read_op.lock_it_->cce_addr_.SetNodeGroupId(bucket_ng);
-                ++batch_read_op.lock_it_;
+                read_batch[lock_key_index].cce_addr_.SetNodeGroupId(bucket_ng);
+                ++lock_key_index;
             }
             else
             {
@@ -7315,6 +7320,15 @@ void TransactionExecution::Process(BatchReadOperation &batch_read_op)
         size_t key_hash = key.Hash();
         sharding_code =
             read_batch[idx].cce_addr_.NodeGroupId() << 10 | (key_hash & 0x3FF);
+        int32_t partition_id = -1;
+        if (table_name.IsHashPartitioned())
+        {
+            partition_id = Sharder::MapKeyHashToHashPartitionId(key_hash);
+        }
+        else
+        {
+            partition_id = batch_read_op.range_ids_[idx];
+        }
         cc_handler_->Read(table_name,
                           batch_read_op.batch_read_tx_req_->schema_version_,
                           key,
@@ -7332,7 +7346,8 @@ void TransactionExecution::Process(BatchReadOperation &batch_read_op)
                           protocol_,
                           batch_read_op.batch_read_tx_req_->is_for_write_,
                           false,
-                          true);
+                          true,
+                          partition_id);
     }
 
     StartTiming();
