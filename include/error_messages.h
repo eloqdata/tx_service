@@ -108,7 +108,7 @@ enum struct TxErrorCode : uint16_t
     NEGOTIATED_TX_UNKNOWN,
     NEGOTIATE_TX_ERR,
     // Scan
-    CRATE_CCM_SCANNER_FAILED,
+    CREATE_CCM_SCANNER_FAILED,
     // log service
     LOG_CLOSURE_RESULT_UNKNOWN_ERR,
     WRITE_LOG_FAILED,
@@ -200,7 +200,7 @@ static const std::unordered_map<TxErrorCode, std::string> tx_error_messages{
      "transaction status is unknown."},
     {TxErrorCode::NEGOTIATE_TX_ERR,
      "Negotiate transaction commit timestamp failed due to error."},
-    {TxErrorCode::CRATE_CCM_SCANNER_FAILED,
+    {TxErrorCode::CREATE_CCM_SCANNER_FAILED,
      "Create in memory data scanner failed."},
     {TxErrorCode::WRITE_LOG_FAILED, "Write log failed."},
     {TxErrorCode::LOG_NODE_NOT_LEADER, "Log node is not leader."},
@@ -267,7 +267,7 @@ enum struct CcErrorCode : uint8_t
     NEGOTIATE_TX_ERR,
 
     // Scan
-    CRATE_CCM_SCANNER_FAILED,
+    CREATE_CCM_SCANNER_FAILED,
 
     // AcquireAllCc, AcquireCc
     DUPLICATE_INSERT_ERR,
@@ -351,7 +351,7 @@ static const std::unordered_map<CcErrorCode, std::string> cc_error_messages{
      "REQUESTED_INDEX_TABLE_NOT_EXISTS"},
     {CcErrorCode::REQUESTED_TABLE_SCHEMA_MISMATCH,
      "REQUESTED_TABLE_SCHEMA_MISMATCH"},
-    {CcErrorCode::CRATE_CCM_SCANNER_FAILED, "CRATE_CCM_SCANNER_FAILED"},
+    {CcErrorCode::CREATE_CCM_SCANNER_FAILED, "CRATE_CCM_SCANNER_FAILED"},
 
     {CcErrorCode::DUPLICATE_INSERT_ERR, "DUPLICATE_INSERT_ERR"},
     {CcErrorCode::ACQUIRE_LOCK_BLOCKED, "ACQUIRE_LOCK_BLOCKED"},

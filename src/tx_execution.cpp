@@ -411,8 +411,8 @@ TxErrorCode TransactionExecution::ConvertCcError(CcErrorCode error)
     case CcErrorCode::NEGOTIATE_TX_ERR:
         return TxErrorCode::NEGOTIATE_TX_ERR;
 
-    case CcErrorCode::CRATE_CCM_SCANNER_FAILED:
-        return TxErrorCode::CRATE_CCM_SCANNER_FAILED;
+    case CcErrorCode::CREATE_CCM_SCANNER_FAILED:
+        return TxErrorCode::CREATE_CCM_SCANNER_FAILED;
 
     case CcErrorCode::LOG_CLOSURE_RESULT_UNKNOWN_ERR:
         return TxErrorCode::LOG_SERVICE_UNREACHABLE;

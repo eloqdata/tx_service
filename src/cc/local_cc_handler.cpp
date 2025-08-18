@@ -1172,7 +1172,7 @@ void txservice::LocalCcHandler::ScanOpenLocal(
 
     if (ccm_scanner == nullptr)
     {
-        hd_res.SetError(CcErrorCode::CRATE_CCM_SCANNER_FAILED);
+        hd_res.SetError(CcErrorCode::CREATE_CCM_SCANNER_FAILED);
         return;
     }
 
