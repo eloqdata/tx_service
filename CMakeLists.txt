@@ -35,13 +35,6 @@ if(FORK_HM_PROCESS)
     add_definitions(-DFORK_HM_PROCESS)
 endif()
 
-option(ON_KEY_OBJECT "Enable ON_KEY_OBJECT" OFF)
-message(STATUS "ON_KEY_OBJECT : ${ON_KEY_OBJECT}")
-
-if(ON_KEY_OBJECT)
-    add_definitions(-DON_KEY_OBJECT)
-endif()
-
 option(RUNNING_TXSERVICE_CTEST "running tx_service alone to run test" ON)
 message(STATUS "RUNNING_TXSERVICE_CTEST : ${RUNNING_TXSERVICE_CTEST}")
 
