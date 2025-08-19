@@ -722,6 +722,8 @@ public:
                     // Temporary object exists, execute and commit the command
                     // on the temporary object.
                     ValueT &dirty_object = *dirty_payload;
+                    LOG(INFO) << "ObjectCcMap::Execute on " << cce->KeyString() << ", command:" << typeid(*cmd).name();
+
                     cmd->ExecuteOn(dirty_object);
                     cce->SetDirtyPayload(std::move(dirty_payload));
                     cce->SetDirtyPayloadStatus(dirty_payload_status);
@@ -732,6 +734,8 @@ public:
                     assert(cce->PayloadStatus() == RecordStatus::Normal);
                     assert(cce->IsNullPendingCmd());
                     ValueT &object = *cce->payload_.cur_payload_;
+                    LOG(INFO) << "ObjectCcMap::Execute on " << cce->KeyString() << ", command:" << typeid(*cmd).name();
+
                     cmd->ExecuteOn(object);
                     obj_result.rec_status_ = cce->PayloadStatus();
                 }
@@ -741,6 +745,8 @@ public:
                 assert(cce->PayloadStatus() == RecordStatus::Normal);
                 assert(cce->payload_.cur_payload_ != nullptr);
                 ValueT &object = *cce->payload_.cur_payload_;
+                LOG(INFO) << "ObjectCcMap::Execute on " << cce->KeyString() << ", command:" << typeid(*cmd).name();
+
                 cmd->ExecuteOn(object);
                 obj_result.rec_status_ = cce->PayloadStatus();
             }
