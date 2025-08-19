@@ -694,7 +694,7 @@ public:
                        cce->PayloadStatus() == RecordStatus::Deleted)
                 : cce->PayloadStatus() == RecordStatus::Deleted;
 
-        LOG(INFO) << "ObjectCcMap::Execute on " << cce->KeyString();
+        LOG(INFO) << "ObjectCcMap::Execute on " << cce->KeyString() << ", command:" << typeid(*cmd).name();
         // This branch processes and returns the results for all read-only
         // commands.
         if (cmd->IsReadOnly())
