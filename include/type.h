@@ -155,10 +155,11 @@ enum class TableType : uint8_t
 
 enum class TableEngine : uint8_t
 {
-    None = 'M',  // table that does not belong to any engine like bucket table.
-    EloqSql = 'S',
-    EloqKv = 'K',
-    EloqDoc = 'D',
+    EloqSql = 0,
+    EloqKv = 1,
+    EloqDoc = 2,
+    Sequence = 3,  // Special engine for sequence table.
+    None = 4,  // table that does not belong to any engine like bucket table.
 };
 
 struct TableName
@@ -576,18 +577,14 @@ inline static TableName cluster_config_ccm_name{
 
 // Sequence table is a special table for auto increment id and range partition
 // id. It is used to generate auto increment id and range partition id for
-// tables. It is treated as a eloqsql table since it is range partitioned.
+// tables. 
 inline static TableName sequence_table_name{sequence_table_name_sv.data(),
                                             sequence_table_name_sv.size(),
                                             TableType::Primary,
-                                            TableEngine::EloqSql};
+                                            TableEngine::Sequence};
 
-#ifdef ON_KEY_OBJECT
 // Set buckets count to be the same as the slots count. (16384)
 inline static const uint16_t total_range_buckets = 0x4000;
-#else
-inline static const uint16_t total_range_buckets = 4096;
-#endif
 
 enum struct SlicePosition
 {

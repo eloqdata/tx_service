@@ -854,23 +854,31 @@ void txservice::LocalCcHandler::ScanOpen(
         }
 
         if (direction == ScanDirection::Forward &&
-            sk_forward_scanner_.Size() > 0)
+            sk_forward_scanner_[static_cast<int>(table_name.Engine())].Size() >
+                0)
         {
-            ccm_scanner = std::move(sk_forward_scanner_.Peek());
-            sk_forward_scanner_.Dequeue();
+            ccm_scanner = std::move(
+                sk_forward_scanner_[static_cast<int>(table_name.Engine())]
+                    .Peek());
+            sk_forward_scanner_[static_cast<int>(table_name.Engine())]
+                .Dequeue();
             ccm_scanner->Reset(index_key_schema);
         }
         else if (direction == ScanDirection::Backward &&
-                 sk_backward_scanner_.Size() > 0)
+                 sk_backward_scanner_[static_cast<int>(table_name.Engine())]
+                         .Size() > 0)
         {
-            ccm_scanner = std::move(sk_backward_scanner_.Peek());
-            sk_backward_scanner_.Dequeue();
+            ccm_scanner = std::move(
+                sk_backward_scanner_[static_cast<int>(table_name.Engine())]
+                    .Peek());
+            sk_backward_scanner_[static_cast<int>(table_name.Engine())]
+                .Dequeue();
             ccm_scanner->Reset(index_key_schema);
         }
         else
         {
-            ccm_scanner = local_shard.catalog_factory_->CreateSkCcmScanner(
-                direction, index_key_schema);
+            ccm_scanner = local_shard.GetCatalogFactory(table_name.Engine())
+                              ->CreateSkCcmScanner(direction, index_key_schema);
         }
     }
     else
@@ -891,23 +899,31 @@ void txservice::LocalCcHandler::ScanOpen(
             key_schema = catalog_entry->schema_->KeySchema();
         }
         if (direction == ScanDirection::Forward &&
-            pk_forward_scanner_.Size() > 0)
+            pk_forward_scanner_[static_cast<int>(table_name.Engine())].Size() >
+                0)
         {
-            ccm_scanner = std::move(pk_forward_scanner_.Peek());
-            pk_forward_scanner_.Dequeue();
+            ccm_scanner = std::move(
+                pk_forward_scanner_[static_cast<int>(table_name.Engine())]
+                    .Peek());
+            pk_forward_scanner_[static_cast<int>(table_name.Engine())]
+                .Dequeue();
             ccm_scanner->Reset(key_schema);
         }
         else if (direction == ScanDirection::Backward &&
-                 pk_backward_scanner_.Size() > 0)
+                 pk_backward_scanner_[static_cast<int>(table_name.Engine())]
+                         .Size() > 0)
         {
-            ccm_scanner = std::move(pk_backward_scanner_.Peek());
-            pk_backward_scanner_.Dequeue();
+            ccm_scanner = std::move(
+                pk_backward_scanner_[static_cast<int>(table_name.Engine())]
+                    .Peek());
+            pk_backward_scanner_[static_cast<int>(table_name.Engine())]
+                .Dequeue();
             ccm_scanner->Reset(key_schema);
         }
         else
         {
-            ccm_scanner = local_shard.catalog_factory_->CreatePkCcmScanner(
-                direction, key_schema);
+            ccm_scanner = local_shard.GetCatalogFactory(table_name.Engine())
+                              ->CreatePkCcmScanner(direction, key_schema);
         }
     }
 
@@ -1122,8 +1138,9 @@ void txservice::LocalCcHandler::ScanOpenLocal(
             schema = catalog_entry->schema_.get()->KeySchema();
         }
 
-        ccm_scanner = local_shard.catalog_factory_->CreateRangeCcmScanner(
-            direction, schema, table_name);
+        ccm_scanner =
+            local_shard.GetCatalogFactory(table_name.Engine())
+                ->CreateRangeCcmScanner(direction, schema, table_name);
     }
     else if (table_name.Type() == TableType::Secondary ||
              table_name.Type() == TableType::UniqueSecondary)
@@ -1136,8 +1153,8 @@ void txservice::LocalCcHandler::ScanOpenLocal(
         {
             schema = catalog_entry->schema_.get()->IndexKeySchema(table_name);
         }
-        ccm_scanner =
-            local_shard.catalog_factory_->CreateSkCcmScanner(direction, schema);
+        ccm_scanner = local_shard.GetCatalogFactory(table_name.Engine())
+                          ->CreateSkCcmScanner(direction, schema);
     }
     else
     {
@@ -1149,8 +1166,8 @@ void txservice::LocalCcHandler::ScanOpenLocal(
             schema = catalog_entry->schema_.get()->KeySchema();
         }
 
-        ccm_scanner =
-            local_shard.catalog_factory_->CreatePkCcmScanner(direction, schema);
+        ccm_scanner = local_shard.GetCatalogFactory(table_name.Engine())
+                          ->CreatePkCcmScanner(direction, schema);
     }
 
     if (ccm_scanner == nullptr)
@@ -1457,11 +1474,13 @@ void txservice::LocalCcHandler::ScanClose(const TableName &table_name,
 
         if (direction == ScanDirection::Forward)
         {
-            pk_forward_scanner_.Enqueue(std::move(scanner));
+            pk_forward_scanner_[static_cast<int>(table_name.Engine())].Enqueue(
+                std::move(scanner));
         }
         else
         {
-            pk_backward_scanner_.Enqueue(std::move(scanner));
+            pk_backward_scanner_[static_cast<int>(table_name.Engine())].Enqueue(
+                std::move(scanner));
         }
     }
     else if (table_name.Type() == TableType::Secondary)
@@ -1470,11 +1489,13 @@ void txservice::LocalCcHandler::ScanClose(const TableName &table_name,
 
         if (direction == ScanDirection::Forward)
         {
-            sk_forward_scanner_.Enqueue(std::move(scanner));
+            sk_forward_scanner_[static_cast<int>(table_name.Engine())].Enqueue(
+                std::move(scanner));
         }
         else
         {
-            sk_backward_scanner_.Enqueue(std::move(scanner));
+            sk_backward_scanner_[static_cast<int>(table_name.Engine())].Enqueue(
+                std::move(scanner));
         }
     }
 }

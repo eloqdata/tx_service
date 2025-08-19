@@ -147,7 +147,7 @@ UpsertTableIndexOp::UpsertTableIndexOp(
 
     TxKey neg_key = Sharder::Instance()
                         .GetLocalCcShards()
-                        ->GetCatalogFactory()
+                        ->GetCatalogFactory(table_engine)
                         ->NegativeInfKey();
     last_scanned_end_key_.Release();
     last_scanned_end_key_ = neg_key.GetShallowCopy();
@@ -1762,7 +1762,7 @@ void UpsertTableIndexOp::Reset(const std::string_view table_name_str,
     ResetLeaderTerms();
     TxKey neg_inf = Sharder::Instance()
                         .GetLocalCcShards()
-                        ->GetCatalogFactory()
+                        ->GetCatalogFactory(table_engine)
                         ->NegativeInfKey();
     last_scanned_end_key_ = neg_inf.GetShallowCopy();
     is_last_scanned_key_str_ = false;
@@ -1978,7 +1978,7 @@ void UpsertTableIndexOp::DispatchRangeTask(
     uint64_t tx_number = upsert_index_txm->TxNumber();
     int64_t tx_term = upsert_index_txm->TxTerm();
     TxKey target_range_end_key =
-        cc_shards->GetCatalogFactory()->PositiveInfKey();
+        cc_shards->GetCatalogFactory(base_table_name.Engine())->PositiveInfKey();
     TxKey target_range_start_key = last_scanned_end_key_.GetShallowCopy();
 
     uint32_t node_group_cnt = 0;
@@ -2114,12 +2114,12 @@ void UpsertTableIndexOp::DispatchRangeTask(
             if (curr_range_start_key.KeyPtr() == nullptr)
             {
                 curr_range_start_key =
-                    cc_shards->GetCatalogFactory()->NegativeInfKey();
+                    cc_shards->GetCatalogFactory(base_table_name.Engine())->NegativeInfKey();
             }
             if (curr_range_end_key.KeyPtr() == nullptr)
             {
                 curr_range_end_key =
-                    cc_shards->GetCatalogFactory()->PositiveInfKey();
+                    cc_shards->GetCatalogFactory(base_table_name.Engine())->PositiveInfKey();
             }
 
             HandleRangeTask(base_table_name,

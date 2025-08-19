@@ -62,9 +62,7 @@
 #include "tx_start_ts_collector.h"
 #include "txlog.h"
 
-#ifdef ON_KEY_OBJECT
 #include "store/snapshot_manager.h"  // SnapshotManager
-#endif
 
 using namespace std::chrono_literals;
 namespace bthread
@@ -1102,7 +1100,7 @@ class TxService
 {
 public:
     TxService(
-        CatalogFactory *catalog_factory,
+        CatalogFactory *catalog_factory[4],
         SystemHandler *system_handler,
         const std::map<std::string, uint32_t> &conf,
         uint32_t node_id,  // = 0,

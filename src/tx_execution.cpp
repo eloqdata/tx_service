@@ -1456,11 +1456,14 @@ void TransactionExecution::ProcessTxRequest(
                     ::txlog::SchemaOpMessage::LastKeyType::
                         SchemaOpMessage_LastKeyType_PosInfKey)
                 {
+                TableEngine table_engine =
+                    ::txlog::ToLocalType::ConvertTableEngine(
+                        schema_op_msg.table_engine());
                     // The positive inf key
                     index_op_->last_finished_end_key_ =
                         Sharder::Instance()
                             .GetLocalCcShards()
-                            ->GetCatalogFactory()
+                            ->GetCatalogFactory(table_engine)
                             ->PositiveInfKey();
                     index_op_->is_last_finished_key_str_ = false;
                 }
@@ -2514,13 +2517,9 @@ void TransactionExecution::Process(ScanNextOperation &scan_next)
                 command_id_.load(std::memory_order_relaxed),
                 start_ts_,
                 scanner,
-                scan_next.hd_result_
-#ifdef ON_KEY_OBJECT
-                ,
+                scan_next.hd_result_,
                 scan_next.tx_req_->obj_type_,
-                scan_next.tx_req_->scan_pattern_
-#endif
-            );
+                scan_next.tx_req_->scan_pattern_);
         }
 
         is_local = scan_next.hd_result_.Value().is_local_;

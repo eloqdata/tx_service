@@ -4680,7 +4680,7 @@ public:
                 uint32_t kv_len = *reinterpret_cast<const uint32_t *>(
                     blob.data() + blob_offset);
                 blob_offset += sizeof(uint32_t);
-                size_t hash = ccs.GetCatalogFactory()->KeyHash(
+                size_t hash = ccs.GetCatalogFactory(table_engine)->KeyHash(
                     blob.data(), blob_offset, nullptr);
                 dest_core = hash ? (hash & 0x3FF) % ccs.core_cnt_
                                  : (dest_core + 1) % ccs.core_cnt_;

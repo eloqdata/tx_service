@@ -193,7 +193,7 @@ public:
         uint32_t node_id,  // = 0,
         uint32_t ng_id,    // = 0,
         const std::map<std::string, uint32_t> &conf,
-        CatalogFactory *catalog_factory,  // = nullptr,
+        CatalogFactory *catalog_factory[4],  // = nullptr,
         SystemHandler *system_handler,    // = nullptr,
         std::unordered_map<uint32_t, std::vector<NodeConfig>>
             *ng_configs,                    // = nullptr,
@@ -1389,9 +1389,9 @@ public:
         return tx_service_;
     }
 
-    CatalogFactory *GetCatalogFactory() const
+    CatalogFactory *GetCatalogFactory(TableEngine table_engine) const
     {
-        return catalog_factory_;
+        return catalog_factory_[static_cast<int>(table_engine)];
     }
 
     SystemHandler *GetSystemHandler()
@@ -1870,7 +1870,8 @@ private:
     // timestamp of transactions on all ccshards to keep it up to date.
     std::atomic<uint64_t> ts_base_;
 
-    CatalogFactory *const catalog_factory_;
+    // catalog factory for each table engine
+    CatalogFactory *catalog_factory_[4]{nullptr, nullptr, nullptr, nullptr};
 
     SystemHandler *const system_handler_;
 

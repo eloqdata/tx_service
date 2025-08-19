@@ -807,11 +807,9 @@ void txservice::remote::RemoteScanOpen::Reset(
     tx_number_ = input_msg->tx_number();
     snapshot_ts_ = scan_open.ts();
 
-#ifdef ON_KEY_OBJECT
     obj_type_ = scan_open.obj_type();
     scan_pattern_ = scan_open.scan_pattern();
     schema_version_ = scan_open.schema_version();
-#endif
 
     ccm_ = nullptr;
 
@@ -988,10 +986,8 @@ void txservice::remote::RemoteScanNextBatch::Reset(
                                node_group_id_,
                                cce_addr.core_id());
 
-#ifdef ON_KEY_OBJECT
     obj_type_ = scan_next.obj_type();
     scan_pattern_ = scan_next.scan_pattern();
-#endif
 
     ccm_ = nullptr;
 
