@@ -694,7 +694,6 @@ public:
                        cce->PayloadStatus() == RecordStatus::Deleted)
                 : cce->PayloadStatus() == RecordStatus::Deleted;
 
-        LOG(INFO) << "ObjectCcMap::Execute on " << cce->KeyString() << ", command:" << typeid(*cmd).name();
         // This branch processes and returns the results for all read-only
         // commands.
         if (cmd->IsReadOnly())
@@ -1011,6 +1010,7 @@ public:
             // Temporary object exists, execute and commit the command on
             // the temporary object.
             ValueT &dirty_object = *dirty_payload;
+            LOG(INFO) << "ObjectCcMap::Execute on " << cce->KeyString() << ", command:" << typeid(*cmd).name();
             exec_rst = cmd->ExecuteOn(dirty_object);
             object_modified = (exec_rst == ExecResult::Write);
 
@@ -1040,6 +1040,7 @@ public:
             assert(cce->IsNullPendingCmd());
             assert(cce->payload_.cur_payload_ != nullptr);
             ValueT &object = *cce->payload_.cur_payload_;
+            LOG(INFO) << "ObjectCcMap::Execute on " << cce->KeyString() << ", command:" << typeid(*cmd).name();
             exec_rst = cmd->ExecuteOn(object);
             object_modified = (exec_rst == ExecResult::Write);
 
