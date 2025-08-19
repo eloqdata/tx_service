@@ -548,6 +548,7 @@ public:
                                   false);
         }
 
+        LOG(INFO) << "ObjectCcMap::Execute on " << ((EloqKV::EloqKey *) look_key)->ToString();
         switch (err_code)
         {
         case CcErrorCode::NO_ERROR:
