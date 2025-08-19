@@ -1834,6 +1834,11 @@ public:
 
                     return false;
                 });
+                if (req.Isolation() == IsolationLevel::Snapshot &&
+                    shard_->LastReadTs() < req.ReadTimestamp())
+                {
+                    shard_->UpdateLastReadTs(req.ReadTimestamp());
+                }
                 std::tie(acquired_lock, err_code) =
                     AcquireCceKeyLock(cce,
                                       cce->CommitTs(),
@@ -1970,7 +1975,7 @@ public:
             assert(req.Type() == ReadType::Inside);
 
             VersionResultRecord<ValueT> v_rec;
-            cce->MvccGet(req.ReadTimestamp(), shard_->LastReadTs(), v_rec);
+            cce->MvccGet(req.ReadTimestamp(), v_rec);
             if (v_rec.payload_status_ == RecordStatus::Normal)
             {
                 if (req.Record() != nullptr)
@@ -4064,7 +4069,8 @@ public:
                 (1 + req.PrefetchSize() / shard_->core_cnt_) * 125 / 100);
         }
 
-        auto is_cache_full = [&req, scan_cache, remote_scan_cache] {
+        auto is_cache_full = [&req, scan_cache, remote_scan_cache]
+        {
             return req.IsLocal() ? scan_cache->IsFull()
                                  : remote_scan_cache->IsFull();
         };
@@ -4593,6 +4599,12 @@ public:
         }
         else
         {
+            if (req.Isolation() == IsolationLevel::Snapshot &&
+                shard_->LastReadTs() < req.ReadTimestamp())
+            {
+                shard_->UpdateLastReadTs(req.ReadTimestamp());
+            }
+
             std::pair<Iterator, ScanType> start_pair =
                 req.Direction() == ScanDirection::Forward
                     ? ForwardScanStart(*req_start_key, req.StartInclusive())
@@ -11036,7 +11048,7 @@ protected:
         {
             assert(VersionedRecord);
             VersionResultRecord<ValueT> v_rec;
-            cce->MvccGet(read_ts, shard_->LastReadTs(), v_rec);
+            cce->MvccGet(read_ts, v_rec);
 
             // For snapshot reads, only if the visible version's record
             // status is deleted and no lock has been put on it, should
@@ -11200,7 +11212,7 @@ protected:
         {
             assert(VersionedRecord);
             VersionResultRecord<ValueT> v_rec;
-            cce->MvccGet(read_ts, shard_->LastReadTs(), v_rec);
+            cce->MvccGet(read_ts, v_rec);
 
             // For snapshot reads, only if the visible version's record
             // status is deleted and no lock has been put on it, should
@@ -11361,7 +11373,7 @@ protected:
         {
             assert(VersionedRecord);
             VersionResultRecord<ValueT> v_rec;
-            cce->MvccGet(read_ts, shard_->LastReadTs(), v_rec);
+            cce->MvccGet(read_ts, v_rec);
 
             // For snapshot reads, only if the visible version's record
             // status is deleted and no lock has been put on it, should
