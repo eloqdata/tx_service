@@ -548,7 +548,6 @@ public:
                                   false);
         }
 
-        LOG(INFO) << "ObjectCcMap::Execute on " << ((EloqKV::EloqKey *) look_key)->ToString();
         switch (err_code)
         {
         case CcErrorCode::NO_ERROR:
@@ -695,6 +694,7 @@ public:
                        cce->PayloadStatus() == RecordStatus::Deleted)
                 : cce->PayloadStatus() == RecordStatus::Deleted;
 
+        LOG(INFO) << "ObjectCcMap::Execute on " << cce->KeyString();
         // This branch processes and returns the results for all read-only
         // commands.
         if (cmd->IsReadOnly())
