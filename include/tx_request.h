@@ -88,7 +88,7 @@ struct TemplateTxRequest : TxRequest
         return TxErrorMessage(ErrorCode());
     }
 
-#if defined ON_KEY_OBJECT && defined EXT_TX_PROC_ENABLED
+#if defined EXT_TX_PROC_ENABLED
     void ForceExternalForwardOnce(TransactionExecution *txm)
     {
         // Allow the txm to be forwarded both externally and by
@@ -108,41 +108,28 @@ struct TemplateTxRequest : TxRequest
 
     void Wait()
     {
-#if defined ON_KEY_OBJECT && defined EXT_TX_PROC_ENABLED
-        if (tx_result_.HasYieldResume())
-        {
-            assert(txm_ != nullptr);
-            ForceExternalForwardOnce(txm_);
-            // After first forward, the ccrequest must have been sent and could
-            // have already finished, no matter, always wait once so that we
-            // don't need lock and condition variable (which is costly compared
-            // to bthread block and resume).
-            (*tx_result_.GetYield())();
-
-            // No need for lock when accessing tx_result_.status_ since the txm
-            // can only be externally forwarded and the reader and writer are
-            // the same thread.
-            if (tx_result_.Status() == TxResultStatus::Unknown)
-            {
-                // Forward the txm again, after the second forward, the tx
-                // result must be finished.
-                ForceExternalForwardOnce(txm_);
-            }
-            assert(tx_result_.Status() != TxResultStatus::Unknown);
-            return;
-        }
-#endif
-
         TxResultStatus result_status = TxResultStatus::Unknown;
         do
         {
 #ifdef EXT_TX_PROC_ENABLED
             if (txm_ != nullptr)
             {
-                txm_->ExternalForward();
+                if (cc_notify_)
+                {
+                    ForceExternalForwardOnce(txm_);
+                    // After first forward, the ccrequest must have been sent
+                    // and could have already finished, no matter, always wait
+                    // once so that we don't need lock and condition variable
+                    // (which is costly compared to bthread block and resume).
+                    (*tx_result_.GetYield())();
+                }
+                else
+                {
+                    txm_->ExternalForward();
+                    tx_result_.Wait();
+                }
             }
 #endif
-            tx_result_.Wait();
             result_status = tx_result_.Status();
         } while (result_status == TxResultStatus::Unknown);
     }
@@ -176,6 +163,10 @@ struct TemplateTxRequest : TxRequest
 
 protected:
     TransactionExecution *txm_{nullptr};
+    // If true, cc request will wake up runtime coroutine directly. Otherwise,
+    // cc request will only notify txm, and runtime coroutine will be resumed by
+    // txm.
+    bool cc_notify_{false};
     friend class TransactionExecution;
 };
 
@@ -823,6 +814,7 @@ struct ObjectCommandTxRequest
           always_redirect_(always_redirect),
           is_cmd_owner_(false)
     {
+        this->cc_notify_ = yield_fptr != nullptr;
     }
 
     template <typename KeyT>

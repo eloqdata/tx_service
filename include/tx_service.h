@@ -355,18 +355,12 @@ public:
             is_busy_round_ = false;
         }
 
-#ifdef EXT_TX_PROC_ENABLED
         size_t loop_cnt = 3;
+#ifdef EXT_TX_PROC_ENABLED
         if (is_ext_proc)
         {
             CheckWaitingTxs();
         }
-#else
-        size_t loop_cnt = 5;
-#endif
-
-#ifdef ON_KEY_OBJECT
-        loop_cnt = 1;
 #endif
 
         for (size_t loop = 0; loop < loop_cnt; ++loop)
@@ -644,9 +638,9 @@ public:
      */
     bool ForwardTx(TransactionExecution *txm)
     {
-#ifdef ON_KEY_OBJECT
+#ifdef ELOQ_MODULE_ENABLED
         assert(bthread::tls_task_group->group_id_ >= 0);
-        if (bthread::tls_task_group->group_id_ != (int32_t) thd_id_)
+        if (bthread::tls_task_group->group_id_ >= 0  && bthread::tls_task_group->group_id_ != (int32_t) thd_id_)
         {
             // For redis a tx life cycle can spread across multiple cmds, which
             // might be put into different bthread task group. If the task group
@@ -693,7 +687,6 @@ public:
     {
         static const uint64_t check_progress_period = 2000000;
         uint64_t now_ts = LocalCcShards::ClockTs();
-#ifdef ON_KEY_OBJECT
 
         static const uint64_t check_progress_block_period = 10000;
         if (now_ts - progress_check_ts_block_ <= check_progress_block_period)
@@ -721,7 +714,6 @@ public:
         }
 
         progress_check_ts_block_ = now_ts;
-#endif
         if (now_ts - progress_check_ts_ <= check_progress_period)
         {
             return;
@@ -793,7 +785,6 @@ public:
         uint16_t cmd_id = txm->CommandId();
         uint64_t clock_ts = LocalCcShards::ClockTs();
 
-#ifdef ON_KEY_OBJECT
         auto op =
             txm->state_stack_.empty() ? nullptr : txm->state_stack_.back();
         if (op != nullptr && op->IsBlockCommand())
@@ -806,7 +797,6 @@ public:
             }
         }
         else
-#endif
         {
             auto tx_it = tx_progress_.try_emplace(txm, cmd_id, clock_ts);
             if (!tx_it.second)
@@ -992,11 +982,9 @@ private:
         uint64_t wait_clock_ts_;
     };
 
-#ifdef ON_KEY_OBJECT
     // The map of transaction with blocked operation and its TxProcess
     std::unordered_map<TransactionExecution *, TxProgress> tx_progress_block_;
     uint64_t progress_check_ts_block_{0};
-#endif
     absl::flat_hash_map<TransactionExecution *, TxProgress> tx_progress_;
     uint64_t progress_check_ts_{0};
 #endif
@@ -1224,11 +1212,9 @@ public:
             }
         }
 
-#ifdef ON_KEY_OBJECT
         // must start before host_manager
         store::SnapshotManager::Instance().Init(local_cc_shards_.store_hd_);
         store::SnapshotManager::Instance().Start();
-#endif
         uint16_t ng_rep_cnt = (uint16_t) conf.at("rep_group_cnt");
         if (Sharder::Instance().Init(node_id,
                                      ng_id,
@@ -1295,9 +1281,7 @@ public:
 
     void Shutdown()
     {
-#ifdef ON_KEY_OBJECT
         store::SnapshotManager::Instance().Shutdown();
-#endif
         DeadLockCheck::SetStop();
         ckpt_.Terminate();
         ckpt_.Join();

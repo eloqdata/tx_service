@@ -135,29 +135,6 @@ public:
     template <typename U>
     void Finish(U &&val)
     {
-#if defined ON_KEY_OBJECT && defined EXT_TX_PROC_ENABLED
-        if (HasYieldResume())
-        {
-            // No need for lock since the txrequest sender bthread and the
-            // txm forward thread are the same thread or coordinated
-            // already.
-            value_ = std::forward<U>(val);
-            StatusCombo state = status_combo_.load(std::memory_order_relaxed);
-            status_combo_.store({TxResultStatus::Finished, state.waiting_},
-                                std::memory_order_relaxed);
-
-            // The yield func and resume func can only be called once each.
-            if (allow_resume_call_)
-            {
-                const std::function<void()> *resume = GetResume();
-                assert(resume != nullptr);
-                allow_resume_call_ = false;
-                (*resume)();
-            }
-            // resume_func_ = nullptr;
-            return;
-        }
-#endif
         value_ = std::forward<U>(val);
 
         if (HasYieldResume())
@@ -176,6 +153,7 @@ public:
                 // The resume functor schedules the coroutine waiting for the
                 // result to re-run/resume from the point it yields, i.e.,
                 // inside Wait().
+                allow_resume_call_ = false;
                 (*resume)();
             }
         }
@@ -201,27 +179,6 @@ public:
 
     void FinishError(TxErrorCode err_code = TxErrorCode::UNDEFINED_ERR)
     {
-#if defined ON_KEY_OBJECT && defined EXT_TX_PROC_ENABLED
-        if (HasYieldResume())
-        {
-            // No need for lock since the txrequest sender bthread and the
-            // txm forward thread are the same thread or coordinated
-            // already.
-            StatusCombo state = status_combo_.load(std::memory_order_relaxed);
-            status_combo_.store({TxResultStatus::Error, state.waiting_},
-                                std::memory_order_relaxed);
-            error_code_ = err_code;
-
-            // The yield func and resume func can only be called once each.
-            if (allow_resume_call_)
-            {
-                const std::function<void()> *resume = GetResume();
-                allow_resume_call_ = false;
-                (*resume)();
-            }
-            return;
-        }
-#endif
         error_code_ = err_code;
 
         if (HasYieldResume())
@@ -237,6 +194,7 @@ public:
             if (state.waiting_ && allow_resume_call_)
             {
                 const std::function<void()> *resume = GetResume();
+                allow_resume_call_ = false;
                 (*resume)();
             }
         }
