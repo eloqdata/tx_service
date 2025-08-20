@@ -596,7 +596,14 @@ public:
                 RecordStatus new_status =
                     is_del ? RecordStatus::Deleted : RecordStatus::Normal;
                 cce->SetCommitTsPayloadStatus(commit_ts, new_status);
-
+                if (table_name_.StringView() ==
+                    "tpcc.DISTRICT*$$D_W_ID_1_D_ID_1_D_NEXT_O_ID_1_D_TAX_1")
+                {
+                    LOG(INFO) << ">> PostWriteCc txn: " << req.Txn()
+                              << ", cce: " << cce
+                              << ", payload status: " << (int) new_status
+                              << ", commit_ts: " << commit_ts;
+                }
                 if (req.IsInitialInsert())
                 {
                     // Updates the ckpt ts after commit ts is set.
@@ -4069,8 +4076,7 @@ public:
                 (1 + req.PrefetchSize() / shard_->core_cnt_) * 125 / 100);
         }
 
-        auto is_cache_full = [&req, scan_cache, remote_scan_cache]
-        {
+        auto is_cache_full = [&req, scan_cache, remote_scan_cache] {
             return req.IsLocal() ? scan_cache->IsFull()
                                  : remote_scan_cache->IsFull();
         };
