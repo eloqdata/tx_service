@@ -344,9 +344,6 @@ TxErrorCode TransactionExecution::ConvertCcError(CcErrorCode error)
     case CcErrorCode::VALIDATION_FAILED_FOR_CONFILICTED_TXS:
         return TxErrorCode::OCC_BREAK_REPEATABLE_READ;
 
-    case CcErrorCode::MVCC_READ_FOR_WRITE_CONFLICT:
-        return TxErrorCode::SI_R4W_ERR_KEY_WAS_UPDATED;
-
     case CcErrorCode::DEAD_LOCK_ABORT:
         return TxErrorCode::DEAD_LOCK_ABORT;
 
@@ -390,6 +387,61 @@ TxErrorCode TransactionExecution::ConvertCcError(CcErrorCode error)
         return TxErrorCode::UNIQUE_CONSTRAINT;
     case CcErrorCode::PACK_SK_ERR:
         return TxErrorCode::CAL_ENGINE_DEFINED_CONSTRAINT;
+
+    case CcErrorCode::REQUESTED_TABLE_NOT_EXISTS:
+        return TxErrorCode::REQUESTD_TABLE_NOT_EXISTS;
+    case CcErrorCode::REQUESTED_INDEX_TABLE_NOT_EXISTS:
+        return TxErrorCode::REQUESTD_INDEX_TABLE_NOT_EXISTS;
+    case CcErrorCode::REQUESTED_TABLE_SCHEMA_MISMATCH:
+        return TxErrorCode::REQUESTD_TABLE_SCHEMA_MISMATCH;
+
+    case CcErrorCode::ACQUIRE_LOCK_BLOCKED:
+        return TxErrorCode::ACQUIRE_LOCK_BLOCKED;
+
+    case CcErrorCode::MVCC_READ_MUST_WAIT_WRITE:
+        return TxErrorCode::MVCC_READ_MUST_WAIT_WRITE;
+    case CcErrorCode::MVCC_READ_FOR_WRITE_CONFLICT:
+        return TxErrorCode::SI_R4W_ERR_KEY_WAS_UPDATED;
+
+    case CcErrorCode::TX_NODE_NOT_LEADER:
+        return TxErrorCode::TX_NODE_NOT_LEADER;
+
+    case CcErrorCode::NEGOTIATED_TX_UNKNOWN:
+        return TxErrorCode::NEGOTIATED_TX_UNKNOWN;
+    case CcErrorCode::NEGOTIATE_TX_ERR:
+        return TxErrorCode::NEGOTIATE_TX_ERR;
+
+    case CcErrorCode::CREATE_CCM_SCANNER_FAILED:
+        return TxErrorCode::CREATE_CCM_SCANNER_FAILED;
+
+    case CcErrorCode::LOG_CLOSURE_RESULT_UNKNOWN_ERR:
+        return TxErrorCode::LOG_SERVICE_UNREACHABLE;
+    case CcErrorCode::WRITE_LOG_FAILED:
+        return TxErrorCode::WRITE_LOG_FAIL;
+    case CcErrorCode::LOG_NODE_NOT_LEADER:
+        return TxErrorCode::LOG_NODE_NOT_LEADER;
+    case CcErrorCode::DUPLICATE_MIGRATION_TX_ERR:
+        return TxErrorCode::DUPLICATE_MIGRATION_TX_ERROR;
+    case CcErrorCode::DUPLICATE_CLUSTER_SCALE_TX_ERR:
+        return TxErrorCode::DUPLICATE_CLUSTER_SCALE_TX_ERROR;
+    case CcErrorCode::ESTABLISH_NODE_CHANNEL_FAILED:
+        return TxErrorCode::ESTABLISH_NODE_CHANNEL_FAILED;
+
+    case CcErrorCode::SYSTEM_HANDLER_ERR:
+        return TxErrorCode::SYSTEM_HANDLER_ERR;
+    case CcErrorCode::TASK_EXPIRED:
+        return TxErrorCode::TASK_EXPIRED;
+    case CcErrorCode::LOG_NOT_TRUNCATABLE:
+        return TxErrorCode::LOG_NOT_TRUNCATABLE;
+
+    case CcErrorCode::UPLOAD_BATCH_REJECTED:
+        return TxErrorCode::UPLOAD_BATCH_REJECTED;
+
+    case CcErrorCode::RPC_CALL_ERR:
+        return TxErrorCode::RPC_CALL_ERR;
+
+    case CcErrorCode::UPDATE_SEQUENCE_TABLE_FAIL:
+        return TxErrorCode::UPDATE_SEQUENCE_TABLE_FAIL;
 
     case CcErrorCode::UNDEFINED_ERR:
     default:

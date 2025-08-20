@@ -91,6 +91,42 @@ enum struct TxErrorCode : uint16_t
 
     // Catalog read write conflict, the table(db) is being modified.
     READ_CATALOG_CONFLICT,
+
+    // TemplatedCcRequest Common
+    REQUESTD_TABLE_NOT_EXISTS,
+    REQUESTD_INDEX_TABLE_NOT_EXISTS,
+    REQUESTD_TABLE_SCHEMA_MISMATCH,
+
+    // ReadCc,ScanOpenBatchCc,ScanNextBatchCc,AcquireAllCc,AcquireCc,
+    ACQUIRE_LOCK_BLOCKED,  // (only used by CcMap).
+    // ReadCc,ScanOpenBatchCc,ScanNextBatchCc
+    MVCC_READ_MUST_WAIT_WRITE,     // (only used by CcMap).
+    MVCC_READ_FOR_WRITE_CONFLICT,  // latest version not fits the read timestamp
+    // ReadLocal,ScanLocal
+    TX_NODE_NOT_LEADER,
+    // NegotiateCc
+    NEGOTIATED_TX_UNKNOWN,
+    NEGOTIATE_TX_ERR,
+    // Scan
+    CREATE_CCM_SCANNER_FAILED,
+    // log service
+    LOG_CLOSURE_RESULT_UNKNOWN_ERR,
+    WRITE_LOG_FAILED,
+    LOG_NODE_NOT_LEADER,
+    DUPLICATE_MIGRATION_TX_ERR,
+    DUPLICATE_CLUSTER_SCALE_TX_ERR,
+    ESTABLISH_NODE_CHANNEL_FAILED,
+    // Error when call system handler, like ReloadCacheCc.
+    SYSTEM_HANDLER_ERR,
+    TASK_EXPIRED,
+    LOG_NOT_TRUNCATABLE,
+    // Refuse to receive batch data sent from remote for cache.
+    UPLOAD_BATCH_REJECTED,
+    // RPC failed that can not retry
+    RPC_CALL_ERR,
+    // Update sequence table fail
+    UPDATE_SEQUENCE_TABLE_FAIL,
+
 };
 
 static const std::unordered_map<TxErrorCode, std::string> tx_error_messages{
@@ -147,7 +183,36 @@ static const std::unordered_map<TxErrorCode, std::string> tx_error_messages{
      "Execute TxRequest failed, transaction has committed/aborted"},
     {TxErrorCode::READ_CATALOG_FAIL, "Current db has not been initialized"},
     {TxErrorCode::READ_CATALOG_CONFLICT,
-     "Current db is being modified by FLUSHDB"}};
+     "Read catalog conflict, the table(db) is being modified."},
+    {TxErrorCode::REQUESTD_TABLE_NOT_EXISTS, "Requested table not exists."},
+    {TxErrorCode::REQUESTD_INDEX_TABLE_NOT_EXISTS,
+     "Requested index table not exists."},
+    {TxErrorCode::REQUESTD_TABLE_SCHEMA_MISMATCH,
+     "Requested table schema mismatch."},
+    {TxErrorCode::ACQUIRE_LOCK_BLOCKED, "Acquire lock blocked."},
+    {TxErrorCode::MVCC_READ_MUST_WAIT_WRITE,
+     "MVCC read must wait write to finish."},
+    {TxErrorCode::MVCC_READ_FOR_WRITE_CONFLICT,
+     "MVCC read for write conflict."},
+    {TxErrorCode::TX_NODE_NOT_LEADER, "Transaction node is not leader."},
+    {TxErrorCode::NEGOTIATED_TX_UNKNOWN,
+     "Negotiated transaction commit timestamp failed since conflict "
+     "transaction status is unknown."},
+    {TxErrorCode::NEGOTIATE_TX_ERR,
+     "Negotiate transaction commit timestamp failed due to error."},
+    {TxErrorCode::CREATE_CCM_SCANNER_FAILED,
+     "Create in memory data scanner failed."},
+    {TxErrorCode::WRITE_LOG_FAILED, "Write log failed."},
+    {TxErrorCode::LOG_NODE_NOT_LEADER, "Log node is not leader."},
+    {TxErrorCode::ESTABLISH_NODE_CHANNEL_FAILED,
+     "Establish node channel failed."},
+    {TxErrorCode::SYSTEM_HANDLER_ERR, "System handler error."},
+    {TxErrorCode::TASK_EXPIRED, "Task expired."},
+    {TxErrorCode::LOG_NOT_TRUNCATABLE, "Log not truncatable."},
+    {TxErrorCode::UPLOAD_BATCH_REJECTED, "Upload batch rejected."},
+    {TxErrorCode::RPC_CALL_ERR, "RPC call error."},
+    {TxErrorCode::UPDATE_SEQUENCE_TABLE_FAIL, "Update sequence table fail."},
+};
 
 static inline const std::string &TxErrorMessage(TxErrorCode err_code)
 {
@@ -202,7 +267,7 @@ enum struct CcErrorCode : uint8_t
     NEGOTIATE_TX_ERR,
 
     // Scan
-    CRATE_CCM_SCANNER_FAILED,
+    CREATE_CCM_SCANNER_FAILED,
 
     // AcquireAllCc, AcquireCc
     DUPLICATE_INSERT_ERR,
@@ -286,7 +351,7 @@ static const std::unordered_map<CcErrorCode, std::string> cc_error_messages{
      "REQUESTED_INDEX_TABLE_NOT_EXISTS"},
     {CcErrorCode::REQUESTED_TABLE_SCHEMA_MISMATCH,
      "REQUESTED_TABLE_SCHEMA_MISMATCH"},
-    {CcErrorCode::CRATE_CCM_SCANNER_FAILED, "CRATE_CCM_SCANNER_FAILED"},
+    {CcErrorCode::CREATE_CCM_SCANNER_FAILED, "CRATE_CCM_SCANNER_FAILED"},
 
     {CcErrorCode::DUPLICATE_INSERT_ERR, "DUPLICATE_INSERT_ERR"},
     {CcErrorCode::ACQUIRE_LOCK_BLOCKED, "ACQUIRE_LOCK_BLOCKED"},
@@ -342,6 +407,8 @@ static const std::unordered_map<CcErrorCode, std::string> cc_error_messages{
     {CcErrorCode::LOG_NODE_NOT_LEADER, "LOG_NODE_NOT_LEADER"},
 
     {CcErrorCode::READ_CATALOG_CONFLICT, "READ_CATALOG_CONFLICT"},
+    {CcErrorCode::RPC_CALL_ERR, "RPC_CALL_ERR"},
+    {CcErrorCode::UPDATE_SEQUENCE_TABLE_FAIL, "UPDATE_SEQUENCE_TABLE_FAIL"},
 
     // NOTICE: please keep this variable at tail.
     {CcErrorCode::LAST_ERROR_CODE, "LAST_ERROR_CODE"},
