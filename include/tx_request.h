@@ -88,7 +88,7 @@ struct TemplateTxRequest : TxRequest
         return TxErrorMessage(ErrorCode());
     }
 
-#if defined ON_KEY_OBJECT && defined EXT_TX_PROC_ENABLED
+#if defined EXT_TX_PROC_ENABLED
     void ForceExternalForwardOnce(TransactionExecution *txm)
     {
         // Allow the txm to be forwarded both externally and by
@@ -108,8 +108,8 @@ struct TemplateTxRequest : TxRequest
 
     void Wait()
     {
-#if defined ON_KEY_OBJECT && defined EXT_TX_PROC_ENABLED
-        if (tx_result_.HasYieldResume())
+#ifdef EXT_TX_PROC_ENABLED
+        if (cc_notify_)
         {
             assert(txm_ != nullptr);
             ForceExternalForwardOnce(txm_);
@@ -132,7 +132,6 @@ struct TemplateTxRequest : TxRequest
             return;
         }
 #endif
-
         TxResultStatus result_status = TxResultStatus::Unknown;
         do
         {
@@ -140,9 +139,9 @@ struct TemplateTxRequest : TxRequest
             if (txm_ != nullptr)
             {
                 txm_->ExternalForward();
+                tx_result_.Wait();
             }
 #endif
-            tx_result_.Wait();
             result_status = tx_result_.Status();
         } while (result_status == TxResultStatus::Unknown);
     }
@@ -176,6 +175,10 @@ struct TemplateTxRequest : TxRequest
 
 protected:
     TransactionExecution *txm_{nullptr};
+    // If true, cc request will wake up runtime coroutine directly. Otherwise,
+    // cc request will only notify txm, and runtime coroutine will be resumed by
+    // txm.
+    bool cc_notify_{false};
     friend class TransactionExecution;
 };
 
@@ -823,6 +826,7 @@ struct ObjectCommandTxRequest
           always_redirect_(always_redirect),
           is_cmd_owner_(false)
     {
+        this->cc_notify_ = yield_fptr != nullptr;
     }
 
     template <typename KeyT>
