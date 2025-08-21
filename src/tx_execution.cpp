@@ -176,6 +176,7 @@ void TransactionExecution::Reset()
     }
 
     ClearCachedBucketInfos();
+    lock_cluster_config_op_.Reset();
     lock_range_bucket_result_.Reset();
     lock_range_op_.Reset();
     lock_bucket_op_.Reset();
@@ -2281,7 +2282,6 @@ void TransactionExecution::Process(ScanOpenOperation &scan_open)
     bool is_require_sort = scan_open.tx_req_->is_require_sort_;
 
     scan_open.Reset();
-    scan_open.is_running_ = true;
     scan_open.Set(&table_name,
                   index_type,
                   &start_key,
@@ -2290,6 +2290,21 @@ void TransactionExecution::Process(ScanOpenOperation &scan_open)
                   is_ckpt_delta);
 
     scan_open.hd_result_.Value().scan_alias_ = scan_open.tx_req_->scan_alias_;
+
+    if (!scan_open.lock_cluster_config_result_.IsFinished())
+    {
+        lock_cluster_config_op_.Reset(TableName(cluster_config_ccm_name_sv,
+                                                TableType::ClusterConfig,
+                                                TableEngine::None),
+                                      VoidKey::NegInfTxKey(),
+                                      &scan_open.cluster_config_rec_,
+                                      &scan_open.lock_cluster_config_result_);
+        PushOperation(&lock_cluster_config_op_);
+        Process(lock_cluster_config_op_);
+        return;
+    }
+
+    scan_open.is_running_ = true;
 
     if (scan_open.tx_req_->read_local_)
     {
@@ -2388,6 +2403,7 @@ void TransactionExecution::PostProcess(ScanOpenOperation &scan_open)
     auto table_iter = rw_set_.WriteSet().find(table_name);
     if (table_iter != rw_set_.WriteSet().end())
     {
+        // TODO(lokax): create write iter for each bucket
         if (scan_open.direction_ == ScanDirection::Forward)
         {
             auto wset_it = rw_set_.InitIter(table_iter->second.second,
@@ -2437,10 +2453,18 @@ void TransactionExecution::PostProcess(ScanOpenOperation &scan_open)
     }
     else
     {
+        std::vector<uint16_t> unscan_bucket_ids;
+        std::unordered_map<uint16_t, std::pair<TxKey, bool>> pause_bucket_ids;
+
+        LocalCcShards *local_cc_shard = Sharder::Instance().GetLocalCcShards();
+
+        std::unordered_map<NodeGroupId, std::vector<std::vector<uint16_t>>>
+            node_group_bucket_ids;
+
+        // TODO(lokax): read bucket info.
         scans_.try_emplace(open_result.scan_alias_,
                            std::move(open_result.scanner_),
-                           scan_open.tx_req_->EndKey(),
-                           scan_open.tx_req_->end_inclusive_);
+                           std::move(scan_open.tx_req_->pause_info_));
     }
 
     if (uint64_resp_ != nullptr)
@@ -2487,6 +2511,7 @@ void TransactionExecution::Process(ScanNextOperation &scan_next)
     CcScanner &scanner = *scan_next.scan_state_->scanner_;
     scan_next.is_running_ = true;
 
+    // TODO(lokax): to_scan_next
     bool to_scan_next = scanner.Current() == nullptr &&
                         scanner.Status() == ScannerStatus::Blocked;
     bool is_local = true;
@@ -2504,22 +2529,29 @@ void TransactionExecution::Process(ScanNextOperation &scan_next)
         }
         else
         {
-            cc_handler_->ScanNextBatch(
-                tx_number_.load(std::memory_order_relaxed),
-                tx_term_,
-                command_id_.load(std::memory_order_relaxed),
-                start_ts_,
-                scanner,
-                scan_next.hd_result_
+            auto &last_key_status = scan_next.LastKeyStatus();
+            scan_next.ResetResultForHashPart(last_key_status.size());
+
+            for (const auto &[node_group_id, bucket_ids] : last_key_status)
+            {
+                cc_handler_->ScanNextBatch(
+                    node_group_id,
+                    tx_number_.load(std::memory_order_relaxed),
+                    tx_term_,
+                    command_id_.load(std::memory_order_relaxed),
+                    start_ts_,
+                    scanner,
+                    scan_next.hd_result_
 #ifdef ON_KEY_OBJECT
-                ,
-                scan_next.tx_req_->obj_type_,
-                scan_next.tx_req_->scan_pattern_
+                    ,
+                    scan_next.tx_req_->obj_type_,
+                    scan_next.tx_req_->scan_pattern_
 #endif
-            );
+                );
+            }
         }
 
-        is_local = scan_next.hd_result_.Value().is_local_;
+        is_local = scan_next.hd_result_.RemoteRefCnt() == 0;
     }
     else if (to_scan_next && scanner.Type() == CcmScannerType::RangePartition)
     {

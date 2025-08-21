@@ -22,6 +22,7 @@
 #pragma once
 
 #include <atomic>
+#include <cstdint>
 #include <memory>  //unique_ptr
 #include <shared_mutex>
 #include <utility>
@@ -29,6 +30,7 @@
 
 #include "cc/cc_entry.h"
 #include "proto/cc_request.pb.h"
+#include "sharder.h"
 #include "tx_command.h"
 #include "type.h"
 
@@ -326,6 +328,23 @@ struct RemoteScanSliceCache
     std::vector<std::string> archive_records_;
 };
 
+struct BucketScanPostition
+{
+    std::unordered_map<uint16_t, TxKey> store_pause_keys_;
+    LruEntry *last_cce_;
+
+    bool FilterBucket(size_t key_hash_code)
+    {
+        auto bucket_id = Sharder::MapKeyHashToBucketId(key_hash_code);
+        if (bucket_ids_.count(bucket_id) > 0)
+        {
+            return true;
+        }
+
+        return false;
+    }
+};
+
 struct RangeScanSliceResult
 {
     RangeScanSliceResult()
@@ -512,11 +531,62 @@ struct RangeScanSliceResult
     std::atomic<LastKeySetStatus> last_key_status_;
 };
 
+struct BucketScanPauseState
+{
+    BucketScanPauseState(TxKey last_key, bool last_key_inclusive)
+        : last_key_(std::move(last_key)),
+          last_key_inclusive_(last_key_inclusive),
+          last_scanned_cce_(nullptr)
+    {
+    }
+
+    TxKey last_key_;
+    bool last_key_inclusive_;
+    LruEntry *last_scanned_cce_{nullptr};
+};
 struct ScanNextResult
 {
-    bool is_local_;
-    int64_t term_;
-    uint32_t node_group_id_;
+    std::unordered_map<NodeGroupId,
+                       std::unordered_map<uint16_t, BucketScanPauseState>> &
+    LastKeyStatus()
+    {
+        return last_key_status_;
+    }
+
+    std::unordered_map<uint16_t, BucketScanPauseState> &LastKeyStatus(
+        NodeGroupId node_group_id)
+    {
+        return last_key_status_[node_group_id];
+    }
+
+    int64_t GetNodeGroupTerm(NodeGroupId node_group_id) const
+    {
+        auto iter = node_group_terms_.find(node_group_id);
+        if (iter == node_group_terms_.end())
+        {
+            return -1;
+        }
+        else
+        {
+            assert(iter->second != -1);
+            return iter->second;
+        }
+    }
+
+    void UpdateNodeGroupTerm(NodeGroupId node_group_id, int64_t node_group_term)
+    {
+        if (node_group_terms_.count(node_group_id) == 0)
+        {
+            node_group_terms_[node_group_id] = node_group_term;
+        }
+    }
+
+    // bucket id, last key, last key inclusive, last cce
+    std::unordered_map<NodeGroupId,
+                       std::unordered_map<uint16_t, BucketScanPauseState>>
+        last_key_status_;
+    std::unordered_map<NodeGroupId, int64_t> node_group_terms_;
+    CcScanner *ccm_scanner_;
 };
 
 struct InitTxResult

@@ -38,6 +38,7 @@
 #include "log_closure.h"
 #include "range_record.h"
 #include "read_write_set.h"
+#include "sharder.h"
 #include "tx_command.h"
 #include "tx_key.h"
 #include "tx_operation_result.h"
@@ -396,6 +397,8 @@ struct ScanOpenOperation : TransactionOperation
 
     void Reset();
 
+    ClusterConfigRecord cluster_config_rec_;
+    CcHandlerResult<ReadKeyResult> lock_cluster_config_result_;
     CcHandlerResult<ScanOpenResult> hd_result_;
 
     const TableName *table_name_{nullptr};
@@ -409,19 +412,35 @@ struct ScanOpenOperation : TransactionOperation
 
 struct ScanState
 {
+    using Plan =
+        std::unordered_map<NodeGroupId,
+                           std::unordered_map<uint16_t, BucketScanPauseState>>;
+
     ScanState() = delete;
-    ScanState(std::unique_ptr<CcScanner> scanner,
-              const TxKey *end_key,
-              bool end_inclusive)
+    ScanState(
+        std::unique_ptr<CcScanner> scanner,
+        std::unordered_map<NodeGroupId,
+                           std::unordered_map<uint16_t, BucketScanPauseState>>
+            hash_scan_pause_state)
         : scanner_(std::move(scanner)),
-          scan_end_key_(end_key),
-          scan_end_inclusive_(end_inclusive)
+          hash_scan_pause_state_(std::move(hash_scan_pause_state))
     {
+    }
+
+    Plan PickPlans()
+    {
+        return {};
     }
 
     std::unique_ptr<CcScanner> scanner_;
     const TxKey *scan_end_key_;
     bool scan_end_inclusive_;
+
+    std::vector<Plan> plans_;
+    // TODO(lokax):
+    std::unordered_map<NodeGroupId,
+                       std::unordered_map<uint16_t, BucketScanPauseState>>
+        hash_scan_pause_state_;
 
     ScanState(std::unique_ptr<CcScanner> scanner,
               uint64_t schema_version,
@@ -471,6 +490,7 @@ struct ScanNextOperation : TransactionOperation
     void Forward(TransactionExecution *txm) override;
     void Reset();
     void ResetResult();
+    void ResetResultForHashPart(size_t ng_cnt);
 
     ScanDirection Direction() const
     {
@@ -487,6 +507,18 @@ struct ScanNextOperation : TransactionOperation
 
     ScanState *scan_state_;
     CcHandlerResult<ScanNextResult> hd_result_;
+
+    std::unordered_map<NodeGroupId,
+                       std::unordered_map<uint16_t, BucketScanPauseState>> &
+    LastKeyStatus()
+    {
+        return hd_result_.Value().LastKeyStatus();
+    }
+
+    int64_t BucketNgTerm(NodeGroupId bucket_owner) const
+    {
+        return hd_result_.Value().GetNodeGroupTerm(bucket_owner);
+    }
 
     int64_t RangeNgTerm() const
     {

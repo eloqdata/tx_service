@@ -2748,7 +2748,9 @@ public:
         }
 
         TemplateScanCache<KeyT, ValueT> *typed_cache =
-            static_cast<TemplateScanCache<KeyT, ValueT> *>(req.scan_cache_);
+            static_cast<TemplateScanCache<KeyT, ValueT> *>(
+                req.GetLocalScanCache(shard_->core_id_));
+        // TODO(lokax): Full ?
         assert(typed_cache->Full());
 
         ScanDirection direction = typed_cache->Scanner()->Direction();
@@ -2824,11 +2826,12 @@ public:
             cce_last = prior_cce;
             ccp_last = ccp;
         }
-        else
+        else if (req.bucket_scan_postition_[shard_->core_id_].last_cce_ !=
+                 nullptr)
         {
             prior_cce = reinterpret_cast<
                 CcEntry<KeyT, ValueT, VersionedRecord, RangePartitioned> *>(
-                typed_cache->Last()->cce_addr_.ExtractCce());
+                req.bucket_scan_postition_[shard_->core_id_].last_cce_);
             CcPage<KeyT, ValueT, VersionedRecord, RangePartitioned> *ccp =
                 static_cast<
                     CcPage<KeyT, ValueT, VersionedRecord, RangePartitioned> *>(
@@ -2853,6 +2856,103 @@ public:
             }
             typed_cache->Reset();
         }
+        else
+        {
+            const KeyT *look_key = req.bucket_scan_postition_[shard_->core_id_]
+                                       .last_key_.GetKey<KeyT>();
+
+            std::pair<Iterator, ScanType> start_pair =
+                direction == ScanDirection::Forward
+                    ? ForwardScanStart(
+                          *look_key,
+                          req.bucket_scan_postition_[shard_->core_id_]
+                              .last_key_inclusive_)
+                    : BackwardScanStart(
+                          *look_key,
+                          req.bucket_scan_postition_[shard_->core_id_]
+                              .last_key_inclusive_);
+            scan_ccm_it = start_pair.first;
+            const KeyT *key_ptr = scan_ccm_it->first;
+            CcEntry<KeyT, ValueT, VersionedRecord, RangePartitioned> *cce =
+                scan_ccm_it->second;
+            CcPage<KeyT, ValueT, VersionedRecord, RangePartitioned> *ccp =
+                scan_ccm_it.GetPage();
+            ScanType scan_type = start_pair.second;
+            // TODO(lokax): ScanGap ?
+            if (scan_type == ScanType::ScanGap ||
+                (req.bucket_scan_postition_[shard_->core_id_].FilterBucket(
+                     key_ptr->Hash()) &&
+                 FilterRecord(key_ptr,
+                              cce,
+                              req.GetRedisObjectType(),
+                              req.GetRedisScanPattern())))
+            {
+                req.SetCcePtr(cce);
+                req.SetCcePtrScanType(scan_type);
+
+                if (scan_type != ScanType::ScanGap)
+                {
+                    auto lock_pair = AcquireCceKeyLock(cce,
+                                                       cce->CommitTs(),
+                                                       ccp,
+                                                       cce->PayloadStatus(),
+                                                       &req,
+                                                       ng_id,
+                                                       ng_term,
+                                                       tx_term,
+                                                       cc_op,
+                                                       iso_lvl,
+                                                       cc_proto,
+                                                       req.ReadTimestamp(),
+                                                       req.IsCoveringKeys());
+                    switch (lock_pair.second)
+                    {
+                    case CcErrorCode::NO_ERROR:
+                        break;
+                    case CcErrorCode::MVCC_READ_MUST_WAIT_WRITE:
+                    {
+                        req.SetIsWaitForPostWrite(true);
+                        return false;
+                    }
+                    case CcErrorCode::ACQUIRE_LOCK_BLOCKED:
+                    {
+                        // Lock fail should stop the execution of current
+                        // CC request since it's already in blocking queue.
+                        return false;
+                    }
+                    default:
+                    {
+                        // lock confilct: back off and retry.
+                        req.Result()->SetError(lock_pair.second);
+                        return true;
+                    }
+                    }  //-- end: switch
+                }
+                else
+                {
+                    // TODO(lzx): handle gap lock
+                }
+
+                AddScanTuple(key_ptr,
+                             cce,
+                             typed_cache,
+                             scan_type,
+                             ng_id,
+                             ng_term,
+                             req.Txn(),
+                             req.ReadTimestamp(),
+                             is_read_snapshot,
+                             need_fetch_snapshot,
+                             true,
+                             req.is_ckpt_delta_,
+                             req.is_require_keys_,
+                             req.is_require_recs_);
+                cce_last = cce;
+                ccp_last = ccp;
+            }
+        }
+
+        bool scan_finished = false;
 
         if (direction == ScanDirection::Forward)
         {
@@ -2874,7 +2974,9 @@ public:
                     // checkpoint, skips those that have been checkpointed.
                     continue;
                 }
-                if (!FilterRecord(key,
+                if (!req.bucket_scan_postition_[shard_->core_id_].FilterBucket(
+                        key->Hash()) ||
+                    !FilterRecord(key,
                                   cce,
                                   req.GetRedisObjectType(),
                                   req.GetRedisScanPattern()))
@@ -2944,6 +3046,8 @@ public:
                 cce_last = cce;
                 ccp_last = ccp;
             }
+
+            scan_finished = (scan_ccm_it == pos_inf_it);
         }
         else
         {
@@ -2958,7 +3062,9 @@ public:
                 CcPage<KeyT, ValueT, VersionedRecord, RangePartitioned> *ccp =
                     scan_ccm_it.GetPage();
 
-                if (!FilterRecord(key,
+                if (!req.bucket_scan_postition_[shard_->core_id_].FilterBucket(
+                        key->Hash()) ||
+                    !FilterRecord(key,
                                   cce,
                                   req.GetRedisObjectType(),
                                   req.GetRedisScanPattern()))
@@ -3026,6 +3132,8 @@ public:
                 cce_last = cce;
                 ccp_last = ccp;
             }
+
+            scan_finished = (scan_ccm_it == neg_inf_it);
         }
 
         if (cce_last != nullptr)
@@ -3049,6 +3157,17 @@ public:
                                             table_name_.Type());
             }
         }
+
+        /*
+        ScanNextResult &scan_next_result = req.Result()->Value();
+        auto &ng_last_key_status =
+            scan_next_result.last_key_status_[req.NodeGroupId()];
+        for (const auto &bucket_id :
+             req.bucket_scan_postition_[shard_->core_id_].bucket_ids_)
+        {
+            // ng_last_key_status[bucket_id].last_key_ =
+        }
+        */
 
         req.Result()->SetFinished();
         return true;
