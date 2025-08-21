@@ -1794,7 +1794,11 @@ public:
                         // recycled before fetch record returns.
                         cce->GetOrCreateKeyLock(shard_, this, ccp);
 
-                        int32_t part_id = (look_key->Hash() >> 10) & 0x3FF;
+                        // TODO(lokax):
+                        int32_t part_id =
+                            Sharder::MapKeyHashToBucketId(look_key->Hash()) &
+                            0x3FF;
+                        // int32_t part_id = (look_key->Hash() >> 10) & 0x3FF;
                         auto fetch_ret_status = shard_->FetchRecord(
                             this->table_name_,
                             this->table_schema_,
@@ -2014,7 +2018,10 @@ public:
                 }
                 else
                 {
-                    part_id = (look_key->Hash() >> 10) & 0x3FF;
+                    // TODO(lokax):
+                    part_id =
+                        Sharder::MapKeyHashToBucketId(look_key->Hash()) & 0x3FF;
+                    // part_id = (look_key->Hash() >> 10) & 0x3FF;
                 }
                 auto fetch_ret_status = shard_->FetchRecord(
                     this->table_name_,
@@ -6356,7 +6363,12 @@ public:
                             {
                                 cce->GetOrCreateKeyLock(shard_, this, ccp);
                                 TxKey tx_key(key);
-                                int32_t part_id = (key->Hash() >> 10) & 0x3FF;
+                                // TODO(lokax):
+                                int32_t part_id =
+                                    Sharder::MapKeyHashToBucketId(key->Hash()) &
+                                    0x3FF;
+                                // int32_t part_id = (key->Hash() >> 10) &
+                                // 0x3FF;
                                 shard_->FetchRecord(table_name_,
                                                     table_schema_,
                                                     TxKey(key),

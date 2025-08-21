@@ -4482,7 +4482,11 @@ void LocalCcShards::DataSyncForHashPartition(
                 {
                     // cce_ is null means the key is already persisted on kv, so
                     // we don't need to put it into the flush vec.
-                    int32_t part_id = (rec.Key().Hash() >> 10) & 0x3FF;
+
+                    // TODO(lokax): (bucket_id & 0x3FF)
+                    int32_t part_id =
+                        Sharder::MapKeyHashToBucketId(rec.Key().Hash()) & 0x3FF;
+                    // int32_t part_id = (rec.Key().Hash() >> 10) & 0x3FF;
                     data_sync_vec->emplace_back(rec.Key().Clone(),
 #ifdef ON_KEY_OBJECT
                                                 rec.GetNonVersionedPayload(),
@@ -4509,8 +4513,10 @@ void LocalCcShards::DataSyncForHashPartition(
             {
                 size_t key_idx = scan_cc.MoveBaseIdxVec()[j];
                 TxKey key_raw = (*data_sync_vec)[key_idx].Key();
-
-                int32_t part_id = (key_raw.Hash() >> 10) & 0x3FF;
+                // TODO(lokax):
+                int32_t part_id =
+                    Sharder::MapKeyHashToBucketId(key_raw.Hash()) & 0x3FF;
+                // int32_t part_id = (key_raw.Hash() >> 10) & 0x3FF;
                 mv_base_vec->emplace_back(std::move(key_raw), part_id);
             }
 
