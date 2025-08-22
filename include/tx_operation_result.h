@@ -333,6 +333,7 @@ struct BucketScanPostition
     std::unordered_set<uint16_t> bucket_ids_;
     LruEntry *last_cce_{nullptr};
     TxKey last_key_;
+    bool last_key_inclusive_{false};
 
     bool FilterBucket(size_t key_hash_code)
     {
@@ -543,6 +544,86 @@ struct BucketScanPauseState
     LruEntry *last_cce_{nullptr};
     bool is_drained_{false};
 };
+
+class BucketScanPlan
+{
+public:
+    BucketScanPlan(
+        std::unordered_map<NodeGroupId, std::vector<uint16_t>> *buckets,
+        const std::unordered_map<NodeGroupId,
+                                 std::unordered_map<uint64_t, TxKey>>
+            *pause_position)
+        : current_scan_bucket_(buckets)
+    {
+        assert(buckets != nullptr);
+        current_scan_position_.reserve(buckets->size());
+
+        if (pause_position != nullptr)
+        {
+            // eloqkv use cursor id to execute scan command.
+            // restore scan position.
+            for (auto &[node_group_id, pos] : *pause_position)
+            {
+                auto iter = current_scan_position_.try_emplace(node_group_id);
+                for (const auto &[shard_code, pause_key] : pos)
+                {
+                    iter.first->second.try_emplace(
+                        shard_code,
+                        BucketScanPauseState(TxKey(pause_key.Clone())));
+                }
+            }
+        }
+        else
+        {
+            for (const auto &[node_group_id, buckets] : *buckets)
+            {
+                current_scan_position_.try_emplace(node_group_id);
+            }
+        }
+    }
+
+    BucketScanPlan() = default;
+    BucketScanPlan(const BucketScanPlan &) = delete;
+    BucketScanPlan &operator=(const BucketScanPlan &) = delete;
+    BucketScanPlan(BucketScanPlan &&other)
+        : current_scan_bucket_(other.current_scan_bucket_),
+          current_scan_position_(std::move(other.current_scan_position_))
+    {
+        other.current_scan_bucket_ = nullptr;
+    }
+    BucketScanPlan &operator=(BucketScanPlan &&other) noexcept
+    {
+        if (this != &other)
+        {
+            current_scan_bucket_ = std::move(other.current_scan_bucket_);
+            other.current_scan_bucket_ = nullptr;
+            current_scan_position_ = std::move(other.current_scan_position_);
+            assert(other.current_scan_position_.empty());
+        }
+
+        return *this;
+    }
+
+    std::unordered_map<NodeGroupId, std::vector<uint16_t>> &CurrentScanBuckets()
+    {
+        return *current_scan_bucket_;
+    }
+
+    std::unordered_map<NodeGroupId,
+                       std::unordered_map<uint64_t, BucketScanPauseState>> &
+    CurrentScanPosition()
+    {
+        return current_scan_position_;
+    }
+
+private:
+    std::unordered_map<NodeGroupId, std::vector<uint16_t>>
+        *current_scan_bucket_{nullptr};
+    std::unordered_map<NodeGroupId,
+                       std::unordered_map<uint64_t, BucketScanPauseState>>
+        current_scan_position_;
+};
+
 struct ScanNextResult
 {
     int64_t GetNodeGroupTerm(NodeGroupId node_group_id) const
@@ -567,13 +648,7 @@ struct ScanNextResult
         }
     }
 
-    std::unordered_map<NodeGroupId, std::vector<uint16_t>> plans_;
-    std::unordered_map<uint64_t, BucketScanPauseState> pause_position_;
-
-    // bucket id, last key, last key inclusive, last cce
-    // std::unordered_map<NodeGroupId,
-    //                   std::unordered_map<uint16_t, BucketScanPauseState>>
-    //    last_key_status_;
+    BucketScanPlan current_scan_plan_;
     std::unordered_map<NodeGroupId, int64_t> node_group_terms_;
     CcScanner *ccm_scanner_;
 };

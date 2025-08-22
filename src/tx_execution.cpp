@@ -176,7 +176,7 @@ void TransactionExecution::Reset()
     }
 
     ClearCachedBucketInfos();
-    // lock_cluster_config_op_.Reset();
+    lock_cluster_config_op_.Reset();
     lock_range_bucket_result_.Reset();
     lock_range_op_.Reset();
     lock_bucket_op_.Reset();
@@ -2291,7 +2291,6 @@ void TransactionExecution::Process(ScanOpenOperation &scan_open)
 
     scan_open.hd_result_.Value().scan_alias_ = scan_open.tx_req_->scan_alias_;
 
-    /*
     if (!scan_open.lock_cluster_config_result_.IsFinished())
     {
         lock_cluster_config_op_.Reset(TableName(cluster_config_ccm_name_sv,
@@ -2304,7 +2303,6 @@ void TransactionExecution::Process(ScanOpenOperation &scan_open)
         Process(lock_cluster_config_op_);
         return;
     }
-        */
 
     scan_open.is_running_ = true;
 
@@ -2455,9 +2453,12 @@ void TransactionExecution::PostProcess(ScanOpenOperation &scan_open)
     }
     else
     {
-        /*
+        std::vector<std::unordered_map<NodeGroupId, std::vector<uint16_t>>>
+            plans;
+
         auto &unscan_bucket_ids = scan_open.tx_req_->unscan_bucket_ids_;
-        auto &pause_bucket_ids = scan_open.tx_req_->pause_bucket_ids_;
+        auto &pause_bucket_ids = scan_open.tx_req_->pause_bucket_ids;
+        auto &pause_position_ = scan_open.tx_req_->pause_position_;
         LocalCcShards *local_cc_shard = Sharder::Instance().GetLocalCcShards();
 
         // <NodeGroupId, <core_idx, vector<bucket_id>>
@@ -2477,18 +2478,13 @@ void TransactionExecution::PostProcess(ScanOpenOperation &scan_open)
         std::unordered_map<NodeGroupId,
                            std::unordered_map<uint16_t, std::size_t>>
             batch_idx;
-        std::vector<std::unordered_map<
-            NodeGroupId,
-            std::unordered_map<uint16_t, BucketScanPauseState>>>
-            plans;
+
         bool finished = false;
         while (!finished)
         {
             finished = true;
-            std::unordered_map<
-                NodeGroupId,
-                std::unordered_map<uint16_t, BucketScanPauseState>>
-                plan;
+            std::unordered_map<NodeGroupId, std::vector<uint16_t>>
+                current_plan_bucket_ids;
 
             for (auto &[ng, core_map] : grouped)
             {
@@ -2502,15 +2498,10 @@ void TransactionExecution::PostProcess(ScanOpenOperation &scan_open)
 
                     std::size_t end = std::min(
                         cur + ScanState::max_bucket_count_per_core, vec.size());
-                    auto &dst = plan[ng];
+                    auto &dst = current_plan_bucket_ids[ng];
                     for (size_t i = cur; i < end; ++i)
                     {
-                        dst.emplace(vec[i],
-                                    BucketScanPauseState(
-                                        TxKey(Sharder::Instance()
-                                                  .GetLocalCcShards()
-                                                  ->GetCatalogFactory()
-                                                  ->NegativeInfKey())));
+                        dst.push_back(vec[i]);
                     }
                     cur = end;
                 }
@@ -2518,26 +2509,24 @@ void TransactionExecution::PostProcess(ScanOpenOperation &scan_open)
 
             if (!finished)
             {
-                plans.push_back(std::move(plan));
+                plans.push_back(std::move(current_plan_bucket_ids));
             }
         }
 
-        std::unordered_map<NodeGroupId,
-                           std::unordered_map<uint16_t, BucketScanPauseState>>
-            plan;
-        for (const auto &[bucket_id, pause_key] : pause_bucket_ids)
+        if (!pause_bucket_ids.empty())
         {
-            NodeGroupId bucket_owner =
-                local_cc_shard->GetBucketOwner(bucket_id, TxCcNodeId());
-            BucketScanPauseState pause_state(TxKey(pause_key.Clone()));
-            plan[bucket_owner][bucket_id] = std::move(pause_state);
+            std::unordered_map<NodeGroupId, std::vector<uint16_t>>
+                current_plan_bucket_ids;
+            for (const auto &[node_group_id, bucket_ids] : pause_bucket_ids)
+            {
+                current_plan_bucket_ids[node_group_id] = std::move(bucket_ids);
+            }
         }
 
-        plans.push_back(std::move(plan));
         scans_.try_emplace(open_result.scan_alias_,
                            std::move(open_result.scanner_),
-                           std::move(plans));
-        */
+                           std::move(plans),
+                           std::move(pause_position_));
     }
 
     if (uint64_resp_ != nullptr)
@@ -2602,6 +2591,7 @@ void TransactionExecution::Process(ScanNextOperation &scan_next)
         }
         else
         {
+            /*
             auto &last_key_status = scan_next.LastKeyStatus();
             scan_next.ResetResultForHashPart(last_key_status.size());
 
@@ -2622,6 +2612,7 @@ void TransactionExecution::Process(ScanNextOperation &scan_next)
 #endif
                 );
             }
+                */
         }
 
         is_local = scan_next.hd_result_.RemoteRefCnt() == 0;

@@ -264,6 +264,9 @@ enum struct CcErrorCode : uint8_t
     // Update sequence table fail
     UPDATE_SEQUENCE_TABLE_FAIL,
 
+    // The cursor has become invalid.
+    INVALID_CURSOR,
+
     // NOTICE: please keep this variable at tail.
     LAST_ERROR_CODE,
 

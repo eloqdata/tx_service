@@ -1215,34 +1215,40 @@ void txservice::LocalCcHandler::ScanNextBatch(
             hd_res.Value().GetNodeGroupTerm(node_group_id);
 
         absl::flat_hash_map<uint16_t, BucketScanPostition> bucket_scan_position;
+        assert(hd_res.Value().current_scan_plan_.CurrentScanBuckets().count(
+                   node_group_id) > 0);
+        assert(hd_res.Value().current_scan_plan_.CurrentScanPosition().count(
+                   node_group_id) > 0);
+        auto &pause_position =
+            hd_res.Value()
+                .current_scan_plan_.CurrentScanPosition()[node_group_id];
+        if (pause_position.empty())
+        {
+            // scan from negative start key
+            for (uint16_t core_idx = 0;
+                 core_idx < Sharder::Instance().GetLocalCcShardsCount();
+                 ++core_idx)
+            {
+                auto iter = bucket_scan_position.try_emplace(core_idx);
+                iter.first->second.last_cce_ = nullptr;
+                iter.first->second.last_key_ = Sharder::Instance()
+                                                   .GetLocalCcShards()
+                                                   ->GetCatalogFactory()
+                                                   ->NegativeInfKey();
+                iter.first->second.last_key_inclusive_ = true;
+            }
+        }
 
-        /*
-        for (const auto &[bucket_id, pause_position] : plan)
+        assert(hd_res.Value().current_scan_plan_.CurrentScanBuckets().count(
+                   node_group_id) > 0);
+        for (const auto &bucket_id :
+             hd_res.Value()
+                 .current_scan_plan_.CurrentScanBuckets()[node_group_id])
         {
             uint16_t core_idx =
                 Sharder::Instance().ShardBucketIdToCoreIdx(bucket_id);
-            auto [iter, inserted] = bucket_scan_position.try_emplace(core_idx);
-            if (inserted)
-            {
-                iter->second.last_cce_ = pause_position.last_cce_;
-                iter->second.pause_key_ =
-                    pause_position.last_key_.GetShallowCopy();
-                iter->second.bucket_ids_.insert(bucket_id);
-            }
-            else
-            {
-                if (iter->second.last_cce_ == pause_position.last_cce_ &&
-                    iter->second.pause_key_ == pause_position.last_key_)
-                {
-                    iter->second.bucket_ids_.insert(bucket_id);
-                }
-                // else:
-                // the eloqkv client using the cursor id to resume the
-                // scan. In this scenario, the cluster config may have changed
-                // or the core count on a node may have been changed.
-            }
+            bucket_scan_position[core_idx].bucket_ids_.insert(bucket_id);
         }
-            */
 
         TX_TRACE_ACTION(this, req);
         TX_TRACE_DUMP(req);
@@ -1412,6 +1418,7 @@ void txservice::LocalCcHandler::ScanNextBatchLocal(
     CcScanner &scanner,
     CcHandlerResult<ScanNextResult> &hd_res)
 {
+    /*
     uint32_t shard_code = scanner.BlockedShard();
     ScanCache *blocked_cache = scanner.Cache(shard_code);
     uint32_t node_group_id = shard_code >> 10;
@@ -1439,6 +1446,7 @@ void txservice::LocalCcHandler::ScanNextBatchLocal(
     hd_res.SetToBlock();
 #endif
     local_shard.Enqueue(req);
+    */
 }
 
 void txservice::LocalCcHandler::ScanClose(const TableName &table_name,

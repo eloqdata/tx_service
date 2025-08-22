@@ -489,9 +489,11 @@ struct ScanOpenTxRequest : public TemplateTxRequest<ScanOpenTxRequest, size_t>
         return end_key_;
     }
 
+    uint64_t cluster_config_version_{UINT64_MAX};
     std::vector<uint16_t> unscan_bucket_ids_;
-    // TODO(lokax): hash_map<NodeGroupId, hash_map<shard_code, TxKey>>
-    std::unordered_map<uint16_t, TxKey> pause_bucket_ids_;
+    std::unordered_map<NodeGroupId, std::vector<uint16_t>> pause_bucket_ids;
+    std::unordered_map<NodeGroupId, std::unordered_map<uint64_t, TxKey>>
+        pause_position_;
 
     const TableName *tab_name_{nullptr};
     ScanIndexType indx_type_{ScanIndexType::Primary};

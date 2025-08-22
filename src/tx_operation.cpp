@@ -1300,6 +1300,28 @@ void ScanOpenOperation::Forward(TransactionExecution *txm)
             return;
         }
 
+        if (table_name_->IsHashPartitioned() &&
+            lock_cluster_config_result_.IsFinished())
+        {
+            const auto &cluster_config_rec =
+                (*static_cast<const ClusterConfigRecord *>(
+                    lock_cluster_config_result_.Value().rec_));
+            if (tx_req_->cluster_config_version_ != UINT64_MAX &&
+                tx_req_->pause_position_.size() > 0 &&
+                cluster_config_rec.Version() !=
+                    tx_req_->cluster_config_version_)
+            {
+                // the eloqkv client using the cursor id to resume the
+                // scan. In this scenario, the cluster config may have changed.
+                // This is a very rare case, we'll treat it here as an iterator
+                // invalidation. eloqkv will return RD_ERR_INVALID_CURSOR to
+                // client.
+                hd_result_.SetError(CcErrorCode::INVALID_CURSOR);
+                txm->PostProcess(*this);
+                return;
+            }
+        }
+
         txm->Process(*this);
     }
 
