@@ -2293,6 +2293,7 @@ void TransactionExecution::Process(ScanOpenOperation &scan_open)
 
     if (!scan_open.lock_cluster_config_result_.IsFinished())
     {
+        // Acquire cluster config read lock
         lock_cluster_config_op_.Reset(TableName(cluster_config_ccm_name_sv,
                                                 TableType::ClusterConfig,
                                                 TableEngine::None),
@@ -2453,83 +2454,71 @@ void TransactionExecution::PostProcess(ScanOpenOperation &scan_open)
     }
     else
     {
-        std::vector<std::unordered_map<NodeGroupId, std::vector<uint16_t>>>
-            plans;
-
-        auto &unscan_bucket_ids =
-            scan_open.tx_req_->bucket_scan_save_point_.unscan_bucket_ids_;
-        auto &pause_bucket_ids =
-            scan_open.tx_req_->bucket_scan_save_point_.pause_bucket_ids;
-        auto &pause_position_ =
-            scan_open.tx_req_->bucket_scan_save_point_.pause_position_;
-        LocalCcShards *local_cc_shard = Sharder::Instance().GetLocalCcShards();
-
-        // <NodeGroupId, <core_idx, vector<bucket_id>>
-        // group by node group and core idx
-        std::unordered_map<NodeGroupId,
-                           std::unordered_map<uint16_t, std::vector<uint16_t>>>
-            grouped;
-        for (const auto &bucket_id : unscan_bucket_ids)
+        if (scan_open.tx_req_->bucket_scan_save_point_->unscan_bucket_.empty())
         {
-            NodeGroupId bucket_owner =
-                local_cc_shard->GetBucketOwner(bucket_id, TxCcNodeId());
-            uint16_t core_idx =
-                Sharder::Instance().ShardBucketIdToCoreIdx(bucket_id);
-            grouped[bucket_owner][core_idx].push_back(bucket_id);
-        }
+            // Generate scan plan
 
-        std::unordered_map<NodeGroupId,
-                           std::unordered_map<uint16_t, std::size_t>>
-            batch_idx;
-
-        bool finished = false;
-        while (!finished)
-        {
-            finished = true;
-            std::unordered_map<NodeGroupId, std::vector<uint16_t>>
-                current_plan_bucket_ids;
-
-            for (auto &[ng, core_map] : grouped)
+            LocalCcShards *local_cc_shard =
+                Sharder::Instance().GetLocalCcShards();
+            // <NodeGroupId, <core_idx, vector<bucket_id>>
+            // group by node group and core idx
+            std::unordered_map<
+                NodeGroupId,
+                std::unordered_map<uint16_t, std::vector<uint16_t>>>
+                grouped;
+            for (size_t bucket_id = 0; bucket_id < total_range_buckets;
+                 ++bucket_id)
             {
-                for (auto &[ci, vec] : core_map)
+                NodeGroupId bucket_owner =
+                    local_cc_shard->GetBucketOwner(bucket_id, TxCcNodeId());
+                uint16_t core_idx =
+                    Sharder::Instance().ShardBucketIdToCoreIdx(bucket_id);
+                grouped[bucket_owner][core_idx].push_back(bucket_id);
+            }
+
+            std::unordered_map<NodeGroupId,
+                               std::unordered_map<uint16_t, std::size_t>>
+                batch_idx;
+
+            bool finished = false;
+            while (!finished)
+            {
+                finished = true;
+                std::unordered_map<NodeGroupId, std::vector<uint16_t>>
+                    current_plan_bucket_ids;
+
+                for (auto &[ng, core_map] : grouped)
                 {
-                    std::size_t &cur = batch_idx[ng][ci];
-                    if (cur >= vec.size())
-                        continue;
-
-                    finished = false;
-
-                    std::size_t end = std::min(
-                        cur + ScanState::max_bucket_count_per_core, vec.size());
-                    auto &dst = current_plan_bucket_ids[ng];
-                    for (size_t i = cur; i < end; ++i)
+                    for (auto &[ci, vec] : core_map)
                     {
-                        dst.push_back(vec[i]);
+                        std::size_t &cur = batch_idx[ng][ci];
+                        if (cur >= vec.size())
+                            continue;
+
+                        finished = false;
+
+                        std::size_t end =
+                            std::min(cur + ScanState::max_bucket_count_per_core,
+                                     vec.size());
+                        auto &dst = current_plan_bucket_ids[ng];
+                        for (size_t i = cur; i < end; ++i)
+                        {
+                            dst.push_back(vec[i]);
+                        }
+                        cur = end;
                     }
-                    cur = end;
                 }
-            }
 
-            if (!finished)
-            {
-                plans.push_back(std::move(current_plan_bucket_ids));
-            }
-        }
-
-        if (!pause_bucket_ids.empty())
-        {
-            std::unordered_map<NodeGroupId, std::vector<uint16_t>>
-                current_plan_bucket_ids;
-            for (const auto &[node_group_id, bucket_ids] : pause_bucket_ids)
-            {
-                current_plan_bucket_ids[node_group_id] = std::move(bucket_ids);
+                if (!finished)
+                {
+                    scan_open.tx_req_->bucket_scan_save_point_->unscan_bucket_
+                        .push_back(std::move(current_plan_bucket_ids));
+                }
             }
         }
 
         scans_.try_emplace(open_result.scan_alias_,
-                           std::move(open_result.scanner_),
-                           std::move(plans),
-                           std::move(pause_position_));
+                           std::move(open_result.scanner_));
     }
 
     if (uint64_resp_ != nullptr)
@@ -2576,14 +2565,12 @@ void TransactionExecution::Process(ScanNextOperation &scan_next)
     CcScanner &scanner = *scan_next.scan_state_->scanner_;
     if (!scan_next.is_running_)
     {
-        scan_next.ResetResult();
         ScanNextResult &scan_next_result = scan_next.hd_result_.Value();
         scan_next_result.Clear();
-        scan_next_result.current_scan_plan_ = scan_next.scan_state_->PeekPlan();
+        scan_next_result.current_scan_plan_ =
+            scan_next.tx_req_->bucket_scan_plan_;
         scan_next_result.ccm_scanner_ = &scanner;
         scan_next.is_running_ = true;
-
-        // TODO(lokax): pop current plan in postprocess
     }
 
     // TODO(lokax): to_scan_next
@@ -2606,7 +2593,7 @@ void TransactionExecution::Process(ScanNextOperation &scan_next)
         {
             auto &current_ng_scan_buckets =
                 scan_next.hd_result_.Value()
-                    .current_scan_plan_.CurrentScanBuckets();
+                    .current_scan_plan_->CurrentScanBuckets();
             scan_next.ResetResultForHashPart(current_ng_scan_buckets.size());
 
             for (const auto &[node_group_id, bucket_ids] :

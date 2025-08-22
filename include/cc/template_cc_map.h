@@ -3159,6 +3159,10 @@ public:
             }
         }
 
+        // TODO(lokax): update scan next result
+        // ScanNextResult &scan_next_result = req.Result()->Value();
+        // scan_next_result.current_scan_plan_->CurrentScanPosition()
+
         req.Result()->SetFinished();
         return true;
     }

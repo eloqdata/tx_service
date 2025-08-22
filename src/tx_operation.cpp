@@ -1306,7 +1306,7 @@ void ScanOpenOperation::Forward(TransactionExecution *txm)
             const auto &cluster_config_rec =
                 (*static_cast<const ClusterConfigRecord *>(
                     lock_cluster_config_result_.Value().rec_));
-            if (!tx_req_->bucket_scan_save_point_.IsValidCursor(
+            if (!tx_req_->bucket_scan_save_point_->IsValidCursor(
                     cluster_config_rec.Version()))
             {
                 // the eloqkv client using the cursor id to resume the
@@ -1389,6 +1389,7 @@ void ScanNextOperation::ResetResult()
     unlock_range_result_.Reset();
     lock_range_result_.Reset();
     hd_result_.Reset();
+    hd_result_.Value().Clear();
 }
 
 void ScanNextOperation::ResetResultForHashPart(size_t ng_cnt)

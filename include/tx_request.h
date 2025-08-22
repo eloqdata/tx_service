@@ -387,10 +387,26 @@ struct UpsertTxRequest : public TemplateTxRequest<UpsertTxRequest, Void>
 struct BucketScanSavePoint
 {
     uint64_t cluster_config_version_{UINT64_MAX};
-    std::vector<uint16_t> unscan_bucket_ids_;
-    std::unordered_map<NodeGroupId, std::vector<uint16_t>> pause_bucket_ids;
+    size_t prev_pause_idx_{UINT64_MAX};
+    std::vector<std::unordered_map<NodeGroupId, std::vector<uint16_t>>>
+        unscan_bucket_;
     std::unordered_map<NodeGroupId, std::unordered_map<uint64_t, TxKey>>
         pause_position_;
+
+    BucketScanPlan PickPlan(size_t current_idx)
+    {
+        if (prev_pause_idx_ != UINT64_MAX && prev_pause_idx_ == current_idx)
+        {
+            // pause plan
+            BucketScanPlan plan(&unscan_bucket_[current_idx], &pause_position_);
+            return plan;
+        }
+        else
+        {
+            BucketScanPlan plan(&unscan_bucket_[current_idx], nullptr);
+            return plan;
+        }
+    }
 
     bool IsValidCursor(uint64_t version)
     {
@@ -399,8 +415,12 @@ struct BucketScanSavePoint
         // This is a very rare case, we'll treat it here as an iterator
         // invalidation. eloqkv will return RD_ERR_INVALID_CURSOR to
         // client.
-        if (cluster_config_version_ != UINT64_MAX && !pause_position_.empty() &&
-            version != cluster_config_version_)
+        if (cluster_config_version_ == UINT64_MAX)
+        {
+            cluster_config_version_ = version;
+        }
+
+        if (version != cluster_config_version_)
         {
             return false;
         }
@@ -435,7 +455,8 @@ struct ScanOpenTxRequest : public TemplateTxRequest<ScanOpenTxRequest, size_t>
                       const std::function<void()> *resume_fptr = nullptr,
                       TransactionExecution *txm = nullptr,
                       int32_t obj_type = -1,
-                      std::string_view scan_pattern = {})
+                      std::string_view scan_pattern = {},
+                      BucketScanSavePoint *save_point = nullptr)
         : TemplateTxRequest(yield_fptr, resume_fptr, txm),
           tab_name_(tabname),
           indx_type_(index_type),
@@ -455,7 +476,8 @@ struct ScanOpenTxRequest : public TemplateTxRequest<ScanOpenTxRequest, size_t>
           scan_alias_(UINT64_MAX),
           schema_version_(schema_version),
           obj_type_(obj_type),
-          scan_pattern_(scan_pattern)
+          scan_pattern_(scan_pattern),
+          bucket_scan_save_point_(save_point)
     {
     }
 
@@ -479,7 +501,8 @@ struct ScanOpenTxRequest : public TemplateTxRequest<ScanOpenTxRequest, size_t>
                const std::function<void()> *resume_fptr = nullptr,
                TransactionExecution *txm = nullptr,
                int32_t obj_type = -1,
-               std::string_view scan_pattern = {})
+               std::string_view scan_pattern = {},
+               BucketScanSavePoint *save_point = nullptr)
     {
         tx_result_.Reset(yield_fptr, resume_fptr);
         txm_ = txm;
@@ -502,6 +525,7 @@ struct ScanOpenTxRequest : public TemplateTxRequest<ScanOpenTxRequest, size_t>
         schema_version_ = schema_version;
         obj_type_ = obj_type;
         scan_pattern_ = scan_pattern;
+        bucket_scan_save_point_ = save_point;
     }
 
     const TxKey *StartKey() const
@@ -535,7 +559,7 @@ struct ScanOpenTxRequest : public TemplateTxRequest<ScanOpenTxRequest, size_t>
     int32_t obj_type_{-1};
     std::string_view scan_pattern_;
 
-    BucketScanSavePoint bucket_scan_save_point_;
+    BucketScanSavePoint *bucket_scan_save_point_{nullptr};
 };
 
 struct ScanBatchTuple
@@ -601,7 +625,8 @@ struct ScanBatchTxRequest : public TemplateTxRequest<ScanBatchTxRequest, bool>
 #ifdef ON_KEY_OBJECT
                        ,
                        int32_t obj_type = -1,
-                       std::string_view scan_pattern = {}
+                       std::string_view scan_pattern = {},
+                       BucketScanPlan *bucket_scan_plan = nullptr
 #endif
                        )
         : TemplateTxRequest(yield_fptr, resume_fptr, txm),
@@ -611,7 +636,8 @@ struct ScanBatchTxRequest : public TemplateTxRequest<ScanBatchTxRequest, bool>
 #ifdef ON_KEY_OBJECT
           ,
           obj_type_(obj_type),
-          scan_pattern_(scan_pattern)
+          scan_pattern_(scan_pattern),
+          bucket_scan_plan_(bucket_scan_plan)
 #endif
     {
         batch_->clear();
@@ -628,6 +654,8 @@ struct ScanBatchTxRequest : public TemplateTxRequest<ScanBatchTxRequest, bool>
     int32_t obj_type_{-1};
     std::string_view scan_pattern_;
 #endif
+
+    BucketScanPlan *bucket_scan_plan_;
 };
 
 struct UnlockTuple

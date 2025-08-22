@@ -1215,13 +1215,13 @@ void txservice::LocalCcHandler::ScanNextBatch(
             hd_res.Value().GetNodeGroupTerm(node_group_id);
 
         absl::flat_hash_map<uint16_t, BucketScanPostition> bucket_scan_position;
-        assert(hd_res.Value().current_scan_plan_.CurrentScanBuckets().count(
+        assert(hd_res.Value().current_scan_plan_->CurrentScanBuckets().count(
                    node_group_id) > 0);
-        assert(hd_res.Value().current_scan_plan_.CurrentScanPosition().count(
+        assert(hd_res.Value().current_scan_plan_->CurrentScanPosition().count(
                    node_group_id) > 0);
         auto &pause_position =
             hd_res.Value()
-                .current_scan_plan_.CurrentScanPosition()[node_group_id];
+                .current_scan_plan_->CurrentScanPosition()[node_group_id];
         if (pause_position.empty())
         {
             // scan from negative start key
@@ -1239,11 +1239,11 @@ void txservice::LocalCcHandler::ScanNextBatch(
             }
         }
 
-        assert(hd_res.Value().current_scan_plan_.CurrentScanBuckets().count(
+        assert(hd_res.Value().current_scan_plan_->CurrentScanBuckets().count(
                    node_group_id) > 0);
         for (const auto &bucket_id :
              hd_res.Value()
-                 .current_scan_plan_.CurrentScanBuckets()[node_group_id])
+                 .current_scan_plan_->CurrentScanBuckets()[node_group_id])
         {
             uint16_t core_idx =
                 Sharder::Instance().ShardBucketIdToCoreIdx(bucket_id);
