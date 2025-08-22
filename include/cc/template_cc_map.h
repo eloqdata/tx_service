@@ -3159,17 +3159,6 @@ public:
             }
         }
 
-        /*
-        ScanNextResult &scan_next_result = req.Result()->Value();
-        auto &ng_last_key_status =
-            scan_next_result.last_key_status_[req.NodeGroupId()];
-        for (const auto &bucket_id :
-             req.bucket_scan_postition_[shard_->core_id_].bucket_ids_)
-        {
-            // ng_last_key_status[bucket_id].last_key_ =
-        }
-        */
-
         req.Result()->SetFinished();
         return true;
     }

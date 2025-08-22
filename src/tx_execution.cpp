@@ -2456,9 +2456,12 @@ void TransactionExecution::PostProcess(ScanOpenOperation &scan_open)
         std::vector<std::unordered_map<NodeGroupId, std::vector<uint16_t>>>
             plans;
 
-        auto &unscan_bucket_ids = scan_open.tx_req_->unscan_bucket_ids_;
-        auto &pause_bucket_ids = scan_open.tx_req_->pause_bucket_ids;
-        auto &pause_position_ = scan_open.tx_req_->pause_position_;
+        auto &unscan_bucket_ids =
+            scan_open.tx_req_->bucket_scan_save_point_.unscan_bucket_ids_;
+        auto &pause_bucket_ids =
+            scan_open.tx_req_->bucket_scan_save_point_.pause_bucket_ids;
+        auto &pause_position_ =
+            scan_open.tx_req_->bucket_scan_save_point_.pause_position_;
         LocalCcShards *local_cc_shard = Sharder::Instance().GetLocalCcShards();
 
         // <NodeGroupId, <core_idx, vector<bucket_id>>
@@ -2571,7 +2574,17 @@ void TransactionExecution::Process(ScanNextOperation &scan_next)
     }
 
     CcScanner &scanner = *scan_next.scan_state_->scanner_;
-    scan_next.is_running_ = true;
+    if (!scan_next.is_running_)
+    {
+        scan_next.ResetResult();
+        ScanNextResult &scan_next_result = scan_next.hd_result_.Value();
+        scan_next_result.Clear();
+        scan_next_result.current_scan_plan_ = scan_next.scan_state_->PeekPlan();
+        scan_next_result.ccm_scanner_ = &scanner;
+        scan_next.is_running_ = true;
+
+        // TODO(lokax): pop current plan in postprocess
+    }
 
     // TODO(lokax): to_scan_next
     bool to_scan_next = scanner.Current() == nullptr &&
@@ -2591,11 +2604,13 @@ void TransactionExecution::Process(ScanNextOperation &scan_next)
         }
         else
         {
-            /*
-            auto &last_key_status = scan_next.LastKeyStatus();
-            scan_next.ResetResultForHashPart(last_key_status.size());
+            auto &current_ng_scan_buckets =
+                scan_next.hd_result_.Value()
+                    .current_scan_plan_.CurrentScanBuckets();
+            scan_next.ResetResultForHashPart(current_ng_scan_buckets.size());
 
-            for (const auto &[node_group_id, bucket_ids] : last_key_status)
+            for (const auto &[node_group_id, bucket_ids] :
+                 current_ng_scan_buckets)
             {
                 cc_handler_->ScanNextBatch(
                     node_group_id,
@@ -2612,7 +2627,6 @@ void TransactionExecution::Process(ScanNextOperation &scan_next)
 #endif
                 );
             }
-                */
         }
 
         is_local = scan_next.hd_result_.RemoteRefCnt() == 0;

@@ -626,6 +626,13 @@ private:
 
 struct ScanNextResult
 {
+    void Clear()
+    {
+        node_group_terms_.clear();
+        ccm_scanner_ = nullptr;
+        current_scan_plan_ = BucketScanPlan();
+    }
+
     int64_t GetNodeGroupTerm(NodeGroupId node_group_id) const
     {
         auto iter = node_group_terms_.find(node_group_id);
@@ -650,7 +657,7 @@ struct ScanNextResult
 
     BucketScanPlan current_scan_plan_;
     std::unordered_map<NodeGroupId, int64_t> node_group_terms_;
-    CcScanner *ccm_scanner_;
+    CcScanner *ccm_scanner_{nullptr};
 };
 
 struct InitTxResult

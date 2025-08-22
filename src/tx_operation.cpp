@@ -1306,10 +1306,8 @@ void ScanOpenOperation::Forward(TransactionExecution *txm)
             const auto &cluster_config_rec =
                 (*static_cast<const ClusterConfigRecord *>(
                     lock_cluster_config_result_.Value().rec_));
-            if (tx_req_->cluster_config_version_ != UINT64_MAX &&
-                tx_req_->pause_position_.size() > 0 &&
-                cluster_config_rec.Version() !=
-                    tx_req_->cluster_config_version_)
+            if (!tx_req_->bucket_scan_save_point_.IsValidCursor(
+                    cluster_config_rec.Version()))
             {
                 // the eloqkv client using the cursor id to resume the
                 // scan. In this scenario, the cluster config may have changed.

@@ -384,6 +384,31 @@ struct UpsertTxRequest : public TemplateTxRequest<UpsertTxRequest, Void>
     OperationType operation_type_;
 };
 
+struct BucketScanSavePoint
+{
+    uint64_t cluster_config_version_{UINT64_MAX};
+    std::vector<uint16_t> unscan_bucket_ids_;
+    std::unordered_map<NodeGroupId, std::vector<uint16_t>> pause_bucket_ids;
+    std::unordered_map<NodeGroupId, std::unordered_map<uint64_t, TxKey>>
+        pause_position_;
+
+    bool IsValidCursor(uint64_t version)
+    {
+        // the eloqkv client using the cursor id to resume the
+        // scan. In this scenario, the cluster config may have changed.
+        // This is a very rare case, we'll treat it here as an iterator
+        // invalidation. eloqkv will return RD_ERR_INVALID_CURSOR to
+        // client.
+        if (cluster_config_version_ != UINT64_MAX && !pause_position_.empty() &&
+            version != cluster_config_version_)
+        {
+            return false;
+        }
+
+        return true;
+    }
+};
+
 struct ScanOpenTxRequest : public TemplateTxRequest<ScanOpenTxRequest, size_t>
 {
     ScanOpenTxRequest() : TemplateTxRequest(nullptr, nullptr)
@@ -489,12 +514,6 @@ struct ScanOpenTxRequest : public TemplateTxRequest<ScanOpenTxRequest, size_t>
         return end_key_;
     }
 
-    uint64_t cluster_config_version_{UINT64_MAX};
-    std::vector<uint16_t> unscan_bucket_ids_;
-    std::unordered_map<NodeGroupId, std::vector<uint16_t>> pause_bucket_ids;
-    std::unordered_map<NodeGroupId, std::unordered_map<uint64_t, TxKey>>
-        pause_position_;
-
     const TableName *tab_name_{nullptr};
     ScanIndexType indx_type_{ScanIndexType::Primary};
     const TxKey *start_key_{nullptr};
@@ -515,6 +534,8 @@ struct ScanOpenTxRequest : public TemplateTxRequest<ScanOpenTxRequest, size_t>
 
     int32_t obj_type_{-1};
     std::string_view scan_pattern_;
+
+    BucketScanSavePoint bucket_scan_save_point_;
 };
 
 struct ScanBatchTuple
