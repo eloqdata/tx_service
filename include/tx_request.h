@@ -28,6 +28,7 @@
 #include <utility>
 #include <vector>
 
+#include "absl/container/flat_hash_map.h"
 #include "range_slice.h"
 #include "scan.h"
 #include "tx_command.h"
@@ -388,22 +389,52 @@ struct BucketScanSavePoint
 {
     uint64_t cluster_config_version_{UINT64_MAX};
     size_t prev_pause_idx_{UINT64_MAX};
-    std::vector<std::unordered_map<NodeGroupId, std::vector<uint16_t>>>
-        unscan_bucket_;
-    std::unordered_map<NodeGroupId, std::unordered_map<uint64_t, TxKey>>
+    std::vector<absl::flat_hash_map<NodeGroupId, std::vector<uint16_t>>>
+        bucket_groups_;
+    absl::flat_hash_map<NodeGroupId, absl::flat_hash_map<uint64_t, TxKey>>
         pause_position_;
 
     BucketScanPlan PickPlan(size_t current_idx)
     {
+        /*
+            BucketScanSavePoint *save_point =
+                client_connection_context->GetOrCreateSavePoint(cursor_id);
+            // Generate scan plan if need
+            ScanOpenTxRequest scan_open_req(save_point);
+            Execute(&scan_open_req);
+
+            while (save_point->HasPlan())
+            {
+                BucketScanPlan current_plan = save_point->PickPlan();
+                ScanBatchTxRequest scan_batch_req(&current_plan);
+                auto [result, err_code] = Execute(&scan_batch_req);
+                if (err_code != no_error)
+                {
+                    // don't update save point
+                    return {false, {}};
+                }
+
+                if (total_result_size >= limit)
+                {
+                    BucketScanSavePoint* new_save_point =
+                        GernerateNewSavePoint(result);
+                    CacheSavePoint(cursor_id,
+                        new_save_point);
+                    return {true, total_result};
+                }
+            }
+        */
+
         if (prev_pause_idx_ != UINT64_MAX && prev_pause_idx_ == current_idx)
         {
             // pause plan
-            BucketScanPlan plan(&unscan_bucket_[current_idx], &pause_position_);
+            BucketScanPlan plan(&bucket_groups_[current_idx], &pause_position_);
             return plan;
         }
         else
         {
-            BucketScanPlan plan(&unscan_bucket_[current_idx], nullptr);
+            // new plan
+            BucketScanPlan plan(&bucket_groups_[current_idx], nullptr);
             return plan;
         }
     }

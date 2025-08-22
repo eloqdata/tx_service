@@ -28,6 +28,7 @@
 #include <string>
 #include <vector>
 
+#include "absl/container/flat_hash_map.h"
 #include "cc_protocol.h"
 #include "error_messages.h"  //CcErrorCode
 #include "local_cc_shards.h"
@@ -391,6 +392,8 @@ TxErrorCode TransactionExecution::ConvertCcError(CcErrorCode error)
         return TxErrorCode::UNIQUE_CONSTRAINT;
     case CcErrorCode::PACK_SK_ERR:
         return TxErrorCode::CAL_ENGINE_DEFINED_CONSTRAINT;
+    case CcErrorCode::INVALID_CURSOR:
+        return TxErrorCode::INVALID_CURSOR;
 
     case CcErrorCode::UNDEFINED_ERR:
     default:
@@ -2454,7 +2457,7 @@ void TransactionExecution::PostProcess(ScanOpenOperation &scan_open)
     }
     else
     {
-        if (scan_open.tx_req_->bucket_scan_save_point_->unscan_bucket_.empty())
+        if (scan_open.tx_req_->bucket_scan_save_point_->bucket_groups_.empty())
         {
             // Generate scan plan
 
@@ -2462,9 +2465,9 @@ void TransactionExecution::PostProcess(ScanOpenOperation &scan_open)
                 Sharder::Instance().GetLocalCcShards();
             // <NodeGroupId, <core_idx, vector<bucket_id>>
             // group by node group and core idx
-            std::unordered_map<
+            absl::flat_hash_map<
                 NodeGroupId,
-                std::unordered_map<uint16_t, std::vector<uint16_t>>>
+                absl::flat_hash_map<uint16_t, std::vector<uint16_t>>>
                 grouped;
             for (size_t bucket_id = 0; bucket_id < total_range_buckets;
                  ++bucket_id)
@@ -2476,15 +2479,15 @@ void TransactionExecution::PostProcess(ScanOpenOperation &scan_open)
                 grouped[bucket_owner][core_idx].push_back(bucket_id);
             }
 
-            std::unordered_map<NodeGroupId,
-                               std::unordered_map<uint16_t, std::size_t>>
+            absl::flat_hash_map<NodeGroupId,
+                                std::unordered_map<uint16_t, std::size_t>>
                 batch_idx;
 
             bool finished = false;
             while (!finished)
             {
                 finished = true;
-                std::unordered_map<NodeGroupId, std::vector<uint16_t>>
+                absl::flat_hash_map<NodeGroupId, std::vector<uint16_t>>
                     current_plan_bucket_ids;
 
                 for (auto &[ng, core_map] : grouped)
@@ -2511,7 +2514,7 @@ void TransactionExecution::PostProcess(ScanOpenOperation &scan_open)
 
                 if (!finished)
                 {
-                    scan_open.tx_req_->bucket_scan_save_point_->unscan_bucket_
+                    scan_open.tx_req_->bucket_scan_save_point_->bucket_groups_
                         .push_back(std::move(current_plan_bucket_ids));
                 }
             }
@@ -2591,6 +2594,7 @@ void TransactionExecution::Process(ScanNextOperation &scan_next)
         }
         else
         {
+            // Update handler result ref count
             auto &current_ng_scan_buckets =
                 scan_next.hd_result_.Value()
                     .current_scan_plan_->CurrentScanBuckets();

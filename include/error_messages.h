@@ -91,6 +91,8 @@ enum struct TxErrorCode : uint16_t
 
     // Catalog read write conflict, the table(db) is being modified.
     READ_CATALOG_CONFLICT,
+
+    INVALID_CURSOR,
 };
 
 static const std::unordered_map<TxErrorCode, std::string> tx_error_messages{

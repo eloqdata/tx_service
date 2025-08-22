@@ -488,11 +488,6 @@ struct ScanNextOperation : TransactionOperation
     ScanState *scan_state_;
     CcHandlerResult<ScanNextResult> hd_result_;
 
-    int64_t BucketNgTerm(NodeGroupId bucket_owner) const
-    {
-        return hd_result_.Value().GetNodeGroupTerm(bucket_owner);
-    }
-
     int64_t RangeNgTerm() const
     {
         return slice_hd_result_.Value().ccm_scanner_->PartitionNgTerm();

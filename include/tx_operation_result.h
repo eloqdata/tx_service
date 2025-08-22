@@ -28,6 +28,7 @@
 #include <utility>
 #include <vector>
 
+#include "absl/container/flat_hash_map.h"
 #include "cc/cc_entry.h"
 #include "proto/cc_request.pb.h"
 #include "sharder.h"
@@ -549,9 +550,9 @@ class BucketScanPlan
 {
 public:
     BucketScanPlan(
-        std::unordered_map<NodeGroupId, std::vector<uint16_t>> *buckets,
-        const std::unordered_map<NodeGroupId,
-                                 std::unordered_map<uint64_t, TxKey>>
+        absl::flat_hash_map<NodeGroupId, std::vector<uint16_t>> *buckets,
+        const absl::flat_hash_map<NodeGroupId,
+                                  absl::flat_hash_map<uint64_t, TxKey>>
             *pause_position)
         : current_scan_bucket_(buckets)
     {
@@ -604,23 +605,24 @@ public:
         return *this;
     }
 
-    std::unordered_map<NodeGroupId, std::vector<uint16_t>> &CurrentScanBuckets()
+    absl::flat_hash_map<NodeGroupId, std::vector<uint16_t>> &
+    CurrentScanBuckets()
     {
         return *current_scan_bucket_;
     }
 
-    std::unordered_map<NodeGroupId,
-                       std::unordered_map<uint64_t, BucketScanPauseState>> &
+    absl::flat_hash_map<NodeGroupId,
+                        absl::flat_hash_map<uint64_t, BucketScanPauseState>> &
     CurrentScanPosition()
     {
         return current_scan_position_;
     }
 
 private:
-    std::unordered_map<NodeGroupId, std::vector<uint16_t>>
+    absl::flat_hash_map<NodeGroupId, std::vector<uint16_t>>
         *current_scan_bucket_{nullptr};
-    std::unordered_map<NodeGroupId,
-                       std::unordered_map<uint64_t, BucketScanPauseState>>
+    absl::flat_hash_map<NodeGroupId,
+                        absl::flat_hash_map<uint64_t, BucketScanPauseState>>
         current_scan_position_;
 };
 
