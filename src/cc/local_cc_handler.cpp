@@ -1238,6 +1238,16 @@ void txservice::LocalCcHandler::ScanNextBatch(
                 iter.first->second.last_key_inclusive_ = true;
             }
         }
+        else
+        {
+            for (const auto &[core_idx, pause_pos] : pause_position)
+            {
+                bucket_scan_position[core_idx].last_cce_ = pause_pos.last_cce_;
+                bucket_scan_position[core_idx].last_key_ =
+                    pause_pos.last_key_.GetShallowCopy();
+                bucket_scan_position[core_idx].last_key_inclusive_ = false;
+            }
+        }
 
         assert(hd_res.Value().current_scan_plan_->CurrentScanBuckets().count(
                    node_group_id) > 0);

@@ -417,7 +417,7 @@ struct BucketScanSavePoint
                 if (total_result_size >= limit)
                 {
                     BucketScanSavePoint* new_save_point =
-                        GernerateNewSavePoint(result);
+                        GernerateNewSavePoint(save_point, result);
                     CacheSavePoint(cursor_id,
                         new_save_point);
                     return {true, total_result};

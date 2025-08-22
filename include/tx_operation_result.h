@@ -33,6 +33,7 @@
 #include "proto/cc_request.pb.h"
 #include "sharder.h"
 #include "tx_command.h"
+#include "tx_key.h"
 #include "type.h"
 
 namespace txservice
@@ -616,6 +617,30 @@ public:
     CurrentScanPosition()
     {
         return current_scan_position_;
+    }
+
+    void UpdateScanPosition(NodeGroupId node_group_id,
+                            uint16_t core_idx,
+                            TxKey last_key,
+                            LruEntry *cce,
+                            bool is_drained)
+    {
+        assert(current_scan_position_.count(node_group_id) > 0);
+        auto &ng_scan_pos = current_scan_position_[node_group_id];
+        auto iter = ng_scan_pos.find(core_idx);
+        if (iter != ng_scan_pos.end())
+        {
+            iter->second.last_key_ = std::move(last_key);
+            iter->second.last_cce_ = cce;
+            iter->second.is_drained_ = is_drained;
+        }
+        else
+        {
+            auto insert_iter = ng_scan_pos.try_emplace(
+                core_idx, BucketScanPauseState(std::move(last_key)));
+            insert_iter.first->second.last_cce_ = cce;
+            insert_iter.first->second.is_drained_ = is_drained;
+        }
     }
 
 private:
