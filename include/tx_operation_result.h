@@ -330,8 +330,9 @@ struct RemoteScanSliceCache
 
 struct BucketScanPostition
 {
-    std::unordered_map<uint16_t, TxKey> store_pause_keys_;
-    LruEntry *last_cce_;
+    std::unordered_set<uint16_t> bucket_ids_;
+    LruEntry *last_cce_{nullptr};
+    TxKey pause_key_;
 
     bool FilterBucket(size_t key_hash_code)
     {
@@ -533,27 +534,25 @@ struct RangeScanSliceResult
 
 struct BucketScanPauseState
 {
-    BucketScanPauseState(TxKey last_key, bool last_key_inclusive)
-        : last_key_(std::move(last_key)),
-          last_key_inclusive_(last_key_inclusive),
-          last_scanned_cce_(nullptr)
+    BucketScanPauseState(TxKey last_key)
+        : last_key_(std::move(last_key)), last_cce_(nullptr)
     {
     }
 
     TxKey last_key_;
-    bool last_key_inclusive_;
-    LruEntry *last_scanned_cce_{nullptr};
+    LruEntry *last_cce_{nullptr};
+    bool is_drained_{false};
 };
 struct ScanNextResult
 {
     std::unordered_map<NodeGroupId,
                        std::unordered_map<uint16_t, BucketScanPauseState>> &
-    LastKeyStatus()
+    Plan()
     {
         return last_key_status_;
     }
 
-    std::unordered_map<uint16_t, BucketScanPauseState> &LastKeyStatus(
+    std::unordered_map<uint16_t, BucketScanPauseState> &Plan(
         NodeGroupId node_group_id)
     {
         return last_key_status_[node_group_id];

@@ -490,7 +490,7 @@ struct ScanOpenTxRequest : public TemplateTxRequest<ScanOpenTxRequest, size_t>
     }
 
     std::vector<uint16_t> unscan_bucket_ids_;
-    std::unordered_map<uint16_t, BucketScanPauseState> pause_bucket_ids_;
+    std::unordered_map<uint16_t, TxKey> pause_bucket_ids_;
 
     const TableName *tab_name_{nullptr};
     ScanIndexType indx_type_{ScanIndexType::Primary};

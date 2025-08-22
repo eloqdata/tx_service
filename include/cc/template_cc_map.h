@@ -2726,7 +2726,8 @@ public:
             req.Result()->SetError(CcErrorCode::REQUESTED_NODE_NOT_LEADER);
             return false;
         }
-        req.Result()->Value().term_ = ng_term;
+
+        // req.Result()->Value().term_ = ng_term;
 
         IsolationLevel iso_lvl = req.Isolation();
         CcProtocol cc_proto = req.Protocol();

@@ -1827,8 +1827,8 @@ public:
         obj_type_ = obj_type;
         scan_pattern_ = scan_pattern;
 
-        unfinished_core_cnt_ = Sharder::Instance().GetLocalCcShardsCount();
         bucket_scan_postition_ = std::move(bucket_scan_postition);
+        unfinished_core_cnt_ = bucket_scan_postition_.size();
     }
 
     absl::flat_hash_map<uint16_t, BucketScanPostition> &GetBucketScanPosition()

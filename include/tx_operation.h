@@ -34,6 +34,7 @@
 #include "cc_entry.h"
 #include "cc_map.h"
 #include "cluster_config_record.h"
+#include "local_cc_shards.h"
 #include "log.pb.h"
 #include "log_closure.h"
 #include "range_record.h"
@@ -415,21 +416,22 @@ struct ScanState
     using Plan =
         std::unordered_map<NodeGroupId,
                            std::unordered_map<uint16_t, BucketScanPauseState>>;
+    static constexpr size_t max_bucket_count_per_core = 10;
 
     ScanState() = delete;
-    ScanState(
-        std::unique_ptr<CcScanner> scanner,
-        std::unordered_map<NodeGroupId,
-                           std::unordered_map<uint16_t, BucketScanPauseState>>
-            hash_scan_pause_state)
-        : scanner_(std::move(scanner)),
-          hash_scan_pause_state_(std::move(hash_scan_pause_state))
+    ScanState(std::unique_ptr<CcScanner> scanner, std::vector<Plan> &&plans)
+        : scanner_(std::move(scanner)), plans_(std::move(plans))
     {
     }
 
-    Plan PickPlans()
+    Plan &PeekPlan()
     {
-        return {};
+        return plans_.back();
+    }
+
+    void PopPlan()
+    {
+        plans_.pop_back();
     }
 
     std::unique_ptr<CcScanner> scanner_;
@@ -437,10 +439,6 @@ struct ScanState
     bool scan_end_inclusive_;
 
     std::vector<Plan> plans_;
-    // TODO(lokax):
-    std::unordered_map<NodeGroupId,
-                       std::unordered_map<uint16_t, BucketScanPauseState>>
-        hash_scan_pause_state_;
 
     ScanState(std::unique_ptr<CcScanner> scanner,
               uint64_t schema_version,
@@ -512,7 +510,7 @@ struct ScanNextOperation : TransactionOperation
                        std::unordered_map<uint16_t, BucketScanPauseState>> &
     LastKeyStatus()
     {
-        return hd_result_.Value().LastKeyStatus();
+        return hd_result_.Value().Plan();
     }
 
     int64_t BucketNgTerm(NodeGroupId bucket_owner) const

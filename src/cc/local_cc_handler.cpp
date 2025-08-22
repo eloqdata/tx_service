@@ -1188,62 +1188,8 @@ void txservice::LocalCcHandler::ScanOpenLocal(
     scanner_ptr->lock_type_ = LockTypeUtil::DeduceLockType(
         scanner_ptr->cc_op_, iso_level, proto, false);
 
-    // TODO(lokax):
     hd_res.SetFinished();
     return;
-
-    /*
-    ScanCache *shard_scan_cache = scanner_ptr->AddShard(shard_code);
-
-    ScanOpenBatchCc *scan_open_cc_req = scan_open_pool.NextRequest();
-    scan_open_cc_req->Reset(&table_name,
-                            0,
-                            index_type,
-                            cc_ng_id,
-                            &start_key,
-                            inclusive,
-                            direction,
-                            tx_number,
-                            ts,
-                            shard_scan_cache,
-                            tx_term,
-                            &hd_res,
-                            scanner_ptr->iso_level_,
-                            scanner_ptr->protocol_,
-                            scanner_ptr->is_for_write_,
-                            scanner_ptr->is_ckpt_delta_,
-                            scanner_ptr->is_covering_keys_,
-                            scanner_ptr->is_require_keys_,
-                            scanner_ptr->is_require_recs_,
-                            scanner_ptr->is_require_sort_);
-
-    TX_TRACE_ACTION(this, scan_open_cc_req);
-    TX_TRACE_DUMP(scan_open_cc_req);
-    // Check if the table exists
-    CcMap *ccm = local_shard.GetCcm(table_name, cc_ng_id);
-
-    if (ccm != nullptr)
-    {
-        bool finished = ccm->Execute(*scan_open_cc_req);
-        if (finished)
-        {
-            scan_open_cc_req->Free();
-        }
-        else
-        {
-#ifdef EXT_TX_PROC_ENABLED
-            hd_res.SetToBlock();
-#endif
-        }
-    }
-    else
-    {
-#ifdef EXT_TX_PROC_ENABLED
-        hd_res.SetToBlock();
-#endif
-        local_shard.Enqueue(scan_open_cc_req);
-    }
-    */
 }
 
 void txservice::LocalCcHandler::ScanNextBatch(
@@ -1257,11 +1203,6 @@ void txservice::LocalCcHandler::ScanNextBatch(
     int32_t obj_type,
     const std::string_view &scan_pattern)
 {
-    // uint32_t shard_code = scanner.BlockedShard();
-    // ScanCache *blocked_cache = scanner.Cache(shard_code);
-    // uint32_t node_group_id = shard_code >> 10;
-    // hd_res.Value().node_group_id_ = node_group_id;
-
     bool is_standby_tx = IsStandbyTx(tx_term);
 #ifdef EXT_TX_PROC_ENABLED
     hd_res.SetToBlock();
@@ -1272,33 +1213,28 @@ void txservice::LocalCcHandler::ScanNextBatch(
     {
         int64_t node_group_term =
             hd_res.Value().GetNodeGroupTerm(node_group_id);
-        auto &last_key_status = hd_res.Value().LastKeyStatus(node_group_id);
+        auto &plan = hd_res.Value().Plan(node_group_id);
 
         absl::flat_hash_map<uint16_t, BucketScanPostition> bucket_scan_position;
 
-        for (const auto &status : last_key_status)
+        for (const auto &[bucket_id, pause_position] : plan)
         {
             uint16_t core_idx =
-                Sharder::Instance().ShardBucketIdToCoreIdx(status.first);
-            auto iter = bucket_scan_position.try_emplace(core_idx);
-            if (iter.second)
+                Sharder::Instance().ShardBucketIdToCoreIdx(bucket_id);
+            auto [iter, inserted] = bucket_scan_position.try_emplace(core_idx);
+            if (inserted)
             {
-                iter.first->second.bucket_ids_.insert(status.first);
-                iter.first->second.last_cce_ = status.second.last_scanned_cce_;
-                iter.first->second.last_key_ =
-                    status.second.last_key_.GetShallowCopy();
-                iter.first->second.last_key_inclusive_ =
-                    status.second.last_key_inclusive_;
+                iter->second.last_cce_ = pause_position.last_cce_;
+                iter->second.pause_key_ =
+                    pause_position.last_key_.GetShallowCopy();
+                iter->second.bucket_ids_.insert(bucket_id);
             }
             else
             {
-                if (iter.first->second.last_cce_ ==
-                        status.second.last_scanned_cce_ &&
-                    iter.first->second.last_key_inclusive_ ==
-                        status.second.last_key_inclusive_ &&
-                    iter.first->second.last_key_ == status.second.last_key_)
+                if (iter->second.last_cce_ == pause_position.last_cce_ &&
+                    iter->second.pause_key_ == pause_position.last_key_)
                 {
-                    iter.first->second.bucket_ids_.insert(status.first);
+                    iter->second.bucket_ids_.insert(bucket_id);
                 }
                 // else:
                 // the eloqkv client using the cursor id to resume the
