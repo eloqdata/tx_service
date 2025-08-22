@@ -332,7 +332,7 @@ struct BucketScanPostition
 {
     std::unordered_set<uint16_t> bucket_ids_;
     LruEntry *last_cce_{nullptr};
-    TxKey pause_key_;
+    TxKey last_key_;
 
     bool FilterBucket(size_t key_hash_code)
     {
@@ -545,19 +545,6 @@ struct BucketScanPauseState
 };
 struct ScanNextResult
 {
-    std::unordered_map<NodeGroupId,
-                       std::unordered_map<uint16_t, BucketScanPauseState>> &
-    Plan()
-    {
-        return last_key_status_;
-    }
-
-    std::unordered_map<uint16_t, BucketScanPauseState> &Plan(
-        NodeGroupId node_group_id)
-    {
-        return last_key_status_[node_group_id];
-    }
-
     int64_t GetNodeGroupTerm(NodeGroupId node_group_id) const
     {
         auto iter = node_group_terms_.find(node_group_id);
@@ -580,10 +567,13 @@ struct ScanNextResult
         }
     }
 
+    std::unordered_map<NodeGroupId, std::vector<uint16_t>> plans_;
+    std::unordered_map<uint64_t, BucketScanPauseState> pause_position_;
+
     // bucket id, last key, last key inclusive, last cce
-    std::unordered_map<NodeGroupId,
-                       std::unordered_map<uint16_t, BucketScanPauseState>>
-        last_key_status_;
+    // std::unordered_map<NodeGroupId,
+    //                   std::unordered_map<uint16_t, BucketScanPauseState>>
+    //    last_key_status_;
     std::unordered_map<NodeGroupId, int64_t> node_group_terms_;
     CcScanner *ccm_scanner_;
 };

@@ -176,7 +176,7 @@ void TransactionExecution::Reset()
     }
 
     ClearCachedBucketInfos();
-    lock_cluster_config_op_.Reset();
+    // lock_cluster_config_op_.Reset();
     lock_range_bucket_result_.Reset();
     lock_range_op_.Reset();
     lock_bucket_op_.Reset();
@@ -2291,6 +2291,7 @@ void TransactionExecution::Process(ScanOpenOperation &scan_open)
 
     scan_open.hd_result_.Value().scan_alias_ = scan_open.tx_req_->scan_alias_;
 
+    /*
     if (!scan_open.lock_cluster_config_result_.IsFinished())
     {
         lock_cluster_config_op_.Reset(TableName(cluster_config_ccm_name_sv,
@@ -2303,6 +2304,7 @@ void TransactionExecution::Process(ScanOpenOperation &scan_open)
         Process(lock_cluster_config_op_);
         return;
     }
+        */
 
     scan_open.is_running_ = true;
 
@@ -2453,6 +2455,7 @@ void TransactionExecution::PostProcess(ScanOpenOperation &scan_open)
     }
     else
     {
+        /*
         auto &unscan_bucket_ids = scan_open.tx_req_->unscan_bucket_ids_;
         auto &pause_bucket_ids = scan_open.tx_req_->pause_bucket_ids_;
         LocalCcShards *local_cc_shard = Sharder::Instance().GetLocalCcShards();
@@ -2534,6 +2537,7 @@ void TransactionExecution::PostProcess(ScanOpenOperation &scan_open)
         scans_.try_emplace(open_result.scan_alias_,
                            std::move(open_result.scanner_),
                            std::move(plans));
+        */
     }
 
     if (uint64_resp_ != nullptr)

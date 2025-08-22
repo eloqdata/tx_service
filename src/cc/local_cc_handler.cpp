@@ -1213,10 +1213,10 @@ void txservice::LocalCcHandler::ScanNextBatch(
     {
         int64_t node_group_term =
             hd_res.Value().GetNodeGroupTerm(node_group_id);
-        auto &plan = hd_res.Value().Plan(node_group_id);
 
         absl::flat_hash_map<uint16_t, BucketScanPostition> bucket_scan_position;
 
+        /*
         for (const auto &[bucket_id, pause_position] : plan)
         {
             uint16_t core_idx =
@@ -1242,6 +1242,7 @@ void txservice::LocalCcHandler::ScanNextBatch(
                 // or the core count on a node may have been changed.
             }
         }
+            */
 
         TX_TRACE_ACTION(this, req);
         TX_TRACE_DUMP(req);
