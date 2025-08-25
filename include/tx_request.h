@@ -394,9 +394,7 @@ struct BucketScanSavePoint
     absl::flat_hash_map<NodeGroupId, absl::flat_hash_map<uint64_t, TxKey>>
         pause_position_;
 
-    BucketScanPlan PickPlan(size_t current_idx)
-    {
-        /*
+    /*
             BucketScanSavePoint *save_point =
                 client_connection_context->GetOrCreateSavePoint(cursor_id);
             // Generate scan plan if need
@@ -423,8 +421,10 @@ struct BucketScanSavePoint
                     return {true, total_result};
                 }
             }
-        */
+    */
 
+    BucketScanPlan PickPlan(size_t current_idx)
+    {
         if (prev_pause_idx_ != UINT64_MAX && prev_pause_idx_ == current_idx)
         {
             // pause plan

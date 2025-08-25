@@ -2500,6 +2500,7 @@ void TransactionExecution::PostProcess(ScanOpenOperation &scan_open)
 
                         finished = false;
 
+                        // 10 buckets each core
                         std::size_t end =
                             std::min(cur + ScanState::max_bucket_count_per_core,
                                      vec.size());
