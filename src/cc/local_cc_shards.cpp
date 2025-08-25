@@ -4488,7 +4488,7 @@ void LocalCcShards::DataSyncForHashPartition(
                 {
                     // cce_ is null means the key is already persisted on kv, so
                     // we don't need to put it into the flush vec.
-                    int32_t part_id = 0;
+                    int32_t part_id = (rec.Key().Hash() >> 10) & 0x3FF;
                     if (table_name.Engine() == TableEngine::EloqKv)
                     {
                         data_sync_vec->emplace_back(
