@@ -1296,7 +1296,7 @@ void ScanOpenOperation::Forward(TransactionExecution *txm)
             !lock_cluster_config_result_.IsFinished())
         {
             // The locking cluster config request has not finished. The scan
-            // next operation cannot proceed without locking the cluster config.
+            // open operation cannot proceed without locking the cluster config.
             return;
         }
 
