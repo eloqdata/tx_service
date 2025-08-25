@@ -7177,6 +7177,10 @@ public:
                     key_lock == nullptr ||
                     !key_lock->HasWriteLockOrWriteIntent(req.Txn()))
                 {
+                    if (op_type != OperationType::Delete)
+                    {
+                        rec.Deserialize(log_blob.data(), offset);
+                    }
                     continue;
                 }
             }

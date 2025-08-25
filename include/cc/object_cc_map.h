@@ -2170,6 +2170,7 @@ public:
                     key_lock == nullptr ||
                     !key_lock->HasWriteLockOrWriteIntent(req.Txn()))
                 {
+                    offset += cmds_len;
                     continue;
                 }
             }
