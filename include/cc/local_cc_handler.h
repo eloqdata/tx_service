@@ -30,6 +30,7 @@
 #include "cc_req_pool.h"
 #include "cc_request.h"
 #include "remote/remote_cc_handler.h"
+#include "type.h"
 
 namespace txservice
 {
@@ -224,7 +225,8 @@ public:
                        bool is_for_write = false,
                        bool is_ckpt_delta = false) override;
 
-    void ScanNextBatch(uint64_t tx_number,
+    void ScanNextBatch(NodeGroupId node_group_id,
+                       uint64_t tx_number,
                        int64_t tx_term,
                        uint16_t command_id,
                        uint64_t start_ts,
