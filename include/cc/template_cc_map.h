@@ -2751,7 +2751,6 @@ public:
         TemplateScanCache<KeyT, ValueT> *typed_cache =
             static_cast<TemplateScanCache<KeyT, ValueT> *>(
                 req.GetLocalScanCache(shard_->core_id_));
-        // TODO(lokax): Full ?
         assert(typed_cache->Full());
 
         ScanDirection direction = typed_cache->Scanner()->Direction();
