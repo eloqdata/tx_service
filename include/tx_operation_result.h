@@ -330,25 +330,6 @@ struct RemoteScanSliceCache
     std::vector<std::string> archive_records_;
 };
 
-struct BucketScanPostition
-{
-    std::unordered_set<uint16_t> bucket_ids_;
-    LruEntry *last_cce_{nullptr};
-    TxKey last_key_;
-    bool last_key_inclusive_{false};
-
-    bool FilterBucket(size_t key_hash_code)
-    {
-        auto bucket_id = Sharder::MapKeyHashToBucketId(key_hash_code);
-        if (bucket_ids_.count(bucket_id) > 0)
-        {
-            return true;
-        }
-
-        return false;
-    }
-};
-
 struct RangeScanSliceResult
 {
     RangeScanSliceResult()
@@ -535,14 +516,17 @@ struct RangeScanSliceResult
     std::atomic<LastKeySetStatus> last_key_status_;
 };
 
-struct BucketScanPauseState
+struct BucketScanPausePosition
 {
-    BucketScanPauseState(TxKey last_key)
-        : last_key_(std::move(last_key)), last_cce_(nullptr)
+    BucketScanPausePosition(TxKey last_key, bool last_key_inclusive)
+        : last_key_(std::move(last_key)),
+          last_key_inclusive_(last_key_inclusive),
+          last_cce_(nullptr)
     {
     }
 
     TxKey last_key_;
+    bool last_key_inclusive_{false};
     LruEntry *last_cce_{nullptr};
     bool is_drained_{false};
 };
@@ -563,20 +547,22 @@ public:
         if (pause_position != nullptr)
         {
             // eloqkv use cursor id to execute scan command.
-            // restore scan position.
+            // restore the scan position.
             for (auto &[node_group_id, pos] : *pause_position)
             {
                 auto iter = current_scan_position_.try_emplace(node_group_id);
-                for (const auto &[shard_code, pause_key] : pos)
+                for (const auto &[core_idx, pause_key] : pos)
                 {
                     iter.first->second.try_emplace(
-                        shard_code,
-                        BucketScanPauseState(TxKey(pause_key.Clone())));
+                        core_idx,
+                        BucketScanPausePosition(TxKey(pause_key.Clone()),
+                                                false));
                 }
             }
         }
         else
         {
+            // scan from start negative key
             for (const auto &[node_group_id, buckets] : *buckets)
             {
                 current_scan_position_.try_emplace(node_group_id);
@@ -612,8 +598,9 @@ public:
         return *current_scan_bucket_;
     }
 
-    absl::flat_hash_map<NodeGroupId,
-                        absl::flat_hash_map<uint64_t, BucketScanPauseState>> &
+    absl::flat_hash_map<
+        NodeGroupId,
+        absl::flat_hash_map<uint64_t, BucketScanPausePosition>> &
     CurrentScanPosition()
     {
         return current_scan_position_;
@@ -637,7 +624,7 @@ public:
         else
         {
             auto insert_iter = ng_scan_pos.try_emplace(
-                core_idx, BucketScanPauseState(std::move(last_key)));
+                core_idx, BucketScanPausePosition(std::move(last_key), true));
             insert_iter.first->second.last_cce_ = cce;
             insert_iter.first->second.is_drained_ = is_drained;
         }
@@ -647,7 +634,7 @@ private:
     absl::flat_hash_map<NodeGroupId, std::vector<uint16_t>>
         *current_scan_bucket_{nullptr};
     absl::flat_hash_map<NodeGroupId,
-                        absl::flat_hash_map<uint64_t, BucketScanPauseState>>
+                        absl::flat_hash_map<uint64_t, BucketScanPausePosition>>
         current_scan_position_;
 };
 

@@ -1213,8 +1213,6 @@ void txservice::LocalCcHandler::ScanNextBatch(
     {
         int64_t node_group_term =
             hd_res.Value().GetNodeGroupTerm(node_group_id);
-
-        absl::flat_hash_map<uint16_t, BucketScanPostition> bucket_scan_position;
         assert(hd_res.Value().current_scan_plan_->CurrentScanBuckets().count(
                    node_group_id) > 0);
         assert(hd_res.Value().current_scan_plan_->CurrentScanPosition().count(
@@ -1229,47 +1227,28 @@ void txservice::LocalCcHandler::ScanNextBatch(
                  core_idx < Sharder::Instance().GetLocalCcShardsCount();
                  ++core_idx)
             {
-                auto iter = bucket_scan_position.try_emplace(core_idx);
+                auto iter = pause_position.try_emplace(
+                    core_idx,
+                    BucketScanPausePosition(Sharder::Instance()
+                                                .GetLocalCcShards()
+                                                ->GetCatalogFactory()
+                                                ->NegativeInfKey(),
+                                            true));
                 iter.first->second.last_cce_ = nullptr;
-                iter.first->second.last_key_ = Sharder::Instance()
-                                                   .GetLocalCcShards()
-                                                   ->GetCatalogFactory()
-                                                   ->NegativeInfKey();
-                iter.first->second.last_key_inclusive_ = true;
+                iter.first->second.is_drained_ = false;
             }
-        }
-        else
-        {
-            for (const auto &[core_idx, pause_pos] : pause_position)
-            {
-                bucket_scan_position[core_idx].last_cce_ = pause_pos.last_cce_;
-                bucket_scan_position[core_idx].last_key_ =
-                    pause_pos.last_key_.GetShallowCopy();
-                bucket_scan_position[core_idx].last_key_inclusive_ = false;
-            }
-        }
-
-        assert(hd_res.Value().current_scan_plan_->CurrentScanBuckets().count(
-                   node_group_id) > 0);
-        for (const auto &bucket_id :
-             hd_res.Value()
-                 .current_scan_plan_->CurrentScanBuckets()[node_group_id])
-        {
-            uint16_t core_idx =
-                Sharder::Instance().ShardBucketIdToCoreIdx(bucket_id);
-            bucket_scan_position[core_idx].bucket_ids_.insert(bucket_id);
         }
 
         TX_TRACE_ACTION(this, req);
         TX_TRACE_DUMP(req);
 
-        assert(bucket_scan_position.size() > 0);
+        // assert(bucket_scan_position.size() > 0);
         ScanNextBatchCc *req = scan_next_pool.NextRequest();
         req->Reset(node_group_id,
                    node_group_term,
                    tx_number,
                    start_ts,
-                   std::move(bucket_scan_position),
+                   hd_res.Value().current_scan_plan_,
                    tx_term,
                    &hd_res,
                    scanner.iso_level_,
@@ -1282,7 +1261,8 @@ void txservice::LocalCcHandler::ScanNextBatch(
                    scanner.is_require_sort_,
                    obj_type,
                    scan_pattern);
-        for (const auto &[core_idx, position] : req->GetBucketScanPosition())
+        for (const auto &[core_idx, position] :
+             req->GetBucketScanPlan()->CurrentScanPosition()[node_group_id])
         {
             cc_shards_.EnqueueCcRequest(thd_id_, core_idx, req);
         }

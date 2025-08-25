@@ -2762,6 +2762,7 @@ public:
         CcPage<KeyT, ValueT, VersionedRecord, RangePartitioned> *ccp_last =
             nullptr;
 
+        /*
         if (req.CcePtr() != nullptr)
         {
             prior_cce = static_cast<
@@ -2879,7 +2880,6 @@ public:
             CcPage<KeyT, ValueT, VersionedRecord, RangePartitioned> *ccp =
                 scan_ccm_it.GetPage();
             ScanType scan_type = start_pair.second;
-            // TODO(lokax): ScanGap ?
             if (scan_type == ScanType::ScanGap ||
                 (req.bucket_scan_postition_[shard_->core_id_].FilterBucket(
                      key_ptr->Hash()) &&
@@ -2952,6 +2952,7 @@ public:
                 ccp_last = ccp;
             }
         }
+        */
 
         bool scan_finished = false;
 
@@ -2975,6 +2976,8 @@ public:
                     // checkpoint, skips those that have been checkpointed.
                     continue;
                 }
+
+                /*
                 if (!req.bucket_scan_postition_[shard_->core_id_].FilterBucket(
                         key->Hash()) ||
                     !FilterRecord(key,
@@ -2984,6 +2987,7 @@ public:
                 {
                     continue;
                 }
+                */
 
                 req.SetCcePtr(cce);
                 req.SetCcePtrScanType(ScanType::ScanBoth);
@@ -3063,6 +3067,7 @@ public:
                 CcPage<KeyT, ValueT, VersionedRecord, RangePartitioned> *ccp =
                     scan_ccm_it.GetPage();
 
+                /*
                 if (!req.bucket_scan_postition_[shard_->core_id_].FilterBucket(
                         key->Hash()) ||
                     !FilterRecord(key,
@@ -3072,6 +3077,7 @@ public:
                 {
                     continue;
                 }
+                */
                 req.SetCcePtr(cce);
                 req.SetCcePtrScanType(ScanType::ScanBoth);
 

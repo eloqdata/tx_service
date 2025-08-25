@@ -1793,8 +1793,7 @@ public:
                int64_t ng_term,
                TxNumber tx_number,
                const uint64_t &ts,
-               absl::flat_hash_map<uint16_t, BucketScanPostition>
-                   bucket_scan_postition,
+               BucketScanPlan *bucket_scan_plan,
                int64_t tx_term,
                CcHandlerResult<ScanNextResult> *next_res,
                IsolationLevel iso_level,
@@ -1827,13 +1826,14 @@ public:
         obj_type_ = obj_type;
         scan_pattern_ = scan_pattern;
 
-        bucket_scan_postition_ = std::move(bucket_scan_postition);
-        unfinished_core_cnt_ = bucket_scan_postition_.size();
+        // bucket_scan_postition_ = std::move(bucket_scan_postition);
+        bucket_scan_plan_ = bucket_scan_plan;
+        unfinished_core_cnt_ = bucket_scan_plan->CurrentScanPosition().size();
     }
 
-    absl::flat_hash_map<uint16_t, BucketScanPostition> &GetBucketScanPosition()
+    BucketScanPlan *GetBucketScanPlan()
     {
-        return bucket_scan_postition_;
+        return bucket_scan_plan_;
     }
 
     ScanCache *GetLocalScanCache(size_t shard_id)
@@ -1956,7 +1956,9 @@ private:
 
     std::atomic<size_t> unfinished_core_cnt_{0};
     // <core_idx, postition>
-    absl::flat_hash_map<uint16_t, BucketScanPostition> bucket_scan_postition_;
+    // absl::flat_hash_map<uint16_t, BucketScanPostition>
+    // bucket_scan_postition_;
+    BucketScanPlan *bucket_scan_plan_{nullptr};
 
     template <typename KeyT,
               typename ValueT,
