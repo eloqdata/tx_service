@@ -572,6 +572,52 @@ public:
     std::function<void()> handle_kv_res_;
 };
 
+struct FetchBucketDataCc : public CcRequestBase
+{
+public:
+    FetchBucketDataCc() = default;
+
+    ~FetchBucketDataCc() = default;
+
+    void Reset(const TableName *table_name,
+               const TableSchema *table_schema,
+               NodeGroupId node_group_id,
+               int64_t node_group_term,
+               CcShard *ccs,
+               uint16_t bucket_id,
+               TxKey start_key,
+               bool start_key_inclusive,
+               size_t batch_size,
+               CcRequestBase *requester);
+
+    bool ValidTermCheck();
+
+    bool Execute(CcShard &ccs) override;
+
+    void SetFinish(int32_t err);
+
+    void AddDataItem(std::string &&key_str,
+                     std::string &&rec_str,
+                     uint64_t version,
+                     bool is_deleted);
+
+    // table_name is a string view, cannot access it outside TxProcessor.
+    TableName table_name_{
+        std::string(""), TableType::Primary, TableEngine::None};
+    std::string kv_table_name_;
+    NodeGroupId node_group_id_;
+    int64_t node_group_term_;
+    CcShard *ccs_;
+    uint16_t bucket_id_;
+    TxKey start_key_;
+    bool start_key_inclusive_;
+    size_t batch_size_{0};
+    CcRequestBase *requester_{nullptr};
+    int32_t err_code_{0};
+
+    std::deque<RawSliceDataItem> bucket_data_items_;
+};
+
 struct FetchSnapshotCc;
 typedef void (*OnFetchedSnapshot)(FetchSnapshotCc *fetch_cc,
                                   CcRequestBase *requester);
