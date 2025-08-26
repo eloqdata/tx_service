@@ -22,6 +22,7 @@
 #include "remote/cc_stream_receiver.h"
 
 #include <brpc/controller.h>
+#include <bthread/bthread.h>
 #include <bvar/latency_recorder.h>
 
 #include <atomic>
@@ -323,10 +324,8 @@ void CcStreamReceiver::RecycleScanSliceResp(
 void CcStreamReceiver::PreProcessScanResp(
     std::unique_ptr<ScanSliceResponse> msg)
 {
-    CODE_FAULT_INJECTOR("before_mark_remote_received", {
-        std::this_thread::sleep_for(std::chrono::seconds(15));
-        std::this_thread::yield();
-    });
+    CODE_FAULT_INJECTOR("before_mark_remote_received",
+                        { bthread_usleep(15000000); });
     CcHandlerResult<RangeScanSliceResult> *hd_res = nullptr;
     uint32_t tx_node_id = (msg->tx_number() >> 32L) >> 10;
     int64_t tx_term = msg->tx_term();
