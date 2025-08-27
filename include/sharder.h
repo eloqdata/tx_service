@@ -222,7 +222,12 @@ public:
 
     static inline int32_t MapKeyHashToHashPartitionId(uint64_t hash_code)
     {
-        return (hash_code >> 10) & 0x3FF;
+        return MapKeyHashToBucketId(hash_code) & 0x3FF;
+    }
+
+    static inline uint16_t ToTalRangeBuckets()
+    {
+        return total_range_buckets;
     }
 
     uint32_t NativeNodeGroup() const
