@@ -501,10 +501,14 @@ private:
     CcRequestPool<UploadTxCommandsCc> cmd_commit_pool;
     CcRequestPool<InvalidateTableCacheCc> invalidate_table_cache_pool;
     CcRequestPool<UpdateKeyCacheCc> update_key_cache_pool_;
-    CircularQueue<std::unique_ptr<CcScanner>> pk_forward_scanner_[3]{64, 64, 64};
-    CircularQueue<std::unique_ptr<CcScanner>> pk_backward_scanner_[3]{64, 64, 64};
-    CircularQueue<std::unique_ptr<CcScanner>> sk_forward_scanner_[3]{64, 64, 64};
-    CircularQueue<std::unique_ptr<CcScanner>> sk_backward_scanner_[3]{64, 64, 64};
+    CircularQueue<std::unique_ptr<CcScanner>> pk_forward_scanner_[3]{
+        64, 64, 64};
+    CircularQueue<std::unique_ptr<CcScanner>> pk_backward_scanner_[3]{
+        64, 64, 64};
+    CircularQueue<std::unique_ptr<CcScanner>> sk_forward_scanner_[3]{
+        64, 64, 64};
+    CircularQueue<std::unique_ptr<CcScanner>> sk_backward_scanner_[3]{
+        64, 64, 64};
 
     friend class remote::RemoteCcHandler;
 };

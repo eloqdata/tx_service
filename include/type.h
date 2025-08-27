@@ -577,7 +577,7 @@ inline static TableName cluster_config_ccm_name{
 
 // Sequence table is a special table for auto increment id and range partition
 // id. It is used to generate auto increment id and range partition id for
-// tables. 
+// tables.
 inline static TableName sequence_table_name{sequence_table_name_sv.data(),
                                             sequence_table_name_sv.size(),
                                             TableType::Primary,

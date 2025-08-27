@@ -1978,7 +1978,8 @@ void UpsertTableIndexOp::DispatchRangeTask(
     uint64_t tx_number = upsert_index_txm->TxNumber();
     int64_t tx_term = upsert_index_txm->TxTerm();
     TxKey target_range_end_key =
-        cc_shards->GetCatalogFactory(base_table_name.Engine())->PositiveInfKey();
+        cc_shards->GetCatalogFactory(base_table_name.Engine())
+            ->PositiveInfKey();
     TxKey target_range_start_key = last_scanned_end_key_.GetShallowCopy();
 
     uint32_t node_group_cnt = 0;
@@ -2114,12 +2115,14 @@ void UpsertTableIndexOp::DispatchRangeTask(
             if (curr_range_start_key.KeyPtr() == nullptr)
             {
                 curr_range_start_key =
-                    cc_shards->GetCatalogFactory(base_table_name.Engine())->NegativeInfKey();
+                    cc_shards->GetCatalogFactory(base_table_name.Engine())
+                        ->NegativeInfKey();
             }
             if (curr_range_end_key.KeyPtr() == nullptr)
             {
                 curr_range_end_key =
-                    cc_shards->GetCatalogFactory(base_table_name.Engine())->PositiveInfKey();
+                    cc_shards->GetCatalogFactory(base_table_name.Engine())
+                        ->PositiveInfKey();
             }
 
             HandleRangeTask(base_table_name,

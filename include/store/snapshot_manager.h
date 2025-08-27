@@ -103,6 +103,5 @@ private:
     txservice::TxWorkerPool backup_worker_{1};
 };
 
-
 }  // namespace store
 }  // namespace txservice

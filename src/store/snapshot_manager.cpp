@@ -31,7 +31,6 @@ namespace txservice
 namespace store
 {
 
-
 void SnapshotManager::Start()
 {
     standby_sync_worker_ = std::thread([this] { StandbySyncWorker(); });
