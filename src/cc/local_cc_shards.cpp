@@ -4627,7 +4627,8 @@ void LocalCcShards::DataSyncForHashPartition(
                     // cce_ is null means the key is already persisted on
                     // kv, so we don't need to put it into the flush vec.
                     int32_t part_id =
-                        static_cast<int32_t>(rec.Key().Hash() & 0x3FF);
+                        Sharder::Instance().MapKeyHashToHashPartitionId(
+                            rec.Key().Hash());
                     if (table_name.Engine() == TableEngine::EloqKv)
                     {
                         data_sync_vec->emplace_back(
@@ -4665,8 +4666,9 @@ void LocalCcShards::DataSyncForHashPartition(
             {
                 size_t key_idx = scan_cc.MoveBaseIdxVec()[j];
                 TxKey key_raw = (*data_sync_vec)[key_idx].Key();
-
-                auto part_id = static_cast<int32_t>(key_raw.Hash() & 0x3FF);
+                int32_t part_id =
+                    Sharder::MapKeyHashToHashPartitionId(key_raw.Hash());
+                // int32_t part_id = (key_raw.Hash() >> 10) & 0x3FF;
                 mv_base_vec->emplace_back(std::move(key_raw), part_id);
             }
 

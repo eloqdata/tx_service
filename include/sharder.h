@@ -223,7 +223,13 @@ public:
     static inline int32_t MapKeyHashToHashPartitionId(uint64_t hash_code)
     {
         static constexpr int32_t kHashPartitions = 1024;
-        return static_cast<int32_t>(hash_code & (kHashPartitions - 1));
+        return static_cast<int32_t>(MapKeyHashToBucketId(hash_code) &
+                                    (kHashPartitions - 1));
+    }
+
+    static inline uint16_t ToTalRangeBuckets()
+    {
+        return total_range_buckets;
     }
 
     uint32_t NativeNodeGroup() const
