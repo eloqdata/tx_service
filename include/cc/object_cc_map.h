@@ -480,7 +480,9 @@ public:
                     cce->GetOrCreateKeyLock(shard_, this, ccp);
 
                     // Fetch record from storage
-                    int32_t part_id = (look_key->Hash() >> 10) & 0x3FF;
+                    // TODO(lokax):
+                    int32_t part_id =
+                        Sharder::MapKeyHashToHashPartitionId(look_key->Hash());
                     auto fetch_ret_status = shard_->FetchRecord(table_name_,
                                                                 table_schema_,
                                                                 TxKey(look_key),
@@ -1852,7 +1854,9 @@ public:
                         // Cannot find a cached version in memory. Fetch
                         // it from kv store if kv is synced with primary.
                         cce->GetOrCreateKeyLock(shard_, this, ccp);
-                        int32_t part_id = (look_key->Hash() >> 10) & 0x3FF;
+                        // TODO(lokax):
+                        int32_t part_id = Sharder::MapKeyHashToHashPartitionId(
+                            look_key->Hash());
                         shard_->FetchRecord(table_name_,
                                             table_schema_,
                                             TxKey(look_key),
@@ -2288,7 +2292,9 @@ public:
                     // cmd list so there's no need to put this req back in
                     // queue after record is fetched.
 
-                    int32_t part_id = (key.Hash() >> 10) & 0x3FF;
+                    // TODO(lokax):
+                    int32_t part_id =
+                        Sharder::MapKeyHashToBucketId(key.Hash()) & 0x3FF;
                     shard_->FetchRecord(table_name_,
                                         table_schema_,
                                         TxKey(&key),

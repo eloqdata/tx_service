@@ -6484,7 +6484,12 @@ public:
                             {
                                 cce->GetOrCreateKeyLock(shard_, this, ccp);
                                 TxKey tx_key(key);
-                                int32_t part_id = (key->Hash() >> 10) & 0x3FF;
+                                // TODO(lokax):
+                                int32_t part_id =
+                                    Sharder::MapKeyHashToBucketId(key->Hash()) &
+                                    0x3FF;
+                                // int32_t part_id = (key->Hash() >> 10) &
+                                // 0x3FF;
                                 shard_->FetchRecord(table_name_,
                                                     table_schema_,
                                                     TxKey(key),
