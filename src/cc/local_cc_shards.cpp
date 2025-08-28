@@ -90,8 +90,10 @@ LocalCcShards::LocalCcShards(
       ng_id_(ng_id),
       timer_terminate_(false),
       is_waiting_ckpt_(false),
-      catalog_factory_{
-          catalog_factory[0], catalog_factory[1], catalog_factory[2], catalog_factory[3]},
+      catalog_factory_{catalog_factory[0],
+                       catalog_factory[1],
+                       catalog_factory[2],
+                       catalog_factory[3]},
       system_handler_(system_handler),
       tx_service_(tx_service),
       enable_mvcc_(enable_mvcc),
@@ -367,9 +369,10 @@ std::pair<bool, const CatalogEntry *> LocalCcShards::CreateCatalog(
     {
         // A new catalog entry is created in LocalCcShards.
         catalog_entry.InitSchema(
-            catalog_image.empty() ? nullptr
-                                  : GetCatalogFactory(table_name.Engine())->CreateTableSchema(
-                                        table_name, catalog_image, commit_ts),
+            catalog_image.empty()
+                ? nullptr
+                : GetCatalogFactory(table_name.Engine())
+                      ->CreateTableSchema(table_name, catalog_image, commit_ts),
             commit_ts);
     }
     else
@@ -381,8 +384,9 @@ std::pair<bool, const CatalogEntry *> LocalCcShards::CreateCatalog(
             catalog_entry.InitSchema(
                 catalog_image.empty()
                     ? nullptr
-                    : GetCatalogFactory(table_name.Engine())->CreateTableSchema(
-                          table_name, catalog_image, commit_ts),
+                    : GetCatalogFactory(table_name.Engine())
+                          ->CreateTableSchema(
+                              table_name, catalog_image, commit_ts),
                 commit_ts);
         }
         else if (catalog_entry.schema_version_ == commit_ts)
@@ -408,8 +412,8 @@ TableSchema::uptr LocalCcShards::CreateTableSchemaFromImage(
     {
         return nullptr;
     }
-    return GetCatalogFactory(table_name.Engine())->CreateTableSchema(
-        table_name, catalog_image, version);
+    return GetCatalogFactory(table_name.Engine())
+        ->CreateTableSchema(table_name, catalog_image, version);
 }
 
 std::pair<bool, const CatalogEntry *> LocalCcShards::CreateReplayCatalog(
@@ -433,8 +437,9 @@ std::pair<bool, const CatalogEntry *> LocalCcShards::CreateReplayCatalog(
         catalog_entry.InitSchema(
             old_catalog_image.empty()
                 ? nullptr
-                : GetCatalogFactory(table_name.Engine())->CreateTableSchema(
-                      table_name, old_catalog_image, old_schema_ts),
+                : GetCatalogFactory(table_name.Engine())
+                      ->CreateTableSchema(
+                          table_name, old_catalog_image, old_schema_ts),
             old_schema_ts);
     }
 
@@ -446,8 +451,9 @@ std::pair<bool, const CatalogEntry *> LocalCcShards::CreateReplayCatalog(
         catalog_entry.SetDirtySchema(
             new_catalog_image.empty()
                 ? nullptr
-                : GetCatalogFactory(table_name.Engine())->CreateTableSchema(
-                      table_name, new_catalog_image, dirty_schema_ts),
+                : GetCatalogFactory(table_name.Engine())
+                      ->CreateTableSchema(
+                          table_name, new_catalog_image, dirty_schema_ts),
             dirty_schema_ts);
         return {true, &catalog_entry};
     }
@@ -484,9 +490,10 @@ CatalogEntry *LocalCcShards::CreateDirtyCatalog(
         // For idempotency, only installs the dirty version when the input ts is
         // greater than the existing version and dirty version.
         catalog_entry.SetDirtySchema(
-            catalog_image.empty() ? nullptr
-                                  : GetCatalogFactory(table_name.Engine())->CreateTableSchema(
-                                        table_name, catalog_image, commit_ts),
+            catalog_image.empty()
+                ? nullptr
+                : GetCatalogFactory(table_name.Engine())
+                      ->CreateTableSchema(table_name, catalog_image, commit_ts),
             commit_ts);
     }
 
@@ -500,8 +507,10 @@ void LocalCcShards::UpdateDirtyCatalog(const TableName &table_name,
     assert(catalog_entry && !catalog_image.empty());
     std::unique_lock<std::shared_mutex> lk(meta_data_mux_);
     catalog_entry->SetDirtySchema(
-        GetCatalogFactory(table_name.Engine())->CreateTableSchema(
-            table_name, catalog_image, catalog_entry->dirty_schema_version_),
+        GetCatalogFactory(table_name.Engine())
+            ->CreateTableSchema(table_name,
+                                catalog_image,
+                                catalog_entry->dirty_schema_version_),
         catalog_entry->dirty_schema_version_);
 }
 
@@ -1076,7 +1085,9 @@ void LocalCcShards::InitPrebuiltTables(NodeGroupId ng_id, int64_t term)
             if (ng_it.second)
             {
                 ng_it.first->second.InitSchema(
-                    GetCatalogFactory(table.Engine())->CreateTableSchema(table, image, 2), 2);
+                    GetCatalogFactory(table.Engine())
+                        ->CreateTableSchema(table, image, 2),
+                    2);
             }
         }
     }

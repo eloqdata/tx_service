@@ -90,7 +90,10 @@ CcShard::CcShard(
       clean_start_ccp_(nullptr),
       size_(0),
       ckpter_(nullptr),
-      catalog_factory_{catalog_factory[0], catalog_factory[1], catalog_factory[2], catalog_factory[3]},
+      catalog_factory_{catalog_factory[0],
+                       catalog_factory[1],
+                       catalog_factory[2],
+                       catalog_factory[3]},
       system_handler_(system_handler),
       active_si_txs_()
 {
@@ -1600,10 +1603,14 @@ CcMap *CcShard::CreateOrUpdatePkCcMap(const TableName &table_name,
 {
     if (IsNative(ng_id))
     {
-        auto ccm_it = native_ccms_.try_emplace(
-            table_name,
-            GetCatalogFactory(table_name.Engine())->CreatePkCcMap(
-                table_name, table_schema, ccm_has_full_entries, this, ng_id));
+        auto ccm_it =
+            native_ccms_.try_emplace(table_name,
+                                     GetCatalogFactory(table_name.Engine())
+                                         ->CreatePkCcMap(table_name,
+                                                         table_schema,
+                                                         ccm_has_full_entries,
+                                                         this,
+                                                         ng_id));
         // update table schema for alter table command.
         if (!is_create && !ccm_it.second)
         {
@@ -1618,10 +1625,13 @@ CcMap *CcShard::CreateOrUpdatePkCcMap(const TableName &table_name,
         auto fail_ccm_it = failover_ccms_.try_emplace(table_name).first;
         std::unordered_map<NodeGroupId, CcMap::uptr> &ccms =
             fail_ccm_it->second;
-        auto ccm_it = ccms.try_emplace(
-            ng_id,
-            GetCatalogFactory(table_name.Engine())->CreatePkCcMap(
-                table_name, table_schema, ccm_has_full_entries, this, ng_id));
+        auto ccm_it = ccms.try_emplace(ng_id,
+                                       GetCatalogFactory(table_name.Engine())
+                                           ->CreatePkCcMap(table_name,
+                                                           table_schema,
+                                                           ccm_has_full_entries,
+                                                           this,
+                                                           ng_id));
         // update table schema for alter table command.
         if (!is_create && !ccm_it.second)
         {
@@ -1641,8 +1651,8 @@ CcMap *CcShard::CreateOrUpdateSkCcMap(const TableName &index_name,
     {
         auto ccm_it = native_ccms_.try_emplace(
             index_name,
-            GetCatalogFactory(index_name.Engine())->CreateSkCcMap(
-                index_name, table_schema, this, ng_id));
+            GetCatalogFactory(index_name.Engine())
+                ->CreateSkCcMap(index_name, table_schema, this, ng_id));
         // update table schema for current sk cc map
         if (!is_create && !ccm_it.second)
         {
@@ -1656,10 +1666,10 @@ CcMap *CcShard::CreateOrUpdateSkCcMap(const TableName &index_name,
         auto fail_ccm_it = failover_ccms_.try_emplace(index_name).first;
         std::unordered_map<NodeGroupId, CcMap::uptr> &ccms =
             fail_ccm_it->second;
-        auto ccm_it =
-            ccms.try_emplace(ng_id,
-                             GetCatalogFactory(index_name.Engine())->CreateSkCcMap(
-                                 index_name, table_schema, this, ng_id));
+        auto ccm_it = ccms.try_emplace(
+            ng_id,
+            GetCatalogFactory(index_name.Engine())
+                ->CreateSkCcMap(index_name, table_schema, this, ng_id));
         // update table schema for current sk cc map
         if (!is_create && !ccm_it.second)
         {
@@ -2012,8 +2022,9 @@ void CcShard::CreateOrUpdateRangeCcMap(const TableName &table_name,
     {
         auto ccm_it = native_ccms_.try_emplace(
             range_table_name,
-            GetCatalogFactory(range_table_name.Engine())->CreateRangeMap(
-                range_table_name, table_schema, schema_ts, this, ng_id));
+            GetCatalogFactory(range_table_name.Engine())
+                ->CreateRangeMap(
+                    range_table_name, table_schema, schema_ts, this, ng_id));
         // update table schema for current range cc map
         if (!is_create && !ccm_it.second)
         {
@@ -2029,8 +2040,9 @@ void CcShard::CreateOrUpdateRangeCcMap(const TableName &table_name,
             fail_range_it->second;
         auto ccm_it = range_maps.try_emplace(
             ng_id,
-            GetCatalogFactory(range_table_name.Engine())->CreateRangeMap(
-                range_table_name, table_schema, schema_ts, this, ng_id));
+            GetCatalogFactory(range_table_name.Engine())
+                ->CreateRangeMap(
+                    range_table_name, table_schema, schema_ts, this, ng_id));
         // update table schema for current range cc map
         if (!is_create && !ccm_it.second)
         {

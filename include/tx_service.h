@@ -55,14 +55,13 @@
 #include "local_cc_shards.h"
 #include "sharder.h"
 #include "spinlock.h"
+#include "store/snapshot_manager.h"  // SnapshotManager
 #include "tx_execution.h"
 #include "tx_request.h"
 #include "tx_service_common.h"
 #include "tx_service_metrics.h"
 #include "tx_start_ts_collector.h"
 #include "txlog.h"
-
-#include "store/snapshot_manager.h"  // SnapshotManager
 
 using namespace std::chrono_literals;
 namespace bthread
@@ -640,7 +639,8 @@ public:
     {
 #ifdef ELOQ_MODULE_ENABLED
         assert(bthread::tls_task_group->group_id_ >= 0);
-        if (bthread::tls_task_group->group_id_ >= 0  && bthread::tls_task_group->group_id_ != (int32_t) thd_id_)
+        if (bthread::tls_task_group->group_id_ >= 0 &&
+            bthread::tls_task_group->group_id_ != (int32_t) thd_id_)
         {
             // For redis a tx life cycle can spread across multiple cmds, which
             // might be put into different bthread task group. If the task group

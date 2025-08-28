@@ -2061,7 +2061,7 @@ public:
         range_slice_id_.Reset();
         last_pinned_slice_ = nullptr;
         prefetch_size_ = prefetch_size;
-        err_ = CcErrorCode::NO_ERROR;
+        err_.store(CcErrorCode::NO_ERROR, std::memory_order_relaxed);
         cache_hit_miss_collected_ = false;
     }
 
@@ -2125,7 +2125,7 @@ public:
         unfinished_core_cnt_.store(1, std::memory_order_relaxed);
         range_slice_id_.Reset();
         last_pinned_slice_ = nullptr;
-        err_ = CcErrorCode::NO_ERROR;
+        err_.store(CcErrorCode::NO_ERROR, std::memory_order_relaxed);
         cache_hit_miss_collected_ = false;
     }
 
@@ -2437,7 +2437,8 @@ public:
             // result will be updated by dedicated core.
             if (res_->Value().is_local_)
             {
-                if (err_ == CcErrorCode::NO_ERROR)
+                if (err_.load(std::memory_order_relaxed) ==
+                    CcErrorCode::NO_ERROR)
                 {
                     res_->Value().ccm_scanner_->FinalizeCommit();
 
@@ -2445,7 +2446,7 @@ public:
                 }
                 else
                 {
-                    res_->SetError(err_);
+                    res_->SetError(err_.load(std::memory_order_relaxed));
                 }
             }
         }
@@ -2455,7 +2456,11 @@ public:
 
     bool SetError(CcErrorCode err)
     {
-        err_ = err;
+        CcErrorCode expected = CcErrorCode::NO_ERROR;
+        err_.compare_exchange_strong(expected,
+                                     err,
+                                     std::memory_order_relaxed,
+                                     std::memory_order_relaxed);
         uint16_t remaining_cnt =
             unfinished_core_cnt_.fetch_sub(1, std::memory_order_acq_rel);
 
@@ -2463,10 +2468,24 @@ public:
         // put back into the result sending core's queue.
         if (remaining_cnt <= 1)
         {
-            res_->SetError(err_);
+            res_->SetError(err_.load(std::memory_order_relaxed));
         }
 
         return remaining_cnt <= 1;
+    }
+
+    void DeferSetError(CcErrorCode err)
+    {
+        CcErrorCode expected = CcErrorCode::NO_ERROR;
+        err_.compare_exchange_strong(expected,
+                                     err,
+                                     std::memory_order_relaxed,
+                                     std::memory_order_relaxed);
+    }
+
+    CcErrorCode GetError() const
+    {
+        return err_.load(std::memory_order_acquire);
     }
 
     /**
@@ -2483,13 +2502,13 @@ public:
     {
         if (unfinished_core_cnt_.load(std::memory_order_relaxed) == 0)
         {
-            if (err_ == CcErrorCode::NO_ERROR)
+            if (err_.load(std::memory_order_relaxed) == CcErrorCode::NO_ERROR)
             {
                 res_->SetFinished();
             }
             else
             {
-                res_->SetError(err_);
+                res_->SetError(err_.load(std::memory_order_relaxed));
             }
             return true;
         }
@@ -2650,7 +2669,7 @@ private:
     uint32_t range_id_{0};
 
     std::atomic<uint16_t> unfinished_core_cnt_{1};
-    CcErrorCode err_{CcErrorCode::NO_ERROR};
+    std::atomic<CcErrorCode> err_{CcErrorCode::NO_ERROR};
 
     uint64_t ts_{0};
 

@@ -204,7 +204,9 @@ void SkGenerator::ProcessTask()
     {
         if (start_key_str_->size() == 0)
         {
-            range_start_key = cc_shards->GetCatalogFactory(base_table_name_->Engine())->NegativeInfKey();
+            range_start_key =
+                cc_shards->GetCatalogFactory(base_table_name_->Engine())
+                    ->NegativeInfKey();
             read_range_req.Set(&range_table_name,
                                0,
                                &range_start_key,

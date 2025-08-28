@@ -258,7 +258,6 @@ struct SequenceRecordSchema : public txservice::RecordSchema
 {
 public:
     SequenceRecordSchema() = default;
-
 };
 
 struct SequenceTableSchema : public txservice::TableSchema

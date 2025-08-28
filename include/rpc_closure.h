@@ -364,8 +364,9 @@ public:
                     const std::string *range_end_key_str =
                         &(request_.end_key());
                     bool is_last_scanned_key_str = true;
-                    TableEngine table_engine = remote::ToLocalType::ConvertTableEngine(
-                        request_.table_engine());
+                    TableEngine table_engine =
+                        remote::ToLocalType::ConvertTableEngine(
+                            request_.table_engine());
 
                     // Re-dispatch this range task.
                     if (request_.start_key().size() == 0)

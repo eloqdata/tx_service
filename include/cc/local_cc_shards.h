@@ -194,7 +194,7 @@ public:
         uint32_t ng_id,    // = 0,
         const std::map<std::string, uint32_t> &conf,
         CatalogFactory *catalog_factory[4],  // = nullptr,
-        SystemHandler *system_handler,    // = nullptr,
+        SystemHandler *system_handler,       // = nullptr,
         std::unordered_map<uint32_t, std::vector<NodeConfig>>
             *ng_configs,                    // = nullptr,
         uint64_t cluster_config_version,    // = 0,

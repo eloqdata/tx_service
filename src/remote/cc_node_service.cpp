@@ -1957,7 +1957,6 @@ void CcNodeService::CreateClusterBackup(
     auto *brpc_cntl = static_cast<brpc::Controller *>(controller);
     brpc_cntl->set_always_print_primitive_fields(true);
 
-
     const std::string &backup_name = request->backup_name();
     const std::string &dest_path = request->dest_path();
     const std::string &dest_user = request->dest_user();

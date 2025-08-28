@@ -4444,10 +4444,39 @@ public:
                     {
                         assert(lock_pair.second ==
                                CcErrorCode::MVCC_READ_FOR_WRITE_CONFLICT);
+
+                        if (req.IsLocal())
+                        {
+                            req.GetLocalScanner()->CommitAtCore(core_id);
+                        }
+
+                        if (is_read_snapshot &&
+                            req.WaitForSnapshotCnt(shard_->core_id_) > 0)
+                        {
+                            req.SetIsWaitForSnapshot(shard_->core_id_);
+                            req.DeferSetError(lock_pair.second);
+                            return false;
+                        }
+
                         if (req.SetError(lock_pair.second))
                         {
-                            req.UnpinSlices();
-                            return true;
+                            if (req.Result()->Value().is_local_)
+                            {
+                                req.UnpinSlices();
+                                return true;
+                            }
+                            else if (req.IsResponseSender(shard_->core_id_))
+                            {
+                                req.SendResponseIfFinished();
+                                req.UnpinSlices();
+                                return true;
+                            }
+                            else
+                            {
+                                shard_->local_shards_.EnqueueCcRequest(
+                                    shard_->core_id_, req.Txn(), &req);
+                                return false;
+                            }
                         }
                         else
                         {
@@ -4781,10 +4810,38 @@ public:
             case ScanReturnType::Blocked:
                 return false;
             case ScanReturnType::Error:
+                if (req.IsLocal())
+                {
+                    req.GetLocalScanner()->CommitAtCore(core_id);
+                }
+
+                if (is_read_snapshot &&
+                    req.WaitForSnapshotCnt(shard_->core_id_) > 0)
+                {
+                    req.SetIsWaitForSnapshot(shard_->core_id_);
+                    req.DeferSetError(err);
+                    return false;
+                }
+
                 if (req.SetError(err))
                 {
-                    req.UnpinSlices();
-                    return true;
+                    if (req.Result()->Value().is_local_)
+                    {
+                        req.UnpinSlices();
+                        return true;
+                    }
+                    else if (req.IsResponseSender(shard_->core_id_))
+                    {
+                        req.SendResponseIfFinished();
+                        req.UnpinSlices();
+                        return true;
+                    }
+                    else
+                    {
+                        shard_->local_shards_.EnqueueCcRequest(
+                            shard_->core_id_, req.Txn(), &req);
+                        return false;
+                    }
                 }
                 else
                 {
@@ -4978,10 +5035,38 @@ public:
                         case ScanReturnType::Blocked:
                             return false;
                         case ScanReturnType::Error:
+                            if (req.IsLocal())
+                            {
+                                req.GetLocalScanner()->CommitAtCore(core_id);
+                            }
+
+                            if (is_read_snapshot &&
+                                req.WaitForSnapshotCnt(shard_->core_id_) > 0)
+                            {
+                                req.SetIsWaitForSnapshot(shard_->core_id_);
+                                req.DeferSetError(err);
+                                return false;
+                            }
+
                             if (req.SetError(err))
                             {
-                                req.UnpinSlices();
-                                return true;
+                                if (req.Result()->Value().is_local_)
+                                {
+                                    req.UnpinSlices();
+                                    return true;
+                                }
+                                else if (req.IsResponseSender(shard_->core_id_))
+                                {
+                                    req.SendResponseIfFinished();
+                                    req.UnpinSlices();
+                                    return true;
+                                }
+                                else
+                                {
+                                    shard_->local_shards_.EnqueueCcRequest(
+                                        shard_->core_id_, req.Txn(), &req);
+                                    return false;
+                                }
                             }
                             else
                             {
@@ -5181,10 +5266,38 @@ public:
             case ScanReturnType::Blocked:
                 return false;
             case ScanReturnType::Error:
+                if (req.IsLocal())
+                {
+                    req.GetLocalScanner()->CommitAtCore(core_id);
+                }
+
+                if (is_read_snapshot &&
+                    req.WaitForSnapshotCnt(shard_->core_id_) > 0)
+                {
+                    req.SetIsWaitForSnapshot(shard_->core_id_);
+                    req.DeferSetError(err);
+                    return false;
+                }
+
                 if (req.SetError(err))
                 {
-                    req.UnpinSlices();
-                    return true;
+                    if (req.Result()->Value().is_local_)
+                    {
+                        req.UnpinSlices();
+                        return true;
+                    }
+                    else if (req.IsResponseSender(shard_->core_id_))
+                    {
+                        req.SendResponseIfFinished();
+                        req.UnpinSlices();
+                        return true;
+                    }
+                    else
+                    {
+                        shard_->local_shards_.EnqueueCcRequest(
+                            shard_->core_id_, req.Txn(), &req);
+                        return false;
+                    }
                 }
                 else
                 {
@@ -5378,10 +5491,38 @@ public:
                         case ScanReturnType::Blocked:
                             return false;
                         case ScanReturnType::Error:
+                            if (req.IsLocal())
+                            {
+                                req.GetLocalScanner()->CommitAtCore(core_id);
+                            }
+
+                            if (is_read_snapshot &&
+                                req.WaitForSnapshotCnt(shard_->core_id_) > 0)
+                            {
+                                req.SetIsWaitForSnapshot(shard_->core_id_);
+                                req.DeferSetError(err);
+                                return false;
+                            }
+
                             if (req.SetError(err))
                             {
-                                req.UnpinSlices();
-                                return true;
+                                if (req.Result()->Value().is_local_)
+                                {
+                                    req.UnpinSlices();
+                                    return true;
+                                }
+                                else if (req.IsResponseSender(shard_->core_id_))
+                                {
+                                    req.SendResponseIfFinished();
+                                    req.UnpinSlices();
+                                    return true;
+                                }
+                                else
+                                {
+                                    shard_->local_shards_.EnqueueCcRequest(
+                                        shard_->core_id_, req.Txn(), &req);
+                                    return false;
+                                }
                             }
                             else
                             {
