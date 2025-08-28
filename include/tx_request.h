@@ -963,6 +963,8 @@ struct MultiObjectCommandTxRequest
           is_cmd_owner_(true),
           is_watch_keys_(is_watch_keys)
     {
+        DLOG(INFO) << "ParseBRPopCommand cmd: "
+                   << static_cast<void *>(multi_obj_cmd_uptr_.get());
     }
 
     MultiObjectCommandTxRequest(const MultiObjectCommandTxRequest &rhs) =

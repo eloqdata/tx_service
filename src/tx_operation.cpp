@@ -5345,6 +5345,9 @@ void ObjectCommandOp::Forward(TransactionExecution *txm)
                 bool force_error = hd_result_.ForceError();
                 if (force_error)
                 {
+                    DLOG(INFO) << "ObjectCommandOp::Forward force error with "
+                                  "current ts: "
+                               << txservice::LocalCcShards::ClockTs();
                     txm->PostProcess(*this);
                 }
             }
@@ -5542,6 +5545,13 @@ void MultiObjectCommandOp::Forward(TransactionExecution *txm)
             atm_block_cnt_.load(std::memory_order_relaxed) > 0)
         {
             return;
+        }
+        if (mcmd->IsExpired())
+        {
+            DLOG(INFO) << "MultiObjectCommandOp::Forward mcmd "
+                       << static_cast<void *>(mcmd)
+                       << " is expired, current ts: "
+                       << txservice::LocalCcShards::ClockTs() << ", parse ts: ";
         }
 
         if (!mcmd->ForwardResult())
