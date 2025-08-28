@@ -430,12 +430,14 @@ message CreateBackupRequest{
 
     // only used on datastore processing the task.
     int64 ng_term = 6;
-    BackupTaskStatus status = 7;
+    repeated string backup_files = 7;
+    uint64 backup_ts = 8;
+    BackupTaskStatus status = 9;
 }
 
 message CreateBackupResponse{
     uint32 ng_id = 1;
-    BackupTaskStatus status = 2;
+    BackupTaskStatus status = 4;
 }
 
 message FetchBackupRequest{
@@ -445,7 +447,9 @@ message FetchBackupRequest{
 
 message FetchBackupResponse{
     uint32 ng_id = 1;
-    BackupTaskStatus status = 2;
+    repeated string backup_files = 2;
+    uint64 backup_ts = 3;
+    BackupTaskStatus status = 4;
 }
 
 message TerminateBackupRequest{
@@ -480,6 +484,30 @@ message ClusterBackupResponse{
 
 message FetchClusterBackupRequest{
     string backup_name = 1;
+}
+
+message CreateSnapshotRequest{
+  // The prefix for generating the snapshot_path
+  string snapshot_naming_prefix = 1;
+}
+
+message CreateSnapshotResponse{
+    int32 error_code = 1;
+    string snapshot_path = 2;
+    // The ts of the last checkpoint triggered just before the snapshot taken
+    uint64 checkpoint_ts = 3;
+}
+
+message CreateBranchRequest{
+    // The prefix for generating the branch_path
+    string branch_naming_prefix = 1;
+}
+
+message CreateBranchResponse{
+    int32 error_code = 1;
+    string branch_path = 2;
+    // The ts of the last checkpoint triggered just before the branching
+    uint64 checkpoint_ts = 3; 
 }
 
 service CcStreamService {
@@ -522,6 +550,8 @@ service CcRpcService {
     rpc NotifyShutdownCkpt(NotifyShutdownCkptRequest) returns (NotifyShutdownCkptResponse);
     rpc CheckCkptStatus(CheckCkptStatusRequest) returns (CheckCkptStatusResponse);
     rpc UpdateClusterConfig(UpdateClusterConfigRequest) returns (google.protobuf.Empty);
+    rpc CreateSnapshot(CreateSnapshotRequest) returns (CreateSnapshotResponse);
+    rpc CreateBranch(CreateBranchRequest) returns (CreateBranchResponse);
 }
 
 enum ShutdownStatus{
@@ -1372,6 +1402,10 @@ message CcMessage {
         StandbyHeartbeatRequest = 57;
         InvalidateTableCacheRequest = 58;
         InvalidateTableCacheResponse = 59;
+        CreateSnapshotRequest = 60;
+        CreateSnapshotResponse = 61;
+        CreateBranchRequest = 62;
+        CreateBeanchResponse = 63;
     }
 
     MessageType type = 1;
@@ -1428,5 +1462,9 @@ message CcMessage {
         KeyObjectStandbyForwardRequest key_obj_standby_forward_req=64;
         InvalidateTableCacheRequest invalidate_table_cache_req = 65;
         InvalidateTableCacheResponse invalidate_table_cache_resp = 66;
+        CreateSnapshotRequest create_snapshot_request = 67;
+        CreateSnapshotResponse create_snapshot_response = 68;
+        CreateBranchRequest create_branch_request = 69;
+        CreateBranchResponse create_branch_response = 70;
     }
 }

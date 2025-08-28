@@ -19,11 +19,10 @@
  *    <http://www.gnu.org/licenses/>.
  *
  */
-#include "store/snapshot_manager.h"
-
 #include <vector>
 
 #include "cc/local_cc_shards.h"
+#include "store/snapshot_manager.h"
 
 namespace txservice
 {
@@ -366,10 +365,17 @@ bool SnapshotManager::RunOneRoundCheckpoint(uint32_t node_group,
 
 void SnapshotManager::UpdateBackupTaskStatus(
     txservice::remote::CreateBackupRequest *task_ptr,
-    txservice::remote::BackupTaskStatus st)
+    txservice::remote::BackupTaskStatus st,
+    const std::vector<std::string> &snapshot_files,
+    const uint64_t checkpoint_ts)
 {
     std::unique_lock<std::mutex> lk(backup_tasks_mux_);
     task_ptr->set_status(st);
+    for (const auto &f : snapshot_files)
+    {
+        task_ptr->add_backup_files(f);
+    }
+    task_ptr->set_backup_ts(checkpoint_ts);
 }
 
 void SnapshotManager::HandleBackupTask(
@@ -419,6 +425,9 @@ void SnapshotManager::HandleBackupTask(
         return;
     }
 
+    // Fetch last checkpoint ts of the recent checkpoint.
+    uint64_t last_ckpt_ts = Sharder::Instance().GetNodeGroupCkptTs(node_group);
+
     {
         std::unique_lock<std::mutex> lk(backup_tasks_mux_);
         if (task_ptr->status() ==
@@ -440,8 +449,8 @@ void SnapshotManager::HandleBackupTask(
                                         ROCKSDB_CLOUD_FS_TYPE == 2 /*GCS*/))
         // For shared storage with cloud filesystem enabled, create snapshot
         std::vector<std::string> snapshot_files;
-        bool res =
-            store_hd_->CreateSnapshotForBackup(backup_name, snapshot_files);
+        bool res = store_hd_->CreateSnapshotForBackup(
+            backup_name, snapshot_files, last_ckpt_ts);
         if (!res)
         {
             LOG(ERROR) << "Failed to create snapshot for backup in shared "
@@ -456,14 +465,18 @@ void SnapshotManager::HandleBackupTask(
 #else
         LOG(INFO) << "Backup finished, name:" << backup_name;
 #endif
+
         this->UpdateBackupTaskStatus(
-            task_ptr, txservice::remote::BackupTaskStatus::Finished);
+            task_ptr,
+            txservice::remote::BackupTaskStatus::Finished,
+            snapshot_files,
+            last_ckpt_ts);
         return;
     }
     else
     {
-        bool res =
-            store_hd_->CreateSnapshotForBackup(backup_name, snapshot_files);
+        bool res = store_hd_->CreateSnapshotForBackup(
+            backup_name, snapshot_files, last_ckpt_ts);
         if (!res)
         {
             LOG(ERROR) << "Failed to create snpashot for backup";
@@ -477,7 +490,10 @@ void SnapshotManager::HandleBackupTask(
     if (task_ptr->dest_path().empty())
     {
         this->UpdateBackupTaskStatus(
-            task_ptr, txservice::remote::BackupTaskStatus::Finished);
+            task_ptr,
+            txservice::remote::BackupTaskStatus::Finished,
+            snapshot_files,
+            last_ckpt_ts);
         LOG(INFO) << "Backup task is finished, backup name: " << backup_name
                   << ", dest_path is not set.";
         return;
@@ -488,7 +504,10 @@ void SnapshotManager::HandleBackupTask(
     {
         DLOG(INFO) << "snapshot_files is empty";
         this->UpdateBackupTaskStatus(
-            task_ptr, txservice::remote::BackupTaskStatus::Finished);
+            task_ptr,
+            txservice::remote::BackupTaskStatus::Finished,
+            snapshot_files,
+            last_ckpt_ts);
         return;
     }
     else
@@ -536,7 +555,10 @@ void SnapshotManager::HandleBackupTask(
             LOG(INFO) << "Backup task is finished, backup name: " << backup_name
                       << ", dest_path:" << remote_dest;
             this->UpdateBackupTaskStatus(
-                task_ptr, txservice::remote::BackupTaskStatus::Finished);
+                task_ptr,
+                txservice::remote::BackupTaskStatus::Finished,
+                snapshot_files,
+                last_ckpt_ts);
         }
         else
         {
