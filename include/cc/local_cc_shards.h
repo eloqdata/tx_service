@@ -75,6 +75,17 @@ class SkGenerator;
 class UploadBatchSlicesClosure;
 struct FlushDataTask;
 
+// Provide a single ODR(One Definition Rule in C++) location for the default
+// next-slice function used by LocalCcShards::PinRangeSlice default argument to
+// avoid duplicate typeinfo.
+inline const std::function<int32_t(int32_t, bool)> &DefaultNextPrefetchSlice()
+{
+    static const std::function<int32_t(int32_t, bool)> fn =
+        [](int32_t idx, bool forward) -> int32_t
+    { return forward ? (idx + 1) : (idx - 1); };
+    return fn;
+}
+
 struct DataMigrationStatus
 {
 public:
@@ -1067,8 +1078,7 @@ public:
         bool no_load_on_miss = false,
         bool prefetch_force_load = false,
         const std::function<int32_t(int32_t, bool)> &next_prefetch_slice =
-            [](int32_t idx, bool forward)
-        { return forward ? (idx + 1) : (idx - 1); })
+            DefaultNextPrefetchSlice())
     {
         std::shared_lock<std::shared_mutex> lk(meta_data_mux_);
 
