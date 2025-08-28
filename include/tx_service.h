@@ -1021,10 +1021,10 @@ class TxServiceModule : public eloq::EloqModule
 {
 public:
     TxServiceModule() = default;
-    explicit TxServiceModule(
-        std::vector<std::unique_ptr<TxProcessor>> *tx_processors)
-        : tx_processors_(tx_processors)
+
+    void Init(std::vector<std::unique_ptr<TxProcessor>> *tx_processors)
     {
+        tx_processors_ = tx_processors;
         coordinators_.reserve(tx_processors_->size());
         for (const auto &txp : *tx_processors_)
         {
@@ -1250,7 +1250,7 @@ public:
 #ifdef ELOQ_MODULE_ENABLED
         // Register TxServiceModule into brpc so that the brpc workers can
         // process TxService tasks.
-        module_ = TxServiceModule(&pool_);
+        module_.Init(&pool_);
         LOG(INFO) << "Tx service module is registered.";
         eloq::register_module(&module_);
 #endif
