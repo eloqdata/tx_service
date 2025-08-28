@@ -2163,7 +2163,7 @@ private:
             flush_data_mem_usage_ -= quota;
 
             // Notify all waiting threads that memory has been freed
-            mem_cv_.notify_one();
+            mem_cv_.notify_all();
 
             return old_usage;
         }
