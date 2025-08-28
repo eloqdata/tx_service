@@ -6486,10 +6486,8 @@ public:
                                 TxKey tx_key(key);
                                 // TODO(lokax):
                                 int32_t part_id =
-                                    Sharder::MapKeyHashToBucketId(key->Hash()) &
-                                    0x3FF;
-                                // int32_t part_id = (key->Hash() >> 10) &
-                                // 0x3FF;
+                                    Sharder::MapKeyHashToHashPartitionId(
+                                        key->Hash());
                                 shard_->FetchRecord(table_name_,
                                                     table_schema_,
                                                     TxKey(key),
