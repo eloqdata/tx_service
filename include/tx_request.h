@@ -57,7 +57,8 @@ struct TemplateTxRequest : TxRequest
     TemplateTxRequest(const std::function<void()> *yield_fptr,
                       const std::function<void()> *resume_fptr,
                       TransactionExecution *txm = nullptr)
-        : tx_result_(yield_fptr, resume_fptr), txm_(txm)
+        : tx_result_(yield_fptr, resume_fptr),
+          txm_(yield_fptr != nullptr ? txm : nullptr)
     {
     }
 

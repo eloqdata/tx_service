@@ -555,7 +555,17 @@ public:
                                           std::memory_order_relaxed);
 
                     std::unique_lock<std::mutex> lk(coordi_->sleep_mux_);
-                    coordi_->sleep_cv_.wait(lk, [this]() { return !IsIdle(); });
+                    coordi_->sleep_cv_.wait(
+                        lk,
+                        [this]()
+                        {
+                            return !IsIdle()
+#ifdef EXT_TX_PROC_ENABLED
+                                   || coordi_->ext_processor_cnt_.load(
+                                          std::memory_order_relaxed) > 0
+#endif
+                                ;
+                        });
 
 #ifdef EXT_TX_PROC_ENABLED
                     local_round_cnt =
@@ -614,7 +624,7 @@ public:
 
     std::function<void(int16_t)> UpdateExtProcFunctor()
     {
-        return [this, coordi = coordi_](int16_t thd_delta) -> void
+        return [coordi = coordi_](int16_t thd_delta) -> void
         { coordi->UpdateExtTxProcessorCnt(thd_delta); };
     }
 
