@@ -3952,19 +3952,7 @@ public:
         if (req.IsWaitForSnapshot(shard_->core_id_))
         {
             assert(req.WaitForSnapshotCnt(shard_->core_id_) == 0);
-            bool finalized = [&req]
-            {
-                CcErrorCode err = req.GetError();
-                if (err == CcErrorCode::NO_ERROR)
-                {
-                    return req.SetFinish();
-                }
-                else
-                {
-                    return req.SetError(err);
-                }
-            }();
-            if (finalized)
+            if (req.SetFinish())
             {
                 if (req.Result()->Value().is_local_)
                 {
