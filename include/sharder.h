@@ -230,6 +230,11 @@ public:
         return total_range_buckets;
     }
 
+    static inline int32_t MapBucketIdToKvPartitionId(uint16_t bucket_id)
+    {
+        return bucket_id & 0x3FF;
+    }
+
     uint32_t NativeNodeGroup() const
     {
         return native_ng_;
