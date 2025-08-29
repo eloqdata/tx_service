@@ -416,6 +416,7 @@ public:
 
     CatalogFactory *GetCatalogFactory(TableEngine table_engine)
     {
+        LOG(INFO) << "GetCatalogFactory: " << static_cast<int>(table_engine)-1;
         return catalog_factory_[static_cast<int>(table_engine)-1];
     }
 
