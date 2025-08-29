@@ -28,6 +28,7 @@
 #include <string>
 #include <thread>
 #include <unordered_map>
+#include <vector>
 
 #include "store/data_store_handler.h"
 
@@ -79,8 +80,11 @@ private:
     void SyncWithStandby();
 
     void HandleBackupTask(txservice::remote::CreateBackupRequest *task);
-    void UpdateBackupTaskStatus(txservice::remote::CreateBackupRequest *task,
-                                txservice::remote::BackupTaskStatus st);
+    void UpdateBackupTaskStatus(
+        txservice::remote::CreateBackupRequest *task,
+        txservice::remote::BackupTaskStatus st,
+        const std::vector<std::string> &snapshot_files = {},
+        const uint64_t checkpoint_ts = 0);
 
     store::DataStoreHandler *store_hd_{nullptr};
 
@@ -93,8 +97,10 @@ private:
 
     const std::string backup_path_;
     std::mutex backup_tasks_mux_;
-    static const size_t MaxBackupTaskCount = 100;
+    // Queue of backup tasks whose status can be queried
     std::deque<txservice::remote::CreateBackupRequest *> backup_task_queue_;
+    // Limit the max number of backup tasks in queue
+    static const size_t MaxBackupTaskCount = 100;
     std::unordered_map<
         txservice::NodeGroupId,
         std::unordered_map<std::string, txservice::remote::CreateBackupRequest>>
