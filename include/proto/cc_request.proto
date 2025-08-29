@@ -486,30 +486,6 @@ message FetchClusterBackupRequest{
     string backup_name = 1;
 }
 
-message CreateSnapshotRequest{
-  // The prefix for generating the snapshot_path
-  string snapshot_naming_prefix = 1;
-}
-
-message CreateSnapshotResponse{
-    int32 error_code = 1;
-    string snapshot_path = 2;
-    // The ts of the last checkpoint triggered just before the snapshot taken
-    uint64 checkpoint_ts = 3;
-}
-
-message CreateBranchRequest{
-    // The prefix for generating the branch_path
-    string branch_naming_prefix = 1;
-}
-
-message CreateBranchResponse{
-    int32 error_code = 1;
-    string branch_path = 2;
-    // The ts of the last checkpoint triggered just before the branching
-    uint64 checkpoint_ts = 3; 
-}
-
 service CcStreamService {
   rpc Connect(ConnectRequest) returns (ConnectResponse);
 };
@@ -550,8 +526,6 @@ service CcRpcService {
     rpc NotifyShutdownCkpt(NotifyShutdownCkptRequest) returns (NotifyShutdownCkptResponse);
     rpc CheckCkptStatus(CheckCkptStatusRequest) returns (CheckCkptStatusResponse);
     rpc UpdateClusterConfig(UpdateClusterConfigRequest) returns (google.protobuf.Empty);
-    rpc CreateSnapshot(CreateSnapshotRequest) returns (CreateSnapshotResponse);
-    rpc CreateBranch(CreateBranchRequest) returns (CreateBranchResponse);
 }
 
 enum ShutdownStatus{
