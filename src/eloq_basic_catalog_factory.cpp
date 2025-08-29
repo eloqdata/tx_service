@@ -31,6 +31,7 @@
 #include "sharder.h"
 #include "tx_key.h"
 #include "range_cc_map.h"
+#include "sequences/sequences.h"
 #include "type.h"
 
 namespace txservice
@@ -71,11 +72,30 @@ std::unique_ptr<TxCommand> EloqBasicTableSchema::CreateTxCommand(
     return nullptr;
 }
 
+const TableName *EloqBasicTableSchema::GetSequenceTableName() const
+{
+    return &Sequences::table_name_;
+}
+
+std::pair<TxKey, TxRecord::Uptr>
+EloqBasicTableSchema::GetSequenceKeyAndInitRecord(
+    const TableName &table_name) const
+{
+    // Should not support auto increment column for basic table schema
+    return {TxKey(), nullptr};
+}
+
 TableSchema::uptr EloqHashCatalogFactory::CreateTableSchema(
     const TableName &table_name,
     const std::string &catalog_image,
     uint64_t version)
 {
+    if (table_name == txservice::Sequences::table_name_)
+    {
+      DLOG(INFO) << "===create sequence table schema";
+      return std::make_unique<txservice::SequenceTableSchema>(
+          table_name, catalog_image, version);
+    }
     return std::make_unique<EloqBasicTableSchema>(
         table_name, catalog_image, version);
 }
@@ -194,6 +214,12 @@ TableSchema::uptr EloqRangeCatalogFactory::CreateTableSchema(
     const std::string &catalog_image,
     uint64_t version)
 {
+    if (table_name == txservice::Sequences::table_name_)
+    {
+      DLOG(INFO) << "===create sequence table schema";
+      return std::make_unique<txservice::SequenceTableSchema>(
+          table_name, catalog_image, version);
+    }
     return std::make_unique<EloqBasicTableSchema>(
         table_name, catalog_image, version);
 }
