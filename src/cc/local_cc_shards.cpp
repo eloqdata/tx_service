@@ -90,10 +90,8 @@ LocalCcShards::LocalCcShards(
       ng_id_(ng_id),
       timer_terminate_(false),
       is_waiting_ckpt_(false),
-      catalog_factory_{catalog_factory[0],
-                       catalog_factory[1],
-                       catalog_factory[2],
-                       catalog_factory[3]},
+      catalog_factory_{
+          catalog_factory[0], catalog_factory[1], catalog_factory[2], catalog_factory[3], &hash_catalog_factory_, &range_catalog_factory_},
       system_handler_(system_handler),
       tx_service_(tx_service),
       enable_mvcc_(enable_mvcc),
