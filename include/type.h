@@ -452,7 +452,7 @@ struct TableName
 
     bool IsHashPartitioned() const
     {
-        return engine_ == TableEngine::EloqKv || engine_ == TableEngine::None;
+        return engine_ == TableEngine::EloqKv || engine_ == TableEngine::None || engine_ == TableEngine::InternalHash || engine_ == TableEngine::Sequence;
     }
 
     bool IsStringOwner() const
