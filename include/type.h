@@ -160,7 +160,7 @@ enum class TableEngine : uint8_t
     EloqKv = 2,
     EloqDoc = 3,
     Sequence = 4,  // Special engine for sequence table.
-    InternalRange = 5, // TODO(liunyl): Sequence should be part of internal range table.
+    InternalRange = 5, // TODO(liunyl): Sequence should be part of internal hash table.
     InternalHash = 6,
 };
 

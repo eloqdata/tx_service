@@ -168,19 +168,13 @@ public:
     {
         return false;
     }
-    
-    const TableName *GetSequenceTableName() const override
-    {
-        return nullptr;
-    }
+
+    const TableName *GetSequenceTableName() const override;
     
     std::pair<TxKey, TxRecord::Uptr>
     GetSequenceKeyAndInitRecord(
-        const TableName &table_name) const override
-    {
-        return {TxKey(), nullptr};
-    }
-
+        const TableName &table_name) const override;
+    
     void SetVersion(uint64_t version)
     {
         version_ = version;
