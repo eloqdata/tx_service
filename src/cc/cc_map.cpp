@@ -114,6 +114,15 @@ std::pair<LockType, CcErrorCode> CcMap::AcquireCceKeyLock(
             CcMap *lock_ccm = ccm == nullptr ? this : ccm;
             lock = &cce->GetOrCreateKeyLock(shard_, lock_ccm, page);
             lock_op_status = lock->AcquireLock(req, protocol, lock_type);
+            if (lock_ccm->table_name_.StringView() ==
+                    "tpcc.DISTRICT*$$D_W_ID_1_D_ID_1_D_NEXT_O_ID_1_D_TAX_1" &&
+                lock_type != LockType::ReadLock &&
+                lock_type != LockType::ReadIntent)
+            {
+                LOG(INFO) << ">> txn: " << req->Txn() << ", cce: " << cce
+                          << ", lock: " << lock->DebugInfo()
+                          << ", lock_op_status: " << (int) lock_op_status;
+            }
         }
         else
         {
@@ -283,6 +292,15 @@ std::pair<LockType, CcErrorCode> CcMap::LockHandleForResumedRequest(
     }
     else
     {
+        if (table_name_.StringView() ==
+            "tpcc.DISTRICT*$$D_W_ID_1_D_ID_1_D_NEXT_O_ID_1_D_TAX_1")
+        {
+            LOG(INFO) << ">> LockHandleForResumedRequest txn: " << req->Txn()
+                      << ", acquire_lock: " << (int) acquired_lock
+                      << ", iso_level: " << (int) iso_level << ", cce: " << cce
+                      << ", commit_ts: " << commit_ts
+                      << " read_ts: " << read_ts;
+        }
         shard_->UpsertLockHoldingTx(tx_number,
                                     tx_term,
                                     cce,

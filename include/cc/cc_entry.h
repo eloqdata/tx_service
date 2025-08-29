@@ -1236,9 +1236,7 @@ public:
      * @param ts - snapshot read timestamp
      * @param rec - variable to store result
      */
-    void MvccGet(uint64_t ts,
-                 uint64_t &last_read_ts,
-                 VersionResultRecord<ValueT> &rec)
+    void MvccGet(uint64_t ts, VersionResultRecord<ValueT> &rec)
     {
         assert(VersionedRecord);
         const uint64_t commit_ts = this->CommitTs();
@@ -1256,7 +1254,6 @@ public:
             // writer's commit_ts must be higher than MVCC reader's ts. Or it
             // will break the REPEATABLE READ since the next MVCC read in the
             // same transaction will read the new updated ccentry.
-            last_read_ts = std::max(ts, last_read_ts);
             if (rec_status == RecordStatus::Normal)
             {
                 rec.payload_ptr_ = payload_.VersionedCurrentPayload();
