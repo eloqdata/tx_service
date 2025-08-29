@@ -907,7 +907,8 @@ void FetchBucketDataCc::Reset(const TableName *table_name,
                               TxKey start_key,
                               bool start_key_inclusive,
                               size_t batch_size,
-                              CcRequestBase *requester)
+                              CcRequestBase *requester,
+                              OnFetchedBucketData backfill_func)
 {
     table_name_ = TableName(
         table_name->StringView(), table_name->Type(), table_name->Engine());
@@ -924,6 +925,7 @@ void FetchBucketDataCc::Reset(const TableName *table_name,
     err_code_ = 0;
 
     bucket_data_items_.clear();
+    backfill_func_ = backfill_func;
 }
 
 bool FetchBucketDataCc::ValidTermCheck()
@@ -963,8 +965,7 @@ bool FetchBucketDataCc::Execute(CcShard &ccs)
     }
     else
     {
-        // TODO(lokax): Add callback to process data
-        ccs.Enqueue(requester_);
+        (*backfill_func_)(this, requester_);
     }
 
     return true;

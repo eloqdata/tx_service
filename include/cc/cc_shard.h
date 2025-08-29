@@ -743,7 +743,8 @@ public:
         TxKey start_key,
         bool start_key_inclusive,
         size_t batch_size,
-        CcRequestBase *requester);
+        CcRequestBase *requester,
+        OnFetchedBucketData backfill_func);
 
     void RemoveFetchRecordRequest(LruEntry *cce);
 

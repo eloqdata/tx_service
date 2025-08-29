@@ -29,6 +29,7 @@
 #include <vector>
 
 #include "scan.h"
+#include "schema.h"
 #include "tx_key.h"
 #include "tx_record.h"
 
@@ -200,6 +201,11 @@ public:
     void SetCacheMaxBytes(size_t max_bytes)
     {
         mem_max_bytes_ = max_bytes;
+    }
+
+    const KeySchema *GetKeySchema()
+    {
+        return key_schema_;
     }
 
     TemplateScanTuple<KeyT, ValueT> *AddScanTuple()

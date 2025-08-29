@@ -572,6 +572,10 @@ public:
     std::function<void()> handle_kv_res_;
 };
 
+struct FetchBucketDataCc;
+typedef void (*OnFetchedBucketData)(FetchBucketDataCc *fetch_cc,
+                                    CcRequestBase *requester);
+
 struct FetchBucketDataCc : public CcRequestBase
 {
 public:
@@ -588,7 +592,8 @@ public:
                TxKey start_key,
                bool start_key_inclusive,
                size_t batch_size,
-               CcRequestBase *requester);
+               CcRequestBase *requester,
+               OnFetchedBucketData backfill_func);
 
     bool ValidTermCheck();
 
@@ -616,6 +621,8 @@ public:
     int32_t err_code_{0};
 
     std::deque<RawSliceDataItem> bucket_data_items_;
+
+    OnFetchedBucketData backfill_func_;
 };
 
 struct FetchSnapshotCc;

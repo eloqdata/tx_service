@@ -1601,7 +1601,8 @@ store::DataStoreHandler::DataStoreOpStatus CcShard::FetchBucketData(
     TxKey start_key,
     bool start_key_inclusive,
     size_t batch_size,
-    CcRequestBase *requester)
+    CcRequestBase *requester,
+    OnFetchedBucketData backfill_func)
 {
     FetchBucketDataCc *fetch_bucket_data_cc =
         fetch_bucket_data_cc_pool_.NextRequest();
@@ -1614,7 +1615,8 @@ store::DataStoreHandler::DataStoreOpStatus CcShard::FetchBucketData(
                                 std::move(start_key),
                                 start_key_inclusive,
                                 batch_size,
-                                requester);
+                                requester,
+                                backfill_func);
     return local_shards_.store_hd_->FetchBucketData(fetch_bucket_data_cc);
 }
 

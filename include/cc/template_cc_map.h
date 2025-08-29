@@ -72,6 +72,11 @@ namespace txservice
 template <typename KeyT, typename ValueT>
 void BackfillSnapshotForScanSlice(FetchSnapshotCc *fetch_cc,
                                   CcRequestBase *requester);
+
+template <typename KeyT, typename ValueT>
+void BackfillForScanNextBatch(FetchBucketDataCc *fetch_cc,
+                              CcRequestBase *requester);
+
 template <typename KeyT,
           typename ValueT,
           bool VersionedRecord,
@@ -12067,6 +12072,44 @@ void BackfillSnapshotForScanSlice(FetchSnapshotCc *fetch_cc,
     {
         shard.Enqueue(core_id, req);
     }
+}
+
+template <typename KeyT, typename ValueT>
+void BackfillForScanNextBatch(FetchBucketDataCc *fetch_cc,
+                              CcRequestBase *requester)
+{
+    ScanNextBatchCc *req = static_cast<ScanNextBatchCc *>(requester);
+    uint16_t bucket_id = fetch_cc->bucket_id_;
+    CcShard &shard = *fetch_cc->ccs_;
+    TemplateScanCache<KeyT, ValueT> *scan_cache =
+        static_cast<TemplateScanCache<KeyT, ValueT> *>(
+            req->GetKvCache(bucket_id));
+    assert(scan_cache != nullptr);
+
+    scan_cache->Reset();
+    for (auto &item : fetch_cc->bucket_data_items_)
+    {
+        size_t key_offset = 0;
+        TemplateScanTuple<KeyT, ValueT> *scan_tuple =
+            scan_cache->AddScanTuple();
+        scan_tuple->key_ts_ = item.version_ts_;
+        scan_tuple->KeyObj().Deserialize(
+            item.key_str_.data(), key_offset, scan_cache->GetKeySchema());
+
+        if (!item.is_deleted_)
+        {
+            scan_tuple->rec_status_ = RecordStatus::Normal;
+            ValueT val;
+            size_t rec_offset = 0;
+            scan_tuple->SetRecord(item.rec_str_.data(), rec_offset);
+        }
+        else
+        {
+            scan_tuple->rec_status_ = RecordStatus::Deleted;
+        }
+    }
+
+    shard.Enqueue(req);
 }
 
 }  // namespace txservice
