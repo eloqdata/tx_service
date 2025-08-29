@@ -282,6 +282,7 @@ public:
                 target_key = &decoded_key;
             }
 
+
             if (req.IsInsert())
             {
                 Iterator it = Floor(*target_key);
@@ -336,6 +337,7 @@ public:
         // new insert, or the cc entry whose key will be updated/deleted.
         CcEntry<KeyT, ValueT, VersionedRecord, RangePartitioned> &cc_entry =
             *cce_ptr;
+            LOG(INFO) << "target_key: " << target_key->ToString() << " cce_ptr " << cce_ptr;
 
         {
             if (!block_by_lock)
@@ -543,6 +545,7 @@ public:
                 cce->GetCcPage());
             assert(cc_page != nullptr);
             write_key = cc_page->KeyOfEntry(cce);
+        LOG(INFO) << "post write cc: " << txn << " " << commit_ts << " " << (int)op_type << " " << is_del << ",  key " << write_key->ToString();
 
             if (commit_ts > 0)
             {
@@ -596,6 +599,7 @@ public:
                 RecordStatus new_status =
                     is_del ? RecordStatus::Deleted : RecordStatus::Normal;
                 cce->SetCommitTsPayloadStatus(commit_ts, new_status);
+                LOG(INFO) << "set cce " << cce << " status " << (int)new_status;
 
                 if (req.IsInitialInsert())
                 {
@@ -1424,6 +1428,7 @@ public:
             is_read_snapshot =
                 (iso_lvl == IsolationLevel::Snapshot && !req.IsForWrite());
         }
+        LOG(INFO) << "is_read_snapshot: " << is_read_snapshot;
 
         CcEntryAddr &cce_addr = hd_res->Value().cce_addr_;
         CcEntry<KeyT, ValueT, VersionedRecord, RangePartitioned> *cce = nullptr;
@@ -1754,6 +1759,7 @@ public:
                 {
                     Iterator it =
                         FindEmplace(*look_key, false, !req.IsForWrite());
+                    LOG(INFO) << "FindEmplace: " << look_key->ToString();
                     cce = it->second;
                     ccp = it.GetPage();
                     // The read request accesses a new key not in the cc map.
@@ -1769,6 +1775,7 @@ public:
                     if (ccm_has_full_entries_ &&
                         cce->PayloadStatus() == RecordStatus::Unknown)
                     {
+                        LOG(INFO) << "unknown status to deleted";
                         cce->SetCommitTsPayloadStatus(1U,
                                                       RecordStatus::Deleted);
                         cce->SetCkptTs(1U);
@@ -1787,6 +1794,7 @@ public:
                         }
                         req.SetCacheHitMissCollected();
                     }
+                    LOG(INFO) << "cce->PayloadStatus(): " << (int)cce->PayloadStatus() << " cce " << cce;
 
                     if (cce->PayloadStatus() == RecordStatus::Unknown)
                     {

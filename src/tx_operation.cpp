@@ -678,16 +678,6 @@ void LockWriteRangeBucketsOp::Advance(TransactionExecution *txm)
             bucket_info = txm->FastToGetBucket(bucket_id);
             if (bucket_info != nullptr)
             {
-                write_key_it_++;
-            }
-            else
-            {
-                break;
-            }
-        }
-        if (write_key_it_ != write_key_end_)
-        {
-            assert(bucket_info != nullptr);
             NodeGroupId bucket_ng = bucket_info->BucketOwner();
             NodeGroupId new_bucket_ng = bucket_info->DirtyBucketOwner();
 
@@ -702,6 +692,12 @@ void LockWriteRangeBucketsOp::Advance(TransactionExecution *txm)
                 write_entry.forward_addr_.try_emplace((new_bucket_ng << 10) |
                                                       (hash & 0x3FF));
                 txm->rw_set_.IncreaseFowardWriteCnt(1);
+            }
+                write_key_it_++;
+            }
+            else
+            {
+                break;
             }
         }
     }

@@ -119,7 +119,7 @@ CcMap::uptr EloqHashCatalogFactory::CreatePkCcMap(
         table_name,
         table_version,
         table_schema,
-        ccm_has_full_entries);
+        ccm_has_full_entries || txservice_skip_kv);
 }
 
 CcMap::uptr EloqHashCatalogFactory::CreateSkCcMap(
@@ -243,7 +243,7 @@ CcMap::uptr EloqRangeCatalogFactory::CreatePkCcMap(
         table_name,
         table_version,
         table_schema,
-        ccm_has_full_entries);
+        ccm_has_full_entries || txservice_skip_kv);
 }
 
 CcMap::uptr EloqRangeCatalogFactory::CreateSkCcMap(
