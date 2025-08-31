@@ -329,6 +329,16 @@ public:
         cc_shards_[0]->NotifyCkpt(request_ckpt);
     }
 
+    void SuspendCheckPointerAndWaitForDone()
+    {
+        cc_shards_[0]->SuspendCkptAndWaitForDone();
+    }
+
+    void ResumeCheckPointer()
+    {
+        cc_shards_[0]->ResumeCkpt();
+    }
+
     void PrintCcMap()
     {
         std::unordered_map<TableName, size_t>

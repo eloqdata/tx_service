@@ -19,8 +19,6 @@
  *    <http://www.gnu.org/licenses/>.
  *
  */
-#include "checkpointer.h"
-
 #include <brpc/controller.h>
 
 #include <cstdint>
@@ -29,6 +27,7 @@
 
 #include "catalog_key_record.h"
 #include "cc_request.h"
+#include "checkpointer.h"
 #include "error_messages.h"
 #include "metrics.h"
 #include "range_slice.h"
@@ -62,6 +61,7 @@ Checkpointer::Checkpointer(LocalCcShards &shards,
       request_ckpt_(false),
       store_hd_(write_hd),
       ckpt_thd_status_(Status::Active),
+      is_doing_ckpt_(false),
       checkpoint_interval_(checkpoint_interval),
       ckpt_delay_time_(ckpt_delay_seconds * 1000000),
       log_agent_(log_agent)
@@ -413,7 +413,11 @@ void Checkpointer::Run()
             std::chrono::seconds(checkpoint_interval_),
             [this]
             {
-                if (ckpt_thd_status_ != Status::Active)
+                if (ckpt_thd_status_ == Status::Suspend)
+                {
+                    return false;
+                }
+                else if (ckpt_thd_status_ != Status::Active)
                 {
                     return true;
                 }
@@ -435,24 +439,33 @@ void Checkpointer::Run()
             last_checkpoint_ts_ = std::chrono::high_resolution_clock::now();
             continue;
         });
+
         if (ckpt_thd_status_ != Status::Active)
         {
             break;
         }
 
         last_checkpoint_ts_ = std::chrono::high_resolution_clock::now();
+        is_doing_ckpt_ = true;
         lk.unlock();
         Ckpt(false);
         lk.lock();
+        // notify all waiting that one round checkpoint is done.
+        is_doing_ckpt_ = false;
+        ckpt_cv_.notify_all();
 
         request_ckpt_ = false;
     }
 
     // ensure normal shutdown execute checkpoint since we could receive
     // terminating request during the last checkpoint.
+    is_doing_ckpt_ = true;
     lk.unlock();
     Ckpt(true);
     lk.lock();
+    // notify all waiting that one round checkpoint is done.
+    is_doing_ckpt_ = false;
+    ckpt_cv_.notify_all();
     ckpt_thd_status_ = Status::Terminated;
 }
 
@@ -463,9 +476,9 @@ void Checkpointer::Run()
  */
 void Checkpointer::Notify(bool request_ckpt)
 {
+    std::unique_lock<std::mutex> lk(ckpt_mux_);
     if (request_ckpt)
     {
-        std::unique_lock<std::mutex> lk(ckpt_mux_);
         request_ckpt_ = true;
     }
     ckpt_cv_.notify_one();
@@ -489,6 +502,38 @@ void Checkpointer::Terminate()
     {
         assert(ckpt_thd_status_ == Status::Active);
         ckpt_thd_status_ = Status::Terminating;
+        ckpt_cv_.notify_one();
+    }
+}
+
+void Checkpointer::Suspend()
+{
+    std::unique_lock<std::mutex> lk(ckpt_mux_);
+    if (ckpt_thd_status_ == Status::Active)
+    {
+        ckpt_thd_status_ = Status::Suspend;
+    }
+}
+
+void Checkpointer::SuspendAndWaitForDone()
+{
+    std::unique_lock<std::mutex> lk(ckpt_mux_);
+    if (ckpt_thd_status_ == Status::Active)
+    {
+        ckpt_thd_status_ = Status::Suspend;
+        while (is_doing_ckpt_)
+        {
+            ckpt_cv_.wait(lk);
+        }
+    }
+}
+
+void Checkpointer::Resume()
+{
+    std::unique_lock<std::mutex> lk(ckpt_mux_);
+    if (ckpt_thd_status_ == Status::Suspend)
+    {
+        ckpt_thd_status_ = Status::Active;
         ckpt_cv_.notify_one();
     }
 }
