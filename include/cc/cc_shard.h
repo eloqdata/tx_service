@@ -1000,14 +1000,14 @@ public:
     }
 
     std::shared_ptr<ReaderWriterObject<TableSchema>> FindSchemaCntl(
-        const TableName &tbl_name);
+        const TableName &tbl_name, NodeGroupId cc_ng_id);
 
     std::shared_ptr<ReaderWriterObject<TableSchema>> FindEmplaceSchemaCntl(
-        const TableName &tbl_name);
+        const TableName &tbl_name, NodeGroupId cc_ng_id);
 
-    void DeleteSchemaCntl(const TableName &tbl_name);
+    void DeleteSchemaCntl(const TableName &tbl_name, NodeGroupId cc_ng_id);
 
-    void ClearNativeSchemaCntl();
+    void ClearSchemaCntl(NodeGroupId cc_ng_id);
     void CollectCacheHit();
     void CollectCacheMiss();
 
@@ -1151,8 +1151,10 @@ private:
 
     SystemHandler *const system_handler_;
 
-    absl::flat_hash_map<TableName,
-                        std::shared_ptr<ReaderWriterObject<TableSchema>>>
+    absl::flat_hash_map<
+        NodeGroupId,
+        absl::flat_hash_map<TableName,
+                            std::shared_ptr<ReaderWriterObject<TableSchema>>>>
         catalog_rw_cntl_;
 
     // The max number of cc page to scan in one invocation of Clean().
