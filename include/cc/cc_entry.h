@@ -1250,10 +1250,6 @@ public:
         }
         if (commit_ts <= ts)
         {
-            // MVCC update last_read_ts_ of lastest ccentry to tell later
-            // writer's commit_ts must be higher than MVCC reader's ts. Or it
-            // will break the REPEATABLE READ since the next MVCC read in the
-            // same transaction will read the new updated ccentry.
             if (rec_status == RecordStatus::Normal)
             {
                 rec.payload_ptr_ = payload_.VersionedCurrentPayload();
