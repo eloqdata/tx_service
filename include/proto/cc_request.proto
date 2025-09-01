@@ -1376,10 +1376,6 @@ message CcMessage {
         StandbyHeartbeatRequest = 57;
         InvalidateTableCacheRequest = 58;
         InvalidateTableCacheResponse = 59;
-        CreateSnapshotRequest = 60;
-        CreateSnapshotResponse = 61;
-        CreateBranchRequest = 62;
-        CreateBeanchResponse = 63;
     }
 
     MessageType type = 1;
@@ -1436,9 +1432,5 @@ message CcMessage {
         KeyObjectStandbyForwardRequest key_obj_standby_forward_req=64;
         InvalidateTableCacheRequest invalidate_table_cache_req = 65;
         InvalidateTableCacheResponse invalidate_table_cache_resp = 66;
-        CreateSnapshotRequest create_snapshot_request = 67;
-        CreateSnapshotResponse create_snapshot_response = 68;
-        CreateBranchRequest create_branch_request = 69;
-        CreateBranchResponse create_branch_response = 70;
     }
 }
