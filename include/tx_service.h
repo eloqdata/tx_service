@@ -647,9 +647,10 @@ public:
      */
     bool ForwardTx(TransactionExecution *txm)
     {
-#ifdef ELOQ_MODULE_ENABLED
-        assert(bthread::tls_task_group->group_id_ >= 0);
-        if (bthread::tls_task_group->group_id_ >= 0 &&
+        assert(bthread::tls_task_group == nullptr ||
+               bthread::tls_task_group->group_id_ >= 0);
+        if (bthread::tls_task_group != nullptr &&
+            bthread::tls_task_group->group_id_ >= 0 &&
             bthread::tls_task_group->group_id_ != (int32_t) thd_id_)
         {
             // For redis a tx life cycle can spread across multiple cmds, which
@@ -658,7 +659,7 @@ public:
             // txm.
             return false;
         }
-#endif
+
         TxShardStatus expected = TxShardStatus::Free;
         bool success = coordi_->shard_status_.compare_exchange_weak(
             expected, TxShardStatus::Occupied, std::memory_order_acquire);

@@ -140,9 +140,9 @@ struct TemplateTxRequest : TxRequest
             if (txm_ != nullptr)
             {
                 txm_->ExternalForward();
-                tx_result_.Wait();
             }
 #endif
+            tx_result_.Wait();
             result_status = tx_result_.Status();
         } while (result_status == TxResultStatus::Unknown);
     }
