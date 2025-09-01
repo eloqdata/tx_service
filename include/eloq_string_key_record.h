@@ -424,16 +424,26 @@
 
      void SetEncodedBlob(const unsigned char *blob_ptr, size_t blob_size) override;
 
+     const char *EncodedBlobData() const override;
+
      size_t EncodedBlobSize() const override;
 
      size_t UnpackInfoSize() const override;
+
+     const char *UnpackInfoData() const override;
 
      size_t Length() const override;
 
      void Prefetch() const override;
 
+     static TxRecord::Uptr Create()
+     {
+         return std::make_unique<EloqStringRecord>();
+     }
+
 private:
     std::vector<char> encoded_blob_;
+    std::vector<char> unpack_info_;
  };
  
  }  // namespace txservice
