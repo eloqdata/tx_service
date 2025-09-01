@@ -1834,8 +1834,7 @@ public:
 
                     return false;
                 });
-                if (req.Isolation() == IsolationLevel::Snapshot &&
-                    shard_->LastReadTs() < req.ReadTimestamp())
+                if (req.Isolation() == IsolationLevel::Snapshot)
                 {
                     shard_->UpdateLastReadTs(req.ReadTimestamp());
                 }
@@ -4069,8 +4068,7 @@ public:
                 (1 + req.PrefetchSize() / shard_->core_cnt_) * 125 / 100);
         }
 
-        auto is_cache_full = [&req, scan_cache, remote_scan_cache]
-        {
+        auto is_cache_full = [&req, scan_cache, remote_scan_cache] {
             return req.IsLocal() ? scan_cache->IsFull()
                                  : remote_scan_cache->IsFull();
         };
@@ -4599,8 +4597,7 @@ public:
         }
         else
         {
-            if (req.Isolation() == IsolationLevel::Snapshot &&
-                shard_->LastReadTs() < req.ReadTimestamp())
+            if (req.Isolation() == IsolationLevel::Snapshot)
             {
                 shard_->UpdateLastReadTs(req.ReadTimestamp());
             }
