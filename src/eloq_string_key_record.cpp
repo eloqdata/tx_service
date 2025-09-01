@@ -195,8 +195,8 @@ TxRecord::Uptr EloqStringRecord::RemoveTTL()
 
 void EloqStringRecord::SetUnpackInfo(const unsigned char *unpack_ptr, size_t unpack_size)
 {
-    // EloqStringRecord uses empty string for unpack info
-    // No action needed as unpack info is always empty
+    unpack_info_.assign(reinterpret_cast<const char *>(unpack_ptr), 
+                        reinterpret_cast<const char *>(unpack_ptr) + unpack_size);
 }
 
 void EloqStringRecord::SetEncodedBlob(const unsigned char *blob_ptr, size_t blob_size)
@@ -205,14 +205,24 @@ void EloqStringRecord::SetEncodedBlob(const unsigned char *blob_ptr, size_t blob
                         reinterpret_cast<const char *>(blob_ptr) + blob_size);
 }
 
+const char *EloqStringRecord::EncodedBlobData() const
+{
+    return encoded_blob_.data();
+}
+
 size_t EloqStringRecord::EncodedBlobSize() const
 {
     return encoded_blob_.size();
 }
 
+const char *EloqStringRecord::UnpackInfoData() const
+{
+    return unpack_info_.data();
+}
+
 size_t EloqStringRecord::UnpackInfoSize() const
 {
-    return 0;
+    return unpack_info_.size();
 }
 
 size_t EloqStringRecord::Length() const
