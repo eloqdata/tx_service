@@ -1910,7 +1910,8 @@ void CcNodeService::FetchBackup(
     if (store_hd && !backup_name.empty())
     {
         auto st = store::SnapshotManager::Instance().GetBackupStatus(
-            ng_id, backup_name);
+            ng_id, backup_name, response);
+
         response->set_status(st);
     }
     else

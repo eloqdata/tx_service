@@ -660,7 +660,9 @@ txservice::remote::BackupTaskStatus SnapshotManager::CreateBackup(
 }
 
 txservice::remote::BackupTaskStatus SnapshotManager::GetBackupStatus(
-    txservice::NodeGroupId ng_id, const std::string &backup_name)
+    txservice::NodeGroupId ng_id,
+    const std::string &backup_name,
+    ::txservice::remote::FetchBackupResponse *response)
 {
     if (store_hd_ == nullptr)
     {
@@ -674,7 +676,17 @@ txservice::remote::BackupTaskStatus SnapshotManager::GetBackupStatus(
         auto backup_it = ng_it->second.find(backup_name);
         if (backup_it != ng_it->second.end())
         {
-            return backup_it->second.status();
+            auto backup_status = backup_it->second.status();
+            if (backup_status == txservice::remote::BackupTaskStatus::Finished)
+            {
+                for (const auto &f : backup_it->second.backup_files())
+                {
+                    response->add_backup_files(f);
+                }
+                response->set_backup_ts(backup_it->second.backup_ts());
+            }
+          
+            return backup_status;
         }
     }
 

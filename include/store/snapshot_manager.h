@@ -64,7 +64,9 @@ public:
         const txservice::remote::CreateBackupRequest *req);
 
     txservice::remote::BackupTaskStatus GetBackupStatus(
-        txservice::NodeGroupId ng_id, const std::string &backup_name);
+        txservice::NodeGroupId ng_id,
+        const std::string &backup_name,
+        ::txservice::remote::FetchBackupResponse *response);
 
     void TerminateBackup(txservice::NodeGroupId ng_id,
                          const std::string &backup_name);
