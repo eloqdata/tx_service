@@ -1834,6 +1834,15 @@ public:
 
                     return false;
                 });
+                if (req.Isolation() == IsolationLevel::Snapshot)
+                {
+                    // MVCC update last_read_ts_ of lastest ccentry to tell
+                    // later writer's commit_ts must be higher than MVCC
+                    // reader's ts. Or it will break the REPEATABLE READ since
+                    // the next MVCC read in the same transaction will read the
+                    // new updated ccentry.
+                    shard_->UpdateLastReadTs(req.ReadTimestamp());
+                }
                 std::tie(acquired_lock, err_code) =
                     AcquireCceKeyLock(cce,
                                       cce->CommitTs(),
@@ -1970,7 +1979,7 @@ public:
             assert(req.Type() == ReadType::Inside);
 
             VersionResultRecord<ValueT> v_rec;
-            cce->MvccGet(req.ReadTimestamp(), shard_->LastReadTs(), v_rec);
+            cce->MvccGet(req.ReadTimestamp(), v_rec);
             if (v_rec.payload_status_ == RecordStatus::Normal)
             {
                 if (req.Record() != nullptr)
@@ -4593,6 +4602,16 @@ public:
         }
         else
         {
+            if (req.Isolation() == IsolationLevel::Snapshot)
+            {
+                // MVCC update last_read_ts_ of lastest ccentry to tell
+                // later writer's commit_ts must be higher than MVCC
+                // reader's ts. Or it will break the REPEATABLE READ since
+                // the next MVCC read in the same transaction will read the
+                // new updated ccentry.
+                shard_->UpdateLastReadTs(req.ReadTimestamp());
+            }
+
             std::pair<Iterator, ScanType> start_pair =
                 req.Direction() == ScanDirection::Forward
                     ? ForwardScanStart(*req_start_key, req.StartInclusive())
@@ -11036,7 +11055,7 @@ protected:
         {
             assert(VersionedRecord);
             VersionResultRecord<ValueT> v_rec;
-            cce->MvccGet(read_ts, shard_->LastReadTs(), v_rec);
+            cce->MvccGet(read_ts, v_rec);
 
             // For snapshot reads, only if the visible version's record
             // status is deleted and no lock has been put on it, should
@@ -11200,7 +11219,7 @@ protected:
         {
             assert(VersionedRecord);
             VersionResultRecord<ValueT> v_rec;
-            cce->MvccGet(read_ts, shard_->LastReadTs(), v_rec);
+            cce->MvccGet(read_ts, v_rec);
 
             // For snapshot reads, only if the visible version's record
             // status is deleted and no lock has been put on it, should
@@ -11361,7 +11380,7 @@ protected:
         {
             assert(VersionedRecord);
             VersionResultRecord<ValueT> v_rec;
-            cce->MvccGet(read_ts, shard_->LastReadTs(), v_rec);
+            cce->MvccGet(read_ts, v_rec);
 
             // For snapshot reads, only if the visible version's record
             // status is deleted and no lock has been put on it, should
