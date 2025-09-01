@@ -2911,40 +2911,70 @@ void CcShard::NotifyTxProcessor()
 }
 
 std::shared_ptr<ReaderWriterObject<TableSchema>> CcShard::FindSchemaCntl(
-    const TableName &tbl_name)
+    const TableName &tbl_name, NodeGroupId cc_ng_id)
 {
-    auto it = catalog_rw_cntl_.find(tbl_name);
-    return it == catalog_rw_cntl_.end() ? nullptr : it->second;
+    auto ng_it = catalog_rw_cntl_.find(cc_ng_id);
+    if (ng_it == catalog_rw_cntl_.end())
+    {
+        return nullptr;
+    }
+    absl::flat_hash_map<TableName,
+                        std::shared_ptr<ReaderWriterObject<TableSchema>>>
+        &tbl_rw_cntls = ng_it->second;
+    auto it = tbl_rw_cntls.find(tbl_name);
+    return it == tbl_rw_cntls.end() ? nullptr : it->second;
 }
 
 std::shared_ptr<ReaderWriterObject<TableSchema>> CcShard::FindEmplaceSchemaCntl(
-    const TableName &tbl_name)
+    const TableName &tbl_name, NodeGroupId cc_ng_id)
 {
-    auto [it, insert] = catalog_rw_cntl_.try_emplace(tbl_name);
-    if (insert)
+    auto [ng_it, _] = catalog_rw_cntl_.try_emplace(cc_ng_id);
+    absl::flat_hash_map<TableName,
+                        std::shared_ptr<ReaderWriterObject<TableSchema>>>
+        &tbl_rw_cntls = ng_it->second;
+    auto [it, inserted] = tbl_rw_cntls.try_emplace(tbl_name);
+    if (inserted)
     {
         it->second = std::make_shared<ReaderWriterObject<TableSchema>>(this);
     }
-
     return it->second;
 }
 
-void CcShard::DeleteSchemaCntl(const TableName &tbl_name)
+void CcShard::DeleteSchemaCntl(const TableName &tbl_name, NodeGroupId cc_ng_id)
 {
-    catalog_rw_cntl_.erase(tbl_name);
+    auto ng_it = catalog_rw_cntl_.find(cc_ng_id);
+    if (ng_it == catalog_rw_cntl_.end())
+    {
+        return;
+    }
+    absl::flat_hash_map<TableName,
+                        std::shared_ptr<ReaderWriterObject<TableSchema>>>
+        &tbl_rw_cntls = ng_it->second;
+    tbl_rw_cntls.erase(tbl_name);
+    if (tbl_rw_cntls.empty())
+    {
+        catalog_rw_cntl_.erase(ng_it);
+    }
 }
 
-void CcShard::ClearNativeSchemaCntl()
+void CcShard::ClearSchemaCntl(NodeGroupId cc_ng_id)
 {
-    // When the native cc shard fails over, invalidates all schema reader-writer
+    // When the node gorup fails over, invalidates all schema reader-writer
     // control blocks. Invalidation ensures that future runtime queries will not
     // use cached schema and falls back to reading the schema via concurrency
     // control. Ongoing runtime queries will continue to use the old schema.
-    for (auto &[tbl_name, cntl] : catalog_rw_cntl_)
+    auto ng_it = catalog_rw_cntl_.find(cc_ng_id);
+    if (ng_it != catalog_rw_cntl_.end())
     {
-        cntl->Invalidate();
+        absl::flat_hash_map<TableName,
+                        std::shared_ptr<ReaderWriterObject<TableSchema>>>
+            &tbl_rw_cntls = ng_it->second;
+        for (auto &[tbl_name, cntl] : tbl_rw_cntls)
+        {
+            cntl->Invalidate();
+        }
+        catalog_rw_cntl_.erase(ng_it);
     }
-    catalog_rw_cntl_.clear();
 }
 
 TxLockInfo::uptr CcShard::GetTxLockInfo(int64_t tx_term)
