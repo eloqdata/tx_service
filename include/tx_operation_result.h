@@ -525,6 +525,7 @@ struct BucketScanPausePosition
     {
     }
 
+    // TODO(lokax): remove last key, last cce, last key inclusive
     TxKey last_key_;
     bool last_key_inclusive_{false};
     LruEntry *last_cce_{nullptr};
