@@ -22,10 +22,13 @@
 #pragma once
 
 #include <algorithm>
+#include <cstdint>
 #include <memory>
+#include <unordered_map>
 #include <utility>
 #include <vector>
 
+#include "absl/container/flat_hash_map.h"
 #include "range_slice.h"
 #include "scan.h"
 #include "tx_command.h"
@@ -385,6 +388,81 @@ struct UpsertTxRequest : public TemplateTxRequest<UpsertTxRequest, Void>
     OperationType operation_type_;
 };
 
+struct BucketScanSavePoint
+{
+    uint64_t cluster_config_version_{UINT64_MAX};
+    size_t prev_pause_idx_{UINT64_MAX};
+    std::vector<absl::flat_hash_map<NodeGroupId, std::vector<uint16_t>>>
+        bucket_groups_;
+    absl::flat_hash_map<NodeGroupId, absl::flat_hash_map<uint64_t, TxKey>>
+        pause_position_;
+
+    /*
+            BucketScanSavePoint *save_point =
+                client_connection_context->GetOrCreateSavePoint(cursor_id);
+            // Generate scan plan if need
+            ScanOpenTxRequest scan_open_req(save_point);
+            Execute(&scan_open_req);
+
+            while (save_point->HasPlan())
+            {
+                BucketScanPlan current_plan = save_point->PickPlan();
+                ScanBatchTxRequest scan_batch_req(&current_plan);
+                auto [result, err_code] = Execute(&scan_batch_req);
+                if (err_code != no_error)
+                {
+                    // don't update save point
+                    return {false, {}};
+                }
+
+                if (total_result_size >= limit)
+                {
+                    BucketScanSavePoint* new_save_point =
+                        GernerateNewSavePoint(save_point, result);
+                    CacheSavePoint(cursor_id,
+                        new_save_point);
+                    return {true, total_result};
+                }
+            }
+    */
+
+    BucketScanPlan PickPlan(size_t current_idx)
+    {
+        if (prev_pause_idx_ != UINT64_MAX && prev_pause_idx_ == current_idx)
+        {
+            // pause plan
+            BucketScanPlan plan(&bucket_groups_[current_idx], &pause_position_);
+            return plan;
+        }
+        else
+        {
+            // new plan
+            BucketScanPlan plan(&bucket_groups_[current_idx], nullptr);
+            return plan;
+        }
+    }
+
+    bool IsValidCursor(uint64_t version)
+    {
+        // the eloqkv client using the cursor id to resume the
+        // scan. In this scenario, the cluster config may have changed.
+        // This is a very rare case, we'll treat it here as an iterator
+        // invalidation. eloqkv will return RD_ERR_INVALID_CURSOR to
+        // client.
+        if (cluster_config_version_ == UINT64_MAX)
+        {
+            cluster_config_version_ = version;
+        }
+
+        if (version != cluster_config_version_)
+        {
+            return false;
+        }
+
+        return true;
+    }
+};
+
 struct ScanOpenTxRequest : public TemplateTxRequest<ScanOpenTxRequest, size_t>
 {
     ScanOpenTxRequest() : TemplateTxRequest(nullptr, nullptr)
@@ -411,7 +489,8 @@ struct ScanOpenTxRequest : public TemplateTxRequest<ScanOpenTxRequest, size_t>
                       const std::function<void()> *resume_fptr = nullptr,
                       TransactionExecution *txm = nullptr,
                       int32_t obj_type = -1,
-                      std::string_view scan_pattern = {})
+                      std::string_view scan_pattern = {},
+                      BucketScanSavePoint *save_point = nullptr)
         : TemplateTxRequest(yield_fptr, resume_fptr, txm),
           tab_name_(tabname),
           indx_type_(index_type),
@@ -431,7 +510,8 @@ struct ScanOpenTxRequest : public TemplateTxRequest<ScanOpenTxRequest, size_t>
           scan_alias_(UINT64_MAX),
           schema_version_(schema_version),
           obj_type_(obj_type),
-          scan_pattern_(scan_pattern)
+          scan_pattern_(scan_pattern),
+          bucket_scan_save_point_(save_point)
     {
     }
 
@@ -455,7 +535,8 @@ struct ScanOpenTxRequest : public TemplateTxRequest<ScanOpenTxRequest, size_t>
                const std::function<void()> *resume_fptr = nullptr,
                TransactionExecution *txm = nullptr,
                int32_t obj_type = -1,
-               std::string_view scan_pattern = {})
+               std::string_view scan_pattern = {},
+               BucketScanSavePoint *save_point = nullptr)
     {
         tx_result_.Reset(yield_fptr, resume_fptr);
         txm_ = txm;
@@ -478,6 +559,7 @@ struct ScanOpenTxRequest : public TemplateTxRequest<ScanOpenTxRequest, size_t>
         schema_version_ = schema_version;
         obj_type_ = obj_type;
         scan_pattern_ = scan_pattern;
+        bucket_scan_save_point_ = save_point;
     }
 
     const TxKey *StartKey() const
@@ -510,6 +592,8 @@ struct ScanOpenTxRequest : public TemplateTxRequest<ScanOpenTxRequest, size_t>
 
     int32_t obj_type_{-1};
     std::string_view scan_pattern_;
+
+    BucketScanSavePoint *bucket_scan_save_point_{nullptr};
 };
 
 struct ScanBatchTuple
@@ -573,13 +657,15 @@ struct ScanBatchTxRequest : public TemplateTxRequest<ScanBatchTxRequest, bool>
                        const std::function<void()> *resume_fptr = nullptr,
                        TransactionExecution *txm = nullptr,
                        int32_t obj_type = -1,
-                       std::string_view scan_pattern = {})
+                       std::string_view scan_pattern = {},
+                       BucketScanPlan *bucket_scan_plan = nullptr)
         : TemplateTxRequest(yield_fptr, resume_fptr, txm),
           alias_(alias),
           table_name_(table_name),
           batch_(batch_vec),
           obj_type_(obj_type),
-          scan_pattern_(scan_pattern)
+          scan_pattern_(scan_pattern),
+          bucket_scan_plan_(bucket_scan_plan)
     {
         batch_->clear();
     }
@@ -593,6 +679,8 @@ struct ScanBatchTxRequest : public TemplateTxRequest<ScanBatchTxRequest, bool>
 
     int32_t obj_type_{-1};
     std::string_view scan_pattern_;
+
+    BucketScanPlan *bucket_scan_plan_;
 };
 
 struct UnlockTuple
