@@ -1236,11 +1236,11 @@ void txservice::LocalCcHandler::ScanNextBatch(
             hd_res.Value().current_scan_plan_->GetNodeGroupTerm(node_group_id);
         assert(hd_res.Value().current_scan_plan_->CurrentScanBuckets().count(
                    node_group_id) > 0);
-        assert(hd_res.Value().current_scan_plan_->CurrentScanPosition().count(
+        assert(hd_res.Value().current_scan_plan_->CurrentScanPositions().count(
                    node_group_id) > 0);
         auto &pause_position =
             hd_res.Value()
-                .current_scan_plan_->CurrentScanPosition()[node_group_id];
+                .current_scan_plan_->CurrentScanPositions()[node_group_id];
         if (pause_position.empty())
         {
             // scan from negative start key
@@ -1256,7 +1256,7 @@ void txservice::LocalCcHandler::ScanNextBatch(
                             ->GetCatalogFactory(table_name.Engine())
                             ->NegativeInfKey(),
                         true));
-                iter.first->second.last_cce_ = nullptr;
+                // iter.first->second.last_cce_ = nullptr;
                 // iter.first->second.is_drained_ = false;
             }
         }
@@ -1284,7 +1284,7 @@ void txservice::LocalCcHandler::ScanNextBatch(
                    obj_type,
                    scan_pattern);
         for (const auto &[core_idx, position] :
-             req->GetBucketScanPlan()->CurrentScanPosition()[node_group_id])
+             req->GetBucketScanPlan()->CurrentScanPositions()[node_group_id])
         {
             cc_shards_.EnqueueCcRequest(thd_id_, core_idx, req);
         }

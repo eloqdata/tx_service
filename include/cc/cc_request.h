@@ -1564,6 +1564,15 @@ private:
     bool cache_hit_miss_collected_{false};
 };
 
+enum struct ScanBlockingType
+{
+    NoBlocking = 0,
+    BlockOnLock,
+    BlockOnFuture,
+    BlockOnWaitSnapshots,
+    BlockOnFetchBucket,
+};
+
 struct ScanOpenBatchCc
     : public TemplatedCcRequest<ScanOpenBatchCc, ScanOpenResult>
 {
@@ -1834,15 +1843,30 @@ public:
         is_require_keys_ = is_require_keys;
         is_require_recs_ = is_require_recs;
         is_require_sort_ = is_require_sort;
-        cce_ptr_ = nullptr;
-        cce_ptr_scan_type_ = ScanType::ScanUnknow;
+        // cce_ptr_ = nullptr;
+        // cce_ptr_scan_type_ = ScanType::ScanUnknow;
         ccm_ = nullptr;
         obj_type_ = obj_type;
         scan_pattern_ = scan_pattern;
 
-        // bucket_scan_postition_ = std::move(bucket_scan_postition);
         bucket_scan_plan_ = bucket_scan_plan;
-        unfinished_core_cnt_ = bucket_scan_plan->CurrentScanPosition().size();
+        unfinished_core_cnt_ =
+            bucket_scan_plan->CurrentScanPositions()[ng_id].size();
+        current_ng_scan_buckets_ = bucket_scan_plan_->CurrentScanBuckets(ng_id);
+
+        wait_for_fetch_bucket_cnt_.clear();
+        blocking_info_.clear();
+
+        for (const auto &[core_id, pos] :
+             bucket_scan_plan->CurrentScanPositions()[ng_id])
+        {
+            wait_for_fetch_bucket_cnt_[core_id] = 0;
+
+            auto [iter, inserted] = blocking_info_.try_emplace(core_id);
+            iter->second.cce_lock_addr_ = 0;
+            iter->second.scan_type_ = ScanType::ScanUnknow;
+            iter->second.type_ = ScanBlockingType::NoBlocking;
+        }
     }
 
     BucketScanPlan *GetBucketScanPlan()
@@ -1850,9 +1874,39 @@ public:
         return bucket_scan_plan_;
     }
 
-    ScanCache *GetLocalScanCache(size_t shard_id)
+    ScanCache *GetLocalMemoryCache(uint32_t shard_code)
     {
-        return res_->Value().ccm_scanner_->Cache(shard_id);
+        return res_->Value().ccm_scanner_->Cache(shard_code);
+    }
+
+    ScanCache *GetLocalKvCache(uint32_t shard_code, uint16_t bucket_id)
+    {
+        return res_->Value().ccm_scanner_->KvCache(shard_code, bucket_id);
+    }
+
+    BucketScanPausePosition &GetBucketScanPosition(
+        txservice::NodeGroupId node_group_id, uint16_t core_id)
+    {
+        return bucket_scan_plan_->CurrentScanPosition(node_group_id, core_id);
+    }
+
+    std::vector<uint16_t> &GetCurrentNgScanBuckets()
+    {
+        return *current_ng_scan_buckets_;
+    }
+
+    bool FilterBucket(size_t hash_code)
+    {
+        uint16_t bucket_id = Sharder::MapKeyHashToBucketId(hash_code);
+        for (const auto &bucket : *current_ng_scan_buckets_)
+        {
+            if (bucket == bucket_id)
+            {
+                return true;
+            }
+        }
+
+        return false;
     }
 
     bool IsForWrite() const
@@ -1885,49 +1939,72 @@ public:
         return ts_;
     }
 
-    void SetCcePtr(LruEntry *ptr)
+    uint64_t BlockingCceLockAddr(uint16_t core_id)
     {
-        cce_ptr_ = ptr;
+        assert(blocking_info_.count(core_id) > 0);
+        return blocking_info_[core_id].cce_lock_addr_;
     }
 
-    LruEntry *CcePtr() const
+    std::pair<ScanBlockingType, ScanType> BlockingPair(uint16_t core_id)
     {
-        return cce_ptr_;
+        assert(blocking_info_.count(core_id) > 0);
+        return {blocking_info_[core_id].type_,
+                blocking_info_[core_id].scan_type_};
     }
 
-    ScanType CcePtrScanType() const
+    void SetBlockingInfo(uint16_t core_id,
+                         uint64_t cce_lock_addr,
+                         ScanType scan_type,
+                         ScanBlockingType blocking_type)
     {
-        return cce_ptr_scan_type_;
-    }
-
-    void SetCcePtrScanType(ScanType scan_type)
-    {
-        cce_ptr_scan_type_ = scan_type;
-    }
-
-    void SetIsWaitForPostWrite(bool is_wait)
-    {
-        is_wait_for_post_write_ = is_wait;
-    }
-
-    bool IsWaitForPostWrite() const
-    {
-        return is_wait_for_post_write_;
+        assert(blocking_info_.count(core_id) > 0);
+        blocking_info_[core_id] = {cce_lock_addr, scan_type, blocking_type};
     }
 
     int32_t GetRedisObjectType() const
     {
         return obj_type_;
     }
+
     const std::string_view &GetRedisScanPattern() const
     {
         return scan_pattern_;
     }
 
-    ScanCache *GetKvCache(uint16_t bucket_id)
+    int64_t NodeGroupTerm() const
     {
-        assert(false);
-        return nullptr;
+        return ng_term_;
+    }
+
+    size_t WaitForFetchBucketCnt(uint16_t core_id)
+    {
+        assert(wait_for_fetch_bucket_cnt_.count(core_id) > 0);
+        return wait_for_fetch_bucket_cnt_[core_id];
+    }
+
+    void DecreaseWaitForFetchBucketCnt(uint16_t core_id)
+    {
+        assert(wait_for_fetch_bucket_cnt_.count(core_id) > 0);
+        wait_for_fetch_bucket_cnt_[core_id]--;
+    }
+
+    void IncreaseWaitForFetchBucketCnt(uint16_t core_id)
+    {
+        assert(wait_for_fetch_bucket_cnt_.count(core_id) > 0);
+        wait_for_fetch_bucket_cnt_[core_id]++;
+    }
+
+    bool IsWaitForFetchBucket(uint16_t core_id)
+    {
+        assert(blocking_info_.count(core_id) > 0);
+        return blocking_info_[core_id].type_ ==
+               ScanBlockingType::BlockOnFetchBucket;
+    }
+
+    void SetIsWaitForFetchBucket(uint16_t core_id)
+    {
+        assert(blocking_info_.count(core_id) > 0);
+        blocking_info_[core_id].type_ = ScanBlockingType::BlockOnFetchBucket;
     }
 
 private:
@@ -1940,7 +2017,7 @@ private:
     bool is_require_recs_{true};
     bool is_require_sort_{true};
     // Record the scan type of the blocked cce
-    ScanType cce_ptr_scan_type_{ScanType::ScanUnknow};
+    // ScanType cce_ptr_scan_type_{ScanType::ScanUnknow};
 
     // The pointer of the cc entry to which this request is directed. The
     // pointer is set, when the request locates the cc entry but is
@@ -1949,18 +2026,27 @@ private:
     // of the cc entry.
     // TODO: use lock_ptr_ when we allow the ccentry to move to another memory
     // address
-    LruEntry *cce_ptr_{nullptr};
+    // LruEntry *cce_ptr_{nullptr};
 
-    bool is_wait_for_post_write_{false};
+    // bool is_wait_for_post_write_{false};
 
     int32_t obj_type_{-1};
     std::string_view scan_pattern_;
 
     std::atomic<size_t> unfinished_core_cnt_{0};
-    // <core_idx, postition>
-    // absl::flat_hash_map<uint16_t, BucketScanPostition>
-    // bucket_scan_postition_;
+
     BucketScanPlan *bucket_scan_plan_{nullptr};
+    std::vector<uint16_t> *current_ng_scan_buckets_{nullptr};
+
+    struct ScanBlockingInfo
+    {
+        uint64_t cce_lock_addr_;
+        ScanType scan_type_;
+        ScanBlockingType type_;
+    };
+
+    absl::flat_hash_map<uint16_t, size_t> wait_for_fetch_bucket_cnt_;
+    absl::flat_hash_map<uint16_t, ScanBlockingInfo> blocking_info_;
 
     template <typename KeyT,
               typename ValueT,
@@ -2373,14 +2459,6 @@ public:
     {
         return IsLocal() ? res_->Value().ccm_scanner_ : nullptr;
     }
-
-    enum struct ScanBlockingType
-    {
-        NoBlocking = 0,
-        BlockOnLock,
-        BlockOnFuture,
-        BlockOnWaitSnapshots,
-    };
 
     uint64_t BlockingCceLockAddr(uint16_t core_id)
     {

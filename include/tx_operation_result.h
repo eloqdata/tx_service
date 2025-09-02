@@ -598,12 +598,23 @@ public:
         return *current_scan_bucket_;
     }
 
+    std::vector<uint16_t> *CurrentScanBuckets(NodeGroupId node_group_id)
+    {
+        return &current_scan_bucket_->at(node_group_id);
+    }
+
     absl::flat_hash_map<
         NodeGroupId,
         absl::flat_hash_map<uint64_t, BucketScanPausePosition>> &
-    CurrentScanPosition()
+    CurrentScanPositions()
     {
         return current_scan_position_;
+    }
+
+    BucketScanPausePosition &CurrentScanPosition(NodeGroupId node_group_id,
+                                                 uint16_t core_id)
+    {
+        return current_scan_position_.at(node_group_id).at(core_id);
     }
 
     void UpdateScanPosition(NodeGroupId node_group_id,

@@ -353,6 +353,10 @@ public:
     virtual ~CcScanner() = default;
 
     virtual ScanCache *Cache(uint32_t shard_code) = 0;
+    virtual ScanCache *KvCache(uint32_t shard_code, uint16_t bucket_id)
+    {
+        return nullptr;
+    }
     virtual void ResetShards(size_t shard_cnt) = 0;
     virtual void ResetCaches() = 0;
     virtual void Reset(const KeySchema *key_schema) = 0;
@@ -526,12 +530,20 @@ public:
         {
         }
 
-        ScanCache *GetKvCache(uint16_t bucket_id)
+        ScanCache *GetKvCache(uint16_t bucket_id,
+                              CcScanner *scanner,
+                              const KeySchema *key_schema)
         {
             auto iter = kv_caches_.find(bucket_id);
             if (iter != kv_caches_.end())
             {
                 return &iter->second;
+            }
+            else
+            {
+                auto em_it =
+                    kv_caches_.try_emplace(bucket_id, scanner, key_schema);
+                return &em_it.first->second;
             }
         }
 
@@ -639,6 +651,12 @@ public:
         ShardCache *shard_cache = GetShardCache(shard_code);
         return &shard_cache->memory_cache_;
         // For TemplateCcScanner, shard_code is (ng_id << 10) + core_id.
+    }
+
+    ScanCache *KvCache(uint32_t shard_code, uint16_t bucket_id) override
+    {
+        ShardCache *shard_cache = GetShardCache(shard_code);
+        return shard_cache->GetKvCache(bucket_id, this, key_schema_);
     }
 
     void ShardCacheSizes(std::vector<std::pair<uint32_t, size_t>>
