@@ -2959,7 +2959,7 @@ void CcShard::DeleteSchemaCntl(const TableName &tbl_name, NodeGroupId cc_ng_id)
 
 void CcShard::ClearSchemaCntl(NodeGroupId cc_ng_id)
 {
-    // When the node gorup fails over, invalidates all schema reader-writer
+    // When the node group fails over, invalidates all schema reader-writer
     // control blocks. Invalidation ensures that future runtime queries will not
     // use cached schema and falls back to reading the schema via concurrency
     // control. Ongoing runtime queries will continue to use the old schema.
@@ -2967,7 +2967,7 @@ void CcShard::ClearSchemaCntl(NodeGroupId cc_ng_id)
     if (ng_it != catalog_rw_cntl_.end())
     {
         absl::flat_hash_map<TableName,
-                        std::shared_ptr<ReaderWriterObject<TableSchema>>>
+                            std::shared_ptr<ReaderWriterObject<TableSchema>>>
             &tbl_rw_cntls = ng_it->second;
         for (auto &[tbl_name, cntl] : tbl_rw_cntls)
         {
