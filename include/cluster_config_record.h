@@ -21,6 +21,7 @@
  */
 #pragma once
 
+#include <cstdint>
 #include <map>
 #include <unordered_set>
 
@@ -276,6 +277,11 @@ public:
     void SetVersion(uint64_t version)
     {
         version_ = version;
+    }
+
+    uint64_t Version() const
+    {
+        return version_;
     }
 
     void SetNodeGroupConfigs(

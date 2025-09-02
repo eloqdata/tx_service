@@ -345,7 +345,9 @@ public:
         bool is_for_write = false,
         bool is_ckpt_delta = false) = 0;
 
-    virtual void ScanNextBatch(uint64_t tx_number,
+    virtual void ScanNextBatch(const TableName &table_name,
+                               NodeGroupId node_group_id,
+                               uint64_t tx_number,
                                int64_t tx_term,
                                uint16_t command_id,
                                uint64_t start_ts,

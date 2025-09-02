@@ -47,6 +47,7 @@
 #include <utility>
 #include <vector>
 
+#include "absl/container/flat_hash_map.h"
 #include "catalog_key_record.h"
 #include "cc/cc_map.h"
 #include "cc/cc_shard.h"
@@ -1786,33 +1787,27 @@ public:
         {
             cc_ng_term = Sharder::Instance().LeaderTerm(node_group_id_);
         }
-        if (cce_addr_->Term() != cc_ng_term)
+
+        if (ng_term_ < 0)
         {
-            return false;
+            ng_term_ = cc_ng_term;
         }
 
-        assert(cce_addr_->CceLockPtr() != 0);
-        KeyGapLockAndExtraData *lock =
-            reinterpret_cast<KeyGapLockAndExtraData *>(cce_addr_->CceLockPtr());
-        if (lock->GetCcMap() == nullptr)
+        if (cc_ng_term < 0 || cc_ng_term != ng_term_)
         {
-            assert(lock->GetCcEntry() == nullptr);
-            assert(lock->GetCcPage() == nullptr);
             return false;
         }
         else
         {
-            ccm_ = lock->GetCcMap();
+            return true;
         }
-
-        assert(ccm_ != nullptr);
-        return true;
     }
 
     void Reset(const uint32_t &ng_id,
+               int64_t ng_term,
                TxNumber tx_number,
                const uint64_t &ts,
-               ScanCache *cache,
+               BucketScanPlan *bucket_scan_plan,
                int64_t tx_term,
                CcHandlerResult<ScanNextResult> *next_res,
                IsolationLevel iso_level,
@@ -1829,8 +1824,10 @@ public:
         TemplatedCcRequest<ScanNextBatchCc, ScanNextResult>::Reset(
             nullptr, next_res, ng_id, tx_number, tx_term, protocol, iso_level);
 
+        // parallel_req_ = true;
+
+        ng_term_ = ng_term;  // bucket owner term
         ts_ = ts;
-        scan_cache_ = cache;
         is_for_write_ = is_for_write;
         is_ckpt_delta_ = is_delta;
         is_covering_keys_ = is_covering_keys;
@@ -1839,12 +1836,23 @@ public:
         is_require_sort_ = is_require_sort;
         cce_ptr_ = nullptr;
         cce_ptr_scan_type_ = ScanType::ScanUnknow;
-
-        const ScanTuple *last_tuple = cache->LastTuple();
-        cce_addr_ = &last_tuple->cce_addr_;
         ccm_ = nullptr;
         obj_type_ = obj_type;
         scan_pattern_ = scan_pattern;
+
+        // bucket_scan_postition_ = std::move(bucket_scan_postition);
+        bucket_scan_plan_ = bucket_scan_plan;
+        unfinished_core_cnt_ = bucket_scan_plan->CurrentScanPosition().size();
+    }
+
+    BucketScanPlan *GetBucketScanPlan()
+    {
+        return bucket_scan_plan_;
+    }
+
+    ScanCache *GetLocalScanCache(size_t shard_id)
+    {
+        return res_->Value().ccm_scanner_->Cache(shard_id);
     }
 
     bool IsForWrite() const
@@ -1887,7 +1895,7 @@ public:
         return cce_ptr_;
     }
 
-    ScanType CcePtrScanType()
+    ScanType CcePtrScanType() const
     {
         return cce_ptr_scan_type_;
     }
@@ -1923,9 +1931,7 @@ public:
     }
 
 private:
-    const CcEntryAddr *cce_addr_;
     uint64_t ts_{0};
-    ScanCache *scan_cache_{nullptr};
 
     bool is_for_write_{false};
     bool is_covering_keys_{false};
@@ -1949,6 +1955,13 @@ private:
 
     int32_t obj_type_{-1};
     std::string_view scan_pattern_;
+
+    std::atomic<size_t> unfinished_core_cnt_{0};
+    // <core_idx, postition>
+    // absl::flat_hash_map<uint16_t, BucketScanPostition>
+    // bucket_scan_postition_;
+    BucketScanPlan *bucket_scan_plan_{nullptr};
+
     template <typename KeyT,
               typename ValueT,
               bool VersionedRecord,
