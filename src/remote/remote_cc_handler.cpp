@@ -630,7 +630,7 @@ void txservice::remote::RemoteCcHandler::ScanNext(
     // the range. Sets the cc entry addresses where last scan stops.
     if (cc_ng_term > 0)
     {
-        uint32_t remote_core_cnt = scanner.CacheCount();
+        uint32_t remote_core_cnt = scanner.ShardCount();
 
         for (uint32_t core_id = 0; core_id < remote_core_cnt; ++core_id)
         {
