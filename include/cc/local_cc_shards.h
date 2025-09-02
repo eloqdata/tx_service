@@ -1067,8 +1067,7 @@ public:
         bool no_load_on_miss = false,
         bool prefetch_force_load = false,
         const std::function<int32_t(int32_t, bool)> &next_prefetch_slice =
-            [](int32_t idx, bool forward)
-        { return forward ? (idx + 1) : (idx - 1); })
+            DefaultNextPrefetchSlice)
     {
         std::shared_lock<std::shared_mutex> lk(meta_data_mux_);
 
@@ -1756,6 +1755,11 @@ public:
     std::mutex table_ranges_heap_mux_;
 
 private:
+    static inline int32_t DefaultNextPrefetchSlice(int32_t idx, bool forward)
+    {
+        return forward ? (idx + 1) : (idx - 1);
+    }
+
     void TimerRun();
     // Internal interface that exposes non const return type and does
     // not acquire mutex lock.
