@@ -2707,6 +2707,7 @@ public:
         {
             ng_term = Sharder::Instance().LeaderTerm(ng_id);
         }
+
         if (ng_term < 0)
         {
             req.Result()->SetError(CcErrorCode::REQUESTED_NODE_NOT_LEADER);
@@ -2939,7 +2940,7 @@ public:
         }
         */
 
-        bool scan_finished = false;
+        // bool scan_finished = false;
 
         if (direction == ScanDirection::Forward)
         {
@@ -3037,7 +3038,7 @@ public:
                 ccp_last = ccp;
             }
 
-            scan_finished = (scan_ccm_it == pos_inf_it);
+            // scan_finished = (scan_ccm_it == pos_inf_it);
         }
         else
         {
@@ -3125,7 +3126,7 @@ public:
                 ccp_last = ccp;
             }
 
-            scan_finished = (scan_ccm_it == neg_inf_it);
+            // scan_finished = (scan_ccm_it == neg_inf_it);
         }
 
         if (cce_last != nullptr)

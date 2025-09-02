@@ -658,14 +658,18 @@ struct ScanBatchTxRequest : public TemplateTxRequest<ScanBatchTxRequest, bool>
                        TransactionExecution *txm = nullptr,
                        int32_t obj_type = -1,
                        std::string_view scan_pattern = {},
-                       BucketScanPlan *bucket_scan_plan = nullptr)
+                       BucketScanPlan *bucket_scan_plan = nullptr,
+                       std::vector<std::pair<uint32_t, size_t>>
+                           *shard_code_and_sizes = nullptr)
         : TemplateTxRequest(yield_fptr, resume_fptr, txm),
           alias_(alias),
           table_name_(table_name),
           batch_(batch_vec),
           obj_type_(obj_type),
           scan_pattern_(scan_pattern),
-          bucket_scan_plan_(bucket_scan_plan)
+
+          bucket_scan_plan_(bucket_scan_plan),
+          shard_code_and_sizes_(shard_code_and_sizes)
     {
         batch_->clear();
     }
@@ -680,7 +684,8 @@ struct ScanBatchTxRequest : public TemplateTxRequest<ScanBatchTxRequest, bool>
     int32_t obj_type_{-1};
     std::string_view scan_pattern_;
 
-    BucketScanPlan *bucket_scan_plan_;
+    BucketScanPlan *bucket_scan_plan_{nullptr};
+    std::vector<std::pair<uint32_t, size_t>> *shard_code_and_sizes_{nullptr};
 };
 
 struct UnlockTuple

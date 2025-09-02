@@ -936,7 +936,7 @@ void txservice::LocalCcHandler::ScanOpen(
     CcScanner *scanner_ptr = open_result.scanner_.get();
     assert(open_result.scan_alias_ < UINT64_MAX);
     scanner_ptr->SetStatus(ScannerStatus::Open);
-    scanner_ptr->SetDrainCacheMode(false);
+    // scanner_ptr->SetDrainCacheMode(false);
     scanner_ptr->is_ckpt_delta_ = is_ckpt_delta;
     scanner_ptr->is_for_write_ = is_for_write;
     scanner_ptr->is_covering_keys_ = is_covering_keys;
@@ -1197,7 +1197,7 @@ void txservice::LocalCcHandler::ScanOpenLocal(
     CcScanner *scanner_ptr = open_result.scanner_.get();
     assert(open_result.scan_alias_ < UINT64_MAX);
     scanner_ptr->SetStatus(ScannerStatus::Open);
-    scanner_ptr->SetDrainCacheMode(false);
+    // scanner_ptr->SetDrainCacheMode(false);
     scanner_ptr->is_ckpt_delta_ = is_ckpt_delta;
     scanner_ptr->is_for_write_ = is_for_write;
     scanner_ptr->iso_level_ = iso_level;
@@ -1233,7 +1233,7 @@ void txservice::LocalCcHandler::ScanNextBatch(
         Sharder::Instance().LeaderNodeId(node_group_id) == cc_shards_.node_id_)
     {
         int64_t node_group_term =
-            hd_res.Value().GetNodeGroupTerm(node_group_id);
+            hd_res.Value().current_scan_plan_->GetNodeGroupTerm(node_group_id);
         assert(hd_res.Value().current_scan_plan_->CurrentScanBuckets().count(
                    node_group_id) > 0);
         assert(hd_res.Value().current_scan_plan_->CurrentScanPosition().count(
@@ -1257,7 +1257,7 @@ void txservice::LocalCcHandler::ScanNextBatch(
                             ->NegativeInfKey(),
                         true));
                 iter.first->second.last_cce_ = nullptr;
-                iter.first->second.is_drained_ = false;
+                // iter.first->second.is_drained_ = false;
             }
         }
 
