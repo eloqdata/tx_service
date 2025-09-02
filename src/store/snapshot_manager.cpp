@@ -415,10 +415,6 @@ void SnapshotManager::HandleBackupTask(
         }
     }
 
-    // Suspend checkpointer to avoid checkpoint and backup running at the
-    // same time.
-    Sharder::Instance().GetLocalCcShards()->SuspendCheckPointerAndWaitForDone();
-
     bool ckpt_res = this->RunOneRoundCheckpoint(node_group, leader_term);
     if (!ckpt_res)
     {
@@ -490,9 +486,6 @@ void SnapshotManager::HandleBackupTask(
             return;
         }
     }
-
-    // Resume checkpointer
-    Sharder::Instance().GetLocalCcShards()->ResumeCheckPointer();
 
     if (task_ptr->dest_path().empty())
     {

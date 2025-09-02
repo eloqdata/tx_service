@@ -95,22 +95,6 @@ public:
      */
     void Terminate();
 
-    /**
-     * @brief Suspend the checkpointer thread for a while.
-     */
-    void Suspend();
-
-    /**
-     * @brief Suspend the checkpointer thread and wait for the current
-     * checkpoint to be done.
-     */
-    void SuspendAndWaitForDone();
-
-    /**
-     * @brief Resume the checkpointer thread.
-     */
-    void Resume();
-
     void Join();
 
     void CollectCkptMetric(bool success)
@@ -150,7 +134,6 @@ private:
     enum struct Status
     {
         Active,
-        Suspend,
         Terminating,
         Terminated
     };
@@ -163,7 +146,6 @@ private:
     store::DataStoreHandler *store_hd_;
     std::thread thd_;
     Status ckpt_thd_status_;
-    bool is_doing_ckpt_{false};
     const uint32_t checkpoint_interval_;
     std::chrono::system_clock::time_point last_checkpoint_ts_;
     uint32_t ckpt_delay_time_;  // unit: Microsecond

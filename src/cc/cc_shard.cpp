@@ -1036,22 +1036,6 @@ void CcShard::NotifyCkpt(bool request_ckpt)
     }
 }
 
-void CcShard::SuspendCkptAndWaitForDone()
-{
-    if (ckpter_ != nullptr)
-    {
-        ckpter_->SuspendAndWaitForDone();
-    }
-}
-
-void CcShard::ResumeCkpt()
-{
-    if (ckpter_ != nullptr)
-    {
-        ckpter_->Resume();
-    }
-}
-
 void CcShard::SetWaitingCkpt(bool is_waiting)
 {
     local_shards_.SetWaitingCkpt(is_waiting);
