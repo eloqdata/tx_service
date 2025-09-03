@@ -3020,7 +3020,7 @@ void TransactionExecution::PostProcess(ScanNextOperation &scan_next)
         if (scan_batch.empty())
         {
             // current plan finished. clear all cache.
-            scanner.Close();
+            // scanner.Close();
             scanner.SetStatus(ScannerStatus::Blocked);
         }
 
@@ -3535,7 +3535,7 @@ void TransactionExecution::ScanClose(
         // not NoLock, then drain_batch_ has include them, and should skip them.
         // Non-repetition and non-omission.
         std::vector<const ScanTuple *> last_tuples;
-        scanner->ShardCacheLastTuples(&last_tuples);
+        scanner->MemoryShardCacheLastTuples(&last_tuples);
         for (const ScanTuple *last_tuple : last_tuples)
         {
             if (last_tuple)
@@ -3556,7 +3556,7 @@ void TransactionExecution::ScanClose(
         // tuple, then add it into drain_batch_ to ensure the ReadIntent lock to
         // be released if added.
         std::vector<const ScanTuple *> last_tuples;
-        scanner->ShardCacheLastTuples(&last_tuples);
+        scanner->MemoryShardCacheLastTuples(&last_tuples);
         for (const ScanTuple *last_tuple : last_tuples)
         {
             if (last_tuple)
@@ -3581,7 +3581,7 @@ void TransactionExecution::ScanClose(
     // They were not added into read set. Check if they were put into read set
     // by other operations before, if not, release these locks.
     std::vector<const ScanTuple *> trailing_tuples;
-    scanner->ShardCacheTrailingTuples(&trailing_tuples);
+    scanner->MemoryShardCacheTrailingTuples(&trailing_tuples);
     for (auto tuple : trailing_tuples)
     {
         LockType lk_type = scanner->DeduceScanTupleLockType(tuple->rec_status_);

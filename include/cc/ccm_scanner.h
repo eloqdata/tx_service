@@ -369,10 +369,12 @@ public:
     virtual void Close() = 0;
     virtual void ShardCacheSizes(std::vector<std::pair<uint32_t, size_t>>
                                      *shard_code_and_sizes) const = 0;
-    virtual void ShardCacheLastTuples(
+    virtual void MemoryShardCacheLastTuples(
         std::vector<const ScanTuple *> *last_tuples) const = 0;
-    virtual void ShardCacheTrailingTuples(
+    virtual void MemoryShardCacheTrailingTuples(
         std::vector<const ScanTuple *> *trailing_tuples) const = 0;
+
+    virtual const ScanTuple *ShardCacheLastTuple(uint32_t shard_code) = 0;
 
     virtual void Init() = 0;
     virtual const ScanTuple *Current() = 0;
@@ -602,6 +604,21 @@ public:
             return offsets_.size();
         }
 
+        const TemplateScanTuple<KeyT, ValueT> *Last()
+        {
+            if (offsets_.empty())
+            {
+                return nullptr;
+            }
+            else
+            {
+                TemplateScanCache<KeyT, ValueT> *cache =
+                    static_cast<TemplateScanCache<KeyT, ValueT> *>(
+                        offsets_.back().first);
+                return cache->At(offsets_.back().second);
+            }
+        }
+
         const TemplateScanTuple<KeyT, ValueT> *Current()
         {
             TemplateScanCache<KeyT, ValueT> *cache =
@@ -670,7 +687,7 @@ public:
         }
     }
 
-    void ShardCacheLastTuples(
+    void MemoryShardCacheLastTuples(
         std::vector<const ScanTuple *> *last_tuples) const override
     {
         std::unique_lock<std::mutex> lock(mutex_);
@@ -681,7 +698,20 @@ public:
         }
     }
 
-    void ShardCacheTrailingTuples(
+    const ScanTuple *ShardCacheLastTuple(uint32_t shard_code) override
+    {
+        auto iter = index_chains_.find(shard_code);
+        if (iter == index_chains_.end())
+        {
+            return nullptr;
+        }
+        else
+        {
+            return iter->second.Last();
+        }
+    }
+
+    void MemoryShardCacheTrailingTuples(
         std::vector<const ScanTuple *> *trailing_tuples) const override
     {
         std::unique_lock<std::mutex> lock(mutex_);
@@ -1008,7 +1038,7 @@ public:
         }
     }
 
-    void ShardCacheLastTuples(
+    void MemoryShardCacheLastTuples(
         std::vector<const ScanTuple *> *last_tuples) const override
     {
         last_tuples->reserve(scans_.size());
@@ -1018,7 +1048,12 @@ public:
         }
     }
 
-    void ShardCacheTrailingTuples(
+    const ScanTuple *ShardCacheLastTuple(uint32_t shard) override
+    {
+        return scans_[shard].LastTuple();
+    }
+
+    void MemoryShardCacheTrailingTuples(
         std::vector<const ScanTuple *> *trailing_tuples) const override
     {
         for (size_t core_id = 0; core_id < scans_.size(); ++core_id)
