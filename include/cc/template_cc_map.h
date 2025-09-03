@@ -2747,8 +2747,16 @@ public:
         TemplateScanCache<KeyT, ValueT> *typed_cache =
             static_cast<TemplateScanCache<KeyT, ValueT> *>(
                 req.GetLocalMemoryCache(shard_code));
-        BucketScanPausePosition &bucket_scan_pos =
-            req.GetBucketScanPosition(ng_id, shard_->core_id_);
+        auto &[last_key, last_cce] = req.LastScanPosition(shard_->core_id_);
+        absl::flat_hash_set<uint16_t> &bucket_ids =
+            req.BucketIds(shard_->core_id_);
+
+        auto filter_bucket_lambda = [this, &bucket_ids](size_t hash_code)
+        {
+            uint16_t bucket_id =
+                Sharder::Instance().MapKeyHashToBucketId(hash_code);
+            return bucket_ids.count(bucket_id) > 0;
+        };
 
         ScanDirection direction = typed_cache->Scanner()->Direction();
         Iterator scan_ccm_it;
@@ -2762,13 +2770,14 @@ public:
         if (cce_lock_addr == 0)
         {
             // first enter, send async request to kv store
-            for (const auto &bucket : req.GetCurrentNgScanBuckets())
+            for (const auto &bucket : bucket_ids)
             {
                 uint16_t target_core =
                     Sharder::Instance().ShardBucketIdToCoreIdx(bucket);
-                if (shard_->core_id_ == target_core &&
-                    bucket_scan_pos.kv_is_drained_.count(bucket) == 0)
+                if (shard_->core_id_ == target_core)
                 {
+                    // TODO(lokax): bucket is drained ?
+
                     // increate counter
                     req.IncreaseWaitForFetchBucketCnt(shard_->core_id_);
                     shard_->FetchBucketData(
@@ -2852,11 +2861,11 @@ public:
             cce_last = prior_cce;
             ccp_last = ccp;
         }
-        else if (bucket_scan_pos.last_cce_ != nullptr)
+        else if (last_cce != nullptr)
         {
             prior_cce = reinterpret_cast<
                 CcEntry<KeyT, ValueT, VersionedRecord, RangePartitioned> *>(
-                bucket_scan_pos.last_cce_);
+                last_cce);
             CcPage<KeyT, ValueT, VersionedRecord, RangePartitioned> *ccp =
                 static_cast<
                     CcPage<KeyT, ValueT, VersionedRecord, RangePartitioned> *>(
@@ -2879,10 +2888,9 @@ public:
         }
         else
         {
-            const KeyT *look_key = bucket_scan_pos.last_key_.GetKey<KeyT>();
-
-            std::pair<Iterator, ScanType> start_pair = ForwardScanStart(
-                *look_key, bucket_scan_pos.last_key_inclusive_);
+            const KeyT *look_key = last_key.GetKey<KeyT>();
+            std::pair<Iterator, ScanType> start_pair =
+                ForwardScanStart(*look_key, false);
             scan_ccm_it = start_pair.first;
             if (start_pair.second == ScanType::ScanGap)
             {
@@ -2895,71 +2903,71 @@ public:
             CcPage<KeyT, ValueT, VersionedRecord, RangePartitioned> *ccp =
                 scan_ccm_it.GetPage();
 
-            if ((req.FilterBucket(key_ptr->Hash()) &&
-                 FilterRecord(key_ptr,
-                              cce,
-                              req.GetRedisObjectType(),
-                              req.GetRedisScanPattern())))
-            {
-                auto lock_pair = AcquireCceKeyLock(cce,
-                                                   cce->CommitTs(),
-                                                   ccp,
-                                                   cce->PayloadStatus(),
-                                                   &req,
-                                                   ng_id,
-                                                   ng_term,
-                                                   tx_term,
-                                                   cc_op,
-                                                   iso_lvl,
-                                                   cc_proto,
-                                                   req.ReadTimestamp(),
-                                                   req.IsCoveringKeys());
-                switch (lock_pair.second)
-                {
-                case CcErrorCode::NO_ERROR:
-                    break;
-                case CcErrorCode::MVCC_READ_MUST_WAIT_WRITE:
-                {
-                    req.SetBlockingInfo(
-                        shard_->core_id_,
-                        reinterpret_cast<uint64_t>(cce->GetLockAddr()),
-                        ScanType::ScanBoth,
-                        ScanBlockingType::BlockOnFuture);
-                    return false;
-                }
-                case CcErrorCode::ACQUIRE_LOCK_BLOCKED:
-                {
-                    req.SetBlockingInfo(
-                        shard_->core_id_,
-                        reinterpret_cast<uint64_t>(cce->GetLockAddr()),
-                        ScanType::ScanBoth,
-                        ScanBlockingType::BlockOnLock);
-                    return false;
-                }
-                default:
-                {
-                    // lock confilct: back off and retry.
-                    return req.SetError(shard_->core_id_, lock_pair.second);
-                }
-                }  //-- end: switch
-
-                AddScanTuple(key_ptr,
+            if (filter_bucket_lambda(key_ptr->Hash()) &&
+                FilterRecord(key_ptr,
                              cce,
-                             typed_cache,
-                             ScanType::ScanBoth,
-                             ng_id,
-                             ng_term,
-                             req.Txn(),
-                             req.ReadTimestamp(),
-                             is_read_snapshot,
-                             need_fetch_snapshot,
-                             true,
-                             req.is_ckpt_delta_,
-                             req.is_require_keys_,
-                             req.is_require_recs_);
-                cce_last = cce;
-                ccp_last = ccp;
-            }
+                             req.GetRedisObjectType(),
+                             req.GetRedisScanPattern())))
+                {
+                    auto lock_pair = AcquireCceKeyLock(cce,
+                                                       cce->CommitTs(),
+                                                       ccp,
+                                                       cce->PayloadStatus(),
+                                                       &req,
+                                                       ng_id,
+                                                       ng_term,
+                                                       tx_term,
+                                                       cc_op,
+                                                       iso_lvl,
+                                                       cc_proto,
+                                                       req.ReadTimestamp(),
+                                                       req.IsCoveringKeys());
+                    switch (lock_pair.second)
+                    {
+                    case CcErrorCode::NO_ERROR:
+                        break;
+                    case CcErrorCode::MVCC_READ_MUST_WAIT_WRITE:
+                    {
+                        req.SetBlockingInfo(
+                            shard_->core_id_,
+                            reinterpret_cast<uint64_t>(cce->GetLockAddr()),
+                            ScanType::ScanBoth,
+                            ScanBlockingType::BlockOnFuture);
+                        return false;
+                    }
+                    case CcErrorCode::ACQUIRE_LOCK_BLOCKED:
+                    {
+                        req.SetBlockingInfo(
+                            shard_->core_id_,
+                            reinterpret_cast<uint64_t>(cce->GetLockAddr()),
+                            ScanType::ScanBoth,
+                            ScanBlockingType::BlockOnLock);
+                        return false;
+                    }
+                    default:
+                    {
+                        // lock confilct: back off and retry.
+                        return req.SetError(shard_->core_id_, lock_pair.second);
+                    }
+                    }  //-- end: switch
+
+                    AddScanTuple(key_ptr,
+                                 cce,
+                                 typed_cache,
+                                 ScanType::ScanBoth,
+                                 ng_id,
+                                 ng_term,
+                                 req.Txn(),
+                                 req.ReadTimestamp(),
+                                 is_read_snapshot,
+                                 need_fetch_snapshot,
+                                 true,
+                                 req.is_ckpt_delta_,
+                                 req.is_require_keys_,
+                                 req.is_require_recs_);
+                    cce_last = cce;
+                    ccp_last = ccp;
+                }
         }
 
         // bool scan_finished = false;
@@ -2985,7 +2993,7 @@ public:
                     continue;
                 }
 
-                if (!req.FilterBucket(key->Hash()) ||
+                if (!filter_bucket_lambda(key->Hash()) ||
                     !FilterRecord(key,
                                   cce,
                                   req.GetRedisObjectType(),

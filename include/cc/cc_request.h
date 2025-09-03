@@ -1816,7 +1816,8 @@ public:
                int64_t ng_term,
                TxNumber tx_number,
                const uint64_t &ts,
-               BucketScanPlan *bucket_scan_plan,
+               // BucketScanPlan *bucket_scan_plan,
+               std::vector<uint16_t> *buckets,
                int64_t tx_term,
                CcHandlerResult<ScanNextResult> *next_res,
                IsolationLevel iso_level,
@@ -1849,16 +1850,22 @@ public:
         obj_type_ = obj_type;
         scan_pattern_ = scan_pattern;
 
-        bucket_scan_plan_ = bucket_scan_plan;
-        unfinished_core_cnt_ =
-            bucket_scan_plan->CurrentScanPositions()[ng_id].size();
-        current_ng_scan_buckets_ = bucket_scan_plan_->CurrentScanBuckets(ng_id);
+        assert(buckets != nullptr);
+        bucket_ids_.clear();
+        last_scan_position_.clear();
+        for (const auto &bucket_id : *buckets)
+        {
+            uint16_t target_core =
+                Sharder::Instance().ShardBucketIdToCoreIdx(bucket_id);
+            bucket_ids_[target_core].insert(bucket_id);
+        }
+
+        unfinished_core_cnt_ = bucket_ids_.size();
+        assert(unfinished_core_cnt_ != 0);
 
         wait_for_fetch_bucket_cnt_.clear();
         blocking_info_.clear();
-
-        for (const auto &[core_id, pos] :
-             bucket_scan_plan->CurrentScanPositions()[ng_id])
+        for (const auto &[core_id, bucket] : bucket_ids_)
         {
             wait_for_fetch_bucket_cnt_[core_id] = 0;
 
@@ -1869,9 +1876,9 @@ public:
         }
     }
 
-    BucketScanPlan *GetBucketScanPlan()
+    void AddLastScanPosition(uint16_t core_id, TxKey &&key, LruEntry *cce)
     {
-        return bucket_scan_plan_;
+        last_scan_position_[core_id] = {std::move(key), cce};
     }
 
     ScanCache *GetLocalMemoryCache(uint32_t shard_code)
@@ -1882,31 +1889,6 @@ public:
     ScanCache *GetLocalKvCache(uint32_t shard_code, uint16_t bucket_id)
     {
         return res_->Value().ccm_scanner_->KvCache(shard_code, bucket_id);
-    }
-
-    BucketScanPausePosition &GetBucketScanPosition(
-        txservice::NodeGroupId node_group_id, uint16_t core_id)
-    {
-        return bucket_scan_plan_->CurrentScanPosition(node_group_id, core_id);
-    }
-
-    std::vector<uint16_t> &GetCurrentNgScanBuckets()
-    {
-        return *current_ng_scan_buckets_;
-    }
-
-    bool FilterBucket(size_t hash_code)
-    {
-        uint16_t bucket_id = Sharder::MapKeyHashToBucketId(hash_code);
-        for (const auto &bucket : *current_ng_scan_buckets_)
-        {
-            if (bucket == bucket_id)
-            {
-                return true;
-            }
-        }
-
-        return false;
     }
 
     void SetErrorCode(CcErrorCode err_code)
@@ -2067,6 +2049,23 @@ public:
         blocking_info_[core_id].type_ = ScanBlockingType::BlockOnFetchBucket;
     }
 
+    std::pair<TxKey, LruEntry *> &LastScanPosition(uint16_t core_id)
+    {
+        assert(last_scan_position_.count(core_id) > 0);
+        return last_scan_position_[core_id];
+    }
+
+    absl::flat_hash_map<uint16_t, absl::flat_hash_set<uint16_t>> &BucketIds()
+    {
+        return bucket_ids_;
+    }
+
+    absl::flat_hash_set<uint16_t> &BucketIds(uint16_t core_id)
+    {
+        assert(bucket_ids_.count(core_id) > 0);
+        return bucket_ids_[core_id];
+    }
+
 private:
     uint64_t ts_{0};
 
@@ -2096,8 +2095,11 @@ private:
     std::atomic<uint16_t> unfinished_core_cnt_{0};
     std::atomic<CcErrorCode> err_{CcErrorCode::NO_ERROR};
 
-    BucketScanPlan *bucket_scan_plan_{nullptr};
-    std::vector<uint16_t> *current_ng_scan_buckets_{nullptr};
+    // BucketScanPlan *bucket_scan_plan_{nullptr};
+    // std::vector<uint16_t> *current_ng_scan_buckets_{nullptr};
+    absl::flat_hash_map<uint16_t, absl::flat_hash_set<uint16_t>> bucket_ids_;
+    absl::flat_hash_map<uint16_t, std::pair<TxKey, LruEntry *>>
+        last_scan_position_;
 
     struct ScanBlockingInfo
     {
