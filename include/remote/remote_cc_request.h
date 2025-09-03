@@ -432,7 +432,6 @@ private:
     bool is_covering_keys_{false};
     bool is_require_keys_{true};
     bool is_require_recs_{true};
-    bool is_require_sort_{true};
     uint64_t snapshot_ts_{0};
     std::vector<bool> is_wait_for_post_write_;
 
@@ -549,7 +548,6 @@ private:
     bool is_covering_keys_{false};
     bool is_require_keys_{true};
     bool is_require_recs_{true};
-    bool is_require_sort_{true};
     bool is_wait_for_post_write_{false};
     // scan type for above cce_ptr_
     ScanType cce_ptr_scan_type_{ScanType::ScanUnknow};

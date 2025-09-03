@@ -1588,7 +1588,6 @@ public:
                bool is_covering_keys,
                bool is_require_keys,
                bool is_require_recs,
-               bool is_require_sort,
                bool is_include_floor_cce = false,
                int32_t obj_type = -1,
                const std::string_view &scan_pattern = {})
@@ -1609,7 +1608,6 @@ public:
         is_include_floor_cce_ = is_include_floor_cce;
         is_require_keys_ = is_require_keys;
         is_require_recs_ = is_require_recs;
-        is_require_sort_ = is_require_sort;
         cce_ptr_ = nullptr;
         cce_ptr_scan_type_ = ScanType::ScanUnknow;
         obj_type_ = obj_type;
@@ -1662,11 +1660,6 @@ public:
     bool IsRequireRecs() const
     {
         return is_require_recs_;
-    }
-
-    bool IsRequireSort() const
-    {
-        return is_require_sort_;
     }
 
     uint64_t ReadTimestamp() const
@@ -1729,7 +1722,6 @@ private:
     bool is_covering_keys_{false};
     bool is_require_keys_{true};
     bool is_require_recs_{true};
-    bool is_require_sort_{true};
     bool is_ckpt_delta_{false};
     // If always include floor_cce in scan result
     bool is_include_floor_cce_{false};
@@ -1822,7 +1814,6 @@ public:
                bool is_covering_keys,
                bool is_require_keys,
                bool is_require_recs,
-               bool is_require_sort,
                int32_t obj_type = -1,
                const std::string_view &scan_pattern = {})
     {
@@ -1836,7 +1827,6 @@ public:
         is_covering_keys_ = is_covering_keys;
         is_require_keys_ = is_require_keys;
         is_require_recs_ = is_require_recs;
-        is_require_sort_ = is_require_sort;
         cce_ptr_ = nullptr;
         cce_ptr_scan_type_ = ScanType::ScanUnknow;
 
@@ -1865,11 +1855,6 @@ public:
     bool IsRequireRecs() const
     {
         return is_require_recs_;
-    }
-
-    bool IsRequireSort() const
-    {
-        return is_require_sort_;
     }
 
     uint64_t ReadTimestamp() const
@@ -1926,7 +1911,6 @@ private:
     bool is_ckpt_delta_{false};
     bool is_require_keys_{true};
     bool is_require_recs_{true};
-    bool is_require_sort_{true};
     // Record the scan type of the blocked cce
     ScanType cce_ptr_scan_type_{ScanType::ScanUnknow};
 
@@ -2021,7 +2005,6 @@ public:
              bool is_covering_keys,
              bool is_require_keys,
              bool is_require_recs,
-             bool is_require_sort,
              uint32_t prefetch_size)
     {
         assert(hd_res.Value().is_local_);
@@ -2055,7 +2038,6 @@ public:
         is_covering_keys_ = is_covering_keys;
         is_require_keys_ = is_require_keys;
         is_require_recs_ = is_require_recs;
-        is_require_sort_ = is_require_sort;
 
         unfinished_core_cnt_.store(1, std::memory_order_relaxed);
         range_slice_id_.Reset();
@@ -2085,7 +2067,6 @@ public:
              bool is_covering_keys,
              bool is_require_keys,
              bool is_require_recs,
-             bool is_require_sort,
              uint32_t prefetch_size)
     {
         assert(!hd_res.Value().is_local_);
@@ -2119,7 +2100,6 @@ public:
         is_covering_keys_ = is_covering_keys;
         is_require_keys_ = is_require_keys;
         is_require_recs_ = is_require_recs;
-        is_require_sort_ = is_require_sort;
         prefetch_size_ = prefetch_size;
 
         unfinished_core_cnt_.store(1, std::memory_order_relaxed);
@@ -2545,11 +2525,6 @@ public:
         return is_require_recs_;
     }
 
-    bool IsRequireSort() const
-    {
-        return is_require_sort_;
-    }
-
     /**
      * @brief Returns the number of slices to prefetch when loading a cache-miss
      * slice.
@@ -2664,7 +2639,6 @@ private:
      */
     bool is_require_keys_{true};
     bool is_require_recs_{true};
-    bool is_require_sort_{true};
 
     uint32_t range_id_{0};
 

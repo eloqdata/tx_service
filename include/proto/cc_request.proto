@@ -974,7 +974,6 @@ message ScanOpenRequest {
     uint64 schema_version = 19;
     bool is_require_keys = 20;
     bool is_require_recs = 21;
-    bool is_require_sort = 22;
 }
 
 message ScanCache_msg {
@@ -1003,7 +1002,6 @@ message ScanNextRequest {
     string scan_pattern = 13; // Only used for redis scan command
     bool is_require_keys = 14;
     bool is_require_recs = 15;
-    bool is_require_sort = 16;
 }
 
 message ScanNextResponse {
@@ -1036,9 +1034,8 @@ message ScanSliceRequest {
     bool is_covering_keys = 18;
     bool is_require_keys = 19;
     bool is_require_recs = 20;
-    bool is_require_sort = 21;
-    uint32 prefetch_size = 22;
-    uint64 schema_version = 23;
+    uint32 prefetch_size = 21;
+    uint64 schema_version = 22;
 }
 
 message ScanSliceResponse {
