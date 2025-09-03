@@ -11057,17 +11057,15 @@ protected:
             VersionResultRecord<ValueT> v_rec;
             cce->MvccGet(read_ts, v_rec);
 
-            // For snapshot reads, only if the visible version's record
-            // status is deleted and no lock has been put on it, should
-            // the record be skipped in the result set. Note that if the
-            // visible version is mising in memory, the key still needs
-            // to be returned. Runtime will use the key to retrieve the
-            // visible version from the data store.
-            if (v_rec.payload_status_ == RecordStatus::Deleted && !keep_deleted)
+            if (v_rec.payload_status_ == RecordStatus::Normal ||
+                v_rec.payload_status_ == RecordStatus::Deleted && keep_deleted)
+            {
+                tuple = typed_cache->AddScanTuple();
+            }
+            else
             {
                 return;
             }
-            tuple = typed_cache->AddScanTuple();
 
             if (is_require_keys ||
                 v_rec.payload_status_ != RecordStatus::Normal)
@@ -11221,13 +11219,9 @@ protected:
             VersionResultRecord<ValueT> v_rec;
             cce->MvccGet(read_ts, v_rec);
 
-            // For snapshot reads, only if the visible version's record
-            // status is deleted and no lock has been put on it, should
-            // the record be skipped in the result set. Note that if the
-            // visible version is mising in memory, the key still needs
-            // to be returned. Runtime will use the key to retrieve the
-            // visible version from the data store.
-            if (v_rec.payload_status_ == RecordStatus::Deleted && !keep_deleted)
+            if (!(v_rec.payload_status_ == RecordStatus::Normal ||
+                  v_rec.payload_status_ == RecordStatus::Deleted &&
+                      keep_deleted))
             {
                 return;
             }
@@ -11382,16 +11376,13 @@ protected:
             VersionResultRecord<ValueT> v_rec;
             cce->MvccGet(read_ts, v_rec);
 
-            // For snapshot reads, only if the visible version's record
-            // status is deleted and no lock has been put on it, should
-            // the record be skipped in the result set. Note that if the
-            // visible version is mising in memory, the key still needs
-            // to be returned. Runtime will use the key to retrieve the
-            // visible version from the data store.
-            if (v_rec.payload_status_ == RecordStatus::Deleted && !keep_deleted)
+            if (!(v_rec.payload_status_ == RecordStatus::Normal ||
+                  v_rec.payload_status_ == RecordStatus::Deleted &&
+                      keep_deleted))
             {
                 return;
             }
+
             tuple = remote_cache->cache_msg_->add_scan_tuple();
             if (is_require_keys)
             {

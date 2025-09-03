@@ -452,7 +452,6 @@ void txservice::remote::RemoteCcHandler::ScanOpen(
     bool is_covering_keys,
     bool is_require_keys,
     bool is_require_recs,
-    bool is_require_sort,
     int32_t obj_type,
     const std::string_view &scan_pattern)
 {
@@ -499,7 +498,6 @@ void txservice::remote::RemoteCcHandler::ScanOpen(
     scan_open->set_is_covering_keys(is_covering_keys);
     scan_open->set_is_require_keys(is_require_keys);
     scan_open->set_is_require_recs(is_require_recs);
-    scan_open->set_is_require_sort(is_require_sort);
     scan_open->set_obj_type(obj_type);
     scan_open->set_scan_pattern(std::string(scan_pattern));
     scan_open->set_schema_version(schema_version);
@@ -523,7 +521,6 @@ void txservice::remote::RemoteCcHandler::ScanNext(
     bool is_covering_keys,
     bool is_require_keys,
     bool is_require_recs,
-    bool is_require_sort,
     int32_t obj_type,
     const std::string_view &scan_pattern)
 {
@@ -557,7 +554,6 @@ void txservice::remote::RemoteCcHandler::ScanNext(
     scan_next->set_is_covering_keys(is_covering_keys);
     scan_next->set_is_require_keys(is_require_keys);
     scan_next->set_is_require_recs(is_require_recs);
-    scan_next->set_is_require_sort(is_require_sort);
     scan_next->set_obj_type(obj_type);
     scan_next->set_scan_pattern(std::string(scan_pattern));
 
@@ -649,7 +645,6 @@ void txservice::remote::RemoteCcHandler::ScanNext(
     scan_slice->set_is_covering_keys(scanner.is_covering_keys_);
     scan_slice->set_is_require_keys(scanner.is_require_keys_);
     scan_slice->set_is_require_recs(scanner.is_require_recs_);
-    scan_slice->set_is_require_sort(scanner.is_require_sort_);
     scan_slice->set_prefetch_size(prefetch_size);
     stream_sender_.SendMessageToNg(cc_ng_id, send_msg, &hd_res);
 }

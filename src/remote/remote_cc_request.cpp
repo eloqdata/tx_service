@@ -801,7 +801,6 @@ void txservice::remote::RemoteScanOpen::Reset(
     is_covering_keys_ = scan_open.is_covering_keys();
     is_require_keys_ = scan_open.is_require_keys();
     is_require_recs_ = scan_open.is_require_recs();
-    is_require_sort_ = scan_open.is_require_sort();
     isolation_level_ = ToLocalType::ConvertIsolation(scan_open.iso_level());
     proto_ = ToLocalType::ConvertProtocol(scan_open.protocol());
     tx_number_ = input_msg->tx_number();
@@ -974,7 +973,6 @@ void txservice::remote::RemoteScanNextBatch::Reset(
     is_covering_keys_ = scan_next.is_covering_keys();
     is_require_keys_ = scan_next.is_require_keys();
     is_require_recs_ = scan_next.is_require_recs();
-    is_require_sort_ = scan_next.is_require_sort();
     isolation_level_ = ToLocalType::ConvertIsolation(scan_next.iso_level());
     proto_ = ToLocalType::ConvertProtocol(scan_next.protocol());
     tx_number_ = input_msg->tx_number();
@@ -1199,7 +1197,6 @@ void txservice::remote::RemoteScanSlice::Reset(
                      scan_slice_req.is_covering_keys(),
                      scan_slice_req.is_require_keys(),
                      scan_slice_req.is_require_recs(),
-                     scan_slice_req.is_require_sort(),
                      scan_slice_req.prefetch_size());
 
     output_msg_.set_tx_number(input_msg->tx_number());

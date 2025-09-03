@@ -1043,7 +1043,6 @@ void txservice::LocalCcHandler::ScanOpen(
                            is_covering_keys,
                            is_require_keys,
                            is_require_recs,
-                           is_require_sort,
                            false,
                            obj_type,
                            scan_pattern);
@@ -1087,7 +1086,6 @@ void txservice::LocalCcHandler::ScanOpen(
                                 is_covering_keys,
                                 is_require_keys,
                                 is_require_recs,
-                                is_require_sort,
                                 obj_type,
                                 scan_pattern);
         }
@@ -1217,8 +1215,7 @@ void txservice::LocalCcHandler::ScanOpenLocal(
                             scanner_ptr->is_ckpt_delta_,
                             scanner_ptr->is_covering_keys_,
                             scanner_ptr->is_require_keys_,
-                            scanner_ptr->is_require_recs_,
-                            scanner_ptr->is_require_sort_);
+                            scanner_ptr->is_require_recs_);
 
     TX_TRACE_ACTION(this, scan_open_cc_req);
     TX_TRACE_DUMP(scan_open_cc_req);
@@ -1285,7 +1282,6 @@ void txservice::LocalCcHandler::ScanNextBatch(
                    scanner.is_covering_keys_,
                    scanner.is_require_keys_,
                    scanner.is_require_recs_,
-                   scanner.is_require_sort_,
                    obj_type,
                    scan_pattern);
 
@@ -1311,7 +1307,6 @@ void txservice::LocalCcHandler::ScanNextBatch(
                             scanner.is_covering_keys_,
                             scanner.is_require_keys_,
                             scanner.is_require_recs_,
-                            scanner.is_require_sort_,
                             obj_type,
                             scan_pattern);
     }
@@ -1367,7 +1362,6 @@ void txservice::LocalCcHandler::ScanNextBatch(
                  scanner.is_covering_keys_,
                  scanner.is_require_keys_,
                  scanner.is_require_recs_,
-                 scanner.is_require_sort_,
                  prefetch_size);
 
         uint32_t core_cnt = cc_shards_.Count();
@@ -1450,8 +1444,7 @@ void txservice::LocalCcHandler::ScanNextBatchLocal(
                scanner.is_ckpt_delta_,
                scanner.is_covering_keys_,
                scanner.is_require_keys_,
-               scanner.is_require_recs_,
-               scanner.is_require_sort_);
+               scanner.is_require_recs_);
     TX_TRACE_ACTION(this, req);
     TX_TRACE_DUMP(req);
 #ifdef EXT_TX_PROC_ENABLED

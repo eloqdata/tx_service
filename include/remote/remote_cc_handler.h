@@ -156,7 +156,6 @@ public:
                   bool is_covering_keys = false,
                   bool is_require_keys = true,
                   bool is_require_recs = true,
-                  bool is_require_sort = true,
                   int32_t obj_type = -1,
                   const std::string_view &scan_pattern = {});
 
@@ -175,7 +174,6 @@ public:
                   bool is_covering_keys = false,
                   bool is_require_keys = true,
                   bool is_require_recs = true,
-                  bool is_require_sort = true,
                   int32_t obj_type = -1,
                   const std::string_view &scan_pattern = {});
 
