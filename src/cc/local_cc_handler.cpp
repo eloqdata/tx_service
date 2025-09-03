@@ -1304,19 +1304,19 @@ void txservice::LocalCcHandler::ScanNextBatch(
                             .GetLocalCcShards()
                             ->GetCatalogFactory(table_name.Engine())
                             ->NegativeInfKey();
-                    req->AddLastScanPosition(
-                        core_idx, std::move(start_key), nullptr);
+                    req->AddStartKey(core_idx, std::move(start_key));
                 }
                 else
                 {
-                    TxKey start_key = pause_position[node_group_id][core_idx]
+                    TxKey start_key = pause_position->at(node_group_id)
+                                          .at(core_idx)
                                           .GetShallowCopy();
-                    req->AddLastScanPosition(
-                        core_idx, std::move(start_key), nullptr);
+                    req->AddStartKey(core_idx, std::move(start_key));
                 }
             }
             else
             {
+                req->AddStartKey(core_idx, scan_tuple->Key().Clone());
             }
         }
 

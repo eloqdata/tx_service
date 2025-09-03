@@ -1876,9 +1876,9 @@ public:
         }
     }
 
-    void AddLastScanPosition(uint16_t core_id, TxKey &&key, LruEntry *cce)
+    void AddStartKey(uint16_t core_id, TxKey &&key)
     {
-        last_scan_position_[core_id] = {std::move(key), cce};
+        start_key_[core_id] = std::move(key);
     }
 
     ScanCache *GetLocalMemoryCache(uint32_t shard_code)
@@ -2049,10 +2049,10 @@ public:
         blocking_info_[core_id].type_ = ScanBlockingType::BlockOnFetchBucket;
     }
 
-    std::pair<TxKey, LruEntry *> &LastScanPosition(uint16_t core_id)
+    const TxKey *StartKey(uint16_t core_id)
     {
-        assert(last_scan_position_.count(core_id) > 0);
-        return last_scan_position_[core_id];
+        assert(start_key_.count(core_id) > 0);
+        return &start_key_[core_id];
     }
 
     absl::flat_hash_map<uint16_t, absl::flat_hash_set<uint16_t>> &BucketIds()
@@ -2098,8 +2098,7 @@ private:
     // BucketScanPlan *bucket_scan_plan_{nullptr};
     // std::vector<uint16_t> *current_ng_scan_buckets_{nullptr};
     absl::flat_hash_map<uint16_t, absl::flat_hash_set<uint16_t>> bucket_ids_;
-    absl::flat_hash_map<uint16_t, std::pair<TxKey, LruEntry *>>
-        last_scan_position_;
+    absl::flat_hash_map<uint16_t, TxKey> start_key_;
 
     struct ScanBlockingInfo
     {

@@ -607,7 +607,8 @@ private:
         *current_scan_bucket_{nullptr};
     const absl::flat_hash_map<NodeGroupId, absl::flat_hash_map<uint64_t, TxKey>>
         *pause_position_{nullptr};
-    std::unordered_map<NodeGroupId, int64_t> node_group_terms_;
+    absl::flat_hash_map<NodeGroupId, int64_t> node_group_terms_;
+    absl::flat_hash_map<uint32_t, LruEntry *> last_cce_;
 };
 
 struct ScanNextResult

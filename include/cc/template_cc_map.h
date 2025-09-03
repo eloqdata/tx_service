@@ -2747,7 +2747,7 @@ public:
         TemplateScanCache<KeyT, ValueT> *typed_cache =
             static_cast<TemplateScanCache<KeyT, ValueT> *>(
                 req.GetLocalMemoryCache(shard_code));
-        auto &[last_key, last_cce] = req.LastScanPosition(shard_->core_id_);
+        const TxKey *start_key = req.StartKey(shard_->core_id_);
         absl::flat_hash_set<uint16_t> &bucket_ids =
             req.BucketIds(shard_->core_id_);
 
@@ -2861,6 +2861,7 @@ public:
             cce_last = prior_cce;
             ccp_last = ccp;
         }
+        /*
         else if (last_cce != nullptr)
         {
             prior_cce = reinterpret_cast<
@@ -2886,11 +2887,14 @@ public:
                                LockType::ReadIntent);
             }
         }
+        */
         else
         {
-            const KeyT *look_key = last_key.GetKey<KeyT>();
+            const KeyT *look_key = start_key->GetKey<KeyT>();
+            bool inclusive = start_key->Type() == KeyType::NegativeInf;
+
             std::pair<Iterator, ScanType> start_pair =
-                ForwardScanStart(*look_key, false);
+                ForwardScanStart(*look_key, inclusive);
             scan_ccm_it = start_pair.first;
             if (start_pair.second == ScanType::ScanGap)
             {
