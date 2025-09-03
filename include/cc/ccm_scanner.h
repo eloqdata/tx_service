@@ -357,6 +357,12 @@ public:
     {
         return nullptr;
     }
+
+    virtual void Merge(uint32_t shard_code)
+    {
+        assert(false);
+    }
+
     virtual void ResetShards(size_t shard_cnt) = 0;
     virtual void ResetCaches() = 0;
     virtual void Reset(const KeySchema *key_schema) = 0;
@@ -561,11 +567,6 @@ public:
         {
             offsets_.clear();
             current_index_ = 0;
-        }
-
-        CompoundIndex(std::vector<std::pair<ScanCache *, size_t>> &&offset)
-            : current_index_(0), offsets_(std::move(offset))
-        {
         }
 
         CompoundIndex(const CompoundIndex &) = delete;
@@ -817,7 +818,7 @@ public:
         }
     }
 
-    void Merge(uint32_t shard_code, std::unordered_set<uint16_t> &bucket_ids)
+    void Merge(uint32_t shard_code) override
     {
         ShardCache *shard_cache = GetShardCache(shard_code);
         auto &cache = shard_cache->memory_cache_;
@@ -825,28 +826,27 @@ public:
         CompoundIndex compound_index;
         auto greater_pair = [](std::pair<const KeyT *, uint16_t> &p1,
                                std::pair<const KeyT *, uint16_t> &p2) -> bool
-        { return *p1.first > *p2.first; };
+        { return *p2.first < *p1.first; };
         std::priority_queue<std::pair<const KeyT *, uint16_t>,
                             std::vector<std::pair<const KeyT *, uint16_t>>,
                             decltype(greater_pair)>
             pq(greater_pair);
 
         std::unordered_map<uint16_t, size_t> idxs;
-        if (cache->Size() > 0)
+        if (cache.Size() > 0)
         {
             idxs[UINT16_MAX] = 0;
-            const TemplateScanTuple<KeyT, ValueT> *scan_tuple = cache->At(0);
+            const TemplateScanTuple<KeyT, ValueT> *scan_tuple = cache.At(0);
             pq.emplace(&scan_tuple->KeyObj(), UINT16_MAX);
         }
 
-        for (const auto &bucket_id : bucket_ids)
+        for (const auto &[bucket_id, kv_cache] : shard_cache->kv_caches_)
         {
             idxs[bucket_id] = 0;
-            auto &kv_cache = shard_cache->kv_caches_.at(bucket_id);
-            if (kv_cache->Size() > 0)
+            if (kv_cache.Size() > 0)
             {
                 const TemplateScanTuple<KeyT, ValueT> *scan_tuple =
-                    kv_cache->At(0);
+                    kv_cache.At(0);
                 pq.emplace(&scan_tuple->KeyObj(), bucket_id);
             }
         }
@@ -859,16 +859,16 @@ public:
             uint16_t bucket = top.second;
             pq.pop();
 
-            compound_index.offsets_.emplace_back(bucket, idxs[bucket]);
             auto &current_cache = bucket == UINT16_MAX
                                       ? cache
                                       : shard_cache->kv_caches_.at(bucket);
+            compound_index.offsets_.emplace_back(&current_cache, idxs[bucket]);
 
             ++idxs[bucket];
-            if (idxs[bucket] < current_cache->Size())
+            if (idxs[bucket] < current_cache.Size())
             {
                 const TemplateScanTuple<KeyT, ValueT> *scan_tuple =
-                    current_cache->At(idxs[bucket]);
+                    current_cache.At(idxs[bucket]);
                 pq.emplace(&scan_tuple->KeyObj(), bucket);
                 idxs[bucket]++;
             }
@@ -878,14 +878,14 @@ public:
             }
         }
 
-        if (cache->Size() > 0)
+        if (cache.Size() > 0)
         {
-            cache->RemoveLast(idxs[UINT16_MAX]);
+            cache.RemoveLast(idxs[UINT16_MAX]);
         }
 
         {
             std::lock_guard<std::mutex> lk(mutex_);
-            index_chains_.try_emplace(shard_code, compound_index);
+            index_chains_.try_emplace(shard_code, std::move(compound_index));
         }
     }
 

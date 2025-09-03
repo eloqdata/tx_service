@@ -2716,8 +2716,12 @@ public:
 
         if (ng_term < 0 || ng_term != req.NodeGroupTerm())
         {
-            req.Result()->SetError(CcErrorCode::NG_TERM_CHANGED);
-            return false;
+            return req.SetError(shard_->core_id_, CcErrorCode::NG_TERM_CHANGED);
+        }
+
+        if (req.IsWaitForFetchBucket(shard_->core_id_))
+        {
+            return req.SetFinish(shard_->core_id_);
         }
 
         IsolationLevel iso_lvl = req.Isolation();
@@ -2826,8 +2830,7 @@ public:
                 {
                     assert(lock_pair.second ==
                            CcErrorCode::MVCC_READ_FOR_WRITE_CONFLICT);
-                    req.Result()->SetError(lock_pair.second);
-                    return true;
+                    return req.SetError(shard_->core_id_, lock_pair.second);
                 }
             }
 
@@ -2936,8 +2939,7 @@ public:
                 default:
                 {
                     // lock confilct: back off and retry.
-                    req.Result()->SetError(lock_pair.second);
-                    return true;
+                    return req.SetError(shard_->core_id_, lock_pair.second);
                 }
                 }  //-- end: switch
 
@@ -3037,8 +3039,7 @@ public:
                 default:
                 {
                     // lock confilct: back off and retry.
-                    req.Result()->SetError(lock_pair.second);
-                    return true;
+                    return req.SetError(shard_->core_id_, lock_pair.second);
                 }
                 }  //-- end: switch
 
@@ -3090,12 +3091,7 @@ public:
             }
         }
 
-        // TODO(lokax): update scan next result
-        // ScanNextResult &scan_next_result = req.Result()->Value();
-        // scan_next_result.current_scan_plan_->CurrentScanPosition()
-
-        req.Result()->SetFinished();
-        return true;
+        return req.SetFinish(shard_->core_id_);
     }
 
     void AddScanTupleMsg(
@@ -12164,7 +12160,12 @@ void BackfillForScanNextBatch(FetchBucketDataCc *fetch_cc,
         }
     }
 
-    shard.Enqueue(req);
+    req->DecreaseWaitForFetchBucketCnt(shard.core_id_);
+    if (req->IsWaitForFetchBucket(shard.core_id_) &&
+        req->WaitForFetchBucketCnt(shard.core_id_) == 0)
+    {
+        shard.Enqueue(requester);
+    }
 }
 
 }  // namespace txservice

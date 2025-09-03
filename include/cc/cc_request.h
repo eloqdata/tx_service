@@ -1909,6 +1909,66 @@ public:
         return false;
     }
 
+    void SetErrorCode(CcErrorCode err_code)
+    {
+        CcErrorCode expected = CcErrorCode::NO_ERROR;
+        err_.compare_exchange_strong(expected,
+                                     err_code,
+                                     std::memory_order_relaxed,
+                                     std::memory_order_relaxed);
+    }
+
+    CcErrorCode ErrorCode()
+    {
+        return err_.load(std::memory_order_relaxed);
+    }
+
+    bool SetFinish(uint16_t core_id)
+    {
+        if (WaitForFetchBucketCnt(core_id) > 0)
+        {
+            SetIsWaitForFetchBucket(core_id);
+            return false;
+        }
+
+        CcErrorCode err_code = err_.load(std::memory_order_relaxed);
+        if (err_code == CcErrorCode::NO_ERROR)
+        {
+            // Merge data
+            uint32_t shard_code = (NodeGroupId() << 10) + core_id;
+            res_->Value().ccm_scanner_->Merge(shard_code);
+        }
+
+        uint16_t remaining_cnt =
+            unfinished_core_cnt_.fetch_sub(1, std::memory_order_acq_rel);
+        if (remaining_cnt == 1)
+        {
+            if (err_code == CcErrorCode::NO_ERROR)
+            {
+                res_->SetFinished();
+            }
+            else
+            {
+                res_->SetError(err_code);
+            }
+        }
+
+        return remaining_cnt == 1;
+    }
+
+    bool SetError(uint16_t core_id, CcErrorCode err)
+    {
+        SetErrorCode(err);
+
+        if (WaitForFetchBucketCnt(core_id) > 0)
+        {
+            SetIsWaitForFetchBucket(core_id);
+            return false;
+        }
+
+        return SetFinish(core_id);
+    }
+
     bool IsForWrite() const
     {
         return is_for_write_;
@@ -2033,7 +2093,8 @@ private:
     int32_t obj_type_{-1};
     std::string_view scan_pattern_;
 
-    std::atomic<size_t> unfinished_core_cnt_{0};
+    std::atomic<uint16_t> unfinished_core_cnt_{0};
+    std::atomic<CcErrorCode> err_{CcErrorCode::NO_ERROR};
 
     BucketScanPlan *bucket_scan_plan_{nullptr};
     std::vector<uint16_t> *current_ng_scan_buckets_{nullptr};
