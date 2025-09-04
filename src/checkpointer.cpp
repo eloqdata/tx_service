@@ -19,8 +19,6 @@
  *    <http://www.gnu.org/licenses/>.
  *
  */
-#include "checkpointer.h"
-
 #include <brpc/controller.h>
 
 #include <cstdint>
@@ -29,6 +27,7 @@
 
 #include "catalog_key_record.h"
 #include "cc_request.h"
+#include "checkpointer.h"
 #include "error_messages.h"
 #include "metrics.h"
 #include "range_slice.h"
@@ -435,6 +434,7 @@ void Checkpointer::Run()
             last_checkpoint_ts_ = std::chrono::high_resolution_clock::now();
             continue;
         });
+
         if (ckpt_thd_status_ != Status::Active)
         {
             break;
@@ -444,6 +444,8 @@ void Checkpointer::Run()
         lk.unlock();
         Ckpt(false);
         lk.lock();
+        // notify all waiting that one round checkpoint is done.
+        ckpt_cv_.notify_all();
 
         request_ckpt_ = false;
     }
@@ -453,6 +455,8 @@ void Checkpointer::Run()
     lk.unlock();
     Ckpt(true);
     lk.lock();
+    // notify all waiting that one round checkpoint is done.
+    ckpt_cv_.notify_all();
     ckpt_thd_status_ = Status::Terminated;
 }
 
@@ -463,9 +467,9 @@ void Checkpointer::Run()
  */
 void Checkpointer::Notify(bool request_ckpt)
 {
+    std::unique_lock<std::mutex> lk(ckpt_mux_);
     if (request_ckpt)
     {
-        std::unique_lock<std::mutex> lk(ckpt_mux_);
         request_ckpt_ = true;
     }
     ckpt_cv_.notify_one();

@@ -365,6 +365,12 @@ public:
             &flush_task_entries,
         bool only_archives);
 
+    /**
+     * @brief Notify the checkpoint thread to do checkpoint.
+     * @param request_ckpt If true, request a new checkpoint. If false, just
+     * notify the checkpoint thread to check whether there is a pending
+     * checkpoint request.
+     */
     void NotifyCkpt(bool request_ckpt = true);
 
     void SetWaitingCkpt(bool is_waiting);

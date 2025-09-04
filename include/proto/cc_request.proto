@@ -430,12 +430,14 @@ message CreateBackupRequest{
 
     // only used on datastore processing the task.
     int64 ng_term = 6;
-    BackupTaskStatus status = 7;
+    repeated string backup_files = 7;
+    uint64 backup_ts = 8;
+    BackupTaskStatus status = 9;
 }
 
 message CreateBackupResponse{
     uint32 ng_id = 1;
-    BackupTaskStatus status = 2;
+    BackupTaskStatus status = 4;
 }
 
 message FetchBackupRequest{
@@ -445,7 +447,9 @@ message FetchBackupRequest{
 
 message FetchBackupResponse{
     uint32 ng_id = 1;
-    BackupTaskStatus status = 2;
+    repeated string backup_files = 2;
+    uint64 backup_ts = 3;
+    BackupTaskStatus status = 4;
 }
 
 message TerminateBackupRequest{
