@@ -365,7 +365,6 @@ public:
 
     virtual void ResetShards(size_t shard_cnt) = 0;
     virtual void ResetCaches() = 0;
-    virtual void ResetCache(uint32_t shard_code) = 0;
     virtual void Reset(const KeySchema *key_schema) = 0;
     virtual void Close() = 0;
     virtual void ShardCacheSizes(std::vector<std::pair<uint32_t, size_t>>
@@ -663,25 +662,6 @@ public:
 
         current_iter_ = {};
         init_ = false;
-    }
-
-    void ResetCache(uint32_t shard_code) override
-    {
-        auto iter = shard_caches_.find(shard_code);
-        if (iter != shard_caches_.end())
-        {
-            iter->second.memory_cache_.Reset();
-            for (auto &[bucket_id, kv_cache] : iter->second.kv_caches_)
-            {
-                kv_cache.Reset();
-            }
-        }
-
-        auto index_iter = index_chains_.find(shard_code);
-        if (index_iter != index_chains_.end())
-        {
-            index_iter->second.Reset();
-        }
     }
 
     ScanCache *Cache(uint32_t shard_code) override

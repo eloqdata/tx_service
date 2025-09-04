@@ -2639,7 +2639,6 @@ void TransactionExecution::Process(ScanNextOperation &scan_next)
         scan_next.is_running_ = true;
     }
 
-    // TODO(lokax): to_scan_next
     bool to_scan_next = scanner.Current() == nullptr &&
                         scanner.Status() == ScannerStatus::Blocked;
     bool is_local = true;
@@ -2660,16 +2659,15 @@ void TransactionExecution::Process(ScanNextOperation &scan_next)
         else
         {
             // Update handler result ref count
-            auto &current_ng_scan_buckets =
+            auto &ng_scan_buckets =
                 scan_next.hd_result_.Value()
                     .current_scan_plan_->CurrentScanBuckets();
-            scan_next.ResetResultForHashPart(current_ng_scan_buckets.size());
+            scan_next.ResetResultForHashPart(ng_scan_buckets.size());
 
             // Reset all caches, we need to scan next batch data
             scanner.ResetCaches();
 
-            for (const auto &[node_group_id, bucket_ids] :
-                 current_ng_scan_buckets)
+            for (const auto &[node_group_id, bucket_ids] : ng_scan_buckets)
             {
                 cc_handler_->ScanNextBatch(
                     scan_next.tx_req_->table_name_,

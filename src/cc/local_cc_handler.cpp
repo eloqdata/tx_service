@@ -1232,48 +1232,33 @@ void txservice::LocalCcHandler::ScanNextBatch(
     if (is_standby_tx ||
         Sharder::Instance().LeaderNodeId(node_group_id) == cc_shards_.node_id_)
     {
-        int64_t node_group_term =
-            hd_res.Value().current_scan_plan_->GetNodeGroupTerm(node_group_id);
-        assert(hd_res.Value().current_scan_plan_->CurrentScanBuckets().count(
-                   node_group_id) > 0);
-        // assert(hd_res.Value().current_scan_plan_->CurrentScanPositions().count(
-        //           node_group_id) > 0);
-        /*
-        auto &pause_position =
-            hd_res.Value()
-                .current_scan_plan_->CurrentScanPositions()[node_group_id];
-        if (pause_position.empty())
+        BucketScanPlan *plan = hd_res.Value().current_scan_plan_;
+        assert(plan->CurrentScanBuckets().count(node_group_id) > 0);
+
+        auto *start_keys = plan->StartKeys(node_group_id);
+        if (start_keys->empty())
         {
             // scan from negative start key
             for (uint16_t core_idx = 0;
                  core_idx < Sharder::Instance().GetLocalCcShardsCount();
                  ++core_idx)
             {
-                auto iter = pause_position.try_emplace(
+                start_keys->try_emplace(
                     core_idx,
-                    BucketScanPausePosition(
-                        Sharder::Instance()
-                            .GetLocalCcShards()
-                            ->GetCatalogFactory(table_name.Engine())
-                            ->NegativeInfKey(),
-                        true));
-                // iter.first->second.last_cce_ = nullptr;
-                // iter.first->second.is_drained_ = false;
+                    Sharder::Instance()
+                        .GetLocalCcShards()
+                        ->GetCatalogFactory(table_name.Engine())
+                        ->NegativeInfKey(),
+                    false);
             }
         }
-        */
 
-        TX_TRACE_ACTION(this, req);
-        TX_TRACE_DUMP(req);
-
-        // assert(bucket_scan_position.size() > 0);
         ScanNextBatchCc *req = scan_next_pool.NextRequest();
         req->Reset(node_group_id,
-                   node_group_term,
+                   plan->GetNodeGroupTerm(node_group_id),
                    tx_number,
                    start_ts,
-                   hd_res.Value().current_scan_plan_->CurrentScanBuckets(
-                       node_group_id),
+                   plan,
                    tx_term,
                    &hd_res,
                    scanner.iso_level_,
@@ -1287,40 +1272,13 @@ void txservice::LocalCcHandler::ScanNextBatch(
                    obj_type,
                    scan_pattern);
 
-        for (const auto &[core_idx, bucket_ids] : req->BucketIds())
-        {
-            uint32_t shard_code = (node_group_id << 10) + core_idx;
-            const txservice::ScanTuple *scan_tuple =
-                hd_res.Value().ccm_scanner_->ShardCacheLastTuple(shard_code);
-            if (scan_tuple == nullptr)
-            {
-                auto *pause_position =
-                    hd_res.Value().current_scan_plan_->PausePosition();
-                if (pause_position == nullptr)
-                {
-                    // Start form negative key
-                    TxKey start_key =
-                        Sharder::Instance()
-                            .GetLocalCcShards()
-                            ->GetCatalogFactory(table_name.Engine())
-                            ->NegativeInfKey();
-                    req->AddStartKey(core_idx, std::move(start_key));
-                }
-                else
-                {
-                    TxKey start_key = pause_position->at(node_group_id)
-                                          .at(core_idx)
-                                          .GetShallowCopy();
-                    req->AddStartKey(core_idx, std::move(start_key));
-                }
-            }
-            else
-            {
-                req->AddStartKey(core_idx, scan_tuple->Key().Clone());
-            }
-        }
+        TX_TRACE_ACTION(this, req);
+        TX_TRACE_DUMP(req);
 
-        // cc_shards_.EnqueueCcRequest(thd_id_, core_idx, req);
+        for (const auto &[core_idx, bucket] : req->BucketIds())
+        {
+            cc_shards_.EnqueueCcRequest(thd_id_, core_idx, req);
+        }
     }
     else
     {

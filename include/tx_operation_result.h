@@ -540,14 +540,33 @@ public:
         const absl::flat_hash_map<NodeGroupId,
                                   absl::flat_hash_map<uint64_t, TxKey>>
             *pause_position)
-        : current_scan_bucket_(buckets), pause_position_(pause_position)
+        : current_scan_bucket_(buckets)
     {
         assert(buckets != nullptr);
-        assert(pause_position != nullptr);
 
         for (const auto &[node_group_id, bucket] : *buckets)
         {
             node_group_terms_.try_emplace(node_group_id, -1);
+        }
+
+        if (pause_position == nullptr)
+        {
+            for (const auto &[node_group_id, bucket] : *buckets)
+            {
+                current_position_.try_emplace(node_group_id);
+            }
+        }
+        else
+        {
+            for (auto &[node_group_id, pos] : *pause_position)
+            {
+                auto iter = current_position_.try_emplace(node_group_id);
+                for (const auto &[core_idx, pause_key] : pos)
+                {
+                    iter.first->second.try_emplace(
+                        core_idx, pause_key.Clone(), false);
+                }
+            }
         }
     }
 
@@ -555,11 +574,9 @@ public:
     BucketScanPlan(const BucketScanPlan &) = delete;
     BucketScanPlan &operator=(const BucketScanPlan &) = delete;
     BucketScanPlan(BucketScanPlan &&other)
-        : current_scan_bucket_(other.current_scan_bucket_),
-          pause_position_(other.pause_position_)
+        : current_scan_bucket_(other.current_scan_bucket_)
     {
         other.current_scan_bucket_ = nullptr;
-        other.pause_position_ = nullptr;
     }
     BucketScanPlan &operator=(BucketScanPlan &&other) noexcept
     {
@@ -567,8 +584,6 @@ public:
         {
             current_scan_bucket_ = std::move(other.current_scan_bucket_);
             other.current_scan_bucket_ = nullptr;
-            pause_position_ = other.pause_position_;
-            other.pause_position_ = nullptr;
         }
 
         return *this;
@@ -595,20 +610,20 @@ public:
         node_group_terms_[node_group_id] = node_group_term;
     }
 
-    const absl::flat_hash_map<NodeGroupId,
-                              absl::flat_hash_map<uint64_t, TxKey>> *
-    PausePosition()
+    absl::flat_hash_map<uint16_t, std::pair<TxKey, bool>> *StartKeys(
+        NodeGroupId node_group_id)
     {
-        return pause_position_;
+        assert(current_position_.count(node_group_id) > 0);
+        return &current_position_[node_group_id];
     }
 
 private:
     absl::flat_hash_map<NodeGroupId, std::vector<uint16_t>>
         *current_scan_bucket_{nullptr};
-    const absl::flat_hash_map<NodeGroupId, absl::flat_hash_map<uint64_t, TxKey>>
-        *pause_position_{nullptr};
+    absl::flat_hash_map<NodeGroupId,
+                        absl::flat_hash_map<uint16_t, std::pair<TxKey, bool>>>
+        current_position_;
     absl::flat_hash_map<NodeGroupId, int64_t> node_group_terms_;
-    absl::flat_hash_map<uint32_t, LruEntry *> last_cce_;
 };
 
 struct ScanNextResult

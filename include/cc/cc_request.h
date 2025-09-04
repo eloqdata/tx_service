@@ -1816,8 +1816,7 @@ public:
                int64_t ng_term,
                TxNumber tx_number,
                const uint64_t &ts,
-               // BucketScanPlan *bucket_scan_plan,
-               std::vector<uint16_t> *buckets,
+               BucketScanPlan *bucket_scan_plan,
                int64_t tx_term,
                CcHandlerResult<ScanNextResult> *next_res,
                IsolationLevel iso_level,
@@ -1844,16 +1843,17 @@ public:
         is_require_keys_ = is_require_keys;
         is_require_recs_ = is_require_recs;
         is_require_sort_ = is_require_sort;
-        // cce_ptr_ = nullptr;
-        // cce_ptr_scan_type_ = ScanType::ScanUnknow;
         ccm_ = nullptr;
         obj_type_ = obj_type;
         scan_pattern_ = scan_pattern;
 
-        assert(buckets != nullptr);
         bucket_ids_.clear();
-        last_scan_position_.clear();
-        for (const auto &bucket_id : *buckets)
+
+        start_keys_ = bucket_scan_plan->StartKeys(node_group_id_);
+        assert(start_keys_ != nullptr);
+
+        for (const auto &bucket_id :
+             *bucket_scan_plan->CurrentScanBuckets(node_group_id_))
         {
             uint16_t target_core =
                 Sharder::Instance().ShardBucketIdToCoreIdx(bucket_id);
@@ -1874,11 +1874,6 @@ public:
             iter->second.scan_type_ = ScanType::ScanUnknow;
             iter->second.type_ = ScanBlockingType::NoBlocking;
         }
-    }
-
-    void AddStartKey(uint16_t core_id, TxKey &&key)
-    {
-        start_key_[core_id] = std::move(key);
     }
 
     ScanCache *GetLocalMemoryCache(uint32_t shard_code)
@@ -1919,6 +1914,21 @@ public:
             // Merge data
             uint32_t shard_code = (NodeGroupId() << 10) + core_id;
             res_->Value().ccm_scanner_->Merge(shard_code);
+            res_->Value().current_scan_plan_->UpdateNodeGroupTerm(
+                node_group_id_, ng_term_);
+            const txservice::ScanTuple *scan_tuple =
+                res_->Value().ccm_scanner_->ShardCacheLastTuple(shard_code);
+            auto *keys =
+                res_->Value().current_scan_plan_->StartKeys(node_group_id_);
+            if (scan_tuple)
+            {
+                keys->at(core_id) = {scan_tuple->Key().Clone(), false};
+            }
+            else
+            {
+                // drained
+                keys->at(core_id) = {TxKey(), true};
+            }
         }
 
         uint16_t remaining_cnt =
@@ -2049,10 +2059,15 @@ public:
         blocking_info_[core_id].type_ = ScanBlockingType::BlockOnFetchBucket;
     }
 
-    const TxKey *StartKey(uint16_t core_id)
+    const TxKey &StartKey(uint16_t core_id)
     {
-        assert(start_key_.count(core_id) > 0);
-        return &start_key_[core_id];
+        assert(start_keys_->count(core_id) > 0);
+        return start_keys_->at(core_id).first;
+    }
+
+    bool ShardIsDrained(uint16_t core_id)
+    {
+        return start_keys_->at(core_id).second;
     }
 
     absl::flat_hash_map<uint16_t, absl::flat_hash_set<uint16_t>> &BucketIds()
@@ -2098,7 +2113,7 @@ private:
     // BucketScanPlan *bucket_scan_plan_{nullptr};
     // std::vector<uint16_t> *current_ng_scan_buckets_{nullptr};
     absl::flat_hash_map<uint16_t, absl::flat_hash_set<uint16_t>> bucket_ids_;
-    absl::flat_hash_map<uint16_t, TxKey> start_key_;
+    absl::flat_hash_map<uint16_t, std::pair<TxKey, bool>> *start_keys_{nullptr};
 
     struct ScanBlockingInfo
     {
