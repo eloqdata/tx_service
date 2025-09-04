@@ -1852,8 +1852,7 @@ public:
         start_keys_ = bucket_scan_plan->StartKeys(node_group_id_);
         assert(start_keys_ != nullptr);
 
-        for (const auto &bucket_id :
-             *bucket_scan_plan->CurrentScanBuckets(node_group_id_))
+        for (const auto &bucket_id : *bucket_scan_plan->Buckets(node_group_id_))
         {
             uint16_t target_core =
                 Sharder::Instance().ShardBucketIdToCoreIdx(bucket_id);

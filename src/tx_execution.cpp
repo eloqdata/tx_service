@@ -802,6 +802,13 @@ void TransactionExecution::ProcessTxRequest(ScanOpenTxRequest &scan_open_req)
     }
     uint64_resp_ = &scan_open_req.tx_result_;
 
+    scan_open_.Reset();
+    scan_open_.Set(scan_open_req.tab_name_,
+                   scan_open_req.indx_type_,
+                   scan_open_req.StartKey(),
+                   scan_open_req.start_inclusive_,
+                   scan_open_req.direct_,
+                   scan_open_req.is_ckpt_delta_);
     scan_open_.tx_req_ = &scan_open_req;
     PushOperation(&scan_open_);
     Process(scan_open_);
@@ -2343,18 +2350,21 @@ void TransactionExecution::Process(ScanOpenOperation &scan_open)
     bool is_require_recs = scan_open.tx_req_->is_require_recs_;
     bool is_require_sort = scan_open.tx_req_->is_require_sort_;
 
-    scan_open.Reset();
+    // scan_open.Reset();
+    /*
     scan_open.Set(&table_name,
                   index_type,
                   &start_key,
                   inclusive,
                   direction,
                   is_ckpt_delta);
+    */
 
     scan_open.hd_result_.Value().scan_alias_ = scan_open.tx_req_->scan_alias_;
 
     if (!scan_open.lock_cluster_config_result_.IsFinished())
     {
+        LOG(INFO) << "==Process: lock cluste config not finished";
         // Acquire cluster config read lock
         lock_cluster_config_op_.Reset(TableName(cluster_config_ccm_name_sv,
                                                 TableType::ClusterConfig,
@@ -2660,8 +2670,7 @@ void TransactionExecution::Process(ScanNextOperation &scan_next)
         {
             // Update handler result ref count
             auto &ng_scan_buckets =
-                scan_next.hd_result_.Value()
-                    .current_scan_plan_->CurrentScanBuckets();
+                scan_next.hd_result_.Value().current_scan_plan_->Buckets();
             scan_next.ResetResultForHashPart(ng_scan_buckets.size());
 
             // Reset all caches, we need to scan next batch data
@@ -5794,7 +5803,7 @@ void TransactionExecution::DrainScanner(CcScanner *scanner,
         // "key_ts_ == 0", means the lock is added on gap. Now, gap lock is
         // not used when do scan operation.
         if (scan_tuple_lock_type != LockType::NoLock &&
-            cc_scan_tuple->key_ts_ != 0 &&
+            !cc_scan_tuple->cce_addr_.Empty() && cc_scan_tuple->key_ts_ != 0 &&
             rw_set_.RemoveDataReadEntry(table_name, cc_scan_tuple->cce_addr_) ==
                 0)
         {

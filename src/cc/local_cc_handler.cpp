@@ -1233,7 +1233,7 @@ void txservice::LocalCcHandler::ScanNextBatch(
         Sharder::Instance().LeaderNodeId(node_group_id) == cc_shards_.node_id_)
     {
         BucketScanPlan *plan = hd_res.Value().current_scan_plan_;
-        assert(plan->CurrentScanBuckets().count(node_group_id) > 0);
+        assert(plan->Buckets().count(node_group_id) > 0);
 
         auto *start_keys = plan->StartKeys(node_group_id);
         if (start_keys->empty())

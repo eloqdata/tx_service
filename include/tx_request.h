@@ -394,7 +394,7 @@ struct BucketScanSavePoint
     size_t prev_pause_idx_{UINT64_MAX};
     std::vector<absl::flat_hash_map<NodeGroupId, std::vector<uint16_t>>>
         bucket_groups_;
-    absl::flat_hash_map<NodeGroupId, absl::flat_hash_map<uint64_t, TxKey>>
+    absl::flat_hash_map<NodeGroupId, absl::flat_hash_map<uint16_t, TxKey>>
         pause_position_;
 
     /*
@@ -460,6 +460,15 @@ struct BucketScanSavePoint
         }
 
         return true;
+    }
+
+    void Debug()
+    {
+        LOG(INFO) << "==yf: cluster config version = "
+                  << cluster_config_version_
+                  << ", prev pause index = " << prev_pause_idx_
+                  << ", group size = " << bucket_groups_.size()
+                  << ", position size = " << pause_position_.size();
     }
 };
 

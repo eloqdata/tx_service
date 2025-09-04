@@ -538,9 +538,9 @@ public:
     BucketScanPlan(
         absl::flat_hash_map<NodeGroupId, std::vector<uint16_t>> *buckets,
         const absl::flat_hash_map<NodeGroupId,
-                                  absl::flat_hash_map<uint64_t, TxKey>>
+                                  absl::flat_hash_map<uint16_t, TxKey>>
             *pause_position)
-        : current_scan_bucket_(buckets)
+        : buckets_(buckets)
     {
         assert(buckets != nullptr);
 
@@ -558,6 +558,7 @@ public:
         }
         else
         {
+            // Resume from eloqkv cursor
             for (auto &[node_group_id, pos] : *pause_position)
             {
                 auto iter = current_position_.try_emplace(node_group_id);
@@ -568,36 +569,43 @@ public:
                 }
             }
         }
+
+        assert(node_group_terms_.size() > 0);
+        assert(current_position_.size() > 0);
     }
 
     BucketScanPlan() = default;
     BucketScanPlan(const BucketScanPlan &) = delete;
     BucketScanPlan &operator=(const BucketScanPlan &) = delete;
     BucketScanPlan(BucketScanPlan &&other)
-        : current_scan_bucket_(other.current_scan_bucket_)
+        : buckets_(other.buckets_),
+          current_position_(std::move(other.current_position_)),
+          node_group_terms_(std::move(other.node_group_terms_))
     {
-        other.current_scan_bucket_ = nullptr;
+        other.buckets_ = nullptr;
     }
+
     BucketScanPlan &operator=(BucketScanPlan &&other) noexcept
     {
         if (this != &other)
         {
-            current_scan_bucket_ = std::move(other.current_scan_bucket_);
-            other.current_scan_bucket_ = nullptr;
+            buckets_ = std::move(other.buckets_);
+            other.buckets_ = nullptr;
+            current_position_ = std::move(other.current_position_);
+            node_group_terms_ = std::move(other.node_group_terms_);
         }
 
         return *this;
     }
 
-    absl::flat_hash_map<NodeGroupId, std::vector<uint16_t>> &
-    CurrentScanBuckets()
+    absl::flat_hash_map<NodeGroupId, std::vector<uint16_t>> &Buckets()
     {
-        return *current_scan_bucket_;
+        return *buckets_;
     }
 
-    std::vector<uint16_t> *CurrentScanBuckets(NodeGroupId node_group_id)
+    std::vector<uint16_t> *Buckets(NodeGroupId node_group_id)
     {
-        return &current_scan_bucket_->at(node_group_id);
+        return &buckets_->at(node_group_id);
     }
 
     int64_t GetNodeGroupTerm(NodeGroupId node_group_id) const
@@ -618,8 +626,8 @@ public:
     }
 
 private:
-    absl::flat_hash_map<NodeGroupId, std::vector<uint16_t>>
-        *current_scan_bucket_{nullptr};
+    absl::flat_hash_map<NodeGroupId, std::vector<uint16_t>> *buckets_{nullptr};
+    // <pause key, is_drained>
     absl::flat_hash_map<NodeGroupId,
                         absl::flat_hash_map<uint16_t, std::pair<TxKey, bool>>>
         current_position_;
