@@ -11057,15 +11057,24 @@ protected:
             VersionResultRecord<ValueT> v_rec;
             cce->MvccGet(read_ts, v_rec);
 
-            if (v_rec.payload_status_ == RecordStatus::Normal ||
-                v_rec.payload_status_ == RecordStatus::Deleted && keep_deleted)
-            {
-                tuple = typed_cache->AddScanTuple();
-            }
-            else
+            // For snapshot reads, only if the visible version's record
+            // status is deleted and no lock has been put on it, should
+            // the record be skipped in the result set. Note that if the
+            // visible version is mising in memory, the key still needs
+            // to be returned. Runtime will use the key to retrieve the
+            // visible version from the data store.
+            //
+            // AcquireCc might emplace an unknown record and put a wlock on it.
+            // If the wlock_ts of the record is larger than the scan read_ts,
+            // then the record is regard as nonexistent. Note that the slice is
+            // fully cached.
+            if (v_rec.payload_status_ == RecordStatus::Unknown ||
+                v_rec.payload_status_ == RecordStatus::Deleted && !keep_deleted)
             {
                 return;
             }
+
+            tuple = typed_cache->AddScanTuple();
 
             if (is_require_keys ||
                 v_rec.payload_status_ != RecordStatus::Normal)
@@ -11219,9 +11228,19 @@ protected:
             VersionResultRecord<ValueT> v_rec;
             cce->MvccGet(read_ts, v_rec);
 
-            if (!(v_rec.payload_status_ == RecordStatus::Normal ||
-                  v_rec.payload_status_ == RecordStatus::Deleted &&
-                      keep_deleted))
+            // For snapshot reads, only if the visible version's record
+            // status is deleted and no lock has been put on it, should
+            // the record be skipped in the result set. Note that if the
+            // visible version is mising in memory, the key still needs
+            // to be returned. Runtime will use the key to retrieve the
+            // visible version from the data store.
+            //
+            // AcquireCc might emplace an unknown record and put a wlock on it.
+            // If the wlock_ts of the record is larger than the scan read_ts,
+            // then the record is regard as nonexistent. Note the slice is fully
+            // cached.
+            if (v_rec.payload_status_ == RecordStatus::Unknown ||
+                v_rec.payload_status_ == RecordStatus::Deleted && !keep_deleted)
             {
                 return;
             }
@@ -11376,9 +11395,19 @@ protected:
             VersionResultRecord<ValueT> v_rec;
             cce->MvccGet(read_ts, v_rec);
 
-            if (!(v_rec.payload_status_ == RecordStatus::Normal ||
-                  v_rec.payload_status_ == RecordStatus::Deleted &&
-                      keep_deleted))
+            // For snapshot reads, only if the visible version's record
+            // status is deleted and no lock has been put on it, should
+            // the record be skipped in the result set. Note that if the
+            // visible version is mising in memory, the key still needs
+            // to be returned. Runtime will use the key to retrieve the
+            // visible version from the data store.
+            //
+            // AcquireCc might emplace an unknown record and put a wlock on it.
+            // If the wlock_ts of the record is larger than the scan read_ts,
+            // then the record is regard as nonexistent. Note the slice is fully
+            // cached.
+            if (v_rec.payload_status_ == RecordStatus::Unknown ||
+                v_rec.payload_status_ == RecordStatus::Deleted && !keep_deleted)
             {
                 return;
             }
