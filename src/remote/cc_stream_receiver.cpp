@@ -504,7 +504,6 @@ void CcStreamReceiver::OnReceiveCcMsg(std::unique_ptr<CcMessage> msg)
                 CcHandlerResult<std::vector<AcquireKeyResult>> *>(
                 msg->handler_addr());
 
-            assert(txm == hd_res->Txm());
             if (txm->TxNumber() != msg->tx_number() ||
                 txm->CommandId() != msg->command_id() || hd_res->IsFinished())
             {
@@ -515,6 +514,7 @@ void CcStreamReceiver::OnReceiveCcMsg(std::unique_ptr<CcMessage> msg)
                 txm->ReleaseSharedForwardLatch();
                 break;
             }
+            assert(txm == hd_res->Txm());
         }
 
         const AcquireResponse &cc_res = msg->acquire_resp();
@@ -628,20 +628,7 @@ void CcStreamReceiver::OnReceiveCcMsg(std::unique_ptr<CcMessage> msg)
 
             hd_res = reinterpret_cast<CcHandlerResult<AcquireAllResult> *>(
                 msg->handler_addr());
-
-            // Double-check the txm status since it could have timed out and
-            // been reused after the first check.
             assert(txm == hd_res->Txm());
-            if (txm->TxNumber() != msg->tx_number() ||
-                txm->CommandId() != msg->command_id())
-            {
-                // The original tx has terminated and the tx machine has been
-                // recycled. The response message is directed to an obsolete tx.
-                // Skips setting the cc handler result.
-                msg_pool_.enqueue(std::move(msg));
-                txm->ReleaseSharedForwardLatch();
-                break;
-            }
         }
 
         const AcquireAllResponse &cc_res = msg->acquire_all_resp();
@@ -772,7 +759,6 @@ void CcStreamReceiver::OnReceiveCcMsg(std::unique_ptr<CcMessage> msg)
             hd_res = reinterpret_cast<CcHandlerResult<PostProcessResult> *>(
                 msg->handler_addr());
 
-            assert(txm == hd_res->Txm());
             if (txm->TxNumber() != msg->tx_number() ||
                 txm->CommandId() != msg->command_id())
             {
@@ -783,6 +769,7 @@ void CcStreamReceiver::OnReceiveCcMsg(std::unique_ptr<CcMessage> msg)
                 txm->ReleaseSharedForwardLatch();
                 break;
             }
+            assert(txm == hd_res->Txm());
         }
 
         const ValidateResponse &cc_res = msg->validate_resp();
@@ -829,7 +816,6 @@ void CcStreamReceiver::OnReceiveCcMsg(std::unique_ptr<CcMessage> msg)
             hd_res = reinterpret_cast<CcHandlerResult<PostProcessResult> *>(
                 msg->handler_addr());
 
-            assert(txm == hd_res->Txm());
             if (txm->TxNumber() != msg->tx_number() ||
                 txm->CommandId() != msg->command_id())
             {
@@ -840,6 +826,7 @@ void CcStreamReceiver::OnReceiveCcMsg(std::unique_ptr<CcMessage> msg)
                 txm->ReleaseSharedForwardLatch();
                 break;
             }
+            assert(txm == hd_res->Txm());
         }
 
         const PostprocessResponse &cc_res = msg->post_resp();
@@ -1105,7 +1092,6 @@ void CcStreamReceiver::OnReceiveCcMsg(std::unique_ptr<CcMessage> msg)
             hd_res = reinterpret_cast<CcHandlerResult<ScanOpenResult> *>(
                 msg->handler_addr());
 
-            assert(txm == hd_res->Txm());
             if (txm->TxNumber() != msg->tx_number() ||
                 txm->CommandId() != msg->command_id())
             {
@@ -1116,6 +1102,7 @@ void CcStreamReceiver::OnReceiveCcMsg(std::unique_ptr<CcMessage> msg)
                 txm->ReleaseSharedForwardLatch();
                 break;
             }
+            assert(txm == hd_res->Txm());
         }
 
         const ScanOpenResponse &scan_open_res = msg->scan_open_resp();
@@ -1223,7 +1210,6 @@ void CcStreamReceiver::OnReceiveCcMsg(std::unique_ptr<CcMessage> msg)
             hd_res = reinterpret_cast<CcHandlerResult<ScanNextResult> *>(
                 msg->handler_addr());
 
-            assert(txm == hd_res->Txm());
             if (txm->TxNumber() != msg->tx_number() ||
                 txm->CommandId() != msg->command_id())
             {
@@ -1234,6 +1220,7 @@ void CcStreamReceiver::OnReceiveCcMsg(std::unique_ptr<CcMessage> msg)
                 txm->ReleaseSharedForwardLatch();
                 break;
             }
+            assert(txm == hd_res->Txm());
         }
 
         const ScanNextResponse &scan_next_res = msg->scan_next_resp();
@@ -1330,7 +1317,6 @@ void CcStreamReceiver::OnReceiveCcMsg(std::unique_ptr<CcMessage> msg)
             hd_res =
                 reinterpret_cast<CcHandlerResult<Void> *>(msg->handler_addr());
 
-            assert(txm == hd_res->Txm());
             if (txm->TxNumber() != msg->tx_number() ||
                 txm->CommandId() != msg->command_id())
             {
@@ -1341,6 +1327,7 @@ void CcStreamReceiver::OnReceiveCcMsg(std::unique_ptr<CcMessage> msg)
                 txm->ReleaseSharedForwardLatch();
                 break;
             }
+            assert(txm == hd_res->Txm());
         }
 
         const ReloadCacheResponse &reload_resp = msg->reload_cache_resp();
@@ -1389,7 +1376,6 @@ void CcStreamReceiver::OnReceiveCcMsg(std::unique_ptr<CcMessage> msg)
 
         txm->AcquireSharedForwardLatch();
 
-        assert(txm == hd_res->Txm());
         if (txm->TxNumber() != msg->tx_number() ||
             txm->CommandId() != msg->command_id())
         {
@@ -1400,6 +1386,7 @@ void CcStreamReceiver::OnReceiveCcMsg(std::unique_ptr<CcMessage> msg)
             txm->ReleaseSharedForwardLatch();
             break;
         }
+        assert(txm == hd_res->Txm());
 
         const FaultInjectResponse &fi_res = msg->fault_inject_resp();
 
@@ -1449,7 +1436,6 @@ void CcStreamReceiver::OnReceiveCcMsg(std::unique_ptr<CcMessage> msg)
             hd_res =
                 reinterpret_cast<CcHandlerResult<Void> *>(msg->handler_addr());
 
-            assert(txm == hd_res->Txm());
             if (txm->TxNumber() != msg->tx_number() ||
                 txm->CommandId() != msg->command_id())
             {
@@ -1460,6 +1446,7 @@ void CcStreamReceiver::OnReceiveCcMsg(std::unique_ptr<CcMessage> msg)
                 txm->ReleaseSharedForwardLatch();
                 break;
             }
+            assert(txm == hd_res->Txm());
         }
 
         const AnalyzeTableAllResponse &analyze_resp =
@@ -1666,7 +1653,6 @@ void CcStreamReceiver::OnReceiveCcMsg(std::unique_ptr<CcMessage> msg)
                     CcHandlerResult<std::vector<AcquireKeyResult>> *>(
                     msg->handler_addr());
 
-            assert(txm == hd_res->Txm());
             if (txm->TxNumber() != msg->tx_number() ||
                 txm->CommandId() != msg->command_id() || hd_res->IsFinished())
             {
@@ -1677,6 +1663,7 @@ void CcStreamReceiver::OnReceiveCcMsg(std::unique_ptr<CcMessage> msg)
                 txm->ReleaseSharedForwardLatch();
                 break;
             }
+            assert(txm == hd_res->Txm());
 
             auto &acq_key_result_vec = hd_res->Value();
             if (acq_key_result_vec.at(resp.acq_key_result_vec_idx())
@@ -1809,7 +1796,6 @@ void CcStreamReceiver::OnReceiveCcMsg(std::unique_ptr<CcMessage> msg)
             hd_res =
                 reinterpret_cast<CcHandlerResult<Void> *>(msg->handler_addr());
 
-            assert(txm == hd_res->Txm());
             if (txm->TxNumber() != msg->tx_number() ||
                 txm->CommandId() != msg->command_id())
             {
@@ -1820,6 +1806,7 @@ void CcStreamReceiver::OnReceiveCcMsg(std::unique_ptr<CcMessage> msg)
                 txm->ReleaseSharedForwardLatch();
                 break;
             }
+            assert(txm == hd_res->Txm());
         }
 
         // Handle the result.
@@ -2030,7 +2017,6 @@ void CcStreamReceiver::OnReceiveCcMsg(std::unique_ptr<CcMessage> msg)
             hd_res =
                 reinterpret_cast<CcHandlerResult<Void> *>(msg->handler_addr());
 
-            assert(txm == hd_res->Txm());
             if (txm->TxNumber() != msg->tx_number() ||
                 txm->CommandId() != msg->command_id())
             {
@@ -2038,6 +2024,7 @@ void CcStreamReceiver::OnReceiveCcMsg(std::unique_ptr<CcMessage> msg)
                 txm->ReleaseSharedForwardLatch();
                 break;
             }
+            assert(txm == hd_res->Txm());
         }
 
         const InvalidateTableCacheResponse &invalidate_resp =
