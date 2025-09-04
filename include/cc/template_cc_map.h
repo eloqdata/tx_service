@@ -11063,6 +11063,11 @@ protected:
             // visible version is mising in memory, the key still needs
             // to be returned. Runtime will use the key to retrieve the
             // visible version from the data store.
+            //
+            // AcquireCc might emplace an unknown record and put a wlock on it.
+            // If the wlock_ts of the record is larger than the scan read_ts,
+            // then the record is regard as nonexistent. Note that the slice is
+            // fully cached.
             if (v_rec.payload_status_ == RecordStatus::Unknown ||
                 v_rec.payload_status_ == RecordStatus::Deleted && !keep_deleted)
             {
@@ -11229,6 +11234,11 @@ protected:
             // visible version is mising in memory, the key still needs
             // to be returned. Runtime will use the key to retrieve the
             // visible version from the data store.
+            //
+            // AcquireCc might emplace an unknown record and put a wlock on it.
+            // If the wlock_ts of the record is larger than the scan read_ts,
+            // then the record is regard as nonexistent. Note the slice is fully
+            // cached.
             if (v_rec.payload_status_ == RecordStatus::Unknown ||
                 v_rec.payload_status_ == RecordStatus::Deleted && !keep_deleted)
             {
@@ -11391,6 +11401,11 @@ protected:
             // visible version is mising in memory, the key still needs
             // to be returned. Runtime will use the key to retrieve the
             // visible version from the data store.
+            //
+            // AcquireCc might emplace an unknown record and put a wlock on it.
+            // If the wlock_ts of the record is larger than the scan read_ts,
+            // then the record is regard as nonexistent. Note the slice is fully
+            // cached.
             if (v_rec.payload_status_ == RecordStatus::Unknown ||
                 v_rec.payload_status_ == RecordStatus::Deleted && !keep_deleted)
             {
