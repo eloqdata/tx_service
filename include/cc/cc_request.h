@@ -1812,7 +1812,8 @@ public:
         }
     }
 
-    void Reset(const uint32_t &ng_id,
+    void Reset(const TableName &table_name,
+               const uint32_t &ng_id,
                int64_t ng_term,
                TxNumber tx_number,
                const uint64_t &ts,
@@ -1830,10 +1831,15 @@ public:
                int32_t obj_type = -1,
                const std::string_view &scan_pattern = {})
     {
-        TemplatedCcRequest<ScanNextBatchCc, ScanNextResult>::Reset(
-            nullptr, next_res, ng_id, tx_number, tx_term, protocol, iso_level);
+        TemplatedCcRequest<ScanNextBatchCc, ScanNextResult>::Reset(&table_name,
+                                                                   next_res,
+                                                                   ng_id,
+                                                                   tx_number,
+                                                                   tx_term,
+                                                                   protocol,
+                                                                   iso_level);
 
-        // parallel_req_ = true;
+        parallel_req_ = true;
 
         ng_term_ = ng_term;  // bucket owner term
         ts_ = ts;
@@ -1867,7 +1873,6 @@ public:
         for (const auto &[core_id, bucket] : bucket_ids_)
         {
             wait_for_fetch_bucket_cnt_[core_id] = 0;
-
             auto [iter, inserted] = blocking_info_.try_emplace(core_id);
             iter->second.cce_lock_addr_ = 0;
             iter->second.scan_type_ = ScanType::ScanUnknow;
@@ -1901,6 +1906,7 @@ public:
 
     bool SetFinish(uint16_t core_id)
     {
+        LOG(INFO) << "==ScanNextBatchCc: SetFinished";
         if (WaitForFetchBucketCnt(core_id) > 0)
         {
             SetIsWaitForFetchBucket(core_id);

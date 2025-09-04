@@ -442,6 +442,11 @@ struct BucketScanSavePoint
         }
     }
 
+    size_t PlanSize()
+    {
+        return bucket_groups_.size();
+    }
+
     bool IsValidCursor(uint64_t version)
     {
         // the eloqkv client using the cursor id to resume the
@@ -464,11 +469,21 @@ struct BucketScanSavePoint
 
     void Debug()
     {
+        size_t cnt = 0;
+        for (auto &group : bucket_groups_)
+        {
+            for (auto &[node_group_id, buckets] : group)
+            {
+                cnt += buckets.size();
+            }
+        }
+
         LOG(INFO) << "==yf: cluster config version = "
                   << cluster_config_version_
                   << ", prev pause index = " << prev_pause_idx_
                   << ", group size = " << bucket_groups_.size()
-                  << ", position size = " << pause_position_.size();
+                  << ", position size = " << pause_position_.size()
+                  << ", cnt = " << cnt;
     }
 };
 
@@ -676,7 +691,6 @@ struct ScanBatchTxRequest : public TemplateTxRequest<ScanBatchTxRequest, bool>
           batch_(batch_vec),
           obj_type_(obj_type),
           scan_pattern_(scan_pattern),
-
           bucket_scan_plan_(bucket_scan_plan),
           shard_code_and_sizes_(shard_code_and_sizes)
     {

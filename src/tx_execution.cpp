@@ -2568,7 +2568,9 @@ void TransactionExecution::PostProcess(ScanOpenOperation &scan_open)
                     {
                         std::size_t &cur = batch_idx[ng][ci];
                         if (cur >= vec.size())
+                        {
                             continue;
+                        }
 
                         finished = false;
 
@@ -2587,6 +2589,8 @@ void TransactionExecution::PostProcess(ScanOpenOperation &scan_open)
 
                 if (!finished)
                 {
+                    LOG(INFO) << "== current plan bucket ids size = "
+                              << current_plan_bucket_ids.size();
                     scan_open.tx_req_->bucket_scan_save_point_->bucket_groups_
                         .push_back(std::move(current_plan_bucket_ids));
                 }
@@ -2641,6 +2645,7 @@ void TransactionExecution::Process(ScanNextOperation &scan_next)
     CcScanner &scanner = *scan_next.scan_state_->scanner_;
     if (!scan_next.is_running_)
     {
+        LOG(INFO) << "==ScanNextOperation::Process: reset scan next result";
         ScanNextResult &scan_next_result = scan_next.hd_result_.Value();
         scan_next_result.Clear();
         scan_next_result.current_scan_plan_ =
@@ -2651,6 +2656,9 @@ void TransactionExecution::Process(ScanNextOperation &scan_next)
 
     bool to_scan_next = scanner.Current() == nullptr &&
                         scanner.Status() == ScannerStatus::Blocked;
+
+    LOG(INFO) << "==ScanNextOperation::Process: to scan next = "
+              << to_scan_next;
     bool is_local = true;
     if (to_scan_next && scanner.Type() == CcmScannerType::HashPartition)
     {
@@ -3030,6 +3038,9 @@ void TransactionExecution::PostProcess(ScanNextOperation &scan_next)
             // scanner.Close();
             scanner.SetStatus(ScannerStatus::Blocked);
         }
+
+        LOG(INFO) << "==ScanNextOperation::PostProcess: scan batch size = "
+                  << scan_batch.size();
 
         bool_resp_->Finish(scan_batch.empty());
     }

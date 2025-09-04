@@ -163,7 +163,7 @@ public:
 
     void RemoveLast(size_t new_size)
     {
-        assert(new_size < size_);
+        assert(new_size <= size_);
         trailing_cnt_ = size_ - new_size;
         size_ = new_size;
     }
@@ -754,7 +754,7 @@ public:
 
     const ScanTuple *Current() override
     {
-        assert(init_);
+        // assert(init_);
 
         if (status_ != ScannerStatus::Open)
         {
