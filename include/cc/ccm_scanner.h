@@ -764,6 +764,8 @@ public:
             {
                 status_ = ScannerStatus::Open;
             }
+
+            init_ = true;
         }
     }
 
