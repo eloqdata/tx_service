@@ -118,7 +118,7 @@ public:
 
             const TableName &tbl_name = catalog_key->Name();
             std::shared_ptr<ReaderWriterObject<TableSchema>> schema_cntl =
-                shard_->FindEmplaceSchemaCntl(tbl_name);
+                shard_->FindEmplaceSchemaCntl(tbl_name, ng_id);
             AddWriterResult ret = schema_cntl->AddWriter(&req);
             switch (ret)
             {
@@ -132,8 +132,8 @@ public:
                 return false;
             case AddWriterResult::Invalid:
                 // The control block is invalid. Deletes it from the shard.
-                shard_->DeleteSchemaCntl(tbl_name);
-                schema_cntl = shard_->FindEmplaceSchemaCntl(tbl_name);
+                shard_->DeleteSchemaCntl(tbl_name, ng_id);
+                schema_cntl = shard_->FindEmplaceSchemaCntl(tbl_name, ng_id);
                 ret = schema_cntl->AddWriter(&req);
                 assert(ret == AddWriterResult::Success);
                 break;
@@ -572,11 +572,11 @@ public:
         {
             const TableName &tbl_name = table_key->Name();
             std::shared_ptr<ReaderWriterObject<TableSchema>> schema_cntl =
-                shard_->FindSchemaCntl(tbl_name);
+                shard_->FindSchemaCntl(tbl_name, req.NodeGroupId());
             if (schema_cntl != nullptr)
             {
-                schema_cntl->FinishWriter();
-                shard_->DeleteSchemaCntl(tbl_name);
+                schema_cntl->FinishWriter(req.Txn());
+                shard_->DeleteSchemaCntl(tbl_name, req.NodeGroupId());
             }
 
             catalog_entry =
@@ -1219,7 +1219,7 @@ public:
             sch_rec->DirtySchema() == nullptr)
         {
             std::shared_ptr<ReaderWriterObject<TableSchema>> sch_cntl =
-                shard_->FindEmplaceSchemaCntl(table_key->Name());
+                shard_->FindEmplaceSchemaCntl(table_key->Name(), ng_id);
             if (sch_cntl->HasNoWriter())
             {
                 if (sch_cntl->GetObjectPtr() == nullptr)

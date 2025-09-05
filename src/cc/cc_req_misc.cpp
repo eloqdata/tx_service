@@ -410,11 +410,11 @@ bool ClearCcNodeGroup::Execute(CcShard &ccs)
     ccs.DropLockHoldingTxs(cc_ng_id_);
     ccs.DropCcms(cc_ng_id_);
     ccs.ResetStandbySequence();
+    ccs.ClearSchemaCntl(cc_ng_id_);
 
     if (ccs.IsNative(cc_ng_id_))
     {
         ccs.ClearActvieSiTxs();
-        ccs.ClearNativeSchemaCntl();
         ccs.ClearActiveBlockingTxs();
     }
 
