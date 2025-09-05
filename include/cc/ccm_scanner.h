@@ -882,8 +882,7 @@ public:
         {
             if (kv_cache.Size() > 0)
             {
-                const TemplateScanTuple<KeyT, ValueT> *tuple =
-                    shard_cache->memory_cache_.Last();
+                const TemplateScanTuple<KeyT, ValueT> *tuple = kv_cache.Last();
                 if (min_key == nullptr || tuple->KeyObj() < *min_key)
                 {
                     min_key = &tuple->KeyObj();
