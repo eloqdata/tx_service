@@ -3015,12 +3015,12 @@ void TransactionExecution::PostProcess(ScanNextOperation &scan_next)
 
         // Collect shard code and sizes. EloqKV use these infomation to generate
         // cursor
-        scanner.ShardCacheSizes(scan_next.tx_req_->shard_code_and_sizes_);
+        // scanner.ShardCacheSizes(scan_next.tx_req_->shard_code_and_sizes_);
 
         if (scan_batch.empty())
         {
             // current plan finished. clear all cache.
-            scanner.Close();
+            // scanner.Close();
             scanner.SetStatus(ScannerStatus::Blocked);
         }
 
