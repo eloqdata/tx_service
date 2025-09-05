@@ -528,7 +528,6 @@ struct BucketScanPausePosition
     TxKey last_key_;
     bool last_key_inclusive_{false};
     LruEntry *last_cce_{nullptr};
-    std::unordered_set<uint16_t> kv_is_drained_;
 };
 
 class BucketScanPlan
