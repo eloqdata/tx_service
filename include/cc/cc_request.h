@@ -1918,9 +1918,7 @@ public:
         {
             // Merge data
             uint32_t shard_code = (NodeGroupId() << 10) + core_id;
-            LOG(INFO) << "==ScanNextBatchCc: Merger start";
             res_->Value().ccm_scanner_->Merge(shard_code);
-            LOG(INFO) << "==ScanNextBatchCc: Merge stop";
             res_->Value().current_scan_plan_->UpdateNodeGroupTerm(
                 node_group_id_, ng_term_);
             const txservice::ScanTuple *scan_tuple =

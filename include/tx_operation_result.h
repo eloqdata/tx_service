@@ -625,6 +625,22 @@ public:
         return &current_position_[node_group_id];
     }
 
+    bool CurrentPlanIsFinished()
+    {
+        for (const auto &[node_group_id, shard_position] : current_position_)
+        {
+            for (const auto &[core_idx, position] : shard_position)
+            {
+                if (!position.second)
+                {
+                    return false;
+                }
+            }
+        }
+
+        return true;
+    }
+
 private:
     absl::flat_hash_map<NodeGroupId, std::vector<uint16_t>> *buckets_{nullptr};
     // <pause key, is_drained>

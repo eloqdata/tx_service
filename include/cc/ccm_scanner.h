@@ -758,12 +758,10 @@ public:
 
             if (current_iter_ == index_chains_.end())
             {
-                LOG(INFO) << "==Init: Blocked Status";
                 status_ = ScannerStatus::Blocked;
             }
             else
             {
-                LOG(INFO) << "==Init: Open Status";
                 status_ = ScannerStatus::Open;
             }
 
@@ -884,17 +882,18 @@ public:
             const TemplateScanTuple<KeyT, ValueT> *tuple =
                 shard_cache->memory_cache_.Last();
             min_key = &tuple->KeyObj();
+            LOG(INFO) << "==Merge: memory cache last key = " << min_key;
         }
 
         for (auto &[bucket_id, kv_cache] : shard_cache->kv_caches_)
         {
             if (kv_cache.Size() > 0)
             {
-                const TemplateScanTuple<KeyT, ValueT> *tuple =
-                    shard_cache->memory_cache_.Last();
+                const TemplateScanTuple<KeyT, ValueT> *tuple = kv_cache->Last();
                 if (min_key == nullptr || tuple->KeyObj() < *min_key)
                 {
                     min_key = &tuple->KeyObj();
+                    LOG(INFO) << "==Merge: kv cache, min key = " << min_key;
                 }
             }
         }
