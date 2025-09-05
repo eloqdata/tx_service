@@ -2794,7 +2794,7 @@ public:
                         bucket,
                         start_key.GetShallowCopy(),
                         false,
-                        128,
+                        64,
                         &req,
                         &BackfillForScanNextBatch<KeyT, ValueT>);
                 }
@@ -2905,12 +2905,13 @@ public:
             {
                 ++scan_ccm_it;
             }
+
+            // typed_cache->Reset();
         }
 
         if (direction == ScanDirection::Forward)
         {
             // ++scan_ccm_it;
-
             Iterator pos_inf_it = End();
             for (; scan_ccm_it != pos_inf_it && !typed_cache->Full();
                  ++scan_ccm_it)
@@ -3014,6 +3015,9 @@ public:
             assert(false);
         }
 
+        // TODO(lokax): Yield
+
+        /*
         if (cce_last != nullptr)
         {
             bool add_intent =
@@ -3035,6 +3039,7 @@ public:
                                             table_name_.Type());
             }
         }
+        */
 
         return req.SetFinish(shard_->core_id_);
     }

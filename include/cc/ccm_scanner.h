@@ -758,18 +758,28 @@ public:
 
             if (current_iter_ == index_chains_.end())
             {
+                LOG(INFO) << "==Init: Blocked Status";
                 status_ = ScannerStatus::Blocked;
             }
             else
             {
+                LOG(INFO) << "==Init: Open Status";
                 status_ = ScannerStatus::Open;
             }
+
+            init_ = true;
         }
     }
 
     const ScanTuple *Current() override
     {
         // assert(init_);
+        /*
+        if (!init_)
+        {
+            Init();
+        }
+        */
 
         if (status_ != ScannerStatus::Open)
         {

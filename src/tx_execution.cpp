@@ -2948,9 +2948,15 @@ void TransactionExecution::PostProcess(ScanNextOperation &scan_next)
 
     if (scanner.Type() == CcmScannerType::HashPartition)
     {
+        size_t debug_cnt = 0;
+        LOG(INFO) << "==ScanNextOperation::PostProcess: Loop start";
+
         scanner.Init();
         while (scanner.Status() == ScannerStatus::Open)
         {
+            debug_cnt++;
+            LOG(INFO) << "==ScanNextOperation::PostProcess: loop cnt = "
+                      << debug_cnt;
             cc_scan_tuple = scanner.Current();
             if (cc_scan_tuple == nullptr)
             {
@@ -3032,6 +3038,7 @@ void TransactionExecution::PostProcess(ScanNextOperation &scan_next)
         // cursor
         scanner.ShardCacheSizes(scan_next.tx_req_->shard_code_and_sizes_);
 
+        LOG(INFO) << "==ScanNextOperation::PostProcess: Loop stop";
         if (scan_batch.empty())
         {
             // current plan finished. clear all cache.
@@ -3039,8 +3046,11 @@ void TransactionExecution::PostProcess(ScanNextOperation &scan_next)
             scanner.SetStatus(ScannerStatus::Blocked);
         }
 
-        LOG(INFO) << "==ScanNextOperation::PostProcess: scan batch size = "
-                  << scan_batch.size();
+        if (!scan_batch.empty())
+        {
+            LOG(INFO) << "==ScanNextOperation::PostProcess: scan batch size = "
+                      << scan_batch.size();
+        }
 
         bool_resp_->Finish(scan_batch.empty());
     }
