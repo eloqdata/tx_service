@@ -822,11 +822,7 @@ bool FetchRecordCc::Execute(CcShard &ccs)
         ccs.RemoveFetchRecordRequest(cce_);
         return false;
     }
-    if (handle_kv_res_)
-    {
-        handle_kv_res_();
-        handle_kv_res_ = nullptr;
-    }
+
     if (lock_->GetCcEntry() != nullptr)
     {
         assert(lock_->GetCcMap() != nullptr);
