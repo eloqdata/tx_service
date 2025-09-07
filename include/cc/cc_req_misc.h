@@ -544,7 +544,6 @@ public:
     std::string_view kv_end_key_;
     std::string kv_session_id_;
     int32_t kv_partition_id_{0};
-    std::shared_ptr<void> defer_unpin_;
 };
 
 struct FetchRecordCc : public FetchCc
