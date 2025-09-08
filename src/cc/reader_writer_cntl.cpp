@@ -129,8 +129,14 @@ AddWriterResult ReaderWriterCntl::AddWriter(CcRequestBase *write_req)
     return success ? AddWriterResult::Success : AddWriterResult::WritePending;
 }
 
-void ReaderWriterCntl::FinishWriter()
+void ReaderWriterCntl::FinishWriter(uint64_t tx_number)
 {
+    // The writer txn might have failed to acquire the write lock and aborted.
+    auto write_req = write_req_.load(std::memory_order_relaxed);
+    if (write_req == nullptr || write_req->Txn() != tx_number)
+    {
+        return;
+    }
     assert(
         [&]()
         {

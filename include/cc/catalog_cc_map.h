@@ -87,9 +87,9 @@ public:
         // queries that are accessing the schema w/o concurrency control and
         // blocks future runtime queries from accessing the schema via the
         // control block.
-        if (req.CcOp() == CcOperation::ReadForWrite)
+        uint32_t ng_id = req.NodeGroupId();
+        if (shard_->IsNative(ng_id) && req.CcOp() == CcOperation::ReadForWrite)
         {
-            uint32_t ng_id = req.NodeGroupId();
             int64_t ng_term = Sharder::Instance().LeaderTerm(ng_id);
             CcHandlerResult<AcquireAllResult> *hd_res = req.Result();
             if (ng_term < 0)
@@ -570,13 +570,16 @@ public:
         }
         case PostWriteType::PostCommit:
         {
-            const TableName &tbl_name = table_key->Name();
-            std::shared_ptr<ReaderWriterObject<TableSchema>> schema_cntl =
-                shard_->FindSchemaCntl(tbl_name);
-            if (schema_cntl != nullptr)
+            if (shard_->IsNative(req.NodeGroupId()))
             {
-                schema_cntl->FinishWriter();
-                shard_->DeleteSchemaCntl(tbl_name);
+                const TableName &tbl_name = table_key->Name();
+                std::shared_ptr<ReaderWriterObject<TableSchema>> schema_cntl =
+                    shard_->FindSchemaCntl(tbl_name);
+                if (schema_cntl != nullptr)
+                {
+                    schema_cntl->FinishWriter(req.Txn());
+                    shard_->DeleteSchemaCntl(tbl_name);
+                }
             }
 
             catalog_entry =

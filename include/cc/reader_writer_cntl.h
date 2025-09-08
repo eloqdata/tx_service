@@ -51,7 +51,7 @@ public:
     bool AddReader();
     void FinishReader();
     AddWriterResult AddWriter(CcRequestBase *write_req);
-    void FinishWriter();
+    void FinishWriter(uint64_t tx_number);
     void Invalidate();
 
     bool HasNoWriter() const
