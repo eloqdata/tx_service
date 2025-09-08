@@ -19,8 +19,6 @@
  *    <http://www.gnu.org/licenses/>.
  *
  */
-#include "remote/cc_node_service.h"
-
 #include <brpc/controller.h>
 #include <bthread/condition_variable.h>
 #include <bthread/mutex.h>
@@ -36,6 +34,7 @@
 #include "cc_request.h"
 #include "cc_request.pb.h"
 #include "error_messages.h"
+#include "remote/cc_node_service.h"
 #include "remote/remote_type.h"
 #include "sharder.h"
 #include "sk_generator.h"
@@ -1911,7 +1910,8 @@ void CcNodeService::FetchBackup(
     if (store_hd && !backup_name.empty())
     {
         auto st = store::SnapshotManager::Instance().GetBackupStatus(
-            ng_id, backup_name);
+            ng_id, backup_name, response);
+
         response->set_status(st);
     }
     else
@@ -2161,5 +2161,6 @@ void CcNodeService::UpdateClusterConfig(
     Sharder::Instance().UpdateInMemoryClusterConfig(
         new_ng_configs, std::move(node_configs), request->config_version());
 }
+
 }  // namespace remote
 }  // namespace txservice
