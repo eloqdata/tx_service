@@ -2104,19 +2104,6 @@ private:
     bool is_require_keys_{true};
     bool is_require_recs_{true};
     bool is_require_sort_{true};
-    // Record the scan type of the blocked cce
-    // ScanType cce_ptr_scan_type_{ScanType::ScanUnknow};
-
-    // The pointer of the cc entry to which this request is directed. The
-    // pointer is set, when the request locates the cc entry but is
-    // blocked due to conflicts in 2PL. After the request is unblocked and
-    // acquires the lock, the request's execution resumes without further lookup
-    // of the cc entry.
-    // TODO: use lock_ptr_ when we allow the ccentry to move to another memory
-    // address
-    // LruEntry *cce_ptr_{nullptr};
-
-    // bool is_wait_for_post_write_{false};
 
     int32_t obj_type_{-1};
     std::string_view scan_pattern_;
@@ -2124,8 +2111,6 @@ private:
     std::atomic<uint16_t> unfinished_core_cnt_{0};
     std::atomic<CcErrorCode> err_{CcErrorCode::NO_ERROR};
 
-    // BucketScanPlan *bucket_scan_plan_{nullptr};
-    // std::vector<uint16_t> *current_ng_scan_buckets_{nullptr};
     absl::flat_hash_map<uint16_t, absl::flat_hash_set<uint16_t>> bucket_ids_;
     absl::flat_hash_map<uint16_t, std::pair<TxKey, bool>> *start_keys_{nullptr};
 

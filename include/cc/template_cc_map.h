@@ -2871,33 +2871,6 @@ public:
             cce_last = prior_cce;
             ccp_last = ccp;
         }
-        /*
-        else if (last_cce != nullptr)
-        {
-            prior_cce = reinterpret_cast<
-                CcEntry<KeyT, ValueT, VersionedRecord, RangePartitioned> *>(
-                last_cce);
-            CcPage<KeyT, ValueT, VersionedRecord, RangePartitioned> *ccp =
-                static_cast<
-                    CcPage<KeyT, ValueT, VersionedRecord, RangePartitioned> *>(
-                    prior_cce->GetCcPage());
-            assert(ccp != nullptr);
-            scan_ccm_it = Iterator(prior_cce, ccp, &neg_inf_);
-
-            if (LockTypeUtil::DeduceLockType(cc_op,
-                                             req.Isolation(),
-                                             req.Protocol(),
-                                             req.IsCoveringKeys()) ==
-                LockType::NoLock)
-            {
-                ReleaseCceLock(prior_cce->GetKeyLock(),
-                               prior_cce,
-                               req.Txn(),
-                               ng_id,
-                               LockType::ReadIntent);
-            }
-        }
-        */
         else
         {
             LOG(INFO) << "==ScanNextBatchCc: Scan Start key = "
@@ -2916,13 +2889,10 @@ public:
             // typed_cache->Reset();
         }
 
-        bool scan_finished = false;
-
         size_t debug_loop_cnt = 0;
         if (direction == ScanDirection::Forward)
         {
             // ++scan_ccm_it;
-            // TODO: yield
             Iterator pos_inf_it = End();
             for (; scan_ccm_it != pos_inf_it && !typed_cache->Full();
                  ++scan_ccm_it)
@@ -2950,9 +2920,6 @@ public:
                 {
                     continue;
                 }
-
-                LOG(INFO) << "==ScanNextBatchCc: Add scan tuple, key = "
-                          << key->ToString();
 
                 RecordStatus status =
                     cce->PayloadStatus() == RecordStatus::Unknown
@@ -3021,39 +2988,11 @@ public:
                 cce_last = cce;
                 ccp_last = ccp;
             }
-
-            // scan_finished = (scan_ccm_it == pos_inf_it);
         }
         else
         {
             assert(false);
         }
-
-        // TODO(lokax): Yield
-
-        /*
-        if (cce_last != nullptr)
-        {
-            bool add_intent =
-                cce_last->GetOrCreateKeyLock(shard_, this, ccp_last)
-                    .AcquireReadIntent(req.Txn());
-
-            ScanTuple *last_tuple =
-                const_cast<ScanTuple *>(typed_cache->LastTuple());
-            assert(cce_last->GetLockAddr() != 0);
-            last_tuple->cce_addr_.SetCceLock(
-                reinterpret_cast<uint64_t>(cce_last->GetLockAddr()));
-            if (add_intent)
-            {
-                shard_->UpsertLockHoldingTx(req.Txn(),
-                                            tx_term,
-                                            cce_last,
-                                            false,
-                                            ng_id,
-                                            table_name_.Type());
-            }
-        }
-        */
 
         LOG(INFO) << "== debug loop cnt = " << debug_loop_cnt
                   << ", core idx = " << shard_->core_id_
@@ -12107,12 +12046,6 @@ void BackfillForScanNextBatch(FetchBucketDataCc *fetch_cc,
             req->GetLocalKvCache(shard_code, bucket_id));
     assert(scan_cache != nullptr);
 
-    if (fetch_cc->bucket_data_items_.size() > 0)
-    {
-        LOG(INFO) << "==BackfillScanNextBatch: has data, size = "
-                  << fetch_cc->bucket_data_items_.size()
-                  << ", bucket id = " << bucket_id;
-    }
     // Reset kv cache
     scan_cache->Reset();
 

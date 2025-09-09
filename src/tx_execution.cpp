@@ -2533,6 +2533,17 @@ void TransactionExecution::PostProcess(ScanOpenOperation &scan_open)
         {
             // Generate scan plan
 
+            if (!CheckLeaderTerm() && !CheckStandbyTerm())
+            {
+                if (uint64_resp_ != nullptr)
+                {
+                    uint64_resp_->FinishError(TxErrorCode::TX_NODE_NOT_LEADER);
+                    uint64_resp_ = nullptr;
+                }
+                scan_open.Reset();
+                return;
+            }
+
             LocalCcShards *local_cc_shard =
                 Sharder::Instance().GetLocalCcShards();
             // <NodeGroupId, <core_idx, vector<bucket_id>>

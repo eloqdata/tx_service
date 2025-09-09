@@ -516,22 +516,6 @@ struct RangeScanSliceResult
     std::atomic<LastKeySetStatus> last_key_status_;
 };
 
-struct BucketScanPausePosition
-{
-    BucketScanPausePosition(TxKey last_key, bool last_key_inclusive)
-        : last_key_(std::move(last_key)),
-          last_key_inclusive_(last_key_inclusive),
-          last_cce_(nullptr)
-    {
-    }
-
-    // TODO(lokax): remove last key, last cce, last key inclusive
-    TxKey last_key_;
-    bool last_key_inclusive_{false};
-    LruEntry *last_cce_{nullptr};
-    std::unordered_set<uint16_t> kv_is_drained_;
-};
-
 class BucketScanPlan
 {
 public:

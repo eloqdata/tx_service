@@ -24,10 +24,8 @@
 #include <cstdint>
 #include <memory>  // std::shared_ptr
 #include <mutex>
-#include <queue>
 #include <unordered_map>
 #include <utility>
-#include <variant>
 #include <vector>
 
 #include "absl/container/flat_hash_map.h"
@@ -51,7 +49,6 @@ enum class ScannerStatus
     Open = 0,
     Closed,
     Blocked,
-    // Yield,
 };
 
 class CcScanner;
@@ -339,15 +336,6 @@ public:
             size_ == cache_.size() ? cache_.end() : cache_.begin() + size_;
         auto it = std::upper_bound(cache_.begin(), last, start_key, cmp);
         size_t new_size = it - cache_.begin();
-
-        for (size_t idx = 0; idx < size_; ++idx)
-        {
-            LOG(INFO) << "idx = " << idx
-                      << ", key = " << cache_[idx].KeyObj().ToString()
-                      << ", new size = " << new_size
-                      << ", min key = " << start_key.ToString();
-        }
-
         RemoveLast(new_size);
     }
 
@@ -761,18 +749,11 @@ public:
             }
 
             init_ = true;
-
-            for (auto &[shard_code, index_offset] : index_chains_)
-            {
-                LOG(INFO) << "==INit: index size = " << index_offset->Size()
-                          << ", this = " << this;
-            }
         }
     }
 
     const ScanTuple *Current() override
     {
-        // assert(init_);
         /*
         if (!init_)
         {
@@ -897,7 +878,6 @@ public:
             const TemplateScanTuple<KeyT, ValueT> *tuple =
                 shard_cache->memory_cache_.Last();
             min_key = &tuple->KeyObj();
-            LOG(INFO) << "==Merge: memory cache last key = " << min_key;
         }
 
         LOG(INFO) << "== shard memory cache size = "
@@ -912,7 +892,6 @@ public:
                 if (min_key == nullptr || tuple->KeyObj() < *min_key)
                 {
                     min_key = &tuple->KeyObj();
-                    LOG(INFO) << "==Merge: kv cache, min key = " << min_key;
                 }
             }
         }
@@ -924,29 +903,16 @@ public:
             return {TxKey(), 0};
         }
 
-        LOG(INFO) << "== min key = " << min_key->ToString();
-
         if (shard_cache->memory_cache_.Size() > 0)
         {
-            LOG(INFO) << "Before kv cache size = "
-                      << shard_cache->memory_cache_.Size();
             shard_cache->memory_cache_.RemoveLast(*min_key);
-            LOG(INFO) << "== After remove, memory cahce size = "
-                      << shard_cache->memory_cache_.Size();
         }
 
         for (auto &[bucket_id, kv_cache] : shard_cache->kv_caches_)
         {
             if (kv_cache.Size() > 0)
             {
-                LOG(INFO) << "== bucket id = " << bucket_id
-                          << ", Before kv cache size = " << kv_cache.Size();
-
                 kv_cache.RemoveLast(*min_key);
-
-                LOG(INFO) << "== bucket id = " << bucket_id
-                          << "After remove, memory cache size = "
-                          << kv_cache.Size();
             }
         }
 
@@ -1051,33 +1017,6 @@ public:
     void Init() override
     {
     }
-
-    /*
-    ScanCache *AddShard(uint32_t shard_code) override
-    {
-        size_t curr_size = scans_.size();
-        if (shard_code >= curr_size)
-        {
-            scans_.reserve(shard_code + 1);
-            index_chain_.reserve(shard_code + 1);
-            for (size_t idx = curr_size; idx < shard_code + 1; ++idx)
-            {
-                scans_.emplace_back(this, key_schema_);
-                index_chain_.emplace_back();
-            }
-        }
-
-        for (size_t idx = 0; idx < curr_size; ++idx)
-        {
-            scans_[idx].Reset();
-            index_chain_[idx].clear();
-        }
-
-        assert(shard_code < scans_.size());
-
-        return &scans_[shard_code];
-    }
-    */
 
     void ResetShards(size_t shard_cnt) override
     {
