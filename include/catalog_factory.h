@@ -379,13 +379,18 @@ public:
         CcShard *ccs,
         NodeGroupId cc_ng_id) = 0;
 
-    virtual TxKey NegativeInfKey() = 0;
-    virtual TxKey PositiveInfKey() = 0;
+    virtual TxKey NegativeInfKey() const = 0;
+    virtual TxKey PositiveInfKey() const = 0;
     virtual size_t KeyHash(const char *buf,
                            size_t offset,
                            const txservice::KeySchema *key_schema) const
     {
         return 0;
     }
+
+    virtual TxKey CreateTxKey() const = 0;
+    virtual TxKey CreateTxKey(const char *data, size_t size) const = 0;
+    virtual const TxKey *PackedNegativeInfinity() const = 0;
+    virtual std::unique_ptr<TxRecord> CreateTxRecord() const = 0;
 };
 }  // namespace txservice
