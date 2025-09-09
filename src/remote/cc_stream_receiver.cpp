@@ -1238,7 +1238,7 @@ void CcStreamReceiver::OnReceiveCcMsg(std::unique_ptr<CcMessage> msg)
             for (int idx = 0; idx < scan_cache.scan_tuple_size(); ++idx)
             {
                 const ScanTuple_msg &tuple_msg = scan_cache.scan_tuple(idx);
-                hd_res->Value().term_ = tuple_msg.cce_addr().term();
+                // hd_res->Value().term_ = tuple_msg.cce_addr().term();
 
                 RecordStatus rec_status = ToLocalType::ConvertRecordStatusType(
                     tuple_msg.rec_status());

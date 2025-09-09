@@ -396,6 +396,8 @@ struct ScanOpenOperation : TransactionOperation
 
     void Reset();
 
+    ClusterConfigRecord cluster_config_rec_;
+    CcHandlerResult<ReadKeyResult> lock_cluster_config_result_;
     CcHandlerResult<ScanOpenResult> hd_result_;
 
     const TableName *table_name_{nullptr};
@@ -409,13 +411,10 @@ struct ScanOpenOperation : TransactionOperation
 
 struct ScanState
 {
+    static constexpr size_t max_bucket_count_per_core = 10;
+
     ScanState() = delete;
-    ScanState(std::unique_ptr<CcScanner> scanner,
-              const TxKey *end_key,
-              bool end_inclusive)
-        : scanner_(std::move(scanner)),
-          scan_end_key_(end_key),
-          scan_end_inclusive_(end_inclusive)
+    ScanState(std::unique_ptr<CcScanner> scanner) : scanner_(std::move(scanner))
     {
     }
 
@@ -471,6 +470,7 @@ struct ScanNextOperation : TransactionOperation
     void Forward(TransactionExecution *txm) override;
     void Reset();
     void ResetResult();
+    void ResetResultForHashPart(size_t ng_cnt);
 
     ScanDirection Direction() const
     {
