@@ -90,7 +90,12 @@ CcShard::CcShard(
       clean_start_ccp_(nullptr),
       size_(0),
       ckpter_(nullptr),
-      catalog_factory_{catalog_factory[0], catalog_factory[1], catalog_factory[2], catalog_factory[3], catalog_factory[4], catalog_factory[5]},
+      catalog_factory_{catalog_factory[0],
+                       catalog_factory[1],
+                       catalog_factory[2],
+                       catalog_factory[3],
+                       catalog_factory[4],
+                       catalog_factory[5]},
       system_handler_(system_handler),
       active_si_txs_()
 {

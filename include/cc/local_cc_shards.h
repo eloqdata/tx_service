@@ -1391,7 +1391,7 @@ public:
 
     CatalogFactory *GetCatalogFactory(TableEngine table_engine) const
     {
-        return catalog_factory_[static_cast<int>(table_engine)-1];
+        return catalog_factory_[static_cast<int>(table_engine) - 1];
     }
 
     SystemHandler *GetSystemHandler()
@@ -1876,7 +1876,12 @@ private:
     std::atomic<uint64_t> ts_base_;
 
     // catalog factory for each table engine
-    CatalogFactory *catalog_factory_[6]{nullptr, nullptr, nullptr, nullptr, &hash_catalog_factory_, &range_catalog_factory_};
+    CatalogFactory *catalog_factory_[6]{nullptr,
+                                        nullptr,
+                                        nullptr,
+                                        nullptr,
+                                        &hash_catalog_factory_,
+                                        &range_catalog_factory_};
 
     SystemHandler *const system_handler_;
 

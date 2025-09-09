@@ -27,32 +27,30 @@
 #include "cc/ccm_scanner.h"
 #include "cc/template_cc_map.h"
 #include "eloq_string_key_record.h"
+#include "range_cc_map.h"
 #include "schema.h"
+#include "sequences/sequences.h"
 #include "sharder.h"
 #include "tx_key.h"
-#include "range_cc_map.h"
-#include "sequences/sequences.h"
 #include "type.h"
 
 namespace txservice
 {
 
 EloqBasicTableSchema::EloqBasicTableSchema(const TableName &table_name,
-                                         const std::string &catalog_image,
-                                         uint64_t version)
-    : table_name_(table_name),
-      schema_image_(catalog_image),
-      version_(version)
+                                           const std::string &catalog_image,
+                                           uint64_t version)
+    : table_name_(table_name), schema_image_(catalog_image), version_(version)
 {
     // Create a simple KV catalog info for internal use
     kv_info_ = std::make_unique<KVCatalogInfo>();
-    
+
     // Use table version as key schema version
     uint64_t key_schema_ts = version;
-    
+
     // Set a simple table name for internal use
     kv_info_->kv_table_name_ = table_name.String();
-    
+
     // Create key and record schemas
     key_schema_ = std::make_unique<EloqBasicKeySchema>(key_schema_ts);
     record_schema_ = std::make_unique<EloqBasicRecordSchema>();
@@ -92,9 +90,9 @@ TableSchema::uptr EloqHashCatalogFactory::CreateTableSchema(
 {
     if (table_name == txservice::Sequences::table_name_)
     {
-      DLOG(INFO) << "===create sequence table schema";
-      return std::make_unique<txservice::SequenceTableSchema>(
-          table_name, catalog_image, version);
+        DLOG(INFO) << "===create sequence table schema";
+        return std::make_unique<txservice::SequenceTableSchema>(
+            table_name, catalog_image, version);
     }
     return std::make_unique<EloqBasicTableSchema>(
         table_name, catalog_image, version);
@@ -113,7 +111,8 @@ CcMap::uptr EloqHashCatalogFactory::CreatePkCcMap(
     // Create a hash-partitioned CCM with versioned records
     // Using TemplateCcMap<EloqStringKey, EloqStringRecord, true, false>
     // where true = VersionedRecord, false = RangePartitioned
-    return std::make_unique<TemplateCcMap<EloqStringKey, EloqStringRecord, true, false>>(
+    return std::make_unique<
+        TemplateCcMap<EloqStringKey, EloqStringRecord, true, false>>(
         shard,
         cc_ng_id,
         table_name,
@@ -146,21 +145,18 @@ CcMap::uptr EloqHashCatalogFactory::CreateRangeMap(
 std::unique_ptr<CcScanner> EloqHashCatalogFactory::CreatePkCcmScanner(
     ScanDirection direction, const KeySchema *key_schema)
 {
-    return std::make_unique<
-        TemplateCcScanner<EloqStringKey, EloqStringRecord>>(
+    return std::make_unique<TemplateCcScanner<EloqStringKey, EloqStringRecord>>(
         direction, ScanIndexType::Primary, key_schema);
 }
 
 std::unique_ptr<CcScanner> EloqHashCatalogFactory::CreateSkCcmScanner(
-    ScanDirection direction,
-    const KeySchema *compound_key_schema)
+    ScanDirection direction, const KeySchema *compound_key_schema)
 {
     // No secondary indexes supported
     return nullptr;
 }
 
-std::unique_ptr<CcScanner>
-EloqHashCatalogFactory::CreateRangeCcmScanner(
+std::unique_ptr<CcScanner> EloqHashCatalogFactory::CreateRangeCcmScanner(
     ScanDirection direction,
     const KeySchema *key_schema,
     const TableName &range_table_name)
@@ -169,19 +165,16 @@ EloqHashCatalogFactory::CreateRangeCcmScanner(
     return nullptr;
 }
 
-std::unique_ptr<Statistics>
-EloqHashCatalogFactory::CreateTableStatistics(
+std::unique_ptr<Statistics> EloqHashCatalogFactory::CreateTableStatistics(
     const TableSchema *table_schema, NodeGroupId cc_ng_id)
 {
     // No statistics needed for internal use
     return nullptr;
 }
 
-std::unique_ptr<Statistics>
-EloqHashCatalogFactory::CreateTableStatistics(
+std::unique_ptr<Statistics> EloqHashCatalogFactory::CreateTableStatistics(
     const TableSchema *table_schema,
-    std::unordered_map<TableName,
-                       std::pair<uint64_t, std::vector<TxKey>>>
+    std::unordered_map<TableName, std::pair<uint64_t, std::vector<TxKey>>>
         sample_pool_map,
     CcShard *ccs,
     NodeGroupId cc_ng_id)
@@ -200,14 +193,12 @@ TxKey EloqHashCatalogFactory::PositiveInfKey()
     return TxKey(EloqStringKey::PositiveInfinity());
 }
 
-size_t EloqHashCatalogFactory::KeyHash(
-    const char *buf,
-    size_t offset,
-    const KeySchema *key_schema) const
+size_t EloqHashCatalogFactory::KeyHash(const char *buf,
+                                       size_t offset,
+                                       const KeySchema *key_schema) const
 {
     return EloqStringKey::HashFromSerializedKey(buf, offset);
 }
-
 
 TableSchema::uptr EloqRangeCatalogFactory::CreateTableSchema(
     const TableName &table_name,
@@ -216,9 +207,9 @@ TableSchema::uptr EloqRangeCatalogFactory::CreateTableSchema(
 {
     if (table_name == txservice::Sequences::table_name_)
     {
-      DLOG(INFO) << "===create sequence table schema";
-      return std::make_unique<txservice::SequenceTableSchema>(
-          table_name, catalog_image, version);
+        DLOG(INFO) << "===create sequence table schema";
+        return std::make_unique<txservice::SequenceTableSchema>(
+            table_name, catalog_image, version);
     }
     return std::make_unique<EloqBasicTableSchema>(
         table_name, catalog_image, version);
@@ -237,7 +228,8 @@ CcMap::uptr EloqRangeCatalogFactory::CreatePkCcMap(
     // Create a range-partitioned CCM with versioned records
     // Using TemplateCcMap<EloqStringKey, EloqStringRecord, true, true>
     // where true = VersionedRecord, true = RangePartitioned
-    return std::make_unique<TemplateCcMap<EloqStringKey, EloqStringRecord, true, true>>(
+    return std::make_unique<
+        TemplateCcMap<EloqStringKey, EloqStringRecord, true, true>>(
         shard,
         cc_ng_id,
         table_name,
@@ -289,15 +281,13 @@ std::unique_ptr<CcScanner> EloqRangeCatalogFactory::CreatePkCcmScanner(
 }
 
 std::unique_ptr<CcScanner> EloqRangeCatalogFactory::CreateSkCcmScanner(
-    ScanDirection direction,
-    const KeySchema *compound_key_schema)
+    ScanDirection direction, const KeySchema *compound_key_schema)
 {
     // No secondary indexes supported
     return nullptr;
 }
 
-std::unique_ptr<CcScanner>
-EloqRangeCatalogFactory::CreateRangeCcmScanner(
+std::unique_ptr<CcScanner> EloqRangeCatalogFactory::CreateRangeCcmScanner(
     ScanDirection direction,
     const KeySchema *key_schema,
     const TableName &range_table_name)
@@ -317,19 +307,16 @@ EloqRangeCatalogFactory::CreateRangeCcmScanner(
     }
 }
 
-std::unique_ptr<Statistics>
-EloqRangeCatalogFactory::CreateTableStatistics(
+std::unique_ptr<Statistics> EloqRangeCatalogFactory::CreateTableStatistics(
     const TableSchema *table_schema, NodeGroupId cc_ng_id)
 {
     // No statistics needed for internal use
     return nullptr;
 }
 
-std::unique_ptr<Statistics>
-EloqRangeCatalogFactory::CreateTableStatistics(
+std::unique_ptr<Statistics> EloqRangeCatalogFactory::CreateTableStatistics(
     const TableSchema *table_schema,
-    std::unordered_map<TableName,
-                       std::pair<uint64_t, std::vector<TxKey>>>
+    std::unordered_map<TableName, std::pair<uint64_t, std::vector<TxKey>>>
         sample_pool_map,
     CcShard *ccs,
     NodeGroupId cc_ng_id)
@@ -347,13 +334,15 @@ std::unique_ptr<TableRangeEntry> EloqRangeCatalogFactory::CreateTableRange(
     assert(start_key.Type() == KeyType::NegativeInf || start_key.IsOwner());
     // The range's start key must not be null. If the start points to negative
     // infinity, it points to MongoKey::NegativeInfinity().
-    const EloqStringKey* start = start_key.GetKey<EloqStringKey>();
+    const EloqStringKey *start = start_key.GetKey<EloqStringKey>();
     assert(start != nullptr);
 
-    txservice::TemplateStoreRange<EloqStringKey>* range_ptr =
-        static_cast<txservice::TemplateStoreRange<EloqStringKey>*>(slices.release());
+    txservice::TemplateStoreRange<EloqStringKey> *range_ptr =
+        static_cast<txservice::TemplateStoreRange<EloqStringKey> *>(
+            slices.release());
 
-    std::unique_ptr<txservice::TemplateStoreRange<EloqStringKey>> typed_range{range_ptr};
+    std::unique_ptr<txservice::TemplateStoreRange<EloqStringKey>> typed_range{
+        range_ptr};
 
     return std::make_unique<txservice::TemplateTableRangeEntry<EloqStringKey>>(
         start, version_ts, partition_id, std::move(typed_range));
@@ -369,13 +358,11 @@ TxKey EloqRangeCatalogFactory::PositiveInfKey()
     return TxKey(EloqStringKey::PositiveInfinity());
 }
 
-size_t EloqRangeCatalogFactory::KeyHash(
-    const char *buf,
-    size_t offset,
-    const KeySchema *key_schema) const
+size_t EloqRangeCatalogFactory::KeyHash(const char *buf,
+                                        size_t offset,
+                                        const KeySchema *key_schema) const
 {
     return EloqStringKey::HashFromSerializedKey(buf, offset);
 }
-
 
 }  // namespace txservice

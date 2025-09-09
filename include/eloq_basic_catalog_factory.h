@@ -35,7 +35,8 @@ namespace txservice
 class EloqBasicKeySchema : public KeySchema
 {
 public:
-    explicit EloqBasicKeySchema(uint64_t key_schema_ts) : schema_ts_(key_schema_ts)
+    explicit EloqBasicKeySchema(uint64_t key_schema_ts)
+        : schema_ts_(key_schema_ts)
     {
     }
 
@@ -72,8 +73,8 @@ struct EloqBasicTableSchema : public TableSchema
 {
 public:
     EloqBasicTableSchema(const TableName &table_name,
-                        const std::string &catalog_image,
-                        uint64_t version);
+                         const std::string &catalog_image,
+                         uint64_t version);
 
     TableSchema::uptr Clone() const override;
 
@@ -97,9 +98,8 @@ public:
         return schema_image_;
     }
 
-    const std::unordered_map<
-        uint16_t,
-        std::pair<TableName, SecondaryKeySchema>> *
+    const std::unordered_map<uint16_t,
+                             std::pair<TableName, SecondaryKeySchema>> *
     GetIndexes() const override
     {
         // No secondary indexes supported
@@ -117,8 +117,7 @@ public:
         return UINT16_MAX;
     }
 
-    void BindStatistics(
-        std::shared_ptr<Statistics> statistics) override
+    void BindStatistics(std::shared_ptr<Statistics> statistics) override
     {
         // No statistics binding needed for internal use
     }
@@ -170,11 +169,10 @@ public:
     }
 
     const TableName *GetSequenceTableName() const override;
-    
-    std::pair<TxKey, TxRecord::Uptr>
-    GetSequenceKeyAndInitRecord(
+
+    std::pair<TxKey, TxRecord::Uptr> GetSequenceKeyAndInitRecord(
         const TableName &table_name) const override;
-    
+
     void SetVersion(uint64_t version)
     {
         version_ = version;
@@ -195,37 +193,32 @@ public:
     EloqHashCatalogFactory() = default;
     ~EloqHashCatalogFactory() override = default;
 
-    TableSchema::uptr CreateTableSchema(
-        const TableName &table_name,
-        const std::string &catalog_image,
-        uint64_t version) override;
+    TableSchema::uptr CreateTableSchema(const TableName &table_name,
+                                        const std::string &catalog_image,
+                                        uint64_t version) override;
 
-    CcMap::uptr CreatePkCcMap(
-        const TableName &table_name,
-        const TableSchema *table_schema,
-        bool ccm_has_full_entries,
-        CcShard *shard,
-        NodeGroupId cc_ng_id) override;
+    CcMap::uptr CreatePkCcMap(const TableName &table_name,
+                              const TableSchema *table_schema,
+                              bool ccm_has_full_entries,
+                              CcShard *shard,
+                              NodeGroupId cc_ng_id) override;
 
-    CcMap::uptr CreateSkCcMap(
-        const TableName &table_name,
-        const TableSchema *table_schema,
-        CcShard *shard,
-        NodeGroupId cc_ng_id) override;
+    CcMap::uptr CreateSkCcMap(const TableName &table_name,
+                              const TableSchema *table_schema,
+                              CcShard *shard,
+                              NodeGroupId cc_ng_id) override;
 
-    CcMap::uptr CreateRangeMap(
-        const TableName &range_table_name,
-        const TableSchema *table_schema,
-        uint64_t schema_ts,
-        CcShard *shard,
-        NodeGroupId ng_id) override;
+    CcMap::uptr CreateRangeMap(const TableName &range_table_name,
+                               const TableSchema *table_schema,
+                               uint64_t schema_ts,
+                               CcShard *shard,
+                               NodeGroupId ng_id) override;
 
     std::unique_ptr<CcScanner> CreatePkCcmScanner(
         ScanDirection direction, const KeySchema *key_schema) override;
 
     std::unique_ptr<CcScanner> CreateSkCcmScanner(
-        ScanDirection direction,
-        const KeySchema *compound_key_schema) override;
+        ScanDirection direction, const KeySchema *compound_key_schema) override;
 
     std::unique_ptr<CcScanner> CreateRangeCcmScanner(
         ScanDirection direction,
@@ -237,8 +230,7 @@ public:
 
     std::unique_ptr<Statistics> CreateTableStatistics(
         const TableSchema *table_schema,
-        std::unordered_map<TableName,
-                           std::pair<uint64_t, std::vector<TxKey>>>
+        std::unordered_map<TableName, std::pair<uint64_t, std::vector<TxKey>>>
             sample_pool_map,
         CcShard *ccs,
         NodeGroupId cc_ng_id) override;
@@ -262,45 +254,38 @@ public:
                    const KeySchema *key_schema) const override;
 };
 
-
-
 class EloqRangeCatalogFactory : public CatalogFactory
 {
 public:
     EloqRangeCatalogFactory() = default;
     ~EloqRangeCatalogFactory() override = default;
 
-    TableSchema::uptr CreateTableSchema(
-        const TableName &table_name,
-        const std::string &catalog_image,
-        uint64_t version) override;
+    TableSchema::uptr CreateTableSchema(const TableName &table_name,
+                                        const std::string &catalog_image,
+                                        uint64_t version) override;
 
-    CcMap::uptr CreatePkCcMap(
-        const TableName &table_name,
-        const TableSchema *table_schema,
-        bool ccm_has_full_entries,
-        CcShard *shard,
-        NodeGroupId cc_ng_id) override;
+    CcMap::uptr CreatePkCcMap(const TableName &table_name,
+                              const TableSchema *table_schema,
+                              bool ccm_has_full_entries,
+                              CcShard *shard,
+                              NodeGroupId cc_ng_id) override;
 
-    CcMap::uptr CreateSkCcMap(
-        const TableName &table_name,
-        const TableSchema *table_schema,
-        CcShard *shard,
-        NodeGroupId cc_ng_id) override;
+    CcMap::uptr CreateSkCcMap(const TableName &table_name,
+                              const TableSchema *table_schema,
+                              CcShard *shard,
+                              NodeGroupId cc_ng_id) override;
 
-    CcMap::uptr CreateRangeMap(
-        const TableName &range_table_name,
-        const TableSchema *table_schema,
-        uint64_t schema_ts,
-        CcShard *shard,
-        NodeGroupId ng_id) override;
+    CcMap::uptr CreateRangeMap(const TableName &range_table_name,
+                               const TableSchema *table_schema,
+                               uint64_t schema_ts,
+                               CcShard *shard,
+                               NodeGroupId ng_id) override;
 
     std::unique_ptr<CcScanner> CreatePkCcmScanner(
         ScanDirection direction, const KeySchema *key_schema) override;
 
     std::unique_ptr<CcScanner> CreateSkCcmScanner(
-        ScanDirection direction,
-        const KeySchema *compound_key_schema) override;
+        ScanDirection direction, const KeySchema *compound_key_schema) override;
 
     std::unique_ptr<CcScanner> CreateRangeCcmScanner(
         ScanDirection direction,
@@ -312,8 +297,7 @@ public:
 
     std::unique_ptr<Statistics> CreateTableStatistics(
         const TableSchema *table_schema,
-        std::unordered_map<TableName,
-                           std::pair<uint64_t, std::vector<TxKey>>>
+        std::unordered_map<TableName, std::pair<uint64_t, std::vector<TxKey>>>
             sample_pool_map,
         CcShard *ccs,
         NodeGroupId cc_ng_id) override;

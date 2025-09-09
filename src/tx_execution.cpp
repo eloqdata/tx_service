@@ -2017,7 +2017,6 @@ void TransactionExecution::Process(ReadOperation &read)
                     uint32_t residual = key.Hash() & 0x3FF;
                     NodeGroupId bucket_ng = bucket_info->BucketOwner();
                     key_shard_code = bucket_ng << 10 | residual;
-                    LOG(INFO) << "key_shard_code: " << key_shard_code << " bucket_ng " << bucket_ng << " residual " << residual;
                 }
             }
 

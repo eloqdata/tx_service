@@ -678,21 +678,23 @@ void LockWriteRangeBucketsOp::Advance(TransactionExecution *txm)
             bucket_info = txm->FastToGetBucket(bucket_id);
             if (bucket_info != nullptr)
             {
-            NodeGroupId bucket_ng = bucket_info->BucketOwner();
-            NodeGroupId new_bucket_ng = bucket_info->DirtyBucketOwner();
+                NodeGroupId bucket_ng = bucket_info->BucketOwner();
+                NodeGroupId new_bucket_ng = bucket_info->DirtyBucketOwner();
 
-            // Updates the sharding codes of this key according to bucket info.
-            const TxKey &write_tx_key = write_key_it_->first;
-            size_t hash = write_tx_key.Hash();
-            WriteSetEntry &write_entry = write_key_it_->second;
-            write_entry.key_shard_code_ = (bucket_ng << 10) | (hash & 0x3FF);
-            // If current bucket is migrating, forward to new range owner.
-            if (new_bucket_ng != UINT32_MAX)
-            {
-                write_entry.forward_addr_.try_emplace((new_bucket_ng << 10) |
-                                                      (hash & 0x3FF));
-                txm->rw_set_.IncreaseFowardWriteCnt(1);
-            }
+                // Updates the sharding codes of this key according to bucket
+                // info.
+                const TxKey &write_tx_key = write_key_it_->first;
+                size_t hash = write_tx_key.Hash();
+                WriteSetEntry &write_entry = write_key_it_->second;
+                write_entry.key_shard_code_ =
+                    (bucket_ng << 10) | (hash & 0x3FF);
+                // If current bucket is migrating, forward to new range owner.
+                if (new_bucket_ng != UINT32_MAX)
+                {
+                    write_entry.forward_addr_.try_emplace(
+                        (new_bucket_ng << 10) | (hash & 0x3FF));
+                    txm->rw_set_.IncreaseFowardWriteCnt(1);
+                }
                 write_key_it_++;
             }
             else

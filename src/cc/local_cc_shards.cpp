@@ -90,8 +90,12 @@ LocalCcShards::LocalCcShards(
       ng_id_(ng_id),
       timer_terminate_(false),
       is_waiting_ckpt_(false),
-      catalog_factory_{
-          catalog_factory[0], catalog_factory[1], catalog_factory[2], &hash_catalog_factory_, &range_catalog_factory_, &hash_catalog_factory_},
+      catalog_factory_{catalog_factory[0],
+                       catalog_factory[1],
+                       catalog_factory[2],
+                       catalog_factory[3],
+                       &range_catalog_factory_,
+                       &hash_catalog_factory_},
       system_handler_(system_handler),
       tx_service_(tx_service),
       enable_mvcc_(enable_mvcc),
@@ -1078,7 +1082,6 @@ void LocalCcShards::InitPrebuiltTables(NodeGroupId ng_id, int64_t term)
     {
         for (const auto &[table, image] : prebuilt_tables_)
         {
-            LOG(INFO) << "Init prebuilt table: " << table.StringView();
             auto table_it = table_catalogs_.try_emplace(table);
             auto ng_it = table_it.first->second.try_emplace(ng_id);
             if (ng_it.second)

@@ -416,8 +416,7 @@ public:
 
     CatalogFactory *GetCatalogFactory(TableEngine table_engine)
     {
-        LOG(INFO) << "GetCatalogFactory: " << static_cast<int>(table_engine)-1;
-        return catalog_factory_[static_cast<int>(table_engine)-1];
+        return catalog_factory_[static_cast<int>(table_engine) - 1];
     }
 
     /**
@@ -1154,7 +1153,8 @@ private:
 
     // Catalog handler which is used to execute catalog related callback
     // function at runtime side.
-    CatalogFactory *catalog_factory_[6]{nullptr, nullptr, nullptr, nullptr, nullptr, nullptr};
+    CatalogFactory *catalog_factory_[6]{
+        nullptr, nullptr, nullptr, nullptr, nullptr, nullptr};
 
     SystemHandler *const system_handler_;
 
