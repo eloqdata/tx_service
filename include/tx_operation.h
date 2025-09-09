@@ -418,6 +418,7 @@ struct ScanState
     {
     }
 
+    size_t current_plan_index_{SIZE_MAX};
     std::unique_ptr<CcScanner> scanner_;
     const TxKey *scan_end_key_;
     bool scan_end_inclusive_;

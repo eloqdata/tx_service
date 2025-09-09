@@ -952,16 +952,22 @@ void FetchBucketDataCc::AddDataItem(std::string &&key_str,
 
 bool FetchBucketDataCc::Execute(CcShard &ccs)
 {
+    ScanNextBatchCc *req = static_cast<ScanNextBatchCc *>(requester_);
+
     if (!ValidTermCheck())
     {
-        requester_->AbortCcRequest(CcErrorCode::NG_TERM_CHANGED);
         err_code_ = static_cast<int32_t>(CcErrorCode::NG_TERM_CHANGED);
-        return true;
     }
 
     if (err_code_ != 0)
     {
-        requester_->AbortCcRequest(CcErrorCode::DATA_STORE_ERR);
+        req->DecreaseWaitForFetchBucketCnt(ccs.core_id_);
+        req->SetErrorCode(static_cast<CcErrorCode>(err_code_));
+        if (req->IsWaitForFetchBucket(ccs.core_id_) &&
+            req->WaitForFetchBucketCnt(ccs.core_id_) == 0)
+        {
+            ccs_->Enqueue(requester_);
+        }
     }
     else
     {
@@ -974,7 +980,7 @@ bool FetchBucketDataCc::Execute(CcShard &ccs)
 void FetchBucketDataCc::SetFinish(int32_t err)
 {
     err_code_ = err;
-    ccs_->Enqueue(requester_);
+    ccs_->Enqueue(this);
 }
 
 void FetchSnapshotCc::Reset(const TableName *tbl_name,

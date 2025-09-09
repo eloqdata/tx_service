@@ -936,7 +936,7 @@ void txservice::LocalCcHandler::ScanOpen(
     CcScanner *scanner_ptr = open_result.scanner_.get();
     assert(open_result.scan_alias_ < UINT64_MAX);
     scanner_ptr->SetStatus(ScannerStatus::Open);
-    scanner_ptr->SetDrainCacheMode(false);
+    // scanner_ptr->SetDrainCacheMode(false);
     scanner_ptr->is_ckpt_delta_ = is_ckpt_delta;
     scanner_ptr->is_for_write_ = is_for_write;
     scanner_ptr->is_covering_keys_ = is_covering_keys;
@@ -1197,7 +1197,7 @@ void txservice::LocalCcHandler::ScanOpenLocal(
     CcScanner *scanner_ptr = open_result.scanner_.get();
     assert(open_result.scan_alias_ < UINT64_MAX);
     scanner_ptr->SetStatus(ScannerStatus::Open);
-    scanner_ptr->SetDrainCacheMode(false);
+    // scanner_ptr->SetDrainCacheMode(false);
     scanner_ptr->is_ckpt_delta_ = is_ckpt_delta;
     scanner_ptr->is_for_write_ = is_for_write;
     scanner_ptr->iso_level_ = iso_level;
@@ -1232,45 +1232,35 @@ void txservice::LocalCcHandler::ScanNextBatch(
     if (is_standby_tx ||
         Sharder::Instance().LeaderNodeId(node_group_id) == cc_shards_.node_id_)
     {
-        int64_t node_group_term =
-            hd_res.Value().GetNodeGroupTerm(node_group_id);
-        assert(hd_res.Value().current_scan_plan_->CurrentScanBuckets().count(
-                   node_group_id) > 0);
-        assert(hd_res.Value().current_scan_plan_->CurrentScanPosition().count(
-                   node_group_id) > 0);
-        auto &pause_position =
-            hd_res.Value()
-                .current_scan_plan_->CurrentScanPosition()[node_group_id];
-        if (pause_position.empty())
+        BucketScanPlan *plan = hd_res.Value().current_scan_plan_;
+        assert(plan->Buckets().count(node_group_id) > 0);
+
+        auto *start_keys = plan->StartKeys(node_group_id);
+        if (start_keys->empty())
         {
+            LOG(INFO) << "==LocalCcHandler::ScanNextBatch: update start key";
             // scan from negative start key
             for (uint16_t core_idx = 0;
                  core_idx < Sharder::Instance().GetLocalCcShardsCount();
                  ++core_idx)
             {
-                auto iter = pause_position.try_emplace(
+                start_keys->try_emplace(
                     core_idx,
-                    BucketScanPausePosition(
-                        Sharder::Instance()
-                            .GetLocalCcShards()
-                            ->GetCatalogFactory(table_name.Engine())
-                            ->NegativeInfKey(),
-                        true));
-                iter.first->second.last_cce_ = nullptr;
-                iter.first->second.is_drained_ = false;
+                    Sharder::Instance()
+                        .GetLocalCcShards()
+                        ->GetCatalogFactory(table_name.Engine())
+                        ->NegativeInfKey(),
+                    false);
             }
         }
 
-        TX_TRACE_ACTION(this, req);
-        TX_TRACE_DUMP(req);
-
-        // assert(bucket_scan_position.size() > 0);
         ScanNextBatchCc *req = scan_next_pool.NextRequest();
-        req->Reset(node_group_id,
-                   node_group_term,
+        req->Reset(table_name,
+                   node_group_id,
+                   plan->GetNodeGroupTerm(node_group_id),
                    tx_number,
                    start_ts,
-                   hd_res.Value().current_scan_plan_,
+                   plan,
                    tx_term,
                    &hd_res,
                    scanner.iso_level_,
@@ -1283,9 +1273,19 @@ void txservice::LocalCcHandler::ScanNextBatch(
                    scanner.is_require_sort_,
                    obj_type,
                    scan_pattern);
-        for (const auto &[core_idx, position] :
-             req->GetBucketScanPlan()->CurrentScanPosition()[node_group_id])
+
+        TX_TRACE_ACTION(this, req);
+        TX_TRACE_DUMP(req);
+
+        for (const auto &[core_idx, bucket] : req->BucketIds())
         {
+            LOG(INFO) << "==LocalCcHandler::ScanNextBatch: core idx = "
+                      << core_idx;
+            for (const auto &buck : bucket)
+            {
+                LOG(INFO) << "bucket = " << buck;
+            }
+
             cc_shards_.EnqueueCcRequest(thd_id_, core_idx, req);
         }
     }

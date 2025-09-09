@@ -394,7 +394,7 @@ struct BucketScanSavePoint
     size_t prev_pause_idx_{UINT64_MAX};
     std::vector<absl::flat_hash_map<NodeGroupId, std::vector<uint16_t>>>
         bucket_groups_;
-    absl::flat_hash_map<NodeGroupId, absl::flat_hash_map<uint64_t, TxKey>>
+    absl::flat_hash_map<NodeGroupId, absl::flat_hash_map<uint16_t, TxKey>>
         pause_position_;
 
     /*
@@ -431,15 +431,22 @@ struct BucketScanSavePoint
         if (prev_pause_idx_ != UINT64_MAX && prev_pause_idx_ == current_idx)
         {
             // pause plan
-            BucketScanPlan plan(&bucket_groups_[current_idx], &pause_position_);
+            BucketScanPlan plan(
+                current_idx, &bucket_groups_[current_idx], &pause_position_);
             return plan;
         }
         else
         {
             // new plan
-            BucketScanPlan plan(&bucket_groups_[current_idx], nullptr);
+            BucketScanPlan plan(
+                current_idx, &bucket_groups_[current_idx], nullptr);
             return plan;
         }
+    }
+
+    size_t PlanSize()
+    {
+        return bucket_groups_.size();
     }
 
     bool IsValidCursor(uint64_t version)
@@ -460,6 +467,25 @@ struct BucketScanSavePoint
         }
 
         return true;
+    }
+
+    void Debug()
+    {
+        size_t cnt = 0;
+        for (auto &group : bucket_groups_)
+        {
+            for (auto &[node_group_id, buckets] : group)
+            {
+                cnt += buckets.size();
+            }
+        }
+
+        LOG(INFO) << "==yf: cluster config version = "
+                  << cluster_config_version_
+                  << ", prev pause index = " << prev_pause_idx_
+                  << ", group size = " << bucket_groups_.size()
+                  << ", position size = " << pause_position_.size()
+                  << ", cnt = " << cnt;
     }
 };
 
@@ -658,14 +684,17 @@ struct ScanBatchTxRequest : public TemplateTxRequest<ScanBatchTxRequest, bool>
                        TransactionExecution *txm = nullptr,
                        int32_t obj_type = -1,
                        std::string_view scan_pattern = {},
-                       BucketScanPlan *bucket_scan_plan = nullptr)
+                       BucketScanPlan *bucket_scan_plan = nullptr,
+                       std::vector<std::pair<uint32_t, size_t>>
+                           *shard_code_and_sizes = nullptr)
         : TemplateTxRequest(yield_fptr, resume_fptr, txm),
           alias_(alias),
           table_name_(table_name),
           batch_(batch_vec),
           obj_type_(obj_type),
           scan_pattern_(scan_pattern),
-          bucket_scan_plan_(bucket_scan_plan)
+          bucket_scan_plan_(bucket_scan_plan),
+          shard_code_and_sizes_(shard_code_and_sizes)
     {
         batch_->clear();
     }
@@ -680,7 +709,8 @@ struct ScanBatchTxRequest : public TemplateTxRequest<ScanBatchTxRequest, bool>
     int32_t obj_type_{-1};
     std::string_view scan_pattern_;
 
-    BucketScanPlan *bucket_scan_plan_;
+    BucketScanPlan *bucket_scan_plan_{nullptr};
+    std::vector<std::pair<uint32_t, size_t>> *shard_code_and_sizes_{nullptr};
 };
 
 struct UnlockTuple

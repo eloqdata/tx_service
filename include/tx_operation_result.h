@@ -525,152 +525,149 @@ struct BucketScanPausePosition
     {
     }
 
+    // TODO(lokax): remove last key, last cce, last key inclusive
     TxKey last_key_;
     bool last_key_inclusive_{false};
     LruEntry *last_cce_{nullptr};
-    bool is_drained_{false};
+    std::unordered_set<uint16_t> kv_is_drained_;
 };
 
 class BucketScanPlan
 {
 public:
     BucketScanPlan(
+        size_t plan_index,
         absl::flat_hash_map<NodeGroupId, std::vector<uint16_t>> *buckets,
         const absl::flat_hash_map<NodeGroupId,
-                                  absl::flat_hash_map<uint64_t, TxKey>>
+                                  absl::flat_hash_map<uint16_t, TxKey>>
             *pause_position)
-        : current_scan_bucket_(buckets)
+        : plan_index_(plan_index), buckets_(buckets)
     {
         assert(buckets != nullptr);
-        current_scan_position_.reserve(buckets->size());
 
-        if (pause_position != nullptr)
+        for (const auto &[node_group_id, bucket] : *buckets)
         {
-            // eloqkv use cursor id to execute scan command.
-            // restore the scan position.
-            for (auto &[node_group_id, pos] : *pause_position)
+            node_group_terms_.try_emplace(node_group_id, -1);
+        }
+
+        if (pause_position == nullptr)
+        {
+            for (const auto &[node_group_id, bucket] : *buckets)
             {
-                auto iter = current_scan_position_.try_emplace(node_group_id);
-                for (const auto &[core_idx, pause_key] : pos)
-                {
-                    iter.first->second.try_emplace(
-                        core_idx,
-                        BucketScanPausePosition(TxKey(pause_key.Clone()),
-                                                false));
-                }
+                current_position_.try_emplace(node_group_id);
             }
         }
         else
         {
-            // scan from start negative key
-            for (const auto &[node_group_id, buckets] : *buckets)
+            // Resume from eloqkv cursor
+            for (auto &[node_group_id, pos] : *pause_position)
             {
-                current_scan_position_.try_emplace(node_group_id);
+                auto iter = current_position_.try_emplace(node_group_id);
+                for (const auto &[core_idx, pause_key] : pos)
+                {
+                    iter.first->second.try_emplace(
+                        core_idx, pause_key.Clone(), false);
+                }
             }
         }
+
+        assert(node_group_terms_.size() > 0);
+        assert(current_position_.size() > 0);
     }
 
     BucketScanPlan() = default;
     BucketScanPlan(const BucketScanPlan &) = delete;
     BucketScanPlan &operator=(const BucketScanPlan &) = delete;
     BucketScanPlan(BucketScanPlan &&other)
-        : current_scan_bucket_(other.current_scan_bucket_),
-          current_scan_position_(std::move(other.current_scan_position_))
+        : plan_index_(other.plan_index_),
+          buckets_(other.buckets_),
+          current_position_(std::move(other.current_position_)),
+          node_group_terms_(std::move(other.node_group_terms_))
     {
-        other.current_scan_bucket_ = nullptr;
+        other.buckets_ = nullptr;
     }
+
     BucketScanPlan &operator=(BucketScanPlan &&other) noexcept
     {
         if (this != &other)
         {
-            current_scan_bucket_ = std::move(other.current_scan_bucket_);
-            other.current_scan_bucket_ = nullptr;
-            current_scan_position_ = std::move(other.current_scan_position_);
-            assert(other.current_scan_position_.empty());
+            plan_index_ = other.plan_index_;
+            buckets_ = std::move(other.buckets_);
+            other.buckets_ = nullptr;
+            current_position_ = std::move(other.current_position_);
+            node_group_terms_ = std::move(other.node_group_terms_);
         }
 
         return *this;
     }
 
-    absl::flat_hash_map<NodeGroupId, std::vector<uint16_t>> &
-    CurrentScanBuckets()
+    absl::flat_hash_map<NodeGroupId, std::vector<uint16_t>> &Buckets()
     {
-        return *current_scan_bucket_;
+        return *buckets_;
     }
 
-    absl::flat_hash_map<
-        NodeGroupId,
-        absl::flat_hash_map<uint64_t, BucketScanPausePosition>> &
-    CurrentScanPosition()
+    std::vector<uint16_t> *Buckets(NodeGroupId node_group_id)
     {
-        return current_scan_position_;
+        return &buckets_->at(node_group_id);
     }
 
-    void UpdateScanPosition(NodeGroupId node_group_id,
-                            uint16_t core_idx,
-                            TxKey last_key,
-                            LruEntry *cce,
-                            bool is_drained)
+    int64_t GetNodeGroupTerm(NodeGroupId node_group_id) const
     {
-        assert(current_scan_position_.count(node_group_id) > 0);
-        auto &ng_scan_pos = current_scan_position_[node_group_id];
-        auto iter = ng_scan_pos.find(core_idx);
-        if (iter != ng_scan_pos.end())
+        return node_group_terms_.at(node_group_id);
+    }
+
+    void UpdateNodeGroupTerm(NodeGroupId node_group_id, int64_t node_group_term)
+    {
+        node_group_terms_[node_group_id] = node_group_term;
+    }
+
+    absl::flat_hash_map<uint16_t, std::pair<TxKey, bool>> *StartKeys(
+        NodeGroupId node_group_id)
+    {
+        assert(current_position_.count(node_group_id) > 0);
+        return &current_position_[node_group_id];
+    }
+
+    bool CurrentPlanIsFinished()
+    {
+        for (const auto &[node_group_id, shard_position] : current_position_)
         {
-            iter->second.last_key_ = std::move(last_key);
-            iter->second.last_cce_ = cce;
-            iter->second.is_drained_ = is_drained;
+            for (const auto &[core_idx, position] : shard_position)
+            {
+                if (!position.second)
+                {
+                    return false;
+                }
+            }
         }
-        else
-        {
-            auto insert_iter = ng_scan_pos.try_emplace(
-                core_idx, BucketScanPausePosition(std::move(last_key), true));
-            insert_iter.first->second.last_cce_ = cce;
-            insert_iter.first->second.is_drained_ = is_drained;
-        }
+
+        return true;
+    }
+
+    size_t PlanIndex() const
+    {
+        return plan_index_;
     }
 
 private:
-    absl::flat_hash_map<NodeGroupId, std::vector<uint16_t>>
-        *current_scan_bucket_{nullptr};
+    size_t plan_index_{0};
+    absl::flat_hash_map<NodeGroupId, std::vector<uint16_t>> *buckets_{nullptr};
+    // <pause key, is_drained>
     absl::flat_hash_map<NodeGroupId,
-                        absl::flat_hash_map<uint64_t, BucketScanPausePosition>>
-        current_scan_position_;
+                        absl::flat_hash_map<uint16_t, std::pair<TxKey, bool>>>
+        current_position_;
+    absl::flat_hash_map<NodeGroupId, int64_t> node_group_terms_;
 };
 
 struct ScanNextResult
 {
     void Clear()
     {
-        node_group_terms_.clear();
         ccm_scanner_ = nullptr;
         current_scan_plan_ = nullptr;
     }
 
-    int64_t GetNodeGroupTerm(NodeGroupId node_group_id) const
-    {
-        auto iter = node_group_terms_.find(node_group_id);
-        if (iter == node_group_terms_.end())
-        {
-            return -1;
-        }
-        else
-        {
-            assert(iter->second != -1);
-            return iter->second;
-        }
-    }
-
-    void UpdateNodeGroupTerm(NodeGroupId node_group_id, int64_t node_group_term)
-    {
-        if (node_group_terms_.count(node_group_id) == 0)
-        {
-            node_group_terms_[node_group_id] = node_group_term;
-        }
-    }
-
     BucketScanPlan *current_scan_plan_{nullptr};
-    std::unordered_map<NodeGroupId, int64_t> node_group_terms_;
     CcScanner *ccm_scanner_{nullptr};
 };
 
