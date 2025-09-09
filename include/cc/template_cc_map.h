@@ -72,6 +72,11 @@ namespace txservice
 template <typename KeyT, typename ValueT>
 void BackfillSnapshotForScanSlice(FetchSnapshotCc *fetch_cc,
                                   CcRequestBase *requester);
+
+template <typename KeyT, typename ValueT, bool VersionedRecord>
+void BackfillForScanNextBatch(FetchBucketDataCc *fetch_cc,
+                              CcRequestBase *requester);
+
 template <typename KeyT,
           typename ValueT,
           bool VersionedRecord,
@@ -12122,6 +12127,60 @@ void BackfillSnapshotForScanSlice(FetchSnapshotCc *fetch_cc,
     {
         shard.Enqueue(core_id, req);
     }
+}
+
+template <typename KeyT, typename ValueT, bool VersionedRecord>
+void BackfillForScanNextBatch(FetchBucketDataCc *fetch_cc,
+                              CcRequestBase *requester)
+{
+    ScanNextBatchCc *req = static_cast<ScanNextBatchCc *>(requester);
+    uint16_t bucket_id = fetch_cc->bucket_id_;
+    CcShard &shard = *fetch_cc->ccs_;
+    TemplateScanCache<KeyT, ValueT> *scan_cache =
+        static_cast<TemplateScanCache<KeyT, ValueT> *>(
+            req->GetKvCache(bucket_id));
+    assert(scan_cache != nullptr);
+
+    // Reset kv cache
+    scan_cache->Reset();
+
+    for (auto &item : fetch_cc->bucket_data_items_)
+    {
+        TemplateScanTuple<KeyT, ValueT> *scan_tuple =
+            scan_cache->AddScanTuple();
+        scan_tuple->key_ts_ = item.version_ts_;
+        scan_tuple->cce_addr_.SetCceLock(0, -1, 0, 0);
+        scan_tuple->KeyObj().SetPackedKey(item.key_str_.data(),
+                                          item.key_str_.size());
+
+        if (!item.is_deleted_)
+        {
+            scan_tuple->rec_status_ = RecordStatus::Normal;
+            if (req->IsRequireRecs())
+            {
+                size_t rec_offset = 0;
+                if constexpr (VersionedRecord)
+                {
+                    ValueT val;
+                    val.Deserialize(item.rec_str_.data(), rec_offset);
+                }
+                else
+                {
+                    ValueT tx_obj;
+                    auto val = tx_obj.DeserializeObject(item.rec_str_.data(),
+                                                        rec_offset);
+                    scan_tuple->SetRecord(std::unique_ptr<ValueT>(
+                        static_cast<ValueT *>(val.release())));
+                }
+            }
+        }
+        else
+        {
+            scan_tuple->rec_status_ = RecordStatus::Deleted;
+        }
+    }
+
+    shard.Enqueue(req);
 }
 
 }  // namespace txservice

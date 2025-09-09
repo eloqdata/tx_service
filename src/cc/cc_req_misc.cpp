@@ -25,6 +25,7 @@
 #include <atomic>
 #include <cstddef>
 #include <mutex>
+#include <system_error>
 #include <unordered_map>
 #include <vector>
 
@@ -891,6 +892,85 @@ void FetchRecordCc::SetFinish(int err)
 {
     error_code_ = err;
     ccs_.Enqueue(this);
+}
+
+void FetchBucketDataCc::Reset(const TableName *table_name,
+                              const TableSchema *table_schema,
+                              NodeGroupId node_group_id,
+                              int64_t node_group_term,
+                              CcShard *ccs,
+                              uint16_t bucket_id,
+                              TxKey start_key,
+                              bool start_key_inclusive,
+                              size_t batch_size,
+                              CcRequestBase *requester,
+                              OnFetchedBucketData backfill_func)
+{
+    table_name_ = TableName(
+        table_name->StringView(), table_name->Type(), table_name->Engine());
+    kv_table_name_ =
+        table_schema->GetKVCatalogInfo()->GetKvTableName(table_name_);
+    node_group_id_ = node_group_id;
+    node_group_term_ = node_group_term;
+    ccs_ = ccs;
+    bucket_id_ = bucket_id;
+    start_key_ = std::move(start_key);
+    start_key_inclusive_ = start_key_inclusive;
+    batch_size_ = batch_size;
+    requester_ = requester;
+    err_code_ = 0;
+
+    bucket_data_items_.clear();
+    backfill_func_ = backfill_func;
+}
+
+bool FetchBucketDataCc::ValidTermCheck()
+{
+    int64_t ng_leader_term = Sharder::Instance().LeaderTerm(node_group_id_);
+    int64_t standby_node_term = Sharder::Instance().StandbyNodeTerm();
+
+    if (std::max(ng_leader_term, standby_node_term) != node_group_term_)
+    {
+        return false;
+    }
+
+    return true;
+}
+
+void FetchBucketDataCc::AddDataItem(std::string &&key_str,
+                                    std::string &&rec_str,
+                                    uint64_t version,
+                                    bool is_deleted)
+{
+    bucket_data_items_.emplace_back(
+        std::move(key_str), std::move(rec_str), version, is_deleted);
+}
+
+bool FetchBucketDataCc::Execute(CcShard &ccs)
+{
+    if (!ValidTermCheck())
+    {
+        requester_->AbortCcRequest(CcErrorCode::NG_TERM_CHANGED);
+        err_code_ = static_cast<int32_t>(CcErrorCode::NG_TERM_CHANGED);
+        return true;
+    }
+
+    if (err_code_ != 0)
+    {
+        requester_->AbortCcRequest(CcErrorCode::DATA_STORE_ERR);
+    }
+    else
+    {
+        (*backfill_func_)(this, requester_);
+    }
+
+    return true;
+}
+
+void FetchBucketDataCc::SetFinish(int32_t err)
+{
+    err_code_ = err;
+    ccs_->Enqueue(requester_);
 }
 
 void FetchSnapshotCc::Reset(const TableName *tbl_name,
