@@ -680,7 +680,7 @@ struct ScanBatchTxRequest : public TemplateTxRequest<ScanBatchTxRequest, bool>
     int32_t obj_type_{-1};
     std::string_view scan_pattern_;
 
-    BucketScanPlan *bucket_scan_plan_;
+    BucketScanPlan *bucket_scan_plan_{nullptr};
 };
 
 struct UnlockTuple
