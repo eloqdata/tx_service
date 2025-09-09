@@ -733,6 +733,19 @@ public:
         OnFetchedSnapshot backfill_func,
         int32_t partition_id);
 
+    store::DataStoreHandler::DataStoreOpStatus FetchBucketData(
+        const TableName *table_name,
+        const TableSchema *table_schema,
+        NodeGroupId node_group_id,
+        int64_t node_group_term,
+        CcShard *ccs,
+        uint16_t bucket_id,
+        TxKey start_key,
+        bool start_key_inclusive,
+        size_t batch_size,
+        CcRequestBase *requester,
+        OnFetchedBucketData backfill_func);
+
     void RemoveFetchRecordRequest(LruEntry *cce);
 
     CcMap *CreateOrUpdatePkCcMap(const TableName &table_name,
@@ -1065,6 +1078,8 @@ private:
 
     // For load snapshot from kvstore asynchronously
     CcRequestPool<FetchSnapshotCc> fetch_snapshot_cc_pool_;
+    // For load bucket data from kvstore asynchronously
+    CcRequestPool<FetchBucketDataCc> fetch_bucket_data_cc_pool_;
 
     // For concurrency execution of cpu-bound tasks.
     CcRequestPool<RunOnTxProcessorCc> run_on_tx_processor_cc_pool_;

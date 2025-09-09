@@ -179,6 +179,13 @@ public:
         return DataStoreOpStatus::Error;
     }
 
+    virtual DataStoreOpStatus FetchBucketData(
+        FetchBucketDataCc *fetch_bucket_data_cc)
+    {
+        assert(false && "Unimplemented");
+        return DataStoreOpStatus::Error;
+    }
+
     virtual bool FetchTable(const TableName &table_name,
                             std::string &schema_image,
                             bool &found,
