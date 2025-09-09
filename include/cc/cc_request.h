@@ -1901,6 +1901,12 @@ public:
         return scan_pattern_;
     }
 
+    ScanCache *GetKvCache(uint16_t bucket_id)
+    {
+        assert(false);
+        return nullptr;
+    }
+
 private:
     const CcEntryAddr *cce_addr_;
     uint64_t ts_{0};

@@ -44,6 +44,7 @@
 #include "rpc_closure.h"
 #include "sharder.h"  // Sharder
 #include "store/data_store_handler.h"
+#include "tx_id.h"
 #include "tx_service_common.h"
 #include "tx_start_ts_collector.h"
 #include "type.h"
@@ -1590,6 +1591,35 @@ store::DataStoreHandler::DataStoreOpStatus CcShard::FetchSnapshot(
                     partition_id);
 
     return local_shards_.store_hd_->FetchRecord(nullptr, fetch_cc);
+}
+
+store::DataStoreHandler::DataStoreOpStatus CcShard::FetchBucketData(
+    const TableName *table_name,
+    const TableSchema *table_schema,
+    NodeGroupId node_group_id,
+    int64_t node_group_term,
+    CcShard *ccs,
+    uint16_t bucket_id,
+    TxKey start_key,
+    bool start_key_inclusive,
+    size_t batch_size,
+    CcRequestBase *requester,
+    OnFetchedBucketData backfill_func)
+{
+    FetchBucketDataCc *fetch_bucket_data_cc =
+        fetch_bucket_data_cc_pool_.NextRequest();
+    fetch_bucket_data_cc->Reset(table_name,
+                                table_schema,
+                                node_group_id,
+                                node_group_term,
+                                ccs,
+                                bucket_id,
+                                std::move(start_key),
+                                start_key_inclusive,
+                                batch_size,
+                                requester,
+                                backfill_func);
+    return local_shards_.store_hd_->FetchBucketData(fetch_bucket_data_cc);
 }
 
 void CcShard::RemoveFetchRecordRequest(LruEntry *cce)
