@@ -835,7 +835,7 @@ void CcNode::SubscribePrimaryNode(uint32_t leader_node_id,
     if (!resubscribe &&
         Sharder::Instance().LeaderNodeId(ng_id_) != leader_node_id)
     {
-        Sharder::Instance().UpdateLeader(ng_id_, leader_node_id);
+        Sharder::Instance().UpdateLeader(ng_id_, leader_node_id, primary_term);
     }
     auto *store_hd = Sharder::Instance().GetLocalCcShards()->store_hd_;
     //  term is already updated. Release processing latch to allow other rpc
