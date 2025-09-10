@@ -195,6 +195,13 @@ private:
     std::unordered_map<TableName, std::pair<uint64_t, std::vector<TxKey>>>
         sample_pool_map_;
     int error_code_{0};
+
+public:
+    // These variables only be used in DataStoreHandler
+    std::string kv_start_key_;
+    std::string kv_end_key_;
+    std::string kv_session_id_;
+    int32_t kv_partition_id_{0};
 };
 
 struct FetchTableRangesCc : public FetchCc
@@ -216,6 +223,12 @@ public:
     const TableName table_name_;
     int error_code_{0};
     std::vector<InitRangeEntry> ranges_vec_;
+
+    // These variables only be used in DataStoreHandler
+    std::string kv_start_key_;
+    std::string kv_end_key_;
+    std::string kv_session_id_;
+    int32_t kv_partition_id_{0};
 };
 
 struct FetchRangeSlicesReq
@@ -281,6 +294,10 @@ public:
     uint64_t slice_version_{0};
     uint64_t segment_cnt_{0};
     uint64_t segment_id_{0};
+
+    // These variables only be used in DataStoreHandler
+    std::string kv_start_key_;
+    int32_t kv_partition_id_{0};
 };
 
 /**
@@ -519,6 +536,14 @@ private:
     uint64_t snapshot_ts_;
     uint32_t slice_size_{0};
     uint32_t rec_cnt_{0};
+
+public:
+    // These variables only be used in DataStoreHandler
+    const std::string *kv_table_name_{nullptr};
+    std::string_view kv_start_key_;
+    std::string_view kv_end_key_;
+    std::string kv_session_id_;
+    int32_t kv_partition_id_{0};
 };
 
 struct FetchRecordCc : public FetchCc
@@ -567,9 +592,10 @@ public:
         std::vector<std::tuple<uint64_t, RecordStatus, std::string>>>
         archive_records_{nullptr};
 
-    // Process the kv result on TxProcessor if the data on CcShard (table
-    // schema) needs to be accessed.
-    std::function<void()> handle_kv_res_;
+    // These variables only be used in DataStoreHandler
+    std::string kv_session_id_;
+    std::string kv_start_key_;
+    std::string kv_end_key_;
 };
 
 struct FetchSnapshotCc;
@@ -642,6 +668,10 @@ public:
     // On fetched archive record, call backfill_func_ to backfill the record (to
     // request).
     OnFetchedSnapshot backfill_func_{nullptr};
+
+    // These variables only be used in DataStoreHandler
+    std::string kv_start_key_;
+    std::string kv_end_key_;
 };
 
 struct RunOnTxProcessorCc : public CcRequestBase
