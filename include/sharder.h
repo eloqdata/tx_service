@@ -353,8 +353,9 @@ public:
      *
      * @param ng_id The cc node group ID.
      * @param node_id The node_id of leader.
+     * @param term The node group leader term.
      */
-    void UpdateLeader(uint32_t ng_id, uint32_t node_id);
+    void UpdateLeader(uint32_t ng_id, uint32_t node_id, int64_t term = -1);
 
     bool OnLeaderStart(uint32_t ng_id,
                        int64_t term,
@@ -761,6 +762,8 @@ private:
     // Ng leader cache. We preallocate it to the max cluster size so that we
     // don't need to modify the size of it.
     std::atomic<uint32_t> ng_leader_cache_[1000];
+    // Ng leader term cache. Note this is not reliable.
+    std::atomic<int64_t> ng_leader_term_cache_[1000];
 
     std::atomic<int64_t> leader_term_cache_[1000];
     std::atomic<int64_t> candidate_leader_term_cache_[1000];
