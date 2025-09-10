@@ -1754,7 +1754,6 @@ public:
                 {
                     Iterator it =
                         FindEmplace(*look_key, false, !req.IsForWrite());
-                    LOG(INFO) << "FindEmplace: " << look_key->ToString();
                     cce = it->second;
                     ccp = it.GetPage();
                     // The read request accesses a new key not in the cc map.

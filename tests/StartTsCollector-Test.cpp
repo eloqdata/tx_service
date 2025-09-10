@@ -85,9 +85,15 @@ TEST_CASE("TxStartTsCollector GlobalMinSiTxStartTs unit test",
         "collect_active_tx_ts_interval_seconds", 2));
     tx_service_conf.insert(
         std::pair<std::string, uint32_t>("rep_group_cnt", 3));
+    CatalogFactory *catalog_factory[4] = {
+        &mock_catalog_factory,
+        &mock_catalog_factory,
+        &mock_catalog_factory,
+        &mock_catalog_factory,
+    };
 
     std::unique_ptr<TxService> tx_service_ =
-        std::make_unique<TxService>(&mock_catalog_factory,
+        std::make_unique<TxService>(catalog_factory,
                                     &MockSystemHandler::Instance(),
                                     tx_service_conf,
                                     node_id,
