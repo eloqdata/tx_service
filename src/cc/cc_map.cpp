@@ -132,6 +132,14 @@ std::pair<LockType, CcErrorCode> CcMap::AcquireCceKeyLock(
                                         lock_type == LockType::WriteLock,
                                         ng_id,
                                         table_name_.Type());
+            DLOG_IF(INFO,
+                    table_name_.StringView() ==
+                        "tpcc.STOCK*~~S_W_ID_1_S_I_ID_1_S_QUANTITY_1")
+                << ">> AcquireCceKeyLock success,table: "
+                << table_name_.StringView() << " , txn: " << req->Txn()
+                << ", acquire lock_type: " << (int) lock_type
+                << ", cce: " << cce << ", status: " << (int) cce_payload_status
+                << ", lock: " << lock->DebugInfo();
         }
 
         if (lock != nullptr && lock->HasWriteLock() &&
@@ -218,6 +226,14 @@ std::pair<LockType, CcErrorCode> CcMap::AcquireCceKeyLock(
         assert(lock != nullptr);
         RecoverTxForLockConfilct(*lock, lock_type, ng_id, ng_term);
         err_code = CcErrorCode::ACQUIRE_LOCK_BLOCKED;
+        DLOG_IF(INFO,
+                table_name_.StringView() ==
+                    "tpcc.STOCK*~~S_W_ID_1_S_I_ID_1_S_QUANTITY_1")
+            << ">> AcquireCceKeyLock blocked,table: "
+            << table_name_.StringView() << " , txn: " << req->Txn()
+            << ", acquire lock_type: " << (int) lock_type << ", cce: " << cce
+            << ", status: " << (int) cce_payload_status
+            << ", lock: " << lock->DebugInfo();
     }
 
     return std::pair<LockType, CcErrorCode>(lock_type, err_code);
@@ -257,6 +273,14 @@ std::pair<LockType, CcErrorCode> CcMap::LockHandleForResumedRequest(
         // request and the prior blocked request may has upsert the tx's lock
         // info in the shard.
         shard_->DeleteLockHoldingTx(tx_number, cce, ng_id);
+        DLOG_IF(INFO,
+                table_name_.StringView() ==
+                    "tpcc.STOCK*~~S_W_ID_1_S_I_ID_1_S_QUANTITY_1")
+            << ">> LockHandleForResumedRequest txn: " << tx_number
+            << ", table: " << table_name_.StringView()
+            << ", acquire lock_type: " << (int) acquired_lock
+            << ", cce: " << cce << ", status: " << (int) cce_payload_status
+            << ", lock: " << lock->DebugInfo();
     }
     else if (acquired_lock == LockType::WriteIntent &&
              iso_level == IsolationLevel::Snapshot && read_ts < commit_ts)
@@ -280,6 +304,14 @@ std::pair<LockType, CcErrorCode> CcMap::LockHandleForResumedRequest(
         // request and the prior blocked request may has upsert the tx's lock
         // info in the shard.
         shard_->DeleteLockHoldingTx(tx_number, cce, ng_id);
+        DLOG_IF(INFO,
+                table_name_.StringView() ==
+                    "tpcc.STOCK*~~S_W_ID_1_S_I_ID_1_S_QUANTITY_1")
+            << ">> LockHandleForResumedRequest txn: " << tx_number
+            << ", table: " << table_name_.StringView()
+            << ", acquire lock_type: " << (int) acquired_lock
+            << ", cce: " << cce << ", status: " << (int) cce_payload_status
+            << ", lock: " << lock->DebugInfo();
     }
     else
     {
@@ -289,6 +321,14 @@ std::pair<LockType, CcErrorCode> CcMap::LockHandleForResumedRequest(
                                     acquired_lock == LockType::WriteLock,
                                     ng_id,
                                     table_name_.Type());
+        DLOG_IF(INFO,
+                table_name_.StringView() ==
+                    "tpcc.STOCK*~~S_W_ID_1_S_I_ID_1_S_QUANTITY_1")
+            << ">> LockHandleForResumedRequest txn: " << tx_number
+            << ", table: " << table_name_.StringView()
+            << ", acquire lock_type: " << (int) acquired_lock
+            << ", cce: " << cce << ", status: " << (int) cce_payload_status
+            << ", lock: " << lock->DebugInfo();
     }
 
     return std::pair<LockType, CcErrorCode>(acquired_lock, err_code);
@@ -432,5 +472,13 @@ void CcMap::ReleaseCceLock(NonBlockingLock *lock,
         // If its owner KeyGapLockAndExtraData has blocked commands, the lock
         // will not be recycled even if it is empty.
     }
+
+    DLOG_IF(INFO,
+            table_name_.StringView() ==
+                "tpcc.STOCK*~~S_W_ID_1_S_I_ID_1_S_QUANTITY_1")
+        << ">> ReleaseCceLock, txn: " << tx_number
+        << ", table: " << table_name_.StringView()
+        << ", lk_type: " << (int) lk_type << ", cce: " << cce
+        << ", lock: " << lock->DebugInfo();
 }
 }  // namespace txservice
