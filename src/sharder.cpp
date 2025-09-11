@@ -694,12 +694,19 @@ void Sharder::UpdateLeader(uint32_t ng_id, uint32_t node_id, int64_t term)
                    << ", cached term: " << cached_leader_term;
         return;
     }
-    while ((term == -1 || term > cached_leader_term) &&
-           ng_leader_term_cache_[ng_id].compare_exchange_weak(
-               cached_leader_term, term))
+
+    while (!ng_leader_term_cache_[ng_id].compare_exchange_weak(
+        cached_leader_term, term))
     {
-        ng_leader_cache_[ng_id].store(node_id, std::memory_order_release);
+        if (term != -1 && cached_leader_term != -1 &&
+            term <= cached_leader_term)
+        {
+            DLOG(INFO) << "skip out-dated leader update, term: " << term
+                       << ", cached term: " << cached_leader_term;
+            return;
+        }
     }
+    ng_leader_cache_[ng_id].store(node_id, std::memory_order_release);
 }
 
 void Sharder::FinishLogReplay(uint32_t cc_ng_id,
