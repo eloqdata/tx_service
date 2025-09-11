@@ -19,6 +19,8 @@
  *    <http://www.gnu.org/licenses/>.
  *
  */
+#include "checkpointer.h"
+
 #include <brpc/controller.h>
 
 #include <cstdint>
@@ -27,7 +29,6 @@
 
 #include "catalog_key_record.h"
 #include "cc_request.h"
-#include "checkpointer.h"
 #include "error_messages.h"
 #include "metrics.h"
 #include "range_slice.h"

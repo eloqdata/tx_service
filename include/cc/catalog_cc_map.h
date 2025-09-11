@@ -87,9 +87,9 @@ public:
         // queries that are accessing the schema w/o concurrency control and
         // blocks future runtime queries from accessing the schema via the
         // control block.
-        if (req.CcOp() == CcOperation::ReadForWrite)
+        uint32_t ng_id = req.NodeGroupId();
+        if (shard_->IsNative(ng_id) && req.CcOp() == CcOperation::ReadForWrite)
         {
-            uint32_t ng_id = req.NodeGroupId();
             int64_t ng_term = Sharder::Instance().LeaderTerm(ng_id);
             CcHandlerResult<AcquireAllResult> *hd_res = req.Result();
             if (ng_term < 0)
@@ -570,34 +570,33 @@ public:
         }
         case PostWriteType::PostCommit:
         {
-            const TableName &tbl_name = table_key->Name();
-            std::shared_ptr<ReaderWriterObject<TableSchema>> schema_cntl =
-                shard_->FindSchemaCntl(tbl_name);
-            if (schema_cntl != nullptr)
+            if (shard_->IsNative(req.NodeGroupId()))
             {
-                schema_cntl->FinishWriter();
-                shard_->DeleteSchemaCntl(tbl_name);
+                const TableName &tbl_name = table_key->Name();
+                std::shared_ptr<ReaderWriterObject<TableSchema>> schema_cntl =
+                    shard_->FindSchemaCntl(tbl_name);
+                if (schema_cntl != nullptr)
+                {
+                    schema_cntl->FinishWriter(req.Txn());
+                    shard_->DeleteSchemaCntl(tbl_name);
+                }
             }
 
             catalog_entry =
                 shard_->GetCatalog(table_key->Name(), req.NodeGroupId());
 
-            if (catalog_entry == nullptr)
-            {
-                // The target table catalog haven't been initialized. Just
-                // return.
-                req.Result()->SetError(CcErrorCode::REQUESTED_TABLE_NOT_EXISTS);
-                return true;
-            }
-
             if (req.CommitTs() == TransactionOperation::tx_op_failed_ts_)
             {
+                // The catalog_entry could be null if the txn aborts after
+                // acquire write intent failure.
+
                 // For add index op, we create new sk ccmap, table ranges and
                 // table statistics for the new sk during prepare phase. If
                 // flush kv failed, should clean these up. But, if the dirty
                 // schema is nullptr, that is mean, this is the recovering
                 // transaction, and there is no need to drop the new sk ccmap.
                 if (req.OpType() == OperationType::AddIndex &&
+                    catalog_entry != nullptr &&
                     catalog_entry->dirty_schema_ != nullptr)
                 {
                     std::vector<TableName> new_index_names =
@@ -633,7 +632,8 @@ public:
                 }
 
                 // Flush kv fails, need to clear dirty CatalogEntry
-                if (shard_->core_id_ == shard_->core_cnt_ - 1)
+                if (shard_->core_id_ == shard_->core_cnt_ - 1 &&
+                    catalog_entry != nullptr)
                 {
                     catalog_entry->RejectDirtySchema();
                 }
@@ -646,6 +646,7 @@ public:
                 return TemplateCcMap::Execute(req);
             }
 
+            assert(catalog_entry != nullptr);
             if (shard_->core_id_ == 0)
             {
                 // For post commit, retrieves the current and dirty schema pair

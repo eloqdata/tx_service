@@ -98,7 +98,7 @@ public:
 
     virtual bool Connect() = 0;
 
-    virtual void ScheduleTimerTasks(){};
+    virtual void ScheduleTimerTasks() {};
     /**
      * @brief flush entries in \@param flush_task to base table or skindex table
      * in data store, stop and return false if the flush failed after max retry
@@ -372,10 +372,9 @@ public:
         return true;
     }
 
-    virtual bool CreateSnapshotForBackup(
-        const std::string &backup_name,
-        std::vector<std::string> &backup_files,
-        uint64_t backup_ts = 0)
+    virtual bool CreateSnapshotForBackup(const std::string &backup_name,
+                                         std::vector<std::string> &backup_files,
+                                         uint64_t backup_ts = 0)
     {
         assert(false);
         return true;

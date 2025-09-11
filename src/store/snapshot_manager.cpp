@@ -19,10 +19,11 @@
  *    <http://www.gnu.org/licenses/>.
  *
  */
+#include "store/snapshot_manager.h"
+
 #include <vector>
 
 #include "cc/local_cc_shards.h"
-#include "store/snapshot_manager.h"
 
 namespace txservice
 {
@@ -678,7 +679,7 @@ txservice::remote::BackupTaskStatus SnapshotManager::GetBackupStatus(
                 }
                 response->set_backup_ts(backup_it->second.backup_ts());
             }
-          
+
             return backup_status;
         }
     }

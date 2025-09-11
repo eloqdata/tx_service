@@ -19,6 +19,8 @@
  *    <http://www.gnu.org/licenses/>.
  *
  */
+#include "cc/cc_shard.h"
+
 #include <brpc/controller.h>
 #include <bthread/bthread.h>
 #include <bthread/remote_task_queue.h>
@@ -29,7 +31,6 @@
 
 #include "cc/catalog_cc_map.h"
 #include "cc/cc_request.h"
-#include "cc/cc_shard.h"
 #include "cc/cluster_config_cc_map.h"
 #include "cc/non_blocking_lock.h"  // lock_vec_
 #include "cc/range_bucket_cc_map.h"
