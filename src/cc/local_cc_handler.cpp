@@ -854,24 +854,24 @@ void txservice::LocalCcHandler::ScanOpen(
         }
 
         if (direction == ScanDirection::Forward &&
-            sk_forward_scanner_[static_cast<int>(table_name.Engine())].Size() >
-                0)
+            sk_forward_scanner_[static_cast<int>(table_name.Engine()) - 1]
+                    .Size() > 0)
         {
             ccm_scanner = std::move(
-                sk_forward_scanner_[static_cast<int>(table_name.Engine())]
+                sk_forward_scanner_[static_cast<int>(table_name.Engine()) - 1]
                     .Peek());
-            sk_forward_scanner_[static_cast<int>(table_name.Engine())]
+            sk_forward_scanner_[static_cast<int>(table_name.Engine()) - 1]
                 .Dequeue();
             ccm_scanner->Reset(index_key_schema);
         }
         else if (direction == ScanDirection::Backward &&
-                 sk_backward_scanner_[static_cast<int>(table_name.Engine())]
+                 sk_backward_scanner_[static_cast<int>(table_name.Engine()) - 1]
                          .Size() > 0)
         {
             ccm_scanner = std::move(
-                sk_backward_scanner_[static_cast<int>(table_name.Engine())]
+                sk_backward_scanner_[static_cast<int>(table_name.Engine()) - 1]
                     .Peek());
-            sk_backward_scanner_[static_cast<int>(table_name.Engine())]
+            sk_backward_scanner_[static_cast<int>(table_name.Engine()) - 1]
                 .Dequeue();
             ccm_scanner->Reset(index_key_schema);
         }
@@ -899,24 +899,24 @@ void txservice::LocalCcHandler::ScanOpen(
             key_schema = catalog_entry->schema_->KeySchema();
         }
         if (direction == ScanDirection::Forward &&
-            pk_forward_scanner_[static_cast<int>(table_name.Engine())].Size() >
-                0)
+            pk_forward_scanner_[static_cast<int>(table_name.Engine()) - 1]
+                    .Size() > 0)
         {
             ccm_scanner = std::move(
-                pk_forward_scanner_[static_cast<int>(table_name.Engine())]
+                pk_forward_scanner_[static_cast<int>(table_name.Engine()) - 1]
                     .Peek());
-            pk_forward_scanner_[static_cast<int>(table_name.Engine())]
+            pk_forward_scanner_[static_cast<int>(table_name.Engine()) - 1]
                 .Dequeue();
             ccm_scanner->Reset(key_schema);
         }
         else if (direction == ScanDirection::Backward &&
-                 pk_backward_scanner_[static_cast<int>(table_name.Engine())]
+                 pk_backward_scanner_[static_cast<int>(table_name.Engine()) - 1]
                          .Size() > 0)
         {
             ccm_scanner = std::move(
-                pk_backward_scanner_[static_cast<int>(table_name.Engine())]
+                pk_backward_scanner_[static_cast<int>(table_name.Engine()) - 1]
                     .Peek());
-            pk_backward_scanner_[static_cast<int>(table_name.Engine())]
+            pk_backward_scanner_[static_cast<int>(table_name.Engine()) - 1]
                 .Dequeue();
             ccm_scanner->Reset(key_schema);
         }
@@ -1467,13 +1467,13 @@ void txservice::LocalCcHandler::ScanClose(const TableName &table_name,
 
         if (direction == ScanDirection::Forward)
         {
-            pk_forward_scanner_[static_cast<int>(table_name.Engine())].Enqueue(
-                std::move(scanner));
+            pk_forward_scanner_[static_cast<int>(table_name.Engine()) - 1]
+                .Enqueue(std::move(scanner));
         }
         else
         {
-            pk_backward_scanner_[static_cast<int>(table_name.Engine())].Enqueue(
-                std::move(scanner));
+            pk_backward_scanner_[static_cast<int>(table_name.Engine()) - 1]
+                .Enqueue(std::move(scanner));
         }
     }
     else if (table_name.Type() == TableType::Secondary)
@@ -1482,13 +1482,13 @@ void txservice::LocalCcHandler::ScanClose(const TableName &table_name,
 
         if (direction == ScanDirection::Forward)
         {
-            sk_forward_scanner_[static_cast<int>(table_name.Engine())].Enqueue(
-                std::move(scanner));
+            sk_forward_scanner_[static_cast<int>(table_name.Engine()) - 1]
+                .Enqueue(std::move(scanner));
         }
         else
         {
-            sk_backward_scanner_[static_cast<int>(table_name.Engine())].Enqueue(
-                std::move(scanner));
+            sk_backward_scanner_[static_cast<int>(table_name.Engine()) - 1]
+                .Enqueue(std::move(scanner));
         }
     }
 }
