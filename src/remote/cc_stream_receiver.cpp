@@ -1512,6 +1512,8 @@ void CcStreamReceiver::OnReceiveCcMsg(std::unique_ptr<CcMessage> msg)
     case CcMessage::MessageType::CcMessage_MessageType_RecoverStateCheckRequest:
     {
         // this request is only used during cluster initialization.
+        LOG(INFO) << "Receive RecoverStateCheckRequest, node "
+                  << Sharder::Instance().NodeId();
         const RecoverStateCheckRequest &req = msg->recover_state_check_req();
 
         CcMessage send_msg;
@@ -1548,6 +1550,9 @@ void CcStreamReceiver::OnReceiveCcMsg(std::unique_ptr<CcMessage> msg)
     {
         // this response is only used during cluster initialization.
         const RecoverStateCheckResponse &resp = msg->recover_state_check_resp();
+        DLOG(INFO) << "RecoverStateCheckResponse, node_group: "
+                   << resp.node_group_id()
+                   << ", error_code:" << resp.error_code();
 
         if (resp.error_code() == 0)
         {
