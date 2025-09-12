@@ -766,6 +766,11 @@ public:
         return 0;
     }
 
+    std::string_view KVSerialize() const
+    {
+        return std::string_view();
+    }
+
     std::unique_ptr<CompositeKey<Types...>> Clone() const
     {
         return std::make_unique<CompositeKey<Types...>>(*this);

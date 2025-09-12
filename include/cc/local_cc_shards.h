@@ -48,6 +48,7 @@
 #include "cc_page_clean_guard.h"
 #include "cc_shard.h"
 #include "data_sync_task.h"
+#include "eloq_basic_catalog_factory.h"
 #include "local_cc_handler.h"
 #include "log.pb.h"
 #include "meter.h"
@@ -1390,7 +1391,7 @@ public:
 
     CatalogFactory *GetCatalogFactory(TableEngine table_engine) const
     {
-        return catalog_factory_[static_cast<int>(table_engine)];
+        return catalog_factory_[static_cast<int>(table_engine) - 1];
     }
 
     SystemHandler *GetSystemHandler()
@@ -1875,7 +1876,12 @@ private:
     std::atomic<uint64_t> ts_base_;
 
     // catalog factory for each table engine
-    CatalogFactory *catalog_factory_[4]{nullptr, nullptr, nullptr, nullptr};
+    CatalogFactory *catalog_factory_[6]{nullptr,
+                                        nullptr,
+                                        nullptr,
+                                        nullptr,
+                                        &hash_catalog_factory_,
+                                        &range_catalog_factory_};
 
     SystemHandler *const system_handler_;
 
@@ -2391,6 +2397,9 @@ private:
     bool enable_shard_heap_defragment_{false};
 
     std::unique_ptr<metrics::Meter> node_meter_{nullptr};
+
+    EloqHashCatalogFactory hash_catalog_factory_;
+    EloqRangeCatalogFactory range_catalog_factory_;
 
     friend class LocalCcHandler;
     friend class remote::RemoteCcHandler;

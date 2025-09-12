@@ -155,11 +155,15 @@ enum class TableType : uint8_t
 
 enum class TableEngine : uint8_t
 {
-    EloqSql = 0,
-    EloqKv = 1,
-    EloqDoc = 2,
-    Sequence = 3,  // Special engine for sequence table.
-    None = 4,  // table that does not belong to any engine like bucket table.
+    None = 0,  // table that does not belong to any engine like bucket table.
+    EloqSql = 1,
+    EloqKv = 2,
+    EloqDoc = 3,
+    Sequence = 4,  // Special engine for sequence table.
+    InternalRange =
+        5,  // TODO(liunyl): Sequence should be part of internal hash table. Fix
+            // this after store_hd supports multiple engines.
+    InternalHash = 6,
 };
 
 struct TableName
@@ -450,7 +454,8 @@ struct TableName
 
     bool IsHashPartitioned() const
     {
-        return engine_ == TableEngine::EloqKv || engine_ == TableEngine::None;
+        return engine_ == TableEngine::EloqKv || engine_ == TableEngine::None ||
+               engine_ == TableEngine::InternalHash;
     }
 
     bool IsStringOwner() const
@@ -567,6 +572,10 @@ constexpr static std::string_view range_bucket_ccm_name_sv{"__range_bucket"};
 constexpr static std::string_view cluster_config_ccm_name_sv{
     "__cluster_config"};
 constexpr static std::string_view sequence_table_name_sv{"__sequence_table"};
+constexpr static std::string_view internal_range_table_name_sv{
+    "__internal_range_table"};
+constexpr static std::string_view internal_hash_table_name_sv{
+    "__internal_hash_table"};
 
 inline static TableName catalog_ccm_name{
     catalog_ccm_name_sv, TableType::Catalog, TableEngine::None};
@@ -574,6 +583,11 @@ inline static TableName range_bucket_ccm_name{
     range_bucket_ccm_name_sv, TableType::RangeBucket, TableEngine::None};
 inline static TableName cluster_config_ccm_name{
     cluster_config_ccm_name_sv, TableType::ClusterConfig, TableEngine::None};
+inline static TableName internal_range_table_name{internal_range_table_name_sv,
+                                                  TableType::Primary,
+                                                  TableEngine::InternalRange};
+inline static TableName internal_hash_table_name{
+    internal_hash_table_name_sv, TableType::Primary, TableEngine::InternalHash};
 
 // Sequence table is a special table for auto increment id and range partition
 // id. It is used to generate auto increment id and range partition id for

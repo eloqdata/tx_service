@@ -219,7 +219,7 @@ public:
             bool realtime_sampling,
             uint32_t native_ng_id,
             LocalCcShards &local_shards,
-            CatalogFactory *catalog_factory[4],
+            CatalogFactory *catalog_factory[6],
             SystemHandler *system_handler,
             std::unordered_map<uint32_t, std::vector<NodeConfig>> *ng_configs,
             uint64_t cluster_config_version,
@@ -416,7 +416,7 @@ public:
 
     CatalogFactory *GetCatalogFactory(TableEngine table_engine)
     {
-        return catalog_factory_[static_cast<int>(table_engine)];
+        return catalog_factory_[static_cast<int>(table_engine) - 1];
     }
 
     /**
@@ -1153,7 +1153,8 @@ private:
 
     // Catalog handler which is used to execute catalog related callback
     // function at runtime side.
-    CatalogFactory *catalog_factory_[4]{nullptr, nullptr, nullptr, nullptr};
+    CatalogFactory *catalog_factory_[6]{
+        nullptr, nullptr, nullptr, nullptr, nullptr, nullptr};
 
     SystemHandler *const system_handler_;
 
