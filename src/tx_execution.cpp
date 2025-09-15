@@ -2381,7 +2381,6 @@ void TransactionExecution::Process(ScanOpenOperation &scan_open)
 
     if (scan_open.tx_req_->read_local_)
     {
-        LOG(INFO) << "== Scan Open read lock";
         cc_handler_->ScanOpenLocal(table_name,
                                    index_type,
                                    start_key,
@@ -3574,10 +3573,6 @@ void TransactionExecution::ScanClose(
             if (read_cnt == 0)
             {
                 drain_batch_.emplace_back(tpl.cce_addr_, tpl.version_ts_);
-                if (drain_batch_.back().first.CceLockPtr() == 0)
-                {
-                    LOG(INFO) << "== empty lock ptr";
-                }
             }
         }
     }
@@ -3604,10 +3599,6 @@ void TransactionExecution::ScanClose(
                 {
                     drain_batch_.emplace_back(last_tuple->cce_addr_,
                                               last_tuple->key_ts_);
-                    if (drain_batch_.back().first.CceLockPtr() == 0)
-                    {
-                        LOG(INFO) << "== empty lock ptr";
-                    }
                 }
             }
         }
@@ -3635,10 +3626,7 @@ void TransactionExecution::ScanClose(
                 {
                     drain_batch_.emplace_back(last_tuple->cce_addr_,
                                               last_tuple->key_ts_);
-                    if (drain_batch_.back().first.CceLockPtr() == 0)
-                    {
-                        LOG(INFO) << "== empty lock ptr";
-                    }
+
                 }
             }
         }
@@ -3658,10 +3646,6 @@ void TransactionExecution::ScanClose(
             rw_set_.GetReadCnt(table_name, tuple->cce_addr_) == 0)
         {
             drain_batch_.emplace_back(tuple->cce_addr_, tuple->key_ts_);
-            if (drain_batch_.back().first.CceLockPtr() == 0)
-            {
-                LOG(INFO) << "== empty lock ptr";
-            }
         }
     }
 
@@ -5882,11 +5866,6 @@ void TransactionExecution::DrainScanner(CcScanner *scanner,
             {
                 drain_batch_.emplace_back(cc_scan_tuple->cce_addr_,
                                           cc_scan_tuple->key_ts_);
-            }
-
-            if (drain_batch_.back().first.CceLockPtr() == 0)
-            {
-                LOG(INFO) << "== empty lock ptr";
             }
         }
         scanner->MoveNext();

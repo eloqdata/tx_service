@@ -1906,7 +1906,6 @@ public:
 
     bool SetFinish(uint16_t core_id)
     {
-        // LOG(INFO) << "==ScanNextBatchCc: SetFinished";
         if (WaitForFetchBucketCnt(core_id) > 0)
         {
             SetIsWaitForFetchBucket(core_id);
@@ -1929,7 +1928,6 @@ public:
                 res_->Value().current_scan_plan_->StartKeys(node_group_id_);
             if (shard_cache_size > 0)
             {
-                // LOG(INFO) << "== Next Scan Key = " << last_key.ToString();
                 keys->at(core_id) = {last_key.Clone(), false};
             }
             else

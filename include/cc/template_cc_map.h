@@ -2791,35 +2791,6 @@ public:
                 64,
                 &req,
                 &BackfillForScanNextBatch<KeyT, ValueT, VersionedRecord>);
-            /*
-            for (const auto &bucket : bucket_ids)
-            {
-
-                uint16_t target_core =
-                    Sharder::Instance().ShardBucketIdToCoreIdx(bucket);
-                if (shard_->core_id_ == target_core)
-                {
-                    // TODO(lokax): bucket is drained ?
-
-                    // increate counter
-                    req.IncreaseWaitForFetchBucketCnt(shard_->core_id_);
-                    shard_->FetchBucketData(
-                        &table_name_,
-                        table_schema_,
-                        ng_id,
-                        ng_term,
-                        shard_,
-                        bucket,
-                        start_key.GetShallowCopy(),
-                        false,
-                        64,
-                        &req,
-                        &BackfillForScanNextBatch<KeyT,
-                                                  ValueT,
-                                                  VersionedRecord>);
-                }
-            }
-            */
 
             auto stop_time = std::chrono::high_resolution_clock::now();
             size_t time = std::chrono::duration_cast<std::chrono::microseconds>(
@@ -2899,8 +2870,6 @@ public:
         }
         else
         {
-            // LOG(INFO) << "==ScanNextBatchCc: Scan Start key = "
-            //          << start_key.ToString();
             const KeyT *look_key = start_key.GetKey<KeyT>();
             bool inclusive = start_key.Type() == KeyType::NegativeInf;
 
