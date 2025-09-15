@@ -7288,37 +7288,53 @@ public:
             }
 
             // Skip records that no longer belong to this ng.
-            const TableRangeEntry *range_entry =
-                shard_->GetTableRangeEntry(table_name_, cc_ng_id_, TxKey(&key));
-
-            const BucketInfo *bucket_info = shard_->GetBucketInfo(
-                Sharder::MapRangeIdToBucketId(
-                    range_entry->GetRangeInfo()->PartitionId()),
-                cc_ng_id_);
-            // Check if range bucket belongs to this ng or is migrating
-            // to this ng.
-            if (bucket_info->BucketOwner() != cc_ng_id_ &&
-                bucket_info->DirtyBucketOwner() != cc_ng_id_)
+            if (RangePartitioned)
             {
-                int32_t new_range_id =
-                    range_entry->GetRangeInfo()->GetKeyNewRangeId(TxKey(&key));
-                // If range is splitting, check if new range belongs to
-                // this ng.
-                if (new_range_id >= 0)
+                const TableRangeEntry *range_entry = shard_->GetTableRangeEntry(
+                    table_name_, cc_ng_id_, TxKey(&key));
+
+                const BucketInfo *bucket_info = shard_->GetBucketInfo(
+                    Sharder::MapRangeIdToBucketId(
+                        range_entry->GetRangeInfo()->PartitionId()),
+                    cc_ng_id_);
+                // Check if range bucket belongs to this ng or is migrating
+                // to this ng.
+                if (bucket_info->BucketOwner() != cc_ng_id_ &&
+                    bucket_info->DirtyBucketOwner() != cc_ng_id_)
                 {
-                    const BucketInfo *new_bucket_info = shard_->GetBucketInfo(
-                        Sharder::MapRangeIdToBucketId(
-                            range_entry->GetRangeInfo()->PartitionId()),
-                        cc_ng_id_);
-                    if (new_bucket_info->BucketOwner() != cc_ng_id_ &&
-                        new_bucket_info->DirtyBucketOwner() != cc_ng_id_)
+                    int32_t new_range_id =
+                        range_entry->GetRangeInfo()->GetKeyNewRangeId(
+                            TxKey(&key));
+                    // If range is splitting, check if new range belongs to
+                    // this ng.
+                    if (new_range_id >= 0)
                     {
-                        if (op_type != OperationType::Delete)
+                        const BucketInfo *new_bucket_info =
+                            shard_->GetBucketInfo(
+                                Sharder::MapRangeIdToBucketId(
+                                    range_entry->GetRangeInfo()->PartitionId()),
+                                cc_ng_id_);
+                        if (new_bucket_info->BucketOwner() != cc_ng_id_ &&
+                            new_bucket_info->DirtyBucketOwner() != cc_ng_id_)
                         {
-                            rec.Deserialize(log_blob.data(), offset);
+                            if (op_type != OperationType::Delete)
+                            {
+                                rec.Deserialize(log_blob.data(), offset);
+                            }
+                            continue;
                         }
-                        continue;
                     }
+                }
+            }
+            else
+            {
+                uint16_t bucket_id = Sharder::MapKeyHashToBucketId(key.Hash());
+                const BucketInfo *bucket_info =
+                    shard_->GetBucketInfo(bucket_id, cc_ng_id_);
+                if (bucket_info->BucketOwner() != cc_ng_id_ &&
+                    bucket_info->DirtyBucketOwner() != cc_ng_id_)
+                {
+                    continue;
                 }
             }
 

@@ -458,6 +458,11 @@ struct TableName
                engine_ == TableEngine::InternalHash;
     }
 
+    bool IsObjectTable() const
+    {
+        return engine_ == TableEngine::EloqKv;
+    }
+
     bool IsStringOwner() const
     {
         return own_string_;
