@@ -2136,7 +2136,10 @@ public:
             uint64_t key_hash = key.Hash();
             uint16_t bucket_id =
                 Sharder::Instance().MapKeyHashToBucketId(key_hash);
-            if (shard_->GetBucketOwner(bucket_id, cc_ng_id_) != cc_ng_id_)
+            const BucketInfo *bucket_info =
+                shard_->GetBucketInfo(bucket_id, cc_ng_id_);
+            if (bucket_info->BucketOwner() != cc_ng_id_ &&
+                bucket_info->DirtyBucketOwner() != cc_ng_id_)
             {
                 offset += cmds_len;
                 continue;
