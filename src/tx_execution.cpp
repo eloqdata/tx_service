@@ -2364,7 +2364,7 @@ void TransactionExecution::Process(ScanOpenOperation &scan_open)
 
     if (!scan_open.lock_cluster_config_result_.IsFinished())
     {
-        LOG(INFO) << "==Process: lock cluste config not finished";
+        // LOG(INFO) << "==Process: lock cluste config not finished";
         // Acquire cluster config read lock
         lock_cluster_config_op_.Reset(TableName(cluster_config_ccm_name_sv,
                                                 TableType::ClusterConfig,
@@ -2381,6 +2381,7 @@ void TransactionExecution::Process(ScanOpenOperation &scan_open)
 
     if (scan_open.tx_req_->read_local_)
     {
+        LOG(INFO) << "== Scan Open read lock";
         cc_handler_->ScanOpenLocal(table_name,
                                    index_type,
                                    start_key,
@@ -2404,6 +2405,7 @@ void TransactionExecution::Process(ScanOpenOperation &scan_open)
             iso_lvl = IsolationLevel::RepeatableRead;
         }
 
+        auto start_time = std::chrono::high_resolution_clock::now();
         cc_handler_->ScanOpen(table_name,
                               schema_version,
                               index_type,
@@ -2425,11 +2427,18 @@ void TransactionExecution::Process(ScanOpenOperation &scan_open)
                               is_require_sort,
                               scan_open.tx_req_->obj_type_,
                               scan_open.tx_req_->scan_pattern_);
+
+        auto end_time = std::chrono::high_resolution_clock::now();
+        LOG(INFO) << "scan open time = "
+                  << std::chrono::duration_cast<std::chrono::microseconds>(
+                         end_time - start_time)
+                         .count();
     }
 
     if (table_name.IsHashPartitioned())
     {
-        StartTiming();
+        // immediately forward again.
+        command_id_.fetch_add(1, std::memory_order_relaxed);
     }
 }
 
@@ -2529,6 +2538,7 @@ void TransactionExecution::PostProcess(ScanOpenOperation &scan_open)
         //  sets the status of the scanner "Blocked".
         open_result.scanner_->SetStatus(ScannerStatus::Blocked);
 
+        auto start_time = std::chrono::high_resolution_clock::now();
         if (scan_open.tx_req_->bucket_scan_save_point_->bucket_groups_.empty())
         {
             // Generate scan plan
@@ -2600,13 +2610,17 @@ void TransactionExecution::PostProcess(ScanOpenOperation &scan_open)
 
                 if (!finished)
                 {
-                    LOG(INFO) << "== current plan bucket ids size = "
-                              << current_plan_bucket_ids.size();
                     scan_open.tx_req_->bucket_scan_save_point_->bucket_groups_
                         .push_back(std::move(current_plan_bucket_ids));
                 }
             }
         }
+
+        auto end_time = std::chrono::high_resolution_clock::now();
+        LOG(INFO) << "time = "
+                  << std::chrono::duration_cast<std::chrono::microseconds>(
+                         end_time - start_time)
+                         .count();
 
         scans_.try_emplace(open_result.scan_alias_,
                            std::move(open_result.scanner_));
@@ -2656,7 +2670,7 @@ void TransactionExecution::Process(ScanNextOperation &scan_next)
     CcScanner &scanner = *scan_next.scan_state_->scanner_;
     if (!scan_next.is_running_)
     {
-        LOG(INFO) << "==ScanNextOperation::Process: reset scan next result";
+        // LOG(INFO) << "==ScanNextOperation::Process: reset scan next result";
         ScanNextResult &scan_next_result = scan_next.hd_result_.Value();
         scan_next_result.Clear();
         scan_next_result.current_scan_plan_ =
@@ -2675,7 +2689,7 @@ void TransactionExecution::Process(ScanNextOperation &scan_next)
             scan_next.scan_state_->current_plan_index_ !=
                 scan_next.tx_req_->bucket_scan_plan_->PlanIndex())
         {
-            LOG(INFO) << "== Close: ";
+            // LOG(INFO) << "== Close: ";
             scan_next.scan_state_->current_plan_index_ =
                 scan_next.tx_req_->bucket_scan_plan_->PlanIndex();
             scanner.Close();
@@ -2683,8 +2697,8 @@ void TransactionExecution::Process(ScanNextOperation &scan_next)
         }
     }
 
-    LOG(INFO) << "==ScanNextOperation::Process: to scan next = "
-              << to_scan_next;
+    // LOG(INFO) << "==ScanNextOperation::Process: to scan next = "
+    //          << to_scan_next;
     bool is_local = true;
     if (to_scan_next && scanner.Type() == CcmScannerType::HashPartition)
     {
@@ -2974,6 +2988,7 @@ void TransactionExecution::PostProcess(ScanNextOperation &scan_next)
 
     if (scanner.Type() == CcmScannerType::HashPartition)
     {
+        auto start_time = std::chrono::high_resolution_clock::now();
         scanner.Init();
         while (scanner.Status() == ScannerStatus::Open)
         {
@@ -3054,10 +3069,16 @@ void TransactionExecution::PostProcess(ScanNextOperation &scan_next)
             scanner.MoveNext();
         }
 
-        LOG(INFO) << "==== debug scan batch size = " << scan_batch.size();
+        // LOG(INFO) << "==== debug scan batch size = " << scan_batch.size();
 
         bool_resp_->Finish(
             scan_next.tx_req_->bucket_scan_plan_->CurrentPlanIsFinished());
+
+        auto stop_time = std::chrono::high_resolution_clock::now();
+        size_t time = std::chrono::duration_cast<std::chrono::microseconds>(
+                          stop_time - start_time)
+                          .count();
+        // LOG(INFO) << "== ScanNext PostPrcess time = " << time;
     }
     else
     {
@@ -3553,6 +3574,10 @@ void TransactionExecution::ScanClose(
             if (read_cnt == 0)
             {
                 drain_batch_.emplace_back(tpl.cce_addr_, tpl.version_ts_);
+                if (drain_batch_.back().first.CceLockPtr() == 0)
+                {
+                    LOG(INFO) << "== empty lock ptr";
+                }
             }
         }
     }
@@ -3579,6 +3604,10 @@ void TransactionExecution::ScanClose(
                 {
                     drain_batch_.emplace_back(last_tuple->cce_addr_,
                                               last_tuple->key_ts_);
+                    if (drain_batch_.back().first.CceLockPtr() == 0)
+                    {
+                        LOG(INFO) << "== empty lock ptr";
+                    }
                 }
             }
         }
@@ -3588,6 +3617,8 @@ void TransactionExecution::ScanClose(
         // In hash partition, cross every channel of scanner and get the last
         // tuple, then add it into drain_batch_ to ensure the ReadIntent lock to
         // be released if added.
+
+        /*
         std::vector<const ScanTuple *> last_tuples;
         scanner->MemoryShardCacheLastTuples(&last_tuples);
         for (const ScanTuple *last_tuple : last_tuples)
@@ -3604,9 +3635,14 @@ void TransactionExecution::ScanClose(
                 {
                     drain_batch_.emplace_back(last_tuple->cce_addr_,
                                               last_tuple->key_ts_);
+                    if (drain_batch_.back().first.CceLockPtr() == 0)
+                    {
+                        LOG(INFO) << "== empty lock ptr";
+                    }
                 }
             }
         }
+        */
     }
 
     // Release trailing tuple locks acquired during scan. These tuples are
@@ -3622,6 +3658,10 @@ void TransactionExecution::ScanClose(
             rw_set_.GetReadCnt(table_name, tuple->cce_addr_) == 0)
         {
             drain_batch_.emplace_back(tuple->cce_addr_, tuple->key_ts_);
+            if (drain_batch_.back().first.CceLockPtr() == 0)
+            {
+                LOG(INFO) << "== empty lock ptr";
+            }
         }
     }
 
@@ -5842,6 +5882,11 @@ void TransactionExecution::DrainScanner(CcScanner *scanner,
             {
                 drain_batch_.emplace_back(cc_scan_tuple->cce_addr_,
                                           cc_scan_tuple->key_ts_);
+            }
+
+            if (drain_batch_.back().first.CceLockPtr() == 0)
+            {
+                LOG(INFO) << "== empty lock ptr";
             }
         }
         scanner->MoveNext();

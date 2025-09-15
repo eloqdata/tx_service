@@ -869,6 +869,7 @@ public:
 
     std::pair<TxKey, size_t> Merge(uint32_t shard_code) override
     {
+        auto start_time = std::chrono::high_resolution_clock::now();
         ShardCache *shard_cache = GetShardCache(shard_code);
 
         const KeyT *min_key = nullptr;
@@ -880,10 +881,10 @@ public:
             min_key = &tuple->KeyObj();
         }
 
-        LOG(INFO) << "== shard memory cache size = "
-                  << shard_cache->memory_cache_.Size();
-        LOG(INFO) << "== shard cache kv cache cnt = "
-                  << shard_cache->kv_caches_.size();
+        // LOG(INFO) << "== shard memory cache size = "
+        //          << shard_cache->memory_cache_.Size();
+        // LOG(INFO) << "== shard cache kv cache cnt = "
+        //          << shard_cache->kv_caches_.size();
         for (auto &[bucket_id, kv_cache] : shard_cache->kv_caches_)
         {
             if (kv_cache.Size() > 0)
@@ -898,7 +899,7 @@ public:
 
         if (min_key == nullptr)
         {
-            LOG(INFO) << "== min key is nullptr";
+            // LOG(INFO) << "== min key is nullptr";
             // All caches are empty
             return {TxKey(), 0};
         }
@@ -982,8 +983,15 @@ public:
             }
         }
 
-        LOG(INFO) << "== shard code = " << shard_code
-                  << ", index chain cnt = " << debug_index_chain_cnt;
+        auto stop_time = std::chrono::high_resolution_clock::now();
+        size_t time = std::chrono::duration_cast<std::chrono::microseconds>(
+                          stop_time - start_time)
+                          .count();
+        // LOG(INFO) << "== stop merge: shard coed = " << shard_code
+        //          << ", merge time = " << time;
+
+        // LOG(INFO) << "== shard code = " << shard_code
+        //          << ", index chain cnt = " << debug_index_chain_cnt;
         return {TxKey(min_key), index_chain->Size()};
     }
 

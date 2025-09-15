@@ -522,8 +522,9 @@ public:
     BucketScanPlan(
         size_t plan_index,
         absl::flat_hash_map<NodeGroupId, std::vector<uint16_t>> *buckets,
-        const absl::flat_hash_map<NodeGroupId,
-                                  absl::flat_hash_map<uint16_t, TxKey>>
+        const absl::flat_hash_map<
+            NodeGroupId,
+            absl::flat_hash_map<uint16_t, std::pair<TxKey, bool>>>
             *pause_position)
         : plan_index_(plan_index), buckets_(buckets)
     {
@@ -550,7 +551,7 @@ public:
                 for (const auto &[core_idx, pause_key] : pos)
                 {
                     iter.first->second.try_emplace(
-                        core_idx, pause_key.Clone(), false);
+                        core_idx, pause_key.first.Clone(), pause_key.second);
                 }
             }
         }
@@ -631,6 +632,13 @@ public:
     size_t PlanIndex() const
     {
         return plan_index_;
+    }
+
+    absl::flat_hash_map<NodeGroupId,
+                        absl::flat_hash_map<uint16_t, std::pair<TxKey, bool>>> &
+    CurrentPosition()
+    {
+        return current_position_;
     }
 
 private:

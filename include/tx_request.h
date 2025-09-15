@@ -390,13 +390,6 @@ struct UpsertTxRequest : public TemplateTxRequest<UpsertTxRequest, Void>
 
 struct BucketScanSavePoint
 {
-    uint64_t cluster_config_version_{UINT64_MAX};
-    size_t prev_pause_idx_{UINT64_MAX};
-    std::vector<absl::flat_hash_map<NodeGroupId, std::vector<uint16_t>>>
-        bucket_groups_;
-    absl::flat_hash_map<NodeGroupId, absl::flat_hash_map<uint16_t, TxKey>>
-        pause_position_;
-
     /*
             BucketScanSavePoint *save_point =
                 client_connection_context->GetOrCreateSavePoint(cursor_id);
@@ -487,6 +480,14 @@ struct BucketScanSavePoint
                   << ", position size = " << pause_position_.size()
                   << ", cnt = " << cnt;
     }
+
+    uint64_t cluster_config_version_{UINT64_MAX};
+    size_t prev_pause_idx_{UINT64_MAX};
+    std::vector<absl::flat_hash_map<NodeGroupId, std::vector<uint16_t>>>
+        bucket_groups_;
+    absl::flat_hash_map<NodeGroupId,
+                        absl::flat_hash_map<uint16_t, std::pair<TxKey, bool>>>
+        pause_position_;
 };
 
 struct ScanOpenTxRequest : public TemplateTxRequest<ScanOpenTxRequest, size_t>

@@ -1238,7 +1238,7 @@ void txservice::LocalCcHandler::ScanNextBatch(
         auto *start_keys = plan->StartKeys(node_group_id);
         if (start_keys->empty())
         {
-            LOG(INFO) << "==LocalCcHandler::ScanNextBatch: update start key";
+            // LOG(INFO) << "==LocalCcHandler::ScanNextBatch: update start key";
             // scan from negative start key
             for (uint16_t core_idx = 0;
                  core_idx < Sharder::Instance().GetLocalCcShardsCount();
@@ -1279,13 +1279,6 @@ void txservice::LocalCcHandler::ScanNextBatch(
 
         for (const auto &[core_idx, bucket] : req->BucketIds())
         {
-            LOG(INFO) << "==LocalCcHandler::ScanNextBatch: core idx = "
-                      << core_idx;
-            for (const auto &buck : bucket)
-            {
-                LOG(INFO) << "bucket = " << buck;
-            }
-
             cc_shards_.EnqueueCcRequest(thd_id_, core_idx, req);
         }
     }
