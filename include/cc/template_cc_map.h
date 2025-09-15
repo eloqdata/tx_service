@@ -2722,7 +2722,8 @@ public:
 
         if (req.ShardIsDrained(shard_->core_id_))
         {
-            LOG(INFO) << "== shard is drained, core id = " << shard_->core_id_;
+            // LOG(INFO) << "== shard is drained, core id = " <<
+            // shard_->core_id_;
             return req.SetFinish(shard_->core_id_);
         }
 
@@ -2777,9 +2778,23 @@ public:
         if (cce_lock_addr == 0)
         {
             // first enter, send async request to kv store
-
+            auto start_time = std::chrono::high_resolution_clock::now();
+            shard_->FetchBucketData(
+                &table_name_,
+                table_schema_,
+                ng_id,
+                ng_term,
+                shard_,
+                bucket_ids,
+                start_key.GetShallowCopy(),
+                false,
+                64,
+                &req,
+                &BackfillForScanNextBatch<KeyT, ValueT, VersionedRecord>);
+            /*
             for (const auto &bucket : bucket_ids)
             {
+
                 uint16_t target_core =
                     Sharder::Instance().ShardBucketIdToCoreIdx(bucket);
                 if (shard_->core_id_ == target_core)
@@ -2804,7 +2819,18 @@ public:
                                                   VersionedRecord>);
                 }
             }
+            */
+
+            auto stop_time = std::chrono::high_resolution_clock::now();
+            size_t time = std::chrono::duration_cast<std::chrono::microseconds>(
+                              stop_time - start_time)
+                              .count();
+            // LOG(INFO) << "== core id = " << shard_->core_id_
+            //          << ", scan next batch time = " << time
+            //          << ", bucket id cnt = " << bucket_ids.size();
         }
+
+        auto start_time = std::chrono::high_resolution_clock::now();
 
         if (cce_lock_addr != 0)
         {
@@ -2873,8 +2899,8 @@ public:
         }
         else
         {
-            LOG(INFO) << "==ScanNextBatchCc: Scan Start key = "
-                      << start_key.ToString();
+            // LOG(INFO) << "==ScanNextBatchCc: Scan Start key = "
+            //          << start_key.ToString();
             const KeyT *look_key = start_key.GetKey<KeyT>();
             bool inclusive = start_key.Type() == KeyType::NegativeInf;
 
@@ -2994,10 +3020,19 @@ public:
             assert(false);
         }
 
+        /*
         LOG(INFO) << "== debug loop cnt = " << debug_loop_cnt
                   << ", core idx = " << shard_->core_id_
                   << ", ccmp size = " << size_
                   << ", cache size = " << typed_cache->Size();
+        */
+
+        auto stop_time = std::chrono::high_resolution_clock::now();
+        size_t time = std::chrono::duration_cast<std::chrono::microseconds>(
+                          stop_time - start_time)
+                          .count();
+        // LOG(INFO) << "== core id = " << shard_->core_id_
+        //          << ", scan next batch time = " << time;
 
         return req.SetFinish(shard_->core_id_);
     }
@@ -12089,8 +12124,8 @@ void BackfillForScanNextBatch(FetchBucketDataCc *fetch_cc,
     if (req->IsWaitForFetchBucket(shard.core_id_) &&
         req->WaitForFetchBucketCnt(shard.core_id_) == 0)
     {
-        LOG(INFO) << "==BackfillScanNextBatch: Enqueu, core id = "
-                  << shard.core_id_;
+        // LOG(INFO) << "==Backfill: all fetch are finished, core id = "
+        //          << shard.core_id_;
         shard.Enqueue(requester);
     }
 }
