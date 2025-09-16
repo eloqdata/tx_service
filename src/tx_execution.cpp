@@ -2364,7 +2364,6 @@ void TransactionExecution::Process(ScanOpenOperation &scan_open)
 
     if (!scan_open.lock_cluster_config_result_.IsFinished())
     {
-        // LOG(INFO) << "==Process: lock cluste config not finished";
         // Acquire cluster config read lock
         lock_cluster_config_op_.Reset(TableName(cluster_config_ccm_name_sv,
                                                 TableType::ClusterConfig,
@@ -2428,10 +2427,6 @@ void TransactionExecution::Process(ScanOpenOperation &scan_open)
                               scan_open.tx_req_->scan_pattern_);
 
         auto end_time = std::chrono::high_resolution_clock::now();
-        LOG(INFO) << "scan open time = "
-                  << std::chrono::duration_cast<std::chrono::microseconds>(
-                         end_time - start_time)
-                         .count();
     }
 
     if (table_name.IsHashPartitioned())
@@ -2616,11 +2611,6 @@ void TransactionExecution::PostProcess(ScanOpenOperation &scan_open)
         }
 
         auto end_time = std::chrono::high_resolution_clock::now();
-        LOG(INFO) << "time = "
-                  << std::chrono::duration_cast<std::chrono::microseconds>(
-                         end_time - start_time)
-                         .count();
-
         scans_.try_emplace(open_result.scan_alias_,
                            std::move(open_result.scanner_),
                            scan_open.tx_req_->StartKey(),
@@ -2673,7 +2663,6 @@ void TransactionExecution::Process(ScanNextOperation &scan_next)
     CcScanner &scanner = *scan_next.scan_state_->scanner_;
     if (!scan_next.is_running_)
     {
-        // LOG(INFO) << "==ScanNextOperation::Process: reset scan next result";
         ScanNextResult &scan_next_result = scan_next.hd_result_.Value();
         scan_next_result.Clear();
         scan_next_result.current_scan_plan_ =
@@ -2692,7 +2681,6 @@ void TransactionExecution::Process(ScanNextOperation &scan_next)
             scan_next.scan_state_->current_plan_index_ !=
                 scan_next.tx_req_->bucket_scan_plan_->PlanIndex())
         {
-            // LOG(INFO) << "== Close: ";
             scan_next.scan_state_->current_plan_index_ =
                 scan_next.tx_req_->bucket_scan_plan_->PlanIndex();
             scanner.Close();
@@ -3074,8 +3062,6 @@ void TransactionExecution::PostProcess(ScanNextOperation &scan_next)
             scanner.MoveNext();
         }
 
-        // LOG(INFO) << "==== debug scan batch size = " << scan_batch.size();
-
         bool_resp_->Finish(
             scan_next.tx_req_->bucket_scan_plan_->CurrentPlanIsFinished());
 
@@ -3083,7 +3069,6 @@ void TransactionExecution::PostProcess(ScanNextOperation &scan_next)
         size_t time = std::chrono::duration_cast<std::chrono::microseconds>(
                           stop_time - start_time)
                           .count();
-        // LOG(INFO) << "== ScanNext PostPrcess time = " << time;
     }
     else
     {
