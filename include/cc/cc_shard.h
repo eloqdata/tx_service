@@ -745,7 +745,7 @@ public:
         NodeGroupId node_group_id,
         int64_t node_group_term,
         CcShard *ccs,
-        uint16_t bucket_id,
+        absl::flat_hash_map<uint16_t, bool> &bucket_ids,
         TxKey start_key,
         bool start_key_inclusive,
         size_t batch_size,

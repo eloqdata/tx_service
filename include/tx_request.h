@@ -390,56 +390,27 @@ struct UpsertTxRequest : public TemplateTxRequest<UpsertTxRequest, Void>
 
 struct BucketScanSavePoint
 {
-    uint64_t cluster_config_version_{UINT64_MAX};
-    size_t prev_pause_idx_{UINT64_MAX};
-    std::vector<absl::flat_hash_map<NodeGroupId, std::vector<uint16_t>>>
-        bucket_groups_;
-    absl::flat_hash_map<NodeGroupId, absl::flat_hash_map<uint64_t, TxKey>>
-        pause_position_;
-
-    /*
-            BucketScanSavePoint *save_point =
-                client_connection_context->GetOrCreateSavePoint(cursor_id);
-            // Generate scan plan if need
-            ScanOpenTxRequest scan_open_req(save_point);
-            Execute(&scan_open_req);
-
-            while (save_point->HasPlan())
-            {
-                BucketScanPlan current_plan = save_point->PickPlan();
-                ScanBatchTxRequest scan_batch_req(&current_plan);
-                auto [result, err_code] = Execute(&scan_batch_req);
-                if (err_code != no_error)
-                {
-                    // don't update save point
-                    return {false, {}};
-                }
-
-                if (total_result_size >= limit)
-                {
-                    BucketScanSavePoint* new_save_point =
-                        GernerateNewSavePoint(save_point, result);
-                    CacheSavePoint(cursor_id,
-                        new_save_point);
-                    return {true, total_result};
-                }
-            }
-    */
-
     BucketScanPlan PickPlan(size_t current_idx)
     {
-        if (prev_pause_idx_ != UINT64_MAX && prev_pause_idx_ == current_idx)
+        if (prev_pause_idx_ == UINT64_MAX || prev_pause_idx_ != current_idx)
         {
-            // pause plan
-            BucketScanPlan plan(&bucket_groups_[current_idx], &pause_position_);
+            // clear prev pause position
+            // pause_position_.clear();
+            BucketScanPlan plan(
+                current_idx, &bucket_groups_[current_idx], nullptr);
             return plan;
         }
         else
         {
-            // new plan
-            BucketScanPlan plan(&bucket_groups_[current_idx], nullptr);
+            BucketScanPlan plan(
+                current_idx, &bucket_groups_[current_idx], &pause_position_);
             return plan;
         }
+    }
+
+    size_t PlanSize()
+    {
+        return bucket_groups_.size();
     }
 
     bool IsValidCursor(uint64_t version)
@@ -461,6 +432,33 @@ struct BucketScanSavePoint
 
         return true;
     }
+
+    void Debug()
+    {
+        size_t cnt = 0;
+        for (auto &group : bucket_groups_)
+        {
+            for (auto &[node_group_id, buckets] : group)
+            {
+                cnt += buckets.size();
+            }
+        }
+
+        LOG(INFO) << "==yf: cluster config version = "
+                  << cluster_config_version_
+                  << ", prev pause index = " << prev_pause_idx_
+                  << ", group size = " << bucket_groups_.size()
+                  << ", position size = " << pause_position_.size()
+                  << ", cnt = " << cnt;
+    }
+
+    uint64_t cluster_config_version_{UINT64_MAX};
+    size_t prev_pause_idx_{UINT64_MAX};
+    std::vector<absl::flat_hash_map<NodeGroupId, std::vector<uint16_t>>>
+        bucket_groups_;
+    absl::flat_hash_map<NodeGroupId,
+                        absl::flat_hash_map<uint16_t, BucketScanProgress>>
+        pause_position_;
 };
 
 struct ScanOpenTxRequest : public TemplateTxRequest<ScanOpenTxRequest, size_t>
@@ -680,7 +678,7 @@ struct ScanBatchTxRequest : public TemplateTxRequest<ScanBatchTxRequest, bool>
     int32_t obj_type_{-1};
     std::string_view scan_pattern_;
 
-    BucketScanPlan *bucket_scan_plan_;
+    BucketScanPlan *bucket_scan_plan_{nullptr};
 };
 
 struct UnlockTuple
