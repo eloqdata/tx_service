@@ -2768,9 +2768,10 @@ public:
             req.BucketIds(shard_->core_id_);
         auto filter_bucket_lambda = [this, &bucket_ids](size_t hash_code)
         {
-            uint16_t bucket_id =
-                Sharder::Instance().MapKeyHashToBucketId(hash_code);
-            return bucket_ids.count(bucket_id) > 0;
+            return hash_code == SIZE_MAX;
+            // uint16_t bucket_id =
+            //    Sharder::Instance().MapKeyHashToBucketId(hash_code);
+            // return bucket_ids.count(bucket_id) > 0;
         };
 
         ScanDirection direction = typed_cache->Scanner()->Direction();
