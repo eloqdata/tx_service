@@ -2722,8 +2722,6 @@ public:
 
         if (req.ShardIsDrained(shard_->core_id_))
         {
-            // LOG(INFO) << "== shard is drained, core id = " <<
-            // shard_->core_id_;
             return req.SetFinish(shard_->core_id_);
         }
 
@@ -3008,13 +3006,6 @@ public:
             assert(false);
         }
 
-        /*
-        LOG(INFO) << "== debug loop cnt = " << debug_loop_cnt
-                  << ", core idx = " << shard_->core_id_
-                  << ", ccmp size = " << size_
-                  << ", cache size = " << typed_cache->Size();
-        */
-
         scan_finished = (scan_ccm_it == End());
         if (scan_finished)
         {
@@ -3027,10 +3018,6 @@ public:
         size_t time = std::chrono::duration_cast<std::chrono::microseconds>(
                           stop_time - start_time)
                           .count();
-        LOG(INFO) << "== core id = " << shard_->core_id_
-                  << ", scan next batch time = " << time
-                  << ", debug loop cnt = " << debug_loop_cnt
-                  << ", add cache cnt = " << add_cache_cnt;
 
         return req.SetFinish(shard_->core_id_);
     }
@@ -12082,18 +12069,6 @@ void BackfillForScanNextBatch(FetchBucketDataCc *fetch_cc,
     // Reset kv cache
     scan_cache->Reset();
 
-    /*
-    if (obj_type >= 0 && cce->payload_.cur_payload_ != nullptr &&
-        !cce->payload_.cur_payload_->IsMatchType(obj_type))
-    {
-        return false;
-    }
-    if (scan_pattern.size() > 0 && !key->IsMatch(scan_pattern))
-    {
-        return false;
-    }
-    */
-
     for (auto &item : fetch_cc->bucket_data_items_)
     {
         TemplateScanTuple<KeyT, ValueT> *scan_tuple =
@@ -12141,7 +12116,6 @@ void BackfillForScanNextBatch(FetchBucketDataCc *fetch_cc,
     if (req->IsWaitForFetchBucket(shard.core_id_) &&
         req->WaitForFetchBucketCnt(shard.core_id_) == 0)
     {
-        LOG(INFO) << "==BackFill: shard code id = " << shard.core_id_;
         shard.Enqueue(requester);
     }
 }

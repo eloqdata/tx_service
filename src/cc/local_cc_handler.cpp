@@ -1247,7 +1247,6 @@ void txservice::LocalCcHandler::ScanNextBatch(
                  core_idx < Sharder::Instance().GetLocalCcShardsCount();
                  ++core_idx)
             {
-                // TODO(lokax): create user defined start key
                 bucket_scan_progress->try_emplace(core_idx, start_key.Clone());
             }
 
@@ -1260,7 +1259,6 @@ void txservice::LocalCcHandler::ScanNextBatch(
             }
         }
 
-        // TODO(lokax): pass end key
         ScanNextBatchCc *req = scan_next_pool.NextRequest();
         req->Reset(table_name,
                    node_group_id,

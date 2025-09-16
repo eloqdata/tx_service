@@ -979,11 +979,6 @@ public:
         size_t time = std::chrono::duration_cast<std::chrono::microseconds>(
                           stop_time - start_time)
                           .count();
-        LOG(INFO) << "== stop merge: shard coed = " << shard_code
-                  << ", merge time = " << time;
-
-        // LOG(INFO) << "== shard code = " << shard_code
-        //          << ", index chain cnt = " << debug_index_chain_cnt;
         return TxKey(min_key);
     }
 

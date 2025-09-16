@@ -105,11 +105,6 @@ public:
         return true;
     }
 
-    size_t DebugSize()
-    {
-        return pool_.size();
-    }
-
 private:
     std::vector<std::unique_ptr<T>> pool_;
     size_t head_;

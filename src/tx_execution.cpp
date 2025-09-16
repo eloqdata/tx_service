@@ -2700,8 +2700,6 @@ void TransactionExecution::Process(ScanNextOperation &scan_next)
         }
     }
 
-    // LOG(INFO) << "==ScanNextOperation::Process: to scan next = "
-    //          << to_scan_next;
     bool is_local = true;
     if (to_scan_next && scanner.Type() == CcmScannerType::HashPartition)
     {
