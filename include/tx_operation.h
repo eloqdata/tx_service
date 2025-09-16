@@ -412,7 +412,7 @@ struct ScanOpenOperation : TransactionOperation
 
 struct ScanState
 {
-    static constexpr size_t max_bucket_count_per_core = 20;
+    static constexpr size_t max_bucket_count_per_core = 40;
 
     ScanState() = delete;
     ScanState(std::unique_ptr<CcScanner> scanner,
