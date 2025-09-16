@@ -1480,7 +1480,7 @@ public:
 
         if (!shard_->IsBucketsMigrating())
         {
-            req.SetError(CcErrorCode::REQUESTED_NODE_NOT_LEADER);
+            return req.SetError(CcErrorCode::REQUESTED_NODE_NOT_LEADER);
         }
         auto entry_tuples = req.EntryTuple();
         size_t batch_size = req.BatchSize();
