@@ -900,6 +900,59 @@ WriteToLogOp::WriteToLogOp(TransactionExecution *txm) : hd_result_(txm)
     TX_TRACE_ASSOCIATE(this, &hd_result_);
 }
 
+// Update leader cache using leader info from log service response.
+static void UpdateLeadersFromLogInfo(
+    const google::protobuf::Map<uint32_t, txlog::LeaderInfo> &ng_leader_info)
+{
+    if (ng_leader_info.empty())
+    {
+        return;
+    }
+
+    // Fetch a snapshot of ng configs (copy) for safe concurrent access.
+    auto ng_configs = Sharder::Instance().GetNodeGroupConfigs();
+
+    for (const auto &entry : ng_leader_info)
+    {
+        uint32_t ng_id = entry.first;
+        const txlog::LeaderInfo &leader_info = entry.second;
+        const std::string &leader_ip = leader_info.ip();
+        int64_t leader_term = leader_info.term();
+
+        auto ng_it = ng_configs.find(ng_id);
+        if (ng_it == ng_configs.end())
+        {
+            DLOG(WARNING) << "Log leader info for unknown ng_id=" << ng_id;
+            continue;
+        }
+
+        // Find matching node_id by hostname/IP match
+        const std::vector<NodeConfig> &node_configs = ng_it->second;
+        uint32_t leader_node_id = UINT32_MAX;
+        for (const auto &node_config : node_configs)
+        {
+            if (node_config.host_name_ == leader_ip)
+            {
+                leader_node_id = node_config.node_id_;
+                break;
+            }
+        }
+
+        if (leader_node_id == UINT32_MAX)
+        {
+            // No direct match, skip but log for diagnostics
+            DLOG(WARNING) << "Cannot map leader IP '" << leader_ip
+                          << "' to node_id for ng_id=" << ng_id;
+            continue;
+        }
+
+        DLOG(INFO) << "Update leader from log service: ng_id=" << ng_id
+                   << ", node_id=" << leader_node_id
+                   << ", term=" << leader_term;
+        Sharder::Instance().UpdateLeader(ng_id, leader_node_id, leader_term);
+    }
+}
+
 void WriteToLogOp::Forward(TransactionExecution *txm)
 {
     // start the state machine if not running.
@@ -972,6 +1025,21 @@ void WriteToLogOp::Forward(TransactionExecution *txm)
             }
         }
 
+        // If the WritLog succeeds and log response carries node group leader
+        // info, try to update leader cache.
+        txlog::LogResponse &log_resp = log_closure_.LogResponse();
+        brpc::Controller *cntl = log_closure_.Controller();
+        if (!cntl->Failed() &&
+            log_resp.response_status() ==
+                ::txlog::LogResponse_ResponseStatus_Success &&
+            log_resp.has_write_log_response())
+        {
+            const txlog::WriteLogResponse &write_log_resp =
+                log_resp.write_log_response();
+            const auto &ng_leader_info =
+                write_log_resp.node_group_leader_info();
+            UpdateLeadersFromLogInfo(ng_leader_info);
+        }
         txm->PostProcess(*this);
     }
 }
