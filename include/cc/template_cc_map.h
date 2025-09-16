@@ -2777,7 +2777,6 @@ public:
         if (cce_lock_addr == 0)
         {
             // first enter, send async request to kv store
-            auto start_time = std::chrono::high_resolution_clock::now();
             shard_->FetchBucketData(
                 &table_name_,
                 table_schema_,
@@ -2790,14 +2789,7 @@ public:
                 16,
                 &req,
                 &BackfillForScanNextBatch<KeyT, ValueT, VersionedRecord>);
-
-            auto stop_time = std::chrono::high_resolution_clock::now();
-            size_t time = std::chrono::duration_cast<std::chrono::microseconds>(
-                              stop_time - start_time)
-                              .count();
         }
-
-        auto start_time = std::chrono::high_resolution_clock::now();
 
         if (cce_lock_addr != 0)
         {
@@ -3010,11 +3002,6 @@ public:
                 ->at(shard_->core_id_)
                 .memory_scan_is_finished_ = true;
         }
-
-        auto stop_time = std::chrono::high_resolution_clock::now();
-        size_t time = std::chrono::duration_cast<std::chrono::microseconds>(
-                          stop_time - start_time)
-                          .count();
 
         return req.SetFinish(shard_->core_id_);
     }

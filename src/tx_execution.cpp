@@ -2403,7 +2403,6 @@ void TransactionExecution::Process(ScanOpenOperation &scan_open)
             iso_lvl = IsolationLevel::RepeatableRead;
         }
 
-        auto start_time = std::chrono::high_resolution_clock::now();
         cc_handler_->ScanOpen(table_name,
                               schema_version,
                               index_type,
@@ -2425,8 +2424,6 @@ void TransactionExecution::Process(ScanOpenOperation &scan_open)
                               is_require_sort,
                               scan_open.tx_req_->obj_type_,
                               scan_open.tx_req_->scan_pattern_);
-
-        auto end_time = std::chrono::high_resolution_clock::now();
     }
 
     if (table_name.IsHashPartitioned())
@@ -2532,7 +2529,6 @@ void TransactionExecution::PostProcess(ScanOpenOperation &scan_open)
         //  sets the status of the scanner "Blocked".
         open_result.scanner_->SetStatus(ScannerStatus::Blocked);
 
-        auto start_time = std::chrono::high_resolution_clock::now();
         if (scan_open.tx_req_->bucket_scan_save_point_->bucket_groups_.empty())
         {
             // Generate scan plan
@@ -2610,7 +2606,6 @@ void TransactionExecution::PostProcess(ScanOpenOperation &scan_open)
             }
         }
 
-        auto end_time = std::chrono::high_resolution_clock::now();
         scans_.try_emplace(open_result.scan_alias_,
                            std::move(open_result.scanner_),
                            scan_open.tx_req_->StartKey(),
@@ -2981,7 +2976,6 @@ void TransactionExecution::PostProcess(ScanNextOperation &scan_next)
 
     if (scanner.Type() == CcmScannerType::HashPartition)
     {
-        auto start_time = std::chrono::high_resolution_clock::now();
         scanner.Init();
         while (scanner.Status() == ScannerStatus::Open)
         {
@@ -3064,11 +3058,6 @@ void TransactionExecution::PostProcess(ScanNextOperation &scan_next)
 
         bool_resp_->Finish(
             scan_next.tx_req_->bucket_scan_plan_->CurrentPlanIsFinished());
-
-        auto stop_time = std::chrono::high_resolution_clock::now();
-        size_t time = std::chrono::duration_cast<std::chrono::microseconds>(
-                          stop_time - start_time)
-                          .count();
     }
     else
     {

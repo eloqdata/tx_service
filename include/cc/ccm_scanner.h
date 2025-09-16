@@ -876,7 +876,6 @@ public:
         bool memory_is_drained,
         const absl::flat_hash_map<uint16_t, bool> &kv_is_drained) override
     {
-        auto start_time = std::chrono::high_resolution_clock::now();
         ShardCache *shard_cache = GetShardCache(shard_code);
 
         const KeyT *min_key = nullptr;
@@ -976,10 +975,6 @@ public:
             }
         }
 
-        auto stop_time = std::chrono::high_resolution_clock::now();
-        size_t time = std::chrono::duration_cast<std::chrono::microseconds>(
-                          stop_time - start_time)
-                          .count();
         return TxKey(min_key);
     }
 
