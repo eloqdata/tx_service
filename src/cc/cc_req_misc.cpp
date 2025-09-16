@@ -925,6 +925,7 @@ void FetchBucketDataCc::Reset(const TableName *table_name,
     err_code_ = 0;
 
     bucket_data_items_.clear();
+    is_drained_ = false;
     backfill_func_ = backfill_func;
 }
 

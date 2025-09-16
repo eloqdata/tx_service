@@ -390,49 +390,20 @@ struct UpsertTxRequest : public TemplateTxRequest<UpsertTxRequest, Void>
 
 struct BucketScanSavePoint
 {
-    /*
-            BucketScanSavePoint *save_point =
-                client_connection_context->GetOrCreateSavePoint(cursor_id);
-            // Generate scan plan if need
-            ScanOpenTxRequest scan_open_req(save_point);
-            Execute(&scan_open_req);
-
-            while (save_point->HasPlan())
-            {
-                BucketScanPlan current_plan = save_point->PickPlan();
-                ScanBatchTxRequest scan_batch_req(&current_plan);
-                auto [result, err_code] = Execute(&scan_batch_req);
-                if (err_code != no_error)
-                {
-                    // don't update save point
-                    return {false, {}};
-                }
-
-                if (total_result_size >= limit)
-                {
-                    BucketScanSavePoint* new_save_point =
-                        GernerateNewSavePoint(save_point, result);
-                    CacheSavePoint(cursor_id,
-                        new_save_point);
-                    return {true, total_result};
-                }
-            }
-    */
-
     BucketScanPlan PickPlan(size_t current_idx)
     {
-        if (prev_pause_idx_ != UINT64_MAX && prev_pause_idx_ == current_idx)
+        if (prev_pause_idx_ == UINT64_MAX || prev_pause_idx_ != current_idx)
         {
-            // pause plan
+            // clear prev pause position
+            // pause_position_.clear();
             BucketScanPlan plan(
-                current_idx, &bucket_groups_[current_idx], &pause_position_);
+                current_idx, &bucket_groups_[current_idx], nullptr);
             return plan;
         }
         else
         {
-            // new plan
             BucketScanPlan plan(
-                current_idx, &bucket_groups_[current_idx], nullptr);
+                current_idx, &bucket_groups_[current_idx], &pause_position_);
             return plan;
         }
     }
@@ -486,7 +457,7 @@ struct BucketScanSavePoint
     std::vector<absl::flat_hash_map<NodeGroupId, std::vector<uint16_t>>>
         bucket_groups_;
     absl::flat_hash_map<NodeGroupId,
-                        absl::flat_hash_map<uint16_t, std::pair<TxKey, bool>>>
+                        absl::flat_hash_map<uint16_t, BucketScanProgress>>
         pause_position_;
 };
 

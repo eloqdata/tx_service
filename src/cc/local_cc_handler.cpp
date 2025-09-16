@@ -1219,6 +1219,10 @@ void txservice::LocalCcHandler::ScanNextBatch(
     int64_t tx_term,
     uint16_t command_id,
     uint64_t start_ts,
+    const TxKey &start_key,
+    bool start_inclusive,
+    const TxKey &end_key,
+    bool end_inclusive,
     CcScanner &scanner,
     CcHandlerResult<ScanNextResult> &hd_res,
     int32_t obj_type,
@@ -1235,31 +1239,36 @@ void txservice::LocalCcHandler::ScanNextBatch(
         BucketScanPlan *plan = hd_res.Value().current_scan_plan_;
         assert(plan->Buckets().count(node_group_id) > 0);
 
-        auto *start_keys = plan->StartKeys(node_group_id);
-        if (start_keys->empty())
+        absl::flat_hash_map<uint16_t, BucketScanProgress>
+            *bucket_scan_progress = plan->GetBucketScanProgress(node_group_id);
+        if (bucket_scan_progress->empty())
         {
-            // LOG(INFO) << "==LocalCcHandler::ScanNextBatch: update start key";
-            // scan from negative start key
             for (uint16_t core_idx = 0;
                  core_idx < Sharder::Instance().GetLocalCcShardsCount();
                  ++core_idx)
             {
-                start_keys->try_emplace(
-                    core_idx,
-                    Sharder::Instance()
-                        .GetLocalCcShards()
-                        ->GetCatalogFactory(table_name.Engine())
-                        ->NegativeInfKey(),
-                    false);
+                // TODO(lokax): create user defined start key
+                bucket_scan_progress->try_emplace(core_idx, start_key.Clone());
+            }
+
+            for (const auto &bucket_id : *plan->Buckets(node_group_id))
+            {
+                uint16_t target_core =
+                    Sharder::Instance().ShardBucketIdToCoreIdx(bucket_id);
+                bucket_scan_progress->at(target_core)
+                    .scan_buckets_.emplace(bucket_id, false);
             }
         }
 
+        // TODO(lokax): pass end key
         ScanNextBatchCc *req = scan_next_pool.NextRequest();
         req->Reset(table_name,
                    node_group_id,
                    plan->GetNodeGroupTerm(node_group_id),
                    tx_number,
                    start_ts,
+                   end_key,
+                   end_inclusive,
                    plan,
                    tx_term,
                    &hd_res,
@@ -1277,7 +1286,8 @@ void txservice::LocalCcHandler::ScanNextBatch(
         TX_TRACE_ACTION(this, req);
         TX_TRACE_DUMP(req);
 
-        for (const auto &[core_idx, bucket] : req->BucketIds())
+        for (const auto &[core_idx, scan_progress] :
+             *req->GetBucketScanProgress())
         {
             cc_shards_.EnqueueCcRequest(thd_id_, core_idx, req);
         }

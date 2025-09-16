@@ -1817,6 +1817,8 @@ public:
                int64_t ng_term,
                TxNumber tx_number,
                const uint64_t &ts,
+               const TxKey &end_key,
+               bool end_key_inclusive,
                BucketScanPlan *bucket_scan_plan,
                int64_t tx_term,
                CcHandlerResult<ScanNextResult> *next_res,
@@ -1853,24 +1855,21 @@ public:
         obj_type_ = obj_type;
         scan_pattern_ = scan_pattern;
 
-        bucket_ids_.clear();
+        // bucket_ids_.clear();
+        end_key_ = end_key.GetShallowCopy();
+        end_key_inclusive_ = end_key_inclusive;
 
-        start_keys_ = bucket_scan_plan->StartKeys(node_group_id_);
-        assert(start_keys_ != nullptr);
+        bucket_scan_progress_ =
+            bucket_scan_plan->GetBucketScanProgress(node_group_id_);
+        assert(bucket_scan_progress_ != nullptr);
 
-        for (const auto &bucket_id : *bucket_scan_plan->Buckets(node_group_id_))
-        {
-            uint16_t target_core =
-                Sharder::Instance().ShardBucketIdToCoreIdx(bucket_id);
-            bucket_ids_[target_core].insert(bucket_id);
-        }
-
-        unfinished_core_cnt_ = bucket_ids_.size();
+        // unfinished_core_cnt_ = bucket_ids_.size();
+        unfinished_core_cnt_ = bucket_scan_progress_->size();
         assert(unfinished_core_cnt_ != 0);
 
         wait_for_fetch_bucket_cnt_.clear();
         blocking_info_.clear();
-        for (const auto &[core_id, bucket] : bucket_ids_)
+        for (const auto &[core_id, scan_progress] : *bucket_scan_progress_)
         {
             wait_for_fetch_bucket_cnt_[core_id] = 0;
             auto [iter, inserted] = blocking_info_.try_emplace(core_id);
@@ -1915,26 +1914,16 @@ public:
         CcErrorCode err_code = err_.load(std::memory_order_relaxed);
         if (err_code == CcErrorCode::NO_ERROR)
         {
+            BucketScanProgress &progress = bucket_scan_progress_->at(core_id);
             // Merge data
             uint32_t shard_code = (NodeGroupId() << 10) + core_id;
-            auto [last_key, shard_cache_size] =
-                res_->Value().ccm_scanner_->Merge(shard_code);
+            auto last_key = res_->Value().ccm_scanner_->Merge(
+                shard_code,
+                progress.memory_scan_is_finished_,
+                progress.scan_buckets_);
             res_->Value().current_scan_plan_->UpdateNodeGroupTerm(
                 node_group_id_, ng_term_);
-
-            // const txservice::ScanTuple *scan_tuple =
-            //    res_->Value().ccm_scanner_->ShardCacheLastTuple(shard_code);
-            auto *keys =
-                res_->Value().current_scan_plan_->StartKeys(node_group_id_);
-            if (shard_cache_size > 0)
-            {
-                keys->at(core_id) = {last_key.Clone(), false};
-            }
-            else
-            {
-                // drained
-                keys->at(core_id) = {TxKey(), true};
-            }
+            progress.pause_key_ = last_key.Clone();
         }
 
         uint16_t remaining_cnt =
@@ -2067,30 +2056,23 @@ public:
 
     const TxKey &StartKey(uint16_t core_id)
     {
-        assert(start_keys_->count(core_id) > 0);
-        return start_keys_->at(core_id).first;
+        assert(bucket_scan_progress_->count(core_id) > 0);
+        return bucket_scan_progress_->at(core_id).pause_key_;
     }
 
     bool ShardIsDrained(uint16_t core_id)
     {
-        return start_keys_->at(core_id).second;
+        return bucket_scan_progress_->at(core_id).AllFinished();
     }
 
-    absl::flat_hash_map<uint16_t, absl::flat_hash_set<uint16_t>> &BucketIds()
+    absl::flat_hash_map<uint16_t, bool> &BucketIds(uint16_t core_id)
     {
-        return bucket_ids_;
+        return bucket_scan_progress_->at(core_id).scan_buckets_;
     }
 
-    absl::flat_hash_set<uint16_t> &BucketIds(uint16_t core_id)
+    absl::flat_hash_map<uint16_t, BucketScanProgress> *GetBucketScanProgress()
     {
-        assert(bucket_ids_.count(core_id) > 0);
-        return bucket_ids_[core_id];
-    }
-
-    ScanCache *GetKvCache(uint16_t bucket_id)
-    {
-        assert(false);
-        return nullptr;
+        return bucket_scan_progress_;
     }
 
 private:
@@ -2109,8 +2091,10 @@ private:
     std::atomic<uint16_t> unfinished_core_cnt_{0};
     std::atomic<CcErrorCode> err_{CcErrorCode::NO_ERROR};
 
-    absl::flat_hash_map<uint16_t, absl::flat_hash_set<uint16_t>> bucket_ids_;
-    absl::flat_hash_map<uint16_t, std::pair<TxKey, bool>> *start_keys_{nullptr};
+    TxKey end_key_;
+    bool end_key_inclusive_{false};
+    absl::flat_hash_map<uint16_t, BucketScanProgress> *bucket_scan_progress_{
+        nullptr};
 
     struct ScanBlockingInfo
     {

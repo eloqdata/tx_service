@@ -739,20 +739,7 @@ public:
         NodeGroupId node_group_id,
         int64_t node_group_term,
         CcShard *ccs,
-        uint16_t bucket_id,
-        TxKey start_key,
-        bool start_key_inclusive,
-        size_t batch_size,
-        CcRequestBase *requester,
-        OnFetchedBucketData backfill_func);
-
-    store::DataStoreHandler::DataStoreOpStatus FetchBucketData(
-        const TableName *table_name,
-        const TableSchema *table_schema,
-        NodeGroupId node_group_id,
-        int64_t node_group_term,
-        CcShard *ccs,
-        absl::flat_hash_set<uint16_t> &bucket_ids,
+        absl::flat_hash_map<uint16_t, bool> &bucket_ids,
         TxKey start_key,
         bool start_key_inclusive,
         size_t batch_size,

@@ -2756,9 +2756,9 @@ public:
             static_cast<TemplateScanCache<KeyT, ValueT> *>(
                 req.GetLocalMemoryCache(shard_code));
         const TxKey &start_key = req.StartKey(shard_->core_id_);
-        absl::flat_hash_set<uint16_t> &bucket_ids =
-            req.BucketIds(shard_->core_id_);
 
+        absl::flat_hash_map<uint16_t, bool> &bucket_ids =
+            req.BucketIds(shard_->core_id_);
         auto filter_bucket_lambda = [this, &bucket_ids](size_t hash_code)
         {
             uint16_t bucket_id =
@@ -2768,6 +2768,7 @@ public:
 
         ScanDirection direction = typed_cache->Scanner()->Direction();
         Iterator scan_ccm_it;
+        Iterator end_it;
         CcEntry<KeyT, ValueT, VersionedRecord, RangePartitioned> *prior_cce;
         CcEntry<KeyT, ValueT, VersionedRecord, RangePartitioned> *cce_last =
             nullptr;
@@ -2788,7 +2789,7 @@ public:
                 bucket_ids,
                 start_key.GetShallowCopy(),
                 false,
-                64,
+                16,
                 &req,
                 &BackfillForScanNextBatch<KeyT, ValueT, VersionedRecord>);
 
@@ -2796,9 +2797,9 @@ public:
             size_t time = std::chrono::duration_cast<std::chrono::microseconds>(
                               stop_time - start_time)
                               .count();
-            // LOG(INFO) << "== core id = " << shard_->core_id_
-            //          << ", scan next batch time = " << time
-            //          << ", bucket id cnt = " << bucket_ids.size();
+            LOG(INFO) << "== core id = " << shard_->core_id_
+                      << ", scan next batch time = " << time
+                      << ", bucket id cnt = " << bucket_ids.size();
         }
 
         auto start_time = std::chrono::high_resolution_clock::now();
@@ -2871,6 +2872,7 @@ public:
         else
         {
             const KeyT *look_key = start_key.GetKey<KeyT>();
+            const KeyT *end_key = req.end_key_.GetKey<KeyT>();
             bool inclusive = start_key.Type() == KeyType::NegativeInf;
 
             std::pair<Iterator, ScanType> start_pair =
@@ -2881,16 +2883,32 @@ public:
                 ++scan_ccm_it;
             }
 
+            if (end_key == nullptr || end_key->Type() == KeyType::PositiveInf)
+            {
+                end_it = End();
+            }
+            else
+            {
+                std::pair<Iterator, ScanType> end_pair =
+                    ForwardScanStart(*end_key, req.end_key_inclusive_);
+                end_it = end_pair.first;
+                if (end_pair.second == ScanType::ScanGap)
+                {
+                    ++end_it;
+                }
+            }
+
             // typed_cache->Reset();
         }
 
+        bool scan_finished = false;
         size_t debug_loop_cnt = 0;
+        size_t add_cache_cnt = 0;
+
         if (direction == ScanDirection::Forward)
         {
             // ++scan_ccm_it;
-            Iterator pos_inf_it = End();
-            for (; scan_ccm_it != pos_inf_it && !typed_cache->Full();
-                 ++scan_ccm_it)
+            for (; scan_ccm_it != end_it && !typed_cache->Full(); ++scan_ccm_it)
             {
                 debug_loop_cnt++;
 
@@ -2980,6 +2998,7 @@ public:
                              req.is_require_keys_,
                              req.is_require_recs_);
 
+                add_cache_cnt++;
                 cce_last = cce;
                 ccp_last = ccp;
             }
@@ -2996,12 +3015,22 @@ public:
                   << ", cache size = " << typed_cache->Size();
         */
 
+        scan_finished = (scan_ccm_it == End());
+        if (scan_finished)
+        {
+            req.GetBucketScanProgress()
+                ->at(shard_->core_id_)
+                .memory_scan_is_finished_ = true;
+        }
+
         auto stop_time = std::chrono::high_resolution_clock::now();
         size_t time = std::chrono::duration_cast<std::chrono::microseconds>(
                           stop_time - start_time)
                           .count();
-        // LOG(INFO) << "== core id = " << shard_->core_id_
-        //          << ", scan next batch time = " << time;
+        LOG(INFO) << "== core id = " << shard_->core_id_
+                  << ", scan next batch time = " << time
+                  << ", debug loop cnt = " << debug_loop_cnt
+                  << ", add cache cnt = " << add_cache_cnt;
 
         return req.SetFinish(shard_->core_id_);
     }
@@ -12053,6 +12082,18 @@ void BackfillForScanNextBatch(FetchBucketDataCc *fetch_cc,
     // Reset kv cache
     scan_cache->Reset();
 
+    /*
+    if (obj_type >= 0 && cce->payload_.cur_payload_ != nullptr &&
+        !cce->payload_.cur_payload_->IsMatchType(obj_type))
+    {
+        return false;
+    }
+    if (scan_pattern.size() > 0 && !key->IsMatch(scan_pattern))
+    {
+        return false;
+    }
+    */
+
     for (auto &item : fetch_cc->bucket_data_items_)
     {
         TemplateScanTuple<KeyT, ValueT> *scan_tuple =
@@ -12089,12 +12130,18 @@ void BackfillForScanNextBatch(FetchBucketDataCc *fetch_cc,
         }
     }
 
+    if (fetch_cc->is_drained_)
+    {
+        req->GetBucketScanProgress()
+            ->at(shard.core_id_)
+            .scan_buckets_[bucket_id] = true;
+    }
+
     req->DecreaseWaitForFetchBucketCnt(shard.core_id_);
     if (req->IsWaitForFetchBucket(shard.core_id_) &&
         req->WaitForFetchBucketCnt(shard.core_id_) == 0)
     {
-        // LOG(INFO) << "==Backfill: all fetch are finished, core id = "
-        //          << shard.core_id_;
+        LOG(INFO) << "==BackFill: shard code id = " << shard.core_id_;
         shard.Enqueue(requester);
     }
 }

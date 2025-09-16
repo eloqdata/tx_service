@@ -1597,36 +1597,7 @@ store::DataStoreHandler::DataStoreOpStatus CcShard::FetchBucketData(
     NodeGroupId node_group_id,
     int64_t node_group_term,
     CcShard *ccs,
-    uint16_t bucket_id,
-    TxKey start_key,
-    bool start_key_inclusive,
-    size_t batch_size,
-    CcRequestBase *requester,
-    OnFetchedBucketData backfill_func)
-{
-    FetchBucketDataCc *fetch_bucket_data_cc =
-        fetch_bucket_data_cc_pool_.NextRequest();
-    fetch_bucket_data_cc->Reset(table_name,
-                                table_schema,
-                                node_group_id,
-                                node_group_term,
-                                ccs,
-                                bucket_id,
-                                std::move(start_key),
-                                start_key_inclusive,
-                                batch_size,
-                                requester,
-                                backfill_func);
-    return local_shards_.store_hd_->FetchBucketData(fetch_bucket_data_cc);
-}
-
-store::DataStoreHandler::DataStoreOpStatus CcShard::FetchBucketData(
-    const TableName *table_name,
-    const TableSchema *table_schema,
-    NodeGroupId node_group_id,
-    int64_t node_group_term,
-    CcShard *ccs,
-    absl::flat_hash_set<uint16_t> &bucket_ids,
+    absl::flat_hash_map<uint16_t, bool> &bucket_ids,
     TxKey start_key,
     bool start_key_inclusive,
     size_t batch_size,
@@ -1636,33 +1607,38 @@ store::DataStoreHandler::DataStoreOpStatus CcShard::FetchBucketData(
     ScanNextBatchCc *scan_next_batch_cc =
         static_cast<ScanNextBatchCc *>(requester);
     std::vector<FetchBucketDataCc *> requests;
-    requests.reserve(10);
-    for (const auto &bucket : bucket_ids)
+    requests.reserve(bucket_ids.size());
+    for (const auto &[bucket, kv_is_drained] : bucket_ids)
     {
-        uint16_t target_core =
-            Sharder::Instance().ShardBucketIdToCoreIdx(bucket);
-        if (core_id_ == target_core)
+        if (kv_is_drained)
         {
-            // increate counter
-            scan_next_batch_cc->IncreaseWaitForFetchBucketCnt(core_id_);
-            FetchBucketDataCc *fetch_bucket_data_cc =
-                fetch_bucket_data_cc_pool_.NextRequest();
-            fetch_bucket_data_cc->Reset(table_name,
-                                        table_schema,
-                                        node_group_id,
-                                        node_group_term,
-                                        ccs,
-                                        bucket,
-                                        std::move(start_key),
-                                        start_key_inclusive,
-                                        batch_size,
-                                        requester,
-                                        backfill_func);
-            requests.push_back(fetch_bucket_data_cc);
+            continue;
         }
+
+        // increate counter
+        scan_next_batch_cc->IncreaseWaitForFetchBucketCnt(core_id_);
+        FetchBucketDataCc *fetch_bucket_data_cc =
+            fetch_bucket_data_cc_pool_.NextRequest();
+        fetch_bucket_data_cc->Reset(table_name,
+                                    table_schema,
+                                    node_group_id,
+                                    node_group_term,
+                                    ccs,
+                                    bucket,
+                                    std::move(start_key),
+                                    start_key_inclusive,
+                                    batch_size,
+                                    requester,
+                                    backfill_func);
+        requests.push_back(fetch_bucket_data_cc);
     }
 
-    return local_shards_.store_hd_->FetchBucketData(requests);
+    if (requests.size() > 0)
+    {
+        return local_shards_.store_hd_->FetchBucketData(requests);
+    }
+
+    return store::DataStoreHandler::DataStoreOpStatus::Success;
 }
 
 void CcShard::RemoveFetchRecordRequest(LruEntry *cce)

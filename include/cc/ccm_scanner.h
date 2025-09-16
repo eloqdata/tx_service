@@ -371,7 +371,10 @@ public:
         return nullptr;
     }
 
-    virtual std::pair<TxKey, size_t> Merge(uint32_t shard_code)
+    virtual TxKey Merge(
+        uint32_t shard_code,
+        bool memory_is_drained,
+        const absl::flat_hash_map<uint16_t, bool> &kv_is_drained)
     {
         assert(false);
     }
@@ -867,27 +870,26 @@ public:
         return iter->second.get();
     }
 
-    std::pair<TxKey, size_t> Merge(uint32_t shard_code) override
+    TxKey Merge(
+        uint32_t shard_code,
+        bool memory_is_drained,
+        const absl::flat_hash_map<uint16_t, bool> &kv_is_drained) override
     {
         auto start_time = std::chrono::high_resolution_clock::now();
         ShardCache *shard_cache = GetShardCache(shard_code);
 
         const KeyT *min_key = nullptr;
 
-        if (shard_cache->memory_cache_.Size() > 0)
+        if (!memory_is_drained && shard_cache->memory_cache_.Size() > 0)
         {
             const TemplateScanTuple<KeyT, ValueT> *tuple =
                 shard_cache->memory_cache_.Last();
             min_key = &tuple->KeyObj();
         }
 
-        // LOG(INFO) << "== shard memory cache size = "
-        //          << shard_cache->memory_cache_.Size();
-        // LOG(INFO) << "== shard cache kv cache cnt = "
-        //          << shard_cache->kv_caches_.size();
         for (auto &[bucket_id, kv_cache] : shard_cache->kv_caches_)
         {
-            if (kv_cache.Size() > 0)
+            if (!kv_is_drained.at(bucket_id) && kv_cache.Size() > 0)
             {
                 const TemplateScanTuple<KeyT, ValueT> *tuple = kv_cache.Last();
                 if (min_key == nullptr || tuple->KeyObj() < *min_key)
@@ -897,23 +899,19 @@ public:
             }
         }
 
-        if (min_key == nullptr)
+        if (min_key != nullptr)
         {
-            // LOG(INFO) << "== min key is nullptr";
-            // All caches are empty
-            return {TxKey(), 0};
-        }
-
-        if (shard_cache->memory_cache_.Size() > 0)
-        {
-            shard_cache->memory_cache_.RemoveLast(*min_key);
-        }
-
-        for (auto &[bucket_id, kv_cache] : shard_cache->kv_caches_)
-        {
-            if (kv_cache.Size() > 0)
+            if (shard_cache->memory_cache_.Size() > 0)
             {
-                kv_cache.RemoveLast(*min_key);
+                shard_cache->memory_cache_.RemoveLast(*min_key);
+            }
+
+            for (auto &[bucket_id, kv_cache] : shard_cache->kv_caches_)
+            {
+                if (kv_cache.Size() > 0)
+                {
+                    kv_cache.RemoveLast(*min_key);
+                }
             }
         }
 
@@ -923,8 +921,6 @@ public:
         {
             cache_offset[bucket_id] = 0;
         }
-
-        size_t debug_index_chain_cnt = 0;
 
         CompoundIndex *index_chain = GetIndexChain(shard_code);
 
@@ -965,8 +961,6 @@ public:
             index_chain->offsets_.emplace_back(&shard_cache->memory_cache_,
                                                memory_cache_offset);
             memory_cache_offset++;
-
-            debug_index_chain_cnt++;
         }
 
         // memory cache is drained. we don't need to merge data
@@ -978,8 +972,6 @@ public:
             {
                 index_chain->offsets_.emplace_back(kv_cache, offset);
                 offset++;
-
-                debug_index_chain_cnt++;
             }
         }
 
@@ -987,12 +979,12 @@ public:
         size_t time = std::chrono::duration_cast<std::chrono::microseconds>(
                           stop_time - start_time)
                           .count();
-        // LOG(INFO) << "== stop merge: shard coed = " << shard_code
-        //          << ", merge time = " << time;
+        LOG(INFO) << "== stop merge: shard coed = " << shard_code
+                  << ", merge time = " << time;
 
         // LOG(INFO) << "== shard code = " << shard_code
         //          << ", index chain cnt = " << debug_index_chain_cnt;
-        return {TxKey(min_key), index_chain->Size()};
+        return TxKey(min_key);
     }
 
 private:

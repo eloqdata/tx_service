@@ -2622,7 +2622,11 @@ void TransactionExecution::PostProcess(ScanOpenOperation &scan_open)
                          .count();
 
         scans_.try_emplace(open_result.scan_alias_,
-                           std::move(open_result.scanner_));
+                           std::move(open_result.scanner_),
+                           scan_open.tx_req_->StartKey(),
+                           scan_open.tx_req_->start_inclusive_,
+                           scan_open.tx_req_->EndKey(),
+                           scan_open.tx_req_->end_inclusive_);
     }
 
     if (uint64_resp_ != nullptr)
@@ -2732,6 +2736,10 @@ void TransactionExecution::Process(ScanNextOperation &scan_next)
                     tx_term_,
                     command_id_.load(std::memory_order_relaxed),
                     start_ts_,
+                    *scan_next.scan_state_->scan_start_key_,
+                    scan_next.scan_state_->scan_start_inclusive_,
+                    *scan_next.scan_state_->scan_end_key_,
+                    scan_next.scan_state_->scan_end_inclusive_,
                     scanner,
                     scan_next.hd_result_,
                     scan_next.tx_req_->obj_type_,
