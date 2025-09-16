@@ -245,13 +245,18 @@ public:
         return nullptr;
     }
 
-    TxKey NegativeInfKey() override;
+    TxKey NegativeInfKey() const override;
 
-    TxKey PositiveInfKey() override;
+    TxKey PositiveInfKey() const override;
 
     size_t KeyHash(const char *buf,
                    size_t offset,
                    const KeySchema *key_schema) const override;
+
+    TxKey CreateTxKey() const override;
+    TxKey CreateTxKey(const char *data, size_t size) const override;
+    const TxKey *PackedNegativeInfinity() const override;
+    std::unique_ptr<TxRecord> CreateTxRecord() const override;
 };
 
 class EloqRangeCatalogFactory : public CatalogFactory
@@ -308,12 +313,17 @@ public:
         int64_t partition_id,
         std::unique_ptr<StoreRange> slices = nullptr) override;
 
-    TxKey NegativeInfKey() override;
+    TxKey NegativeInfKey() const override;
 
-    TxKey PositiveInfKey() override;
+    TxKey PositiveInfKey() const override;
 
     size_t KeyHash(const char *buf,
                    size_t offset,
                    const KeySchema *key_schema) const override;
+
+    TxKey CreateTxKey() const override;
+    TxKey CreateTxKey(const char *data, size_t size) const override;
+    const TxKey *PackedNegativeInfinity() const override;
+    std::unique_ptr<TxRecord> CreateTxRecord() const override;
 };
 }  // namespace txservice

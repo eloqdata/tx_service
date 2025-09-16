@@ -159,11 +159,8 @@ enum class TableEngine : uint8_t
     EloqSql = 1,
     EloqKv = 2,
     EloqDoc = 3,
-    Sequence = 4,  // Special engine for sequence table.
-    InternalRange =
-        5,  // TODO(liunyl): Sequence should be part of internal hash table. Fix
-            // this after store_hd supports multiple engines.
-    InternalHash = 6,
+    InternalRange = 4,
+    InternalHash = 5,  // eg. Sequence table is a kind of internal hash table.
 };
 
 struct TableName
@@ -600,7 +597,7 @@ inline static TableName internal_hash_table_name{
 inline static TableName sequence_table_name{sequence_table_name_sv.data(),
                                             sequence_table_name_sv.size(),
                                             TableType::Primary,
-                                            TableEngine::Sequence};
+                                            TableEngine::InternalHash};
 
 // Set buckets count to be the same as the slots count. (16384)
 inline static const uint16_t total_range_buckets = 0x4000;
