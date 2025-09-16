@@ -87,6 +87,17 @@ void TxWorkerPool::SubmitWork(std::function<void()> work)
     work_queue_cv_.notify_one();
 }
 
+void TxWorkerPool::BulkSubmitWorkl(std::vector<std::function<void()>> work)
+{
+    std::unique_lock<std::mutex> lk(work_queue_mutex_);
+    if (shutdown_indicator_.load(std::memory_order_acquire))
+    {
+        return;
+    }
+    work_queue_.insert(work_queue_.end(), work.begin(), work.end());
+    work_queue_cv_.notify_one();
+}
+
 void TxWorkerPool::Shutdown()
 {
     {

@@ -213,6 +213,7 @@ static const std::unordered_map<TxErrorCode, std::string> tx_error_messages{
     {TxErrorCode::UPLOAD_BATCH_REJECTED, "Upload batch rejected."},
     {TxErrorCode::RPC_CALL_ERR, "RPC call error."},
     {TxErrorCode::UPDATE_SEQUENCE_TABLE_FAIL, "Update sequence table fail."},
+    {TxErrorCode::INVALID_CURSOR, "ERR invalid cursor"},
 };
 
 static inline const std::string &TxErrorMessage(TxErrorCode err_code)

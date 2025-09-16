@@ -647,6 +647,7 @@ public:
     int32_t err_code_{0};
 
     std::deque<RawSliceDataItem> bucket_data_items_;
+    bool is_drained_{false};
 
     OnFetchedBucketData backfill_func_;
 };

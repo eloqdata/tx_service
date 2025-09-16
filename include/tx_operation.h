@@ -38,6 +38,7 @@
 #include "log_closure.h"
 #include "range_record.h"
 #include "read_write_set.h"
+#include "schema.h"
 #include "tx_command.h"
 #include "tx_key.h"
 #include "tx_operation_result.h"
@@ -414,11 +415,23 @@ struct ScanState
     static constexpr size_t max_bucket_count_per_core = 10;
 
     ScanState() = delete;
-    ScanState(std::unique_ptr<CcScanner> scanner) : scanner_(std::move(scanner))
+    ScanState(std::unique_ptr<CcScanner> scanner,
+              const TxKey *start_key,
+              bool start_inclusive,
+              const TxKey *end_key,
+              bool end_inclusive)
+        : scanner_(std::move(scanner)),
+          scan_start_key_(start_key),
+          scan_start_inclusive_(start_inclusive),
+          scan_end_key_(end_key),
+          scan_end_inclusive_(end_inclusive)
     {
     }
 
+    size_t current_plan_index_{SIZE_MAX};
     std::unique_ptr<CcScanner> scanner_;
+    const TxKey *scan_start_key_{nullptr};
+    bool scan_start_inclusive_;
     const TxKey *scan_end_key_;
     bool scan_end_inclusive_;
 
