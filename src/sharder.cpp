@@ -683,14 +683,13 @@ void Sharder::UpdateLeader(uint32_t ng_id)
 
 void Sharder::UpdateLeader(uint32_t ng_id, uint32_t node_id, int64_t term)
 {
-    DLOG(INFO) << "ccnode group ng" << ng_id
-               << " updates leader to node_id:" << node_id;
     auto cached_leader_term =
         ng_leader_term_cache_[ng_id].load(std::memory_order_relaxed);
     // If the term is passed and out-dated, skip it.
     if (term != -1 && cached_leader_term != -1 && term <= cached_leader_term)
     {
-        DLOG(INFO) << "skip out-dated leader update, term: " << term
+        DLOG(INFO) << "skip out-dated node group leader update, ng: " << ng_id
+                   << ", term: " << term
                    << ", cached term: " << cached_leader_term;
         return;
     }
@@ -701,11 +700,14 @@ void Sharder::UpdateLeader(uint32_t ng_id, uint32_t node_id, int64_t term)
         if (term != -1 && cached_leader_term != -1 &&
             term <= cached_leader_term)
         {
-            DLOG(INFO) << "skip out-dated leader update, term: " << term
+            DLOG(INFO) << "skip out-dated node group leader update, ng: "
+                       << ng_id << ", term: " << term
                        << ", cached term: " << cached_leader_term;
             return;
         }
     }
+    LOG(INFO) << "update node group ng" << ng_id
+              << " leader to node_id: " << node_id;
     ng_leader_cache_[ng_id].store(node_id, std::memory_order_release);
 }
 
