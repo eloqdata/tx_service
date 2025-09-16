@@ -1297,7 +1297,6 @@ void ScanOpenOperation::Forward(TransactionExecution *txm)
                 // The locking cluster config request has not finished. The scan
                 // open operation cannot proceed without locking the cluster
                 // config.
-                LOG(INFO) << "== lock cluster config not finished";
                 return;
             }
             else
@@ -1308,7 +1307,6 @@ void ScanOpenOperation::Forward(TransactionExecution *txm)
                 if (!tx_req_->bucket_scan_save_point_->IsValidCursor(
                         cluster_config_rec.Version()))
                 {
-                    LOG(INFO) << "== lock cluster config finished, mismatch";
                     // the eloqkv client using the cursor id to resume the
                     // scan. In this scenario, the cluster config may have
                     // changed. This is a very rare case, we'll treat it here as
@@ -1320,8 +1318,6 @@ void ScanOpenOperation::Forward(TransactionExecution *txm)
                 }
                 else
                 {
-                    LOG(INFO)
-                        << "== lock cluster config finished, process scan open";
                     txm->Process(*this);
                 }
             }
