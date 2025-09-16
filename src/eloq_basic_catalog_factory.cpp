@@ -145,7 +145,8 @@ CcMap::uptr EloqHashCatalogFactory::CreateRangeMap(
 std::unique_ptr<CcScanner> EloqHashCatalogFactory::CreatePkCcmScanner(
     ScanDirection direction, const KeySchema *key_schema)
 {
-    return std::make_unique<TemplateCcScanner<EloqStringKey, EloqStringRecord>>(
+    return std::make_unique<
+        HashParitionCcScanner<EloqStringKey, EloqStringRecord>>(
         direction, ScanIndexType::Primary, key_schema);
 }
 

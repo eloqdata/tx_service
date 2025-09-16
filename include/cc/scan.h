@@ -187,7 +187,7 @@ private:
     bool is_ptr_{false};
 
     template <typename KT, typename VT>
-    friend class TemplateCcScanner;
+    friend class HashParitionCcScanner;
 
     template <typename KT, typename VT>
     friend class TemplateScanCache;
