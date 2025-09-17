@@ -920,6 +920,10 @@ public:
                 if (memory_cache_size != shard_cache->memory_cache_.Size())
                 {
                     memory_is_drained = false;
+                    LOG(INFO)
+                        << "== Merge: before cache size = " << memory_cache_size
+                        << ", new cache size = "
+                        << shard_cache->memory_cache_.Size();
                 }
             }
 
@@ -932,6 +936,10 @@ public:
                     if (kv_cache_size != kv_cache.Size())
                     {
                         kv_is_drained[bucket_id] = false;
+                        LOG(INFO) << "== Merge: before kv cache size = "
+                                  << kv_cache_size
+                                  << ", new kv cache size = " << kv_cache.Size()
+                                  << ", bucket id = " << bucket_id;
                     }
                 }
             }
