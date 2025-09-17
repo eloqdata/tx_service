@@ -879,6 +879,7 @@ public:
 
         const KeyT *min_key = nullptr;
 
+        /*
         if (!memory_is_drained && shard_cache->memory_cache_.Size() > 0)
         {
             const TemplateScanTuple<KeyT, ValueT> *tuple =
@@ -915,8 +916,8 @@ public:
                 }
             }
         }
+        */
 
-        /*
         bool all_drained = memory_is_drained;
         if (all_drained)
         {
@@ -982,7 +983,6 @@ public:
                 }
             }
         }
-        */
 
         // Init cache offset
         absl::flat_hash_map<uint16_t, size_t> cache_offset;

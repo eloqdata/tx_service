@@ -2786,6 +2786,7 @@ public:
         uint64_t cce_lock_addr = req.BlockingCceLockAddr(shard_->core_id_);
         if (cce_lock_addr == 0)
         {
+            auto start_time = std::chrono::high_resolution_clock::now();
             // first enter, send async request to kv store
             shard_->FetchBucketData(
                 &table_name_,
@@ -2799,6 +2800,13 @@ public:
                 16,
                 &req,
                 &BackfillForScanNextBatch<KeyT, ValueT, VersionedRecord>);
+            auto stop_time = std::chrono::high_resolution_clock::now();
+            int64_t time =
+                std::chrono::duration_cast<std::chrono::microseconds>(
+                    stop_time - start_time)
+                    .count();
+            LOG(INFO) << "== FetchBucket: time = " << time
+                      << " us, core id = " << shard_->core_id_;
         }
 
         auto start_time = std::chrono::high_resolution_clock::now();
@@ -12165,6 +12173,7 @@ void BackfillForScanNextBatch(FetchBucketDataCc *fetch_cc,
     if (req->IsWaitForFetchBucket(shard.core_id_) &&
         req->WaitForFetchBucketCnt(shard.core_id_) == 0)
     {
+        LOG(INFO) << "== all bucket fetch finished";
         shard.Enqueue(requester);
     }
 }
