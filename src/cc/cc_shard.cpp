@@ -1600,7 +1600,7 @@ store::DataStoreHandler::DataStoreOpStatus CcShard::FetchBucketData(
     int64_t node_group_term,
     CcShard *ccs,
     absl::flat_hash_map<uint16_t, bool> &bucket_ids,
-    TxKey start_key,
+    const TxKey &start_key,
     bool start_key_inclusive,
     size_t batch_size,
     CcRequestBase *requester,
@@ -1627,7 +1627,7 @@ store::DataStoreHandler::DataStoreOpStatus CcShard::FetchBucketData(
                                     node_group_term,
                                     ccs,
                                     bucket,
-                                    std::move(start_key),
+                                    &start_key,
                                     start_key_inclusive,
                                     batch_size,
                                     requester,
@@ -1635,9 +1635,11 @@ store::DataStoreHandler::DataStoreOpStatus CcShard::FetchBucketData(
         requests.push_back(fetch_bucket_data_cc);
     }
 
-    if (requests.size() > 0)
+    if (!requests.empty())
     {
-        return local_shards_.store_hd_->FetchBucketData(requests);
+        auto err_code = local_shards_.store_hd_->FetchBucketData(requests);
+        assert(err_code == store::DataStoreHandler::DataStoreOpStatus::Success);
+        return err_code;
     }
 
     return store::DataStoreHandler::DataStoreOpStatus::Success;

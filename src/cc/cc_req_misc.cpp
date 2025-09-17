@@ -900,7 +900,7 @@ void FetchBucketDataCc::Reset(const TableName *table_name,
                               int64_t node_group_term,
                               CcShard *ccs,
                               uint16_t bucket_id,
-                              TxKey start_key,
+                              const TxKey *start_key,
                               bool start_key_inclusive,
                               size_t batch_size,
                               CcRequestBase *requester,
@@ -914,7 +914,7 @@ void FetchBucketDataCc::Reset(const TableName *table_name,
     node_group_term_ = node_group_term;
     ccs_ = ccs;
     bucket_id_ = bucket_id;
-    start_key_ = std::move(start_key);
+    start_key_ = start_key;
     start_key_inclusive_ = start_key_inclusive;
     batch_size_ = batch_size;
     requester_ = requester;

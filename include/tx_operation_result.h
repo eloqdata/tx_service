@@ -518,13 +518,15 @@ struct RangeScanSliceResult
 
 struct BucketScanProgress
 {
-    BucketScanProgress(TxKey &&key) : pause_key_(std::move(key))
+    BucketScanProgress(TxKey &&key, bool inclusive)
+        : pause_key_(std::move(key)), pause_key_inclusive_(inclusive)
     {
     }
 
     BucketScanProgress(const BucketScanProgress &other)
     {
         pause_key_ = other.pause_key_.Clone();
+        pause_key_inclusive_ = other.pause_key_inclusive_;
         memory_scan_is_finished_ = other.memory_scan_is_finished_;
         scan_buckets_ = other.scan_buckets_;
     }
@@ -534,6 +536,7 @@ struct BucketScanProgress
         if (this != &other)
         {
             pause_key_ = other.pause_key_.Clone();
+            pause_key_inclusive_ = other.pause_key_inclusive_;
             memory_scan_is_finished_ = other.memory_scan_is_finished_;
             scan_buckets_ = other.scan_buckets_;
         }
@@ -543,6 +546,7 @@ struct BucketScanProgress
     BucketScanProgress(BucketScanProgress &&other) noexcept
     {
         pause_key_ = std::move(other.pause_key_);
+        pause_key_inclusive_ = other.pause_key_inclusive_;
         memory_scan_is_finished_ = other.memory_scan_is_finished_;
         scan_buckets_ = std::move(other.scan_buckets_);
     }
@@ -552,6 +556,7 @@ struct BucketScanProgress
         if (this != &other)
         {
             pause_key_ = std::move(other.pause_key_);
+            pause_key_inclusive_ = other.pause_key_inclusive_;
             memory_scan_is_finished_ = other.memory_scan_is_finished_;
             scan_buckets_ = std::move(other.scan_buckets_);
         }
@@ -577,6 +582,7 @@ struct BucketScanProgress
     }
 
     TxKey pause_key_;
+    bool pause_key_inclusive_{false};
     bool memory_scan_is_finished_{false};
     absl::flat_hash_map<uint16_t, bool> scan_buckets_;
 };
