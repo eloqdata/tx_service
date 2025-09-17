@@ -1812,7 +1812,7 @@ void CcStreamReceiver::OnReceiveCcMsg(std::unique_ptr<CcMessage> msg)
         // Handle the result.
         const KickoutDataResponse &cc_resp = msg->kickout_data_resp();
 
-        if (!cc_resp.error_code())
+        if (cc_resp.error_code() != 0)
         {
             hd_res->SetRemoteError(
                 ToLocalType::ConvertCcErrorCode(cc_resp.error_code()));
