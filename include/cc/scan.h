@@ -148,12 +148,14 @@ public:
 
     void SetRecord(std::shared_ptr<ValueT> ptr)
     {
+        rec_obj_.reset();
         is_ptr_ = true;
         rec_ptr_ = ptr;
     }
 
     void SetRecord(const char *rec, size_t &offset)
     {
+        rec_ptr_.reset();
         is_ptr_ = false;
         if (rec_obj_ == nullptr)
         {
