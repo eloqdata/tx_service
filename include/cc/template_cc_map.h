@@ -3018,9 +3018,9 @@ public:
         int64_t time = std::chrono::duration_cast<std::chrono::microseconds>(
                            stop_time - start_time)
                            .count();
-        LOG(INFO) << "== ccm scan time = " << time
-                  << " us, loop cnt = " << debug_loop_cnt
-                  << ", add cache cnt = " << add_cache_cnt;
+        // LOG(INFO) << "== ccm scan time = " << time
+        //          << " us, loop cnt = " << debug_loop_cnt
+        //          << ", add cache cnt = " << add_cache_cnt;
 
         return req.SetFinish(shard_->core_id_);
     }
