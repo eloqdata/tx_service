@@ -1121,6 +1121,7 @@ void CcStreamReceiver::OnReceiveCcMsg(std::unique_ptr<CcMessage> msg)
                 uint32_t shard_code = (ng_id << 10) + core_id;
                 const ScanCache_msg &cache_msg =
                     scan_open_res.scan_cache(core_id);
+                /*
                 ScanCache *shard_cache = scanner.AddShard(shard_code);
 
                 for (int idx = 0; idx < cache_msg.scan_tuple_size(); ++idx)
@@ -1150,6 +1151,7 @@ void CcStreamReceiver::OnReceiveCcMsg(std::unique_ptr<CcMessage> msg)
                         tuple_msg.cce_addr().core_id(),
                         ng_id);
                 }
+                        */
             }
 
             hd_res->Value().cc_node_terms_[ng_id] = term;

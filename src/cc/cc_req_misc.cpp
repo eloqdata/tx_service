@@ -900,7 +900,7 @@ void FetchBucketDataCc::Reset(const TableName *table_name,
                               int64_t node_group_term,
                               CcShard *ccs,
                               uint16_t bucket_id,
-                              TxKey start_key,
+                              const TxKey *start_key,
                               bool start_key_inclusive,
                               size_t batch_size,
                               CcRequestBase *requester,
@@ -914,13 +914,14 @@ void FetchBucketDataCc::Reset(const TableName *table_name,
     node_group_term_ = node_group_term;
     ccs_ = ccs;
     bucket_id_ = bucket_id;
-    start_key_ = std::move(start_key);
+    start_key_ = start_key;
     start_key_inclusive_ = start_key_inclusive;
     batch_size_ = batch_size;
     requester_ = requester;
     err_code_ = 0;
 
     bucket_data_items_.clear();
+    is_drained_ = false;
     backfill_func_ = backfill_func;
 }
 
@@ -948,16 +949,22 @@ void FetchBucketDataCc::AddDataItem(std::string &&key_str,
 
 bool FetchBucketDataCc::Execute(CcShard &ccs)
 {
+    ScanNextBatchCc *req = static_cast<ScanNextBatchCc *>(requester_);
+
     if (!ValidTermCheck())
     {
-        requester_->AbortCcRequest(CcErrorCode::NG_TERM_CHANGED);
         err_code_ = static_cast<int32_t>(CcErrorCode::NG_TERM_CHANGED);
-        return true;
     }
 
     if (err_code_ != 0)
     {
-        requester_->AbortCcRequest(CcErrorCode::DATA_STORE_ERR);
+        req->DecreaseWaitForFetchBucketCnt(ccs.core_id_);
+        req->SetErrorCode(static_cast<CcErrorCode>(err_code_));
+        if (req->IsWaitForFetchBucket(ccs.core_id_) &&
+            req->WaitForFetchBucketCnt(ccs.core_id_) == 0)
+        {
+            ccs_->Enqueue(requester_);
+        }
     }
     else
     {
@@ -970,7 +977,7 @@ bool FetchBucketDataCc::Execute(CcShard &ccs)
 void FetchBucketDataCc::SetFinish(int32_t err)
 {
     err_code_ = err;
-    ccs_->Enqueue(requester_);
+    ccs_->Enqueue(this);
 }
 
 void FetchSnapshotCc::Reset(const TableName *tbl_name,
