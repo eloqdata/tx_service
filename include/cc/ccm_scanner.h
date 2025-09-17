@@ -879,6 +879,44 @@ public:
 
         const KeyT *min_key = nullptr;
 
+        if (!memory_is_drained && shard_cache->memory_cache_.Size() > 0)
+        {
+            const TemplateScanTuple<KeyT, ValueT> *tuple =
+                shard_cache->memory_cache_.Last();
+            min_key = &tuple->KeyObj();
+        }
+
+        for (auto &[bucket_id, kv_cache] : shard_cache->kv_caches_)
+        {
+            if (!kv_is_drained.at(bucket_id) && kv_cache.Size() > 0)
+            {
+                const TemplateScanTuple<KeyT, ValueT> *tuple = kv_cache.Last();
+                if (min_key == nullptr || tuple->KeyObj() < *min_key)
+                {
+                    min_key = &tuple->KeyObj();
+                }
+            }
+        }
+
+        if (min_key != nullptr)
+        {
+            size_t memory_cache_size = shard_cache->memory_cache_.Size();
+            if (memory_cache_size > 0)
+            {
+                shard_cache->memory_cache_.RemoveLast(*min_key);
+            }
+
+            for (auto &[bucket_id, kv_cache] : shard_cache->kv_caches_)
+            {
+                size_t kv_cache_size = kv_cache.Size();
+                if (kv_cache_size > 0)
+                {
+                    kv_cache.RemoveLast(*min_key);
+                }
+            }
+        }
+
+        /*
         bool all_drained = memory_is_drained;
         if (all_drained)
         {
@@ -944,6 +982,7 @@ public:
                 }
             }
         }
+        */
 
         // Init cache offset
         absl::flat_hash_map<uint16_t, size_t> cache_offset;
