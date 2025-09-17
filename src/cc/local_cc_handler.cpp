@@ -1245,7 +1245,8 @@ void txservice::LocalCcHandler::ScanNextBatch(
                  core_idx < Sharder::Instance().GetLocalCcShardsCount();
                  ++core_idx)
             {
-                bucket_scan_progress->try_emplace(core_idx, start_key.Clone());
+                bucket_scan_progress->try_emplace(
+                    core_idx, start_key.Clone(), start_inclusive);
             }
 
             for (const auto &bucket_id : *plan->Buckets(node_group_id))

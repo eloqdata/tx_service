@@ -431,9 +431,9 @@ struct ScanState
     size_t current_plan_index_{SIZE_MAX};
     std::unique_ptr<CcScanner> scanner_;
     const TxKey *scan_start_key_{nullptr};
-    bool scan_start_inclusive_;
-    const TxKey *scan_end_key_;
-    bool scan_end_inclusive_;
+    bool scan_start_inclusive_{false};
+    const TxKey *scan_end_key_{nullptr};
+    bool scan_end_inclusive_{false};
 
     ScanState(std::unique_ptr<CcScanner> scanner,
               uint64_t schema_version,

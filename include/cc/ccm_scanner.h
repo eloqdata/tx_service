@@ -371,10 +371,9 @@ public:
         return nullptr;
     }
 
-    virtual TxKey Merge(
-        uint32_t shard_code,
-        bool memory_is_drained,
-        const absl::flat_hash_map<uint16_t, bool> &kv_is_drained)
+    virtual TxKey Merge(uint32_t shard_code,
+                        bool &memory_is_drained,
+                        absl::flat_hash_map<uint16_t, bool> &kv_is_drained)
     {
         assert(false);
     }
@@ -871,16 +870,29 @@ public:
         return iter->second.get();
     }
 
-    TxKey Merge(
-        uint32_t shard_code,
-        bool memory_is_drained,
-        const absl::flat_hash_map<uint16_t, bool> &kv_is_drained) override
+    TxKey Merge(uint32_t shard_code,
+                bool &memory_is_drained,
+                absl::flat_hash_map<uint16_t, bool> &kv_is_drained) override
     {
+        assert(Direction() == ScanDirection::Forward);
         ShardCache *shard_cache = GetShardCache(shard_code);
 
         const KeyT *min_key = nullptr;
 
-        if (!memory_is_drained && shard_cache->memory_cache_.Size() > 0)
+        bool all_drained = memory_is_drained;
+        if (all_drained)
+        {
+            for (const auto &[bucket_id, is_drained] : kv_is_drained)
+            {
+                if (!is_drained)
+                {
+                    all_drained = false;
+                    break;
+                }
+            }
+        }
+
+        if (!all_drained && shard_cache->memory_cache_.Size() > 0)
         {
             const TemplateScanTuple<KeyT, ValueT> *tuple =
                 shard_cache->memory_cache_.Last();
@@ -889,7 +901,7 @@ public:
 
         for (auto &[bucket_id, kv_cache] : shard_cache->kv_caches_)
         {
-            if (!kv_is_drained.at(bucket_id) && kv_cache.Size() > 0)
+            if (!all_drained && kv_cache.Size() > 0)
             {
                 const TemplateScanTuple<KeyT, ValueT> *tuple = kv_cache.Last();
                 if (min_key == nullptr || tuple->KeyObj() < *min_key)
@@ -901,16 +913,26 @@ public:
 
         if (min_key != nullptr)
         {
-            if (shard_cache->memory_cache_.Size() > 0)
+            size_t memory_cache_size = shard_cache->memory_cache_.Size();
+            if (memory_cache_size > 0)
             {
                 shard_cache->memory_cache_.RemoveLast(*min_key);
+                if (memory_cache_size != shard_cache->memory_cache_.Size())
+                {
+                    memory_is_drained = false;
+                }
             }
 
             for (auto &[bucket_id, kv_cache] : shard_cache->kv_caches_)
             {
-                if (kv_cache.Size() > 0)
+                size_t kv_cache_size = kv_cache.Size();
+                if (kv_cache_size > 0)
                 {
                     kv_cache.RemoveLast(*min_key);
+                    if (kv_cache_size != kv_cache.Size())
+                    {
+                        kv_is_drained[bucket_id] = false;
+                    }
                 }
             }
         }
@@ -975,7 +997,9 @@ public:
             }
         }
 
-        return TxKey(min_key);
+        const auto *last_tuple = index_chain->Last();
+        const KeyT *last_key = last_tuple ? &last_tuple->KeyObj() : nullptr;
+        return TxKey(last_key);
     }
 
 private:

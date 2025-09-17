@@ -2775,7 +2775,7 @@ public:
 
         ScanDirection direction = typed_cache->Scanner()->Direction();
         Iterator scan_ccm_it;
-        Iterator end_it;
+        Iterator end_it = End();
         CcEntry<KeyT, ValueT, VersionedRecord, RangePartitioned> *prior_cce;
         CcEntry<KeyT, ValueT, VersionedRecord, RangePartitioned> *cce_last =
             nullptr;
@@ -2869,10 +2869,9 @@ public:
         {
             const KeyT *look_key = start_key.GetKey<KeyT>();
             const KeyT *end_key = req.end_key_.GetKey<KeyT>();
-            bool inclusive = start_key.Type() == KeyType::NegativeInf;
 
-            std::pair<Iterator, ScanType> start_pair =
-                ForwardScanStart(*look_key, inclusive);
+            std::pair<Iterator, ScanType> start_pair = ForwardScanStart(
+                *look_key, req.StartKeyInlcuisve(shard_->core_id_));
             scan_ccm_it = start_pair.first;
             if (start_pair.second == ScanType::ScanGap)
             {
@@ -3004,7 +3003,7 @@ public:
             assert(false);
         }
 
-        scan_finished = (scan_ccm_it == End());
+        scan_finished = (scan_ccm_it == end_it);
         if (scan_finished)
         {
             req.GetBucketScanProgress()

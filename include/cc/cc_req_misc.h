@@ -615,7 +615,7 @@ public:
                int64_t node_group_term,
                CcShard *ccs,
                uint16_t bucket_id,
-               TxKey start_key,
+               const TxKey *start_key,
                bool start_key_inclusive,
                size_t batch_size,
                CcRequestBase *requester,
@@ -640,8 +640,8 @@ public:
     int64_t node_group_term_;
     CcShard *ccs_;
     uint16_t bucket_id_;
-    TxKey start_key_;
-    bool start_key_inclusive_;
+    const TxKey *start_key_{nullptr};
+    bool start_key_inclusive_{false};
     size_t batch_size_{0};
     CcRequestBase *requester_{nullptr};
     int32_t err_code_{0};

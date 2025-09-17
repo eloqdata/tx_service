@@ -2045,6 +2045,12 @@ public:
         return bucket_scan_progress_->at(core_id).pause_key_;
     }
 
+    bool StartKeyInlcuisve(uint16_t core_id)
+    {
+        assert(bucket_scan_progress_->count(core_id) > 0);
+        return bucket_scan_progress_->at(core_id).pause_key_inclusive_;
+    }
+
     bool ShardIsDrained(uint16_t core_id)
     {
         return bucket_scan_progress_->at(core_id).AllFinished();
