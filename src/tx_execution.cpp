@@ -2676,10 +2676,17 @@ void TransactionExecution::Process(ScanNextOperation &scan_next)
             scan_next.scan_state_->current_plan_index_ !=
                 scan_next.tx_req_->bucket_scan_plan_->PlanIndex())
         {
+            auto start_time = std::chrono::high_resolution_clock::now();
             scan_next.scan_state_->current_plan_index_ =
                 scan_next.tx_req_->bucket_scan_plan_->PlanIndex();
             scanner.Close();
             scanner.SetStatus(ScannerStatus::Blocked);
+            auto stop_time = std::chrono::high_resolution_clock::now();
+            int64_t time =
+                std::chrono::duration_cast<std::chrono::microseconds>(
+                    stop_time - start_time)
+                    .count();
+            LOG(INFO) << "== Close time = " << time;
         }
     }
 

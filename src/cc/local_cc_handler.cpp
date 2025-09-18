@@ -1287,6 +1287,7 @@ void txservice::LocalCcHandler::ScanNextBatch(
         {
             cc_shards_.EnqueueCcRequest(thd_id_, core_idx, req);
         }
+        LOG(INFO) << "== ScanNextBatch: Enqueue";
     }
     else
     {
