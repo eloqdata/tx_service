@@ -21,6 +21,7 @@
  */
 #pragma once
 
+#include <chrono>
 #include <cstdint>
 #include <memory>  // std::shared_ptr
 #include <mutex>
@@ -874,6 +875,7 @@ public:
                 bool &memory_is_drained,
                 absl::flat_hash_map<uint16_t, bool> &kv_is_drained) override
     {
+        auto start = std::chrono::high_resolution_clock::now();
         assert(Direction() == ScanDirection::Forward);
         ShardCache *shard_cache = GetShardCache(shard_code);
 
@@ -1050,6 +1052,12 @@ public:
 
         const auto *last_tuple = index_chain->Last();
         const KeyT *last_key = last_tuple ? &last_tuple->KeyObj() : nullptr;
+        auto stop_time = std::chrono::high_resolution_clock::now();
+        int64_t time = std::chrono::duration_cast<std::chrono::microseconds>(
+                           stop_time - start)
+                           .count();
+        LOG(INFO) << "== merge time = " << time;
+
         return TxKey(last_key);
     }
 
