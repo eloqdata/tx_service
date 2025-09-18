@@ -2805,8 +2805,8 @@ public:
                 std::chrono::duration_cast<std::chrono::microseconds>(
                     stop_time - start_time)
                     .count();
-            LOG(INFO) << "== FetchBucket: time = " << time
-                      << " us, core id = " << shard_->core_id_;
+            // LOG(INFO) << "== FetchBucket: time = " << time
+            //          << " us, core id = " << shard_->core_id_;
         }
 
         auto start_time = std::chrono::high_resolution_clock::now();
@@ -3026,10 +3026,12 @@ public:
         int64_t time = std::chrono::duration_cast<std::chrono::microseconds>(
                            stop_time - start_time)
                            .count();
+        /*
         LOG(INFO) << "== ccm scan time = " << time
                   << " us, loop cnt = " << debug_loop_cnt
                   << ", add cache cnt = " << add_cache_cnt
                   << ", core id = " << shard_->core_id_;
+        */
 
         return req.SetFinish(shard_->core_id_);
     }
@@ -12174,8 +12176,8 @@ void BackfillForScanNextBatch(FetchBucketDataCc *fetch_cc,
     if (req->IsWaitForFetchBucket(shard.core_id_) &&
         req->WaitForFetchBucketCnt(shard.core_id_) == 0)
     {
-        LOG(INFO) << "== all bucket fetch finished, core id = "
-                  << shard.core_id_;
+        // LOG(INFO) << "== all bucket fetch finished, core id = "
+        //          << shard.core_id_;
         shard.Enqueue(requester);
     }
 }
