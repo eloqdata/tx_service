@@ -917,6 +917,7 @@ static void UpdateLeadersFromLogInfo(
         uint32_t ng_id = entry.first;
         const txlog::LeaderInfo &leader_info = entry.second;
         const std::string &leader_ip = leader_info.ip();
+        const uint32_t leader_port = leader_info.port();
         int64_t leader_term = leader_info.term();
 
         auto ng_it = ng_configs.find(ng_id);
@@ -926,12 +927,16 @@ static void UpdateLeadersFromLogInfo(
             continue;
         }
 
-        // Find matching node_id by hostname/IP match
+        // Find matching node_id by hostname/IP and port match
         const std::vector<NodeConfig> &node_configs = ng_it->second;
         uint32_t leader_node_id = UINT32_MAX;
         for (const auto &node_config : node_configs)
         {
-            if (node_config.host_name_ == leader_ip)
+            // The log replay service listens on GET_LOG_REPLAY_RPC_PORT(port_)
+            // Compare both host and the corresponding replay port.
+            if (node_config.host_name_ == leader_ip &&
+                static_cast<uint32_t>(
+                    GET_LOG_REPLAY_RPC_PORT(node_config.port_)) == leader_port)
             {
                 leader_node_id = node_config.node_id_;
                 break;
@@ -941,8 +946,8 @@ static void UpdateLeadersFromLogInfo(
         if (leader_node_id == UINT32_MAX)
         {
             // No direct match, skip but log for diagnostics
-            DLOG(WARNING) << "Cannot map leader IP '" << leader_ip
-                          << "' to node_id for ng_id=" << ng_id;
+            DLOG(WARNING) << "Cannot map leader '" << leader_ip << ":"
+                          << leader_port << "' to node_id for ng_id=" << ng_id;
             continue;
         }
 
