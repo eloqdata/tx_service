@@ -2544,6 +2544,8 @@ void TransactionExecution::PostProcess(ScanOpenOperation &scan_open)
                 return;
             }
 
+            auto start = std::chrono::high_resolution_clock::now();
+
             LocalCcShards *local_cc_shard =
                 Sharder::Instance().GetLocalCcShards();
             // <NodeGroupId, <core_idx, vector<bucket_id>>
@@ -2566,6 +2568,72 @@ void TransactionExecution::PostProcess(ScanOpenOperation &scan_open)
                                 std::unordered_map<uint16_t, std::size_t>>
                 batch_idx;
 
+            size_t plan_bucket_cnt_soft_limit = 256;
+            size_t total_bucket_cnt = Sharder::Instance().ToTalRangeBuckets();
+
+            absl::flat_hash_map<NodeGroupId, std::vector<uint16_t>>
+                current_plan_bucket_ids;
+            size_t current_plan_bucket_cnt = 0;
+            size_t seen_bucket_cnt = 0;
+
+            while (seen_bucket_cnt < total_bucket_cnt)
+            {
+                for (const auto &[ng, core_map] : grouped)
+                {
+                    for (const auto &[core_id, vec] : core_map)
+                    {
+                        size_t &idx = batch_idx[ng][core_id];
+                        if (idx < vec.size())
+                        {
+                            current_plan_bucket_ids[ng].push_back(vec[idx++]);
+                            seen_bucket_cnt++;
+                            current_plan_bucket_cnt++;
+                        }
+                    }
+                }
+
+                if (current_plan_bucket_cnt >= plan_bucket_cnt_soft_limit)
+                {
+                    scan_open.tx_req_->bucket_scan_save_point_->bucket_groups_
+                        .push_back(std::move(current_plan_bucket_ids));
+                    current_plan_bucket_ids.clear();
+                    current_plan_bucket_cnt = 0;
+                }
+            }
+
+            if (current_plan_bucket_cnt > 0)
+            {
+                scan_open.tx_req_->bucket_scan_save_point_->bucket_groups_
+                    .push_back(std::move(current_plan_bucket_ids));
+                current_plan_bucket_ids.clear();
+                current_plan_bucket_cnt = 0;
+            }
+
+            /*
+            LOG(INFO) << "== ScanOpen: plan size = "
+                      << scan_open.tx_req_->bucket_scan_save_point_
+                             ->bucket_groups_.size();
+            size_t debug_total_bucket_cnt = 0;
+            size_t debug_plan_idx = 0;
+            for (const auto &buckets :
+                 scan_open.tx_req_->bucket_scan_save_point_->bucket_groups_)
+            {
+                for (const auto &[ng, buck_ids] : buckets)
+                {
+                    LOG(INFO) << "plan index = " << debug_plan_idx
+                              << ", ng id = " << ng
+                              << ", bucket size = " << buck_ids.size();
+                    debug_total_bucket_cnt += buck_ids.size();
+                }
+
+                debug_plan_idx++;
+            }
+
+            LOG(INFO) << "== debug total bucket cnt = "
+                      << debug_total_bucket_cnt;
+            */
+
+            /*
             bool finished = false;
             while (!finished)
             {
@@ -2604,6 +2672,13 @@ void TransactionExecution::PostProcess(ScanOpenOperation &scan_open)
                         .push_back(std::move(current_plan_bucket_ids));
                 }
             }
+                */
+
+            auto stop_time = std::chrono::high_resolution_clock::now();
+            LOG(INFO) << "== plan time = "
+                      << std::chrono::duration_cast<std::chrono::microseconds>(
+                             stop_time - start)
+                             .count();
         }
 
         scans_.try_emplace(open_result.scan_alias_,
