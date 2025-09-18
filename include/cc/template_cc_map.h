@@ -12175,8 +12175,8 @@ void BackfillForScanNextBatch(FetchBucketDataCc *fetch_cc,
     if (req->IsWaitForFetchBucket(shard.core_id_) &&
         req->WaitForFetchBucketCnt(shard.core_id_) == 0)
     {
-        // LOG(INFO) << "== all bucket fetch finished, core id = "
-        //          << shard.core_id_;
+        LOG(INFO) << "== all bucket fetch finished, core id = "
+                  << shard.core_id_;
         shard.Enqueue(requester);
     }
 }
