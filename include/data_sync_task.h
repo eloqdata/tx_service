@@ -29,6 +29,7 @@
 #include <functional>
 #include <mutex>
 #include <unordered_map>
+#include <utility>
 
 #include "absl/container/flat_hash_map.h"
 #include "catalog_factory.h"
@@ -121,10 +122,10 @@ public:
           node_group_id_(ng_id),
           node_group_term_(ng_term),
           data_sync_ts_(data_sync_ts),
-          filter_lambda_(filter_lambda),
+          filter_lambda_(std::move(filter_lambda)),
           forward_cache_(forward_cache),
           is_standby_node_ckpt_(is_standby_node_ckpt),
-          status_(status),
+          status_(std::move(status)),
           is_dirty_(is_dirty),
           sync_ts_adjustable_(need_adjust_ts),
           task_res_(hres),
@@ -301,6 +302,11 @@ public:
     {
         std::lock_guard<bthread::Mutex> lk(flush_task_entries_mux_);
         return pending_flush_size_;
+    }
+
+    size_t GetFlushBufferSize() const
+    {
+        return max_pending_flush_size_;
     }
 
     std::unique_ptr<FlushDataTask> MoveFlushData(bool force)

@@ -222,7 +222,8 @@ public:
 
     static inline int32_t MapKeyHashToHashPartitionId(uint64_t hash_code)
     {
-        return (hash_code >> 10) & 0x3FF;
+        static constexpr int32_t kHashPartitions = 1024;
+        return static_cast<int32_t>(hash_code & (kHashPartitions - 1));
     }
 
     uint32_t NativeNodeGroup() const

@@ -6503,7 +6503,9 @@ public:
                             {
                                 cce->GetOrCreateKeyLock(shard_, this, ccp);
                                 TxKey tx_key(key);
-                                int32_t part_id = (key->Hash() >> 10) & 0x3FF;
+                                int32_t part_id =
+                                    Sharder::MapKeyHashToHashPartitionId(
+                                        key->Hash());
                                 shard_->FetchRecord(table_name_,
                                                     table_schema_,
                                                     TxKey(key),
@@ -8406,7 +8408,7 @@ public:
         return true;
     }
 
-    bool Execute(ScanSliceDeltaSizeCc &req) override
+    bool Execute(ScanSliceDeltaSizeCcForRangePartition &req) override
     {
         TX_TRACE_ACTION_WITH_CONTEXT(
             (txservice::CcMap *) this,
@@ -8504,11 +8506,11 @@ public:
                                      ? req.StoreRangePtr()->HasDmlSinceDdl()
                                      : true;
 
-        // ScanSliceDeltaSizeCc is running on TxProcessor thread. To avoid
-        // blocking other transaction for a long time, we only process
-        // ScanBatchSize number of keys in each round.
+        // ScanSliceDeltaSizeCcForRangePartition is running on TxProcessor
+        // thread. To avoid blocking other transaction for a long time, we only
+        // process ScanBatchSize number of keys in each round.
         for (size_t scan_cnt = 0;
-             scan_cnt < ScanSliceDeltaSizeCc::ScanBatchSize &&
+             scan_cnt < ScanSliceDeltaSizeCcForRangePartition::ScanBatchSize &&
              key_it != req_end_it && key_it != req_end_next_page_it;
              ++scan_cnt)
         {
@@ -8746,8 +8748,153 @@ public:
             shard_->Enqueue(&req);
         }
 
-        // Access ScanSliceDeltaSizeCc member variable is unsafe after
-        // SetFinished().
+        // Access ScanSliceDeltaSizeCcForRangePartition member variable is
+        // unsafe after SetFinished().
+        return false;
+    }
+
+    bool Execute(ScanDeltaSizeCcForHashPartition &req) override
+    {
+        TX_TRACE_ACTION_WITH_CONTEXT(
+            (txservice::CcMap *) this,
+            &req,
+            [&req]() -> std::string
+            {
+                return std::string("\"cc_map_type\":\"template_cc_map\"")
+                    .append(",\"tx_number\":")
+                    .append(std::to_string(req.Txn()))
+                    .append(",\"term\":")
+                    .append("0");
+            });
+        TX_TRACE_DUMP(&req);
+
+        auto &paused_key = req.PausedKey();
+
+        auto deduce_iterator = [this](const KeyT &search_key) -> Iterator
+        {
+            Iterator it;
+            std::pair<Iterator, ScanType> search_pair =
+                ForwardScanStart(search_key, true);
+            it = search_pair.first;
+            if (search_pair.second == ScanType::ScanGap)
+            {
+                ++it;
+            }
+            return it;
+        };
+
+        auto next_page_it = [this](Iterator &end_it) -> Iterator
+        {
+            Iterator it = end_it;
+            if (it != End())
+            {
+                CcPage<KeyT, ValueT, VersionedRecord, RangePartitioned> *ccp =
+                    it.GetPage();
+                assert(ccp != nullptr);
+                if (ccp->next_page_ == PagePosInf())
+                {
+                    it = End();
+                }
+                else
+                {
+                    it = Iterator(ccp->next_page_, 0, &neg_inf_);
+                }
+            }
+            return it;
+        };
+
+        Iterator key_it;
+        Iterator req_end_it;
+
+        // The key iterator.
+        const KeyT *const search_start_key =
+            paused_key.GetKey<KeyT>() == nullptr ? KeyT::NegativeInfinity()
+                                                 : paused_key.GetKey<KeyT>();
+        key_it = deduce_iterator(*search_start_key);
+
+        // The request end iterator
+        req_end_it = deduce_iterator(*KeyT::PositiveInfinity());
+
+        // Since we might skip the page that end_it is on if it's not updated
+        // since last ckpt, it might skip end_it. If the last page is skipped it
+        // will be set as the first entry on the next page. Also check if
+        // (key_it == end_next_page_it).
+        Iterator req_end_next_page_it = next_page_it(req_end_it);
+
+        // The current slice end iterator
+        Iterator slice_end_it = req_end_it;
+        Iterator slice_end_next_page_it = req_end_next_page_it;
+
+        // ScanSliceDeltaSizeCcForRangePartition is running on TxProcessor
+        // thread. To avoid blocking other transaction for a long time, we only
+        // process ScanBatchSize number of keys in each round.
+        for (size_t scan_cnt = 0;
+             scan_cnt < ScanDeltaSizeCcForHashPartition::ScanBatchSize &&
+             key_it != req_end_it && key_it != req_end_next_page_it;
+             ++scan_cnt)
+        {
+            CcEntry<KeyT, ValueT, VersionedRecord, RangePartitioned> *cce =
+                key_it->second;
+            CcPage<KeyT, ValueT, VersionedRecord, RangePartitioned> *ccp =
+                key_it.GetPage();
+            assert(ccp);
+
+            if (ccp->last_dirty_commit_ts_ <= req.LastDataSyncTs())
+            {
+                assert(!cce->NeedCkpt());
+                // Skip the pages that have no updates since last data sync.
+                if (ccp->next_page_ == PagePosInf())
+                {
+                    key_it = End();
+                }
+                else
+                {
+                    key_it = Iterator(ccp->next_page_, 0, &neg_inf_);
+                }
+
+                // Check the slice iterator.
+                if (key_it == slice_end_it || key_it == slice_end_next_page_it)
+                {
+                    // Reset the slice end iterator
+                    slice_end_it = req_end_it;
+                    slice_end_next_page_it = next_page_it(slice_end_it);
+                }
+                continue;
+            }
+
+            const uint64_t commit_ts = cce->CommitTs();
+
+            // The commit_ts <= 1 means the key is non-existed or a new inserted
+            // key that the tx has not finished post-processing.
+            req.UpdateKeyCount(cce->NeedCkpt() && commit_ts > 1 &&
+                               commit_ts <= req.ScanTs());
+
+            // Forward key iterator
+            ++key_it;
+
+            if (key_it == slice_end_it)
+            {
+                // Update the end it.
+                slice_end_it = req_end_it;
+                slice_end_next_page_it = next_page_it(slice_end_it);
+            }
+        }
+
+        if (key_it == req_end_it || key_it == req_end_next_page_it)
+        {
+            int64_t allocated, committed;
+            mi_thread_stats(&allocated, &committed);
+            req.SetMemoryUsage(allocated);
+            req.SetFinish();
+        }
+        else
+        {
+            paused_key = key_it->first->CloneTxKey();
+            shard_->Enqueue(&req);
+        }
+
+        // Access ScanSliceDeltaSizeCcForRangePartition member variable is
+        // unsafe after SetFinished().
         return false;
     }
 
