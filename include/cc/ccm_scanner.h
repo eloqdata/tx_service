@@ -57,7 +57,7 @@ class CcScanner;
 struct ScanCache
 {
 public:
-    static constexpr size_t ScanBatchSize = 1600;
+    static constexpr size_t ScanBatchSize = 1024;
 
     // Approximate meta data size in storage.
     static constexpr size_t MetaDataSize = 8;
