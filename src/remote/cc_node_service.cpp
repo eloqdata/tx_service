@@ -218,9 +218,10 @@ void CcNodeService::NotifyNewLeaderStart(
 
     uint32_t ng_id = request->ng_id();
     uint32_t node_id = request->node_id();
+    int64_t term = request->term();
 
     // update the leader cache directly.
-    Sharder::Instance().UpdateLeader(ng_id, node_id);
+    Sharder::Instance().UpdateLeader(ng_id, node_id, term);
 
     response->set_error(false);
 }

@@ -41,6 +41,7 @@ message CheckTxStatusResponse {
 message NotifyNewLeaderStartRequest {
   uint32 ng_id = 1;
   uint32 node_id = 2;
+  int64 term = 3;
 }
 
 message NotifyNewLeaderStartResponse {
