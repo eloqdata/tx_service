@@ -3602,8 +3602,8 @@ private:
 
     CcErrorCode err_{CcErrorCode::NO_ERROR};
     bool finished_{false};
-    std::mutex mux_;
-    std::condition_variable cv_;
+    std::mutex mux_{};
+    std::condition_variable cv_{};
 
     // True means If no larger version exists, we need to export the data which
     // commit_ts same as ckpt_ts.
@@ -8180,21 +8180,21 @@ private:
     size_t free_count_{0};
 };
 
-struct ScanSliceDeltaSizeCc : public CcRequestBase
+struct ScanSliceDeltaSizeCcForRangePartition : public CcRequestBase
 {
     static constexpr size_t ScanBatchSize = 128;
 
-    ScanSliceDeltaSizeCc(const TableName &table_name,
-                         uint64_t last_datasync_ts,
-                         uint64_t scan_ts,
-                         uint64_t ng_id,
-                         int64_t ng_term,
-                         uint64_t core_cnt,
-                         uint64_t txn,
-                         const TxKey &target_start_key,
-                         const TxKey &target_end_key,
-                         StoreRange *store_range,
-                         bool is_dirty)
+    ScanSliceDeltaSizeCcForRangePartition(const TableName &table_name,
+                                          uint64_t last_datasync_ts,
+                                          uint64_t scan_ts,
+                                          uint64_t ng_id,
+                                          int64_t ng_term,
+                                          uint64_t core_cnt,
+                                          uint64_t txn,
+                                          const TxKey &target_start_key,
+                                          const TxKey &target_end_key,
+                                          StoreRange *store_range,
+                                          bool is_dirty)
         : table_name_(table_name),
           node_group_id_(ng_id),
           node_group_term_(ng_term),
@@ -8220,13 +8220,12 @@ struct ScanSliceDeltaSizeCc : public CcRequestBase
         }
     }
 
-    bool ValidTermCheck()
+    bool ValidTermCheck() const
     {
         int64_t cc_ng_term = Sharder::Instance().LeaderTerm(node_group_id_);
         assert(node_group_term_ > 0);
 
-        return (cc_ng_term < 0 || cc_ng_term != node_group_term_) ? false
-                                                                  : true;
+        return cc_ng_term >= 0 && cc_ng_term == node_group_term_;
     }
 
     bool Execute(CcShard &ccs) override
@@ -8411,6 +8410,172 @@ private:
 
     CcErrorCode err_{CcErrorCode::NO_ERROR};
     uint32_t unfinished_cnt_;
+    std::mutex mux_;
+    std::condition_variable cv_;
+};
+
+struct ScanDeltaSizeCcForHashPartition : public CcRequestBase
+{
+    static constexpr size_t ScanBatchSize = 128;
+
+    ScanDeltaSizeCcForHashPartition(const TableName &table_name,
+                                    uint64_t last_datasync_ts,
+                                    uint64_t scan_ts,
+                                    uint64_t ng_id,
+                                    int64_t ng_term,
+                                    uint64_t txn)
+        : table_name_(table_name),
+          node_group_id_(ng_id),
+          node_group_term_(ng_term),
+          last_datasync_ts_(last_datasync_ts),
+          scan_ts_(scan_ts)
+    {
+        tx_number_ = txn;
+    }
+
+    bool ValidTermCheck()
+    {
+        int64_t cc_ng_term = Sharder::Instance().LeaderTerm(node_group_id_);
+        assert(node_group_term_ > 0);
+
+        return cc_ng_term >= 0 && cc_ng_term == node_group_term_;
+    }
+
+    bool Execute(CcShard &ccs) override
+    {
+        if (!ValidTermCheck())
+        {
+            SetError(CcErrorCode::REQUESTED_NODE_NOT_LEADER);
+            return false;
+        }
+
+        CcMap *ccm = ccs.GetCcm(table_name_, node_group_id_);
+        if (ccm == nullptr)
+        {
+            assert(!table_name_.IsMeta());
+            ccs.InitCcm(table_name_, node_group_id_, node_group_term_, this);
+            // Catalog entry should always exists and schema should not be null,
+            // since this cc request should be executed when table is locked by
+            // data sync txm.
+            ccm = ccs.GetCcm(table_name_, node_group_id_);
+            assert(ccm != nullptr);
+        }
+        ccm->Execute(*this);
+
+        // return false since ScanSliceDeltaSizeCcForRangePartition is not
+        // re-used and does not need to call CcRequestBase::Free
+        return false;
+    }
+
+    void Wait()
+    {
+        std::unique_lock<std::mutex> lk(mux_);
+        cv_.wait(lk, [this] { return finished_; });
+    }
+
+    void SetFinish()
+    {
+        std::unique_lock<std::mutex> lk(mux_);
+        finished_ = true;
+        cv_.notify_one();
+    }
+
+    void SetError(CcErrorCode err)
+    {
+        std::unique_lock<std::mutex> lk(mux_);
+        err_ = err;
+        finished_ = true;
+        cv_.notify_one();
+    }
+
+    bool IsError()
+    {
+        std::lock_guard<std::mutex> lk(mux_);
+        return err_ != CcErrorCode::NO_ERROR;
+    }
+
+    CcErrorCode ErrorCode()
+    {
+        std::lock_guard<std::mutex> lk(mux_);
+        return err_;
+    }
+
+    uint32_t NodeGroupId()
+    {
+        return node_group_id_;
+    }
+
+    int64_t NodeGroupTerm() const
+    {
+        return node_group_term_;
+    }
+
+    uint64_t LastDataSyncTs() const
+    {
+        return last_datasync_ts_;
+    }
+
+    uint64_t ScanTs() const
+    {
+        return scan_ts_;
+    }
+
+    void AbortCcRequest(CcErrorCode err_code) override
+    {
+        assert(err_code != CcErrorCode::NO_ERROR);
+        SetError(err_code);
+    }
+
+    TxKey &PausedKey()
+    {
+        return pause_key_;
+    }
+
+    void UpdateKeyCount(const bool need_ckpt)
+    {
+        ++scanned_key_count_;
+        if (need_ckpt)
+        {
+            ++updated_key_count_;
+        }
+    }
+
+    size_t UpdatedMemory() const
+    {
+        const uint64_t scanned = scanned_key_count_;
+        if (scanned == 0)
+            return 0;
+        // integer math with rounding up to avoid systematic underestimation
+        return static_cast<size_t>(
+            (updated_key_count_ * memory_usage_ + scanned - 1) / scanned);
+    }
+
+    void SetMemoryUsage(const uint64_t memory)
+    {
+        memory_usage_ = memory;
+    }
+
+private:
+    const TableName &table_name_;
+    uint32_t node_group_id_;
+    int64_t node_group_term_;
+    // It is used as a hint to decide if a page has dirty data since last round
+    // of checkpoint. It is guaranteed that all entries committed before this ts
+    // are synced into data store.
+    uint64_t last_datasync_ts_;
+    // Target ts. Collect all data changes committed before this ts into data
+    // sync vec.
+    uint64_t scan_ts_;
+    //  Position that we left off during last round of scan.
+    TxKey pause_key_;
+
+    // Number of keys scanned / updated, and per-core memory usage.
+    uint64_t scanned_key_count_{0};
+    uint64_t updated_key_count_{0};
+    uint64_t memory_usage_{0};
+
+    CcErrorCode err_{CcErrorCode::NO_ERROR};
+    bool finished_{false};
     std::mutex mux_;
     std::condition_variable cv_;
 };

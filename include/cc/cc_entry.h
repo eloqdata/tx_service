@@ -103,17 +103,19 @@ public:
                 RecordStatus payload_status,
                 uint64_t commit_ts,
                 LruEntry *cce,
-                int32_t post_flush_size,
+                uint32_t post_flush_size,
                 int32_t partition_id)
+        : payload_(std::in_place_type<std::shared_ptr<TxRecord>>,
+                   std::move(payload)),
+          flush_key_(std::in_place_type<TxKey>, std::move(key)),
+          payload_status_(payload_status),
+          post_flush_size_(post_flush_size),
+          commit_ts_(commit_ts),
+          cce_(cce),
+          partition_id_(partition_id)
     {
-        flush_key_ = std::move(key);
-        payload_ = std::move(payload);
-        payload_status_ = payload_status;
-        commit_ts_ = commit_ts;
-        cce_ = cce;
-        post_flush_size_ = post_flush_size;
-        partition_id_ = partition_id;
     }
+
     FlushRecord(TxKey key,
                 const BlobTxRecord &payload,
                 RecordStatus payload_status,
@@ -121,15 +123,17 @@ public:
                 LruEntry *cce,
                 int32_t post_flush_size,
                 int32_t partition_id)
+
+        :  // use copy constructor to avoid reallocating memory in
+           // DataSyncScanCc
+          payload_(std::in_place_type<BlobTxRecord>, payload),
+          flush_key_(std::in_place_type<TxKey>, std::move(key)),
+          payload_status_(payload_status),
+          post_flush_size_(post_flush_size),
+          commit_ts_(commit_ts),
+          cce_(cce),
+          partition_id_(partition_id)
     {
-        flush_key_ = std::move(key);
-        // use copy constructor to avoid re-allocatting memory in DataSyncScanCc
-        payload_ = payload;
-        payload_status_ = payload_status;
-        commit_ts_ = commit_ts;
-        cce_ = cce;
-        post_flush_size_ = post_flush_size;
-        partition_id_ = partition_id;
     }
 
     ~FlushRecord() = default;
@@ -1383,7 +1387,7 @@ public:
 
         if (VersionedRecord && this->IsPersistent())
         {
-            // 1.This version data has alredy flushed to base
+            // 1.This version data has already flushed to base
             // table(commit_ts == ckpt_ts).
             // 2. No new version data to be
             // flushed(newest commit ts == ckpt_ts).
