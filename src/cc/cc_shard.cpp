@@ -1608,8 +1608,6 @@ store::DataStoreHandler::DataStoreOpStatus CcShard::FetchBucketData(
     CcRequestBase *requester,
     OnFetchedBucketData backfill_func)
 {
-    auto start_time = std::chrono::high_resolution_clock::now();
-
     ScanNextBatchCc *scan_next_batch_cc =
         static_cast<ScanNextBatchCc *>(requester);
     std::vector<FetchBucketDataCc *> requests;
@@ -1641,20 +1639,17 @@ store::DataStoreHandler::DataStoreOpStatus CcShard::FetchBucketData(
         requests.push_back(fetch_bucket_data_cc);
     }
 
-    /*
-    auto stop_time = std::chrono::high_resolution_clock::now();
-    LOG(INFO) << "== FetchBucketData: prepare time = "
-              << std::chrono::duration_cast<std::chrono::microseconds>(
-                     stop_time - start_time)
-                     .count()
-              << ", core id = " << core_id_;
-
-    */
-
     if (!requests.empty())
     {
+        auto start_time = std::chrono::high_resolution_clock::now();
         auto err_code = local_shards_.store_hd_->FetchBucketData(requests);
         assert(err_code == store::DataStoreHandler::DataStoreOpStatus::Success);
+        auto stop_time = std::chrono::high_resolution_clock::now();
+        LOG(INFO) << "== FetchBucketData: fetch time = "
+                  << std::chrono::duration_cast<std::chrono::microseconds>(
+                         stop_time - start_time)
+                         .count()
+                  << ", core id = " << core_id_;
         return err_code;
     }
 
