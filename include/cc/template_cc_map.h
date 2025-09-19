@@ -2774,19 +2774,19 @@ public:
         TemplateScanCache<KeyT, ValueT> *typed_cache =
             static_cast<TemplateScanCache<KeyT, ValueT> *>(
                 req.GetLocalMemoryCache(shard_code));
-        LOG(INFO) << "set cache max size = " << bucket_ids.size() * 16;
         typed_cache->SetCacheMaxSize(bucket_ids.size() * 16);
 
         ScanDirection direction = typed_cache->Scanner()->Direction();
         Iterator scan_ccm_it;
         Iterator end_it = End();
         CcEntry<KeyT, ValueT, VersionedRecord, RangePartitioned> *prior_cce;
-        CcEntry<KeyT, ValueT, VersionedRecord, RangePartitioned> *cce_last =
-            nullptr;
-        CcPage<KeyT, ValueT, VersionedRecord, RangePartitioned> *ccp_last =
-            nullptr;
+        // <KeyT, ValueT, VersionedRecord, RangePartitioned> *cce_last =
+        //    nullptr;
+        // CcPage<KeyT, ValueT, VersionedRecord, RangePartitioned> *ccp_last =
+        //    nullptr;
 
-        uint64_t cce_lock_addr = req.BlockingCceLockAddr(shard_->core_id_);
+        auto [cce_lock_addr, end_lock_addr] =
+            req.BlockingCceLockAddr(shard_->core_id_);
         if (cce_lock_addr == 0)
         {
             auto start_time = std::chrono::high_resolution_clock::now();
@@ -2798,8 +2798,10 @@ public:
                 ng_term,
                 shard_,
                 bucket_ids,
-                start_key.GetShallowCopy(),
-                false,
+                start_key,
+                req.StartKeyInlcuisve(shard_->core_id_),
+                req.EndKey(),
+                req.EndKeyInclusive(),
                 ScanNextBatchCc::kv_bucket_batch_size,
                 &req,
                 &BackfillForScanNextBatch<KeyT, ValueT, VersionedRecord>);
@@ -2811,6 +2813,22 @@ public:
             LOG(INFO) << "== FetchBucket: time = " << time
                       << " us, core id = " << shard_->core_id_;
         }
+
+        auto acquire_read_intent =
+            [&, this](
+                CcEntry<KeyT, ValueT, VersionedRecord, RangePartitioned> *cce,
+                CcPage<KeyT, ValueT, VersionedRecord, RangePartitioned> *page)
+        {
+            assert(cce != nullptr && page != nullptr);
+            bool add_intent = cce->GetOrCreateKeyLock(shard_, this, page)
+                                  .AcquireReadIntent(req.Txn());
+
+            if (add_intent)
+            {
+                shard_->UpsertLockHoldingTx(
+                    req.Txn(), tx_term, cce, false, ng_id, table_name_.Type());
+            }
+        };
 
         auto start_time = std::chrono::high_resolution_clock::now();
 
@@ -2827,6 +2845,27 @@ public:
                     CcPage<KeyT, ValueT, VersionedRecord, RangePartitioned> *>(
                     prior_cce->GetCcPage());
             assert(ccp != nullptr);
+
+            if (end_lock_addr != 0)
+            {
+                KeyGapLockAndExtraData *end_lock =
+                    reinterpret_cast<KeyGapLockAndExtraData *>(end_lock_addr);
+                assert(end_lock != nullptr &&
+                       end_lock->GetCcEntry() != nullptr);
+                auto end_cce = static_cast<
+                    CcEntry<KeyT, ValueT, VersionedRecord, RangePartitioned> *>(
+                    end_lock->GetCcEntry());
+                auto *end_ccp = static_cast<
+                    CcPage<KeyT, ValueT, VersionedRecord, RangePartitioned> *>(
+                    end_cce->GetCcPage());
+                assert(end_ccp != nullptr);
+
+                // Release read intent lock
+                end_it = Iterator(end_cce, ccp, &neg_inf_);
+                ReleaseCceLock(
+                    end_cce->GetKeyLock(), end_cce, req.Txn(), ng_id);
+            }
+
             scan_ccm_it = Iterator(prior_cce, ccp, &neg_inf_);
             const KeyT *prior_cce_key = scan_ccm_it->first;
 
@@ -2836,6 +2875,12 @@ public:
             if (blocking_type == ScanBlockingType::BlockOnFuture)
             {
                 prior_cce->GetKeyLock()->ReleaseReadLock(req.Txn(), shard_);
+            }
+            else if (blocking_type == ScanBlockingType::NoBlocking)
+            {
+                // Release read intent lock
+                ReleaseCceLock(
+                    prior_cce->GetKeyLock(), prior_cce, req.Txn(), ng_id);
             }
             else
             {
@@ -2859,25 +2904,25 @@ public:
                            CcErrorCode::MVCC_READ_FOR_WRITE_CONFLICT);
                     return req.SetError(shard_->core_id_, lock_pair.second);
                 }
+
+                AddScanTuple(prior_cce_key,
+                             prior_cce,
+                             typed_cache,
+                             scan_type,
+                             ng_id,
+                             ng_term,
+                             req.Txn(),
+                             req.ReadTimestamp(),
+                             is_read_snapshot,
+                             need_fetch_snapshot,
+                             true,
+                             req.is_ckpt_delta_,
+                             req.is_require_keys_,
+                             req.is_require_recs_);
+
+                // cce_last = prior_cce;
+                // ccp_last = ccp;
             }
-
-            AddScanTuple(prior_cce_key,
-                         prior_cce,
-                         typed_cache,
-                         scan_type,
-                         ng_id,
-                         ng_term,
-                         req.Txn(),
-                         req.ReadTimestamp(),
-                         is_read_snapshot,
-                         need_fetch_snapshot,
-                         true,
-                         req.is_ckpt_delta_,
-                         req.is_require_keys_,
-                         req.is_require_recs_);
-
-            cce_last = prior_cce;
-            ccp_last = ccp;
         }
         else
         {
@@ -2917,7 +2962,10 @@ public:
         if (direction == ScanDirection::Forward)
         {
             // ++scan_ccm_it;
-            for (; scan_ccm_it != end_it && !typed_cache->Full(); ++scan_ccm_it)
+            size_t scan_cnt = 0;
+            for (; scan_ccm_it != end_it && !typed_cache->Full() &&
+                   scan_cnt < ScanNextBatchCc::scan_batch_size;
+                 ++scan_ccm_it, ++scan_cnt)
             {
                 debug_loop_cnt++;
 
@@ -2967,18 +3015,36 @@ public:
                     break;
                 case CcErrorCode::MVCC_READ_MUST_WAIT_WRITE:
                 {
+                    uint64_t end_it_lock_addr = 0;
+                    if (end_it != End())
+                    {
+                        acquire_read_intent(end_it->second, end_it.GetPage());
+                        end_it_lock_addr = reinterpret_cast<uint64_t>(
+                            end_it->second->GetLockAddr());
+                    }
+
                     req.SetBlockingInfo(
                         shard_->core_id_,
                         reinterpret_cast<uint64_t>(cce->GetLockAddr()),
+                        end_it_lock_addr,
                         ScanType::ScanBoth,
                         ScanBlockingType::BlockOnFuture);
                     return false;
                 }
                 case CcErrorCode::ACQUIRE_LOCK_BLOCKED:
                 {
+                    uint64_t end_it_lock_addr = 0;
+                    if (end_it != End())
+                    {
+                        acquire_read_intent(end_it->second, end_it.GetPage());
+                        end_it_lock_addr = reinterpret_cast<uint64_t>(
+                            end_it->second->GetLockAddr());
+                    }
+
                     req.SetBlockingInfo(
                         shard_->core_id_,
                         reinterpret_cast<uint64_t>(cce->GetLockAddr()),
+                        end_it_lock_addr,
                         ScanType::ScanBoth,
                         ScanBlockingType::BlockOnLock);
                     // Lock fail should stop the execution of current
@@ -3008,8 +3074,8 @@ public:
                              req.is_require_recs_);
 
                 add_cache_cnt++;
-                cce_last = cce;
-                ccp_last = ccp;
+                // cce_last = cce;
+                // ccp_last = ccp;
             }
         }
         else
@@ -3023,19 +3089,52 @@ public:
             req.GetBucketScanProgress()
                 ->at(shard_->core_id_)
                 .memory_scan_is_finished_ = true;
+            auto stop_time = std::chrono::high_resolution_clock::now();
+            int64_t time =
+                std::chrono::duration_cast<std::chrono::microseconds>(
+                    stop_time - start_time)
+                    .count();
+
+            LOG(INFO) << "== ccm scan time = " << time
+                      << " us, loop cnt = " << debug_loop_cnt
+                      << ", add cache cnt = " << add_cache_cnt
+                      << ", core id = " << shard_->core_id_;
+
+            return req.SetFinish(shard_->core_id_);
         }
+        else
+        {
+            uint64_t end_it_lock_addr = 0;
+            if (end_it != End())
+            {
+                acquire_read_intent(end_it->second, end_it.GetPage());
+                end_it_lock_addr =
+                    reinterpret_cast<uint64_t>(end_it->second->GetLockAddr());
+            }
 
-        auto stop_time = std::chrono::high_resolution_clock::now();
-        int64_t time = std::chrono::duration_cast<std::chrono::microseconds>(
-                           stop_time - start_time)
-                           .count();
+            acquire_read_intent(scan_ccm_it->second, scan_ccm_it.GetPage());
 
-        LOG(INFO) << "== ccm scan time = " << time
-                  << " us, loop cnt = " << debug_loop_cnt
-                  << ", add cache cnt = " << add_cache_cnt
-                  << ", core id = " << shard_->core_id_;
+            req.SetBlockingInfo(
+                shard_->core_id_,
+                reinterpret_cast<uint64_t>(scan_ccm_it->second->GetLockAddr()),
+                end_it_lock_addr,
+                ScanType::ScanBoth,
+                ScanBlockingType::NoBlocking);
 
-        return req.SetFinish(shard_->core_id_);
+            shard_->Enqueue(&req);
+
+            auto stop_time = std::chrono::high_resolution_clock::now();
+            int64_t time =
+                std::chrono::duration_cast<std::chrono::microseconds>(
+                    stop_time - start_time)
+                    .count();
+
+            LOG(INFO) << "== yield ccm scan time = " << time
+                      << " us, loop cnt = " << debug_loop_cnt
+                      << ", add cache cnt = " << add_cache_cnt
+                      << ", core id = " << shard_->core_id_;
+            return false;
+        }
     }
 
     void AddScanTupleMsg(

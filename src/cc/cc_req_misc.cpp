@@ -902,6 +902,8 @@ void FetchBucketDataCc::Reset(const TableName *table_name,
                               uint16_t bucket_id,
                               const TxKey *start_key,
                               bool start_key_inclusive,
+                              const TxKey *end_key,
+                              bool end_key_inclusive,
                               size_t batch_size,
                               CcRequestBase *requester,
                               OnFetchedBucketData backfill_func)
@@ -916,6 +918,8 @@ void FetchBucketDataCc::Reset(const TableName *table_name,
     bucket_id_ = bucket_id;
     start_key_ = start_key;
     start_key_inclusive_ = start_key_inclusive;
+    end_key_ = end_key;
+    end_key_inclusive_ = end_key_inclusive;
     batch_size_ = batch_size;
     requester_ = requester;
     err_code_ = 0;
@@ -923,6 +927,9 @@ void FetchBucketDataCc::Reset(const TableName *table_name,
     bucket_data_items_.clear();
     is_drained_ = false;
     backfill_func_ = backfill_func;
+
+    kv_start_key_.clear();
+    kv_end_key_.clear();
 }
 
 bool FetchBucketDataCc::ValidTermCheck()

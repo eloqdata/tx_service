@@ -1602,6 +1602,8 @@ store::DataStoreHandler::DataStoreOpStatus CcShard::FetchBucketData(
     absl::flat_hash_map<uint16_t, bool> &bucket_ids,
     const TxKey &start_key,
     bool start_key_inclusive,
+    const TxKey &end_key,
+    bool end_key_inclusive,
     size_t batch_size,
     CcRequestBase *requester,
     OnFetchedBucketData backfill_func)
@@ -1629,6 +1631,8 @@ store::DataStoreHandler::DataStoreOpStatus CcShard::FetchBucketData(
                                     bucket,
                                     &start_key,
                                     start_key_inclusive,
+                                    &end_key,
+                                    end_key_inclusive,
                                     batch_size,
                                     requester,
                                     backfill_func);

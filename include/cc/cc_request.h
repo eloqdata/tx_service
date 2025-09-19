@@ -1774,6 +1774,7 @@ struct ScanNextBatchCc
 {
 public:
     static constexpr size_t kv_bucket_batch_size = 16;
+    static constexpr size_t scan_batch_size = 128;
 
     ScanNextBatchCc() = default;
 
@@ -1976,10 +1977,11 @@ public:
         return ts_;
     }
 
-    uint64_t BlockingCceLockAddr(uint16_t core_id)
+    std::pair<uint64_t, uint64_t> BlockingCceLockAddr(uint16_t core_id)
     {
         assert(blocking_info_.count(core_id) > 0);
-        return blocking_info_[core_id].cce_lock_addr_;
+        ScanBlockingInfo &blocking_info = blocking_info_[core_id];
+        return {blocking_info.cce_lock_addr_, blocking_info.end_cce_lock_addr_};
     }
 
     std::pair<ScanBlockingType, ScanType> BlockingPair(uint16_t core_id)
@@ -1991,11 +1993,13 @@ public:
 
     void SetBlockingInfo(uint16_t core_id,
                          uint64_t cce_lock_addr,
+                         uint64_t end_cce_lock_addr,
                          ScanType scan_type,
                          ScanBlockingType blocking_type)
     {
         assert(blocking_info_.count(core_id) > 0);
-        blocking_info_[core_id] = {cce_lock_addr, scan_type, blocking_type};
+        blocking_info_[core_id] = {
+            cce_lock_addr, end_cce_lock_addr, scan_type, blocking_type};
     }
 
     int32_t GetRedisObjectType() const
@@ -2056,6 +2060,16 @@ public:
         return bucket_scan_progress_->at(core_id).pause_key_inclusive_;
     }
 
+    const TxKey &EndKey()
+    {
+        return end_key_;
+    }
+
+    bool EndKeyInclusive()
+    {
+        return end_key_inclusive_;
+    }
+
     bool ShardIsDrained(uint16_t core_id)
     {
         return bucket_scan_progress_->at(core_id).AllFinished();
@@ -2094,6 +2108,7 @@ private:
     struct ScanBlockingInfo
     {
         uint64_t cce_lock_addr_;
+        uint64_t end_cce_lock_addr_;
         ScanType scan_type_;
         ScanBlockingType type_;
     };

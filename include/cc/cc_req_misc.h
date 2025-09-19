@@ -617,6 +617,8 @@ public:
                uint16_t bucket_id,
                const TxKey *start_key,
                bool start_key_inclusive,
+               const TxKey *end_key,
+               bool end_key_inclusive,
                size_t batch_size,
                CcRequestBase *requester,
                OnFetchedBucketData backfill_func);
@@ -642,6 +644,8 @@ public:
     uint16_t bucket_id_;
     const TxKey *start_key_{nullptr};
     bool start_key_inclusive_{false};
+    const TxKey *end_key_{nullptr};
+    bool end_key_inclusive_{false};
     size_t batch_size_{0};
     CcRequestBase *requester_{nullptr};
     int32_t err_code_{0};
@@ -650,6 +654,9 @@ public:
     bool is_drained_{false};
 
     OnFetchedBucketData backfill_func_;
+
+    std::string kv_start_key_;
+    std::string kv_end_key_;
 };
 
 struct FetchSnapshotCc;

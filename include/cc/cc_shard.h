@@ -748,6 +748,8 @@ public:
         absl::flat_hash_map<uint16_t, bool> &bucket_ids,
         const TxKey &start_key,
         bool start_key_inclusive,
+        const TxKey &end_key,
+        bool end_key_inclusive,
         size_t batch_size,
         CcRequestBase *requester,
         OnFetchedBucketData backfill_func);
