@@ -968,18 +968,18 @@ public:
 
         const KeyT *min_key = nullptr;
 
-        if (!memory_is_drained && shard_cache->memory_cache_.Size() > 0)
+        if (!memory_is_drained && shard_cache->memory_cache_->Size() > 0)
         {
             const TemplateScanTuple<KeyT, ValueT> *tuple =
-                shard_cache->memory_cache_.Last();
+                shard_cache->memory_cache_->Last();
             min_key = &tuple->KeyObj();
         }
 
         for (auto &[bucket_id, kv_cache] : shard_cache->kv_caches_)
         {
-            if (!kv_is_drained.at(bucket_id) && kv_cache.Size() > 0)
+            if (!kv_is_drained.at(bucket_id) && kv_cache->Size() > 0)
             {
-                const TemplateScanTuple<KeyT, ValueT> *tuple = kv_cache.Last();
+                const TemplateScanTuple<KeyT, ValueT> *tuple = kv_cache->Last();
                 if (min_key == nullptr || tuple->KeyObj() < *min_key)
                 {
                     min_key = &tuple->KeyObj();
