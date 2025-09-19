@@ -914,8 +914,13 @@ public:
     void Close() override
     {
         status_ = ScannerStatus::Closed;
-        // TODO(lokax): recycle shard cache
-        shard_caches_.clear();
+
+        // shard_caches_.clear();
+        for (auto &[shard_code, shard_cache] : shard_caches_)
+        {
+            shard_cache->Recycle();
+        }
+
         index_chains_.clear();
         current_iter_ = {};
         init_ = false;

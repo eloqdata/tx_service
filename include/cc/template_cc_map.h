@@ -3095,10 +3095,12 @@ public:
                     stop_time - start_time)
                     .count();
 
+            /*
             LOG(INFO) << "== ccm scan time = " << time
                       << " us, loop cnt = " << debug_loop_cnt
                       << ", add cache cnt = " << add_cache_cnt
                       << ", core id = " << shard_->core_id_;
+            */
 
             return req.SetFinish(shard_->core_id_);
         }
@@ -3128,11 +3130,12 @@ public:
                 std::chrono::duration_cast<std::chrono::microseconds>(
                     stop_time - start_time)
                     .count();
-
+            /*
             LOG(INFO) << "== yield ccm scan time = " << time
                       << " us, loop cnt = " << debug_loop_cnt
                       << ", add cache cnt = " << add_cache_cnt
                       << ", core id = " << shard_->core_id_;
+            */
             return false;
         }
     }
