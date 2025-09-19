@@ -402,6 +402,7 @@ public:
                         absl::flat_hash_map<uint16_t, bool> &kv_is_drained)
     {
         assert(false);
+        return TxKey();
     }
 
     virtual void ResetShards(size_t shard_cnt) = 0;
@@ -967,7 +968,6 @@ public:
 
         const KeyT *min_key = nullptr;
 
-        /*
         if (!memory_is_drained && shard_cache->memory_cache_.Size() > 0)
         {
             const TemplateScanTuple<KeyT, ValueT> *tuple =
@@ -989,23 +989,31 @@ public:
 
         if (min_key != nullptr)
         {
-            size_t memory_cache_size = shard_cache->memory_cache_.Size();
+            size_t memory_cache_size = shard_cache->memory_cache_->Size();
             if (memory_cache_size > 0)
             {
-                shard_cache->memory_cache_.RemoveLast(*min_key);
+                shard_cache->memory_cache_->RemoveLast(*min_key);
+                if (memory_cache_size != shard_cache->memory_cache_->Size())
+                {
+                    memory_is_drained = false;
+                }
             }
 
             for (auto &[bucket_id, kv_cache] : shard_cache->kv_caches_)
             {
-                size_t kv_cache_size = kv_cache.Size();
+                size_t kv_cache_size = kv_cache->Size();
                 if (kv_cache_size > 0)
                 {
-                    kv_cache.RemoveLast(*min_key);
+                    kv_cache->RemoveLast(*min_key);
+                    if (kv_cache_size != kv_cache->Size())
+                    {
+                        kv_is_drained[bucket_id] = false;
+                    }
                 }
             }
         }
-        */
 
+        /*
         bool all_drained = memory_is_drained;
         if (all_drained)
         {
@@ -1047,12 +1055,6 @@ public:
                 if (memory_cache_size != shard_cache->memory_cache_->Size())
                 {
                     memory_is_drained = false;
-                    /*
-                    LOG(INFO)
-                        << "== Merge: before cache size = " << memory_cache_size
-                        << ", new cache size = "
-                        << shard_cache->memory_cache_.Size();
-                    */
                 }
             }
 
@@ -1065,16 +1067,11 @@ public:
                     if (kv_cache_size != kv_cache->Size())
                     {
                         kv_is_drained[bucket_id] = false;
-                        /*
-                        LOG(INFO) << "== Merge: before kv cache size = "
-                                  << kv_cache_size
-                                  << ", new kv cache size = " << kv_cache.Size()
-                                  << ", bucket id = " << bucket_id;
-                        */
                     }
                 }
             }
         }
+        */
 
         // Init cache offset
         absl::flat_hash_map<uint16_t, size_t> cache_offset;
