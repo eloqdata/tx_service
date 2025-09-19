@@ -1773,6 +1773,8 @@ struct ScanNextBatchCc
     : public TemplatedCcRequest<ScanNextBatchCc, ScanNextResult>
 {
 public:
+    static constexpr size_t kv_bucket_batch_size = 16;
+
     ScanNextBatchCc() = default;
 
     bool ValidTermCheck() override
@@ -1874,9 +1876,12 @@ public:
         return res_->Value().ccm_scanner_->Cache(shard_code);
     }
 
-    ScanCache *GetLocalKvCache(uint32_t shard_code, uint16_t bucket_id)
+    ScanCache *GetLocalKvCache(uint32_t shard_code,
+                               uint16_t bucket_id,
+                               size_t batch_size)
     {
-        return res_->Value().ccm_scanner_->KvCache(shard_code, bucket_id);
+        return res_->Value().ccm_scanner_->KvCache(
+            shard_code, bucket_id, batch_size);
     }
 
     void SetErrorCode(CcErrorCode err_code)

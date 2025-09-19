@@ -2758,14 +2758,10 @@ public:
                 (iso_lvl == IsolationLevel::Snapshot && !req.IsForWrite());
         }
 
-        uint32_t shard_code = (ng_id << 10) + shard_->core_id_;
-        TemplateScanCache<KeyT, ValueT> *typed_cache =
-            static_cast<TemplateScanCache<KeyT, ValueT> *>(
-                req.GetLocalMemoryCache(shard_code));
         const TxKey &start_key = req.StartKey(shard_->core_id_);
-
         absl::flat_hash_map<uint16_t, bool> &bucket_ids =
             req.BucketIds(shard_->core_id_);
+
         auto filter_bucket_lambda = [this, &bucket_ids](size_t hash_code)
         {
             // return hash_code == SIZE_MAX;
@@ -2773,6 +2769,13 @@ public:
                 Sharder::Instance().MapKeyHashToBucketId(hash_code);
             return bucket_ids.count(bucket_id) > 0;
         };
+
+        uint32_t shard_code = (ng_id << 10) + shard_->core_id_;
+        TemplateScanCache<KeyT, ValueT> *typed_cache =
+            static_cast<TemplateScanCache<KeyT, ValueT> *>(
+                req.GetLocalMemoryCache(shard_code));
+        LOG(INFO) << "set cache max size = " << bucket_ids.size() * 16;
+        typed_cache->SetCacheMaxSize(bucket_ids.size() * 16);
 
         ScanDirection direction = typed_cache->Scanner()->Direction();
         Iterator scan_ccm_it;
@@ -2797,7 +2800,7 @@ public:
                 bucket_ids,
                 start_key.GetShallowCopy(),
                 false,
-                16,
+                ScanNextBatchCc::kv_bucket_batch_size,
                 &req,
                 &BackfillForScanNextBatch<KeyT, ValueT, VersionedRecord>);
             auto stop_time = std::chrono::high_resolution_clock::now();
@@ -12122,7 +12125,7 @@ void BackfillForScanNextBatch(FetchBucketDataCc *fetch_cc,
     uint32_t shard_code = (req->NodeGroupId() << 10) + shard.core_id_;
     TemplateScanCache<KeyT, ValueT> *scan_cache =
         static_cast<TemplateScanCache<KeyT, ValueT> *>(
-            req->GetLocalKvCache(shard_code, bucket_id));
+            req->GetLocalKvCache(shard_code, bucket_id, fetch_cc->batch_size_));
     assert(scan_cache != nullptr);
 
     // Reset kv cache

@@ -57,29 +57,37 @@ class CcScanner;
 struct ScanCache
 {
 public:
-    static constexpr size_t ScanBatchSize = 1024;
+    static constexpr size_t ScanBatchSize = 128;
 
     // Approximate meta data size in storage.
     static constexpr size_t MetaDataSize = 8;
 
     ScanCache(CcScanner *scanner)
-        : idx_(0), size_(0), scanner_(scanner), mem_size_(0), mem_max_bytes_(0)
-    {
-    }
-
-    ScanCache(size_t idx, size_t size, CcScanner *scanner)
-        : idx_(idx),
-          size_(size),
-          trailing_cnt_(0),
+        : idx_(0),
+          size_(0),
+          scan_batch_size_(ScanBatchSize),
           scanner_(scanner),
           mem_size_(0),
           mem_max_bytes_(0)
     {
     }
 
+    ScanCache(size_t idx, size_t size, size_t max_size, CcScanner *scanner)
+        : idx_(idx),
+          size_(size),
+          scan_batch_size_(max_size),
+          trailing_cnt_(0),
+          scanner_(scanner),
+          mem_size_(0),
+          mem_max_bytes_(0)
+    {
+        assert(size_ <= max_size);
+    }
+
     ScanCache(ScanCache &&rhs) noexcept
         : idx_(rhs.idx_),
           size_(rhs.size_),
+          scan_batch_size_(rhs.scan_batch_size_),
           trailing_cnt_(rhs.trailing_cnt_),
           scanner_(rhs.scanner_),
           mem_size_(rhs.mem_size_),
@@ -95,7 +103,7 @@ public:
         {
             return ScannerStatus::Open;
         }
-        else if (size_ == ScanCache::ScanBatchSize)
+        else if (size_ == scan_batch_size_)
         {
             return ScannerStatus::Blocked;
         }
@@ -114,6 +122,7 @@ public:
     {
         idx_ = 0;
         size_ = 0;
+        scan_batch_size_ = ScanBatchSize;
         mem_size_ = 0;
         mem_max_bytes_ = 0;
         trailing_cnt_ = 0;
@@ -131,7 +140,7 @@ public:
 
     bool Full() const
     {
-        return size_ == ScanCache::ScanBatchSize;
+        return size_ == scan_batch_size_;
     }
 
     CcScanner *Scanner() const
@@ -173,6 +182,7 @@ public:
 protected:
     size_t idx_;
     size_t size_;
+    size_t scan_batch_size_;
     size_t trailing_cnt_{0};
     CcScanner *const scanner_;
     uint32_t mem_size_{0};
@@ -195,8 +205,16 @@ public:
         assert(cache_.size() == ScanCache::ScanBatchSize);
     }
 
+    TemplateScanCache(CcScanner *scanner,
+                      size_t cache_size,
+                      const KeySchema *key_schema)
+        : ScanCache(scanner), cache_(cache_size), key_schema_(key_schema)
+    {
+        assert(cache_.size() == cache_size);
+    }
+
     TemplateScanCache(TemplateScanCache &&rhs)
-        : ScanCache(rhs.idx_, rhs.size_, rhs.scanner_),
+        : ScanCache(rhs.idx_, rhs.size_, rhs.scan_batch_size_, rhs.scanner_),
           cache_(std::move(rhs.cache_)),
           key_schema_(rhs.key_schema_)
     {
@@ -214,6 +232,11 @@ public:
     void SetCacheMaxBytes(size_t max_bytes)
     {
         mem_max_bytes_ = max_bytes;
+    }
+
+    void SetCacheMaxSize(size_t max_size)
+    {
+        scan_batch_size_ = max_size;
     }
 
     const KeySchema *GetKeySchema()
@@ -367,7 +390,9 @@ public:
     virtual ~CcScanner() = default;
 
     virtual ScanCache *Cache(uint32_t shard_code) = 0;
-    virtual ScanCache *KvCache(uint32_t shard_code, uint16_t bucket_id)
+    virtual ScanCache *KvCache(uint32_t shard_code,
+                               uint16_t bucket_id,
+                               size_t batch_size)
     {
         return nullptr;
     }
@@ -548,29 +573,82 @@ public:
     struct ShardCache
     {
         ShardCache(CcScanner *scanner, const KeySchema *key_schema)
-            : memory_cache_(scanner, key_schema)
         {
+            memory_cache_ = std::make_unique<TemplateScanCache<KeyT, ValueT>>(
+                scanner, key_schema);
         }
 
-        TemplateScanCache<KeyT, ValueT> *GetKvCache(uint16_t bucket_id,
-                                                    CcScanner *scanner,
-                                                    const KeySchema *key_schema)
+        void Recycle()
+        {
+            if (memory_cache_)
+            {
+                memory_cache_->Reset();
+            }
+
+            for (auto &[bucket_id, cache] : kv_caches_)
+            {
+                cache->Reset();
+                free_cache_pool_.push_back(std::move(cache));
+            }
+
+            kv_caches_.clear();
+        }
+
+        TemplateScanCache<KeyT, ValueT> *GetOrCreateKvCache(
+            uint16_t bucket_id,
+            CcScanner *scanner,
+            const KeySchema *key_schema,
+            size_t batch_size)
         {
             auto iter = kv_caches_.find(bucket_id);
             if (iter != kv_caches_.end())
             {
-                return &iter->second;
+                return iter->second.get();
             }
             else
             {
-                auto em_it =
-                    kv_caches_.try_emplace(bucket_id, scanner, key_schema);
-                return &em_it.first->second;
+                if (free_cache_pool_.empty())
+                {
+                    auto cache =
+                        std::make_unique<TemplateScanCache<KeyT, ValueT>>(
+                            scanner, batch_size, key_schema);
+                    cache->SetCacheMaxSize(SIZE_MAX);
+                    auto em_it =
+                        kv_caches_.try_emplace(bucket_id, std::move(cache));
+                    return em_it.first->second.get();
+                }
+                else
+                {
+                    auto cache = std::move(free_cache_pool_.back());
+                    free_cache_pool_.pop_back();
+                    cache->Reset();
+                    cache->SetCacheMaxSize(SIZE_MAX);
+                    auto em_it =
+                        kv_caches_.try_emplace(bucket_id, std::move(cache));
+                    return em_it.first->second.get();
+                }
             }
         }
 
-        TemplateScanCache<KeyT, ValueT> memory_cache_;
-        absl::flat_hash_map<uint16_t, TemplateScanCache<KeyT, ValueT>>
+        TemplateScanCache<KeyT, ValueT> *GetKvCache(uint16_t bucket_id)
+        {
+            auto iter = kv_caches_.find(bucket_id);
+            if (iter != kv_caches_.end())
+            {
+                return iter->second.get();
+            }
+            else
+            {
+                assert(false);
+                return nullptr;
+            }
+        }
+
+        std::vector<std::unique_ptr<TemplateScanCache<KeyT, ValueT>>>
+            free_cache_pool_;
+        std::unique_ptr<TemplateScanCache<KeyT, ValueT>> memory_cache_{nullptr};
+        absl::flat_hash_map<uint16_t,
+                            std::unique_ptr<TemplateScanCache<KeyT, ValueT>>>
             kv_caches_;
     };
 
@@ -662,10 +740,10 @@ public:
     {
         for (auto &[shard_code, cache] : shard_caches_)
         {
-            cache->memory_cache_.Reset();
+            cache->memory_cache_->Reset();
             for (auto &[bucket_id, kv_cache] : cache->kv_caches_)
             {
-                kv_cache.Reset();
+                kv_cache->Reset();
             }
         }
 
@@ -681,14 +759,17 @@ public:
     ScanCache *Cache(uint32_t shard_code) override
     {
         ShardCache *shard_cache = GetShardCache(shard_code);
-        return &shard_cache->memory_cache_;
+        return shard_cache->memory_cache_.get();
         // For TemplateCcScanner, shard_code is (ng_id << 10) + core_id.
     }
 
-    ScanCache *KvCache(uint32_t shard_code, uint16_t bucket_id) override
+    ScanCache *KvCache(uint32_t shard_code,
+                       uint16_t bucket_id,
+                       size_t batch_size) override
     {
         ShardCache *shard_cache = GetShardCache(shard_code);
-        return shard_cache->GetKvCache(bucket_id, this, key_schema_);
+        return shard_cache->GetOrCreateKvCache(
+            bucket_id, this, key_schema_, batch_size);
     }
 
     void ShardCacheSizes(std::vector<std::pair<uint32_t, size_t>>
@@ -708,7 +789,7 @@ public:
         last_tuples->reserve(shard_caches_.size());
         for (const auto &[shard_code, shard_cache] : shard_caches_)
         {
-            last_tuples->emplace_back(shard_cache->memory_cache_.LastTuple());
+            last_tuples->emplace_back(shard_cache->memory_cache_->LastTuple());
         }
     }
 
@@ -719,7 +800,7 @@ public:
 
         for (auto &[shard_code, shard_cache] : shard_caches_)
         {
-            shard_cache->memory_cache_.TrailingTuples(*trailing_tuples);
+            shard_cache->memory_cache_->TrailingTuples(*trailing_tuples);
         }
     }
 
@@ -933,18 +1014,18 @@ public:
             }
         }
 
-        if (!all_drained && shard_cache->memory_cache_.Size() > 0)
+        if (!all_drained && shard_cache->memory_cache_->Size() > 0)
         {
             const TemplateScanTuple<KeyT, ValueT> *tuple =
-                shard_cache->memory_cache_.Last();
+                shard_cache->memory_cache_->Last();
             min_key = &tuple->KeyObj();
         }
 
         for (auto &[bucket_id, kv_cache] : shard_cache->kv_caches_)
         {
-            if (!all_drained && kv_cache.Size() > 0)
+            if (!all_drained && kv_cache->Size() > 0)
             {
-                const TemplateScanTuple<KeyT, ValueT> *tuple = kv_cache.Last();
+                const TemplateScanTuple<KeyT, ValueT> *tuple = kv_cache->Last();
                 if (min_key == nullptr || tuple->KeyObj() < *min_key)
                 {
                     min_key = &tuple->KeyObj();
@@ -954,11 +1035,11 @@ public:
 
         if (min_key != nullptr)
         {
-            size_t memory_cache_size = shard_cache->memory_cache_.Size();
+            size_t memory_cache_size = shard_cache->memory_cache_->Size();
             if (memory_cache_size > 0)
             {
-                shard_cache->memory_cache_.RemoveLast(*min_key);
-                if (memory_cache_size != shard_cache->memory_cache_.Size())
+                shard_cache->memory_cache_->RemoveLast(*min_key);
+                if (memory_cache_size != shard_cache->memory_cache_->Size())
                 {
                     memory_is_drained = false;
                     /*
@@ -972,11 +1053,11 @@ public:
 
             for (auto &[bucket_id, kv_cache] : shard_cache->kv_caches_)
             {
-                size_t kv_cache_size = kv_cache.Size();
+                size_t kv_cache_size = kv_cache->Size();
                 if (kv_cache_size > 0)
                 {
-                    kv_cache.RemoveLast(*min_key);
-                    if (kv_cache_size != kv_cache.Size())
+                    kv_cache->RemoveLast(*min_key);
+                    if (kv_cache_size != kv_cache->Size())
                     {
                         kv_is_drained[bucket_id] = false;
                         /*
@@ -1000,40 +1081,42 @@ public:
         CompoundIndex *index_chain = GetIndexChain(shard_code);
 
         size_t memory_cache_offset = 0;
-        size_t memory_cache_size = shard_cache->memory_cache_.Size();
+        size_t memory_cache_size = shard_cache->memory_cache_->Size();
 
         // deduplicate
         while (memory_cache_offset < memory_cache_size)
         {
             const TemplateScanTuple<KeyT, ValueT> *memory_tuple =
-                shard_cache->memory_cache_.At(memory_cache_offset);
+                shard_cache->memory_cache_->At(memory_cache_offset);
             uint16_t target_bucket =
                 Sharder::MapKeyHashToBucketId(memory_tuple->KeyObj().Hash());
             TemplateScanCache<KeyT, ValueT> *kv_cache =
-                shard_cache->GetKvCache(target_bucket, this, key_schema_);
-
-            while (cache_offset[target_bucket] < kv_cache->Size())
+                shard_cache->GetKvCache(target_bucket);
+            if (kv_cache)
             {
-                const TemplateScanTuple<KeyT, ValueT> *kv_tuple =
-                    kv_cache->At(cache_offset[target_bucket]);
-                if (kv_tuple->KeyObj() < memory_tuple->KeyObj())
+                while (cache_offset[target_bucket] < kv_cache->Size())
                 {
-                    index_chain->offsets_.emplace_back(
-                        kv_cache, cache_offset[target_bucket]);
-                    cache_offset[target_bucket]++;
-                }
-                else if (kv_tuple->KeyObj() == memory_tuple->KeyObj())
-                {
-                    cache_offset[target_bucket]++;
-                    break;
-                }
-                else
-                {
-                    break;
+                    const TemplateScanTuple<KeyT, ValueT> *kv_tuple =
+                        kv_cache->At(cache_offset[target_bucket]);
+                    if (kv_tuple->KeyObj() < memory_tuple->KeyObj())
+                    {
+                        index_chain->offsets_.emplace_back(
+                            kv_cache, cache_offset[target_bucket]);
+                        cache_offset[target_bucket]++;
+                    }
+                    else if (kv_tuple->KeyObj() == memory_tuple->KeyObj())
+                    {
+                        cache_offset[target_bucket]++;
+                        break;
+                    }
+                    else
+                    {
+                        break;
+                    }
                 }
             }
 
-            index_chain->offsets_.emplace_back(&shard_cache->memory_cache_,
+            index_chain->offsets_.emplace_back(shard_cache->memory_cache_.get(),
                                                memory_cache_offset);
             memory_cache_offset++;
         }
@@ -1042,11 +1125,14 @@ public:
         for (auto &[bucket_id, offset] : cache_offset)
         {
             TemplateScanCache<KeyT, ValueT> *kv_cache =
-                shard_cache->GetKvCache(bucket_id, this, key_schema_);
-            while (offset < kv_cache->Size())
+                shard_cache->GetKvCache(bucket_id);
+            if (kv_cache)
             {
-                index_chain->offsets_.emplace_back(kv_cache, offset);
-                offset++;
+                while (offset < kv_cache->Size())
+                {
+                    index_chain->offsets_.emplace_back(kv_cache, offset);
+                    offset++;
+                }
             }
         }
 
