@@ -1641,11 +1641,15 @@ store::DataStoreHandler::DataStoreOpStatus CcShard::FetchBucketData(
         requests.push_back(fetch_bucket_data_cc);
     }
 
+    /*
     auto stop_time = std::chrono::high_resolution_clock::now();
     LOG(INFO) << "== FetchBucketData: prepare time = "
               << std::chrono::duration_cast<std::chrono::microseconds>(
                      stop_time - start_time)
-                     .count();
+                     .count()
+              << ", core id = " << core_id_;
+
+    */
 
     if (!requests.empty())
     {
