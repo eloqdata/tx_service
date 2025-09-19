@@ -61,7 +61,7 @@ CcShard::CcShard(
     bool realtime_sampling,
     uint32_t ng_id,
     LocalCcShards &local_shards,
-    CatalogFactory *catalog_factory[6],
+    CatalogFactory *catalog_factory[5],
     SystemHandler *system_handler,
     std::unordered_map<uint32_t, std::vector<NodeConfig>> *ng_configs,
     uint64_t cluster_config_version,
@@ -94,8 +94,7 @@ CcShard::CcShard(
                        catalog_factory[1],
                        catalog_factory[2],
                        catalog_factory[3],
-                       catalog_factory[4],
-                       catalog_factory[5]},
+                       catalog_factory[4]},
       system_handler_(system_handler),
       active_si_txs_()
 {

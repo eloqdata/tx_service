@@ -66,8 +66,10 @@ public:
             return TableEngine::EloqDoc;
         case txservice::TableEngine::EloqKv:
             return TableEngine::EloqKv;
-        case txservice::TableEngine::Sequence:
-            return TableEngine::Sequence;
+        case txservice::TableEngine::InternalRange:
+            return TableEngine::InternalRange;
+        case txservice::TableEngine::InternalHash:
+            return TableEngine::InternalHash;
         default:
             assert(false);
             return TableEngine::None;
@@ -113,8 +115,10 @@ public:
             return txservice::TableEngine::EloqKv;
         case TableEngine::EloqDoc:
             return txservice::TableEngine::EloqDoc;
-        case TableEngine::Sequence:
-            return txservice::TableEngine::Sequence;
+        case TableEngine::InternalRange:
+            return txservice::TableEngine::InternalRange;
+        case TableEngine::InternalHash:
+            return txservice::TableEngine::InternalHash;
         default:
             assert(false);
             return txservice::TableEngine::None;

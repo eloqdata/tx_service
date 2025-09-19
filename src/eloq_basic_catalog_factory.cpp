@@ -88,12 +88,6 @@ TableSchema::uptr EloqHashCatalogFactory::CreateTableSchema(
     const std::string &catalog_image,
     uint64_t version)
 {
-    if (table_name == txservice::Sequences::table_name_)
-    {
-        DLOG(INFO) << "===create sequence table schema";
-        return std::make_unique<txservice::SequenceTableSchema>(
-            table_name, catalog_image, version);
-    }
     return std::make_unique<EloqBasicTableSchema>(
         table_name, catalog_image, version);
 }
@@ -183,12 +177,12 @@ std::unique_ptr<Statistics> EloqHashCatalogFactory::CreateTableStatistics(
     return nullptr;
 }
 
-TxKey EloqHashCatalogFactory::NegativeInfKey()
+TxKey EloqHashCatalogFactory::NegativeInfKey() const
 {
     return TxKey(EloqStringKey::NegativeInfinity());
 }
 
-TxKey EloqHashCatalogFactory::PositiveInfKey()
+TxKey EloqHashCatalogFactory::PositiveInfKey() const
 {
     return TxKey(EloqStringKey::PositiveInfinity());
 }
@@ -200,17 +194,31 @@ size_t EloqHashCatalogFactory::KeyHash(const char *buf,
     return EloqStringKey::HashFromSerializedKey(buf, offset);
 }
 
+txservice::TxKey EloqHashCatalogFactory::CreateTxKey() const
+{
+    return txservice::TxKey(std::make_unique<EloqStringKey>());
+}
+txservice::TxKey EloqHashCatalogFactory::CreateTxKey(const char *data,
+                                                     size_t size) const
+{
+    return txservice::TxKey(std::make_unique<EloqStringKey>(
+        reinterpret_cast<const char *>(data), size));
+}
+const txservice::TxKey *EloqHashCatalogFactory::PackedNegativeInfinity() const
+{
+    return EloqStringKey::PackedNegativeInfinityTxKey();
+}
+std::unique_ptr<txservice::TxRecord> EloqHashCatalogFactory::CreateTxRecord()
+    const
+{
+    return EloqStringRecord::Create();
+}
+
 TableSchema::uptr EloqRangeCatalogFactory::CreateTableSchema(
     const TableName &table_name,
     const std::string &catalog_image,
     uint64_t version)
 {
-    if (table_name == txservice::Sequences::table_name_)
-    {
-        DLOG(INFO) << "===create sequence table schema";
-        return std::make_unique<txservice::SequenceTableSchema>(
-            table_name, catalog_image, version);
-    }
     return std::make_unique<EloqBasicTableSchema>(
         table_name, catalog_image, version);
 }
@@ -348,12 +356,12 @@ std::unique_ptr<TableRangeEntry> EloqRangeCatalogFactory::CreateTableRange(
         start, version_ts, partition_id, std::move(typed_range));
 }
 
-TxKey EloqRangeCatalogFactory::NegativeInfKey()
+TxKey EloqRangeCatalogFactory::NegativeInfKey() const
 {
     return TxKey(EloqStringKey::NegativeInfinity());
 }
 
-TxKey EloqRangeCatalogFactory::PositiveInfKey()
+TxKey EloqRangeCatalogFactory::PositiveInfKey() const
 {
     return TxKey(EloqStringKey::PositiveInfinity());
 }
@@ -363,6 +371,26 @@ size_t EloqRangeCatalogFactory::KeyHash(const char *buf,
                                         const KeySchema *key_schema) const
 {
     return EloqStringKey::HashFromSerializedKey(buf, offset);
+}
+
+txservice::TxKey EloqRangeCatalogFactory::CreateTxKey() const
+{
+    return txservice::TxKey(std::make_unique<EloqStringKey>());
+}
+txservice::TxKey EloqRangeCatalogFactory::CreateTxKey(const char *data,
+                                                      size_t size) const
+{
+    return txservice::TxKey(std::make_unique<EloqStringKey>(
+        reinterpret_cast<const char *>(data), size));
+}
+const txservice::TxKey *EloqRangeCatalogFactory::PackedNegativeInfinity() const
+{
+    return EloqStringKey::PackedNegativeInfinityTxKey();
+}
+std::unique_ptr<txservice::TxRecord> EloqRangeCatalogFactory::CreateTxRecord()
+    const
+{
+    return EloqStringRecord::Create();
 }
 
 }  // namespace txservice

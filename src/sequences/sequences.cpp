@@ -22,6 +22,7 @@
 
 #include "sequences/sequences.h"
 
+#include "eloq_string_key_record.h"
 #include "tx_util.h"
 
 namespace txservice
@@ -233,19 +234,14 @@ int64_t Sequences::ApplyIdOfAutoIncrColumn(
 // This method used to generate TxKey.
 TxKey Sequences::GenKey(const std::string &seq_name)
 {
-    // TODO(lzx): use independent key-record type after support to run
-    // mutli engines in one process.
-    txservice::TxKey tx_key =
-        txservice::TxKeyFactory::CreateTxKey(seq_name.data(), seq_name.size());
-    return tx_key;
+    assert(sequence_table_name.Engine() == TableEngine::InternalHash);
+    return txservice::TxKey(std::make_unique<EloqStringKey>(
+        reinterpret_cast<const char *>(seq_name.data()), seq_name.size()));
 }
 
 std::unique_ptr<TxRecord> Sequences::GenRecord()
 {
-    // TODO(lzx): use independent key-record type after support to run
-    // mutli engines in one process.
-    std::unique_ptr<TxRecord> tx_record = TxRecordFactory::CreateTxRecord();
-    return tx_record;
+    return EloqStringRecord::Create();
 }
 
 int Sequences::ApplySequenceBatch(
@@ -915,29 +911,6 @@ void Sequences::DecodeSeqRecord(std::string_view encoded_data,
 
     curr_val = *(reinterpret_cast<const int64_t *>(buf));
     buf += sizeof(int64_t);
-}
-
-//------------------------------
-
-SequenceTableSchema::SequenceTableSchema(
-    const txservice::TableName &sequence_table_name,
-    const std::string &catalog_image,
-    uint64_t version)
-    : sequence_table_name_(sequence_table_name),
-      schema_image_(catalog_image),
-      version_(version)
-{
-    // catalog_image only store kv_table_name.
-
-    kv_info_ = std::make_unique<txservice::KVCatalogInfo>();
-    // Catalog image only stores kv_table_name for now.
-    const std::string &kv_table_name = catalog_image;
-    // Use table version as key schema version.
-    uint64_t key_schema_ts = version;
-
-    kv_info_->kv_table_name_ = kv_table_name;
-    key_schema_ = std::make_unique<SequenceKeySchema>(key_schema_ts);
-    record_schema_ = std::make_unique<SequenceRecordSchema>();
 }
 
 }  // namespace txservice
