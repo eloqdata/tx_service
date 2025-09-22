@@ -2874,11 +2874,7 @@ public:
             auto [blocking_type, scan_type] =
                 req.BlockingPair(shard_->core_id_);
 
-            if (blocking_type == ScanBlockingType::BlockOnFuture)
-            {
-                prior_cce->GetKeyLock()->ReleaseReadLock(req.Txn(), shard_);
-            }
-            else if (blocking_type == ScanBlockingType::NoBlocking)
+            if (blocking_type == ScanBlockingType::NoBlocking)
             {
                 // Release read intent lock
                 ReleaseCceLock(
@@ -2886,6 +2882,11 @@ public:
             }
             else
             {
+                if (blocking_type == ScanBlockingType::BlockOnFuture)
+                {
+                    prior_cce->GetKeyLock()->ReleaseReadLock(req.Txn(), shard_);
+                }
+
                 // Lock has been acquired, UpsertLockHoldingTx
                 auto lock_pair =
                     LockHandleForResumedRequest(prior_cce,
@@ -3115,38 +3116,43 @@ public:
         }
         else
         {
-            uint64_t end_it_lock_addr = 0;
-            if (end_it != End())
+            if (!typed_cache->Full())
             {
-                acquire_read_intent(end_it->second, end_it.GetPage());
-                end_it_lock_addr =
-                    reinterpret_cast<uint64_t>(end_it->second->GetLockAddr());
+                uint64_t end_it_lock_addr = 0;
+                if (end_it != End())
+                {
+                    acquire_read_intent(end_it->second, end_it.GetPage());
+                    end_it_lock_addr = reinterpret_cast<uint64_t>(
+                        end_it->second->GetLockAddr());
+                }
+
+                acquire_read_intent(scan_ccm_it->second, scan_ccm_it.GetPage());
+
+                req.SetBlockingInfo(shard_->core_id_,
+                                    reinterpret_cast<uint64_t>(
+                                        scan_ccm_it->second->GetLockAddr()),
+                                    end_it_lock_addr,
+                                    ScanType::ScanBoth,
+                                    ScanBlockingType::NoBlocking);
+
+                shard_->Enqueue(&req);
+
+                /*
+                auto stop_time = std::chrono::high_resolution_clock::now();
+                int64_t time =
+                    std::chrono::duration_cast<std::chrono::microseconds>(
+                        stop_time - start_time)
+                        .count();
+
+                LOG(INFO) << "== yield ccm scan time = " << time
+                          << " us, loop cnt = " << debug_loop_cnt
+                          << ", add cache cnt = " << add_cache_cnt
+                          << ", core id = " << shard_->core_id_;
+                */
+                return false;
             }
 
-            acquire_read_intent(scan_ccm_it->second, scan_ccm_it.GetPage());
-
-            req.SetBlockingInfo(
-                shard_->core_id_,
-                reinterpret_cast<uint64_t>(scan_ccm_it->second->GetLockAddr()),
-                end_it_lock_addr,
-                ScanType::ScanBoth,
-                ScanBlockingType::NoBlocking);
-
-            shard_->Enqueue(&req);
-
-            /*
-            auto stop_time = std::chrono::high_resolution_clock::now();
-            int64_t time =
-                std::chrono::duration_cast<std::chrono::microseconds>(
-                    stop_time - start_time)
-                    .count();
-
-            LOG(INFO) << "== yield ccm scan time = " << time
-                      << " us, loop cnt = " << debug_loop_cnt
-                      << ", add cache cnt = " << add_cache_cnt
-                      << ", core id = " << shard_->core_id_;
-            */
-            return false;
+            return req.SetFinish(shard_->core_id_);
         }
     }
 
