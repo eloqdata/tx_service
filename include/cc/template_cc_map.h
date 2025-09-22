@@ -2954,8 +2954,12 @@ public:
                 }
             }
 
-            LOG(INFO) << "== START: core id = " << shard_->core_id_
-                      << ", cache size = " << typed_cache->Size();
+            assert(typed_cache->Size() == 0);
+            if (typed_cache->Size() != 0)
+            {
+                LOG(INFO) << "== START: core id = " << shard_->core_id_
+                          << ", cache size = " << typed_cache->Size();
+            }
 
             // typed_cache->Reset();
         }
@@ -2966,12 +2970,6 @@ public:
 
         if (direction == ScanDirection::Forward)
         {
-            if (typed_cache->Full() && typed_cache->Size() != 1024)
-            {
-                LOG(INFO) << "== Full: core id = " << shard_->core_id_
-                          << ", cache size = " << typed_cache->Size();
-            }
-
             // ++scan_ccm_it;
             size_t scan_cnt = 0;
             for (; scan_ccm_it != end_it && !typed_cache->Full() &&
