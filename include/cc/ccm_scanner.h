@@ -140,8 +140,11 @@ public:
 
     bool Full() const
     {
-        LOG(INFO) << "== Full: size_ = " << size_
-                  << ", scan batch size = " << scan_batch_size_;
+        if (size_ > 1024)
+        {
+            LOG(INFO) << "== Full: size_ = " << size_
+                      << ", scan batch size = " << scan_batch_size_;
+        }
         return size_ == scan_batch_size_;
     }
 
