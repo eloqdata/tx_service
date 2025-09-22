@@ -222,7 +222,7 @@ public:
                           uint32_t shard_code,
                           CcRequestBase *req)
     {
-        uint32_t residual = shard_code & 0x3FF;
+        uint32_t residual = Sharder::MapKeyHashToHashPartitionId(shard_code);
         size_t core_idx = residual % cc_shards_.size();
 
         cc_shards_[core_idx]->Enqueue(thd_id, req);
@@ -230,7 +230,8 @@ public:
 
     void EnqueueCcRequest(uint32_t shard_code, CcRequestBase *req)
     {
-        size_t core_idx = (shard_code & 0x3FF) % cc_shards_.size();
+        size_t core_idx = Sharder::MapKeyHashToHashPartitionId(shard_code) %
+                          cc_shards_.size();
         cc_shards_.at(core_idx)->Enqueue(req);
     }
 
@@ -2087,6 +2088,9 @@ private:
      * DataSync Operation Interface
      */
     WorkerThreadContext data_sync_worker_ctx_;
+    std::vector<bool> data_sync_done_;
+    std::atomic<size_t> scan_concurrency_{1};
+    size_t last_data_sync_worker_idx_{0};
 
     std::vector<std::deque<std::shared_ptr<DataSyncTask>>>
         data_sync_task_queue_;
