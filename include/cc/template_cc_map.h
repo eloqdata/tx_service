@@ -2966,7 +2966,7 @@ public:
 
         if (direction == ScanDirection::Forward)
         {
-            if (typed_cache->Full())
+            if (typed_cache->Full() && typed_cache->Size() != 1024)
             {
                 LOG(INFO) << "== Full: core id = " << shard_->core_id_
                           << ", cache size = " << typed_cache->Size();
