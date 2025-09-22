@@ -5298,6 +5298,25 @@ ObjectCommandOp::ObjectCommandOp(
     TX_TRACE_ASSOCIATE(this, &hd_result_);
 }
 
+void ObjectCommandOp::Reset()
+{
+    table_name_ = nullptr;
+    key_ = nullptr;
+    command_ = nullptr;
+    hd_result_.Reset();
+    hd_result_.Value().Reset();
+    auto_commit_ = false;
+    always_redirect_ = false;
+    if (lock_bucket_result_)
+    {
+        lock_bucket_result_->Value().Reset();
+        lock_bucket_result_->Reset();
+    }
+    forward_key_shard_ = UINT32_MAX;
+    catalog_read_success_ = false;
+    is_running_ = false;
+}
+
 void ObjectCommandOp::Reset(const TableName *table_name,
                             const TxKey *key,
                             TxCommand *command,
@@ -5315,6 +5334,7 @@ void ObjectCommandOp::Reset(const TableName *table_name,
     lock_bucket_result_->Reset();
     forward_key_shard_ = UINT32_MAX;
     catalog_read_success_ = false;
+    is_running_ = false;
 }
 
 void ObjectCommandOp::Forward(TransactionExecution *txm)
@@ -5454,6 +5474,43 @@ bool MultiObjectCommandOp::IsBlockCommand()
     return is_block_command_;
 }
 
+void MultiObjectCommandOp::Reset()
+{
+    tx_req_ = nullptr;
+    // Reset existing handler results without clearing vectors (keep capacity)
+    for (auto &hr : vct_hd_result_)
+    {
+        hr.Reset();
+        hr.Value().Reset();
+    }
+
+    // Reset abort results as well (do not clear)
+    for (auto &hr : vct_abort_hd_result_)
+    {
+        hr.Reset();
+        hr.Value().Reset();
+    }
+
+    // Keep vct_key_shard_code_ as-is; next Reset(&req) rebuilds it
+
+    // Reset counters and flags
+    atm_cnt_.store(0, std::memory_order_relaxed);
+    atm_block_cnt_.store(0, std::memory_order_relaxed);
+    atm_local_cnt_.store(0, std::memory_order_relaxed);
+    atm_err_code_.store(CcErrorCode::NO_ERROR, std::memory_order_relaxed);
+    is_block_command_ = false;
+
+    // Reset progress and state
+    bucket_lock_cur_ = 0;
+    if (lock_bucket_result_)
+    {
+        lock_bucket_result_->Value().Reset();
+        lock_bucket_result_->Reset();
+    }
+    catalog_read_success_ = false;
+    is_running_ = false;
+}
+
 void MultiObjectCommandOp::Reset(MultiObjectCommandTxRequest *req)
 {
     tx_req_ = req;
@@ -5555,6 +5612,7 @@ void MultiObjectCommandOp::Reset(MultiObjectCommandTxRequest *req)
     lock_bucket_result_->Reset();
     lock_bucket_result_->Value().Reset();
     catalog_read_success_ = false;
+    is_running_ = false;
 }
 
 void MultiObjectCommandOp::Forward(TransactionExecution *txm)
