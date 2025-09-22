@@ -2789,7 +2789,7 @@ public:
             req.BlockingCceLockAddr(shard_->core_id_);
         if (cce_lock_addr == 0)
         {
-            auto start_time = std::chrono::high_resolution_clock::now();
+            // auto start_time = std::chrono::high_resolution_clock::now();
             // first enter, send async request to kv store
             shard_->FetchBucketData(
                 &table_name_,
@@ -2805,6 +2805,7 @@ public:
                 ScanNextBatchCc::kv_bucket_batch_size,
                 &req,
                 &BackfillForScanNextBatch<KeyT, ValueT, VersionedRecord>);
+            /*
             auto stop_time = std::chrono::high_resolution_clock::now();
             int64_t time =
                 std::chrono::duration_cast<std::chrono::microseconds>(
@@ -2812,6 +2813,7 @@ public:
                     .count();
             LOG(INFO) << "== FetchBucket: time = " << time
                       << " us, core id = " << shard_->core_id_;
+            */
         }
 
         auto acquire_read_intent =
@@ -2830,7 +2832,7 @@ public:
             }
         };
 
-        auto start_time = std::chrono::high_resolution_clock::now();
+        // auto start_time = std::chrono::high_resolution_clock::now();
 
         if (cce_lock_addr != 0)
         {
@@ -3089,13 +3091,13 @@ public:
             req.GetBucketScanProgress()
                 ->at(shard_->core_id_)
                 .memory_scan_is_finished_ = true;
+
+            /*
             auto stop_time = std::chrono::high_resolution_clock::now();
             int64_t time =
                 std::chrono::duration_cast<std::chrono::microseconds>(
                     stop_time - start_time)
                     .count();
-
-            /*
             LOG(INFO) << "== ccm scan time = " << time
                       << " us, loop cnt = " << debug_loop_cnt
                       << ", add cache cnt = " << add_cache_cnt
@@ -3125,12 +3127,13 @@ public:
 
             shard_->Enqueue(&req);
 
+            /*
             auto stop_time = std::chrono::high_resolution_clock::now();
             int64_t time =
                 std::chrono::duration_cast<std::chrono::microseconds>(
                     stop_time - start_time)
                     .count();
-            /*
+
             LOG(INFO) << "== yield ccm scan time = " << time
                       << " us, loop cnt = " << debug_loop_cnt
                       << ", add cache cnt = " << add_cache_cnt
@@ -12280,8 +12283,8 @@ void BackfillForScanNextBatch(FetchBucketDataCc *fetch_cc,
     if (req->IsWaitForFetchBucket(shard.core_id_) &&
         req->WaitForFetchBucketCnt(shard.core_id_) == 0)
     {
-        LOG(INFO) << "== all bucket fetch finished, core id = "
-                  << shard.core_id_;
+        // LOG(INFO) << "== all bucket fetch finished, core id = "
+        //          << shard.core_id_;
         shard.Enqueue(requester);
     }
 }

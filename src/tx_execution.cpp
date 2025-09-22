@@ -2544,7 +2544,7 @@ void TransactionExecution::PostProcess(ScanOpenOperation &scan_open)
                 return;
             }
 
-            auto start = std::chrono::high_resolution_clock::now();
+            // auto start = std::chrono::high_resolution_clock::now();
 
             LocalCcShards *local_cc_shard =
                 Sharder::Instance().GetLocalCcShards();
@@ -2672,13 +2672,15 @@ void TransactionExecution::PostProcess(ScanOpenOperation &scan_open)
                         .push_back(std::move(current_plan_bucket_ids));
                 }
             }
-                */
+            */
 
+            /*
             auto stop_time = std::chrono::high_resolution_clock::now();
             LOG(INFO) << "== plan time = "
                       << std::chrono::duration_cast<std::chrono::microseconds>(
                              stop_time - start)
                              .count();
+            */
         }
 
         scans_.try_emplace(open_result.scan_alias_,
@@ -2751,17 +2753,20 @@ void TransactionExecution::Process(ScanNextOperation &scan_next)
             scan_next.scan_state_->current_plan_index_ !=
                 scan_next.tx_req_->bucket_scan_plan_->PlanIndex())
         {
-            auto start_time = std::chrono::high_resolution_clock::now();
+            // auto start_time = std::chrono::high_resolution_clock::now();
             scan_next.scan_state_->current_plan_index_ =
                 scan_next.tx_req_->bucket_scan_plan_->PlanIndex();
             scanner.Close();
             scanner.SetStatus(ScannerStatus::Blocked);
+
+            /*
             auto stop_time = std::chrono::high_resolution_clock::now();
             int64_t time =
                 std::chrono::duration_cast<std::chrono::microseconds>(
                     stop_time - start_time)
                     .count();
             LOG(INFO) << "== Close time = " << time;
+            */
         }
     }
 
