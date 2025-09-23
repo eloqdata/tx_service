@@ -4382,8 +4382,9 @@ void LocalCcShards::DataSyncForHashPartition(
             [min_partition_id_this_scan,
              max_partition_id_this_scan](const size_t hash_code)
         {
-            return (hash_code & 0x3FF) >= min_partition_id_this_scan &&
-                   (hash_code & 0x3FF) <= max_partition_id_this_scan;
+            int32_t part_id = Sharder::MapKeyHashToHashPartitionId(hash_code);
+            return part_id >= min_partition_id_this_scan &&
+                   part_id <= max_partition_id_this_scan;
         };
         HashPartitionDataSyncScanCc scan_cc(table_name,
                                             data_sync_task->data_sync_ts_,
@@ -4667,7 +4668,6 @@ void LocalCcShards::DataSyncForHashPartition(
                 TxKey key_raw = (*data_sync_vec)[key_idx].Key();
                 int32_t part_id =
                     Sharder::MapKeyHashToHashPartitionId(key_raw.Hash());
-                // int32_t part_id = (key_raw.Hash() >> 10) & 0x3FF;
                 mv_base_vec->emplace_back(std::move(key_raw), part_id);
             }
 
