@@ -1276,46 +1276,7 @@ void ReloadCacheOperation::Forward(TransactionExecution *txm)
     // start the state machine if not running.
     if (!is_running_)
     {
-        if (table_name_->IsHashPartitioned())
-        {
-            if (!lock_cluster_config_result_.IsFinished())
-            {
-                // The locking cluster config request has not finished. The scan
-                // open operation cannot proceed without locking the cluster
-                // config.
-                LOG(INFO) << "== lock cluster config not finished";
-                return;
-            }
-            else
-            {
-                const auto &cluster_config_rec =
-                    (*static_cast<const ClusterConfigRecord *>(
-                        lock_cluster_config_result_.Value().rec_));
-                if (!tx_req_->bucket_scan_save_point_->IsValidCursor(
-                        cluster_config_rec.Version()))
-                {
-                    LOG(INFO) << "== lock cluster config finished, mismatch";
-                    // the eloqkv client using the cursor id to resume the
-                    // scan. In this scenario, the cluster config may have
-                    // changed. This is a very rare case, we'll treat it here as
-                    // an iterator invalidation. eloqkv will return
-                    // RD_ERR_INVALID_CURSOR to client.
-                    hd_result_.SetError(CcErrorCode::INVALID_CURSOR);
-                    txm->PostProcess(*this);
-                    return;
-                }
-                else
-                {
-                    LOG(INFO)
-                        << "== lock cluster config finished, process scan open";
-                    txm->Process(*this);
-                }
-            }
-        }
-        else
-        {
-            txm->Process(*this);
-        }
+        txm->Process(*this);
 
         return;
     }
@@ -1402,9 +1363,51 @@ void ScanOpenOperation::Reset()
 void ScanOpenOperation::Forward(TransactionExecution *txm)
 {
     // start the state machine if not running.
+
     if (!is_running_)
     {
-        txm->Process(*this);
+        if (table_name_->IsHashPartitioned())
+        {
+            if (!lock_cluster_config_result_.IsFinished())
+            {
+                // The locking cluster config request has not finished. The scan
+                // open operation cannot proceed without locking the cluster
+                // config.
+                LOG(INFO) << "== lock cluster config not finished";
+                return;
+            }
+            else
+            {
+                const auto &cluster_config_rec =
+                    (*static_cast<const ClusterConfigRecord *>(
+                        lock_cluster_config_result_.Value().rec_));
+                if (!tx_req_->bucket_scan_save_point_->IsValidCursor(
+                        cluster_config_rec.Version()))
+                {
+                    LOG(INFO) << "== lock cluster config finished, mismatch";
+                    // the eloqkv client using the cursor id to resume the
+                    // scan. In this scenario, the cluster config may have
+                    // changed. This is a very rare case, we'll treat it here as
+                    // an iterator invalidation. eloqkv will return
+                    // RD_ERR_INVALID_CURSOR to client.
+                    hd_result_.SetError(CcErrorCode::INVALID_CURSOR);
+                    txm->PostProcess(*this);
+                    return;
+                }
+                else
+                {
+                    LOG(INFO)
+                        << "== lock cluster config finished, process scan open";
+                    txm->Process(*this);
+                }
+            }
+        }
+        else
+        {
+            txm->Process(*this);
+        }
+
+        return;
     }
 
     if (hd_result_.IsFinished())
