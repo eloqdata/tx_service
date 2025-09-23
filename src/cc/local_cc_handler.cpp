@@ -1222,6 +1222,7 @@ void txservice::LocalCcHandler::ScanNextBatch(
     const TxKey &end_key,
     bool end_inclusive,
     CcScanner &scanner,
+    const std::vector<DataStoreSearchCond> *pushdown_cond,
     CcHandlerResult<ScanNextResult> &hd_res,
     int32_t obj_type,
     const std::string_view &scan_pattern)
@@ -1267,6 +1268,7 @@ void txservice::LocalCcHandler::ScanNextBatch(
                    end_key,
                    end_inclusive,
                    plan,
+                   pushdown_cond,
                    tx_term,
                    &hd_res,
                    scanner.iso_level_,

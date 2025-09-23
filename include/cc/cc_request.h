@@ -1773,6 +1773,9 @@ struct ScanNextBatchCc
     : public TemplatedCcRequest<ScanNextBatchCc, ScanNextResult>
 {
 public:
+    static constexpr size_t KvBucketBatchSize = 16;
+    static constexpr size_t ScanBatchSize = 128;
+
     ScanNextBatchCc() = default;
 
     bool ValidTermCheck() override
@@ -1812,6 +1815,7 @@ public:
                const TxKey &end_key,
                bool end_key_inclusive,
                BucketScanPlan *bucket_scan_plan,
+               const std::vector<DataStoreSearchCond> *pushdown_cond,
                int64_t tx_term,
                CcHandlerResult<ScanNextResult> *next_res,
                IsolationLevel iso_level,
@@ -1853,6 +1857,8 @@ public:
             bucket_scan_plan->GetBucketScanProgress(node_group_id_);
         assert(bucket_scan_progress_ != nullptr);
 
+        pushdown_cond_ = pushdown_cond;
+
         // unfinished_core_cnt_ = bucket_ids_.size();
         unfinished_core_cnt_ = bucket_scan_progress_->size();
         assert(unfinished_core_cnt_ != 0);
@@ -1874,9 +1880,12 @@ public:
         return res_->Value().ccm_scanner_->Cache(shard_code);
     }
 
-    ScanCache *GetLocalKvCache(uint32_t shard_code, uint16_t bucket_id)
+    ScanCache *GetLocalKvCache(uint32_t shard_code,
+                               uint16_t bucket_id,
+                               size_t batch_size)
     {
-        return res_->Value().ccm_scanner_->KvCache(shard_code, bucket_id);
+        return res_->Value().ccm_scanner_->KvCache(
+            shard_code, bucket_id, batch_size);
     }
 
     void SetErrorCode(CcErrorCode err_code)
@@ -1971,10 +1980,11 @@ public:
         return ts_;
     }
 
-    uint64_t BlockingCceLockAddr(uint16_t core_id)
+    std::pair<uint64_t, uint64_t> BlockingCceLockAddr(uint16_t core_id)
     {
         assert(blocking_info_.count(core_id) > 0);
-        return blocking_info_[core_id].cce_lock_addr_;
+        ScanBlockingInfo &blocking_info = blocking_info_[core_id];
+        return {blocking_info.cce_lock_addr_, blocking_info.end_cce_lock_addr_};
     }
 
     std::pair<ScanBlockingType, ScanType> BlockingPair(uint16_t core_id)
@@ -1986,11 +1996,13 @@ public:
 
     void SetBlockingInfo(uint16_t core_id,
                          uint64_t cce_lock_addr,
+                         uint64_t end_cce_lock_addr,
                          ScanType scan_type,
                          ScanBlockingType blocking_type)
     {
         assert(blocking_info_.count(core_id) > 0);
-        blocking_info_[core_id] = {cce_lock_addr, scan_type, blocking_type};
+        blocking_info_[core_id] = {
+            cce_lock_addr, end_cce_lock_addr, scan_type, blocking_type};
     }
 
     int32_t GetRedisObjectType() const
@@ -2051,6 +2063,16 @@ public:
         return bucket_scan_progress_->at(core_id).pause_key_inclusive_;
     }
 
+    const TxKey &EndKey()
+    {
+        return end_key_;
+    }
+
+    bool EndKeyInclusive()
+    {
+        return end_key_inclusive_;
+    }
+
     bool ShardIsDrained(uint16_t core_id)
     {
         return bucket_scan_progress_->at(core_id).AllFinished();
@@ -2085,10 +2107,12 @@ private:
     bool end_key_inclusive_{false};
     absl::flat_hash_map<uint16_t, BucketScanProgress> *bucket_scan_progress_{
         nullptr};
+    const std::vector<DataStoreSearchCond> *pushdown_cond_;
 
     struct ScanBlockingInfo
     {
         uint64_t cce_lock_addr_;
+        uint64_t end_cce_lock_addr_;
         ScanType scan_type_;
         ScanBlockingType type_;
     };

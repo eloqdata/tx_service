@@ -25,8 +25,10 @@
 #include <atomic>
 #include <cstddef>
 #include <mutex>
+#include <string_view>
 #include <system_error>
 #include <unordered_map>
+#include <variant>
 #include <vector>
 
 #include "cc/cc_map.h"
@@ -894,17 +896,23 @@ void FetchRecordCc::SetFinish(int err)
     ccs_.Enqueue(this);
 }
 
-void FetchBucketDataCc::Reset(const TableName *table_name,
-                              const TableSchema *table_schema,
-                              NodeGroupId node_group_id,
-                              int64_t node_group_term,
-                              CcShard *ccs,
-                              uint16_t bucket_id,
-                              const TxKey *start_key,
-                              bool start_key_inclusive,
-                              size_t batch_size,
-                              CcRequestBase *requester,
-                              OnFetchedBucketData backfill_func)
+void FetchBucketDataCc::Reset(
+    const TableName *table_name,
+    const TableSchema *table_schema,
+    NodeGroupId node_group_id,
+    int64_t node_group_term,
+    CcShard *ccs,
+    uint16_t bucket_id,
+    const std::vector<DataStoreSearchCond> *pushdown_cond,
+    std::string_view start_key,
+    KeyType start_key_type,
+    bool start_key_inclusive,
+    std::string_view end_key,
+    KeyType end_key_type,
+    bool end_key_inclusive,
+    size_t batch_size,
+    CcRequestBase *requester,
+    OnFetchedBucketData backfill_func)
 {
     table_name_ = TableName(
         table_name->StringView(), table_name->Type(), table_name->Engine());
@@ -914,8 +922,16 @@ void FetchBucketDataCc::Reset(const TableName *table_name,
     node_group_term_ = node_group_term;
     ccs_ = ccs;
     bucket_id_ = bucket_id;
+    pushdown_cond_ = pushdown_cond;
     start_key_ = start_key;
+    start_key_type_ = start_key_type;
     start_key_inclusive_ = start_key_inclusive;
+    end_key_ = end_key;
+    end_key_type_ = end_key_type;
+    end_key_inclusive_ = end_key_inclusive;
+    assert(std::holds_alternative<std::string_view>(start_key_));
+    assert(std::holds_alternative<std::string_view>(end_key_));
+
     batch_size_ = batch_size;
     requester_ = requester;
     err_code_ = 0;
@@ -923,6 +939,9 @@ void FetchBucketDataCc::Reset(const TableName *table_name,
     bucket_data_items_.clear();
     is_drained_ = false;
     backfill_func_ = backfill_func;
+
+    kv_start_key_.clear();
+    kv_end_key_.clear();
 }
 
 bool FetchBucketDataCc::ValidTermCheck()

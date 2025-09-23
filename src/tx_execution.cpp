@@ -2476,7 +2476,6 @@ void TransactionExecution::PostProcess(ScanOpenOperation &scan_open)
     auto table_iter = rw_set_.WriteSet().find(table_name);
     if (table_iter != rw_set_.WriteSet().end())
     {
-        // TODO(lokax): create write iter for each bucket
         if (scan_open.direction_ == ScanDirection::Forward)
         {
             auto wset_it = rw_set_.InitIter(table_iter->second.second,
@@ -2566,48 +2565,57 @@ void TransactionExecution::PostProcess(ScanOpenOperation &scan_open)
                                 std::unordered_map<uint16_t, std::size_t>>
                 batch_idx;
 
-            bool finished = false;
-            while (!finished)
+            size_t plan_bucket_cnt_soft_limit = 256;
+            size_t total_bucket_cnt = Sharder::Instance().ToTalRangeBuckets();
+
+            absl::flat_hash_map<NodeGroupId, std::vector<uint16_t>>
+                current_plan_bucket_ids;
+            size_t current_plan_bucket_cnt = 0;
+            size_t seen_bucket_cnt = 0;
+
+            while (seen_bucket_cnt < total_bucket_cnt)
             {
-                finished = true;
-                absl::flat_hash_map<NodeGroupId, std::vector<uint16_t>>
-                    current_plan_bucket_ids;
-
-                for (auto &[ng, core_map] : grouped)
+                for (const auto &[ng, core_map] : grouped)
                 {
-                    for (auto &[ci, vec] : core_map)
+                    for (const auto &[core_id, vec] : core_map)
                     {
-                        std::size_t &cur = batch_idx[ng][ci];
-                        if (cur >= vec.size())
+                        size_t &idx = batch_idx[ng][core_id];
+                        if (idx < vec.size())
                         {
-                            continue;
+                            current_plan_bucket_ids[ng].push_back(vec[idx++]);
+                            seen_bucket_cnt++;
+                            current_plan_bucket_cnt++;
                         }
-
-                        finished = false;
-
-                        // 10 buckets each core
-                        std::size_t end =
-                            std::min(cur + ScanState::max_bucket_count_per_core,
-                                     vec.size());
-                        auto &dst = current_plan_bucket_ids[ng];
-                        for (size_t i = cur; i < end; ++i)
-                        {
-                            dst.push_back(vec[i]);
-                        }
-                        cur = end;
                     }
                 }
 
-                if (!finished)
+                if (current_plan_bucket_cnt >= plan_bucket_cnt_soft_limit)
                 {
                     scan_open.tx_req_->bucket_scan_save_point_->bucket_groups_
                         .push_back(std::move(current_plan_bucket_ids));
+                    current_plan_bucket_ids.clear();
+                    current_plan_bucket_cnt = 0;
                 }
+            }
+
+            if (current_plan_bucket_cnt > 0)
+            {
+                scan_open.tx_req_->bucket_scan_save_point_->bucket_groups_
+                    .push_back(std::move(current_plan_bucket_ids));
+                current_plan_bucket_ids.clear();
+                current_plan_bucket_cnt = 0;
             }
         }
 
+        auto search_cond =
+            Sharder::Instance()
+                .GetDataStoreHandler()
+                ->CreateDataSerachCondition(scan_open.tx_req_->obj_type_,
+                                            scan_open.tx_req_->scan_pattern_);
+
         scans_.try_emplace(open_result.scan_alias_,
                            std::move(open_result.scanner_),
+                           std::move(search_cond),
                            scan_open.tx_req_->StartKey(),
                            scan_open.tx_req_->start_inclusive_,
                            scan_open.tx_req_->EndKey(),
@@ -2666,7 +2674,6 @@ void TransactionExecution::Process(ScanNextOperation &scan_next)
         scan_next.is_running_ = true;
     }
 
-    // TODO(lokax): to_scan_next
     bool to_scan_next = scanner.Current() == nullptr &&
                         scanner.Status() == ScannerStatus::Blocked;
 
@@ -2722,6 +2729,7 @@ void TransactionExecution::Process(ScanNextOperation &scan_next)
                     *scan_next.scan_state_->scan_end_key_,
                     scan_next.scan_state_->scan_end_inclusive_,
                     scanner,
+                    &scan_next.scan_state_->pushdown_condition_,
                     scan_next.hd_result_,
                     scan_next.tx_req_->obj_type_,
                     scan_next.tx_req_->scan_pattern_);
@@ -3045,7 +3053,6 @@ void TransactionExecution::PostProcess(ScanNextOperation &scan_next)
                     cc_scan_tuple->rec_status_ == RecordStatus::Normal
                         ? cc_scan_tuple->Record()
                         : nullptr;
-
                 scan_batch.emplace_back(cc_scan_tuple->Key(),
                                         const_cast<TxRecord *>(rec),
                                         cc_scan_tuple->rec_status_,
@@ -5799,7 +5806,6 @@ void TransactionExecution::DrainScanner(CcScanner *scanner,
                                         const TableName &table_name)
 {
     assert(scanner != nullptr);
-    // TODO(lokax):
     // drain out the scan tuple in the scan cache
     // scanner->SetDrainCacheMode(true);
     const ScanTuple *cc_scan_tuple = scanner->Current();

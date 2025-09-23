@@ -4383,8 +4383,8 @@ void LocalCcShards::DataSyncForHashPartition(
              max_partition_id_this_scan](const size_t hash_code)
         {
             int32_t part_id = Sharder::MapKeyHashToHashPartitionId(hash_code);
-            return part_id >= min_partition_id_this_scan &&
-                   part_id <= max_partition_id_this_scan;
+            return static_cast<size_t>(part_id) >= min_partition_id_this_scan &&
+                   static_cast<size_t>(part_id) <= max_partition_id_this_scan;
         };
         HashPartitionDataSyncScanCc scan_cc(table_name,
                                             data_sync_task->data_sync_ts_,

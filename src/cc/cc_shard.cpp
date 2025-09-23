@@ -1600,8 +1600,13 @@ store::DataStoreHandler::DataStoreOpStatus CcShard::FetchBucketData(
     int64_t node_group_term,
     CcShard *ccs,
     absl::flat_hash_map<uint16_t, bool> &bucket_ids,
-    const TxKey &start_key,
+    const std::vector<DataStoreSearchCond> *pushdown_cond_,
+    std::string_view start_key,
+    KeyType start_key_type,
     bool start_key_inclusive,
+    std::string_view end_key,
+    KeyType end_key_type,
+    bool end_key_inclusive,
     size_t batch_size,
     CcRequestBase *requester,
     OnFetchedBucketData backfill_func)
@@ -1627,8 +1632,13 @@ store::DataStoreHandler::DataStoreOpStatus CcShard::FetchBucketData(
                                     node_group_term,
                                     ccs,
                                     bucket,
-                                    &start_key,
+                                    pushdown_cond_,
+                                    start_key,
+                                    start_key_type,
                                     start_key_inclusive,
+                                    end_key,
+                                    end_key_type,
+                                    end_key_inclusive,
                                     batch_size,
                                     requester,
                                     backfill_func);
@@ -1643,6 +1653,15 @@ store::DataStoreHandler::DataStoreOpStatus CcShard::FetchBucketData(
     }
 
     return store::DataStoreHandler::DataStoreOpStatus::Success;
+}
+
+store::DataStoreHandler::DataStoreOpStatus CcShard::FetchBucketData(
+    FetchBucketDataCc *fetch_bucket_data_cc)
+{
+    auto err_code =
+        local_shards_.store_hd_->FetchBucketData(fetch_bucket_data_cc);
+    assert(err_code == store::DataStoreHandler::DataStoreOpStatus::Success);
+    return err_code;
 }
 
 void CcShard::RemoveFetchRecordRequest(LruEntry *cce)
@@ -1807,7 +1826,7 @@ const CatalogEntry *CcShard::InitCcm(const TableName &table_name,
             return nullptr;
         }
 #endif
-        // TODO(lokax):
+
         std::vector<TableName> index_names = curr_schema->IndexNames();
         bool ccm_has_full_entries = txservice_skip_kv;
         CreateOrUpdatePkCcMap(

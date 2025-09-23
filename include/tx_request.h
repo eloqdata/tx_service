@@ -444,8 +444,7 @@ struct BucketScanSavePoint
             }
         }
 
-        LOG(INFO) << "==yf: cluster config version = "
-                  << cluster_config_version_
+        LOG(INFO) << "==: cluster config version = " << cluster_config_version_
                   << ", prev pause index = " << prev_pause_idx_
                   << ", group size = " << bucket_groups_.size()
                   << ", position size = " << pause_position_.size()
