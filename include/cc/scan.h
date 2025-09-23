@@ -155,6 +155,7 @@ public:
 
     void SetRecord(std::unique_ptr<ValueT> rec_obj)
     {
+        rec_ptr_ = nullptr;
         is_ptr_ = false;
         rec_obj_ = std::move(rec_obj);
     }
