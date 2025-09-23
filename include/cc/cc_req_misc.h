@@ -33,8 +33,10 @@
 #include <mutex>
 #include <optional>
 #include <string>
+#include <string_view>
 #include <unordered_map>
 #include <utility>
+#include <variant>
 #include <vector>
 
 #include "catalog_factory.h"  //TableSchema
@@ -615,9 +617,12 @@ public:
                int64_t node_group_term,
                CcShard *ccs,
                uint16_t bucket_id,
-               const TxKey *start_key,
+               const std::vector<DataStoreSearchCond> *pushdown_cond,
+               std::string_view start_key,
+               KeyType start_key_type,
                bool start_key_inclusive,
-               const TxKey *end_key,
+               std::string_view end_key,
+               KeyType end_key_type,
                bool end_key_inclusive,
                size_t batch_size,
                CcRequestBase *requester,
@@ -634,6 +639,32 @@ public:
                      uint64_t version,
                      bool is_deleted);
 
+    std::string_view StartKey()
+    {
+        if (std::holds_alternative<std::string>(start_key_))
+        {
+            return std::string_view(std::get<0>(start_key_).data(),
+                                    std::get<0>(start_key_).size());
+        }
+        else
+        {
+            return std::get<1>(start_key_);
+        }
+    }
+
+    std::string_view EndKey()
+    {
+        if (std::holds_alternative<std::string>(end_key_))
+        {
+            return std::string_view(std::get<0>(end_key_).data(),
+                                    std::get<0>(end_key_).size());
+        }
+        else
+        {
+            return std::get<1>(end_key_);
+        }
+    }
+
     // table_name is a string view, cannot access it outside TxProcessor.
     TableName table_name_{
         std::string(""), TableType::Primary, TableEngine::None};
@@ -642,9 +673,12 @@ public:
     int64_t node_group_term_;
     CcShard *ccs_;
     uint16_t bucket_id_;
-    const TxKey *start_key_{nullptr};
+    const std::vector<DataStoreSearchCond> *pushdown_cond_{nullptr};
+    std::variant<std::string, std::string_view> start_key_;
+    KeyType start_key_type_{KeyType::NegativeInf};
     bool start_key_inclusive_{false};
-    const TxKey *end_key_{nullptr};
+    std::variant<std::string, std::string_view> end_key_;
+    KeyType end_key_type_{KeyType::PositiveInf};
     bool end_key_inclusive_{false};
     size_t batch_size_{0};
     CcRequestBase *requester_{nullptr};

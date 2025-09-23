@@ -968,6 +968,7 @@ public:
 
         const KeyT *min_key = nullptr;
 
+        assert(memory_is_drained || shard_cache->memory_cache_->Size() > 0);
         if (!memory_is_drained && shard_cache->memory_cache_->Size() > 0)
         {
             const TemplateScanTuple<KeyT, ValueT> *tuple =
@@ -977,6 +978,7 @@ public:
 
         for (auto &[bucket_id, kv_cache] : shard_cache->kv_caches_)
         {
+            assert(kv_is_drained.at(bucket_id) || kv_cache->Size() > 0);
             if (!kv_is_drained.at(bucket_id) && kv_cache->Size() > 0)
             {
                 const TemplateScanTuple<KeyT, ValueT> *tuple = kv_cache->Last();

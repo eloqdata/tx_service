@@ -34,6 +34,7 @@
 #include <memory>
 #include <optional>
 #include <string>
+#include <variant>
 #include <vector>
 
 #include "cc_entry.h"
@@ -2798,9 +2799,12 @@ public:
                 ng_term,
                 shard_,
                 bucket_ids,
-                start_key,
+                req.pushdown_cond_,
+                std::string_view(start_key.Data(), start_key.Size()),
+                start_key.Type(),
                 req.StartKeyInlcuisve(shard_->core_id_),
-                req.EndKey(),
+                std::string_view(req.EndKey().Data(), req.EndKey().Size()),
+                req.EndKey().Type(),
                 req.EndKeyInclusive(),
                 ScanNextBatchCc::kv_bucket_batch_size,
                 &req,
@@ -12240,6 +12244,9 @@ void BackfillForScanNextBatch(FetchBucketDataCc *fetch_cc,
     uint16_t bucket_id = fetch_cc->bucket_id_;
     CcShard &shard = *fetch_cc->ccs_;
 
+    int32_t obj_type = req->GetRedisObjectType();
+    const auto &pattern = req->GetRedisScanPattern();
+
     uint32_t shard_code = (req->NodeGroupId() << 10) + shard.core_id_;
     TemplateScanCache<KeyT, ValueT> *scan_cache =
         static_cast<TemplateScanCache<KeyT, ValueT> *>(
@@ -12248,9 +12255,29 @@ void BackfillForScanNextBatch(FetchBucketDataCc *fetch_cc,
 
     // Reset kv cache
     scan_cache->Reset();
+    assert(scan_cache->Size() == 0);
 
     for (auto &item : fetch_cc->bucket_data_items_)
     {
+        if constexpr (!VersionedRecord)
+        {
+            if (!KeyT::IsMatch(
+                    item.key_str_.data(), item.key_str_.size(), pattern))
+            {
+                continue;
+            }
+
+            if (obj_type >= 0)
+            {
+                int8_t store_rec_obj_type =
+                    static_cast<int8_t>(*item.rec_str_.data());
+                if (static_cast<int32_t>(store_rec_obj_type) != obj_type)
+                {
+                    continue;
+                }
+            }
+        }
+
         TemplateScanTuple<KeyT, ValueT> *scan_tuple =
             scan_cache->AddScanTuple();
         scan_tuple->key_ts_ = item.version_ts_;
@@ -12290,6 +12317,25 @@ void BackfillForScanNextBatch(FetchBucketDataCc *fetch_cc,
         req->GetBucketScanProgress()
             ->at(shard.core_id_)
             .scan_buckets_[bucket_id] = true;
+    }
+    else if (scan_cache->Size() == 0)
+    {
+        assert(!fetch_cc->is_drained_);
+        assert(!fetch_cc->bucket_data_items_.empty());
+        fetch_cc->kv_start_key_.clear();
+        fetch_cc->kv_end_key_.clear();
+
+        fetch_cc->start_key_ =
+            std::move(fetch_cc->bucket_data_items_.back().key_str_);
+        assert(std::holds_alternative<std::string>(fetch_cc->start_key_));
+        fetch_cc->start_key_type_ = KeyType::Normal;
+        fetch_cc->start_key_inclusive_ = false;
+        // Fetch again
+        fetch_cc->err_code_ = 0;
+        fetch_cc->bucket_data_items_.clear();
+
+        shard.FetchBucketData(fetch_cc);
+        return;
     }
 
     req->DecreaseWaitForFetchBucketCnt(shard.core_id_);

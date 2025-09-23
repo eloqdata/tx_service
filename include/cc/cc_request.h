@@ -1815,6 +1815,7 @@ public:
                const TxKey &end_key,
                bool end_key_inclusive,
                BucketScanPlan *bucket_scan_plan,
+               const std::vector<DataStoreSearchCond> *pushdown_cond,
                int64_t tx_term,
                CcHandlerResult<ScanNextResult> *next_res,
                IsolationLevel iso_level,
@@ -1855,6 +1856,8 @@ public:
         bucket_scan_progress_ =
             bucket_scan_plan->GetBucketScanProgress(node_group_id_);
         assert(bucket_scan_progress_ != nullptr);
+
+        pushdown_cond_ = pushdown_cond;
 
         // unfinished_core_cnt_ = bucket_ids_.size();
         unfinished_core_cnt_ = bucket_scan_progress_->size();
@@ -2104,6 +2107,7 @@ private:
     bool end_key_inclusive_{false};
     absl::flat_hash_map<uint16_t, BucketScanProgress> *bucket_scan_progress_{
         nullptr};
+    const std::vector<DataStoreSearchCond> *pushdown_cond_;
 
     struct ScanBlockingInfo
     {

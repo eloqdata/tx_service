@@ -416,11 +416,13 @@ struct ScanState
 
     ScanState() = delete;
     ScanState(std::unique_ptr<CcScanner> scanner,
+              std::vector<DataStoreSearchCond> pushdown_cond,
               const TxKey *start_key,
               bool start_inclusive,
               const TxKey *end_key,
               bool end_inclusive)
         : scanner_(std::move(scanner)),
+          pushdown_condition_(std::move(pushdown_cond)),
           scan_start_key_(start_key),
           scan_start_inclusive_(start_inclusive),
           scan_end_key_(end_key),
@@ -430,6 +432,7 @@ struct ScanState
 
     size_t current_plan_index_{SIZE_MAX};
     std::unique_ptr<CcScanner> scanner_;
+    std::vector<DataStoreSearchCond> pushdown_condition_;
     const TxKey *scan_start_key_{nullptr};
     bool scan_start_inclusive_{false};
     const TxKey *scan_end_key_{nullptr};

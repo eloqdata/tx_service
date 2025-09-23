@@ -237,6 +237,7 @@ public:
                        const TxKey &end_key,
                        bool end_inclusive,
                        CcScanner &scanner,
+                       const std::vector<DataStoreSearchCond> *pushdown_cond,
                        CcHandlerResult<ScanNextResult> &hd_res,
                        int32_t obj_type = -1,
                        const std::string_view &scan_pattern = {}) override;

@@ -2683,8 +2683,15 @@ void TransactionExecution::PostProcess(ScanOpenOperation &scan_open)
             */
         }
 
+        auto search_cond =
+            Sharder::Instance()
+                .GetDataStoreHandler()
+                ->CreateDataSerachCondition(scan_open.tx_req_->obj_type_,
+                                            scan_open.tx_req_->scan_pattern_);
+
         scans_.try_emplace(open_result.scan_alias_,
                            std::move(open_result.scanner_),
+                           std::move(search_cond),
                            scan_open.tx_req_->StartKey(),
                            scan_open.tx_req_->start_inclusive_,
                            scan_open.tx_req_->EndKey(),
@@ -2809,6 +2816,7 @@ void TransactionExecution::Process(ScanNextOperation &scan_next)
                     *scan_next.scan_state_->scan_end_key_,
                     scan_next.scan_state_->scan_end_inclusive_,
                     scanner,
+                    &scan_next.scan_state_->pushdown_condition_,
                     scan_next.hd_result_,
                     scan_next.tx_req_->obj_type_,
                     scan_next.tx_req_->scan_pattern_);
@@ -3132,7 +3140,6 @@ void TransactionExecution::PostProcess(ScanNextOperation &scan_next)
                     cc_scan_tuple->rec_status_ == RecordStatus::Normal
                         ? cc_scan_tuple->Record()
                         : nullptr;
-
                 scan_batch.emplace_back(cc_scan_tuple->Key(),
                                         const_cast<TxRecord *>(rec),
                                         cc_scan_tuple->rec_status_,
