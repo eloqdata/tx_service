@@ -471,6 +471,7 @@ size_t CcShard::ProcessRequests()
 
         for (size_t i = 0; i < req_cnt; ++i)
         {
+            // LOG(INFO) << "ccreq type: " << typeid(*req_buf_[i]).name();
             bool finish = req_buf_[i]->Execute(*this);
             if (finish)
             {

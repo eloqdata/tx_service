@@ -55,6 +55,21 @@ extern bool txservice_skip_kv;
 template <typename KeyT, typename ValueT>
 class ObjectCcMap : public TemplateCcMap<KeyT, ValueT, false, false>
 {
+
+    struct NormalObjCntDebugger
+    {
+        ~NormalObjCntDebugger()
+        {
+            assert(ccm_ != nullptr);
+            bool success = ccm_->VerifyNormalObjCnt();
+            if (!success)
+            {
+                assert(false);
+            }
+        }
+        TemplateCcMap<KeyT, ValueT, false, false> *ccm_{};
+    };
+
 public:
     ObjectCcMap(const ObjectCcMap &rhs) = delete;
     ~ObjectCcMap() = default;
@@ -106,6 +121,8 @@ public:
 
     bool Execute(ApplyCc &req) override
     {
+        NormalObjCntDebugger dbg;
+        dbg.ccm_ = this;
         TX_TRACE_ACTION_WITH_CONTEXT(
             (txservice::CcMap *) this,
             &req,
@@ -1300,6 +1317,8 @@ public:
 
     bool Execute(PostWriteCc &req) override
     {
+        NormalObjCntDebugger dbg;
+        dbg.ccm_ = this;
         TX_TRACE_ACTION_WITH_CONTEXT(
             (txservice::CcMap *) this,
             &req,
@@ -1468,6 +1487,8 @@ public:
 
     bool Execute(UploadBatchCc &req) override
     {
+        NormalObjCntDebugger dbg;
+        dbg.ccm_ = this;
         TX_TRACE_ACTION_WITH_CONTEXT(
             (txservice::CcMap *) this,
             &req,
@@ -1690,6 +1711,8 @@ public:
 
     bool Execute(UploadTxCommandsCc &req) override
     {
+        NormalObjCntDebugger dbg;
+        dbg.ccm_ = this;
         TxNumber txn = req.Txn();
         uint64_t obj_version = req.ObjectVersion();
         uint64_t commit_ts = req.CommitTs();
@@ -1800,6 +1823,8 @@ public:
 
     bool Execute(KeyObjectStandbyForwardCc &req) override
     {
+        NormalObjCntDebugger dbg;
+        dbg.ccm_ = this;
         uint64_t schema_version = req.SchemaVersion();
         if (schema_version < schema_ts_)
         {
@@ -1991,6 +2016,8 @@ public:
 
     bool Execute(RestoreCcMapCc &req) override
     {
+        NormalObjCntDebugger dbg;
+        dbg.ccm_ = this;
         uint16_t core_id = shard_->core_id_;
         if (req.data_item_decoded_[core_id] == 0)
         {
@@ -2086,6 +2113,8 @@ public:
 
     bool Execute(ReplayLogCc &req) override
     {
+        NormalObjCntDebugger dbg;
+        dbg.ccm_ = this;
         TX_TRACE_ACTION_WITH_CONTEXT(
             (txservice::CcMap *) this,
             &req,
@@ -2447,6 +2476,8 @@ public:
                   RecordStatus status,
                   const std::string &rec_str) override
     {
+        NormalObjCntDebugger dbg;
+        dbg.ccm_ = this;
         if (commit_ts > 1 && commit_ts < schema_ts_)
         {
             DLOG(INFO) << "BackFill: discard, commit_ts: " << commit_ts

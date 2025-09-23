@@ -25,6 +25,7 @@
 #include <butil/time.h>
 
 #include <algorithm>  // std::max
+#include <boost/stacktrace.hpp>
 #include <cassert>
 #include <chrono>
 #include <cstddef>
@@ -78,6 +79,20 @@ template <typename KeyT,
           bool RangePartitioned>
 class TemplateCcMap : public CcMap
 {
+    struct NormalObjCntDebugger
+    {
+        ~NormalObjCntDebugger()
+        {
+            assert(ccm_ != nullptr);
+            bool success = ccm_->VerifyNormalObjCnt();
+            if (!success)
+            {
+                assert(false);
+            }
+        }
+        TemplateCcMap<KeyT, ValueT, VersionedRecord, RangePartitioned> *ccm_{};
+    };
+
     using BtreeMapIterator = typename absl::btree_map<
         KeyT,
         std::unique_ptr<
@@ -465,6 +480,8 @@ public:
 
     bool Execute(PostWriteCc &req) override
     {
+        NormalObjCntDebugger dbg;
+        dbg.ccm_ = this;
         TX_TRACE_ACTION_WITH_CONTEXT(
             (txservice::CcMap *) this,
             &req,
@@ -656,6 +673,8 @@ public:
 
     bool Execute(AcquireAllCc &req) override
     {
+        NormalObjCntDebugger dbg;
+        dbg.ccm_ = this;
         TX_TRACE_ACTION_WITH_CONTEXT(
             (txservice::CcMap *) this,
             &req,
@@ -1161,6 +1180,8 @@ public:
 
     bool Execute(PostReadCc &req) override
     {
+        NormalObjCntDebugger dbg;
+        dbg.ccm_ = this;
         const CcEntryAddr &cce_addr = *req.CceAddr();
         CcEntry<KeyT, ValueT, VersionedRecord, RangePartitioned> &cc_entry =
             *reinterpret_cast<
@@ -4073,7 +4094,8 @@ public:
                 (1 + req.PrefetchSize() / shard_->core_cnt_) * 125 / 100);
         }
 
-        auto is_cache_full = [&req, scan_cache, remote_scan_cache] {
+        auto is_cache_full = [&req, scan_cache, remote_scan_cache]
+        {
             return req.IsLocal() ? scan_cache->IsFull()
                                  : remote_scan_cache->IsFull();
         };
@@ -7742,6 +7764,8 @@ public:
 
     bool Execute(KickoutCcEntryCc &req) override
     {
+        NormalObjCntDebugger dbg;
+        dbg.ccm_ = this;
         TX_TRACE_ACTION_WITH_CONTEXT(
             (txservice::CcMap *) this,
             &req,
@@ -9493,6 +9517,33 @@ public:
         assert(cnt > 0);
 
         return cnt;
+    }
+
+    bool VerifyNormalObjCnt()
+    {
+        if (table_name_.Engine() != TableEngine::EloqKv)
+        {
+            return true;
+        }
+        Iterator ccm_it = Begin();
+        Iterator pos_inf_it = End();
+        size_t normal_cnt = 0;
+        for (; ccm_it != pos_inf_it; ++ccm_it)
+        {
+            auto cce = ccm_it->second;
+            if (cce->PayloadStatus() == RecordStatus::Normal)
+            {
+                normal_cnt++;
+            }
+        }
+        if (normal_cnt != normal_obj_sz_)
+        {
+            LOG(INFO) << "VerifyNormalObjCnt fail, normal_cnt: " << normal_cnt
+                      << ", normal_obj_sz_: " << normal_obj_sz_;
+            LOG(INFO) << boost::stacktrace::stacktrace();
+            return false;
+        }
+        return true;
     }
 
     bool BulkEmplaceForTest(std::vector<KeyT *> &keys)

@@ -23,6 +23,7 @@
 
 #include <glog/logging.h>
 
+#include <boost/stacktrace/stacktrace.hpp>
 #include <memory>
 #include <string>
 #include <unordered_set>
@@ -80,6 +81,12 @@ public:
     {
         read_intentions_.clear();
         read_locks_.clear();
+        if (read_cnt_ != 0)
+        {
+            LOG(INFO) << "NonBlockingLock::Reset(), read_cnt: " << read_cnt_
+                      << ", stacktrace:";
+            LOG(INFO) << boost::stacktrace::stacktrace();
+        }
         read_cnt_ = 0;
         write_lk_type_ = WriteLockType::NoWritelock;
         write_txn_ = 0;

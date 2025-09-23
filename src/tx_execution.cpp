@@ -119,6 +119,8 @@ TransactionExecution::TransactionExecution(CcHandler *handler,
 
 void TransactionExecution::Reset()
 {
+    // LOG(INFO) << "TransactionExecution: " << this << " Reset, old txn: "
+    //           << tx_number_.load(std::memory_order_relaxed);
     // Skip releasing catalogs read if the tx is not started.
     if (FLAGS_cmd_read_catalog && TxNumber() != UINT64_MAX)
     {
@@ -189,6 +191,7 @@ void TransactionExecution::Restart(CcHandler *handler,
                                    TxProcessor *tx_processor,
                                    bool bind_to_ext_proc)
 {
+    // LOG(INFO) << "TransactionExecution: " << this << " Restart";
     cc_handler_ = handler;
     txlog_ = txlog;
     tx_processor_ = tx_processor;
@@ -311,6 +314,18 @@ void TransactionExecution::ReleaseCatalogsRead()
     if (BAIDU_UNLIKELY(!Sharder::Instance().CheckLeaderTerm(ng_id, TxTerm()) &&
                        Sharder::Instance().StandbyNodeTerm() != TxTerm()))
     {
+        DLOG(INFO) << "Leader term and standby term both mismatch, skip "
+                      "ReleaseCatalogRead"
+                   << ", leader term: " << Sharder::Instance().LeaderTerm(ng_id)
+                   << ", standby term: "
+                   << Sharder::Instance().StandbyNodeTerm()
+                   << ", TxTerm: " << TxTerm()
+                   << ", db 0 locked: " << locked_db_[0].first;
+
+        if (locked_db_[0].first != nullptr)
+        {
+            LOG(INFO) << locked_db_[0].first->DebugInfo();
+        }
         locked_db_ = {};
         return;
     }

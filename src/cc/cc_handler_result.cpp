@@ -85,6 +85,8 @@ bool CcHandlerResult<T>::SetFinished()
                 }
                 else if (txm != nullptr && is_blocking)
                 {
+                    // miss Enlist? if resume func is not empty.
+                    // The txm is always in waiting_tx list.
                     txm->Enlist();
                 }
 #endif

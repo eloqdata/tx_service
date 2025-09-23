@@ -747,6 +747,8 @@ bool CcNode::OnSnapshotReceived(const remote::OnSnapshotSyncedRequest *req)
 
 void CcNode::ClearCcNodeGroupData()
 {
+    LOG(INFO) << "ClearCcNodeGroupData: " << ng_id_ << "......";
+    LOG(INFO) << boost::stacktrace::stacktrace();
     uint16_t core_cnt = local_cc_shards_.Count();
     ClearCcNodeGroup clear_ccm_req(ng_id_, core_cnt);
     for (uint16_t core_id = 0; core_id < core_cnt; ++core_id)
@@ -754,6 +756,7 @@ void CcNode::ClearCcNodeGroupData()
         local_cc_shards_.EnqueueCcRequest(core_id, &clear_ccm_req);
     }
     clear_ccm_req.Wait();
+    LOG(INFO) << "ClearCcNodeGroupData finishes";
 }
 
 void CcNode::SubscribePrimaryNode(uint32_t leader_node_id,
