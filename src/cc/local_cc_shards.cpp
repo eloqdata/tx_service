@@ -4312,9 +4312,7 @@ void LocalCcShards::DataSyncForHashPartition(
         data_sync_txm->TxNumber());
 
     EnqueueToCcShard(worker_idx, &scan_delta_size_cc);
-    {
-        scan_delta_size_cc.Wait();
-    }
+    scan_delta_size_cc.Wait();
 
     if (scan_delta_size_cc.IsError())
     {

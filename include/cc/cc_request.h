@@ -3408,14 +3408,7 @@ public:
             node_group_term_ = current_term;
         }
 
-        if (current_term < 0 || current_term != node_group_term_)
-        {
-            return false;
-        }
-        else
-        {
-            return true;
-        }
+        return current_term >= 0 && current_term == node_group_term_;
     }
 
     // DataSyncScanCc is always stack object and won't be reused, worse, it
@@ -8436,9 +8429,15 @@ struct ScanDeltaSizeCcForHashPartition : public CcRequestBase
     bool ValidTermCheck()
     {
         int64_t cc_ng_term = Sharder::Instance().LeaderTerm(node_group_id_);
-        assert(node_group_term_ > 0);
+        int64_t standby_node_term = Sharder::Instance().StandbyNodeTerm();
+        int64_t current_term = std::max(cc_ng_term, standby_node_term);
 
-        return cc_ng_term >= 0 && cc_ng_term == node_group_term_;
+        if (node_group_term_ < 0)
+        {
+            node_group_term_ = current_term;
+        }
+
+        return current_term >= 0 && current_term == node_group_term_;
     }
 
     bool Execute(CcShard &ccs) override
