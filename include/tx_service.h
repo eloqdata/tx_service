@@ -1099,7 +1099,7 @@ class TxService
 {
 public:
     TxService(
-        CatalogFactory *catalog_factory[4],
+        CatalogFactory *catalog_factory[3],
         SystemHandler *system_handler,
         const std::map<std::string, uint32_t> &conf,
         uint32_t node_id,  // = 0,

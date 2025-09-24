@@ -757,7 +757,8 @@ enum TableEngine {
     EloqSql = 1;
     EloqKv = 2;
     EloqDoc = 3;
-    Sequence = 4;
+    InternalRange = 4;
+    InternalHash = 5;
 }
 
 enum RemoteKeyType {

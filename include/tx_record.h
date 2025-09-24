@@ -551,32 +551,5 @@ struct BlobTxRecord : public TxRecord
     uint64_t ttl_{UINT64_MAX};
 };
 
-class TxRecordFactory
-{
-    using CreateTxRecordFunc = std::unique_ptr<TxRecord> (*)();
-
-public:
-    static void RegisterCreateTxRecordFunc(
-        CreateTxRecordFunc create_tx_record_func)
-    {
-        assert(Instance().create_tx_record_func_ == nullptr);
-        Instance().create_tx_record_func_ = create_tx_record_func;
-    }
-
-    static std::unique_ptr<TxRecord> CreateTxRecord()
-    {
-        assert(Instance().create_tx_record_func_ != nullptr);
-        return Instance().create_tx_record_func_();
-    }
-
-private:
-    static TxRecordFactory &Instance()
-    {
-        static TxRecordFactory tx_record_factory_;
-        return tx_record_factory_;
-    }
-
-    CreateTxRecordFunc create_tx_record_func_{nullptr};
-};
 
 }  // namespace txservice
