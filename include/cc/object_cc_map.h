@@ -1940,6 +1940,15 @@ public:
                 int64_t buffered_cmd_cnt_old = buffered_cmd_list.Size();
                 cce->EmplaceAndCommitBufferedTxnCommand(
                     txn_cmd, shard_->NowInMilliseconds());
+                RecordStatus new_status = cce->PayloadStatus();
+                if (s_obj_exist && new_status != RecordStatus::Normal)
+                {
+                    TemplateCcMap<KeyT, ValueT, false, false>::normal_obj_sz_--;
+                }
+                else if (!s_obj_exist && new_status == RecordStatus::Normal)
+                {
+                    TemplateCcMap<KeyT, ValueT, false, false>::normal_obj_sz_++;
+                }
                 int64_t buffered_cmd_cnt_new = buffered_cmd_list.Size();
                 shard_->UpdateBufferedCommandCnt(buffered_cmd_cnt_new -
                                                  buffered_cmd_cnt_old);
