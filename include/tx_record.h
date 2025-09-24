@@ -551,5 +551,4 @@ struct BlobTxRecord : public TxRecord
     uint64_t ttl_{UINT64_MAX};
 };
 
-
 }  // namespace txservice
