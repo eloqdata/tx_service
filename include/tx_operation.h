@@ -1053,6 +1053,8 @@ struct ObjectCommandOp : TransactionOperation
     explicit ObjectCommandOp(
         TransactionExecution *txm,
         CcHandlerResult<ReadKeyResult> *lock_range_bucket_result = nullptr);
+    // Reset to empty state
+    void Reset();
     void Reset(const TableName *table_name,
                const TxKey *key,
                TxCommand *command,
@@ -1078,6 +1080,8 @@ struct MultiObjectCommandOp : TransactionOperation
     explicit MultiObjectCommandOp(
         TransactionExecution *txm,
         CcHandlerResult<ReadKeyResult> *lock_range_bucket_result = nullptr);
+    // Reset to empty state
+    void Reset();
     void Reset(MultiObjectCommandTxRequest *tx_req);
 
     void Forward(TransactionExecution *txm) override;

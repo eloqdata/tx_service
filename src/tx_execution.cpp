@@ -6436,13 +6436,16 @@ void TransactionExecution::PostProcess(ObjectCommandOp &obj_cmd_op)
     state_stack_.pop_back();
     assert(state_stack_.empty());
 
+    bool need_commit = obj_cmd_op.auto_commit_;
+
     const CcHandlerResult<ObjectCommandResult> &hd_result =
         obj_cmd_op.hd_result_;
     if (hd_result.IsError())
     {
         rec_resp_->FinishError(ConvertCcError(hd_result.ErrorCode()));
         rec_resp_ = nullptr;
-        if (obj_cmd_op.auto_commit_)
+        obj_cmd_op.Reset();
+        if (need_commit)
         {
             Abort();
         }
@@ -6561,11 +6564,11 @@ void TransactionExecution::PostProcess(ObjectCommandOp &obj_cmd_op)
         {
             rec_resp_->FinishError(TxErrorCode::OCC_BREAK_REPEATABLE_READ);
             rec_resp_ = nullptr;
-            if (obj_cmd_op.auto_commit_)
+            obj_cmd_op.Reset();
+            if (need_commit)
             {
                 Abort();
             }
-            obj_cmd_op.Reset(nullptr, nullptr, nullptr);
             return;
         }
 
@@ -6588,6 +6591,7 @@ void TransactionExecution::PostProcess(ObjectCommandOp &obj_cmd_op)
             rec_resp_ = nullptr;
         }
 
+        obj_cmd_op.Reset();
         if (already_committed && rw_set_.MetaDataReadSetSize() == 0)
         {
             // The command has already committed, just reset the txm.
@@ -6604,7 +6608,7 @@ void TransactionExecution::PostProcess(ObjectCommandOp &obj_cmd_op)
         // Whether we should auto commit the txn. For autocommit commands that
         // need to write log, the request sender will be notified after WriteLog
         // and PostProcess.
-        if (obj_cmd_op.auto_commit_)
+        if (need_commit)
         {
             Commit();
         }
@@ -6842,9 +6846,11 @@ void TransactionExecution::PostProcess(MultiObjectCommandOp &obj_cmd_op)
         vct_rec_resp_->FinishError(
             ConvertCcError(lock_range_bucket_result_.ErrorCode()));
         vct_rec_resp_ = nullptr;
+        obj_cmd_op.Reset();
         return;
     }
     MultiObjectCommandTxRequest *req = obj_cmd_op.tx_req_;
+    bool need_commit = req->auto_commit_;
     const std::vector<TxKey> *vct_key = req->VctKey();
     const std::vector<TxCommand *> *vct_cmd = req->VctCommand();
 
@@ -6879,7 +6885,8 @@ void TransactionExecution::PostProcess(MultiObjectCommandOp &obj_cmd_op)
 
         vct_rec_resp_->FinishError(ConvertCcError(err));
         vct_rec_resp_ = nullptr;
-        if (req->auto_commit_)
+        obj_cmd_op.Reset();
+        if (need_commit)
         {
             Abort();
         }
@@ -6983,7 +6990,8 @@ void TransactionExecution::PostProcess(MultiObjectCommandOp &obj_cmd_op)
                 vct_rec_resp_->FinishError(
                     TxErrorCode::OCC_BREAK_REPEATABLE_READ);
                 vct_rec_resp_ = nullptr;
-                if (req->auto_commit_)
+                obj_cmd_op.Reset();
+                if (need_commit)
                 {
                     Abort();
                 }
@@ -7002,7 +7010,8 @@ void TransactionExecution::PostProcess(MultiObjectCommandOp &obj_cmd_op)
             vct_rec_resp_ = nullptr;
         }
 
-        if (req->auto_commit_)
+        obj_cmd_op.Reset();
+        if (need_commit)
         {
             if (cmd_success)
             {
