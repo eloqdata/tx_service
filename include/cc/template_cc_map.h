@@ -6522,11 +6522,11 @@ public:
                             // After node escalate to leader, and we've loaded
                             // from kv, there should be no gap in the buffered
                             // cmd list.
-                            assert(false);
                             LOG(ERROR)
                                 << "Buffered cmds found on leader node"
                                 << ", cce CommitTs: " << cce->CommitTs() << "\n"
                                 << buffered_cmds;
+                            assert(false);
                         }
                         else
                         {
