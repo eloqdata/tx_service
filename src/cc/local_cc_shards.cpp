@@ -4377,10 +4377,13 @@ void LocalCcShards::DataSyncForHashPartition(
                           1];
         std::function<bool(size_t)> filter_lambda =
             [min_partition_id_this_scan,
-             max_partition_id_this_scan](const size_t hash_code)
+             max_partition_id_this_scan,
+             &filter_func =
+                 data_sync_task->filter_lambda_](const size_t hash_code)
         {
             return (hash_code & 0x3FF) >= min_partition_id_this_scan &&
-                   (hash_code & 0x3FF) <= max_partition_id_this_scan;
+                   (hash_code & 0x3FF) <= max_partition_id_this_scan &&
+                   (!filter_func || filter_func(hash_code));
         };
         HashPartitionDataSyncScanCc scan_cc(table_name,
                                             data_sync_task->data_sync_ts_,
