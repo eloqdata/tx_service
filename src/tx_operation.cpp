@@ -5308,7 +5308,7 @@ void ObjectCommandOp::Reset()
     forward_key_shard_ = UINT32_MAX;
     catalog_read_success_ = false;
     is_running_ = false;
-    // Do not reset the hd_result, which might be used after txn commits.
+    // Do not reset the hd_result, which might be used when txn commits.
 }
 
 void ObjectCommandOp::Reset(const TableName *table_name,
@@ -5483,7 +5483,7 @@ void MultiObjectCommandOp::Reset()
     bucket_lock_cur_ = 0;
     catalog_read_success_ = false;
     is_running_ = false;
-    // Do not reset the hd_results, which might be used after txn commits.
+    // Do not reset the hd_results, which might be used when txn commits.
 }
 
 void MultiObjectCommandOp::Reset(MultiObjectCommandTxRequest *req)
