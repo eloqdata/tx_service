@@ -826,7 +826,9 @@ struct ObjectCommandTxRequest
           always_redirect_(always_redirect),
           is_cmd_owner_(false)
     {
-        this->cc_notify_ = yield_fptr != nullptr;
+        bool cc_req_notify_runtime = yield_fptr != nullptr;
+        cc_notify_ = cc_req_notify_runtime;
+        tx_result_.cc_notify_ = cc_req_notify_runtime;
     }
 
     template <typename KeyT>
