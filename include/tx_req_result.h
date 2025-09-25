@@ -137,6 +137,28 @@ public:
     {
         value_ = std::forward<U>(val);
 
+        if (cc_notify_)
+        {
+            // cc request notifies the runtime, the runtime might have been
+            // resumed or not depending on allow_resume_call_.
+
+            // No need for lock since the txrequest sender bthread and the txm
+            // forward thread are the same thread or coordinated already.
+            StatusCombo state = status_combo_.load(std::memory_order_relaxed);
+            status_combo_.store({TxResultStatus::Finished, state.waiting_},
+                                std::memory_order_relaxed);
+
+            // The yield func and resume func can only be called once each.
+            if (allow_resume_call_)
+            {
+                const std::function<void()> *resume = GetResume();
+                assert(resume != nullptr);
+                allow_resume_call_ = false;
+                (*resume)();
+            }
+            return;
+        }
+
         if (HasYieldResume())
         {
             StatusCombo state = status_combo_.load(std::memory_order_relaxed);
@@ -180,6 +202,27 @@ public:
     void FinishError(TxErrorCode err_code = TxErrorCode::UNDEFINED_ERR)
     {
         error_code_ = err_code;
+
+        if (cc_notify_)
+        {
+            // cc request notifies the runtime, the runtime might have been
+            // resumed or not depending on allow_resume_call_.
+
+            // No need for lock since the txrequest sender bthread and the txm
+            // forward thread are the same thread or coordinated already.
+            StatusCombo state = status_combo_.load(std::memory_order_relaxed);
+            status_combo_.store({TxResultStatus::Error, state.waiting_},
+                                std::memory_order_relaxed);
+
+            // The yield func and resume func can only be called once each.
+            if (allow_resume_call_)
+            {
+                const std::function<void()> *resume = GetResume();
+                allow_resume_call_ = false;
+                (*resume)();
+            }
+            return;
+        }
 
         if (HasYieldResume())
         {
@@ -347,6 +390,9 @@ private:
     std::atomic<StatusCombo> status_combo_;
     TxErrorCode error_code_;
     bool allow_resume_call_{true};
+    // Allow cc handler result SetFinish to notify the runtime tx request
+    // sender.
+    bool cc_notify_{false};
 
     std::variant<YieldResume, MutexCond> control_;
 
@@ -355,5 +401,6 @@ private:
 
     template <typename Subtype, typename ResultType>
     friend struct TemplateTxRequest;
+    friend struct ObjectCommandTxRequest;
 };
 }  // namespace txservice
