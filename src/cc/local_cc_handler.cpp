@@ -1286,9 +1286,6 @@ void txservice::LocalCcHandler::ScanNextBatch(
         TX_TRACE_ACTION(this, req);
         TX_TRACE_DUMP(req);
 
-        LOG(INFO) << "local request: ref cnt = " << hd_res.RefCnt()
-                  << ", ng id = " << node_group_id << ", addr = " << &hd_res;
-
         for (const auto &[core_idx, scan_progress] :
              *req->GetBucketScanProgress())
         {
@@ -1297,8 +1294,6 @@ void txservice::LocalCcHandler::ScanNextBatch(
     }
     else
     {
-        LOG(INFO) << "remote request: ref cnt = " << hd_res.RefCnt()
-                  << ", ng id = " << node_group_id << ", addr = " << &hd_res;
         hd_res.IncreaseRemoteRef();
         remote_hd_.ScanNext(cc_shards_.node_id_,
                             node_group_id,

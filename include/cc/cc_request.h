@@ -134,9 +134,6 @@ public:
     {
         if (!ValidTermCheck())
         {
-            LOG(INFO) << "== not leader: addr = " << res_
-                      << ", ref cnt = " << res_->RefCnt()
-                      << ", core id = " << ccs.core_id_;
             res_->SetError(CcErrorCode::REQUESTED_NODE_NOT_LEADER);
             return true;
         }
@@ -1986,7 +1983,6 @@ public:
             unfinished_core_cnt_.fetch_sub(1, std::memory_order_acq_rel);
         if (remaining_cnt == 1)
         {
-            LOG(INFO) << "== ScanNextBatchCc: ref cnt = " << res_->RefCnt();
             if (err_code == CcErrorCode::NO_ERROR)
             {
                 res_->SetFinished();

@@ -525,14 +525,11 @@ public:
         CcErrorCode err_code = err_.load(std::memory_order_relaxed);
         if (err_code == CcErrorCode::NO_ERROR)
         {
-            LOG(INFO) << "== RemoteScanNextBatch: Merge, core id = " << core_id;
             // BucketScanProgress &progress = bucket_scan_progress_.at(core_id);
             // Merge data
             RemoteScanCache *remote_cache = GetRemoteScanCache(core_id);
             auto last_key = remote_cache->Merge(memory_is_drained_[core_id],
                                                 scan_buckets_[core_id]);
-            LOG(INFO) << "== RemoteScanNextBatch: Merge finished, core id = "
-                      << core_id;
             ScanNextResponse *scan_next_resp =
                 output_msg_.mutable_scan_next_resp();
             ::txservice::remote::BucketScanProgressMsg &progress_msg =
@@ -545,11 +542,8 @@ public:
 
         uint16_t remaining_cnt =
             unfinished_core_cnt_.fetch_sub(1, std::memory_order_acq_rel);
-        LOG(INFO) << "== remaining cnt = " << remaining_cnt
-                  << ", core id = " << core_id;
         if (remaining_cnt == 1)
         {
-            LOG(INFO) << "== SetFinish: ref cnt = " << res_->RefCnt();
             if (err_code == CcErrorCode::NO_ERROR)
             {
                 res_->SetFinished();
@@ -739,7 +733,7 @@ private:
 
     TableName remote_table_name_{
         empty_sv, TableType::Primary, txservice::TableEngine::None};
-    // absl::flat_hash_map<uint16_t, BucketScanProgress> bucket_scan_progress_;
+
     TxKey end_key_;
 
     absl::flat_hash_map<uint16_t, RemoteScanCache> scan_caches_;
@@ -750,8 +744,6 @@ private:
     absl::flat_hash_map<uint16_t, size_t> wait_for_fetch_bucket_cnt_;
     absl::flat_hash_map<uint16_t, ScanBlockingInfo> blocking_info_;
     std::vector<DataStoreSearchCond> pushdown_cond_;
-
-    // const ::txservice::remote::BucketScanProgressMap *progress_{nullptr};
 
     std::atomic<uint16_t> unfinished_core_cnt_{0};
     std::atomic<CcErrorCode> err_{CcErrorCode::NO_ERROR};

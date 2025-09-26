@@ -383,9 +383,9 @@ struct RemoteScanCache
                             cache_offset[target_bucket]);
                     if (kv_tuple.key() < memory_tuple.key())
                     {
-                        shard_cache_->add_bucket_id(target_bucket);
-                        shard_cache_->add_cache_offset(
-                            cache_offset[target_bucket]);
+                        // shard_cache_->add_bucket_id(target_bucket);
+                        // shard_cache_->add_cache_offset(
+                        //    cache_offset[target_bucket]);
                         cache_offset[target_bucket]++;
                     }
                     else if (kv_tuple.key() == memory_tuple.key())
@@ -403,8 +403,8 @@ struct RemoteScanCache
                     }
                 }
 
-                shard_cache_->add_bucket_id(UINT32_MAX);
-                shard_cache_->add_cache_offset(memory_cache_idx);
+                // shard_cache_->add_bucket_id(UINT32_MAX);
+                // shard_cache_->add_cache_offset(memory_cache_idx);
             }
             memory_cache_idx++;
         }
@@ -421,8 +421,8 @@ struct RemoteScanCache
                     kv_cache.scan_tuple_size() - kv_cache.trailing_cnt();
                 while (offset < kv_cache_end_idx)
                 {
-                    shard_cache_->add_bucket_id(bucket_id);
-                    shard_cache_->add_cache_offset(offset);
+                    // shard_cache_->add_bucket_id(bucket_id);
+                    // shard_cache_->add_cache_offset(offset);
                     offset++;
                 }
             }

@@ -21,8 +21,6 @@
  */
 #pragma once
 
-#include <butil/logging.h>
-
 #include <atomic>
 #include <cassert>
 #include <cstdint>
@@ -157,7 +155,6 @@ public:
 
     void Reset()
     {
-        LOG(INFO) << "== Reset handler result, this = " << this;
         error_code_.store(CcErrorCode::NO_ERROR, std::memory_order_relaxed);
         ClearRefCnt();
 #ifdef EXT_TX_PROC_ENABLED

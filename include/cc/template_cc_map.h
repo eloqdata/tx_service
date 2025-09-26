@@ -2726,11 +2726,6 @@ public:
             ng_term = Sharder::Instance().LeaderTerm(ng_id);
         }
 
-        LOG(INFO) << "== ScanNextBatch, ng term = " << ng_term
-                  << ", req ng term = " << req.NodeGroupTerm()
-                  << ", ng id = " << ng_id
-                  << ", core id = " << shard_->core_id_;
-
         if (ng_term < 0 || ng_term != req.NodeGroupTerm())
         {
             return req.SetError(shard_->core_id_, CcErrorCode::NG_TERM_CHANGED);
@@ -3686,7 +3681,6 @@ public:
             });
         TX_TRACE_DUMP(&req);
 
-        LOG(INFO) << "== RemoteScanNextBatch: start execute";
         uint32_t ng_id = req.NodeGroupId();
         int64_t tx_term = req.TxTerm();
         bool is_standby_tx = IsStandbyTx(tx_term);
@@ -3702,19 +3696,16 @@ public:
 
         if (ng_term < 0 || ng_term != req.NodeGroupTerm())
         {
-            LOG(INFO) << "== SetError";
             return req.SetError(shard_->core_id_, CcErrorCode::NG_TERM_CHANGED);
         }
 
         if (req.ShardIsDrained(shard_->core_id_))
         {
-            LOG(INFO) << "== SetFinish";
             return req.SetFinish(shard_->core_id_);
         }
 
         if (req.IsWaitForFetchBucket(shard_->core_id_))
         {
-            LOG(INFO) << "== SetFinish";
             return req.SetFinish(shard_->core_id_);
         }
 
@@ -3737,7 +3728,6 @@ public:
                 (iso_lvl == IsolationLevel::Snapshot && !req.IsForWrite());
         }
 
-        LOG(INFO) << "== GetBucketIds";
         absl::flat_hash_map<uint16_t, bool> &bucket_ids =
             req.BucketIds(shard_->core_id_);
         assert(!bucket_ids.empty());
@@ -3751,11 +3741,9 @@ public:
 
         uint32_t shard_code = (ng_id << 10) + shard_->core_id_;
 
-        LOG(INFO) << "== GetRemoteScanCache start";
         RemoteScanCache *remote_cache =
             req.GetRemoteScanCache(shard_->core_id_);
         remote_cache->SetCapacity(bucket_ids.size() * 16);
-        LOG(INFO) << "== GetRemoteScanCache";
 
         ScanDirection direction = req.direct_;
         Iterator scan_ccm_it;
@@ -3768,15 +3756,9 @@ public:
         const KeyT *req_end_key = nullptr;
         if (cce_lock_addr == 0)
         {
-            LOG(INFO) << "== cce lock addr is 0, core idx = "
-                      << shard_->core_id_
-                      << ", first core = " << req.BucketIds().begin()->first;
-
             if (shard_->core_id_ == req.BucketIds().begin()->first)
             {
                 KeyType end_key_type = req.EndKeyType();
-                LOG(INFO) << "== first core: end key type = "
-                          << (int) end_key_type;
                 switch (end_key_type)
                 {
                 case KeyType::NegativeInf:
@@ -3789,12 +3771,6 @@ public:
                 {
                     req_end_key = KeyT::PositiveInfinity();
                     req.SetEndKey(TxKey(req_end_key));
-
-                    LOG(INFO)
-                        << "== Set Pos End Key, core id = " << shard_->core_id_
-                        << ", req end key addr = " << req_end_key
-                        << ", after addr " << req.EndKey()->GetKey<KeyT>();
-
                     break;
                 }
                 case KeyType::Normal:
@@ -3826,8 +3802,6 @@ public:
             else
             {
                 req_end_key = req.EndKey()->GetKey<KeyT>();
-                LOG(INFO) << "== req end key = " << (int) req_end_key->Type()
-                          << ", core id = " << shard_->core_id_;
             }
 
             KeyType start_key_type = req.StartKeyType(shard_->core_id_);
@@ -3875,8 +3849,6 @@ public:
                     std::string_view(req_end_key->Data(), req_end_key->Size());
             }
 
-            LOG(INFO) << "== FetchBucketData, core id = " << shard_->core_id_;
-
             // first enter, send async request to kv store
             shard_->FetchBucketData(
                 &table_name_,
@@ -3916,7 +3888,6 @@ public:
 
         if (cce_lock_addr != 0)
         {
-            LOG(INFO) << "== != 0";
             KeyGapLockAndExtraData *lock =
                 reinterpret_cast<KeyGapLockAndExtraData *>(cce_lock_addr);
             assert(lock != nullptr && lock->GetCcEntry() != nullptr);
@@ -4006,10 +3977,6 @@ public:
         }
         else
         {
-            LOG(INFO) << "== ForwardScanStart";
-            // const KeyT *look_key = start_key.GetKey<KeyT>();
-            // const KeyT *end_key = req.end_key_.GetKey<KeyT>();
-
             std::pair<Iterator, ScanType> start_pair = ForwardScanStart(
                 *req_start_key, req.StartKeyInclusive(shard_->core_id_));
             scan_ccm_it = start_pair.first;
@@ -4040,7 +4007,6 @@ public:
 
         if (direction == ScanDirection::Forward)
         {
-            LOG(INFO) << "== RemoteScanNextBatch:: loop start";
             // ++scan_ccm_it;
             size_t scan_cnt = 0;
             for (;
@@ -4151,8 +4117,6 @@ public:
                                 req.is_require_keys_,
                                 req.is_require_recs_);
             }
-
-            LOG(INFO) << "== RemoteScanNextBatch: loop end";
         }
         else
         {
@@ -12696,8 +12660,6 @@ void BackfillForScanNextBatch(FetchBucketDataCc *fetch_cc,
         }
         fetch_again =
             (remote_kv_cache->scan_tuple_size() == 0 && !fetch_cc->is_drained_);
-        LOG(INFO) << "== fetch remote bucket data: bucket_id = " << bucket_id
-                  << ", core id = " << shard.core_id_;
         if (!fetch_again)
         {
             req->DecreaseWaitForFetchBucketCnt(shard.core_id_);
