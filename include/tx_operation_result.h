@@ -31,6 +31,7 @@
 #include "absl/container/flat_hash_map.h"
 #include "cc/cc_entry.h"
 #include "proto/cc_request.pb.h"
+#include "remote/remote_type.h"
 #include "sharder.h"
 #include "tx_command.h"
 #include "tx_key.h"
@@ -213,39 +214,231 @@ struct ScanOpenResult
 
 struct RemoteScanCache
 {
-    RemoteScanCache() : cache_msg_(nullptr), cache_mem_size_(0)
+    RemoteScanCache() : shard_cache_(nullptr), capacity_(128)
     {
     }
 
-    RemoteScanCache(remote::ScanCache_msg *cache_msg, uint32_t mem_size)
-        : cache_msg_(cache_msg), cache_mem_size_(mem_size)
+    RemoteScanCache(::txservice::remote::ShardCacheMsg *shard_cache,
+                    size_t capacity)
+        : shard_cache_(shard_cache), capacity_(capacity)
     {
+        memory_cache_hash_codes_.reserve(capacity);
     }
 
-    size_t Size() const
+    void SetCapacity(size_t capacity)
     {
-        return cache_msg_->scan_tuple_size();
+        capacity_ = capacity;
+        memory_cache_hash_codes_.reserve(capacity);
     }
 
-    bool IsFull() const
+    bool MemoryCacheIsFull() const
     {
-        return cache_mem_size_ >= 1024;
+        return static_cast<size_t>(
+                   shard_cache_->memory_scan_cache().scan_tuple_size()) >=
+               capacity_;
     }
 
-    const std::string &LastScanKey() const
+    ::txservice::remote::ScanCache_msg *GetMemoryCache()
     {
-        return cache_msg_->scan_tuple(cache_msg_->scan_tuple_size() - 1).key();
+        return shard_cache_->mutable_memory_scan_cache();
     }
 
-    remote::ScanTuple_msg *LastTuple()
+    void AddHashCode(size_t hash_code)
     {
-        auto *tuples = cache_msg_->mutable_scan_tuple();
-        assert(!tuples->empty());
-        return &tuples->at(tuples->size() - 1);
+        memory_cache_hash_codes_.push_back(hash_code);
+        assert(memory_cache_hash_codes_.size() ==
+               static_cast<size_t>(
+                   shard_cache_->memory_scan_cache().scan_tuple_size()));
     }
 
-    remote::ScanCache_msg *cache_msg_;
-    uint32_t cache_mem_size_;
+    ::txservice::remote::ScanCache_msg *GetKvCache(uint16_t bucket_id)
+    {
+        ::google::protobuf::Map<uint32_t, ::txservice::remote::ScanCache_msg>
+            *kv_caches = shard_cache_->mutable_kv_scan_cache();
+        auto iter = kv_caches->find(bucket_id);
+        if (iter != kv_caches->end())
+        {
+            return &iter->second;
+        }
+        else
+        {
+            auto em_it = kv_caches->try_emplace(bucket_id);
+            return &em_it.first->second;
+        }
+    }
+
+    static void RemoveLast(::txservice::remote::ScanCache_msg &scan_cache,
+                           const std::string &min_key)
+    {
+        const ::google::protobuf::RepeatedPtrField<
+            ::txservice::remote::ScanTuple_msg> &scan_tuple_vec =
+            scan_cache.scan_tuple();
+        // upper bound
+        int first = 0;
+        int count = scan_cache.scan_tuple_size();
+        while (count > 0)
+        {
+            int step = count / 2;
+            int mid = first + step;
+            if (!(scan_tuple_vec.Get(mid).key() > min_key))
+            {
+                first = mid + 1;
+                count -= step + 1;
+            }
+            else
+            {
+                count = step;
+            }
+        }
+
+        int trailing_cnt = scan_cache.scan_tuple_size() - first;
+        assert(trailing_cnt > 0);
+        scan_cache.set_trailing_cnt(trailing_cnt);
+    }
+
+    std::string Merge(bool &memory_is_drained,
+                      absl::flat_hash_map<uint16_t, bool> &kv_is_drained)
+    {
+        const std::string *min_key = nullptr;
+        ::txservice::remote::ScanCache_msg *memory_cache =
+            shard_cache_->mutable_memory_scan_cache();
+        ::google::protobuf::Map<uint32_t, ::txservice::remote::ScanCache_msg>
+            *kv_caches = shard_cache_->mutable_kv_scan_cache();
+
+        assert(memory_is_drained || memory_cache->scan_tuple_size() > 0);
+        if (!memory_is_drained && memory_cache->scan_tuple_size() > 0)
+        {
+            const ::txservice::remote::ScanTuple_msg &last_tuple =
+                memory_cache->scan_tuple(memory_cache->scan_tuple_size() - 1);
+            min_key = &last_tuple.key();
+        }
+        // const ::google::protobuf::Map<uint32_t,
+        // ::txservice::remote::ScanCache_msg> &
+        for (auto &[bucket_id, kv_cache] : *kv_caches)
+        {
+            assert(kv_is_drained.at(bucket_id) ||
+                   kv_cache.scan_tuple_size() > 0);
+            if (!kv_is_drained.at(bucket_id) && kv_cache.scan_tuple_size() > 0)
+            {
+                const ::txservice::remote::ScanTuple_msg &last_tuple =
+                    kv_cache.scan_tuple(kv_cache.scan_tuple_size() - 1);
+                min_key = &last_tuple.key();
+            }
+        }
+
+        if (min_key != nullptr)
+        {
+            auto memory_cache_size = memory_cache->scan_tuple_size();
+            if (memory_cache_size > 0)
+            {
+                RemoveLast(*memory_cache, *min_key);
+                if (memory_cache->trailing_cnt() > 0)
+                {
+                    memory_is_drained = false;
+                }
+            }
+
+            for (auto &[bucket_id, kv_cache] :
+                 *shard_cache_->mutable_kv_scan_cache())
+            {
+                auto kv_cache_size = kv_cache.scan_tuple_size();
+                if (kv_cache_size > 0)
+                {
+                    RemoveLast(kv_cache, *min_key);
+                    if (kv_cache.trailing_cnt() > 0)
+                    {
+                        kv_is_drained[bucket_id] = false;
+                    }
+                }
+            }
+        }
+
+        absl::flat_hash_map<uint16_t, int> cache_offset;
+        for (auto &[bucket_id, kv_cache] : *kv_caches)
+        {
+            cache_offset[bucket_id] = 0;
+        }
+
+        int memory_cache_idx = 0;
+        int memory_cache_end_idx =
+            memory_cache->scan_tuple_size() - memory_cache->trailing_cnt();
+        while (memory_cache_idx < memory_cache_end_idx)
+        {
+            const ::txservice::remote::ScanTuple_msg &memory_tuple =
+                memory_cache->scan_tuple(memory_cache_idx);
+            uint16_t target_bucket = Sharder::MapKeyHashToBucketId(
+                memory_cache_hash_codes_[memory_cache_idx]);
+            auto kv_cache_iter = kv_caches->find(target_bucket);
+            if (kv_cache_iter != kv_caches->end())
+            {
+                ::txservice::remote::ScanCache_msg &kv_cache =
+                    kv_cache_iter->second;
+                int kv_cache_end_idx =
+                    kv_cache.scan_tuple_size() - kv_cache.trailing_cnt();
+                assert(kv_cache_end_idx >= 0);
+                while (cache_offset[target_bucket] < kv_cache_end_idx)
+                {
+                    ::txservice::remote::ScanTuple_msg &kv_tuple =
+                        *kv_cache.mutable_scan_tuple(
+                            cache_offset[target_bucket]);
+                    if (kv_tuple.key() < memory_tuple.key())
+                    {
+                        shard_cache_->add_bucket_id(target_bucket);
+                        shard_cache_->add_cache_offset(
+                            cache_offset[target_bucket]);
+                        cache_offset[target_bucket]++;
+                    }
+                    else if (kv_tuple.key() == memory_tuple.key())
+                    {
+                        // duplicate
+                        kv_tuple.set_rec_status(
+                            remote::ToRemoteType::ConvertRecordStatus(
+                                RecordStatus::Deleted));
+                        cache_offset[target_bucket]++;
+                        break;
+                    }
+                    else
+                    {
+                        break;
+                    }
+                }
+
+                shard_cache_->add_bucket_id(UINT32_MAX);
+                shard_cache_->add_cache_offset(memory_cache_idx);
+            }
+            memory_cache_idx++;
+        }
+
+        // memory cache is drained. we don't need to merge data
+        for (auto &[bucket_id, offset] : cache_offset)
+        {
+            auto kv_cache_iter = kv_caches->find(bucket_id);
+            if (kv_cache_iter != kv_caches->end())
+            {
+                ::txservice::remote::ScanCache_msg &kv_cache =
+                    kv_cache_iter->second;
+                int kv_cache_end_idx =
+                    kv_cache.scan_tuple_size() - kv_cache.trailing_cnt();
+                while (offset < kv_cache_end_idx)
+                {
+                    shard_cache_->add_bucket_id(bucket_id);
+                    shard_cache_->add_cache_offset(offset);
+                    offset++;
+                }
+            }
+        }
+
+        if (min_key)
+        {
+            return *min_key;
+        }
+
+        return "";
+    }
+
+    ::txservice::remote::ShardCacheMsg *shard_cache_{nullptr};
+    std::vector<size_t> memory_cache_hash_codes_;
+    size_t capacity_{128};
 };
 
 struct RemoteScanSliceCache
@@ -519,7 +712,9 @@ struct RangeScanSliceResult
 struct BucketScanProgress
 {
     BucketScanProgress(TxKey &&key, bool inclusive)
-        : pause_key_(std::move(key)), pause_key_inclusive_(inclusive)
+        : pause_key_(std::move(key)),
+          pause_key_inclusive_(inclusive),
+          memory_scan_is_finished_(false)
     {
     }
 

@@ -28,11 +28,14 @@
 
 #include "cc/cc_handler_result.h"
 #include "cc/ccm_scanner.h"
+#include "cc_map.h"
 #include "cc_request.pb.h"
 #include "error_messages.h"  //CcErrorCode
 #include "remote/remote_cc_handler.h"
 #include "remote/remote_type.h"  //ToRemoteType
 #include "sharder.h"
+#include "tx_key.h"
+#include "type.h"
 
 txservice::remote::RemoteAcquire::RemoteAcquire()
 {
@@ -710,6 +713,7 @@ void txservice::remote::RemotePostWriteAll::Reset(
 
 txservice::remote::RemoteScanOpen::RemoteScanOpen()
 {
+    /*
     parallel_req_ = true;
     output_msg_.set_type(
         CcMessage::MessageType::CcMessage_MessageType_ScanOpenResponse);
@@ -771,11 +775,13 @@ txservice::remote::RemoteScanOpen::RemoteScanOpen()
         hd_->SendMessageToNode(req.src_node_id(), output_msg_);
         hd_->RecycleCcMsg(std::move(input_msg_));
     };
+    */
 }
 
 void txservice::remote::RemoteScanOpen::Reset(
     std::unique_ptr<CcMessage> input_msg, uint32_t core_cnt)
 {
+    /*
     assert(input_msg->has_scan_open_req());
 
     cc_res_.Reset();
@@ -860,6 +866,7 @@ void txservice::remote::RemoteScanOpen::Reset(
     }
 
     ng_term_ = -1;
+    */
 }
 
 void txservice::remote::RemoteScanOpen::Free()
@@ -877,15 +884,6 @@ txservice::remote::RemoteScanNextBatch::RemoteScanNextBatch()
         CcMessage::MessageType::CcMessage_MessageType_ScanNextResponse);
     is_ckpt_delta_ = false;
     res_ = &cc_res_;
-    cce_ptr_ = nullptr;
-
-    /*message ScanNextResponse
-    {
-        bool error = 1;
-        repeated ScanTuple_msg scan_tuple = 2;
-        uint64 ccm_ptr = 3;
-        uint64 scan_cache_ptr = 4;
-    }*/
 
     cc_res_.post_lambda_ = [this](CcHandlerResult<Void> *res)
     {
@@ -897,18 +895,21 @@ txservice::remote::RemoteScanNextBatch::RemoteScanNextBatch()
 
         ScanNextResponse *scan_next_resp = output_msg_.mutable_scan_next_resp();
         const ScanNextRequest &req = input_msg_->scan_next_req();
+        // set error code
         scan_next_resp->set_error_code(
             ToRemoteType::ConvertCcErrorCode(res->ErrorCode()));
+        scan_next_resp->set_term(ng_term_);
+        scan_next_resp->set_node_group_id(node_group_id_);
 
         if (res->IsError())
         {
             CcOperation cc_op;
-
-            if (tbl_type_ == TableType::Secondary)
+            TableType table_type = table_name_->Type();
+            if (table_type == TableType::Secondary)
             {
                 cc_op = CcOperation::ReadSkIndex;
             }
-            else if (tbl_type_ == TableType::UniqueSecondary)
+            else if (table_type == TableType::UniqueSecondary)
             {
                 cc_op = IsForWrite() ? CcOperation::ReadForWrite
                                      : CcOperation::ReadSkIndex;
@@ -928,10 +929,27 @@ txservice::remote::RemoteScanNextBatch::RemoteScanNextBatch()
             // post-processing.
             if (lock_type == LockType::NoLock)
             {
-                scan_next_resp->mutable_scan_cache()->Clear();
+                scan_next_resp->mutable_shard_cache_map()->Clear();
             }
         }
-        scan_next_resp->set_scan_cache_ptr(req.scan_cache_ptr());
+        else
+        {
+            // set term
+            ::txservice::remote::BucketScanProgressMap *progress_map =
+                scan_next_resp->mutable_progress();
+            for (const auto &[core_idx, bucket_info] : scan_buckets_)
+            {
+                auto iter =
+                    progress_map->mutable_progress()->try_emplace(core_idx);
+                for (const auto &[bucket_id, is_drained] : bucket_info)
+                {
+                    iter.first->second.mutable_scan_buckets()->try_emplace(
+                        bucket_id, is_drained);
+                }
+                iter.first->second.set_memory_is_drained(
+                    memory_is_drained_[core_idx]);
+            }
+        }
 
         hd_->SendMessageToNode(req.src_node_id(), output_msg_);
         hd_->RecycleCcMsg(std::move(input_msg_));
@@ -940,17 +958,83 @@ txservice::remote::RemoteScanNextBatch::RemoteScanNextBatch()
 
 bool txservice::remote::RemoteScanNextBatch::ValidTermCheck()
 {
-    int64_t cc_ng_term = Sharder::Instance().LeaderTerm(node_group_id_);
-    if (prior_cce_addr_.Term() != cc_ng_term)
+    bool is_standby_tx = IsStandbyTx(TxTerm());
+    int64_t cc_ng_term = -1;
+    if (is_standby_tx)
+    {
+        assert(node_group_id_ == Sharder::Instance().NativeNodeGroup());
+        cc_ng_term = Sharder::Instance().StandbyNodeTerm();
+    }
+    else
+    {
+        cc_ng_term = Sharder::Instance().LeaderTerm(node_group_id_);
+    }
+
+    if (ng_term_ < 0)
+    {
+        ng_term_ = cc_ng_term;
+    }
+
+    if (cc_ng_term < 0 || cc_ng_term != ng_term_)
     {
         return false;
     }
+    else
+    {
+        return true;
+    }
+}
 
-    const LruEntry *lru_entry = prior_cce_addr_.ExtractCce();
-    ccm_ = lru_entry->GetCcMap();
-    assert(ccm_ != nullptr);
-    tbl_type_ = ccm_->Type();
-    return true;
+bool txservice::remote::RemoteScanNextBatch::Execute(CcShard &ccs)
+{
+    if (!ValidTermCheck())
+    {
+        // Do not modify res_ directly since there could be other cores
+        // still working on this cc req.
+        return SetError(ccs.core_id_, CcErrorCode::REQUESTED_NODE_NOT_LEADER);
+    }
+
+    CcMap *ccm = nullptr;
+
+    // assert(table_name_ != nullptr);
+    assert(table_name_->StringView() != empty_sv);
+    ccm = ccs.GetCcm(*table_name_, node_group_id_);
+
+    if (ccm == nullptr)
+    {
+        // Find base table name for index table.
+        // Fetch/Get Catalog is based on base table name, but Get
+        // ccmap is based on the real table name, for example, index
+        // should get the corresponding sk_ccmap.
+        assert(!table_name_->IsMeta());
+        const CatalogEntry *catalog_entry =
+            ccs.InitCcm(*table_name_, node_group_id_, ng_term_, this);
+        if (catalog_entry == nullptr)
+        {
+            // The local node does not contain the table's schema
+            // instance. The FetchCatalog() method will send an
+            // async request toward the data store to fetch the
+            // catalog. After fetching is finished, this cc request
+            // is re-enqueued for re-execution.
+            return false;
+        }
+        else
+        {
+            if (catalog_entry->schema_ == nullptr)
+            {
+                // The local node (LocalCcShards) contains a schema
+                // instance, which indicates that the table has been
+                // dropped. Returns the request with an error.
+                return SetError(ccs.core_id_,
+                                CcErrorCode::REQUESTED_TABLE_NOT_EXISTS);
+            }
+
+            ccm = ccs.GetCcm(*table_name_, node_group_id_);
+        }
+    }
+
+    assert(ccm != nullptr);
+    return ccm->Execute(*this);
 }
 
 void txservice::remote::RemoteScanNextBatch::Reset(
@@ -960,45 +1044,134 @@ void txservice::remote::RemoteScanNextBatch::Reset(
 
     cc_res_.Reset();
 
-    const ScanNextRequest &scan_next = input_msg->scan_next_req();
+    ScanNextRequest &scan_next = *input_msg->mutable_scan_next_req();
 
+    tx_number_ = input_msg->tx_number();
+    tx_term_ = input_msg->tx_term();
     node_group_id_ = scan_next.node_group_id();
-    const CceAddr_msg &cce_addr = scan_next.prior_cce_ptr();
-    ng_term_ = -1;
+    // const CceAddr_msg &cce_addr = scan_next.prior_cce_ptr();
+    ng_term_ = scan_next.node_group_term();
 
+    std::string_view table_name_sv(scan_next.table_name_str());
+    remote_table_name_ =
+        TableName(table_name_sv,
+                  ToLocalType::ConvertCcTableType(scan_next.table_type()),
+                  ToLocalType::ConvertTableEngine(scan_next.table_engine()));
+    assert(scan_next.direction());
     direct_ = scan_next.direction() ? ScanDirection::Forward
                                     : ScanDirection::Backward;
-    tx_term_ = input_msg->tx_term();
+    snapshot_ts_ = scan_next.ts();
+    is_ckpt_delta_ = scan_next.ckpt();
+    isolation_level_ = ToLocalType::ConvertIsolation(scan_next.iso_level());
+    proto_ = ToLocalType::ConvertProtocol(scan_next.protocol());
+
     is_for_write_ = scan_next.is_for_write();
     is_covering_keys_ = scan_next.is_covering_keys();
     is_require_keys_ = scan_next.is_require_keys();
     is_require_recs_ = scan_next.is_require_recs();
-    isolation_level_ = ToLocalType::ConvertIsolation(scan_next.iso_level());
-    proto_ = ToLocalType::ConvertProtocol(scan_next.protocol());
-    tx_number_ = input_msg->tx_number();
-    cce_ptr_ = nullptr;
-    snapshot_ts_ = scan_next.ts();
-
-    prior_cce_addr_.SetCceLock(cce_addr.cce_lock_ptr(),
-                               cce_addr.term(),
-                               node_group_id_,
-                               cce_addr.core_id());
 
     obj_type_ = scan_next.obj_type();
     scan_pattern_ = scan_next.scan_pattern();
 
-    ccm_ = nullptr;
+    end_key_ = TxKey();
+    scan_caches_.clear();
+    memory_is_drained_.clear();
+    scan_buckets_.clear();
+    wait_for_fetch_bucket_cnt_.clear();
+    blocking_info_.clear();
+    pushdown_cond_.clear();
+    err_ = CcErrorCode::NO_ERROR;
+    unfinished_core_cnt_ = 1;
 
+    if (Sharder::Instance().GetDataStoreHandler())
+    {
+        pushdown_cond_ =
+            Sharder::Instance()
+                .GetDataStoreHandler()
+                ->CreateDataSerachCondition(obj_type_, scan_pattern_);
+    }
+
+    if (scan_next.has_progress())
+    {
+        LOG(INFO) << "== has progress";
+        const ::txservice::remote::BucketScanProgressMap &scan_progress_map =
+            scan_next.progress();
+        for (const auto &[core_id, progress] : scan_progress_map.progress())
+        {
+            memory_is_drained_[core_id] = false;
+            for (const auto &[bucket_id, drained] : progress.scan_buckets())
+            {
+                if (!drained)
+                {
+                    LOG(INFO) << "no drain bucket id = " << bucket_id;
+                }
+                scan_buckets_[core_id].try_emplace(bucket_id, drained);
+            }
+        }
+    }
+    else
+    {
+        LOG(INFO) << "== has global info";
+        const ::txservice::remote::BucketScanInfoMsg &scan_info =
+            scan_next.global_info();
+        for (const auto &bucket_id : scan_info.scan_buckets())
+        {
+            uint16_t target_core =
+                Sharder::Instance().ShardBucketIdToCoreIdx(bucket_id);
+            auto iter = scan_buckets_.find(target_core);
+            if (iter == scan_buckets_.end())
+            {
+                memory_is_drained_[target_core] = false;
+                auto em_it = scan_buckets_.try_emplace(target_core);
+                em_it.first->second.emplace(bucket_id, false);
+            }
+            else
+            {
+                iter->second.emplace(bucket_id, false);
+            }
+        }
+    }
+
+    for (const auto &[core_idx, buckets] : scan_buckets_)
+    {
+        wait_for_fetch_bucket_cnt_[core_idx] = 0;
+        auto [iter, inserted] = blocking_info_.try_emplace(core_idx);
+        iter->second.cce_lock_addr_ = 0;
+        iter->second.scan_type_ = ScanType::ScanUnknow;
+        iter->second.type_ = ScanBlockingType::NoBlocking;
+
+        LOG(INFO) << "== scan bucket: core idx = " << core_idx
+                  << ", first core = " << scan_buckets_.begin()->first;
+    }
+
+    ccm_ = nullptr;
+    parallel_req_ = true;
+    table_name_ = &remote_table_name_;
     output_msg_.clear_tx_number();
     output_msg_.clear_handler_addr();
     output_msg_.clear_scan_next_resp();
-
     ScanNextResponse *resp = output_msg_.mutable_scan_next_resp();
-    resp->clear_scan_cache();
-    scan_cache_.cache_msg_ = resp->mutable_scan_cache();
-    scan_cache_.cache_mem_size_ = 0;
+    ShardCacheMsgMap *shard_cache_map = resp->mutable_shard_cache_map();
+    resp->clear_progress();
+    BucketScanProgressMap *progress_map = resp->mutable_progress();
 
-    is_ckpt_delta_ = scan_next.ckpt();
+    // create scan cahe
+    for (const auto &[core_id, progress] : scan_buckets_)
+    {
+        uint32_t shard_code = (node_group_id_ << 10) + core_id;
+        auto iter =
+            shard_cache_map->mutable_shard_caches()->emplace(shard_code);
+        assert(iter.second);
+        txservice::remote::ShardCacheMsg *shard_cache_msg = &iter.first->second;
+        scan_caches_.try_emplace(core_id, shard_cache_msg, 128);
+        progress_map->mutable_progress()->try_emplace(core_id);
+    }
+
+    for (const auto &[core_id, progress] : scan_buckets_)
+    {
+        LOG(INFO) << "== All Finished = " << ShardIsDrained(core_id)
+                  << ", core idx = " << core_id;
+    }
 
     input_msg_ = std::move(input_msg);
 
@@ -1006,6 +1179,141 @@ void txservice::remote::RemoteScanNextBatch::Reset(
     {
         hd_ = Sharder::Instance().GetCcStreamSender();
     }
+}
+
+txservice::KeyType txservice::remote::RemoteScanNextBatch::StartKeyType(
+    uint16_t core_id)
+{
+    const ScanNextRequest &scan_next = input_msg_->scan_next_req();
+    RemoteTxKey::InnerKeyCase start_key_case =
+        RemoteTxKey::InnerKeyCase::kNegInf;
+    if (scan_next.has_global_info())
+    {
+        start_key_case = scan_next.global_info().start_key().inner_key_case();
+    }
+    else
+    {
+        start_key_case = scan_next.progress()
+                             .progress()
+                             .at(core_id)
+                             .start_key()
+                             .inner_key_case();
+    }
+
+    switch (start_key_case)
+    {
+    case RemoteTxKey::InnerKeyCase::kNegInf:
+    {
+        return txservice::KeyType::NegativeInf;
+    }
+    case RemoteTxKey::InnerKeyCase::kPosInf:
+    {
+        return txservice::KeyType::PositiveInf;
+    }
+    case RemoteTxKey::InnerKeyCase::kKey:
+    {
+        return txservice::KeyType::Normal;
+    }
+    default:
+    {
+        assert(false);
+        return txservice::KeyType::NegativeInf;
+    }
+    }
+}
+
+txservice::KeyType txservice::remote::RemoteScanNextBatch::EndKeyType()
+{
+    const ScanNextRequest &scan_next = input_msg_->scan_next_req();
+    RemoteTxKey::InnerKeyCase end_key_case = RemoteTxKey::InnerKeyCase::kNegInf;
+
+    end_key_case = scan_next.end_key().inner_key_case();
+
+    switch (end_key_case)
+    {
+    case RemoteTxKey::InnerKeyCase::kNegInf:
+    {
+        return txservice::KeyType::NegativeInf;
+    }
+    case RemoteTxKey::InnerKeyCase::kPosInf:
+    {
+        return txservice::KeyType::PositiveInf;
+    }
+    case RemoteTxKey::InnerKeyCase::kKey:
+    {
+        return txservice::KeyType::Normal;
+    }
+    default:
+    {
+        assert(false);
+        return txservice::KeyType::NegativeInf;
+    }
+    }
+}
+
+const std::string *txservice::remote::RemoteScanNextBatch::StartKeyStr(
+    uint16_t core_id)
+{
+    const ScanNextRequest &scan_next = input_msg_->scan_next_req();
+    if (scan_next.has_global_info())
+    {
+        if (scan_next.global_info().start_key().inner_key_case() ==
+            RemoteTxKey::InnerKeyCase::kKey)
+        {
+            return &scan_next.global_info().start_key().key();
+        }
+        else
+        {
+            return nullptr;
+        }
+    }
+    else
+    {
+        const ::txservice::remote::RemoteTxKey &remote_start_key =
+            scan_next.progress().progress().at(core_id).start_key();
+        if (remote_start_key.inner_key_case() ==
+            RemoteTxKey::InnerKeyCase::kKey)
+        {
+            return &remote_start_key.key();
+        }
+        else
+        {
+            return nullptr;
+        }
+    }
+}
+
+const std::string *txservice::remote::RemoteScanNextBatch::EndKeyStr()
+{
+    const ScanNextRequest &scan_next = input_msg_->scan_next_req();
+    if (scan_next.end_key().inner_key_case() == RemoteTxKey::InnerKeyCase::kKey)
+    {
+        return &scan_next.end_key().key();
+    }
+
+    return nullptr;
+}
+
+bool txservice::remote::RemoteScanNextBatch::StartKeyInclusive(uint16_t core_id)
+{
+    const ScanNextRequest &scan_next = input_msg_->scan_next_req();
+    if (scan_next.has_global_info())
+    {
+        return scan_next.global_info().start_key_inclusive();
+    }
+    else
+    {
+        return scan_next.progress()
+            .progress()
+            .at(core_id)
+            .start_key_inclusive();
+    }
+}
+
+bool txservice::remote::RemoteScanNextBatch::EndKeyInclusive()
+{
+    const ScanNextRequest &scan_next = input_msg_->scan_next_req();
+    return scan_next.end_key_inclusive();
 }
 
 txservice::remote::RemoteScanSlice::RemoteScanSlice()

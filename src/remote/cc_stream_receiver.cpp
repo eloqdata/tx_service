@@ -1118,10 +1118,11 @@ void CcStreamReceiver::OnReceiveCcMsg(std::unique_ptr<CcMessage> msg)
             for (int core_id = 0; core_id < scan_open_res.scan_cache_size();
                  ++core_id)
             {
+                /*
                 uint32_t shard_code = (ng_id << 10) + core_id;
                 const ScanCache_msg &cache_msg =
                     scan_open_res.scan_cache(core_id);
-                /*
+
                 ScanCache *shard_cache = scanner.AddShard(shard_code);
 
                 for (int idx = 0; idx < cache_msg.scan_tuple_size(); ++idx)
@@ -1174,11 +1175,23 @@ void CcStreamReceiver::OnReceiveCcMsg(std::unique_ptr<CcMessage> msg)
     }
     case CcMessage::MessageType::CcMessage_MessageType_ScanNextRequest:
     {
+        LOG(INFO) << "== Rec remote scan message";
         RemoteScanNextBatch *scan_next_req = scan_next_pool_.NextRequest();
         TX_TRACE_ASSOCIATE(msg.get(), scan_next_req);
         scan_next_req->Reset(std::move(msg));
-        local_shards_.EnqueueCcRequest(scan_next_req->PriorCceAddr().CoreId(),
-                                       scan_next_req);
+        if (!scan_next_req->BucketIds().empty())
+        {
+            LOG(INFO) << "== enqueue remote scan request: core idx = "
+                      << scan_next_req->BucketIds().begin()->first;
+            LOG(INFO) << "== enqueue remote scan request: core idx = "
+                      << scan_next_req->BucketIds().begin()->first;
+            LOG(INFO) << "== enqueue remote scan request: core idx = "
+                      << scan_next_req->BucketIds().begin()->first;
+            // only one core to decode tx key
+            local_shards_.EnqueueCcRequest(
+                scan_next_req->BucketIds().begin()->first, scan_next_req);
+        }
+
         break;
     }
     case CcMessage::MessageType::CcMessage_MessageType_ScanNextResponse:
@@ -1225,50 +1238,170 @@ void CcStreamReceiver::OnReceiveCcMsg(std::unique_ptr<CcMessage> msg)
             assert(txm == hd_res->Txm());
         }
 
-        const ScanNextResponse &scan_next_res = msg->scan_next_resp();
-
-        // Even if ScanNext operation fail, we should also move scan
-        // result into read set to release acquired lock.
-        {
-            ScanCache *shard_cache =
-                reinterpret_cast<ScanCache *>(scan_next_res.scan_cache_ptr());
-
-            uint32_t ng_id = shard_cache->LastTuple()->cce_addr_.NodeGroupId();
-            shard_cache->Reset();
-            const ScanCache_msg &scan_cache = scan_next_res.scan_cache();
-
-            for (int idx = 0; idx < scan_cache.scan_tuple_size(); ++idx)
-            {
-                const ScanTuple_msg &tuple_msg = scan_cache.scan_tuple(idx);
-                // hd_res->Value().term_ = tuple_msg.cce_addr().term();
-
-                RecordStatus rec_status = ToLocalType::ConvertRecordStatusType(
-                    tuple_msg.rec_status());
-
-                size_t key_offset = 0;
-                size_t rec_offset = 0;
-                shard_cache->AddScanTuple(tuple_msg.key(),
-                                          key_offset,
-                                          tuple_msg.key_ts(),
-                                          tuple_msg.record(),
-                                          rec_offset,
-                                          rec_status,
-                                          tuple_msg.gap_ts(),
-                                          tuple_msg.cce_addr().cce_lock_ptr(),
-                                          tuple_msg.cce_addr().term(),
-                                          tuple_msg.cce_addr().core_id(),
-                                          ng_id);
-            }
-        }
-
+        ScanNextResponse &scan_next_res = *msg->mutable_scan_next_resp();
+        LOG(INFO) << "== stream: ref cnt = " << hd_res->RefCnt()
+                  << ", node group id = " << scan_next_res.node_group_id();
         if (scan_next_res.error_code() != 0)
         {
-            hd_res->SetError(
+            LOG(INFO) << "== stream: err code = " << scan_next_res.error_code();
+            // hd_res->SetError(
+            //    ToLocalType::ConvertCcErrorCode(scan_next_res.error_code()));
+            hd_res->SetRemoteError(
                 ToLocalType::ConvertCcErrorCode(scan_next_res.error_code()));
         }
         else
         {
-            hd_res->SetFinished();
+            // Even if ScanNext operation fail, we should also move scan
+            // result into read set to release acquired lock.
+            {
+                uint32_t node_group_id = scan_next_res.node_group_id();
+                CcScanner *scanner = hd_res->Value().ccm_scanner_;
+                hd_res->Value().current_scan_plan_->UpdateNodeGroupTerm(
+                    node_group_id, scan_next_res.term());
+                auto *ng_bucket_scan_progress =
+                    hd_res->Value().current_scan_plan_->GetBucketScanProgress(
+                        node_group_id);
+                assert(ng_bucket_scan_progress);
+
+                for (const auto &[core_idx, progress] :
+                     scan_next_res.progress().progress())
+                {
+                    txservice::BucketScanProgress *bucket_scan_progress =
+                        nullptr;
+                    auto iter = ng_bucket_scan_progress->find(core_idx);
+                    if (iter == ng_bucket_scan_progress->end())
+                    {
+                        assert(progress.start_key().inner_key_case() ==
+                               RemoteTxKey::InnerKeyCase::kKey);
+                        auto em_it = ng_bucket_scan_progress->try_emplace(
+                            core_idx,
+                            scanner->DecodeKey(progress.start_key().key()),
+                            progress.start_key_inclusive());
+                        bucket_scan_progress = &em_it.first->second;
+                    }
+                    else
+                    {
+                        bucket_scan_progress = &iter->second;
+                    }
+
+                    for (const auto &[bucket_id, is_drained] :
+                         progress.scan_buckets())
+                    {
+                        if (!is_drained)
+                        {
+                            LOG(INFO)
+                                << "==rec: core idx = " << core_idx
+                                << ", no drained bucket id = " << bucket_id;
+                        }
+                        bucket_scan_progress->scan_buckets_[bucket_id] =
+                            is_drained;
+                    }
+
+                    bucket_scan_progress->memory_scan_is_finished_ =
+                        progress.memory_is_drained();
+                    LOG(INFO) << "== rec: core idx = " << core_idx
+                              << ", memory is drained = "
+                              << bucket_scan_progress->memory_scan_is_finished_;
+                }
+
+                ::txservice::remote::ShardCacheMsgMap *shard_caches =
+                    scan_next_res.mutable_shard_cache_map();
+                for (auto &[core_id, shard_cache] :
+                     *shard_caches->mutable_shard_caches())
+                {
+                    const ::txservice::remote::ScanCache_msg &memory_cache =
+                        shard_cache.memory_scan_cache();
+                    uint32_t shard_code = (node_group_id << 10) + core_id;
+
+                    if (memory_cache.scan_tuple_size() > 0)
+                    {
+                        ScanCache *scan_cache = scanner->Cache(shard_code);
+                        scan_cache->Reset();
+
+                        for (int idx = 0; idx < memory_cache.scan_tuple_size();
+                             ++idx)
+                        {
+                            const ScanTuple_msg &tuple_msg =
+                                memory_cache.scan_tuple(idx);
+                            RecordStatus rec_status =
+                                ToLocalType::ConvertRecordStatusType(
+                                    tuple_msg.rec_status());
+                            size_t key_offset = 0;
+                            size_t rec_offset = 0;
+
+                            LOG(INFO) << "== memory key = " << tuple_msg.key()
+                                      << ", status = " << (int) rec_status;
+
+                            scan_cache->AddScanTuple(
+                                tuple_msg.key(),
+                                key_offset,
+                                tuple_msg.key_ts(),
+                                tuple_msg.record(),
+                                rec_offset,
+                                rec_status,
+                                tuple_msg.gap_ts(),
+                                tuple_msg.cce_addr().cce_lock_ptr(),
+                                tuple_msg.cce_addr().term(),
+                                tuple_msg.cce_addr().core_id(),
+                                tuple_msg.cce_addr().node_group_id());
+                        }
+
+                        if (memory_cache.trailing_cnt() > 0)
+                        {
+                            scan_cache->RemoveLast(scan_cache->Size() -
+                                                   memory_cache.trailing_cnt());
+                        }
+                    }
+
+                    for (const auto &[bucket_id, kv_cache] :
+                         shard_cache.kv_scan_cache())
+                    {
+                        if (kv_cache.scan_tuple_size() > 0)
+                        {
+                            ScanCache *scan_cache =
+                                scanner->KvCache(shard_code, bucket_id, 16);
+                            scan_cache->Reset();
+                            for (int idx = 0; idx < kv_cache.scan_tuple_size();
+                                 ++idx)
+                            {
+                                const ScanTuple_msg &tuple_msg =
+                                    kv_cache.scan_tuple(idx);
+                                RecordStatus rec_status =
+                                    ToLocalType::ConvertRecordStatusType(
+                                        tuple_msg.rec_status());
+                                size_t key_offset = 0;
+                                size_t rec_offset = 0;
+
+                                LOG(INFO) << "== kv key = " << tuple_msg.key()
+                                          << ", status = " << (int) rec_status;
+
+                                scan_cache->AddScanTuple(
+                                    tuple_msg.key(),
+                                    key_offset,
+                                    tuple_msg.key_ts(),
+                                    tuple_msg.record(),
+                                    rec_offset,
+                                    rec_status,
+                                    tuple_msg.gap_ts(),
+                                    tuple_msg.cce_addr().cce_lock_ptr(),
+                                    tuple_msg.cce_addr().term(),
+                                    tuple_msg.cce_addr().core_id(),
+                                    tuple_msg.cce_addr().node_group_id());
+                            }
+
+                            if (kv_cache.trailing_cnt() > 0)
+                            {
+                                scan_cache->RemoveLast(
+                                    scan_cache->Size() -
+                                    memory_cache.trailing_cnt());
+                            }
+                        }
+                    }
+                }
+            }
+
+            // hd_res->SetFinished();
+            hd_res->SetRemoteFinished();
         }
 
         txm->ReleaseSharedForwardLatch();
