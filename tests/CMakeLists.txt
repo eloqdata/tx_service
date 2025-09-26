@@ -1,27 +1,26 @@
-
-cmake_minimum_required( VERSION 3.0 )
+cmake_minimum_required( VERSION 3.12 )
 
 project( CatchExamples CXX )
 
 find_package(Catch2 REQUIRED)
 
-option(USE_ROCKSDB_LOG_STATE "Whether use rocksdb log state or in-memory log state" ON)
-message(NOTICE "USE_ROCKSDB_LOG_STATE : ${USE_ROCKSDB_LOG_STATE}")
-option(WITH_ROCKSDB_CLOUD "RocksDB Cloud storage backend, S3 or GCS")
-set_property(CACHE WITH_ROCKSDB_CLOUD PROPERTY STRINGS "S3" "GCS")
-message(NOTICE "With RocksDB Cloud: ${WITH_ROCKSDB_CLOUD}")
+set(WITH_LOG_STATE "ROCKSDB" CACHE STRING "The log state implementation")
+set_property(CACHE WITH_LOG_STATE PROPERTY STRINGS "MEMORY" "ROCKSDB" "ROCKSDB_CLOUD_S3" "ROCKSDB_CLOUD_GCS")
+message(NOTICE "WITH_LOG_STATE: ${WITH_LOG_STATE}")
 
-if (USE_ROCKSDB_LOG_STATE)
-  if (WITH_ROCKSDB_CLOUD MATCHES "S3|GCS")
-    if (WITH_ROCKSDB_CLOUD STREQUAL "S3")
-        add_compile_definitions(WITH_ROCKSDB_CLOUD=1)
-    elseif (WITH_ROCKSDB_CLOUD STREQUAL "GCS")
-        add_compile_definitions(WITH_ROCKSDB_CLOUD=2)
-    endif()
-  endif()
-  add_compile_definitions(USE_ROCKSDB_LOG_STATE)
+# Add compile flags for LOG STATE TYPE
+if(WITH_LOG_STATE STREQUAL "MEMORY")
+  add_compile_definitions(LOG_STATE_TYPE_MEM)
+elseif(WITH_LOG_STATE STREQUAL "ROCKSDB")
+  add_compile_definitions(LOG_STATE_TYPE_RKDB)
+elseif(WITH_LOG_STATE STREQUAL "ROCKSDB_CLOUD_S3")
+  add_compile_definitions(LOG_STATE_TYPE_RKDB_S3)
+elseif(WITH_LOG_STATE STREQUAL "ROCKSDB_CLOUD_GCS")
+  add_compile_definitions(LOG_STATE_TYPE_RKDB_GCS)
+else()
+  message(FATAL_ERROR "Unknown WITH_LOG_STATE: ${WITH_LOG_STATE}")
 endif()
-	   
+
 # define folders used:
 set( TESTS_DIR ${CMAKE_SOURCE_DIR}/tests )
 set( HEADER_DIR   ${CMAKE_SOURCE_DIR}/tests/include) 
