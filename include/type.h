@@ -681,6 +681,33 @@ struct WorkerThreadContext
     std::condition_variable cv_;
     WorkerStatus status_{WorkerStatus::Active};
 };
+
+enum class DataStoreDataType
+{
+    Blob,
+    Numeric,
+    String,
+    Bool
+};
+
+struct DataStoreSearchCond
+{
+    DataStoreSearchCond(std::string field_name,
+                        std::string op,
+                        std::string val_str,
+                        DataStoreDataType data_type)
+        : field_name_(field_name),
+          op_(op),
+          val_str_(val_str),
+          data_type_(data_type)
+    {
+    }
+
+    std::string field_name_;
+    std::string op_;
+    std::string val_str_;
+    DataStoreDataType data_type_;
+};
 }  // namespace txservice
 
 namespace std

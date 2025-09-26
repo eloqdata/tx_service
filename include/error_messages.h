@@ -127,6 +127,7 @@ enum struct TxErrorCode : uint16_t
     // Update sequence table fail
     UPDATE_SEQUENCE_TABLE_FAIL,
 
+    INVALID_CURSOR,
 };
 
 static const std::unordered_map<TxErrorCode, std::string> tx_error_messages{
@@ -212,6 +213,7 @@ static const std::unordered_map<TxErrorCode, std::string> tx_error_messages{
     {TxErrorCode::UPLOAD_BATCH_REJECTED, "Upload batch rejected."},
     {TxErrorCode::RPC_CALL_ERR, "RPC call error."},
     {TxErrorCode::UPDATE_SEQUENCE_TABLE_FAIL, "Update sequence table fail."},
+    {TxErrorCode::INVALID_CURSOR, "ERR invalid cursor"},
 };
 
 static inline const std::string &TxErrorMessage(TxErrorCode err_code)
@@ -328,6 +330,9 @@ enum struct CcErrorCode : uint8_t
 
     // Update sequence table fail
     UPDATE_SEQUENCE_TABLE_FAIL,
+
+    // The cursor has become invalid.
+    INVALID_CURSOR,
 
     // NOTICE: please keep this variable at tail.
     LAST_ERROR_CODE,

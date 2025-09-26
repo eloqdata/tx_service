@@ -687,6 +687,7 @@ private:
     // Initialization phase.
     InitTxnOperation init_txn_;
 
+    ReadLocalOperation lock_cluster_config_op_;
     // Execution phase.
     CcHandlerResult<ReadKeyResult> lock_range_bucket_result_;
     ReadLocalOperation lock_range_op_;

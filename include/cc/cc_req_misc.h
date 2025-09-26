@@ -33,8 +33,10 @@
 #include <mutex>
 #include <optional>
 #include <string>
+#include <string_view>
 #include <unordered_map>
 #include <utility>
+#include <variant>
 #include <vector>
 
 #include "catalog_factory.h"  //TableSchema
@@ -594,6 +596,99 @@ public:
 
     // These variables only be used in DataStoreHandler
     std::string kv_session_id_;
+    std::string kv_start_key_;
+    std::string kv_end_key_;
+};
+
+struct FetchBucketDataCc;
+typedef void (*OnFetchedBucketData)(FetchBucketDataCc *fetch_cc,
+                                    CcRequestBase *requester);
+
+struct FetchBucketDataCc : public CcRequestBase
+{
+public:
+    FetchBucketDataCc() = default;
+
+    ~FetchBucketDataCc() = default;
+
+    void Reset(const TableName *table_name,
+               const TableSchema *table_schema,
+               NodeGroupId node_group_id,
+               int64_t node_group_term,
+               CcShard *ccs,
+               uint16_t bucket_id,
+               const std::vector<DataStoreSearchCond> *pushdown_cond,
+               std::string_view start_key,
+               KeyType start_key_type,
+               bool start_key_inclusive,
+               std::string_view end_key,
+               KeyType end_key_type,
+               bool end_key_inclusive,
+               size_t batch_size,
+               CcRequestBase *requester,
+               OnFetchedBucketData backfill_func);
+
+    bool ValidTermCheck();
+
+    bool Execute(CcShard &ccs) override;
+
+    void SetFinish(int32_t err);
+
+    void AddDataItem(std::string &&key_str,
+                     std::string &&rec_str,
+                     uint64_t version,
+                     bool is_deleted);
+
+    std::string_view StartKey()
+    {
+        if (std::holds_alternative<std::string>(start_key_))
+        {
+            return std::string_view(std::get<0>(start_key_).data(),
+                                    std::get<0>(start_key_).size());
+        }
+        else
+        {
+            return std::get<1>(start_key_);
+        }
+    }
+
+    std::string_view EndKey()
+    {
+        if (std::holds_alternative<std::string>(end_key_))
+        {
+            return std::string_view(std::get<0>(end_key_).data(),
+                                    std::get<0>(end_key_).size());
+        }
+        else
+        {
+            return std::get<1>(end_key_);
+        }
+    }
+
+    // table_name is a string view, cannot access it outside TxProcessor.
+    TableName table_name_{
+        std::string(""), TableType::Primary, TableEngine::None};
+    std::string kv_table_name_;
+    NodeGroupId node_group_id_;
+    int64_t node_group_term_;
+    CcShard *ccs_;
+    uint16_t bucket_id_;
+    const std::vector<DataStoreSearchCond> *pushdown_cond_{nullptr};
+    std::variant<std::string, std::string_view> start_key_;
+    KeyType start_key_type_{KeyType::NegativeInf};
+    bool start_key_inclusive_{false};
+    std::variant<std::string, std::string_view> end_key_;
+    KeyType end_key_type_{KeyType::PositiveInf};
+    bool end_key_inclusive_{false};
+    size_t batch_size_{0};
+    CcRequestBase *requester_{nullptr};
+    int32_t err_code_{0};
+
+    std::deque<RawSliceDataItem> bucket_data_items_;
+    bool is_drained_{false};
+
+    OnFetchedBucketData backfill_func_;
+
     std::string kv_start_key_;
     std::string kv_end_key_;
 };
