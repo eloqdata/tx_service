@@ -60,6 +60,7 @@
 #include "store/data_store_handler.h"
 #include "system_handler.h"
 #include "tentry.h"
+#include "tx_key.h"
 #include "tx_service_common.h"
 
 namespace txservice
@@ -739,6 +740,27 @@ public:
         OnFetchedSnapshot backfill_func,
         int32_t partition_id);
 
+    store::DataStoreHandler::DataStoreOpStatus FetchBucketData(
+        const TableName *table_name,
+        const TableSchema *table_schema,
+        NodeGroupId node_group_id,
+        int64_t node_group_term,
+        CcShard *ccs,
+        absl::flat_hash_map<uint16_t, bool> &bucket_ids,
+        const std::vector<DataStoreSearchCond> *pushdown_cond_,
+        std::string_view start_key,
+        KeyType start_key_type,
+        bool start_key_inclusive,
+        std::string_view end_key,
+        KeyType end_key_type,
+        bool end_key_inclusive,
+        size_t batch_size,
+        CcRequestBase *requester,
+        OnFetchedBucketData backfill_func);
+
+    store::DataStoreHandler::DataStoreOpStatus FetchBucketData(
+        FetchBucketDataCc *fetch_bucket_data_cc);
+
     void RemoveFetchRecordRequest(LruEntry *cce);
 
     CcMap *CreateOrUpdatePkCcMap(const TableName &table_name,
@@ -1072,6 +1094,8 @@ private:
 
     // For load snapshot from kvstore asynchronously
     CcRequestPool<FetchSnapshotCc> fetch_snapshot_cc_pool_;
+    // For load bucket data from kvstore asynchronously
+    CcRequestPool<FetchBucketDataCc> fetch_bucket_data_cc_pool_;
 
     // For concurrency execution of cpu-bound tasks.
     CcRequestPool<RunOnTxProcessorCc> run_on_tx_processor_cc_pool_;

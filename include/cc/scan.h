@@ -153,6 +153,13 @@ public:
         rec_ptr_ = ptr;
     }
 
+    void SetRecord(std::unique_ptr<ValueT> rec_obj)
+    {
+        rec_ptr_ = nullptr;
+        is_ptr_ = false;
+        rec_obj_ = std::move(rec_obj);
+    }
+
     void SetRecord(const char *rec, size_t &offset)
     {
         rec_ptr_.reset();
@@ -181,7 +188,7 @@ private:
     bool is_ptr_{false};
 
     template <typename KT, typename VT>
-    friend class TemplateCcScanner;
+    friend class HashParitionCcScanner;
 
     template <typename KT, typename VT>
     friend class TemplateScanCache;

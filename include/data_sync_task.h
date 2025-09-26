@@ -71,6 +71,7 @@ struct DataSyncStatus
     // the data are scanned and flushed to kvstore.
     int32_t unfinished_tasks_{0};
     bool all_task_started_{false};
+
     CcErrorCode err_code_{CcErrorCode::NO_ERROR};
     // True if need to truncate redo log when all tasks succeed.
     bool need_truncate_log_{true};
