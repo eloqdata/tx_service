@@ -6551,7 +6551,6 @@ void LocalCcShards::FastMetaDataMutex::lock()
             // std::this_thread::yield();
         }
     }
-    LOG(INFO) << "finish lock";
 
     meta_data_mux_.lock();
 }
