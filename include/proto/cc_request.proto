@@ -998,8 +998,6 @@ message ScanCache_msg {
 message ShardCacheMsg {
     ScanCache_msg memory_scan_cache = 1;
     map<uint32, ScanCache_msg> kv_scan_cache = 2;
-    repeated uint32 bucket_id = 3;
-    repeated uint64 cache_offset = 4;
 }
 
 message ShardCacheMsgMap {
