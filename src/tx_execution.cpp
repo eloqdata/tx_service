@@ -2566,7 +2566,7 @@ void TransactionExecution::PostProcess(ScanOpenOperation &scan_open)
                 batch_idx;
 
             size_t plan_bucket_cnt_soft_limit = 256;
-            size_t total_bucket_cnt = Sharder::Instance().ToTalRangeBuckets();
+            size_t total_bucket_cnt = Sharder::Instance().TotalRangeBuckets();
 
             absl::flat_hash_map<NodeGroupId, std::vector<uint16_t>>
                 current_plan_bucket_ids;
@@ -2607,12 +2607,15 @@ void TransactionExecution::PostProcess(ScanOpenOperation &scan_open)
             }
         }
 
-        auto search_cond =
-            Sharder::Instance()
-                .GetDataStoreHandler()
-                ->CreateDataSerachCondition(scan_open.tx_req_->obj_type_,
-                                            scan_open.tx_req_->scan_pattern_);
-
+        std::vector<DataStoreSearchCond> search_cond;
+        if (Sharder::Instance().GetDataStoreHandler())
+        {
+            search_cond = Sharder::Instance()
+                              .GetDataStoreHandler()
+                              ->CreateDataSerachCondition(
+                                  scan_open.tx_req_->obj_type_,
+                                  scan_open.tx_req_->scan_pattern_);
+        }
         scans_.try_emplace(open_result.scan_alias_,
                            std::move(open_result.scanner_),
                            std::move(search_cond),
@@ -2676,7 +2679,6 @@ void TransactionExecution::Process(ScanNextOperation &scan_next)
 
     bool to_scan_next = scanner.Current() == nullptr &&
                         scanner.Status() == ScannerStatus::Blocked;
-
     if (to_scan_next)
     {
         if (scan_next.scan_state_->current_plan_index_ == SIZE_MAX ||

@@ -164,6 +164,7 @@ void LruEntry::ClearLocks(CcShard &ccs,
     {
         ccs.DeleteLockHoldingTx(txn, this, ng_id);
     }
+
     // clean up blocked cc reqs
     key_lock->AbortAllQueuedRequests(CcErrorCode::REQUESTED_NODE_NOT_LEADER);
 
