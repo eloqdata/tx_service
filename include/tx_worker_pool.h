@@ -41,7 +41,7 @@ public:
     TxWorkerPool(size_t max_workers_num = MAX_WORKERS_NUM);
     ~TxWorkerPool() = default;
 
-    void SubmitWork(std::function<void()> work);
+    void SubmitWork(std::function<void(size_t)> work);
     size_t WorkQueueSize();
     void Shutdown();
     size_t WorkerPoolSize()
@@ -52,7 +52,7 @@ public:
 private:
     size_t max_workers_num_;
     std::vector<std::thread> workers_;
-    std::deque<std::function<void()>> work_queue_;
+    std::deque<std::function<void(size_t)>> work_queue_;
     std::mutex work_queue_mutex_;
     std::condition_variable work_queue_cv_;
     std::atomic<bool> shutdown_indicator_{false};
