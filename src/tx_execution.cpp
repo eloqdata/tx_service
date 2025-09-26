@@ -2567,7 +2567,7 @@ void TransactionExecution::PostProcess(ScanOpenOperation &scan_open)
                 batch_idx;
 
             size_t plan_bucket_cnt_soft_limit = 256;
-            size_t total_bucket_cnt = Sharder::Instance().ToTalRangeBuckets();
+            size_t total_bucket_cnt = Sharder::Instance().TotalRangeBuckets();
 
             absl::flat_hash_map<NodeGroupId, std::vector<uint16_t>>
                 current_plan_bucket_ids;
@@ -2680,10 +2680,6 @@ void TransactionExecution::Process(ScanNextOperation &scan_next)
 
     bool to_scan_next = scanner.Current() == nullptr &&
                         scanner.Status() == ScannerStatus::Blocked;
-    LOG(INFO) << "== to scan next = " << to_scan_next << ", plan index = "
-              << scan_next.tx_req_->bucket_scan_plan_->PlanIndex()
-              << ", state plan index = "
-              << scan_next.scan_state_->current_plan_index_;
     if (to_scan_next)
     {
         if (scan_next.scan_state_->current_plan_index_ == SIZE_MAX ||
@@ -2722,8 +2718,6 @@ void TransactionExecution::Process(ScanNextOperation &scan_next)
             // Reset all caches, we need to scan next batch data
             scanner.ResetCaches();
 
-            LOG(INFO) << "cc_handler->ScanNextBatch start, cnt = "
-                      << ng_scan_buckets.size();
             for (const auto &[node_group_id, bucket_ids] : ng_scan_buckets)
             {
                 cc_handler_->ScanNextBatch(
@@ -2743,7 +2737,6 @@ void TransactionExecution::Process(ScanNextOperation &scan_next)
                     scan_next.tx_req_->obj_type_,
                     scan_next.tx_req_->scan_pattern_);
             }
-            LOG(INFO) << "cc_handler stop";
         }
 
         is_local = scan_next.hd_result_.RemoteRefCnt() == 0;
@@ -3072,12 +3065,6 @@ void TransactionExecution::PostProcess(ScanNextOperation &scan_next)
 
             scanner.MoveNext();
         }
-
-        LOG(INFO)
-            << "== current plan is finished : "
-            << scan_next.tx_req_->bucket_scan_plan_->CurrentPlanIsFinished()
-            << ", plan index = "
-            << scan_next.tx_req_->bucket_scan_plan_->PlanIndex();
 
         bool_resp_->Finish(
             scan_next.tx_req_->bucket_scan_plan_->CurrentPlanIsFinished());

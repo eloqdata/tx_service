@@ -1093,7 +1093,6 @@ void txservice::remote::RemoteScanNextBatch::Reset(
 
     if (scan_next.has_progress())
     {
-        LOG(INFO) << "== has progress";
         const ::txservice::remote::BucketScanProgressMap &scan_progress_map =
             scan_next.progress();
         for (const auto &[core_id, progress] : scan_progress_map.progress())
@@ -1101,17 +1100,12 @@ void txservice::remote::RemoteScanNextBatch::Reset(
             memory_is_drained_[core_id] = false;
             for (const auto &[bucket_id, drained] : progress.scan_buckets())
             {
-                if (!drained)
-                {
-                    LOG(INFO) << "no drain bucket id = " << bucket_id;
-                }
                 scan_buckets_[core_id].try_emplace(bucket_id, drained);
             }
         }
     }
     else
     {
-        LOG(INFO) << "== has global info";
         const ::txservice::remote::BucketScanInfoMsg &scan_info =
             scan_next.global_info();
         for (const auto &bucket_id : scan_info.scan_buckets())
@@ -1139,9 +1133,6 @@ void txservice::remote::RemoteScanNextBatch::Reset(
         iter->second.cce_lock_addr_ = 0;
         iter->second.scan_type_ = ScanType::ScanUnknow;
         iter->second.type_ = ScanBlockingType::NoBlocking;
-
-        LOG(INFO) << "== scan bucket: core idx = " << core_idx
-                  << ", first core = " << scan_buckets_.begin()->first;
     }
 
     ccm_ = nullptr;
@@ -1165,12 +1156,6 @@ void txservice::remote::RemoteScanNextBatch::Reset(
         txservice::remote::ShardCacheMsg *shard_cache_msg = &iter.first->second;
         scan_caches_.try_emplace(core_id, shard_cache_msg, 128);
         progress_map->mutable_progress()->try_emplace(core_id);
-    }
-
-    for (const auto &[core_id, progress] : scan_buckets_)
-    {
-        LOG(INFO) << "== All Finished = " << ShardIsDrained(core_id)
-                  << ", core idx = " << core_id;
     }
 
     input_msg_ = std::move(input_msg);
