@@ -688,7 +688,6 @@ public:
     bool is_local_{true};
     std::deque<RawSliceDataItem> bucket_data_items_;
     bool is_drained_{false};
-    absl::flat_hash_map<uint16_t, bool> *scan_next_batch_cc_buckets_{nullptr};
 
     OnFetchedBucketData backfill_func_;
 

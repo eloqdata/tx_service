@@ -623,8 +623,6 @@ void txservice::remote::RemoteCcHandler::ScanNext(
         {
             scan_info->add_scan_buckets(bucket);
         }
-
-        LOG(INFO) << "== RemoteCcHandler::ScanNext: ng id = " << ng_id;
     }
     else
     {
@@ -640,8 +638,6 @@ void txservice::remote::RemoteCcHandler::ScanNext(
                                                                    drained);
             }
 
-            LOG(INFO) << "== RemoteCcHandler::ScanNext: ng id = " << ng_id
-                      << ", progress finished = " << progress.AllFinished();
             progress.pause_key_.Serialize(
                 *iter.first->second.mutable_start_key()->mutable_key());
             iter.first->second.set_start_key_inclusive(

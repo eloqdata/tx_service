@@ -1175,18 +1175,11 @@ void CcStreamReceiver::OnReceiveCcMsg(std::unique_ptr<CcMessage> msg)
     }
     case CcMessage::MessageType::CcMessage_MessageType_ScanNextRequest:
     {
-        LOG(INFO) << "== Rec remote scan message";
         RemoteScanNextBatch *scan_next_req = scan_next_pool_.NextRequest();
         TX_TRACE_ASSOCIATE(msg.get(), scan_next_req);
         scan_next_req->Reset(std::move(msg));
         if (!scan_next_req->BucketIds().empty())
         {
-            LOG(INFO) << "== enqueue remote scan request: core idx = "
-                      << scan_next_req->BucketIds().begin()->first;
-            LOG(INFO) << "== enqueue remote scan request: core idx = "
-                      << scan_next_req->BucketIds().begin()->first;
-            LOG(INFO) << "== enqueue remote scan request: core idx = "
-                      << scan_next_req->BucketIds().begin()->first;
             // only one core to decode tx key
             local_shards_.EnqueueCcRequest(
                 scan_next_req->BucketIds().begin()->first, scan_next_req);
@@ -1239,11 +1232,8 @@ void CcStreamReceiver::OnReceiveCcMsg(std::unique_ptr<CcMessage> msg)
         }
 
         ScanNextResponse &scan_next_res = *msg->mutable_scan_next_resp();
-        LOG(INFO) << "== stream: ref cnt = " << hd_res->RefCnt()
-                  << ", node group id = " << scan_next_res.node_group_id();
         if (scan_next_res.error_code() != 0)
         {
-            LOG(INFO) << "== stream: err code = " << scan_next_res.error_code();
             // hd_res->SetError(
             //    ToLocalType::ConvertCcErrorCode(scan_next_res.error_code()));
             hd_res->SetRemoteError(
@@ -1287,21 +1277,12 @@ void CcStreamReceiver::OnReceiveCcMsg(std::unique_ptr<CcMessage> msg)
                     for (const auto &[bucket_id, is_drained] :
                          progress.scan_buckets())
                     {
-                        if (!is_drained)
-                        {
-                            LOG(INFO)
-                                << "==rec: core idx = " << core_idx
-                                << ", no drained bucket id = " << bucket_id;
-                        }
                         bucket_scan_progress->scan_buckets_[bucket_id] =
                             is_drained;
                     }
 
                     bucket_scan_progress->memory_scan_is_finished_ =
                         progress.memory_is_drained();
-                    LOG(INFO) << "== rec: core idx = " << core_idx
-                              << ", memory is drained = "
-                              << bucket_scan_progress->memory_scan_is_finished_;
                 }
 
                 ::txservice::remote::ShardCacheMsgMap *shard_caches =
@@ -1328,9 +1309,6 @@ void CcStreamReceiver::OnReceiveCcMsg(std::unique_ptr<CcMessage> msg)
                                     tuple_msg.rec_status());
                             size_t key_offset = 0;
                             size_t rec_offset = 0;
-
-                            LOG(INFO) << "== memory key = " << tuple_msg.key()
-                                      << ", status = " << (int) rec_status;
 
                             scan_cache->AddScanTuple(
                                 tuple_msg.key(),
@@ -1371,9 +1349,6 @@ void CcStreamReceiver::OnReceiveCcMsg(std::unique_ptr<CcMessage> msg)
                                         tuple_msg.rec_status());
                                 size_t key_offset = 0;
                                 size_t rec_offset = 0;
-
-                                LOG(INFO) << "== kv key = " << tuple_msg.key()
-                                          << ", status = " << (int) rec_status;
 
                                 scan_cache->AddScanTuple(
                                     tuple_msg.key(),
