@@ -1232,30 +1232,32 @@ void txservice::LocalCcHandler::ScanNextBatch(
     hd_res.SetToBlock();
 #endif
 
+    BucketScanPlan *plan = hd_res.Value().current_scan_plan_;
     if (is_standby_tx ||
         Sharder::Instance().LeaderNodeId(node_group_id) == cc_shards_.node_id_)
     {
-        BucketScanPlan *plan = hd_res.Value().current_scan_plan_;
         assert(plan->Buckets().count(node_group_id) > 0);
 
         absl::flat_hash_map<uint16_t, BucketScanProgress>
             *bucket_scan_progress = plan->GetBucketScanProgress(node_group_id);
         if (bucket_scan_progress->empty())
         {
-            for (uint16_t core_idx = 0;
-                 core_idx < Sharder::Instance().GetLocalCcShardsCount();
-                 ++core_idx)
-            {
-                bucket_scan_progress->try_emplace(
-                    core_idx, start_key.Clone(), start_inclusive);
-            }
-
             for (const auto &bucket_id : *plan->Buckets(node_group_id))
             {
                 uint16_t target_core =
                     Sharder::Instance().ShardBucketIdToCoreIdx(bucket_id);
-                bucket_scan_progress->at(target_core)
-                    .scan_buckets_.emplace(bucket_id, false);
+
+                auto iter = bucket_scan_progress->find(target_core);
+                if (iter != bucket_scan_progress->end())
+                {
+                    iter->second.scan_buckets_.emplace(bucket_id, false);
+                }
+                else
+                {
+                    auto em_it = bucket_scan_progress->try_emplace(
+                        target_core, start_key.Clone(), start_inclusive);
+                    em_it.first->second.scan_buckets_.emplace(bucket_id, false);
+                }
             }
         }
 
@@ -1284,6 +1286,9 @@ void txservice::LocalCcHandler::ScanNextBatch(
         TX_TRACE_ACTION(this, req);
         TX_TRACE_DUMP(req);
 
+        LOG(INFO) << "local request: ref cnt = " << hd_res.RefCnt()
+                  << ", ng id = " << node_group_id << ", addr = " << &hd_res;
+
         for (const auto &[core_idx, scan_progress] :
              *req->GetBucketScanProgress())
         {
@@ -1292,16 +1297,23 @@ void txservice::LocalCcHandler::ScanNextBatch(
     }
     else
     {
+        LOG(INFO) << "remote request: ref cnt = " << hd_res.RefCnt()
+                  << ", ng id = " << node_group_id << ", addr = " << &hd_res;
         hd_res.IncreaseRemoteRef();
-        /*
-        hd_res.Value().is_local_ = false;
         remote_hd_.ScanNext(cc_shards_.node_id_,
                             node_group_id,
+                            plan->GetNodeGroupTerm(node_group_id),
                             tx_number,
                             tx_term,
                             command_id,
                             start_ts,
-                            blocked_cache,
+                            table_name,
+                            start_key,
+                            start_inclusive,
+                            end_key,
+                            end_inclusive,
+                            *plan->Buckets(node_group_id),
+                            *plan->GetBucketScanProgress(node_group_id),
                             hd_res,
                             scanner.iso_level_,
                             scanner.protocol_,
@@ -1312,7 +1324,6 @@ void txservice::LocalCcHandler::ScanNextBatch(
                             scanner.is_require_recs_,
                             obj_type,
                             scan_pattern);
-        */
     }
 }
 

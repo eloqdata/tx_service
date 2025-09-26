@@ -902,6 +902,7 @@ void FetchBucketDataCc::Reset(
     NodeGroupId node_group_id,
     int64_t node_group_term,
     CcShard *ccs,
+    bool is_local,
     uint16_t bucket_id,
     const std::vector<DataStoreSearchCond> *pushdown_cond,
     std::string_view start_key,
@@ -921,6 +922,7 @@ void FetchBucketDataCc::Reset(
     node_group_id_ = node_group_id;
     node_group_term_ = node_group_term;
     ccs_ = ccs;
+    is_local_ = is_local;
     bucket_id_ = bucket_id;
     pushdown_cond_ = pushdown_cond;
     start_key_ = start_key;
@@ -968,8 +970,6 @@ void FetchBucketDataCc::AddDataItem(std::string &&key_str,
 
 bool FetchBucketDataCc::Execute(CcShard &ccs)
 {
-    ScanNextBatchCc *req = static_cast<ScanNextBatchCc *>(requester_);
-
     if (!ValidTermCheck())
     {
         err_code_ = static_cast<int32_t>(CcErrorCode::NG_TERM_CHANGED);
@@ -977,12 +977,28 @@ bool FetchBucketDataCc::Execute(CcShard &ccs)
 
     if (err_code_ != 0)
     {
-        req->DecreaseWaitForFetchBucketCnt(ccs.core_id_);
-        req->SetErrorCode(static_cast<CcErrorCode>(err_code_));
-        if (req->IsWaitForFetchBucket(ccs.core_id_) &&
-            req->WaitForFetchBucketCnt(ccs.core_id_) == 0)
+        if (is_local_)
         {
-            ccs_->Enqueue(requester_);
+            ScanNextBatchCc *req = static_cast<ScanNextBatchCc *>(requester_);
+            req->DecreaseWaitForFetchBucketCnt(ccs.core_id_);
+            req->SetErrorCode(static_cast<CcErrorCode>(err_code_));
+            if (req->IsWaitForFetchBucket(ccs.core_id_) &&
+                req->WaitForFetchBucketCnt(ccs.core_id_) == 0)
+            {
+                ccs_->Enqueue(requester_);
+            }
+        }
+        else
+        {
+            remote::RemoteScanNextBatch *req =
+                static_cast<remote::RemoteScanNextBatch *>(requester_);
+            req->DecreaseWaitForFetchBucketCnt(ccs.core_id_);
+            req->SetErrorCode(static_cast<CcErrorCode>(err_code_));
+            if (req->IsWaitForFetchBucket(ccs.core_id_) &&
+                req->WaitForFetchBucketCnt(ccs.core_id_) == 0)
+            {
+                ccs_->Enqueue(requester_);
+            }
         }
     }
     else

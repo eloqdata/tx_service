@@ -955,6 +955,14 @@ message ScanTuple_msg {
     CceAddr_msg cce_addr = 6;
 }
 
+message RemoteTxKey {
+    oneof inner_key {
+        bytes key = 1;
+        bool neg_inf = 2;
+        bool pos_inf = 3;
+    }
+}
+
 message ScanOpenRequest {
     uint32 src_node_id = 1;
     uint32 shard_id = 2;
@@ -983,6 +991,18 @@ message ScanOpenRequest {
 
 message ScanCache_msg {
     repeated ScanTuple_msg scan_tuple = 1;
+    int32 trailing_cnt = 2;
+}
+
+message ShardCacheMsg {
+    ScanCache_msg memory_scan_cache = 1;
+    map<uint32, ScanCache_msg> kv_scan_cache = 2;
+    repeated uint32 bucket_id = 3;
+    repeated uint64 cache_offset = 4;
+}
+
+message ShardCacheMsgMap {
+    map<uint32, ShardCacheMsg> shard_caches = 1;
 }
 
 message ScanOpenResponse {
@@ -991,28 +1011,57 @@ message ScanOpenResponse {
     repeated ScanCache_msg scan_cache = 3;
 }
 
+message BucketScanProgressMsg {
+    RemoteTxKey start_key = 1;
+    bool start_key_inclusive = 2;
+    bool memory_is_drained = 3;
+    map<int32, bool> scan_buckets = 4;
+}
+
+message BucketScanProgressMap {
+    map<int32, BucketScanProgressMsg> progress = 1;
+}
+
+message BucketScanInfoMsg {
+    repeated int32 scan_buckets = 1;
+    RemoteTxKey start_key = 2;
+    bool start_key_inclusive = 3;
+}
+
 message ScanNextRequest {
     uint32 src_node_id = 1;
     uint32 node_group_id = 2;
-    CceAddr_msg prior_cce_ptr = 3;
-    bool direction = 4;
-    uint64 ts = 5;
-    uint64 scan_cache_ptr = 6;
-    bool ckpt = 7;
-    IsolationType iso_level = 8;
-    CcProtocolType protocol = 9;
-    bool is_for_write = 10;
-    bool is_covering_keys = 11;
-    int32 obj_type = 12; // Only used for redis scan command
-    string scan_pattern = 13; // Only used for redis scan command
-    bool is_require_keys = 14;
-    bool is_require_recs = 15;
+    int64 node_group_term = 3;
+    string table_name_str = 4;
+    TableEngine table_engine = 5;
+    CcTableType table_type = 6;
+    bool direction = 7;
+    uint64 ts = 8;
+    bool ckpt = 9;
+    IsolationType iso_level = 10;
+    CcProtocolType protocol = 11;
+    bool is_for_write = 12;
+    bool is_covering_keys = 13;
+    int32 obj_type = 14; // Only used for redis scan command
+    string scan_pattern = 15; // Only used for redis scan command
+    bool is_require_keys = 16;
+    bool is_require_recs = 17;
+
+    oneof scan_spec {
+        BucketScanProgressMap progress = 18;
+        BucketScanInfoMsg global_info = 19;
+    }
+
+    RemoteTxKey end_key = 20;
+    bool end_key_inclusive = 21;
 }
 
 message ScanNextResponse {
     int32 error_code = 1;
-    ScanCache_msg scan_cache = 2;
-    uint64 scan_cache_ptr = 3;
+    ShardCacheMsgMap shard_cache_map = 2;
+    BucketScanProgressMap progress = 3;
+    int64 term = 4;
+    uint32 node_group_id = 5;
 }
 
 message ScanSliceRequest {
