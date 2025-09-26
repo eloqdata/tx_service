@@ -31,20 +31,32 @@ namespace txservice
 // EloqStringRecord implementation
 void EloqStringRecord::Serialize(std::vector<char> &buf, size_t &offset) const
 {
+    size_t unpack_info_size = unpack_info_.size();
     size_t encoded_blob_size = encoded_blob_.size();
-    size_t total_size = sizeof(uint32_t) + encoded_blob_size;
+    size_t total_size =
+        sizeof(size_t) * 2 + unpack_info_size + encoded_blob_size;
 
     if (buf.capacity() - offset < total_size)
     {
         buf.resize(offset + total_size);
     }
 
+    // Serialize unpack info size and unpack info
+    const char *size_ptr = reinterpret_cast<const char *>(&unpack_info_size);
+    std::copy(size_ptr, size_ptr + sizeof(size_t), buf.begin() + offset);
+    offset += sizeof(size_t);
+
+    if (unpack_info_size > 0)
+    {
+        std::copy(
+            unpack_info_.begin(), unpack_info_.end(), buf.begin() + offset);
+        offset += unpack_info_size;
+    }
+
     // Serialize encoded blob size and encoded blob
-    uint32_t blob_size_val = static_cast<uint32_t>(encoded_blob_size);
-    const char *blob_size_ptr = reinterpret_cast<const char *>(&blob_size_val);
-    std::copy(
-        blob_size_ptr, blob_size_ptr + sizeof(uint32_t), buf.begin() + offset);
-    offset += sizeof(uint32_t);
+    size_ptr = reinterpret_cast<const char *>(&encoded_blob_size);
+    std::copy(size_ptr, size_ptr + sizeof(size_t), buf.begin() + offset);
+    offset += sizeof(size_t);
 
     if (encoded_blob_size > 0)
     {
@@ -56,32 +68,56 @@ void EloqStringRecord::Serialize(std::vector<char> &buf, size_t &offset) const
 
 void EloqStringRecord::Serialize(std::string &str) const
 {
-    size_t encoded_blob_size = encoded_blob_.size();
-    uint32_t size_val = static_cast<uint32_t>(encoded_blob_size);
+    size_t blob_size = unpack_info_.size();
+    // Serialize unpack info size
+    const char *size_ptr = reinterpret_cast<const char *>(&blob_size);
+    str.append(size_ptr, sizeof(size_t));
 
+    // Serialize unpack info
+    if (blob_size > 0)
+    {
+        str.append(unpack_info_.data(), blob_size);
+    }
+
+    blob_size = encoded_blob_.size();
     // Serialize encoded blob size
-    const char *size_ptr = reinterpret_cast<const char *>(&size_val);
-    str.append(size_ptr, sizeof(uint32_t));
+    size_ptr = reinterpret_cast<const char *>(&blob_size);
+    str.append(size_ptr, sizeof(size_t));
 
     // Serialize encoded blob
-    if (encoded_blob_size > 0)
+    if (blob_size > 0)
     {
-        str.append(encoded_blob_.data(), encoded_blob_size);
+        str.append(encoded_blob_.data(), blob_size);
     }
 }
 
 void EloqStringRecord::Deserialize(const char *buf, size_t &offset)
 {
+    // Deserialize unpack info size and unpack info
+    const size_t *size_ptr = reinterpret_cast<const size_t *>(buf + offset);
+    size_t len = *size_ptr;
+    offset += sizeof(size_t);
+
+    if (len > 0)
+    {
+        unpack_info_.assign(buf + offset, buf + offset + len);
+        offset += len;
+    }
+    else
+    {
+        unpack_info_.clear();
+    }
+
     // Deserialize encoded blob size
-    const uint32_t *size_ptr = reinterpret_cast<const uint32_t *>(buf + offset);
-    uint32_t encoded_blob_size = *size_ptr;
-    offset += sizeof(uint32_t);
+    size_ptr = reinterpret_cast<const size_t *>(buf + offset);
+    len = *size_ptr;
+    offset += sizeof(size_t);
 
     // Deserialize encoded blob
-    if (encoded_blob_size > 0)
+    if (len > 0)
     {
-        encoded_blob_.assign(buf + offset, buf + offset + encoded_blob_size);
-        offset += encoded_blob_size;
+        encoded_blob_.assign(buf + offset, buf + offset + len);
+        offset += len;
     }
     else
     {
