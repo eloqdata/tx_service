@@ -306,8 +306,10 @@ public:
             // this scan. Only deserializes the key when the key is included.
             assert(key_ts > 0);
             scan_tuple->key_ts_ = key_ts;
-            scan_tuple->KeyObj().Deserialize(
-                key_str.data(), key_offset, key_schema_);
+
+            scan_tuple->KeyObj().SetPackedKey(key_str.data(), key_str.size());
+            // scan_tuple->KeyObj().Deserialize(
+            //    key_str.data(), key_offset, key_schema_);
 
             scan_tuple->rec_status_ = rec_status;
             scan_tuple->SetRecord(record_str.data(), rec_offset);
@@ -336,6 +338,12 @@ public:
     }
 
     const TemplateScanTuple<KeyT, ValueT> *At(uint32_t idx) const
+    {
+        assert(idx < cache_.size());
+        return &cache_[idx];
+    }
+
+    TemplateScanTuple<KeyT, ValueT> *At(uint32_t idx)
     {
         assert(idx < cache_.size());
         return &cache_[idx];
@@ -646,6 +654,158 @@ public:
             }
         }
 
+        class Iterator
+        {
+        public:
+            Iterator()
+                : mgr_(nullptr),
+                  scan_cache_type_(ScanCacheType::MemoryCache),
+                  inner_(0),
+                  cur_(nullptr)
+            {
+            }
+
+            Iterator(const ShardCache *m)
+                : mgr_(m),
+                  scan_cache_type_(ScanCacheType::MemoryCache),
+                  inner_(0),
+                  cur_(nullptr)
+            {
+            }
+
+            Iterator(const Iterator &other)
+            {
+                mgr_ = other.mgr_;
+                scan_cache_type_ = other.scan_cache_type_;
+                inner_ = other.inner_;
+                kv_cache_iter_ = other.kv_cache_iter_;
+                cur_ = other.cur_;
+            }
+
+            Iterator &operator=(const Iterator &other)
+            {
+                if (this != &other)
+                {
+                    mgr_ = other.mgr_;
+                    scan_cache_type_ = other.scan_cache_type_;
+                    inner_ = other.inner_;
+                    kv_cache_iter_ = other.kv_cache_iter_;
+                    cur_ = other.cur_;
+                }
+                return *this;
+            }
+
+            enum class ScanCacheType
+            {
+                MemoryCache = 0,
+                KvCache = 1
+            };
+
+            void Init()
+            {
+                scan_cache_type_ = ScanCacheType::MemoryCache;
+                inner_ = 0;
+                kv_cache_iter_ = mgr_->kv_caches_.cbegin();
+                cur_ = nullptr;
+                SkipEmpty();
+            }
+
+            const TemplateScanTuple<KeyT, ValueT> *Current() const
+            {
+                assert(Valid());
+                return cur_;
+            }
+
+            bool MoveNext()
+            {
+                ++inner_;
+                LOG(INFO) << "== Iterator: MoveNext, inner = " << inner_;
+                if (scan_cache_type_ == ScanCacheType::MemoryCache)
+                {
+                    if (inner_ < mgr_->memory_cache_->Size())
+                    {
+                        cur_ = mgr_->memory_cache_->At(inner_);
+                        return true;
+                    }
+
+                    scan_cache_type_ = ScanCacheType::KvCache;
+                    kv_cache_iter_ = mgr_->kv_caches_.cbegin();
+                    inner_ = 0;  // reset containter index
+                }
+                else
+                {
+                    assert(kv_cache_iter_ != mgr_->kv_caches_.cend());
+                    if (inner_ < kv_cache_iter_->second->Size())
+                    {
+                        cur_ = kv_cache_iter_->second->At(inner_);
+                        return true;
+                    }
+                    // move to next kv cache
+                    kv_cache_iter_++;
+                    inner_ = 0;
+                }
+
+                SkipEmpty();
+                return Valid();
+            }
+
+            bool Valid() const
+            {
+                return cur_ != nullptr;
+            }
+
+        private:
+            void SkipEmpty()
+            {
+                if (mgr_ == nullptr)
+                {
+                    return;
+                }
+
+                cur_ = nullptr;
+                inner_ = 0;
+
+                if (scan_cache_type_ == ScanCacheType::MemoryCache)
+                {
+                    if (mgr_->memory_cache_ && mgr_->memory_cache_->Size() > 0)
+                    {
+                        cur_ = mgr_->memory_cache_->At(inner_);
+                        return;
+                    }
+
+                    scan_cache_type_ = ScanCacheType::KvCache;
+                    kv_cache_iter_ = mgr_->kv_caches_.cbegin();
+                }
+
+                while (kv_cache_iter_ != mgr_->kv_caches_.cend())
+                {
+                    if (kv_cache_iter_->second->Size() > 0)
+                    {
+                        cur_ = kv_cache_iter_->second->At(inner_);
+                        return;
+                    }
+
+                    ++kv_cache_iter_;
+                }
+
+                assert(kv_cache_iter_ == mgr_->kv_caches_.cend());
+            }
+
+            const ShardCache *mgr_;
+            ScanCacheType scan_cache_type_{ScanCacheType::MemoryCache};
+            size_t inner_;  // containter index
+            typename absl::flat_hash_map<
+                uint16_t,
+                std::unique_ptr<TemplateScanCache<KeyT, ValueT>>>::
+                const_iterator kv_cache_iter_{};
+            const TemplateScanTuple<KeyT, ValueT> *cur_;
+        };
+
+        Iterator NewIterator()
+        {
+            return Iterator(this);
+        }
+
         std::vector<std::unique_ptr<TemplateScanCache<KeyT, ValueT>>>
             free_cache_pool_;
         std::unique_ptr<TemplateScanCache<KeyT, ValueT>> memory_cache_{nullptr};
@@ -755,6 +915,9 @@ public:
         }
 
         current_iter_ = {};
+        debug_current_iter_ = {};
+        shard_cache_iter_ = typename ShardCache::Iterator();
+        cache_offset_ = 0;
         init_ = false;
     }
 
@@ -809,8 +972,7 @@ public:
     TxKey DecodeKey(const std::string &blob) const override
     {
         std::unique_ptr<KeyT> key = std::make_unique<KeyT>();
-        size_t offset = 0;
-        key->Deserialize(blob.data(), offset, key_schema_);
+        key->SetPackedKey(blob.data(), blob.size());
         return TxKey(std::move(key));
     }
 
@@ -818,6 +980,33 @@ public:
     {
         if (!init_)
         {
+            LOG(INFO) << "Init start";
+            debug_current_iter_ = shard_caches_.begin();
+            while (debug_current_iter_ != shard_caches_.end())
+            {
+                shard_cache_iter_ = debug_current_iter_->second->NewIterator();
+                shard_cache_iter_.Init();
+                if (shard_cache_iter_.Valid())
+                {
+                    break;
+                }
+
+                debug_current_iter_++;
+            }
+            LOG(INFO) << "Init stop";
+
+            if (debug_current_iter_ == shard_caches_.end())
+            {
+                status_ = ScannerStatus::Blocked;
+            }
+            else
+            {
+                status_ = ScannerStatus::Open;
+            }
+
+            init_ = true;
+
+            /*
             current_iter_ = index_chains_.begin();
             while (current_iter_ != index_chains_.end() &&
                    !current_iter_->second->HasMoreData())
@@ -835,23 +1024,26 @@ public:
             }
 
             init_ = true;
+            */
         }
     }
 
     const ScanTuple *Current() override
     {
-        /*
-        if (!init_)
-        {
-            Init();
-        }
-        */
-
         if (status_ != ScannerStatus::Open)
         {
             return nullptr;
         }
 
+        if (debug_current_iter_ == shard_caches_.end())
+        {
+            status_ = ScannerStatus::Blocked;
+            return nullptr;
+        }
+
+        return shard_cache_iter_.Current();
+
+        /*
         if (current_iter_ == index_chains_.end())
         {
             status_ = ScannerStatus::Blocked;
@@ -859,6 +1051,7 @@ public:
         }
 
         return current_iter_->second->Current();
+        */
     }
 
     void MoveNext() override
@@ -868,6 +1061,39 @@ public:
             return;
         }
 
+        if (debug_current_iter_ == shard_caches_.end())
+        {
+            status_ = ScannerStatus::Blocked;
+            return;
+        }
+
+        if (status_ != ScannerStatus::Open)
+        {
+            return;
+        }
+
+        LOG(INFO) << "Move Next star";
+        // current_iter_->second->MoveNext();
+        bool has_data = shard_cache_iter_.MoveNext();
+        while (!has_data)
+        {
+            LOG(INFO) << "Move to next shard cache";
+            debug_current_iter_++;
+            if (debug_current_iter_ == shard_caches_.end())
+            {
+                LOG(INFO) << "Move next stop";
+                status_ = ScannerStatus::Blocked;
+                return;
+            }
+
+            shard_cache_iter_ = debug_current_iter_->second->NewIterator();
+            shard_cache_iter_.Init();
+            has_data = shard_cache_iter_.Valid();
+        }
+
+        LOG(INFO) << "Move next stop";
+
+        /*
         if (current_iter_ == index_chains_.end())
         {
             status_ = ScannerStatus::Blocked;
@@ -891,6 +1117,7 @@ public:
                 return;
             }
         }
+        */
     }
 
     CcmScannerType Type() const override
@@ -910,6 +1137,8 @@ public:
         shard_caches_.clear();
         index_chains_.clear();
         current_iter_ = {};
+        debug_current_iter_ = {};
+        shard_cache_iter_ = typename ShardCache::Iterator();
         init_ = false;
     }
 
@@ -925,6 +1154,8 @@ public:
 
         index_chains_.clear();
         current_iter_ = {};
+        debug_current_iter_ = {};
+        shard_cache_iter_ = typename ShardCache::Iterator();
         init_ = false;
     }
 
@@ -1040,7 +1271,7 @@ public:
             {
                 while (cache_offset[target_bucket] < kv_cache->Size())
                 {
-                    const TemplateScanTuple<KeyT, ValueT> *kv_tuple =
+                    TemplateScanTuple<KeyT, ValueT> *kv_tuple =
                         kv_cache->At(cache_offset[target_bucket]);
                     if (kv_tuple->KeyObj() < memory_tuple->KeyObj())
                     {
@@ -1050,6 +1281,7 @@ public:
                     }
                     else if (kv_tuple->KeyObj() == memory_tuple->KeyObj())
                     {
+                        kv_tuple->rec_status_ = RecordStatus::Deleted;
                         cache_offset[target_bucket]++;
                         break;
                     }
@@ -1080,10 +1312,7 @@ public:
             }
         }
 
-        const auto *last_tuple = index_chain->Last();
-        const KeyT *last_key = last_tuple ? &last_tuple->KeyObj() : nullptr;
-
-        return TxKey(last_key);
+        return TxKey(min_key);
     }
 
 private:
@@ -1092,10 +1321,18 @@ private:
     /// </summary>
 
     std::unordered_map<uint32_t, std::unique_ptr<ShardCache>> shard_caches_;
+    // TODO(lokax): delete index chain.
     std::unordered_map<uint32_t, std::unique_ptr<CompoundIndex>> index_chains_;
     typename std::unordered_map<uint32_t,
                                 std::unique_ptr<CompoundIndex>>::iterator
         current_iter_;
+
+    typename std::unordered_map<uint32_t, std::unique_ptr<ShardCache>>::iterator
+        debug_current_iter_;
+    typename ShardCache::Iterator shard_cache_iter_;
+
+    size_t cache_offset_{0};
+
     bool init_{false};
 
     const KeySchema *key_schema_;

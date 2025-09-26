@@ -34,6 +34,7 @@
 #include "cc/cluster_config_cc_map.h"
 #include "cc/non_blocking_lock.h"  // lock_vec_
 #include "cc/range_bucket_cc_map.h"
+#include "cc_map.h"
 #include "cc_req_misc.h"
 #include "cc_request.pb.h"
 #include "checkpointer.h"
@@ -1598,6 +1599,7 @@ store::DataStoreHandler::DataStoreOpStatus CcShard::FetchBucketData(
     NodeGroupId node_group_id,
     int64_t node_group_term,
     CcShard *ccs,
+    bool is_local,
     absl::flat_hash_map<uint16_t, bool> &bucket_ids,
     const std::vector<DataStoreSearchCond> *pushdown_cond_,
     std::string_view start_key,
@@ -1610,8 +1612,6 @@ store::DataStoreHandler::DataStoreOpStatus CcShard::FetchBucketData(
     CcRequestBase *requester,
     OnFetchedBucketData backfill_func)
 {
-    ScanNextBatchCc *scan_next_batch_cc =
-        static_cast<ScanNextBatchCc *>(requester);
     std::vector<FetchBucketDataCc *> requests;
     requests.reserve(bucket_ids.size());
     for (const auto &[bucket, kv_is_drained] : bucket_ids)
@@ -1621,8 +1621,20 @@ store::DataStoreHandler::DataStoreOpStatus CcShard::FetchBucketData(
             continue;
         }
 
-        // increate counter
-        scan_next_batch_cc->IncreaseWaitForFetchBucketCnt(core_id_);
+        if (is_local)
+        {
+            ScanNextBatchCc *scan_next_batch_cc =
+                static_cast<ScanNextBatchCc *>(requester);
+            // increate counter
+            scan_next_batch_cc->IncreaseWaitForFetchBucketCnt(core_id_);
+        }
+        else
+        {
+            remote::RemoteScanNextBatch *remote_scan_next_batch_cc =
+                static_cast<remote::RemoteScanNextBatch *>(requester);
+            remote_scan_next_batch_cc->IncreaseWaitForFetchBucketCnt(core_id_);
+        }
+
         FetchBucketDataCc *fetch_bucket_data_cc =
             fetch_bucket_data_cc_pool_.NextRequest();
         fetch_bucket_data_cc->Reset(table_name,
@@ -1630,6 +1642,7 @@ store::DataStoreHandler::DataStoreOpStatus CcShard::FetchBucketData(
                                     node_group_id,
                                     node_group_term,
                                     ccs,
+                                    is_local,
                                     bucket,
                                     pushdown_cond_,
                                     start_key,
