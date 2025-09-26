@@ -746,6 +746,7 @@ public:
         NodeGroupId node_group_id,
         int64_t node_group_term,
         CcShard *ccs,
+        bool is_local,
         absl::flat_hash_map<uint16_t, bool> &bucket_ids,
         const std::vector<DataStoreSearchCond> *pushdown_cond_,
         std::string_view start_key,

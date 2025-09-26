@@ -616,6 +616,7 @@ public:
                NodeGroupId node_group_id,
                int64_t node_group_term,
                CcShard *ccs,
+               bool is_local,
                uint16_t bucket_id,
                const std::vector<DataStoreSearchCond> *pushdown_cond,
                std::string_view start_key,
@@ -684,8 +685,10 @@ public:
     CcRequestBase *requester_{nullptr};
     int32_t err_code_{0};
 
+    bool is_local_{true};
     std::deque<RawSliceDataItem> bucket_data_items_;
     bool is_drained_{false};
+    absl::flat_hash_map<uint16_t, bool> *scan_next_batch_cc_buckets_{nullptr};
 
     OnFetchedBucketData backfill_func_;
 

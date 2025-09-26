@@ -1479,6 +1479,7 @@ void ScanNextOperation::ResetResultForHashPart(size_t ng_cnt)
 {
     hd_result_.Reset();
     hd_result_.SetRefCnt(ng_cnt);
+    LOG(INFO) << "== hd result ref cnt = " << hd_result_.RefCnt();
 }
 
 void ScanNextOperation::Forward(TransactionExecution *txm)

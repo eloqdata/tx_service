@@ -134,6 +134,9 @@ public:
     {
         if (!ValidTermCheck())
         {
+            LOG(INFO) << "== not leader: addr = " << res_
+                      << ", ref cnt = " << res_->RefCnt()
+                      << ", core id = " << ccs.core_id_;
             res_->SetError(CcErrorCode::REQUESTED_NODE_NOT_LEADER);
             return true;
         }
@@ -1875,6 +1878,59 @@ public:
         }
     }
 
+    bool Execute(CcShard &ccs) override
+    {
+        if (!ValidTermCheck())
+        {
+            // Do not modify res_ directly since there could be other cores
+            // still working on this cc req.
+            return SetError(ccs.core_id_,
+                            CcErrorCode::REQUESTED_NODE_NOT_LEADER);
+        }
+
+        CcMap *ccm = nullptr;
+
+        // assert(table_name_ != nullptr);
+        assert(table_name_->StringView() != empty_sv);
+        ccm = ccs.GetCcm(*table_name_, node_group_id_);
+
+        if (ccm == nullptr)
+        {
+            // Find base table name for index table.
+            // Fetch/Get Catalog is based on base table name, but Get
+            // ccmap is based on the real table name, for example, index
+            // should get the corresponding sk_ccmap.
+            assert(!table_name_->IsMeta());
+            const CatalogEntry *catalog_entry =
+                ccs.InitCcm(*table_name_, node_group_id_, ng_term_, this);
+            if (catalog_entry == nullptr)
+            {
+                // The local node does not contain the table's schema
+                // instance. The FetchCatalog() method will send an
+                // async request toward the data store to fetch the
+                // catalog. After fetching is finished, this cc request
+                // is re-enqueued for re-execution.
+                return false;
+            }
+            else
+            {
+                if (catalog_entry->schema_ == nullptr)
+                {
+                    // The local node (LocalCcShards) contains a schema
+                    // instance, which indicates that the table has been
+                    // dropped. Returns the request with an error.
+                    return SetError(ccs.core_id_,
+                                    CcErrorCode::REQUESTED_TABLE_NOT_EXISTS);
+                }
+
+                ccm = ccs.GetCcm(*table_name_, node_group_id_);
+            }
+        }
+
+        assert(ccm != nullptr);
+        return ccm->Execute(*this);
+    }
+
     ScanCache *GetLocalMemoryCache(uint32_t shard_code)
     {
         return res_->Value().ccm_scanner_->Cache(shard_code);
@@ -1923,12 +1979,14 @@ public:
             res_->Value().current_scan_plan_->UpdateNodeGroupTerm(
                 node_group_id_, ng_term_);
             progress.pause_key_ = last_key.Clone();
+            progress.pause_key_inclusive_ = false;
         }
 
         uint16_t remaining_cnt =
             unfinished_core_cnt_.fetch_sub(1, std::memory_order_acq_rel);
         if (remaining_cnt == 1)
         {
+            LOG(INFO) << "== ScanNextBatchCc: ref cnt = " << res_->RefCnt();
             if (err_code == CcErrorCode::NO_ERROR)
             {
                 res_->SetFinished();
