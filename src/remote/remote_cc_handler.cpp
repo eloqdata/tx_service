@@ -508,11 +508,19 @@ void txservice::remote::RemoteCcHandler::ScanOpen(
 void txservice::remote::RemoteCcHandler::ScanNext(
     uint32_t src_node_id,
     uint32_t ng_id,
+    int64_t ng_term,
     uint64_t tx_number,
     int64_t tx_term,
     uint16_t command_id,
     uint64_t start_ts,
-    ScanCache *scan_cache,
+    const TableName &table_name,
+    const TxKey &start_key,
+    bool start_key_inclusive,
+    const TxKey &end_key,
+    bool end_key_inclusive,
+    const std::vector<uint16_t> &bucket_ids,
+    const absl::flat_hash_map<uint16_t, BucketScanProgress>
+        &bucket_scan_progress,
     CcHandlerResult<ScanNextResult> &hd_res,
     IsolationLevel iso_level,
     CcProtocol proto,
@@ -538,24 +546,108 @@ void txservice::remote::RemoteCcHandler::ScanNext(
 
     scan_next->set_src_node_id(src_node_id);
     scan_next->set_node_group_id(ng_id);
-    const CcEntryAddr &last_cce_addr = scan_cache->LastTuple()->cce_addr_;
-    CceAddr_msg *cce_addr_msg = scan_next->mutable_prior_cce_ptr();
-    cce_addr_msg->set_cce_lock_ptr(last_cce_addr.CceLockPtr());
-    cce_addr_msg->set_term(last_cce_addr.Term());
-    cce_addr_msg->set_core_id(last_cce_addr.CoreId());
-    scan_next->set_direction(scan_cache->Scanner()->Direction() ==
-                             ScanDirection::Forward);
+    scan_next->set_node_group_term(ng_term);
+    // set table name
+    scan_next->set_table_name_str(table_name.String());
+    scan_next->set_table_type(
+        ToRemoteType::ConvertTableType(table_name.Type()));
+    scan_next->set_table_engine(
+        ToRemoteType::ConvertTableEngine(table_name.Engine()));
+    // set direction
+    scan_next->set_direction(true);
+    // set ts
     scan_next->set_ts(start_ts);
-    scan_next->set_scan_cache_ptr(reinterpret_cast<uint64_t>(scan_cache));
+    scan_next->set_ckpt(is_ckpt);
     scan_next->set_iso_level(ToRemoteType::ConvertIsolation(iso_level));
     scan_next->set_protocol(ToRemoteType::ConvertProtocol(proto));
     scan_next->set_is_for_write(is_for_write);
-    scan_next->set_ckpt(is_ckpt);
     scan_next->set_is_covering_keys(is_covering_keys);
     scan_next->set_is_require_keys(is_require_keys);
     scan_next->set_is_require_recs(is_require_recs);
     scan_next->set_obj_type(obj_type);
     scan_next->set_scan_pattern(std::string(scan_pattern));
+
+    // set end key
+    switch (end_key.Type())
+    {
+    case KeyType::NegativeInf:
+    {
+        scan_next->clear_end_key();
+        scan_next->mutable_end_key()->set_neg_inf(true);
+        break;
+    }
+    case KeyType::PositiveInf:
+    {
+        scan_next->clear_end_key();
+        scan_next->mutable_end_key()->set_pos_inf(true);
+        break;
+    }
+    default:
+    {
+        scan_next->clear_end_key();
+        end_key.Serialize(*scan_next->mutable_end_key()->mutable_key());
+        break;
+    }
+    }
+
+    scan_next->set_end_key_inclusive(end_key_inclusive);
+
+    scan_next->clear_scan_spec();
+    if (bucket_scan_progress.empty())
+    {
+        // new plan
+        ::txservice::remote::BucketScanInfoMsg *scan_info =
+            scan_next->mutable_global_info();
+        scan_info->clear_start_key();
+        switch (start_key.Type())
+        {
+        case KeyType::NegativeInf:
+        {
+            scan_info->mutable_start_key()->set_neg_inf(true);
+            break;
+        }
+        case KeyType::PositiveInf:
+        {
+            scan_info->mutable_start_key()->set_pos_inf(true);
+            break;
+        }
+        default:
+        {
+            end_key.Serialize(*scan_info->mutable_start_key()->mutable_key());
+            break;
+        }
+        }
+
+        scan_info->set_start_key_inclusive(start_key_inclusive);
+        for (const auto &bucket : bucket_ids)
+        {
+            scan_info->add_scan_buckets(bucket);
+        }
+
+        LOG(INFO) << "== RemoteCcHandler::ScanNext: ng id = " << ng_id;
+    }
+    else
+    {
+        ::txservice::remote::BucketScanProgressMap *progress_map =
+            scan_next->mutable_progress();
+        for (const auto &[core_id, progress] : bucket_scan_progress)
+        {
+            auto iter = progress_map->mutable_progress()->emplace(core_id);
+            iter.first->second.clear_scan_buckets();
+            for (const auto &[bucket_id, drained] : progress.scan_buckets_)
+            {
+                iter.first->second.mutable_scan_buckets()->emplace(bucket_id,
+                                                                   drained);
+            }
+
+            LOG(INFO) << "== RemoteCcHandler::ScanNext: ng id = " << ng_id
+                      << ", progress finished = " << progress.AllFinished();
+            progress.pause_key_.Serialize(
+                *iter.first->second.mutable_start_key()->mutable_key());
+            iter.first->second.set_start_key_inclusive(
+                progress.pause_key_inclusive_);
+        }
+    }
 
     stream_sender_.SendMessageToNg(ng_id, send_msg, &hd_res);
 }

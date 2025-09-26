@@ -183,6 +183,7 @@ bool CcStreamSender::SendMessageToNode(uint32_t dest_node_id,
         // SendMessage error return -1 to indicate the request needs retry.
         if (res != nullptr)
         {
+            LOG(INFO) << "sender: not leader";
             res->SetLocalOrRemoteError(CcErrorCode::REQUESTED_NODE_NOT_LEADER);
         }
 
@@ -311,6 +312,7 @@ bool CcStreamSender::SendMessageToNode(uint32_t dest_node_id,
                         // forward_latch_.
                         txm->AcquireSharedForwardLatch();
                     }
+                    LOG(INFO) << "sender: not leader";
                     res->SetLocalOrRemoteError(
                         CcErrorCode::REQUESTED_NODE_NOT_LEADER);
                     if (txm != nullptr)
