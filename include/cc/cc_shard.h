@@ -823,7 +823,6 @@ public:
         return ng_id == ng_id_;
     }
 
-
     // native node group
     const uint16_t core_id_;
     const uint16_t core_cnt_;

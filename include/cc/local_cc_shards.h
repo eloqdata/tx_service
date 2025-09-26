@@ -799,7 +799,8 @@ public:
         size_t estimate_rec_size = UINT64_MAX,
         bool has_dml_since_ddl = true)
     {
-        std::unique_lock<FastMetaDataMutex> lk(fast_meta_data_mux_, std::defer_lock);
+        std::unique_lock<FastMetaDataMutex> lk(fast_meta_data_mux_,
+                                               std::defer_lock);
         if (need_meta_lk)
         {
             lk.lock();
