@@ -30,6 +30,7 @@
 #include "cc_req_pool.h"
 #include "cc_request.h"
 #include "remote/remote_cc_handler.h"
+#include "type.h"
 
 namespace txservice
 {
@@ -225,11 +226,18 @@ public:
                        bool is_for_write = false,
                        bool is_ckpt_delta = false) override;
 
-    void ScanNextBatch(uint64_t tx_number,
+    void ScanNextBatch(const TableName &table_name,
+                       NodeGroupId node_group_id,
+                       uint64_t tx_number,
                        int64_t tx_term,
                        uint16_t command_id,
                        uint64_t start_ts,
+                       const TxKey &start_key,
+                       bool start_inclusive,
+                       const TxKey &end_key,
+                       bool end_inclusive,
                        CcScanner &scanner,
+                       const std::vector<DataStoreSearchCond> *pushdown_cond,
                        CcHandlerResult<ScanNextResult> &hd_res,
                        int32_t obj_type = -1,
                        const std::string_view &scan_pattern = {}) override;
