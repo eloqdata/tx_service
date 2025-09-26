@@ -4413,8 +4413,9 @@ void LocalCcShards::DataSyncForHashPartition(
              &filter_func =
                  data_sync_task->filter_lambda_](const size_t hash_code)
         {
-            return (hash_code & 0x3FF) >= min_partition_id_this_scan &&
-                   (hash_code & 0x3FF) <= max_partition_id_this_scan &&
+            int32_t part_id = Sharder::MapKeyHashToHashPartitionId(hash_code);
+            return static_cast<size_t>(part_id) >= min_partition_id_this_scan &&
+                   static_cast<size_t>(part_id) <= max_partition_id_this_scan &&
                    (!filter_func || filter_func(hash_code));
         };
         HashPartitionDataSyncScanCc scan_cc(table_name,
@@ -4659,7 +4660,7 @@ void LocalCcShards::DataSyncForHashPartition(
                     // cce_ is null means the key is already persisted on
                     // kv, so we don't need to put it into the flush vec.
                     int32_t part_id =
-                        static_cast<int32_t>(rec.Key().Hash() & 0x3FF);
+                        Sharder::MapKeyHashToHashPartitionId(rec.Key().Hash());
                     if (table_name.Engine() == TableEngine::EloqKv)
                     {
                         data_sync_vec->emplace_back(
@@ -4697,8 +4698,8 @@ void LocalCcShards::DataSyncForHashPartition(
             {
                 size_t key_idx = scan_cc.MoveBaseIdxVec()[j];
                 TxKey key_raw = (*data_sync_vec)[key_idx].Key();
-
-                auto part_id = static_cast<int32_t>(key_raw.Hash() & 0x3FF);
+                int32_t part_id =
+                    Sharder::MapKeyHashToHashPartitionId(key_raw.Hash());
                 mv_base_vec->emplace_back(std::move(key_raw), part_id);
             }
 

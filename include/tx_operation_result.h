@@ -22,14 +22,18 @@
 #pragma once
 
 #include <atomic>
+#include <cstdint>
 #include <memory>  //unique_ptr
 #include <shared_mutex>
 #include <utility>
 #include <vector>
 
+#include "absl/container/flat_hash_map.h"
 #include "cc/cc_entry.h"
 #include "proto/cc_request.pb.h"
+#include "sharder.h"
 #include "tx_command.h"
+#include "tx_key.h"
 #include "type.h"
 
 namespace txservice
@@ -512,11 +516,220 @@ struct RangeScanSliceResult
     std::atomic<LastKeySetStatus> last_key_status_;
 };
 
+struct BucketScanProgress
+{
+    BucketScanProgress(TxKey &&key, bool inclusive)
+        : pause_key_(std::move(key)), pause_key_inclusive_(inclusive)
+    {
+    }
+
+    BucketScanProgress(const BucketScanProgress &other)
+    {
+        pause_key_ = other.pause_key_.Clone();
+        pause_key_inclusive_ = other.pause_key_inclusive_;
+        memory_scan_is_finished_ = other.memory_scan_is_finished_;
+        scan_buckets_ = other.scan_buckets_;
+    }
+
+    BucketScanProgress &operator=(const BucketScanProgress &other)
+    {
+        if (this != &other)
+        {
+            pause_key_ = other.pause_key_.Clone();
+            pause_key_inclusive_ = other.pause_key_inclusive_;
+            memory_scan_is_finished_ = other.memory_scan_is_finished_;
+            scan_buckets_ = other.scan_buckets_;
+        }
+        return *this;
+    }
+
+    BucketScanProgress(BucketScanProgress &&other) noexcept
+    {
+        pause_key_ = std::move(other.pause_key_);
+        pause_key_inclusive_ = other.pause_key_inclusive_;
+        memory_scan_is_finished_ = other.memory_scan_is_finished_;
+        scan_buckets_ = std::move(other.scan_buckets_);
+    }
+
+    BucketScanProgress &operator=(BucketScanProgress &&other) noexcept
+    {
+        if (this != &other)
+        {
+            pause_key_ = std::move(other.pause_key_);
+            pause_key_inclusive_ = other.pause_key_inclusive_;
+            memory_scan_is_finished_ = other.memory_scan_is_finished_;
+            scan_buckets_ = std::move(other.scan_buckets_);
+        }
+        return *this;
+    }
+
+    bool AllFinished() const
+    {
+        if (!memory_scan_is_finished_)
+        {
+            return false;
+        }
+
+        for (const auto &[bucket_id, kv_scan_is_finished] : scan_buckets_)
+        {
+            if (!kv_scan_is_finished)
+            {
+                return false;
+            }
+        }
+
+        return true;
+    }
+
+    TxKey pause_key_;
+    bool pause_key_inclusive_{false};
+    bool memory_scan_is_finished_{false};
+    absl::flat_hash_map<uint16_t, bool> scan_buckets_;
+};
+
+class BucketScanPlan
+{
+public:
+    BucketScanPlan(
+        size_t plan_index,
+        absl::flat_hash_map<NodeGroupId, std::vector<uint16_t>> *buckets,
+        absl::flat_hash_map<NodeGroupId,
+                            absl::flat_hash_map<uint16_t, BucketScanProgress>>
+            *pause_position)
+        : plan_index_(plan_index), buckets_(buckets)
+    {
+        assert(buckets != nullptr);
+
+        for (const auto &[node_group_id, bucket] : *buckets)
+        {
+            node_group_terms_.try_emplace(node_group_id, -1);
+        }
+
+        if (pause_position == nullptr)
+        {
+            for (const auto &[node_group_id, bucket] : *buckets)
+            {
+                current_position_.try_emplace(node_group_id);
+            }
+        }
+        else
+        {
+            // Resume from eloqkv cursor
+            for (auto &[node_group_id, bucket_scan_progress] : *pause_position)
+            {
+                auto iter = current_position_.try_emplace(node_group_id);
+                for (const auto &[core_idx, progress] : bucket_scan_progress)
+                {
+                    iter.first->second.try_emplace(core_idx, progress);
+                }
+            }
+        }
+
+        assert(node_group_terms_.size() > 0);
+    }
+
+    BucketScanPlan() = default;
+    BucketScanPlan(const BucketScanPlan &) = delete;
+    BucketScanPlan &operator=(const BucketScanPlan &) = delete;
+    BucketScanPlan(BucketScanPlan &&other)
+        : plan_index_(other.plan_index_),
+          buckets_(other.buckets_),
+          current_position_(std::move(other.current_position_)),
+          node_group_terms_(std::move(other.node_group_terms_))
+    {
+        other.buckets_ = nullptr;
+    }
+
+    BucketScanPlan &operator=(BucketScanPlan &&other) noexcept
+    {
+        if (this != &other)
+        {
+            plan_index_ = other.plan_index_;
+            buckets_ = std::move(other.buckets_);
+            other.buckets_ = nullptr;
+            current_position_ = std::move(other.current_position_);
+            node_group_terms_ = std::move(other.node_group_terms_);
+        }
+
+        return *this;
+    }
+
+    absl::flat_hash_map<NodeGroupId, std::vector<uint16_t>> &Buckets()
+    {
+        return *buckets_;
+    }
+
+    std::vector<uint16_t> *Buckets(NodeGroupId node_group_id)
+    {
+        return &buckets_->at(node_group_id);
+    }
+
+    int64_t GetNodeGroupTerm(NodeGroupId node_group_id) const
+    {
+        return node_group_terms_.at(node_group_id);
+    }
+
+    void UpdateNodeGroupTerm(NodeGroupId node_group_id, int64_t node_group_term)
+    {
+        node_group_terms_[node_group_id] = node_group_term;
+    }
+
+    absl::flat_hash_map<uint16_t, BucketScanProgress> *GetBucketScanProgress(
+        NodeGroupId node_group_id)
+    {
+        assert(current_position_.count(node_group_id) > 0);
+        return &current_position_.at(node_group_id);
+    }
+
+    bool CurrentPlanIsFinished()
+    {
+        for (const auto &[node_group_id, bucket_scan_progress] :
+             current_position_)
+        {
+            for (const auto &[core_idx, progress] : bucket_scan_progress)
+            {
+                if (!progress.AllFinished())
+                {
+                    return false;
+                }
+            }
+        }
+
+        return true;
+    }
+
+    size_t PlanIndex() const
+    {
+        return plan_index_;
+    }
+
+    absl::flat_hash_map<NodeGroupId,
+                        absl::flat_hash_map<uint16_t, BucketScanProgress>>
+    CurrentPosition()
+    {
+        return current_position_;
+    }
+
+private:
+    size_t plan_index_{0};
+    absl::flat_hash_map<NodeGroupId, std::vector<uint16_t>> *buckets_{nullptr};
+    // <pause key, is_drained>
+    absl::flat_hash_map<NodeGroupId,
+                        absl::flat_hash_map<uint16_t, BucketScanProgress>>
+        current_position_;
+    absl::flat_hash_map<NodeGroupId, int64_t> node_group_terms_;
+};
+
 struct ScanNextResult
 {
-    bool is_local_;
-    int64_t term_;
-    uint32_t node_group_id_;
+    void Clear()
+    {
+        ccm_scanner_ = nullptr;
+        current_scan_plan_ = nullptr;
+    }
+
+    BucketScanPlan *current_scan_plan_{nullptr};
+    CcScanner *ccm_scanner_{nullptr};
 };
 
 struct InitTxResult

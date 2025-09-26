@@ -44,6 +44,7 @@
 #include "rpc_closure.h"
 #include "sharder.h"  // Sharder
 #include "store/data_store_handler.h"
+#include "tx_id.h"
 #include "tx_service_common.h"
 #include "tx_start_ts_collector.h"
 #include "type.h"
@@ -1592,6 +1593,77 @@ store::DataStoreHandler::DataStoreOpStatus CcShard::FetchSnapshot(
                     partition_id);
 
     return local_shards_.store_hd_->FetchRecord(nullptr, fetch_cc);
+}
+
+store::DataStoreHandler::DataStoreOpStatus CcShard::FetchBucketData(
+    const TableName *table_name,
+    const TableSchema *table_schema,
+    NodeGroupId node_group_id,
+    int64_t node_group_term,
+    CcShard *ccs,
+    absl::flat_hash_map<uint16_t, bool> &bucket_ids,
+    const std::vector<DataStoreSearchCond> *pushdown_cond_,
+    std::string_view start_key,
+    KeyType start_key_type,
+    bool start_key_inclusive,
+    std::string_view end_key,
+    KeyType end_key_type,
+    bool end_key_inclusive,
+    size_t batch_size,
+    CcRequestBase *requester,
+    OnFetchedBucketData backfill_func)
+{
+    ScanNextBatchCc *scan_next_batch_cc =
+        static_cast<ScanNextBatchCc *>(requester);
+    std::vector<FetchBucketDataCc *> requests;
+    requests.reserve(bucket_ids.size());
+    for (const auto &[bucket, kv_is_drained] : bucket_ids)
+    {
+        if (kv_is_drained)
+        {
+            continue;
+        }
+
+        // increate counter
+        scan_next_batch_cc->IncreaseWaitForFetchBucketCnt(core_id_);
+        FetchBucketDataCc *fetch_bucket_data_cc =
+            fetch_bucket_data_cc_pool_.NextRequest();
+        fetch_bucket_data_cc->Reset(table_name,
+                                    table_schema,
+                                    node_group_id,
+                                    node_group_term,
+                                    ccs,
+                                    bucket,
+                                    pushdown_cond_,
+                                    start_key,
+                                    start_key_type,
+                                    start_key_inclusive,
+                                    end_key,
+                                    end_key_type,
+                                    end_key_inclusive,
+                                    batch_size,
+                                    requester,
+                                    backfill_func);
+        requests.push_back(fetch_bucket_data_cc);
+    }
+
+    if (!requests.empty())
+    {
+        auto err_code = local_shards_.store_hd_->FetchBucketData(requests);
+        assert(err_code == store::DataStoreHandler::DataStoreOpStatus::Success);
+        return err_code;
+    }
+
+    return store::DataStoreHandler::DataStoreOpStatus::Success;
+}
+
+store::DataStoreHandler::DataStoreOpStatus CcShard::FetchBucketData(
+    FetchBucketDataCc *fetch_bucket_data_cc)
+{
+    auto err_code =
+        local_shards_.store_hd_->FetchBucketData(fetch_bucket_data_cc);
+    assert(err_code == store::DataStoreHandler::DataStoreOpStatus::Success);
+    return err_code;
 }
 
 void CcShard::RemoveFetchRecordRequest(LruEntry *cce)
