@@ -4348,7 +4348,7 @@ void SplitFlushRangeOp::Forward(TransactionExecution *txm)
                      table_name,
                      table_schema,
                      &hd_res,
-                     store_hd]
+                     store_hd](size_t)
                     {
                         bool succ = store_hd->DeleteOutOfRangeData(
                             table_name, partition_id, &start_key, table_schema);
@@ -6749,7 +6749,7 @@ void NotifyStartMigrateOp::InitDataMigration(TxNumber tx_number,
              bucket_ids = iter->second.bucket_ids_,        // Copy
              new_owner_ngs = iter->second.new_owner_ngs_,  // Copy
              unfinished_cnt = &unfinished_req_cnt_,
-             &migrate_plans = migrate_plans_]() mutable
+             &migrate_plans = migrate_plans_](size_t) mutable
             {
                 TxLog *tx_log = Sharder::Instance().GetLogAgent();
                 auto cluster_scale_tx_log_ng_id =

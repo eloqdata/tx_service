@@ -697,7 +697,7 @@ void CcNode::OnStartFollowing(uint32_t node_id, int64_t term, bool resubscribe)
         // resubscribe is called on tx processor and on start following needs
         // to be handled on a worker thread.
         Sharder::Instance().GetTxWorkerPool()->SubmitWork(
-            [this, node_id, term]
+            [this, node_id, term](size_t)
             { SubscribePrimaryNode(node_id, term, true); });
     }
     else
