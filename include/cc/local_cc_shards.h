@@ -76,7 +76,6 @@ class SkGenerator;
 class UploadBatchSlicesClosure;
 struct FlushDataTask;
 
-inline thread_local size_t tls_shard_idx = std::numeric_limits<size_t>::max();
 struct DataMigrationStatus
 {
 public:
@@ -241,11 +240,6 @@ public:
         return cc_shards_[thd_id]->ProcessRequests();
     }
 
-    void BindThreadToFastMetaDataShard(size_t shard_idx)
-    {
-        tls_shard_idx = shard_idx;
-    }
-
     size_t QueueSize(size_t thd_id)
     {
         return cc_shards_[thd_id]->QueueSize();
@@ -403,6 +397,8 @@ public:
     uint64_t TsBaseInMillseconds();
     void UpdateTsBase(uint64_t timestamp);
     void StartBackgroudWorkers();
+
+    void BindThreadToFastMetaDataShard(size_t shard_idx);
 
     /**
      * @brief Create new heap used by table ranges only.
@@ -1918,7 +1914,7 @@ private:
 
     // map to store mapping relationship from bucket id to bucket info
     // that stores the bucket owner of this bucket.
-    // TODO(jerry) make inner map vector
+    // TODO(zc) make inner map vector
     std::unordered_map<
         NodeGroupId,
         std::unordered_map<uint16_t, std::unique_ptr<BucketInfo>>>

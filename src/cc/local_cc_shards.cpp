@@ -64,6 +64,7 @@
 namespace txservice
 {
 std::atomic<uint64_t> LocalCcShards::local_clock(0);
+inline thread_local size_t tls_shard_idx = std::numeric_limits<size_t>::max();
 
 LocalCcShards::LocalCcShards(
     uint32_t node_id,
@@ -334,6 +335,15 @@ void LocalCcShards::UpdateTsBase(uint64_t timestamp)
         // ts_base_ can also be updated when calculating commit timestamp, which
         // results in system clock could be smaller than ts_base_. In this case
         // we should not update ts_base_.
+    }
+}
+
+void LocalCcShards::BindThreadToFastMetaDataShard(size_t shard_idx)
+{
+    if (__builtin_expect(tls_shard_idx == std::numeric_limits<size_t>::max(),
+                         0))
+    {
+        tls_shard_idx = shard_idx;
     }
 }
 
@@ -4365,7 +4375,13 @@ void LocalCcShards::DataSyncForHashPartition(
 
     if (scan_concurrency > 0)
     {
+        bool need_notify = scan_concurrency >
+                           scan_concurrency_.load(std::memory_order_acquire);
         scan_concurrency_.store(scan_concurrency, std::memory_order_relaxed);
+        if (need_notify)
+        {
+            data_sync_worker_ctx_.cv_.notify_all();
+        }
     }
 
     // 3. Scan records.
@@ -5560,7 +5576,8 @@ void LocalCcShards::SyncTableStatisticsWorker()
         statistics_worker_ctx_.cv_.wait_for(
             worker_lk,
             10s,
-            [this] {
+            [this]
+            {
                 return statistics_worker_ctx_.status_ ==
                        WorkerStatus::Terminated;
             });
@@ -5831,7 +5848,8 @@ void LocalCcShards::HeartbeatWorker()
         bool wait_res = heartbeat_worker_ctx_.cv_.wait_for(
             heartbeat_worker_lk,
             std::chrono::seconds(1),
-            [this] {
+            [this]
+            {
                 return heartbeat_worker_ctx_.status_ ==
                        WorkerStatus::Terminated;
             });
@@ -5919,7 +5937,8 @@ void LocalCcShards::PurgeDeletedData()
         bool wait_res = purge_deleted_worker_ctx_.cv_.wait_for(
             worker_lk,
             std::chrono::seconds(10),
-            [this] {
+            [this]
+            {
                 return purge_deleted_worker_ctx_.status_ ==
                        WorkerStatus::Terminated;
             });
