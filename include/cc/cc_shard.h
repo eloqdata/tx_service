@@ -824,9 +824,10 @@ public:
     }
 
     // native node group
-    const NodeGroupId ng_id_;
     const uint16_t core_id_;
     const uint16_t core_cnt_;
+    const NodeGroupId ng_id_;
+    std::atomic<int32_t> meta_data_mux_{};
     LocalCcShards &local_shards_;
 
     bool EnableMvcc() const;
