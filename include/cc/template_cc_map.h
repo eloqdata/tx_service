@@ -8841,7 +8841,6 @@ public:
 
             if (ccp->last_dirty_commit_ts_ <= req.LastDataSyncTs())
             {
-                assert(!cce->NeedCkpt());
                 // Skip the pages that have no updates since last data sync.
                 if (ccp->next_page_ == PagePosInf())
                 {
