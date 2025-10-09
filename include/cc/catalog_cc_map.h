@@ -2364,6 +2364,14 @@ public:
         {
             assert(lock_ptr != nullptr);
             assert(schema_version > 0);
+#ifndef NDEBUG
+            shard_->UpsertLockHoldingTx(tx_number,
+                                        ng_term,
+                                        nullptr,
+                                        false,
+                                        node_group_id,
+                                        table_name_.Type());
+#endif
             return {CcErrorCode::NO_ERROR, lock_ptr, schema_version};
         }
         else

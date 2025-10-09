@@ -172,7 +172,7 @@ public:
                 int64_t ng_term,
                 TxNumber tx_number) const;
 
-    bool ReleaseCatalogRead(NonBlockingLock *lock) const;
+    bool ReleaseCatalogRead(NonBlockingLock *lock, TxNumber tx_number) const;
 
     bool ReadLocal(const TableName &table_name,
                    const std::string &key_str,
