@@ -31,7 +31,7 @@ TxWorkerPool::TxWorkerPool(size_t max_workers_num)
     for (size_t i = 0; i < max_workers_num_; i++)
     {
         std::thread worker = std::thread(
-            [this]
+            [this](size_t worker_id)
             {
                 while (true)
                 {
@@ -49,12 +49,12 @@ TxWorkerPool::TxWorkerPool(size_t max_workers_num)
                     // Take work if work queue is not empty
                     if (!work_queue_.empty())
                     {
-                        std::function<void()> work =
+                        std::function<void(size_t)> work =
                             std::move(work_queue_.front());
                         work_queue_.pop_front();
                         lk.unlock();
                         // Do work
-                        work();
+                        work(worker_id);
                     }
                     else
                     {
@@ -65,7 +65,8 @@ TxWorkerPool::TxWorkerPool(size_t max_workers_num)
                         break;
                     }
                 }
-            });
+            },
+            i);
         workers_.push_back(std::move(worker));
     }
 }
@@ -76,7 +77,7 @@ size_t TxWorkerPool::WorkQueueSize()
     return work_queue_.size();
 }
 
-void TxWorkerPool::SubmitWork(std::function<void()> work)
+void TxWorkerPool::SubmitWork(std::function<void(size_t)> work)
 {
     std::unique_lock<std::mutex> lk(work_queue_mutex_);
     if (shutdown_indicator_.load(std::memory_order_acquire))

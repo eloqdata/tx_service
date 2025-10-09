@@ -665,7 +665,7 @@ void Sharder::UpdateLeader(uint32_t ng_id)
     if (!hm_ip_.empty())
     {
         Sharder::Instance().sharder_worker_->SubmitWork(
-            [ng_id, this]
+            [ng_id, this](size_t)
             {
                 brpc::Controller cntl;
                 remote::GetLeaderRequest req;
@@ -1426,7 +1426,7 @@ void Sharder::UpdateClusterConfig(
     // Since sharder worker is a single thread worker, we don't need to worry
     // about cluster config being updated by multiple threads at the same time.
     sharder_worker_->SubmitWork(
-        [this, new_ng_configs, cc_req, cc_shard, version]
+        [this, new_ng_configs, cc_req, cc_shard, version](size_t)
         {
             if (ClusterConfigVersion() >= version)
             {

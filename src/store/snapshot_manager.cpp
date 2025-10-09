@@ -649,7 +649,8 @@ txservice::remote::BackupTaskStatus SnapshotManager::CreateBackup(
         task.set_ng_term(ng_term);
     }
 
-    backup_worker_.SubmitWork([this, task_ptr] { HandleBackupTask(task_ptr); });
+    backup_worker_.SubmitWork([this, task_ptr](size_t)
+                              { HandleBackupTask(task_ptr); });
     return txservice::remote::BackupTaskStatus::Inited;
 }
 
