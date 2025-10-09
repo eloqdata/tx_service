@@ -716,6 +716,11 @@ public:
                                             req.Protocol(),
                                             0,
                                             false);
+            DLOG(INFO) << "AcquireAllCc from txn: " << req.Txn()
+                       << ", on table: " << table_name_.StringView()
+                       << ", key: " << cce_ptr->KeyString()
+                       << " is resumed from blocking. acquired_lock: "
+                       << int(acquired_lock) << ", err_code: " << int(err_code);
         }
         else
         {
@@ -924,6 +929,10 @@ public:
             }
             case CcErrorCode::ACQUIRE_LOCK_BLOCKED:
             {
+                DLOG(INFO) << "AcquireAllCc from txn: " << req.Txn()
+                           << ", on table: " << table_name_.StringView()
+                           << ", key: " << cce_ptr->KeyString()
+                           << " is blocked.";
                 // If the request comes from a remote node, sends
                 // acknowledgement to the sender when the request is
                 // blocked.

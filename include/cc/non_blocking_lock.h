@@ -320,6 +320,7 @@ private:
     {
         if (read_cnt_ > 0)
         {
+            DLOG(INFO) << "ReadLockConflict, read_cnt_: " << read_cnt_;
             return false;
         }
 
