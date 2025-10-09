@@ -5576,8 +5576,7 @@ void LocalCcShards::SyncTableStatisticsWorker()
         statistics_worker_ctx_.cv_.wait_for(
             worker_lk,
             10s,
-            [this]
-            {
+            [this] {
                 return statistics_worker_ctx_.status_ ==
                        WorkerStatus::Terminated;
             });
@@ -5848,8 +5847,7 @@ void LocalCcShards::HeartbeatWorker()
         bool wait_res = heartbeat_worker_ctx_.cv_.wait_for(
             heartbeat_worker_lk,
             std::chrono::seconds(1),
-            [this]
-            {
+            [this] {
                 return heartbeat_worker_ctx_.status_ ==
                        WorkerStatus::Terminated;
             });
@@ -5937,8 +5935,7 @@ void LocalCcShards::PurgeDeletedData()
         bool wait_res = purge_deleted_worker_ctx_.cv_.wait_for(
             worker_lk,
             std::chrono::seconds(10),
-            [this]
-            {
+            [this] {
                 return purge_deleted_worker_ctx_.status_ ==
                        WorkerStatus::Terminated;
             });
