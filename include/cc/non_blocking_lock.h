@@ -131,7 +131,7 @@ public:
      * @param ccs
      * @return
      */
-    bool ReleaseReadLockFast(CcShard *ccs);
+    bool ReleaseReadLockFast(CcShard *ccs, TxNumber tx_number);
 
     /**
      * @brief Tries to acquire the read lock. Only tx's under 2PL acquire read
