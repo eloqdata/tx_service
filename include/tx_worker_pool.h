@@ -43,7 +43,7 @@ public:
 
     void SubmitWork(std::function<void(size_t)> work);
 
-    void BulkSubmitWork(std::vector<std::function<void()>> work);
+    void BulkSubmitWork(std::vector<std::function<void(size_t)>> work);
 
     size_t WorkQueueSize();
     void Shutdown();

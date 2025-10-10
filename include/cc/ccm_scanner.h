@@ -21,7 +21,6 @@
  */
 #pragma once
 
-#include <chrono>
 #include <cstdint>
 #include <memory>  // std::shared_ptr
 #include <mutex>
@@ -65,29 +64,29 @@ public:
     ScanCache(CcScanner *scanner)
         : idx_(0),
           size_(0),
-          capacity(ScanBatchSize),
+          capacity_(ScanBatchSize),
           scanner_(scanner),
           mem_size_(0),
           mem_max_bytes_(0)
     {
     }
 
-    ScanCache(size_t idx, size_t size, size_t max_size, CcScanner *scanner)
+    ScanCache(size_t idx, size_t size, size_t capacity, CcScanner *scanner)
         : idx_(idx),
           size_(size),
-          capacity(max_size),
+          capacity_(capacity),
           trailing_cnt_(0),
           scanner_(scanner),
           mem_size_(0),
           mem_max_bytes_(0)
     {
-        assert(size_ <= max_size);
+        assert(size_ <= capacity);
     }
 
     ScanCache(ScanCache &&rhs) noexcept
         : idx_(rhs.idx_),
           size_(rhs.size_),
-          capacity(rhs.capacity),
+          capacity_(rhs.capacity_),
           trailing_cnt_(rhs.trailing_cnt_),
           scanner_(rhs.scanner_),
           mem_size_(rhs.mem_size_),
@@ -103,7 +102,7 @@ public:
         {
             return ScannerStatus::Open;
         }
-        else if (size_ == capacity)
+        else if (size_ == capacity_)
         {
             return ScannerStatus::Blocked;
         }
@@ -122,7 +121,7 @@ public:
     {
         idx_ = 0;
         size_ = 0;
-        capacity = ScanBatchSize;
+        capacity_ = ScanBatchSize;
         mem_size_ = 0;
         mem_max_bytes_ = 0;
         trailing_cnt_ = 0;
@@ -140,7 +139,7 @@ public:
 
     bool Full() const
     {
-        return size_ == capacity;
+        return size_ == capacity_;
     }
 
     CcScanner *Scanner() const
@@ -182,7 +181,7 @@ public:
 protected:
     size_t idx_;
     size_t size_;
-    size_t capacity;
+    size_t capacity_;
     size_t trailing_cnt_{0};
     CcScanner *const scanner_;
     uint32_t mem_size_{0};
@@ -214,7 +213,7 @@ public:
     }
 
     TemplateScanCache(TemplateScanCache &&rhs)
-        : ScanCache(rhs.idx_, rhs.size_, rhs.capacity, rhs.scanner_),
+        : ScanCache(rhs.idx_, rhs.size_, rhs.capacity_, rhs.scanner_),
           cache_(std::move(rhs.cache_)),
           key_schema_(rhs.key_schema_)
     {
@@ -234,9 +233,9 @@ public:
         mem_max_bytes_ = max_bytes;
     }
 
-    void SetCacheCapacity(size_t max_size)
+    void SetCacheCapacity(size_t capacity)
     {
-        capacity = max_size;
+        capacity_ = capacity;
     }
 
     const KeySchema *GetKeySchema()
@@ -306,9 +305,8 @@ public:
             // this scan. Only deserializes the key when the key is included.
             assert(key_ts > 0);
             scan_tuple->key_ts_ = key_ts;
-            scan_tuple->KeyObj().Deserialize(
-                key_str.data(), key_offset, key_schema_);
 
+            scan_tuple->KeyObj().SetPackedKey(key_str.data(), key_str.size());
             scan_tuple->rec_status_ = rec_status;
             scan_tuple->SetRecord(record_str.data(), rec_offset);
 
@@ -336,6 +334,12 @@ public:
     }
 
     const TemplateScanTuple<KeyT, ValueT> *At(uint32_t idx) const
+    {
+        assert(idx < cache_.size());
+        return &cache_[idx];
+    }
+
+    TemplateScanTuple<KeyT, ValueT> *At(uint32_t idx)
     {
         assert(idx < cache_.size());
         return &cache_[idx];
@@ -595,6 +599,22 @@ public:
             kv_caches_.clear();
         }
 
+        size_t ToTalSize()
+        {
+            size_t size = 0;
+            if (memory_cache_)
+            {
+                size += memory_cache_->Size();
+            }
+
+            for (const auto &[bucket_id, kv_cache] : kv_caches_)
+            {
+                size += kv_cache->Size();
+            }
+
+            return size;
+        }
+
         TemplateScanCache<KeyT, ValueT> *GetOrCreateKvCache(
             uint16_t bucket_id,
             CcScanner *scanner,
@@ -646,83 +666,163 @@ public:
             }
         }
 
+        class Iterator
+        {
+        public:
+            Iterator()
+                : mgr_(nullptr),
+                  scan_cache_type_(ScanCacheType::MemoryCache),
+                  inner_(0),
+                  cur_(nullptr)
+            {
+            }
+
+            Iterator(const ShardCache *m)
+                : mgr_(m),
+                  scan_cache_type_(ScanCacheType::MemoryCache),
+                  inner_(0),
+                  cur_(nullptr)
+            {
+            }
+
+            Iterator(const Iterator &other)
+            {
+                mgr_ = other.mgr_;
+                scan_cache_type_ = other.scan_cache_type_;
+                inner_ = other.inner_;
+                kv_cache_iter_ = other.kv_cache_iter_;
+                cur_ = other.cur_;
+            }
+
+            Iterator &operator=(const Iterator &other)
+            {
+                if (this != &other)
+                {
+                    mgr_ = other.mgr_;
+                    scan_cache_type_ = other.scan_cache_type_;
+                    inner_ = other.inner_;
+                    kv_cache_iter_ = other.kv_cache_iter_;
+                    cur_ = other.cur_;
+                }
+                return *this;
+            }
+
+            enum class ScanCacheType
+            {
+                MemoryCache = 0,
+                KvCache = 1
+            };
+
+            void Init()
+            {
+                scan_cache_type_ = ScanCacheType::MemoryCache;
+                inner_ = 0;
+                kv_cache_iter_ = mgr_->kv_caches_.cbegin();
+                cur_ = nullptr;
+                SkipEmpty();
+            }
+
+            const TemplateScanTuple<KeyT, ValueT> *Current() const
+            {
+                assert(Valid());
+                return cur_;
+            }
+
+            bool MoveNext()
+            {
+                ++inner_;
+                if (scan_cache_type_ == ScanCacheType::MemoryCache)
+                {
+                    if (inner_ < mgr_->memory_cache_->Size())
+                    {
+                        cur_ = mgr_->memory_cache_->At(inner_);
+                        return true;
+                    }
+
+                    scan_cache_type_ = ScanCacheType::KvCache;
+                    kv_cache_iter_ = mgr_->kv_caches_.cbegin();
+                    inner_ = 0;  // reset containter index
+                }
+                else
+                {
+                    assert(kv_cache_iter_ != mgr_->kv_caches_.cend());
+                    if (inner_ < kv_cache_iter_->second->Size())
+                    {
+                        cur_ = kv_cache_iter_->second->At(inner_);
+                        return true;
+                    }
+                    // move to next kv cache
+                    kv_cache_iter_++;
+                    inner_ = 0;
+                }
+
+                SkipEmpty();
+                return Valid();
+            }
+
+            bool Valid() const
+            {
+                return cur_ != nullptr;
+            }
+
+        private:
+            void SkipEmpty()
+            {
+                if (mgr_ == nullptr)
+                {
+                    return;
+                }
+
+                cur_ = nullptr;
+                inner_ = 0;
+
+                if (scan_cache_type_ == ScanCacheType::MemoryCache)
+                {
+                    if (mgr_->memory_cache_ && mgr_->memory_cache_->Size() > 0)
+                    {
+                        cur_ = mgr_->memory_cache_->At(inner_);
+                        return;
+                    }
+
+                    scan_cache_type_ = ScanCacheType::KvCache;
+                    kv_cache_iter_ = mgr_->kv_caches_.cbegin();
+                }
+
+                while (kv_cache_iter_ != mgr_->kv_caches_.cend())
+                {
+                    if (kv_cache_iter_->second->Size() > 0)
+                    {
+                        cur_ = kv_cache_iter_->second->At(inner_);
+                        return;
+                    }
+
+                    ++kv_cache_iter_;
+                }
+
+                assert(kv_cache_iter_ == mgr_->kv_caches_.cend());
+            }
+
+            const ShardCache *mgr_;
+            ScanCacheType scan_cache_type_{ScanCacheType::MemoryCache};
+            size_t inner_;  // containter index
+            typename absl::flat_hash_map<
+                uint16_t,
+                std::unique_ptr<TemplateScanCache<KeyT, ValueT>>>::
+                const_iterator kv_cache_iter_{};
+            const TemplateScanTuple<KeyT, ValueT> *cur_;
+        };
+
+        Iterator NewIterator()
+        {
+            return Iterator(this);
+        }
+
         std::vector<std::unique_ptr<TemplateScanCache<KeyT, ValueT>>>
             free_cache_pool_;
         std::unique_ptr<TemplateScanCache<KeyT, ValueT>> memory_cache_{nullptr};
         absl::flat_hash_map<uint16_t,
                             std::unique_ptr<TemplateScanCache<KeyT, ValueT>>>
             kv_caches_;
-    };
-
-    struct CompoundIndex
-    {
-    public:
-        CompoundIndex() = default;
-
-        void Reset()
-        {
-            offsets_.clear();
-            current_index_ = 0;
-        }
-
-        CompoundIndex(const CompoundIndex &) = delete;
-        CompoundIndex &operator=(const CompoundIndex &) = delete;
-        CompoundIndex(CompoundIndex &&other) noexcept
-        {
-            current_index_ = other.current_index_;
-            offsets_ = std::move(other.offsets_);
-        }
-
-        CompoundIndex &operator=(CompoundIndex &&other) noexcept
-        {
-            if (this != &other)
-            {
-                current_index_ = other.current_index_;
-                offsets_ = std::move(other.offsets_);
-            }
-            return *this;
-        }
-
-        void MoveNext()
-        {
-            current_index_++;
-        }
-
-        bool HasMoreData() const
-        {
-            return current_index_ < offsets_.size();
-        }
-
-        size_t Size() const
-        {
-            return offsets_.size();
-        }
-
-        const TemplateScanTuple<KeyT, ValueT> *Last()
-        {
-            if (offsets_.empty())
-            {
-                return nullptr;
-            }
-            else
-            {
-                TemplateScanCache<KeyT, ValueT> *cache =
-                    static_cast<TemplateScanCache<KeyT, ValueT> *>(
-                        offsets_.back().first);
-                return cache->At(offsets_.back().second);
-            }
-        }
-
-        const TemplateScanTuple<KeyT, ValueT> *Current()
-        {
-            TemplateScanCache<KeyT, ValueT> *cache =
-                static_cast<TemplateScanCache<KeyT, ValueT> *>(
-                    offsets_[current_index_].first);
-            return cache->At(offsets_[current_index_].second);
-        }
-
-        size_t current_index_{0};
-        std::vector<std::pair<ScanCache *, size_t>> offsets_;
     };
 
     HashParitionCcScanner(ScanDirection direct,
@@ -749,12 +849,9 @@ public:
             }
         }
 
-        for (auto &[shard_code, index] : index_chains_)
-        {
-            index->Reset();
-        }
-
         current_iter_ = {};
+        shard_cache_iter_ = typename ShardCache::Iterator();
+        cache_offset_ = 0;
         init_ = false;
     }
 
@@ -778,9 +875,9 @@ public:
                              *shard_code_and_sizes) const override
     {
         std::unique_lock<std::mutex> lock(mutex_);
-        for (const auto &[shard_code, cindex] : index_chains_)
+        for (const auto &[shard_code, cache] : shard_caches_)
         {
-            shard_code_and_sizes->emplace_back(shard_code, cindex->Size());
+            shard_code_and_sizes->emplace_back(shard_code, cache->ToTalSize());
         }
     }
 
@@ -809,8 +906,7 @@ public:
     TxKey DecodeKey(const std::string &blob) const override
     {
         std::unique_ptr<KeyT> key = std::make_unique<KeyT>();
-        size_t offset = 0;
-        key->Deserialize(blob.data(), offset, key_schema_);
+        key->SetPackedKey(blob.data(), blob.size());
         return TxKey(std::move(key));
     }
 
@@ -818,14 +914,20 @@ public:
     {
         if (!init_)
         {
-            current_iter_ = index_chains_.begin();
-            while (current_iter_ != index_chains_.end() &&
-                   !current_iter_->second->HasMoreData())
+            current_iter_ = shard_caches_.begin();
+            while (current_iter_ != shard_caches_.end())
             {
+                shard_cache_iter_ = current_iter_->second->NewIterator();
+                shard_cache_iter_.Init();
+                if (shard_cache_iter_.Valid())
+                {
+                    break;
+                }
+
                 current_iter_++;
             }
 
-            if (current_iter_ == index_chains_.end())
+            if (current_iter_ == shard_caches_.end())
             {
                 status_ = ScannerStatus::Blocked;
             }
@@ -840,25 +942,18 @@ public:
 
     const ScanTuple *Current() override
     {
-        /*
-        if (!init_)
-        {
-            Init();
-        }
-        */
-
         if (status_ != ScannerStatus::Open)
         {
             return nullptr;
         }
 
-        if (current_iter_ == index_chains_.end())
+        if (current_iter_ == shard_caches_.end())
         {
             status_ = ScannerStatus::Blocked;
             return nullptr;
         }
 
-        return current_iter_->second->Current();
+        return shard_cache_iter_.Current();
     }
 
     void MoveNext() override
@@ -868,7 +963,7 @@ public:
             return;
         }
 
-        if (current_iter_ == index_chains_.end())
+        if (current_iter_ == shard_caches_.end())
         {
             status_ = ScannerStatus::Blocked;
             return;
@@ -879,17 +974,19 @@ public:
             return;
         }
 
-        current_iter_->second->MoveNext();
-        while (current_iter_ != index_chains_.end() &&
-               !current_iter_->second->HasMoreData())
+        bool has_data = shard_cache_iter_.MoveNext();
+        while (!has_data)
         {
-            // Move to next shard
             current_iter_++;
-            if (current_iter_ == index_chains_.end())
+            if (current_iter_ == shard_caches_.end())
             {
                 status_ = ScannerStatus::Blocked;
                 return;
             }
+
+            shard_cache_iter_ = current_iter_->second->NewIterator();
+            shard_cache_iter_.Init();
+            has_data = shard_cache_iter_.Valid();
         }
     }
 
@@ -908,8 +1005,8 @@ public:
         status_ = ScannerStatus::Blocked;
         key_schema_ = key_schema;
         shard_caches_.clear();
-        index_chains_.clear();
         current_iter_ = {};
+        shard_cache_iter_ = typename ShardCache::Iterator();
         init_ = false;
     }
 
@@ -923,8 +1020,8 @@ public:
             shard_cache->Recycle();
         }
 
-        index_chains_.clear();
         current_iter_ = {};
+        shard_cache_iter_ = typename ShardCache::Iterator();
         init_ = false;
     }
 
@@ -943,20 +1040,6 @@ public:
                 shard_caches_.try_emplace(shard_code, std::move(shard_cache));
             return em_it.first->second.get();
         }
-    }
-
-    CompoundIndex *GetIndexChain(uint32_t shard_code)
-    {
-        std::lock_guard<std::mutex> lk(mutex_);
-        auto iter = index_chains_.find(shard_code);
-        if (iter == index_chains_.end())
-        {
-            auto em_it = index_chains_.emplace(
-                shard_code, std::make_unique<CompoundIndex>());
-            return em_it.first->second.get();
-        }
-
-        return iter->second.get();
     }
 
     TxKey Merge(uint32_t shard_code,
@@ -1022,8 +1105,6 @@ public:
             cache_offset[bucket_id] = 0;
         }
 
-        CompoundIndex *index_chain = GetIndexChain(shard_code);
-
         size_t memory_cache_offset = 0;
         size_t memory_cache_size = shard_cache->memory_cache_->Size();
 
@@ -1040,16 +1121,17 @@ public:
             {
                 while (cache_offset[target_bucket] < kv_cache->Size())
                 {
-                    const TemplateScanTuple<KeyT, ValueT> *kv_tuple =
+                    TemplateScanTuple<KeyT, ValueT> *kv_tuple =
                         kv_cache->At(cache_offset[target_bucket]);
                     if (kv_tuple->KeyObj() < memory_tuple->KeyObj())
                     {
-                        index_chain->offsets_.emplace_back(
-                            kv_cache, cache_offset[target_bucket]);
+                        // index_chain->offsets_.emplace_back(
+                        //    kv_cache, cache_offset[target_bucket]);
                         cache_offset[target_bucket]++;
                     }
                     else if (kv_tuple->KeyObj() == memory_tuple->KeyObj())
                     {
+                        kv_tuple->rec_status_ = RecordStatus::Deleted;
                         cache_offset[target_bucket]++;
                         break;
                     }
@@ -1060,8 +1142,8 @@ public:
                 }
             }
 
-            index_chain->offsets_.emplace_back(shard_cache->memory_cache_.get(),
-                                               memory_cache_offset);
+            // index_chain->offsets_.emplace_back(shard_cache->memory_cache_.get(),
+            //                                   memory_cache_offset);
             memory_cache_offset++;
         }
 
@@ -1074,16 +1156,13 @@ public:
             {
                 while (offset < kv_cache->Size())
                 {
-                    index_chain->offsets_.emplace_back(kv_cache, offset);
+                    // index_chain->offsets_.emplace_back(kv_cache, offset);
                     offset++;
                 }
             }
         }
 
-        const auto *last_tuple = index_chain->Last();
-        const KeyT *last_key = last_tuple ? &last_tuple->KeyObj() : nullptr;
-
-        return TxKey(last_key);
+        return TxKey(min_key);
     }
 
 private:
@@ -1092,10 +1171,12 @@ private:
     /// </summary>
 
     std::unordered_map<uint32_t, std::unique_ptr<ShardCache>> shard_caches_;
-    std::unordered_map<uint32_t, std::unique_ptr<CompoundIndex>> index_chains_;
-    typename std::unordered_map<uint32_t,
-                                std::unique_ptr<CompoundIndex>>::iterator
+    typename std::unordered_map<uint32_t, std::unique_ptr<ShardCache>>::iterator
         current_iter_;
+    typename ShardCache::Iterator shard_cache_iter_;
+
+    size_t cache_offset_{0};
+
     bool init_{false};
 
     const KeySchema *key_schema_;
@@ -1295,7 +1376,7 @@ public:
             if (is_require_sort_)
             {
                 CompoundIndex head_index(core_id, 0);
-                Merge(head_index);
+                MergeCompoundIndex(head_index);
             }
             else
             {
@@ -1366,7 +1447,7 @@ private:
         return inf;
     }
 
-    void Merge(CompoundIndex head)
+    void MergeCompoundIndex(CompoundIndex head)
     {
         std::unique_lock<std::mutex> lk(mux_);
         if (!head_occupied_)
@@ -1388,11 +1469,11 @@ private:
             head_occupied_ = false;
 
             lk.unlock();
-            Merge(head, curr_head);
+            MergeCompoundIndex(head, curr_head);
         }
     }
 
-    void Merge(CompoundIndex left, CompoundIndex right)
+    void MergeCompoundIndex(CompoundIndex left, CompoundIndex right)
     {
         CompoundIndex merge_head;
         CompoundIndex prev_index;
@@ -1400,12 +1481,12 @@ private:
         if (left == Inf())
         {
             // The left is empty.
-            return Merge(right);
+            return MergeCompoundIndex(right);
         }
         else if (right == Inf())
         {
             // The right is empty.
-            return Merge(left);
+            return MergeCompoundIndex(left);
         }
 
         const TemplateScanTuple<KeyT, ValueT> *left_tuple = At(left);
@@ -1490,7 +1571,7 @@ private:
             UpdateNextIndex(prev_index, right);
         }
 
-        Merge(merge_head);
+        MergeCompoundIndex(merge_head);
     }
 
     /**

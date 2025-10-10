@@ -2350,16 +2350,6 @@ void TransactionExecution::Process(ScanOpenOperation &scan_open)
     bool is_require_recs = scan_open.tx_req_->is_require_recs_;
     bool is_require_sort = scan_open.tx_req_->is_require_sort_;
 
-    // scan_open.Reset();
-    /*
-    scan_open.Set(&table_name,
-                  index_type,
-                  &start_key,
-                  inclusive,
-                  direction,
-                  is_ckpt_delta);
-    */
-
     scan_open.hd_result_.Value().scan_alias_ = scan_open.tx_req_->scan_alias_;
 
     if (!scan_open.lock_cluster_config_result_.IsFinished())
@@ -2505,7 +2495,7 @@ void TransactionExecution::PostProcess(ScanOpenOperation &scan_open)
 
     assert(scans_.find(open_result.scan_alias_) == scans_.end());
 
-    if (!table_name.IsHashPartitioned())
+    if (open_result.scanner_->Type() == CcmScannerType::RangePartition)
     {
         // Constructs a pseudo slice prior to the first slice of the scan. And
         // sets the status of the scanner "Blocked".
@@ -2558,6 +2548,15 @@ void TransactionExecution::PostProcess(ScanOpenOperation &scan_open)
                     local_cc_shard->GetBucketOwner(bucket_id, TxCcNodeId());
                 uint16_t core_idx =
                     Sharder::Instance().ShardBucketIdToCoreIdx(bucket_id);
+
+                if (open_result.scanner_->read_local_ &&
+                    bucket_owner != Sharder::Instance().NativeNodeGroup())
+                {
+                    // ha_eloq::analyze()
+                    assert(table_name.Type() == TableType::RangePartition);
+                    continue;
+                }
+
                 grouped[bucket_owner][core_idx].push_back(bucket_id);
             }
 
@@ -2566,7 +2565,7 @@ void TransactionExecution::PostProcess(ScanOpenOperation &scan_open)
                 batch_idx;
 
             size_t plan_bucket_cnt_soft_limit = 256;
-            size_t total_bucket_cnt = Sharder::Instance().ToTalRangeBuckets();
+            size_t total_bucket_cnt = Sharder::Instance().TotalRangeBuckets();
 
             absl::flat_hash_map<NodeGroupId, std::vector<uint16_t>>
                 current_plan_bucket_ids;
@@ -2607,12 +2606,15 @@ void TransactionExecution::PostProcess(ScanOpenOperation &scan_open)
             }
         }
 
-        auto search_cond =
-            Sharder::Instance()
-                .GetDataStoreHandler()
-                ->CreateDataSerachCondition(scan_open.tx_req_->obj_type_,
-                                            scan_open.tx_req_->scan_pattern_);
-
+        std::vector<DataStoreSearchCond> search_cond;
+        if (Sharder::Instance().GetDataStoreHandler())
+        {
+            search_cond = Sharder::Instance()
+                              .GetDataStoreHandler()
+                              ->CreateDataSerachCondition(
+                                  scan_open.tx_req_->obj_type_,
+                                  scan_open.tx_req_->scan_pattern_);
+        }
         scans_.try_emplace(open_result.scan_alias_,
                            std::move(open_result.scanner_),
                            std::move(search_cond),
@@ -2676,7 +2678,6 @@ void TransactionExecution::Process(ScanNextOperation &scan_next)
 
     bool to_scan_next = scanner.Current() == nullptr &&
                         scanner.Status() == ScannerStatus::Blocked;
-
     if (to_scan_next)
     {
         if (scan_next.scan_state_->current_plan_index_ == SIZE_MAX ||
@@ -2695,45 +2696,38 @@ void TransactionExecution::Process(ScanNextOperation &scan_next)
     {
         if (scanner.read_local_)
         {
-            /*
-            cc_handler_->ScanNextBatchLocal(
+            // only one node group
+            assert(scan_next.hd_result_.Value()
+                       .current_scan_plan_->Buckets()
+                       .size() == 1);
+        }
+
+        // Update handler result ref count
+        auto &ng_scan_buckets =
+            scan_next.hd_result_.Value().current_scan_plan_->Buckets();
+        scan_next.ResetResultForHashPart(ng_scan_buckets.size());
+
+        // Reset all caches, we need to scan next batch data
+        scanner.ResetCaches();
+
+        for (const auto &[node_group_id, bucket_ids] : ng_scan_buckets)
+        {
+            cc_handler_->ScanNextBatch(
+                scan_next.tx_req_->table_name_,
+                node_group_id,
                 tx_number_.load(std::memory_order_relaxed),
                 tx_term_,
                 command_id_.load(std::memory_order_relaxed),
                 start_ts_,
+                *scan_next.scan_state_->scan_start_key_,
+                scan_next.scan_state_->scan_start_inclusive_,
+                *scan_next.scan_state_->scan_end_key_,
+                scan_next.scan_state_->scan_end_inclusive_,
                 scanner,
-                scan_next.hd_result_);
-            */
-        }
-        else
-        {
-            // Update handler result ref count
-            auto &ng_scan_buckets =
-                scan_next.hd_result_.Value().current_scan_plan_->Buckets();
-            scan_next.ResetResultForHashPart(ng_scan_buckets.size());
-
-            // Reset all caches, we need to scan next batch data
-            scanner.ResetCaches();
-
-            for (const auto &[node_group_id, bucket_ids] : ng_scan_buckets)
-            {
-                cc_handler_->ScanNextBatch(
-                    scan_next.tx_req_->table_name_,
-                    node_group_id,
-                    tx_number_.load(std::memory_order_relaxed),
-                    tx_term_,
-                    command_id_.load(std::memory_order_relaxed),
-                    start_ts_,
-                    *scan_next.scan_state_->scan_start_key_,
-                    scan_next.scan_state_->scan_start_inclusive_,
-                    *scan_next.scan_state_->scan_end_key_,
-                    scan_next.scan_state_->scan_end_inclusive_,
-                    scanner,
-                    &scan_next.scan_state_->pushdown_condition_,
-                    scan_next.hd_result_,
-                    scan_next.tx_req_->obj_type_,
-                    scan_next.tx_req_->scan_pattern_);
-            }
+                &scan_next.scan_state_->pushdown_condition_,
+                scan_next.hd_result_,
+                scan_next.tx_req_->obj_type_,
+                scan_next.tx_req_->scan_pattern_);
         }
 
         is_local = scan_next.hd_result_.RemoteRefCnt() == 0;
