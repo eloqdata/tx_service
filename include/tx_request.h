@@ -394,8 +394,6 @@ struct BucketScanSavePoint
     {
         if (prev_pause_idx_ == UINT64_MAX || prev_pause_idx_ != current_idx)
         {
-            // clear prev pause position
-            // pause_position_.clear();
             BucketScanPlan plan(
                 current_idx, &bucket_groups_[current_idx], nullptr);
             return plan;

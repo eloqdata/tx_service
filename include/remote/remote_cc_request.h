@@ -525,7 +525,6 @@ public:
         CcErrorCode err_code = err_.load(std::memory_order_relaxed);
         if (err_code == CcErrorCode::NO_ERROR)
         {
-            // BucketScanProgress &progress = bucket_scan_progress_.at(core_id);
             // Merge data
             RemoteScanCache *remote_cache = GetRemoteScanCache(core_id);
             auto last_key = remote_cache->Merge(memory_is_drained_[core_id],
