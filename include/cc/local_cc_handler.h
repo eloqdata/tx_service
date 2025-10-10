@@ -260,13 +260,6 @@ public:
                        IsolationLevel iso_level = IsolationLevel::ReadCommitted,
                        CcProtocol proto = CcProtocol::OCC) override;
 
-    void ScanNextBatchLocal(uint64_t tx_number,
-                            int64_t tx_term,
-                            uint16_t command_id,
-                            uint64_t start_ts,
-                            CcScanner &scanner,
-                            CcHandlerResult<ScanNextResult> &hd_res) override;
-
     void ScanClose(const TableName &table_name,
                    ScanDirection direction,
                    std::unique_ptr<CcScanner> scanner) override;

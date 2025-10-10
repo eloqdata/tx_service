@@ -381,14 +381,6 @@ public:
         IsolationLevel iso_level = IsolationLevel::ReadCommitted,
         CcProtocol proto = CcProtocol::OCC) = 0;
 
-    virtual void ScanNextBatchLocal(
-        uint64_t tx_number,
-        int64_t tx_term,
-        uint16_t command_id,
-        uint64_t start_ts,
-        CcScanner &scanner,
-        CcHandlerResult<ScanNextResult> &hd_res) = 0;
-
     virtual void ScanClose(const TableName &table_name,
                            ScanDirection direction,
                            std::unique_ptr<CcScanner> scanner) = 0;

@@ -1049,7 +1049,6 @@ void txservice::remote::RemoteScanNextBatch::Reset(
     tx_number_ = input_msg->tx_number();
     tx_term_ = input_msg->tx_term();
     node_group_id_ = scan_next.node_group_id();
-    // const CceAddr_msg &cce_addr = scan_next.prior_cce_ptr();
     ng_term_ = scan_next.node_group_term();
 
     std::string_view table_name_sv(scan_next.table_name_str());

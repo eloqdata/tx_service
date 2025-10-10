@@ -1046,20 +1046,7 @@ void CcStreamReceiver::OnReceiveCcMsg(std::unique_ptr<CcMessage> msg)
     }
     case CcMessage::MessageType::CcMessage_MessageType_ScanOpenRequest:
     {
-        RemoteScanOpen *scan_open_req = scan_open_pool_.NextRequest();
-        uint32_t local_core_cnt = (uint32_t) local_shards_.Count();
-        TX_TRACE_ASSOCIATE(msg.get(), scan_open_req);
-        scan_open_req->Reset(std::move(msg), local_core_cnt);
-
-        for (uint32_t core_id = 0; core_id < local_core_cnt; ++core_id)
-        {
-            // The scan open request is directed to all local shards. The
-            // request pre-allocates scan caches, one for each shard. Each shard
-            // fills its own designated cache, so there is no synchronization
-            // across cores.
-            local_shards_.EnqueueCcRequest(core_id, scan_open_req);
-        }
-
+        assert(false && "Unimplemented");
         break;
     }
     case CcMessage::MessageType::CcMessage_MessageType_ScanOpenResponse:
@@ -1071,106 +1058,7 @@ void CcStreamReceiver::OnReceiveCcMsg(std::unique_ptr<CcMessage> msg)
             repeated ScanCache_msg scan_cache = 3;
         }*/
 
-        assert(msg->has_scan_open_resp());
-
-        CcHandlerResult<ScanOpenResult> *hd_res = nullptr;
-        TransactionExecution *txm = nullptr;
-        uint32_t tx_node_id = (msg->tx_number() >> 32L) >> 10;
-        int64_t tx_term = msg->tx_term();
-        if (!Sharder::Instance().CheckLeaderTerm(tx_node_id, tx_term))
-        {
-            // The tx node has failed. Pointer stability does not hold anymore.
-            msg_pool_.enqueue(std::move(msg));
-            break;
-        }
-        else
-        {
-            txm = reinterpret_cast<TransactionExecution *>(msg->txm_addr());
-
-            txm->AcquireSharedForwardLatch();
-
-            hd_res = reinterpret_cast<CcHandlerResult<ScanOpenResult> *>(
-                msg->handler_addr());
-
-            if (txm->TxNumber() != msg->tx_number() ||
-                txm->CommandId() != msg->command_id())
-            {
-                // The original tx has terminated and the tx machine has been
-                // recycled. The response message is directed to an obsolete tx.
-                // Skips setting the cc handler result.
-                msg_pool_.enqueue(std::move(msg));
-                txm->ReleaseSharedForwardLatch();
-                break;
-            }
-            assert(txm == hd_res->Txm());
-        }
-
-        const ScanOpenResponse &scan_open_res = msg->scan_open_resp();
-        uint32_t ng_id = scan_open_res.node_group_id();
-        hd_res->Value().cc_node_returned_[ng_id] = 1;
-
-        // Even if ScanOpen operation fail, we should also move scan
-        // result into read set to release acquired lock.
-        {
-            CcScanner &scanner = *hd_res->Value().scanner_;
-            int64_t term = -1;
-
-            for (int core_id = 0; core_id < scan_open_res.scan_cache_size();
-                 ++core_id)
-            {
-                /*
-                uint32_t shard_code = (ng_id << 10) + core_id;
-                const ScanCache_msg &cache_msg =
-                    scan_open_res.scan_cache(core_id);
-
-                ScanCache *shard_cache = scanner.AddShard(shard_code);
-
-                for (int idx = 0; idx < cache_msg.scan_tuple_size(); ++idx)
-                {
-                    const ScanTuple_msg &tuple_msg = cache_msg.scan_tuple(idx);
-                    assert(tuple_msg.cce_addr().core_id() ==
-                           (uint32_t) core_id);
-
-                    term = tuple_msg.cce_addr().term();
-
-                    RecordStatus rec_status =
-                        ToLocalType::ConvertRecordStatusType(
-                            tuple_msg.rec_status());
-
-                    size_t key_offset = 0;
-                    size_t rec_offset = 0;
-                    shard_cache->AddScanTuple(
-                        tuple_msg.key(),
-                        key_offset,
-                        tuple_msg.key_ts(),
-                        tuple_msg.record(),
-                        rec_offset,
-                        rec_status,
-                        tuple_msg.gap_ts(),
-                        tuple_msg.cce_addr().cce_lock_ptr(),
-                        tuple_msg.cce_addr().term(),
-                        tuple_msg.cce_addr().core_id(),
-                        ng_id);
-                }
-                        */
-            }
-
-            hd_res->Value().cc_node_terms_[ng_id] = term;
-        }
-
-        if (scan_open_res.error_code() != 0)
-        {
-            hd_res->SetRemoteError(
-                ToLocalType::ConvertCcErrorCode(scan_open_res.error_code()));
-        }
-        else
-        {
-            hd_res->SetRemoteFinished();
-        }
-
-        txm->ReleaseSharedForwardLatch();
-
-        msg_pool_.enqueue(std::move(msg));
+        assert(false && "Unimplemented");
         break;
     }
     case CcMessage::MessageType::CcMessage_MessageType_ScanNextRequest:
@@ -1189,14 +1077,6 @@ void CcStreamReceiver::OnReceiveCcMsg(std::unique_ptr<CcMessage> msg)
     }
     case CcMessage::MessageType::CcMessage_MessageType_ScanNextResponse:
     {
-        /*message ScanNextResponse
-        {
-            bool error = 1;
-            repeated ScanTuple_msg scan_tuple = 2;
-            uint64 ccm_ptr = 3;
-            uint64 scan_cache_ptr = 4;
-        }*/
-
         assert(msg->has_scan_next_resp());
 
         CcHandlerResult<ScanNextResult> *hd_res = nullptr;
