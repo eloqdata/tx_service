@@ -790,7 +790,7 @@ public:
         absl::flat_hash_map<NodeGroupId, std::vector<uint16_t>> *buckets,
         absl::flat_hash_map<NodeGroupId,
                             absl::flat_hash_map<uint16_t, BucketScanProgress>>
-            *pause_position)
+            &pause_position)
         : plan_index_(plan_index), buckets_(buckets)
     {
         assert(buckets != nullptr);
@@ -800,7 +800,7 @@ public:
             node_group_terms_.try_emplace(node_group_id, -1);
         }
 
-        if (pause_position == nullptr)
+        if (pause_position.empty())
         {
             for (const auto &[node_group_id, bucket] : *buckets)
             {
@@ -810,7 +810,7 @@ public:
         else
         {
             // Resume from eloqkv cursor
-            for (auto &[node_group_id, bucket_scan_progress] : *pause_position)
+            for (auto &[node_group_id, bucket_scan_progress] : pause_position)
             {
                 auto iter = current_position_.try_emplace(node_group_id);
                 for (const auto &[core_idx, progress] : bucket_scan_progress)
