@@ -637,7 +637,8 @@ void txservice::remote::RemoteCcHandler::ScanNext(
                 iter.first->second.mutable_scan_buckets()->emplace(bucket_id,
                                                                    drained);
             }
-
+            iter.first->second.set_memory_is_drained(
+                progress.memory_scan_is_finished_);
             progress.pause_key_.Serialize(
                 *iter.first->second.mutable_start_key()->mutable_key());
             iter.first->second.set_start_key_inclusive(

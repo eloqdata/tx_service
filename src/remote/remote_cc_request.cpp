@@ -1096,7 +1096,7 @@ void txservice::remote::RemoteScanNextBatch::Reset(
             scan_next.progress();
         for (const auto &[core_id, progress] : scan_progress_map.progress())
         {
-            memory_is_drained_[core_id] = false;
+            memory_is_drained_[core_id] = progress.memory_is_drained();
             for (const auto &[bucket_id, drained] : progress.scan_buckets())
             {
                 scan_buckets_[core_id].try_emplace(bucket_id, drained);
