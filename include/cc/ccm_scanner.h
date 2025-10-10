@@ -21,7 +21,6 @@
  */
 #pragma once
 
-#include <chrono>
 #include <cstdint>
 #include <memory>  // std::shared_ptr
 #include <mutex>
@@ -65,29 +64,29 @@ public:
     ScanCache(CcScanner *scanner)
         : idx_(0),
           size_(0),
-          capacity(ScanBatchSize),
+          capacity_(ScanBatchSize),
           scanner_(scanner),
           mem_size_(0),
           mem_max_bytes_(0)
     {
     }
 
-    ScanCache(size_t idx, size_t size, size_t max_size, CcScanner *scanner)
+    ScanCache(size_t idx, size_t size, size_t capacity, CcScanner *scanner)
         : idx_(idx),
           size_(size),
-          capacity(max_size),
+          capacity_(capacity),
           trailing_cnt_(0),
           scanner_(scanner),
           mem_size_(0),
           mem_max_bytes_(0)
     {
-        assert(size_ <= max_size);
+        assert(size_ <= capacity);
     }
 
     ScanCache(ScanCache &&rhs) noexcept
         : idx_(rhs.idx_),
           size_(rhs.size_),
-          capacity(rhs.capacity),
+          capacity_(rhs.capacity_),
           trailing_cnt_(rhs.trailing_cnt_),
           scanner_(rhs.scanner_),
           mem_size_(rhs.mem_size_),
@@ -103,7 +102,7 @@ public:
         {
             return ScannerStatus::Open;
         }
-        else if (size_ == capacity)
+        else if (size_ == capacity_)
         {
             return ScannerStatus::Blocked;
         }
@@ -122,7 +121,7 @@ public:
     {
         idx_ = 0;
         size_ = 0;
-        capacity = ScanBatchSize;
+        capacity_ = ScanBatchSize;
         mem_size_ = 0;
         mem_max_bytes_ = 0;
         trailing_cnt_ = 0;
@@ -140,7 +139,7 @@ public:
 
     bool Full() const
     {
-        return size_ == capacity;
+        return size_ == capacity_;
     }
 
     CcScanner *Scanner() const
@@ -182,7 +181,7 @@ public:
 protected:
     size_t idx_;
     size_t size_;
-    size_t capacity;
+    size_t capacity_;
     size_t trailing_cnt_{0};
     CcScanner *const scanner_;
     uint32_t mem_size_{0};
@@ -214,7 +213,7 @@ public:
     }
 
     TemplateScanCache(TemplateScanCache &&rhs)
-        : ScanCache(rhs.idx_, rhs.size_, rhs.capacity, rhs.scanner_),
+        : ScanCache(rhs.idx_, rhs.size_, rhs.capacity_, rhs.scanner_),
           cache_(std::move(rhs.cache_)),
           key_schema_(rhs.key_schema_)
     {
@@ -234,9 +233,9 @@ public:
         mem_max_bytes_ = max_bytes;
     }
 
-    void SetCacheCapacity(size_t max_size)
+    void SetCacheCapacity(size_t capacity)
     {
-        capacity = max_size;
+        capacity_ = capacity;
     }
 
     const KeySchema *GetKeySchema()
@@ -308,9 +307,6 @@ public:
             scan_tuple->key_ts_ = key_ts;
 
             scan_tuple->KeyObj().SetPackedKey(key_str.data(), key_str.size());
-            // scan_tuple->KeyObj().Deserialize(
-            //    key_str.data(), key_offset, key_schema_);
-
             scan_tuple->rec_status_ = rec_status;
             scan_tuple->SetRecord(record_str.data(), rec_offset);
 
@@ -1380,7 +1376,7 @@ public:
             if (is_require_sort_)
             {
                 CompoundIndex head_index(core_id, 0);
-                Merge(head_index);
+                MergeCompoundIndex(head_index);
             }
             else
             {
@@ -1451,7 +1447,7 @@ private:
         return inf;
     }
 
-    void Merge(CompoundIndex head)
+    void MergeCompoundIndex(CompoundIndex head)
     {
         std::unique_lock<std::mutex> lk(mux_);
         if (!head_occupied_)
@@ -1473,11 +1469,11 @@ private:
             head_occupied_ = false;
 
             lk.unlock();
-            Merge(head, curr_head);
+            MergeCompoundIndex(head, curr_head);
         }
     }
 
-    void Merge(CompoundIndex left, CompoundIndex right)
+    void MergeCompoundIndex(CompoundIndex left, CompoundIndex right)
     {
         CompoundIndex merge_head;
         CompoundIndex prev_index;
@@ -1485,12 +1481,12 @@ private:
         if (left == Inf())
         {
             // The left is empty.
-            return Merge(right);
+            return MergeCompoundIndex(right);
         }
         else if (right == Inf())
         {
             // The right is empty.
-            return Merge(left);
+            return MergeCompoundIndex(left);
         }
 
         const TemplateScanTuple<KeyT, ValueT> *left_tuple = At(left);
@@ -1575,7 +1571,7 @@ private:
             UpdateNextIndex(prev_index, right);
         }
 
-        Merge(merge_head);
+        MergeCompoundIndex(merge_head);
     }
 
     /**

@@ -1849,7 +1849,6 @@ public:
         obj_type_ = obj_type;
         scan_pattern_ = scan_pattern;
 
-        // bucket_ids_.clear();
         end_key_ = end_key.GetShallowCopy();
         end_key_inclusive_ = end_key_inclusive;
 
@@ -1859,7 +1858,6 @@ public:
 
         pushdown_cond_ = pushdown_cond;
 
-        // unfinished_core_cnt_ = bucket_ids_.size();
         unfinished_core_cnt_ = bucket_scan_progress_->size();
         assert(unfinished_core_cnt_ != 0);
 
