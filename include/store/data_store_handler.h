@@ -253,18 +253,6 @@ public:
 
     virtual void DropKvTableAsync(const std::string &kv_table_name) = 0;
 
-    virtual std::unique_ptr<DataStoreScanner> ScanForward(
-        const TableName &table_name,
-        uint32_t ng_id,
-        const TxKey &start_key,
-        bool inclusive,
-        uint8_t key_parts,
-        const std::vector<DataStoreSearchCond> &search_cond,
-        const KeySchema *key_schema,
-        const RecordSchema *rec_schema,
-        const KVCatalogInfo *kv_info,
-        bool scan_foward) = 0;
-
     /**
      * @brief Write batch historical versions into DataStore.
      */
