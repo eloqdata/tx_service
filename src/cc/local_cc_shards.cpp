@@ -6547,7 +6547,6 @@ void LocalCcShards::FastMetaDataMutex::lock()
             // Wait for writers that already hold the bit.
             while ((expected & kWriterMask) != 0)
             {
-                // std::this_thread::yield();
                 expected = ptr->load(std::memory_order_acquire);
             }
 
@@ -6564,7 +6563,6 @@ void LocalCcShards::FastMetaDataMutex::lock()
         // Wait until all readers drain so only the writer bit remains.
         while ((ptr->load(std::memory_order_acquire) & ~kWriterMask) != 0)
         {
-            // std::this_thread::yield();
         }
     }
 
@@ -6579,7 +6577,6 @@ void LocalCcShards::FastMetaDataMutex::lock_shared()
     {
         if ((expected & kWriterMask) != 0)
         {
-            // std::this_thread::yield();
             expected = ptr->load(std::memory_order_acquire);
             continue;
         }
