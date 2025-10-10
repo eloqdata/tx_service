@@ -1074,7 +1074,7 @@ public:
         const std::function<int32_t(int32_t, bool)> &next_prefetch_slice =
             DefaultNextPrefetchSlice)
     {
-        std::shared_lock<std::shared_mutex> lk(meta_data_mux_);
+        std::shared_lock<FastMetaDataMutex> lk(fast_meta_data_mux_);
 
         TableName range_table_name(table_name.StringView(),
                                    TableType::RangePartition,
