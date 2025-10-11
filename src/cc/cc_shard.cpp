@@ -1711,7 +1711,15 @@ const CatalogEntry *CcShard::InitCcm(const TableName &table_name,
         }
         else
         {
-            schema_ts = curr_schema->IndexKeySchema(table_name)->SchemaTs();
+            const SecondaryKeySchema *index_schema =
+                curr_schema->IndexKeySchema(table_name);
+            if (index_schema == nullptr)
+            {
+                requester->AbortCcRequest(
+                    CcErrorCode::REQUESTED_INDEX_TABLE_NOT_EXISTS);
+                return nullptr;
+            }
+            schema_ts = index_schema->SchemaTs();
         }
     }
 
