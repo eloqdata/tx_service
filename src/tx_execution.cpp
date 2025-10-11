@@ -315,13 +315,14 @@ void TransactionExecution::ReleaseCatalogsRead()
         return;
     }
 
+    uint64_t tx_number = TxNumber();
     for (auto &db_idx : locked_db_)
     {
         if (db_idx.first != nullptr)
         {
             LocalCcHandler *local_hd =
                 static_cast<LocalCcHandler *>(cc_handler_);
-            local_hd->ReleaseCatalogRead(db_idx.first);
+            local_hd->ReleaseCatalogRead(db_idx.first, tx_number);
         }
     }
     locked_db_ = {};
