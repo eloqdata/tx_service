@@ -523,6 +523,7 @@ public:
                     cce->PayloadStatus() != RecordStatus::Unknown)
                 {
                     LOG(ERROR) << "Buffered cmds found on leader node"
+                               << ", cce key: " << cce->KeyString()
                                << ", cce CommitTs: " << cce->CommitTs() << "\n"
                                << cce->BufferedCommandList();
                     assert(false);

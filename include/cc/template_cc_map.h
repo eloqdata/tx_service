@@ -6533,6 +6533,7 @@ public:
                             // cmd list.
                             LOG(ERROR)
                                 << "Buffered cmds found on leader node"
+                                << ", cce key: " << cce->KeyString()
                                 << ", cce CommitTs: " << cce->CommitTs() << "\n"
                                 << buffered_cmds;
                             assert(false);
