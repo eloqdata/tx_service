@@ -67,9 +67,9 @@ CcShard::CcShard(
     uint64_t cluster_config_version,
     metrics::MetricsRegistry *metrics_registry,
     metrics::CommonLabels common_labels)
-    : ng_id_(ng_id),
-      core_id_(core_id),
+    : core_id_(core_id),
       core_cnt_(core_cnt),
+      ng_id_(ng_id),
       local_shards_(local_shards),
       realtime_sampling_(realtime_sampling),
       lock_vec_(),
