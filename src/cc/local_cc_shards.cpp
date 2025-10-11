@@ -340,8 +340,7 @@ void LocalCcShards::UpdateTsBase(uint64_t timestamp)
 
 void LocalCcShards::BindThreadToFastMetaDataShard(size_t shard_idx)
 {
-    if (__builtin_expect(tls_shard_idx == std::numeric_limits<size_t>::max(),
-                         0))
+    if (BAIDU_UNLIKELY(tls_shard_idx == std::numeric_limits<size_t>::max()))
     {
         tls_shard_idx = shard_idx;
     }
