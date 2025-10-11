@@ -674,7 +674,8 @@ txservice::LocalCcHandler::ReadCatalog(const TableName &table_name,
     return catalog_ccm->ReadTable(table_name, ng_id, ng_term, tx_number);
 }
 
-bool txservice::LocalCcHandler::ReleaseCatalogRead(NonBlockingLock *lock, TxNumber tx_number) const
+bool txservice::LocalCcHandler::ReleaseCatalogRead(NonBlockingLock *lock,
+                                                   TxNumber tx_number) const
 {
     CcShard *shard_ = cc_shards_.cc_shards_[thd_id_].get();
     return lock->ReleaseReadLockFast(shard_, tx_number);
