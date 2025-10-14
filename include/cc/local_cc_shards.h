@@ -2136,17 +2136,6 @@ private:
                 return false;
             };
 
-            if (!has_enough_memory())
-            {
-                DLOG(INFO) << "Flush data memory quota is full "
-                           << flush_data_mem_usage_
-                           << " ,request quota: " << quota
-                           << " total quota: " << flush_data_mem_quota_;
-                Sharder::Instance()
-                    .GetLocalCcShards()
-                    ->FlushCurrentFlushBuffer();
-            }
-
             // Wait until enough memory is available
             while (!has_enough_memory())
             {
