@@ -2144,9 +2144,10 @@ private:
                            << flush_data_mem_usage_
                            << " ,request quota: " << quota
                            << " total quota: " << flush_data_mem_quota_;
-                Sharder::Instance()
-                    .GetLocalCcShards()
-                    ->FlushCurrentFlushBuffer();
+                LOG(INFO) << "DataSyncMemoryController allocate fail, FlushCurrentFlushBuffer";
+                // Sharder::Instance()
+                //     .GetLocalCcShards()
+                //     ->FlushCurrentFlushBuffer();
             }
 
             // Wait until enough memory is available
