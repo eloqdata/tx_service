@@ -497,6 +497,7 @@ struct ScanNextOperation : TransactionOperation
     {
         scan_state_ = scan_state;
         slice_hd_result_.Value().ccm_scanner_ = scan_state->scanner_.get();
+        hd_result_.Value().ccm_scanner_ = scan_state->scanner_.get();
     }
 
     ScanState *scan_state_;
