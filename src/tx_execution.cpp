@@ -30,6 +30,7 @@
 
 #include "absl/container/flat_hash_map.h"
 #include "cc_protocol.h"
+#include "ccm_scanner.h"
 #include "error_messages.h"  //CcErrorCode
 #include "local_cc_shards.h"
 #include "log.pb.h"
@@ -2669,17 +2670,23 @@ void TransactionExecution::Process(ScanNextOperation &scan_next)
     CcScanner &scanner = *scan_next.scan_state_->scanner_;
     if (!scan_next.is_running_)
     {
-        ScanNextResult &scan_next_result = scan_next.hd_result_.Value();
-        scan_next_result.Clear();
-        scan_next_result.current_scan_plan_ =
-            scan_next.tx_req_->bucket_scan_plan_;
-        scan_next_result.ccm_scanner_ = &scanner;
+        if (scanner.Type() == CcmScannerType::HashPartition)
+        {
+            ScanNextResult &scan_next_result = scan_next.hd_result_.Value();
+            scan_next_result.Clear();
+            scan_next_result.current_scan_plan_ =
+                scan_next.tx_req_->bucket_scan_plan_;
+            scan_next_result.ccm_scanner_ = &scanner;
+        }
+
         scan_next.is_running_ = true;
     }
 
     bool to_scan_next = scanner.Current() == nullptr &&
                         scanner.Status() == ScannerStatus::Blocked;
-    if (to_scan_next)
+
+    bool is_local = true;
+    if (to_scan_next && scanner.Type() == CcmScannerType::HashPartition)
     {
         if (scan_next.scan_state_->current_plan_index_ == SIZE_MAX ||
             scan_next.scan_state_->current_plan_index_ !=
@@ -2690,11 +2697,7 @@ void TransactionExecution::Process(ScanNextOperation &scan_next)
             scanner.Close();
             scanner.SetStatus(ScannerStatus::Blocked);
         }
-    }
 
-    bool is_local = true;
-    if (to_scan_next && scanner.Type() == CcmScannerType::HashPartition)
-    {
         if (scanner.read_local_)
         {
             // only one node group
