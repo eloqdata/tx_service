@@ -2391,7 +2391,8 @@ public:
         auto [cce_lock_addr, end_lock_addr] =
             req.BlockingCceLockAddr(shard_->core_id_);
         if (cce_lock_addr == 0 &&
-            table_name_.Type() != TableType::RangePartition)
+            table_name_.Type() != TableType::RangePartition &&
+            Sharder::GetDataStoreHandler() != nullptr)
         {
             // first enter, send async request to kv store
             shard_->FetchBucketData(
@@ -3019,39 +3020,43 @@ public:
                 assert(false);
             }
 
-            std::string_view req_start_key_view;
-            std::string_view req_end_key_view;
-            if (req_start_key->Type() == KeyType::Normal)
+            if (table_name_.Type() != TableType::RangePartition &&
+                Sharder::GetDataStoreHandler() != nullptr)
             {
-                req_start_key_view = std::string_view(req_start_key->Data(),
-                                                      req_start_key->Size());
-            }
+                std::string_view req_start_key_view;
+                std::string_view req_end_key_view;
+                if (req_start_key->Type() == KeyType::Normal)
+                {
+                    req_start_key_view = std::string_view(
+                        req_start_key->Data(), req_start_key->Size());
+                }
 
-            if (req_end_key->Type() == KeyType::Normal)
-            {
-                req_end_key_view =
-                    std::string_view(req_end_key->Data(), req_end_key->Size());
-            }
+                if (req_end_key->Type() == KeyType::Normal)
+                {
+                    req_end_key_view = std::string_view(req_end_key->Data(),
+                                                        req_end_key->Size());
+                }
 
-            // first enter, send async request to kv store
-            shard_->FetchBucketData(
-                &table_name_,
-                table_schema_,
-                ng_id,
-                ng_term,
-                shard_,
-                false,
-                bucket_ids,
-                req.PushdownCond(),
-                std::move(req_start_key_view),
-                req_start_key->Type(),
-                req.StartKeyInclusive(shard_->core_id_),
-                std::move(req_end_key_view),
-                req_end_key->Type(),
-                req.EndKeyInclusive(),
-                ScanNextBatchCc::KvBucketBatchSize,
-                &req,
-                &BackfillForScanNextBatch<KeyT, ValueT, VersionedRecord>);
+                // first enter, send async request to kv store
+                shard_->FetchBucketData(
+                    &table_name_,
+                    table_schema_,
+                    ng_id,
+                    ng_term,
+                    shard_,
+                    false,
+                    bucket_ids,
+                    req.PushdownCond(),
+                    std::move(req_start_key_view),
+                    req_start_key->Type(),
+                    req.StartKeyInclusive(shard_->core_id_),
+                    std::move(req_end_key_view),
+                    req_end_key->Type(),
+                    req.EndKeyInclusive(),
+                    ScanNextBatchCc::KvBucketBatchSize,
+                    &req,
+                    &BackfillForScanNextBatch<KeyT, ValueT, VersionedRecord>);
+            }
         }
 
         auto acquire_read_intent =
