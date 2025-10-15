@@ -1105,6 +1105,8 @@ void txservice::LocalCcHandler::ScanNextBatch(
             *bucket_scan_progress = plan->GetBucketScanProgress(node_group_id);
         if (bucket_scan_progress->empty())
         {
+            bool kv_finished =
+                Sharder::Instance().GetDataStoreHandler() == nullptr;
             for (const auto &bucket_id : *plan->Buckets(node_group_id))
             {
                 uint16_t target_core =
@@ -1113,13 +1115,14 @@ void txservice::LocalCcHandler::ScanNextBatch(
                 auto iter = bucket_scan_progress->find(target_core);
                 if (iter != bucket_scan_progress->end())
                 {
-                    iter->second.scan_buckets_.emplace(bucket_id, false);
+                    iter->second.scan_buckets_.emplace(bucket_id, kv_finished);
                 }
                 else
                 {
                     auto em_it = bucket_scan_progress->try_emplace(
                         target_core, start_key.Clone(), start_inclusive);
-                    em_it.first->second.scan_buckets_.emplace(bucket_id, false);
+                    em_it.first->second.scan_buckets_.emplace(bucket_id,
+                                                              kv_finished);
                 }
             }
         }

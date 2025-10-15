@@ -661,7 +661,7 @@ public:
             }
             else
             {
-                assert(false);
+                assert(Sharder::Instance().GetDataStoreHandler() == nullptr);
                 return nullptr;
             }
         }

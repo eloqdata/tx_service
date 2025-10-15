@@ -2617,6 +2617,7 @@ void TransactionExecution::PostProcess(ScanOpenOperation &scan_open)
                                   scan_open.tx_req_->obj_type_,
                                   scan_open.tx_req_->scan_pattern_);
         }
+
         scans_.try_emplace(open_result.scan_alias_,
                            std::move(open_result.scanner_),
                            std::move(search_cond),

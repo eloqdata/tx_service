@@ -1107,20 +1107,22 @@ void txservice::remote::RemoteScanNextBatch::Reset(
     {
         const ::txservice::remote::BucketScanInfoMsg &scan_info =
             scan_next.global_info();
+        bool kv_finished = Sharder::Instance().GetDataStoreHandler() == nullptr;
         for (const auto &bucket_id : scan_info.scan_buckets())
         {
             uint16_t target_core =
                 Sharder::Instance().ShardBucketIdToCoreIdx(bucket_id);
             auto iter = scan_buckets_.find(target_core);
+
             if (iter == scan_buckets_.end())
             {
                 memory_is_drained_[target_core] = false;
                 auto em_it = scan_buckets_.try_emplace(target_core);
-                em_it.first->second.emplace(bucket_id, false);
+                em_it.first->second.emplace(bucket_id, kv_finished);
             }
             else
             {
-                iter->second.emplace(bucket_id, false);
+                iter->second.emplace(bucket_id, kv_finished);
             }
         }
     }
