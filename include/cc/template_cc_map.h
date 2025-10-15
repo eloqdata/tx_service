@@ -2392,7 +2392,7 @@ public:
             req.BlockingCceLockAddr(shard_->core_id_);
         if (cce_lock_addr == 0 &&
             table_name_.Type() != TableType::RangePartition &&
-            Sharder::GetDataStoreHandler() != nullptr)
+            Sharder::Instance().GetDataStoreHandler() != nullptr)
         {
             // first enter, send async request to kv store
             shard_->FetchBucketData(
@@ -3021,7 +3021,7 @@ public:
             }
 
             if (table_name_.Type() != TableType::RangePartition &&
-                Sharder::GetDataStoreHandler() != nullptr)
+                Sharder::Instance().GetDataStoreHandler() != nullptr)
             {
                 std::string_view req_start_key_view;
                 std::string_view req_end_key_view;
