@@ -1383,6 +1383,11 @@ void txservice::LocalCcHandler::NewTxn(CcHandlerResult<InitTxResult> &hres,
         TxNumber txn = init_tx_res.txid_.TxNumber();
         init_tx_res.start_ts_ = tx.lower_bound_;
         init_tx_res.term_ = tx.term_;
+        LOG(INFO) << "NewTxn " << this << ", tx_ng_id: " << tx_ng_id
+                  << ", log_group_id: " << log_group_id
+                  << ", txid: " << init_tx_res.txid_.TxNumber()
+                  << ", start_ts: " << init_tx_res.start_ts_
+                  << ", term: " << init_tx_res.term_ << ", SET FINISH" << ", hd res " << &hres;
         hres.SetFinished();
 
         // Update active tx info
@@ -1399,6 +1404,7 @@ void txservice::LocalCcHandler::NewTxn(CcHandlerResult<InitTxResult> &hres,
         // preferred leader of that cc node group, it is very likely
         // that that leader will be transferred soon. For simplicity, we stop
         // creating new tx's if the native node is not the leader for now.
+        LOG(INFO) << "set error";
         hres.SetError(CcErrorCode::REQUESTED_NODE_NOT_LEADER);
     }
 }

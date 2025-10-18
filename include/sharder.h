@@ -308,7 +308,6 @@ public:
              const std::string &local_path,
              const std::string &cluster_config_path,
              const uint16_t rep_group_cnt,
-             bool enable_brpc_builtin_services,
              bool fork_host_manager);
 
     /**
@@ -599,7 +598,7 @@ public:
      * TxProcessor thread start, so, should start cc stream server after the
      * txservice::Start().
      */
-    void StartCcStreamReceiver(bool enable_brpc_builtin_services = true);
+    void StartCcStreamReceiver();
 
     /**
      * @brief Connect cc stream sender to remote nodes
