@@ -118,8 +118,9 @@ public:
         pos_inf_page_.prev_page_ = &neg_inf_page_;
         pos_inf_page_.next_page_ = nullptr;
 
-        if (shard->realtime_sampling_ && table_schema && !table_name.IsMeta() &&
-            table_name != sequence_table_name)
+        if (shard->realtime_sampling_ && table_schema &&
+            (table_name.Engine() == TableEngine::EloqSql ||
+             table_name.Engine() == TableEngine::EloqDoc))
         {
             TableStatistics<KeyT> *statistics =
                 static_cast<TableStatistics<KeyT> *>(

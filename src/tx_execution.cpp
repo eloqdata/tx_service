@@ -493,12 +493,13 @@ TxmStatus TransactionExecution::Forward()
         {
             prev_op = nullptr;
             cmd_id = 0;
-
+            LOG(INFO) << "DequeueTxRequest " << this ;
             TxRequest *req = DequeueTxRequest();
             if (req == nullptr)
             {
                 break;
             }
+            LOG(INFO) << "DequeueTxRequest req: " << req << ", req type: " << typeid(*req).name();
 
             req->Process(this);
         }
@@ -527,6 +528,7 @@ int TransactionExecution::Execute(TxRequest *tx_req)
 
     if (status == TxnStatus::Ongoing || status == TxnStatus::Recovering)
     {
+        LOG(INFO) << "enqueue tx_req bind_to_ext_proc_: " << bind_to_ext_proc_;
         if (bind_to_ext_proc_)
         {
             tx_req_queue_.Enqueue(tx_req);
@@ -755,6 +757,7 @@ void TransactionExecution::ProcessTxRequest(ReadTxRequest &read_req)
 
     if (tx_term_ < 0)
     {
+        LOG(INFO) << "tx term < 0 " << this  << ", tx term: " << tx_term_;
         read_req.SetError(TxErrorCode::TX_INIT_FAIL);
         return;
     }
@@ -764,6 +767,7 @@ void TransactionExecution::ProcessTxRequest(ReadTxRequest &read_req)
     read_.read_type_ = ReadType::Inside;
     read_.read_tx_req_ = &read_req;
     read_.Reset();
+    LOG(INFO) << "ReadTxRequest: " << read_req.tab_name_->String();
 
     PushOperation(&read_);
     Process(read_);
@@ -1736,6 +1740,7 @@ void TransactionExecution::Process(InitTxnOperation &init_txn)
         tx_duration_start_ = metrics::Clock::now();
     }
 
+    LOG(INFO) << "Process InitTxnOperation " << this ;
     init_txn.is_running_ = true;
     commit_ts_ = 0;
     commit_ts_bound_ = 0;
@@ -1744,6 +1749,7 @@ void TransactionExecution::Process(InitTxnOperation &init_txn)
                         iso_level_,
                         init_txn.tx_ng_id_,
                         init_txn.log_group_id_);
+    LOG(INFO) << "NewTxn " << this << ", tx_ng_id: " << init_txn.tx_ng_id_ << ", log_group_id: " << init_txn.log_group_id_;
 }
 
 void TransactionExecution::PostProcess(InitTxnOperation &init_txn)
@@ -1787,6 +1793,7 @@ void TransactionExecution::PostProcess(InitTxnOperation &init_txn)
         return;
     }
 
+    LOG(INFO) << "PostProcess InitTxnOperation " << this ;
     const InitTxResult &init_result = init_txn.hd_result_.Value();
     txid_ = init_result.txid_;
     uint64_t tx_number = txid_.TxNumber();
@@ -1834,6 +1841,7 @@ void TransactionExecution::Process(ReadOperation &read)
         // bound. This API is used for reading cc maps replicated in all shards.
         // A typical use case of ReadLocal is to read and start concurrency
         // control of a table catalog.
+        LOG(INFO) << "read_tx_req_->read_local_: " << read.read_tx_req_->read_local_;
         if (read.read_tx_req_->read_local_)
         {
             // So far ReadLocal() is use exclusively for reading catalogs.
@@ -1851,6 +1859,7 @@ void TransactionExecution::Process(ReadOperation &read)
             read.protocol_ = CcProtocol::Locking;
 
             bool finished = true;
+            LOG(INFO) << "read op process";
             if (!read.read_tx_req_->is_str_key_)
             {
                 finished = cc_handler_->ReadLocal(
@@ -1889,6 +1898,11 @@ void TransactionExecution::Process(ReadOperation &read)
             if (finished)
             {
                 command_id_.fetch_add(1, std::memory_order_relaxed);
+                LOG(INFO) << "read op done";
+            }
+            else
+            {
+                LOG(INFO) << "read op failed";
             }
         }
         else
