@@ -1102,7 +1102,7 @@ class TxService
 {
 public:
     TxService(
-        CatalogFactory *catalog_factory[3],
+        CatalogFactory *catalog_factory[NUM_EXTERNAL_ENGINES],
         SystemHandler *system_handler,
         const std::map<std::string, uint32_t> &conf,
         uint32_t node_id,  // = 0,
@@ -1213,7 +1213,6 @@ public:
               std::unique_ptr<TxLog> log_agent,
               const std::string &local_path,
               const std::string &cluster_config_path,
-              bool enable_brpc_builtin_services = true,
               bool fork_host_manager = true)
     {
         if (!txservice_enable_cache_replacement && !txservice_skip_kv)
@@ -1244,7 +1243,6 @@ public:
                                      local_path,
                                      cluster_config_path,
                                      ng_rep_cnt,
-                                     enable_brpc_builtin_services,
                                      fork_host_manager) < 0)
 
         {
@@ -1270,7 +1268,7 @@ public:
 #endif
 
         // Start cc stream receiver server.
-        Sharder::Instance().StartCcStreamReceiver(enable_brpc_builtin_services);
+        Sharder::Instance().StartCcStreamReceiver();
 
         // Connect cc stream sender to remote nodes
         Sharder::Instance().ConnectCcStreamSender();

@@ -215,7 +215,6 @@ public:
     CcShard(uint16_t core_id,
             uint32_t core_cnt,
             uint32_t node_memory_limit_mb,
-            uint32_t node_log_limit_mb,
             bool realtime_sampling,
             uint32_t native_ng_id,
             LocalCcShards &local_shards,
@@ -848,10 +847,6 @@ public:
 
     // shard level memory limit.
     uint64_t memory_limit_{0};
-    // shard level log limit. Note that RocksDB engine based log service
-    // supports persist log state machine to disk. Hence log_limit is a soft
-    // limit.
-    uint64_t log_limit_{0};
 
     const bool realtime_sampling_{true};
 

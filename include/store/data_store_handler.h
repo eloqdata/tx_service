@@ -425,6 +425,11 @@ public:
         assert(false);
     }
 
+    virtual bool AppendPreBuiltTable(const txservice::TableName &table_name)
+    {
+        return true;
+    }
+
 protected:
     TxService *tx_service_{nullptr};
 };

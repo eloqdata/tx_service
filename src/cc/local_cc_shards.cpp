@@ -179,7 +179,6 @@ LocalCcShards::LocalCcShards(
             std::make_unique<CcShard>(thd_idx,
                                       core_cnt,
                                       node_memory_limit_mb,
-                                      conf.at("node_log_limit_mb"),
                                       conf.at("realtime_sampling"),
                                       ng_id_,
                                       *this,

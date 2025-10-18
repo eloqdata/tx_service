@@ -41,6 +41,8 @@
 
 namespace txservice
 {
+// define number of engines
+#define NUM_EXTERNAL_ENGINES 3
 #define KB(x) ((size_t) (x) << 10)
 #define MB(x) ((size_t) (x) << 20)
 #define GB(x) ((size_t) (x) << 30)

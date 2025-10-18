@@ -149,7 +149,6 @@ int Sharder::Init(
     const std::string &local_path,
     const std::string &cluster_config_path,
     const uint16_t rep_group_cnt,
-    bool enable_brpc_builtin_services,
     bool fork_host_manager)
 {
     node_id_ = node_id;
@@ -299,7 +298,6 @@ int Sharder::Init(
     brpc::ServerOptions server_options;
     // server_options.num_threads 0 means use default bthread worker count.
     server_options.num_threads = 0;
-    server_options.has_builtin_services = enable_brpc_builtin_services;
     if (cc_node_server_.Start(GET_CCNODE_RPC_PORT(port_), &server_options) != 0)
     {
         LOG(ERROR) << "Failed to start the cc node server.";
@@ -335,10 +333,6 @@ int Sharder::Init(
             std::string arg_ip = "--hm_ip=" + hm_ip_;
             std::string arg_port = "--hm_port=" + std::to_string(hm_port_);
             std::string arg_raft_log = "--hm_raft_log_path=" + log_path;
-            std::string arg_brpc_builtin =
-                "--enable_brpc_builtin_services=" +
-                (enable_brpc_builtin_services ? std::string("true")
-                                              : std::string("false"));
             std::string arg_cluster_config_path =
                 "--cluster_config_path=" + cluster_config_path;
 #if BRPC_WITH_GLOG
@@ -349,7 +343,6 @@ int Sharder::Init(
                             const_cast<char *>(arg_ip.c_str()),
                             const_cast<char *>(arg_port.c_str()),
                             const_cast<char *>(arg_raft_log.c_str()),
-                            const_cast<char *>(arg_brpc_builtin.c_str()),
                             const_cast<char *>(arg_cluster_config_path.c_str()),
 #if BRPC_WITH_GLOG
                             const_cast<char *>(arg_log_dir.c_str()),
@@ -1496,14 +1489,13 @@ void Sharder::UpdateClusterConfig(
         });
 }
 
-void Sharder::StartCcStreamReceiver(bool enable_brpc_builtin_services)
+void Sharder::StartCcStreamReceiver()
 {
     // The cc_stream_receiver_ object has been add to this server during
     // Sharder::Init().
     brpc::ServerOptions server_options;
     // server_options.num_threads 0 means use default bthread worker count.
     server_options.num_threads = 0;
-    server_options.has_builtin_services = enable_brpc_builtin_services;
     if (cc_stream_server_.Start(port_, &server_options) != 0)
     {
         LOG(ERROR) << "Failed to start the cc stream server.";

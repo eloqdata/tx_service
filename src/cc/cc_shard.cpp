@@ -57,7 +57,6 @@ CcShard::CcShard(
     uint16_t core_id,
     uint32_t core_cnt,
     uint32_t node_memory_limit_mb,
-    uint32_t node_log_limit_mb,
     bool realtime_sampling,
     uint32_t ng_id,
     LocalCcShards &local_shards,
@@ -98,14 +97,12 @@ CcShard::CcShard(
       system_handler_(system_handler),
       active_si_txs_()
 {
-    // memory_limit_ and log_limit_ are calculated at shard level.
+    // memory_limit_ is calculated at shard level.
     // reserve 5% for range slice info, 10% for data sync heap, 5% for key cache
     memory_limit_ = (uint64_t) MB(node_memory_limit_mb) *
                     (txservice_enable_key_cache ? 0.9 : 0.95);
 
     memory_limit_ /= core_cnt_;
-    log_limit_ = (uint64_t) MB(node_log_limit_mb);
-    log_limit_ /= core_cnt_;
 
     head_ccp_.lru_prev_ = nullptr;
     head_ccp_.lru_next_ = &tail_ccp_;
