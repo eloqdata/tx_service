@@ -3390,7 +3390,7 @@ public:
         data_sync_vec_.resize(scan_batch_size);
 
         archive_vec_.reserve(scan_batch_size);
-        mv_base_idx_vec_.resize(scan_batch_size);
+        mv_base_idx_vec_.reserve(scan_batch_size);
 
         pause_pos_ = {nullptr, false};
         accumulated_scan_cnt_ = 0;
