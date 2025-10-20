@@ -327,6 +327,9 @@ txservice::CcReqStatus txservice::LocalCcHandler::PostRead(
             &cce_addr, tx_number, tx_term, commit_ts, key_ts, gap_ts, &hres);
         TX_TRACE_ACTION(this, req);
         TX_TRACE_DUMP(req);
+#ifdef EXT_TX_PROC_ENABLED
+        hres.SetToBlock();
+#endif
         cc_shards_.EnqueueCcRequest(thd_id_, cce_addr.CoreId(), req);
         return CcReqStatus::SentLocal;
     }
