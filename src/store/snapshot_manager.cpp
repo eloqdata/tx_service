@@ -447,9 +447,8 @@ void SnapshotManager::HandleBackupTask(
     if (store_hd_->IsSharedStorage())
     {
 #if (defined(DATA_STORE_TYPE_ELOQDSS_ROCKSDB_CLOUD_S3) || \
-      defined(DATA_STORE_TYPE_ELOQDSS_ROCKSDB_CLOUD_GCS))
+     defined(DATA_STORE_TYPE_ELOQDSS_ROCKSDB_CLOUD_GCS))
         // For shared storage with cloud filesystem enabled, create snapshot
-        std::vector<std::string> snapshot_files;
         bool res = store_hd_->CreateSnapshotForBackup(
             backup_name, snapshot_files, last_ckpt_ts);
         if (!res)
