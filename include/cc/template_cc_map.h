@@ -2706,6 +2706,7 @@ public:
         CcEntry<KeyT, ValueT, VersionedRecord, RangePartitioned> *cce,
         RemoteScanCache *remote_cache,
         ScanType scan_type,
+        NodeGroupId ng_id,
         int64_t ng_term,
         TxNumber txn,
         uint64_t read_ts,
@@ -2736,6 +2737,7 @@ public:
                 cce,
                 remote_cache,
                 true,
+                ng_id,
                 ng_term,
                 txn,
                 read_ts,
@@ -2752,6 +2754,7 @@ public:
                 cce,
                 remote_cache,
                 false,
+                ng_id,
                 ng_term,
                 txn,
                 read_ts,
@@ -3144,6 +3147,7 @@ public:
                                 prior_cce,
                                 remote_cache,
                                 scan_type,
+                                ng_id,
                                 ng_term,
                                 req.Txn(),
                                 req.ReadTimestamp(),
@@ -3287,6 +3291,7 @@ public:
                                 cce,
                                 remote_cache,
                                 ScanType::ScanBoth,
+                                ng_id,
                                 ng_term,
                                 req.Txn(),
                                 req.ReadTimestamp(),
@@ -10937,6 +10942,7 @@ protected:
                  CcEntry<KeyT, ValueT, VersionedRecord, RangePartitioned> *cce,
                  RemoteScanCache *remote_cache,
                  bool include_gap,
+                 NodeGroupId ng_id,
                  int64_t ng_term,
                  TxNumber txn,
                  uint64_t read_ts,
@@ -11120,6 +11126,7 @@ protected:
         }
 
         remote::CceAddr_msg *cce_addr = tuple->mutable_cce_addr();
+        cce_addr->set_node_group_id(ng_id);
         cce_addr->set_cce_lock_ptr(
             reinterpret_cast<uint64_t>(cce->GetLockAddr()));
         cce_addr->set_term(ng_term);
