@@ -292,7 +292,7 @@ struct RemoteScanCache
         }
 
         int trailing_cnt = scan_cache.scan_tuple_size() - first;
-        assert(trailing_cnt > 0);
+        assert(trailing_cnt >= 0);
         scan_cache.set_trailing_cnt(trailing_cnt);
     }
 

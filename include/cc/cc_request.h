@@ -1981,6 +1981,7 @@ public:
             unfinished_core_cnt_.fetch_sub(1, std::memory_order_acq_rel);
         if (remaining_cnt == 1)
         {
+            err_code = err_.load(std::memory_order_relaxed);
             if (err_code == CcErrorCode::NO_ERROR)
             {
                 res_->SetFinished();

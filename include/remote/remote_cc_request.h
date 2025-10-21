@@ -523,6 +523,7 @@ public:
         }
 
         CcErrorCode err_code = err_.load(std::memory_order_relaxed);
+        // fast path to avoid merge data
         if (err_code == CcErrorCode::NO_ERROR)
         {
             // Merge data
@@ -543,6 +544,8 @@ public:
             unfinished_core_cnt_.fetch_sub(1, std::memory_order_acq_rel);
         if (remaining_cnt == 1)
         {
+            // reload error code if this core is last core.
+            err_code = err_.load(std::memory_order_relaxed);
             if (err_code == CcErrorCode::NO_ERROR)
             {
                 res_->SetFinished();
@@ -711,8 +714,6 @@ private:
     CcHandlerResult<Void> cc_res_{nullptr};
 
     uint64_t snapshot_ts_{0};
-
-    ScanDirection direct_{ScanDirection::Forward};
     bool is_ckpt_delta_{false};
     bool is_for_write_{false};
     bool is_covering_keys_{false};

@@ -554,7 +554,7 @@ void txservice::remote::RemoteCcHandler::ScanNext(
     scan_next->set_table_engine(
         ToRemoteType::ConvertTableEngine(table_name.Engine()));
     // set direction
-    scan_next->set_direction(true);
+    // scan_next->set_direction(true);
     // set ts
     scan_next->set_ts(start_ts);
     scan_next->set_ckpt(is_ckpt);
@@ -613,7 +613,7 @@ void txservice::remote::RemoteCcHandler::ScanNext(
         }
         default:
         {
-            end_key.Serialize(*scan_info->mutable_start_key()->mutable_key());
+            start_key.Serialize(*scan_info->mutable_start_key()->mutable_key());
             break;
         }
         }
