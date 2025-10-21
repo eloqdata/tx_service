@@ -264,6 +264,7 @@ public:
 #endif
     )
     {
+        local_cc_shards_.BindThreadToFastMetaDataShard(thd_id_);
 #ifdef EXT_TX_PROC_ENABLED
         TxShardStatus expected = TxShardStatus::Free;
         bool success = shard_status.compare_exchange_strong(
@@ -453,6 +454,7 @@ public:
 
         size_t idle_rnd = 0;
         CcShard *shard = local_cc_shards_.GetCcShard(thd_id_);
+        local_cc_shards_.BindThreadToFastMetaDataShard(thd_id_);
         shard->Init();
         // Set shard status to free so that the tx processor can start to run.
         assert(coordi_->shard_status_.load(std::memory_order_relaxed) ==
@@ -669,6 +671,7 @@ public:
         }
         // Override default heap since we're accessing txm in cc shard.
         CcShard *shard = local_cc_shards_.GetCcShard(thd_id_);
+        local_cc_shards_.BindThreadToFastMetaDataShard(thd_id_);
         CcShardHeap *shard_heap = shard->GetShardHeap();
         if (shard_heap == nullptr)
         {
