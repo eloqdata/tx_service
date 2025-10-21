@@ -1127,6 +1127,7 @@ public:
         TX_TRACE_DUMP(&req);
 
         assert(req.IsLocal());
+        LOG(INFO) << "Execute ReadCc " << this ;
 
         uint32_t ng_id = req.NodeGroupId();
         int64_t ng_term = Sharder::Instance().LeaderTerm(ng_id);
@@ -1149,6 +1150,8 @@ public:
         if (ng_term < 0)
         {
             req.Result()->SetError(CcErrorCode::REQUESTED_NODE_NOT_LEADER);
+            LOG(INFO) << "Execute ReadCc, node_group(#" << ng_id
+                      << ") term < 0, tx:" << req.Txn();
             return true;
         }
 
@@ -1180,6 +1183,7 @@ public:
                                 ng_term,
                                 &req))
                         {
+                            LOG(INFO) << "Execute ReadCc, load ranges and statistics fails, table name: " << table_key->Name().StringView() << ", tx:" << req.Txn();
                             return false;
                         }
 #endif

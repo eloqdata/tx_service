@@ -65,14 +65,12 @@ bool CcHandlerResult<T>::SetFinished()
     bool is_blocking = is_blocking_;
 #endif
 
-LOG(INFO) << "SetFinished " << this << " ref_cnted_: " << ref_cnted_ << " ref_cnt_: " << ref_cnt_.load(std::memory_order_acquire);
     if (ref_cnted_)
     {
         auto r = ref_cnt_.fetch_sub(1, std::memory_order_relaxed);
         if (r == 1)
         {
             bool expect = false;
-        LOG(INFO) << "SetFinished compare_exchange_strong " << this << ", isfinished: " << is_finished_.load(std::memory_order_acquire);
             if (is_finished_.compare_exchange_strong(
                     expect, true, std::memory_order_acq_rel))
             {
@@ -97,7 +95,6 @@ LOG(INFO) << "SetFinished " << this << " ref_cnted_: " << ref_cnted_ << " ref_cn
     else
     {
         bool expect = false;
-        LOG(INFO) << "SetFinished compare_exchange_strong " << this << ", isfinished: " << is_finished_.load(std::memory_order_acquire);
         if (is_finished_.compare_exchange_strong(
                 expect, true, std::memory_order_acq_rel))
         {

@@ -136,7 +136,6 @@ public:
     void Finish(U &&val)
     {
         value_ = std::forward<U>(val);
-        LOG(INFO) << "Finish";
 
         if (cc_notify_)
         {
@@ -163,7 +162,6 @@ public:
         if (HasYieldResume())
         {
             StatusCombo state = status_combo_.load(std::memory_order_relaxed);
-        LOG(INFO) << "Finish has yield resume";
 
             while (!status_combo_.compare_exchange_weak(
                 state,
@@ -190,7 +188,6 @@ public:
             // wake up spuriously before notify_one() is called. If so, the
             // sending thread moves forward and de-allocate the tx request,
             // before notify_one() is called, causing invalid memory access.
-            LOG(INFO) << "Finish has mutex cond";
             std::unique_lock<bthread::Mutex> lk(mux);
             StatusCombo state = status_combo_.load(std::memory_order_relaxed);
             status_combo_.store({TxResultStatus::Finished, state.waiting_},
@@ -351,7 +348,6 @@ public:
 
             std::unique_lock<bthread::Mutex> lk(mux);
             StatusCombo state = status_combo_.load(std::memory_order_relaxed);
-            LOG(INFO) << "Wait state: " << static_cast<int>(state.status_);
             while (state.status_ == TxResultStatus::Unknown)
             {
                 status_combo_.store({TxResultStatus::Unknown, true},
@@ -359,7 +355,6 @@ public:
                 cv.wait(lk);
                 state = status_combo_.load(std::memory_order_relaxed);
             }
-            LOG(INFO) << "done wait";
         }
 
         return 0;
