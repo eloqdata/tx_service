@@ -398,6 +398,8 @@ public:
     void UpdateTsBase(uint64_t timestamp);
     void StartBackgroudWorkers();
 
+    void BindThreadToFastMetaDataShard(size_t shard_idx);
+
     /**
      * @brief Create new heap used by table ranges only.
      *
@@ -619,7 +621,7 @@ public:
 
             // Acquire meta lock since table_ranges_ is not consistent during
             // split.
-            std::unique_lock<std::shared_mutex> meta_lk(meta_data_mux_);
+            std::unique_lock<FastMetaDataMutex> meta_lk(fast_meta_data_mux_);
             bool split_range_res = old_store_range->SplitRange(
                 tx_key.GetKey<KeyT>(), new_slice_info);
             if (!split_range_res)
@@ -720,7 +722,7 @@ public:
                                     : true;
             // Acquire meta lock since table_ranges_ is not consistent during
             // split.
-            std::unique_lock<std::shared_mutex> meta_lk(meta_data_mux_);
+            std::unique_lock<FastMetaDataMutex> meta_lk(fast_meta_data_mux_);
             for (size_t i = 0; i < new_range_cnt; i++)
             {
                 const TxKey &tx_key = old_info->NewKey()->at(i);
@@ -793,7 +795,8 @@ public:
         size_t estimate_rec_size = UINT64_MAX,
         bool has_dml_since_ddl = true)
     {
-        std::unique_lock<std::shared_mutex> lk(meta_data_mux_, std::defer_lock);
+        std::unique_lock<FastMetaDataMutex> lk(fast_meta_data_mux_,
+                                               std::defer_lock);
         if (need_meta_lk)
         {
             lk.lock();
@@ -1071,7 +1074,7 @@ public:
         const std::function<int32_t(int32_t, bool)> &next_prefetch_slice =
             DefaultNextPrefetchSlice)
     {
-        std::shared_lock<std::shared_mutex> lk(meta_data_mux_);
+        std::shared_lock<FastMetaDataMutex> lk(fast_meta_data_mux_);
 
         TableName range_table_name(table_name.StringView(),
                                    TableType::RangePartition,
@@ -1911,6 +1914,7 @@ private:
 
     // map to store mapping relationship from bucket id to bucket info
     // that stores the bucket owner of this bucket.
+    // TODO(zc) make inner map vector
     std::unordered_map<
         NodeGroupId,
         std::unordered_map<uint16_t, std::unique_ptr<BucketInfo>>>
@@ -1920,8 +1924,6 @@ private:
     mi_heap_t *table_ranges_heap_{nullptr};
     mi_threadid_t table_ranges_thread_id_{0};
 
-    // Protects meta data (table_ranges_ and table_catalogs_)
-    mutable std::shared_mutex meta_data_mux_;
     std::atomic_bool buckets_migrating_{false};
 
     std::unordered_map<TableName, std::string> prebuilt_tables_;
@@ -2392,6 +2394,27 @@ private:
 
     EloqHashCatalogFactory hash_catalog_factory_;
     EloqRangeCatalogFactory range_catalog_factory_;
+    // Protects meta data (table_ranges_ and table_catalogs_)
+    mutable std::shared_mutex meta_data_mux_;
+    mutable struct FastMetaDataMutex
+    {
+        explicit FastMetaDataMutex(size_t size,
+                                   std::shared_mutex &meta_data_mux)
+            : mux_ptrs_(size), meta_data_mux_(meta_data_mux)
+        {
+        }
+
+        void lock();
+        bool try_lock() = delete;
+        void unlock();
+        void lock_shared();
+        bool try_lock_shared() = delete;
+        void unlock_shared();
+        static constexpr int32_t kWriterMask = static_cast<int32_t>(1u << 31);
+
+        std::vector<std::atomic<int32_t> *> mux_ptrs_;
+        std::shared_mutex &meta_data_mux_;
+    } fast_meta_data_mux_;
 
     friend class LocalCcHandler;
     friend class remote::RemoteCcHandler;

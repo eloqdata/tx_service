@@ -29,6 +29,7 @@
 #include <chrono>
 #include <condition_variable>
 #include <cstdint>
+#include <limits>
 #include <memory>
 #include <mutex>
 #include <optional>
@@ -63,6 +64,7 @@
 namespace txservice
 {
 std::atomic<uint64_t> LocalCcShards::local_clock(0);
+inline thread_local size_t tls_shard_idx = std::numeric_limits<size_t>::max();
 
 LocalCcShards::LocalCcShards(
     uint32_t node_id,
@@ -132,7 +134,9 @@ LocalCcShards::LocalCcShards(
                                         ? conf.at("kickout_data_for_test")
                                         : 0),
       publish_func_(publish_func),
-      enable_shard_heap_defragment_(conf.at("enable_shard_heap_defragment"))
+      enable_shard_heap_defragment_(conf.at("enable_shard_heap_defragment")),
+      fast_meta_data_mux_(conf.at("core_num"), meta_data_mux_)
+
 {
     if (conf.find("max_standby_lag") != conf.end())
     {
@@ -165,6 +169,32 @@ LocalCcShards::LocalCcShards(
     {
         ng_ids.emplace(ng_id);
     }
+
+    uint64_t node_memory_limit_mb = conf.at("node_memory_limit_mb");
+    uint16_t core_cnt = conf.at("core_num");
+    for (uint16_t thd_idx = 0; thd_idx < core_cnt; ++thd_idx)
+    {
+        common_labels["core_id"] = std::to_string(thd_idx);
+        cc_shards_.emplace_back(
+            std::make_unique<CcShard>(thd_idx,
+                                      core_cnt,
+                                      node_memory_limit_mb,
+                                      conf.at("node_log_limit_mb"),
+                                      conf.at("realtime_sampling"),
+                                      ng_id_,
+                                      *this,
+                                      catalog_factory_,
+                                      system_handler,
+                                      ng_configs,
+                                      cluster_config_version,
+                                      metrics_registry,
+                                      common_labels));
+    }
+    for (size_t i = 0; i < cc_shards_.size(); ++i)
+    {
+        fast_meta_data_mux_.mux_ptrs_[i] = &cc_shards_[i]->meta_data_mux_;
+    }
+
     InitRangeBuckets(ng_id_, ng_ids, cluster_config_version);
 
     if (prebuilt_tables)
@@ -208,27 +238,6 @@ LocalCcShards::LocalCcShards(
         node_meter_->Register(metrics::NAME_IS_LEADER,
                               metrics::Type::Gauge,
                               std::move(is_leader_metric_labels));
-    }
-
-    uint64_t node_memory_limit_mb = conf.at("node_memory_limit_mb");
-    uint16_t core_cnt = conf.at("core_num");
-    for (uint16_t thd_idx = 0; thd_idx < conf.at("core_num"); ++thd_idx)
-    {
-        common_labels["core_id"] = std::to_string(thd_idx);
-        cc_shards_.emplace_back(
-            std::make_unique<CcShard>(thd_idx,
-                                      core_cnt,
-                                      node_memory_limit_mb,
-                                      conf.at("node_log_limit_mb"),
-                                      conf.at("realtime_sampling"),
-                                      ng_id_,
-                                      *this,
-                                      catalog_factory_,
-                                      system_handler,
-                                      ng_configs,
-                                      cluster_config_version,
-                                      metrics_registry,
-                                      common_labels));
     }
 }
 
@@ -329,6 +338,14 @@ void LocalCcShards::UpdateTsBase(uint64_t timestamp)
     }
 }
 
+void LocalCcShards::BindThreadToFastMetaDataShard(size_t shard_idx)
+{
+    if (BAIDU_UNLIKELY(tls_shard_idx == std::numeric_limits<size_t>::max()))
+    {
+        tls_shard_idx = shard_idx;
+    }
+}
+
 void LocalCcShards::TimerRun()
 {
     std::unique_lock<std::mutex> lk(timer_terminate_mux_);
@@ -360,7 +377,7 @@ std::pair<bool, const CatalogEntry *> LocalCcShards::CreateCatalog(
     uint64_t commit_ts)
 {
     assert(table_name.Type() == TableType::Primary);
-    std::unique_lock<std::shared_mutex> lk(meta_data_mux_);
+    std::unique_lock<FastMetaDataMutex> lk(fast_meta_data_mux_);
 
     auto ng_catalog_it = table_catalogs_.try_emplace(table_name);
     auto catalog_it = ng_catalog_it.first->second.try_emplace(cc_ng_id);
@@ -425,7 +442,7 @@ std::pair<bool, const CatalogEntry *> LocalCcShards::CreateReplayCatalog(
     uint64_t old_schema_ts,
     uint64_t dirty_schema_ts)
 {
-    std::unique_lock lk(meta_data_mux_);
+    std::unique_lock<FastMetaDataMutex> lk(fast_meta_data_mux_);
 
     auto ng_catalog_it = table_catalogs_.try_emplace(table_name);
     auto catalog_it = ng_catalog_it.first->second.try_emplace(cc_ng_id);
@@ -479,7 +496,7 @@ CatalogEntry *LocalCcShards::CreateDirtyCatalog(
     const std::string &catalog_image,
     uint64_t commit_ts)
 {
-    std::unique_lock<std::shared_mutex> lk(meta_data_mux_);
+    std::unique_lock<FastMetaDataMutex> lk(fast_meta_data_mux_);
 
     auto ng_catalog_it = table_catalogs_.try_emplace(table_name);
     auto catalog_it = ng_catalog_it.first->second.try_emplace(cc_ng_id);
@@ -506,7 +523,7 @@ void LocalCcShards::UpdateDirtyCatalog(const TableName &table_name,
                                        CatalogEntry *catalog_entry)
 {
     assert(catalog_entry && !catalog_image.empty());
-    std::unique_lock<std::shared_mutex> lk(meta_data_mux_);
+    std::unique_lock<FastMetaDataMutex> lk(fast_meta_data_mux_);
     catalog_entry->SetDirtySchema(
         GetCatalogFactory(table_name.Engine())
             ->CreateTableSchema(table_name,
@@ -974,7 +991,7 @@ void LocalCcShards::InitTableRanges(const TableName &range_table_name,
                                     NodeGroupId ng_id,
                                     bool empty_table)
 {
-    std::unique_lock<std::shared_mutex> lk(meta_data_mux_);
+    std::unique_lock<FastMetaDataMutex> lk(fast_meta_data_mux_);
 
     std::unique_lock<std::mutex> heap_lk(table_ranges_heap_mux_);
     bool is_override_thd = mi_is_override_thread();
@@ -1181,7 +1198,7 @@ LocalCcShards::GetTableRangeIdsForATableInternal(
 void LocalCcShards::CleanTableRange(const TableName &table_name,
                                     NodeGroupId ng_id)
 {
-    std::unique_lock<std::shared_mutex> lk(meta_data_mux_);
+    std::unique_lock<FastMetaDataMutex> lk(fast_meta_data_mux_);
     auto table_it = table_ranges_.find(table_name);
     if (table_it != table_ranges_.end())
     {
@@ -1196,7 +1213,7 @@ void LocalCcShards::CleanTableRange(const TableName &table_name,
 
 void LocalCcShards::DropTableRanges(NodeGroupId ng_id)
 {
-    std::unique_lock<std::shared_mutex> lk(meta_data_mux_);
+    std::unique_lock<FastMetaDataMutex> lk(fast_meta_data_mux_);
     for (auto &table_range : table_ranges_)
     {
         table_range.second.erase(ng_id);
@@ -1533,7 +1550,7 @@ void LocalCcShards::SetTxIdent(uint32_t latest_committed_tx_no)
 
 void LocalCcShards::DropCatalogs(NodeGroupId cc_ng_id)
 {
-    std::unique_lock<std::shared_mutex> lk(meta_data_mux_);
+    std::unique_lock<FastMetaDataMutex> lk(fast_meta_data_mux_);
 
     for (auto node_catalog_it = table_catalogs_.begin();
          node_catalog_it != table_catalogs_.end();
@@ -1650,7 +1667,7 @@ TableRangeEntry *LocalCcShards::GetTableRangeEntryInternal(
 std::pair<std::shared_ptr<Statistics>, bool> LocalCcShards::InitTableStatistics(
     TableSchema *table_schema, NodeGroupId ng_id)
 {
-    std::unique_lock<std::shared_mutex> lk(meta_data_mux_);
+    std::unique_lock<FastMetaDataMutex> lk(fast_meta_data_mux_);
 
     auto ng_statistics_it =
         table_statistics_map_.try_emplace(table_schema->GetBaseTableName());
@@ -1677,7 +1694,7 @@ std::pair<std::shared_ptr<Statistics>, bool> LocalCcShards::InitTableStatistics(
         sample_pool_map,
     CcShard *ccs)
 {
-    std::unique_lock<std::shared_mutex> lk(meta_data_mux_);
+    std::unique_lock<FastMetaDataMutex> lk(fast_meta_data_mux_);
 
     auto ng_statistics_it =
         table_statistics_map_.try_emplace(table_schema->GetBaseTableName());
@@ -1721,7 +1738,7 @@ StatisticsEntry *LocalCcShards::GetTableStatistics(const TableName &table_name,
 void LocalCcShards::CleanTableStatistics(const TableName &table_name,
                                          NodeGroupId ng_id)
 {
-    std::unique_lock<std::shared_mutex> lk(meta_data_mux_);
+    std::unique_lock<FastMetaDataMutex> lk(fast_meta_data_mux_);
 
     auto ng_statistics_it = table_statistics_map_.find(table_name);
     if (ng_statistics_it != table_statistics_map_.end())
@@ -1732,7 +1749,7 @@ void LocalCcShards::CleanTableStatistics(const TableName &table_name,
 
 void LocalCcShards::DropTableStatistics(NodeGroupId ng_id)
 {
-    std::unique_lock<std::shared_mutex> lk(meta_data_mux_);
+    std::unique_lock<FastMetaDataMutex> lk(fast_meta_data_mux_);
     for (auto ng_statistics_it = table_statistics_map_.begin();
          ng_statistics_it != table_statistics_map_.end();
          ++ng_statistics_it)
@@ -1854,7 +1871,7 @@ std::vector<std::pair<uint16_t, NodeGroupId>> LocalCcShards::GetAllBucketOwners(
 const std::unordered_map<uint16_t, std::unique_ptr<BucketInfo>> *
 LocalCcShards::GetAllBucketInfos(NodeGroupId ng_id) const
 {
-    std::shared_lock<std::shared_mutex> lk(meta_data_mux_);
+    std::shared_lock<FastMetaDataMutex> lk(fast_meta_data_mux_);
     auto ng_bucket_it = bucket_infos_.find(ng_id);
     if (ng_bucket_it == bucket_infos_.end())
     {
@@ -1876,7 +1893,7 @@ LocalCcShards::GetAllBucketInfosNoLocking(const NodeGroupId ng_id) const
 
 void LocalCcShards::DropBucketInfo(NodeGroupId ng_id)
 {
-    std::unique_lock<std::shared_mutex> lk(meta_data_mux_);
+    std::unique_lock<FastMetaDataMutex> lk(fast_meta_data_mux_);
     // bucket_infos_.erase(ng_id);
     assert(bucket_infos_.find(ng_id) != bucket_infos_.end());
     bucket_infos_.at(ng_id).clear();
@@ -1894,7 +1911,7 @@ void LocalCcShards::InitRangeBuckets(NodeGroupId ng_id,
                                      const std::set<NodeGroupId> &node_groups,
                                      uint64_t version)
 {
-    std::unique_lock<std::shared_mutex> lk(meta_data_mux_);
+    std::unique_lock<FastMetaDataMutex> lk(fast_meta_data_mux_);
     size_t ng_cnt = node_groups.size();
     if (bucket_infos_.size() != ng_cnt)
     {
@@ -6510,6 +6527,81 @@ void LocalCcShards::RangeCacheSender::SendRangeCacheRequest(
                                head->UploadBatchResponse(),
                                head);
     }
+}
+
+void LocalCcShards::FastMetaDataMutex::lock()
+{
+    meta_data_mux_.lock();
+
+    for (auto *ptr : mux_ptrs_)
+    {
+        assert(ptr != nullptr);
+        int32_t expected = ptr->load(std::memory_order_relaxed);
+        for (;;)
+        {
+            // Wait for writers that already hold the bit.
+            while ((expected & kWriterMask) != 0)
+            {
+                expected = ptr->load(std::memory_order_acquire);
+            }
+
+            const int32_t desired = expected | kWriterMask;
+            if (ptr->compare_exchange_weak(expected,
+                                           desired,
+                                           std::memory_order_acq_rel,
+                                           std::memory_order_relaxed))
+            {
+                break;
+            }
+        }
+
+        // Wait until all readers drain so only the writer bit remains.
+        while ((ptr->load(std::memory_order_acquire) & ~kWriterMask) != 0)
+        {
+        }
+    }
+}
+
+void LocalCcShards::FastMetaDataMutex::lock_shared()
+{
+    auto *ptr = mux_ptrs_[tls_shard_idx];
+    int32_t expected = ptr->load(std::memory_order_acquire);
+    for (;;)
+    {
+        if ((expected & kWriterMask) != 0)
+        {
+            expected = ptr->load(std::memory_order_acquire);
+            continue;
+        }
+
+        const int32_t desired = expected + 1;
+        if (ptr->compare_exchange_weak(expected,
+                                       desired,
+                                       std::memory_order_acq_rel,
+                                       std::memory_order_relaxed))
+        {
+            break;
+        }
+    }
+}
+
+void LocalCcShards::FastMetaDataMutex::unlock()
+{
+    meta_data_mux_.unlock();
+
+    for (auto *ptr : mux_ptrs_)
+    {
+        assert(ptr != nullptr);
+        ptr->fetch_and(~kWriterMask, std::memory_order_release);
+    }
+}
+
+void LocalCcShards::FastMetaDataMutex::unlock_shared()
+{
+    auto *ptr = mux_ptrs_[tls_shard_idx];
+    assert(ptr != nullptr);
+
+    ptr->fetch_sub(1, std::memory_order_release);
 }
 
 }  // namespace txservice
