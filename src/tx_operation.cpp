@@ -1104,6 +1104,7 @@ InitTxnOperation::InitTxnOperation(TransactionExecution *txm)
 
 void InitTxnOperation::Reset()
 {
+    LOG(INFO) << "Reset InitTxnOperation " << this ;
     hd_result_.Reset();
 }
 
