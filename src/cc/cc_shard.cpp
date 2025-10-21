@@ -30,11 +30,11 @@
 #include <string>
 
 #include "cc/catalog_cc_map.h"
+#include "cc/cc_map.h"
 #include "cc/cc_request.h"
 #include "cc/cluster_config_cc_map.h"
 #include "cc/non_blocking_lock.h"  // lock_vec_
 #include "cc/range_bucket_cc_map.h"
-#include "cc_map.h"
 #include "cc_req_misc.h"
 #include "cc_request.pb.h"
 #include "checkpointer.h"

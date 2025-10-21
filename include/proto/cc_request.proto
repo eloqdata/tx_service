@@ -1034,25 +1034,24 @@ message ScanNextRequest {
     string table_name_str = 4;
     TableEngine table_engine = 5;
     CcTableType table_type = 6;
-    bool direction = 7;
-    uint64 ts = 8;
-    bool ckpt = 9;
-    IsolationType iso_level = 10;
-    CcProtocolType protocol = 11;
-    bool is_for_write = 12;
-    bool is_covering_keys = 13;
-    int32 obj_type = 14; // Only used for redis scan command
-    string scan_pattern = 15; // Only used for redis scan command
-    bool is_require_keys = 16;
-    bool is_require_recs = 17;
+    uint64 ts = 7;
+    bool ckpt = 8;
+    IsolationType iso_level = 9;
+    CcProtocolType protocol = 10;
+    bool is_for_write = 11;
+    bool is_covering_keys = 12;
+    int32 obj_type = 13; // Only used for redis scan command
+    string scan_pattern = 14; // Only used for redis scan command
+    bool is_require_keys = 15;
+    bool is_require_recs = 16;
 
     oneof scan_spec {
-        BucketScanProgressMap progress = 18;
-        BucketScanInfoMsg global_info = 19;
+        BucketScanProgressMap progress = 17;
+        BucketScanInfoMsg global_info = 18;
     }
 
-    RemoteTxKey end_key = 20;
-    bool end_key_inclusive = 21;
+    RemoteTxKey end_key = 19;
+    bool end_key_inclusive = 20;
 }
 
 message ScanNextResponse {

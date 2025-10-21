@@ -1056,9 +1056,6 @@ void txservice::remote::RemoteScanNextBatch::Reset(
         TableName(table_name_sv,
                   ToLocalType::ConvertCcTableType(scan_next.table_type()),
                   ToLocalType::ConvertTableEngine(scan_next.table_engine()));
-    assert(scan_next.direction());
-    direct_ = scan_next.direction() ? ScanDirection::Forward
-                                    : ScanDirection::Backward;
     snapshot_ts_ = scan_next.ts();
     is_ckpt_delta_ = scan_next.ckpt();
     isolation_level_ = ToLocalType::ConvertIsolation(scan_next.iso_level());
@@ -1080,6 +1077,7 @@ void txservice::remote::RemoteScanNextBatch::Reset(
     blocking_info_.clear();
     pushdown_cond_.clear();
     err_ = CcErrorCode::NO_ERROR;
+    // first core to decode key
     unfinished_core_cnt_ = 1;
 
     if (Sharder::Instance().GetDataStoreHandler())

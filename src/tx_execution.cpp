@@ -3635,10 +3635,12 @@ void TransactionExecution::ScanClose(
         }
     }
 
+    /*
     if (scanner->Type() == CcmScannerType::HashPartition)
     {
         DrainScanner(scanner, table_name);
     }
+    */
 
     cc_handler_->ScanClose(
         table_name, scanner->Direction(), std::move(scan_it->second.scanner_));
@@ -5807,6 +5809,7 @@ void TransactionExecution::DrainScanner(CcScanner *scanner,
     assert(scanner != nullptr);
     // drain out the scan tuple in the scan cache
     // scanner->SetDrainCacheMode(true);
+    scanner->Init();
     const ScanTuple *cc_scan_tuple = scanner->Current();
     // In case the scan status is blocked before
     if (cc_scan_tuple == nullptr && scanner->Status() == ScannerStatus::Blocked)
@@ -5855,6 +5858,22 @@ void TransactionExecution::DrainScanner(CcScanner *scanner,
         }
         scanner->MoveNext();
         cc_scan_tuple = scanner->Current();
+    }
+
+    // Release trailing tuple locks acquired during scan. These tuples are
+    // tuples scanned beyond scan end key and are not intended to be locked.
+    // They were not added into read set. Check if they were put into read set
+    // by other operations before, if not, release these locks.
+    std::vector<const ScanTuple *> trailing_tuples;
+    scanner->MemoryShardCacheTrailingTuples(&trailing_tuples);
+    for (auto tuple : trailing_tuples)
+    {
+        LockType lk_type = scanner->DeduceScanTupleLockType(tuple->rec_status_);
+        if (lk_type != LockType::NoLock &&
+            rw_set_.GetReadCnt(table_name, tuple->cce_addr_) == 0)
+        {
+            drain_batch_.emplace_back(tuple->cce_addr_, tuple->key_ts_);
+        }
     }
 }
 

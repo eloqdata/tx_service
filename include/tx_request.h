@@ -392,6 +392,7 @@ struct BucketScanSavePoint
 {
     BucketScanPlan PickPlan(size_t current_idx)
     {
+        assert(current_idx < bucket_groups_.size());
         if (prev_pause_idx_ == UINT64_MAX || prev_pause_idx_ != current_idx)
         {
             pause_position_.clear();
