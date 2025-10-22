@@ -1363,7 +1363,6 @@ void ScanOpenOperation::Reset()
 void ScanOpenOperation::Forward(TransactionExecution *txm)
 {
     // start the state machine if not running.
-
     if (!is_running_)
     {
         if (table_name_->IsHashPartitioned())
