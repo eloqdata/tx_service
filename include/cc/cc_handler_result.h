@@ -27,7 +27,6 @@
 #include <functional>
 #include <string>
 #include <utility>
-#include <glog/logging.h>
 
 #include "error_messages.h"  // CcErrorCode
 

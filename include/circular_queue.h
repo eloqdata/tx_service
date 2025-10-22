@@ -21,6 +21,9 @@
  */
 #pragma once
 
+#ifndef CIRCULAR_QUEUE_H
+#define CIRCULAR_QUEUE_H
+
 #include <memory>
 #include <utility>
 
@@ -252,3 +255,4 @@ private:
     size_t cnt_;
     size_t capacity_;
 };
+#endif // CIRCULAR_QUEUE_H
