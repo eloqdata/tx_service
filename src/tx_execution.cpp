@@ -1712,6 +1712,7 @@ void TransactionExecution::Process(InitTxnOperation &init_txn)
         tx_duration_start_ = metrics::Clock::now();
     }
 
+    init_txn.hd_result_.Reset();
     init_txn.is_running_ = true;
     commit_ts_ = 0;
     commit_ts_bound_ = 0;
@@ -1763,7 +1764,6 @@ void TransactionExecution::PostProcess(InitTxnOperation &init_txn)
         return;
     }
 
-    LOG(INFO) << "PostProcess InitTxnOperation " << this ;
     const InitTxResult &init_result = init_txn.hd_result_.Value();
     txid_ = init_result.txid_;
     uint64_t tx_number = txid_.TxNumber();

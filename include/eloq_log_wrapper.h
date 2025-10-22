@@ -179,4 +179,4 @@ private:
     ::txlog::LogAgent log_agent_;
     const uint32_t log_group_replica_num_;
 };
-}  // namespace EloqKV
+}  // namespace txservice
