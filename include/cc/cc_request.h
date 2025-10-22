@@ -1891,35 +1891,97 @@ public:
 
         if (ccm == nullptr)
         {
-            // Find base table name for index table.
-            // Fetch/Get Catalog is based on base table name, but Get
-            // ccmap is based on the real table name, for example, index
-            // should get the corresponding sk_ccmap.
-            assert(!table_name_->IsMeta() ||
-                   table_name_->Type() == TableType::RangePartition);
-            const CatalogEntry *catalog_entry =
-                ccs.InitCcm(*table_name_, node_group_id_, ng_term_, this);
-            if (catalog_entry == nullptr)
+            if (table_name_->Type() == TableType::RangePartition)
             {
-                // The local node does not contain the table's schema
-                // instance. The FetchCatalog() method will send an
-                // async request toward the data store to fetch the
-                // catalog. After fetching is finished, this cc request
-                // is re-enqueued for re-execution.
-                return false;
+                // Get original table name for the range table name
+                const TableName base_table_name{
+                    table_name_->GetBaseTableNameSV(),
+                    TableType::Primary,
+                    table_name_->Engine()};
+                const CatalogEntry *catalog_entry =
+                    ccs.GetCatalog(base_table_name, node_group_id_);
+                if (catalog_entry == nullptr)
+                {
+                    ccs.FetchCatalog(
+                        base_table_name, node_group_id_, ng_term_, this);
+                    return false;
+                }
+                if (catalog_entry->schema_ == nullptr)
+                {
+                    if (catalog_entry->dirty_schema_ == nullptr)
+                    {
+                        res_->SetError(CcErrorCode::REQUESTED_TABLE_NOT_EXISTS);
+                        return true;
+                    }
+                    else
+                    {
+                        DLOG(INFO)
+                            << "PostWriteAllCc is executing, retry "
+                            << catalog_entry->dirty_schema_->GetBaseTableName()
+                                   .StringView();
+                        ccs.Enqueue(this);
+                        return false;
+                    }
+                }
+                TableSchema *table_schema = catalog_entry->schema_.get();
+
+                // The request is toward a special cc map that contains a
+                // table's range meta data.
+                std::map<TxKey, TableRangeEntry::uptr> *ranges =
+                    ccs.GetTableRangesForATable(*table_name_, node_group_id_);
+                if (ranges != nullptr)
+                {
+                    ccs.CreateOrUpdateRangeCcMap(*table_name_,
+                                                 table_schema,
+                                                 node_group_id_,
+                                                 table_schema->Version());
+                    ccm = ccs.GetCcm(*table_name_, node_group_id_);
+                }
+                else
+                {
+                    // The local node does not contain the table's ranges.
+                    // The FetchTableRanges() method will send an async
+                    // request toward the data store to fetch the table's
+                    // ranges and initializes the table's range cc map.
+                    // After fetching is finished, this cc request is
+                    // re-enqueued for re-execution.
+                    ccs.FetchTableRanges(
+                        *table_name_, this, node_group_id_, ng_term_);
+                    return false;
+                }
             }
             else
             {
-                if (catalog_entry->schema_ == nullptr)
+                // Find base table name for index table.
+                // Fetch/Get Catalog is based on base table name, but Get
+                // ccmap is based on the real table name, for example, index
+                // should get the corresponding sk_ccmap.
+                assert(!table_name_->IsMeta());
+                const CatalogEntry *catalog_entry =
+                    ccs.InitCcm(*table_name_, node_group_id_, ng_term_, this);
+                if (catalog_entry == nullptr)
                 {
-                    // The local node (LocalCcShards) contains a schema
-                    // instance, which indicates that the table has been
-                    // dropped. Returns the request with an error.
-                    return SetError(ccs.core_id_,
-                                    CcErrorCode::REQUESTED_TABLE_NOT_EXISTS);
+                    // The local node does not contain the table's schema
+                    // instance. The FetchCatalog() method will send an
+                    // async request toward the data store to fetch the
+                    // catalog. After fetching is finished, this cc request
+                    // is re-enqueued for re-execution.
+                    return false;
                 }
+                else
+                {
+                    if (catalog_entry->schema_ == nullptr)
+                    {
+                        // The local node (LocalCcShards) contains a schema
+                        // instance, which indicates that the table has been
+                        // dropped. Returns the request with an error.
+                        return SetError(
+                            ccs.core_id_,
+                            CcErrorCode::REQUESTED_TABLE_NOT_EXISTS);
+                    }
 
-                ccm = ccs.GetCcm(*table_name_, node_group_id_);
+                    ccm = ccs.GetCcm(*table_name_, node_group_id_);
+                }
             }
         }
 
