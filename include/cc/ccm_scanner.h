@@ -661,7 +661,8 @@ public:
             }
             else
             {
-                assert(Sharder::Instance().GetDataStoreHandler() == nullptr);
+                // TableType::RangePartition
+                // assert(Sharder::Instance().GetDataStoreHandler() == nullptr);
                 return nullptr;
             }
         }
