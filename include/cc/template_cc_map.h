@@ -1425,9 +1425,6 @@ public:
             hd_res->SetError(CcErrorCode::REQUESTED_TABLE_SCHEMA_MISMATCH);
             return true;
         }
-        LOG(INFO) << "ReadCc, node_group(#" << ng_id << ") term: " << ng_term
-                  << ", tx:" << req.Txn()
-                  << ", error code: " << static_cast<int>(hd_res->ErrorCode());
 
         IsolationLevel iso_lvl = req.Isolation();
         CcProtocol cc_proto = req.Protocol();
@@ -1763,9 +1760,6 @@ public:
                                 // data store is inaccessible.
                                 hd_res->SetError(
                                     CcErrorCode::PIN_RANGE_SLICE_FAILED);
-                                LOG(INFO)
-                                    << "ReadCc, pin range slice failed, tx:"
-                                    << req.Txn();
                                 return true;
                             }
                         }
@@ -1908,7 +1902,6 @@ public:
             case CcErrorCode::NO_ERROR:
             {
                 hd_res->Value().lock_type_ = acquired_lock;
-                LOG(INFO) << "Acquire lock success, error code: " << static_cast<int>(err_code);
                 break;
             }
             case CcErrorCode::ACQUIRE_LOCK_BLOCKED:
@@ -2070,7 +2063,6 @@ public:
             hd_res->Value().ts_ = v_rec.commit_ts_;
             hd_res->Value().rec_status_ = v_rec.payload_status_;
             hd_res->SetFinished();
-            LOG(INFO) << "ReadCc finished successfully, error code: " << static_cast<int>(hd_res->ErrorCode());
             return true;
         }
         else if (cce->PayloadStatus() == RecordStatus::Normal &&

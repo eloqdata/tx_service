@@ -168,7 +168,6 @@ void ReadOperation::Forward(TransactionExecution *txm)
             return;
         }
 
-        LOG(INFO) << "read op process";
         txm->Process(*this);
         return;
     }
@@ -177,7 +176,6 @@ void ReadOperation::Forward(TransactionExecution *txm)
 
     if (hd_result_.IsFinished())
     {
-        LOG(INFO) << "read op done";
         if (hd_result_.ErrorCode() == CcErrorCode::PIN_RANGE_SLICE_FAILED ||
             hd_result_.ErrorCode() == CcErrorCode::REQUESTED_NODE_NOT_LEADER ||
             hd_result_.ErrorCode() == CcErrorCode::DATA_STORE_ERR)
@@ -1104,7 +1102,6 @@ InitTxnOperation::InitTxnOperation(TransactionExecution *txm)
 
 void InitTxnOperation::Reset()
 {
-    LOG(INFO) << "Reset InitTxnOperation " << this ;
     hd_result_.Reset();
 }
 
@@ -1113,14 +1110,12 @@ void InitTxnOperation::Forward(TransactionExecution *txm)
     // start the state machine if not running.
     if (!is_running_)
     {
-        LOG(INFO) << "Process InitTxnOperation " << this ;
         txm->Process(*this);
     }
 
 
     if (hd_result_.IsFinished())
     {
-        LOG(INFO) << "Forward InitTxnOperation " << this << " is finished";
         txm->PostProcess(*this);
     }
 }
