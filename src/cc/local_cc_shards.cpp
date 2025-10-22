@@ -4613,9 +4613,6 @@ void LocalCcShards::DataSyncForHashPartition(
             // nothing to flush
             if (scan_cc.accumulated_scan_cnt_ == 0)
             {
-                DLOG(INFO) << "scan_cc: "
-                           << reinterpret_cast<uint64_t>(&scan_cc)
-                           << "  scan data cnt is 0";
                 scan_cc.Reset();
                 continue;
             }
@@ -5618,7 +5615,8 @@ void LocalCcShards::SyncTableStatisticsWorker()
 
                 const TableName &table_name = it->first;
                 bool is_dirty = it->second;
-                if (!table_name.IsMeta() && table_name != sequence_table_name)
+                if (table_name.Engine() == TableEngine::EloqSql ||
+                    table_name.Engine() == TableEngine::EloqDoc)
                 {
                     // Set isolation level to RepeatableRead to ensure the
                     // readlock will be set during the execution of the
