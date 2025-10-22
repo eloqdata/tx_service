@@ -1106,7 +1106,8 @@ void txservice::LocalCcHandler::ScanNextBatch(
         if (bucket_scan_progress->empty())
         {
             bool kv_finished =
-                Sharder::Instance().GetDataStoreHandler() == nullptr;
+                Sharder::Instance().GetDataStoreHandler() == nullptr ||
+                table_name.Type() == TableType::RangePartition;
             for (const auto &bucket_id : *plan->Buckets(node_group_id))
             {
                 uint16_t target_core =

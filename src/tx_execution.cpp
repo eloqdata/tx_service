@@ -2338,6 +2338,7 @@ void TransactionExecution::Process(ScanOpenOperation &scan_open)
                 .append("\"tx_term\":")
                 .append(std::to_string(this->tx_term_));
         });
+
     const TableName &table_name = *scan_open.tx_req_->tab_name_;
     uint64_t schema_version = scan_open.tx_req_->schema_version_;
     ScanIndexType index_type = scan_open.tx_req_->indx_type_;
@@ -2418,11 +2419,8 @@ void TransactionExecution::Process(ScanOpenOperation &scan_open)
                               scan_open.tx_req_->scan_pattern_);
     }
 
-    if (table_name.IsHashPartitioned())
-    {
-        // immediately forward again.
-        command_id_.fetch_add(1, std::memory_order_relaxed);
-    }
+    // immediately forward again.
+    command_id_.fetch_add(1, std::memory_order_relaxed);
 }
 
 void TransactionExecution::PostProcess(ScanOpenOperation &scan_open)
@@ -5858,22 +5856,6 @@ void TransactionExecution::DrainScanner(CcScanner *scanner,
         }
         scanner->MoveNext();
         cc_scan_tuple = scanner->Current();
-    }
-
-    // Release trailing tuple locks acquired during scan. These tuples are
-    // tuples scanned beyond scan end key and are not intended to be locked.
-    // They were not added into read set. Check if they were put into read set
-    // by other operations before, if not, release these locks.
-    std::vector<const ScanTuple *> trailing_tuples;
-    scanner->MemoryShardCacheTrailingTuples(&trailing_tuples);
-    for (auto tuple : trailing_tuples)
-    {
-        LockType lk_type = scanner->DeduceScanTupleLockType(tuple->rec_status_);
-        if (lk_type != LockType::NoLock &&
-            rw_set_.GetReadCnt(table_name, tuple->cce_addr_) == 0)
-        {
-            drain_batch_.emplace_back(tuple->cce_addr_, tuple->key_ts_);
-        }
     }
 }
 

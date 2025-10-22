@@ -1105,7 +1105,9 @@ void txservice::remote::RemoteScanNextBatch::Reset(
     {
         const ::txservice::remote::BucketScanInfoMsg &scan_info =
             scan_next.global_info();
-        bool kv_finished = Sharder::Instance().GetDataStoreHandler() == nullptr;
+        bool kv_finished =
+            Sharder::Instance().GetDataStoreHandler() == nullptr ||
+            remote_table_name_.Type() == TableType::RangePartition;
         for (const auto &bucket_id : scan_info.scan_buckets())
         {
             uint16_t target_core =
