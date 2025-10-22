@@ -1895,7 +1895,8 @@ public:
             // Fetch/Get Catalog is based on base table name, but Get
             // ccmap is based on the real table name, for example, index
             // should get the corresponding sk_ccmap.
-            assert(!table_name_->IsMeta());
+            assert(!table_name_->IsMeta() ||
+                   table_name_->Type() == TableType::RangePartition);
             const CatalogEntry *catalog_entry =
                 ccs.InitCcm(*table_name_, node_group_id_, ng_term_, this);
             if (catalog_entry == nullptr)
