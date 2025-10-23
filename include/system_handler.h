@@ -38,5 +38,9 @@ public:
     {
         done(true);
     }
+
+    virtual void Shutdown()
+    {
+    }
 };
 }  // namespace txservice
