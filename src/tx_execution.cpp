@@ -30,6 +30,7 @@
 
 #include "absl/container/flat_hash_map.h"
 #include "cc_protocol.h"
+#include "ccm_scanner.h"
 #include "error_messages.h"  //CcErrorCode
 #include "local_cc_shards.h"
 #include "log.pb.h"
@@ -2336,6 +2337,7 @@ void TransactionExecution::Process(ScanOpenOperation &scan_open)
                 .append("\"tx_term\":")
                 .append(std::to_string(this->tx_term_));
         });
+
     const TableName &table_name = *scan_open.tx_req_->tab_name_;
     uint64_t schema_version = scan_open.tx_req_->schema_version_;
     ScanIndexType index_type = scan_open.tx_req_->indx_type_;
@@ -2349,16 +2351,6 @@ void TransactionExecution::Process(ScanOpenOperation &scan_open)
     bool is_require_keys = scan_open.tx_req_->is_require_keys_;
     bool is_require_recs = scan_open.tx_req_->is_require_recs_;
     bool is_require_sort = scan_open.tx_req_->is_require_sort_;
-
-    // scan_open.Reset();
-    /*
-    scan_open.Set(&table_name,
-                  index_type,
-                  &start_key,
-                  inclusive,
-                  direction,
-                  is_ckpt_delta);
-    */
 
     scan_open.hd_result_.Value().scan_alias_ = scan_open.tx_req_->scan_alias_;
 
@@ -2426,11 +2418,8 @@ void TransactionExecution::Process(ScanOpenOperation &scan_open)
                               scan_open.tx_req_->scan_pattern_);
     }
 
-    if (table_name.IsHashPartitioned())
-    {
-        // immediately forward again.
-        command_id_.fetch_add(1, std::memory_order_relaxed);
-    }
+    // immediately forward again.
+    command_id_.fetch_add(1, std::memory_order_relaxed);
 }
 
 void TransactionExecution::PostProcess(ScanOpenOperation &scan_open)
@@ -2505,7 +2494,7 @@ void TransactionExecution::PostProcess(ScanOpenOperation &scan_open)
 
     assert(scans_.find(open_result.scan_alias_) == scans_.end());
 
-    if (!table_name.IsHashPartitioned())
+    if (open_result.scanner_->Type() == CcmScannerType::RangePartition)
     {
         // Constructs a pseudo slice prior to the first slice of the scan. And
         // sets the status of the scanner "Blocked".
@@ -2558,6 +2547,15 @@ void TransactionExecution::PostProcess(ScanOpenOperation &scan_open)
                     local_cc_shard->GetBucketOwner(bucket_id, TxCcNodeId());
                 uint16_t core_idx =
                     Sharder::Instance().ShardBucketIdToCoreIdx(bucket_id);
+
+                if (open_result.scanner_->read_local_ &&
+                    bucket_owner != Sharder::Instance().NativeNodeGroup())
+                {
+                    // ha_eloq::analyze()
+                    assert(table_name.Type() == TableType::RangePartition);
+                    continue;
+                }
+
                 grouped[bucket_owner][core_idx].push_back(bucket_id);
             }
 
@@ -2566,7 +2564,7 @@ void TransactionExecution::PostProcess(ScanOpenOperation &scan_open)
                 batch_idx;
 
             size_t plan_bucket_cnt_soft_limit = 256;
-            size_t total_bucket_cnt = Sharder::Instance().ToTalRangeBuckets();
+            size_t total_bucket_cnt = Sharder::Instance().TotalRangeBuckets();
 
             absl::flat_hash_map<NodeGroupId, std::vector<uint16_t>>
                 current_plan_bucket_ids;
@@ -2607,11 +2605,15 @@ void TransactionExecution::PostProcess(ScanOpenOperation &scan_open)
             }
         }
 
-        auto search_cond =
-            Sharder::Instance()
-                .GetDataStoreHandler()
-                ->CreateDataSerachCondition(scan_open.tx_req_->obj_type_,
-                                            scan_open.tx_req_->scan_pattern_);
+        std::vector<DataStoreSearchCond> search_cond;
+        if (Sharder::Instance().GetDataStoreHandler())
+        {
+            search_cond = Sharder::Instance()
+                              .GetDataStoreHandler()
+                              ->CreateDataSerachCondition(
+                                  scan_open.tx_req_->obj_type_,
+                                  scan_open.tx_req_->scan_pattern_);
+        }
 
         scans_.try_emplace(open_result.scan_alias_,
                            std::move(open_result.scanner_),
@@ -2666,18 +2668,23 @@ void TransactionExecution::Process(ScanNextOperation &scan_next)
     CcScanner &scanner = *scan_next.scan_state_->scanner_;
     if (!scan_next.is_running_)
     {
-        ScanNextResult &scan_next_result = scan_next.hd_result_.Value();
-        scan_next_result.Clear();
-        scan_next_result.current_scan_plan_ =
-            scan_next.tx_req_->bucket_scan_plan_;
-        scan_next_result.ccm_scanner_ = &scanner;
+        if (scanner.Type() == CcmScannerType::HashPartition)
+        {
+            ScanNextResult &scan_next_result = scan_next.hd_result_.Value();
+            scan_next_result.Clear();
+            scan_next_result.current_scan_plan_ =
+                scan_next.tx_req_->bucket_scan_plan_;
+            scan_next_result.ccm_scanner_ = &scanner;
+        }
+
         scan_next.is_running_ = true;
     }
 
     bool to_scan_next = scanner.Current() == nullptr &&
                         scanner.Status() == ScannerStatus::Blocked;
 
-    if (to_scan_next)
+    bool is_local = true;
+    if (to_scan_next && scanner.Type() == CcmScannerType::HashPartition)
     {
         if (scan_next.scan_state_->current_plan_index_ == SIZE_MAX ||
             scan_next.scan_state_->current_plan_index_ !=
@@ -2688,52 +2695,41 @@ void TransactionExecution::Process(ScanNextOperation &scan_next)
             scanner.Close();
             scanner.SetStatus(ScannerStatus::Blocked);
         }
-    }
 
-    bool is_local = true;
-    if (to_scan_next && scanner.Type() == CcmScannerType::HashPartition)
-    {
         if (scanner.read_local_)
         {
-            /*
-            cc_handler_->ScanNextBatchLocal(
+            // only one node group
+            assert(scan_next.hd_result_.Value()
+                       .current_scan_plan_->Buckets()
+                       .size() == 1);
+        }
+
+        // Update handler result ref count
+        auto &ng_scan_buckets =
+            scan_next.hd_result_.Value().current_scan_plan_->Buckets();
+        scan_next.ResetResultForHashPart(ng_scan_buckets.size());
+
+        // Reset all caches, we need to scan next batch data
+        scanner.ResetCaches();
+
+        for (const auto &[node_group_id, bucket_ids] : ng_scan_buckets)
+        {
+            cc_handler_->ScanNextBatch(
+                scan_next.tx_req_->table_name_,
+                node_group_id,
                 tx_number_.load(std::memory_order_relaxed),
                 tx_term_,
                 command_id_.load(std::memory_order_relaxed),
                 start_ts_,
+                *scan_next.scan_state_->scan_start_key_,
+                scan_next.scan_state_->scan_start_inclusive_,
+                *scan_next.scan_state_->scan_end_key_,
+                scan_next.scan_state_->scan_end_inclusive_,
                 scanner,
-                scan_next.hd_result_);
-            */
-        }
-        else
-        {
-            // Update handler result ref count
-            auto &ng_scan_buckets =
-                scan_next.hd_result_.Value().current_scan_plan_->Buckets();
-            scan_next.ResetResultForHashPart(ng_scan_buckets.size());
-
-            // Reset all caches, we need to scan next batch data
-            scanner.ResetCaches();
-
-            for (const auto &[node_group_id, bucket_ids] : ng_scan_buckets)
-            {
-                cc_handler_->ScanNextBatch(
-                    scan_next.tx_req_->table_name_,
-                    node_group_id,
-                    tx_number_.load(std::memory_order_relaxed),
-                    tx_term_,
-                    command_id_.load(std::memory_order_relaxed),
-                    start_ts_,
-                    *scan_next.scan_state_->scan_start_key_,
-                    scan_next.scan_state_->scan_start_inclusive_,
-                    *scan_next.scan_state_->scan_end_key_,
-                    scan_next.scan_state_->scan_end_inclusive_,
-                    scanner,
-                    &scan_next.scan_state_->pushdown_condition_,
-                    scan_next.hd_result_,
-                    scan_next.tx_req_->obj_type_,
-                    scan_next.tx_req_->scan_pattern_);
-            }
+                &scan_next.scan_state_->pushdown_condition_,
+                scan_next.hd_result_,
+                scan_next.tx_req_->obj_type_,
+                scan_next.tx_req_->scan_pattern_);
         }
 
         is_local = scan_next.hd_result_.RemoteRefCnt() == 0;
@@ -3196,7 +3192,6 @@ void TransactionExecution::PostProcess(ScanNextOperation &scan_next)
                                                           RecordStatus::Normal
                                                       ? cc_scan_tuple->Record()
                                                       : nullptr;
-
                             scan_batch.emplace_back(cc_scan_tuple->Key(),
                                                     const_cast<TxRecord *>(rec),
                                                     cc_scan_tuple->rec_status_,
@@ -3636,10 +3631,12 @@ void TransactionExecution::ScanClose(
         }
     }
 
+    /*
     if (scanner->Type() == CcmScannerType::HashPartition)
     {
         DrainScanner(scanner, table_name);
     }
+    */
 
     cc_handler_->ScanClose(
         table_name, scanner->Direction(), std::move(scan_it->second.scanner_));
@@ -5808,6 +5805,7 @@ void TransactionExecution::DrainScanner(CcScanner *scanner,
     assert(scanner != nullptr);
     // drain out the scan tuple in the scan cache
     // scanner->SetDrainCacheMode(true);
+    scanner->Init();
     const ScanTuple *cc_scan_tuple = scanner->Current();
     // In case the scan status is blocked before
     if (cc_scan_tuple == nullptr && scanner->Status() == ScannerStatus::Blocked)

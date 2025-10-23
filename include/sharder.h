@@ -227,7 +227,7 @@ public:
                                     (kHashPartitions - 1));
     }
 
-    static inline uint16_t ToTalRangeBuckets()
+    static inline uint16_t TotalRangeBuckets()
     {
         return total_range_buckets;
     }
