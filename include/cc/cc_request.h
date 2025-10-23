@@ -3243,7 +3243,8 @@ public:
                                           cce_lock_ptr_ptr[tuple_idx],
                                           term_ptr[tuple_idx],
                                           remote_core_idx,
-                                          scan_slice_result.cc_ng_id_);
+                                          scan_slice_result.cc_ng_id_,
+                                          true);
             }
 
             if (tuple_idx == tuple_cnt)

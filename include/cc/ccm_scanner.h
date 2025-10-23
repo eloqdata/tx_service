@@ -157,7 +157,8 @@ public:
                                     uint64_t cce_lock_ptr,
                                     int64_t term,
                                     uint32_t core_id,
-                                    uint32_t ng_id) = 0;
+                                    uint32_t ng_id,
+                                    bool need_deserialize_key) = 0;
 
     virtual const ScanTuple *LastTuple() const = 0;
 
@@ -276,7 +277,8 @@ public:
                             uint64_t cce_lock_ptr,
                             int64_t term,
                             uint32_t core_id,
-                            uint32_t ng_id) override
+                            uint32_t ng_id,
+                            bool need_deserialize_key) override
     {
         assert(size_ <= cache_.size());
 
@@ -305,8 +307,16 @@ public:
             // this scan. Only deserializes the key when the key is included.
             assert(key_ts > 0);
             scan_tuple->key_ts_ = key_ts;
-
-            scan_tuple->KeyObj().SetPackedKey(key_str.data(), key_str.size());
+            if (need_deserialize_key)
+            {
+                scan_tuple->KeyObj().Deserialize(
+                    key_str.data(), key_offset, key_schema_);
+            }
+            else
+            {
+                scan_tuple->KeyObj().SetPackedKey(key_str.data(),
+                                                  key_str.size());
+            }
             scan_tuple->rec_status_ = rec_status;
             scan_tuple->SetRecord(record_str.data(), rec_offset);
 

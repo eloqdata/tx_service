@@ -1163,7 +1163,8 @@ void CcStreamReceiver::OnReceiveCcMsg(std::unique_ptr<CcMessage> msg)
                         tuple_msg.cce_addr().cce_lock_ptr(),
                         tuple_msg.cce_addr().term(),
                         tuple_msg.cce_addr().core_id(),
-                        tuple_msg.cce_addr().node_group_id());
+                        tuple_msg.cce_addr().node_group_id(),
+                        false);
                 }
 
                 if (memory_cache.trailing_cnt() > 0)
@@ -1202,7 +1203,8 @@ void CcStreamReceiver::OnReceiveCcMsg(std::unique_ptr<CcMessage> msg)
                             tuple_msg.cce_addr().cce_lock_ptr(),
                             tuple_msg.cce_addr().term(),
                             tuple_msg.cce_addr().core_id(),
-                            tuple_msg.cce_addr().node_group_id());
+                            tuple_msg.cce_addr().node_group_id(),
+                            false);
                     }
 
                     if (kv_cache.trailing_cnt() > 0)
