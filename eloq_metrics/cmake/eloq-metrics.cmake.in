@@ -1,0 +1,10 @@
+@PACKAGE_INIT@
+include(CMakeFindDependencyMacro)
+
+find_dependency(prometheus-cpp)
+
+include("${CMAKE_CURRENT_LIST_DIR}/eloq_metrics-targets.cmake")
+
+check_required_components(
+  "eloq-metrics-shared"
+  )
