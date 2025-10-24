@@ -28,15 +28,15 @@
 #if ELOQDS
 #include <filesystem>
 
+#include "data_store_service_client.h"
 #include "eloq_data_store_service/data_store_service.h"
 #include "eloq_data_store_service/data_store_service_config.h"
-#include "data_store_service_client.h"
 #endif
 #if defined(DATA_STORE_TYPE_ROCKSDB)
 #include "store_handler/rocksdb_handler.h"
 #endif
 
-#if defined(DATA_STORE_TYPE_ELOQDSS_ROCKSDB_CLOUD_S3) ||                       \
+#if defined(DATA_STORE_TYPE_ELOQDSS_ROCKSDB_CLOUD_S3) || \
     defined(DATA_STORE_TYPE_ELOQDSS_ROCKSDB_CLOUD_GCS)
 #include "eloq_data_store_service/rocksdb_cloud_data_store_factory.h"
 #elif defined(DATA_STORE_TYPE_ELOQDSS_ROCKSDB)
@@ -70,7 +70,7 @@ DEFINE_string(bigtable_keyspace, "eloq", "KeySpace of BigTable");
 #if defined(DATA_STORE_TYPE_ELOQDSS_ROCKSDB_CLOUD_S3)
 DECLARE_string(aws_access_key_id);
 DECLARE_string(aws_secret_key);
-#elif defined(DATA_STORE_TYPE_DYNAMODB) ||                                     \
+#elif defined(DATA_STORE_TYPE_DYNAMODB) || \
     (defined(USE_ROCKSDB_LOG_STATE) && defined(WITH_ROCKSDB_CLOUD))
 DEFINE_string(aws_access_key_id, "", "AWS SDK access key id");
 DEFINE_string(aws_secret_key, "", "AWS SDK secret key");
@@ -90,7 +90,7 @@ DEFINE_string(eloq_dss_config_file_path,
               "config from a file.");
 #endif
 
-DEFINE_uint32(snapshot_sync_worker_num, 0, "Snpashot sync worker num");
+DEFINE_uint32(snapshot_sync_worker_num, 0, "Snapshot sync worker num");
 
 bool DataSubstrate::InitializeStorageHandler(const INIReader &config_reader)
 {
@@ -156,9 +156,12 @@ bool DataSubstrate::InitializeStorageHandler(const INIReader &config_reader)
             : config_reader.GetString(
                   "store", "bigtable_instance_id", FLAGS_bigtable_instance_id);
     bool ddl_skip_kv = false;
-    store_hd_ = std::make_unique<EloqDS::BigTableHandler>(
-        bigtable_keyspace, bigtable_project_id, bigtable_instance_id, core_config_.bootstrap,
-        ddl_skip_kv);
+    store_hd_ =
+        std::make_unique<EloqDS::BigTableHandler>(bigtable_keyspace,
+                                                  bigtable_project_id,
+                                                  bigtable_instance_id,
+                                                  core_config_.bootstrap,
+                                                  ddl_skip_kv);
 
 #elif defined(DATA_STORE_TYPE_ROCKSDB)
     bool is_single_node =
@@ -192,10 +195,12 @@ bool DataSubstrate::InitializeStorageHandler(const INIReader &config_reader)
         std::filesystem::create_directories(eloq_dss_data_path);
     }
 
-    std::string dss_config_file_path =   !CheckCommandLineFlagIsDefault("eloq_dss_config_file_path")
+    std::string dss_config_file_path =
+        !CheckCommandLineFlagIsDefault("eloq_dss_config_file_path")
             ? FLAGS_eloq_dss_config_file_path
-            : config_reader.GetString(
-                  "store", "eloq_dss_config_file_path", FLAGS_eloq_dss_config_file_path);
+            : config_reader.GetString("store",
+                                      "eloq_dss_config_file_path",
+                                      FLAGS_eloq_dss_config_file_path);
 
     if (dss_config_file_path.empty())
     {
@@ -256,7 +261,7 @@ bool DataSubstrate::InitializeStorageHandler(const INIReader &config_reader)
         }
     }
 
-#if defined(DATA_STORE_TYPE_ELOQDSS_ROCKSDB_CLOUD_S3) ||                       \
+#if defined(DATA_STORE_TYPE_ELOQDSS_ROCKSDB_CLOUD_S3) || \
     defined(DATA_STORE_TYPE_ELOQDSS_ROCKSDB_CLOUD_GCS)
     EloqDS::RocksDBConfig rocksdb_config(config_reader, eloq_dss_data_path);
     EloqDS::RocksDBCloudConfig rocksdb_cloud_config(config_reader);
@@ -284,14 +289,16 @@ bool DataSubstrate::InitializeStorageHandler(const INIReader &config_reader)
         eloq_dss_data_path + "/DSMigrateLog",
         std::move(ds_factory));
     // setup local data store service
-    bool ret = data_store_service_->StartService(core_config_.bootstrap || is_single_node);
+    bool ret = data_store_service_->StartService(core_config_.bootstrap ||
+                                                 is_single_node);
     if (!ret)
     {
         LOG(ERROR) << "Failed to start data store service";
         return false;
     }
     // setup data store service client
-    txservice::CatalogFactory *catalog_factory[NUM_EXTERNAL_ENGINES] = {nullptr, nullptr, nullptr};
+    txservice::CatalogFactory *catalog_factory[NUM_EXTERNAL_ENGINES] = {
+        nullptr, nullptr, nullptr};
 
     for (size_t i = 0; i < NUM_EXTERNAL_ENGINES; i++)
     {
