@@ -1259,6 +1259,11 @@ void txservice::LocalCcHandler::ScanNextBatch(
             req->SetPriorCceLockAddr(
                 last_tuple != nullptr ? last_tuple->cce_addr_.CceLockPtr() : 0,
                 core_id);
+            LOG(INFO) << ">> LocalCcHandler::ScanNextBatch table: "
+                      << tbl_name.StringView() << ", txn: " << tx_number
+                      << ", scanner: " << &scanner << ", core: " << core_id
+                      << ", lock: "
+                      << (void *) req->BlockingCceLockAddr(core_id);
         }
 
         scanner.ResetCaches();

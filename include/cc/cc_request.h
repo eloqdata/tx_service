@@ -3259,6 +3259,13 @@ public:
 
                 if (!MoveForward(ccs.core_id_))
                 {
+                    if (shard_cache->LastTuple() && shard_cache->LastTuple())
+                    {
+                        LOG(INFO) << ">> ProcessRemoteScanRespCc txn: " << Txn()
+                                  << ", lock: "
+                                  << (void *) shard_cache->LastTuple()
+                                         ->cce_addr_.CceLockPtr();
+                    }
                     // No more data
                     return SetFinished();
                 }

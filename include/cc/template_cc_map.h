@@ -3393,18 +3393,19 @@ public:
         }
 
         CcOperation cc_op;
-        bool is_read_snapshot =
-            req.Isolation() == IsolationLevel::Snapshot && !req.IsForWrite();
+        bool is_read_snapshot;
         if (table_name_.Type() == TableType::Secondary ||
             table_name_.Type() == TableType::UniqueSecondary)
         {
-            cc_op = req.IsForWrite() ? CcOperation::ReadForWrite
-                                     : CcOperation::ReadSkIndex;
+            cc_op = CcOperation::ReadSkIndex;
+            is_read_snapshot = (req.Isolation() == IsolationLevel::Snapshot);
         }
         else
         {
             cc_op = req.IsForWrite() ? CcOperation::ReadForWrite
                                      : CcOperation::Read;
+            is_read_snapshot = (req.Isolation() == IsolationLevel::Snapshot &&
+                                !req.IsForWrite());
         }
 
         LockType lock_type = LockTypeUtil::DeduceLockType(
@@ -3800,6 +3801,13 @@ public:
                 lock->GetCcEntry());
 
             auto [blocking_type, scan_type] = req.BlockingPair(core_id);
+            if (blocking_type == ScanSliceCc::ScanBlockingType::NoBlocking)
+            {
+                LOG(INFO) << ">> ScanSliceCc next. table: "
+                          << table_name_.StringView() << ", txn: " << req.Txn()
+                          << ", core: " << core_id << ", lock: " << lock
+                          << " - " << lock->KeyLock()->DebugInfo();
+            }
             CcPage<KeyT, ValueT, VersionedRecord, RangePartitioned> *ccp =
                 static_cast<
                     CcPage<KeyT, ValueT, VersionedRecord, RangePartitioned> *>(
@@ -5002,6 +5010,13 @@ public:
                     assert(last_cce->GetLockAddr() != nullptr);
                     last_tuple->cce_addr_.SetCceLock(
                         reinterpret_cast<uint64_t>(last_cce->GetLockAddr()));
+                    LOG(INFO)
+                        << ">> ScanSliceCc table: " << table_name_.StringView()
+                        << ", for_write: " << req.IsForWrite()
+                        << ", islocal: " << req.IsLocal()
+                        << ", core: " << core_id << ", cce: " << last_cce
+                        << ", lock: " << last_cce->GetLockAddr() << " - "
+                        << last_cce->GetKeyLock()->DebugInfo();
                 }
                 else
                 {
@@ -5009,6 +5024,16 @@ public:
                     assert(last_cce->GetLockAddr() != nullptr);
                     remote_scan_cache->SetLastCceLock(
                         reinterpret_cast<uint64_t>(last_cce->GetLockAddr()));
+                    LOG(INFO)
+                        << ">> ScanSliceCc table: " << table_name_.StringView()
+                        << ", ScanSliceCc addr: " << &req
+                        << ", remote_scan_cache addr: " << remote_scan_cache
+                        << ", txn: " << req.Txn()
+                        << ", for_write: " << req.IsForWrite()
+                        << ", islocal: " << req.IsLocal()
+                        << ", core: " << core_id << ", cce: " << last_cce
+                        << ", lock: " << last_cce->GetLockAddr() << " - "
+                        << last_cce->GetKeyLock()->DebugInfo();
                 }
                 if (add_intent)
                 {

@@ -723,6 +723,11 @@ void txservice::remote::RemoteCcHandler::ScanNext(
             const ScanTuple *last_tuple = cache->LastTuple();
             scan_slice->add_prior_cce_lock_vec(
                 last_tuple != nullptr ? last_tuple->cce_addr_.CceLockPtr() : 0);
+            LOG(INFO) << ">> RemoteCcHandler::ScanNext table: "
+                      << tbl_name.StringView() << ", txn: " << tx_number
+                      << ", scanner: " << &scanner << ", core: " << core_id
+                      << ", lock: "
+                      << (void *) *scan_slice->prior_cce_lock_vec().rbegin();
         }
 
         scanner.ResetCaches();

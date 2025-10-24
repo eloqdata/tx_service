@@ -484,21 +484,14 @@ public:
     static CcOperation DeduceCcOperation(ScanIndexType index_type,
                                          bool is_for_write)
     {
-        CcOperation cc_op;
-        if (is_for_write)
+        CcOperation cc_op = CcOperation::Read;
+        if (index_type == ScanIndexType::Secondary)
+        {
+            cc_op = CcOperation::ReadSkIndex;
+        }
+        else if (is_for_write)
         {
             cc_op = CcOperation::ReadForWrite;
-        }
-        else
-        {
-            if (index_type == ScanIndexType::Secondary)
-            {
-                cc_op = CcOperation::ReadSkIndex;
-            }
-            else
-            {
-                cc_op = CcOperation::Read;
-            }
         }
         return cc_op;
     }

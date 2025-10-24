@@ -1319,14 +1319,10 @@ txservice::remote::RemoteScanSlice::RemoteScanSlice()
         {
             CcOperation cc_op;
 
-            if (remote_tbl_name_.Type() == TableType::Secondary)
+            if (remote_tbl_name_.Type() == TableType::Secondary ||
+                remote_tbl_name_.Type() == TableType::UniqueSecondary)
             {
                 cc_op = CcOperation::ReadSkIndex;
-            }
-            else if (remote_tbl_name_.Type() == TableType::UniqueSecondary)
-            {
-                cc_op = IsForWrite() ? CcOperation::ReadForWrite
-                                     : CcOperation::ReadSkIndex;
             }
             else
             {
@@ -1447,6 +1443,9 @@ txservice::remote::RemoteScanSlice::RemoteScanSlice()
                 output_msg_.mutable_trailing_cnts()->append(
                     (const char *) &cache.trailing_cnt_, sizeof(size_t));
             }
+
+            LOG(INFO) << ">> RemoteScanSlice::post_lambda_ txn" << Txn()
+                      << ", addr: " << this;
         }
         const ScanSliceRequest &req = input_msg_->scan_slice_req();
         hd_->SendScanRespToNode(req.src_node_id(), output_msg_, false);
@@ -1507,6 +1506,11 @@ void txservice::remote::RemoteScanSlice::Reset(
         uint64_t cce_lock_addr =
             core_id < vec_size ? scan_slice_req.prior_cce_lock_vec(core_id) : 0;
         SetPriorCceLockAddr(cce_lock_addr, core_id);
+        LOG(INFO) << ">> RemoteScanSlice::Reset table: "
+                  << remote_tbl_name_.StringView()
+                  << ", txn: " << input_msg->tx_number()
+                  << ", core: " << core_id
+                  << ", lock: " << (void *) cce_lock_addr;
     }
 
     RangeScanSliceResult &slice_result = cc_res_.Value();
