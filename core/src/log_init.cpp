@@ -95,7 +95,6 @@ DEFINE_string(notify_checkpointer_threshold_size,
               "When the replay log size reaches this threshold the txlog "
               "server sends a checkpoint request to tx_service.");
 
-
 bool DataSubstrate::InitializeLogService(const INIReader &config_reader)
 {
     std::string txlog_service =

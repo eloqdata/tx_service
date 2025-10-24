@@ -29,9 +29,9 @@
 #include <unordered_map>
 #include <vector>
 
-#if (defined(DATA_STORE_TYPE_ELOQDSS_ROCKSDB_CLOUD_S3) ||                      \
-     defined(DATA_STORE_TYPE_ELOQDSS_ROCKSDB_CLOUD_GCS) ||                     \
-     defined(DATA_STORE_TYPE_ELOQDSS_ROCKSDB) ||                               \
+#if (defined(DATA_STORE_TYPE_ELOQDSS_ROCKSDB_CLOUD_S3) ||  \
+     defined(DATA_STORE_TYPE_ELOQDSS_ROCKSDB_CLOUD_GCS) || \
+     defined(DATA_STORE_TYPE_ELOQDSS_ROCKSDB) ||           \
      defined(DATA_STORE_TYPE_ELOQDSS_ELOQSTORE))
 #define ELOQDS 1
 #endif
@@ -40,7 +40,7 @@
 #if !defined(LOG_STATE_TYPE_RKDB_CLOUD)
 
 // Only if LOG_STATE_TYPE_RKDB_CLOUD undefined
-#if ((defined(LOG_STATE_TYPE_RKDB_S3) || defined(LOG_STATE_TYPE_RKDB_GCS)) &&  \
+#if ((defined(LOG_STATE_TYPE_RKDB_S3) || defined(LOG_STATE_TYPE_RKDB_GCS)) && \
      !defined(LOG_STATE_TYPE_RKDB))
 #define LOG_STATE_TYPE_RKDB_CLOUD 1
 #endif
@@ -50,19 +50,19 @@
 #if !defined(LOG_STATE_TYPE_RKDB_ALL)
 
 // Only if LOG_STATE_TYPE_RKDB_ALL undefined
-#if (defined(LOG_STATE_TYPE_RKDB_S3) || defined(LOG_STATE_TYPE_RKDB_GCS) ||    \
+#if (defined(LOG_STATE_TYPE_RKDB_S3) || defined(LOG_STATE_TYPE_RKDB_GCS) || \
      defined(LOG_STATE_TYPE_RKDB))
 #define LOG_STATE_TYPE_RKDB_ALL 1
 #endif
 
 #endif
 
-#if defined(DATA_STORE_TYPE_DYNAMODB) ||                                       \
+#if defined(DATA_STORE_TYPE_DYNAMODB) || \
     (ROCKSDB_CLOUD_FS_TYPE == ROCKSDB_CLOUD_FS_TYPE_S3)
 #include <aws/core/Aws.h>
 #endif
-#include "metrics.h"
 #include "meter.h"
+#include "metrics.h"
 #include "type.h"
 
 // Forward declaration for INIReader
@@ -209,15 +209,15 @@ private:
     std::vector<std::tuple<metrics::Name,
                            metrics::Type,
                            std::vector<metrics::LabelGroup>>>
-        external_metrics = {};
+        external_metrics_ = {};
     // TODO(liunyl): system handler is used to refresh auth related cache. In
     // converged db, there should only be one system handler.
     txservice::SystemHandler *system_handler_{nullptr};
 
     // Component instances
     std::unique_ptr<txservice::TxService> tx_service_;
-#if defined(DATA_STORE_TYPE_DYNAMODB) ||                                       \
-    defined(DATA_STORE_TYPE_ELOQDSS_ROCKSDB_CLOUD_S3) ||                       \
+#if defined(DATA_STORE_TYPE_DYNAMODB) ||                 \
+    defined(DATA_STORE_TYPE_ELOQDSS_ROCKSDB_CLOUD_S3) || \
     defined(LOG_STATE_TYPE_RKDB_S3)
     Aws::SDKOptions aws_options_;
 #endif

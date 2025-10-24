@@ -176,28 +176,28 @@ bool DataSubstrate::InitializeMetrics(const INIReader &config_reader)
                                         core_config_.core_num);
         metrics::redis_meter->Collect(
             metrics::NAME_MAX_CONNECTION,
-            DataSubstrate::GetGlobal()->GetCoreConfig().maxclients);
+            core_config_.maxclients);
         for (const auto &[cmd, _] : EloqKV::command_types)
         {
             std::vector<metrics::LabelGroup> label_groups = {{"type", {cmd}}};
 
-            external_metrics.push_back(
+            external_metrics_.push_back(
                 std::make_tuple(metrics::NAME_REDIS_COMMAND_DURATION,
                                 metrics::Type::Histogram,
                                 label_groups));
-            external_metrics.push_back(
+            external_metrics_.push_back(
                 std::make_tuple(metrics::NAME_REDIS_COMMAND_TOTAL,
                                 metrics::Type::Counter,
                                 label_groups));
         }
         for (const auto &access_type : {"read", "write"})
         {
-            external_metrics.push_back(
+            external_metrics_.push_back(
                 std::make_tuple(metrics::NAME_REDIS_COMMAND_AGGREGATED_TOTAL,
                                 metrics::Type::Counter,
                                 std::vector<metrics::LabelGroup>{
                                     {"access_type", {access_type}}}));
-            external_metrics.push_back(
+            external_metrics_.push_back(
                 std::make_tuple(metrics::NAME_REDIS_COMMAND_AGGREGATED_DURATION,
                                 metrics::Type::Histogram,
                                 std::vector<metrics::LabelGroup>{
