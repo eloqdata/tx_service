@@ -346,7 +346,6 @@ include/proto/*.pb.cc
 include/proto/*.pb.h
 
 # log_service dir
-eloq_metrics
 raft_host_manager
 
 # pre-commit
