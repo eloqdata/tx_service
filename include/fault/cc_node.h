@@ -61,8 +61,7 @@ public:
     void FinishLogGroupReplay(uint32_t log_group_id,
                               int64_t ng_term,
                               uint32_t latest_committed_txn_no,
-                              uint64_t last_ckpt_ts,
-                              uint64_t max_ts_in_log);
+                              uint64_t last_ckpt_ts);
 
     /**
      * Pin data of this node group if this ccnode is group leader.
