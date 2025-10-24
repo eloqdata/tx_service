@@ -1834,15 +1834,6 @@ public:
 
                     return false;
                 });
-                if (req.Isolation() == IsolationLevel::Snapshot)
-                {
-                    // MVCC update last_read_ts_ of lastest ccentry to tell
-                    // later writer's commit_ts must be higher than MVCC
-                    // reader's ts. Or it will break the REPEATABLE READ since
-                    // the next MVCC read in the same transaction will read the
-                    // new updated ccentry.
-                    shard_->UpdateLastReadTs(req.ReadTimestamp());
-                }
                 std::tie(acquired_lock, err_code) =
                     AcquireCceKeyLock(cce,
                                       cce->CommitTs(),
@@ -4602,16 +4593,6 @@ public:
         }
         else
         {
-            if (req.Isolation() == IsolationLevel::Snapshot)
-            {
-                // MVCC update last_read_ts_ of lastest ccentry to tell
-                // later writer's commit_ts must be higher than MVCC
-                // reader's ts. Or it will break the REPEATABLE READ since
-                // the next MVCC read in the same transaction will read the
-                // new updated ccentry.
-                shard_->UpdateLastReadTs(req.ReadTimestamp());
-            }
-
             std::pair<Iterator, ScanType> start_pair =
                 req.Direction() == ScanDirection::Forward
                     ? ForwardScanStart(*req_start_key, req.StartInclusive())
