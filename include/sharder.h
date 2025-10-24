@@ -417,13 +417,13 @@ public:
      * @param latest_txn_no The latest txn number committed from cc node group
      * cc_ng_id, valid only when cc node group cc_ng_id is bound to log group
      * log_group_id, otherwise it should be 0.
-     * @param last_ckpt_ts The last checkpoint timestamp of node group cc_ng_id,
-     * used to update each ccshard's ts_base_.
+     * @param latest_commit_ts The latest commit ts the log group has ever seen, used to update each ccshard's ts_base_ (last_read_ts).
      */
     void FinishLogReplay(uint32_t cc_ng_id,
                          int64_t cc_ng_term,
                          uint32_t log_group_id,
                          uint32_t latest_txn_no,
+                         uint64_t latest_commit_ts,
                          uint64_t last_ckpt_ts);
 
     bool CheckLogGroupReplayFinished(uint32_t cc_ng_id,

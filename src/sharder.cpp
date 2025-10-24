@@ -41,7 +41,6 @@
 #include "remote/cc_stream_sender.h"
 #include "tx_command.h"
 #include "tx_service.h"
-#include "tx_service_common.h"
 #include "tx_worker_pool.h"
 
 // gflags 2.1.1 missing GFLAGS_NAMESPACE. This is a workaround to handle gflags
@@ -715,6 +714,7 @@ void Sharder::FinishLogReplay(uint32_t cc_ng_id,
                               int64_t cc_ng_term,
                               uint32_t log_group_id,
                               uint32_t latest_txn_no,
+                              uint64_t latest_commit_ts,
                               uint64_t last_ckpt_ts)
 {
     std::shared_lock<std::shared_mutex> cnf_lk(cluster_cnf_mux_);
@@ -727,7 +727,12 @@ void Sharder::FinishLogReplay(uint32_t cc_ng_id,
 
     find_it->second->FinishLogGroupReplay(
         log_group_id, cc_ng_term, latest_txn_no, last_ckpt_ts);
-    local_shards_->UpdateTsBase(last_ckpt_ts);
+
+    // The ts_base must be bigger than the node group's last_ckpt_ts and
+    // latest_commit_ts of all node groups' committed transactions, so that the
+    // commit ts of new txns can be set correctly.
+    uint64_t ts_base = std::max(latest_commit_ts, last_ckpt_ts);
+    local_shards_->UpdateTsBase(ts_base);
 }
 
 bool Sharder::CheckLogGroupReplayFinished(uint32_t cc_ng_id,
