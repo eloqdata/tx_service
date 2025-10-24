@@ -273,7 +273,7 @@ bool NonBlockingLock::AcquireReadLockFast(TxNumber tx_number)
     return false;
 }
 
-bool NonBlockingLock::ReleaseReadLockFast(CcShard *ccs)
+bool NonBlockingLock::ReleaseReadLockFast(CcShard *ccs, TxNumber tx_number)
 {
     // For fast path catalog realese read lock, only decrement the read_cnt_.
     assert(read_cnt_ > 0);
@@ -281,6 +281,9 @@ bool NonBlockingLock::ReleaseReadLockFast(CcShard *ccs)
     // If releasing the current read lock may unblock anything, it may be the
     // write lock who is the head of the blocking queue, or a no lock pk read
     // directed from a sk scan.
+#ifndef NDEBUG
+    ccs->DeleteLockHoldingTx(tx_number, nullptr, (tx_number >> 32L) >> 10);
+#endif
     TryPopBlockingQueue(ccs);
     return true;
 }

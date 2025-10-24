@@ -131,7 +131,7 @@ public:
      * @param ccs
      * @return
      */
-    bool ReleaseReadLockFast(CcShard *ccs);
+    bool ReleaseReadLockFast(CcShard *ccs, TxNumber tx_number);
 
     /**
      * @brief Tries to acquire the read lock. Only tx's under 2PL acquire read
@@ -320,6 +320,7 @@ private:
     {
         if (read_cnt_ > 0)
         {
+            DLOG(INFO) << "ReadLockConflict, read_cnt_: " << read_cnt_;
             return false;
         }
 

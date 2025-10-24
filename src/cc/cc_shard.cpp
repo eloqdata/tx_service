@@ -732,7 +732,10 @@ TxLockInfo *CcShard::UpsertLockHoldingTx(TxNumber txn,
     {
         tx_it->second = GetTxLockInfo(tx_term);
     }
-    tx_it->second->cce_list_.emplace(cce_ptr);
+    if (cce_ptr != nullptr)
+    {
+        tx_it->second->cce_list_.emplace(cce_ptr);
+    }
     tx_it->second->last_recover_ts_ = Now();
     tx_it->second->table_type_ = table_type;
 
