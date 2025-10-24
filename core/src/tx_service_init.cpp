@@ -122,7 +122,10 @@ bool DataSubstrate::InitializeTxService(const INIReader &config_reader)
             struct sysinfo meminfo;
             if (sysinfo(&meminfo))
             {
-                LOG(ERROR) << "config is missing: " << field_mem;
+                LOG(ERROR) << "Failed to get system memory info: "
+                           << strerror(errno)
+                           << " when node_memory_limit_mb is not set";
+                return false;
             }
             uint32_t mem_mib =
                 ((uint64_t) meminfo.totalram * meminfo.mem_unit) /
@@ -193,7 +196,14 @@ bool DataSubstrate::InitializeTxService(const INIReader &config_reader)
     if (hm_bin_path.empty())
     {
         char path_buf[PATH_MAX];
-        ssize_t len = ::readlink("/proc/self/exe", path_buf, sizeof(path_buf));
+        ssize_t len =
+            ::readlink("/proc/self/exe", path_buf, sizeof(path_buf) - 1);
+        if (len < 0 || len >= (ssize_t) sizeof(path_buf))
+        {
+            LOG(ERROR) << "readlink(/proc/self/exe) failed; cannot derive "
+                          "host_manager path";
+            return false;
+        }
         path_buf[len] = '\0';
         std::string s_path(path_buf);
         std::string::size_type pos = s_path.find_last_of("/");
@@ -250,7 +260,7 @@ bool DataSubstrate::InitializeTxService(const INIReader &config_reader)
 #ifdef ELOQ_MODULE_ELOQKV
         ,
         EloqKV::eloqkv_publish_func,
-        external_metrics
+        external_metrics_
 #endif
     );
 
