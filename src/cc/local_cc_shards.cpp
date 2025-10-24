@@ -3825,6 +3825,7 @@ void LocalCcShards::DataSyncForRangePartition(
             MergeSortedVectors(
                 std::move(archive_vecs), *archive_vec, rec_greater, false);
 
+            size_t data_sync_vec_size = data_sync_vec->size();
             // Fix the vector of FlushRecords.
             if (!scan_data_drained)
             {
@@ -3875,6 +3876,14 @@ void LocalCcShards::DataSyncForRangePartition(
                     std::make_move_iterator(mv_base_iter),
                     std::make_move_iterator(mv_base_vec->end()));
                 mv_base_vec->erase(mv_base_iter, mv_base_vec->end());
+            }
+
+            if (data_sync_vec->empty())
+            {
+                LOG(WARNING)
+                    << "data_sync_vec becomes empty after erase. old_size:"
+                    << data_sync_vec_size;
+                continue;
             }
 
             // Updata slices for this batch records.
@@ -6143,6 +6152,13 @@ void LocalCcShards::RangeCacheSender::FindSliceKeys(
         // sending.
         LOG(WARNING) << "FindSliceKeys: Failed to init the channel of ng#"
                      << new_range_owner_ << ". Skip sending cache.";
+        return;
+    }
+
+    if (batch_records.empty())
+    {
+        LOG(WARNING)
+            << "FindSliceKeys: Empty batch records. Skip sending cache.";
         return;
     }
 
