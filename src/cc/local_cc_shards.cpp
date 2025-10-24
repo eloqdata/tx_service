@@ -6161,13 +6161,6 @@ void LocalCcShards::RangeCacheSender::FindSliceKeys(
         return;
     }
 
-    if (batch_records.empty())
-    {
-        LOG(WARNING)
-            << "FindSliceKeys: Empty batch records. Skip sending cache.";
-        return;
-    }
-
     TxKey first_key = batch_records[0].Key();
     TxKey last_key = batch_records.at(batch_records.size() - 1).Key();
     std::vector<const StoreSlice *> batch_slices =
