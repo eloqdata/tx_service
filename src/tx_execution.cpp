@@ -6248,6 +6248,30 @@ void TransactionExecution::Process(ObjectCommandOp &obj_cmd_op)
                 uint32_t ng_id = TxCcNodeId();
                 int64_t ng_term = TxTerm();
 
+                bool is_standby_tx = IsStandbyTx(TxTerm());
+                if (is_standby_tx)
+                {
+                    obj_cmd_op.is_running_ = false;
+                    // Read and lock the catalog through read_catalog_op_.
+                    read_catalog_result_.Reset();
+                    read_catalog_result_.Value().Reset();
+                    read_catalog_key_ = CatalogKey(*obj_cmd_op.table_name_);
+                    read_catalog_record_ = CatalogRecord{};
+
+                    read_catalog_op_.Reset(TableName(catalog_ccm_name_sv.data(),
+                                                     catalog_ccm_name_sv.size(),
+                                                     TableType::Catalog,
+                                                     TableEngine::None),
+                                           &catalog_tx_key_,
+                                           &read_catalog_record_,
+                                           &read_catalog_result_);
+
+                    // Control flow jumps to read_catalog_op_, do not execute
+                    // further after `Process(read_catalog_op_)` returns.
+                    PushOperation(&read_catalog_op_);
+                    Process(read_catalog_op_);
+                    return;
+                }
                 auto [err_code, lock_struct, schema_version] =
                     local_hd->ReadCatalog(
                         *obj_cmd_op.table_name_, ng_id, ng_term, TxNumber());
@@ -6636,6 +6660,31 @@ void TransactionExecution::Process(MultiObjectCommandOp &obj_cmd_op)
 
                 uint32_t ng_id = TxCcNodeId();
                 int64_t ng_term = TxTerm();
+
+                bool is_standby_tx = IsStandbyTx(TxTerm());
+                if (is_standby_tx)
+                {
+                    obj_cmd_op.is_running_ = false;
+                    // Read and lock the catalog through read_catalog_op_.
+                    read_catalog_result_.Reset();
+                    read_catalog_result_.Value().Reset();
+                    read_catalog_key_ = CatalogKey(*req->table_name_);
+                    read_catalog_record_ = CatalogRecord{};
+
+                    read_catalog_op_.Reset(TableName(catalog_ccm_name_sv.data(),
+                                                     catalog_ccm_name_sv.size(),
+                                                     TableType::Catalog,
+                                                     TableEngine::None),
+                                           &catalog_tx_key_,
+                                           &read_catalog_record_,
+                                           &read_catalog_result_);
+
+                    // Control flow jumps to read_catalog_op_, do not execute
+                    // further after `Process(read_catalog_op_)` returns.
+                    PushOperation(&read_catalog_op_);
+                    Process(read_catalog_op_);
+                    return;
+                }
 
                 auto [err_code, lock_struct, schema_version] =
                     local_hd->ReadCatalog(
