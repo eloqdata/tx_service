@@ -5386,6 +5386,7 @@ void ObjectCommandOp::Forward(TransactionExecution *txm)
                 return;
             }
 
+            catalog_read_success_ = true;
             txm->Process(*this);
             return;
         }
@@ -5637,6 +5638,7 @@ void MultiObjectCommandOp::Forward(TransactionExecution *txm)
                 return;
             }
 
+            catalog_read_success_ = true;
             txm->Process(*this);
             return;
         }
