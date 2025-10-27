@@ -3825,6 +3825,17 @@ void LocalCcShards::DataSyncForRangePartition(
             MergeSortedVectors(
                 std::move(archive_vecs), *archive_vec, rec_greater, false);
 
+            data_sync_vecs.resize(cc_shards_.size() + 1);
+            archive_vecs.resize(cc_shards_.size() + 1);
+            mv_base_vecs.resize(cc_shards_.size() + 1);
+            for (size_t i = 0; i <= cc_shards_.size(); ++i)
+            {
+                data_sync_vecs.at(i).clear();
+                archive_vecs.at(i).clear();
+                mv_base_vecs.at(i).clear();
+            }
+
+            size_t data_sync_vec_size = data_sync_vec->size();
             // Fix the vector of FlushRecords.
             if (!scan_data_drained)
             {
@@ -3875,6 +3886,16 @@ void LocalCcShards::DataSyncForRangePartition(
                     std::make_move_iterator(mv_base_iter),
                     std::make_move_iterator(mv_base_vec->end()));
                 mv_base_vec->erase(mv_base_iter, mv_base_vec->end());
+            }
+
+            if (data_sync_vec->empty())
+            {
+                LOG(WARNING) << "data_sync_vec becomes empty after erase, old "
+                                "size of data_sync_vec_size: "
+                             << data_sync_vec_size;
+                // Reset
+                scan_cc.Reset();
+                continue;
             }
 
             // Updata slices for this batch records.
@@ -3955,12 +3976,6 @@ void LocalCcShards::DataSyncForRangePartition(
             }
             // Reset
             scan_cc.Reset();
-            for (size_t i = 0; i < cc_shards_.size(); ++i)
-            {
-                data_sync_vecs.at(i).clear();
-                archive_vecs.at(i).clear();
-                mv_base_vecs.at(i).clear();
-            }
         }
     }
 
