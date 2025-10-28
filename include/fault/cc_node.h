@@ -30,7 +30,6 @@
 #include "cc_request.pb.h"
 #include "log_replay_service.h"
 #include "sharder.h"
-#include "type.h"
 
 namespace txservice::fault
 {

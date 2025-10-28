@@ -38,7 +38,6 @@
 #include "local_cc_shards.h"
 #include "metrics.h"
 #include "sharder.h"
-#include "tx_service.h"
 #include "tx_service_common.h"
 #include "util.h"
 
