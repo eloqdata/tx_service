@@ -544,6 +544,7 @@ public:
     std::string_view kv_end_key_;
     std::string kv_session_id_;
     int32_t kv_partition_id_{0};
+    std::chrono::system_clock::time_point start_time_;
 };
 
 struct FetchRecordCc : public FetchCc
