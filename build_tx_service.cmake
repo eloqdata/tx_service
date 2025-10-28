@@ -117,6 +117,7 @@ add_subdirectory(tx_service/abseil-cpp)
 
 message(${TX_SERVICE_SOURCE_DIR})
 set(INCLUDE_DIR
+    ${TX_SERVICE_SOURCE_DIR}/abseil-cpp
     ${TX_SERVICE_SOURCE_DIR}/include
     ${TX_SERVICE_SOURCE_DIR}/include/cc
     ${TX_SERVICE_SOURCE_DIR}/include/remote
@@ -137,6 +138,7 @@ set(LINK_LIB ${LINK_LIB} ${PROTOBUF_LIBRARY})
 
 set(LINK_LIB ${LINK_LIB}
     mimalloc
+    absl::base
     absl::btree
     absl::flat_hash_map
     ${GFLAGS_LIBRARY}
@@ -196,8 +198,7 @@ SET(ELOQ_SOURCES
 set(INCLUDE_DIR ${INCLUDE_DIR} ${PROTO_SRC})
 set(ELOQ_SOURCES ${ELOQ_SOURCES} ${PROTO_CC_FILES})
 
-ADD_LIBRARY(txservice STATIC
-    ${ELOQ_SOURCES})
+ADD_LIBRARY(txservice ${ELOQ_SOURCES})
 
 target_include_directories(txservice PUBLIC ${INCLUDE_DIR})
 

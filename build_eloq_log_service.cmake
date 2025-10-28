@@ -266,7 +266,7 @@ set(LOG_LIB
 find_package(Protobuf REQUIRED)
 
 
-ADD_LIBRARY(logservice STATIC
+ADD_LIBRARY(logservice
     ${LOG_SOURCE_DIR}/src/log_instance.cpp
     ${LOG_SOURCE_DIR}/src/log_server.cpp
     ${LOG_SOURCE_DIR}/src/log_state_rocksdb_impl.cpp

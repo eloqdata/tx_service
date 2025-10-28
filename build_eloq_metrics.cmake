@@ -37,7 +37,7 @@ set(ELOQ_METRICS_TARGET_SOURCE_LIST
     ${ELOQ_METRICS_SRC_DIR}/metrics_manager.cc
     ${ELOQ_METRICS_SRC_DIR}/metrics_registry_impl.cpp
 )
-add_library(${METRICS_LIB} STATIC ${ELOQ_METRICS_TARGET_SOURCE_LIST})
+add_library(${METRICS_LIB} ${ELOQ_METRICS_TARGET_SOURCE_LIST})
 
 target_include_directories(${METRICS_LIB} PUBLIC ${ELOQ_METRICS_INCLUDE_DIR})
 
