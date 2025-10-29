@@ -230,7 +230,7 @@ public:
     {
     }
     RocksDBCatalogInfo(const std::string &kv_table_name,
-                       const std::string &kv_index_names){};
+                       const std::string &kv_index_names) {};
     ~RocksDBCatalogInfo()
     {
     }

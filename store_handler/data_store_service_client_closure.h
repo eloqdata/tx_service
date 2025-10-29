@@ -352,7 +352,9 @@ struct PartitionBatchRequest
         parts_cnt_per_record = 1;
     }
 
-    void Reset(uint16_t key_parts_count, uint16_t record_parts_count, size_t record_cnt)
+    void Reset(uint16_t key_parts_count,
+               uint16_t record_parts_count,
+               size_t record_cnt)
     {
         Clear();
         parts_cnt_per_key = key_parts_count;

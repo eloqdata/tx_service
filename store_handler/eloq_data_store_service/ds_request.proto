@@ -13,7 +13,6 @@ service DataStoreRpcService {
   rpc CreateTable(CreateTableRequest) returns (CreateTableResponse);
   rpc DropTable(DropTableRequest) returns (DropTableResponse);
 
-
   //-----External node management RPC interface
   rpc FetchDSSClusterConfig(google.protobuf.Empty)
       returns (FetchDSSClusterConfigResponse);
@@ -37,8 +36,8 @@ service DataStoreRpcService {
   rpc FaultInjectForTest(FaultInjectRequest) returns (FaultInjectResponse);
 
   //-----Snapshot and branch
-  rpc CreateSnapshotForBackup(CreateSnapshotForBackupRequest) returns (CreateSnapshotForBackupResponse);
-
+  rpc CreateSnapshotForBackup(CreateSnapshotForBackupRequest)
+      returns (CreateSnapshotForBackupResponse);
 };
 
 enum DataStoreError {
@@ -186,7 +185,6 @@ message DropTableResponse {
   CommonResult result = 1;
 }
 
-
 //-----External node management RPC interface
 
 message DSSNodeBuf {
@@ -292,7 +290,7 @@ message UpdateDSShardConfigResponse {
 // Search condition for pushdown filtering
 message SearchCondition {
   string field_name = 1;
-  string op = 2;     // Operation type (e.g., EQ, LT, GT, etc.)
+  string op = 2;    // Operation type (e.g., EQ, LT, GT, etc.)
   bytes value = 3;  // Serialized value to compare against
 }
 

@@ -151,8 +151,7 @@ public:
         std::vector<uint16_t> txlog_ports;
     };
 
-    static void Initialize(
-        const std::string &config_file_path);
+    static void Initialize(const std::string &config_file_path);
 
     // Global initialization function
     static bool InitializeGlobal(const std::string &config_file_path);

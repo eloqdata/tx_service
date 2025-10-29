@@ -182,9 +182,8 @@ prometheus::Labels PrometheusCollector::Convert2Labels(const Labels &labels)
         labels.begin(),
         labels.end(),
         [&prometheus_labels](
-            const std::pair<std::string, std::string> &inner_label) {
-            prometheus_labels.insert({inner_label.first, inner_label.second});
-        });
+            const std::pair<std::string, std::string> &inner_label)
+        { prometheus_labels.insert({inner_label.first, inner_label.second}); });
     return prometheus_labels;
 }
 

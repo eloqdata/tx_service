@@ -19,6 +19,8 @@
  *    <http://www.gnu.org/licenses/>.
  *
  */
+#include "rocksdb_cloud_data_store.h"
+
 #include <aws/core/client/ClientConfiguration.h>
 #include <aws/s3/S3Client.h>
 #include <bthread/condition_variable.h>
@@ -47,7 +49,6 @@
 #include "purger_event_listener.h"
 #include "rocksdb/cloud/cloud_file_system_impl.h"
 #include "rocksdb/cloud/cloud_storage_provider.h"
-#include "rocksdb_cloud_data_store.h"
 
 #define LONG_STR_SIZE 21
 
@@ -447,8 +448,8 @@ bool RocksDBCloudDataStore::OpenCloudDB(
     // boost write performance by enabling unordered write
     options.unordered_write = true;
     // skip Consistency check, which compares the actual file size with the size
-    // recorded in the metadata, which can fail when skip_cloud_files_in_getchildren is
-    // set to true
+    // recorded in the metadata, which can fail when
+    // skip_cloud_files_in_getchildren is set to true
     options.paranoid_checks = false;
 
     // print db statistics every 60 seconds

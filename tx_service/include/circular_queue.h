@@ -255,4 +255,4 @@ private:
     size_t cnt_;
     size_t capacity_;
 };
-#endif // CIRCULAR_QUEUE_H
+#endif  // CIRCULAR_QUEUE_H

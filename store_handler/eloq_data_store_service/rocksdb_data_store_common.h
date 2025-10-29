@@ -280,7 +280,6 @@ protected:
     rocksdb::InfoLogLevel StringToInfoLogLevel(
         const std::string &log_level_str);
 
-
 protected:
     rocksdb::InfoLogLevel info_log_level_;
     const bool enable_stats_;

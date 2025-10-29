@@ -1,7 +1,7 @@
-TxProcessor->Checkpointer:  Ccmap full, start ckpt
+TxProcessor->Checkpointer: Ccmap full, start ckpt
 Note right of Checkpointer: Timeout based ckpt
 Checkpointer->TxProcessor: Sned CkptTsCc request to get ckpt_ts
-TxProcessor->Checkpointer:  Return ckpt_ts
+TxProcessor->Checkpointer: Return ckpt_ts
 Checkpointer->TxProcessor: Send CkptScanCc request for each ccmap
 Note right of TxProcessor: CkptScanCc will copy payload_\n to payload_ckpt_
 TxProcessor->Checkpointer: Return ckpted_ccentry_list

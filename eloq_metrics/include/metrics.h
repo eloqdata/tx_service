@@ -38,7 +38,7 @@ inline bool enable_metrics = false;
 class Name
 {
 public:
-    Name(std::string name) : name_(std::move(name)){};
+    Name(std::string name) : name_(std::move(name)) {};
 
     const std::string &GetName() const
     {

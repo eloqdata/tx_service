@@ -159,7 +159,8 @@ CmdLineParams parse_arguments()
         params.get_value.first.empty())
     {
         throw std::runtime_error(
-            "No action specified. Use --list_cf, --opendb, --dump_keys, or --get_value");
+            "No action specified. Use --list_cf, --opendb, --dump_keys, or "
+            "--get_value");
     }
 
     return params;

@@ -440,10 +440,11 @@ public:
      * @param response Create snapshot for backup response
      * @param done Callback function
      */
-    void CreateSnapshotForBackup(::google::protobuf::RpcController *controller,
-                        const ::EloqDS::remote::CreateSnapshotForBackupRequest *request,
-                        ::EloqDS::remote::CreateSnapshotForBackupResponse *response,
-                        ::google::protobuf::Closure *done) override;
+    void CreateSnapshotForBackup(
+        ::google::protobuf::RpcController *controller,
+        const ::EloqDS::remote::CreateSnapshotForBackupRequest *request,
+        ::EloqDS::remote::CreateSnapshotForBackupResponse *response,
+        ::google::protobuf::Closure *done) override;
 
     /**
      * @brief Create snapshot for backup operation
@@ -452,13 +453,12 @@ public:
      * @param backup_ts Backup timestamp
      * @param done Callback function
      */
-    void CreateSnapshotForBackup(
-                        uint32_t shard_id,
-                        std::string_view backup_name,
-                        uint64_t backup_ts,
-                        std::vector<std::string> *backup_files,
-                        remote::CommonResult *result,
-                        ::google::protobuf::Closure *done);
+    void CreateSnapshotForBackup(uint32_t shard_id,
+                                 std::string_view backup_name,
+                                 uint64_t backup_ts,
+                                 std::vector<std::string> *backup_files,
+                                 remote::CommonResult *result,
+                                 ::google::protobuf::Closure *done);
 
     /**
      * @brief Append the key string of this node to the specified string stream.
@@ -614,7 +614,6 @@ private:
         return 0;
         // return cluster_manager_.GetShardIdByPartitionId(partition_id);
     }
-
 
     DataStore *GetDataStore(uint32_t shard_id)
     {

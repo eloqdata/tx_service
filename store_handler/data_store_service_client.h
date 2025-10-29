@@ -350,10 +350,9 @@ public:
      * @param snapshot_files The output snapshot files.
      * @return True if create successfully, otherwise false.
      */
-    bool CreateSnapshotForBackup(
-        const std::string &backup_name,
-        std::vector<std::string> &backup_files,
-        uint64_t backup_ts = 0) override;
+    bool CreateSnapshotForBackup(const std::string &backup_name,
+                                 std::vector<std::string> &backup_files,
+                                 uint64_t backup_ts = 0) override;
 
     bool NeedCopyRange() const override;
 
@@ -487,19 +486,19 @@ private:
      * Helper methods for concurrent PutAll implementation
      */
     void PreparePartitionBatches(
-        PartitionFlushState& partition_state,
-        const std::vector<std::pair<size_t, size_t>>& flush_recs,
-        const std::vector<std::unique_ptr<txservice::FlushTaskEntry>>& entries,
-        const txservice::TableName& table_name,
+        PartitionFlushState &partition_state,
+        const std::vector<std::pair<size_t, size_t>> &flush_recs,
+        const std::vector<std::unique_ptr<txservice::FlushTaskEntry>> &entries,
+        const txservice::TableName &table_name,
         uint16_t parts_cnt_per_key,
         uint16_t parts_cnt_per_record,
         uint64_t now);
 
     void PrepareRangePartitionBatches(
-        PartitionFlushState& partition_state,
-        const std::vector<size_t>& flush_recs,
-        const std::vector<std::unique_ptr<txservice::FlushTaskEntry>>& entries,
-        const txservice::TableName& table_name,
+        PartitionFlushState &partition_state,
+        const std::vector<size_t> &flush_recs,
+        const std::vector<std::unique_ptr<txservice::FlushTaskEntry>> &entries,
+        const txservice::TableName &table_name,
         uint16_t parts_cnt_per_key,
         uint16_t parts_cnt_per_record,
         uint64_t now);
