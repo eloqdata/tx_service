@@ -15,13 +15,23 @@ option(SMALL_RANGE "Whether enable small range" OFF)
 option(STATISTICS "Whether enable table statistics" ON)
 option(EXT_TX_PROC_ENABLED "Allows external threads to move forward the tx service." ON)
 option(ELOQ_MODULE_ENABLED "Register the tx service as an ELOQ module." OFF)
+option(BUILD_SHARED_LIBS "Build shared libraries instead of static libraries" OFF)
 
 
 message(NOTICE "WITH_DATA_STORE: ${WITH_DATA_STORE}")
 message(NOTICE "WITH_LOG_SERVICE: ${WITH_LOG_SERVICE}")
 message(NOTICE "OPEN_LOG_SERVICE: ${OPEN_LOG_SERVICE}")
+message(NOTICE "BUILD_SHARED_LIBS: ${BUILD_SHARED_LIBS}")
 option(USE_ONE_ELOQDSS_PARTITION_ENABLED "Whether use one partition for kv store" OFF)
 message(NOTICE "USE_ONE_ELOQDSS_PARTITION_ENABLED : ${USE_ONE_ELOQDSS_PARTITION_ENABLED}")
+
+# Enable Position Independent Code for shared libraries
+if(BUILD_SHARED_LIBS)
+    set(CMAKE_POSITION_INDEPENDENT_CODE ON)
+    message(NOTICE "Building SHARED libraries")
+else()
+    message(NOTICE "Building STATIC libraries")
+endif()
 
 if(USE_ONE_ELOQDSS_PARTITION_ENABLED)
     add_compile_definitions(USE_ONE_ELOQDSS_PARTITION)
@@ -252,8 +262,8 @@ elseif(WITH_DATA_STORE STREQUAL "ELOQDSS_ELOQSTORE")
     )
 endif()
 
-# Build the static library
-ADD_LIBRARY(${DATA_SUBSTRATE_LIB} STATIC ${DATA_SUBSTRATE_SOURCES})
+# Build the library (static or shared based on BUILD_SHARED_LIBS option)
+ADD_LIBRARY(${DATA_SUBSTRATE_LIB} ${DATA_SUBSTRATE_SOURCES})
 
 # Link with dependencies
 SET(DATA_SUBSTRATE_LINK_LIBS
