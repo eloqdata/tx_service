@@ -57,9 +57,12 @@
 
 #endif
 
-#if defined(DATA_STORE_TYPE_DYNAMODB) || \
-    (ROCKSDB_CLOUD_FS_TYPE == ROCKSDB_CLOUD_FS_TYPE_S3)
+#if (defined(DATA_STORE_TYPE_DYNAMODB) || defined(LOG_STATE_TYPE_RKDB_S3) || \
+     defined(DATA_STORE_TYPE_ELOQDSS_ROCKSDB_CLOUD_S3))
 #include <aws/core/Aws.h>
+#include <aws/core/utils/logging/AWSLogging.h>
+#include <aws/core/utils/logging/DefaultLogSystem.h>
+#include <aws/core/utils/memory/stl/AWSString.h>
 #endif
 #include "meter.h"
 #include "metrics.h"
@@ -148,7 +151,7 @@ public:
         std::vector<uint16_t> txlog_ports;
     };
 
-    static std::unique_ptr<DataSubstrate> Initialize(
+    static void Initialize(
         const std::string &config_file_path);
 
     // Global initialization function

@@ -71,6 +71,8 @@ DEFINE_string(log_file_name_prefix,
 extern txservice::CatalogFactory *eloqsql_catalog_factory __attribute__((weak));
 extern txservice::CatalogFactory *eloqkv_catalog_factory __attribute__((weak));
 extern txservice::SystemHandler *eloqsql_system_handler __attribute__((weak));
+extern txservice::CatalogFactory *eloqdoc_catalog_factory __attribute__((weak));
+extern txservice::SystemHandler *eloqdoc_system_handler __attribute__((weak));
 
 namespace brpc
 {
@@ -81,54 +83,60 @@ const auto NUM_VCPU = std::thread::hardware_concurrency();
 // Global DataSubstrate instance
 std::unique_ptr<DataSubstrate> g_data_substrate = nullptr;
 
-std::unique_ptr<DataSubstrate> DataSubstrate::Initialize(
-    const std::string &config_file_path)
+void DataSubstrate::Initialize(const std::string &config_file_path)
 {
-    auto data_substrate = std::make_unique<DataSubstrate>();
+  g_data_substrate = std::make_unique<DataSubstrate>();
 
-    INIReader config_file_reader(config_file_path);
-    if (!config_file_path.empty() && config_file_reader.ParseError() != 0)
-    {
-        LOG(ERROR) << "Failed to parse config file: " << config_file_path;
-        return nullptr;
-    }
-    // Phase 1: Load core and network configuration
-    if (!data_substrate->LoadCoreAndNetworkConfig(config_file_reader))
-    {
-        return nullptr;
-    }
+  INIReader config_file_reader(config_file_path);
+  if (!config_file_path.empty() && config_file_reader.ParseError() != 0)
+  {
+    LOG(ERROR) << "Failed to parse config file: " << config_file_path;
+    g_data_substrate = nullptr;
+    return;
+  }
+  // Phase 1: Load core and network configuration
+  if (!g_data_substrate->LoadCoreAndNetworkConfig(config_file_reader))
+  {
+    g_data_substrate = nullptr;
+    return;
+  }
 
-    // Phase 2: Register engines
-    if (!data_substrate->RegisterEngines())
-    {
-        return nullptr;
-    }
+  // Phase 2: Register engines
+  if (!g_data_substrate->RegisterEngines())
+  {
+    g_data_substrate = nullptr;
+    return;
+  }
 
-    // Phase 3: Initialize log service
-    if (!data_substrate->InitializeLogService(config_file_reader))
-    {
-        return nullptr;
-    }
+  // Phase 3: Initialize log service
+  if (!g_data_substrate->InitializeLogService(config_file_reader))
+  {
+    g_data_substrate = nullptr;
+    return;
+  }
 
-    // Phase 4: Initialize storage handler
-    if (data_substrate->GetCoreConfig().enable_data_store &&
-        !data_substrate->InitializeStorageHandler(config_file_reader))
-    {
-        return nullptr;
-    }
+  // Phase 4: Initialize storage handler
+  if (g_data_substrate->GetCoreConfig().enable_data_store &&
+      !g_data_substrate->InitializeStorageHandler(config_file_reader))
+  {
+    g_data_substrate = nullptr;
+    return;
+  }
 
-    // Phase 5: Initialize metrics
-    if (!data_substrate->InitializeMetrics(config_file_reader))
-    {
-        return nullptr;
-    }
+  // Phase 5: Initialize metrics
+  if (!g_data_substrate->InitializeMetrics(config_file_reader))
+  {
+    g_data_substrate = nullptr;
+    return;
+  }
 
-    // Phase 6: Initialize TxService
-    if (!data_substrate->InitializeTxService(config_file_reader))
-    {
-        return nullptr;
-    }
-    return data_substrate;
+
+  // Phase 6: Initialize TxService
+  if (!g_data_substrate->InitializeTxService(config_file_reader))
+  {
+    g_data_substrate = nullptr;
+    return;
+  }
 }
 
 bool DataSubstrate::InitializeGlobal(const std::string &config_file_path)
@@ -139,12 +147,12 @@ bool DataSubstrate::InitializeGlobal(const std::string &config_file_path)
         return true;
     }
 
-    g_data_substrate = Initialize(config_file_path);
-    if (g_data_substrate == nullptr)
-    {
-        LOG(ERROR) << "Failed to initialize global DataSubstrate";
-        return false;
-    }
+  Initialize(config_file_path);
+  if (g_data_substrate == nullptr)
+  {
+    LOG(ERROR) << "Failed to initialize global DataSubstrate";
+    return false;
+  }
 
     LOG(INFO) << "Global DataSubstrate initialized successfully";
     return true;
@@ -256,7 +264,17 @@ bool DataSubstrate::RegisterEngines()
     }
 #endif
 
-    return true;
+#ifdef ELOQ_MODULE_ELOQDOC
+  engines_[2].enable_engine= true;
+  if (eloqdoc_catalog_factory) {
+    engines_[2].catalog_factory= eloqdoc_catalog_factory;
+  }
+  if (eloqdoc_system_handler) {
+    system_handler_ = eloqdoc_system_handler;
+  }
+#endif
+
+  return true;
 }
 
 bool DataSubstrate::LoadCoreAndNetworkConfig(const INIReader &config_reader)
