@@ -392,6 +392,11 @@ public:
         return true;
     }
 
+    virtual bool OnLeaderStop(int64_t term)
+    {
+        return true;
+    }
+
     virtual std::string SnapshotSyncDestPath() const
     {
         return std::string("");
