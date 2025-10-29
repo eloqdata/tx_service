@@ -350,7 +350,7 @@ bool CcNode::OnLeaderStart(int64_t term,
         return false;
     }
 
-    if (!txservice_skip_kv && !local_cc_shards_.store_hd_->IsSharedStorage())
+    if (!txservice_skip_kv)
     {
         if (!local_cc_shards_.store_hd_->OnLeaderStart(next_leader_node))
         {
@@ -490,6 +490,15 @@ bool CcNode::OnLeaderStop(int64_t term)
         std::lock_guard<std::mutex> lk(recovery_mux_);
         Sharder::Instance().SetLeaderTerm(ng_id_, -1);
         Sharder::Instance().SetCandidateTerm(ng_id_, -1);
+    }
+
+    if (!txservice_skip_kv)
+    {
+        if (!local_cc_shards_.store_hd_->OnLeaderStop(term))
+        {
+            // Keep retrying
+            return false;
+        }
     }
 
     if (metrics::enable_metrics)
