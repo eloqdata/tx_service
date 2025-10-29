@@ -125,7 +125,8 @@ public:
      * @brief Create a snapshot of the data store.
      * @param req The pointer of the request.
      */
-    virtual void CreateSnapshotForBackup(CreateSnapshotForBackupRequest *req) = 0;
+    virtual void CreateSnapshotForBackup(
+        CreateSnapshotForBackupRequest *req) = 0;
 
     /**
      * @brief Switch the data store to read only mode.

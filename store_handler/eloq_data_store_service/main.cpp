@@ -67,9 +67,7 @@ DEFINE_string(eloq_dss_peer_node,
               "Data store peer node address. Used to get cluster topology if "
               "data_store_config_file is not provided.");
 
-DEFINE_string(eloq_dss_branch_name,
-              "development",
-              "Data store branch name.");
+DEFINE_string(eloq_dss_branch_name, "development", "Data store branch name.");
 
 DEFINE_string(ip, "127.0.0.1", "Server IP");
 DEFINE_int32(port, 9100, "Server Port");

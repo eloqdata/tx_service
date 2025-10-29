@@ -1113,7 +1113,6 @@ void InitTxnOperation::Forward(TransactionExecution *txm)
         txm->Process(*this);
     }
 
-
     if (hd_result_.IsFinished())
     {
         txm->PostProcess(*this);

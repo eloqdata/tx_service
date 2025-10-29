@@ -4118,16 +4118,16 @@ void DataStoreServiceClient::UpsertTable(UpsertTableData *table_data)
         if (alter_table_info)
         {
             auto *new_table_schema = table_data->new_table_schema_;
-            ok = ok &&
-                 std::all_of(
-                     alter_table_info->index_add_names_.begin(),
-                     alter_table_info->index_add_names_.end(),
-                     [this, new_table_schema](
-                         const std::pair<txservice::TableName, std::string> &p)
-                     {
-                         return InitTableRanges(p.first,
-                                                new_table_schema->Version());
-                     });
+            ok =
+                ok &&
+                std::all_of(
+                    alter_table_info->index_add_names_.begin(),
+                    alter_table_info->index_add_names_.end(),
+                    [this, new_table_schema](
+                        const std::pair<txservice::TableName, std::string> &p) {
+                        return InitTableRanges(p.first,
+                                               new_table_schema->Version());
+                    });
         }
 
         // 3- Delete table statistics

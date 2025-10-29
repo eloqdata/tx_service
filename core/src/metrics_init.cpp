@@ -174,9 +174,8 @@ bool DataSubstrate::InitializeMetrics(const INIReader &config_reader)
         metrics::register_redis_metrics(metrics_registry_.get(),
                                         redis_common_labels,
                                         core_config_.core_num);
-        metrics::redis_meter->Collect(
-            metrics::NAME_MAX_CONNECTION,
-            core_config_.maxclients);
+        metrics::redis_meter->Collect(metrics::NAME_MAX_CONNECTION,
+                                      core_config_.maxclients);
         for (const auto &[cmd, _] : EloqKV::command_types)
         {
             std::vector<metrics::LabelGroup> label_groups = {{"type", {cmd}}};

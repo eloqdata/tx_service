@@ -1,7 +1,8 @@
+#include "rocksdb_data_store_common.h"
+
 #include <filesystem>
 
 #include "internal_request.h"
-#include "rocksdb_data_store_common.h"
 
 namespace EloqDS
 {

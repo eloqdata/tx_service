@@ -56,8 +56,8 @@ public:
 
     static const std::unordered_map<
         uint16_t,
-        std::pair<txservice::TableName, txservice::SecondaryKeySchema>>
-        *GetIndexes(const txservice::TableSchema *table_schema);
+        std::pair<txservice::TableName, txservice::SecondaryKeySchema>> *
+    GetIndexes(const txservice::TableSchema *table_schema);
 
     // Pairs of payload's field name with datatype name separated by
     // "," in Cassandra Table. (Should be end with ",")

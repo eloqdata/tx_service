@@ -20,6 +20,8 @@
  *
  */
 
+#include "purger_sliding_window.h"
+
 #include <glog/logging.h>
 #include <rocksdb/cloud/cloud_storage_provider.h>
 #include <rocksdb/db.h>
@@ -39,8 +41,6 @@
 #include <thread>
 #include <unordered_map>
 #include <utility>
-
-#include "purger_sliding_window.h"
 
 namespace EloqDS
 {
@@ -226,7 +226,7 @@ void SlidingWindow::RemoveFileNumber(uint64_t thread_id, uint64_t job_id)
         // Mark the entry as deleted, but do not remove it immediately
         // to avoid frequent S3 updates, and give some time for Manifests
         // file get updated.
-	//
+        //
         // The entry will be removed when it expires in GetSmallestFileNumber()
         it->second.deleted_ = true;
         it->second.timestamp_ = now;
