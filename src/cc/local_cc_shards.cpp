@@ -73,7 +73,7 @@ bvar::LatencyRecorder g_pin_slices_cnt_recorder("yf_pin_slice_cnt");
 bvar::Adder<int64_t> g_delay_total_cnt("yf_delay_load_cnt");
 bvar::PerSecond<bvar::Adder<int64_t>> g_delay_qps("yf_delay_qps",
                                                   &g_delay_total_cnt,
-                                                  60);
+                                                  10);
 
 void LocalCcShards::AddCnt(size_t cnt)
 {
