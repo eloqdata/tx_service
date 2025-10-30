@@ -217,28 +217,36 @@ public:
                     // ccmap is based on the real table name, for example, index
                     // should get the corresponding sk_ccmap.
                     assert(!table_name_->IsMeta());
-                    const CatalogEntry *catalog_entry = ccs.InitCcm(
+                    std::optional<const TableSchema *> init_res = ccs.InitCcm(
                         *table_name_, node_group_id_, ng_term_, this);
-                    if (catalog_entry == nullptr)
+                    if (!init_res.has_value())
                     {
-                        // The local node does not contain the table's schema
-                        // instance. The FetchCatalog() method will send an
-                        // async request toward the data store to fetch the
-                        // catalog. After fetching is finished, this cc request
-                        // is re-enqueued for re-execution.
+                        // InitCcm failure.
+                        // the catalog may need to be fetched from the
+                        // KV store, may not exist (payload status = Deleted),
+                        // or is currently being modified (write lock acquired).
+                        //
+                        // In the first case, the requester will be re-enqueued
+                        // after FetchCatalog() completes fetching the catalog
+                        // from the data store. In the latter cases, the request
+                        // is marked as errored.
                         return false;
                     }
                     else
                     {
-                        if (catalog_entry->schema_ == nullptr)
-                        {
-                            // The local node (LocalCcShards) contains a schema
-                            // instance, which indicates that the table has been
-                            // dropped. Returns the request with an error.
-                            res_->SetError(
-                                CcErrorCode::REQUESTED_TABLE_NOT_EXISTS);
-                            return true;
-                        }
+
+                        assert(init_res.value() != nullptr);
+                        // InitCcm success.
+                        // const TableSchema *table_schema = init_res.value();
+                        // if (table_schema == nullptr)
+                        // {
+                        //     // The local node (LocalCcShards) contains a schema
+                        //     // instance, which indicates that the table has been
+                        //     // dropped. Returns the request with an error.
+                        //     res_->SetError(
+                        //         CcErrorCode::REQUESTED_TABLE_NOT_EXISTS);
+                        //     return true;
+                        // }
 
                         ccm = ccs.GetCcm(*table_name_, node_group_id_);
                     }
@@ -2455,30 +2463,34 @@ public:
                 // ccmap is based on the real table name, for example, index
                 // should get the corresponding sk_ccmap.
                 assert(!table_name_->IsMeta());
-                const CatalogEntry *catalog_entry =
+                std::optional<const TableSchema *> init_res =
                     ccs.InitCcm(*table_name_, node_group_id_, ng_term_, this);
-                if (catalog_entry == nullptr)
+                if (!init_res.has_value())
                 {
-                    // The local node does not contain the table's schema
-                    // instance. The FetchCatalog() method will send an
-                    // async request toward the data store to fetch the
-                    // catalog. After fetching is finished, this cc request
-                    // is re-enqueued for re-execution.
+                    // InitCcm failure.
+                    // the catalog may need to be fetched from the
+                    // KV store, may not exist (payload status = Deleted),
+                    // or is currently being modified (write lock acquired).
+                    //
+                    // In the first case, the requester will be re-enqueued
+                    // after FetchCatalog() completes fetching the catalog
+                    // from the data store. In the latter cases, the request
+                    // is marked as errored.
                     return false;
                 }
-                else
-                {
-                    if (catalog_entry->schema_ == nullptr)
-                    {
-                        // The local node (LocalCcShards) contains a schema
-                        // instance, which indicates that the table has been
-                        // dropped. Returns the request with an error.
-                        res_->SetError(CcErrorCode::REQUESTED_TABLE_NOT_EXISTS);
-                        return true;
-                    }
 
-                    ccm = ccs.GetCcm(*table_name_, node_group_id_);
-                }
+                const TableSchema *table_schema = init_res.value();
+                assert(table_schema != nullptr);
+                // if (table_schema == nullptr)
+                // {
+                //     // The local node (LocalCcShards) contains a schema
+                //     // instance, which indicates that the table has been
+                //     // dropped. Returns the request with an error.
+                //     res_->SetError(CcErrorCode::REQUESTED_TABLE_NOT_EXISTS);
+                //     return true;
+                // }
+
+                ccm = ccs.GetCcm(*table_name_, node_group_id_);
             }
             if (!parallel_req_)
             {
@@ -3741,29 +3753,31 @@ public:
         if (ccm == nullptr)
         {
             assert(!table_name_->IsMeta());
-            const CatalogEntry *catalog_entry = ccs.InitCcm(
-                *table_name_, node_group_id_, node_group_term_, this);
-            if (catalog_entry == nullptr)
+            std::optional<const TableSchema *> init_res =
+                ccs.InitCcm(*table_name_, node_group_id_, node_group_term_, this);
+            if (!init_res.has_value())
             {
-                // The local node does not contain the table's schema
-                // instance. The FetchCatalog() method will send an
-                // async request toward the data store to fetch the
-                // catalog. After fetching is finished, this cc request
-                // is re-enqueued for re-execution.
+                // InitCcm failure.
+                // the catalog may need to be fetched from the
+                // KV store, may not exist (payload status = Deleted),
+                // or is currently being modified (write lock acquired).
+                //
+                // In the first case, the requester will be re-enqueued
+                // after FetchCatalog() completes fetching the catalog
+                // from the data store. In the latter cases, the request
+                // is marked as errored.
                 return false;
             }
-            else
-            {
-                if (catalog_entry->schema_ == nullptr)
-                {
-                    // The local node (LocalCcShards) contains a schema
-                    // instance, which indicates that the table has been
-                    // dropped. Returns the request with an error.
-                    SetError(CcErrorCode::REQUESTED_TABLE_NOT_EXISTS);
-                    return false;
-                }
-                ccm = ccs.GetCcm(*table_name_, node_group_id_);
-            }
+
+            const TableSchema *table_schema = init_res.value();
+            assert(table_schema != nullptr);
+            // if (table_schema == nullptr)
+            // {
+            //     // Table dropped.
+            //     SetError(CcErrorCode::REQUESTED_TABLE_NOT_EXISTS);
+            //     return false;
+            // }
+            ccm = ccs.GetCcm(*table_name_, node_group_id_);
         }
         assert(ccm != nullptr);
         ccm->Execute(*this);
@@ -4001,7 +4015,8 @@ public:
             slices_to_scan_.reserve(old_slices_delta_size->size());
             std::for_each(old_slices_delta_size->begin(),
                           old_slices_delta_size->end(),
-                          [&](decltype(*old_slices_delta_size->begin()) &elem) {
+                          [&](decltype(*old_slices_delta_size->begin()) &elem)
+                          {
                               slices_to_scan_.emplace_back(
                                   std::move(elem.first.GetShallowCopy()));
                           });
@@ -4068,29 +4083,31 @@ public:
         if (ccm == nullptr)
         {
             assert(!table_name_->IsMeta());
-            const CatalogEntry *catalog_entry = ccs.InitCcm(
-                *table_name_, node_group_id_, node_group_term_, this);
-            if (catalog_entry == nullptr)
+            std::optional<const TableSchema *> init_res =
+                ccs.InitCcm(*table_name_, node_group_id_, node_group_term_, this);
+            if (!init_res.has_value())
             {
-                // The local node does not contain the table's schema
-                // instance. The FetchCatalog() method will send an
-                // async request toward the data store to fetch the
-                // catalog. After fetching is finished, this cc request
-                // is re-enqueued for re-execution.
+                // InitCcm failure.
+                // the catalog may need to be fetched from the
+                // KV store, may not exist (payload status = Deleted),
+                // or is currently being modified (write lock acquired).
+                //
+                // In the first case, the requester will be re-enqueued
+                // after FetchCatalog() completes fetching the catalog
+                // from the data store. In the latter cases, the request
+                // is marked as errored.
                 return false;
             }
-            else
-            {
-                if (catalog_entry->schema_ == nullptr)
-                {
-                    // The local node (LocalCcShards) contains a schema
-                    // instance, which indicates that the table has been
-                    // dropped. Returns the request with an error.
-                    SetError(CcErrorCode::REQUESTED_TABLE_NOT_EXISTS);
-                    return false;
-                }
-                ccm = ccs.GetCcm(*table_name_, node_group_id_);
-            }
+
+            const TableSchema *table_schema = init_res.value();
+            assert(table_schema != nullptr);
+            // if (table_schema == nullptr)
+            // {
+            //     // Table dropped.
+            //     SetError(CcErrorCode::REQUESTED_TABLE_NOT_EXISTS);
+            //     return false;
+            // }
+            ccm = ccs.GetCcm(*table_name_, node_group_id_);
         }
         assert(ccm != nullptr);
         ccm->Execute(*this);
@@ -4678,44 +4695,47 @@ public:
                 }
                 else
                 {
-                    const CatalogEntry *catalog_entry = ccs.InitCcm(
-                        *table_name_, node_group_id_, ng_term_, this);
-                    if (catalog_entry != nullptr)
+                    std::optional<const TableSchema *> init_res =
+                        ccs.InitCcm(
+                            *table_name_, node_group_id_, ng_term_, this);
+                    if (!init_res.has_value())
                     {
-                        // If FetchCatalogCc failure due to storage fault,
-                        // FetchCatalogCc::Execute() abort the ReplayLogCc
-                        assert(catalog_entry->schema_version_ > 0);
-                        if (catalog_entry->schema_ != nullptr)
+                        // InitCcm failure.
+                        // the catalog may need to be fetched from the
+                        // KV store, may not exist (payload status = Deleted),
+                        // or is currently being modified (write lock acquired).
+                        //
+                        // In the first case, the requester will be re-enqueued
+                        // after FetchCatalog() completes fetching the catalog
+                        // from the data store. In the latter cases, the request
+                        // is marked as errored.
+                        return false;
+                    }
+
+                    const TableSchema *table_schema = init_res.value();
+                    assert(table_schema != nullptr);
+                    if (table_schema != nullptr)
+                    {
+                        ccm_ = ccs.GetCcm(*table_name_, node_group_id_);
+                        if (ccm_ == nullptr)
                         {
-                            ccm_ = ccs.GetCcm(*table_name_, node_group_id_);
-                            if (ccm_ == nullptr)
-                            {
-                                // The base table schema exists but the index
-                                // table is dropped. Skips replaying the log for
-                                // this cc map.
-                                assert(table_name_->Type() ==
-                                           TableType::Secondary ||
-                                       table_name_->Type() ==
-                                           TableType::UniqueSecondary);
-                                SetFinish();
-                                return true;
-                            }
-                        }
-                        else
-                        {
-                            // The table is dropped. Skips replaying the log for
-                            // this cc map.
+                            // The base table schema exists but the index table
+                            // is dropped. Skips replaying the log for this cc
+                            // map.
+                            assert(table_name_->Type() ==
+                                       TableType::Secondary ||
+                                   table_name_->Type() ==
+                                       TableType::UniqueSecondary);
                             SetFinish();
                             return true;
                         }
                     }
                     else
                     {
-                        // The table's schema is not available yet. Cannot
-                        // initialize the cc map. The request will be
-                        // re-executed after the schema is fetched from the data
-                        // store.
-                        return false;
+                        // The table is dropped. Skips replaying the log for
+                        // this cc map.
+                        SetFinish();
+                        return true;
                     }
                 }
             }
@@ -7019,29 +7039,32 @@ public:
             // ccmap is based on the real table name, for example, index
             // should get the corresponding sk_ccmap.
             assert(!table_name_->IsMeta());
-            const CatalogEntry *catalog_entry = ccs.InitCcm(
-                *table_name_, node_group_id_, StandbyNodeTerm(), this);
-            if (catalog_entry == nullptr)
+            std::optional<const TableSchema *> init_res =
+                ccs.InitCcm(
+                    *table_name_, node_group_id_, StandbyNodeTerm(), this);
+            if (!init_res.has_value())
             {
-                // The local node does not contain the table's schema
-                // instance. The FetchCatalog() method will send an
-                // async request toward the data store to fetch the
-                // catalog. After fetching is finished, this cc request
-                // is re-enqueued for re-execution.
+                // InitCcm failure.
+                // the catalog may need to be fetched from the
+                // KV store, may not exist (payload status = Deleted),
+                // or is currently being modified (write lock acquired).
+                //
+                // In the first case, the requester will be re-enqueued
+                // after FetchCatalog() completes fetching the catalog
+                // from the data store. In the latter cases, the request
+                // is marked as errored.
                 return false;
             }
-            else
-            {
-                if (catalog_entry->schema_ == nullptr)
-                {
-                    // The local node (LocalCcShards) contains a schema
-                    // instance, which indicates that the table has been
-                    // dropped. Returns the request with an error.
-                    return SetFinish(ccs);
-                }
 
-                ccm = ccs.GetCcm(*table_name_, node_group_id_);
-            }
+            const TableSchema *table_schema = init_res.value();
+            assert(table_schema != nullptr);
+            // if (table_schema == nullptr)
+            // {
+            //     // Table dropped.
+            //     return SetFinish(ccs);
+            // }
+
+            ccm = ccs.GetCcm(*table_name_, node_group_id_);
         }
         assert(ccm != nullptr);
         assert(ccs.core_id_ == ccm->shard_->core_id_);
@@ -7484,29 +7507,31 @@ public:
         if (ccm == nullptr)
         {
             assert(!table_name_->IsMeta());
-            const CatalogEntry *catalog_entry = ccs.InitCcm(
-                *table_name_, node_group_id_, *node_group_term_, this);
-            if (catalog_entry == nullptr)
+            std::optional<const TableSchema *> init_res =
+                ccs.InitCcm(*table_name_, node_group_id_, *node_group_term_, this);
+            if (!init_res.has_value())
             {
-                // The local node does not contain the table's schema
-                // instance. The FetchCatalog() method will send an
-                // async request toward the data store to fetch the
-                // catalog. After fetching is finished, this cc request
-                // is re-enqueued for re-execution.
+                // InitCcm failure.
+                // the catalog may need to be fetched from the
+                // KV store, may not exist (payload status = Deleted),
+                // or is currently being modified (write lock acquired).
+                //
+                // In the first case, the requester will be re-enqueued
+                // after FetchCatalog() completes fetching the catalog
+                // from the data store. In the latter cases, the request
+                // is marked as errored.
                 return false;
             }
-            else
-            {
-                if (catalog_entry->schema_ == nullptr)
-                {
-                    // The local node (LocalCcShards) contains a schema
-                    // instance, which indicates that the table has been
-                    // dropped. Returns the request with an error.
-                    return SetError(CcErrorCode::REQUESTED_TABLE_NOT_EXISTS);
-                }
 
-                ccm = ccs.GetCcm(*table_name_, node_group_id_);
-            }
+            const TableSchema *table_schema = init_res.value();
+            assert(table_schema != nullptr);
+            // if (table_schema == nullptr)
+            // {
+            //     // Table dropped.
+            //     return SetError(CcErrorCode::REQUESTED_TABLE_NOT_EXISTS);
+            // }
+
+            ccm = ccs.GetCcm(*table_name_, node_group_id_);
         }
 
         assert(ccm != nullptr);
@@ -7983,29 +8008,31 @@ public:
         if (ccm == nullptr)
         {
             assert(!table_name_->IsMeta());
-            const CatalogEntry *catalog_entry = ccs.InitCcm(
-                *table_name_, node_group_id_, *node_group_term_, this);
-            if (catalog_entry == nullptr)
+            std::optional<const TableSchema *> init_res =
+                ccs.InitCcm(*table_name_, node_group_id_, *node_group_term_, this);
+            if (!init_res.has_value())
             {
-                // The local node does not contain the table's schema
-                // instance. The FetchCatalog() method will send an
-                // async request toward the data store to fetch the
-                // catalog. After fetching is finished, this cc request
-                // is re-enqueued for re-execution.
+                // InitCcm failure.
+                // the catalog may need to be fetched from the
+                // KV store, may not exist (payload status = Deleted),
+                // or is currently being modified (write lock acquired).
+                //
+                // In the first case, the requester will be re-enqueued
+                // after FetchCatalog() completes fetching the catalog
+                // from the data store. In the latter cases, the request
+                // is marked as errored.
                 return false;
             }
-            else
-            {
-                if (catalog_entry->schema_ == nullptr)
-                {
-                    // The local node (LocalCcShards) contains a schema
-                    // instance, which indicates that the table has been
-                    // dropped. Returns the request with an error.
-                    return SetError(CcErrorCode::REQUESTED_TABLE_NOT_EXISTS);
-                }
 
-                ccm = ccs.GetCcm(*table_name_, node_group_id_);
-            }
+            const TableSchema *table_schema = init_res.value();
+            assert(table_schema != nullptr);
+            // if (table_schema == nullptr)
+            // {
+            //     // Table dropped.
+            //     return SetError(CcErrorCode::REQUESTED_TABLE_NOT_EXISTS);
+            // }
+
+            ccm = ccs.GetCcm(*table_name_, node_group_id_);
         }
 
         assert(ccm != nullptr);
@@ -8548,10 +8575,14 @@ struct ScanSliceDeltaSizeCcForRangePartition : public CcRequestBase
         if (ccm == nullptr)
         {
             assert(!table_name_.IsMeta());
-            ccs.InitCcm(table_name_, node_group_id_, node_group_term_, this);
+            std::optional<const TableSchema *> init_res =
+                ccs.InitCcm(
+                    table_name_, node_group_id_, node_group_term_, this);
             // Catalog entry should always exists and schema should not be null,
             // since this cc request should be executed when table is locked by
             // data sync txm.
+            assert(init_res.has_value());
+            assert(init_res.value() != nullptr);
             ccm = ccs.GetCcm(table_name_, node_group_id_);
             assert(ccm != nullptr);
         }
@@ -8767,10 +8798,14 @@ struct ScanDeltaSizeCcForHashPartition : public CcRequestBase
         if (ccm == nullptr)
         {
             assert(!table_name_.IsMeta());
-            ccs.InitCcm(table_name_, node_group_id_, node_group_term_, this);
+            std::optional<const TableSchema *> init_res =
+                ccs.InitCcm(
+                    table_name_, node_group_id_, node_group_term_, this);
             // Catalog entry should always exists and schema should not be null,
             // since this cc request should be executed when table is locked by
             // data sync txm.
+            assert(init_res.has_value());
+            assert(init_res.value() != nullptr);
             ccm = ccs.GetCcm(table_name_, node_group_id_);
             assert(ccm != nullptr);
         }
@@ -8980,10 +9015,14 @@ public:
         if (ccm == nullptr)
         {
             assert(!table_name_.IsMeta());
-            ccs.InitCcm(table_name_, node_group_id_, node_group_term_, this);
+            std::optional<const TableSchema *> init_res =
+                ccs.InitCcm(
+                    table_name_, node_group_id_, node_group_term_, this);
             // Catalog entry should always exists and schema should not be null,
             // since this cc request should be executed when table is locked by
             // data sync txm.
+            assert(init_res.has_value());
+            assert(init_res.value() != nullptr);
             ccm = ccs.GetCcm(table_name_, node_group_id_);
             assert(ccm != nullptr);
         }

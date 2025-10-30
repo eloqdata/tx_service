@@ -32,6 +32,7 @@
 #include <iostream>
 #include <map>
 #include <memory>
+#include <optional>
 #include <string>
 #include <unordered_map>
 #include <utility>
@@ -776,19 +777,23 @@ public:
                                  bool is_create = true);
 
     /**
-     * @brief Initializes the request's target cc map, if the table
-     * schema is available and indicates that the table exists. Sends an async
-     * request to fetch the schema from the data store, if the schema is not
-     * cached locally.
+     * @brief Initializes the request's target CC map if the table schema
+     * is available and indicates that the table exists.
      *
-     * @return const TableSchemaView* The pointer to the schema view of the
-     * request's target cc map. Null, if the schema is not cached at the node
-     * level.
+     * The request is rejected if the table is being modified, or if the
+     * requested schema does not match the target schema. If the schema
+     * is not cached locally, an asynchronous FetchCatalog() request is
+     * issued to retrieve it from the data store.
+     *
+     * @return std::nullopt if the catalog needs to be fetched from the KV
+     * store, does not exist (payload status = Deleted), or is currently being
+     * modified (write lock acquired). Otherwise, returns a pointer to the table
+     * schema cached in the CatalogCcMap’s CatalogRecord.
      */
-    const CatalogEntry *InitCcm(const TableName &table_name,
-                                NodeGroupId cc_ng_id,
-                                int64_t cc_ng_term,
-                                CcRequestBase *requester);
+    std::optional<const TableSchema *> InitCcm(const TableName &table_name,
+                                               NodeGroupId cc_ng_id,
+                                               int64_t cc_ng_term,
+                                               CcRequestBase *requester);
 
     void DropCcm(const TableName &table_name, NodeGroupId ng_id);
 

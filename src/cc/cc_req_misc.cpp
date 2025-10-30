@@ -25,6 +25,7 @@
 #include <atomic>
 #include <cstddef>
 #include <mutex>
+#include <optional>
 #include <string_view>
 #include <system_error>
 #include <unordered_map>
@@ -593,33 +594,35 @@ bool FillStoreSliceCc::Execute(CcShard &ccs)
 
     if (ccm == nullptr)
     {
-        const CatalogEntry *catalog_entry =
+        std::optional<const TableSchema *> init_res =
             ccs.InitCcm(*table_name_,
                         cc_ng_id_,
                         std::max(cc_ng_term, cc_ng_candid_term),
                         this);
 
-        if (catalog_entry != nullptr)
+        if (!init_res.has_value())
         {
-            // Successfully load table catalog from data store.
-            assert(catalog_entry->schema_version_ > 0);
-
-            // For a filling range slice request, there must be a prior
-            // request reading and locking the table's schema, to prevent
-            // others from dropping the table. Hence, the table's schema
-            // must be avaliable.
-            assert(catalog_entry->schema_ != nullptr);
-            ccm = ccs.GetCcm(*table_name_, cc_ng_id_);
-            assert(ccm != nullptr);
-        }
-        else
-        {
-            // The table's schema is not available yet. Cannot initialize the cc
-            // map. The request will be re-executed after the schema is fetched
-            // from the data store.
-
+            // InitCcm failure.
+            // the catalog may need to be fetched from the
+            // KV store, may not exist (payload status = Deleted),
+            // or is currently being modified (write lock acquired).
+            //
+            // In the first case, the requester will be re-enqueued
+            // after FetchCatalog() completes fetching the catalog
+            // from the data store. In the latter cases, the request
+            // is marked as errored.
             return false;
         }
+        const TableSchema *table_schema = init_res.value();
+        // Successfully load table catalog from data store.
+        assert(table_schema != nullptr);
+        assert(table_schema->Version() > 0);
+        // For a filling range slice request, there must be a prior
+        // request reading and locking the table's schema, to prevent
+        // others from dropping the table. Hence, the table's schema
+        // must be avaliable.
+        ccm = ccs.GetCcm(*table_name_, cc_ng_id_);
+        assert(ccm != nullptr);
     }
 
     return ccm->Execute(*this);
@@ -1285,29 +1288,35 @@ bool RestoreCcMapCc::Execute(CcShard &ccs)
 
     if (ccm == nullptr)
     {
-        const CatalogEntry *catalog_entry =
-            ccs.InitCcm(*table_name_, cc_ng_id_, cc_ng_term_, this);
+        std::optional<const TableSchema *> init_res =
+            ccs.InitCcm(*table_name_,
+                        cc_ng_id_,
+                        std::max(cc_ng_term, cc_ng_candid_term),
+                        this);
 
-        if (catalog_entry != nullptr)
+        if (!init_res.has_value())
         {
-            // Successfully load table catalog from data store.
-            assert(catalog_entry->schema_version_ > 0);
-
-            // For a filling range slice request, there must be a prior
-            // request reading and locking the table's schema, to prevent
-            // others from dropping the table. Hence, the table's schema
-            // must be avaliable.
-            assert(catalog_entry->schema_ != nullptr);
-            ccm = ccs.GetCcm(*table_name_, cc_ng_id_);
-            assert(ccm != nullptr);
-        }
-        else
-        {
-            // The table's schema is not available yet. Cannot initialize the cc
-            // map. The request will be re-executed after the schema is fetched
-            // from the data store.
+            // InitCcm failure.
+            // the catalog may need to be fetched from the
+            // KV store, may not exist (payload status = Deleted),
+            // or is currently being modified (write lock acquired).
+            //
+            // In the first case, the requester will be re-enqueued
+            // after FetchCatalog() completes fetching the catalog
+            // from the data store. In the latter cases, the request
+            // is marked as errored.
             return false;
         }
+        const TableSchema *table_schema = init_res.value();
+        // Successfully load table catalog from data store.
+        assert(table_schema != nullptr);
+        assert(table_schema->Version() > 0);
+        // For a filling range slice request, there must be a prior
+        // request reading and locking the table's schema, to prevent
+        // others from dropping the table. Hence, the table's schema
+        // must be avaliable.
+        ccm = ccs.GetCcm(*table_name_, cc_ng_id_);
+        assert(ccm != nullptr);
     }
 
     ccm->Execute(*this);
