@@ -88,8 +88,49 @@ RecoveryService::RecoveryService(LocalCcShards &local_shards,
                 queue_cv_.wait_for(
                     lk,
                     std::chrono::seconds(10),
-                    [this]
+                    [this, &lk]
                     {
+                        // Check every 10s if there are any orphaned ng
+                        // recovery.
+                        lk.unlock();
+                        auto ngs = Sharder::Instance().AllNodeGroups();
+                        for (auto ng_id : *ngs)
+                        {
+                            int64_t candidate_term =
+                                Sharder::Instance().CandidateLeaderTerm(ng_id);
+                            if (candidate_term != -1)
+                            {
+                                // ng should be replaying
+                                bool need_replay = true;
+                                {
+                                    std::unique_lock<bthread::Mutex> inbound_lk(
+                                        inbound_mux_);
+                                    for (const auto &entry :
+                                         inbound_connections_)
+                                    {
+                                        if (entry.second.cc_ng_id_ == ng_id)
+                                        {
+                                            need_replay = false;
+                                            break;
+                                        }
+                                    }
+                                }
+                                if (need_replay)
+                                {
+                                    // ng is not recovering, send replay log
+                                    // request
+                                    LOG(INFO)
+                                        << "Requesting log replay for ng: "
+                                        << ng_id
+                                        << " at term: " << candidate_term
+                                        << " as there is no recovery "
+                                           "connection";
+                                    ReplayLog(
+                                        ng_id, candidate_term, -1, 0, false);
+                                }
+                            }
+                        }
+                        lk.lock();
                         return !replay_log_queue_.empty() ||
                                !recover_tx_queue_.empty() ||
                                finish_.load(std::memory_order_acquire);
@@ -168,7 +209,7 @@ void RecoveryService::Shutdown()
     notify_thread_.join();
 
     // close all streams
-    std::unique_lock<std::mutex> lk(inbound_mux_);
+    std::unique_lock<bthread::Mutex> lk(inbound_mux_);
     for (auto it = inbound_connections_.begin();
          it != inbound_connections_.end();
          it++)
@@ -176,7 +217,10 @@ void RecoveryService::Shutdown()
         brpc::StreamClose(it->first);
     }
 
-    inbound_cv_.wait(lk, [this]() { return active_stream_cnt_ == 0; });
+    while (active_stream_cnt_ != 0)
+    {
+        inbound_cv_.wait(lk);
+    }
 }
 
 void RecoveryService::Connect(::google::protobuf::RpcController *controller,
@@ -349,7 +393,7 @@ int RecoveryService::on_received_messages(brpc::StreamId stream_id,
 
     ConnectionInfo *info;
     {
-        std::lock_guard<std::mutex> lk(inbound_mux_);
+        std::lock_guard<bthread::Mutex> lk(inbound_mux_);
         info = &inbound_connections_.find(stream_id)->second;
     }
     bthread::Mutex &mux = info->mux_;
@@ -710,7 +754,7 @@ void RecoveryService::on_closed(brpc::StreamId id)
     // reference to ConnectionInfo here.
     ConnectionInfo *info;
     {
-        std::lock_guard<std::mutex> lk(inbound_mux_);
+        std::lock_guard<bthread::Mutex> lk(inbound_mux_);
         info = &inbound_connections_.find(id)->second;
     }
     WaitAndClearRequests(id,
@@ -719,7 +763,7 @@ void RecoveryService::on_closed(brpc::StreamId id)
                          info->status_,
                          info->recovery_error_);
 
-    std::unique_lock<std::mutex> lk(inbound_mux_);
+    std::unique_lock<bthread::Mutex> lk(inbound_mux_);
     active_stream_cnt_--;
     inbound_connections_.erase(id);
     LOG(INFO) << "replay service stream: " << id
