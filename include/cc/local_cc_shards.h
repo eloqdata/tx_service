@@ -218,6 +218,8 @@ public:
         return cc_shards_[core_idx].get();
     }
 
+    void AddCnt(size_t cnt);
+
     void EnqueueCcRequest(uint32_t thd_id,
                           uint32_t shard_code,
                           CcRequestBase *req)

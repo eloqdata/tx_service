@@ -44,6 +44,7 @@
 #include "rpc_closure.h"
 #include "sharder.h"  // Sharder
 #include "store/data_store_handler.h"
+#include "tx_id.h"
 #include "tx_service_common.h"
 #include "tx_start_ts_collector.h"
 #include "type.h"
@@ -1592,6 +1593,11 @@ store::DataStoreHandler::DataStoreOpStatus CcShard::FetchSnapshot(
                     partition_id);
 
     return local_shards_.store_hd_->FetchRecord(nullptr, fetch_cc);
+}
+
+void CcShard::AddCnt(size_t cnt)
+{
+    local_shards_.AddCnt(cnt);
 }
 
 void CcShard::RemoveFetchRecordRequest(LruEntry *cce)

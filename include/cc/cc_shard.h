@@ -739,6 +739,8 @@ public:
         OnFetchedSnapshot backfill_func,
         int32_t partition_id);
 
+    void AddCnt(size_t cnt);
+
     void RemoveFetchRecordRequest(LruEntry *cce);
 
     CcMap *CreateOrUpdatePkCcMap(const TableName &table_name,

@@ -76,8 +76,6 @@ template <typename KeyT, typename ValueT>
 void BackfillSnapshotForScanSlice(FetchSnapshotCc *fetch_cc,
                                   CcRequestBase *requester);
 
-bvar::IntRecorder g_pin_slices_cnt_recorder("yf_pin_slice_cnt");
-
 template <typename KeyT,
           typename ValueT,
           bool VersionedRecord,
@@ -1667,8 +1665,7 @@ public:
                                     // core, the target record cannot be kicked
                                     // out before this read request finishes.
                                     slice_id.Unpin();
-                                    g_pin_slices_cnt_recorder
-                                        << req.pin_slice_cnt_;
+                                    shard_->AddCnt(req.pin_slice_cnt_);
                                 }
                             }
                             else if (pin_status ==

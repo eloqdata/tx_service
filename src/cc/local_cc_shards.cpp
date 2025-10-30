@@ -65,6 +65,12 @@ namespace txservice
 {
 std::atomic<uint64_t> LocalCcShards::local_clock(0);
 inline thread_local size_t tls_shard_idx = std::numeric_limits<size_t>::max();
+bvar::IntRecorder g_pin_slices_cnt_recorder("yf_pin_slice_cnt");
+
+void LocalCcShards::AddCnt(size_t cnt)
+{
+    g_pin_slices_cnt_recorder << cnt;
+}
 
 LocalCcShards::LocalCcShards(
     uint32_t node_id,
