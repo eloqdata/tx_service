@@ -1679,6 +1679,7 @@ public:
                             }
                             else if (pin_status == RangeSliceOpStatus::Delay)
                             {
+                                req.pin_slice_cnt_--;
                                 shard_->AddDelayCnt(1);
                                 if (slice_id.Range()->HasLock())
                                 {
