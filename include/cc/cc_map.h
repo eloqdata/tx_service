@@ -410,6 +410,16 @@ protected:
                         bool recycle_lock = true,
                         TxObject *object = nullptr) const;
 
+    void PinReadIntent(LruEntry *cce,
+                       LruPage *page,
+                       TxNumber tx_number,
+                       int64_t tx_term);
+
+    void UnpinReadIntent(NonBlockingLock *lock,
+                         LruEntry *cce,
+                         TxNumber tx_number,
+                         uint32_t ng_id);
+
     /**
      * @brief The version of this ccmap. It is the version of the corresponding
      * KeySchema. This value is different from version of the TableSchema.

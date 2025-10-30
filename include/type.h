@@ -567,6 +567,12 @@ enum class PostWriteType
     UpdateDirty,
 };
 
+enum class PostReadType
+{
+    Release,
+    Unpin,
+};
+
 constexpr static std::string_view empty_sv{"__empty"};
 constexpr static std::string_view catalog_ccm_name_sv{"__catalog"};
 constexpr static std::string_view redis_table_name_sv{"redis_table"};

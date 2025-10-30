@@ -742,6 +742,11 @@ enum CommitType {
     UpdateDirty = 4;
 }
 
+enum PostReadType {
+    Release = 0;
+    Unpin = 1;
+}
+
 enum CcTableType {
     Primary = 0;
     Secondary = 1;
@@ -844,6 +849,7 @@ message ValidateRequest {
     uint64 key_ts = 6;
     uint64 gap_ts = 7;
     bool need_resp = 8;
+    PostReadType post_read_type = 9;
 }
 
 message ValidateResponse {

@@ -186,16 +186,18 @@ public:
      * @param need_remote_resp
      * @return CcReqStatus
      */
-    virtual CcReqStatus PostRead(uint64_t tx_number,
-                                 int64_t tx_term,
-                                 uint16_t command_id,
-                                 uint64_t key_ts,
-                                 uint64_t gap_ts,
-                                 uint64_t commit_ts,
-                                 const CcEntryAddr &ccentry_addr,
-                                 CcHandlerResult<PostProcessResult> &hres,
-                                 bool is_local = false,
-                                 bool need_remote_resp = true) = 0;
+    virtual CcReqStatus PostRead(
+        uint64_t tx_number,
+        int64_t tx_term,
+        uint16_t command_id,
+        uint64_t key_ts,
+        uint64_t gap_ts,
+        uint64_t commit_ts,
+        const CcEntryAddr &ccentry_addr,
+        CcHandlerResult<PostProcessResult> &hres,
+        bool is_local = false,
+        bool need_remote_resp = true,
+        PostReadType post_read_type = PostReadType::Release) = 0;
 
     /**
      * @brief Reads the input key and returns the key's record. The request puts

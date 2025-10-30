@@ -316,7 +316,8 @@ txservice::CcReqStatus txservice::LocalCcHandler::PostRead(
     const CcEntryAddr &cce_addr,
     CcHandlerResult<PostProcessResult> &hres,
     bool is_local,
-    bool need_remote_resp)
+    bool need_remote_resp,
+    PostReadType post_read_type)
 {
     if (IsStandbyTx(tx_term))
     {
@@ -326,8 +327,14 @@ txservice::CcReqStatus txservice::LocalCcHandler::PostRead(
             return CcReqStatus::Processed;
         }
         PostReadCc *req = postread_pool_.NextRequest();
-        req->Reset(
-            &cce_addr, tx_number, tx_term, commit_ts, key_ts, gap_ts, &hres);
+        req->Reset(&cce_addr,
+                   tx_number,
+                   tx_term,
+                   commit_ts,
+                   key_ts,
+                   gap_ts,
+                   post_read_type,
+                   &hres);
         TX_TRACE_ACTION(this, req);
         TX_TRACE_DUMP(req);
 #ifdef EXT_TX_PROC_ENABLED
@@ -344,8 +351,14 @@ txservice::CcReqStatus txservice::LocalCcHandler::PostRead(
     if (dest_node_id == cc_shards_.node_id_ || is_local)
     {
         PostReadCc *req = postread_pool_.NextRequest();
-        req->Reset(
-            &cce_addr, tx_number, tx_term, commit_ts, key_ts, gap_ts, &hres);
+        req->Reset(&cce_addr,
+                   tx_number,
+                   tx_term,
+                   commit_ts,
+                   key_ts,
+                   gap_ts,
+                   post_read_type,
+                   &hres);
         TX_TRACE_ACTION(this, req);
         TX_TRACE_DUMP(req);
         if (thd_id_ == cce_addr.CoreId())
@@ -389,7 +402,8 @@ txservice::CcReqStatus txservice::LocalCcHandler::PostRead(
                             commit_ts,
                             cce_addr,
                             hres,
-                            need_remote_resp);
+                            need_remote_resp,
+                            post_read_type);
     }
     return req_status;
 }
@@ -1259,11 +1273,6 @@ void txservice::LocalCcHandler::ScanNextBatch(
             req->SetPriorCceLockAddr(
                 last_tuple != nullptr ? last_tuple->cce_addr_.CceLockPtr() : 0,
                 core_id);
-            LOG(INFO) << ">> LocalCcHandler::ScanNextBatch table: "
-                      << tbl_name.StringView() << ", txn: " << tx_number
-                      << ", scanner: " << &scanner << ", core: " << core_id
-                      << ", lock: "
-                      << (void *) req->BlockingCceLockAddr(core_id);
         }
 
         scanner.ResetCaches();

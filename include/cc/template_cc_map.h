@@ -1319,12 +1319,19 @@ public:
                 }
             }
 
-            ReleaseCceLock(key_lock,
-                           &cc_entry,
-                           txn,
-                           req.NodeGroupId(),
-                           LockType::NoLock,
-                           recycle_lock);
+            if (req.GetPostReadType() == PostReadType::Release)
+            {
+                ReleaseCceLock(key_lock,
+                               &cc_entry,
+                               txn,
+                               req.NodeGroupId(),
+                               LockType::NoLock,
+                               recycle_lock);
+            }
+            else
+            {
+                UnpinReadIntent(key_lock, &cc_entry, txn, req.NodeGroupId());
+            }
 
             if (conflicting_txs.Size() > 0)
             {
@@ -3801,13 +3808,6 @@ public:
                 lock->GetCcEntry());
 
             auto [blocking_type, scan_type] = req.BlockingPair(core_id);
-            if (blocking_type == ScanSliceCc::ScanBlockingType::NoBlocking)
-            {
-                LOG(INFO) << ">> ScanSliceCc next. table: "
-                          << table_name_.StringView() << ", txn: " << req.Txn()
-                          << ", core: " << core_id << ", lock: " << lock
-                          << " - " << lock->KeyLock()->DebugInfo();
-            }
             CcPage<KeyT, ValueT, VersionedRecord, RangePartitioned> *ccp =
                 static_cast<
                     CcPage<KeyT, ValueT, VersionedRecord, RangePartitioned> *>(
@@ -3825,11 +3825,7 @@ public:
                 // resumes.
                 if (lock_type == LockType::NoLock)
                 {
-                    ReleaseCceLock(cce->GetKeyLock(),
-                                   cce,
-                                   req.Txn(),
-                                   ng_id,
-                                   LockType::ReadIntent);
+                    UnpinReadIntent(cce->GetKeyLock(), cce, req.Txn(), ng_id);
                 }
             }
             else
@@ -4996,9 +4992,7 @@ public:
 
                 CcPage<KeyT, ValueT, VersionedRecord, RangePartitioned>
                     *last_ccp = scan_ccm_it.GetPage();
-                bool add_intent =
-                    last_cce->GetOrCreateKeyLock(shard_, this, last_ccp)
-                        .AcquireReadIntent(req.Txn());
+                PinReadIntent(last_cce, last_ccp, req.Txn(), tx_term);
 
                 // Lock might have not been acquired during the scan, set the
                 // lock addr of last tuple here.
@@ -5010,13 +5004,6 @@ public:
                     assert(last_cce->GetLockAddr() != nullptr);
                     last_tuple->cce_addr_.SetCceLock(
                         reinterpret_cast<uint64_t>(last_cce->GetLockAddr()));
-                    LOG(INFO)
-                        << ">> ScanSliceCc table: " << table_name_.StringView()
-                        << ", for_write: " << req.IsForWrite()
-                        << ", islocal: " << req.IsLocal()
-                        << ", core: " << core_id << ", cce: " << last_cce
-                        << ", lock: " << last_cce->GetLockAddr() << " - "
-                        << last_cce->GetKeyLock()->DebugInfo();
                 }
                 else
                 {
@@ -5024,25 +5011,6 @@ public:
                     assert(last_cce->GetLockAddr() != nullptr);
                     remote_scan_cache->SetLastCceLock(
                         reinterpret_cast<uint64_t>(last_cce->GetLockAddr()));
-                    LOG(INFO)
-                        << ">> ScanSliceCc table: " << table_name_.StringView()
-                        << ", ScanSliceCc addr: " << &req
-                        << ", remote_scan_cache addr: " << remote_scan_cache
-                        << ", txn: " << req.Txn()
-                        << ", for_write: " << req.IsForWrite()
-                        << ", islocal: " << req.IsLocal()
-                        << ", core: " << core_id << ", cce: " << last_cce
-                        << ", lock: " << last_cce->GetLockAddr() << " - "
-                        << last_cce->GetKeyLock()->DebugInfo();
-                }
-                if (add_intent)
-                {
-                    shard_->UpsertLockHoldingTx(req.Txn(),
-                                                tx_term,
-                                                last_cce,
-                                                false,
-                                                ng_id,
-                                                table_name_.Type());
                 }
             }
         }
@@ -5778,7 +5746,7 @@ public:
                     CcPage<KeyT, ValueT, VersionedRecord, RangePartitioned> *>(
                     pause_lock_struct->GetCcPage());
             it = Iterator(pause_entry, ccp, &neg_inf_);
-            ReleaseCceLock(
+            UnpinReadIntent(
                 pause_entry->GetKeyLock(), pause_entry, req.Txn(), cc_ng_id_);
             if (req.IsTerminated())
             {
@@ -6020,20 +5988,11 @@ public:
         {
             // set the pause_key_ to mark resume position
             assert(pause_pos_and_is_drained.second == false);
-            bool add_intent =
-                it->second->GetOrCreateKeyLock(shard_, this, it.GetPage())
-                    .AcquireReadIntent(req.Txn());
+            PinReadIntent(
+                it->second, it.GetPage(), req.Txn(), req.NodeGroupTerm());
+
             // TODO: use lock_ptr_ when we allow the ccentry to move to another
             // memory
-
-            assert(add_intent);
-            (void) add_intent;
-            shard_->UpsertLockHoldingTx(req.Txn(),
-                                        req.node_group_term_,
-                                        it->second,
-                                        false,
-                                        cc_ng_id_,
-                                        table_name_.Type());
             pause_pos_and_is_drained.first =
                 it->second->GetKeyGapLockAndExtraData();
             if (is_scan_mem_full)

@@ -476,27 +476,56 @@ bool NonBlockingLock::ReleaseWriteIntent(TxNumber tx_number, CcShard *ccs)
 
 bool NonBlockingLock::AcquireReadIntent(TxNumber tx_number)
 {
+    bool emplaced = false;
+
     if (read_locks_.find(tx_number) != read_locks_.end() ||
-        read_intentions_.find(tx_number) != read_intentions_.end() ||
         (write_lk_type_ != WriteLockType::NoWritelock &&
          write_txn_ == tx_number))
     {
-        return false;
+        return emplaced;
     }
 
-    read_intentions_.emplace(tx_number);
-    return true;
+    absl::flat_hash_map<TxNumber, uint32_t>::iterator iter;
+    std::tie(iter, emplaced) = read_intentions_.emplace(tx_number, 1);
+    if (!emplaced)
+    {
+        uint32_t &cnt = iter->second;
+        cnt += 1;
+    }
+
+    return emplaced;
 }
 
-bool NonBlockingLock::ReleaseReadIntent(TxNumber tx_number)
+bool NonBlockingLock::ReleaseReadIntent(TxNumber tx_number, bool release_all)
 {
-    if (read_intentions_.empty())
+    bool erased = false;
+
+    auto iter = read_intentions_.find(tx_number);
+    if (iter == read_intentions_.end())
     {
-        return false;
+        return erased;
     }
 
-    size_t cnt = read_intentions_.erase(tx_number);
-    return cnt > 0;
+    if (release_all)
+    {
+        read_intentions_.erase(iter);
+        erased = true;
+    }
+    else
+    {
+        uint32_t &cnt = iter->second;
+        if (cnt <= 1)
+        {
+            read_intentions_.erase(iter);
+            erased = true;
+        }
+        else
+        {
+            cnt -= 1;
+        }
+    }
+
+    return erased;
 }
 
 void NonBlockingLock::InsertBlockingQueue(CcRequestBase *cc_req,
@@ -564,7 +593,8 @@ const absl::flat_hash_set<TxNumber> &NonBlockingLock::ReadLocks() const
     return read_locks_;
 }
 
-const absl::flat_hash_set<TxNumber> &NonBlockingLock::ReadIntents() const
+const absl::flat_hash_map<TxNumber, uint32_t> &NonBlockingLock::ReadIntents()
+    const
 {
     return read_intentions_;
 }

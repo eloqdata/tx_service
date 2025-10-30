@@ -135,6 +135,21 @@ public:
         }
     }
 
+    static txservice::remote::PostReadType ConvertPostReadType(
+        txservice::PostReadType post_read_type)
+    {
+        switch (post_read_type)
+        {
+        case txservice::PostReadType::Release:
+            return remote::PostReadType::Release;
+        case txservice::PostReadType::Unpin:
+            return remote::PostReadType::Unpin;
+        default:
+            assert(false);
+            return remote::PostReadType::Release;
+        }
+    }
+
     static txservice::remote::RecordStatusType ConvertRecordStatus(
         txservice::RecordStatus rec_status)
     {
@@ -346,6 +361,21 @@ public:
         default:
             assert(false);
             return PostWriteType::PostCommit;
+        }
+    }
+
+    static txservice::PostReadType ConvertPostReadType(
+        txservice::remote::PostReadType post_read_type)
+    {
+        switch (post_read_type)
+        {
+        case remote::PostReadType::Release:
+            return txservice::PostReadType::Release;
+        case remote::PostReadType::Unpin:
+            return txservice::PostReadType::Unpin;
+        default:
+            assert(false);
+            return txservice::PostReadType::Release;
         }
     }
 

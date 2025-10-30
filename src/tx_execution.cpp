@@ -3639,11 +3639,6 @@ void TransactionExecution::ScanClose(
     }
     */
 
-    if (!drain_batch_.empty())
-    {
-        LOG(INFO) << ">> ScanClose table: " << table_name.StringView()
-                  << ", txn: " << TxNumber() << ", scanner: " << scanner;
-    }
     cc_handler_->ScanClose(
         table_name, scanner->Direction(), std::move(scan_it->second.scanner_));
 
@@ -6357,15 +6352,14 @@ void TransactionExecution::Process(ReleaseScanExtraLockOp &unlock_op)
         CcReqStatus ret = cc_handler_->PostRead(TxNumber(),
                                                 TxTerm(),
                                                 CommandId(),
-                                                addr_pair.second,
+                                                0,  // skip validate
                                                 0,
                                                 commit_ts_,
                                                 addr_pair.first,
                                                 unlock_op.hd_result_,
                                                 false,
-                                                false);
-        LOG(INFO) << ">> ReleaseScanExtraLockOp txn: " << TxNumber()
-                  << ", lock: " << (void *) addr_pair.first.CceLockPtr();
+                                                false,
+                                                PostReadType::Unpin);
         if (ret == CcReqStatus::SentLocal)
         {
             ++post_local_cnt;

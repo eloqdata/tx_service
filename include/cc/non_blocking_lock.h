@@ -30,6 +30,7 @@
 #include <variant>
 #include <vector>
 
+#include "absl/container/flat_hash_map.h"
 #include "absl/container/flat_hash_set.h"
 #include "cc_protocol.h"
 #include "cc_req_base.h"
@@ -161,7 +162,7 @@ public:
      */
     bool AcquireReadIntent(TxNumber tx_number);
 
-    bool ReleaseReadIntent(TxNumber tx_number);
+    bool ReleaseReadIntent(TxNumber tx_number, bool release_all = true);
 
     LockOpStatus AcquireLock(CcRequestBase *cc_req,
                              CcProtocol protocol,
@@ -196,7 +197,7 @@ public:
                      TxObject *object = nullptr);
 
     const absl::flat_hash_set<TxNumber> &ReadLocks() const;
-    const absl::flat_hash_set<TxNumber> &ReadIntents() const;
+    const absl::flat_hash_map<TxNumber, uint32_t> &ReadIntents() const;
 
     uint64_t WLockTs() const
     {
@@ -213,7 +214,7 @@ public:
         for (auto it = read_intentions_.begin(); it != read_intentions_.end();
              it++)
         {
-            debug_string.append(std::to_string(*it));
+            debug_string.append(std::to_string(it->first));
             debug_string.append(",");
         }
 
@@ -349,7 +350,11 @@ private:
     // to prevent the cache replacement algorithm from kicking out the
     // item's concurrency control (cc) entry from the cc map before the tx
     // finishes.
-    absl::flat_hash_set<TxNumber> read_intentions_;
+    //
+    // ScanSliceCc might scan records batch-by-batch. After scan previous batch,
+    // scanner INCR a read intent on the last record of the batch, and DECR it
+    // when scan next batch.
+    absl::flat_hash_map<TxNumber, uint32_t> read_intentions_;
     // Tx's who have acquired read locks
     absl::flat_hash_set<TxNumber> read_locks_;
     // How many readers has acquired read locks. Only used for Catalog read fast
