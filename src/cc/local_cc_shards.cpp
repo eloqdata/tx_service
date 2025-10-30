@@ -24,6 +24,9 @@
 #include <bthread/mutex.h>
 #include <butil/time.h>
 #include <bvar/bvar.h>
+#include <bvar/latency_recorder.h>
+#include <bvar/reducer.h>
+#include <bvar/window.h>
 #include <sys/stat.h>
 
 #include <atomic>
@@ -66,7 +69,7 @@ namespace txservice
 {
 std::atomic<uint64_t> LocalCcShards::local_clock(0);
 inline thread_local size_t tls_shard_idx = std::numeric_limits<size_t>::max();
-bvar::IntRecorder g_pin_slices_cnt_recorder("yf_pin_slice_cnt");
+bvar::LatencyRecorder g_pin_slices_cnt_recorder("yf_pin_slice_cnt");
 bvar::Adder<int64_t> g_delay_total_cnt("yf_delay_load_cnt");
 
 void LocalCcShards::AddCnt(size_t cnt)
