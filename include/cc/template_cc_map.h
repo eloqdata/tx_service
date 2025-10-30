@@ -1680,7 +1680,7 @@ public:
                             else if (pin_status == RangeSliceOpStatus::Delay)
                             {
                                 req.pin_slice_cnt_--;
-                                shard_->AddDelayCnt(1);
+                                req.delay_ = true;
                                 if (slice_id.Range()->HasLock())
                                 {
                                     hd_res->SetError(
@@ -2113,6 +2113,11 @@ public:
         if (req.pin_slice_cnt_ != 0)
         {
             shard_->AddCnt(req.pin_slice_cnt_);
+        }
+
+        if (req.delay_)
+        {
+            shard_->AddDelayCnt(1);
         }
         hd_res->SetFinished();
 

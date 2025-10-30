@@ -1177,6 +1177,7 @@ public:
           is_for_write_(false)
     {
         pin_slice_cnt_ = 0;
+        delay_ = false;
     }
 
     ReadCc(const ReadCc &rhs) = delete;
@@ -1294,6 +1295,7 @@ public:
         }
 
         pin_slice_cnt_ = 0;
+        delay_ = false;
     }
 
     void Reset(const TableName *tn,
@@ -1348,6 +1350,7 @@ public:
         }
 
         pin_slice_cnt_ = 0;
+        delay_ = false;
     }
 
     void Reset(const TableName *tn,
@@ -1402,6 +1405,7 @@ public:
         }
 
         pin_slice_cnt_ = 0;
+        delay_ = false;
     }
 
     uint32_t KeyShardCode() const
@@ -1526,6 +1530,7 @@ public:
     }
 
     size_t pin_slice_cnt_{0};
+    bool delay_{false};
 
 private:
     const void *key_ptr_;
