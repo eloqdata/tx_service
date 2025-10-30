@@ -592,10 +592,12 @@ StoreRange::LoadSliceStatus StoreRange::LoadSlice(
 
     if (slice.fetch_slice_cc_ == nullptr)
     {
+        /*
         if (!ctrl.ForceLoad() && slice.IsRecentLoad())
         {
             return LoadSliceStatus::Delay;
         }
+        */
         pins_.fetch_add(1, std::memory_order_release);
 
         // Calls the data store's async API to load the slice
