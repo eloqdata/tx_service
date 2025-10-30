@@ -1176,6 +1176,7 @@ public:
           type_(ReadType::Inside),
           is_for_write_(false)
     {
+        pin_slice_cnt_ = 0;
     }
 
     ReadCc(const ReadCc &rhs) = delete;
@@ -1291,6 +1292,8 @@ public:
         {
             table_name_ = tn;
         }
+
+        pin_slice_cnt_ = 0;
     }
 
     void Reset(const TableName *tn,
@@ -1343,6 +1346,8 @@ public:
         {
             table_name_ = tn;
         }
+
+        pin_slice_cnt_ = 0;
     }
 
     void Reset(const TableName *tn,
@@ -1395,6 +1400,8 @@ public:
         {
             table_name_ = tn;
         }
+
+        pin_slice_cnt_ = 0;
     }
 
     uint32_t KeyShardCode() const
@@ -1517,6 +1524,8 @@ public:
     {
         cache_hit_miss_collected_ = true;
     }
+
+    size_t pin_slice_cnt_{0};
 
 private:
     const void *key_ptr_;

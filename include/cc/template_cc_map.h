@@ -23,6 +23,9 @@
 
 #include <absl/container/btree_map.h>
 #include <butil/time.h>
+#include <bvar/bvar.h>
+#include <bvar/latency_recorder.h>
+#include <bvar/recorder.h>
 
 #include <algorithm>  // std::max
 #include <cassert>
@@ -72,6 +75,9 @@ namespace txservice
 template <typename KeyT, typename ValueT>
 void BackfillSnapshotForScanSlice(FetchSnapshotCc *fetch_cc,
                                   CcRequestBase *requester);
+
+bvar::LatencyRecorder g_pin_slices_cnt_recorder("yf_pin_slice_cnt");
+
 template <typename KeyT,
           typename ValueT,
           bool VersionedRecord,
