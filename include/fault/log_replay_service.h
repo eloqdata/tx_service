@@ -210,8 +210,8 @@ private:
     // pair.
     std::unordered_map<brpc::StreamId, ConnectionInfo> inbound_connections_;
     int active_stream_cnt_ = 0;
-    std::mutex inbound_mux_;
-    std::condition_variable inbound_cv_;
+    bthread::Mutex inbound_mux_;
+    bthread::ConditionVariable inbound_cv_;
 
     void WaitAndClearRequests(
         brpc::StreamId stream_id,
