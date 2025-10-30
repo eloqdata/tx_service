@@ -11581,7 +11581,8 @@ protected:
             // then the record is regard as nonexistent. Note the slice is fully
             // cached.
             if (v_rec.payload_status_ == RecordStatus::Unknown ||
-                (v_rec.payload_status_ == RecordStatus::Deleted && !keep_deleted))
+                (v_rec.payload_status_ == RecordStatus::Deleted &&
+                 !keep_deleted))
             {
                 return;
             }
