@@ -220,6 +220,8 @@ public:
 
     void AddCnt(size_t cnt);
 
+    void AddDelayCnt(size_t cnt);
+
     void EnqueueCcRequest(uint32_t thd_id,
                           uint32_t shard_code,
                           CcRequestBase *req)

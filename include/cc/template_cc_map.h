@@ -1665,7 +1665,6 @@ public:
                                     // core, the target record cannot be kicked
                                     // out before this read request finishes.
                                     slice_id.Unpin();
-                                    shard_->AddCnt(req.pin_slice_cnt_);
                                 }
                             }
                             else if (pin_status ==
@@ -1680,6 +1679,7 @@ public:
                             }
                             else if (pin_status == RangeSliceOpStatus::Delay)
                             {
+                                shard_->AddDelayCnt(1);
                                 if (slice_id.Range()->HasLock())
                                 {
                                     hd_res->SetError(
@@ -2108,6 +2108,11 @@ public:
 
         hd_res->Value().ts_ = cce->CommitTs();
         hd_res->Value().rec_status_ = cce->PayloadStatus();
+
+        if (req.pin_slice_cnt_ != 0)
+        {
+            shard_->AddCnt(req.pin_slice_cnt_);
+        }
         hd_res->SetFinished();
 
         return true;

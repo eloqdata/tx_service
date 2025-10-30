@@ -1600,6 +1600,11 @@ void CcShard::AddCnt(size_t cnt)
     local_shards_.AddCnt(cnt);
 }
 
+void CcShard::AddDelayCnt(size_t cnt)
+{
+    local_shards_.AddDelayCnt(cnt);
+}
+
 void CcShard::RemoveFetchRecordRequest(LruEntry *cce)
 {
     fetch_record_reqs_.erase(cce);
