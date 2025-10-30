@@ -71,6 +71,9 @@ std::atomic<uint64_t> LocalCcShards::local_clock(0);
 inline thread_local size_t tls_shard_idx = std::numeric_limits<size_t>::max();
 bvar::LatencyRecorder g_pin_slices_cnt_recorder("yf_pin_slice_cnt");
 bvar::Adder<int64_t> g_delay_total_cnt("yf_delay_load_cnt");
+bvar::PerSecond<bvar::Adder<int64_t>> g_delay_qps("yf_delay_qps",
+                                                  &g_delay_total_cnt,
+                                                  60);
 
 void LocalCcShards::AddCnt(size_t cnt)
 {
