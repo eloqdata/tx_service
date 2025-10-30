@@ -2378,10 +2378,6 @@ public:
                     table_key.Name(), cc_ng_id, cc_ng_term, requester);
                 return std::nullopt;
             }
-
-            // Should never happen that LocalCcShards's catalog_entry has dirty
-            // schema but catalog ccmap entry was not initialized.
-            assert(catalog_entry->dirty_schema_ == nullptr);
         }
         else
         {
@@ -2391,7 +2387,7 @@ public:
         const auto keylock = catalog_cce->GetKeyLock();
         if (keylock != nullptr && keylock->HasWriteLock())
         {
-            // If write lock exits, the CatalogRecord should have dirty schema
+            // If write lock exists, the CatalogRecord should have dirty schema
             // set.
             assert(catalog_cce->payload_.cur_payload_.get()->DirtySchema() !=
                    nullptr);
