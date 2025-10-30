@@ -76,7 +76,7 @@ template <typename KeyT, typename ValueT>
 void BackfillSnapshotForScanSlice(FetchSnapshotCc *fetch_cc,
                                   CcRequestBase *requester);
 
-bvar::LatencyRecorder g_pin_slices_cnt_recorder("yf_pin_slice_cnt");
+bvar::IntRecorder g_pin_slices_cnt_recorder("yf_pin_slice_cnt");
 
 template <typename KeyT,
           typename ValueT,
@@ -1538,6 +1538,7 @@ public:
                         if (Type() == TableType::Primary ||
                             Type() == TableType::UniqueSecondary)
                         {
+                            req.pin_slice_cnt_++;
                             RangeSliceOpStatus pin_status;
                             RangeSliceId slice_id =
                                 shard_->local_shards_.PinRangeSlice(
@@ -1666,6 +1667,8 @@ public:
                                     // core, the target record cannot be kicked
                                     // out before this read request finishes.
                                     slice_id.Unpin();
+                                    g_pin_slices_cnt_recorder
+                                        << req.pin_slice_cnt_;
                                 }
                             }
                             else if (pin_status ==
