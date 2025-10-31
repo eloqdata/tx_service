@@ -2110,7 +2110,7 @@ public:
         hd_res->Value().ts_ = cce->CommitTs();
         hd_res->Value().rec_status_ = cce->PayloadStatus();
 
-        if (req.pin_slice_cnt_ != 0)
+        if (req.pin_slice_cnt_ > 1)
         {
             shard_->AddCnt(req.pin_slice_cnt_);
         }
