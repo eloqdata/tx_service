@@ -961,7 +961,7 @@ void CcNode::SubscribePrimaryNode(uint32_t leader_node_id,
 
     if (!txservice_skip_kv)
     {
-        store_hd->OnStartFollowing();
+        store_hd->OnStartFollowing(leader_node_id, primary_term, standby_term);
     }
     uint32_t seq_grp_cnt = start_follow_resp.start_sequence_id_size();
     std::vector<uint64_t> init_seq_ids;
