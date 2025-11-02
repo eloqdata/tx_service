@@ -600,7 +600,9 @@ inline static TableName sequence_table_name{sequence_table_name_sv.data(),
                                             TableEngine::InternalHash};
 
 // Set buckets count to be the same as the slots count. (16384)
-inline static const uint16_t total_range_buckets = 0x4000;
+// inline static const uint16_t total_range_buckets = 0x4000;
+
+inline static const uint16_t total_range_buckets = 1024;
 
 enum struct SlicePosition
 {

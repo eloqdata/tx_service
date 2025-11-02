@@ -401,16 +401,16 @@ public:
         return true;
     }
 
-    virtual void OnStartFollowing()
+    virtual void OnStartFollowing(uint32_t ng_id, uint32_t leader_node_id)
     {
     }
 
-    virtual bool OnLeaderStart(uint32_t *next_leader_node)
+    virtual bool OnLeaderStart(uint32_t ng_id, uint32_t *next_leader_node)
     {
         return true;
     }
 
-    virtual bool OnLeaderStop(int64_t term)
+    virtual bool OnLeaderStop(uint32_t ng_id, int64_t term)
     {
         return true;
     }

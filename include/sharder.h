@@ -226,6 +226,11 @@ public:
         return static_cast<int32_t>(hash_code & (kHashPartitions - 1));
     }
 
+    static inline uint32_t MapHashPartitionIdToBucketId(int32_t partition_id)
+    {
+        return static_cast<uint32_t>(partition_id % total_range_buckets);
+    }
+
     uint32_t NativeNodeGroup() const
     {
         return native_ng_;
