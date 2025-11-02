@@ -1946,11 +1946,14 @@ void LocalCcShards::InitRangeBuckets(NodeGroupId ng_id,
     // use ng id as seed to generate random numbers
     for (auto ng : node_groups)
     {
-        srand(ng);
+        // Thread-safe and deterministic random generator
+        std::mt19937 rng(ng);
+        std::uniform_int_distribution<uint16_t> dist(0,
+                                                     total_range_buckets - 1);
         size_t generated = 0;
         while (generated < 64)
         {
-            uint16_t rand_num = rand() % total_range_buckets;
+            uint16_t rand_num = dist(rng);
             if (rand_num_to_ng.find(rand_num) == rand_num_to_ng.end())
             {
                 generated++;
@@ -2121,11 +2124,13 @@ LocalCcShards::GenerateBucketMigrationPlan(
     // use ng id as seed to generate random numbers
     for (auto ng : new_node_groups)
     {
-        srand(ng);
+        std::mt19937 rng(ng);
+        std::uniform_int_distribution<uint16_t> dist(0,
+                                                     total_range_buckets - 1);
         size_t generated = 0;
         while (generated < 64)
         {
-            uint16_t rand_num = std::rand() % total_range_buckets;
+            uint16_t rand_num = dist(rng);
             if (rand_num_to_ng.find(rand_num) == rand_num_to_ng.end())
             {
                 generated++;
@@ -4371,10 +4376,9 @@ void LocalCcShards::DataSyncForHashPartition(
     }
 
     auto core_number = cc_shards_.size();
-    constexpr size_t partition_number = 1024;
     auto partition_number_this_core =
-        partition_number / core_number +
-        (worker_idx < partition_number % core_number);
+        total_hash_partitions / core_number +
+        (worker_idx < total_hash_partitions % core_number);
     std::vector<size_t> partition_ids;
     partition_ids.reserve(partition_number_this_core);
     for (size_t i = 0; i < partition_number_this_core; ++i)
