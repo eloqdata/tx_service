@@ -4146,6 +4146,11 @@ public:
 
     void SetError(CcErrorCode err)
     {
+        if (static_cast<int32_t>(err) == 31)
+        {
+            LOG(FATAL) << "== Range Partition Data Sync: Out Of Memory, Set Error";
+        }
+
         std::lock_guard<std::mutex> lk(mux_);
         err_ = err;
         --unfinished_cnt_;
@@ -4158,6 +4163,11 @@ public:
 
     void AbortCcRequest(CcErrorCode err_code) override
     {
+        if (static_cast<int32_t>(err_code) == 31)
+        {
+            LOG(FATAL) << "== Range Partition Data Sync: Out Of Memory, Set Error";
+        }
+
         assert(err_code != CcErrorCode::NO_ERROR);
         std::lock_guard<std::mutex> lk(mux_);
         err_ = err_code;
