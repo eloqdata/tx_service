@@ -2381,7 +2381,7 @@ public:
         }
         else
         {
-            LOG(INFO) << "catalog_cce->PayloadStatus() not unknown";
+            // LOG(INFO) << "catalog_cce->PayloadStatus() not unknown";
         }
 
         const auto keylock = catalog_cce->GetKeyLock();
@@ -2405,8 +2405,8 @@ public:
         RecordStatus payload_status = catalog_cce->PayloadStatus();
         if (payload_status == RecordStatus::Deleted)
         {
-            DLOG(INFO) << "InitCcm failure, target table does not exist: "
-                       << table_name.StringView();
+            //DLOG(INFO) << "InitCcm failure, target table does not exist: "
+            //           << table_name.StringView();
             if (requester != nullptr)
             {
                 requester->AbortCcRequest(
