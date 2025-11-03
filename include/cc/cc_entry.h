@@ -2770,6 +2770,22 @@ private:
     std::atomic<int64_t> term_;
 };
 
+struct DrainTuple
+{
+    DrainTuple(const CcEntryAddr &cce_addr,
+               uint64_t version_ts,
+               PostReadType post_read_type)
+        : cce_addr_(&cce_addr),
+          version_ts_(version_ts),
+          post_read_type_(post_read_type)
+    {
+    }
+
+    const CcEntryAddr *cce_addr_;
+    uint64_t version_ts_;
+    PostReadType post_read_type_;
+};
+
 }  // namespace txservice
 namespace std
 {
