@@ -85,56 +85,58 @@ RecoveryService::RecoveryService(LocalCcShards &local_shards,
             while (!finish_.load(std::memory_order_acquire))
             {
                 std::unique_lock<std::mutex> lk(queue_mux_);
-                queue_cv_.wait_for(
+                bool timed_out = !queue_cv_.wait_for(
                     lk,
                     std::chrono::seconds(10),
-                    [this, &lk]
+                    [this]
                     {
-                        // Check every 10s if there are any orphaned ng
-                        // recovery.
-                        lk.unlock();
-                        auto ngs = Sharder::Instance().AllNodeGroups();
-                        for (auto ng_id : *ngs)
-                        {
-                            int64_t candidate_term =
-                                Sharder::Instance().CandidateLeaderTerm(ng_id);
-                            if (candidate_term != -1)
-                            {
-                                // ng should be replaying
-                                bool need_replay = true;
-                                {
-                                    std::unique_lock<bthread::Mutex> inbound_lk(
-                                        inbound_mux_);
-                                    for (const auto &entry :
-                                         inbound_connections_)
-                                    {
-                                        if (entry.second.cc_ng_id_ == ng_id)
-                                        {
-                                            need_replay = false;
-                                            break;
-                                        }
-                                    }
-                                }
-                                if (need_replay)
-                                {
-                                    // ng is not recovering, send replay log
-                                    // request
-                                    LOG(INFO)
-                                        << "Requesting log replay for ng: "
-                                        << ng_id
-                                        << " at term: " << candidate_term
-                                        << " as there is no recovery "
-                                           "connection";
-                                    ReplayLog(
-                                        ng_id, candidate_term, -1, 0, false);
-                                }
-                            }
-                        }
-                        lk.lock();
                         return !replay_log_queue_.empty() ||
                                !recover_tx_queue_.empty() ||
                                finish_.load(std::memory_order_acquire);
                     });
+
+                // Only check for orphaned ng recovery on timeout, not on notify
+                if (timed_out)
+                {
+                    // Check every 10s if there are any orphaned ng
+                    // recovery.
+                    lk.unlock();
+                    auto ngs = Sharder::Instance().AllNodeGroups();
+                    for (auto ng_id : *ngs)
+                    {
+                        int64_t candidate_term =
+                            Sharder::Instance().CandidateLeaderTerm(ng_id);
+                        if (candidate_term != -1)
+                        {
+                            // ng should be replaying
+                            bool need_replay = true;
+                            {
+                                std::unique_lock<bthread::Mutex> inbound_lk(
+                                    inbound_mux_);
+                                for (const auto &entry : inbound_connections_)
+                                {
+                                    if (entry.second.cc_ng_id_ == ng_id)
+                                    {
+                                        need_replay = false;
+                                        break;
+                                    }
+                                }
+                            }
+                            if (need_replay)
+                            {
+                                // ng is not recovering, send replay log
+                                // request
+                                LOG(INFO)
+                                    << "Requesting log replay for ng: " << ng_id
+                                    << " at term: " << candidate_term
+                                    << " as there is no recovery "
+                                       "connection";
+                                ReplayLog(ng_id, candidate_term, -1, 0, false);
+                            }
+                        }
+                    }
+                    lk.lock();
+                }
                 if (finish_.load(std::memory_order_acquire))
                 {
                     LOG(INFO) << "replay service notify thread quits";
