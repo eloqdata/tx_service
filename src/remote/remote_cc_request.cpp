@@ -1027,17 +1027,6 @@ bool txservice::remote::RemoteScanNextBatch::Execute(CcShard &ccs)
         {
             assert(init_res.value() != nullptr);
             // InitCcm success.
-            // const TableSchema *table_schema = init_res.value();
-            // if (table_schema == nullptr)
-            // {
-            //     // The local node (LocalCcShards) contains a schema
-            //     // instance, which indicates that the table has been
-            //     // dropped. Returns the request with an error.
-            //     res_->SetError(
-            //         CcErrorCode::REQUESTED_TABLE_NOT_EXISTS);
-            //     return true;
-            // }
-
             ccm = ccs.GetCcm(*table_name_, node_group_id_);
         }
     }

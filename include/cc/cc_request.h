@@ -237,17 +237,6 @@ public:
 
                         assert(init_res.value() != nullptr);
                         // InitCcm success.
-                        // const TableSchema *table_schema = init_res.value();
-                        // if (table_schema == nullptr)
-                        // {
-                        //     // The local node (LocalCcShards) contains a schema
-                        //     // instance, which indicates that the table has been
-                        //     // dropped. Returns the request with an error.
-                        //     res_->SetError(
-                        //         CcErrorCode::REQUESTED_TABLE_NOT_EXISTS);
-                        //     return true;
-                        // }
-
                         ccm = ccs.GetCcm(*table_name_, node_group_id_);
                     }
                 }
@@ -1997,17 +1986,6 @@ public:
                 {
                     assert(init_res.value() != nullptr);
                     // InitCcm success.
-                    // const TableSchema *table_schema = init_res.value();
-                    // if (table_schema == nullptr)
-                    // {
-                    //     // The local node (LocalCcShards) contains a schema
-                    //     // instance, which indicates that the table has been
-                    //     // dropped. Returns the request with an error.
-                    //     res_->SetError(
-                    //         CcErrorCode::REQUESTED_TABLE_NOT_EXISTS);
-                    //     return true;
-                    // }
-
                     ccm = ccs.GetCcm(*table_name_, node_group_id_);
                 }
             }
@@ -2488,15 +2466,6 @@ public:
 
                 const TableSchema *table_schema = init_res.value();
                 assert(table_schema != nullptr);
-                // if (table_schema == nullptr)
-                // {
-                //     // The local node (LocalCcShards) contains a schema
-                //     // instance, which indicates that the table has been
-                //     // dropped. Returns the request with an error.
-                //     res_->SetError(CcErrorCode::REQUESTED_TABLE_NOT_EXISTS);
-                //     return true;
-                // }
-
                 ccm = ccs.GetCcm(*table_name_, node_group_id_);
             }
             if (!parallel_req_)
@@ -3778,12 +3747,6 @@ public:
 
             const TableSchema *table_schema = init_res.value();
             assert(table_schema != nullptr);
-            // if (table_schema == nullptr)
-            // {
-            //     // Table dropped.
-            //     SetError(CcErrorCode::REQUESTED_TABLE_NOT_EXISTS);
-            //     return false;
-            // }
             ccm = ccs.GetCcm(*table_name_, node_group_id_);
         }
         assert(ccm != nullptr);
@@ -4108,12 +4071,6 @@ public:
 
             const TableSchema *table_schema = init_res.value();
             assert(table_schema != nullptr);
-            // if (table_schema == nullptr)
-            // {
-            //     // Table dropped.
-            //     SetError(CcErrorCode::REQUESTED_TABLE_NOT_EXISTS);
-            //     return false;
-            // }
             ccm = ccs.GetCcm(*table_name_, node_group_id_);
         }
         assert(ccm != nullptr);
@@ -4719,28 +4676,17 @@ public:
                         return false;
                     }
 
-                    const TableSchema *table_schema = init_res.value();
-                    assert(table_schema != nullptr);
-                    if (table_schema != nullptr)
+                    assert(init_res.value() != nullptr);
+                    ccm_ = ccs.GetCcm(*table_name_, node_group_id_);
+                    if (ccm_ == nullptr)
                     {
-                        ccm_ = ccs.GetCcm(*table_name_, node_group_id_);
-                        if (ccm_ == nullptr)
-                        {
-                            // The base table schema exists but the index table
-                            // is dropped. Skips replaying the log for this cc
-                            // map.
-                            assert(table_name_->Type() ==
-                                       TableType::Secondary ||
-                                   table_name_->Type() ==
-                                       TableType::UniqueSecondary);
-                            SetFinish();
-                            return true;
-                        }
-                    }
-                    else
-                    {
-                        // The table is dropped. Skips replaying the log for
-                        // this cc map.
+                        // The base table schema exists but the index table
+                        // is dropped. Skips replaying the log for this cc
+                        // map.
+                        assert(table_name_->Type() ==
+                                   TableType::Secondary ||
+                               table_name_->Type() ==
+                                   TableType::UniqueSecondary);
                         SetFinish();
                         return true;
                     }
@@ -7065,12 +7011,6 @@ public:
 
             const TableSchema *table_schema = init_res.value();
             assert(table_schema != nullptr);
-            // if (table_schema == nullptr)
-            // {
-            //     // Table dropped.
-            //     return SetFinish(ccs);
-            // }
-
             ccm = ccs.GetCcm(*table_name_, node_group_id_);
         }
         assert(ccm != nullptr);
@@ -7532,12 +7472,6 @@ public:
 
             const TableSchema *table_schema = init_res.value();
             assert(table_schema != nullptr);
-            // if (table_schema == nullptr)
-            // {
-            //     // Table dropped.
-            //     return SetError(CcErrorCode::REQUESTED_TABLE_NOT_EXISTS);
-            // }
-
             ccm = ccs.GetCcm(*table_name_, node_group_id_);
         }
 
@@ -8033,12 +7967,6 @@ public:
 
             const TableSchema *table_schema = init_res.value();
             assert(table_schema != nullptr);
-            // if (table_schema == nullptr)
-            // {
-            //     // Table dropped.
-            //     return SetError(CcErrorCode::REQUESTED_TABLE_NOT_EXISTS);
-            // }
-
             ccm = ccs.GetCcm(*table_name_, node_group_id_);
         }
 

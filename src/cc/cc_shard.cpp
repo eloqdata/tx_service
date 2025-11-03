@@ -1133,7 +1133,6 @@ void CcShard::FetchCatalog(const TableName &table_name,
                            int64_t cc_ng_term,
                            CcRequestBase *requester)
 {
-    LOG(INFO) << "FetchCatalog, table: " << table_name.StringView();
     assert(cc_ng_term > 0);
     FetchCatalogCc *fetch_req = nullptr;
     auto tab_it = fetch_reqs_.find(table_name);

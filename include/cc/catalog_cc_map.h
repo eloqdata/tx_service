@@ -2323,7 +2323,6 @@ public:
 
         if (catalog_cce->PayloadStatus() == RecordStatus::Unknown)
         {
-            LOG(INFO) << "catalog_cce->PayloadStatus() unknown";
             const CatalogEntry *catalog_entry =
                 shard_->GetCatalog(table_key.Name(), cc_ng_id);
 
@@ -2353,10 +2352,6 @@ public:
                     // upload catalog record
                     catalog_cce->payload_.PassInCurrentPayload(
                         std::make_unique<CatalogRecord>());
-                    LOG(INFO) << "Set catalog cce payload, schema: "
-                              << catalog_entry->schema_ << " "
-                              << catalog_entry->dirty_schema_ << " "
-                              << catalog_entry->schema_version_;
                     catalog_cce->payload_.cur_payload_->Set(
                         catalog_entry->schema_,
                         catalog_entry->dirty_schema_,
@@ -2366,7 +2361,6 @@ public:
                 }
                 else
                 {
-                    LOG(INFO) << "Set catalog cce payload, Deleted";
                     catalog_cce->SetCommitTsPayloadStatus(
                         catalog_entry->schema_version_, RecordStatus::Deleted);
                 }
@@ -2379,10 +2373,6 @@ public:
                 return std::nullopt;
             }
         }
-        else
-        {
-            // LOG(INFO) << "catalog_cce->PayloadStatus() not unknown";
-        }
 
         const auto keylock = catalog_cce->GetKeyLock();
         if (keylock != nullptr && keylock->HasWriteLock())
@@ -2391,7 +2381,7 @@ public:
             // set.
             assert(catalog_cce->payload_.cur_payload_.get()->DirtySchema() !=
                    nullptr);
-            DLOG(INFO)
+            DLOG(WARNING)
                 << "InitCcm failure, target table: " << table_name.StringView()
                 << " has write lock on catalog_cc_map, which means, it is "
                    "being modified on this shard.";
@@ -2405,8 +2395,6 @@ public:
         RecordStatus payload_status = catalog_cce->PayloadStatus();
         if (payload_status == RecordStatus::Deleted)
         {
-            //DLOG(INFO) << "InitCcm failure, target table does not exist: "
-            //           << table_name.StringView();
             if (requester != nullptr)
             {
                 requester->AbortCcRequest(
