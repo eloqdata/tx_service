@@ -540,6 +540,7 @@ void FillStoreSliceCc::Reset(const TableName &table_name,
     cc_ng_term_ = cc_ng_term;
     slice_size_ = 0;
     rec_cnt_ = 0;
+    err_code_ = CcErrorCode::NO_ERROR;
 }
 
 void FillStoreSliceCc::SetKvFinish(bool success)
