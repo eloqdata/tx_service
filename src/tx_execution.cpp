@@ -28,7 +28,9 @@
 #include <string>
 #include <vector>
 
+#include "absl/container/flat_hash_map.h"
 #include "cc_protocol.h"
+#include "ccm_scanner.h"
 #include "error_messages.h"  //CcErrorCode
 #include "local_cc_shards.h"
 #include "log.pb.h"
@@ -176,6 +178,7 @@ void TransactionExecution::Reset()
     }
 
     ClearCachedBucketInfos();
+    lock_cluster_config_op_.Reset();
     lock_range_bucket_result_.Reset();
     lock_range_op_.Reset();
     lock_bucket_op_.Reset();
@@ -388,6 +391,8 @@ TxErrorCode TransactionExecution::ConvertCcError(CcErrorCode error)
         return TxErrorCode::UNIQUE_CONSTRAINT;
     case CcErrorCode::PACK_SK_ERR:
         return TxErrorCode::CAL_ENGINE_DEFINED_CONSTRAINT;
+    case CcErrorCode::INVALID_CURSOR:
+        return TxErrorCode::INVALID_CURSOR;
 
     case CcErrorCode::REQUESTED_TABLE_NOT_EXISTS:
         return TxErrorCode::REQUESTD_TABLE_NOT_EXISTS;
@@ -799,6 +804,13 @@ void TransactionExecution::ProcessTxRequest(ScanOpenTxRequest &scan_open_req)
     }
     uint64_resp_ = &scan_open_req.tx_result_;
 
+    scan_open_.Reset();
+    scan_open_.Set(scan_open_req.tab_name_,
+                   scan_open_req.indx_type_,
+                   scan_open_req.StartKey(),
+                   scan_open_req.start_inclusive_,
+                   scan_open_req.direct_,
+                   scan_open_req.is_ckpt_delta_);
     scan_open_.tx_req_ = &scan_open_req;
     PushOperation(&scan_open_);
     Process(scan_open_);
@@ -2326,6 +2338,7 @@ void TransactionExecution::Process(ScanOpenOperation &scan_open)
                 .append("\"tx_term\":")
                 .append(std::to_string(this->tx_term_));
         });
+
     const TableName &table_name = *scan_open.tx_req_->tab_name_;
     uint64_t schema_version = scan_open.tx_req_->schema_version_;
     ScanIndexType index_type = scan_open.tx_req_->indx_type_;
@@ -2340,16 +2353,23 @@ void TransactionExecution::Process(ScanOpenOperation &scan_open)
     bool is_require_recs = scan_open.tx_req_->is_require_recs_;
     bool is_require_sort = scan_open.tx_req_->is_require_sort_;
 
-    scan_open.Reset();
-    scan_open.is_running_ = true;
-    scan_open.Set(&table_name,
-                  index_type,
-                  &start_key,
-                  inclusive,
-                  direction,
-                  is_ckpt_delta);
-
     scan_open.hd_result_.Value().scan_alias_ = scan_open.tx_req_->scan_alias_;
+
+    if (!scan_open.lock_cluster_config_result_.IsFinished())
+    {
+        // Acquire cluster config read lock
+        lock_cluster_config_op_.Reset(TableName(cluster_config_ccm_name_sv,
+                                                TableType::ClusterConfig,
+                                                TableEngine::None),
+                                      VoidKey::NegInfTxKey(),
+                                      &scan_open.cluster_config_rec_,
+                                      &scan_open.lock_cluster_config_result_);
+        PushOperation(&lock_cluster_config_op_);
+        Process(lock_cluster_config_op_);
+        return;
+    }
+
+    scan_open.is_running_ = true;
 
     if (scan_open.tx_req_->read_local_)
     {
@@ -2399,10 +2419,8 @@ void TransactionExecution::Process(ScanOpenOperation &scan_open)
                               scan_open.tx_req_->scan_pattern_);
     }
 
-    if (table_name.IsHashPartitioned())
-    {
-        StartTiming();
-    }
+    // immediately forward again.
+    command_id_.fetch_add(1, std::memory_order_relaxed);
 }
 
 void TransactionExecution::PostProcess(ScanOpenOperation &scan_open)
@@ -2477,7 +2495,7 @@ void TransactionExecution::PostProcess(ScanOpenOperation &scan_open)
 
     assert(scans_.find(open_result.scan_alias_) == scans_.end());
 
-    if (!table_name.IsHashPartitioned())
+    if (open_result.scanner_->Type() == CcmScannerType::RangePartition)
     {
         // Constructs a pseudo slice prior to the first slice of the scan. And
         // sets the status of the scanner "Blocked".
@@ -2497,8 +2515,112 @@ void TransactionExecution::PostProcess(ScanOpenOperation &scan_open)
     }
     else
     {
+        //  sets the status of the scanner "Blocked".
+        open_result.scanner_->SetStatus(ScannerStatus::Blocked);
+
+        if (scan_open.tx_req_->bucket_scan_save_point_->bucket_groups_.empty())
+        {
+            // Generate scan plan
+
+            if (!CheckLeaderTerm() && !CheckStandbyTerm())
+            {
+                if (uint64_resp_ != nullptr)
+                {
+                    uint64_resp_->FinishError(TxErrorCode::TX_NODE_NOT_LEADER);
+                    uint64_resp_ = nullptr;
+                }
+                scan_open.Reset();
+                return;
+            }
+
+            LocalCcShards *local_cc_shard =
+                Sharder::Instance().GetLocalCcShards();
+            // <NodeGroupId, <core_idx, vector<bucket_id>>
+            // group by node group and core idx
+            absl::flat_hash_map<
+                NodeGroupId,
+                absl::flat_hash_map<uint16_t, std::vector<uint16_t>>>
+                grouped;
+            for (size_t bucket_id = 0; bucket_id < total_range_buckets;
+                 ++bucket_id)
+            {
+                NodeGroupId bucket_owner =
+                    local_cc_shard->GetBucketOwner(bucket_id, TxCcNodeId());
+                uint16_t core_idx =
+                    Sharder::Instance().ShardBucketIdToCoreIdx(bucket_id);
+
+                if (open_result.scanner_->read_local_ &&
+                    bucket_owner != Sharder::Instance().NativeNodeGroup())
+                {
+                    // ha_eloq::analyze()
+                    assert(table_name.Type() == TableType::RangePartition);
+                    continue;
+                }
+
+                grouped[bucket_owner][core_idx].push_back(bucket_id);
+            }
+
+            absl::flat_hash_map<NodeGroupId,
+                                std::unordered_map<uint16_t, std::size_t>>
+                batch_idx;
+
+            size_t plan_bucket_cnt_soft_limit = 256;
+            size_t total_bucket_cnt = Sharder::Instance().TotalRangeBuckets();
+
+            absl::flat_hash_map<NodeGroupId, std::vector<uint16_t>>
+                current_plan_bucket_ids;
+            size_t current_plan_bucket_cnt = 0;
+            size_t seen_bucket_cnt = 0;
+
+            while (seen_bucket_cnt < total_bucket_cnt)
+            {
+                for (const auto &[ng, core_map] : grouped)
+                {
+                    for (const auto &[core_id, vec] : core_map)
+                    {
+                        size_t &idx = batch_idx[ng][core_id];
+                        if (idx < vec.size())
+                        {
+                            current_plan_bucket_ids[ng].push_back(vec[idx++]);
+                            seen_bucket_cnt++;
+                            current_plan_bucket_cnt++;
+                        }
+                    }
+                }
+
+                if (current_plan_bucket_cnt >= plan_bucket_cnt_soft_limit)
+                {
+                    scan_open.tx_req_->bucket_scan_save_point_->bucket_groups_
+                        .push_back(std::move(current_plan_bucket_ids));
+                    current_plan_bucket_ids.clear();
+                    current_plan_bucket_cnt = 0;
+                }
+            }
+
+            if (current_plan_bucket_cnt > 0)
+            {
+                scan_open.tx_req_->bucket_scan_save_point_->bucket_groups_
+                    .push_back(std::move(current_plan_bucket_ids));
+                current_plan_bucket_ids.clear();
+                current_plan_bucket_cnt = 0;
+            }
+        }
+
+        std::vector<DataStoreSearchCond> search_cond;
+        if (Sharder::Instance().GetDataStoreHandler())
+        {
+            search_cond = Sharder::Instance()
+                              .GetDataStoreHandler()
+                              ->CreateDataSerachCondition(
+                                  scan_open.tx_req_->obj_type_,
+                                  scan_open.tx_req_->scan_pattern_);
+        }
+
         scans_.try_emplace(open_result.scan_alias_,
                            std::move(open_result.scanner_),
+                           std::move(search_cond),
+                           scan_open.tx_req_->StartKey(),
+                           scan_open.tx_req_->start_inclusive_,
                            scan_open.tx_req_->EndKey(),
                            scan_open.tx_req_->end_inclusive_);
     }
@@ -2545,37 +2667,73 @@ void TransactionExecution::Process(ScanNextOperation &scan_next)
     }
 
     CcScanner &scanner = *scan_next.scan_state_->scanner_;
-    scan_next.is_running_ = true;
+    if (!scan_next.is_running_)
+    {
+        if (scanner.Type() == CcmScannerType::HashPartition)
+        {
+            ScanNextResult &scan_next_result = scan_next.hd_result_.Value();
+            scan_next_result.Clear();
+            scan_next_result.current_scan_plan_ =
+                scan_next.tx_req_->bucket_scan_plan_;
+            scan_next_result.ccm_scanner_ = &scanner;
+        }
+
+        scan_next.is_running_ = true;
+    }
 
     bool to_scan_next = scanner.Current() == nullptr &&
                         scanner.Status() == ScannerStatus::Blocked;
+
     bool is_local = true;
     if (to_scan_next && scanner.Type() == CcmScannerType::HashPartition)
     {
+        if (scan_next.scan_state_->current_plan_index_ == SIZE_MAX ||
+            scan_next.scan_state_->current_plan_index_ !=
+                scan_next.tx_req_->bucket_scan_plan_->PlanIndex())
+        {
+            scan_next.scan_state_->current_plan_index_ =
+                scan_next.tx_req_->bucket_scan_plan_->PlanIndex();
+            scanner.Close();
+            scanner.SetStatus(ScannerStatus::Blocked);
+        }
+
         if (scanner.read_local_)
         {
-            cc_handler_->ScanNextBatchLocal(
-                tx_number_.load(std::memory_order_relaxed),
-                tx_term_,
-                command_id_.load(std::memory_order_relaxed),
-                start_ts_,
-                scanner,
-                scan_next.hd_result_);
+            // only one node group
+            assert(scan_next.hd_result_.Value()
+                       .current_scan_plan_->Buckets()
+                       .size() == 1);
         }
-        else
+
+        // Update handler result ref count
+        auto &ng_scan_buckets =
+            scan_next.hd_result_.Value().current_scan_plan_->Buckets();
+        scan_next.ResetResultForHashPart(ng_scan_buckets.size());
+
+        // Reset all caches, we need to scan next batch data
+        scanner.ResetCaches();
+
+        for (const auto &[node_group_id, bucket_ids] : ng_scan_buckets)
         {
             cc_handler_->ScanNextBatch(
+                scan_next.tx_req_->table_name_,
+                node_group_id,
                 tx_number_.load(std::memory_order_relaxed),
                 tx_term_,
                 command_id_.load(std::memory_order_relaxed),
                 start_ts_,
+                *scan_next.scan_state_->scan_start_key_,
+                scan_next.scan_state_->scan_start_inclusive_,
+                *scan_next.scan_state_->scan_end_key_,
+                scan_next.scan_state_->scan_end_inclusive_,
                 scanner,
+                &scan_next.scan_state_->pushdown_condition_,
                 scan_next.hd_result_,
                 scan_next.tx_req_->obj_type_,
                 scan_next.tx_req_->scan_pattern_);
         }
 
-        is_local = scan_next.hd_result_.Value().is_local_;
+        is_local = scan_next.hd_result_.RemoteRefCnt() == 0;
     }
     else if (to_scan_next && scanner.Type() == CcmScannerType::RangePartition)
     {
@@ -2821,9 +2979,9 @@ void TransactionExecution::PostProcess(ScanNextOperation &scan_next)
     std::vector<ScanBatchTuple> &scan_batch = *scan_next.tx_req_->batch_;
     assert(scan_batch.empty());
 
-    if (scanner.Direction() == ScanDirection::Forward)
+    if (scanner.Type() == CcmScannerType::HashPartition)
     {
-        auto it = wset_iters_.find(scan_next.alias_);
+        scanner.Init();
         while (scanner.Status() == ScannerStatus::Open)
         {
             cc_scan_tuple = scanner.Current();
@@ -2834,414 +2992,503 @@ void TransactionExecution::PostProcess(ScanNextOperation &scan_next)
                 break;
             }
 
-            if (it == wset_iters_.end() ||
-                it->second.first == it->second.second ||
-                cc_scan_tuple->key_ts_ == 0)
+            // Deduces the lock type. If a lock is put on the scanned
+            // entry, adds the entry into the read set, so that the tx
+            // releases the lock in the commit phase.
+            LockType scan_tuple_lock_type =
+                scanner.DeduceScanTupleLockType(cc_scan_tuple->rec_status_);
+            // "key_ts_ == 0", means the lock is added on gap. Now, gap
+            // lock is not used when do scan operation.
+            if (scan_tuple_lock_type != LockType::NoLock &&
+                !cc_scan_tuple->cce_addr_.Empty() &&
+                cc_scan_tuple->key_ts_ != 0 &&
+                !cmd_set_.FindObjectCommand(table_name,
+                                            cc_scan_tuple->cce_addr_))
             {
-                advance_type = AdvanceType::Ccm;
-            }
-            else
-            {
-                assert(scanner.IsRequireKeys());
-                assert(scanner.IsRequireSort());
+                TX_TRACE_ACTION_WITH_CONTEXT(
+                    this,
+                    "PostProcess.ScanOperation.AddReadSet.cce_ptr",
+                    &scan_next,
+                    (
+                        [this, cc_scan_tuple]() -> std::string
+                        {
+                            return std::string("\"tx_number\":")
+                                .append(std::to_string(this->TxNumber()))
+                                .append(",\"tx_term\":")
+                                .append(std::to_string(this->tx_term_))
+                                .append(",\"cce_lock_ptr\":")
+                                .append(std::to_string(
+                                    cc_scan_tuple->cce_addr_.CceLockPtr()));
+                        }));
 
-                auto &wset_it = it->second.first;
-                const TxKey &write_key = wset_it->first;
-                TxKey ccm_key = cc_scan_tuple->Key();
-                if (write_key < ccm_key)
+                // When the record status is unknown, the read ts is set
+                // to 0 to release the lock without validation.
+                uint64_t read_ts =
+                    cc_scan_tuple->rec_status_ != RecordStatus::Unknown
+                        ? cc_scan_tuple->key_ts_
+                        : 0;
+
+                bool add_res = rw_set_.AddRead(
+                    cc_scan_tuple->cce_addr_, read_ts, &table_name);
+                if (!add_res)
                 {
-                    advance_type = AdvanceType::WriteSet;
+                    DrainScanner(&scanner, table_name);
+                    bool_resp_->FinishError(
+                        TxErrorCode::OCC_BREAK_REPEATABLE_READ);
+                    bool_resp_ = nullptr;
+                    scan_next.Reset();
+                    return;
                 }
-                else if (ccm_key < write_key)
+            }
+
+            if (cc_scan_tuple->key_ts_ > 0)
+            {
+                assert(cc_scan_tuple->rec_status_ != RecordStatus::Unknown);
+                // When the record status is not Normal, the record
+                // is set to null in the scan result.
+                const TxRecord *rec =
+                    cc_scan_tuple->rec_status_ == RecordStatus::Normal
+                        ? cc_scan_tuple->Record()
+                        : nullptr;
+                scan_batch.emplace_back(cc_scan_tuple->Key(),
+                                        const_cast<TxRecord *>(rec),
+                                        cc_scan_tuple->rec_status_,
+                                        cc_scan_tuple->key_ts_,
+                                        cc_scan_tuple->cce_addr_);
+            }
+
+            scanner.MoveNext();
+        }
+
+        bool_resp_->Finish(
+            scan_next.tx_req_->bucket_scan_plan_->CurrentPlanIsFinished());
+    }
+    else
+    {
+        if (scanner.Direction() == ScanDirection::Forward)
+        {
+            auto it = wset_iters_.find(scan_next.alias_);
+            while (scanner.Status() == ScannerStatus::Open)
+            {
+                cc_scan_tuple = scanner.Current();
+                if (cc_scan_tuple == nullptr)
+                {
+                    scanner.MoveNext();
+                    assert(scanner.Status() != ScannerStatus::Open);
+                    break;
+                }
+
+                if (it == wset_iters_.end() ||
+                    it->second.first == it->second.second ||
+                    cc_scan_tuple->key_ts_ == 0)
                 {
                     advance_type = AdvanceType::Ccm;
                 }
                 else
                 {
-                    advance_type = AdvanceType::Both;
-                }
-            }
+                    assert(scanner.IsRequireKeys());
+                    assert(scanner.IsRequireSort());
 
-            if (advance_type == AdvanceType::WriteSet)
-            {
-                auto &wset_it = it->second.first;
-                const TxKey &write_key = wset_it->first;
-                const WriteSetEntry &local_write = wset_it->second;
-                if (local_write.op_ == OperationType::Delete)
-                {
-                    scan_batch.emplace_back(write_key.GetShallowCopy(),
-                                            nullptr,
-                                            RecordStatus::Deleted,
-                                            1);
-                }
-                else
-                {
-                    scan_batch.emplace_back(write_key.GetShallowCopy(),
-                                            local_write.rec_.get(),
-                                            RecordStatus::Normal,
-                                            1);
-                }
-
-                ++wset_it;
-            }
-            else
-            {
-                // Deduces the lock type. If a lock is put on the scanned
-                // entry, adds the entry into the read set, so that the tx
-                // releases the lock in the commit phase.
-                LockType scan_tuple_lock_type =
-                    scanner.DeduceScanTupleLockType(cc_scan_tuple->rec_status_);
-                // "key_ts_ == 0", means the lock is added on gap. Now, gap
-                // lock is not used when do scan operation.
-                if (scan_tuple_lock_type != LockType::NoLock &&
-                    cc_scan_tuple->key_ts_ != 0 &&
-                    !cmd_set_.FindObjectCommand(table_name,
-                                                cc_scan_tuple->cce_addr_))
-                {
-                    TX_TRACE_ACTION_WITH_CONTEXT(
-                        this,
-                        "PostProcess.ScanOperation.AddReadSet.cce_ptr",
-                        &scan_next,
-                        (
-                            [this, cc_scan_tuple]() -> std::string
-                            {
-                                return std::string("\"tx_number\":")
-                                    .append(std::to_string(this->TxNumber()))
-                                    .append(",\"tx_term\":")
-                                    .append(std::to_string(this->tx_term_))
-                                    .append(",\"cce_lock_ptr\":")
-                                    .append(std::to_string(
-                                        cc_scan_tuple->cce_addr_.CceLockPtr()));
-                            }));
-
-                    // When the record status is unknown, the read ts is set
-                    // to 0 to release the lock without validation.
-                    uint64_t read_ts =
-                        cc_scan_tuple->rec_status_ != RecordStatus::Unknown
-                            ? cc_scan_tuple->key_ts_
-                            : 0;
-
-                    bool add_res = rw_set_.AddRead(
-                        cc_scan_tuple->cce_addr_, read_ts, &table_name);
-                    if (!add_res)
+                    auto &wset_it = it->second.first;
+                    const TxKey &write_key = wset_it->first;
+                    TxKey ccm_key = cc_scan_tuple->Key();
+                    if (write_key < ccm_key)
                     {
-                        DrainScanner(&scanner, table_name);
-                        bool_resp_->FinishError(
-                            TxErrorCode::OCC_BREAK_REPEATABLE_READ);
-                        bool_resp_ = nullptr;
-                        scan_next.Reset();
-                        return;
+                        advance_type = AdvanceType::WriteSet;
+                    }
+                    else if (ccm_key < write_key)
+                    {
+                        advance_type = AdvanceType::Ccm;
+                    }
+                    else
+                    {
+                        advance_type = AdvanceType::Both;
                     }
                 }
 
-                if (advance_type == AdvanceType::Ccm)
-                {
-                    if (cc_scan_tuple->key_ts_ > 0)
-                    {
-                        assert(cc_scan_tuple->rec_status_ !=
-                               RecordStatus::Unknown);
-                        // When the record status is not Normal, the record
-                        // is set to null in the scan result.
-                        const TxRecord *rec =
-                            cc_scan_tuple->rec_status_ == RecordStatus::Normal
-                                ? cc_scan_tuple->Record()
-                                : nullptr;
-
-                        scan_batch.emplace_back(cc_scan_tuple->Key(),
-                                                const_cast<TxRecord *>(rec),
-                                                cc_scan_tuple->rec_status_,
-                                                cc_scan_tuple->key_ts_,
-                                                cc_scan_tuple->cce_addr_);
-                    }
-
-                    scanner.MoveNext();
-                }
-                else
+                if (advance_type == AdvanceType::WriteSet)
                 {
                     auto &wset_it = it->second.first;
                     const TxKey &write_key = wset_it->first;
                     const WriteSetEntry &local_write = wset_it->second;
-                    // Returns the key-value pair in the local write set.
                     if (local_write.op_ == OperationType::Delete)
                     {
                         scan_batch.emplace_back(write_key.GetShallowCopy(),
                                                 nullptr,
                                                 RecordStatus::Deleted,
-                                                cc_scan_tuple->key_ts_);
+                                                1);
                     }
                     else
                     {
                         scan_batch.emplace_back(write_key.GetShallowCopy(),
                                                 local_write.rec_.get(),
                                                 RecordStatus::Normal,
-                                                cc_scan_tuple->key_ts_);
+                                                1);
                     }
 
-                    scanner.MoveNext();
+                    ++wset_it;
+                }
+                else
+                {
+                    // Deduces the lock type. If a lock is put on the scanned
+                    // entry, adds the entry into the read set, so that the tx
+                    // releases the lock in the commit phase.
+                    LockType scan_tuple_lock_type =
+                        scanner.DeduceScanTupleLockType(
+                            cc_scan_tuple->rec_status_);
+                    // "key_ts_ == 0", means the lock is added on gap. Now, gap
+                    // lock is not used when do scan operation.
+                    if (scan_tuple_lock_type != LockType::NoLock &&
+                        cc_scan_tuple->key_ts_ != 0 &&
+                        !cmd_set_.FindObjectCommand(table_name,
+                                                    cc_scan_tuple->cce_addr_))
+                    {
+                        TX_TRACE_ACTION_WITH_CONTEXT(
+                            this,
+                            "PostProcess.ScanOperation.AddReadSet.cce_ptr",
+                            &scan_next,
+                            (
+                                [this, cc_scan_tuple]() -> std::string
+                                {
+                                    return std::string("\"tx_number\":")
+                                        .append(
+                                            std::to_string(this->TxNumber()))
+                                        .append(",\"tx_term\":")
+                                        .append(std::to_string(this->tx_term_))
+                                        .append(",\"cce_lock_ptr\":")
+                                        .append(std::to_string(
+                                            cc_scan_tuple->cce_addr_
+                                                .CceLockPtr()));
+                                }));
+
+                        // When the record status is unknown, the read ts is set
+                        // to 0 to release the lock without validation.
+                        uint64_t read_ts =
+                            cc_scan_tuple->rec_status_ != RecordStatus::Unknown
+                                ? cc_scan_tuple->key_ts_
+                                : 0;
+
+                        bool add_res = rw_set_.AddRead(
+                            cc_scan_tuple->cce_addr_, read_ts, &table_name);
+                        if (!add_res)
+                        {
+                            DrainScanner(&scanner, table_name);
+                            bool_resp_->FinishError(
+                                TxErrorCode::OCC_BREAK_REPEATABLE_READ);
+                            bool_resp_ = nullptr;
+                            scan_next.Reset();
+                            return;
+                        }
+                    }
+
+                    if (advance_type == AdvanceType::Ccm)
+                    {
+                        if (cc_scan_tuple->key_ts_ > 0)
+                        {
+                            assert(cc_scan_tuple->rec_status_ !=
+                                   RecordStatus::Unknown);
+                            // When the record status is not Normal, the record
+                            // is set to null in the scan result.
+                            const TxRecord *rec = cc_scan_tuple->rec_status_ ==
+                                                          RecordStatus::Normal
+                                                      ? cc_scan_tuple->Record()
+                                                      : nullptr;
+                            scan_batch.emplace_back(cc_scan_tuple->Key(),
+                                                    const_cast<TxRecord *>(rec),
+                                                    cc_scan_tuple->rec_status_,
+                                                    cc_scan_tuple->key_ts_,
+                                                    cc_scan_tuple->cce_addr_);
+                        }
+
+                        scanner.MoveNext();
+                    }
+                    else
+                    {
+                        auto &wset_it = it->second.first;
+                        const TxKey &write_key = wset_it->first;
+                        const WriteSetEntry &local_write = wset_it->second;
+                        // Returns the key-value pair in the local write set.
+                        if (local_write.op_ == OperationType::Delete)
+                        {
+                            scan_batch.emplace_back(write_key.GetShallowCopy(),
+                                                    nullptr,
+                                                    RecordStatus::Deleted,
+                                                    cc_scan_tuple->key_ts_);
+                        }
+                        else
+                        {
+                            scan_batch.emplace_back(write_key.GetShallowCopy(),
+                                                    local_write.rec_.get(),
+                                                    RecordStatus::Normal,
+                                                    cc_scan_tuple->key_ts_);
+                        }
+
+                        scanner.MoveNext();
+                        ++wset_it;
+                    }
+                }
+            }
+
+            if (it != wset_iters_.end())
+            {
+                auto &wset_it = it->second.first;
+                auto &wset_end = it->second.second;
+                const TxKey *batch_end_key = nullptr;
+                if (scanner.Status() == ScannerStatus::Blocked)
+                {
+                    if (scanner.Type() == CcmScannerType::RangePartition)
+                    {
+                        batch_end_key = scan_next.scan_state_->SliceLastKey();
+                    }
+                    else
+                    {
+                        batch_end_key =
+                            scan_batch.empty()
+                                ? nullptr
+                                : &scan_batch[scan_batch.size() - 1].key_;
+                    }
+                }
+
+                while (wset_it != wset_end &&
+                       (batch_end_key == nullptr ||
+                        batch_end_key->Type() != KeyType::Normal ||
+                        wset_it->first < *batch_end_key))
+                {
+                    const TxKey &write_key = wset_it->first;
+                    const WriteSetEntry &local_write = wset_it->second;
+                    // Returns the key-value pair in the local write set.
+                    if (local_write.op_ != OperationType::Delete)
+                    {
+                        scan_batch.emplace_back(write_key.GetShallowCopy(),
+                                                local_write.rec_.get(),
+                                                RecordStatus::Normal,
+                                                1);
+                    }
+                    else
+                    {
+                        scan_batch.emplace_back(write_key.GetShallowCopy(),
+                                                nullptr,
+                                                RecordStatus::Deleted,
+                                                1);
+                    }
+
                     ++wset_it;
                 }
             }
         }
-
-        if (it != wset_iters_.end())
+        // backward scan
+        else
         {
-            auto &wset_it = it->second.first;
-            auto &wset_end = it->second.second;
-            const TxKey *batch_end_key = nullptr;
-            if (scanner.Status() == ScannerStatus::Blocked)
-            {
-                if (scanner.Type() == CcmScannerType::RangePartition)
-                {
-                    batch_end_key = scan_next.scan_state_->SliceLastKey();
-                }
-                else
-                {
-                    batch_end_key =
-                        scan_batch.empty()
-                            ? nullptr
-                            : &scan_batch[scan_batch.size() - 1].key_;
-                }
-            }
+            auto rit = wset_reverse_iters_.find(scan_next.alias_);
 
-            while (wset_it != wset_end &&
-                   (batch_end_key == nullptr ||
-                    batch_end_key->Type() != KeyType::Normal ||
-                    wset_it->first < *batch_end_key))
+            while (scanner.Status() == ScannerStatus::Open)
             {
-                const TxKey &write_key = wset_it->first;
-                const WriteSetEntry &local_write = wset_it->second;
-                // Returns the key-value pair in the local write set.
-                if (local_write.op_ != OperationType::Delete)
+                cc_scan_tuple = scanner.Current();
+                if (cc_scan_tuple == nullptr)
                 {
-                    scan_batch.emplace_back(write_key.GetShallowCopy(),
-                                            local_write.rec_.get(),
-                                            RecordStatus::Normal,
-                                            1);
-                }
-                else
-                {
-                    scan_batch.emplace_back(write_key.GetShallowCopy(),
-                                            nullptr,
-                                            RecordStatus::Deleted,
-                                            1);
+                    scanner.MoveNext();
+                    assert(scanner.Status() != ScannerStatus::Open);
+                    break;
                 }
 
-                ++wset_it;
-            }
-        }
-    }
-    // backward scan
-    else
-    {
-        auto rit = wset_reverse_iters_.find(scan_next.alias_);
-
-        while (scanner.Status() == ScannerStatus::Open)
-        {
-            cc_scan_tuple = scanner.Current();
-            if (cc_scan_tuple == nullptr)
-            {
-                scanner.MoveNext();
-                assert(scanner.Status() != ScannerStatus::Open);
-                break;
-            }
-
-            if (rit == wset_reverse_iters_.end() ||
-                rit->second.first == rit->second.second ||
-                cc_scan_tuple->key_ts_ == 0)
-            {
-                advance_type = AdvanceType::Ccm;
-            }
-            else
-            {
-                assert(scanner.IsRequireKeys());
-                assert(scanner.IsRequireSort());
-
-                auto &wset_it = rit->second.first;
-                const TxKey &write_key = wset_it->first;
-                TxKey ccm_key = cc_scan_tuple->Key();
-                if (ccm_key < write_key)
-                {
-                    advance_type = AdvanceType::WriteSet;
-                }
-                else if (write_key < ccm_key)
+                if (rit == wset_reverse_iters_.end() ||
+                    rit->second.first == rit->second.second ||
+                    cc_scan_tuple->key_ts_ == 0)
                 {
                     advance_type = AdvanceType::Ccm;
                 }
                 else
                 {
-                    advance_type = AdvanceType::Both;
-                }
-            }
+                    assert(scanner.IsRequireKeys());
+                    assert(scanner.IsRequireSort());
 
-            if (advance_type == AdvanceType::WriteSet)
-            {
-                auto &wset_it = rit->second.first;
-                const TxKey &write_key = wset_it->first;
-                const WriteSetEntry &local_write = wset_it->second;
-                if (local_write.op_ != OperationType::Delete)
-                {
-                    scan_batch.emplace_back(write_key.GetShallowCopy(),
-                                            local_write.rec_.get(),
-                                            RecordStatus::Normal,
-                                            1);
-                }
-                else
-                {
-                    scan_batch.emplace_back(write_key.GetShallowCopy(),
-                                            nullptr,
-                                            RecordStatus::Deleted,
-                                            1);
-                }
-
-                ++wset_it;
-            }
-            else
-            {
-                // Deduces the lock type. If a lock is put on the scanned
-                // entry, adds the entry into the read set, so that the tx
-                // releases the lock in the commit phase.
-                LockType scan_tuple_lock_type =
-                    scanner.DeduceScanTupleLockType(cc_scan_tuple->rec_status_);
-                // "key_ts_ == 0", means the lock is added on gap. Now, gap
-                // lock is not used when do scan operation.
-                if (scan_tuple_lock_type != LockType::NoLock &&
-                    cc_scan_tuple->key_ts_ != 0 &&
-                    !cmd_set_.FindObjectCommand(table_name,
-                                                cc_scan_tuple->cce_addr_))
-                {
-                    TX_TRACE_ACTION_WITH_CONTEXT(
-                        this,
-                        "PostProcess.ScanOperation.AddReadSet.cce_ptr",
-                        &scan_next,
-                        (
-                            [this, cc_scan_tuple]() -> std::string
-                            {
-                                return std::string("\"tx_number\":")
-                                    .append(std::to_string(this->TxNumber()))
-                                    .append(",\"tx_term\":")
-                                    .append(std::to_string(this->tx_term_))
-                                    .append(",\"cce_lock_ptr\":")
-                                    .append(std::to_string(
-                                        cc_scan_tuple->cce_addr_.CceLockPtr()));
-                            }));
-
-                    uint64_t read_ts =
-                        cc_scan_tuple->rec_status_ != RecordStatus::Unknown
-                            ? cc_scan_tuple->key_ts_
-                            : 0;
-
-                    bool add_res = rw_set_.AddRead(
-                        cc_scan_tuple->cce_addr_, read_ts, &table_name);
-                    if (!add_res)
+                    auto &wset_it = rit->second.first;
+                    const TxKey &write_key = wset_it->first;
+                    TxKey ccm_key = cc_scan_tuple->Key();
+                    if (ccm_key < write_key)
                     {
-                        DrainScanner(&scanner, table_name);
-                        bool_resp_->FinishError(
-                            TxErrorCode::OCC_BREAK_REPEATABLE_READ);
-                        bool_resp_ = nullptr;
-                        scan_next.Reset();
-                        return;
+                        advance_type = AdvanceType::WriteSet;
+                    }
+                    else if (write_key < ccm_key)
+                    {
+                        advance_type = AdvanceType::Ccm;
+                    }
+                    else
+                    {
+                        advance_type = AdvanceType::Both;
                     }
                 }
 
-                if (advance_type == AdvanceType::Ccm)
-                {
-                    if (cc_scan_tuple->key_ts_ > 0)
-                    {
-                        assert(cc_scan_tuple->rec_status_ !=
-                               RecordStatus::Unknown);
-
-                        // When the record status is not Normal, the record
-                        // is set to null in the scan result.
-                        const TxRecord *rec =
-                            cc_scan_tuple->rec_status_ == RecordStatus::Normal
-                                ? cc_scan_tuple->Record()
-                                : nullptr;
-
-                        scan_batch.emplace_back(cc_scan_tuple->Key(),
-                                                const_cast<TxRecord *>(rec),
-                                                cc_scan_tuple->rec_status_,
-                                                cc_scan_tuple->key_ts_,
-                                                cc_scan_tuple->cce_addr_);
-                    }
-
-                    scanner.MoveNext();
-                }
-                else
+                if (advance_type == AdvanceType::WriteSet)
                 {
                     auto &wset_it = rit->second.first;
                     const TxKey &write_key = wset_it->first;
                     const WriteSetEntry &local_write = wset_it->second;
-                    // Returns the key-value pair in the local write set.
-                    if (local_write.op_ == OperationType::Delete)
-                    {
-                        scan_batch.emplace_back(write_key.GetShallowCopy(),
-                                                nullptr,
-                                                RecordStatus::Deleted,
-                                                cc_scan_tuple->key_ts_);
-                    }
-                    else
+                    if (local_write.op_ != OperationType::Delete)
                     {
                         scan_batch.emplace_back(write_key.GetShallowCopy(),
                                                 local_write.rec_.get(),
                                                 RecordStatus::Normal,
-                                                cc_scan_tuple->key_ts_);
+                                                1);
+                    }
+                    else
+                    {
+                        scan_batch.emplace_back(write_key.GetShallowCopy(),
+                                                nullptr,
+                                                RecordStatus::Deleted,
+                                                1);
                     }
 
-                    scanner.MoveNext();
+                    ++wset_it;
+                }
+                else
+                {
+                    // Deduces the lock type. If a lock is put on the scanned
+                    // entry, adds the entry into the read set, so that the tx
+                    // releases the lock in the commit phase.
+                    LockType scan_tuple_lock_type =
+                        scanner.DeduceScanTupleLockType(
+                            cc_scan_tuple->rec_status_);
+                    // "key_ts_ == 0", means the lock is added on gap. Now, gap
+                    // lock is not used when do scan operation.
+                    if (scan_tuple_lock_type != LockType::NoLock &&
+                        cc_scan_tuple->key_ts_ != 0 &&
+                        !cmd_set_.FindObjectCommand(table_name,
+                                                    cc_scan_tuple->cce_addr_))
+                    {
+                        TX_TRACE_ACTION_WITH_CONTEXT(
+                            this,
+                            "PostProcess.ScanOperation.AddReadSet.cce_ptr",
+                            &scan_next,
+                            (
+                                [this, cc_scan_tuple]() -> std::string
+                                {
+                                    return std::string("\"tx_number\":")
+                                        .append(
+                                            std::to_string(this->TxNumber()))
+                                        .append(",\"tx_term\":")
+                                        .append(std::to_string(this->tx_term_))
+                                        .append(",\"cce_lock_ptr\":")
+                                        .append(std::to_string(
+                                            cc_scan_tuple->cce_addr_
+                                                .CceLockPtr()));
+                                }));
+
+                        uint64_t read_ts =
+                            cc_scan_tuple->rec_status_ != RecordStatus::Unknown
+                                ? cc_scan_tuple->key_ts_
+                                : 0;
+
+                        bool add_res = rw_set_.AddRead(
+                            cc_scan_tuple->cce_addr_, read_ts, &table_name);
+                        if (!add_res)
+                        {
+                            DrainScanner(&scanner, table_name);
+                            bool_resp_->FinishError(
+                                TxErrorCode::OCC_BREAK_REPEATABLE_READ);
+                            bool_resp_ = nullptr;
+                            scan_next.Reset();
+                            return;
+                        }
+                    }
+
+                    if (advance_type == AdvanceType::Ccm)
+                    {
+                        if (cc_scan_tuple->key_ts_ > 0)
+                        {
+                            assert(cc_scan_tuple->rec_status_ !=
+                                   RecordStatus::Unknown);
+
+                            // When the record status is not Normal, the record
+                            // is set to null in the scan result.
+                            const TxRecord *rec = cc_scan_tuple->rec_status_ ==
+                                                          RecordStatus::Normal
+                                                      ? cc_scan_tuple->Record()
+                                                      : nullptr;
+
+                            scan_batch.emplace_back(cc_scan_tuple->Key(),
+                                                    const_cast<TxRecord *>(rec),
+                                                    cc_scan_tuple->rec_status_,
+                                                    cc_scan_tuple->key_ts_,
+                                                    cc_scan_tuple->cce_addr_);
+                        }
+
+                        scanner.MoveNext();
+                    }
+                    else
+                    {
+                        auto &wset_it = rit->second.first;
+                        const TxKey &write_key = wset_it->first;
+                        const WriteSetEntry &local_write = wset_it->second;
+                        // Returns the key-value pair in the local write set.
+                        if (local_write.op_ == OperationType::Delete)
+                        {
+                            scan_batch.emplace_back(write_key.GetShallowCopy(),
+                                                    nullptr,
+                                                    RecordStatus::Deleted,
+                                                    cc_scan_tuple->key_ts_);
+                        }
+                        else
+                        {
+                            scan_batch.emplace_back(write_key.GetShallowCopy(),
+                                                    local_write.rec_.get(),
+                                                    RecordStatus::Normal,
+                                                    cc_scan_tuple->key_ts_);
+                        }
+
+                        scanner.MoveNext();
+                        ++wset_it;
+                    }
+                }
+            }
+
+            if (rit != wset_reverse_iters_.end())
+            {
+                auto &wset_it = rit->second.first;
+                auto &wset_end = rit->second.second;
+                const TxKey *batch_start_key = nullptr;
+                if (scanner.Status() == ScannerStatus::Blocked)
+                {
+                    if (scanner.Type() == CcmScannerType::RangePartition)
+                    {
+                        batch_start_key = scan_next.scan_state_->SliceLastKey();
+                    }
+                    else
+                    {
+                        batch_start_key =
+                            scan_batch.empty() ? nullptr : &scan_batch[0].key_;
+                    }
+                }
+
+                while (wset_it != wset_end &&
+                       (batch_start_key == nullptr ||
+                        batch_start_key->Type() != KeyType::Normal ||
+                        *batch_start_key < wset_it->first ||
+                        *batch_start_key == wset_it->first))
+                {
+                    const TxKey &write_key = wset_it->first;
+                    const WriteSetEntry &local_write = wset_it->second;
+                    // Returns the key-value pair in the local write set.
+                    if (local_write.op_ != OperationType::Delete)
+                    {
+                        scan_batch.emplace_back(write_key.GetShallowCopy(),
+                                                local_write.rec_.get(),
+                                                RecordStatus::Normal,
+                                                1);
+                    }
+                    else
+                    {
+                        scan_batch.emplace_back(write_key.GetShallowCopy(),
+                                                nullptr,
+                                                RecordStatus::Deleted,
+                                                1);
+                    }
+
                     ++wset_it;
                 }
             }
         }
 
-        if (rit != wset_reverse_iters_.end())
-        {
-            auto &wset_it = rit->second.first;
-            auto &wset_end = rit->second.second;
-            const TxKey *batch_start_key = nullptr;
-            if (scanner.Status() == ScannerStatus::Blocked)
-            {
-                if (scanner.Type() == CcmScannerType::RangePartition)
-                {
-                    batch_start_key = scan_next.scan_state_->SliceLastKey();
-                }
-                else
-                {
-                    batch_start_key =
-                        scan_batch.empty() ? nullptr : &scan_batch[0].key_;
-                }
-            }
-
-            while (wset_it != wset_end &&
-                   (batch_start_key == nullptr ||
-                    batch_start_key->Type() != KeyType::Normal ||
-                    *batch_start_key < wset_it->first ||
-                    *batch_start_key == wset_it->first))
-            {
-                const TxKey &write_key = wset_it->first;
-                const WriteSetEntry &local_write = wset_it->second;
-                // Returns the key-value pair in the local write set.
-                if (local_write.op_ != OperationType::Delete)
-                {
-                    scan_batch.emplace_back(write_key.GetShallowCopy(),
-                                            local_write.rec_.get(),
-                                            RecordStatus::Normal,
-                                            1);
-                }
-                else
-                {
-                    scan_batch.emplace_back(write_key.GetShallowCopy(),
-                                            nullptr,
-                                            RecordStatus::Deleted,
-                                            1);
-                }
-
-                ++wset_it;
-            }
-        }
-    }
-
-    if (scanner.Type() == CcmScannerType::RangePartition)
-    {
         ScanDirection dir = scan_next.Direction();
         SlicePosition slice_pos = scan_next.scan_state_->slice_position_;
         bool scan_finished = (dir == ScanDirection::Forward &&
@@ -3267,10 +3514,7 @@ void TransactionExecution::PostProcess(ScanNextOperation &scan_next)
 
         bool_resp_->Finish(scan_finished);
     }
-    else
-    {
-        bool_resp_->Finish(false);
-    }
+
     bool_resp_ = nullptr;
     scan_next.Reset();
 }
@@ -3327,8 +3571,7 @@ void TransactionExecution::ScanClose(
         // not NoLock, then drain_batch_ has include them, and should skip them.
         // Non-repetition and non-omission.
         std::vector<const ScanTuple *> last_tuples;
-        last_tuples.reserve(scanner->CacheCount());
-        scanner->ShardCacheLastTuples(&last_tuples);
+        scanner->MemoryShardCacheLastTuples(&last_tuples);
         for (const ScanTuple *last_tuple : last_tuples)
         {
             if (last_tuple)
@@ -3348,9 +3591,10 @@ void TransactionExecution::ScanClose(
         // In hash partition, cross every channel of scanner and get the last
         // tuple, then add it into drain_batch_ to ensure the ReadIntent lock to
         // be released if added.
+
+        /*
         std::vector<const ScanTuple *> last_tuples;
-        last_tuples.reserve(scanner->CacheCount());
-        scanner->ShardCacheLastTuples(&last_tuples);
+        scanner->MemoryShardCacheLastTuples(&last_tuples);
         for (const ScanTuple *last_tuple : last_tuples)
         {
             if (last_tuple)
@@ -3365,9 +3609,11 @@ void TransactionExecution::ScanClose(
                 {
                     drain_batch_.emplace_back(last_tuple->cce_addr_,
                                               last_tuple->key_ts_);
+
                 }
             }
         }
+        */
     }
 
     // Release trailing tuple locks acquired during scan. These tuples are
@@ -3375,7 +3621,7 @@ void TransactionExecution::ScanClose(
     // They were not added into read set. Check if they were put into read set
     // by other operations before, if not, release these locks.
     std::vector<const ScanTuple *> trailing_tuples;
-    scanner->ShardCacheTrailingTuples(&trailing_tuples);
+    scanner->MemoryShardCacheTrailingTuples(&trailing_tuples);
     for (auto tuple : trailing_tuples)
     {
         LockType lk_type = scanner->DeduceScanTupleLockType(tuple->rec_status_);
@@ -3386,10 +3632,12 @@ void TransactionExecution::ScanClose(
         }
     }
 
+    /*
     if (scanner->Type() == CcmScannerType::HashPartition)
     {
         DrainScanner(scanner, table_name);
     }
+    */
 
     cc_handler_->ScanClose(
         table_name, scanner->Direction(), std::move(scan_it->second.scanner_));
@@ -5556,9 +5804,9 @@ void TransactionExecution::DrainScanner(CcScanner *scanner,
                                         const TableName &table_name)
 {
     assert(scanner != nullptr);
-
     // drain out the scan tuple in the scan cache
-    scanner->SetDrainCacheMode(true);
+    // scanner->SetDrainCacheMode(true);
+    scanner->Init();
     const ScanTuple *cc_scan_tuple = scanner->Current();
     // In case the scan status is blocked before
     if (cc_scan_tuple == nullptr && scanner->Status() == ScannerStatus::Blocked)
@@ -5590,7 +5838,7 @@ void TransactionExecution::DrainScanner(CcScanner *scanner,
         // "key_ts_ == 0", means the lock is added on gap. Now, gap lock is
         // not used when do scan operation.
         if (scan_tuple_lock_type != LockType::NoLock &&
-            cc_scan_tuple->key_ts_ != 0 &&
+            !cc_scan_tuple->cce_addr_.Empty() && cc_scan_tuple->key_ts_ != 0 &&
             rw_set_.RemoveDataReadEntry(table_name, cc_scan_tuple->cce_addr_) ==
                 0)
         {

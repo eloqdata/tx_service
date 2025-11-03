@@ -25,7 +25,10 @@
 #include <atomic>
 #include <cstddef>
 #include <mutex>
+#include <string_view>
+#include <system_error>
 #include <unordered_map>
+#include <variant>
 #include <vector>
 
 #include "cc/cc_map.h"
@@ -891,6 +894,125 @@ void FetchRecordCc::SetFinish(int err)
 {
     error_code_ = err;
     ccs_.Enqueue(this);
+}
+
+void FetchBucketDataCc::Reset(
+    const TableName *table_name,
+    const TableSchema *table_schema,
+    NodeGroupId node_group_id,
+    int64_t node_group_term,
+    CcShard *ccs,
+    bool is_local,
+    uint16_t bucket_id,
+    const std::vector<DataStoreSearchCond> *pushdown_cond,
+    std::string_view start_key,
+    KeyType start_key_type,
+    bool start_key_inclusive,
+    std::string_view end_key,
+    KeyType end_key_type,
+    bool end_key_inclusive,
+    size_t batch_size,
+    CcRequestBase *requester,
+    OnFetchedBucketData backfill_func)
+{
+    table_name_ = TableName(
+        table_name->StringView(), table_name->Type(), table_name->Engine());
+    kv_table_name_ =
+        table_schema->GetKVCatalogInfo()->GetKvTableName(table_name_);
+    node_group_id_ = node_group_id;
+    node_group_term_ = node_group_term;
+    ccs_ = ccs;
+    is_local_ = is_local;
+    bucket_id_ = bucket_id;
+    pushdown_cond_ = pushdown_cond;
+    start_key_ = start_key;
+    start_key_type_ = start_key_type;
+    start_key_inclusive_ = start_key_inclusive;
+    end_key_ = end_key;
+    end_key_type_ = end_key_type;
+    end_key_inclusive_ = end_key_inclusive;
+    assert(std::holds_alternative<std::string_view>(start_key_));
+    assert(std::holds_alternative<std::string_view>(end_key_));
+
+    batch_size_ = batch_size;
+    requester_ = requester;
+    err_code_ = 0;
+
+    bucket_data_items_.clear();
+    is_drained_ = false;
+    backfill_func_ = backfill_func;
+
+    kv_start_key_.clear();
+    kv_end_key_.clear();
+}
+
+bool FetchBucketDataCc::ValidTermCheck()
+{
+    int64_t ng_leader_term = Sharder::Instance().LeaderTerm(node_group_id_);
+    int64_t standby_node_term = Sharder::Instance().StandbyNodeTerm();
+
+    if (std::max(ng_leader_term, standby_node_term) != node_group_term_)
+    {
+        return false;
+    }
+
+    return true;
+}
+
+void FetchBucketDataCc::AddDataItem(std::string &&key_str,
+                                    std::string &&rec_str,
+                                    uint64_t version,
+                                    bool is_deleted)
+{
+    bucket_data_items_.emplace_back(
+        std::move(key_str), std::move(rec_str), version, is_deleted);
+}
+
+bool FetchBucketDataCc::Execute(CcShard &ccs)
+{
+    if (!ValidTermCheck())
+    {
+        err_code_ = static_cast<int32_t>(CcErrorCode::NG_TERM_CHANGED);
+    }
+
+    if (err_code_ != 0)
+    {
+        if (is_local_)
+        {
+            ScanNextBatchCc *req = static_cast<ScanNextBatchCc *>(requester_);
+            req->DecreaseWaitForFetchBucketCnt(ccs.core_id_);
+            req->SetErrorCode(static_cast<CcErrorCode>(err_code_));
+            if (req->IsWaitForFetchBucket(ccs.core_id_) &&
+                req->WaitForFetchBucketCnt(ccs.core_id_) == 0)
+            {
+                ccs_->Enqueue(requester_);
+            }
+        }
+        else
+        {
+            remote::RemoteScanNextBatch *req =
+                static_cast<remote::RemoteScanNextBatch *>(requester_);
+            req->DecreaseWaitForFetchBucketCnt(ccs.core_id_);
+            req->SetErrorCode(static_cast<CcErrorCode>(err_code_));
+            if (req->IsWaitForFetchBucket(ccs.core_id_) &&
+                req->WaitForFetchBucketCnt(ccs.core_id_) == 0)
+            {
+                ccs_->Enqueue(requester_);
+            }
+        }
+    }
+    else
+    {
+        (*backfill_func_)(this, requester_);
+    }
+
+    return true;
+}
+
+void FetchBucketDataCc::SetFinish(int32_t err)
+{
+    err_code_ = err;
+    ccs_->Enqueue(this);
 }
 
 void FetchSnapshotCc::Reset(const TableName *tbl_name,

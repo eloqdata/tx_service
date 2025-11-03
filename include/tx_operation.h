@@ -38,6 +38,7 @@
 #include "log_closure.h"
 #include "range_record.h"
 #include "read_write_set.h"
+#include "schema.h"
 #include "tx_command.h"
 #include "tx_key.h"
 #include "tx_operation_result.h"
@@ -396,6 +397,8 @@ struct ScanOpenOperation : TransactionOperation
 
     void Reset();
 
+    ClusterConfigRecord cluster_config_rec_;
+    CcHandlerResult<ReadKeyResult> lock_cluster_config_result_;
     CcHandlerResult<ScanOpenResult> hd_result_;
 
     const TableName *table_name_{nullptr};
@@ -411,17 +414,27 @@ struct ScanState
 {
     ScanState() = delete;
     ScanState(std::unique_ptr<CcScanner> scanner,
+              std::vector<DataStoreSearchCond> pushdown_cond,
+              const TxKey *start_key,
+              bool start_inclusive,
               const TxKey *end_key,
               bool end_inclusive)
         : scanner_(std::move(scanner)),
+          pushdown_condition_(std::move(pushdown_cond)),
+          scan_start_key_(start_key),
+          scan_start_inclusive_(start_inclusive),
           scan_end_key_(end_key),
           scan_end_inclusive_(end_inclusive)
     {
     }
 
+    size_t current_plan_index_{SIZE_MAX};
     std::unique_ptr<CcScanner> scanner_;
-    const TxKey *scan_end_key_;
-    bool scan_end_inclusive_;
+    std::vector<DataStoreSearchCond> pushdown_condition_;
+    const TxKey *scan_start_key_{nullptr};
+    bool scan_start_inclusive_{false};
+    const TxKey *scan_end_key_{nullptr};
+    bool scan_end_inclusive_{false};
 
     ScanState(std::unique_ptr<CcScanner> scanner,
               uint64_t schema_version,
@@ -471,6 +484,7 @@ struct ScanNextOperation : TransactionOperation
     void Forward(TransactionExecution *txm) override;
     void Reset();
     void ResetResult();
+    void ResetResultForHashPart(size_t ng_cnt);
 
     ScanDirection Direction() const
     {
@@ -483,6 +497,7 @@ struct ScanNextOperation : TransactionOperation
     {
         scan_state_ = scan_state;
         slice_hd_result_.Value().ccm_scanner_ = scan_state->scanner_.get();
+        hd_result_.Value().ccm_scanner_ = scan_state->scanner_.get();
     }
 
     ScanState *scan_state_;

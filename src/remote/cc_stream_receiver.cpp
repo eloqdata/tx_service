@@ -1046,20 +1046,9 @@ void CcStreamReceiver::OnReceiveCcMsg(std::unique_ptr<CcMessage> msg)
     }
     case CcMessage::MessageType::CcMessage_MessageType_ScanOpenRequest:
     {
-        RemoteScanOpen *scan_open_req = scan_open_pool_.NextRequest();
-        uint32_t local_core_cnt = (uint32_t) local_shards_.Count();
-        TX_TRACE_ASSOCIATE(msg.get(), scan_open_req);
-        scan_open_req->Reset(std::move(msg), local_core_cnt);
-
-        for (uint32_t core_id = 0; core_id < local_core_cnt; ++core_id)
-        {
-            // The scan open request is directed to all local shards. The
-            // request pre-allocates scan caches, one for each shard. Each shard
-            // fills its own designated cache, so there is no synchronization
-            // across cores.
-            local_shards_.EnqueueCcRequest(core_id, scan_open_req);
-        }
-
+        assert(false && "Unimplemented");
+        LOG(ERROR) << "ScanOpenRequest is unsupported; replying error.";
+        msg_pool_.enqueue(std::move(msg));
         break;
     }
     case CcMessage::MessageType::CcMessage_MessageType_ScanOpenResponse:
@@ -1071,102 +1060,8 @@ void CcStreamReceiver::OnReceiveCcMsg(std::unique_ptr<CcMessage> msg)
             repeated ScanCache_msg scan_cache = 3;
         }*/
 
-        assert(msg->has_scan_open_resp());
-
-        CcHandlerResult<ScanOpenResult> *hd_res = nullptr;
-        TransactionExecution *txm = nullptr;
-        uint32_t tx_node_id = (msg->tx_number() >> 32L) >> 10;
-        int64_t tx_term = msg->tx_term();
-        if (!Sharder::Instance().CheckLeaderTerm(tx_node_id, tx_term))
-        {
-            // The tx node has failed. Pointer stability does not hold anymore.
-            msg_pool_.enqueue(std::move(msg));
-            break;
-        }
-        else
-        {
-            txm = reinterpret_cast<TransactionExecution *>(msg->txm_addr());
-
-            txm->AcquireSharedForwardLatch();
-
-            hd_res = reinterpret_cast<CcHandlerResult<ScanOpenResult> *>(
-                msg->handler_addr());
-
-            if (txm->TxNumber() != msg->tx_number() ||
-                txm->CommandId() != msg->command_id())
-            {
-                // The original tx has terminated and the tx machine has been
-                // recycled. The response message is directed to an obsolete tx.
-                // Skips setting the cc handler result.
-                msg_pool_.enqueue(std::move(msg));
-                txm->ReleaseSharedForwardLatch();
-                break;
-            }
-            assert(txm == hd_res->Txm());
-        }
-
-        const ScanOpenResponse &scan_open_res = msg->scan_open_resp();
-        uint32_t ng_id = scan_open_res.node_group_id();
-        hd_res->Value().cc_node_returned_[ng_id] = 1;
-
-        // Even if ScanOpen operation fail, we should also move scan
-        // result into read set to release acquired lock.
-        {
-            CcScanner &scanner = *hd_res->Value().scanner_;
-            int64_t term = -1;
-
-            for (int core_id = 0; core_id < scan_open_res.scan_cache_size();
-                 ++core_id)
-            {
-                uint32_t shard_code = (ng_id << 10) + core_id;
-                const ScanCache_msg &cache_msg =
-                    scan_open_res.scan_cache(core_id);
-                ScanCache *shard_cache = scanner.AddShard(shard_code);
-
-                for (int idx = 0; idx < cache_msg.scan_tuple_size(); ++idx)
-                {
-                    const ScanTuple_msg &tuple_msg = cache_msg.scan_tuple(idx);
-                    assert(tuple_msg.cce_addr().core_id() ==
-                           (uint32_t) core_id);
-
-                    term = tuple_msg.cce_addr().term();
-
-                    RecordStatus rec_status =
-                        ToLocalType::ConvertRecordStatusType(
-                            tuple_msg.rec_status());
-
-                    size_t key_offset = 0;
-                    size_t rec_offset = 0;
-                    shard_cache->AddScanTuple(
-                        tuple_msg.key(),
-                        key_offset,
-                        tuple_msg.key_ts(),
-                        tuple_msg.record(),
-                        rec_offset,
-                        rec_status,
-                        tuple_msg.gap_ts(),
-                        tuple_msg.cce_addr().cce_lock_ptr(),
-                        tuple_msg.cce_addr().term(),
-                        tuple_msg.cce_addr().core_id(),
-                        ng_id);
-                }
-            }
-
-            hd_res->Value().cc_node_terms_[ng_id] = term;
-        }
-
-        if (scan_open_res.error_code() != 0)
-        {
-            hd_res->SetRemoteError(
-                ToLocalType::ConvertCcErrorCode(scan_open_res.error_code()));
-        }
-        else
-        {
-            hd_res->SetRemoteFinished();
-        }
-
-        txm->ReleaseSharedForwardLatch();
-
+        assert(false && "Unimplemented");
+        LOG(ERROR) << "ScanOpenResponse is unsupported; replying error.";
         msg_pool_.enqueue(std::move(msg));
         break;
     }
@@ -1175,20 +1070,23 @@ void CcStreamReceiver::OnReceiveCcMsg(std::unique_ptr<CcMessage> msg)
         RemoteScanNextBatch *scan_next_req = scan_next_pool_.NextRequest();
         TX_TRACE_ASSOCIATE(msg.get(), scan_next_req);
         scan_next_req->Reset(std::move(msg));
-        local_shards_.EnqueueCcRequest(scan_next_req->PriorCceAddr().CoreId(),
-                                       scan_next_req);
+        if (!scan_next_req->BucketIds().empty())
+        {
+            // only one core to decode tx key
+            local_shards_.EnqueueCcRequest(
+                scan_next_req->BucketIds().begin()->first, scan_next_req);
+        }
+        else
+        {
+            assert(false);
+            LOG(ERROR) << "RemoteScanNextBatch: empty scan buckets";
+            local_shards_.EnqueueCcRequest(0, scan_next_req);
+        }
+
         break;
     }
     case CcMessage::MessageType::CcMessage_MessageType_ScanNextResponse:
     {
-        /*message ScanNextResponse
-        {
-            bool error = 1;
-            repeated ScanTuple_msg scan_tuple = 2;
-            uint64 ccm_ptr = 3;
-            uint64 scan_cache_ptr = 4;
-        }*/
-
         assert(msg->has_scan_next_resp());
 
         CcHandlerResult<ScanNextResult> *hd_res = nullptr;
@@ -1223,50 +1121,146 @@ void CcStreamReceiver::OnReceiveCcMsg(std::unique_ptr<CcMessage> msg)
             assert(txm == hd_res->Txm());
         }
 
-        const ScanNextResponse &scan_next_res = msg->scan_next_resp();
+        ScanNextResponse &scan_next_res = *msg->mutable_scan_next_resp();
 
         // Even if ScanNext operation fail, we should also move scan
         // result into read set to release acquired lock.
+
+        uint32_t node_group_id = scan_next_res.node_group_id();
+        CcScanner *scanner = hd_res->Value().ccm_scanner_;
+        ::txservice::remote::ShardCacheMsgMap *shard_caches =
+            scan_next_res.mutable_shard_cache_map();
+        for (auto &[core_id, shard_cache] :
+             *shard_caches->mutable_shard_caches())
         {
-            ScanCache *shard_cache =
-                reinterpret_cast<ScanCache *>(scan_next_res.scan_cache_ptr());
+            const ::txservice::remote::ScanCache_msg &memory_cache =
+                shard_cache.memory_scan_cache();
+            uint32_t shard_code = (node_group_id << 10) + core_id;
 
-            uint32_t ng_id = shard_cache->LastTuple()->cce_addr_.NodeGroupId();
-            shard_cache->Reset();
-            const ScanCache_msg &scan_cache = scan_next_res.scan_cache();
-
-            for (int idx = 0; idx < scan_cache.scan_tuple_size(); ++idx)
+            if (memory_cache.scan_tuple_size() > 0)
             {
-                const ScanTuple_msg &tuple_msg = scan_cache.scan_tuple(idx);
-                hd_res->Value().term_ = tuple_msg.cce_addr().term();
+                ScanCache *scan_cache = scanner->Cache(shard_code);
+                scan_cache->Reset();
 
-                RecordStatus rec_status = ToLocalType::ConvertRecordStatusType(
-                    tuple_msg.rec_status());
+                for (int idx = 0; idx < memory_cache.scan_tuple_size(); ++idx)
+                {
+                    const ScanTuple_msg &tuple_msg =
+                        memory_cache.scan_tuple(idx);
+                    RecordStatus rec_status =
+                        ToLocalType::ConvertRecordStatusType(
+                            tuple_msg.rec_status());
+                    size_t key_offset = 0;
+                    size_t rec_offset = 0;
 
-                size_t key_offset = 0;
-                size_t rec_offset = 0;
-                shard_cache->AddScanTuple(tuple_msg.key(),
-                                          key_offset,
-                                          tuple_msg.key_ts(),
-                                          tuple_msg.record(),
-                                          rec_offset,
-                                          rec_status,
-                                          tuple_msg.gap_ts(),
-                                          tuple_msg.cce_addr().cce_lock_ptr(),
-                                          tuple_msg.cce_addr().term(),
-                                          tuple_msg.cce_addr().core_id(),
-                                          ng_id);
+                    scan_cache->AddScanTuple(
+                        tuple_msg.key(),
+                        key_offset,
+                        tuple_msg.key_ts(),
+                        tuple_msg.record(),
+                        rec_offset,
+                        rec_status,
+                        tuple_msg.gap_ts(),
+                        tuple_msg.cce_addr().cce_lock_ptr(),
+                        tuple_msg.cce_addr().term(),
+                        tuple_msg.cce_addr().core_id(),
+                        tuple_msg.cce_addr().node_group_id(),
+                        false);
+                }
+
+                if (memory_cache.trailing_cnt() > 0)
+                {
+                    scan_cache->RemoveLast(scan_cache->Size() -
+                                           memory_cache.trailing_cnt());
+                }
+            }
+
+            for (const auto &[bucket_id, kv_cache] :
+                 shard_cache.kv_scan_cache())
+            {
+                if (kv_cache.scan_tuple_size() > 0)
+                {
+                    ScanCache *scan_cache =
+                        scanner->KvCache(shard_code, bucket_id, 16);
+                    scan_cache->Reset();
+                    for (int idx = 0; idx < kv_cache.scan_tuple_size(); ++idx)
+                    {
+                        const ScanTuple_msg &tuple_msg =
+                            kv_cache.scan_tuple(idx);
+                        RecordStatus rec_status =
+                            ToLocalType::ConvertRecordStatusType(
+                                tuple_msg.rec_status());
+                        size_t key_offset = 0;
+                        size_t rec_offset = 0;
+
+                        scan_cache->AddScanTuple(
+                            tuple_msg.key(),
+                            key_offset,
+                            tuple_msg.key_ts(),
+                            tuple_msg.record(),
+                            rec_offset,
+                            rec_status,
+                            tuple_msg.gap_ts(),
+                            tuple_msg.cce_addr().cce_lock_ptr(),
+                            tuple_msg.cce_addr().term(),
+                            tuple_msg.cce_addr().core_id(),
+                            tuple_msg.cce_addr().node_group_id(),
+                            false);
+                    }
+
+                    if (kv_cache.trailing_cnt() > 0)
+                    {
+                        scan_cache->RemoveLast(scan_cache->Size() -
+                                               kv_cache.trailing_cnt());
+                    }
+                }
             }
         }
 
         if (scan_next_res.error_code() != 0)
         {
-            hd_res->SetError(
+            hd_res->SetRemoteError(
                 ToLocalType::ConvertCcErrorCode(scan_next_res.error_code()));
         }
         else
         {
-            hd_res->SetFinished();
+            hd_res->Value().current_scan_plan_->UpdateNodeGroupTerm(
+                node_group_id, scan_next_res.term());
+            auto *ng_bucket_scan_progress =
+                hd_res->Value().current_scan_plan_->GetBucketScanProgress(
+                    node_group_id);
+            assert(ng_bucket_scan_progress);
+
+            for (const auto &[core_idx, progress] :
+                 scan_next_res.progress().progress())
+            {
+                txservice::BucketScanProgress *bucket_scan_progress = nullptr;
+                auto iter = ng_bucket_scan_progress->find(core_idx);
+                if (iter == ng_bucket_scan_progress->end())
+                {
+                    assert(progress.start_key().inner_key_case() ==
+                           RemoteTxKey::InnerKeyCase::kKey);
+                    auto em_it = ng_bucket_scan_progress->try_emplace(
+                        core_idx,
+                        scanner->DecodeKey(progress.start_key().key()),
+                        progress.start_key_inclusive());
+                    bucket_scan_progress = &em_it.first->second;
+                }
+                else
+                {
+                    bucket_scan_progress = &iter->second;
+                }
+
+                for (const auto &[bucket_id, is_drained] :
+                     progress.scan_buckets())
+                {
+                    bucket_scan_progress->scan_buckets_[bucket_id] = is_drained;
+                }
+
+                bucket_scan_progress->memory_scan_is_finished_ =
+                    progress.memory_is_drained();
+            }
+
+            hd_res->SetRemoteFinished();
         }
 
         txm->ReleaseSharedForwardLatch();

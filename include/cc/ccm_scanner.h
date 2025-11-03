@@ -28,9 +28,13 @@
 #include <utility>
 #include <vector>
 
+#include "absl/container/flat_hash_map.h"
 #include "scan.h"
+#include "schema.h"
+#include "sharder.h"
 #include "tx_key.h"
 #include "tx_record.h"
+#include "type.h"
 
 namespace txservice
 {
@@ -44,7 +48,7 @@ enum class ScannerStatus
 {
     Open = 0,
     Closed,
-    Blocked
+    Blocked,
 };
 
 class CcScanner;
@@ -58,23 +62,31 @@ public:
     static constexpr size_t MetaDataSize = 8;
 
     ScanCache(CcScanner *scanner)
-        : idx_(0), size_(0), scanner_(scanner), mem_size_(0), mem_max_bytes_(0)
-    {
-    }
-
-    ScanCache(size_t idx, size_t size, CcScanner *scanner)
-        : idx_(idx),
-          size_(size),
-          trailing_cnt_(0),
+        : idx_(0),
+          size_(0),
+          capacity_(ScanBatchSize),
           scanner_(scanner),
           mem_size_(0),
           mem_max_bytes_(0)
     {
     }
 
+    ScanCache(size_t idx, size_t size, size_t capacity, CcScanner *scanner)
+        : idx_(idx),
+          size_(size),
+          capacity_(capacity),
+          trailing_cnt_(0),
+          scanner_(scanner),
+          mem_size_(0),
+          mem_max_bytes_(0)
+    {
+        assert(size_ <= capacity);
+    }
+
     ScanCache(ScanCache &&rhs) noexcept
         : idx_(rhs.idx_),
           size_(rhs.size_),
+          capacity_(rhs.capacity_),
           trailing_cnt_(rhs.trailing_cnt_),
           scanner_(rhs.scanner_),
           mem_size_(rhs.mem_size_),
@@ -90,7 +102,7 @@ public:
         {
             return ScannerStatus::Open;
         }
-        else if (size_ == ScanCache::ScanBatchSize)
+        else if (size_ == capacity_)
         {
             return ScannerStatus::Blocked;
         }
@@ -109,6 +121,7 @@ public:
     {
         idx_ = 0;
         size_ = 0;
+        capacity_ = ScanBatchSize;
         mem_size_ = 0;
         mem_max_bytes_ = 0;
         trailing_cnt_ = 0;
@@ -126,7 +139,7 @@ public:
 
     bool Full() const
     {
-        return size_ == ScanCache::ScanBatchSize;
+        return size_ == capacity_;
     }
 
     CcScanner *Scanner() const
@@ -144,7 +157,8 @@ public:
                                     uint64_t cce_lock_ptr,
                                     int64_t term,
                                     uint32_t core_id,
-                                    uint32_t ng_id) = 0;
+                                    uint32_t ng_id,
+                                    bool need_deserialize_key) = 0;
 
     virtual const ScanTuple *LastTuple() const = 0;
 
@@ -155,12 +169,20 @@ public:
         trailing_cnt_++;
     }
 
+    void RemoveLast(size_t new_size)
+    {
+        assert(new_size <= size_);
+        trailing_cnt_ = size_ - new_size;
+        size_ = new_size;
+    }
+
     virtual void TrailingTuples(
         std::vector<const ScanTuple *> &tuple_buf) const = 0;
 
 protected:
     size_t idx_;
     size_t size_;
+    size_t capacity_;
     size_t trailing_cnt_{0};
     CcScanner *const scanner_;
     uint32_t mem_size_{0};
@@ -171,6 +193,8 @@ template <typename KeyT, typename ValueT>
 struct TemplateScanCache : public ScanCache
 {
 public:
+    using ScanCache::RemoveLast;
+
     TemplateScanCache() = delete;
 
     TemplateScanCache(CcScanner *scanner, const KeySchema *key_schema)
@@ -181,8 +205,16 @@ public:
         assert(cache_.size() == ScanCache::ScanBatchSize);
     }
 
+    TemplateScanCache(CcScanner *scanner,
+                      size_t cache_size,
+                      const KeySchema *key_schema)
+        : ScanCache(scanner), cache_(cache_size), key_schema_(key_schema)
+    {
+        assert(cache_.size() == cache_size);
+    }
+
     TemplateScanCache(TemplateScanCache &&rhs)
-        : ScanCache(rhs.idx_, rhs.size_, rhs.scanner_),
+        : ScanCache(rhs.idx_, rhs.size_, rhs.capacity_, rhs.scanner_),
           cache_(std::move(rhs.cache_)),
           key_schema_(rhs.key_schema_)
     {
@@ -200,6 +232,16 @@ public:
     void SetCacheMaxBytes(size_t max_bytes)
     {
         mem_max_bytes_ = max_bytes;
+    }
+
+    void SetCacheCapacity(size_t capacity)
+    {
+        capacity_ = capacity;
+    }
+
+    const KeySchema *GetKeySchema()
+    {
+        return key_schema_;
     }
 
     TemplateScanTuple<KeyT, ValueT> *AddScanTuple()
@@ -235,7 +277,8 @@ public:
                             uint64_t cce_lock_ptr,
                             int64_t term,
                             uint32_t core_id,
-                            uint32_t ng_id) override
+                            uint32_t ng_id,
+                            bool need_deserialize_key) override
     {
         assert(size_ <= cache_.size());
 
@@ -264,9 +307,16 @@ public:
             // this scan. Only deserializes the key when the key is included.
             assert(key_ts > 0);
             scan_tuple->key_ts_ = key_ts;
-            scan_tuple->KeyObj().Deserialize(
-                key_str.data(), key_offset, key_schema_);
-
+            if (need_deserialize_key)
+            {
+                scan_tuple->KeyObj().Deserialize(
+                    key_str.data(), key_offset, key_schema_);
+            }
+            else
+            {
+                scan_tuple->KeyObj().SetPackedKey(key_str.data(),
+                                                  key_str.size());
+            }
             scan_tuple->rec_status_ = rec_status;
             scan_tuple->SetRecord(record_str.data(), rec_offset);
 
@@ -299,6 +349,12 @@ public:
         return &cache_[idx];
     }
 
+    TemplateScanTuple<KeyT, ValueT> *At(uint32_t idx)
+    {
+        assert(idx < cache_.size());
+        return &cache_[idx];
+    }
+
     void TrailingTuples(
         std::vector<const ScanTuple *> &tuple_buf) const override
     {
@@ -306,6 +362,19 @@ public:
         {
             tuple_buf.push_back(At(idx));
         }
+    }
+
+    void RemoveLast(const KeyT &start_key)
+    {
+        auto cmp =
+            [](const KeyT &key, const TemplateScanTuple<KeyT, ValueT> &tuple)
+        { return key < tuple.KeyObj(); };
+
+        auto last =
+            size_ == cache_.size() ? cache_.end() : cache_.begin() + size_;
+        auto it = std::upper_bound(cache_.begin(), last, start_key, cmp);
+        size_t new_size = it - cache_.begin();
+        RemoveLast(new_size);
     }
 
 private:
@@ -328,28 +397,40 @@ public:
         : direct_(direction),
           index_type_(index_type),
           status_(ScannerStatus::Open),
-          drain_cache_mode_(false),
           is_ckpt_delta_(false)
     {
     }
 
     virtual ~CcScanner() = default;
 
-    // virtual ScannerStatus MoveNext(const ScanTuple *&tuple) = 0;
-    virtual uint32_t BlockedShard() const = 0;
     virtual ScanCache *Cache(uint32_t shard_code) = 0;
-    virtual ScanCache *AddShard(uint32_t shard_code) = 0;
+    virtual ScanCache *KvCache(uint32_t shard_code,
+                               uint16_t bucket_id,
+                               size_t batch_size)
+    {
+        return nullptr;
+    }
+
+    virtual TxKey Merge(uint32_t shard_code,
+                        bool &memory_is_drained,
+                        absl::flat_hash_map<uint16_t, bool> &kv_is_drained)
+    {
+        assert(false);
+        return TxKey();
+    }
+
     virtual void ResetShards(size_t shard_cnt) = 0;
     virtual void ResetCaches() = 0;
     virtual void Reset(const KeySchema *key_schema) = 0;
     virtual void Close() = 0;
     virtual void ShardCacheSizes(std::vector<std::pair<uint32_t, size_t>>
                                      *shard_code_and_sizes) const = 0;
-    virtual void ShardCacheLastTuples(
+    virtual void MemoryShardCacheLastTuples(
         std::vector<const ScanTuple *> *last_tuples) const = 0;
-    virtual void ShardCacheTrailingTuples(
+    virtual void MemoryShardCacheTrailingTuples(
         std::vector<const ScanTuple *> *trailing_tuples) const = 0;
 
+    virtual void Init() = 0;
     virtual const ScanTuple *Current() = 0;
     virtual CcmScannerType Type() const = 0;
 
@@ -365,8 +446,6 @@ public:
 
     virtual void MoveNext() = 0;
 
-    virtual void SetDrainCacheMode(bool drain_cache_mode) = 0;
-    virtual bool GetDrainCacheMode() = 0;
     virtual TxKey DecodeKey(const std::string &blob) const
     {
         return TxKey();
@@ -380,11 +459,17 @@ public:
     {
     }
 
-    virtual uint32_t CacheCount() const = 0;
+    virtual uint32_t ShardCount() const = 0;
 
-    virtual void CommitAtCore(uint16_t core_id) = 0;
+    virtual void CommitAtCore(uint16_t core_id)
+    {
+        assert(false);
+    }
 
-    virtual void FinalizeCommit() = 0;
+    virtual void FinalizeCommit()
+    {
+        assert(false);
+    }
 
     ScanDirection Direction() const
     {
@@ -480,10 +565,6 @@ protected:
     ScanIndexType index_type_;
     ScannerStatus status_;
 
-    // In drain cache mode, Movenext/Current will drain out the cached the
-    // tuples in each buckets
-    bool drain_cache_mode_{false};
-
 public:
     bool read_local_{false};
     bool is_ckpt_delta_{false};
@@ -501,26 +582,265 @@ public:
 };
 
 template <typename KeyT, typename ValueT>
-class TemplateCcScanner : public CcScanner
+class HashParitionCcScanner : public CcScanner
 {
 public:
-    TemplateCcScanner(ScanDirection direct,
-                      ScanIndexType index_type,
-                      const KeySchema *schema)
-        : CcScanner(direct, index_type),
-          scans_(),
-          curr_shard_code_(0),
-          curr_tuple_(nullptr),
-          key_schema_(schema)
+    struct ShardCache
     {
-    }
+        ShardCache(CcScanner *scanner, const KeySchema *key_schema)
+        {
+            memory_cache_ = std::make_unique<TemplateScanCache<KeyT, ValueT>>(
+                scanner, key_schema);
+        }
 
-    ScanCache *AddShard(uint32_t shard_code) override
+        void Recycle()
+        {
+            if (memory_cache_)
+            {
+                memory_cache_->Reset();
+            }
+
+            for (auto &[bucket_id, cache] : kv_caches_)
+            {
+                cache->Reset();
+                free_cache_pool_.push_back(std::move(cache));
+            }
+
+            kv_caches_.clear();
+        }
+
+        size_t ToTalSize()
+        {
+            size_t size = 0;
+            if (memory_cache_)
+            {
+                size += memory_cache_->Size();
+            }
+
+            for (const auto &[bucket_id, kv_cache] : kv_caches_)
+            {
+                size += kv_cache->Size();
+            }
+
+            return size;
+        }
+
+        TemplateScanCache<KeyT, ValueT> *GetOrCreateKvCache(
+            uint16_t bucket_id,
+            CcScanner *scanner,
+            const KeySchema *key_schema,
+            size_t batch_size)
+        {
+            auto iter = kv_caches_.find(bucket_id);
+            if (iter != kv_caches_.end())
+            {
+                return iter->second.get();
+            }
+            else
+            {
+                if (free_cache_pool_.empty())
+                {
+                    auto cache =
+                        std::make_unique<TemplateScanCache<KeyT, ValueT>>(
+                            scanner, batch_size, key_schema);
+                    // we don't care kv cache capacity
+                    cache->SetCacheCapacity(SIZE_MAX);
+                    auto em_it =
+                        kv_caches_.try_emplace(bucket_id, std::move(cache));
+                    return em_it.first->second.get();
+                }
+                else
+                {
+                    auto cache = std::move(free_cache_pool_.back());
+                    free_cache_pool_.pop_back();
+                    cache->Reset();
+                    cache->SetCacheCapacity(SIZE_MAX);
+                    auto em_it =
+                        kv_caches_.try_emplace(bucket_id, std::move(cache));
+                    return em_it.first->second.get();
+                }
+            }
+        }
+
+        TemplateScanCache<KeyT, ValueT> *GetKvCache(uint16_t bucket_id)
+        {
+            auto iter = kv_caches_.find(bucket_id);
+            if (iter != kv_caches_.end())
+            {
+                return iter->second.get();
+            }
+            else
+            {
+                // TableType::RangePartition
+                // assert(Sharder::Instance().GetDataStoreHandler() == nullptr);
+                return nullptr;
+            }
+        }
+
+        class Iterator
+        {
+        public:
+            Iterator()
+                : mgr_(nullptr),
+                  scan_cache_type_(ScanCacheType::MemoryCache),
+                  inner_(0),
+                  cur_(nullptr)
+            {
+            }
+
+            Iterator(const ShardCache *m)
+                : mgr_(m),
+                  scan_cache_type_(ScanCacheType::MemoryCache),
+                  inner_(0),
+                  cur_(nullptr)
+            {
+            }
+
+            Iterator(const Iterator &other)
+            {
+                mgr_ = other.mgr_;
+                scan_cache_type_ = other.scan_cache_type_;
+                inner_ = other.inner_;
+                kv_cache_iter_ = other.kv_cache_iter_;
+                cur_ = other.cur_;
+            }
+
+            Iterator &operator=(const Iterator &other)
+            {
+                if (this != &other)
+                {
+                    mgr_ = other.mgr_;
+                    scan_cache_type_ = other.scan_cache_type_;
+                    inner_ = other.inner_;
+                    kv_cache_iter_ = other.kv_cache_iter_;
+                    cur_ = other.cur_;
+                }
+                return *this;
+            }
+
+            enum class ScanCacheType
+            {
+                MemoryCache = 0,
+                KvCache = 1
+            };
+
+            void Init()
+            {
+                scan_cache_type_ = ScanCacheType::MemoryCache;
+                inner_ = 0;
+                kv_cache_iter_ = mgr_->kv_caches_.cbegin();
+                cur_ = nullptr;
+                SkipEmpty();
+            }
+
+            const TemplateScanTuple<KeyT, ValueT> *Current() const
+            {
+                assert(Valid());
+                return cur_;
+            }
+
+            bool MoveNext()
+            {
+                ++inner_;
+                if (scan_cache_type_ == ScanCacheType::MemoryCache)
+                {
+                    if (inner_ < mgr_->memory_cache_->Size())
+                    {
+                        cur_ = mgr_->memory_cache_->At(inner_);
+                        return true;
+                    }
+
+                    scan_cache_type_ = ScanCacheType::KvCache;
+                    kv_cache_iter_ = mgr_->kv_caches_.cbegin();
+                    inner_ = 0;  // reset containter index
+                }
+                else
+                {
+                    assert(kv_cache_iter_ != mgr_->kv_caches_.cend());
+                    if (inner_ < kv_cache_iter_->second->Size())
+                    {
+                        cur_ = kv_cache_iter_->second->At(inner_);
+                        return true;
+                    }
+                    // move to next kv cache
+                    kv_cache_iter_++;
+                    inner_ = 0;
+                }
+
+                SkipEmpty();
+                return Valid();
+            }
+
+            bool Valid() const
+            {
+                return cur_ != nullptr;
+            }
+
+        private:
+            void SkipEmpty()
+            {
+                if (mgr_ == nullptr)
+                {
+                    return;
+                }
+
+                cur_ = nullptr;
+                inner_ = 0;
+
+                if (scan_cache_type_ == ScanCacheType::MemoryCache)
+                {
+                    if (mgr_->memory_cache_ && mgr_->memory_cache_->Size() > 0)
+                    {
+                        cur_ = mgr_->memory_cache_->At(inner_);
+                        return;
+                    }
+
+                    scan_cache_type_ = ScanCacheType::KvCache;
+                    kv_cache_iter_ = mgr_->kv_caches_.cbegin();
+                }
+
+                while (kv_cache_iter_ != mgr_->kv_caches_.cend())
+                {
+                    if (kv_cache_iter_->second->Size() > 0)
+                    {
+                        cur_ = kv_cache_iter_->second->At(inner_);
+                        return;
+                    }
+
+                    ++kv_cache_iter_;
+                }
+
+                assert(kv_cache_iter_ == mgr_->kv_caches_.cend());
+            }
+
+            const ShardCache *mgr_;
+            ScanCacheType scan_cache_type_{ScanCacheType::MemoryCache};
+            size_t inner_;  // containter index
+            typename absl::flat_hash_map<
+                uint16_t,
+                std::unique_ptr<TemplateScanCache<KeyT, ValueT>>>::
+                const_iterator kv_cache_iter_{};
+            const TemplateScanTuple<KeyT, ValueT> *cur_;
+        };
+
+        Iterator NewIterator()
+        {
+            return Iterator(this);
+        }
+
+        std::vector<std::unique_ptr<TemplateScanCache<KeyT, ValueT>>>
+            free_cache_pool_;
+        std::unique_ptr<TemplateScanCache<KeyT, ValueT>> memory_cache_{nullptr};
+        absl::flat_hash_map<uint16_t,
+                            std::unique_ptr<TemplateScanCache<KeyT, ValueT>>>
+            kv_caches_;
+    };
+
+    HashParitionCcScanner(ScanDirection direct,
+                          ScanIndexType index_type,
+                          const KeySchema *schema)
+        : CcScanner(direct, index_type), key_schema_(schema)
     {
-        std::unique_lock<std::mutex> lock(mutex_);
-        auto em_it = scans_.try_emplace(shard_code, this, key_schema_);
-        em_it.first->second.Reset();
-        return &em_it.first->second;
     }
 
     void ResetShards(size_t shard_cnt) override
@@ -531,160 +851,154 @@ public:
 
     void ResetCaches() override
     {
-        for (auto &[shard_code, cache] : scans_)
+        for (auto &[shard_code, cache] : shard_caches_)
         {
-            cache.Reset();
+            cache->memory_cache_->Reset();
+            for (auto &[bucket_id, kv_cache] : cache->kv_caches_)
+            {
+                kv_cache->Reset();
+            }
         }
 
-        curr_shard_code_ = 0;
-        curr_tuple_ = 0;
-    }
-
-    uint32_t BlockedShard() const override
-    {
-        return curr_shard_code_;
+        current_iter_ = {};
+        shard_cache_iter_ = typename ShardCache::Iterator();
+        cache_offset_ = 0;
+        init_ = false;
     }
 
     ScanCache *Cache(uint32_t shard_code) override
     {
+        ShardCache *shard_cache = GetShardCache(shard_code);
+        return shard_cache->memory_cache_.get();
         // For TemplateCcScanner, shard_code is (ng_id << 10) + core_id.
-        return &scans_.at(shard_code);
+    }
+
+    ScanCache *KvCache(uint32_t shard_code,
+                       uint16_t bucket_id,
+                       size_t batch_size) override
+    {
+        ShardCache *shard_cache = GetShardCache(shard_code);
+        return shard_cache->GetOrCreateKvCache(
+            bucket_id, this, key_schema_, batch_size);
     }
 
     void ShardCacheSizes(std::vector<std::pair<uint32_t, size_t>>
                              *shard_code_and_sizes) const override
     {
         std::unique_lock<std::mutex> lock(mutex_);
-        for (const auto &[shard_code, cache] : scans_)
+        for (const auto &[shard_code, cache] : shard_caches_)
         {
-            shard_code_and_sizes->emplace_back(shard_code, cache.Size());
+            shard_code_and_sizes->emplace_back(shard_code, cache->ToTalSize());
         }
     }
 
-    void ShardCacheLastTuples(
+    void MemoryShardCacheLastTuples(
         std::vector<const ScanTuple *> *last_tuples) const override
     {
         std::unique_lock<std::mutex> lock(mutex_);
-        for (const auto &[shard_code, cache] : scans_)
+        last_tuples->reserve(shard_caches_.size());
+        for (const auto &[shard_code, shard_cache] : shard_caches_)
         {
-            last_tuples->emplace_back(cache.LastTuple());
+            last_tuples->emplace_back(shard_cache->memory_cache_->LastTuple());
         }
     }
 
-    void ShardCacheTrailingTuples(
-        std::vector<const ScanTuple *> *last_tuples) const override
+    void MemoryShardCacheTrailingTuples(
+        std::vector<const ScanTuple *> *trailing_tuples) const override
     {
-        // Hash partition does not have trailing tuples.
+        std::unique_lock<std::mutex> lock(mutex_);
+
+        for (auto &[shard_code, shard_cache] : shard_caches_)
+        {
+            shard_cache->memory_cache_->TrailingTuples(*trailing_tuples);
+        }
+    }
+
+    TxKey DecodeKey(const std::string &blob) const override
+    {
+        std::unique_ptr<KeyT> key = std::make_unique<KeyT>();
+        key->SetPackedKey(blob.data(), blob.size());
+        return TxKey(std::move(key));
+    }
+
+    void Init() override
+    {
+        if (!init_)
+        {
+            current_iter_ = shard_caches_.begin();
+            while (current_iter_ != shard_caches_.end())
+            {
+                shard_cache_iter_ = current_iter_->second->NewIterator();
+                shard_cache_iter_.Init();
+                if (shard_cache_iter_.Valid())
+                {
+                    break;
+                }
+
+                current_iter_++;
+            }
+
+            if (current_iter_ == shard_caches_.end())
+            {
+                status_ = ScannerStatus::Blocked;
+            }
+            else
+            {
+                status_ = ScannerStatus::Open;
+            }
+
+            init_ = true;
+        }
     }
 
     const ScanTuple *Current() override
     {
-        if (curr_tuple_ != nullptr)
-        {
-            return curr_tuple_;
-        }
-        else if (status_ == ScannerStatus::Closed)
+        if (status_ != ScannerStatus::Open)
         {
             return nullptr;
         }
 
-        const KeyT *min_key = nullptr;
-
-        for (const auto &[shard_code, cache] : scans_)
+        if (current_iter_ == shard_caches_.end())
         {
-            const TemplateScanTuple<KeyT, ValueT> *tuple = cache.Current();
-
-            if (tuple != nullptr)
-            {
-                if (min_key == nullptr || tuple->key_ts_ == 0 ||
-                    (direct_ == ScanDirection::Forward &&
-                     tuple->key_obj_ < *min_key) ||
-                    (direct_ == ScanDirection::Backward &&
-                     !(tuple->key_obj_ < *min_key)))
-                {
-                    min_key = &tuple->key_obj_;
-                    curr_shard_code_ = shard_code;
-
-                    if (tuple->key_ts_ == 0)
-                    {
-                        // When the key's timestamp is 0, the key is not
-                        // included in the scan results. The scan tuple is
-                        // only returned for later validation. Since the
-                        // key is not included in the results, the key's
-                        // relative order w.r.t. other keys is irrelevant.
-                        // Hence, we terminate merging early and returns the
-                        // tuple immediately. The upper-layer tx will bookkeep
-                        // the gap in the scan set and skips the key.
-                        min_key = &tuple->key_obj_;
-                        curr_shard_code_ = shard_code;
-                        break;
-                    }
-                }
-            }
-            else
-            {
-                if (cache.Status() == ScannerStatus::Blocked)
-                {
-                    if (!drain_cache_mode_)
-                    {
-                        status_ = ScannerStatus::Blocked;
-                        curr_shard_code_ = shard_code;
-                        curr_tuple_ = nullptr;
-
-                        return nullptr;
-                    }
-                    {
-                        // In drain_cache_mode_, we just it iterate all cache
-                    }
-                }
-            }
-        }
-
-        if (min_key == nullptr)
-        {
-            curr_tuple_ = nullptr;
-            status_ = ScannerStatus::Closed;
+            status_ = ScannerStatus::Blocked;
             return nullptr;
         }
-        else
-        {
-            curr_tuple_ = scans_.at(curr_shard_code_).Current();
-            status_ = ScannerStatus::Open;
-            return curr_tuple_;
-        }
+
+        return shard_cache_iter_.Current();
     }
 
     void MoveNext() override
     {
-        if (curr_tuple_ != nullptr)
+        if (!init_)
         {
-            scans_.at(curr_shard_code_).MoveNext();
-            curr_tuple_ = nullptr;
+            return;
         }
-        else if (status_ != ScannerStatus::Closed)
+
+        if (current_iter_ == shard_caches_.end())
         {
-            curr_tuple_ =
-                static_cast<const TemplateScanTuple<KeyT, ValueT> *>(Current());
-            if (curr_tuple_ != nullptr)
+            status_ = ScannerStatus::Blocked;
+            return;
+        }
+
+        if (status_ != ScannerStatus::Open)
+        {
+            return;
+        }
+
+        bool has_data = shard_cache_iter_.MoveNext();
+        while (!has_data)
+        {
+            current_iter_++;
+            if (current_iter_ == shard_caches_.end())
             {
-                // The scanner is not blocked. Advances the cache that produces
-                // the min/max key.
-                scans_.at(curr_shard_code_).MoveNext();
-                curr_tuple_ = nullptr;
+                status_ = ScannerStatus::Blocked;
+                return;
             }
+
+            shard_cache_iter_ = current_iter_->second->NewIterator();
+            shard_cache_iter_.Init();
+            has_data = shard_cache_iter_.Valid();
         }
-    }
-
-    void SetDrainCacheMode(bool drain_cache_mode) override
-    {
-        std::unique_lock<std::mutex> lock(mutex_);
-        drain_cache_mode_ = drain_cache_mode;
-    }
-
-    bool GetDrainCacheMode() override
-    {
-        std::unique_lock<std::mutex> lock(mutex_);
-        return drain_cache_mode_;
     }
 
     CcmScannerType Type() const override
@@ -692,48 +1006,189 @@ public:
         return CcmScannerType::HashPartition;
     }
 
-    uint32_t CacheCount() const override
+    uint32_t ShardCount() const override
     {
-        return scans_.size();
-    }
-
-    void CommitAtCore(uint16_t core_id) override
-    {
-    }
-
-    void FinalizeCommit() override
-    {
+        return shard_caches_.size();
     }
 
     void Reset(const KeySchema *key_schema) override
     {
+        status_ = ScannerStatus::Blocked;
         key_schema_ = key_schema;
-        curr_shard_code_ = 0;
-        curr_tuple_ = nullptr;
-
-        for (auto cache_it = scans_.begin(); cache_it != scans_.end();
-             ++cache_it)
-        {
-            cache_it->second.Reset();
-        }
+        shard_caches_.clear();
+        current_iter_ = {};
+        shard_cache_iter_ = typename ShardCache::Iterator();
+        init_ = false;
     }
 
     void Close() override
     {
         status_ = ScannerStatus::Closed;
-        scans_.clear();
-        curr_shard_code_ = 0;
-        curr_tuple_ = 0;
+
+        // shard_caches_.clear();
+        for (auto &[shard_code, shard_cache] : shard_caches_)
+        {
+            shard_cache->Recycle();
+        }
+
+        current_iter_ = {};
+        shard_cache_iter_ = typename ShardCache::Iterator();
+        init_ = false;
+    }
+
+    ShardCache *GetShardCache(uint32_t shard_code)
+    {
+        std::lock_guard<std::mutex> lk(mutex_);
+        auto iter = shard_caches_.find(shard_code);
+        if (iter != shard_caches_.end())
+        {
+            return iter->second.get();
+        }
+        else
+        {
+            auto shard_cache = std::make_unique<ShardCache>(this, key_schema_);
+            auto em_it =
+                shard_caches_.try_emplace(shard_code, std::move(shard_cache));
+            return em_it.first->second.get();
+        }
+    }
+
+    TxKey Merge(uint32_t shard_code,
+                bool &memory_is_drained,
+                absl::flat_hash_map<uint16_t, bool> &kv_is_drained) override
+    {
+        assert(Direction() == ScanDirection::Forward);
+        ShardCache *shard_cache = GetShardCache(shard_code);
+
+        const KeyT *min_key = nullptr;
+
+        assert(memory_is_drained || shard_cache->memory_cache_->Size() > 0);
+        if (!memory_is_drained && shard_cache->memory_cache_->Size() > 0)
+        {
+            const TemplateScanTuple<KeyT, ValueT> *tuple =
+                shard_cache->memory_cache_->Last();
+            min_key = &tuple->KeyObj();
+        }
+
+        for (auto &[bucket_id, kv_cache] : shard_cache->kv_caches_)
+        {
+            assert(kv_is_drained.at(bucket_id) || kv_cache->Size() > 0);
+            if (!kv_is_drained.at(bucket_id) && kv_cache->Size() > 0)
+            {
+                const TemplateScanTuple<KeyT, ValueT> *tuple = kv_cache->Last();
+                if (min_key == nullptr || tuple->KeyObj() < *min_key)
+                {
+                    min_key = &tuple->KeyObj();
+                }
+            }
+        }
+
+        if (min_key != nullptr)
+        {
+            size_t memory_cache_size = shard_cache->memory_cache_->Size();
+            if (memory_cache_size > 0)
+            {
+                shard_cache->memory_cache_->RemoveLast(*min_key);
+                if (memory_cache_size != shard_cache->memory_cache_->Size())
+                {
+                    memory_is_drained = false;
+                }
+            }
+
+            for (auto &[bucket_id, kv_cache] : shard_cache->kv_caches_)
+            {
+                size_t kv_cache_size = kv_cache->Size();
+                if (kv_cache_size > 0)
+                {
+                    kv_cache->RemoveLast(*min_key);
+                    if (kv_cache_size != kv_cache->Size())
+                    {
+                        kv_is_drained[bucket_id] = false;
+                    }
+                }
+            }
+        }
+
+        // Init cache offset
+        absl::flat_hash_map<uint16_t, size_t> cache_offset;
+        for (auto &[bucket_id, kv_cache] : shard_cache->kv_caches_)
+        {
+            cache_offset[bucket_id] = 0;
+        }
+
+        size_t memory_cache_offset = 0;
+        size_t memory_cache_size = shard_cache->memory_cache_->Size();
+
+        // deduplicate
+        while (memory_cache_offset < memory_cache_size)
+        {
+            const TemplateScanTuple<KeyT, ValueT> *memory_tuple =
+                shard_cache->memory_cache_->At(memory_cache_offset);
+            uint16_t target_bucket =
+                Sharder::MapKeyHashToBucketId(memory_tuple->KeyObj().Hash());
+            TemplateScanCache<KeyT, ValueT> *kv_cache =
+                shard_cache->GetKvCache(target_bucket);
+            if (kv_cache)
+            {
+                while (cache_offset[target_bucket] < kv_cache->Size())
+                {
+                    TemplateScanTuple<KeyT, ValueT> *kv_tuple =
+                        kv_cache->At(cache_offset[target_bucket]);
+                    if (kv_tuple->KeyObj() < memory_tuple->KeyObj())
+                    {
+                        // index_chain->offsets_.emplace_back(
+                        //    kv_cache, cache_offset[target_bucket]);
+                        cache_offset[target_bucket]++;
+                    }
+                    else if (kv_tuple->KeyObj() == memory_tuple->KeyObj())
+                    {
+                        kv_tuple->rec_status_ = RecordStatus::Deleted;
+                        cache_offset[target_bucket]++;
+                        break;
+                    }
+                    else
+                    {
+                        break;
+                    }
+                }
+            }
+
+            // index_chain->offsets_.emplace_back(shard_cache->memory_cache_.get(),
+            //                                   memory_cache_offset);
+            memory_cache_offset++;
+        }
+
+        // memory cache is drained. we don't need to merge data
+        for (auto &[bucket_id, offset] : cache_offset)
+        {
+            TemplateScanCache<KeyT, ValueT> *kv_cache =
+                shard_cache->GetKvCache(bucket_id);
+            if (kv_cache)
+            {
+                while (offset < kv_cache->Size())
+                {
+                    // index_chain->offsets_.emplace_back(kv_cache, offset);
+                    offset++;
+                }
+            }
+        }
+
+        return TxKey(min_key);
     }
 
 private:
     /// <summary>
     /// A collection of local and remote scan caches, one per core.
     /// </summary>
-    std::unordered_map<uint32_t, TemplateScanCache<KeyT, ValueT>> scans_;
 
-    uint32_t curr_shard_code_;
-    const TemplateScanTuple<KeyT, ValueT> *curr_tuple_;
+    std::unordered_map<uint32_t, std::unique_ptr<ShardCache>> shard_caches_;
+    typename std::unordered_map<uint32_t, std::unique_ptr<ShardCache>>::iterator
+        current_iter_;
+    typename ShardCache::Iterator shard_cache_iter_;
+
+    size_t cache_offset_{0};
+
+    bool init_{false};
 
     const KeySchema *key_schema_;
     mutable std::mutex mutex_;
@@ -750,29 +1205,8 @@ public:
     {
     }
 
-    ScanCache *AddShard(uint32_t shard_code) override
+    void Init() override
     {
-        size_t curr_size = scans_.size();
-        if (shard_code >= curr_size)
-        {
-            scans_.reserve(shard_code + 1);
-            index_chain_.reserve(shard_code + 1);
-            for (size_t idx = curr_size; idx < shard_code + 1; ++idx)
-            {
-                scans_.emplace_back(this, key_schema_);
-                index_chain_.emplace_back();
-            }
-        }
-
-        for (size_t idx = 0; idx < curr_size; ++idx)
-        {
-            scans_[idx].Reset();
-            index_chain_[idx].clear();
-        }
-
-        assert(shard_code < scans_.size());
-
-        return &scans_[shard_code];
     }
 
     void ResetShards(size_t shard_cnt) override
@@ -822,11 +1256,6 @@ public:
         head_occupied_ = false;
     }
 
-    uint32_t BlockedShard() const override
-    {
-        return UINT32_MAX;
-    }
-
     ScanCache *Cache(uint32_t shard_code) override
     {
         // For RangePartitionedCcmScanner, shard_code is core_id.
@@ -842,16 +1271,17 @@ public:
         }
     }
 
-    void ShardCacheLastTuples(
+    void MemoryShardCacheLastTuples(
         std::vector<const ScanTuple *> *last_tuples) const override
     {
+        last_tuples->reserve(scans_.size());
         for (size_t core_id = 0; core_id < scans_.size(); ++core_id)
         {
             last_tuples->emplace_back(scans_[core_id].LastTuple());
         }
     }
 
-    void ShardCacheTrailingTuples(
+    void MemoryShardCacheTrailingTuples(
         std::vector<const ScanTuple *> *trailing_tuples) const override
     {
         for (size_t core_id = 0; core_id < scans_.size(); ++core_id)
@@ -888,16 +1318,6 @@ public:
         }
     }
 
-    void SetDrainCacheMode(bool drain_cache_mode) override
-    {
-        drain_cache_mode_ = drain_cache_mode;
-    }
-
-    bool GetDrainCacheMode() override
-    {
-        return drain_cache_mode_;
-    }
-
     CcmScannerType Type() const override
     {
         return CcmScannerType::RangePartition;
@@ -922,7 +1342,7 @@ public:
         return TxKey(std::move(key));
     }
 
-    uint32_t CacheCount() const override
+    uint32_t ShardCount() const override
     {
         return scans_.size();
     }
@@ -967,7 +1387,7 @@ public:
             if (is_require_sort_)
             {
                 CompoundIndex head_index(core_id, 0);
-                Merge(head_index);
+                MergeCompoundIndex(head_index);
             }
             else
             {
@@ -1038,7 +1458,7 @@ private:
         return inf;
     }
 
-    void Merge(CompoundIndex head)
+    void MergeCompoundIndex(CompoundIndex head)
     {
         std::unique_lock<std::mutex> lk(mux_);
         if (!head_occupied_)
@@ -1060,11 +1480,11 @@ private:
             head_occupied_ = false;
 
             lk.unlock();
-            Merge(head, curr_head);
+            MergeCompoundIndex(head, curr_head);
         }
     }
 
-    void Merge(CompoundIndex left, CompoundIndex right)
+    void MergeCompoundIndex(CompoundIndex left, CompoundIndex right)
     {
         CompoundIndex merge_head;
         CompoundIndex prev_index;
@@ -1072,12 +1492,12 @@ private:
         if (left == Inf())
         {
             // The left is empty.
-            return Merge(right);
+            return MergeCompoundIndex(right);
         }
         else if (right == Inf())
         {
             // The right is empty.
-            return Merge(left);
+            return MergeCompoundIndex(left);
         }
 
         const TemplateScanTuple<KeyT, ValueT> *left_tuple = At(left);
@@ -1162,7 +1582,7 @@ private:
             UpdateNextIndex(prev_index, right);
         }
 
-        Merge(merge_head);
+        MergeCompoundIndex(merge_head);
     }
 
     /**

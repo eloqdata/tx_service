@@ -22,14 +22,19 @@
 #pragma once
 
 #include <atomic>
+#include <cstdint>
 #include <memory>  //unique_ptr
 #include <shared_mutex>
 #include <utility>
 #include <vector>
 
+#include "absl/container/flat_hash_map.h"
 #include "cc/cc_entry.h"
 #include "proto/cc_request.pb.h"
+#include "remote/remote_type.h"
+#include "sharder.h"
 #include "tx_command.h"
+#include "tx_key.h"
 #include "type.h"
 
 namespace txservice
@@ -209,39 +214,231 @@ struct ScanOpenResult
 
 struct RemoteScanCache
 {
-    RemoteScanCache() : cache_msg_(nullptr), cache_mem_size_(0)
+    RemoteScanCache() : shard_cache_(nullptr), capacity_(128)
     {
     }
 
-    RemoteScanCache(remote::ScanCache_msg *cache_msg, uint32_t mem_size)
-        : cache_msg_(cache_msg), cache_mem_size_(mem_size)
+    RemoteScanCache(::txservice::remote::ShardCacheMsg *shard_cache,
+                    size_t capacity)
+        : shard_cache_(shard_cache), capacity_(capacity)
     {
+        memory_cache_hash_codes_.reserve(capacity);
     }
 
-    size_t Size() const
+    void SetCapacity(size_t capacity)
     {
-        return cache_msg_->scan_tuple_size();
+        capacity_ = capacity;
+        memory_cache_hash_codes_.reserve(capacity);
     }
 
-    bool IsFull() const
+    bool MemoryCacheIsFull() const
     {
-        return cache_mem_size_ >= 1024;
+        return static_cast<size_t>(
+                   shard_cache_->memory_scan_cache().scan_tuple_size()) >=
+               capacity_;
     }
 
-    const std::string &LastScanKey() const
+    ::txservice::remote::ScanCache_msg *GetMemoryCache()
     {
-        return cache_msg_->scan_tuple(cache_msg_->scan_tuple_size() - 1).key();
+        return shard_cache_->mutable_memory_scan_cache();
     }
 
-    remote::ScanTuple_msg *LastTuple()
+    void AddHashCode(size_t hash_code)
     {
-        auto *tuples = cache_msg_->mutable_scan_tuple();
-        assert(!tuples->empty());
-        return &tuples->at(tuples->size() - 1);
+        memory_cache_hash_codes_.push_back(hash_code);
+        assert(memory_cache_hash_codes_.size() ==
+               static_cast<size_t>(
+                   shard_cache_->memory_scan_cache().scan_tuple_size()));
     }
 
-    remote::ScanCache_msg *cache_msg_;
-    uint32_t cache_mem_size_;
+    ::txservice::remote::ScanCache_msg *GetKvCache(uint16_t bucket_id)
+    {
+        ::google::protobuf::Map<uint32_t, ::txservice::remote::ScanCache_msg>
+            *kv_caches = shard_cache_->mutable_kv_scan_cache();
+        auto iter = kv_caches->find(bucket_id);
+        if (iter != kv_caches->end())
+        {
+            return &iter->second;
+        }
+        else
+        {
+            auto em_it = kv_caches->try_emplace(bucket_id);
+            return &em_it.first->second;
+        }
+    }
+
+    static void RemoveLast(::txservice::remote::ScanCache_msg &scan_cache,
+                           const std::string &min_key)
+    {
+        const ::google::protobuf::RepeatedPtrField<
+            ::txservice::remote::ScanTuple_msg> &scan_tuple_vec =
+            scan_cache.scan_tuple();
+        // upper bound
+        int first = 0;
+        int count = scan_cache.scan_tuple_size();
+        while (count > 0)
+        {
+            int step = count / 2;
+            int mid = first + step;
+            if (!(scan_tuple_vec.Get(mid).key() > min_key))
+            {
+                first = mid + 1;
+                count -= step + 1;
+            }
+            else
+            {
+                count = step;
+            }
+        }
+
+        int trailing_cnt = scan_cache.scan_tuple_size() - first;
+        assert(trailing_cnt >= 0);
+        scan_cache.set_trailing_cnt(trailing_cnt);
+    }
+
+    std::string Merge(bool &memory_is_drained,
+                      absl::flat_hash_map<uint16_t, bool> &kv_is_drained)
+    {
+        const std::string *min_key = nullptr;
+        ::txservice::remote::ScanCache_msg *memory_cache =
+            shard_cache_->mutable_memory_scan_cache();
+        ::google::protobuf::Map<uint32_t, ::txservice::remote::ScanCache_msg>
+            *kv_caches = shard_cache_->mutable_kv_scan_cache();
+
+        assert(memory_is_drained || memory_cache->scan_tuple_size() > 0);
+        if (!memory_is_drained && memory_cache->scan_tuple_size() > 0)
+        {
+            const ::txservice::remote::ScanTuple_msg &last_tuple =
+                memory_cache->scan_tuple(memory_cache->scan_tuple_size() - 1);
+            min_key = &last_tuple.key();
+        }
+        // const ::google::protobuf::Map<uint32_t,
+        // ::txservice::remote::ScanCache_msg> &
+        for (auto &[bucket_id, kv_cache] : *kv_caches)
+        {
+            assert(kv_is_drained.at(bucket_id) ||
+                   kv_cache.scan_tuple_size() > 0);
+            if (!kv_is_drained.at(bucket_id) && kv_cache.scan_tuple_size() > 0)
+            {
+                const ::txservice::remote::ScanTuple_msg &last_tuple =
+                    kv_cache.scan_tuple(kv_cache.scan_tuple_size() - 1);
+                min_key = &last_tuple.key();
+            }
+        }
+
+        if (min_key != nullptr)
+        {
+            auto memory_cache_size = memory_cache->scan_tuple_size();
+            if (memory_cache_size > 0)
+            {
+                RemoveLast(*memory_cache, *min_key);
+                if (memory_cache->trailing_cnt() > 0)
+                {
+                    memory_is_drained = false;
+                }
+            }
+
+            for (auto &[bucket_id, kv_cache] :
+                 *shard_cache_->mutable_kv_scan_cache())
+            {
+                auto kv_cache_size = kv_cache.scan_tuple_size();
+                if (kv_cache_size > 0)
+                {
+                    RemoveLast(kv_cache, *min_key);
+                    if (kv_cache.trailing_cnt() > 0)
+                    {
+                        kv_is_drained[bucket_id] = false;
+                    }
+                }
+            }
+        }
+
+        absl::flat_hash_map<uint16_t, int> cache_offset;
+        for (auto &[bucket_id, kv_cache] : *kv_caches)
+        {
+            cache_offset[bucket_id] = 0;
+        }
+
+        int memory_cache_idx = 0;
+        int memory_cache_end_idx =
+            memory_cache->scan_tuple_size() - memory_cache->trailing_cnt();
+        while (memory_cache_idx < memory_cache_end_idx)
+        {
+            const ::txservice::remote::ScanTuple_msg &memory_tuple =
+                memory_cache->scan_tuple(memory_cache_idx);
+            uint16_t target_bucket = Sharder::MapKeyHashToBucketId(
+                memory_cache_hash_codes_[memory_cache_idx]);
+            auto kv_cache_iter = kv_caches->find(target_bucket);
+            if (kv_cache_iter != kv_caches->end())
+            {
+                ::txservice::remote::ScanCache_msg &kv_cache =
+                    kv_cache_iter->second;
+                int kv_cache_end_idx =
+                    kv_cache.scan_tuple_size() - kv_cache.trailing_cnt();
+                assert(kv_cache_end_idx >= 0);
+                while (cache_offset[target_bucket] < kv_cache_end_idx)
+                {
+                    ::txservice::remote::ScanTuple_msg &kv_tuple =
+                        *kv_cache.mutable_scan_tuple(
+                            cache_offset[target_bucket]);
+                    if (kv_tuple.key() < memory_tuple.key())
+                    {
+                        // shard_cache_->add_bucket_id(target_bucket);
+                        // shard_cache_->add_cache_offset(
+                        //    cache_offset[target_bucket]);
+                        cache_offset[target_bucket]++;
+                    }
+                    else if (kv_tuple.key() == memory_tuple.key())
+                    {
+                        // duplicate
+                        kv_tuple.set_rec_status(
+                            remote::ToRemoteType::ConvertRecordStatus(
+                                RecordStatus::Deleted));
+                        cache_offset[target_bucket]++;
+                        break;
+                    }
+                    else
+                    {
+                        break;
+                    }
+                }
+
+                // shard_cache_->add_bucket_id(UINT32_MAX);
+                // shard_cache_->add_cache_offset(memory_cache_idx);
+            }
+            memory_cache_idx++;
+        }
+
+        // memory cache is drained. we don't need to merge data
+        for (auto &[bucket_id, offset] : cache_offset)
+        {
+            auto kv_cache_iter = kv_caches->find(bucket_id);
+            if (kv_cache_iter != kv_caches->end())
+            {
+                ::txservice::remote::ScanCache_msg &kv_cache =
+                    kv_cache_iter->second;
+                int kv_cache_end_idx =
+                    kv_cache.scan_tuple_size() - kv_cache.trailing_cnt();
+                while (offset < kv_cache_end_idx)
+                {
+                    // shard_cache_->add_bucket_id(bucket_id);
+                    // shard_cache_->add_cache_offset(offset);
+                    offset++;
+                }
+            }
+        }
+
+        if (min_key)
+        {
+            return *min_key;
+        }
+
+        return "";
+    }
+
+    ::txservice::remote::ShardCacheMsg *shard_cache_{nullptr};
+    std::vector<size_t> memory_cache_hash_codes_;
+    size_t capacity_{128};
 };
 
 struct RemoteScanSliceCache
@@ -512,11 +709,222 @@ struct RangeScanSliceResult
     std::atomic<LastKeySetStatus> last_key_status_;
 };
 
+struct BucketScanProgress
+{
+    BucketScanProgress(TxKey &&key, bool inclusive)
+        : pause_key_(std::move(key)),
+          pause_key_inclusive_(inclusive),
+          memory_scan_is_finished_(false)
+    {
+    }
+
+    BucketScanProgress(const BucketScanProgress &other)
+    {
+        pause_key_ = other.pause_key_.Clone();
+        pause_key_inclusive_ = other.pause_key_inclusive_;
+        memory_scan_is_finished_ = other.memory_scan_is_finished_;
+        scan_buckets_ = other.scan_buckets_;
+    }
+
+    BucketScanProgress &operator=(const BucketScanProgress &other)
+    {
+        if (this != &other)
+        {
+            pause_key_ = other.pause_key_.Clone();
+            pause_key_inclusive_ = other.pause_key_inclusive_;
+            memory_scan_is_finished_ = other.memory_scan_is_finished_;
+            scan_buckets_ = other.scan_buckets_;
+        }
+        return *this;
+    }
+
+    BucketScanProgress(BucketScanProgress &&other) noexcept
+    {
+        pause_key_ = std::move(other.pause_key_);
+        pause_key_inclusive_ = other.pause_key_inclusive_;
+        memory_scan_is_finished_ = other.memory_scan_is_finished_;
+        scan_buckets_ = std::move(other.scan_buckets_);
+    }
+
+    BucketScanProgress &operator=(BucketScanProgress &&other) noexcept
+    {
+        if (this != &other)
+        {
+            pause_key_ = std::move(other.pause_key_);
+            pause_key_inclusive_ = other.pause_key_inclusive_;
+            memory_scan_is_finished_ = other.memory_scan_is_finished_;
+            scan_buckets_ = std::move(other.scan_buckets_);
+        }
+        return *this;
+    }
+
+    bool AllFinished() const
+    {
+        if (!memory_scan_is_finished_)
+        {
+            return false;
+        }
+
+        for (const auto &[bucket_id, kv_scan_is_finished] : scan_buckets_)
+        {
+            if (!kv_scan_is_finished)
+            {
+                return false;
+            }
+        }
+
+        return true;
+    }
+
+    TxKey pause_key_;
+    bool pause_key_inclusive_{false};
+    bool memory_scan_is_finished_{false};
+    absl::flat_hash_map<uint16_t, bool> scan_buckets_;
+};
+
+class BucketScanPlan
+{
+public:
+    BucketScanPlan(
+        size_t plan_index,
+        absl::flat_hash_map<NodeGroupId, std::vector<uint16_t>> *buckets,
+        absl::flat_hash_map<NodeGroupId,
+                            absl::flat_hash_map<uint16_t, BucketScanProgress>>
+            &pause_position)
+        : plan_index_(plan_index), buckets_(buckets)
+    {
+        assert(buckets != nullptr);
+
+        for (const auto &[node_group_id, bucket] : *buckets)
+        {
+            node_group_terms_.try_emplace(node_group_id, -1);
+        }
+
+        if (pause_position.empty())
+        {
+            for (const auto &[node_group_id, bucket] : *buckets)
+            {
+                current_position_.try_emplace(node_group_id);
+            }
+        }
+        else
+        {
+            // Resume from eloqkv cursor
+            for (auto &[node_group_id, bucket_scan_progress] : pause_position)
+            {
+                auto iter = current_position_.try_emplace(node_group_id);
+                for (const auto &[core_idx, progress] : bucket_scan_progress)
+                {
+                    iter.first->second.try_emplace(core_idx, progress);
+                }
+            }
+        }
+
+        assert(node_group_terms_.size() > 0);
+    }
+
+    BucketScanPlan() = default;
+    BucketScanPlan(const BucketScanPlan &) = delete;
+    BucketScanPlan &operator=(const BucketScanPlan &) = delete;
+    BucketScanPlan(BucketScanPlan &&other)
+        : plan_index_(other.plan_index_),
+          buckets_(other.buckets_),
+          current_position_(std::move(other.current_position_)),
+          node_group_terms_(std::move(other.node_group_terms_))
+    {
+        other.buckets_ = nullptr;
+    }
+
+    BucketScanPlan &operator=(BucketScanPlan &&other) noexcept
+    {
+        if (this != &other)
+        {
+            plan_index_ = other.plan_index_;
+            buckets_ = std::move(other.buckets_);
+            other.buckets_ = nullptr;
+            current_position_ = std::move(other.current_position_);
+            node_group_terms_ = std::move(other.node_group_terms_);
+        }
+
+        return *this;
+    }
+
+    absl::flat_hash_map<NodeGroupId, std::vector<uint16_t>> &Buckets()
+    {
+        return *buckets_;
+    }
+
+    std::vector<uint16_t> *Buckets(NodeGroupId node_group_id)
+    {
+        return &buckets_->at(node_group_id);
+    }
+
+    int64_t GetNodeGroupTerm(NodeGroupId node_group_id) const
+    {
+        return node_group_terms_.at(node_group_id);
+    }
+
+    void UpdateNodeGroupTerm(NodeGroupId node_group_id, int64_t node_group_term)
+    {
+        node_group_terms_[node_group_id] = node_group_term;
+    }
+
+    absl::flat_hash_map<uint16_t, BucketScanProgress> *GetBucketScanProgress(
+        NodeGroupId node_group_id)
+    {
+        assert(current_position_.count(node_group_id) > 0);
+        return &current_position_.at(node_group_id);
+    }
+
+    bool CurrentPlanIsFinished()
+    {
+        for (const auto &[node_group_id, bucket_scan_progress] :
+             current_position_)
+        {
+            for (const auto &[core_idx, progress] : bucket_scan_progress)
+            {
+                if (!progress.AllFinished())
+                {
+                    return false;
+                }
+            }
+        }
+
+        return true;
+    }
+
+    size_t PlanIndex() const
+    {
+        return plan_index_;
+    }
+
+    absl::flat_hash_map<NodeGroupId,
+                        absl::flat_hash_map<uint16_t, BucketScanProgress>>
+    CurrentPosition()
+    {
+        return current_position_;
+    }
+
+private:
+    size_t plan_index_{0};
+    absl::flat_hash_map<NodeGroupId, std::vector<uint16_t>> *buckets_{nullptr};
+    // <pause key, is_drained>
+    absl::flat_hash_map<NodeGroupId,
+                        absl::flat_hash_map<uint16_t, BucketScanProgress>>
+        current_position_;
+    absl::flat_hash_map<NodeGroupId, int64_t> node_group_terms_;
+};
+
 struct ScanNextResult
 {
-    bool is_local_;
-    int64_t term_;
-    uint32_t node_group_id_;
+    void Clear()
+    {
+        ccm_scanner_ = nullptr;
+        current_scan_plan_ = nullptr;
+    }
+
+    BucketScanPlan *current_scan_plan_{nullptr};
+    CcScanner *ccm_scanner_{nullptr};
 };
 
 struct InitTxResult

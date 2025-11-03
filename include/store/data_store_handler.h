@@ -24,6 +24,7 @@
 #include <cstddef>
 #include <memory>
 #include <string>
+#include <string_view>
 #include <unordered_map>
 #include <utility>
 #include <vector>
@@ -57,33 +58,6 @@ struct FlushTaskEntry;
 
 namespace store
 {
-enum class DataStoreDataType
-{
-    Blob,
-    Numeric,
-    String,
-    Bool
-};
-
-struct DataStoreSearchCond
-{
-    DataStoreSearchCond(std::string field_name,
-                        std::string op,
-                        std::string val_str,
-                        DataStoreDataType data_type)
-        : field_name_(field_name),
-          op_(op),
-          val_str_(val_str),
-          data_type_(data_type)
-    {
-    }
-
-    std::string field_name_;
-    std::string op_;
-    std::string val_str_;
-    DataStoreDataType data_type_;
-};
-
 class DataStoreHandler
 {
 public:
@@ -179,6 +153,26 @@ public:
         return DataStoreOpStatus::Error;
     }
 
+    virtual DataStoreOpStatus FetchBucketData(
+        FetchBucketDataCc *fetch_bucket_data_cc)
+    {
+        assert(false && "Unimplemented");
+        return DataStoreOpStatus::Error;
+    }
+
+    virtual DataStoreOpStatus FetchBucketData(
+        std::vector<FetchBucketDataCc *> fetch_bucket_data_ccs)
+    {
+        assert(false && "Unimplemented");
+        return DataStoreOpStatus::Error;
+    }
+
+    virtual std::vector<DataStoreSearchCond> CreateDataSerachCondition(
+        int32_t obj_type, const std::string_view &pattern)
+    {
+        return {};
+    }
+
     virtual bool FetchTable(const TableName &table_name,
                             std::string &schema_image,
                             bool &found,
@@ -258,18 +252,6 @@ public:
     virtual bool DropKvTable(const std::string &kv_table_name) = 0;
 
     virtual void DropKvTableAsync(const std::string &kv_table_name) = 0;
-
-    virtual std::unique_ptr<DataStoreScanner> ScanForward(
-        const TableName &table_name,
-        uint32_t ng_id,
-        const TxKey &start_key,
-        bool inclusive,
-        uint8_t key_parts,
-        const std::vector<DataStoreSearchCond> &search_cond,
-        const KeySchema *key_schema,
-        const RecordSchema *rec_schema,
-        const KVCatalogInfo *kv_info,
-        bool scan_foward) = 0;
 
     /**
      * @brief Write batch historical versions into DataStore.

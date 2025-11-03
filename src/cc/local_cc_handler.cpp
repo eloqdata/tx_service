@@ -29,10 +29,13 @@
 #include "catalog_cc_map.h"
 #include "cc_map.h"
 #include "cc_protocol.h"
+#include "ccm_scanner.h"
 #include "error_messages.h"  //CcErrorCode
 #include "local_cc_shards.h"
 #include "remote/remote_cc_handler.h"
 #include "sharder.h"
+#include "tx_id.h"
+#include "tx_key.h"
 #include "tx_record.h"
 #include "tx_trace.h"
 #include "type.h"
@@ -937,7 +940,7 @@ void txservice::LocalCcHandler::ScanOpen(
     CcScanner *scanner_ptr = open_result.scanner_.get();
     assert(open_result.scan_alias_ < UINT64_MAX);
     scanner_ptr->SetStatus(ScannerStatus::Open);
-    scanner_ptr->SetDrainCacheMode(false);
+    // scanner_ptr->SetDrainCacheMode(false);
     scanner_ptr->is_ckpt_delta_ = is_ckpt_delta;
     scanner_ptr->is_for_write_ = is_for_write;
     scanner_ptr->is_covering_keys_ = is_covering_keys;
@@ -952,148 +955,9 @@ void txservice::LocalCcHandler::ScanOpen(
     scanner_ptr->lock_type_ = LockTypeUtil::DeduceLockType(
         scanner_ptr->cc_op_, iso_level, proto, is_covering_keys);
 
-    if (scanner_ptr->Type() == CcmScannerType::RangePartition)
-    {
-        // scan open for range partition just initialize the scanner. Actual
-        // scan is done in scan next.
-        hd_res.SetFinished();
-        return;
-    }
-
-    // For hash partition, scan open will do the first scan batch.
-    auto all_node_groups = Sharder::Instance().AllNodeGroups();
-    open_result.Reset(*all_node_groups);
-    size_t core_cnt = cc_shards_.Count();
-
-    // A scan sends requests to local cores and remote cc nodes.
-    uint32_t dependent_cnt = 0;
-    if (is_standby_tx)
-    {
-        dependent_cnt = core_cnt;
-    }
-    else
-    {
-        for (uint32_t ng_id : *all_node_groups)
-        {
-            uint32_t node_id = Sharder::Instance().LeaderNodeId(ng_id);
-            if (node_id == cc_shards_.node_id_)
-            {
-                dependent_cnt += core_cnt;
-            }
-            else
-            {
-                // remote
-                dependent_cnt++;
-            }
-        }
-    }
-
-    hd_res.SetRefCnt(dependent_cnt);
-
-    for (uint32_t ng_id : *all_node_groups)
-    {
-        uint32_t node_id = Sharder::Instance().LeaderNodeId(ng_id);
-        if (node_id == cc_shards_.node_id_ || is_standby_tx)
-        {
-            int64_t local_term = -1;
-            if (is_standby_tx)
-            {
-                local_term = Sharder::Instance().StandbyNodeTerm();
-            }
-            else
-            {
-                local_term = Sharder::Instance().LeaderTerm(ng_id);
-            }
-            if (local_term < 0)
-            {
-                // The local node is not the leader of the corresponding
-                // cc node group. Skips scanning the local shards.
-                open_result.cc_node_returned_[ng_id] = 1;
-                for (uint32_t core_id = 0; core_id < cc_shards_.Count();
-                     ++core_id)
-                {
-                    // The cc handler is set to be errored multiple times (i.e.,
-                    // #core-count times), because the cc handler result's
-                    // reference count includes the local core count.
-                    hd_res.SetError(CcErrorCode::REQUESTED_NODE_NOT_LEADER);
-                }
-                continue;
-            }
-
-#ifdef EXT_TX_PROC_ENABLED
-            hd_res.SetToBlock();
-#endif
-            for (uint32_t core_id = 0; core_id < core_cnt; ++core_id)
-            {
-                uint32_t shard_code = (ng_id << 10) + core_id;
-                ScanCache *shard_scan_cache = scanner_ptr->AddShard(shard_code);
-                ScanOpenBatchCc *req = scan_open_pool.NextRequest();
-                req->Reset(&table_name,
-                           schema_version,
-                           index_type,
-                           ng_id,
-                           &start_key,
-                           inclusive,
-                           direction,
-                           tx_number,
-                           ts,
-                           shard_scan_cache,
-                           local_term,
-                           &hd_res,
-                           iso_level,
-                           proto,
-                           is_for_write,
-                           is_ckpt_delta,
-                           is_covering_keys,
-                           is_require_keys,
-                           is_require_recs,
-                           false,
-                           obj_type,
-                           scan_pattern);
-
-                TX_TRACE_ACTION(this, req);
-                TX_TRACE_DUMP(req);
-                cc_shards_.EnqueueCcRequest(thd_id_, core_id, req);
-            }
-
-            open_result.cc_node_terms_[ng_id] = local_term;
-            // For the local node, we mark the flag in the cc_node_returned
-            // vector to true, even though the scan requests toward local cores
-            // may not all finish. This is because the cc_node_returned vector
-            // is used to trace remote requests, not requests toward local
-            // cores.
-            open_result.cc_node_returned_[ng_id] = 1;
-        }
-        else
-        {
-            hd_res.IncreaseRemoteRef();
-#ifdef EXT_TX_PROC_ENABLED
-            hd_res.SetToBlock();
-#endif
-            remote_hd_.ScanOpen(cc_shards_.node_id_,
-                                table_name,
-                                schema_version,
-                                index_type,
-                                ng_id,
-                                start_key,
-                                inclusive,
-                                tx_number,
-                                tx_term,
-                                command_id,
-                                ts,
-                                hd_res,
-                                direction,
-                                iso_level,
-                                proto,
-                                is_for_write,
-                                is_ckpt_delta,
-                                is_covering_keys,
-                                is_require_keys,
-                                is_require_recs,
-                                obj_type,
-                                scan_pattern);
-        }
-    }
+    // Actual scan is done in scan next.
+    hd_res.SetFinished();
+    return;
 }
 
 void txservice::LocalCcHandler::ScanOpenLocal(
@@ -1187,7 +1051,7 @@ void txservice::LocalCcHandler::ScanOpenLocal(
     CcScanner *scanner_ptr = open_result.scanner_.get();
     assert(open_result.scan_alias_ < UINT64_MAX);
     scanner_ptr->SetStatus(ScannerStatus::Open);
-    scanner_ptr->SetDrainCacheMode(false);
+    // scanner_ptr->SetDrainCacheMode(false);
     scanner_ptr->is_ckpt_delta_ = is_ckpt_delta;
     scanner_ptr->is_for_write_ = is_for_write;
     scanner_ptr->iso_level_ = iso_level;
@@ -1198,85 +1062,82 @@ void txservice::LocalCcHandler::ScanOpenLocal(
     scanner_ptr->lock_type_ = LockTypeUtil::DeduceLockType(
         scanner_ptr->cc_op_, iso_level, proto, false);
 
-    ScanCache *shard_scan_cache = scanner_ptr->AddShard(shard_code);
-
-    ScanOpenBatchCc *scan_open_cc_req = scan_open_pool.NextRequest();
-    scan_open_cc_req->Reset(&table_name,
-                            0,
-                            index_type,
-                            cc_ng_id,
-                            &start_key,
-                            inclusive,
-                            direction,
-                            tx_number,
-                            ts,
-                            shard_scan_cache,
-                            tx_term,
-                            &hd_res,
-                            scanner_ptr->iso_level_,
-                            scanner_ptr->protocol_,
-                            scanner_ptr->is_for_write_,
-                            scanner_ptr->is_ckpt_delta_,
-                            scanner_ptr->is_covering_keys_,
-                            scanner_ptr->is_require_keys_,
-                            scanner_ptr->is_require_recs_);
-
-    TX_TRACE_ACTION(this, scan_open_cc_req);
-    TX_TRACE_DUMP(scan_open_cc_req);
-    // Check if the table exists
-    CcMap *ccm = local_shard.GetCcm(table_name, cc_ng_id);
-
-    if (ccm != nullptr)
-    {
-        bool finished = ccm->Execute(*scan_open_cc_req);
-        if (finished)
-        {
-            scan_open_cc_req->Free();
-        }
-        else
-        {
-#ifdef EXT_TX_PROC_ENABLED
-            hd_res.SetToBlock();
-#endif
-        }
-    }
-    else
-    {
-#ifdef EXT_TX_PROC_ENABLED
-        hd_res.SetToBlock();
-#endif
-        local_shard.Enqueue(scan_open_cc_req);
-    }
+    hd_res.SetFinished();
+    return;
 }
 
 void txservice::LocalCcHandler::ScanNextBatch(
+    const TableName &table_name,
+    NodeGroupId node_group_id,
     uint64_t tx_number,
     int64_t tx_term,
     uint16_t command_id,
     uint64_t start_ts,
+    const TxKey &start_key,
+    bool start_inclusive,
+    const TxKey &end_key,
+    bool end_inclusive,
     CcScanner &scanner,
+    const std::vector<DataStoreSearchCond> *pushdown_cond,
     CcHandlerResult<ScanNextResult> &hd_res,
     int32_t obj_type,
     const std::string_view &scan_pattern)
 {
-    uint32_t shard_code = scanner.BlockedShard();
-    ScanCache *blocked_cache = scanner.Cache(shard_code);
-    uint32_t node_group_id = shard_code >> 10;
-    hd_res.Value().node_group_id_ = node_group_id;
     bool is_standby_tx = IsStandbyTx(tx_term);
 #ifdef EXT_TX_PROC_ENABLED
     hd_res.SetToBlock();
 #endif
 
-    if (is_standby_tx ||
-        Sharder::Instance().LeaderNodeId(node_group_id) == cc_shards_.node_id_)
+    BucketScanPlan *plan = hd_res.Value().current_scan_plan_;
+    bool is_local_req =
+        Sharder::Instance().LeaderNodeId(node_group_id) == cc_shards_.node_id_;
+    if (scanner.read_local_ && !is_local_req)
     {
-        hd_res.Value().is_local_ = true;
+        hd_res.SetError(CcErrorCode::REQUESTED_NODE_NOT_LEADER);
+        return;
+    }
+
+    if (is_standby_tx || is_local_req)
+    {
+        assert(plan->Buckets().count(node_group_id) > 0);
+
+        absl::flat_hash_map<uint16_t, BucketScanProgress>
+            *bucket_scan_progress = plan->GetBucketScanProgress(node_group_id);
+        if (bucket_scan_progress->empty())
+        {
+            bool kv_finished =
+                Sharder::Instance().GetDataStoreHandler() == nullptr ||
+                table_name.Type() == TableType::RangePartition;
+            for (const auto &bucket_id : *plan->Buckets(node_group_id))
+            {
+                uint16_t target_core =
+                    Sharder::Instance().ShardBucketIdToCoreIdx(bucket_id);
+
+                auto iter = bucket_scan_progress->find(target_core);
+                if (iter != bucket_scan_progress->end())
+                {
+                    iter->second.scan_buckets_.emplace(bucket_id, kv_finished);
+                }
+                else
+                {
+                    auto em_it = bucket_scan_progress->try_emplace(
+                        target_core, start_key.Clone(), start_inclusive);
+                    em_it.first->second.scan_buckets_.emplace(bucket_id,
+                                                              kv_finished);
+                }
+            }
+        }
+
         ScanNextBatchCc *req = scan_next_pool.NextRequest();
-        req->Reset(node_group_id,
+        req->Reset(table_name,
+                   node_group_id,
+                   plan->GetNodeGroupTerm(node_group_id),
                    tx_number,
                    start_ts,
-                   blocked_cache,
+                   end_key,
+                   end_inclusive,
+                   plan,
+                   pushdown_cond,
                    tx_term,
                    &hd_res,
                    scanner.iso_level_,
@@ -1291,18 +1152,30 @@ void txservice::LocalCcHandler::ScanNextBatch(
 
         TX_TRACE_ACTION(this, req);
         TX_TRACE_DUMP(req);
-        cc_shards_.EnqueueCcRequest(thd_id_, shard_code, req);
+
+        for (const auto &[core_idx, scan_progress] :
+             *req->GetBucketScanProgress())
+        {
+            cc_shards_.EnqueueCcRequest(thd_id_, core_idx, req);
+        }
     }
     else
     {
-        hd_res.Value().is_local_ = false;
+        hd_res.IncreaseRemoteRef();
         remote_hd_.ScanNext(cc_shards_.node_id_,
                             node_group_id,
+                            plan->GetNodeGroupTerm(node_group_id),
                             tx_number,
                             tx_term,
                             command_id,
                             start_ts,
-                            blocked_cache,
+                            table_name,
+                            start_key,
+                            start_inclusive,
+                            end_key,
+                            end_inclusive,
+                            *plan->Buckets(node_group_id),
+                            *plan->GetBucketScanProgress(node_group_id),
                             hd_res,
                             scanner.iso_level_,
                             scanner.protocol_,
@@ -1419,42 +1292,6 @@ void txservice::LocalCcHandler::ScanNextBatch(
                             iso_level,
                             proto);
     }
-}
-
-void txservice::LocalCcHandler::ScanNextBatchLocal(
-    uint64_t tx_number,
-    int64_t tx_term,
-    uint16_t command_id,
-    uint64_t start_ts,
-    CcScanner &scanner,
-    CcHandlerResult<ScanNextResult> &hd_res)
-{
-    uint32_t shard_code = scanner.BlockedShard();
-    ScanCache *blocked_cache = scanner.Cache(shard_code);
-    uint32_t node_group_id = shard_code >> 10;
-    hd_res.Value().node_group_id_ = node_group_id;
-
-    CcShard &local_shard = *cc_shards_.cc_shards_.at(thd_id_);
-    ScanNextBatchCc *req = scan_next_pool.NextRequest();
-    req->Reset(node_group_id,
-               tx_number,
-               start_ts,
-               blocked_cache,
-               tx_term,
-               &hd_res,
-               scanner.iso_level_,
-               scanner.protocol_,
-               scanner.is_for_write_,
-               scanner.is_ckpt_delta_,
-               scanner.is_covering_keys_,
-               scanner.is_require_keys_,
-               scanner.is_require_recs_);
-    TX_TRACE_ACTION(this, req);
-    TX_TRACE_DUMP(req);
-#ifdef EXT_TX_PROC_ENABLED
-    hd_res.SetToBlock();
-#endif
-    local_shard.Enqueue(req);
 }
 
 void txservice::LocalCcHandler::ScanClose(const TableName &table_name,

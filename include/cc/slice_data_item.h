@@ -69,4 +69,5 @@ struct SliceDataItem
     uint64_t version_ts_;
     bool is_deleted_;
 };
+
 }  // namespace txservice

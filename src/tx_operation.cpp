@@ -1277,6 +1277,8 @@ void ReloadCacheOperation::Forward(TransactionExecution *txm)
     if (!is_running_)
     {
         txm->Process(*this);
+
+        return;
     }
 
     if (hd_result_.IsFinished())
@@ -1346,13 +1348,15 @@ void FaultInjectOp::Forward(TransactionExecution *txm)
 }
 
 ScanOpenOperation::ScanOpenOperation(TransactionExecution *txm)
-    : hd_result_(txm)
+    : lock_cluster_config_result_(txm), hd_result_(txm)
 {
     TX_TRACE_ASSOCIATE(this, &hd_result_);
 }
 
 void ScanOpenOperation::Reset()
 {
+    cluster_config_rec_.Reset();
+    lock_cluster_config_result_.Reset();
     hd_result_.Reset();
 }
 
@@ -1361,7 +1365,44 @@ void ScanOpenOperation::Forward(TransactionExecution *txm)
     // start the state machine if not running.
     if (!is_running_)
     {
-        txm->Process(*this);
+        if (table_name_->IsHashPartitioned())
+        {
+            if (!lock_cluster_config_result_.IsFinished())
+            {
+                // The locking cluster config request has not finished. The scan
+                // open operation cannot proceed without locking the cluster
+                // config.
+                return;
+            }
+            else
+            {
+                const auto &cluster_config_rec =
+                    (*static_cast<const ClusterConfigRecord *>(
+                        lock_cluster_config_result_.Value().rec_));
+                if (!tx_req_->bucket_scan_save_point_->IsValidCursor(
+                        cluster_config_rec.Version()))
+                {
+                    // the eloqkv client using the cursor id to resume the
+                    // scan. In this scenario, the cluster config may have
+                    // changed. This is a very rare case, we'll treat it here as
+                    // an iterator invalidation. eloqkv will return
+                    // RD_ERR_INVALID_CURSOR to client.
+                    hd_result_.SetError(CcErrorCode::INVALID_CURSOR);
+                    txm->PostProcess(*this);
+                    return;
+                }
+                else
+                {
+                    txm->Process(*this);
+                }
+            }
+        }
+        else
+        {
+            txm->Process(*this);
+        }
+
+        return;
     }
 
     if (hd_result_.IsFinished())
@@ -1430,6 +1471,13 @@ void ScanNextOperation::ResetResult()
     unlock_range_result_.Reset();
     lock_range_result_.Reset();
     hd_result_.Reset();
+    hd_result_.Value().Clear();
+}
+
+void ScanNextOperation::ResetResultForHashPart(size_t ng_cnt)
+{
+    hd_result_.Reset();
+    hd_result_.SetRefCnt(ng_cnt);
 }
 
 void ScanNextOperation::Forward(TransactionExecution *txm)
@@ -1501,19 +1549,6 @@ void ScanNextOperation::Forward(TransactionExecution *txm)
     if (scanner.Type() == CcmScannerType::HashPartition &&
         hd_result_.IsFinished())
     {
-        // Error code REQUESTED_NODE_NOT_LEADER indicates send message failed or
-        // term changed.
-        if (hd_result_.ErrorCode() == CcErrorCode::REQUESTED_NODE_NOT_LEADER)
-        {
-            Sharder::Instance().UpdateLeader(hd_result_.Value().node_group_id_);
-            if (retry_num_ > 0)
-            {
-                hd_result_.Reset();
-                ReRunOp(txm);
-                return;
-            }
-        }
-
         scanner.SetStatus(ScannerStatus::Open);
         txm->PostProcess(*this);
     }
@@ -1644,23 +1679,14 @@ void ScanNextOperation::Forward(TransactionExecution *txm)
         }
         else
         {
-            if (hd_result_.Value().is_local_)
+            assert(scanner.Type() == CcmScannerType::HashPartition);
+            if (hd_result_.LocalRefCnt() == 0)
             {
-                // Never force error for local request.
-                return;
-            }
-
-            if (retry_num_ > 0 &&
-                (txm->CheckLeaderTerm() || txm->CheckStandbyTerm()))
-            {
-                ReRunOp(txm);
-                return;
-            }
-
-            bool force_error = hd_result_.ForceError();
-            if (force_error)
-            {
-                txm->PostProcess(*this);
+                bool force_error = hd_result_.ForceError();
+                if (force_error)
+                {
+                    txm->PostProcess(*this);
+                }
             }
         }
     }
