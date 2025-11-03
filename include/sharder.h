@@ -222,7 +222,8 @@ public:
 
     static inline int32_t MapKeyHashToHashPartitionId(uint64_t hash_code)
     {
-        static constexpr int32_t kHashPartitions = 1024;
+        // static constexpr int32_t kHashPartitions = 1024;
+        static constexpr int32_t kHashPartitions = total_hash_partitions;
         return static_cast<int32_t>(hash_code & (kHashPartitions - 1));
     }
 
