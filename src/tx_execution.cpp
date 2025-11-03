@@ -2898,13 +2898,7 @@ void TransactionExecution::Process(ScanNextOperation &scan_next)
         return;
     }
 
-    if (!is_local ||
-        DeduceReadLockType(scanner.IndexType() == ScanIndexType::Primary
-                               ? TableType::Primary
-                               : TableType::Secondary,
-                           scanner.IsReadForWrite(),
-                           scanner.Isolation(),
-                           scanner.IsCoveringKey()) != LockType::NoLock)
+    if (!is_local || scanner.lock_type_ != LockType::NoLock)
     {
         StartTiming();
     }
