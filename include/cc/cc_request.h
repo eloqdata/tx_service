@@ -1995,7 +1995,6 @@ public:
                 }
                 else
                 {
-
                     assert(init_res.value() != nullptr);
                     // InitCcm success.
                     // const TableSchema *table_schema = init_res.value();

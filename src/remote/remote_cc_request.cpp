@@ -1008,27 +1008,35 @@ bool txservice::remote::RemoteScanNextBatch::Execute(CcShard &ccs)
         // ccmap is based on the real table name, for example, index
         // should get the corresponding sk_ccmap.
         assert(!table_name_->IsMeta());
-        const CatalogEntry *catalog_entry =
-            ccs.InitCcm(*table_name_, node_group_id_, ng_term_, this);
-        if (catalog_entry == nullptr)
+        std::optional<const TableSchema *> init_res = ccs.InitCcm(
+                        *table_name_, node_group_id_, ng_term_, this);
+        if (!init_res.has_value())
         {
-            // The local node does not contain the table's schema
-            // instance. The FetchCatalog() method will send an
-            // async request toward the data store to fetch the
-            // catalog. After fetching is finished, this cc request
-            // is re-enqueued for re-execution.
+            // InitCcm failure.
+            // the catalog may need to be fetched from the
+            // KV store, may not exist (payload status = Deleted),
+            // or is currently being modified (write lock acquired).
+            //
+            // In the first case, the requester will be re-enqueued
+            // after FetchCatalog() completes fetching the catalog
+            // from the data store. In the latter cases, the request
+            // is marked as errored.
             return false;
         }
         else
         {
-            if (catalog_entry->schema_ == nullptr)
-            {
-                // The local node (LocalCcShards) contains a schema
-                // instance, which indicates that the table has been
-                // dropped. Returns the request with an error.
-                return SetError(ccs.core_id_,
-                                CcErrorCode::REQUESTED_TABLE_NOT_EXISTS);
-            }
+            assert(init_res.value() != nullptr);
+            // InitCcm success.
+            // const TableSchema *table_schema = init_res.value();
+            // if (table_schema == nullptr)
+            // {
+            //     // The local node (LocalCcShards) contains a schema
+            //     // instance, which indicates that the table has been
+            //     // dropped. Returns the request with an error.
+            //     res_->SetError(
+            //         CcErrorCode::REQUESTED_TABLE_NOT_EXISTS);
+            //     return true;
+            // }
 
             ccm = ccs.GetCcm(*table_name_, node_group_id_);
         }
