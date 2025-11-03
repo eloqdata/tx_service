@@ -71,6 +71,9 @@ void SnapshotManager::StandbySyncWorker()
 void SnapshotManager::OnSnapshotSyncRequested(
     const txservice::remote::StorageSnapshotSyncRequest *req)
 {
+    DLOG(INFO) << "Received snapshot sync request from standby node #"
+               << req->standby_node_id()
+               << " for standby term: " << req->standby_node_term();
     assert(store_hd_ != nullptr);
     if (store_hd_ == nullptr)
     {
@@ -232,18 +235,43 @@ void SnapshotManager::SyncWithStandby()
         {
             auto channel = Sharder::Instance().GetCcNodeServiceChannel(
                 req.standby_node_id());
+            DLOG(INFO) << "Notifying standby node #" << req.standby_node_id()
+                       << " for snapshot synced at term "
+                       << req.standby_node_term()
+                       << ", channel: " << (channel ? "valid" : "null");
 
             if (channel)
             {
+                // needs retry if failed
+                // since the standby node may be still spinning up.
                 remote::CcRpcService_Stub stub(channel.get());
-                brpc::Controller cntl;
-                cntl.set_timeout_ms(1);
-                remote::OnSnapshotSyncedRequest on_synced_req;
-                remote::OnSnapshotSyncedResponse on_sync_resp;
-                on_synced_req.set_snapshot_path(req.dest_path());
-                on_synced_req.set_standby_node_term(req.standby_node_term());
-                stub.OnSnapshotSynced(
-                    &cntl, &on_synced_req, &on_sync_resp, nullptr);
+                int retry_times = 5;
+                while (retry_times-- > 0)
+                {
+                    brpc::Controller cntl;
+                    cntl.set_timeout_ms(1);
+                    remote::OnSnapshotSyncedRequest on_synced_req;
+                    remote::OnSnapshotSyncedResponse on_sync_resp;
+                    on_synced_req.set_snapshot_path(req.dest_path());
+                    on_synced_req.set_standby_node_term(
+                        req.standby_node_term());
+                    stub.OnSnapshotSynced(
+                        &cntl, &on_synced_req, &on_sync_resp, nullptr);
+                    if (cntl.Failed())
+                    {
+                        LOG(WARNING) << "OnSnapshotSynced to standby node #"
+                                     << req.standby_node_id() << " failed, "
+                                     << " error: " << cntl.ErrorText()
+                                     << " error code: " << cntl.ErrorCode();
+                        // sleep 1 second and retry
+                        std::this_thread::sleep_for(std::chrono::seconds(1));
+                        continue;
+                    }
+                    else
+                    {
+                        break;
+                    }
+                }
             }
 
             // We don't care if the notification is successful or not.
