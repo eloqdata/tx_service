@@ -570,7 +570,7 @@ enum class PostWriteType
 enum class PostReadType
 {
     Release,
-    Unpin,
+    DecrReadIntent,
 };
 
 constexpr static std::string_view empty_sv{"__empty"};

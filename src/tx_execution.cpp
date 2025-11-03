@@ -3588,7 +3588,7 @@ void TransactionExecution::ScanClose(
                 {
                     drain_batch_.emplace_back(last_tuple->cce_addr_,
                                               last_tuple->key_ts_,
-                                              PostReadType::Unpin);
+                                              PostReadType::DecrReadIntent);
                 }
             }
         }
@@ -6365,7 +6365,7 @@ void TransactionExecution::Process(ReleaseScanExtraLockOp &unlock_op)
                                                 drain_tuple.version_ts_,
                                                 0,
                                                 commit_ts_,
-                                                *drain_tuple.cce_addr_,
+                                                drain_tuple.cce_addr_,
                                                 unlock_op.hd_result_,
                                                 false,
                                                 false,

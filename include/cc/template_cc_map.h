@@ -1330,7 +1330,7 @@ public:
             }
             else
             {
-                UnpinReadIntent(key_lock, &cc_entry, txn, req.NodeGroupId());
+                DecrReadIntent(key_lock, &cc_entry, txn, req.NodeGroupId());
             }
 
             if (conflicting_txs.Size() > 0)
@@ -2422,22 +2422,6 @@ public:
                 &BackfillForScanNextBatch<KeyT, ValueT, VersionedRecord>);
         }
 
-        auto acquire_read_intent =
-            [&, this](
-                CcEntry<KeyT, ValueT, VersionedRecord, RangePartitioned> *cce,
-                CcPage<KeyT, ValueT, VersionedRecord, RangePartitioned> *page)
-        {
-            assert(cce != nullptr && page != nullptr);
-            bool add_intent = cce->GetOrCreateKeyLock(shard_, this, page)
-                                  .AcquireReadIntent(req.Txn());
-
-            if (add_intent)
-            {
-                shard_->UpsertLockHoldingTx(
-                    req.Txn(), tx_term, cce, false, ng_id, table_name_.Type());
-            }
-        };
-
         if (cce_lock_addr != 0)
         {
             KeyGapLockAndExtraData *lock =
@@ -2619,7 +2603,10 @@ public:
                     uint64_t end_it_lock_addr = 0;
                     if (end_it != End())
                     {
-                        acquire_read_intent(end_it->second, end_it.GetPage());
+                        AcquireReadIntent(end_it->second,
+                                          end_it.GetPage(),
+                                          req.Txn(),
+                                          tx_term);
                         end_it_lock_addr = reinterpret_cast<uint64_t>(
                             end_it->second->GetLockAddr());
                     }
@@ -2637,7 +2624,10 @@ public:
                     uint64_t end_it_lock_addr = 0;
                     if (end_it != End())
                     {
-                        acquire_read_intent(end_it->second, end_it.GetPage());
+                        AcquireReadIntent(end_it->second,
+                                          end_it.GetPage(),
+                                          req.Txn(),
+                                          tx_term);
                         end_it_lock_addr = reinterpret_cast<uint64_t>(
                             end_it->second->GetLockAddr());
                     }
@@ -2695,12 +2685,16 @@ public:
                 uint64_t end_it_lock_addr = 0;
                 if (end_it != End())
                 {
-                    acquire_read_intent(end_it->second, end_it.GetPage());
+                    AcquireReadIntent(
+                        end_it->second, end_it.GetPage(), req.Txn(), tx_term);
                     end_it_lock_addr = reinterpret_cast<uint64_t>(
                         end_it->second->GetLockAddr());
                 }
 
-                acquire_read_intent(scan_ccm_it->second, scan_ccm_it.GetPage());
+                AcquireReadIntent(scan_ccm_it->second,
+                                  scan_ccm_it.GetPage(),
+                                  req.Txn(),
+                                  tx_term);
 
                 req.SetBlockingInfo(shard_->core_id_,
                                     reinterpret_cast<uint64_t>(
@@ -3068,22 +3062,6 @@ public:
             }
         }
 
-        auto acquire_read_intent =
-            [&, this](
-                CcEntry<KeyT, ValueT, VersionedRecord, RangePartitioned> *cce,
-                CcPage<KeyT, ValueT, VersionedRecord, RangePartitioned> *page)
-        {
-            assert(cce != nullptr && page != nullptr);
-            bool add_intent = cce->GetOrCreateKeyLock(shard_, this, page)
-                                  .AcquireReadIntent(req.Txn());
-
-            if (add_intent)
-            {
-                shard_->UpsertLockHoldingTx(
-                    req.Txn(), tx_term, cce, false, ng_id, table_name_.Type());
-            }
-        };
-
         if (cce_lock_addr != 0)
         {
             KeyGapLockAndExtraData *lock =
@@ -3256,7 +3234,8 @@ public:
                 uint64_t end_it_lock_addr = 0;
                 if (end_it != End())
                 {
-                    acquire_read_intent(end_it->second, end_it.GetPage());
+                    AcquireReadIntent(
+                        end_it->second, end_it.GetPage(), req.Txn(), tx_term);
                     end_it_lock_addr = reinterpret_cast<uint64_t>(
                         end_it->second->GetLockAddr());
                 }
@@ -3274,7 +3253,8 @@ public:
                 uint64_t end_it_lock_addr = 0;
                 if (end_it != End())
                 {
-                    acquire_read_intent(end_it->second, end_it.GetPage());
+                    AcquireReadIntent(
+                        end_it->second, end_it.GetPage(), req.Txn(), tx_term);
                     end_it_lock_addr = reinterpret_cast<uint64_t>(
                         end_it->second->GetLockAddr());
                 }
@@ -3325,12 +3305,16 @@ public:
                 uint64_t end_it_lock_addr = 0;
                 if (end_it != End())
                 {
-                    acquire_read_intent(end_it->second, end_it.GetPage());
+                    AcquireReadIntent(
+                        end_it->second, end_it.GetPage(), req.Txn(), tx_term);
                     end_it_lock_addr = reinterpret_cast<uint64_t>(
                         end_it->second->GetLockAddr());
                 }
 
-                acquire_read_intent(scan_ccm_it->second, scan_ccm_it.GetPage());
+                AcquireReadIntent(scan_ccm_it->second,
+                                  scan_ccm_it.GetPage(),
+                                  req.Txn(),
+                                  tx_term);
 
                 req.SetBlockingInfo(shard_->core_id_,
                                     reinterpret_cast<uint64_t>(
@@ -3825,7 +3809,7 @@ public:
                 // resumes.
                 if (lock_type == LockType::NoLock)
                 {
-                    UnpinReadIntent(cce->GetKeyLock(), cce, req.Txn(), ng_id);
+                    DecrReadIntent(cce->GetKeyLock(), cce, req.Txn(), ng_id);
                 }
             }
             else
@@ -4992,7 +4976,7 @@ public:
 
                 CcPage<KeyT, ValueT, VersionedRecord, RangePartitioned>
                     *last_ccp = scan_ccm_it.GetPage();
-                PinReadIntent(last_cce, last_ccp, req.Txn(), tx_term);
+                AcquireReadIntent(last_cce, last_ccp, req.Txn(), tx_term);
 
                 // Lock might have not been acquired during the scan, set the
                 // lock addr of last tuple here.
@@ -5746,7 +5730,7 @@ public:
                     CcPage<KeyT, ValueT, VersionedRecord, RangePartitioned> *>(
                     pause_lock_struct->GetCcPage());
             it = Iterator(pause_entry, ccp, &neg_inf_);
-            UnpinReadIntent(
+            DecrReadIntent(
                 pause_entry->GetKeyLock(), pause_entry, req.Txn(), cc_ng_id_);
             if (req.IsTerminated())
             {
@@ -5988,7 +5972,7 @@ public:
         {
             // set the pause_key_ to mark resume position
             assert(pause_pos_and_is_drained.second == false);
-            PinReadIntent(
+            AcquireReadIntent(
                 it->second, it.GetPage(), req.Txn(), req.NodeGroupTerm());
 
             // TODO: use lock_ptr_ when we allow the ccentry to move to another

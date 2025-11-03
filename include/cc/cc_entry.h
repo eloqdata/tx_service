@@ -2775,13 +2775,13 @@ struct DrainTuple
     DrainTuple(const CcEntryAddr &cce_addr,
                uint64_t version_ts,
                PostReadType post_read_type)
-        : cce_addr_(&cce_addr),
+        : cce_addr_(cce_addr),
           version_ts_(version_ts),
           post_read_type_(post_read_type)
     {
     }
 
-    const CcEntryAddr *cce_addr_;
+    CcEntryAddr cce_addr_;
     uint64_t version_ts_;
     PostReadType post_read_type_;
 };

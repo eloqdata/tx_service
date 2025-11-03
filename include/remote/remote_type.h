@@ -142,8 +142,8 @@ public:
         {
         case txservice::PostReadType::Release:
             return remote::PostReadType::Release;
-        case txservice::PostReadType::Unpin:
-            return remote::PostReadType::Unpin;
+        case txservice::PostReadType::DecrReadIntent:
+            return remote::PostReadType::DecrReadIntent;
         default:
             assert(false);
             return remote::PostReadType::Release;
@@ -371,8 +371,8 @@ public:
         {
         case remote::PostReadType::Release:
             return txservice::PostReadType::Release;
-        case remote::PostReadType::Unpin:
-            return txservice::PostReadType::Unpin;
+        case remote::PostReadType::DecrReadIntent:
+            return txservice::PostReadType::DecrReadIntent;
         default:
             assert(false);
             return txservice::PostReadType::Release;

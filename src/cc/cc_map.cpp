@@ -434,10 +434,10 @@ void CcMap::ReleaseCceLock(NonBlockingLock *lock,
     }
 }
 
-void CcMap::PinReadIntent(LruEntry *cce,
-                          LruPage *page,
-                          TxNumber tx_number,
-                          int64_t tx_term)
+void CcMap::AcquireReadIntent(LruEntry *cce,
+                              LruPage *page,
+                              TxNumber tx_number,
+                              int64_t tx_term)
 {
     NonBlockingLock &lock = cce->GetOrCreateKeyLock(shard_, this, page);
     bool emplaced = lock.AcquireReadIntent(tx_number);
@@ -448,10 +448,10 @@ void CcMap::PinReadIntent(LruEntry *cce,
     }
 }
 
-void CcMap::UnpinReadIntent(NonBlockingLock *lock,
-                            LruEntry *cce,
-                            TxNumber tx_number,
-                            uint32_t ng_id)
+void CcMap::DecrReadIntent(NonBlockingLock *lock,
+                           LruEntry *cce,
+                           TxNumber tx_number,
+                           uint32_t ng_id)
 {
     bool erased = lock->ReleaseReadIntent(tx_number, false);
     if (erased)
