@@ -385,6 +385,7 @@ public:
 
     virtual void OnStartFollowing(uint32_t node_id,
                                   int64_t term,
+                                  int64_t standby_term,
                                   bool resubscribe)
     {
     }
