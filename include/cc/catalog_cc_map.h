@@ -2328,6 +2328,7 @@ public:
                 {
                     {
 #ifdef STATISTICS
+                        assert(requester != nullptr);
                         // Initialize table statistics before create ccmap.
                         if (!shard_->LoadRangesAndStatisticsNx(
                                 catalog_entry->schema_.get(),

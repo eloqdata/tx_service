@@ -25,7 +25,6 @@
 #include <atomic>
 #include <cstddef>
 #include <mutex>
-#include <optional>
 #include <string_view>
 #include <system_error>
 #include <unordered_map>
@@ -608,10 +607,9 @@ bool FillStoreSliceCc::Execute(CcShard &ccs)
             // from the data store.
             return false;
         }
-        const TableSchema *table_schema = init_res.schema;
         // Successfully load table catalog from data store.
-        assert(table_schema != nullptr);
-        assert(table_schema->Version() > 0);
+        assert(init_res.schema != nullptr);
+        assert(init_res.schema->Version() > 0);
         // For a filling range slice request, there must be a prior
         // request reading and locking the table's schema, to prevent
         // others from dropping the table. Hence, the table's schema
@@ -1297,10 +1295,9 @@ bool RestoreCcMapCc::Execute(CcShard &ccs)
             // from the data store.
             return false;
         }
-        const TableSchema *table_schema = init_res.schema;
         // Successfully load table catalog from data store.
-        assert(table_schema != nullptr);
-        assert(table_schema->Version() > 0);
+        assert(init_res.schema != nullptr);
+        assert(init_res.schema->Version() > 0);
         // For a filling range slice request, there must be a prior
         // request reading and locking the table's schema, to prevent
         // others from dropping the table. Hence, the table's schema

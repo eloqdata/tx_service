@@ -2478,8 +2478,7 @@ public:
                     return false;
                 }
 
-                const TableSchema *table_schema = init_res.schema;
-                assert(table_schema != nullptr);
+                assert(init_res.schema != nullptr);
                 ccm = ccs.GetCcm(*table_name_, node_group_id_);
             }
             if (!parallel_req_)
@@ -3764,8 +3763,7 @@ public:
                 return false;
             }
 
-            const TableSchema *table_schema = init_res.schema;
-            assert(table_schema != nullptr);
+            assert(init_res.schema != nullptr);
             ccm = ccs.GetCcm(*table_name_, node_group_id_);
         }
         assert(ccm != nullptr);
@@ -4093,8 +4091,7 @@ public:
                 return false;
             }
 
-            const TableSchema *table_schema = init_res.schema;
-            assert(table_schema != nullptr);
+            assert(init_res.schema != nullptr);
             ccm = ccs.GetCcm(*table_name_, node_group_id_);
         }
         assert(ccm != nullptr);
@@ -7041,8 +7038,7 @@ public:
                 return false;
             }
 
-            const TableSchema *table_schema = init_res.schema;
-            assert(table_schema != nullptr);
+            assert(init_res.schema != nullptr);
             ccm = ccs.GetCcm(*table_name_, node_group_id_);
         }
         assert(ccm != nullptr);
@@ -7507,8 +7503,7 @@ public:
                 return false;
             }
 
-            const TableSchema *table_schema = init_res.schema;
-            assert(table_schema != nullptr);
+            assert(init_res.schema != nullptr);
             ccm = ccs.GetCcm(*table_name_, node_group_id_);
         }
 
@@ -8007,8 +8002,7 @@ public:
                 return false;
             }
 
-            const TableSchema *table_schema = init_res.schema;
-            assert(table_schema != nullptr);
+            assert(init_res.schema != nullptr);
             ccm = ccs.GetCcm(*table_name_, node_group_id_);
         }
 

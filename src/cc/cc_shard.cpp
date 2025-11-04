@@ -1839,6 +1839,7 @@ InitCcmResult CcShard::InitCcm(const TableName &table_name,
                 CcErrorCode::REQUESTED_TABLE_SCHEMA_MISMATCH);
         }
 #ifdef STATISTICS
+        assert(requester != nullptr);
         if (!LoadRangesAndStatisticsNx(
                 curr_schema, cc_ng_id, cc_ng_term, requester))
         {
