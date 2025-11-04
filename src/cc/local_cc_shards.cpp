@@ -63,6 +63,8 @@
 
 namespace txservice
 {
+DECLARE_bool(report_ckpt);
+
 std::atomic<uint64_t> LocalCcShards::local_clock(0);
 inline thread_local size_t tls_shard_idx = std::numeric_limits<size_t>::max();
 
@@ -163,6 +165,8 @@ LocalCcShards::LocalCcShards(
 
     // For mariadb, this thread is the main thread of the mariadb process.
     InitializeTableRangesHeap();
+
+    InitializeHashPartitionCkptHeap();
 
     std::set<NodeGroupId> ng_ids;
     for (auto &[ng_id, _] : *ng_configs)
@@ -2890,6 +2894,10 @@ void LocalCcShards::DataSyncWorker(size_t worker_idx)
                 });
             task_worker_lk.unlock();
             DataSyncForHashPartition(std::move(task), worker_idx);
+            if (FLAGS_report_ckpt)
+            {
+                ReportHashPartitionCkptHeapUsage();
+            }
             task_worker_lk.lock();
 
             data_sync_done_[worker_idx] = true;
@@ -4649,6 +4657,13 @@ void LocalCcShards::DataSyncForHashPartition(
                        << " flight_tasks: " << data_sync_task->flight_task_cnt_
                        << " record count: " << scan_cc.accumulated_scan_cnt_;
 
+            std::unique_lock<std::shared_mutex> heap_lk(
+                hash_partition_ckpt_heap_mux_);
+            mi_threadid_t prev_thd =
+                mi_override_thread(hash_partition_main_thread_id_);
+            mi_heap_t *prev_heap =
+                mi_heap_set_default(hash_partition_ckpt_heap_);
+
             data_sync_vec->reserve(scan_cc.accumulated_scan_cnt_);
             for (size_t j = 0; j < scan_cc.accumulated_scan_cnt_; ++j)
             {
@@ -4702,6 +4717,9 @@ void LocalCcShards::DataSyncForHashPartition(
                     Sharder::MapKeyHashToHashPartitionId(key_raw.Hash());
                 mv_base_vec->emplace_back(std::move(key_raw), part_id);
             }
+            mi_override_thread(prev_thd);
+            mi_heap_set_default(prev_heap);
+            heap_lk.unlock();
 
             std::move(scan_cc.ArchiveVec().begin(),
                       scan_cc.ArchiveVec().end(),
@@ -6112,6 +6130,26 @@ void LocalCcShards::KickoutDataForTest()
 
         worker_lk.lock();
     }
+}
+
+void LocalCcShards::ReportHashPartitionCkptHeapUsage()
+{
+    std::shared_lock<std::shared_mutex> heap_lk(hash_partition_ckpt_heap_mux_);
+    mi_threadid_t prev_thd = mi_override_thread(hash_partition_main_thread_id_);
+    mi_heap_t *prev_heap = mi_heap_set_default(hash_partition_ckpt_heap_);
+    int64_t allocated, committed;
+    mi_thread_stats(&allocated, &committed);
+    if (committed != 0)
+    {
+        LOG(INFO) << "ckpt hash partition heap memory usage report, committed "
+                  << committed << ", allocated " << allocated << ", frag ratio "
+                  << std::setprecision(2)
+                  << 100 * (static_cast<float>(committed - allocated) /
+                            static_cast<float>(committed));
+    }
+    mi_override_thread(prev_thd);
+    mi_heap_set_default(prev_heap);
+    heap_lk.unlock();
 }
 
 bool LocalCcShards::GetNextRangePartitionId(const TableName &tablename,
