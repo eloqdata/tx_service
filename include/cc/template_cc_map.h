@@ -2445,10 +2445,7 @@ public:
                 auto end_cce = static_cast<
                     CcEntry<KeyT, ValueT, VersionedRecord, RangePartitioned> *>(
                     end_lock->GetCcEntry());
-                [[maybe_unused]] auto *end_ccp = static_cast<
-                    CcPage<KeyT, ValueT, VersionedRecord, RangePartitioned> *>(
-                    end_cce->GetCcPage());
-                assert(end_ccp != nullptr);
+                assert(end_cce->GetCcPage() != nullptr);
 
                 // Release read intent lock
                 end_it = Iterator(end_cce, ccp, &neg_inf_);
@@ -3085,10 +3082,7 @@ public:
                 auto end_cce = static_cast<
                     CcEntry<KeyT, ValueT, VersionedRecord, RangePartitioned> *>(
                     end_lock->GetCcEntry());
-                [[maybe_unused]] auto *end_ccp = static_cast<
-                    CcPage<KeyT, ValueT, VersionedRecord, RangePartitioned> *>(
-                    end_cce->GetCcPage());
-                assert(end_ccp != nullptr);
+                assert(end_cce->GetCcPage() != nullptr);
 
                 // Release read intent lock
                 end_it = Iterator(end_cce, ccp, &neg_inf_);
