@@ -310,8 +310,7 @@ bool DataSubstrate::LoadCoreAndNetworkConfig(const INIReader &config_reader)
     ulimit.rlim_max = FLAGS_maxclients;
     if (setrlimit(RLIMIT_NOFILE, &ulimit) == -1)
     {
-        LOG(ERROR) << "Failed to set maxclients.";
-        return false;
+        LOG(WARNING) << "Failed to set maxclients.";
     }
     core_config_.bootstrap =
         !CheckCommandLineFlagIsDefault("bootstrap")
