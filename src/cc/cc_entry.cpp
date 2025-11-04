@@ -160,7 +160,7 @@ void LruEntry::ClearLocks(CcShard &ccs,
         ccs.DeleteLockHoldingTx(txn, this, ng_id);
     }
 
-    for (const TxNumber &txn : key_lock->ReadIntents())
+    for (const auto &[txn, cnt] : key_lock->ReadIntents())
     {
         ccs.DeleteLockHoldingTx(txn, this, ng_id);
     }

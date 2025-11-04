@@ -106,7 +106,9 @@ public:
                   uint64_t commit_ts,
                   const CcEntryAddr &cce_addr,
                   CcHandlerResult<PostProcessResult> &hres,
-                  bool need_remote_resp = true);
+                  bool need_remote_resp = true,
+                  txservice::PostReadType post_read_type =
+                      txservice::PostReadType::Release);
 
     void Read(uint32_t src_node_id,
               NodeGroupId dest_ng_id,

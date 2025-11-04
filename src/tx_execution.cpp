@@ -152,10 +152,13 @@ void TransactionExecution::Reset()
 
     if (drain_batch_.capacity() > 32)
     {
-        drain_batch_.resize(32);
-        drain_batch_.shrink_to_fit();
+        drain_batch_ = {};
+        drain_batch_.reserve(32);
     }
-    drain_batch_.clear();
+    else
+    {
+        drain_batch_.clear();
+    }
 
     scan_alias_cnt_ = 0;
 
@@ -2245,7 +2248,9 @@ void TransactionExecution::PostProcess(ReadOperation &read)
                     *read_tx_req->tab_name_, read_res.cce_addr_);
                 if (read_cnt == 0)
                 {
-                    drain_batch_.emplace_back(read_res.cce_addr_, read_res.ts_);
+                    drain_batch_.emplace_back(read_res.cce_addr_,
+                                              read_res.ts_,
+                                              PostReadType::Release);
                 }
             }
             else if (read_tx_req->tab_name_->Type() == TableType::Primary &&
@@ -2893,13 +2898,7 @@ void TransactionExecution::Process(ScanNextOperation &scan_next)
         return;
     }
 
-    if (!is_local ||
-        DeduceReadLockType(scanner.IndexType() == ScanIndexType::Primary
-                               ? TableType::Primary
-                               : TableType::Secondary,
-                           scanner.IsReadForWrite(),
-                           scanner.Isolation(),
-                           scanner.IsCoveringKey()) != LockType::NoLock)
+    if (!is_local || scanner.lock_type_ != LockType::NoLock)
     {
         StartTiming();
     }
@@ -3555,7 +3554,8 @@ void TransactionExecution::ScanClose(
                 rw_set_.RemoveDataReadEntry(table_name, tpl.cce_addr_);
             if (read_cnt == 0)
             {
-                drain_batch_.emplace_back(tpl.cce_addr_, tpl.version_ts_);
+                drain_batch_.emplace_back(
+                    tpl.cce_addr_, tpl.version_ts_, PostReadType::Release);
             }
         }
     }
@@ -3581,7 +3581,8 @@ void TransactionExecution::ScanClose(
                 if (lk_type == LockType::NoLock)
                 {
                     drain_batch_.emplace_back(last_tuple->cce_addr_,
-                                              last_tuple->key_ts_);
+                                              last_tuple->key_ts_,
+                                              PostReadType::DecrReadIntent);
                 }
             }
         }
@@ -3628,7 +3629,8 @@ void TransactionExecution::ScanClose(
         if (lk_type != LockType::NoLock &&
             rw_set_.GetReadCnt(table_name, tuple->cce_addr_) == 0)
         {
-            drain_batch_.emplace_back(tuple->cce_addr_, tuple->key_ts_);
+            drain_batch_.emplace_back(
+                tuple->cce_addr_, tuple->key_ts_, PostReadType::Release);
         }
     }
 
@@ -5845,12 +5847,14 @@ void TransactionExecution::DrainScanner(CcScanner *scanner,
             if (cc_scan_tuple->rec_status_ == RecordStatus::Unknown)
             {
                 // Only used to release lock.
-                drain_batch_.emplace_back(cc_scan_tuple->cce_addr_, 0);
+                drain_batch_.emplace_back(
+                    cc_scan_tuple->cce_addr_, 0, PostReadType::Release);
             }
             else
             {
                 drain_batch_.emplace_back(cc_scan_tuple->cce_addr_,
-                                          cc_scan_tuple->key_ts_);
+                                          cc_scan_tuple->key_ts_,
+                                          PostReadType::Release);
             }
         }
         scanner->MoveNext();
@@ -6347,18 +6351,19 @@ void TransactionExecution::Process(ReleaseScanExtraLockOp &unlock_op)
     }
 
     size_t post_local_cnt = 0, post_remote_cnt = 0;
-    for (const auto &addr_pair : drain_batch_)
+    for (const DrainTuple &drain_tuple : drain_batch_)
     {
         CcReqStatus ret = cc_handler_->PostRead(TxNumber(),
                                                 TxTerm(),
                                                 CommandId(),
-                                                addr_pair.second,
+                                                drain_tuple.version_ts_,
                                                 0,
                                                 commit_ts_,
-                                                addr_pair.first,
+                                                drain_tuple.cce_addr_,
                                                 unlock_op.hd_result_,
                                                 false,
-                                                false);
+                                                false,
+                                                drain_tuple.post_read_type_);
         if (ret == CcReqStatus::SentLocal)
         {
             ++post_local_cnt;

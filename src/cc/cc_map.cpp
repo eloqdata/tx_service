@@ -433,4 +433,32 @@ void CcMap::ReleaseCceLock(NonBlockingLock *lock,
         // will not be recycled even if it is empty.
     }
 }
+
+void CcMap::AcquireReadIntent(LruEntry *cce,
+                              LruPage *page,
+                              TxNumber tx_number,
+                              int64_t tx_term)
+{
+    NonBlockingLock &lock = cce->GetOrCreateKeyLock(shard_, this, page);
+    bool emplaced = lock.AcquireReadIntent(tx_number);
+    if (emplaced)
+    {
+        shard_->UpsertLockHoldingTx(
+            tx_number, tx_term, cce, false, cc_ng_id_, table_name_.Type());
+    }
+}
+
+void CcMap::DecrReadIntent(NonBlockingLock *lock,
+                           LruEntry *cce,
+                           TxNumber tx_number,
+                           uint32_t ng_id)
+{
+    bool erased = lock->ReleaseReadIntent(tx_number, false);
+    if (erased)
+    {
+        shard_->DeleteLockHoldingTx(tx_number, cce, ng_id);
+        cce->RecycleKeyLock(*shard_);
+    }
+}
+
 }  // namespace txservice

@@ -344,6 +344,7 @@ void txservice::remote::RemotePostRead::Reset(
                       req.commit_ts(),
                       req.key_ts(),
                       req.gap_ts(),
+                      ToLocalType::ConvertPostReadType(req.post_read_type()),
                       &cc_res_);
 
     input_msg_ = std::move(input_msg);
@@ -1319,14 +1320,10 @@ txservice::remote::RemoteScanSlice::RemoteScanSlice()
         {
             CcOperation cc_op;
 
-            if (remote_tbl_name_.Type() == TableType::Secondary)
+            if (remote_tbl_name_.Type() == TableType::Secondary ||
+                remote_tbl_name_.Type() == TableType::UniqueSecondary)
             {
                 cc_op = CcOperation::ReadSkIndex;
-            }
-            else if (remote_tbl_name_.Type() == TableType::UniqueSecondary)
-            {
-                cc_op = IsForWrite() ? CcOperation::ReadForWrite
-                                     : CcOperation::ReadSkIndex;
             }
             else
             {

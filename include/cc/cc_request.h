@@ -1070,7 +1070,12 @@ private:
 struct PostReadCc : public TemplatedCcRequest<PostReadCc, PostProcessResult>
 {
 public:
-    PostReadCc() : cce_addr_(nullptr), commit_ts_(0), key_ts_(0), gap_ts_(0)
+    PostReadCc()
+        : cce_addr_(nullptr),
+          commit_ts_(0),
+          key_ts_(0),
+          gap_ts_(0),
+          post_read_type_(PostReadType::Release)
     {
     }
 
@@ -1113,6 +1118,7 @@ public:
                uint64_t commit_ts,
                uint64_t key_ts,
                uint64_t gap_ts,
+               PostReadType post_read_type,
                CcHandlerResult<PostProcessResult> *res)
     {
         TemplatedCcRequest<PostReadCc, PostProcessResult>::Reset(
@@ -1122,6 +1128,7 @@ public:
         commit_ts_ = commit_ts;
         key_ts_ = key_ts;
         gap_ts_ = gap_ts;
+        post_read_type_ = post_read_type;
         ccm_ = nullptr;
     }
 
@@ -1145,11 +1152,17 @@ public:
         return gap_ts_;
     }
 
+    PostReadType GetPostReadType() const
+    {
+        return post_read_type_;
+    }
+
 private:
     const CcEntryAddr *cce_addr_;
     uint64_t commit_ts_;
     uint64_t key_ts_;
     uint64_t gap_ts_;
+    PostReadType post_read_type_;
 };
 
 struct ReadCc : public TemplatedCcRequest<ReadCc, ReadKeyResult>

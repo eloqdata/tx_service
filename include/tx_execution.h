@@ -709,7 +709,7 @@ private:
     ScanNextOperation scan_next_;
     // Temporarily save scan tuple when drain out the remainder scan tuples.
     // To avoid ccentry address to be saved in stack
-    std::vector<std::pair<CcEntryAddr, uint64_t>> drain_batch_;
+    std::vector<DrainTuple> drain_batch_;
 
     std::unique_ptr<CircularQueue<std::unique_ptr<ScanCloseTxRequest>>>
         scan_close_req_pool_{nullptr};
