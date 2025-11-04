@@ -72,7 +72,7 @@ public:
 
     virtual bool Connect() = 0;
 
-    virtual void ScheduleTimerTasks() {};
+    virtual void ScheduleTimerTasks(){};
     /**
      * @brief flush entries in \@param flush_task to base table or skindex table
      * in data store, stop and return false if the flush failed after max retry
@@ -383,11 +383,19 @@ public:
         return true;
     }
 
-    virtual void OnStartFollowing()
+    virtual void OnStartFollowing(uint32_t node_id,
+                                  int64_t term,
+                                  int64_t standby_term,
+                                  bool resubscribe)
     {
     }
 
     virtual bool OnLeaderStart(uint32_t *next_leader_node)
+    {
+        return true;
+    }
+
+    virtual bool OnLeaderStop(int64_t term)
     {
         return true;
     }
