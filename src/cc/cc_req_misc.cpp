@@ -594,26 +594,21 @@ bool FillStoreSliceCc::Execute(CcShard &ccs)
 
     if (ccm == nullptr)
     {
-        std::optional<const TableSchema *> init_res =
+        InitCcmResult init_res =
             ccs.InitCcm(*table_name_,
                         cc_ng_id_,
                         std::max(cc_ng_term, cc_ng_candid_term),
                         this);
 
-        if (!init_res.has_value())
+        if (!init_res.success)
         {
-            // InitCcm failure.
-            // the catalog may need to be fetched from the
-            // KV store, may not exist (payload status = Deleted),
-            // or is currently being modified (write lock acquired).
-            //
-            // In the first case, the requester will be re-enqueued
-            // after FetchCatalog() completes fetching the catalog
-            // from the data store. In the latter cases, the request
-            // is marked as errored.
+            assert(init_res.error == CcErrorCode::NO_ERROR);
+            // The table's schema is not available yet. Cannot initialize the cc
+            // map. The request will be re-executed after the schema is fetched
+            // from the data store.
             return false;
         }
-        const TableSchema *table_schema = init_res.value();
+        const TableSchema *table_schema = init_res.schema;
         // Successfully load table catalog from data store.
         assert(table_schema != nullptr);
         assert(table_schema->Version() > 0);
@@ -1288,26 +1283,21 @@ bool RestoreCcMapCc::Execute(CcShard &ccs)
 
     if (ccm == nullptr)
     {
-        std::optional<const TableSchema *> init_res =
+        InitCcmResult init_res =
             ccs.InitCcm(*table_name_,
                         cc_ng_id_,
                         std::max(cc_ng_term, cc_ng_candid_term),
                         this);
 
-        if (!init_res.has_value())
+        if (!init_res.success)
         {
-            // InitCcm failure.
-            // the catalog may need to be fetched from the
-            // KV store, may not exist (payload status = Deleted),
-            // or is currently being modified (write lock acquired).
-            //
-            // In the first case, the requester will be re-enqueued
-            // after FetchCatalog() completes fetching the catalog
-            // from the data store. In the latter cases, the request
-            // is marked as errored.
+            assert(init_res.error == CcErrorCode::NO_ERROR);
+            // The table's schema is not available yet. Cannot initialize the cc
+            // map. The request will be re-executed after the schema is fetched
+            // from the data store.
             return false;
         }
-        const TableSchema *table_schema = init_res.value();
+        const TableSchema *table_schema = init_res.schema;
         // Successfully load table catalog from data store.
         assert(table_schema != nullptr);
         assert(table_schema->Version() > 0);

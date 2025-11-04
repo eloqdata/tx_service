@@ -24,7 +24,6 @@
 #include <algorithm>
 #include <chrono>
 #include <memory>  // make_shared
-#include <optional>
 #include <string>
 #include <thread>
 #include <tuple>
@@ -2288,12 +2287,6 @@ public:
         return keylock->HasWriteLock();
     }
 
-    struct InitCcmResult
-    {
-        const TableSchema *schema;
-        uint64_t schema_ts;
-    };
-
     /**
      * GetTableSchema stored in each shard's CatalogCcMap. Used to initialize
      * the Pk and Sk ccmaps.
@@ -2301,14 +2294,12 @@ public:
      * @param cc_ng_id
      * @param cc_ng_term
      * @param requester
-     * @return std::nullopt which indicates failure, or the table_schema if it
-     * exists in CatalogCcMap's CatalogRecord.
+     * @return InitCcmResult describing the schema lookup outcome.
      */
-    std::optional<const TableSchema *> GetTableSchema(
-        const TableName &table_name,
-        NodeGroupId cc_ng_id,
-        int64_t cc_ng_term,
-        CcRequestBase *requester)
+    InitCcmResult GetTableSchema(const TableName &table_name,
+                                 NodeGroupId cc_ng_id,
+                                 int64_t cc_ng_term,
+                                 CcRequestBase *requester)
     {
         const TableName base_table_name{table_name.GetBaseTableNameSV(),
                                         TableType::Primary,
@@ -2344,7 +2335,7 @@ public:
                                 cc_ng_term,
                                 requester))
                         {
-                            return std::nullopt;
+                            return InitCcmResult::Retry();
                         }
 #endif
                     }
@@ -2370,7 +2361,7 @@ public:
                 // Global CatalogEntry does not exist.
                 shard_->FetchCatalog(
                     table_key.Name(), cc_ng_id, cc_ng_term, requester);
-                return std::nullopt;
+                return InitCcmResult::Retry();
             }
         }
 
@@ -2385,22 +2376,14 @@ public:
                 << "InitCcm failure, target table: " << table_name.StringView()
                 << " has write lock on catalog_cc_map, which means, it is "
                    "being modified on this shard.";
-            if (requester != nullptr)
-            {
-                requester->AbortCcRequest(CcErrorCode::READ_CATALOG_CONFLICT);
-            }
-            return std::nullopt;
+            return InitCcmResult::Failure(CcErrorCode::READ_CATALOG_CONFLICT);
         }
 
         RecordStatus payload_status = catalog_cce->PayloadStatus();
         if (payload_status == RecordStatus::Deleted)
         {
-            if (requester != nullptr)
-            {
-                requester->AbortCcRequest(
-                    CcErrorCode::REQUESTED_TABLE_NOT_EXISTS);
-            }
-            return std::nullopt;
+            return InitCcmResult::Failure(
+                CcErrorCode::REQUESTED_TABLE_NOT_EXISTS);
         }
 
         assert(payload_status == RecordStatus::Normal);
@@ -2408,7 +2391,7 @@ public:
         assert(catalog_rec != nullptr);
         assert(catalog_rec->Schema() != nullptr);
 
-        return catalog_rec->Schema();
+        return InitCcmResult::Success(catalog_rec->Schema());
     }
 
     std::tuple<CcErrorCode, NonBlockingLock *, uint64_t> ReadTable(

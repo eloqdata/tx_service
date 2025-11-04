@@ -32,7 +32,6 @@
 #include <iostream>
 #include <map>
 #include <memory>
-#include <optional>
 #include <string>
 #include <unordered_map>
 #include <utility>
@@ -99,6 +98,28 @@ public:
     std::string table_catalog_info_;
     // catalog version
     std::string table_catalog_version_;
+};
+
+struct InitCcmResult
+{
+    bool success{false};
+    CcErrorCode error{CcErrorCode::NO_ERROR};
+    const TableSchema *schema{nullptr};
+
+    static InitCcmResult Success(const TableSchema *schema_ptr)
+    {
+        return InitCcmResult{true, CcErrorCode::NO_ERROR, schema_ptr};
+    }
+
+    static InitCcmResult Failure(CcErrorCode error_code)
+    {
+        return InitCcmResult{false, error_code, nullptr};
+    }
+
+    static InitCcmResult Retry()
+    {
+        return InitCcmResult{};
+    }
 };
 
 struct TxLockInfo
@@ -785,15 +806,14 @@ public:
      * is not cached locally, an asynchronous FetchCatalog() request is
      * issued to retrieve it from the data store.
      *
-     * @return std::nullopt if the catalog needs to be fetched from the KV
-     * store, does not exist (payload status = Deleted), or is currently being
-     * modified (write lock acquired). Otherwise, returns a pointer to the table
-     * schema cached in the CatalogCcMap’s CatalogRecord.
+     * @return InitCcmResult describing the outcome. success=false with
+     * error=CcErrorCode::NO_ERROR indicates that the caller should retry
+     * after catalog fetching completes.
      */
-    std::optional<const TableSchema *> InitCcm(const TableName &table_name,
-                                               NodeGroupId cc_ng_id,
-                                               int64_t cc_ng_term,
-                                               CcRequestBase *requester);
+    InitCcmResult InitCcm(const TableName &table_name,
+                          NodeGroupId cc_ng_id,
+                          int64_t cc_ng_term,
+                          CcRequestBase *requester);
 
     void DropCcm(const TableName &table_name, NodeGroupId ng_id);
 

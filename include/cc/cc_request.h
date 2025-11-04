@@ -217,9 +217,9 @@ public:
                     // ccmap is based on the real table name, for example, index
                     // should get the corresponding sk_ccmap.
                     assert(!table_name_->IsMeta());
-                    std::optional<const TableSchema *> init_res = ccs.InitCcm(
+                    InitCcmResult init_res = ccs.InitCcm(
                         *table_name_, node_group_id_, ng_term_, this);
-                    if (!init_res.has_value())
+                    if (!init_res.success)
                     {
                         // InitCcm failure.
                         // the catalog may need to be fetched from the
@@ -230,12 +230,16 @@ public:
                         // after FetchCatalog() completes fetching the catalog
                         // from the data store. In the latter cases, the request
                         // is marked as errored.
+                        if (init_res.error != CcErrorCode::NO_ERROR)
+                        {
+                            AbortCcRequest(init_res.error);
+                        }
+                        // The req is aborted or will be re-enqueued.
                         return false;
                     }
                     else
                     {
-
-                        assert(init_res.value() != nullptr);
+                        assert(init_res.schema != nullptr);
                         // InitCcm success.
                         ccm = ccs.GetCcm(*table_name_, node_group_id_);
                     }
@@ -1967,9 +1971,9 @@ public:
                 // ccmap is based on the real table name, for example, index
                 // should get the corresponding sk_ccmap.
                 assert(!table_name_->IsMeta());
-                std::optional<const TableSchema *> init_res = ccs.InitCcm(
-                        *table_name_, node_group_id_, ng_term_, this);
-                if (!init_res.has_value())
+                InitCcmResult init_res =
+                    ccs.InitCcm(*table_name_, node_group_id_, ng_term_, this);
+                if (!init_res.success)
                 {
                     // InitCcm failure.
                     // the catalog may need to be fetched from the
@@ -1980,11 +1984,16 @@ public:
                     // after FetchCatalog() completes fetching the catalog
                     // from the data store. In the latter cases, the request
                     // is marked as errored.
+                    if (init_res.error != CcErrorCode::NO_ERROR)
+                    {
+                        return SetError(ccs.core_id_, init_res.error);
+                    }
+                    // The req will be re-enqueued.
                     return false;
                 }
                 else
                 {
-                    assert(init_res.value() != nullptr);
+                    assert(init_res.schema != nullptr);
                     // InitCcm success.
                     ccm = ccs.GetCcm(*table_name_, node_group_id_);
                 }
@@ -2448,9 +2457,9 @@ public:
                 // ccmap is based on the real table name, for example, index
                 // should get the corresponding sk_ccmap.
                 assert(!table_name_->IsMeta());
-                std::optional<const TableSchema *> init_res =
+                InitCcmResult init_res =
                     ccs.InitCcm(*table_name_, node_group_id_, ng_term_, this);
-                if (!init_res.has_value())
+                if (!init_res.success)
                 {
                     // InitCcm failure.
                     // the catalog may need to be fetched from the
@@ -2461,10 +2470,15 @@ public:
                     // after FetchCatalog() completes fetching the catalog
                     // from the data store. In the latter cases, the request
                     // is marked as errored.
+                    if (init_res.error != CcErrorCode::NO_ERROR)
+                    {
+                        return SetError(init_res.error);
+                    }
+                    // The req will be re-enqueued.
                     return false;
                 }
 
-                const TableSchema *table_schema = init_res.value();
+                const TableSchema *table_schema = init_res.schema;
                 assert(table_schema != nullptr);
                 ccm = ccs.GetCcm(*table_name_, node_group_id_);
             }
@@ -3729,9 +3743,9 @@ public:
         if (ccm == nullptr)
         {
             assert(!table_name_->IsMeta());
-            std::optional<const TableSchema *> init_res =
-                ccs.InitCcm(*table_name_, node_group_id_, node_group_term_, this);
-            if (!init_res.has_value())
+            InitCcmResult init_res = ccs.InitCcm(
+                *table_name_, node_group_id_, node_group_term_, this);
+            if (!init_res.success)
             {
                 // InitCcm failure.
                 // the catalog may need to be fetched from the
@@ -3742,10 +3756,15 @@ public:
                 // after FetchCatalog() completes fetching the catalog
                 // from the data store. In the latter cases, the request
                 // is marked as errored.
+                if (init_res.error != CcErrorCode::NO_ERROR)
+                {
+                    SetError(init_res.error);
+                }
+                // The req is SetErrored or will be re-enqueued.
                 return false;
             }
 
-            const TableSchema *table_schema = init_res.value();
+            const TableSchema *table_schema = init_res.schema;
             assert(table_schema != nullptr);
             ccm = ccs.GetCcm(*table_name_, node_group_id_);
         }
@@ -4053,9 +4072,9 @@ public:
         if (ccm == nullptr)
         {
             assert(!table_name_->IsMeta());
-            std::optional<const TableSchema *> init_res =
-                ccs.InitCcm(*table_name_, node_group_id_, node_group_term_, this);
-            if (!init_res.has_value())
+            InitCcmResult init_res = ccs.InitCcm(
+                *table_name_, node_group_id_, node_group_term_, this);
+            if (!init_res.success)
             {
                 // InitCcm failure.
                 // the catalog may need to be fetched from the
@@ -4066,10 +4085,15 @@ public:
                 // after FetchCatalog() completes fetching the catalog
                 // from the data store. In the latter cases, the request
                 // is marked as errored.
+                if (init_res.error != CcErrorCode::NO_ERROR)
+                {
+                    SetError(init_res.error);
+                }
+                // The req is SetErrored or will be re-enqueued.
                 return false;
             }
 
-            const TableSchema *table_schema = init_res.value();
+            const TableSchema *table_schema = init_res.schema;
             assert(table_schema != nullptr);
             ccm = ccs.GetCcm(*table_name_, node_group_id_);
         }
@@ -4659,10 +4683,9 @@ public:
                 }
                 else
                 {
-                    std::optional<const TableSchema *> init_res =
-                        ccs.InitCcm(
-                            *table_name_, node_group_id_, ng_term_, this);
-                    if (!init_res.has_value())
+                    InitCcmResult init_res = ccs.InitCcm(
+                        *table_name_, node_group_id_, ng_term_, this);
+                    if (!init_res.success)
                     {
                         // InitCcm failure.
                         // the catalog may need to be fetched from the
@@ -4673,18 +4696,23 @@ public:
                         // after FetchCatalog() completes fetching the catalog
                         // from the data store. In the latter cases, the request
                         // is marked as errored.
+                        if (init_res.error != CcErrorCode::NO_ERROR)
+                        {
+                            SetFinish();
+                            return true;
+                        }
+                        // The req will be re-enqueued.
                         return false;
                     }
 
-                    assert(init_res.value() != nullptr);
+                    assert(init_res.schema != nullptr);
                     ccm_ = ccs.GetCcm(*table_name_, node_group_id_);
                     if (ccm_ == nullptr)
                     {
                         // The base table schema exists but the index table
                         // is dropped. Skips replaying the log for this cc
                         // map.
-                        assert(table_name_->Type() ==
-                                   TableType::Secondary ||
+                        assert(table_name_->Type() == TableType::Secondary ||
                                table_name_->Type() ==
                                    TableType::UniqueSecondary);
                         SetFinish();
@@ -6992,10 +7020,9 @@ public:
             // ccmap is based on the real table name, for example, index
             // should get the corresponding sk_ccmap.
             assert(!table_name_->IsMeta());
-            std::optional<const TableSchema *> init_res =
-                ccs.InitCcm(
-                    *table_name_, node_group_id_, StandbyNodeTerm(), this);
-            if (!init_res.has_value())
+            InitCcmResult init_res = ccs.InitCcm(
+                *table_name_, node_group_id_, StandbyNodeTerm(), this);
+            if (!init_res.success)
             {
                 // InitCcm failure.
                 // the catalog may need to be fetched from the
@@ -7006,10 +7033,15 @@ public:
                 // after FetchCatalog() completes fetching the catalog
                 // from the data store. In the latter cases, the request
                 // is marked as errored.
+                if (init_res.error != CcErrorCode::NO_ERROR)
+                {
+                    return SetFinish(ccs);
+                }
+                // The req will be re-enqueued.
                 return false;
             }
 
-            const TableSchema *table_schema = init_res.value();
+            const TableSchema *table_schema = init_res.schema;
             assert(table_schema != nullptr);
             ccm = ccs.GetCcm(*table_name_, node_group_id_);
         }
@@ -7454,9 +7486,9 @@ public:
         if (ccm == nullptr)
         {
             assert(!table_name_->IsMeta());
-            std::optional<const TableSchema *> init_res =
-                ccs.InitCcm(*table_name_, node_group_id_, *node_group_term_, this);
-            if (!init_res.has_value())
+            InitCcmResult init_res = ccs.InitCcm(
+                *table_name_, node_group_id_, *node_group_term_, this);
+            if (!init_res.success)
             {
                 // InitCcm failure.
                 // the catalog may need to be fetched from the
@@ -7467,10 +7499,15 @@ public:
                 // after FetchCatalog() completes fetching the catalog
                 // from the data store. In the latter cases, the request
                 // is marked as errored.
+                if (init_res.error != CcErrorCode::NO_ERROR)
+                {
+                    return SetError(init_res.error);
+                }
+                // The req will be re-enqueued.
                 return false;
             }
 
-            const TableSchema *table_schema = init_res.value();
+            const TableSchema *table_schema = init_res.schema;
             assert(table_schema != nullptr);
             ccm = ccs.GetCcm(*table_name_, node_group_id_);
         }
@@ -7949,9 +7986,9 @@ public:
         if (ccm == nullptr)
         {
             assert(!table_name_->IsMeta());
-            std::optional<const TableSchema *> init_res =
-                ccs.InitCcm(*table_name_, node_group_id_, *node_group_term_, this);
-            if (!init_res.has_value())
+            InitCcmResult init_res = ccs.InitCcm(
+                *table_name_, node_group_id_, *node_group_term_, this);
+            if (!init_res.success)
             {
                 // InitCcm failure.
                 // the catalog may need to be fetched from the
@@ -7962,10 +7999,15 @@ public:
                 // after FetchCatalog() completes fetching the catalog
                 // from the data store. In the latter cases, the request
                 // is marked as errored.
+                if (init_res.error != CcErrorCode::NO_ERROR)
+                {
+                    return SetError(init_res.error);
+                }
+                // The req will be re-enqueued.
                 return false;
             }
 
-            const TableSchema *table_schema = init_res.value();
+            const TableSchema *table_schema = init_res.schema;
             assert(table_schema != nullptr);
             ccm = ccs.GetCcm(*table_name_, node_group_id_);
         }
@@ -8510,14 +8552,13 @@ struct ScanSliceDeltaSizeCcForRangePartition : public CcRequestBase
         if (ccm == nullptr)
         {
             assert(!table_name_.IsMeta());
-            std::optional<const TableSchema *> init_res =
-                ccs.InitCcm(
-                    table_name_, node_group_id_, node_group_term_, this);
+            InitCcmResult init_res = ccs.InitCcm(
+                table_name_, node_group_id_, node_group_term_, this);
             // Catalog entry should always exists and schema should not be null,
             // since this cc request should be executed when table is locked by
             // data sync txm.
-            assert(init_res.has_value());
-            assert(init_res.value() != nullptr);
+            assert(init_res.success);
+            assert(init_res.schema != nullptr);
             ccm = ccs.GetCcm(table_name_, node_group_id_);
             assert(ccm != nullptr);
         }
@@ -8733,14 +8774,13 @@ struct ScanDeltaSizeCcForHashPartition : public CcRequestBase
         if (ccm == nullptr)
         {
             assert(!table_name_.IsMeta());
-            std::optional<const TableSchema *> init_res =
-                ccs.InitCcm(
-                    table_name_, node_group_id_, node_group_term_, this);
+            InitCcmResult init_res = ccs.InitCcm(
+                table_name_, node_group_id_, node_group_term_, this);
             // Catalog entry should always exists and schema should not be null,
             // since this cc request should be executed when table is locked by
             // data sync txm.
-            assert(init_res.has_value());
-            assert(init_res.value() != nullptr);
+            assert(init_res.success);
+            assert(init_res.schema != nullptr);
             ccm = ccs.GetCcm(table_name_, node_group_id_);
             assert(ccm != nullptr);
         }
@@ -8950,14 +8990,13 @@ public:
         if (ccm == nullptr)
         {
             assert(!table_name_.IsMeta());
-            std::optional<const TableSchema *> init_res =
-                ccs.InitCcm(
-                    table_name_, node_group_id_, node_group_term_, this);
+            InitCcmResult init_res = ccs.InitCcm(
+                table_name_, node_group_id_, node_group_term_, this);
             // Catalog entry should always exists and schema should not be null,
             // since this cc request should be executed when table is locked by
             // data sync txm.
-            assert(init_res.has_value());
-            assert(init_res.value() != nullptr);
+            assert(init_res.success);
+            assert(init_res.schema != nullptr);
             ccm = ccs.GetCcm(table_name_, node_group_id_);
             assert(ccm != nullptr);
         }

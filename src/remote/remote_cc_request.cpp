@@ -1008,9 +1008,9 @@ bool txservice::remote::RemoteScanNextBatch::Execute(CcShard &ccs)
         // ccmap is based on the real table name, for example, index
         // should get the corresponding sk_ccmap.
         assert(!table_name_->IsMeta());
-        std::optional<const TableSchema *> init_res = ccs.InitCcm(
-                        *table_name_, node_group_id_, ng_term_, this);
-        if (!init_res.has_value())
+        InitCcmResult init_res =
+            ccs.InitCcm(*table_name_, node_group_id_, ng_term_, this);
+        if (!init_res.success)
         {
             // InitCcm failure.
             // the catalog may need to be fetched from the
@@ -1021,11 +1021,16 @@ bool txservice::remote::RemoteScanNextBatch::Execute(CcShard &ccs)
             // after FetchCatalog() completes fetching the catalog
             // from the data store. In the latter cases, the request
             // is marked as errored.
+            if (init_res.error != CcErrorCode::NO_ERROR)
+            {
+                return SetError(ccs.core_id_, init_res.error);
+            }
+            // The req will be re-enqueued.
             return false;
         }
         else
         {
-            assert(init_res.value() != nullptr);
+            assert(init_res.schema != nullptr);
             // InitCcm success.
             ccm = ccs.GetCcm(*table_name_, node_group_id_);
         }

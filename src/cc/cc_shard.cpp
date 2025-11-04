@@ -27,7 +27,6 @@
 
 #include <chrono>  // std::chrono
 #include <cstdint>
-#include <optional>
 #include <string>
 
 #include "cc/catalog_cc_map.h"
@@ -1770,11 +1769,10 @@ CcMap *CcShard::CreateOrUpdateSkCcMap(const TableName &index_name,
     }
 }
 
-std::optional<const TableSchema *> CcShard::InitCcm(
-    const TableName &table_name,
-    NodeGroupId cc_ng_id,
-    int64_t cc_ng_term,
-    CcRequestBase *requester)
+InitCcmResult CcShard::InitCcm(const TableName &table_name,
+                               NodeGroupId cc_ng_id,
+                               int64_t cc_ng_term,
+                               CcRequestBase *requester)
 {
     const TableName base_table_name{table_name.GetBaseTableNameSV(),
                                     TableType::Primary,
@@ -1788,28 +1786,17 @@ std::optional<const TableSchema *> CcShard::InitCcm(
     // error.
     assert(catalog_ccm != nullptr);
 
-    std::optional<const TableSchema *> init_result =
-        catalog_ccm->GetTableSchema(
-            table_name, cc_ng_id, cc_ng_term, requester);
-    if (!init_result.has_value())
+    InitCcmResult init_result = catalog_ccm->GetTableSchema(
+        table_name, cc_ng_id, cc_ng_term, requester);
+    if (!init_result.success)
     {
-        // GetTableSchema failed, the catalog need to be fetched from KV, or
-        // does not exist(payload status is Deleted), or is being modified(write
-        // lock been acquired).
-        // The requester will be enqueued again after FetchCatalog or has been
-        // set-errored.
-
         // GetTableSchema() failed — the catalog may need to be fetched from the
         // KV store, may not exist (payload status = Deleted), or is currently
         // being modified (write lock acquired).
-        //
-        // In the first case, the requester will be re-enqueued after
-        // FetchCatalog() completes fetching the catalog from the data store.
-        // In the latter cases, the request is marked as errored.
-        return std::nullopt;
+        return init_result;
     }
 
-    const TableSchema *curr_schema = init_result.value();
+    const TableSchema *curr_schema = init_result.schema;
     uint64_t schema_ts = 0;
     assert(curr_schema != nullptr);
     if (curr_schema != nullptr)
@@ -1824,9 +1811,10 @@ std::optional<const TableSchema *> CcShard::InitCcm(
                 curr_schema->IndexKeySchema(table_name);
             if (index_schema == nullptr)
             {
-                requester->AbortCcRequest(
+                // requester->AbortCcRequest(
+                //     CcErrorCode::REQUESTED_INDEX_TABLE_NOT_EXISTS);
+                return InitCcmResult::Failure(
                     CcErrorCode::REQUESTED_INDEX_TABLE_NOT_EXISTS);
-                return std::nullopt;
             }
             schema_ts = index_schema->SchemaTs();
         }
@@ -1845,15 +1833,16 @@ std::optional<const TableSchema *> CcShard::InitCcm(
             // could still be old. Initiating ccm with the old version leads to
             // conflicts. Therefore, we explicitly verify the schema version
             // here to prevent such cases.
-            requester->AbortCcRequest(
+            // requester->AbortCcRequest(
+            //     CcErrorCode::REQUESTED_TABLE_SCHEMA_MISMATCH);
+            return InitCcmResult::Failure(
                 CcErrorCode::REQUESTED_TABLE_SCHEMA_MISMATCH);
-            return std::nullopt;
         }
 #ifdef STATISTICS
         if (!LoadRangesAndStatisticsNx(
                 curr_schema, cc_ng_id, cc_ng_term, requester))
         {
-            return std::nullopt;
+            return InitCcmResult::Retry();
         }
 #endif
 
@@ -1868,7 +1857,7 @@ std::optional<const TableSchema *> CcShard::InitCcm(
         }
     }
 
-    return curr_schema;
+    return InitCcmResult::Success(curr_schema);
 }
 
 void CcShard::DropCcm(const TableName &table_name, NodeGroupId ng_id)
