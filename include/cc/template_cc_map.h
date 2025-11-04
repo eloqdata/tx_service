@@ -2445,7 +2445,7 @@ public:
                 auto end_cce = static_cast<
                     CcEntry<KeyT, ValueT, VersionedRecord, RangePartitioned> *>(
                     end_lock->GetCcEntry());
-                auto *end_ccp = static_cast<
+                [[maybe_unused]] auto *end_ccp = static_cast<
                     CcPage<KeyT, ValueT, VersionedRecord, RangePartitioned> *>(
                     end_cce->GetCcPage());
                 assert(end_ccp != nullptr);
@@ -3085,7 +3085,7 @@ public:
                 auto end_cce = static_cast<
                     CcEntry<KeyT, ValueT, VersionedRecord, RangePartitioned> *>(
                     end_lock->GetCcEntry());
-                auto *end_ccp = static_cast<
+                [[maybe_unused]] auto *end_ccp = static_cast<
                     CcPage<KeyT, ValueT, VersionedRecord, RangePartitioned> *>(
                     end_cce->GetCcPage());
                 assert(end_ccp != nullptr);
@@ -10956,8 +10956,7 @@ protected:
 
             if (is_require_keys)
             {
-                // key->Serialize(*tuple->mutable_key());
-                *tuple->mutable_key() = std::string(key->Data(), key->Size());
+                tuple->mutable_key()->assign(key->Data(), key->Size());
                 tuple_size += key->Size();
             }
 
@@ -10999,8 +10998,7 @@ protected:
                 tuple = remote_cache->GetMemoryCache()->add_scan_tuple();
                 remote_cache->AddHashCode(key->Hash());
 
-                // key->Serialize(*tuple->mutable_key());
-                *tuple->mutable_key() = std::string(key->Data(), key->Size());
+                tuple->mutable_key()->assign(key->Data(), key->Size());
                 tuple_size += key->Size();
 
                 const RecordStatus rec_dirty_status = cce->DirtyPayloadStatus();
@@ -11051,9 +11049,7 @@ protected:
                 }
                 if (is_require_keys)
                 {
-                    // key->Serialize(*tuple->mutable_key());
-                    *tuple->mutable_key() =
-                        std::string(key->Data(), key->Size());
+                    tuple->mutable_key()->assign(key->Data(), key->Size());
                     tuple_size += key->Size();
                 }
 
