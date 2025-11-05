@@ -197,7 +197,7 @@ public:
 
     void CreateBackup(::google::protobuf::RpcController *controller,
                       const ::txservice::remote::CreateBackupRequest *request,
-                      ::txservice::remote::CreateBackupResponse *response,
+                      ::txservice::remote::FetchBackupResponse *response,
                       ::google::protobuf::Closure *done) override;
 
     void FetchBackup(::google::protobuf::RpcController *controller,

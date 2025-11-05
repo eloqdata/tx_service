@@ -1858,7 +1858,7 @@ void CcNodeService::ResetStandbySequenceId(
 void CcNodeService::CreateBackup(
     ::google::protobuf::RpcController *controller,
     const ::txservice::remote::CreateBackupRequest *request,
-    ::txservice::remote::CreateBackupResponse *response,
+    ::txservice::remote::FetchBackupResponse *response,
     ::google::protobuf::Closure *done)
 {
     brpc::ClosureGuard done_guard(done);
@@ -1881,6 +1881,12 @@ void CcNodeService::CreateBackup(
         assert(!request->dest_path().empty());
         auto st = store::SnapshotManager::Instance().CreateBackup(request);
         response->set_status(st);
+        if (st == BackupTaskStatus::Finished)
+        {
+            // Get backup files and backup ts for instant completion
+            store::SnapshotManager::Instance().GetBackupStatus(
+                ng_id, request->backup_name(), response);
+        }
     }
     else
     {
@@ -1972,16 +1978,15 @@ void CcNodeService::CreateClusterBackup(
     }
 
     std::unordered_map<txservice::NodeGroupId,
-                       txservice::remote::BackupTaskStatus>
-        backup_status;
+                       txservice::remote::FetchBackupResponse>
+        backup_responses;
     auto result = BackupUtil::CreateBackup(
-        backup_name, dest_path, dest_host, dest_user, backup_status);
+        backup_name, dest_path, dest_host, dest_user, backup_responses);
 
-    for (auto &[ng_id, st] : backup_status)
+    for (auto &[ng_id, resp] : backup_responses)
     {
         auto *ref = response->add_backup_infos();
-        ref->set_ng_id(ng_id);
-        ref->set_status(st);
+        ref->CopyFrom(resp);
     }
 
     switch (result)
@@ -2022,15 +2027,14 @@ void CcNodeService::FetchClusterBackup(
     }
 
     std::unordered_map<txservice::NodeGroupId,
-                       txservice::remote::BackupTaskStatus>
-        backup_status;
-    auto result = BackupUtil::GetBackupStatus(backup_name, backup_status);
+                       txservice::remote::FetchBackupResponse>
+        backup_responses;
+    auto result = BackupUtil::GetBackupStatus(backup_name, backup_responses);
 
-    for (auto &[ng_id, st] : backup_status)
+    for (auto &[ng_id, resp] : backup_responses)
     {
         auto *ref = response->add_backup_infos();
-        ref->set_ng_id(ng_id);
-        ref->set_status(st);
+        ref->CopyFrom(resp);
     }
 
     switch (result)
