@@ -144,14 +144,14 @@ public:
         const std::string &dest_path,
         const std::string &dest_host,
         const std::string &dest_user,
-        std::unordered_map<NodeGroupId, txservice::remote::BackupTaskStatus>
-            &ng_backup_result)
+        std::unordered_map<NodeGroupId, txservice::remote::FetchBackupResponse>
+            &backup_responses)
     {
         auto all_node_groups = Sharder::Instance().AllNodeGroups();
 
         std::vector<std::unique_ptr<txservice::remote::CreateBackupRequest>>
             req_vec;
-        std::vector<std::unique_ptr<txservice::remote::CreateBackupResponse>>
+        std::vector<std::unique_ptr<txservice::remote::FetchBackupResponse>>
             resp_vec;
         std::vector<std::unique_ptr<brpc::Controller>> cntl_vec;
         std::unordered_map<uint32_t, uint32_t> sent_nodes;
@@ -167,19 +167,25 @@ public:
                            << leader_node << ") .";
 
                 failed = true;
-                ng_backup_result.try_emplace(
-                    ng_id, txservice::remote::BackupTaskStatus::Failed);
+                backup_responses.try_emplace(
+                    ng_id, txservice::remote::FetchBackupResponse());
+                backup_responses.at(ng_id).set_ng_id(ng_id);
+                backup_responses.at(ng_id).set_status(
+                    txservice::remote::BackupTaskStatus::Failed);
                 break;
             }
 
             sent_nodes.try_emplace(ng_id, leader_node);
 
-            ng_backup_result.try_emplace(
-                ng_id, txservice::remote::BackupTaskStatus::Unknown);
+            backup_responses.try_emplace(
+                ng_id, txservice::remote::FetchBackupResponse());
+            backup_responses.at(ng_id).set_ng_id(ng_id);
+            backup_responses.at(ng_id).set_status(
+                txservice::remote::BackupTaskStatus::Unknown);
             req_vec.emplace_back(
                 std::make_unique<txservice::remote::CreateBackupRequest>());
             resp_vec.emplace_back(
-                std::make_unique<txservice::remote::CreateBackupResponse>());
+                std::make_unique<txservice::remote::FetchBackupResponse>());
             cntl_vec.emplace_back(std::make_unique<brpc::Controller>());
 
             auto *req = req_vec.back().get();
@@ -216,8 +222,8 @@ public:
             {
                 DLOG(INFO) << "CreateBackup rpc call failed, "
                            << cntl->ErrorText();
-                ng_backup_result.at(ng_id) =
-                    txservice::remote::BackupTaskStatus::Failed;
+                backup_responses.at(ng_id).set_status(
+                    txservice::remote::BackupTaskStatus::Failed);
                 failed = true;
                 sent_nodes.erase(ng_id);
             }
@@ -225,7 +231,13 @@ public:
             {
                 DLOG(INFO) << "CreateBackup ng# " << ng_id
                            << ", result:" << resp->status();
-                ng_backup_result.at(ng_id) = resp->status();
+                backup_responses.at(ng_id).set_ng_id(ng_id);
+                backup_responses.at(ng_id).set_status(resp->status());
+                for (const auto &f : resp->backup_files())
+                {
+                    backup_responses.at(ng_id).add_backup_files(f);
+                }
+                backup_responses.at(ng_id).set_backup_ts(resp->backup_ts());
             }
         }
 
@@ -239,8 +251,8 @@ public:
 
     static BackupResult GetBackupStatus(
         const std::string &backup_name,
-        std::unordered_map<NodeGroupId, txservice::remote::BackupTaskStatus>
-            &backup_status)
+        std::unordered_map<NodeGroupId, txservice::remote::FetchBackupResponse>
+            &backup_responses)
     {
         auto all_node_groups = Sharder::Instance().AllNodeGroups();
 
@@ -253,8 +265,11 @@ public:
         bool failed = false;
         for (uint32_t ng_id : *all_node_groups)
         {
-            backup_status.try_emplace(
-                ng_id, txservice::remote::BackupTaskStatus::Unknown);
+            backup_responses.try_emplace(
+                ng_id, txservice::remote::FetchBackupResponse());
+            backup_responses.at(ng_id).set_ng_id(ng_id);
+            backup_responses.at(ng_id).set_status(
+                txservice::remote::BackupTaskStatus::Unknown);
             auto leader_node = Sharder::Instance().LeaderNodeId(ng_id);
             std::shared_ptr<brpc::Channel> channel =
                 Sharder::Instance().GetCcNodeServiceChannel(leader_node);
@@ -263,6 +278,8 @@ public:
                 LOG(ERROR) << "Fail to init the channel to the node("
                            << leader_node << ") .";
                 failed = true;
+                backup_responses.at(ng_id).set_status(
+                    txservice::remote::BackupTaskStatus::Failed);
                 continue;
             }
 
@@ -303,14 +320,15 @@ public:
             {
                 DLOG(INFO) << "FetchBackup rpc call failed, "
                            << cntl->ErrorText();
-                backup_status.at(ng_id) =
-                    txservice::remote::BackupTaskStatus::Unknown;
+                backup_responses.at(ng_id).set_status(
+                    ::txservice::remote::BackupTaskStatus::Unknown);
                 failed = true;
             }
             else
             {
                 auto st = resp->status();
-                backup_status.at(ng_id) = st;
+                backup_responses.at(ng_id).set_ng_id(ng_id);
+                backup_responses.at(ng_id).set_status(st);
                 if (st == remote::BackupTaskStatus::Failed)
                 {
                     failed = true;
@@ -318,6 +336,14 @@ public:
                 else if (st != remote::BackupTaskStatus::Finished)
                 {
                     finished = false;
+                }
+                else
+                {
+                    for (const auto &f : resp->backup_files())
+                    {
+                        backup_responses.at(ng_id).add_backup_files(f);
+                    }
+                    backup_responses.at(ng_id).set_backup_ts(resp->backup_ts());
                 }
             }
         }

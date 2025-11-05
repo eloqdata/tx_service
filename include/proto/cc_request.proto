@@ -436,11 +436,6 @@ message CreateBackupRequest{
     BackupTaskStatus status = 9;
 }
 
-message CreateBackupResponse{
-    uint32 ng_id = 1;
-    BackupTaskStatus status = 4;
-}
-
 message FetchBackupRequest{
     uint32 ng_id = 1;
     string backup_name = 2;
@@ -480,7 +475,7 @@ message ClusterBackupResponse{
     string backup_name = 1;
     // failed, finished, running.
     string result = 2;
-    repeated BackupInfo backup_infos = 3;
+    repeated FetchBackupResponse backup_infos = 3;
 }
 
 message FetchClusterBackupRequest{
@@ -519,7 +514,7 @@ service CcRpcService {
     rpc OnSnapshotSynced(OnSnapshotSyncedRequest) returns (OnSnapshotSyncedResponse);
     rpc FetchNodeInfo(FetchNodeInfoRequest) returns (FetchNodeInfoResponse);
     rpc ResetStandbySequenceId(ResetStandbySequenceIdRequest) returns (ResetStandbySequenceIdResponse);
-    rpc CreateBackup(CreateBackupRequest) returns (CreateBackupResponse);
+    rpc CreateBackup(CreateBackupRequest) returns (FetchBackupResponse);
     rpc FetchBackup(FetchBackupRequest) returns (FetchBackupResponse);
     rpc TerminateBackup(TerminateBackupRequest) returns (TerminateBackupResponse);
     rpc CreateClusterBackup(CreateClusterBackupRequest) returns (ClusterBackupResponse);
