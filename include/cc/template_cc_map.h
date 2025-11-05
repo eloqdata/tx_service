@@ -72,11 +72,24 @@
 
 namespace txservice
 {
+
+inline bvar::LatencyRecorder post_read_lr("post_read_lr", "us");
+
+struct PostReadTimer
+{
+    ~PostReadTimer()
+    {
+        post_read_lr << (butil::cpuwide_time_us() - start);
+    }
+    int64_t start{butil::cpuwide_time_us()};
+};
+
 template <typename KeyT, typename ValueT>
 void BackfillSnapshotForScanSlice(FetchSnapshotCc *fetch_cc,
                                   CcRequestBase *requester);
 
 template <typename KeyT, typename ValueT, bool VersionedRecord>
+
 
 void BackfillForScanNextBatch(FetchBucketDataCc *fetch_cc,
                               CcRequestBase *requester);
@@ -495,6 +508,7 @@ public:
                 return false;
             }
         });
+        PostReadTimer timer;
 
         const CcEntryAddr *cce_addr = req.CceAddr();
 
