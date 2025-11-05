@@ -416,6 +416,12 @@ public:
         }
     }
 
+    void InitializeHashPartitionCkptHeap()
+    {
+        hash_partition_ckpt_heap_ = mi_heap_new();
+        hash_partition_main_thread_id_ = mi_thread_id();
+    }
+
     mi_threadid_t GetTableRangesHeapThreadId() const
     {
         return table_ranges_thread_id_;
@@ -2375,6 +2381,8 @@ private:
     WorkerThreadContext kickout_data_test_worker_ctx_;
     void KickoutDataForTest();
 
+    void ReportHashPartitionCkptHeapUsage();
+
     /**
      * Generate sk from pk
      */
@@ -2415,6 +2423,10 @@ private:
         std::vector<std::atomic<int32_t> *> mux_ptrs_;
         std::shared_mutex &meta_data_mux_;
     } fast_meta_data_mux_;
+
+    mi_heap_t *hash_partition_ckpt_heap_{nullptr};
+    mi_threadid_t hash_partition_main_thread_id_{0};
+    std::shared_mutex hash_partition_ckpt_heap_mux_;
 
     friend class LocalCcHandler;
     friend class remote::RemoteCcHandler;
