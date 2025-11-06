@@ -790,6 +790,12 @@ public:
                 assert(new_schema->Version() ==
                        catalog_entry->dirty_schema_version_);
 
+                shard_->CleanCcm(table_key->Name(), req.NodeGroupId());
+                shard_->UpdateCcmSchema(table_key->Name(),
+                                        req.NodeGroupId(),
+                                        catalog_entry->dirty_schema_.get(),
+                                        catalog_entry->dirty_schema_version_);
+
                 // Sync ddl op to standby nodes.
                 if (shard_->core_id_ == 0 &&
                     !shard_->GetSubscribedStandbys().empty())
