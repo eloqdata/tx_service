@@ -1008,28 +1008,30 @@ bool txservice::remote::RemoteScanNextBatch::Execute(CcShard &ccs)
         // ccmap is based on the real table name, for example, index
         // should get the corresponding sk_ccmap.
         assert(!table_name_->IsMeta());
-        const CatalogEntry *catalog_entry =
+        InitCcmResult init_res =
             ccs.InitCcm(*table_name_, node_group_id_, ng_term_, this);
-        if (catalog_entry == nullptr)
+        if (!init_res.success)
         {
-            // The local node does not contain the table's schema
-            // instance. The FetchCatalog() method will send an
-            // async request toward the data store to fetch the
-            // catalog. After fetching is finished, this cc request
-            // is re-enqueued for re-execution.
+            // InitCcm failure.
+            // the catalog may need to be fetched from the
+            // KV store, may not exist (payload status = Deleted),
+            // or is currently being modified (write lock acquired).
+            //
+            // In the first case, the requester will be re-enqueued
+            // after FetchCatalog() completes fetching the catalog
+            // from the data store. In the latter cases, the request
+            // is marked as errored.
+            if (init_res.error != CcErrorCode::NO_ERROR)
+            {
+                return SetError(ccs.core_id_, init_res.error);
+            }
+            // The req will be re-enqueued.
             return false;
         }
         else
         {
-            if (catalog_entry->schema_ == nullptr)
-            {
-                // The local node (LocalCcShards) contains a schema
-                // instance, which indicates that the table has been
-                // dropped. Returns the request with an error.
-                return SetError(ccs.core_id_,
-                                CcErrorCode::REQUESTED_TABLE_NOT_EXISTS);
-            }
-
+            assert(init_res.schema != nullptr);
+            // InitCcm success.
             ccm = ccs.GetCcm(*table_name_, node_group_id_);
         }
     }

@@ -1769,28 +1769,36 @@ CcMap *CcShard::CreateOrUpdateSkCcMap(const TableName &index_name,
     }
 }
 
-const CatalogEntry *CcShard::InitCcm(const TableName &table_name,
-                                     NodeGroupId cc_ng_id,
-                                     int64_t cc_ng_term,
-                                     CcRequestBase *requester)
+InitCcmResult CcShard::InitCcm(const TableName &table_name,
+                               NodeGroupId cc_ng_id,
+                               int64_t cc_ng_term,
+                               CcRequestBase *requester)
 {
     const TableName base_table_name{table_name.GetBaseTableNameSV(),
                                     TableType::Primary,
                                     table_name.Engine()};
 
-    const CatalogEntry *catalog_entry = GetCatalog(base_table_name, cc_ng_id);
-    if (catalog_entry == nullptr)
+    CatalogCcMap *catalog_ccm =
+        reinterpret_cast<CatalogCcMap *>(GetCcm(catalog_ccm_name, cc_ng_id));
+
+    // Catalog cc map is created eagerly per shard (native) or lazily for
+    // failover groups, so reaching here without one indicates a programming
+    // error.
+    assert(catalog_ccm != nullptr);
+
+    InitCcmResult init_result = catalog_ccm->GetTableSchema(
+        table_name, cc_ng_id, cc_ng_term, requester);
+    if (!init_result.success)
     {
-        // The local node does not contain the table's schema instance. The
-        // FetchCatalog() method sends an async request toward the data
-        // store to fetch the catalog. After fetching is finished, this cc
-        // request is re-enqueued for re-execution.
-        FetchCatalog(base_table_name, cc_ng_id, cc_ng_term, requester);
-        return nullptr;
+        // GetTableSchema() failed — the catalog may need to be fetched from the
+        // KV store, may not exist (payload status = Deleted), or is currently
+        // being modified (write lock acquired).
+        return init_result;
     }
 
-    const TableSchema *curr_schema = catalog_entry->schema_.get();
+    const TableSchema *curr_schema = init_result.schema;
     uint64_t schema_ts = 0;
+    assert(curr_schema != nullptr);
     if (curr_schema != nullptr)
     {
         if (table_name.IsBase())
@@ -1803,9 +1811,10 @@ const CatalogEntry *CcShard::InitCcm(const TableName &table_name,
                 curr_schema->IndexKeySchema(table_name);
             if (index_schema == nullptr)
             {
-                requester->AbortCcRequest(
+                // requester->AbortCcRequest(
+                //     CcErrorCode::REQUESTED_INDEX_TABLE_NOT_EXISTS);
+                return InitCcmResult::Failure(
                     CcErrorCode::REQUESTED_INDEX_TABLE_NOT_EXISTS);
-                return nullptr;
             }
             schema_ts = index_schema->SchemaTs();
         }
@@ -1824,29 +1833,17 @@ const CatalogEntry *CcShard::InitCcm(const TableName &table_name,
             // could still be old. Initiating ccm with the old version leads to
             // conflicts. Therefore, we explicitly verify the schema version
             // here to prevent such cases.
-            requester->AbortCcRequest(
+            // requester->AbortCcRequest(
+            //     CcErrorCode::REQUESTED_TABLE_SCHEMA_MISMATCH);
+            return InitCcmResult::Failure(
                 CcErrorCode::REQUESTED_TABLE_SCHEMA_MISMATCH);
-            return nullptr;
-        }
-        auto cc_map = GetCcm(catalog_ccm_name, cc_ng_id);
-        CatalogCcMap *catalog_ccm = reinterpret_cast<CatalogCcMap *>(cc_map);
-        if (catalog_ccm->HasWriteLock(table_name, cc_ng_id))
-        {
-            // This verification is used in cases where this node receives a
-            // request from an old leader with an outdated schema version,
-            // which happens to match the current schema version. Such a request
-            // should still be aborted. We verify this by checking whether the
-            // table is being updated, using the write lock as an indicator,
-            // since a table is being changed under write lock.
-            requester->AbortCcRequest(
-                CcErrorCode::REQUESTED_TABLE_SCHEMA_MISMATCH);
-            return nullptr;
         }
 #ifdef STATISTICS
+        assert(requester != nullptr);
         if (!LoadRangesAndStatisticsNx(
                 curr_schema, cc_ng_id, cc_ng_term, requester))
         {
-            return nullptr;
+            return InitCcmResult::Retry();
         }
 #endif
 
@@ -1861,7 +1858,7 @@ const CatalogEntry *CcShard::InitCcm(const TableName &table_name,
         }
     }
 
-    return catalog_entry;
+    return InitCcmResult::Success(curr_schema);
 }
 
 void CcShard::DropCcm(const TableName &table_name, NodeGroupId ng_id)

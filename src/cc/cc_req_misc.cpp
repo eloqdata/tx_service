@@ -593,33 +593,29 @@ bool FillStoreSliceCc::Execute(CcShard &ccs)
 
     if (ccm == nullptr)
     {
-        const CatalogEntry *catalog_entry =
+        InitCcmResult init_res =
             ccs.InitCcm(*table_name_,
                         cc_ng_id_,
                         std::max(cc_ng_term, cc_ng_candid_term),
                         this);
 
-        if (catalog_entry != nullptr)
+        if (!init_res.success)
         {
-            // Successfully load table catalog from data store.
-            assert(catalog_entry->schema_version_ > 0);
-
-            // For a filling range slice request, there must be a prior
-            // request reading and locking the table's schema, to prevent
-            // others from dropping the table. Hence, the table's schema
-            // must be avaliable.
-            assert(catalog_entry->schema_ != nullptr);
-            ccm = ccs.GetCcm(*table_name_, cc_ng_id_);
-            assert(ccm != nullptr);
-        }
-        else
-        {
+            assert(init_res.error == CcErrorCode::NO_ERROR);
             // The table's schema is not available yet. Cannot initialize the cc
             // map. The request will be re-executed after the schema is fetched
             // from the data store.
-
             return false;
         }
+        // Successfully load table catalog from data store.
+        assert(init_res.schema != nullptr);
+        assert(init_res.schema->Version() > 0);
+        // For a filling range slice request, there must be a prior
+        // request reading and locking the table's schema, to prevent
+        // others from dropping the table. Hence, the table's schema
+        // must be avaliable.
+        ccm = ccs.GetCcm(*table_name_, cc_ng_id_);
+        assert(ccm != nullptr);
     }
 
     return ccm->Execute(*this);
@@ -1285,29 +1281,29 @@ bool RestoreCcMapCc::Execute(CcShard &ccs)
 
     if (ccm == nullptr)
     {
-        const CatalogEntry *catalog_entry =
-            ccs.InitCcm(*table_name_, cc_ng_id_, cc_ng_term_, this);
+        InitCcmResult init_res =
+            ccs.InitCcm(*table_name_,
+                        cc_ng_id_,
+                        std::max(cc_ng_term, cc_ng_candid_term),
+                        this);
 
-        if (catalog_entry != nullptr)
+        if (!init_res.success)
         {
-            // Successfully load table catalog from data store.
-            assert(catalog_entry->schema_version_ > 0);
-
-            // For a filling range slice request, there must be a prior
-            // request reading and locking the table's schema, to prevent
-            // others from dropping the table. Hence, the table's schema
-            // must be avaliable.
-            assert(catalog_entry->schema_ != nullptr);
-            ccm = ccs.GetCcm(*table_name_, cc_ng_id_);
-            assert(ccm != nullptr);
-        }
-        else
-        {
+            assert(init_res.error == CcErrorCode::NO_ERROR);
             // The table's schema is not available yet. Cannot initialize the cc
             // map. The request will be re-executed after the schema is fetched
             // from the data store.
             return false;
         }
+        // Successfully load table catalog from data store.
+        assert(init_res.schema != nullptr);
+        assert(init_res.schema->Version() > 0);
+        // For a filling range slice request, there must be a prior
+        // request reading and locking the table's schema, to prevent
+        // others from dropping the table. Hence, the table's schema
+        // must be avaliable.
+        ccm = ccs.GetCcm(*table_name_, cc_ng_id_);
+        assert(ccm != nullptr);
     }
 
     ccm->Execute(*this);

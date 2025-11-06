@@ -2287,6 +2287,114 @@ public:
         return keylock->HasWriteLock();
     }
 
+    /**
+     * GetTableSchema stored in each shard's CatalogCcMap. Used to initialize
+     * the Pk and Sk ccmaps.
+     * @param table_name
+     * @param cc_ng_id
+     * @param cc_ng_term
+     * @param requester
+     * @return InitCcmResult describing the schema lookup outcome.
+     */
+    InitCcmResult GetTableSchema(const TableName &table_name,
+                                 NodeGroupId cc_ng_id,
+                                 int64_t cc_ng_term,
+                                 CcRequestBase *requester)
+    {
+        const TableName base_table_name{table_name.GetBaseTableNameSV(),
+                                        TableType::Primary,
+                                        table_name.Engine()};
+
+        CatalogKey table_key{base_table_name};
+
+        bool emplace = false;
+        Iterator it = FindEmplace(table_key, emplace, true, false);
+        CcEntry<CatalogKey, CatalogRecord, true, false> *catalog_cce =
+            it->second;
+
+        if (catalog_cce->PayloadStatus() == RecordStatus::Unknown)
+        {
+            const CatalogEntry *catalog_entry =
+                shard_->GetCatalog(table_key.Name(), cc_ng_id);
+
+            // If the read toward the catalog cc entry acquires the read
+            // lock but the cc entry does not contain the value, checks if
+            // the catalog has been constructed at this node. If so, turns
+            // this request into a read-outside request that installs the
+            // value in the cc entry.
+            if (catalog_entry != nullptr && catalog_entry->schema_version_ > 0)
+            {
+                if (catalog_entry->schema_ != nullptr)
+                {
+                    {
+#ifdef STATISTICS
+                        assert(requester != nullptr);
+                        // Initialize table statistics before create ccmap.
+                        if (!shard_->LoadRangesAndStatisticsNx(
+                                catalog_entry->schema_.get(),
+                                cc_ng_id,
+                                cc_ng_term,
+                                requester))
+                        {
+                            return InitCcmResult::Retry();
+                        }
+#endif
+                    }
+
+                    // upload catalog record
+                    catalog_cce->payload_.PassInCurrentPayload(
+                        std::make_unique<CatalogRecord>());
+                    catalog_cce->payload_.cur_payload_->Set(
+                        catalog_entry->schema_,
+                        catalog_entry->dirty_schema_,
+                        catalog_entry->schema_version_);
+                    catalog_cce->SetCommitTsPayloadStatus(
+                        catalog_entry->schema_version_, RecordStatus::Normal);
+                }
+                else
+                {
+                    catalog_cce->SetCommitTsPayloadStatus(
+                        catalog_entry->schema_version_, RecordStatus::Deleted);
+                }
+            }
+            else
+            {
+                // Global CatalogEntry does not exist.
+                shard_->FetchCatalog(
+                    table_key.Name(), cc_ng_id, cc_ng_term, requester);
+                return InitCcmResult::Retry();
+            }
+        }
+
+        const auto keylock = catalog_cce->GetKeyLock();
+        if (keylock != nullptr && keylock->HasWriteLock())
+        {
+            // If write lock exists, the CatalogRecord should have dirty schema
+            // set.
+            assert(catalog_cce->payload_.cur_payload_.get()->DirtySchema() !=
+                   nullptr);
+            DLOG(WARNING)
+                << "InitCcm failure, target table: " << table_name.StringView()
+                << " has write lock on catalog_cc_map, which means, it is "
+                   "being modified on this shard.";
+            return InitCcmResult::Failure(CcErrorCode::READ_CATALOG_CONFLICT);
+        }
+
+        RecordStatus payload_status = catalog_cce->PayloadStatus();
+        if (payload_status == RecordStatus::Deleted)
+        {
+            return InitCcmResult::Failure(
+                CcErrorCode::REQUESTED_TABLE_NOT_EXISTS);
+        }
+
+        assert(payload_status == RecordStatus::Normal);
+        CatalogRecord *catalog_rec = catalog_cce->payload_.cur_payload_.get();
+        assert(catalog_rec != nullptr);
+        assert(catalog_rec->Schema() != nullptr);
+
+        return InitCcmResult::Success(catalog_rec->Schema());
+    }
+
     std::tuple<CcErrorCode, NonBlockingLock *, uint64_t> ReadTable(
         const TableName &table_name,
         uint32_t node_group_id,

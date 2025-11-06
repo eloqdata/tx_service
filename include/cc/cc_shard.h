@@ -100,6 +100,28 @@ public:
     std::string table_catalog_version_;
 };
 
+struct InitCcmResult
+{
+    bool success{false};
+    CcErrorCode error{CcErrorCode::NO_ERROR};
+    const TableSchema *schema{nullptr};
+
+    static InitCcmResult Success(const TableSchema *schema_ptr)
+    {
+        return InitCcmResult{true, CcErrorCode::NO_ERROR, schema_ptr};
+    }
+
+    static InitCcmResult Failure(CcErrorCode error_code)
+    {
+        return InitCcmResult{false, error_code, nullptr};
+    }
+
+    static InitCcmResult Retry()
+    {
+        return InitCcmResult{};
+    }
+};
+
 struct TxLockInfo
 {
     using uptr = std::unique_ptr<TxLockInfo>;
@@ -776,19 +798,22 @@ public:
                                  bool is_create = true);
 
     /**
-     * @brief Initializes the request's target cc map, if the table
-     * schema is available and indicates that the table exists. Sends an async
-     * request to fetch the schema from the data store, if the schema is not
-     * cached locally.
+     * @brief Initializes the request's target CC map if the table schema
+     * is available and indicates that the table exists.
      *
-     * @return const TableSchemaView* The pointer to the schema view of the
-     * request's target cc map. Null, if the schema is not cached at the node
-     * level.
+     * The request is rejected if the table is being modified, or if the
+     * requested schema does not match the target schema. If the schema
+     * is not cached locally, an asynchronous FetchCatalog() request is
+     * issued to retrieve it from the data store.
+     *
+     * @return InitCcmResult describing the outcome. success=false with
+     * error=CcErrorCode::NO_ERROR indicates that the caller should retry
+     * after catalog fetching completes.
      */
-    const CatalogEntry *InitCcm(const TableName &table_name,
-                                NodeGroupId cc_ng_id,
-                                int64_t cc_ng_term,
-                                CcRequestBase *requester);
+    InitCcmResult InitCcm(const TableName &table_name,
+                          NodeGroupId cc_ng_id,
+                          int64_t cc_ng_term,
+                          CcRequestBase *requester);
 
     void DropCcm(const TableName &table_name, NodeGroupId ng_id);
 
