@@ -3,6 +3,9 @@
 #include <atomic>
 #include <cstdint>
 #include <memory>
+#include <variant>
+
+#include "cc_req_base.h"
 
 namespace txservice
 {
@@ -63,7 +66,7 @@ public:
 private:
     std::atomic<ReaderWriterCntlBlock> cntl_block_;
     CcShard *ccs_{nullptr};
-    std::atomic<CcRequestBase *> write_req_{nullptr};
+    std::atomic<std::variant<CcRequestBase *, uint64_t >> writer_{nullptr};
 };
 
 template <typename T>
