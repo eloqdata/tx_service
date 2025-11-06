@@ -83,6 +83,8 @@ enum struct TxErrorCode : uint16_t
 
     DATA_NOT_ON_LOCAL_NODE,
 
+    WRITE_REQUEST_ON_SLAVE_NODE,
+
     // Execute TxRequest on a committed/aborted txn
     TX_REQUEST_TO_COMMITTED_ABORTED_TX,
 
@@ -180,6 +182,7 @@ static const std::unordered_map<TxErrorCode, std::string> tx_error_messages{
     {TxErrorCode::INVALID_CLUSTER_SCALE_REQUEST,
      "Invalid cluster scale request."},
     {TxErrorCode::DATA_NOT_ON_LOCAL_NODE, "Data not on local node."},
+    {TxErrorCode::WRITE_REQUEST_ON_SLAVE_NODE, "Write request on slave node."},
     {TxErrorCode::TX_REQUEST_TO_COMMITTED_ABORTED_TX,
      "Execute TxRequest failed, transaction has committed/aborted"},
     {TxErrorCode::READ_CATALOG_FAIL, "Current db has not been initialized"},
@@ -312,6 +315,8 @@ enum struct CcErrorCode : uint8_t
     // For Redis, if key not on local node, return this error.
     DATA_NOT_ON_LOCAL_NODE,
 
+    WRITE_REQUEST_ON_SLAVE_NODE,
+
     TASK_EXPIRED,
 
     LOG_NOT_TRUNCATABLE,
@@ -400,7 +405,7 @@ static const std::unordered_map<CcErrorCode, std::string> cc_error_messages{
     {CcErrorCode::SYSTEM_HANDLER_ERR, "SYSTEM_HANDLER_ERR"},
 
     {CcErrorCode::DATA_NOT_ON_LOCAL_NODE, "DATA_NOT_ON_LOCAL_NODE"},
-
+    {CcErrorCode::WRITE_REQUEST_ON_SLAVE_NODE, "WRITE_REQUEST_ON_SLAVE_NODE"},
     {CcErrorCode::TASK_EXPIRED, "TASK_EXPIRED"},
 
     {CcErrorCode::LOG_NOT_TRUNCATABLE, "LOG_NOT_TRUNCATABLE"},
