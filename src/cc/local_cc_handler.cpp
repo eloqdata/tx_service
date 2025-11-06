@@ -625,7 +625,7 @@ bool txservice::LocalCcHandler::ReadLocal(const TableName &table_name,
     if (IsStandbyTx(tx_term) && is_for_write)
     {
         // redis smart client needs to resend this command to primary node
-        hres.SetError(CcErrorCode::DATA_NOT_ON_LOCAL_NODE);
+        hres.SetError(CcErrorCode::WRITE_REQUEST_ON_SLAVE_NODE);
         return true;
     }
 
@@ -843,7 +843,12 @@ void txservice::LocalCcHandler::ScanOpen(
         // Standby node does not communicate with other node groups so
         // scan on standby node only works if there's only 1 node group.
         // Standby node does not support scan for write.
-        if (Sharder::Instance().NodeGroupCount() > 1 || is_for_write)
+        if (is_for_write)
+        {
+            hd_res.SetError(CcErrorCode::WRITE_REQUEST_ON_SLAVE_NODE);
+            return;
+        }
+        if (Sharder::Instance().NodeGroupCount() > 1)
         {
             hd_res.SetError(CcErrorCode::DATA_NOT_ON_LOCAL_NODE);
             return;
@@ -1657,18 +1662,18 @@ void txservice::LocalCcHandler::ObjectCommand(
     // Standby transaction only execute local request.
     if (is_standby_tx)
     {
+        if (!obj_cmd.IsReadOnly())
+        {
+            // redis smart client needs to resend this command to primary node
+            DLOG(WARNING) << "!!! WRITE_REQUEST_ON_SLAVE_NODE !!";
+            hres.SetError(CcErrorCode::WRITE_REQUEST_ON_SLAVE_NODE);
+            return;
+        }
+
         if (Sharder::Instance().NativeNodeGroup() != ng_id)
         {
             // the standby node isn't allow to communicate with the master node
             // of any other node group
-            hres.SetError(CcErrorCode::DATA_NOT_ON_LOCAL_NODE);
-            return;
-        }
-
-        if (!obj_cmd.IsReadOnly())
-        {
-            // redis smart client needs to resend this command to primary node
-            DLOG(WARNING) << "!!! DATA_NOT_ON_LOCAL_NODE !!";
             hres.SetError(CcErrorCode::DATA_NOT_ON_LOCAL_NODE);
             return;
         }

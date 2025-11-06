@@ -385,6 +385,8 @@ TxErrorCode TransactionExecution::ConvertCcError(CcErrorCode error)
     case CcErrorCode::DATA_NOT_ON_LOCAL_NODE:
         return TxErrorCode::DATA_NOT_ON_LOCAL_NODE;
 
+    case CcErrorCode::WRITE_REQUEST_ON_SLAVE_NODE:
+        return TxErrorCode::WRITE_REQUEST_ON_SLAVE_NODE;
     case CcErrorCode::READ_CATALOG_FAIL:
         return TxErrorCode::READ_CATALOG_FAIL;
 
