@@ -37,8 +37,6 @@
 
 #include "cc_req_misc.h"
 #include "data_store_service_client_closure.h"
-#include "data_store_service_config.h"
-#include "data_store_service_scanner.h"
 #include "eloq_data_store_service/object_pool.h"  // ObjectPool
 #include "eloq_data_store_service/thread_worker_pool.h"
 #include "metrics.h"

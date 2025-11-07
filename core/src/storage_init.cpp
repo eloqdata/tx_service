@@ -70,8 +70,8 @@ DEFINE_string(bigtable_keyspace, "eloq", "KeySpace of BigTable");
 #if defined(DATA_STORE_TYPE_ELOQDSS_ROCKSDB_CLOUD_S3)
 DECLARE_string(aws_access_key_id);
 DECLARE_string(aws_secret_key);
-#elif defined(DATA_STORE_TYPE_DYNAMODB) || \
-    defined(LOG_STATE_TYPE_RKDB_S3) || defined(LOG_STATE_TYPE_RKDB_GCS)
+#elif defined(DATA_STORE_TYPE_DYNAMODB) || defined(LOG_STATE_TYPE_RKDB_S3) || \
+    defined(LOG_STATE_TYPE_RKDB_GCS)
 DEFINE_string(aws_access_key_id, "", "AWS SDK access key id");
 DEFINE_string(aws_secret_key, "", "AWS SDK secret key");
 #endif
@@ -174,7 +174,9 @@ bool DataSubstrate::InitializeStorageHandler(const INIReader &config_reader)
 
     store_hd_ = std::make_unique<EloqKV::RocksDBHandlerImpl>(
         rocksdb_config,
-        (core_config_.bootstrap || is_single_node),
+        true,  // for non shared storage, always pass
+               // create_if_missing=true, since no confilcts will happen
+               // under
         core_config_.enable_cache_replacement);
 
 #elif ELOQDS
@@ -195,72 +197,47 @@ bool DataSubstrate::InitializeStorageHandler(const INIReader &config_reader)
         std::filesystem::create_directories(eloq_dss_data_path);
     }
 
-    std::string dss_config_file_path =
-        !CheckCommandLineFlagIsDefault("eloq_dss_config_file_path")
-            ? FLAGS_eloq_dss_config_file_path
-            : config_reader.GetString("store",
-                                      "eloq_dss_config_file_path",
-                                      FLAGS_eloq_dss_config_file_path);
+    std::string dss_config_file_path = "";
+    EloqDS::DataStoreServiceClusterManager ds_config;
+    uint32_t dss_leader_id = EloqDS::UNKNOWN_DSS_LEADER_NODE_ID;
 
-    if (dss_config_file_path.empty())
+    // use tx node id as the dss node id
+    // since they are deployed together
+    uint32_t dss_node_id = network_config_.node_id;
+    if (core_config_.bootstrap || is_single_node)
     {
-        dss_config_file_path = eloq_dss_data_path + "/dss_config.ini";
+        dss_leader_id = network_config_.node_id;
     }
 
-    EloqDS::DataStoreServiceClusterManager ds_config;
-    if (std::filesystem::exists(dss_config_file_path))
+    if (!eloq_dss_peer_node.empty())
     {
-        bool load_res = ds_config.Load(dss_config_file_path);
-        if (!load_res)
+        ds_config.SetThisNode(network_config_.local_ip,
+                              EloqDS::DataStoreServiceClient::TxPort2DssPort(
+                                  network_config_.local_port));
+        // Fetch ds topology from peer node
+        if (!EloqDS::DataStoreService::FetchConfigFromPeer(eloq_dss_peer_node,
+                                                           ds_config))
         {
-            LOG(ERROR) << "Failed to load dss config file  : "
-                       << dss_config_file_path;
+            LOG(ERROR) << "Failed to fetch config from peer node: "
+                       << eloq_dss_peer_node;
             return false;
         }
     }
     else
     {
-        if (!eloq_dss_peer_node.empty())
+        if (network_config_.ng_configs.size() > 1)
         {
-            ds_config.SetThisNode(network_config_.local_ip,
-                                  network_config_.local_port + 7);
-            // Fetch ds topology from peer node
-            if (!EloqDS::DataStoreService::FetchConfigFromPeer(
-                    eloq_dss_peer_node, ds_config))
-            {
-                LOG(ERROR) << "Failed to fetch config from peer node: "
-                           << eloq_dss_peer_node;
-                return false;
-            }
-
-            // Save the fetched config to the local file
-            if (!ds_config.Save(dss_config_file_path))
-            {
-                LOG(ERROR) << "Failed to save config to file: "
-                           << dss_config_file_path;
-                return false;
-            }
-        }
-        else if (core_config_.bootstrap || is_single_node)
-        {
-            // Initialize the data store service config
-            ds_config.Initialize(network_config_.local_ip,
-                                 network_config_.local_port + 7);
-            if (!ds_config.Save(dss_config_file_path))
-            {
-                LOG(ERROR) << "Failed to save config to file: "
-                           << dss_config_file_path;
-                return false;
-            }
-        }
-        else
-        {
-            LOG(ERROR) << "Failed to load data store service config file: "
-                       << dss_config_file_path;
+            LOG(ERROR) << "EloqDS multi-node cluster must specify "
+                          "eloq_dss_peer_node.";
             return false;
         }
+        EloqDS::DataStoreServiceClient::TxConfigsToDssClusterConfig(
+            dss_node_id,
+            network_config_.native_ng_id,
+            network_config_.ng_configs,
+            dss_leader_id,
+            ds_config);
     }
-
 #if defined(DATA_STORE_TYPE_ELOQDSS_ROCKSDB_CLOUD_S3) || \
     defined(DATA_STORE_TYPE_ELOQDSS_ROCKSDB_CLOUD_GCS)
     EloqDS::RocksDBConfig rocksdb_config(config_reader, eloq_dss_data_path);
@@ -289,8 +266,17 @@ bool DataSubstrate::InitializeStorageHandler(const INIReader &config_reader)
         eloq_dss_data_path + "/DSMigrateLog",
         std::move(ds_factory));
     // setup local data store service
-    bool ret = data_store_service_->StartService(core_config_.bootstrap ||
-                                                 is_single_node);
+    bool ret = true;
+#if defined(DATA_STORE_TYPE_ELOQDSS_ROCKSDB)
+    // For non shared storage like rocksdb,
+    // we always set create_if_missing to true
+    // since non conflicts will happen under
+    // multi-node deployment.
+    ret = data_store_service_->StartService(true, dss_leader_id, dss_node_id);
+#else
+    ret = data_store_service_->StartService(
+        (core_config_.bootstrap || is_single_node), dss_leader_id, dss_node_id);
+#endif
     if (!ret)
     {
         LOG(ERROR) << "Failed to start data store service";
