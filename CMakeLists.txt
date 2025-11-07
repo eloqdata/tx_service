@@ -224,7 +224,7 @@ add_library(txservice STATIC ${TxService_SOURCES})
 
 target_include_directories(txservice PUBLIC ${INCLUDE_DIR})
 
-target_link_libraries(txservice PUBLIC mimalloc ${LINK_LIB} ${PROTOBUF_LIBRARIES} ${ABSEIL} atomic)
+target_link_libraries(txservice PUBLIC mimalloc ${LINK_LIB} ${PROTOBUF_LIBRARIES} ${ABSEIL})
 
 include(FetchContent)
     # Import yaml-cpp library used by host manager
