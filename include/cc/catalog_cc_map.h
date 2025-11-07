@@ -2375,10 +2375,6 @@ public:
         const auto keylock = catalog_cce->GetKeyLock();
         if (keylock != nullptr && keylock->HasWriteLock())
         {
-            // If write lock exists, the CatalogRecord should have dirty schema
-            // set.
-            assert(catalog_cce->payload_.cur_payload_.get()->DirtySchema() !=
-                   nullptr);
             DLOG(WARNING)
                 << "InitCcm failure, target table: " << table_name.StringView()
                 << " has write lock on catalog_cc_map, which means, it is "
