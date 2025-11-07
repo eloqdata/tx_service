@@ -600,7 +600,8 @@ public:
     void Reset(DataStoreServiceClient *client,
                const std::string_view table_name,
                const uint32_t partition_id,
-               const std::string_view key,
+               std::string_view be_bucket_id,
+               std::string_view key,
                void *callback_data,
                DataStoreCallback callback)
     {
@@ -609,7 +610,11 @@ public:
         retry_count_ = 0;
         table_name_ = table_name;
         partition_id_ = partition_id;
-        key_ = key;
+        if (!be_bucket_id.empty())
+        {
+            key_parts_.emplace_back(be_bucket_id);
+        }
+        key_parts_.emplace_back(key);
         ds_service_client_ = client;
         callback_data_ = callback_data;
         callback_ = callback;
@@ -627,7 +632,7 @@ public:
         response_.Clear();
         table_name_ = "";
         partition_id_ = 0;
-        key_ = "";
+        key_parts_.clear();
         result_.Clear();
         value_.clear();
         ts_ = 0;
@@ -655,7 +660,14 @@ public:
             request_.Clear();
             request_.set_kv_table_name(table_name_.data(), table_name_.size());
             request_.set_partition_id(partition_id_);
-            request_.set_key_str(key_.data(), key_.size());
+
+            for (size_t idx = 0; idx < key_parts_.size(); ++idx)
+            {
+                std::string *key_part = request_.add_key_str();
+                key_part->append(key_parts_[idx].data(),
+                                 key_parts_[idx].size());
+            }
+
             rpc_request_prepare_ = true;
         }
     }
@@ -758,9 +770,9 @@ public:
         return partition_id_;
     }
 
-    const std::string_view Key()
+    const std::vector<std::string_view> &Key()
     {
-        return key_;
+        return key_parts_;
     }
 
     std::string &LocalValueRef()
@@ -880,7 +892,7 @@ private:
     // serve local call
     std::string_view table_name_;
     uint32_t partition_id_;
-    std::string_view key_;
+    std::vector<std::string_view> key_parts_;
     ::EloqDS::remote::CommonResult result_;
     std::string value_;
     uint64_t ts_;
@@ -980,7 +992,7 @@ public:
             if (cntl_.Failed())
             {
                 // RPC failed.
-                LOG(ERROR) << "Failed for DeleteRange RPC request "
+                LOG(ERROR) << "Failed for FlushData RPC request "
                            << ", with Error code: " << cntl_.ErrorCode()
                            << ". Error Msg: " << cntl_.ErrorText();
                 if (cntl_.ErrorCode() != brpc::EOVERCROWDED &&
@@ -1727,7 +1739,7 @@ public:
             }
         }
 
-        if (need_retry && retry_count_ < 2)
+        if (need_retry && retry_count_ < ds_service_client_->retry_limit_)
         {
             self_guard.Release();
             retry_count_++;
@@ -1890,8 +1902,10 @@ public:
         inclusive_end_ = false;
         scan_forward_ = true;
         session_id_ = "";
+        generate_session_id_ = true;
         batch_size_ = 0;
-        search_conditions_ = nullptr;
+        // search_conditions_ = nullptr;
+        search_conditions_.clear();
         result_.Clear();
         items_.clear();
 
@@ -1900,19 +1914,21 @@ public:
         callback_data_ = nullptr;
     }
 
-    void Reset(DataStoreServiceClient &store_hd,
-               const std::string_view table_name,
-               uint32_t partition_id,
-               const std::string_view start_key,
-               const std::string_view end_key,
-               bool inclusive_start,
-               bool inclusive_end,
-               bool scan_forward,
-               const std::string_view session_id,
-               const uint32_t batch_size,
-               const std::vector<remote::SearchCondition> *search_conditions,
-               void *callback_data,
-               DataStoreCallback callback)
+    void Reset(
+        DataStoreServiceClient &store_hd,
+        const std::string_view table_name,
+        uint32_t partition_id,
+        const std::string_view start_key,
+        const std::string_view end_key,
+        bool inclusive_start,
+        bool inclusive_end,
+        bool scan_forward,
+        const std::string_view session_id,
+        bool generate_session_id,
+        const uint32_t batch_size,
+        const std::vector<txservice::DataStoreSearchCond> *pushdown_conditions,
+        void *callback_data,
+        DataStoreCallback callback)
     {
         is_local_request_ = true;
         rpc_request_prepare_ = false;
@@ -1927,8 +1943,21 @@ public:
         inclusive_end_ = inclusive_end;
         scan_forward_ = scan_forward;
         session_id_ = session_id;
+        generate_session_id_ = generate_session_id;
         batch_size_ = batch_size;
-        search_conditions_ = search_conditions;
+        if (pushdown_conditions)
+        {
+            // convert pushdown conditions to search conditions
+            for (const auto &cond : *pushdown_conditions)
+            {
+                remote::SearchCondition search_cond;
+                search_cond.set_field_name(cond.field_name_);
+                search_cond.set_op(cond.op_);
+                search_cond.set_value(cond.val_str_);
+                search_conditions_.emplace_back(std::move(search_cond));
+            }
+        }
+        // search_conditions_ = search_conditions;
         callback_data_ = callback_data;
         callback_ = callback;
         assert(callback_ != nullptr);
@@ -1958,25 +1987,28 @@ public:
             request_.set_kv_table_name_str(table_name_.data(),
                                            table_name_.size());
             request_.set_partition_id(partition_id_);
+
             request_.set_start_key(start_key_.data(), start_key_.size());
             request_.set_inclusive_start(inclusive_start_);
             request_.set_inclusive_end(inclusive_end_);
             request_.set_end_key(end_key_.data(), end_key_.size());
             request_.set_scan_forward(scan_forward_);
             request_.set_session_id(session_id_);
+            request_.set_generate_session_id(generate_session_id_);
             request_.set_batch_size(batch_size_);
-            if (search_conditions_)
+            if (!search_conditions_.empty())
             {
-                for (auto &cond : *search_conditions_)
+                for (auto &cond : search_conditions_)
                 {
                     remote::SearchCondition *rcond =
                         request_.add_search_conditions();
-                    rcond->set_field_name(cond.field_name());
-                    rcond->set_op(cond.op());
-                    rcond->set_value(cond.value());
+                    rcond->set_field_name(
+                        std::move(*cond.mutable_field_name()));
+                    rcond->set_op(std::move(*cond.mutable_op()));
+                    rcond->set_value(std::move(*cond.mutable_value()));
                 }
                 assert(static_cast<size_t>(request_.search_conditions_size()) ==
-                       search_conditions_->size());
+                       search_conditions_.size());
             }
             rpc_request_prepare_ = true;
         }
@@ -2113,6 +2145,11 @@ public:
         return session_id_;
     }
 
+    bool GenerateSessionId() const
+    {
+        return generate_session_id_;
+    }
+
     const std::string &SessionId() const
     {
         if (is_local_request_)
@@ -2195,7 +2232,7 @@ public:
 
     const std::vector<remote::SearchCondition> *LocalSearchConditionsPtr()
     {
-        return search_conditions_;
+        return &search_conditions_;
     }
 
     void SetRemoteNodeIndex(uint32_t remote_node_index)
@@ -2222,8 +2259,9 @@ private:
     bool inclusive_end_{false};
     bool scan_forward_{true};
     std::string session_id_;
+    bool generate_session_id_{true};
     uint32_t batch_size_;
-    const std::vector<remote::SearchCondition> *search_conditions_;
+    std::vector<remote::SearchCondition> search_conditions_;
 
     // reuslt
     ::EloqDS::remote::CommonResult result_;
@@ -2898,12 +2936,11 @@ struct FetchArchivesCallbackData : public SyncCallbackData
     std::vector<uint64_t> archive_commit_ts_;
 };
 
-/**
- * Callback for fetching archive records.
- *
- * Handles the completion of archive record fetch operations and processes the
- * result.
- */
+void FetchBucketDataCallback(void *data,
+                             ::google::protobuf::Closure *closure,
+                             DataStoreServiceClient &client,
+                             const remote::CommonResult &result);
+
 void FetchArchivesCallback(void *data,
                            ::google::protobuf::Closure *closure,
                            DataStoreServiceClient &client,

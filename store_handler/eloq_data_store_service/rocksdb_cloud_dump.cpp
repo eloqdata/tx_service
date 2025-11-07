@@ -20,8 +20,10 @@
  *
  */
 
+#if defined(DATA_STORE_TYPE_ELOQDSS_ROCKSDB_CLOUD_S3)
 #include <aws/core/Aws.h>
 #include <aws/s3/S3Client.h>
+#endif
 #include <gflags/gflags.h>
 #include <glog/logging.h>
 #include <rocksdb/cloud/cloud_storage_provider.h>
@@ -159,13 +161,13 @@ CmdLineParams parse_arguments()
         params.get_value.first.empty())
     {
         throw std::runtime_error(
-            "No action specified. Use --list_cf, --opendb, --dump_keys, or "
-            "--get_value");
+            "No action specified. Use --list_cf, --opendb, --dump_keys, or --get_value");
     }
 
     return params;
 }
 
+#if defined(DATA_STORE_TYPE_ELOQDSS_ROCKSDB_CLOUD_S3)
 // Function to build an S3 client factory
 rocksdb::S3ClientFactory buildS3ClientFactory(const std::string &endpoint)
 {
@@ -230,6 +232,7 @@ rocksdb::S3ClientFactory buildS3ClientFactory(const std::string &endpoint)
         }
     };
 }
+#endif
 
 // Function to decode key from RocksDB format
 bool decodeKey(const rocksdb::Slice &full_key,
@@ -347,12 +350,14 @@ int main(int argc, char **argv)
         // Create directory for DB path if it doesn't exist
         std::filesystem::create_directories(params.db_path);
 
+        // Set up cloud filesystem options
+        rocksdb::Status status;
+        rocksdb::CloudFileSystemOptions cfs_options;
+#if defined(DATA_STORE_TYPE_ELOQDSS_ROCKSDB_CLOUD_S3)
         // Initialize AWS SDK
         Aws::SDKOptions aws_options;
         Aws::InitAPI(aws_options);
 
-        // Set up cloud filesystem options
-        rocksdb::CloudFileSystemOptions cfs_options;
 
         // Set credentials
         if (!params.aws_access_key_id.empty() && !params.aws_secret_key.empty())
@@ -366,13 +371,14 @@ int main(int argc, char **argv)
         }
 
         // Validate credentials
-        rocksdb::Status status = cfs_options.credentials.HasValid();
+        status = cfs_options.credentials.HasValid();
         if (!status.ok())
         {
             LOG(ERROR) << "Invalid AWS credentials: " << status.ToString();
             throw std::runtime_error("Invalid AWS credentials: " +
                                      status.ToString());
         }
+#endif
 
         // Set bucket info
         cfs_options.src_bucket.SetBucketName(params.bucket_name,
@@ -399,17 +405,24 @@ int main(int argc, char **argv)
         cfs_options.resync_on_open =
             true;  // Sync cloud manifest and manifest files
 
+#if defined(DATA_STORE_TYPE_ELOQDSS_ROCKSDB_CLOUD_S3)
         // Set S3 endpoint URL if provided
         if (!params.s3_endpoint_url.empty())
         {
             cfs_options.s3_client_factory =
                 buildS3ClientFactory(params.s3_endpoint_url);
         }
+#endif
 
         // Create cloud file system
         rocksdb::CloudFileSystem *cfs = nullptr;
+#if defined(DATA_STORE_TYPE_ELOQDSS_ROCKSDB_CLOUD_S3)
         status = rocksdb::CloudFileSystemEnv::NewAwsFileSystem(
             rocksdb::FileSystem::Default(), cfs_options, nullptr, &cfs);
+#elif defined(DATA_STORE_TYPE_ELOQDSS_ROCKSDB_CLOUD_GCP)
+        status = rocksdb::CloudFileSystemEnv::NewGcpFileSystem(
+            rocksdb::FileSystem::Default(), cfs_options, nullptr, &cfs);
+#endif
 
         if (!status.ok())
         {
@@ -459,7 +472,9 @@ int main(int argc, char **argv)
             }
             cloud_env = nullptr;
             cloud_fs = nullptr;
+#if defined(DATA_STORE_TYPE_ELOQDSS_ROCKSDB_CLOUD_S3)
             Aws::ShutdownAPI(aws_options);
+#endif
             google::ShutdownGoogleLogging();
             return 0;
         }
@@ -512,7 +527,9 @@ int main(int argc, char **argv)
             cloud_fs = nullptr;
             DLOG(INFO) << "cloud_fs reset";
             LOG(INFO) << "Database closed successfully.";
+#if defined(DATA_STORE_TYPE_ELOQDSS_ROCKSDB_CLOUD_S3)
             Aws::ShutdownAPI(aws_options);
+#endif
             google::ShutdownGoogleLogging();
             return 0;
         }
@@ -622,7 +639,9 @@ int main(int argc, char **argv)
         delete db;
         cloud_env = nullptr;
         cloud_fs = nullptr;
+#if defined(DATA_STORE_TYPE_ELOQDSS_ROCKSDB_CLOUD_S3)
         Aws::ShutdownAPI(aws_options);
+#endif
 
         return 0;
     }

@@ -293,7 +293,7 @@ public:
         const txservice::KVCatalogInfo *kv_info,
         const txservice::TxKey &start_key,
         bool inclusive,
-        const std::vector<txservice::store::DataStoreSearchCond> &pushdown_cond,
+        const std::vector<txservice::DataStoreSearchCond> &pushdown_cond,
         size_t batch_size);
 
     ~DataStoreServiceHashPartitionScanner();
@@ -320,8 +320,7 @@ private:
     const txservice::KeySchema *key_sch_;
     const txservice::RecordSchema *rec_sch_;
     const txservice::KVCatalogInfo *kv_info_;
-    const std::vector<txservice::store::DataStoreSearchCond>
-        pushdown_condition_;
+    const std::vector<txservice::DataStoreSearchCond> pushdown_condition_;
     const bool is_object_key_schema_;
 
     // scanner state

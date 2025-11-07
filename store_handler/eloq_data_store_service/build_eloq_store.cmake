@@ -25,6 +25,7 @@ endif()
 
 find_package(jsoncpp REQUIRED)
 find_package(CURL REQUIRED)
+find_library(ZSTD_LIBRARY zstd)
 
 find_path(URING_INCLUDE_PATH NAMES liburing.h)
 find_library(URING_LIB NAMES uring)
@@ -99,9 +100,10 @@ set(ELOQ_STORE_SOURCES
     ${ELOQ_STORE_SOURCE_DIR}/object_store.cpp
     ${ELOQ_STORE_SOURCE_DIR}/types.cpp
     ${ELOQ_STORE_SOURCE_DIR}/kv_options.cpp
+    ${ELOQ_STORE_SOURCE_DIR}/compression.cpp
     ${ELOQ_STORE_SOURCE_DIR}/eloqstore_module.cpp)
 
 add_library(eloqstore STATIC ${ELOQ_STORE_SOURCES} ${INI_SOURCES})
 
 target_include_directories(eloqstore PUBLIC ${ELOQ_STORE_INCLUDE})
-target_link_libraries(eloqstore PRIVATE ${URING_LIB} Boost::context glog::glog absl::flat_hash_map jsoncpp_lib ${CURL_LIBRARIES})
+target_link_libraries(eloqstore PRIVATE ${URING_LIB} Boost::context glog::glog absl::flat_hash_map jsoncpp_lib ${CURL_LIBRARIES} ${ZSTD_LIBRARY})

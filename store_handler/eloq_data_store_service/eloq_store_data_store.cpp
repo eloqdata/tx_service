@@ -92,7 +92,6 @@ EloqStoreDataStore::EloqStoreDataStore(uint32_t shard_id,
                << ", store path: " << opts.store_path.front()
                << ", open files limit: " << opts.fd_limit
                << ", cloud store path: " << opts.cloud_store_path
-               << ", gc threads: " << opts.num_gc_threads
                << ", buffer pool size per shard: "
                << opts.index_buffer_pool_size;
     eloq_store_service_ = std::make_unique<::eloqstore::EloqStore>(opts);
@@ -104,7 +103,12 @@ void EloqStoreDataStore::Read(ReadRequest *read_req)
     eloq_store_table_id.tbl_name_ = read_req->GetTableName();
     eloq_store_table_id.partition_id_ = read_req->GetPartitionId();
 
-    std::string_view key = read_req->GetKey();
+    std::string key;
+    for (size_t i = 0; i < read_req->PartsCountPerKey(); ++i)
+    {
+        const std::string_view part = read_req->GetKey(i);
+        key.append(part.data(), part.size());
+    }
 
     // Read from eloqstore async
     EloqStoreOperationData<::eloqstore::ReadRequest> *read_op =
@@ -252,11 +256,13 @@ void EloqStoreDataStore::OnBatchWrite(::eloqstore::KvRequest *req)
 
         result.set_error_code(::EloqDS::remote::DataStoreError::WRITE_FAILED);
         result.set_error_msg(write_req->ErrMessage());
+        write_req->Clear();
         ds_write_req->SetFinish(result);
         return;
     }
 
     result.set_error_code(::EloqDS::remote::DataStoreError::NO_ERROR);
+    write_req->Clear();
     ds_write_req->SetFinish(result);
 }
 

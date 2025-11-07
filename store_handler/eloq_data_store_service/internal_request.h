@@ -625,7 +625,9 @@ public:
     // paramters in
     virtual const std::string_view GetTableName() const = 0;
 
-    virtual const std::string_view GetKey() const = 0;
+    virtual std::string_view GetKey(size_t index) const = 0;
+
+    virtual size_t PartsCountPerKey() const = 0;
 
     virtual uint32_t GetPartitionId() const = 0;
 
@@ -672,9 +674,14 @@ public:
         return req_->kv_table_name();
     }
 
-    const std::string_view GetKey() const override
+    std::string_view GetKey(size_t index) const override
     {
-        return req_->key_str();
+        return req_->key_str(index);
+    }
+
+    size_t PartsCountPerKey() const override
+    {
+        return req_->key_str_size();
     }
 
     uint32_t GetPartitionId() const override
@@ -727,7 +734,7 @@ public:
     void Reset(DataStoreService *ds_service,
                const std::string_view table_name,
                const uint32_t partition_id,
-               const std::string_view key,
+               const std::vector<std::string_view> *key_parts,
                std::string *record,
                uint64_t *record_ts,
                uint64_t *record_ttl,
@@ -736,7 +743,7 @@ public:
     {
         ds_service_ = ds_service;
         table_name_ = table_name;
-        key_ = key;
+        key_parts_ = key_parts;
         partition_id_ = partition_id;
         record_ = record;
         record_ts_ = record_ts;
@@ -749,7 +756,7 @@ public:
     {
         ds_service_ = nullptr;
         table_name_ = "";
-        key_ = "";
+        key_parts_ = nullptr;
         partition_id_ = 0;
         record_ = nullptr;
         record_ts_ = nullptr;
@@ -763,9 +770,14 @@ public:
         return table_name_;
     }
 
-    const std::string_view GetKey() const override
+    std::string_view GetKey(size_t index) const override
     {
-        return key_;
+        return (*key_parts_)[index];
+    }
+
+    size_t PartsCountPerKey() const override
+    {
+        return key_parts_->size();
     }
 
     uint32_t GetPartitionId() const override
@@ -803,7 +815,7 @@ public:
 private:
     DataStoreService *ds_service_{nullptr};
     std::string_view table_name_{""};
-    std::string_view key_{""};
+    const std::vector<std::string_view> *key_parts_{nullptr};
     uint32_t partition_id_{0};
     std::string *record_{nullptr};
     uint64_t *record_ts_{nullptr};
@@ -1090,6 +1102,8 @@ public:
 
     virtual void SetSessionId(const std::string &session_id) = 0;
 
+    virtual bool GenerateSessionId() const = 0;
+
     virtual void ClearSessionId() = 0;
 
     virtual const std::string &GetSessionId() = 0;
@@ -1209,6 +1223,11 @@ public:
         return req_->session_id();
     }
 
+    bool GenerateSessionId() const override
+    {
+        return req_->generate_session_id();
+    }
+
     void SetFinish(const ::EloqDS::remote::DataStoreError error_code,
                    const std::string error_message) override
     {
@@ -1230,7 +1249,6 @@ private:
     const remote::ScanRequest *req_{nullptr};
     remote::ScanResponse *resp_{nullptr};
     google::protobuf::Closure *done_{nullptr};
-    std::vector<::EloqDS::remote::SearchCondition> search_conditions_;
 };
 
 class ScanLocalRequest : public ScanRequest
@@ -1252,6 +1270,7 @@ public:
                const std::vector<remote::SearchCondition> *search_conditions,
                std::vector<ScanTuple> *items,
                std::string *session_id,
+               bool generate_session_id,
                ::EloqDS::remote::CommonResult *result,
                google::protobuf::Closure *done)
     {
@@ -1267,6 +1286,7 @@ public:
         search_conditions_ = search_conditions;
         items_ = items;
         session_id_ = session_id;
+        generate_session_id_ = generate_session_id;
         result_ = result;
         done_ = done;
     }
@@ -1275,6 +1295,7 @@ public:
                const std::string_view table_name,
                const uint32_t partition_id,
                std::string *session_id,
+               bool generate_session_id,
                ::EloqDS::remote::CommonResult *result,
                google::protobuf::Closure *done)
     {
@@ -1282,6 +1303,7 @@ public:
         table_name_ = table_name;
         partition_id_ = partition_id;
         session_id_ = session_id;
+        generate_session_id_ = generate_session_id;
         result_ = result;
         done_ = done;
     }
@@ -1300,6 +1322,7 @@ public:
         search_conditions_ = nullptr;
         items_ = nullptr;
         session_id_ = nullptr;
+        generate_session_id_ = true;
         result_ = nullptr;
         done_ = nullptr;
     }
@@ -1381,6 +1404,11 @@ public:
         return *session_id_;
     }
 
+    bool GenerateSessionId() const override
+    {
+        return generate_session_id_;
+    }
+
     void SetFinish(const ::EloqDS::remote::DataStoreError error_code,
                    const std::string error_message) override
     {
@@ -1407,6 +1435,7 @@ private:
     const std::vector<remote::SearchCondition> *search_conditions_{nullptr};
     std::vector<ScanTuple> *items_{nullptr};
     std::string *session_id_{nullptr};
+    bool generate_session_id_{true};
     EloqDS::remote::CommonResult *result_{nullptr};
     google::protobuf::Closure *done_{nullptr};
 };

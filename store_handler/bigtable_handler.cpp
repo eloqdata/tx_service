@@ -1699,22 +1699,6 @@ void EloqDS::BigTableHandler::DropKvTableAsync(
     assert(false && "BigTable doesn't support DropKvTableAsync");
 }
 
-std::unique_ptr<txservice::store::DataStoreScanner>
-EloqDS::BigTableHandler::ScanForward(
-    const txservice::TableName &table_name,
-    uint32_t ng_id,
-    const txservice::TxKey &start_key,
-    bool inclusive,
-    uint8_t key_parts,
-    const std::vector<txservice::store::DataStoreSearchCond> &search_cond,
-    const txservice::KeySchema *key_schema,
-    const txservice::RecordSchema *rec_schema,
-    const txservice::KVCatalogInfo *kv_info,
-    bool scan_forward)
-{
-    return nullptr;
-}
-
 bool EloqDS::BigTableHandler::PutArchivesAll(
     uint32_t node_group,
     const txservice::TableName &table_name,

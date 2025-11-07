@@ -91,7 +91,7 @@ struct RocksDBCloudConfig
     std::string s3_endpoint_url_;
     size_t warm_up_thread_num_;
     bool run_purger_{true};
-    size_t purger_periodicity_millis_{10 * 60 * 1000};  // 10 minutes
+    size_t purger_periodicity_millis_{10 * 60 * 1000}; // 10 minutes
     std::string branch_name_;
 };
 

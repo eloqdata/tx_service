@@ -45,8 +45,8 @@ const txservice::TableSchema *DynamoHandlerTyped::GetSequenceTableSchema()
 
 const std::unordered_map<
     uint16_t,
-    std::pair<txservice::TableName, txservice::SecondaryKeySchema>> *
-DynamoHandlerTyped::GetIndexes(const txservice::TableSchema *table_schema)
+    std::pair<txservice::TableName, txservice::SecondaryKeySchema>>
+    *DynamoHandlerTyped::GetIndexes(const txservice::TableSchema *table_schema)
 {
     assert(false);
     return nullptr;

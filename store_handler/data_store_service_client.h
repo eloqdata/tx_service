@@ -21,6 +21,7 @@
  */
 #pragma once
 
+#include <cstdint>
 #include <deque>
 #include <map>
 #include <memory>
@@ -32,6 +33,8 @@
 #include "eloq_data_store_service/data_store_service.h"
 #include "eloq_data_store_service/ds_request.pb.h"
 #include "eloq_data_store_service/thread_worker_pool.h"
+#include "store_util.h"
+#include "tx_key.h"
 #include "tx_service/include/cc/cc_shard.h"
 #include "tx_service/include/eloq_basic_catalog_factory.h"
 #include "tx_service/include/sequences/sequences.h"
@@ -98,6 +101,14 @@ public:
                 [this](const DataStoreServiceClusterManager &cluster_manager)
                 { this->SetupConfig(cluster_manager); });
         }
+        be_bucket_ids_.reserve(txservice::Sharder::TotalRangeBuckets());
+        for (uint16_t bucket_id = 0;
+             bucket_id < txservice::Sharder::TotalRangeBuckets();
+             ++bucket_id)
+        {
+            uint16_t be_bucket_id = EloqShare::host_to_big_endian(bucket_id);
+            be_bucket_ids_.push_back(be_bucket_id);
+        }
     }
 
     // The maximum number of retries for RPC requests.
@@ -107,6 +118,19 @@ public:
      * Connect to remote data store service.
      */
     void SetupConfig(const DataStoreServiceClusterManager &config);
+
+    static uint16_t TxPort2DssPort(uint16_t tx_port)
+    {
+        return tx_port + 7;
+    }
+
+    static void TxConfigsToDssClusterConfig(
+        uint32_t dss_node_id,  // = 0,
+        uint32_t ng_id,        // = 0,
+        const std::unordered_map<uint32_t, std::vector<txservice::NodeConfig>>
+            &ng_configs,
+        uint32_t dss_leader_node_id,  // if no leader,set uint32t_max
+        DataStoreServiceClusterManager &cluster_manager);
 
     void ConnectToLocalDataStoreService(
         std::unique_ptr<DataStoreService> ds_serv);
@@ -205,6 +229,16 @@ public:
               uint64_t &version_ts,
               const txservice::TableSchema *table_schema) override;
 
+    std::vector<txservice::DataStoreSearchCond> CreateDataSerachCondition(
+        int32_t obj_type, const std::string_view &pattern) override;
+
+    txservice::store::DataStoreHandler::DataStoreOpStatus FetchBucketData(
+        txservice::FetchBucketDataCc *fetch_bucket_data_cc) override;
+
+    txservice::store::DataStoreHandler::DataStoreOpStatus FetchBucketData(
+        std::vector<txservice::FetchBucketDataCc *> fetch_bucket_data_ccs)
+        override;
+
     DataStoreOpStatus FetchRecord(
         txservice::FetchRecordCc *fetch_cc,
         txservice::FetchSnapshotCc *fetch_snapshot_cc = nullptr) override;
@@ -223,18 +257,6 @@ public:
      * FetchSnapshot)
      */
     DataStoreOpStatus FetchVisibleArchive(txservice::FetchSnapshotCc *fetch_cc);
-
-    std::unique_ptr<txservice::store::DataStoreScanner> ScanForward(
-        const txservice::TableName &table_name,
-        uint32_t ng_id,
-        const txservice::TxKey &start_key,
-        bool inclusive,
-        uint8_t key_parts,
-        const std::vector<txservice::store::DataStoreSearchCond> &search_cond,
-        const txservice::KeySchema *key_schema,
-        const txservice::RecordSchema *rec_schema,
-        const txservice::KVCatalogInfo *kv_info,
-        bool scan_foward) override;
 
     txservice::store::DataStoreHandler::DataStoreOpStatus LoadRangeSlice(
         const txservice::TableName &table_name,
@@ -361,7 +383,12 @@ public:
 
     bool OnLeaderStart(uint32_t *next_leader_node) override;
 
-    void OnStartFollowing() override;
+    bool OnLeaderStop(int64_t term) override;
+
+    void OnStartFollowing(uint32_t leader_node_id,
+                          int64_t term,
+                          int64_t standby_term,
+                          bool resubscribe) override;
 
     void OnShutdown() override;
 
@@ -404,6 +431,15 @@ public:
 
     static uint32_t HashArchiveKey(const std::string &kv_table_name,
                                    const txservice::TxKey &tx_key);
+
+    static void EncodeKvKeyForHashPart(uint16_t bucket_id,
+                                       std::string &key_out);
+    static void EncodeKvKeyForHashPart(uint16_t bucket_id,
+                                       const std::string_view &tx_key,
+                                       std::string &key_out);
+
+    static std::string_view DecodeKvKeyForHashPart(const char *data,
+                                                   size_t size);
 
     // NOTICE: be_commit_ts is the big endian encode value of commit_ts
     static std::string EncodeArchiveKey(std::string_view table_name,
@@ -448,16 +484,17 @@ public:
 private:
     int32_t MapKeyHashToPartitionId(const txservice::TxKey &key) const
     {
-        return key.Hash() & 0x3FF;
+        return txservice::Sharder::MapKeyHashToHashPartitionId(key.Hash());
     }
 
-    // =====================================================
+// =====================================================
     // Group: KV Interface
     // Functions that decide if the request is local or remote
     // =====================================================
 
     void Read(const std::string_view kv_table_name,
               const uint32_t partition_id,
+              const std::string_view be_bucket_id,
               const std::string_view key,
               void *callback_data,
               DataStoreCallback callback);
@@ -526,18 +563,20 @@ private:
 
     void FlushDataInternal(FlushDataClosure *flush_data_closure);
 
-    void ScanNext(const std::string_view table_name,
-                  uint32_t partition_id,
-                  const std::string_view start_key,
-                  const std::string_view end_key,
-                  const std::string_view session_id,
-                  bool inclusive_start,
-                  bool inclusive_end,
-                  bool scan_forward,
-                  uint32_t batch_size,
-                  const std::vector<remote::SearchCondition> *search_conditions,
-                  void *callback_data,
-                  DataStoreCallback callback);
+    void ScanNext(
+        const std::string_view table_name,
+        uint32_t partition_id,
+        const std::string_view start_key,
+        const std::string_view end_key,
+        const std::string_view session_id,
+        bool generate_session,
+        bool inclusive_start,
+        bool inclusive_end,
+        bool scan_forward,
+        uint32_t batch_size,
+        const std::vector<txservice::DataStoreSearchCond> *search_conditions,
+        void *callback_data,
+        DataStoreCallback callback);
 
     void ScanNextInternal(ScanNextClosure *scan_next_closure);
 
@@ -637,6 +676,13 @@ private:
                              const std::string &host_name,
                              uint16_t port);
 
+    std::string_view EncodeBucketId(uint16_t bucket_id)
+    {
+        uint16_t &be_bucket_id = be_bucket_ids_[bucket_id];
+        return std::string_view(reinterpret_cast<const char *>(&be_bucket_id),
+                                sizeof(uint16_t));
+    }
+
     txservice::EloqHashCatalogFactory hash_catalog_factory_{};
     txservice::EloqRangeCatalogFactory range_catalog_factory_{};
     // TODO(lzx): define a global catalog factory array that used by
@@ -719,6 +765,8 @@ private:
         pre_built_table_names_;
     ThreadWorkerPool upsert_table_worker_{1};
 
+    std::vector<uint16_t> be_bucket_ids_;
+
     friend class ReadClosure;
     friend class BatchWriteRecordsClosure;
     friend class FlushDataClosure;
@@ -735,6 +783,10 @@ private:
                                          ::google::protobuf::Closure *closure,
                                          DataStoreServiceClient &client,
                                          const remote::CommonResult &result);
+    friend void FetchBucketDataCallback(void *data,
+                                        ::google::protobuf::Closure *closure,
+                                        DataStoreServiceClient &client,
+                                        const remote::CommonResult &result);
     friend void DiscoverAllTableNamesCallback(
         void *data,
         ::google::protobuf::Closure *closure,

@@ -271,6 +271,12 @@ bool RocksDBDataStoreCommon::Initialize()
         }
     }
 
+    if (query_worker_pool_ == nullptr)
+    {
+       query_worker_pool_ =
+            std::make_unique<ThreadWorkerPool>(query_worker_number_);
+    }
+
     return true;
 }
 
@@ -418,7 +424,6 @@ void RocksDBDataStoreCommon::Read(ReadRequest *req)
 
             auto table_name = req->GetTableName();
             uint32_t partition_id = req->GetPartitionId();
-            auto key = req->GetKey();
 
             std::shared_lock<std::shared_mutex> db_lk(db_mux_);
 
@@ -429,7 +434,7 @@ void RocksDBDataStoreCommon::Read(ReadRequest *req)
                 return;
             }
 
-            std::string key_str = BuildKey(table_name, partition_id, key);
+            std::string key_str = this->BuildKey(table_name, partition_id, req);
             std::string value;
             rocksdb::ReadOptions read_options;
             rocksdb::Status status = db->Get(read_options, key_str, &value);
@@ -927,32 +932,6 @@ void RocksDBDataStoreCommon::ScanNext(ScanRequest *scan_req)
                                    key);
                 assert(ret);
                 rocksdb::Slice value = iter->value();
-                const remote::SearchCondition *cond = nullptr;
-                bool matched = true;
-                for (int cond_idx = 0; cond_idx < search_cond_size; ++cond_idx)
-                {
-                    cond = scan_req->GetSearchConditions(cond_idx);
-                    assert(cond);
-                    if (cond->field_name() == "type" &&
-                        cond->value().compare(0, 1, value.data(), 0, 1))
-                    {
-                        // type mismatch
-                        matched = false;
-                        break;
-                    }
-                }
-                if (!matched)
-                {
-                    if (scan_forward)
-                    {
-                        iter->Next();
-                    }
-                    else
-                    {
-                        iter->Prev();
-                    }
-                    continue;
-                }
 
                 // Deserialize value to record and record_ts
                 std::string rec;
@@ -960,6 +939,43 @@ void RocksDBDataStoreCommon::ScanNext(ScanRequest *scan_req)
                 uint64_t rec_ttl;
                 DeserializeValueToRecord(
                     value.data(), value.size(), rec, rec_ts, rec_ttl);
+
+                const remote::SearchCondition *cond = nullptr;
+                bool matched = true;
+                if (!rec.empty())
+                {
+                    for (int cond_idx = 0; cond_idx < search_cond_size;
+                         ++cond_idx)
+                    {
+                        cond = scan_req->GetSearchConditions(cond_idx);
+                        assert(cond);
+                        if (cond->field_name() == "type")
+                        {
+                            int8_t obj_type =
+                                static_cast<int8_t>(cond->value()[0]);
+                            int8_t store_obj_type = static_cast<int8_t>(rec[0]);
+                            if (obj_type != store_obj_type)
+                            {
+                                // type mismatch
+                                matched = false;
+                                break;
+                            }
+                        }
+                    }
+
+                    if (!matched)
+                    {
+                        if (scan_forward)
+                        {
+                            iter->Next();
+                        }
+                        else
+                        {
+                            iter->Prev();
+                        }
+                        continue;
+                    }
+                }
 
                 scan_req->AddItem(
                     std::string(key), std::move(rec), rec_ts, rec_ttl);
@@ -995,7 +1011,7 @@ void RocksDBDataStoreCommon::ScanNext(ScanRequest *scan_req)
                     // Set session id carry over to the response
                     scan_req->SetSessionId(session_id);
                 }
-                else
+                else if (scan_req->GenerateSessionId())
                 {
                     // Otherwise, save the iterator in the session map
                     auto iter_wrapper =
@@ -1007,6 +1023,10 @@ void RocksDBDataStoreCommon::ScanNext(ScanRequest *scan_req)
                     // Save the iterator in the session map
                     data_store_service_->EmplaceScanIter(
                         shard_id_, session_id, std::move(iter_wrapper));
+                }
+                else
+                {
+                    delete iter;
                 }
             }
 
@@ -1106,10 +1126,9 @@ void RocksDBDataStoreCommon::SwitchToReadWrite()
     }
 }
 // Build key in RocksDB
-const std::string RocksDBDataStoreCommon::BuildKey(
-    const std::string_view table_name,
-    uint32_t partition_id,
-    const std::string_view key)
+std::string RocksDBDataStoreCommon::BuildKey(const std::string_view table_name,
+                                             uint32_t partition_id,
+                                             const std::string_view key)
 {
     std::string tmp_key;
     tmp_key.reserve(table_name.size() + 2 + key.size());
@@ -1118,6 +1137,32 @@ const std::string RocksDBDataStoreCommon::BuildKey(
     tmp_key.append(std::to_string(partition_id));
     tmp_key.append(KEY_SEPARATOR);
     tmp_key.append(key);
+    return tmp_key;
+}
+
+std::string RocksDBDataStoreCommon::BuildKey(const std::string_view table_name,
+                                             uint32_t partition_id,
+                                             const ReadRequest *read_request)
+{
+    size_t total_key_size = 0;
+    for (size_t idx = 0; idx < read_request->PartsCountPerKey(); ++idx)
+    {
+        total_key_size += read_request->GetKey(idx).size();
+    }
+
+    total_key_size += table_name.size() + 2;
+
+    std::string tmp_key;
+    tmp_key.reserve(total_key_size);
+    tmp_key.append(table_name);
+    tmp_key.append(KEY_SEPARATOR);
+    tmp_key.append(std::to_string(partition_id));
+    tmp_key.append(KEY_SEPARATOR);
+
+    for (size_t idx = 0; idx < read_request->PartsCountPerKey(); ++idx)
+    {
+        tmp_key.append(read_request->GetKey(idx));
+    }
     return tmp_key;
 }
 

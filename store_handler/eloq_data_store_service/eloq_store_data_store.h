@@ -164,7 +164,7 @@ class EloqStoreDataStore : public DataStore
 public:
     EloqStoreDataStore(uint32_t shard_id, DataStoreService *data_store_service);
 
-    ~EloqStoreDataStore() = default;
+    ~EloqStoreDataStore() override = default;
 
     bool Initialize() override
     {

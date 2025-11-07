@@ -26,8 +26,8 @@
 
 #include "data_store.h"
 #include "data_store_factory.h"
-#include "rocksdb_config.h"
 #include "rocksdb_data_store.h"
+#include "rocksdb_config.h"
 
 namespace EloqDS
 {
@@ -35,8 +35,9 @@ namespace EloqDS
 class RocksDBDataStoreFactory : public DataStoreFactory
 {
 public:
-    RocksDBDataStoreFactory(const ::EloqDS::RocksDBConfig &config,
-                            bool tx_enable_cache_replacement)
+    RocksDBDataStoreFactory(
+        const ::EloqDS::RocksDBConfig &config,
+        bool tx_enable_cache_replacement)
         : config_(config),
           tx_enable_cache_replacement_(tx_enable_cache_replacement)
     {
@@ -48,12 +49,12 @@ public:
         DataStoreService *data_store_service,
         bool start_db = true) override
     {
-        auto ds =
-            std::make_unique<RocksDBDataStore>(config_,
-                                               create_if_missing,
-                                               tx_enable_cache_replacement_,
-                                               shard_id,
-                                               data_store_service);
+        auto ds = std::make_unique<RocksDBDataStore>(
+            config_,
+            create_if_missing,
+            tx_enable_cache_replacement_,
+            shard_id,
+            data_store_service);
 
         ds->Initialize();
 

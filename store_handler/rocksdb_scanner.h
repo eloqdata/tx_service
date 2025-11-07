@@ -32,6 +32,7 @@
 #endif
 
 #include <memory>
+#include <shared_mutex>
 #include <string>
 #include <unordered_set>
 #include <utility>
@@ -58,7 +59,8 @@ public:
         const EloqKV::EloqKey *start_key,
         bool inclusive,
         const std::vector<txservice::store::DataStoreSearchCond> &pushdown_cond,
-        bool scan_forward)
+        bool scan_forward,
+        std::shared_lock<std::shared_mutex> db_lock)
         : db_(db),
           cfh_(cfh),
           key_sch_(key_sch),
@@ -70,6 +72,7 @@ public:
           scan_forward_(scan_forward),
           pushdown_condition_(pushdown_cond),
           initialized_(false),
+          db_lock_(std::move(db_lock)),
           iter_(nullptr),
           current_key_(nullptr),
           current_rec_(nullptr)
@@ -103,10 +106,10 @@ private:
     const EloqKV::EloqKey start_key_;  // pk or (sk,pk)
     const bool inclusive_;
     bool scan_forward_;
-    const std::vector<txservice::store::DataStoreSearchCond>
-        pushdown_condition_;
+    const std::vector<txservice::DataStoreSearchCond> pushdown_condition_;
     bool initialized_{false};
 
+    std::shared_lock<std::shared_mutex> db_lock_;
     std::unique_ptr<rocksdb::Iterator> iter_{nullptr};
     std::unique_ptr<EloqKV::EloqKey> current_key_{nullptr};
     txservice::TxRecord::Uptr current_rec_{nullptr};
