@@ -3,7 +3,6 @@
 #include <atomic>
 #include <cstdint>
 #include <memory>
-#include <variant>
 
 #include "cc_req_base.h"
 
@@ -66,7 +65,8 @@ public:
 private:
     std::atomic<ReaderWriterCntlBlock> cntl_block_;
     CcShard *ccs_{nullptr};
-    std::atomic<std::variant<CcRequestBase *, uint64_t >> writer_{nullptr};
+    // Tagged 64-bit slot: bit0=0 -> pointer, bit0=1 -> transaction id.
+    std::atomic<uint64_t> writer_{0};
 };
 
 template <typename T>

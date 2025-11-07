@@ -4,6 +4,45 @@
 
 #include "cc/cc_shard.h"
 
+namespace
+{
+// Keep these helpers with internal linkage so the tagged-writer encoding
+// details do not leak outside this translation unit.
+using txservice::CcRequestBase;
+
+constexpr uint64_t kWriterTagMask = 0x1ULL;
+
+inline bool IsWriterPtr(uint64_t value)
+{
+    return (value & kWriterTagMask) == 0;
+}
+
+inline uint64_t EncodeWriterPtr(CcRequestBase *ptr)
+{
+    auto raw = reinterpret_cast<uintptr_t>(ptr);
+    assert((raw & kWriterTagMask) == 0);
+    return static_cast<uint64_t>(raw);
+}
+
+inline uint64_t EncodeWriterTxn(uint64_t txn)
+{
+    assert((txn >> 63) == 0);
+    return (txn << 1) | kWriterTagMask;
+}
+
+inline CcRequestBase *DecodeWriterPtr(uint64_t value)
+{
+    assert(IsWriterPtr(value));
+    return reinterpret_cast<CcRequestBase *>(static_cast<uintptr_t>(value));
+}
+
+inline uint64_t DecodeWriterTxn(uint64_t value)
+{
+    assert(!IsWriterPtr(value));
+    return value >> 1;
+}
+}  // namespace
+
 namespace txservice
 {
 bool ReaderWriterCntl::AddReader()
@@ -54,10 +93,10 @@ void ReaderWriterCntl::FinishReader()
         // successful. If the load succeeds the store, the last reader and the
         // writer will race to set the write status to ProcessedWriter. Whoever
         // wins will process the write request.
-        auto writer = writer_.load(std::memory_order_relaxed);
-        if (std::holds_alternative<CcRequestBase *>(writer))
+        uint64_t writer = writer_.load(std::memory_order_relaxed);
+        if (IsWriterPtr(writer))
         {
-            CcRequestBase *write_req = std::get<CcRequestBase *>(writer);
+            CcRequestBase *write_req = DecodeWriterPtr(writer);
             if (write_req != nullptr)
             {
                 cntl = {0, WriteStatus::PendingWriter};
@@ -68,7 +107,8 @@ void ReaderWriterCntl::FinishReader()
                 {
                     // Store the writer txn after setting the write status to
                     // ProcessedWriter.
-                    writer_.store(write_req->Txn());
+                    writer_.store(EncodeWriterTxn(write_req->Txn()),
+                                  std::memory_order_relaxed);
                     ccs_->Enqueue(write_req);
                 }
             }
@@ -86,18 +126,15 @@ AddWriterResult ReaderWriterCntl::AddWriter(CcRequestBase *write_req)
 
         if (cntl.write_status_ == WriteStatus::PendingWriter)
         {
-            auto writer = writer_.load(std::memory_order_relaxed);
+            uint64_t writer = writer_.load(std::memory_order_relaxed);
             // Requests adding a writer are always processed serially at each
             // core. So if the write status is PendingWriter, the writer_ must
             // exist.
-            assert(std::holds_alternative<CcRequestBase *>(writer) &&
-                       std::get<CcRequestBase *>(writer) != nullptr ||
-                   std::holds_alternative<uint64_t>(writer));
+            assert(writer != 0);
 
-            uint64_t writer_txn =
-                std::holds_alternative<CcRequestBase *>(writer)
-                    ? std::get<CcRequestBase *>(writer)->Txn()
-                    : std::get<uint64_t>(writer);
+            uint64_t writer_txn = IsWriterPtr(writer)
+                                      ? DecodeWriterPtr(writer)->Txn()
+                                      : DecodeWriterTxn(writer);
             if (writer_txn != write_req->Txn())
             {
                 return AddWriterResult::WriteConflict;
@@ -111,18 +148,15 @@ AddWriterResult ReaderWriterCntl::AddWriter(CcRequestBase *write_req)
         }
         else if (cntl.write_status_ == WriteStatus::ProcessedWriter)
         {
-            auto writer = writer_.load(std::memory_order_relaxed);
+            uint64_t writer = writer_.load(std::memory_order_relaxed);
             // Requests adding a writer are always processed serially at each
             // core. So if the write status is ProcessedWriter, the writer_ must
             // exist.
-            assert(std::holds_alternative<CcRequestBase *>(writer) &&
-                       std::get<CcRequestBase *>(writer) != nullptr ||
-                   std::holds_alternative<uint64_t>(writer));
+            assert(writer != 0);
 
-            uint64_t writer_txn =
-                std::holds_alternative<CcRequestBase *>(writer)
-                    ? std::get<CcRequestBase *>(writer)->Txn()
-                    : std::get<uint64_t>(writer);
+            uint64_t writer_txn = IsWriterPtr(writer)
+                                      ? DecodeWriterPtr(writer)->Txn()
+                                      : DecodeWriterTxn(writer);
             return writer_txn == write_req->Txn()
                        ? AddWriterResult::Success
                        : AddWriterResult::WriteConflict;
@@ -147,7 +181,7 @@ AddWriterResult ReaderWriterCntl::AddWriter(CcRequestBase *write_req)
     // After the write status is set to PendingWriter, read ref count can only
     // decrease.
 
-    writer_.store(write_req, std::memory_order_relaxed);
+    writer_.store(EncodeWriterPtr(write_req), std::memory_order_relaxed);
 
     cntl = {0, WriteStatus::PendingWriter};
     // If the CAS succeeded, there must be no readers and the write status is
@@ -161,7 +195,8 @@ AddWriterResult ReaderWriterCntl::AddWriter(CcRequestBase *write_req)
     {
         // Store the writer txn after setting the write status to
         // ProcessedWriter.
-        writer_.store(write_req->Txn(), std::memory_order_relaxed);
+        writer_.store(EncodeWriterTxn(write_req->Txn()),
+                      std::memory_order_relaxed);
     }
     return success ? AddWriterResult::Success : AddWriterResult::WritePending;
 }
@@ -169,10 +204,11 @@ AddWriterResult ReaderWriterCntl::AddWriter(CcRequestBase *write_req)
 void ReaderWriterCntl::FinishWriter(uint64_t tx_number)
 {
     // The writer txn might have failed to acquire the write lock and aborted.
-    auto writer = writer_.load(std::memory_order_relaxed);
-    if (std::holds_alternative<CcRequestBase *>(writer))
+    uint64_t writer = writer_.load(std::memory_order_relaxed);
+
+    if (IsWriterPtr(writer))
     {
-        auto write_req = std::get<CcRequestBase *>(writer);
+        auto write_req = DecodeWriterPtr(writer);
         if (write_req == nullptr || write_req->Txn() != tx_number)
         {
             return;
@@ -180,7 +216,7 @@ void ReaderWriterCntl::FinishWriter(uint64_t tx_number)
     }
     else
     {
-        if (std::get<uint64_t>(writer) != tx_number)
+        if (DecodeWriterTxn(writer) != tx_number)
         {
             return;
         }
@@ -195,7 +231,7 @@ void ReaderWriterCntl::FinishWriter(uint64_t tx_number)
                    cntl.write_status_ == WriteStatus::ProcessedWriter;
         }());
 
-    writer_.store(nullptr, std::memory_order_relaxed);
+    writer_.store(0, std::memory_order_relaxed);
     cntl_block_.store({0, WriteStatus::Invalid}, std::memory_order_relaxed);
 }
 
