@@ -2754,55 +2754,6 @@ void EloqDS::DynamoHandler::OnFetchRecord(
 
 #endif
 
-std::unique_ptr<txservice::store::DataStoreScanner>
-EloqDS::DynamoHandler::ScanForward(
-    const txservice::TableName &table_name,
-    uint32_t ng_id,
-    const txservice::TxKey &start_key,
-    bool inclusive,
-    uint8_t key_parts,
-    const std::vector<txservice::store::DataStoreSearchCond> &search_cond,
-    const txservice::KeySchema *key_schema,
-    const txservice::RecordSchema *rec_schema,
-    const txservice::KVCatalogInfo *kv_info,
-    bool scan_forward)
-{
-#ifdef RANGE_PARTITION_ENABLED
-    return nullptr;
-#else
-    std::unique_ptr<DynamoScanner> scanner = nullptr;
-    if (scan_forward)
-    {
-        scanner = std::make_unique<HashPartitionDynamoScanner<true>>(
-            keyspace_,
-            client_.get(),
-            key_schema,
-            rec_schema,
-            table_name,
-            kv_info,
-            *start_key.GetKey<EloqKV::EloqKey>(),
-            inclusive,
-            search_cond);
-    }
-    else
-    {
-        scanner = std::make_unique<HashPartitionDynamoScanner<false>>(
-            keyspace_,
-            client_.get(),
-            key_schema,
-            rec_schema,
-            table_name,
-            kv_info,
-            *start_key.GetKey<EloqKV::EloqKey>(),
-            inclusive,
-            search_cond);
-    }
-
-    scanner->MoveNext();
-    return scanner;
-#endif
-}
-
 bool EloqDS::DynamoHandler::FetchTable(const txservice::TableName &table_name,
                                        std::string &schema_image,
                                        bool &found,

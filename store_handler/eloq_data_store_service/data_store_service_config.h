@@ -311,6 +311,9 @@ private:
     uint64_t topology_version_{1};
 };
 
+// The DSS leader node ID is unknown if euqal to this value
+static const uint32_t UNKNOWN_DSS_LEADER_NODE_ID = UINT32_MAX;
+
 class DataStoreServiceClusterManager
 {
 public:

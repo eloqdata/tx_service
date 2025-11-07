@@ -39,10 +39,6 @@ DEFINE_uint32(eloq_store_open_files_limit,
 DEFINE_string(eloq_store_cloud_store_path,
               "",
               "EloqStore cloud store path (disable cloud store if empty)");
-DEFINE_uint32(
-    eloq_store_gc_threads,
-    1,
-    "EloqStore gc threads count (Must be 0 when cloud store is enabled).");
 DEFINE_uint32(eloq_store_cloud_worker_count,
               1,
               "EloqStore cloud worker count.");
@@ -58,8 +54,8 @@ DEFINE_uint32(eloq_store_init_page_count,
 DEFINE_bool(eloq_store_skip_verify_checksum,
             false,
             "EloqStore skip verify checksum.");
-DEFINE_uint32(eloq_store_index_buffer_pool_size,
-              1 << 15,
+DEFINE_uint64(eloq_store_index_buffer_pool_size,
+              128 << 20,
               "EloqStore index buffer pool size.");
 DEFINE_uint32(eloq_store_manifest_limit, 8 << 20, "EloqStore manifest limit.");
 DEFINE_uint32(eloq_store_io_queue_size,
@@ -99,6 +95,9 @@ DEFINE_uint32(eloq_store_pages_per_file_shift,
               "EloqStore pages per file shift.");
 DEFINE_uint32(eloq_store_overflow_pointers, 16, "EloqStore overflow pointers.");
 DEFINE_bool(eloq_store_data_append_mode, false, "EloqStore data append mode.");
+DEFINE_bool(eloq_store_enable_compression,
+            false,
+            "EloqStore enable compression.");
 
 namespace EloqDS
 {
@@ -163,14 +162,6 @@ EloqStoreConfig::EloqStoreConfig(const INIReader &config_reader,
             : config_reader.GetString("store",
                                       "eloq_store_cloud_store_path",
                                       FLAGS_eloq_store_cloud_store_path);
-    eloqstore_configs_.num_gc_threads =
-        !eloqstore_configs_.cloud_store_path.empty()
-            ? 0
-            : (!CheckCommandLineFlagIsDefault("eloq_store_gc_threads")
-                   ? FLAGS_eloq_store_gc_threads
-                   : config_reader.GetInteger("store",
-                                              "eloq_store_gc_threads",
-                                              FLAGS_eloq_store_gc_threads));
     LOG_IF(INFO, !eloqstore_configs_.cloud_store_path.empty())
         << "EloqStore cloud store enabled";
     eloqstore_configs_.data_page_restart_interval =
@@ -304,6 +295,12 @@ EloqStoreConfig::EloqStoreConfig(const INIReader &config_reader,
             : config_reader.GetBoolean("store",
                                        "eloq_store_data_append_mode",
                                        FLAGS_eloq_store_data_append_mode);
+    eloqstore_configs_.enable_compression =
+        !CheckCommandLineFlagIsDefault("eloq_store_enable_compression")
+            ? FLAGS_eloq_store_enable_compression
+            : config_reader.GetBoolean("store",
+                                       "eloq_store_enable_compression",
+                                       FLAGS_eloq_store_enable_compression);
 }
 
 void EloqStoreConfig::ParseStoragePath(

@@ -19,8 +19,6 @@
  *    <http://www.gnu.org/licenses/>.
  *
  */
-#include "rocksdb_data_store.h"
-
 #include <bthread/condition_variable.h>
 #include <rocksdb/db.h>
 #include <rocksdb/listener.h>
@@ -39,20 +37,22 @@
 #include "data_store_service.h"
 #include "ds_request.pb.h"
 #include "internal_request.h"
+#include "rocksdb_data_store.h"
 
 namespace EloqDS
 {
 
-RocksDBDataStore::RocksDBDataStore(const EloqDS::RocksDBConfig &config,
-                                   bool create_if_missing,
-                                   bool tx_enable_cache_replacement,
-                                   uint32_t shard_id,
-                                   DataStoreService *data_store_service)
-    : RocksDBDataStoreCommon(config,
-                             create_if_missing,
-                             tx_enable_cache_replacement,
-                             shard_id,
-                             data_store_service),
+RocksDBDataStore::RocksDBDataStore(
+    const EloqDS::RocksDBConfig &config,
+    bool create_if_missing,
+    bool tx_enable_cache_replacement,
+    uint32_t shard_id,
+    DataStoreService *data_store_service)
+  : RocksDBDataStoreCommon(config,
+                            create_if_missing,
+                            tx_enable_cache_replacement,
+                            shard_id,
+                            data_store_service),
       db_(nullptr)
 {
 }

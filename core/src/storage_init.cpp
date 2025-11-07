@@ -71,7 +71,7 @@ DEFINE_string(bigtable_keyspace, "eloq", "KeySpace of BigTable");
 DECLARE_string(aws_access_key_id);
 DECLARE_string(aws_secret_key);
 #elif defined(DATA_STORE_TYPE_DYNAMODB) || \
-    (defined(USE_ROCKSDB_LOG_STATE) && defined(WITH_ROCKSDB_CLOUD))
+    defined(LOG_STATE_TYPE_RKDB_S3) || defined(LOG_STATE_TYPE_RKDB_GCS)
 DEFINE_string(aws_access_key_id, "", "AWS SDK access key id");
 DEFINE_string(aws_secret_key, "", "AWS SDK secret key");
 #endif

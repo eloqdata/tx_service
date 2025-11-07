@@ -436,6 +436,10 @@ bool DataStoreServiceClusterManager::Load(const std::string &filename)
 bool DataStoreServiceClusterManager::Save(const std::string &filename) const
 {
     std::shared_lock<std::shared_mutex> lk(mutex_);
+    if (filename.empty())
+    {
+        return true;
+    }
     return SaveInternal(filename);
 }
 
@@ -821,7 +825,7 @@ bool DataStoreServiceClusterManager::SwitchShardToClosed(uint32_t shard_id,
     std::unique_lock<std::shared_mutex> lk(mutex_);
     auto shard_status = topology_.FetchDSShardStatus(shard_id);
 
-    assert(expected == DSShardStatus::ReadOnly);
+    // assert(expected == DSShardStatus::ReadOnly);
     if (shard_status != expected)
     {
         return false;
@@ -834,12 +838,12 @@ bool DataStoreServiceClusterManager::SwitchShardToClosed(uint32_t shard_id,
         return true;
     }
 
-    if (shard_status != DSShardStatus::ReadOnly)
-    {
-        DLOG(ERROR) << "Shard " << shard_id << " is not in read only mode"
-                    << ", status: " << shard_status;
-        return false;
-    }
+    // if (shard_status != DSShardStatus::ReadOnly)
+    // {
+    //     DLOG(ERROR) << "Shard " << shard_id << " is not in read only mode"
+    //                 << ", status: " << static_cast<int>(shard_status);
+    //     return false;
+    // }
 
     topology_.UpdateDSShardStatus(shard_id, DSShardStatus::Closed);
     DLOG(INFO) << "SwitchToClosed, shard " << shard_id
@@ -901,7 +905,6 @@ void DataStoreServiceClusterManager::PrepareShardingError(
     uint32_t shard_id, ::EloqDS::remote::CommonResult *result)
 {
     std::shared_lock<std::shared_mutex> lk(mutex_);
-
     result->set_error_code(
         ::EloqDS::remote::DataStoreError::REQUESTED_NODE_NOT_OWNER);
     DLOG(INFO) << "=====PrepareShardingError";

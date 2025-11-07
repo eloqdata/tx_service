@@ -19,8 +19,6 @@
  *    <http://www.gnu.org/licenses/>.
  *
  */
-#include "rocksdb_cloud_data_store.h"
-
 #include <aws/core/client/ClientConfiguration.h>
 #include <aws/s3/S3Client.h>
 #include <bthread/condition_variable.h>
@@ -49,6 +47,7 @@
 #include "purger_event_listener.h"
 #include "rocksdb/cloud/cloud_file_system_impl.h"
 #include "rocksdb/cloud/cloud_storage_provider.h"
+#include "rocksdb_cloud_data_store.h"
 
 #define LONG_STR_SIZE 21
 
@@ -203,6 +202,7 @@ static std::string toLower(const std::string &str)
     return lowerStr;
 }
 
+#if defined(DATA_STORE_TYPE_ELOQDSS_ROCKSDB_CLOUD_S3)
 rocksdb::S3ClientFactory RocksDBCloudDataStore::BuildS3ClientFactory(
     const std::string &endpoint)
 {
@@ -263,6 +263,7 @@ rocksdb::S3ClientFactory RocksDBCloudDataStore::BuildS3ClientFactory(
         }
     };
 }
+#endif
 
 bool RocksDBCloudDataStore::StartDB()
 {
@@ -272,7 +273,7 @@ bool RocksDBCloudDataStore::StartDB()
         DLOG(INFO) << "DBCloud already started";
         return true;
     }
-
+    rocksdb::Status status;
 #ifdef DATA_STORE_TYPE_ELOQDSS_ROCKSDB_CLOUD_S3
     if (cloud_config_.aws_access_key_id_.length() == 0 ||
         cloud_config_.aws_secret_key_.length() == 0)
@@ -287,7 +288,7 @@ bool RocksDBCloudDataStore::StartDB()
             cloud_config_.aws_access_key_id_, cloud_config_.aws_secret_key_);
     }
 
-    rocksdb::Status status = cfs_options_.credentials.HasValid();
+    status = cfs_options_.credentials.HasValid();
     if (!status.ok())
     {
         LOG(ERROR) << "Valid AWS_ACCESS_KEY_ID/AWS_SECRET_ACCESS_KEY "
@@ -339,6 +340,7 @@ bool RocksDBCloudDataStore::StartDB()
                << cfs_options_.purger_periodicity_millis << " ms"
                << ", run_purger: " << cfs_options_.run_purger;
 
+#ifdef DATA_STORE_TYPE_ELOQDSS_ROCKSDB_CLOUD_S3
     if (!cloud_config_.s3_endpoint_url_.empty())
     {
         cfs_options_.s3_client_factory =
@@ -354,6 +356,7 @@ bool RocksDBCloudDataStore::StartDB()
         // the transfer manager can leverage multipart upload and download
         cfs_options_.use_aws_transfer_manager = true;
     }
+#endif
 
     DLOG(INFO) << "DBCloud Open";
     rocksdb::CloudFileSystem *cfs;
@@ -448,8 +451,8 @@ bool RocksDBCloudDataStore::OpenCloudDB(
     // boost write performance by enabling unordered write
     options.unordered_write = true;
     // skip Consistency check, which compares the actual file size with the size
-    // recorded in the metadata, which can fail when
-    // skip_cloud_files_in_getchildren is set to true
+    // recorded in the metadata, which can fail when skip_cloud_files_in_getchildren is
+    // set to true
     options.paranoid_checks = false;
 
     // print db statistics every 60 seconds

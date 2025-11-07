@@ -187,7 +187,9 @@ public:
 
     ~DataStoreService();
 
-    bool StartService(bool create_db_if_missing);
+    bool StartService(bool create_db_if_missing,
+                      uint32_t dss_leader_node_id,
+                      uint32_t dss_node_id);
 
     brpc::Server *GetBrpcServer()
     {
@@ -218,7 +220,7 @@ public:
      */
     void Read(const std::string_view table_name,
               const uint32_t partition_id,
-              const std::string_view key,
+              const std::vector<std::string_view> &key,
               std::string *record,
               uint64_t *ts,
               uint64_t *ttl,
@@ -404,6 +406,7 @@ public:
                   const std::vector<remote::SearchCondition> *search_conditions,
                   std::vector<ScanTuple> *items,
                   std::string *session_id,
+                  bool generate_session_id,
                   ::EloqDS::remote::CommonResult *result,
                   ::google::protobuf::Closure *done);
 
@@ -602,9 +605,20 @@ public:
 
     bool IsOwnerOfShard(uint32_t shard_id) const
     {
+        DLOG(INFO) << "IsOwnerOfShard check: shard_status="
+                   << static_cast<int>(shard_status_.load()) << ", shard_id_="
+                   << shard_id_ << ", check_shard_id=" << shard_id;
         return shard_status_.load(std::memory_order_acquire) !=
                    DSShardStatus::Closed &&
                shard_id_ == shard_id;
+    }
+
+    void CloseDataStore(uint32_t shard_id);
+    void OpenDataStore(uint32_t shard_id);
+
+    DataStoreServiceClusterManager &GetClusterManager()
+    {
+      return cluster_manager_;
     }
 
 private:

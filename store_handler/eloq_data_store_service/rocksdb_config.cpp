@@ -19,8 +19,6 @@
  *    <http://www.gnu.org/licenses/>.
  *
  */
-#include "rocksdb_config.h"
-
 #include <cassert>
 #include <ctime>
 #include <iomanip>
@@ -30,6 +28,7 @@
 #include <string_view>
 
 #include "glog/logging.h"
+#include "rocksdb_config.h"
 
 DEFINE_string(rocksdb_info_log_level, "INFO", "RocksDB store info log level");
 DEFINE_bool(rocksdb_enable_stats, false, "RocksDB store enable stats");
@@ -273,7 +272,9 @@ DEFINE_uint32(rocksdb_cloud_db_file_deletion_delay_sec,
 DEFINE_uint32(rocksdb_cloud_warm_up_thread_num,
               1,
               "Rocksdb cloud warm up thread number");
-DEFINE_bool(rocksdb_cloud_run_purger, true, "Rocksdb cloud run purger");
+DEFINE_bool(rocksdb_cloud_run_purger,
+            true,
+            "Rocksdb cloud run purger");
 DEFINE_uint32(rocksdb_cloud_purger_periodicity_secs,
               10 * 60, /*10 minutes*/
               "Rocksdb cloud purger periodicity seconds");
@@ -564,7 +565,8 @@ RocksDBCloudConfig::RocksDBCloudConfig(const INIReader &config)
                                 "rocksdb_cloud_run_purger",
                                 FLAGS_rocksdb_cloud_run_purger);
     uint64_t rocksdb_cloud_purger_periodicity_secs =
-        !CheckCommandLineFlagIsDefault("rocksdb_cloud_purger_periodicity_secs")
+        !CheckCommandLineFlagIsDefault(
+            "rocksdb_cloud_purger_periodicity_secs")
             ? FLAGS_rocksdb_cloud_purger_periodicity_secs
             : config.GetInteger("store",
                                 "rocksdb_cloud_purger_periodicity_secs",

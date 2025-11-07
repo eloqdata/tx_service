@@ -65,7 +65,7 @@ public:
         const txservice::KVCatalogInfo *kv_info,
         const EloqKV::EloqKey *start_key,
         bool inclusive,
-        const std::vector<txservice::store::DataStoreSearchCond> &pushdown_cond,
+        const std::vector<txservice::DataStoreSearchCond> &pushdown_cond,
         bool scan_forward)
         : keyspace_(keyspace),
           dynamo_client_(client),
@@ -112,8 +112,7 @@ protected:
     const EloqKV::EloqKey *start_key_;
     const bool inclusive_;
     bool scan_forward_;
-    const std::vector<txservice::store::DataStoreSearchCond>
-        pushdown_condition_;
+    const std::vector<txservice::DataStoreSearchCond> pushdown_condition_;
     Aws::DynamoDB::Model::QueryRequest scan_req_;
     bool initialized_{false};
     bool full_column_scan_{true};
@@ -132,7 +131,7 @@ public:
         const txservice::KVCatalogInfo *kv_info,
         const EloqKV::EloqKey &start_key,
         bool inclusive,
-        const std::vector<txservice::store::DataStoreSearchCond> &pushdown_cond)
+        const std::vector<txservice::DataStoreSearchCond> &pushdown_cond)
         : DynamoScanner(keyspace,
                         client,
                         key_sch,

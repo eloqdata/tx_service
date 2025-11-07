@@ -150,11 +150,10 @@ public:
           received_snapshot_path_(storage_path_ + "/received_snapshot/"),
           create_db_if_missing_(create_if_missing),
           tx_enable_cache_replacement_(tx_enable_cache_replacement),
-          ttl_compaction_filter_(nullptr)
+          ttl_compaction_filter_(nullptr),
+          query_worker_number_(config.query_worker_num_)
     {
         info_log_level_ = StringToInfoLogLevel(config.info_log_level_);
-        query_worker_pool_ =
-            std::make_unique<ThreadWorkerPool>(config.query_worker_num_);
     }
 
     /**
@@ -235,9 +234,14 @@ protected:
 #endif
 
 protected:
-    const std::string BuildKey(const std::string_view table_name,
-                               uint32_t partition_id,
-                               const std::string_view key);
+    std::string BuildKey(const std::string_view table_name,
+                         uint32_t partition_id,
+                         const std::string_view key);
+
+    std::string BuildKey(const std::string_view table_name,
+                         uint32_t partition_id,
+                         const ReadRequest *read_request);
+
     const std::string BuildKeyForDebug(
         const std::unique_ptr<rocksdb::Slice[]> &key_slices, size_t slice_size);
 
@@ -246,6 +250,7 @@ protected:
     void BuildKey(const std::string_view prefix,
                   const std::string_view key,
                   std::string &key_out);
+
     void BuildKeyPrefixSlices(
         const std::string_view table_name,
         const std::string_view partition_id,
@@ -315,6 +320,7 @@ protected:
     bool tx_enable_cache_replacement_{true};
     std::unique_ptr<EloqDS::TTLCompactionFilter> ttl_compaction_filter_{
         nullptr};
+    size_t query_worker_number_{4};
 
     std::unique_ptr<ThreadWorkerPool> query_worker_pool_;
     std::shared_mutex db_mux_;

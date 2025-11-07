@@ -47,6 +47,7 @@ public:
 
     ~RocksDBCloudDataStore();
 
+#ifdef DATA_STORE_TYPE_ELOQDSS_ROCKSDB_CLOUD_S3
     /**
      * @brief Build S3 client factory.
      *        Used to connect to S3 compatible storage, e.g. MinIO.
@@ -54,6 +55,7 @@ public:
      * @return The S3 client factory.
      */
     rocksdb::S3ClientFactory BuildS3ClientFactory(const std::string &endpoint);
+#endif
 
     /**
      * @brief Open the cloud database.

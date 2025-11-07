@@ -99,10 +99,10 @@ public:
      */
     ~SlidingWindow();
 
-    SlidingWindow(const SlidingWindow &) = delete;
-    SlidingWindow &operator=(const SlidingWindow &) = delete;
-    SlidingWindow(SlidingWindow &&) = delete;
-    SlidingWindow &operator=(SlidingWindow &&) = delete;
+    SlidingWindow(const SlidingWindow&) = delete;
+    SlidingWindow& operator=(const SlidingWindow&) = delete;
+    SlidingWindow(SlidingWindow&&) = delete;
+    SlidingWindow& operator=(SlidingWindow&&) = delete;
 
     void SetEpoch(const std::string &epoch);
 
@@ -114,9 +114,7 @@ public:
      * @param thread_id The thread ID of the operation
      * @param job_id The job ID of the operation
      */
-    void AddFileNumber(uint64_t file_number,
-                       uint64_t thread_id,
-                       uint64_t job_id);
+    void AddFileNumber(uint64_t file_number, uint64_t thread_id, uint64_t job_id);
 
     /**
      * @brief Remove a file number entry from the sliding window

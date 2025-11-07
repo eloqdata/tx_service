@@ -20,11 +20,11 @@
  *
  */
 
-#include "purger_event_listener.h"
-
 #include <rocksdb/db.h>
 
 #include <string>
+
+#include "purger_event_listener.h"
 
 namespace EloqDS
 {
