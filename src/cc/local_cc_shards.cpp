@@ -2649,6 +2649,7 @@ void LocalCcShards::EnqueueDataSyncTaskForTable(
             return;
         }
 
+        /*
         size_t debug_idx = 0;
         for (auto &range : *ranges)
         {
@@ -2658,9 +2659,11 @@ void LocalCcShards::EnqueueDataSyncTaskForTable(
                       << ", debug idx = " << debug_idx;
             debug_idx++;
         }
+        */
 
         for (auto &range : *ranges)
         {
+            /*
             if (range.second->Version() == 1762482755490268)
             {
                 LOG(INFO) << "Debug point for range "
@@ -2676,6 +2679,7 @@ void LocalCcShards::EnqueueDataSyncTaskForTable(
                           << ", index = " << debug_idx;
             }
             debug_idx++;
+            */
 
             if (EnqueueRangeDataSyncTask(table_name,
                                          ng_id,
