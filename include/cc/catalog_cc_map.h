@@ -790,6 +790,12 @@ public:
                 assert(new_schema->Version() ==
                        catalog_entry->dirty_schema_version_);
 
+                shard_->CleanCcm(table_key->Name(), req.NodeGroupId());
+                shard_->UpdateCcmSchema(table_key->Name(),
+                                        req.NodeGroupId(),
+                                        catalog_entry->dirty_schema_.get(),
+                                        catalog_entry->dirty_schema_version_);
+
                 // Sync ddl op to standby nodes.
                 if (shard_->core_id_ == 0 &&
                     !shard_->GetSubscribedStandbys().empty())
@@ -2369,10 +2375,6 @@ public:
         const auto keylock = catalog_cce->GetKeyLock();
         if (keylock != nullptr && keylock->HasWriteLock())
         {
-            // If write lock exists, the CatalogRecord should have dirty schema
-            // set.
-            assert(catalog_cce->payload_.cur_payload_.get()->DirtySchema() !=
-                   nullptr);
             DLOG(WARNING)
                 << "InitCcm failure, target table: " << table_name.StringView()
                 << " has write lock on catalog_cc_map, which means, it is "

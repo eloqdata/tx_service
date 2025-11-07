@@ -4,6 +4,8 @@
 #include <cstdint>
 #include <memory>
 
+#include "cc_req_base.h"
+
 namespace txservice
 {
 class CcShard;
@@ -63,7 +65,8 @@ public:
 private:
     std::atomic<ReaderWriterCntlBlock> cntl_block_;
     CcShard *ccs_{nullptr};
-    std::atomic<CcRequestBase *> write_req_{nullptr};
+    // Tagged 64-bit slot: bit0=0 -> pointer, bit0=1 -> transaction id.
+    std::atomic<uint64_t> writer_{0};
 };
 
 template <typename T>
