@@ -1502,6 +1502,36 @@ public:
                 {
                     cce->GetKeyGapLockAndExtraData()->ReleasePin();
                     cce->RecycleKeyLock(*shard_);
+
+                    if (req.Isolation() == IsolationLevel::Snapshot)
+                    {
+                        // MVCC update last_read_ts_ of lastest ccentry to tell
+                        // later writer's commit_ts must be higher than MVCC
+                        // reader's ts. Or it will break the REPEATABLE READ
+                        // since the next MVCC read in the same transaction will
+                        // read the new updated ccentry.
+                        shard_->UpdateLastReadTs(req.ReadTimestamp());
+                    }
+                    std::tie(acquired_lock, err_code) =
+                        AcquireCceKeyLock(cce,
+                                          cce->CommitTs(),
+                                          ccp,
+                                          cce->PayloadStatus(),
+                                          &req,
+                                          ng_id,
+                                          ng_term,
+                                          req.TxTerm(),
+                                          cc_op,
+                                          iso_lvl,
+                                          cc_proto,
+                                          req.ReadTimestamp(),
+                                          req.IsCoveringKeys());
+
+                    cce_addr.SetCceLock(reinterpret_cast<uint64_t>(
+                                            cce->GetKeyGapLockAndExtraData()),
+                                        ng_term,
+                                        req.NodeGroupId(),
+                                        shard_->LocalCoreId());
                 }
                 else
                 {
@@ -1846,6 +1876,7 @@ public:
                         return false;
                     }
                 }
+
                 req.SetCcePtr(cce);
                 CODE_FAULT_INJECTOR("remote_read_msg_missed", {
                     LOG(INFO) << "FaultInject  remote_read_msg_missed"
