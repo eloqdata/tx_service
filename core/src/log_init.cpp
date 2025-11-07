@@ -36,6 +36,10 @@ DEFINE_bool(enable_txlog_request_checkpoint,
             "Enable txlog server sending checkpoint requests when the criteria "
             "are met.");
 
+#if defined(DATA_STORE_TYPE_ELOQDSS_ROCKSDB_CLOUD_S3)
+DECLARE_string(aws_access_key_id);
+DECLARE_string(aws_secret_key);
+#endif
 #if defined(LOG_STATE_TYPE_RKDB_CLOUD)
 DEFINE_string(txlog_rocksdb_cloud_region,
               "ap-northeast-1",
