@@ -211,6 +211,7 @@ if (WITH_LOG_STATE MATCHES "ROCKSDB|ROCKSDB_CLOUD_S3|ROCKSDB_CLOUD_GCS")
     	  message(FATAL_ERROR "Fail to find RocksDB Cloud include path")
       endif ()
       message(STATUS "ROCKSDB_CLOUD_INCLUDE_PATH: ${ROCKSDB_CLOUD_INCLUDE_PATH}")
+
       set(ROCKSDB_INCLUDE_PATH ${ROCKSDB_INCLUDE_PATH} ${ROCKSDB_CLOUD_INCLUDE_PATH})
 
       if (NOT ROCKSDB_CLOUD_LIB)
@@ -279,4 +280,7 @@ ADD_LIBRARY(logservice
     )
 
 target_include_directories(logservice PUBLIC ${LOG_INCLUDE_DIR})
+if (WITH_LOG_STATE MATCHES "ROCKSDB|ROCKSDB_CLOUD_S3|ROCKSDB_CLOUD_GCS")
+    target_include_directories(logservice PUBLIC ${ROCKSDB_INCLUDE_PATH})
+endif()
 target_link_libraries(logservice PUBLIC ${LOG_LIB} ${PROTOBUF_LIBRARIES})
