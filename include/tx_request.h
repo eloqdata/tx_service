@@ -1319,6 +1319,7 @@ public:
                        const std::function<void()> *yield_fptr = nullptr,
                        const std::function<void()> *resume_fptr = nullptr,
                        TransactionExecution *txm = nullptr,
+                       bool point_read_on_cache_miss = false,
                        uint64_t corresponding_sk_commit_ts = 0,
                        bool local_cache_checked = false)
         : TemplateTxRequest(yield_fptr, resume_fptr, txm),
@@ -1327,6 +1328,7 @@ public:
           is_for_write_(is_for_write),
           is_for_share_(is_for_share),
           read_local_(read_local),
+          point_read_on_cache_miss_(point_read_on_cache_miss),
           corresponding_sk_commit_ts_(corresponding_sk_commit_ts),
           schema_version_(schema_version),
           local_cache_checked_(local_cache_checked)
@@ -1339,6 +1341,7 @@ public:
              bool is_for_write = false,
              bool is_for_share = false,
              bool read_local = false,
+             bool point_read_on_cache_miss = false,
              uint64_t corresponding_sk_commit_ts = 0)
     {
         tab_name_ = tab_name;
@@ -1346,6 +1349,7 @@ public:
         is_for_write_ = is_for_write;
         is_for_share_ = is_for_share;
         read_local_ = read_local;
+        point_read_on_cache_miss_ = point_read_on_cache_miss;
         corresponding_sk_commit_ts_ = corresponding_sk_commit_ts;
         schema_version_ = schema_version;
         local_cache_checked_ = false;
@@ -1356,6 +1360,7 @@ public:
     bool is_for_write_;  // used for "select ... for update".
     bool is_for_share_;  // used for "select ... lock in share mode".
     bool read_local_;
+    bool point_read_on_cache_miss_;
     uint64_t corresponding_sk_commit_ts_;
     uint64_t schema_version_;
     bool local_cache_checked_;

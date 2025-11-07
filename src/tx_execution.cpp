@@ -7645,25 +7645,25 @@ void TransactionExecution::Process(BatchReadOperation &batch_read_op)
         {
             partition_id = batch_read_op.range_ids_[idx];
         }
-        cc_handler_->Read(table_name,
-                          batch_read_op.batch_read_tx_req_->schema_version_,
-                          key,
-                          sharding_code,
-                          rec,
-                          ReadType::Inside,
-                          TxNumber(),
-                          tx_term_,
-                          CommandId(),
-                          read_batch[idx].version_ts_ > 0
-                              ? read_batch[idx].version_ts_
-                              : read_ts,
-                          batch_read_op.hd_result_vec_[idx],
-                          iso_level,
-                          protocol_,
-                          batch_read_op.batch_read_tx_req_->is_for_write_,
-                          false,
-                          true,
-                          partition_id);
+        cc_handler_->Read(
+            table_name,
+            batch_read_op.batch_read_tx_req_->schema_version_,
+            key,
+            sharding_code,
+            rec,
+            ReadType::Inside,
+            TxNumber(),
+            tx_term_,
+            CommandId(),
+            read_batch[idx].version_ts_ > 0 ? read_batch[idx].version_ts_
+                                            : read_ts,
+            batch_read_op.hd_result_vec_[idx],
+            iso_level,
+            protocol_,
+            batch_read_op.batch_read_tx_req_->is_for_write_,
+            false,  // is_covering_keys
+            batch_read_op.batch_read_tx_req_->point_read_on_cache_miss_,
+            partition_id);
     }
 
     StartTiming();

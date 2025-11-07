@@ -10144,12 +10144,6 @@ protected:
             {
                 CleanEntry(cce, ccp);
             }
-            else
-            {
-                // No lock should be put on an unknown cce beside
-                // fetch record read intent.
-                assert(cce->PayloadStatus() != RecordStatus::Unknown);
-            }
             return true;
         }
         const uint64_t cce_version = cce->CommitTs();
