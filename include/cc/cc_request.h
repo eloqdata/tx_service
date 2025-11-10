@@ -4002,8 +4002,7 @@ public:
             slices_to_scan_.reserve(old_slices_delta_size->size());
             std::for_each(old_slices_delta_size->begin(),
                           old_slices_delta_size->end(),
-                          [&](decltype(*old_slices_delta_size->begin()) &elem)
-                          {
+                          [&](decltype(*old_slices_delta_size->begin()) &elem) {
                               slices_to_scan_.emplace_back(
                                   std::move(elem.first.GetShallowCopy()));
                           });
@@ -8546,7 +8545,7 @@ struct ScanSliceDeltaSizeCcForRangePartition : public CcRequestBase
         if (ccm == nullptr)
         {
             assert(!table_name_.IsMeta());
-            InitCcmResult init_res = ccs.InitCcm(
+            [[maybe_unused]] InitCcmResult init_res = ccs.InitCcm(
                 table_name_, node_group_id_, node_group_term_, this);
             // Catalog entry should always exists and schema should not be null,
             // since this cc request should be executed when table is locked by
@@ -8768,7 +8767,7 @@ struct ScanDeltaSizeCcForHashPartition : public CcRequestBase
         if (ccm == nullptr)
         {
             assert(!table_name_.IsMeta());
-            InitCcmResult init_res = ccs.InitCcm(
+            [[maybe_unused]] InitCcmResult init_res = ccs.InitCcm(
                 table_name_, node_group_id_, node_group_term_, this);
             // Catalog entry should always exists and schema should not be null,
             // since this cc request should be executed when table is locked by
@@ -8984,7 +8983,7 @@ public:
         if (ccm == nullptr)
         {
             assert(!table_name_.IsMeta());
-            InitCcmResult init_res = ccs.InitCcm(
+            [[maybe_unused]] InitCcmResult init_res = ccs.InitCcm(
                 table_name_, node_group_id_, node_group_term_, this);
             // Catalog entry should always exists and schema should not be null,
             // since this cc request should be executed when table is locked by
