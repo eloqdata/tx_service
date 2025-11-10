@@ -618,13 +618,16 @@ StoreRange::LoadSliceStatus StoreRange::LoadSlice(
             slice.cc_queue_.emplace_back(cc_request, cc_shard);
         }
 
-        auto start_time = std::chrono::high_resolution_clock::now();
+        // auto start_time = std::chrono::high_resolution_clock::now();
         slice_lk.unlock();
+
+        /*
         auto stop_time = std::chrono::high_resolution_clock::now();
         auto duration = std::chrono::duration_cast<std::chrono::microseconds>(
                             stop_time - start_time)
                             .count();
         Sharder::Instance().AddUnlockLatency(duration);
+        */
 
         if (ctrl.AsyncEmit())
         {
