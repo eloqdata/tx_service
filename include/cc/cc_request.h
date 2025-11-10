@@ -8427,7 +8427,7 @@ public:
                 }
                 else
                 {
-#ifndef ONE_KEY_OBJECT
+#ifndef ON_KEY_OBJECT
                     // Reach to the tail ccpage, but the allocated memory is
                     // still larger than the heap threshold, just abort the
                     // waiting ccrequests.
