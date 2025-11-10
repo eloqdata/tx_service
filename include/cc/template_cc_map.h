@@ -1749,6 +1749,7 @@ public:
                                     }
                                     ccp = it.GetPage();
                                 }
+
                                 // Create key lock and extra struct for the cce.
                                 // Fetch record will pin the cce to prevent it
                                 // from being recycled before fetch record
@@ -5194,9 +5195,11 @@ public:
 
         auto pin_range_slice =
             [this, &req, &pause_key_and_is_drained, &next_slice_func](
-                const KeyT &search_key) -> std::pair<RangeSliceId, bool>
+                const KeyT &search_key,
+                bool prefetch) -> std::pair<RangeSliceId, bool>
         {
             bool succ = false;
+            size_t prefetch_size = prefetch ? 32 : 0;
             RangeSliceOpStatus pin_status;
             RangeSliceId slice_id = shard_->local_shards_.PinRangeSlice(
                 table_name_,
@@ -5213,7 +5216,7 @@ public:
                 shard_,
                 pin_status,
                 true,
-                32,
+                prefetch_size,
                 false,
                 false,
                 !req.export_base_table_item_,
@@ -5378,7 +5381,8 @@ public:
                     // false, it means that the pin slice operation is required
                     // due to slice splitting, then, only need pin the current
                     // slice that needs to be split.
-                    auto [new_slice_id, succ] = pin_range_slice(*start_key);
+                    auto [new_slice_id, succ] = pin_range_slice(
+                        *start_key, req.export_base_table_item_);
                     if (!succ)
                     {
                         return {Iterator(),
