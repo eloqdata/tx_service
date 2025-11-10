@@ -1179,7 +1179,9 @@ public:
         // it is completed.
         BlockByPostWrite,
         // Blocked by FetchRecord
-        BlockByFetch
+        BlockByFetchBaseRecord,
+        // Blocked by FetchArchive
+        BlockByFetchArchiveRecord
     };
     ReadCc()
         : key_ptr_(nullptr),
