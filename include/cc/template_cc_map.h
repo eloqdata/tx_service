@@ -5201,11 +5201,9 @@ public:
 
         auto pin_range_slice =
             [this, &req, &pause_key_and_is_drained, &next_slice_func](
-                const KeyT &search_key,
-                bool prefetch) -> std::pair<RangeSliceId, bool>
+                const KeyT &search_key) -> std::pair<RangeSliceId, bool>
         {
             bool succ = false;
-            size_t prefetch_size = prefetch ? 32 : 0;
             RangeSliceOpStatus pin_status;
             RangeSliceId slice_id = shard_->local_shards_.PinRangeSlice(
                 table_name_,
@@ -5222,7 +5220,7 @@ public:
                 shard_,
                 pin_status,
                 true,
-                prefetch_size,
+                32,
                 false,
                 false,
                 !req.export_base_table_item_,
@@ -5387,8 +5385,7 @@ public:
                     // false, it means that the pin slice operation is required
                     // due to slice splitting, then, only need pin the current
                     // slice that needs to be split.
-                    auto [new_slice_id, succ] = pin_range_slice(
-                        *start_key, req.export_base_table_item_);
+                    auto [new_slice_id, succ] = pin_range_slice(*start_key);
                     if (!succ)
                     {
                         return {Iterator(),
