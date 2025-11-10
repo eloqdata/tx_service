@@ -7,7 +7,7 @@ set(METRICS_LIB "eloq-metrics" CACHE STRING "Metrics library name")
 
 # Options from original eloq CMakeLists
 set(WITH_DATA_STORE "ELOQDSS_ROCKSDB" CACHE STRING "Which key-value storage to use")
-set_property(CACHE WITH_DATA_STORE PROPERTY STRINGS "DYNAMODB" "BIGTABLE" "ELOQDSS_ROCKSDB_CLOUD_S3" "ELOQDSS_ELOQSTORE" "ELOQDSS_ROCKSDB")
+set_property(CACHE WITH_DATA_STORE PROPERTY STRINGS "DYNAMODB" "BIGTABLE" "ROCKSDB" "ELOQDSS_ROCKSDB" "ELOQDSS_ROCKSDB_CLOUD_S3" "ELOQDSS_ROCKSDB_CLOUD_GCS" "ELOQDSS_ELOQSTORE")
 
 option(WITH_LOG_SERVICE "Compile with built-in log service." ON)
 option(OPEN_LOG_SERVICE "Compile with open log service." ON)
@@ -25,6 +25,79 @@ message(NOTICE "BUILD_SHARED_LIBS: ${BUILD_SHARED_LIBS}")
 option(USE_ONE_ELOQDSS_PARTITION_ENABLED "Whether use one partition for kv store" OFF)
 message(NOTICE "USE_ONE_ELOQDSS_PARTITION_ENABLED : ${USE_ONE_ELOQDSS_PARTITION_ENABLED}")
 
+# Synchronize WITH_DATA_STORE and WITH_LOG_STATE
+# Determine RocksDB type from WITH_DATA_STORE
+set(DATA_STORE_USES_LOCAL_ROCKSDB FALSE)
+set(DATA_STORE_USES_CLOUD_S3_ROCKSDB FALSE)
+set(DATA_STORE_USES_CLOUD_GCS_ROCKSDB FALSE)
+set(DATA_STORE_USES_ROCKSDB FALSE)
+
+if(WITH_DATA_STORE STREQUAL "ROCKSDB" OR WITH_DATA_STORE STREQUAL "ELOQDSS_ROCKSDB")
+    set(DATA_STORE_USES_LOCAL_ROCKSDB TRUE)
+    set(DATA_STORE_USES_ROCKSDB TRUE)
+elseif(WITH_DATA_STORE STREQUAL "ELOQDSS_ROCKSDB_CLOUD_S3")
+    set(DATA_STORE_USES_CLOUD_S3_ROCKSDB TRUE)
+    set(DATA_STORE_USES_ROCKSDB TRUE)
+elseif(WITH_DATA_STORE STREQUAL "ELOQDSS_ROCKSDB_CLOUD_GCS")
+    set(DATA_STORE_USES_CLOUD_GCS_ROCKSDB TRUE)
+    set(DATA_STORE_USES_ROCKSDB TRUE)
+endif()
+
+# Check if WITH_LOG_STATE is already set in cache
+get_property(LOG_STATE_CACHED CACHE WITH_LOG_STATE PROPERTY VALUE SET)
+
+# If DATA_STORE uses RocksDB, synchronize WITH_LOG_STATE
+if(DATA_STORE_USES_ROCKSDB)
+    if(NOT LOG_STATE_CACHED)
+        # Auto-set WITH_LOG_STATE based on WITH_DATA_STORE
+        if(DATA_STORE_USES_LOCAL_ROCKSDB)
+            set(WITH_LOG_STATE "ROCKSDB" CACHE STRING "The log state implementation" FORCE)
+            message(WARNING "WITH_LOG_STATE was not set. Auto-set to 'ROCKSDB' to match WITH_DATA_STORE='${WITH_DATA_STORE}'. Please set WITH_LOG_STATE explicitly if you need a different value.")
+        elseif(DATA_STORE_USES_CLOUD_S3_ROCKSDB)
+            set(WITH_LOG_STATE "ROCKSDB_CLOUD_S3" CACHE STRING "The log state implementation" FORCE)
+            message(WARNING "WITH_LOG_STATE was not set. Auto-set to 'ROCKSDB_CLOUD_S3' to match WITH_DATA_STORE='${WITH_DATA_STORE}'. Please set WITH_LOG_STATE explicitly if you need a different value.")
+        elseif(DATA_STORE_USES_CLOUD_GCS_ROCKSDB)
+            set(WITH_LOG_STATE "ROCKSDB_CLOUD_GCS" CACHE STRING "The log state implementation" FORCE)
+            message(WARNING "WITH_LOG_STATE was not set. Auto-set to 'ROCKSDB_CLOUD_GCS' to match WITH_DATA_STORE='${WITH_DATA_STORE}'. Please set WITH_LOG_STATE explicitly if you need a different value.")
+        endif()
+        set_property(CACHE WITH_LOG_STATE PROPERTY STRINGS "MEMORY" "ROCKSDB" "ROCKSDB_CLOUD_S3" "ROCKSDB_CLOUD_GCS")
+    else()
+        # Validate compatibility
+        if(DATA_STORE_USES_LOCAL_ROCKSDB AND NOT WITH_LOG_STATE STREQUAL "ROCKSDB")
+            message(FATAL_ERROR "WITH_DATA_STORE='${WITH_DATA_STORE}' uses local RocksDB, but WITH_LOG_STATE='${WITH_LOG_STATE}' is incompatible. WITH_LOG_STATE must be 'ROCKSDB' when using local RocksDB.")
+        elseif(DATA_STORE_USES_CLOUD_S3_ROCKSDB AND NOT WITH_LOG_STATE STREQUAL "ROCKSDB_CLOUD_S3")
+            message(FATAL_ERROR "WITH_DATA_STORE='${WITH_DATA_STORE}' uses cloud RocksDB (S3), but WITH_LOG_STATE='${WITH_LOG_STATE}' is incompatible. WITH_LOG_STATE must be 'ROCKSDB_CLOUD_S3' when using cloud RocksDB (S3).")
+        elseif(DATA_STORE_USES_CLOUD_GCS_ROCKSDB AND NOT WITH_LOG_STATE STREQUAL "ROCKSDB_CLOUD_GCS")
+            message(FATAL_ERROR "WITH_DATA_STORE='${WITH_DATA_STORE}' uses cloud RocksDB (GCS), but WITH_LOG_STATE='${WITH_LOG_STATE}' is incompatible. WITH_LOG_STATE must be 'ROCKSDB_CLOUD_GCS' when using cloud RocksDB (GCS).")
+        endif()
+    endif()
+else()
+    # DATA_STORE doesn't use RocksDB, so WITH_LOG_STATE can be anything
+    # No synchronization needed in this case
+endif()
+
+# Handle reverse case: if only WITH_LOG_STATE is set to local RocksDB, auto-set WITH_DATA_STORE
+# But only if WITH_DATA_STORE doesn't already use RocksDB (to avoid conflicts)
+if(LOG_STATE_CACHED AND WITH_LOG_STATE STREQUAL "ROCKSDB")
+    if(NOT DATA_STORE_USES_ROCKSDB)
+        # WITH_LOG_STATE is set to local RocksDB, but WITH_DATA_STORE doesn't use RocksDB
+        # Capture the old value before changing it
+        set(OLD_DATA_STORE_VALUE ${WITH_DATA_STORE})
+        # Auto-set WITH_DATA_STORE to use local RocksDB
+        set(WITH_DATA_STORE "ELOQDSS_ROCKSDB" CACHE STRING "Which key-value storage to use" FORCE)
+        message(WARNING "WITH_LOG_STATE='ROCKSDB' (local RocksDB) was set, but WITH_DATA_STORE='${OLD_DATA_STORE_VALUE}' doesn't use RocksDB. Auto-set WITH_DATA_STORE to 'ELOQDSS_ROCKSDB'. Please set WITH_DATA_STORE explicitly if you need a different value.")
+        # Re-evaluate after auto-setting
+        set(DATA_STORE_USES_LOCAL_ROCKSDB TRUE)
+        set(DATA_STORE_USES_ROCKSDB TRUE)
+    elseif(NOT DATA_STORE_USES_LOCAL_ROCKSDB)
+        # WITH_LOG_STATE is set to local RocksDB, but WITH_DATA_STORE uses cloud RocksDB
+        message(FATAL_ERROR "WITH_LOG_STATE='ROCKSDB' (local RocksDB) is incompatible with WITH_DATA_STORE='${WITH_DATA_STORE}' (cloud RocksDB). Please set compatible values.")
+    endif()
+endif()
+
+message(NOTICE "WITH_DATA_STORE: ${WITH_DATA_STORE}")
+message(NOTICE "WITH_LOG_STATE: ${WITH_LOG_STATE}")
+
 # Enable Position Independent Code for shared libraries
 if(BUILD_SHARED_LIBS)
     set(CMAKE_POSITION_INDEPENDENT_CODE ON)
@@ -41,6 +114,8 @@ if(WITH_DATA_STORE STREQUAL "DYNAMODB")
     set(KV_STORAGE_VAL 1 CACHE STRING "dynamodb" FORCE)
     add_compile_definitions(DATA_STORE_TYPE_DYNAMODB)
     find_package(AWSSDK REQUIRED COMPONENTS dynamodb)
+elseif(WITH_DATA_STORE STREQUAL "ROCKSDB")
+    add_compile_definitions(DATA_STORE_TYPE_ROCKSDB)
 elseif(WITH_DATA_STORE STREQUAL "BIGTABLE")
     set(KV_STORAGE_VAL 2 CACHE STRING "big table" FORCE)
     add_compile_definitions(DATA_STORE_TYPE_BIGTABLE)
@@ -62,7 +137,7 @@ else()
 endif()
 
 # Find RocksDB if needed
-if(WITH_DATA_STORE STREQUAL "ELOQDSS_ROCKSDB")
+if(WITH_DATA_STORE STREQUAL "ELOQDSS_ROCKSDB" OR WITH_DATA_STORE STREQUAL "ROCKSDB")
     find_path(ROCKSDB_INCLUDE_PATH NAMES rocksdb/db.h)
     if(NOT ROCKSDB_INCLUDE_PATH)
         message(FATAL_ERROR "Fail to find RocksDB include path")
