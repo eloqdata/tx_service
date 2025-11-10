@@ -22,6 +22,10 @@
 #include "sharder.h"
 
 #include <brpc/channel.h>
+#include <bvar/bvar.h>
+#include <bvar/latency_recorder.h>
+#include <bvar/reducer.h>
+#include <bvar/window.h>
 #include <spawn.h>
 #include <unistd.h>
 
@@ -51,6 +55,20 @@ namespace GFLAGS_NAMESPACE = gflags;
 
 namespace txservice
 {
+
+bvar::LatencyRecorder g_lock_recorder("yf_pin_slice_lock_time");
+bvar::LatencyRecorder g_unlock_recorder("yf_pin_slice_unlock_time");
+
+void Sharder::AddLockLatency(uint64_t latency)
+{
+    g_lock_recorder << latency;
+}
+
+void Sharder::AddUnlockLatency(uint64_t latency)
+{
+    g_unlock_recorder << latency;
+}
+
 Sharder::Sharder() = default;
 Sharder::~Sharder()
 {

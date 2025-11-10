@@ -21,11 +21,6 @@
  */
 #pragma once
 
-#include <bvar/bvar.h>
-#include <bvar/latency_recorder.h>
-#include <bvar/reducer.h>
-#include <bvar/window.h>
-
 #include <atomic>
 #include <chrono>
 #include <cmath>
@@ -62,9 +57,6 @@ struct FlushRecord;
 
 // whether use key cache to skip kv read.
 inline bool txservice_enable_key_cache = false;
-
-bvar::LatencyRecorder g_lock_recorder("yf_pin_slice_lock_time");
-bvar::LatencyRecorder g_unlock_recorder("yf_pin_slice_unlock_time");
 
 namespace store
 {
@@ -1438,7 +1430,7 @@ public:
                         std::chrono::duration_cast<std::chrono::microseconds>(
                             stop_time - start_time)
                             .count();
-                    g_lock_recorder << duration;
+                    Sharder::Instance().AddLockLatency(duration);
 
                     if (prefetch_slice->status_ == SliceStatus::PartiallyCached)
                     {
