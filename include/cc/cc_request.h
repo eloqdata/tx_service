@@ -8427,14 +8427,14 @@ public:
                 }
                 else
                 {
-#ifndef ON_KEY_OBJECT
-                    // Reach to the tail ccpage, but the allocated memory is
-                    // still larger than the heap threshold, just abort the
-                    // waiting ccrequests.
-                    ccs.DequeueWaitListAfterMemoryFree(true);
-#else
-                    // Waiting until have free memory.
-#endif
+// #ifndef ON_KEY_OBJECT
+//                     // Reach to the tail ccpage, but the allocated memory is
+//                     // still larger than the heap threshold, just abort the
+//                     // waiting ccrequests.
+//                     ccs.DequeueWaitListAfterMemoryFree(true);
+// #else
+//                     // Waiting until have free memory.
+// #endif
 
                     // Notify the checkpointer thread to do checkpoint if there
                     // is not freeable entries to be kicked out from ccmap and
