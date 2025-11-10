@@ -1421,32 +1421,39 @@ public:
                         }
                     }
 
-                    auto start_time = std::chrono::high_resolution_clock::now();
+                    // auto start_time =
+                    // std::chrono::high_resolution_clock::now();
                     std::unique_lock<std::mutex> prefetch_lk(
-                        prefetch_slice->slice_mux_);
+                        prefetch_slice->slice_mux_, std::try_to_lock);
 
+                    /*
                     auto stop_time = std::chrono::high_resolution_clock::now();
                     auto duration =
                         std::chrono::duration_cast<std::chrono::microseconds>(
                             stop_time - start_time)
                             .count();
                     Sharder::Instance().AddLockLatency(duration);
+                    */
 
-                    if (prefetch_slice->status_ == SliceStatus::PartiallyCached)
+                    if (prefetch_lk.owns_lock())
                     {
-                        LoadSlice(tbl_name,
-                                  ng_term,
-                                  *prefetch_slice,
-                                  key_schema,
-                                  rec_schema,
-                                  schema_ts,
-                                  snapshot_ts,
-                                  kv_info,
-                                  nullptr,
-                                  cc_shard,
-                                  store_hd,
-                                  load_ctrl,
-                                  std::move(prefetch_lk));
+                        if (prefetch_slice->status_ ==
+                            SliceStatus::PartiallyCached)
+                        {
+                            LoadSlice(tbl_name,
+                                      ng_term,
+                                      *prefetch_slice,
+                                      key_schema,
+                                      rec_schema,
+                                      schema_ts,
+                                      snapshot_ts,
+                                      kv_info,
+                                      nullptr,
+                                      cc_shard,
+                                      store_hd,
+                                      load_ctrl,
+                                      std::move(prefetch_lk));
+                        }
                     }
 
                     sid = next_prefetch_slice(sid, true);
