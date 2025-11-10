@@ -53,9 +53,9 @@ DEFINE_bool(enable_mvcc, false, "Enable mvcc");
 // Network configuration gflags
 DEFINE_string(tx_ip, "127.0.0.1", "Local tx service IP address");
 DEFINE_int32(tx_port, 16379, "Local tx service port");
-DEFINE_string(ip_port_list, "", "IP list for cluster");
-DEFINE_string(standby_ip_port_list, "", "Standby IP list");
-DEFINE_string(voter_ip_port_list, "", "Voter IP list");
+DEFINE_string(tx_ip_port_list, "", "IP list for cluster");
+DEFINE_string(tx_standby_ip_port_list, "", "Standby IP list");
+DEFINE_string(tx_voter_ip_port_list, "", "Voter IP list");
 
 DEFINE_string(cluster_config_file, "", "Cluster configuration file");
 DEFINE_int32(node_group_replica_num, 3, "Node group replica number");
@@ -319,8 +319,9 @@ bool DataSubstrate::LoadCoreAndNetworkConfig(const INIReader &config_reader)
 
     core_config_.enable_wal =
         (!core_config_.bootstrap && CheckCommandLineFlagIsDefault("enable_wal")
-            ? FLAGS_enable_wal
-            : config_reader.GetBoolean("local", "enable_wal", FLAGS_enable_wal));
+             ? FLAGS_enable_wal
+             : config_reader.GetBoolean(
+                   "local", "enable_wal", FLAGS_enable_wal));
 
     core_config_.enable_data_store =
         !CheckCommandLineFlagIsDefault("enable_data_store")
@@ -395,21 +396,21 @@ bool DataSubstrate::LoadCoreAndNetworkConfig(const INIReader &config_reader)
     else
     {
         network_config_.ip_list =
-            !CheckCommandLineFlagIsDefault("ip_port_list")
-                ? FLAGS_ip_port_list
-                : config_reader.Get("cluster", "ip_port_list", local_ip_port);
+            !CheckCommandLineFlagIsDefault("tx_ip_port_list")
+                ? FLAGS_tx_ip_port_list
+                : config_reader.Get(
+                      "cluster", "tx_ip_port_list", local_ip_port);
 
         network_config_.standby_ip_list =
-            !CheckCommandLineFlagIsDefault("standby_ip_port_list")
-                ? FLAGS_standby_ip_port_list
-                : config_reader.Get("cluster", "standby_ip_port_list", "");
+            !CheckCommandLineFlagIsDefault("tx_standby_ip_port_list")
+                ? FLAGS_tx_standby_ip_port_list
+                : config_reader.Get("cluster", "tx_standby_ip_port_list", "");
 
         network_config_.voter_ip_list =
-            !CheckCommandLineFlagIsDefault("voter_ip_port_list")
-                ? FLAGS_voter_ip_port_list
-                : config_reader.Get("cluster", "voter_ip_port_list", "");
+            !CheckCommandLineFlagIsDefault("tx_voter_ip_port_list")
+                ? FLAGS_tx_voter_ip_port_list
+                : config_reader.Get("cluster", "tx_voter_ip_port_list", "");
     }
-
     network_config_.cluster_config_file_path =
         !CheckCommandLineFlagIsDefault("cluster_config_file")
             ? FLAGS_cluster_config_file
@@ -459,7 +460,7 @@ bool DataSubstrate::LoadCoreAndNetworkConfig(const INIReader &config_reader)
         if (!parse_res)
         {
             LOG(ERROR)
-                << "Failed to extract cluster configs from ip_port_list.";
+                << "Failed to extract cluster configs from tx_ip_port_list.";
             return false;
         }
     }
