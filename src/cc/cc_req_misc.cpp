@@ -544,6 +544,8 @@ void FillStoreSliceCc::Reset(const TableName &table_name,
     slice_size_ = 0;
     rec_cnt_ = 0;
     err_code_ = CcErrorCode::NO_ERROR;
+    core_finished_.clear();
+    core_finished_.resize(cc_shards.Count(), false);
 }
 
 void FillStoreSliceCc::SetKvFinish(bool success)
@@ -653,6 +655,7 @@ bool FillStoreSliceCc::SetFinish(CcShard *cc_shard)
     {
         std::lock_guard<std::mutex> lk(mux_);
         ++finish_cnt_;
+        core_finished_[cc_shard->core_id_] = true;
 
         if (finish_cnt_ == core_cnt_)
         {
@@ -721,6 +724,9 @@ bool FillStoreSliceCc::SetError(CcErrorCode err_code)
         ++finish_cnt_;
         err_code_ = err_code;
 
+        LOG(INFO) << "== FillStoreSliceCc::SetError: finish_cnt_="
+                  << finish_cnt_ << ", core_cnt_=" << core_cnt_
+                  << ", this = " << this;
         if (finish_cnt_ == core_cnt_)
         {
             finish_all = true;
