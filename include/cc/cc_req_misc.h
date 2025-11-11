@@ -429,8 +429,8 @@ public:
     void AbortCcRequest(CcErrorCode err_code) override
     {
         assert(err_code != CcErrorCode::NO_ERROR);
-        DLOG(ERROR) << "Abort this FillStoreSliceCc request with error: "
-                    << CcErrorMessage(err_code);
+        LOG(INFO) << "Abort this FillStoreSliceCc request with error: "
+                  << CcErrorMessage(err_code);
         bool finish_all = SetError(err_code);
         // Recycle request
         if (finish_all)
@@ -538,6 +538,8 @@ private:
     uint64_t snapshot_ts_;
     uint32_t slice_size_{0};
     uint32_t rec_cnt_{0};
+
+    std::vector<bool> core_finished_{};
 
 public:
     // These variables only be used in DataStoreHandler
