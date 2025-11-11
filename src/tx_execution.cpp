@@ -334,6 +334,11 @@ void TransactionExecution::ReleaseCatalogsRead()
     locked_db_ = {};
 }
 
+bool TransactionExecution::HoldingRangeReadLock() const
+{
+    return rw_set_.HasRangeReadLock();
+}
+
 TxErrorCode TransactionExecution::ConvertCcError(CcErrorCode error)
 {
     switch (error)
@@ -2072,7 +2077,8 @@ void TransactionExecution::Process(ReadOperation &read)
                               read.read_tx_req_->is_for_write_,
                               is_covering_keys,
                               read.read_tx_req_->point_read_on_cache_miss_,
-                              partition_id);
+                              partition_id,
+                              HoldingRangeReadLock());
 
             if (!read.hd_result_.Value().is_local_)
             {
@@ -4003,6 +4009,7 @@ void TransactionExecution::Process(AcquireWriteOperation &acquire_write)
 
     size_t res_idx = 0, entry_idx = 0;
     auto &wset = rw_set_.WriteSet();
+    bool abort_if_oom = HoldingRangeReadLock();
     for (auto &[table_name, pair] : wset)
     {
         uint64_t schema_version = pair.first;
@@ -4025,7 +4032,8 @@ void TransactionExecution::Process(AcquireWriteOperation &acquire_write)
                 acquire_write.hd_result_,
                 res_idx++,
                 protocol_,
-                iso_level_);
+                iso_level_,
+                abort_if_oom);
             for (auto &[forward_shard_code, cce_addr] :
                  write_entry.forward_addr_)
             {
@@ -4042,7 +4050,8 @@ void TransactionExecution::Process(AcquireWriteOperation &acquire_write)
                     acquire_write.hd_result_,
                     res_idx++,
                     protocol_,
-                    iso_level_);
+                    iso_level_,
+                    abort_if_oom);
             }
         }
     }
@@ -5593,6 +5602,7 @@ void TransactionExecution::Process(AcquireAllOp &acq_all_op)
     acq_all_op.is_running_ = true;
     size_t hd_idx = 0;
 
+    bool abort_if_oom = HoldingRangeReadLock();
     for (uint32_t ng_id : *all_node_groups)
     {
         for (uint32_t key_idx = 0; key_idx < acq_all_op.keys_.size(); key_idx++)
@@ -5611,7 +5621,8 @@ void TransactionExecution::Process(AcquireAllOp &acq_all_op)
                 false,
                 hres,
                 acq_all_op.protocol_,
-                acq_all_op.cc_op_);
+                acq_all_op.cc_op_,
+                abort_if_oom);
         }
     }
     StartTiming();
@@ -5649,6 +5660,7 @@ void TransactionExecution::Process(PostWriteAllOp &post_write_all_op)
     post_write_all_op.Reset(all_node_groups->size());
     post_write_all_op.is_running_ = true;
 
+    bool abort_if_oom = HoldingRangeReadLock();
     for (uint32_t ngid : *all_node_groups)
     {
         if (TxCcNodeId() == ngid)
@@ -5671,7 +5683,8 @@ void TransactionExecution::Process(PostWriteAllOp &post_write_all_op)
                 commit_ts_,
                 post_write_all_op.hd_result_,
                 post_write_all_op.op_type_,
-                post_write_all_op.write_type_);
+                post_write_all_op.write_type_,
+                abort_if_oom);
         }
     }
 
@@ -5687,7 +5700,8 @@ void TransactionExecution::Process(PostWriteAllOp &post_write_all_op)
                                   commit_ts_,
                                   post_write_all_op.hd_result_,
                                   post_write_all_op.op_type_,
-                                  post_write_all_op.write_type_);
+                                  post_write_all_op.write_type_,
+                                  abort_if_oom);
     }
     StartTiming();
 }
@@ -5760,6 +5774,7 @@ void TransactionExecution::ReleaseCatalogWriteAll(
 
     std::shared_ptr<std::set<uint32_t>> all_node_groups =
         Sharder::Instance().AllNodeGroups();
+    bool abort_if_oom = HoldingRangeReadLock();
     for (uint32_t ngid : *all_node_groups)
     {
         if (TxCcNodeId() == ngid)
@@ -5782,7 +5797,8 @@ void TransactionExecution::ReleaseCatalogWriteAll(
                 commit_ts,
                 catalog_post_all_hd_result,
                 OperationType::Update,
-                PostWriteType::PostCommit);
+                PostWriteType::PostCommit,
+                abort_if_oom);
         }
     }
     for (const auto &[write_key, write_entry] : rw_set_.CatalogWriteSet())
@@ -5798,7 +5814,8 @@ void TransactionExecution::ReleaseCatalogWriteAll(
                                   commit_ts,
                                   catalog_post_all_hd_result,
                                   OperationType::Update,
-                                  PostWriteType::PostCommit);
+                                  PostWriteType::PostCommit,
+                                  abort_if_oom);
     }
 
     StartTiming();
@@ -6672,7 +6689,8 @@ void TransactionExecution::Process(ObjectCommandOp &obj_cmd_op)
                                iso_level_,
                                protocol_,
                                commit,
-                               obj_cmd_op.always_redirect_);
+                               obj_cmd_op.always_redirect_,
+                               HoldingRangeReadLock());
 
     StartTiming();
 }
@@ -7044,6 +7062,7 @@ void TransactionExecution::Process(MultiObjectCommandOp &obj_cmd_op)
             ? IsolationLevel::RepeatableRead
             : iso_level_;
 
+    bool abort_if_oom = HoldingRangeReadLock();
     for (size_t i = 0; i < vct_key->size(); i++)
     {
         auto &hd_res = obj_cmd_op.vct_hd_result_[i];
@@ -7068,7 +7087,8 @@ void TransactionExecution::Process(MultiObjectCommandOp &obj_cmd_op)
                                    iso,
                                    protocol_,
                                    commit,
-                                   req->always_redirect_);
+                                   req->always_redirect_,
+                                   abort_if_oom);
 
         if (hd_res.Value().is_local_)
         {
@@ -7293,6 +7313,7 @@ void TransactionExecution::Process(CmdForwardAcquireWriteOp &forward_acquire)
     const std::unordered_map<TableName,
                              std::unordered_map<CcEntryAddr, CmdSetEntry>>
         &tx_cmd_set = *cmd_set_.ObjectCommandSet();
+    bool abort_if_oom = HoldingRangeReadLock();
     for (const auto &[table_name, obj_cmd_set] : tx_cmd_set)
     {
         int db_idx = GetDbIndex(&table_name);
@@ -7321,7 +7342,8 @@ void TransactionExecution::Process(CmdForwardAcquireWriteOp &forward_acquire)
                 forward_acquire.hd_result_,
                 res_idx++,
                 protocol_,
-                iso_level_);
+                iso_level_,
+                abort_if_oom);
         }
     }
 
@@ -7622,6 +7644,7 @@ void TransactionExecution::Process(BatchReadOperation &batch_read_op)
         read_ts = corresponding_sk_commit_ts;
     }
 
+    bool abort_if_oom = HoldingRangeReadLock();
     for (size_t idx = 0; idx < read_batch.size(); ++idx)
     {
         if (read_batch[idx].status_ != RecordStatus::Unknown)
@@ -7663,7 +7686,8 @@ void TransactionExecution::Process(BatchReadOperation &batch_read_op)
             batch_read_op.batch_read_tx_req_->is_for_write_,
             false,  // is_covering_keys
             batch_read_op.batch_read_tx_req_->point_read_on_cache_miss_,
-            partition_id);
+            partition_id,
+            abort_if_oom);
     }
 
     StartTiming();

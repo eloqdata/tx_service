@@ -512,6 +512,11 @@ public:
         return end_key_;
     }
 
+    bool AbortIfOom() const override
+    {
+        return true;
+    }
+
     metrics::TimePoint start_;
 
 private:

@@ -556,6 +556,8 @@ private:
 
     void ReleaseCatalogsRead();
 
+    bool HoldingRangeReadLock() const;
+
     enum struct TxType
     {
         Data = 0,
