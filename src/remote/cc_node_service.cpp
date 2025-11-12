@@ -1619,6 +1619,8 @@ void CcNodeService::StandbyStartFollowing(
                 {
                     std::unique_lock<bthread::Mutex> lk(mux);
                     start_seq = ccs.GetNextForwardSequnceId();
+                    // Track this candidate follower
+                    ccs.AddCandidateStandby(node_id, start_seq);
                 }
 
                 return true;
@@ -1839,6 +1841,8 @@ void CcNodeService::ResetStandbySequenceId(
             if (Sharder::Instance().CheckLeaderTerm(
                     ng_id, PrimaryTermFromStandbyTerm(standby_node_term)))
             {
+                // Remove from candidates and add to subscribed
+                ccs.RemoveCandidateStandby(node_id);
                 ccs.AddSubscribedStandby(
                     node_id, seq_ids.at(ccs.core_id_), standby_node_term);
             }

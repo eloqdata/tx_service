@@ -380,10 +380,16 @@ struct LruEntry
         return cc_lock_and_extra_->ForwardEntry();
     }
 
-    void SetForwardEntry(StandbyForwardEntry *entry)
+    void SetForwardEntry(std::unique_ptr<StandbyForwardEntry> entry)
     {
         assert(cc_lock_and_extra_ != nullptr);
-        cc_lock_and_extra_->SetForwardEntry(entry);
+        cc_lock_and_extra_->SetForwardEntry(std::move(entry));
+    }
+
+    std::unique_ptr<StandbyForwardEntry> ReleaseForwardEntry()
+    {
+        assert(cc_lock_and_extra_ != nullptr);
+        return cc_lock_and_extra_->ReleaseForwardEntry();
     }
 
     KeyGapLockAndExtraData *GetKeyGapLockAndExtraData()
