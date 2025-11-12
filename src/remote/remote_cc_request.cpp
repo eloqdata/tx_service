@@ -1639,7 +1639,7 @@ void txservice::remote::RemoteFaultInjectCC::Reset(
 
     output_msg_.clear_tx_number();
     output_msg_.clear_handler_addr();
-    output_msg_.clear_acquire_resp();
+    output_msg_.clear_fault_inject_resp();
 
     const FaultInjectRequest &req = input_msg->fault_inject_req();
 
@@ -1784,7 +1784,7 @@ void txservice::remote::RemoteCleanCcEntryForTestCc::Reset(
 
     output_msg_.clear_tx_number();
     output_msg_.clear_handler_addr();
-    output_msg_.clear_acquire_resp();
+    output_msg_.clear_clean_cc_entry_resp();
 
     const CleanCcEntryForTestRequest &req = input_msg->clean_cc_entry_req();
     std::string_view table_name_sv{req.table_name_str()};
@@ -1818,7 +1818,7 @@ void txservice::remote::RemoteCheckDeadLockCc::Reset(
     CheckDeadLockCc::Reset();
     output_msg_.clear_tx_number();
     output_msg_.clear_handler_addr();
-    output_msg_.clear_acquire_resp();
+    output_msg_.clear_dead_lock_response();
     const DeadLockRequest &req = input_msg->dead_lock_request();
     DeadLockCheck::UpdateCheckNodeId(req.src_node_id());
     input_msg_ = std::move(input_msg);
@@ -1902,7 +1902,7 @@ void txservice::remote::RemoteAbortTransactionCc::Reset(
 
     output_msg_.clear_tx_number();
     output_msg_.clear_handler_addr();
-    output_msg_.clear_acquire_resp();
+    output_msg_.clear_abort_tran_resp();
     const AbortTransactionRequest &req = input_msg->abort_tran_req();
 
     AbortTransactionCc::Reset(
@@ -1964,7 +1964,7 @@ void txservice::remote::RemoteBlockReqCheckCc::Reset(
 
     output_msg_.clear_tx_number();
     output_msg_.clear_handler_addr();
-    output_msg_.clear_acquire_resp();
+    output_msg_.clear_blocked_check_resp();
 
     input_msg_ = std::move(input_msg);
 
