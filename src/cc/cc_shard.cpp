@@ -2672,7 +2672,6 @@ void CcShard::ForwardStandbyMessage(StandbyForwardEntry *entry)
             LOG(INFO) << "FaultInject  "
                          "discard_forward_standby_message, seq_id:"
                       << seq_id;
-            any_send_failed = true;
             continue;
         });
 
@@ -2738,6 +2737,7 @@ void CcShard::ForwardStandbyMessage(StandbyForwardEntry *entry)
         // Update memory usage
         uint64_t entry_size = CalculateEntryMemorySize(entry_raw);
         total_standby_buffer_memory_usage_ += entry_size;
+        uint64_t largest_removed_seq_id = 0;
 
         // Evict if memory limit exceeded
         while (total_standby_buffer_memory_usage_ >
@@ -2748,18 +2748,23 @@ void CcShard::ForwardStandbyMessage(StandbyForwardEntry *entry)
                 std::move(history_standby_msg_.front());
             history_standby_msg_.pop_front();
 
-            uint64_t oldest_seq_id = oldest_entry->SequenceId();
-            seq_id_to_entry_map_.erase(oldest_seq_id);
+            largest_removed_seq_id = oldest_entry->SequenceId();
+            seq_id_to_entry_map_.erase(largest_removed_seq_id);
 
             uint64_t oldest_size = CalculateEntryMemorySize(oldest_entry.get());
             total_standby_buffer_memory_usage_ -= oldest_size;
 
+            // Entry will be automatically freed when unique_ptr goes out of
+            // scope
+        }
+        if (largest_removed_seq_id > 0)
+        {
             // Check and remove affected candidates (if evicted message's seq_id
-            // <= candidate's start_seq_id)
+            // >= candidate's start_seq_id)
             auto candidate_it = candidate_standby_nodes_.begin();
             while (candidate_it != candidate_standby_nodes_.end())
             {
-                if (oldest_seq_id <= candidate_it->second)
+                if (largest_removed_seq_id >= candidate_it->second)
                 {
                     // This candidate's start_seq_id is no longer in history,
                     // remove candidate
@@ -2767,7 +2772,7 @@ void CcShard::ForwardStandbyMessage(StandbyForwardEntry *entry)
                               << candidate_it->first << " because start_seq_id "
                               << candidate_it->second
                               << " is no longer in history (evicted seq_id: "
-                              << oldest_seq_id << ")";
+                              << largest_removed_seq_id << ")";
                     candidate_it = candidate_standby_nodes_.erase(candidate_it);
                 }
                 else
@@ -2775,9 +2780,6 @@ void CcShard::ForwardStandbyMessage(StandbyForwardEntry *entry)
                     ++candidate_it;
                 }
             }
-
-            // Entry will be automatically freed when unique_ptr goes out of
-            // scope
         }
     }
     // else: entry_ptr goes out of scope and automatically frees the entry
