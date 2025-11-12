@@ -1832,8 +1832,11 @@ public:
         // first time the request is processed
         auto it = FindEmplace(*look_key);
         cce = it->second;
-        // On standby node we should never OOM since all data can be
-        // kicked out of memory.
+        if (cce == nullptr)
+        {
+            shard_->EnqueueWaitListIfMemoryFull(&req);
+            return false;
+        }
         assert(cce);
         ccp = it.GetPage();
 
