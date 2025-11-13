@@ -35,6 +35,7 @@
 #include <thread>
 #include <unordered_map>
 #include <utility>  //move
+#include <variant>
 #include <vector>
 
 #include "constants.h"
@@ -168,11 +169,9 @@ struct TableName
     TableName() = delete;
     TableName &operator=(const TableName &) = delete;
 
+    // Construct from view
     TableName(std::string_view name_view, TableType type, TableEngine engine)
-        : name_view_(name_view),
-          own_string_(false),
-          type_(type),
-          engine_(engine)
+        : name_(name_view), type_(type), engine_(engine)
     {
     }
 
@@ -180,98 +179,26 @@ struct TableName
               size_t name_len,
               TableType type,
               TableEngine engine)
-        : name_str_(name_ptr, name_len),
-          own_string_(true),
-          type_(type),
-          engine_(engine)
+        : name_(std::string(name_ptr, name_len)), type_(type), engine_(engine)
     {
     }
 
     TableName(std::string name_str, TableType type, TableEngine engine)
-        : name_str_(std::move(name_str)),
-          own_string_(true),
-          type_(type),
-          engine_(engine)
+        : name_(std::move(name_str)), type_(type), engine_(engine)
     {
     }
 
     // Copy constructor always creates a string owner
     TableName(const TableName &rhs)
-        : name_str_(rhs.StringView().data(), rhs.StringView().size()),
-          own_string_(true),
-          type_(rhs.type_),
-          engine_(rhs.engine_)
+        : name_(rhs.String()), type_(rhs.type_), engine_(rhs.engine_)
     {
     }
 
-    // TableName needs to be MoveInsertable in case like
-    // std::vector<txservice::TableName>
-    TableName(TableName &&rhs) noexcept
-    {
-        if (rhs.own_string_)
-        {
-            new (&name_str_) std::string(std::move(rhs.name_str_));
-        }
-        else
-        {
-            name_view_ = rhs.name_view_;
-        }
-        type_ = rhs.type_;
-        own_string_ = rhs.own_string_;
-        rhs.own_string_ = false;
-        engine_ = rhs.engine_;
-    }
+    TableName(TableName &&rhs) noexcept = default;
 
-    TableName &operator=(TableName &&rhs) noexcept
-    {
-        if (this == &rhs)
-        {
-            return *this;
-        }
+    TableName &operator=(TableName &&rhs) noexcept = default;
 
-        if (rhs.own_string_)
-        {
-            if (own_string_)
-            {
-                // Notice: If we only use MoveAssignment operator here
-                // ("name_str_=std::move(rhs.name_str_);") ,
-                // a "memory leak" error will be throwed when asan enabled.
-                // So, we must free old value of "name_str_" before assign it.
-                name_str_.~basic_string();
-                // Here must re-create "name_str_" to string object instead of
-                // assign it like ("name_str_=std::move(rhs.name_str_);").
-                // Otherwise, a "heap-use-after-free" error will be exposed.
-                new (&name_str_) std::string(std::move(rhs.name_str_));
-            }
-            else
-            {
-                new (&name_str_) std::string(std::move(rhs.name_str_));
-            }
-        }
-        else
-        {
-            if (own_string_)
-            {
-                name_str_.~basic_string();
-            }
-
-            name_view_ = rhs.StringView();
-        }
-
-        type_ = rhs.type_;
-        own_string_ = rhs.own_string_;
-        rhs.own_string_ = false;
-        engine_ = rhs.engine_;
-        return *this;
-    }
-
-    ~TableName()
-    {
-        if (own_string_)
-        {
-            name_str_.~basic_string();
-        }
-    }
+    ~TableName() = default;
 
     bool operator==(const TableName &rhs) const
     {
@@ -281,7 +208,7 @@ struct TableName
 
     bool operator!=(const TableName &rhs) const
     {
-        return !this->operator==(rhs);
+        return !(*this == rhs);
     }
 
     bool operator<(const TableName &rhs) const
@@ -294,99 +221,44 @@ struct TableName
 
     std::string_view StringView() const
     {
-        if (own_string_)
-        {
-            return {name_str_.data(), name_str_.size()};
-        }
-        else
-        {
-            return name_view_;
-        }
+        return std::holds_alternative<std::string>(name_)
+                   ? std::get<std::string>(name_)
+                   : std::get<std::string_view>(name_);
     }
 
     std::string String() const
     {
-        if (own_string_)
-        {
-            return name_str_;
-        }
-        else
-        {
-            return std::string(name_view_);
-        }
+        return std::holds_alternative<std::string>(name_)
+                   ? std::get<std::string>(name_)
+                   : std::string(std::get<std::string_view>(name_));
     }
 
     std::string Trace() const
     {
-        if (own_string_)
+        std::string base = String();
+        if (type_ == TableType::RangePartition)
         {
-            if (type_ == TableType::RangePartition)
-            {
-                return name_str_ + "_ranges";
-            }
-            else
-            {
-                return name_str_;
-            }
+            base += "_ranges";
         }
-        else
-        {
-            if (type_ == TableType::RangePartition)
-            {
-                return std::string(name_view_) + "_ranges";
-            }
-            else
-            {
-                return std::string(name_view_);
-            }
-        }
+        return base;
     }
 
     std::string Serialize() const
     {
+        std::string_view sv = StringView();
         std::string str;
-        if (own_string_)
-        {
-            str.reserve(name_str_.size() + sizeof(char));
-            str = name_str_;
-        }
-        else
-        {
-            str.reserve(name_view_.size() + sizeof(char));
-            str = name_view_;
-        }
+        str.reserve(sv.size() + 1);
 
-        int8_t engine_type = static_cast<int8_t>(engine_);
-        assert(engine_type != 0);
-        str.append(1, engine_type);
+        str.append(sv.data(), sv.size());
+        str.push_back(static_cast<char>(engine_));
         return str;
     }
 
     void CopyFrom(const TableName &other)
     {
-        if (other.own_string_)
-        {
-            if (own_string_)
-            {
-                name_str_ = other.name_str_;
-            }
-            else
-            {
-                new (&name_str_) std::string(other.name_str_);
-            }
-        }
-        else
-        {
-            if (own_string_)
-            {
-                name_str_.~basic_string();
-            }
-
-            name_view_ = other.StringView();
-        }
+        name_ = other.String();
 
         type_ = other.type_;
-        own_string_ = other.own_string_;
         engine_ = other.engine_;
     }
 
@@ -422,7 +294,7 @@ struct TableName
         {
             pos = table_name_sv.find(UNIQUE_INDEX_NAME_PREFIX);
         }
-        return (pos == std::string_view::npos) ? true : false;
+        return pos == std::string_view::npos;
     }
 
     bool IsMeta() const
@@ -446,7 +318,7 @@ struct TableName
     static bool IsUniqueSecondary(const std::string_view &table_name_sv)
     {
         size_t pos = table_name_sv.find(UNIQUE_INDEX_NAME_PREFIX);
-        return (pos != std::string_view::npos) ? true : false;
+        return pos != std::string_view::npos;
     }
 
     bool IsHashPartitioned() const
@@ -462,7 +334,7 @@ struct TableName
 
     bool IsStringOwner() const
     {
-        return own_string_;
+        return std::holds_alternative<std::string>(name_);
     }
 
     const TableType &Type() const
@@ -494,14 +366,7 @@ struct TableName
     }
 
 private:
-    // base or index table name
-    union
-    {
-        std::string name_str_;
-        std::string_view name_view_;
-    };
-
-    bool own_string_;
+    std::variant<std::string, std::string_view> name_;
     TableType type_;
     TableEngine engine_;
 };
