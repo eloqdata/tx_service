@@ -1,14 +1,14 @@
 ## Knowledge Base: Standby Message Buffer - Memory Bounded Implementation
 
 ### Metadata
-- **Last Updated:** 2025-11-12
+- **Last Updated:** 2025-01-13
 ### 1. Executive Summary
 
 Replaces the fixed-size count-based standby message buffer (`txservice_max_standby_lag` = 400,000 entries) with a memory-bounded queue that allocates entries on-demand and evicts oldest messages when memory limit is reached. This prevents unbounded memory growth while ensuring messages needed by followers or candidate subscribers are retained until no longer referenced.
 
 ### 2. Core Concepts & Definitions
 
-- **Standby Forward Entry (`StandbyForwardEntry`)**: Contains a protobuf message (`remote::CcMessage`) with transaction data to forward to standby nodes. Each entry has a sequence ID and tracks memory usage.
+- **Standby Forward Entry (`StandbyForwardEntry`)**: Contains a protobuf message (`remote::CcMessage`) with transaction data to forward to standby nodes. Each entry has a sequence ID and provides `MemorySize()` method to calculate its memory footprint.
 
 - **History Queue (`history_standby_msg_`)**: Memory-bounded FIFO queue (`std::deque<std::unique_ptr<StandbyForwardEntry>>`) storing entries still needed for retry or candidate followers. Owns entry lifetime.
 
@@ -38,6 +38,8 @@ Replaces the fixed-size count-based standby message buffer (`txservice_max_stand
 
 - **Why Out-of-Sync Notification**: When retry mechanism can't find a message (evicted), sends out-of-sync message to notify standby to resubscribe. This handles the case where memory pressure evicted messages before all followers received them.
 
+- **Why Memory Calculation in Entry**: Memory size calculation moved from `CcShard::CalculateEntryMemorySize()` to `StandbyForwardEntry::MemorySize()` for better encapsulation. The entry knows its own structure and only counts the relevant protobuf field (`key_obj_standby_forward_req`) rather than the entire message, providing more accurate memory tracking.
+
 - **Key Dependencies**: 
   - `StandbyForwardEntry` structure (`tx_service/include/standby.h`)
   - `CcShard` class (`tx_service/include/cc/cc_shard.h`)
@@ -64,7 +66,7 @@ tx_service/src/remote/
   - cc_node_service.cpp (StandbyStartFollowing, ResetStandbySequenceId handlers)
 
 tx_service/include/
-  - standby.h (StandbyForwardEntry structure, Remove Reset() method)
+  - standby.h (StandbyForwardEntry structure with MemorySize() method, Remove Reset() method)
 ```
 
 **Core Code Patterns:**
@@ -87,10 +89,14 @@ shard_->ForwardStandbyMessage(entry_ptr.release());  // Transfer ownership to sh
 
 **Memory Size Calculation:**
 ```cpp
-uint64_t CalculateEntryMemorySize(const StandbyForwardEntry *entry) const {
-    // protobuf size + overhead (bool in_use_ + uint64_t sequence_id_)
-    return entry->Message().ByteSizeLong() + sizeof(bool) + sizeof(uint64_t);
+// In StandbyForwardEntry (standby.h):
+uint64_t MemorySize() const {
+    // Only count key_obj_standby_forward_req size, ignore other fields
+    return msg.key_obj_standby_forward_req().ByteSizeLong() + sizeof(uint64_t);
 }
+
+// Usage in CcShard:
+uint64_t entry_size = entry->MemorySize();
 ```
 
 **Entry Need Check:**
@@ -116,8 +122,7 @@ if (IsEntryNeeded(seq_id)) {
     history_standby_msg_.push_back(std::move(entry_ptr));  // Move ownership to queue
     seq_id_to_entry_map_[seq_id] = entry_raw;
     
-    uint64_t entry_size = CalculateEntryMemorySize(entry_raw);
-    total_standby_buffer_memory_usage_ += entry_size;
+    total_standby_buffer_memory_usage_ += entry_raw->MemorySize();
     
     // Evict if memory limit exceeded
     while (total_standby_buffer_memory_usage_ > standby_buffer_memory_limit_ && !history_standby_msg_.empty()) {
@@ -125,7 +130,7 @@ if (IsEntryNeeded(seq_id)) {
         history_standby_msg_.pop_front();
         uint64_t oldest_seq_id = oldest_entry->SequenceId();
         seq_id_to_entry_map_.erase(oldest_seq_id);
-        total_standby_buffer_memory_usage_ -= CalculateEntryMemorySize(oldest_entry.get());
+        total_standby_buffer_memory_usage_ -= oldest_entry->MemorySize();
         // Clean up affected candidates (Phase 3)
         // Entry automatically freed when unique_ptr goes out of scope
     }
@@ -205,17 +210,23 @@ void RemoveCandidateStandby(uint32_t node_id);
 void CheckAndFreeUnneededEntries();
 
 // Private methods:
-uint64_t CalculateEntryMemorySize(const StandbyForwardEntry *entry) const;
 bool IsEntryNeeded(uint64_t seq_id) const;
+```
+
+**New Methods in StandbyForwardEntry:**
+```cpp
+// Memory size calculation (moved from CcShard for better encapsulation)
+uint64_t MemorySize() const;
 ```
 
 **Removed Methods:**
 - `GetNextStandbyForwardEntry()` - Replaced with direct `std::make_unique<StandbyForwardEntry>()` allocation
 - `StandbyForwardEntry::Reset()` - Entries no longer reused, deleted immediately when not needed
+- `CcShard::CalculateEntryMemorySize()` - Moved to `StandbyForwardEntry::MemorySize()` for better encapsulation
 
 ### 6. Open Questions & Known Risks
 
-- **Memory Calculation Accuracy**: Uses `msg.ByteSizeLong() + 9 bytes` overhead. Protobuf allocates content on heap, so actual memory may vary. Consider caching calculation per entry.
+- **Memory Calculation Accuracy**: Uses `msg.key_obj_standby_forward_req().ByteSizeLong() + 8 bytes` overhead (only counts the relevant protobuf field, not the entire message). Protobuf allocates content on heap, so actual memory may vary. Calculation is encapsulated in `StandbyForwardEntry::MemorySize()` method.
 
 - **Concurrency**: Buffer is per-shard, single-threaded access only. No locks needed, but verify no cross-shard access.
 
@@ -229,5 +240,5 @@ bool IsEntryNeeded(uint64_t seq_id) const;
 
 ### 7. Keywords
 
-standby message buffer, memory bounded, memory limit, eviction, candidate follower, entry ownership, sequence ID, retry mechanism, out-of-sync, ForwardStandbyMessage, ResendFailedForwardMessages, StandbyStartFollowing, ResetStandbySequenceId, history queue, memory tracking, immediate freeing, on-demand allocation
+standby message buffer, memory bounded, memory limit, eviction, candidate follower, entry ownership, sequence ID, retry mechanism, out-of-sync, ForwardStandbyMessage, ResendFailedForwardMessages, StandbyStartFollowing, ResetStandbySequenceId, history queue, memory tracking, immediate freeing, on-demand allocation, MemorySize, CalculateEntryMemorySize
 

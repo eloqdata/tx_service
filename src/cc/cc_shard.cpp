@@ -2529,15 +2529,6 @@ std::unordered_map<TableName, bool> CcShard::GetCatalogTableNameSnapshot(
     return local_shards_.GetCatalogTableNameSnapshot(cc_ng_id, ckpt_ts);
 }
 
-uint64_t CcShard::CalculateEntryMemorySize(
-    const StandbyForwardEntry *entry) const
-{
-    assert(entry != nullptr);
-    // Memory size = protobuf message size + overhead
-    // Overhead: bool in_use_ + uint64_t sequence_id_ = 9 bytes
-    return entry->Message().ByteSizeLong() + sizeof(bool) + sizeof(uint64_t);
-}
-
 void CcShard::AddCandidateStandby(uint32_t node_id, uint64_t start_seq_id)
 {
     candidate_standby_nodes_[node_id] = start_seq_id;
@@ -2600,7 +2591,7 @@ void CcShard::CheckAndFreeUnneededEntries()
             history_standby_msg_.pop_front();
 
             uint64_t seq_id = entry->SequenceId();
-            uint64_t entry_size = CalculateEntryMemorySize(entry.get());
+            uint64_t entry_size = entry->MemorySize();
             total_standby_buffer_memory_usage_ -= entry_size;
 
             seq_id_to_entry_map_.erase(seq_id);
@@ -2625,7 +2616,7 @@ void CcShard::CheckAndFreeUnneededEntries()
                 std::move(history_standby_msg_.front());
             history_standby_msg_.pop_front();
 
-            uint64_t entry_size = CalculateEntryMemorySize(entry.get());
+            uint64_t entry_size = entry->MemorySize();
             total_standby_buffer_memory_usage_ -= entry_size;
 
             seq_id_to_entry_map_.erase(front_seq_id);
@@ -2735,8 +2726,7 @@ void CcShard::ForwardStandbyMessage(StandbyForwardEntry *entry)
         seq_id_to_entry_map_[seq_id] = entry_raw;
 
         // Update memory usage
-        uint64_t entry_size = CalculateEntryMemorySize(entry_raw);
-        total_standby_buffer_memory_usage_ += entry_size;
+        total_standby_buffer_memory_usage_ += entry_raw->MemorySize();
         uint64_t largest_removed_seq_id = 0;
 
         // Evict if memory limit exceeded
@@ -2751,8 +2741,7 @@ void CcShard::ForwardStandbyMessage(StandbyForwardEntry *entry)
             largest_removed_seq_id = oldest_entry->SequenceId();
             seq_id_to_entry_map_.erase(largest_removed_seq_id);
 
-            uint64_t oldest_size = CalculateEntryMemorySize(oldest_entry.get());
-            total_standby_buffer_memory_usage_ -= oldest_size;
+            total_standby_buffer_memory_usage_ -= oldest_entry->MemorySize();
 
             // Entry will be automatically freed when unique_ptr goes out of
             // scope
@@ -3015,6 +3004,7 @@ void CcShard::ResetStandbySequence()
     seq_id_to_entry_map_.clear();
     total_standby_buffer_memory_usage_ = 0;
     subscribed_standby_nodes_.clear();
+    candidate_standby_nodes_.clear();
 
     for (auto &[grp_id, grp_info] : standby_sequence_grps_)
     {

@@ -1072,10 +1072,6 @@ public:
     void CollectCacheMiss();
 
 private:
-    // Calculate memory size of a StandbyForwardEntry
-    // Returns: msg.ByteSizeLong() + sizeof(bool) + sizeof(uint64_t)
-    uint64_t CalculateEntryMemorySize(const StandbyForwardEntry *entry) const;
-
     void SetTxProcNotifier(std::atomic<TxProcessorStatus> *tx_proc_status,
                            TxProcCoordinator *tx_coordi)
     {

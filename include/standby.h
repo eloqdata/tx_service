@@ -67,6 +67,14 @@ struct StandbyForwardEntry
         return msg;
     }
 
+    uint64_t MemorySize() const
+    {
+        // Only check for key_obj_standby_forward_req size, ignore the other
+        // fields.
+        return msg.key_obj_standby_forward_req().ByteSizeLong() +
+               sizeof(uint64_t);
+    }
+
 private:
     uint64_t sequence_id_{UINT64_MAX};
     remote::CcMessage msg;
