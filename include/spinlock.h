@@ -82,6 +82,7 @@ public:
         pthread_rwlock_init(&rw_, &attr);
         pthread_rwlockattr_destroy(&attr);
     }
+
     ~WritePreferSharedMutex()
     {
         pthread_rwlock_destroy(&rw_);
