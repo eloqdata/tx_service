@@ -352,7 +352,8 @@ bool CcNode::OnLeaderStart(int64_t term,
 
     if (!txservice_skip_kv)
     {
-        if (!local_cc_shards_.store_hd_->OnLeaderStart(next_leader_node))
+        if (!local_cc_shards_.store_hd_->OnLeaderStart(ng_id_,
+                                                       next_leader_node))
         {
             retry = false;
             return false;
@@ -494,7 +495,7 @@ bool CcNode::OnLeaderStop(int64_t term)
 
     if (!txservice_skip_kv)
     {
-        if (!local_cc_shards_.store_hd_->OnLeaderStop(term))
+        if (!local_cc_shards_.store_hd_->OnLeaderStop(ng_id_, term))
         {
             // Keep retrying
             return false;
@@ -974,7 +975,7 @@ void CcNode::SubscribePrimaryNode(uint32_t leader_node_id,
     if (!txservice_skip_kv)
     {
         store_hd->OnStartFollowing(
-            leader_node_id, primary_term, standby_term, resubscribe);
+            ng_id_, leader_node_id, primary_term, standby_term, resubscribe);
     }
     uint32_t seq_grp_cnt = start_follow_resp.start_sequence_id_size();
     std::vector<uint64_t> init_seq_ids;
