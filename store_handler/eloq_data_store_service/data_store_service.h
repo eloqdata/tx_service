@@ -605,9 +605,6 @@ public:
 
     bool IsOwnerOfShard(uint32_t shard_id) const
     {
-        DLOG(INFO) << "IsOwnerOfShard check: shard_status="
-                   << static_cast<int>(shard_status_.load()) << ", shard_id_="
-                   << shard_id_ << ", check_shard_id=" << shard_id;
         return shard_status_.load(std::memory_order_acquire) !=
                    DSShardStatus::Closed &&
                shard_id_ == shard_id;
@@ -618,7 +615,7 @@ public:
 
     DataStoreServiceClusterManager &GetClusterManager()
     {
-      return cluster_manager_;
+        return cluster_manager_;
     }
 
 private:

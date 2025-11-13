@@ -209,7 +209,7 @@ inline uint64_t parse_size(const std::string &size_str)
     std::string_view unit_str = get_last_two(size_str_v);
     uint64_t unit = unit_num(unit_str);
     std::string_view num_str = remove_last_two(size_str_v);
-    uint64_t num = std::stol(std::string(num_str));
+    uint64_t num = std::stoull(std::string(num_str));
     return num * unit;
 }
 
@@ -242,9 +242,9 @@ static std::string formatTime(const std::tm &time)
 static std::string GetDefaultOffPeakTimeUtc()
 {
     const std::string dialy_offpeak_time_start = "00:00";
-    const std::string dialy_offpeal_time_end = "05:00";
+    const std::string dialy_offpeak_time_end = "05:00";
     std::tm start_tm = parseTime(dialy_offpeak_time_start);
-    std::tm end_tm = parseTime(dialy_offpeal_time_end);
+    std::tm end_tm = parseTime(dialy_offpeak_time_end);
     int tz_offset = getTimeZoneOffset();
     std::tm start_tm_utc = toUTC(start_tm, tz_offset);
     std::tm end_tm_utc = toUTC(end_tm, tz_offset);

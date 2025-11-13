@@ -143,7 +143,7 @@ if (CMAKE_SYSTEM_NAME STREQUAL "Darwin")
     endif ()
 endif ()
 
-set(CMAKE_CXX_FLAGS "${DEFINE_CLOCK_GETTIME} -DGFLAGS_NS=${GFLAGS_NS} -g")
+set(CMAKE_CXX_FLAGS "${DEFINE_CLOCK_GETTIME} -DGFLAGS_NS=${GFLAGS_NS} -fno-omit-frame-pointer -g")
 #set(CMAKE_CXX_FLAGS "${CMAKE_CPP_FLAGS} -DNDEBUG -O2 -D__const__= -pipe -W -Wall -Wno-unused-parameter -fPIC -fno-omit-frame-pointer")
 
 if (WITH_ASAN)

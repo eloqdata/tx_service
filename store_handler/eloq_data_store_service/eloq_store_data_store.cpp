@@ -200,6 +200,8 @@ void EloqStoreDataStore::BatchWriteRecords(WriteRecordsRequest *write_req)
         entry.op_ = (write_req->KeyOpType(i) == WriteOpType::PUT
                          ? ::eloqstore::WriteOp::Upsert
                          : ::eloqstore::WriteOp::Delete);
+        uint64_t ttl = write_req->GetRecordTtl(i);
+        entry.expire_ts_ = ttl == UINT64_MAX ? 0 : ttl;
         entries.emplace_back(std::move(entry));
     }
 

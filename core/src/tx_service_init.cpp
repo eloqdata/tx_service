@@ -165,52 +165,58 @@ bool DataSubstrate::InitializeTxService(const INIReader &config_reader)
             : config_reader.GetBoolean(
                   "local", "auto_redirect", FLAGS_auto_redirect);
 
-    bool fork_host_manager =
-        !CheckCommandLineFlagIsDefault("fork_host_manager")
-            ? FLAGS_fork_host_manager
-            : config_reader.GetBoolean(
-                  "local", "fork_host_manager", FLAGS_fork_host_manager);
+    bool fork_hm_process = false;
+    std::string hm_ip = "";
+    std::string hm_bin_path = "";
+    uint16_t hm_port = 0;
+    if (!core_config_.bootstrap)
+    {
+        fork_hm_process =
+            CheckCommandLineFlagIsDefault("fork_host_manager")
+                ? FLAGS_fork_host_manager
+                : config_reader.GetBoolean(
+                      "local", "fork_host_manager", FLAGS_fork_host_manager);
+        hm_ip = !CheckCommandLineFlagIsDefault("hm_ip")
+                    ? FLAGS_hm_ip
+                    : config_reader.Get("local", "hm_ip", FLAGS_hm_ip);
 
-    std::string hm_ip = !CheckCommandLineFlagIsDefault("hm_ip")
-                            ? FLAGS_hm_ip
-                            : config_reader.Get("local", "hm_ip", FLAGS_hm_ip);
+        hm_port =
+            !CheckCommandLineFlagIsDefault("hm_port")
+                ? FLAGS_hm_port
+                : config_reader.GetInteger("local", "hm_port", FLAGS_hm_port);
 
-    uint16_t hm_port =
-        !CheckCommandLineFlagIsDefault("hm_port")
-            ? FLAGS_hm_port
-            : config_reader.GetInteger("local", "hm_port", FLAGS_hm_port);
-
-    std::string hm_bin_path =
-        !CheckCommandLineFlagIsDefault("hm_bin_path")
-            ? FLAGS_hm_bin_path
-            : config_reader.Get("local", "hm_bin_path", FLAGS_hm_bin_path);
+        hm_bin_path =
+            !CheckCommandLineFlagIsDefault("hm_bin_path")
+                ? FLAGS_hm_bin_path
+                : config_reader.Get("local", "hm_bin_path", FLAGS_hm_bin_path);
 #ifdef FORK_HM_PROCESS
-    if (hm_ip.empty())
-    {
-        hm_ip = network_config_.local_ip;
-    }
-    if (hm_port == 0)
-    {
-        hm_port = network_config_.local_port + 4;
-    }
-    if (hm_bin_path.empty())
-    {
-        char path_buf[PATH_MAX];
-        ssize_t len =
-            ::readlink("/proc/self/exe", path_buf, sizeof(path_buf) - 1);
-        if (len < 0 || len >= (ssize_t) sizeof(path_buf))
+        if (hm_ip.empty())
         {
-            LOG(ERROR) << "readlink(/proc/self/exe) failed; cannot derive "
-                          "host_manager path";
-            return false;
+            hm_ip = network_config_.local_ip;
         }
-        path_buf[len] = '\0';
-        std::string s_path(path_buf);
-        std::string::size_type pos = s_path.find_last_of("/");
-        std::string parent_path = s_path.substr(0, pos);
-        hm_bin_path = parent_path + "/host_manager";
-    }
+        if (hm_port == 0)
+        {
+            hm_port = network_config_.local_port + 4;
+        }
+        if (hm_bin_path.empty())
+        {
+            char path_buf[PATH_MAX];
+            ssize_t len =
+                ::readlink("/proc/self/exe", path_buf, sizeof(path_buf) - 1);
+            if (len < 0 || len >= (ssize_t) sizeof(path_buf))
+            {
+                LOG(ERROR) << "readlink(/proc/self/exe) failed; cannot derive "
+                              "host_manager path";
+                return false;
+            }
+            path_buf[len] = '\0';
+            std::string s_path(path_buf);
+            std::string::size_type pos = s_path.find_last_of("/");
+            std::string parent_path = s_path.substr(0, pos);
+            hm_bin_path = parent_path + "/host_manager";
+        }
 #endif
+    }
 
     std::map<std::string, uint32_t> tx_service_conf{
         {"core_num", core_config_.core_num},
@@ -282,7 +288,7 @@ bool DataSubstrate::InitializeTxService(const INIReader &config_reader)
                            std::move(log_agent),
                            tx_path,
                            network_config_.cluster_config_file_path,
-                           fork_host_manager) != 0)
+                           fork_hm_process) != 0)
     {
         LOG(ERROR) << "Failed to start tx service!!!!!";
         return false;
