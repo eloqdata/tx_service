@@ -41,7 +41,7 @@ void TableRangeEntry::FetchRangeSlices(const TableName &range_tbl_name,
                                        int64_t ng_term,
                                        CcShard *cc_shard)
 {
-    std::unique_lock<std::shared_mutex> lk(mux_);
+    std::unique_lock<WritePreferSharedMutex> lk(mux_);
     if (RangeSlices() != nullptr)
     {
         cc_shard->Enqueue(requester);

@@ -347,7 +347,7 @@ void FetchRangeSlicesReq::SetFinish(CcErrorCode err)
                 estimate_rec_size = stats->EstimateRecordSize();
             }
         }
-        std::unique_lock<std::shared_mutex> lk(range_entry_->mux_);
+        std::unique_lock<WritePreferSharedMutex> lk(range_entry_->mux_);
         assert(range_entry_->RangeSlices() == nullptr);
 
         std::unique_lock<std::mutex> heap_lk(shards->table_ranges_heap_mux_);
@@ -391,7 +391,7 @@ void FetchRangeSlicesReq::SetFinish(CcErrorCode err)
         // We need to make sure that the CcMap::Execute(CcRequest ) and
         // CcRequest::ABortCcRequest(...) functions occur on the same thread.
         // Otherwise, AbortCcRequest is not safe behavior.
-        std::unique_lock<std::shared_mutex> lk(range_entry_->mux_);
+        std::unique_lock<WritePreferSharedMutex> lk(range_entry_->mux_);
         std::unordered_map<CcShard *, std::vector<CcRequestBase *>>
             waiting_reqs;
 

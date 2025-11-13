@@ -1244,7 +1244,7 @@ void LocalCcShards::KickoutRangeSlices()
         {
             for (auto &[key, range_entry] : ng_ranges)
             {
-                std::shared_lock<std::shared_mutex> lk(range_entry->mux_);
+                std::shared_lock<WritePreferSharedMutex> lk(range_entry->mux_);
                 StoreRange *store_range = range_entry->RangeSlices();
                 if (store_range)
                 {
@@ -1253,7 +1253,7 @@ void LocalCcShards::KickoutRangeSlices()
                         current_ts - last_accessed > 600000000)
                     {
                         lk.unlock();
-                        std::unique_lock<std::shared_mutex> uniq_lk(
+                        std::unique_lock<WritePreferSharedMutex> uniq_lk(
                             range_entry->mux_);
                         if (range_entry->IsStoreRangeFree())
                         {
@@ -1306,7 +1306,7 @@ void LocalCcShards::KickoutRangeSlices()
               { return a.first < b.first; });
     for (auto &[time, entry] : scanned_ranges)
     {
-        std::unique_lock<std::shared_mutex> uniq_lk(entry->mux_);
+        std::unique_lock<WritePreferSharedMutex> uniq_lk(entry->mux_);
         if (entry->IsStoreRangeFree())
         {
             std::unique_lock<std::mutex> heap_lk(table_ranges_heap_mux_);
@@ -2033,7 +2033,8 @@ bool LocalCcShards::DropStoreRangesInBucket(NodeGroupId ng_id,
                 if (Sharder::MapRangeIdToBucketId(
                         entry->GetRangeInfo()->PartitionId()) == bucket_id)
                 {
-                    std::unique_lock<std::shared_mutex> uniq_lk(entry->mux_);
+                    std::unique_lock<WritePreferSharedMutex> uniq_lk(
+                        entry->mux_);
                     if (entry->IsStoreRangeFree(true))
                     {
                         std::unique_lock<std::mutex> heap_lk(
