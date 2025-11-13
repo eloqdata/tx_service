@@ -1486,13 +1486,15 @@ public:
                 bool kickout_any = false;
                 uint64_t dirty_range_version =
                     range_entry->GetRangeInfo()->DirtyTs();
+                uint64_t last_sync_ts = range_entry->GetLastSyncTs();
                 idx = clean_guard->MarkCleanInRange(
                     store_range,
                     idx,
                     kickout_any,
                     (range_entry->GetRangeInfo()->IsDirty()
                          ? &dirty_range_version
-                         : nullptr));
+                         : nullptr),
+                    last_sync_ts);
                 if (kickout_any && clean_guard->cc_shard_->IsBucketsMigrating())
                 {
                     // If the key is kicked out, we need to update the bucket

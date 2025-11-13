@@ -159,7 +159,8 @@ protected:
     };
     virtual CanBeCleanedResult CanBeCleaned(
         const CcEntry<KeyT, ValueT, VersionedRecord, RangePartitioned> *cce,
-        const uint64_t *const dirty_range_ts = nullptr) const = 0;
+        const uint64_t *const dirty_range_ts = nullptr,
+        const uint64_t *const range_last_sync_ts = nullptr) const = 0;
 
     virtual bool IsCleanTarget(
         const KeyT &key,
@@ -181,7 +182,8 @@ protected:
     size_t MarkCleanInRange(TemplateStoreRange<KeyT> *store_range,
                             size_t idx_in_page,
                             bool &kickout_any,
-                            const uint64_t *const dirty_range_ts)
+                            const uint64_t *const dirty_range_ts,
+                            const uint64_t &range_last_sync_ts)
     {
         assert(RangePartitioned);
         kickout_any = false;
@@ -225,8 +227,8 @@ protected:
                 auto &cce = page_->entries_[idx];
 
                 bool is_clean_target = IsCleanTarget(key, cce.get());
-                auto [can_be_cleaned, delay_free] =
-                    CanBeCleaned(cce.get(), dirty_range_ts);
+                auto [can_be_cleaned, delay_free] = CanBeCleaned(
+                    cce.get(), dirty_range_ts, &range_last_sync_ts);
 
                 if (is_clean_target && can_be_cleaned)
                 {
@@ -369,16 +371,19 @@ private:
         CanBeCleanedResult
         CanBeCleaned(
             const CcEntry<KeyT, ValueT, VersionedRecord, RangePartitioned> *cce,
-            const uint64_t *const dirty_range_ts = nullptr) const override
+            const uint64_t *const dirty_range_ts = nullptr,
+            const uint64_t *const range_last_sync_ts = nullptr) const override
     {
         if (RangePartitioned && dirty_range_ts &&
-            cce->CkptTs() == *dirty_range_ts)
+            cce->CkptTs() > *range_last_sync_ts &&
+            cce->CkptTs() <= *dirty_range_ts)
         {
-            // During the split range, if the ckpt ts of cce is equal to the
-            // dirty range version ts, it means that cce is only flushed into
-            // the new range, but the new range entry has not been installed
-            // into the range cc map. At this time, we cannot evict this cce
-            // because the read request will still access the old range.
+            // During the split range, if the ckpt ts of cce is greater than
+            // the range last sync ts and not greater than the dirty range
+            // version ts, it means that cce is only flushed into the new range,
+            // but the new range entry has not been installed into the range cc
+            // map. At this time, we cannot evict this cce because the read
+            // request will still access the old range.
             assert(*dirty_range_ts > 0);
             return {false, false};
         }
@@ -493,7 +498,8 @@ private:
         CanBeCleanedResult
         CanBeCleaned(
             const CcEntry<KeyT, ValueT, VersionedRecord, RangePartitioned> *cce,
-            const uint64_t *const dirty_range_ts = nullptr) const override
+            const uint64_t *const dirty_range_ts = nullptr,
+            const uint64_t *const range_last_sync_ts = nullptr) const override
     {
         // Check if the cce has any locks on it. If so recycle the lock entry
         // before deleting cce.
