@@ -39,30 +39,13 @@ struct StandbyForwardEntry
     {
         msg.set_type(remote::CcMessage::MessageType::
                          CcMessage_MessageType_KeyObjectStandbyForwardRequest);
+        msg.mutable_key_obj_standby_forward_req()->set_out_of_sync(false);
+        sequence_id_ = UINT64_MAX;
     }
 
     void AddTxCommand(ApplyCc &cc_req);
 
     void AddTxCommand(TxCommand *cmd);
-
-    void Free()
-    {
-        in_use_ = false;
-    }
-
-    bool IsFree() const
-    {
-        return !in_use_;
-    }
-
-    void Reset()
-    {
-        assert(!in_use_);
-        in_use_ = true;
-        msg.clear_key_obj_standby_forward_req();
-        msg.mutable_key_obj_standby_forward_req()->set_out_of_sync(false);
-        sequence_id_ = UINT64_MAX;
-    }
 
     remote::KeyObjectStandbyForwardRequest &Request()
     {
@@ -84,8 +67,15 @@ struct StandbyForwardEntry
         return msg;
     }
 
+    uint64_t MemorySize() const
+    {
+        // Only check for key_obj_standby_forward_req size, ignore the other
+        // fields.
+        return msg.key_obj_standby_forward_req().ByteSizeLong() +
+               sizeof(uint64_t);
+    }
+
 private:
-    bool in_use_{false};
     uint64_t sequence_id_{UINT64_MAX};
     remote::CcMessage msg;
 };

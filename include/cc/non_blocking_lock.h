@@ -36,6 +36,7 @@
 #include "cc_req_base.h"
 #include "circular_queue.h"
 #include "error_messages.h"
+#include "standby.h"
 #include "tx_command.h"
 #include "tx_id.h"
 #include "tx_object.h"
@@ -51,7 +52,6 @@ struct CcEntry;
 class CcMap;
 struct LruPage;
 struct LruEntry;
-struct StandbyForwardEntry;
 
 class NonBlockingLock
 {
@@ -418,7 +418,7 @@ public:
         dirty_payload_status_ = RecordStatus::NonExistent;
         pending_cmd_ = nullptr;
         buffered_cmd_list_.Clear();
-        forward_entry_ = nullptr;
+        forward_entry_.reset();
         pin_count_ = 0;
     }
 
@@ -563,7 +563,8 @@ public:
         }
     }
     StandbyForwardEntry *ForwardEntry();
-    void SetForwardEntry(StandbyForwardEntry *entry);
+    void SetForwardEntry(std::unique_ptr<StandbyForwardEntry> entry);
+    std::unique_ptr<StandbyForwardEntry> ReleaseForwardEntry();
 
     void ClearTx()
     {
@@ -591,7 +592,7 @@ private:
     RecordStatus dirty_payload_status_{RecordStatus::NonExistent};
 
     BufferedTxnCmdList buffered_cmd_list_;
-    StandbyForwardEntry *forward_entry_;
+    std::unique_ptr<StandbyForwardEntry> forward_entry_;
     // The pins on the cce. For cases that we need to keep the cce in memory
     // for a while and we are not in a transaction context, we use pins to
     // prevent the cce from being recycled.

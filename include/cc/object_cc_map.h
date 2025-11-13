@@ -870,8 +870,10 @@ public:
             forward_entry = cce->ForwardEntry();
             if (!forward_entry)
             {
-                forward_entry = shard_->GetNextStandbyForwardEntry();
-                cce->SetForwardEntry(forward_entry);
+                auto forward_entry_ptr =
+                    std::make_unique<StandbyForwardEntry>();
+                forward_entry = forward_entry_ptr.get();
+                cce->SetForwardEntry(std::move(forward_entry_ptr));
                 forward_req = &forward_entry->Request();
                 forward_req->set_primary_leader_term(ng_term);
                 forward_req->set_tx_number(req.Txn());
@@ -948,8 +950,9 @@ public:
                             forward_req->set_object_version(cce->CommitTs());
                         }
                         forward_entry->Request().set_schema_version(schema_ts_);
-                        cce->SetForwardEntry(nullptr);
-                        shard_->ForwardStandbyMessage(forward_entry);
+                        std::unique_ptr<StandbyForwardEntry> entry_ptr =
+                            cce->ReleaseForwardEntry();
+                        shard_->ForwardStandbyMessage(entry_ptr.release());
                     }
                     cce->SetCommitTsPayloadStatus(commit_ts,
                                                   RecordStatus::Deleted);
@@ -1110,9 +1113,8 @@ public:
             assert(!req.apply_and_commit_);
             if (forward_entry)
             {
-                // reset forward entry before releasing lock.
-                forward_entry->Free();
-                cce->SetForwardEntry(nullptr);
+                // Release forward entry (will be automatically freed)
+                cce->ReleaseForwardEntry();
             }
             cce->PushBlockCmdRequest(&req);
             cce->SetDirtyPayload(nullptr);
@@ -1130,9 +1132,8 @@ public:
             assert(!req.apply_and_commit_);
             if (forward_entry)
             {
-                // reset forward entry before releasing lock.
-                forward_entry->Free();
-                cce->SetForwardEntry(nullptr);
+                // Release forward entry (will be automatically freed)
+                cce->ReleaseForwardEntry();
             }
             cce->SetDirtyPayload(nullptr);
             cce->SetDirtyPayloadStatus(RecordStatus::NonExistent);
@@ -1188,8 +1189,9 @@ public:
                     // Set commit ts and send the msg to standby node
                     forward_req->set_commit_ts(commit_ts);
                     forward_entry->Request().set_schema_version(schema_ts_);
-                    cce->SetForwardEntry(nullptr);
-                    shard_->ForwardStandbyMessage(forward_entry);
+                    std::unique_ptr<StandbyForwardEntry> entry_ptr =
+                        cce->ReleaseForwardEntry();
+                    shard_->ForwardStandbyMessage(entry_ptr.release());
                 }
 
                 if (last_dirty_commit_ts_ < commit_ts)
@@ -1227,8 +1229,8 @@ public:
                 cce->SetDirtyPayloadStatus(RecordStatus::NonExistent);
                 if (forward_entry)
                 {
-                    forward_entry->Free();
-                    cce->SetForwardEntry(nullptr);
+                    // Release forward entry (will be automatically freed)
+                    cce->ReleaseForwardEntry();
                 }
             }
 
@@ -1388,8 +1390,9 @@ public:
                 // Set commit ts and send the msg to standby node
                 forward_entry->Request().set_commit_ts(commit_ts);
                 forward_entry->Request().set_schema_version(schema_ts_);
-                cce->SetForwardEntry(nullptr);
-                shard_->ForwardStandbyMessage(forward_entry);
+                std::unique_ptr<StandbyForwardEntry> entry_ptr =
+                    cce->ReleaseForwardEntry();
+                shard_->ForwardStandbyMessage(entry_ptr.release());
             }
             cce->SetCommitTsPayloadStatus(commit_ts, payload_status);
             // It's possible that the cce HasBufferedCommandList and is still in
@@ -1430,9 +1433,8 @@ public:
         }
         else if (forward_entry)
         {
-            // tx aborts, free forward entry
-            forward_entry->Free();
-            cce->SetForwardEntry(nullptr);
+            // tx aborts, release forward entry (will be automatically freed)
+            cce->ReleaseForwardEntry();
         }
 
         // Reset the dirty status.
@@ -2427,8 +2429,9 @@ public:
                     auto forward_entry = cce->ForwardEntry();
                     forward_entry->Request().set_commit_ts(commit_ts);
                     forward_entry->Request().set_schema_version(schema_ts_);
-                    cce->SetForwardEntry(nullptr);
-                    shard_->ForwardStandbyMessage(forward_entry);
+                    std::unique_ptr<StandbyForwardEntry> entry_ptr =
+                        cce->ReleaseForwardEntry();
+                    shard_->ForwardStandbyMessage(entry_ptr.release());
                 }
 
                 TxNumber txn = lk->WriteLockTx();

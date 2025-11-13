@@ -800,8 +800,10 @@ public:
                 if (shard_->core_id_ == 0 &&
                     !shard_->GetSubscribedStandbys().empty())
                 {
+                    auto forward_entry_ptr =
+                        std::make_unique<StandbyForwardEntry>();
                     StandbyForwardEntry *forward_entry =
-                        shard_->GetNextStandbyForwardEntry();
+                        forward_entry_ptr.get();
                     auto *forward_req = &forward_entry->Request();
                     forward_req->set_primary_leader_term(ng_term);
                     forward_req->set_tx_number(req.Txn());
@@ -837,7 +839,7 @@ public:
                         catalog_entry->dirty_schema_version_);
                     forward_req->set_schema_version(
                         catalog_entry->schema_version_);
-                    shard_->ForwardStandbyMessage(forward_entry);
+                    shard_->ForwardStandbyMessage(forward_entry_ptr.release());
                 }
             }
             else if (req.OpType() == OperationType::DropTable)

@@ -28,6 +28,7 @@
 #include <algorithm>
 #include <atomic>
 #include <cstdint>
+#include <deque>
 #include <functional>
 #include <iostream>
 #include <map>
@@ -234,6 +235,7 @@ class CcShard
 public:
     CcShard() = delete;
     CcShard(const CcShard &other) = delete;
+    ~CcShard();
 
     CcShard(uint16_t core_id,
             uint32_t core_cnt,
@@ -949,8 +951,10 @@ public:
     };
 
     // Called on primary node
-    StandbyForwardEntry *GetNextStandbyForwardEntry();
     void ForwardStandbyMessage(StandbyForwardEntry *entry);
+    void AddCandidateStandby(uint32_t node_id, uint64_t start_seq_id);
+    void RemoveCandidateStandby(uint32_t node_id);
+    void CheckAndFreeUnneededEntries();
     void AddSubscribedStandby(uint32_t node_id,
                               uint64_t start_seq_id,
                               int64_t standby_node_term)
@@ -966,6 +970,7 @@ public:
             {
                 ins_res.first->second.first = start_seq_id - 1;
                 ins_res.first->second.second = standby_node_term;
+                CheckAndFreeUnneededEntries();
             }
         }
     }
@@ -1148,13 +1153,18 @@ private:
     // global_core_id, while lower 32 bits are tx_ident.
     uint32_t next_tx_ident_;
 
-    // Standby forward msg related members used on primary node
-    // pool of actual standby msgs.
-    std::vector<std::unique_ptr<StandbyForwardEntry>> standby_fwd_vec_;
-    // Buffers the last "txservice_max_standby_lag" msgs sent to standby node.
-    // It is used to find the missed msg with sequence id.
-    std::vector<StandbyForwardEntry *> standby_fwded_msg_buffer_;
-    uint32_t next_foward_idx_{0};
+    // Standby forward msg related members used on primary node.
+    // Uses memory-bounded queue instead of fixed-size buffer.
+    // Memory-bounded queue for entries still needed (owns entries)
+    std::deque<std::unique_ptr<StandbyForwardEntry>> history_standby_msg_;
+    // O(1) lookup map: sequence ID -> entry pointer (entries owned by queue)
+    std::unordered_map<uint64_t, StandbyForwardEntry *> seq_id_to_entry_map_;
+    // Candidate followers: node_id -> start_seq_id
+    std::unordered_map<uint32_t, uint64_t> candidate_standby_nodes_;
+    // Total memory usage of all entries in history queue
+    uint64_t total_standby_buffer_memory_usage_{0};
+    // Memory limit for standby buffer (10% of node memory limit per shard)
+    uint64_t standby_buffer_memory_limit_{0};
     uint64_t next_forward_sequence_id_{1};
     std::unordered_map<uint32_t, std::pair<uint64_t, int64_t>>
         subscribed_standby_nodes_;

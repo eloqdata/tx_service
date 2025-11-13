@@ -1598,6 +1598,9 @@ void CcNodeService::StandbyStartFollowing(
     bool err = false;
     uint64_t start_seq;
     WaitableCc add_sub_cc;
+    // Track which shards have successfully added candidates for rollback on
+    // error
+    std::vector<uint16_t> successful_core_ids;
 
     for (uint16_t core_id = 0; core_id < local_shards_.Count(); core_id++)
     {
@@ -1619,6 +1622,8 @@ void CcNodeService::StandbyStartFollowing(
                 {
                     std::unique_lock<bthread::Mutex> lk(mux);
                     start_seq = ccs.GetNextForwardSequnceId();
+                    // Track this candidate follower
+                    ccs.AddCandidateStandby(node_id, start_seq);
                 }
 
                 return true;
@@ -1628,10 +1633,26 @@ void CcNodeService::StandbyStartFollowing(
         std::unique_lock<bthread::Mutex> lk(mux);
         if (err)
         {
+            // Rollback candidates from all shards that succeeded before this
+            // error
+            WaitableCc rollback_cc;
+            for (uint16_t rollback_core_id : successful_core_ids)
+            {
+                rollback_cc.Reset(
+                    [node_id = request->node_id()](CcShard &ccs)
+                    {
+                        ccs.RemoveCandidateStandby(node_id);
+                        return true;
+                    });
+                local_shards_.EnqueueCcRequest(rollback_core_id, &rollback_cc);
+                rollback_cc.Wait();
+            }
             response->set_error(true);
             return;
         }
 
+        // Track successful core_id for potential rollback
+        successful_core_ids.push_back(core_id);
         response->add_start_sequence_id(start_seq);
     }
 
@@ -1839,6 +1860,8 @@ void CcNodeService::ResetStandbySequenceId(
             if (Sharder::Instance().CheckLeaderTerm(
                     ng_id, PrimaryTermFromStandbyTerm(standby_node_term)))
             {
+                // Remove from candidates and add to subscribed
+                ccs.RemoveCandidateStandby(node_id);
                 ccs.AddSubscribedStandby(
                     node_id, seq_ids.at(ccs.core_id_), standby_node_term);
             }

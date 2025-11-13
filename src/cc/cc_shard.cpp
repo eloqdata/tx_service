@@ -85,7 +85,6 @@ CcShard::CcShard(
       tx_vec_(),
       next_tx_idx_(0),
       next_tx_ident_(0),
-      next_foward_idx_(0),
       next_forward_sequence_id_(1),
       head_ccp_(nullptr),
       tail_ccp_(nullptr),
@@ -108,6 +107,10 @@ CcShard::CcShard(
     memory_limit_ /= core_cnt_;
     log_limit_ = (uint64_t) MB(node_log_limit_mb);
     log_limit_ /= core_cnt_;
+
+    // Calculate standby buffer memory limit: 10% of node memory limit per shard
+    standby_buffer_memory_limit_ =
+        (uint64_t) MB(node_memory_limit_mb) * 0.1 / core_cnt_;
 
     head_ccp_.lru_prev_ = nullptr;
     head_ccp_.lru_next_ = &tail_ccp_;
@@ -196,6 +199,16 @@ CcShard::CcShard(
     shard_clean_cc_ = std::make_unique<ShardCleanCc>();
 }
 
+CcShard::~CcShard()
+{
+    // Free all remaining entries in history queue (unique_ptr will auto-delete)
+    history_standby_msg_.clear();
+
+    // Clear maps
+    seq_id_to_entry_map_.clear();
+    candidate_standby_nodes_.clear();
+}
+
 void CcShard::Init()
 {
     InitializeShardHeap();
@@ -205,14 +218,11 @@ void CcShard::Init()
     {
         lock_vec_[i] = std::make_unique<KeyGapLockAndExtraData>();
     }
-    standby_fwd_vec_.resize(txservice_max_standby_lag);
-    for (size_t i = 0; i < txservice_max_standby_lag; ++i)
-    {
-        standby_fwd_vec_[i] = std::make_unique<StandbyForwardEntry>();
-    }
-
-    assert(standby_fwded_msg_buffer_.empty());
-    standby_fwded_msg_buffer_.resize(txservice_max_standby_lag, nullptr);
+    // Initialize memory-bounded queue structures
+    history_standby_msg_.clear();
+    seq_id_to_entry_map_.clear();
+    candidate_standby_nodes_.clear();
+    total_standby_buffer_memory_usage_ = 0;
 
     tx_vec_.reserve(128);
     for (int idx = 0; idx < 128; ++idx)
@@ -2519,74 +2529,130 @@ std::unordered_map<TableName, bool> CcShard::GetCatalogTableNameSnapshot(
     return local_shards_.GetCatalogTableNameSnapshot(cc_ng_id, ckpt_ts);
 }
 
-StandbyForwardEntry *CcShard::GetNextStandbyForwardEntry()
+void CcShard::AddCandidateStandby(uint32_t node_id, uint64_t start_seq_id)
 {
-    size_t cnt = 0;
-    bool found = false;
-    while (cnt < standby_fwd_vec_.size())
-    {
-        StandbyForwardEntry *ety = standby_fwd_vec_[next_foward_idx_].get();
-        found =
-            (ety->IsFree() && (ety->SequenceId() == UINT64_MAX ||
-                               next_forward_sequence_id_ - ety->SequenceId() >=
-                                   txservice_max_standby_lag));
+    candidate_standby_nodes_[node_id] = start_seq_id;
+    LOG(INFO) << "Added candidate standby node " << node_id
+              << " with start_seq_id " << start_seq_id << " for shard "
+              << core_id_;
+}
 
-        if (found)
+void CcShard::RemoveCandidateStandby(uint32_t node_id)
+{
+    auto it = candidate_standby_nodes_.find(node_id);
+    if (it != candidate_standby_nodes_.end())
+    {
+        candidate_standby_nodes_.erase(it);
+        LOG(INFO) << "Removed candidate standby node " << node_id
+                  << " from shard " << core_id_;
+    }
+}
+
+void CcShard::CheckAndFreeUnneededEntries()
+{
+    // Find the minimum sequence ID that is still needed
+    uint64_t min_needed_seq_id = UINT64_MAX;
+
+    // Check subscribed followers: need entries with seq_id > last_sent_seq_id
+    // So minimum needed is last_sent_seq_id + 1
+    for (const auto &[node_id, last_sent_seq_id_and_term] :
+         subscribed_standby_nodes_)
+    {
+        uint64_t last_sent_seq_id = last_sent_seq_id_and_term.first;
+        if (last_sent_seq_id != UINT64_MAX)
         {
+            uint64_t needed_seq_id = last_sent_seq_id + 1;
+            if (needed_seq_id < min_needed_seq_id)
+            {
+                min_needed_seq_id = needed_seq_id;
+            }
+        }
+    }
+
+    // Check candidate followers: need entries with seq_id >= start_seq_id
+    // So minimum needed is start_seq_id
+    for (const auto &[node_id, start_seq_id] : candidate_standby_nodes_)
+    {
+        if (start_seq_id < min_needed_seq_id)
+        {
+            min_needed_seq_id = start_seq_id;
+        }
+    }
+
+    // If no followers or candidates, or min_needed_seq_id is still UINT64_MAX,
+    // nothing is needed
+    if (min_needed_seq_id == UINT64_MAX)
+    {
+        // No entries needed, clear everything
+        while (!history_standby_msg_.empty())
+        {
+            std::unique_ptr<StandbyForwardEntry> entry =
+                std::move(history_standby_msg_.front());
+            history_standby_msg_.pop_front();
+
+            uint64_t seq_id = entry->SequenceId();
+            uint64_t entry_size = entry->MemorySize();
+            total_standby_buffer_memory_usage_ -= entry_size;
+
+            seq_id_to_entry_map_.erase(seq_id);
+            // Entry will be automatically freed when unique_ptr goes out of
+            // scope
+        }
+        return;
+    }
+
+    // Remove all entries from front with seq_id < min_needed_seq_id
+    // Sequence IDs are in order (1, 2, 3, 4, 5...), so we can safely remove
+    // from front
+    while (!history_standby_msg_.empty())
+    {
+        StandbyForwardEntry *front_entry = history_standby_msg_.front().get();
+        uint64_t front_seq_id = front_entry->SequenceId();
+
+        if (front_seq_id < min_needed_seq_id)
+        {
+            // This entry is no longer needed, remove and free
+            std::unique_ptr<StandbyForwardEntry> entry =
+                std::move(history_standby_msg_.front());
+            history_standby_msg_.pop_front();
+
+            uint64_t entry_size = entry->MemorySize();
+            total_standby_buffer_memory_usage_ -= entry_size;
+
+            seq_id_to_entry_map_.erase(front_seq_id);
+            // Entry will be automatically freed when unique_ptr goes out of
+            // scope
+        }
+        else
+        {
+            // All remaining entries are needed (since sequence IDs are in
+            // order)
             break;
         }
-
-        // Only overwrite standby entry if it is already older than the
-        // oldest buffered msg.
-        ++next_foward_idx_;
-        if (next_foward_idx_ >= standby_fwd_vec_.size())
-        {
-            next_foward_idx_ = 0;
-        }
-
-        ++cnt;
     }
-
-    if (!found)
-    {
-        uint32_t old_size = (uint32_t) standby_fwd_vec_.size();
-        // Increases the capacity of the forward vector.
-        uint32_t new_size = (uint32_t) (standby_fwd_vec_.size() * 1.5);
-        LOG(INFO) << "Resize standby forward entry container, size:"
-                  << standby_fwd_vec_.size() << ",new_size:" << new_size;
-        standby_fwd_vec_.resize(new_size);
-        for (uint32_t idx = old_size; idx < new_size; idx++)
-        {
-            standby_fwd_vec_[idx] = std::make_unique<StandbyForwardEntry>();
-        }
-
-        // position old_size must be an available slot.
-        next_foward_idx_ = old_size;
-    }
-
-    StandbyForwardEntry *entry = standby_fwd_vec_.at(next_foward_idx_).get();
-    entry->Reset();
-    ++next_foward_idx_;
-    next_foward_idx_ =
-        next_foward_idx_ == standby_fwd_vec_.size() ? 0 : next_foward_idx_;
-
-    return entry;
 }
 
 void CcShard::ForwardStandbyMessage(StandbyForwardEntry *entry)
 {
     assert(entry != nullptr);
+
+    // Take ownership of the entry (caller transfers ownership)
+    std::unique_ptr<StandbyForwardEntry> entry_ptr(entry);
+
     uint64_t seq_id = next_forward_sequence_id_++;
-    size_t buf_idx = seq_id % txservice_max_standby_lag;
-    entry->SetSequenceId(seq_id);
-    standby_fwded_msg_buffer_[buf_idx] = entry;
-    auto &req = entry->Request();
+    entry_ptr->SetSequenceId(seq_id);
+
+    auto &req = entry_ptr->Request();
     req.set_forward_seq_id(seq_id);
     req.set_forward_seq_grp(core_id_);
+
     if (!stream_sender_)
     {
         stream_sender_ = Sharder::Instance().GetCcStreamSender();
     }
+
+    // Track if any send failed (for determining if entry is still needed)
+    bool any_send_failed = false;
 
     for (auto &[node_id, last_sent_seq_id_and_term] : subscribed_standby_nodes_)
     {
@@ -2613,32 +2679,119 @@ void CcShard::ForwardStandbyMessage(StandbyForwardEntry *entry)
                         retry_fwd_msg_cc_->Use();
                         Enqueue(retry_fwd_msg_cc_.get());
                     }
+                    any_send_failed = true;
                     continue;
                 }
             });
 
             write_succ = stream_sender_->SendMessageToNode(
-                node_id, entry->Message(), nullptr, false, false);
+                node_id, entry_ptr->Message(), nullptr, false, false);
             if (write_succ)
             {
                 last_sent_seq_id++;
             }
+            else
+            {
+                any_send_failed = true;
+            }
         }
-        if (!write_succ && !retry_fwd_msg_cc_->InUse())
+        else
         {
-            // If the latest message is not successfully written to standby,
-            // enqueue retry cc req that will keep retrying to send message from
-            // last suceeded seq id.
-            retry_fwd_msg_cc_->Use();
-            Enqueue(retry_fwd_msg_cc_.get());
+            // Previous message not sent yet, this one will be retried later
+            any_send_failed = true;
         }
     }
 
-    entry->Free();
+    // Check if entry is still needed
+    bool entry_needed = any_send_failed;
+    if (!entry_needed)
+    {
+        // Check if any candidate follower needs this entry
+        for (const auto &[node_id, start_seq_id] : candidate_standby_nodes_)
+        {
+            if (start_seq_id <= seq_id)
+            {
+                entry_needed =
+                    true;  // Candidate follower will need this message
+                break;
+            }
+        }
+    }
+
+    if (entry_needed)
+    {
+        // Add to history queue (move ownership to queue)
+        StandbyForwardEntry *entry_raw = entry_ptr.get();
+        history_standby_msg_.push_back(std::move(entry_ptr));
+        seq_id_to_entry_map_[seq_id] = entry_raw;
+
+        // Update memory usage
+        total_standby_buffer_memory_usage_ += entry_raw->MemorySize();
+        uint64_t largest_removed_seq_id = 0;
+
+        // Evict if memory limit exceeded
+        while (total_standby_buffer_memory_usage_ >
+                   standby_buffer_memory_limit_ &&
+               !history_standby_msg_.empty())
+        {
+            std::unique_ptr<StandbyForwardEntry> oldest_entry =
+                std::move(history_standby_msg_.front());
+            history_standby_msg_.pop_front();
+
+            largest_removed_seq_id = oldest_entry->SequenceId();
+            seq_id_to_entry_map_.erase(largest_removed_seq_id);
+
+            total_standby_buffer_memory_usage_ -= oldest_entry->MemorySize();
+
+            // Entry will be automatically freed when unique_ptr goes out of
+            // scope
+        }
+        if (largest_removed_seq_id > 0)
+        {
+            // Check and remove affected candidates (if evicted message's seq_id
+            // >= candidate's start_seq_id)
+            auto candidate_it = candidate_standby_nodes_.begin();
+            while (candidate_it != candidate_standby_nodes_.end())
+            {
+                if (largest_removed_seq_id >= candidate_it->second)
+                {
+                    // This candidate's start_seq_id is no longer in history,
+                    // remove candidate
+                    LOG(INFO) << "Removing candidate standby node "
+                              << candidate_it->first << " because start_seq_id "
+                              << candidate_it->second
+                              << " is no longer in history (evicted seq_id: "
+                              << largest_removed_seq_id << ")";
+                    candidate_it = candidate_standby_nodes_.erase(candidate_it);
+                }
+                else
+                {
+                    ++candidate_it;
+                }
+            }
+        }
+    }
+    // else: entry_ptr goes out of scope and automatically frees the entry
+
+    // Continue with existing retry trigger logic
+    if (any_send_failed && !retry_fwd_msg_cc_->InUse())
+    {
+        // If the latest message is not successfully written to standby,
+        // enqueue retry cc req that will keep retrying to send message from
+        // last suceeded seq id.
+        retry_fwd_msg_cc_->Use();
+        Enqueue(retry_fwd_msg_cc_.get());
+    }
 }
 
 bool CcShard::ResendFailedForwardMessages()
 {
+    // Ensure stream_sender_ is initialized
+    if (!stream_sender_)
+    {
+        stream_sender_ = Sharder::Instance().GetCcStreamSender();
+    }
+
     bool all_msgs_sent = true;
     for (auto &[node_id, seq_id_and_term] : subscribed_standby_nodes_)
     {
@@ -2655,19 +2808,16 @@ bool CcShard::ResendFailedForwardMessages()
         while (seq_id < next_forward_sequence_id_ - 1 && sent_msg < 500)
         {
             // seq id is the last sent msg, start sending from seq id + 1
-            size_t pending_buf_idx = (seq_id + 1) % txservice_max_standby_lag;
+            uint64_t pending_seq_id = seq_id + 1;
 
-            if (standby_fwded_msg_buffer_[pending_buf_idx] &&
-                standby_fwded_msg_buffer_[pending_buf_idx]->IsFree() &&
-                standby_fwded_msg_buffer_[pending_buf_idx]->SequenceId() ==
-                    seq_id + 1)
+            // Look up message in map (O(1))
+            auto entry_it = seq_id_to_entry_map_.find(pending_seq_id);
+
+            if (entry_it != seq_id_to_entry_map_.end())
             {
+                StandbyForwardEntry *entry = entry_it->second;
                 bool succ = stream_sender_->SendMessageToNode(
-                    node_id,
-                    standby_fwded_msg_buffer_[pending_buf_idx]->Message(),
-                    nullptr,
-                    false,
-                    false);
+                    node_id, entry->Message(), nullptr, false, false);
                 if (!succ)
                 {
                     all_msgs_sent = false;
@@ -2681,12 +2831,11 @@ bool CcShard::ResendFailedForwardMessages()
             }
             else
             {
-                // this message is already lost and this standby needs to
+                // Message not found in map - it has been evicted
+                // This message is already lost and this standby needs to
                 // resubscribe to the primary node again. Notify standby that
-                // it has alraedy fall behind. Use the latest seq id so that
+                // it has already fallen behind. Use the latest seq id so that
                 // standby knows which epoch this out of sync msg belongs to.
-                assert(next_forward_sequence_id_ - seq_id >=
-                       txservice_max_standby_lag);
                 remote::CcMessage cc_msg;
                 cc_msg.set_type(
                     remote::CcMessage_MessageType::
@@ -2735,11 +2884,15 @@ bool CcShard::ResendFailedForwardMessages()
                 break;
             }
         }
+
         if (seq_id < next_forward_sequence_id_ - 1)
         {
             all_msgs_sent = false;
         }
     }
+
+    // After retry, check if entries can be freed
+    CheckAndFreeUnneededEntries();
 
     return all_msgs_sent;
 }
@@ -2770,6 +2923,7 @@ void CcShard::RemoveSubscribedStandby(uint32_t node_id)
         local_shards_.RemoveHeartbeatTargetNode(node_id,
                                                 seq_id_and_term->second.second);
         subscribed_standby_nodes_.erase(node_id);
+        CheckAndFreeUnneededEntries();
     }
 }
 
@@ -2845,12 +2999,12 @@ bool CcShard::UpdateLastReceivedStandbySequenceId(
 void CcShard::ResetStandbySequence()
 {
     next_forward_sequence_id_ = 1;
-    for (auto &entry : standby_fwd_vec_)
-    {
-        entry->Free();
-        entry->SetSequenceId(UINT64_MAX);
-    }
+    // Clear history queue (entries will be automatically freed by unique_ptr)
+    history_standby_msg_.clear();
+    seq_id_to_entry_map_.clear();
+    total_standby_buffer_memory_usage_ = 0;
     subscribed_standby_nodes_.clear();
+    candidate_standby_nodes_.clear();
 
     for (auto &[grp_id, grp_info] : standby_sequence_grps_)
     {

@@ -750,13 +750,20 @@ bool KeyGapLockAndExtraData::SafeToRecycle() const
                recycle_interval_us_;
 }
 
-void KeyGapLockAndExtraData::SetForwardEntry(StandbyForwardEntry *entry)
+void KeyGapLockAndExtraData::SetForwardEntry(
+    std::unique_ptr<StandbyForwardEntry> entry)
 {
-    forward_entry_ = entry;
+    forward_entry_ = std::move(entry);
 }
 
 StandbyForwardEntry *KeyGapLockAndExtraData::ForwardEntry()
 {
-    return forward_entry_;
+    return forward_entry_.get();
+}
+
+std::unique_ptr<StandbyForwardEntry>
+KeyGapLockAndExtraData::ReleaseForwardEntry()
+{
+    return std::move(forward_entry_);
 }
 }  // namespace txservice
