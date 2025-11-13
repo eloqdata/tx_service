@@ -545,6 +545,7 @@ void FillStoreSliceCc::Reset(const TableName &table_name,
     rec_cnt_ = 0;
     core_finished_.clear();
     core_finished_.resize(cc_shards.Count(), false);
+    err_code_ = CcErrorCode::NO_ERROR;
 }
 
 void FillStoreSliceCc::SetKvFinish(bool success)
