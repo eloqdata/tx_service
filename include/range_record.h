@@ -37,6 +37,7 @@
 #include "range_bucket_key_record.h"
 #include "range_slice.h"
 #include "sharder.h"
+#include "spinlock.h"
 #include "tx_key.h"
 #include "tx_record.h"
 #include "tx_serialize.h"
@@ -504,8 +505,9 @@ protected:
     // Protects range_slices_, fetch_range_slices_cc_
     // Any update on these pointers requres unique lock on mux. But updating
     // the object that these pointers point to only requires shared lock.
-    std::shared_mutex mux_;
+    // std::shared_mutex mux_;
 
+    WritePreferSharedMutex mux_;
     std::unique_ptr<FetchRangeSlicesReq> fetch_range_slices_req_{nullptr};
 
     template <typename KeyT>
