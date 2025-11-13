@@ -725,9 +725,9 @@ bool FillStoreSliceCc::SetError(CcErrorCode err_code)
         ++finish_cnt_;
         err_code_ = err_code;
 
-        LOG(INFO) << "== FillStoreSliceCc::SetError: finish_cnt_="
-                  << finish_cnt_ << ", core_cnt_=" << core_cnt_
-                  << ", this = " << this;
+        // LOG(INFO) << "== FillStoreSliceCc::SetError: finish_cnt_="
+        //          << finish_cnt_ << ", core_cnt_=" << core_cnt_
+        //          << ", this = " << this;
         if (finish_cnt_ == core_cnt_)
         {
             finish_all = true;
