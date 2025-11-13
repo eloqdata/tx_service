@@ -23,6 +23,7 @@
 
 #include <cassert>
 #include <filesystem>
+#include <regex>
 
 #include "gflags/gflags.h"
 #include "glog/logging.h"
@@ -54,8 +55,8 @@ DEFINE_uint32(eloq_store_init_page_count,
 DEFINE_bool(eloq_store_skip_verify_checksum,
             false,
             "EloqStore skip verify checksum.");
-DEFINE_uint64(eloq_store_index_buffer_pool_size,
-              128 << 20,
+DEFINE_string(eloq_store_index_buffer_pool_size,
+              "128MB",
               "EloqStore index buffer pool size.");
 DEFINE_uint32(eloq_store_manifest_limit, 8 << 20, "EloqStore manifest limit.");
 DEFINE_uint32(eloq_store_io_queue_size,
@@ -83,8 +84,8 @@ DEFINE_uint32(eloq_store_max_archive_tasks,
 DEFINE_uint32(eloq_store_file_amplify_factor,
               2,
               "EloqStore file amplify factor.");
-DEFINE_uint64(eloq_store_local_space_limit,
-              1ULL << 40,
+DEFINE_string(eloq_store_local_space_limit,
+              "1TB",
               "EloqStore local space limit.");
 DEFINE_uint32(eloq_store_reserve_space_ratio,
               100,
@@ -113,6 +114,102 @@ inline bool CheckCommandLineFlagIsDefault(const char *name)
     // Return `true` if the flag has the default value and has not been set
     // explicitly from the cmdline or via SetCommandLineOption
     return flag_info.is_default;
+}
+
+inline bool is_number(const std::string &str)
+{
+    // regular expression for matching number format
+    std::regex pattern("^[0-9]+$");
+    return std::regex_match(str, pattern);
+}
+
+inline std::string_view remove_last_two(const std::string_view &str)
+{
+    if (str.length() <= 2)
+    {
+        return "";
+    }
+    return std::string_view(str.data(), str.size() - 2);
+}
+
+inline std::string_view get_last_two(const std::string_view &str)
+{
+    if (str.length() <= 2)
+    {
+        return "";
+    }
+    return std::string_view(str.data() + str.size() - 2, 2);
+}
+
+inline uint64_t unit_num(const std::string_view &unit_str)
+{
+    if (unit_str == "MB" || unit_str == "mb")
+    {
+        return 1024 * 1024L;
+    }
+    else if (unit_str == "GB" || unit_str == "gb")
+    {
+        return 1024 * 1024 * 1024L;
+    }
+    else if (unit_str == "TB" || unit_str == "tb")
+    {
+        return 1024 * 1024 * 1024 * 1024L;
+    }
+
+    return 1L;
+}
+
+inline bool ends_with(const std::string_view &str,
+                      const std::string_view &suffix)
+{
+    if (str.size() < suffix.size())
+    {
+        return false;
+    }
+    if (str.compare(str.size() - suffix.size(), suffix.size(), suffix) != 0)
+    {
+        return false;
+    }
+
+    return true;
+}
+
+inline bool is_valid_size(const std::string_view &size_str_v)
+{
+    bool is_right_end =
+        ends_with(size_str_v, "MB") || ends_with(size_str_v, "mb") ||
+        ends_with(size_str_v, "GB") || ends_with(size_str_v, "gb") ||
+        ends_with(size_str_v, "TB") || ends_with(size_str_v, "tb");
+
+    if (!is_right_end)
+    {
+        return false;
+    }
+
+    std::string num_str;
+    num_str = remove_last_two(size_str_v);
+
+    if (!is_number(num_str))
+    {
+        return false;
+    }
+
+    return true;
+}
+
+inline uint64_t parse_size(const std::string &size_str)
+{
+    std::string_view size_str_v(size_str);
+    if (!is_valid_size(size_str_v))
+    {
+        LOG(FATAL) << "Invalid size format: " << size_str;
+        return 0;
+    }
+    std::string_view unit_str = get_last_two(size_str_v);
+    uint64_t unit = unit_num(unit_str);
+    std::string_view num_str = remove_last_two(size_str_v);
+    uint64_t num = std::stoull(std::string(num_str));
+    return num * unit;
 }
 
 EloqStoreConfig::EloqStoreConfig(const INIReader &config_reader,
@@ -190,13 +287,14 @@ EloqStoreConfig::EloqStoreConfig(const INIReader &config_reader,
             : config_reader.GetBoolean("store",
                                        "eloq_store_skip_verify_checksum",
                                        FLAGS_eloq_store_skip_verify_checksum);
-    eloqstore_configs_.index_buffer_pool_size =
+    std::string index_buffer_pool_size =
         !CheckCommandLineFlagIsDefault("eloq_store_index_buffer_pool_size")
             ? FLAGS_eloq_store_index_buffer_pool_size
-            : config_reader.GetInteger("store",
-                                       "eloq_store_index_buffer_pool_size",
-                                       FLAGS_eloq_store_index_buffer_pool_size);
-    eloqstore_configs_.index_buffer_pool_size /= eloqstore_configs_.num_threads;
+            : config_reader.GetString("store",
+                                      "eloq_store_index_buffer_pool_size",
+                                      FLAGS_eloq_store_index_buffer_pool_size);
+    eloqstore_configs_.index_buffer_pool_size =
+        parse_size(index_buffer_pool_size) / eloqstore_configs_.num_threads;
     eloqstore_configs_.manifest_limit =
         !CheckCommandLineFlagIsDefault("eloq_store_manifest_limit")
             ? FLAGS_eloq_store_manifest_limit
@@ -259,12 +357,13 @@ EloqStoreConfig::EloqStoreConfig(const INIReader &config_reader,
             : config_reader.GetInteger("store",
                                        "eloq_store_file_amplify_factor",
                                        FLAGS_eloq_store_file_amplify_factor);
-    eloqstore_configs_.local_space_limit =
+    std::string local_space_limit =
         !CheckCommandLineFlagIsDefault("eloq_store_local_space_limit")
             ? FLAGS_eloq_store_local_space_limit
-            : config_reader.GetInteger("store",
-                                       "eloq_store_local_space_limit",
-                                       FLAGS_eloq_store_local_space_limit);
+            : config_reader.GetString("store",
+                                      "eloq_store_local_space_limit",
+                                      FLAGS_eloq_store_local_space_limit);
+    eloqstore_configs_.local_space_limit = parse_size(local_space_limit);
     eloqstore_configs_.reserve_space_ratio =
         !CheckCommandLineFlagIsDefault("eloq_store_reserve_space_ratio")
             ? FLAGS_eloq_store_reserve_space_ratio
