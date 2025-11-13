@@ -318,9 +318,9 @@ bool DataSubstrate::LoadCoreAndNetworkConfig(const INIReader &config_reader)
             : config_reader.GetBoolean("local", "bootstrap", FLAGS_bootstrap);
 
     core_config_.enable_wal =
-        !CheckCommandLineFlagIsDefault("enable_wal")
+        (!core_config_.bootstrap && CheckCommandLineFlagIsDefault("enable_wal")
             ? FLAGS_enable_wal
-            : config_reader.GetBoolean("local", "enable_wal", FLAGS_enable_wal);
+            : config_reader.GetBoolean("local", "enable_wal", FLAGS_enable_wal));
 
     core_config_.enable_data_store =
         !CheckCommandLineFlagIsDefault("enable_data_store")
@@ -388,20 +388,27 @@ bool DataSubstrate::LoadCoreAndNetworkConfig(const INIReader &config_reader)
                                 std::to_string(network_config_.local_port);
     DLOG(INFO) << "Local tx service ip port: " << local_ip_port;
 
-    network_config_.ip_list =
-        !CheckCommandLineFlagIsDefault("ip_port_list")
-            ? FLAGS_ip_port_list
-            : config_reader.Get("cluster", "ip_port_list", local_ip_port);
+    if (core_config_.bootstrap)
+    {
+        network_config_.ip_list = local_ip_port;
+    }
+    else
+    {
+        network_config_.ip_list =
+            !CheckCommandLineFlagIsDefault("ip_port_list")
+                ? FLAGS_ip_port_list
+                : config_reader.Get("cluster", "ip_port_list", local_ip_port);
 
-    network_config_.standby_ip_list =
-        !CheckCommandLineFlagIsDefault("standby_ip_port_list")
-            ? FLAGS_standby_ip_port_list
-            : config_reader.Get("cluster", "standby_ip_port_list", "");
+        network_config_.standby_ip_list =
+            !CheckCommandLineFlagIsDefault("standby_ip_port_list")
+                ? FLAGS_standby_ip_port_list
+                : config_reader.Get("cluster", "standby_ip_port_list", "");
 
-    network_config_.voter_ip_list =
-        !CheckCommandLineFlagIsDefault("voter_ip_port_list")
-            ? FLAGS_voter_ip_port_list
-            : config_reader.Get("cluster", "voter_ip_port_list", "");
+        network_config_.voter_ip_list =
+            !CheckCommandLineFlagIsDefault("voter_ip_port_list")
+                ? FLAGS_voter_ip_port_list
+                : config_reader.Get("cluster", "voter_ip_port_list", "");
+    }
 
     network_config_.cluster_config_file_path =
         !CheckCommandLineFlagIsDefault("cluster_config_file")
