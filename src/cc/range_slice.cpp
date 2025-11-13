@@ -733,8 +733,8 @@ StoreRange::LoadSliceStatus StoreRange::LoadSlice(
                 slice.fetch_slice_cc_->Free();
                 slice.fetch_slice_cc_ = nullptr;
                 pins_.fetch_sub(1, std::memory_order_release);
-                LOG(INFO) << "== 1: LoadSlice retrying for table: "
-                          << tbl_name.StringView();
+                // LOG(INFO) << "== 1: LoadSlice retrying for table: "
+                //          << tbl_name.StringView();
                 return LoadSliceStatus::Retry;
             default:
                 // Abort those ccrequests except the first one which will be
@@ -781,8 +781,8 @@ StoreRange::LoadSliceStatus StoreRange::LoadSlice(
             // it into ccrequest queue. If OOM, the queued request will be
             // aborted. Setting force load to true means that requests will
             // ignore OOM errors, such as DataSyncScanCc.
-            LOG(INFO) << "== 2: LoadSlice retrying for table: "
-                      << tbl_name.StringView();
+            // LOG(INFO) << "== 2: LoadSlice retrying for table: "
+            //          << tbl_name.StringView();
             return LoadSliceStatus::Retry;
         }
 

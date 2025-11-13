@@ -429,8 +429,8 @@ public:
     void AbortCcRequest(CcErrorCode err_code) override
     {
         assert(err_code != CcErrorCode::NO_ERROR);
-        LOG(INFO) << "Abort this FillStoreSliceCc request with error: "
-                  << CcErrorMessage(err_code);
+        DLOG(ERROR) << "Abort this FillStoreSliceCc request with error: "
+                    << CcErrorMessage(err_code);
         bool finish_all = SetError(err_code);
         // Recycle request
         if (finish_all)
