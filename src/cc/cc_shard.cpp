@@ -2934,6 +2934,7 @@ void CcShard::RemoveSubscribedStandby(uint32_t node_id)
         local_shards_.RemoveHeartbeatTargetNode(node_id,
                                                 seq_id_and_term->second.second);
         subscribed_standby_nodes_.erase(node_id);
+        CheckAndFreeUnneededEntries();
     }
 }
 

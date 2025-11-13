@@ -970,6 +970,7 @@ public:
             {
                 ins_res.first->second.first = start_seq_id - 1;
                 ins_res.first->second.second = standby_node_term;
+                CheckAndFreeUnneededEntries();
             }
         }
     }
