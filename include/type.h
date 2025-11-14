@@ -169,57 +169,46 @@ struct TableName
     TableName &operator=(const TableName &) = delete;
 
     TableName(std::string_view name_view, TableType type, TableEngine engine)
-        : name_view_(name_view),
-          own_string_(false),
-          type_(type),
-          engine_(engine)
+        : own_string_(false), type_(type), engine_(engine)
     {
+        new (&name_view_) std::string_view(name_view);
     }
 
     TableName(const char *name_ptr,
               size_t name_len,
               TableType type,
               TableEngine engine)
-        : name_str_(name_ptr, name_len),
-          own_string_(true),
-          type_(type),
-          engine_(engine)
+        : own_string_(true), type_(type), engine_(engine)
     {
+        new (&name_str_) std::string(name_ptr, name_len);
     }
 
     TableName(std::string name_str, TableType type, TableEngine engine)
-        : name_str_(std::move(name_str)),
-          own_string_(true),
-          type_(type),
-          engine_(engine)
+        : own_string_(true), type_(type), engine_(engine)
     {
+        new (&name_str_) std::string(std::move(name_str));
     }
 
     // Copy constructor always creates a string owner
     TableName(const TableName &rhs)
-        : name_str_(rhs.StringView().data(), rhs.StringView().size()),
-          own_string_(true),
-          type_(rhs.type_),
-          engine_(rhs.engine_)
+        : own_string_(true), type_(rhs.type_), engine_(rhs.engine_)
     {
+        new (&name_str_) std::string(rhs.StringView());
     }
 
     // TableName needs to be MoveInsertable in case like
     // std::vector<txservice::TableName>
     TableName(TableName &&rhs) noexcept
+        : own_string_(rhs.own_string_), type_(rhs.type_), engine_(rhs.engine_)
     {
-        if (rhs.own_string_)
+        if (own_string_)
         {
             new (&name_str_) std::string(std::move(rhs.name_str_));
         }
         else
         {
-            name_view_ = rhs.name_view_;
+            new (&name_view_) std::string_view(rhs.name_view_);
         }
-        type_ = rhs.type_;
-        own_string_ = rhs.own_string_;
-        rhs.own_string_ = false;
-        engine_ = rhs.engine_;
     }
 
     TableName &operator=(TableName &&rhs) noexcept
@@ -255,12 +244,11 @@ struct TableName
                 name_str_.~basic_string();
             }
 
-            name_view_ = rhs.StringView();
+            new (&name_view_) std::string_view(rhs.StringView());
         }
 
         type_ = rhs.type_;
         own_string_ = rhs.own_string_;
-        rhs.own_string_ = false;
         engine_ = rhs.engine_;
         return *this;
     }
@@ -382,7 +370,7 @@ struct TableName
                 name_str_.~basic_string();
             }
 
-            name_view_ = other.StringView();
+            new (&name_view_) std::string_view(other.StringView());
         }
 
         type_ = other.type_;
