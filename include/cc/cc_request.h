@@ -3933,6 +3933,11 @@ public:
         return op_type_ == OpType::Terminated;
     }
 
+    uint64_t SchemaVersion() const override
+    {
+        return schema_version_;
+    }
+
     size_t accumulated_scan_cnt_;
     uint64_t accumulated_flush_data_size_{0};
     bool scan_heap_is_full_{false};
@@ -4051,7 +4056,8 @@ public:
             slices_to_scan_.reserve(old_slices_delta_size->size());
             std::for_each(old_slices_delta_size->begin(),
                           old_slices_delta_size->end(),
-                          [&](decltype(*old_slices_delta_size->begin()) &elem) {
+                          [&](decltype(*old_slices_delta_size->begin()) &elem)
+                          {
                               slices_to_scan_.emplace_back(
                                   std::move(elem.first.GetShallowCopy()));
                           });
@@ -4308,6 +4314,11 @@ public:
     {
         assert(!export_base_table_item_);
         return slices_to_scan_.end();
+    }
+
+    uint64_t SchemaVersion() const override
+    {
+        return schema_version_;
     }
 
     std::vector<size_t> accumulated_scan_cnt_;
@@ -8568,7 +8579,8 @@ struct ScanSliceDeltaSizeCcForRangePartition : public CcRequestBase
                                           const TxKey &target_start_key,
                                           const TxKey &target_end_key,
                                           StoreRange *store_range,
-                                          bool is_dirty)
+                                          bool is_dirty,
+                                          uint64_t schema_version)
         : table_name_(table_name),
           node_group_id_(ng_id),
           node_group_term_(ng_term),
@@ -8579,7 +8591,8 @@ struct ScanSliceDeltaSizeCcForRangePartition : public CcRequestBase
           store_range_(store_range),
           is_dirty_(is_dirty),
           has_dml_since_ddl_(false),
-          unfinished_cnt_(core_cnt)
+          unfinished_cnt_(core_cnt),
+          schema_version_(schema_version)
     {
         tx_number_ = txn;
         pause_pos_.resize(core_cnt);
@@ -8746,6 +8759,11 @@ struct ScanSliceDeltaSizeCcForRangePartition : public CcRequestBase
         return has_dml_since_ddl_.load(std::memory_order_relaxed);
     }
 
+    uint64_t SchemaVersion() const override
+    {
+        return schema_version_;
+    }
+
 private:
     const TableName &table_name_;
     uint32_t node_group_id_;
@@ -8787,8 +8805,15 @@ private:
 
     CcErrorCode err_{CcErrorCode::NO_ERROR};
     uint32_t unfinished_cnt_;
+    uint64_t schema_version_;
     std::mutex mux_;
     std::condition_variable cv_;
+
+    template <typename KeyT,
+              typename ValueT,
+              bool VersionedRecord,
+              bool RangePartitioned>
+    friend class TemplateCcMap;
 };
 
 struct ScanDeltaSizeCcForHashPartition : public CcRequestBase
@@ -8800,12 +8825,14 @@ struct ScanDeltaSizeCcForHashPartition : public CcRequestBase
                                     uint64_t scan_ts,
                                     uint64_t ng_id,
                                     int64_t ng_term,
-                                    uint64_t txn)
+                                    uint64_t txn,
+                                    uint64_t schema_version)
         : table_name_(table_name),
           node_group_id_(ng_id),
           node_group_term_(ng_term),
           last_datasync_ts_(last_datasync_ts),
-          scan_ts_(scan_ts)
+          scan_ts_(scan_ts),
+          schema_version_(schema_version)
     {
         tx_number_ = txn;
     }
@@ -8941,6 +8968,11 @@ struct ScanDeltaSizeCcForHashPartition : public CcRequestBase
         memory_usage_ = memory;
     }
 
+    uint64_t SchemaVersion() const override
+    {
+        return schema_version_;
+    }
+
 private:
     const TableName &table_name_;
     uint32_t node_group_id_;
@@ -8954,6 +8986,7 @@ private:
     uint64_t scan_ts_;
     //  Position that we left off during last round of scan.
     TxKey pause_key_;
+    uint64_t schema_version_;
 
     // Number of keys scanned / updated, and per-core memory usage.
     uint64_t scanned_key_count_{0};
@@ -8964,6 +8997,12 @@ private:
     bool finished_{false};
     std::mutex mux_;
     std::condition_variable cv_;
+
+    template <typename KeyT,
+              typename ValueT,
+              bool VersionedRecord,
+              bool RangePartitioned>
+    friend class TemplateCcMap;
 };
 
 struct SampleSubRangeKeysCc : public CcRequestBase

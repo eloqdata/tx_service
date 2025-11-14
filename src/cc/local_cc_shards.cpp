@@ -3502,7 +3502,8 @@ void LocalCcShards::DataSyncForRangePartition(
         start_tx_key,
         end_tx_key,
         store_range,
-        is_dirty);
+        is_dirty,
+        schema_version);
 
     for (size_t i = 0; i < cc_shards_.size(); i++)
     {
@@ -4349,7 +4350,8 @@ void LocalCcShards::DataSyncForHashPartition(
         data_sync_task->data_sync_ts_,
         ng_id,
         ng_term,
-        data_sync_txm->TxNumber());
+        data_sync_txm->TxNumber(),
+        catalog_rec.Schema()->Version());
 
     EnqueueToCcShard(worker_idx, &scan_delta_size_cc);
     scan_delta_size_cc.Wait();
