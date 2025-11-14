@@ -28,9 +28,9 @@
 #include <algorithm>
 #include <atomic>
 #include <cstdint>
-#include <deque>
 #include <functional>
 #include <iostream>
+#include <list>
 #include <map>
 #include <memory>
 #include <string>
@@ -325,13 +325,19 @@ public:
     /**
      * @brief Puts a cc request into the shard's request wait list until memory
      * is avaliable.
+     * @param req The pointer to the cc request.
      */
     void EnqueueWaitListIfMemoryFull(CcRequestBase *req);
     /**
      * @brief Dequeue cc requests from the shard's request wait list to process.
+     * @param deque_all If true, dequeue all the requests in the wait list.
+     * @return True if the wait list is empty, false otherwise.
      */
-    bool DequeueWaitListAfterMemoryFree(bool abort = false,
-                                        bool deque_all = true);
+    bool DequeueWaitListAfterMemoryFree(bool deque_all = false);
+    /**
+     * @brief Abort the cc requests whose tx is holding a range read lock.
+     */
+    void AbortRequestsAfterMemoryFree();
 
     size_t WaitListSizeForMemory();
 
@@ -1139,7 +1145,8 @@ private:
     std::atomic<uint32_t> cc_queue_size_{0};
     std::array<CcRequestBase *, 64> req_buf_;
     std::vector<moodycamel::ProducerToken> thd_token_;
-    std::deque<CcRequestBase *> cc_wait_list_for_memory_;
+    // Cc requests waiting for the free memory.
+    std::list<CcRequestBase *> cc_wait_list_for_memory_;
 
     // all the transactions started on this ccshard. Some txs are Ongoing while
     // others are Available, new transaction request has to traverse the array

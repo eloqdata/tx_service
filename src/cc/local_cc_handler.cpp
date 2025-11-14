@@ -61,7 +61,8 @@ void txservice::LocalCcHandler::AcquireWrite(
     CcHandlerResult<std::vector<AcquireKeyResult>> &hres,
     uint32_t hd_res_idx,
     CcProtocol proto,
-    IsolationLevel iso_level)
+    IsolationLevel iso_level,
+    bool abort_if_oom)
 {
     uint32_t ng_id = Sharder::Instance().ShardToCcNodeGroup(key_shard_code);
     AcquireKeyResult &acquire_result = hres.Value()[hd_res_idx];
@@ -90,7 +91,8 @@ void txservice::LocalCcHandler::AcquireWrite(
                    &hres,
                    hd_res_idx,
                    proto,
-                   iso_level);
+                   iso_level,
+                   abort_if_oom);
         TX_TRACE_ACTION(this, req);
         TX_TRACE_DUMP(req);
 
@@ -115,7 +117,8 @@ void txservice::LocalCcHandler::AcquireWrite(
                                 hres,
                                 hd_res_idx,
                                 proto,
-                                iso_level);
+                                iso_level,
+                                abort_if_oom);
     }
 }
 
@@ -129,7 +132,8 @@ void txservice::LocalCcHandler::AcquireWriteAll(
     bool is_insert,
     CcHandlerResult<AcquireAllResult> &hres,
     CcProtocol proto,
-    CcOperation cc_op)
+    CcOperation cc_op,
+    bool abort_if_oom)
 {
 #ifdef EXT_TX_PROC_ENABLED
     hres.SetToBlock();
@@ -149,7 +153,9 @@ void txservice::LocalCcHandler::AcquireWriteAll(
                    &hres,
                    cc_shards_.Count(),
                    proto,
-                   cc_op);
+                   cc_op,
+                   IsolationLevel::ReadCommitted,
+                   abort_if_oom);
         TX_TRACE_ACTION(this, req);
         TX_TRACE_DUMP(req);
         // The request is dispatched to the first core and then passed to
@@ -169,7 +175,8 @@ void txservice::LocalCcHandler::AcquireWriteAll(
                                    is_insert,
                                    hres,
                                    proto,
-                                   cc_op);
+                                   cc_op,
+                                   abort_if_oom);
     }
 }
 
@@ -184,7 +191,8 @@ void txservice::LocalCcHandler::PostWriteAll(
     uint64_t commit_ts,
     CcHandlerResult<PostProcessResult> &hres,
     OperationType op_type,
-    PostWriteType post_write_type)
+    PostWriteType post_write_type,
+    bool abort_if_oom)
 {
 #ifdef EXT_TX_PROC_ENABLED
     hres.SetToBlock();
@@ -213,7 +221,8 @@ void txservice::LocalCcHandler::PostWriteAll(
                        op_type,
                        &hres,
                        post_write_type,
-                       tx_term);
+                       tx_term,
+                       abort_if_oom);
         }
         else
         {
@@ -227,7 +236,8 @@ void txservice::LocalCcHandler::PostWriteAll(
                        op_type,
                        &hres,
                        post_write_type,
-                       tx_term);
+                       tx_term,
+                       abort_if_oom);
         }
 
         TX_TRACE_ACTION(this, req);
@@ -250,7 +260,8 @@ void txservice::LocalCcHandler::PostWriteAll(
                                 commit_ts,
                                 hres,
                                 op_type,
-                                post_write_type);
+                                post_write_type,
+                                abort_if_oom);
     }
 }
 
@@ -424,7 +435,8 @@ void txservice::LocalCcHandler::Read(const TableName &table_name,
                                      bool is_for_write,
                                      bool is_covering_keys,
                                      bool point_read_on_miss,
-                                     int32_t partition_id)
+                                     int32_t partition_id,
+                                     bool abort_if_oom)
 {
     hres.Value().rec_ = &record;
     uint32_t cc_ng_id = Sharder::Instance().ShardToCcNodeGroup(key_shard_code);
@@ -459,7 +471,8 @@ void txservice::LocalCcHandler::Read(const TableName &table_name,
                    nullptr,
                    false,
                    point_read_on_miss,
-                   partition_id);
+                   partition_id,
+                   abort_if_oom);
         TX_TRACE_ACTION(this, req);
         TX_TRACE_DUMP(req);
         cc_shards_.EnqueueCcRequest(thd_id_, key_shard_code, req);
@@ -486,7 +499,8 @@ void txservice::LocalCcHandler::Read(const TableName &table_name,
                         is_for_write,
                         is_covering_keys,
                         point_read_on_miss,
-                        partition_id);
+                        partition_id,
+                        abort_if_oom);
     }
 }
 
@@ -1650,7 +1664,8 @@ void txservice::LocalCcHandler::ObjectCommand(
     IsolationLevel iso_level,
     txservice::CcProtocol proto,
     bool commit,
-    bool always_redirect)
+    bool always_redirect,
+    bool abort_if_oom)
 {
 #ifdef EXT_TX_PROC_ENABLED
     hres.SetToBlock();
@@ -1691,7 +1706,8 @@ void txservice::LocalCcHandler::ObjectCommand(
                    &hres,
                    proto,
                    iso_level,
-                   commit);
+                   commit,
+                   abort_if_oom);
         cc_shards_.EnqueueCcRequest(thd_id_, key_shard_code, req);
         return;
     }
@@ -1712,7 +1728,8 @@ void txservice::LocalCcHandler::ObjectCommand(
                    &hres,
                    proto,
                    iso_level,
-                   commit);
+                   commit,
+                   abort_if_oom);
         cc_shards_.EnqueueCcRequest(thd_id_, key_shard_code, req);
     }
     else
@@ -1741,7 +1758,8 @@ void txservice::LocalCcHandler::ObjectCommand(
                                  hres,
                                  iso_level,
                                  proto,
-                                 commit);
+                                 commit,
+                                 abort_if_oom);
     }
 }
 

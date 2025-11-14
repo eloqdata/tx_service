@@ -377,7 +377,8 @@ public:
                CcHandlerResult<std::vector<AcquireKeyResult>> *res,
                uint32_t hd_res_idx,
                CcProtocol proto,
-               IsolationLevel iso_level)
+               IsolationLevel iso_level,
+               bool abort_if_oom)
     {
         uint32_t ng_id = Sharder::Instance().ShardToCcNodeGroup(key_shard_code);
         TemplatedCcRequest<AcquireCc, std::vector<AcquireKeyResult>>::Reset(
@@ -393,6 +394,7 @@ public:
         hd_result_idx_ = hd_res_idx;
         is_local_ = true;
         block_by_lock_ = false;
+        abort_if_oom_ = abort_if_oom;
     }
 
     void Reset(const TableName *tname,
@@ -406,11 +408,12 @@ public:
                CcHandlerResult<std::vector<AcquireKeyResult>> *res,
                uint32_t hd_res_idx,
                CcProtocol proto,
-               IsolationLevel iso_level)
+               IsolationLevel iso_level,
+               bool abort_if_oom)
     {
         uint32_t ng_id = Sharder::Instance().ShardToCcNodeGroup(key_shard_code);
         TemplatedCcRequest<AcquireCc, std::vector<AcquireKeyResult>>::Reset(
-            tname, res, ng_id, txn, tx_term, proto);
+            tname, res, ng_id, txn, tx_term, proto, iso_level);
 
         key_ptr_ = nullptr;
         key_str_ = key_str;
@@ -422,6 +425,7 @@ public:
         hd_result_idx_ = hd_res_idx;
         is_local_ = false;
         block_by_lock_ = false;
+        abort_if_oom_ = abort_if_oom;
     }
 
     const void *Key() const
@@ -484,6 +488,11 @@ public:
         block_by_lock_ = val;
     }
 
+    bool AbortIfOom() const override
+    {
+        return abort_if_oom_;
+    }
+
 private:
     const void *key_ptr_;
     const std::string *key_str_;
@@ -502,6 +511,7 @@ private:
     uint32_t hd_result_idx_{0};
     bool is_local_{true};
     bool block_by_lock_{false};
+    bool abort_if_oom_{false};
 };
 
 struct AcquireAllCc : public TemplatedCcRequest<AcquireAllCc, AcquireAllResult>
@@ -526,7 +536,8 @@ public:
                uint16_t core_cnt,
                CcProtocol proto,
                CcOperation cc_op,
-               IsolationLevel iso_level = IsolationLevel::ReadCommitted)
+               IsolationLevel iso_level = IsolationLevel::ReadCommitted,
+               bool abort_if_oom = false)
     {
         TemplatedCcRequest<AcquireAllCc, AcquireAllResult>::Reset(
             tname, res, node_group_id, tx_number, tx_term, proto, iso_level);
@@ -541,6 +552,7 @@ public:
         cce_ptr_.resize(core_cnt, nullptr);
         is_local_ = true;
         res->Value().last_vali_ts_ = 0;
+        abort_if_oom_ = abort_if_oom;
     }
 
     void Reset(const TableName *tname,
@@ -554,7 +566,8 @@ public:
                uint16_t core_cnt,
                CcProtocol proto,
                CcOperation cc_op,
-               IsolationLevel iso_level = IsolationLevel::ReadCommitted)
+               IsolationLevel iso_level = IsolationLevel::ReadCommitted,
+               bool abort_if_oom = false)
     {
         TemplatedCcRequest<AcquireAllCc, AcquireAllResult>::Reset(
             tname, res, node_group_id, tx_number, tx_term, proto, iso_level);
@@ -569,6 +582,7 @@ public:
         cce_ptr_.resize(core_cnt, nullptr);
         is_local_ = false;
         res->Value().last_vali_ts_ = 0;
+        abort_if_oom_ = abort_if_oom;
     }
 
     const void *Key() const
@@ -631,6 +645,11 @@ public:
         res_->Value().last_vali_ts_ = std::max(res_->Value().last_vali_ts_, ts);
     }
 
+    bool AbortIfOom() const override
+    {
+        return abort_if_oom_;
+    }
+
 protected:
     // protects acquire all res in concurrent update from different cores.
     std::mutex mux_;
@@ -649,6 +668,7 @@ private:
     // acquires the lock, the request's execution resumes without further lookup
     // of the cc entry.
     std::vector<LruEntry *> cce_ptr_;
+    bool abort_if_oom_{false};
 };
 
 struct PostWriteCc : public TemplatedCcRequest<PostWriteCc, PostProcessResult>
@@ -908,7 +928,8 @@ public:
                OperationType op_type,
                CcHandlerResult<PostProcessResult> *res,
                PostWriteType commit_type,
-               int64_t tx_term)
+               int64_t tx_term,
+               bool abort_if_oom)
     {
         TemplatedCcRequest<PostWriteAllCc, PostProcessResult>::Reset(
             tname, res, node_group_id, tx_number, tx_term, CcProtocol::OCC);
@@ -923,6 +944,7 @@ public:
         decoded_payload_ = nullptr;
         op_type_ = op_type;
         commit_type_ = commit_type;
+        abort_if_oom_ = abort_if_oom;
     }
 
     void Reset(const TableName *tname,
@@ -934,7 +956,8 @@ public:
                OperationType op_type,
                CcHandlerResult<PostProcessResult> *res,
                PostWriteType commit_type,
-               int64_t tx_term)
+               int64_t tx_term,
+               bool abort_if_oom)
     {
         TemplatedCcRequest<PostWriteAllCc, PostProcessResult>::Reset(
             tname, res, node_group_id, tx_number, tx_term, CcProtocol::OCC);
@@ -949,6 +972,7 @@ public:
         decoded_payload_ = std::move(rec);
         op_type_ = op_type;
         commit_type_ = commit_type;
+        abort_if_oom_ = abort_if_oom;
     }
 
     void Reset(const TableName *tname,
@@ -961,7 +985,8 @@ public:
                OperationType op_type,
                CcHandlerResult<PostProcessResult> *res,
                PostWriteType commit_type,
-               int64_t tx_term)
+               int64_t tx_term,
+               bool abort_if_oom)
     {
         TemplatedCcRequest<PostWriteAllCc, PostProcessResult>::Reset(
             tname, res, node_group_id, tx_number, tx_term, CcProtocol::OCC);
@@ -976,6 +1001,7 @@ public:
         decoded_payload_ = nullptr;
         op_type_ = op_type;
         commit_type_ = commit_type;
+        abort_if_oom_ = abort_if_oom;
     }
 
     uint64_t CommitTs() const
@@ -1045,6 +1071,11 @@ public:
         ccm_ = nullptr;
     }
 
+    bool AbortIfOom() const override
+    {
+        return abort_if_oom_;
+    }
+
 private:
     const void *key_{nullptr};
     const std::string *key_str_{nullptr};
@@ -1066,6 +1097,7 @@ private:
     std::unique_ptr<TxRecord> decoded_payload_{nullptr};
     OperationType op_type_{OperationType::Update};
     PostWriteType commit_type_;
+    bool abort_if_oom_{false};
 };
 
 struct PostReadCc : public TemplatedCcRequest<PostReadCc, PostProcessResult>
@@ -1272,7 +1304,8 @@ public:
                std::vector<VersionTxRecord> *archives = nullptr,
                bool is_in_recovering = false,
                bool point_read_on_miss = false,
-               int32_t partition_id = -1)
+               int32_t partition_id = -1,
+               bool abort_if_oom = false)
     {
         uint32_t ng_id = Sharder::Instance().ShardToCcNodeGroup(key_shard_code);
         TemplatedCcRequest<ReadCc, ReadKeyResult>::Reset(
@@ -1306,6 +1339,7 @@ public:
         {
             table_name_ = tn;
         }
+        abort_if_oom_ = abort_if_oom;
     }
 
     void Reset(const TableName *tn,
@@ -1324,7 +1358,8 @@ public:
                bool is_covering_keys = false,
                std::vector<VersionTxRecord> *archives = nullptr,
                bool point_read_on_miss = false,
-               int32_t partition_id = -1)
+               int32_t partition_id = -1,
+               bool abort_if_oom = false)
     {
         uint32_t ng_id = Sharder::Instance().ShardToCcNodeGroup(key_shard_code);
         TemplatedCcRequest<ReadCc, ReadKeyResult>::Reset(
@@ -1358,6 +1393,7 @@ public:
         {
             table_name_ = tn;
         }
+        abort_if_oom_ = abort_if_oom;
     }
 
     void Reset(const TableName *tn,
@@ -1376,7 +1412,8 @@ public:
                bool is_covering_keys = false,
                std::vector<VersionTxRecord> *archives = nullptr,
                bool point_read_on_miss = false,
-               int32_t partition_id = -1)
+               int32_t partition_id = -1,
+               bool abort_if_oom = false)
     {
         uint32_t ng_id = Sharder::Instance().ShardToCcNodeGroup(key_shard_code);
         TemplatedCcRequest<ReadCc, ReadKeyResult>::Reset(
@@ -1410,6 +1447,7 @@ public:
         {
             table_name_ = tn;
         }
+        abort_if_oom_ = abort_if_oom;
     }
 
     uint32_t KeyShardCode() const
@@ -1533,6 +1571,11 @@ public:
         cache_hit_miss_collected_ = true;
     }
 
+    bool AbortIfOom() const override
+    {
+        return abort_if_oom_;
+    }
+
 private:
     const void *key_ptr_;
     const std::string *key_str_;
@@ -1576,6 +1619,7 @@ private:
 
     // Request will be executed more than once when FetchRecord.
     bool cache_hit_miss_collected_{false};
+    bool abort_if_oom_{false};
 };
 
 enum struct ScanBlockingType
@@ -2911,6 +2955,11 @@ public:
         wait_for_snapshot_cnt_[core_id]++;
     }
 
+    bool AbortIfOom() const override
+    {
+        return true;
+    }
+
 private:
     enum struct RangeKeyType : uint8_t
     {
@@ -3464,7 +3513,7 @@ public:
         {
             // Dequeue a batch ccrequests from wait list if heap is not full
             // anymore every 20 scan batch
-            ccs.DequeueWaitListAfterMemoryFree(false, false);
+            ccs.DequeueWaitListAfterMemoryFree();
         }
 
         if (static_cast<size_t>(current_node_group_idx_) < node_groups_.size())
@@ -3511,7 +3560,7 @@ public:
             // this is the end of the defrag heap cc scan
             heap_->SetDefragHeapCcOnFly(false);
             // deque cc request in wait list after defragmentation
-            ccs.DequeueWaitListAfterMemoryFree();
+            ccs.DequeueWaitListAfterMemoryFree(true);
 
             int64_t allocated, committed;
             mi_thread_stats(&allocated, &committed);
@@ -6569,7 +6618,8 @@ public:
                CcHandlerResult<ObjectCommandResult> *res,
                CcProtocol proto,
                IsolationLevel iso_level,
-               bool commit)
+               bool commit,
+               bool abort_if_oom)
     {
         TemplatedCcRequest<ApplyCc, ObjectCommandResult>::Reset(
             table_name,
@@ -6600,6 +6650,7 @@ public:
         apply_and_commit_ = commit;
         block_type_ = ApplyBlockType::NoBlocking;
         cache_hit_miss_collected_ = false;
+        abort_if_oom_ = abort_if_oom;
     }
 
     // for remote
@@ -6614,7 +6665,8 @@ public:
                CcHandlerResult<ObjectCommandResult> *res,
                CcProtocol proto,
                IsolationLevel iso_level,
-               bool commit)
+               bool commit,
+               bool abort_if_oom)
     {
         TemplatedCcRequest<ApplyCc, ObjectCommandResult>::Reset(
             table_name,
@@ -6647,6 +6699,7 @@ public:
         block_type_ = ApplyBlockType::NoBlocking;
         apply_and_commit_ = commit;
         cache_hit_miss_collected_ = false;
+        abort_if_oom_ = abort_if_oom;
     }
 
     bool IsLocal() const
@@ -6746,6 +6799,11 @@ public:
         return schema_version_;
     }
 
+    bool AbortIfOom() const override
+    {
+        return abort_if_oom_;
+    }
+
     union
     {
         LocalTuple local_input_;
@@ -6791,6 +6849,7 @@ public:
 
     // Request will be executed more than once when FetchRecord.
     bool cache_hit_miss_collected_{false};
+    bool abort_if_oom_{false};
 };
 
 struct UploadTxCommandsCc
@@ -7321,6 +7380,12 @@ struct RequestAborterCc : public CcRequestBase
     {
         for (CcRequestBase *req : reqs_)
         {
+            if (err_code_ == CcErrorCode::OUT_OF_MEMORY && !req->AbortIfOom())
+            {
+                // Re-enqueue this request to the shard.
+                ccs.Enqueue(ccs.LocalCoreId(), req);
+                continue;
+            }
             req->AbortCcRequest(err_code_);
         }
 
@@ -7618,6 +7683,11 @@ public:
     UploadBatchType Kind()
     {
         return data_type_;
+    }
+
+    bool AbortIfOom() const override
+    {
+        return true;
     }
 
 private:
@@ -8153,6 +8223,11 @@ public:
         return partitioned_slice_data_[core_id];
     }
 
+    bool AbortIfOom() const override
+    {
+        return true;
+    }
+
 private:
     uint16_t core_cnt_;
     const TableName *table_name_{nullptr};
@@ -8427,14 +8502,10 @@ public:
                 }
                 else
                 {
-#ifndef ON_KEY_OBJECT
                     // Reach to the tail ccpage, but the allocated memory is
                     // still larger than the heap threshold, just abort the
                     // waiting ccrequests.
-                    ccs.DequeueWaitListAfterMemoryFree(true);
-#else
-                    // Waiting until have free memory.
-#endif
+                    ccs.AbortRequestsAfterMemoryFree();
 
                     // Notify the checkpointer thread to do checkpoint if there
                     // is not freeable entries to be kicked out from ccmap and
@@ -8454,8 +8525,7 @@ public:
             else
             {
                 // Get the free memory, re-run a batch of the waiting ccrequest.
-                bool wait_list_empty =
-                    ccs.DequeueWaitListAfterMemoryFree(false, false);
+                bool wait_list_empty = ccs.DequeueWaitListAfterMemoryFree();
                 if (!wait_list_empty)
                 {
                     ccs.Enqueue(this);
@@ -8471,8 +8541,7 @@ public:
             // There is available memory on this shard, re-run a batch of the
             // waiting ccrequest if has any waiting request, otherwise, finish
             // this shard clean ccrequests.
-            bool wait_list_empty =
-                ccs.DequeueWaitListAfterMemoryFree(false, false);
+            bool wait_list_empty = ccs.DequeueWaitListAfterMemoryFree();
             if (!wait_list_empty)
             {
                 ccs.Enqueue(this);

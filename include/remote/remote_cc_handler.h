@@ -59,7 +59,8 @@ public:
                       CcHandlerResult<std::vector<AcquireKeyResult>> &hres,
                       uint32_t hd_res_idx,
                       CcProtocol proto = CcProtocol::OCC,
-                      IsolationLevel iso_level = IsolationLevel::ReadCommitted);
+                      IsolationLevel iso_level = IsolationLevel::ReadCommitted,
+                      bool abort_if_oom = false);
 
     void AcquireWriteAll(uint32_t src_node_id,
                          const TableName &table_name,
@@ -71,7 +72,8 @@ public:
                          bool is_insert,
                          CcHandlerResult<AcquireAllResult> &hres,
                          CcProtocol proto,
-                         CcOperation cc_op);
+                         CcOperation cc_op,
+                         bool abort_if_oom);
 
     void PostWrite(uint32_t src_node_id,
                    uint64_t tx_number,
@@ -95,7 +97,8 @@ public:
                       uint64_t commit_ts,
                       CcHandlerResult<PostProcessResult> &hres,
                       OperationType op_type,
-                      PostWriteType post_write_type);
+                      PostWriteType post_write_type,
+                      bool abort_if_oom);
 
     void PostRead(uint32_t src_node_id,
                   uint64_t tx_number,
@@ -128,7 +131,8 @@ public:
               bool is_for_write = false,
               bool is_covering_keys = false,
               bool point_read_on_miss = false,
-              int32_t partition_id = -1);
+              int32_t partition_id = -1,
+              bool abort_if_oom = false);
 
     void ReadOutside(int64_t tx_term,
                      uint16_t command_id,
@@ -316,7 +320,8 @@ public:
                        CcHandlerResult<ObjectCommandResult> &hres,
                        IsolationLevel iso_level,
                        CcProtocol proto,
-                       bool commit);
+                       bool commit,
+                       bool abort_if_oom);
 
     void PublishMessage(uint64_t ng_id,
                         int64_t tx_term,

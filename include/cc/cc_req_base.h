@@ -92,6 +92,11 @@ public:
         return 0;
     }
 
+    virtual bool AbortIfOom() const
+    {
+        return false;
+    }
+
 protected:
     CcRequestBase() = default;
 

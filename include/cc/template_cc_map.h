@@ -7701,6 +7701,11 @@ public:
 
         if (!success)
         {
+            // The is used for send range cache to the future owner during range
+            // split. If the memory is not enough, we should abort the request
+            // to avoid blocking the range split.
+            // This is a performance optimization, and it does't matter if the
+            // request is aborted.
             shard_->EnqueueWaitListIfMemoryFull(&req);
             return false;
         }

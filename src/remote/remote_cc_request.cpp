@@ -123,7 +123,8 @@ void txservice::remote::RemoteAcquire::Reset(
                      &cc_res_,
                      req.vec_idx(),
                      ToLocalType::ConvertProtocol(req.protocol()),
-                     ToLocalType::ConvertIsolation(req.iso_level()));
+                     ToLocalType::ConvertIsolation(req.iso_level()),
+                     req.abort_if_oom());
 
     input_msg_ = std::move(input_msg);
 
@@ -238,7 +239,9 @@ void txservice::remote::RemoteAcquireAll::Reset(
                         &cc_res_,
                         Sharder::Instance().GetLocalCcShardsCount(),
                         ToLocalType::ConvertProtocol(req.protocol()),
-                        ToLocalType::ConvertCcOperation(req.cc_op()));
+                        ToLocalType::ConvertCcOperation(req.cc_op()),
+                        txservice::IsolationLevel::ReadCommitted,
+                        req.abort_if_oom());
 
     input_msg_ = std::move(input_msg);
 
@@ -459,7 +462,8 @@ void txservice::remote::RemoteRead::Reset(std::unique_ptr<CcMessage> input_msg)
                       req.is_covering_keys(),
                       nullptr,
                       req.point_read_on_miss(),
-                      req.partition_id());
+                      req.partition_id(),
+                      req.abort_if_oom());
     }
     else
     {
@@ -482,7 +486,11 @@ void txservice::remote::RemoteRead::Reset(std::unique_ptr<CcMessage> input_msg)
                       ToLocalType::ConvertIsolation(req.iso_level()),
                       ToLocalType::ConvertProtocol(req.protocol()),
                       req.is_for_write(),
-                      req.is_covering_keys());
+                      req.is_covering_keys(),
+                      nullptr,
+                      false,
+                      -1,
+                      req.abort_if_oom());
     }
 
     input_msg_ = std::move(input_msg);
@@ -702,7 +710,8 @@ void txservice::remote::RemotePostWriteAll::Reset(
                           op_type,
                           &cc_res_,
                           write_type,
-                          tx_term);
+                          tx_term,
+                          post_write_all.abort_if_oom());
 
     input_msg_ = std::move(input_msg);
 
@@ -2232,7 +2241,8 @@ void txservice::remote::RemoteApplyCc::Reset(
                    &cc_res_,
                    ToLocalType::ConvertProtocol(req.protocol()),
                    ToLocalType::ConvertIsolation(req.iso_level()),
-                   req.apply_and_commit());
+                   req.apply_and_commit(),
+                   req.abort_if_oom());
 
     input_msg_ = std::move(input_msg);
 
