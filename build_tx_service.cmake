@@ -113,6 +113,7 @@ execute_process(
     WORKING_DIRECTORY ${LOG_PROTO_SRC}
 )
 
+set(ABSL_ENABLE_INSTALL ON CACHE INTERNAL "Install Abseil libs" FORCE)
 add_subdirectory(tx_service/abseil-cpp)
 
 message(${TX_SERVICE_SOURCE_DIR})
@@ -331,6 +332,7 @@ if (FORK_HM_PROCESS)
             GIT_TAG yaml-cpp-0.7.0 # Can be a tag (yaml-cpp-x.x.x), a commit hash, or a branch name (master)
     )
     FetchContent_MakeAvailable(yaml-cpp)
+    install(TARGETS yaml-cpp EXPORT yaml-cppTargets DESTINATION lib)
     set(HOST_MANAGER_LINK_LIB ${HOST_MANAGER_LINK_LIB} yaml-cpp::yaml-cpp)
 
     include_directories(${HOST_MANAGER_INCLUDE_DIR})
