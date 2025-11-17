@@ -176,14 +176,16 @@ public:
     virtual bool FetchTable(const TableName &table_name,
                             std::string &schema_image,
                             bool &found,
-                            uint64_t &version_ts) = 0;
+                            uint64_t &version_ts,
+                            const std::function<void()> *yield_fptr = nullptr,
+                            const std::function<void()> *resume_fptr = nullptr) = 0;
 
     bool FetchTable(const txservice::TableName &table_name,
                     std::string &schema_image,
                     bool &found)
     {
         uint64_t version_ts;
-        return FetchTable(table_name, schema_image, found, version_ts);
+        return FetchTable(table_name, schema_image, found, version_ts, nullptr, nullptr);
     }
 
     virtual void FetchCurrentTableStatistics(
@@ -236,8 +238,12 @@ public:
 
     //-- database
     virtual bool UpsertDatabase(std::string_view db,
-                                std::string_view definition) = 0;
-    virtual bool DropDatabase(std::string_view db) = 0;
+                                std::string_view definition,
+                                const std::function<void()> *yield_fptr = nullptr,
+                                const std::function<void()> *resume_fptr = nullptr) = 0;
+    virtual bool DropDatabase(std::string_view db,
+                              const std::function<void()> *yield_fptr = nullptr,
+                              const std::function<void()> *resume_fptr = nullptr) = 0;
     virtual bool FetchDatabase(
         std::string_view db,
         std::string &definition,

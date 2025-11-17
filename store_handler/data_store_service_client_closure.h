@@ -2582,12 +2582,18 @@ struct FetchTableCallbackData : public SyncCallbackData
     FetchTableCallbackData() = default;
     ~FetchTableCallbackData() = default;
 
-    void Reset(std::string &schema_image, bool &found, uint64_t &version_ts)
+    void Reset(std::string &schema_image,
+               bool &found,
+               uint64_t &version_ts,
+               const std::function<void()> *yield_fptr = nullptr,
+               const std::function<void()> *resume_fptr = nullptr)
     {
         SyncCallbackData::Reset();
         schema_image_ = &schema_image;
         found_ = &found;
         version_ts_ = &version_ts;
+        yield_fptr_ = yield_fptr;
+        resume_fptr_ = resume_fptr;
     }
 
     void Clear() override
@@ -2596,11 +2602,39 @@ struct FetchTableCallbackData : public SyncCallbackData
         schema_image_ = nullptr;
         found_ = nullptr;
         version_ts_ = nullptr;
+        yield_fptr_ = nullptr;
+        resume_fptr_ = nullptr;
+    }
+
+    void Wait() override
+    {
+        if (yield_fptr_ != nullptr)
+        {
+            (*yield_fptr_)();
+        }
+        else
+        {
+            SyncCallbackData::Wait();
+        }
+    }
+
+    void Notify() override
+    {
+        if (resume_fptr_ != nullptr)
+        {
+            (*resume_fptr_)();
+        }
+        else
+        {
+            SyncCallbackData::Notify();
+        }
     }
 
     std::string *schema_image_;
     bool *found_;
     uint64_t *version_ts_;
+    const std::function<void()> *yield_fptr_;
+    const std::function<void()> *resume_fptr_;
 };
 
 void FetchTableCallback(void *data,
@@ -2781,6 +2815,134 @@ void FetchAllDatabaseCallback(void *data,
                               ::google::protobuf::Closure *closure,
                               DataStoreServiceClient &client,
                               const remote::CommonResult &result);
+
+/**
+ * Callback data for upserting database information.
+ *
+ * Extends SyncCallbackData to include yield/resume function pointers
+ * for cooperative scheduling.
+ */
+struct UpsertDatabaseCallbackData : public SyncCallbackData
+{
+    UpsertDatabaseCallbackData() = default;
+    ~UpsertDatabaseCallbackData() = default;
+
+    void Reset(const std::function<void()> *yield_fptr = nullptr,
+               const std::function<void()> *resume_fptr = nullptr)
+    {
+        SyncCallbackData::Reset();
+        yield_fptr_ = yield_fptr;
+        resume_fptr_ = resume_fptr;
+    }
+
+    void Clear() override
+    {
+        SyncCallbackData::Clear();
+        yield_fptr_ = nullptr;
+        resume_fptr_ = nullptr;
+    }
+
+    void Wait() override
+    {
+        if (yield_fptr_ != nullptr)
+        {
+            (*yield_fptr_)();
+        }
+        else
+        {
+            SyncCallbackData::Wait();
+        }
+    }
+
+    void Notify() override
+    {
+        if (resume_fptr_ != nullptr)
+        {
+            (*resume_fptr_)();
+        }
+        else
+        {
+            SyncCallbackData::Notify();
+        }
+    }
+
+    const std::function<void()> *yield_fptr_;
+    const std::function<void()> *resume_fptr_;
+};
+
+/**
+ * Callback data for dropping database information.
+ *
+ * Extends SyncCallbackData to include yield/resume function pointers
+ * for cooperative scheduling.
+ */
+struct DropDatabaseCallbackData : public SyncCallbackData
+{
+    DropDatabaseCallbackData() = default;
+    ~DropDatabaseCallbackData() = default;
+
+    void Reset(const std::function<void()> *yield_fptr = nullptr,
+               const std::function<void()> *resume_fptr = nullptr)
+    {
+        SyncCallbackData::Reset();
+        yield_fptr_ = yield_fptr;
+        resume_fptr_ = resume_fptr;
+    }
+
+    void Clear() override
+    {
+        SyncCallbackData::Clear();
+        yield_fptr_ = nullptr;
+        resume_fptr_ = nullptr;
+    }
+
+    void Wait() override
+    {
+        if (yield_fptr_ != nullptr)
+        {
+            (*yield_fptr_)();
+        }
+        else
+        {
+            SyncCallbackData::Wait();
+        }
+    }
+
+    void Notify() override
+    {
+        if (resume_fptr_ != nullptr)
+        {
+            (*resume_fptr_)();
+        }
+        else
+        {
+            SyncCallbackData::Notify();
+        }
+    }
+
+    const std::function<void()> *yield_fptr_;
+    const std::function<void()> *resume_fptr_;
+};
+
+/**
+ * Callback for upserting database information.
+ *
+ * Handles the completion of database upsert operations and processes the result.
+ */
+void UpsertDatabaseCallback(void *data,
+                            ::google::protobuf::Closure *closure,
+                            DataStoreServiceClient &client,
+                            const remote::CommonResult &result);
+
+/**
+ * Callback for dropping database information.
+ *
+ * Handles the completion of database drop operations and processes the result.
+ */
+void DropDatabaseCallback(void *data,
+                          ::google::protobuf::Closure *closure,
+                          DataStoreServiceClient &client,
+                          const remote::CommonResult &result);
 
 /**
  * Callback data for discovering all table names.

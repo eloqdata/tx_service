@@ -96,7 +96,9 @@ public:
     bool FetchTable(const txservice::TableName &table_name,
                     std::string &schema_image,
                     bool &found,
-                    uint64_t &version_ts) const override;
+                    uint64_t &version_ts,
+                    const std::function<void()> *yield_fptr = nullptr,
+                    const std::function<void()> *resume_fptr = nullptr) const override;
 
     void FetchCurrentTableStatistics(
         const txservice::TableName &ccm_table_name,
@@ -145,8 +147,12 @@ public:
 
     //-- database
     bool UpsertDatabase(std::string_view db,
-                        std::string_view definition) const override;
-    bool DropDatabase(std::string_view db) const override;
+                        std::string_view definition,
+                        const std::function<void()> *yield_fptr = nullptr,
+                        const std::function<void()> *resume_fptr = nullptr) const override;
+    bool DropDatabase(std::string_view db,
+                      const std::function<void()> *yield_fptr = nullptr,
+                      const std::function<void()> *resume_fptr = nullptr) const override;
     bool FetchDatabase(
         std::string_view db,
         std::string &definition,

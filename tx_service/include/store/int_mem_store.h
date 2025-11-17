@@ -139,7 +139,9 @@ public:
     bool FetchTable(const txservice::TableName &table_name,
                     std::string &schema_image,
                     bool &found,
-                    uint64_t &version_ts) override
+                    uint64_t &version_ts,
+                    const std::function<void()> *yield_fptr = nullptr,
+                    const std::function<void()> *resume_fptr = nullptr) override
     {
         assert(false);
         return false;
@@ -156,12 +158,16 @@ public:
 
     //-- database
     bool UpsertDatabase(std::string_view db,
-                        std::string_view definition) override
+                        std::string_view definition,
+                        const std::function<void()> *yield_fptr = nullptr,
+                        const std::function<void()> *resume_fptr = nullptr) override
     {
         assert(false);
         return false;
     }
-    bool DropDatabase(std::string_view db) override
+    bool DropDatabase(std::string_view db,
+                      const std::function<void()> *yield_fptr = nullptr,
+                      const std::function<void()> *resume_fptr = nullptr) override
     {
         assert(false);
         return false;
