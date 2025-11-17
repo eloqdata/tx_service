@@ -551,6 +551,20 @@ public:
         forward_write_cnt_ = 0;
     }
 
+    bool HasRangeReadLock() const
+    {
+        for (const auto &[cce_addr, read_entry_pair] : meta_data_rset_)
+        {
+            if (read_entry_pair.second != catalog_ccm_name_sv &&
+                read_entry_pair.second != range_bucket_ccm_name_sv &&
+                read_entry_pair.second != cluster_config_ccm_name_sv)
+            {
+                return true;
+            }
+        }
+        return false;
+    }
+
 private:
     /**
      * @brief Apply an operation to an existing wset_entry.

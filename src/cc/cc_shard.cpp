@@ -377,36 +377,52 @@ void CcShard::Enqueue(uint32_t thd_id, uint32_t shard_code, CcRequestBase *req)
 
 void CcShard::EnqueueWaitListIfMemoryFull(CcRequestBase *req)
 {
-    cc_wait_list_for_memory_.push_back(req);
+    cc_wait_list_for_memory_.emplace_back(req);
 }
 
-bool CcShard::DequeueWaitListAfterMemoryFree(bool abort, bool deque_all)
+bool CcShard::DequeueWaitListAfterMemoryFree(bool deque_all)
 {
     if (cc_wait_list_for_memory_.size() == 0)
     {
         return true;
     }
 
+    uint32_t dequeue_cnt = 0;
     auto it = cc_wait_list_for_memory_.begin();
-    for (uint32_t dequeue_cnt = 0; it != cc_wait_list_for_memory_.end() &&
-                                   (abort || deque_all || dequeue_cnt < 20);
-         ++it)
+    for (; it != cc_wait_list_for_memory_.end() &&
+           (deque_all || dequeue_cnt < 20);)
     {
-        if (abort)
-        {
-            (*it)->AbortCcRequest(CcErrorCode::OUT_OF_MEMORY);
-        }
-        else
-        {
-            this->Enqueue((*it));
-            ++dequeue_cnt;
-        }
+        this->Enqueue(LocalCoreId(), (*it));
+        ++it;
+        ++dequeue_cnt;
     }
 
     bool is_empty = it == cc_wait_list_for_memory_.end();
     cc_wait_list_for_memory_.erase(cc_wait_list_for_memory_.begin(), it);
 
     return is_empty;
+}
+
+void CcShard::AbortRequestsAfterMemoryFree()
+{
+    if (cc_wait_list_for_memory_.size() == 0)
+    {
+        return;
+    }
+
+    for (auto req_it = cc_wait_list_for_memory_.begin();
+         req_it != cc_wait_list_for_memory_.end();)
+    {
+        if ((*req_it)->AbortIfOom())
+        {
+            (*req_it)->AbortCcRequest(CcErrorCode::OUT_OF_MEMORY);
+            req_it = cc_wait_list_for_memory_.erase(req_it);
+        }
+        else
+        {
+            ++req_it;
+        }
+    }
 }
 
 size_t CcShard::WaitListSizeForMemory()

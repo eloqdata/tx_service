@@ -5725,7 +5725,8 @@ void MultiObjectCommandOp::Forward(TransactionExecution *txm)
                 txm->iso_level_,
                 txm->protocol_,
                 commit,
-                tx_req_->always_redirect_);
+                tx_req_->always_redirect_,
+                txm->HoldingRangeReadLock());
 
             if (hd_res.Value().is_local_)
             {

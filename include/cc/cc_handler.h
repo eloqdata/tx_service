@@ -83,6 +83,7 @@ public:
      * @param is_insert Whether or not the write operation is an insert
      * @param hres Result handler of the request
      * @param proto Concurrency control protocol
+     * @param abort_if_oom Whether or not to abort the request if out of memory
      */
     virtual void AcquireWrite(
         const TableName &table_name,
@@ -97,7 +98,8 @@ public:
         CcHandlerResult<std::vector<AcquireKeyResult>> &hres,
         uint32_t hd_res_idx,
         CcProtocol proto,
-        IsolationLevel iso_level) = 0;
+        IsolationLevel iso_level,
+        bool abort_if_oom) = 0;
 
     /**
      * @brief Acquires write locks for the input key in all shards. This method
@@ -114,6 +116,7 @@ public:
      * @param is_insert Whether or not the write operation is an insert
      * @param hres Result handler of the request
      * @param proto Concurrency control protocol, 2PL or OCC/MVCC
+     * @param abort_if_oom Whether or not to abort the request if out of memory
      */
     virtual void AcquireWriteAll(const TableName &table_name,
                                  const TxKey &key,
@@ -124,7 +127,8 @@ public:
                                  bool is_insert,
                                  CcHandlerResult<AcquireAllResult> &hres,
                                  CcProtocol proto,
-                                 CcOperation cc_op) = 0;
+                                 CcOperation cc_op,
+                                 bool abort_if_oom) = 0;
 
     virtual void PostWriteAll(const TableName &table_name,
                               const TxKey &key,
@@ -136,7 +140,8 @@ public:
                               uint64_t ts,
                               CcHandlerResult<PostProcessResult> &hres,
                               OperationType op_type,
-                              PostWriteType post_write_type) = 0;
+                              PostWriteType post_write_type,
+                              bool abort_if_oom) = 0;
 
     /**
      * @brief Post-processes a write key. Post-processing clears the write lock,
@@ -217,6 +222,7 @@ public:
      * @param hres Result handler of the read request
      * @param iso_level Isolation level
      * @param proto Concurrency control (cc) protocol
+     * @param abort_if_oom Whether or not to abort the request if out of memory
      */
     virtual void Read(const TableName &table_name,
                       const uint64_t schema_version,
@@ -234,7 +240,8 @@ public:
                       bool is_for_write = false,
                       bool is_covering_keys = false,
                       bool point_read_on_miss = false,
-                      int32_t partition_id = -1) = 0;
+                      int32_t partition_id = -1,
+                      bool abort_if_oom = false) = 0;
 
     /**
      * @brief Brings the previously-read key's record into the cc map for
@@ -493,6 +500,7 @@ public:
      * @param proto
      * @param commit if true, not just execute the command to get the result,
      * but also commit it on the object
+     * @param abort_if_oom Whether or not to abort the request if out of memory
      */
     virtual void ObjectCommand(const TableName &table_name,
                                const uint64_t schema_version,
@@ -507,7 +515,8 @@ public:
                                IsolationLevel iso_level,
                                CcProtocol proto,
                                bool commit,
-                               bool always_redirect) = 0;
+                               bool always_redirect,
+                               bool abort_if_oom) = 0;
 
     virtual void PublishMessage(uint64_t ng_id,
                                 int64_t tx_term,

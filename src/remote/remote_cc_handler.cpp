@@ -49,7 +49,8 @@ void txservice::remote::RemoteCcHandler::AcquireWrite(
     CcHandlerResult<std::vector<AcquireKeyResult>> &hres,
     uint32_t hd_res_idx,
     CcProtocol proto,
-    IsolationLevel iso_level)
+    IsolationLevel iso_level,
+    bool abort_if_oom)
 {
     /*message AcquireRequest
     {
@@ -88,6 +89,7 @@ void txservice::remote::RemoteCcHandler::AcquireWrite(
     acq->set_key_shard_code(key_shard_code);
     acq->set_protocol(ToRemoteType::ConvertProtocol(proto));
     acq->set_iso_level(ToRemoteType::ConvertIsolation(iso_level));
+    acq->set_abort_if_oom(abort_if_oom);
 
     stream_sender_.SendMessageToNg(dest_ng_id, send_msg, &hres);
 }
@@ -103,7 +105,8 @@ void txservice::remote::RemoteCcHandler::AcquireWriteAll(
     bool is_insert,
     CcHandlerResult<AcquireAllResult> &hres,
     CcProtocol proto,
-    CcOperation cc_op)
+    CcOperation cc_op,
+    bool abort_if_oom)
 {
     CcMessage send_msg;
 
@@ -141,6 +144,7 @@ void txservice::remote::RemoteCcHandler::AcquireWriteAll(
     acq_all->set_insert(is_insert);
     acq_all->set_protocol(ToRemoteType::ConvertProtocol(proto));
     acq_all->set_cc_op(ToRemoteType::ConvertCcOperation(cc_op));
+    acq_all->set_abort_if_oom(abort_if_oom);
 
     stream_sender_.SendMessageToNg(node_group_id, send_msg, &hres);
 }
@@ -206,7 +210,8 @@ void txservice::remote::RemoteCcHandler::PostWriteAll(
     uint64_t commit_ts,
     CcHandlerResult<PostProcessResult> &hres,
     OperationType op_type,
-    PostWriteType post_write_type)
+    PostWriteType post_write_type,
+    bool abort_if_oom)
 {
     CcMessage send_msg;
 
@@ -259,6 +264,7 @@ void txservice::remote::RemoteCcHandler::PostWriteAll(
     CommitType commit_type =
         ToRemoteType::ConvertPostWriteType(post_write_type);
     post_write_all->set_commit_type(commit_type);
+    post_write_all->set_abort_if_oom(abort_if_oom);
 
     stream_sender_.SendMessageToNg(ng_id, send_msg, &hres);
 }
@@ -321,7 +327,8 @@ void txservice::remote::RemoteCcHandler::Read(
     bool is_for_write,
     bool is_covering_keys,
     bool point_read_on_miss,
-    int32_t partition_id)
+    int32_t partition_id,
+    bool abort_if_oom)
 {
     CcMessage send_msg;
 
@@ -373,6 +380,7 @@ void txservice::remote::RemoteCcHandler::Read(
 
     read->set_ts(ts);
     read->set_schema_version(schema_version);
+    read->set_abort_if_oom(abort_if_oom);
 
     stream_sender_.SendMessageToNg(dest_ng_id, send_msg, &hres);
 }
@@ -1049,7 +1057,8 @@ void txservice::remote::RemoteCcHandler::ObjectCommand(
     CcHandlerResult<ObjectCommandResult> &hres,
     IsolationLevel iso_level,
     CcProtocol proto,
-    bool commit)
+    bool commit,
+    bool abort_if_oom)
 {
     CcMessage send_msg;
 
@@ -1076,6 +1085,7 @@ void txservice::remote::RemoteCcHandler::ObjectCommand(
     apply_req->set_tx_ts(tx_ts);
     apply_req->set_apply_and_commit(commit);
     apply_req->set_schema_version(schema_version);
+    apply_req->set_abort_if_oom(abort_if_oom);
 
     apply_req->clear_cmd();
     std::string *cmd_str = apply_req->mutable_cmd();

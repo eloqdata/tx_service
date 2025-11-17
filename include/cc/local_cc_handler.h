@@ -54,7 +54,8 @@ public:
                       CcHandlerResult<std::vector<AcquireKeyResult>> &hres,
                       uint32_t hd_res_idx,
                       CcProtocol proto,
-                      IsolationLevel iso_level) override;
+                      IsolationLevel iso_level,
+                      bool abort_if_oom) override;
 
     void AcquireWriteAll(const TableName &table_name,
                          const TxKey &key,
@@ -65,7 +66,8 @@ public:
                          bool is_insert,
                          CcHandlerResult<AcquireAllResult> &hres,
                          CcProtocol proto,
-                         CcOperation cc_op) override;
+                         CcOperation cc_op,
+                         bool abort_if_oom) override;
 
     void PostWriteAll(const TableName &table_name,
                       const TxKey &key,
@@ -77,7 +79,8 @@ public:
                       uint64_t commit_ts,
                       CcHandlerResult<PostProcessResult> &hres,
                       OperationType op_type,
-                      PostWriteType post_write_type) override;
+                      PostWriteType post_write_type,
+                      bool abort_if_oom) override;
 
     /// <summary>
     /// Installs the committed write and releases the write intention/lock after
@@ -127,6 +130,7 @@ public:
     /// <param name="ts"></param>
     /// <param name="hres"></param>
     /// <param name="proto"></param>
+    /// <param name="abort_if_oom"></param>
     void Read(const TableName &table_name,
               const uint64_t schema_version,
               const TxKey &key,
@@ -143,7 +147,8 @@ public:
               bool is_for_write = false,
               bool is_covering_keys = false,
               bool point_read_on_miss = false,
-              int32_t partition_id = -1) override;
+              int32_t partition_id = -1,
+              bool abort_if_oom = false) override;
 
     void ReadOutside(int64_t tx_term,
                      uint16_t command_id,
@@ -366,7 +371,8 @@ public:
                        IsolationLevel iso_level,
                        CcProtocol proto,
                        bool commit,
-                       bool always_redirect) override;
+                       bool always_redirect,
+                       bool abort_if_oom) override;
 
     void PublishMessage(uint64_t ng_id,
                         int64_t tx_term,
