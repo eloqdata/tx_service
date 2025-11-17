@@ -37,6 +37,7 @@
 #include "range_bucket_key_record.h"
 #include "range_slice.h"
 #include "sharder.h"
+#include "spinlock.h"
 #include "tx_key.h"
 #include "tx_record.h"
 #include "tx_serialize.h"
@@ -429,7 +430,7 @@ public:
 
     StoreRange *PinStoreRange()
     {
-        std::shared_lock<std::shared_mutex> lk(mux_);
+        std::shared_lock<WritePreferSharedMutex> lk(mux_);
         StoreRange *store_range = RangeSlices();
         if (store_range != nullptr)
         {
@@ -441,7 +442,7 @@ public:
 
     void UnPinStoreRange()
     {
-        std::shared_lock<std::shared_mutex> lk(mux_);
+        std::shared_lock<WritePreferSharedMutex> lk(mux_);
         StoreRange *store_range = RangeSlices();
         if (store_range != nullptr)
         {
@@ -474,13 +475,13 @@ public:
 
     uint64_t GetLastSyncTs()
     {
-        std::shared_lock<std::shared_mutex> lk(mux_);
+        std::shared_lock<WritePreferSharedMutex> lk(mux_);
         return last_sync_ts_;
     }
 
     void UpdateLastDataSyncTS(uint64_t last_sync_ts)
     {
-        std::unique_lock<std::shared_mutex> lk(mux_);
+        std::unique_lock<WritePreferSharedMutex> lk(mux_);
 
         if (last_sync_ts > last_sync_ts_)
         {
@@ -504,8 +505,9 @@ protected:
     // Protects range_slices_, fetch_range_slices_cc_
     // Any update on these pointers requres unique lock on mux. But updating
     // the object that these pointers point to only requires shared lock.
-    std::shared_mutex mux_;
+    // std::shared_mutex mux_;
 
+    WritePreferSharedMutex mux_;
     std::unique_ptr<FetchRangeSlicesReq> fetch_range_slices_req_{nullptr};
 
     template <typename KeyT>
@@ -532,7 +534,7 @@ public:
                           std::unique_ptr<TemplateStoreRange<KeyT>> slices)
     {
         range_info_.version_ts_ = version_ts;
-        std::lock_guard<std::shared_mutex> lk(mux_);
+        std::lock_guard<WritePreferSharedMutex> lk(mux_);
         range_slices_ = std::move(slices);
     }
 
@@ -682,7 +684,7 @@ public:
                                 bool has_dml_since_ddl,
                                 std::vector<SliceInitInfo> &&new_slices)
     {
-        std::lock_guard<std::shared_mutex> entry_lk(mux_);
+        std::lock_guard<WritePreferSharedMutex> entry_lk(mux_);
 
         if (range_info_.IsDirty() && dirty_ts == range_info_.DirtyTs())
         {
@@ -718,7 +720,7 @@ public:
                                SliceStatus status)
     {
         assert(status == SliceStatus::FullyCached);
-        std::shared_lock<std::shared_mutex> entry_lk(mux_);
+        std::shared_lock<WritePreferSharedMutex> entry_lk(mux_);
         if (range_info_.IsDirty() && DirtyVersion() == dirty_version &&
             dirty_range_slices_ != nullptr)
         {
@@ -757,7 +759,7 @@ public:
 
     bool AcceptsDirtyRangeData(uint64_t dirty_version)
     {
-        std::shared_lock<std::shared_mutex> entry_lk(mux_);
+        std::shared_lock<WritePreferSharedMutex> entry_lk(mux_);
         if (dirty_range_slices_ != nullptr && DirtyVersion() == dirty_version)
         {
             return std::get<0>(*dirty_range_slices_);
@@ -767,7 +769,7 @@ public:
 
     void SetAcceptsDirtyRangeData(bool accept)
     {
-        std::lock_guard<std::shared_mutex> entry_lk(mux_);
+        std::lock_guard<WritePreferSharedMutex> entry_lk(mux_);
 
         if (dirty_range_slices_ != nullptr)
         {
@@ -781,7 +783,7 @@ public:
                    std::unordered_map<int32_t, std::vector<SliceInitInfo>>>>
     ReleaseDirtyRangeSlices()
     {
-        std::lock_guard<std::shared_mutex> entry_lk(mux_);
+        std::lock_guard<WritePreferSharedMutex> entry_lk(mux_);
         if (dirty_range_slices_ != nullptr &&
             !std::get<0>(*dirty_range_slices_))
         {

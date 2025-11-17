@@ -99,6 +99,13 @@ void StoreSlice::CommitLoading(StoreRange &range, uint32_t slice_size)
 
     fetch_slice_cc_ = nullptr;
     range.pins_.fetch_sub(1, std::memory_order_release);
+
+    if (to_alter_)
+    {
+        slice_lk.unlock();
+        std::lock_guard<std::shared_mutex> range_lk(range.mux_);
+        range.wait_cv_.notify_all();
+    }
 }
 
 FillStoreSliceCc *StoreSlice::FillCcRequest()
@@ -108,7 +115,7 @@ FillStoreSliceCc *StoreSlice::FillCcRequest()
 
 void StoreSlice::SetLoadingError(StoreRange &range, CcErrorCode err_code)
 {
-    std::lock_guard<std::mutex> lk(slice_mux_);
+    std::unique_lock<std::mutex> slice_lk(slice_mux_);
 
     assert(pins_ == 0);
     status_ = SliceStatus::PartiallyCached;
@@ -136,6 +143,13 @@ void StoreSlice::SetLoadingError(StoreRange &range, CcErrorCode err_code)
 
     fetch_slice_cc_ = nullptr;
     range.pins_.fetch_sub(1, std::memory_order_release);
+
+    if (to_alter_)
+    {
+        slice_lk.unlock();
+        std::lock_guard<std::shared_mutex> range_lk(range.mux_);
+        range.wait_cv_.notify_all();
+    }
 }
 
 bool StoreSlice::IsRecentLoad() const

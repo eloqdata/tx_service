@@ -1046,7 +1046,7 @@ public:
             // key cache does not exist for this range.
             return RangeSliceOpStatus::Error;
         }
-        std::shared_lock<std::shared_mutex> range_lk(range_entry->mux_);
+        std::shared_lock<WritePreferSharedMutex> range_lk(range_entry->mux_);
         TemplateStoreRange<KeyT> *store_range = range_entry->TypedStoreRange();
         if (!store_range)
         {
@@ -1109,7 +1109,7 @@ public:
             pin_status = RangeSliceOpStatus::BlockedOnLoad;
             return RangeSliceId();
         }
-        std::shared_lock<std::shared_mutex> range_lk(range_entry->mux_);
+        std::shared_lock<WritePreferSharedMutex> range_lk(range_entry->mux_);
         TemplateStoreRange<KeyT> *store_range = range_entry->TypedStoreRange();
         if (store_range == nullptr)
         {
@@ -1207,7 +1207,7 @@ public:
             pin_status = RangeSliceOpStatus::BlockedOnLoad;
             return RangeSliceId();
         }
-        std::shared_lock<std::shared_mutex> range_lk(range_entry->mux_);
+        std::shared_lock<WritePreferSharedMutex> range_lk(range_entry->mux_);
         TemplateStoreRange<KeyT> *store_range = range_entry->TypedStoreRange();
         if (store_range == nullptr)
         {

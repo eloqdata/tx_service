@@ -21,6 +21,8 @@
  */
 #pragma once
 
+#include <pthread.h>
+
 #include <atomic>
 
 namespace txservice
@@ -67,4 +69,54 @@ public:
 private:
     std::atomic<bool> lock_{false};
 };
+
+class WritePreferSharedMutex
+{
+public:
+    WritePreferSharedMutex()
+    {
+        pthread_rwlockattr_t attr;
+        pthread_rwlockattr_init(&attr);
+        pthread_rwlockattr_setkind_np(
+            &attr, PTHREAD_RWLOCK_PREFER_WRITER_NONRECURSIVE_NP);
+        pthread_rwlock_init(&rw_, &attr);
+        pthread_rwlockattr_destroy(&attr);
+    }
+
+    ~WritePreferSharedMutex()
+    {
+        pthread_rwlock_destroy(&rw_);
+    }
+
+    void lock_shared()
+    {
+        pthread_rwlock_rdlock(&rw_);
+    }
+    void unlock_shared()
+    {
+        pthread_rwlock_unlock(&rw_);
+    }
+
+    void lock()
+    {
+        pthread_rwlock_wrlock(&rw_);
+    }
+    void unlock()
+    {
+        pthread_rwlock_unlock(&rw_);
+    }
+
+    bool try_lock()
+    {
+        return pthread_rwlock_trywrlock(&rw_) == 0;
+    }
+    bool try_lock_shared()
+    {
+        return pthread_rwlock_tryrdlock(&rw_) == 0;
+    }
+
+private:
+    pthread_rwlock_t rw_;
+};
+
 }  // namespace txservice
