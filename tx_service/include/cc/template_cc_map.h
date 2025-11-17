@@ -120,7 +120,10 @@ public:
 
         if (shard->realtime_sampling_ && table_schema &&
             (table_name.Engine() == TableEngine::EloqSql ||
-             table_name.Engine() == TableEngine::EloqDoc))
+             table_name.Engine() == TableEngine::EloqDoc) &&
+            (table_name.Type() == TableType::Primary ||
+            table_name.Type() == TableType::Secondary ||
+            table_name.Type() == TableType::UniqueSecondary))
         {
             TableStatistics<KeyT> *statistics =
                 static_cast<TableStatistics<KeyT> *>(
