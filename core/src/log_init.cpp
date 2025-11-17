@@ -71,7 +71,7 @@ DEFINE_string(txlog_rocksdb_cloud_log_purger_schedule,
 DEFINE_uint32(txlog_in_mem_data_log_queue_size_high_watermark,
               50 * 10000,
               "In memory data log queue max size");
-DEFINE_string(txlog_rocksdb_cloud_endpoint_url,
+DEFINE_string(txlog_rocksdb_cloud_s3_endpoint_url,
               "",
               "Endpoint url of cloud storage service");
 DEFINE_string(txlog_rocksdb_cloud_sst_file_cache_size,
@@ -293,12 +293,12 @@ bool DataSubstrate::InitializeLogService(const INIReader &config_reader)
 #endif /* LOG_STATE_TYPE_RKDB_S3 */
             txlog_rocksdb_cloud_config.endpoint_url_ =
                 !CheckCommandLineFlagIsDefault(
-                    "txlog_rocksdb_cloud_endpoint_url")
-                    ? FLAGS_txlog_rocksdb_cloud_endpoint_url
+                    "txlog_rocksdb_cloud_s3_endpoint_url")
+                    ? FLAGS_txlog_rocksdb_cloud_s3_endpoint_url
                     : config_reader.GetString(
                           "local",
-                          "txlog_rocksdb_cloud_endpoint_url",
-                          FLAGS_txlog_rocksdb_cloud_endpoint_url);
+                          "txlog_rocksdb_cloud_s3_endpoint_url",
+                          FLAGS_txlog_rocksdb_cloud_s3_endpoint_url);
             txlog_rocksdb_cloud_config.bucket_name_ =
                 !CheckCommandLineFlagIsDefault(
                     "txlog_rocksdb_cloud_bucket_name")
