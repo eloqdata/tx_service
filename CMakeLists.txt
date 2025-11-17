@@ -370,3 +370,26 @@ TARGET_INCLUDE_DIRECTORIES(${DATA_SUBSTRATE_LIB} PUBLIC
     ${CMAKE_CURRENT_SOURCE_DIR}/eloq_metrics/include
     ${CMAKE_CURRENT_SOURCE_DIR}/store_handler
 )
+
+# --- Installation Rules ---
+# install tx_service lib and includes files
+install(TARGETS txservice
+        ARCHIVE DESTINATION lib
+        LIBRARY DESTINATION lib)
+
+install(TARGETS logservice
+        ARCHIVE DESTINATION lib
+        LIBRARY DESTINATION lib)
+
+install(TARGETS data_substrate
+        ARCHIVE DESTINATION lib
+        LIBRARY DESTINATION lib)
+
+install(TARGETS eloq-metrics
+        ARCHIVE DESTINATION lib
+        LIBRARY DESTINATION lib)
+
+if(FORK_HM_PROCESS) # Only install host_manager if it's built
+    install(TARGETS host_manager
+            RUNTIME DESTINATION bin)
+endif()
