@@ -68,6 +68,8 @@ thread_local ObjectPool<FetchTableCallbackData> fetch_table_callback_data_pool_;
 thread_local ObjectPool<FetchDatabaseCallbackData> fetch_db_callback_data_pool_;
 thread_local ObjectPool<FetchAllDatabaseCallbackData>
     fetch_all_dbs_callback_data_pool_;
+thread_local ObjectPool<UpsertDatabaseCallbackData> upsert_db_callback_data_pool_;
+thread_local ObjectPool<DropDatabaseCallbackData> drop_db_callback_data_pool_;
 thread_local ObjectPool<DiscoverAllTableNamesCallbackData>
     discover_all_tables_callback_data_pool_;
 thread_local ObjectPool<SyncPutAllData> sync_putall_data_pool_;
@@ -1500,12 +1502,14 @@ bool DataStoreServiceClient::UpsertRanges(
 bool DataStoreServiceClient::FetchTable(const txservice::TableName &table_name,
                                         std::string &schema_image,
                                         bool &found,
-                                        uint64_t &version_ts)
+                                        uint64_t &version_ts,
+                                        const std::function<void()> *yield_fptr,
+                                        const std::function<void()> *resume_fptr)
 {
     FetchTableCallbackData *callback_data =
         fetch_table_callback_data_pool_.NextObject();
     PoolableGuard guard(callback_data);
-    callback_data->Reset(schema_image, found, version_ts);
+    callback_data->Reset(schema_image, found, version_ts, yield_fptr, resume_fptr);
     Read(kv_table_catalogs_name,
          0,
          "",
@@ -1580,16 +1584,18 @@ bool DataStoreServiceClient::DiscoverAllTableNames(
  * fails.
  */
 bool DataStoreServiceClient::UpsertDatabase(std::string_view db,
-                                            std::string_view definition)
+                                            std::string_view definition,
+                                            const std::function<void()> *yield_fptr,
+                                            const std::function<void()> *resume_fptr)
 {
     std::vector<std::string_view> keys;
     std::vector<std::string_view> records;
     std::vector<uint64_t> records_ts;
     std::vector<uint64_t> records_ttl;
     std::vector<WriteOpType> op_types;
-    SyncCallbackData *callback_data = sync_callback_data_pool_.NextObject();
+    UpsertDatabaseCallbackData *callback_data = upsert_db_callback_data_pool_.NextObject();
     PoolableGuard guard(callback_data);
-    callback_data->Reset();
+    callback_data->Reset(yield_fptr, resume_fptr);
     uint64_t now =
         std::chrono::duration_cast<std::chrono::microseconds>(
             std::chrono::high_resolution_clock::now().time_since_epoch())
@@ -1610,7 +1616,7 @@ bool DataStoreServiceClient::UpsertDatabase(std::string_view db,
                       std::move(op_types),
                       false,
                       callback_data,
-                      &SyncCallback);
+                      &UpsertDatabaseCallback);
     callback_data->Wait();
 
     if (callback_data->Result().error_code() !=
@@ -1636,16 +1642,18 @@ bool DataStoreServiceClient::UpsertDatabase(std::string_view db,
  * @return true if the database is dropped successfully, false if any operation
  * fails.
  */
-bool DataStoreServiceClient::DropDatabase(std::string_view db)
+bool DataStoreServiceClient::DropDatabase(std::string_view db,
+                                          const std::function<void()> *yield_fptr,
+                                          const std::function<void()> *resume_fptr)
 {
     std::vector<std::string_view> keys;
     std::vector<std::string_view> records;
     std::vector<uint64_t> records_ts;
     std::vector<uint64_t> records_ttl;
     std::vector<WriteOpType> op_types;
-    SyncCallbackData *callback_data = sync_callback_data_pool_.NextObject();
+    DropDatabaseCallbackData *callback_data = drop_db_callback_data_pool_.NextObject();
     PoolableGuard guard(callback_data);
-    callback_data->Reset();
+    callback_data->Reset(yield_fptr, resume_fptr);
     uint64_t now =
         std::chrono::duration_cast<std::chrono::microseconds>(
             std::chrono::high_resolution_clock::now().time_since_epoch())
@@ -1666,7 +1674,7 @@ bool DataStoreServiceClient::DropDatabase(std::string_view db)
                       std::move(op_types),
                       false,
                       callback_data,
-                      &SyncCallback);
+                      &DropDatabaseCallback);
     callback_data->Wait();
 
     if (callback_data->Result().error_code() !=

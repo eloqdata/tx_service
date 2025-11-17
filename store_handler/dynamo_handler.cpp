@@ -2757,7 +2757,9 @@ void EloqDS::DynamoHandler::OnFetchRecord(
 bool EloqDS::DynamoHandler::FetchTable(const txservice::TableName &table_name,
                                        std::string &schema_image,
                                        bool &found,
-                                       uint64_t &version_ts) const
+                                       uint64_t &version_ts,
+                                       const std::function<void()> *yield_fptr,
+                                       const std::function<void()> *resume_fptr) const
 {
     GetItemRequest req;
 
@@ -2893,7 +2895,9 @@ bool EloqDS::DynamoHandler::DiscoverAllTableNames(
 
 //-- database
 bool EloqDS::DynamoHandler::UpsertDatabase(std::string_view db,
-                                           std::string_view definition) const
+                                           std::string_view definition,
+                                           const std::function<void()> *yield_fptr,
+                                           const std::function<void()> *resume_fptr) const
 {
     PutItemRequest putItemRequest;
     putItemRequest.SetTableName(keyspace_ + '.' + dynamo_database_catalog_name);
@@ -2921,7 +2925,9 @@ bool EloqDS::DynamoHandler::UpsertDatabase(std::string_view db,
     return true;
 }
 
-bool EloqDS::DynamoHandler::DropDatabase(std::string_view db) const
+bool EloqDS::DynamoHandler::DropDatabase(std::string_view db,
+                                         const std::function<void()> *yield_fptr,
+                                         const std::function<void()> *resume_fptr) const
 {
     DeleteItemRequest req;
     req.SetTableName(keyspace_ + '.' + dynamo_database_catalog_name);

@@ -56,6 +56,28 @@ void SyncCallback(void *data,
     callback_data->Notify();
 }
 
+void UpsertDatabaseCallback(void *data,
+                            ::google::protobuf::Closure *closure,
+                            DataStoreServiceClient &client,
+                            const remote::CommonResult &result)
+{
+    auto *callback_data = static_cast<UpsertDatabaseCallbackData *>(data);
+    callback_data->Result().set_error_code(result.error_code());
+    callback_data->Result().set_error_msg(result.error_msg());
+    callback_data->Notify();
+}
+
+void DropDatabaseCallback(void *data,
+                          ::google::protobuf::Closure *closure,
+                          DataStoreServiceClient &client,
+                          const remote::CommonResult &result)
+{
+    auto *callback_data = static_cast<DropDatabaseCallbackData *>(data);
+    callback_data->Result().set_error_code(result.error_code());
+    callback_data->Result().set_error_msg(result.error_msg());
+    callback_data->Notify();
+}
+
 void SyncBatchReadForArchiveCallback(void *data,
                                      ::google::protobuf::Closure *closure,
                                      DataStoreServiceClient &client,

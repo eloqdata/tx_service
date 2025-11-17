@@ -1468,7 +1468,9 @@ bool RocksDBHandler::UpsertRanges(
 bool RocksDBHandler::FetchTable(const txservice::TableName &table_name,
                                 std::string &schema_image,
                                 bool &found,
-                                uint64_t &version_ts)
+                                uint64_t &version_ts,
+                                const std::function<void()> *yield_fptr,
+                                const std::function<void()> *resume_fptr)
 {
     LOG(ERROR) << "RocksDBHandler::FetchTable not implemented";
     // Not implemented
@@ -1489,7 +1491,9 @@ bool RocksDBHandler::DiscoverAllTableNames(
 
 //-- database
 bool RocksDBHandler::UpsertDatabase(std::string_view db,
-                                    std::string_view definition)
+                                    std::string_view definition,
+                                    const std::function<void()> *yield_fptr,
+                                    const std::function<void()> *resume_fptr)
 {
     DLOG(ERROR) << "RocksDBHandler::UpsertDatabase not implemented";
     // Not implemented
@@ -1498,7 +1502,9 @@ bool RocksDBHandler::UpsertDatabase(std::string_view db,
     return true;
 }
 
-bool RocksDBHandler::DropDatabase(std::string_view db)
+bool RocksDBHandler::DropDatabase(std::string_view db,
+                                  const std::function<void()> *yield_fptr,
+                                  const std::function<void()> *resume_fptr)
 {
     LOG(ERROR) << "RocksDBHandler::DropDatabase not implemented";
     // Not implemented

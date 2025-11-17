@@ -970,7 +970,9 @@ void EloqDS::BigTableHandler::OnFetchRecord(
 bool EloqDS::BigTableHandler::FetchTable(const txservice::TableName &table_name,
                                          std::string &schema_image,
                                          bool &found,
-                                         uint64_t &version_ts) const
+                                         uint64_t &version_ts,
+                                         const std::function<void()> *yield_fptr,
+                                         const std::function<void()> *resume_fptr) const
 {
     cbt::Table cbt_handler = TableHandler(bigtable_table_catalog_name);
     std::string row_key(table_name.String());
@@ -1584,7 +1586,9 @@ bool EloqDS::BigTableHandler::DiscoverAllTableNames(
 }
 
 bool EloqDS::BigTableHandler::UpsertDatabase(std::string_view db,
-                                             std::string_view definition) const
+                                             std::string_view definition,
+                                             const std::function<void()> *yield_fptr,
+                                             const std::function<void()> *resume_fptr) const
 {
     cbt::Table cbt_handler = TableHandler(bigtable_database_catalog_name);
     std::string row_key(db);
@@ -1602,7 +1606,9 @@ bool EloqDS::BigTableHandler::UpsertDatabase(std::string_view db,
     return true;
 }
 
-bool EloqDS::BigTableHandler::DropDatabase(std::string_view db) const
+bool EloqDS::BigTableHandler::DropDatabase(std::string_view db,
+                                            const std::function<void()> *yield_fptr,
+                                            const std::function<void()> *resume_fptr) const
 {
     cbt::Table cbt_handler = TableHandler(bigtable_database_catalog_name);
     std::string row_key(db);
