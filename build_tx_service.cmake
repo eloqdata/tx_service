@@ -113,7 +113,6 @@ execute_process(
     WORKING_DIRECTORY ${LOG_PROTO_SRC}
 )
 
-set(ABSL_ENABLE_INSTALL ON CACHE INTERNAL "Install Abseil libs" FORCE)
 add_subdirectory(tx_service/abseil-cpp)
 
 message(${TX_SERVICE_SOURCE_DIR})
