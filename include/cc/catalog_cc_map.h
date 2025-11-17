@@ -1203,9 +1203,31 @@ public:
             }
             else
             {
-                shard_->FetchCatalog(
-                    table_key->Name(), req.NodeGroupId(), ng_term, &req);
-                return false;
+                if (catalog_entry == nullptr)
+                {
+                    shard_->FetchCatalog(
+                        table_key->Name(), req.NodeGroupId(), ng_term, &req);
+                    return false;
+                }
+                if (catalog_entry->schema_ == nullptr)
+                {
+                    if (catalog_entry->dirty_schema_ == nullptr)
+                    {
+                        CcHandlerResult<ReadKeyResult> *hd_res = req.Result();
+                        hd_res->SetError(
+                            CcErrorCode::REQUESTED_TABLE_NOT_EXISTS);
+                        return true;
+                    }
+                    else
+                    {
+                        DLOG(INFO)
+                            << "PostWriteAllCc is executing, retry "
+                            << catalog_entry->dirty_schema_->GetBaseTableName()
+                                   .StringView();
+                        shard_->Enqueue(&req);
+                        return false;
+                    }
+                }
             }
         }
 
