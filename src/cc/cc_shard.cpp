@@ -24,9 +24,6 @@
 #include <brpc/controller.h>
 #include <bthread/bthread.h>
 #include <bthread/remote_task_queue.h>
-#include <bvar/bvar.h>
-#include <bvar/latency_recorder.h>
-#include <bvar/recorder.h>
 
 #include <chrono>  // std::chrono
 #include <cstdint>
@@ -53,17 +50,11 @@
 #include "tx_start_ts_collector.h"
 #include "type.h"
 #include "util.h"
-bvar::LatencyRecorder g_retry_recorder("yf_retry_count");
 
 DECLARE_bool(cmd_read_catalog);
 
 namespace txservice
 {
-void CcShard::AddRetryCount(size_t count)
-{
-    g_retry_recorder << count;
-}
-
 CcShard::CcShard(
     uint16_t core_id,
     uint32_t core_cnt,

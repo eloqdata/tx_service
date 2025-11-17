@@ -539,8 +539,6 @@ private:
     uint32_t slice_size_{0};
     uint32_t rec_cnt_{0};
 
-    std::vector<bool> core_finished_{};
-
 public:
     // These variables only be used in DataStoreHandler
     const std::string *kv_table_name_{nullptr};

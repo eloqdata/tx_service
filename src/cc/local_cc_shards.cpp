@@ -2650,38 +2650,8 @@ void LocalCcShards::EnqueueDataSyncTaskForTable(
             return;
         }
 
-        /*
-        size_t debug_idx = 0;
         for (auto &range : *ranges)
         {
-            LOG(INFO) << "== range id = "
-                      << range.second->GetRangeInfo()->PartitionId()
-                      << ", version = " << range.second->Version()
-                      << ", debug idx = " << debug_idx;
-            debug_idx++;
-        }
-        */
-
-        for (auto &range : *ranges)
-        {
-            /*
-            if (range.second->Version() == 1762482755490268)
-            {
-                LOG(INFO) << "Debug point for range "
-                          << range.second->GetRangeInfo()->PartitionId()
-                          << ", version = " << range.second->Version()
-                          << ", index = " << debug_idx;
-            }
-            else if (range.second->Version() == 1762482755490270)
-            {
-                LOG(INFO) << "Debug point for range "
-                          << range.second->GetRangeInfo()->PartitionId()
-                          << ", version = " << range.second->Version()
-                          << ", index = " << debug_idx;
-            }
-            debug_idx++;
-            */
-
             if (EnqueueRangeDataSyncTask(table_name,
                                          ng_id,
                                          ng_term,

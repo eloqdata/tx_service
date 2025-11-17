@@ -1059,8 +1059,6 @@ public:
         return init_key_cache_cc_pool_.NextRequest();
     }
 
-    void AddRetryCount(size_t count);
-
     std::shared_ptr<ReaderWriterObject<TableSchema>> FindSchemaCntl(
         const TableName &tbl_name);
 

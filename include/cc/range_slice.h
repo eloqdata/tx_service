@@ -22,7 +22,6 @@
 #pragma once
 
 #include <atomic>
-#include <chrono>
 #include <cmath>
 #include <condition_variable>
 #include <cstdint>
@@ -1421,19 +1420,8 @@ public:
                         }
                     }
 
-                    // auto start_time =
-                    // std::chrono::high_resolution_clock::now();
                     std::unique_lock<std::mutex> prefetch_lk(
                         prefetch_slice->slice_mux_, std::try_to_lock);
-
-                    /*
-                    auto stop_time = std::chrono::high_resolution_clock::now();
-                    auto duration =
-                        std::chrono::duration_cast<std::chrono::microseconds>(
-                            stop_time - start_time)
-                            .count();
-                    Sharder::Instance().AddLockLatency(duration);
-                    */
 
                     if (prefetch_lk.owns_lock())
                     {

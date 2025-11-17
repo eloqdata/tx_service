@@ -188,9 +188,6 @@ public:
     void Shutdown();
     void CloseStreamSender();
 
-    void AddLockLatency(uint64_t latency);
-    void AddUnlockLatency(uint64_t latency);
-
     /**
      * @brief Returns the ID of the leader node of the input cc node group.
      *
