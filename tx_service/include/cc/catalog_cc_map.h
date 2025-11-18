@@ -348,7 +348,10 @@ public:
                         return false;
                     }
 
-                    if (!shard_->LoadRangesAndStatisticsNx(
+                    if (Sharder::Instance().GetLocalCcShards()->store_hd_ !=
+                            nullptr &&
+                        !table_name_.IsHashPartitioned() &&
+                        !shard_->LoadRangesAndStatisticsNx(
                             catalog_entry->schema_.get(),
                             req.NodeGroupId(),
                             ng_term,
@@ -1174,7 +1177,10 @@ public:
                     {
 #ifdef STATISTICS
                         // Initialize table statistics before create ccmap.
-                        if (!shard_->LoadRangesAndStatisticsNx(
+                        if (Sharder::Instance().GetLocalCcShards()->store_hd_ !=
+                                nullptr &&
+                            !table_name_.IsHashPartitioned() &&
+                            !shard_->LoadRangesAndStatisticsNx(
                                 catalog_entry->schema_.get(),
                                 req.NodeGroupId(),
                                 ng_term,
@@ -1445,7 +1451,9 @@ public:
 
             if (catalog_entry->schema_)
             {
-                if (!table_name.IsHashPartitioned() &&
+                if (Sharder::Instance().GetLocalCcShards()->store_hd_ !=
+                        nullptr &&
+                    !table_name_.IsHashPartitioned() &&
                     !shard_->LoadRangesAndStatisticsNx(
                         catalog_entry->schema_.get(),
                         req.NodeGroupId(),
@@ -1755,7 +1763,9 @@ public:
                 if (catalog_entry->schema_ != nullptr)
                 {
                     // Initialize table statistics before create ccmap.
-                    if (!table_name.IsHashPartitioned() &&
+                    if (Sharder::Instance().GetLocalCcShards()->store_hd_ !=
+                            nullptr &&
+                        !table_name_.IsHashPartitioned() &&
                         !shard_->LoadRangesAndStatisticsNx(
                             catalog_entry->schema_.get(),
                             req.NodeGroupId(),
@@ -2355,7 +2365,10 @@ public:
 #ifdef STATISTICS
                         assert(requester != nullptr);
                         // Initialize table statistics before create ccmap.
-                        if (!shard_->LoadRangesAndStatisticsNx(
+                        if (Sharder::Instance().GetLocalCcShards()->store_hd_ !=
+                                nullptr &&
+                            !table_name_.IsHashPartitioned() &&
+                            !shard_->LoadRangesAndStatisticsNx(
                                 catalog_entry->schema_.get(),
                                 cc_ng_id,
                                 cc_ng_term,

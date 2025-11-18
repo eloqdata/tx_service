@@ -19,8 +19,6 @@
  *    <http://www.gnu.org/licenses/>.
  *
  */
-#include "cc/cc_shard.h"
-
 #include <brpc/controller.h>
 #include <bthread/bthread.h>
 #include <bthread/remote_task_queue.h>
@@ -32,6 +30,7 @@
 #include "cc/catalog_cc_map.h"
 #include "cc/cc_map.h"
 #include "cc/cc_request.h"
+#include "cc/cc_shard.h"
 #include "cc/cluster_config_cc_map.h"
 #include "cc/non_blocking_lock.h"  // lock_vec_
 #include "cc/range_bucket_cc_map.h"
@@ -1370,22 +1369,21 @@ const StatisticsEntry *CcShard::LoadRangesAndStatisticsNx(
         return statistics_entry;
     }
 
-    if (!curr_schema->GetBaseTableName().IsHashPartitioned())
+    assert(!curr_schema->GetBaseTableName().IsHashPartitioned());
+
+    // Initialize table ranges before create table
+    // statistics.
+    TableName base_range_table_name(
+        curr_schema->GetBaseTableName().StringView(),
+        TableType::RangePartition,
+        curr_schema->GetBaseTableName().Engine());
+    const auto *ranges =
+        GetTableRangesForATable(base_range_table_name, cc_ng_id);
+    if (ranges == nullptr)
     {
-        // Initialize table ranges before create table
-        // statistics.
-        TableName base_range_table_name(
-            curr_schema->GetBaseTableName().StringView(),
-            TableType::RangePartition,
-            curr_schema->GetBaseTableName().Engine());
-        const auto *ranges =
-            GetTableRangesForATable(base_range_table_name, cc_ng_id);
-        if (ranges == nullptr)
-        {
-            FetchTableRanges(
-                base_range_table_name, requester, cc_ng_id, cc_ng_term);
-            return nullptr;
-        }
+        FetchTableRanges(
+            base_range_table_name, requester, cc_ng_id, cc_ng_term);
+        return nullptr;
     }
 
     std::vector<TableName> index_names = curr_schema->IndexNames();
@@ -1853,7 +1851,9 @@ InitCcmResult CcShard::InitCcm(const TableName &table_name,
         }
 #ifdef STATISTICS
         assert(requester != nullptr);
-        if (!LoadRangesAndStatisticsNx(
+        if (Sharder::Instance().GetLocalCcShards()->store_hd_ != nullptr &&
+            !table_name.IsHashPartitioned() &&
+            !LoadRangesAndStatisticsNx(
                 curr_schema, cc_ng_id, cc_ng_term, requester))
         {
             return InitCcmResult::Retry();
