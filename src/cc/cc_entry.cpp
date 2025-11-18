@@ -45,7 +45,7 @@ void VersionedLruEntry<Versioned, RangePartitioned>::SetCommitTsPayloadStatus(
     uint8_t stat = static_cast<uint8_t>(status);
     uint64_t curr_ts = entry_info_.commit_ts_and_status_ >> 8;
 
-    if (curr_ts < ts || curr_ts == 0)
+    if (curr_ts < ts)
     {
         entry_info_.commit_ts_and_status_ = (ts << 8) | stat;
     }

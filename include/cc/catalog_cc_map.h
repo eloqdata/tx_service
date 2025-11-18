@@ -1212,8 +1212,7 @@ public:
                 assert(catalog_entry->schema_ == nullptr);
                 if (catalog_entry->dirty_schema_ == nullptr)
                 {
-                    cce->SetCommitTsPayloadStatus(
-                        catalog_entry->schema_version_, RecordStatus::Deleted);
+                    cce->SetCommitTsPayloadStatus(1, RecordStatus::Deleted);
                 }
                 else
                 {
