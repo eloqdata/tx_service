@@ -3726,6 +3726,7 @@ void LocalCcShards::DataSyncForRangePartition(
 
     while (!scan_data_drained)
     {
+        auto scan_cc_start_ts = std::chrono::steady_clock::now();
         for (size_t i = 0; i < cc_shards_.size(); ++i)
         {
             EnqueueToCcShard(i, &scan_cc);
@@ -3756,11 +3757,32 @@ void LocalCcShards::DataSyncForRangePartition(
             {
                 flush_data_size += flush_data_size_per_core;
             }
+
+            auto scan_cc_end_ts = std::chrono::steady_clock::now();
+            LOG(INFO) << "== DataSync scan FlushRecords took "
+                      << std::chrono::duration_cast<std::chrono::microseconds>(
+                             scan_cc_end_ts - scan_cc_start_ts)
+                             .count()
+                      << " us"
+                      << " of range: " << range_id
+                      << " for table: " << table_name.StringView();
+
+            auto allocate_start_ts = std::chrono::steady_clock::now();
             // This thread will wait in AllocatePendingFlushDataMemQuota if
             // quota is not available
             uint64_t old_usage =
                 data_sync_mem_controller_.AllocateFlushDataMemQuota(
                     flush_data_size);
+            auto allocate_end_ts = std::chrono::steady_clock::now();
+            LOG(INFO) << "== DataSync AllocateFlushDataMemQuota took "
+                      << std::chrono::duration_cast<std::chrono::microseconds>(
+                             allocate_end_ts - allocate_start_ts)
+                             .count()
+                      << " us"
+                      << " for size: " << flush_data_size
+                      << " of range: " << range_id
+                      << " for table: " << table_name.StringView();
+
             DLOG(INFO) << "AllocateFlushDataMemQuota old_usage: " << old_usage
                        << " new_usage: " << old_usage + flush_data_size
                        << " quota: "
@@ -3913,6 +3935,8 @@ void LocalCcShards::DataSyncForRangePartition(
                 continue;
             }
 
+            auto update_slices_start_ts = std::chrono::steady_clock::now();
+
             // Updata slices for this batch records.
             UpdateSlices(table_name,
                          table_schema.get(),
@@ -3920,6 +3944,12 @@ void LocalCcShards::DataSyncForRangePartition(
                          scan_data_drained,
                          *data_sync_vec,
                          update_slice_status);
+
+            auto update_slices_end_ts = std::chrono::steady_clock::now();
+            LOG(INFO) << "== UpdateSlices time us: "
+                      << std::chrono::duration_cast<std::chrono::microseconds>(
+                             update_slices_end_ts - update_slices_start_ts)
+                             .count();
 
             if (need_send_range_cache)
             {
