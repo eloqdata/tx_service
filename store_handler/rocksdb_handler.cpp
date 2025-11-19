@@ -20,8 +20,6 @@
  *
  */
 
-#include "rocksdb_handler.h"
-
 #include <brpc/controller.h>
 #include <brpc/server.h>
 #include <brpc/stream.h>
@@ -61,17 +59,18 @@
 #include <utility>
 #include <vector>
 
-#include "cc_node_service.h"
-#include "cc_request.pb.h"
-#include "local_cc_shards.h"
 #include "../../../include/redis_hash_object.h"
 #include "../../../include/redis_list_object.h"
 #include "../../../include/redis_object.h"  // RedisEloqObject
 #include "../../../include/redis_set_object.h"
 #include "../../../include/redis_string_object.h"
 #include "../../../include/redis_zset_object.h"
+#include "cc_node_service.h"
+#include "cc_request.pb.h"
+#include "local_cc_shards.h"
 #include "rocksdb/iostats_context.h"
 #include "rocksdb/rate_limiter.h"
+#include "rocksdb_handler.h"
 #include "store_util.h"
 #include "tx_key.h"
 #include "tx_record.h"
@@ -1003,6 +1002,9 @@ void RocksDBHandler::FetchTableCatalog(
             if (!status.ok())
             {
                 fetch_cc->SetFinish(txservice::RecordStatus::Deleted, 0);
+		DLOG(INFO) << "FetchTableCatalog table "
+			   << ccm_table_name.String()
+			   << " not found in data store.";
                 return;
             }
             std::string kv_cf_name;
@@ -1028,6 +1030,8 @@ void RocksDBHandler::FetchTableCatalog(
             // catalog image stores only kv_table_name
             catalog_image.append(kv_cf_name);
             fetch_cc->SetFinish(txservice::RecordStatus::Normal, 0);
+            DLOG(INFO) << "FetchTableCatalog catalog_image for table "
+                       << ccm_table_name.String() << " is " << catalog_image;
         });
 }
 
@@ -2857,7 +2861,8 @@ bool RocksDBCloudHandlerImpl::OpenCloudDB(
                         {
                             found = true;
                             rocksdb::WideColumns table_catalog_wc;
-                            table_catalog_wc.emplace_back("kv_cf_name", table_name);
+                            table_catalog_wc.emplace_back("kv_cf_name",
+                                                          table_name);
                             uint64_t version = 100U;
                             rocksdb::Slice commit_ts_value(
                                 reinterpret_cast<const char *>(&version),
@@ -2870,9 +2875,10 @@ bool RocksDBCloudHandlerImpl::OpenCloudDB(
                                                     table_catalog_wc);
                             if (!status.ok())
                             {
-                                LOG(ERROR) << "Unable to write table schema to db "
-                                              "with error: "
-                                           << status.ToString();
+                                LOG(ERROR)
+                                    << "Unable to write table schema to db "
+                                       "with error: "
+                                    << status.ToString();
                                 return false;
                             }
                             break;
@@ -3293,10 +3299,15 @@ bool RocksDBHandlerImpl::StartDB(bool is_ng_leader, uint32_t *next_leader_node)
                     // it, init the table schema with version 100
                     // TODO(liunyl): we should not have a column family for each
                     // table
-                    auto pre_built_table = pre_built_tables_.find(
-                        txservice::TableName(table_name,
-                                             txservice::TableType::Primary,
-                                             txservice::TableEngine::EloqKv));
+                    auto pre_built_table = pre_built_tables_.end();
+                    for (auto it = pre_built_tables_.begin(); it != pre_built_tables_.end(); ++it)
+                    {
+                        if (it->first.StringView() == table_name)
+                        {
+                            pre_built_table = it;
+                            break;
+                        }
+                    }
                     if (pre_built_table != pre_built_tables_.end())
                     {
                         // create the table schema
@@ -3319,6 +3330,10 @@ bool RocksDBHandlerImpl::StartDB(bool is_ng_leader, uint32_t *next_leader_node)
                                        << status.ToString();
                             return false;
                         }
+
+			            DLOG(INFO) << "Initialized prebuilt table schema for table: "
+				                   << table_name << " with version "
+				                   << version;
                     }
                     else
                     {
