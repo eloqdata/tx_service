@@ -663,10 +663,15 @@ bool txservice::LocalCcHandler::ReadLocal(const TableName &table_name,
     TX_TRACE_ACTION(this, read_req);
     TX_TRACE_DUMP(read_req);
 
-    CcMap *ccm = ccs->GetCcm(table_name, cc_ng_id);
     bool finished = false;
 
-    if (ccm != nullptr && thd_id_ == ccs->core_id_ && execute_immediately)
+    CcMap *ccm = nullptr;
+    if (execute_immediately && thd_id_ == ccs->core_id_)
+    {
+        ccm = ccs->GetCcm(table_name, cc_ng_id);
+    }
+
+    if (ccm != nullptr)
     {
         //__catalog table will be preloaded when ccshard constructed
         finished = ccm->Execute(*read_req);
@@ -794,10 +799,15 @@ bool txservice::LocalCcHandler::ReadLocal(const TableName &table_name,
     TX_TRACE_ACTION(this, read_req);
     TX_TRACE_DUMP(read_req);
 
-    CcMap *ccm = ccs->GetCcm(table_name, cc_ng_id);
     bool finished = false;
 
-    if (ccm != nullptr && thd_id_ == ccs->core_id_)
+    CcMap *ccm = nullptr;
+    if (thd_id_ == ccs->core_id_)
+    {
+        ccm = ccs->GetCcm(table_name, cc_ng_id);
+    }
+
+    if (ccm != nullptr)
     {
         //__catalog table will be preloaded when ccshard constructed
         finished = ccm->Execute(*read_req);
