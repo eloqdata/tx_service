@@ -3545,8 +3545,7 @@ public:
             assert(remote_scan_cache != nullptr);
         }
 
-        auto is_cache_full = [&req, scan_cache, remote_scan_cache]
-        {
+        auto is_cache_full = [&req, scan_cache, remote_scan_cache] {
             return req.IsLocal() ? scan_cache->IsFull()
                                  : remote_scan_cache->IsFull();
         };
