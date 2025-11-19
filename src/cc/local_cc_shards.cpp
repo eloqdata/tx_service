@@ -3726,6 +3726,7 @@ void LocalCcShards::DataSyncForRangePartition(
 
     while (!scan_data_drained)
     {
+        size_t debug_scan_count = scan_cc.scan_count_;
         auto scan_cc_start_ts = std::chrono::steady_clock::now();
         for (size_t i = 0; i < cc_shards_.size(); ++i)
         {
@@ -3759,13 +3760,16 @@ void LocalCcShards::DataSyncForRangePartition(
             }
 
             auto scan_cc_end_ts = std::chrono::steady_clock::now();
+            size_t delta_scan_count = scan_cc.scan_count_ - debug_scan_count;
             LOG(INFO) << "== DataSync scan FlushRecords took "
                       << std::chrono::duration_cast<std::chrono::microseconds>(
                              scan_cc_end_ts - scan_cc_start_ts)
                              .count()
                       << " us"
                       << " of range: " << range_id
-                      << " for table: " << table_name.StringView();
+                      << " for table: " << table_name.StringView()
+                      << ", req scan count = " << delta_scan_count
+                      << ", total req scan count = " << scan_cc.scan_count_;
 
             auto allocate_start_ts = std::chrono::steady_clock::now();
             // This thread will wait in AllocatePendingFlushDataMemQuota if
