@@ -5203,6 +5203,8 @@ public:
             [this, &req, &pause_key_and_is_drained, &next_slice_func](
                 const KeyT &search_key) -> std::pair<RangeSliceId, bool>
         {
+            req.total_pin_count_[shard_->core_id_]++;
+
             bool succ = false;
             RangeSliceOpStatus pin_status;
             RangeSliceId slice_id = shard_->local_shards_.PinRangeSlice(
