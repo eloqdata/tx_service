@@ -1225,26 +1225,9 @@ public:
             }
             else
             {
-                if (catalog_entry == nullptr)
-                {
-                    shard_->FetchCatalog(
-                        table_key->Name(), req.NodeGroupId(), ng_term, &req);
-                    return false;
-                }
-                assert(catalog_entry->schema_ == nullptr);
-                if (catalog_entry->dirty_schema_ == nullptr)
-                {
-                    cce->SetCommitTsPayloadStatus(1, RecordStatus::Deleted);
-                }
-                else
-                {
-                    DLOG(INFO)
-                        << "PostWriteAllCc is executing, retry "
-                        << catalog_entry->dirty_schema_->GetBaseTableName()
-                               .StringView();
-                    shard_->Enqueue(&req);
-                    return false;
-                }
+                shard_->FetchCatalog(
+                    table_key->Name(), req.NodeGroupId(), ng_term, &req);
+                return false;
             }
         }
 
