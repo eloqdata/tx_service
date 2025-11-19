@@ -55,7 +55,7 @@
 #else
 #include "rocksdb/db.h"
 #endif
-#include "redis_object.h"
+#include "../../../include/redis_object.h"
 #include "rocksdb_config.h"
 #include "store_util.h"
 #include "tx_service/include/store/data_store_handler.h"
