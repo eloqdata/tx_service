@@ -3130,7 +3130,6 @@ bool RocksDBHandlerImpl::StartDB(bool is_ng_leader, uint32_t *next_leader_node)
         {
             if (cf != rocksdb::kDefaultColumnFamilyName)
             {
-                assert(cf.find("data_table_") == 0);
                 cfds.emplace_back(cf, cf_options);
             }
         }
