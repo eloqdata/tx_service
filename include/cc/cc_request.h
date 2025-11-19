@@ -166,21 +166,8 @@ public:
                     }
                     if (catalog_entry->schema_ == nullptr)
                     {
-                        if (catalog_entry->dirty_schema_ == nullptr)
-                        {
-                            res_->SetError(
-                                CcErrorCode::REQUESTED_TABLE_NOT_EXISTS);
-                            return true;
-                        }
-                        else
-                        {
-                            DLOG(INFO) << "PostWriteAllCc is executing, retry "
-                                       << catalog_entry->dirty_schema_
-                                              ->GetBaseTableName()
-                                              .StringView();
-                            ccs.Enqueue(this);
-                            return false;
-                        }
+                        res_->SetError(CcErrorCode::REQUESTED_TABLE_NOT_EXISTS);
+                        return true;
                     }
                     TableSchema *table_schema = catalog_entry->schema_.get();
 
@@ -4058,7 +4045,8 @@ public:
             slices_to_scan_.reserve(old_slices_delta_size->size());
             std::for_each(old_slices_delta_size->begin(),
                           old_slices_delta_size->end(),
-                          [&](decltype(*old_slices_delta_size->begin()) &elem) {
+                          [&](decltype(*old_slices_delta_size->begin()) &elem)
+                          {
                               slices_to_scan_.emplace_back(
                                   std::move(elem.first.GetShallowCopy()));
                           });

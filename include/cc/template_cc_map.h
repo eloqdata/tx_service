@@ -1122,6 +1122,16 @@ public:
 
                         cce_ptr->SetCommitTsPayloadStatus(commit_ts, status);
                     }
+                    else if (req.CommitType() == PostWriteType::PrepareCommit)
+                    {
+                        if (req.OpType() == OperationType::CreateTable)
+                        {
+                            // For prepare commit of create table operation,
+                            // set the status to Deleted.
+                            cce_ptr->SetCommitTsPayloadStatus(
+                                1, RecordStatus::Deleted);
+                        }
+                    }
                 }
 
                 // When commit_ts = 0, the request removes the write lock
@@ -3502,7 +3512,8 @@ public:
                 (1 + req.PrefetchSize() / shard_->core_cnt_) * 125 / 100);
         }
 
-        auto is_cache_full = [&req, scan_cache, remote_scan_cache] {
+        auto is_cache_full = [&req, scan_cache, remote_scan_cache]
+        {
             return req.IsLocal() ? scan_cache->IsFull()
                                  : remote_scan_cache->IsFull();
         };
