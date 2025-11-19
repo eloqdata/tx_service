@@ -2850,33 +2850,35 @@ bool RocksDBCloudHandlerImpl::OpenCloudDB(
                 {
                     // if the table schema is not found, then we need to create
                     // it
-                    auto pre_built_table = pre_built_tables_.find(
-                        txservice::TableName(table_name,
-                                             txservice::TableType::Primary,
-                                             txservice::TableEngine::EloqKv));
-                    if (pre_built_table != pre_built_tables_.end())
+                    bool found = false;
+                    for (const auto &pre_built_table : pre_built_tables_)
                     {
-                        rocksdb::WideColumns table_catalog_wc;
-                        table_catalog_wc.emplace_back("kv_cf_name", table_name);
-                        uint64_t version = 100U;
-                        rocksdb::Slice commit_ts_value(
-                            reinterpret_cast<const char *>(&version),
-                            sizeof(uint64_t));
-                        table_catalog_wc.emplace_back("version",
-                                                      commit_ts_value);
-                        status = db_->PutEntity(rocksdb::WriteOptions(),
-                                                cfh_default,
-                                                table_key,
-                                                table_catalog_wc);
-                        if (!status.ok())
+                        if (pre_built_table.first.String() == table_name)
                         {
-                            LOG(ERROR) << "Unable to write table schema to db "
-                                          "with error: "
-                                       << status.ToString();
-                            return false;
+                            found = true;
+                            rocksdb::WideColumns table_catalog_wc;
+                            table_catalog_wc.emplace_back("kv_cf_name", table_name);
+                            uint64_t version = 100U;
+                            rocksdb::Slice commit_ts_value(
+                                reinterpret_cast<const char *>(&version),
+                                sizeof(uint64_t));
+                            table_catalog_wc.emplace_back("version",
+                                                          commit_ts_value);
+                            status = db_->PutEntity(rocksdb::WriteOptions(),
+                                                    cfh_default,
+                                                    table_key,
+                                                    table_catalog_wc);
+                            if (!status.ok())
+                            {
+                                LOG(ERROR) << "Unable to write table schema to db "
+                                              "with error: "
+                                           << status.ToString();
+                                return false;
+                            }
+                            break;
                         }
                     }
-                    else
+                    if (!found)
                     {
                         LOG(ERROR) << "Unable to get table schema for table: "
                                    << table_name << " in pre_built_tables_";
