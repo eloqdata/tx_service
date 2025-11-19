@@ -33,6 +33,7 @@
 #include <memory>
 #include <mutex>
 #include <optional>
+#include <random>
 #include <shared_mutex>
 #include <thread>
 #include <tuple>
@@ -3275,10 +3276,9 @@ void LocalCcShards::DataSyncForRangePartition(
                 CcErrorCode::REQUESTED_NODE_NOT_LEADER);
         }
 
-        defer_unpin = std::move(std::shared_ptr<void>(
+        defer_unpin = std::shared_ptr<void>(
             nullptr,
-            [ng_id](void *)
-            { Sharder::Instance().UnpinNodeGroupData(ng_id); }));
+            [ng_id](void *) { Sharder::Instance().UnpinNodeGroupData(ng_id); });
 
         // Process this task.
         // 1. Get a new txm and init
@@ -3490,6 +3490,8 @@ void LocalCcShards::DataSyncForRangePartition(
         schema_version = table_schema->Version();
     }
 
+    auto scan_slice_delta_size_start_time = std::chrono::steady_clock::now();
+
     // Scan the delta slice size
     std::map<TxKey, int64_t> slices_delta_size;
     ScanSliceDeltaSizeCcForRangePartition scan_delta_size_cc(
@@ -3512,6 +3514,18 @@ void LocalCcShards::DataSyncForRangePartition(
     }
     scan_delta_size_cc.Wait();
 
+    auto scan_slice_delta_size_end_time = std::chrono::steady_clock::now();
+    auto scan_slice_delta_size_duration =
+        std::chrono::duration_cast<std::chrono::microseconds>(
+            scan_slice_delta_size_end_time - scan_slice_delta_size_start_time)
+            .count();
+
+    LOG(INFO) << "yf: scan slice delta size on table "
+              << table_name.StringView() << " for range#" << range_id
+              << " is split_range=" << during_split_range << " error="
+              << static_cast<uint32_t>(scan_delta_size_cc.ErrorCode())
+              << " took " << scan_slice_delta_size_duration << " us.";
+
     if (scan_delta_size_cc.IsError())
     {
         LOG(ERROR) << "DataSync scan slice delta size failed on table "
@@ -3531,6 +3545,7 @@ void LocalCcShards::DataSyncForRangePartition(
         data_sync_worker_ctx_.cv_.notify_one();
         return;
     }
+
     for (size_t i = 0; i < cc_shards_.size(); ++i)
     {
         auto &delta_size = scan_delta_size_cc.SliceDeltaSize(i);
@@ -3584,13 +3599,31 @@ void LocalCcShards::DataSyncForRangePartition(
         store_range->SetHasDmlSinceDdl();
     }
 
+    auto update_slice_post_ckpt_size_start_time =
+        std::chrono::steady_clock::now();
     // Update slice post ckpt size.
     UpdateSlicePostCkptSize(store_range, slices_delta_size);
+
+    auto update_slice_post_ckpt_size_end_time =
+        std::chrono::steady_clock::now();
+    auto update_slice_post_ckpt_size_duration =
+        std::chrono::duration_cast<std::chrono::microseconds>(
+            update_slice_post_ckpt_size_end_time -
+            update_slice_post_ckpt_size_start_time)
+            .count();
+    LOG(INFO) << "yf: update slice post ckpt size on table "
+              << table_name.StringView() << " for range#" << range_id
+              << " is split_range=" << during_split_range << " took "
+              << update_slice_post_ckpt_size_duration << " us.";
 
     if (!during_split_range)
     {
         // If the task comes from split range transaction, it is assumed that
         // there will be no further splitting.
+
+        auto caculate_range_update_start_time =
+            std::chrono::steady_clock::now();
+
         std::vector<TxKey> split_keys;
         bool ret = CalculateRangeUpdate(table_name,
                                         ng_id,
@@ -3598,6 +3631,18 @@ void LocalCcShards::DataSyncForRangePartition(
                                         data_sync_task->data_sync_ts_,
                                         store_range,
                                         split_keys);
+
+        auto caculate_range_update_end_time = std::chrono::steady_clock::now();
+        auto caculate_range_update_duration =
+            std::chrono::duration_cast<std::chrono::microseconds>(
+                caculate_range_update_end_time -
+                caculate_range_update_start_time)
+                .count();
+        LOG(INFO) << "yf: calculate range update on table "
+                  << table_name.StringView() << " for range#" << range_id
+                  << " is split_range=" << during_split_range
+                  << " success=" << ret << " took "
+                  << caculate_range_update_duration << " us.";
         if (!ret)
         {
             LOG(ERROR) << "Calculate subranges key failed on table "
@@ -3722,6 +3767,7 @@ void LocalCcShards::DataSyncForRangePartition(
     while (!scan_data_drained)
     {
         size_t debug_scan_count = scan_cc.scan_count_;
+
         auto scan_cc_start_ts = std::chrono::steady_clock::now();
         for (size_t i = 0; i < cc_shards_.size(); ++i)
         {
@@ -3756,15 +3802,18 @@ void LocalCcShards::DataSyncForRangePartition(
 
             auto scan_cc_end_ts = std::chrono::steady_clock::now();
             size_t delta_scan_count = scan_cc.scan_count_ - debug_scan_count;
-            LOG(INFO) << "== DataSync scan FlushRecords took "
+
+            LOG(INFO) << "yf: datasync scan on table "
+                      << table_name.StringView() << " for range#" << range_id
+                      << " is split_range=" << during_split_range
+                      << " flush data size=" << flush_data_size
+                      << " req execute count =" << delta_scan_count
+                      << " total execute count = " << scan_cc.scan_count_
+                      << " took "
                       << std::chrono::duration_cast<std::chrono::microseconds>(
                              scan_cc_end_ts - scan_cc_start_ts)
                              .count()
-                      << " us"
-                      << " of range: " << range_id
-                      << " for table: " << table_name.StringView()
-                      << ", req scan count = " << delta_scan_count
-                      << ", total req scan count = " << scan_cc.scan_count_;
+                      << " us.";
 
             auto allocate_start_ts = std::chrono::steady_clock::now();
             // This thread will wait in AllocatePendingFlushDataMemQuota if
@@ -3773,14 +3822,14 @@ void LocalCcShards::DataSyncForRangePartition(
                 data_sync_mem_controller_.AllocateFlushDataMemQuota(
                     flush_data_size);
             auto allocate_end_ts = std::chrono::steady_clock::now();
-            LOG(INFO) << "== DataSync AllocateFlushDataMemQuota took "
+            LOG(INFO) << "yf: datasync allocate flush data mem quota on table "
+                      << table_name.StringView() << " for range#" << range_id
+                      << " is split_range=" << during_split_range
+                      << " flush data size=" << flush_data_size << " took "
                       << std::chrono::duration_cast<std::chrono::microseconds>(
                              allocate_end_ts - allocate_start_ts)
                              .count()
-                      << " us"
-                      << " for size: " << flush_data_size
-                      << " of range: " << range_id
-                      << " for table: " << table_name.StringView();
+                      << " us.";
 
             DLOG(INFO) << "AllocateFlushDataMemQuota old_usage: " << old_usage
                        << " new_usage: " << old_usage + flush_data_size
@@ -3836,6 +3885,8 @@ void LocalCcShards::DataSyncForRangePartition(
 
                 scan_data_drained = scan_cc.IsDrained(i) && scan_data_drained;
             }
+
+            auto merge_vectors_start_ts = std::chrono::steady_clock::now();
 
             std::unique_ptr<std::vector<FlushRecord>> data_sync_vec =
                 std::make_unique<std::vector<FlushRecord>>();
@@ -3924,6 +3975,15 @@ void LocalCcShards::DataSyncForRangePartition(
                 mv_base_vec->erase(mv_base_iter, mv_base_vec->end());
             }
 
+            auto merge_vector_end_ts = std::chrono::steady_clock::now();
+            LOG(INFO) << "yf: merge vectors on table "
+                      << table_name.StringView() << " for range#" << range_id
+                      << " is split_range=" << during_split_range << " took "
+                      << std::chrono::duration_cast<std::chrono::microseconds>(
+                             merge_vector_end_ts - merge_vectors_start_ts)
+                             .count()
+                      << " us.";
+
             if (data_sync_vec->empty())
             {
                 LOG(WARNING) << "data_sync_vec becomes empty after erase, old "
@@ -3945,10 +4005,13 @@ void LocalCcShards::DataSyncForRangePartition(
                          update_slice_status);
 
             auto update_slices_end_ts = std::chrono::steady_clock::now();
-            LOG(INFO) << "== UpdateSlices time us: "
+            LOG(INFO) << "yf: update slices on table "
+                      << table_name.StringView() << " for range#" << range_id
+                      << " is split_range=" << during_split_range << " took "
                       << std::chrono::duration_cast<std::chrono::microseconds>(
                              update_slices_end_ts - update_slices_start_ts)
-                             .count();
+                             .count()
+                      << " us.";
 
             if (need_send_range_cache)
             {
@@ -4008,6 +4071,8 @@ void LocalCcShards::DataSyncForRangePartition(
             {
                 if (scan_cc.scan_heap_is_full_[i] == 1)
                 {
+                    auto release_heap_start_ts =
+                        std::chrono::steady_clock::now();
                     // Clear the FlushRecords' memory of scan cc since the
                     // DataSyncScan heap is full.
                     auto &data_sync_vec_ref = scan_cc.DataSyncVec(i);
@@ -4016,6 +4081,16 @@ void LocalCcShards::DataSyncForRangePartition(
                         &data_sync_vec_ref, &archive_vec_ref);
                     EnqueueCcRequest(i, &release_scan_heap_cc);
                     release_scan_heap_cc.Wait();
+                    auto release_heap_end_ts = std::chrono::steady_clock::now();
+                    LOG(INFO)
+                        << "yf: A release scan heap on table "
+                        << table_name.StringView() << " for range#" << range_id
+                        << " is split_range=" << during_split_range << " took "
+                        << std::chrono::duration_cast<
+                               std::chrono::microseconds>(release_heap_end_ts -
+                                                          release_heap_start_ts)
+                               .count()
+                        << " us.";
                 }
             }
             // Reset
@@ -4030,6 +4105,7 @@ void LocalCcShards::DataSyncForRangePartition(
         range_cache_sender->SendRangeCacheRequest(start_tx_key, end_tx_key);
     }
 
+    auto release_heap_start_ts = std::chrono::steady_clock::now();
     // Release scan heap memory after scan finish.
     std::list<ReleaseDataSyncScanHeapCc> req_vec;
     for (size_t core_idx = 0; core_idx < Count(); ++core_idx)
@@ -4044,6 +4120,15 @@ void LocalCcShards::DataSyncForRangePartition(
         req_vec.back().Wait();
         req_vec.pop_back();
     }
+
+    auto release_heap_end_ts = std::chrono::steady_clock::now();
+    LOG(INFO) << "yf: B release scan heap on table " << table_name.StringView()
+              << " for range#" << range_id
+              << " is split_range=" << during_split_range << " took "
+              << std::chrono::duration_cast<std::chrono::microseconds>(
+                     release_heap_end_ts - release_heap_start_ts)
+                     .count()
+              << " us.";
 
     PostProcessRangePartitionDataSyncTask(std::move(data_sync_task),
                                           data_sync_txm,
@@ -5369,7 +5454,30 @@ void LocalCcShards::FlushData(std::unique_lock<std::mutex> &flush_worker_lk)
 
     if (succ)
     {
+        size_t total_flush_cnt = 0;
+        for (const auto &flush_entry : flush_task_entries)
+        {
+            for (const auto &entry : flush_entry.second)
+            {
+                if (entry->data_sync_vec_)
+                {
+                    total_flush_cnt += entry->data_sync_vec_->size();
+                }
+            }
+        }
+
+        auto put_all_start_time = std::chrono::steady_clock::now();
+
         succ = store_hd_->PutAll(flush_task_entries);
+
+        auto put_all_end_time = std::chrono::steady_clock::now();
+        auto put_all_duration =
+            std::chrono::duration_cast<std::chrono::microseconds>(
+                put_all_end_time - put_all_start_time)
+                .count();
+        LOG(INFO) << "yf: DataSync PutAll total_flush_cnt: " << total_flush_cnt
+                  << " duration(us): " << put_all_duration;
+
         if (!succ)
         {
             LOG(ERROR) << "DataSync PutAll flush to kv "
@@ -5390,12 +5498,21 @@ void LocalCcShards::FlushData(std::unique_lock<std::mutex> &flush_worker_lk)
     // Persist data in kv store if needed
     if (succ && store_hd_->NeedPersistKV())
     {
+        auto persist_kv_start_time = std::chrono::steady_clock::now();
         std::vector<std::string> kv_table_names;
         for (auto &[table_name, entries] : flush_task_entries)
         {
             kv_table_names.push_back(table_name.data());
         }
         succ = store_hd_->PersistKV(kv_table_names);
+        auto persist_kv_end_time = std::chrono::steady_clock::now();
+        auto persist_kv_duration =
+            std::chrono::duration_cast<std::chrono::microseconds>(
+                persist_kv_end_time - persist_kv_start_time)
+                .count();
+        LOG(INFO) << "yf: DataSync PersistKV table_cnt: "
+                  << kv_table_names.size()
+                  << " duration(us): " << persist_kv_duration << " range id ";
     }
 
     std::unordered_set<uint16_t> updated_ckpt_ts_core_ids;
