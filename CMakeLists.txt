@@ -335,6 +335,12 @@ elseif(WITH_DATA_STORE STREQUAL "ELOQDSS_ELOQSTORE")
         store_handler/eloq_data_store_service/ds_request.pb.cc
         store_handler/eloq_data_store_service/eloq_store_config.cpp
     )
+elseif((WITH_DATA_STORE STREQUAL "ROCKSDB") OR (WITH_DATA_STORE STREQUAL "ROCKSDB_CLOUD_S3") OR(WITH_DATA_STORE STREQUAL "ROCKSDB_CLOUD_GCS"))
+    SET(DATA_SUBSTRATE_SOURCES ${DATA_SUBSTRATE_SOURCES}
+        store_handler/rocksdb_config.cpp
+        store_handler/rocksdb_handler.cpp
+        store_handler/store_util.cpp
+    )
 endif()
 
 # Build the library (static or shared based on BUILD_SHARED_LIBS option)

@@ -38,8 +38,8 @@
 #include <utility>
 #include <vector>
 
-#include "eloqkv_key.h"
-#include "redis_object.h"
+#include "../../../include/eloqkv_key.h"
+#include "../../../include/redis_object.h"
 #include "rocksdb_config.h"
 #include "tx_service/include/store/data_store_handler.h"
 
@@ -58,7 +58,7 @@ public:
         const txservice::KVCatalogInfo *kv_info,
         const EloqKV::EloqKey *start_key,
         bool inclusive,
-        const std::vector<txservice::store::DataStoreSearchCond> &pushdown_cond,
+        const std::vector<txservice::DataStoreSearchCond> &pushdown_cond,
         bool scan_forward,
         std::shared_lock<std::shared_mutex> db_lock)
         : db_(db),

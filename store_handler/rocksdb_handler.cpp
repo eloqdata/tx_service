@@ -64,12 +64,12 @@
 #include "cc_node_service.h"
 #include "cc_request.pb.h"
 #include "local_cc_shards.h"
-#include "redis_hash_object.h"
-#include "redis_list_object.h"
-#include "redis_object.h"  // RedisEloqObject
-#include "redis_set_object.h"
-#include "redis_string_object.h"
-#include "redis_zset_object.h"
+#include "../../../include/redis_hash_object.h"
+#include "../../../include/redis_list_object.h"
+#include "../../../include/redis_object.h"  // RedisEloqObject
+#include "../../../include/redis_set_object.h"
+#include "../../../include/redis_string_object.h"
+#include "../../../include/redis_zset_object.h"
 #include "rocksdb/iostats_context.h"
 #include "rocksdb/rate_limiter.h"
 #include "store_util.h"
