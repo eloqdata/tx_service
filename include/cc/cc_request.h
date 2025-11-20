@@ -4089,6 +4089,7 @@ public:
         slice_ids_.resize(core_cnt_);
 
         total_pin_count_.resize(core_cnt_, 0);
+        retry_pin_count_.resize(core_cnt_, 0);
     }
 
     bool ValidTermCheck()
@@ -4199,6 +4200,7 @@ public:
             }
 
             total_pin_count_[i] = 0;
+            retry_pin_count_[i] = 0;
         }
 
         err_ = CcErrorCode::NO_ERROR;
@@ -4334,6 +4336,7 @@ public:
 
     size_t scan_count_{0};
     std::vector<size_t> total_pin_count_;
+    std::vector<size_t> retry_pin_count_;
 
 private:
     const TableName *table_name_{nullptr};
