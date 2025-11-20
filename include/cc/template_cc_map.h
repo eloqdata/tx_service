@@ -5251,6 +5251,7 @@ public:
             }
             case RangeSliceOpStatus::Retry:
             {
+                req.retry_pin_count_[shard_->core_id_]++;
                 pause_key_and_is_drained.first = search_key.CloneTxKey();
                 shard_->Enqueue(shard_->LocalCoreId(), &req);
                 succ = false;
@@ -11726,6 +11727,11 @@ void BackfillForScanNextBatch(FetchBucketDataCc *fetch_cc,
         // Reset kv cache
         scan_cache->Reset();
         assert(scan_cache->Size() == 0);
+
+        // current plan: bucket 1, 2, 3, 4, 5
+        // round 1: fetch bucket 1, 2, 3, 4, 5
+        // round 2: fetch bucket 1, 2, 3, 4, 5
+        // round 3: fetch bucket 1, 2, 3, 4, 5 (33-34)
 
         for (auto &item : fetch_cc->bucket_data_items_)
         {
