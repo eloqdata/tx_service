@@ -310,7 +310,7 @@ public:
 
     virtual void ScanOpen(
         const TableName &table_name,
-        const uint64_t schema_version,
+        uint64_t schema_version,
         ScanIndexType index_type,
         const TxKey &start_key,
         bool inclusive,
