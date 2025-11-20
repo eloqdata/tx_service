@@ -3808,9 +3808,15 @@ void LocalCcShards::DataSyncForRangePartition(
             auto scan_cc_end_ts = std::chrono::steady_clock::now();
             size_t delta_scan_count = scan_cc.scan_count_ - debug_scan_count;
             size_t total_pin_cnt = 0;
+            size_t total_retry_cnt = 0;
             for (const auto pin_slice_cnt : scan_cc.total_pin_count_)
             {
                 total_pin_cnt += pin_slice_cnt;
+            }
+
+            for (const auto retry_cnt : scan_cc.retry_pin_count_)
+            {
+                total_retry_cnt += retry_cnt;
             }
 
             LOG(INFO) << "yf: datasync scan on table "
@@ -3820,7 +3826,7 @@ void LocalCcShards::DataSyncForRangePartition(
                       << " req execute count =" << delta_scan_count
                       << " total execute count = " << scan_cc.scan_count_
                       << " total pin slice count = " << total_pin_cnt
-                      << " took "
+                      << " total retry cnt = " << total_retry_cnt << " took "
                       << std::chrono::duration_cast<std::chrono::microseconds>(
                              scan_cc_end_ts - scan_cc_start_ts)
                              .count()
