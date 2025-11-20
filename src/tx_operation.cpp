@@ -1420,29 +1420,6 @@ void ScanOpenOperation::Forward(TransactionExecution *txm)
             txm->PostProcess(*this);
         }
     }
-    else if (txm->IsTimeOut())
-    {
-        DeadLockCheck::RequestCheck();
-
-        if (hd_result_.LocalRefCnt() > 0)
-        {
-            // Never force error for local request.
-            return;
-        }
-
-        if (retry_num_ > 0 &&
-            (txm->CheckLeaderTerm() || txm->CheckStandbyTerm()))
-        {
-            ReRunOp(txm);
-            return;
-        }
-
-        bool force_error = hd_result_.ForceError();
-        if (force_error)
-        {
-            txm->PostProcess(*this);
-        }
-    }
 }
 
 ScanNextOperation::ScanNextOperation(TransactionExecution *txm)

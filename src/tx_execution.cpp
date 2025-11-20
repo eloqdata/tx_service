@@ -2906,10 +2906,7 @@ void TransactionExecution::Process(ScanNextOperation &scan_next)
         return;
     }
 
-    if (!is_local || scanner.lock_type_ != LockType::NoLock)
-    {
-        StartTiming();
-    }
+    StartTiming();
 }
 
 void TransactionExecution::PostProcess(ScanNextOperation &scan_next)
