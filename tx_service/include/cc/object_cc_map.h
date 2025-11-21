@@ -2497,6 +2497,9 @@ public:
         {
             cce->SetCommitTsPayloadStatus(commit_ts, status);
             cce->SetCkptTs(commit_ts);
+            DLOG(INFO) << "BackFill key: " << cce->KeyString()
+                       << ", status: " << int(status)
+                       << ", commit_ts: " << commit_ts;
 
             if (!rec_str.empty())
             {
