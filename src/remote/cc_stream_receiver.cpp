@@ -1130,12 +1130,12 @@ void CcStreamReceiver::OnReceiveCcMsg(std::unique_ptr<CcMessage> msg)
         CcScanner *scanner = hd_res->Value().ccm_scanner_;
         ::txservice::remote::ShardCacheMsgMap *shard_caches =
             scan_next_res.mutable_shard_cache_map();
-        for (auto &[core_id, shard_cache] :
+        for (auto &[shard_code, shard_cache] :
              *shard_caches->mutable_shard_caches())
         {
             const ::txservice::remote::ScanCache_msg &memory_cache =
                 shard_cache.memory_scan_cache();
-            uint32_t shard_code = (node_group_id << 10) + core_id;
+            // uint32_t shard_code = (node_group_id << 10) + core_id;
 
             if (memory_cache.scan_tuple_size() > 0)
             {
