@@ -153,6 +153,7 @@ public:
                                     const std::string &record_str,
                                     size_t &rec_offset,
                                     RecordStatus rec_status,
+                                    int32_t object_type,
                                     uint64_t gap_ts,
                                     uint64_t cce_lock_ptr,
                                     int64_t term,
@@ -273,6 +274,7 @@ public:
                             const std::string &record_str,
                             size_t &rec_offset,
                             RecordStatus rec_status,
+                            int32_t object_type,
                             uint64_t gap_ts,
                             uint64_t cce_lock_ptr,
                             int64_t term,
@@ -300,6 +302,7 @@ public:
             scan_tuple->gap_ts_ = 0;
             scan_tuple->cce_addr_.SetCceLock(
                 cce_lock_ptr, term, ng_id, core_id);
+            scan_tuple->obj_type_ = object_type;
         }
         else
         {
@@ -317,6 +320,7 @@ public:
                 scan_tuple->KeyObj().SetPackedKey(key_str.data(),
                                                   key_str.size());
             }
+            scan_tuple->obj_type_ = object_type;
             scan_tuple->rec_status_ = rec_status;
             scan_tuple->SetRecord(record_str.data(), rec_offset);
 

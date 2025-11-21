@@ -54,6 +54,7 @@ public:
         : key_ts_(0),
           gap_ts_(0),
           rec_status_(RecordStatus::Normal),
+          obj_type_(-1),
           cce_ptr_(nullptr),
           cce_addr_()
     {
@@ -62,11 +63,13 @@ public:
     ScanTuple(uint64_t key_ts,
               uint64_t gap_ts,
               RecordStatus status,
+              int32_t obj_type,
               LruEntry *cce_ptr,
               const CcEntryAddr &cce_addr)
         : key_ts_(key_ts),
           gap_ts_(gap_ts),
           rec_status_(status),
+          obj_type_(obj_type),
           cce_ptr_(cce_ptr),
           cce_addr_(cce_addr)
     {
@@ -79,10 +82,15 @@ public:
 
     virtual TxKey Key() const = 0;
     virtual const TxRecord *Record() const = 0;
+    virtual int32_t ObjectType() const
+    {
+        return obj_type_;
+    }
 
     uint64_t key_ts_;
     uint64_t gap_ts_;
     RecordStatus rec_status_;
+    int32_t obj_type_;
     // For range slice scan, to make sure that all shards' ScanSlice stop at the
     // same end key, the tuple's cce is required to adjust the scan last
     // position. Also, the last cce needs to be pinned by ReadIntent. Since the
@@ -110,6 +118,7 @@ public:
         : ScanTuple(rhs.key_ts_,
                     rhs.gap_ts_,
                     rhs.rec_status_,
+                    rhs.obj_type_,
                     rhs.cce_ptr_,
                     rhs.cce_addr_),
           key_obj_(std::move(rhs.key_obj_)),

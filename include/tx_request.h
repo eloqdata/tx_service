@@ -599,11 +599,13 @@ struct ScanBatchTuple
     ScanBatchTuple(TxKey key,
                    TxRecord *rec,
                    RecordStatus status,
-                   uint64_t version)
+                   uint64_t version,
+                   int32_t object_type)
         : key_(std::move(key)),
           record_(rec),
           status_(status),
-          version_ts_(version)
+          version_ts_(version),
+          object_type_(object_type)
     {
     }
 
@@ -611,11 +613,13 @@ struct ScanBatchTuple
                    TxRecord *rec,
                    RecordStatus status,
                    uint64_t version,
+                   int32_t object_type,
                    const CcEntryAddr &cce_addr)
         : key_(std::move(key)),
           record_(rec),
           status_(status),
           version_ts_(version),
+          object_type_(object_type),
           cce_addr_(cce_addr)
     {
     }
@@ -627,6 +631,7 @@ struct ScanBatchTuple
           record_(rhs.record_),
           status_(rhs.status_),
           version_ts_(rhs.version_ts_),
+          object_type_(rhs.object_type_),
           cce_addr_(rhs.cce_addr_)
     {
     }
@@ -635,6 +640,7 @@ struct ScanBatchTuple
     TxRecord *record_{nullptr};
     RecordStatus status_{RecordStatus::Unknown};
     uint64_t version_ts_{0};
+    int32_t object_type_{-1};
     CcEntryAddr cce_addr_;
 };
 
