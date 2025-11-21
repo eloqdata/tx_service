@@ -5833,15 +5833,6 @@ public:
                     return false;
                 }
 
-                if (catalog_entry != nullptr &&
-                    catalog_entry->dirty_schema_ != nullptr)
-                {
-                    ccs.UpdateCcmSchema(*table_name_,
-                                        node_group_id_,
-                                        catalog_entry->dirty_schema_.get(),
-                                        catalog_entry->dirty_schema_version_);
-                }
-
                 if (ccs.core_id_ == 0 && !txservice_skip_kv &&
                     !Sharder::Instance()
                          .GetDataStoreHandler()
