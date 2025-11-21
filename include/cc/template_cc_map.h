@@ -2425,11 +2425,8 @@ public:
                 &BackfillForScanNextBatch<KeyT, ValueT, VersionedRecord>);
         }
 
-        LOG(INFO) << "== scan next batch: A, core id = " << shard_->core_id_;
-
         if (cce_lock_addr != 0)
         {
-            LOG(INFO) << "== cce lock addr = " << cce_lock_addr;
             KeyGapLockAndExtraData *lock =
                 reinterpret_cast<KeyGapLockAndExtraData *>(cce_lock_addr);
             assert(lock != nullptr && lock->GetCcEntry() != nullptr);
@@ -2444,8 +2441,6 @@ public:
 
             if (end_lock_addr != 0)
             {
-                LOG(INFO) << "== end lock addr = " << end_lock_addr
-                          << ", release lock";
                 KeyGapLockAndExtraData *end_lock =
                     reinterpret_cast<KeyGapLockAndExtraData *>(end_lock_addr);
                 assert(end_lock != nullptr &&
@@ -2454,8 +2449,6 @@ public:
                     CcEntry<KeyT, ValueT, VersionedRecord, RangePartitioned> *>(
                     end_lock->GetCcEntry());
 
-                LOG(INFO) << "== end cce key = " << end_cce->KeyString()
-                          << ", end cce addr = " << end_cce;
                 assert(end_cce->GetCcPage() != nullptr);
 
                 CcPage<KeyT, ValueT, VersionedRecord, RangePartitioned>
@@ -2465,13 +2458,10 @@ public:
 
                 // Release read intent lock
                 end_it = Iterator(end_cce, end_ccp, &neg_inf_);
-
-                LOG(INFO) << "== release lock for end key";
                 ReleaseCceLock(
                     end_cce->GetKeyLock(), end_cce, req.Txn(), ng_id);
             }
 
-            LOG(INFO) << "== crate iter. " << prior_cce->KeyString();
             scan_ccm_it = Iterator(prior_cce, ccp, &neg_inf_);
             const KeyT *prior_cce_key = scan_ccm_it->first;
 
@@ -2480,14 +2470,12 @@ public:
 
             if (blocking_type == ScanBlockingType::NoBlocking)
             {
-                LOG(INFO) << "== release lock for normal scan";
                 // Release read intent lock
                 ReleaseCceLock(
                     prior_cce->GetKeyLock(), prior_cce, req.Txn(), ng_id);
             }
             else
             {
-                LOG(INFO) << "== reacquire lock for resumed scan";
                 if (blocking_type == ScanBlockingType::BlockOnFuture)
                 {
                     prior_cce->GetKeyLock()->ReleaseReadLock(req.Txn(), shard_);
@@ -2561,9 +2549,6 @@ public:
                 }
             }
 
-            LOG(INFO) << "== end key = " << end_key->ToString()
-                      << ", end it key = " << end_it->first->ToString();
-
             assert(typed_cache->Size() == 0);
             // typed_cache->Reset();
         }
@@ -2572,8 +2557,6 @@ public:
 
         if (direction == ScanDirection::Forward)
         {
-            LOG(INFO) << "== scan next batch: B, core id = "
-                      << shard_->core_id_;
             // ++scan_ccm_it;
             size_t scan_cnt = 0;
             for (; scan_ccm_it != end_it && !typed_cache->Full() &&
@@ -2698,8 +2681,6 @@ public:
             assert(false);
         }
 
-        LOG(INFO) << "== scan next batch: C, core id = " << shard_->core_id_;
-
         scan_finished = (scan_ccm_it == end_it);
         if (scan_finished)
         {
@@ -2719,11 +2700,6 @@ public:
                         end_it->second, end_it.GetPage(), req.Txn(), tx_term);
                     end_it_lock_addr = reinterpret_cast<uint64_t>(
                         end_it->second->GetLockAddr());
-
-                    LOG(INFO)
-                        << "== acquire end it lock addr, end it ->second = "
-                        << end_it->second << ", end page = " << end_it.GetPage()
-                        << ", lock addr = " << end_it_lock_addr;
                 }
 
                 AcquireReadIntent(scan_ccm_it->second,
