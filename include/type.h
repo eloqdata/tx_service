@@ -593,8 +593,9 @@ inline static TableName sequence_table_name{sequence_table_name_sv.data(),
                                             TableType::Primary,
                                             TableEngine::InternalHash};
 
-// Set buckets count to be the same as the slots count. (16384)
-inline static const uint16_t total_range_buckets = 0x4000;
+// Set buckets count to be the same as the hash partition count.
+inline static const uint16_t total_range_buckets = 0x400;  // 1024
+inline static const uint16_t total_hash_partitions = 0x400;
 
 enum struct SlicePosition
 {

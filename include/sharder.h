@@ -222,9 +222,7 @@ public:
 
     static inline int32_t MapKeyHashToHashPartitionId(uint64_t hash_code)
     {
-        static constexpr int32_t kHashPartitions = 1024;
-        return static_cast<int32_t>(MapKeyHashToBucketId(hash_code) &
-                                    (kHashPartitions - 1));
+        return static_cast<int32_t>(hash_code % total_hash_partitions);
     }
 
     static inline uint16_t TotalRangeBuckets()
@@ -232,9 +230,15 @@ public:
         return total_range_buckets;
     }
 
-    static inline int32_t MapBucketIdToKvPartitionId(uint16_t bucket_id)
+    static inline int32_t MapBucketIdToHashPartitionId(uint16_t bucket_id)
     {
-        return bucket_id & 0x3FF;
+        assert(total_hash_partitions <= total_range_buckets);
+        return bucket_id % total_hash_partitions;
+    }
+
+    static inline uint32_t MapHashPartitionIdToBucketId(int32_t partition_id)
+    {
+        return static_cast<uint32_t>(partition_id % total_range_buckets);
     }
 
     uint32_t NativeNodeGroup() const
