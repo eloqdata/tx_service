@@ -2458,8 +2458,11 @@ public:
 
                 // Release read intent lock
                 end_it = Iterator(end_cce, end_ccp, &neg_inf_);
-                ReleaseCceLock(
-                    end_cce->GetKeyLock(), end_cce, req.Txn(), ng_id);
+                ReleaseCceLock(end_cce->GetKeyLock(),
+                               end_cce,
+                               req.Txn(),
+                               ng_id,
+                               LockType::ReadIntent);
             }
 
             scan_ccm_it = Iterator(prior_cce, ccp, &neg_inf_);
@@ -2471,8 +2474,11 @@ public:
             if (blocking_type == ScanBlockingType::NoBlocking)
             {
                 // Release read intent lock
-                ReleaseCceLock(
-                    prior_cce->GetKeyLock(), prior_cce, req.Txn(), ng_id);
+                ReleaseCceLock(prior_cce->GetKeyLock(),
+                               prior_cce,
+                               req.Txn(),
+                               ng_id,
+                               LockType::ReadIntent);
             }
             else
             {
@@ -3103,8 +3109,11 @@ public:
 
                 // Release read intent lock
                 end_it = Iterator(end_cce, ccp, &neg_inf_);
-                ReleaseCceLock(
-                    end_cce->GetKeyLock(), end_cce, req.Txn(), ng_id);
+                ReleaseCceLock(end_cce->GetKeyLock(),
+                               end_cce,
+                               req.Txn(),
+                               ng_id,
+                               LockType::ReadIntent);
             }
 
             scan_ccm_it = Iterator(prior_cce, ccp, &neg_inf_);
@@ -3116,8 +3125,11 @@ public:
             if (blocking_type == ScanBlockingType::NoBlocking)
             {
                 // Release read intent lock
-                ReleaseCceLock(
-                    prior_cce->GetKeyLock(), prior_cce, req.Txn(), ng_id);
+                ReleaseCceLock(prior_cce->GetKeyLock(),
+                               prior_cce,
+                               req.Txn(),
+                               ng_id,
+                               LockType::ReadIntent);
             }
             else
             {
