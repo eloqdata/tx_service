@@ -19,6 +19,8 @@
  *    <http://www.gnu.org/licenses/>.
  *
  */
+#include "rocksdb_cloud_data_store.h"
+
 #include <aws/core/client/ClientConfiguration.h>
 #include <aws/s3/S3Client.h>
 #include <bthread/condition_variable.h>
@@ -35,6 +37,7 @@
 #include <chrono>
 #include <filesystem>
 #include <memory>
+#include <set>
 #include <sstream>
 #include <string>
 #include <unordered_map>
@@ -47,7 +50,6 @@
 #include "purger_event_listener.h"
 #include "rocksdb/cloud/cloud_file_system_impl.h"
 #include "rocksdb/cloud/cloud_storage_provider.h"
-#include "rocksdb_cloud_data_store.h"
 
 #define LONG_STR_SIZE 21
 
@@ -156,8 +158,7 @@ RocksDBCloudDataStore::RocksDBCloudDataStore(
 
 RocksDBCloudDataStore::~RocksDBCloudDataStore()
 {
-    if (query_worker_pool_ != nullptr || data_store_service_ != nullptr ||
-        db_ != nullptr)
+    if (query_worker_pool_ != nullptr || db_ != nullptr)
     {
         Shutdown();
     }
@@ -165,15 +166,9 @@ RocksDBCloudDataStore::~RocksDBCloudDataStore()
 
 void RocksDBCloudDataStore::Shutdown()
 {
+    RocksDBDataStoreCommon::Shutdown();
+
     std::unique_lock<std::shared_mutex> db_lk(db_mux_);
-
-    // shutdown query worker pool
-    query_worker_pool_->Shutdown();
-    query_worker_pool_ = nullptr;
-
-    data_store_service_->ForceEraseScanIters(shard_id_);
-    data_store_service_ = nullptr;
-
     if (db_ != nullptr)
     {
         DLOG(INFO) << "RocksDBCloudDataStore Shutdown, db->Close()";
@@ -359,6 +354,7 @@ bool RocksDBCloudDataStore::StartDB()
 #endif
 
     DLOG(INFO) << "DBCloud Open";
+    auto start_time = std::chrono::steady_clock::now();
     rocksdb::CloudFileSystem *cfs;
     // Open the cloud file system
     status = EloqDS::NewCloudFileSystem(cfs_options_, &cfs);
@@ -376,6 +372,11 @@ bool RocksDBCloudDataStore::StartDB()
 
         return false;
     }
+    auto end_time = std::chrono::steady_clock::now();
+    auto use_time = std::chrono::duration_cast<std::chrono::milliseconds>(
+                        end_time - start_time)
+                        .count();
+    LOG(INFO) << "DBCloud open, NewCloudFileSystem took " << use_time << " ms";
 
     std::string cookie_on_open = "";
     std::string new_cookie_on_open = "";
@@ -451,8 +452,8 @@ bool RocksDBCloudDataStore::OpenCloudDB(
     // boost write performance by enabling unordered write
     options.unordered_write = true;
     // skip Consistency check, which compares the actual file size with the size
-    // recorded in the metadata, which can fail when skip_cloud_files_in_getchildren is
-    // set to true
+    // recorded in the metadata, which can fail when
+    // skip_cloud_files_in_getchildren is set to true
     options.paranoid_checks = false;
 
     // print db statistics every 60 seconds
@@ -630,7 +631,7 @@ bool RocksDBCloudDataStore::OpenCloudDB(
     // Disable auto compactions before blocking purger
     options.disable_auto_compactions = true;
 
-    auto start = std::chrono::system_clock::now();
+    auto start = std::chrono::steady_clock::now();
     std::unique_lock<std::shared_mutex> db_lk(db_mux_);
     rocksdb::Status status;
     uint32_t retry_num = 0;
@@ -650,10 +651,10 @@ bool RocksDBCloudDataStore::OpenCloudDB(
         bthread_usleep(retry_num * 200000);
     }
 
-    auto end = std::chrono::system_clock::now();
+    auto end = std::chrono::steady_clock::now();
     auto duration =
         std::chrono::duration_cast<std::chrono::milliseconds>(end - start);
-    DLOG(INFO) << "DBCloud Open took " << duration.count() << " ms";
+    LOG(INFO) << "DBCloud Open took " << duration.count() << " ms";
 
     if (!status.ok())
     {
@@ -830,6 +831,103 @@ void RocksDBCloudDataStore::CreateSnapshotForBackup(
 rocksdb::DBCloud *RocksDBCloudDataStore::GetDBPtr()
 {
     return db_;
+}
+
+bool RocksDBCloudDataStore::CollectCachedSstFiles(
+    std::vector<::EloqDS::remote::FileInfo> &file_infos)
+{
+    std::shared_lock<std::shared_mutex> db_lk(db_mux_);
+
+    if (db_ == nullptr)
+    {
+        LOG(ERROR) << "DB not open, cannot collect file cache";
+        return false;
+    }
+
+    // Get live file metadata from RocksDB
+    std::vector<rocksdb::LiveFileMetaData> metadata;
+    db_->GetLiveFilesMetaData(&metadata);
+
+    // Get list of files in local directory
+    std::set<std::string> local_files;
+    std::error_code ec;
+    std::filesystem::directory_iterator dir_ite(db_path_, ec);
+    if (ec.value() != 0)
+    {
+        LOG(ERROR) << "Failed to list local directory: " << ec.message();
+        return false;
+    }
+
+    for (const auto &entry : dir_ite)
+    {
+        if (entry.is_regular_file())
+        {
+            std::string filename = entry.path().filename().string();
+            // Only include .sst- files (format: {file_number}.sst-{epoch})
+            if (filename.find(".sst-") != std::string::npos)
+            {
+                local_files.insert(filename);
+            }
+        }
+    }
+
+    // Build intersection: files that are both in metadata and local directory
+    file_infos.clear();
+    rocksdb::CloudFileSystem *cfs =
+        dynamic_cast<rocksdb::CloudFileSystem *>(cloud_fs_.get());
+    
+    for (const auto &meta : metadata)
+    {
+        std::string filename =
+            std::filesystem::path(meta.name).filename().string();
+        std::string remapped_filename = cfs->RemapFilename(filename);
+        // Only include files that exist locally
+        if (local_files.find(remapped_filename) != local_files.end())
+        {
+            ::EloqDS::remote::FileInfo file_info;
+            file_info.set_file_name(remapped_filename);
+            file_info.set_file_size(meta.size);
+            file_info.set_file_number(ExtractFileNumber(remapped_filename));
+
+            file_infos.push_back(file_info);
+        }
+    }
+
+    DLOG(INFO) << "Collected " << file_infos.size()
+               << " cached SST files for shard " << shard_id_;
+    return true;
+}
+
+uint64_t RocksDBCloudDataStore::ExtractFileNumber(const std::string &file_name)
+{
+    // SST file names are in format: {file_number}.sst-{epoch}
+    // Example: "000011.sst-ef6b2d92d3687a84"
+    // Extract numeric part before ".sst-"
+    size_t sst_pos = file_name.find(".sst-");
+    if (sst_pos == std::string::npos)
+    {
+        LOG(ERROR) << "Failed to extract file number from " << file_name;
+        return 0;
+    }
+
+    std::string base = file_name.substr(0, sst_pos);
+    // Remove leading zeros and convert to number
+    size_t first_non_zero = base.find_first_not_of('0');
+    if (first_non_zero == std::string::npos)
+    {
+        LOG(ERROR) << "All zeros in file number from " << file_name;
+        return 0;  // All zeros
+    }
+
+    try
+    {
+        return std::stoull(base.substr(first_non_zero));
+    }
+    catch (const std::exception &e)
+    {
+        LOG(ERROR) << "Failed to extract file number from " << file_name;
+        return 0;
+    }
 }
 
 inline std::string RocksDBCloudDataStore::MakeCloudManifestCookie(

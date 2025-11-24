@@ -205,11 +205,13 @@ public:
     }
 
     void Reset(DataStoreServiceScanner *scanner,
-               uint32_t partition_id,
+               int32_t partition_id,
+               uint32_t data_shard_id,
                const std::string_view start_key)
     {
         scanner_ = scanner;
         partition_id_ = partition_id;
+        data_shard_id_ = data_shard_id;
         last_key_ = start_key;
         session_id_ = "";
         last_batch_size_ = scanner_->GetBatchSize();
@@ -247,6 +249,7 @@ protected:
     {
         scanner_ = nullptr;
         partition_id_ = 0;
+        data_shard_id_ = 0;
         last_key_ = "";
         session_id_ = "";
         last_batch_size_ = 0;
@@ -259,7 +262,8 @@ private:
     void ResetCache();
 
     DataStoreServiceScanner *scanner_;
-    uint32_t partition_id_;
+    int32_t partition_id_;
+    uint32_t data_shard_id_{0};
     std::string last_key_;
     uint32_t last_batch_size_;
     std::string session_id_;
@@ -277,11 +281,8 @@ class DataStoreServiceHashPartitionScanner
     : public txservice::store::DataStoreScanner,
       public DataStoreServiceScanner
 {
-#ifdef USE_ONE_ELOQDSS_PARTITION
-    static constexpr uint32_t HASH_PARTITION_COUNT = 1;
-#else
-    static constexpr uint32_t HASH_PARTITION_COUNT = 0x400;  // 1024
-#endif
+    static constexpr uint32_t HASH_PARTITION_COUNT =
+        txservice::total_hash_partitions;
 
 public:
     DataStoreServiceHashPartitionScanner(

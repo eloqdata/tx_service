@@ -318,8 +318,8 @@ int main(int argc, char *argv[])
                                                    std::move(ds_factory));
 
     // setup local data store service
-    bool ret = data_store_service_->StartService(
-        FLAGS_bootstrap || is_single_node, 0, 0);
+    bool ret =
+        data_store_service_->StartService(FLAGS_bootstrap || is_single_node);
     if (!ret)
     {
         LOG(ERROR) << "Failed to start data store service";

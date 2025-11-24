@@ -47,6 +47,7 @@ namespace EloqDS
 struct PartitionFlushState;
 struct PartitionBatchRequest;
 struct PartitionCallbackData;
+struct SyncConcurrentRequest;
 class DataStoreServiceClient;
 class BatchWriteRecordsClosure;
 class ReadClosure;
@@ -57,6 +58,42 @@ struct UpsertTableData;
 class ScanNextClosure;
 class CreateSnapshotForBackupClosure;
 class SinglePartitionScanner;
+
+// Range batching helper structs
+struct RangeSliceBatchPlan
+{
+    uint32_t segment_cnt;
+    std::vector<std::string> segment_keys;      // Owned string buffers
+    std::vector<std::string> segment_records;    // Owned string buffers
+
+    // Clear method for reuse
+    void Clear()
+    {
+        segment_cnt = 0;
+        segment_keys.clear();
+        segment_records.clear();
+    }
+};
+
+struct RangeMetadataRecord
+{
+    std::string encoded_key;
+    std::string encoded_value;
+    uint64_t version;  // Stored separately for records_ts in BatchWriteRecords
+};
+
+struct RangeMetadataAccumulator
+{
+    // Key: (kv_table_name, kv_partition_id) as string pair
+    // Value: vector of metadata records for that table/partition
+    std::map<std::pair<std::string, int32_t>,
+             std::vector<RangeMetadataRecord>> records_by_table_partition;
+
+    void Clear()
+    {
+        records_by_table_partition.clear();
+    }
+};
 
 class DssClusterConfig;
 
@@ -71,43 +108,49 @@ public:
     ~DataStoreServiceClient();
 
     DataStoreServiceClient(
+        bool is_bootstrap,
         txservice::CatalogFactory *catalog_factory[3],
         const DataStoreServiceClusterManager &cluster_manager,
+        bool bind_data_shard_with_ng,
         DataStoreService *data_store_service = nullptr)
         : catalog_factory_array_{catalog_factory[0],
                                  catalog_factory[1],
                                  catalog_factory[2],
                                  &range_catalog_factory_,
                                  &hash_catalog_factory_},
-          data_store_service_(data_store_service)
+          data_store_service_(data_store_service),
+          need_bootstrap_(is_bootstrap),
+          bind_data_shard_with_ng_(bind_data_shard_with_ng)
     {
         // Init dss cluster config.
         dss_topology_version_ = cluster_manager.GetTopologyVersion();
         auto all_shards = cluster_manager.GetAllShards();
-        assert(all_shards.size() == 1);
+
         for (auto &[shard_id, shard] : all_shards)
         {
+            if (shard_id >= dss_shards_.size())
+            {
+                LOG(FATAL) << "Shard id " << shard_id
+                           << " is out of range, should expand the hard-coded "
+                              "dss_shards_ size.";
+            }
             uint32_t node_idx = FindFreeNodeIndex();
             auto &node_ref = dss_nodes_[node_idx];
             node_ref.Reset(shard.nodes_[0].host_name_,
                            shard.nodes_[0].port_,
                            shard.version_);
-            dss_shards_[shard_id].store(shard_id);
+            dss_shards_[shard_id].store(node_idx);
+            dss_shard_ids_.insert(shard_id);
         }
+
+        // init bucket infos
+        InitBucketsInfo(dss_shard_ids_, 0, bucket_infos_);
 
         if (data_store_service_ != nullptr)
         {
             data_store_service_->AddListenerForUpdateConfig(
                 [this](const DataStoreServiceClusterManager &cluster_manager)
                 { this->SetupConfig(cluster_manager); });
-        }
-        be_bucket_ids_.reserve(txservice::Sharder::TotalRangeBuckets());
-        for (uint16_t bucket_id = 0;
-             bucket_id < txservice::Sharder::TotalRangeBuckets();
-             ++bucket_id)
-        {
-            uint16_t be_bucket_id = EloqShare::host_to_big_endian(bucket_id);
-            be_bucket_ids_.push_back(be_bucket_id);
         }
     }
 
@@ -125,11 +168,10 @@ public:
     }
 
     static void TxConfigsToDssClusterConfig(
-        uint32_t dss_node_id,  // = 0,
-        uint32_t ng_id,        // = 0,
+        uint32_t node_id,  // = 0,
         const std::unordered_map<uint32_t, std::vector<txservice::NodeConfig>>
             &ng_configs,
-        uint32_t dss_leader_node_id,  // if no leader,set uint32t_max
+        const std::unordered_map<uint32_t, uint32_t> &ng_leaders,
         DataStoreServiceClusterManager &cluster_manager);
 
     void ConnectToLocalDataStoreService(
@@ -387,11 +429,12 @@ public:
     void RestoreTxCache(txservice::NodeGroupId cc_ng_id,
                         int64_t cc_ng_term) override;
 
-    bool OnLeaderStart(uint32_t *next_leader_node) override;
+    bool OnLeaderStart(uint32_t ng_id, uint32_t *next_leader_node) override;
 
-    bool OnLeaderStop(int64_t term) override;
+    bool OnLeaderStop(uint32_t ng_id, int64_t term) override;
 
-    void OnStartFollowing(uint32_t leader_node_id,
+    void OnStartFollowing(uint32_t ng_id,
+                          uint32_t leader_node_id,
                           int64_t term,
                           int64_t standby_term,
                           bool resubscribe) override;
@@ -438,15 +481,6 @@ public:
     static uint32_t HashArchiveKey(const std::string &kv_table_name,
                                    const txservice::TxKey &tx_key);
 
-    static void EncodeKvKeyForHashPart(uint16_t bucket_id,
-                                       std::string &key_out);
-    static void EncodeKvKeyForHashPart(uint16_t bucket_id,
-                                       const std::string_view &tx_key,
-                                       std::string &key_out);
-
-    static std::string_view DecodeKvKeyForHashPart(const char *data,
-                                                   size_t size);
-
     // NOTICE: be_commit_ts is the big endian encode value of commit_ts
     static std::string EncodeArchiveKey(std::string_view table_name,
                                         std::string_view key,
@@ -487,6 +521,9 @@ public:
     bool DeleteCatalog(const txservice::TableName &base_table_name,
                        uint64_t write_time);
 
+    uint32_t GetShardIdByPartitionId(int32_t partition_id,
+                                     bool is_range_partition) const;
+
 private:
     int32_t MapKeyHashToPartitionId(const txservice::TxKey &key) const
     {
@@ -499,8 +536,8 @@ private:
     // =====================================================
 
     void Read(const std::string_view kv_table_name,
-              const uint32_t partition_id,
-              const std::string_view be_bucket_id,
+              const int32_t partition_id,
+              const uint32_t shard_id,
               const std::string_view key,
               void *callback_data,
               DataStoreCallback callback);
@@ -510,6 +547,7 @@ private:
     void BatchWriteRecords(
         std::string_view kv_table_name,
         int32_t partition_id,
+        uint32_t shard_id,
         std::vector<std::string_view> &&key_parts,
         std::vector<std::string_view> &&record_parts,
         std::vector<uint64_t> &&records_ts,
@@ -547,11 +585,46 @@ private:
         uint64_t now);
 
     /**
+     * Helper methods for range slice batching
+     */
+    RangeSliceBatchPlan PrepareRangeSliceBatches(
+        const txservice::TableName &table_name,
+        uint64_t version,
+        const std::vector<const txservice::StoreSlice *> &slices,
+        int32_t partition_id);
+
+    void DispatchRangeSliceBatches(std::string_view kv_table_name,
+                                   int32_t kv_partition_id,
+                                   uint64_t version,
+                                   const std::vector<RangeSliceBatchPlan> &plans,
+                                   SyncConcurrentRequest *sync_concurrent);
+
+    /**
+     * Helper methods for range metadata batching
+     */
+    void EnqueueRangeMetadataRecord(
+        const txservice::CatalogFactory *catalog_factory,
+        const txservice::TableName &table_name,
+        const txservice::TxKey &range_start_key,
+        int32_t partition_id,
+        uint64_t range_version,
+        uint64_t version,
+        uint32_t segment_cnt,
+        RangeMetadataAccumulator &accumulator);
+
+    void DispatchRangeMetadataBatches(
+        std::string_view kv_table_name,
+        const RangeMetadataAccumulator &accumulator,
+        SyncConcurrentRequest *sync_concurrent,
+        size_t max_batch_size = 64 * 1024 * 1024);  // 64MB
+
+    /**
      * Delete range and flush data are not frequent calls, all calls are sent
      * with rpc.
      */
     void DeleteRange(const std::string_view table_name,
                      const int32_t partition_id,
+                     uint32_t shard_id,
                      const std::string &start_key,
                      const std::string &end_key,
                      const bool skip_wal,
@@ -571,7 +644,8 @@ private:
 
     void ScanNext(
         const std::string_view table_name,
-        uint32_t partition_id,
+        int32_t partition_id,
+        uint32_t shard_id,
         const std::string_view start_key,
         const std::string_view end_key,
         const std::string_view session_id,
@@ -587,7 +661,8 @@ private:
     void ScanNextInternal(ScanNextClosure *scan_next_closure);
 
     void ScanClose(const std::string_view table_name,
-                   uint32_t partition_id,
+                   int32_t partition_id,
+                   uint32_t shard_id,
                    std::string &session_id,
                    void *callback_data,
                    DataStoreCallback callback);
@@ -624,29 +699,15 @@ private:
     // statistics and etc.).
     int32_t KvPartitionIdOf(const txservice::TableName &table) const
     {
-#ifdef USE_ONE_ELOQDSS_PARTITION
-        return 0;
-#else
         std::string_view sv = table.StringView();
-        return (std::hash<std::string_view>()(sv)) & 0x3FF;
-#endif
+        auto hash_code = std::hash<std::string_view>()(sv);
+        return txservice::Sharder::MapKeyHashToHashPartitionId(hash_code);
     }
 
     int32_t KvPartitionIdOf(int32_t key_partition,
                             bool is_range_partition = true)
     {
-#ifdef USE_ONE_ELOQDSS_PARTITION
-        if (is_range_partition)
-        {
-            return key_partition;
-        }
-        else
-        {
-            return 0;
-        }
-#else
         return key_partition;
-#endif
     }
 
     const txservice::CatalogFactory *GetCatalogFactory(
@@ -656,25 +717,29 @@ private:
     }
 
     /**
-     * @brief Check if the shard_id is local to the current node.
+     * @brief Check if the owner of shard is the local DataStoreService node.
      * @param shard_id
-     * @return true if the shard_id is local to the current node.
+     * @return true if the owner of shard is the local DataStoreService node
      */
     bool IsLocalShard(uint32_t shard_id);
-
     /**
-     * @brief Check if the partition_id is local to the current node.
-     * @param partition_id
-     * @return true if the partition_id is local to the current node.
+     * @brief Get the index of the shard's owner node in dss_nodes_.
+     * @param shard_id
+     * @return uint32_t
      */
-    bool IsLocalPartition(int32_t partition_id);
-
-    uint32_t GetShardIdByPartitionId(int32_t partition_id) const;
-    uint32_t AllDataShardCount() const;
     uint32_t GetOwnerNodeIndexOfShard(uint32_t shard_id) const;
+    std::vector<uint32_t> GetAllDataShards();
     bool UpdateOwnerNodeIndexOfShard(uint32_t shard_id,
                                      uint32_t old_node_index,
                                      uint32_t &new_node_index);
+    void InitBucketsInfo(
+        const std::set<uint32_t> &node_groups,
+        uint64_t version,
+        std::unordered_map<uint16_t, std::unique_ptr<txservice::BucketInfo>>
+            &ng_bucket_infos);
+
+    void UpdateShardOwner(uint32_t shard_id, uint32_t node_id);
+
     uint32_t FindFreeNodeIndex();
     void HandleShardingError(const ::EloqDS::remote::CommonResult &result);
     bool UpgradeShardVersion(uint32_t shard_id,
@@ -682,24 +747,17 @@ private:
                              const std::string &host_name,
                              uint16_t port);
 
-    std::string_view EncodeBucketId(uint16_t bucket_id)
-    {
-        uint16_t &be_bucket_id = be_bucket_ids_[bucket_id];
-        return std::string_view(reinterpret_cast<const char *>(&be_bucket_id),
-                                sizeof(uint16_t));
-    }
-
     txservice::EloqHashCatalogFactory hash_catalog_factory_{};
     txservice::EloqRangeCatalogFactory range_catalog_factory_{};
     // TODO(lzx): define a global catalog factory array that used by
     // EngineServer TxService and DataStoreHandler
     std::array<const txservice::CatalogFactory *, 5> catalog_factory_array_;
 
-    // bthread::Mutex ds_service_mutex_;
-    // bthread::ConditionVariable ds_service_cv_;
-    // std::atomic<bool> ds_serv_shutdown_indicator_;
     // point to the data store service if it is colocated
     DataStoreService *data_store_service_;
+
+    bool need_bootstrap_{false};
+    bool bind_data_shard_with_ng_{false};
 
     struct DssNode
     {
@@ -759,19 +817,19 @@ private:
     const uint64_t NodeExpiredTime = 10 * 1000 * 1000;  // 10s
     // Now only support one shard. dss_shards_ caches the index in dss_nodes_ of
     // shard owner.
-    std::array<std::atomic<uint32_t>, 1> dss_shards_;
+    std::array<std::atomic<uint32_t>, 1000> dss_shards_;
     std::atomic<uint64_t> dss_topology_version_{0};
 
-    // std::atomic<uint64_t> flying_remote_fetch_count_{0};
-    // // Work queue for fetch records from primary node
-    // std::deque<txservice::FetchRecordCc *> remote_fetch_cc_queue_;
+    std::shared_mutex dss_shard_ids_mutex_;
+    std::set<uint32_t> dss_shard_ids_;
+    // key is bucket id, value is bucket info.
+    std::unordered_map<uint16_t, std::unique_ptr<txservice::BucketInfo>>
+        bucket_infos_;
 
     // table names and their kv table names
     std::unordered_map<txservice::TableName, std::string>
         pre_built_table_names_;
     ThreadWorkerPool upsert_table_worker_{1};
-
-    std::vector<uint16_t> be_bucket_ids_;
 
     friend class ReadClosure;
     friend class BatchWriteRecordsClosure;

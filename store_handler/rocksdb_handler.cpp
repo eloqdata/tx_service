@@ -2112,7 +2112,7 @@ void RocksDBHandler::RestoreTxCache(txservice::NodeGroupId cc_ng_id,
         });
 }
 
-bool RocksDBHandler::OnLeaderStart(uint32_t *next_leader_node)
+bool RocksDBHandler::OnLeaderStart(uint32_t ng_id, uint32_t *next_leader_node)
 {
     bthread::Mutex mux;
     bthread::ConditionVariable cv;
@@ -2181,7 +2181,8 @@ uint16_t RocksDBHandler::DecodeBucketIdFromKvKey(const char *data, size_t size)
     return EloqShare::big_endian_to_host(be_bucket_id);
 }
 
-void RocksDBHandler::OnStartFollowing(uint32_t leader_node_id,
+void RocksDBHandler::OnStartFollowing(uint32_t ng_id,
+                                      uint32_t leader_node_id,
                                       int64_t term,
                                       int64_t standby_term,
                                       bool resubscribe)

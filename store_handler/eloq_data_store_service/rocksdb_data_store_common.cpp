@@ -276,8 +276,28 @@ bool RocksDBDataStoreCommon::Initialize()
        query_worker_pool_ =
             std::make_unique<ThreadWorkerPool>(query_worker_number_);
     }
+    else
+    {
+        query_worker_pool_->Initialize();
+    }
 
     return true;
+}
+
+void RocksDBDataStoreCommon::Shutdown()
+{
+    // shutdown query worker pool
+    if (query_worker_pool_ != nullptr)
+    {
+        query_worker_pool_->Shutdown();
+        // If the data store be reused, query_worker_pool_ will be re-created in
+        // Initialize().
+    }
+
+    if (data_store_service_ != nullptr)
+    {
+        data_store_service_->ForceEraseScanIters(shard_id_);
+    }
 }
 
 void RocksDBDataStoreCommon::FlushData(FlushDataRequest *flush_data_req)
@@ -424,6 +444,7 @@ void RocksDBDataStoreCommon::Read(ReadRequest *req)
 
             auto table_name = req->GetTableName();
             uint32_t partition_id = req->GetPartitionId();
+            auto key = req->GetKey();
 
             std::shared_lock<std::shared_mutex> db_lk(db_mux_);
 
@@ -434,7 +455,7 @@ void RocksDBDataStoreCommon::Read(ReadRequest *req)
                 return;
             }
 
-            std::string key_str = this->BuildKey(table_name, partition_id, req);
+            std::string key_str = this->BuildKey(table_name, partition_id, key);
             std::string value;
             rocksdb::ReadOptions read_options;
             rocksdb::Status status = db->Get(read_options, key_str, &value);
@@ -1137,32 +1158,6 @@ std::string RocksDBDataStoreCommon::BuildKey(const std::string_view table_name,
     tmp_key.append(std::to_string(partition_id));
     tmp_key.append(KEY_SEPARATOR);
     tmp_key.append(key);
-    return tmp_key;
-}
-
-std::string RocksDBDataStoreCommon::BuildKey(const std::string_view table_name,
-                                             uint32_t partition_id,
-                                             const ReadRequest *read_request)
-{
-    size_t total_key_size = 0;
-    for (size_t idx = 0; idx < read_request->PartsCountPerKey(); ++idx)
-    {
-        total_key_size += read_request->GetKey(idx).size();
-    }
-
-    total_key_size += table_name.size() + 2;
-
-    std::string tmp_key;
-    tmp_key.reserve(total_key_size);
-    tmp_key.append(table_name);
-    tmp_key.append(KEY_SEPARATOR);
-    tmp_key.append(std::to_string(partition_id));
-    tmp_key.append(KEY_SEPARATOR);
-
-    for (size_t idx = 0; idx < read_request->PartsCountPerKey(); ++idx)
-    {
-        tmp_key.append(read_request->GetKey(idx));
-    }
     return tmp_key;
 }
 

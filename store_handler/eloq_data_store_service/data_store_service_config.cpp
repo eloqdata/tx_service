@@ -34,6 +34,7 @@
 #include "INIReader.h"
 #include "glog/logging.h"
 
+
 namespace EloqDS
 {
 
@@ -797,6 +798,19 @@ void DataStoreServiceClusterManager::AppendThisNodeKey(
 {
     std::shared_lock<std::shared_mutex> lk(mutex_);
     ss << this_node_.host_name_ << ":" << this_node_.port_;
+}
+
+void DataStoreServiceClusterManager::SetFileCacheSyncIntervalSec(
+    uint32_t interval_sec)
+{
+    std::unique_lock<std::shared_mutex> lk(mutex_);
+    file_cache_sync_interval_sec_ = interval_sec;
+}
+
+uint32_t DataStoreServiceClusterManager::GetFileCacheSyncIntervalSec() const
+{
+    std::shared_lock<std::shared_mutex> lk(mutex_);
+    return file_cache_sync_interval_sec_;
 }
 
 uint32_t DataStoreServiceClusterManager::GetShardIdByPartitionId(

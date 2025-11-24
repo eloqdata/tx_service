@@ -496,7 +496,7 @@ struct ReadBaseForArchiveCallbackData
         return flying_read_cnt_;
     }
 
-    void AddResult(uint32_t partition_id,
+    void AddResult(int32_t partition_id,
                    const std::string_view key,
                    std::string &&value,
                    uint64_t ts,
@@ -529,7 +529,7 @@ struct ReadBaseForArchiveCallbackData
     bthread::ConditionVariable &cv_;
     size_t &flying_read_cnt_;
     int &error_code_;
-    uint32_t partition_id_;
+    int32_t partition_id_;
     std::string_view key_str_;
     std::string value_str_;
     uint64_t ts_;
@@ -599,8 +599,8 @@ public:
 
     void Reset(DataStoreServiceClient *client,
                const std::string_view table_name,
-               const uint32_t partition_id,
-               std::string_view be_bucket_id,
+               const int32_t partition_id,
+               const uint32_t shard_id,
                std::string_view key,
                void *callback_data,
                DataStoreCallback callback)
@@ -610,11 +610,8 @@ public:
         retry_count_ = 0;
         table_name_ = table_name;
         partition_id_ = partition_id;
-        if (!be_bucket_id.empty())
-        {
-            key_parts_.emplace_back(be_bucket_id);
-        }
-        key_parts_.emplace_back(key);
+        shard_id_ = shard_id;
+        key_ = key;
         ds_service_client_ = client;
         callback_data_ = callback_data;
         callback_ = callback;
@@ -629,10 +626,19 @@ public:
         ds_service_client_ = nullptr;
         cntl_.Reset();
         request_.Clear();
+        // The Clear of the brpc request/response only clear the content of the
+        // request/response, but donot release the memory of the
+        // request/response. So we need to swap with an empty request/response
+        // to release the memory of the request/response.
+        EloqDS::remote::ReadRequest empty_request;
+        request_.Swap(&empty_request);
         response_.Clear();
+        EloqDS::remote::ReadResponse empty_response;
+        response_.Swap(&empty_response);
         table_name_ = "";
-        partition_id_ = 0;
-        key_parts_.clear();
+        partition_id_ = INT32_MAX;
+        shard_id_ = UINT32_MAX;
+        key_ = "";
         result_.Clear();
         value_.clear();
         ts_ = 0;
@@ -659,15 +665,9 @@ public:
             }
             request_.Clear();
             request_.set_kv_table_name(table_name_.data(), table_name_.size());
+            request_.set_shard_id(shard_id_);
             request_.set_partition_id(partition_id_);
-
-            for (size_t idx = 0; idx < key_parts_.size(); ++idx)
-            {
-                std::string *key_part = request_.add_key_str();
-                key_part->append(key_parts_[idx].data(),
-                                 key_parts_[idx].size());
-            }
-
+            request_.set_key_str(key_.data(), key_.size());
             rpc_request_prepare_ = true;
         }
     }
@@ -691,12 +691,9 @@ public:
                     cntl_.ErrorCode() != EAGAIN &&
                     cntl_.ErrorCode() != brpc::ERPCTIMEDOUT)
                 {
-                    uint32_t shard_id =
-                        ds_service_client_->GetShardIdByPartitionId(
-                            partition_id_);
                     uint32_t new_node_index;
                     ds_service_client_->UpdateOwnerNodeIndexOfShard(
-                        shard_id, remote_node_index_, new_node_index);
+                        shard_id_, remote_node_index_, new_node_index);
 
                     // Retry
                     if (retry_count_ < ds_service_client_->retry_limit_)
@@ -765,14 +762,19 @@ public:
         return table_name_;
     }
 
-    uint32_t PartitionId()
+    int32_t PartitionId()
     {
         return partition_id_;
     }
-
-    const std::vector<std::string_view> &Key()
+    
+    uint32_t ShardId()
     {
-        return key_parts_;
+        return shard_id_;
+    }
+
+    const std::string_view Key()
+    {
+        return key_;
     }
 
     std::string &LocalValueRef()
@@ -891,8 +893,9 @@ private:
 
     // serve local call
     std::string_view table_name_;
-    uint32_t partition_id_;
-    std::vector<std::string_view> key_parts_;
+    int32_t partition_id_;
+    uint32_t shard_id_;
+    std::string_view key_;
     ::EloqDS::remote::CommonResult result_;
     std::string value_;
     uint64_t ts_;
@@ -1158,7 +1161,8 @@ public:
 
     void Reset(DataStoreServiceClient &store_hd,
                const std::string_view table_name,
-               const uint32_t partition_id,
+               const int32_t partition_id,
+               const uint32_t shard_id,
                const std::string &start_key,
                const std::string &end_key,
                const bool skip_wal,
@@ -1172,6 +1176,7 @@ public:
         ds_service_client_ = &store_hd;
         table_name_ = table_name;
         partition_id_ = partition_id;
+        shard_id_ = shard_id;
         start_key_ = start_key;
         end_key_ = end_key;
         skip_wal_ = skip_wal;
@@ -1200,6 +1205,7 @@ public:
             request_.Clear();
             request_.set_kv_table_name(table_name_.data(), table_name_.size());
             request_.set_partition_id(partition_id_);
+            request_.set_shard_id(shard_id_);
             request_.set_start_key(start_key_.data(), start_key_.size());
             request_.set_end_key(end_key_.data(), end_key_.size());
             request_.set_skip_wal(skip_wal_);
@@ -1225,12 +1231,9 @@ public:
                     cntl_.ErrorCode() != EAGAIN &&
                     cntl_.ErrorCode() != brpc::ERPCTIMEDOUT)
                 {
-                    uint32_t shard_id =
-                        ds_service_client_->GetShardIdByPartitionId(
-                            partition_id_);
                     uint32_t new_node_index;
                     ds_service_client_->UpdateOwnerNodeIndexOfShard(
-                        shard_id, remote_node_index_, new_node_index);
+                        shard_id_, remote_node_index_, new_node_index);
 
                     // Retry
                     if (retry_count_ < ds_service_client_->retry_limit_)
@@ -1298,9 +1301,14 @@ public:
         return table_name_;
     }
 
-    uint32_t PartitionId()
+    int32_t PartitionId()
     {
         return partition_id_;
+    }
+
+    uint32_t ShardId()
+    {
+        return shard_id_;
     }
 
     std::string_view StartKey()
@@ -1353,7 +1361,8 @@ private:
     bool is_local_request_{false};
     bool rpc_request_prepare_{false};
     std::string_view table_name_;
-    uint32_t partition_id_;
+    int32_t partition_id_;
+    uint32_t shard_id_;
     std::string_view start_key_;
     std::string_view end_key_;
     bool skip_wal_{false};
@@ -1601,7 +1610,8 @@ public:
         is_local_request_ = false;
 
         kv_table_name_ = "";
-        partition_id_ = 0;
+        partition_id_ = INT32_MAX;
+        shard_id_ = UINT32_MAX;
         key_parts_.clear();
         record_parts_.clear();
         record_ts_.clear();
@@ -1613,7 +1623,11 @@ public:
         callback_ = nullptr;
 
         request_.Clear();
+        EloqDS::remote::BatchWriteRecordsRequest empty_request;
+        request_.Swap(&empty_request);
         response_.Clear();
+        EloqDS::remote::BatchWriteRecordsResponse empty_response;
+        response_.Swap(&empty_response);
         cntl_.Reset();
         remote_node_index_ = UINT32_MAX;
         parts_cnt_per_key_ = 1;
@@ -1625,6 +1639,7 @@ public:
     void Reset(DataStoreServiceClient &store_hd,
                std::string_view kv_table_name,
                int32_t partition_id,
+               uint32_t shard_id,
                std::string_view key,
                std::string_view record,
                uint64_t record_ts,
@@ -1641,6 +1656,7 @@ public:
         ds_service_client_ = &store_hd;
         kv_table_name_ = kv_table_name;
         partition_id_ = partition_id;
+        shard_id_ = shard_id;
         key_parts_.emplace_back(key);
         record_parts_.emplace_back(record);
         record_ts_.emplace_back(record_ts);
@@ -1656,6 +1672,7 @@ public:
     void Reset(DataStoreServiceClient &store_hd,
                std::string_view kv_table_name,
                int32_t partition_id,
+               uint32_t shard_id,
                std::vector<std::string_view> &&key_parts,
                std::vector<std::string_view> &&record_parts,
                std::vector<uint64_t> &&record_ts,
@@ -1672,6 +1689,7 @@ public:
         ds_service_client_ = &store_hd;
         kv_table_name_ = kv_table_name;
         partition_id_ = partition_id;
+        shard_id_ = shard_id;
 
         key_parts_ = std::move(key_parts);
         record_parts_ = std::move(record_parts);
@@ -1704,12 +1722,9 @@ public:
                     cntl_.ErrorCode() != EAGAIN &&
                     cntl_.ErrorCode() != brpc::ERPCTIMEDOUT)
                 {
-                    uint32_t req_shard_id =
-                        ds_service_client_->GetShardIdByPartitionId(
-                            partition_id_);
                     uint32_t new_node_index;
                     ds_service_client_->UpdateOwnerNodeIndexOfShard(
-                        req_shard_id, remote_node_index_, new_node_index);
+                        shard_id_, remote_node_index_, new_node_index);
 
                     need_retry = true;
                 }
@@ -1771,6 +1786,7 @@ public:
         request_.set_kv_table_name(kv_table_name_.data(),
                                    kv_table_name_.size());
         request_.set_partition_id(partition_id_);
+        request_.set_shard_id(shard_id_);
         request_.set_skip_wal(skip_wal_);
         assert(record_ts_.size() * parts_cnt_per_key_ == key_parts_.size());
         assert(record_ts_.size() * parts_cnt_per_record_ ==
@@ -1843,6 +1859,16 @@ public:
         remote_node_index_ = remote_node_index;
     }
 
+    int32_t PartitionId() const
+    {
+        return partition_id_;
+    }
+
+    uint32_t ShardId() const
+    {
+        return shard_id_;
+    }
+
 private:
     brpc::Controller cntl_;
     EloqDS::remote::BatchWriteRecordsRequest request_;
@@ -1853,6 +1879,7 @@ private:
 
     std::string_view kv_table_name_;
     int32_t partition_id_;
+    uint32_t shard_id_;
     std::vector<std::string_view> key_parts_;
     std::vector<std::string_view> record_parts_;
     std::vector<uint64_t> record_ts_;
@@ -1887,7 +1914,11 @@ public:
     {
         cntl_.Reset();
         request_.Clear();
+        EloqDS::remote::ScanRequest empty_request;
+        request_.Swap(&empty_request);
         response_.Clear();
+        EloqDS::remote::ScanResponse empty_response;
+        response_.Swap(&empty_response);
         remote_node_index_ = UINT32_MAX;
         cntl_.Reset();
         ds_service_client_ = nullptr;
@@ -1895,7 +1926,8 @@ public:
         is_local_request_ = false;
         rpc_request_prepare_ = false;
         table_name_ = "";
-        partition_id_ = 0;
+        partition_id_ = INT32_MAX;
+        shard_id_ = UINT32_MAX;
         start_key_ = "";
         end_key_ = "";
         inclusive_start_ = false;
@@ -1917,7 +1949,8 @@ public:
     void Reset(
         DataStoreServiceClient &store_hd,
         const std::string_view table_name,
-        uint32_t partition_id,
+        int32_t partition_id,
+        uint32_t shard_id,
         const std::string_view start_key,
         const std::string_view end_key,
         bool inclusive_start,
@@ -1937,6 +1970,7 @@ public:
         ds_service_client_ = &store_hd;
         table_name_ = table_name;
         partition_id_ = partition_id;
+        shard_id_ = shard_id;
         start_key_ = start_key;
         end_key_ = end_key;
         inclusive_start_ = inclusive_start;
@@ -1987,7 +2021,7 @@ public:
             request_.set_kv_table_name_str(table_name_.data(),
                                            table_name_.size());
             request_.set_partition_id(partition_id_);
-
+            request_.set_shard_id(shard_id_);
             request_.set_start_key(start_key_.data(), start_key_.size());
             request_.set_inclusive_start(inclusive_start_);
             request_.set_inclusive_end(inclusive_end_);
@@ -2032,12 +2066,9 @@ public:
                     cntl_.ErrorCode() != EAGAIN &&
                     cntl_.ErrorCode() != brpc::ERPCTIMEDOUT)
                 {
-                    uint32_t shard_id =
-                        ds_service_client_->GetShardIdByPartitionId(
-                            partition_id_);
                     uint32_t new_node_index;
                     ds_service_client_->UpdateOwnerNodeIndexOfShard(
-                        shard_id, remote_node_index_, new_node_index);
+                        shard_id_, remote_node_index_, new_node_index);
 
                     // Retry
                     if (retry_count_ < ds_service_client_->retry_limit_)
@@ -2105,9 +2136,14 @@ public:
         return table_name_;
     }
 
-    uint32_t PartitionId()
+    int32_t PartitionId()
     {
         return partition_id_;
+    }
+
+    uint32_t ShardId()
+    {
+        return shard_id_;
     }
 
     const std::string_view StartKey()
@@ -2252,7 +2288,8 @@ private:
     bool is_local_request_{false};
     bool rpc_request_prepare_{false};
     std::string_view table_name_;
-    uint32_t partition_id_;
+    int32_t partition_id_;
+    uint32_t shard_id_;
     std::string_view start_key_;
     std::string_view end_key_;
     bool inclusive_start_{false};
@@ -3069,7 +3106,7 @@ void FetchTableStatsCallback(void *data,
 struct FetchArchivesCallbackData : public SyncCallbackData
 {
     FetchArchivesCallbackData(const std::string_view kv_table_name,
-                              uint32_t partition_id,
+                              int32_t partition_id,
                               std::string &start_key,
                               const std::string &end_key,
                               const size_t batch_size,
@@ -3087,7 +3124,7 @@ struct FetchArchivesCallbackData : public SyncCallbackData
     }
 
     const std::string_view kv_table_name_;
-    const uint32_t partition_id_;
+    const int32_t partition_id_;
     std::string &start_key_;
     const std::string &end_key_;
     const size_t batch_size_;

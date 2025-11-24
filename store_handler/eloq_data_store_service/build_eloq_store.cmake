@@ -81,6 +81,7 @@ set(ELOQ_STORE_SOURCES
     ${ELOQ_STORE_SOURCE_DIR}/write_task.cpp
     ${ELOQ_STORE_SOURCE_DIR}/read_task.cpp
     ${ELOQ_STORE_SOURCE_DIR}/scan_task.cpp
+    ${ELOQ_STORE_SOURCE_DIR}/prewarm_task.cpp
     ${ELOQ_STORE_SOURCE_DIR}/batch_write_task.cpp
     ${ELOQ_STORE_SOURCE_DIR}/background_write.cpp
     ${ELOQ_STORE_SOURCE_DIR}/async_io_manager.cpp

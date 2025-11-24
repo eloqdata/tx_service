@@ -29,6 +29,7 @@
 #include <boost/uuid/uuid_io.hpp>
 #include <cstdint>
 #include <memory>
+#include <random>
 #include <string>
 #include <string_view>
 #include <unordered_map>
@@ -110,7 +111,6 @@ DataStoreServiceClient::~DataStoreServiceClient()
 void DataStoreServiceClient::SetupConfig(
     const DataStoreServiceClusterManager &cluster_manager)
 {
-    assert(cluster_manager.GetShardCount() == 1);
     auto current_version =
         dss_topology_version_.load(std::memory_order_acquire);
     auto new_version = cluster_manager.GetTopologyVersion();
@@ -151,62 +151,63 @@ void DataStoreServiceClient::SetupConfig(
 }
 
 void DataStoreServiceClient::TxConfigsToDssClusterConfig(
-    uint32_t dss_node_id,  // = 0,
-    uint32_t ng_id,        // = 0,
+    uint32_t node_id,
     const std::unordered_map<uint32_t, std::vector<txservice::NodeConfig>>
         &ng_configs,
-    uint32_t dss_leader_node_id,  // if no leader,set uint32t_max
+    const std::unordered_map<uint32_t, uint32_t> &ng_leaders,
     DataStoreServiceClusterManager &cluster_manager)
 {
-    assert(ng_configs.size() == 1);
-    auto it = ng_configs.find(ng_id);
-    assert(it != ng_configs.end());
-    auto &ng_member_configs = it->second;
-
-    const txservice::NodeConfig *this_node = nullptr;
-    const txservice::NodeConfig *leader_node = nullptr;
-    for (auto &node_config : ng_member_configs)
+    std::unordered_map<uint32_t, DSSNode> nodes_map;
+    for (auto &[ng_id, ng_members] : ng_configs)
     {
-        if (node_config.node_id_ == dss_node_id)
+        for (auto &node_config : ng_members)
         {
-            this_node = &node_config;
-        }
-        if (node_config.node_id_ == dss_leader_node_id)
-        {
-            leader_node = &node_config;
-        }
-    }
-    assert(this_node != nullptr);
-    assert(dss_leader_node_id == UNKNOWN_DSS_LEADER_NODE_ID ||
-           leader_node != nullptr);
-    cluster_manager.Initialize(this_node->host_name_,
-                               TxPort2DssPort(this_node->port_));
-
-    std::vector<DSSNode> shard_nodes;
-    for (auto &node_config : ng_member_configs)
-    {
-        if (node_config.node_id_ != dss_node_id)
-        {
-            DSSNode dss_node(node_config.host_name_,
-                             TxPort2DssPort(node_config.port_));
-            cluster_manager.AddShardMember(ng_id, dss_node);
+            nodes_map.try_emplace(node_config.node_id_,
+                                  node_config.host_name_,
+                                  TxPort2DssPort(node_config.port_));
         }
     }
 
-    if (dss_leader_node_id != dss_node_id)
+    for (auto &[ng_id, ng_members] : ng_configs)
     {
-        LOG(INFO) << "cluster_manager change shard status " << ng_id << " from "
-                  << static_cast<int>(
-                         cluster_manager.FetchDSShardStatus(ng_id));
-        cluster_manager.SwitchShardToClosed(ng_id, DSShardStatus::ReadWrite);
-        LOG(INFO) << "cluster_manager change shard status " << ng_id << " to "
-                  << static_cast<int>(
-                         cluster_manager.FetchDSShardStatus(ng_id));
-        if (dss_leader_node_id != UNKNOWN_DSS_LEADER_NODE_ID)
+        // add nodes
+        bool contain_this_node = false;
+        for (auto &node_config : ng_members)
         {
-            DSSNode dss_node(leader_node->host_name_,
-                             TxPort2DssPort(leader_node->port_));
-            cluster_manager.UpdatePrimaryNode(ng_id, dss_node);
+            if (node_config.is_candidate_)
+            {
+                if (node_config.node_id_ == node_id)
+                {
+                    contain_this_node = true;
+                }
+                cluster_manager.AddShardMember(
+                    ng_id, nodes_map.at(node_config.node_id_));
+            }
+        }
+        // set primary node
+        if (ng_leaders.find(ng_id) != ng_leaders.end())
+        {
+            uint32_t leader_id = ng_leaders.at(ng_id);
+            assert(nodes_map.find(leader_id) != nodes_map.end());
+            if (nodes_map.find(leader_id) != nodes_map.end())
+            {
+                cluster_manager.UpdatePrimaryNode(ng_id,
+                                                  nodes_map.at(leader_id));
+            }
+            if (leader_id == node_id)
+            {
+                contain_this_node = true;
+                cluster_manager.SwitchShardToReadWrite(ng_id,
+                                                       DSShardStatus::Closed);
+            }
+        }
+
+        // set this node
+        if (contain_this_node && nodes_map.find(node_id) != nodes_map.end())
+        {
+            auto &this_node_config = nodes_map.at(node_id);
+            cluster_manager.SetThisNode(this_node_config.host_name_,
+                                        this_node_config.port_);
         }
     }
 }
@@ -222,6 +223,10 @@ void DataStoreServiceClient::TxConfigsToDssClusterConfig(
  */
 bool DataStoreServiceClient::Connect()
 {
+    if (!need_bootstrap_)
+    {
+        return true;
+    }
     bool succeed = false;
     for (int retry = 1; retry <= 5 && !succeed; retry++)
     {
@@ -247,8 +252,7 @@ bool DataStoreServiceClient::Connect()
  */
 void DataStoreServiceClient::ScheduleTimerTasks()
 {
-    LOG(ERROR) << "ScheduleTimerTasks not implemented";
-    assert(false);
+    LOG(WARNING) << "ScheduleTimerTasks not implemented (noop)";
 }
 
 /**
@@ -293,6 +297,7 @@ bool DataStoreServiceClient::PutAll(
     // Process each table
     for (auto &[kv_table_name, entries] : flush_task)
     {
+        size_t records_count = 0;
         auto &table_name = entries.front()->data_sync_task_->table_name_;
 
         // Group records by partition
@@ -308,6 +313,7 @@ bool DataStoreServiceClient::PutAll(
             {
                 continue;
             }
+            records_count += batch.size();
 
             if (table_name.IsHashPartitioned())
             {
@@ -330,10 +336,10 @@ bool DataStoreServiceClient::PutAll(
             {
                 // All records in the batch are in the same partition for range
                 // table
-                uint32_t parition_id =
+                int32_t partition_id =
                     KvPartitionIdOf(batch[0].partition_id_, true);
                 auto [it, inserted] =
-                    range_partitions_map.try_emplace(parition_id);
+                    range_partitions_map.try_emplace(partition_id);
                 it->second.emplace_back(flush_task_entry_idx);
             }
             flush_task_entry_idx++;
@@ -344,7 +350,7 @@ bool DataStoreServiceClient::PutAll(
         PoolableGuard sync_putall_guard(sync_putall);
         sync_putall->Reset();
 
-        uint16_t parts_cnt_per_key = table_name.IsHashPartitioned() ? 2 : 1;
+        uint16_t parts_cnt_per_key = 1;
         uint16_t parts_cnt_per_record = 5;
         if (table_name.IsHashPartitioned() && table_name.IsObjectTable())
         {
@@ -399,6 +405,7 @@ bool DataStoreServiceClient::PutAll(
         // Set up global coordinator
         sync_putall->total_partitions_ = sync_putall->partition_states_.size();
 
+        bool is_range_partitioned = !table_name.IsHashPartitioned();
         // Start concurrent processing for each partition
         for (size_t i = 0; i < callback_data_list.size(); ++i)
         {
@@ -409,18 +416,21 @@ bool DataStoreServiceClient::PutAll(
             auto &first_batch = callback_data->inflight_batch;
             if (partition_state->GetNextBatch(first_batch))
             {
-                BatchWriteRecords(callback_data->table_name,
-                                  partition_state->partition_id,
-                                  std::move(first_batch.key_parts),
-                                  std::move(first_batch.record_parts),
-                                  std::move(first_batch.records_ts),
-                                  std::move(first_batch.records_ttl),
-                                  std::move(first_batch.op_types),
-                                  true,  // skip_wal
-                                  callback_data,
-                                  PartitionBatchCallback,
-                                  first_batch.parts_cnt_per_key,
-                                  first_batch.parts_cnt_per_record);
+                BatchWriteRecords(
+                    callback_data->table_name,
+                    partition_state->partition_id,
+                    GetShardIdByPartitionId(partition_state->partition_id,
+                                            is_range_partitioned),
+                    std::move(first_batch.key_parts),
+                    std::move(first_batch.record_parts),
+                    std::move(first_batch.records_ts),
+                    std::move(first_batch.records_ttl),
+                    std::move(first_batch.op_types),
+                    true,  // skip_wal
+                    callback_data,
+                    PartitionBatchCallback,
+                    first_batch.parts_cnt_per_key,
+                    first_batch.parts_cnt_per_record);
             }
             else
             {
@@ -460,6 +470,12 @@ bool DataStoreServiceClient::PutAll(
         {
             callback_data->Clear();
             callback_data->Free();
+        }
+
+        if (metrics::enable_kv_metrics)
+        {
+            metrics::kv_meter->Collect(
+                metrics::NAME_KV_FLUSH_ROWS_TOTAL, records_count, "base");
         }
     }
     return true;
@@ -587,10 +603,12 @@ void DataStoreServiceClient::FetchTableCatalog(
     txservice::FetchCatalogCc *fetch_cc)
 {
     int32_t kv_partition_id = 0;
+    uint32_t shard_id = GetShardIdByPartitionId(kv_partition_id, false);
+
     std::string_view key = fetch_cc->CatalogName().StringView();
     Read(kv_table_catalogs_name,
          kv_partition_id,
-         "",
+         shard_id,
          key,
          fetch_cc,
          &FetchTableCatalogCallback);
@@ -614,11 +632,13 @@ void DataStoreServiceClient::FetchCurrentTableStatistics(
 {
     std::string_view sv = ccm_table_name.StringView();
     fetch_cc->kv_partition_id_ = KvPartitionIdOf(ccm_table_name);
+    uint32_t shard_id =
+        GetShardIdByPartitionId(fetch_cc->kv_partition_id_, false);
 
     fetch_cc->SetStoreHandler(this);
     Read(kv_table_statistics_version_name,
          fetch_cc->kv_partition_id_,
-         "",
+         shard_id,
          sv,
          fetch_cc,
          &FetchCurrentTableStatsCallback);
@@ -654,11 +674,14 @@ void DataStoreServiceClient::FetchTableStatistics(
     fetch_cc->kv_end_key_.back()++;
 
     fetch_cc->kv_partition_id_ = KvPartitionIdOf(ccm_table_name);
+    uint32_t data_shard_id =
+        GetShardIdByPartitionId(fetch_cc->kv_partition_id_, false);
 
     // NOTICE: here batch_size is 1, because the size of item in
     // {kv_table_statistics_name} may be more than MAX_WRITE_BATCH_SIZE.
     ScanNext(kv_table_statistics_name,
              fetch_cc->kv_partition_id_,
+             data_shard_id,
              fetch_cc->kv_start_key_,
              fetch_cc->kv_end_key_,
              fetch_cc->kv_session_id_,
@@ -802,6 +825,7 @@ bool DataStoreServiceClient::UpsertTableStatistics(
 
     // 2- write the segments to storage
     int32_t kv_partition_id = KvPartitionIdOf(ccm_table_name);
+    uint32_t data_shard_id = GetShardIdByPartitionId(kv_partition_id, false);
     std::vector<std::string_view> keys;
     std::vector<std::string_view> records;
     std::vector<uint64_t> records_ts;
@@ -825,6 +849,7 @@ bool DataStoreServiceClient::UpsertTableStatistics(
         callback_data->Reset();
         BatchWriteRecords(kv_table_statistics_name,
                           kv_partition_id,
+                          data_shard_id,
                           std::move(keys),
                           std::move(records),
                           std::move(records_ts),
@@ -854,6 +879,7 @@ bool DataStoreServiceClient::UpsertTableStatistics(
     op_types.emplace_back(WriteOpType::PUT);
     BatchWriteRecords(kv_table_statistics_version_name,
                       kv_partition_id,
+                      data_shard_id,
                       std::move(keys),
                       std::move(records),
                       std::move(records_ts),
@@ -887,6 +913,7 @@ bool DataStoreServiceClient::UpsertTableStatistics(
     callback_data->Reset();
     DeleteRange(kv_table_statistics_name,
                 kv_partition_id,
+                data_shard_id,
                 start_key,
                 end_key,
                 true,
@@ -918,6 +945,8 @@ void DataStoreServiceClient::FetchTableRanges(
     txservice::FetchTableRangesCc *fetch_cc)
 {
     fetch_cc->kv_partition_id_ = KvPartitionIdOf(fetch_cc->table_name_);
+    uint32_t data_shard_id =
+        GetShardIdByPartitionId(fetch_cc->kv_partition_id_, false);
 
     fetch_cc->kv_start_key_ = fetch_cc->table_name_.String();
     fetch_cc->kv_end_key_ = fetch_cc->table_name_.String();
@@ -926,6 +955,7 @@ void DataStoreServiceClient::FetchTableRanges(
 
     ScanNext(kv_range_table_name,
              fetch_cc->kv_partition_id_,
+             data_shard_id,
              fetch_cc->kv_start_key_,
              fetch_cc->kv_end_key_,
              fetch_cc->kv_session_id_,
@@ -963,6 +993,8 @@ void DataStoreServiceClient::FetchRangeSlices(
         return;
     }
     fetch_cc->kv_partition_id_ = KvPartitionIdOf(fetch_cc->table_name_);
+    uint32_t shard_id =
+        GetShardIdByPartitionId(fetch_cc->kv_partition_id_, false);
     // Also use segment_cnt to identify the step is fetch range or fetch slices.
     fetch_cc->SetSegmentCnt(0);
 
@@ -976,7 +1008,7 @@ void DataStoreServiceClient::FetchRangeSlices(
 
     Read(kv_range_table_name,
          fetch_cc->kv_partition_id_,
-         "",
+         shard_id,
          fetch_cc->kv_start_key_,
          fetch_cc,
          &FetchRangeSlicesCallback);
@@ -1025,8 +1057,11 @@ bool DataStoreServiceClient::DeleteOutOfRangeData(
     SyncCallbackData *callback_data = sync_callback_data_pool_.NextObject();
     PoolableGuard guard(callback_data);
     callback_data->Reset();
+    int32_t kv_part_id = KvPartitionIdOf(partition_id, true);
+    uint32_t shard_id = GetShardIdByPartitionId(kv_part_id, true);
     DeleteRange(kv_table_name,
-                KvPartitionIdOf(partition_id, true),
+                kv_part_id,
+                shard_id,
                 start_key_str,
                 end_key_str,
                 false,
@@ -1118,10 +1153,13 @@ DataStoreServiceClient::LoadRangeSlice(
     load_slice_req->kv_table_name_ = &(kv_info->GetKvTableName(table_name));
     load_slice_req->kv_partition_id_ =
         KvPartitionIdOf(range_partition_id, true);
+    uint32_t data_shard_id =
+        GetShardIdByPartitionId(load_slice_req->kv_partition_id_, true);
     load_slice_req->kv_session_id_.clear();
 
     ScanNext(*load_slice_req->kv_table_name_,
              load_slice_req->kv_partition_id_,
+             data_shard_id,
              load_slice_req->kv_start_key_,
              load_slice_req->kv_end_key_,
              "",  // session_id
@@ -1261,6 +1299,370 @@ void DataStoreServiceClient::UpdateEncodedRangeSliceKey(
                             sizeof(new_segment_id));
 }
 
+RangeSliceBatchPlan DataStoreServiceClient::PrepareRangeSliceBatches(
+    const txservice::TableName &table_name,
+    uint64_t version,
+    const std::vector<const txservice::StoreSlice *> &slices,
+    int32_t partition_id)
+{
+    auto catalog_factory = GetCatalogFactory(table_name.Engine());
+    assert(catalog_factory != nullptr);
+
+    RangeSliceBatchPlan plan;
+    plan.segment_cnt = 0;
+
+    // Estimate capacity based on slices size
+    plan.segment_keys.reserve(slices.size() / 10 + 1);  // Rough estimate
+    plan.segment_records.reserve(slices.size() / 10 + 1);
+
+    std::string segment_key =
+        EncodeRangeSliceKey(table_name, partition_id, plan.segment_cnt);
+    std::string segment_record;
+    size_t batch_size = segment_key.size() + sizeof(uint64_t);
+    size_t max_segment_size = 1024 * 1024;  // 1 MB
+    segment_record.reserve(max_segment_size - segment_key.size());
+    segment_record.append(reinterpret_cast<const char *>(&version),
+                          sizeof(uint64_t));
+    batch_size += sizeof(uint64_t);
+
+    for (size_t i = 0; i < slices.size(); ++i)
+    {
+        txservice::TxKey slice_start_key = slices[i]->StartTxKey();
+        if (slice_start_key.Type() == txservice::KeyType::NegativeInf)
+        {
+            slice_start_key =
+                catalog_factory->PackedNegativeInfinity()->GetShallowCopy();
+        }
+        uint32_t key_size = static_cast<uint32_t>(slice_start_key.Size());
+        batch_size += sizeof(uint32_t);
+        batch_size += key_size;
+
+        if (batch_size >= max_segment_size)
+        {
+            plan.segment_keys.emplace_back(std::move(segment_key));
+            plan.segment_records.emplace_back(std::move(segment_record));
+
+            plan.segment_cnt++;
+            segment_key =
+                EncodeRangeSliceKey(table_name, partition_id, plan.segment_cnt);
+            batch_size = segment_key.size();
+
+            segment_record.clear();
+            segment_record.reserve(max_segment_size - segment_key.size());
+            segment_record.append(reinterpret_cast<const char *>(&version),
+                                  sizeof(uint64_t));
+            batch_size += sizeof(uint64_t);
+        }
+
+        segment_record.append(reinterpret_cast<const char *>(&key_size),
+                              sizeof(uint32_t));
+        segment_record.append(slice_start_key.Data(), key_size);
+        uint32_t slice_size = static_cast<uint32_t>(slices[i]->Size());
+        segment_record.append(reinterpret_cast<const char *>(&slice_size),
+                              sizeof(uint32_t));
+    }
+
+    if (segment_record.size() > 0)
+    {
+        plan.segment_keys.emplace_back(std::move(segment_key));
+        plan.segment_records.emplace_back(std::move(segment_record));
+        plan.segment_cnt++;
+    }
+
+    assert(plan.segment_keys.size() == plan.segment_cnt);
+    return plan;
+}
+
+/**
+ * @brief Dispatches range slice batches from multiple plans, batching segments
+ *        together up to MAX_WRITE_BATCH_SIZE.
+ *
+ * All plans must share the same kv_table_name, kv_partition_id, and version.
+ * Segments from all plans are merged into batches and dispatched via
+ * BatchWriteRecords calls, reducing the number of RPC calls.
+ *
+ * @param kv_table_name The KV table name (must be same for all plans)
+ * @param kv_partition_id The partition ID (must be same for all plans)
+ * @param version The version (must be same for all plans)
+ * @param plans Vector of RangeSliceBatchPlan to dispatch
+ * @param sync_concurrent SyncConcurrentRequest for concurrency control
+ */
+void DataStoreServiceClient::DispatchRangeSliceBatches(
+    std::string_view kv_table_name,
+    int32_t kv_partition_id,
+    uint64_t version,
+    const std::vector<RangeSliceBatchPlan> &plans,
+    SyncConcurrentRequest *sync_concurrent)
+{
+    uint32_t data_shard_id = GetShardIdByPartitionId(kv_partition_id, false);
+    
+    // Initialize batch vectors
+    std::vector<std::string_view> keys;
+    std::vector<std::string_view> records;
+    std::vector<uint64_t> records_ts;
+    std::vector<uint64_t> records_ttl;
+    std::vector<WriteOpType> op_types;
+    
+    // Estimate total segments across all plans
+    size_t total_segments = 0;
+    for (const auto &plan : plans)
+    {
+        total_segments += plan.segment_cnt;
+    }
+    
+    keys.reserve(total_segments);
+    records.reserve(total_segments);
+    records_ts.reserve(total_segments);
+    records_ttl.reserve(total_segments);
+    op_types.reserve(total_segments);
+    
+    size_t write_batch_size = 0;
+    constexpr size_t overhead_per_segment = 20;  // records_ts (8) + records_ttl (8) + op_types (4)
+    
+    // Iterate through all plans and collect segments
+    for (const auto &plan : plans)
+    {
+        for (uint32_t i = 0; i < plan.segment_cnt; ++i)
+        {
+            size_t key_size = plan.segment_keys[i].size();
+            size_t record_size = plan.segment_records[i].size();
+            size_t segment_total_size = key_size + record_size + overhead_per_segment;
+            
+            // If adding this segment would exceed MAX_WRITE_BATCH_SIZE and batch is non-empty, dispatch current batch
+            if (write_batch_size + segment_total_size >= MAX_WRITE_BATCH_SIZE && keys.size() > 0)
+            {
+                // Concurrency control: wait if limit reached, then increment counter
+                {
+                    std::unique_lock<bthread::Mutex> lk(sync_concurrent->mux_);
+                    while (sync_concurrent->unfinished_request_cnt_ >=
+                           SyncConcurrentRequest::max_flying_write_count)
+                    {
+                        sync_concurrent->cv_.wait(lk);
+                    }
+                    sync_concurrent->unfinished_request_cnt_++;
+                }
+                
+                // Dispatch current batch
+                BatchWriteRecords(kv_table_name,
+                                  kv_partition_id,
+                                  data_shard_id,
+                                  std::move(keys),
+                                  std::move(records),
+                                  std::move(records_ts),
+                                  std::move(records_ttl),
+                                  std::move(op_types),
+                                  true,
+                                  sync_concurrent,
+                                  SyncConcurrentRequestCallback,
+                                  1,  // parts_cnt_per_key
+                                  1); // parts_cnt_per_record
+                
+                // Clear and re-reserve for next batch
+                keys.clear();
+                records.clear();
+                records_ts.clear();
+                records_ttl.clear();
+                op_types.clear();
+                keys.reserve(total_segments);
+                records.reserve(total_segments);
+                records_ts.reserve(total_segments);
+                records_ttl.reserve(total_segments);
+                op_types.reserve(total_segments);
+                write_batch_size = 0;
+            }
+            
+            // Append to batch vectors
+            keys.emplace_back(plan.segment_keys[i]);
+            records.emplace_back(plan.segment_records[i]);
+            records_ts.emplace_back(version);
+            records_ttl.emplace_back(0);  // no TTL for range slices
+            op_types.emplace_back(WriteOpType::PUT);
+            write_batch_size += segment_total_size;
+        }
+    }
+    
+    // Dispatch final batch if vectors are non-empty
+    if (keys.size() > 0)
+    {
+        // Concurrency control: wait if limit reached, then increment counter
+        {
+            std::unique_lock<bthread::Mutex> lk(sync_concurrent->mux_);
+            while (sync_concurrent->unfinished_request_cnt_ >=
+                   SyncConcurrentRequest::max_flying_write_count)
+            {
+                sync_concurrent->cv_.wait(lk);
+            }
+            sync_concurrent->unfinished_request_cnt_++;
+        }
+        
+        BatchWriteRecords(kv_table_name,
+                          kv_partition_id,
+                          data_shard_id,
+                          std::move(keys),
+                          std::move(records),
+                          std::move(records_ts),
+                          std::move(records_ttl),
+                          std::move(op_types),
+                          true,
+                          sync_concurrent,
+                          SyncConcurrentRequestCallback,
+                          1,  // parts_cnt_per_key
+                          1); // parts_cnt_per_record
+    }
+}
+
+void DataStoreServiceClient::EnqueueRangeMetadataRecord(
+    const txservice::CatalogFactory *catalog_factory,
+    const txservice::TableName &table_name,
+    const txservice::TxKey &range_start_key,
+    int32_t partition_id,
+    uint64_t range_version,
+    uint64_t version,
+    uint32_t segment_cnt,
+    RangeMetadataAccumulator &accumulator)
+{
+    // Compute kv_table_name and kv_partition_id
+    std::string kv_table_name = std::string(table_name.StringView());
+    int32_t kv_partition_id = KvPartitionIdOf(table_name);
+
+    // Encode key and value
+    std::string key_str = EncodeRangeKey(catalog_factory, table_name, range_start_key);
+    std::string rec_str = EncodeRangeValue(partition_id, range_version, version, segment_cnt);
+
+    // Get or create entry in accumulator
+    auto key = std::make_pair(kv_table_name, kv_partition_id);
+    auto &records_vec = accumulator.records_by_table_partition[key];
+
+    // Create and append record
+    RangeMetadataRecord record;
+    record.encoded_key = std::move(key_str);
+    record.encoded_value = std::move(rec_str);
+    record.version = version;
+    records_vec.emplace_back(std::move(record));
+}
+
+void DataStoreServiceClient::DispatchRangeMetadataBatches(
+    std::string_view kv_table_name,
+    const RangeMetadataAccumulator &accumulator,
+    SyncConcurrentRequest *sync_concurrent,
+    size_t max_batch_size)
+{
+    for (const auto &[table_partition, records_vec] : accumulator.records_by_table_partition)
+    {
+        const std::string &kv_table_name_str = table_partition.first;
+        int32_t kv_partition_id = table_partition.second;
+        uint32_t data_shard_id = GetShardIdByPartitionId(kv_partition_id, false);
+
+        // Use kv_table_name parameter if provided, otherwise use kv_table_name_str
+        // For consistency, prefer the parameter
+        std::string_view target_table_name = kv_table_name.empty() ? kv_table_name_str : kv_table_name;
+
+        // Initialize batch vectors
+        std::vector<std::string_view> keys;
+        std::vector<std::string_view> records;
+        std::vector<uint64_t> records_ts;
+        std::vector<uint64_t> records_ttl;
+        std::vector<WriteOpType> op_types;
+
+        keys.reserve(records_vec.size());
+        records.reserve(records_vec.size());
+        records_ts.reserve(records_vec.size());
+        records_ttl.reserve(records_vec.size());
+        op_types.reserve(records_vec.size());
+
+        size_t write_batch_size = 0;
+
+        for (const auto &record : records_vec)
+        {
+            size_t key_size = record.encoded_key.size();
+            size_t value_size = record.encoded_value.size();
+            // Overhead: records_ts (8 bytes) + records_ttl (8 bytes) + op_types (4 bytes) ≈ 20 bytes
+            constexpr size_t overhead_per_record = 20;
+            size_t record_total_size = key_size + value_size + overhead_per_record;
+
+            // If adding this record would exceed max_batch_size and batch is non-empty, dispatch current batch
+            if (write_batch_size + record_total_size >= max_batch_size && keys.size() > 0)
+            {
+                // Concurrency control: wait if limit reached, then increment counter
+                {
+                    std::unique_lock<bthread::Mutex> lk(sync_concurrent->mux_);
+                    while (sync_concurrent->unfinished_request_cnt_ >=
+                           SyncConcurrentRequest::max_flying_write_count)
+                    {
+                        sync_concurrent->cv_.wait(lk);
+                    }
+                    sync_concurrent->unfinished_request_cnt_++;
+                }
+
+                // Dispatch current batch
+                BatchWriteRecords(target_table_name,
+                                  kv_partition_id,
+                                  data_shard_id,
+                                  std::move(keys),
+                                  std::move(records),
+                                  std::move(records_ts),
+                                  std::move(records_ttl),
+                                  std::move(op_types),
+                                  true,
+                                  sync_concurrent,
+                                  SyncConcurrentRequestCallback,
+                                  1,  // parts_cnt_per_key
+                                  1); // parts_cnt_per_record
+
+                // Clear and re-reserve for next batch
+                keys.clear();
+                records.clear();
+                records_ts.clear();
+                records_ttl.clear();
+                op_types.clear();
+                keys.reserve(records_vec.size());
+                records.reserve(records_vec.size());
+                records_ts.reserve(records_vec.size());
+                records_ttl.reserve(records_vec.size());
+                op_types.reserve(records_vec.size());
+                write_batch_size = 0;
+            }
+
+            // Append to batch vectors
+            keys.emplace_back(record.encoded_key);
+            records.emplace_back(record.encoded_value);
+            records_ts.emplace_back(record.version);
+            records_ttl.emplace_back(0);  // no TTL for range metadata
+            op_types.emplace_back(WriteOpType::PUT);
+            write_batch_size += record_total_size;
+        }
+
+        // Dispatch final batch for this table/partition if vectors are non-empty
+        if (keys.size() > 0)
+        {
+            // Concurrency control: wait if limit reached, then increment counter
+            {
+                std::unique_lock<bthread::Mutex> lk(sync_concurrent->mux_);
+                while (sync_concurrent->unfinished_request_cnt_ >=
+                       SyncConcurrentRequest::max_flying_write_count)
+                {
+                    sync_concurrent->cv_.wait(lk);
+                }
+                sync_concurrent->unfinished_request_cnt_++;
+            }
+
+            BatchWriteRecords(target_table_name,
+                              kv_partition_id,
+                              data_shard_id,
+                              std::move(keys),
+                              std::move(records),
+                              std::move(records_ts),
+                              std::move(records_ttl),
+                              std::move(op_types),
+                              true,
+                              sync_concurrent,
+                              SyncConcurrentRequestCallback,
+                              1,  // parts_cnt_per_key
+                              1); // parts_cnt_per_record
+        }
+    }
+}
+
 /**
  * @brief Updates range slices for a table partition.
  *
@@ -1290,143 +1692,77 @@ bool DataStoreServiceClient::UpdateRangeSlices(
     auto catalog_factory = GetCatalogFactory(table_name.Engine());
     assert(catalog_factory != nullptr);
 
-    // 1- store range_slices info into {kv_range_slices_table_name}
-    std::vector<std::string> segment_keys;
-    std::vector<std::string> segment_records;
-    uint32_t segment_cnt = 0;
+    // 1- Prepare slice batches
+    auto slice_plan =
+        PrepareRangeSliceBatches(table_name, version, slices, partition_id);
 
-    std::string segment_key =
-        EncodeRangeSliceKey(table_name, partition_id, segment_cnt);
-    std::string segment_record;
-    size_t batch_size = segment_key.size() + sizeof(uint64_t);
-    size_t max_segment_size = 1024 * 1024;
-    segment_record.reserve(max_segment_size - segment_key.size());
-    segment_record.append(reinterpret_cast<const char *>(&version),
-                          sizeof(uint64_t));
-    batch_size += sizeof(uint64_t);
-
-    for (size_t i = 0; i < slices.size(); ++i)
+    // 2- Dispatch slice batches concurrently
+    SyncConcurrentRequest *slice_sync_concurrent =
+        sync_concurrent_request_pool_.NextObject();
+    PoolableGuard slice_guard(slice_sync_concurrent);
+    slice_sync_concurrent->Reset();
+    std::vector<RangeSliceBatchPlan> slice_plans;
+    slice_plans.emplace_back(std::move(slice_plan));
+    const uint32_t segment_cnt = slice_plans[0].segment_cnt;
+    DispatchRangeSliceBatches(kv_range_slices_table_name,
+                              KvPartitionIdOf(table_name),
+                              version,
+                              slice_plans,
+                              slice_sync_concurrent);
+    // 3- Wait for slice requests to complete. Make sure meta data is updated
+    // after all slice info is written.
     {
-        txservice::TxKey slice_start_key = slices[i]->StartTxKey();
-        if (slice_start_key.Type() == txservice::KeyType::NegativeInf)
+        std::unique_lock<bthread::Mutex> lk(slice_sync_concurrent->mux_);
+        slice_sync_concurrent->all_request_started_ = true;
+        while (slice_sync_concurrent->unfinished_request_cnt_ != 0)
         {
-            slice_start_key =
-                catalog_factory->PackedNegativeInfinity()->GetShallowCopy();
-        }
-        uint32_t key_size = static_cast<uint32_t>(slice_start_key.Size());
-        batch_size += sizeof(uint32_t);
-        batch_size += key_size;
-
-        if (batch_size >= max_segment_size)
-        {
-            segment_keys.emplace_back(std::move(segment_key));
-            segment_records.emplace_back(std::move(segment_record));
-
-            segment_cnt++;
-            segment_key =
-                EncodeRangeSliceKey(table_name, partition_id, segment_cnt);
-            batch_size = segment_key.size();
-
-            segment_record.clear();
-            segment_record.reserve(max_segment_size - segment_key.size());
-            segment_record.append(reinterpret_cast<const char *>(&version),
-                                  sizeof(uint64_t));
-            batch_size += sizeof(uint64_t);
-        }
-
-        segment_record.append(reinterpret_cast<const char *>(&key_size),
-                              sizeof(uint32_t));
-        segment_record.append(slice_start_key.Data(), key_size);
-        uint32_t slice_size = static_cast<uint32_t>(slices[i]->Size());
-        segment_record.append(reinterpret_cast<const char *>(&slice_size),
-                              sizeof(uint32_t));
-    }
-    if (segment_record.size() > 0)
-    {
-        segment_keys.emplace_back(std::move(segment_key));
-        segment_records.emplace_back(std::move(segment_record));
-        segment_cnt++;
-    }
-
-    assert(segment_keys.size() == segment_cnt);
-
-    // 2- write the segments to storage
-    // Calculate kv_partition_id based on table_name.
-    int32_t kv_partition_id = KvPartitionIdOf(table_name);
-    std::vector<std::string_view> keys;
-    std::vector<std::string_view> records;
-    std::vector<uint64_t> records_ts;
-    std::vector<uint64_t> records_ttl;
-    std::vector<WriteOpType> op_types;
-    SyncCallbackData *callback_data = sync_callback_data_pool_.NextObject();
-    PoolableGuard guard(callback_data);
-    callback_data->Reset();
-
-    for (size_t i = 0; i < segment_keys.size(); ++i)
-    {
-        keys.emplace_back(segment_keys[i]);
-        records.emplace_back(segment_records[i]);
-        records_ts.emplace_back(version);
-        records_ttl.emplace_back(0);  // no ttl
-        op_types.emplace_back(WriteOpType::PUT);
-
-        // For segments are splitted based on MAX_WRITE_BATCH_SIZE, execute
-        // one write request for each segment record.
-        callback_data->Reset();
-        BatchWriteRecords(kv_range_slices_table_name,
-                          kv_partition_id,
-                          std::move(keys),
-                          std::move(records),
-                          std::move(records_ts),
-                          std::move(records_ttl),
-                          std::move(op_types),
-                          true,
-                          callback_data,
-                          &SyncCallback);
-        callback_data->Wait();
-        keys.clear();
-        records.clear();
-        records_ts.clear();
-        records_ttl.clear();
-        op_types.clear();
-
-        if (callback_data->Result().error_code() !=
-            EloqDS::remote::DataStoreError::NO_ERROR)
-        {
-            LOG(WARNING) << "UpdateRangeSlices: Failed to write segments.";
-            return false;
+            slice_sync_concurrent->cv_.wait(lk);
         }
     }
 
-    // 3- store range info into {kv_range_table_name}
-    callback_data->Reset();
-
-    std::string key_str =
-        EncodeRangeKey(catalog_factory, table_name, range_start_key);
-    std::string rec_str =
-        EncodeRangeValue(partition_id, range_version, version, segment_cnt);
-
-    keys.emplace_back(key_str);
-    records.emplace_back(rec_str);
-
-    records_ts.emplace_back(version);
-    records_ttl.emplace_back(0);  // no ttl
-    op_types.emplace_back(WriteOpType::PUT);
-    BatchWriteRecords(kv_range_table_name,
-                      kv_partition_id,
-                      std::move(keys),
-                      std::move(records),
-                      std::move(records_ts),
-                      std::move(records_ttl),
-                      std::move(op_types),
-                      true,
-                      callback_data,
-                      &SyncCallback);
-    callback_data->Wait();
-    if (callback_data->Result().error_code() !=
-        EloqDS::remote::DataStoreError::NO_ERROR)
+    if (slice_sync_concurrent->result_.error_code() !=
+        remote::DataStoreError::NO_ERROR)
     {
-        LOG(WARNING) << "UpdateRangeSlices: Failed to write range info.";
+        LOG(WARNING) << "UpdateRangeSlices: Failed to write segments. Error: "
+                     << slice_sync_concurrent->result_.error_msg();
+        return false;
+    }
+
+    // 4- Enqueue and dispatch metadata record concurrently
+    RangeMetadataAccumulator meta_acc;
+    EnqueueRangeMetadataRecord(catalog_factory,
+                               table_name,
+                               range_start_key,
+                               partition_id,
+                               range_version,
+                               version,
+                               segment_cnt,
+                               meta_acc);
+
+    SyncConcurrentRequest *meta_sync_concurrent =
+        sync_concurrent_request_pool_.NextObject();
+    PoolableGuard meta_guard(meta_sync_concurrent);
+    meta_sync_concurrent->Reset();
+    DispatchRangeMetadataBatches(kv_range_table_name,
+                                 meta_acc,
+                                 meta_sync_concurrent);
+
+    // 5- Wait for metadata requests to complete
+    {
+        std::unique_lock<bthread::Mutex> lk(meta_sync_concurrent->mux_);
+        meta_sync_concurrent->all_request_started_ = true;
+        while (meta_sync_concurrent->unfinished_request_cnt_ != 0)
+        {
+            meta_sync_concurrent->cv_.wait(lk);
+        }
+    }
+
+    // 6- Check for errors
+    if (meta_sync_concurrent->result_.error_code() !=
+        remote::DataStoreError::NO_ERROR)
+    {
+        LOG(WARNING) << "UpdateRangeSlices: Failed to write range info. Error: "
+                     << meta_sync_concurrent->result_.error_msg();
         return false;
     }
 
@@ -1436,10 +1772,10 @@ bool DataStoreServiceClient::UpdateRangeSlices(
 /**
  * @brief Upserts range information for a table.
  *
- * Updates range slices for multiple ranges by calling UpdateRangeSlices for
- * each range in the provided vector. After updating all ranges, flushes the
- * range table data to ensure persistence. Validates that the table name is not
- * empty and handles errors from individual range updates.
+ * Updates range slices for multiple ranges by batching metadata across all
+ * ranges and parallelizing slice writes. After updating all ranges, flushes
+ * the range table data to ensure persistence. Validates that the table name
+ * is not empty and handles errors from individual range updates.
  *
  * @param table_name The table name for the ranges.
  * @param range_info Vector of split range information to upsert.
@@ -1454,19 +1790,97 @@ bool DataStoreServiceClient::UpsertRanges(
 {
     assert(table_name.StringView() != txservice::empty_sv);
 
+    if (range_info.empty())
+    {
+        return true;
+    }
+
+    auto catalog_factory = GetCatalogFactory(table_name.Engine());
+    assert(catalog_factory != nullptr);
+
+    // 1- First pass: Prepare slice batches and accumulate metadata for all ranges
+    std::vector<RangeSliceBatchPlan> slice_plans;
+    slice_plans.reserve(range_info.size());
+    RangeMetadataAccumulator meta_acc;
+
     for (auto &range : range_info)
     {
-        if (!UpdateRangeSlices(table_name,
-                               version,
-                               std::move(range.start_key_),
-                               std::move(range.slices_),
-                               range.partition_id_,
-                               version))
+        // Prepare slice batches for this range
+        auto slice_plan = PrepareRangeSliceBatches(
+            table_name, version, range.slices_, range.partition_id_);
+        slice_plans.emplace_back(std::move(slice_plan));
+
+        // Enqueue metadata record for this range
+        EnqueueRangeMetadataRecord(catalog_factory,
+                                   table_name,
+                                   range.start_key_,
+                                   range.partition_id_,
+                                   version,  // range_version (using version for now)
+                                   version,
+                                   slice_plans.back().segment_cnt,
+                                   meta_acc);
+    }
+
+    // 2- Dispatch slice batches for all ranges concurrently (shared SyncConcurrentRequest)
+    SyncConcurrentRequest *slice_sync_concurrent =
+        sync_concurrent_request_pool_.NextObject();
+    PoolableGuard slice_guard(slice_sync_concurrent);
+    slice_sync_concurrent->Reset();
+
+    int32_t kv_partition_id = KvPartitionIdOf(table_name);
+    // Call DispatchRangeSliceBatches once with all plans
+    DispatchRangeSliceBatches(kv_range_slices_table_name,
+                              kv_partition_id,
+                              version,
+                              slice_plans,
+                              slice_sync_concurrent);
+
+    // 3- Wait for slice requests to complete
+    {
+        std::unique_lock<bthread::Mutex> lk(slice_sync_concurrent->mux_);
+        slice_sync_concurrent->all_request_started_ = true;
+        while (slice_sync_concurrent->unfinished_request_cnt_ != 0)
         {
-            return false;
+            slice_sync_concurrent->cv_.wait(lk);
+        }
+    }
+    if (slice_sync_concurrent->result_.error_code() !=
+        remote::DataStoreError::NO_ERROR)
+    {
+        LOG(WARNING) << "UpsertRanges: Failed to write range slices. Error: "
+                     << slice_sync_concurrent->result_.error_msg();
+        return false;
+    }
+
+    // 4- Dispatch metadata batches concurrently (batched by table/partition)
+    SyncConcurrentRequest *meta_sync_concurrent =
+        sync_concurrent_request_pool_.NextObject();
+    PoolableGuard meta_guard(meta_sync_concurrent);
+    meta_sync_concurrent->Reset();
+    DispatchRangeMetadataBatches(kv_range_table_name,
+                                 meta_acc,
+                                 meta_sync_concurrent);
+
+    // 5- Wait for metadata requests to complete
+    {
+        std::unique_lock<bthread::Mutex> lk(meta_sync_concurrent->mux_);
+        meta_sync_concurrent->all_request_started_ = true;
+        while (meta_sync_concurrent->unfinished_request_cnt_ != 0)
+        {
+            meta_sync_concurrent->cv_.wait(lk);
         }
     }
 
+    // 6- Check for errors
+    if (meta_sync_concurrent->result_.error_code() !=
+        remote::DataStoreError::NO_ERROR)
+    {
+        LOG(WARNING) << "UpsertRanges: Failed to write range metadata. Error: "
+                     << meta_sync_concurrent->result_.error_msg();
+        return false;
+    }
+
+    // 7- Flush data
     SyncCallbackData *callback_data = sync_callback_data_pool_.NextObject();
     PoolableGuard guard(callback_data);
     callback_data->Reset();
@@ -1510,9 +1924,10 @@ bool DataStoreServiceClient::FetchTable(const txservice::TableName &table_name,
         fetch_table_callback_data_pool_.NextObject();
     PoolableGuard guard(callback_data);
     callback_data->Reset(schema_image, found, version_ts, yield_fptr, resume_fptr);
+    uint32_t shard_id = GetShardIdByPartitionId(0, false);
     Read(kv_table_catalogs_name,
          0,
-         "",
+         shard_id,
          table_name.StringView(),
          callback_data,
          &FetchTableCallback);
@@ -1554,6 +1969,7 @@ bool DataStoreServiceClient::DiscoverAllTableNames(
 
     ScanNext(kv_table_catalogs_name,
              0,  // kv_partition_id
+             GetShardIdByPartitionId(0, false),
              "",
              "",
              callback_data->session_id_,
@@ -1609,6 +2025,7 @@ bool DataStoreServiceClient::UpsertDatabase(std::string_view db,
 
     BatchWriteRecords(kv_database_catalogs_name,
                       0,
+                      GetShardIdByPartitionId(0, false),
                       std::move(keys),
                       std::move(records),
                       std::move(records_ts),
@@ -1667,6 +2084,7 @@ bool DataStoreServiceClient::DropDatabase(std::string_view db,
 
     BatchWriteRecords(kv_database_catalogs_name,
                       0,
+                      GetShardIdByPartitionId(0, false),
                       std::move(keys),
                       std::move(records),
                       std::move(records_ts),
@@ -1714,9 +2132,11 @@ bool DataStoreServiceClient::FetchDatabase(
         fetch_db_callback_data_pool_.NextObject();
     PoolableGuard guard(callback_data);
     callback_data->Reset(definition, found, yield_fptr, resume_fptr);
+    uint32_t shard_id = GetShardIdByPartitionId(0, false);
+
     Read(kv_database_catalogs_name,
          0,
-         "",
+         shard_id,
          db,
          callback_data,
          &FetchDatabaseCallback);
@@ -1737,6 +2157,7 @@ bool DataStoreServiceClient::FetchAllDatabase(
 
     ScanNext(kv_database_catalogs_name,
              0,
+             GetShardIdByPartitionId(0, false),
              callback_data->start_key_,
              callback_data->end_key_,
              callback_data->session_id_,
@@ -1775,8 +2196,8 @@ bool DataStoreServiceClient::DropKvTable(const std::string &kv_table_name)
 // NOTICE: this function is not atomic
 void DataStoreServiceClient::DropKvTableAsync(const std::string &kv_table_name)
 {
-    // FIXME(lzx): this function may not be used now.
-    assert(false);
+    // FIXME(lzx): this function may not be used now, delete it.
+    LOG(WARNING) << "DropKvTableAsync should not be used (noop)";
 
     AsyncDropTableCallbackData *callback_data =
         new AsyncDropTableCallbackData();
@@ -1939,33 +2360,6 @@ uint32_t DataStoreServiceClient::HashArchiveKey(
     uint32_t partition_id =
         (kv_table_name_hash ^ (key_hash << 1)) & 0x3FF;  // 1024 partitions
     return partition_id;
-}
-
-void DataStoreServiceClient::EncodeKvKeyForHashPart(uint16_t bucket_id,
-                                                    std::string &key_out)
-{
-    uint16_t be_bucket_id = EloqShare::host_to_big_endian(bucket_id);
-    key_out.append(reinterpret_cast<const char *>(&be_bucket_id),
-                   sizeof(be_bucket_id));
-}
-
-void DataStoreServiceClient::EncodeKvKeyForHashPart(
-    uint16_t bucket_id, const std::string_view &tx_key, std::string &key_out)
-{
-    uint16_t be_bucket_id = EloqShare::host_to_big_endian(bucket_id);
-    key_out.reserve(sizeof(uint16_t) + tx_key.size());
-    key_out.append(reinterpret_cast<const char *>(&be_bucket_id),
-                   sizeof(be_bucket_id));
-    key_out.append(tx_key.data(), tx_key.size());
-}
-
-std::string_view DataStoreServiceClient::DecodeKvKeyForHashPart(
-    const char *data, size_t size)
-{
-    assert(size >= sizeof(uint16_t));
-    const char *tx_key_start = data + sizeof(uint16_t);
-    size_t tx_key_len = size - sizeof(uint16_t);
-    return std::string_view(tx_key_start, tx_key_len);
 }
 
 std::string DataStoreServiceClient::EncodeArchiveKey(
@@ -2133,10 +2527,10 @@ bool DataStoreServiceClient::PutArchivesAll(
             for (size_t i = 0; i < archive_vec.size(); ++i)
             {
                 txservice::TxKey tx_key = archive_vec[i].Key();
-                uint32_t partition_id =
+                int32_t partition_id =
                     HashArchiveKey(kv_table_name.data(), tx_key);
                 auto [it, inserted] = partitions_map.try_emplace(
-                    KvPartitionIdOf(partition_id, true));
+                    KvPartitionIdOf(partition_id, false));
                 if (inserted)
                 {
                     it->second.reserve(archive_vec.size() / 1024 * 2 *
@@ -2183,6 +2577,8 @@ bool DataStoreServiceClient::PutArchivesAll(
         records_ttl.reserve(recs_cnt);
         op_types.reserve(recs_cnt);
 
+        uint32_t data_shard_id = GetShardIdByPartitionId(partition_id, false);
+
         for (size_t i = 0; i < archive_ptrs.size(); ++i)
         {
             // Start a new batch if done with current partition.
@@ -2200,6 +2596,7 @@ bool DataStoreServiceClient::PutArchivesAll(
                 }
                 BatchWriteRecords(kv_mvcc_archive_name,
                                   partition_id,
+                                  data_shard_id,
                                   std::move(keys),
                                   std::move(records),
                                   std::move(records_ts),
@@ -2276,6 +2673,7 @@ bool DataStoreServiceClient::PutArchivesAll(
         {
             BatchWriteRecords(kv_mvcc_archive_name,
                               partition_id,
+                              data_shard_id,
                               std::move(keys),
                               std::move(records),
                               std::move(records_ts),
@@ -2321,6 +2719,12 @@ bool DataStoreServiceClient::PutArchivesAll(
                        << sync_concurrent->result_.error_msg();
             return false;
         }
+
+        if (metrics::enable_kv_metrics)
+        {
+            metrics::kv_meter->Collect(
+                metrics::NAME_KV_FLUSH_ROWS_TOTAL, recs_cnt, "archive");
+        }
     }
 
     return true;
@@ -2354,6 +2758,7 @@ bool DataStoreServiceClient::CopyBaseToArchive(
         auto &table_name =
             flush_task_entry.front()->data_sync_task_->table_name_;
         auto &table_schema = flush_task_entry.front()->table_schema_;
+        bool is_range_partitioned = !table_name.IsHashPartitioned();
 
         auto *catalog_factory = GetCatalogFactory(table_name.Engine());
         assert(catalog_factory != nullptr);
@@ -2387,21 +2792,19 @@ bool DataStoreServiceClient::CopyBaseToArchive(
                 txservice::TxKey &tx_key = base_vec[base_idx].first;
                 assert(tx_key.Data() != nullptr && tx_key.Size() > 0);
 
-                uint32_t partition_id = base_vec[base_idx].second;
+                int32_t partition_id = base_vec[base_idx].second;
+                int32_t kv_part_id =
+                    KvPartitionIdOf(partition_id, is_range_partitioned);
+                uint32_t shard_id =
+                    GetShardIdByPartitionId(kv_part_id, is_range_partitioned);
+
                 auto *callback_data = &callback_datas[base_idx];
                 callback_data->ResetResult();
                 size_t flying_cnt = callback_data->AddFlyingReadCount();
 
-                std::string_view be_bucket_id =
-                    table_name.IsHashPartitioned()
-                        ? EncodeBucketId(
-                              txservice::Sharder::MapKeyHashToBucketId(
-                                  tx_key.Hash()))
-                        : std::string_view();
-
                 Read(base_kv_table_name,
-                     KvPartitionIdOf(partition_id, true),
-                     be_bucket_id,
+                     kv_part_id,
+                     shard_id,
                      std::string_view(tx_key.Data(), tx_key.Size()),
                      callback_data,
                      &SyncBatchReadForArchiveCallback);
@@ -2437,17 +2840,10 @@ bool DataStoreServiceClient::CopyBaseToArchive(
             for (size_t i = 0; i < base_vec.size(); i++)
             {
                 auto &callback_data = callback_datas[i];
-                std::string_view tx_key_view = callback_data.key_str_;
-                if (table_name.IsHashPartitioned())
-                {
-                    tx_key_view = DecodeKvKeyForHashPart(tx_key_view.data(),
-                                                         tx_key_view.size());
-                }
-
-                txservice::TxKey tx_key = catalog_factory->CreateTxKey(
-                    tx_key_view.data(), tx_key_view.size());
-
-                batch_size += tx_key_view.size();
+                txservice::TxKey tx_key =
+                    catalog_factory->CreateTxKey(callback_data.key_str_.data(),
+                                                 callback_data.key_str_.size());
+                batch_size += callback_data.key_str_.size();
                 batch_size += callback_data.value_str_.size();
                 std::string_view val = callback_data.value_str_;
                 size_t offset = 0;
@@ -2457,7 +2853,7 @@ bool DataStoreServiceClient::CopyBaseToArchive(
                 if (table_name.Engine() == txservice::TableEngine::EloqKv)
                 {
                     // mvcc is not used for EloqKV
-                    assert(false);
+                    LOG(WARNING) << "EloqKv engine not support mvcc feature";
                     txservice::TxObject *tx_object =
                         static_cast<txservice::TxObject *>(record.get());
                     record = tx_object->DeserializeObject(val.data(), offset);
@@ -2481,7 +2877,8 @@ bool DataStoreServiceClient::CopyBaseToArchive(
                     if (table_name.Engine() == txservice::TableEngine::EloqKv)
                     {
                         // should not be here
-                        assert(false);
+                        LOG(WARNING)
+                            << "EloqKv engine not support mvcc feature";
                         ref.SetNonVersionedPayload(record.get());
                     }
                     else
@@ -2546,7 +2943,7 @@ bool DataStoreServiceClient::CopyBaseToArchive(
  * @param key The key to fetch archive records for.
  * @param archives Output vector to store the fetched archive records.
  * @param from_ts Starting timestamp for the archive fetch.
- * @return Currently always returns false (not implemented).
+ * @return True if the archives are successfully fetched, false otherwise.
  */
 bool DataStoreServiceClient::FetchArchives(
     const txservice::TableName &table_name,
@@ -2555,7 +2952,8 @@ bool DataStoreServiceClient::FetchArchives(
     std::vector<txservice::VersionTxRecord> &archives,
     uint64_t from_ts)
 {
-    assert(false);
+    LOG(WARNING) << "FetchArchives should not be used because all "
+                    "archive versions are fetched from ccmap. (noop)";
 
     LOG(INFO) << "FetchArchives: table_name: " << table_name.StringView();
     const std::string &kv_table_name = kv_info->GetKvTableName(table_name);
@@ -2564,8 +2962,10 @@ bool DataStoreServiceClient::FetchArchives(
         kv_table_name, std::string_view(key.Data(), key.Size()), be_from_ts);
     std::string upper_bound_key = EncodeArchiveKey(
         kv_table_name, std::string_view(key.Data(), key.Size()), UINT64_MAX);
-    uint32_t partition_id = HashArchiveKey(kv_table_name, key);
-    int32_t kv_partition_id = KvPartitionIdOf(partition_id, true);
+    int32_t partition_id = HashArchiveKey(kv_table_name, key);
+    int32_t kv_partition_id = KvPartitionIdOf(partition_id, false);
+    uint32_t data_shard_id = GetShardIdByPartitionId(kv_partition_id, false);
+
     size_t batch_size = 100;
     FetchArchivesCallbackData callback_data(kv_mvcc_archive_name,
                                             kv_partition_id,
@@ -2577,6 +2977,7 @@ bool DataStoreServiceClient::FetchArchives(
 
     ScanNext(kv_mvcc_archive_name,
              kv_partition_id,
+             data_shard_id,
              lower_bound_key,
              upper_bound_key,
              callback_data.session_id_,
@@ -2621,7 +3022,7 @@ bool DataStoreServiceClient::FetchArchives(
             if (table_name.Engine() == txservice::TableEngine::EloqKv)
             {
                 // should not be here
-                assert(false);
+                LOG(WARNING) << "EloqKv engine not support mvcc feature";
             }
             else
             {
@@ -2651,7 +3052,8 @@ bool DataStoreServiceClient::FetchArchives(
  * @param rec Output parameter for the fetched record.
  * @param rec_status Output parameter for the record status.
  * @param commit_ts Output parameter for the commit timestamp.
- * @return Currently always returns false (not implemented).
+ * @return True if the visible archive record is successfully fetched, false
+ * otherwise.
  */
 bool DataStoreServiceClient::FetchVisibleArchive(
     const txservice::TableName &table_name,
@@ -2662,7 +3064,9 @@ bool DataStoreServiceClient::FetchVisibleArchive(
     txservice::RecordStatus &rec_status,
     uint64_t &commit_ts)
 {
-    assert(false);
+    // TODO(lzx): Remove this function if not needed.
+    LOG(WARNING) << "FetchVisibleArchive should not be used because all "
+                    "archive versions are fetched from ccmap. (noop)";
 
     const std::string &kv_table_name = kv_info->GetKvTableName(table_name);
     uint64_t be_upper_bound_ts = EloqShare::host_to_big_endian(upper_bound_ts);
@@ -2672,8 +3076,9 @@ bool DataStoreServiceClient::FetchVisibleArchive(
                          be_upper_bound_ts);
     std::string upper_bound_key = EncodeArchiveKey(
         kv_table_name, std::string_view(key.Data(), key.Size()), 0);
-    uint32_t partition_id = HashArchiveKey(kv_table_name, key);
-    int32_t kv_partition_id = KvPartitionIdOf(partition_id, true);
+    int32_t partition_id = HashArchiveKey(kv_table_name, key);
+    int32_t kv_partition_id = KvPartitionIdOf(partition_id, false);
+    uint32_t data_shard_id = GetShardIdByPartitionId(kv_partition_id, false);
     size_t batch_size = 1;
     FetchArchivesCallbackData callback_data(kv_mvcc_archive_name,
                                             kv_partition_id,
@@ -2684,6 +3089,7 @@ bool DataStoreServiceClient::FetchVisibleArchive(
                                             false);
     ScanNext(kv_mvcc_archive_name,
              kv_partition_id,
+             data_shard_id,
              lower_bound_key,
              upper_bound_key,
              callback_data.session_id_,
@@ -2727,7 +3133,7 @@ bool DataStoreServiceClient::FetchVisibleArchive(
         if (table_name.Engine() == txservice::TableEngine::EloqKv)
         {
             // should not be here
-            assert(false);
+            LOG(WARNING) << "EloqKv engine not support mvcc feature";
         }
         else
         {
@@ -2766,13 +3172,16 @@ DataStoreServiceClient::FetchArchives(txservice::FetchRecordCc *fetch_cc)
         kv_table_name, std::string_view(key.Data(), key.Size()), be_read_ts);
     fetch_cc->kv_end_key_ = EncodeArchiveKey(
         kv_table_name, std::string_view(key.Data(), key.Size()), 0);
-    uint32_t partition_id = HashArchiveKey(kv_table_name, key);
+    int32_t partition_id = HashArchiveKey(kv_table_name, key);
     // Also use the partion_id in fetch_cc to store kv partition
-    fetch_cc->partition_id_ = KvPartitionIdOf(partition_id, true);
+    fetch_cc->partition_id_ = KvPartitionIdOf(partition_id, false);
+    uint32_t data_shard_id =
+        GetShardIdByPartitionId(fetch_cc->partition_id_, false);
     fetch_cc->kv_session_id_.clear();
 
     ScanNext(kv_mvcc_archive_name,
              fetch_cc->partition_id_,
+             data_shard_id,
              fetch_cc->kv_start_key_,
              fetch_cc->kv_end_key_,
              fetch_cc->kv_session_id_,
@@ -2802,11 +3211,13 @@ DataStoreServiceClient::FetchVisibleArchive(
         kv_table_name, std::string_view(key.Data(), key.Size()), be_read_ts);
     fetch_cc->kv_end_key_ = EncodeArchiveKey(
         kv_table_name, std::string_view(key.Data(), key.Size()), 0);
-    uint32_t partition_id = HashArchiveKey(kv_table_name, key);
-    int32_t kv_partition_id = KvPartitionIdOf(partition_id, true);
+    int32_t partition_id = HashArchiveKey(kv_table_name, key);
+    int32_t kv_partition_id = KvPartitionIdOf(partition_id, false);
+    uint32_t data_shard_id = GetShardIdByPartitionId(kv_partition_id, false);
 
     ScanNext(kv_mvcc_archive_name,
              kv_partition_id,
+             data_shard_id,
              fetch_cc->kv_start_key_,
              fetch_cc->kv_end_key_,
              "",
@@ -2842,14 +3253,8 @@ bool DataStoreServiceClient::CreateSnapshotForBackup(
 {
     CreateSnapshotForBackupClosure *closure =
         create_snapshot_for_backup_closure_pool_.NextObject();
-    uint32_t shard_cnt = AllDataShardCount();
-    std::vector<uint32_t> shard_ids;
-    shard_ids.reserve(shard_cnt);
-    for (uint32_t shard_id = 0; shard_id < shard_cnt; shard_id++)
-    {
-        shard_ids.push_back(shard_id);
-    }
 
+    std::vector<uint32_t> shard_ids = GetAllDataShards();
     CreateSnapshotForBackupCallbackData *callback_data =
         create_snapshot_for_backup_callback_data_pool_.NextObject();
     PoolableGuard guard(callback_data);
@@ -2946,8 +3351,8 @@ bool DataStoreServiceClient::NeedCopyRange() const
 void DataStoreServiceClient::RestoreTxCache(txservice::NodeGroupId cc_ng_id,
                                             int64_t cc_ng_term)
 {
-    LOG(ERROR) << "RestoreTxCache not implemented";
-    assert(false);
+    LOG(ERROR) << "RestoreTxCache not implemented - operation skipped";
+    // TODO: Implement if needed
 }
 
 /**
@@ -2959,15 +3364,18 @@ void DataStoreServiceClient::RestoreTxCache(txservice::NodeGroupId cc_ng_id,
  * @param next_leader_node Pointer to store the next leader node ID (unused).
  * @return Always returns true.
  */
-bool DataStoreServiceClient::OnLeaderStart(uint32_t *next_leader_node)
+bool DataStoreServiceClient::OnLeaderStart(uint32_t ng_id,
+                                           uint32_t *next_leader_node)
 {
-    DLOG(INFO)
-        << "DataStoreServiceClient OnLeaderStart called data_store_service_:"
-        << data_store_service_;
+    if (!bind_data_shard_with_ng_)
+    {
+        return true;
+    }
+
     if (data_store_service_ != nullptr)
     {
-        // Now, only support one shard.
-        data_store_service_->OpenDataStore(0);
+        // Binded data store shard with ng.
+        data_store_service_->OpenDataStore(ng_id);
     }
 
     Connect();
@@ -2975,16 +3383,17 @@ bool DataStoreServiceClient::OnLeaderStart(uint32_t *next_leader_node)
     return true;
 }
 
-bool DataStoreServiceClient::OnLeaderStop(int64_t term)
+bool DataStoreServiceClient::OnLeaderStop(uint32_t ng_id, int64_t term)
 {
-    DLOG(INFO)
-        << "DataStoreServiceClient OnLeaderStop called data_store_service_:"
-        << data_store_service_;
-    // swith to read only in case of data store status is read write
+    if (!bind_data_shard_with_ng_)
+    {
+        return true;
+    }
+
     if (data_store_service_ != nullptr)
     {
-        // Now, only support one shard.
-        data_store_service_->CloseDataStore(0);
+        // Close the data store shard.
+        data_store_service_->CloseDataStore(ng_id);
     }
     return true;
 }
@@ -2996,23 +3405,25 @@ bool DataStoreServiceClient::OnLeaderStop(int64_t term)
  * following another leader and can be used to perform follower-specific
  * initialization.
  */
-void DataStoreServiceClient::OnStartFollowing(uint32_t leader_node_id,
+void DataStoreServiceClient::OnStartFollowing(uint32_t ng_id,
+                                              uint32_t leader_node_id,
                                               int64_t term,
                                               int64_t standby_term,
                                               bool resubscribe)
 {
-    DLOG(INFO)
-        << "DataStoreServiceClient OnStartFollowing called data_store_service_:"
-        << data_store_service_;
+    if (!bind_data_shard_with_ng_)
+    {
+        return;
+    }
+
     if (data_store_service_ != nullptr)
     {
-        // Now, only support one shard.
-        data_store_service_->CloseDataStore(0);
+        data_store_service_->CloseDataStore(ng_id);
     }
 
     // Treat leader_node_id as dss_leader_node_id
     uint32_t dss_leader_node_id = leader_node_id;
-    uint32_t dss_shard_id = txservice::Sharder::Instance().NativeNodeGroup();
+    uint32_t dss_shard_id = ng_id;
 
     // Update leader node in cluster_manager if necessary
     auto ng_configs = txservice::Sharder::Instance().GetNodeGroupConfigs();
@@ -3056,14 +3467,9 @@ void DataStoreServiceClient::OnShutdown()
 }
 
 /**
- * @brief Checks if a shard is local to this node.
- *
- * Determines whether the specified shard is owned by this node using the
- * cluster manager. This is used for scale-up scenarios where data needs to be
- * migrated from smaller to larger nodes.
- *
- * @param shard_id The shard ID to check.
- * @return true if the shard is local to this node, false otherwise.
+ * @brief Check if the owner of shard is the local DataStoreService node.
+ * @param shard_id
+ * @return true if the owner of shard is the local DataStoreService node.
  */
 bool DataStoreServiceClient::IsLocalShard(uint32_t shard_id)
 {
@@ -3075,36 +3481,123 @@ bool DataStoreServiceClient::IsLocalShard(uint32_t shard_id)
     return false;
 }
 
-/**
- * @brief Checks if a partition is local to this node.
- *
- * Determines whether the specified partition is owned by this node using the
- * cluster manager. Used for determining whether operations should be performed
- * locally or remotely.
- *
- * @param partition_id The partition ID to check.
- * @return true if the partition is local to this node, false otherwise.
- */
-bool DataStoreServiceClient::IsLocalPartition(int32_t partition_id)
-{
-    return IsLocalShard(GetShardIdByPartitionId(partition_id));
-}
-
 uint32_t DataStoreServiceClient::GetShardIdByPartitionId(
-    int32_t partition_id) const
+    int32_t partition_id, bool is_range_partition) const
 {
-    // Now, only support one shard.
-    return 0;
+    uint16_t bucket_id;
+    if (is_range_partition)
+    {
+        bucket_id = txservice::Sharder::MapRangeIdToBucketId(partition_id);
+    }
+    else
+    {
+        bucket_id =
+            txservice::Sharder::MapHashPartitionIdToBucketId(partition_id);
+    }
+
+    auto it = bucket_infos_.find(bucket_id);
+    assert(it != bucket_infos_.end());
+    if (it != bucket_infos_.end())
+    {
+        uint32_t shard_id = it->second->BucketOwner();
+        assert(dss_shard_ids_.find(shard_id) != dss_shard_ids_.end());
+        return shard_id;
+    }
+    LOG(ERROR) << "Bucket not found for partition_id=" << partition_id
+               << " (bucket_id=" << bucket_id << ")";
+    return UINT32_MAX;
 }
 
-uint32_t DataStoreServiceClient::AllDataShardCount() const
+std::vector<uint32_t> DataStoreServiceClient::GetAllDataShards()
 {
-    return dss_shards_.size();
+    // Ensure that the access of dss_shard_ids_ is thread-safe after
+    // support shard scaling.
+    std::shared_lock<std::shared_mutex> lock(dss_shard_ids_mutex_);
+    std::vector<uint32_t> shard_ids;
+    shard_ids.reserve(dss_shard_ids_.size());
+    for (auto shard_id : dss_shard_ids_)
+    {
+        shard_ids.push_back(shard_id);
+    }
+
+    return shard_ids;
+}
+
+void DataStoreServiceClient::InitBucketsInfo(
+    const std::set<uint32_t> &node_groups,
+    uint64_t version,
+    std::unordered_map<uint16_t, std::unique_ptr<txservice::BucketInfo>>
+        &ng_bucket_infos)
+{
+    // Construct bucket info map on startup
+    if (node_groups.empty())
+    {
+        LOG(ERROR) << "InitBucketsInfo called with empty node_groups";
+        ng_bucket_infos.clear();
+        return;
+    }
+    // Generate 64 random numbers for each node group as virtual nodes on
+    // hashing ring. Each bucket id belongs to the first virtual node that is
+    // larger than the bucket id.
+    ng_bucket_infos.clear();
+    std::map<uint16_t, uint32_t> rand_num_to_ng;
+    // use ng id as seed to generate random numbers
+    for (auto ng : node_groups)
+    {
+        // Thread-safe and deterministic random generator
+        std::mt19937 rng(ng);
+        std::uniform_int_distribution<uint16_t> dist(
+            0, txservice::total_range_buckets - 1);
+        size_t generated = 0;
+        while (generated < 64)
+        {
+            uint16_t rand_num = dist(rng);
+            if (rand_num_to_ng.find(rand_num) == rand_num_to_ng.end())
+            {
+                generated++;
+                rand_num_to_ng.emplace(rand_num, ng);
+            }
+            if (rand_num_to_ng.size() >= txservice::total_range_buckets)
+            {
+                LOG(WARNING)
+                    << "Cluster has too many node groups, need to reduce the "
+                       "number of buckets held by each node group";
+                break;
+            }
+        }
+    }
+
+    // Insert bucket ids into the map.
+    auto it = rand_num_to_ng.begin();
+    for (uint16_t bucket_id = 0; bucket_id < txservice::total_range_buckets;
+         bucket_id++)
+    {
+        // The buckets larger than the last random number belongs to the
+        // first virtual node on the ring.
+        if (it != rand_num_to_ng.end() && bucket_id >= it->first)
+        {
+            it++;
+        }
+        uint32_t ng_id = it == rand_num_to_ng.end()
+                             ? rand_num_to_ng.begin()->second
+                             : it->second;
+        auto insert_res = ng_bucket_infos.try_emplace(
+            bucket_id, std::make_unique<txservice::BucketInfo>(ng_id, version));
+        if (insert_res.second)
+        {
+            insert_res.first->second->Set(ng_id, version);
+        }
+    }
 }
 
 uint32_t DataStoreServiceClient::GetOwnerNodeIndexOfShard(
     uint32_t shard_id) const
 {
+    if (shard_id >= dss_shards_.size())
+    {
+        LOG(ERROR) << "shard_id " << shard_id << " exceeds array bounds";
+        return UINT32_MAX;
+    }
     assert(dss_shards_[shard_id].load(std::memory_order_acquire) != UINT32_MAX);
     return dss_shards_[shard_id].load(std::memory_order_acquire);
 }
@@ -3112,6 +3605,11 @@ uint32_t DataStoreServiceClient::GetOwnerNodeIndexOfShard(
 bool DataStoreServiceClient::UpdateOwnerNodeIndexOfShard(
     uint32_t shard_id, uint32_t old_node_index, uint32_t &new_node_index)
 {
+    if (shard_id >= dss_shards_.size())
+    {
+        LOG(ERROR) << "shard_id " << shard_id << " exceeds array bounds";
+        return false;
+    }
     new_node_index = dss_shards_[shard_id].load(std::memory_order_acquire);
     if (new_node_index != old_node_index)
     {
@@ -3212,7 +3710,6 @@ void DataStoreServiceClient::HandleShardingError(
     }
     else
     {
-        assert(false);
         // the whole node group has changed
         LOG(FATAL) << "The topology of data shards is changed";
         // TODO(lzx): handle the topology of cluster change.
@@ -3226,10 +3723,8 @@ bool DataStoreServiceClient::UpgradeShardVersion(uint32_t shard_id,
 {
     if (shard_id >= dss_shards_.size())
     {
-        assert(false);
-        // Now only support one shard.
-        LOG(FATAL) << "Shard id not found, shard_id: " << shard_id;
-        return true;
+        LOG(ERROR) << "shard_id " << shard_id << " exceeds array bounds";
+        return false;
     }
 
     uint32_t node_index = dss_shards_[shard_id].load(std::memory_order_acquire);
@@ -3262,7 +3757,8 @@ bool DataStoreServiceClient::UpgradeShardVersion(uint32_t shard_id,
         if (!dss_shards_[shard_id].compare_exchange_strong(node_index,
                                                            free_node_index))
         {
-            assert(false);
+            LOG(WARNING) << "Other thread updated the data shard, shard_id: "
+                         << shard_id;
             free_node_ref.expired_ts_.store(1, std::memory_order_release);
         }
     }
@@ -3280,11 +3776,6 @@ DataStoreServiceClient::FetchRecord(
         return FetchSnapshot(fetch_snapshot_cc);
     }
 
-    if (metrics::enable_kv_metrics)
-    {
-        fetch_cc->start_ = metrics::Clock::now();
-    }
-
     if (!fetch_cc->tx_key_.IsOwner())
     {
         fetch_cc->tx_key_ = fetch_cc->tx_key_.Clone();
@@ -3295,16 +3786,19 @@ DataStoreServiceClient::FetchRecord(
         return FetchArchives(fetch_cc);
     }
 
-    std::string_view be_bucket_id =
-        fetch_cc->table_name_.IsHashPartitioned()
-            ? EncodeBucketId(txservice::Sharder::MapKeyHashToBucketId(
-                  fetch_cc->tx_key_.Hash()))
-            : std::string_view();
+    if (metrics::enable_kv_metrics)
+    {
+        fetch_cc->start_ = metrics::Clock::now();
+    }
+
+    int32_t kv_partition_id = KvPartitionIdOf(
+        fetch_cc->partition_id_, !fetch_cc->table_name_.IsHashPartitioned());
+    uint32_t shard_id = GetShardIdByPartitionId(
+        kv_partition_id, !fetch_cc->table_name_.IsHashPartitioned());
 
     Read(fetch_cc->kv_table_name_,
-         KvPartitionIdOf(fetch_cc->partition_id_,
-                         !fetch_cc->table_name_.IsHashPartitioned()),
-         be_bucket_id,
+         kv_partition_id,
+         shard_id,
          std::string_view(fetch_cc->tx_key_.Data(), fetch_cc->tx_key_.Size()),
          fetch_cc,
          &FetchRecordCallback);
@@ -3349,44 +3843,34 @@ DataStoreServiceClient::FetchBucketData(
     assert(fetch_bucket_data_cc->table_name_.IsHashPartitioned());
 
     int32_t kv_partition_id =
-        KvPartitionIdOf(txservice::Sharder::MapBucketIdToKvPartitionId(
+        KvPartitionIdOf(txservice::Sharder::MapBucketIdToHashPartitionId(
                             fetch_bucket_data_cc->bucket_id_),
                         false);
+    uint32_t shard_id = GetShardIdByPartitionId(
+        kv_partition_id,
+        !fetch_bucket_data_cc->table_name_.IsHashPartitioned());
 
     fetch_bucket_data_cc->kv_start_key_.clear();
     fetch_bucket_data_cc->kv_end_key_.clear();
 
-    if (fetch_bucket_data_cc->start_key_type_ ==
+    if (fetch_bucket_data_cc->start_key_type_ !=
         txservice::KeyType::NegativeInf)
-    {
-        EncodeKvKeyForHashPart(fetch_bucket_data_cc->bucket_id_,
-                               fetch_bucket_data_cc->kv_start_key_);
-    }
-    else
     {
         assert(fetch_bucket_data_cc->start_key_type_ ==
                txservice::KeyType::Normal);
-        EncodeKvKeyForHashPart(fetch_bucket_data_cc->bucket_id_,
-                               fetch_bucket_data_cc->StartKey(),
-                               fetch_bucket_data_cc->kv_start_key_);
+        fetch_bucket_data_cc->kv_start_key_ = fetch_bucket_data_cc->StartKey();
     }
 
-    if (fetch_bucket_data_cc->end_key_type_ == txservice::KeyType::PositiveInf)
-    {
-        EncodeKvKeyForHashPart(fetch_bucket_data_cc->bucket_id_ + 1,
-                               fetch_bucket_data_cc->kv_end_key_);
-    }
-    else
+    if (fetch_bucket_data_cc->end_key_type_ != txservice::KeyType::PositiveInf)
     {
         assert(fetch_bucket_data_cc->end_key_type_ ==
                txservice::KeyType::Normal);
-        EncodeKvKeyForHashPart(fetch_bucket_data_cc->bucket_id_,
-                               fetch_bucket_data_cc->EndKey(),
-                               fetch_bucket_data_cc->kv_end_key_);
+        fetch_bucket_data_cc->kv_end_key_ = fetch_bucket_data_cc->EndKey();
     }
 
     ScanNext(fetch_bucket_data_cc->kv_table_name_,
              kv_partition_id,
+             shard_id,
              fetch_bucket_data_cc->kv_start_key_,
              fetch_bucket_data_cc->kv_end_key_,
              "",
@@ -3405,11 +3889,6 @@ DataStoreServiceClient::FetchBucketData(
 txservice::store::DataStoreHandler::DataStoreOpStatus
 DataStoreServiceClient::FetchSnapshot(txservice::FetchSnapshotCc *fetch_cc)
 {
-    if (metrics::enable_kv_metrics)
-    {
-        fetch_cc->start_ = metrics::Clock::now();
-    }
-
     if (!fetch_cc->tx_key_.IsOwner())
     {
         fetch_cc->tx_key_ = fetch_cc->tx_key_.Clone();
@@ -3420,16 +3899,19 @@ DataStoreServiceClient::FetchSnapshot(txservice::FetchSnapshotCc *fetch_cc)
         return FetchVisibleArchive(fetch_cc);
     }
 
-    std::string_view be_bucket_id =
-        fetch_cc->table_name_.IsHashPartitioned()
-            ? EncodeBucketId(txservice::Sharder::MapKeyHashToBucketId(
-                  fetch_cc->tx_key_.Hash()))
-            : std::string_view();
+    if (metrics::enable_kv_metrics)
+    {
+        fetch_cc->start_ = metrics::Clock::now();
+    }
+
+    int32_t kv_part_id = KvPartitionIdOf(
+        fetch_cc->partition_id_, !fetch_cc->table_name_.IsHashPartitioned());
+    uint32_t shard_id = GetShardIdByPartitionId(
+        kv_part_id, !fetch_cc->table_name_.IsHashPartitioned());
 
     Read(fetch_cc->kv_table_name_,
-         KvPartitionIdOf(fetch_cc->partition_id_,
-                         !fetch_cc->table_name_.IsHashPartitioned()),
-         be_bucket_id,
+         kv_part_id,
+         shard_id,
          std::string_view(fetch_cc->tx_key_.Data(), fetch_cc->tx_key_.Size()),
          fetch_cc,
          &FetchSnapshotCallback);
@@ -3438,8 +3920,8 @@ DataStoreServiceClient::FetchSnapshot(txservice::FetchSnapshotCc *fetch_cc)
 }
 
 void DataStoreServiceClient::Read(const std::string_view kv_table_name,
-                                  const uint32_t partition_id,
-                                  std::string_view be_bucket_id,
+                                  const int32_t partition_id,
+                                  const uint32_t shard_id,
                                   const std::string_view key,
                                   void *callback_data,
                                   DataStoreCallback callback)
@@ -3448,7 +3930,7 @@ void DataStoreServiceClient::Read(const std::string_view kv_table_name,
     read_clouse->Reset(this,
                        kv_table_name,
                        partition_id,
-                       be_bucket_id,
+                       shard_id,
                        key,
                        callback_data,
                        callback);
@@ -3457,11 +3939,12 @@ void DataStoreServiceClient::Read(const std::string_view kv_table_name,
 
 void DataStoreServiceClient::ReadInternal(ReadClosure *read_closure)
 {
-    if (IsLocalPartition(read_closure->PartitionId()))
+    if (IsLocalShard(read_closure->ShardId()))
     {
         read_closure->PrepareRequest(true);
         data_store_service_->Read(read_closure->TableName(),
                                   read_closure->PartitionId(),
+                                  read_closure->ShardId(),
                                   read_closure->Key(),
                                   &read_closure->LocalValueRef(),
                                   &read_closure->LocalTsRef(),
@@ -3472,8 +3955,7 @@ void DataStoreServiceClient::ReadInternal(ReadClosure *read_closure)
     else
     {
         read_closure->PrepareRequest(false);
-        uint32_t node_index = GetOwnerNodeIndexOfShard(
-            GetShardIdByPartitionId(read_closure->PartitionId()));
+        uint32_t node_index = GetOwnerNodeIndexOfShard(read_closure->ShardId());
         read_closure->SetRemoteNodeIndex(node_index);
         auto *channel = dss_nodes_[node_index].Channel();
 
@@ -3488,6 +3970,7 @@ void DataStoreServiceClient::ReadInternal(ReadClosure *read_closure)
 
 void DataStoreServiceClient::DeleteRange(const std::string_view table_name,
                                          const int32_t partition_id,
+                                         const uint32_t shard_id,
                                          const std::string &start_key,
                                          const std::string &end_key,
                                          const bool skip_wal,
@@ -3499,6 +3982,7 @@ void DataStoreServiceClient::DeleteRange(const std::string_view table_name,
     closure->Reset(*this,
                    table_name,
                    partition_id,
+                   shard_id,
                    start_key,
                    end_key,
                    skip_wal,
@@ -3511,11 +3995,12 @@ void DataStoreServiceClient::DeleteRange(const std::string_view table_name,
 void DataStoreServiceClient::DeleteRangeInternal(
     DeleteRangeClosure *delete_range_clouse)
 {
-    if (IsLocalPartition(delete_range_clouse->PartitionId()))
+    if (IsLocalShard(delete_range_clouse->ShardId()))
     {
         delete_range_clouse->PrepareRequest(true);
         data_store_service_->DeleteRange(delete_range_clouse->TableName(),
                                          delete_range_clouse->PartitionId(),
+                                         delete_range_clouse->ShardId(),
                                          delete_range_clouse->StartKey(),
                                          delete_range_clouse->EndKey(),
                                          delete_range_clouse->SkipWal(),
@@ -3525,8 +4010,8 @@ void DataStoreServiceClient::DeleteRangeInternal(
     else
     {
         delete_range_clouse->PrepareRequest(false);
-        uint32_t node_index = GetOwnerNodeIndexOfShard(
-            GetShardIdByPartitionId(delete_range_clouse->PartitionId()));
+        uint32_t node_index =
+            GetOwnerNodeIndexOfShard(delete_range_clouse->ShardId());
         delete_range_clouse->SetRemoteNodeIndex(node_index);
         auto *channel = dss_nodes_[node_index].Channel();
 
@@ -3545,13 +4030,7 @@ void DataStoreServiceClient::FlushData(
     DataStoreCallback callback)
 {
     FlushDataClosure *closure = flush_data_closure_pool_.NextObject();
-    uint32_t shard_cnt = AllDataShardCount();
-    std::vector<uint32_t> shard_ids;
-    shard_ids.reserve(shard_cnt);
-    for (uint32_t shard_id = 0; shard_id < shard_cnt; shard_id++)
-    {
-        shard_ids.push_back(shard_id);
-    }
+    std::vector<uint32_t> shard_ids = GetAllDataShards();
 
     closure->Reset(
         *this, &kv_table_names, std::move(shard_ids), callback_data, callback);
@@ -3596,14 +4075,7 @@ void DataStoreServiceClient::DropTable(std::string_view table_name,
     DLOG(INFO) << "DropTableWithRetry for table: " << table_name;
 
     DropTableClosure *closure = drop_table_closure_pool_.NextObject();
-    uint32_t shard_cnt = AllDataShardCount();
-    std::vector<uint32_t> shard_ids;
-    shard_ids.reserve(shard_cnt);
-    for (uint32_t shard_id = 0; shard_id < shard_cnt; shard_id++)
-    {
-        shard_ids.push_back(shard_id);
-    }
-
+    std::vector<uint32_t> shard_ids = GetAllDataShards();
     closure->Reset(
         *this, table_name, std::move(shard_ids), callback_data, callback);
 
@@ -3641,7 +4113,8 @@ void DataStoreServiceClient::DropTableInternal(
 
 void DataStoreServiceClient::ScanNext(
     const std::string_view table_name,
-    uint32_t partition_id,
+    int32_t partition_id,
+    uint32_t shard_id,
     const std::string_view start_key,
     const std::string_view end_key,
     const std::string_view session_id,
@@ -3658,6 +4131,7 @@ void DataStoreServiceClient::ScanNext(
     closure->Reset(*this,
                    table_name,
                    partition_id,
+                   shard_id,
                    start_key,
                    end_key,
                    inclusive_start,
@@ -3675,12 +4149,13 @@ void DataStoreServiceClient::ScanNext(
 void DataStoreServiceClient::ScanNextInternal(
     ScanNextClosure *scan_next_closure)
 {
-    if (IsLocalPartition(scan_next_closure->PartitionId()))
+    if (IsLocalShard(scan_next_closure->ShardId()))
     {
         scan_next_closure->PrepareRequest(true);
         data_store_service_->ScanNext(
             scan_next_closure->TableName(),
             scan_next_closure->PartitionId(),
+            scan_next_closure->ShardId(),
             scan_next_closure->StartKey(),
             scan_next_closure->EndKey(),
             scan_next_closure->InclusiveStart(),
@@ -3697,8 +4172,8 @@ void DataStoreServiceClient::ScanNextInternal(
     else
     {
         scan_next_closure->PrepareRequest(false);
-        uint32_t node_index = GetOwnerNodeIndexOfShard(
-            GetShardIdByPartitionId(scan_next_closure->PartitionId()));
+        uint32_t node_index =
+            GetOwnerNodeIndexOfShard(scan_next_closure->ShardId());
         scan_next_closure->SetRemoteNodeIndex(node_index);
         auto *channel = dss_nodes_[node_index].Channel();
 
@@ -3712,7 +4187,8 @@ void DataStoreServiceClient::ScanNextInternal(
 }
 
 void DataStoreServiceClient::ScanClose(const std::string_view table_name,
-                                       uint32_t partition_id,
+                                       int32_t partition_id,
+                                       uint32_t shard_id,
                                        std::string &session_id,
                                        void *callback_data,
                                        DataStoreCallback callback)
@@ -3721,6 +4197,7 @@ void DataStoreServiceClient::ScanClose(const std::string_view table_name,
     closure->Reset(*this,
                    table_name,
                    partition_id,
+                   shard_id,
                    "",     // start_key (empty for scan close)
                    "",     // end_key (empty for scan close)
                    false,  // inclusive_start
@@ -3738,11 +4215,12 @@ void DataStoreServiceClient::ScanClose(const std::string_view table_name,
 void DataStoreServiceClient::ScanCloseInternal(
     ScanNextClosure *scan_next_closure)
 {
-    if (IsLocalPartition(scan_next_closure->PartitionId()))
+    if (IsLocalShard(scan_next_closure->ShardId()))
     {
         scan_next_closure->PrepareRequest(true);
         data_store_service_->ScanClose(scan_next_closure->TableName(),
                                        scan_next_closure->PartitionId(),
+                                       scan_next_closure->ShardId(),
                                        &scan_next_closure->LocalSessionIdRef(),
                                        &scan_next_closure->LocalResultRef(),
                                        scan_next_closure);
@@ -3750,8 +4228,8 @@ void DataStoreServiceClient::ScanCloseInternal(
     else
     {
         scan_next_closure->PrepareRequest(false);
-        uint32_t node_index = GetOwnerNodeIndexOfShard(
-            GetShardIdByPartitionId(scan_next_closure->PartitionId()));
+        uint32_t node_index =
+            GetOwnerNodeIndexOfShard(scan_next_closure->ShardId());
         scan_next_closure->SetRemoteNodeIndex(node_index);
         auto *channel = dss_nodes_[node_index].Channel();
 
@@ -3769,6 +4247,7 @@ bool DataStoreServiceClient::InitTableRanges(
 {
     // init_partition_id and kv_partition_id
     int32_t kv_partition_id = KvPartitionIdOf(table_name);
+    uint32_t data_shard_id = GetShardIdByPartitionId(kv_partition_id, false);
     int32_t init_range_id =
         txservice::Sequences::InitialRangePartitionIdOf(table_name);
     auto catalog_factory = GetCatalogFactory(table_name.Engine());
@@ -3797,6 +4276,7 @@ bool DataStoreServiceClient::InitTableRanges(
     op_types.emplace_back(WriteOpType::PUT);
     BatchWriteRecords(kv_range_table_name,
                       kv_partition_id,
+                      data_shard_id,
                       std::move(keys),
                       std::move(records),
                       std::move(records_ts),
@@ -3820,6 +4300,7 @@ bool DataStoreServiceClient::DeleteTableRanges(
     const txservice::TableName &table_name)
 {
     int32_t kv_partition_id = KvPartitionIdOf(table_name);
+    uint32_t data_shard_id = GetShardIdByPartitionId(kv_partition_id, false);
     // delete all slices info from {kv_range_slices_table_name} table
     std::string start_key = table_name.String();
     std::string end_key = start_key;
@@ -3830,6 +4311,7 @@ bool DataStoreServiceClient::DeleteTableRanges(
     callback_data->Reset();
     DeleteRange(kv_range_slices_table_name,
                 kv_partition_id,
+                data_shard_id,
                 start_key,
                 end_key,
                 false,
@@ -3849,6 +4331,7 @@ bool DataStoreServiceClient::DeleteTableRanges(
     callback_data->Reset();
     DeleteRange(kv_range_table_name,
                 kv_partition_id,
+                data_shard_id,
                 start_key,
                 end_key,
                 false,
@@ -3910,8 +4393,21 @@ bool DataStoreServiceClient::InitTableLastRangePartitionId(
     {
         encoded_tx_record = SerializeTxRecord(false, seq_pair.second.get());
     }
-    int32_t kv_partition_id =
-        KvPartitionIdOf(txservice::Sequences::table_name_);
+
+    int32_t kv_partition_id;
+    uint32_t data_shard_id;
+
+    if (txservice::Sequences::table_name_.IsHashPartitioned())
+    {
+        kv_partition_id = txservice::Sharder::MapKeyHashToHashPartitionId(
+            seq_pair.first.Hash());
+        data_shard_id = GetShardIdByPartitionId(kv_partition_id, false);
+    }
+    else
+    {
+        LOG(ERROR) << "Sequences table must be hash partitioned";
+        return false;
+    }
 
     for (int i = 0; i < 3; i++)
     {
@@ -3927,6 +4423,7 @@ bool DataStoreServiceClient::InitTableLastRangePartitionId(
 
         BatchWriteRecords(txservice::Sequences::kv_table_name_sv_,
                           kv_partition_id,
+                          data_shard_id,
                           std::move(keys),
                           std::move(records),
                           std::move(records_ts),
@@ -3960,6 +4457,7 @@ bool DataStoreServiceClient::DeleteTableStatistics(
     const txservice::TableName &base_table_name)
 {
     int32_t kv_partition_id = KvPartitionIdOf(base_table_name);
+    uint32_t data_shard_id = GetShardIdByPartitionId(kv_partition_id, false);
 
     // delete all sample keys from {kv_table_statistics_name} table
     std::string start_key = base_table_name.String();
@@ -3971,6 +4469,7 @@ bool DataStoreServiceClient::DeleteTableStatistics(
     callback_data->Reset();
     DeleteRange(kv_table_statistics_name,
                 kv_partition_id,
+                data_shard_id,
                 start_key,
                 end_key,
                 false,
@@ -3991,6 +4490,7 @@ bool DataStoreServiceClient::DeleteTableStatistics(
     callback_data->Reset();
     DeleteRange(kv_table_statistics_version_name,
                 kv_partition_id,
+                data_shard_id,
                 start_key,
                 end_key,
                 false,
@@ -4012,6 +4512,7 @@ bool DataStoreServiceClient::DeleteTableStatistics(
 void DataStoreServiceClient::BatchWriteRecords(
     std::string_view kv_table_name,
     int32_t partition_id,
+    uint32_t shard_id,
     std::vector<std::string_view> &&key_parts,
     std::vector<std::string_view> &&record_parts,
     std::vector<uint64_t> &&records_ts,
@@ -4030,6 +4531,7 @@ void DataStoreServiceClient::BatchWriteRecords(
     closure->Reset(*this,
                    kv_table_name,
                    partition_id,
+                   shard_id,
                    std::move(key_parts),
                    std::move(record_parts),
                    std::move(records_ts),
@@ -4048,13 +4550,13 @@ void DataStoreServiceClient::BatchWriteRecordsInternal(
     BatchWriteRecordsClosure *closure)
 {
     assert(closure != nullptr);
-    uint32_t req_shard_id = GetShardIdByPartitionId(closure->partition_id_);
 
-    if (IsLocalShard(req_shard_id))
+    if (IsLocalShard(closure->shard_id_))
     {
         closure->PrepareRequest(true);
         data_store_service_->BatchWriteRecords(closure->kv_table_name_,
                                                closure->partition_id_,
+                                               closure->shard_id_,
                                                closure->key_parts_,
                                                closure->record_parts_,
                                                closure->record_ts_,
@@ -4070,7 +4572,7 @@ void DataStoreServiceClient::BatchWriteRecordsInternal(
     {
         // prepare request
         closure->PrepareRequest(false);
-        uint32_t node_index = GetOwnerNodeIndexOfShard(req_shard_id);
+        uint32_t node_index = GetOwnerNodeIndexOfShard(closure->shard_id_);
         closure->SetRemoteNodeIndex(node_index);
         auto *channel = dss_nodes_[node_index].Channel();
 
@@ -4166,7 +4668,6 @@ bool DataStoreServiceClient::DeserializeTxRecordStr(
 
 bool DataStoreServiceClient::InitPreBuiltTables()
 {
-    int32_t partition_id = 0;
     uint64_t table_version = 100U;
     std::vector<std::string_view> keys;
     std::vector<std::string_view> records;
@@ -4226,8 +4727,12 @@ bool DataStoreServiceClient::InitPreBuiltTables()
         SyncCallbackData *callback_data = sync_callback_data_pool_.NextObject();
         PoolableGuard guard(callback_data);
         callback_data->Reset();
+        int32_t partition_id = 0;
+        int32_t kv_part_id = KvPartitionIdOf(partition_id, false);
+        uint32_t data_shard_id = GetShardIdByPartitionId(kv_part_id, false);
         BatchWriteRecords(kv_table_catalogs_name,
-                          partition_id,
+                          kv_part_id,
+                          data_shard_id,
                           std::move(keys),
                           std::move(records),
                           std::move(records_ts),
@@ -4447,6 +4952,7 @@ bool DataStoreServiceClient::UpsertCatalog(
         table_schema->GetBaseTableName();
     const std::string &catalog_image = table_schema->SchemaImage();
     int32_t partition_id = 0;
+    uint32_t data_shard_id = GetShardIdByPartitionId(partition_id, false);
 
     keys.emplace_back(base_table_name.StringView());
     records.emplace_back(
@@ -4457,6 +4963,7 @@ bool DataStoreServiceClient::UpsertCatalog(
 
     BatchWriteRecords(kv_table_catalogs_name,
                       partition_id,
+                      data_shard_id,
                       std::move(keys),
                       std::move(records),
                       std::move(records_ts),
@@ -4492,6 +4999,7 @@ bool DataStoreServiceClient::DeleteCatalog(
 
     // Delete table catalog image
     int32_t partition_id = 0;
+    uint32_t data_shard_id = GetShardIdByPartitionId(partition_id, false);
 
     keys.emplace_back(base_table_name.StringView());
     records.emplace_back(std::string_view());
@@ -4501,6 +5009,7 @@ bool DataStoreServiceClient::DeleteCatalog(
 
     BatchWriteRecords(kv_table_catalogs_name,
                       partition_id,
+                      data_shard_id,
                       std::move(keys),
                       std::move(records),
                       std::move(records_ts),
@@ -4548,11 +5057,9 @@ void DataStoreServiceClient::PreparePartitionBatches(
         if (ckpt_rec.payload_status_ == txservice::RecordStatus::Normal &&
             (!ckpt_rec.Payload()->HasTTL() || ttl > now))
         {
-            batch_request.key_parts.emplace_back(EncodeBucketId(
-                txservice::Sharder::MapKeyHashToBucketId(tx_key.Hash())));
             batch_request.key_parts.emplace_back(
                 std::string_view(tx_key.Data(), tx_key.Size()));
-            batch_size += tx_key.Size() + sizeof(uint16_t);
+            batch_size += tx_key.Size();
 
             const txservice::TxRecord *rec = ckpt_rec.Payload();
             batch_request.record_parts.emplace_back(std::string_view(
@@ -4570,11 +5077,9 @@ void DataStoreServiceClient::PreparePartitionBatches(
         }
         else
         {
-            batch_request.key_parts.emplace_back(EncodeBucketId(
-                txservice::Sharder::MapKeyHashToBucketId(tx_key.Hash())));
             batch_request.key_parts.emplace_back(
                 std::string_view(tx_key.Data(), tx_key.Size()));
-            batch_size += tx_key.Size() + sizeof(uint16_t);
+            batch_size += tx_key.Size();
 
             batch_request.record_parts.emplace_back(std::string_view());
             batch_size += 0;
@@ -4599,11 +5104,9 @@ void DataStoreServiceClient::PreparePartitionBatches(
         bool is_deleted =
             !(ckpt_rec.payload_status_ == txservice::RecordStatus::Normal);
 
-        batch_request.key_parts.emplace_back(EncodeBucketId(
-            txservice::Sharder::MapKeyHashToBucketId(tx_key.Hash())));
         batch_request.key_parts.emplace_back(
             std::string_view(tx_key.Data(), tx_key.Size()));
-        batch_size += tx_key.Size() + sizeof(uint16_t);
+        batch_size += tx_key.Size();
 
         const txservice::TxRecord *rec = ckpt_rec.Payload();
         if (is_deleted)

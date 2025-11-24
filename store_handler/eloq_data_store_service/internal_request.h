@@ -50,6 +50,8 @@ public:
 
     virtual int32_t GetPartitionId() const = 0;
 
+    virtual uint32_t GetShardId() const = 0;
+
     virtual const std::string_view GetRecordPart(size_t index) const = 0;
 
     virtual uint16_t PartsCountPerRecord() const = 0;
@@ -116,6 +118,11 @@ public:
         return req_->partition_id();
     }
 
+    uint32_t GetShardId() const override
+    {
+        return req_->shard_id();
+    }
+
     const std::string_view GetRecordPart(size_t index) const override
     {
         return req_->items(index).value();
@@ -157,7 +164,7 @@ public:
 
     void SetFinish(const remote::CommonResult &result) override
     {
-        data_store_service_->DecreaseWriteReqCount();
+        data_store_service_->DecreaseWriteReqCount(GetShardId());
         brpc::ClosureGuard done_guard(done_);
         // Set error code and error message
         resp_->mutable_result()->set_error_code(result.error_code());
@@ -183,6 +190,7 @@ public:
     {
         table_name_ = "";
         partition_id_ = 0;
+        shard_id_ = UINT32_MAX;
         key_parts_ = nullptr;
         record_parts_ = nullptr;
         ts_ = nullptr;
@@ -198,6 +206,7 @@ public:
     void Reset(DataStoreService *ds_service,
                std::string_view table_name,
                int32_t partition_id,
+               uint32_t shard_id,
                const std::vector<std::string_view> &key_parts,
                const std::vector<std::string_view> &record_parts,
                const std::vector<uint64_t> &ts,
@@ -212,6 +221,7 @@ public:
         data_store_service_ = ds_service;
         table_name_ = table_name;
         partition_id_ = partition_id;
+        shard_id_ = shard_id;
         key_parts_ = &key_parts;
         record_parts_ = &record_parts;
         ts_ = &ts;
@@ -255,6 +265,11 @@ public:
         return partition_id_;
     }
 
+    uint32_t GetShardId() const override
+    {
+        return shard_id_;
+    }
+
     const std::string_view GetRecordPart(size_t index) const override
     {
         return record_parts_->at(index);
@@ -287,7 +302,7 @@ public:
 
     void SetFinish(const remote::CommonResult &result) override
     {
-        data_store_service_->DecreaseWriteReqCount();
+        data_store_service_->DecreaseWriteReqCount(shard_id_);
         brpc::ClosureGuard done_guard(done_);
         // Set error code and error message
         result_->set_error_code(result.error_code());
@@ -298,6 +313,7 @@ private:
     DataStoreService *data_store_service_{nullptr};
     std::string_view table_name_;
     int32_t partition_id_;
+    uint32_t shard_id_{UINT32_MAX};
     const std::vector<std::string_view> *key_parts_{nullptr};
     const std::vector<std::string_view> *record_parts_{nullptr};
     const std::vector<uint64_t> *ts_{nullptr};
@@ -321,6 +337,8 @@ public:
 
     // parameters in
     virtual const std::vector<std::string> &GetKvTableNames() const = 0;
+
+    virtual uint32_t GetShardId() const = 0;
 
     // finish
     virtual void SetFinish(const remote::CommonResult &result) = 0;
@@ -362,9 +380,14 @@ public:
         return kv_table_names_;
     }
 
+    uint32_t GetShardId() const override
+    {
+        return req_->shard_id();
+    }
+
     void SetFinish(const remote::CommonResult &result) override
     {
-        data_store_service_->DecreaseWriteReqCount();
+        data_store_service_->DecreaseWriteReqCount(req_->shard_id());
         brpc::ClosureGuard done_guard(done_);
 
         ::EloqDS::remote::CommonResult *res = resp_->mutable_result();
@@ -401,17 +424,20 @@ public:
     void Clear() override
     {
         kv_table_names_ = nullptr;
+        shard_id_ = UINT32_MAX;
         result_ = nullptr;
         done_ = nullptr;
     }
 
     void Reset(DataStoreService *ds_service,
                const std::vector<std::string> *kv_table_names,
+               uint32_t shard_id,
                remote::CommonResult &result,
                google::protobuf::Closure *done)
     {
         data_store_service_ = ds_service;
         kv_table_names_ = kv_table_names;
+        shard_id_ = shard_id;
         result_ = &result;
         done_ = done;
     }
@@ -421,9 +447,14 @@ public:
         return *kv_table_names_;
     }
 
+    uint32_t GetShardId() const override
+    {
+        return shard_id_;
+    }
+
     void SetFinish(const remote::CommonResult &result) override
     {
-        data_store_service_->DecreaseWriteReqCount();
+        data_store_service_->DecreaseWriteReqCount(shard_id_);
         brpc::ClosureGuard done_guard(done_);
         result_->set_error_code(result.error_code());
         result_->set_error_msg(result.error_msg());
@@ -432,6 +463,7 @@ public:
 private:
     DataStoreService *data_store_service_{nullptr};
     const std::vector<std::string> *kv_table_names_{nullptr};
+    uint32_t shard_id_{UINT32_MAX};
     remote::CommonResult *result_{nullptr};
     google::protobuf::Closure *done_{nullptr};
 };
@@ -447,7 +479,8 @@ public:
 
     // parameters in
     virtual const std::string_view GetTableName() const = 0;
-    virtual uint32_t GetPartitionId() const = 0;
+    virtual int32_t GetPartitionId() const = 0;
+    virtual uint32_t GetShardId() const = 0;
     virtual const std::string_view GetStartKey() const = 0;
     virtual const std::string_view GetEndKey() const = 0;
     virtual bool SkipWal() const = 0;
@@ -487,9 +520,14 @@ public:
         return req_->kv_table_name();
     }
 
-    uint32_t GetPartitionId() const override
+    int32_t GetPartitionId() const override
     {
         return req_->partition_id();
+    }
+
+    uint32_t GetShardId() const override
+    {
+        return req_->shard_id();
     }
 
     const std::string_view GetStartKey() const override
@@ -509,7 +547,7 @@ public:
 
     void SetFinish(const remote::CommonResult &result) override
     {
-        data_store_service_->DecreaseWriteReqCount();
+        data_store_service_->DecreaseWriteReqCount(req_->shard_id());
         brpc::ClosureGuard done_guard(done_);
 
         ::EloqDS::remote::CommonResult *res = resp_->mutable_result();
@@ -536,6 +574,7 @@ public:
     {
         table_name_ = "";
         partition_id_ = 0;
+        shard_id_ = UINT32_MAX;
         start_key_ = "";
         end_key_ = "";
         skip_wal_ = false;
@@ -545,7 +584,8 @@ public:
 
     void Reset(DataStoreService *ds_service,
                const std::string_view table_name,
-               const uint32_t partition_id,
+               const int32_t partition_id,
+               const uint32_t shard_id,
                const std::string_view start_key,
                const std::string_view end_key,
                const bool skip_wal,
@@ -555,6 +595,7 @@ public:
         data_store_service_ = ds_service;
         table_name_ = table_name;
         partition_id_ = partition_id;
+        shard_id_ = shard_id;
         start_key_ = start_key;
         end_key_ = end_key;
         skip_wal_ = skip_wal;
@@ -567,9 +608,14 @@ public:
         return table_name_;
     }
 
-    uint32_t GetPartitionId() const override
+    int32_t GetPartitionId() const override
     {
         return partition_id_;
+    }
+
+    uint32_t GetShardId() const override
+    {
+        return shard_id_;
     }
 
     const std::string_view GetStartKey() const override
@@ -589,7 +635,7 @@ public:
 
     void SetFinish(const remote::CommonResult &result) override
     {
-        data_store_service_->DecreaseWriteReqCount();
+        data_store_service_->DecreaseWriteReqCount(shard_id_);
         brpc::ClosureGuard done_guard(done_);
         result_->set_error_code(result.error_code());
         result_->set_error_msg(result.error_msg());
@@ -598,7 +644,8 @@ public:
 private:
     DataStoreService *data_store_service_{nullptr};
     std::string_view table_name_{""};
-    uint32_t partition_id_{0};
+    int32_t partition_id_{0};
+    uint32_t shard_id_{UINT32_MAX};
     std::string_view start_key_{""};
     std::string_view end_key_{""};
     bool skip_wal_{false};
@@ -625,11 +672,11 @@ public:
     // paramters in
     virtual const std::string_view GetTableName() const = 0;
 
-    virtual std::string_view GetKey(size_t index) const = 0;
+    virtual const std::string_view GetKey() const = 0;
 
-    virtual size_t PartsCountPerKey() const = 0;
+    virtual int32_t GetPartitionId() const = 0;
 
-    virtual uint32_t GetPartitionId() const = 0;
+    virtual uint32_t GetShardId() const = 0;
 
     // parameters out
     virtual void SetRecord(std::string &&record) = 0;
@@ -674,19 +721,19 @@ public:
         return req_->kv_table_name();
     }
 
-    std::string_view GetKey(size_t index) const override
+    const std::string_view GetKey() const override
     {
-        return req_->key_str(index);
+        return req_->key_str();
     }
 
-    size_t PartsCountPerKey() const override
-    {
-        return req_->key_str_size();
-    }
-
-    uint32_t GetPartitionId() const override
+    int32_t GetPartitionId() const override
     {
         return req_->partition_id();
+    }
+
+    uint32_t GetShardId() const override
+    {
+        return req_->shard_id();
     }
 
     void SetRecord(std::string &&record) override
@@ -707,13 +754,6 @@ public:
     void SetFinish(const ::EloqDS::remote::DataStoreError error_code) override
     {
         brpc::ClosureGuard done_guard(done_);
-        if (error_code == remote::DataStoreError::REQUESTED_NODE_NOT_OWNER)
-        {
-            ds_service_->PrepareShardingError(req_->partition_id(),
-                                              resp_->mutable_result());
-            return;
-        }
-
         resp_->mutable_result()->set_error_code(error_code);
     }
 
@@ -733,8 +773,9 @@ public:
 
     void Reset(DataStoreService *ds_service,
                const std::string_view table_name,
-               const uint32_t partition_id,
-               const std::vector<std::string_view> *key_parts,
+               const int32_t partition_id,
+               const uint32_t shard_id,
+               const std::string_view key,
                std::string *record,
                uint64_t *record_ts,
                uint64_t *record_ttl,
@@ -743,8 +784,9 @@ public:
     {
         ds_service_ = ds_service;
         table_name_ = table_name;
-        key_parts_ = key_parts;
+        key_ = key;
         partition_id_ = partition_id;
+        shard_id_ = shard_id;
         record_ = record;
         record_ts_ = record_ts;
         record_ttl_ = record_ttl;
@@ -756,8 +798,9 @@ public:
     {
         ds_service_ = nullptr;
         table_name_ = "";
-        key_parts_ = nullptr;
+        key_ = "";
         partition_id_ = 0;
+        shard_id_ = UINT32_MAX;
         record_ = nullptr;
         record_ts_ = nullptr;
         record_ttl_ = nullptr;
@@ -770,19 +813,19 @@ public:
         return table_name_;
     }
 
-    std::string_view GetKey(size_t index) const override
+    const std::string_view GetKey() const override
     {
-        return (*key_parts_)[index];
+        return key_;
     }
 
-    size_t PartsCountPerKey() const override
-    {
-        return key_parts_->size();
-    }
-
-    uint32_t GetPartitionId() const override
+    int32_t GetPartitionId() const override
     {
         return partition_id_;
+    }
+
+    uint32_t GetShardId() const override
+    {
+        return shard_id_;
     }
 
     void SetRecord(std::string &&record) override
@@ -803,20 +846,15 @@ public:
     void SetFinish(const ::EloqDS::remote::DataStoreError error_code) override
     {
         brpc::ClosureGuard done_guard(done_);
-        if (error_code == remote::DataStoreError::REQUESTED_NODE_NOT_OWNER)
-        {
-            ds_service_->PrepareShardingError(partition_id_, result_);
-            return;
-        }
-
         result_->set_error_code(error_code);
     }
 
 private:
     DataStoreService *ds_service_{nullptr};
     std::string_view table_name_{""};
-    const std::vector<std::string_view> *key_parts_{nullptr};
-    uint32_t partition_id_{0};
+    std::string_view key_{""};
+    int32_t partition_id_{0};
+    uint32_t shard_id_{UINT32_MAX};
     std::string *record_{nullptr};
     uint64_t *record_ts_{nullptr};
     uint64_t *record_ttl_{nullptr};
@@ -835,6 +873,8 @@ public:
 
     // parameters in
     virtual const std::string_view GetTableName() const = 0;
+
+    virtual uint32_t GetShardId() const = 0;
 
     // finish
     virtual void SetFinish(const remote::CommonResult &result) = 0;
@@ -871,9 +911,14 @@ public:
         return req_->kv_table_name();
     }
 
+    uint32_t GetShardId() const override
+    {
+        return req_->shard_id();
+    }
+
     void SetFinish(const remote::CommonResult &result) override
     {
-        ds_service_->DecreaseWriteReqCount();
+        ds_service_->DecreaseWriteReqCount(req_->shard_id());
         brpc::ClosureGuard done_guard(done_);
 
         ::EloqDS::remote::CommonResult *res = resp_->mutable_result();
@@ -909,17 +954,20 @@ public:
     void Clear() override
     {
         table_name_ = "";
+        shard_id_ = UINT32_MAX;
         result_ = nullptr;
         done_ = nullptr;
     }
 
     void Reset(DataStoreService *ds_service,
                const std::string_view table_name,
+               uint32_t shard_id,
                remote::CommonResult &result,
                google::protobuf::Closure *done)
     {
         ds_service_ = ds_service;
         table_name_ = table_name;
+        shard_id_ = shard_id;
         result_ = &result;
         done_ = done;
     }
@@ -929,9 +977,14 @@ public:
         return table_name_;
     }
 
+    uint32_t GetShardId() const override
+    {
+        return shard_id_;
+    }
+
     void SetFinish(const remote::CommonResult &result) override
     {
-        ds_service_->DecreaseWriteReqCount();
+        ds_service_->DecreaseWriteReqCount(shard_id_);
         brpc::ClosureGuard done_guard(done_);
         result_->set_error_code(result.error_code());
         result_->set_error_msg(result.error_msg());
@@ -940,6 +993,7 @@ public:
 private:
     DataStoreService *ds_service_{nullptr};
     std::string_view table_name_{""};
+    uint32_t shard_id_{UINT32_MAX};
     remote::CommonResult *result_{nullptr};
     google::protobuf::Closure *done_{nullptr};
 };
@@ -955,6 +1009,8 @@ public:
 
     // parameters in
     virtual const std::string_view GetTableName() const = 0;
+
+    virtual uint32_t GetShardId() const = 0;
 
     // finish
     virtual void SetFinish(const remote::CommonResult &result) = 0;
@@ -990,9 +1046,14 @@ public:
         return req_->kv_table_name();
     }
 
+    uint32_t GetShardId() const override
+    {
+        return req_->shard_id();
+    }
+
     void SetFinish(const remote::CommonResult &result) override
     {
-        ds_service_->DecreaseWriteReqCount();
+        ds_service_->DecreaseWriteReqCount(req_->shard_id());
         brpc::ClosureGuard done_guard(done_);
 
         ::EloqDS::remote::CommonResult *res = resp_->mutable_result();
@@ -1028,17 +1089,20 @@ public:
     void Clear() override
     {
         table_name_ = "";
+        shard_id_ = UINT32_MAX;
         result_ = nullptr;
         done_ = nullptr;
     }
 
     void Reset(DataStoreService *ds_service,
                const std::string_view table_name,
+               uint32_t shard_id,
                remote::CommonResult &result,
                google::protobuf::Closure *done)
     {
         ds_service_ = ds_service;
         table_name_ = table_name;
+        shard_id_ = shard_id;
         result_ = &result;
         done_ = done;
     }
@@ -1048,9 +1112,14 @@ public:
         return table_name_;
     }
 
+    uint32_t GetShardId() const override
+    {
+        return shard_id_;
+    }
+
     void SetFinish(const remote::CommonResult &result) override
     {
-        ds_service_->DecreaseWriteReqCount();
+        ds_service_->DecreaseWriteReqCount(shard_id_);
         brpc::ClosureGuard done_guard(done_);
         result_->set_error_code(result.error_code());
         result_->set_error_msg(result.error_msg());
@@ -1059,6 +1128,7 @@ public:
 private:
     DataStoreService *ds_service_{nullptr};
     std::string_view table_name_{""};
+    uint32_t shard_id_{UINT32_MAX};
     remote::CommonResult *result_{nullptr};
     google::protobuf::Closure *done_{nullptr};
 };
@@ -1075,7 +1145,9 @@ public:
     // parameters in
     virtual const std::string_view GetTableName() const = 0;
 
-    virtual uint32_t GetPartitionId() const = 0;
+    virtual int32_t GetPartitionId() const = 0;
+
+    virtual uint32_t GetShardId() const = 0;
 
     virtual const std::string_view GetStartKey() const = 0;
 
@@ -1147,9 +1219,14 @@ public:
         return req_->kv_table_name_str();
     }
 
-    uint32_t GetPartitionId() const override
+    int32_t GetPartitionId() const override
     {
         return req_->partition_id();
+    }
+
+    uint32_t GetShardId() const override
+    {
+        return req_->shard_id();
     }
 
     const std::string_view GetStartKey() const override
@@ -1232,12 +1309,6 @@ public:
                    const std::string error_message) override
     {
         brpc::ClosureGuard done_guard(done_);
-        if (error_code == remote::DataStoreError::REQUESTED_NODE_NOT_OWNER)
-        {
-            ds_service_->PrepareShardingError(req_->partition_id(),
-                                              resp_->mutable_result());
-            return;
-        }
         ::EloqDS::remote::CommonResult *result = resp_->mutable_result();
         result->set_error_code(error_code);
         result->set_error_msg(error_message);
@@ -1260,7 +1331,8 @@ public:
 
     void Reset(DataStoreService *ds_service,
                const std::string_view table_name,
-               uint32_t partition_id,
+               int32_t partition_id,
+               uint32_t shard_id,
                const std::string_view start_key,
                const std::string_view end_key,
                bool inclusive_start,
@@ -1277,6 +1349,7 @@ public:
         ds_service_ = ds_service;
         table_name_ = table_name;
         partition_id_ = partition_id;
+        shard_id_ = shard_id;
         start_key_ = start_key;
         end_key_ = end_key;
         inclusive_start_ = inclusive_start;
@@ -1293,7 +1366,8 @@ public:
 
     void Reset(DataStoreService *ds_service,
                const std::string_view table_name,
-               const uint32_t partition_id,
+               const int32_t partition_id,
+               const uint32_t shard_id,
                std::string *session_id,
                bool generate_session_id,
                ::EloqDS::remote::CommonResult *result,
@@ -1302,6 +1376,7 @@ public:
         ds_service_ = ds_service;
         table_name_ = table_name;
         partition_id_ = partition_id;
+        shard_id_ = shard_id;
         session_id_ = session_id;
         generate_session_id_ = generate_session_id;
         result_ = result;
@@ -1313,6 +1388,7 @@ public:
         ds_service_ = nullptr;
         table_name_ = "";
         partition_id_ = 0;
+        shard_id_ = UINT32_MAX;
         start_key_ = "";
         end_key_ = "";
         inclusive_start_ = false;
@@ -1332,9 +1408,14 @@ public:
         return table_name_;
     }
 
-    uint32_t GetPartitionId() const override
+    int32_t GetPartitionId() const override
     {
         return partition_id_;
+    }
+
+    uint32_t GetShardId() const override
+    {
+        return shard_id_;
     }
 
     const std::string_view GetStartKey() const override
@@ -1413,11 +1494,6 @@ public:
                    const std::string error_message) override
     {
         brpc::ClosureGuard done_guard(done_);
-        if (error_code == remote::DataStoreError::REQUESTED_NODE_NOT_OWNER)
-        {
-            ds_service_->PrepareShardingError(partition_id_, result_);
-            return;
-        }
         result_->set_error_code(error_code);
         result_->set_error_msg(error_message);
     }
@@ -1425,7 +1501,8 @@ public:
 private:
     DataStoreService *ds_service_{nullptr};
     std::string_view table_name_{""};
-    uint32_t partition_id_{0};
+    int32_t partition_id_{0};
+    uint32_t shard_id_{UINT32_MAX};
     std::string_view start_key_{""};
     std::string_view end_key_{""};
     bool inclusive_start_{false};
@@ -1450,6 +1527,8 @@ public:
         const CreateSnapshotForBackupRequest &other) = delete;
 
     virtual ~CreateSnapshotForBackupRequest() = default;
+
+    virtual uint32_t GetShardId() const = 0;
 
     virtual std::string_view GetBackupName() const = 0;
     virtual uint64_t GetBackupTs() const = 0;
@@ -1488,6 +1567,11 @@ public:
         done_ = nullptr;
     }
 
+    uint32_t GetShardId() const override
+    {
+        return req_->shard_id();
+    }
+
     std::string_view GetBackupName() const override
     {
         return req_->backup_name();
@@ -1506,7 +1590,7 @@ public:
     void SetFinish(const ::EloqDS::remote::DataStoreError error_code,
                    const std::string error_message) override
     {
-        ds_service_->DecreaseWriteReqCount();
+        ds_service_->DecreaseWriteReqCount(req_->shard_id());
         brpc::ClosureGuard done_guard(done_);
         ::EloqDS::remote::CommonResult *result = resp_->mutable_result();
         result->set_error_code(error_code);
@@ -1531,6 +1615,7 @@ public:
         const CreateSnapshotForBackupLocalRequest &other) = delete;
 
     void Reset(DataStoreService *ds_service,
+               uint32_t shard_id,
                std::string_view backup_name,
                const uint64_t backup_ts,
                std::vector<std::string> *backup_files,
@@ -1538,6 +1623,7 @@ public:
                google::protobuf::Closure *done)
     {
         ds_service_ = ds_service;
+        shard_id_ = shard_id;
         backup_name_ = backup_name;
         backup_files_ = backup_files;
         backup_ts_ = backup_ts;
@@ -1548,11 +1634,17 @@ public:
     void Clear() override
     {
         ds_service_ = nullptr;
+        shard_id_ = UINT32_MAX;
         backup_name_ = "";
         backup_files_ = nullptr;
         backup_ts_ = 0;
         result_ = nullptr;
         done_ = nullptr;
+    }
+
+    uint32_t GetShardId() const override
+    {
+        return shard_id_;
     }
 
     std::string_view GetBackupName() const override
@@ -1573,7 +1665,7 @@ public:
     void SetFinish(const ::EloqDS::remote::DataStoreError error_code,
                    const std::string error_message) override
     {
-        ds_service_->DecreaseWriteReqCount();
+        ds_service_->DecreaseWriteReqCount(shard_id_);
         brpc::ClosureGuard done_guard(done_);
         result_->set_error_code(error_code);
         result_->set_error_msg(error_message);
@@ -1581,10 +1673,47 @@ public:
 
 private:
     DataStoreService *ds_service_{nullptr};
-    EloqDS::remote::CommonResult *result_{nullptr};
+    uint32_t shard_id_{UINT32_MAX};
+    ::EloqDS::remote::CommonResult *result_{nullptr};
     std::string_view backup_name_{""};
     std::vector<std::string> *backup_files_{nullptr};
     uint64_t backup_ts_{0};
+    google::protobuf::Closure *done_{nullptr};
+};
+
+class SyncFileCacheLocalRequest : public Poolable
+{
+public:
+    SyncFileCacheLocalRequest() = default;
+    SyncFileCacheLocalRequest(const SyncFileCacheLocalRequest &other) = delete;
+    SyncFileCacheLocalRequest &operator=(const SyncFileCacheLocalRequest &other) = delete;
+
+    void Clear() override
+    {
+        request_ = nullptr;
+        done_ = nullptr;
+    }
+
+    void SetRequest(const ::EloqDS::remote::SyncFileCacheRequest *request,
+                    google::protobuf::Closure *done)
+    {
+        request_ = request;
+        done_ = done;
+    }
+
+    const ::EloqDS::remote::SyncFileCacheRequest *GetRequest() const
+    {
+        return request_;
+    }
+
+    void Finish()
+    {
+        brpc::ClosureGuard done_guard(done_);
+        // Response is Empty, nothing to set
+    }
+
+private:
+    const ::EloqDS::remote::SyncFileCacheRequest *request_{nullptr};
     google::protobuf::Closure *done_{nullptr};
 };
 

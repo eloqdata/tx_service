@@ -56,6 +56,51 @@ public:
         return ds;
     }
 
+    std::string GetStoragePath() const override
+    {
+        // EloqStore uses multiple paths, return first one or empty
+        if (eloq_store_configs_.eloqstore_configs_.store_path.empty())
+        {
+            return "";
+        }
+        return eloq_store_configs_.eloqstore_configs_.store_path[0];
+    }
+
+    std::string GetS3BucketName() const override
+    {
+        return "";  // Not applicable for EloqStore
+    }
+
+    std::string GetS3ObjectPath() const override
+    {
+        return "";  // Not applicable for EloqStore
+    }
+
+    std::string GetS3Region() const override
+    {
+        return "";  // Not applicable for EloqStore
+    }
+
+    std::string GetS3EndpointUrl() const override
+    {
+        return "";  // Not applicable for EloqStore
+    }
+
+    std::string GetAwsAccessKeyId() const override
+    {
+        return "";  // Not applicable for EloqStore
+    }
+
+    std::string GetAwsSecretKey() const override
+    {
+        return "";  // Not applicable for EloqStore
+    }
+
+    uint64_t GetSstFileCacheSize() const override
+    {
+        return 0;  // Not applicable for EloqStore
+    }
+
 private:
     const EloqStoreConfig eloq_store_configs_;
 

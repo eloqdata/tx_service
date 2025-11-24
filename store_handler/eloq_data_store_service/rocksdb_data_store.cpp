@@ -68,16 +68,10 @@ RocksDBDataStore::~RocksDBDataStore()
 
 void RocksDBDataStore::Shutdown()
 {
-    std::unique_lock<std::shared_mutex> db_lk(db_mux_);
     DLOG(INFO) << "Shutting down RocksDBDataStore";
+    RocksDBDataStoreCommon::Shutdown();
 
-    // shutdown query worker pool
-    query_worker_pool_->Shutdown();
-    query_worker_pool_ = nullptr;
-
-    data_store_service_->ForceEraseScanIters(shard_id_);
-    data_store_service_ = nullptr;
-
+    std::unique_lock<std::shared_mutex> db_lk(db_mux_);
     if (db_ != nullptr)
     {
         DLOG(INFO) << "Closing RocksDB at path: " << storage_path_;

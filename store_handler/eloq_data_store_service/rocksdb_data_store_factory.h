@@ -71,6 +71,46 @@ public:
         return ds;
     }
 
+    std::string GetStoragePath() const override
+    {
+        return config_.storage_path_;
+    }
+
+    std::string GetS3BucketName() const override
+    {
+        return "";  // Not applicable for non-cloud RocksDB
+    }
+
+    std::string GetS3ObjectPath() const override
+    {
+        return "";  // Not applicable for non-cloud RocksDB
+    }
+
+    std::string GetS3Region() const override
+    {
+        return "";  // Not applicable for non-cloud RocksDB
+    }
+
+    std::string GetS3EndpointUrl() const override
+    {
+        return "";  // Not applicable for non-cloud RocksDB
+    }
+
+    std::string GetAwsAccessKeyId() const override
+    {
+        return "";  // Not applicable for non-cloud RocksDB
+    }
+
+    std::string GetAwsSecretKey() const override
+    {
+        return "";  // Not applicable for non-cloud RocksDB
+    }
+
+    uint64_t GetSstFileCacheSize() const override
+    {
+        return 0;  // Not applicable for non-cloud RocksDB
+    }
+
 private:
     ::EloqDS::RocksDBConfig config_;
     bool tx_enable_cache_replacement_;

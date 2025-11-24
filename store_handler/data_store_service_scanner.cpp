@@ -64,6 +64,7 @@ bool SinglePartitionScanner::FetchNextBatch()
     client->ScanNext(
         scanner_->GetTableName(),
         partition_id_,
+        data_shard_id_,
         last_key_,
         scanner_->GetEndKey(),
         session_id_,
@@ -107,6 +108,7 @@ bool SinglePartitionScanner::ScanClose()
     {
         client->ScanClose(scanner_->GetTableName(),
                           partition_id_,
+                          data_shard_id_,
                           session_id_,
                           this,
                           ProcessScanCloseResult);
@@ -412,7 +414,9 @@ bool DataStoreServiceHashPartitionScanner<ScanForward>::Init()
     for (uint32_t part_cnt = 0; part_cnt < HASH_PARTITION_COUNT; part_cnt++)
     {
         auto *part_scanner = single_partition_scanner_pool_.NextObject();
-        part_scanner->Reset(this, part_cnt, start_key_);
+        uint32_t data_shard_id = client_->GetShardIdByPartitionId(
+            static_cast<int32_t>(part_cnt), false);
+        part_scanner->Reset(this, part_cnt, data_shard_id, start_key_);
         partition_scanners_.push_back(part_scanner);
         // ignore the return value, since the scanner is not used
         part_scanner->FetchNextBatch();

@@ -534,9 +534,10 @@ public:
     static std::string DecodeTxKeyFromKvKey(const char *data, size_t size);
     static uint16_t DecodeBucketIdFromKvKey(const char *data, size_t size);
 
-    bool OnLeaderStart(uint32_t *next_leader_node) override;
+    bool OnLeaderStart(uint32_t ng_id, uint32_t *next_leader_node) override;
 
-    void OnStartFollowing(uint32_t leader_node_id,
+    void OnStartFollowing(uint32_t ng_id,
+                          uint32_t leader_node_id,
                           int64_t term,
                           int64_t standby_term,
                           bool resubscribe) override;

@@ -28,45 +28,58 @@ namespace EloqDS
 ThreadWorkerPool::ThreadWorkerPool(size_t max_workers_num)
     : max_workers_num_(max_workers_num)
 {
-    for (size_t i = 0; i < max_workers_num_; i++)
+    Initialize();
+}
+
+void ThreadWorkerPool::Initialize()
+{
+    while (shutdown_indicator_.load(std::memory_order_acquire))
     {
-        std::thread worker = std::thread(
-            [this]
-            {
-                while (true)
+        std::this_thread::sleep_for(std::chrono::microseconds(100));
+    }
+    // start all worker threads.
+    if (workers_.empty())
+    {
+        for (size_t i = 0; i < max_workers_num_; i++)
+        {
+            std::thread worker = std::thread(
+                [this]
                 {
-                    // Acquire work queue mutex
-                    std::unique_lock<std::mutex> lk(work_queue_mutex_);
-                    // Wait for new work come in or shutdown happen
-                    work_queue_cv_.wait(
-                        lk,
-                        [this]
+                    while (true)
+                    {
+                        // Acquire work queue mutex
+                        std::unique_lock<std::mutex> lk(work_queue_mutex_);
+                        // Wait for new work come in or shutdown happen
+                        work_queue_cv_.wait(
+                            lk,
+                            [this]
+                            {
+                                return !work_queue_.empty() ||
+                                       shutdown_indicator_.load(
+                                           std::memory_order_acquire);
+                            });
+                        // Take work if work queue is not empty
+                        if (!work_queue_.empty())
                         {
-                            return !work_queue_.empty() ||
-                                   shutdown_indicator_.load(
-                                       std::memory_order_acquire);
-                        });
-                    // Take work if work queue is not empty
-                    if (!work_queue_.empty())
-                    {
-                        std::function<void()> work =
-                            std::move(work_queue_.front());
-                        work_queue_.pop_front();
-                        lk.unlock();
-                        // Do work
-                        work();
+                            std::function<void()> work =
+                                std::move(work_queue_.front());
+                            work_queue_.pop_front();
+                            lk.unlock();
+                            // Do work
+                            work();
+                        }
+                        else
+                        {
+                            // Quit loop if shutdown
+                            assert(shutdown_indicator_.load(
+                                std::memory_order_acquire));
+                            lk.unlock();
+                            break;
+                        }
                     }
-                    else
-                    {
-                        // Quit loop if shutdown
-                        assert(shutdown_indicator_.load(
-                            std::memory_order_acquire));
-                        lk.unlock();
-                        break;
-                    }
-                }
-            });
-        workers_.push_back(std::move(worker));
+                });
+            workers_.push_back(std::move(worker));
+        }
     }
 }
 
@@ -103,5 +116,8 @@ void ThreadWorkerPool::Shutdown()
             worker.join();
         }
     }
+
+    workers_.clear();
+    shutdown_indicator_.store(false, std::memory_order_release);
 }
 }  // namespace EloqDS

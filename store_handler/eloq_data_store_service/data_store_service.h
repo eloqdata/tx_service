@@ -26,7 +26,10 @@
 #include <bthread/mutex.h>
 
 #include <chrono>
+#include <condition_variable>
+#include <map>
 #include <memory>
+#include <mutex>
 #include <set>
 #include <shared_mutex>
 #include <string>
@@ -43,6 +46,14 @@
 
 namespace EloqDS
 {
+
+class SyncFileCacheLocalRequest;
+
+#if defined(DATA_STORE_TYPE_ELOQDSS_ROCKSDB_CLOUD_S3)
+// Must not include "s3_file_downloader.h" in this file, for there is a enum
+// type definition in "S3Client.h" conflicted with eloqsql.
+class S3FileDownloader;
+#endif
 
 enum class WriteOpType
 {
@@ -187,9 +198,7 @@ public:
 
     ~DataStoreService();
 
-    bool StartService(bool create_db_if_missing,
-                      uint32_t dss_leader_node_id,
-                      uint32_t dss_node_id);
+    bool StartService(bool create_db_if_missing);
 
     brpc::Server *GetBrpcServer()
     {
@@ -212,6 +221,7 @@ public:
      * @brief Point read operation
      * @param table_name Table name
      * @param partition_id Partition id
+     * @param shard_id Shard id
      * @param key Key
      * @param record Record (output)
      * @param ts Timestamp (output)
@@ -219,8 +229,9 @@ public:
      * @param done Callback function
      */
     void Read(const std::string_view table_name,
-              const uint32_t partition_id,
-              const std::vector<std::string_view> &key,
+              int32_t partition_id,
+              uint32_t shard_id,
+              const std::string_view key,
               std::string *record,
               uint64_t *ts,
               uint64_t *ttl,
@@ -244,6 +255,7 @@ public:
      * @brief Batch write operation
      * @param table_name Table name
      * @param partition_id Partition id
+     * @param shard_id Shard id
      * @param keys Keys
      * @param records Records
      * @param ts Timestamps
@@ -254,6 +266,7 @@ public:
      */
     void BatchWriteRecords(std::string_view table_name,
                            int32_t partition_id,
+                           uint32_t shard_id,
                            const std::vector<std::string_view> &key_parts,
                            const std::vector<std::string_view> &record_parts,
                            const std::vector<uint64_t> &ts,
@@ -307,6 +320,7 @@ public:
      * @brief Delete range of data operation
      * @param table_name Table name
      * @param partition_id Partition id
+     * @param shard_id Shard id
      * @param start_key Start key,
      *        if empty, delete from the beginning of the table
      * @param end_key End key
@@ -315,7 +329,8 @@ public:
      * @param done Callback function
      */
     void DeleteRange(const std::string_view table_name,
-                     const uint32_t partition_id,
+                     const int32_t partition_id,
+                     uint32_t shard_id,
                      const std::string_view start_key,
                      const std::string_view end_key,
                      const bool skip_wal,
@@ -384,6 +399,7 @@ public:
      * @brief Scan next operation
      * @param table_name Table name
      * @param partition_id Partition id
+     * @param shard_id Shard id
      * @param start_key Start key
      * @param end_key End key
      * @param inclusive_start Inclusive start
@@ -396,7 +412,8 @@ public:
      * @param done Callback function
      */
     void ScanNext(const std::string_view table_name,
-                  uint32_t partition_id,
+                  int32_t partition_id,
+                  uint32_t shard_id,
                   const std::string_view start_key,
                   const std::string_view end_key,
                   bool inclusive_start,
@@ -426,12 +443,14 @@ public:
      * @brief Scan close operation
      * @param table_name Table name
      * @param partition_id Partition id
+     * @param shard_id Shard id
      * @param session_id Session ID
      * @param result Result (output)
      * @param done Callback function
      */
     void ScanClose(const std::string_view table_name,
-                   uint32_t partition_id,
+                   int32_t partition_id,
+                   uint32_t shard_id,
                    std::string *session_id,
                    ::EloqDS::remote::CommonResult *result,
                    ::google::protobuf::Closure *done);
@@ -448,6 +467,19 @@ public:
         const ::EloqDS::remote::CreateSnapshotForBackupRequest *request,
         ::EloqDS::remote::CreateSnapshotForBackupResponse *response,
         ::google::protobuf::Closure *done) override;
+
+    /**
+     * @brief RPC handler for file cache synchronization (generic for any
+     * storage backend)
+     * @param controller RPC controller
+     * @param request File cache sync request
+     * @param response Empty response (google.protobuf.Empty)
+     * @param done Callback function
+     */
+    void SyncFileCache(::google::protobuf::RpcController *controller,
+                       const ::EloqDS::remote::SyncFileCacheRequest *request,
+                       ::google::protobuf::Empty *response,
+                       ::google::protobuf::Closure *done) override;
 
     /**
      * @brief Create snapshot for backup operation
@@ -514,11 +546,9 @@ public:
      * @brief Preapre sharding error
      *        Fill the error code and the topology change in the result
      */
-    void PrepareShardingError(uint32_t partition_id,
+    void PrepareShardingError(uint32_t shard_id,
                               ::EloqDS::remote::CommonResult *result)
     {
-        uint32_t shard_id =
-            cluster_manager_.GetShardIdByPartitionId(partition_id);
         cluster_manager_.PrepareShardingError(shard_id, result);
     }
 
@@ -575,9 +605,10 @@ public:
     // =======================================================================
     DSShardStatus FetchDSShardStatus(uint32_t shard_id)
     {
-        if (shard_id_ == shard_id)
+        if (data_shards_.at(shard_id).shard_id_ == shard_id)
         {
-            return shard_status_;
+            return data_shards_.at(shard_id).shard_status_.load(
+                std::memory_order_acquire);
         }
         return DSShardStatus::Closed;
     }
@@ -593,21 +624,23 @@ public:
         return data_store_factory_.get();
     }
 
-    void IncreaseWriteReqCount()
+    void IncreaseWriteReqCount(uint32_t shard_id)
     {
-        ongoing_write_requests_.fetch_add(1, std::memory_order_release);
+        data_shards_.at(shard_id).ongoing_write_requests_.fetch_add(
+            1, std::memory_order_release);
     }
 
-    void DecreaseWriteReqCount()
+    void DecreaseWriteReqCount(uint32_t shard_id)
     {
-        ongoing_write_requests_.fetch_sub(1, std::memory_order_release);
+        data_shards_.at(shard_id).ongoing_write_requests_.fetch_sub(
+            1, std::memory_order_release);
     }
 
     bool IsOwnerOfShard(uint32_t shard_id) const
     {
-        return shard_status_.load(std::memory_order_acquire) !=
-                   DSShardStatus::Closed &&
-               shard_id_ == shard_id;
+        const auto &ds_ref = data_shards_.at(shard_id);
+        return ds_ref.shard_status_.load(std::memory_order_acquire) !=
+               DSShardStatus::Closed;
     }
 
     void CloseDataStore(uint32_t shard_id);
@@ -619,18 +652,11 @@ public:
     }
 
 private:
-    uint32_t GetShardIdByPartitionId(int32_t partition_id)
-    {
-        // Now only support single data shard
-        return 0;
-        // return cluster_manager_.GetShardIdByPartitionId(partition_id);
-    }
-
     DataStore *GetDataStore(uint32_t shard_id)
     {
-        if (shard_id_ == shard_id)
+        if (data_shards_.at(shard_id).shard_id_ == shard_id)
         {
-            return data_store_.get();
+            return data_shards_.at(shard_id).data_store_.get();
         }
         else
         {
@@ -660,29 +686,49 @@ private:
                           uint32_t &migration_status,
                           uint64_t &shard_next_version);
 
-    // std::shared_mutex serv_mux_;
-    int32_t service_port_;
     std::unique_ptr<brpc::Server> server_;
 
     DataStoreServiceClusterManager cluster_manager_;
     std::string config_file_path_;
     std::string migration_log_path_;
 
-    // Now, there is only one data store shard in a DataStoreService.
-    // To avoid using mutex in read or write APIs, use a atomic variable
-    // (shard_status_) to control concurrency conflicts.
-    // - During migraion, we change the shard_status_ firstly, then change the
-    // data_store_ after all read/write requests are finished.
-    // - In write functions, we increase the ongoing_write_requests_ firstly and
-    // then check the shard_status_. After the request is executed or if
-    // shard_status_ is not required, decrease them.
-    uint32_t shard_id_{UINT32_MAX};
-    std::unique_ptr<DataStore> data_store_{nullptr};
-    std::atomic<DSShardStatus> shard_status_{DSShardStatus::Closed};
-    std::atomic<uint64_t> ongoing_write_requests_{0};
+    /**
+     * @brief Per-shard data structure encapsulating all shard-specific state.
+     * Each DataShard manages its own data store, status, and scan cache.
+     * Thread-safety: shard_status_ and ongoing_write_requests_ are atomic.
+     * data_store_ and scan_iter_cache_ access is protected by shard_status_
+     * state machine.
+     */
+    struct DataShard
+    {
+        void ShutDown()
+        {
+            if (data_store_ != nullptr)
+            {
+                data_store_->Shutdown();
+                // Don't set data_store_ to nullptr here, as it may be used
+                // in read operations because we don't use read counter.
+            }
 
-    // scan iterator cache
-    TTLWrapperCache scan_iter_cache_;
+            if (scan_iter_cache_ != nullptr)
+            {
+                scan_iter_cache_->Clear();
+                scan_iter_cache_ = nullptr;
+            }
+        }
+
+        uint32_t shard_id_{UINT32_MAX};
+        std::unique_ptr<DataStore> data_store_{nullptr};
+        std::atomic<DSShardStatus> shard_status_{DSShardStatus::Closed};
+        std::atomic<uint64_t> ongoing_write_requests_{0};
+        std::unique_ptr<TTLWrapperCache> scan_iter_cache_{nullptr};
+
+        // Whether the file cache sync is running. Used to avoid concurrent
+        // local ssd file operations between db and file sync worker.
+        std::atomic<bool> is_file_sync_running_{false};
+    };
+
+    std::array<DataShard, 1000> data_shards_;
 
     std::unique_ptr<DataStoreFactory> data_store_factory_;
 
@@ -752,6 +798,53 @@ private:
     // map{event_id->migrate_log}
     std::shared_mutex migrate_task_mux_;
     std::unordered_map<std::string, MigrateLog> migrate_task_map_;
+
+    /**
+     * @brief Worker thread for periodic file cache sync to standby nodes
+     * @param interval_sec Sync interval in seconds
+     */
+    void FileCacheSyncWorker(uint32_t interval_sec);
+
+    /**
+     * @brief Process file cache sync request (called by file_sync_worker_)
+     * @param req Local request containing the sync request
+     */
+    void ProcessSyncFileCache(SyncFileCacheLocalRequest *req);
+
+#if defined(DATA_STORE_TYPE_ELOQDSS_ROCKSDB_CLOUD_S3)
+    /**
+     * @brief Create S3 downloader instance
+     * @return Unique pointer to S3FileDownloader, or nullptr on failure
+     */
+    std::unique_ptr<S3FileDownloader> CreateS3Downloader() const;
+#endif
+
+    /**
+     * @brief Get SST file cache size limit from config
+     * @return Cache size limit in bytes
+     */
+    uint64_t GetSstFileCacheSizeLimit() const;
+
+    /**
+     * @brief Determine which files to keep based on cache size limit and file
+     * number Files with lower file numbers are prioritized (older files are
+     * kept first) Files with higher file numbers are excluded if cache size
+     * limit is exceeded
+     * @param file_info_map Map of all available files from primary node
+     * @param cache_size_limit Maximum cache size in bytes
+     * @return Set of file names that should be kept on local disk
+     */
+    std::set<std::string> DetermineFilesToKeep(
+        const std::map<std::string, ::EloqDS::remote::FileInfo> &file_info_map,
+        uint64_t cache_size_limit) const;
+
+    std::unique_ptr<ThreadWorkerPool> file_cache_sync_worker_;
+    std::unique_ptr<ThreadWorkerPool> file_sync_worker_;
+
+    // File cache sync worker synchronization
+    std::mutex file_cache_sync_mutex_;
+    std::condition_variable file_cache_sync_cv_;
+    bool file_cache_sync_running_{false};
 };
 
 }  // namespace EloqDS

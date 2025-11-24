@@ -162,6 +162,8 @@ public:
      */
     bool Initialize() override;
 
+    void Shutdown() override;
+
     /**
      * @brief indicate end of flush entries in a single ckpt for \@param batch
      * to base table or skindex table in data store, stop and return false if
@@ -237,10 +239,6 @@ protected:
     std::string BuildKey(const std::string_view table_name,
                          uint32_t partition_id,
                          const std::string_view key);
-
-    std::string BuildKey(const std::string_view table_name,
-                         uint32_t partition_id,
-                         const ReadRequest *read_request);
 
     const std::string BuildKeyForDebug(
         const std::unique_ptr<rocksdb::Slice[]> &key_slices, size_t slice_size);

@@ -75,6 +75,13 @@ public:
      */
     void Shutdown() override;
 
+    /**
+     * @brief Collect list of cached SST files (intersection of live files and local directory)
+     * @param file_infos Output vector of file information
+     * @return true if collection succeeded, false otherwise
+     */
+    bool CollectCachedSstFiles(std::vector<::EloqDS::remote::FileInfo> &file_infos);
+
 protected:
     /**
      * @brief Get the RocksDB pointer.
@@ -144,6 +151,13 @@ private:
      * you can convert a string into a long long, and obtain back the string
      * from the number without any loss in the string representation. */
     bool String2ll(const char *s, size_t slen, int64_t &value);
+
+    /**
+     * @brief Extract file number from SST file name (e.g., "000011.sst-ef6b2d92d3687a84" -> 11)
+     * @param file_name SST file name in format {file_number}.sst-{epoch}
+     * @return File number, or 0 if extraction fails
+     */
+    uint64_t ExtractFileNumber(const std::string &file_name);
 
     /**
      * @brief Open the cloud database.

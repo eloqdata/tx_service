@@ -329,7 +329,8 @@ public:
           sharding_algorithm_(config.sharding_algorithm_
                                   ? CreateShardingAlgorithm(
                                         config.sharding_algorithm_->GetName())
-                                  : nullptr)
+                                  : nullptr),
+          file_cache_sync_interval_sec_(config.file_cache_sync_interval_sec_)
     {
     }
 
@@ -354,6 +355,7 @@ public:
             config.sharding_algorithm_
                 ? CreateShardingAlgorithm(config.sharding_algorithm_->GetName())
                 : nullptr;
+        file_cache_sync_interval_sec_ = config.file_cache_sync_interval_sec_;
         return *this;
     }
 
@@ -453,6 +455,16 @@ public:
     void SetThisNode(const std::string &ip, uint16_t port);
 
     /**
+     * @brief Set the file cache sync interval in seconds.
+     */
+    void SetFileCacheSyncIntervalSec(uint32_t interval_sec);
+
+    /**
+     * @brief Get the file cache sync interval in seconds.
+     */
+    uint32_t GetFileCacheSyncIntervalSec() const;
+
+    /**
      * @brief Append the key of this node to the specified string stream.
      */
     void AppendThisNodeKey(std::stringstream &ss) const;
@@ -510,5 +522,8 @@ private:
 
     // channel to other DSS service
     std::map<DSSNode, std::shared_ptr<brpc::Channel>> node_channel_map_;
+
+    // file cache sync interval in seconds
+    uint32_t file_cache_sync_interval_sec_{30};
 };
 }  // namespace EloqDS
