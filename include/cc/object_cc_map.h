@@ -2786,5 +2786,12 @@ private:
 
         return true;
     }
+
+    int32_t GetObjectType(CcEntry<KeyT, ValueT, false, false> *cce) override
+    {
+        return cce->payload_.cur_payload_ != nullptr
+                   ? cce->payload_.cur_payload_->GetObjectType()
+                   : -1;
+    }
 };
 }  // namespace txservice

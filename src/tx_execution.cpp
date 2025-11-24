@@ -3058,6 +3058,7 @@ void TransactionExecution::PostProcess(ScanNextOperation &scan_next)
                                         const_cast<TxRecord *>(rec),
                                         cc_scan_tuple->rec_status_,
                                         cc_scan_tuple->key_ts_,
+                                        cc_scan_tuple->obj_type_,
                                         cc_scan_tuple->cce_addr_);
             }
 
@@ -3120,14 +3121,16 @@ void TransactionExecution::PostProcess(ScanNextOperation &scan_next)
                         scan_batch.emplace_back(write_key.GetShallowCopy(),
                                                 nullptr,
                                                 RecordStatus::Deleted,
-                                                1);
+                                                1,
+                                                -1);
                     }
                     else
                     {
                         scan_batch.emplace_back(write_key.GetShallowCopy(),
                                                 local_write.rec_.get(),
                                                 RecordStatus::Normal,
-                                                1);
+                                                1,
+                                                -1);
                     }
 
                     ++wset_it;
@@ -3201,6 +3204,7 @@ void TransactionExecution::PostProcess(ScanNextOperation &scan_next)
                                                     const_cast<TxRecord *>(rec),
                                                     cc_scan_tuple->rec_status_,
                                                     cc_scan_tuple->key_ts_,
+                                                    -1,
                                                     cc_scan_tuple->cce_addr_);
                         }
 
@@ -3217,14 +3221,16 @@ void TransactionExecution::PostProcess(ScanNextOperation &scan_next)
                             scan_batch.emplace_back(write_key.GetShallowCopy(),
                                                     nullptr,
                                                     RecordStatus::Deleted,
-                                                    cc_scan_tuple->key_ts_);
+                                                    cc_scan_tuple->key_ts_,
+                                                    -1);
                         }
                         else
                         {
                             scan_batch.emplace_back(write_key.GetShallowCopy(),
                                                     local_write.rec_.get(),
                                                     RecordStatus::Normal,
-                                                    cc_scan_tuple->key_ts_);
+                                                    cc_scan_tuple->key_ts_,
+                                                    -1);
                         }
 
                         scanner.MoveNext();
@@ -3266,14 +3272,16 @@ void TransactionExecution::PostProcess(ScanNextOperation &scan_next)
                         scan_batch.emplace_back(write_key.GetShallowCopy(),
                                                 local_write.rec_.get(),
                                                 RecordStatus::Normal,
-                                                1);
+                                                1,
+                                                -1);
                     }
                     else
                     {
                         scan_batch.emplace_back(write_key.GetShallowCopy(),
                                                 nullptr,
                                                 RecordStatus::Deleted,
-                                                1);
+                                                1,
+                                                -1);
                     }
 
                     ++wset_it;
@@ -3333,14 +3341,16 @@ void TransactionExecution::PostProcess(ScanNextOperation &scan_next)
                         scan_batch.emplace_back(write_key.GetShallowCopy(),
                                                 local_write.rec_.get(),
                                                 RecordStatus::Normal,
-                                                1);
+                                                1,
+                                                -1);
                     }
                     else
                     {
                         scan_batch.emplace_back(write_key.GetShallowCopy(),
                                                 nullptr,
                                                 RecordStatus::Deleted,
-                                                1);
+                                                1,
+                                                -1);
                     }
 
                     ++wset_it;
@@ -3414,6 +3424,7 @@ void TransactionExecution::PostProcess(ScanNextOperation &scan_next)
                                                     const_cast<TxRecord *>(rec),
                                                     cc_scan_tuple->rec_status_,
                                                     cc_scan_tuple->key_ts_,
+                                                    -1,
                                                     cc_scan_tuple->cce_addr_);
                         }
 
@@ -3430,14 +3441,16 @@ void TransactionExecution::PostProcess(ScanNextOperation &scan_next)
                             scan_batch.emplace_back(write_key.GetShallowCopy(),
                                                     nullptr,
                                                     RecordStatus::Deleted,
-                                                    cc_scan_tuple->key_ts_);
+                                                    cc_scan_tuple->key_ts_,
+                                                    -1);
                         }
                         else
                         {
                             scan_batch.emplace_back(write_key.GetShallowCopy(),
                                                     local_write.rec_.get(),
                                                     RecordStatus::Normal,
-                                                    cc_scan_tuple->key_ts_);
+                                                    cc_scan_tuple->key_ts_,
+                                                    -1);
                         }
 
                         scanner.MoveNext();
@@ -3478,14 +3491,16 @@ void TransactionExecution::PostProcess(ScanNextOperation &scan_next)
                         scan_batch.emplace_back(write_key.GetShallowCopy(),
                                                 local_write.rec_.get(),
                                                 RecordStatus::Normal,
-                                                1);
+                                                1,
+                                                -1);
                     }
                     else
                     {
                         scan_batch.emplace_back(write_key.GetShallowCopy(),
                                                 nullptr,
                                                 RecordStatus::Deleted,
-                                                1);
+                                                1,
+                                                -1);
                     }
 
                     ++wset_it;

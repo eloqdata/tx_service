@@ -3304,6 +3304,7 @@ public:
                                           resp_msg_->records(),
                                           rec_offset,
                                           rec_status,
+                                          -1,
                                           gap_ts_ptr[tuple_idx],
                                           cce_lock_ptr_ptr[tuple_idx],
                                           term_ptr[tuple_idx],
