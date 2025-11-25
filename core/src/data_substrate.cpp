@@ -20,12 +20,11 @@
  *
  */
 
-#include "data_substrate.h"
-
 #include <gflags/gflags.h>
 #include <sys/resource.h>
 
 #include "INIReader.h"
+#include "data_substrate.h"
 #include "log_server.h"
 #include "sequences/sequences.h"
 #include "store/data_store_handler.h"
@@ -278,6 +277,129 @@ bool DataSubstrate::RegisterEngines()
     return true;
 }
 
+bool DataSubstrate::LoadNetworkConfig(bool is_bootstrap,
+                                      const INIReader &config_reader,
+                                      const std::string &default_data_path,
+                                      NetworkConfig &network_config)
+{
+    // Load network and cluster configuration with gflags priority
+    network_config.local_ip =
+        !CheckCommandLineFlagIsDefault("tx_ip")
+            ? FLAGS_tx_ip
+            : config_reader.Get("local", "tx_ip", FLAGS_tx_ip);
+
+    network_config.local_port =
+        !CheckCommandLineFlagIsDefault("tx_port")
+            ? FLAGS_tx_port
+            : config_reader.GetInteger("local", "tx_port", FLAGS_tx_port);
+    std::string local_ip_port = network_config.local_ip + ":" +
+                                std::to_string(network_config.local_port);
+    DLOG(INFO) << "Local tx service ip port: " << local_ip_port;
+
+    if (is_bootstrap)
+    {
+        network_config.ip_list = local_ip_port;
+    }
+    else
+    {
+        network_config.ip_list =
+            !CheckCommandLineFlagIsDefault("tx_ip_port_list")
+                ? FLAGS_tx_ip_port_list
+                : config_reader.Get(
+                      "cluster", "tx_ip_port_list", local_ip_port);
+
+        network_config.standby_ip_list =
+            !CheckCommandLineFlagIsDefault("tx_standby_ip_port_list")
+                ? FLAGS_tx_standby_ip_port_list
+                : config_reader.Get("cluster", "tx_standby_ip_port_list", "");
+
+        network_config.voter_ip_list =
+            !CheckCommandLineFlagIsDefault("tx_voter_ip_port_list")
+                ? FLAGS_tx_voter_ip_port_list
+                : config_reader.Get("cluster", "tx_voter_ip_port_list", "");
+    }
+    network_config.cluster_config_file_path =
+        !CheckCommandLineFlagIsDefault("cluster_config_file")
+            ? FLAGS_cluster_config_file
+            : config_reader.Get(
+                  "cluster", "cluster_config_file", FLAGS_cluster_config_file);
+
+    network_config.node_group_replica_num =
+        !CheckCommandLineFlagIsDefault("node_group_replica_num")
+            ? FLAGS_node_group_replica_num
+            : config_reader.GetInteger("cluster",
+                                       "node_group_replica_num",
+                                       FLAGS_node_group_replica_num);
+
+    network_config.bind_all =
+        !CheckCommandLineFlagIsDefault("bind_all")
+            ? FLAGS_bind_all
+            : config_reader.GetBoolean("local", "bind_all", FLAGS_bind_all);
+
+    // Try to read cluster config from file. Cluster config file is written by
+    // host manager when cluster config updates.
+    if (network_config.cluster_config_file_path.empty())
+    {
+        network_config.cluster_config_file_path =
+            default_data_path + "/tx_service/cluster_config";
+    }
+
+    network_config.cluster_config_version = 2;
+    if (!txservice::ReadClusterConfigFile(
+            network_config.cluster_config_file_path,
+            network_config.ng_configs,
+            network_config.cluster_config_version))
+    {
+        // Read cluster topology from general config file in this case
+        auto parse_res =
+            txservice::ParseNgConfig(network_config.ip_list,
+                                     network_config.standby_ip_list,
+                                     network_config.voter_ip_list,
+                                     network_config.ng_configs,
+                                     network_config.node_group_replica_num,
+                                     0);
+        if (!parse_res)
+        {
+            LOG(ERROR)
+                << "Failed to extract cluster configs from tx_ip_port_list.";
+            return false;
+        }
+    }
+
+    // check whether this node is in cluster.
+    bool found = false;
+    network_config.node_id = 0;
+    network_config.native_ng_id = 0;
+    for (auto &pair : network_config.ng_configs)
+    {
+        auto &ng_nodes = pair.second;
+        for (size_t i = 0; i < ng_nodes.size(); i++)
+        {
+            if (ng_nodes[i].host_name_ == network_config.local_ip &&
+                ng_nodes[i].port_ == network_config.local_port)
+            {
+                network_config.node_id = ng_nodes[i].node_id_;
+                found = true;
+                if (ng_nodes[i].is_candidate_)
+                {
+                    // found native_ng_id.
+                    network_config.native_ng_id = pair.first;
+                    break;
+                }
+            }
+        }
+    }
+
+    if (!found)
+    {
+        LOG(ERROR) << "!!!!!!!! Current node does not belong to the "
+                      "cluster, startup is terminated !!!!!!!!";
+        return false;
+    }
+
+    return true;
+}
+
 bool DataSubstrate::LoadCoreAndNetworkConfig(const INIReader &config_reader)
 {
     // Load core data substrate configuration with gflags priority
@@ -318,7 +440,8 @@ bool DataSubstrate::LoadCoreAndNetworkConfig(const INIReader &config_reader)
             : config_reader.GetBoolean("local", "bootstrap", FLAGS_bootstrap);
 
     core_config_.enable_wal =
-        !core_config_.bootstrap && (CheckCommandLineFlagIsDefault("enable_wal")
+        !core_config_.bootstrap &&
+        (CheckCommandLineFlagIsDefault("enable_wal")
              ? FLAGS_enable_wal
              : config_reader.GetBoolean(
                    "local", "enable_wal", FLAGS_enable_wal));
@@ -375,97 +498,24 @@ bool DataSubstrate::LoadCoreAndNetworkConfig(const INIReader &config_reader)
         }
     }
 
-    // Load network and cluster configuration with gflags priority
-    network_config_.local_ip =
-        !CheckCommandLineFlagIsDefault("tx_ip")
-            ? FLAGS_tx_ip
-            : config_reader.Get("local", "tx_ip", FLAGS_tx_ip);
-
-    network_config_.local_port =
-        !CheckCommandLineFlagIsDefault("tx_port")
-            ? FLAGS_tx_port
-            : config_reader.GetInteger("local", "tx_port", FLAGS_tx_port);
-    std::string local_ip_port = network_config_.local_ip + ":" +
-                                std::to_string(network_config_.local_port);
-    DLOG(INFO) << "Local tx service ip port: " << local_ip_port;
-
-    if (core_config_.bootstrap)
-    {
-        network_config_.ip_list = local_ip_port;
-    }
-    else
-    {
-        network_config_.ip_list =
-            !CheckCommandLineFlagIsDefault("tx_ip_port_list")
-                ? FLAGS_tx_ip_port_list
-                : config_reader.Get(
-                      "cluster", "tx_ip_port_list", local_ip_port);
-
-        network_config_.standby_ip_list =
-            !CheckCommandLineFlagIsDefault("tx_standby_ip_port_list")
-                ? FLAGS_tx_standby_ip_port_list
-                : config_reader.Get("cluster", "tx_standby_ip_port_list", "");
-
-        network_config_.voter_ip_list =
-            !CheckCommandLineFlagIsDefault("tx_voter_ip_port_list")
-                ? FLAGS_tx_voter_ip_port_list
-                : config_reader.Get("cluster", "tx_voter_ip_port_list", "");
-    }
-    network_config_.cluster_config_file_path =
-        !CheckCommandLineFlagIsDefault("cluster_config_file")
-            ? FLAGS_cluster_config_file
-            : config_reader.Get(
-                  "cluster", "cluster_config_file", FLAGS_cluster_config_file);
-
-    network_config_.node_group_replica_num =
-        !CheckCommandLineFlagIsDefault("node_group_replica_num")
-            ? FLAGS_node_group_replica_num
-            : config_reader.GetInteger("cluster",
-                                       "node_group_replica_num",
-                                       FLAGS_node_group_replica_num);
-
-    network_config_.bind_all =
-        !CheckCommandLineFlagIsDefault("bind_all")
-            ? FLAGS_bind_all
-            : config_reader.GetBoolean("local", "bind_all", FLAGS_bind_all);
-
     core_config_.enable_mvcc =
         !CheckCommandLineFlagIsDefault("enable_mvcc")
             ? FLAGS_enable_mvcc
             : config_reader.GetBoolean(
                   "local", "enable_mvcc", FLAGS_enable_mvcc);
 
-    // Try to read cluster config from file. Cluster config file is written by
-    // host manager when cluster config updates.
-    if (network_config_.cluster_config_file_path.empty())
+    // Load network configuration
+    if (!LoadNetworkConfig(core_config_.bootstrap,
+                           config_reader,
+                           core_config_.data_path,
+                           network_config_))
     {
-        network_config_.cluster_config_file_path =
-            core_config_.data_path + "/tx_service/cluster_config";
-    }
-
-    network_config_.cluster_config_version = 2;
-    if (!txservice::ReadClusterConfigFile(
-            network_config_.cluster_config_file_path,
-            network_config_.ng_configs,
-            network_config_.cluster_config_version))
-    {
-        // Read cluster topology from general config file in this case
-        auto parse_res =
-            txservice::ParseNgConfig(network_config_.ip_list,
-                                     network_config_.standby_ip_list,
-                                     network_config_.voter_ip_list,
-                                     network_config_.ng_configs,
-                                     network_config_.node_group_replica_num,
-                                     0);
-        if (!parse_res)
-        {
-            LOG(ERROR)
-                << "Failed to extract cluster configs from tx_ip_port_list.";
-            return false;
-        }
+        LOG(ERROR) << "Failed to load network configuration.";
+        return false;
     }
 
     // print out ng_configs
+    LOG(INFO) << "Cluster Node Group Configurations:";
     for (auto &pair : network_config_.ng_configs)
     {
         DLOG(INFO) << "ng_id: " << pair.first;
@@ -477,36 +527,6 @@ bool DataSubstrate::LoadCoreAndNetworkConfig(const INIReader &config_reader)
         }
     }
 
-    // check whether this node is in cluster.
-    bool found = false;
-    network_config_.node_id = 0;
-    network_config_.native_ng_id = 0;
-    for (auto &pair : network_config_.ng_configs)
-    {
-        auto &ng_nodes = pair.second;
-        for (size_t i = 0; i < ng_nodes.size(); i++)
-        {
-            if (ng_nodes[i].host_name_ == network_config_.local_ip &&
-                ng_nodes[i].port_ == network_config_.local_port)
-            {
-                network_config_.node_id = ng_nodes[i].node_id_;
-                found = true;
-                if (ng_nodes[i].is_candidate_)
-                {
-                    // found native_ng_id.
-                    network_config_.native_ng_id = pair.first;
-                    break;
-                }
-            }
-        }
-    }
-
-    if (!found)
-    {
-        LOG(ERROR) << "!!!!!!!! Current node does not belong to the "
-                      "cluster, startup is terminated !!!!!!!!";
-        return false;
-    }
     const char *field_ed = "event_dispatcher_num";
     uint num_iothreads = brpc::FLAGS_event_dispatcher_num;
     if (CheckCommandLineFlagIsDefault(field_ed))

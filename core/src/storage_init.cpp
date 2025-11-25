@@ -20,6 +20,7 @@
  *
  */
 #include <gflags/gflags.h>
+#include <memory>
 
 #include "INIReader.h"
 #include "data_store_handler.h"
@@ -164,10 +165,7 @@ bool DataSubstrate::InitializeStorageHandler(const INIReader &config_reader)
                                                   ddl_skip_kv);
 
 #elif defined(DATA_STORE_TYPE_ROCKSDB)
-    bool is_single_node =
-        (network_config_.standby_ip_list.empty() &&
-         network_config_.voter_ip_list.empty() &&
-         network_config_.ip_list.find(',') == network_config_.ip_list.npos);
+    bool is_single_node = network_config_.IsSingleNode();
 
     EloqShare::RocksDBConfig rocksdb_config(config_reader,
                                             core_config_.data_path);
@@ -180,10 +178,25 @@ bool DataSubstrate::InitializeStorageHandler(const INIReader &config_reader)
         core_config_.enable_cache_replacement);
 
 #elif ELOQDS
-    bool is_single_node =
-        (network_config_.standby_ip_list.empty() &&
-         network_config_.voter_ip_list.empty() &&
-         network_config_.ip_list.find(',') == network_config_.ip_list.npos);
+    NetworkConfig *network_config_ptr = &network_config_;
+    // if this is bootstrap, we need to get the complete network config,
+    // instead of the local node only.
+    NetworkConfig full_network_config;
+    if (core_config_.bootstrap)
+    {
+        if (!LoadNetworkConfig(false,
+                               config_reader,
+                               core_config_.data_path,
+                               full_network_config))
+        {
+            LOG(ERROR) << "Failed to load full network configuration for "
+                          "eloq dss bootstrap.";
+            return false;
+        }
+        network_config_ptr = &full_network_config;
+    }
+
+    bool is_single_node = network_config_ptr->IsSingleNode();
 
     std::string eloq_dss_peer_node =
         !CheckCommandLineFlagIsDefault("eloq_dss_peer_node")
@@ -203,17 +216,17 @@ bool DataSubstrate::InitializeStorageHandler(const INIReader &config_reader)
 
     // use tx node id as the dss node id
     // since they are deployed together
-    uint32_t dss_node_id = network_config_.node_id;
+    uint32_t dss_node_id = network_config_ptr->node_id;
     if (core_config_.bootstrap || is_single_node)
     {
-        dss_leader_id = network_config_.node_id;
+        dss_leader_id = network_config_ptr->node_id;
     }
 
     if (!eloq_dss_peer_node.empty())
     {
-        ds_config.SetThisNode(network_config_.local_ip,
+        ds_config.SetThisNode(network_config_ptr->local_ip,
                               EloqDS::DataStoreServiceClient::TxPort2DssPort(
-                                  network_config_.local_port));
+                                  network_config_ptr->local_port));
         // Fetch ds topology from peer node
         if (!EloqDS::DataStoreService::FetchConfigFromPeer(eloq_dss_peer_node,
                                                            ds_config))
@@ -225,18 +238,22 @@ bool DataSubstrate::InitializeStorageHandler(const INIReader &config_reader)
     }
     else
     {
-        if (network_config_.ng_configs.size() > 1)
+        if (network_config_ptr->ng_configs.size() > 1)
         {
             LOG(ERROR) << "EloqDS multi-node cluster must specify "
                           "eloq_dss_peer_node.";
             return false;
         }
+
+        assert(dss_leader_id != EloqDS::UNKNOWN_DSS_LEADER_NODE_ID);
+        // Single node or bootstraping multi-node cluster
+        std::unordered_map<uint32_t, uint32_t> ng_leaders;
+        for (const auto &[ng_id, ng_config] : network_config_ptr->ng_configs)
+        {
+            ng_leaders.emplace(ng_id, dss_leader_id);
+        }
         EloqDS::DataStoreServiceClient::TxConfigsToDssClusterConfig(
-            dss_node_id,
-            network_config_.native_ng_id,
-            network_config_.ng_configs,
-            dss_leader_id,
-            ds_config);
+            dss_node_id, network_config_ptr->ng_configs, ng_leaders, ds_config);
     }
 #if defined(DATA_STORE_TYPE_ELOQDSS_ROCKSDB_CLOUD_S3) || \
     defined(DATA_STORE_TYPE_ELOQDSS_ROCKSDB_CLOUD_GCS)
@@ -275,7 +292,7 @@ bool DataSubstrate::InitializeStorageHandler(const INIReader &config_reader)
     ret = data_store_service_->StartService(true, dss_leader_id, dss_node_id);
 #else
     ret = data_store_service_->StartService(
-        (core_config_.bootstrap || is_single_node), dss_leader_id, dss_node_id);
+        (core_config_.bootstrap || is_single_node));
 #endif
     if (!ret)
     {
@@ -292,7 +309,11 @@ bool DataSubstrate::InitializeStorageHandler(const INIReader &config_reader)
     }
 
     store_hd_ = std::make_unique<EloqDS::DataStoreServiceClient>(
-        catalog_factory, ds_config, data_store_service_.get());
+        core_config_.bootstrap,
+        catalog_factory,
+        ds_config,
+        eloq_dss_peer_node.empty(),
+        data_store_service_.get());
 
 #endif
 

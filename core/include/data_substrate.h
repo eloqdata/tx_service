@@ -143,6 +143,13 @@ public:
         uint32_t node_id;
         uint32_t native_ng_id;
         std::string cluster_config_file_path;
+
+	bool IsSingleNode() const
+	{
+	    return (standby_ip_list.empty() &&
+		    voter_ip_list.empty() &&
+		    ip_list.find(',') == ip_list.npos);
+	}
     };
 
     struct LogServiceConfig
@@ -196,6 +203,10 @@ public:
 
 private:
     // Private methods that call component initialization files
+    bool LoadNetworkConfig(bool is_bootstrap,
+                           const INIReader &config_file_reader,
+			   const std::string &default_data_path,
+                           NetworkConfig &network_config);
     bool LoadCoreAndNetworkConfig(const INIReader &config_file_reader);
     bool InitializeStorageHandler(const INIReader &config_file_reader);
     bool InitializeLogService(const INIReader &config_file_reader);
