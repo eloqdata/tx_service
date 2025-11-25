@@ -5576,6 +5576,7 @@ void LocalCcShards::FlushData(std::unique_lock<std::mutex> &flush_worker_lk)
 
                 if (cce_entries_map.size() > 0)
                 {
+                    auto start_time = std::chrono::steady_clock::now();
                     UpdateCceCkptTsCc update_cce_req(
                         entry->data_sync_task_->node_group_id_,
                         entry->data_sync_task_->node_group_term_,
@@ -5588,6 +5589,16 @@ void LocalCcShards::FlushData(std::unique_lock<std::mutex> &flush_worker_lk)
                         EnqueueToCcShard(core_idx, &update_cce_req);
                     }
                     update_cce_req.Wait();
+
+                    auto stop_time = std::chrono::steady_clock::now();
+                    auto duration =
+                        std::chrono::duration_cast<std::chrono::microseconds>(
+                            stop_time - start_time)
+                            .count();
+                    LOG(INFO) << "yf: DataSync UpdateCceCkptTsCc table_name: "
+                              << table_name.StringView()
+                              << " cce_count: " << entry->data_sync_vec_->size()
+                              << " duration(us): " << duration;
                 }
             }
         }
