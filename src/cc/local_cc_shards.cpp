@@ -5459,6 +5459,8 @@ void LocalCcShards::FlushCurrentFlushBuffer()
             auto &last_task = pending_flush_work_.back();
             if (last_task->MergeFrom(std::move(flush_data_task)))
             {
+                LOG(INFO)
+                    << "yf: FlushCurrentFlushBuffer merged to last task ==";
                 // Merge successful, task was merged into last_task
                 flush_data_worker_ctx_.cv_.notify_one();
                 return;
@@ -5472,6 +5474,7 @@ void LocalCcShards::FlushCurrentFlushBuffer()
             flush_data_worker_ctx_.cv_.wait(worker_lk);
         }
 
+        LOG(INFO) << "yf: FlushCurrentFlushBuffer push new task ==";
         // Add as new task
         pending_flush_work_.emplace_back(std::move(flush_data_task));
         flush_data_worker_ctx_.cv_.notify_one();
