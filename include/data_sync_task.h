@@ -59,6 +59,13 @@ struct DataSyncStatus
         need_truncate_log_ = false;
     }
 
+    void SetEntriesSkippedAndNoTruncateLog()
+    {
+        std::lock_guard<std::mutex> lk(mux_);
+        has_skipped_entries = true;
+        need_truncate_log_ = false;
+    }
+
     NodeGroupId node_group_id_;
     int64_t node_group_term_;
     // Number of unfinished scan tasks. We keep track of this separately since
@@ -75,6 +82,10 @@ struct DataSyncStatus
     uint64_t truncate_log_ts_{0};
     // Collect from each data sync task.
     size_t total_entry_cnt_{0};
+
+    // Whether there are entries being skipped by DataSyncScan. For EloqKV,
+    // entries with buffer commands might be skipped.
+    bool has_skipped_entries{false};
 
     // If kvstore need do PersistKV after PutAll, we must update ccentry's
     // ckpt_ts after PersistKV done. Since we do data sync in small baches and

@@ -389,7 +389,8 @@ bool SnapshotManager::RunOneRoundCheckpoint(uint32_t node_group,
         [&data_sync_status]
         { return data_sync_status->unfinished_tasks_ == 0; });
 
-    return (data_sync_status->err_code_ == CcErrorCode::NO_ERROR);
+    return (data_sync_status->err_code_ == CcErrorCode::NO_ERROR &&
+            !data_sync_status->has_skipped_entries);
 }
 
 void SnapshotManager::UpdateBackupTaskStatus(
