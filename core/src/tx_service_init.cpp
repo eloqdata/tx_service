@@ -300,7 +300,7 @@ bool DataSubstrate::InitializeTxService(const INIReader &config_reader)
     // nodes to finish the log recovery process and setup the cc_stream_sender.
     tx_service_->WaitClusterReady();
     // wait for the tx_service node to become the native group leader.
-    tx_service_->WaitNodeBecomeNativeGroupLeader();
+    // tx_service_->WaitNodeBecomeNativeGroupLeader();
 
     return true;
 }
