@@ -4135,10 +4135,19 @@ void LocalCcShards::DataSyncForRangePartition(
                      .count()
               << " us.";
 
+    auto post_process_start_ts = std::chrono::steady_clock::now();
+
     PostProcessRangePartitionDataSyncTask(std::move(data_sync_task),
                                           data_sync_txm,
                                           DataSyncTask::CkptErrorCode::NO_ERROR,
                                           true);
+    auto post_process_end_ts = std::chrono::steady_clock::now();
+    LOG(INFO) << "yf: post process datasync task on table "
+              << table_name.StringView() << " for range#" << range_id
+              << " is split_range=" << during_split_range << " took "
+              << std::chrono::duration_cast<std::chrono::microseconds>(
+                     post_process_end_ts - post_process_start_ts)
+                     .count();
 }
 
 void LocalCcShards::PostProcessHashPartitionDataSyncTask(
