@@ -5764,6 +5764,9 @@ void LocalCcShards::FlushDataWorker()
                     }
                 }
 
+                LOG(INFO) << "yf: FlushDataWorker wake up to check pending "
+                             "work, empty queue, queue size = "
+                          << pending_flush_work_.size();
                 return false;
             });
 
