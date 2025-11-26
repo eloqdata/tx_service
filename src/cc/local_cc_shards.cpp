@@ -5710,6 +5710,9 @@ void LocalCcShards::FlushDataWorker()
                 if (!pending_flush_work_.empty() ||
                     flush_data_worker_ctx_.status_ == WorkerStatus::Terminated)
                 {
+                    LOG(INFO) << "yf: FlushDataWorker wake up to check pending "
+                                 "work, queue size = "
+                              << pending_flush_work_.size();
                     return true;
                 }
                 auto current_time = std::chrono::steady_clock::now();
@@ -5740,11 +5743,17 @@ void LocalCcShards::FlushDataWorker()
                                 if (last_task->MergeFrom(
                                         std::move(flush_data_task)))
                                 {
+                                    LOG(INFO) << "yf: FlushDataWorker wake up "
+                                                 "merge to last task "
+                                                 "work, queue size = "
+                                              << pending_flush_work_.size();
                                     // Merge successful, task was merged into
                                     // last_task
                                     return true;
                                 }
                             }
+
+                            LOG(INFO) << "yf: FlushDataWorker push new task";
 
                             // Add as new task. We just checked that
                             // pending_flush_work_ is empty,
