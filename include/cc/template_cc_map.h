@@ -5226,7 +5226,7 @@ public:
                 prefetch_size,
                 false,
                 false,
-                req.export_base_table_item_,
+                true,
                 next_slice_func);
 
             switch (pin_status)
