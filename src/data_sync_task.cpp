@@ -219,8 +219,9 @@ void DataSyncTask::SetScanTaskFinished()
     {
         // If all scan tasks are finished, but there are still unfinished data
         // sync task due to pending flush, flush the current flush buffer.
-        DLOG(INFO) << "Flushing current flush buffer after all scan tasks are "
-                      "finished";
+        LOG(INFO) << "Flushing current flush buffer after all scan tasks are "
+                     "finished, range id = "
+                  << id_;
         Sharder::Instance().GetLocalCcShards()->FlushCurrentFlushBuffer();
     }
 }
