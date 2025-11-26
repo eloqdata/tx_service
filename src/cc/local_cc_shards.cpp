@@ -5707,6 +5707,8 @@ void LocalCcShards::FlushDataWorker()
             continue;
         }
 
+        LOG(INFO) << "yf: flush data workler pending queue size = "
+                  << pending_flush_work_.size();
         FlushData(flush_worker_lk);
     }
 
