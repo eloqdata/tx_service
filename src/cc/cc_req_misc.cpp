@@ -1373,4 +1373,77 @@ void RestoreCcMapCc::DecodedDataItem(
         std::move(key), std::move(record), version_ts, is_deleted);
 }
 
+bool ShardCleanCc::Execute(CcShard &ccs)
+{
+    CcShardHeap *shard_heap = ccs.GetShardHeap();
+    int64_t heap_alloc, heap_commit;
+    if (shard_heap != nullptr && shard_heap->Full(&heap_alloc, &heap_commit))
+    {
+        assert(txservice_enable_cache_replacement);
+        bool need_yield = false;
+        if (shard_heap->NeedCleanShard(heap_alloc, heap_commit))
+        {
+            size_t free_size = 0;
+            std::tie(free_size, need_yield) = ccs.Clean();
+            free_count_ += free_size;
+        }
+
+        if (shard_heap->Full(&heap_alloc, &heap_commit) &&
+            shard_heap->NeedCleanShard(heap_alloc, heap_commit))
+        {
+            if (need_yield)
+            {
+                // Continue to clean in the next run one round.
+                ccs.Enqueue(this);
+                return false;
+            }
+            else
+            {
+                // Reach to the tail ccpage, but the allocated memory is
+                // still larger than the heap threshold, just abort the
+                // waiting ccrequests.
+                ccs.AbortRequestsAfterMemoryFree();
+
+                // Notify the checkpointer thread to do checkpoint if there
+                // is not freeable entries to be kicked out from ccmap and
+                // if the shard is not doing defrag.
+                if (free_count_ == 0 && !shard_heap->IsDefragHeapCcOnFly() &&
+                    !Sharder::Instance().GetCheckpointer()->IsOngoingDataSync())
+                {
+                    ccs.NotifyCkpt();
+                }
+                free_count_ = 0;
+                // Return true will set the request as free, which means the
+                // request is not in working state.
+                return true;
+            }
+        }
+        else
+        {
+            // Get the free memory, re-run a batch of the waiting ccrequest.
+            bool wait_list_empty = ccs.DequeueWaitListAfterMemoryFree();
+            if (!wait_list_empty)
+            {
+                ccs.Enqueue(this);
+            }
+
+            // Reset the value if the ccrequest is finished.
+            free_count_ = (wait_list_empty) ? 0 : free_count_;
+            return wait_list_empty;
+        }
+    }
+    else
+    {
+        // There is available memory on this shard, re-run a batch of the
+        // waiting ccrequest if has any waiting request, otherwise, finish
+        // this shard clean ccrequests.
+        bool wait_list_empty = ccs.DequeueWaitListAfterMemoryFree();
+        if (!wait_list_empty)
+        {
+            ccs.Enqueue(this);
+        }
+        return wait_list_empty;
+    }
+}
+
 }  // namespace txservice

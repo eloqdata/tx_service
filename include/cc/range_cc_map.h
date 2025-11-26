@@ -660,11 +660,6 @@ public:
                     ACTION_FAULT_INJECTOR(
                         "range_split_post_commit_participant");
                 }
-
-                // Reset waiting ckpt flag. Shards should be able to request
-                // ckpt again if no cc entries can be kicked out. Set the flag
-                // on one core is enough.
-                shard_->SetWaitingCkpt(false);
             }
             else
             {

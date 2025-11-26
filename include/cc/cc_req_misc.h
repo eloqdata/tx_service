@@ -1076,4 +1076,18 @@ public:
     bthread::Mutex req_mux_{};
 };
 
+struct ShardCleanCc : public CcRequestBase
+{
+public:
+    ShardCleanCc() : free_count_(0)
+    {
+    }
+
+    ShardCleanCc(ShardCleanCc &&rhs) = delete;
+
+    bool Execute(CcShard &ccs) override;
+
+private:
+    size_t free_count_{0};
+};
 }  // namespace txservice

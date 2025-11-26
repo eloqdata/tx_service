@@ -49,12 +49,9 @@ struct DataSyncStatus
 {
     explicit DataSyncStatus(NodeGroupId node_group_id,
                             int64_t node_group_term,
-                            bool need_truncate_log)
-        : node_group_id_(node_group_id),
-          node_group_term_(node_group_term),
-          need_truncate_log_(need_truncate_log)
-    {
-    }
+                            bool need_truncate_log);
+
+    ~DataSyncStatus();
 
     void SetNoTruncateLog()
     {
