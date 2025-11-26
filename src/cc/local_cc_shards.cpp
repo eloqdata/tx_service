@@ -2988,7 +2988,6 @@ void LocalCcShards::PostProcessRangePartitionDataSyncTask(
                                task->id_);
             }
             task->SetError(CcErrorCode::REQUESTED_NODE_NOT_LEADER);
-            SetWaitingCkpt(false);
             if (ng_term >= 0)
             {
                 Sharder::Instance().UnpinNodeGroupData(task->node_group_id_);
@@ -3042,7 +3041,6 @@ void LocalCcShards::PostProcessRangePartitionDataSyncTask(
             }
         }
 
-        bool reset_waiting_ckpt = false;
         if (task_ckpt_err == DataSyncTask::CkptErrorCode::NO_ERROR)
         {
             if (!task->during_split_range_)
@@ -3055,7 +3053,6 @@ void LocalCcShards::PostProcessRangePartitionDataSyncTask(
                                task->node_group_term_,
                                task->table_name_,
                                task->id_);
-                reset_waiting_ckpt = true;
             }
 
             task->SetFinish();
@@ -3101,8 +3098,6 @@ void LocalCcShards::PostProcessRangePartitionDataSyncTask(
                                task->node_group_term_,
                                task->table_name_,
                                task->id_);
-
-                reset_waiting_ckpt = true;
             }
 
             if (!Sharder::Instance().CheckLeaderTerm(task->node_group_id_,
@@ -3123,13 +3118,6 @@ void LocalCcShards::PostProcessRangePartitionDataSyncTask(
                 txservice::AbortTx(data_sync_txm);
             }
             task->SetError(CcErrorCode::DATA_STORE_ERR);
-        }
-
-        if (reset_waiting_ckpt)
-        {
-            // Reset waiting ckpt flag. Shards should be able to request ckpt
-            // again if no cc entries can be kicked out.
-            SetWaitingCkpt(false);
         }
     }
 
@@ -4083,10 +4071,6 @@ void LocalCcShards::PostProcessHashPartitionDataSyncTask(
                 CommitTx(data_sync_txm);
             }
 
-            // Reset waiting ckpt flag. Shards should be able to request
-            // ckpt again if no cc entries can be kicked out.
-            SetWaitingCkpt(false);
-
             PopPendingTask(task->node_group_id_,
                            task->node_group_term_,
                            task->table_name_,
@@ -4140,8 +4124,6 @@ void LocalCcShards::PostProcessHashPartitionDataSyncTask(
                            task->node_group_term_,
                            task->table_name_,
                            task->id_);
-
-            SetWaitingCkpt(false);
         }
         else
         {
@@ -4149,7 +4131,6 @@ void LocalCcShards::PostProcessHashPartitionDataSyncTask(
                    DataSyncTask::CkptErrorCode::PERSIST_KV_ERROR);
             txservice::AbortTx(data_sync_txm);
             task->SetError(CcErrorCode::DATA_STORE_ERR);
-            SetWaitingCkpt(false);
         }
     }
     if (is_scan_task)
@@ -5297,7 +5278,28 @@ void LocalCcShards::AddFlushTaskEntry(std::unique_ptr<FlushTaskEntry> &&entry)
         cur_flush_buffer_.MoveFlushData(false);
     if (flush_data_task != nullptr)
     {
-        std::lock_guard<std::mutex> worker_lk(flush_data_worker_ctx_.mux_);
+        std::unique_lock<std::mutex> worker_lk(flush_data_worker_ctx_.mux_);
+
+        // Try to merge with the last task if queue is not empty
+        if (!pending_flush_work_.empty())
+        {
+            auto &last_task = pending_flush_work_.back();
+            if (last_task->MergeFrom(std::move(flush_data_task)))
+            {
+                // Merge successful, task was merged into last_task
+                flush_data_worker_ctx_.cv_.notify_one();
+                return;
+            }
+        }
+
+        // Could not merge, wait if queue is full
+        while (pending_flush_work_.size() >=
+               static_cast<size_t>(flush_data_worker_ctx_.worker_num_))
+        {
+            flush_data_worker_ctx_.cv_.wait(worker_lk);
+        }
+
+        // Add as new task
         pending_flush_work_.emplace_back(std::move(flush_data_task));
         flush_data_worker_ctx_.cv_.notify_one();
     }
@@ -5309,7 +5311,28 @@ void LocalCcShards::FlushCurrentFlushBuffer()
         cur_flush_buffer_.MoveFlushData(true);
     if (flush_data_task != nullptr)
     {
-        std::lock_guard<std::mutex> worker_lk(flush_data_worker_ctx_.mux_);
+        std::unique_lock<std::mutex> worker_lk(flush_data_worker_ctx_.mux_);
+
+        // Try to merge with the last task if queue is not empty
+        if (!pending_flush_work_.empty())
+        {
+            auto &last_task = pending_flush_work_.back();
+            if (last_task->MergeFrom(std::move(flush_data_task)))
+            {
+                // Merge successful, task was merged into last_task
+                flush_data_worker_ctx_.cv_.notify_one();
+                return;
+            }
+        }
+
+        // Could not merge, wait if queue is full
+        while (pending_flush_work_.size() >=
+               static_cast<size_t>(flush_data_worker_ctx_.worker_num_))
+        {
+            flush_data_worker_ctx_.cv_.wait(worker_lk);
+        }
+
+        // Add as new task
         pending_flush_work_.emplace_back(std::move(flush_data_task));
         flush_data_worker_ctx_.cv_.notify_one();
     }
@@ -5317,10 +5340,14 @@ void LocalCcShards::FlushCurrentFlushBuffer()
 
 void LocalCcShards::FlushData(std::unique_lock<std::mutex> &flush_worker_lk)
 {
-    // Retrieve first pending work and pop it.
+    // Retrieve first pending work and pop it (FIFO).
     std::unique_ptr<FlushDataTask> cur_work =
-        std::move(pending_flush_work_.back());
-    pending_flush_work_.pop_back();
+        std::move(pending_flush_work_.front());
+    pending_flush_work_.pop_front();
+
+    // Notify any threads waiting for queue space
+    flush_data_worker_ctx_.cv_.notify_all();
+
     flush_worker_lk.unlock();
 
     auto &flush_task_entries = cur_work->flush_task_entries_;
@@ -5518,10 +5545,27 @@ void LocalCcShards::FlushDataWorker()
                             cur_flush_buffer_.MoveFlushData(true);
                         if (flush_data_task != nullptr)
                         {
+                            // Try to merge with the last task if queue is not
+                            // empty Note: flush_worker_lk is already held here
+                            // (inside condition variable predicate)
+                            if (!pending_flush_work_.empty())
+                            {
+                                auto &last_task = pending_flush_work_.back();
+                                if (last_task->MergeFrom(
+                                        std::move(flush_data_task)))
+                                {
+                                    // Merge successful, task was merged into
+                                    // last_task
+                                    return true;
+                                }
+                            }
+
+                            // Add as new task. We just checked that
+                            // pending_flush_work_ is empty,
                             pending_flush_work_.emplace_back(
                                 std::move(flush_data_task));
+                            return true;
                         }
-                        return true;
                     }
                 }
 

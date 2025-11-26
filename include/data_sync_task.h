@@ -49,12 +49,9 @@ struct DataSyncStatus
 {
     explicit DataSyncStatus(NodeGroupId node_group_id,
                             int64_t node_group_term,
-                            bool need_truncate_log)
-        : node_group_id_(node_group_id),
-          node_group_term_(node_group_term),
-          need_truncate_log_(need_truncate_log)
-    {
-    }
+                            bool need_truncate_log);
+
+    ~DataSyncStatus();
 
     void SetNoTruncateLog()
     {
@@ -308,6 +305,54 @@ public:
     size_t GetFlushBufferSize() const
     {
         return max_pending_flush_size_;
+    }
+
+    /**
+     * @brief Merge all entries from another FlushDataTask into this one.
+     * @param other The FlushDataTask to merge from. It will be emptied after
+     * merging.
+     * @return true if merge was successful, false if merge would exceed
+     * max_pending_flush_size_
+     */
+    bool MergeFrom(std::unique_ptr<FlushDataTask> &&other)
+    {
+        // Lock both mutexes in consistent order (by address) to avoid deadlock
+        bthread::Mutex *m1 = &flush_task_entries_mux_;
+        bthread::Mutex *m2 = &other->flush_task_entries_mux_;
+        if (m1 > m2)
+        {
+            std::swap(m1, m2);
+        }
+
+        std::lock_guard<bthread::Mutex> lk1(*m1);
+        std::lock_guard<bthread::Mutex> lk2(*m2);
+
+        // Check if merge would exceed max size
+        if (pending_flush_size_ + other->pending_flush_size_ >
+            max_pending_flush_size_)
+        {
+            return false;
+        }
+
+        // Merge entries by table name
+        for (auto &[table_name, entries] : other->flush_task_entries_)
+        {
+            auto table_flush_entries_it =
+                flush_task_entries_.try_emplace(table_name);
+            auto &target_entries = table_flush_entries_it.first->second;
+            target_entries.insert(target_entries.end(),
+                                  std::make_move_iterator(entries.begin()),
+                                  std::make_move_iterator(entries.end()));
+        }
+
+        // Update size
+        pending_flush_size_ += other->pending_flush_size_;
+
+        // Clear the other task
+        other->pending_flush_size_ = 0;
+        other->flush_task_entries_.clear();
+
+        return true;
     }
 
     std::unique_ptr<FlushDataTask> MoveFlushData(bool force)

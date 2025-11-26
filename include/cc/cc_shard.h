@@ -404,9 +404,6 @@ public:
      */
     void NotifyCkpt(bool request_ckpt = true);
 
-    void SetWaitingCkpt(bool is_waiting);
-    bool IsWaitingCkpt();
-
     /**
      * @brief Dispatch heavy cpu-bound task, e.g. StoreRange::LoadSlice().
      * @param cc_shard_idx Execute the task on which cc_shard.

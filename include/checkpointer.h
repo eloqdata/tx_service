@@ -30,8 +30,6 @@
 #include <unordered_map>
 #include <vector>
 
-#include "cc/cc_entry.h"
-#include "cc/cc_request.h"
 #include "cc/local_cc_shards.h"
 #include "metrics.h"
 #include "sharder.h"
@@ -130,6 +128,21 @@ public:
         }
     }
 
+    void IncrementOngoingDataSyncCnt()
+    {
+        ongoing_data_sync_cnt_.fetch_add(1, std::memory_order_relaxed);
+    }
+
+    void DecrementOngoingDataSyncCnt()
+    {
+        ongoing_data_sync_cnt_.fetch_sub(1, std::memory_order_relaxed);
+    }
+
+    bool IsOngoingDataSync() const
+    {
+        return ongoing_data_sync_cnt_.load(std::memory_order_relaxed) > 0;
+    }
+
 private:
     enum struct Status
     {
@@ -149,6 +162,7 @@ private:
     const uint32_t checkpoint_interval_;
     std::chrono::system_clock::time_point last_checkpoint_ts_;
     uint32_t ckpt_delay_time_;  // unit: Microsecond
+    std::atomic<uint64_t> ongoing_data_sync_cnt_{0};
     TxService *tx_service_;
     TxLog *log_agent_;
 

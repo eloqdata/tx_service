@@ -26,6 +26,7 @@
 #include <condition_variable>
 #include <cstddef>
 #include <cstdint>
+#include <deque>
 #include <functional>
 #include <iostream>
 #include <map>
@@ -1384,16 +1385,6 @@ public:
         return enable_mvcc_;
     }
 
-    void SetWaitingCkpt(bool is_waiting)
-    {
-        is_waiting_ckpt_.store(is_waiting, std::memory_order_release);
-    }
-
-    bool IsWaitingCkpt()
-    {
-        return is_waiting_ckpt_.load(std::memory_order_acquire);
-    }
-
     TxService *GetTxService() const
     {
         return tx_service_;
@@ -2360,7 +2351,7 @@ private:
     // size, which will then be processed by flush data worker.
     FlushDataTask cur_flush_buffer_;
     // Flush task queue for flush data worker to process.
-    std::vector<std::unique_ptr<FlushDataTask>> pending_flush_work_;
+    std::deque<std::unique_ptr<FlushDataTask>> pending_flush_work_;
 
     void FlushDataWorker();
     void FlushData(std::unique_lock<std::mutex> &flush_worker_lk);

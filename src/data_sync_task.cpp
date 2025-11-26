@@ -24,9 +24,6 @@
 #include <absl/container/flat_hash_map.h>
 
 #include <mutex>
-#include <string_view>
-#include <unordered_map>
-#include <unordered_set>
 
 #include "cc_req_misc.h"
 #include "cc_shard.h"
@@ -40,6 +37,21 @@
 
 namespace txservice
 {
+
+DataSyncStatus::DataSyncStatus(NodeGroupId node_group_id,
+                               int64_t node_group_term,
+                               bool need_truncate_log)
+    : node_group_id_(node_group_id),
+      node_group_term_(node_group_term),
+      need_truncate_log_(need_truncate_log)
+{
+    Sharder::Instance().GetCheckpointer()->IncrementOngoingDataSyncCnt();
+}
+
+DataSyncStatus::~DataSyncStatus()
+{
+    Sharder::Instance().GetCheckpointer()->DecrementOngoingDataSyncCnt();
+}
 
 DataSyncTask::DataSyncTask(const TableName &table_name,
                            uint32_t ng_id,
