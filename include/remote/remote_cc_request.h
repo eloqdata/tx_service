@@ -121,6 +121,8 @@ public:
 
             if (core_cnt_ == 0 && !cce_addrs_.empty())
             {
+                assert(cce_addrs_.size() ==
+                       Sharder::Instance().GetLocalCcShardsCount());
                 Acknowledge();
             }
         }

@@ -203,6 +203,7 @@ void txservice::remote::RemoteAcquireAll::Reset(
     core_cnt_ = Sharder::Instance().GetLocalCcShardsCount();
     cc_res_.Reset();
     cc_res_.Value().Reset();
+    cce_addrs_.clear();
 
     output_msg_.clear_tx_number();
     output_msg_.clear_handler_addr();
