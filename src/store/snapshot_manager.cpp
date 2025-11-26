@@ -319,19 +319,20 @@ bool SnapshotManager::RunOneRoundCheckpoint(uint32_t node_group,
     using namespace txservice;
     auto &local_shards = *Sharder::Instance().GetLocalCcShards();
 
+    // Get table names in this node group, checkpointer should be TableName
+    // string owner.
+    // Use max number for ckpt ts to flush all in memory data to kv.
+    std::unordered_map<TableName, bool> tables =
+        local_shards.GetCatalogTableNameSnapshot(node_group, UINT64_MAX);
+
     std::shared_ptr<DataSyncStatus> data_sync_status =
         std::make_shared<DataSyncStatus>(node_group, ng_leader_term, true);
+    data_sync_status->SetNoTruncateLog();
 
     bool can_be_skipped = false;
     uint64_t last_ckpt_ts = Sharder::Instance().GetNodeGroupCkptTs(node_group);
     size_t core_cnt = local_shards.Count();
     CkptTsCc ckpt_req(core_cnt, node_group);
-    uint64_t ckpt_ts = ckpt_req.GetCkptTs();
-
-    // Get table names in this node group, checkpointer should be TableName
-    // string owner.
-    std::unordered_map<TableName, bool> tables =
-        local_shards.GetCatalogTableNameSnapshot(node_group, ckpt_ts);
 
     // Find minimum ckpt_ts from all the ccshards in parallel. ckpt_ts is
     // the minimum timestamp minus 1 among all the active transactions, thus
@@ -388,9 +389,7 @@ bool SnapshotManager::RunOneRoundCheckpoint(uint32_t node_group,
         [&data_sync_status]
         { return data_sync_status->unfinished_tasks_ == 0; });
 
-    // return success if all entries are scanned and flushed.
-    return (data_sync_status->err_code_ == CcErrorCode::NO_ERROR &&
-            data_sync_status->need_truncate_log_);
+    return (data_sync_status->err_code_ == CcErrorCode::NO_ERROR);
 }
 
 void SnapshotManager::UpdateBackupTaskStatus(
