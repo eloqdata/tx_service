@@ -3147,6 +3147,16 @@ void LocalCcShards::PostProcessRangePartitionDataSyncTask(
 void LocalCcShards::DataSyncForRangePartition(
     std::shared_ptr<DataSyncTask> data_sync_task, size_t worker_idx)
 {
+    int64_t allocated, committed;
+    mi_thread_stats(&allocated, &committed);
+    if (committed != 0)
+    {
+        LOG(INFO) << "ckpt range partition heap memory usage report, worker "
+                  << worker_idx << "committed " << committed << ", allocated "
+                  << allocated << ", frag ratio " << std::setprecision(2)
+                  << 100 * (static_cast<float>(committed - allocated) /
+                            static_cast<float>(committed));
+    }
     // Whether other task worker is processing this table.
     const TableName &table_name = data_sync_task->table_name_;
     uint32_t ng_id = data_sync_task->node_group_id_;
@@ -5610,7 +5620,8 @@ void LocalCcShards::SyncTableStatisticsWorker()
         statistics_worker_ctx_.cv_.wait_for(
             worker_lk,
             10s,
-            [this] {
+            [this]
+            {
                 return statistics_worker_ctx_.status_ ==
                        WorkerStatus::Terminated;
             });
@@ -5881,7 +5892,8 @@ void LocalCcShards::HeartbeatWorker()
         bool wait_res = heartbeat_worker_ctx_.cv_.wait_for(
             heartbeat_worker_lk,
             std::chrono::seconds(1),
-            [this] {
+            [this]
+            {
                 return heartbeat_worker_ctx_.status_ ==
                        WorkerStatus::Terminated;
             });
@@ -5969,7 +5981,8 @@ void LocalCcShards::PurgeDeletedData()
         bool wait_res = purge_deleted_worker_ctx_.cv_.wait_for(
             worker_lk,
             std::chrono::seconds(10),
-            [this] {
+            [this]
+            {
                 return purge_deleted_worker_ctx_.status_ ==
                        WorkerStatus::Terminated;
             });
