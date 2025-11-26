@@ -26,6 +26,7 @@
 #include <condition_variable>
 #include <cstddef>
 #include <cstdint>
+#include <deque>
 #include <functional>
 #include <iostream>
 #include <map>
@@ -2360,7 +2361,7 @@ private:
     // size, which will then be processed by flush data worker.
     FlushDataTask cur_flush_buffer_;
     // Flush task queue for flush data worker to process.
-    std::vector<std::unique_ptr<FlushDataTask>> pending_flush_work_;
+    std::deque<std::unique_ptr<FlushDataTask>> pending_flush_work_;
 
     void FlushDataWorker();
     void FlushData(std::unique_lock<std::mutex> &flush_worker_lk);
