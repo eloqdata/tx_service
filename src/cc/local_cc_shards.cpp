@@ -5709,7 +5709,7 @@ void LocalCcShards::FlushDataWorker()
                         current_flush_size != previous_flush_size;
                     previous_flush_size = current_flush_size;
                     previous_size_update_time = current_time;
-                    if (!flush_size_changed && current_flush_size > 0)
+                    if (flush_size_changed && current_flush_size > 0)
                     {
                         // data sync might be stuck due to lock conflict with
                         // DDL. Flush current flush buffer to release catalog
