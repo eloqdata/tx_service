@@ -1069,16 +1069,6 @@ void CcShard::NotifyCkpt(bool request_ckpt)
     }
 }
 
-void CcShard::SetWaitingCkpt(bool is_waiting)
-{
-    local_shards_.SetWaitingCkpt(is_waiting);
-}
-
-bool CcShard::IsWaitingCkpt()
-{
-    return local_shards_.IsWaitingCkpt();
-}
-
 void CcShard::DispatchTask(uint16_t cc_shard_idx,
                            std::function<bool(CcShard &)> task)
 {

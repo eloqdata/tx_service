@@ -2988,7 +2988,6 @@ void LocalCcShards::PostProcessRangePartitionDataSyncTask(
                                task->id_);
             }
             task->SetError(CcErrorCode::REQUESTED_NODE_NOT_LEADER);
-            SetWaitingCkpt(false);
             if (ng_term >= 0)
             {
                 Sharder::Instance().UnpinNodeGroupData(task->node_group_id_);
@@ -3042,7 +3041,6 @@ void LocalCcShards::PostProcessRangePartitionDataSyncTask(
             }
         }
 
-        bool reset_waiting_ckpt = false;
         if (task_ckpt_err == DataSyncTask::CkptErrorCode::NO_ERROR)
         {
             if (!task->during_split_range_)
@@ -3055,7 +3053,6 @@ void LocalCcShards::PostProcessRangePartitionDataSyncTask(
                                task->node_group_term_,
                                task->table_name_,
                                task->id_);
-                reset_waiting_ckpt = true;
             }
 
             task->SetFinish();
@@ -3101,8 +3098,6 @@ void LocalCcShards::PostProcessRangePartitionDataSyncTask(
                                task->node_group_term_,
                                task->table_name_,
                                task->id_);
-
-                reset_waiting_ckpt = true;
             }
 
             if (!Sharder::Instance().CheckLeaderTerm(task->node_group_id_,
@@ -3123,13 +3118,6 @@ void LocalCcShards::PostProcessRangePartitionDataSyncTask(
                 txservice::AbortTx(data_sync_txm);
             }
             task->SetError(CcErrorCode::DATA_STORE_ERR);
-        }
-
-        if (reset_waiting_ckpt)
-        {
-            // Reset waiting ckpt flag. Shards should be able to request ckpt
-            // again if no cc entries can be kicked out.
-            SetWaitingCkpt(false);
         }
     }
 
@@ -4083,10 +4071,6 @@ void LocalCcShards::PostProcessHashPartitionDataSyncTask(
                 CommitTx(data_sync_txm);
             }
 
-            // Reset waiting ckpt flag. Shards should be able to request
-            // ckpt again if no cc entries can be kicked out.
-            SetWaitingCkpt(false);
-
             PopPendingTask(task->node_group_id_,
                            task->node_group_term_,
                            task->table_name_,
@@ -4140,8 +4124,6 @@ void LocalCcShards::PostProcessHashPartitionDataSyncTask(
                            task->node_group_term_,
                            task->table_name_,
                            task->id_);
-
-            SetWaitingCkpt(false);
         }
         else
         {
@@ -4149,7 +4131,6 @@ void LocalCcShards::PostProcessHashPartitionDataSyncTask(
                    DataSyncTask::CkptErrorCode::PERSIST_KV_ERROR);
             txservice::AbortTx(data_sync_txm);
             task->SetError(CcErrorCode::DATA_STORE_ERR);
-            SetWaitingCkpt(false);
         }
     }
     if (is_scan_task)

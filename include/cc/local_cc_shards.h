@@ -1385,16 +1385,6 @@ public:
         return enable_mvcc_;
     }
 
-    void SetWaitingCkpt(bool is_waiting)
-    {
-        is_waiting_ckpt_.store(is_waiting, std::memory_order_release);
-    }
-
-    bool IsWaitingCkpt()
-    {
-        return is_waiting_ckpt_.load(std::memory_order_acquire);
-    }
-
     TxService *GetTxService() const
     {
         return tx_service_;
