@@ -20,6 +20,7 @@
  *
  */
 #include <gflags/gflags.h>
+
 #include <memory>
 
 #include "INIReader.h"
@@ -238,19 +239,17 @@ bool DataSubstrate::InitializeStorageHandler(const INIReader &config_reader)
     }
     else
     {
-        if (network_config_ptr->ng_configs.size() > 1)
-        {
-            LOG(ERROR) << "EloqDS multi-node cluster must specify "
-                          "eloq_dss_peer_node.";
-            return false;
-        }
-
-        assert(dss_leader_id != EloqDS::UNKNOWN_DSS_LEADER_NODE_ID);
         // Single node or bootstraping multi-node cluster
         std::unordered_map<uint32_t, uint32_t> ng_leaders;
-        for (const auto &[ng_id, ng_config] : network_config_ptr->ng_configs)
+        // If dss_leader_id is UNKNOWN_DSS_LEADER_NODE_ID, skip setting
+        // ng_leaders
+        if (dss_leader_id != EloqDS::UNKNOWN_DSS_LEADER_NODE_ID)
         {
-            ng_leaders.emplace(ng_id, dss_leader_id);
+            for (const auto &[ng_id, ng_config] :
+                 network_config_ptr->ng_configs)
+            {
+                ng_leaders.emplace(ng_id, dss_leader_id);
+            }
         }
         EloqDS::DataStoreServiceClient::TxConfigsToDssClusterConfig(
             dss_node_id, network_config_ptr->ng_configs, ng_leaders, ds_config);
