@@ -350,7 +350,7 @@ public:
 
                     if (Sharder::Instance().GetLocalCcShards()->store_hd_ !=
                             nullptr &&
-                        !table_name_.IsHashPartitioned() &&
+                        !table_key->Name().IsHashPartitioned() &&
                         !shard_->LoadRangesAndStatisticsNx(
                             catalog_entry->schema_.get(),
                             req.NodeGroupId(),
@@ -1179,7 +1179,7 @@ public:
                         // Initialize table statistics before create ccmap.
                         if (Sharder::Instance().GetLocalCcShards()->store_hd_ !=
                                 nullptr &&
-                            !table_name_.IsHashPartitioned() &&
+                            !table_key->Name().IsHashPartitioned() &&
                             !shard_->LoadRangesAndStatisticsNx(
                                 catalog_entry->schema_.get(),
                                 req.NodeGroupId(),
@@ -1453,7 +1453,7 @@ public:
             {
                 if (Sharder::Instance().GetLocalCcShards()->store_hd_ !=
                         nullptr &&
-                    !table_name_.IsHashPartitioned() &&
+                    !table_name.IsHashPartitioned() &&
                     !shard_->LoadRangesAndStatisticsNx(
                         catalog_entry->schema_.get(),
                         req.NodeGroupId(),
@@ -1765,7 +1765,7 @@ public:
                     // Initialize table statistics before create ccmap.
                     if (Sharder::Instance().GetLocalCcShards()->store_hd_ !=
                             nullptr &&
-                        !table_name_.IsHashPartitioned() &&
+                        !table_name.IsHashPartitioned() &&
                         !shard_->LoadRangesAndStatisticsNx(
                             catalog_entry->schema_.get(),
                             req.NodeGroupId(),
@@ -2367,7 +2367,7 @@ public:
                         // Initialize table statistics before create ccmap.
                         if (Sharder::Instance().GetLocalCcShards()->store_hd_ !=
                                 nullptr &&
-                            !table_name_.IsHashPartitioned() &&
+                            !table_name.IsHashPartitioned() &&
                             !shard_->LoadRangesAndStatisticsNx(
                                 catalog_entry->schema_.get(),
                                 cc_ng_id,
