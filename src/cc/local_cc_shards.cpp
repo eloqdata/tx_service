@@ -5679,9 +5679,9 @@ void LocalCcShards::FlushData(std::unique_lock<std::mutex> &flush_worker_lk)
     uint64_t old_usage = data_sync_mem_controller_.DeallocateFlushMemQuota(
         cur_work->pending_flush_size_);
 
-    DLOG(INFO) << "DelocateFlushDataMemQuota old_usage: " << old_usage
-               << " new_usage: " << old_usage - cur_work->pending_flush_size_
-               << " quota: " << data_sync_mem_controller_.FlushMemoryQuota();
+    LOG(INFO) << "DelocateFlushDataMemQuota old_usage: " << old_usage
+              << " new_usage: " << old_usage - cur_work->pending_flush_size_
+              << " quota: " << data_sync_mem_controller_.FlushMemoryQuota();
 
     auto post_process_start_time = std::chrono::steady_clock::now();
 
