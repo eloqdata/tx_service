@@ -2271,6 +2271,7 @@ public:
         int64_t ng_term,
         TxNumber txn,
         uint64_t read_ts,
+        int32_t object_type,
         bool is_read_snapshot,
         bool &need_fetch_snapshot,
         bool keep_deleted = true,
@@ -2287,7 +2288,7 @@ public:
             need_fetch_snapshot = false;
             TemplateScanTuple<KeyT, ValueT> *scan_tuple =
                 typed_cache->AddScanTuple();
-            ScanGap(key, cce, scan_tuple, ng_id, ng_term);
+            ScanGap(key, cce, scan_tuple, ng_id, ng_term, object_type);
             break;
         }
         case ScanType::ScanBoth:
@@ -2300,6 +2301,7 @@ public:
                 ng_term,
                 txn,
                 read_ts,
+                object_type,
                 is_read_snapshot,
                 need_fetch_snapshot,
                 keep_deleted,
@@ -2317,6 +2319,7 @@ public:
                 ng_term,
                 txn,
                 read_ts,
+                object_type,
                 is_read_snapshot,
                 need_fetch_snapshot,
                 keep_deleted,
@@ -2483,12 +2486,21 @@ public:
                 auto end_cce = static_cast<
                     CcEntry<KeyT, ValueT, VersionedRecord, RangePartitioned> *>(
                     end_lock->GetCcEntry());
+
                 assert(end_cce->GetCcPage() != nullptr);
 
+                CcPage<KeyT, ValueT, VersionedRecord, RangePartitioned>
+                    *end_ccp = static_cast<
+                        CcPage<KeyT, ValueT, VersionedRecord, RangePartitioned>
+                            *>(end_cce->GetCcPage());
+
                 // Release read intent lock
-                end_it = Iterator(end_cce, ccp, &neg_inf_);
-                ReleaseCceLock(
-                    end_cce->GetKeyLock(), end_cce, req.Txn(), ng_id);
+                end_it = Iterator(end_cce, end_ccp, &neg_inf_);
+                ReleaseCceLock(end_cce->GetKeyLock(),
+                               end_cce,
+                               req.Txn(),
+                               ng_id,
+                               LockType::ReadIntent);
             }
 
             scan_ccm_it = Iterator(prior_cce, ccp, &neg_inf_);
@@ -2500,8 +2512,11 @@ public:
             if (blocking_type == ScanBlockingType::NoBlocking)
             {
                 // Release read intent lock
-                ReleaseCceLock(
-                    prior_cce->GetKeyLock(), prior_cce, req.Txn(), ng_id);
+                ReleaseCceLock(prior_cce->GetKeyLock(),
+                               prior_cce,
+                               req.Txn(),
+                               ng_id,
+                               LockType::ReadIntent);
             }
             else
             {
@@ -2531,6 +2546,8 @@ public:
                     return req.SetError(shard_->core_id_, lock_pair.second);
                 }
 
+                int32_t object_type = GetObjectType(prior_cce);
+
                 AddScanTuple(prior_cce_key,
                              prior_cce,
                              typed_cache,
@@ -2539,6 +2556,7 @@ public:
                              ng_term,
                              req.Txn(),
                              req.ReadTimestamp(),
+                             object_type,
                              is_read_snapshot,
                              need_fetch_snapshot,
                              true,
@@ -2611,6 +2629,7 @@ public:
                     continue;
                 }
 
+                int32_t object_type = GetObjectType(cce);
                 RecordStatus status =
                     cce->PayloadStatus() == RecordStatus::Unknown
                         ? RecordStatus::Deleted
@@ -2692,6 +2711,7 @@ public:
                              ng_term,
                              req.Txn(),
                              req.ReadTimestamp(),
+                             object_type,
                              is_read_snapshot,
                              need_fetch_snapshot,
                              true,
@@ -2755,6 +2775,7 @@ public:
         int64_t ng_term,
         TxNumber txn,
         uint64_t read_ts,
+        int32_t object_type,
         bool is_read_snapshot,
         bool &need_fetch_snapshot,
         bool keep_deleted = true,
@@ -2773,7 +2794,7 @@ public:
                 remote::ScanTuple_msg *tuple =
                     remote_cache->GetMemoryCache()->add_scan_tuple();
                 remote_cache->AddHashCode(key->Hash());
-                ScanGap(key, cce, tuple, ng_term);
+                ScanGap(key, cce, tuple, ng_term, object_type);
             }
             break;
         case ScanType::ScanBoth:
@@ -2786,6 +2807,7 @@ public:
                 ng_term,
                 txn,
                 read_ts,
+                object_type,
                 is_read_snapshot,
                 need_fetch_snapshot,
                 keep_deleted,
@@ -2803,6 +2825,7 @@ public:
                 ng_term,
                 txn,
                 read_ts,
+                object_type,
                 is_read_snapshot,
                 need_fetch_snapshot,
                 keep_deleted,
@@ -3124,8 +3147,11 @@ public:
 
                 // Release read intent lock
                 end_it = Iterator(end_cce, ccp, &neg_inf_);
-                ReleaseCceLock(
-                    end_cce->GetKeyLock(), end_cce, req.Txn(), ng_id);
+                ReleaseCceLock(end_cce->GetKeyLock(),
+                               end_cce,
+                               req.Txn(),
+                               ng_id,
+                               LockType::ReadIntent);
             }
 
             scan_ccm_it = Iterator(prior_cce, ccp, &neg_inf_);
@@ -3137,8 +3163,11 @@ public:
             if (blocking_type == ScanBlockingType::NoBlocking)
             {
                 // Release read intent lock
-                ReleaseCceLock(
-                    prior_cce->GetKeyLock(), prior_cce, req.Txn(), ng_id);
+                ReleaseCceLock(prior_cce->GetKeyLock(),
+                               prior_cce,
+                               req.Txn(),
+                               ng_id,
+                               LockType::ReadIntent);
             }
             else
             {
@@ -3168,6 +3197,8 @@ public:
                     return req.SetError(shard_->core_id_, lock_pair.second);
                 }
 
+                int32_t object_type = GetObjectType(prior_cce);
+
                 AddScanTupleMsg(prior_cce_key,
                                 prior_cce,
                                 remote_cache,
@@ -3176,6 +3207,7 @@ public:
                                 ng_term,
                                 req.Txn(),
                                 req.ReadTimestamp(),
+                                object_type,
                                 is_read_snapshot,
                                 need_fetch_snapshot,
                                 true,
@@ -3239,6 +3271,8 @@ public:
             {
                 continue;
             }
+
+            int32_t object_type = GetObjectType(cce);
 
             RecordStatus status = cce->PayloadStatus() == RecordStatus::Unknown
                                       ? RecordStatus::Deleted
@@ -3316,6 +3350,7 @@ public:
                             ng_term,
                             req.Txn(),
                             req.ReadTimestamp(),
+                            object_type,
                             is_read_snapshot,
                             need_fetch_snapshot,
                             true,
@@ -3727,6 +3762,7 @@ public:
                              ng_term,
                              req.Txn(),
                              req.ReadTimestamp(),
+                             -1,
                              is_read_snapshot,
                              need_fetch_snapshot,
                              is_locked,
@@ -3931,6 +3967,7 @@ public:
                                  ng_term,
                                  req.Txn(),
                                  req.ReadTimestamp(),
+                                 -1,
                                  is_read_snapshot,
                                  need_fetch_snapshot,
                                  is_locked,
@@ -10631,6 +10668,7 @@ protected:
                  int64_t ng_term,
                  TxNumber txn,
                  uint64_t read_ts,
+                 int32_t object_type,
                  bool is_read_snapshot,
                  bool &need_fetch_snapshot,
                  bool keep_deleted,
@@ -10666,6 +10704,7 @@ protected:
             }
 
             tuple = typed_cache->AddScanTuple();
+            tuple->obj_type_ = object_type;
 
             if (is_require_keys ||
                 v_rec.payload_status_ != RecordStatus::Normal)
@@ -10705,7 +10744,9 @@ protected:
             if (check_dirty_status)
             {
                 assert(!VersionedRecord);
+
                 tuple = typed_cache->AddScanTuple();
+                tuple->obj_type_ = object_type;
                 if (is_require_keys)
                 {
                     tuple->KeyObj().Copy(*key);
@@ -10735,6 +10776,7 @@ protected:
                 {
                     assert(false && "Unknown dirty record status");
                 }
+
                 tuple->key_ts_ = cce->CommitTs() + 1;
             }
             else
@@ -10744,6 +10786,7 @@ protected:
                     (rec_status == RecordStatus::Deleted && keep_deleted))
                 {
                     tuple = typed_cache->AddScanTuple();
+                    tuple->obj_type_ = object_type;
                 }
                 else
                 {
@@ -10969,6 +11012,7 @@ protected:
                  int64_t ng_term,
                  TxNumber txn,
                  uint64_t read_ts,
+                 int32_t object_type,
                  bool is_read_snapshot,
                  bool &need_fetch_snapshot,
                  bool keep_deleted,
@@ -11008,6 +11052,7 @@ protected:
 
             tuple = remote_cache->GetMemoryCache()->add_scan_tuple();
             remote_cache->AddHashCode(key->Hash());
+            tuple->set_obj_type(object_type);
 
             if (is_require_keys)
             {
@@ -11052,6 +11097,7 @@ protected:
 
                 tuple = remote_cache->GetMemoryCache()->add_scan_tuple();
                 remote_cache->AddHashCode(key->Hash());
+                tuple->set_obj_type(object_type);
 
                 tuple->mutable_key()->assign(key->Data(), key->Size());
                 tuple_size += key->Size();
@@ -11097,6 +11143,7 @@ protected:
                 {
                     tuple = remote_cache->GetMemoryCache()->add_scan_tuple();
                     remote_cache->AddHashCode(key->Hash());
+                    tuple->set_obj_type(object_type);
                 }
                 else
                 {
@@ -11159,11 +11206,13 @@ protected:
                  CcEntry<KeyT, ValueT, VersionedRecord, RangePartitioned> *cce,
                  TemplateScanTuple<KeyT, ValueT> *tuple,
                  uint32_t ng_id,
-                 int64_t ng_term) const
+                 int64_t ng_term,
+                 int32_t object_type) const
     {
         tuple->key_ts_ = 0;
         tuple->gap_ts_ = 0;
         tuple->cce_ptr_ = cce;
+        tuple->obj_type_ = object_type;
         tuple->cce_addr_.SetCceLock(
             reinterpret_cast<uint64_t>(cce->GetKeyGapLockAndExtraData()),
             ng_term,
@@ -11174,10 +11223,12 @@ protected:
     void ScanGap(const KeyT *key,
                  CcEntry<KeyT, ValueT, VersionedRecord, RangePartitioned> *cce,
                  remote::ScanTuple_msg *tuple,
-                 int64_t ng_term) const
+                 int64_t ng_term,
+                 int32_t object_type) const
     {
         tuple->set_key_ts(0);
         tuple->set_gap_ts(0);
+        tuple->set_obj_type(object_type);
 
         remote::CceAddr_msg *cce_addr = tuple->mutable_cce_addr();
         cce_addr->set_cce_lock_ptr(
@@ -11245,6 +11296,12 @@ protected:
         const std::string_view &scan_pattern)
     {
         return true;
+    }
+
+    virtual int32_t GetObjectType(
+        CcEntry<KeyT, ValueT, VersionedRecord, RangePartitioned> *cce)
+    {
+        return -1;
     }
 
     virtual void CreateDirtyPayloadFromPendingCommand(
@@ -11752,6 +11809,7 @@ void BackfillForScanNextBatch(FetchBucketDataCc *fetch_cc,
             scan_tuple->cce_addr_.SetCceLock(0, -1, 0, 0);
             scan_tuple->KeyObj().SetPackedKey(item.key_str_.data(),
                                               item.key_str_.size());
+            scan_tuple->obj_type_ = static_cast<int8_t>(*item.rec_str_.data());
 
             if (!item.is_deleted_)
             {
@@ -11840,6 +11898,10 @@ void BackfillForScanNextBatch(FetchBucketDataCc *fetch_cc,
             cce_addr->set_term(-1);
             cce_addr->set_core_id(0);
             cce_addr->set_node_group_id(0);
+
+            int8_t object_type = static_cast<int8_t>(*item.rec_str_.data());
+
+            scan_tuple->set_obj_type(object_type);
 
             if (!item.is_deleted_)
             {

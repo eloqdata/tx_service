@@ -959,6 +959,7 @@ message ScanTuple_msg {
     uint64 key_ts = 4;
     uint64 gap_ts = 5;
     CceAddr_msg cce_addr = 6;
+    int32 obj_type = 7;
 }
 
 message RemoteTxKey {

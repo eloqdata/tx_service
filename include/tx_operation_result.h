@@ -819,6 +819,10 @@ public:
                 }
             }
         }
+        for (const auto &[_, buckets] : *buckets)
+        {
+            bucket_number_ += buckets.size();
+        }
 
         assert(node_group_terms_.size() > 0);
     }
@@ -826,13 +830,15 @@ public:
     BucketScanPlan() = default;
     BucketScanPlan(const BucketScanPlan &) = delete;
     BucketScanPlan &operator=(const BucketScanPlan &) = delete;
-    BucketScanPlan(BucketScanPlan &&other)
+    BucketScanPlan(BucketScanPlan &&other) noexcept
         : plan_index_(other.plan_index_),
+          bucket_number_(other.bucket_number_),
           buckets_(other.buckets_),
           current_position_(std::move(other.current_position_)),
           node_group_terms_(std::move(other.node_group_terms_))
     {
         other.buckets_ = nullptr;
+        other.bucket_number_ = 0;
     }
 
     BucketScanPlan &operator=(BucketScanPlan &&other) noexcept
@@ -905,8 +911,14 @@ public:
         return current_position_;
     }
 
+    size_t BucketNumber() const
+    {
+        return bucket_number_;
+    }
+
 private:
     size_t plan_index_{0};
+    size_t bucket_number_{0};
     absl::flat_hash_map<NodeGroupId, std::vector<uint16_t>> *buckets_{nullptr};
     // <pause key, is_drained>
     absl::flat_hash_map<NodeGroupId,
