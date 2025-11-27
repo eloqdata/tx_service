@@ -218,6 +218,12 @@ public:
         return false;
     }
 
+    virtual bool UpdateRangeSlices(
+        std::vector<UpdateRangeSlicesReq> &update_range_slice_reqs)
+    {
+        return false;
+    }
+
     /**
      * @brief Upsert list of ranges into range table. This will also update
      * range slice sizes.

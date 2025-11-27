@@ -700,6 +700,59 @@ public:
     std::string kv_end_key_;
 };
 
+struct UpdateRangeSlicesReq
+{
+    UpdateRangeSlicesReq(const TableName *table_name,
+                         uint64_t ckpt_ts,
+                         TxKey &&start_key,
+                         std::vector<const txservice::StoreSlice *> &&slices,
+                         int32_t partition_id,
+                         uint64_t range_version)
+        : table_name_(table_name),
+          ckpt_ts_(ckpt_ts),
+          start_key_(std::move(start_key)),
+          range_slices_(std::move(slices)),
+          partition_id_(partition_id),
+          range_version_(range_version)
+    {
+    }
+
+    UpdateRangeSlicesReq(const UpdateRangeSlicesReq &) = delete;
+    UpdateRangeSlicesReq &operator=(const UpdateRangeSlicesReq &) = delete;
+
+    UpdateRangeSlicesReq(UpdateRangeSlicesReq &&other) noexcept
+        : table_name_(std::move(other.table_name_)),
+          ckpt_ts_(std::move(other.ckpt_ts_)),
+          start_key_(std::move(other.start_key_)),
+          range_slices_(std::move(other.range_slices_)),
+          partition_id_(std::move(other.partition_id_)),
+          range_version_(std::move(other.range_version_))
+    {
+    }
+
+    UpdateRangeSlicesReq &operator=(UpdateRangeSlicesReq &&other) noexcept
+    {
+        if (this != &other)
+        {
+            table_name_ = std::move(other.table_name_);
+            ckpt_ts_ = std::move(other.ckpt_ts_);
+            start_key_ = std::move(other.start_key_);
+            range_slices_ = std::move(other.range_slices_);
+            partition_id_ = std::move(other.partition_id_);
+            range_version_ = std::move(other.range_version_);
+        }
+
+        return *this;
+    }
+
+    const TableName *table_name_{nullptr};
+    uint64_t ckpt_ts_{UINT64_MAX};
+    TxKey start_key_;
+    std::vector<const StoreSlice *> range_slices_;
+    uint32_t partition_id_{UINT32_MAX};
+    uint64_t range_version_{UINT64_MAX};
+};
+
 struct FetchSnapshotCc;
 typedef void (*OnFetchedSnapshot)(FetchSnapshotCc *fetch_cc,
                                   CcRequestBase *requester);

@@ -1848,6 +1848,13 @@ private:
         DataSyncTask::CkptErrorCode ckpt_err,
         bool is_scan_task = true);
 
+    void PostProcessRangePartitionFlushTaskEntries(
+        std::unordered_map<
+            std::basic_string_view<char>,
+            std::vector<std::unique_ptr<txservice::FlushTaskEntry>>>
+            &flush_task_entries,
+        DataSyncTask::CkptErrorCode ckpt_err);
+
     const uint32_t node_id_;
     // Native node group
     const NodeGroupId ng_id_;
@@ -2150,8 +2157,6 @@ private:
             // Allocate the memory quota
             uint64_t old_usage = flush_data_mem_usage_;
             flush_data_mem_usage_ += quota;
-
-            LOG(INFO) << "yf: flush data mem usage = " << flush_data_mem_usage_;
             return old_usage;
         }
 
@@ -2330,6 +2335,8 @@ private:
                           const TxKey *start_key,
                           const TxKey *end_key,
                           bool flush_res);
+
+    bool UpdateStoreSlices(std::vector<FlushTaskEntry *> &task);
 
     bool GetNextRangePartitionId(const TableName &tablename,
                                  const TableSchema *table_schema,
