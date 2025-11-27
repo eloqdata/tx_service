@@ -2150,6 +2150,8 @@ private:
             // Allocate the memory quota
             uint64_t old_usage = flush_data_mem_usage_;
             flush_data_mem_usage_ += quota;
+
+            LOG(INFO) << "yf: flush data mem usage = " << flush_data_mem_usage_;
             return old_usage;
         }
 
