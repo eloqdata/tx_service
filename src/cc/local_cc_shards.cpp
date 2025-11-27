@@ -5571,7 +5571,7 @@ void LocalCcShards::FlushData(std::unique_lock<std::mutex> &flush_worker_lk)
     }
 
     std::unordered_set<uint16_t> updated_ckpt_ts_core_ids;
-    auto start_time = std::chrono::steady_clock::now();
+    auto update_cce_start_time = std::chrono::steady_clock::now();
     // Update cce ckpt ts in memory
     if (succ)
     {
@@ -5632,6 +5632,14 @@ void LocalCcShards::FlushData(std::unique_lock<std::mutex> &flush_worker_lk)
         }
     }
 
+    auto update_cce_stop_time = std::chrono::steady_clock::now();
+    LOG(INFO) << "yf: FlushData update cce, duration="
+              << std::chrono::duration_cast<std::chrono::microseconds>(
+                     update_cce_stop_time - update_cce_start_time)
+                     .count();
+
+    auto reset_start_time = std::chrono::steady_clock::now();
+
     // Notify cc shards that dirty data has been flushed. This will re-enqueue
     // kickout data cc reqs if there are any.
     WaitableCc reset_cc(
@@ -5647,6 +5655,12 @@ void LocalCcShards::FlushData(std::unique_lock<std::mutex> &flush_worker_lk)
     }
     reset_cc.Wait();
 
+    auto reset_stop_time = std::chrono::steady_clock::now();
+    LOG(INFO) << "yf: FlushData reset cc duration="
+              << std::chrono::duration_cast<std::chrono::microseconds>(
+                     reset_stop_time - reset_start_time)
+                     .count();
+
     auto ckpt_err = succ ? DataSyncTask::CkptErrorCode::NO_ERROR
                          : DataSyncTask::CkptErrorCode::FLUSH_ERROR;
 
@@ -5657,6 +5671,8 @@ void LocalCcShards::FlushData(std::unique_lock<std::mutex> &flush_worker_lk)
     DLOG(INFO) << "DelocateFlushDataMemQuota old_usage: " << old_usage
                << " new_usage: " << old_usage - cur_work->pending_flush_size_
                << " quota: " << data_sync_mem_controller_.FlushMemoryQuota();
+
+    auto post_process_start_time = std::chrono::steady_clock::now();
 
     for (auto &[table_name, entries] : flush_task_entries)
     {
@@ -5681,11 +5697,11 @@ void LocalCcShards::FlushData(std::unique_lock<std::mutex> &flush_worker_lk)
         }
     }
 
-    auto stop_time = std::chrono::steady_clock::now();
+    auto post_process_stop_time = std::chrono::steady_clock::now();
     auto duration = std::chrono::duration_cast<std::chrono::microseconds>(
-                        stop_time - start_time)
+                        post_process_stop_time - post_process_start_time)
                         .count();
-    LOG(INFO) << "yf: FlushData finished, duration=" << duration;
+    LOG(INFO) << "yf: FlushData post process, duration=" << duration;
 
     flush_worker_lk.lock();
 }
