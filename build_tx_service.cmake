@@ -12,7 +12,7 @@ if(EXT_TX_PROC_ENABLED)
     add_definitions(-DEXT_TX_PROC_ENABLED)
 endif()
 
-option(ELOQ_MODULE_ENABLED "Register the tx service as an ELOQ module." OFF)
+option(ELOQ_MODULE_ENABLED "Register the tx service as an ELOQ module." ON)
 message(NOTICE "Tx service ELOQ_MODULE_ENABLED : ${ELOQ_MODULE_ENABLED}")
 
 if(ELOQ_MODULE_ENABLED)

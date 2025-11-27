@@ -288,7 +288,7 @@ bool DataSubstrate::InitializeStorageHandler(const INIReader &config_reader)
     // we always set create_if_missing to true
     // since non conflicts will happen under
     // multi-node deployment.
-    ret = data_store_service_->StartService(true, dss_leader_id, dss_node_id);
+    ret = data_store_service_->StartService(true);
 #else
     ret = data_store_service_->StartService(
         (core_config_.bootstrap || is_single_node));
