@@ -3044,11 +3044,13 @@ void LocalCcShards::PostProcessRangePartitionDataSyncTask(
             }
             auto updata_store_slice_stop_time =
                 std::chrono::steady_clock::now();
+            /*
             LOG(INFO) << "yf: update store slice time = "
                       << std::chrono::duration_cast<std::chrono::microseconds>(
                              updata_store_slice_stop_time -
                              updata_store_slice_start_time)
                              .count();
+            */
         }
 
         if (task_ckpt_err == DataSyncTask::CkptErrorCode::NO_ERROR)
@@ -5857,8 +5859,8 @@ bool LocalCcShards::UpdateStoreSlice(const TableName &table_name,
     // case, this job will be done in the split range operation.
     if (start_key == nullptr && flush_res && range_updated)
     {
-        success = range->UpdateRangeSlicesInStore(
-            table_name, ckpt_ts, range_version, store_hd_);
+        // success = range->UpdateRangeSlicesInStore(
+        //    table_name, ckpt_ts, range_version, store_hd_);
     }
     // else: SplitFlushRangeOp will update range slice in store
     return success;
