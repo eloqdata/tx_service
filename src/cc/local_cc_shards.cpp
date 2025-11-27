@@ -3014,6 +3014,8 @@ void LocalCcShards::PostProcessRangePartitionDataSyncTask(
 
         if (task_ckpt_err == DataSyncTask::CkptErrorCode::NO_ERROR)
         {
+            auto updata_store_slice_start_time =
+                std::chrono::steady_clock::now();
             // update Update the slice size.
             while (!UpdateStoreSlice(task->table_name_,
                                      task->data_sync_ts_,
@@ -3040,6 +3042,13 @@ void LocalCcShards::PostProcessRangePartitionDataSyncTask(
                     break;
                 }
             }
+            auto updata_store_slice_stop_time =
+                std::chrono::steady_clock::now();
+            LOG(INFO) << "yf: update store slice time = "
+                      << std::chrono::duration_cast<std::chrono::microseconds>(
+                             updata_store_slice_stop_time -
+                             updata_store_slice_start_time)
+                             .count();
         }
 
         if (task_ckpt_err == DataSyncTask::CkptErrorCode::NO_ERROR)
