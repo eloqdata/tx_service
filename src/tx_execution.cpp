@@ -3200,6 +3200,7 @@ void TransactionExecution::PostProcess(ScanNextOperation &scan_next)
                                                           RecordStatus::Normal
                                                       ? cc_scan_tuple->Record()
                                                       : nullptr;
+
                             scan_batch.emplace_back(cc_scan_tuple->Key(),
                                                     const_cast<TxRecord *>(rec),
                                                     cc_scan_tuple->rec_status_,

@@ -1261,7 +1261,6 @@ void txservice::LocalCcHandler::ScanNextBatch(
     if (node_id == cc_shards_.node_id_)
     {
         hd_res.Value().is_local_ = true;
-
         ScanSliceCc *req = scan_slice_pool.NextRequest();
         req->Set(tbl_name,
                  schema_version,
