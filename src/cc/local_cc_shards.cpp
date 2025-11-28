@@ -3152,7 +3152,7 @@ void LocalCcShards::DataSyncForRangePartition(
     if (committed != 0)
     {
         LOG(INFO) << "ckpt range partition heap memory usage report, worker "
-                  << worker_idx << "committed " << committed << ", allocated "
+                  << worker_idx << " committed " << committed << ", allocated "
                   << allocated << ", frag ratio " << std::setprecision(2)
                   << 100 * (static_cast<float>(committed - allocated) /
                             static_cast<float>(committed));

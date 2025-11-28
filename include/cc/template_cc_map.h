@@ -5653,9 +5653,8 @@ public:
         {
             next_pause_key = key_it->first->CloneTxKey();
         }
-        else if (slice_pinned)
+        if (slice_pinned)
         {
-            assert(no_more_data);
             // Unpin slice
             req.slice_ids_[shard_->core_id_].Unpin();
             req.slice_ids_[shard_->core_id_].Reset();
