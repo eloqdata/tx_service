@@ -249,7 +249,8 @@ public:
             std::unordered_map<uint32_t, std::vector<NodeConfig>> *ng_configs,
             uint64_t cluster_config_version,
             metrics::MetricsRegistry *metrics_registry = nullptr,
-            metrics::CommonLabels common_labels = {});
+            metrics::CommonLabels common_labels = {},
+            uint32_t range_slice_memory_limit_percent = 10);
 
     void Init();
 

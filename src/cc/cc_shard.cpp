@@ -68,7 +68,8 @@ CcShard::CcShard(
     std::unordered_map<uint32_t, std::vector<NodeConfig>> *ng_configs,
     uint64_t cluster_config_version,
     metrics::MetricsRegistry *metrics_registry,
-    metrics::CommonLabels common_labels)
+    metrics::CommonLabels common_labels,
+    uint32_t range_slice_memory_limit_percent)
     : core_id_(core_id),
       core_cnt_(core_cnt),
       ng_id_(ng_id),
@@ -100,10 +101,13 @@ CcShard::CcShard(
       active_si_txs_()
 {
     // memory_limit_ and log_limit_ are calculated at shard level.
-    // reserve 5% for range slice info, 10% for data sync heap, 5% for key cache
-    memory_limit_ = (uint64_t) MB(node_memory_limit_mb) *
-                    (txservice_enable_key_cache ? 0.9 : 0.95);
-
+    // Reserve range_slice_memory_limit_percent% for range slice info.
+    // We update this to dynamically reserve the configured range slice percentage.
+    double range_slice_reserve_ratio = static_cast<double>(range_slice_memory_limit_percent) / 100.0;
+    // 7.5% for data sync memory usage
+    double memory_usage_ratio = 1.0 - range_slice_reserve_ratio - 0.075;
+    
+    memory_limit_ = static_cast<uint64_t>(MB(node_memory_limit_mb) * memory_usage_ratio);
     memory_limit_ /= core_cnt_;
     log_limit_ = (uint64_t) MB(node_log_limit_mb);
     log_limit_ /= core_cnt_;
