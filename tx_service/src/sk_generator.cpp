@@ -458,7 +458,6 @@ void SkGenerator::ScanAndEncodeIndex(const TxKey *start_key,
                         // Finish the pack sk operation
                         task_result_ = CcErrorCode::PACK_SK_ERR;
                         pack_sk_err_ = std::move(sk_encoder->GetError());
-                        scan_req.UnpinSlices();
                         return;
                     }
                 } /* End of each key */
@@ -475,7 +474,6 @@ void SkGenerator::ScanAndEncodeIndex(const TxKey *start_key,
                             << node_group_id_;
                         task_status_->TerminateGenerateSk();
                         task_result_ = CcErrorCode::TX_NODE_NOT_LEADER;
-                        scan_req.UnpinSlices();
                         return;
                     }
                     // Update the last finished key.
@@ -524,7 +522,6 @@ void SkGenerator::ScanAndEncodeIndex(const TxKey *start_key,
                        << "of ng#" << node_group_id_
                        << " caused by upload task failed."
                        << static_cast<uint32_t>(upload_res);
-            scan_req.UnpinSlices();
             task_result_ = upload_res;
         }
     } while (!scan_pk_finished);

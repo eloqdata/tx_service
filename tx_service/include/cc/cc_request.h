@@ -4209,7 +4209,6 @@ public:
         --unfinished_cnt_;
         if (unfinished_cnt_ == 0)
         {
-            UnpinSlices();
             cv_.notify_one();
         }
     }
@@ -4222,7 +4221,6 @@ public:
         --unfinished_cnt_;
         if (unfinished_cnt_ == 0)
         {
-            UnpinSlices();
             cv_.notify_one();
         }
     }
@@ -4245,10 +4243,6 @@ public:
         --unfinished_cnt_;
         if (unfinished_cnt_ == 0)
         {
-            if (err_ != CcErrorCode::NO_ERROR)
-            {
-                UnpinSlices();
-            }
             cv_.notify_one();
         }
     }
@@ -4287,18 +4281,6 @@ public:
     bool IsTerminated() const
     {
         return op_type_ == OpType::Terminated;
-    }
-
-    void UnpinSlices()
-    {
-        for (size_t i = 0; i < slice_ids_.size(); ++i)
-        {
-            if (slice_ids_[i].Slice() != nullptr)
-            {
-                slice_ids_[i].Unpin();
-                slice_ids_[i].Reset();
-            }
-        }
     }
 
     StoreRange *StoreRangePtr() const

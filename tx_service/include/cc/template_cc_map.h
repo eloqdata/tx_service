@@ -5271,14 +5271,6 @@ public:
             {
             case RangeSliceOpStatus::Successful:
             {
-                assert(
-                    [&]()
-                    {
-                        const TemplateStoreSlice<KeyT> *new_slice =
-                            static_cast<const TemplateStoreSlice<KeyT> *>(
-                                slice_id.Slice());
-                        return search_key == *new_slice->StartKey();
-                    }());
                 succ = true;
                 break;
             }
@@ -5694,10 +5686,14 @@ public:
         {
             next_pause_key = key_it->first->CloneTxKey();
         }
-        else if (slice_pinned)
+
+        bool req_finished =
+            is_scan_mem_full || no_more_data ||
+            req.accumulated_scan_cnt_[shard_->core_id_] >= req.scan_batch_size_;
+        if (slice_pinned && req_finished)
         {
-            assert(no_more_data);
             // Unpin slice
+            // Must unpin the slice here, once the request finished.
             req.slice_ids_[shard_->core_id_].Unpin();
             req.slice_ids_[shard_->core_id_].Reset();
         }
@@ -5708,20 +5704,16 @@ public:
         if (is_scan_mem_full)
         {
             req.scan_heap_is_full_[shard_->core_id_] = 1;
+        }
+
+        if (req_finished)
+        {
             req.SetFinish(shard_->core_id_);
             return false;
         }
 
-        if (no_more_data ||
-            req.accumulated_scan_cnt_[shard_->core_id_] >= req.scan_batch_size_)
-        {
-            req.SetFinish(shard_->core_id_);
-        }
-        else
-        {
-            // Put DataSyncScanCc request into CcQueue again.
-            shard_->Enqueue(&req);
-        }
+        // Put DataSyncScanCc request into CcQueue again.
+        shard_->Enqueue(&req);
 
         // Access DataSyncScanCc member variable is unsafe after
         // SetFinished(...).
