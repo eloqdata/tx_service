@@ -5898,6 +5898,7 @@ void LocalCcShards::FlushData(std::unique_lock<std::mutex> &flush_worker_lk)
     auto ckpt_err = succ ? DataSyncTask::CkptErrorCode::NO_ERROR
                          : DataSyncTask::CkptErrorCode::FLUSH_ERROR;
 
+    auto release_start_time = std::chrono::steady_clock::now();
     for (const auto &flush_entry : flush_task_entries)
     {
         for (const auto &entry : flush_entry.second)
@@ -5907,6 +5908,12 @@ void LocalCcShards::FlushData(std::unique_lock<std::mutex> &flush_worker_lk)
             entry->mv_base_vec_ = nullptr;
         }
     }
+
+    auto release_stop_time = std::chrono::steady_clock::now();
+    auto aduration = std::chrono::duration_cast<std::chrono::microseconds>(
+                         release_stop_time - release_start_time)
+                         .count();
+    LOG(INFO) << "yf: FlushData release, duration=" << aduration;
 
     // notify waiting data sync scan thread
     uint64_t old_usage = data_sync_mem_controller_.DeallocateFlushMemQuota(
