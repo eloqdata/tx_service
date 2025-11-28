@@ -6140,7 +6140,8 @@ bool LocalCcShards::UpdateStoreSlices(
         LOG(INFO) << "yf: FlushData update range slices time = "
                   << std::chrono::duration_cast<std::chrono::microseconds>(
                          stop_time - start_time)
-                         .count();
+                         .count()
+                  << ", req size = " << update_range_slice_reqs.size();
 
         return success;
     }
