@@ -249,7 +249,7 @@ void SnapshotManager::SyncWithStandby()
                 while (retry_times-- > 0)
                 {
                     brpc::Controller cntl;
-                    cntl.set_timeout_ms(1);
+                    cntl.set_timeout_ms(1000);
                     remote::OnSnapshotSyncedRequest on_synced_req;
                     remote::OnSnapshotSyncedResponse on_sync_resp;
                     on_synced_req.set_snapshot_path(req.dest_path());
@@ -389,7 +389,17 @@ bool SnapshotManager::RunOneRoundCheckpoint(uint32_t node_group,
         [&data_sync_status]
         { return data_sync_status->unfinished_tasks_ == 0; });
 
-    return (data_sync_status->err_code_ == CcErrorCode::NO_ERROR);
+    DLOG_IF(WARNING, data_sync_status->err_code_ != CcErrorCode::NO_ERROR)
+        << "SyncWithStandby for node_group: " << node_group
+        << " term: " << ng_leader_term
+        << " DataSync error: " << int(data_sync_status->err_code_);
+    DLOG_IF(WARNING, data_sync_status->has_skipped_entries_)
+        << "SyncWithStandby for node_group: " << node_group
+        << " term: " << ng_leader_term
+        << " DataSyncScan has skipped some entries, return checkpoint failure";
+
+    return (data_sync_status->err_code_ == CcErrorCode::NO_ERROR &&
+            !data_sync_status->has_skipped_entries_);
 }
 
 void SnapshotManager::UpdateBackupTaskStatus(

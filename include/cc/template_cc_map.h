@@ -5927,15 +5927,14 @@ public:
                 {
                     if (cce->HasBufferedCommandList())
                     {
-                        BufferedTxnCmdList &buffered_cmds =
-                            cce->BufferedCommandList();
-                        if (buffered_cmds.txn_cmd_list_.back().new_version_ >
-                            req.data_sync_ts_)
-                        {
-                            // Forward iterator
-                            it++;
-                            continue;
-                        }
+                        DLOG(INFO)
+                            << "cce has buffer command, skip "
+                               "ckpt cce: "
+                            << cce->KeyString()
+                            << ", cce status: " << int(cce->PayloadStatus())
+                            << ", BufferCommand: " << cce->BufferedCommandList()
+                            << ", data_sync_ts_: " << req.data_sync_ts_;
+                        replay_cmds_notnull = true;
 
                         // The fetch record may failed when the
                         // cce is touch at 1st place, so the record status can
@@ -5965,7 +5964,6 @@ public:
                                                     nullptr,
                                                     part_id);
                             }
-                            replay_cmds_notnull = true;
                         }
                         else if (ng_term > 0)
                         {
@@ -5976,7 +5974,7 @@ public:
                                 << "Buffered cmds found on leader node"
                                 << ", cce key: " << cce->KeyString()
                                 << ", cce CommitTs: " << cce->CommitTs() << "\n"
-                                << buffered_cmds;
+                                << cce->BufferedCommandList();
                             assert(false);
                         }
                         else

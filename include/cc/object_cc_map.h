@@ -884,6 +884,10 @@ public:
                     remote::ToRemoteType::ConvertTableEngine(
                         table_name_.Engine()));
                 forward_req->set_key_shard_code(req.key_shard_code_);
+                if (cce->PayloadStatus() == RecordStatus::Deleted)
+                {
+                    forward_req->set_has_overwrite(true);
+                }
                 std::string key_str;
 
                 if (req.Key() == nullptr)

@@ -4459,7 +4459,7 @@ void LocalCcShards::DataSyncForHashPartition(
             }
             if (scan_cc.ErrorCode() == CcErrorCode::LOG_NOT_TRUNCATABLE)
             {
-                data_sync_task->status_->SetNoTruncateLog();
+                data_sync_task->status_->SetEntriesSkippedAndNoTruncateLog();
             }
 
             scan_data_drained = true;
