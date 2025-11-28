@@ -2954,7 +2954,7 @@ void LocalCcShards::PostProcessRangePartitionFlushTaskEntries(
     DataSyncTask::CkptErrorCode ckpt_err)
 {
     assert(ckpt_err != DataSyncTask::CkptErrorCode::SCAN_ERROR);
-    std::vector<FlushTaskEntry *> pending_tasks;
+    std::vector<FlushTaskEntry *> pending_flush_entry;
     std::map<NodeGroupId, int64_t> pinned_node_group_terms_;
 
     for (auto &[table_name, entries] : flush_task_entries)
@@ -2985,7 +2985,7 @@ void LocalCcShards::PostProcessRangePartitionFlushTaskEntries(
                     pinned_node_group_terms_[task->node_group_id_] = ng_term;
                 }
 
-                DataSyncTask::CkptErrorCode current_task_err = ckpt_err;
+                auto current_task_err = ckpt_err;
                 if (ng_term != task->node_group_term_)
                 {
                     LOG(ERROR)
@@ -3031,7 +3031,7 @@ void LocalCcShards::PostProcessRangePartitionFlushTaskEntries(
 
                     if (task_ckpt_err == DataSyncTask::CkptErrorCode::NO_ERROR)
                     {
-                        pending_tasks.push_back(entry.get());
+                        pending_flush_entry.push_back(entry.get());
                         continue;
                     }
                     else if (task_ckpt_err ==
@@ -3102,31 +3102,47 @@ void LocalCcShards::PostProcessRangePartitionFlushTaskEntries(
         }
     }
 
-    if (!pending_tasks.empty())
+    if (!pending_flush_entry.empty())
     {
-        bool success = UpdateStoreSlices(pending_tasks);
-        if (!success)
+        bool success = UpdateStoreSlices(pending_flush_entry);
+
+        for (auto &entry : pending_flush_entry)
         {
-            for (auto &flush_task : pending_tasks)
+            auto &task = entry->data_sync_task_;
+            TableRangeEntry *range_entry = nullptr;
+            const TxKey *start_key = nullptr;
+            const TxKey *end_key = nullptr;
+            if (!task->during_split_range_)
             {
-                auto &task = flush_task->data_sync_task_;
-                TableRangeEntry *range_entry = nullptr;
-                const TxKey *start_key = nullptr;
-                const TxKey *end_key = nullptr;
+                range_entry = const_cast<TableRangeEntry *>(GetTableRangeEntry(
+                    task->table_name_, task->node_group_id_, task->id_));
+            }
+            else
+            {
+                range_entry = task->range_entry_;
+                start_key = &task->start_key_;
+                end_key = &task->end_key_;
+            }
+            assert(range_entry);
+
+            if (success)
+            {
                 if (!task->during_split_range_)
                 {
-                    range_entry = const_cast<TableRangeEntry *>(
-                        GetTableRangeEntry(task->table_name_,
-                                           task->node_group_id_,
-                                           task->id_));
+                    range_entry->UpdateLastDataSyncTS(task->data_sync_ts_);
+                    range_entry->UnPinStoreRange();
+                    // Commit the data sync txm
+                    txservice::CommitTx(entry->data_sync_txm_);
+                    PopPendingTask(task->node_group_id_,
+                                   task->node_group_term_,
+                                   task->table_name_,
+                                   task->id_);
                 }
-                else
-                {
-                    range_entry = task->range_entry_;
-                    start_key = &task->start_key_;
-                    end_key = &task->end_key_;
-                }
-                assert(range_entry);
+
+                task->SetFinish();
+            }
+            else
+            {
                 CcErrorCode err_code = CcErrorCode::DATA_STORE_ERR;
                 // Reset the post ckpt size if flush failed
                 UpdateStoreSlice(task->table_name_,
@@ -3140,7 +3156,7 @@ void LocalCcShards::PostProcessRangePartitionFlushTaskEntries(
                 {
                     // Abort the data sync txm
                     range_entry->UnPinStoreRange();
-                    txservice::AbortTx(flush_task->data_sync_txm_);
+                    txservice::AbortTx(entry->data_sync_txm_);
 
                     PopPendingTask(task->node_group_id_,
                                    task->node_group_term_,
