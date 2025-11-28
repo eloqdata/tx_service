@@ -19,6 +19,8 @@
  *    <http://www.gnu.org/licenses/>.
  *
  */
+#include "data_store_service.h"
+
 #include <brpc/closure_guard.h>
 #include <brpc/server.h>
 
@@ -37,7 +39,6 @@
 #include <vector>
 
 #include "data_store_fault_inject.h"  // ACTION_FAULT_INJECTOR
-#include "data_store_service.h"
 #include "internal_request.h"
 #include "object_pool.h"
 #if defined(DATA_STORE_TYPE_ELOQDSS_ROCKSDB_CLOUD_S3)

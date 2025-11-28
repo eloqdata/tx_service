@@ -161,7 +161,8 @@ CmdLineParams parse_arguments()
         params.get_value.first.empty())
     {
         throw std::runtime_error(
-            "No action specified. Use --list_cf, --opendb, --dump_keys, or --get_value");
+            "No action specified. Use --list_cf, --opendb, --dump_keys, or "
+            "--get_value");
     }
 
     return params;
@@ -357,7 +358,6 @@ int main(int argc, char **argv)
         // Initialize AWS SDK
         Aws::SDKOptions aws_options;
         Aws::InitAPI(aws_options);
-
 
         // Set credentials
         if (!params.aws_access_key_id.empty() && !params.aws_secret_key.empty())

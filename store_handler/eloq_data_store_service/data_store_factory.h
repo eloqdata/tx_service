@@ -72,13 +72,15 @@ public:
 
     /**
      * @brief Get AWS access key ID for S3 authentication
-     * @return AWS access key ID, empty if not applicable or using default credentials
+     * @return AWS access key ID, empty if not applicable or using default
+     * credentials
      */
     virtual std::string GetAwsAccessKeyId() const = 0;
 
     /**
      * @brief Get AWS secret key for S3 authentication
-     * @return AWS secret key, empty if not applicable or using default credentials
+     * @return AWS secret key, empty if not applicable or using default
+     * credentials
      */
     virtual std::string GetAwsSecretKey() const = 0;
 

@@ -38,8 +38,8 @@
 
 #include "cc_req_misc.h"
 #include "data_store_service_client_closure.h"
-#include "eloq_data_store_service/data_store_service_config.h"
 #include "data_store_service_scanner.h"
+#include "eloq_data_store_service/data_store_service_config.h"
 #include "eloq_data_store_service/object_pool.h"  // ObjectPool
 #include "eloq_data_store_service/thread_worker_pool.h"
 #include "metrics.h"
@@ -69,7 +69,8 @@ thread_local ObjectPool<FetchTableCallbackData> fetch_table_callback_data_pool_;
 thread_local ObjectPool<FetchDatabaseCallbackData> fetch_db_callback_data_pool_;
 thread_local ObjectPool<FetchAllDatabaseCallbackData>
     fetch_all_dbs_callback_data_pool_;
-thread_local ObjectPool<UpsertDatabaseCallbackData> upsert_db_callback_data_pool_;
+thread_local ObjectPool<UpsertDatabaseCallbackData>
+    upsert_db_callback_data_pool_;
 thread_local ObjectPool<DropDatabaseCallbackData> drop_db_callback_data_pool_;
 thread_local ObjectPool<DiscoverAllTableNamesCallbackData>
     discover_all_tables_callback_data_pool_;
@@ -1395,30 +1396,31 @@ void DataStoreServiceClient::DispatchRangeSliceBatches(
     SyncConcurrentRequest *sync_concurrent)
 {
     uint32_t data_shard_id = GetShardIdByPartitionId(kv_partition_id, false);
-    
+
     // Initialize batch vectors
     std::vector<std::string_view> keys;
     std::vector<std::string_view> records;
     std::vector<uint64_t> records_ts;
     std::vector<uint64_t> records_ttl;
     std::vector<WriteOpType> op_types;
-    
+
     // Estimate total segments across all plans
     size_t total_segments = 0;
     for (const auto &plan : plans)
     {
         total_segments += plan.segment_cnt;
     }
-    
+
     keys.reserve(total_segments);
     records.reserve(total_segments);
     records_ts.reserve(total_segments);
     records_ttl.reserve(total_segments);
     op_types.reserve(total_segments);
-    
+
     size_t write_batch_size = 0;
-    constexpr size_t overhead_per_segment = 20;  // records_ts (8) + records_ttl (8) + op_types (4)
-    
+    constexpr size_t overhead_per_segment =
+        20;  // records_ts (8) + records_ttl (8) + op_types (4)
+
     // Iterate through all plans and collect segments
     for (const auto &plan : plans)
     {
@@ -1426,12 +1428,16 @@ void DataStoreServiceClient::DispatchRangeSliceBatches(
         {
             size_t key_size = plan.segment_keys[i].size();
             size_t record_size = plan.segment_records[i].size();
-            size_t segment_total_size = key_size + record_size + overhead_per_segment;
-            
-            // If adding this segment would exceed MAX_WRITE_BATCH_SIZE and batch is non-empty, dispatch current batch
-            if (write_batch_size + segment_total_size >= MAX_WRITE_BATCH_SIZE && keys.size() > 0)
+            size_t segment_total_size =
+                key_size + record_size + overhead_per_segment;
+
+            // If adding this segment would exceed MAX_WRITE_BATCH_SIZE and
+            // batch is non-empty, dispatch current batch
+            if (write_batch_size + segment_total_size >= MAX_WRITE_BATCH_SIZE &&
+                keys.size() > 0)
             {
-                // Concurrency control: wait if limit reached, then increment counter
+                // Concurrency control: wait if limit reached, then increment
+                // counter
                 {
                     std::unique_lock<bthread::Mutex> lk(sync_concurrent->mux_);
                     while (sync_concurrent->unfinished_request_cnt_ >=
@@ -1441,7 +1447,7 @@ void DataStoreServiceClient::DispatchRangeSliceBatches(
                     }
                     sync_concurrent->unfinished_request_cnt_++;
                 }
-                
+
                 // Dispatch current batch
                 BatchWriteRecords(kv_table_name,
                                   kv_partition_id,
@@ -1454,9 +1460,9 @@ void DataStoreServiceClient::DispatchRangeSliceBatches(
                                   true,
                                   sync_concurrent,
                                   SyncConcurrentRequestCallback,
-                                  1,  // parts_cnt_per_key
-                                  1); // parts_cnt_per_record
-                
+                                  1,   // parts_cnt_per_key
+                                  1);  // parts_cnt_per_record
+
                 // Clear and re-reserve for next batch
                 keys.clear();
                 records.clear();
@@ -1470,7 +1476,7 @@ void DataStoreServiceClient::DispatchRangeSliceBatches(
                 op_types.reserve(total_segments);
                 write_batch_size = 0;
             }
-            
+
             // Append to batch vectors
             keys.emplace_back(plan.segment_keys[i]);
             records.emplace_back(plan.segment_records[i]);
@@ -1480,7 +1486,7 @@ void DataStoreServiceClient::DispatchRangeSliceBatches(
             write_batch_size += segment_total_size;
         }
     }
-    
+
     // Dispatch final batch if vectors are non-empty
     if (keys.size() > 0)
     {
@@ -1494,7 +1500,7 @@ void DataStoreServiceClient::DispatchRangeSliceBatches(
             }
             sync_concurrent->unfinished_request_cnt_++;
         }
-        
+
         BatchWriteRecords(kv_table_name,
                           kv_partition_id,
                           data_shard_id,
@@ -1506,8 +1512,8 @@ void DataStoreServiceClient::DispatchRangeSliceBatches(
                           true,
                           sync_concurrent,
                           SyncConcurrentRequestCallback,
-                          1,  // parts_cnt_per_key
-                          1); // parts_cnt_per_record
+                          1,   // parts_cnt_per_key
+                          1);  // parts_cnt_per_record
     }
 }
 
@@ -1526,8 +1532,10 @@ void DataStoreServiceClient::EnqueueRangeMetadataRecord(
     int32_t kv_partition_id = KvPartitionIdOf(table_name);
 
     // Encode key and value
-    std::string key_str = EncodeRangeKey(catalog_factory, table_name, range_start_key);
-    std::string rec_str = EncodeRangeValue(partition_id, range_version, version, segment_cnt);
+    std::string key_str =
+        EncodeRangeKey(catalog_factory, table_name, range_start_key);
+    std::string rec_str =
+        EncodeRangeValue(partition_id, range_version, version, segment_cnt);
 
     // Get or create entry in accumulator
     auto key = std::make_pair(kv_table_name, kv_partition_id);
@@ -1547,15 +1555,18 @@ void DataStoreServiceClient::DispatchRangeMetadataBatches(
     SyncConcurrentRequest *sync_concurrent,
     size_t max_batch_size)
 {
-    for (const auto &[table_partition, records_vec] : accumulator.records_by_table_partition)
+    for (const auto &[table_partition, records_vec] :
+         accumulator.records_by_table_partition)
     {
         const std::string &kv_table_name_str = table_partition.first;
         int32_t kv_partition_id = table_partition.second;
-        uint32_t data_shard_id = GetShardIdByPartitionId(kv_partition_id, false);
+        uint32_t data_shard_id =
+            GetShardIdByPartitionId(kv_partition_id, false);
 
-        // Use kv_table_name parameter if provided, otherwise use kv_table_name_str
-        // For consistency, prefer the parameter
-        std::string_view target_table_name = kv_table_name.empty() ? kv_table_name_str : kv_table_name;
+        // Use kv_table_name parameter if provided, otherwise use
+        // kv_table_name_str For consistency, prefer the parameter
+        std::string_view target_table_name =
+            kv_table_name.empty() ? kv_table_name_str : kv_table_name;
 
         // Initialize batch vectors
         std::vector<std::string_view> keys;
@@ -1576,14 +1587,19 @@ void DataStoreServiceClient::DispatchRangeMetadataBatches(
         {
             size_t key_size = record.encoded_key.size();
             size_t value_size = record.encoded_value.size();
-            // Overhead: records_ts (8 bytes) + records_ttl (8 bytes) + op_types (4 bytes) ≈ 20 bytes
+            // Overhead: records_ts (8 bytes) + records_ttl (8 bytes) + op_types
+            // (4 bytes) ≈ 20 bytes
             constexpr size_t overhead_per_record = 20;
-            size_t record_total_size = key_size + value_size + overhead_per_record;
+            size_t record_total_size =
+                key_size + value_size + overhead_per_record;
 
-            // If adding this record would exceed max_batch_size and batch is non-empty, dispatch current batch
-            if (write_batch_size + record_total_size >= max_batch_size && keys.size() > 0)
+            // If adding this record would exceed max_batch_size and batch is
+            // non-empty, dispatch current batch
+            if (write_batch_size + record_total_size >= max_batch_size &&
+                keys.size() > 0)
             {
-                // Concurrency control: wait if limit reached, then increment counter
+                // Concurrency control: wait if limit reached, then increment
+                // counter
                 {
                     std::unique_lock<bthread::Mutex> lk(sync_concurrent->mux_);
                     while (sync_concurrent->unfinished_request_cnt_ >=
@@ -1606,8 +1622,8 @@ void DataStoreServiceClient::DispatchRangeMetadataBatches(
                                   true,
                                   sync_concurrent,
                                   SyncConcurrentRequestCallback,
-                                  1,  // parts_cnt_per_key
-                                  1); // parts_cnt_per_record
+                                  1,   // parts_cnt_per_key
+                                  1);  // parts_cnt_per_record
 
                 // Clear and re-reserve for next batch
                 keys.clear();
@@ -1632,10 +1648,12 @@ void DataStoreServiceClient::DispatchRangeMetadataBatches(
             write_batch_size += record_total_size;
         }
 
-        // Dispatch final batch for this table/partition if vectors are non-empty
+        // Dispatch final batch for this table/partition if vectors are
+        // non-empty
         if (keys.size() > 0)
         {
-            // Concurrency control: wait if limit reached, then increment counter
+            // Concurrency control: wait if limit reached, then increment
+            // counter
             {
                 std::unique_lock<bthread::Mutex> lk(sync_concurrent->mux_);
                 while (sync_concurrent->unfinished_request_cnt_ >=
@@ -1657,8 +1675,8 @@ void DataStoreServiceClient::DispatchRangeMetadataBatches(
                               true,
                               sync_concurrent,
                               SyncConcurrentRequestCallback,
-                              1,  // parts_cnt_per_key
-                              1); // parts_cnt_per_record
+                              1,   // parts_cnt_per_key
+                              1);  // parts_cnt_per_record
         }
     }
 }
@@ -1743,9 +1761,8 @@ bool DataStoreServiceClient::UpdateRangeSlices(
         sync_concurrent_request_pool_.NextObject();
     PoolableGuard meta_guard(meta_sync_concurrent);
     meta_sync_concurrent->Reset();
-    DispatchRangeMetadataBatches(kv_range_table_name,
-                                 meta_acc,
-                                 meta_sync_concurrent);
+    DispatchRangeMetadataBatches(
+        kv_range_table_name, meta_acc, meta_sync_concurrent);
 
     // 5- Wait for metadata requests to complete
     {
@@ -1798,7 +1815,8 @@ bool DataStoreServiceClient::UpsertRanges(
     auto catalog_factory = GetCatalogFactory(table_name.Engine());
     assert(catalog_factory != nullptr);
 
-    // 1- First pass: Prepare slice batches and accumulate metadata for all ranges
+    // 1- First pass: Prepare slice batches and accumulate metadata for all
+    // ranges
     std::vector<RangeSliceBatchPlan> slice_plans;
     slice_plans.reserve(range_info.size());
     RangeMetadataAccumulator meta_acc;
@@ -1811,17 +1829,19 @@ bool DataStoreServiceClient::UpsertRanges(
         slice_plans.emplace_back(std::move(slice_plan));
 
         // Enqueue metadata record for this range
-        EnqueueRangeMetadataRecord(catalog_factory,
-                                   table_name,
-                                   range.start_key_,
-                                   range.partition_id_,
-                                   version,  // range_version (using version for now)
-                                   version,
-                                   slice_plans.back().segment_cnt,
-                                   meta_acc);
+        EnqueueRangeMetadataRecord(
+            catalog_factory,
+            table_name,
+            range.start_key_,
+            range.partition_id_,
+            version,  // range_version (using version for now)
+            version,
+            slice_plans.back().segment_cnt,
+            meta_acc);
     }
 
-    // 2- Dispatch slice batches for all ranges concurrently (shared SyncConcurrentRequest)
+    // 2- Dispatch slice batches for all ranges concurrently (shared
+    // SyncConcurrentRequest)
     SyncConcurrentRequest *slice_sync_concurrent =
         sync_concurrent_request_pool_.NextObject();
     PoolableGuard slice_guard(slice_sync_concurrent);
@@ -1857,9 +1877,8 @@ bool DataStoreServiceClient::UpsertRanges(
         sync_concurrent_request_pool_.NextObject();
     PoolableGuard meta_guard(meta_sync_concurrent);
     meta_sync_concurrent->Reset();
-    DispatchRangeMetadataBatches(kv_range_table_name,
-                                 meta_acc,
-                                 meta_sync_concurrent);
+    DispatchRangeMetadataBatches(
+        kv_range_table_name, meta_acc, meta_sync_concurrent);
 
     // 5- Wait for metadata requests to complete
     {
@@ -1913,17 +1932,19 @@ bool DataStoreServiceClient::UpsertRanges(
  * @param version_ts Output parameter for the version timestamp.
  * @return true if the fetch operation completes successfully, false otherwise.
  */
-bool DataStoreServiceClient::FetchTable(const txservice::TableName &table_name,
-                                        std::string &schema_image,
-                                        bool &found,
-                                        uint64_t &version_ts,
-                                        const std::function<void()> *yield_fptr,
-                                        const std::function<void()> *resume_fptr)
+bool DataStoreServiceClient::FetchTable(
+    const txservice::TableName &table_name,
+    std::string &schema_image,
+    bool &found,
+    uint64_t &version_ts,
+    const std::function<void()> *yield_fptr,
+    const std::function<void()> *resume_fptr)
 {
     FetchTableCallbackData *callback_data =
         fetch_table_callback_data_pool_.NextObject();
     PoolableGuard guard(callback_data);
-    callback_data->Reset(schema_image, found, version_ts, yield_fptr, resume_fptr);
+    callback_data->Reset(
+        schema_image, found, version_ts, yield_fptr, resume_fptr);
     uint32_t shard_id = GetShardIdByPartitionId(0, false);
     Read(kv_table_catalogs_name,
          0,
@@ -1999,17 +2020,19 @@ bool DataStoreServiceClient::DiscoverAllTableNames(
  * @return true if the database is upserted successfully, false if any operation
  * fails.
  */
-bool DataStoreServiceClient::UpsertDatabase(std::string_view db,
-                                            std::string_view definition,
-                                            const std::function<void()> *yield_fptr,
-                                            const std::function<void()> *resume_fptr)
+bool DataStoreServiceClient::UpsertDatabase(
+    std::string_view db,
+    std::string_view definition,
+    const std::function<void()> *yield_fptr,
+    const std::function<void()> *resume_fptr)
 {
     std::vector<std::string_view> keys;
     std::vector<std::string_view> records;
     std::vector<uint64_t> records_ts;
     std::vector<uint64_t> records_ttl;
     std::vector<WriteOpType> op_types;
-    UpsertDatabaseCallbackData *callback_data = upsert_db_callback_data_pool_.NextObject();
+    UpsertDatabaseCallbackData *callback_data =
+        upsert_db_callback_data_pool_.NextObject();
     PoolableGuard guard(callback_data);
     callback_data->Reset(yield_fptr, resume_fptr);
     uint64_t now =
@@ -2059,16 +2082,18 @@ bool DataStoreServiceClient::UpsertDatabase(std::string_view db,
  * @return true if the database is dropped successfully, false if any operation
  * fails.
  */
-bool DataStoreServiceClient::DropDatabase(std::string_view db,
-                                          const std::function<void()> *yield_fptr,
-                                          const std::function<void()> *resume_fptr)
+bool DataStoreServiceClient::DropDatabase(
+    std::string_view db,
+    const std::function<void()> *yield_fptr,
+    const std::function<void()> *resume_fptr)
 {
     std::vector<std::string_view> keys;
     std::vector<std::string_view> records;
     std::vector<uint64_t> records_ts;
     std::vector<uint64_t> records_ttl;
     std::vector<WriteOpType> op_types;
-    DropDatabaseCallbackData *callback_data = drop_db_callback_data_pool_.NextObject();
+    DropDatabaseCallbackData *callback_data =
+        drop_db_callback_data_pool_.NextObject();
     PoolableGuard guard(callback_data);
     callback_data->Reset(yield_fptr, resume_fptr);
     uint64_t now =

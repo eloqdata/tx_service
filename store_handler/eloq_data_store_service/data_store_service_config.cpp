@@ -34,7 +34,6 @@
 #include "INIReader.h"
 #include "glog/logging.h"
 
-
 namespace EloqDS
 {
 

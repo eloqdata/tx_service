@@ -26,9 +26,10 @@
 #include <aws/core/auth/AWSCredentialsProviderChain.h>
 #include <aws/s3/S3Client.h>
 #include <aws/s3/model/GetObjectRequest.h>
+#include <glog/logging.h>
+
 #include <algorithm>
 #include <fstream>
-#include <glog/logging.h>
 
 namespace EloqDS
 {
@@ -40,16 +41,18 @@ S3FileDownloader::S3FileDownloader(const std::string &s3_url,
                                    const std::string &s3_endpoint_url)
 {
     // Parse S3 URL: s3://bucket-name/object-path-prefix
-    // Example: s3://my-bucket/my-prefix/ -> bucket_name_ = "my-bucket", object_path_prefix_ = "my-prefix/"
+    // Example: s3://my-bucket/my-prefix/ -> bucket_name_ = "my-bucket",
+    // object_path_prefix_ = "my-prefix/"
     if (s3_url.find("s3://") != 0)
     {
-        LOG(ERROR) << "Invalid S3 URL format, must start with s3://: " << s3_url;
+        LOG(ERROR) << "Invalid S3 URL format, must start with s3://: "
+                   << s3_url;
         return;
     }
-    
+
     std::string url_without_scheme = s3_url.substr(5);  // Remove "s3://"
     size_t slash_pos = url_without_scheme.find('/');
-    
+
     if (slash_pos == std::string::npos)
     {
         // No object path prefix, just bucket name
@@ -66,23 +69,25 @@ S3FileDownloader::S3FileDownloader(const std::string &s3_url,
             object_path_prefix_ += "/";
         }
     }
-    
+
     if (bucket_name_.empty())
     {
         LOG(ERROR) << "Invalid S3 URL: bucket name is empty";
         return;
     }
-    
+
     Aws::Client::ClientConfiguration config;
     config.region = region;
-    
+
     if (!s3_endpoint_url.empty())
     {
         config.endpointOverride = s3_endpoint_url;
         // Determine scheme from endpoint
         std::string lower_endpoint = s3_endpoint_url;
-        std::transform(lower_endpoint.begin(), lower_endpoint.end(),
-                      lower_endpoint.begin(), ::tolower);
+        std::transform(lower_endpoint.begin(),
+                       lower_endpoint.end(),
+                       lower_endpoint.begin(),
+                       ::tolower);
         if (lower_endpoint.find("https://") == 0)
         {
             config.scheme = Aws::Http::Scheme::HTTPS;
@@ -94,21 +99,21 @@ S3FileDownloader::S3FileDownloader(const std::string &s3_url,
             config.verifySSL = false;
         }
     }
-    
+
     std::shared_ptr<Aws::Auth::AWSCredentialsProvider> credentials_provider;
     if (!aws_access_key_id.empty() && !aws_secret_key.empty())
     {
-        credentials_provider = 
+        credentials_provider =
             std::make_shared<Aws::Auth::SimpleAWSCredentialsProvider>(
-                Aws::String(aws_access_key_id.c_str()), 
+                Aws::String(aws_access_key_id.c_str()),
                 Aws::String(aws_secret_key.c_str()));
     }
     else
     {
-        credentials_provider = 
+        credentials_provider =
             std::make_shared<Aws::Auth::DefaultAWSCredentialsProviderChain>();
     }
-    
+
     s3_client_ = std::make_shared<Aws::S3::S3Client>(
         credentials_provider,
         config,
@@ -123,41 +128,41 @@ bool S3FileDownloader::DownloadFile(const std::string &s3_file_name,
 {
     // Construct S3 object key: {object_path_prefix}{file_name}
     std::string s3_key = object_path_prefix_ + s3_file_name;
-    
+
     Aws::S3::Model::GetObjectRequest request;
     request.SetBucket(bucket_name_);
     request.SetKey(s3_key);
-    
+
     auto outcome = s3_client_->GetObject(request);
-    
+
     if (!outcome.IsSuccess())
     {
-        LOG(ERROR) << "Failed to download " << s3_file_name 
+        LOG(ERROR) << "Failed to download " << s3_file_name
                    << " from S3: " << outcome.GetError().GetMessage();
         return false;
     }
-    
+
     // Write to local file
     std::ofstream out_file(local_file_path, std::ios::binary);
     if (!out_file.is_open())
     {
-        LOG(ERROR) << "Failed to open local file for writing: " << local_file_path;
+        LOG(ERROR) << "Failed to open local file for writing: "
+                   << local_file_path;
         return false;
     }
-    
+
     auto &body = outcome.GetResult().GetBody();
     out_file << body.rdbuf();
     out_file.close();
-    
+
     if (!out_file.good())
     {
         LOG(ERROR) << "Failed to write file: " << local_file_path;
         return false;
     }
-    
+
     DLOG(INFO) << "Downloaded " << s3_file_name << " to " << local_file_path;
     return true;
 }
 
 }  // namespace EloqDS
-

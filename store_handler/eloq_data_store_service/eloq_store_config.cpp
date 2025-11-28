@@ -24,10 +24,10 @@
 #include <cassert>
 #include <filesystem>
 #include <regex>
+#include <sstream>
 
 #include "gflags/gflags.h"
 #include "glog/logging.h"
-#include <sstream>
 
 DEFINE_uint32(eloq_store_worker_num, 1, "EloqStore server worker num.");
 
@@ -279,8 +279,8 @@ EloqStoreConfig::EloqStoreConfig(const INIReader &config_reader,
                       FLAGS_eloq_store_cloud_store_daemon_ports);
         if (daemon_ports.empty())
         {
-            daemon_ports =
-                config_reader.GetString("store", "cloud_store_daemon_ports", "");
+            daemon_ports = config_reader.GetString(
+                "store", "cloud_store_daemon_ports", "");
             if (daemon_ports.empty())
             {
                 daemon_ports = config_reader.GetString(

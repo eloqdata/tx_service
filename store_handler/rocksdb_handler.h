@@ -411,12 +411,13 @@ public:
                       std::vector<txservice::SplitRangeInfo> range_info,
                       uint64_t version) override;
 
-    bool FetchTable(const txservice::TableName &table_name,
-                    std::string &schema_image,
-                    bool &found,
-                    uint64_t &version_ts,
-                    const std::function<void()> *yield_fptr = nullptr,
-                    const std::function<void()> *resume_fptr = nullptr) override;
+    bool FetchTable(
+        const txservice::TableName &table_name,
+        std::string &schema_image,
+        bool &found,
+        uint64_t &version_ts,
+        const std::function<void()> *yield_fptr = nullptr,
+        const std::function<void()> *resume_fptr = nullptr) override;
 
     bool DiscoverAllTableNames(
         std::vector<std::string> &norm_name_vec,
@@ -424,13 +425,15 @@ public:
         const std::function<void()> *resume_fptr = nullptr) override;
 
     //-- database
-    bool UpsertDatabase(std::string_view db,
-                        std::string_view definition,
-                        const std::function<void()> *yield_fptr = nullptr,
-                        const std::function<void()> *resume_fptr = nullptr) override;
-    bool DropDatabase(std::string_view db,
-                      const std::function<void()> *yield_fptr = nullptr,
-                      const std::function<void()> *resume_fptr = nullptr) override;
+    bool UpsertDatabase(
+        std::string_view db,
+        std::string_view definition,
+        const std::function<void()> *yield_fptr = nullptr,
+        const std::function<void()> *resume_fptr = nullptr) override;
+    bool DropDatabase(
+        std::string_view db,
+        const std::function<void()> *yield_fptr = nullptr,
+        const std::function<void()> *resume_fptr = nullptr) override;
     bool FetchDatabase(
         std::string_view db,
         std::string &definition,

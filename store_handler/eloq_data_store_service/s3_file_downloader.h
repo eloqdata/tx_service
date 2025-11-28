@@ -23,8 +23,9 @@
 
 #include <aws/core/Aws.h>
 #include <aws/s3/S3Client.h>
-#include <string>
+
 #include <memory>
+#include <string>
 
 namespace EloqDS
 {
@@ -37,27 +38,29 @@ public:
      * @param s3_url S3 URL in format: s3://bucket-name/object-path-prefix
      *                Example: s3://my-bucket/my-prefix/
      * @param region AWS region
-     * @param aws_access_key_id AWS access key ID (empty to use default provider)
+     * @param aws_access_key_id AWS access key ID (empty to use default
+     * provider)
      * @param aws_secret_key AWS secret key (empty to use default provider)
-     * @param s3_endpoint_url Custom S3 endpoint URL (empty for default AWS endpoint)
+     * @param s3_endpoint_url Custom S3 endpoint URL (empty for default AWS
+     * endpoint)
      */
     S3FileDownloader(const std::string &s3_url,
                      const std::string &region,
                      const std::string &aws_access_key_id,
                      const std::string &aws_secret_key,
                      const std::string &s3_endpoint_url = "");
-    
+
     ~S3FileDownloader();
-    
+
     /**
      * @brief Download a file from S3 to local path
      * @param s3_file_name File name in S3 (e.g., "000123.sst")
      * @param local_file_path Full local path to save the file
      * @return true if download succeeded, false otherwise
      */
-    bool DownloadFile(const std::string &s3_file_name, 
+    bool DownloadFile(const std::string &s3_file_name,
                       const std::string &local_file_path);
-    
+
 private:
     std::shared_ptr<Aws::S3::S3Client> s3_client_;
     std::string bucket_name_;
@@ -65,4 +68,3 @@ private:
 };
 
 }  // namespace EloqDS
-

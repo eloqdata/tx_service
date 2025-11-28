@@ -63,8 +63,8 @@ class SinglePartitionScanner;
 struct RangeSliceBatchPlan
 {
     uint32_t segment_cnt;
-    std::vector<std::string> segment_keys;      // Owned string buffers
-    std::vector<std::string> segment_records;    // Owned string buffers
+    std::vector<std::string> segment_keys;     // Owned string buffers
+    std::vector<std::string> segment_records;  // Owned string buffers
 
     // Clear method for reuse
     void Clear()
@@ -86,8 +86,8 @@ struct RangeMetadataAccumulator
 {
     // Key: (kv_table_name, kv_partition_id) as string pair
     // Value: vector of metadata records for that table/partition
-    std::map<std::pair<std::string, int32_t>,
-             std::vector<RangeMetadataRecord>> records_by_table_partition;
+    std::map<std::pair<std::string, int32_t>, std::vector<RangeMetadataRecord>>
+        records_by_table_partition;
 
     void Clear()
     {
@@ -331,12 +331,13 @@ public:
     void UpdateEncodedRangeSliceKey(std::string &range_slice_key,
                                     uint32_t new_segment_id);
 
-    bool FetchTable(const txservice::TableName &table_name,
-                    std::string &schema_image,
-                    bool &found,
-                    uint64_t &version_ts,
-                    const std::function<void()> *yield_fptr = nullptr,
-                    const std::function<void()> *resume_fptr = nullptr) override;
+    bool FetchTable(
+        const txservice::TableName &table_name,
+        std::string &schema_image,
+        bool &found,
+        uint64_t &version_ts,
+        const std::function<void()> *yield_fptr = nullptr,
+        const std::function<void()> *resume_fptr = nullptr) override;
 
     bool DiscoverAllTableNames(
         std::vector<std::string> &norm_name_vec,
@@ -344,13 +345,15 @@ public:
         const std::function<void()> *resume_fptr = nullptr) override;
 
     //-- database
-    bool UpsertDatabase(std::string_view db,
-                        std::string_view definition,
-                        const std::function<void()> *yield_fptr = nullptr,
-                        const std::function<void()> *resume_fptr = nullptr) override;
-    bool DropDatabase(std::string_view db,
-                      const std::function<void()> *yield_fptr = nullptr,
-                      const std::function<void()> *resume_fptr = nullptr) override;
+    bool UpsertDatabase(
+        std::string_view db,
+        std::string_view definition,
+        const std::function<void()> *yield_fptr = nullptr,
+        const std::function<void()> *resume_fptr = nullptr) override;
+    bool DropDatabase(
+        std::string_view db,
+        const std::function<void()> *yield_fptr = nullptr,
+        const std::function<void()> *resume_fptr = nullptr) override;
     bool FetchDatabase(
         std::string_view db,
         std::string &definition,
@@ -530,7 +533,7 @@ private:
         return txservice::Sharder::MapKeyHashToHashPartitionId(key.Hash());
     }
 
-// =====================================================
+    // =====================================================
     // Group: KV Interface
     // Functions that decide if the request is local or remote
     // =====================================================
@@ -593,11 +596,12 @@ private:
         const std::vector<const txservice::StoreSlice *> &slices,
         int32_t partition_id);
 
-    void DispatchRangeSliceBatches(std::string_view kv_table_name,
-                                   int32_t kv_partition_id,
-                                   uint64_t version,
-                                   const std::vector<RangeSliceBatchPlan> &plans,
-                                   SyncConcurrentRequest *sync_concurrent);
+    void DispatchRangeSliceBatches(
+        std::string_view kv_table_name,
+        int32_t kv_partition_id,
+        uint64_t version,
+        const std::vector<RangeSliceBatchPlan> &plans,
+        SyncConcurrentRequest *sync_concurrent);
 
     /**
      * Helper methods for range metadata batching

@@ -766,7 +766,7 @@ public:
     {
         return partition_id_;
     }
-    
+
     uint32_t ShardId()
     {
         return shard_id_;
@@ -2964,7 +2964,8 @@ struct DropDatabaseCallbackData : public SyncCallbackData
 /**
  * Callback for upserting database information.
  *
- * Handles the completion of database upsert operations and processes the result.
+ * Handles the completion of database upsert operations and processes the
+ * result.
  */
 void UpsertDatabaseCallback(void *data,
                             ::google::protobuf::Closure *closure,

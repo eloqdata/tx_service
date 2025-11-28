@@ -76,11 +76,13 @@ public:
     void Shutdown() override;
 
     /**
-     * @brief Collect list of cached SST files (intersection of live files and local directory)
+     * @brief Collect list of cached SST files (intersection of live files and
+     * local directory)
      * @param file_infos Output vector of file information
      * @return true if collection succeeded, false otherwise
      */
-    bool CollectCachedSstFiles(std::vector<::EloqDS::remote::FileInfo> &file_infos);
+    bool CollectCachedSstFiles(
+        std::vector<::EloqDS::remote::FileInfo> &file_infos);
 
 protected:
     /**
@@ -153,7 +155,8 @@ private:
     bool String2ll(const char *s, size_t slen, int64_t &value);
 
     /**
-     * @brief Extract file number from SST file name (e.g., "000011.sst-ef6b2d92d3687a84" -> 11)
+     * @brief Extract file number from SST file name (e.g.,
+     * "000011.sst-ef6b2d92d3687a84" -> 11)
      * @param file_name SST file name in format {file_number}.sst-{epoch}
      * @return File number, or 0 if extraction fails
      */

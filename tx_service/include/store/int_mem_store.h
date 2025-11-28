@@ -157,17 +157,19 @@ public:
     }
 
     //-- database
-    bool UpsertDatabase(std::string_view db,
-                        std::string_view definition,
-                        const std::function<void()> *yield_fptr = nullptr,
-                        const std::function<void()> *resume_fptr = nullptr) override
+    bool UpsertDatabase(
+        std::string_view db,
+        std::string_view definition,
+        const std::function<void()> *yield_fptr = nullptr,
+        const std::function<void()> *resume_fptr = nullptr) override
     {
         assert(false);
         return false;
     }
-    bool DropDatabase(std::string_view db,
-                      const std::function<void()> *yield_fptr = nullptr,
-                      const std::function<void()> *resume_fptr = nullptr) override
+    bool DropDatabase(
+        std::string_view db,
+        const std::function<void()> *yield_fptr = nullptr,
+        const std::function<void()> *resume_fptr = nullptr) override
     {
         assert(false);
         return false;

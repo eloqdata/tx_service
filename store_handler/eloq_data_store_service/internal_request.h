@@ -1686,7 +1686,8 @@ class SyncFileCacheLocalRequest : public Poolable
 public:
     SyncFileCacheLocalRequest() = default;
     SyncFileCacheLocalRequest(const SyncFileCacheLocalRequest &other) = delete;
-    SyncFileCacheLocalRequest &operator=(const SyncFileCacheLocalRequest &other) = delete;
+    SyncFileCacheLocalRequest &operator=(
+        const SyncFileCacheLocalRequest &other) = delete;
 
     void Clear() override
     {

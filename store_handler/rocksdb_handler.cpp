@@ -20,6 +20,8 @@
  *
  */
 
+#include "rocksdb_handler.h"
+
 #include <brpc/controller.h>
 #include <brpc/server.h>
 #include <brpc/stream.h>
@@ -70,7 +72,6 @@
 #include "local_cc_shards.h"
 #include "rocksdb/iostats_context.h"
 #include "rocksdb/rate_limiter.h"
-#include "rocksdb_handler.h"
 #include "store_util.h"
 #include "tx_key.h"
 #include "tx_record.h"
@@ -1002,9 +1003,9 @@ void RocksDBHandler::FetchTableCatalog(
             if (!status.ok())
             {
                 fetch_cc->SetFinish(txservice::RecordStatus::Deleted, 0);
-		DLOG(INFO) << "FetchTableCatalog table "
-			   << ccm_table_name.String()
-			   << " not found in data store.";
+                DLOG(INFO) << "FetchTableCatalog table "
+                           << ccm_table_name.String()
+                           << " not found in data store.";
                 return;
             }
             std::string kv_cf_name;
@@ -3301,7 +3302,9 @@ bool RocksDBHandlerImpl::StartDB(bool is_ng_leader, uint32_t *next_leader_node)
                     // TODO(liunyl): we should not have a column family for each
                     // table
                     auto pre_built_table = pre_built_tables_.end();
-                    for (auto it = pre_built_tables_.begin(); it != pre_built_tables_.end(); ++it)
+                    for (auto it = pre_built_tables_.begin();
+                         it != pre_built_tables_.end();
+                         ++it)
                     {
                         if (it->first.StringView() == table_name)
                         {
@@ -3332,9 +3335,9 @@ bool RocksDBHandlerImpl::StartDB(bool is_ng_leader, uint32_t *next_leader_node)
                             return false;
                         }
 
-			            DLOG(INFO) << "Initialized prebuilt table schema for table: "
-				                   << table_name << " with version "
-				                   << version;
+                        DLOG(INFO)
+                            << "Initialized prebuilt table schema for table: "
+                            << table_name << " with version " << version;
                     }
                     else
                     {

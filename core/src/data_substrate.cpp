@@ -20,11 +20,12 @@
  *
  */
 
+#include "data_substrate.h"
+
 #include <gflags/gflags.h>
 #include <sys/resource.h>
 
 #include "INIReader.h"
-#include "data_substrate.h"
 #include "log_server.h"
 #include "sequences/sequences.h"
 #include "store/data_store_handler.h"

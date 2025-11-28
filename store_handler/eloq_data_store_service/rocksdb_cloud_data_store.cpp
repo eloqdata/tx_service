@@ -875,7 +875,7 @@ bool RocksDBCloudDataStore::CollectCachedSstFiles(
     file_infos.clear();
     rocksdb::CloudFileSystem *cfs =
         dynamic_cast<rocksdb::CloudFileSystem *>(cloud_fs_.get());
-    
+
     for (const auto &meta : metadata)
     {
         std::string filename =

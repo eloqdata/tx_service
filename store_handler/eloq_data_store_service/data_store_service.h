@@ -816,7 +816,8 @@ private:
      * @brief Create S3 downloader instance
      * @return Unique pointer to S3FileDownloader, or nullptr on failure
      */
-    std::unique_ptr<S3FileDownloader> CreateS3Downloader(uint32_t shard_id) const;
+    std::unique_ptr<S3FileDownloader> CreateS3Downloader(
+        uint32_t shard_id) const;
 #endif
 
     /**
