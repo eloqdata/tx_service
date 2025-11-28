@@ -349,9 +349,6 @@ ASALocalRun/
 eloq_log_service
 tx_service/raft_host_manager
 
-# pre-commit
-.pre-commit-config.yaml
-
 # macOS garbage
 .DS_Store
 
