@@ -1,328 +1,402 @@
-cmake_minimum_required(VERSION 3.12)
-project(eloq)
+cmake_minimum_required(VERSION 3.8)
+project(data_substrate)
 
-find_package(Threads)
+# Set library name
+set(DATA_SUBSTRATE_LIB "data_substrate" CACHE STRING "Data substrate library name")
+set(METRICS_LIB "eloq-metrics" CACHE STRING "Metrics library name")
 
-set(CMAKE_CXX_STANDARD 17)
-set(CMAKE_CXX_FLAGS_RELEASE "-O3")
+# Options from original eloq CMakeLists
+set(WITH_DATA_STORE "ELOQDSS_ROCKSDB" CACHE STRING "Which key-value storage to use")
+set_property(CACHE WITH_DATA_STORE PROPERTY STRINGS "DYNAMODB" "BIGTABLE" "ROCKSDB" "ELOQDSS_ROCKSDB" "ELOQDSS_ROCKSDB_CLOUD_S3" "ELOQDSS_ROCKSDB_CLOUD_GCS" "ELOQDSS_ELOQSTORE")
 
-set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -Wno-parentheses -Wno-error -W -fPIC")
-set(CMAKE_CXX_FLAGS_DEBUG "${CMAKE_CXX_FLAGS_DEBUG} -g -DFAULT_INJECTOR")
+option(WITH_LOG_SERVICE "Compile with built-in log service." ON)
+option(OPEN_LOG_SERVICE "Compile with open log service." ON)
+option(SMALL_RANGE "Whether enable small range" OFF)
+option(STATISTICS "Whether enable table statistics" ON)
+option(EXT_TX_PROC_ENABLED "Allows external threads to move forward the tx service." ON)
+option(ELOQ_MODULE_ENABLED "Register the tx service as an ELOQ module." OFF)
+option(BUILD_SHARED_LIBS "Build shared libraries instead of static libraries" OFF)
 
-if(CMAKE_COMPILER_IS_GNUCC)
-    set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -Wall -Wextra -Wno-reorder -Wno-unused-parameter -Wno-parentheses")
+
+message(NOTICE "WITH_DATA_STORE: ${WITH_DATA_STORE}")
+message(NOTICE "WITH_LOG_SERVICE: ${WITH_LOG_SERVICE}")
+message(NOTICE "OPEN_LOG_SERVICE: ${OPEN_LOG_SERVICE}")
+message(NOTICE "BUILD_SHARED_LIBS: ${BUILD_SHARED_LIBS}")
+option(USE_ONE_ELOQDSS_PARTITION_ENABLED "Whether use one partition for kv store" OFF)
+message(NOTICE "USE_ONE_ELOQDSS_PARTITION_ENABLED : ${USE_ONE_ELOQDSS_PARTITION_ENABLED}")
+
+# Synchronize WITH_DATA_STORE and WITH_LOG_STATE
+# Determine RocksDB type from WITH_DATA_STORE
+set(DATA_STORE_USES_LOCAL_ROCKSDB FALSE)
+set(DATA_STORE_USES_CLOUD_S3_ROCKSDB FALSE)
+set(DATA_STORE_USES_CLOUD_GCS_ROCKSDB FALSE)
+set(DATA_STORE_USES_ROCKSDB FALSE)
+
+if(WITH_DATA_STORE STREQUAL "ROCKSDB" OR WITH_DATA_STORE STREQUAL "ELOQDSS_ROCKSDB")
+    set(DATA_STORE_USES_LOCAL_ROCKSDB TRUE)
+    set(DATA_STORE_USES_ROCKSDB TRUE)
+elseif(WITH_DATA_STORE STREQUAL "ELOQDSS_ROCKSDB_CLOUD_S3")
+    set(DATA_STORE_USES_CLOUD_S3_ROCKSDB TRUE)
+    set(DATA_STORE_USES_ROCKSDB TRUE)
+elseif(WITH_DATA_STORE STREQUAL "ELOQDSS_ROCKSDB_CLOUD_GCS")
+    set(DATA_STORE_USES_CLOUD_GCS_ROCKSDB TRUE)
+    set(DATA_STORE_USES_ROCKSDB TRUE)
 endif()
 
-if(MSVC)
-    set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} /W3")
+# Check if WITH_LOG_STATE is already set in cache
+get_property(LOG_STATE_CACHED CACHE WITH_LOG_STATE PROPERTY VALUE SET)
+
+# If DATA_STORE uses RocksDB, synchronize WITH_LOG_STATE
+if(DATA_STORE_USES_ROCKSDB)
+    if(NOT LOG_STATE_CACHED)
+        # Auto-set WITH_LOG_STATE based on WITH_DATA_STORE
+        if(DATA_STORE_USES_LOCAL_ROCKSDB)
+            set(WITH_LOG_STATE "ROCKSDB" CACHE STRING "The log state implementation" FORCE)
+            message(WARNING "WITH_LOG_STATE was not set. Auto-set to 'ROCKSDB' to match WITH_DATA_STORE='${WITH_DATA_STORE}'. Please set WITH_LOG_STATE explicitly if you need a different value.")
+        elseif(DATA_STORE_USES_CLOUD_S3_ROCKSDB)
+            set(WITH_LOG_STATE "ROCKSDB_CLOUD_S3" CACHE STRING "The log state implementation" FORCE)
+            message(WARNING "WITH_LOG_STATE was not set. Auto-set to 'ROCKSDB_CLOUD_S3' to match WITH_DATA_STORE='${WITH_DATA_STORE}'. Please set WITH_LOG_STATE explicitly if you need a different value.")
+        elseif(DATA_STORE_USES_CLOUD_GCS_ROCKSDB)
+            set(WITH_LOG_STATE "ROCKSDB_CLOUD_GCS" CACHE STRING "The log state implementation" FORCE)
+            message(WARNING "WITH_LOG_STATE was not set. Auto-set to 'ROCKSDB_CLOUD_GCS' to match WITH_DATA_STORE='${WITH_DATA_STORE}'. Please set WITH_LOG_STATE explicitly if you need a different value.")
+        endif()
+        set_property(CACHE WITH_LOG_STATE PROPERTY STRINGS "MEMORY" "ROCKSDB" "ROCKSDB_CLOUD_S3" "ROCKSDB_CLOUD_GCS")
+    else()
+        # Validate compatibility
+        if(DATA_STORE_USES_LOCAL_ROCKSDB AND NOT WITH_LOG_STATE STREQUAL "ROCKSDB")
+            message(FATAL_ERROR "WITH_DATA_STORE='${WITH_DATA_STORE}' uses local RocksDB, but WITH_LOG_STATE='${WITH_LOG_STATE}' is incompatible. WITH_LOG_STATE must be 'ROCKSDB' when using local RocksDB.")
+        elseif(DATA_STORE_USES_CLOUD_S3_ROCKSDB AND NOT WITH_LOG_STATE STREQUAL "ROCKSDB_CLOUD_S3")
+            message(FATAL_ERROR "WITH_DATA_STORE='${WITH_DATA_STORE}' uses cloud RocksDB (S3), but WITH_LOG_STATE='${WITH_LOG_STATE}' is incompatible. WITH_LOG_STATE must be 'ROCKSDB_CLOUD_S3' when using cloud RocksDB (S3).")
+        elseif(DATA_STORE_USES_CLOUD_GCS_ROCKSDB AND NOT WITH_LOG_STATE STREQUAL "ROCKSDB_CLOUD_GCS")
+            message(FATAL_ERROR "WITH_DATA_STORE='${WITH_DATA_STORE}' uses cloud RocksDB (GCS), but WITH_LOG_STATE='${WITH_LOG_STATE}' is incompatible. WITH_LOG_STATE must be 'ROCKSDB_CLOUD_GCS' when using cloud RocksDB (GCS).")
+        endif()
+    endif()
+else()
+    # DATA_STORE doesn't use RocksDB, so WITH_LOG_STATE can be anything
+    # No synchronization needed in this case
 endif()
 
-if(NOT CMAKE_BUILD_TYPE)
-    set(CMAKE_BUILD_TYPE Debug CACHE STRING "Build type" FORCE)
+# Handle reverse case: if only WITH_LOG_STATE is set to local RocksDB, auto-set WITH_DATA_STORE
+# But only if WITH_DATA_STORE doesn't already use RocksDB (to avoid conflicts)
+if(LOG_STATE_CACHED AND WITH_LOG_STATE STREQUAL "ROCKSDB")
+    if(NOT DATA_STORE_USES_ROCKSDB)
+        # WITH_LOG_STATE is set to local RocksDB, but WITH_DATA_STORE doesn't use RocksDB
+        # Capture the old value before changing it
+        set(OLD_DATA_STORE_VALUE ${WITH_DATA_STORE})
+        # Auto-set WITH_DATA_STORE to use local RocksDB
+        set(WITH_DATA_STORE "ELOQDSS_ROCKSDB" CACHE STRING "Which key-value storage to use" FORCE)
+        message(WARNING "WITH_LOG_STATE='ROCKSDB' (local RocksDB) was set, but WITH_DATA_STORE='${OLD_DATA_STORE_VALUE}' doesn't use RocksDB. Auto-set WITH_DATA_STORE to 'ELOQDSS_ROCKSDB'. Please set WITH_DATA_STORE explicitly if you need a different value.")
+        # Re-evaluate after auto-setting
+        set(DATA_STORE_USES_LOCAL_ROCKSDB TRUE)
+        set(DATA_STORE_USES_ROCKSDB TRUE)
+    elseif(NOT DATA_STORE_USES_LOCAL_ROCKSDB)
+        # WITH_LOG_STATE is set to local RocksDB, but WITH_DATA_STORE uses cloud RocksDB
+        message(FATAL_ERROR "WITH_LOG_STATE='ROCKSDB' (local RocksDB) is incompatible with WITH_DATA_STORE='${WITH_DATA_STORE}' (cloud RocksDB). Please set compatible values.")
+    endif()
 endif()
 
-set(WITH_LOG_STATE "ROCKSDB" CACHE STRING "The log state implementation")
-set_property(CACHE WITH_LOG_STATE PROPERTY STRINGS "MEMORY" "ROCKSDB" "ROCKSDB_CLOUD_S3" "ROCKSDB_CLOUD_GCS")
+message(NOTICE "WITH_DATA_STORE: ${WITH_DATA_STORE}")
 message(NOTICE "WITH_LOG_STATE: ${WITH_LOG_STATE}")
 
-# Add compile flags for LOG STATE TYPE
-if(WITH_LOG_STATE STREQUAL "MEMORY")
-  add_compile_definitions(LOG_STATE_TYPE_MEM)
-elseif(WITH_LOG_STATE STREQUAL "ROCKSDB")
-  add_compile_definitions(LOG_STATE_TYPE_RKDB)
-elseif(WITH_LOG_STATE STREQUAL "ROCKSDB_CLOUD_S3")
-  add_compile_definitions(LOG_STATE_TYPE_RKDB_S3)
-elseif(WITH_LOG_STATE STREQUAL "ROCKSDB_CLOUD_GCS")
-  add_compile_definitions(LOG_STATE_TYPE_RKDB_GCS)
+# Enable Position Independent Code for shared libraries
+if(BUILD_SHARED_LIBS)
+    set(CMAKE_POSITION_INDEPENDENT_CODE ON)
+    message(NOTICE "Building SHARED libraries")
 else()
-  message(FATAL_ERROR "Unknown WITH_LOG_STATE: ${WITH_LOG_STATE}")
+    message(NOTICE "Building STATIC libraries")
 endif()
 
-option(BRPC_WITH_GLOG "With glog" ON)
-option(RUN_TX_SERVICE_TESTS "Run unit-tests" ON)
-option(FORK_HM_PROCESS "Whether fork host manager process" ON)
-message(NOTICE "FORK_HM_PROCESS : ${FORK_HM_PROCESS}")
-
-if(FORK_HM_PROCESS)
-    add_definitions(-DFORK_HM_PROCESS)
+if(USE_ONE_ELOQDSS_PARTITION_ENABLED)
+    add_compile_definitions(USE_ONE_ELOQDSS_PARTITION)
+endif()
+# Add compile definitions based on options
+if(WITH_DATA_STORE STREQUAL "DYNAMODB")
+    set(KV_STORAGE_VAL 1 CACHE STRING "dynamodb" FORCE)
+    add_compile_definitions(DATA_STORE_TYPE_DYNAMODB)
+    find_package(AWSSDK REQUIRED COMPONENTS dynamodb)
+elseif(WITH_DATA_STORE STREQUAL "ROCKSDB")
+    add_compile_definitions(DATA_STORE_TYPE_ROCKSDB)
+elseif(WITH_DATA_STORE STREQUAL "BIGTABLE")
+    set(KV_STORAGE_VAL 2 CACHE STRING "big table" FORCE)
+    add_compile_definitions(DATA_STORE_TYPE_BIGTABLE)
+    find_package(google_cloud_cpp_bigtable REQUIRED)
+elseif(WITH_DATA_STORE STREQUAL "ELOQDSS_ROCKSDB_CLOUD_S3")
+    set(KV_STORAGE_VAL 3 CACHE STRING "eloq_ds" FORCE)
+    add_compile_definitions(DATA_STORE_TYPE_ELOQDSS_ROCKSDB_CLOUD_S3)
+elseif(WITH_DATA_STORE STREQUAL "ELOQDSS_ROCKSDB")
+    set(KV_STORAGE_VAL 3 CACHE STRING "eloq_ds" FORCE)
+    add_compile_definitions(DATA_STORE_TYPE_ELOQDSS_ROCKSDB)
+elseif(WITH_DATA_STORE STREQUAL "ELOQDSS_ELOQSTORE")
+    set(KV_STORAGE_VAL 3 CACHE STRING "eloq_ds" FORCE)
+    add_compile_definitions(DATA_STORE_TYPE_ELOQDSS_ELOQSTORE)
+    option(WITH_TXSERVICE "Whether compile eloqstore with txservice" ON)
+    set(ELOQSTORE_PARENT_DIR ${CMAKE_CURRENT_SOURCE_DIR}/store_handler/eloq_data_store_service CACHE PATH "EloqStore parent directory")
+    INCLUDE(${CMAKE_CURRENT_SOURCE_DIR}/store_handler/eloq_data_store_service/build_eloq_store.cmake)
+else()
+    message(FATAL_ERROR "Unset WITH_DATA_STORE")
 endif()
 
-option(RUNNING_TXSERVICE_CTEST "running tx_service alone to run test" ON)
-message(STATUS "RUNNING_TXSERVICE_CTEST : ${RUNNING_TXSERVICE_CTEST}")
-
-if(RUNNING_TXSERVICE_CTEST)
-    add_definitions(-DRUNNING_TXSERVICE_CTEST)
-endif()
-
-add_subdirectory(abseil-cpp)
-
-set(ABSEIL
-    absl::btree
-    absl::flat_hash_map
-    absl::span
-)
-
-find_package(Protobuf REQUIRED)
-find_package(GFLAGS REQUIRED)
-find_package(OpenSSL REQUIRED)
-find_package(MIMALLOC REQUIRED)
-
-find_path(GFLAGS_INCLUDE_PATH gflags/gflags.h)
-find_library(GFLAGS_LIBRARY NAMES gflags libgflags)
-
-if((NOT GFLAGS_INCLUDE_PATH) OR(NOT GFLAGS_LIBRARY))
-    message(FATAL_ERROR "Fail to find gflags")
-endif()
-
-message(STATUS "OpenSSL include dir: ${OPENSSL_INCLUDE_DIR}")
-
-message(STATUS "protobuf dir: ${PROTOBUF_LIBRARY}")
-message(STATUS "protobuf include dir: ${Protobuf_INCLUDE_DIR}")
-message(STATUS "gflags libs dir: ${GFLAGS_LIBRARY}")
-message(STATUS "gflags include dir: ${GFLAGS_INCLUDE_DIR}")
-
-if(CMAKE_COMPILER_IS_GNUCC)
-    find_path(BRPC_INCLUDE_PATH NAMES brpc/stream.h)
-    find_library(BRPC_LIB NAMES brpc)
-
-    if((NOT BRPC_INCLUDE_PATH) OR(NOT BRPC_LIB))
-        message(FATAL_ERROR "Fail to find brpc")
+# Find RocksDB if needed
+if(WITH_DATA_STORE STREQUAL "ELOQDSS_ROCKSDB" OR WITH_DATA_STORE STREQUAL "ROCKSDB")
+    find_path(ROCKSDB_INCLUDE_PATH NAMES rocksdb/db.h)
+    if(NOT ROCKSDB_INCLUDE_PATH)
+        message(FATAL_ERROR "Fail to find RocksDB include path")
     endif()
+    message(STATUS "ROCKSDB_INCLUDE_PATH: ${ROCKSDB_INCLUDE_PATH}")
+    include_directories(${ROCKSDB_INCLUDE_PATH})
 
-    find_path(BRAFT_INCLUDE_PATH NAMES braft/raft.h)
-    find_library(BRAFT_LIB NAMES braft)
-
-    if((NOT BRAFT_INCLUDE_PATH) OR(NOT BRAFT_LIB))
-        message(FATAL_ERROR "Fail to find braft")
+    find_library(ROCKSDB_LIB NAMES rocksdb)
+    if(NOT ROCKSDB_LIB)
+        message(FATAL_ERROR "Fail to find RocksDB lib path")
     endif()
+    message(STATUS "ROCKSDB_LIB: ${ROCKSDB_LIB}")
+    set(ROCKSDB_LIBRARIES ${ROCKSDB_LIBRARIES} ${ROCKSDB_LIB})
+endif()
 
-    if(BRPC_WITH_GLOG)
-        find_path(GLOG_INCLUDE_PATH NAMES glog/logging.h)
-        find_library(GLOG_LIB NAMES glog VERSION ">=0.6.0" REQUIRED)
-
-        if((NOT GLOG_INCLUDE_PATH) OR(NOT GLOG_LIB))
-            message(FATAL_ERROR "Fail to find glog")
+# Handle RocksDB Cloud S3/GCS configurations
+if((WITH_DATA_STORE STREQUAL "ROCKSDB_CLOUD_S3") OR (WITH_DATA_STORE STREQUAL "ROCKSDB_CLOUD_GCS") 
+          OR (WITH_DATA_STORE STREQUAL "ELOQDSS_ROCKSDB_CLOUD_S3") OR (WITH_DATA_STORE STREQUAL "ELOQDSS_ROCKSDB_CLOUD_GCS"))
+    if((WITH_DATA_STORE STREQUAL "ROCKSDB_CLOUD_S3") OR (WITH_DATA_STORE STREQUAL "ELOQDSS_ROCKSDB_CLOUD_S3"))
+        find_path(AWS_CORE_INCLUDE_PATH aws/core/Aws.h)
+        if((NOT AWS_CORE_INCLUDE_PATH))
+            message(FATAL_ERROR "Fail to find aws/core include path")
         endif()
+        message(STATUS "aws/core include path: ${AWS_CORE_INCLUDE_PATH}")
 
-        include_directories(${GLOG_INCLUDE_PATH})
-        set(LINK_LIB ${LINK_LIB} ${GLOG_LIB})
-        message(STATUS "glog lib dir: ${GLOG_LIB}")
+        find_library(AWS_CORE_LIB aws-cpp-sdk-core)
+        if((NOT AWS_CORE_LIB ))
+            message(FATAL_ERROR "Fail to find aws-cpp-sdk-core lib")
+        endif()
+        message(STATUS "aws-cpp-sdk-core library: ${AWS_CORE_LIB}")
+
+        find_path(AWS_S3_INCLUDE_PATH aws/s3/S3Client.h)
+        if((NOT AWS_S3_INCLUDE_PATH))
+            message(FATAL_ERROR "Fail to find aws/s3 include path")
+        endif()
+        message(STATUS "aws/s3 include path: ${AWS_S3_INCLUDE_PATH}")
+
+        find_library(AWS_S3_LIB aws-cpp-sdk-s3)
+        if((NOT AWS_S3_LIB ))
+            message(FATAL_ERROR "Fail to find aws-cpp-sdk-s3 lib")
+        endif()
+        message(STATUS "aws-cpp-sdk-s3 library: ${AWS_S3_LIB}")
+
+        set(ROCKSDB_INCLUDE_PATH ${ROCKSDB_INCLUDE_PATH} ${AWS_CORE_INCLUDE_PATH})
+        set(ROCKSDB_INCLUDE_PATH ${ROCKSDB_INCLUDE_PATH} ${AWS_S3_INCLUDE_PATH})
+
+        set(ROCKSDB_LIBRARIES ${ROCKSDB_LIBRARIES} ${AWS_CORE_LIB})
+        set(ROCKSDB_LIBRARIES ${ROCKSDB_LIBRARIES} ${AWS_S3_LIB})
+
+        find_library(ROCKSDB_CLOUD_LIB NAMES rocksdb-cloud-aws)
     endif()
 
-    find_path(LEVELDB_INCLUDE_PATH NAMES leveldb/db.h)
-    find_library(LEVELDB_LIB NAMES leveldb)
-
-    if((NOT LEVELDB_INCLUDE_PATH) OR(NOT LEVELDB_LIB))
-        message(FATAL_ERROR "Fail to find leveldb")
+    # Common RocksDB Cloud setup
+    find_path(ROCKSDB_CLOUD_INCLUDE_PATH NAMES rocksdb/db.h PATH_SUFFIXES "rocksdb_cloud_header")
+    if(NOT ROCKSDB_CLOUD_INCLUDE_PATH)
+        message(FATAL_ERROR "Fail to find RocksDB Cloud include path")
     endif()
+    message(STATUS "ROCKSDB_CLOUD_INCLUDE_PATH: ${ROCKSDB_CLOUD_INCLUDE_PATH}")
+    set(ROCKSDB_INCLUDE_PATH ${ROCKSDB_INCLUDE_PATH} ${ROCKSDB_CLOUD_INCLUDE_PATH})
+    include_directories(${ROCKSDB_INCLUDE_PATH})
 
-    # find_path(OPENSSL_INCLUDE_PATH NAMES openssl/ssl.h)
-    # find_library(OPENSSL_LIB NAMES ssl)
-    # if ((NOT OPENSSL_INCLUDE_PATH) OR (NOT OPENSSL_LIB))
-    # message(FATAL_ERROR "Fail to find openssl")
-    # endif()
+    if(NOT ROCKSDB_CLOUD_LIB)
+        message(FATAL_ERROR "Fail to find RocksDB Cloud lib path")
+    endif()
+    message(STATUS "ROCKSDB_CLOUD_LIB: ${ROCKSDB_CLOUD_LIB}")
+    set(ROCKSDB_LIBRARIES ${ROCKSDB_LIBRARIES} ${ROCKSDB_CLOUD_LIB})
 endif()
 
-# Compile all protobuf files under proto directory.
-set(PROTO_SRC ${CMAKE_CURRENT_SOURCE_DIR}/include/proto)
-set(PROTO_NAME cc_request)
-execute_process(
-    COMMAND protoc ./${PROTO_NAME}.proto --cpp_out=./ --proto_path=./
-    WORKING_DIRECTORY ${PROTO_SRC}
-)
-
-set(LOG_PROTO_SRC ${CMAKE_CURRENT_SOURCE_DIR}/tx-log-protos)
-set(LOG_PROTO_NAME log)
-execute_process(
-    COMMAND protoc ./${LOG_PROTO_NAME}.proto --cpp_out=./ --proto_path=./
-    WORKING_DIRECTORY ${LOG_PROTO_SRC}
-)
-
-set(TX_SERVICE_SOURCE_DIR ${CMAKE_SOURCE_DIR})
-SET(METRICS_SERVICE_SOURCE_DIR ${CMAKE_SOURCE_DIR}/../eloq_metrics)
-
-set(INCLUDE_DIR
-    ${TX_SERVICE_SOURCE_DIR}/include
-    ${TX_SERVICE_SOURCE_DIR}/abseil-cpp
-    ${TX_SERVICE_SOURCE_DIR}/include/cc
-    ${TX_SERVICE_SOURCE_DIR}/include/remote
-    ${TX_SERVICE_SOURCE_DIR}/include/fault
-    ${TX_SERVICE_SOURCE_DIR}/tx-log-protos
-    ${METRICS_SERVICE_SOURCE_DIR}/include
-    ${Protobuf_INCLUDE_DIR})
-
-if(CMAKE_COMPILER_IS_GNUCC)
-    set(INCLUDE_DIR ${INCLUDE_DIR}
-        ${MIMALLOC_INCLUDE_PATH}
-        ${BRPC_INCLUDE_PATH}
-        ${BRAFT_INCLUDE_PATH}
-        ${GLOG_INCLUDE_PATH}
-        ${GFLAGS_INCLUDE_PATH})
-endif()
-
-set(LINK_LIB ${LINK_LIB} ${PROTOBUF_LIBRARY})
-
-if(CMAKE_COMPILER_IS_GNUCC)
-    set(LINK_LIB ${LINK_LIB}
-        ${MIMALLOC_LIB}
-        ${GFLAGS_LIBRARY}
-        ${LEVELDB_LIB}
-        ${BRAFT_LIB}
-        ${BRPC_LIB}
-        ${OPENSSL_LIB}
+# Compile proto file for data store service
+if((WITH_DATA_STORE STREQUAL "ELOQDSS_ROCKSDB_CLOUD_S3") OR (WITH_DATA_STORE STREQUAL "ELOQDSS_ROCKSDB_CLOUD_GCS") OR (WITH_DATA_STORE STREQUAL "ELOQDSS_ROCKSDB") OR (WITH_DATA_STORE STREQUAL "ELOQDSS_ELOQSTORE"))
+    set(DS_PROTO_DIR ${CMAKE_CURRENT_SOURCE_DIR}/store_handler/eloq_data_store_service)
+    message(NOTICE "data store service proto dir: ${DS_PROTO_DIR}")
+    set(PROTO_SRC ${DS_PROTO_DIR})
+    set(PROTO_NAME ds_request)
+    execute_process(
+        COMMAND protoc ./${PROTO_NAME}.proto --cpp_out=./
+        WORKING_DIRECTORY ${PROTO_SRC}
     )
 endif()
 
-SET(TxService_SOURCES
-    ${TX_SERVICE_SOURCE_DIR}/src/tx_key.cpp
-    ${TX_SERVICE_SOURCE_DIR}/src/tx_execution.cpp
-    ${TX_SERVICE_SOURCE_DIR}/src/tx_operation.cpp
-    ${TX_SERVICE_SOURCE_DIR}/src/checkpointer.cpp
-    ${TX_SERVICE_SOURCE_DIR}/src/tx_trace.cpp
-    ${TX_SERVICE_SOURCE_DIR}/src/tx_start_ts_collector.cpp
-    ${TX_SERVICE_SOURCE_DIR}/src/sharder.cpp
-    ${TX_SERVICE_SOURCE_DIR}/src/catalog_key_record.cpp
-    ${TX_SERVICE_SOURCE_DIR}/src/range_record.cpp
-    ${TX_SERVICE_SOURCE_DIR}/src/range_bucket_key_record.cpp
-    ${TX_SERVICE_SOURCE_DIR}/src/cc/cc_entry.cpp
-    ${TX_SERVICE_SOURCE_DIR}/src/cc/cc_map.cpp
-    ${TX_SERVICE_SOURCE_DIR}/src/cc/cc_shard.cpp
-    ${TX_SERVICE_SOURCE_DIR}/src/cc/cc_handler_result.cpp
-    ${TX_SERVICE_SOURCE_DIR}/src/cc/local_cc_handler.cpp
-    ${TX_SERVICE_SOURCE_DIR}/src/cc/local_cc_shards.cpp
-    ${TX_SERVICE_SOURCE_DIR}/src/cc/non_blocking_lock.cpp
-    ${TX_SERVICE_SOURCE_DIR}/src/cc/cc_req_misc.cpp
-    ${TX_SERVICE_SOURCE_DIR}/src/cc/range_slice.cpp
-    ${TX_SERVICE_SOURCE_DIR}/src/cc/reader_writer_cntl.cpp
-    ${TX_SERVICE_SOURCE_DIR}/src/eloq_string_key_record.cpp
-    ${TX_SERVICE_SOURCE_DIR}/src/eloq_basic_catalog_factory.cpp
-    ${TX_SERVICE_SOURCE_DIR}/src/remote/remote_cc_handler.cpp
-    ${TX_SERVICE_SOURCE_DIR}/src/remote/remote_cc_request.cpp
-    ${TX_SERVICE_SOURCE_DIR}/src/remote/cc_node_service.cpp
-    ${TX_SERVICE_SOURCE_DIR}/src/remote/cc_stream_receiver.cpp
-    ${TX_SERVICE_SOURCE_DIR}/src/remote/cc_stream_sender.cpp
-    ${TX_SERVICE_SOURCE_DIR}/src/fault/log_replay_service.cpp
-    ${TX_SERVICE_SOURCE_DIR}/src/fault/cc_node.cpp
-    ${TX_SERVICE_SOURCE_DIR}/src/fault/fault_inject.cpp
-    ${TX_SERVICE_SOURCE_DIR}/src/tx_worker_pool.cpp
-    ${TX_SERVICE_SOURCE_DIR}/src/dead_lock_check.cpp
-    ${TX_SERVICE_SOURCE_DIR}/src/tx_index_operation.cpp
-    ${TX_SERVICE_SOURCE_DIR}/src/sk_generator.cpp
-    ${TX_SERVICE_SOURCE_DIR}/src/data_sync_task.cpp
-    ${TX_SERVICE_SOURCE_DIR}/src/standby.cpp
-    ${TX_SERVICE_SOURCE_DIR}/src/store/snapshot_manager.cpp
-    ${TX_SERVICE_SOURCE_DIR}/src/sequences/sequences.cpp
-    ${METRICS_SERVICE_SOURCE_DIR}/src/metrics.cc
-)
-
-set(INCLUDE_DIR ${INCLUDE_DIR} ${PROTO_SRC} ${LOG_PROTO_SRC} ${OPENSSL_INCLUDE_DIR})
-set(TxService_SOURCES ${TxService_SOURCES} ${PROTO_SRC}/${PROTO_NAME}.pb.cc)
-set(TxService_SOURCES ${TxService_SOURCES} ${LOG_PROTO_SRC}/log_agent.cpp)
-set(TxService_SOURCES ${TxService_SOURCES} ${LOG_PROTO_SRC}/${LOG_PROTO_NAME}.pb.cc)
-
-add_library(txservice STATIC ${TxService_SOURCES})
-
-target_include_directories(txservice PUBLIC ${INCLUDE_DIR})
-
-target_link_libraries(txservice PUBLIC mimalloc ${LINK_LIB} ${PROTOBUF_LIBRARIES} ${ABSEIL})
-
-include(FetchContent)
-    # Import yaml-cpp library used by host manager
-FetchContent_Declare(
-    yaml-cpp
-    GIT_REPOSITORY https://github.com/jbeder/yaml-cpp.git
-    GIT_TAG yaml-cpp-0.7.0 # Can be a tag (yaml-cpp-x.x.x), a commit hash, or a branch name (master)
-)
-FetchContent_MakeAvailable(yaml-cpp)
-
-# add_executable(hello ${CMAKE_SOURCE_DIR}/hello.cpp)
-# target_link_libraries(hello PRIVATE txservice ${CMAKE_THREAD_LIBS_INIT})
-SET(HOST_MANAGER_SOURCE_DIR ${CMAKE_CURRENT_SOURCE_DIR}/raft_host_manager)
-set(HOST_MANAGER_INCLUDE_DIR
-    ${HOST_MANAGER_SOURCE_DIR}/include
-    ${TX_SERVICE_SOURCE_DIR}/tx-log-protos
-    ${OPENSSL_INCLUDE_DIR}
-    ${PROTO_SRC}
-    ${LOG_PROTO_SRC})
-
-if(CMAKE_COMPILER_IS_GNUCC)
-    set(HOST_MANAGER_INCLUDE_DIR ${HOST_MANAGER_INCLUDE_DIR}
-        ${BRPC_INCLUDE_PATH}
-        ${BRAFT_INCLUDE_PATH}
-        ${GLOG_INCLUDE_PATH}
-        ${GFLAGS_INCLUDE_PATH})
+# Add compile definitions based on options
+if(WITH_LOG_SERVICE)
+    add_compile_definitions(WITH_LOG_SERVICE)
 endif()
 
-set(HOST_MANAGER_LINK_LIB ${HOST_MANAGER_LINK_LIB} ${PROTOBUF_LIBRARIES})
-
-if(CMAKE_COMPILER_IS_GNUCC)
-    find_path(BRAFT_INCLUDE_PATH NAMES braft/raft.h)
-    find_library(BRAFT_LIB NAMES braft)
-
-    if((NOT BRAFT_INCLUDE_PATH) OR(NOT BRAFT_LIB))
-        message(FATAL_ERROR "Fail to find braft")
-    endif()
-
-    set(HOST_MANAGER_LINK_LIB ${HOST_MANAGER_LINK_LIB}
-        ${GFLAGS_LIBRARY}
-        ${LEVELDB_LIB}
-        ${BRAFT_LIB}
-        ${BRPC_LIB}
-        ${OPENSSL_LIB})
-    find_path(GLOG_INCLUDE_PATH NAMES glog/logging.h)
-    find_library(GLOG_LIB NAMES glog VERSION ">=0.6.0" REQUIRED)
-
-    if((NOT GLOG_INCLUDE_PATH) OR(NOT GLOG_LIB))
-        message(FATAL_ERROR "Fail to find glog")
-    endif()
-
-    include_directories(${GLOG_INCLUDE_PATH})
-    set(HOST_MANAGER_LINK_LIB ${HOST_MANAGER_LINK_LIB} ${GLOG_LIB})
+if(OPEN_LOG_SERVICE)
+    add_compile_definitions(OPEN_LOG_SERVICE=1)
 endif()
 
-SET(RaftHM_SOURCES
-    ${HOST_MANAGER_SOURCE_DIR}/src/main.cpp
-    ${HOST_MANAGER_SOURCE_DIR}/src/raft_host_manager_service.cpp
-    ${HOST_MANAGER_SOURCE_DIR}/src/raft_host_manager.cpp
-    ${HOST_MANAGER_SOURCE_DIR}/src/ini.c
-    ${HOST_MANAGER_SOURCE_DIR}/src/INIReader.cpp
-    ${PROTO_SRC}/${PROTO_NAME}.pb.cc
-    ${LOG_PROTO_SRC}/log_agent.cpp
-    ${LOG_PROTO_SRC}/${LOG_PROTO_NAME}.pb.cc
+if(EXT_TX_PROC_ENABLED)
+    add_compile_definitions(EXT_TX_PROC_ENABLED)
+endif()
+
+if(ELOQ_MODULE_ENABLED)
+    add_compile_definitions(ELOQ_MODULE_ENABLED)
+endif()
+
+if(SMALL_RANGE)
+    add_compile_definitions(SMALL_RANGE)
+endif()
+
+if(STATISTICS)
+    add_compile_definitions(STATISTICS)
+endif()
+
+
+# Include build files for subcomponents
+INCLUDE(build_tx_service.cmake)
+INCLUDE(build_eloq_metrics.cmake)
+
+if(WITH_LOG_SERVICE)
+    if(OPEN_LOG_SERVICE)
+        INCLUDE(build_log_service.cmake)
+    else()
+        INCLUDE(build_eloq_log_service.cmake)
+    endif()
+endif()
+
+# Find mimalloc
+find_package(MIMALLOC REQUIRED)
+include_directories(${MIMALLOC_INCLUDE_DIR})
+
+# Include directories
+include_directories(
+    ${CMAKE_CURRENT_SOURCE_DIR}
+    ${CMAKE_CURRENT_SOURCE_DIR}/core/include
+    ${CMAKE_CURRENT_SOURCE_DIR}/tx_service/include
+    ${CMAKE_CURRENT_SOURCE_DIR}/tx_service/include/cc
+    ${CMAKE_CURRENT_SOURCE_DIR}/tx_service/include/remote
+    ${CMAKE_CURRENT_SOURCE_DIR}/tx_service/include/fault
+    ${CMAKE_CURRENT_SOURCE_DIR}/tx_service/include/store
+    ${CMAKE_CURRENT_SOURCE_DIR}/tx_service/tx-log-protos
+    ${CMAKE_CURRENT_SOURCE_DIR}/eloq_metrics/include
+    ${CMAKE_CURRENT_SOURCE_DIR}/store_handler
 )
 
-include_directories(${HOST_MANAGER_INCLUDE_DIR})
-add_executable(host_manager ${RaftHM_SOURCES})
-target_link_libraries(host_manager ${HOST_MANAGER_LINK_LIB} yaml-cpp::yaml-cpp)
+if(WITH_LOG_SERVICE)
+    if(OPEN_LOG_SERVICE)
+        include_directories(${CMAKE_CURRENT_SOURCE_DIR}/log_service/include)
+    else()
+        include_directories(${CMAKE_CURRENT_SOURCE_DIR}/eloq_log_service/include)
+    endif()
+endif()
 
-install(TARGETS host_manager
-    RUNTIME DESTINATION bin)
+# Collect all source files for the library
+SET(DATA_SUBSTRATE_SOURCES
+    # Core data substrate files
+    core/src/data_substrate.cpp
+    core/src/log_init.cpp
+    core/src/metrics_init.cpp
+    core/src/storage_init.cpp
+    core/src/tx_service_init.cpp
+)
 
-message(NOTICE "with tests: ${RUN_TX_SERVICE_TESTS}")
+# Add store handler sources based on data store type
+if(WITH_DATA_STORE STREQUAL "ELOQDSS_ROCKSDB" OR WITH_DATA_STORE STREQUAL "ELOQDSS_ROCKSDB_CLOUD_S3")
+    SET(DATA_SUBSTRATE_SOURCES ${DATA_SUBSTRATE_SOURCES}
+        store_handler/data_store_service_client.cpp
+        store_handler/data_store_service_client_closure.cpp
+        store_handler/data_store_service_scanner.cpp
+        store_handler/store_util.cpp
+        store_handler/eloq_data_store_service/ini.c
+        store_handler/eloq_data_store_service/INIReader.cpp
+        store_handler/eloq_data_store_service/thread_worker_pool.cpp
+        store_handler/eloq_data_store_service/data_store_service.cpp
+        store_handler/eloq_data_store_service/data_store_fault_inject.cpp
+        store_handler/eloq_data_store_service/data_store_service_config.cpp
+        store_handler/eloq_data_store_service/ds_request.pb.cc
+        store_handler/eloq_data_store_service/rocksdb_config.cpp
+        store_handler/eloq_data_store_service/rocksdb_data_store_common.cpp
+    )
+    
+    if(WITH_DATA_STORE STREQUAL "ELOQDSS_ROCKSDB")
+        SET(DATA_SUBSTRATE_SOURCES ${DATA_SUBSTRATE_SOURCES}
+            store_handler/eloq_data_store_service/rocksdb_data_store.cpp
+        )
+    elseif(WITH_DATA_STORE STREQUAL "ELOQDSS_ROCKSDB_CLOUD_S3")
+        SET(DATA_SUBSTRATE_SOURCES ${DATA_SUBSTRATE_SOURCES}
+            store_handler/eloq_data_store_service/rocksdb_cloud_data_store.cpp
+            store_handler/eloq_data_store_service/purger_event_listener.cpp
+            store_handler/eloq_data_store_service/purger_sliding_window.cpp
+	    store_handler/eloq_data_store_service/s3_file_downloader.cpp
+        )
+    endif()
+elseif(WITH_DATA_STORE STREQUAL "ELOQDSS_ELOQSTORE")
+    SET(DATA_SUBSTRATE_SOURCES ${DATA_SUBSTRATE_SOURCES}
+        store_handler/data_store_service_client.cpp
+        store_handler/data_store_service_client_closure.cpp
+        store_handler/data_store_service_scanner.cpp
+        store_handler/store_util.cpp
+        store_handler/eloq_data_store_service/thread_worker_pool.cpp
+        store_handler/eloq_data_store_service/data_store_service.cpp
+        store_handler/eloq_data_store_service/data_store_fault_inject.cpp
+        store_handler/eloq_data_store_service/data_store_service_config.cpp
+        store_handler/eloq_data_store_service/eloq_store_data_store.cpp
+        store_handler/eloq_data_store_service/ds_request.pb.cc
+        store_handler/eloq_data_store_service/eloq_store_config.cpp
+    )
+elseif((WITH_DATA_STORE STREQUAL "ROCKSDB") OR (WITH_DATA_STORE STREQUAL "ROCKSDB_CLOUD_S3") OR(WITH_DATA_STORE STREQUAL "ROCKSDB_CLOUD_GCS"))
+    SET(DATA_SUBSTRATE_SOURCES ${DATA_SUBSTRATE_SOURCES}
+        store_handler/rocksdb_config.cpp
+        store_handler/rocksdb_handler.cpp
+        store_handler/store_util.cpp
+    )
+endif()
 
-if(RUN_TX_SERVICE_TESTS)
-    # Ensure tests are enabled
-    enable_testing()
+# Build the library (static or shared based on BUILD_SHARED_LIBS option)
+ADD_LIBRARY(${DATA_SUBSTRATE_LIB} ${DATA_SUBSTRATE_SOURCES})
 
-    find_package(Catch2 CONFIG REQUIRED)
+# Link with dependencies
+SET(DATA_SUBSTRATE_LINK_LIBS
+    txservice
+    ${METRICS_LIB}
+)
 
-    # CcEntry-Test
-    add_executable(CcEntry-Test ${TX_SERVICE_SOURCE_DIR}/tests/CcEntry-Test.cpp)
-    target_include_directories(CcEntry-Test PUBLIC ${TX_SERVICE_SOURCE_DIR}/tests/include ${INCLUDE_DIR})
-    target_link_libraries(CcEntry-Test PUBLIC txservice Catch2::Catch2)
+if(WITH_LOG_SERVICE)
+    SET(DATA_SUBSTRATE_LINK_LIBS ${DATA_SUBSTRATE_LINK_LIBS} logservice)
+endif()
 
-    # CcPage-Test
-    add_executable(CcPage-Test ${TX_SERVICE_SOURCE_DIR}/tests/CcPage-Test.cpp)
-    target_include_directories(CcPage-Test PUBLIC ${TX_SERVICE_SOURCE_DIR}/tests/include ${INCLUDE_DIR})
-    target_link_libraries(CcPage-Test PUBLIC txservice Catch2::Catch2)
+if(WITH_DATA_STORE STREQUAL "ELOQDSS_ROCKSDB" OR WITH_DATA_STORE STREQUAL "ELOQDSS_ROCKSDB_CLOUD_S3")
+    SET(DATA_SUBSTRATE_LINK_LIBS ${DATA_SUBSTRATE_LINK_LIBS} ${ROCKSDB_LIBRARIES})
+elseif(WITH_DATA_STORE STREQUAL "DYNAMODB")
+    SET(DATA_SUBSTRATE_LINK_LIBS ${DATA_SUBSTRATE_LINK_LIBS} ${AWSSDK_LINK_LIBRARIES})
+elseif(WITH_DATA_STORE STREQUAL "BIGTABLE")
+    SET(DATA_SUBSTRATE_LINK_LIBS ${DATA_SUBSTRATE_LINK_LIBS} google-cloud-cpp::bigtable)
+elseif(WITH_DATA_STORE STREQUAL "ELOQDSS_ELOQSTORE")
+    SET(DATA_SUBSTRATE_LINK_LIBS ${DATA_SUBSTRATE_LINK_LIBS} eloqstore)
+endif()
 
-    # StartTsCollector-Test
-    add_executable(StartTsCollector-Test ${TX_SERVICE_SOURCE_DIR}/tests/StartTsCollector-Test.cpp)
-    target_include_directories(StartTsCollector-Test PUBLIC ${TX_SERVICE_SOURCE_DIR}/tests/include ${INCLUDE_DIR})
-    target_link_libraries(StartTsCollector-Test PUBLIC txservice Catch2::Catch2)
+TARGET_LINK_LIBRARIES(${DATA_SUBSTRATE_LIB} ${DATA_SUBSTRATE_LINK_LIBS})
 
-    # Register tests with CTest
-    add_test(NAME CcEntry-Test COMMAND CcEntry-Test)
-    add_test(NAME CcPage-Test COMMAND CcPage-Test)
-    add_test(NAME StartTsCollector-Test COMMAND StartTsCollector-Test)
+# Export include directories for other targets
+TARGET_INCLUDE_DIRECTORIES(${DATA_SUBSTRATE_LIB} PUBLIC
+    ${CMAKE_CURRENT_SOURCE_DIR}
+    ${CMAKE_CURRENT_SOURCE_DIR}/core/include
+    ${CMAKE_CURRENT_SOURCE_DIR}/tx_service/include
+    ${CMAKE_CURRENT_SOURCE_DIR}/eloq_metrics/include
+    ${CMAKE_CURRENT_SOURCE_DIR}/store_handler
+)
+
+# --- Installation Rules ---
+# install tx_service lib and includes files
+install(TARGETS txservice
+        ARCHIVE DESTINATION lib
+        LIBRARY DESTINATION lib)
+
+install(TARGETS logservice
+        ARCHIVE DESTINATION lib
+        LIBRARY DESTINATION lib)
+
+install(TARGETS data_substrate
+        ARCHIVE DESTINATION lib
+        LIBRARY DESTINATION lib)
+
+install(TARGETS eloq-metrics
+        ARCHIVE DESTINATION lib
+        LIBRARY DESTINATION lib)
+
+if(FORK_HM_PROCESS) # Only install host_manager if it's built
+    install(TARGETS host_manager
+            RUNTIME DESTINATION bin)
 endif()

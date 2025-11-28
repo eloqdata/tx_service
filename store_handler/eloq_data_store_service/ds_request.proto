@@ -1,0 +1,371 @@
+syntax = "proto3";
+package EloqDS.remote;
+option cc_generic_services = true;
+import "google/protobuf/empty.proto";
+
+service DataStoreRpcService {
+  rpc Read(ReadRequest) returns (ReadResponse);
+  rpc FetchRecords(FetchRecordsRequest) returns (FetchRecordsResponse);
+  rpc BatchWriteRecords(BatchWriteRecordsRequest)
+      returns (BatchWriteRecordsResponse);
+  rpc FlushData(FlushDataRequest) returns (FlushDataResponse);
+  rpc DeleteRange(DeleteRangeRequest) returns (DeleteRangeResponse);
+  rpc CreateTable(CreateTableRequest) returns (CreateTableResponse);
+  rpc DropTable(DropTableRequest) returns (DropTableResponse);
+
+
+  //-----External node management RPC interface
+  rpc FetchDSSClusterConfig(google.protobuf.Empty)
+      returns (FetchDSSClusterConfigResponse);
+  rpc UpdateDSSClusterConfig(UpdateDSSClusterConfigRequest)
+      returns (UpdateDSSClusterConfigResponse);
+  // for migrate ds shard
+  rpc ShardMigrate(ShardMigrateRequest) returns (ShardMigrateResponse);
+  rpc ShardMigrateStatus(ShardMigrateStatusRequest)
+      returns (ShardMigrateStatusResponse);
+  rpc OpenDSShard(OpenDSShardRequest) returns (OpenDSShardResponse);
+  rpc SwitchDSShardMode(SwitchDSShardModeRequest)
+      returns (SwitchDSShardModeResponse);
+  rpc UpdateDSShardConfig(UpdateDSShardConfigRequest)
+      returns (UpdateDSShardConfigResponse);
+
+  //-----New scan operations
+  rpc ScanNext(ScanRequest) returns (ScanResponse);
+  rpc ScanClose(ScanRequest) returns (ScanResponse);
+
+  //-----FaultInject for tests
+  rpc FaultInjectForTest(FaultInjectRequest) returns (FaultInjectResponse);
+
+  //-----Snapshot and branch
+  rpc CreateSnapshotForBackup(CreateSnapshotForBackupRequest) returns (CreateSnapshotForBackupResponse);
+
+  //-----File cache sync for standby warm-up (generic protocol for any storage backend)
+  rpc SyncFileCache(SyncFileCacheRequest) returns (google.protobuf.Empty);
+
+};
+
+enum DataStoreError {
+  NO_ERROR = 0;
+  UNKNOWN_ERROR = 1;
+  DB_NOT_OPEN = 2;
+  WRITE_TO_READ_ONLY_DB = 3;
+  REQUESTED_NODE_NOT_OWNER = 4;
+  WRITE_FAILED = 5;
+  READ_FAILED = 6;
+  TABLE_NOT_FOUND = 7;
+  UPSERT_TABLE_FAILED = 8;
+  NETWORK_ERROR = 9;
+  FLUSH_FAILED = 10;
+  INVALID_ARGUMENT = 11;
+  KEY_NOT_FOUND = 12;
+  BACKUP_FAILED = 13;
+  STATUS_SWITCH_FAILED = 14;
+  CREATE_SNAPSHOT_ERROR = 15;
+}
+
+enum CcTableType {
+  Primary = 0;
+  Secondary = 1;
+  Catalog = 2;
+  RangePartition = 3;
+  UniqueSecondary = 4;
+  RangeBucket = 5;
+  ClusterConfig = 6;
+}
+
+enum KeyShardingErrorType {
+  PrimaryNodeChanged = 0;
+  NodeGroupChanged = 1;
+}
+
+message KeyShardingChanged {
+  KeyShardingErrorType type = 1;
+  DSSNodeBuf new_primary_node = 2;
+  uint32 shard_id = 3;
+  uint64 shard_version = 4;
+  DSSClusterConfig new_cluster_config = 5;
+}
+
+message CommonResult {
+  uint32 error_code = 1;
+  string error_msg = 2;
+  KeyShardingChanged new_key_sharding = 3;
+}
+
+message ReadRequest {
+  int32 partition_id = 1;
+  string kv_table_name = 2;
+  bytes key_str = 3;
+  uint32 shard_id = 4;
+}
+
+message ReadResponse {
+  bytes value = 1;
+  uint64 ts = 2;
+  uint64 ttl = 3;
+  CommonResult result = 4;
+}
+
+message FetchRecordsRequest {
+  message key {
+    string kv_table_name_str = 1;
+    bytes key_str = 3;
+  }
+
+  repeated key keys = 1;
+  uint32 key_shard_code = 2;
+}
+
+message FetchRecordsResponse {
+  message record {
+    bytes payload = 1;
+    uint64 version = 2;
+    bool is_deleted = 3;
+  }
+
+  CommonResult result = 1;
+  repeated record records = 2;
+}
+
+enum WriteOpType {
+  Delete = 0;
+  Put = 1;
+}
+
+message BatchWriteRecordsRequest {
+  message Item {
+    bytes key = 1;
+    bytes value = 2;
+    WriteOpType op_type = 3;
+    uint64 ts = 4;
+    uint64 ttl = 5;
+  }
+
+  string kv_table_name = 1;
+  int32 partition_id = 2;
+  uint32 shard_id = 3;
+  bool skip_wal = 4;
+  repeated Item items = 5;
+}
+
+message BatchWriteRecordsResponse {
+  CommonResult result = 1;
+}
+
+message FlushDataRequest {
+  repeated string kv_table_name = 1;
+  uint32 shard_id = 2;
+}
+
+message FlushDataResponse {
+  CommonResult result = 1;
+}
+
+message DeleteRangeRequest {
+  string kv_table_name = 1;
+  int32 partition_id = 2;
+  bytes start_key = 3;
+  bytes end_key = 4;
+  bool skip_wal = 5;
+  uint32 shard_id = 6;
+}
+
+message DeleteRangeResponse {
+  CommonResult result = 1;
+}
+
+message CreateTableRequest {
+  string kv_table_name = 1;
+  uint32 shard_id = 2;
+}
+
+message CreateTableResponse {
+  CommonResult result = 1;
+}
+
+message DropTableRequest {
+  string kv_table_name = 1;
+  uint32 shard_id = 2;
+}
+
+message DropTableResponse {
+  CommonResult result = 1;
+}
+
+
+//-----External node management RPC interface
+
+message DSSNodeBuf {
+  string host_name = 1;
+  int32 port = 2;
+}
+
+enum DSShardStatus {
+  READ_ONLY = 0;
+  READ_WRITE = 1;
+  CLOSED = 2;
+}
+
+message DSShardBuf {
+  uint32 shard_id = 1;
+  uint64 shard_version = 2;
+  repeated DSSNodeBuf member_nodes = 3;
+}
+
+message DSSClusterConfig {
+  string sharding_algorithm = 1;
+  repeated DSShardBuf shards = 2;
+  uint64 topology_version = 3;
+}
+
+message FetchDSSClusterConfigResponse {
+  DSSClusterConfig cluster_config = 1;
+}
+
+message UpdateDSSClusterConfigRequest {
+  DSSClusterConfig cluster_config = 1;
+}
+
+message UpdateDSSClusterConfigResponse {
+  uint32 error_code = 1;
+  string error_msg = 2;
+}
+
+enum ShardMigrateError {
+  IN_PROGRESS = 0;
+  DUPLICATE_REQUEST = 1;
+  REQUEST_NOT_OWNER = 2;
+}
+
+message ShardMigrateRequest {
+  string event_id = 1;
+  uint32 shard_id = 2;
+  string to_node_host = 3;
+  int32 to_node_port = 4;
+}
+
+message ShardMigrateResponse {
+  string event_id = 1;
+  ShardMigrateError error_code = 2;
+}
+
+message ShardMigrateStatusRequest {
+  string event_id = 1;
+}
+
+message ShardMigrateStatusResponse {
+  bool finished = 1;
+  int32 status = 2;
+}
+
+message OpenDSShardRequest {
+  uint32 shard_id = 1;
+  DSShardStatus mode = 2;
+  uint64 version = 3;
+  repeated DSSNodeBuf members = 4;
+}
+
+message OpenDSShardResponse {
+  uint32 error_code = 1;
+  string error_msg = 2;
+}
+
+message SwitchDSShardModeRequest {
+  uint32 shard_id = 1;
+  DSShardStatus mode = 2;
+  // for check
+  uint64 version = 3;
+}
+
+message SwitchDSShardModeResponse {
+  uint32 error_code = 1;
+  string error_msg = 2;
+}
+
+message UpdateDSShardConfigRequest {
+  uint32 shard_id = 1;
+  uint64 version = 2;
+  repeated DSSNodeBuf members = 3;
+}
+
+message UpdateDSShardConfigResponse {
+  uint32 error_code = 1;
+  string error_msg = 2;
+}
+
+//-----New scan operations
+
+// Search condition for pushdown filtering
+message SearchCondition {
+  string field_name = 1;
+  string op = 2;     // Operation type (e.g., EQ, LT, GT, etc.)
+  bytes value = 3;  // Serialized value to compare against
+}
+
+// Request message for scan operations
+message ScanRequest {
+  string session_id = 1;
+  string kv_table_name_str = 2;
+  int32 partition_id = 3;
+  // empty start_key will be treated as negitive infinity or
+  // positive infinity depends on scan_forward
+  bytes start_key = 4;
+  // empty end_key will be treated as negitive infinity or
+  // positive infinity depends on scan_forward
+  bytes end_key = 5;
+  bool inclusive_start = 6;  // Whether to include start_key in results
+  bool inclusive_end = 7;    // Whether to include end_key in results
+  bool scan_forward = 8;     // Scan direction
+  uint32 batch_size = 9;     // Number of items to return in scan
+  repeated SearchCondition search_conditions = 10;
+  bool generate_session_id = 11;
+  uint32 shard_id = 12;
+}
+
+// Response message for scan operations
+message ScanResponse {
+  message Item {
+    bytes key = 1;
+    bytes value = 2;
+    uint64 ts = 3;
+    uint64 ttl = 4;
+    // bool deleted = 4;
+  }
+
+  CommonResult result = 1;
+  repeated Item items = 2;
+  string session_id = 3;
+}
+
+message CreateSnapshotForBackupRequest {
+  uint32 shard_id = 1;
+  string backup_name = 2;
+  uint64 backup_ts = 3;
+}
+
+message CreateSnapshotForBackupResponse {
+  repeated string backup_files = 1;
+  CommonResult result = 2;
+}
+
+//-----FaultInject for test
+message FaultInjectRequest {
+  string fault_name = 1;
+  string fault_paras =
+      2;  // eg. "action=NOTIFY_CHECKPOINTER", "remove", "action=panic".
+}
+message FaultInjectResponse {
+  bool finished = 1;
+}
+
+//-----File cache sync for standby warm-up
+message FileInfo {
+  string file_name = 1;      // File name (e.g., "000123.sst")
+  uint64 file_size = 2;      // File size in bytes
+  uint64 file_number = 3;    // File number extracted from filename for eviction priority
+}
+
+message SyncFileCacheRequest {
+  uint32 shard_id = 1;
+  repeated FileInfo files = 2;
+}

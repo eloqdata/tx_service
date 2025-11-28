@@ -342,15 +342,12 @@ ASALocalRun/
 .localhistory/
 
 # Protocol Buffer files
-include/proto/*.pb.cc
-include/proto/*.pb.h
+*.pb.cc
+*.pb.h
 
 # log_service dir
-eloq_metrics
-raft_host_manager
-
-# pre-commit
-.pre-commit-config.yaml
+eloq_log_service
+tx_service/raft_host_manager
 
 # macOS garbage
 .DS_Store
