@@ -6125,7 +6125,16 @@ bool LocalCcShards::UpdateStoreSlices(
 
     if (!update_range_slice_reqs.empty())
     {
-        return store_hd_->UpdateRangeSlices(update_range_slice_reqs);
+        auto start_time = std::chrono::steady_clock::now();
+        bool success = store_hd_->UpdateRangeSlices(update_range_slice_reqs);
+        auto stop_time = std::chrono::steady_clock::now();
+
+        LOG(INFO) << "== store handler: update range slices time = "
+                  << std::chrono::duration_cast<std::chrono::microseconds>(
+                         stop_time - start_time)
+                         .count();
+
+        return success;
     }
 
     return true;
