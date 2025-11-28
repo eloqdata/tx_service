@@ -1693,7 +1693,8 @@ public:
     GenerateBucketMigrationPlan(const std::set<NodeGroupId> &new_node_groups);
 
     // Memory limit of heap memory allocated by range slices info.
-    // 5% of the total memory limit.
+    // Configurable via rangeSliceMemoryLimitPercent (default 10% of node
+    // memory).
     const uint64_t range_slice_memory_limit_;
 
     GenerateSkStatus *GetGenerateSkStatus(NodeGroupId ng_id,
