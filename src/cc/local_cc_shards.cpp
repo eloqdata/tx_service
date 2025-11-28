@@ -6086,6 +6086,7 @@ bool LocalCcShards::UpdateStoreSlices(
 {
     std::vector<UpdateRangeSlicesReq> update_range_slice_reqs;
 
+    auto a_start_time = std::chrono::steady_clock::now();
     for (auto &flush_task : flush_tasks)
     {
         auto &task = flush_task->data_sync_task_;
@@ -6123,13 +6124,20 @@ bool LocalCcShards::UpdateStoreSlices(
         }
     }
 
+    auto a_stop_time = std::chrono::steady_clock::now();
+
+    LOG(INFO) << "yf: FlushData memory update range slices time = "
+              << std::chrono::duration_cast<std::chrono::microseconds>(
+                     a_stop_time - a_start_time)
+                     .count();
+
     if (!update_range_slice_reqs.empty())
     {
         auto start_time = std::chrono::steady_clock::now();
         bool success = store_hd_->UpdateRangeSlices(update_range_slice_reqs);
         auto stop_time = std::chrono::steady_clock::now();
 
-        LOG(INFO) << "== store handler: update range slices time = "
+        LOG(INFO) << "yf: FlushData update range slices time = "
                   << std::chrono::duration_cast<std::chrono::microseconds>(
                          stop_time - start_time)
                          .count();
