@@ -62,7 +62,7 @@ struct DataSyncStatus
     void SetEntriesSkippedAndNoTruncateLog()
     {
         std::lock_guard<std::mutex> lk(mux_);
-        has_skipped_entries = true;
+        has_skipped_entries_ = true;
         need_truncate_log_ = false;
     }
 
@@ -85,7 +85,7 @@ struct DataSyncStatus
 
     // Whether there are entries being skipped by DataSyncScan. For EloqKV,
     // entries with buffer commands might be skipped.
-    bool has_skipped_entries{false};
+    bool has_skipped_entries_{false};
 
     // If kvstore need do PersistKV after PutAll, we must update ccentry's
     // ckpt_ts after PersistKV done. Since we do data sync in small baches and

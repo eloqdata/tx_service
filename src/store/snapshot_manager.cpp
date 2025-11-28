@@ -389,13 +389,17 @@ bool SnapshotManager::RunOneRoundCheckpoint(uint32_t node_group,
         [&data_sync_status]
         { return data_sync_status->unfinished_tasks_ == 0; });
 
-    DLOG_IF(WARNING, data_sync_status->has_skipped_entries)
+    DLOG_IF(WARNING, data_sync_status->err_code_ != CcErrorCode::NO_ERROR)
+        << "SyncWithStandby for node_group: " << node_group
+        << " term: " << ng_leader_term
+        << " DataSync error: " << int(data_sync_status->err_code_);
+    DLOG_IF(WARNING, data_sync_status->has_skipped_entries_)
         << "SyncWithStandby for node_group: " << node_group
         << " term: " << ng_leader_term
         << " DataSyncScan has skipped some entries, return checkpoint failure";
 
     return (data_sync_status->err_code_ == CcErrorCode::NO_ERROR &&
-            !data_sync_status->has_skipped_entries);
+            !data_sync_status->has_skipped_entries_);
 }
 
 void SnapshotManager::UpdateBackupTaskStatus(
