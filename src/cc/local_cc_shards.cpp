@@ -5898,6 +5898,16 @@ void LocalCcShards::FlushData(std::unique_lock<std::mutex> &flush_worker_lk)
     auto ckpt_err = succ ? DataSyncTask::CkptErrorCode::NO_ERROR
                          : DataSyncTask::CkptErrorCode::FLUSH_ERROR;
 
+    for (const auto &flush_entry : flush_task_entries)
+    {
+        for (const auto &entry : flush_entry.second)
+        {
+            entry->data_sync_vec_ = nullptr;
+            entry->archive_vec_ = nullptr;
+            entry->mv_base_vec_ = nullptr;
+        }
+    }
+
     // notify waiting data sync scan thread
     uint64_t old_usage = data_sync_mem_controller_.DeallocateFlushMemQuota(
         cur_work->pending_flush_size_);
