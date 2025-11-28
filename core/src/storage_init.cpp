@@ -308,7 +308,7 @@ bool DataSubstrate::InitializeStorageHandler(const INIReader &config_reader)
     }
 
     store_hd_ = std::make_unique<EloqDS::DataStoreServiceClient>(
-        core_config_.bootstrap,
+        core_config_.bootstrap || is_single_node,
         catalog_factory,
         ds_config,
         eloq_dss_peer_node.empty(),
