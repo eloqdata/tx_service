@@ -191,6 +191,11 @@ if((WITH_DATA_STORE STREQUAL "ROCKSDB_CLOUD_S3") OR (WITH_DATA_STORE STREQUAL "R
         set(ROCKSDB_LIBRARIES ${ROCKSDB_LIBRARIES} ${AWS_S3_LIB})
 
         find_library(ROCKSDB_CLOUD_LIB NAMES rocksdb-cloud-aws)
+        if(NOT ROCKSDB_CLOUD_LIB)
+            message(FATAL_ERROR "Fail to find RocksDB Cloud lib path")
+        endif()
+        message(STATUS "ROCKSDB_CLOUD_LIB: ${ROCKSDB_CLOUD_LIB}")
+        set(ROCKSDB_LIBRARIES ${ROCKSDB_LIBRARIES} ${ROCKSDB_CLOUD_LIB})
     endif()
 
     # Common RocksDB Cloud setup
@@ -202,11 +207,6 @@ if((WITH_DATA_STORE STREQUAL "ROCKSDB_CLOUD_S3") OR (WITH_DATA_STORE STREQUAL "R
     set(ROCKSDB_INCLUDE_PATH ${ROCKSDB_INCLUDE_PATH} ${ROCKSDB_CLOUD_INCLUDE_PATH})
     include_directories(${ROCKSDB_INCLUDE_PATH})
 
-    if(NOT ROCKSDB_CLOUD_LIB)
-        message(FATAL_ERROR "Fail to find RocksDB Cloud lib path")
-    endif()
-    message(STATUS "ROCKSDB_CLOUD_LIB: ${ROCKSDB_CLOUD_LIB}")
-    set(ROCKSDB_LIBRARIES ${ROCKSDB_LIBRARIES} ${ROCKSDB_CLOUD_LIB})
 endif()
 
 # Compile proto file for data store service
