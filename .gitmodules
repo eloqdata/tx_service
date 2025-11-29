@@ -6,4 +6,4 @@
 	url = https://github.com/eloqdata/tx-log-protos.git
 [submodule "log_service"]
 	path = log_service
-	url = git@github.com:eloqdata/log_service.git
+	url = https://github.com/eloqdata/log_service.git
