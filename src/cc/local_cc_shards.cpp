@@ -3804,29 +3804,25 @@ void LocalCcShards::DataSyncForRangePartition(
                 scan_data_drained = scan_cc.IsDrained(i) && scan_data_drained;
             }
 
-            std::unique_ptr<std::vector<FlushRecord>> data_sync_vec =
-                std::make_unique<std::vector<FlushRecord>>();
-            std::unique_ptr<std::vector<FlushRecord>> archive_vec =
-                std::make_unique<std::vector<FlushRecord>>();
-            std::unique_ptr<std::vector<std::pair<TxKey, int32_t>>>
-                mv_base_vec =
-                    std::make_unique<std::vector<std::pair<TxKey, int32_t>>>();
+            std::vector<FlushRecord> data_sync_vec;
+            std::vector<FlushRecord> archive_vec;
+            std::vector<std::pair<TxKey, int32_t>> mv_base_vec;
 
             MergeSortedVectors(
-                std::move(mv_base_vecs), *mv_base_vec, key_greater, false);
+                std::move(mv_base_vecs), mv_base_vec, key_greater, false);
 
             // Set the ckpt_ts_ of a cc entry repeatedly, which might cause the
             // ccentry become invalid in between. But, there should be no
             // duplication here. we don't need to remove duplicate record.
             MergeSortedVectors(
-                std::move(data_sync_vecs), *data_sync_vec, rec_greater, false);
+                std::move(data_sync_vecs), data_sync_vec, rec_greater, false);
 
             // For archive vec we don't need to worry about duplicate causing
             // issue since we're not visiting their cc entry. Also we cannot
             // rely on key compare to dedup archive vec since a key could have
             // multiple version of archive versions.
             MergeSortedVectors(
-                std::move(archive_vecs), *archive_vec, rec_greater, false);
+                std::move(archive_vecs), archive_vec, rec_greater, false);
 
             data_sync_vecs.resize(cc_shards_.size() + 1);
             archive_vecs.resize(cc_shards_.size() + 1);
@@ -3838,15 +3834,15 @@ void LocalCcShards::DataSyncForRangePartition(
                 mv_base_vecs.at(i).clear();
             }
 
-            size_t data_sync_vec_size = data_sync_vec->size();
+            size_t data_sync_vec_size = data_sync_vec.size();
             // Fix the vector of FlushRecords.
             if (!scan_data_drained)
             {
                 // Only flush the keys that are not greater than the
                 // min_scanned_end_key
                 auto iter = std::upper_bound(
-                    data_sync_vec->begin(),
-                    data_sync_vec->end(),
+                    data_sync_vec.begin(),
+                    data_sync_vec.end(),
                     min_scanned_end_key,
                     [](const TxKey &key, const FlushRecord &rec)
                     { return key < rec.Key(); });
@@ -3856,13 +3852,13 @@ void LocalCcShards::DataSyncForRangePartition(
                 remaining_vec.insert(
                     remaining_vec.begin(),
                     std::make_move_iterator(iter),
-                    std::make_move_iterator(data_sync_vec->end()));
-                data_sync_vec->erase(iter, data_sync_vec->end());
+                    std::make_move_iterator(data_sync_vec.end()));
+                data_sync_vec.erase(iter, data_sync_vec.end());
 
                 // archive vector
                 auto archive_iter = std::upper_bound(
-                    archive_vec->begin(),
-                    archive_vec->end(),
+                    archive_vec.begin(),
+                    archive_vec.end(),
                     min_scanned_end_key,
                     [](const TxKey &key, const FlushRecord &rec)
                     { return key < rec.Key(); });
@@ -3871,13 +3867,13 @@ void LocalCcShards::DataSyncForRangePartition(
                 archive_remaining_vec.insert(
                     archive_remaining_vec.begin(),
                     std::make_move_iterator(archive_iter),
-                    std::make_move_iterator(archive_vec->end()));
-                archive_vec->erase(archive_iter, archive_vec->end());
+                    std::make_move_iterator(archive_vec.end()));
+                archive_vec.erase(archive_iter, archive_vec.end());
 
                 // mv base vector
                 auto mv_base_iter = std::upper_bound(
-                    mv_base_vec->begin(),
-                    mv_base_vec->end(),
+                    mv_base_vec.begin(),
+                    mv_base_vec.end(),
                     min_scanned_end_key,
                     [](const TxKey &t_key,
                        const std::pair<TxKey, int32_t> &key_and_partition_id)
@@ -3887,11 +3883,11 @@ void LocalCcShards::DataSyncForRangePartition(
                 mv_base_remaining_vec.insert(
                     mv_base_remaining_vec.begin(),
                     std::make_move_iterator(mv_base_iter),
-                    std::make_move_iterator(mv_base_vec->end()));
-                mv_base_vec->erase(mv_base_iter, mv_base_vec->end());
+                    std::make_move_iterator(mv_base_vec.end()));
+                mv_base_vec.erase(mv_base_iter, mv_base_vec.end());
             }
 
-            if (data_sync_vec->empty())
+            if (data_sync_vec.empty())
             {
                 LOG(WARNING) << "data_sync_vec becomes empty after erase, old "
                                 "size of data_sync_vec_size: "
@@ -3906,16 +3902,16 @@ void LocalCcShards::DataSyncForRangePartition(
                          table_schema.get(),
                          store_range,
                          scan_data_drained,
-                         *data_sync_vec,
+                         data_sync_vec,
                          update_slice_status);
 
             if (need_send_range_cache)
             {
-                range_cache_sender->FindSliceKeys(*data_sync_vec,
+                range_cache_sender->FindSliceKeys(data_sync_vec,
                                                   update_slice_status);
                 // Upload this batch records of split out ranges to their future
                 // owner for caching.
-                range_cache_sender->AppendSliceDataRequest(*data_sync_vec,
+                range_cache_sender->AppendSliceDataRequest(data_sync_vec,
                                                            scan_data_drained);
             }
 
@@ -3924,9 +3920,9 @@ void LocalCcShards::DataSyncForRangePartition(
             // the subslice keys.
             if (!export_base_table_items)
             {
-                auto it = data_sync_vec->begin();
-                auto flush_it = data_sync_vec->begin();
-                for (; it != data_sync_vec->end(); ++it)
+                auto it = data_sync_vec.begin();
+                auto flush_it = data_sync_vec.begin();
+                for (; it != data_sync_vec.end(); ++it)
                 {
                     if (it->cce_)
                     {
@@ -3934,7 +3930,7 @@ void LocalCcShards::DataSyncForRangePartition(
                         ++flush_it;
                     }
                 }
-                data_sync_vec->erase(flush_it, data_sync_vec->end());
+                data_sync_vec.erase(flush_it, data_sync_vec.end());
             }
 
             // Send this flush task to flush worker.
@@ -3954,14 +3950,13 @@ void LocalCcShards::DataSyncForRangePartition(
                 data_sync_task->flight_task_cnt_ += 1;
             }
 
-            AddFlushTaskEntry(
-                std::make_unique<FlushTaskEntry>(std::move(data_sync_vec),
-                                                 std::move(archive_vec),
-                                                 std::move(mv_base_vec),
-                                                 data_sync_txm,
-                                                 data_sync_task,
-                                                 table_schema,
-                                                 flush_data_size));
+            AddFlushTaskEntry(FlushTaskEntry(std::move(data_sync_vec),
+                                             std::move(archive_vec),
+                                             std::move(mv_base_vec),
+                                             data_sync_txm,
+                                             data_sync_task,
+                                             table_schema,
+                                             flush_data_size));
 
             for (size_t i = 0; i < cc_shards_.size(); ++i)
             {
@@ -4426,10 +4421,9 @@ void LocalCcShards::DataSyncForHashPartition(
                                             catalog_rec.Schema()->Version());
         bool scan_data_drained = false;
 
-        auto data_sync_vec = std::make_unique<std::vector<FlushRecord>>();
-        auto archive_vec = std::make_unique<std::vector<FlushRecord>>();
-        auto mv_base_vec =
-            std::make_unique<std::vector<std::pair<TxKey, int32_t>>>();
+        std::vector<FlushRecord> data_sync_vec;
+        std::vector<FlushRecord> archive_vec;
+        std::vector<std::pair<TxKey, int32_t>> mv_base_vec;
         uint64_t vec_mem_usage = 0;
 
         // Note: `DataSyncScanCc` needs to ensure that no two ckpt_rec with the
@@ -4652,7 +4646,7 @@ void LocalCcShards::DataSyncForHashPartition(
             mi_heap_t *prev_heap =
                 mi_heap_set_default(hash_partition_ckpt_heap_);
 
-            data_sync_vec->reserve(scan_cc.accumulated_scan_cnt_);
+            data_sync_vec.reserve(scan_cc.accumulated_scan_cnt_);
             for (size_t j = 0; j < scan_cc.accumulated_scan_cnt_; ++j)
             {
                 auto &rec = scan_cc.DataSyncVec()[j];
@@ -4666,18 +4660,17 @@ void LocalCcShards::DataSyncForHashPartition(
                         Sharder::MapKeyHashToHashPartitionId(rec.Key().Hash());
                     if (table_name.Engine() == TableEngine::EloqKv)
                     {
-                        data_sync_vec->emplace_back(
-                            rec.Key().Clone(),
-                            rec.GetNonVersionedPayload(),
-                            rec.payload_status_,
-                            rec.commit_ts_,
-                            rec.cce_,
-                            rec.post_flush_size_,
-                            part_id);
+                        data_sync_vec.emplace_back(rec.Key().Clone(),
+                                                   rec.GetNonVersionedPayload(),
+                                                   rec.payload_status_,
+                                                   rec.commit_ts_,
+                                                   rec.cce_,
+                                                   rec.post_flush_size_,
+                                                   part_id);
                     }
                     else
                     {
-                        data_sync_vec->emplace_back(
+                        data_sync_vec.emplace_back(
                             rec.Key().Clone(),
                             rec.ReleaseVersionedPayload(),
                             rec.payload_status_,
@@ -4694,16 +4687,16 @@ void LocalCcShards::DataSyncForHashPartition(
                 auto &rec = scan_cc.ArchiveVec()[j];
                 // Note. We need to ensure the copy constructor of
                 // FlushRecord could not be called.
-                rec.SetKey((*data_sync_vec)[rec.GetKeyIndex()].Key());
+                rec.SetKey(data_sync_vec[rec.GetKeyIndex()].Key());
             }
 
             for (size_t j = 0; j < scan_cc.MoveBaseIdxVec().size(); ++j)
             {
                 size_t key_idx = scan_cc.MoveBaseIdxVec()[j];
-                TxKey key_raw = (*data_sync_vec)[key_idx].Key();
+                TxKey key_raw = data_sync_vec[key_idx].Key();
                 int32_t part_id =
                     Sharder::MapKeyHashToHashPartitionId(key_raw.Hash());
-                mv_base_vec->emplace_back(std::move(key_raw), part_id);
+                mv_base_vec.emplace_back(std::move(key_raw), part_id);
             }
             mi_override_thread(prev_thd);
             mi_heap_set_default(prev_heap);
@@ -4711,7 +4704,7 @@ void LocalCcShards::DataSyncForHashPartition(
 
             std::move(scan_cc.ArchiveVec().begin(),
                       scan_cc.ArchiveVec().end(),
-                      std::back_inserter(*archive_vec));
+                      std::back_inserter(archive_vec));
 
             vec_mem_usage += flush_data_size;
 
@@ -4738,9 +4731,9 @@ void LocalCcShards::DataSyncForHashPartition(
                         scan_cc.Wait();
                     }
                     // 2. Release memory usage on this datasync worker.
-                    data_sync_vec->clear();
-                    archive_vec->clear();
-                    mv_base_vec->clear();
+                    data_sync_vec.clear();
+                    archive_vec.clear();
+                    mv_base_vec.clear();
                     data_sync_mem_controller_.DeallocateFlushMemQuota(
                         vec_mem_usage);
                     break;
@@ -4751,21 +4744,19 @@ void LocalCcShards::DataSyncForHashPartition(
                 data_sync_task->flight_task_cnt_ += 1;
             }
 
-            AddFlushTaskEntry(
-                std::make_unique<FlushTaskEntry>(std::move(data_sync_vec),
-                                                 std::move(archive_vec),
-                                                 std::move(mv_base_vec),
-                                                 data_sync_txm,
-                                                 data_sync_task,
-                                                 catalog_rec.CopySchema(),
-                                                 vec_mem_usage));
+            AddFlushTaskEntry(FlushTaskEntry(std::move(data_sync_vec),
+                                             std::move(archive_vec),
+                                             std::move(mv_base_vec),
+                                             data_sync_txm,
+                                             data_sync_task,
+                                             catalog_rec.CopySchema(),
+                                             vec_mem_usage));
 
-            data_sync_vec = std::make_unique<std::vector<FlushRecord>>();
+            data_sync_vec = std::vector<FlushRecord>();
 
-            archive_vec = std::make_unique<std::vector<FlushRecord>>();
+            archive_vec = std::vector<FlushRecord>();
 
-            mv_base_vec =
-                std::make_unique<std::vector<std::pair<TxKey, int32_t>>>();
+            mv_base_vec = std::vector<std::pair<TxKey, int32_t>>();
 
             vec_mem_usage = 0;
 
@@ -4792,8 +4783,8 @@ void LocalCcShards::DataSyncForHashPartition(
         EnqueueCcRequest(worker_idx, &release_scan_heap_cc);
         release_scan_heap_cc.Wait();
 
-        if (!data_sync_vec->empty() || !archive_vec->empty() ||
-            !mv_base_vec->empty())
+        if (!data_sync_vec.empty() || !archive_vec.empty() ||
+            !mv_base_vec.empty())
         {
             std::unique_lock<bthread::Mutex> flight_task_lk(
                 data_sync_task->flight_task_mux_);
@@ -4803,14 +4794,13 @@ void LocalCcShards::DataSyncForHashPartition(
                 data_sync_task->flight_task_cnt_ += 1;
                 flight_task_lk.unlock();
 
-                AddFlushTaskEntry(
-                    std::make_unique<FlushTaskEntry>(std::move(data_sync_vec),
-                                                     std::move(archive_vec),
-                                                     std::move(mv_base_vec),
-                                                     data_sync_txm,
-                                                     data_sync_task,
-                                                     catalog_rec.CopySchema(),
-                                                     vec_mem_usage));
+                AddFlushTaskEntry(FlushTaskEntry(std::move(data_sync_vec),
+                                                 std::move(archive_vec),
+                                                 std::move(mv_base_vec),
+                                                 data_sync_txm,
+                                                 data_sync_task,
+                                                 catalog_rec.CopySchema(),
+                                                 vec_mem_usage));
             }
             else
             {
@@ -5270,8 +5260,9 @@ void LocalCcShards::SplitFlushRange(
     txservice::CommitTx(split_txm);
 }
 
-void LocalCcShards::AddFlushTaskEntry(std::unique_ptr<FlushTaskEntry> &&entry)
+void LocalCcShards::AddFlushTaskEntry(FlushTaskEntry &&entry)
 {
+    // Move the FlushTaskEntry payload into the flush buffer.
     cur_flush_buffer_.AddFlushTaskEntry(std::move(entry));
 
     std::unique_ptr<FlushDataTask> flush_data_task =
@@ -5404,7 +5395,7 @@ void LocalCcShards::FlushData(std::unique_lock<std::mutex> &flush_worker_lk)
         {
             for (auto &entry : entries)
             {
-                if (!entry->data_sync_task_->need_update_ckpt_ts_)
+                if (!entry.data_sync_task_->need_update_ckpt_ts_)
                 {
                     continue;
                 }
@@ -5413,10 +5404,9 @@ void LocalCcShards::FlushData(std::unique_lock<std::mutex> &flush_worker_lk)
                                     std::vector<UpdateCceCkptTsCc::CkptTsEntry>>
                     cce_entries_map;
 
-                auto &table_name =
-                    entries.front()->data_sync_task_->table_name_;
+                auto &table_name = entries.front().data_sync_task_->table_name_;
 
-                for (auto &rec : *(entry->data_sync_vec_))
+                for (auto &rec : entry.data_sync_vec_)
                 {
                     auto cce = rec.cce_;
                     if (cce != nullptr)
@@ -5428,7 +5418,7 @@ void LocalCcShards::FlushData(std::unique_lock<std::mutex> &flush_worker_lk)
                         }
                         else
                         {
-                            key_core_idx = entry->data_sync_task_->id_;
+                            key_core_idx = entry.data_sync_task_->id_;
                         }
                         auto insert_it = cce_entries_map.try_emplace(
                             key_core_idx,
@@ -5441,8 +5431,8 @@ void LocalCcShards::FlushData(std::unique_lock<std::mutex> &flush_worker_lk)
                 if (cce_entries_map.size() > 0)
                 {
                     UpdateCceCkptTsCc update_cce_req(
-                        entry->data_sync_task_->node_group_id_,
-                        entry->data_sync_task_->node_group_term_,
+                        entry.data_sync_task_->node_group_id_,
+                        entry.data_sync_task_->node_group_term_,
                         cce_entries_map,
                         !table_name.IsHashPartitioned(),
                         table_name.Engine() != TableEngine::EloqKv);
@@ -5487,19 +5477,19 @@ void LocalCcShards::FlushData(std::unique_lock<std::mutex> &flush_worker_lk)
     {
         for (auto &entry : entries)
         {
-            if (entry->data_sync_task_->table_name_.IsHashPartitioned())
+            if (entry.data_sync_task_->table_name_.IsHashPartitioned())
             {
                 PostProcessHashPartitionDataSyncTask(
-                    std::move(entry->data_sync_task_),
-                    entry->data_sync_txm_,
+                    std::move(entry.data_sync_task_),
+                    entry.data_sync_txm_,
                     ckpt_err,
                     false);
             }
             else
             {
                 PostProcessRangePartitionDataSyncTask(
-                    std::move(entry->data_sync_task_),
-                    entry->data_sync_txm_,
+                    std::move(entry.data_sync_task_),
+                    entry.data_sync_txm_,
                     ckpt_err,
                     false);
             }
@@ -5654,7 +5644,8 @@ void LocalCcShards::SyncTableStatisticsWorker()
         statistics_worker_ctx_.cv_.wait_for(
             worker_lk,
             10s,
-            [this] {
+            [this]
+            {
                 return statistics_worker_ctx_.status_ ==
                        WorkerStatus::Terminated;
             });
@@ -5925,7 +5916,8 @@ void LocalCcShards::HeartbeatWorker()
         bool wait_res = heartbeat_worker_ctx_.cv_.wait_for(
             heartbeat_worker_lk,
             std::chrono::seconds(1),
-            [this] {
+            [this]
+            {
                 return heartbeat_worker_ctx_.status_ ==
                        WorkerStatus::Terminated;
             });
@@ -6013,7 +6005,8 @@ void LocalCcShards::PurgeDeletedData()
         bool wait_res = purge_deleted_worker_ctx_.cv_.wait_for(
             worker_lk,
             std::chrono::seconds(10),
-            [this] {
+            [this]
+            {
                 return purge_deleted_worker_ctx_.status_ ==
                        WorkerStatus::Terminated;
             });

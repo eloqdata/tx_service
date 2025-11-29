@@ -1044,8 +1044,7 @@ std::pair<size_t, bool> CcShard::Clean()
  *
  */
 bool CcShard::FlushEntryForTest(
-    std::unordered_map<std::string_view,
-                       std::vector<std::unique_ptr<FlushTaskEntry>>>
+    std::unordered_map<std::string_view, std::vector<FlushTaskEntry>>
         &flush_task_entries,
     bool only_archives)
 {

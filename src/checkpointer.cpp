@@ -523,16 +523,14 @@ void Checkpointer::NotifyLogOfCkptTs(uint32_t node_group,
 }
 
 bool Checkpointer::CkptEntryForTest(
-    std::unordered_map<std::string_view,
-                       std::vector<std::unique_ptr<FlushTaskEntry>>>
+    std::unordered_map<std::string_view, std::vector<FlushTaskEntry>>
         &flush_task_entries)
 {
     return store_hd_->PutAll(flush_task_entries);
 }
 
 bool Checkpointer::FlushArchiveForTest(
-    std::unordered_map<std::string_view,
-                       std::vector<std::unique_ptr<FlushTaskEntry>>>
+    std::unordered_map<std::string_view, std::vector<FlushTaskEntry>>
         &flush_task_entries)
 {
     return store_hd_->PutArchivesAll(flush_task_entries);

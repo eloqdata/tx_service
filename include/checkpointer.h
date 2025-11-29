@@ -64,13 +64,11 @@ public:
      * Now, only used for test.
      */
     bool CkptEntryForTest(
-        std::unordered_map<std::string_view,
-                           std::vector<std::unique_ptr<FlushTaskEntry>>>
+        std::unordered_map<std::string_view, std::vector<FlushTaskEntry>>
             &flush_task_entries);
 
     bool FlushArchiveForTest(
-        std::unordered_map<std::string_view,
-                           std::vector<std::unique_ptr<FlushTaskEntry>>>
+        std::unordered_map<std::string_view, std::vector<FlushTaskEntry>>
             &flush_task_entries);
 
     void Run();

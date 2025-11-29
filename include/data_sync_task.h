@@ -232,14 +232,13 @@ public:
 struct FlushTaskEntry
 {
 public:
-    FlushTaskEntry(
-        std::unique_ptr<std::vector<FlushRecord>> &&data_sync_vec,
-        std::unique_ptr<std::vector<FlushRecord>> &&archive_vec,
-        std::unique_ptr<std::vector<std::pair<TxKey, int32_t>>> &&mv_base_vec,
-        TransactionExecution *data_sync_txm,
-        std::shared_ptr<DataSyncTask> data_sync_task,
-        std::shared_ptr<const TableSchema> table_schema,
-        size_t size)
+    FlushTaskEntry(std::vector<FlushRecord> &&data_sync_vec,
+                   std::vector<FlushRecord> &&archive_vec,
+                   std::vector<std::pair<TxKey, int32_t>> &&mv_base_vec,
+                   TransactionExecution *data_sync_txm,
+                   std::shared_ptr<DataSyncTask> data_sync_task,
+                   std::shared_ptr<const TableSchema> table_schema,
+                   size_t size)
         : data_sync_vec_(std::move(data_sync_vec)),
           archive_vec_(std::move(archive_vec)),
           mv_base_vec_(std::move(mv_base_vec)),
@@ -252,9 +251,17 @@ public:
 
     ~FlushTaskEntry() = default;
 
-    std::unique_ptr<std::vector<FlushRecord>> data_sync_vec_;
-    std::unique_ptr<std::vector<FlushRecord>> archive_vec_;
-    std::unique_ptr<std::vector<std::pair<TxKey, int32_t>>> mv_base_vec_;
+    // Movable but not copyable: explicitly declare move operations and
+    // delete copy operations to avoid accidental copies that fail when
+    // contained types are move-only.
+    FlushTaskEntry(FlushTaskEntry &&) noexcept = default;
+    FlushTaskEntry &operator=(FlushTaskEntry &&) noexcept = default;
+    FlushTaskEntry(const FlushTaskEntry &) = delete;
+    FlushTaskEntry &operator=(const FlushTaskEntry &) = delete;
+
+    std::vector<FlushRecord> data_sync_vec_;
+    std::vector<FlushRecord> archive_vec_;
+    std::vector<std::pair<TxKey, int32_t>> mv_base_vec_;
     TransactionExecution *data_sync_txm_{nullptr};
     std::shared_ptr<DataSyncTask> data_sync_task_{nullptr};
     std::shared_ptr<const TableSchema> table_schema_{nullptr};
@@ -274,13 +281,13 @@ public:
      * @brief Add a flush task entry to the flush task.
      * @param entry The flush task entry to add.
      */
-    void AddFlushTaskEntry(std::unique_ptr<FlushTaskEntry> &&entry)
+    void AddFlushTaskEntry(FlushTaskEntry &&entry)
     {
         std::lock_guard<bthread::Mutex> lk(flush_task_entries_mux_);
-        pending_flush_size_ += entry->size_;
+        pending_flush_size_ += entry.size_;
         auto table_flush_entries_it = flush_task_entries_.try_emplace(
-            entry->table_schema_->GetKVCatalogInfo()->GetKvTableName(
-                entry->data_sync_task_->table_name_));
+            entry.table_schema_->GetKVCatalogInfo()->GetKvTableName(
+                entry.data_sync_task_->table_name_));
         table_flush_entries_it.first->second.emplace_back(std::move(entry));
     }
 
@@ -340,9 +347,13 @@ public:
             auto table_flush_entries_it =
                 flush_task_entries_.try_emplace(table_name);
             auto &target_entries = table_flush_entries_it.first->second;
-            target_entries.insert(target_entries.end(),
-                                  std::make_move_iterator(entries.begin()),
-                                  std::make_move_iterator(entries.end()));
+            // Move elements one-by-one to avoid instantiating
+            // uninitialized_copy paths that may require copy-constructible
+            // element types in some libstdc++ implementations.
+            for (auto &e : entries)
+            {
+                target_entries.emplace_back(std::move(e));
+            }
         }
 
         // Update size
@@ -372,8 +383,7 @@ public:
         return nullptr;
     }
 
-    std::unordered_map<std::string_view,
-                       std::vector<std::unique_ptr<FlushTaskEntry>>>
+    std::unordered_map<std::string_view, std::vector<FlushTaskEntry>>
         flush_task_entries_;
     size_t pending_flush_size_{0};
     size_t max_pending_flush_size_{0};

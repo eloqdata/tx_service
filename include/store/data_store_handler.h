@@ -82,10 +82,10 @@ public:
      * data_sync_vec_ in each flush task entry.
      * @return whether all entries are written to data store successfully
      */
-    virtual bool PutAll(std::unordered_map<
-                        std::string_view,
-                        std::vector<std::unique_ptr<txservice::FlushTaskEntry>>>
-                            &flush_task) = 0;
+    virtual bool PutAll(
+        std::unordered_map<std::string_view,
+                           std::vector<txservice::FlushTaskEntry>>
+            &flush_task) = 0;
 
     /**
      * @brief indicate end of flush entries in a single ckpt for \@param batch
@@ -257,17 +257,15 @@ public:
      * @brief Write batch historical versions into DataStore.
      */
     virtual bool PutArchivesAll(
-        std::unordered_map<
-            std::string_view,
-            std::vector<std::unique_ptr<txservice::FlushTaskEntry>>>
+        std::unordered_map<std::string_view,
+                           std::vector<txservice::FlushTaskEntry>>
             &flush_task) = 0;
     /**
      * @brief Copy record from base/sk table to mvcc_archives.
      */
     virtual bool CopyBaseToArchive(
-        std::unordered_map<
-            std::string_view,
-            std::vector<std::unique_ptr<txservice::FlushTaskEntry>>>
+        std::unordered_map<std::string_view,
+                           std::vector<txservice::FlushTaskEntry>>
             &flush_task) = 0;
 
     /**

@@ -3537,7 +3537,8 @@ public:
                 (1 + req.PrefetchSize() / shard_->core_cnt_) * 125 / 100);
         }
 
-        auto is_cache_full = [&req, scan_cache, remote_scan_cache] {
+        auto is_cache_full = [&req, scan_cache, remote_scan_cache]
+        {
             return req.IsLocal() ? scan_cache->IsFull()
                                  : remote_scan_cache->IsFull();
         };
@@ -7005,29 +7006,23 @@ public:
                             false,
                             false);
 
-                    std::unique_ptr<FlushTaskEntry> flush_task_entry =
-                        std::make_unique<FlushTaskEntry>(
-                            std::make_unique<std::vector<FlushRecord>>(
-                                std::move(tmp_ckpt_vec)),
-                            std::make_unique<std::vector<FlushRecord>>(
-                                std::move(tmp_akv_vec)),
-                            std::make_unique<
-                                std::vector<std::pair<TxKey, int32_t>>>(),
-                            nullptr,
-                            data_sync_task,
-                            table_schema,
-                            flush_size);
+                    FlushTaskEntry flush_task_entry(
+                        std::move(tmp_ckpt_vec),
+                        std::move(tmp_akv_vec),
+                        std::vector<std::pair<TxKey, int32_t>>(),
+                        nullptr,
+                        data_sync_task,
+                        table_schema,
+                        flush_size);
 
-                    std::unordered_map<
-                        std::string_view,
-                        std::vector<std::unique_ptr<FlushTaskEntry>>>
+                    std::unordered_map<std::string_view,
+                                       std::vector<FlushTaskEntry>>
                         flush_task_entries;
                     std::string_view kv_table_name =
                         table_schema->GetKVCatalogInfo()->GetKvTableName(
                             table_name_);
                     flush_task_entries.try_emplace(
-                        kv_table_name,
-                        std::vector<std::unique_ptr<FlushTaskEntry>>());
+                        kv_table_name, std::vector<FlushTaskEntry>());
                     flush_task_entries[kv_table_name].emplace_back(
                         std::move(flush_task_entry));
 

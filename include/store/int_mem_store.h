@@ -54,9 +54,8 @@ public:
      * data_sync_vec_ in each flush task entry.
      * @return whether all entries are written to data store successfully
      */
-    bool PutAll(std::unordered_map<
-                std::string_view,
-                std::vector<std::unique_ptr<txservice::FlushTaskEntry>>>
+    bool PutAll(std::unordered_map<std::string_view,
+                                   std::vector<txservice::FlushTaskEntry>>
                     &flush_task) override
     {
         assert(false);
@@ -226,10 +225,10 @@ public:
      * @brief Write batch historical versions into DataStore.
      *
      */
-    bool PutArchivesAll(std::unordered_map<
-                        std::string_view,
-                        std::vector<std::unique_ptr<txservice::FlushTaskEntry>>>
-                            &flush_task) override
+    bool PutArchivesAll(
+        std::unordered_map<std::string_view,
+                           std::vector<txservice::FlushTaskEntry>> &flush_task)
+        override
     {
         assert(false);
         return true;
@@ -238,10 +237,9 @@ public:
      * @brief Copy record from base/sk table to mvcc_archives.
      */
     bool CopyBaseToArchive(
-        std::unordered_map<
-            std::string_view,
-            std::vector<std::unique_ptr<txservice::FlushTaskEntry>>>
-            &flush_task) override
+        std::unordered_map<std::string_view,
+                           std::vector<txservice::FlushTaskEntry>> &flush_task)
+        override
     {
         assert(false);
         return true;
