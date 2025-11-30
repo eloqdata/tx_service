@@ -118,8 +118,12 @@ public:
         pos_inf_page_.prev_page_ = &neg_inf_page_;
         pos_inf_page_.next_page_ = nullptr;
 
-        if (shard->realtime_sampling_ && table_schema && !table_name.IsMeta() &&
-            table_name != sequence_table_name)
+        if (shard->realtime_sampling_ && table_schema &&
+            (table_name.Engine() == TableEngine::EloqSql ||
+             table_name.Engine() == TableEngine::EloqDoc) &&
+            (table_name.Type() == TableType::Primary ||
+             table_name.Type() == TableType::Secondary ||
+             table_name.Type() == TableType::UniqueSecondary))
         {
             TableStatistics<KeyT> *statistics =
                 static_cast<TableStatistics<KeyT> *>(
@@ -5267,14 +5271,6 @@ public:
             {
             case RangeSliceOpStatus::Successful:
             {
-                assert(
-                    [&]()
-                    {
-                        const TemplateStoreSlice<KeyT> *new_slice =
-                            static_cast<const TemplateStoreSlice<KeyT> *>(
-                                slice_id.Slice());
-                        return search_key == *new_slice->StartKey();
-                    }());
                 succ = true;
                 break;
             }
@@ -5690,10 +5686,14 @@ public:
         {
             next_pause_key = key_it->first->CloneTxKey();
         }
-        else if (slice_pinned)
+
+        bool req_finished =
+            is_scan_mem_full || no_more_data ||
+            req.accumulated_scan_cnt_[shard_->core_id_] >= req.scan_batch_size_;
+        if (slice_pinned && req_finished)
         {
-            assert(no_more_data);
             // Unpin slice
+            // Must unpin the slice here, once the request finished.
             req.slice_ids_[shard_->core_id_].Unpin();
             req.slice_ids_[shard_->core_id_].Reset();
         }
@@ -5704,20 +5704,16 @@ public:
         if (is_scan_mem_full)
         {
             req.scan_heap_is_full_[shard_->core_id_] = 1;
+        }
+
+        if (req_finished)
+        {
             req.SetFinish(shard_->core_id_);
             return false;
         }
 
-        if (no_more_data ||
-            req.accumulated_scan_cnt_[shard_->core_id_] >= req.scan_batch_size_)
-        {
-            req.SetFinish(shard_->core_id_);
-        }
-        else
-        {
-            // Put DataSyncScanCc request into CcQueue again.
-            shard_->Enqueue(&req);
-        }
+        // Put DataSyncScanCc request into CcQueue again.
+        shard_->Enqueue(&req);
 
         // Access DataSyncScanCc member variable is unsafe after
         // SetFinished(...).
@@ -5927,15 +5923,14 @@ public:
                 {
                     if (cce->HasBufferedCommandList())
                     {
-                        BufferedTxnCmdList &buffered_cmds =
-                            cce->BufferedCommandList();
-                        if (buffered_cmds.txn_cmd_list_.back().new_version_ >
-                            req.data_sync_ts_)
-                        {
-                            // Forward iterator
-                            it++;
-                            continue;
-                        }
+                        DLOG(INFO)
+                            << "cce has buffer command, skip "
+                               "ckpt cce: "
+                            << cce->KeyString()
+                            << ", cce status: " << int(cce->PayloadStatus())
+                            << ", BufferCommand: " << cce->BufferedCommandList()
+                            << ", data_sync_ts_: " << req.data_sync_ts_;
+                        replay_cmds_notnull = true;
 
                         // The fetch record may failed when the
                         // cce is touch at 1st place, so the record status can
@@ -5965,7 +5960,6 @@ public:
                                                     nullptr,
                                                     part_id);
                             }
-                            replay_cmds_notnull = true;
                         }
                         else if (ng_term > 0)
                         {
@@ -5976,7 +5970,7 @@ public:
                                 << "Buffered cmds found on leader node"
                                 << ", cce key: " << cce->KeyString()
                                 << ", cce CommitTs: " << cce->CommitTs() << "\n"
-                                << buffered_cmds;
+                                << cce->BufferedCommandList();
                             assert(false);
                         }
                         else
