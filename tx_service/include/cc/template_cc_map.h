@@ -5237,6 +5237,9 @@ public:
             [this, &req, &pause_key_and_is_drained, &next_slice_func](
                 const KeyT &search_key) -> std::pair<RangeSliceId, bool>
         {
+            req.total_pin_count_[shard_->core_id_]++;
+
+            size_t prefetch_size = 32;
             bool succ = false;
             RangeSliceOpStatus pin_status;
             RangeSliceId slice_id = shard_->local_shards_.PinRangeSlice(
@@ -5254,7 +5257,7 @@ public:
                 shard_,
                 pin_status,
                 true,
-                32,
+                prefetch_size,
                 false,
                 false,
                 !req.export_base_table_item_,
@@ -5275,6 +5278,7 @@ public:
             }
             case RangeSliceOpStatus::Retry:
             {
+                req.retry_pin_count_[shard_->core_id_]++;
                 pause_key_and_is_drained.first = search_key.CloneTxKey();
                 shard_->Enqueue(shard_->LocalCoreId(), &req);
                 succ = false;
@@ -11765,6 +11769,11 @@ void BackfillForScanNextBatch(FetchBucketDataCc *fetch_cc,
         // Reset kv cache
         scan_cache->Reset();
         assert(scan_cache->Size() == 0);
+
+        // current plan: bucket 1, 2, 3, 4, 5
+        // round 1: fetch bucket 1, 2, 3, 4, 5
+        // round 2: fetch bucket 1, 2, 3, 4, 5
+        // round 3: fetch bucket 1, 2, 3, 4, 5 (33-34)
 
         for (auto &item : fetch_cc->bucket_data_items_)
         {

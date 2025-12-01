@@ -53,12 +53,6 @@ struct DataSyncStatus
 
     ~DataSyncStatus();
 
-    void SetNoTruncateLog()
-    {
-        std::lock_guard<std::mutex> lk(mux_);
-        need_truncate_log_ = false;
-    }
-
     void SetEntriesSkippedAndNoTruncateLog()
     {
         std::lock_guard<std::mutex> lk(mux_);

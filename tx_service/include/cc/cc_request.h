@@ -4088,6 +4088,9 @@ public:
         }
 
         slice_ids_.resize(core_cnt_);
+
+        total_pin_count_.resize(core_cnt_, 0);
+        retry_pin_count_.resize(core_cnt_, 0);
     }
 
     bool ValidTermCheck()
@@ -4196,6 +4199,9 @@ public:
                 data_sync_vec_[i].resize(scan_batch_size_);
                 scan_heap_is_full_[i] = 0;
             }
+
+            total_pin_count_[i] = 0;
+            retry_pin_count_[i] = 0;
         }
 
         err_ = CcErrorCode::NO_ERROR;
@@ -4312,6 +4318,8 @@ public:
     std::vector<uint32_t> scan_heap_is_full_{0};
 
     size_t scan_count_{0};
+    std::vector<size_t> total_pin_count_;
+    std::vector<size_t> retry_pin_count_;
 
 private:
     const TableName *table_name_{nullptr};
