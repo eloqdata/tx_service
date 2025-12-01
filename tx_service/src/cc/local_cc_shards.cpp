@@ -5608,18 +5608,6 @@ void LocalCcShards::FlushData(std::unique_lock<std::mutex> &flush_worker_lk)
 
     if (succ)
     {
-        size_t total_flush_cnt = 0;
-        for (const auto &flush_entry : flush_task_entries)
-        {
-            for (const auto &entry : flush_entry.second)
-            {
-                if (entry->data_sync_vec_)
-                {
-                    total_flush_cnt += entry->data_sync_vec_->size();
-                }
-            }
-        }
-
         succ = store_hd_->PutAll(flush_task_entries);
         if (!succ)
         {
