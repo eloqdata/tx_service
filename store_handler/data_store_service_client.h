@@ -65,6 +65,7 @@ struct RangeSliceBatchPlan
     uint32_t segment_cnt;
     std::vector<std::string> segment_keys;     // Owned string buffers
     std::vector<std::string> segment_records;  // Owned string buffers
+    size_t version;
 
     // Clear method for reuse
     void Clear()
@@ -72,6 +73,7 @@ struct RangeSliceBatchPlan
         segment_cnt = 0;
         segment_keys.clear();
         segment_records.clear();
+        version = 0;
     }
 };
 
@@ -305,6 +307,9 @@ public:
         const txservice::KVCatalogInfo *kv_info,
         uint32_t range_partition_id,
         txservice::FillStoreSliceCc *load_slice_req) override;
+
+    bool UpdateRangeSlices(std::vector<txservice::UpdateRangeSlicesReq>
+                               &update_range_slice_reqs) override;
 
     bool UpdateRangeSlices(const txservice::TableName &table_name,
                            uint64_t version,
@@ -599,7 +604,6 @@ private:
     void DispatchRangeSliceBatches(
         std::string_view kv_table_name,
         int32_t kv_partition_id,
-        uint64_t version,
         const std::vector<RangeSliceBatchPlan> &plans,
         SyncConcurrentRequest *sync_concurrent);
 

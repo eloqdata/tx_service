@@ -1459,6 +1459,15 @@ bool RocksDBHandler::UpdateRangeSlices(
     return true;
 }
 
+bool RocksDBHandler::UpdateRangeSlices(
+    std::vector<txservice::UpdateRangeSlicesReq> &update_range_slice_reqs)
+{
+    LOG(ERROR) << "RocksDBHandler::UpdateRangeSlices not implemented";
+    // Not implemented
+    assert(false);
+    return false;
+}
+
 bool RocksDBHandler::UpsertRanges(
     const txservice::TableName &table_name,
     std::vector<txservice::SplitRangeInfo> range_info,

@@ -1311,6 +1311,7 @@ RangeSliceBatchPlan DataStoreServiceClient::PrepareRangeSliceBatches(
 
     RangeSliceBatchPlan plan;
     plan.segment_cnt = 0;
+    plan.version = version;
 
     // Estimate capacity based on slices size
     plan.segment_keys.reserve(slices.size() / 10 + 1);  // Rough estimate
@@ -1384,14 +1385,13 @@ RangeSliceBatchPlan DataStoreServiceClient::PrepareRangeSliceBatches(
  *
  * @param kv_table_name The KV table name (must be same for all plans)
  * @param kv_partition_id The partition ID (must be same for all plans)
- * @param version The version (must be same for all plans)
+ * @param version The version
  * @param plans Vector of RangeSliceBatchPlan to dispatch
  * @param sync_concurrent SyncConcurrentRequest for concurrency control
  */
 void DataStoreServiceClient::DispatchRangeSliceBatches(
     std::string_view kv_table_name,
     int32_t kv_partition_id,
-    uint64_t version,
     const std::vector<RangeSliceBatchPlan> &plans,
     SyncConcurrentRequest *sync_concurrent)
 {
@@ -1480,7 +1480,7 @@ void DataStoreServiceClient::DispatchRangeSliceBatches(
             // Append to batch vectors
             keys.emplace_back(plan.segment_keys[i]);
             records.emplace_back(plan.segment_records[i]);
-            records_ts.emplace_back(version);
+            records_ts.emplace_back(plan.version);
             records_ttl.emplace_back(0);  // no TTL for range slices
             op_types.emplace_back(WriteOpType::PUT);
             write_batch_size += segment_total_size;
@@ -1681,6 +1681,134 @@ void DataStoreServiceClient::DispatchRangeMetadataBatches(
     }
 }
 
+bool DataStoreServiceClient::UpdateRangeSlices(
+    std::vector<txservice::UpdateRangeSlicesReq> &update_range_slice_reqs)
+{
+    if (update_range_slice_reqs.empty())
+    {
+        return true;
+    }
+
+    std::unordered_map<int32_t, std::vector<RangeSliceBatchPlan>> slice_plans;
+    slice_plans.reserve(update_range_slice_reqs.size());
+    RangeMetadataAccumulator meta_acc;
+
+    // 1- First pass: Prepare slice batches and accumulate metadata for all
+    // ranges
+    for (auto &req : update_range_slice_reqs)
+    {
+        // Prepare slice batches for this range
+        auto slice_plan = PrepareRangeSliceBatches(*req.table_name_,
+                                                   req.ckpt_ts_,
+                                                   req.range_slices_,
+                                                   req.partition_id_);
+        uint32_t segment_cnt = slice_plan.segment_cnt;
+        int32_t kv_partition_id = KvPartitionIdOf(*req.table_name_);
+        auto iter = slice_plans.find(kv_partition_id);
+        if (iter == slice_plans.end())
+        {
+            auto em_it = slice_plans.try_emplace(kv_partition_id);
+            em_it.first->second.push_back(std::move(slice_plan));
+        }
+        else
+        {
+            iter->second.push_back(std::move(slice_plan));
+        }
+
+        auto catalog_factory = GetCatalogFactory(req.table_name_->Engine());
+        assert(catalog_factory != nullptr);
+
+        // Enqueue metadata record for this range
+        EnqueueRangeMetadataRecord(catalog_factory,
+                                   *req.table_name_,
+                                   req.start_key_,
+                                   req.partition_id_,
+                                   req.range_version_,
+                                   req.ckpt_ts_,
+                                   segment_cnt,
+                                   meta_acc);
+    }
+
+    // 2- Dispatch slice batches for all ranges concurrently (shared
+    // SyncConcurrentRequest)
+    SyncConcurrentRequest *slice_sync_concurrent =
+        sync_concurrent_request_pool_.NextObject();
+    PoolableGuard slice_guard(slice_sync_concurrent);
+    slice_sync_concurrent->Reset();
+    for (const auto &[kv_partition_id, slice_plans] : slice_plans)
+    {
+        // Call DispatchRangeSliceBatches once with all plans
+        DispatchRangeSliceBatches(kv_range_slices_table_name,
+                                  kv_partition_id,
+                                  slice_plans,
+                                  slice_sync_concurrent);
+    }
+
+    // 3- Wait for slice requests to complete
+    {
+        std::unique_lock<bthread::Mutex> lk(slice_sync_concurrent->mux_);
+        slice_sync_concurrent->all_request_started_ = true;
+        while (slice_sync_concurrent->unfinished_request_cnt_ != 0)
+        {
+            slice_sync_concurrent->cv_.wait(lk);
+        }
+    }
+
+    if (slice_sync_concurrent->result_.error_code() !=
+        remote::DataStoreError::NO_ERROR)
+    {
+        LOG(WARNING) << "UpsertRanges: Failed to write range slices. Error: "
+                     << slice_sync_concurrent->result_.error_msg();
+        return false;
+    }
+
+    // 4- Dispatch metadata batches concurrently (batched by table/partition)
+    SyncConcurrentRequest *meta_sync_concurrent =
+        sync_concurrent_request_pool_.NextObject();
+    PoolableGuard meta_guard(meta_sync_concurrent);
+    meta_sync_concurrent->Reset();
+    DispatchRangeMetadataBatches(
+        kv_range_table_name, meta_acc, meta_sync_concurrent);
+
+    // 5- Wait for metadata requests to complete
+    {
+        std::unique_lock<bthread::Mutex> lk(meta_sync_concurrent->mux_);
+        meta_sync_concurrent->all_request_started_ = true;
+        while (meta_sync_concurrent->unfinished_request_cnt_ != 0)
+        {
+            meta_sync_concurrent->cv_.wait(lk);
+        }
+    }
+
+    // 6- Check for errors
+    if (meta_sync_concurrent->result_.error_code() !=
+        remote::DataStoreError::NO_ERROR)
+    {
+        LOG(WARNING)
+            << "UpdateRangeSlices: Failed to write range metadata. Error: "
+            << meta_sync_concurrent->result_.error_msg();
+        return false;
+    }
+
+    // 7- Flush data
+    SyncCallbackData *callback_data = sync_callback_data_pool_.NextObject();
+    PoolableGuard guard(callback_data);
+    callback_data->Reset();
+    std::vector<std::string> kv_range_table_names;
+    kv_range_table_names.emplace_back(kv_range_table_name);
+    FlushData(kv_range_table_names, callback_data, &SyncCallback);
+    callback_data->Wait();
+    if (callback_data->Result().error_code() !=
+        EloqDS::remote::DataStoreError::NO_ERROR)
+    {
+        LOG(WARNING) << "UpsertRanges: Failed to flush ranges. Error: "
+                     << callback_data->Result().error_msg();
+        return false;
+    }
+
+    return true;
+}
+
 /**
  * @brief Updates range slices for a table partition.
  *
@@ -1724,7 +1852,6 @@ bool DataStoreServiceClient::UpdateRangeSlices(
     const uint32_t segment_cnt = slice_plans[0].segment_cnt;
     DispatchRangeSliceBatches(kv_range_slices_table_name,
                               KvPartitionIdOf(table_name),
-                              version,
                               slice_plans,
                               slice_sync_concurrent);
     // 3- Wait for slice requests to complete. Make sure meta data is updated
@@ -1851,7 +1978,6 @@ bool DataStoreServiceClient::UpsertRanges(
     // Call DispatchRangeSliceBatches once with all plans
     DispatchRangeSliceBatches(kv_range_slices_table_name,
                               kv_partition_id,
-                              version,
                               slice_plans,
                               slice_sync_concurrent);
 
