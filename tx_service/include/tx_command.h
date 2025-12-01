@@ -52,7 +52,8 @@ enum class ExecResult
 {
     Fail,   // Failed to execute command
     Read,   // Success to execute readonly command
-    Write,  // Succes to execute the command and modified object.
+    Write,  // Success to execute the command and modified object.
+    Delete, // The object will be deleted by the command.
     Block,  // The command is blocked
     Unlock  // There has not expected result and release ccentry lock
 };

@@ -4806,6 +4806,8 @@ bool TransactionExecution::FillDataLogRequest(WriteToLogOp &write_log)
                                     sizeof(cmds_len));
 
                 uint8_t has_overwrite = cmd_entry->ignore_previous_version_;
+                LOG(INFO) << "key: " << key_str << ", has_overwrite: "
+                          << cmd_entry->ignore_previous_version_;
                 log_ng_blob->append(
                     reinterpret_cast<const char *>(&has_overwrite),
                     sizeof(has_overwrite));
@@ -4817,6 +4819,7 @@ bool TransactionExecution::FillDataLogRequest(WriteToLogOp &write_log)
                 for (const auto &cmd_str : cmd_str_list)
                 {
                     uint32_t cmd_len = cmd_str.size();
+                    LOG(INFO) << "cmd_str: " << cmd_str;
                     log_ng_blob->append(
                         reinterpret_cast<const char *>(&cmd_len),
                         sizeof(cmd_len));
@@ -4839,6 +4842,7 @@ bool TransactionExecution::FillDataLogRequest(WriteToLogOp &write_log)
                 key_cmd_len_start, sizeof(uint32_t), ptr, sizeof(uint32_t));
         }
     }
+    LOG(INFO) << "FillDataLog done";
 
     // fill rw_set_.catalog_wset_ term if any insert request triggers an catalog
     // logical update operation.
@@ -6768,6 +6772,9 @@ void TransactionExecution::PostProcess(ObjectCommandOp &obj_cmd_op)
         RecordStatus obj_status = cmd_result.rec_status_;
         LockType lock_acquired = cmd_result.lock_acquired_;
         bool object_modified = cmd_result.object_modified_;
+        bool object_deleted = cmd_result.object_deleted_;
+        LOG(INFO) << "obj_status: " << int(obj_status)
+                  << ", obj_deleted: " << object_deleted;
         const TxCommand *cmd = obj_cmd_op.command_;
         const TableName *table_name = obj_cmd_op.table_name_;
         const CcEntryAddr &cce_addr = cmd_result.cce_addr_;
@@ -6789,7 +6796,7 @@ void TransactionExecution::PostProcess(ObjectCommandOp &obj_cmd_op)
         {
             // If the cce is expired before the command is applyed
             // Add a retire command before the write command
-            if (ttl_expired)
+            if (ttl_expired || object_deleted)
             {
                 auto retire_command =
                     obj_cmd_.command_->RetireExpiredTTLObjectCommand();
@@ -6829,17 +6836,20 @@ void TransactionExecution::PostProcess(ObjectCommandOp &obj_cmd_op)
             // The command modifies the object. Put it into the command set
             // for writing log and post-processing. If the command fails, only
             // to release the write lock.
-            cmd_set_.AddObjectCommand(
-                *table_name,
-                cce_addr,
-                obj_status,
-                commit_ts,
-                lock_ts,
-                last_vali_ts,
-                obj_cmd_op.key_,
-                object_modified ? obj_cmd_op.command_ : nullptr,
-                ttl,
-                obj_cmd_op.forward_key_shard_);
+            if (!object_deleted)
+            {
+                cmd_set_.AddObjectCommand(
+                    *table_name,
+                    cce_addr,
+                    obj_status,
+                    commit_ts,
+                    lock_ts,
+                    last_vali_ts,
+                    obj_cmd_op.key_,
+                    object_modified ? obj_cmd_op.command_ : nullptr,
+                    ttl,
+                    obj_cmd_op.forward_key_shard_);
+            }
 
             uint64_t read_version = rw_set_.DedupRead(cce_addr);
             if (read_version > 0 && read_version != cmd_result.commit_ts_)
@@ -7257,8 +7267,10 @@ void TransactionExecution::PostProcess(MultiObjectCommandOp &obj_cmd_op)
                 if (cmd_res.lock_acquired_ == LockType::WriteLock)
                 {
                     // If the cce is expired before the command is applyed
-                    // Add a retire command before the write command
-                    if (cmd_res.ttl_expired_)
+                    // Add a retire command before the write command.
+                    // If the cmd will delete the object, just add a delete
+                    // command.
+                    if (cmd_res.ttl_expired_ || cmd_res.object_deleted_)
                     {
                         assert(cmd_res.ttl_ == UINT64_MAX);
                         auto retire_command =
@@ -7278,17 +7290,20 @@ void TransactionExecution::PostProcess(MultiObjectCommandOp &obj_cmd_op)
                     // The command modifies the object. Put it into the command
                     // set for writing log and post-processing. If the command
                     // fails, only to release the write lock.
-                    cmd_set_.AddObjectCommand(
-                        *req->table_name_,
-                        cmd_res.cce_addr_,
-                        cmd_res.rec_status_,
-                        cmd_res.commit_ts_,
-                        cmd_res.lock_ts_,
-                        cmd_res.last_vali_ts_,
-                        &vct_key->at(i),
-                        cmd_res.object_modified_ ? vct_cmd->at(i) : nullptr,
-                        cmd_res.ttl_,
-                        obj_cmd_op.vct_key_shard_code_[i].second);
+                    if (!cmd_res.object_deleted_)
+                    {
+                        cmd_set_.AddObjectCommand(
+                            *req->table_name_,
+                            cmd_res.cce_addr_,
+                            cmd_res.rec_status_,
+                            cmd_res.commit_ts_,
+                            cmd_res.lock_ts_,
+                            cmd_res.last_vali_ts_,
+                            &vct_key->at(i),
+                            cmd_res.object_modified_ ? vct_cmd->at(i) : nullptr,
+                            cmd_res.ttl_,
+                            obj_cmd_op.vct_key_shard_code_[i].second);
+                    }
 
                     uint64_t read_version =
                         rw_set_.DedupRead(cmd_res.cce_addr_);

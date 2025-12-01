@@ -130,6 +130,7 @@ public:
         ObjectCommandResult &obj_result = hd_res->Value();
         CcEntryAddr &cce_addr = obj_result.cce_addr_;
         bool &object_modified = obj_result.object_modified_;
+        bool &object_deleted = obj_result.object_deleted_;
         CcEntry<KeyT, ValueT, false, false> *cce = nullptr;
         CcPage<KeyT, ValueT, false, false> *ccp = nullptr;
         const KeyT *look_key = nullptr;
@@ -1020,7 +1021,8 @@ public:
             // the temporary object.
             ValueT &dirty_object = *dirty_payload;
             exec_rst = cmd->ExecuteOn(dirty_object);
-            object_modified = (exec_rst == ExecResult::Write);
+            object_deleted = exec_rst == ExecResult::Delete;
+            object_modified = object_deleted || exec_rst == ExecResult::Write;
 
             if (object_modified)
             {
@@ -1049,10 +1051,13 @@ public:
             assert(cce->payload_.cur_payload_ != nullptr);
             ValueT &object = *cce->payload_.cur_payload_;
             exec_rst = cmd->ExecuteOn(object);
-            object_modified = (exec_rst == ExecResult::Write);
+            object_deleted = exec_rst == ExecResult::Delete;
+            object_modified = object_deleted || exec_rst == ExecResult::Write;
+            LOG(INFO) << "object_deleted: " << object_deleted;
 
             if (object_modified)
             {
+                // TODO: modify this
                 if (forward_entry)
                 {
                     forward_req->set_object_version(cce->CommitTs());
@@ -2477,6 +2482,9 @@ public:
         CcEntry<KeyT, ValueT, false, false> *cce =
             static_cast<CcEntry<KeyT, ValueT, false, false> *>(entry);
         LruPage *ccp = cce->GetCcPage();
+        LOG(INFO) << "BackFill, status: " << int(status)
+                  << ", commit ts: " << commit_ts
+                  << ", key: " << cce->KeyString();
 
         cce->GetKeyGapLockAndExtraData()->ReleasePin();
         cce->RecycleKeyLock(*shard_);

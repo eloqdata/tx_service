@@ -1004,6 +1004,7 @@ struct ObjectCommandResult
         rec_status_ = RecordStatus::Unknown;
         lock_acquired_ = LockType::NoLock;
         object_modified_ = false;
+        object_deleted_ = false;
         is_local_ = true;
         cmd_result_ = nullptr;
         ttl_expired_ = false;
@@ -1023,11 +1024,13 @@ struct ObjectCommandResult
 
     RecordStatus rec_status_{RecordStatus::Unknown};
     LockType lock_acquired_{LockType::NoLock};
-    // True: The command has updated the object and will be added into write set
-    // for writing log.
+    // True: The command updates the object and will be added into write set for
+    // writing log.
     // False: The command failed to exec or is readonly, does not need to write
     // log.
     bool object_modified_{};
+    // True: The command deletes the object.
+    bool object_deleted_{};
 
     // Whether the command operation executting on local node.
     bool is_local_{true};
