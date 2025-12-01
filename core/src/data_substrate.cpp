@@ -442,7 +442,7 @@ bool DataSubstrate::LoadCoreAndNetworkConfig(const INIReader &config_reader)
 
     core_config_.enable_wal =
         !core_config_.bootstrap &&
-        (CheckCommandLineFlagIsDefault("enable_wal")
+        (!CheckCommandLineFlagIsDefault("enable_wal")
              ? FLAGS_enable_wal
              : config_reader.GetBoolean(
                    "local", "enable_wal", FLAGS_enable_wal));
