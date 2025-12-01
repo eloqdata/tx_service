@@ -1328,7 +1328,7 @@ public:
         is_local_ = true;
         is_in_recovering_ = is_in_recovering;
         is_covering_keys_ = is_covering_keys;
-        point_read_on_cache_miss_ = point_read_on_miss;
+        point_read_on_cache_miss_ = true;
         blk_type_ = NotBlocked;
         cache_hit_miss_collected_ = false;
 
@@ -1382,7 +1382,7 @@ public:
         is_local_ = false;
         is_in_recovering_ = false;
         is_covering_keys_ = is_covering_keys;
-        point_read_on_cache_miss_ = point_read_on_miss;
+        point_read_on_cache_miss_ = true;
         blk_type_ = NotBlocked;
         cache_hit_miss_collected_ = false;
 
@@ -1436,7 +1436,7 @@ public:
         is_local_ = true;
         is_in_recovering_ = false;
         is_covering_keys_ = is_covering_keys;
-        point_read_on_cache_miss_ = point_read_on_miss;
+        point_read_on_cache_miss_ = true;
         blk_type_ = NotBlocked;
         cache_hit_miss_collected_ = false;
 
