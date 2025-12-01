@@ -2947,14 +2947,17 @@ void LocalCcShards::DataSyncWorker(size_t worker_idx)
     }
 }
 
-void LocalCcShards::PostProcessRangePartitionFlushTaskEntries(
-    std::unordered_map<std::basic_string_view<char>,
+void LocalCcShards::PostProcessFlushTaskEntries(
+    std::unordered_map<std::string_view,
                        std::vector<std::unique_ptr<txservice::FlushTaskEntry>>>
         &flush_task_entries,
     DataSyncTask::CkptErrorCode ckpt_err)
 {
     assert(ckpt_err != DataSyncTask::CkptErrorCode::SCAN_ERROR);
-    std::vector<FlushTaskEntry *> pending_flush_entry;
+
+    // collect all tasks that require update slices
+    std::vector<FlushTaskEntry *> pending_update_entries;
+    // cache node group term to avoid multiple calls to TryPinNodeGroupData
     std::map<NodeGroupId, int64_t> pinned_node_group_terms_;
 
     for (auto &[table_name, entries] : flush_task_entries)
@@ -2973,6 +2976,7 @@ void LocalCcShards::PostProcessRangePartitionFlushTaskEntries(
             {
                 auto &task = entry->data_sync_task_;
 
+                // check node group term
                 int64_t ng_term = -1;
                 if (pinned_node_group_terms_.count(task->node_group_id_) > 0)
                 {
@@ -2985,15 +2989,14 @@ void LocalCcShards::PostProcessRangePartitionFlushTaskEntries(
                     pinned_node_group_terms_[task->node_group_id_] = ng_term;
                 }
 
-                auto current_task_err = ckpt_err;
+                auto task_ckpt_err = ckpt_err;
                 if (ng_term != task->node_group_term_)
                 {
                     LOG(ERROR)
                         << "PostProcessDataSyncTask: term mismatch ng#"
                         << task->node_group_id_ << ", leader term: " << ng_term
                         << ", expected term: " << task->node_group_term_;
-                    current_task_err =
-                        DataSyncTask::CkptErrorCode::TERM_MISMATCH;
+                    task_ckpt_err = DataSyncTask::CkptErrorCode::TERM_MISMATCH;
                 }
 
                 std::unique_lock<bthread::Mutex> flight_task_lk(
@@ -3002,10 +3005,10 @@ void LocalCcShards::PostProcessRangePartitionFlushTaskEntries(
 
                 if (task->ckpt_err_ == DataSyncTask::CkptErrorCode::NO_ERROR)
                 {
-                    task->ckpt_err_ = current_task_err;
+                    task->ckpt_err_ = task_ckpt_err;
                 }
 
-                auto task_ckpt_err = task->ckpt_err_;
+                task_ckpt_err = task->ckpt_err_;
                 flight_task_lk.unlock();
 
                 // All flush tasks of this datasync task are finished
@@ -3031,7 +3034,7 @@ void LocalCcShards::PostProcessRangePartitionFlushTaskEntries(
 
                     if (task_ckpt_err == DataSyncTask::CkptErrorCode::NO_ERROR)
                     {
-                        pending_flush_entry.push_back(entry.get());
+                        pending_update_entries.push_back(entry.get());
                         continue;
                     }
                     else if (task_ckpt_err ==
@@ -3102,11 +3105,11 @@ void LocalCcShards::PostProcessRangePartitionFlushTaskEntries(
         }
     }
 
-    if (!pending_flush_entry.empty())
+    if (!pending_update_entries.empty())
     {
-        bool success = UpdateStoreSlices(pending_flush_entry);
+        bool success = UpdateStoreSlices(pending_update_entries);
 
-        for (auto &entry : pending_flush_entry)
+        for (auto &entry : pending_update_entries)
         {
             auto &task = entry->data_sync_task_;
             TableRangeEntry *range_entry = nullptr;
@@ -3175,6 +3178,7 @@ void LocalCcShards::PostProcessRangePartitionFlushTaskEntries(
         }
     }
 
+    // unpin node group data
     for (const auto &[node_group, term] : pinned_node_group_terms_)
     {
         Sharder::Instance().UnpinNodeGroupData(node_group);
@@ -5898,23 +5902,6 @@ void LocalCcShards::FlushData(std::unique_lock<std::mutex> &flush_worker_lk)
     auto ckpt_err = succ ? DataSyncTask::CkptErrorCode::NO_ERROR
                          : DataSyncTask::CkptErrorCode::FLUSH_ERROR;
 
-    auto release_start_time = std::chrono::steady_clock::now();
-    for (const auto &flush_entry : flush_task_entries)
-    {
-        for (const auto &entry : flush_entry.second)
-        {
-            entry->data_sync_vec_ = nullptr;
-            entry->archive_vec_ = nullptr;
-            entry->mv_base_vec_ = nullptr;
-        }
-    }
-
-    auto release_stop_time = std::chrono::steady_clock::now();
-    auto aduration = std::chrono::duration_cast<std::chrono::microseconds>(
-                         release_stop_time - release_start_time)
-                         .count();
-    LOG(INFO) << "yf: FlushData release, duration=" << aduration;
-
     // notify waiting data sync scan thread
     uint64_t old_usage = data_sync_mem_controller_.DeallocateFlushMemQuota(
         cur_work->pending_flush_size_);
@@ -5950,7 +5937,7 @@ void LocalCcShards::FlushData(std::unique_lock<std::mutex> &flush_worker_lk)
     }
     */
 
-    PostProcessRangePartitionFlushTaskEntries(flush_task_entries, ckpt_err);
+    PostProcessFlushTaskEntries(flush_task_entries, ckpt_err);
 
     auto post_process_stop_time = std::chrono::steady_clock::now();
     auto duration = std::chrono::duration_cast<std::chrono::microseconds>(

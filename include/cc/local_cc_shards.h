@@ -1848,9 +1848,9 @@ private:
         DataSyncTask::CkptErrorCode ckpt_err,
         bool is_scan_task = true);
 
-    void PostProcessRangePartitionFlushTaskEntries(
+    void PostProcessFlushTaskEntries(
         std::unordered_map<
-            std::basic_string_view<char>,
+            std::string_view,
             std::vector<std::unique_ptr<txservice::FlushTaskEntry>>>
             &flush_task_entries,
         DataSyncTask::CkptErrorCode ckpt_err);
