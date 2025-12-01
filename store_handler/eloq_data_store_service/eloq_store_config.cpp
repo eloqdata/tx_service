@@ -41,6 +41,24 @@ DEFINE_uint32(eloq_store_open_files_limit,
 DEFINE_string(eloq_store_cloud_store_path,
               "",
               "EloqStore cloud store path (disable cloud store if empty)");
+DEFINE_string(eloq_store_cloud_provider,
+              "aws",
+              "EloqStore cloud provider implementation.");
+DEFINE_string(eloq_store_cloud_endpoint,
+              "",
+              "Optional override for the EloqStore cloud endpoint URL.");
+DEFINE_string(eloq_store_cloud_region,
+              "us-east-1",
+              "EloqStore cloud provider region.");
+DEFINE_string(eloq_store_cloud_access_key,
+              "minioadmin",
+              "EloqStore cloud provider access key.");
+DEFINE_string(eloq_store_cloud_secret_key,
+              "minioadmin",
+              "EloqStore cloud provider secret key.");
+DEFINE_bool(eloq_store_cloud_verify_ssl,
+            false,
+            "EloqStore cloud provider verify TLS certificates.");
 DEFINE_uint32(eloq_store_cloud_worker_count,
               1,
               "EloqStore cloud worker count.");
@@ -269,6 +287,42 @@ EloqStoreConfig::EloqStoreConfig(const INIReader &config_reader,
             : config_reader.GetString("store",
                                       "eloq_store_cloud_store_path",
                                       FLAGS_eloq_store_cloud_store_path);
+    eloqstore_configs_.cloud_provider =
+        !CheckCommandLineFlagIsDefault("eloq_store_cloud_provider")
+            ? FLAGS_eloq_store_cloud_provider
+            : config_reader.GetString("store",
+                                      "eloq_store_cloud_provider",
+                                      FLAGS_eloq_store_cloud_provider);
+    eloqstore_configs_.cloud_endpoint =
+        !CheckCommandLineFlagIsDefault("eloq_store_cloud_endpoint")
+            ? FLAGS_eloq_store_cloud_endpoint
+            : config_reader.GetString("store",
+                                      "eloq_store_cloud_endpoint",
+                                      FLAGS_eloq_store_cloud_endpoint);
+    eloqstore_configs_.cloud_region =
+        !CheckCommandLineFlagIsDefault("eloq_store_cloud_region")
+            ? FLAGS_eloq_store_cloud_region
+            : config_reader.GetString("store",
+                                      "eloq_store_cloud_region",
+                                      FLAGS_eloq_store_cloud_region);
+    eloqstore_configs_.cloud_access_key =
+        !CheckCommandLineFlagIsDefault("eloq_store_cloud_access_key")
+            ? FLAGS_eloq_store_cloud_access_key
+            : config_reader.GetString("store",
+                                      "eloq_store_cloud_access_key",
+                                      FLAGS_eloq_store_cloud_access_key);
+    eloqstore_configs_.cloud_secret_key =
+        !CheckCommandLineFlagIsDefault("eloq_store_cloud_secret_key")
+            ? FLAGS_eloq_store_cloud_secret_key
+            : config_reader.GetString("store",
+                                      "eloq_store_cloud_secret_key",
+                                      FLAGS_eloq_store_cloud_secret_key);
+    eloqstore_configs_.cloud_verify_ssl =
+        !CheckCommandLineFlagIsDefault("eloq_store_cloud_verify_ssl")
+            ? FLAGS_eloq_store_cloud_verify_ssl
+            : config_reader.GetBoolean("store",
+                                       "eloq_store_cloud_verify_ssl",
+                                       FLAGS_eloq_store_cloud_verify_ssl);
     LOG_IF(INFO, !eloqstore_configs_.cloud_store_path.empty())
         << "EloqStore cloud store enabled";
     {

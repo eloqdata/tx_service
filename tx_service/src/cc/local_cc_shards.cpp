@@ -83,12 +83,7 @@ LocalCcShards::LocalCcShards(
     metrics::CommonLabels common_labels,
     std::unordered_map<TableName, std::string> *prebuilt_tables,
     std::function<void(std::string_view, std::string_view)> publish_func)
-    : range_slice_memory_limit_(
-          (static_cast<uint64_t>(MB(conf.at("node_memory_limit_mb")))) /
-          ((conf.at("enable_key_cache") && !enable_mvcc)
-               ? 10
-               : 20)),  // If key cache is included in range slice mem use 10%,
-                        // otherwise 5%
+    : range_slice_memory_limit_(MB(15000)),
       store_hd_(store_hd),
       node_id_(node_id),
       ng_id_(ng_id),

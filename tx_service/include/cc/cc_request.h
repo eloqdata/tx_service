@@ -1309,6 +1309,7 @@ public:
                int32_t partition_id = -1,
                bool abort_if_oom = false)
     {
+        point_read_on_miss = true;
         uint32_t ng_id = Sharder::Instance().ShardToCcNodeGroup(key_shard_code);
         TemplatedCcRequest<ReadCc, ReadKeyResult>::Reset(
             nullptr, res, ng_id, tx_number, tx_term, protocol, iso_level);
