@@ -596,7 +596,7 @@ inline static TableName sequence_table_name{sequence_table_name_sv.data(),
 // Set buckets count to be the same as the hash partition count.
 inline static const uint16_t total_range_buckets = 0x400;  // 1024
 inline static const uint16_t total_hash_partitions = 0x400;
-inline static const uint16_t total_range_slices_kv_partition = 64;
+inline static const uint16_t total_range_slices_kv_partition = 32;
 
 enum struct SlicePosition
 {
