@@ -4806,8 +4806,6 @@ bool TransactionExecution::FillDataLogRequest(WriteToLogOp &write_log)
                                     sizeof(cmds_len));
 
                 uint8_t has_overwrite = cmd_entry->ignore_previous_version_;
-                LOG(INFO) << "key: " << key_str << ", has_overwrite: "
-                          << cmd_entry->ignore_previous_version_;
                 log_ng_blob->append(
                     reinterpret_cast<const char *>(&has_overwrite),
                     sizeof(has_overwrite));
@@ -4819,7 +4817,6 @@ bool TransactionExecution::FillDataLogRequest(WriteToLogOp &write_log)
                 for (const auto &cmd_str : cmd_str_list)
                 {
                     uint32_t cmd_len = cmd_str.size();
-                    LOG(INFO) << "cmd_str: " << cmd_str;
                     log_ng_blob->append(
                         reinterpret_cast<const char *>(&cmd_len),
                         sizeof(cmd_len));
@@ -4842,7 +4839,6 @@ bool TransactionExecution::FillDataLogRequest(WriteToLogOp &write_log)
                 key_cmd_len_start, sizeof(uint32_t), ptr, sizeof(uint32_t));
         }
     }
-    LOG(INFO) << "FillDataLog done";
 
     // fill rw_set_.catalog_wset_ term if any insert request triggers an catalog
     // logical update operation.
@@ -6773,8 +6769,6 @@ void TransactionExecution::PostProcess(ObjectCommandOp &obj_cmd_op)
         LockType lock_acquired = cmd_result.lock_acquired_;
         bool object_modified = cmd_result.object_modified_;
         bool object_deleted = cmd_result.object_deleted_;
-        LOG(INFO) << "obj_status: " << int(obj_status)
-                  << ", obj_deleted: " << object_deleted;
         const TxCommand *cmd = obj_cmd_op.command_;
         const TableName *table_name = obj_cmd_op.table_name_;
         const CcEntryAddr &cce_addr = cmd_result.cce_addr_;

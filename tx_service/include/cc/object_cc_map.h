@@ -922,7 +922,7 @@ public:
             {
                 // Forward retire command to standby node to clear the object
                 auto retire_command = cmd->RetireExpiredTTLObjectCommand();
-                forward_entry->AddTxCommand(retire_command.get());
+                forward_entry->AddOverWriteCommand(retire_command.get());
             }
             // Object not exist due to ttl expired,
             // for command on exist object, return early
@@ -1028,7 +1028,18 @@ public:
             {
                 if (forward_entry)
                 {
-                    forward_entry->AddTxCommand(req);
+                    if (object_deleted)
+                    {
+                        // If the command modifies the object into delete state,
+                        // like rpop, zrem, add a delete command.
+                        auto retire_command =
+                            cmd->RetireExpiredTTLObjectCommand();
+                        forward_entry->AddOverWriteCommand(retire_command.get());
+                    }
+                    else
+                    {
+                        forward_entry->AddTxCommand(req);
+                    }
                 }
                 CommitCommandOnDirtyPayload(
                     dirty_payload, dirty_payload_status, *cmd);
@@ -1057,7 +1068,6 @@ public:
 
             if (object_modified)
             {
-                // TODO: modify this
                 if (forward_entry)
                 {
                     forward_req->set_object_version(cce->CommitTs());
@@ -1067,9 +1077,21 @@ public:
                         // the object in case the object is removed from old
                         // node due to ttl expired.
                         auto recover_command = cmd->RecoverTTLObjectCommand();
-                        forward_entry->AddTxCommand(recover_command);
+                        forward_entry->AddOverWriteCommand(recover_command);
                     }
-                    forward_entry->AddTxCommand(req);
+
+                    if (object_deleted)
+                    {
+                        // If the command modifies the object into delete state,
+                        // like rpop, zrem, add a delete command.
+                        auto retire_command =
+                            cmd->RetireExpiredTTLObjectCommand();
+                        forward_entry->AddOverWriteCommand(retire_command.get());
+                    }
+                    else
+                    {
+                        forward_entry->AddTxCommand(req);
+                    }
                 }
                 if (!req.apply_and_commit_)
                 {
