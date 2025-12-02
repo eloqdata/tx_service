@@ -936,6 +936,11 @@ void FetchRangeSlicesCallback(void *data,
                                                range_partition_id,
                                                fetch_req->CurrentSegmentId());
 
+                // update kv partition id
+                fetch_req->kv_partition_id_ = client.KvPartitionIdOfRangeSlices(
+                    fetch_req->table_name_,
+                    fetch_req->range_entry_->GetRangeInfo()->PartitionId());
+
                 client.Read(kv_range_slices_table_name,
                             fetch_req->kv_partition_id_,
                             read_closure->ShardId(),
@@ -1033,6 +1038,11 @@ void FetchRangeSlicesCallback(void *data,
             fetch_req->SetCurrentSegmentId(segment_id);
             client.UpdateEncodedRangeSliceKey(fetch_req->kv_start_key_,
                                               fetch_req->CurrentSegmentId());
+
+            // update kv partition id
+            fetch_req->kv_partition_id_ = client.KvPartitionIdOfRangeSlices(
+                fetch_req->table_name_,
+                fetch_req->range_entry_->GetRangeInfo()->PartitionId());
             client.Read(kv_range_slices_table_name,
                         fetch_req->kv_partition_id_,
                         read_closure->ShardId(),
