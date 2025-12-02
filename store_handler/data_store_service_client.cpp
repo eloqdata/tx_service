@@ -1995,8 +1995,7 @@ bool DataStoreServiceClient::UpsertRanges(
         DispatchRangeSliceBatches(kv_range_slices_table_name,
                                   kv_partition_id,
                                   slice_plan,
-                                  slice_sync_concurrent,
-                                  c);
+                                  slice_sync_concurrent);
     }
 
     // 3- Wait for slice requests to complete
@@ -4477,7 +4476,7 @@ bool DataStoreServiceClient::DeleteTableRanges(
     PoolableGuard delete_slices_req_guard(delete_slices_sync_concurrent);
     delete_slices_sync_concurrent->Reset();
     size_t total_range_slices_kv_partitions = TotalRangeSlicesKvPartitions();
-    for (int32_t kv_partition_id = 0;
+    for (uint32_t kv_partition_id = 0;
          kv_partition_id < total_range_slices_kv_partitions;
          ++kv_partition_id)
     {
