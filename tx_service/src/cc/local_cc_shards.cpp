@@ -3180,7 +3180,10 @@ void LocalCcShards::PostProcessFlushTaskEntries(
     // unpin node group data
     for (const auto &[node_group, term] : pinned_node_group_terms_)
     {
-        Sharder::Instance().UnpinNodeGroupData(node_group);
+        if (term >= 0)
+        {
+            Sharder::Instance().UnpinNodeGroupData(node_group);
+        }
     }
 }
 

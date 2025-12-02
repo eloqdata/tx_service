@@ -407,7 +407,7 @@ public:
                            int32_t partition_id,
                            uint64_t range_version) override;
 
-    bool UpdateRangeSlices(std::vector<txservice::UpdateRangeSlicesReq>
+    bool UpdateRangeSlices(const std::vector<txservice::UpdateRangeSlicesReq>
                                &update_range_slice_reqs) override;
 
     bool UpsertRanges(const txservice::TableName &table_name,
