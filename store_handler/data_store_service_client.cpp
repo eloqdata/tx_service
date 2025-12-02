@@ -1682,7 +1682,7 @@ void DataStoreServiceClient::DispatchRangeMetadataBatches(
 }
 
 bool DataStoreServiceClient::UpdateRangeSlices(
-    std::vector<txservice::UpdateRangeSlicesReq> &update_range_slice_reqs)
+    const std::vector<txservice::UpdateRangeSlicesReq> &update_range_slice_reqs)
 {
     if (update_range_slice_reqs.empty())
     {
@@ -4582,6 +4582,7 @@ bool DataStoreServiceClient::InitTableLastRangePartitionId(
             1,
             1,
             init_range_id + 1);
+
     // See PutAll(): encode is_delete, encoded_blob_data and unpack_info
     std::string encoded_tx_record;
     if (table_name.IsHashPartitioned())

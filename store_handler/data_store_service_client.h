@@ -308,7 +308,7 @@ public:
         uint32_t range_partition_id,
         txservice::FillStoreSliceCc *load_slice_req) override;
 
-    bool UpdateRangeSlices(std::vector<txservice::UpdateRangeSlicesReq>
+    bool UpdateRangeSlices(const std::vector<txservice::UpdateRangeSlicesReq>
                                &update_range_slice_reqs) override;
 
     bool UpdateRangeSlices(const txservice::TableName &table_name,

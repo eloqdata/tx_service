@@ -223,7 +223,7 @@ public:
     }
 
     virtual bool UpdateRangeSlices(
-        std::vector<UpdateRangeSlicesReq> &update_range_slice_reqs)
+        const std::vector<UpdateRangeSlicesReq> &update_range_slice_reqs)
     {
         return false;
     }

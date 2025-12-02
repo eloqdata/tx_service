@@ -1460,12 +1460,12 @@ bool RocksDBHandler::UpdateRangeSlices(
 }
 
 bool RocksDBHandler::UpdateRangeSlices(
-    std::vector<txservice::UpdateRangeSlicesReq> &update_range_slice_reqs)
+    const std::vector<txservice::UpdateRangeSlicesReq> &update_range_slice_reqs)
 {
     LOG(ERROR) << "RocksDBHandler::UpdateRangeSlices not implemented";
     // Not implemented
     assert(false);
-    return false;
+    return true;
 }
 
 bool RocksDBHandler::UpsertRanges(
