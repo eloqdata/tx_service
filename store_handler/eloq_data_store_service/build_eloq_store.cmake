@@ -106,5 +106,9 @@ set(ELOQ_STORE_SOURCES
 
 add_library(eloqstore STATIC ${ELOQ_STORE_SOURCES} ${INI_SOURCES})
 
+# Rename the inih C++ wrapper symbol when building eloqstore to avoid
+# clashing with the other INIReader implementations (log service / core).
+target_compile_definitions(eloqstore PRIVATE INIReader=EloqStorePrivateINIReader)
+
 target_include_directories(eloqstore PUBLIC ${ELOQ_STORE_INCLUDE})
 target_link_libraries(eloqstore PRIVATE ${URING_LIB} Boost::context glog::glog absl::flat_hash_map jsoncpp_lib ${CURL_LIBRARIES} ${ZSTD_LIBRARY})
