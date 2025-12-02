@@ -241,6 +241,11 @@ public:
         return static_cast<uint32_t>(partition_id % total_range_buckets);
     }
 
+    static inline uint16_t TotalRangeSlicesKvPartitions()
+    {
+        return total_range_slices_kv_partition;
+    }
+
     uint32_t NativeNodeGroup() const
     {
         return native_ng_;

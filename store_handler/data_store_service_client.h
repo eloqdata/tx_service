@@ -712,6 +712,20 @@ private:
         return txservice::Sharder::MapKeyHashToHashPartitionId(hash_code);
     }
 
+    int32_t KvPartitionIdOfRangeSlices(const txservice::TableName &table,
+                                       int32_t range_id) const
+    {
+        size_t h1 = std::hash<std::string_view>()(table.StringView());
+        size_t h2 = std::hash<int32_t>()(range_id);
+        size_t hash_code = h1 ^ (h2 + 0x9e3779b9 + (h1 << 6) + (h1 >> 2));
+        return hash_code % txservice::Sharder::TotalRangeSlicesKvPartitions();
+    }
+
+    size_t TotalRangeSlicesKvPartitions() const
+    {
+        return txservice::Sharder::TotalRangeSlicesKvPartitions();
+    }
+
     int32_t KvPartitionIdOf(int32_t key_partition,
                             bool is_range_partition = true)
     {
