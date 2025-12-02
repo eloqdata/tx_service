@@ -235,6 +235,11 @@ private:
     // Make constructor private for singleton pattern
     DataSubstrate() = default;
 
+    DataSubstrate(const DataSubstrate &) = delete;
+    DataSubstrate &operator=(const DataSubstrate &) = delete;
+    DataSubstrate(DataSubstrate &&) = delete;
+    DataSubstrate &operator=(DataSubstrate &&) = delete;
+
     // Initialization state tracking
     InitState init_state_ = InitState::NotInitialized;
 
@@ -290,8 +295,8 @@ private:
     std::condition_variable engine_registration_cv_;
     std::mutex engine_registration_mutex_;
 
-    // Synchronization for DataSubstrate::Start() completion (engines wait on this)
-    // Uses instance_mutex_ and init_state_ instead of separate mutex/flag
+    // Synchronization for DataSubstrate::Start() completion (engines wait on
+    // this) Uses instance_mutex_ and init_state_ instead of separate mutex/flag
     std::condition_variable data_substrate_started_cv_;
 };
 

@@ -84,7 +84,7 @@ bool DataSubstrate::InitializeMetrics(const INIReader &config_reader)
 
         // remote request metrics
         metrics::enable_remote_request_metrics = config_reader.GetBoolean(
-            "metrics", "enable_busy_round_metrics", metrics::enable_tx_metrics);
+            "metrics", "enable_remote_request_metrics", metrics::enable_tx_metrics);
         LOG(INFO) << "enable_remote_request_metrics: "
                   << (metrics::enable_remote_request_metrics ? "ON" : "OFF");
         if (core_config_.enable_data_store)

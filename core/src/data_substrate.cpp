@@ -187,11 +187,12 @@ bool DataSubstrate::Start()
 
     instance.init_state_ = InitState::Started;
     LOG(INFO) << "DataSubstrate started successfully";
-    
+
     // Notify all waiting engine threads that DataSubstrate has started
-    // (instance_mutex_ is already held, which is what data_substrate_started_cv_ uses)
+    // (instance_mutex_ is already held, which is what
+    // data_substrate_started_cv_ uses)
     instance.data_substrate_started_cv_.notify_all();
-    
+
     return true;
 }
 
@@ -359,7 +360,8 @@ bool DataSubstrate::RegisterEngine(
     // Set engine_registered and notify waiting threads
     // Use engine_registration_mutex_ to protect engine_registered flag
     {
-        std::lock_guard<std::mutex> reg_lock(instance.engine_registration_mutex_);
+        std::lock_guard<std::mutex> reg_lock(
+            instance.engine_registration_mutex_);
         instance.engines_[engine_index].engine_registered = true;
         instance.engine_registration_cv_.notify_all();
     }
@@ -389,9 +391,10 @@ void DataSubstrate::EnableEngine(txservice::TableEngine engine_type)
     }
 
     DataSubstrate &instance = Instance();
-    std::lock_guard<std::mutex> reg_lock(engine_registration_mutex_);
+    std::lock_guard<std::mutex> reg_lock(instance.engine_registration_mutex_);
     instance.engines_[engine_index].enable_engine = true;
-    instance.engines_[engine_index].engine_registered = false;  // Initialize to false
+    instance.engines_[engine_index].engine_registered =
+        false;  // Initialize to false
     instance.engines_[engine_index].engine = engine_type;
 }
 
@@ -399,7 +402,7 @@ bool DataSubstrate::WaitForEnabledEnginesRegistered(
     std::chrono::milliseconds timeout)
 {
     DataSubstrate &instance = Instance();
-    std::unique_lock<std::mutex> lock(engine_registration_mutex_);
+    std::unique_lock<std::mutex> lock(instance.engine_registration_mutex_);
 
     auto deadline = std::chrono::steady_clock::now() + timeout;
 
@@ -423,7 +426,7 @@ bool DataSubstrate::WaitForEnabledEnginesRegistered(
         }
 
         // Wait with timeout
-        if (engine_registration_cv_.wait_until(lock, deadline) ==
+        if (instance.engine_registration_cv_.wait_until(lock, deadline) ==
             std::cv_status::timeout)
         {
             // Timeout - check one more time
@@ -456,10 +459,10 @@ bool DataSubstrate::WaitForDataSubstrateStarted(
 
     // Wait for Start() to complete
     auto deadline = std::chrono::steady_clock::now() + timeout;
-    bool started = data_substrate_started_cv_.wait_until(
-        lock, deadline, [&instance] {
-            return instance.init_state_ == InitState::Started;
-        });
+    bool started = instance.data_substrate_started_cv_.wait_until(
+        lock,
+        deadline,
+        [&instance] { return instance.init_state_ == InitState::Started; });
 
     return started;
 }
