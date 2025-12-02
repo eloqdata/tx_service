@@ -11,7 +11,7 @@
 #include "log_service_metrics.h"
 #endif
 #ifdef ELOQ_MODULE_ELOQSQL
-#include "mysql_metrics.h"  //TDOO(liunyl): move this file to correct location
+#include "mysql_metrics.h"
 #endif
 #ifdef ELOQ_MODULE_ELOQKV
 #include "redis_metrics.h"
@@ -19,12 +19,6 @@
 
 DEFINE_bool(enable_metrics, false, "Enable metrics");
 DEFINE_string(metrics_port, "18081", "Metrics port");
-namespace EloqKV
-{
-enum struct RedisCommandType;
-extern const std::vector<std::pair<const char *, RedisCommandType>>
-    command_types;
-}  // namespace EloqKV
 
 bool DataSubstrate::InitializeMetrics(const INIReader &config_reader)
 {
@@ -176,34 +170,7 @@ bool DataSubstrate::InitializeMetrics(const INIReader &config_reader)
                                         core_config_.core_num);
         metrics::redis_meter->Collect(metrics::NAME_MAX_CONNECTION,
                                       core_config_.maxclients);
-        for (const auto &[cmd, _] : EloqKV::command_types)
-        {
-            std::vector<metrics::LabelGroup> label_groups = {{"type", {cmd}}};
-
-            external_metrics_.push_back(
-                std::make_tuple(metrics::NAME_REDIS_COMMAND_DURATION,
-                                metrics::Type::Histogram,
-                                label_groups));
-            external_metrics_.push_back(
-                std::make_tuple(metrics::NAME_REDIS_COMMAND_TOTAL,
-                                metrics::Type::Counter,
-                                label_groups));
-        }
-        for (const auto &access_type : {"read", "write"})
-        {
-            external_metrics_.push_back(
-                std::make_tuple(metrics::NAME_REDIS_COMMAND_AGGREGATED_TOTAL,
-                                metrics::Type::Counter,
-                                std::vector<metrics::LabelGroup>{
-                                    {"access_type", {access_type}}}));
-            external_metrics_.push_back(
-                std::make_tuple(metrics::NAME_REDIS_COMMAND_AGGREGATED_DURATION,
-                                metrics::Type::Histogram,
-                                std::vector<metrics::LabelGroup>{
-                                    {"access_type", {access_type}}}));
-        }
 #endif
-
         tx_service_common_labels_["node_ip"] = network_config_.local_ip;
         tx_service_common_labels_["node_port"] =
             std::to_string(network_config_.local_port);

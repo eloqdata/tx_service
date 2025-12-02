@@ -798,6 +798,7 @@ void LockWriteRangeBucketsOp::Advance(TransactionExecution *txm)
 SetCommitTsOperation::SetCommitTsOperation(TransactionExecution *txm)
     : hd_result_(txm)
 {
+    Reset();
     TX_TRACE_ASSOCIATE(this, &hd_result_);
 }
 

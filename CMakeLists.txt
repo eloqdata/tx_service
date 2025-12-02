@@ -14,7 +14,7 @@ option(OPEN_LOG_SERVICE "Compile with open log service." ON)
 option(SMALL_RANGE "Whether enable small range" OFF)
 option(STATISTICS "Whether enable table statistics" ON)
 option(EXT_TX_PROC_ENABLED "Allows external threads to move forward the tx service." ON)
-option(ELOQ_MODULE_ENABLED "Register the tx service as an ELOQ module." OFF)
+option(ELOQ_MODULE_ENABLED "Register the tx service as an ELOQ module." ON)
 option(BUILD_SHARED_LIBS "Build shared libraries instead of static libraries" OFF)
 
 

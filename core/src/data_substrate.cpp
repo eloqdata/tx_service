@@ -25,6 +25,8 @@
 #include <gflags/gflags.h>
 #include <sys/resource.h>
 
+#include <mutex>
+
 #include "INIReader.h"
 #include "log_server.h"
 #include "sequences/sequences.h"
@@ -67,12 +69,6 @@ DEFINE_uint32(maxclients, 10000, "maxclients");
 DEFINE_string(log_file_name_prefix,
               "eloqdb.log",
               "Sets the prefix for log files. Default is 'eloqdb.log'");
-// Declare as weak symbols to allow optional linking
-extern txservice::CatalogFactory *eloqsql_catalog_factory __attribute__((weak));
-extern txservice::CatalogFactory *eloqkv_catalog_factory __attribute__((weak));
-extern txservice::SystemHandler *eloqsql_system_handler __attribute__((weak));
-extern txservice::CatalogFactory *eloqdoc_catalog_factory __attribute__((weak));
-extern txservice::SystemHandler *eloqdoc_system_handler __attribute__((weak));
 
 namespace brpc
 {
@@ -80,86 +76,123 @@ DECLARE_int32(event_dispatcher_num);
 }
 const auto NUM_VCPU = std::thread::hardware_concurrency();
 
-// Global DataSubstrate instance
-std::unique_ptr<DataSubstrate> g_data_substrate = nullptr;
+// Static mutex for protecting initialization state
+static std::mutex instance_mutex_;
 
-void DataSubstrate::Initialize(const std::string &config_file_path)
+DataSubstrate &DataSubstrate::Instance()
 {
-    g_data_substrate = std::make_unique<DataSubstrate>();
+    static DataSubstrate instance_;
+    return instance_;
+}
+
+bool DataSubstrate::Init(const std::string &config_file_path)
+{
+    std::lock_guard<std::mutex> lock(instance_mutex_);
+
+    DataSubstrate &instance = Instance();
+
+    if (instance.init_state_ != InitState::NotInitialized)
+    {
+        LOG(WARNING) << "DataSubstrate already initialized";
+        return true;
+    }
+
+    // Save config file path for use in Start()
+    instance.config_file_path_ = config_file_path;
 
     INIReader config_file_reader(config_file_path);
     if (!config_file_path.empty() && config_file_reader.ParseError() != 0)
     {
         LOG(ERROR) << "Failed to parse config file: " << config_file_path;
-        g_data_substrate = nullptr;
-        return;
-    }
-    // Phase 1: Load core and network configuration
-    if (!g_data_substrate->LoadCoreAndNetworkConfig(config_file_reader))
-    {
-        g_data_substrate = nullptr;
-        return;
-    }
-
-    // Phase 2: Register engines
-    if (!g_data_substrate->RegisterEngines())
-    {
-        g_data_substrate = nullptr;
-        return;
-    }
-
-    // Phase 3: Initialize log service
-    if (!g_data_substrate->InitializeLogService(config_file_reader))
-    {
-        g_data_substrate = nullptr;
-        return;
-    }
-
-    // Phase 4: Initialize storage handler
-    if (g_data_substrate->GetCoreConfig().enable_data_store &&
-        !g_data_substrate->InitializeStorageHandler(config_file_reader))
-    {
-        g_data_substrate = nullptr;
-        return;
-    }
-
-    // Phase 5: Initialize metrics
-    if (!g_data_substrate->InitializeMetrics(config_file_reader))
-    {
-        g_data_substrate = nullptr;
-        return;
-    }
-
-    // Phase 6: Initialize TxService
-    if (!g_data_substrate->InitializeTxService(config_file_reader))
-    {
-        g_data_substrate = nullptr;
-        return;
-    }
-}
-
-bool DataSubstrate::InitializeGlobal(const std::string &config_file_path)
-{
-    if (g_data_substrate != nullptr)
-    {
-        LOG(WARNING) << "Global DataSubstrate already initialized";
-        return true;
-    }
-
-    Initialize(config_file_path);
-    if (g_data_substrate == nullptr)
-    {
-        LOG(ERROR) << "Failed to initialize global DataSubstrate";
+        instance.init_state_ = InitState::NotInitialized;
         return false;
     }
 
-    LOG(INFO) << "Global DataSubstrate initialized successfully";
+    // Phase 1: Load core and network configuration only
+    if (!instance.LoadCoreAndNetworkConfig(config_file_reader))
+    {
+        instance.init_state_ = InitState::NotInitialized;
+        return false;
+    }
+
+    // Add Sequences table (system table, not engine-specific)
+    instance.prebuilt_tables_.try_emplace(
+        txservice::Sequences::table_name_,
+        std::string(txservice::Sequences::table_name_sv_));
+
+    // Mark as initialized (but not started)
+    instance.init_state_ = InitState::ConfigLoaded;
+
+    LOG(INFO) << "DataSubstrate initialized (config loaded)";
     return true;
 }
 
-DataSubstrate *DataSubstrate::GetGlobal()
+bool DataSubstrate::Start()
 {
-    return g_data_substrate.get();
+    std::lock_guard<std::mutex> lock(instance_mutex_);
+
+    DataSubstrate &instance = Instance();
+
+    if (instance.init_state_ == InitState::NotInitialized)
+    {
+        LOG(ERROR) << "Cannot start: DataSubstrate not initialized. Call "
+                      "Init() first.";
+        return false;
+    }
+
+    if (instance.init_state_ == InitState::Started)
+    {
+        LOG(WARNING) << "DataSubstrate already started";
+        return true;
+    }
+
+    // Use config file path saved during Init()
+    INIReader config_file_reader(instance.config_file_path_);
+    if (!instance.config_file_path_.empty() &&
+        config_file_reader.ParseError() != 0)
+    {
+        LOG(ERROR) << "Failed to parse config file: "
+                   << instance.config_file_path_;
+        return false;
+    }
+
+    // Phase 1: Initialize log service
+    if (!instance.InitializeLogService(config_file_reader))
+    {
+        LOG(ERROR) << "Failed to initialize log service";
+        return false;
+    }
+
+    // Phase 2: Initialize storage handler
+    if (instance.GetCoreConfig().enable_data_store &&
+        !instance.InitializeStorageHandler(config_file_reader))
+    {
+        LOG(ERROR) << "Failed to initialize storage handler";
+        return false;
+    }
+
+    // Phase 3: Initialize metrics
+    if (!instance.InitializeMetrics(config_file_reader))
+    {
+        LOG(ERROR) << "Failed to initialize metrics";
+        return false;
+    }
+
+    // Phase 4: Initialize TxService
+    if (!instance.InitializeTxService(config_file_reader))
+    {
+        LOG(ERROR) << "Failed to initialize TxService";
+        return false;
+    }
+
+    instance.init_state_ = InitState::Started;
+    LOG(INFO) << "DataSubstrate started successfully";
+    
+    // Notify all waiting engine threads that DataSubstrate has started
+    // (instance_mutex_ is already held, which is what data_substrate_started_cv_ uses)
+    instance.data_substrate_started_cv_.notify_all();
+    
+    return true;
 }
 
 DataSubstrate::~DataSubstrate()
@@ -224,57 +257,228 @@ void DataSubstrate::Shutdown()
     tx_service_ = nullptr;
 }
 
+bool DataSubstrate::RegisterEngine(
+    txservice::TableEngine engine_type,
+    txservice::CatalogFactory *factory,
+    txservice::SystemHandler *system_handler,
+    std::vector<std::pair<txservice::TableName, std::string>> &&prebuilt_tables,
+    std::vector<std::tuple<metrics::Name,
+                           metrics::Type,
+                           std::vector<metrics::LabelGroup>>> &&engine_metrics)
+{
+    // Acquire mutex to protect RegisterEngine() and init_state_ access
+    // This is thread-safe as RegisterEngine() may be called from different
+    // threads Note: instance_mutex_ is a static mutex declared in the .cpp file
+    std::lock_guard<std::mutex> lock(instance_mutex_);
+
+    DataSubstrate &instance = Instance();
+
+    // Check init_state_ (protected by mutex) - must be ConfigLoaded
+    if (instance.init_state_ != InitState::ConfigLoaded)
+    {
+        if (instance.init_state_ == InitState::NotInitialized)
+        {
+            LOG(ERROR)
+                << "Cannot register engine: DataSubstrate not initialized. "
+                   "Call Init() first.";
+        }
+        else if (instance.init_state_ == InitState::Started)
+        {
+            LOG(ERROR)
+                << "Cannot register engine: DataSubstrate already started. "
+                   "Register engines before calling Start().";
+        }
+        return false;
+    }
+
+    // Validate engine type (must be one of the external engines: EloqSql=1,
+    // EloqKv=2, EloqDoc=3)
+    if (engine_type == txservice::TableEngine::None ||
+        engine_type < txservice::TableEngine::EloqSql ||
+        engine_type > txservice::TableEngine::EloqDoc)
+    {
+        LOG(ERROR) << "Invalid engine type: " << static_cast<int>(engine_type);
+        return false;
+    }
+
+    // Find engine slot (EloqSql=1 -> index 0, EloqKv=2 -> index 1, EloqDoc=3 ->
+    // index 2)
+    size_t engine_index = static_cast<size_t>(engine_type) - 1;
+    if (engine_index >= NUM_EXTERNAL_ENGINES)
+    {
+        LOG(ERROR) << "Engine type out of range: "
+                   << static_cast<int>(engine_type);
+        return false;
+    }
+
+    // Check for duplicate registration by checking if engine is already enabled
+    if (instance.engines_[engine_index].engine_registered)
+    {
+        LOG(ERROR) << "Engine " << static_cast<int>(engine_type)
+                   << " already registered";
+        return false;
+    }
+
+    // Register the engine
+    instance.engines_[engine_index].engine = engine_type;
+    instance.engines_[engine_index].catalog_factory = factory;
+
+    // Store system handler if provided (only one system handler is allowed)
+    if (system_handler != nullptr)
+    {
+        if (instance.system_handler_ != nullptr &&
+            instance.system_handler_ != system_handler)
+        {
+            LOG(WARNING)
+                << "SystemHandler already set, replacing with new handler";
+        }
+        instance.system_handler_ = system_handler;
+    }
+
+    // Store prebuilt tables
+    for (auto &[table_name, table_string] : prebuilt_tables)
+    {
+        instance.prebuilt_tables_.try_emplace(std::move(table_name),
+                                              std::move(table_string));
+    }
+
+    // Note: The Sequences table is a special prebuilt table that was previously
+    // added in RegisterEngines(). It should be added separately if needed, or
+    // engines can include it in their prebuilt_tables vector.
+
+    // Store engine metrics
+    for (auto &metric : engine_metrics)
+    {
+        instance.external_metrics_.push_back(std::move(metric));
+    }
+
+    LOG(INFO) << "Engine " << static_cast<int>(engine_type)
+              << " registered successfully";
+    // Note: instance_mutex_ is released here when lock goes out of scope
+
+    // Set engine_registered and notify waiting threads
+    // Use engine_registration_mutex_ to protect engine_registered flag
+    {
+        std::lock_guard<std::mutex> reg_lock(instance.engine_registration_mutex_);
+        instance.engines_[engine_index].engine_registered = true;
+        instance.engine_registration_cv_.notify_all();
+    }
+
+    return true;
+}
+
+void DataSubstrate::EnableEngine(txservice::TableEngine engine_type)
+{
+    // Validate engine type
+    if (engine_type == txservice::TableEngine::None ||
+        engine_type < txservice::TableEngine::EloqSql ||
+        engine_type > txservice::TableEngine::EloqDoc)
+    {
+        LOG(ERROR) << "Invalid engine type for EnableEngine: "
+                   << static_cast<int>(engine_type);
+        return;
+    }
+
+    // Find engine slot
+    size_t engine_index = static_cast<size_t>(engine_type) - 1;
+    if (engine_index >= NUM_EXTERNAL_ENGINES)
+    {
+        LOG(ERROR) << "Engine type out of range: "
+                   << static_cast<int>(engine_type);
+        return;
+    }
+
+    DataSubstrate &instance = Instance();
+    std::lock_guard<std::mutex> reg_lock(engine_registration_mutex_);
+    instance.engines_[engine_index].enable_engine = true;
+    instance.engines_[engine_index].engine_registered = false;  // Initialize to false
+    instance.engines_[engine_index].engine = engine_type;
+}
+
+bool DataSubstrate::WaitForEnabledEnginesRegistered(
+    std::chrono::milliseconds timeout)
+{
+    DataSubstrate &instance = Instance();
+    std::unique_lock<std::mutex> lock(engine_registration_mutex_);
+
+    auto deadline = std::chrono::steady_clock::now() + timeout;
+
+    while (true)
+    {
+        // Check if all enabled engines are registered
+        bool all_registered = true;
+        for (size_t i = 0; i < NUM_EXTERNAL_ENGINES; i++)
+        {
+            if (instance.engines_[i].enable_engine &&
+                !instance.engines_[i].engine_registered)
+            {
+                all_registered = false;
+                break;
+            }
+        }
+
+        if (all_registered)
+        {
+            return true;
+        }
+
+        // Wait with timeout
+        if (engine_registration_cv_.wait_until(lock, deadline) ==
+            std::cv_status::timeout)
+        {
+            // Timeout - check one more time
+            all_registered = true;
+            for (size_t i = 0; i < NUM_EXTERNAL_ENGINES; i++)
+            {
+                if (instance.engines_[i].enable_engine &&
+                    !instance.engines_[i].engine_registered)
+                {
+                    all_registered = false;
+                    break;
+                }
+            }
+            return all_registered;
+        }
+    }
+}
+
+bool DataSubstrate::WaitForDataSubstrateStarted(
+    std::chrono::milliseconds timeout)
+{
+    DataSubstrate &instance = Instance();
+    std::unique_lock<std::mutex> lock(instance_mutex_);
+
+    // Check if already started
+    if (instance.init_state_ == InitState::Started)
+    {
+        return true;
+    }
+
+    // Wait for Start() to complete
+    auto deadline = std::chrono::steady_clock::now() + timeout;
+    bool started = data_substrate_started_cv_.wait_until(
+        lock, deadline, [&instance] {
+            return instance.init_state_ == InitState::Started;
+        });
+
+    return started;
+}
+
+[[deprecated("Engines should call RegisterEngine() directly")]]
 bool DataSubstrate::RegisterEngines()
 {
-    engines_[0] = {nullptr, txservice::TableEngine::EloqSql, false};
-    engines_[1] = {nullptr, txservice::TableEngine::EloqKv, false};
-    engines_[2] = {nullptr, txservice::TableEngine::EloqDoc, false};
+    // Initialize engines array to default values
+    engines_[0] = {nullptr, txservice::TableEngine::EloqSql, false, false};
+    engines_[1] = {nullptr, txservice::TableEngine::EloqKv, false, false};
+    engines_[2] = {nullptr, txservice::TableEngine::EloqDoc, false, false};
 
+    // Add Sequences table (system table, not engine-specific)
     prebuilt_tables_.try_emplace(
         txservice::Sequences::table_name_,
         std::string(txservice::Sequences::table_name_sv_));
-#ifdef ELOQ_MODULE_ELOQSQL
-    engines_[0].enable_engine = true;
-    if (eloqsql_catalog_factory)
-    {
-        engines_[0].catalog_factory = eloqsql_catalog_factory;
-    }
-    if (eloqsql_system_handler)
-    {
-        system_handler_ = eloqsql_system_handler;
-    }
-#endif
 
-#ifdef ELOQ_MODULE_ELOQKV
-    engines_[1].enable_engine = true;
-    if (eloqkv_catalog_factory)
-    {
-        engines_[1].catalog_factory = eloqkv_catalog_factory;
-    }
-    for (uint16_t i = 0; i < 16; i++)
-    {
-        std::string table_name("data_table_");
-        table_name.append(std::to_string(i));
-        txservice::TableName redis_table_name(std::move(table_name),
-                                              txservice::TableType::Primary,
-                                              txservice::TableEngine::EloqKv);
-        std::string image = redis_table_name.String();
-        prebuilt_tables_.try_emplace(redis_table_name, image);
-    }
-#endif
-
-#ifdef ELOQ_MODULE_ELOQDOC
-    engines_[2].enable_engine = true;
-    if (eloqdoc_catalog_factory)
-    {
-        engines_[2].catalog_factory = eloqdoc_catalog_factory;
-    }
-    if (eloqdoc_system_handler)
-    {
-        system_handler_ = eloqdoc_system_handler;
-    }
-#endif
-
+    // Note: Engines must register themselves via RegisterEngine() API
+    // This method no longer performs engine-specific registration
     return true;
 }
 
