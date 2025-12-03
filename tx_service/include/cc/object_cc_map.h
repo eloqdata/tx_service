@@ -2004,7 +2004,8 @@ public:
 
         // Must update dirty_commit_ts. Otherwise, this entry may be
         // skipped by checkpointer.
-        commit_ts = cce->CommitTs();
+        // Update dirty_commit_ts with the req.CommitTs().
+        commit_ts = std::max(commit_ts, cce->CommitTs());
         if (commit_ts > last_dirty_commit_ts_)
         {
             last_dirty_commit_ts_ = commit_ts;
