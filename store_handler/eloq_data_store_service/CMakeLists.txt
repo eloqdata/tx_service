@@ -365,12 +365,12 @@ SET(RESELOQ_SOURCES ${RESELOQ_SOURCES}
         ds_request.pb.cc
     )
 
-if (NOT (WITH_DATA_STORE STREQUAL "ELOQDSS_ELOQSTORE"))
-    SET(RESELOQ_SOURCES ${RESELOQ_SOURCES}
-        INIReader.cpp
-        ini.c
-    )
-endif()
+# The INIReader definition in the eloqstore library was renamed to avoid
+# clashing with the other INIReader implementations (log service / core).
+SET(RESELOQ_SOURCES ${RESELOQ_SOURCES}
+    INIReader.cpp
+    ini.c
+)
 
 if ((WITH_DATA_STORE STREQUAL "ELOQDSS_ROCKSDB_CLOUD_S3") OR
         (WITH_DATA_STORE STREQUAL "ELOQDSS_ROCKSDB_CLOUD_GCS"))
