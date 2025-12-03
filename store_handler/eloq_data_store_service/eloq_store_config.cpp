@@ -94,6 +94,9 @@ DEFINE_uint32(eloq_store_reserve_space_ratio,
 DEFINE_bool(eloq_store_prewarm_cloud_cache,
             false,
             "EloqStore prewarm cloud cache during startup.");
+DEFINE_uint32(eloq_store_prewarm_task_count,
+              3,
+              "EloqStore prewarm task count per shard.");
 DEFINE_uint32(eloq_store_data_page_size, 1 << 12, "EloqStore data page size.");
 DEFINE_uint32(eloq_store_pages_per_file_shift,
               11,
@@ -423,6 +426,12 @@ EloqStoreConfig::EloqStoreConfig(const INIReader &config_reader,
             : config_reader.GetBoolean("store",
                                        "eloq_store_prewarm_cloud_cache",
                                        FLAGS_eloq_store_prewarm_cloud_cache);
+    eloqstore_configs_.prewarm_task_count =
+        !CheckCommandLineFlagIsDefault("eloq_store_prewarm_task_count")
+            ? FLAGS_eloq_store_prewarm_task_count
+            : config_reader.GetInteger("store",
+                                       "eloq_store_prewarm_task_count",
+                                       FLAGS_eloq_store_prewarm_task_count);
     eloqstore_configs_.data_page_size =
         !CheckCommandLineFlagIsDefault("eloq_store_data_page_size")
             ? FLAGS_eloq_store_data_page_size
