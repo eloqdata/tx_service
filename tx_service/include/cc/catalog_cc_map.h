@@ -793,7 +793,6 @@ public:
                 assert(new_schema->Version() ==
                        catalog_entry->dirty_schema_version_);
 
-                shard_->CleanCcm(table_key->Name(), req.NodeGroupId());
                 shard_->UpdateCcmSchema(table_key->Name(),
                                         req.NodeGroupId(),
                                         catalog_entry->dirty_schema_.get(),
