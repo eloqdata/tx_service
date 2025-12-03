@@ -313,6 +313,8 @@ bool DataSubstrate::RegisterEngine(
     }
 
     // Check for duplicate registration by checking if engine is already enabled
+    // Use engine_registration_mutex_ to protect engine_registered flag
+    std::lock_guard<std::mutex> reg_lock(instance.engine_registration_mutex_);
     if (instance.engines_[engine_index].engine_registered)
     {
         LOG(ERROR) << "Engine " << static_cast<int>(engine_type)
@@ -358,13 +360,8 @@ bool DataSubstrate::RegisterEngine(
     // Note: instance_mutex_ is released here when lock goes out of scope
 
     // Set engine_registered and notify waiting threads
-    // Use engine_registration_mutex_ to protect engine_registered flag
-    {
-        std::lock_guard<std::mutex> reg_lock(
-            instance.engine_registration_mutex_);
-        instance.engines_[engine_index].engine_registered = true;
-        instance.engine_registration_cv_.notify_all();
-    }
+    instance.engines_[engine_index].engine_registered = true;
+    instance.engine_registration_cv_.notify_all();
 
     return true;
 }
