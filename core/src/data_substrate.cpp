@@ -467,24 +467,6 @@ bool DataSubstrate::WaitForDataSubstrateStarted(
     return started;
 }
 
-[[deprecated("Engines should call RegisterEngine() directly")]]
-bool DataSubstrate::RegisterEngines()
-{
-    // Initialize engines array to default values
-    engines_[0] = {nullptr, txservice::TableEngine::EloqSql, false, false};
-    engines_[1] = {nullptr, txservice::TableEngine::EloqKv, false, false};
-    engines_[2] = {nullptr, txservice::TableEngine::EloqDoc, false, false};
-
-    // Add Sequences table (system table, not engine-specific)
-    prebuilt_tables_.try_emplace(
-        txservice::Sequences::table_name_,
-        std::string(txservice::Sequences::table_name_sv_));
-
-    // Note: Engines must register themselves via RegisterEngine() API
-    // This method no longer performs engine-specific registration
-    return true;
-}
-
 bool DataSubstrate::LoadNetworkConfig(bool is_bootstrap,
                                       const INIReader &config_reader,
                                       const std::string &default_data_path,

@@ -256,7 +256,6 @@ private:
     bool InitializeLogService(const INIReader &config_file_reader);
     bool InitializeTxService(const INIReader &config_file_reader);
     bool InitializeMetrics(const INIReader &config_file_reader);
-    bool RegisterEngines();
 
     // Configuration storage
     CoreConfig core_config_;
