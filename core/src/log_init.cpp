@@ -36,7 +36,7 @@ DEFINE_bool(enable_txlog_request_checkpoint,
             "Enable txlog server sending checkpoint requests when the criteria "
             "are met.");
 
-#if defined(DATA_STORE_TYPE_ELOQDSS_ROCKSDB_CLOUD_S3)
+#if defined(LOG_STATE_TYPE_RKDB_S3)
 DECLARE_string(aws_access_key_id);
 DECLARE_string(aws_secret_key);
 #endif
