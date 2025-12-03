@@ -2368,7 +2368,8 @@ void TransactionExecution::Process(ScanOpenOperation &scan_open)
 
     scan_open.hd_result_.Value().scan_alias_ = scan_open.tx_req_->scan_alias_;
 
-    if (!scan_open.lock_cluster_config_result_.IsFinished())
+    if (table_name.IsHashPartitioned() &&
+        !scan_open.lock_cluster_config_result_.IsFinished())
     {
         // Acquire cluster config read lock
         lock_cluster_config_op_.Reset(TableName(cluster_config_ccm_name_sv,

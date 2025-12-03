@@ -14,7 +14,7 @@ option(OPEN_LOG_SERVICE "Compile with open log service." ON)
 option(SMALL_RANGE "Whether enable small range" OFF)
 option(STATISTICS "Whether enable table statistics" ON)
 option(EXT_TX_PROC_ENABLED "Allows external threads to move forward the tx service." ON)
-option(ELOQ_MODULE_ENABLED "Register the tx service as an ELOQ module." OFF)
+option(ELOQ_MODULE_ENABLED "Register the tx service as an ELOQ module." ON)
 option(BUILD_SHARED_LIBS "Build shared libraries instead of static libraries" OFF)
 
 
@@ -22,8 +22,6 @@ message(NOTICE "WITH_DATA_STORE: ${WITH_DATA_STORE}")
 message(NOTICE "WITH_LOG_SERVICE: ${WITH_LOG_SERVICE}")
 message(NOTICE "OPEN_LOG_SERVICE: ${OPEN_LOG_SERVICE}")
 message(NOTICE "BUILD_SHARED_LIBS: ${BUILD_SHARED_LIBS}")
-option(USE_ONE_ELOQDSS_PARTITION_ENABLED "Whether use one partition for kv store" OFF)
-message(NOTICE "USE_ONE_ELOQDSS_PARTITION_ENABLED : ${USE_ONE_ELOQDSS_PARTITION_ENABLED}")
 
 # Synchronize WITH_DATA_STORE and WITH_LOG_STATE
 # Determine RocksDB type from WITH_DATA_STORE
@@ -76,25 +74,6 @@ else()
     # No synchronization needed in this case
 endif()
 
-# Handle reverse case: if only WITH_LOG_STATE is set to local RocksDB, auto-set WITH_DATA_STORE
-# But only if WITH_DATA_STORE doesn't already use RocksDB (to avoid conflicts)
-if(LOG_STATE_CACHED AND WITH_LOG_STATE STREQUAL "ROCKSDB")
-    if(NOT DATA_STORE_USES_ROCKSDB)
-        # WITH_LOG_STATE is set to local RocksDB, but WITH_DATA_STORE doesn't use RocksDB
-        # Capture the old value before changing it
-        set(OLD_DATA_STORE_VALUE ${WITH_DATA_STORE})
-        # Auto-set WITH_DATA_STORE to use local RocksDB
-        set(WITH_DATA_STORE "ELOQDSS_ROCKSDB" CACHE STRING "Which key-value storage to use" FORCE)
-        message(WARNING "WITH_LOG_STATE='ROCKSDB' (local RocksDB) was set, but WITH_DATA_STORE='${OLD_DATA_STORE_VALUE}' doesn't use RocksDB. Auto-set WITH_DATA_STORE to 'ELOQDSS_ROCKSDB'. Please set WITH_DATA_STORE explicitly if you need a different value.")
-        # Re-evaluate after auto-setting
-        set(DATA_STORE_USES_LOCAL_ROCKSDB TRUE)
-        set(DATA_STORE_USES_ROCKSDB TRUE)
-    elseif(NOT DATA_STORE_USES_LOCAL_ROCKSDB)
-        # WITH_LOG_STATE is set to local RocksDB, but WITH_DATA_STORE uses cloud RocksDB
-        message(FATAL_ERROR "WITH_LOG_STATE='ROCKSDB' (local RocksDB) is incompatible with WITH_DATA_STORE='${WITH_DATA_STORE}' (cloud RocksDB). Please set compatible values.")
-    endif()
-endif()
-
 message(NOTICE "WITH_DATA_STORE: ${WITH_DATA_STORE}")
 message(NOTICE "WITH_LOG_STATE: ${WITH_LOG_STATE}")
 
@@ -106,9 +85,6 @@ else()
     message(NOTICE "Building STATIC libraries")
 endif()
 
-if(USE_ONE_ELOQDSS_PARTITION_ENABLED)
-    add_compile_definitions(USE_ONE_ELOQDSS_PARTITION)
-endif()
 # Add compile definitions based on options
 if(WITH_DATA_STORE STREQUAL "DYNAMODB")
     set(KV_STORAGE_VAL 1 CACHE STRING "dynamodb" FORCE)

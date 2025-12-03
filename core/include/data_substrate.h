@@ -24,7 +24,10 @@
 #include <gflags/gflags.h>
 
 #include <cassert>
+#include <chrono>
+#include <condition_variable>
 #include <memory>
+#include <mutex>
 #include <string>
 #include <unordered_map>
 #include <vector>
@@ -105,11 +108,19 @@ class MetricsRegistry;
 class DataSubstrate
 {
 public:
+    enum class InitState
+    {
+        NotInitialized,
+        ConfigLoaded,
+        Started
+    };
+
     struct EngineConfig
     {
-        txservice::CatalogFactory *catalog_factory;
-        txservice::TableEngine engine;
-        bool enable_engine;
+        txservice::CatalogFactory *catalog_factory{nullptr};
+        txservice::TableEngine engine{txservice::TableEngine::None};
+        bool enable_engine{false};      // Set by main thread before engine init
+        bool engine_registered{false};  // Set true when engine calls RegisterEngine()
     };
 
     // Core data substrate configuration
@@ -157,13 +168,36 @@ public:
         std::vector<uint16_t> txlog_ports;
     };
 
-    static void Initialize(const std::string &config_file_path);
+    // New singleton access methods
+    static DataSubstrate &Instance();
+    static bool Init(const std::string &config_file_path);
 
-    // Global initialization function
-    static bool InitializeGlobal(const std::string &config_file_path);
+    // Complete initialization by starting all services
+    // Must be called after Init() and all engines have registered
+    // Uses config file path saved during Init()
+    bool Start();
 
-    // Get global DataSubstrate instance
-    static DataSubstrate *GetGlobal();
+    // Register an engine with data substrate
+    // Returns true on success, false on failure (e.g., duplicate registration)
+    bool RegisterEngine(
+        txservice::TableEngine engine_type,
+        txservice::CatalogFactory *factory,
+        txservice::SystemHandler *system_handler,  // Optional, can be nullptr
+        std::vector<std::pair<txservice::TableName, std::string>>
+            &&prebuilt_tables,
+        std::vector<std::tuple<metrics::Name,
+                               metrics::Type,
+                               std::vector<metrics::LabelGroup>>>
+            &&engine_metrics);
+
+    // Called in main thread before starting engine init threads
+    void EnableEngine(txservice::TableEngine engine_type);
+
+    // Wait until all enabled engines have registered (or timeout)
+    bool WaitForEnabledEnginesRegistered(std::chrono::milliseconds timeout);
+
+    // Called by engine threads to wait until DataSubstrate has fully started
+    bool WaitForDataSubstrateStarted(std::chrono::milliseconds timeout);
 
     // Shutdown DataSubstrate instance
     void Shutdown();
@@ -197,10 +231,21 @@ public:
 
     ~DataSubstrate();
 
-    // Constructor (public for static factory method)
+private:
+    // Make constructor private for singleton pattern
     DataSubstrate() = default;
 
-private:
+    DataSubstrate(const DataSubstrate &) = delete;
+    DataSubstrate &operator=(const DataSubstrate &) = delete;
+    DataSubstrate(DataSubstrate &&) = delete;
+    DataSubstrate &operator=(DataSubstrate &&) = delete;
+
+    // Initialization state tracking
+    InitState init_state_ = InitState::NotInitialized;
+
+    // Config file path saved during Init() for use in Start()
+    std::string config_file_path_;
+
     // Private methods that call component initialization files
     bool LoadNetworkConfig(bool is_bootstrap,
                            const INIReader &config_file_reader,
@@ -211,7 +256,6 @@ private:
     bool InitializeLogService(const INIReader &config_file_reader);
     bool InitializeTxService(const INIReader &config_file_reader);
     bool InitializeMetrics(const INIReader &config_file_reader);
-    bool RegisterEngines();
 
     // Configuration storage
     CoreConfig core_config_;
@@ -245,6 +289,14 @@ private:
     EngineConfig engines_[NUM_EXTERNAL_ENGINES];
 
     std::unordered_map<txservice::TableName, std::string> prebuilt_tables_;
+
+    // Synchronization for engine registration (Option A: condition_variable)
+    std::condition_variable engine_registration_cv_;
+    std::mutex engine_registration_mutex_;
+
+    // Synchronization for DataSubstrate::Start() completion (engines wait on
+    // this) Uses instance_mutex_ and init_state_ instead of separate mutex/flag
+    std::condition_variable data_substrate_started_cv_;
 };
 
 // Helper function to check if a gflag was set from command line
