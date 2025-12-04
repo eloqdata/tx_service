@@ -2505,9 +2505,6 @@ public:
         CcEntry<KeyT, ValueT, false, false> *cce =
             static_cast<CcEntry<KeyT, ValueT, false, false> *>(entry);
         LruPage *ccp = cce->GetCcPage();
-        LOG(INFO) << "BackFill, status: " << int(status)
-                  << ", commit ts: " << commit_ts
-                  << ", key: " << cce->KeyString();
 
         cce->GetKeyGapLockAndExtraData()->ReleasePin();
         cce->RecycleKeyLock(*shard_);
