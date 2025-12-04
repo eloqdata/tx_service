@@ -226,7 +226,8 @@ void Checkpointer::Ckpt(bool is_last_ckpt)
         }
 
         LOG_IF(INFO, FLAGS_report_ckpt)
-            << "Begin checkpoint with timestamp: " << ckpt_ts
+            << "Begin checkpoint of node group #" << node_group
+            << " with timestamp: " << ckpt_ts
             << ". The memory usage of node is: " << mem_usage << " KB.";
 
         // Get table names in this node group, checkpointer should be TableName
