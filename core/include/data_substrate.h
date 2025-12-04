@@ -119,8 +119,9 @@ public:
     {
         txservice::CatalogFactory *catalog_factory{nullptr};
         txservice::TableEngine engine{txservice::TableEngine::None};
-        bool enable_engine{false};      // Set by main thread before engine init
-        bool engine_registered{false};  // Set true when engine calls RegisterEngine()
+        bool enable_engine{false};  // Set by main thread before engine init
+        bool engine_registered{
+            false};  // Set true when engine calls RegisterEngine()
     };
 
     // Core data substrate configuration
