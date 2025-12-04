@@ -5186,8 +5186,7 @@ public:
         // data sync scan cc for range partitioned table
         assert(RangePartitioned);
 
-        if (req.schema_version_ != 0 &&
-            schema_ts_ != req.schema_version_)
+        if (req.schema_version_ != 0 && schema_ts_ != req.schema_version_)
         {
             assert(req.schema_version_ > schema_ts_);
             LOG(WARNING) << "Table schema version mismatched for data sync "
@@ -5735,8 +5734,7 @@ public:
             });
         TX_TRACE_DUMP(&req);
 
-        if (req.schema_version_ != 0 &&
-            schema_ts_ != req.schema_version_)
+        if (req.schema_version_ != 0 && schema_ts_ != req.schema_version_)
         {
             assert(req.schema_version_ > schema_ts_);
             LOG(WARNING) << "Table schema version mismatched for data sync "
@@ -7863,8 +7861,7 @@ public:
                     .append("0");
             });
         TX_TRACE_DUMP(&req);
-        if (req.schema_version_ != 0 &&
-            schema_ts_ != req.schema_version_)
+        if (req.schema_version_ != 0 && schema_ts_ != req.schema_version_)
         {
             assert(req.schema_version_ > schema_ts_);
             LOG(WARNING) << "Table schema version mismatched for data sync "
@@ -8220,8 +8217,7 @@ public:
                     .append("0");
             });
         TX_TRACE_DUMP(&req);
-        if (req.schema_version_ != 0 &&
-            schema_ts_ != req.schema_version_)
+        if (req.schema_version_ != 0 && schema_ts_ != req.schema_version_)
         {
             assert(req.schema_version_ > schema_ts_);
             LOG(WARNING) << "Table schema version mismatched for data sync "

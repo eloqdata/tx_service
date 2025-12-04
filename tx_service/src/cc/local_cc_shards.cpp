@@ -3478,7 +3478,7 @@ void LocalCcShards::DataSyncForRangePartition(
 
         last_sync_ts = is_dirty ? 0 : range_entry->GetLastSyncTs();
     }
-    
+
     if (table_name.IsBase())
     {
         schema_version = table_schema->KeySchema()->SchemaTs();
