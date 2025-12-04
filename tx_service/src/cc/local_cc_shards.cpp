@@ -3357,7 +3357,6 @@ void LocalCcShards::DataSyncForRangePartition(
         // table, only in the case that there is no key schema corresponding to
         // the index table in the current table schema, should use the dirty
         // table schema.
-
         table_schema = catalog_rec.CopySchema();
         if (table_name.Type() == TableType::Secondary ||
             table_name.Type() == TableType::UniqueSecondary)
@@ -3396,7 +3395,6 @@ void LocalCcShards::DataSyncForRangePartition(
                 return;
             }
         }
-        schema_version = table_schema->Version();
 
         // Lock bucket so that bucket cannot be migrated away during data sync.
         uint64_t expected_range_version = data_sync_task->range_version_;
@@ -3479,7 +3477,15 @@ void LocalCcShards::DataSyncForRangePartition(
         assert(store_range);
 
         last_sync_ts = is_dirty ? 0 : range_entry->GetLastSyncTs();
-        schema_version = table_schema->Version();
+    }
+    
+    if (table_name.IsBase())
+    {
+        schema_version = table_schema->KeySchema()->SchemaTs();
+    }
+    else
+    {
+        schema_version = table_schema->IndexKeySchema(table_name)->SchemaTs();
     }
 
     // Scan the delta slice size
