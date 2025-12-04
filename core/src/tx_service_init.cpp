@@ -41,14 +41,6 @@ DEFINE_bool(auto_redirect,
             false,
             "If redirect remote object command to remote node internally");
 
-#ifdef ELOQ_MODULE_ELOQKV
-namespace EloqKV
-{
-extern std::function<void(std::string_view, std::string_view)>
-    eloqkv_publish_func;
-}
-#endif
-
 bool DataSubstrate::InitializeTxService(const INIReader &config_reader)
 {
     uint64_t checkpointer_interval =
@@ -262,13 +254,9 @@ bool DataSubstrate::InitializeTxService(const INIReader &config_reader)
         auto_redirect,                          // auto_redirect
         metrics_registry_.get(),                // metrics_registry
         tx_service_common_labels_,              // common_labels
-        &prebuilt_tables_
-#ifdef ELOQ_MODULE_ELOQKV
-        ,
-        EloqKV::eloqkv_publish_func,
-        external_metrics_
-#endif
-    );
+        &prebuilt_tables_,
+        publish_func_,
+        external_metrics_);
 
     if (core_config_.enable_data_store)
     {

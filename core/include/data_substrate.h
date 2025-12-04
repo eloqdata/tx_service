@@ -189,7 +189,9 @@ public:
         std::vector<std::tuple<metrics::Name,
                                metrics::Type,
                                std::vector<metrics::LabelGroup>>>
-            &&engine_metrics);
+            &&engine_metrics,
+        std::function<void(std::string_view, std::string_view)> publish_func =
+            nullptr);
 
     // Called in main thread before starting engine init threads
     void EnableEngine(txservice::TableEngine engine_type);
@@ -270,6 +272,10 @@ private:
     // TODO(liunyl): system handler is used to refresh auth related cache. In
     // converged db, there should only be one system handler.
     txservice::SystemHandler *system_handler_{nullptr};
+
+    // This is for publish subscribe feature in eloqkv.
+    std::function<void(std::string_view, std::string_view)> publish_func_{
+        nullptr};
 
     // Component instances
     std::unique_ptr<txservice::TxService> tx_service_;

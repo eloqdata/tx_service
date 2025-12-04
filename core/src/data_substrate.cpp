@@ -265,7 +265,8 @@ bool DataSubstrate::RegisterEngine(
     std::vector<std::pair<txservice::TableName, std::string>> &&prebuilt_tables,
     std::vector<std::tuple<metrics::Name,
                            metrics::Type,
-                           std::vector<metrics::LabelGroup>>> &&engine_metrics)
+                           std::vector<metrics::LabelGroup>>> &&engine_metrics,
+    std::function<void(std::string_view, std::string_view)> publish_func)
 {
     // Acquire mutex to protect RegisterEngine() and init_state_ access
     // This is thread-safe as RegisterEngine() may be called from different
@@ -354,6 +355,8 @@ bool DataSubstrate::RegisterEngine(
     {
         instance.external_metrics_.push_back(std::move(metric));
     }
+
+    instance.publish_func_ = publish_func;
 
     LOG(INFO) << "Engine " << static_cast<int>(engine_type)
               << " registered successfully";
