@@ -5187,9 +5187,9 @@ public:
         assert(RangePartitioned);
 
         if (req.schema_version_ != 0 &&
-            KeySchema()->SchemaTs() != req.schema_version_)
+            schema_ts_ != req.schema_version_)
         {
-            assert(req.schema_version_ > KeySchema()->SchemaTs());
+            assert(req.schema_version_ > schema_ts_);
             LOG(WARNING) << "Table schema version mismatched for data sync "
                             "scan, table name: "
                          << req.table_name_->String()
@@ -5736,14 +5736,14 @@ public:
         TX_TRACE_DUMP(&req);
 
         if (req.schema_version_ != 0 &&
-            KeySchema()->SchemaTs() != req.schema_version_)
+            schema_ts_ != req.schema_version_)
         {
-            assert(req.schema_version_ > KeySchema()->SchemaTs());
+            assert(req.schema_version_ > schema_ts_);
             LOG(WARNING) << "Table schema version mismatched for data sync "
                             "scan, table name: "
                          << req.table_name_->String()
                          << " ,scan carried version: " << req.schema_version_
-                         << " ,ccmap version: " << KeySchema()->SchemaTs();
+                         << " ,ccmap version: " << schema_ts_;
             req.SetError(CcErrorCode::REQUESTED_TABLE_SCHEMA_MISMATCH);
             return false;
         }
@@ -7864,14 +7864,14 @@ public:
             });
         TX_TRACE_DUMP(&req);
         if (req.schema_version_ != 0 &&
-            KeySchema()->SchemaTs() != req.schema_version_)
+            schema_ts_ != req.schema_version_)
         {
-            assert(req.schema_version_ > KeySchema()->SchemaTs());
+            assert(req.schema_version_ > schema_ts_);
             LOG(WARNING) << "Table schema version mismatched for data sync "
                             "scan, table name: "
                          << req.table_name_.String()
                          << " ,scan carried version: " << req.schema_version_
-                         << " ,ccmap version: " << KeySchema()->SchemaTs();
+                         << " ,ccmap version: " << schema_ts_;
             req.SetError(CcErrorCode::REQUESTED_TABLE_SCHEMA_MISMATCH);
             return false;
         }
@@ -8221,14 +8221,14 @@ public:
             });
         TX_TRACE_DUMP(&req);
         if (req.schema_version_ != 0 &&
-            KeySchema()->SchemaTs() != req.schema_version_)
+            schema_ts_ != req.schema_version_)
         {
-            assert(req.schema_version_ > KeySchema()->SchemaTs());
+            assert(req.schema_version_ > schema_ts_);
             LOG(WARNING) << "Table schema version mismatched for data sync "
                             "scan, table name: "
                          << req.table_name_.String()
                          << " ,scan carried version: " << req.schema_version_
-                         << " ,ccmap version: " << KeySchema()->SchemaTs();
+                         << " ,ccmap version: " << schema_ts_;
             req.SetError(CcErrorCode::REQUESTED_TABLE_SCHEMA_MISMATCH);
             return false;
         }
