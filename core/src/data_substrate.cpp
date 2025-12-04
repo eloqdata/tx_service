@@ -20,17 +20,18 @@
  *
  */
 
-#include "data_substrate.h"
-
 #include <gflags/gflags.h>
 #include <sys/resource.h>
 
+#include <filesystem>
+#include <iostream>
 #include <mutex>
 
 #include "INIReader.h"
 // clang-format off
 #include "tx_service.h"
 // clang-format on
+#include "data_substrate.h"
 #include "log_server.h"
 #include "sequences/sequences.h"
 #include "store/data_store_handler.h"
@@ -245,7 +246,39 @@ void DataSubstrate::Shutdown()
     if (log_server_ != nullptr)
     {
         LOG(INFO) << "Shutting down the internal logservice.";
+        std::string storage_path = log_server_->GetStoragePath();
+#if defined(LOG_STATE_TYPE_RKDB_ALL)
+        std::string rocksdb_storage_path = log_server_->GetRocksDBStoragePath();
+#endif
         log_server_ = nullptr;
+        if (core_config_.bootstrap)
+        {
+            std::error_code ec;
+#if defined(LOG_STATE_TYPE_RKDB_ALL)
+            // Remove rocksdb storage path for bootstrap mode
+            LOG(INFO) << "Removing rocksdb storage path after bootstrap: "
+                      << rocksdb_storage_path;
+            std::filesystem::remove_all(rocksdb_storage_path, ec);
+            if (ec)
+            {
+                LOG(ERROR) << "Failed to remove rocksdb storage path: "
+                           << ec.message();
+            }
+#endif
+            // Remove log storage path for bootstrap mode
+            LOG(INFO) << "Removing log storage path after bootstrap: "
+                      << storage_path;
+            if (storage_path.find("local://") == 0)
+            {
+                storage_path = storage_path.substr(8);
+            }
+            std::filesystem::remove_all(storage_path, ec);
+            if (ec)
+            {
+                LOG(ERROR) << "Failed to remove log storage path: "
+                           << ec.message();
+            }
+        }
         LOG(INFO) << "Internal logservice shut down.";
     }
 #endif
