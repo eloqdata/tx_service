@@ -750,6 +750,10 @@ bool DataSubstrate::LoadCoreAndNetworkConfig(const INIReader &config_reader)
                                            "true");
     GFLAGS_NAMESPACE::SetCommandLineOption("max_body_size", "536870912");
     GFLAGS_NAMESPACE::SetCommandLineOption("graceful_quit_on_sigterm", "true");
+#ifdef DATA_STORE_TYPE_ELOQDSS_ELOQSTORE
+    GFLAGS_NAMESPACE::SetCommandLineOption(
+        "eloq_store_worker_num", std::to_string(core_config_.core_num).c_str());
+#endif
 
     bool enable_io_uring =
         !CheckCommandLineFlagIsDefault("enable_io_uring")
