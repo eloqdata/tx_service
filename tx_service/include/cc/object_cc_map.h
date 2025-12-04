@@ -1064,7 +1064,6 @@ public:
             exec_rst = cmd->ExecuteOn(object);
             object_deleted = exec_rst == ExecResult::Delete;
             object_modified = object_deleted || exec_rst == ExecResult::Write;
-            LOG(INFO) << "object_deleted: " << object_deleted;
 
             if (object_modified)
             {

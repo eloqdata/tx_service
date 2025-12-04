@@ -6788,8 +6788,9 @@ void TransactionExecution::PostProcess(ObjectCommandOp &obj_cmd_op)
         bool version_changed = false;
         if (lock_acquired == LockType::WriteLock)
         {
-            // If the cce is expired before the command is applyed
-            // Add a retire command before the write command
+            // If the cce is expired before the command is applied or the
+            // command deletes the object, add a retire/delete command
+            // before any normal write command.
             if (ttl_expired || object_deleted)
             {
                 auto retire_command =
@@ -7260,10 +7261,9 @@ void TransactionExecution::PostProcess(MultiObjectCommandOp &obj_cmd_op)
 
                 if (cmd_res.lock_acquired_ == LockType::WriteLock)
                 {
-                    // If the cce is expired before the command is applyed
-                    // Add a retire command before the write command.
-                    // If the cmd will delete the object, just add a delete
-                    // command.
+                    // If the cce is expired before the command is applied, or
+                    // the command deletes the object, add a retire/delete
+                    // command for this key instead of a normal write command.
                     if (cmd_res.ttl_expired_ || cmd_res.object_deleted_)
                     {
                         assert(cmd_res.ttl_ == UINT64_MAX);
