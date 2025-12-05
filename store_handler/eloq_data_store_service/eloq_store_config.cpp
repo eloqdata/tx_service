@@ -41,6 +41,24 @@ DEFINE_uint32(eloq_store_open_files_limit,
 DEFINE_string(eloq_store_cloud_store_path,
               "",
               "EloqStore cloud store path (disable cloud store if empty)");
+DEFINE_string(eloq_store_cloud_provider,
+              "aws",
+              "EloqStore cloud provider implementation.");
+DEFINE_string(eloq_store_cloud_endpoint,
+              "",
+              "Optional override for the EloqStore cloud endpoint URL.");
+DEFINE_string(eloq_store_cloud_region,
+              "us-east-1",
+              "EloqStore cloud provider region.");
+DEFINE_string(eloq_store_cloud_access_key,
+              "minioadmin",
+              "EloqStore cloud provider access key.");
+DEFINE_string(eloq_store_cloud_secret_key,
+              "minioadmin",
+              "EloqStore cloud provider secret key.");
+DEFINE_bool(eloq_store_cloud_verify_ssl,
+            false,
+            "EloqStore cloud provider verify TLS certificates.");
 DEFINE_uint32(eloq_store_cloud_worker_count,
               1,
               "EloqStore cloud worker count.");
@@ -106,9 +124,6 @@ DEFINE_bool(eloq_store_data_append_mode, false, "EloqStore data append mode.");
 DEFINE_bool(eloq_store_enable_compression,
             false,
             "EloqStore enable compression.");
-DEFINE_string(eloq_store_cloud_store_daemon_ports,
-              "5572,5573,5574,5575,5576,5577,5578,5579,5580,5581",
-              "EloqStore cloud store daemon ports or URLs (comma-separated)");
 
 namespace EloqDS
 {
@@ -269,48 +284,44 @@ EloqStoreConfig::EloqStoreConfig(const INIReader &config_reader,
             : config_reader.GetString("store",
                                       "eloq_store_cloud_store_path",
                                       FLAGS_eloq_store_cloud_store_path);
+    eloqstore_configs_.cloud_provider =
+        !CheckCommandLineFlagIsDefault("eloq_store_cloud_provider")
+            ? FLAGS_eloq_store_cloud_provider
+            : config_reader.GetString("store",
+                                      "eloq_store_cloud_provider",
+                                      FLAGS_eloq_store_cloud_provider);
+    eloqstore_configs_.cloud_endpoint =
+        !CheckCommandLineFlagIsDefault("eloq_store_cloud_endpoint")
+            ? FLAGS_eloq_store_cloud_endpoint
+            : config_reader.GetString("store",
+                                      "eloq_store_cloud_endpoint",
+                                      FLAGS_eloq_store_cloud_endpoint);
+    eloqstore_configs_.cloud_region =
+        !CheckCommandLineFlagIsDefault("eloq_store_cloud_region")
+            ? FLAGS_eloq_store_cloud_region
+            : config_reader.GetString("store",
+                                      "eloq_store_cloud_region",
+                                      FLAGS_eloq_store_cloud_region);
+    eloqstore_configs_.cloud_access_key =
+        !CheckCommandLineFlagIsDefault("eloq_store_cloud_access_key")
+            ? FLAGS_eloq_store_cloud_access_key
+            : config_reader.GetString("store",
+                                      "eloq_store_cloud_access_key",
+                                      FLAGS_eloq_store_cloud_access_key);
+    eloqstore_configs_.cloud_secret_key =
+        !CheckCommandLineFlagIsDefault("eloq_store_cloud_secret_key")
+            ? FLAGS_eloq_store_cloud_secret_key
+            : config_reader.GetString("store",
+                                      "eloq_store_cloud_secret_key",
+                                      FLAGS_eloq_store_cloud_secret_key);
+    eloqstore_configs_.cloud_verify_ssl =
+        !CheckCommandLineFlagIsDefault("eloq_store_cloud_verify_ssl")
+            ? FLAGS_eloq_store_cloud_verify_ssl
+            : config_reader.GetBoolean("store",
+                                       "eloq_store_cloud_verify_ssl",
+                                       FLAGS_eloq_store_cloud_verify_ssl);
     LOG_IF(INFO, !eloqstore_configs_.cloud_store_path.empty())
         << "EloqStore cloud store enabled";
-    {
-        std::string daemon_ports =
-            !CheckCommandLineFlagIsDefault(
-                "eloq_store_cloud_store_daemon_ports")
-                ? FLAGS_eloq_store_cloud_store_daemon_ports
-                : config_reader.GetString(
-                      "store",
-                      "eloq_store_cloud_store_daemon_ports",
-                      FLAGS_eloq_store_cloud_store_daemon_ports);
-        if (daemon_ports.empty())
-        {
-            daemon_ports = config_reader.GetString(
-                "store", "cloud_store_daemon_ports", "");
-            if (daemon_ports.empty())
-            {
-                daemon_ports = config_reader.GetString(
-                    "store", "cloud_store_daemon_url", "");
-            }
-        }
-        if (!daemon_ports.empty())
-        {
-            std::vector<std::string> parsed;
-            std::string token;
-            std::stringstream ss(daemon_ports);
-            while (std::getline(ss, token, ','))
-            {
-                size_t begin = token.find_first_not_of(" \t\n\r");
-                if (begin == std::string::npos)
-                {
-                    continue;
-                }
-                size_t end = token.find_last_not_of(" \t\n\r");
-                parsed.emplace_back(token.substr(begin, end - begin + 1));
-            }
-            if (!parsed.empty())
-            {
-                eloqstore_configs_.cloud_store_daemon_ports = std::move(parsed);
-            }
-        }
-    }
     eloqstore_configs_.data_page_restart_interval =
         !CheckCommandLineFlagIsDefault("eloq_store_data_page_restart_interval")
             ? FLAGS_eloq_store_data_page_restart_interval
