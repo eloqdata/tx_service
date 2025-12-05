@@ -29,6 +29,13 @@
 namespace EloqDS
 {
 
+enum class DataStoreFactoryType
+{
+    ROCKSDB_FACTORY = 0,
+    ROCKSDB_CLOUD_FACTORY = 2,
+    ELOQSTORE_FACTORY = 3,
+};
+
 class DataStoreFactory
 {
 public:
@@ -39,6 +46,8 @@ public:
         uint32_t shard_id,
         DataStoreService *data_store_service,
         bool start_db = true) = 0;
+
+    virtual DataStoreFactoryType DataStoreType() const = 0;
 
     /**
      * @brief Get storage path for the data store

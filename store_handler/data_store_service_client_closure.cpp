@@ -815,20 +815,59 @@ void FetchTableRangesCallback(void *data,
         if (items_size < scan_next_closure->BatchSize())
         {
             // Has no more data, notify.
-
-            // When ddl_skip_kv_ is enabled and the range entry is not
-            // physically ready, initializes the original range from negative
-            // infinity to positive infinity.
-            if (range_vec.empty() && fetch_range_cc->EmptyRanges())
+            if (static_cast<uint32_t>(fetch_range_cc->kv_partition_id_) + 1 <
+                client.TotalRangeSlicesKvPartitions())
             {
-                range_vec.emplace_back(
-                    catalog_factory->NegativeInfKey(),
-                    txservice::Sequences::InitialRangePartitionIdOf(
-                        fetch_range_cc->table_name_),
-                    1);
+                fetch_range_cc->AppendTableRanges(std::move(range_vec));
+                fetch_range_cc->kv_partition_id_++;
+                uint32_t data_shard_id = client.GetShardIdByPartitionId(
+                    fetch_range_cc->kv_partition_id_, false);
+                fetch_range_cc->kv_start_key_ =
+                    fetch_range_cc->table_name_.String();
+                fetch_range_cc->kv_end_key_ =
+                    fetch_range_cc->table_name_.String();
+                fetch_range_cc->kv_end_key_.back()++;
+                fetch_range_cc->kv_session_id_.clear();
+                client.ScanNext(kv_range_table_name,
+                                fetch_range_cc->kv_partition_id_,
+                                data_shard_id,
+                                fetch_range_cc->kv_start_key_,
+                                fetch_range_cc->kv_end_key_,
+                                fetch_range_cc->kv_session_id_,
+                                true,
+                                true,
+                                false,
+                                true,
+                                100,
+                                nullptr,
+                                fetch_range_cc,
+                                &FetchTableRangesCallback);
             }
-            fetch_range_cc->AppendTableRanges(std::move(range_vec));
-            fetch_range_cc->SetFinish(0);
+            else
+            {
+                assert(fetch_range_cc->kv_partition_id_ + 1 ==
+                       client.TotalRangeSlicesKvPartitions());
+                // When ddl_skip_kv_ is enabled and the range entry is not
+                // physically ready, initializes the original range from
+                // negative infinity to positive infinity.
+                if (range_vec.empty() && fetch_range_cc->EmptyRanges())
+                {
+                    range_vec.emplace_back(
+                        catalog_factory->NegativeInfKey(),
+                        txservice::Sequences::InitialRangePartitionIdOf(
+                            fetch_range_cc->table_name_),
+                        1);
+                }
+
+                fetch_range_cc->AppendTableRanges(std::move(range_vec));
+                std::sort(fetch_range_cc->ranges_vec_.begin(),
+                          fetch_range_cc->ranges_vec_.end(),
+                          [](const txservice::InitRangeEntry &lhs,
+                             const txservice::InitRangeEntry &rhs)
+                          { return lhs.key_ < rhs.key_; });
+
+                fetch_range_cc->SetFinish(0);
+            }
         }
         else
         {
@@ -936,11 +975,6 @@ void FetchRangeSlicesCallback(void *data,
                                                range_partition_id,
                                                fetch_req->CurrentSegmentId());
 
-                // update kv partition id
-                fetch_req->kv_partition_id_ = client.KvPartitionIdOfRangeSlices(
-                    fetch_req->table_name_,
-                    fetch_req->range_entry_->GetRangeInfo()->PartitionId());
-
                 client.Read(kv_range_slices_table_name,
                             fetch_req->kv_partition_id_,
                             read_closure->ShardId(),
@@ -1039,10 +1073,6 @@ void FetchRangeSlicesCallback(void *data,
             client.UpdateEncodedRangeSliceKey(fetch_req->kv_start_key_,
                                               fetch_req->CurrentSegmentId());
 
-            // update kv partition id
-            fetch_req->kv_partition_id_ = client.KvPartitionIdOfRangeSlices(
-                fetch_req->table_name_,
-                fetch_req->range_entry_->GetRangeInfo()->PartitionId());
             client.Read(kv_range_slices_table_name,
                         fetch_req->kv_partition_id_,
                         read_closure->ShardId(),
