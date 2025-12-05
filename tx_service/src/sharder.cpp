@@ -219,9 +219,9 @@ int Sharder::Init(
             uint32_t log_group_count = log_agent_->LogGroupCount();
             if (log_group_count == 0)
             {
-                LOG(WARNING) << "No log groups found after log agent "
-                                "initialization. Log service may not be properly "
-                                "configured.";
+                LOG(WARNING)
+                    << "No log groups found after log agent initialization. "
+                       "Log service may not be properly configured.";
             }
             else
             {
