@@ -57,6 +57,7 @@ struct ScanCache
 {
 public:
     static constexpr size_t ScanBatchSize = 128;
+    static constexpr size_t DefaultCacheMaxBytes = 10 * 1024 * 1024;
 
     // Approximate meta data size in storage.
     static constexpr size_t MetaDataSize = 8;
@@ -67,7 +68,7 @@ public:
           capacity_(ScanBatchSize),
           scanner_(scanner),
           mem_size_(0),
-          mem_max_bytes_(0)
+          mem_max_bytes_(DefaultCacheMaxBytes)
     {
     }
 
@@ -78,7 +79,7 @@ public:
           trailing_cnt_(0),
           scanner_(scanner),
           mem_size_(0),
-          mem_max_bytes_(0)
+          mem_max_bytes_(DefaultCacheMaxBytes)
     {
         assert(size_ <= capacity);
     }
@@ -123,7 +124,7 @@ public:
         size_ = 0;
         capacity_ = ScanBatchSize;
         mem_size_ = 0;
-        mem_max_bytes_ = 0;
+        mem_max_bytes_ = DefaultCacheMaxBytes;
         trailing_cnt_ = 0;
     }
 
