@@ -198,6 +198,11 @@ public:
 
     ~DataStoreService();
 
+    DataStoreFactoryType DataStoreType() const
+    {
+        return data_store_factory_->DataStoreType();
+    }
+
     bool StartService(bool create_db_if_missing);
 
     brpc::Server *GetBrpcServer()

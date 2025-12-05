@@ -945,7 +945,7 @@ bool DataStoreServiceClient::UpsertTableStatistics(
 void DataStoreServiceClient::FetchTableRanges(
     txservice::FetchTableRangesCc *fetch_cc)
 {
-    fetch_cc->kv_partition_id_ = KvPartitionIdOf(fetch_cc->table_name_);
+    fetch_cc->kv_partition_id_ = 0;
     uint32_t data_shard_id =
         GetShardIdByPartitionId(fetch_cc->kv_partition_id_, false);
 
@@ -993,7 +993,10 @@ void DataStoreServiceClient::FetchRangeSlices(
         fetch_cc->SetFinish(txservice::CcErrorCode::NG_TERM_CHANGED);
         return;
     }
-    fetch_cc->kv_partition_id_ = KvPartitionIdOf(fetch_cc->table_name_);
+
+    fetch_cc->kv_partition_id_ = KvPartitionIdOfRangeSlices(
+        fetch_cc->table_name_,
+        fetch_cc->range_entry_->GetRangeInfo()->PartitionId());
     uint32_t shard_id =
         GetShardIdByPartitionId(fetch_cc->kv_partition_id_, false);
     // Also use segment_cnt to identify the step is fetch range or fetch slices.
@@ -1529,7 +1532,8 @@ void DataStoreServiceClient::EnqueueRangeMetadataRecord(
 {
     // Compute kv_table_name and kv_partition_id
     std::string kv_table_name = std::string(table_name.StringView());
-    int32_t kv_partition_id = KvPartitionIdOf(table_name);
+    int32_t kv_partition_id =
+        KvPartitionIdOfRangeSlices(table_name, partition_id);
 
     // Encode key and value
     std::string key_str =
@@ -1763,6 +1767,27 @@ bool DataStoreServiceClient::UpdateRangeSlices(
         return false;
     }
 
+    if (DataStoreType() != DataStoreFactoryType::ELOQSTORE_FACTORY)
+    {
+        // persist range slices table
+        SyncCallbackData *flush_slices_callback_data =
+            sync_callback_data_pool_.NextObject();
+        PoolableGuard guard(flush_slices_callback_data);
+        flush_slices_callback_data->Reset();
+        std::vector<std::string> kv_slices_table_names;
+        kv_slices_table_names.emplace_back(kv_range_slices_table_name);
+        FlushData(
+            kv_slices_table_names, flush_slices_callback_data, &SyncCallback);
+        flush_slices_callback_data->Wait();
+        if (flush_slices_callback_data->Result().error_code() !=
+            EloqDS::remote::DataStoreError::NO_ERROR)
+        {
+            LOG(WARNING) << "UpdateRangeSlices: Failed to flush slices. Error: "
+                         << flush_slices_callback_data->Result().error_msg();
+            return false;
+        }
+    }
+
     // 4- Dispatch metadata batches concurrently (batched by table/partition)
     SyncConcurrentRequest *meta_sync_concurrent =
         sync_concurrent_request_pool_.NextObject();
@@ -1790,21 +1815,23 @@ bool DataStoreServiceClient::UpdateRangeSlices(
             << meta_sync_concurrent->result_.error_msg();
         return false;
     }
-
-    // 7- Flush data
-    SyncCallbackData *callback_data = sync_callback_data_pool_.NextObject();
-    PoolableGuard guard(callback_data);
-    callback_data->Reset();
-    std::vector<std::string> kv_range_table_names;
-    kv_range_table_names.emplace_back(kv_range_table_name);
-    FlushData(kv_range_table_names, callback_data, &SyncCallback);
-    callback_data->Wait();
-    if (callback_data->Result().error_code() !=
-        EloqDS::remote::DataStoreError::NO_ERROR)
+    if (DataStoreType() != DataStoreFactoryType::ELOQSTORE_FACTORY)
     {
-        LOG(WARNING) << "UpsertRanges: Failed to flush ranges. Error: "
-                     << callback_data->Result().error_msg();
-        return false;
+        // 7- Flush data
+        SyncCallbackData *callback_data = sync_callback_data_pool_.NextObject();
+        PoolableGuard guard(callback_data);
+        callback_data->Reset();
+        std::vector<std::string> kv_range_table_names;
+        kv_range_table_names.emplace_back(kv_range_table_name);
+        FlushData(kv_range_table_names, callback_data, &SyncCallback);
+        callback_data->Wait();
+        if (callback_data->Result().error_code() !=
+            EloqDS::remote::DataStoreError::NO_ERROR)
+        {
+            LOG(WARNING) << "UpsertRanges: Failed to flush ranges. Error: "
+                         << callback_data->Result().error_msg();
+            return false;
+        }
     }
 
     return true;
@@ -1875,6 +1902,27 @@ bool DataStoreServiceClient::UpdateRangeSlices(
         return false;
     }
 
+    if (DataStoreType() != DataStoreFactoryType::ELOQSTORE_FACTORY)
+    {
+        // persist range slices table
+        SyncCallbackData *flush_slices_callback_data =
+            sync_callback_data_pool_.NextObject();
+        PoolableGuard guard(flush_slices_callback_data);
+        flush_slices_callback_data->Reset();
+        std::vector<std::string> kv_slices_table_names;
+        kv_slices_table_names.emplace_back(kv_range_slices_table_name);
+        FlushData(
+            kv_slices_table_names, flush_slices_callback_data, &SyncCallback);
+        flush_slices_callback_data->Wait();
+        if (flush_slices_callback_data->Result().error_code() !=
+            EloqDS::remote::DataStoreError::NO_ERROR)
+        {
+            LOG(WARNING) << "UpdateRangeSlices: Failed to flush slices. Error: "
+                         << flush_slices_callback_data->Result().error_msg();
+            return false;
+        }
+    }
+
     // 4- Enqueue and dispatch metadata record concurrently
     RangeMetadataAccumulator meta_acc;
     EnqueueRangeMetadataRecord(catalog_factory,
@@ -1910,6 +1958,25 @@ bool DataStoreServiceClient::UpdateRangeSlices(
         LOG(WARNING) << "UpdateRangeSlices: Failed to write range info. Error: "
                      << meta_sync_concurrent->result_.error_msg();
         return false;
+    }
+
+    if (DataStoreType() != DataStoreFactoryType::ELOQSTORE_FACTORY)
+    {
+        // 7- persist range table
+        SyncCallbackData *callback_data = sync_callback_data_pool_.NextObject();
+        PoolableGuard guard(callback_data);
+        callback_data->Reset();
+        std::vector<std::string> kv_range_table_names;
+        kv_range_table_names.emplace_back(kv_range_table_name);
+        FlushData(kv_range_table_names, callback_data, &SyncCallback);
+        callback_data->Wait();
+        if (callback_data->Result().error_code() !=
+            EloqDS::remote::DataStoreError::NO_ERROR)
+        {
+            LOG(WARNING) << "UpsertRanges: Failed to flush ranges. Error: "
+                         << callback_data->Result().error_msg();
+            return false;
+        }
     }
 
     return true;
@@ -2015,6 +2082,27 @@ bool DataStoreServiceClient::UpsertRanges(
         return false;
     }
 
+    if (DataStoreType() != DataStoreFactoryType::ELOQSTORE_FACTORY)
+    {
+        // persist range slices table
+        SyncCallbackData *flush_slices_callback_data =
+            sync_callback_data_pool_.NextObject();
+        PoolableGuard guard(flush_slices_callback_data);
+        flush_slices_callback_data->Reset();
+        std::vector<std::string> kv_slices_table_names;
+        kv_slices_table_names.emplace_back(kv_range_slices_table_name);
+        FlushData(
+            kv_slices_table_names, flush_slices_callback_data, &SyncCallback);
+        flush_slices_callback_data->Wait();
+        if (flush_slices_callback_data->Result().error_code() !=
+            EloqDS::remote::DataStoreError::NO_ERROR)
+        {
+            LOG(WARNING) << "UpdateRangeSlices: Failed to flush slices. Error: "
+                         << flush_slices_callback_data->Result().error_msg();
+            return false;
+        }
+    }
+
     // 4- Dispatch metadata batches concurrently (batched by table/partition)
     SyncConcurrentRequest *meta_sync_concurrent =
         sync_concurrent_request_pool_.NextObject();
@@ -2042,20 +2130,23 @@ bool DataStoreServiceClient::UpsertRanges(
         return false;
     }
 
-    // 7- Flush data
-    SyncCallbackData *callback_data = sync_callback_data_pool_.NextObject();
-    PoolableGuard guard(callback_data);
-    callback_data->Reset();
-    std::vector<std::string> kv_range_table_names;
-    kv_range_table_names.emplace_back(kv_range_table_name);
-    FlushData(kv_range_table_names, callback_data, &SyncCallback);
-    callback_data->Wait();
-    if (callback_data->Result().error_code() !=
-        EloqDS::remote::DataStoreError::NO_ERROR)
+    if (DataStoreType() != DataStoreFactoryType::ELOQSTORE_FACTORY)
     {
-        LOG(WARNING) << "UpsertRanges: Failed to flush ranges. Error: "
-                     << callback_data->Result().error_msg();
-        return false;
+        // 7- Flush data
+        SyncCallbackData *callback_data = sync_callback_data_pool_.NextObject();
+        PoolableGuard guard(callback_data);
+        callback_data->Reset();
+        std::vector<std::string> kv_range_table_names;
+        kv_range_table_names.emplace_back(kv_range_table_name);
+        FlushData(kv_range_table_names, callback_data, &SyncCallback);
+        callback_data->Wait();
+        if (callback_data->Result().error_code() !=
+            EloqDS::remote::DataStoreError::NO_ERROR)
+        {
+            LOG(WARNING) << "UpsertRanges: Failed to flush ranges. Error: "
+                         << callback_data->Result().error_msg();
+            return false;
+        }
     }
 
     return true;
@@ -4414,10 +4505,12 @@ bool DataStoreServiceClient::InitTableRanges(
     const txservice::TableName &table_name, uint64_t version)
 {
     // init_partition_id and kv_partition_id
-    int32_t kv_partition_id = KvPartitionIdOf(table_name);
-    uint32_t data_shard_id = GetShardIdByPartitionId(kv_partition_id, false);
     int32_t init_range_id =
         txservice::Sequences::InitialRangePartitionIdOf(table_name);
+    // init_partition_id and kv_partition_id
+    int32_t kv_partition_id =
+        KvPartitionIdOfRangeSlices(table_name, init_range_id);
+    uint32_t data_shard_id = GetShardIdByPartitionId(kv_partition_id, false);
     auto catalog_factory = GetCatalogFactory(table_name.Engine());
     assert(catalog_factory != nullptr);
 
@@ -4475,9 +4568,8 @@ bool DataStoreServiceClient::DeleteTableRanges(
         sync_concurrent_request_pool_.NextObject();
     PoolableGuard delete_slices_req_guard(delete_slices_sync_concurrent);
     delete_slices_sync_concurrent->Reset();
-    size_t total_range_slices_kv_partitions = TotalRangeSlicesKvPartitions();
-    for (uint32_t kv_partition_id = 0;
-         kv_partition_id < total_range_slices_kv_partitions;
+    ssize_t kv_partition_cnt = TotalRangeSlicesKvPartitions();
+    for (uint32_t kv_partition_id = 0; kv_partition_id < kv_partition_cnt;
          ++kv_partition_id)
     {
         std::unique_lock<bthread::Mutex> lk(
@@ -4522,27 +4614,49 @@ bool DataStoreServiceClient::DeleteTableRanges(
         return false;
     }
 
-    int32_t kv_partition_id = KvPartitionIdOf(table_name);
-    uint32_t data_shard_id = GetShardIdByPartitionId(kv_partition_id, false);
-    // delete all range info from {kv_range_table_name} table
-    SyncCallbackData *sync_callback_data =
-        sync_callback_data_pool_.NextObject();
-    PoolableGuard sync_callback_data_guard(sync_callback_data);
-    sync_callback_data->Reset();
-    DeleteRange(kv_range_table_name,
-                KvPartitionIdOf(table_name),
-                data_shard_id,
-                start_key,
-                end_key,
-                false,
-                sync_callback_data,
-                &SyncCallback);
-    sync_callback_data->Wait();
-    if (sync_callback_data->Result().error_code() !=
+    // Reset callback data
+    delete_slices_sync_concurrent->Reset();
+    assert(delete_slices_sync_concurrent->unfinished_request_cnt_ == 0);
+    for (int32_t kv_partition_id = 0; kv_partition_id < kv_partition_cnt;
+         ++kv_partition_id)
+    {
+        std::unique_lock<bthread::Mutex> lk(
+            delete_slices_sync_concurrent->mux_);
+        while (delete_slices_sync_concurrent->unfinished_request_cnt_ >=
+               SyncConcurrentRequest::max_flying_write_count)
+        {
+            delete_slices_sync_concurrent->cv_.wait(lk);
+        }
+        delete_slices_sync_concurrent->unfinished_request_cnt_++;
+
+        // get shard id
+        uint32_t data_shard_id =
+            GetShardIdByPartitionId(kv_partition_id, false);
+        DeleteRange(kv_range_table_name,
+                    KvPartitionIdOf(table_name),
+                    data_shard_id,
+                    start_key,
+                    end_key,
+                    false,
+                    delete_slices_sync_concurrent,
+                    SyncConcurrentRequestCallback);
+    }
+
+    {
+        std::unique_lock<bthread::Mutex> lk(
+            delete_slices_sync_concurrent->mux_);
+        delete_slices_sync_concurrent->all_request_started_ = true;
+        while (delete_slices_sync_concurrent->unfinished_request_cnt_ != 0)
+        {
+            delete_slices_sync_concurrent->cv_.wait(lk);
+        }
+    }
+
+    if (delete_slices_sync_concurrent->result_.error_code() !=
         EloqDS::remote::DataStoreError::NO_ERROR)
     {
         LOG(ERROR) << "DeleteTableRanges failed, error: "
-                   << sync_callback_data->Result().error_msg();
+                   << delete_slices_sync_concurrent->result_.error_msg();
         return false;
     }
 

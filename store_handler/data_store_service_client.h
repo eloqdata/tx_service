@@ -193,6 +193,11 @@ public:
 
     void ScheduleTimerTasks() override;
 
+    DataStoreFactoryType DataStoreType() const
+    {
+        return data_store_service_->DataStoreType();
+    }
+
     /**
      * @brief flush entries in \@param batch to base table or skindex table
      * in data store, stop and return false if node_group is not longer

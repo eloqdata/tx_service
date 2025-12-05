@@ -71,11 +71,23 @@ struct InitRangeEntry
     {
     }
 
-    InitRangeEntry(InitRangeEntry &&rhs)
+    InitRangeEntry(InitRangeEntry &&rhs) noexcept
         : key_(std::move(rhs.key_)),
           partition_id_(rhs.partition_id_),
           version_ts_(rhs.version_ts_)
     {
+    }
+
+    InitRangeEntry &operator=(InitRangeEntry &&rhs) noexcept
+    {
+        if (this != &rhs)
+        {
+            key_ = std::move(rhs.key_);
+            partition_id_ = rhs.partition_id_;
+            version_ts_ = rhs.version_ts_;
+        }
+
+        return *this;
     }
 
     TxKey key_;
