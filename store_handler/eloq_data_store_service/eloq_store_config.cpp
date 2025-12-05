@@ -51,10 +51,10 @@ DEFINE_string(eloq_store_cloud_region,
               "us-east-1",
               "EloqStore cloud provider region.");
 DEFINE_string(eloq_store_cloud_access_key,
-              "minioadmin",
+              "",
               "EloqStore cloud provider access key.");
 DEFINE_string(eloq_store_cloud_secret_key,
-              "minioadmin",
+              "",
               "EloqStore cloud provider secret key.");
 DEFINE_bool(eloq_store_cloud_verify_ssl,
             false,
