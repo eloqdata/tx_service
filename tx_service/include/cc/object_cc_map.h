@@ -1034,7 +1034,8 @@ public:
                         // like rpop, zrem, add a delete command.
                         auto retire_command =
                             cmd->RetireExpiredTTLObjectCommand();
-                        forward_entry->AddOverWriteCommand(retire_command.get());
+                        forward_entry->AddOverWriteCommand(
+                            retire_command.get());
                     }
                     else
                     {
@@ -1085,7 +1086,8 @@ public:
                         // like rpop, zrem, add a delete command.
                         auto retire_command =
                             cmd->RetireExpiredTTLObjectCommand();
-                        forward_entry->AddOverWriteCommand(retire_command.get());
+                        forward_entry->AddOverWriteCommand(
+                            retire_command.get());
                     }
                     else
                     {
