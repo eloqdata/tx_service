@@ -28,10 +28,12 @@
 #include <mutex>
 
 #include "INIReader.h"
+// clang-format off
+#include "tx_service.h"
+// clang-format on
 #include "log_server.h"
 #include "sequences/sequences.h"
 #include "store/data_store_handler.h"
-#include "tx_service.h"
 
 #ifdef ELOQDS
 #include "eloq_data_store_service/data_store_service.h"
