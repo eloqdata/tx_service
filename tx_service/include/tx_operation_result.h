@@ -445,10 +445,11 @@ struct RemoteScanSliceCache
 {
     // Approximate meta data size in storage.
     static constexpr size_t MetaDataSize = 8;
+    static constexpr size_t DefaultCacheMaxBytes = 10 * 1024 * 1024;
 
     RemoteScanSliceCache(uint16_t shard_cnt)
         : cache_mem_size_(0),
-          mem_max_bytes_(0),
+          mem_max_bytes_(DefaultCacheMaxBytes),
           shard_cnt_(shard_cnt),
           trailing_cnt_(0)
     {
@@ -476,7 +477,7 @@ struct RemoteScanSliceCache
         records_.clear();
         cache_mem_size_ = 0;
         trailing_cnt_ = 0;
-        mem_max_bytes_ = 0;
+        mem_max_bytes_ = DefaultCacheMaxBytes;
         shard_cnt_ = shard_cnt;
         archive_positions_.clear();
         archive_records_.clear();
