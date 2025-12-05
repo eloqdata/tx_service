@@ -217,9 +217,12 @@ int Sharder::Init(
             // initialization to ensure we have current leader info, especially
             // important after cluster restart when leaders may have changed.
             uint32_t log_group_count = log_agent_->LogGroupCount();
+            LOG(INFO) << "Refreshing leader info for " << log_group_count
+                      << " log group(s) after initialization";
             for (uint32_t lg_id = 0; lg_id < log_group_count; ++lg_id)
             {
                 log_agent_->RefreshLeader(lg_id);
+                DLOG(INFO) << "Refreshed leader for log group " << lg_id;
             }
         }
 
