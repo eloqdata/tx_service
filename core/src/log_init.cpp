@@ -106,7 +106,7 @@ bool DataSubstrate::InitializeLogService(const INIReader &config_reader)
             ? FLAGS_txlog_service_list
             : config_reader.GetString(
                   "cluster", "txlog_service_list", FLAGS_txlog_service_list);
-    int txlog_group_replica_num =
+    uint32_t txlog_group_replica_num =
         !CheckCommandLineFlagIsDefault("txlog_group_replica_num")
             ? FLAGS_txlog_group_replica_num
             : config_reader.GetInteger("cluster",
@@ -129,6 +129,7 @@ bool DataSubstrate::InitializeLogService(const INIReader &config_reader)
     log_path.append("/log_service");
     // parse standalone txlog_service_list
     bool is_standalone_txlog_service = false;
+    log_service_config_.txlog_group_replica_num = txlog_group_replica_num;
     std::vector<std::string> &txlog_ips = log_service_config_.txlog_ips;
     std::vector<uint16_t> &txlog_ports = log_service_config_.txlog_ports;
     if (!txlog_service.empty())

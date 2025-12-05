@@ -40,6 +40,7 @@ DEFINE_uint32(range_split_worker_num, 0, "Range split worker number");
 DEFINE_bool(auto_redirect,
             false,
             "If redirect remote object command to remote node internally");
+// DECLARE_uint32(txlog_group_replica_num);
 
 bool DataSubstrate::InitializeTxService(const INIReader &config_reader)
 {
@@ -157,6 +158,13 @@ bool DataSubstrate::InitializeTxService(const INIReader &config_reader)
             : config_reader.GetBoolean(
                   "local", "auto_redirect", FLAGS_auto_redirect);
 
+    // int txlog_group_replica_num =
+    // !CheckCommandLineFlagIsDefault("txlog_group_replica_num")
+    // ? FLAGS_txlog_group_replica_num
+    // : config_reader.GetInteger("cluster",
+    // "txlog_group_replica_num",
+    // FLAGS_txlog_group_replica_num);
+
     bool fork_hm_process = false;
     std::string hm_ip = "";
     std::string hm_bin_path = "";
@@ -235,7 +243,7 @@ bool DataSubstrate::InitializeTxService(const INIReader &config_reader)
     }
 
     auto log_agent = std::make_unique<txservice::EloqLogAgent>(
-        network_config_.node_group_replica_num);
+        log_service_config_.txlog_group_replica_num);
 
     tx_service_ = std::make_unique<txservice::TxService>(
         catalog_factory,
