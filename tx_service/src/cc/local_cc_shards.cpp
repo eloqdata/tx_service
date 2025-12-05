@@ -4647,8 +4647,7 @@ void LocalCcShards::DataSyncForHashPartition(
                        << " flight_tasks: " << data_sync_task->flight_task_cnt_
                        << " record count: " << scan_cc.accumulated_scan_cnt_;
 
-            std::unique_lock<std::shared_mutex> heap_lk(
-                hash_partition_ckpt_heap_mux_);
+            std::unique_lock<std::mutex> heap_lk(hash_partition_ckpt_heap_mux_);
             mi_threadid_t prev_thd =
                 mi_override_thread(hash_partition_main_thread_id_);
             mi_heap_t *prev_heap =
@@ -6188,7 +6187,7 @@ void LocalCcShards::KickoutDataForTest()
 
 void LocalCcShards::ReportHashPartitionCkptHeapUsage()
 {
-    std::shared_lock<std::shared_mutex> heap_lk(hash_partition_ckpt_heap_mux_);
+    std::unique_lock<std::mutex> heap_lk(hash_partition_ckpt_heap_mux_);
     mi_threadid_t prev_thd = mi_override_thread(hash_partition_main_thread_id_);
     mi_heap_t *prev_heap = mi_heap_set_default(hash_partition_ckpt_heap_);
     int64_t allocated, committed;
@@ -6203,7 +6202,6 @@ void LocalCcShards::ReportHashPartitionCkptHeapUsage()
     }
     mi_override_thread(prev_thd);
     mi_heap_set_default(prev_heap);
-    heap_lk.unlock();
 }
 
 bool LocalCcShards::GetNextRangePartitionId(const TableName &tablename,

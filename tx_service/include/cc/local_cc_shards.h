@@ -2419,7 +2419,7 @@ private:
 
     mi_heap_t *hash_partition_ckpt_heap_{nullptr};
     mi_threadid_t hash_partition_main_thread_id_{0};
-    std::shared_mutex hash_partition_ckpt_heap_mux_;
+    std::mutex hash_partition_ckpt_heap_mux_;
 
     friend class LocalCcHandler;
     friend class remote::RemoteCcHandler;
