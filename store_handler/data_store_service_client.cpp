@@ -4633,7 +4633,7 @@ bool DataStoreServiceClient::DeleteTableRanges(
         uint32_t data_shard_id =
             GetShardIdByPartitionId(kv_partition_id, false);
         DeleteRange(kv_range_table_name,
-                    KvPartitionIdOf(table_name),
+                    kv_partition_id,
                     data_shard_id,
                     start_key,
                     end_key,
