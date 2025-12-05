@@ -440,6 +440,9 @@ public:
      */
     bool TableRangesMemoryFull()
     {
+#if defined(USE_JEMALLOC)
+        return false;
+#endif
         if (table_ranges_heap_ != nullptr)
         {
             int64_t allocated, committed;
@@ -460,6 +463,9 @@ public:
      */
     bool HasEnoughTableRangesMemory()
     {
+#if defined(USE_JEMALLOC)
+        return false;
+#endif
         if (table_ranges_heap_ != nullptr)
         {
             size_t target_memory_size = range_slice_memory_limit_ / 10 * 9;
