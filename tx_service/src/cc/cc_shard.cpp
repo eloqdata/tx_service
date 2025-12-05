@@ -50,6 +50,9 @@
 #include "tx_start_ts_collector.h"
 #include "type.h"
 #include "util.h"
+#if defined(WITH_JEMALLOC)
+#include <jemalloc/jemalloc.h>
+#endif
 
 DECLARE_bool(cmd_read_catalog);
 
@@ -2524,6 +2527,18 @@ mi_heap_t *CcShardHeap::SetAsDefaultHeap()
 
 bool CcShardHeap::Full(int64_t *alloc, int64_t *commit) const
 {
+#if defined(WITH_JEMALLOC)
+    // estimate thread memory usage from total process memory
+    size_t total_resident, resident;
+    size_t sz = sizeof(total_resident);
+
+    // Resident memory pages actually held by jemalloc from OS
+    mallctl("stats.resident", &total_resident, &sz, NULL, 0);
+
+    resident = total_resident * 0.9 / cc_shard_->core_cnt_;
+
+    return resident >= static_cast<int64_t>(memory_limit_);
+#endif
     int64_t allocated, committed;
     mi_thread_stats(&allocated, &committed);
     if (alloc != nullptr)
@@ -2550,6 +2565,10 @@ bool CcShardHeap::NeedCleanShard(int64_t &alloc, int64_t &commit) const
 
 bool CcShardHeap::NeedDefragment(int64_t *alloc, int64_t *commit) const
 {
+#if defined(WITH_JEMALLOC)
+    // defragmentation is not supported with jemalloc
+    return false;
+#endif
     int64_t allocated, committed;
     mi_thread_stats(&allocated, &committed);
     if (alloc != nullptr)
