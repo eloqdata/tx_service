@@ -235,7 +235,7 @@ bool DataSubstrate::InitializeTxService(const INIReader &config_reader)
     }
 
     auto log_agent = std::make_unique<txservice::EloqLogAgent>(
-        network_config_.node_group_replica_num);
+        log_service_config_.txlog_group_replica_num);
 
     tx_service_ = std::make_unique<txservice::TxService>(
         catalog_factory,

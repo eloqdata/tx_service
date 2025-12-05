@@ -165,6 +165,7 @@ public:
 
     struct LogServiceConfig
     {
+        uint32_t txlog_group_replica_num;
         std::vector<std::string> txlog_ips;
         std::vector<uint16_t> txlog_ports;
     };
