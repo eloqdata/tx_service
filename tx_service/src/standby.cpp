@@ -50,9 +50,12 @@ void StandbyForwardEntry::AddTxCommand(ApplyCc &cc_req)
     }
 }
 
-void StandbyForwardEntry::AddTxCommand(TxCommand *cmd)
+void StandbyForwardEntry::AddOverWriteCommand(TxCommand *cmd)
 {
+    assert(cmd->IsOverwrite());
     auto &req = Request();
+    req.set_has_overwrite(true);
+    req.clear_cmd_list();
     std::string cmd_str;
     cmd->Serialize(cmd_str);
     req.add_cmd_list(std::move(cmd_str));

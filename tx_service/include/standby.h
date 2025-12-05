@@ -45,7 +45,7 @@ struct StandbyForwardEntry
 
     void AddTxCommand(ApplyCc &cc_req);
 
-    void AddTxCommand(TxCommand *cmd);
+    void AddOverWriteCommand(TxCommand *cmd);
 
     remote::KeyObjectStandbyForwardRequest &Request()
     {

@@ -68,7 +68,8 @@ public:
                           uint32_t forward_key_shard = UINT32_MAX)
     {
         auto [table_it, success] = cmd_set_internal_.try_emplace(table_name);
-        auto &table_cmd_set = table_it->second;
+        std::unordered_map<CcEntryAddr, CmdSetEntry> &table_cmd_set =
+            table_it->second;
 
         auto cce_it = table_cmd_set.find(cce_addr);
         if (cce_it == table_cmd_set.end())

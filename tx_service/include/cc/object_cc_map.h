@@ -130,6 +130,7 @@ public:
         ObjectCommandResult &obj_result = hd_res->Value();
         CcEntryAddr &cce_addr = obj_result.cce_addr_;
         bool &object_modified = obj_result.object_modified_;
+        bool &object_deleted = obj_result.object_deleted_;
         CcEntry<KeyT, ValueT, false, false> *cce = nullptr;
         CcPage<KeyT, ValueT, false, false> *ccp = nullptr;
         const KeyT *look_key = nullptr;
@@ -921,7 +922,7 @@ public:
             {
                 // Forward retire command to standby node to clear the object
                 auto retire_command = cmd->RetireExpiredTTLObjectCommand();
-                forward_entry->AddTxCommand(retire_command.get());
+                forward_entry->AddOverWriteCommand(retire_command.get());
             }
             // Object not exist due to ttl expired,
             // for command on exist object, return early
@@ -1020,13 +1021,26 @@ public:
             // the temporary object.
             ValueT &dirty_object = *dirty_payload;
             exec_rst = cmd->ExecuteOn(dirty_object);
-            object_modified = (exec_rst == ExecResult::Write);
+            object_deleted = exec_rst == ExecResult::Delete;
+            object_modified = object_deleted || exec_rst == ExecResult::Write;
 
             if (object_modified)
             {
                 if (forward_entry)
                 {
-                    forward_entry->AddTxCommand(req);
+                    if (object_deleted)
+                    {
+                        // If the command modifies the object into delete state,
+                        // like rpop, zrem, add a delete command.
+                        auto retire_command =
+                            cmd->RetireExpiredTTLObjectCommand();
+                        forward_entry->AddOverWriteCommand(
+                            retire_command.get());
+                    }
+                    else
+                    {
+                        forward_entry->AddTxCommand(req);
+                    }
                 }
                 CommitCommandOnDirtyPayload(
                     dirty_payload, dirty_payload_status, *cmd);
@@ -1049,7 +1063,8 @@ public:
             assert(cce->payload_.cur_payload_ != nullptr);
             ValueT &object = *cce->payload_.cur_payload_;
             exec_rst = cmd->ExecuteOn(object);
-            object_modified = (exec_rst == ExecResult::Write);
+            object_deleted = exec_rst == ExecResult::Delete;
+            object_modified = object_deleted || exec_rst == ExecResult::Write;
 
             if (object_modified)
             {
@@ -1062,9 +1077,22 @@ public:
                         // the object in case the object is removed from old
                         // node due to ttl expired.
                         auto recover_command = cmd->RecoverTTLObjectCommand();
-                        forward_entry->AddTxCommand(recover_command);
+                        forward_entry->AddOverWriteCommand(recover_command);
                     }
-                    forward_entry->AddTxCommand(req);
+
+                    if (object_deleted)
+                    {
+                        // If the command modifies the object into delete state,
+                        // like rpop, zrem, add a delete command.
+                        auto retire_command =
+                            cmd->RetireExpiredTTLObjectCommand();
+                        forward_entry->AddOverWriteCommand(
+                            retire_command.get());
+                    }
+                    else
+                    {
+                        forward_entry->AddTxCommand(req);
+                    }
                 }
                 if (!req.apply_and_commit_)
                 {
@@ -1977,7 +2005,8 @@ public:
 
         // Must update dirty_commit_ts. Otherwise, this entry may be
         // skipped by checkpointer.
-        commit_ts = cce->CommitTs();
+        // Update dirty_commit_ts with the req.CommitTs().
+        commit_ts = std::max(commit_ts, cce->CommitTs());
         if (commit_ts > last_dirty_commit_ts_)
         {
             last_dirty_commit_ts_ = commit_ts;
