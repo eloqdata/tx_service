@@ -180,6 +180,7 @@ bool DataSubstrate::InitializeStorageHandler(const INIReader &config_reader)
 
 #elif ELOQDS
     NetworkConfig *network_config_ptr = &network_config_;
+#if !defined(DATA_STORE_TYPE_ELOQDSS_ELOQSTORE)
     // if this is bootstrap, we need to get the complete network config,
     // instead of the local node only.
     NetworkConfig full_network_config;
@@ -196,6 +197,7 @@ bool DataSubstrate::InitializeStorageHandler(const INIReader &config_reader)
         }
         network_config_ptr = &full_network_config;
     }
+#endif
 
     bool is_single_node = network_config_ptr->IsSingleNode();
 
@@ -206,6 +208,23 @@ bool DataSubstrate::InitializeStorageHandler(const INIReader &config_reader)
                   "store", "eloq_dss_peer_node", FLAGS_eloq_dss_peer_node);
 
     std::string eloq_dss_data_path = core_config_.data_path + "/eloq_dss";
+    // Normalize to absolute path first
+    if (!std::filesystem::path(eloq_dss_data_path).is_absolute())
+    {
+        try
+        {
+            eloq_dss_data_path =
+                std::filesystem::absolute(eloq_dss_data_path).string();
+            LOG(INFO) << "The absolute path of data store path is: "
+                      << eloq_dss_data_path;
+        }
+        catch (const std::filesystem::filesystem_error &e)
+        {
+            LOG(ERROR) << "Failed to get absolute path for data store path ("
+                       << eloq_dss_data_path << "), error: " << e.what();
+            return false;
+        }
+    }
     if (!std::filesystem::exists(eloq_dss_data_path))
     {
         std::filesystem::create_directories(eloq_dss_data_path);
