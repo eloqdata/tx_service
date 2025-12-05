@@ -213,6 +213,14 @@ int Sharder::Init(
         if (log_agent_ != nullptr)
         {
             log_agent_->Init(txlog_ips_, txlog_ports_, 0);
+            // Refresh leader information for all log groups immediately after
+            // initialization to ensure we have current leader info, especially
+            // important after cluster restart when leaders may have changed.
+            uint32_t log_group_count = log_agent_->LogGroupCount();
+            for (uint32_t lg_id = 0; lg_id < log_group_count; ++lg_id)
+            {
+                log_agent_->RefreshLeader(lg_id);
+            }
         }
 
 #ifdef EXT_TX_PROC_ENABLED
