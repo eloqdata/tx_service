@@ -217,12 +217,24 @@ int Sharder::Init(
             // initialization to ensure we have current leader info, especially
             // important after cluster restart when leaders may have changed.
             uint32_t log_group_count = log_agent_->LogGroupCount();
-            LOG(INFO) << "Refreshing leader info for " << log_group_count
-                      << " log group(s) after initialization";
-            for (uint32_t lg_id = 0; lg_id < log_group_count; ++lg_id)
+            if (log_group_count == 0)
             {
-                log_agent_->RefreshLeader(lg_id);
-                DLOG(INFO) << "Refreshed leader for log group " << lg_id;
+                LOG(WARNING) << "No log groups found after log agent "
+                                "initialization. Log service may not be properly "
+                                "configured.";
+            }
+            else
+            {
+                LOG(INFO) << "Refreshing leader info for " << log_group_count
+                          << " log group(s) after initialization";
+                for (uint32_t lg_id = 0; lg_id < log_group_count; ++lg_id)
+                {
+                    // RefreshLeader is typically a lightweight operation that
+                    // updates internal cache. The log service will handle any
+                    // connection issues gracefully with retries.
+                    log_agent_->RefreshLeader(lg_id);
+                    DLOG(INFO) << "Refreshed leader for log group " << lg_id;
+                }
             }
         }
 
