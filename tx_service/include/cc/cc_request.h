@@ -81,6 +81,9 @@
 #include "tx_service_common.h"
 #include "type.h"
 #include "util.h"
+#if defined(USE_JEMALLOC)
+#include <jemalloc/jemalloc.h>
+#endif
 
 namespace txservice
 {
@@ -7410,6 +7413,15 @@ struct CollectMemStatsCc : public CcRequestBase
         std::lock_guard<std::mutex> lk(mux_);
         finished_ = true;
         cv_.notify_one();
+#if defined(USE_JEMALLOC)
+        // estimate thread memory usage from total process memory
+        size_t total_resident, resident;
+        size_t sz = sizeof(total_resident);
+
+        // Resident memory pages actually held by jemalloc from OS
+        mallctl("stats.resident", &total_resident, &sz, NULL, 0);
+        LOG(INFO) << "CollectMemStatsCc: total_resident " << total_resident;
+#endif
         return false;
     }
 
