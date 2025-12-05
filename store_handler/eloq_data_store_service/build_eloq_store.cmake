@@ -26,6 +26,7 @@ endif()
 find_package(jsoncpp REQUIRED)
 find_package(CURL REQUIRED)
 find_library(ZSTD_LIBRARY zstd)
+find_package(AWSSDK REQUIRED COMPONENTS s3)
 
 find_path(URING_INCLUDE_PATH NAMES liburing.h)
 find_library(URING_LIB NAMES uring)
@@ -111,4 +112,4 @@ add_library(eloqstore STATIC ${ELOQ_STORE_SOURCES} ${INI_SOURCES})
 target_compile_definitions(eloqstore PRIVATE INIReader=EloqStorePrivateINIReader)
 
 target_include_directories(eloqstore PUBLIC ${ELOQ_STORE_INCLUDE})
-target_link_libraries(eloqstore PRIVATE ${URING_LIB} Boost::context glog::glog absl::flat_hash_map jsoncpp_lib ${CURL_LIBRARIES} ${ZSTD_LIBRARY})
+target_link_libraries(eloqstore PRIVATE ${URING_LIB} Boost::context glog::glog absl::flat_hash_map jsoncpp_lib ${CURL_LIBRARIES} ${ZSTD_LIBRARY} ${AWSSDK_LINK_LIBRARIES})
