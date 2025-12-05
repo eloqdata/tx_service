@@ -866,6 +866,16 @@ void FetchTableRangesCallback(void *data,
                              const txservice::InitRangeEntry &rhs)
                           { return lhs.key_ < rhs.key_; });
 
+                LOG(INFO) << "== fetch table ranges start: table name = "
+                          << fetch_range_cc->table_name_.StringView();
+                for (auto &range_entry : fetch_range_cc->ranges_vec_)
+                {
+                    LOG(INFO) << "== range entry key = "
+                              << range_entry.key_.ToString();
+                }
+                LOG(INFO) << "== fetch table ranges stop: table name = "
+                          << fetch_range_cc->table_name_.StringView();
+
                 fetch_range_cc->SetFinish(0);
             }
         }
