@@ -33,6 +33,7 @@
 #include <memory>
 #include <mutex>
 #include <optional>
+#include <random>
 #include <shared_mutex>
 #include <thread>
 #include <tuple>
@@ -2945,6 +2946,247 @@ void LocalCcShards::DataSyncWorker(size_t worker_idx)
     }
 }
 
+void LocalCcShards::PostProcessFlushTaskEntries(
+    std::unordered_map<std::string_view,
+                       std::vector<std::unique_ptr<txservice::FlushTaskEntry>>>
+        &flush_task_entries,
+    DataSyncTask::CkptErrorCode ckpt_err)
+{
+    assert(ckpt_err != DataSyncTask::CkptErrorCode::SCAN_ERROR);
+
+    // collect all tasks that require update slices
+    std::vector<FlushTaskEntry *> pending_update_entries;
+    // cache node group term to avoid multiple calls to TryPinNodeGroupData
+    std::map<NodeGroupId, int64_t> pinned_node_group_terms_;
+
+    for (auto &[table_name, entries] : flush_task_entries)
+    {
+        for (auto &entry : entries)
+        {
+            if (entry->data_sync_task_->table_name_.IsHashPartitioned())
+            {
+                PostProcessHashPartitionDataSyncTask(
+                    std::move(entry->data_sync_task_),
+                    entry->data_sync_txm_,
+                    ckpt_err,
+                    false);
+            }
+            else
+            {
+                auto &task = entry->data_sync_task_;
+
+                // check node group term
+                int64_t ng_term = -1;
+                if (pinned_node_group_terms_.count(task->node_group_id_) > 0)
+                {
+                    ng_term = pinned_node_group_terms_.at(task->node_group_id_);
+                }
+                else
+                {
+                    ng_term = Sharder::Instance().TryPinNodeGroupData(
+                        task->node_group_id_);
+                    pinned_node_group_terms_[task->node_group_id_] = ng_term;
+                }
+
+                auto task_ckpt_err = ckpt_err;
+                if (ng_term != task->node_group_term_)
+                {
+                    LOG(ERROR)
+                        << "PostProcessDataSyncTask: term mismatch ng#"
+                        << task->node_group_id_ << ", leader term: " << ng_term
+                        << ", expected term: " << task->node_group_term_;
+                    task_ckpt_err = DataSyncTask::CkptErrorCode::TERM_MISMATCH;
+                }
+
+                std::unique_lock<bthread::Mutex> flight_task_lk(
+                    task->flight_task_mux_);
+                int64_t flight_task_cnt = --task->flight_task_cnt_;
+
+                if (task->ckpt_err_ == DataSyncTask::CkptErrorCode::NO_ERROR)
+                {
+                    task->ckpt_err_ = task_ckpt_err;
+                }
+
+                task_ckpt_err = task->ckpt_err_;
+                flight_task_lk.unlock();
+
+                // All flush tasks of this datasync task are finished
+                // (flight_task_cnt == 0)
+                if (flight_task_cnt == 0)
+                {
+                    if (task_ckpt_err ==
+                        DataSyncTask::CkptErrorCode::TERM_MISMATCH)
+                    {
+                        if (!task->during_split_range_)
+                        {
+                            // Abort the data sync txm
+                            txservice::AbortTx(entry->data_sync_txm_);
+
+                            PopPendingTask(task->node_group_id_,
+                                           task->node_group_term_,
+                                           task->table_name_,
+                                           task->id_);
+                        }
+                        task->SetError(CcErrorCode::REQUESTED_NODE_NOT_LEADER);
+                        continue;
+                    }
+
+                    if (task_ckpt_err == DataSyncTask::CkptErrorCode::NO_ERROR)
+                    {
+                        pending_update_entries.push_back(entry.get());
+                        continue;
+                    }
+                    else if (task_ckpt_err ==
+                             DataSyncTask::CkptErrorCode::FLUSH_ERROR)
+                    {
+                        assert(task_ckpt_err ==
+                               DataSyncTask::CkptErrorCode::FLUSH_ERROR);
+
+                        TableRangeEntry *range_entry = nullptr;
+                        const TxKey *start_key = nullptr;
+                        const TxKey *end_key = nullptr;
+                        if (!task->during_split_range_)
+                        {
+                            range_entry = const_cast<TableRangeEntry *>(
+                                GetTableRangeEntry(task->table_name_,
+                                                   task->node_group_id_,
+                                                   task->id_));
+                        }
+                        else
+                        {
+                            range_entry = task->range_entry_;
+                            start_key = &task->start_key_;
+                            end_key = &task->end_key_;
+                        }
+                        assert(range_entry);
+                        CcErrorCode err_code = CcErrorCode::DATA_STORE_ERR;
+                        // Reset the post ckpt size if flush failed
+                        UpdateStoreSlice(task->table_name_,
+                                         task->data_sync_ts_,
+                                         range_entry,
+                                         start_key,
+                                         end_key,
+                                         false);
+
+                        if (!task->during_split_range_)
+                        {
+                            // Abort the data sync txm
+                            range_entry->UnPinStoreRange();
+                            txservice::AbortTx(entry->data_sync_txm_);
+
+                            PopPendingTask(task->node_group_id_,
+                                           task->node_group_term_,
+                                           task->table_name_,
+                                           task->id_);
+                        }
+
+                        if (!Sharder::Instance().CheckLeaderTerm(
+                                task->node_group_id_, task->node_group_term_))
+                        {
+                            err_code = CcErrorCode::REQUESTED_NODE_NOT_LEADER;
+                        }
+
+                        task->SetError(err_code);
+                    }
+                    else
+                    {
+                        assert(task_ckpt_err ==
+                               DataSyncTask::CkptErrorCode::PERSIST_KV_ERROR);
+                        if (!task->during_split_range_)
+                        {
+                            // Abort the data sync txm
+                            txservice::AbortTx(entry->data_sync_txm_);
+                        }
+                        task->SetError(CcErrorCode::DATA_STORE_ERR);
+                    }
+                }
+            }
+        }
+    }
+
+    if (!pending_update_entries.empty())
+    {
+        bool success = UpdateStoreSlices(pending_update_entries);
+
+        for (auto &entry : pending_update_entries)
+        {
+            auto &task = entry->data_sync_task_;
+            TableRangeEntry *range_entry = nullptr;
+            const TxKey *start_key = nullptr;
+            const TxKey *end_key = nullptr;
+            if (!task->during_split_range_)
+            {
+                range_entry = const_cast<TableRangeEntry *>(GetTableRangeEntry(
+                    task->table_name_, task->node_group_id_, task->id_));
+            }
+            else
+            {
+                range_entry = task->range_entry_;
+                start_key = &task->start_key_;
+                end_key = &task->end_key_;
+            }
+            assert(range_entry);
+
+            if (success)
+            {
+                if (!task->during_split_range_)
+                {
+                    range_entry->UpdateLastDataSyncTS(task->data_sync_ts_);
+                    range_entry->UnPinStoreRange();
+                    // Commit the data sync txm
+                    txservice::CommitTx(entry->data_sync_txm_);
+                    PopPendingTask(task->node_group_id_,
+                                   task->node_group_term_,
+                                   task->table_name_,
+                                   task->id_);
+                }
+
+                task->SetFinish();
+            }
+            else
+            {
+                CcErrorCode err_code = CcErrorCode::DATA_STORE_ERR;
+                // Reset the post ckpt size if flush failed
+                UpdateStoreSlice(task->table_name_,
+                                 task->data_sync_ts_,
+                                 range_entry,
+                                 start_key,
+                                 end_key,
+                                 false);
+
+                if (!task->during_split_range_)
+                {
+                    // Abort the data sync txm
+                    range_entry->UnPinStoreRange();
+                    txservice::AbortTx(entry->data_sync_txm_);
+
+                    PopPendingTask(task->node_group_id_,
+                                   task->node_group_term_,
+                                   task->table_name_,
+                                   task->id_);
+                }
+
+                if (!Sharder::Instance().CheckLeaderTerm(
+                        task->node_group_id_, task->node_group_term_))
+                {
+                    err_code = CcErrorCode::REQUESTED_NODE_NOT_LEADER;
+                }
+
+                task->SetError(err_code);
+            }
+        }
+    }
+
+    // unpin node group data
+    for (const auto &[node_group, term] : pinned_node_group_terms_)
+    {
+        if (term >= 0)
+        {
+            Sharder::Instance().UnpinNodeGroupData(node_group);
+        }
+    }
+}
+
 void LocalCcShards::PostProcessRangePartitionDataSyncTask(
     std::shared_ptr<DataSyncTask> task,
     TransactionExecution *data_sync_txm,
@@ -3267,10 +3509,9 @@ void LocalCcShards::DataSyncForRangePartition(
                 CcErrorCode::REQUESTED_NODE_NOT_LEADER);
         }
 
-        defer_unpin = std::move(std::shared_ptr<void>(
+        defer_unpin = std::shared_ptr<void>(
             nullptr,
-            [ng_id](void *)
-            { Sharder::Instance().UnpinNodeGroupData(ng_id); }));
+            [ng_id](void *) { Sharder::Instance().UnpinNodeGroupData(ng_id); });
 
         // Process this task.
         // 1. Get a new txm and init
@@ -3529,6 +3770,7 @@ void LocalCcShards::DataSyncForRangePartition(
         data_sync_worker_ctx_.cv_.notify_one();
         return;
     }
+
     for (size_t i = 0; i < cc_shards_.size(); ++i)
     {
         auto &delta_size = scan_delta_size_cc.SliceDeltaSize(i);
@@ -3749,11 +3991,13 @@ void LocalCcShards::DataSyncForRangePartition(
             {
                 flush_data_size += flush_data_size_per_core;
             }
+
             // This thread will wait in AllocatePendingFlushDataMemQuota if
             // quota is not available
             uint64_t old_usage =
                 data_sync_mem_controller_.AllocateFlushDataMemQuota(
                     flush_data_size);
+
             DLOG(INFO) << "AllocateFlushDataMemQuota old_usage: " << old_usage
                        << " new_usage: " << old_usage + flush_data_size
                        << " quota: "
@@ -5397,7 +5641,6 @@ void LocalCcShards::FlushData(std::unique_lock<std::mutex> &flush_worker_lk)
     }
 
     std::unordered_set<uint16_t> updated_ckpt_ts_core_ids;
-
     // Update cce ckpt ts in memory
     if (succ)
     {
@@ -5484,29 +5727,7 @@ void LocalCcShards::FlushData(std::unique_lock<std::mutex> &flush_worker_lk)
                << " new_usage: " << old_usage - cur_work->pending_flush_size_
                << " quota: " << data_sync_mem_controller_.FlushMemoryQuota();
 
-    for (auto &[table_name, entries] : flush_task_entries)
-    {
-        for (auto &entry : entries)
-        {
-            if (entry->data_sync_task_->table_name_.IsHashPartitioned())
-            {
-                PostProcessHashPartitionDataSyncTask(
-                    std::move(entry->data_sync_task_),
-                    entry->data_sync_txm_,
-                    ckpt_err,
-                    false);
-            }
-            else
-            {
-                PostProcessRangePartitionDataSyncTask(
-                    std::move(entry->data_sync_task_),
-                    entry->data_sync_txm_,
-                    ckpt_err,
-                    false);
-            }
-        }
-    }
-
+    PostProcessFlushTaskEntries(flush_task_entries, ckpt_err);
     flush_worker_lk.lock();
 }
 
@@ -5614,6 +5835,57 @@ void LocalCcShards::RangeSplitWorker()
     {
         SplitFlushRange(range_split_worker_lk);
     }
+}
+
+bool LocalCcShards::UpdateStoreSlices(
+    std::vector<FlushTaskEntry *> &flush_tasks)
+{
+    std::vector<UpdateRangeSlicesReq> update_range_slice_reqs;
+
+    for (auto &flush_task : flush_tasks)
+    {
+        auto &task = flush_task->data_sync_task_;
+        TableRangeEntry *range_entry = nullptr;
+        const TxKey *start_key = nullptr;
+        const TxKey *end_key = nullptr;
+        if (!task->during_split_range_)
+        {
+            range_entry = const_cast<TableRangeEntry *>(GetTableRangeEntry(
+                task->table_name_, task->node_group_id_, task->id_));
+        }
+        else
+        {
+            range_entry = task->range_entry_;
+            start_key = &task->start_key_;
+            end_key = &task->end_key_;
+        }
+
+        StoreRange *range = range_entry->RangeSlices();
+        // Update in-memory slice size
+        bool range_updated =
+            range->UpdateSliceSizeAfterFlush(start_key, end_key, true);
+
+        // Update data store slice size
+        // start_key != nullptr, means that it is during split range, and for
+        // this case, this job will be done in the split range operation.
+        if (start_key == nullptr && range_updated)
+        {
+            update_range_slice_reqs.emplace_back(&task->table_name_,
+                                                 task->data_sync_ts_,
+                                                 range->RangeStartTxKey(),
+                                                 range->Slices(),
+                                                 range->PartitionId(),
+                                                 range_entry->Version());
+        }
+    }
+
+    if (!update_range_slice_reqs.empty())
+    {
+        bool success = store_hd_->UpdateRangeSlices(update_range_slice_reqs);
+        return success;
+    }
+
+    return true;
 }
 
 bool LocalCcShards::UpdateStoreSlice(const TableName &table_name,

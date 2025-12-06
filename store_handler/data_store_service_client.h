@@ -65,6 +65,7 @@ struct RangeSliceBatchPlan
     uint32_t segment_cnt;
     std::vector<std::string> segment_keys;     // Owned string buffers
     std::vector<std::string> segment_records;  // Owned string buffers
+    size_t version;
 
     // Clear method for reuse
     void Clear()
@@ -72,6 +73,7 @@ struct RangeSliceBatchPlan
         segment_cnt = 0;
         segment_keys.clear();
         segment_records.clear();
+        version = 0;
     }
 };
 
@@ -191,6 +193,11 @@ public:
 
     void ScheduleTimerTasks() override;
 
+    DataStoreFactoryType DataStoreType() const
+    {
+        return data_store_service_->DataStoreType();
+    }
+
     /**
      * @brief flush entries in \@param batch to base table or skindex table
      * in data store, stop and return false if node_group is not longer
@@ -305,6 +312,9 @@ public:
         const txservice::KVCatalogInfo *kv_info,
         uint32_t range_partition_id,
         txservice::FillStoreSliceCc *load_slice_req) override;
+
+    bool UpdateRangeSlices(const std::vector<txservice::UpdateRangeSlicesReq>
+                               &update_range_slice_reqs) override;
 
     bool UpdateRangeSlices(const txservice::TableName &table_name,
                            uint64_t version,
@@ -599,7 +609,6 @@ private:
     void DispatchRangeSliceBatches(
         std::string_view kv_table_name,
         int32_t kv_partition_id,
-        uint64_t version,
         const std::vector<RangeSliceBatchPlan> &plans,
         SyncConcurrentRequest *sync_concurrent);
 
@@ -706,6 +715,20 @@ private:
         std::string_view sv = table.StringView();
         auto hash_code = std::hash<std::string_view>()(sv);
         return txservice::Sharder::MapKeyHashToHashPartitionId(hash_code);
+    }
+
+    int32_t KvPartitionIdOfRangeSlices(const txservice::TableName &table,
+                                       int32_t range_id) const
+    {
+        size_t h1 = std::hash<std::string_view>()(table.StringView());
+        size_t h2 = std::hash<int32_t>()(range_id);
+        size_t hash_code = h1 ^ (h2 + 0x9e3779b9 + (h1 << 6) + (h1 >> 2));
+        return hash_code % TotalRangeSlicesKvPartitions();
+    }
+
+    size_t TotalRangeSlicesKvPartitions() const
+    {
+        return 32;
     }
 
     int32_t KvPartitionIdOf(int32_t key_partition,

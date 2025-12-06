@@ -87,6 +87,11 @@ public:
         return ds;
     }
 
+    DataStoreFactoryType DataStoreType() const override
+    {
+        return DataStoreFactoryType::ROCKSDB_CLOUD_FACTORY;
+    }
+
     std::string GetStoragePath() const override
     {
         return config_.storage_path_;

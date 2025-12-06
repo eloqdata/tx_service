@@ -5243,6 +5243,7 @@ public:
             [this, &req, &pause_key_and_is_drained, &next_slice_func](
                 const KeyT &search_key) -> std::pair<RangeSliceId, bool>
         {
+            size_t prefetch_size = 32;
             bool succ = false;
             RangeSliceOpStatus pin_status;
             RangeSliceId slice_id = shard_->local_shards_.PinRangeSlice(
@@ -5260,10 +5261,10 @@ public:
                 shard_,
                 pin_status,
                 true,
-                32,
+                prefetch_size,
                 false,
                 false,
-                !req.export_base_table_item_,
+                req.export_base_table_item_,
                 next_slice_func);
 
             switch (pin_status)
