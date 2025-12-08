@@ -897,7 +897,8 @@ void CcShard::CheckRecoverTx(TxNumber lock_holding_txn,
                         // unknown result. In this case the modified data cces
                         // will have orphan locks. But this won't leave any read
                         // locks as orphaned locks.
-                        DLOG(INFO) << "read lock detected in tx " << lock_holding_txn << ", skip recovery";
+                        DLOG(INFO) << "read lock detected in tx "
+                                   << lock_holding_txn << ", skip recovery";
                         return;
                     }
                     auto [it, is_insert] =

@@ -31,6 +31,7 @@
 #include <mutex>
 #include <string>
 #include <unordered_set>
+#include <utility>
 
 #include "sharder.h"
 #include "tx_execution.h"
@@ -855,9 +856,15 @@ void CcStreamSender::ConnectStreams()
                             // re-enqueue messages from i+1 to msg_cnt-1
                             // (message at i was already enqueued in
                             // SendMessageToNode)
-                            size_t left_msg_cnt = msg_cnt - i - 1;
-                            message_list_it->second.try_enqueue_bulk(
-                                messages + i + 1, left_msg_cnt);
+                            for (size_t left_idx = i + 1; left_idx < msg_cnt;
+                                 ++left_idx)
+                            {
+                                if (messages[left_idx])
+                                {
+                                    message_list_it->second.enqueue(
+                                        std::move(messages[left_idx]));
+                                }
+                            }
                             break;
                         }
                     }
@@ -908,9 +915,15 @@ void CcStreamSender::ConnectStreams()
                             // re-enqueue messages from i+1 to msg_cnt-1
                             // (message at i was already enqueued in
                             // SendMessageToNode)
-                            size_t left_msg_cnt = msg_cnt - i - 1;
-                            message_list_it->second.try_enqueue_bulk(
-                                messages + i + 1, left_msg_cnt);
+                            for (size_t left_idx = i + 1; left_idx < msg_cnt;
+                                 ++left_idx)
+                            {
+                                if (messages[left_idx])
+                                {
+                                    message_list_it->second.enqueue(
+                                        std::move(messages[left_idx]));
+                                }
+                            }
                             break;
                         }
                     }
