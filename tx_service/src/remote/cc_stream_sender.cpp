@@ -159,7 +159,8 @@ bool CcStreamSender::SendMessageToNode(uint32_t dest_node_id,
                                        CcHandlerResultBase *res,
                                        bool resend,
                                        bool resend_on_eagain,
-                                       bool log_verbose)
+                                       bool log_verbose,
+                                       bool *need_reconnect)
 {
     TX_TRACE_ACTION_WITH_CONTEXT(
         this,
@@ -195,6 +196,10 @@ bool CcStreamSender::SendMessageToNode(uint32_t dest_node_id,
     int64_t stream_ver = stream_version.load(std::memory_order_acquire);
     if (stream_ver == -1)
     {
+        if (need_reconnect != nullptr)
+        {
+            *need_reconnect = true;
+        }
         // resend the message if stream is connecting
         std::lock_guard<std::mutex> lk(to_connect_mux_);
         if (log_verbose)
@@ -365,7 +370,8 @@ bool CcStreamSender::SendMessageToNode(uint32_t dest_node_id,
 
 bool CcStreamSender::SendScanRespToNode(uint32_t dest_node_id,
                                         const ScanSliceResponse &msg,
-                                        bool resend)
+                                        bool resend,
+                                        bool *need_reconnect)
 {
     TX_TRACE_ACTION_WITH_CONTEXT(
         this,
@@ -392,6 +398,10 @@ bool CcStreamSender::SendScanRespToNode(uint32_t dest_node_id,
     int64_t stream_ver = stream_version.load(std::memory_order_acquire);
     if (stream_ver == -1)
     {
+        if (need_reconnect != nullptr)
+        {
+            *need_reconnect = true;
+        }
         // resend the message if stream is connecting
         std::lock_guard<std::mutex> lk(to_connect_mux_);
         DLOG(INFO) << "CC stream is connecting, buffer the message for resend";
@@ -819,8 +829,10 @@ void CcStreamSender::ConnectStreams()
                 LOG(INFO) << "Establish the cc stream to node " << nid;
 
                 // Resend failed messages to the reconnected node.
+                bool need_reconnect = false;
                 auto message_list_it = resend_message_list_.find(nid);
-                while (message_list_it != resend_message_list_.end() &&
+                while (!need_reconnect &&
+                       message_list_it != resend_message_list_.end() &&
                        !message_list_it->second.is_empty())
                 {
                     ResendMessage::Uptr messages[100];
@@ -831,8 +843,23 @@ void CcStreamSender::ConnectStreams()
                     lk.unlock();
                     for (size_t i = 0; i < msg_cnt; ++i)
                     {
-                        SendMessageToNode(
-                            nid, messages[i]->msg_, messages[i]->res_, true);
+                        SendMessageToNode(nid,
+                                          messages[i]->msg_,
+                                          messages[i]->res_,
+                                          true,
+                                          true,
+                                          false,
+                                          &need_reconnect);
+                        if (need_reconnect)
+                        {
+                            // re-enqueue messages from i+1 to msg_cnt-1
+                            // (message at i was already enqueued in
+                            // SendMessageToNode)
+                            size_t left_msg_cnt = msg_cnt - i - 1;
+                            message_list_it->second.try_enqueue_bulk(
+                                messages + i + 1, left_msg_cnt);
+                            break;
+                        }
                     }
                     lk.lock();
                     // Update the message list since the node might be
@@ -860,8 +887,10 @@ void CcStreamSender::ConnectStreams()
             {
                 LOG(INFO) << "Establish the long msg cc stream to node " << nid;
 
+                bool need_reconnect = false;
                 auto message_list_it = long_msg_resend_message_list_.find(nid);
-                while (message_list_it != long_msg_resend_message_list_.end() &&
+                while (!need_reconnect &&
+                       message_list_it != long_msg_resend_message_list_.end() &&
                        !message_list_it->second.is_empty())
                 {
                     ResendScanSliceResp::Uptr messages[100];
@@ -872,7 +901,18 @@ void CcStreamSender::ConnectStreams()
                     lk.unlock();
                     for (size_t i = 0; i < msg_cnt; ++i)
                     {
-                        SendScanRespToNode(nid, messages[i]->msg_, true);
+                        SendScanRespToNode(
+                            nid, messages[i]->msg_, true, &need_reconnect);
+                        if (need_reconnect)
+                        {
+                            // re-enqueue messages from i+1 to msg_cnt-1
+                            // (message at i was already enqueued in
+                            // SendMessageToNode)
+                            size_t left_msg_cnt = msg_cnt - i - 1;
+                            message_list_it->second.try_enqueue_bulk(
+                                messages + i + 1, left_msg_cnt);
+                            break;
+                        }
                     }
                     lk.lock();
                     // Update the message list since the node might be

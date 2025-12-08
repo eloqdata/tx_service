@@ -1002,10 +1002,10 @@ void RocksDBHandler::FetchTableCatalog(
                                                 &pinnable_table_catalog);
             if (!status.ok())
             {
-                fetch_cc->SetFinish(txservice::RecordStatus::Deleted, 0);
                 DLOG(INFO) << "FetchTableCatalog table "
                            << ccm_table_name.String()
                            << " not found in data store.";
+                fetch_cc->SetFinish(txservice::RecordStatus::Deleted, 0);
                 return;
             }
             std::string kv_cf_name;
@@ -1030,9 +1030,9 @@ void RocksDBHandler::FetchTableCatalog(
             std::string &catalog_image = fetch_cc->CatalogImage();
             // catalog image stores only kv_table_name
             catalog_image.append(kv_cf_name);
-            fetch_cc->SetFinish(txservice::RecordStatus::Normal, 0);
             DLOG(INFO) << "FetchTableCatalog catalog_image for table "
                        << ccm_table_name.String() << " is " << catalog_image;
+            fetch_cc->SetFinish(txservice::RecordStatus::Normal, 0);
         });
 }
 
