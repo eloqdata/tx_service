@@ -852,10 +852,12 @@ void CcStreamSender::ConnectStreams()
                                           &need_reconnect);
                         if (need_reconnect)
                         {
-                            // re-enqueue messages from i to msg_cnt-1
-                            size_t left_msg_cnt = msg_cnt - i;
+                            // re-enqueue messages from i+1 to msg_cnt-1
+                            // (message at i was already enqueued in
+                            // SendMessageToNode)
+                            size_t left_msg_cnt = msg_cnt - i - 1;
                             message_list_it->second.try_enqueue_bulk(
-                                messages + i, left_msg_cnt);
+                                messages + i + 1, left_msg_cnt);
                             break;
                         }
                     }
@@ -903,10 +905,12 @@ void CcStreamSender::ConnectStreams()
                             nid, messages[i]->msg_, true, &need_reconnect);
                         if (need_reconnect)
                         {
-                            // re-enqueue messages from i to msg_cnt-1
-                            size_t left_msg_cnt = msg_cnt - i;
+                            // re-enqueue messages from i+1 to msg_cnt-1
+                            // (message at i was already enqueued in
+                            // SendMessageToNode)
+                            size_t left_msg_cnt = msg_cnt - i - 1;
                             message_list_it->second.try_enqueue_bulk(
-                                messages + i, left_msg_cnt);
+                                messages + i + 1, left_msg_cnt);
                             break;
                         }
                     }
