@@ -3528,17 +3528,11 @@ public:
             scan_cache = static_cast<TemplateScanCache<KeyT, ValueT> *>(
                 req.GetLocalScanCache(core_id));
             assert(scan_cache != nullptr);
-            scan_cache->SetCacheMaxBytes(
-                StoreSlice::slice_upper_bound *
-                (1 + req.PrefetchSize() / shard_->core_cnt_));
         }
         else
         {
             remote_scan_cache = req.GetRemoteScanCache(core_id);
             assert(remote_scan_cache != nullptr);
-            remote_scan_cache->SetCacheMaxBytes(
-                StoreSlice::slice_upper_bound *
-                (1 + req.PrefetchSize() / shard_->core_cnt_) * 125 / 100);
         }
 
         auto is_cache_full = [&req, scan_cache, remote_scan_cache] {
@@ -3584,8 +3578,8 @@ public:
             // is dispatched to other cores to scan in parallel. The slice is
             // unpinned by the last core finishing the scan batch.
             RangeSliceOpStatus pin_status = RangeSliceOpStatus::NotPinned;
-            const StoreSlice *last_pinned_slice;
             uint32_t max_pin_cnt = req.PrefetchSize();
+            const StoreSlice *last_pinned_slice;
 
             RangeSliceId slice_id = shard_->local_shards_.PinRangeSlices(
                 table_name_,

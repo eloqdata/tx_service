@@ -867,7 +867,7 @@ void CcShard::CheckRecoverTx(TxNumber lock_holding_txn,
         if (txn_node_group == Sharder::Instance().NativeNodeGroup() &&
             cc_ng_id == txn_node_group)
         {
-            LOG(WARNING)
+            DLOG(WARNING)
                 << "orphan lock detected, lock holding txn: "
                 << lock_holding_txn
                 << ", txn is initiated by this machine, try to recover";
@@ -882,6 +882,16 @@ void CcShard::CheckRecoverTx(TxNumber lock_holding_txn,
                     NonBlockingLock *lk = lru->GetKeyLock();
                     assert(lk != nullptr);
                     LockType lk_type = lk->SearchLock(lock_holding_txn);
+                    if (lk_type == LockType::ReadLock)
+                    {
+                        // The only case that an orhpahned lock will appear on
+                        // local node is that write log has failed with an
+                        // unknown result. In this case the modified data cces
+                        // will have orphan locks. But this won't leave any read
+                        // locks as orphaned locks.
+                        DLOG(INFO) << "read lock detected in tx " << lock_holding_txn << ", skip recovery";
+                        return;
+                    }
                     auto [it, is_insert] =
                         tbl_set.try_emplace(ccm->table_name_.Trace());
                     it->second.emplace(lk_type);
