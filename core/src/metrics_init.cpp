@@ -59,10 +59,8 @@ bool DataSubstrate::InitializeMetrics(const INIReader &config_reader)
                   << (metrics::enable_tx_metrics ? "ON" : "OFF");
         if (metrics::enable_tx_metrics)
         {
-            metrics::collect_tx_duration_round =
-                config_reader.GetInteger("metrics",
-                                         "collect_tx_duration_round",
-                                         metrics::collect_tx_duration_round);
+            metrics::collect_tx_duration_round = config_reader.GetInteger(
+                "metrics", "collect_tx_duration_round", 100);
             LOG(INFO) << "collect tx duration every "
                       << metrics::collect_tx_duration_round << " round(s)";
         }
