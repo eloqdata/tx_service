@@ -3579,14 +3579,6 @@ public:
             // unpinned by the last core finishing the scan batch.
             RangeSliceOpStatus pin_status = RangeSliceOpStatus::NotPinned;
             uint32_t max_pin_cnt = req.PrefetchSize();
-            uint32_t prefetch_size = max_pin_cnt;
-            if (req_end_key != nullptr)
-            {
-                // If end key is specified, we can prefetch more aggressively since
-                // prefetch/prepin won't go beyond the end key.
-                max_pin_cnt = 256;
-                prefetch_size = 256;
-            }
             const StoreSlice *last_pinned_slice;
 
             RangeSliceId slice_id = shard_->local_shards_.PinRangeSlices(
@@ -3605,7 +3597,7 @@ public:
                 &req,
                 shard_,
                 false,
-                prefetch_size,
+                req.PrefetchSize(),
                 max_pin_cnt,
                 req.Direction() == ScanDirection::Forward,
                 pin_status,

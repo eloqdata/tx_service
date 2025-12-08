@@ -902,7 +902,7 @@ void CcShard::CheckRecoverTx(TxNumber lock_holding_txn,
             {
                 for (LockType lk_type : tbl_lk.second)
                 {
-                    DLOG(INFO)
+                    LOG(INFO)
                         << "Txn #" << lock_holding_txn << " locks "
                         << tbl_lk.first << ", lock type: " << (int) lk_type;
                 }
