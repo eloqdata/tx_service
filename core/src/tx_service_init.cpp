@@ -10,6 +10,9 @@
 #include "tx_service.h"
 DEFINE_int32(checkpointer_interval, 10, "Checkpointer interval in seconds");
 DEFINE_int32(node_memory_limit_mb, 8192, "Node memory limit in MB");
+DEFINE_int32(range_slice_memory_limit_percent,
+             10,
+             "Range slice memory limit percentage");
 DEFINE_int32(checkpointer_delay_seconds, 5, "Checkpointer delay in seconds");
 DEFINE_int32(collect_active_tx_ts_interval_seconds,
              2,
@@ -130,6 +133,13 @@ bool DataSubstrate::InitializeTxService(const INIReader &config_reader)
     }
     FLAGS_node_memory_limit_mb = node_memory_limit_mb;
 
+    uint64_t range_slice_memory_limit_percent =
+        !CheckCommandLineFlagIsDefault("range_slice_memory_limit_percent")
+            ? FLAGS_range_slice_memory_limit_percent
+            : config_reader.GetInteger("local",
+                                       "range_slice_memory_limit_percent",
+                                       FLAGS_range_slice_memory_limit_percent);
+
     uint64_t deadlock_check_interval_seconds =
         !CheckCommandLineFlagIsDefault("deadlock_check_interval_seconds")
             ? FLAGS_deadlock_check_interval_seconds
@@ -224,7 +234,8 @@ bool DataSubstrate::InitializeTxService(const INIReader &config_reader)
          core_config_.enable_heap_defragment ? 1 : 0},
         {"enable_key_cache", enable_key_cache},
         {"max_standby_lag", max_standby_lag},
-        {"kickout_data_for_test", kickout_data_for_test ? 1 : 0}};
+        {"kickout_data_for_test", kickout_data_for_test ? 1 : 0},
+        {"range_slice_memory_limit_percent", range_slice_memory_limit_percent}};
 
     txservice::CatalogFactory *catalog_factory[NUM_EXTERNAL_ENGINES] = {
         nullptr, nullptr, nullptr};
