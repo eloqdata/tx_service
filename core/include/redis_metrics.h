@@ -43,7 +43,7 @@ inline const Name NAME_REDIS_COMMAND_AGGREGATED_DURATION{
 
 inline const Name NAME_REDIS_SLOW_LOG_LEN{"redis_slow_log_len"};
 
-inline size_t collect_redis_command_duration_round{0};
+inline size_t collect_redis_command_duration_round{100};
 inline std::unique_ptr<Meter> redis_meter{nullptr};
 
 inline void register_redis_metrics(MetricsRegistry *metrics_registry,
