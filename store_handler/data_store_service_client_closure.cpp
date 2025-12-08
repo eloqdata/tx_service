@@ -870,34 +870,7 @@ void FetchTableRangesCallback(void *data,
                 fetch_range_cc->AppendTableRanges(
                     fetch_range_cc->kv_partition_id_, std::move(range_vec));
 
-                LOG(INFO) << "== fetch table ranges start: table name = "
-                          << fetch_range_cc->table_name_.StringView();
-                for (auto &range_entrys : fetch_range_cc->partition_ranges_vec_)
-                {
-                    for (auto &range_entry : range_entrys)
-                    {
-                        LOG(INFO) << "== range entry key = "
-                                  << range_entry.key_.ToString()
-                                  << ", range entry key = "
-                                  << std::string(range_entry.key_.Data(),
-                                                 range_entry.key_.Size());
-                    }
-                }
-                LOG(INFO) << "== fetch table ranges stop: table name = "
-                          << fetch_range_cc->table_name_.StringView();
-
                 fetch_range_cc->Merge();
-
-                LOG(INFO) << "== table name = "
-                          << fetch_range_cc->table_name_.StringView()
-                          << ", sorted = "
-                          << std::is_sorted(
-                                 fetch_range_cc->ranges_vec_.begin(),
-                                 fetch_range_cc->ranges_vec_.end(),
-                                 [](const txservice::InitRangeEntry &a,
-                                    const txservice::InitRangeEntry &b)
-                                 { return a.key_ < b.key_; });
-
                 fetch_range_cc->SetFinish(0);
             }
         }
@@ -946,10 +919,6 @@ void FetchRangeSlicesCallback(void *data,
         // step-1: fetched range info.
         if (result.error_code() == remote::DataStoreError::KEY_NOT_FOUND)
         {
-            LOG(INFO) << "== FetchRangeSlices callback: shard id = "
-                      << read_closure->ShardId()
-                      << ", kv partition id = " << fetch_req->kv_partition_id_
-                      << "< tbl name = " << fetch_req->table_name_.StringView();
             // Failed to read range info.
             assert(false);
             // This should only happen if ddl_skip_kv_ is true.

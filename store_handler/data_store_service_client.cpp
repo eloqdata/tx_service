@@ -1015,14 +1015,6 @@ void DataStoreServiceClient::FetchRangeSlices(
     fetch_cc->kv_start_key_ =
         EncodeRangeKey(catalog_factory, fetch_cc->table_name_, start_key);
 
-    LOG(INFO) << "== FetchRangeSlices: kv partition id = "
-              << fetch_cc->kv_partition_id_
-              << ", tbl name = " << fetch_cc->table_name_.StringView()
-              << ", kv start key = " << fetch_cc->kv_start_key_
-              << ",start key = " << start_key.ToString() << ", start key = "
-              << std::string(start_key.Data(), start_key.Size())
-              << ", shard size = " << GetAllDataShards().size();
-
     Read(kv_range_table_name,
          fetch_cc->kv_partition_id_,
          shard_id,
@@ -1558,11 +1550,6 @@ void DataStoreServiceClient::EnqueueRangeMetadataRecord(
         EncodeRangeKey(catalog_factory, table_name, range_start_key);
     std::string rec_str =
         EncodeRangeValue(partition_id, range_version, version, segment_cnt);
-
-    LOG(INFO) << "== EnqueueRangeMeta: table name = " << table_name.StringView()
-              << ", start key = " << range_start_key.ToString()
-              << ", kv key = " << key_str << ", range start key = "
-              << std::string(range_start_key.Data(), range_start_key.Size());
 
     // Get or create entry in accumulator
     auto key = std::make_pair(kv_table_name, kv_partition_id);
