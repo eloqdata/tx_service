@@ -998,6 +998,7 @@ void RocksDBDataStoreCommon::ScanNext(ScanRequest *scan_req)
                     }
                 }
 
+                LOG(INFO) << "== rocksdb scannext: key = " << key;
                 scan_req->AddItem(
                     std::string(key), std::move(rec), rec_ts, rec_ttl);
                 if (scan_forward)
@@ -1239,6 +1240,8 @@ bool RocksDBDataStoreCommon::DeserializeKey(const char *data,
     }
 
     key_out = std::string_view(data + prefix_size, size - prefix_size);
+    LOG(INFO) << "== full key = " << std::string(data, size)
+              << ", key out = " << key_out;
     return true;
 }
 

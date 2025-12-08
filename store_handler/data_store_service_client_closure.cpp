@@ -43,6 +43,7 @@ static const std::string_view kv_table_statistics_version_name(
     "table_statistics_version");
 static const std::string_view kv_database_catalogs_name("db_catalogs");
 static const std::string_view kv_mvcc_archive_name("mvcc_archives");
+static const std::string_view KEY_SEPARATOR("\\");
 
 void SyncCallback(void *data,
                   ::google::protobuf::Closure *closure,
@@ -781,8 +782,9 @@ void FetchTableRangesCallback(void *data,
             uint64_t slice_version = *(reinterpret_cast<const uint64_t *>(buf));
             buf += sizeof(slice_version);
 
-            std::string_view start_key_sv(key.data() + table_name_sv.size(),
-                                          key.size() - table_name_sv.size());
+            std::string_view start_key_sv(
+                key.data() + (table_name_sv.size() + KEY_SEPARATOR.size()),
+                key.size() - table_name_sv.size() - KEY_SEPARATOR.size());
 
             // If the key is 0x00, it means that the key is NegativeInfinity.
             // (see EloqKey::PackedNegativeInfinity)
@@ -818,14 +820,18 @@ void FetchTableRangesCallback(void *data,
             if (static_cast<uint32_t>(fetch_range_cc->kv_partition_id_) + 1 <
                 client.TotalRangeSlicesKvPartitions())
             {
-                fetch_range_cc->AppendTableRanges(std::move(range_vec));
+                fetch_range_cc->AppendTableRanges(
+                    fetch_range_cc->kv_partition_id_, std::move(range_vec));
+
                 fetch_range_cc->kv_partition_id_++;
                 uint32_t data_shard_id = client.GetShardIdByPartitionId(
                     fetch_range_cc->kv_partition_id_, false);
-                fetch_range_cc->kv_start_key_ =
-                    fetch_range_cc->table_name_.String();
-                fetch_range_cc->kv_end_key_ =
-                    fetch_range_cc->table_name_.String();
+
+                fetch_range_cc->kv_start_key_.clear();
+                fetch_range_cc->kv_start_key_.append(
+                    fetch_range_cc->table_name_.StringView());
+                fetch_range_cc->kv_start_key_.append(KEY_SEPARATOR);
+                fetch_range_cc->kv_end_key_ = fetch_range_cc->kv_start_key_;
                 fetch_range_cc->kv_end_key_.back()++;
                 fetch_range_cc->kv_session_id_.clear();
                 client.ScanNext(kv_range_table_name,
@@ -845,8 +851,10 @@ void FetchTableRangesCallback(void *data,
             }
             else
             {
-                assert(fetch_range_cc->kv_partition_id_ + 1 ==
+                assert(static_cast<size_t>(fetch_range_cc->kv_partition_id_) +
+                           1 ==
                        client.TotalRangeSlicesKvPartitions());
+
                 // When ddl_skip_kv_ is enabled and the range entry is not
                 // physically ready, initializes the original range from
                 // negative infinity to positive infinity.
@@ -859,22 +867,36 @@ void FetchTableRangesCallback(void *data,
                         1);
                 }
 
-                fetch_range_cc->AppendTableRanges(std::move(range_vec));
-                std::sort(fetch_range_cc->ranges_vec_.begin(),
-                          fetch_range_cc->ranges_vec_.end(),
-                          [](const txservice::InitRangeEntry &lhs,
-                             const txservice::InitRangeEntry &rhs)
-                          { return lhs.key_ < rhs.key_; });
+                fetch_range_cc->AppendTableRanges(
+                    fetch_range_cc->kv_partition_id_, std::move(range_vec));
 
                 LOG(INFO) << "== fetch table ranges start: table name = "
                           << fetch_range_cc->table_name_.StringView();
-                for (auto &range_entry : fetch_range_cc->ranges_vec_)
+                for (auto &range_entrys : fetch_range_cc->partition_ranges_vec_)
                 {
-                    LOG(INFO) << "== range entry key = "
-                              << range_entry.key_.ToString();
+                    for (auto &range_entry : range_entrys)
+                    {
+                        LOG(INFO) << "== range entry key = "
+                                  << range_entry.key_.ToString()
+                                  << ", range entry key = "
+                                  << std::string(range_entry.key_.Data(),
+                                                 range_entry.key_.Size());
+                    }
                 }
                 LOG(INFO) << "== fetch table ranges stop: table name = "
                           << fetch_range_cc->table_name_.StringView();
+
+                fetch_range_cc->Merge();
+
+                LOG(INFO) << "== table name = "
+                          << fetch_range_cc->table_name_.StringView()
+                          << ", sorted = "
+                          << std::is_sorted(
+                                 fetch_range_cc->ranges_vec_.begin(),
+                                 fetch_range_cc->ranges_vec_.end(),
+                                 [](const txservice::InitRangeEntry &a,
+                                    const txservice::InitRangeEntry &b)
+                                 { return a.key_ < b.key_; });
 
                 fetch_range_cc->SetFinish(0);
             }
@@ -885,7 +907,8 @@ void FetchTableRangesCallback(void *data,
             fetch_range_cc->kv_session_id_ = scan_next_closure->SessionId();
             fetch_range_cc->kv_start_key_.clear();
             fetch_range_cc->kv_start_key_.append(key);
-            fetch_range_cc->AppendTableRanges(std::move(range_vec));
+            fetch_range_cc->AppendTableRanges(fetch_range_cc->kv_partition_id_,
+                                              std::move(range_vec));
 
             client.ScanNext(kv_range_table_name,
                             fetch_range_cc->kv_partition_id_,
@@ -923,6 +946,10 @@ void FetchRangeSlicesCallback(void *data,
         // step-1: fetched range info.
         if (result.error_code() == remote::DataStoreError::KEY_NOT_FOUND)
         {
+            LOG(INFO) << "== FetchRangeSlices callback: shard id = "
+                      << read_closure->ShardId()
+                      << ", kv partition id = " << fetch_req->kv_partition_id_
+                      << "< tbl name = " << fetch_req->table_name_.StringView();
             // Failed to read range info.
             assert(false);
             // This should only happen if ddl_skip_kv_ is true.

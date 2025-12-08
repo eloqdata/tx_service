@@ -949,10 +949,15 @@ void DataStoreServiceClient::FetchTableRanges(
     uint32_t data_shard_id =
         GetShardIdByPartitionId(fetch_cc->kv_partition_id_, false);
 
-    fetch_cc->kv_start_key_ = fetch_cc->table_name_.String();
-    fetch_cc->kv_end_key_ = fetch_cc->table_name_.String();
+    fetch_cc->kv_start_key_.reserve(fetch_cc->table_name_.StringView().size() +
+                                    KEY_SEPARATOR.size());
+    fetch_cc->kv_start_key_.append(fetch_cc->table_name_.StringView());
+    fetch_cc->kv_start_key_.append(KEY_SEPARATOR);
+    fetch_cc->kv_end_key_ = fetch_cc->kv_start_key_;
     fetch_cc->kv_end_key_.back()++;
     fetch_cc->kv_session_id_.clear();
+
+    fetch_cc->partition_ranges_vec_.resize(TotalRangeSlicesKvPartitions());
 
     ScanNext(kv_range_table_name,
              fetch_cc->kv_partition_id_,
@@ -1009,6 +1014,14 @@ void DataStoreServiceClient::FetchRangeSlices(
     assert(catalog_factory != nullptr);
     fetch_cc->kv_start_key_ =
         EncodeRangeKey(catalog_factory, fetch_cc->table_name_, start_key);
+
+    LOG(INFO) << "== FetchRangeSlices: kv partition id = "
+              << fetch_cc->kv_partition_id_
+              << ", tbl name = " << fetch_cc->table_name_.StringView()
+              << ", kv start key = " << fetch_cc->kv_start_key_
+              << ",start key = " << start_key.ToString() << ", start key = "
+              << std::string(start_key.Data(), start_key.Size())
+              << ", shard size = " << GetAllDataShards().size();
 
     Read(kv_range_table_name,
          fetch_cc->kv_partition_id_,
@@ -1205,8 +1218,10 @@ std::string DataStoreServiceClient::EncodeRangeKey(
 {
     std::string key;
     auto table_sv = table_name.StringView();
-    key.reserve(table_sv.size() + range_start_key.Size());
+    key.reserve(table_sv.size() + range_start_key.Size() +
+                KEY_SEPARATOR.size());
     key.append(table_sv);
+    key.append(KEY_SEPARATOR);
     if (range_start_key.Type() == txservice::KeyType::NegativeInf)
     {
         const txservice::TxKey *packed_neginf =
@@ -1274,12 +1289,15 @@ std::string DataStoreServiceClient::EncodeRangeSliceKey(
 {
     std::string key;
     auto table_sv = table_name.StringView();
-    key.reserve(table_sv.size() + sizeof(range_id) + sizeof(segment_id));
+    key.reserve(table_sv.size() + sizeof(range_id) + sizeof(segment_id) +
+                (2 * KEY_SEPARATOR.size()));
     key.append(table_sv);
+    key.append(KEY_SEPARATOR);
     // Due to all read operations of range slices are point reads not scan,
     // we just small endian encoding value of range_id and segment_id instead of
     // big endian encoding.
     key.append(reinterpret_cast<const char *>(&range_id), sizeof(range_id));
+    key.append(KEY_SEPARATOR);
     key.append(reinterpret_cast<const char *>(&segment_id), sizeof(segment_id));
     return key;
 }
@@ -1540,6 +1558,11 @@ void DataStoreServiceClient::EnqueueRangeMetadataRecord(
         EncodeRangeKey(catalog_factory, table_name, range_start_key);
     std::string rec_str =
         EncodeRangeValue(partition_id, range_version, version, segment_cnt);
+
+    LOG(INFO) << "== EnqueueRangeMeta: table name = " << table_name.StringView()
+              << ", start key = " << range_start_key.ToString()
+              << ", kv key = " << key_str << ", range start key = "
+              << std::string(range_start_key.Data(), range_start_key.Size());
 
     // Get or create entry in accumulator
     auto key = std::make_pair(kv_table_name, kv_partition_id);
@@ -4560,7 +4583,11 @@ bool DataStoreServiceClient::InitTableRanges(
 bool DataStoreServiceClient::DeleteTableRanges(
     const txservice::TableName &table_name)
 {
-    std::string start_key = table_name.String();
+    std::string start_key;
+    start_key.reserve(table_name.StringView().size() + KEY_SEPARATOR.size());
+    start_key.append(table_name.StringView());
+    start_key.append(KEY_SEPARATOR);
+
     std::string end_key = start_key;
     end_key.back()++;
 

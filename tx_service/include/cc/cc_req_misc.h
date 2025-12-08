@@ -215,16 +215,19 @@ public:
                        int64_t cc_ng_term);
 
     bool Execute(CcShard &ccs) override;
-    void AppendTableRanges(std::vector<InitRangeEntry> &&ranges);
-    void AppendTableRange(InitRangeEntry &&range);
+    void AppendTableRanges(int32_t kv_part_id,
+                           std::vector<InitRangeEntry> &&ranges);
+    void AppendTableRange(int32_t kv_part_id, InitRangeEntry &&range);
 
     bool EmptyRanges() const;
     void SetFinish(int err);
+    void Merge();
 
 public:
     const TableName table_name_;
     int error_code_{0};
     std::vector<InitRangeEntry> ranges_vec_;
+    std::vector<std::vector<InitRangeEntry>> partition_ranges_vec_;
 
     // These variables only be used in DataStoreHandler
     std::string kv_start_key_;
