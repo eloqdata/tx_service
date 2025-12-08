@@ -1657,7 +1657,16 @@ void CcNodeService::StandbyStartFollowing(
     }
 
     auto subscribe_id = Sharder::Instance().GetNextSubscribeId();
+    std::string start_seq_ids;
+    for (auto &seq_id : response->start_sequence_id())
+    {
+        start_seq_ids.append(std::to_string(seq_id)).append(", ");
+    }
 
+    LOG(INFO) << "‼️‼️‼️‼️StandByStartFollowing"
+
+              << ", subscribe_id: " << subscribe_id
+              << ", start_seq_id: " << start_seq_ids;
     response->set_subscribe_id(subscribe_id);
     response->set_error(false);
 }
@@ -1748,9 +1757,13 @@ void CcNodeService::RequestStorageSnapshotSync(
     int64_t standby_node_term = request->standby_node_term();
     int64_t primary_leader_term = PrimaryTermFromStandbyTerm(standby_node_term);
 
+    LOG(INFO) << "RequestStorageSnapshotSync of standby term: "
+              << standby_node_term
+              << ", primary leader term: " << primary_leader_term;
     if (!Sharder::Instance().CheckLeaderTerm(request->ng_id(),
                                              primary_leader_term))
     {
+        LOG(INFO) << "LeaderTermCheck failure";
         response->set_error(true);
         return;
     }
@@ -1768,6 +1781,7 @@ void CcNodeService::RequestStorageSnapshotSync(
     // has been flushed to kvstore. (standby nodes begin fetch record from
     // kvstore on cache miss).
     store::SnapshotManager::Instance().OnSnapshotSyncRequested(request);
+    LOG(INFO) << "RequestStorageSnapshotSync OnSnapshotSyncRequested done, return RPC";
     response->set_error(false);
 }
 

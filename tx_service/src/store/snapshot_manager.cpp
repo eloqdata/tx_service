@@ -229,6 +229,8 @@ void SnapshotManager::SyncWithStandby()
         {
             succ = store_hd_->SendSnapshotToRemote(
                 req.ng_id(), req_primary_term, snapshot_files, remote_dest);
+            LOG(INFO) << "SendSnapshotToRemote, success: " << succ
+                      << ", remotedest: " << remote_dest;
         }
 
         if (succ)
@@ -388,6 +390,8 @@ bool SnapshotManager::RunOneRoundCheckpoint(uint32_t node_group,
         task_sender_lk,
         [&data_sync_status]
         { return data_sync_status->unfinished_tasks_ == 0; });
+    LOG(INFO) << "data_sync_status, err_code: "
+              << int(data_sync_status->err_code_);
 
     DLOG_IF(WARNING, data_sync_status->err_code_ != CcErrorCode::NO_ERROR)
         << "SyncWithStandby for node_group: " << node_group

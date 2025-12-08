@@ -3541,7 +3541,8 @@ public:
                 (1 + req.PrefetchSize() / shard_->core_cnt_) * 125 / 100);
         }
 
-        auto is_cache_full = [&req, scan_cache, remote_scan_cache] {
+        auto is_cache_full = [&req, scan_cache, remote_scan_cache]
+        {
             return req.IsLocal() ? scan_cache->IsFull()
                                  : remote_scan_cache->IsFull();
         };
@@ -5867,6 +5868,17 @@ public:
             if (ccp->last_dirty_commit_ts_ <= req.previous_ckpt_ts_ &&
                 !req.include_persisted_data_)
             {
+                LOG(INFO) << "DataSyncScan skipping ccp: " << ccp
+                          << ", last_dirty_commit_ts_: "
+                          << ccp->last_dirty_commit_ts_
+                          << ", req.previous_ckpt_ts_: "
+                          << req.previous_ckpt_ts_
+                          << ", req.data_sync_ts_: " << req.data_sync_ts_
+                          << ", req.include_persisted_data_: "
+                          << req.include_persisted_data_
+                          << "\nKey range in page: ["
+                          << ccp->FirstKey().ToString() << ", "
+                          << ccp->LastKey().ToString() << "]";
                 // Skip the pages that have no updates since last data
                 // sync.
                 if (ccp->next_page_ == PagePosInf())
@@ -5933,10 +5945,11 @@ public:
                         // The fetch record may failed when the
                         // cce is touch at 1st place, so the record status can
                         // be Unknown. If the data is owned by this ng, fetch
-                        // the record, otherwise only skip this record for now
-                        // and don't truncate redo log.
+                        // the record, othetemrwise only skip this record for
+                        // now and don't truncate redo log.
                         if (cce->PayloadStatus() == RecordStatus::Unknown)
                         {
+                            LOG(ERROR) << "cce->Payload status unknown";
                             uint16_t bucket_id =
                                 Sharder::Instance().MapKeyHashToBucketId(
                                     key_hash);
@@ -5944,6 +5957,7 @@ public:
                                     cc_ng_id_ &&
                                 current_term > 0)
                             {
+                                LOG(INFO) << "FetchRecord";
                                 cce->GetOrCreateKeyLock(shard_, this, ccp);
                                 TxKey tx_key(key);
                                 int32_t part_id =

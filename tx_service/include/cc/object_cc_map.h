@@ -957,6 +957,12 @@ public:
                         forward_entry->Request().set_schema_version(schema_ts_);
                         std::unique_ptr<StandbyForwardEntry> entry_ptr =
                             cce->ReleaseForwardEntry();
+                        LOG(INFO)
+                            << "ForwardStandbyMessage in ApplyCc ttl expired, "
+                               "key: "
+                            << cce->KeyString() << ", commit ts: " << commit_ts
+                            << ", command: " << typeid(*cmd).name();
+
                         shard_->ForwardStandbyMessage(entry_ptr.release());
                     }
                     cce->SetCommitTsPayloadStatus(commit_ts,
@@ -1187,6 +1193,8 @@ public:
                 // lock.
                 assert(acquired_lock == LockType::WriteLock);
                 RecordStatus status = cce->PayloadStatus();
+                RecordStatus old_status = status;
+                uint64_t old_commit_ts = cce->CommitTs();
                 if (dirty_payload_status == RecordStatus::Normal ||
                     dirty_payload_status == RecordStatus::Deleted)
                 {
@@ -1223,6 +1231,21 @@ public:
                     forward_entry->Request().set_schema_version(schema_ts_);
                     std::unique_ptr<StandbyForwardEntry> entry_ptr =
                         cce->ReleaseForwardEntry();
+
+                    LOG(INFO)
+                        << "ForwardStandbyMessage in ApplyCc "
+                           "apply_and_commit_, key: "
+                        << cce->KeyString() << ", commit ts: " << commit_ts
+                        << ", command: " << typeid(*cmd).name()
+                        << ", old status: " << int(old_status)
+                        << ", old commit ts: " << old_commit_ts
+                        << ", new status: " << int(status)
+                        << ", forward req has_overwrite: "
+                        << forward_req->has_overwrite();
+                    if (old_status == RecordStatus::Deleted)
+                    {
+                        assert(forward_req->has_overwrite());
+                    }
                     shard_->ForwardStandbyMessage(entry_ptr.release());
                 }
 
@@ -1424,6 +1447,9 @@ public:
                 forward_entry->Request().set_schema_version(schema_ts_);
                 std::unique_ptr<StandbyForwardEntry> entry_ptr =
                     cce->ReleaseForwardEntry();
+                LOG(INFO) << "ForwardStandbyMessage in PostWriteCc, key: "
+                          << cce->KeyString() << ", commit ts: " << commit_ts
+                          << ", commands: " << entry_ptr->OutputCommands();
                 shard_->ForwardStandbyMessage(entry_ptr.release());
             }
             cce->SetCommitTsPayloadStatus(commit_ts, payload_status);
@@ -1835,15 +1861,18 @@ public:
 
     bool Execute(KeyObjectStandbyForwardCc &req) override
     {
+        LOG(INFO) << "KeyObjectStandbyForwardCc: " << req.CommitTs();
         uint64_t schema_version = req.SchemaVersion();
         if (schema_version < schema_ts_)
         {
             // Discard message since it expired.
+            LOG(INFO) << "Discard message since it expired.";
             return req.SetFinish(*shard_);
         }
         else if (schema_version > schema_ts_)
         {
             // Wait for DDL operation clearring this ccm.
+            LOG(INFO) << "Wait for DDL operation clearring this ccm.";
             shard_->EnqueueWaitListIfSchemaMismatch(&req);
             return false;
         }
@@ -1874,15 +1903,23 @@ public:
         assert(cce);
         ccp = it.GetPage();
 
+        LOG(INFO) << "core: " << shard_->core_id_
+                  << " KeyObjectStandbyForwardCc operates on key: "
+                  << look_key->ToString()
+                  << ", req commit ts: " << req.CommitTs();
         if (commit_ts <= cce->CommitTs())
         {
             // Discard message since cce has a newer version.
+            DLOG(INFO) << "Discard KeyObjectStandbyForwardCc on key: "
+                       << look_key->ToString() << ", commit ts: " << commit_ts
+                       << ", cce commit ts: " << cce->CommitTs();
             return req.SetFinish(*shard_);
         }
         else
         {
             if (cce->PayloadStatus() == RecordStatus::Unknown)
             {
+                LOG(INFO) << "cce->PayloadStatus() == RecordStatus::Unknown";
                 if (!has_overwrite && obj_version != 1 &&
                     !ccm_has_full_entries_)
                 {
@@ -1893,6 +1930,8 @@ public:
                         cce->GetOrCreateKeyLock(shard_, this, ccp);
                         int32_t part_id = Sharder::MapKeyHashToHashPartitionId(
                             look_key->Hash());
+                        LOG(INFO)
+                            << "KeyObjectStandbyForwardCc, FetchRecord...";
                         shard_->FetchRecord(table_name_,
                                             table_schema_,
                                             TxKey(look_key),
@@ -2464,6 +2503,10 @@ public:
                     forward_entry->Request().set_schema_version(schema_ts_);
                     std::unique_ptr<StandbyForwardEntry> entry_ptr =
                         cce->ReleaseForwardEntry();
+                    LOG(INFO)
+                        << "ForwardStandbyMessage in ReplayLogCc, key: "
+                        << cce->KeyString() << ", commit ts: " << commit_ts
+                        << ", commands: " << entry_ptr->OutputCommands();
                     shard_->ForwardStandbyMessage(entry_ptr.release());
                 }
 
@@ -2524,6 +2567,9 @@ public:
         // second ReplayLogCc has_overwrite and overrides the cce.
         if (cce->PayloadStatus() == RecordStatus::Unknown)
         {
+            LOG(INFO) << "Backfill, cce: " << cce->KeyString()
+                      << ", commit ts: " << commit_ts
+                      << ", status: " << int(status);
             cce->SetCommitTsPayloadStatus(commit_ts, status);
             cce->SetCkptTs(commit_ts);
             DLOG(INFO) << "BackFill key: " << cce->KeyString()

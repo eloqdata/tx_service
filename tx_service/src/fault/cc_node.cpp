@@ -1072,7 +1072,14 @@ void CcNode::SubscribePrimaryNode(uint32_t leader_node_id,
         reset_req.add_seq_grp(i);
     }
 
+    std::string start_seq_ids;
+    for (auto &seq_id : start_follow_resp.start_sequence_id())
+    {
+        start_seq_ids.append(std::to_string(seq_id)).append(", ");
+    }
+
     cntl.Reset();
+    LOG(INFO) << "ResetStandbySequenceId, seq id: " << start_seq_ids;
     stub->ResetStandbySequenceId(&cntl, &reset_req, &reset_resp, nullptr);
 
     // Check rpc result
@@ -1144,12 +1151,16 @@ void CcNode::SubscribePrimaryNode(uint32_t leader_node_id,
         snapshot_req.set_user(username);
         cntl.Reset();
         cntl.set_timeout_ms(10000);
+        LOG(INFO) << "RequestStorageSnapshotSync...standby_node_term: "
+                  << standby_term;
         stub->RequestStorageSnapshotSync(
             &cntl, &snapshot_req, &snapshot_resp, nullptr);
+        LOG(INFO) << "cntl fail: " << cntl.Failed();
         if (snapshot_resp.error())
         {
             LOG(ERROR) << "snapshot sync failed";
         }
+        LOG(INFO) << "RequestStorageSnapshotSync success";
     }
 }
 

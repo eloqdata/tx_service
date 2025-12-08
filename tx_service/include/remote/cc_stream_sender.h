@@ -88,7 +88,8 @@ public:
                            CcHandlerResultBase *res = nullptr,
                            bool resend = false,
                            bool resend_on_eagain = true,
-                           bool log_verbose = false);
+                           bool log_verbose = false,
+                           bool *stream_connecting = nullptr);
     bool SendScanRespToNode(uint32_t dest_node_id,
                             const ScanSliceResponse &msg,
                             bool resend = false);

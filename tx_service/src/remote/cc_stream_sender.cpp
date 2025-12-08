@@ -159,8 +159,13 @@ bool CcStreamSender::SendMessageToNode(uint32_t dest_node_id,
                                        CcHandlerResultBase *res,
                                        bool resend,
                                        bool resend_on_eagain,
-                                       bool log_verbose)
+                                       bool log_verbose,
+                                       bool *stream_connecting)
 {
+    if (stream_connecting != nullptr)
+    {
+        *stream_connecting = false;
+    }
     TX_TRACE_ACTION_WITH_CONTEXT(
         this,
         &msg,
@@ -195,6 +200,10 @@ bool CcStreamSender::SendMessageToNode(uint32_t dest_node_id,
     int64_t stream_ver = stream_version.load(std::memory_order_acquire);
     if (stream_ver == -1)
     {
+        if (stream_connecting != nullptr)
+        {
+            *stream_connecting = true;
+        }
         // resend the message if stream is connecting
         std::lock_guard<std::mutex> lk(to_connect_mux_);
         if (log_verbose)
@@ -829,12 +838,43 @@ void CcStreamSender::ConnectStreams()
 
                     // release lock before resend queued messages.
                     lk.unlock();
+                    bool reconnecting_stream = false;
+                    size_t requeue_start = msg_cnt;
                     for (size_t i = 0; i < msg_cnt; ++i)
                     {
-                        SendMessageToNode(
-                            nid, messages[i]->msg_, messages[i]->res_, true);
+                        bool stream_connecting = false;
+                        SendMessageToNode(nid,
+                                          messages[i]->msg_,
+                                          messages[i]->res_,
+                                          true,
+                                          true,
+                                          false,
+                                          &stream_connecting);
+                        if (stream_connecting)
+                        {
+                            reconnecting_stream = true;
+                            requeue_start = i + 1;
+                            break;
+                        }
                     }
                     lk.lock();
+                    if (reconnecting_stream)
+                    {
+                        auto queue_it = resend_message_list_.find(nid);
+                        if (queue_it != resend_message_list_.end())
+                        {
+                            for (size_t idx = requeue_start; idx < msg_cnt;
+                                 ++idx)
+                            {
+                                if (messages[idx] != nullptr)
+                                {
+                                    queue_it->second.enqueue(
+                                        std::move(messages[idx]));
+                                }
+                            }
+                        }
+                        break;
+                    }
                     // Update the message list since the node might be
                     // removed when sending the mssages.
                     message_list_it = resend_message_list_.find(nid);
