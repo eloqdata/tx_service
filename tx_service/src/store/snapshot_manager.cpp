@@ -202,8 +202,11 @@ void SnapshotManager::SyncWithStandby()
             }
             tasks.emplace_back(std::move(pending_task));
 
-            // Don't erase pending_req_
-            // it = pending_req_.erase(it);
+            // Keep the request entry so completion logic can check whether it
+            // needs to stay queued, but make sure to advance the iterator so we
+            // don't loop on the
+            // same element indefinitely.
+            it++;
         }
     }
 
