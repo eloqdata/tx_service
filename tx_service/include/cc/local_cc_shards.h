@@ -1849,6 +1849,13 @@ private:
         DataSyncTask::CkptErrorCode ckpt_err,
         bool is_scan_task = true);
 
+    void PostProcessFlushTaskEntries(
+        std::unordered_map<
+            std::string_view,
+            std::vector<std::unique_ptr<txservice::FlushTaskEntry>>>
+            &flush_task_entries,
+        DataSyncTask::CkptErrorCode ckpt_err);
+
     const uint32_t node_id_;
     // Native node group
     const NodeGroupId ng_id_;
@@ -2329,6 +2336,8 @@ private:
                           const TxKey *start_key,
                           const TxKey *end_key,
                           bool flush_res);
+
+    bool UpdateStoreSlices(std::vector<FlushTaskEntry *> &task);
 
     bool GetNextRangePartitionId(const TableName &tablename,
                                  const TableSchema *table_schema,

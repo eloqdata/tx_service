@@ -43,6 +43,7 @@ static const std::string_view kv_table_statistics_version_name(
     "table_statistics_version");
 static const std::string_view kv_database_catalogs_name("db_catalogs");
 static const std::string_view kv_mvcc_archive_name("mvcc_archives");
+static const std::string_view KEY_SEPARATOR("\\");
 
 void SyncCallback(void *data,
                   ::google::protobuf::Closure *closure,
@@ -781,8 +782,9 @@ void FetchTableRangesCallback(void *data,
             uint64_t slice_version = *(reinterpret_cast<const uint64_t *>(buf));
             buf += sizeof(slice_version);
 
-            std::string_view start_key_sv(key.data() + table_name_sv.size(),
-                                          key.size() - table_name_sv.size());
+            std::string_view start_key_sv(
+                key.data() + (table_name_sv.size() + KEY_SEPARATOR.size()),
+                key.size() - table_name_sv.size() - KEY_SEPARATOR.size());
 
             // If the key is 0x00, it means that the key is NegativeInfinity.
             // (see EloqKey::PackedNegativeInfinity)
@@ -815,20 +817,62 @@ void FetchTableRangesCallback(void *data,
         if (items_size < scan_next_closure->BatchSize())
         {
             // Has no more data, notify.
-
-            // When ddl_skip_kv_ is enabled and the range entry is not
-            // physically ready, initializes the original range from negative
-            // infinity to positive infinity.
-            if (range_vec.empty() && fetch_range_cc->EmptyRanges())
+            if (static_cast<uint32_t>(fetch_range_cc->kv_partition_id_) + 1 <
+                client.TotalRangeSlicesKvPartitions())
             {
-                range_vec.emplace_back(
-                    catalog_factory->NegativeInfKey(),
-                    txservice::Sequences::InitialRangePartitionIdOf(
-                        fetch_range_cc->table_name_),
-                    1);
+                fetch_range_cc->AppendTableRanges(
+                    fetch_range_cc->kv_partition_id_, std::move(range_vec));
+
+                fetch_range_cc->kv_partition_id_++;
+                uint32_t data_shard_id = client.GetShardIdByPartitionId(
+                    fetch_range_cc->kv_partition_id_, false);
+
+                fetch_range_cc->kv_start_key_.clear();
+                fetch_range_cc->kv_start_key_.append(
+                    fetch_range_cc->table_name_.StringView());
+                fetch_range_cc->kv_start_key_.append(KEY_SEPARATOR);
+                fetch_range_cc->kv_end_key_ = fetch_range_cc->kv_start_key_;
+                fetch_range_cc->kv_end_key_.back()++;
+                fetch_range_cc->kv_session_id_.clear();
+                client.ScanNext(kv_range_table_name,
+                                fetch_range_cc->kv_partition_id_,
+                                data_shard_id,
+                                fetch_range_cc->kv_start_key_,
+                                fetch_range_cc->kv_end_key_,
+                                fetch_range_cc->kv_session_id_,
+                                true,
+                                true,
+                                false,
+                                true,
+                                100,
+                                nullptr,
+                                fetch_range_cc,
+                                &FetchTableRangesCallback);
             }
-            fetch_range_cc->AppendTableRanges(std::move(range_vec));
-            fetch_range_cc->SetFinish(0);
+            else
+            {
+                assert(static_cast<size_t>(fetch_range_cc->kv_partition_id_) +
+                           1 ==
+                       client.TotalRangeSlicesKvPartitions());
+
+                // When ddl_skip_kv_ is enabled and the range entry is not
+                // physically ready, initializes the original range from
+                // negative infinity to positive infinity.
+                if (range_vec.empty() && fetch_range_cc->EmptyRanges())
+                {
+                    range_vec.emplace_back(
+                        catalog_factory->NegativeInfKey(),
+                        txservice::Sequences::InitialRangePartitionIdOf(
+                            fetch_range_cc->table_name_),
+                        1);
+                }
+
+                fetch_range_cc->AppendTableRanges(
+                    fetch_range_cc->kv_partition_id_, std::move(range_vec));
+
+                fetch_range_cc->Merge();
+                fetch_range_cc->SetFinish(0);
+            }
         }
         else
         {
@@ -836,7 +880,8 @@ void FetchTableRangesCallback(void *data,
             fetch_range_cc->kv_session_id_ = scan_next_closure->SessionId();
             fetch_range_cc->kv_start_key_.clear();
             fetch_range_cc->kv_start_key_.append(key);
-            fetch_range_cc->AppendTableRanges(std::move(range_vec));
+            fetch_range_cc->AppendTableRanges(fetch_range_cc->kv_partition_id_,
+                                              std::move(range_vec));
 
             client.ScanNext(kv_range_table_name,
                             fetch_range_cc->kv_partition_id_,
@@ -1033,6 +1078,7 @@ void FetchRangeSlicesCallback(void *data,
             fetch_req->SetCurrentSegmentId(segment_id);
             client.UpdateEncodedRangeSliceKey(fetch_req->kv_start_key_,
                                               fetch_req->CurrentSegmentId());
+
             client.Read(kv_range_slices_table_name,
                         fetch_req->kv_partition_id_,
                         read_closure->ShardId(),

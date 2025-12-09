@@ -299,22 +299,32 @@ bool FetchTableRangesCc::Execute(CcShard &ccs)
     return false;
 }
 
-void FetchTableRangesCc::AppendTableRanges(std::vector<InitRangeEntry> &&ranges)
+void FetchTableRangesCc::AppendTableRanges(int32_t kv_part_id,
+                                           std::vector<InitRangeEntry> &&ranges)
 {
     for (auto &range : ranges)
     {
-        ranges_vec_.push_back(std::move(range));
+        partition_ranges_vec_.at(kv_part_id).push_back(std::move(range));
     }
 }
 
-void FetchTableRangesCc::AppendTableRange(InitRangeEntry &&range)
+void FetchTableRangesCc::AppendTableRange(int32_t kv_part_id,
+                                          InitRangeEntry &&range)
 {
-    ranges_vec_.push_back(std::move(range));
+    partition_ranges_vec_.at(kv_part_id).push_back(std::move(range));
 }
 
 bool FetchTableRangesCc::EmptyRanges() const
 {
-    return ranges_vec_.empty();
+    for (const auto &vec : partition_ranges_vec_)
+    {
+        if (!vec.empty())
+        {
+            return false;
+        }
+    }
+
+    return true;
 }
 
 void FetchTableRangesCc::SetFinish(int err)
@@ -323,8 +333,49 @@ void FetchTableRangesCc::SetFinish(int err)
     CODE_FAULT_INJECTOR("FetchTableRangesCc_SetFinish_Error", {
         error_code_ = static_cast<int>(CcErrorCode::DATA_STORE_ERR);
         ranges_vec_.clear();
+        partition_ranges_vec_.clear();
     });
     ccs_.Enqueue(this);
+}
+
+void FetchTableRangesCc::Merge()
+{
+    using Entry = txservice::InitRangeEntry;
+    auto cmp = [](const std::pair<Entry *, size_t> &lhs,
+                  const std::pair<Entry *, size_t> &rhs)
+    { return rhs.first->key_ < lhs.first->key_; };
+    std::priority_queue<std::pair<Entry *, size_t>,
+                        std::vector<std::pair<Entry *, size_t>>,
+                        decltype(cmp)>
+        pq(cmp);
+
+    size_t total_range_cnt = 0;
+    for (size_t i = 0; i < partition_ranges_vec_.size(); ++i)
+    {
+        if (!partition_ranges_vec_[i].empty())
+        {
+            total_range_cnt += partition_ranges_vec_[i].size();
+            pq.emplace(&partition_ranges_vec_[i][0], i);
+        }
+    }
+
+    ranges_vec_.clear();
+    ranges_vec_.reserve(total_range_cnt);
+    std::vector<size_t> idx(partition_ranges_vec_.size(), 0);
+    while (!pq.empty())
+    {
+        auto [ent, vec_idx] = pq.top();
+        pq.pop();
+        ranges_vec_.push_back(std::move(*ent));
+        if (++idx[vec_idx] < partition_ranges_vec_[vec_idx].size())
+        {
+            pq.emplace(&partition_ranges_vec_[vec_idx][idx[vec_idx]], vec_idx);
+        }
+    }
+
+    partition_ranges_vec_.clear();
+    assert(partition_ranges_vec_.empty());
+    assert(!ranges_vec_.empty());
 }
 
 void FetchRangeSlicesReq::SetFinish(CcErrorCode err)

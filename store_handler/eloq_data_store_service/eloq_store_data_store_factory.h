@@ -56,6 +56,11 @@ public:
         return ds;
     }
 
+    DataStoreFactoryType DataStoreType() const override
+    {
+        return DataStoreFactoryType::ELOQSTORE_FACTORY;
+    }
+
     std::string GetStoragePath() const override
     {
         // EloqStore uses multiple paths, return first one or empty
