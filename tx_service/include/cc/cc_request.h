@@ -4059,7 +4059,8 @@ public:
             slices_to_scan_.reserve(old_slices_delta_size->size());
             std::for_each(old_slices_delta_size->begin(),
                           old_slices_delta_size->end(),
-                          [&](decltype(*old_slices_delta_size->begin()) &elem) {
+                          [&](decltype(*old_slices_delta_size->begin()) &elem)
+                          {
                               slices_to_scan_.emplace_back(
                                   std::move(elem.first.GetShallowCopy()));
                           });
@@ -6261,10 +6262,21 @@ private:
     std::pair<bool, CcErrorCode> upsert_kv_err_code_;
 };
 
+inline bvar::LatencyRecorder ReleaseDataSyncScanHeapLr("debug_release_heap",
+                                                       "us");
+struct ReleaseHeapTimer
+{
+    ~ReleaseHeapTimer()
+    {
+        ReleaseDataSyncScanHeapLr << butil::cpuwide_time_us() - start_ts;
+    }
+    int64_t start_ts{butil::cpuwide_time_us()};
+};
+
 struct ReleaseDataSyncScanHeapCc : public CcRequestBase
 {
 public:
-    static constexpr size_t VEC_ERASE_BATCH_SIZE = 1000;
+    static constexpr size_t VEC_ERASE_BATCH_SIZE = 100;
 
     ReleaseDataSyncScanHeapCc(std::vector<FlushRecord> *data_sync_vec,
                               std::vector<FlushRecord> *archive_vec)
@@ -6281,6 +6293,8 @@ public:
         // memory freed can be directly refelct to the mi stats allocated and
         // committed, otherwise the the stats updates will delayed to next
         // allocation
+        ReleaseHeapTimer timer;
+
         if (data_sync_vec_ != nullptr)
         {
             // to avoid large jitter when releasing big memory chunck,

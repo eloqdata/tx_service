@@ -1031,6 +1031,17 @@ public:
     friend class TxServiceModule;
 };
 
+inline bvar::LatencyRecorder run_one_round_recorder(
+    "debug_run_one_round_recorder", "us");
+struct RunOneRoundRecorder
+{
+    ~RunOneRoundRecorder()
+    {
+        run_one_round_recorder << butil::cpuwide_time_us() - start_ts_;
+    }
+    int64_t start_ts_{butil::cpuwide_time_us()};
+};
+
 class TxServiceModule : public eloq::EloqModule
 {
 public:
@@ -1073,6 +1084,7 @@ public:
         size_t active_cnt = 0, req_cnt = 0;
         bool yield = false;
         TxProcessor *txp = tx_processors_->at(thd_id).get();
+        RunOneRoundRecorder timer;
         txp->RunOneRound(
             active_cnt, req_cnt, yield, coord->shard_status_, true);
 #endif

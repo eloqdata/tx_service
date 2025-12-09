@@ -129,6 +129,8 @@ void SyncBatchReadForArchiveCallback(void *data,
     }
 }
 
+bvar::LatencyRecorder FetchRecordRecorder("debug_fetch_record", "us");
+
 void FetchRecordCallback(void *data,
                          ::google::protobuf::Closure *closure,
                          DataStoreServiceClient &client,
@@ -156,6 +158,10 @@ void FetchRecordCallback(void *data,
         metrics::kv_meter->CollectDuration(metrics::NAME_KV_READ_DURATION,
                                            fetch_cc->start_);
         metrics::kv_meter->Collect(metrics::NAME_KV_READ_TOTAL, 1);
+        FetchRecordRecorder
+            << std::chrono::duration_cast<std::chrono::microseconds>(
+                   metrics::Clock::now() - fetch_cc->start_)
+                   .count();
     }
 
     if (err_code == remote::DataStoreError::KEY_NOT_FOUND)
