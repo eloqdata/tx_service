@@ -1257,7 +1257,9 @@ public:
             TxProcessor *tp = pool_[thd_idx].get();
 
             tp->InitializeLocalHandler();
-            thd_pool_.emplace_back(std::thread([tp] { tp->Run(); }));
+            std::thread &thd = thd_pool_.emplace_back([tp] { tp->Run(); });
+            std::string thread_name = "tx_proc_" + std::to_string(thd_idx);
+            pthread_setname_np(thd.native_handle(), thread_name.c_str());
         }
 #ifdef ELOQ_MODULE_ENABLED
         // Register TxServiceModule into brpc so that the brpc workers can

@@ -554,8 +554,10 @@ void UploadIndexContext::InitUploadWorkers()
     {
         for (size_t i = 0; i < UploadIndexWorkerSize; ++i)
         {
-            worker_thds_.push_back(
-                std::thread([this]() { UploadIndexWorker(); }));
+            std::thread &thd =
+                worker_thds_.emplace_back([this]() { UploadIndexWorker(); });
+            std::string thread_name = "upload_idx_" + std::to_string(i);
+            pthread_setname_np(thd.native_handle(), thread_name.c_str());
         }
     }
 }

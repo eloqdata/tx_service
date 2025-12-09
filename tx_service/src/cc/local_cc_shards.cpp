@@ -160,6 +160,7 @@ LocalCcShards::LocalCcShards(
     ts_base_.store(ts_base);
     local_clock.store(ts_base);
     timer_thd_ = std::thread([this] { TimerRun(); });
+    pthread_setname_np(timer_thd_.native_handle(), "tx_timer");
 
     // For mariadb, this thread is the main thread of the mariadb process.
     InitializeTableRangesHeap();
@@ -261,48 +262,65 @@ void LocalCcShards::StartBackgroudWorkers()
     // Starts flush worker threads firstly.
     for (int id = 0; id < flush_data_worker_ctx_.worker_num_; id++)
     {
-        flush_data_worker_ctx_.worker_thd_.push_back(
-            std::thread([this] { FlushDataWorker(); }));
+        std::thread &thd = flush_data_worker_ctx_.worker_thd_.emplace_back(
+            [this] { FlushDataWorker(); });
+        std::string thread_name = "flush_data_" + std::to_string(id);
+        pthread_setname_np(thd.native_handle(), thread_name.c_str());
     }
 
     LOG(INFO) << "Range Split Worker Num: "
               << range_split_worker_ctx_.worker_num_;
     for (int id = 0; id < range_split_worker_ctx_.worker_num_; id++)
     {
-        range_split_worker_ctx_.worker_thd_.push_back(
-            std::thread([this] { RangeSplitWorker(); }));
+        std::thread &thd = range_split_worker_ctx_.worker_thd_.emplace_back(
+            [this] { RangeSplitWorker(); });
+        std::string thread_name = "range_split_" + std::to_string(id);
+        pthread_setname_np(thd.native_handle(), thread_name.c_str());
     }
 
     data_sync_task_queue_.resize(data_sync_worker_ctx_.worker_num_);
 
     for (int id = 0; id < data_sync_worker_ctx_.worker_num_; id++)
     {
-        data_sync_worker_ctx_.worker_thd_.push_back(
-            std::thread([this, id] { DataSyncWorker(id); }));
+        std::thread &thd = data_sync_worker_ctx_.worker_thd_.emplace_back(
+            [this, id] { DataSyncWorker(id); });
+        std::string thread_name = "data_sync_" + std::to_string(id);
+        pthread_setname_np(thd.native_handle(), thread_name.c_str());
     }
 
     if (realtime_sampling_)
     {
-        statistics_worker_ctx_.worker_thd_.push_back(
-            std::thread([this] { SyncTableStatisticsWorker(); }));
+        std::thread &thd = statistics_worker_ctx_.worker_thd_.emplace_back(
+            [this] { SyncTableStatisticsWorker(); });
+        std::string thread_name = "stat_sync";
+        pthread_setname_np(thd.native_handle(), thread_name.c_str());
     }
 
-    heartbeat_worker_ctx_.worker_thd_.push_back(
-        std::thread([this] { HeartbeatWorker(); }));
+    {
+        std::thread &thd = heartbeat_worker_ctx_.worker_thd_.emplace_back(
+            [this] { HeartbeatWorker(); });
+        std::string thread_name = "heartbeat";
+        pthread_setname_np(thd.native_handle(), thread_name.c_str());
+    }
 
     if (!txservice_enable_cache_replacement)
     {
         // In this mode we will not try to evict cce when memory is full. We
         // need to periodically clean up deleted cces to avoid memory overflow.
-        purge_deleted_worker_ctx_.worker_thd_.push_back(
-            std::thread([this] { PurgeDeletedData(); }));
+        std::thread &thd = purge_deleted_worker_ctx_.worker_thd_.emplace_back(
+            [this] { PurgeDeletedData(); });
+        std::string thread_name = "purge_deleted";
+        pthread_setname_np(thd.native_handle(), thread_name.c_str());
     }
 
     if (kickout_data_test_worker_ctx_.worker_num_ > 0)
     {
         assert(kickout_data_test_worker_ctx_.worker_num_ == 1);
-        kickout_data_test_worker_ctx_.worker_thd_.push_back(
-            std::thread([this] { KickoutDataForTest(); }));
+        std::thread &thd =
+            kickout_data_test_worker_ctx_.worker_thd_.emplace_back(
+                [this] { KickoutDataForTest(); });
+        std::string thread_name = "kick_data_test";
+        pthread_setname_np(thd.native_handle(), thread_name.c_str());
     }
 }
 

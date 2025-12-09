@@ -34,6 +34,7 @@ namespace store
 void SnapshotManager::Start()
 {
     standby_sync_worker_ = std::thread([this] { StandbySyncWorker(); });
+    pthread_setname_np(standby_sync_worker_.native_handle(), "ss_standby_sync");
 }
 
 void SnapshotManager::Shutdown()

@@ -49,6 +49,7 @@ public:
         FileHandlerFactory factory;
         logfile_hd_ = factory.NewFileHandler("txlog", true);
         thd_ = std::thread([this] { Run(); });
+        pthread_setname_np(thd_.native_handle(), "tx_log_flush");
     }
 
     ~LogFlushService()

@@ -174,6 +174,7 @@ RecoveryService::RecoveryService(LocalCcShards &local_shards,
                 }
             }
         });
+    pthread_setname_np(notify_thread_.native_handle(), "replay_notify");
 }
 
 bool RecoveryService::ReplayNow(ReplayLogTask &task)

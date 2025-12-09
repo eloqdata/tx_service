@@ -47,6 +47,7 @@ DeadLockCheck::DeadLockCheck(LocalCcShards &local_shards)
                            std::chrono::system_clock::now().time_since_epoch())
                            .count();
     thd_ = std::thread([this] { Run(); });
+    pthread_setname_np(thd_.native_handle(), "dead_lock_check");
 }
 
 DeadLockCheck::~DeadLockCheck()

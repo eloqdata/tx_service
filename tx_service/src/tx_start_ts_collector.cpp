@@ -53,6 +53,7 @@ void TxStartTsCollector::Start()
                << delay_seconds_;
     active_ = true;
     thd_ = std::thread([this] { Run(); });
+    pthread_setname_np(thd_.native_handle(), "tx_start_ts_col");
 }
 
 void TxStartTsCollector::Shutdown()
