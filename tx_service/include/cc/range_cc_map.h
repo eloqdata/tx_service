@@ -29,6 +29,7 @@
 #include "cc_handler_result.h"
 #include "cc_protocol.h"
 #include "cc_request.h"
+#include "dead_lock_check.h"
 #include "error_messages.h"  //CcErrorCode
 #include "range_bucket_cc_map.h"
 #include "range_bucket_key_record.h"
@@ -229,9 +230,9 @@ public:
         // is never a read-outside request that brings an individual range into
         // memory for caching.
         assert(req.Type() != ReadType::OutsideNormal);
-        // We directly abort cc request if blocked by write lock. So we should
-        // not have any resumed range read cc.
-        assert(req.CcePtr() == nullptr);
+        // Range reads now block when lock acquisition fails (similar to regular
+        // data reads), allowing deadlock detection to see wait conditions.
+        // Resumed range read cc requests are now possible.
 
         LockType acquired_lock;
         CcErrorCode err_code;
@@ -324,16 +325,25 @@ public:
         else
         {
             assert(err_code == CcErrorCode::ACQUIRE_LOCK_BLOCKED);
-            // Release the acquired bucket read lock before aborting.
-            ReleaseCceLock(bucket_cce->GetKeyLock(),
-                           bucket_cce,
-                           req.Txn(),
-                           this->cc_ng_id_,
-                           LockType::ReadLock);
-            floor_cce->GetKeyLock()->AbortQueueRequest(
-                req.Txn(),
-                CcErrorCode::ACQUIRE_KEY_LOCK_FAILED_FOR_RW_CONFLICT);
-            return true;
+            // Trigger deadlock check (throttled to once per second)
+            DeadLockCheck::RequestCheckWithThrottle(req.Txn());
+
+            // Block instead of abort - similar to regular data reads
+            // Keep the bucket read lock (don't release it) - this matches the
+            // pattern of regular data reads which don't release locks when
+            // blocking. The bucket lock is a read lock, so it doesn't prevent
+            // other readers. When the request resumes, we already have the
+            // bucket lock and can immediately retry the range lock acquisition.
+            // If the read request comes from a remote node, send acknowledgement
+            if (!req.IsLocal())
+            {
+                remote::RemoteRead &remote_req =
+                    static_cast<remote::RemoteRead &>(req);
+                remote_req.Acknowledge();
+            }
+            req.SetBlockType(ReadCc::BlockByLock);
+            // Request is now in blocking queue, stop execution
+            return false;
         }
 
         return true;

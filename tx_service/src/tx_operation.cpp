@@ -303,41 +303,15 @@ void ReadLocalOperation::Forward(txservice::TransactionExecution *txm)
         {
             assert(hd_result_->ErrorCode() ==
                        CcErrorCode::ACQUIRE_KEY_LOCK_FAILED_FOR_RW_CONFLICT ||
-                   hd_result_->ErrorCode() == CcErrorCode::DATA_STORE_ERR ||
-                   hd_result_->ErrorCode() ==
-                       CcErrorCode::LEADER_NODE_UNREACHABLE ||
-                   hd_result_->ErrorCode() == CcErrorCode::NG_TERM_CHANGED ||
-                   hd_result_->ErrorCode() ==
-                       CcErrorCode::REQUESTED_TABLE_NOT_EXISTS);
-            if (hd_result_->ErrorCode() ==
-                CcErrorCode::ACQUIRE_KEY_LOCK_FAILED_FOR_RW_CONFLICT)
-            {
-                // If acquire range read lock blocked by DDL, check if tx has
-                // already acquired other range read lock. If so we need to
-                // abort tx since it might cause dead lock with range split. If
-                // this tx has not acquired any range read lock, we can safely
-                // retry here.
-                const auto &rset = txm->rw_set_.MetaDataReadSet();
-                for (const auto &[cce_addr, read_entry_pair] : rset)
-                {
-                    if (read_entry_pair.second != catalog_ccm_name_sv &&
-                        read_entry_pair.second != cluster_config_ccm_name_sv)
-                    {
-                        // Abort tx.
-                        txm->PostProcess(*this);
-                        return;
-                    }
-                }
-                hd_result_->Value().Reset();
-                hd_result_->Reset();
-                execute_immediately_ = false;
-                txm->Process(*this);
-            }
-            else
-            {
-                // Abort the tx.
-                txm->PostProcess(*this);
-            }
+                   hd_result_->ErrorCode() == CcErrorCode::DATA_STORE_ERR);
+            // With blocking range reads and deadlock detection, we no longer
+            // need to preemptively abort. The request will block and deadlock
+            // detection will handle actual deadlocks. Retry the operation.
+            hd_result_->Value().Reset();
+            hd_result_->Reset();
+            execute_immediately_ = false;
+            txm->Process(*this);
+            return;
         }
         else
         {
@@ -624,23 +598,9 @@ void LockWriteRangeBucketsOp::Forward(TransactionExecution *txm)
         {
             assert(lock_result_->ErrorCode() ==
                    CcErrorCode::ACQUIRE_KEY_LOCK_FAILED_FOR_RW_CONFLICT);
-            // If acquire range/bucket read lock blocked by DDL, check if tx has
-            // already acquired other range/bucket read lock. If so we need to
-            // abort tx since it might cause dead lock with bucket migration. If
-            // this tx has not acquired any range/buckets read lock, we can
-            // safely retry here.
-            const auto &rset = txm->rw_set_.MetaDataReadSet();
-            for (const auto &[cce_addr, read_entry_pair] : rset)
-            {
-                if (read_entry_pair.second != catalog_ccm_name_sv &&
-                    read_entry_pair.second != range_bucket_ccm_name_sv &&
-                    read_entry_pair.second != cluster_config_ccm_name_sv)
-                {
-                    // Abort tx.
-                    txm->PostProcess(*this);
-                    return;
-                }
-            }
+            // With blocking range reads and deadlock detection, we no longer
+            // need to preemptively abort. The request will block and deadlock
+            // detection will handle actual deadlocks. Retry the operation.
             lock_result_->Value().Reset();
             lock_result_->Reset();
             is_running_ = false;
