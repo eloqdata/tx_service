@@ -81,6 +81,16 @@ template <typename KeyT, typename ValueT, bool VersionedRecord>
 void BackfillForScanNextBatch(FetchBucketDataCc *fetch_cc,
                               CcRequestBase *requester);
 
+inline bvar::LatencyRecorder data_sync_scan_lr("debug_data_sync_scan_lr", "us");
+struct DataSyncScanTimer
+{
+    ~DataSyncScanTimer()
+    {
+        data_sync_scan_lr << butil::cpuwide_time_us() - start_ts_;
+    }
+    int64_t start_ts_{butil::cpuwide_time_us()};
+};
+
 template <typename KeyT,
           typename ValueT,
           bool VersionedRecord,
@@ -5716,6 +5726,7 @@ public:
 
     bool Execute(HashPartitionDataSyncScanCc &req) override
     {
+        DataSyncScanTimer timer;
         TX_TRACE_ACTION_WITH_CONTEXT(
             (txservice::CcMap *) this,
             &req,

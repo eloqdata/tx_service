@@ -4406,6 +4406,16 @@ void LocalCcShards::PostProcessHashPartitionDataSyncTask(
     }
 }
 
+bvar::LatencyRecorder ScanSliceLr("debug_prescan", "us");
+struct ScanSliceTimer
+{
+    ~ScanSliceTimer()
+    {
+        ScanSliceLr << butil::cpuwide_time_us() - start_ts;
+    }
+    int64_t start_ts{butil::cpuwide_time_us()};
+};
+
 void LocalCcShards::DataSyncForHashPartition(
     std::shared_ptr<DataSyncTask> data_sync_task, size_t worker_idx)
 {
@@ -4607,8 +4617,11 @@ void LocalCcShards::DataSyncForHashPartition(
         data_sync_txm->TxNumber(),
         catalog_rec.Schema()->Version());
 
-    EnqueueToCcShard(worker_idx, &scan_delta_size_cc);
-    scan_delta_size_cc.Wait();
+    {
+        ScanSliceTimer timer;
+        EnqueueToCcShard(worker_idx, &scan_delta_size_cc);
+        scan_delta_size_cc.Wait();
+    }
 
     if (scan_delta_size_cc.IsError())
     {
@@ -5952,7 +5965,8 @@ void LocalCcShards::SyncTableStatisticsWorker()
         statistics_worker_ctx_.cv_.wait_for(
             worker_lk,
             10s,
-            [this] {
+            [this]
+            {
                 return statistics_worker_ctx_.status_ ==
                        WorkerStatus::Terminated;
             });
@@ -6224,7 +6238,8 @@ void LocalCcShards::HeartbeatWorker()
         bool wait_res = heartbeat_worker_ctx_.cv_.wait_for(
             heartbeat_worker_lk,
             std::chrono::seconds(1),
-            [this] {
+            [this]
+            {
                 return heartbeat_worker_ctx_.status_ ==
                        WorkerStatus::Terminated;
             });
@@ -6312,7 +6327,8 @@ void LocalCcShards::PurgeDeletedData()
         bool wait_res = purge_deleted_worker_ctx_.cv_.wait_for(
             worker_lk,
             std::chrono::seconds(10),
-            [this] {
+            [this]
+            {
                 return purge_deleted_worker_ctx_.status_ ==
                        WorkerStatus::Terminated;
             });

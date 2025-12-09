@@ -76,7 +76,7 @@ inline bool enable_kv_metrics{false};
 inline bool enable_standby_metrics{false};
 
 inline size_t collect_memory_usage_round{0};
-inline size_t collect_tx_duration_round{0};
+inline size_t collect_tx_duration_round{100};
 inline size_t busy_round_threshold{0};
 inline size_t collect_standby_metrics_round{10000};
 }  // namespace metrics
