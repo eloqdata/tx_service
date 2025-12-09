@@ -199,6 +199,11 @@ public:
         }
     }
 
+    // Request check with throttling to prevent excessive deadlock checks
+    // Global throttling: once per second for all transactions
+    // Returns true if check was requested, false if throttled
+    static bool RequestCheckWithThrottle(uint64_t tx_id);
+
 protected:
     void Run();
     void GatherLockDependancy();
@@ -243,5 +248,9 @@ protected:
     uint32_t check_node_id_;
     // If the dead lock check is requested by this node.
     bool requested_check_{false};
+    // Last throttled check request time (microseconds)
+    // Used to throttle deadlock check requests to once per second globally for all transactions
+    uint64_t last_throttled_check_time_{0};
+    static constexpr uint64_t CHECK_THROTTLE_INTERVAL_ = 1 * MICRO_SECOND;  // 1 second
 };
 }  // namespace txservice
