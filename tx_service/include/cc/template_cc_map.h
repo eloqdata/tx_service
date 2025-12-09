@@ -8296,7 +8296,10 @@ public:
 
         // ScanSliceDeltaSizeCcForRangePartition is running on TxProcessor
         // thread. To avoid blocking other transaction for a long time, we only
-        // process ScanBatchSize number of keys in each round.
+        // process ScanBatchSize number of keys in each round and yield if a
+        // scan takes too long.
+        auto l_start = std::chrono::high_resolution_clock::now();
+        size_t processed_cnt = 0;
         for (size_t scan_cnt = 0;
              scan_cnt < ScanDeltaSizeCcForHashPartition::ScanBatchSize &&
              key_it != req_end_it && key_it != req_end_next_page_it;
@@ -8336,6 +8339,7 @@ public:
             // key that the tx has not finished post-processing.
             req.UpdateKeyCount(cce->NeedCkpt() && commit_ts > 1 &&
                                commit_ts <= req.ScanTs());
+            ++processed_cnt;
 
             // Forward key iterator
             ++key_it;
@@ -8345,6 +8349,17 @@ public:
                 // Update the end it.
                 slice_end_it = req_end_it;
                 slice_end_next_page_it = next_page_it(slice_end_it);
+            }
+
+            if (processed_cnt > 0 && processed_cnt % 4 == 0)
+            {
+                auto l_now = std::chrono::high_resolution_clock::now();
+                if (std::chrono::duration_cast<std::chrono::microseconds>(
+                        l_now - l_start)
+                        .count() >= std::chrono::microseconds(50).count())
+                {
+                    break;
+                }
             }
         }
 
