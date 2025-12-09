@@ -59,6 +59,8 @@ CcStreamSender::CcStreamSender(
     stream_write_options_.write_in_background = true;
     connect_thd_ = std::thread([this] { ConnectStreams(); });
     resend_thd_ = std::thread([this] { ResendMessageToNode(); });
+    pthread_setname_np(connect_thd_.native_handle(), "ccstream_conn");
+    pthread_setname_np(resend_thd_.native_handle(), "ccstream_resend");
 }
 
 void CcStreamSender::RecycleCcMsg(std::unique_ptr<CcMessage> msg)

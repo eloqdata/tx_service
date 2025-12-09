@@ -4508,7 +4508,7 @@ void SplitFlushRangeOp::Forward(TransactionExecution *txm)
             return;
         });
 
-        LOG(INFO) << "Split Flush transaction lock cluster config, range id"
+        LOG(INFO) << "Split Flush transaction lock cluster config, range id "
                   << range_info_->PartitionId() << ", txn: " << txm->TxNumber();
         // Upgrade to write lock again for commit phase.
         ForwardToSubOperation(txm, &lock_cluster_config_op_);

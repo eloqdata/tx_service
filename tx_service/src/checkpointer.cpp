@@ -75,6 +75,7 @@ Checkpointer::Checkpointer(LocalCcShards &shards,
     if (store_hd_)
     {
         thd_ = std::thread([this] { Run(); });
+        pthread_setname_np(thd_.native_handle(), "checkpointer");
     }
 
     DLOG(INFO) << "checkpointer init, checkpoint_interval_: "
