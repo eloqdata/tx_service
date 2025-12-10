@@ -5976,6 +5976,7 @@ public:
                                 int32_t part_id =
                                     Sharder::MapKeyHashToHashPartitionId(
                                         key->Hash());
+                                LOG(WARNING) << "Scan FetchRecord";
                                 shard_->FetchRecord(table_name_,
                                                     table_schema_,
                                                     TxKey(key),
