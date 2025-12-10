@@ -112,8 +112,7 @@ public:
     SendMessageResult SendScanRespToNode(uint32_t dest_node_id,
                                          const ScanSliceResponse &msg,
                                          bool resend = false);
-    bool SendStandbyMessageToNode(uint32_t dest_node_id,
-                                  const CcMessage &msg);
+    bool SendStandbyMessageToNode(uint32_t dest_node_id, const CcMessage &msg);
     void UpdateRemoteNodes(
         const std::unordered_map<NodeId, NodeConfig> &nodes_configs);
 
