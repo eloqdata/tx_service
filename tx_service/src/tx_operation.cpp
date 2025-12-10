@@ -4510,6 +4510,11 @@ void SplitFlushRangeOp::Forward(TransactionExecution *txm)
             return;
         }
 
+        CODE_FAULT_INJECTOR("term_SplitFlushOp_CommitAcquireAllWriteOp_Continue", {
+            LOG(INFO) << "FaultInject term_SplitFlushOp_CommitAcquireAllWriteOp_Continue";
+            return;
+        });
+
         ACTION_FAULT_INJECTOR("range_split_commit_acquire_all");
 
         if (table_name_.IsBase() && txservice_enable_key_cache)
