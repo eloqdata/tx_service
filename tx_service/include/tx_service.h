@@ -1037,7 +1037,11 @@ struct RunOneRoundRecorder
 {
     ~RunOneRoundRecorder()
     {
-        run_one_round_recorder << butil::cpuwide_time_us() - start_ts_;
+        int64_t gap = butil::cpuwide_time_us() - start_ts_;
+        if (gap > 1000)
+        {
+            run_one_round_recorder << gap;
+        }
     }
     int64_t start_ts_{butil::cpuwide_time_us()};
 };
