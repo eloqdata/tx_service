@@ -3555,7 +3555,8 @@ public:
             assert(remote_scan_cache != nullptr);
         }
 
-        auto is_cache_full = [&req, scan_cache, remote_scan_cache] {
+        auto is_cache_full = [&req, scan_cache, remote_scan_cache]
+        {
             return req.IsLocal() ? scan_cache->IsFull()
                                  : remote_scan_cache->IsFull();
         };
@@ -5868,6 +5869,16 @@ public:
                         l_now - l_start)
                         .count() >= std::chrono::microseconds(50).count())
                 {
+                    if (std::chrono::duration_cast<std::chrono::microseconds>(
+                            l_now - l_start)
+                            .count() >= std::chrono::microseconds(500).count())
+                    {
+                        LOG(ERROR)
+                            << "Scan "
+                            << std::chrono::duration_cast<
+                                   std::chrono::microseconds>(l_now - l_start)
+                                   .count();
+                    }
                     break;
                 }
             }
@@ -8220,7 +8231,7 @@ public:
 
     bool Execute(ScanDeltaSizeCcForHashPartition &req) override
     {
-    ScanSliceTimer timer;
+        ScanSliceTimer timer;
         TX_TRACE_ACTION_WITH_CONTEXT(
             (txservice::CcMap *) this,
             &req,
