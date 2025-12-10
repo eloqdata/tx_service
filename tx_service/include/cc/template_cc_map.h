@@ -91,6 +91,16 @@ struct DataSyncScanTimer
     int64_t start_ts_{butil::cpuwide_time_us()};
 };
 
+inline bvar::LatencyRecorder ScanSliceLr("debug_prescan", "us");
+struct ScanSliceTimer
+{
+    ~ScanSliceTimer()
+    {
+        ScanSliceLr << butil::cpuwide_time_us() - start_ts;
+    }
+    int64_t start_ts{butil::cpuwide_time_us()};
+};
+
 template <typename KeyT,
           typename ValueT,
           bool VersionedRecord,
@@ -8213,6 +8223,7 @@ public:
 
     bool Execute(ScanDeltaSizeCcForHashPartition &req) override
     {
+    ScanSliceTimer timer;
         TX_TRACE_ACTION_WITH_CONTEXT(
             (txservice::CcMap *) this,
             &req,
