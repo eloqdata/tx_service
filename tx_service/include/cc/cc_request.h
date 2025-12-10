@@ -6311,7 +6311,7 @@ public:
                     release_size += data_sync_vec_->back().FlushSize();
                     data_sync_vec_->pop_back();
                     cnt++;
-                    if (release_size >= 10240)
+                    if (release_size >= 1024000)
                     {
                         break;
                     }
