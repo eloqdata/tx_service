@@ -87,13 +87,13 @@ public:
                            const CcMessage &msg,
                            CcHandlerResultBase *res = nullptr,
                            bool resend = false,
-                           bool resend_on_eagain = true,
-                           bool log_verbose = false,
                            bool *need_reconnect = nullptr);
     bool SendScanRespToNode(uint32_t dest_node_id,
                             const ScanSliceResponse &msg,
                             bool resend = false,
                             bool *need_reconnect = nullptr);
+    bool SendStandbyMessageToNode(uint32_t dest_node_id,
+                                  const CcMessage &msg);
     void UpdateRemoteNodes(
         const std::unordered_map<NodeId, NodeConfig> &nodes_configs);
 

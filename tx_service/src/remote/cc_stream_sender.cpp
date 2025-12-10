@@ -161,8 +161,6 @@ bool CcStreamSender::SendMessageToNode(uint32_t dest_node_id,
                                        const CcMessage &msg,
                                        CcHandlerResultBase *res,
                                        bool resend,
-                                       bool resend_on_eagain,
-                                       bool log_verbose,
                                        bool *need_reconnect)
 {
     TX_TRACE_ACTION_WITH_CONTEXT(
@@ -176,10 +174,6 @@ bool CcStreamSender::SendMessageToNode(uint32_t dest_node_id,
                     .append("}");
             }));
     TX_TRACE_DUMP(&msg);
-    if (log_verbose)
-    {
-        LOG(INFO) << "SendMessageToNode " << dest_node_id;
-    }
     std::shared_lock<std::shared_mutex> outbound_lk(outbound_mux_);
     auto stream_it = outbound_streams_.find(dest_node_id);
     if (stream_it == outbound_streams_.end())
@@ -205,11 +199,6 @@ bool CcStreamSender::SendMessageToNode(uint32_t dest_node_id,
         }
         // resend the message if stream is connecting
         std::lock_guard<std::mutex> lk(to_connect_mux_);
-        if (log_verbose)
-        {
-            LOG(INFO) << "CC stream is connecting, buffer the message for "
-                         "resend";
-        }
         auto resend_message_list = resend_message_list_.try_emplace(
             dest_node_id, moodycamel::ConcurrentQueue<ResendMessage::Uptr>());
         resend_message_list.first->second.enqueue(
@@ -233,31 +222,10 @@ bool CcStreamSender::SendMessageToNode(uint32_t dest_node_id,
     int error_code =
         brpc::StreamWrite(stream_id, iobuf, &stream_write_options_);
 
-    if (log_verbose)
-    {
-        LOG(INFO) << "cc_stream_sender: do stream write with stream id: "
-                  << stream_id << " dest_node_id: " << dest_node_id
-                  << " print response error code: " << error_code;
-    }
-
     if (error_code != 0)
     {
         if (error_code == EAGAIN)
         {
-            if (!resend_on_eagain)
-            {
-                return false;
-            }
-            if (log_verbose)
-            {
-                LOG(INFO)
-                    << "cc_stream_sender: retry stream write again on the "
-                       "backgroud thread"
-                       "with stream id: "
-                    << stream_id
-                    << " print response error code: " << error_code;
-            }
-
             std::lock_guard<std::mutex> resend_lk(resend_mux_);
 
             auto bg_resend_msg_list =
@@ -300,11 +268,6 @@ bool CcStreamSender::SendMessageToNode(uint32_t dest_node_id,
             // remote node is dead. We should skip resend the message again.
             if (resend)
             {
-                if (log_verbose)
-                {
-                    LOG(INFO) << "cc_stream_sender: resend message and break";
-                }
-
                 // SendMessage error return -1 to indicate the request needs
                 // retry.
                 if (res != nullptr)
@@ -331,12 +294,6 @@ bool CcStreamSender::SendMessageToNode(uint32_t dest_node_id,
             }
             else
             {
-                if (log_verbose)
-                {
-                    LOG(INFO) << "cc_stream_sender: check stream version: "
-                              << stream_ver << " and need resend message";
-                }
-
                 std::lock_guard<std::mutex> lk(to_connect_mux_);
                 // If the stream version is -1, a separate thread has notified
                 // the connecting thread to reconnect the stream. If the stream
@@ -516,6 +473,42 @@ bool CcStreamSender::SendScanRespToNode(uint32_t dest_node_id,
     {
         return true;
     }
+}
+
+bool CcStreamSender::SendStandbyMessageToNode(uint32_t dest_node_id,
+                                              const CcMessage &msg)
+{
+    std::shared_lock<std::shared_mutex> outbound_lk(outbound_mux_);
+    auto stream_it = outbound_streams_.find(dest_node_id);
+    if (stream_it == outbound_streams_.end())
+    {
+        LOG_EVERY_SECOND(ERROR)
+            << "SendStandbyMessageToNode: unknown node " << dest_node_id;
+        return false;
+    }
+
+    std::atomic<int64_t> &stream_version = std::get<1>(stream_it->second);
+    if (stream_version.load(std::memory_order_acquire) == -1)
+    {
+        return false;
+    }
+
+    brpc::StreamId stream_id = std::get<0>(stream_it->second);
+    outbound_lk.unlock();
+
+    butil::IOBuf iobuf;
+    butil::IOBufAsZeroCopyOutputStream wrapper(&iobuf);
+    msg.SerializeToZeroCopyStream(&wrapper);
+
+    int error_code = brpc::StreamWrite(stream_id, iobuf, &stream_write_options_);
+    if (error_code != 0)
+    {
+        DLOG(INFO) << "SendStandbyMessageToNode failed, node: " << dest_node_id
+                   << ", err: " << error_code;
+        return false;
+    }
+
+    return true;
 }
 
 /**
@@ -850,8 +843,6 @@ void CcStreamSender::ConnectStreams()
                                           messages[i]->msg_,
                                           messages[i]->res_,
                                           true,
-                                          true,
-                                          false,
                                           &need_reconnect);
                         if (need_reconnect)
                         {
