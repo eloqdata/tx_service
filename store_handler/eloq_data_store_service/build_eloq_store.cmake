@@ -103,6 +103,7 @@ set(ELOQ_STORE_SOURCES
     ${ELOQ_STORE_SOURCE_DIR}/types.cpp
     ${ELOQ_STORE_SOURCE_DIR}/kv_options.cpp
     ${ELOQ_STORE_SOURCE_DIR}/compression.cpp
+    ${ELOQ_STORE_SOURCE_DIR}/cloud_storage_service.cpp
     ${ELOQ_STORE_SOURCE_DIR}/eloqstore_module.cpp)
 
 add_library(eloqstore STATIC ${ELOQ_STORE_SOURCES} ${INI_SOURCES})
