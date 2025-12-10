@@ -6305,10 +6305,16 @@ public:
                 CcShardHeap *scan_heap = ccs.GetShardDataSyncScanHeap();
                 mi_heap_t *prev_heap = scan_heap->SetAsDefaultHeap();
                 size_t cnt = 0;
+                size_t release_size = 0;
                 while (cnt < VEC_ERASE_BATCH_SIZE && data_sync_vec_->size() > 0)
                 {
+                    release_size += data_sync_vec_->back().FlushSize();
                     data_sync_vec_->pop_back();
                     cnt++;
+                    if (release_size >= 10240)
+                    {
+                        break;
+                    }
                 }
                 int64_t allocated, committed;
                 if (data_sync_vec_->size() == 0 &&
