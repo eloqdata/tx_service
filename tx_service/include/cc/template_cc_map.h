@@ -5855,6 +5855,9 @@ public:
 
         size_t export_data_cnt = 0;
         auto l_start = std::chrono::high_resolution_clock::now();
+        static constexpr size_t kScanSizeOneRound = 4096;
+        size_t last_accumulated_flush_data_size =
+            req.accumulated_flush_data_size_;
 
         for (size_t scan_cnt = 0;
              scan_cnt < HashPartitionDataSyncScanCc::DataSyncScanBatchSize &&
@@ -5881,6 +5884,12 @@ public:
                     }
                     break;
                 }
+            }
+            if (req.accumulated_flush_data_size_ -
+                    last_accumulated_flush_data_size >
+                kScanSizeOneRound)
+            {
+                break;
             }
 
             const KeyT *key = it->first;
@@ -5975,7 +5984,6 @@ public:
                                 int32_t part_id =
                                     Sharder::MapKeyHashToHashPartitionId(
                                         key->Hash());
-                                LOG(WARNING) << "Scan FetchRecord";
                                 shard_->FetchRecord(table_name_,
                                                     table_schema_,
                                                     TxKey(key),
