@@ -21,6 +21,8 @@
  */
 #pragma once
 
+#include <jemalloc/jemalloc.h>
+
 #include <fstream>
 #include <queue>
 #include <sstream>
@@ -436,6 +438,33 @@ static inline uint32_t SubscribeIdFromStandbyTerm(int64_t standby_term)
 static inline bool IsStandbyTx(int64_t tx_term)
 {
     return (tx_term >> 32) > 0;
+}
+
+static inline void GetJemallocArenaStat(unsigned arena_id,
+                                        size_t &resisdent,
+                                        size_t &allocated)
+{
+    // estimate thread memory usage from total process memory
+    size_t total_resident = 0;
+    size_t small_allocated = 0;
+    size_t large_allocated = 0;
+    size_t sz = sizeof(total_resident);
+
+    uint64_t epoch = 1;
+    mallctl("epoch", NULL, NULL, &epoch, sizeof(epoch));
+    // Resident memory pages actually held by jemalloc from OS
+    // mallctl("stats.resident", &total_resident, &sz, NULL, 0);
+    // mallctl("stats.allocated", &total_allocated, &sz, NULL, 0);
+    char mib[64];
+    snprintf(mib, sizeof(mib), "stats.arenas.%u.resident", arena_id);
+    mallctl(mib, &total_resident, &sz, NULL, 0);
+    snprintf(mib, sizeof(mib), "stats.arenas.%u.small.allocated", arena_id);
+    mallctl(mib, &small_allocated, &sz, NULL, 0);
+    snprintf(mib, sizeof(mib), "stats.arenas.%u.large.allocated", arena_id);
+    mallctl(mib, &large_allocated, &sz, NULL, 0);
+
+    resisdent = total_resident;
+    allocated = small_allocated + large_allocated;
 }
 
 }  // namespace txservice

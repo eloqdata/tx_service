@@ -286,12 +286,18 @@ public:
             return;
         }
         mi_heap_t *prev_heap = shard_heap->SetAsDefaultHeap();
+#if defined(WITH_JEMALLOC)
+        auto prev_arena = shard_heap->SetAsDefaultArena();
+#endif
         if (is_ext_proc)
         {
             // Override thread id as well if current thread id is not heap owner
             // thread id.
             shard->OverrideHeapThread();
             coordi_->ext_tx_proc_heap_ = prev_heap;
+#if defined(WITH_JEMALLOC)
+            coordi_->ext_tx_arena_id_ = prev_arena;
+#endif
         }
         one_round_cnt_.fetch_add(1, std::memory_order_relaxed);
 #endif
@@ -416,11 +422,17 @@ public:
 #ifdef EXT_TX_PROC_ENABLED
 
         mi_heap_set_default(prev_heap);
+#if defined(WITH_JEMALLOC)
+        mallctl("thread.arena", NULL, NULL, &prev_arena, sizeof(unsigned));
+#endif
         if (is_ext_proc)
         {
             assert(coordi_->ext_tx_proc_heap_ != nullptr);
             mi_restore_default_thread_id();
             coordi_->ext_tx_proc_heap_ = nullptr;
+#if defined(WITH_JEMALLOC)
+            coordi_->ext_tx_arena_id_ = 0;
+#endif
         }
         shard_status.store(TxShardStatus::Free, std::memory_order_release);
 #endif
@@ -681,6 +693,9 @@ public:
         }
         shard->OverrideHeapThread();
         coordi_->ext_tx_proc_heap_ = shard_heap->SetAsDefaultHeap();
+#if defined(WITH_JEMALLOC)
+        coordi_->ext_tx_arena_id_ = shard_heap->SetAsDefaultArena();
+#endif
 
         TxmStatus txm_status = txm->Forward();
         if (txm_status == TxmStatus::Finished)
@@ -690,6 +705,15 @@ public:
         mi_heap_set_default(coordi_->ext_tx_proc_heap_);
         mi_restore_default_thread_id();
         coordi_->ext_tx_proc_heap_ = nullptr;
+#if defined(WITH_JEMALLOC)
+        mallctl("thread.arena",
+                NULL,
+                NULL,
+                &coordi_->ext_tx_arena_id_,
+                sizeof(unsigned));
+        coordi_->ext_tx_arena_id_ = 0;
+#endif
+
         assert(coordi_->shard_status_.load(std::memory_order_relaxed) ==
                TxShardStatus::Occupied);
         coordi_->shard_status_.store(TxShardStatus::Free,

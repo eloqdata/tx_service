@@ -221,6 +221,9 @@ void CcShard::Init()
 {
     InitializeShardHeap();
     mi_heap_t *prev_heap = shard_heap_->SetAsDefaultHeap();
+#if defined(WITH_JEMALLOC)
+    auto prev_arena = shard_heap_->SetAsDefaultArena();
+#endif
     lock_vec_.resize(LOCK_ARRAY_INIT_SIZE);
     for (size_t i = 0; i < LOCK_ARRAY_INIT_SIZE; ++i)
     {
@@ -247,6 +250,10 @@ void CcShard::Init()
                              std::make_unique<RangeBucketCcMap>(
                                  this, ng_id_, range_bucket_ccm_name));
     mi_heap_set_default(prev_heap);
+
+#if defined(WITH_JEMALLOC)
+    mallctl("thread.arena", NULL, NULL, &prev_arena, sizeof(unsigned));
+#endif
 }
 
 CcMap *CcShard::GetCcm(const TableName &table_name, uint32_t node_group)
@@ -2446,6 +2453,11 @@ CcShardHeap::CcShardHeap(CcShard *cc_shard, size_t limit)
         // Init defrag heap cc
         defrag_heap_cc_ = std::make_unique<DefragShardHeapCc>(this, 16);
     }
+
+#if defined(WITH_JEMALLOC)
+    size_t sz = sizeof(arena_id_);
+    mallctl("arenas.create", &arena_id_, &sz, NULL, 0);
+#endif
 }
 
 CcShardHeap::~CcShardHeap()
@@ -2463,38 +2475,64 @@ mi_heap_t *CcShardHeap::SetAsDefaultHeap()
     return mi_heap_set_default(heap_);
 }
 
+unsigned CcShardHeap::SetAsDefaultArena()
+{
+#if defined(WITH_JEMALLOC)
+    unsigned prev_arena;
+    size_t sz = sizeof(prev_arena);
+    // read prev arena id
+    mallctl("thread.arena", &prev_arena, &sz, NULL, 0);  // read only
+    // override arena id
+    mallctl("thread.arena", NULL, NULL, &arena_id_, sizeof(unsigned));
+    return prev_arena;
+#else
+    assert(false);
+    return 0;
+#endif
+}
+
 bool CcShardHeap::Full(int64_t *alloc, int64_t *commit) const
 {
 #if defined(WITH_JEMALLOC)
     // estimate thread memory usage from total process memory
-    size_t total_resident, resident;
-    size_t total_allocated, allocated;
+    size_t total_resident = 0;
+    size_t small_allocated = 0;
+    size_t large_allocated = 0;
     size_t sz = sizeof(total_resident);
 
     uint64_t epoch = 1;
     mallctl("epoch", NULL, NULL, &epoch, sizeof(epoch));
     // Resident memory pages actually held by jemalloc from OS
-    mallctl("stats.resident", &total_resident, &sz, NULL, 0);
-    mallctl("stats.allocated", &total_allocated, &sz, NULL, 0);
-
-    resident = total_resident * 0.9 / cc_shard_->core_cnt_;
-    allocated = total_allocated * 0.9 / cc_shard_->core_cnt_;
+    // mallctl("stats.resident", &total_resident, &sz, NULL, 0);
+    // mallctl("stats.allocated", &total_allocated, &sz, NULL, 0);
+    char mib[64];
+    snprintf(mib, sizeof(mib), "stats.arenas.%u.resident", arena_id_);
+    mallctl(mib, &total_resident, &sz, NULL, 0);
+    snprintf(mib, sizeof(mib), "stats.arenas.%u.small.allocated", arena_id_);
+    mallctl(mib, &small_allocated, &sz, NULL, 0);
+    snprintf(mib, sizeof(mib), "stats.arenas.%u.large.allocated", arena_id_);
+    mallctl(mib, &large_allocated, &sz, NULL, 0);
 
     if (alloc != nullptr)
     {
-        *alloc = allocated;
+        *alloc = small_allocated + large_allocated;
     }
 
     if (commit != nullptr)
     {
-        *commit = resident;
+        *commit = total_resident;
     }
 
-    LOG(INFO) << "yf: resident = " << resident << ", total resident "
+    unsigned my_arena;
+    sz = sizeof(my_arena);
+    mallctl("thread.arena", &my_arena, &sz, NULL, 0);  // 只读
+    LOG(INFO) << my_arena << ", arena id_ = " << arena_id_;
+    LOG(INFO) << "yf: resident = " << total_resident << ", total resident "
               << total_resident << ", memory limit = " << memory_limit_
-              << ", allocated = " << allocated
-              << ", total allocated = " << total_allocated;
-    return resident >= static_cast<int64_t>(memory_limit_);
+              << ", total allocated = " << small_allocated + large_allocated
+              << ", large allocated = " << large_allocated
+              << ", small allocated = " << small_allocated;
+    return total_resident >= static_cast<int64_t>(memory_limit_);
 
 #else
     int64_t allocated, committed;
@@ -2526,8 +2564,8 @@ bool CcShardHeap::NeedDefragment(int64_t *alloc, int64_t *commit) const
 {
 #if defined(WITH_JEMALLOC)
     // defragmentation is not supported with jemalloc
-    LOG(INFO) << "== yf: defragmentation is not supported with jemalloc";
     return false;
+
 #else
     int64_t allocated, committed;
     mi_thread_stats(&allocated, &committed);
