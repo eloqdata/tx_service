@@ -5141,7 +5141,13 @@ public:
         std::pair<size_t, bool> export_size = {0, true};
         // Do not try to call mi_heap_collect, since it is expensive, flush data
         // will return the memory anyway when it done
-        if (!scan_heap->Full())
+
+#if defined(WITH_JEMALLOC)
+        bool scan_heap_is_full = false;
+#else
+        bool scan_heap_is_full = scan_heap->Full();
+#endif
+        if (!scan_heap_is_full)
         {
             export_size.first =
                 cce->ExportForCkpt(key,

@@ -440,9 +440,10 @@ public:
      */
     bool TableRangesMemoryFull()
     {
-#if defined(USE_JEMALLOC)
+#if defined(WITH_JEMALLOC)
+        LOG(INFO) << "yf: table ranges memory";
         return false;
-#endif
+#else
         if (table_ranges_heap_ != nullptr)
         {
             int64_t allocated, committed;
@@ -454,6 +455,7 @@ public:
         {
             return false;
         }
+#endif
     }
 
     /**
@@ -463,9 +465,10 @@ public:
      */
     bool HasEnoughTableRangesMemory()
     {
-#if defined(USE_JEMALLOC)
-        return false;
-#endif
+#if defined(WITH_JEMALLOC)
+        LOG(INFO) << "yf: has enough table ranges memory";
+        return true;
+#else
         if (table_ranges_heap_ != nullptr)
         {
             size_t target_memory_size = range_slice_memory_limit_ / 10 * 9;
@@ -477,6 +480,7 @@ public:
         {
             return false;
         }
+#endif
     }
 
     void TableRangeHeapUsageReport()

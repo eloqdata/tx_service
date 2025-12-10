@@ -2468,15 +2468,35 @@ bool CcShardHeap::Full(int64_t *alloc, int64_t *commit) const
 #if defined(WITH_JEMALLOC)
     // estimate thread memory usage from total process memory
     size_t total_resident, resident;
+    size_t total_allocated, allocated;
     size_t sz = sizeof(total_resident);
 
+    uint64_t epoch = 1;
+    mallctl("epoch", NULL, NULL, &epoch, sizeof(epoch));
     // Resident memory pages actually held by jemalloc from OS
     mallctl("stats.resident", &total_resident, &sz, NULL, 0);
+    mallctl("stats.allocated", &total_allocated, &sz, NULL, 0);
 
     resident = total_resident * 0.9 / cc_shard_->core_cnt_;
+    allocated = total_allocated * 0.9 / cc_shard_->core_cnt_;
 
+    if (alloc != nullptr)
+    {
+        *alloc = allocated;
+    }
+
+    if (commit != nullptr)
+    {
+        *commit = resident;
+    }
+
+    LOG(INFO) << "yf: resident = " << resident << ", total resident "
+              << total_resident << ", memory limit = " << memory_limit_
+              << ", allocated = " << allocated
+              << ", total allocated = " << total_allocated;
     return resident >= static_cast<int64_t>(memory_limit_);
-#endif
+
+#else
     int64_t allocated, committed;
     mi_thread_stats(&allocated, &committed);
     if (alloc != nullptr)
@@ -2492,6 +2512,7 @@ bool CcShardHeap::Full(int64_t *alloc, int64_t *commit) const
     return allocated >= static_cast<int64_t>(memory_limit_) ||
            (cc_shard_->EnableDefragment() &&
             committed > static_cast<int64_t>(memory_limit_));
+#endif
 }
 
 bool CcShardHeap::NeedCleanShard(int64_t &alloc, int64_t &commit) const
@@ -2505,8 +2526,9 @@ bool CcShardHeap::NeedDefragment(int64_t *alloc, int64_t *commit) const
 {
 #if defined(WITH_JEMALLOC)
     // defragmentation is not supported with jemalloc
+    LOG(INFO) << "== yf: defragmentation is not supported with jemalloc";
     return false;
-#endif
+#else
     int64_t allocated, committed;
     mi_thread_stats(&allocated, &committed);
     if (alloc != nullptr)
@@ -2522,6 +2544,7 @@ bool CcShardHeap::NeedDefragment(int64_t *alloc, int64_t *commit) const
     return committed > (memory_limit_ * CcShardHeap::high_water) &&
            (static_cast<double>(allocated) / static_cast<double>(committed)) <=
                CcShardHeap::utilization;
+#endif
 }
 
 bool CcShardHeap::AsyncDefragment()

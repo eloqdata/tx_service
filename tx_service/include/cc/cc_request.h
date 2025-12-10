@@ -81,7 +81,7 @@
 #include "tx_service_common.h"
 #include "type.h"
 #include "util.h"
-#if defined(USE_JEMALLOC)
+#if defined(WITH_JEMALLOC)
 #include <jemalloc/jemalloc.h>
 #endif
 
@@ -6299,6 +6299,8 @@ public:
                     data_sync_vec_->pop_back();
                     cnt++;
                 }
+
+#if !defined(WITH_JEMALLOC)
                 int64_t allocated, committed;
                 if (data_sync_vec_->size() == 0 &&
                     scan_heap->Full(&allocated, &committed))
@@ -6309,6 +6311,8 @@ public:
                         << " committed: " << committed
                         << " heap size: " << scan_heap->Threshold();
                 }
+#endif
+
                 mi_heap_set_default(prev_heap);
 
                 if (data_sync_vec_->size() > 0)
@@ -6333,6 +6337,7 @@ public:
                     cnt++;
                 }
 
+#if !defined(WITH_JEMALLOC)
                 int64_t allocated, committed;
                 if (archive_vec_->size() == 0 &&
                     scan_heap->Full(&allocated, &committed))
@@ -6343,6 +6348,7 @@ public:
                         << " committed: " << committed
                         << " heap size: " << scan_heap->Threshold();
                 }
+#endif
                 mi_heap_set_default(prev_heap);
 
                 if (archive_vec_->size() > 0)
@@ -7404,6 +7410,7 @@ struct CollectMemStatsCc : public CcRequestBase
 
     bool Execute(CcShard &ccs) override
     {
+#if !defined(WITH_JEMALLOC)
         // this cc will only execute in context of shard heap, so the stats
         // collected are shard heap stats
         //
@@ -7413,14 +7420,27 @@ struct CollectMemStatsCc : public CcRequestBase
         std::lock_guard<std::mutex> lk(mux_);
         finished_ = true;
         cv_.notify_one();
-#if defined(USE_JEMALLOC)
+
+#else
         // estimate thread memory usage from total process memory
-        size_t total_resident, resident;
+        size_t total_resident, total_allocated;
+        size_t resident, allocated;
         size_t sz = sizeof(total_resident);
 
+        uint64_t epoch = 1;
+        mallctl("epoch", NULL, NULL, &epoch, sizeof(epoch));
         // Resident memory pages actually held by jemalloc from OS
         mallctl("stats.resident", &total_resident, &sz, NULL, 0);
-        LOG(INFO) << "CollectMemStatsCc: total_resident " << total_resident;
+        mallctl("stats.allocated", &total_allocated, &sz, NULL, 0);
+
+        resident = total_resident * 0.9 / ccs.core_cnt_;
+        allocated = total_allocated * 0.9 / ccs.core_cnt_;
+
+        stats_->allocated_ = allocated;
+        stats_->committed_ = resident;
+
+        LOG(INFO) << "CollectMemStatsCc: ccs #" << ccs.core_id_ << ", resident "
+                  << resident << ", allocated = " << total_allocated;
 #endif
         return false;
     }
