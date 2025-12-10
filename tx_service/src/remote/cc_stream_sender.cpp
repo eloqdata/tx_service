@@ -154,14 +154,11 @@ bool CcStreamSender::UpdateStreamIP(uint32_t node_id,
  * @param msg
  * @param res
  * @param resend
- * @return true
- * @return false
  */
-bool CcStreamSender::SendMessageToNode(uint32_t dest_node_id,
-                                       const CcMessage &msg,
-                                       CcHandlerResultBase *res,
-                                       bool resend,
-                                       bool *need_reconnect)
+SendMessageResult CcStreamSender::SendMessageToNode(uint32_t dest_node_id,
+                                                    const CcMessage &msg,
+                                                    CcHandlerResultBase *res,
+                                                    bool resend)
 {
     TX_TRACE_ACTION_WITH_CONTEXT(
         this,
@@ -186,18 +183,13 @@ bool CcStreamSender::SendMessageToNode(uint32_t dest_node_id,
 
         LOG(ERROR) << "Trying to connect to an unknown remote node. Node Id: "
                    << dest_node_id;
-        return false;
+        return SendMessageResult::Failed();
     }
 
     std::atomic<int64_t> &stream_version = std::get<1>(stream_it->second);
     int64_t stream_ver = stream_version.load(std::memory_order_acquire);
     if (stream_ver == -1)
     {
-        if (need_reconnect != nullptr)
-        {
-            *need_reconnect = true;
-        }
-        // resend the message if stream is connecting
         std::lock_guard<std::mutex> lk(to_connect_mux_);
         auto resend_message_list = resend_message_list_.try_emplace(
             dest_node_id, moodycamel::ConcurrentQueue<ResendMessage::Uptr>());
@@ -208,7 +200,7 @@ bool CcStreamSender::SendMessageToNode(uint32_t dest_node_id,
         // resend messages.
         to_connect_flag_ = true;
         to_connect_cv_.notify_one();
-        return true;
+        return SendMessageResult::Queued(true);
     }
 
     brpc::StreamId stream_id = std::get<0>(stream_it->second);
@@ -259,13 +251,14 @@ bool CcStreamSender::SendMessageToNode(uint32_t dest_node_id,
                 }
             }
 
-            return true;
+            return SendMessageResult::Queued(false);
         }
         else
         {
             // for resend message, we have already reconnect the stream, if it
             // still failed to send the message, it possibly means that the
             // remote node is dead. We should skip resend the message again.
+            // TODO: discard the message? needs thorough thinking.
             if (resend)
             {
                 // SendMessage error return -1 to indicate the request needs
@@ -290,7 +283,7 @@ bool CcStreamSender::SendMessageToNode(uint32_t dest_node_id,
                     }
                 }
 
-                return false;
+                return SendMessageResult::Failed();
             }
             else
             {
@@ -318,20 +311,16 @@ bool CcStreamSender::SendMessageToNode(uint32_t dest_node_id,
                 to_connect_flag_ = true;
                 to_connect_cv_.notify_one();
 
-                return true;
+                return SendMessageResult::Queued(true);
             }
         }
     }
-    else
-    {
-        return true;
-    }
+
+    return SendMessageResult::Sent();
 }
 
-bool CcStreamSender::SendScanRespToNode(uint32_t dest_node_id,
-                                        const ScanSliceResponse &msg,
-                                        bool resend,
-                                        bool *need_reconnect)
+SendMessageResult CcStreamSender::SendScanRespToNode(
+    uint32_t dest_node_id, const ScanSliceResponse &msg, bool resend)
 {
     TX_TRACE_ACTION_WITH_CONTEXT(
         this,
@@ -351,17 +340,13 @@ bool CcStreamSender::SendScanRespToNode(uint32_t dest_node_id,
     {
         LOG(ERROR) << "Trying to connect to an unknown remote node. Node Id: "
                    << dest_node_id;
-        return false;
+        return SendMessageResult::Failed();
     }
 
     std::atomic<int64_t> &stream_version = std::get<1>(stream_it->second);
     int64_t stream_ver = stream_version.load(std::memory_order_acquire);
     if (stream_ver == -1)
     {
-        if (need_reconnect != nullptr)
-        {
-            *need_reconnect = true;
-        }
         // resend the message if stream is connecting
         std::lock_guard<std::mutex> lk(to_connect_mux_);
         DLOG(INFO) << "CC stream is connecting, buffer the message for resend";
@@ -376,7 +361,7 @@ bool CcStreamSender::SendScanRespToNode(uint32_t dest_node_id,
         // resend messages.
         to_connect_flag_ = true;
         to_connect_cv_.notify_one();
-        return true;
+        return SendMessageResult::Queued(true);
     }
 
     brpc::StreamId &stream_id = std::get<0>(stream_it->second);
@@ -389,7 +374,6 @@ bool CcStreamSender::SendScanRespToNode(uint32_t dest_node_id,
         brpc::StreamWrite(stream_id, iobuf, &stream_write_options_);
 
     if (error_code != 0)
-
     {
         if (error_code == EAGAIN)
         {
@@ -427,16 +411,17 @@ bool CcStreamSender::SendScanRespToNode(uint32_t dest_node_id,
                 }
             }
 
-            return true;
+            return SendMessageResult::Queued(false);
         }
         else
         {
             // for resend message, we have already reconnect the stream, if it
             // still failed to send the message, it possibly means that the
             // remote node is dead. We should skip resend the message again.
+            // TODO: discard the message? needs thorough thinking.
             if (resend)
             {
-                return false;
+                return SendMessageResult::Failed();
             }
             else
             {
@@ -465,14 +450,11 @@ bool CcStreamSender::SendScanRespToNode(uint32_t dest_node_id,
                 to_connect_flag_ = true;
                 to_connect_cv_.notify_one();
 
-                return true;
+                return SendMessageResult::Queued(true);
             }
         }
     }
-    else
-    {
-        return true;
-    }
+    return SendMessageResult::Sent();
 }
 
 bool CcStreamSender::SendStandbyMessageToNode(uint32_t dest_node_id,
@@ -500,7 +482,8 @@ bool CcStreamSender::SendStandbyMessageToNode(uint32_t dest_node_id,
     butil::IOBufAsZeroCopyOutputStream wrapper(&iobuf);
     msg.SerializeToZeroCopyStream(&wrapper);
 
-    int error_code = brpc::StreamWrite(stream_id, iobuf, &stream_write_options_);
+    int error_code =
+        brpc::StreamWrite(stream_id, iobuf, &stream_write_options_);
     if (error_code != 0)
     {
         DLOG(INFO) << "SendStandbyMessageToNode failed, node: " << dest_node_id
@@ -520,13 +503,11 @@ bool CcStreamSender::SendStandbyMessageToNode(uint32_t dest_node_id,
  * @param msg
  * @param res
  * @param resend
- * @return true
- * @return false
  */
-bool CcStreamSender::SendMessageToNg(uint32_t node_group_id,
-                                     const CcMessage &msg,
-                                     CcHandlerResultBase *res,
-                                     bool resend)
+SendMessageResult CcStreamSender::SendMessageToNg(uint32_t node_group_id,
+                                                  const CcMessage &msg,
+                                                  CcHandlerResultBase *res,
+                                                  bool resend)
 {
     uint32_t dest_node_id = Sharder::Instance().LeaderNodeId(node_group_id);
     return SendMessageToNode(dest_node_id, msg, res, resend);
@@ -708,10 +689,9 @@ void CcStreamSender::ResendMessageToNode()
 
                 for (size_t idx = 0; idx < msg_cnt; ++idx)
                 {
-                    if (SendMessageToNode(nid,
-                                          messages[idx]->msg_,
-                                          messages[idx]->res_,
-                                          false))
+                    auto send_result = SendMessageToNode(
+                        nid, messages[idx]->msg_, messages[idx]->res_, false);
+                    if (send_result.sent || send_result.queued_for_retry)
                     {
                         send_cnt += 1;
                     }
@@ -757,7 +737,9 @@ void CcStreamSender::ResendMessageToNode()
 
                 for (size_t idx = 0; idx < msg_cnt; ++idx)
                 {
-                    if (SendScanRespToNode(nid, messages[idx]->msg_, false))
+                    auto send_result =
+                        SendScanRespToNode(nid, messages[idx]->msg_, false);
+                    if (send_result.sent || send_result.queued_for_retry)
                     {
                         send_cnt += 1;
                     }
@@ -839,16 +821,14 @@ void CcStreamSender::ConnectStreams()
                     lk.unlock();
                     for (size_t i = 0; i < msg_cnt; ++i)
                     {
-                        SendMessageToNode(nid,
-                                          messages[i]->msg_,
-                                          messages[i]->res_,
-                                          true,
-                                          &need_reconnect);
-                        if (need_reconnect)
+                        auto send_result = SendMessageToNode(
+                            nid, messages[i]->msg_, messages[i]->res_, true);
+                        if (send_result.need_reconnect)
                         {
                             // re-enqueue messages from i+1 to msg_cnt-1
                             // (message at i was already enqueued in
                             // SendMessageToNode)
+                            assert(send_result.queued_for_retry);
                             for (size_t left_idx = i + 1; left_idx < msg_cnt;
                                  ++left_idx)
                             {
@@ -858,6 +838,7 @@ void CcStreamSender::ConnectStreams()
                                         std::move(messages[left_idx]));
                                 }
                             }
+                            need_reconnect = true;
                             break;
                         }
                     }
@@ -901,13 +882,10 @@ void CcStreamSender::ConnectStreams()
                     lk.unlock();
                     for (size_t i = 0; i < msg_cnt; ++i)
                     {
-                        SendScanRespToNode(
-                            nid, messages[i]->msg_, true, &need_reconnect);
-                        if (need_reconnect)
+                        auto send_result =
+                            SendScanRespToNode(nid, messages[i]->msg_, true);
+                        if (send_result.need_reconnect)
                         {
-                            // re-enqueue messages from i+1 to msg_cnt-1
-                            // (message at i was already enqueued in
-                            // SendMessageToNode)
                             for (size_t left_idx = i + 1; left_idx < msg_cnt;
                                  ++left_idx)
                             {
@@ -917,6 +895,7 @@ void CcStreamSender::ConnectStreams()
                                         std::move(messages[left_idx]));
                                 }
                             }
+                            need_reconnect = true;
                             break;
                         }
                     }
