@@ -473,6 +473,10 @@ bool CcStreamSender::SendStandbyMessageToNode(uint32_t dest_node_id,
     std::atomic<int64_t> &stream_version = std::get<1>(stream_it->second);
     if (stream_version.load(std::memory_order_acquire) == -1)
     {
+        std::lock_guard<std::mutex> lk(to_connect_mux_);
+        // wake up connector thread to reconnect streams
+        to_connect_flag_ = true;
+        to_connect_cv_.notify_one();
         return false;
     }
 
