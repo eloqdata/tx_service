@@ -19,8 +19,6 @@
  *    <http://www.gnu.org/licenses/>.
  *
  */
-#include "tx_operation.h"
-
 #include <algorithm>
 #include <atomic>
 #include <chrono>
@@ -48,6 +46,7 @@
 #include "store/data_store_handler.h"
 #include "tx_execution.h"
 #include "tx_key.h"
+#include "tx_operation.h"
 #include "tx_request.h"
 #include "tx_service.h"
 #include "tx_service_common.h"
@@ -4212,7 +4211,46 @@ void SplitFlushRangeOp::Forward(TransactionExecution *txm)
                       << range_info_->PartitionId()
                       << ", txn: " << txm->TxNumber();
             // Upgrade to write lock again for commit phase.
+
+#ifdef WITH_FAULT_INJECT
+            // Check if fault injector is enabled
+            FaultEntry *fault_entry =
+                FaultInject::Entry("split_flush_commit_acquire_all_deadlock");
+            if (fault_entry != nullptr)
+            {
+                // Only assign to op_ and push to txm, do not call Process
+                op_ = &commit_acquire_all_write_op_;
+                txm->PushOperation(&commit_acquire_all_write_op_);
+                // Ensure hd_results_ is initialized
+                // Initialize with at least one result if empty
+                auto all_node_groups = Sharder::Instance().AllNodeGroups();
+                commit_acquire_all_write_op_.Reset(all_node_groups->size());
+                commit_acquire_all_write_op_.is_running_ = true;
+                // Set error on the first hd_result with DEAD_LOCK_ABORT
+                commit_acquire_all_write_op_.hd_results_[0].SetError(
+                    CcErrorCode::DEAD_LOCK_ABORT);
+                commit_acquire_all_write_op_.hd_results_[0].ForceError();
+                DLOG(INFO)
+                    << "FaultInject split_flush_commit_acquire_all_deadlock, "
+                    << " commit_acquire_all_write_op_.IsDeadlock(): "
+                    << commit_acquire_all_write_op_.IsDeadlock()
+                    << " upload_cnt_: "
+                    << commit_acquire_all_write_op_.upload_cnt_
+                    << " fail_cnt_: "
+                    << commit_acquire_all_write_op_.fail_cnt_.load(
+                           std::memory_order_relaxed);
+                // Auto-remove the fault to prevent it from being triggered
+                // again
+                FaultInject::Instance().InjectFault(
+                    "split_flush_commit_acquire_all_deadlock", "remove");
+            }
+            else
+            {
+                ForwardToSubOperation(txm, &commit_acquire_all_write_op_);
+            }
+#else
             ForwardToSubOperation(txm, &commit_acquire_all_write_op_);
+#endif
         }
     }
     else if (op_ == &prepare_acquire_all_write_op_)
@@ -4489,6 +4527,9 @@ void SplitFlushRangeOp::Forward(TransactionExecution *txm)
     }
     else if (op_ == &commit_acquire_all_write_op_)
     {
+        DLOG(INFO) << "Split Flush commit acquire all write lock op fail cnt: "
+                   << commit_acquire_all_write_op_.fail_cnt_.load(
+                          std::memory_order_relaxed);
         if (commit_acquire_all_write_op_.fail_cnt_.load(
                 std::memory_order_relaxed) > 0)
         {
@@ -4499,7 +4540,7 @@ void SplitFlushRangeOp::Forward(TransactionExecution *txm)
                            << txm->TxNumber();
                 if (commit_acquire_all_write_op_.IsDeadlock())
                 {
-                    LOG(ERROR)
+                    DLOG(ERROR)
                         << "Split Flush transaction deadlocks with other "
                            "transactions, downgrade write lock, tx_number:"
                         << txm->TxNumber();
@@ -4520,10 +4561,13 @@ void SplitFlushRangeOp::Forward(TransactionExecution *txm)
             return;
         }
 
-        CODE_FAULT_INJECTOR("term_SplitFlushOp_CommitAcquireAllWriteOp_Continue", {
-            LOG(INFO) << "FaultInject term_SplitFlushOp_CommitAcquireAllWriteOp_Continue";
-            return;
-        });
+        CODE_FAULT_INJECTOR(
+            "term_SplitFlushOp_CommitAcquireAllWriteOp_Continue", {
+                LOG(INFO)
+                    << "FaultInject "
+                       "term_SplitFlushOp_CommitAcquireAllWriteOp_Continue";
+                return;
+            });
 
         ACTION_FAULT_INJECTOR("range_split_commit_acquire_all");
 
