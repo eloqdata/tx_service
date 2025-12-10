@@ -4144,16 +4144,6 @@ void LocalCcShards::PostProcessHashPartitionDataSyncTask(
     }
 }
 
-bvar::LatencyRecorder ScanSliceLr("debug_prescan", "us");
-struct ScanSliceTimer
-{
-    ~ScanSliceTimer()
-    {
-        ScanSliceLr << butil::cpuwide_time_us() - start_ts;
-    }
-    int64_t start_ts{butil::cpuwide_time_us()};
-};
-
 void LocalCcShards::DataSyncForHashPartition(
     std::shared_ptr<DataSyncTask> data_sync_task, size_t worker_idx)
 {
@@ -4355,11 +4345,8 @@ void LocalCcShards::DataSyncForHashPartition(
         data_sync_txm->TxNumber(),
         catalog_rec.Schema()->Version());
 
-    {
-        ScanSliceTimer timer;
         EnqueueToCcShard(worker_idx, &scan_delta_size_cc);
         scan_delta_size_cc.Wait();
-    }
 
     if (scan_delta_size_cc.IsError())
     {
