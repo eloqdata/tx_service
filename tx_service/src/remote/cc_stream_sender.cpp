@@ -190,6 +190,7 @@ SendMessageResult CcStreamSender::SendMessageToNode(uint32_t dest_node_id,
     int64_t stream_ver = stream_version.load(std::memory_order_acquire);
     if (stream_ver == -1)
     {
+        // resend the message if stream is connecting
         std::lock_guard<std::mutex> lk(to_connect_mux_);
         auto resend_message_list = resend_message_list_.try_emplace(
             dest_node_id, moodycamel::ConcurrentQueue<ResendMessage::Uptr>());
@@ -886,6 +887,10 @@ void CcStreamSender::ConnectStreams()
                             SendScanRespToNode(nid, messages[i]->msg_, true);
                         if (send_result.need_reconnect)
                         {
+                            // re-enqueue messages from i+1 to msg_cnt-1
+                            // (message at i was already enqueued in
+                            // SendMessageToNode)
+                            assert(send_result.queued_for_retry);
                             for (size_t left_idx = i + 1; left_idx < msg_cnt;
                                  ++left_idx)
                             {
