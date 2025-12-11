@@ -1843,6 +1843,8 @@ void AcquireAllOp::Forward(TransactionExecution *txm)
         // arbitrarily long, after all acquire requests are acknowledged, we
         // still need to periodically check liveness of the remote node.
 
+        DLOG(INFO) << "All acquire all requests finished for tx "
+                   << txm->TxNumber() << ", fail count: " << fail_cnt_.load();
         if (fail_cnt_.load(std::memory_order_relaxed) == 0)
         {
             for (size_t idx = 0; idx < upload_cnt_; ++idx)
@@ -4221,15 +4223,17 @@ void SplitFlushRangeOp::Forward(TransactionExecution *txm)
                 // Only assign to op_ and push to txm, do not call Process
                 op_ = &commit_acquire_all_write_op_;
                 txm->PushOperation(&commit_acquire_all_write_op_);
-                // Ensure hd_results_ is initialized
-                // Initialize with at least one result if empty
                 auto all_node_groups = Sharder::Instance().AllNodeGroups();
                 commit_acquire_all_write_op_.Reset(all_node_groups->size());
                 commit_acquire_all_write_op_.is_running_ = true;
+
+                // Ensure at least one result slot exists.
+                assert(commit_acquire_all_write_op_.hd_results_.size() >= 1);
                 // Set error on the first hd_result with DEAD_LOCK_ABORT
                 commit_acquire_all_write_op_.hd_results_[0].SetError(
                     CcErrorCode::DEAD_LOCK_ABORT);
                 commit_acquire_all_write_op_.hd_results_[0].ForceError();
+
                 DLOG(INFO)
                     << "FaultInject split_flush_commit_acquire_all_deadlock, "
                     << " commit_acquire_all_write_op_.IsDeadlock(): "
