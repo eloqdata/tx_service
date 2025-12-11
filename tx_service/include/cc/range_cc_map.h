@@ -345,8 +345,6 @@ public:
             // Request is now in blocking queue, stop execution
             return false;
         }
-
-        return true;
     }
 
     bool Execute(PostReadCc &req) override
