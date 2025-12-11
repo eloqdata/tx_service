@@ -334,7 +334,8 @@ public:
             // blocking. The bucket lock is a read lock, so it doesn't prevent
             // other readers. When the request resumes, we already have the
             // bucket lock and can immediately retry the range lock acquisition.
-            // If the read request comes from a remote node, send acknowledgement
+            // If the read request comes from a remote node, send
+            // acknowledgement
             if (!req.IsLocal())
             {
                 remote::RemoteRead &remote_req =
