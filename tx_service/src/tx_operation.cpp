@@ -196,20 +196,6 @@ void ReadOperation::Forward(TransactionExecution *txm)
             }
         }
 
-        if (read_tx_req_->tab_name_->IsHashPartitioned() &&
-            hd_result_.ErrorCode() == CcErrorCode::OUT_OF_MEMORY)
-        {
-            // For hash partition, keep retrying since checkpoint will
-            // clean up memory for new insert.
-            // For range partition, keep retrying with range read lock might
-            // block checkpoint, which will cause dirty data fail to flush, and
-            // we will keep getting OOM error.
-            retry_num_++;
-            hd_result_.Value().Reset();
-            hd_result_.Reset();
-            ReRunOp(txm);
-            return;
-        }
         txm->PostProcess(*this);
     }
     else
@@ -8338,7 +8324,6 @@ void BatchReadOperation::Forward(TransactionExecution *txm)
     {
         uint32_t err_cnt = 0;
         std::unordered_set<uint32_t> update_leader_set;
-        bool out_of_memory_error = false;
         for (auto &hd_result : hd_result_vec_)
         {
             if (hd_result.ErrorCode() == CcErrorCode::PIN_RANGE_SLICE_FAILED ||
@@ -8364,22 +8349,8 @@ void BatchReadOperation::Forward(TransactionExecution *txm)
                 hd_result.Value().Reset();
                 hd_result.Reset();
             }
-            else if (hd_result.ErrorCode() == CcErrorCode::OUT_OF_MEMORY)
-            {
-                ++err_cnt;
-                out_of_memory_error = true;
-                hd_result.Value().Reset();
-                hd_result.Reset();
-            }
         }
 
-        if (out_of_memory_error)
-        {
-            retry_num_++;
-            unfinished_cnt_.store(err_cnt, std::memory_order_relaxed);
-            ReRunOp(txm);
-            return;
-        }
         if (err_cnt > 0 && retry_num_ > 0)
         {
             unfinished_cnt_.store(err_cnt, std::memory_order_relaxed);
