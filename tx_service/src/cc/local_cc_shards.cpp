@@ -4652,7 +4652,14 @@ void LocalCcShards::DataSyncForHashPartition(
 
     if (scan_concurrency > 0)
     {
+        bool need_notify = scan_concurrency >
+                           scan_concurrency_.load(std::memory_order_acquire);
         scan_concurrency_.store(scan_concurrency, std::memory_order_relaxed);
+        if (need_notify)
+        {
+            std::lock_guard<std::mutex> lk(data_sync_worker_ctx_.mux_);
+            data_sync_worker_ctx_.cv_.notify_all();
+        }
     }
 
     // 3. Scan records.
