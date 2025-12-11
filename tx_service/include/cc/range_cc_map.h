@@ -1051,6 +1051,7 @@ public:
                         shard_->local_shards_.GetTableRangesHeap());
 
 #if defined(WITH_JEMALLOC)
+/*
                     unsigned prev_arena;
                     size_t sz = sizeof(prev_arena);
                     // read prev arena id
@@ -1067,6 +1068,7 @@ public:
                             NULL,
                             &table_range_arena_id,
                             sizeof(unsigned));
+                            */
 #endif
                     old_table_range_entry->InitRangeSlices(
                         std::move(range_slices),
@@ -1084,11 +1086,13 @@ public:
                     }
 
 #if defined(WITH_JEMALLOC)
+                    /*
                     mallctl("thread.arena",
                             NULL,
                             NULL,
                             &prev_arena,
                             sizeof(unsigned));
+                    */
 
 #endif
                     heap_lk.unlock();

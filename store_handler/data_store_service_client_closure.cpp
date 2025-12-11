@@ -755,6 +755,7 @@ void FetchTableRangesCallback(void *data,
             mi_heap_set_default(shards->GetTableRangesHeap());
 
 #if defined(WITH_JEMALLOC)
+        /*
         unsigned prev_arena;
         size_t sz = sizeof(prev_arena);
         // read prev arena id
@@ -766,6 +767,7 @@ void FetchTableRangesCallback(void *data,
                 NULL,
                 &table_range_arena_id,
                 sizeof(unsigned));
+        */
 
 #endif
 
@@ -829,7 +831,7 @@ void FetchTableRangesCallback(void *data,
         }
 
 #if defined(WITH_JEMALLOC)
-        mallctl("thread.arena", NULL, NULL, &prev_arena, sizeof(unsigned));
+        // mallctl("thread.arena", NULL, NULL, &prev_arena, sizeof(unsigned));
 #endif
         heap_lk.unlock();
 
@@ -1050,6 +1052,7 @@ void FetchRangeSlicesCallback(void *data,
                 mi_heap_set_default(shards->GetTableRangesHeap());
 
 #if defined(WITH_JEMALLOC)
+            /*
             unsigned prev_arena;
             size_t sz = sizeof(prev_arena);
             // read prev arena id
@@ -1061,6 +1064,7 @@ void FetchRangeSlicesCallback(void *data,
                     NULL,
                     &table_range_arena_id,
                     sizeof(unsigned));
+            */
 
 #endif
 
@@ -1099,7 +1103,8 @@ void FetchRangeSlicesCallback(void *data,
                 mi_restore_default_thread_id();
             }
 #if defined(WITH_JEMALLOC)
-            mallctl("thread.arena", NULL, NULL, &prev_arena, sizeof(unsigned));
+            // mallctl("thread.arena", NULL, NULL, &prev_arena,
+            // sizeof(unsigned));
 #endif
             heap_lk.unlock();
 

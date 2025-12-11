@@ -457,11 +457,13 @@ public:
     bool TableRangesMemoryFull()
     {
 #if defined(WITH_JEMALLOC)
+        /*
         size_t committed = 0;
         size_t allocated = 0;
         auto table_range_arena_id = GetTableRangesArenaId();
         GetJemallocArenaStat(table_range_arena_id, committed, allocated);
         return (static_cast<size_t>(allocated) >= range_slice_memory_limit_);
+        */
 #else
         if (table_ranges_heap_ != nullptr)
         {
@@ -485,12 +487,14 @@ public:
     bool HasEnoughTableRangesMemory()
     {
 #if defined(WITH_JEMALLOC)
+        /*
         size_t committed = 0;
         size_t allocated = 0;
         unsigned table_range_arena_id = GetTableRangesArenaId();
         GetJemallocArenaStat(table_range_arena_id, committed, allocated);
         size_t target_memory_size = range_slice_memory_limit_ / 10 * 9;
         return (static_cast<size_t>(allocated) <= target_memory_size);
+        */
 #else
         if (table_ranges_heap_ != nullptr)
         {
@@ -509,6 +513,7 @@ public:
     void TableRangeHeapUsageReport()
     {
 #if defined(WITH_JEMALLOC)
+        /*
         size_t committed = 0;
         size_t allocated = 0;
         GetJemallocArenaStat(GetTableRangesArenaId(), committed, allocated);
@@ -516,6 +521,7 @@ public:
                   << ", committed " << committed << ", full: "
                   << (bool) (static_cast<size_t>(allocated) >=
                              range_slice_memory_limit_);
+        */
 #else
         std::unique_lock<std::mutex> heap_lk(table_ranges_heap_mux_);
         bool is_override_thd = mi_is_override_thread();
@@ -867,6 +873,7 @@ public:
         mi_heap_t *prev_heap = mi_heap_set_default(table_ranges_heap_);
 
 #if defined(WITH_JEMALLOC)
+        /*
         unsigned prev_arena_id;
         size_t table_range_arena_id = GetTableRangesArenaId();
         size_t sz = sizeof(prev_arena_id);
@@ -876,6 +883,7 @@ public:
                 NULL,
                 &table_range_arena_id,
                 sizeof(unsigned));
+        */
 #endif
 
         TxKey range_tx_key(&start_key);
@@ -943,8 +951,8 @@ public:
             }
 
 #if defined(WITH_JEMALLOC)
-            mallctl(
-                "thread.arena", NULL, NULL, &prev_arena_id, sizeof(unsigned));
+            // mallctl(
+            //    "thread.arena", NULL, NULL, &prev_arena_id, sizeof(unsigned));
 #endif
 
             if (last_sync_ts > 0)
@@ -992,7 +1000,8 @@ public:
         mi_heap_set_default(prev_heap);
 
 #if defined(WITH_JEMALLOC)
-        mallctl("thread.arena", NULL, NULL, &prev_arena_id, sizeof(unsigned));
+        // mallctl("thread.arena", NULL, NULL, &prev_arena_id,
+        // sizeof(unsigned));
 #endif
 
         return static_cast<TemplateTableRangeEntry<KeyT> *>(

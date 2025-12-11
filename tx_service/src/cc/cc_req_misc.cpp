@@ -409,6 +409,7 @@ void FetchRangeSlicesReq::SetFinish(CcErrorCode err)
             mi_heap_set_default(shards->GetTableRangesHeap());
 
 #if defined(WITH_JEMALLOC)
+        /*
         unsigned prev_arena;
         size_t sz = sizeof(prev_arena);
         // read prev arena id
@@ -420,6 +421,7 @@ void FetchRangeSlicesReq::SetFinish(CcErrorCode err)
                 NULL,
                 &table_range_arena_id,
                 sizeof(unsigned));
+        */
 
 #endif
 
@@ -441,7 +443,7 @@ void FetchRangeSlicesReq::SetFinish(CcErrorCode err)
         }
 
 #if defined(WITH_JEMALLOC)
-        mallctl("thread.arena", NULL, NULL, &prev_arena, sizeof(unsigned));
+        // mallctl("thread.arena", NULL, NULL, &prev_arena, sizeof(unsigned));
 #endif
         heap_lk.unlock();
 

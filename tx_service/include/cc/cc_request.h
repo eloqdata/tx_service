@@ -6295,7 +6295,7 @@ public:
                 mi_heap_t *prev_heap = scan_heap->SetAsDefaultHeap();
 
 #if defined(WITH_JEMALLOC)
-                auto prev_arena = scan_heap->SetAsDefaultArena();
+                // auto prev_arena = scan_heap->SetAsDefaultArena();
 #endif
 
                 size_t cnt = 0;
@@ -6318,8 +6318,9 @@ public:
 
                 mi_heap_set_default(prev_heap);
 #if defined(WITH_JEMALLOC)
-                mallctl(
-                    "thread.arena", NULL, NULL, &prev_arena, sizeof(unsigned));
+                // mallctl(
+                //    "thread.arena", NULL, NULL, &prev_arena,
+                //    sizeof(unsigned));
 #endif
 
                 if (data_sync_vec_->size() > 0)
@@ -6338,7 +6339,7 @@ public:
                 CcShardHeap *scan_heap = ccs.GetShardDataSyncScanHeap();
                 mi_heap_t *prev_heap = scan_heap->SetAsDefaultHeap();
 #if defined(WITH_JEMALLOC)
-                auto prev_arena = scan_heap->SetAsDefaultArena();
+                // auto prev_arena = scan_heap->SetAsDefaultArena();
 #endif
 
                 size_t cnt = 0;
@@ -6362,8 +6363,9 @@ public:
                 mi_heap_set_default(prev_heap);
 
 #if defined(WITH_JEMALLOC)
-                mallctl(
-                    "thread.arena", NULL, NULL, &prev_arena, sizeof(unsigned));
+                // mallctl(
+                //    "thread.arena", NULL, NULL, &prev_arena,
+                //    sizeof(unsigned));
 #endif
 
                 if (archive_vec_->size() > 0)
@@ -7433,6 +7435,7 @@ struct CollectMemStatsCc : public CcRequestBase
         mi_thread_stats(&stats_->allocated_, &stats_->committed_);
 #else
         // estimate thread memory usage from total process memory
+        /*
         unsigned prev_arena;
         size_t sz = sizeof(prev_arena);
         // read prev arena id
@@ -7449,6 +7452,7 @@ struct CollectMemStatsCc : public CcRequestBase
 
         LOG(INFO) << "CollectMemStatsCc: ccs #" << ccs.core_id_ << ", commited "
                   << committed << ", allocated = " << allocated;
+        */
 #endif
 
         stats_->wait_list_size_ = ccs.WaitListSizeForMemory();

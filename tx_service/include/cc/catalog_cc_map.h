@@ -440,23 +440,27 @@ public:
                                             .GetTableRangesHeap());
 
 #if defined(WITH_JEMALLOC)
-                                    unsigned prev_arena;
-                                    size_t sz = sizeof(prev_arena);
-                                    // read prev arena id
-                                    mallctl("thread.arena",
-                                            &prev_arena,
-                                            &sz,
-                                            NULL,
-                                            0);  // read only
-                                    // override arena id
-                                    size_t table_range_arena_id =
-                                        shard_->local_shards_
-                                            .GetTableRangesArenaId();
-                                    mallctl("thread.arena",
-                                            NULL,
-                                            NULL,
-                                            &table_range_arena_id,
-                                            sizeof(unsigned));
+                                    /*
+                                                                        unsigned
+                                       prev_arena; size_t sz =
+                                       sizeof(prev_arena);
+                                                                        // read
+                                       prev arena id mallctl("thread.arena",
+                                                                                &prev_arena,
+                                                                                &sz,
+                                                                                NULL,
+                                                                                0);  // read only
+                                                                        //
+                                       override arena id size_t
+                                       table_range_arena_id =
+                                                                            shard_->local_shards_
+                                                                                .GetTableRangesArenaId();
+                                                                        mallctl("thread.arena",
+                                                                                NULL,
+                                                                                NULL,
+                                                                                &table_range_arena_id,
+                                                                                sizeof(unsigned));
+                                                                                */
 
 #endif
 
@@ -480,11 +484,13 @@ public:
                                     }
 
 #if defined(WITH_JEMALLOC)
+/*
                                     mallctl("thread.arena",
                                             NULL,
                                             NULL,
                                             &prev_arena,
                                             sizeof(unsigned));
+                                            */
 #endif
                                     heap_lk.unlock();
                                 }

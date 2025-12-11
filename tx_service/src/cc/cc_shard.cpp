@@ -222,7 +222,7 @@ void CcShard::Init()
     InitializeShardHeap();
     mi_heap_t *prev_heap = shard_heap_->SetAsDefaultHeap();
 #if defined(WITH_JEMALLOC)
-    auto prev_arena = shard_heap_->SetAsDefaultArena();
+    // auto prev_arena = shard_heap_->SetAsDefaultArena();
 #endif
     lock_vec_.resize(LOCK_ARRAY_INIT_SIZE);
     for (size_t i = 0; i < LOCK_ARRAY_INIT_SIZE; ++i)
@@ -252,7 +252,7 @@ void CcShard::Init()
     mi_heap_set_default(prev_heap);
 
 #if defined(WITH_JEMALLOC)
-    mallctl("thread.arena", NULL, NULL, &prev_arena, sizeof(unsigned));
+    // mallctl("thread.arena", NULL, NULL, &prev_arena, sizeof(unsigned));
 #endif
 }
 
@@ -2472,6 +2472,7 @@ CcShardHeap::~CcShardHeap()
 
 mi_heap_t *CcShardHeap::SetAsDefaultHeap()
 {
+    // mallctl("thread.arena", NULL, NULL, &arena_id_, sizeof(unsigned));
     return mi_heap_set_default(heap_);
 }
 

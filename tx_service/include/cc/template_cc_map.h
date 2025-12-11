@@ -5138,7 +5138,7 @@ public:
         assert(shard_->GetShardHeapThreadId() == mi_thread_id());
 
 #if defined(WITH_JEMALLOC)
-        auto prev_arena = scan_heap->SetAsDefaultArena();
+        // auto prev_arena = scan_heap->SetAsDefaultArena();
 #endif
 
         // If the heap is full, we should stop exporting.
@@ -5150,10 +5150,12 @@ public:
         int64_t commit = 0;
         bool scan_heap_is_full = scan_heap->Full(&alloc, &commit);
 #if defined(WITH_JEMALLOC)
+        /*
         LOG(INFO) << "yf: alloc = " << alloc << ", commit = " << commit
                   << ", limit = " << scan_heap->MemoryLimit()
                   << ", prev arena = " << prev_arena
                   << ", scan heap arena = " << scan_heap->ArenaId();
+        */
 #endif
 
         if (!scan_heap_is_full)
@@ -5177,7 +5179,7 @@ public:
         mi_heap_set_default(prev_heap);
 
 #if defined(WITH_JEMALLOC)
-        mallctl("thread.arena", NULL, NULL, &prev_arena, sizeof(unsigned));
+        // mallctl("thread.arena", NULL, NULL, &prev_arena, sizeof(unsigned));
 #endif
         return export_size;
     }
