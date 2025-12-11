@@ -798,7 +798,7 @@ private:
     bool NotifyNodesUpdateDSShardConfig(const std::set<DSSNode> &nodes,
                                         const DSShard &shard_config);
 
-    ThreadWorkerPool migrate_worker_{1};
+    ThreadWorkerPool migrate_worker_{"dss_migr", 1};
 
     // map{event_id->migrate_log}
     std::shared_mutex migrate_task_mux_;

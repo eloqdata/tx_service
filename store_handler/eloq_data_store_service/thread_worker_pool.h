@@ -36,7 +36,7 @@ namespace EloqDS
 class ThreadWorkerPool
 {
 public:
-    ThreadWorkerPool(size_t max_workers_num = 1);
+    ThreadWorkerPool(const char *short_name, size_t max_workers_num = 1);
     ~ThreadWorkerPool() = default;
 
     void Initialize();
@@ -49,6 +49,7 @@ public:
     }
 
 private:
+    const std::string short_name_;
     size_t max_workers_num_;
     std::vector<std::thread> workers_;
     std::deque<std::function<void()>> work_queue_;

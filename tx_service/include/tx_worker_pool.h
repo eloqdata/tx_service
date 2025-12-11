@@ -38,7 +38,8 @@ namespace txservice
 class TxWorkerPool
 {
 public:
-    TxWorkerPool(size_t max_workers_num = MAX_WORKERS_NUM);
+    TxWorkerPool(const char *short_name,
+                 size_t max_workers_num = MAX_WORKERS_NUM);
     ~TxWorkerPool() = default;
 
     void SubmitWork(std::function<void(size_t)> work);

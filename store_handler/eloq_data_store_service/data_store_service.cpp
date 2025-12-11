@@ -82,7 +82,7 @@ thread_local ObjectPool<SyncFileCacheLocalRequest>
 TTLWrapperCache::TTLWrapperCache()
 {
     ttl_check_running_ = true;
-    ttl_check_worker_ = std::make_unique<ThreadWorkerPool>(1);
+    ttl_check_worker_ = std::make_unique<ThreadWorkerPool>("dss_ttl", 1);
     ttl_check_worker_->SubmitWork([this]() { TTLCheckWorker(); });
 }
 
@@ -338,14 +338,15 @@ bool DataStoreService::StartService(bool create_db_if_missing)
     // standby)
     uint32_t sync_interval_sec = cluster_manager_.GetFileCacheSyncIntervalSec();
     file_cache_sync_running_ = true;
-    file_cache_sync_worker_ = std::make_unique<ThreadWorkerPool>(1);
+    file_cache_sync_worker_ =
+        std::make_unique<ThreadWorkerPool>("dss_fcsyn", 1);
     file_cache_sync_worker_->SubmitWork(
         [this, sync_interval_sec]()
         { FileCacheSyncWorker(sync_interval_sec); });
 
     // Start file sync worker (for standby node to process incoming sync
     // requests)
-    file_sync_worker_ = std::make_unique<ThreadWorkerPool>(1);
+    file_sync_worker_ = std::make_unique<ThreadWorkerPool>("dss_fisyn", 1);
     // ThreadWorkerPool manages its own worker threads internally
     // We just need to create it and submit work items to it
 #endif

@@ -856,7 +856,7 @@ private:
     // table names and their kv table names
     std::unordered_map<txservice::TableName, std::string>
         pre_built_table_names_;
-    ThreadWorkerPool upsert_table_worker_{1};
+    ThreadWorkerPool upsert_table_worker_{"dss_up_tb", 1};
 
     friend class ReadClosure;
     friend class BatchWriteRecordsClosure;

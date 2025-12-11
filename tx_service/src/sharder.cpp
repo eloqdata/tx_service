@@ -217,12 +217,12 @@ int Sharder::Init(
 
 #ifdef EXT_TX_PROC_ENABLED
         tx_worker_pool_ = std::make_unique<TxWorkerPool>(
-            local_shards_->Count() >= 2 ? local_shards_->Count() / 2 : 1);
+            "tx", local_shards_->Count() >= 2 ? local_shards_->Count() / 2 : 1);
 #else
         tx_worker_pool_ =
-            std::make_unique<TxWorkerPool>(local_shards_->Count());
+            std::make_unique<TxWorkerPool>("tx", local_shards_->Count());
 #endif
-        sharder_worker_ = std::make_unique<TxWorkerPool>(1);
+        sharder_worker_ = std::make_unique<TxWorkerPool>("sharder", 1);
 
         assert(nodes_configs.find(node_id_) != nodes_configs.end());
         const NodeConfig &node_conf = nodes_configs.at(node_id_);
