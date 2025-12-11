@@ -4220,13 +4220,11 @@ void SplitFlushRangeOp::Forward(TransactionExecution *txm)
 
                 // Ensure at least one result slot exists.
                 assert(commit_acquire_all_write_op_.hd_results_.size() >= 1);
-                auto &first_result =
-                    commit_acquire_all_write_op_.hd_results_[0];
-                first_result.SetToBlock();
+                auto &hd_result0 = commit_acquire_all_write_op_.hd_results_[0];
+                hd_result0.Reset();
+                hd_result0.SetToBlock();
                 // Set error on the first hd_result with DEAD_LOCK_ABORT
-                first_result.SetError(CcErrorCode::DEAD_LOCK_ABORT);
-                first_result.ForceError();
-
+                hd_result0.SetError(CcErrorCode::DEAD_LOCK_ABORT);
                 DLOG(INFO)
                     << "FaultInject split_flush_commit_acquire_all_deadlock, "
                     << " commit_acquire_all_write_op_.IsDeadlock(): "
