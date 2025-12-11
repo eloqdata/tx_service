@@ -288,7 +288,6 @@ public:
         mi_heap_t *prev_heap = shard_heap->SetAsDefaultHeap();
 #if defined(WITH_JEMALLOC)
         // auto prev_arena = shard_heap->SetAsDefaultArena();
-        LOG(INFO) << "== yf: aaaa";
 #endif
         if (is_ext_proc)
         {
@@ -696,7 +695,6 @@ public:
         coordi_->ext_tx_proc_heap_ = shard_heap->SetAsDefaultHeap();
 #if defined(WITH_JEMALLOC)
         // coordi_->ext_tx_arena_id_ = shard_heap->SetAsDefaultArena();
-        LOG(INFO) << "== yf: bbb";
 #endif
 
         TxmStatus txm_status = txm->Forward();

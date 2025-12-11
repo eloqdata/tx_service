@@ -418,7 +418,7 @@ public:
 
 #if defined(WITH_JEMALLOC)
         size_t sz = sizeof(table_ranges_arena_id_);
-        mallctl("arenas.create", &table_ranges_arena_id_, &sz, NULL, 0);
+        // mallctl("arenas.create", &table_ranges_arena_id_, &sz, NULL, 0);
 #endif
     }
 
@@ -428,7 +428,8 @@ public:
         hash_partition_main_thread_id_ = mi_thread_id();
 #if defined(WITH_JEMALLOC)
         size_t sz = sizeof(hash_partition_ckpt_arena_id_);
-        mallctl("arenas.create", &table_ranges_arena_id_, &sz, NULL, 0);
+        // mallctl("arenas.create", &hash_partition_ckpt_arena_id_, &sz, NULL,
+        // 0);
 #endif
     }
 
@@ -464,6 +465,7 @@ public:
         GetJemallocArenaStat(table_range_arena_id, committed, allocated);
         return (static_cast<size_t>(allocated) >= range_slice_memory_limit_);
         */
+        return false;
 #else
         if (table_ranges_heap_ != nullptr)
         {
@@ -495,6 +497,7 @@ public:
         size_t target_memory_size = range_slice_memory_limit_ / 10 * 9;
         return (static_cast<size_t>(allocated) <= target_memory_size);
         */
+        return false;
 #else
         if (table_ranges_heap_ != nullptr)
         {

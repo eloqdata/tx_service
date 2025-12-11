@@ -85,7 +85,7 @@ struct TxProcCoordinator
     mi_heap_t *ext_tx_proc_heap_{nullptr};
 
 #if defined(WITH_JEMALLOC)
-    unsigned ext_tx_arena_id_{0};
+    // unsigned ext_tx_arena_id_{0};
 #endif
 #endif
 };
