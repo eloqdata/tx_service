@@ -54,7 +54,7 @@ DeadLockCheck::~DeadLockCheck()
 {
 }
 
-bool DeadLockCheck::RequestCheckWithThrottle(uint64_t tx_id)
+bool DeadLockCheck::RequestCheckWithThrottle()
 {
     if (!inst_)
     {
