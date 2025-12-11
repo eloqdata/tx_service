@@ -112,7 +112,20 @@ public:
     SendMessageResult SendScanRespToNode(uint32_t dest_node_id,
                                          const ScanSliceResponse &msg,
                                          bool resend = false);
+
+    /**
+     * @brief Send standby message with best-effort semantics (no
+     * retry/queuing).
+     *
+     * Unlike SendMessageToNode, this does not queue failed messages for retry.
+     * Use for standby replication which has a dedicated resend logic. The
+     * caller only cares whether the message is successfully sent into stream or
+     * not.
+     *
+     * @return true if sent immediately, false otherwise
+     */
     bool SendStandbyMessageToNode(uint32_t dest_node_id, const CcMessage &msg);
+
     void UpdateRemoteNodes(
         const std::unordered_map<NodeId, NodeConfig> &nodes_configs);
 
