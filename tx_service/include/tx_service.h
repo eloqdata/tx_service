@@ -287,7 +287,8 @@ public:
         }
         mi_heap_t *prev_heap = shard_heap->SetAsDefaultHeap();
 #if defined(WITH_JEMALLOC)
-        auto prev_arena = shard_heap->SetAsDefaultArena();
+        // auto prev_arena = shard_heap->SetAsDefaultArena();
+        LOG(INFO) << "== yf: aaaa";
 #endif
         if (is_ext_proc)
         {
@@ -296,7 +297,7 @@ public:
             shard->OverrideHeapThread();
             coordi_->ext_tx_proc_heap_ = prev_heap;
 #if defined(WITH_JEMALLOC)
-            coordi_->ext_tx_arena_id_ = prev_arena;
+            // coordi_->ext_tx_arena_id_ = prev_arena;
 #endif
         }
         one_round_cnt_.fetch_add(1, std::memory_order_relaxed);
@@ -423,7 +424,7 @@ public:
 
         mi_heap_set_default(prev_heap);
 #if defined(WITH_JEMALLOC)
-        mallctl("thread.arena", NULL, NULL, &prev_arena, sizeof(unsigned));
+        // mallctl("thread.arena", NULL, NULL, &prev_arena, sizeof(unsigned));
 #endif
         if (is_ext_proc)
         {
@@ -431,7 +432,7 @@ public:
             mi_restore_default_thread_id();
             coordi_->ext_tx_proc_heap_ = nullptr;
 #if defined(WITH_JEMALLOC)
-            coordi_->ext_tx_arena_id_ = 0;
+            // coordi_->ext_tx_arena_id_ = 0;
 #endif
         }
         shard_status.store(TxShardStatus::Free, std::memory_order_release);
@@ -694,7 +695,8 @@ public:
         shard->OverrideHeapThread();
         coordi_->ext_tx_proc_heap_ = shard_heap->SetAsDefaultHeap();
 #if defined(WITH_JEMALLOC)
-        coordi_->ext_tx_arena_id_ = shard_heap->SetAsDefaultArena();
+        // coordi_->ext_tx_arena_id_ = shard_heap->SetAsDefaultArena();
+        LOG(INFO) << "== yf: bbb";
 #endif
 
         TxmStatus txm_status = txm->Forward();
@@ -706,12 +708,14 @@ public:
         mi_restore_default_thread_id();
         coordi_->ext_tx_proc_heap_ = nullptr;
 #if defined(WITH_JEMALLOC)
+        /*
         mallctl("thread.arena",
                 NULL,
                 NULL,
                 &coordi_->ext_tx_arena_id_,
                 sizeof(unsigned));
         coordi_->ext_tx_arena_id_ = 0;
+        */
 #endif
 
         assert(coordi_->shard_status_.load(std::memory_order_relaxed) ==
@@ -1195,6 +1199,14 @@ public:
             }
         }
 
+        unsigned prev_arena;
+        size_t sz = sizeof(prev_arena);
+        // read prev arena id
+        mallctl("thread.arena", &prev_arena, &sz, NULL, 0);  // read only
+        LOG(INFO) << "yf: pool size = " << pool_.size()
+                  << ", core cnt = " << core_cnt << ", prev arena"
+                  << ", this = " << this << ", prev arena = " << prev_arena;
+
         txservice_skip_wal = skip_wal;
         txservice_skip_kv = skip_kv;
         txservice_enable_cache_replacement = enable_cache_replacement;
@@ -1377,6 +1389,12 @@ public:
 #ifdef EXT_TX_PROC_ENABLED
     TransactionExecution *NewTx(size_t shard_id)
     {
+        unsigned prev_arena;
+        size_t sz = sizeof(prev_arena);
+        // read prev arena id
+        mallctl("thread.arena", &prev_arena, &sz, NULL, 0);  // read only
+        LOG(INFO) << "yf: " << prev_arena << ", this = " << this;
+
         size_t sid =
             shard_id < pool_.size() ? shard_id : (shard_id % pool_.size());
         return pool_[sid]->NewExternalTx();
