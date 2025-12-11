@@ -54,31 +54,6 @@ DeadLockCheck::~DeadLockCheck()
 {
 }
 
-bool DeadLockCheck::RequestCheckWithThrottle()
-{
-    if (!inst_)
-    {
-        return false;
-    }
-
-    std::unique_lock<std::mutex> lk(inst_->mutex_);
-    uint64_t current_time = LocalCcShards::ClockTs();
-
-    // Check if we've requested a check recently (global throttling)
-    uint64_t time_since_last = current_time - inst_->last_throttled_check_time_;
-    if (time_since_last < CHECK_THROTTLE_INTERVAL_)
-    {
-        // Throttled - don't request check yet
-        return false;
-    }
-
-    // Update last throttled check time
-    inst_->last_throttled_check_time_ = current_time;
-    inst_->requested_check_ = true;
-    inst_->con_var_.notify_one();
-    return true;
-}
-
 void DeadLockCheck::MergeRemoteWaitingLockInfo(const tr::DeadLockResponse *rsp)
 {
     uint32_t node_id = rsp->node_id();

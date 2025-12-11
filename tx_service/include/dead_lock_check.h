@@ -199,11 +199,6 @@ public:
         }
     }
 
-    // Request check with throttling to prevent excessive deadlock checks
-    // Global throttling: once per second for all transactions
-    // Returns true if check was requested, false if throttled
-    static bool RequestCheckWithThrottle();
-
 protected:
     void Run();
     void GatherLockDependancy();
