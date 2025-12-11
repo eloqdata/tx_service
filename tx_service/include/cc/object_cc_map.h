@@ -52,16 +52,6 @@ namespace txservice
 // whether skip accessing KV when cc map cache misses.
 extern bool txservice_skip_kv;
 
-inline bvar::LatencyRecorder BackFillLr("debug_backfill", "us");
-struct BackFillTimer
-{
-    ~BackFillTimer()
-    {
-        BackFillLr << butil::cpuwide_time_us() - start_ts_;
-    }
-    int64_t start_ts_{butil::cpuwide_time_us()};
-};
-
 template <typename KeyT, typename ValueT>
 class ObjectCcMap : public TemplateCcMap<KeyT, ValueT, false, false>
 {
@@ -2506,7 +2496,6 @@ public:
                   RecordStatus status,
                   const std::string &rec_str) override
     {
-        BackFillTimer timer;
         if (commit_ts > 1 && commit_ts < schema_ts_)
         {
             DLOG(INFO) << "BackFill: discard, commit_ts: " << commit_ts
