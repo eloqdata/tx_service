@@ -2894,7 +2894,6 @@ void LocalCcShards::DataSyncWorker(size_t worker_idx)
 
             if (need_notify)
             {
-                std::lock_guard<std::mutex> lk(data_sync_worker_ctx_.mux_);
                 data_sync_worker_ctx_.cv_.notify_all();
             }
             continue;
@@ -4658,6 +4657,7 @@ void LocalCcShards::DataSyncForHashPartition(
         scan_concurrency_.store(scan_concurrency, std::memory_order_relaxed);
         if (need_notify)
         {
+            std::lock_guard<std::mutex> lk(data_sync_worker_ctx_.mux_);
             data_sync_worker_ctx_.cv_.notify_all();
         }
     }
