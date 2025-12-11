@@ -325,23 +325,8 @@ public:
         else
         {
             assert(err_code == CcErrorCode::ACQUIRE_LOCK_BLOCKED);
-            // Trigger deadlock check (throttled to once per second)
-            DeadLockCheck::RequestCheckWithThrottle();
+            DeadLockCheck::RequestCheck();
 
-            // Block instead of abort - similar to regular data reads
-            // Keep the bucket read lock (don't release it) - this matches the
-            // pattern of regular data reads which don't release locks when
-            // blocking. The bucket lock is a read lock, so it doesn't prevent
-            // other readers. When the request resumes, we already have the
-            // bucket lock and can immediately retry the range lock acquisition.
-            // If the read request comes from a remote node, send
-            // acknowledgement
-            if (!req.IsLocal())
-            {
-                remote::RemoteRead &remote_req =
-                    static_cast<remote::RemoteRead &>(req);
-                remote_req.Acknowledge();
-            }
             req.SetBlockType(ReadCc::BlockByLock);
             // Request is now in blocking queue, stop execution
             return false;
