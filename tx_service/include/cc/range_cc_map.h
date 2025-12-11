@@ -326,7 +326,7 @@ public:
         {
             assert(err_code == CcErrorCode::ACQUIRE_LOCK_BLOCKED);
             // Trigger deadlock check (throttled to once per second)
-            DeadLockCheck::RequestCheckWithThrottle(req.Txn());
+            DeadLockCheck::RequestCheckWithThrottle();
 
             // Block instead of abort - similar to regular data reads
             // Keep the bucket read lock (don't release it) - this matches the
