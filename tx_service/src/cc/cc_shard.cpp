@@ -2472,24 +2472,26 @@ CcShardHeap::~CcShardHeap()
 
 mi_heap_t *CcShardHeap::SetAsDefaultHeap()
 {
-    // mallctl("thread.arena", NULL, NULL, &arena_id_, sizeof(unsigned));
+    mallctl("thread.arena", NULL, NULL, &arena_id_, sizeof(unsigned));
     return mi_heap_set_default(heap_);
 }
 
 unsigned CcShardHeap::SetAsDefaultArena()
 {
-#if defined(WITH_JEMALLOC)
-    unsigned prev_arena;
-    size_t sz = sizeof(prev_arena);
-    // read prev arena id
-    mallctl("thread.arena", &prev_arena, &sz, NULL, 0);  // read only
-    // override arena id
-    mallctl("thread.arena", NULL, NULL, &arena_id_, sizeof(unsigned));
-    return prev_arena;
-#else
-    assert(false);
-    return 0;
-#endif
+    /*
+    #if defined(WITH_JEMALLOC)
+        unsigned prev_arena;
+        size_t sz = sizeof(prev_arena);
+        // read prev arena id
+        mallctl("thread.arena", &prev_arena, &sz, NULL, 0);  // read only
+        // override arena id
+        mallctl("thread.arena", NULL, NULL, &arena_id_, sizeof(unsigned));
+        return prev_arena;
+    #else
+        assert(false);
+        return 0;
+    #endif
+    */
 }
 
 bool CcShardHeap::Full(int64_t *alloc, int64_t *commit) const

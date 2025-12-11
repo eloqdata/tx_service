@@ -497,7 +497,7 @@ public:
         size_t target_memory_size = range_slice_memory_limit_ / 10 * 9;
         return (static_cast<size_t>(allocated) <= target_memory_size);
         */
-        return false;
+        return true;
 #else
         if (table_ranges_heap_ != nullptr)
         {

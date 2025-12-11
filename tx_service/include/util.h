@@ -444,6 +444,7 @@ static inline void GetJemallocArenaStat(unsigned arena_id,
                                         size_t &resisdent,
                                         size_t &allocated)
 {
+    /*
     // estimate thread memory usage from total process memory
     size_t total_resident = 0;
     size_t small_allocated = 0;
@@ -465,6 +466,7 @@ static inline void GetJemallocArenaStat(unsigned arena_id,
 
     resisdent = total_resident;
     allocated = small_allocated + large_allocated;
+    */
 }
 
 }  // namespace txservice
