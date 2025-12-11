@@ -86,7 +86,11 @@ struct DataSyncScanTimer
 {
     ~DataSyncScanTimer()
     {
-        data_sync_scan_lr << butil::cpuwide_time_us() - start_ts_;
+        int64_t gap = butil::cpuwide_time_us() - start_ts_;
+        if (gap > 500)
+        {
+            data_sync_scan_lr << gap;
+        }
     }
     int64_t start_ts_{butil::cpuwide_time_us()};
 };
@@ -96,7 +100,11 @@ struct ScanSliceTimer
 {
     ~ScanSliceTimer()
     {
-        ScanSliceLr << butil::cpuwide_time_us() - start_ts;
+        int64_t gap = butil::cpuwide_time_us() - start_ts;
+        if (gap > 500)
+        {
+            ScanSliceLr << gap;
+        }
     }
     int64_t start_ts{butil::cpuwide_time_us()};
 };
