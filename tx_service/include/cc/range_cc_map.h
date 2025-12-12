@@ -1060,7 +1060,7 @@ public:
                             NULL,
                             0);  // read only
                     // override arena id
-                    size_t table_range_arena_id =
+                    auto table_range_arena_id =
                         shard_->local_shards_.GetTableRangesArenaId();
                     mallctl("thread.arena",
                             NULL,

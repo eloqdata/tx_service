@@ -536,7 +536,7 @@ void StoreRange::UpdateSliceSpec(StoreSlice *slice,
     // read prev arena id
     mallctl("thread.arena", &prev_arena, &sz, NULL, 0);  // read only
     // override arena id
-    size_t table_range_arena_id = local_cc_shards_.GetTableRangesArenaId();
+    auto table_range_arena_id = local_cc_shards_.GetTableRangesArenaId();
     mallctl(
         "thread.arena", NULL, NULL, &table_range_arena_id, sizeof(uint32_t));
 #endif

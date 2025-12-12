@@ -1308,8 +1308,7 @@ void LocalCcShards::KickoutRangeSlices()
                                     NULL,
                                     0);  // read only
                             // override arena id
-                            size_t table_range_arena_id =
-                                GetTableRangesArenaId();
+                            auto table_range_arena_id = GetTableRangesArenaId();
                             mallctl("thread.arena",
                                     NULL,
                                     NULL,
