@@ -414,7 +414,7 @@ void FetchRangeSlicesReq::SetFinish(CcErrorCode err)
         // read prev arena id
         mallctl("thread.arena", &prev_arena, &sz, NULL, 0);  // read only
         // override arena id
-        size_t table_range_arena_id = shards->GetTableRangesArenaId();
+        auto table_range_arena_id = shards->GetTableRangesArenaId();
         mallctl("thread.arena",
                 NULL,
                 NULL,
