@@ -100,10 +100,10 @@ public:
     virtual uint64_t GetSstFileCacheSize() const = 0;
 
     /**
-     * @brief Check if S3 URL configuration is being used (instead of legacy config)
-     * @return true if s3_url is configured, false otherwise
+     * @brief Check if OSS URL configuration is being used (instead of legacy config)
+     * @return true if oss_url is configured, false otherwise
      */
-    virtual bool IsS3UrlConfigured() const { return false; }
+    virtual bool IsOssUrlConfigured() const { return false; }
 };
 
 }  // namespace EloqDS

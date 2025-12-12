@@ -294,11 +294,11 @@ DEFINE_string(rocksdb_cloud_s3_endpoint_url,
               "S3 compatible object store (e.g. minio) endpoint URL only for "
               "development purpose");
 
-DEFINE_string(rocksdb_cloud_s3_url,
+DEFINE_string(rocksdb_cloud_oss_url,
               "",
-              "RocksDB cloud S3 URL. Format: s3://{bucket}/{path} or "
-              "http(s)://{host}:{port}/{bucket}/{path}. "
-              "Examples: s3://my-bucket/my-path, "
+              "RocksDB cloud OSS URL. Format: s3://{bucket}/{path}, "
+              "gs://{bucket}/{path}, or http(s)://{host}:{port}/{bucket}/{path}. "
+              "Examples: s3://my-bucket/my-path, gs://my-bucket/my-path, "
               "http://localhost:9000/my-bucket/my-path. "
               "This option takes precedence over legacy configuration options "
               "if both are provided");
@@ -517,12 +517,12 @@ RocksDBCloudConfig::RocksDBCloudConfig(const INIReader &config)
 
 #endif
 
-    // Get the S3 URL configuration (new style)
-    s3_url_ =
-        !CheckCommandLineFlagIsDefault("rocksdb_cloud_s3_url")
-            ? FLAGS_rocksdb_cloud_s3_url
+    // Get the OSS URL configuration (new style)
+    oss_url_ =
+        !CheckCommandLineFlagIsDefault("rocksdb_cloud_oss_url")
+            ? FLAGS_rocksdb_cloud_oss_url
             : config.GetString(
-                  "store", "rocksdb_cloud_s3_url", FLAGS_rocksdb_cloud_s3_url);
+                  "store", "rocksdb_cloud_oss_url", FLAGS_rocksdb_cloud_oss_url);
 
     // Get legacy configuration
     bucket_name_ = !CheckCommandLineFlagIsDefault("rocksdb_cloud_bucket_name")

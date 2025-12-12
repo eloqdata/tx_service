@@ -52,9 +52,9 @@ public:
         bool start_db = true) override
     {
         // Add shard_id to object_path_ only for legacy configuration
-        // When s3_url is configured, the user can include shard path in the URL themselves
+        // When oss_url is configured, the user can include shard path in the URL themselves
         auto shard_cloud_config = cloud_config_;
-        if (!shard_cloud_config.IsS3UrlConfigured())
+        if (!shard_cloud_config.IsOssUrlConfigured())
         {
             // Legacy configuration: append shard_id for shard isolation
             if (shard_cloud_config.object_path_.empty())
@@ -69,8 +69,8 @@ public:
             shard_cloud_config.object_path_.append(std::to_string(shard_id));
         }
         else {
-            shard_cloud_config.s3_url_.append("/ds_");
-            shard_cloud_config.s3_url_.append(std::to_string(shard_id));
+            shard_cloud_config.oss_url_.append("/ds_");
+            shard_cloud_config.oss_url_.append(std::to_string(shard_id));
         }
 
         auto ds = std::make_unique<RocksDBCloudDataStore>(
@@ -141,9 +141,9 @@ public:
         return cloud_config_.sst_file_cache_size_;
     }
 
-    bool IsS3UrlConfigured() const override
+    bool IsOssUrlConfigured() const override
     {
-        return cloud_config_.IsS3UrlConfigured();
+        return cloud_config_.IsOssUrlConfigured();
     }
 
 private:

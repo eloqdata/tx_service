@@ -3047,8 +3047,8 @@ std::unique_ptr<S3FileDownloader> DataStoreService::CreateS3Downloader(
     }
 
     // Append shard ID to path only for legacy configuration
-    // When s3_url is configured, the user can include shard path in the URL themselves
-    if (!data_store_factory_->IsS3UrlConfigured())
+    // When oss_url is configured, the user can include shard path in the URL themselves
+    if (!data_store_factory_->IsOssUrlConfigured())
     {
         s3_url += "ds_" + std::to_string(shard_id) + "/";
     }

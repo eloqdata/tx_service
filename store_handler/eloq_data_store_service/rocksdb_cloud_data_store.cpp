@@ -300,17 +300,19 @@ bool RocksDBCloudDataStore::StartDB()
     std::string effective_object_path = cloud_config_.object_path_;
     std::string effective_endpoint_url = cloud_config_.s3_endpoint_url_;
 
-    if (!cloud_config_.s3_url_.empty())
+    if (!cloud_config_.oss_url_.empty())
     {
-        // Parse S3 URL and use it (overrides legacy config)
-        S3UrlComponents url_components = ParseS3Url(cloud_config_.s3_url_);
+        // Parse OSS URL and use it (overrides legacy config)
+        S3UrlComponents url_components = ParseS3Url(cloud_config_.oss_url_);
         if (!url_components.is_valid)
         {
-            LOG(FATAL) << "Invalid rocksdb_cloud_s3_url: "
+            LOG(FATAL) << "Invalid rocksdb_cloud_oss_url: "
                        << url_components.error_message
-                       << ". URL format: s3://{bucket}/{path} or "
+                       << ". URL format: s3://{bucket}/{path}, "
+                          "gs://{bucket}/{path}, or "
                           "http(s)://{host}:{port}/{bucket}/{path}. "
                        << "Examples: s3://my-bucket/my-path, "
+                       << "gs://my-bucket/my-path, "
                        << "http://localhost:9000/my-bucket/my-path";
         }
 
@@ -319,9 +321,9 @@ bool RocksDBCloudDataStore::StartDB()
         effective_object_path = url_components.object_path;
         effective_endpoint_url = url_components.endpoint_url;
 
-        LOG(INFO) << "Using S3 URL configuration (overrides legacy config if "
+        LOG(INFO) << "Using OSS URL configuration (overrides legacy config if "
                      "present): "
-                  << cloud_config_.s3_url_
+                  << cloud_config_.oss_url_
                   << " (bucket: " << effective_bucket_name
                   << ", object_path: " << effective_object_path
                   << ", endpoint: "
