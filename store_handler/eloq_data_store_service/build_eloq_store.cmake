@@ -19,6 +19,7 @@ find_package(glog REQUIRED)
 if(WITH_ASAN)
     message("build eloqstore with ASAN: ${WITH_ASAN}")
     set(BOOST_CONTEXT_ASAN_PATH "$ENV{HOME}/boost_ucontext_asan")
+    # https://www.boost.org/doc/libs/master/libs/context/doc/html/context/stack/sanitizers.html
     add_compile_definitions(BOOST_USE_ASAN)
     add_compile_definitions(BOOST_USE_UCONTEXT)
 
