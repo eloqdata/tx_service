@@ -819,6 +819,7 @@ bool DataSubstrate::LoadCoreAndNetworkConfig(const INIReader &config_reader)
 #if defined(DATA_STORE_TYPE_DYNAMODB) ||                 \
     defined(DATA_STORE_TYPE_ELOQDSS_ROCKSDB_CLOUD_S3) || \
     defined(LOG_STATE_TYPE_RKDB_S3)
+    aws_options_.httpOptions.installSigPipeHandler = true;
     aws_options_.loggingOptions.logLevel = Aws::Utils::Logging::LogLevel::Info;
     Aws::InitAPI(aws_options_);
 #endif
