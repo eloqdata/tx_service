@@ -241,7 +241,7 @@ private:
     // indicating the per shard defrag heap cc is on fly
     bool defrag_heap_cc_on_fly_{false};
 
-    uint32_t arena_id_;
+    uint32_t arena_id_{0};
 };
 
 class CcShard

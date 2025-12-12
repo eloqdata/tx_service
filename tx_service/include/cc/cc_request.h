@@ -7449,8 +7449,9 @@ struct CollectMemStatsCc : public CcRequestBase
         stats_->allocated_ = allocated;
         stats_->committed_ = committed;
 
-        LOG(INFO) << "CollectMemStatsCc: ccs #" << ccs.core_id_ << ", commited "
-                  << committed << ", allocated = " << allocated;
+        DLOG(INFO) << "CollectMemStatsCc: ccs #" << ccs.core_id_
+                   << ", commited " << committed
+                   << ", allocated = " << allocated;
 #endif
 
         stats_->wait_list_size_ = ccs.WaitListSizeForMemory();

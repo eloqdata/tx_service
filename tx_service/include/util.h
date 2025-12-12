@@ -444,7 +444,7 @@ static inline bool IsStandbyTx(int64_t tx_term)
 
 #if defined(WITH_JEMALLOC)
 static inline void GetJemallocArenaStat(uint32_t arena_id,
-                                        size_t &resisdent,
+                                        size_t &resident,
                                         size_t &allocated)
 {
     // estimate thread memory usage from total process memory
@@ -466,7 +466,7 @@ static inline void GetJemallocArenaStat(uint32_t arena_id,
     snprintf(mib, sizeof(mib), "stats.arenas.%u.large.allocated", arena_id);
     mallctl(mib, &large_allocated, &sz, NULL, 0);
 
-    resisdent = total_resident;
+    resident = total_resident;
     allocated = small_allocated + large_allocated;
 }
 #endif

@@ -2574,10 +2574,12 @@ bool CcShardHeap::Full(int64_t *alloc, int64_t *commit) const
         *commit = total_resident;
     }
 
+    /*
     LOG(INFO) << "yf: resident = " << total_resident << ", total resident "
               << ", total allocated = " << total_allocated
               << ", memory limit = " << memory_limit_
               << ", arena id = " << arena_id_;
+    */
 
     return total_resident >= static_cast<int64_t>(memory_limit_);
 
