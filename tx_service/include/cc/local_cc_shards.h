@@ -879,7 +879,7 @@ public:
 
 #if defined(WITH_JEMALLOC)
         uint32_t prev_arena_id;
-        size_t table_range_arena_id = GetTableRangesArenaId();
+        auto table_range_arena_id = GetTableRangesArenaId();
         size_t sz = sizeof(uint32_t);
         mallctl("thread.arena", &prev_arena_id, &sz, NULL, 0);
         mallctl("thread.arena",

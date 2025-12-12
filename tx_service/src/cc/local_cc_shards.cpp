@@ -1026,7 +1026,7 @@ void LocalCcShards::InitTableRanges(const TableName &range_table_name,
     // read prev arena id
     mallctl("thread.arena", &prev_arena, &sz, NULL, 0);  // read only
     // override arena id
-    size_t table_range_arena_id = GetTableRangesArenaId();
+    auto table_range_arena_id = GetTableRangesArenaId();
     mallctl(
         "thread.arena", NULL, NULL, &table_range_arena_id, sizeof(uint32_t));
 #endif
@@ -1380,7 +1380,7 @@ void LocalCcShards::KickoutRangeSlices()
             // read prev arena id
             mallctl("thread.arena", &prev_arena, &sz, NULL, 0);  // read only
             // override arena id
-            size_t table_range_arena_id = GetTableRangesArenaId();
+            auto table_range_arena_id = GetTableRangesArenaId();
             mallctl("thread.arena",
                     NULL,
                     NULL,
@@ -2135,7 +2135,7 @@ bool LocalCcShards::DropStoreRangesInBucket(NodeGroupId ng_id,
                                 NULL,
                                 0);  // read only
                         // override arena id
-                        size_t table_range_arena_id = GetTableRangesArenaId();
+                        auto table_range_arena_id = GetTableRangesArenaId();
                         mallctl("thread.arena",
                                 NULL,
                                 NULL,
