@@ -5150,10 +5150,10 @@ public:
         int64_t commit = 0;
         bool scan_heap_is_full = scan_heap->Full(&alloc, &commit);
 #if defined(WITH_JEMALLOC)
-        LOG(INFO) << "yf: alloc = " << alloc << ", commit = " << commit
-                  << ", limit = " << scan_heap->MemoryLimit()
-                  << ", prev arena = " << prev_arena
-                  << ", scan heap arena = " << scan_heap->ArenaId();
+        // LOG(INFO) << "yf: alloc = " << alloc << ", commit = " << commit
+        //          << ", limit = " << scan_heap->MemoryLimit()
+        //          << ", prev arena = " << prev_arena
+        //          << ", scan heap arena = " << scan_heap->ArenaId();
 #endif
 
         if (!scan_heap_is_full)

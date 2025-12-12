@@ -1195,14 +1195,6 @@ public:
             }
         }
 
-        unsigned prev_arena;
-        size_t sz = sizeof(prev_arena);
-        // read prev arena id
-        mallctl("thread.arena", &prev_arena, &sz, NULL, 0);  // read only
-        LOG(INFO) << "yf: pool size = " << pool_.size()
-                  << ", core cnt = " << core_cnt << ", prev arena"
-                  << ", this = " << this << ", prev arena = " << prev_arena;
-
         txservice_skip_wal = skip_wal;
         txservice_skip_kv = skip_kv;
         txservice_enable_cache_replacement = enable_cache_replacement;
@@ -1385,12 +1377,6 @@ public:
 #ifdef EXT_TX_PROC_ENABLED
     TransactionExecution *NewTx(size_t shard_id)
     {
-        unsigned prev_arena;
-        size_t sz = sizeof(prev_arena);
-        // read prev arena id
-        mallctl("thread.arena", &prev_arena, &sz, NULL, 0);  // read only
-        LOG(INFO) << "yf: " << prev_arena << ", this = " << this;
-
         size_t sid =
             shard_id < pool_.size() ? shard_id : (shard_id % pool_.size());
         return pool_[sid]->NewExternalTx();

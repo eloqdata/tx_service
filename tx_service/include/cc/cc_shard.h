@@ -288,8 +288,6 @@ public:
         {
             shard_heap_ =
                 std::make_unique<CcShardHeap>(this, memory_limit_ * 0.9);
-            LOG(INFO) << "yf: core id = " << core_id_
-                      << ", arena id = " << shard_heap_->ArenaId();
         }
 
         if (!shard_data_sync_scan_heap_)
@@ -300,8 +298,6 @@ public:
             // 75% for flush data task
             shard_data_sync_scan_heap_ =
                 std::make_unique<CcShardHeap>(this, memory_limit_ * 0.1 * 0.25);
-            LOG(INFO) << "yf: core id = " << core_id_
-                      << ", scan arena id = " << shard_heap_->ArenaId();
         }
     }
 
