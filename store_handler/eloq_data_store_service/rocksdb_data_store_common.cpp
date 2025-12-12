@@ -273,8 +273,8 @@ bool RocksDBDataStoreCommon::Initialize()
 
     if (query_worker_pool_ == nullptr)
     {
-        query_worker_pool_ =
-            std::make_unique<ThreadWorkerPool>(query_worker_number_);
+        query_worker_pool_ = std::make_unique<ThreadWorkerPool>(
+            "dss_rdb_q", query_worker_number_);
     }
     else
     {
