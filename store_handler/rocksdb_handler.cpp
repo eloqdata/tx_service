@@ -2954,7 +2954,7 @@ RocksDBHandlerImpl::RocksDBHandlerImpl(const EloqShare::RocksDBConfig &config,
       ttl_compaction_filter_(nullptr)
 {
     rsync_task_pool_ = std::make_unique<txservice::TxWorkerPool>(
-        "rdb_rsyn" config.snapshot_sync_worker_num_);
+        "rdb_rsyn", config.snapshot_sync_worker_num_);
 }
 
 RocksDBHandlerImpl::~RocksDBHandlerImpl()
