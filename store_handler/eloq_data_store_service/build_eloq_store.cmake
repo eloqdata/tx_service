@@ -27,8 +27,10 @@ if(WITH_ASAN)
             NAMES boost_context
             PATHS ${BOOST_CONTEXT_ASAN_PATH}/lib
             NO_DEFAULT_PATH)
+    set(BOOST_CONTEXT_TARGET ${Boost_CONTEXT_LIBRARY})
 else ()
     find_package(Boost REQUIRED COMPONENTS context)
+    set(BOOST_CONTEXT_TARGET Boost::context)
 endif()
 
 find_package(jsoncpp REQUIRED)
@@ -115,9 +117,4 @@ add_library(eloqstore STATIC ${ELOQ_STORE_SOURCES} ${INI_SOURCES})
 target_compile_definitions(eloqstore PRIVATE INIReader=EloqStorePrivateINIReader)
 
 target_include_directories(eloqstore PUBLIC ${ELOQ_STORE_INCLUDE})
-target_link_libraries(eloqstore PRIVATE ${URING_LIB} glog::glog absl::flat_hash_map jsoncpp_lib ${CURL_LIBRARIES} ${ZSTD_LIBRARY} ${AWSSDK_LINK_LIBRARIES})
-if(WITH_ASAN)
-    target_link_libraries(eloqstore PRIVATE ${Boost_CONTEXT_LIBRARY})
-else ()
-    target_link_libraries(eloqstore PRIVATE Boost::context)
-endif ()
+target_link_libraries(eloqstore PRIVATE ${URING_LIB} ${BOOST_CONTEXT_TARGET} glog::glog absl::flat_hash_map jsoncpp_lib ${CURL_LIBRARIES} ${ZSTD_LIBRARY} ${AWSSDK_LINK_LIBRARIES})

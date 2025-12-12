@@ -350,7 +350,7 @@ endif ()
 
 if(WITH_DATA_STORE STREQUAL "ELOQDSS_ELOQSTORE")
     set(DYNAMIC_LIB ${DYNAMIC_LIB} ${URING_LIB})
-    set(DYNAMIC_LIB ${DYNAMIC_LIB} Boost::context)
+    set(DYNAMIC_LIB ${DYNAMIC_LIB} ${BOOST_CONTEXT_TARGET})
 endif ()
 
 # crcspeed
