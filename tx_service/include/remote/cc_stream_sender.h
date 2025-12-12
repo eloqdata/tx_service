@@ -71,6 +71,28 @@ public:
     ScanSliceResponse msg_;
 };
 
+struct SendMessageResult
+{
+    bool sent{false};
+    bool queued_for_retry{false};
+    bool need_reconnect{false};
+
+    static SendMessageResult Sent()
+    {
+        return SendMessageResult{true, false, false};
+    }
+
+    static SendMessageResult Queued(bool need_reconnect)
+    {
+        return SendMessageResult{false, true, need_reconnect};
+    }
+
+    static SendMessageResult Failed(bool need_reconnect = false)
+    {
+        return SendMessageResult{false, false, need_reconnect};
+    }
+};
+
 class CcStreamSender
 {
 public:
@@ -79,21 +101,31 @@ public:
     ~CcStreamSender();
 
     void RecycleCcMsg(std::unique_ptr<CcMessage> msg);
-    bool SendMessageToNg(uint32_t node_group_id,
-                         const CcMessage &msg,
-                         CcHandlerResultBase *res = nullptr,
-                         bool resend = false);
-    bool SendMessageToNode(uint32_t dest_node_id,
-                           const CcMessage &msg,
-                           CcHandlerResultBase *res = nullptr,
-                           bool resend = false,
-                           bool resend_on_eagain = true,
-                           bool log_verbose = false,
-                           bool *need_reconnect = nullptr);
-    bool SendScanRespToNode(uint32_t dest_node_id,
-                            const ScanSliceResponse &msg,
-                            bool resend = false,
-                            bool *need_reconnect = nullptr);
+    SendMessageResult SendMessageToNg(uint32_t node_group_id,
+                                      const CcMessage &msg,
+                                      CcHandlerResultBase *res = nullptr,
+                                      bool resend = false);
+    SendMessageResult SendMessageToNode(uint32_t dest_node_id,
+                                        const CcMessage &msg,
+                                        CcHandlerResultBase *res = nullptr,
+                                        bool resend = false);
+    SendMessageResult SendScanRespToNode(uint32_t dest_node_id,
+                                         const ScanSliceResponse &msg,
+                                         bool resend = false);
+
+    /**
+     * @brief Send standby message with best-effort semantics (no
+     * retry/queuing).
+     *
+     * Unlike SendMessageToNode, this does not queue failed messages for retry.
+     * Use for standby replication which has a dedicated resend logic. The
+     * caller only cares whether the message is successfully sent into stream or
+     * not.
+     *
+     * @return true if sent immediately, false otherwise
+     */
+    bool SendStandbyMessageToNode(uint32_t dest_node_id, const CcMessage &msg);
+
     void UpdateRemoteNodes(
         const std::unordered_map<NodeId, NodeConfig> &nodes_configs);
 

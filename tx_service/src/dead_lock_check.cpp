@@ -207,10 +207,10 @@ void DeadLockCheck::GatherLockDependancy()
             tr::DeadLockRequest *dl = send_msg.mutable_dead_lock_request();
             dl->set_src_node_id(Sharder::Instance().NodeId());
             dl->set_check_round(check_round_);
-            bool hr =
+            auto send_res =
                 Sharder::Instance().GetCcStreamSender()->SendMessageToNode(
                     node_id, send_msg);
-            if (hr)
+            if (send_res.sent || send_res.queued_for_retry)
             {
                 reply_map_.try_emplace(node_id, false);
             }
