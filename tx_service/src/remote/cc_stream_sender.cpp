@@ -471,7 +471,8 @@ bool CcStreamSender::SendStandbyMessageToNode(uint32_t dest_node_id,
     }
 
     std::atomic<int64_t> &stream_version = std::get<1>(stream_it->second);
-    if (stream_version.load(std::memory_order_acquire) == -1)
+    int64_t stream_ver = stream_version.load(std::memory_order_acquire);
+    if (stream_ver == -1)
     {
         std::lock_guard<std::mutex> lk(to_connect_mux_);
         // wake up connector thread to reconnect streams
@@ -493,6 +494,21 @@ bool CcStreamSender::SendStandbyMessageToNode(uint32_t dest_node_id,
     {
         DLOG(INFO) << "SendStandbyMessageToNode failed, node: " << dest_node_id
                    << ", err: " << error_code;
+        // For non-EAGAIN errors, trigger stream reconnection
+        if (error_code != EAGAIN)
+        {
+            std::lock_guard<std::mutex> lk(to_connect_mux_);
+            // Set stream version to -1 to mark it as broken and trigger
+            // reconnection
+            if (stream_version.compare_exchange_strong(
+                    stream_ver, -1, std::memory_order_release))
+            {
+                to_connect_regular_streams_.try_emplace(dest_node_id,
+                                                        stream_ver + 1);
+            }
+            to_connect_flag_ = true;
+            to_connect_cv_.notify_one();
+        }
         return false;
     }
 
