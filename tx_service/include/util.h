@@ -443,7 +443,7 @@ static inline bool IsStandbyTx(int64_t tx_term)
 }
 
 #if defined(WITH_JEMALLOC)
-static inline void GetJemallocArenaStat(unsigned arena_id,
+static inline void GetJemallocArenaStat(uint32_t arena_id,
                                         size_t &resisdent,
                                         size_t &allocated)
 {

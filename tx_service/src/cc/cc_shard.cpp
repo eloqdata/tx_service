@@ -222,7 +222,7 @@ void CcShard::Init()
     InitializeShardHeap();
     mi_heap_t *prev_heap = shard_heap_->SetAsDefaultHeap();
 #if defined(WITH_JEMALLOC)
-    // auto prev_arena = shard_heap_->SetAsDefaultArena();
+    auto prev_arena = shard_heap_->SetAsDefaultArena();
 #endif
     lock_vec_.resize(LOCK_ARRAY_INIT_SIZE);
     for (size_t i = 0; i < LOCK_ARRAY_INIT_SIZE; ++i)
@@ -252,7 +252,7 @@ void CcShard::Init()
     mi_heap_set_default(prev_heap);
 
 #if defined(WITH_JEMALLOC)
-    // mallctl("thread.arena", NULL, NULL, &prev_arena, sizeof(unsigned));
+    mallctl("thread.arena", NULL, NULL, &prev_arena, sizeof(uint32_t));
 #endif
 }
 
@@ -2513,8 +2513,9 @@ bool CcShardHeap::Full(int64_t *alloc, int64_t *commit) const
     }
 
     LOG(INFO) << "yf: resident = " << total_resident << ", total resident "
-              << ", total allocated = " << total_allocated << total_resident
-              << ", memory limit = " << memory_limit_;
+              << ", total allocated = " << total_allocated
+              << ", memory limit = " << memory_limit_
+              << ", arena id = " << arena_id_;
 
     return total_resident >= static_cast<int64_t>(memory_limit_);
 

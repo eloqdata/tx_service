@@ -409,9 +409,8 @@ void FetchRangeSlicesReq::SetFinish(CcErrorCode err)
             mi_heap_set_default(shards->GetTableRangesHeap());
 
 #if defined(WITH_JEMALLOC)
-        /*
-        unsigned prev_arena;
-        size_t sz = sizeof(prev_arena);
+        uint32_t prev_arena;
+        size_t sz = sizeof(uint32_t);
         // read prev arena id
         mallctl("thread.arena", &prev_arena, &sz, NULL, 0);  // read only
         // override arena id
@@ -420,9 +419,7 @@ void FetchRangeSlicesReq::SetFinish(CcErrorCode err)
                 NULL,
                 NULL,
                 &table_range_arena_id,
-                sizeof(unsigned));
-        */
-
+                sizeof(uint32_t));
 #endif
 
         range_entry_->InitRangeSlices(std::move(slice_info_),
@@ -443,7 +440,7 @@ void FetchRangeSlicesReq::SetFinish(CcErrorCode err)
         }
 
 #if defined(WITH_JEMALLOC)
-        // mallctl("thread.arena", NULL, NULL, &prev_arena, sizeof(unsigned));
+        mallctl("thread.arena", NULL, NULL, &prev_arena, sizeof(uint32_t));
 #endif
         heap_lk.unlock();
 
