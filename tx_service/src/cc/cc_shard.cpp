@@ -2455,7 +2455,8 @@ CcShardHeap::CcShardHeap(CcShard *cc_shard, size_t limit)
     }
 
 #if defined(WITH_JEMALLOC)
-    size_t sz = sizeof(arena_id_);
+    // create arena for each ccshardheap
+    size_t sz = sizeof(uint32_t);
     mallctl("arenas.create", &arena_id_, &sz, NULL, 0);
 #endif
 }
@@ -2468,30 +2469,29 @@ CcShardHeap::~CcShardHeap()
     //{
     // mi_heap_destroy(heap_);
     //}
+
+    // TODO: destroy arena ?
 }
 
 mi_heap_t *CcShardHeap::SetAsDefaultHeap()
 {
-    mallctl("thread.arena", NULL, NULL, &arena_id_, sizeof(unsigned));
     return mi_heap_set_default(heap_);
 }
 
-unsigned CcShardHeap::SetAsDefaultArena()
+uint32_t CcShardHeap::SetAsDefaultArena()
 {
-    /*
-    #if defined(WITH_JEMALLOC)
-        unsigned prev_arena;
-        size_t sz = sizeof(prev_arena);
-        // read prev arena id
-        mallctl("thread.arena", &prev_arena, &sz, NULL, 0);  // read only
-        // override arena id
-        mallctl("thread.arena", NULL, NULL, &arena_id_, sizeof(unsigned));
-        return prev_arena;
-    #else
-        assert(false);
-        return 0;
-    #endif
-    */
+#if defined(WITH_JEMALLOC)
+    uint32_t prev_arena;
+    size_t sz = sizeof(uint32_t);
+    // read prev arena id
+    mallctl("thread.arena", &prev_arena, &sz, NULL, 0);  // read only
+    // override arena id
+    mallctl("thread.arena", NULL, NULL, &arena_id_, sizeof(uint32_t));
+    return prev_arena;
+#else
+    assert(false);
+    return 0;
+#endif
 }
 
 bool CcShardHeap::Full(int64_t *alloc, int64_t *commit) const
@@ -2499,26 +2499,12 @@ bool CcShardHeap::Full(int64_t *alloc, int64_t *commit) const
 #if defined(WITH_JEMALLOC)
     // estimate thread memory usage from total process memory
     size_t total_resident = 0;
-    size_t small_allocated = 0;
-    size_t large_allocated = 0;
-    size_t sz = sizeof(total_resident);
-
-    uint64_t epoch = 1;
-    mallctl("epoch", NULL, NULL, &epoch, sizeof(epoch));
-    // Resident memory pages actually held by jemalloc from OS
-    // mallctl("stats.resident", &total_resident, &sz, NULL, 0);
-    // mallctl("stats.allocated", &total_allocated, &sz, NULL, 0);
-    char mib[64];
-    snprintf(mib, sizeof(mib), "stats.arenas.%u.resident", arena_id_);
-    mallctl(mib, &total_resident, &sz, NULL, 0);
-    snprintf(mib, sizeof(mib), "stats.arenas.%u.small.allocated", arena_id_);
-    mallctl(mib, &small_allocated, &sz, NULL, 0);
-    snprintf(mib, sizeof(mib), "stats.arenas.%u.large.allocated", arena_id_);
-    mallctl(mib, &large_allocated, &sz, NULL, 0);
+    size_t total_allocated = 0;
+    GetJemallocArenaStat(arena_id_, total_resident, total_allocated);
 
     if (alloc != nullptr)
     {
-        *alloc = small_allocated + large_allocated;
+        *alloc = total_allocated;
     }
 
     if (commit != nullptr)
@@ -2526,15 +2512,10 @@ bool CcShardHeap::Full(int64_t *alloc, int64_t *commit) const
         *commit = total_resident;
     }
 
-    unsigned my_arena;
-    sz = sizeof(my_arena);
-    mallctl("thread.arena", &my_arena, &sz, NULL, 0);  // 只读
-    LOG(INFO) << my_arena << ", arena id_ = " << arena_id_;
     LOG(INFO) << "yf: resident = " << total_resident << ", total resident "
-              << total_resident << ", memory limit = " << memory_limit_
-              << ", total allocated = " << small_allocated + large_allocated
-              << ", large allocated = " << large_allocated
-              << ", small allocated = " << small_allocated;
+              << ", total allocated = " << total_allocated << total_resident
+              << ", memory limit = " << memory_limit_;
+
     return total_resident >= static_cast<int64_t>(memory_limit_);
 
 #else

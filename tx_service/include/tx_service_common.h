@@ -83,10 +83,7 @@ struct TxProcCoordinator
     // This is only set when external tx processor occupies the shard,
     // and only should be access after occupying shard_status_.
     mi_heap_t *ext_tx_proc_heap_{nullptr};
-
-#if defined(WITH_JEMALLOC)
-    // unsigned ext_tx_arena_id_{0};
-#endif
+    uint32_t ext_tx_proc_arena_id_{0};
 #endif
 };
 }  // namespace txservice

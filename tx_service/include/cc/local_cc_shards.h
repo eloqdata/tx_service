@@ -38,6 +38,7 @@
 #include <string_view>
 #include <thread>
 #include <tuple>
+#include <type_traits>
 #include <unordered_map>
 #include <unordered_set>
 #include <utility>
@@ -61,6 +62,13 @@
 #include "tx_service_common.h"
 #include "tx_start_ts_collector.h"
 #include "type.h"
+
+#ifdef WITH_JEMALLOC
+// we use uint32_t instead of unsgined to make the code more readable
+static_assert(std::is_same_v<unsigned, uint32_t>,
+              "jemalloc uses 'unsigned' for arena id, but this platform "
+              "has unsigned != uint32_t. Please adjust the type alias.");
+#endif
 
 namespace txservice
 {
@@ -417,8 +425,9 @@ public:
         }
 
 #if defined(WITH_JEMALLOC)
-        size_t sz = sizeof(table_ranges_arena_id_);
-        // mallctl("arenas.create", &table_ranges_arena_id_, &sz, NULL, 0);
+        // create table ranges arena
+        size_t sz = sizeof(uint32_t);
+        mallctl("arenas.create", &table_ranges_arena_id_, &sz, NULL, 0);
 #endif
     }
 
@@ -427,9 +436,9 @@ public:
         hash_partition_ckpt_heap_ = mi_heap_new();
         hash_partition_main_thread_id_ = mi_thread_id();
 #if defined(WITH_JEMALLOC)
-        size_t sz = sizeof(hash_partition_ckpt_arena_id_);
-        // mallctl("arenas.create", &hash_partition_ckpt_arena_id_, &sz, NULL,
-        // 0);
+        // create hash partition ckpt arena
+        size_t sz = sizeof(uint32_t);
+        mallctl("arenas.create", &hash_partition_ckpt_arena_id_, &sz, NULL, 0);
 #endif
     }
 
@@ -443,12 +452,10 @@ public:
         return table_ranges_heap_;
     }
 
-#if defined(WITH_JEMALLOC)
-    unsigned GetTableRangesArenaId() const
+    uint32_t GetTableRangesArenaId() const
     {
         return table_ranges_arena_id_;
     }
-#endif
 
     /**
      * @brief Check whether the table ranges heap reach the limitation.
@@ -458,14 +465,12 @@ public:
     bool TableRangesMemoryFull()
     {
 #if defined(WITH_JEMALLOC)
-        /*
+        auto table_range_arena_id = GetTableRangesArenaId();
         size_t committed = 0;
         size_t allocated = 0;
-        auto table_range_arena_id = GetTableRangesArenaId();
         GetJemallocArenaStat(table_range_arena_id, committed, allocated);
         return (static_cast<size_t>(allocated) >= range_slice_memory_limit_);
-        */
-        return false;
+
 #else
         if (table_ranges_heap_ != nullptr)
         {
@@ -489,15 +494,14 @@ public:
     bool HasEnoughTableRangesMemory()
     {
 #if defined(WITH_JEMALLOC)
-        /*
+        auto table_range_arena_id = GetTableRangesArenaId();
+
         size_t committed = 0;
         size_t allocated = 0;
-        unsigned table_range_arena_id = GetTableRangesArenaId();
         GetJemallocArenaStat(table_range_arena_id, committed, allocated);
         size_t target_memory_size = range_slice_memory_limit_ / 10 * 9;
         return (static_cast<size_t>(allocated) <= target_memory_size);
-        */
-        return true;
+
 #else
         if (table_ranges_heap_ != nullptr)
         {
@@ -516,7 +520,6 @@ public:
     void TableRangeHeapUsageReport()
     {
 #if defined(WITH_JEMALLOC)
-        /*
         size_t committed = 0;
         size_t allocated = 0;
         GetJemallocArenaStat(GetTableRangesArenaId(), committed, allocated);
@@ -524,7 +527,6 @@ public:
                   << ", committed " << committed << ", full: "
                   << (bool) (static_cast<size_t>(allocated) >=
                              range_slice_memory_limit_);
-        */
 #else
         std::unique_lock<std::mutex> heap_lk(table_ranges_heap_mux_);
         bool is_override_thd = mi_is_override_thread();
@@ -2008,9 +2010,8 @@ private:
     mi_heap_t *table_ranges_heap_{nullptr};
     mi_threadid_t table_ranges_thread_id_{0};
 
-#if defined(WITH_JEMALLOC)
-    unsigned table_ranges_arena_id_{0};
-#endif
+    uint32_t table_ranges_arena_id_{0};
+    uint32_t hash_partition_ckpt_arena_id_{0};
 
     std::atomic_bool buckets_migrating_{false};
 
@@ -2511,9 +2512,6 @@ private:
     mi_heap_t *hash_partition_ckpt_heap_{nullptr};
     mi_threadid_t hash_partition_main_thread_id_{0};
     std::mutex hash_partition_ckpt_heap_mux_;
-#if defined(WITH_JEMALLOC)
-    unsigned hash_partition_ckpt_arena_id_{0};
-#endif
 
     friend class LocalCcHandler;
     friend class remote::RemoteCcHandler;

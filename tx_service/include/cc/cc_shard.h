@@ -188,7 +188,7 @@ public:
     // return the previous default heap.
     mi_heap_t *SetAsDefaultHeap();
 
-    unsigned SetAsDefaultArena();
+    uint32_t SetAsDefaultArena();
 
     // Check if this heap is full
     bool Full(int64_t *alloc = nullptr, int64_t *commit = nullptr) const;
@@ -202,12 +202,10 @@ public:
         return heap_;
     }
 
-#if defined(WITH_JEMALLOC)
-    unsigned ArenaId() const
+    uint32_t ArenaId() const
     {
         return arena_id_;
     }
-#endif
 
     size_t Threshold() const
     {
@@ -243,7 +241,7 @@ private:
     // indicating the per shard defrag heap cc is on fly
     bool defrag_heap_cc_on_fly_{false};
 
-    unsigned arena_id_;
+    uint32_t arena_id_;
 };
 
 class CcShard

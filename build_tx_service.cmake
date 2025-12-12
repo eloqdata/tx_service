@@ -19,6 +19,7 @@ if(ELOQ_MODULE_ENABLED)
     add_definitions(-DELOQ_MODULE_ENABLED)
 endif()
 
+
 option(FORK_HM_PROCESS "Whether fork host manager process" OFF)
 message(NOTICE "FORK_HM_PROCESS : ${FORK_HM_PROCESS}")
 
@@ -132,6 +133,10 @@ set(INCLUDE_DIR
     ${Protobuf_INCLUDE_DIR}
     ${MIMALLOC_INCLUDE_DIR})
 
+if(WITH_JEMALLOC)
+    set(INCLUDE_DIR ${INCLUDE_DIR} ${JEMALLOC_INCLUDE_DIRS})
+endif()
+
 if(CMAKE_COMPILER_IS_GNUCC)
     set(INCLUDE_DIR ${INCLUDE_DIR}
         ${BRPC_INCLUDE_PATH}
@@ -208,6 +213,10 @@ ADD_LIBRARY(txservice ${ELOQ_SOURCES})
 target_include_directories(txservice PUBLIC ${INCLUDE_DIR})
 
 target_link_libraries(txservice PUBLIC ${LINK_LIB} ${PROTOBUF_LIBRARIES})
+
+if(WITH_JEMALLOC)
+    target_link_libraries(txservice PUBLIC jemalloc_cfg)
+endif()
 
 # if(FORK_HM_PROCESS)
 #     include(FetchContent)
@@ -343,7 +352,7 @@ if (FORK_HM_PROCESS)
 
     include_directories(${HOST_MANAGER_INCLUDE_DIR})
     add_executable(host_manager ${RaftHM_SOURCES})
-    target_link_libraries(host_manager PRIVATE ${HOST_MANAGER_LINK_LIB} )
+    target_link_libraries(host_manager PRIVATE ${HOST_MANAGER_LINK_LIB})
 
     set_target_properties(host_manager PROPERTIES
             BUILD_RPATH "$ORIGIN/../lib"
@@ -352,4 +361,3 @@ if (FORK_HM_PROCESS)
 
     install(TARGETS host_manager RUNTIME DESTINATION bin)
 endif()
-
