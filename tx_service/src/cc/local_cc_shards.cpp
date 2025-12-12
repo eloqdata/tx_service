@@ -1021,17 +1021,14 @@ void LocalCcShards::InitTableRanges(const TableName &range_table_name,
     mi_heap_t *prev_heap = mi_heap_set_default(table_ranges_heap_);
 
 #if defined(WITH_JEMALLOC)
-    /*
-    unsigned prev_arena;
-    size_t sz = sizeof(prev_arena);
+    uint32_t prev_arena;
+    size_t sz = sizeof(uint32_t);
     // read prev arena id
     mallctl("thread.arena", &prev_arena, &sz, NULL, 0);  // read only
     // override arena id
     size_t table_range_arena_id = GetTableRangesArenaId();
     mallctl(
-        "thread.arena", NULL, NULL, &table_range_arena_id, sizeof(unsigned));
-    */
-
+        "thread.arena", NULL, NULL, &table_range_arena_id, sizeof(uint32_t));
 #endif
 
     // Init table ranges
@@ -1128,7 +1125,7 @@ void LocalCcShards::InitTableRanges(const TableName &range_table_name,
     }
 
 #if defined(WITH_JEMALLOC)
-    // mallctl("thread.arena", NULL, NULL, &prev_arena, sizeof(unsigned));
+    mallctl("thread.arena", NULL, NULL, &prev_arena, sizeof(uint32_t));
 #endif
 }
 
@@ -1302,9 +1299,8 @@ void LocalCcShards::KickoutRangeSlices()
                                 mi_heap_set_default(GetTableRangesHeap());
 
 #if defined(WITH_JEMALLOC)
-                            /*
-                            unsigned prev_arena;
-                            size_t sz = sizeof(prev_arena);
+                            uint32_t prev_arena;
+                            size_t sz = sizeof(uint32_t);
                             // read prev arena id
                             mallctl("thread.arena",
                                     &prev_arena,
@@ -1318,8 +1314,7 @@ void LocalCcShards::KickoutRangeSlices()
                                     NULL,
                                     NULL,
                                     &table_range_arena_id,
-                                    sizeof(unsigned));
-                            */
+                                    sizeof(uint32_t));
 #endif
 
                             range_entry->DropStoreRange();
@@ -1336,13 +1331,11 @@ void LocalCcShards::KickoutRangeSlices()
                             }
 
 #if defined(WITH_JEMALLOC)
-                            /*
                             mallctl("thread.arena",
                                     NULL,
                                     NULL,
                                     &prev_arena,
-                                    sizeof(unsigned));
-                            */
+                                    sizeof(uint32_t));
 #endif
                             if (has_enough_mem)
                             {
@@ -1382,9 +1375,8 @@ void LocalCcShards::KickoutRangeSlices()
                 mi_override_thread(GetTableRangesHeapThreadId());
             mi_heap_t *prev_heap = mi_heap_set_default(GetTableRangesHeap());
 #if defined(WITH_JEMALLOC)
-            /*
-            unsigned prev_arena;
-            size_t sz = sizeof(prev_arena);
+            uint32_t prev_arena;
+            size_t sz = sizeof(uint32_t);
             // read prev arena id
             mallctl("thread.arena", &prev_arena, &sz, NULL, 0);  // read only
             // override arena id
@@ -1393,9 +1385,7 @@ void LocalCcShards::KickoutRangeSlices()
                     NULL,
                     NULL,
                     &table_range_arena_id,
-                    sizeof(unsigned));
-            */
-
+                    sizeof(uint32_t));
 #endif
 
             entry->DropStoreRange();
@@ -1412,8 +1402,7 @@ void LocalCcShards::KickoutRangeSlices()
             }
 
 #if defined(WITH_JEMALLOC)
-            // mallctl("thread.arena", NULL, NULL, &prev_arena,
-            // sizeof(unsigned));
+            mallctl("thread.arena", NULL, NULL, &prev_arena, sizeof(uint32_t));
 #endif
 
             if (has_enough_mem)
@@ -2137,9 +2126,8 @@ bool LocalCcShards::DropStoreRangesInBucket(NodeGroupId ng_id,
                             mi_heap_set_default(GetTableRangesHeap());
 
 #if defined(WITH_JEMALLOC)
-                        /*
-                        unsigned prev_arena;
-                        size_t sz = sizeof(prev_arena);
+                        uint32_t prev_arena;
+                        size_t sz = sizeof(uint32_t);
                         // read prev arena id
                         mallctl("thread.arena",
                                 &prev_arena,
@@ -2152,9 +2140,7 @@ bool LocalCcShards::DropStoreRangesInBucket(NodeGroupId ng_id,
                                 NULL,
                                 NULL,
                                 &table_range_arena_id,
-                                sizeof(unsigned));
-                        */
-
+                                sizeof(uint32_t));
 #endif
 
                         entry->DropStoreRange();
@@ -2170,13 +2156,11 @@ bool LocalCcShards::DropStoreRangesInBucket(NodeGroupId ng_id,
                         }
 
 #if defined(WITH_JEMALLOC)
-                        /*
                         mallctl("thread.arena",
                                 NULL,
                                 NULL,
                                 &prev_arena,
-                                sizeof(unsigned));
-                        */
+                                sizeof(uint32_t));
 #endif
                     }
                     else
@@ -5017,8 +5001,7 @@ void LocalCcShards::DataSyncForHashPartition(
                 mi_heap_set_default(hash_partition_ckpt_heap_);
 
 #if defined(WITH_JEMALLOC)
-            /*
-            unsigned prev_arena;
+            uint32_t prev_arena;
             size_t sz = sizeof(prev_arena);
             // read prev arena id
             mallctl("thread.arena", &prev_arena, &sz, NULL, 0);  // read only
@@ -5027,9 +5010,7 @@ void LocalCcShards::DataSyncForHashPartition(
                     NULL,
                     NULL,
                     &hash_partition_ckpt_arena_id_,
-                    sizeof(unsigned));
-            */
-
+                    sizeof(uint32_t));
 #endif
 
             data_sync_vec->reserve(scan_cc.accumulated_scan_cnt_);
@@ -5090,8 +5071,7 @@ void LocalCcShards::DataSyncForHashPartition(
 
 #if defined(WITH_JEMALLOC)
             // override arena id
-            // mallctl("thread.arena", NULL, NULL, &prev_arena,
-            // sizeof(unsigned));
+            mallctl("thread.arena", NULL, NULL, &prev_arena, sizeof(uint32_t));
 #endif
 
             heap_lk.unlock();
@@ -6602,7 +6582,6 @@ void LocalCcShards::KickoutDataForTest()
 void LocalCcShards::ReportHashPartitionCkptHeapUsage()
 {
 #if defined(WITH_JEMALLOC)
-    /*
     size_t committed = 0;
     size_t allocated = 0;
     GetJemallocArenaStat(hash_partition_ckpt_arena_id_, committed, allocated);
@@ -6614,7 +6593,6 @@ void LocalCcShards::ReportHashPartitionCkptHeapUsage()
                   << 100 * (static_cast<float>(committed - allocated) /
                             static_cast<float>(committed));
     }
-    */
 #else
     std::unique_lock<std::mutex> heap_lk(hash_partition_ckpt_heap_mux_);
     mi_threadid_t prev_thd = mi_override_thread(hash_partition_main_thread_id_);
