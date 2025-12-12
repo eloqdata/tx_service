@@ -21,13 +21,17 @@
  */
 #include "thread_worker_pool.h"
 
+#include <pthread.h>
+
 #include <cassert>
 
 namespace EloqDS
 {
-ThreadWorkerPool::ThreadWorkerPool(size_t max_workers_num)
-    : max_workers_num_(max_workers_num)
+ThreadWorkerPool::ThreadWorkerPool(const char *short_name,
+                                   size_t max_workers_num)
+    : short_name_(short_name), max_workers_num_(max_workers_num)
 {
+    assert(short_name_.size() < 10);
     Initialize();
 }
 
@@ -78,6 +82,9 @@ void ThreadWorkerPool::Initialize()
                         }
                     }
                 });
+            std::string thread_name =
+                std::string(short_name_) + "_wp_" + std::to_string(i);
+            pthread_setname_np(worker.native_handle(), thread_name.c_str());
             workers_.push_back(std::move(worker));
         }
     }

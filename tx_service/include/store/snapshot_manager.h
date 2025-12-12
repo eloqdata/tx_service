@@ -108,7 +108,7 @@ private:
         std::unordered_map<std::string, txservice::remote::CreateBackupRequest>>
         ng_backup_tasks_;
 
-    txservice::TxWorkerPool backup_worker_{1};
+    txservice::TxWorkerPool backup_worker_{"tx_snapbk", 1};
 };
 
 }  // namespace store

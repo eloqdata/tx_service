@@ -22,12 +22,14 @@
 #include "tx_worker_pool.h"
 
 #include <cassert>
+#include <cstring>
 
 namespace txservice
 {
-TxWorkerPool::TxWorkerPool(size_t max_workers_num)
+TxWorkerPool::TxWorkerPool(const char *short_name, size_t max_workers_num)
     : max_workers_num_(max_workers_num)
 {
+    assert(strlen(short_name) < 10);
     for (size_t i = 0; i < max_workers_num_; i++)
     {
         std::thread worker = std::thread(
@@ -67,6 +69,9 @@ TxWorkerPool::TxWorkerPool(size_t max_workers_num)
                 }
             },
             i);
+        std::string thread_name =
+            std::string(short_name) + "_wp_" + std::to_string(i);
+        pthread_setname_np(worker.native_handle(), thread_name.c_str());
         workers_.push_back(std::move(worker));
     }
 }
