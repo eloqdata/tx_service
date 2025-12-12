@@ -125,9 +125,10 @@ RocksDBHandler::RocksDBHandler(const EloqShare::RocksDBConfig &config,
       tx_enable_cache_replacement_(tx_enable_cache_replacement)
 {
     info_log_level_ = StringToInfoLogLevel(config.info_log_level_);
-    query_worker_pool_ =
-        std::make_unique<txservice::TxWorkerPool>(config.query_worker_num_);
-    db_manage_worker_ = std::make_unique<txservice::TxWorkerPool>(1);
+    query_worker_pool_ = std::make_unique<txservice::TxWorkerPool>(
+        "rocksdb_handler_query", config.query_worker_num_);
+    db_manage_worker_ = std::make_unique<txservice::TxWorkerPool>(
+        "rocksdb_handler_db_manage", 1);
 }
 
 RocksDBHandler::~RocksDBHandler()
@@ -2954,7 +2955,7 @@ RocksDBHandlerImpl::RocksDBHandlerImpl(const EloqShare::RocksDBConfig &config,
       ttl_compaction_filter_(nullptr)
 {
     rsync_task_pool_ = std::make_unique<txservice::TxWorkerPool>(
-        config.snapshot_sync_worker_num_);
+        "rocksdb_handler_rsync_task", config.snapshot_sync_worker_num_);
 }
 
 RocksDBHandlerImpl::~RocksDBHandlerImpl()
