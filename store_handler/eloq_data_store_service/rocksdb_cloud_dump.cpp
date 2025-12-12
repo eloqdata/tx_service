@@ -50,12 +50,17 @@ DEFINE_string(oss_url,
               "http(s)://{host}:{port}/{bucket}/{path}. "
               "Takes precedence over legacy config if provided");
 DEFINE_string(bucket_name, "", "S3 bucket name (legacy, use oss_url instead)");
-DEFINE_string(bucket_prefix, "", "S3 bucket prefix (legacy, not supported with oss_url)");
-DEFINE_string(object_path,
-              "rocksdb_cloud",
-              "S3 object path for RocksDB Cloud storage (legacy, use oss_url instead)");
+DEFINE_string(bucket_prefix,
+              "",
+              "S3 bucket prefix (legacy, not supported with oss_url)");
+DEFINE_string(
+    object_path,
+    "rocksdb_cloud",
+    "S3 object path for RocksDB Cloud storage (legacy, use oss_url instead)");
 DEFINE_string(region, "us-east-1", "AWS region");
-DEFINE_string(s3_endpoint, "", "Custom S3 endpoint URL (optional, legacy, use oss_url instead)");
+DEFINE_string(s3_endpoint,
+              "",
+              "Custom S3 endpoint URL (optional, legacy, use oss_url instead)");
 DEFINE_string(db_path, "./db", "Local DB path");
 DEFINE_bool(list_cf, false, "List all column families");
 DEFINE_bool(opendb, false, "Open the DB only");
@@ -84,7 +89,9 @@ void print_usage(const char *prog_name)
         "  --object_path=PATH           S3 object path for RocksDB Cloud "
         "  --region=REGION              AWS region (default: us-east-1)\n"
         "  --s3_endpoint=URL            Custom S3 endpoint URL (optional)\n"
-        "  --oss_url=URL                Object Store Service URL. Format: s3://{bucket}/{path}, gs://{bucket}/{path}, or http(s)://{host}:{port}/{bucket}/{path}. \n"
+        "  --oss_url=URL                Object Store Service URL. Format: "
+        "s3://{bucket}/{path}, gs://{bucket}/{path}, or "
+        "http(s)://{host}:{port}/{bucket}/{path}. \n"
         "  --db_path=PATH               Local DB path (default: ./db)\n"
         "  --list_cf                    List all column families\n"
         "  --opendb                     Open the DB only\n"
@@ -99,10 +106,10 @@ void print_usage(const char *prog_name)
 
 struct S3UrlComponents
 {
-    std::string protocol;       // "s3", "gs", "http", "https"
+    std::string protocol;  // "s3", "gs", "http", "https"
     std::string bucket_name;
     std::string object_path;
-    std::string endpoint_url;   // derived from http/https URLs
+    std::string endpoint_url;  // derived from http/https URLs
     bool is_valid{false};
     std::string error_message;
 };
@@ -131,7 +138,8 @@ inline S3UrlComponents ParseS3Url(const std::string &s3_url)
     size_t protocol_end = s3_url.find("://");
     if (protocol_end == std::string::npos)
     {
-        result.error_message = "Invalid OSS URL format: missing '://' separator";
+        result.error_message =
+            "Invalid OSS URL format: missing '://' separator";
         return result;
     }
 
@@ -150,7 +158,8 @@ inline S3UrlComponents ParseS3Url(const std::string &s3_url)
     size_t path_start = protocol_end + 3;  // Skip "://"
     if (path_start >= s3_url.length())
     {
-        result.error_message = "Invalid OSS URL format: no content after protocol";
+        result.error_message =
+            "Invalid OSS URL format: no content after protocol";
         return result;
     }
 
@@ -170,8 +179,8 @@ inline S3UrlComponents ParseS3Url(const std::string &s3_url)
         }
 
         // Store the full endpoint URL including protocol
-        result.endpoint_url = result.protocol + "://" +
-                              remaining.substr(0, first_slash);
+        result.endpoint_url =
+            result.protocol + "://" + remaining.substr(0, first_slash);
         remaining = remaining.substr(first_slash + 1);
     }
 
@@ -181,7 +190,8 @@ inline S3UrlComponents ParseS3Url(const std::string &s3_url)
     if (first_slash == std::string::npos)
     {
         result.error_message =
-            "Invalid OSS URL format: missing object path (format: {bucket_name}/{object_path})";
+            "Invalid OSS URL format: missing object path (format: "
+            "{bucket_name}/{object_path})";
         return result;
     }
 
@@ -236,10 +246,11 @@ CmdLineParams parse_arguments()
         S3UrlComponents url_components = ParseS3Url(FLAGS_oss_url);
         if (!url_components.is_valid)
         {
-            throw std::runtime_error("Invalid oss_url: " + url_components.error_message +
-                                     ". URL format: s3://{bucket}/{path}, "
-                                     "gs://{bucket}/{path}, or "
-                                     "http(s)://{host}:{port}/{bucket}/{path}");
+            throw std::runtime_error(
+                "Invalid oss_url: " + url_components.error_message +
+                ". URL format: s3://{bucket}/{path}, "
+                "gs://{bucket}/{path}, or "
+                "http(s)://{host}:{port}/{bucket}/{path}");
         }
 
         params.bucket_name = url_components.bucket_name;
@@ -249,8 +260,9 @@ CmdLineParams parse_arguments()
 
         LOG(INFO) << "Using OSS URL configuration: " << FLAGS_oss_url
                   << " (bucket: " << params.bucket_name
-                  << ", object_path: " << params.object_path
-                  << ", endpoint: " << (params.s3_endpoint_url.empty() ? "default" : params.s3_endpoint_url)
+                  << ", object_path: " << params.object_path << ", endpoint: "
+                  << (params.s3_endpoint_url.empty() ? "default"
+                                                     : params.s3_endpoint_url)
                   << ")";
     }
     else
@@ -303,7 +315,8 @@ CmdLineParams parse_arguments()
         params.get_value.first.empty())
     {
         throw std::runtime_error(
-            "No action specified. Use --list_cf, --opendb, --dump_keys, or --get_value");
+            "No action specified. Use --list_cf, --opendb, --dump_keys, or "
+            "--get_value");
     }
 
     return params;
@@ -498,6 +511,9 @@ int main(int argc, char **argv)
 #if defined(DATA_STORE_TYPE_ELOQDSS_ROCKSDB_CLOUD_S3)
         // Initialize AWS SDK
         Aws::SDKOptions aws_options;
+        aws_options.httpOptions.installSigPipeHandler = true;
+        aws_options.loggingOptions.logLevel =
+            Aws::Utils::Logging::LogLevel::Info;
         Aws::InitAPI(aws_options);
 
         // Set credentials
