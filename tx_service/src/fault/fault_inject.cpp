@@ -200,7 +200,8 @@ void FaultInject::TriggerAction(FaultEntry *entry)
                     fi_req->set_fault_name(fault_name);
                     fi_req->set_fault_paras(fault_paras);
 
-                    auto send_res = ss->SendMessageToNode(dest_node_id, send_msg);
+                    auto send_res =
+                        ss->SendMessageToNode(dest_node_id, send_msg);
                     b = (send_res.sent || send_res.queued_for_retry);
                 }
 
