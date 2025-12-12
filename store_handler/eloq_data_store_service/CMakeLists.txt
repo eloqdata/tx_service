@@ -148,6 +148,8 @@ if (WITH_ASAN)
     # Add link flags for executables and shared libraries
     set(CMAKE_EXE_LINKER_FLAGS "${CMAKE_EXE_LINKER_FLAGS} -fsanitize=address -fno-omit-frame-pointer")
     set(CMAKE_SHARED_LINKER_FLAGS "${CMAKE_SHARED_LINKER_FLAGS} -fsanitize=address -fno-omit-frame-pointer")
+    add_compile_definitions(BOOST_USE_ASAN)
+    add_compile_definitions(BOOST_USE_UCONTEXT)
 endif()
 
 # find_path(LEVELDB_INCLUDE_PATH NAMES leveldb/db.h)
@@ -350,7 +352,7 @@ endif ()
 
 if(WITH_DATA_STORE STREQUAL "ELOQDSS_ELOQSTORE")
     set(DYNAMIC_LIB ${DYNAMIC_LIB} ${URING_LIB})
-    set(DYNAMIC_LIB ${DYNAMIC_LIB} Boost::context)
+    set(DYNAMIC_LIB ${DYNAMIC_LIB} ${BOOST_CONTEXT_TARGET})
 endif ()
 
 # crcspeed
