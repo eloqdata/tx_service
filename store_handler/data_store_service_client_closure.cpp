@@ -754,6 +754,20 @@ void FetchTableRangesCallback(void *data,
         mi_heap_t *prev_heap =
             mi_heap_set_default(shards->GetTableRangesHeap());
 
+#if defined(WITH_JEMALLOC)
+        uint32_t prev_arena;
+        size_t sz = sizeof(uint32_t);
+        // read prev arena id
+        mallctl("thread.arena", &prev_arena, &sz, NULL, 0);  // read only
+        // override arena id
+        auto table_range_arena_id = shards->GetTableRangesArenaId();
+        mallctl("thread.arena",
+                NULL,
+                NULL,
+                &table_range_arena_id,
+                sizeof(uint32_t));
+#endif
+
         auto catalog_factory =
             client.GetCatalogFactory(fetch_range_cc->table_name_.Engine());
         assert(catalog_factory != nullptr);
@@ -812,6 +826,10 @@ void FetchTableRangesCallback(void *data,
         {
             mi_restore_default_thread_id();
         }
+
+#if defined(WITH_JEMALLOC)
+        mallctl("thread.arena", NULL, NULL, &prev_arena, sizeof(uint32_t));
+#endif
         heap_lk.unlock();
 
         if (items_size < scan_next_closure->BatchSize())
@@ -1030,6 +1048,20 @@ void FetchRangeSlicesCallback(void *data,
             mi_heap_t *prev_heap =
                 mi_heap_set_default(shards->GetTableRangesHeap());
 
+#if defined(WITH_JEMALLOC)
+            uint32_t prev_arena;
+            size_t sz = sizeof(uint32_t);
+            // read prev arena id
+            mallctl("thread.arena", &prev_arena, &sz, NULL, 0);  // read only
+            // override arena id
+            auto table_range_arena_id = shards->GetTableRangesArenaId();
+            mallctl("thread.arena",
+                    NULL,
+                    NULL,
+                    &table_range_arena_id,
+                    sizeof(uint32_t));
+#endif
+
             auto catalog_factory =
                 client.GetCatalogFactory(fetch_req->table_name_.Engine());
             assert(catalog_factory != nullptr);
@@ -1064,6 +1096,9 @@ void FetchRangeSlicesCallback(void *data,
             {
                 mi_restore_default_thread_id();
             }
+#if defined(WITH_JEMALLOC)
+            mallctl("thread.arena", NULL, NULL, &prev_arena, sizeof(uint32_t));
+#endif
             heap_lk.unlock();
 
             segment_id++;

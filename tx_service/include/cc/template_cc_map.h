@@ -5137,11 +5137,26 @@ public:
         mi_heap_t *prev_heap = scan_heap->SetAsDefaultHeap();
         assert(shard_->GetShardHeapThreadId() == mi_thread_id());
 
+#if defined(WITH_JEMALLOC)
+        auto prev_arena = scan_heap->SetAsDefaultArena();
+#endif
+
         // If the heap is full, we should stop exporting.
         std::pair<size_t, bool> export_size = {0, true};
         // Do not try to call mi_heap_collect, since it is expensive, flush data
         // will return the memory anyway when it done
-        if (!scan_heap->Full())
+
+        int64_t alloc = 0;
+        int64_t commit = 0;
+        bool scan_heap_is_full = scan_heap->Full(&alloc, &commit);
+#if defined(WITH_JEMALLOC)
+        // LOG(INFO) << "yf: alloc = " << alloc << ", commit = " << commit
+        //          << ", limit = " << scan_heap->MemoryLimit()
+        //          << ", prev arena = " << prev_arena
+        //          << ", scan heap arena = " << scan_heap->ArenaId();
+#endif
+
+        if (!scan_heap_is_full)
         {
             export_size.first =
                 cce->ExportForCkpt(key,
@@ -5160,6 +5175,10 @@ public:
         }
 
         mi_heap_set_default(prev_heap);
+
+#if defined(WITH_JEMALLOC)
+        mallctl("thread.arena", NULL, NULL, &prev_arena, sizeof(uint32_t));
+#endif
         return export_size;
     }
 

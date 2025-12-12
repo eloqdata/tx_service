@@ -24,11 +24,17 @@ message(NOTICE "OPEN_LOG_SERVICE: ${OPEN_LOG_SERVICE}")
 message(NOTICE "BUILD_SHARED_LIBS: ${BUILD_SHARED_LIBS}")
 message(NOTICE "WITH_JEMALLOC: ${WITH_JEMALLOC}")
 
-
+add_library(jemalloc_cfg INTERFACE)
+option(WITH_JEMALLOC "Use jemalloc" OFF)
 if(WITH_JEMALLOC)
-    add_compile_definitions(WITH_JEMALLOC)
-    find_package(JeMalloc REQUIRED)
+    find_package(PkgConfig REQUIRED)
+    pkg_check_modules(JEMALLOC REQUIRED jemalloc)
+    target_compile_definitions(jemalloc_cfg INTERFACE WITH_JEMALLOC)
+    target_include_directories(jemalloc_cfg INTERFACE ${JEMALLOC_INCLUDE_DIRS})
+    target_link_libraries(jemalloc_cfg INTERFACE ${JEMALLOC_LINK_LIBRARIES})
 endif()
+
+
 # Synchronize WITH_DATA_STORE and WITH_LOG_STATE
 # Determine RocksDB type from WITH_DATA_STORE
 set(DATA_STORE_USES_LOCAL_ROCKSDB FALSE)
@@ -359,7 +365,11 @@ elseif(WITH_DATA_STORE STREQUAL "ELOQDSS_ELOQSTORE")
     SET(DATA_SUBSTRATE_LINK_LIBS ${DATA_SUBSTRATE_LINK_LIBS} eloqstore)
 endif()
 
-TARGET_LINK_LIBRARIES(${DATA_SUBSTRATE_LIB} ${DATA_SUBSTRATE_LINK_LIBS})
+target_link_libraries(${DATA_SUBSTRATE_LIB} PUBLIC ${DATA_SUBSTRATE_LINK_LIBS})
+
+if(WITH_JEMALLOC)
+    target_link_libraries(${DATA_SUBSTRATE_LIB} PUBLIC jemalloc_cfg)
+endif()
 
 # Export include directories for other targets
 TARGET_INCLUDE_DIRECTORIES(${DATA_SUBSTRATE_LIB} PUBLIC

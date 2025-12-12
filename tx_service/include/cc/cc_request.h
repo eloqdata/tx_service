@@ -81,7 +81,7 @@
 #include "tx_service_common.h"
 #include "type.h"
 #include "util.h"
-#if defined(USE_JEMALLOC)
+#if defined(WITH_JEMALLOC)
 #include <jemalloc/jemalloc.h>
 #endif
 
@@ -6295,12 +6295,18 @@ public:
             {
                 CcShardHeap *scan_heap = ccs.GetShardDataSyncScanHeap();
                 mi_heap_t *prev_heap = scan_heap->SetAsDefaultHeap();
+
+#if defined(WITH_JEMALLOC)
+                auto prev_arena = scan_heap->SetAsDefaultArena();
+#endif
+
                 size_t cnt = 0;
                 while (cnt < VEC_ERASE_BATCH_SIZE && data_sync_vec_->size() > 0)
                 {
                     data_sync_vec_->pop_back();
                     cnt++;
                 }
+
                 int64_t allocated, committed;
                 if (data_sync_vec_->size() == 0 &&
                     scan_heap->Full(&allocated, &committed))
@@ -6311,7 +6317,12 @@ public:
                         << " committed: " << committed
                         << " heap size: " << scan_heap->Threshold();
                 }
+
                 mi_heap_set_default(prev_heap);
+#if defined(WITH_JEMALLOC)
+                mallctl(
+                    "thread.arena", NULL, NULL, &prev_arena, sizeof(uint32_t));
+#endif
 
                 if (data_sync_vec_->size() > 0)
                 {
@@ -6328,6 +6339,10 @@ public:
             {
                 CcShardHeap *scan_heap = ccs.GetShardDataSyncScanHeap();
                 mi_heap_t *prev_heap = scan_heap->SetAsDefaultHeap();
+#if defined(WITH_JEMALLOC)
+                auto prev_arena = scan_heap->SetAsDefaultArena();
+#endif
+
                 size_t cnt = 0;
                 while (cnt < VEC_ERASE_BATCH_SIZE && archive_vec_->size() > 0)
                 {
@@ -6345,7 +6360,13 @@ public:
                         << " committed: " << committed
                         << " heap size: " << scan_heap->Threshold();
                 }
+
                 mi_heap_set_default(prev_heap);
+
+#if defined(WITH_JEMALLOC)
+                mallctl(
+                    "thread.arena", NULL, NULL, &prev_arena, sizeof(uint32_t));
+#endif
 
                 if (archive_vec_->size() > 0)
                 {
@@ -7406,24 +7427,36 @@ struct CollectMemStatsCc : public CcRequestBase
 
     bool Execute(CcShard &ccs) override
     {
+#if !defined(WITH_JEMALLOC)
         // this cc will only execute in context of shard heap, so the stats
         // collected are shard heap stats
         //
         assert(mi_heap_get_default() == ccs.GetShardHeap()->Heap());
         mi_thread_stats(&stats_->allocated_, &stats_->committed_);
+#else
+        // estimate thread memory usage from total process memory
+        // uint32_t prev_arena;
+        // size_t sz = sizeof(uint32_t);
+        // read prev arena id
+        // mallctl("thread.arena", &prev_arena, &sz, NULL, 0);  // read only
+        // assert(prev_arena == ccs.GetShardHeap()->ArenaId());
+
+        size_t committed = 0;
+        size_t allocated = 0;
+        GetJemallocArenaStat(
+            ccs.GetShardHeap()->ArenaId(), committed, allocated);
+
+        stats_->allocated_ = allocated;
+        stats_->committed_ = committed;
+
+        LOG(INFO) << "CollectMemStatsCc: ccs #" << ccs.core_id_ << ", commited "
+                  << committed << ", allocated = " << allocated;
+#endif
+
         stats_->wait_list_size_ = ccs.WaitListSizeForMemory();
         std::lock_guard<std::mutex> lk(mux_);
         finished_ = true;
         cv_.notify_one();
-#if defined(USE_JEMALLOC)
-        // estimate thread memory usage from total process memory
-        size_t total_resident, resident;
-        size_t sz = sizeof(total_resident);
-
-        // Resident memory pages actually held by jemalloc from OS
-        mallctl("stats.resident", &total_resident, &sz, NULL, 0);
-        LOG(INFO) << "CollectMemStatsCc: total_resident " << total_resident;
-#endif
         return false;
     }
 
