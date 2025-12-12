@@ -98,6 +98,12 @@ public:
      * @return Cache size limit in bytes, 0 if not applicable
      */
     virtual uint64_t GetSstFileCacheSize() const = 0;
+
+    /**
+     * @brief Check if S3 URL configuration is being used (instead of legacy config)
+     * @return true if s3_url is configured, false otherwise
+     */
+    virtual bool IsS3UrlConfigured() const { return false; }
 };
 
 }  // namespace EloqDS

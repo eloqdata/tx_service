@@ -51,18 +51,27 @@ public:
         DataStoreService *data_store_service,
         bool start_db = true) override
     {
-        // Add shard_id to object_path_
+        // Add shard_id to object_path_ only for legacy configuration
+        // When s3_url is configured, the user can include shard path in the URL themselves
         auto shard_cloud_config = cloud_config_;
-        if (shard_cloud_config.object_path_.empty())
+        if (!shard_cloud_config.IsS3UrlConfigured())
         {
-            shard_cloud_config.object_path_ = "rocksdb_cloud_object_path/";
+            // Legacy configuration: append shard_id for shard isolation
+            if (shard_cloud_config.object_path_.empty())
+            {
+                shard_cloud_config.object_path_ = "rocksdb_cloud_object_path/";
+            }
+            else if (shard_cloud_config.object_path_.back() != '/')
+            {
+                shard_cloud_config.object_path_.append("/");
+            }
+            shard_cloud_config.object_path_.append("ds_");
+            shard_cloud_config.object_path_.append(std::to_string(shard_id));
         }
-        else if (shard_cloud_config.object_path_.back() != '/')
-        {
-            shard_cloud_config.object_path_.append("/");
+        else {
+            shard_cloud_config.s3_url_.append("/ds_");
+            shard_cloud_config.s3_url_.append(std::to_string(shard_id));
         }
-        shard_cloud_config.object_path_.append("ds_");
-        shard_cloud_config.object_path_.append(std::to_string(shard_id));
 
         auto ds = std::make_unique<RocksDBCloudDataStore>(
             shard_cloud_config,
@@ -130,6 +139,11 @@ public:
     uint64_t GetSstFileCacheSize() const override
     {
         return cloud_config_.sst_file_cache_size_;
+    }
+
+    bool IsS3UrlConfigured() const override
+    {
+        return cloud_config_.IsS3UrlConfigured();
     }
 
 private:
