@@ -64,7 +64,7 @@
 #include "type.h"
 
 #ifdef WITH_JEMALLOC
-// we use uint32_t instead of unsgined to make the code more readable
+// we use uint32_t instead of unsigned to make the code more readable
 static_assert(std::is_same_v<unsigned, uint32_t>,
               "jemalloc uses 'unsigned' for arena id, but this platform "
               "has unsigned != uint32_t. Please adjust the type alias.");

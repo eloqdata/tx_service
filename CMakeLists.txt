@@ -16,7 +16,6 @@ option(STATISTICS "Whether enable table statistics" ON)
 option(EXT_TX_PROC_ENABLED "Allows external threads to move forward the tx service." ON)
 option(ELOQ_MODULE_ENABLED "Register the tx service as an ELOQ module." ON)
 option(BUILD_SHARED_LIBS "Build shared libraries instead of static libraries" OFF)
-option(WITH_JEMALLOC "Use jemalloc" OFF)
 
 message(NOTICE "WITH_DATA_STORE: ${WITH_DATA_STORE}")
 message(NOTICE "WITH_LOG_SERVICE: ${WITH_LOG_SERVICE}")
