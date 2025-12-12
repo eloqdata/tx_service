@@ -304,21 +304,9 @@ void ReadLocalOperation::Forward(txservice::TransactionExecution *txm)
             assert(hd_result_->ErrorCode() ==
                        CcErrorCode::ACQUIRE_KEY_LOCK_FAILED_FOR_RW_CONFLICT ||
                    hd_result_->ErrorCode() == CcErrorCode::DATA_STORE_ERR);
-            // If acquire range read lock blocked by DDL, check if tx has
-            // already acquired other range read lock. If so we need to abort
-            // tx since it might cause dead lock with range split. If this tx
-            // has not acquired any range read lock, we can safely retry here.
-            const auto &rset = txm->rw_set_.MetaDataReadSet();
-            for (const auto &[cce_addr, read_entry_pair] : rset)
-            {
-                if (read_entry_pair.second != catalog_ccm_name_sv &&
-                    read_entry_pair.second != cluster_config_ccm_name_sv)
-                {
-                    // Abort tx.
-                    txm->PostProcess(*this);
-                    return;
-                }
-            }
+            // With blocking range reads and deadlock detection, we no longer
+            // need to preemptively abort. The request will block and deadlock
+            // detection will handle actual deadlocks. Retry the operation.
             hd_result_->Value().Reset();
             hd_result_->Reset();
             execute_immediately_ = false;
@@ -610,23 +598,9 @@ void LockWriteRangeBucketsOp::Forward(TransactionExecution *txm)
         {
             assert(lock_result_->ErrorCode() ==
                    CcErrorCode::ACQUIRE_KEY_LOCK_FAILED_FOR_RW_CONFLICT);
-            // If acquire range/bucket read lock blocked by DDL, check if tx has
-            // already acquired other range/bucket read lock. If so we need to
-            // abort tx since it might cause dead lock with bucket migration. If
-            // this tx has not acquired any range/buckets read lock, we can
-            // safely retry here.
-            const auto &rset = txm->rw_set_.MetaDataReadSet();
-            for (const auto &[cce_addr, read_entry_pair] : rset)
-            {
-                if (read_entry_pair.second != catalog_ccm_name_sv &&
-                    read_entry_pair.second != range_bucket_ccm_name_sv &&
-                    read_entry_pair.second != cluster_config_ccm_name_sv)
-                {
-                    // Abort tx.
-                    txm->PostProcess(*this);
-                    return;
-                }
-            }
+            // With blocking range reads and deadlock detection, we no longer
+            // need to preemptively abort. The request will block and deadlock
+            // detection will handle actual deadlocks. Retry the operation.
             lock_result_->Value().Reset();
             lock_result_->Reset();
             is_running_ = false;
@@ -1856,6 +1830,8 @@ void AcquireAllOp::Forward(TransactionExecution *txm)
         // arbitrarily long, after all acquire requests are acknowledged, we
         // still need to periodically check liveness of the remote node.
 
+        DLOG(INFO) << "All acquire all requests finished for tx "
+                   << txm->TxNumber() << ", fail count: " << fail_cnt_.load();
         if (fail_cnt_.load(std::memory_order_relaxed) == 0)
         {
             for (size_t idx = 0; idx < upload_cnt_; ++idx)
@@ -4224,7 +4200,48 @@ void SplitFlushRangeOp::Forward(TransactionExecution *txm)
                       << range_info_->PartitionId()
                       << ", txn: " << txm->TxNumber();
             // Upgrade to write lock again for commit phase.
+
+#ifdef WITH_FAULT_INJECT
+            // Check if fault injector is enabled
+            FaultEntry *fault_entry =
+                FaultInject::Entry("split_flush_commit_acquire_all_deadlock");
+            if (fault_entry != nullptr)
+            {
+                // Only assign to op_ and push to txm, do not call Process
+                op_ = &commit_acquire_all_write_op_;
+                txm->PushOperation(&commit_acquire_all_write_op_);
+                auto all_node_groups = Sharder::Instance().AllNodeGroups();
+                commit_acquire_all_write_op_.Reset(all_node_groups->size());
+                commit_acquire_all_write_op_.is_running_ = true;
+
+                // Ensure at least one result slot exists.
+                assert(commit_acquire_all_write_op_.hd_results_.size() >= 1);
+                auto &hd_result0 = commit_acquire_all_write_op_.hd_results_[0];
+                hd_result0.Reset();
+                hd_result0.SetToBlock();
+                // Set error on the first hd_result with DEAD_LOCK_ABORT
+                hd_result0.SetError(CcErrorCode::DEAD_LOCK_ABORT);
+                DLOG(INFO)
+                    << "FaultInject split_flush_commit_acquire_all_deadlock, "
+                    << " commit_acquire_all_write_op_.IsDeadlock(): "
+                    << commit_acquire_all_write_op_.IsDeadlock()
+                    << " upload_cnt_: "
+                    << commit_acquire_all_write_op_.upload_cnt_
+                    << " fail_cnt_: "
+                    << commit_acquire_all_write_op_.fail_cnt_.load(
+                           std::memory_order_relaxed);
+                // Auto-remove the fault to prevent it from being triggered
+                // again
+                FaultInject::Instance().InjectFault(
+                    "split_flush_commit_acquire_all_deadlock", "remove");
+            }
+            else
+            {
+                ForwardToSubOperation(txm, &commit_acquire_all_write_op_);
+            }
+#else
             ForwardToSubOperation(txm, &commit_acquire_all_write_op_);
+#endif
         }
     }
     else if (op_ == &prepare_acquire_all_write_op_)
@@ -4501,6 +4518,9 @@ void SplitFlushRangeOp::Forward(TransactionExecution *txm)
     }
     else if (op_ == &commit_acquire_all_write_op_)
     {
+        DLOG(INFO) << "Split Flush commit acquire all write lock op fail cnt: "
+                   << commit_acquire_all_write_op_.fail_cnt_.load(
+                          std::memory_order_relaxed);
         if (commit_acquire_all_write_op_.fail_cnt_.load(
                 std::memory_order_relaxed) > 0)
         {
@@ -4511,7 +4531,7 @@ void SplitFlushRangeOp::Forward(TransactionExecution *txm)
                            << txm->TxNumber();
                 if (commit_acquire_all_write_op_.IsDeadlock())
                 {
-                    LOG(ERROR)
+                    DLOG(ERROR)
                         << "Split Flush transaction deadlocks with other "
                            "transactions, downgrade write lock, tx_number:"
                         << txm->TxNumber();
@@ -4531,6 +4551,14 @@ void SplitFlushRangeOp::Forward(TransactionExecution *txm)
             }
             return;
         }
+
+        CODE_FAULT_INJECTOR(
+            "term_SplitFlushOp_CommitAcquireAllWriteOp_Continue", {
+                LOG(INFO)
+                    << "FaultInject "
+                       "term_SplitFlushOp_CommitAcquireAllWriteOp_Continue";
+                return;
+            });
 
         ACTION_FAULT_INJECTOR("range_split_commit_acquire_all");
 
