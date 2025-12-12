@@ -44,13 +44,18 @@
 // Define command line flags
 DEFINE_string(aws_access_key_id, "", "AWS access key ID");
 DEFINE_string(aws_secret_key, "", "AWS secret access key");
-DEFINE_string(bucket_name, "", "S3 bucket name");
-DEFINE_string(bucket_prefix, "", "S3 bucket prefix");
+DEFINE_string(s3_url,
+              "",
+              "S3 URL. Format: s3://{bucket}/{path} or "
+              "http(s)://{host}:{port}/{bucket}/{path}. "
+              "Takes precedence over legacy config if provided");
+DEFINE_string(bucket_name, "", "S3 bucket name (legacy, use s3_url instead)");
+DEFINE_string(bucket_prefix, "", "S3 bucket prefix (legacy, not supported with s3_url)");
 DEFINE_string(object_path,
               "rocksdb_cloud",
-              "S3 object path for RocksDB Cloud storage");
+              "S3 object path for RocksDB Cloud storage (legacy, use s3_url instead)");
 DEFINE_string(region, "us-east-1", "AWS region");
-DEFINE_string(s3_endpoint, "", "Custom S3 endpoint URL (optional)");
+DEFINE_string(s3_endpoint, "", "Custom S3 endpoint URL (optional, legacy, use s3_url instead)");
 DEFINE_string(db_path, "./db", "Local DB path");
 DEFINE_bool(list_cf, false, "List all column families");
 DEFINE_bool(opendb, false, "Open the DB only");
@@ -116,11 +121,39 @@ CmdLineParams parse_arguments()
 
     params.aws_access_key_id = FLAGS_aws_access_key_id;
     params.aws_secret_key = FLAGS_aws_secret_key;
-    params.bucket_name = FLAGS_bucket_name;
-    params.bucket_prefix = FLAGS_bucket_prefix;
-    params.object_path = FLAGS_object_path;
+    
+    // Check if s3_url was provided (takes precedence over legacy config)
+    if (!FLAGS_s3_url.empty())
+    {
+        EloqDS::S3UrlComponents url_components = EloqDS::ParseS3Url(FLAGS_s3_url);
+        if (!url_components.is_valid)
+        {
+            throw std::runtime_error("Invalid s3_url: " + url_components.error_message +
+                                     ". URL format: s3://{bucket}/{path} or "
+                                     "http(s)://{host}:{port}/{bucket}/{path}");
+        }
+        
+        params.bucket_name = url_components.bucket_name;
+        params.bucket_prefix = "";  // No prefix in URL-based config
+        params.object_path = url_components.object_path;
+        params.s3_endpoint_url = url_components.endpoint_url;
+        
+        LOG(INFO) << "Using S3 URL configuration: " << FLAGS_s3_url
+                  << " (bucket: " << params.bucket_name
+                  << ", object_path: " << params.object_path
+                  << ", endpoint: " << (params.s3_endpoint_url.empty() ? "default" : params.s3_endpoint_url)
+                  << ")";
+    }
+    else
+    {
+        // Use legacy configuration
+        params.bucket_name = FLAGS_bucket_name;
+        params.bucket_prefix = FLAGS_bucket_prefix;
+        params.object_path = FLAGS_object_path;
+        params.s3_endpoint_url = FLAGS_s3_endpoint;
+    }
+    
     params.region = FLAGS_region;
-    params.s3_endpoint_url = FLAGS_s3_endpoint;
     params.db_path = FLAGS_db_path;
     params.list_cf = FLAGS_list_cf;
     params.opendb = FLAGS_opendb;
@@ -161,8 +194,7 @@ CmdLineParams parse_arguments()
         params.get_value.first.empty())
     {
         throw std::runtime_error(
-            "No action specified. Use --list_cf, --opendb, --dump_keys, or "
-            "--get_value");
+            "No action specified. Use --list_cf, --opendb, --dump_keys, or --get_value");
     }
 
     return params;

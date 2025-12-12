@@ -294,6 +294,15 @@ DEFINE_string(rocksdb_cloud_s3_endpoint_url,
               "S3 compatible object store (e.g. minio) endpoint URL only for "
               "development purpose");
 
+DEFINE_string(rocksdb_cloud_s3_url,
+              "",
+              "RocksDB cloud S3 URL. Format: s3://{bucket}/{path} or "
+              "http(s)://{host}:{port}/{bucket}/{path}. "
+              "Examples: s3://my-bucket/my-path, "
+              "http://localhost:9000/my-bucket/my-path. "
+              "This option takes precedence over legacy configuration options "
+              "if both are provided");
+
 namespace EloqDS
 {
 bool CheckCommandLineFlagIsDefault(const char *name)
@@ -508,6 +517,14 @@ RocksDBCloudConfig::RocksDBCloudConfig(const INIReader &config)
 
 #endif
 
+    // Get the S3 URL configuration (new style)
+    s3_url_ =
+        !CheckCommandLineFlagIsDefault("rocksdb_cloud_s3_url")
+            ? FLAGS_rocksdb_cloud_s3_url
+            : config.GetString(
+                  "store", "rocksdb_cloud_s3_url", FLAGS_rocksdb_cloud_s3_url);
+
+    // Get legacy configuration
     bucket_name_ = !CheckCommandLineFlagIsDefault("rocksdb_cloud_bucket_name")
                        ? FLAGS_rocksdb_cloud_bucket_name
                        : config.GetString("store",

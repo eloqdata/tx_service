@@ -87,13 +87,39 @@ These flags are only applicable when RocksDB Cloud is enabled with either S3 or 
 
 ### Cloud Storage Configuration
 
+**New URL-based Configuration (Recommended):**
+
 | Flag Name | Required | Default Value | Format | Description |
 |-----------|----------|--------------|--------|-------------|
-| `rocksdb_cloud_bucket_name` | No | `"rocksdb-cloud-test"` | String | Cloud storage bucket name |
-| `rocksdb_cloud_bucket_prefix` | No | `"eloqkv-"` | String | Prefix for objects in the bucket |
-| `rocksdb_cloud_object_path` | No | `"rocksdb_cloud"` | String | Path within the bucket |
+| `rocksdb_cloud_s3_url` | No | `""` | S3 URL | Complete S3 URL. Takes precedence over legacy config if both provided. |
+
+**URL Format Examples:**
+- AWS S3: `s3://my-bucket/my-object-path`
+- MinIO (HTTP): `http://localhost:9000/my-bucket/my-object-path`
+- S3-compatible (HTTPS): `https://s3.amazonaws.com/my-bucket/my-object-path`
+
+**URL Format Specification:**
+- S3: `s3://{bucket_name}/{object_path}`
+- HTTP/HTTPS: `http(s)://{host}:{port}/{bucket_name}/{object_path}`
+
+**Supported Protocols:** `s3://`, `http://`, `https://`
+
+**Legacy Configuration (Deprecated, use URL-based config instead):**
+
+| Flag Name | Required | Default Value | Format | Description |
+|-----------|----------|--------------|--------|-------------|
+| `rocksdb_cloud_bucket_name` | No | `"rocksdb-cloud-test"` | String | Cloud storage bucket name (deprecated) |
+| `rocksdb_cloud_bucket_prefix` | No | `"eloqkv-"` | String | Prefix for objects in the bucket (deprecated, not supported in URL config) |
+| `rocksdb_cloud_object_path` | No | `"rocksdb_cloud"` | String | Path within the bucket (deprecated) |
+| `rocksdb_cloud_s3_endpoint_url` | No | `""` | String | S3-compatible object store endpoint URL (deprecated) |
+
+**Note:** If both `rocksdb_cloud_s3_url` and legacy options are provided, the URL-based configuration takes precedence and overrides the legacy settings.
+
+**Other Cloud Configuration:**
+
+| Flag Name | Required | Default Value | Format | Description |
+|-----------|----------|--------------|--------|-------------|
 | `rocksdb_cloud_region` | No | `"ap-northeast-1"` | String | Cloud region |
-| `rocksdb_cloud_s3_endpoint_url` | No | `""` | String | S3-compatible object store endpoint URL (for development) |
 
 ### Cloud Cache Configuration
 
