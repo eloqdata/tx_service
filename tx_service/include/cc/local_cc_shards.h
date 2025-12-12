@@ -878,17 +878,15 @@ public:
         mi_heap_t *prev_heap = mi_heap_set_default(table_ranges_heap_);
 
 #if defined(WITH_JEMALLOC)
-        /*
-        unsigned prev_arena_id;
+        uint32_t prev_arena_id;
         size_t table_range_arena_id = GetTableRangesArenaId();
-        size_t sz = sizeof(prev_arena_id);
+        size_t sz = sizeof(uint32_t);
         mallctl("thread.arena", &prev_arena_id, &sz, NULL, 0);
         mallctl("thread.arena",
                 NULL,
                 NULL,
                 &table_range_arena_id,
-                sizeof(unsigned));
-        */
+                sizeof(uint32_t));
 #endif
 
         TxKey range_tx_key(&start_key);
@@ -956,8 +954,8 @@ public:
             }
 
 #if defined(WITH_JEMALLOC)
-            // mallctl(
-            //    "thread.arena", NULL, NULL, &prev_arena_id, sizeof(unsigned));
+            mallctl(
+                "thread.arena", NULL, NULL, &prev_arena_id, sizeof(uint32_t));
 #endif
 
             if (last_sync_ts > 0)
@@ -1005,8 +1003,7 @@ public:
         mi_heap_set_default(prev_heap);
 
 #if defined(WITH_JEMALLOC)
-        // mallctl("thread.arena", NULL, NULL, &prev_arena_id,
-        // sizeof(unsigned));
+        mallctl("thread.arena", NULL, NULL, &prev_arena_id, sizeof(uint32_t));
 #endif
 
         return static_cast<TemplateTableRangeEntry<KeyT> *>(

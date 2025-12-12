@@ -6295,7 +6295,7 @@ public:
                 mi_heap_t *prev_heap = scan_heap->SetAsDefaultHeap();
 
 #if defined(WITH_JEMALLOC)
-                // auto prev_arena = scan_heap->SetAsDefaultArena();
+                auto prev_arena = scan_heap->SetAsDefaultArena();
 #endif
 
                 size_t cnt = 0;
@@ -6318,9 +6318,8 @@ public:
 
                 mi_heap_set_default(prev_heap);
 #if defined(WITH_JEMALLOC)
-                // mallctl(
-                //    "thread.arena", NULL, NULL, &prev_arena,
-                //    sizeof(unsigned));
+                mallctl(
+                    "thread.arena", NULL, NULL, &prev_arena, sizeof(uint32_t));
 #endif
 
                 if (data_sync_vec_->size() > 0)
@@ -6339,7 +6338,7 @@ public:
                 CcShardHeap *scan_heap = ccs.GetShardDataSyncScanHeap();
                 mi_heap_t *prev_heap = scan_heap->SetAsDefaultHeap();
 #if defined(WITH_JEMALLOC)
-                // auto prev_arena = scan_heap->SetAsDefaultArena();
+                auto prev_arena = scan_heap->SetAsDefaultArena();
 #endif
 
                 size_t cnt = 0;
@@ -6363,9 +6362,8 @@ public:
                 mi_heap_set_default(prev_heap);
 
 #if defined(WITH_JEMALLOC)
-                // mallctl(
-                //    "thread.arena", NULL, NULL, &prev_arena,
-                //    sizeof(unsigned));
+                mallctl(
+                    "thread.arena", NULL, NULL, &prev_arena, sizeof(uint32_t));
 #endif
 
                 if (archive_vec_->size() > 0)
@@ -7435,12 +7433,11 @@ struct CollectMemStatsCc : public CcRequestBase
         mi_thread_stats(&stats_->allocated_, &stats_->committed_);
 #else
         // estimate thread memory usage from total process memory
-        /*
-        unsigned prev_arena;
-        size_t sz = sizeof(prev_arena);
+        // uint32_t prev_arena;
+        // size_t sz = sizeof(uint32_t);
         // read prev arena id
-        mallctl("thread.arena", &prev_arena, &sz, NULL, 0);  // read only
-        assert(prev_arena == ccs.GetShardHeap()->ArenaId());
+        // mallctl("thread.arena", &prev_arena, &sz, NULL, 0);  // read only
+        // assert(prev_arena == ccs.GetShardHeap()->ArenaId());
 
         size_t committed = 0;
         size_t allocated = 0;
@@ -7452,7 +7449,6 @@ struct CollectMemStatsCc : public CcRequestBase
 
         LOG(INFO) << "CollectMemStatsCc: ccs #" << ccs.core_id_ << ", commited "
                   << committed << ", allocated = " << allocated;
-        */
 #endif
 
         stats_->wait_list_size_ = ccs.WaitListSizeForMemory();

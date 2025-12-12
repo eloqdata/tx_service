@@ -755,9 +755,8 @@ void FetchTableRangesCallback(void *data,
             mi_heap_set_default(shards->GetTableRangesHeap());
 
 #if defined(WITH_JEMALLOC)
-        /*
-        unsigned prev_arena;
-        size_t sz = sizeof(prev_arena);
+        uint32_t prev_arena;
+        size_t sz = sizeof(uint32_t);
         // read prev arena id
         mallctl("thread.arena", &prev_arena, &sz, NULL, 0);  // read only
         // override arena id
@@ -766,9 +765,7 @@ void FetchTableRangesCallback(void *data,
                 NULL,
                 NULL,
                 &table_range_arena_id,
-                sizeof(unsigned));
-        */
-
+                sizeof(uint32_t));
 #endif
 
         auto catalog_factory =
@@ -831,7 +828,7 @@ void FetchTableRangesCallback(void *data,
         }
 
 #if defined(WITH_JEMALLOC)
-        // mallctl("thread.arena", NULL, NULL, &prev_arena, sizeof(unsigned));
+        mallctl("thread.arena", NULL, NULL, &prev_arena, sizeof(uint32_t));
 #endif
         heap_lk.unlock();
 
@@ -1052,9 +1049,8 @@ void FetchRangeSlicesCallback(void *data,
                 mi_heap_set_default(shards->GetTableRangesHeap());
 
 #if defined(WITH_JEMALLOC)
-            /*
-            unsigned prev_arena;
-            size_t sz = sizeof(prev_arena);
+            uint32_t prev_arena;
+            size_t sz = sizeof(uint32_t);
             // read prev arena id
             mallctl("thread.arena", &prev_arena, &sz, NULL, 0);  // read only
             // override arena id
@@ -1063,9 +1059,7 @@ void FetchRangeSlicesCallback(void *data,
                     NULL,
                     NULL,
                     &table_range_arena_id,
-                    sizeof(unsigned));
-            */
-
+                    sizeof(uint32_t));
 #endif
 
             auto catalog_factory =
@@ -1103,8 +1097,7 @@ void FetchRangeSlicesCallback(void *data,
                 mi_restore_default_thread_id();
             }
 #if defined(WITH_JEMALLOC)
-            // mallctl("thread.arena", NULL, NULL, &prev_arena,
-            // sizeof(unsigned));
+            mallctl("thread.arena", NULL, NULL, &prev_arena, sizeof(uint32_t));
 #endif
             heap_lk.unlock();
 
