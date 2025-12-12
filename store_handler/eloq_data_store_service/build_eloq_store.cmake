@@ -16,11 +16,19 @@ endif()
 find_package(Threads REQUIRED)
 find_package(glog REQUIRED)
 
-find_package(Boost REQUIRED COMPONENTS context)
-if(Boost_FOUND)
-    message(STATUS "Boost found at: ${Boost_INCLUDE_DIRS}")
-else()
-    message(FATAL_ERROR "Boost.Context not found!")
+if(WITH_ASAN)
+    message("build eloqstore with ASAN: ${WITH_ASAN}")
+    set(BOOST_CONTEXT_ASAN_PATH "/usr/local/boost_ucontext_asan")
+    add_compile_definitions(BOOST_USE_ASAN)
+    add_compile_definitions(BOOST_USE_UCONTEXT)
+
+    set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -fsanitize=address -fno-omit-frame-pointer")
+    find_library(Boost_CONTEXT_LIBRARY
+            NAMES boost_context
+            PATHS ${BOOST_CONTEXT_ASAN_PATH}/lib
+            NO_DEFAULT_PATH)
+else ()
+    find_package(Boost REQUIRED COMPONENTS context)
 endif()
 
 find_package(jsoncpp REQUIRED)
@@ -59,11 +67,6 @@ if (NOT WITH_TXSERVICE)
 endif()
 
 set(INI_SOURCES ${ELOQ_STORE_SOURCE_DIR}/inih/ini.c ${ELOQ_STORE_SOURCE_DIR}/inih/cpp/INIReader.cpp)
-
-if(WITH_ASAN)
-  message("build eloqstore with ASAN: ${WITH_ASAN}")
-  set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -fsanitize=address -fno-omit-frame-pointer")
-endif()
 
 SET(ELOQ_STORE_INCLUDE
     ${ELOQ_STORE_SOURCE_DIR}
@@ -112,4 +115,9 @@ add_library(eloqstore STATIC ${ELOQ_STORE_SOURCES} ${INI_SOURCES})
 target_compile_definitions(eloqstore PRIVATE INIReader=EloqStorePrivateINIReader)
 
 target_include_directories(eloqstore PUBLIC ${ELOQ_STORE_INCLUDE})
-target_link_libraries(eloqstore PRIVATE ${URING_LIB} Boost::context glog::glog absl::flat_hash_map jsoncpp_lib ${CURL_LIBRARIES} ${ZSTD_LIBRARY} ${AWSSDK_LINK_LIBRARIES})
+target_link_libraries(eloqstore PRIVATE ${URING_LIB} glog::glog absl::flat_hash_map jsoncpp_lib ${CURL_LIBRARIES} ${ZSTD_LIBRARY} ${AWSSDK_LINK_LIBRARIES})
+if(WITH_ASAN)
+    target_link_libraries(eloqstore PRIVATE ${Boost_CONTEXT_LIBRARY})
+else ()
+    target_link_libraries(eloqstore PRIVATE Boost::context)
+endif ()
