@@ -898,14 +898,9 @@ public:
 
 #if defined(WITH_JEMALLOC)
         uint32_t prev_arena_id;
+        JemallocArenaSwitcher::ReadCurrentArena(prev_arena_id);
         auto table_range_arena_id = GetTableRangesArenaId();
-        size_t sz = sizeof(uint32_t);
-        mallctl("thread.arena", &prev_arena_id, &sz, NULL, 0);
-        mallctl("thread.arena",
-                NULL,
-                NULL,
-                &table_range_arena_id,
-                sizeof(uint32_t));
+        JemallocArenaSwitcher::SwitchToArena(table_range_arena_id);
 #endif
 
         TxKey range_tx_key(&start_key);
@@ -1022,7 +1017,7 @@ public:
         mi_heap_set_default(prev_heap);
 
 #if defined(WITH_JEMALLOC)
-        mallctl("thread.arena", NULL, NULL, &prev_arena_id, sizeof(uint32_t));
+        JemallocArenaSwitcher::SwitchToArena(prev_arena_id);
 #endif
 
         return static_cast<TemplateTableRangeEntry<KeyT> *>(

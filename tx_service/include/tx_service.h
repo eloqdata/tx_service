@@ -413,7 +413,7 @@ public:
 
         mi_heap_set_default(prev_heap);
 #if defined(WITH_JEMALLOC)
-        mallctl("thread.arena", NULL, NULL, &prev_arena, sizeof(uint32_t));
+        JemallocArenaSwitcher::SwitchToArena(prev_arena);
 #endif
         if (is_ext_proc)
         {
@@ -702,11 +702,7 @@ public:
         mi_restore_default_thread_id();
         coordi_->ext_tx_proc_heap_ = nullptr;
 #if defined(WITH_JEMALLOC)
-        mallctl("thread.arena",
-                NULL,
-                NULL,
-                &coordi_->ext_tx_proc_arena_id_,
-                sizeof(uint32_t));
+        JemallocArenaSwitcher::SwitchToArena(coordi_->ext_tx_proc_arena_id_);
         coordi_->ext_tx_proc_arena_id_ = 0;
 #endif
 

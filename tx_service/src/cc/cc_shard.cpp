@@ -260,7 +260,7 @@ void CcShard::Init()
     mi_heap_set_default(prev_heap);
 
 #if defined(WITH_JEMALLOC)
-    mallctl("thread.arena", NULL, NULL, &prev_arena, sizeof(uint32_t));
+    JemallocArenaSwitcher::SwitchToArena(prev_arena);
 #endif
 }
 
@@ -2547,18 +2547,8 @@ uint32_t CcShardHeap::SetAsDefaultArena()
 {
 #if defined(WITH_JEMALLOC)
     uint32_t prev_arena;
-    size_t sz = sizeof(uint32_t);
-    // read prev arena id
-    if (mallctl("thread.arena", &prev_arena, &sz, NULL, 0) != 0)
-    {
-        LOG(FATAL) << "Failed to read current arena for shard heap";
-    }
-    // override arena id
-    if (mallctl("thread.arena", NULL, NULL, &arena_id_, sizeof(uint32_t)) != 0)
-    {
-        LOG(FATAL) << "Failed to switch arena for shard heap";
-    }
-
+    JemallocArenaSwitcher::ReadCurrentArena(prev_arena);
+    JemallocArenaSwitcher::SwitchToArena(arena_id_);
     return prev_arena;
 #else
     assert(false);

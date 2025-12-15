@@ -532,13 +532,10 @@ void StoreRange::UpdateSliceSpec(StoreSlice *slice,
 
 #if defined(WITH_JEMALLOC)
     uint32_t prev_arena;
-    size_t sz = sizeof(uint32_t);
-    // read prev arena id
-    mallctl("thread.arena", &prev_arena, &sz, NULL, 0);  // read only
+    JemallocArenaSwitcher::ReadCurrentArena(prev_arena);
     // override arena id
     auto table_range_arena_id = local_cc_shards_.GetTableRangesArenaId();
-    mallctl(
-        "thread.arena", NULL, NULL, &table_range_arena_id, sizeof(uint32_t));
+    JemallocArenaSwitcher::SwitchToArena(table_range_arena_id);
 #endif
 
     UpdateSlice(slice, split_keys);
@@ -554,7 +551,7 @@ void StoreRange::UpdateSliceSpec(StoreSlice *slice,
         mi_restore_default_thread_id();
     }
 #if defined(WITH_JEMALLOC)
-    mallctl("thread.arena", NULL, NULL, &prev_arena, sizeof(uint32_t));
+    JemallocArenaSwitcher::SwitchToArena(prev_arena);
 #endif
 
     heap_lk.unlock();

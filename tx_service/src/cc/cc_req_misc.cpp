@@ -410,16 +410,10 @@ void FetchRangeSlicesReq::SetFinish(CcErrorCode err)
 
 #if defined(WITH_JEMALLOC)
         uint32_t prev_arena;
-        size_t sz = sizeof(uint32_t);
-        // read prev arena id
-        mallctl("thread.arena", &prev_arena, &sz, NULL, 0);  // read only
+        JemallocArenaSwitcher::ReadCurrentArena(prev_arena);
         // override arena id
         auto table_range_arena_id = shards->GetTableRangesArenaId();
-        mallctl("thread.arena",
-                NULL,
-                NULL,
-                &table_range_arena_id,
-                sizeof(uint32_t));
+        JemallocArenaSwitcher::SwitchToArena(table_range_arena_id);
 #endif
 
         range_entry_->InitRangeSlices(std::move(slice_info_),
@@ -440,7 +434,7 @@ void FetchRangeSlicesReq::SetFinish(CcErrorCode err)
         }
 
 #if defined(WITH_JEMALLOC)
-        mallctl("thread.arena", NULL, NULL, &prev_arena, sizeof(uint32_t));
+        JemallocArenaSwitcher::SwitchToArena(prev_arena);
 #endif
         heap_lk.unlock();
 

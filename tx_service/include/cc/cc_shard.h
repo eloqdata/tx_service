@@ -23,6 +23,7 @@
 
 #include <bthread/moodycamelqueue.h>
 #include <butil/time.h>
+#include <jemalloc/jemalloc.h>
 #include <mimalloc-2.1/mimalloc.h>
 
 #include <algorithm>
@@ -174,6 +175,39 @@ struct TxLockInfo
 
     std::unique_ptr<TxLockInfo> next_{nullptr};
 };
+
+#if defined(WITH_JEMALLOC)
+class JemallocArenaSwitcher
+{
+public:
+    explicit JemallocArenaSwitcher()
+    {
+    }
+
+    static bool ReadCurrentArena(uint32_t &current_arena)
+    {
+        size_t sz = sizeof(uint32_t);
+        if (mallctl("thread.arena", &current_arena, &sz, NULL, 0) != 0)
+        {
+            LOG(FATAL) << "Failed to read current arena";
+            return false;
+        }
+
+        return true;
+    }
+
+    static bool SwitchToArena(uint32_t arena)
+    {
+        if (mallctl("thread.arena", NULL, NULL, &arena, sizeof(uint32_t)) != 0)
+        {
+            LOG(FATAL) << "Failed to switch arena " << arena;
+            return false;
+        }
+
+        return true;
+    }
+};
+#endif
 
 class CcShardHeap
 {

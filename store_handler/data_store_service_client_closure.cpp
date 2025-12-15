@@ -756,16 +756,10 @@ void FetchTableRangesCallback(void *data,
 
 #if defined(WITH_JEMALLOC)
         uint32_t prev_arena;
-        size_t sz = sizeof(uint32_t);
-        // read prev arena id
-        mallctl("thread.arena", &prev_arena, &sz, NULL, 0);  // read only
+        txservice::JemallocArenaSwitcher::ReadCurrentArena(prev_arena);
         // override arena id
         auto table_range_arena_id = shards->GetTableRangesArenaId();
-        mallctl("thread.arena",
-                NULL,
-                NULL,
-                &table_range_arena_id,
-                sizeof(uint32_t));
+        txservice::JemallocArenaSwitcher::SwitchToArena(table_range_arena_id);
 #endif
 
         auto catalog_factory =
@@ -828,7 +822,7 @@ void FetchTableRangesCallback(void *data,
         }
 
 #if defined(WITH_JEMALLOC)
-        mallctl("thread.arena", NULL, NULL, &prev_arena, sizeof(uint32_t));
+        txservice::JemallocArenaSwitcher::SwitchToArena(prev_arena);
 #endif
         heap_lk.unlock();
 
@@ -1050,16 +1044,11 @@ void FetchRangeSlicesCallback(void *data,
 
 #if defined(WITH_JEMALLOC)
             uint32_t prev_arena;
-            size_t sz = sizeof(uint32_t);
-            // read prev arena id
-            mallctl("thread.arena", &prev_arena, &sz, NULL, 0);  // read only
+            txservice::JemallocArenaSwitcher::ReadCurrentArena(prev_arena);
             // override arena id
             auto table_range_arena_id = shards->GetTableRangesArenaId();
-            mallctl("thread.arena",
-                    NULL,
-                    NULL,
-                    &table_range_arena_id,
-                    sizeof(uint32_t));
+            txservice::JemallocArenaSwitcher::SwitchToArena(
+                table_range_arena_id);
 #endif
 
             auto catalog_factory =
@@ -1097,7 +1086,7 @@ void FetchRangeSlicesCallback(void *data,
                 mi_restore_default_thread_id();
             }
 #if defined(WITH_JEMALLOC)
-            mallctl("thread.arena", NULL, NULL, &prev_arena, sizeof(uint32_t));
+            txservice::JemallocArenaSwitcher::SwitchToArena(prev_arena);
 #endif
             heap_lk.unlock();
 

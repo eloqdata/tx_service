@@ -1052,21 +1052,11 @@ public:
 
 #if defined(WITH_JEMALLOC)
                     uint32_t prev_arena;
-                    size_t sz = sizeof(uint32_t);
-                    // read prev arena id
-                    mallctl("thread.arena",
-                            &prev_arena,
-                            &sz,
-                            NULL,
-                            0);  // read only
+                    JemallocArenaSwitcher::ReadCurrentArena(prev_arena);
                     // override arena id
                     auto table_range_arena_id =
                         shard_->local_shards_.GetTableRangesArenaId();
-                    mallctl("thread.arena",
-                            NULL,
-                            NULL,
-                            &table_range_arena_id,
-                            sizeof(uint32_t));
+                    JemallocArenaSwitcher::SwitchToArena(table_range_arena_id);
 #endif
                     old_table_range_entry->InitRangeSlices(
                         std::move(range_slices),
@@ -1084,11 +1074,7 @@ public:
                     }
 
 #if defined(WITH_JEMALLOC)
-                    mallctl("thread.arena",
-                            NULL,
-                            NULL,
-                            &prev_arena,
-                            sizeof(uint32_t));
+                    JemallocArenaSwitcher::SwitchToArena(prev_arena);
 #endif
                     heap_lk.unlock();
                     old_table_range_entry->RangeSlices()->Lock();

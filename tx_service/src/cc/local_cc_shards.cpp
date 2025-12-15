@@ -1022,13 +1022,10 @@ void LocalCcShards::InitTableRanges(const TableName &range_table_name,
 
 #if defined(WITH_JEMALLOC)
     uint32_t prev_arena;
-    size_t sz = sizeof(uint32_t);
-    // read prev arena id
-    mallctl("thread.arena", &prev_arena, &sz, NULL, 0);  // read only
+    JemallocArenaSwitcher::ReadCurrentArena(prev_arena);
     // override arena id
     auto table_range_arena_id = GetTableRangesArenaId();
-    mallctl(
-        "thread.arena", NULL, NULL, &table_range_arena_id, sizeof(uint32_t));
+    JemallocArenaSwitcher::SwitchToArena(table_range_arena_id);
 #endif
 
     // Init table ranges
@@ -1125,7 +1122,7 @@ void LocalCcShards::InitTableRanges(const TableName &range_table_name,
     }
 
 #if defined(WITH_JEMALLOC)
-    mallctl("thread.arena", NULL, NULL, &prev_arena, sizeof(uint32_t));
+    JemallocArenaSwitcher::SwitchToArena(prev_arena);
 #endif
 }
 
@@ -1300,20 +1297,11 @@ void LocalCcShards::KickoutRangeSlices()
 
 #if defined(WITH_JEMALLOC)
                             uint32_t prev_arena;
-                            size_t sz = sizeof(uint32_t);
-                            // read prev arena id
-                            mallctl("thread.arena",
-                                    &prev_arena,
-                                    &sz,
-                                    NULL,
-                                    0);  // read only
+                            JemallocArenaSwitcher::ReadCurrentArena(prev_arena);
                             // override arena id
                             auto table_range_arena_id = GetTableRangesArenaId();
-                            mallctl("thread.arena",
-                                    NULL,
-                                    NULL,
-                                    &table_range_arena_id,
-                                    sizeof(uint32_t));
+                            JemallocArenaSwitcher::SwitchToArena(
+                                table_range_arena_id);
 #endif
 
                             range_entry->DropStoreRange();
@@ -1330,11 +1318,7 @@ void LocalCcShards::KickoutRangeSlices()
                             }
 
 #if defined(WITH_JEMALLOC)
-                            mallctl("thread.arena",
-                                    NULL,
-                                    NULL,
-                                    &prev_arena,
-                                    sizeof(uint32_t));
+                            JemallocArenaSwitcher::SwitchToArena(prev_arena);
 #endif
                             if (has_enough_mem)
                             {
@@ -1375,16 +1359,10 @@ void LocalCcShards::KickoutRangeSlices()
             mi_heap_t *prev_heap = mi_heap_set_default(GetTableRangesHeap());
 #if defined(WITH_JEMALLOC)
             uint32_t prev_arena;
-            size_t sz = sizeof(uint32_t);
-            // read prev arena id
-            mallctl("thread.arena", &prev_arena, &sz, NULL, 0);  // read only
+            JemallocArenaSwitcher::ReadCurrentArena(prev_arena);
             // override arena id
             auto table_range_arena_id = GetTableRangesArenaId();
-            mallctl("thread.arena",
-                    NULL,
-                    NULL,
-                    &table_range_arena_id,
-                    sizeof(uint32_t));
+            JemallocArenaSwitcher::SwitchToArena(table_range_arena_id);
 #endif
 
             entry->DropStoreRange();
@@ -1401,7 +1379,7 @@ void LocalCcShards::KickoutRangeSlices()
             }
 
 #if defined(WITH_JEMALLOC)
-            mallctl("thread.arena", NULL, NULL, &prev_arena, sizeof(uint32_t));
+            JemallocArenaSwitcher::SwitchToArena(prev_arena);
 #endif
 
             if (has_enough_mem)
@@ -2126,20 +2104,11 @@ bool LocalCcShards::DropStoreRangesInBucket(NodeGroupId ng_id,
 
 #if defined(WITH_JEMALLOC)
                         uint32_t prev_arena;
-                        size_t sz = sizeof(uint32_t);
-                        // read prev arena id
-                        mallctl("thread.arena",
-                                &prev_arena,
-                                &sz,
-                                NULL,
-                                0);  // read only
+                        JemallocArenaSwitcher::ReadCurrentArena(prev_arena);
                         // override arena id
                         auto table_range_arena_id = GetTableRangesArenaId();
-                        mallctl("thread.arena",
-                                NULL,
-                                NULL,
-                                &table_range_arena_id,
-                                sizeof(uint32_t));
+                        JemallocArenaSwitcher::SwitchToArena(
+                            table_range_arena_id);
 #endif
 
                         entry->DropStoreRange();
@@ -2155,11 +2124,7 @@ bool LocalCcShards::DropStoreRangesInBucket(NodeGroupId ng_id,
                         }
 
 #if defined(WITH_JEMALLOC)
-                        mallctl("thread.arena",
-                                NULL,
-                                NULL,
-                                &prev_arena,
-                                sizeof(uint32_t));
+                        JemallocArenaSwitcher::SwitchToArena(prev_arena);
 #endif
                     }
                     else
@@ -5009,15 +4974,8 @@ void LocalCcShards::DataSyncForHashPartition(
 
 #if defined(WITH_JEMALLOC)
             uint32_t prev_arena;
-            size_t sz = sizeof(prev_arena);
-            // read prev arena id
-            mallctl("thread.arena", &prev_arena, &sz, NULL, 0);  // read only
-            // override arena id
-            mallctl("thread.arena",
-                    NULL,
-                    NULL,
-                    &hash_partition_ckpt_arena_id_,
-                    sizeof(uint32_t));
+            JemallocArenaSwitcher::ReadCurrentArena(prev_arena);
+            JemallocArenaSwitcher::SwitchToArena(hash_partition_ckpt_arena_id_);
 #endif
 
             data_sync_vec->reserve(scan_cc.accumulated_scan_cnt_);
@@ -5078,7 +5036,7 @@ void LocalCcShards::DataSyncForHashPartition(
 
 #if defined(WITH_JEMALLOC)
             // override arena id
-            mallctl("thread.arena", NULL, NULL, &prev_arena, sizeof(uint32_t));
+            JemallocArenaSwitcher::SwitchToArena(prev_arena);
 #endif
 
             heap_lk.unlock();
