@@ -189,8 +189,13 @@ void SnapshotManager::SyncWithStandby()
             uint32_t pending_task_subscribe_id =
                 SubscribeIdFromStandbyTerm(pending_task_standby_node_term);
 
-            if (pending_task_subscribe_id > current_subscribe_id)
+            if (pending_task_subscribe_id >= current_subscribe_id)
             {
+                LOG(WARNING)
+                    << "The snapshot generated at subscribe counter: "
+                    << current_subscribe_id
+                    << ", does not cover the task subscribe id: "
+                    << pending_task_subscribe_id << ". Wait for next round";
                 covered = false;
             }
 
