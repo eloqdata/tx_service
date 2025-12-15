@@ -2519,7 +2519,10 @@ CcShardHeap::CcShardHeap(CcShard *cc_shard, size_t limit)
 #if defined(WITH_JEMALLOC)
     // create arena for each ccshardheap
     size_t sz = sizeof(uint32_t);
-    mallctl("arenas.create", &arena_id_, &sz, NULL, 0);
+    if (mallctl("arenas.create", &arena_id_, &sz, NULL, 0) != 0)
+    {
+        LOG(FATAL) << "Failed to create jemalloc arena for shard heap";
+    }
 #endif
 }
 
@@ -2546,9 +2549,16 @@ uint32_t CcShardHeap::SetAsDefaultArena()
     uint32_t prev_arena;
     size_t sz = sizeof(uint32_t);
     // read prev arena id
-    mallctl("thread.arena", &prev_arena, &sz, NULL, 0);  // read only
+    if (mallctl("thread.arena", &prev_arena, &sz, NULL, 0) != 0)
+    {
+        LOG(FATAL) << "Failed to read current arena for shard heap";
+    }
     // override arena id
-    mallctl("thread.arena", NULL, NULL, &arena_id_, sizeof(uint32_t));
+    if (mallctl("thread.arena", NULL, NULL, &arena_id_, sizeof(uint32_t)) != 0)
+    {
+        LOG(FATAL) << "Failed to switch arena for shard heap";
+    }
+
     return prev_arena;
 #else
     assert(false);
@@ -2573,13 +2583,6 @@ bool CcShardHeap::Full(int64_t *alloc, int64_t *commit) const
     {
         *commit = total_resident;
     }
-
-    /*
-    LOG(INFO) << "yf: resident = " << total_resident << ", total resident "
-              << ", total allocated = " << total_allocated
-              << ", memory limit = " << memory_limit_
-              << ", arena id = " << arena_id_;
-    */
 
     return total_resident >= static_cast<int64_t>(memory_limit_);
 

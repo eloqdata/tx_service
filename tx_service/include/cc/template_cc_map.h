@@ -5146,17 +5146,7 @@ public:
         // Do not try to call mi_heap_collect, since it is expensive, flush data
         // will return the memory anyway when it done
 
-        int64_t alloc = 0;
-        int64_t commit = 0;
-        bool scan_heap_is_full = scan_heap->Full(&alloc, &commit);
-#if defined(WITH_JEMALLOC)
-        // LOG(INFO) << "yf: alloc = " << alloc << ", commit = " << commit
-        //          << ", limit = " << scan_heap->MemoryLimit()
-        //          << ", prev arena = " << prev_arena
-        //          << ", scan heap arena = " << scan_heap->ArenaId();
-#endif
-
-        if (!scan_heap_is_full)
+        if (!scan_heap->Full())
         {
             export_size.first =
                 cce->ExportForCkpt(key,

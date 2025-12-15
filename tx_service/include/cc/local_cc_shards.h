@@ -435,7 +435,11 @@ public:
 #if defined(WITH_JEMALLOC)
         // create table ranges arena
         size_t sz = sizeof(uint32_t);
-        mallctl("arenas.create", &table_ranges_arena_id_, &sz, NULL, 0);
+        if (mallctl("arenas.create", &table_ranges_arena_id_, &sz, NULL, 0) !=
+            0)
+        {
+            LOG(FATAL) << "Failed to create jemalloc arena for table ranges";
+        }
 #endif
     }
 
@@ -446,7 +450,14 @@ public:
 #if defined(WITH_JEMALLOC)
         // create hash partition ckpt arena
         size_t sz = sizeof(uint32_t);
-        mallctl("arenas.create", &hash_partition_ckpt_arena_id_, &sz, NULL, 0);
+        if (mallctl("arenas.create",
+                    &hash_partition_ckpt_arena_id_,
+                    &sz,
+                    NULL,
+                    0) != 0)
+        {
+            LOG(FATAL) << "Failed to create jemalloc arena for hash part heap";
+        }
 #endif
     }
 
