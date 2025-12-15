@@ -865,8 +865,8 @@ void txservice::remote::RemoteCcHandler::BroadcastStatistics(
     broadcast_stat_req->set_schema_version(schema_ts);
     broadcast_stat_req->mutable_node_group_sample_pool()->CopyFrom(sample_pool);
 
-    bool send = stream_sender_.SendMessageToNg(ng_id, send_msg, &hres);
-    if (send)
+    auto send_res = stream_sender_.SendMessageToNg(ng_id, send_msg, &hres);
+    if (send_res.sent || send_res.queued_for_retry)
     {
         hres.SetFinished();  // Don't wait for remote result.
     }

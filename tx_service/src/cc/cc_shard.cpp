@@ -2707,8 +2707,8 @@ void CcShard::ForwardStandbyMessage(StandbyForwardEntry *entry)
                 }
             });
 
-            write_succ = stream_sender_->SendMessageToNode(
-                node_id, entry_ptr->Message(), nullptr, false, false);
+            write_succ = stream_sender_->SendStandbyMessageToNode(
+                node_id, entry_ptr->Message());
             if (write_succ)
             {
                 last_sent_seq_id++;
@@ -2839,8 +2839,8 @@ bool CcShard::ResendFailedForwardMessages()
             if (entry_it != seq_id_to_entry_map_.end())
             {
                 StandbyForwardEntry *entry = entry_it->second;
-                bool succ = stream_sender_->SendMessageToNode(
-                    node_id, entry->Message(), nullptr, false, false);
+                bool succ = stream_sender_->SendStandbyMessageToNode(
+                    node_id, entry->Message());
                 if (!succ)
                 {
                     all_msgs_sent = false;
