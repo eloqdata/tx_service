@@ -191,7 +191,7 @@ void SnapshotManager::SyncWithStandby()
 
             if (pending_task_subscribe_id >= current_subscribe_id)
             {
-                DLOG(WARNING)
+                LOG(WARNING)
                     << "The snapshot generated at subscribe counter: "
                     << current_subscribe_id
                     << ", does not cover the task subscribe id: "
