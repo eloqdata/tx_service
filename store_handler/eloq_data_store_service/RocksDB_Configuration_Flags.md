@@ -91,7 +91,7 @@ These flags are only applicable when RocksDB Cloud is enabled with either S3 or 
 
 | Flag Name | Required | Default Value | Format | Description |
 |-----------|----------|--------------|--------|-------------|
-| `rocksdb_cloud_oss_url` | No | `""` | OSS URL | Complete Object Storage Service URL. Supports s3://, gs://, http://, and https://. Takes precedence over legacy config if both provided. |
+| `rocksdb_cloud_object_store_service_url` | No | `""` | Object Store Service URL | Complete Object Storage Service URL. Supports s3://, gs://, http://, and https://. Takes precedence over legacy config if both provided. |
 
 **URL Format Examples:**
 - AWS S3: `s3://my-bucket/my-object-path`
@@ -115,7 +115,7 @@ These flags are only applicable when RocksDB Cloud is enabled with either S3 or 
 | `rocksdb_cloud_object_path` | No | `"rocksdb_cloud"` | String | Path within the bucket (deprecated) |
 | `rocksdb_cloud_s3_endpoint_url` | No | `""` | String | S3-compatible object store endpoint URL (deprecated) |
 
-**Note:** If both `rocksdb_cloud_oss_url` and legacy options are provided, the URL-based configuration takes precedence and overrides the legacy settings.
+**Note:** If both `rocksdb_cloud_object_store_service_url` and legacy options are provided, the URL-based configuration takes precedence and overrides the legacy settings.
 
 **Other Cloud Configuration:**
 

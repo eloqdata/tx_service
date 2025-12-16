@@ -80,9 +80,9 @@ DEFINE_string(txlog_rocksdb_cloud_sst_file_cache_size,
 DEFINE_uint32(txlog_rocksdb_cloud_sst_file_cache_num_shard_bits,
               5,
               "TxLog RocksDB Cloud SST file cache num shard bits");
-DEFINE_string(txlog_rocksdb_cloud_oss_url,
+DEFINE_string(txlog_rocksdb_cloud_object_store_service_url,
               "",
-              "OSS URL for txlog RocksDB Cloud storage. Format: "
+              "Object Store Service URL for txlog RocksDB Cloud storage. Format: "
               "s3://{bucket}/{path}, gs://{bucket}/{path}, or "
               "http(s)://{host}:{port}/{bucket}/{path}. "
               "Takes precedence over legacy config if provided.");
@@ -299,12 +299,12 @@ bool DataSubstrate::InitializeLogService(const INIReader &config_reader)
                     : config_reader.GetString("store", "aws_secret_key", "");
 #endif /* LOG_STATE_TYPE_RKDB_S3 */
             txlog_rocksdb_cloud_config.oss_url_ =
-                !CheckCommandLineFlagIsDefault("txlog_rocksdb_cloud_oss_url")
-                    ? FLAGS_txlog_rocksdb_cloud_oss_url
+                !CheckCommandLineFlagIsDefault("txlog_rocksdb_cloud_object_store_service_url")
+                    ? FLAGS_txlog_rocksdb_cloud_object_store_service_url
                     : config_reader.GetString(
                           "local",
-                          "txlog_rocksdb_cloud_oss_url",
-                          FLAGS_txlog_rocksdb_cloud_oss_url);
+                          "txlog_rocksdb_cloud_object_store_service_url",
+                          FLAGS_txlog_rocksdb_cloud_object_store_service_url);
             txlog_rocksdb_cloud_config.endpoint_url_ =
                 !CheckCommandLineFlagIsDefault(
                     "txlog_rocksdb_cloud_s3_endpoint_url")
@@ -418,7 +418,7 @@ bool DataSubstrate::InitializeLogService(const INIReader &config_reader)
                     txlog::ParseS3Url(txlog_rocksdb_cloud_config.oss_url_);
                 if (!url_components.is_valid)
                 {
-                    LOG(FATAL) << "Invalid txlog_rocksdb_cloud_oss_url: "
+                    LOG(FATAL) << "Invalid txlog_rocksdb_cloud_object_store_service_url: "
                                << url_components.error_message
                                << ". URL format: s3://{bucket}/{path}, "
                                   "gs://{bucket}/{path}, or "

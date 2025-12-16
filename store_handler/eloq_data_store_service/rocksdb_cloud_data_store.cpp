@@ -306,7 +306,7 @@ bool RocksDBCloudDataStore::StartDB()
         S3UrlComponents url_components = ParseS3Url(cloud_config_.oss_url_);
         if (!url_components.is_valid)
         {
-            LOG(FATAL) << "Invalid rocksdb_cloud_oss_url: "
+            LOG(FATAL) << "Invalid rocksdb_cloud_object_store_service_url: "
                        << url_components.error_message
                        << ". URL format: s3://{bucket}/{path}, "
                           "gs://{bucket}/{path}, or "

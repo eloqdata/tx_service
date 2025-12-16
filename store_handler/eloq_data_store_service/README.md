@@ -145,7 +145,7 @@ To start the DataStore Service:
    **New URL-based configuration (Recommended):**
    ```ini
    [store]
-   rocksdb_cloud_oss_url = s3://my-eloqdata-bucket/rocksdb_cloud
+   rocksdb_cloud_object_store_service_url = s3://my-eloqdata-bucket/rocksdb_cloud
    rocksdb_cloud_region = us-west-2
    rocksdb_cloud_sst_file_cache_size = 40GB
    aws_access_key_id = YOUR_ACCESS_KEY
@@ -155,7 +155,7 @@ To start the DataStore Service:
    **For Google Cloud Storage:**
    ```ini
    [store]
-   rocksdb_cloud_oss_url = gs://my-eloqdata-bucket/rocksdb_cloud
+   rocksdb_cloud_object_store_service_url = gs://my-eloqdata-bucket/rocksdb_cloud
    rocksdb_cloud_region = us-west-2
    rocksdb_cloud_sst_file_cache_size = 40GB
    ```
@@ -163,7 +163,7 @@ To start the DataStore Service:
    **For MinIO or S3-compatible storage:**
    ```ini
    [store]
-   rocksdb_cloud_oss_url = http://localhost:9000/my-bucket/rocksdb_data
+   rocksdb_cloud_object_store_service_url = http://localhost:9000/my-bucket/rocksdb_data
    rocksdb_cloud_region = us-east-1
    rocksdb_cloud_sst_file_cache_size = 40GB
    aws_access_key_id = minioadmin
@@ -208,7 +208,7 @@ For a production deployment with multiple nodes, you would typically:
 
 ### Overview
 
-Starting from this version, we've introduced a simplified URL-based configuration for RocksDB Cloud (S3/GCS) to reduce configuration complexity. The new `rocksdb_cloud_oss_url` option consolidates multiple configuration parameters into a single URL.
+Starting from this version, we've introduced a simplified URL-based configuration for RocksDB Cloud (S3/GCS) to reduce configuration complexity. The new `rocksdb_cloud_object_store_service_url` option consolidates multiple configuration parameters into a single URL.
 
 ### Why Migrate?
 
@@ -235,7 +235,7 @@ rocksdb_cloud_object_path = rocksdb_data
 **New URL-based Configuration:**
 ```ini
 [store]
-rocksdb_cloud_oss_url = s3://my-production-bucket/rocksdb_data
+rocksdb_cloud_object_store_service_url = s3://my-production-bucket/rocksdb_data
 ```
 
 **Note:** The `bucket_prefix` is not supported in URL-based configuration. If you were using `eloqkv-my-production-bucket`, you should include the prefix in the bucket name: `s3://eloqkv-my-production-bucket/rocksdb_data`
@@ -253,7 +253,7 @@ rocksdb_cloud_s3_endpoint_url = http://localhost:9000
 **New URL-based Configuration:**
 ```ini
 [store]
-rocksdb_cloud_oss_url = http://localhost:9000/test-bucket/eloqdata
+rocksdb_cloud_object_store_service_url = http://localhost:9000/test-bucket/eloqdata
 ```
 
 #### Example 3: HTTPS S3-compatible Storage
@@ -269,7 +269,7 @@ rocksdb_cloud_s3_endpoint_url = https://s3.custom-provider.com
 **New URL-based Configuration:**
 ```ini
 [store]
-rocksdb_cloud_oss_url = https://s3.custom-provider.com/my-bucket/data/rocksdb
+rocksdb_cloud_object_store_service_url = https://s3.custom-provider.com/my-bucket/data/rocksdb
 ```
 
 ### TxLog (Log Service) Configuration
@@ -288,7 +288,7 @@ txlog_rocksdb_cloud_endpoint_url =
 **New:**
 ```ini
 [local]
-txlog_rocksdb_cloud_oss_url = s3://txlog-bucket/logs
+txlog_rocksdb_cloud_object_store_service_url = s3://txlog-bucket/logs
 ```
 
 ### Important Notes
