@@ -193,7 +193,8 @@ public:
     {
         if (inst_)
         {
-            inst_->requested_check_.store(true, std::memory_order_release);
+            std::unique_lock<std::mutex> lk(inst_->mutex_);
+            inst_->requested_check_ = true;
             inst_->con_var_.notify_one();
         }
     }
@@ -241,6 +242,6 @@ protected:
     // The node to rise dead lock check.
     uint32_t check_node_id_;
     // If the dead lock check is requested by this node.
-    std::atomic<bool> requested_check_{false};
+    bool requested_check_{false};
 };
 }  // namespace txservice
