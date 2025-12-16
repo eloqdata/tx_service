@@ -4087,7 +4087,8 @@ public:
             scan_heap_is_full_.emplace_back(0);
         }
 
-        slice_ids_.resize(core_cnt_);
+        slice_barrier_.Reset(core_cnt_);
+        blocked_by_slice_op_.resize(core_cnt_, false);
     }
 
     bool ValidTermCheck()
@@ -4200,6 +4201,10 @@ public:
 
         err_ = CcErrorCode::NO_ERROR;
         op_type_ = op_type;
+
+        slice_barrier_.Reset(core_cnt_);
+        std::fill(
+            blocked_by_slice_op_.begin(), blocked_by_slice_op_.end(), false);
     }
 
     void SetError(CcErrorCode err)
@@ -4314,6 +4319,116 @@ public:
     size_t scan_count_{0};
 
 private:
+    struct SliceBarrier
+    {
+        enum class SliceStatus : uint8_t
+        {
+            None = 0,
+            Pinned,
+            Error,
+            Terminated
+        };
+
+        // Return true if this is the last core trying to pin slice.
+        bool TryStart(uint16_t core_cnt)
+        {
+            if (core_cnt_.fetch_sub(1, std::memory_order_relaxed) == 1)
+            {
+                core_cnt_.store(core_cnt, std::memory_order_relaxed);
+                return true;
+            }
+            return false;
+        }
+        // Return true if this is the last core trying to unpin.
+        bool TryFinish(uint16_t core_cnt)
+        {
+            if (core_cnt_.fetch_sub(1, std::memory_order_relaxed) == 1)
+            {
+                core_cnt_.store(core_cnt, std::memory_order_relaxed);
+                return true;
+            }
+            return false;
+        }
+        RangeSliceId &PinnedSlice()
+        {
+            return pinned_slice_;
+        }
+        // Set the slice status.
+        void MarkSliceStatus(SliceStatus status)
+        {
+            slice_status_.store(status, std::memory_order_release);
+        }
+        // Access the currently pinned slice id.
+        // Get the current slice status.
+        SliceStatus Status() const
+        {
+            return slice_status_.load(std::memory_order_acquire);
+        }
+        // Waiting for the slice operation to complete.
+        void RequestWaiting(uint16_t core_id, CcRequestBase *req)
+        {
+            assert(core_id < waiting_requests_.size());
+            waiting_requests_[core_id] = req;
+        }
+        // Wake up all waiting requests.
+        void WakeupWaitingRequests()
+        {
+            for (size_t shard_idx = 0; shard_idx < waiting_requests_.size();
+                 ++shard_idx)
+            {
+                CcRequestBase *req = waiting_requests_[shard_idx];
+                if (req != nullptr)
+                {
+                    Sharder::Instance().GetCcShard(shard_idx)->Enqueue(req);
+                    waiting_requests_[shard_idx] = nullptr;
+                }
+            }
+        }
+        // Check if there are any waiting requests
+        bool HasWaitingRequests() const
+        {
+            for (const auto *req : waiting_requests_)
+            {
+                if (req != nullptr)
+                {
+                    return true;
+                }
+            }
+            return false;
+        }
+        // Reset the slice barrier.
+        void Reset(uint16_t core_cnt)
+        {
+            pinned_slice_ = RangeSliceId{};
+            core_cnt_.store(core_cnt, std::memory_order_relaxed);
+            slice_status_.store(SliceStatus::None, std::memory_order_relaxed);
+            waiting_requests_.assign(core_cnt, nullptr);
+            req_finished_.store(false, std::memory_order_relaxed);
+        }
+        bool SetFinish()
+        {
+            bool expected = false;
+            return req_finished_.compare_exchange_strong(
+                expected, true, std::memory_order_acq_rel);
+        }
+        bool RequestFinished() const
+        {
+            return req_finished_.load(std::memory_order_relaxed);
+        }
+
+        // Current pinned slice id.
+        RangeSliceId pinned_slice_{};
+        // Number of cores that are try to pin/unpin the slice.
+        std::atomic<uint16_t> core_cnt_{0};
+        // Final slice status for current slice.
+        std::atomic<SliceStatus> slice_status_{SliceStatus::None};
+        // Waiting requests indexed by core id.
+        std::vector<CcRequestBase *> waiting_requests_;
+        // Set true when the request finished on a core, to avoid other cores
+        // waitting the finished core updating the slice barrier.
+        std::atomic<bool> req_finished_{false};
+    };
+
     const TableName *table_name_{nullptr};
     uint32_t node_group_id_;
     int64_t node_group_term_;
@@ -4347,7 +4462,11 @@ private:
     // True means we need to export the data in memory and in kv to ckpt vec.
     // Note: This is only used in range partition.
     bool export_base_table_item_{false};
-    std::vector<RangeSliceId> slice_ids_;
+
+    // Concurrency barriers used to control slice operations.
+    SliceBarrier slice_barrier_;
+    // This indicates whether the request is blocked by a slice operation.
+    std::vector<bool> blocked_by_slice_op_;
 
     // This is used for scan during add index txm.
     bool export_base_table_item_only_{false};

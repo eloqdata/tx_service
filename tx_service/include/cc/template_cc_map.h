@@ -5199,6 +5199,36 @@ public:
             return false;
         }
 
+        using SliceBarrierStatus =
+            RangePartitionDataSyncScanCc::SliceBarrier::SliceStatus;
+        // Check if the core was blocked by slice operation
+        if (req.blocked_by_slice_op_[shard_->core_id_])
+        {
+            // Check the slice coordination status
+            SliceBarrierStatus status = req.slice_barrier_.Status();
+            if (status == SliceBarrierStatus::Error)
+            {
+                req.SetError(CcErrorCode::PIN_RANGE_SLICE_FAILED);
+                return false;
+            }
+            else if (status == SliceBarrierStatus::Terminated)
+            {
+                req.SetFinish(shard_->core_id_);
+                return false;
+            }
+            else
+            {
+                assert(
+                    (req.slice_barrier_.Status() ==
+                         SliceBarrierStatus::Pinned &&
+                     req.slice_barrier_.PinnedSlice().Slice()) ||
+                    (req.slice_barrier_.Status() == SliceBarrierStatus::None &&
+                     !req.slice_barrier_.PinnedSlice().Slice()));
+                // Reset the blocked by slice operation flag
+                req.blocked_by_slice_op_[shard_->core_id_] = false;
+            }
+        }
+
         auto &pause_key_and_is_drained = req.PausePos(shard_->core_id_);
 
         std::function<int32_t(int32_t, bool)> next_slice_func;
@@ -5362,7 +5392,7 @@ public:
             if (req.export_base_table_item_)
             {
                 start_key = &search_key;
-                need_pin_slice = !req.slice_ids_[shard_->core_id_].Slice();
+                need_pin_slice = !req.slice_barrier_.PinnedSlice().Slice();
             }
             else
             {
@@ -5373,7 +5403,7 @@ public:
                 }
                 assert(curr_slice_it != req.EndSliceIt());
 
-                need_pin_slice = !req.slice_ids_[shard_->core_id_].Slice() &&
+                need_pin_slice = !req.slice_barrier_.PinnedSlice().Slice() &&
                                  check_split_slice(curr_slice_it);
                 const KeyT *curr_start_key = req.StoreRangePtr()
                                                  ->FindSlice(*curr_slice_it)
@@ -5398,7 +5428,7 @@ public:
             // reach to the last slice of this request.
             StoreSlice *store_slice = nullptr;
             bool slice_pinned =
-                req.slice_ids_[shard_->core_id_].Slice() != nullptr;
+                req.slice_barrier_.PinnedSlice().Slice() != nullptr;
             Iterator it;
             Iterator end_it;
             const KeyT *slice_end_key = nullptr;
@@ -5407,6 +5437,38 @@ public:
             {
                 if (need_pin_slice)
                 {
+                    // Check the request status
+                    if (req.slice_barrier_.RequestFinished())
+                    {
+                        // Just finish this request
+                        req.PausePos(shard_->core_id_).first =
+                            start_key->CloneTxKey();
+                        req.SetFinish(shard_->core_id_);
+                        return {Iterator(),
+                                Iterator(),
+                                nullptr,
+                                false,
+                                false,
+                                false};
+                    }
+
+                    // Try to become the pinning core (The last core will be)
+                    if (!req.slice_barrier_.TryStart(req.core_cnt_))
+                    {
+                        // Not the last core，blocked by slice operation.
+                        req.PausePos(shard_->core_id_).first =
+                            start_key->CloneTxKey();
+                        req.blocked_by_slice_op_[shard_->core_id_] = true;
+                        req.slice_barrier_.RequestWaiting(shard_->core_id_,
+                                                          &req);
+                        return {Iterator(),
+                                Iterator(),
+                                nullptr,
+                                false,
+                                false,
+                                false};
+                    }
+
                     // Execute the pinslice operation, and return the
                     // RangeSliceId If the value of export_base_table_item_ is
                     // false, it means that the pin slice operation is required
@@ -5415,6 +5477,14 @@ public:
                     auto [new_slice_id, succ] = pin_range_slice(*start_key);
                     if (!succ)
                     {
+                        // Check the reason
+                        if (req.ErrorCode() ==
+                            CcErrorCode::PIN_RANGE_SLICE_FAILED)
+                        {
+                            req.slice_barrier_.MarkSliceStatus(
+                                SliceBarrierStatus::Error);
+                            req.slice_barrier_.WakeupWaitingRequests();
+                        }
                         return {Iterator(),
                                 Iterator(),
                                 nullptr,
@@ -5425,17 +5495,20 @@ public:
                     assert(new_slice_id.Slice());
 
                     // Store the range slice id
-                    req.slice_ids_[shard_->core_id_] = new_slice_id;
+                    req.slice_barrier_.PinnedSlice() = new_slice_id;
+                    req.slice_barrier_.MarkSliceStatus(
+                        SliceBarrierStatus::Pinned);
+                    req.slice_barrier_.WakeupWaitingRequests();
                     slice_pinned = true;
                 }
 
                 // Get the begin iterator and the end iterator of current slice.
                 it = deduce_iterator(*start_key);
 
-                if (req.slice_ids_[shard_->core_id_].Slice())
+                if (req.slice_barrier_.PinnedSlice().Slice())
                 {
                     assert(slice_pinned);
-                    store_slice = req.slice_ids_[shard_->core_id_].Slice();
+                    store_slice = req.slice_barrier_.PinnedSlice().Slice();
                 }
                 else
                 {
@@ -5460,9 +5533,34 @@ public:
                     // reset
                     if (slice_pinned)
                     {
-                        req.slice_ids_[shard_->core_id_].Unpin();
-                        req.slice_ids_[shard_->core_id_].Reset();
-                        slice_pinned = false;
+                        if (req.slice_barrier_.TryFinish(req.core_cnt_))
+                        {
+                            // The last core
+                            req.slice_barrier_.PinnedSlice().Unpin();
+                            req.slice_barrier_.PinnedSlice().Reset();
+                            SliceBarrierStatus status =
+                                req.slice_barrier_.RequestFinished()
+                                    ? SliceBarrierStatus::Terminated
+                                    : SliceBarrierStatus::None;
+                            req.slice_barrier_.MarkSliceStatus(status);
+                            req.slice_barrier_.WakeupWaitingRequests();
+                            slice_pinned = false;
+                        }
+                        else
+                        {
+                            // Not the last core
+                            req.PausePos(shard_->core_id_).first =
+                                slice_end_key->CloneTxKey();
+                            req.blocked_by_slice_op_[shard_->core_id_] = true;
+                            req.slice_barrier_.RequestWaiting(shard_->core_id_,
+                                                              &req);
+                            return {Iterator(),
+                                    Iterator(),
+                                    nullptr,
+                                    false,
+                                    false,
+                                    false};
+                        }
                     }
 
                     // Try find next slice if the current slice is not the last
@@ -5645,9 +5743,29 @@ public:
             {
                 if (slice_pinned)
                 {
-                    req.slice_ids_[shard_->core_id_].Unpin();
-                    req.slice_ids_[shard_->core_id_].Reset();
-                    slice_pinned = false;
+                    if (req.slice_barrier_.TryFinish(req.core_cnt_))
+                    {
+                        // The last core
+                        req.slice_barrier_.PinnedSlice().Unpin();
+                        req.slice_barrier_.PinnedSlice().Reset();
+                        SliceBarrierStatus status =
+                            req.slice_barrier_.RequestFinished()
+                                ? SliceBarrierStatus::Terminated
+                                : SliceBarrierStatus::None;
+                        req.slice_barrier_.MarkSliceStatus(status);
+                        req.slice_barrier_.WakeupWaitingRequests();
+                        slice_pinned = false;
+                    }
+                    else
+                    {
+                        // Not the last core
+                        pause_key_and_is_drained.first =
+                            std::move(slice_end_key->CloneTxKey());
+                        req.blocked_by_slice_op_[shard_->core_id_] = true;
+                        req.slice_barrier_.RequestWaiting(shard_->core_id_,
+                                                          &req);
+                        return false;
+                    }
                 }
 
                 if (!is_last_slice)
@@ -5680,18 +5798,6 @@ public:
         {
             next_pause_key = key_it->first->CloneTxKey();
         }
-
-        bool req_finished =
-            is_scan_mem_full || no_more_data ||
-            req.accumulated_scan_cnt_[shard_->core_id_] >= req.scan_batch_size_;
-        if (slice_pinned && req_finished)
-        {
-            // Unpin slice
-            // Must unpin the slice here, once the request finished.
-            req.slice_ids_[shard_->core_id_].Unpin();
-            req.slice_ids_[shard_->core_id_].Reset();
-        }
-
         // Set the pause_pos_ to mark resume position.
         pause_key_and_is_drained = {std::move(next_pause_key), no_more_data};
 
@@ -5700,8 +5806,32 @@ public:
             req.scan_heap_is_full_[shard_->core_id_] = 1;
         }
 
+        bool req_finished =
+            is_scan_mem_full || no_more_data ||
+            req.accumulated_scan_cnt_[shard_->core_id_] >= req.scan_batch_size_;
         if (req_finished)
         {
+            bool succ = req.slice_barrier_.SetFinish();
+            if (slice_pinned)
+            {
+                if (req.slice_barrier_.TryFinish(req.core_cnt_))
+                {
+                    // The last core
+                    req.slice_barrier_.PinnedSlice().Unpin();
+                    req.slice_barrier_.PinnedSlice().Reset();
+                    req.slice_barrier_.MarkSliceStatus(
+                        SliceBarrierStatus::Terminated);
+                    req.slice_barrier_.WakeupWaitingRequests();
+                }
+                // else, just forward to set finish.
+            }
+            else if (succ && req.slice_barrier_.HasWaitingRequests())
+            {
+                req.slice_barrier_.MarkSliceStatus(
+                    SliceBarrierStatus::Terminated);
+                req.slice_barrier_.WakeupWaitingRequests();
+            }
+
             req.SetFinish(shard_->core_id_);
             return false;
         }
