@@ -61,6 +61,7 @@ DEFINE_string(region, "us-east-1", "AWS region");
 DEFINE_string(s3_endpoint,
               "",
               "Custom S3 endpoint URL (optional, legacy, use oss_url instead)");
+DEFINE_string(object_store_service_url, "", "Object Store Service URL");
 DEFINE_string(db_path, "./db", "Local DB path");
 DEFINE_bool(list_cf, false, "List all column families");
 DEFINE_bool(opendb, false, "Open the DB only");
@@ -89,7 +90,7 @@ void print_usage(const char *prog_name)
         "  --object_path=PATH           S3 object path for RocksDB Cloud "
         "  --region=REGION              AWS region (default: us-east-1)\n"
         "  --s3_endpoint=URL            Custom S3 endpoint URL (optional)\n"
-        "  --oss_url=URL                Object Store Service URL. Format: "
+        "  --object_store_service_url=URL Object Store Service URL. Format: "
         "s3://{bucket}/{path}, gs://{bucket}/{path}, or "
         "http(s)://{host}:{port}/{bucket}/{path}. \n"
         "  --db_path=PATH               Local DB path (default: ./db)\n"
@@ -114,6 +115,15 @@ struct S3UrlComponents
     std::string error_message;
 };
 
+inline std::string to_lower_copy(std::string s)
+{
+    std::transform(s.begin(),
+                   s.end(),
+                   s.begin(),
+                   [](unsigned char c) { return std::tolower(c); });
+    return s;
+}
+
 // Parse OSS URL in format:
 //   s3://{bucket_name}/{object_path}
 //   gs://{bucket_name}/{object_path}
@@ -124,8 +134,10 @@ struct S3UrlComponents
 //   gs://my-bucket/my-path
 //   http://localhost:9000/my-bucket/my-path
 //   https://s3.amazonaws.com/my-bucket/my-path
-inline S3UrlComponents ParseS3Url(const std::string &s3_url)
+inline S3UrlComponents ParseS3Url(const std::string &s3_url_orignal)
 {
+    std::string s3_url = to_lower_copy(s3_url_orignal);
+
     S3UrlComponents result;
 
     if (s3_url.empty())
@@ -241,9 +253,10 @@ CmdLineParams parse_arguments()
     params.aws_secret_key = FLAGS_aws_secret_key;
 
     // Check if oss_url was provided (takes precedence over legacy config)
-    if (!FLAGS_oss_url.empty())
+    if (!FLAGS_object_store_service_url.empty())
     {
-        S3UrlComponents url_components = ParseS3Url(FLAGS_oss_url);
+        S3UrlComponents url_components =
+            ParseS3Url(FLAGS_object_store_service_url);
         if (!url_components.is_valid)
         {
             throw std::runtime_error(
@@ -258,7 +271,7 @@ CmdLineParams parse_arguments()
         params.object_path = url_components.object_path;
         params.s3_endpoint_url = url_components.endpoint_url;
 
-        LOG(INFO) << "Using OSS URL configuration: " << FLAGS_oss_url
+        LOG(INFO) << "Using OSS URL configuration: "
                   << " (bucket: " << params.bucket_name
                   << ", object_path: " << params.object_path << ", endpoint: "
                   << (params.s3_endpoint_url.empty() ? "default"

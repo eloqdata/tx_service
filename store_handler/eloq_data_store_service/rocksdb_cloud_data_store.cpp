@@ -323,7 +323,6 @@ bool RocksDBCloudDataStore::StartDB()
 
         LOG(INFO) << "Using OSS URL configuration (overrides legacy config if "
                      "present): "
-                  << cloud_config_.oss_url_
                   << " (bucket: " << effective_bucket_name
                   << ", object_path: " << effective_object_path
                   << ", endpoint: "
@@ -332,14 +331,19 @@ bool RocksDBCloudDataStore::StartDB()
                   << ")";
     }
 
-    cfs_options_.src_bucket.SetBucketName(effective_bucket_name);
-    cfs_options_.src_bucket.SetBucketPrefix(effective_bucket_prefix);
+    cloud_config_.bucket_name_ = effective_bucket_name;
+    cloud_config_.bucket_prefix_ = effective_bucket_prefix;
+    cloud_config_.object_path_ = effective_object_path;
+    cloud_config_.s3_endpoint_url_ = effective_endpoint_url;
+
+    cfs_options_.src_bucket.SetBucketName(cloud_config_.bucket_name_);
+    cfs_options_.src_bucket.SetBucketPrefix(cloud_config_.bucket_prefix_);
     cfs_options_.src_bucket.SetRegion(cloud_config_.region_);
-    cfs_options_.src_bucket.SetObjectPath(effective_object_path);
-    cfs_options_.dest_bucket.SetBucketName(effective_bucket_name);
-    cfs_options_.dest_bucket.SetBucketPrefix(effective_bucket_prefix);
+    cfs_options_.src_bucket.SetObjectPath(cloud_config_.object_path_);
+    cfs_options_.dest_bucket.SetBucketName(cloud_config_.bucket_name_);
+    cfs_options_.dest_bucket.SetBucketPrefix(cloud_config_.bucket_prefix_);
     cfs_options_.dest_bucket.SetRegion(cloud_config_.region_);
-    cfs_options_.dest_bucket.SetObjectPath(effective_object_path);
+    cfs_options_.dest_bucket.SetObjectPath(cloud_config_.object_path_);
     // Add sst_file_cache for accerlating random access on sst files
     // use 2^5 = 32 shards for the cache, each shard has sst_file_cache_size_/32
     // bytes capacity

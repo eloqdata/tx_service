@@ -3051,7 +3051,11 @@ std::unique_ptr<S3FileDownloader> DataStoreService::CreateS3Downloader(
     // themselves
     if (!data_store_factory_->IsOssUrlConfigured())
     {
-        s3_url += "ds_" + std::to_string(shard_id) + "/";
+        if (s3_url.back() == '/')
+        {
+            s3_url.pop_back();
+        }
+        s3_url += "/ds_" + std::to_string(shard_id) + "/";
     }
 
     // Get AWS credentials from factory

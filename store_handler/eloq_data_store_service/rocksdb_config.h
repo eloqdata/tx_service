@@ -81,6 +81,15 @@ struct S3UrlComponents
     std::string error_message;
 };
 
+inline std::string to_lower_copy(std::string s)
+{
+    std::transform(s.begin(),
+                   s.end(),
+                   s.begin(),
+                   [](unsigned char c) { return std::tolower(c); });
+    return s;
+}
+
 // Parse OSS URL in format:
 //   s3://{bucket_name}/{object_path}
 //   gs://{bucket_name}/{object_path}
@@ -91,8 +100,10 @@ struct S3UrlComponents
 //   gs://my-bucket/my-path
 //   http://localhost:9000/my-bucket/my-path
 //   https://s3.amazonaws.com/my-bucket/my-path
-inline S3UrlComponents ParseS3Url(const std::string &s3_url)
+inline S3UrlComponents ParseS3Url(const std::string &s3_url_orignal)
 {
+    std::string s3_url = to_lower_copy(s3_url_orignal);
+
     S3UrlComponents result;
 
     if (s3_url.empty())

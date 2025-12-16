@@ -443,10 +443,11 @@ bool DataSubstrate::InitializeLogService(const INIReader &config_reader)
                 txlog_rocksdb_cloud_config.endpoint_url_ =
                     url_components.endpoint_url;
 
-                LOG(INFO) << "Using OSS URL configuration for txlog (overrides "
+                LOG(INFO) << "Using Object Store Service URL configuration for "
+                             "txlog (overrides "
                              "legacy config if "
                              "present): "
-                          << txlog_rocksdb_cloud_config.oss_url_ << " (bucket: "
+                          << " (bucket: "
                           << txlog_rocksdb_cloud_config.bucket_name_
                           << ", object_path: "
                           << txlog_rocksdb_cloud_config.object_path_

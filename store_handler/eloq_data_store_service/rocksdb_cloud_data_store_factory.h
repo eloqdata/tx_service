@@ -71,6 +71,10 @@ public:
         }
         else
         {
+            if (shard_cloud_config.oss_url_.back() == '/')
+            {
+                shard_cloud_config.oss_url_.pop_back();
+            }
             shard_cloud_config.oss_url_.append("/ds_");
             shard_cloud_config.oss_url_.append(std::to_string(shard_id));
         }
