@@ -294,14 +294,15 @@ DEFINE_string(rocksdb_cloud_s3_endpoint_url,
               "S3 compatible object store (e.g. minio) endpoint URL only for "
               "development purpose");
 
-DEFINE_string(rocksdb_cloud_object_store_service_url,
-              "",
-              "RocksDB cloud Object Store Service URL. Format: s3://{bucket}/{path}, "
-              "gs://{bucket}/{path}, or http(s)://{host}:{port}/{bucket}/{path}. "
-              "Examples: s3://my-bucket/my-path, gs://my-bucket/my-path, "
-              "http://localhost:9000/my-bucket/my-path. "
-              "This option takes precedence over legacy configuration options "
-              "if both are provided");
+DEFINE_string(
+    rocksdb_cloud_object_store_service_url,
+    "",
+    "RocksDB cloud Object Store Service URL. Format: s3://{bucket}/{path}, "
+    "gs://{bucket}/{path}, or http(s)://{host}:{port}/{bucket}/{path}. "
+    "Examples: s3://my-bucket/my-path, gs://my-bucket/my-path, "
+    "http://localhost:9000/my-bucket/my-path. "
+    "This option takes precedence over legacy configuration options "
+    "if both are provided");
 
 namespace EloqDS
 {
@@ -521,8 +522,9 @@ RocksDBCloudConfig::RocksDBCloudConfig(const INIReader &config)
     oss_url_ =
         !CheckCommandLineFlagIsDefault("rocksdb_cloud_object_store_service_url")
             ? FLAGS_rocksdb_cloud_object_store_service_url
-            : config.GetString(
-                  "store", "rocksdb_cloud_object_store_service_url", FLAGS_rocksdb_cloud_object_store_service_url);
+            : config.GetString("store",
+                               "rocksdb_cloud_object_store_service_url",
+                               FLAGS_rocksdb_cloud_object_store_service_url);
 
     // Get legacy configuration
     bucket_name_ = !CheckCommandLineFlagIsDefault("rocksdb_cloud_bucket_name")

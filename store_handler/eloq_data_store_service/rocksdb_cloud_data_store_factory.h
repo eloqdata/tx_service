@@ -52,7 +52,8 @@ public:
         bool start_db = true) override
     {
         // Add shard_id to object_path_ only for legacy configuration
-        // When oss_url is configured, the user can include shard path in the URL themselves
+        // When oss_url is configured, the user can include shard path in the
+        // URL themselves
         auto shard_cloud_config = cloud_config_;
         if (!shard_cloud_config.IsOssUrlConfigured())
         {
@@ -68,7 +69,8 @@ public:
             shard_cloud_config.object_path_.append("ds_");
             shard_cloud_config.object_path_.append(std::to_string(shard_id));
         }
-        else {
+        else
+        {
             shard_cloud_config.oss_url_.append("/ds_");
             shard_cloud_config.oss_url_.append(std::to_string(shard_id));
         }

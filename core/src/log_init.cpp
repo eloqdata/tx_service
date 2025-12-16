@@ -80,12 +80,13 @@ DEFINE_string(txlog_rocksdb_cloud_sst_file_cache_size,
 DEFINE_uint32(txlog_rocksdb_cloud_sst_file_cache_num_shard_bits,
               5,
               "TxLog RocksDB Cloud SST file cache num shard bits");
-DEFINE_string(txlog_rocksdb_cloud_object_store_service_url,
-              "",
-              "Object Store Service URL for txlog RocksDB Cloud storage. Format: "
-              "s3://{bucket}/{path}, gs://{bucket}/{path}, or "
-              "http(s)://{host}:{port}/{bucket}/{path}. "
-              "Takes precedence over legacy config if provided.");
+DEFINE_string(
+    txlog_rocksdb_cloud_object_store_service_url,
+    "",
+    "Object Store Service URL for txlog RocksDB Cloud storage. Format: "
+    "s3://{bucket}/{path}, gs://{bucket}/{path}, or "
+    "http(s)://{host}:{port}/{bucket}/{path}. "
+    "Takes precedence over legacy config if provided.");
 #endif
 #ifdef WITH_CLOUD_AZ_INFO
 DEFINE_string(txlog_rocksdb_cloud_prefer_zone,
@@ -299,7 +300,8 @@ bool DataSubstrate::InitializeLogService(const INIReader &config_reader)
                     : config_reader.GetString("store", "aws_secret_key", "");
 #endif /* LOG_STATE_TYPE_RKDB_S3 */
             txlog_rocksdb_cloud_config.oss_url_ =
-                !CheckCommandLineFlagIsDefault("txlog_rocksdb_cloud_object_store_service_url")
+                !CheckCommandLineFlagIsDefault(
+                    "txlog_rocksdb_cloud_object_store_service_url")
                     ? FLAGS_txlog_rocksdb_cloud_object_store_service_url
                     : config_reader.GetString(
                           "local",
@@ -414,35 +416,44 @@ bool DataSubstrate::InitializeLogService(const INIReader &config_reader)
             // Parse OSS URL if provided (takes precedence over legacy config)
             if (!txlog_rocksdb_cloud_config.oss_url_.empty())
             {
-                txlog::S3UrlComponents url_components = 
+                txlog::S3UrlComponents url_components =
                     txlog::ParseS3Url(txlog_rocksdb_cloud_config.oss_url_);
                 if (!url_components.is_valid)
                 {
-                    LOG(FATAL) << "Invalid txlog_rocksdb_cloud_object_store_service_url: "
-                               << url_components.error_message
-                               << ". URL format: s3://{bucket}/{path}, "
-                                  "gs://{bucket}/{path}, or "
-                                  "http(s)://{host}:{port}/{bucket}/{path}. "
-                               << "Examples: s3://my-bucket/my-path, "
-                               << "gs://my-bucket/my-path, "
-                               << "http://localhost:9000/my-bucket/my-path";
+                    LOG(FATAL)
+                        << "Invalid "
+                           "txlog_rocksdb_cloud_object_store_service_url: "
+                        << url_components.error_message
+                        << ". URL format: s3://{bucket}/{path}, "
+                           "gs://{bucket}/{path}, or "
+                           "http(s)://{host}:{port}/{bucket}/{path}. "
+                        << "Examples: s3://my-bucket/my-path, "
+                        << "gs://my-bucket/my-path, "
+                        << "http://localhost:9000/my-bucket/my-path";
                     return false;
                 }
 
                 // Override legacy config with parsed values
-                txlog_rocksdb_cloud_config.bucket_name_ = url_components.bucket_name;
-                txlog_rocksdb_cloud_config.bucket_prefix_ = "";  // No prefix in URL-based config
-                txlog_rocksdb_cloud_config.object_path_ = url_components.object_path;
-                txlog_rocksdb_cloud_config.endpoint_url_ = url_components.endpoint_url;
+                txlog_rocksdb_cloud_config.bucket_name_ =
+                    url_components.bucket_name;
+                txlog_rocksdb_cloud_config.bucket_prefix_ =
+                    "";  // No prefix in URL-based config
+                txlog_rocksdb_cloud_config.object_path_ =
+                    url_components.object_path;
+                txlog_rocksdb_cloud_config.endpoint_url_ =
+                    url_components.endpoint_url;
 
-                LOG(INFO) << "Using OSS URL configuration for txlog (overrides legacy config if "
+                LOG(INFO) << "Using OSS URL configuration for txlog (overrides "
+                             "legacy config if "
                              "present): "
-                          << txlog_rocksdb_cloud_config.oss_url_
-                          << " (bucket: " << txlog_rocksdb_cloud_config.bucket_name_
-                          << ", object_path: " << txlog_rocksdb_cloud_config.object_path_
+                          << txlog_rocksdb_cloud_config.oss_url_ << " (bucket: "
+                          << txlog_rocksdb_cloud_config.bucket_name_
+                          << ", object_path: "
+                          << txlog_rocksdb_cloud_config.object_path_
                           << ", endpoint: "
-                          << (txlog_rocksdb_cloud_config.endpoint_url_.empty() ? "default"
-                                                                                : txlog_rocksdb_cloud_config.endpoint_url_)
+                          << (txlog_rocksdb_cloud_config.endpoint_url_.empty()
+                                  ? "default"
+                                  : txlog_rocksdb_cloud_config.endpoint_url_)
                           << ")";
             }
             if (core_config_.bootstrap)

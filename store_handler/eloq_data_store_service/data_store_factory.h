@@ -100,10 +100,14 @@ public:
     virtual uint64_t GetSstFileCacheSize() const = 0;
 
     /**
-     * @brief Check if OSS URL configuration is being used (instead of legacy config)
+     * @brief Check if OSS URL configuration is being used (instead of legacy
+     * config)
      * @return true if oss_url is configured, false otherwise
      */
-    virtual bool IsOssUrlConfigured() const { return false; }
+    virtual bool IsOssUrlConfigured() const
+    {
+        return false;
+    }
 };
 
 }  // namespace EloqDS

@@ -73,10 +73,10 @@ struct RocksDBConfig
 
 struct S3UrlComponents
 {
-    std::string protocol;       // "s3", "gs", "http", "https"
+    std::string protocol;  // "s3", "gs", "http", "https"
     std::string bucket_name;
     std::string object_path;
-    std::string endpoint_url;   // derived from http/https URLs
+    std::string endpoint_url;  // derived from http/https URLs
     bool is_valid{false};
     std::string error_message;
 };
@@ -94,7 +94,7 @@ struct S3UrlComponents
 inline S3UrlComponents ParseS3Url(const std::string &s3_url)
 {
     S3UrlComponents result;
-    
+
     if (s3_url.empty())
     {
         result.error_message = "OSS URL is empty";
@@ -105,17 +105,18 @@ inline S3UrlComponents ParseS3Url(const std::string &s3_url)
     size_t protocol_end = s3_url.find("://");
     if (protocol_end == std::string::npos)
     {
-        result.error_message = "Invalid OSS URL format: missing '://' separator";
+        result.error_message =
+            "Invalid OSS URL format: missing '://' separator";
         return result;
     }
 
     result.protocol = s3_url.substr(0, protocol_end);
-    
+
     // Validate protocol
-    if (result.protocol != "s3" && result.protocol != "gs" && 
+    if (result.protocol != "s3" && result.protocol != "gs" &&
         result.protocol != "http" && result.protocol != "https")
     {
-        result.error_message = "Invalid protocol '" + result.protocol + 
+        result.error_message = "Invalid protocol '" + result.protocol +
                                "'. Must be one of: s3, gs, http, https";
         return result;
     }
@@ -124,12 +125,13 @@ inline S3UrlComponents ParseS3Url(const std::string &s3_url)
     size_t path_start = protocol_end + 3;  // Skip "://"
     if (path_start >= s3_url.length())
     {
-        result.error_message = "Invalid OSS URL format: no content after protocol";
+        result.error_message =
+            "Invalid OSS URL format: no content after protocol";
         return result;
     }
 
     std::string remaining = s3_url.substr(path_start);
-    
+
     // For http/https, extract the endpoint (host:port) and then the bucket/path
     // Format: http(s)://{host}:{port}/{bucket_name}/{object_path}
     if (result.protocol == "http" || result.protocol == "https")
@@ -138,42 +140,43 @@ inline S3UrlComponents ParseS3Url(const std::string &s3_url)
         size_t first_slash = remaining.find('/');
         if (first_slash == std::string::npos)
         {
-            result.error_message = 
+            result.error_message =
                 "Invalid OSS URL format: missing bucket and object path";
             return result;
         }
-        
+
         // Store the full endpoint URL including protocol
-        result.endpoint_url = result.protocol + "://" + 
-                              remaining.substr(0, first_slash);
+        result.endpoint_url =
+            result.protocol + "://" + remaining.substr(0, first_slash);
         remaining = remaining.substr(first_slash + 1);
     }
-    
+
     // Now extract bucket_name and object_path from remaining
     // Format: {bucket_name}/{object_path}
     size_t first_slash = remaining.find('/');
     if (first_slash == std::string::npos)
     {
-        result.error_message = 
-            "Invalid OSS URL format: missing object path (format: {bucket_name}/{object_path})";
+        result.error_message =
+            "Invalid OSS URL format: missing object path (format: "
+            "{bucket_name}/{object_path})";
         return result;
     }
-    
+
     result.bucket_name = remaining.substr(0, first_slash);
     result.object_path = remaining.substr(first_slash + 1);
-    
+
     if (result.bucket_name.empty())
     {
         result.error_message = "Bucket name cannot be empty";
         return result;
     }
-    
+
     if (result.object_path.empty())
     {
         result.error_message = "Object path cannot be empty";
         return result;
     }
-    
+
     result.is_valid = true;
     return result;
 }
@@ -196,14 +199,18 @@ struct RocksDBCloudConfig
     uint32_t db_ready_timeout_us_;
     uint32_t db_file_deletion_delay_;
     std::string s3_endpoint_url_;
-    std::string oss_url_;  // Object Storage Service URL-based configuration (supports s3://, gs://, http://, https://)
+    std::string oss_url_;  // Object Storage Service URL-based configuration
+                           // (supports s3://, gs://, http://, https://)
     size_t warm_up_thread_num_;
     bool run_purger_{true};
-    size_t purger_periodicity_millis_{10 * 60 * 1000}; // 10 minutes
+    size_t purger_periodicity_millis_{10 * 60 * 1000};  // 10 minutes
     std::string branch_name_;
 
     // Returns true if OSS URL configuration is being used
-    bool IsOssUrlConfigured() const { return !oss_url_.empty(); }
+    bool IsOssUrlConfigured() const
+    {
+        return !oss_url_.empty();
+    }
 };
 
 inline rocksdb::Status NewCloudFileSystem(
