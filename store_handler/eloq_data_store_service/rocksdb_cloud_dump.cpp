@@ -44,24 +44,27 @@
 // Define command line flags
 DEFINE_string(aws_access_key_id, "", "AWS access key ID");
 DEFINE_string(aws_secret_key, "", "AWS secret access key");
-DEFINE_string(oss_url,
+DEFINE_string(object_store_service_url,
               "",
               "OSS URL. Format: s3://{bucket}/{path}, gs://{bucket}/{path}, or "
               "http(s)://{host}:{port}/{bucket}/{path}. "
               "Takes precedence over legacy config if provided");
-DEFINE_string(bucket_name, "", "S3 bucket name (legacy, use oss_url instead)");
-DEFINE_string(bucket_prefix,
+DEFINE_string(bucket_name,
               "",
-              "S3 bucket prefix (legacy, not supported with oss_url)");
+              "S3 bucket name (legacy, use object_store_service_url instead)");
 DEFINE_string(
-    object_path,
-    "rocksdb_cloud",
-    "S3 object path for RocksDB Cloud storage (legacy, use oss_url instead)");
+    bucket_prefix,
+    "",
+    "S3 bucket prefix (legacy, not supported with object_store_service_url)");
+DEFINE_string(object_path,
+              "rocksdb_cloud",
+              "S3 object path for RocksDB Cloud storage (legacy, use "
+              "object_store_service_url instead)");
 DEFINE_string(region, "us-east-1", "AWS region");
 DEFINE_string(s3_endpoint,
               "",
-              "Custom S3 endpoint URL (optional, legacy, use oss_url instead)");
-DEFINE_string(object_store_service_url, "", "Object Store Service URL");
+              "Custom S3 endpoint URL (optional, legacy, use "
+              "object_store_service_url instead)");
 DEFINE_string(db_path, "./db", "Local DB path");
 DEFINE_bool(list_cf, false, "List all column families");
 DEFINE_bool(opendb, false, "Open the DB only");
@@ -252,18 +255,19 @@ CmdLineParams parse_arguments()
     params.aws_access_key_id = FLAGS_aws_access_key_id;
     params.aws_secret_key = FLAGS_aws_secret_key;
 
-    // Check if oss_url was provided (takes precedence over legacy config)
+    // Check if object_store_service_url was provided (takes precedence over
+    // legacy config)
     if (!FLAGS_object_store_service_url.empty())
     {
         S3UrlComponents url_components =
             ParseS3Url(FLAGS_object_store_service_url);
         if (!url_components.is_valid)
         {
-            throw std::runtime_error(
-                "Invalid oss_url: " + url_components.error_message +
-                ". URL format: s3://{bucket}/{path}, "
-                "gs://{bucket}/{path}, or "
-                "http(s)://{host}:{port}/{bucket}/{path}");
+            throw std::runtime_error("Invalid object_store_service_url: " +
+                                     url_components.error_message +
+                                     ". URL format: s3://{bucket}/{path}, "
+                                     "gs://{bucket}/{path}, or "
+                                     "http(s)://{host}:{port}/{bucket}/{path}");
         }
 
         params.bucket_name = url_components.bucket_name;
