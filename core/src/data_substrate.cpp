@@ -822,7 +822,7 @@ bool DataSubstrate::LoadCoreAndNetworkConfig(const INIReader &config_reader)
     aws_options_.loggingOptions.logLevel = Aws::Utils::Logging::LogLevel::Info;
     if (!FLAGS_log_dir.empty())
     {
-        aws_options.loggingOptions.defaultLogPrefix = FLAGS_log_dir.c_str();
+        aws_options_.loggingOptions.defaultLogPrefix = FLAGS_log_dir.c_str();
     }
     Aws::InitAPI(aws_options_);
 #endif
