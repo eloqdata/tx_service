@@ -820,6 +820,10 @@ bool DataSubstrate::LoadCoreAndNetworkConfig(const INIReader &config_reader)
     defined(DATA_STORE_TYPE_ELOQDSS_ROCKSDB_CLOUD_S3) || \
     defined(LOG_STATE_TYPE_RKDB_S3)
     aws_options_.loggingOptions.logLevel = Aws::Utils::Logging::LogLevel::Info;
+    if (!FLAGS_log_dir.empty())
+    {
+        aws_options.loggingOptions.defaultLogPrefix = FLAGS_log_dir.c_str();
+    }
     Aws::InitAPI(aws_options_);
 #endif
 
