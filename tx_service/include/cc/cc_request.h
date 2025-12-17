@@ -4088,7 +4088,8 @@ public:
         }
 
         slice_barrier_.Reset(core_cnt_);
-        blocked_by_slice_op_.resize(core_cnt_, false);
+        blocked_by_slice_op_.resize(core_cnt_,
+                                    {false, SliceBarrier::SliceStatus::None});
     }
 
     bool ValidTermCheck()
@@ -4203,8 +4204,10 @@ public:
         op_type_ = op_type;
 
         slice_barrier_.Reset(core_cnt_);
-        std::fill(
-            blocked_by_slice_op_.begin(), blocked_by_slice_op_.end(), false);
+        for (size_t i = 0; i < core_cnt_; i++)
+        {
+            blocked_by_slice_op_[i] = {false, SliceBarrier::SliceStatus::None};
+        }
     }
 
     void SetError(CcErrorCode err)
@@ -4324,6 +4327,7 @@ private:
         enum class SliceStatus : uint8_t
         {
             None = 0,
+            Pinning,
             Pinned,
             Error,
             Terminated
@@ -4337,6 +4341,7 @@ private:
                 core_cnt_.store(core_cnt, std::memory_order_relaxed);
                 return true;
             }
+            waiting_core_cnt_.first.fetch_add(1, std::memory_order_relaxed);
             return false;
         }
         // Return true if this is the last core trying to unpin.
@@ -4347,6 +4352,7 @@ private:
                 core_cnt_.store(core_cnt, std::memory_order_relaxed);
                 return true;
             }
+            waiting_core_cnt_.second.fetch_add(1, std::memory_order_relaxed);
             return false;
         }
         RangeSliceId &PinnedSlice()
@@ -4364,37 +4370,39 @@ private:
         {
             return slice_status_.load(std::memory_order_acquire);
         }
-        // Waiting for the slice operation to complete.
-        void RequestWaiting(uint16_t core_id, CcRequestBase *req)
+        bool IsReady(SliceStatus expected_status) const
         {
-            assert(core_id < waiting_requests_.size());
-            waiting_requests_[core_id] = req;
-        }
-        // Wake up all waiting requests.
-        void WakeupWaitingRequests()
-        {
-            for (size_t shard_idx = 0; shard_idx < waiting_requests_.size();
-                 ++shard_idx)
+            bool is_ready = false;
+            SliceStatus current_status = Status();
+            if (expected_status == SliceStatus::Pinned &&
+                current_status >= SliceStatus::Pinned)
             {
-                CcRequestBase *req = waiting_requests_[shard_idx];
-                if (req != nullptr)
-                {
-                    Sharder::Instance().GetCcShard(shard_idx)->Enqueue(req);
-                    waiting_requests_[shard_idx] = nullptr;
-                }
+                is_ready = true;
+                waiting_core_cnt_.first.fetch_sub(1, std::memory_order_relaxed);
             }
-        }
-        // Check if there are any waiting requests
-        bool HasWaitingRequests() const
-        {
-            for (const auto *req : waiting_requests_)
+            else if (expected_status == SliceStatus::None &&
+                     (current_status == SliceStatus::None ||
+                      current_status == SliceStatus::Terminated))
             {
-                if (req != nullptr)
-                {
-                    return true;
-                }
+                is_ready = true;
+                waiting_core_cnt_.second.fetch_sub(1,
+                                                   std::memory_order_relaxed);
             }
-            return false;
+            return is_ready;
+        }
+        // Check if there are any waiting cores.
+        bool HasWaitingCores(bool waiting_for_pinned) const
+        {
+            if (waiting_for_pinned)
+            {
+                return waiting_core_cnt_.first.load(std::memory_order_relaxed) >
+                       0;
+            }
+            else
+            {
+                return waiting_core_cnt_.second.load(
+                           std::memory_order_relaxed) > 0;
+            }
         }
         // Reset the slice barrier.
         void Reset(uint16_t core_cnt)
@@ -4402,7 +4410,8 @@ private:
             pinned_slice_ = RangeSliceId{};
             core_cnt_.store(core_cnt, std::memory_order_relaxed);
             slice_status_.store(SliceStatus::None, std::memory_order_relaxed);
-            waiting_requests_.assign(core_cnt, nullptr);
+            waiting_core_cnt_.first.store(0, std::memory_order_relaxed);
+            waiting_core_cnt_.second.store(0, std::memory_order_relaxed);
             req_finished_.store(false, std::memory_order_relaxed);
         }
         bool SetFinish()
@@ -4422,8 +4431,11 @@ private:
         std::atomic<uint16_t> core_cnt_{0};
         // Final slice status for current slice.
         std::atomic<SliceStatus> slice_status_{SliceStatus::None};
-        // Waiting requests indexed by core id.
-        std::vector<CcRequestBase *> waiting_requests_;
+        // Number of cores that are waiting for the slice operation to be ready.
+        // The first element is for waiting pinned.
+        // The second element is for waiting unpin.
+        mutable std::pair<std::atomic<uint16_t>, std::atomic<uint16_t>>
+            waiting_core_cnt_{0, 0};
         // Set true when the request finished on a core, to avoid other cores
         // waitting the finished core updating the slice barrier.
         std::atomic<bool> req_finished_{false};
@@ -4466,7 +4478,9 @@ private:
     // Concurrency barriers used to control slice operations.
     SliceBarrier slice_barrier_;
     // This indicates whether the request is blocked by a slice operation.
-    std::vector<bool> blocked_by_slice_op_;
+    // The second element is the ready status.
+    std::vector<std::pair<bool, SliceBarrier::SliceStatus>>
+        blocked_by_slice_op_;
 
     // This is used for scan during add index txm.
     bool export_base_table_item_only_{false};
