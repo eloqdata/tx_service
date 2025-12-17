@@ -2185,6 +2185,8 @@ private:
             nullptr};
     };
 
+    WorkerThreadContext epoch_worker_ctx_;
+
     /**
      * DataSync Operation Interface
      */
@@ -2365,6 +2367,10 @@ private:
         task_limiters_;
 
     void DataSyncWorker(size_t worker_idx);
+
+#if defined(WITH_JEMALLOC)
+    void EpochWorker();
+#endif
 
     void DataSyncForHashPartition(std::shared_ptr<DataSyncTask> data_sync_task,
                                   size_t worker_idx);

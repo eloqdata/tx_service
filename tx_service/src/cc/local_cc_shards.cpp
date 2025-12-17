@@ -123,6 +123,11 @@ LocalCcShards::LocalCcShards(
       flush_data_worker_ctx_(
           std::min(static_cast<int>(conf.at("core_num")), 10)),
 #endif
+
+#if defined(WITH_JEMALLOC)
+      epoch_worker_ctx_(1),
+#endif
+
       cur_flush_buffer_(
           static_cast<uint64_t>(MB(conf.at("node_memory_limit_mb")) * 0.05)),
       data_sync_mem_controller_(
@@ -287,6 +292,13 @@ void LocalCcShards::StartBackgroudWorkers()
         std::string thread_name = "data_sync_" + std::to_string(id);
         pthread_setname_np(thd.native_handle(), thread_name.c_str());
     }
+
+#if defined(WITH_JEMALLOC)
+    for (int id = 0; id < epoch_worker_ctx_.worker_num_; ++id)
+    {
+        epoch_worker_ctx_.worker_thd_.emplace_back([this] { EpochWorker(); });
+    }
+#endif
 
     if (realtime_sampling_)
     {
@@ -2900,7 +2912,31 @@ void LocalCcShards::Terminate()
     {
         kickout_data_test_worker_ctx_.Terminate();
     }
+
+#if defined(WITH_JEMALLOC)
+    epoch_worker_ctx_.Terminate();
+#endif
 }
+
+#if defined(WITH_JEMALLOC)
+void LocalCcShards::EpochWorker()
+{
+    std::unique_lock<std::mutex> lk(epoch_worker_ctx_.mux_);
+    using clock = std::chrono::steady_clock;
+    auto next = clock::now() + std::chrono::seconds(1);
+
+    while (epoch_worker_ctx_.status_ == WorkerStatus::Active)
+    {
+        if (epoch_worker_ctx_.cv_.wait_until(lk, next) ==
+            std::cv_status::timeout)
+        {
+            uint64_t epoch = 1;
+            mallctl("epoch", nullptr, nullptr, &epoch, sizeof(epoch));
+            next += std::chrono::seconds(1);
+        }
+    }
+}
+#endif
 
 void LocalCcShards::DataSyncWorker(size_t worker_idx)
 {

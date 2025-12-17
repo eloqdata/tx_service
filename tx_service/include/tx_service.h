@@ -288,6 +288,10 @@ public:
         mi_heap_t *prev_heap = shard_heap->SetAsDefaultHeap();
 #if defined(WITH_JEMALLOC)
         auto prev_arena = shard_heap->SetAsDefaultArena();
+        uint32_t debug_current_arena;
+        JemallocArenaSwitcher::ReadCurrentArena(debug_current_arena);
+        // LOG(INFO) << "yf: runoneround, prev arena = " << prev_arena
+        //          << ", current arena = " << debug_current_arena;
 #endif
         if (is_ext_proc)
         {
@@ -691,6 +695,11 @@ public:
         coordi_->ext_tx_proc_heap_ = shard_heap->SetAsDefaultHeap();
 #if defined(WITH_JEMALLOC)
         coordi_->ext_tx_proc_arena_id_ = shard_heap->SetAsDefaultArena();
+        uint32_t debug_current_arena;
+        JemallocArenaSwitcher::ReadCurrentArena(debug_current_arena);
+        // LOG(INFO) << "yf: runoneround, prev arena = "
+        //          << coordi_->ext_tx_proc_arena_id_
+        //          << ", current arena = " << debug_current_arena;
 #endif
 
         TxmStatus txm_status = txm->Forward();

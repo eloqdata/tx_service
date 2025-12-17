@@ -453,11 +453,9 @@ static inline void GetJemallocArenaStat(uint32_t arena_id,
     size_t large_allocated = 0;
     size_t sz = sizeof(total_resident);
 
-    uint64_t epoch = 1;
-    mallctl("epoch", NULL, NULL, &epoch, sizeof(epoch));
-    // Resident memory pages actually held by jemalloc from OS
-    // mallctl("stats.resident", &total_resident, &sz, NULL, 0);
-    // mallctl("stats.allocated", &total_allocated, &sz, NULL, 0);
+    // uint64_t epoch = 1;
+    // mallctl("epoch", NULL, NULL, &epoch, sizeof(epoch));
+
     char mib[64];
     snprintf(mib, sizeof(mib), "stats.arenas.%u.resident", arena_id);
     mallctl(mib, &total_resident, &sz, NULL, 0);
