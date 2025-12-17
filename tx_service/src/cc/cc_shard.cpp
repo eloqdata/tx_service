@@ -2575,7 +2575,7 @@ bool CcShardHeap::Full(int64_t *alloc, int64_t *commit) const
         *commit = total_resident;
     }
 
-    return total_resident >= static_cast<int64_t>(memory_limit_);
+    return total_allocated >= memory_limit_;
 
 #else
     int64_t allocated, committed;
