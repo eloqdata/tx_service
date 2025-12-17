@@ -485,6 +485,17 @@ struct TableName
         }
     }
 
+    struct Hasher
+    {
+        size_t operator()(const TableName &name) const
+        {
+            size_t h = std::hash<std::string_view>()(name.StringView());
+            h ^= std::hash<uint8_t>()(static_cast<uint8_t>(name.Type())) + 0x9e3779b9 + (h << 6) + (h >> 2);
+            h ^= std::hash<uint8_t>()(static_cast<uint8_t>(name.Engine())) + 0x9e3779b9 + (h << 6) + (h >> 2);
+            return h;
+        }
+    };
+
 private:
     // base or index table name
     union
@@ -716,7 +727,10 @@ struct hash<txservice::TableName>
 {
     size_t operator()(const txservice::TableName &name) const
     {
-        return std::hash<std::string_view>()(name.StringView());
+        size_t h = std::hash<std::string_view>()(name.StringView());
+        h ^= std::hash<uint8_t>()(static_cast<uint8_t>(name.Type())) + 0x9e3779b9 + (h << 6) + (h >> 2);
+        h ^= std::hash<uint8_t>()(static_cast<uint8_t>(name.Engine())) + 0x9e3779b9 + (h << 6) + (h >> 2);
+        return h;
     }
 };
 }  // namespace std
