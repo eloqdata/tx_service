@@ -519,15 +519,6 @@ public:
             return true;
         }
 
-#if defined(WITH_JEMALLOC)
-        uint32_t arena_id = 0;
-        JemallocArenaSwitcher::ReadCurrentArena(arena_id);
-        // LOG(INFO) << "== find emplace: core id = " << shard_->core_id_
-        //          << ", arena id = " << arena_id;
-#else
-        LOG(INFO) << "== find emplace: WITH JEMALLOC undefinied";
-#endif
-
         const ValueT *commit_val = static_cast<const ValueT *>(req.Payload());
         TxNumber txn = req.Txn();
         uint64_t commit_ts = req.CommitTs();

@@ -835,12 +835,6 @@ TxLockInfo *CcShard::UpsertLockHoldingTx(TxNumber txn,
     if (is_new_tx)
     {
         tx_it->second = GetTxLockInfo(tx_term);
-        /*
-        LOG(INFO) << "== UpsertLockHoldingTx: txn = " << txn
-                  << ", is key write lock"
-                  << ", lkinfo addr = " << tx_it->second.get()
-                  << ", table type = " << (int) (table_type);
-        */
     }
     if (cce_ptr != nullptr)
     {
@@ -880,12 +874,6 @@ void CcShard::DeleteLockHoldingTx(TxNumber txn,
 
     if (lk_info->cce_list_.empty())
     {
-        if (lk_info->wlock_ts_ != 0)
-        {
-            // LOG(INFO) << "== DeleteLockHoldingTx: txn = " << txn
-            //          << ", lkinfo addr = " << lk_info.get();
-        }
-
         RecycleTxLockInfo(std::move(lk_info));
         ng_it->second.erase(tx_it);
     }
@@ -2536,9 +2524,6 @@ CcShardHeap::CcShardHeap(CcShard *cc_shard, size_t limit)
     {
         LOG(FATAL) << "Failed to create jemalloc arena for shard heap";
     }
-
-    LOG(INFO) << "core id = " << cc_shard->core_id_
-              << ", arena id = " << arena_id_;
 #endif
 }
 
@@ -2579,21 +2564,6 @@ bool CcShardHeap::Full(int64_t *alloc, int64_t *commit) const
     size_t total_resident = 0;
     size_t total_allocated = 0;
     GetJemallocArenaStat(arena_id_, total_resident, total_allocated);
-
-    size_t sz = sizeof(size_t);
-    // Resident memory pages actually held by jemalloc from OS
-    size_t debug_total_resident = 0;
-    size_t debug_total_allocated = 0;
-    mallctl("stats.resident", &debug_total_resident, &sz, NULL, 0);
-    mallctl("stats.allocated", &debug_total_allocated, &sz, NULL, 0);
-
-    /*
-    LOG(INFO) << "==yf: GetJemallocArenaStat: total_resident " << total_resident
-              << ", allocated = " << total_allocated
-              << ", arena id = " << arena_id_
-              << ", stats.resident = " << debug_total_resident
-              << ", stats.allocated = " << debug_total_allocated;
-    */
 
     if (alloc != nullptr)
     {
