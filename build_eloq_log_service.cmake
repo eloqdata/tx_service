@@ -3,6 +3,13 @@ SET(TX_LOG_PROTOS_SOURCE_DIR ${CMAKE_CURRENT_SOURCE_DIR}/tx_service/tx-log-proto
 
 set(CMAKE_CXX_FLAGS  "${CMAKE_CXX_FLAGS} -Wno-error")
 
+option(WITH_CLOUD_AZ_INFO "With Cloud Availability Zone Info" OFF)
+message(NOTICE "With Cloud Availability Zone Info: ${WITH_CLOUD_AZ_INFO}")
+
+if (WITH_CLOUD_AZ_INFO)
+    add_definitions(-DWITH_CLOUD_AZ_INFO)
+endif()
+
 option(BRPC_WITH_GLOG "With glog" ON)
 
 set(WITH_LOG_STATE "ROCKSDB" CACHE STRING "The log state implementation")
@@ -124,58 +131,58 @@ if (WITH_LOG_STATE MATCHES "ROCKSDB|ROCKSDB_CLOUD_S3|ROCKSDB_CLOUD_GCS")
           message(FATAL_ERROR "Fail to find aws/core include path")
         endif()
         message(STATUS "aws/core include path: ${AWS_CORE_INCLUDE_PATH}")
-  
+
         find_library(AWS_CORE_LIB aws-cpp-sdk-core)
         if((NOT AWS_CORE_LIB ))
           message(FATAL_ERROR "Fail to find aws-cpp-sdk-core lib")
         endif()
         message(STATUS "aws-cpp-sdk-core library: ${AWS_CORE_LIB}")
-  
+
         find_path(AWS_KINESIS_INCLUDE_PATH aws/kinesis/KinesisClient.h)
         if((NOT AWS_KINESIS_INCLUDE_PATH))
           message(FATAL_ERROR "Fail to find aws/kinesis include path")
         endif()
         message(STATUS "aws/kinesis include path: ${AWS_KINESIS_INCLUDE_PATH}")
-  
+
         find_library(AWS_KINESIS_LIB aws-cpp-sdk-kinesis)
         if((NOT AWS_KINESIS_LIB))
           message(FATAL_ERROR "Fail to find aws-cpp-sdk-kinesis lib")
         endif()
         message(STATUS "aws-cpp-sdk-kinesis library: ${AWS_KINESIS_LIB}")
-  
-  
+
+
         find_path(AWS_KINESIS_INCLUDE_PATH aws/kinesis/KinesisClient.h)
         if((NOT AWS_KINESIS_INCLUDE_PATH))
           message(FATAL_ERROR "Fail to find aws/kinesis include path")
         endif()
         message(STATUS "aws/kinesis include path: ${AWS_KINESIS_INCLUDE_PATH}")
-  
+
         find_library(AWS_KINESIS_LIB aws-cpp-sdk-kinesis)
         if((NOT AWS_KINESIS_LIB))
           message(FATAL_ERROR "Fail to find aws-cpp-sdk-kinesis lib")
         endif()
         message(STATUS "aws-cpp-sdk-kinesis library: ${AWS_KINESIS_LIB}")
-  
+
         find_path(AWS_S3_INCLUDE_PATH aws/s3/S3Client.h)
         if((NOT AWS_S3_INCLUDE_PATH))
           message(FATAL_ERROR "Fail to find aws/s3 include path")
         endif()
         message(STATUS "aws/s3 include path: ${AWS_S3_INCLUDE_PATH}")
-  
+
         find_library(AWS_S3_LIB aws-cpp-sdk-s3)
         if((NOT AWS_S3_LIB ))
           message(FATAL_ERROR "Fail to find aws-cpp-sdk-s3 lib")
         endif()
         message(STATUS "aws-cpp-sdk-s3 library: ${AWS_S3_LIB}")
-  
+
         set(ROCKSDB_INCLUDE_PATH ${ROCKSDB_INCLUDE_PATH} ${AWS_CORE_INCLUDE_PATH})
         set(ROCKSDB_INCLUDE_PATH ${ROCKSDB_INCLUDE_PATH} ${AWS_KINESIS_INCLUDE_PATH})
         set(ROCKSDB_INCLUDE_PATH ${ROCKSDB_INCLUDE_PATH} ${AWS_S3_INCLUDE_PATH})
-  
+
         set(ROCKSDB_LIB ${ROCKSDB_LIB} ${AWS_CORE_LIB})
         set(ROCKSDB_LIB ${ROCKSDB_LIB} ${AWS_KINESIS_LIB})
         set(ROCKSDB_LIB ${ROCKSDB_LIB} ${AWS_S3_LIB})
-  
+
         find_library(ROCKSDB_CLOUD_LIB NAMES rocksdb-cloud-aws)
 
         add_compile_definitions(USE_AWS)
@@ -185,7 +192,7 @@ if (WITH_LOG_STATE MATCHES "ROCKSDB|ROCKSDB_CLOUD_S3|ROCKSDB_CLOUD_GCS")
           message(FATAL_ERROR "Fail to find google/cloud/storage include path")
         endif()
         message(STATUS "google/cloud/storage include path: ${GCP_CS_INCLUDE_PATH}")
-  
+
         find_library(GCP_COMMON_LIB google_cloud_cpp_common)
         if((NOT GCP_COMMON_LIB))
           message(FATAL_ERROR "Fail to find google_cloud_cpp_common lib")
@@ -200,7 +207,7 @@ if (WITH_LOG_STATE MATCHES "ROCKSDB|ROCKSDB_CLOUD_S3|ROCKSDB_CLOUD_GCS")
 
         set(ROCKSDB_LIB ${ROCKSDB_LIB} ${GCP_COMMON_LIB})
         set(ROCKSDB_LIB ${ROCKSDB_LIB} ${GCP_CS_LIB})
-  
+
         find_library(ROCKSDB_CLOUD_LIB NAMES rocksdb-cloud-gcp)
 
         add_compile_definitions(USE_GCP)
