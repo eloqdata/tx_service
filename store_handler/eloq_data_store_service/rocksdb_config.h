@@ -100,10 +100,8 @@ inline std::string to_lower_copy(std::string s)
 //   gs://my-bucket/my-path
 //   http://localhost:9000/my-bucket/my-path
 //   https://s3.amazonaws.com/my-bucket/my-path
-inline S3UrlComponents ParseS3Url(const std::string &s3_url_orignal)
+inline S3UrlComponents ParseS3Url(const std::string &s3_url)
 {
-    std::string s3_url = to_lower_copy(s3_url_orignal);
-
     S3UrlComponents result;
 
     if (s3_url.empty())
@@ -121,7 +119,7 @@ inline S3UrlComponents ParseS3Url(const std::string &s3_url_orignal)
         return result;
     }
 
-    result.protocol = s3_url.substr(0, protocol_end);
+    result.protocol = to_lower_copy(s3_url.substr(0, protocol_end));
 
     // Validate protocol
     if (result.protocol != "s3" && result.protocol != "gs" &&
