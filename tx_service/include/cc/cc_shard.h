@@ -180,14 +180,12 @@ struct TxLockInfo
 class JemallocArenaSwitcher
 {
 public:
-    explicit JemallocArenaSwitcher()
-    {
-    }
+    explicit JemallocArenaSwitcher() = default;
 
     static bool ReadCurrentArena(uint32_t &current_arena)
     {
         size_t sz = sizeof(uint32_t);
-        if (mallctl("thread.arena", &current_arena, &sz, NULL, 0) != 0)
+        if (mallctl("thread.arena", &current_arena, &sz, nullptr, 0) != 0)
         {
             LOG(FATAL) << "Failed to read current arena";
             return false;
@@ -198,7 +196,9 @@ public:
 
     static bool SwitchToArena(uint32_t arena)
     {
-        if (mallctl("thread.arena", NULL, NULL, &arena, sizeof(uint32_t)) != 0)
+        if (mallctl(
+                "thread.arena", nullptr, nullptr, &arena, sizeof(uint32_t)) !=
+            0)
         {
             LOG(FATAL) << "Failed to switch arena " << arena;
             return false;

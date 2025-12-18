@@ -968,8 +968,7 @@ public:
             }
 
 #if defined(WITH_JEMALLOC)
-            mallctl(
-                "thread.arena", NULL, NULL, &prev_arena_id, sizeof(uint32_t));
+            JemallocArenaSwitcher::SwitchToArena(prev_arena_id);
 #endif
 
             if (last_sync_ts > 0)

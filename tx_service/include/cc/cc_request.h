@@ -6320,8 +6320,7 @@ public:
 
                 mi_heap_set_default(prev_heap);
 #if defined(WITH_JEMALLOC)
-                mallctl(
-                    "thread.arena", NULL, NULL, &prev_arena, sizeof(uint32_t));
+                JemallocArenaSwitcher::SwitchToArena(prev_arena);
 #endif
 
                 if (data_sync_vec_->size() > 0)
@@ -6364,8 +6363,7 @@ public:
                 mi_heap_set_default(prev_heap);
 
 #if defined(WITH_JEMALLOC)
-                mallctl(
-                    "thread.arena", NULL, NULL, &prev_arena, sizeof(uint32_t));
+                JemallocArenaSwitcher::SwitchToArena(prev_arena);
 #endif
 
                 if (archive_vec_->size() > 0)
