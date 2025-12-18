@@ -5210,12 +5210,6 @@ public:
             if (!req.slice_barrier_.IsReady(expected_status))
             {
                 shard_->Enqueue(shard_->LocalCoreId(), &req);
-                DLOG(INFO) << "Slice barrier not ready for table: "
-                           << table_name_.StringView()
-                           << ", on core: " << shard_->core_id_
-                           << ". slice barrier status: "
-                           << static_cast<uint32_t>(
-                                  req.slice_barrier_.Status());
                 return false;
             }
             // Check the slice coordination status
@@ -5238,11 +5232,6 @@ public:
                      req.slice_barrier_.PinnedSlice().Slice()) ||
                     (req.slice_barrier_.Status() == SliceBarrierStatus::None &&
                      !req.slice_barrier_.PinnedSlice().Slice()));
-                DLOG(INFO)
-                    << "Slice barrier status is Pinned or None for table: "
-                    << table_name_.StringView()
-                    << ". on core: " << shard_->core_id_ << ". slice status: "
-                    << static_cast<uint32_t>(req.slice_barrier_.Status());
                 move_next_slice =
                     req.slice_barrier_.Status() == SliceBarrierStatus::None;
                 // Reset the blocked by slice operation flag
@@ -5440,17 +5429,6 @@ public:
                                 ->FindSlice(*curr_slice_it)
                                 ->EndTxKey()
                                 .GetKey<KeyT>();
-                        DLOG(INFO)
-                            << "Normal scan with start_key: "
-                            << start_key->ToString()
-                            << ", search_key: " << search_key.ToString()
-                            << ", curr_start_key: "
-                            << curr_start_key->ToString()
-                            << ", curr_end_key: " << curr_end_key->ToString()
-                            << ". need pin slice: " << std::boolalpha
-                            << need_pin_slice
-                            << ". for table: " << table_name_.StringView()
-                            << ". on core: " << shard_->core_id_;
                         return !(*curr_start_key < search_key) ||
                                (search_key < *curr_end_key);
                     }());
@@ -5472,11 +5450,6 @@ public:
                     // Check the request status
                     if (req.slice_barrier_.RequestFinished())
                     {
-                        DLOG(INFO)
-                            << "Slice barrier request finished for table: "
-                            << table_name_.StringView()
-                            << ". on core: " << shard_->core_id_
-                            << ". start_key: " << start_key->ToString();
                         // Just finish this request
                         req.PausePos(shard_->core_id_).first =
                             start_key->CloneTxKey();
@@ -5500,11 +5473,6 @@ public:
                         req.blocked_by_slice_op_[shard_->core_id_] = {
                             true, SliceBarrierStatus::Pinned};
                         shard_->Enqueue(shard_->LocalCoreId(), &req);
-                        DLOG(INFO)
-                            << "Slice barrier not the last core for table: "
-                            << table_name_.StringView()
-                            << ". on core: " << shard_->core_id_
-                            << ". start_key: " << start_key->ToString();
                         return {Iterator(),
                                 Iterator(),
                                 nullptr,
@@ -5515,10 +5483,6 @@ public:
 
                     req.slice_barrier_.MarkSliceStatus(
                         SliceBarrierStatus::Pinning);
-                    DLOG(INFO) << "Slice barrier started for table: "
-                               << table_name_.StringView()
-                               << ". on core: " << shard_->core_id_
-                               << ". start_key: " << start_key->ToString();
 
                     // Execute the pinslice operation, and return the
                     // RangeSliceId If the value of export_base_table_item_ is
@@ -5532,11 +5496,6 @@ public:
                         if (req.ErrorCode() ==
                             CcErrorCode::PIN_RANGE_SLICE_FAILED)
                         {
-                            DLOG(INFO)
-                                << "Pin range slice failed for table: "
-                                << table_name_.StringView()
-                                << ". on core: " << shard_->core_id_
-                                << ". start_key: " << start_key->ToString();
                             req.slice_barrier_.MarkSliceStatus(
                                 SliceBarrierStatus::Error);
                         }
@@ -5553,14 +5512,6 @@ public:
                     req.slice_barrier_.PinnedSlice() = new_slice_id;
                     req.slice_barrier_.MarkSliceStatus(
                         SliceBarrierStatus::Pinned);
-                    DLOG(INFO) << "Slice barrier pinned for table: "
-                               << table_name_.StringView()
-                               << ". on core: " << shard_->core_id_
-                               << ". start_key: " << start_key->ToString()
-                               << ". request core cnt: " << req.core_cnt_
-                               << ". slice barrier core cnt: "
-                               << req.slice_barrier_.core_cnt_.load(
-                                      std::memory_order_relaxed);
                     slice_pinned = true;
                 }
 
@@ -5615,13 +5566,6 @@ public:
                             req.blocked_by_slice_op_[shard_->core_id_] = {
                                 true, SliceBarrierStatus::None};
                             shard_->Enqueue(shard_->LocalCoreId(), &req);
-                            DLOG(INFO)
-                                << "Blocked by unpin slice op for table: "
-                                << table_name_.StringView()
-                                << " on core: " << shard_->core_id_
-                                << ". pause_key: "
-                                << req.PausePos(shard_->core_id_)
-                                       .first.ToString();
                             return {Iterator(),
                                     Iterator(),
                                     nullptr,
@@ -5681,21 +5625,11 @@ public:
             // If this is a new scan cc, start from the specified start
             // key or negative inf.
             search_start_key = req_start_key;
-            DLOG(INFO)
-                << "New scan cc, begin from the specified start key for table: "
-                << table_name_.StringView() << ". on core: " << shard_->core_id_
-                << ". start_key: " << search_start_key->ToString();
         }
         else
         {
             // Begin from the last paused position.
             search_start_key = pause_key_and_is_drained.first.GetKey<KeyT>();
-            DLOG(INFO) << "Begin from the last paused position for table: "
-                       << table_name_.StringView()
-                       << ". on core: " << shard_->core_id_
-                       << ". start_key: " << search_start_key->ToString()
-                       << ". move_next_slice: " << std::boolalpha
-                       << move_next_slice;
         }
 
         bool slice_pinned = false;
@@ -5824,11 +5758,6 @@ public:
                 {
                     if (req.slice_barrier_.TryFinish(req.core_cnt_))
                     {
-                        DLOG(INFO) << "Unpin slice barrier for table: "
-                                   << table_name_.StringView()
-                                   << " on core: " << shard_->core_id_
-                                   << ", is last slice: " << std::boolalpha
-                                   << is_last_slice;
                         // The last core
                         req.slice_barrier_.PinnedSlice().Unpin();
                         req.slice_barrier_.PinnedSlice().Reset();
@@ -5845,13 +5774,6 @@ public:
                         pause_key_and_is_drained = {
                             std::move(slice_end_key->CloneTxKey()),
                             is_last_slice};
-                        DLOG(INFO) << "Blocked by unpin slice op for table: "
-                                   << table_name_.StringView()
-                                   << " on core: " << shard_->core_id_
-                                   << ". pause_key: "
-                                   << pause_key_and_is_drained.first.ToString()
-                                   << ". is_last_slice: " << std::boolalpha
-                                   << is_last_slice;
                         req.blocked_by_slice_op_[shard_->core_id_] = {
                             true, SliceBarrierStatus::None};
                         shard_->Enqueue(shard_->LocalCoreId(), &req);
@@ -5907,9 +5829,6 @@ public:
             {
                 if (req.slice_barrier_.TryFinish(req.core_cnt_))
                 {
-                    DLOG(INFO) << "Unpin slice barrier for table: "
-                               << table_name_.StringView()
-                               << " on core: " << shard_->core_id_;
                     // The last core
                     req.slice_barrier_.PinnedSlice().Unpin();
                     req.slice_barrier_.PinnedSlice().Reset();
@@ -5917,13 +5836,6 @@ public:
                         SliceBarrierStatus::Terminated);
                 }
                 // else, just forward to set finish.
-                else
-                {
-                    DLOG(INFO) << "Request not finished, and not last core to "
-                                  "unpin slice for table: "
-                               << table_name_.StringView()
-                               << ". on core: " << shard_->core_id_;
-                }
             }
             else if (succ && req.slice_barrier_.HasWaitingCores(true))
             {
