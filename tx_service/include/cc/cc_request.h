@@ -3713,6 +3713,7 @@ struct HashPartitionDataSyncScanCc : public CcRequestBase
 public:
     // how many pages to scan one time
     static constexpr size_t DataSyncScanBatchSize = 32;
+    static constexpr size_t MaxScanDataSize = 100 * 1024; // 100KB
     enum struct OpType : uint8_t
     {
         // For normal scan

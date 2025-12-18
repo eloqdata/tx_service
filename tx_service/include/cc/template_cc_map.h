@@ -5831,12 +5831,14 @@ public:
         // indicate if export cce failed due to oom
         bool is_scan_mem_full = false;
         bool replay_cmds_notnull = false;
+        size_t scan_data_size = 0;
 
         size_t export_data_cnt = 0;
         auto l_start = std::chrono::high_resolution_clock::now();
 
         for (size_t scan_cnt = 0;
              scan_cnt < HashPartitionDataSyncScanCc::DataSyncScanBatchSize &&
+             scan_data_size < HashPartitionDataSyncScanCc::MaxScanDataSize &&
              req.accumulated_scan_cnt_ < req.scan_batch_size_ && it != end_it &&
              it != end_it_next_page_it;
              scan_cnt++)
@@ -5901,7 +5903,7 @@ public:
                                       false,
                                       flush_data_size);
                     req.accumulated_flush_data_size_ += flush_data_size;
-
+                    scan_data_size += flush_data_size;
                     if (export_result.second)
                     {
                         is_scan_mem_full = true;
@@ -5997,7 +5999,7 @@ public:
                             is_scan_mem_full = true;
                             break;
                         }
-
+                        scan_data_size += flush_data_size;
                         export_data_cnt++;
                     }
                 }
