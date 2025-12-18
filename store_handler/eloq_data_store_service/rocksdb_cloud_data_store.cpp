@@ -235,13 +235,13 @@ rocksdb::S3ClientFactory RocksDBCloudDataStore::BuildS3ClientFactory(
         if (secured_url)
         {
             config.scheme = Aws::Http::Scheme::HTTPS;
+            // Disable SSL verification for test env if necessary
+            // config.verifySSL = false;
         }
         else
         {
             config.scheme = Aws::Http::Scheme::HTTP;
         }
-        // Disable SSL verification for HTTPS
-        config.verifySSL = false;
 
         // Create and return the S3 client
         if (credentialsProvider)
@@ -293,12 +293,55 @@ bool RocksDBCloudDataStore::StartDB()
     }
 #endif
 
-    cfs_options_.src_bucket.SetBucketName(cloud_config_.bucket_name_,
-                                          cloud_config_.bucket_prefix_);
+    // Determine effective bucket configuration
+    // S3 URL takes precedence over legacy configuration
+    std::string effective_bucket_name = cloud_config_.bucket_name_;
+    std::string effective_bucket_prefix = cloud_config_.bucket_prefix_;
+    std::string effective_object_path = cloud_config_.object_path_;
+    std::string effective_endpoint_url = cloud_config_.s3_endpoint_url_;
+
+    if (!cloud_config_.oss_url_.empty())
+    {
+        // Parse OSS URL and use it (overrides legacy config)
+        S3UrlComponents url_components = ParseS3Url(cloud_config_.oss_url_);
+        if (!url_components.is_valid)
+        {
+            LOG(FATAL) << "Invalid rocksdb_cloud_object_store_service_url: "
+                       << url_components.error_message
+                       << ". URL format: s3://{bucket}/{path}, "
+                          "gs://{bucket}/{path}, or "
+                          "http(s)://{host}:{port}/{bucket}/{path}. "
+                       << "Examples: s3://my-bucket/my-path, "
+                       << "gs://my-bucket/my-path, "
+                       << "http://localhost:9000/my-bucket/my-path";
+        }
+
+        effective_bucket_name = url_components.bucket_name;
+        effective_bucket_prefix = "";  // No prefix in URL-based config
+        effective_object_path = url_components.object_path;
+        effective_endpoint_url = url_components.endpoint_url;
+
+        LOG(INFO) << "Using OSS URL configuration (overrides legacy config if "
+                     "present): "
+                  << " (bucket: " << effective_bucket_name
+                  << ", object_path: " << effective_object_path
+                  << ", endpoint: "
+                  << (effective_endpoint_url.empty() ? "default"
+                                                     : effective_endpoint_url)
+                  << ")";
+    }
+
+    cloud_config_.bucket_name_ = effective_bucket_name;
+    cloud_config_.bucket_prefix_ = effective_bucket_prefix;
+    cloud_config_.object_path_ = effective_object_path;
+    cloud_config_.s3_endpoint_url_ = effective_endpoint_url;
+
+    cfs_options_.src_bucket.SetBucketName(cloud_config_.bucket_name_);
+    cfs_options_.src_bucket.SetBucketPrefix(cloud_config_.bucket_prefix_);
     cfs_options_.src_bucket.SetRegion(cloud_config_.region_);
     cfs_options_.src_bucket.SetObjectPath(cloud_config_.object_path_);
-    cfs_options_.dest_bucket.SetBucketName(cloud_config_.bucket_name_,
-                                           cloud_config_.bucket_prefix_);
+    cfs_options_.dest_bucket.SetBucketName(cloud_config_.bucket_name_);
+    cfs_options_.dest_bucket.SetBucketPrefix(cloud_config_.bucket_prefix_);
     cfs_options_.dest_bucket.SetRegion(cloud_config_.region_);
     cfs_options_.dest_bucket.SetObjectPath(cloud_config_.object_path_);
     // Add sst_file_cache for accerlating random access on sst files
@@ -336,10 +379,10 @@ bool RocksDBCloudDataStore::StartDB()
                << ", run_purger: " << cfs_options_.run_purger;
 
 #ifdef DATA_STORE_TYPE_ELOQDSS_ROCKSDB_CLOUD_S3
-    if (!cloud_config_.s3_endpoint_url_.empty())
+    if (!effective_endpoint_url.empty())
     {
         cfs_options_.s3_client_factory =
-            BuildS3ClientFactory(cloud_config_.s3_endpoint_url_);
+            BuildS3ClientFactory(effective_endpoint_url);
         // Intermittent and unpredictable IOError happend from time to
         // time when using aws transfer manager with minio. Disable aws
         // transfer manager if endpoint is set (minio).

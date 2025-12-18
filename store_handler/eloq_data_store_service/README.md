@@ -131,7 +131,7 @@ To start the DataStore Service:
    ./dss_server --config=/path/to/s3_config.ini
    ```
    
-   Where s3_config.ini contains:
+   Where s3_config.ini contains (legacy format):
    ```ini
    [store]
    rocksdb_cloud_bucket_name = my-eloqdata-bucket
@@ -140,6 +140,34 @@ To start the DataStore Service:
    rocksdb_cloud_sst_file_cache_size = 40GB
    aws_access_key_id = YOUR_ACCESS_KEY
    aws_secret_key = YOUR_SECRET_KEY
+   ```
+
+   **New URL-based configuration (Recommended):**
+   ```ini
+   [store]
+   rocksdb_cloud_object_store_service_url = s3://my-eloqdata-bucket/rocksdb_cloud
+   rocksdb_cloud_region = us-west-2
+   rocksdb_cloud_sst_file_cache_size = 40GB
+   aws_access_key_id = YOUR_ACCESS_KEY
+   aws_secret_key = YOUR_SECRET_KEY
+   ```
+
+   **For Google Cloud Storage:**
+   ```ini
+   [store]
+   rocksdb_cloud_object_store_service_url = gs://my-eloqdata-bucket/rocksdb_cloud
+   rocksdb_cloud_region = us-west-2
+   rocksdb_cloud_sst_file_cache_size = 40GB
+   ```
+
+   **For MinIO or S3-compatible storage:**
+   ```ini
+   [store]
+   rocksdb_cloud_object_store_service_url = http://localhost:9000/my-bucket/rocksdb_data
+   rocksdb_cloud_region = us-east-1
+   rocksdb_cloud_sst_file_cache_size = 40GB
+   aws_access_key_id = minioadmin
+   aws_secret_key = minioadmin
    ```
 
 8. **Run with logging to stderr**:
@@ -175,6 +203,109 @@ For a production deployment with multiple nodes, you would typically:
    ```bash
    ./dss_server --eloq_dss_peer_node=192.168.1.100:9100 --ip=192.168.1.101 --port=9100 --data_path=/data/eloqdata/node2 --config=/etc/eloqdata/dss_prod.ini
    ```
+
+## RocksDB Cloud Configuration Migration Guide
+
+### Overview
+
+Starting from this version, we've introduced a simplified URL-based configuration for RocksDB Cloud (S3/GCS) to reduce configuration complexity. The new `rocksdb_cloud_object_store_service_url` option consolidates multiple configuration parameters into a single URL.
+
+### Why Migrate?
+
+The legacy configuration required multiple separate parameters:
+- `rocksdb_cloud_bucket_name`
+- `rocksdb_cloud_bucket_prefix`
+- `rocksdb_cloud_object_path`
+- `rocksdb_cloud_s3_endpoint_url`
+
+The new URL-based configuration simplifies this to a single parameter that's easier to understand and manage.
+
+### Migration Examples
+
+#### Example 1: Standard AWS S3 Configuration
+
+**Legacy Configuration:**
+```ini
+[store]
+rocksdb_cloud_bucket_name = my-production-bucket
+rocksdb_cloud_bucket_prefix = eloqkv-
+rocksdb_cloud_object_path = rocksdb_data
+```
+
+**New URL-based Configuration:**
+```ini
+[store]
+rocksdb_cloud_object_store_service_url = s3://my-production-bucket/rocksdb_data
+```
+
+**Note:** The `bucket_prefix` is not supported in URL-based configuration. If you were using `eloqkv-my-production-bucket`, you should include the prefix in the bucket name: `s3://eloqkv-my-production-bucket/rocksdb_data`
+
+#### Example 2: MinIO or S3-compatible Storage
+
+**Legacy Configuration:**
+```ini
+[store]
+rocksdb_cloud_bucket_name = test-bucket
+rocksdb_cloud_object_path = eloqdata
+rocksdb_cloud_s3_endpoint_url = http://localhost:9000
+```
+
+**New URL-based Configuration:**
+```ini
+[store]
+rocksdb_cloud_object_store_service_url = http://localhost:9000/test-bucket/eloqdata
+```
+
+#### Example 3: HTTPS S3-compatible Storage
+
+**Legacy Configuration:**
+```ini
+[store]
+rocksdb_cloud_bucket_name = my-bucket
+rocksdb_cloud_object_path = data/rocksdb
+rocksdb_cloud_s3_endpoint_url = https://s3.custom-provider.com
+```
+
+**New URL-based Configuration:**
+```ini
+[store]
+rocksdb_cloud_object_store_service_url = https://s3.custom-provider.com/my-bucket/data/rocksdb
+```
+
+### TxLog (Log Service) Configuration
+
+The same migration applies to transaction log service configuration, with `txlog_` prefix:
+
+**Legacy:**
+```ini
+[local]
+txlog_rocksdb_cloud_bucket_name = txlog-bucket
+txlog_rocksdb_cloud_bucket_prefix = txlog-
+txlog_rocksdb_cloud_object_path = logs
+txlog_rocksdb_cloud_endpoint_url = 
+```
+
+**New:**
+```ini
+[local]
+txlog_rocksdb_cloud_object_store_service_url = s3://txlog-bucket/logs
+```
+
+### Important Notes
+
+1. **Precedence:** If both the new URL-based configuration and legacy configuration are provided, the URL-based configuration takes precedence and overrides the legacy settings.
+
+2. **Bucket Prefix Deprecation:** The `bucket_prefix` parameter is not supported in URL-based configuration. If you need a prefix, include it in the bucket name within the URL.
+
+3. **Backward Compatibility:** The legacy configuration options are still supported and will continue to work. However, we recommend migrating to the URL-based configuration for better maintainability.
+
+4. **Protocol Support:** The following protocols are supported:
+   - `s3://` - AWS S3 (default endpoint)
+   - `gs://` - Google Cloud Storage
+   - `http://` - Custom S3-compatible endpoint (HTTP)
+   - `https://` - Custom S3-compatible endpoint (HTTPS)
+
+5. **Validation:** Invalid URLs will cause the application to fail at startup with a descriptive error message.
 
 ## Storage Backend Configuration
 

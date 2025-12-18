@@ -170,7 +170,7 @@ private:
     bool OpenCloudDB(const rocksdb::CloudFileSystemOptions &cfs_options);
 
 private:
-    const EloqDS::RocksDBCloudConfig cloud_config_;
+    EloqDS::RocksDBCloudConfig cloud_config_;
     rocksdb::CloudFileSystemOptions cfs_options_;
     std::shared_ptr<rocksdb::FileSystem> cloud_fs_{nullptr};
     std::unique_ptr<rocksdb::Env> cloud_env_{nullptr};

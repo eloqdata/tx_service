@@ -269,7 +269,7 @@ int main(int argc, char *argv[])
 
 #if defined(DATA_STORE_TYPE_ELOQDSS_ROCKSDB_CLOUD_S3)
     aws_options_ = std::make_unique<Aws::SDKOptions>();
-
+    aws_options_->httpOptions.installSigPipeHandler = true;
     aws_options_->loggingOptions.logLevel = Aws::Utils::Logging::LogLevel::Info;
     Aws::InitAPI(*aws_options_);
 #endif
