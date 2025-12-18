@@ -822,8 +822,8 @@ bool DataSubstrate::LoadCoreAndNetworkConfig(const INIReader &config_reader)
     aws_options_.loggingOptions.logLevel = Aws::Utils::Logging::LogLevel::Info;
     if (!FLAGS_log_dir.empty())
     {
-        static std::string logprefix = (FLAGS_log_dir / "aws_sdk_").string();
-        aws_options.loggingOptions.defaultLogPrefix = logprefix.c_str();
+        static std::string logprefix = FLAGS_log_dir + std::string("/aws_sdk_");
+        aws_options_.loggingOptions.defaultLogPrefix = logprefix.c_str();
     }
     Aws::InitAPI(aws_options_);
 #endif
