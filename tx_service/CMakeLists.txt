@@ -21,6 +21,13 @@ if(NOT CMAKE_BUILD_TYPE)
     set(CMAKE_BUILD_TYPE Debug CACHE STRING "Build type" FORCE)
 endif()
 
+option(INI_USE_HEAP "Whether parse ini on heap" ON)
+
+if (INI_USE_HEAP)
+    add_definitions(-DINI_USE_STACK=0)
+    add_definitions(-DINI_ALLOW_REALLOC=1)
+endif()
+
 set(WITH_LOG_STATE "ROCKSDB" CACHE STRING "The log state implementation")
 set_property(CACHE WITH_LOG_STATE PROPERTY STRINGS "MEMORY" "ROCKSDB" "ROCKSDB_CLOUD_S3" "ROCKSDB_CLOUD_GCS")
 message(NOTICE "WITH_LOG_STATE: ${WITH_LOG_STATE}")
