@@ -7812,15 +7812,17 @@ public:
                 // If wal log is disabled, we need to flush all in memory cache
                 // to overwrite potential newer version in kv.
                 RecordStatus status = cce->PayloadStatus();
-                cce->SetCommitTsPayloadStatus(now_ts, status);
-                if (!VersionedRecord && cce->HasBufferedCommandList())
+                // Invariant:
+                // 1) Normal / Deleted => no buffered commands
+                // 2) HasBufferedCommandList() => status == Unknown
+                if (status == RecordStatus::Normal ||
+                    status == RecordStatus::Deleted)
                 {
-                    BufferedTxnCmdList &buffered_cmds =
-                        cce->BufferedCommandList();
-                    int64_t buffered_cmd_cnt_old = buffered_cmds.Size();
-                    buffered_cmds.Clear();
-                    shard_->UpdateBufferedCommandCnt(0 - buffered_cmd_cnt_old);
+                    cce->SetCommitTsPayloadStatus(now_ts, status);
+                    assert(!cce->HasBufferedCommandList());
                 }
+                assert(!cce->HasBufferedCommandList() ||
+                       status == RecordStatus::Unknown);
             }
             else
             {
