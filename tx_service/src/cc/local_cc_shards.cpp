@@ -5239,6 +5239,12 @@ void LocalCcShards::UpdateSlices(const TableName &table_name,
                 store_range->UpdateSliceSpec(status.paused_slice_,
                                              status.paused_split_keys_);
             }
+            else if (status.paused_split_keys_.size() == 1)
+            {
+                // Fix the post ckpt size of this slice
+                status.paused_slice_->SetPostCkptSize(
+                    status.paused_split_keys_[0].post_update_size_);
+            }
             status.Reset();
         }
         else if (status.paused_slice_)
@@ -5288,7 +5294,6 @@ void LocalCcShards::UpdateSlices(const TableName &table_name,
             std::move(status.paused_split_keys_);
         if (status.paused_slice_)
         {
-            assert(!slice_split_keys.empty());
             uint32_t paused_subslice_post_ckpt_size =
                 slice_split_keys.back().post_update_size_;
             subslice_post_ckpt_size =
@@ -5390,6 +5395,15 @@ void LocalCcShards::UpdateSlices(const TableName &table_name,
                 // updated after checkpoint.
                 store_range->UpdateSliceSpec(curr_slice, slice_split_keys);
             }
+            else if (slice_split_keys.size() == 1)
+            {
+                // Fix the post ckpt size for this slice
+                // If some keys in this slice are deleted between the scan delta
+                // size and scan keys, it may actually cause the slice to not
+                // need to be split.
+                curr_slice->SetPostCkptSize(
+                    slice_split_keys[0].post_update_size_);
+            }
 
             if (status.paused_slice_)
             {
@@ -5399,6 +5413,8 @@ void LocalCcShards::UpdateSlices(const TableName &table_name,
         else
         {
             assert(flush_record_it == data_sync_vec.end());
+            // The slice_split_keys may be empty if the first few keys of this
+            // slice are DELETED.
             status.SetPausedPos(
                 curr_slice, record_cnt, std::move(slice_split_keys));
         }
