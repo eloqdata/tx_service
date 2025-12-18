@@ -126,6 +126,8 @@ LocalCcShards::LocalCcShards(
 
 #if defined(WITH_JEMALLOC)
       epoch_worker_ctx_(1),
+#else
+      epoch_worker_ctx_(0),
 #endif
 
       cur_flush_buffer_(
