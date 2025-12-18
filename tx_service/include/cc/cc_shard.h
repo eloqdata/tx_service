@@ -23,8 +23,10 @@
 
 #include <bthread/moodycamelqueue.h>
 #include <butil/time.h>
-#include <jemalloc/jemalloc.h>
 #include <mimalloc-2.1/mimalloc.h>
+#if defined(WITH_JEMALLOC)
+#include <jemalloc/jemalloc.h>
+#endif
 
 #include <algorithm>
 #include <atomic>
