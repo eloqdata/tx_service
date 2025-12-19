@@ -392,6 +392,14 @@ public:
         ccs->Enqueue(req);
     }
 
+    void EnqueueLowPriorityCcRequestToShard(uint16_t cc_shard_idx,
+                                            CcRequestBase *req)
+    {
+        assert(cc_shard_idx < cc_shards_.size());
+        auto &ccs = cc_shards_[cc_shard_idx];
+        ccs->EnqueueLowPriorityCcRequest(req);
+    }
+
     static uint64_t ClockTs();
     static uint64_t ClockTsInMillseconds();
     uint64_t TsBase();

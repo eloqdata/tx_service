@@ -82,6 +82,7 @@ CcShard::CcShard(
       failover_ccms_(),
       cc_queue_(256),
       req_buf_(),
+      low_priority_cc_queue_(256),
       tx_vec_(),
       next_tx_idx_(0),
       next_tx_ident_(0),
@@ -126,6 +127,13 @@ CcShard::CcShard(
     for (size_t idx = 0; idx < core_cnt_; ++idx)
     {
         thd_token_.emplace_back(moodycamel::ProducerToken(cc_queue_));
+    }
+
+    low_priority_thd_token_.reserve((size_t) core_cnt_ + 1);
+    for (size_t idx = 0; idx < core_cnt_; ++idx)
+    {
+        low_priority_thd_token_.emplace_back(
+            moodycamel::ProducerToken(low_priority_cc_queue_));
     }
 
     // cluster config map is only created on core 0.
@@ -461,8 +469,61 @@ void CcShard::Enqueue(CcRequestBase *req)
     NotifyTxProcessor();
 }
 
+void CcShard::EnqueueLowPriorityCcRequest(uint32_t thd_id, CcRequestBase *req)
+{
+    // The memory order in enqueue() of the concurrent queue ensures that the
+    // queue size update is visible first.
+    low_priority_cc_queue_size_.fetch_add(1, std::memory_order_relaxed);
+
+    assert(thd_id < low_priority_thd_token_.size());
+    bool ret =
+        low_priority_cc_queue_.enqueue(low_priority_thd_token_.at(thd_id), req);
+    assert(ret == true);
+    (void) ret;
+
+    // Wakes up the tx processor dedicated to this shard when it is asleep.
+    NotifyTxProcessor();
+}
+
+void CcShard::EnqueueLowPriorityCcRequest(CcRequestBase *req)
+{
+    low_priority_cc_queue_size_.fetch_add(1, std::memory_order_relaxed);
+
+    bool ret = low_priority_cc_queue_.enqueue(req);
+    assert(ret == true);
+    (void) ret;
+
+    // Wakes up the tx processor dedicated to this shard when it is asleep.
+    NotifyTxProcessor();
+}
+
 size_t CcShard::ProcessRequests()
 {
+    size_t total = 0;
+    // Process low priority queue: dequeue exactly 1 request
+    uint32_t low_priority_queue_size =
+        low_priority_cc_queue_size_.load(std::memory_order_relaxed);
+    CcRequestBase *low_priority_req = nullptr;
+
+    if (low_priority_queue_size > 0)
+    {
+        low_priority_cc_queue_.try_dequeue(low_priority_req);
+
+        if (low_priority_req != nullptr)
+        {
+            assert(low_priority_cc_queue_size_.load(
+                       std::memory_order_relaxed) >= 1);
+            low_priority_cc_queue_size_.fetch_sub(1, std::memory_order_acq_rel);
+
+            bool finish = low_priority_req->Execute(*this);
+            if (finish)
+            {
+                low_priority_req->Free();
+            }
+            total++;
+        }
+    }
+
     uint32_t queue_size = cc_queue_size_.load(std::memory_order_relaxed);
 
     if (metrics::enable_memory_usage)
@@ -489,10 +550,9 @@ size_t CcShard::ProcessRequests()
 
     if (queue_size == 0)
     {
-        return 0;
+        return total;
     }
 
-    size_t total = 0;
     size_t req_cnt = 0;
     do
     {

@@ -343,19 +343,9 @@ public:
             }
         }
 
-        if (is_busy_round_ && metrics::enable_busy_round_metrics)
-        {
-            auto meter = GetMeter();
-            meter->CollectDuration(metrics::NAME_BUSY_ROUND_DURATION,
-                                   busy_round_start_);
-            meter->Collect(metrics::NAME_BUSY_ROUND_ACTIVE_TX_COUNT,
-                           busy_round_active_tx_count_);
-            meter->Collect(metrics::NAME_BUSY_ROUND_PROCESSED_CC_REQUEST_COUNT,
-                           busy_round_processed_cc_req_count_);
-            is_busy_round_ = false;
-        }
-
         size_t loop_cnt = 3;
+        bool is_busy_round = false;
+        metrics::TimePoint busy_round_start;
 #ifdef EXT_TX_PROC_ENABLED
         if (is_ext_proc)
         {
@@ -402,8 +392,8 @@ public:
                 local_cc_shards_.QueueSize(thd_id_) >=
                     metrics::busy_round_threshold)
             {
-                is_busy_round_ = true;
-                busy_round_start_ = metrics::Clock::now();
+                is_busy_round = true;
+                busy_round_start = metrics::Clock::now();
             }
 
             // Process CcRequests.
@@ -438,10 +428,16 @@ public:
                 total_round_count_ = 0;
             }
 
-            if (is_busy_round_)
+            if (is_busy_round)
             {
-                busy_round_active_tx_count_ = active_cnt;
-                busy_round_processed_cc_req_count_ = req_cnt;
+                auto meter = GetMeter();
+                meter->CollectDuration(metrics::NAME_BUSY_ROUND_DURATION,
+                                       busy_round_start);
+                meter->Collect(metrics::NAME_BUSY_ROUND_ACTIVE_TX_COUNT,
+                               active_cnt);
+                meter->Collect(
+                    metrics::NAME_BUSY_ROUND_PROCESSED_CC_REQUEST_COUNT,
+                    req_cnt);
             }
         }
     }
@@ -1011,8 +1007,6 @@ private:
     std::array<TransactionExecution *, 100> txm_buffer_;
     std::array<TransactionExecution::uptr, 100> utxm_buffer_;
 
-    metrics::TimePoint busy_round_start_;
-    bool is_busy_round_{false};
     size_t busy_round_processed_cc_req_count_{0};
     size_t busy_round_active_tx_count_{0};
     size_t empty_round_count_{0};

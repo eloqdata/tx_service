@@ -350,6 +350,23 @@ public:
      */
     void Enqueue(CcRequestBase *req);
 
+    /**
+     * @brief Puts a cc request into the shard's low priority request queue to
+     * be processed. This API is specifically for background job requests.
+     *
+     * @param thd_id The thread ID of the producer sending the cc request.
+     * @param req The pointer to the cc request.
+     */
+    void EnqueueLowPriorityCcRequest(uint32_t thd_id, CcRequestBase *req);
+
+    /**
+     * @brief Puts a cc request into the shard's low priority request queue to
+     * be processed. This API is specifically for background job requests.
+     *
+     * @param req The pointer to the cc request.
+     */
+    void EnqueueLowPriorityCcRequest(CcRequestBase *req);
+
     void AbortCcRequests(std::vector<CcRequestBase *> &&reqs,
                          CcErrorCode err_code);
 
@@ -1138,6 +1155,10 @@ private:
     std::atomic<uint32_t> cc_queue_size_{0};
     std::array<CcRequestBase *, 64> req_buf_;
     std::vector<moodycamel::ProducerToken> thd_token_;
+    // Low priority queue for background job requests
+    moodycamel::ConcurrentQueue<CcRequestBase *> low_priority_cc_queue_;
+    std::atomic<uint32_t> low_priority_cc_queue_size_{0};
+    std::vector<moodycamel::ProducerToken> low_priority_thd_token_;
     // Cc requests waiting for the free memory.
     std::list<CcRequestBase *> cc_wait_list_for_memory_;
 

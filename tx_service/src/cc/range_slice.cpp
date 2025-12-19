@@ -451,8 +451,8 @@ bool StoreRange::SampleSubRangeKeys(StoreSlice *slice,
 
     // Send the request to one shard randomly.
     uint64_t core_rand = butil::fast_rand();
-    local_cc_shards_.EnqueueToCcShard(core_rand % local_cc_shards_.Count(),
-                                      &sample_keys_cc);
+    local_cc_shards_.EnqueueLowPriorityCcRequestToShard(
+        core_rand % local_cc_shards_.Count(), &sample_keys_cc);
     DLOG(INFO) << "Send the sample range keys request to shard#"
                << core_rand % local_cc_shards_.Count();
 
