@@ -4738,6 +4738,8 @@ public:
                         // is marked as errored.
                         if (init_res.error != CcErrorCode::NO_ERROR)
                         {
+                            LOG(ERROR) << "InitCcm err in ReplayLogCc: "
+                                       << CcErrorMessage(init_res.error);
                             SetFinish();
                             return true;
                         }

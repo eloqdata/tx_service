@@ -772,10 +772,12 @@ TxLockInfo *CcShard::UpsertLockHoldingTx(TxNumber txn,
     tx_it->second->last_recover_ts_ = Now();
     tx_it->second->table_type_ = table_type;
 
-    if (is_key_write_lock)
+    if (is_key_write_lock && tx_it->second->wlock_ts_ == 0)
     {
         // write lock should update ts if the txn exists, or the CkptTsCc
         // request may get an older ckpt_ts.
+        // For txn that acquires write lock more than once, do not update
+        // wlock_ts_ with bigger Now().
         tx_it->second->wlock_ts_ = Now();
     }
     return tx_it->second.get();
