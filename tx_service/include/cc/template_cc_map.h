@@ -5465,7 +5465,7 @@ public:
                     // Try to become the pinning core (The last core will be)
                     if (req.slice_barrier_.Status() !=
                             SliceBarrierStatus::Pinning &&
-                        !req.slice_barrier_.TryStart(req.core_cnt_))
+                        !req.slice_barrier_.TryStart())
                     {
                         // Not the last core，blocked by slice operation.
                         req.PausePos(shard_->core_id_).first =
@@ -5546,7 +5546,7 @@ public:
                     // reset
                     if (slice_pinned)
                     {
-                        if (req.slice_barrier_.TryFinish(req.core_cnt_))
+                        if (req.slice_barrier_.TryFinish())
                         {
                             // The last core
                             req.slice_barrier_.PinnedSlice().Unpin();
@@ -5756,7 +5756,7 @@ public:
             {
                 if (slice_pinned)
                 {
-                    if (req.slice_barrier_.TryFinish(req.core_cnt_))
+                    if (req.slice_barrier_.TryFinish())
                     {
                         // The last core
                         req.slice_barrier_.PinnedSlice().Unpin();
@@ -5827,7 +5827,7 @@ public:
             bool succ = req.slice_barrier_.SetFinish();
             if (slice_pinned)
             {
-                if (req.slice_barrier_.TryFinish(req.core_cnt_))
+                if (req.slice_barrier_.TryFinish())
                 {
                     // The last core
                     req.slice_barrier_.PinnedSlice().Unpin();

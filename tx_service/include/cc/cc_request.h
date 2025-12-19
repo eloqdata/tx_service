@@ -4203,7 +4203,16 @@ public:
         err_ = CcErrorCode::NO_ERROR;
         op_type_ = op_type;
 
-        slice_barrier_.Reset(core_cnt_);
+        // Should fix the core count depending on the actual unfinished core.
+        size_t unfinished_core_cnt = 0;
+        for (auto &pause_pos : pause_pos_)
+        {
+            if (!pause_pos.second)
+            {
+                unfinished_core_cnt++;
+            }
+        }
+        slice_barrier_.Reset(unfinished_core_cnt);
         for (size_t i = 0; i < core_cnt_; i++)
         {
             blocked_by_slice_op_[i] = {false, SliceBarrier::SliceStatus::None};
@@ -4334,22 +4343,24 @@ private:
         };
 
         // Return true if this is the last core trying to pin slice.
-        bool TryStart(uint16_t core_cnt)
+        bool TryStart()
         {
             if (core_cnt_.fetch_sub(1, std::memory_order_relaxed) == 1)
             {
-                core_cnt_.store(core_cnt, std::memory_order_relaxed);
+                core_cnt_.store(unfinished_core_cnt_,
+                                std::memory_order_relaxed);
                 return true;
             }
             waiting_core_cnt_.first.fetch_add(1, std::memory_order_relaxed);
             return false;
         }
         // Return true if this is the last core trying to unpin.
-        bool TryFinish(uint16_t core_cnt)
+        bool TryFinish()
         {
             if (core_cnt_.fetch_sub(1, std::memory_order_relaxed) == 1)
             {
-                core_cnt_.store(core_cnt, std::memory_order_relaxed);
+                core_cnt_.store(unfinished_core_cnt_,
+                                std::memory_order_relaxed);
                 return true;
             }
             waiting_core_cnt_.second.fetch_add(1, std::memory_order_relaxed);
@@ -4413,6 +4424,7 @@ private:
             waiting_core_cnt_.first.store(0, std::memory_order_relaxed);
             waiting_core_cnt_.second.store(0, std::memory_order_relaxed);
             req_finished_.store(false, std::memory_order_relaxed);
+            unfinished_core_cnt_ = core_cnt;
         }
         bool SetFinish()
         {
@@ -4439,6 +4451,7 @@ private:
         // Set true when the request finished on a core, to avoid other cores
         // waitting the finished core updating the slice barrier.
         std::atomic<bool> req_finished_{false};
+        uint16_t unfinished_core_cnt_{0};
     };
 
     const TableName *table_name_{nullptr};
