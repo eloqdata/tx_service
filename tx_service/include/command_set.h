@@ -94,7 +94,8 @@ public:
         CmdSetEntry &entry = cce_it->second;
         // Update the entry fields since a txn might have many commands that
         // operate on the same cce.
-        assert(cce_version >= entry.object_version_);
+        assert(entry.object_version_ == 0 ||
+               entry.object_version_ == cce_version);
         entry.object_version_ = cce_version;
         assert(lock_ts >= entry.lock_ts_);
         entry.lock_ts_ = lock_ts;
