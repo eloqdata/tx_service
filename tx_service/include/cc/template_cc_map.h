@@ -5163,7 +5163,6 @@ public:
         // alreay be overrided before cc_request execution
         // shard_->OverrideHeapThread();
         CcShardHeap *scan_heap = shard_->GetShardDataSyncScanHeap();
-        mi_heap_t *prev_heap = scan_heap->SetAsDefaultHeap();
         assert(shard_->GetShardHeapThreadId() == mi_thread_id());
 
         // If the heap is full, we should stop exporting.
@@ -5188,7 +5187,6 @@ public:
             export_size.second = false;
         }
 
-        mi_heap_set_default(prev_heap);
         return export_size;
     }
 
@@ -5869,6 +5867,8 @@ public:
         size_t last_accumulated_flush_data_size =
             req.accumulated_flush_data_size_;
 
+        CcShardHeap *scan_heap = shard_->GetShardDataSyncScanHeap();
+        mi_heap_t *prev_heap = scan_heap->SetAsDefaultHeap();
         for (size_t scan_cnt = 0;
              scan_cnt < HashPartitionDataSyncScanCc::DataSyncScanBatchSize &&
              scan_data_size < HashPartitionDataSyncScanCc::MaxScanDataSize &&
@@ -6057,6 +6057,7 @@ public:
             // Forward iterator
             it++;
         }
+        mi_heap_set_default(prev_heap);
 
         if (replay_cmds_notnull)
         {
