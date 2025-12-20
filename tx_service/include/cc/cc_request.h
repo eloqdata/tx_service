@@ -4087,7 +4087,9 @@ public:
             scan_heap_is_full_.emplace_back(0);
         }
 
-        slice_ids_.resize(core_cnt_);
+        slice_barrier_.Reset(core_cnt_);
+        blocked_by_slice_op_.resize(core_cnt_,
+                                    {false, SliceBarrier::SliceStatus::None});
     }
 
     bool ValidTermCheck()
@@ -4200,6 +4202,21 @@ public:
 
         err_ = CcErrorCode::NO_ERROR;
         op_type_ = op_type;
+
+        // Should fix the core count depending on the actual unfinished core.
+        size_t unfinished_core_cnt = 0;
+        for (auto &pause_pos : pause_pos_)
+        {
+            if (!pause_pos.second)
+            {
+                unfinished_core_cnt++;
+            }
+        }
+        slice_barrier_.Reset(unfinished_core_cnt);
+        for (size_t i = 0; i < core_cnt_; i++)
+        {
+            blocked_by_slice_op_[i] = {false, SliceBarrier::SliceStatus::None};
+        }
     }
 
     void SetError(CcErrorCode err)
@@ -4314,6 +4331,129 @@ public:
     size_t scan_count_{0};
 
 private:
+    struct SliceBarrier
+    {
+        enum class SliceStatus : uint8_t
+        {
+            None = 0,
+            Pinning,
+            Pinned,
+            Error,
+            Terminated
+        };
+
+        // Return true if this is the last core trying to pin slice.
+        bool TryStart()
+        {
+            if (core_cnt_.fetch_sub(1, std::memory_order_relaxed) == 1)
+            {
+                core_cnt_.store(unfinished_core_cnt_,
+                                std::memory_order_relaxed);
+                return true;
+            }
+            waiting_core_cnt_.first.fetch_add(1, std::memory_order_relaxed);
+            return false;
+        }
+        // Return true if this is the last core trying to unpin.
+        bool TryFinish()
+        {
+            if (core_cnt_.fetch_sub(1, std::memory_order_relaxed) == 1)
+            {
+                core_cnt_.store(unfinished_core_cnt_,
+                                std::memory_order_relaxed);
+                return true;
+            }
+            waiting_core_cnt_.second.fetch_add(1, std::memory_order_relaxed);
+            return false;
+        }
+        RangeSliceId &PinnedSlice()
+        {
+            return pinned_slice_;
+        }
+        // Set the slice status.
+        void MarkSliceStatus(SliceStatus status)
+        {
+            slice_status_.store(status, std::memory_order_release);
+        }
+        // Access the currently pinned slice id.
+        // Get the current slice status.
+        SliceStatus Status() const
+        {
+            return slice_status_.load(std::memory_order_acquire);
+        }
+        bool IsReady(SliceStatus expected_status) const
+        {
+            bool is_ready = false;
+            SliceStatus current_status = Status();
+            if (expected_status == SliceStatus::Pinned &&
+                current_status >= SliceStatus::Pinned)
+            {
+                is_ready = true;
+                waiting_core_cnt_.first.fetch_sub(1, std::memory_order_relaxed);
+            }
+            else if (expected_status == SliceStatus::None &&
+                     (current_status == SliceStatus::None ||
+                      current_status == SliceStatus::Terminated))
+            {
+                is_ready = true;
+                waiting_core_cnt_.second.fetch_sub(1,
+                                                   std::memory_order_relaxed);
+            }
+            return is_ready;
+        }
+        // Check if there are any waiting cores.
+        bool HasWaitingCores(bool waiting_for_pinned) const
+        {
+            if (waiting_for_pinned)
+            {
+                return waiting_core_cnt_.first.load(std::memory_order_relaxed) >
+                       0;
+            }
+            else
+            {
+                return waiting_core_cnt_.second.load(
+                           std::memory_order_relaxed) > 0;
+            }
+        }
+        // Reset the slice barrier.
+        void Reset(uint16_t core_cnt)
+        {
+            pinned_slice_ = RangeSliceId{};
+            core_cnt_.store(core_cnt, std::memory_order_relaxed);
+            slice_status_.store(SliceStatus::None, std::memory_order_relaxed);
+            waiting_core_cnt_.first.store(0, std::memory_order_relaxed);
+            waiting_core_cnt_.second.store(0, std::memory_order_relaxed);
+            req_finished_.store(false, std::memory_order_relaxed);
+            unfinished_core_cnt_ = core_cnt;
+        }
+        bool SetFinish()
+        {
+            bool expected = false;
+            return req_finished_.compare_exchange_strong(
+                expected, true, std::memory_order_acq_rel);
+        }
+        bool RequestFinished() const
+        {
+            return req_finished_.load(std::memory_order_relaxed);
+        }
+
+        // Current pinned slice id.
+        RangeSliceId pinned_slice_{};
+        // Number of cores that are try to pin/unpin the slice.
+        std::atomic<uint16_t> core_cnt_{0};
+        // Final slice status for current slice.
+        std::atomic<SliceStatus> slice_status_{SliceStatus::None};
+        // Number of cores that are waiting for the slice operation to be ready.
+        // The first element is for waiting pinned.
+        // The second element is for waiting unpin.
+        mutable std::pair<std::atomic<uint16_t>, std::atomic<uint16_t>>
+            waiting_core_cnt_{0, 0};
+        // Set true when the request finished on a core, to avoid other cores
+        // waitting the finished core updating the slice barrier.
+        std::atomic<bool> req_finished_{false};
+        uint16_t unfinished_core_cnt_{0};
+    };
+
     const TableName *table_name_{nullptr};
     uint32_t node_group_id_;
     int64_t node_group_term_;
@@ -4347,7 +4487,13 @@ private:
     // True means we need to export the data in memory and in kv to ckpt vec.
     // Note: This is only used in range partition.
     bool export_base_table_item_{false};
-    std::vector<RangeSliceId> slice_ids_;
+
+    // Concurrency barriers used to control slice operations.
+    SliceBarrier slice_barrier_;
+    // This indicates whether the request is blocked by a slice operation.
+    // The second element is the ready status.
+    std::vector<std::pair<bool, SliceBarrier::SliceStatus>>
+        blocked_by_slice_op_;
 
     // This is used for scan during add index txm.
     bool export_base_table_item_only_{false};
