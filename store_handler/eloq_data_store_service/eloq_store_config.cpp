@@ -89,7 +89,7 @@ DEFINE_uint32(eloq_store_max_write_batch_pages,
               "EloqStore max write batch pages.");
 DEFINE_uint32(eloq_store_buf_ring_size, 1 << 12, "EloqStore buf ring size.");
 DEFINE_uint32(eloq_store_coroutine_stack_size,
-              32 * 1024,
+              4096 * 1024,
               "EloqStore coroutine stack size.");
 DEFINE_uint32(eloq_store_num_retained_archives,
               0,
