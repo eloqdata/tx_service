@@ -136,34 +136,64 @@ struct TableKeySchemaTs
                      TableEngine table_engine)
     {
         table_engine_ = table_engine;
-        std::stringstream ts_ss(key_schemas_ts_str);
-        std::istream_iterator<std::string> ts_b(ts_ss);
-        std::istream_iterator<std::string> ts_e;
-        std::vector<std::string> schemas_ts(ts_b, ts_e);
-        pk_schema_ts_ = std::stoull(schemas_ts.at(0));
-        for (size_t idx = 1; idx < schemas_ts.size(); ++idx)
+        // This constructor is used with the old space-delimited format for
+        // backward compatibility Parse the serialized format:
+        // [pk_ts_len][pk_ts_string][index_data_len][index_data]
+        size_t offset = 0;
+        const char *buf = key_schemas_ts_str.data();
+
+        // Read pk schema ts
+        size_t pk_ts_len = *(size_t *) (buf + offset);
+        offset += sizeof(pk_ts_len);
+        std::string pk_ts_str(buf + offset, pk_ts_len);
+        offset += pk_ts_len;
+        pk_schema_ts_ = std::stoull(pk_ts_str);
+
+        // Read index data length
+        size_t index_data_len = *(size_t *) (buf + offset);
+        offset += sizeof(index_data_len);
+
+        if (index_data_len != 0)
         {
-            txservice::TableType table_type = txservice::TableType::Secondary;
-            if (schemas_ts[idx].find(txservice::UNIQUE_INDEX_NAME_PREFIX) !=
-                std::string::npos)
+            // Deserialize length-prefixed format: for each index:
+            // [table_name_len][table_name][ts_len][ts_string]
+            size_t current_offset = offset;
+            while (current_offset < offset + index_data_len)
             {
-                table_type = txservice::TableType::UniqueSecondary;
+                // Read table name length and value
+                size_t table_name_len = *(size_t *) (buf + current_offset);
+                current_offset += sizeof(table_name_len);
+                std::string table_name(buf + current_offset, table_name_len);
+                current_offset += table_name_len;
+
+                // Read ts string length and value
+                size_t ts_len = *(size_t *) (buf + current_offset);
+                current_offset += sizeof(ts_len);
+                std::string ts_str(buf + current_offset, ts_len);
+                current_offset += ts_len;
+
+                txservice::TableType table_type =
+                    txservice::TableType::Secondary;
+                if (table_name.find(txservice::UNIQUE_INDEX_NAME_PREFIX) !=
+                    std::string::npos)
+                {
+                    table_type = txservice::TableType::UniqueSecondary;
+                }
+                else if (table_name.find(txservice::INDEX_NAME_PREFIX) !=
+                         std::string::npos)
+                {
+                    table_type = txservice::TableType::Secondary;
+                }
+                else
+                {
+                    LOG(FATAL) << "Unknown secondary key type: " << table_name;
+                    assert(false && "Unknown secondary key type.");
+                }
+                txservice::TableName table_name_obj(
+                    table_name, table_type, table_engine_);
+                sk_schemas_ts_.try_emplace(std::move(table_name_obj),
+                                           std::stoull(ts_str));
             }
-            else if (schemas_ts[idx].find(txservice::INDEX_NAME_PREFIX) !=
-                     std::string::npos)
-            {
-                table_type = txservice::TableType::Secondary;
-            }
-            else
-            {
-                LOG(FATAL) << "Unknown secondary key type: " << schemas_ts[idx];
-                assert(false && "Unknown secondary key type.");
-            }
-            txservice::TableName table_name(
-                schemas_ts[idx], table_type, table_engine_);
-            ++idx;
-            sk_schemas_ts_.try_emplace(std::move(table_name),
-                                       std::stoull(schemas_ts[idx]));
         }
     }
 
@@ -178,22 +208,26 @@ struct TableKeySchemaTs
         output_str.append(len_ptr, len_sizeof);
         output_str.append(table_ts.data(), len_val);
 
+        // Use length-prefixed format: for each index:
+        // [table_name_len][table_name][ts_len][ts_string]
         std::string index_tables_ts;
         if (sk_schemas_ts_.size() != 0)
         {
             for (auto it = sk_schemas_ts_.cbegin(); it != sk_schemas_ts_.cend();
                  ++it)
             {
-                index_tables_ts.append(it->first.StringView())
-                    .append(" ")
-                    .append(std::to_string(it->second))
-                    .append(" ");
+                std::string table_name = it->first.String();
+                size_t table_name_len = table_name.length();
+                std::string ts_str = std::to_string(it->second);
+                size_t ts_len = ts_str.length();
+                index_tables_ts.append(
+                    reinterpret_cast<const char *>(&table_name_len),
+                    sizeof(table_name_len));
+                index_tables_ts.append(table_name);
+                index_tables_ts.append(reinterpret_cast<const char *>(&ts_len),
+                                       sizeof(ts_len));
+                index_tables_ts.append(ts_str);
             }
-            index_tables_ts.erase(index_tables_ts.size() - 1);
-        }
-        else
-        {
-            index_tables_ts.clear();
         }
 
         len_val = index_tables_ts.size();
@@ -222,33 +256,44 @@ struct TableKeySchemaTs
         offset += len_sizeof;
         if (len_val != 0)
         {
-            std::string index_tables_ts(buf + offset, len_val);
-            std::stringstream sk_ss(index_tables_ts);
-            std::istream_iterator<std::string> sk_b(sk_ss);
-            std::istream_iterator<std::string> sk_e;
-            std::vector<std::string> sk_iter(sk_b, sk_e);
-            for (auto it = sk_iter.begin(); it != sk_iter.end(); ++it)
+            // Deserialize length-prefixed format: for each index:
+            // [table_name_len][table_name][ts_len][ts_string]
+            size_t current_offset = offset;
+            while (current_offset < offset + len_val)
             {
+                // Read table name length and value
+                size_t table_name_len = *(size_t *) (buf + current_offset);
+                current_offset += sizeof(table_name_len);
+                std::string table_name(buf + current_offset, table_name_len);
+                current_offset += table_name_len;
+
+                // Read ts string length and value
+                size_t ts_len = *(size_t *) (buf + current_offset);
+                current_offset += sizeof(ts_len);
+                std::string ts_str(buf + current_offset, ts_len);
+                current_offset += ts_len;
+
                 txservice::TableType table_type =
                     txservice::TableType::Secondary;
-                if (it->find(txservice::UNIQUE_INDEX_NAME_PREFIX) !=
+                if (table_name.find(txservice::UNIQUE_INDEX_NAME_PREFIX) !=
                     std::string::npos)
                 {
                     table_type = txservice::TableType::UniqueSecondary;
                 }
-                else if (it->find(txservice::INDEX_NAME_PREFIX) !=
+                else if (table_name.find(txservice::INDEX_NAME_PREFIX) !=
                          std::string::npos)
                 {
                     table_type = txservice::TableType::Secondary;
                 }
                 else
                 {
-                    LOG(FATAL) << "Unknown secondary key type: " << *it;
+                    LOG(FATAL) << "Unknown secondary key type: " << table_name;
                     assert(false && "Unknown secondary key type.");
                 }
-                txservice::TableName table_name(*it, table_type, table_engine_);
-                sk_schemas_ts_.try_emplace(std::move(table_name),
-                                           std::stoull(*(++it)));
+                txservice::TableName table_name_obj(
+                    table_name, table_type, table_engine_);
+                sk_schemas_ts_.try_emplace(std::move(table_name_obj),
+                                           std::stoull(ts_str));
             }
         }
         else
