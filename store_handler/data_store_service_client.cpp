@@ -3655,6 +3655,7 @@ void DataStoreServiceClient::RestoreTxCache(txservice::NodeGroupId cc_ng_id,
  * @return Always returns true.
  */
 bool DataStoreServiceClient::OnLeaderStart(uint32_t ng_id,
+                                           int64_t term,
                                            uint32_t *next_leader_node)
 {
     if (!bind_data_shard_with_ng_)
@@ -3665,7 +3666,7 @@ bool DataStoreServiceClient::OnLeaderStart(uint32_t ng_id,
     if (data_store_service_ != nullptr)
     {
         // Binded data store shard with ng.
-        data_store_service_->OpenDataStore(ng_id);
+        data_store_service_->OpenDataStore(ng_id, term);
     }
 
     Connect();

@@ -302,7 +302,7 @@ bool CcNode::OnLeaderStart(int64_t term,
 
     if (!txservice_skip_kv)
     {
-        if (!local_cc_shards_.store_hd_->OnLeaderStart(ng_id_,
+        if (!local_cc_shards_.store_hd_->OnLeaderStart(ng_id_,term,
                                                        next_leader_node))
         {
             retry = false;

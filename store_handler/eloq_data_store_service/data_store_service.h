@@ -203,7 +203,7 @@ public:
         return data_store_factory_->DataStoreType();
     }
 
-    bool StartService(bool create_db_if_missing);
+    bool StartService(bool create_db_if_missing, int64_t term = 0);
 
     brpc::Server *GetBrpcServer()
     {
@@ -649,7 +649,7 @@ public:
     }
 
     void CloseDataStore(uint32_t shard_id);
-    void OpenDataStore(uint32_t shard_id);
+    void OpenDataStore(uint32_t shard_id, int64_t term = 0);
 
     DataStoreServiceClusterManager &GetClusterManager()
     {
@@ -671,7 +671,8 @@ private:
 
     bool ConnectAndStartDataStore(uint32_t data_shard_id,
                                   DSShardStatus open_mode,
-                                  bool create_db_if_missing = false);
+                                  bool create_db_if_missing = false,
+                                  int64_t term = 0);
 
     bool SwitchReadWriteToReadOnly(uint32_t shard_id);
     bool SwitchReadOnlyToClosed(uint32_t shard_id);
