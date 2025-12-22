@@ -168,9 +168,9 @@ public:
 
     bool Initialize() override;
 
-    bool StartDB() override
+    bool StartDB(int64_t term) override
     {
-        ::eloqstore::KvError res = eloq_store_service_->Start();
+        ::eloqstore::KvError res = eloq_store_service_->Start(term);
         if (res != ::eloqstore::KvError::NoError)
         {
             LOG(ERROR) << "EloqStore start failed with error code: "

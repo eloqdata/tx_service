@@ -3696,6 +3696,7 @@ void DataStoreServiceClient::RestoreTxCache(txservice::NodeGroupId cc_ng_id,
  * @return Always returns true.
  */
 bool DataStoreServiceClient::OnLeaderStart(uint32_t ng_id,
+                                           int64_t term,
                                            uint32_t *next_leader_node)
 {
     if (!bind_data_shard_with_ng_)
@@ -3716,7 +3717,7 @@ bool DataStoreServiceClient::OnLeaderStart(uint32_t ng_id,
         LOG_IF(FATAL, bucket_ids.empty())
             << "bucket_ids is empty, ng_id: " << ng_id;
         // Binded data store shard with ng.
-        data_store_service_->OpenDataStore(ng_id, std::move(bucket_ids));
+        data_store_service_->OpenDataStore(ng_id, std::move(bucket_ids), term);
     }
 
     Connect();

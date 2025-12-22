@@ -42,14 +42,15 @@ public:
         bool create_if_missing,
         uint32_t shard_id,
         DataStoreService *data_store_service,
-        bool start_db = true) override
+        bool start_db = true,
+        int64_t term = 0) override
     {
         auto ds =
             std::make_unique<EloqStoreDataStore>(shard_id, data_store_service);
         ds->Initialize();
         if (start_db)
         {
-            if (!ds->StartDB())
+            if (!ds->StartDB(term))
             {
                 return nullptr;
             }

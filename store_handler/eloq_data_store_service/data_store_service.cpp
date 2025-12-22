@@ -289,8 +289,10 @@ bool DataStoreService::StartService(bool create_db_if_missing)
                 if (ds_ref.shard_status_.compare_exchange_strong(
                         expect_status, DSShardStatus::Starting))
                 {
+                    // For bootstrap or single node deployment, we pass term 0
+                    // to start db.
                     ds_ref.data_store_ = data_store_factory_->CreateDataStore(
-                        create_db_if_missing, shard_id, this, true);
+                        create_db_if_missing, shard_id, this, true, 0);
                     if (ds_ref.data_store_ == nullptr)
                     {
                         LOG(ERROR) << "Failed to create data store on starting "
@@ -358,7 +360,8 @@ bool DataStoreService::StartService(bool create_db_if_missing)
 
 bool DataStoreService::ConnectAndStartDataStore(uint32_t data_shard_id,
                                                 DSShardStatus open_mode,
-                                                bool create_db_if_missing)
+                                                bool create_db_if_missing,
+                                                int64_t term)
 {
     if (open_mode == DSShardStatus::Closed)
     {
@@ -399,7 +402,7 @@ bool DataStoreService::ConnectAndStartDataStore(uint32_t data_shard_id,
     if (shard_ref.data_store_ == nullptr)
     {
         shard_ref.data_store_ = data_store_factory_->CreateDataStore(
-            create_db_if_missing, data_shard_id, this, true);
+            create_db_if_missing, data_shard_id, this, true, term);
         if (shard_ref.data_store_ == nullptr)
         {
             LOG(ERROR) << "Failed to create data store";
@@ -415,7 +418,7 @@ bool DataStoreService::ConnectAndStartDataStore(uint32_t data_shard_id,
             return false;
         }
 
-        res = shard_ref.data_store_->StartDB();
+        res = shard_ref.data_store_->StartDB(term);
         if (!res)
         {
             LOG(ERROR) << "Failed to start db instance in data store service";
@@ -2199,7 +2202,8 @@ void DataStoreService::CloseDataStore(uint32_t shard_id)
 }
 
 void DataStoreService::OpenDataStore(uint32_t shard_id,
-                                     std::unordered_set<uint16_t> &&bucket_ids)
+                                     std::unordered_set<uint16_t> &&bucket_ids,
+                                     int64_t term)
 {
     if (data_store_factory_ != nullptr)
     {
@@ -2219,8 +2223,8 @@ void DataStoreService::OpenDataStore(uint32_t shard_id,
     }
     DSShardStatus open_mode = DSShardStatus::ReadWrite;
     bool create_db_if_missing = false;
-    auto res =
-        ConnectAndStartDataStore(shard_id, open_mode, create_db_if_missing);
+    auto res = ConnectAndStartDataStore(
+        shard_id, open_mode, create_db_if_missing, term);
     auto end_time = std::chrono::steady_clock::now();
     auto use_time = std::chrono::duration_cast<std::chrono::milliseconds>(
                         end_time - start_time)

@@ -46,7 +46,8 @@ public:
         bool create_if_missing,
         uint32_t shard_id,
         DataStoreService *data_store_service,
-        bool start_db = true) override
+        bool start_db = true,
+        int64_t term = 0) override
     {
         auto ds =
             std::make_unique<RocksDBDataStore>(config_,
@@ -59,7 +60,7 @@ public:
 
         if (start_db)
         {
-            bool ret = ds->StartDB();
+            bool ret = ds->StartDB(term);
             if (!ret)
             {
                 LOG(ERROR)
