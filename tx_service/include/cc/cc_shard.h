@@ -372,7 +372,8 @@ public:
 
     bool IsIdle()
     {
-        return cc_queue_size_.load(std::memory_order_relaxed) == 0;
+        return cc_queue_size_.load(std::memory_order_relaxed) == 0 &&
+               low_priority_cc_queue_size_.load(std::memory_order_relaxed) == 0;
     }
 
     size_t ProcessRequests();
