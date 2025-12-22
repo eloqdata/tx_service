@@ -23,6 +23,7 @@
 
 #include <stdint.h>
 
+#include <cstring>
 #include <memory>
 #include <string>
 #include <utility>
@@ -136,21 +137,44 @@ struct TableKeySchemaTs
                      TableEngine table_engine)
     {
         table_engine_ = table_engine;
-        // This constructor is used with the old space-delimited format for
-        // backward compatibility Parse the serialized format:
         // [pk_ts_len][pk_ts_string][index_data_len][index_data]
         size_t offset = 0;
         const char *buf = key_schemas_ts_str.data();
+        size_t buf_size = key_schemas_ts_str.size();
 
         // Read pk schema ts
-        size_t pk_ts_len = *(size_t *) (buf + offset);
+        if (offset + sizeof(size_t) > buf_size)
+        {
+            LOG(FATAL) << "TableKeySchemaTs constructor: Malformed blob - "
+                          "insufficient data for pk_ts_len. offset="
+                       << offset << ", buf_size=" << buf_size
+                       << ", required=" << sizeof(size_t);
+        }
+        size_t pk_ts_len;
+        std::memcpy(&pk_ts_len, buf + offset, sizeof(pk_ts_len));
         offset += sizeof(pk_ts_len);
+
+        if (offset + pk_ts_len > buf_size)
+        {
+            LOG(FATAL) << "TableKeySchemaTs constructor: Malformed blob - "
+                          "pk_ts_string extends past buffer. offset="
+                       << offset << ", pk_ts_len=" << pk_ts_len
+                       << ", buf_size=" << buf_size;
+        }
         std::string pk_ts_str(buf + offset, pk_ts_len);
         offset += pk_ts_len;
         pk_schema_ts_ = std::stoull(pk_ts_str);
 
         // Read index data length
-        size_t index_data_len = *(size_t *) (buf + offset);
+        if (offset + sizeof(size_t) > buf_size)
+        {
+            LOG(FATAL) << "TableKeySchemaTs constructor: Malformed blob - "
+                          "insufficient data for index_data_len. offset="
+                       << offset << ", buf_size=" << buf_size
+                       << ", required=" << sizeof(size_t);
+        }
+        size_t index_data_len;
+        std::memcpy(&index_data_len, buf + offset, sizeof(index_data_len));
         offset += sizeof(index_data_len);
 
         if (index_data_len != 0)
@@ -158,17 +182,70 @@ struct TableKeySchemaTs
             // Deserialize length-prefixed format: for each index:
             // [table_name_len][table_name][ts_len][ts_string]
             size_t current_offset = offset;
-            while (current_offset < offset + index_data_len)
+            size_t index_blob_end = offset + index_data_len;
+            if (index_blob_end > buf_size)
+            {
+                LOG(FATAL) << "TableKeySchemaTs constructor: Malformed blob - "
+                              "index_data extends past buffer. offset="
+                           << offset << ", index_data_len=" << index_data_len
+                           << ", buf_size=" << buf_size;
+            }
+            while (current_offset < index_blob_end)
             {
                 // Read table name length and value
-                size_t table_name_len = *(size_t *) (buf + current_offset);
+                if (current_offset + sizeof(size_t) > index_blob_end)
+                {
+                    LOG(FATAL)
+                        << "TableKeySchemaTs constructor: Malformed blob - "
+                           "insufficient data for table name length. "
+                           "current_offset="
+                        << current_offset
+                        << ", index_blob_end=" << index_blob_end
+                        << ", required=" << sizeof(size_t);
+                }
+                size_t table_name_len;
+                std::memcpy(&table_name_len,
+                            buf + current_offset,
+                            sizeof(table_name_len));
                 current_offset += sizeof(table_name_len);
+
+                if (current_offset + table_name_len > index_blob_end)
+                {
+                    LOG(FATAL)
+                        << "TableKeySchemaTs constructor: Malformed blob - "
+                           "table name extends past declared length. "
+                           "current_offset="
+                        << current_offset
+                        << ", table_name_len=" << table_name_len
+                        << ", index_blob_end=" << index_blob_end;
+                }
                 std::string table_name(buf + current_offset, table_name_len);
                 current_offset += table_name_len;
 
                 // Read ts string length and value
-                size_t ts_len = *(size_t *) (buf + current_offset);
+                if (current_offset + sizeof(size_t) > index_blob_end)
+                {
+                    LOG(FATAL)
+                        << "TableKeySchemaTs constructor: Malformed blob - "
+                           "insufficient data for ts string length. "
+                           "current_offset="
+                        << current_offset
+                        << ", index_blob_end=" << index_blob_end
+                        << ", required=" << sizeof(size_t);
+                }
+                size_t ts_len;
+                std::memcpy(&ts_len, buf + current_offset, sizeof(ts_len));
                 current_offset += sizeof(ts_len);
+
+                if (current_offset + ts_len > index_blob_end)
+                {
+                    LOG(FATAL)
+                        << "TableKeySchemaTs constructor: Malformed blob - "
+                           "ts string extends past declared length. "
+                           "current_offset="
+                        << current_offset << ", ts_len=" << ts_len
+                        << ", index_blob_end=" << index_blob_end;
+                }
                 std::string ts_str(buf + current_offset, ts_len);
                 current_offset += ts_len;
 
@@ -244,32 +321,80 @@ struct TableKeySchemaTs
             return;
         }
         size_t len_sizeof = sizeof(size_t);
-        size_t *len_ptr = (size_t *) (buf + offset);
-        size_t len_val = *len_ptr;
+
+        // Read pk schema ts length
+        size_t len_val;
+        std::memcpy(&len_val, buf + offset, len_sizeof);
         offset += len_sizeof;
 
         pk_schema_ts_ = std::stoull(std::string(buf + offset, len_val));
         offset += len_val;
 
-        len_ptr = (size_t *) (buf + offset);
-        len_val = *len_ptr;
+        // Read index data length
+        std::memcpy(&len_val, buf + offset, len_sizeof);
         offset += len_sizeof;
         if (len_val != 0)
         {
             // Deserialize length-prefixed format: for each index:
             // [table_name_len][table_name][ts_len][ts_string]
             size_t current_offset = offset;
-            while (current_offset < offset + len_val)
+            size_t index_blob_end = offset + len_val;
+            while (current_offset < index_blob_end)
             {
                 // Read table name length and value
-                size_t table_name_len = *(size_t *) (buf + current_offset);
+                if (current_offset + sizeof(size_t) > index_blob_end)
+                {
+                    LOG(FATAL)
+                        << "TableKeySchemaTs::Deserialize: Malformed blob - "
+                           "insufficient data for table name length. "
+                           "current_offset="
+                        << current_offset
+                        << ", index_blob_end=" << index_blob_end
+                        << ", required=" << sizeof(size_t);
+                }
+                size_t table_name_len;
+                std::memcpy(&table_name_len,
+                            buf + current_offset,
+                            sizeof(table_name_len));
                 current_offset += sizeof(table_name_len);
+
+                if (current_offset + table_name_len > index_blob_end)
+                {
+                    LOG(FATAL)
+                        << "TableKeySchemaTs::Deserialize: Malformed blob - "
+                           "table name extends past declared length. "
+                           "current_offset="
+                        << current_offset
+                        << ", table_name_len=" << table_name_len
+                        << ", index_blob_end=" << index_blob_end;
+                }
                 std::string table_name(buf + current_offset, table_name_len);
                 current_offset += table_name_len;
 
                 // Read ts string length and value
-                size_t ts_len = *(size_t *) (buf + current_offset);
+                if (current_offset + sizeof(size_t) > index_blob_end)
+                {
+                    LOG(FATAL)
+                        << "TableKeySchemaTs::Deserialize: Malformed blob - "
+                           "insufficient data for ts string length. "
+                           "current_offset="
+                        << current_offset
+                        << ", index_blob_end=" << index_blob_end
+                        << ", required=" << sizeof(size_t);
+                }
+                size_t ts_len;
+                std::memcpy(&ts_len, buf + current_offset, sizeof(ts_len));
                 current_offset += sizeof(ts_len);
+
+                if (current_offset + ts_len > index_blob_end)
+                {
+                    LOG(FATAL)
+                        << "TableKeySchemaTs::Deserialize: Malformed blob - "
+                           "ts string extends past declared length. "
+                           "current_offset="
+                        << current_offset << ", ts_len=" << ts_len
+                        << ", index_blob_end=" << index_blob_end;
+                }
                 std::string ts_str(buf + current_offset, ts_len);
                 current_offset += ts_len;
 
@@ -295,12 +420,13 @@ struct TableKeySchemaTs
                 sk_schemas_ts_.try_emplace(std::move(table_name_obj),
                                            std::stoull(ts_str));
             }
+            // Advance offset past the index blob
+            offset = current_offset;
         }
         else
         {
             sk_schemas_ts_.clear();
         }
-        offset += len_val;
     }
 
     /**

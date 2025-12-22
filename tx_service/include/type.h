@@ -25,6 +25,7 @@
 #include <cassert>
 #include <condition_variable>
 #include <cstdint>
+#include <cstring>
 #include <functional>
 #include <iterator>
 #include <mutex>
@@ -38,6 +39,7 @@
 #include <vector>
 
 #include "constants.h"
+#include "glog/logging.h"
 
 namespace txservice
 {
@@ -824,11 +826,35 @@ struct AlterTableInfo
         }
         size_t offset = 0;
         const char *buf = altered_table_info_image.data();
+        size_t buf_size = altered_table_info_image.size();
 
-        index_add_count_ = *(uint8_t *) (buf + offset);
+        // Read index_add_count_
+        if (offset + sizeof(uint8_t) > buf_size)
+        {
+            LOG(FATAL)
+                << "AlterTableInfo::DeserializeAlteredTableInfo: "
+                   "Malformed blob - insufficient data for index_add_count_. "
+                   "offset="
+                << offset << ", buf_size=" << buf_size
+                << ", required=" << sizeof(uint8_t);
+        }
+        std::memcpy(&index_add_count_, buf + offset, sizeof(uint8_t));
         offset += sizeof(uint8_t);
-        size_t add_index_names_len = *(size_t *) (buf + offset);
+
+        // Read add_index_names_len
+        if (offset + sizeof(size_t) > buf_size)
+        {
+            LOG(FATAL) << "AlterTableInfo::DeserializeAlteredTableInfo: "
+                          "Malformed blob - insufficient data for "
+                          "add_index_names_len. "
+                          "offset="
+                       << offset << ", buf_size=" << buf_size
+                       << ", required=" << sizeof(size_t);
+        }
+        size_t add_index_names_len;
+        std::memcpy(&add_index_names_len, buf + offset, sizeof(size_t));
         offset += sizeof(add_index_names_len);
+
         if (index_add_count_ > 0)
         {
             // Clear this buff.
@@ -836,17 +862,73 @@ struct AlterTableInfo
             // Deserialize length-prefixed format: for each index:
             // [len][table_name][len][kv_name]
             size_t current_offset = offset;
+            size_t add_index_blob_end = offset + add_index_names_len;
+            if (add_index_blob_end > buf_size)
+            {
+                LOG(FATAL)
+                    << "AlterTableInfo::DeserializeAlteredTableInfo: "
+                       "Malformed blob - add_index_names extends past buffer. "
+                       "offset="
+                    << offset << ", add_index_names_len=" << add_index_names_len
+                    << ", buf_size=" << buf_size;
+            }
             for (uint8_t i = 0; i < index_add_count_; ++i)
             {
                 // Read table name length and value
-                size_t table_name_len = *(size_t *) (buf + current_offset);
+                if (current_offset + sizeof(size_t) > add_index_blob_end)
+                {
+                    LOG(FATAL)
+                        << "AlterTableInfo::DeserializeAlteredTableInfo: "
+                           "Malformed blob - insufficient data for table name "
+                           "length in add_index_names. current_offset="
+                        << current_offset
+                        << ", add_index_blob_end=" << add_index_blob_end
+                        << ", required=" << sizeof(size_t);
+                }
+                size_t table_name_len;
+                std::memcpy(&table_name_len,
+                            buf + current_offset,
+                            sizeof(table_name_len));
                 current_offset += sizeof(table_name_len);
+
+                if (current_offset + table_name_len > add_index_blob_end)
+                {
+                    LOG(FATAL)
+                        << "AlterTableInfo::DeserializeAlteredTableInfo: "
+                           "Malformed blob - table name extends past declared "
+                           "length in add_index_names. current_offset="
+                        << current_offset
+                        << ", table_name_len=" << table_name_len
+                        << ", add_index_blob_end=" << add_index_blob_end;
+                }
                 std::string table_name(buf + current_offset, table_name_len);
                 current_offset += table_name_len;
 
                 // Read kv name length and value
-                size_t kv_name_len = *(size_t *) (buf + current_offset);
+                if (current_offset + sizeof(size_t) > add_index_blob_end)
+                {
+                    LOG(FATAL)
+                        << "AlterTableInfo::DeserializeAlteredTableInfo: "
+                           "Malformed blob - insufficient data for kv name "
+                           "length in add_index_names. current_offset="
+                        << current_offset
+                        << ", add_index_blob_end=" << add_index_blob_end
+                        << ", required=" << sizeof(size_t);
+                }
+                size_t kv_name_len;
+                std::memcpy(
+                    &kv_name_len, buf + current_offset, sizeof(kv_name_len));
                 current_offset += sizeof(kv_name_len);
+
+                if (current_offset + kv_name_len > add_index_blob_end)
+                {
+                    LOG(FATAL)
+                        << "AlterTableInfo::DeserializeAlteredTableInfo: "
+                           "Malformed blob - kv name extends past declared "
+                           "length in add_index_names. current_offset="
+                        << current_offset << ", kv_name_len=" << kv_name_len
+                        << ", add_index_blob_end=" << add_index_blob_end;
+                }
                 std::string kv_name(buf + current_offset, kv_name_len);
                 current_offset += kv_name_len;
 
@@ -859,17 +941,41 @@ struct AlterTableInfo
                 index_add_names_.emplace(add_index_name, kv_name);
             }
             assert(current_offset == offset + add_index_names_len);
+            // Advance offset past the add_index_names blob
+            offset = current_offset;
         }
         else
         {
             index_add_names_.clear();
         }
-        offset += add_index_names_len;
 
-        index_drop_count_ = *(uint8_t *) (buf + offset);
+        // Read index_drop_count_
+        if (offset + sizeof(uint8_t) > buf_size)
+        {
+            LOG(FATAL)
+                << "AlterTableInfo::DeserializeAlteredTableInfo: "
+                   "Malformed blob - insufficient data for index_drop_count_. "
+                   "offset="
+                << offset << ", buf_size=" << buf_size
+                << ", required=" << sizeof(uint8_t);
+        }
+        std::memcpy(&index_drop_count_, buf + offset, sizeof(uint8_t));
         offset += sizeof(uint8_t);
-        size_t drop_index_names_len = *(size_t *) (buf + offset);
+
+        // Read drop_index_names_len
+        if (offset + sizeof(size_t) > buf_size)
+        {
+            LOG(FATAL) << "AlterTableInfo::DeserializeAlteredTableInfo: "
+                          "Malformed blob - insufficient data for "
+                          "drop_index_names_len. "
+                          "offset="
+                       << offset << ", buf_size=" << buf_size
+                       << ", required=" << sizeof(size_t);
+        }
+        size_t drop_index_names_len;
+        std::memcpy(&drop_index_names_len, buf + offset, sizeof(size_t));
         offset += sizeof(drop_index_names_len);
+
         if (index_drop_count_ > 0)
         {
             // Clear this buff.
@@ -877,17 +983,74 @@ struct AlterTableInfo
             // Deserialize length-prefixed format: for each index:
             // [len][table_name][len][kv_name]
             size_t current_offset = offset;
+            size_t drop_index_blob_end = offset + drop_index_names_len;
+            if (drop_index_blob_end > buf_size)
+            {
+                LOG(FATAL)
+                    << "AlterTableInfo::DeserializeAlteredTableInfo: "
+                       "Malformed blob - drop_index_names extends past buffer. "
+                       "offset="
+                    << offset
+                    << ", drop_index_names_len=" << drop_index_names_len
+                    << ", buf_size=" << buf_size;
+            }
             for (uint8_t i = 0; i < index_drop_count_; ++i)
             {
                 // Read table name length and value
-                size_t table_name_len = *(size_t *) (buf + current_offset);
+                if (current_offset + sizeof(size_t) > drop_index_blob_end)
+                {
+                    LOG(FATAL)
+                        << "AlterTableInfo::DeserializeAlteredTableInfo: "
+                           "Malformed blob - insufficient data for table name "
+                           "length in drop_index_names. current_offset="
+                        << current_offset
+                        << ", drop_index_blob_end=" << drop_index_blob_end
+                        << ", required=" << sizeof(size_t);
+                }
+                size_t table_name_len;
+                std::memcpy(&table_name_len,
+                            buf + current_offset,
+                            sizeof(table_name_len));
                 current_offset += sizeof(table_name_len);
+
+                if (current_offset + table_name_len > drop_index_blob_end)
+                {
+                    LOG(FATAL)
+                        << "AlterTableInfo::DeserializeAlteredTableInfo: "
+                           "Malformed blob - table name extends past declared "
+                           "length in drop_index_names. current_offset="
+                        << current_offset
+                        << ", table_name_len=" << table_name_len
+                        << ", drop_index_blob_end=" << drop_index_blob_end;
+                }
                 std::string table_name(buf + current_offset, table_name_len);
                 current_offset += table_name_len;
 
                 // Read kv name length and value
-                size_t kv_name_len = *(size_t *) (buf + current_offset);
+                if (current_offset + sizeof(size_t) > drop_index_blob_end)
+                {
+                    LOG(FATAL)
+                        << "AlterTableInfo::DeserializeAlteredTableInfo: "
+                           "Malformed blob - insufficient data for kv name "
+                           "length in drop_index_names. current_offset="
+                        << current_offset
+                        << ", drop_index_blob_end=" << drop_index_blob_end
+                        << ", required=" << sizeof(size_t);
+                }
+                size_t kv_name_len;
+                std::memcpy(
+                    &kv_name_len, buf + current_offset, sizeof(kv_name_len));
                 current_offset += sizeof(kv_name_len);
+
+                if (current_offset + kv_name_len > drop_index_blob_end)
+                {
+                    LOG(FATAL)
+                        << "AlterTableInfo::DeserializeAlteredTableInfo: "
+                           "Malformed blob - kv name extends past declared "
+                           "length in drop_index_names. current_offset="
+                        << current_offset << ", kv_name_len=" << kv_name_len
+                        << ", drop_index_blob_end=" << drop_index_blob_end;
+                }
                 std::string kv_name(buf + current_offset, kv_name_len);
                 current_offset += kv_name_len;
 
@@ -900,12 +1063,13 @@ struct AlterTableInfo
                 index_drop_names_.emplace(drop_index_name, kv_name);
             }
             assert(current_offset == offset + drop_index_names_len);
+            // Advance offset past the drop_index_names blob
+            offset = current_offset;
         }
         else
         {
             index_drop_names_.clear();
         }
-        offset += drop_index_names_len;
 
         assert(offset == altered_table_info_image.length());
     }
