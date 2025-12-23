@@ -21,6 +21,7 @@
  */
 #pragma once
 
+#include <cstring>
 #include <memory>
 #include <string>
 #include <unordered_map>
@@ -28,6 +29,7 @@
 
 #include "cc/cc_map.h"
 #include "cc/ccm_scanner.h"  // CcScanner
+#include "glog/logging.h"
 #include "schema.h"
 #include "tx_command.h"
 
@@ -51,6 +53,8 @@ struct KVCatalogInfo
         str.append(len_ptr, len_sizeof);
         str.append(kv_table_name_.data(), len_val);
 
+        // Use length-prefixed format: for each index:
+        // [table_name_len][table_name][kv_name_len][kv_name][engine]
         std::string index_names;
         if (kv_index_names_.size() != 0)
         {
@@ -58,19 +62,19 @@ struct KVCatalogInfo
                  it != kv_index_names_.cend();
                  ++it)
             {
-                index_names.append(it->first.StringView())
-                    .append(" ")
-                    .append(it->second)
-                    .append(" ")
-                    .append(1, static_cast<char>(it->first.Engine()))
-                    .append(" ");
+                std::string table_name = it->first.String();
+                size_t table_name_len = table_name.length();
+                size_t kv_name_len = it->second.length();
+                char engine_char = static_cast<char>(it->first.Engine());
+                index_names.append(
+                    reinterpret_cast<const char *>(&table_name_len),
+                    sizeof(table_name_len));
+                index_names.append(table_name);
+                index_names.append(reinterpret_cast<const char *>(&kv_name_len),
+                                   sizeof(kv_name_len));
+                index_names.append(it->second);
+                index_names.append(1, engine_char);
             }
-            // index_names.substr(0, index_names.size() - 1);
-            index_names.erase(index_names.size() - 1);
-        }
-        else
-        {
-            index_names.clear();
         }
         len_val = static_cast<uint32_t>(index_names.size());
         str.append(len_ptr, len_sizeof);
@@ -98,29 +102,97 @@ struct KVCatalogInfo
         offset += sizeof(uint32_t);
         if (len_val != 0)
         {
-            std::string index_names(buf + offset, len_val);
-            offset += len_val;
-            std::stringstream ss(index_names);
-            std::istream_iterator<std::string> begin(ss);
-            std::istream_iterator<std::string> end;
-            std::vector<std::string> tokens(begin, end);
-            for (auto it = tokens.begin(); it != tokens.end(); ++it)
+            // Deserialize length-prefixed format: for each index:
+            // [table_name_len][table_name][kv_name_len][kv_name][engine]
+            size_t current_offset = offset;
+            size_t index_blob_end = offset + len_val;
+            while (current_offset < index_blob_end)
             {
-                TableType table_type = TableName::Type(*it);
+                // Read table name length and value
+                if (current_offset + sizeof(size_t) > index_blob_end)
+                {
+                    LOG(FATAL)
+                        << "KVCatalogInfo::Deserialize: Malformed blob - "
+                           "insufficient data for table name length. "
+                           "current_offset="
+                        << current_offset
+                        << ", index_blob_end=" << index_blob_end
+                        << ", required=" << sizeof(size_t);
+                }
+                size_t table_name_len;
+                std::memcpy(&table_name_len,
+                            buf + current_offset,
+                            sizeof(table_name_len));
+                current_offset += sizeof(table_name_len);
+
+                if (current_offset + table_name_len > index_blob_end)
+                {
+                    LOG(FATAL)
+                        << "KVCatalogInfo::Deserialize: Malformed blob - "
+                           "table name extends past declared length. "
+                           "current_offset="
+                        << current_offset
+                        << ", table_name_len=" << table_name_len
+                        << ", index_blob_end=" << index_blob_end;
+                }
+                std::string index_name_str(buf + current_offset,
+                                           table_name_len);
+                current_offset += table_name_len;
+
+                // Read kv name length and value
+                if (current_offset + sizeof(size_t) > index_blob_end)
+                {
+                    LOG(FATAL)
+                        << "KVCatalogInfo::Deserialize: Malformed blob - "
+                           "insufficient data for kv name length. "
+                           "current_offset="
+                        << current_offset
+                        << ", index_blob_end=" << index_blob_end
+                        << ", required=" << sizeof(size_t);
+                }
+                size_t kv_name_len;
+                std::memcpy(
+                    &kv_name_len, buf + current_offset, sizeof(kv_name_len));
+                current_offset += sizeof(kv_name_len);
+
+                if (current_offset + kv_name_len > index_blob_end)
+                {
+                    LOG(FATAL)
+                        << "KVCatalogInfo::Deserialize: Malformed blob - "
+                           "kv name extends past declared length. "
+                           "current_offset="
+                        << current_offset << ", kv_name_len=" << kv_name_len
+                        << ", index_blob_end=" << index_blob_end;
+                }
+                std::string kv_index_name_str(buf + current_offset,
+                                              kv_name_len);
+                current_offset += kv_name_len;
+
+                // Read engine (single char)
+                if (current_offset >= index_blob_end)
+                {
+                    LOG(FATAL)
+                        << "KVCatalogInfo::Deserialize: Malformed blob - "
+                           "insufficient data for engine char. "
+                           "current_offset="
+                        << current_offset
+                        << ", index_blob_end=" << index_blob_end;
+                }
+                char engine_char = buf[current_offset];
+                current_offset += 1;
+
+                TableType table_type = TableName::Type(index_name_str);
                 assert(table_type == txservice::TableType::Secondary ||
                        table_type == txservice::TableType::UniqueSecondary);
 
-                const std::string &index_name_str = *it;
-                const std::string &kv_index_name_str = *(++it);
-                const std::string &table_engine_str = *(++it);
-                assert(table_engine_str.size() == 1);
-
                 txservice::TableEngine table_engine =
-                    static_cast<txservice::TableEngine>(table_engine_str[0]);
+                    static_cast<txservice::TableEngine>(engine_char);
                 txservice::TableName index_table_name(
                     index_name_str, table_type, table_engine);
                 kv_index_names_.emplace(index_table_name, kv_index_name_str);
             }
+            // Advance offset past the index blob
+            offset = current_offset;
         }
         else
         {

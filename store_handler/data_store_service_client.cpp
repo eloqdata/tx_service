@@ -2562,12 +2562,21 @@ std::string DataStoreServiceClient::CreateNewKVCatalogInfo(
         }
         if (!dropped)
         {
-            new_kv_index_names.append(kv_index_it->first.String())
-                .append(" ")
-                .append(kv_index_it->second)
-                .append(" ")
-                .append(1, static_cast<char>(kv_index_it->first.Engine()))
-                .append(" ");
+            // Use length-prefixed format:
+            // [table_name_len][table_name][kv_name_len][kv_name][engine]
+            std::string table_name = kv_index_it->first.String();
+            size_t table_name_len = table_name.length();
+            size_t kv_name_len = kv_index_it->second.length();
+            char engine_char = static_cast<char>(kv_index_it->first.Engine());
+            new_kv_index_names.append(
+                reinterpret_cast<const char *>(&table_name_len),
+                sizeof(table_name_len));
+            new_kv_index_names.append(table_name);
+            new_kv_index_names.append(
+                reinterpret_cast<const char *>(&kv_name_len),
+                sizeof(kv_name_len));
+            new_kv_index_names.append(kv_index_it->second);
+            new_kv_index_names.append(1, engine_char);
         }
     }
     assert(alter_table_info.index_drop_names_.size() ==
@@ -2595,12 +2604,20 @@ std::string DataStoreServiceClient::CreateNewKVCatalogInfo(
                 boost::lexical_cast<std::string>(generator()));
         }
 
-        new_kv_index_names.append(add_index_it->first.String())
-            .append(" ")
-            .append(add_index_kv_name.data())
-            .append(" ")
-            .append(1, static_cast<char>(add_index_it->first.Engine()))
-            .append(" ");
+        // Use length-prefixed format:
+        // [table_name_len][table_name][kv_name_len][kv_name][engine]
+        std::string table_name = add_index_it->first.String();
+        size_t table_name_len = table_name.length();
+        size_t kv_name_len = add_index_kv_name.length();
+        char engine_char = static_cast<char>(add_index_it->first.Engine());
+        new_kv_index_names.append(
+            reinterpret_cast<const char *>(&table_name_len),
+            sizeof(table_name_len));
+        new_kv_index_names.append(table_name);
+        new_kv_index_names.append(reinterpret_cast<const char *>(&kv_name_len),
+                                  sizeof(kv_name_len));
+        new_kv_index_names.append(add_index_kv_name);
+        new_kv_index_names.append(1, engine_char);
 
         // set index kv table name
         alter_table_info.index_add_names_[add_index_it->first] =
