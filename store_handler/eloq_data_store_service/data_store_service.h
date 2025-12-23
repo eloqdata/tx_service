@@ -203,7 +203,7 @@ public:
         return data_store_factory_->DataStoreType();
     }
 
-    bool StartService(bool create_db_if_missing, int64_t term = 0);
+    bool StartService(bool create_db_if_missing);
 
     brpc::Server *GetBrpcServer()
     {
