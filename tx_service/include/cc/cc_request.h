@@ -8423,7 +8423,7 @@ struct EscalateStandbyCcmCc : CcRequestBase
 
         SetFinish();
 
-        return true;
+        return false;
     };
 
     uint64_t PrimaryCkptTs() const
