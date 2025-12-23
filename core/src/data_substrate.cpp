@@ -254,7 +254,7 @@ void DataSubstrate::Shutdown()
         if (core_config_.bootstrap)
         {
             std::error_code ec;
-#if defined(LOG_STATE_TYPE_RKDB_ALL)  && !defined(OPEN_LOG_SERVICE)
+#if defined(LOG_STATE_TYPE_RKDB_ALL) && !defined(OPEN_LOG_SERVICE)
             // Remove rocksdb storage path for bootstrap mode
             LOG(INFO) << "Removing rocksdb storage path after bootstrap: "
                       << rocksdb_storage_path;
