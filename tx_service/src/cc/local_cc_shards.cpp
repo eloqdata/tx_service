@@ -3765,7 +3765,7 @@ void LocalCcShards::DataSyncForRangePartition(
 
     for (size_t i = 0; i < cc_shards_.size(); i++)
     {
-        EnqueueToCcShard(i, &scan_delta_size_cc);
+        EnqueueLowPriorityCcRequestToShard(i, &scan_delta_size_cc);
     }
     scan_delta_size_cc.Wait();
 
@@ -3981,7 +3981,7 @@ void LocalCcShards::DataSyncForRangePartition(
     {
         for (size_t i = 0; i < cc_shards_.size(); ++i)
         {
-            EnqueueToCcShard(i, &scan_cc);
+            EnqueueLowPriorityCcRequestToShard(i, &scan_cc);
         }
         scan_cc.Wait();
 
@@ -4240,7 +4240,8 @@ void LocalCcShards::DataSyncForRangePartition(
                     auto &archive_vec_ref = scan_cc.ArchiveVec(i);
                     ReleaseDataSyncScanHeapCc release_scan_heap_cc(
                         &data_sync_vec_ref, &archive_vec_ref);
-                    EnqueueCcRequest(i, &release_scan_heap_cc);
+                    EnqueueLowPriorityCcRequestToShard(i,
+                                                       &release_scan_heap_cc);
                     release_scan_heap_cc.Wait();
                 }
             }
@@ -4263,7 +4264,7 @@ void LocalCcShards::DataSyncForRangePartition(
         auto &data_sync_vec_ref = scan_cc.DataSyncVec(core_idx);
         auto &archive_vec_ref = scan_cc.ArchiveVec(core_idx);
         req_vec.emplace_back(&data_sync_vec_ref, &archive_vec_ref);
-        EnqueueToCcShard(core_idx, &req_vec.back());
+        EnqueueLowPriorityCcRequestToShard(core_idx, &req_vec.back());
     }
     while (req_vec.size() > 0)
     {
@@ -4607,7 +4608,7 @@ void LocalCcShards::DataSyncForHashPartition(
         data_sync_txm->TxNumber(),
         catalog_rec.Schema()->Version());
 
-    EnqueueToCcShard(worker_idx, &scan_delta_size_cc);
+    EnqueueLowPriorityCcRequestToShard(worker_idx, &scan_delta_size_cc);
     scan_delta_size_cc.Wait();
 
     if (scan_delta_size_cc.IsError())
@@ -4714,7 +4715,7 @@ void LocalCcShards::DataSyncForHashPartition(
 
         while (!scan_data_drained)
         {
-            EnqueueToCcShard(worker_idx, &scan_cc);
+            EnqueueLowPriorityCcRequestToShard(worker_idx, &scan_cc);
             scan_cc.Wait();
 
             if (scan_cc.IsError() &&
@@ -5004,7 +5005,8 @@ void LocalCcShards::DataSyncForHashPartition(
                     {
                         scan_cc.Reset(
                             HashPartitionDataSyncScanCc::OpType::Terminated);
-                        EnqueueToCcShard(worker_idx, &scan_cc);
+                        EnqueueLowPriorityCcRequestToShard(worker_idx,
+                                                           &scan_cc);
                         scan_cc.Wait();
                     }
                     // 2. Release memory usage on this datasync worker.
@@ -5047,7 +5049,8 @@ void LocalCcShards::DataSyncForHashPartition(
                 auto &archive_vec_ref = scan_cc.ArchiveVec();
                 ReleaseDataSyncScanHeapCc release_scan_heap_cc(
                     &data_sync_vec_ref, &archive_vec_ref);
-                EnqueueCcRequest(worker_idx, &release_scan_heap_cc);
+                EnqueueLowPriorityCcRequestToShard(worker_idx,
+                                                   &release_scan_heap_cc);
                 release_scan_heap_cc.Wait();
             }
 
@@ -5059,7 +5062,7 @@ void LocalCcShards::DataSyncForHashPartition(
         auto &archive_vec_ref = scan_cc.ArchiveVec();
         ReleaseDataSyncScanHeapCc release_scan_heap_cc(&data_sync_vec_ref,
                                                        &archive_vec_ref);
-        EnqueueCcRequest(worker_idx, &release_scan_heap_cc);
+        EnqueueLowPriorityCcRequestToShard(worker_idx, &release_scan_heap_cc);
         release_scan_heap_cc.Wait();
 
         if (!data_sync_vec->empty() || !archive_vec->empty() ||
