@@ -124,12 +124,6 @@ LocalCcShards::LocalCcShards(
           std::min(static_cast<int>(conf.at("core_num")), 10)),
 #endif
 
-#if defined(WITH_JEMALLOC)
-      epoch_worker_ctx_(1),
-#else
-      epoch_worker_ctx_(0),
-#endif
-
       cur_flush_buffer_(
           static_cast<uint64_t>(MB(conf.at("node_memory_limit_mb")) * 0.05)),
       data_sync_mem_controller_(
@@ -140,6 +134,9 @@ LocalCcShards::LocalCcShards(
       kickout_data_test_worker_ctx_(conf.count("kickout_data_for_test") > 0
                                         ? conf.at("kickout_data_for_test")
                                         : 0),
+#if defined(WITH_JEMALLOC)
+      epoch_worker_ctx_(1),
+#endif
       publish_func_(publish_func),
       enable_shard_heap_defragment_(conf.at("enable_shard_heap_defragment")),
       fast_meta_data_mux_(conf.at("core_num"), meta_data_mux_)

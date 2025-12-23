@@ -2184,8 +2184,6 @@ private:
             nullptr};
     };
 
-    WorkerThreadContext epoch_worker_ctx_;
-
     /**
      * DataSync Operation Interface
      */
@@ -2481,6 +2479,10 @@ private:
 
     WorkerThreadContext kickout_data_test_worker_ctx_;
     void KickoutDataForTest();
+
+#if defined(WITH_JEMALLOC)
+    WorkerThreadContext epoch_worker_ctx_;
+#endif
 
     void ReportHashPartitionCkptHeapUsage();
 
