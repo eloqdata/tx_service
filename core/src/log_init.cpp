@@ -81,10 +81,10 @@ DEFINE_string(txlog_rocksdb_cloud_s3_endpoint_url,
               "",
               "Endpoint url of cloud storage service");
 DEFINE_string(txlog_rocksdb_cloud_sst_file_cache_size,
-              "1GB",
+              "3GB",
               "Local sst cache size for txlog");
 DEFINE_uint32(txlog_rocksdb_cloud_sst_file_cache_num_shard_bits,
-              5,
+              0,
               "TxLog RocksDB Cloud SST file cache num shard bits");
 DEFINE_string(
     txlog_rocksdb_cloud_object_store_service_url,
