@@ -174,7 +174,7 @@ bool DataSubstrate::InitializeTxService(const INIReader &config_reader)
     if (!core_config_.bootstrap)
     {
         fork_hm_process =
-            CheckCommandLineFlagIsDefault("fork_host_manager")
+            !CheckCommandLineFlagIsDefault("fork_host_manager")
                 ? FLAGS_fork_host_manager
                 : config_reader.GetBoolean(
                       "local", "fork_host_manager", FLAGS_fork_host_manager);
