@@ -247,14 +247,14 @@ void DataSubstrate::Shutdown()
     {
         LOG(INFO) << "Shutting down the internal logservice.";
         std::string storage_path = log_server_->GetStoragePath();
-#if defined(LOG_STATE_TYPE_RKDB_ALL)
+#if defined(LOG_STATE_TYPE_RKDB_ALL) && !defined(OPEN_LOG_SERVICE)
         std::string rocksdb_storage_path = log_server_->GetRocksDBStoragePath();
 #endif
         log_server_ = nullptr;
         if (core_config_.bootstrap)
         {
             std::error_code ec;
-#if defined(LOG_STATE_TYPE_RKDB_ALL)
+#if defined(LOG_STATE_TYPE_RKDB_ALL)  && !defined(OPEN_LOG_SERVICE)
             // Remove rocksdb storage path for bootstrap mode
             LOG(INFO) << "Removing rocksdb storage path after bootstrap: "
                       << rocksdb_storage_path;
