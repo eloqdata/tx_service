@@ -403,7 +403,7 @@ public:
                 busy_round_start = metrics::Clock::now();
             }
 
-            // Process regular CcRequests (low priority already processed above)
+            // Process regular CcRequests
             req_cnt += local_cc_shards_.ProcessRequests(thd_id_);
         }
 

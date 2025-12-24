@@ -35,7 +35,7 @@
 #include "log_server.h"
 #include "sequences/sequences.h"
 #include "store/data_store_handler.h"
-
+#include "util.h"
 #ifdef ELOQDS
 #include "eloq_data_store_service/data_store_service.h"
 #endif
@@ -135,6 +135,8 @@ bool DataSubstrate::Start()
     std::lock_guard<std::mutex> lock(instance_mutex_);
 
     DataSubstrate &instance = Instance();
+
+    txservice::InitializeTscFrequency();
 
     if (instance.init_state_ == InitState::NotInitialized)
     {

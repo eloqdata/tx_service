@@ -25,12 +25,15 @@
 #include <jemalloc/jemalloc.h>
 #endif
 
+#include <atomic>
 #include <chrono>
 #include <fstream>
+#include <mutex>
 #include <queue>
 #include <sstream>
 #include <string>
 #include <string_view>
+#include <thread>
 #include <vector>
 
 #if defined(__x86_64__) || defined(_M_X64)
@@ -473,26 +476,140 @@ static inline void GetJemallocArenaStat(uint32_t arena_id,
     allocated = small_allocated + large_allocated;
 }
 #endif
+// TSC frequency in cycles per microsecond (measured at initialization)
+inline std::once_flag tsc_frequency_initialized_;
+inline std::atomic<uint64_t> tsc_cycles_per_microsecond_{0};
+
+/** @brief
+ * Measure TSC frequency by sleeping for 1ms and measuring cycles.
+ * Retries until stable (within 1% difference) or up to 16ms total.
+ * Should be called once during data substrate initialization.
+ * This function is thread-safe and will only execute once.
+ */
+static void InitializeTscFrequency()
+{
+#if defined(__x86_64__) || defined(_M_X64)
+    std::call_once(
+        tsc_frequency_initialized_,
+        []()
+        {
+            constexpr uint64_t SLEEP_MICROSECONDS = 1000;       // 1ms
+            constexpr uint64_t MAX_TOTAL_MICROSECONDS = 16000;  // 16ms max
+            constexpr double STABILITY_THRESHOLD =
+                0.01;  // 1% difference for stability
+
+            uint64_t prev_freq = 0;
+            uint64_t total_slept = 0;
+            int stable_count = 0;
+            constexpr int REQUIRED_STABLE_COUNT =
+                2;  // Need 2 consecutive stable measurements
+
+            while (total_slept < MAX_TOTAL_MICROSECONDS)
+            {
+                uint64_t start_cycles = __rdtsc();
+                std::this_thread::sleep_for(
+                    std::chrono::microseconds(SLEEP_MICROSECONDS));
+                uint64_t end_cycles = __rdtsc();
+                uint64_t elapsed_cycles = end_cycles - start_cycles;
+                uint64_t freq = elapsed_cycles /
+                                SLEEP_MICROSECONDS;  // cycles per microsecond
+
+                total_slept += SLEEP_MICROSECONDS;
+
+                // Check if frequency is stable (within 1% of previous
+                // measurement)
+                if (prev_freq > 0)
+                {
+                    double diff_ratio =
+                        (freq > prev_freq)
+                            ? static_cast<double>(freq - prev_freq) / prev_freq
+                            : static_cast<double>(prev_freq - freq) / prev_freq;
+                    if (diff_ratio <= STABILITY_THRESHOLD)
+                    {
+                        stable_count++;
+                        if (stable_count >= REQUIRED_STABLE_COUNT)
+                        {
+                            // Frequency is stable, use the average
+                            tsc_cycles_per_microsecond_.store(
+                                (prev_freq + freq) / 2,
+                                std::memory_order_release);
+                            return;
+                        }
+                    }
+                    else
+                    {
+                        stable_count = 0;  // Reset stability counter
+                    }
+                }
+
+                prev_freq = freq;
+            }
+
+            // If we couldn't get stable measurement, use the last measured
+            // value
+            if (prev_freq > 0)
+            {
+                tsc_cycles_per_microsecond_.store(prev_freq,
+                                                  std::memory_order_release);
+            }
+            else
+            {
+                // Fallback to approximate value if measurement failed
+                tsc_cycles_per_microsecond_.store(2000,
+                                                  std::memory_order_release);
+            }
+        });  // End of lambda passed to std::call_once
+#elif defined(__aarch64__)
+    std::call_once(tsc_frequency_initialized_,
+                   []()
+                   {
+                       uint64_t freq_hz;
+                       __asm__ volatile("mrs %0, cntfrq_el0" : "=r"(freq_hz));
+                       tsc_cycles_per_microsecond_.store(
+                           freq_hz / 1000000, std::memory_order_release);
+                   });
+#endif
+}
+
 /** @brief
  * Low-cost timing helper for approximate microsecond measurement.
- * Returns elapsed time in microseconds (approximate for x86/ARM, precise for
- * fallback). Uses CPU-specific instructions for low overhead on x86/ARM
- * platforms.
+ * Returns elapsed time in microseconds (precise for x86/ARM after
+ * initialization, precise for fallback). Uses CPU-specific instructions for low
+ * overhead on x86/ARM platforms.
  */
 static inline uint64_t ReadTimeMicroseconds()
 {
-    // Approximate conversion: assumes ~2GHz CPU (1μs = 2000 cycles)
-    // This is approximate but acceptable per requirements
-    static constexpr uint64_t APPROX_CYCLES_PER_MICROSECOND = 2000;
 #if defined(__x86_64__) || defined(_M_X64)
+    uint64_t cycles_per_us =
+        tsc_cycles_per_microsecond_.load(std::memory_order_relaxed);
+    if (__builtin_expect(cycles_per_us == 0, 0))
+    {
+        // Ensure TSC frequency is initialized (thread-safe, only initializes
+        // once)
+        InitializeTscFrequency();
+        cycles_per_us =
+            tsc_cycles_per_microsecond_.load(std::memory_order_acquire);
+    }
+    assert(cycles_per_us != 0);
     // Read TSC (Time Stamp Counter) - returns CPU cycles
     uint64_t cycles = __rdtsc();
-    return cycles / APPROX_CYCLES_PER_MICROSECOND;
+    return cycles / cycles_per_us;
 #elif defined(__aarch64__)
+    // Ensure ARM timer frequency is initialized (thread-safe, only initializes
+    // once)
+    uint64_t cycles_per_us =
+        tsc_cycles_per_microsecond_.load(std::memory_order_relaxed);
+    if (__builtin_expect(cycles_per_us == 0, 0))
+    {
+        InitializeTscFrequency();
+        cycles_per_us =
+            tsc_cycles_per_microsecond_.load(std::memory_order_acquire);
+    }
+    assert(cycles_per_us != 0);
     // Read ARM virtual counter - returns timer ticks
     uint64_t ticks;
     __asm__ volatile("mrs %0, cntvct_el0" : "=r"(ticks));
-    return ticks / APPROX_CYCLES_PER_MICROSECOND;
+    return ticks / cycles_per_us;
 #else
     // Fallback to std::chrono (slower but portable and precise)
     using namespace std::chrono;
