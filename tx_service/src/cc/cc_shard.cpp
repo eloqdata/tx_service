@@ -50,6 +50,9 @@
 #include "tx_start_ts_collector.h"
 #include "type.h"
 #include "util.h"
+#if defined(WITH_JEMALLOC)
+#include <jemalloc/jemalloc.h>
+#endif
 
 DECLARE_bool(cmd_read_catalog);
 
@@ -226,6 +229,9 @@ void CcShard::Init()
 {
     InitializeShardHeap();
     mi_heap_t *prev_heap = shard_heap_->SetAsDefaultHeap();
+#if defined(WITH_JEMALLOC)
+    auto prev_arena = shard_heap_->SetAsDefaultArena();
+#endif
     lock_vec_.resize(LOCK_ARRAY_INIT_SIZE);
     for (size_t i = 0; i < LOCK_ARRAY_INIT_SIZE; ++i)
     {
@@ -252,6 +258,10 @@ void CcShard::Init()
                              std::make_unique<RangeBucketCcMap>(
                                  this, ng_id_, range_bucket_ccm_name));
     mi_heap_set_default(prev_heap);
+
+#if defined(WITH_JEMALLOC)
+    JemallocArenaSwitcher::SwitchToArena(prev_arena);
+#endif
 }
 
 CcMap *CcShard::GetCcm(const TableName &table_name, uint32_t node_group)
@@ -821,6 +831,7 @@ TxLockInfo *CcShard::UpsertLockHoldingTx(TxNumber txn,
 {
     auto [ng_it, is_new_ng] = lock_holding_txs_.try_emplace(cc_ng_id);
     auto [tx_it, is_new_tx] = ng_it->second.try_emplace(txn);
+
     if (is_new_tx)
     {
         tx_it->second = GetTxLockInfo(tx_term);
@@ -2505,6 +2516,15 @@ CcShardHeap::CcShardHeap(CcShard *cc_shard, size_t limit)
         // Init defrag heap cc
         defrag_heap_cc_ = std::make_unique<DefragShardHeapCc>(this, 16);
     }
+
+#if defined(WITH_JEMALLOC)
+    // create arena for each ccshardheap
+    size_t sz = sizeof(uint32_t);
+    if (mallctl("arenas.create", &arena_id_, &sz, NULL, 0) != 0)
+    {
+        LOG(FATAL) << "Failed to create jemalloc arena for shard heap";
+    }
+#endif
 }
 
 CcShardHeap::~CcShardHeap()
@@ -2515,6 +2535,8 @@ CcShardHeap::~CcShardHeap()
     //{
     // mi_heap_destroy(heap_);
     //}
+
+    // TODO: destroy arena ?
 }
 
 mi_heap_t *CcShardHeap::SetAsDefaultHeap()
@@ -2522,8 +2544,40 @@ mi_heap_t *CcShardHeap::SetAsDefaultHeap()
     return mi_heap_set_default(heap_);
 }
 
+uint32_t CcShardHeap::SetAsDefaultArena()
+{
+#if defined(WITH_JEMALLOC)
+    uint32_t prev_arena;
+    JemallocArenaSwitcher::ReadCurrentArena(prev_arena);
+    JemallocArenaSwitcher::SwitchToArena(arena_id_);
+    return prev_arena;
+#else
+    assert(false);
+    return 0;
+#endif
+}
+
 bool CcShardHeap::Full(int64_t *alloc, int64_t *commit) const
 {
+#if defined(WITH_JEMALLOC)
+    // estimate thread memory usage from total process memory
+    size_t total_resident = 0;
+    size_t total_allocated = 0;
+    GetJemallocArenaStat(arena_id_, total_resident, total_allocated);
+
+    if (alloc != nullptr)
+    {
+        *alloc = total_allocated;
+    }
+
+    if (commit != nullptr)
+    {
+        *commit = total_resident;
+    }
+
+    return total_allocated >= memory_limit_;
+
+#else
     int64_t allocated, committed;
     mi_thread_stats(&allocated, &committed);
     if (alloc != nullptr)
@@ -2539,6 +2593,7 @@ bool CcShardHeap::Full(int64_t *alloc, int64_t *commit) const
     return allocated >= static_cast<int64_t>(memory_limit_) ||
            (cc_shard_->EnableDefragment() &&
             committed > static_cast<int64_t>(memory_limit_));
+#endif
 }
 
 bool CcShardHeap::NeedCleanShard(int64_t &alloc, int64_t &commit) const
@@ -2550,6 +2605,11 @@ bool CcShardHeap::NeedCleanShard(int64_t &alloc, int64_t &commit) const
 
 bool CcShardHeap::NeedDefragment(int64_t *alloc, int64_t *commit) const
 {
+#if defined(WITH_JEMALLOC)
+    // defragmentation is not supported with jemalloc
+    return false;
+
+#else
     int64_t allocated, committed;
     mi_thread_stats(&allocated, &committed);
     if (alloc != nullptr)
@@ -2565,6 +2625,7 @@ bool CcShardHeap::NeedDefragment(int64_t *alloc, int64_t *commit) const
     return committed > (memory_limit_ * CcShardHeap::high_water) &&
            (static_cast<double>(allocated) / static_cast<double>(committed)) <=
                CcShardHeap::utilization;
+#endif
 }
 
 bool CcShardHeap::AsyncDefragment()

@@ -439,6 +439,17 @@ public:
                                         shard_->local_shards_
                                             .GetTableRangesHeap());
 
+#if defined(WITH_JEMALLOC)
+                                    uint32_t prev_arena;
+                                    JemallocArenaSwitcher::ReadCurrentArena(
+                                        prev_arena);
+                                    auto table_range_arena_id =
+                                        shard_->local_shards_
+                                            .GetTableRangesArenaId();
+                                    JemallocArenaSwitcher::SwitchToArena(
+                                        table_range_arena_id);
+#endif
+
                                     std::vector<SliceInitInfo> slices;
                                     range.second->InitRangeSlices(
                                         std::move(slices),
@@ -457,6 +468,12 @@ public:
                                     {
                                         mi_restore_default_thread_id();
                                     }
+
+#if defined(WITH_JEMALLOC)
+                                    JemallocArenaSwitcher::SwitchToArena(
+                                        prev_arena);
+
+#endif
                                     heap_lk.unlock();
                                 }
                             }

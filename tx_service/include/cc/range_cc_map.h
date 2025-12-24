@@ -1049,6 +1049,15 @@ public:
                         shard_->local_shards_.GetTableRangesHeapThreadId());
                     mi_heap_t *prev_heap = mi_heap_set_default(
                         shard_->local_shards_.GetTableRangesHeap());
+
+#if defined(WITH_JEMALLOC)
+                    uint32_t prev_arena;
+                    JemallocArenaSwitcher::ReadCurrentArena(prev_arena);
+                    // override arena id
+                    auto table_range_arena_id =
+                        shard_->local_shards_.GetTableRangesArenaId();
+                    JemallocArenaSwitcher::SwitchToArena(table_range_arena_id);
+#endif
                     old_table_range_entry->InitRangeSlices(
                         std::move(range_slices),
                         this->cc_ng_id_,
@@ -1063,6 +1072,10 @@ public:
                     {
                         mi_restore_default_thread_id();
                     }
+
+#if defined(WITH_JEMALLOC)
+                    JemallocArenaSwitcher::SwitchToArena(prev_arena);
+#endif
                     heap_lk.unlock();
                     old_table_range_entry->RangeSlices()->Lock();
                 }

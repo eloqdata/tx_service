@@ -24,6 +24,9 @@
 #include <bthread/moodycamelqueue.h>
 #include <butil/time.h>
 #include <mimalloc-2.1/mimalloc.h>
+#if defined(WITH_JEMALLOC)
+#include <jemalloc/jemalloc.h>
+#endif
 
 #include <algorithm>
 #include <atomic>
@@ -175,6 +178,39 @@ struct TxLockInfo
     std::unique_ptr<TxLockInfo> next_{nullptr};
 };
 
+#if defined(WITH_JEMALLOC)
+class JemallocArenaSwitcher
+{
+public:
+    explicit JemallocArenaSwitcher() = default;
+
+    static bool ReadCurrentArena(uint32_t &current_arena)
+    {
+        size_t sz = sizeof(uint32_t);
+        if (mallctl("thread.arena", &current_arena, &sz, nullptr, 0) != 0)
+        {
+            LOG(FATAL) << "Failed to read current arena";
+            return false;
+        }
+
+        return true;
+    }
+
+    static bool SwitchToArena(uint32_t arena)
+    {
+        if (mallctl(
+                "thread.arena", nullptr, nullptr, &arena, sizeof(uint32_t)) !=
+            0)
+        {
+            LOG(FATAL) << "Failed to switch arena " << arena;
+            return false;
+        }
+
+        return true;
+    }
+};
+#endif
+
 class CcShardHeap
 {
     static constexpr double high_water = 0.8;
@@ -188,6 +224,8 @@ public:
     // return the previous default heap.
     mi_heap_t *SetAsDefaultHeap();
 
+    uint32_t SetAsDefaultArena();
+
     // Check if this heap is full
     bool Full(int64_t *alloc = nullptr, int64_t *commit = nullptr) const;
 
@@ -198,6 +236,11 @@ public:
     mi_heap_t *Heap() const
     {
         return heap_;
+    }
+
+    uint32_t ArenaId() const
+    {
+        return arena_id_;
     }
 
     size_t Threshold() const
@@ -218,6 +261,11 @@ public:
         defrag_heap_cc_on_fly_ = on_fly;
     }
 
+    size_t MemoryLimit() const
+    {
+        return memory_limit_;
+    }
+
 private:
     CcShard *cc_shard_{nullptr};
     mi_heap_t *heap_{nullptr};
@@ -228,6 +276,8 @@ private:
     std::unique_ptr<DefragShardHeapCc> defrag_heap_cc_{nullptr};
     // indicating the per shard defrag heap cc is on fly
     bool defrag_heap_cc_on_fly_{false};
+
+    uint32_t arena_id_{0};
 };
 
 class CcShard

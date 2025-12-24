@@ -408,6 +408,14 @@ void FetchRangeSlicesReq::SetFinish(CcErrorCode err)
         mi_heap_t *prev_heap =
             mi_heap_set_default(shards->GetTableRangesHeap());
 
+#if defined(WITH_JEMALLOC)
+        uint32_t prev_arena;
+        JemallocArenaSwitcher::ReadCurrentArena(prev_arena);
+        // override arena id
+        auto table_range_arena_id = shards->GetTableRangesArenaId();
+        JemallocArenaSwitcher::SwitchToArena(table_range_arena_id);
+#endif
+
         range_entry_->InitRangeSlices(std::move(slice_info_),
                                       cc_ng_id_,
                                       table_name_.IsBase(),
@@ -424,6 +432,10 @@ void FetchRangeSlicesReq::SetFinish(CcErrorCode err)
         {
             mi_restore_default_thread_id();
         }
+
+#if defined(WITH_JEMALLOC)
+        JemallocArenaSwitcher::SwitchToArena(prev_arena);
+#endif
         heap_lk.unlock();
 
         for (auto [req, ccs] : requesters_)

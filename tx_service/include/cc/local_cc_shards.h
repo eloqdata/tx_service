@@ -38,6 +38,7 @@
 #include <string_view>
 #include <thread>
 #include <tuple>
+#include <type_traits>
 #include <unordered_map>
 #include <unordered_set>
 #include <utility>
@@ -61,6 +62,13 @@
 #include "tx_service_common.h"
 #include "tx_start_ts_collector.h"
 #include "type.h"
+
+#ifdef WITH_JEMALLOC
+// we use uint32_t instead of unsigned to make the code more readable
+static_assert(std::is_same_v<unsigned, uint32_t>,
+              "jemalloc uses 'unsigned' for arena id, but this platform "
+              "has unsigned != uint32_t. Please adjust the type alias.");
+#endif
 
 namespace txservice
 {
@@ -423,12 +431,34 @@ public:
             table_ranges_thread_id_ = mi_thread_id();
             table_ranges_heap_ = mi_heap_new();
         }
+
+#if defined(WITH_JEMALLOC)
+        // create table ranges arena
+        size_t sz = sizeof(uint32_t);
+        if (mallctl("arenas.create", &table_ranges_arena_id_, &sz, NULL, 0) !=
+            0)
+        {
+            LOG(FATAL) << "Failed to create jemalloc arena for table ranges";
+        }
+#endif
     }
 
     void InitializeHashPartitionCkptHeap()
     {
         hash_partition_ckpt_heap_ = mi_heap_new();
         hash_partition_main_thread_id_ = mi_thread_id();
+#if defined(WITH_JEMALLOC)
+        // create hash partition ckpt arena
+        size_t sz = sizeof(uint32_t);
+        if (mallctl("arenas.create",
+                    &hash_partition_ckpt_arena_id_,
+                    &sz,
+                    NULL,
+                    0) != 0)
+        {
+            LOG(FATAL) << "Failed to create jemalloc arena for hash part heap";
+        }
+#endif
     }
 
     mi_threadid_t GetTableRangesHeapThreadId() const
@@ -441,6 +471,11 @@ public:
         return table_ranges_heap_;
     }
 
+    uint32_t GetTableRangesArenaId() const
+    {
+        return table_ranges_arena_id_;
+    }
+
     /**
      * @brief Check whether the table ranges heap reach the limitation.
      * NOTE: Be sure that this function is called in context of table ranges
@@ -448,6 +483,14 @@ public:
      */
     bool TableRangesMemoryFull()
     {
+#if defined(WITH_JEMALLOC)
+        auto table_range_arena_id = GetTableRangesArenaId();
+        size_t committed = 0;
+        size_t allocated = 0;
+        GetJemallocArenaStat(table_range_arena_id, committed, allocated);
+        return (static_cast<size_t>(allocated) >= range_slice_memory_limit_);
+
+#else
         if (table_ranges_heap_ != nullptr)
         {
             int64_t allocated, committed;
@@ -459,6 +502,7 @@ public:
         {
             return false;
         }
+#endif
     }
 
     /**
@@ -468,6 +512,16 @@ public:
      */
     bool HasEnoughTableRangesMemory()
     {
+#if defined(WITH_JEMALLOC)
+        auto table_range_arena_id = GetTableRangesArenaId();
+
+        size_t committed = 0;
+        size_t allocated = 0;
+        GetJemallocArenaStat(table_range_arena_id, committed, allocated);
+        size_t target_memory_size = range_slice_memory_limit_ / 10 * 9;
+        return (static_cast<size_t>(allocated) <= target_memory_size);
+
+#else
         if (table_ranges_heap_ != nullptr)
         {
             size_t target_memory_size = range_slice_memory_limit_ / 10 * 9;
@@ -479,10 +533,20 @@ public:
         {
             return false;
         }
+#endif
     }
 
     void TableRangeHeapUsageReport()
     {
+#if defined(WITH_JEMALLOC)
+        size_t committed = 0;
+        size_t allocated = 0;
+        GetJemallocArenaStat(GetTableRangesArenaId(), committed, allocated);
+        LOG(INFO) << "Table range memory report: allocated " << allocated
+                  << ", committed " << committed << ", full: "
+                  << (bool) (static_cast<size_t>(allocated) >=
+                             range_slice_memory_limit_);
+#else
         std::unique_lock<std::mutex> heap_lk(table_ranges_heap_mux_);
         bool is_override_thd = mi_is_override_thread();
         mi_threadid_t prev_thd =
@@ -506,6 +570,7 @@ public:
             mi_restore_default_thread_id();
         }
         heap_lk.unlock();
+#endif
     }
 
     /**
@@ -831,6 +896,13 @@ public:
         mi_threadid_t prev_thd = mi_override_thread(table_ranges_thread_id_);
         mi_heap_t *prev_heap = mi_heap_set_default(table_ranges_heap_);
 
+#if defined(WITH_JEMALLOC)
+        uint32_t prev_arena_id;
+        JemallocArenaSwitcher::ReadCurrentArena(prev_arena_id);
+        auto table_range_arena_id = GetTableRangesArenaId();
+        JemallocArenaSwitcher::SwitchToArena(table_range_arena_id);
+#endif
+
         TxKey range_tx_key(&start_key);
         auto range_it = ranges->find(range_tx_key);
         if (range_it == ranges->end())
@@ -894,6 +966,11 @@ public:
             {
                 mi_restore_default_thread_id();
             }
+
+#if defined(WITH_JEMALLOC)
+            JemallocArenaSwitcher::SwitchToArena(prev_arena_id);
+#endif
+
             if (last_sync_ts > 0)
             {
                 new_range_ptr->UpdateLastDataSyncTS(last_sync_ts);
@@ -937,6 +1014,10 @@ public:
             mi_restore_default_thread_id();
         }
         mi_heap_set_default(prev_heap);
+
+#if defined(WITH_JEMALLOC)
+        JemallocArenaSwitcher::SwitchToArena(prev_arena_id);
+#endif
 
         return static_cast<TemplateTableRangeEntry<KeyT> *>(
             range_it->second.get());
@@ -1939,6 +2020,9 @@ private:
     mi_heap_t *table_ranges_heap_{nullptr};
     mi_threadid_t table_ranges_thread_id_{0};
 
+    uint32_t table_ranges_arena_id_{0};
+    uint32_t hash_partition_ckpt_arena_id_{0};
+
     std::atomic_bool buckets_migrating_{false};
 
     std::unordered_map<TableName, std::string> prebuilt_tables_;
@@ -2281,6 +2365,10 @@ private:
 
     void DataSyncWorker(size_t worker_idx);
 
+#if defined(WITH_JEMALLOC)
+    void EpochWorker();
+#endif
+
     void DataSyncForHashPartition(std::shared_ptr<DataSyncTask> data_sync_task,
                                   size_t worker_idx);
 
@@ -2391,6 +2479,10 @@ private:
 
     WorkerThreadContext kickout_data_test_worker_ctx_;
     void KickoutDataForTest();
+
+#if defined(WITH_JEMALLOC)
+    WorkerThreadContext epoch_worker_ctx_;
+#endif
 
     void ReportHashPartitionCkptHeapUsage();
 

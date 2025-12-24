@@ -5137,10 +5137,15 @@ public:
         mi_heap_t *prev_heap = scan_heap->SetAsDefaultHeap();
         assert(shard_->GetShardHeapThreadId() == mi_thread_id());
 
+#if defined(WITH_JEMALLOC)
+        auto prev_arena = scan_heap->SetAsDefaultArena();
+#endif
+
         // If the heap is full, we should stop exporting.
         std::pair<size_t, bool> export_size = {0, true};
         // Do not try to call mi_heap_collect, since it is expensive, flush data
         // will return the memory anyway when it done
+
         if (!scan_heap->Full())
         {
             export_size.first =
@@ -5160,6 +5165,11 @@ public:
         }
 
         mi_heap_set_default(prev_heap);
+
+#if defined(WITH_JEMALLOC)
+        JemallocArenaSwitcher::SwitchToArena(prev_arena);
+#endif
+
         return export_size;
     }
 

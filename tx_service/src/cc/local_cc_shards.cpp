@@ -123,6 +123,7 @@ LocalCcShards::LocalCcShards(
       flush_data_worker_ctx_(
           std::min(static_cast<int>(conf.at("core_num")), 10)),
 #endif
+
       cur_flush_buffer_(
           static_cast<uint64_t>(MB(conf.at("node_memory_limit_mb")) * 0.05)),
       data_sync_mem_controller_(
@@ -133,6 +134,9 @@ LocalCcShards::LocalCcShards(
       kickout_data_test_worker_ctx_(conf.count("kickout_data_for_test") > 0
                                         ? conf.at("kickout_data_for_test")
                                         : 0),
+#if defined(WITH_JEMALLOC)
+      epoch_worker_ctx_(1),
+#endif
       publish_func_(publish_func),
       enable_shard_heap_defragment_(conf.at("enable_shard_heap_defragment")),
       fast_meta_data_mux_(conf.at("core_num"), meta_data_mux_)
@@ -287,6 +291,13 @@ void LocalCcShards::StartBackgroudWorkers()
         std::string thread_name = "data_sync_" + std::to_string(id);
         pthread_setname_np(thd.native_handle(), thread_name.c_str());
     }
+
+#if defined(WITH_JEMALLOC)
+    for (int id = 0; id < epoch_worker_ctx_.worker_num_; ++id)
+    {
+        epoch_worker_ctx_.worker_thd_.emplace_back([this] { EpochWorker(); });
+    }
+#endif
 
     if (realtime_sampling_)
     {
@@ -1020,6 +1031,14 @@ void LocalCcShards::InitTableRanges(const TableName &range_table_name,
     mi_threadid_t prev_thd = mi_override_thread(table_ranges_thread_id_);
     mi_heap_t *prev_heap = mi_heap_set_default(table_ranges_heap_);
 
+#if defined(WITH_JEMALLOC)
+    uint32_t prev_arena;
+    JemallocArenaSwitcher::ReadCurrentArena(prev_arena);
+    // override arena id
+    auto table_range_arena_id = GetTableRangesArenaId();
+    JemallocArenaSwitcher::SwitchToArena(table_range_arena_id);
+#endif
+
     // Init table ranges
     assert(range_table_name.Type() == TableType::RangePartition);
     auto table_it = table_ranges_.try_emplace(range_table_name);
@@ -1112,6 +1131,10 @@ void LocalCcShards::InitTableRanges(const TableName &range_table_name,
     {
         mi_restore_default_thread_id();
     }
+
+#if defined(WITH_JEMALLOC)
+    JemallocArenaSwitcher::SwitchToArena(prev_arena);
+#endif
 }
 
 void LocalCcShards::InitPrebuiltTables(NodeGroupId ng_id, int64_t term)
@@ -1283,6 +1306,15 @@ void LocalCcShards::KickoutRangeSlices()
                             mi_heap_t *prev_heap =
                                 mi_heap_set_default(GetTableRangesHeap());
 
+#if defined(WITH_JEMALLOC)
+                            uint32_t prev_arena;
+                            JemallocArenaSwitcher::ReadCurrentArena(prev_arena);
+                            // override arena id
+                            auto table_range_arena_id = GetTableRangesArenaId();
+                            JemallocArenaSwitcher::SwitchToArena(
+                                table_range_arena_id);
+#endif
+
                             range_entry->DropStoreRange();
 
                             bool has_enough_mem = HasEnoughTableRangesMemory();
@@ -1295,6 +1327,10 @@ void LocalCcShards::KickoutRangeSlices()
                             {
                                 mi_restore_default_thread_id();
                             }
+
+#if defined(WITH_JEMALLOC)
+                            JemallocArenaSwitcher::SwitchToArena(prev_arena);
+#endif
                             if (has_enough_mem)
                             {
                                 // We've cleaned up enough memory space.
@@ -1332,6 +1368,13 @@ void LocalCcShards::KickoutRangeSlices()
             mi_threadid_t prev_thd =
                 mi_override_thread(GetTableRangesHeapThreadId());
             mi_heap_t *prev_heap = mi_heap_set_default(GetTableRangesHeap());
+#if defined(WITH_JEMALLOC)
+            uint32_t prev_arena;
+            JemallocArenaSwitcher::ReadCurrentArena(prev_arena);
+            // override arena id
+            auto table_range_arena_id = GetTableRangesArenaId();
+            JemallocArenaSwitcher::SwitchToArena(table_range_arena_id);
+#endif
 
             entry->DropStoreRange();
 
@@ -1345,6 +1388,10 @@ void LocalCcShards::KickoutRangeSlices()
             {
                 mi_restore_default_thread_id();
             }
+
+#if defined(WITH_JEMALLOC)
+            JemallocArenaSwitcher::SwitchToArena(prev_arena);
+#endif
 
             if (has_enough_mem)
             {
@@ -2066,6 +2113,15 @@ bool LocalCcShards::DropStoreRangesInBucket(NodeGroupId ng_id,
                         mi_heap_t *prev_heap =
                             mi_heap_set_default(GetTableRangesHeap());
 
+#if defined(WITH_JEMALLOC)
+                        uint32_t prev_arena;
+                        JemallocArenaSwitcher::ReadCurrentArena(prev_arena);
+                        // override arena id
+                        auto table_range_arena_id = GetTableRangesArenaId();
+                        JemallocArenaSwitcher::SwitchToArena(
+                            table_range_arena_id);
+#endif
+
                         entry->DropStoreRange();
 
                         mi_heap_set_default(prev_heap);
@@ -2077,6 +2133,10 @@ bool LocalCcShards::DropStoreRangesInBucket(NodeGroupId ng_id,
                         {
                             mi_restore_default_thread_id();
                         }
+
+#if defined(WITH_JEMALLOC)
+                        JemallocArenaSwitcher::SwitchToArena(prev_arena);
+#endif
                     }
                     else
                     {
@@ -2851,7 +2911,31 @@ void LocalCcShards::Terminate()
     {
         kickout_data_test_worker_ctx_.Terminate();
     }
+
+#if defined(WITH_JEMALLOC)
+    epoch_worker_ctx_.Terminate();
+#endif
 }
+
+#if defined(WITH_JEMALLOC)
+void LocalCcShards::EpochWorker()
+{
+    std::unique_lock<std::mutex> lk(epoch_worker_ctx_.mux_);
+    using clock = std::chrono::steady_clock;
+    auto next = clock::now() + std::chrono::seconds(1);
+
+    while (epoch_worker_ctx_.status_ == WorkerStatus::Active)
+    {
+        if (epoch_worker_ctx_.cv_.wait_until(lk, next) ==
+            std::cv_status::timeout)
+        {
+            uint64_t epoch = 1;
+            mallctl("epoch", nullptr, nullptr, &epoch, sizeof(epoch));
+            next += std::chrono::seconds(1);
+        }
+    }
+}
+#endif
 
 void LocalCcShards::DataSyncWorker(size_t worker_idx)
 {
@@ -4923,6 +5007,12 @@ void LocalCcShards::DataSyncForHashPartition(
             mi_heap_t *prev_heap =
                 mi_heap_set_default(hash_partition_ckpt_heap_);
 
+#if defined(WITH_JEMALLOC)
+            uint32_t prev_arena;
+            JemallocArenaSwitcher::ReadCurrentArena(prev_arena);
+            JemallocArenaSwitcher::SwitchToArena(hash_partition_ckpt_arena_id_);
+#endif
+
             data_sync_vec->reserve(scan_cc.accumulated_scan_cnt_);
             for (size_t j = 0; j < scan_cc.accumulated_scan_cnt_; ++j)
             {
@@ -4978,6 +5068,12 @@ void LocalCcShards::DataSyncForHashPartition(
             }
             mi_override_thread(prev_thd);
             mi_heap_set_default(prev_heap);
+
+#if defined(WITH_JEMALLOC)
+            // override arena id
+            JemallocArenaSwitcher::SwitchToArena(prev_arena);
+#endif
+
             heap_lk.unlock();
 
             std::move(scan_cc.ArchiveVec().begin(),
@@ -6503,6 +6599,19 @@ void LocalCcShards::KickoutDataForTest()
 
 void LocalCcShards::ReportHashPartitionCkptHeapUsage()
 {
+#if defined(WITH_JEMALLOC)
+    size_t committed = 0;
+    size_t allocated = 0;
+    GetJemallocArenaStat(hash_partition_ckpt_arena_id_, committed, allocated);
+    if (committed != 0)
+    {
+        LOG(INFO) << "ckpt hash partition heap memory usage report, committed "
+                  << committed << ", allocated " << allocated << ", frag ratio "
+                  << std::setprecision(2)
+                  << 100 * (static_cast<float>(committed - allocated) /
+                            static_cast<float>(committed));
+    }
+#else
     std::unique_lock<std::mutex> heap_lk(hash_partition_ckpt_heap_mux_);
     mi_threadid_t prev_thd = mi_override_thread(hash_partition_main_thread_id_);
     mi_heap_t *prev_heap = mi_heap_set_default(hash_partition_ckpt_heap_);
@@ -6518,6 +6627,7 @@ void LocalCcShards::ReportHashPartitionCkptHeapUsage()
     }
     mi_override_thread(prev_thd);
     mi_heap_set_default(prev_heap);
+#endif
 }
 
 bool LocalCcShards::GetNextRangePartitionId(const TableName &tablename,

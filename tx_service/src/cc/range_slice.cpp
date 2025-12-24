@@ -530,6 +530,14 @@ void StoreRange::UpdateSliceSpec(StoreSlice *slice,
     mi_heap_t *prev_heap =
         mi_heap_set_default(local_cc_shards_.GetTableRangesHeap());
 
+#if defined(WITH_JEMALLOC)
+    uint32_t prev_arena;
+    JemallocArenaSwitcher::ReadCurrentArena(prev_arena);
+    // override arena id
+    auto table_range_arena_id = local_cc_shards_.GetTableRangesArenaId();
+    JemallocArenaSwitcher::SwitchToArena(table_range_arena_id);
+#endif
+
     UpdateSlice(slice, split_keys);
 
     bool range_slice_mem_full = local_cc_shards_.TableRangesMemoryFull();
@@ -542,6 +550,10 @@ void StoreRange::UpdateSliceSpec(StoreSlice *slice,
     {
         mi_restore_default_thread_id();
     }
+#if defined(WITH_JEMALLOC)
+    JemallocArenaSwitcher::SwitchToArena(prev_arena);
+#endif
+
     heap_lk.unlock();
 
     slice->to_alter_ = false;
