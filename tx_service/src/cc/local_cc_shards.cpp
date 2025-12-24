@@ -4064,10 +4064,12 @@ void LocalCcShards::DataSyncForRangePartition(
 
     while (!scan_data_drained)
     {
-        for (size_t i = 0; i < cc_shards_.size(); ++i)
-        {
-            EnqueueLowPriorityCcRequestToShard(i, &scan_cc);
-        }
+        uint32_t core_rand = butil::fast_rand();
+        // The scan slice request is dispatched to the first core. The first
+        // core tries to pin the slice if necessary and if succeeds, further
+        // dispatches the request to remaining cores for parallel scans.
+        EnqueueLowPriorityCcRequestToShard(core_rand % cc_shards_.size(),
+                                           &scan_cc);
         scan_cc.Wait();
 
         if (scan_cc.IsError())

@@ -5212,15 +5212,6 @@ public:
             return false;
         }
 
-        if (req.IsDrained(shard_->core_id_))
-        {
-            // scan is already finished on this core
-            req.SetFinish(shard_->core_id_);
-            return false;
-        }
-
-        auto &pause_key_and_is_drained = req.PausePos(shard_->core_id_);
-
         std::function<int32_t(int32_t, bool)> next_slice_func;
         if (req.export_base_table_item_)
         {
@@ -5254,7 +5245,7 @@ public:
         }
 
         auto pin_range_slice =
-            [this, &req, &pause_key_and_is_drained, &next_slice_func](
+            [this, &req, &next_slice_func](
                 const KeyT &search_key) -> std::pair<RangeSliceId, bool>
         {
             size_t prefetch_size = 32;
@@ -5290,13 +5281,11 @@ public:
             }
             case RangeSliceOpStatus::BlockedOnLoad:
             {
-                pause_key_and_is_drained.first = search_key.CloneTxKey();
                 succ = false;
                 break;
             }
             case RangeSliceOpStatus::Retry:
             {
-                pause_key_and_is_drained.first = search_key.CloneTxKey();
                 shard_->Enqueue(shard_->LocalCoreId(), &req);
                 succ = false;
                 break;
@@ -5339,14 +5328,20 @@ public:
             return res_it;
         };
 
-        auto check_split_slice =
-            [this, &req](std::vector<TxKey>::const_iterator &slice_it) -> bool
+        auto check_split_slice = [this, &req](const KeyT &slice_key) -> bool
         {
-            const StoreSlice *slice = req.StoreRangePtr()->FindSlice(*slice_it);
+            TemplateStoreRange<KeyT> *range_ptr =
+                static_cast<TemplateStoreRange<KeyT> *>(req.StoreRangePtr());
+            const TemplateStoreSlice<KeyT> *slice =
+                range_ptr->FindSlice(slice_key);
 
             assert(slice->PostCkptSize() != UINT64_MAX);
             return slice->PostCkptSize() > StoreSlice::slice_upper_bound;
         };
+
+        const KeyT *const req_start_key = req.start_key_ != nullptr
+                                              ? req.start_key_->GetKey<KeyT>()
+                                              : KeyT::NegativeInfinity();
 
         const KeyT *req_end_key = nullptr;
         if (req.export_base_table_item_)
@@ -5354,51 +5349,92 @@ public:
             req_end_key = req.end_key_ != nullptr ? req.end_key_->GetKey<KeyT>()
                                                   : KeyT::PositiveInfinity();
         }
-        else
+
+        if (!req.slice_coordinator_.IsReadyForScan())
         {
-            auto curr_slice_it = req.CurrentSliceIt(shard_->core_id_);
-            while (std::next(curr_slice_it) != req.EndSliceIt())
+            const KeyT *start_key = req.slice_coordinator_.StartKey<KeyT>();
+            start_key = start_key == nullptr ? req_start_key : start_key;
+            uint16_t prepared_slice_cnt =
+                req.slice_coordinator_.PreparedSliceCnt();
+
+            for (; prepared_slice_cnt <
+                       RangePartitionDataSyncScanCc::SliceCoordinator::
+                           MaxBatchSliceCount &&
+                   !req.slice_coordinator_.IsLastSlice(req_end_key);
+                 ++prepared_slice_cnt,
+                 start_key = req.slice_coordinator_.StartKey<KeyT>())
             {
-                ++curr_slice_it;
+                // Get the search key
+                if (!req.export_base_table_item_ &&
+                    !check_split_slice(*start_key))
+                {
+                    req.slice_coordinator_.MoveNextSlice<KeyT>();
+                    continue;
+                }
+
+                // Execute the pinslice operation.
+                auto [new_slice_id, succ] = pin_range_slice(*start_key);
+                if (!succ)
+                {
+                    req.slice_coordinator_.UpdatePreparedSliceCnt(
+                        prepared_slice_cnt);
+                    return false;
+                }
+
+                if (!req.export_base_table_item_)
+                {
+                    req.slice_coordinator_.SlicePinned();
+                }
+
+                // Store the pinned slice
+                req.slice_coordinator_.StorePinnedSlice(new_slice_id);
+                const TemplateStoreSlice<KeyT> *slice =
+                    static_cast<const TemplateStoreSlice<KeyT> *>(
+                        new_slice_id.Slice());
+                const KeyT *slice_end_key = slice->EndKey();
+                // update slice
+                req.slice_coordinator_.MoveNextSlice<KeyT>(slice_end_key);
             }
-            req_end_key = req.StoreRangePtr()
-                              ->FindSlice(*curr_slice_it)
-                              ->EndTxKey()
-                              .GetKey<KeyT>();
+            req.slice_coordinator_.UpdateBatchEnd();
+            req.slice_coordinator_.SetReadyForScan();
+            req.SetUnfinishedCoreCnt(shard_->core_cnt_);
+
+            // Dispatch the request to the cores
+            for (uint16_t core_id = 0; core_id < shard_->core_cnt_; ++core_id)
+            {
+                if (core_id == shard_->core_id_)
+                {
+                    continue;
+                }
+                shard_->Enqueue(shard_->LocalCoreId(), core_id, &req);
+            }
         }
 
-        auto find_non_empty_slice = [this,
-                                     &req,
-                                     req_end_key,
-                                     &deduce_iterator,
-                                     &check_split_slice,
-                                     &pin_range_slice](const KeyT &search_key,
-                                                       bool move_next = true)
-            -> std::tuple<Iterator, Iterator, const KeyT *, bool, bool, bool>
+        if (req.IsDrained(shard_->core_id_))
+        {
+            // scan is already finished on this core
+            req.SetFinish(shard_->core_id_);
+            return false;
+        }
+
+        auto &pause_key_and_is_drained = req.PausePos(shard_->core_id_);
+
+        auto find_non_empty_slice =
+            [this, &req, &deduce_iterator](const KeyT &search_key)
+            -> std::tuple<Iterator, Iterator, const KeyT *>
         {
             // Check whether need to pinslice.
-            bool need_pin_slice = false;
             const KeyT *start_key = nullptr;
             if (req.export_base_table_item_)
             {
                 start_key = &search_key;
-                need_pin_slice = !req.slice_ids_[shard_->core_id_].Slice();
             }
             else
             {
-                auto &curr_slice_it = req.CurrentSliceIt(shard_->core_id_);
-                if (move_next)
-                {
-                    ++curr_slice_it;
-                }
-                assert(curr_slice_it != req.EndSliceIt());
-
-                need_pin_slice = !req.slice_ids_[shard_->core_id_].Slice() &&
-                                 check_split_slice(curr_slice_it);
-                const KeyT *curr_start_key = req.StoreRangePtr()
-                                                 ->FindSlice(*curr_slice_it)
-                                                 ->StartTxKey()
-                                                 .GetKey<KeyT>();
+                assert(!req.TheLastSlice(shard_->core_id_));
+                const TxKey &curr_start_tx_key =
+                    req.CurrentSliceKey(shard_->core_id_);
+                const KeyT *curr_start_key = curr_start_tx_key.GetKey<KeyT>();
                 start_key = (*curr_start_key < search_key ? &search_key
                                                           : curr_start_key);
                 assert(
@@ -5406,7 +5442,7 @@ public:
                     {
                         const KeyT *curr_end_key =
                             req.StoreRangePtr()
-                                ->FindSlice(*curr_slice_it)
+                                ->FindSlice(curr_start_tx_key)
                                 ->EndTxKey()
                                 .GetKey<KeyT>();
                         return !(*curr_start_key < search_key) ||
@@ -5417,97 +5453,27 @@ public:
             // Loop to find slice if need until find one non-empty slice or
             // reach to the last slice of this request.
             StoreSlice *store_slice = nullptr;
-            bool slice_pinned =
-                req.slice_ids_[shard_->core_id_].Slice() != nullptr;
             Iterator it;
             Iterator end_it;
             const KeyT *slice_end_key = nullptr;
-            bool is_last_slice = false;
             do
             {
-                if (need_pin_slice)
-                {
-                    // Execute the pinslice operation, and return the
-                    // RangeSliceId If the value of export_base_table_item_ is
-                    // false, it means that the pin slice operation is required
-                    // due to slice splitting, then, only need pin the current
-                    // slice that needs to be split.
-                    auto [new_slice_id, succ] = pin_range_slice(*start_key);
-                    if (!succ)
-                    {
-                        return {Iterator(),
-                                Iterator(),
-                                nullptr,
-                                false,
-                                false,
-                                false};
-                    }
-                    assert(new_slice_id.Slice());
-
-                    // Store the range slice id
-                    req.slice_ids_[shard_->core_id_] = new_slice_id;
-                    slice_pinned = true;
-                }
-
-                // Get the begin iterator and the end iterator of current slice.
-                it = deduce_iterator(*start_key);
-
-                if (req.slice_ids_[shard_->core_id_].Slice())
-                {
-                    assert(slice_pinned);
-                    store_slice = req.slice_ids_[shard_->core_id_].Slice();
-                }
-                else
-                {
-                    assert(!req.export_base_table_item_);
-                    auto &curr_slice_it = req.CurrentSliceIt(shard_->core_id_);
-                    // Store the slice
-                    store_slice =
-                        req.StoreRangePtr()->FindSlice(*curr_slice_it);
-                }
-
+                store_slice = req.CurrentSlice(shard_->core_id_);
                 const TemplateStoreSlice<KeyT> *typed_slice =
                     static_cast<const TemplateStoreSlice<KeyT> *>(store_slice);
+                start_key =
+                    start_key == nullptr ? typed_slice->StartKey() : start_key;
+                // Get the begin iterator and the end iterator of current slice.
+                it = deduce_iterator(*start_key);
                 slice_end_key = typed_slice->EndKey();
                 end_it = deduce_iterator(*slice_end_key);
 
-                is_last_slice = !(*slice_end_key < *req_end_key);
-
-                if (it == end_it && !is_last_slice)
+                if (it == end_it && !req.TheLastSlice(shard_->core_id_))
                 {
                     // The current slice is empty, and it is not the last slice
-                    // of the request. Try to find next slice if need. Unpin and
-                    // reset
-                    if (slice_pinned)
-                    {
-                        req.slice_ids_[shard_->core_id_].Unpin();
-                        req.slice_ids_[shard_->core_id_].Reset();
-                        slice_pinned = false;
-                    }
-
-                    // Try find next slice if the current slice is not the last
-                    // slice of this request.
-                    if (req.export_base_table_item_)
-                    {
-                        need_pin_slice = true;
-                        // Get the search start key
-                        start_key = slice_end_key;
-                    }
-                    else
-                    {
-                        auto &curr_slice_it =
-                            req.CurrentSliceIt(shard_->core_id_);
-                        ++curr_slice_it;
-                        assert(curr_slice_it != req.EndSliceIt());
-                        need_pin_slice = check_split_slice(curr_slice_it);
-
-                        // Get the search start key of next slice that contains
-                        // non-persisted keys.
-                        start_key = req.StoreRangePtr()
-                                        ->FindSlice(*curr_slice_it)
-                                        ->StartTxKey()
-                                        .GetKey<KeyT>();
-                    }
+                    // of the request. Try to find next slice if need.
+                    req.MoveToNextSlice(shard_->core_id_);
+                    start_key = nullptr;
                 }
                 else
                 {
@@ -5517,13 +5483,8 @@ public:
                 }
             } while (true);
 
-            return {
-                it, end_it, slice_end_key, slice_pinned, is_last_slice, true};
+            return {it, end_it, slice_end_key};
         };
-
-        const KeyT *const req_start_key = req.start_key_ != nullptr
-                                              ? req.start_key_->GetKey<KeyT>()
-                                              : KeyT::NegativeInfinity();
 
         Iterator key_it;
         Iterator slice_end_it = key_it;
@@ -5542,22 +5503,10 @@ public:
             search_start_key = pause_key_and_is_drained.first.GetKey<KeyT>();
         }
 
-        bool slice_pinned = false;
-        bool succ = false;
         const KeyT *slice_end_key = req_end_key;
-        bool is_last_slice = false;
         bool is_scan_mem_full = false;
-        std::tie(key_it,
-                 slice_end_it,
-                 slice_end_key,
-                 slice_pinned,
-                 is_last_slice,
-                 succ) = find_non_empty_slice(*search_start_key, false);
-        if (!succ)
-        {
-            // The request is blocked by pin slice.
-            return false;
-        }
+        std::tie(key_it, slice_end_it, slice_end_key) =
+            find_non_empty_slice(*search_start_key);
 
         uint64_t recycle_ts = 1U;
         if (shard_->EnableMvcc() && !req.export_base_table_item_only_)
@@ -5565,13 +5514,14 @@ public:
             recycle_ts = shard_->GlobalMinSiTxStartTs();
         }
 
+        bool slice_pinned = req.IsSlicePinned(shard_->core_id_);
         // The following flag is used to mark the behavior of one slice.
         // Only need to export the key if the key is already persisted, this
         // will happen when the slice need to split, and should export all the
         // keys in this slice to get the subslice keys.
         bool export_persisted_key_only =
             !req.export_base_table_item_ && slice_pinned;
-        assert(key_it != slice_end_it || is_last_slice);
+        assert(key_it != slice_end_it || req.TheLastSlice(shard_->core_id_));
 
         // 3. Loop to scan keys
         // DataSyncScanCc is running on TxProcessor thread. To avoid
@@ -5663,30 +5613,18 @@ public:
             // Check whether reach to the end of the current slice
             if (key_it == slice_end_it)
             {
-                if (slice_pinned)
+                slice_pinned = false;
+                if (!req.TheLastSlice(shard_->core_id_))
                 {
-                    req.slice_ids_[shard_->core_id_].Unpin();
-                    req.slice_ids_[shard_->core_id_].Reset();
-                    slice_pinned = false;
-                }
-
-                if (!is_last_slice)
-                {
+                    // Move to the next slice
+                    req.MoveToNextSlice(shard_->core_id_);
                     // Reach to the end of current slice, and find the next
                     // slice.
                     search_start_key = slice_end_key;
-                    std::tie(key_it,
-                             slice_end_it,
-                             slice_end_key,
-                             slice_pinned,
-                             is_last_slice,
-                             succ) = find_non_empty_slice(*search_start_key);
-                    if (!succ)
-                    {
-                        // The request is blocked by pin slice.
-                        return false;
-                    }
+                    std::tie(key_it, slice_end_it, slice_end_key) =
+                        find_non_empty_slice(*search_start_key);
 
+                    slice_pinned = req.IsSlicePinned(shard_->core_id_);
                     export_persisted_key_only =
                         !req.export_base_table_item_ && slice_pinned;
                 }
@@ -5701,17 +5639,6 @@ public:
             next_pause_key = key_it->first->CloneTxKey();
         }
 
-        bool req_finished =
-            is_scan_mem_full || no_more_data ||
-            req.accumulated_scan_cnt_[shard_->core_id_] >= req.scan_batch_size_;
-        if (slice_pinned && req_finished)
-        {
-            // Unpin slice
-            // Must unpin the slice here, once the request finished.
-            req.slice_ids_[shard_->core_id_].Unpin();
-            req.slice_ids_[shard_->core_id_].Reset();
-        }
-
         // Set the pause_pos_ to mark resume position.
         pause_key_and_is_drained = {std::move(next_pause_key), no_more_data};
 
@@ -5720,8 +5647,10 @@ public:
             req.scan_heap_is_full_[shard_->core_id_] = 1;
         }
 
-        if (req_finished)
+        if (is_scan_mem_full || no_more_data ||
+            req.accumulated_scan_cnt_[shard_->core_id_] >= req.scan_batch_size_)
         {
+            // Request is finished
             req.SetFinish(shard_->core_id_);
             return false;
         }
