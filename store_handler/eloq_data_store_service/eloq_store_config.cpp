@@ -115,6 +115,9 @@ DEFINE_bool(eloq_store_prewarm_cloud_cache,
 DEFINE_uint32(eloq_store_prewarm_task_count,
               3,
               "EloqStore prewarm task count per shard.");
+DEFINE_bool(eloq_store_reuse_local_files,
+            false,
+            "EloqStore reuse local files in cloud mode");
 DEFINE_uint32(eloq_store_data_page_size, 1 << 12, "EloqStore data page size.");
 DEFINE_uint32(eloq_store_pages_per_file_shift,
               11,
@@ -443,6 +446,12 @@ EloqStoreConfig::EloqStoreConfig(const INIReader &config_reader,
             : config_reader.GetInteger("store",
                                        "eloq_store_prewarm_task_count",
                                        FLAGS_eloq_store_prewarm_task_count);
+    eloqstore_configs_.allow_reuse_local_caches =
+        !CheckCommandLineFlagIsDefault("eloq_store_reuse_local_files")
+            ? FLAGS_eloq_store_reuse_local_files
+            : config_reader.GetBoolean("store",
+                                       "eloq_store_reuse_local_files",
+                                       FLAGS_eloq_store_reuse_local_files);
     eloqstore_configs_.data_page_size =
         !CheckCommandLineFlagIsDefault("eloq_store_data_page_size")
             ? FLAGS_eloq_store_data_page_size
