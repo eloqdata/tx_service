@@ -428,6 +428,8 @@ public:
 
     size_t ProcessRequests();
 
+    size_t ProcessLowPriorityRequests();
+
     /**
      * @brief Find an available TEntry in tranaction array and initialize it.
      *
@@ -508,6 +510,11 @@ public:
     size_t QueueSize()
     {
         return cc_queue_size_.load(std::memory_order_relaxed);
+    }
+
+    size_t LowPriorityQueueSize()
+    {
+        return low_priority_cc_queue_size_.load(std::memory_order_relaxed);
     }
 
     CatalogFactory *GetCatalogFactory(TableEngine table_engine)

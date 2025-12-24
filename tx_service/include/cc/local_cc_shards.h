@@ -249,10 +249,20 @@ public:
         return cc_shards_[thd_id]->ProcessRequests();
     }
 
+    size_t ProcessLowPriorityRequests(size_t thd_id)
+    {
+        return cc_shards_[thd_id]->ProcessLowPriorityRequests();
+    }
+
     size_t QueueSize(size_t thd_id)
     {
         return cc_shards_[thd_id]->QueueSize();
     };
+
+    size_t LowPriorityQueueSize(size_t thd_id)
+    {
+        return cc_shards_[thd_id]->LowPriorityQueueSize();
+    }
 
     bool IsIdle(uint32_t thd_id) const
     {

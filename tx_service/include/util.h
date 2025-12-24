@@ -25,12 +25,17 @@
 #include <jemalloc/jemalloc.h>
 #endif
 
+#include <chrono>
 #include <fstream>
 #include <queue>
 #include <sstream>
 #include <string>
 #include <string_view>
 #include <vector>
+
+#if defined(__x86_64__) || defined(_M_X64)
+#include <x86intrin.h>  // For __rdtsc()
+#endif
 
 #include "sharder.h"
 #include "type.h"
@@ -468,5 +473,32 @@ static inline void GetJemallocArenaStat(uint32_t arena_id,
     allocated = small_allocated + large_allocated;
 }
 #endif
+/** @brief
+ * Low-cost timing helper for approximate microsecond measurement.
+ * Returns elapsed time in microseconds (approximate for x86/ARM, precise for
+ * fallback). Uses CPU-specific instructions for low overhead on x86/ARM
+ * platforms.
+ */
+static inline uint64_t ReadTimeMicroseconds()
+{
+    // Approximate conversion: assumes ~2GHz CPU (1μs = 2000 cycles)
+    // This is approximate but acceptable per requirements
+    static constexpr uint64_t APPROX_CYCLES_PER_MICROSECOND = 2000;
+#if defined(__x86_64__) || defined(_M_X64)
+    // Read TSC (Time Stamp Counter) - returns CPU cycles
+    uint64_t cycles = __rdtsc();
+    return cycles / APPROX_CYCLES_PER_MICROSECOND;
+#elif defined(__aarch64__)
+    // Read ARM virtual counter - returns timer ticks
+    uint64_t ticks;
+    __asm__ volatile("mrs %0, cntvct_el0" : "=r"(ticks));
+    return ticks / APPROX_CYCLES_PER_MICROSECOND;
+#else
+    // Fallback to std::chrono (slower but portable and precise)
+    using namespace std::chrono;
+    auto now = steady_clock::now();
+    return duration_cast<microseconds>(now.time_since_epoch()).count();
+#endif
+}
 
 }  // namespace txservice

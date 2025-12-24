@@ -510,29 +510,6 @@ void CcShard::EnqueueLowPriorityCcRequest(CcRequestBase *req)
 size_t CcShard::ProcessRequests()
 {
     size_t total = 0;
-    // Process low priority queue: dequeue exactly 1 request
-    uint32_t low_priority_queue_size =
-        low_priority_cc_queue_size_.load(std::memory_order_relaxed);
-    CcRequestBase *low_priority_req = nullptr;
-
-    if (low_priority_queue_size > 0)
-    {
-        low_priority_cc_queue_.try_dequeue(low_priority_req);
-
-        if (low_priority_req != nullptr)
-        {
-            assert(low_priority_cc_queue_size_.load(
-                       std::memory_order_relaxed) >= 1);
-            low_priority_cc_queue_size_.fetch_sub(1, std::memory_order_acq_rel);
-
-            bool finish = low_priority_req->Execute(*this);
-            if (finish)
-            {
-                low_priority_req->Free();
-            }
-            total++;
-        }
-    }
 
     uint32_t queue_size = cc_queue_size_.load(std::memory_order_relaxed);
 
@@ -580,6 +557,74 @@ size_t CcShard::ProcessRequests()
             }
         }
     } while (req_cnt > (req_buf_.size() >> 1) && total < 1000);
+
+    return total;
+}
+
+size_t CcShard::ProcessLowPriorityRequests()
+{
+    size_t total = 0;
+    constexpr uint64_t MAX_PROCESSING_TIME_MICROSECONDS = 50;
+
+    uint32_t low_priority_queue_size =
+        low_priority_cc_queue_size_.load(std::memory_order_relaxed);
+
+    if (low_priority_queue_size == 0)
+    {
+        return 0;
+    }
+
+    // Start timing (returns microseconds directly)
+    uint64_t start_time_microseconds = ReadTimeMicroseconds();
+    uint64_t total_elapsed_microseconds = 0;
+
+    while (total_elapsed_microseconds < MAX_PROCESSING_TIME_MICROSECONDS)
+    {
+        // Check if queue still has items
+        low_priority_queue_size =
+            low_priority_cc_queue_size_.load(std::memory_order_relaxed);
+        if (low_priority_queue_size == 0)
+        {
+            break;
+        }
+
+        // Dequeue one request
+        CcRequestBase *low_priority_req = nullptr;
+        bool dequeued = low_priority_cc_queue_.try_dequeue(low_priority_req);
+
+        if (!dequeued || low_priority_req == nullptr)
+        {
+            // Queue might be empty now, break
+            break;
+        }
+
+        // Update queue size
+        assert(low_priority_cc_queue_size_.load(std::memory_order_relaxed) >=
+               1);
+        low_priority_cc_queue_size_.fetch_sub(1, std::memory_order_acq_rel);
+
+        // Process the request
+        bool finish = low_priority_req->Execute(*this);
+        if (finish)
+        {
+            low_priority_req->Free();
+        }
+        total++;
+
+        // Check elapsed time (returns microseconds directly)
+        uint64_t current_time_microseconds = ReadTimeMicroseconds();
+        // Handle potential wraparound (unlikely but safe)
+        if (current_time_microseconds >= start_time_microseconds)
+        {
+            total_elapsed_microseconds =
+                current_time_microseconds - start_time_microseconds;
+        }
+        else
+        {
+            // Wraparound detected, use max value to break loop
+            total_elapsed_microseconds = MAX_PROCESSING_TIME_MICROSECONDS;
+        }
+    }
 
     return total;
 }
@@ -2658,7 +2703,7 @@ bool CcShardHeap::AsyncDefragment()
         }
 
         defrag_heap_cc_->Reset(std::move(node_groups_with_term));
-        cc_shard_->Enqueue(defrag_heap_cc_.get());
+        cc_shard_->EnqueueLowPriorityCcRequest(defrag_heap_cc_.get());
 
         LOG(INFO) << "Start defragmentation on shard#" << cc_shard_->core_id_
                   << ", node groups size: "

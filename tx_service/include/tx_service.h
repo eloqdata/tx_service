@@ -395,17 +395,22 @@ public:
             }
 
             if (loop == 0 && metrics::enable_busy_round_metrics &&
-                local_cc_shards_.QueueSize(thd_id_) >=
+                local_cc_shards_.QueueSize(thd_id_) +
+                        local_cc_shards_.LowPriorityQueueSize(thd_id_) >=
                     metrics::busy_round_threshold)
             {
                 is_busy_round = true;
                 busy_round_start = metrics::Clock::now();
             }
 
-            // Process CcRequests.
+            // Process regular CcRequests (low priority already processed above)
             req_cnt += local_cc_shards_.ProcessRequests(thd_id_);
         }
 
+        // Process low priority CC requests
+        size_t low_priority_req_cnt =
+            local_cc_shards_.ProcessLowPriorityRequests(thd_id_);
+        req_cnt += low_priority_req_cnt;
         active_cnt =
             on_fly_txs_.Size() + new_tx_cnt_.load(std::memory_order_relaxed);
 
