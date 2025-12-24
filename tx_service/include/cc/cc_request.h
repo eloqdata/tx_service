@@ -4184,7 +4184,10 @@ public:
                 data_sync_vec_[i].resize(scan_batch_size_);
                 scan_heap_is_full_[i] = 0;
             }
-            curr_slice_index_[i] = 0;
+            if (export_base_table_item_)
+            {
+                curr_slice_index_[i] = 0;
+            }
         }
 
         err_ = CcErrorCode::NO_ERROR;
@@ -4226,17 +4229,21 @@ public:
     {
         std::unique_lock<std::mutex> lk(mux_);
         --unfinished_cnt_;
-        if (export_base_table_item_)
+        DLOG(INFO) << "SetFinish on core " << core_id << " unfinished_cnt_ "
+                   << unfinished_cnt_;
+        if (export_base_table_item_ && !pause_pos_[core_id].second)
         {
+            // Only not drained on this core, should set the paused key.
             UpdateMinPausedSlice(&pause_pos_[core_id].first);
         }
-        else
+        else if (!export_base_table_item_)
         {
             UpdateMinPausedSlice(curr_slice_index_[core_id]);
         }
 
         if (unfinished_cnt_ == 0)
         {
+            DLOG(INFO) << "UnpinSlices on core " << core_id;
             // Unpin the slices
             UnpinSlices();
             cv_.notify_one();
@@ -4284,13 +4291,36 @@ public:
         return store_range_;
     }
 
+    void FixCurrentSliceIndex(uint16_t core_id)
+    {
+        assert(export_base_table_item_);
+        if (pause_pos_[core_id].first.KeyPtr() != nullptr)
+        {
+            size_t curr_slice_idx = 0;
+            StoreSlice *curr_slice =
+                slice_coordinator_.pinned_slices_[curr_slice_idx];
+            while (curr_slice->EndTxKey() < pause_pos_[core_id].first)
+            {
+                ++curr_slice_idx;
+                curr_slice = slice_coordinator_.pinned_slices_[curr_slice_idx];
+            }
+            curr_slice_index_[core_id] = curr_slice_idx;
+        }
+    }
+
     StoreSlice *CurrentSlice(uint16_t core_id) const
     {
         size_t curr_slice_idx = curr_slice_index_[core_id];
+        DLOG(INFO) << "CurrentSlice on core " << core_id << " curr_slice_idx "
+                   << curr_slice_idx;
         if (export_base_table_item_)
         {
+            assert(curr_slice_idx < slice_coordinator_.pinned_slices_.size());
             return slice_coordinator_.pinned_slices_.at(curr_slice_idx);
         }
+        DLOG(INFO) << "CurrentSlice on core " << core_id
+                   << " slices_to_scan_.size() " << slices_to_scan_.size();
+        assert(curr_slice_idx < slices_to_scan_.size());
         const TxKey &curr_slice_key = slices_to_scan_.at(curr_slice_idx).first;
         return store_range_->FindSlice(curr_slice_key);
     }
@@ -4305,10 +4335,17 @@ public:
     void MoveToNextSlice(uint16_t core_id)
     {
         curr_slice_index_[core_id]++;
+        DLOG(INFO) << "MoveToNextSlice on core " << core_id
+                   << " curr_slice_index_ " << curr_slice_index_[core_id];
     }
 
-    bool TheLastSlice(uint16_t core_id) const
+    bool TheBatchEnd(uint16_t core_id) const
     {
+        DLOG(INFO) << "TheBatchEnd on core " << core_id << " curr_slice_index_ "
+                   << curr_slice_index_[core_id] << ", pinned_slices_.size() "
+                   << slice_coordinator_.pinned_slices_.size()
+                   << ", batch_end_slice_index_ "
+                   << slice_coordinator_.batch_end_slice_index_;
         return curr_slice_index_[core_id] >=
                (export_base_table_item_
                     ? slice_coordinator_.pinned_slices_.size()
@@ -4349,6 +4386,10 @@ public:
 
     void UpdateMinPausedSlice(const TxKey *key)
     {
+        assert(key->KeyPtr() != nullptr);
+        DLOG(INFO) << "UpdateMinPausedSlice on continuous mode, key "
+                   << key->ToString() << ", min_paused_key_ "
+                   << slice_coordinator_.min_paused_key_.ToString();
         assert(export_base_table_item_);
         if (*key < slice_coordinator_.min_paused_key_)
         {
@@ -4363,6 +4404,10 @@ public:
         {
             slice_coordinator_.min_paused_slice_index_ = slice_index;
         }
+    }
+    bool IsLastBatch() const
+    {
+        return slice_coordinator_.IsEndSlice();
     }
 
     std::vector<size_t> accumulated_scan_cnt_;
@@ -4386,20 +4431,18 @@ private:
             if (is_continuous_)
             {
                 min_paused_key_ = TxKey();
-                batch_end_key_ = TxKey();
             }
             else
             {
                 min_paused_slice_index_ = 0;
-                batch_end_slice_index_ = 0;
             }
+            batch_end_slice_index_ = 0;
         }
         ~SliceCoordinator()
         {
             if (is_continuous_)
             {
                 min_paused_key_.~TxKey();
-                batch_end_key_.~TxKey();
             }
         }
 
@@ -4433,67 +4476,65 @@ private:
             pinned_slices_.clear();
             prepared_slice_cnt_ = 0;
             ready_for_scan_.store(false, std::memory_order_relaxed);
-            if (is_continuous_)
-            {
-                batch_end_key_ = TxKey();
-            }
-            else
-            {
-                batch_end_slice_index_ = 0;
-            }
+            batch_end_slice_index_ = 0;
+            is_end_slice_ = false;
         }
-        template <typename KeyT>
-        bool IsLastSlice(const KeyT *key = nullptr) const
+        bool IsEndSlice() const
         {
-            if (is_continuous_)
-            {
-                assert(key != nullptr);
-                const KeyT *min_paused_key =
-                    min_paused_key_.template GetKey<KeyT>();
-                return !(*min_paused_key < *key);
-            }
-            else
-            {
-                return min_paused_slice_index_ == slices_keys_ptr_->size();
-            }
+            return is_end_slice_;
         }
         template <typename KeyT>
         const KeyT *StartKey() const
         {
             if (is_continuous_)
             {
+                DLOG(INFO)
+                    << "StartKey on continuous mode, min_paused_key_ is null "
+                    << std::boolalpha << (min_paused_key_.KeyPtr() == nullptr);
                 return min_paused_key_.KeyPtr() == nullptr
                            ? nullptr
                            : min_paused_key_.template GetKey<KeyT>();
             }
             else
             {
+                DLOG(INFO) << "StartKey on non-continuous mode, "
+                              "min_paused_slice_index_ "
+                           << min_paused_slice_index_
+                           << ", slices_keys_ptr_->size() "
+                           << slices_keys_ptr_->size();
                 assert(min_paused_slice_index_ < slices_keys_ptr_->size());
+                assert(slices_keys_ptr_->at(min_paused_slice_index_)
+                           .first.KeyPtr() != nullptr);
                 return slices_keys_ptr_->at(min_paused_slice_index_)
                     .first.template GetKey<KeyT>();
             }
         }
         template <typename KeyT>
-        void MoveNextSlice(const KeyT *key = nullptr)
+        void MoveNextSlice(const KeyT *curr_end_key = nullptr,
+                           const KeyT *req_end_key = nullptr)
         {
             if (is_continuous_)
             {
-                assert(key != nullptr);
-                min_paused_key_ = std::move(TxKey(key));
+                assert(curr_end_key != nullptr && req_end_key != nullptr);
+                is_end_slice_ = !(*curr_end_key < *req_end_key);
+                min_paused_key_ = std::move(TxKey(curr_end_key));
             }
             else
             {
                 ++min_paused_slice_index_;
+                is_end_slice_ =
+                    min_paused_slice_index_ >= slices_keys_ptr_->size();
             }
         }
         void UpdateBatchEnd()
         {
-            if (is_continuous_)
+            if (!is_continuous_)
             {
-                batch_end_key_ = min_paused_key_.GetShallowCopy();
-            }
-            else
-            {
+                DLOG(INFO) << "UpdateBatchEnd on non-continuous mode, "
+                              "min_paused_slice_index_ "
+                           << min_paused_slice_index_
+                           << ". slices_keys_ptr_->size() "
+                           << slices_keys_ptr_->size();
                 batch_end_slice_index_ = min_paused_slice_index_;
             }
         }
@@ -4516,11 +4557,9 @@ private:
         std::vector<std::pair<TxKey, bool>> *slices_keys_ptr_{nullptr};
         uint16_t prepared_slice_cnt_{0};
         std::atomic<bool> ready_for_scan_{false};
-        union
-        {
-            TxKey batch_end_key_;
-            size_t batch_end_slice_index_;
-        };
+        // The index of the batch end slice. Only used in non-continuous mode.
+        size_t batch_end_slice_index_{0};
+        bool is_end_slice_{false};
     };
 
     const TableName *table_name_{nullptr};

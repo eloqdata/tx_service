@@ -3834,6 +3834,10 @@ void LocalCcShards::DataSyncForRangePartition(
 
     // Scan the delta slice size
     std::map<TxKey, int64_t> slices_delta_size;
+    DLOG(INFO) << "DataSync scan slice delta size for range#" << range_id
+               << " on table: " << table_name.StringView()
+               << " with last sync ts: " << last_sync_ts
+               << " and data sync ts: " << data_sync_task->data_sync_ts_;
     ScanSliceDeltaSizeCcForRangePartition scan_delta_size_cc(
         table_name,
         last_sync_ts,
