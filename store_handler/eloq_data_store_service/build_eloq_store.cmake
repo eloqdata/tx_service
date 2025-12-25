@@ -38,6 +38,10 @@ if(WITH_ASAN)
 else ()
     find_library(Boost_CONTEXT_LIBRARY NAMES boost_context)
 
+    if (NOT Boost_CONTEXT_LIBRARY)
+        message(FATAL_ERROR
+                "libboost_context not found in system library paths")
+    endif ()
     set(BOOST_CONTEXT_TARGET ${Boost_CONTEXT_LIBRARY})
 endif()
 message("BOOST_CONTEXT_TARGET: ${BOOST_CONTEXT_TARGET}")
