@@ -382,6 +382,8 @@ bool DataStoreServiceClient::PutAll(
             callback_data_list.push_back(callback_data);
         }
 
+        hash_partitions_map.clear();
+
         // Process range partitions
         for (auto &[partition_id, flush_recs] : range_partitions_map)
         {
@@ -402,6 +404,8 @@ bool DataStoreServiceClient::PutAll(
             sync_putall->partition_states_.push_back(partition_state);
             callback_data_list.push_back(callback_data);
         }
+
+        range_partitions_map.clear();
 
         // Set up global coordinator
         sync_putall->total_partitions_ = sync_putall->partition_states_.size();
