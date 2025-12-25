@@ -18,17 +18,23 @@ find_package(glog REQUIRED)
 
 if(WITH_ASAN)
     message("build eloqstore with ASAN: ${WITH_ASAN}")
-    set(BOOST_CONTEXT_ASAN_PATH "$ENV{HOME}/boost_ucontext_asan")
     # https://www.boost.org/doc/libs/master/libs/context/doc/html/context/stack/sanitizers.html
     add_compile_definitions(BOOST_USE_ASAN)
     add_compile_definitions(BOOST_USE_UCONTEXT)
 
-    set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -fsanitize=address -fno-omit-frame-pointer")
-    find_library(Boost_CONTEXT_LIBRARY
-            NAMES boost_context
-            PATHS ${BOOST_CONTEXT_ASAN_PATH}/lib
-            NO_DEFAULT_PATH)
-    set(BOOST_CONTEXT_TARGET ${Boost_CONTEXT_LIBRARY})
+    add_compile_options(-fsanitize=address -fno-omit-frame-pointer)
+    add_link_options(-fsanitize=address)
+
+    find_library(Boost_CONTEXT_ASAN_LIBRARY
+            NAMES boost_context-asan
+    )
+
+    if (NOT Boost_CONTEXT_ASAN_LIBRARY)
+        message(FATAL_ERROR
+                "libboost_context-asan not found in system library paths")
+    endif ()
+
+    set(BOOST_CONTEXT_TARGET ${Boost_CONTEXT_ASAN_LIBRARY})
 else ()
     find_package(Boost REQUIRED COMPONENTS context)
     set(BOOST_CONTEXT_TARGET Boost::context)
