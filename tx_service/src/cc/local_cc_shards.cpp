@@ -4097,11 +4097,12 @@ void LocalCcShards::DataSyncForRangePartition(
             // The cost of FlushRecord also needs to be considered.
             for (size_t i = 0; i < cc_shards_.size(); ++i)
             {
-                flush_data_size += (data_sync_vecs[i].size() * sizeof(FlushRecord) +
-                                    archive_vecs[i].size() * sizeof(FlushRecord) +
-                                    mv_base_vecs[i].size() * sizeof(std::pair<TxKey, int32_t>));
+                flush_data_size +=
+                    (scan_cc.DataSyncVec(i).size() * sizeof(FlushRecord) +
+                     scan_cc.ArchiveVec(i).size() * sizeof(FlushRecord) +
+                     scan_cc.MoveBaseIdxVec(i).size() *
+                         sizeof(std::pair<TxKey, int32_t>));
             }
-
 
             // This thread will wait in AllocatePendingFlushDataMemQuota if
             // quota is not available
@@ -4999,9 +5000,11 @@ void LocalCcShards::DataSyncForHashPartition(
             }
 
             // The cost of FlushRecord also needs to be considered.
-            flush_data_size += (scan_cc.DataSyncVec().size() * sizeof(FlushRecord) +
-                                scan_cc.ArchiveVec().size() * sizeof(FlushRecord) +
-                                scan_cc.MoveBaseIdxVec().size() * sizeof(std::pair<TxKey, int32_t>));
+            flush_data_size +=
+                (scan_cc.DataSyncVec().size() * sizeof(FlushRecord) +
+                 scan_cc.ArchiveVec().size() * sizeof(FlushRecord) +
+                 scan_cc.MoveBaseIdxVec().size() *
+                     sizeof(std::pair<TxKey, int32_t>));
 
             // this thread will wait in AllocatePendingFlushDataMemQuota if
             // quota is not available
