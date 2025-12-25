@@ -5717,7 +5717,7 @@ public:
         }
 
         // Put DataSyncScanCc request into CcQueue again.
-        shard_->Enqueue(&req);
+        shard_->EnqueueLowPriorityCcRequest(&req);
 
         // Access DataSyncScanCc member variable is unsafe after
         // SetFinished(...).
@@ -5843,20 +5843,21 @@ public:
         bool replay_cmds_notnull = false;
 
         size_t export_data_cnt = 0;
-        auto l_start = std::chrono::high_resolution_clock::now();
+        size_t export_data_size = 0;
+        auto l_start = ReadTimeMicroseconds();
 
         for (size_t scan_cnt = 0;
              scan_cnt < HashPartitionDataSyncScanCc::DataSyncScanBatchSize &&
+             export_data_size <
+                 HashPartitionDataSyncScanCc::DataSyncScanDataSize &&
              req.accumulated_scan_cnt_ < req.scan_batch_size_ && it != end_it &&
              it != end_it_next_page_it;
              scan_cnt++)
         {
             if (export_data_cnt > 0 && export_data_cnt % 4 == 0)
             {
-                auto l_now = std::chrono::high_resolution_clock::now();
-                if (std::chrono::duration_cast<std::chrono::microseconds>(
-                        l_now - l_start)
-                        .count() >= std::chrono::microseconds(50).count())
+                auto l_now = ReadTimeMicroseconds();
+                if (l_now - l_start >= 50 || l_now < l_start)
                 {
                     break;
                 }
@@ -5911,6 +5912,7 @@ public:
                                       false,
                                       flush_data_size);
                     req.accumulated_flush_data_size_ += flush_data_size;
+                    export_data_size += flush_data_size;
 
                     if (export_result.second)
                     {
@@ -6002,6 +6004,7 @@ public:
                                           false,
                                           flush_data_size);
                         req.accumulated_flush_data_size_ += flush_data_size;
+                        export_data_size += flush_data_size;
                         if (export_result.second)
                         {
                             is_scan_mem_full = true;
@@ -6056,7 +6059,7 @@ public:
             else if (req.accumulated_scan_cnt_ < req.scan_batch_size_)
             {
                 // Put DataSyncScanCc request into CcQueue again.
-                shard_->Enqueue(&req);
+                shard_->EnqueueLowPriorityCcRequest(&req);
             }
             else
             {
@@ -6102,7 +6105,7 @@ public:
             }
 
             size_t current_defrag_cnt = 0;
-            auto l_start = std::chrono::high_resolution_clock::now();
+            auto l_start = ReadTimeMicroseconds();
 
             // defrag ccmap key
             for (size_t scan_cnt = 0;
@@ -6111,10 +6114,8 @@ public:
             {
                 if (current_defrag_cnt > 0 && current_defrag_cnt % 4 == 0)
                 {
-                    auto l_now = std::chrono::high_resolution_clock::now();
-                    if (std::chrono::duration_cast<std::chrono::microseconds>(
-                            l_now - l_start)
-                            .count() >= std::chrono::microseconds(50).count())
+                    auto l_now = ReadTimeMicroseconds();
+                    if (l_now - l_start >= 50 || l_now < l_start)
                     {
                         break;
                     }
@@ -6208,7 +6209,7 @@ public:
                 pause_pos = {pause_key.Clone(), false};
             }
 
-            shard_->Enqueue(&req);
+            shard_->EnqueueLowPriorityCcRequest(&req);
         }
         else
         {
@@ -6235,7 +6236,7 @@ public:
             }
 
             size_t current_defrag_cnt = 0;
-            auto l_start = std::chrono::high_resolution_clock::now();
+            auto l_start = ReadTimeMicroseconds();
 
             for (size_t scan_cnt = 0;
                  scan_cnt < req.scan_batch_size_ && it != end_it;
@@ -6243,10 +6244,8 @@ public:
             {
                 if (current_defrag_cnt > 0 && current_defrag_cnt % 4 == 0)
                 {
-                    auto l_now = std::chrono::high_resolution_clock::now();
-                    if (std::chrono::duration_cast<std::chrono::microseconds>(
-                            l_now - l_start)
-                            .count() >= std::chrono::microseconds(50).count())
+                    auto l_now = ReadTimeMicroseconds();
+                    if (l_now - l_start >= 50 || l_now < l_start)
                     {
                         break;
                     }
@@ -6343,7 +6342,7 @@ public:
                 pause_pos.second = false;
             }
 
-            shard_->Enqueue(&req);
+            shard_->EnqueueLowPriorityCcRequest(&req);
         }
 
         return false;
@@ -7280,7 +7279,7 @@ public:
                 CcPage<KeyT, ValueT, VersionedRecord, RangePartitioned> *>(
                 lru_page);
 
-        auto l_start = std::chrono::high_resolution_clock::now();
+        auto l_start = ReadTimeMicroseconds();
 
         // To avoid occupy the TxProcessor thread for a long time, only
         // process KickoutPageBatchSize number of pages in each round.
@@ -7292,10 +7291,8 @@ public:
         {
             if (clean_page_cnt > 0 && clean_page_cnt % 2 == 0)
             {
-                auto l_now = std::chrono::high_resolution_clock::now();
-                if (std::chrono::duration_cast<std::chrono::microseconds>(
-                        l_now - l_start)
-                        .count() >= std::chrono::microseconds(50).count())
+                auto l_now = ReadTimeMicroseconds();
+                if (l_now - l_start >= 50 || l_now < l_start)
                 {
                     break;
                 }
@@ -8101,7 +8098,8 @@ public:
                     case RangeSliceOpStatus::Retry:
                     {
                         paused_position.first = key->CloneTxKey();
-                        shard_->Enqueue(shard_->LocalCoreId(), &req);
+                        shard_->EnqueueLowPriorityCcRequest(
+                            shard_->LocalCoreId(), &req);
                         return false;
                     }
                     case RangeSliceOpStatus::BlockedOnLoad:
@@ -8202,7 +8200,7 @@ public:
         else
         {
             paused_position.first = key_it->first->CloneTxKey();
-            shard_->Enqueue(&req);
+            shard_->EnqueueLowPriorityCcRequest(&req);
         }
 
         // Access ScanSliceDeltaSizeCcForRangePartition member variable is
@@ -8357,7 +8355,7 @@ public:
         else
         {
             paused_key = key_it->first->CloneTxKey();
-            shard_->Enqueue(&req);
+            shard_->EnqueueLowPriorityCcRequest(&req);
         }
 
         // Access ScanSliceDeltaSizeCcForRangePartition member variable is
@@ -8464,7 +8462,7 @@ public:
         {
             // Set the paused position and put the request into ccqueue again.
             pause_pos = it->first->CloneTxKey();
-            shard_->Enqueue(&req);
+            shard_->EnqueueLowPriorityCcRequest(&req);
         }
 
         return false;
