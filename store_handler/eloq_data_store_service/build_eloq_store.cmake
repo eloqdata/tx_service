@@ -36,9 +36,11 @@ if(WITH_ASAN)
 
     set(BOOST_CONTEXT_TARGET ${Boost_CONTEXT_ASAN_LIBRARY})
 else ()
-    find_package(Boost REQUIRED COMPONENTS context)
-    set(BOOST_CONTEXT_TARGET Boost::context)
+    find_library(Boost_CONTEXT_LIBRARY NAMES boost_context)
+
+    set(BOOST_CONTEXT_TARGET ${Boost_CONTEXT_LIBRARY})
 endif()
+message("BOOST_CONTEXT_TARGET: ${BOOST_CONTEXT_TARGET}")
 
 find_package(jsoncpp REQUIRED)
 find_package(CURL REQUIRED)
