@@ -627,12 +627,6 @@ public:
                 if (commit_ts > cc_page->last_dirty_commit_ts_)
                 {
                     cc_page->last_dirty_commit_ts_ = commit_ts;
-                    DLOG(INFO)
-                        << "update cc_page last dirty commit ts: "
-                        << cc_page->last_dirty_commit_ts_ << ", cce addr: 0x"
-                        << std::hex << static_cast<void *>(cce)
-                        << ", on core: " << shard_->core_id_
-                        << " for table: " << table_name_.StringView();
                 }
                 if (sample_pool_)
                 {
@@ -5418,8 +5412,6 @@ public:
             }
             req.slice_coordinator_.SetReadyForScan();
             req.SetUnfinishedCoreCnt(shard_->core_cnt_);
-            DLOG(INFO) << "req.SetUnfinishedCoreCnt(shard_->core_cnt_) on core "
-                       << shard_->core_id_;
 
             // Dispatch the request to the cores
             for (uint16_t core_id = 0; core_id < shard_->core_cnt_; ++core_id)
@@ -5434,14 +5426,10 @@ public:
 
         if (req.IsDrained(shard_->core_id_))
         {
-            DLOG(INFO) << "req.IsDrained(shard_->core_id_) on core "
-                       << shard_->core_id_;
             // scan is already finished on this core
             req.SetFinish(shard_->core_id_);
             return false;
         }
-        DLOG(INFO) << "req.IsDrained(shard_->core_id_) on core "
-                   << shard_->core_id_ << " is false";
 
         auto &pause_key_and_is_drained = req.PausePos(shard_->core_id_);
 
@@ -5470,17 +5458,6 @@ public:
                                 ->FindSlice(curr_start_tx_key)
                                 ->EndTxKey()
                                 .GetKey<KeyT>();
-
-                        DLOG(INFO)
-                            << "find_non_empty_slice start_key "
-                            << start_key->ToString() << " search_key "
-                            << search_key.ToString()
-                            << ", current start tx key: "
-                            << curr_start_tx_key.ToString()
-                            << ", curr_start_key " << curr_start_key->ToString()
-                            << ", curr_end_key " << curr_end_key->ToString()
-                            << " on core " << shard_->core_id_
-                            << " for table: " << table_name_.StringView();
                         return !(*curr_start_key < search_key) ||
                                (search_key < *curr_end_key);
                     }());
@@ -5541,16 +5518,6 @@ public:
         bool is_scan_mem_full = false;
         std::tie(key_it, slice_end_it, slice_end_key) =
             find_non_empty_slice(*search_start_key);
-
-        DLOG(INFO) << "first find_non_empty_slice search_start_key "
-                   << search_start_key->ToString()
-                   << ", key iterator key: " << key_it->first->ToString()
-                   << ", slice end key:" << slice_end_key->ToString()
-                   << " on core: " << shard_->core_id_
-                   << " for table: " << table_name_.StringView()
-                   << ", with export base table item: " << std::boolalpha
-                   << req.export_base_table_item_
-                   << ", with scan ts: " << req.data_sync_ts_;
 
         uint64_t recycle_ts = 1U;
         if (shard_->EnableMvcc() && !req.export_base_table_item_only_)
@@ -5621,14 +5588,6 @@ public:
                 }
             }
 
-            DLOG(INFO) << "need_export: " << std::boolalpha << need_export
-                       << " cce commit ts: " << cce->CommitTs()
-                       << " cce ckpt ts: " << cce->CkptTs()
-                       << " key: " << key->ToString()
-                       << " on core: " << shard_->core_id_
-                       << " for table: " << table_name_.StringView()
-                       << ", with scan ts: " << req.data_sync_ts_;
-
             // Export this item if need.
             if (need_export)
             {
@@ -5677,17 +5636,6 @@ public:
                     slice_pinned = req.IsSlicePinned(shard_->core_id_);
                     export_persisted_key_only =
                         !req.export_base_table_item_ && slice_pinned;
-                    DLOG(INFO)
-                        << "next find_non_empty_slice search_start_key "
-                        << search_start_key->ToString()
-                        << ", key iterator key: " << key_it->first->ToString()
-                        << ", slice end key:" << slice_end_key->ToString()
-                        << " on core " << shard_->core_id_
-                        << " for table: " << table_name_.StringView()
-                        << ", with export base table item: " << std::boolalpha
-                        << req.export_base_table_item_
-                        << ", slice pinned: " << std::boolalpha << slice_pinned
-                        << ", with scan ts: " << req.data_sync_ts_;
                 }
             }
         } /* End of loop */
@@ -5702,10 +5650,6 @@ public:
         if (!no_more_data)
         {
             next_pause_key = key_it->first->CloneTxKey();
-            DLOG(INFO) << "has more data,next_pause_key "
-                       << next_pause_key.ToString() << " on core "
-                       << shard_->core_id_
-                       << " for table: " << table_name_.StringView();
         }
 
         // Set the pause_pos_ to mark resume position.
@@ -5725,12 +5669,6 @@ public:
             req.SetFinish(shard_->core_id_);
             return false;
         }
-
-        DLOG(INFO) << "enqueue DataSyncScanCc request again on core "
-                   << shard_->core_id_
-                   << " for table: " << table_name_.StringView()
-                   << " with paused key: "
-                   << pause_key_and_is_drained.first.ToString();
 
         // Put DataSyncScanCc request into CcQueue again.
         shard_->EnqueueLowPriorityCcRequest(&req);
