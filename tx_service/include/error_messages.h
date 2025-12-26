@@ -339,6 +339,9 @@ enum struct CcErrorCode : uint8_t
     // The cursor has become invalid.
     INVALID_CURSOR,
 
+    // Cannot connect to leader node.
+    LEADER_NODE_UNREACHABLE,
+
     // NOTICE: please keep this variable at tail.
     LAST_ERROR_CODE,
 

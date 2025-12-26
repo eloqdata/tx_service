@@ -95,8 +95,15 @@ bool FetchCatalogCc::ValidTermCheck()
             standby_term = Sharder::Instance().CandidateStandbyNodeTerm();
         }
 
-        if (standby_term != cc_ng_term_)
+        if (standby_term != cc_ng_term_ ||
+            Sharder::Instance().StandbyBecomingLeaderNodeTerm() != -1)
         {
+            DLOG(WARNING)
+                << "FetchCatalogCc from primary, standby_term changed. "
+                   "standby_term: "
+                << standby_term << ", original term: " << cc_ng_term_
+                << ", becoming leader term: "
+                << Sharder::Instance().StandbyBecomingLeaderNodeTerm();
             return false;
         }
     }

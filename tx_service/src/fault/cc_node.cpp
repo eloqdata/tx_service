@@ -287,6 +287,10 @@ bool CcNode::OnLeaderStart(int64_t term,
 
     if (prev_standby_term > 0)
     {
+        // Mark that this node is becoming leader so that new standby messages
+        // will be discarded.
+        Sharder::Instance().SetStandbyBecomingLeaderNodeTerm(term);
+
         size_t core_cnt = local_cc_shards_.Count();
         WaitableCc sub_cc(
             [](CcShard &ccs)
@@ -334,6 +338,7 @@ bool CcNode::OnLeaderStart(int64_t term,
         // no longer subscribed to previous term
         Sharder::Instance().SetStandbyNodeTerm(-1);
         Sharder::Instance().SetCandidateStandbyNodeTerm(-1);
+        Sharder::Instance().SetStandbyBecomingLeaderNodeTerm(-1);
     }
     else if (prev_candidate_standby_term > 0)
     {

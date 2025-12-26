@@ -174,6 +174,7 @@ int Sharder::Init(
 
         standby_node_term_cache_.store(-1, std::memory_order_relaxed);
         candidate_standby_node_term_cache_.store(-1, std::memory_order_relaxed);
+        standby_becoming_leader_term_cache_.store(-1, std::memory_order_relaxed);
 
         if (ng_configs != nullptr)
         {
