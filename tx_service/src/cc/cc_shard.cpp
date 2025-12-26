@@ -1293,8 +1293,12 @@ void CcShard::FetchCatalog(const TableName &table_name,
     {
         assert(!(txservice_skip_kv && (Sharder::Instance().GetPrimaryNodeId() ==
                                        Sharder::Instance().NodeId())));
-        // All standby nodes should fetch catalog from primay node.
-        bool fetch_from_primary = IsStandbyTx(cc_ng_term);
+        // All standby nodes should fetch catalog from primary node.
+        bool fetch_from_primary =
+            IsStandbyTx(cc_ng_term) &&
+            (Sharder::Instance().StandbyNodeTerm() == cc_ng_term ||
+             Sharder::Instance().CandidateStandbyNodeTerm() == cc_ng_term) &&
+            Sharder::Instance().StandbyBecomingLeaderNodeTerm() == -1;
         std::unique_ptr<FetchCatalogCc> fetch_catalog_cc =
             std::make_unique<FetchCatalogCc>(
                 table_name, *this, cc_ng_id, cc_ng_term, fetch_from_primary);

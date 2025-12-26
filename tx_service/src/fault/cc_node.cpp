@@ -285,6 +285,31 @@ bool CcNode::OnLeaderStart(int64_t term,
         Sharder::Instance().CandidateStandbyNodeTerm();
     int64_t prev_subsribe_term = PrimaryTermFromStandbyTerm(prev_standby_term);
 
+    if (prev_candidate_standby_term > 0)
+    {
+        // no longer subscribed to previous term
+        assert(prev_standby_term < 0);
+        Sharder::Instance().SetCandidateStandbyNodeTerm(-1);
+        LOG(INFO) << "Candidate standby cannot escalate to leader";
+        // A new leader has been elected. The cache needs to be cleared since
+        // it is no longer valid.
+        ClearCcNodeGroupData();
+
+        // transfer leader to next node
+        retry = false;
+        return false;
+    }
+
+    if (!txservice_skip_kv)
+    {
+        if (!local_cc_shards_.store_hd_->OnLeaderStart(ng_id_,
+                                                       next_leader_node))
+        {
+            retry = false;
+            return false;
+        }
+    }
+
     if (prev_standby_term > 0)
     {
         // Mark that this node is becoming leader so that new standby messages
@@ -339,30 +364,6 @@ bool CcNode::OnLeaderStart(int64_t term,
         Sharder::Instance().SetStandbyNodeTerm(-1);
         Sharder::Instance().SetCandidateStandbyNodeTerm(-1);
         Sharder::Instance().SetStandbyBecomingLeaderNodeTerm(-1);
-    }
-    else if (prev_candidate_standby_term > 0)
-    {
-        // no longer subscribed to previous term
-        assert(prev_standby_term < 0);
-        Sharder::Instance().SetCandidateStandbyNodeTerm(-1);
-        LOG(INFO) << "Candidate standby cannot escalate to leader";
-        // A new leader has been elected. The cache needs to be cleared since
-        // it is no longer valid.
-        ClearCcNodeGroupData();
-
-        // transfer leader to next node
-        retry = false;
-        return false;
-    }
-
-    if (!txservice_skip_kv)
-    {
-        if (!local_cc_shards_.store_hd_->OnLeaderStart(ng_id_,
-                                                       next_leader_node))
-        {
-            retry = false;
-            return false;
-        }
     }
 
     {
