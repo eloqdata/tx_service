@@ -1126,6 +1126,16 @@ public:
 
                         cce_ptr->SetCommitTsPayloadStatus(commit_ts, status);
                     }
+                    else if (req.CommitType() == PostWriteType::PrepareCommit)
+                    {
+                        if (req.OpType() == OperationType::CreateTable)
+                        {
+                            // For prepare commit of create table operation,
+                            // set the status to Deleted.
+                            cce_ptr->SetCommitTsPayloadStatus(
+                                1, RecordStatus::Deleted);
+                        }
+                    }
                 }
 
                 // When commit_ts = 0, the request removes the write lock

@@ -1225,26 +1225,9 @@ public:
             }
             else
             {
-                if (catalog_entry == nullptr)
-                {
-                    shard_->FetchCatalog(
-                        table_key->Name(), req.NodeGroupId(), ng_term, &req);
-                    return false;
-                }
-                assert(catalog_entry->schema_ == nullptr);
-                if (catalog_entry->dirty_schema_ == nullptr)
-                {
-                    cce->SetCommitTsPayloadStatus(1, RecordStatus::Deleted);
-                }
-                else
-                {
-                    DLOG(INFO)
-                        << "PostWriteAllCc is executing, retry "
-                        << catalog_entry->dirty_schema_->GetBaseTableName()
-                               .StringView();
-                    shard_->Enqueue(&req);
-                    return false;
-                }
+                shard_->FetchCatalog(
+                    table_key->Name(), req.NodeGroupId(), ng_term, &req);
+                return false;
             }
         }
 
@@ -1714,6 +1697,12 @@ public:
         cce->payload_.cur_payload_->Set(catalog_entry->schema_,
                                         catalog_entry->dirty_schema_,
                                         catalog_entry->schema_version_);
+        if (catalog_entry->schema_ == nullptr &&
+            catalog_entry->dirty_schema_ != nullptr)
+        {
+            assert(op_type == OperationType::CreateTable);
+            cce->SetCommitTsPayloadStatus(1, RecordStatus::Deleted);
+        }
 
         if (shard_->core_id_ < shard_->core_cnt_ - 1)
         {

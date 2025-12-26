@@ -169,21 +169,8 @@ public:
                     }
                     if (catalog_entry->schema_ == nullptr)
                     {
-                        if (catalog_entry->dirty_schema_ == nullptr)
-                        {
-                            res_->SetError(
-                                CcErrorCode::REQUESTED_TABLE_NOT_EXISTS);
-                            return true;
-                        }
-                        else
-                        {
-                            DLOG(INFO) << "PostWriteAllCc is executing, retry "
-                                       << catalog_entry->dirty_schema_
-                                              ->GetBaseTableName()
-                                              .StringView();
-                            ccs.Enqueue(this);
-                            return false;
-                        }
+                        res_->SetError(CcErrorCode::REQUESTED_TABLE_NOT_EXISTS);
+                        return true;
                     }
                     TableSchema *table_schema = catalog_entry->schema_.get();
 
