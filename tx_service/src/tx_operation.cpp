@@ -1399,7 +1399,7 @@ void ScanOpenOperation::Forward(TransactionExecution *txm)
             retry_num_ > 0)
         {
             Sharder::Instance().UpdateLeaders();
-            Reset();
+            hd_result_.Reset();
             ReRunOp(txm);
             return;
         }
