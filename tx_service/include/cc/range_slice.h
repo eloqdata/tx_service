@@ -589,7 +589,7 @@ public:
 
     static constexpr float_t key_cache_default_load_factor = 0.8;
 
-    static constexpr float_t new_range_load_factor = 0.1;
+    static constexpr float_t new_range_load_factor = 0.6;
 
     StoreRange(uint32_t partition_id,
                NodeGroupId range_owner,

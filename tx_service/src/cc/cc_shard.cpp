@@ -1008,7 +1008,7 @@ void CcShard::CheckRecoverTx(TxNumber lock_holding_txn,
                     NonBlockingLock *lk = lru->GetKeyLock();
                     assert(lk != nullptr);
                     LockType lk_type = lk->SearchLock(lock_holding_txn);
-                    if (lk_type == LockType::ReadLock)
+                    if (lk_type != LockType::WriteLock)
                     {
                         // The only case that an orhpahned lock will appear on
                         // local node is that write log has failed with an

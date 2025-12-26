@@ -343,11 +343,17 @@ struct PartitionBatchRequest
     void Clear()
     {
         key_parts.clear();
+        key_parts.shrink_to_fit();
         record_parts.clear();
+        record_parts.shrink_to_fit();
         records_ts.clear();
+        records_ts.shrink_to_fit();
         records_ttl.clear();
+        records_ttl.shrink_to_fit();
         record_tmp_mem_area.clear();
+        record_tmp_mem_area.shrink_to_fit();
         op_types.clear();
+        op_types.shrink_to_fit();
         parts_cnt_per_key = 1;
         parts_cnt_per_record = 1;
     }
