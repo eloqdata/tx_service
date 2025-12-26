@@ -1697,6 +1697,12 @@ public:
         cce->payload_.cur_payload_->Set(catalog_entry->schema_,
                                         catalog_entry->dirty_schema_,
                                         catalog_entry->schema_version_);
+        if (catalog_entry->schema_ == nullptr &&
+            catalog_entry->dirty_schema_ != nullptr)
+        {
+            assert(op_type == OperationType::CreateTable);
+            cce->SetCommitTsPayloadStatus(1, RecordStatus::Deleted);
+        }
 
         if (shard_->core_id_ < shard_->core_cnt_ - 1)
         {
