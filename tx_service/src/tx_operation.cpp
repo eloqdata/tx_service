@@ -1399,6 +1399,7 @@ void ScanOpenOperation::Forward(TransactionExecution *txm)
             retry_num_ > 0)
         {
             Sharder::Instance().UpdateLeaders();
+            Reset();
             ReRunOp(txm);
             return;
         }
@@ -1631,6 +1632,8 @@ void ScanNextOperation::Forward(TransactionExecution *txm)
             if (retry_num_ > 0 &&
                 (txm->CheckLeaderTerm() || txm->CheckStandbyTerm()))
             {
+                slice_hd_result_.Value().Reset();
+                slice_hd_result_.Reset();
                 ReRunOp(txm);
                 return;
             }
@@ -1766,6 +1769,7 @@ void AcquireAllOp::Forward(TransactionExecution *txm)
         txm->PostProcess(*this);
         return;
     }
+
     // start the state machine if not running.
     if (!is_running_)
     {
@@ -8346,8 +8350,11 @@ void BatchReadOperation::Forward(TransactionExecution *txm)
                 }
                 // Failed read requests will be retried. Resets their
                 // handler results.
-                hd_result.Value().Reset();
-                hd_result.Reset();
+                if (retry_num_ > 0)
+                {
+                    hd_result.Value().Reset();
+                    hd_result.Reset();
+                }
             }
         }
 
