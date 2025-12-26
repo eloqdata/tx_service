@@ -4102,11 +4102,18 @@ void LocalCcShards::DataSyncForRangePartition(
 #endif
             for (size_t i = 0; i < cc_shards_.size(); ++i)
             {
-                    flush_data_size +=
-                        (scan_cc.DataSyncVec(i).size() * flush_record_size +
-                         scan_cc.ArchiveVec(i).size() * flush_record_size +
-                         scan_cc.MoveBaseIdxVec(i).size() *
-                             sizeof(std::pair<TxKey, int32_t>));
+#ifdef WITH_JEMALLOC
+                flush_data_size +=
+                    (scan_cc.DataSyncVec(i).size() * sizeof(FlushRecord) +
+                     scan_cc.ArchiveVec(i).size() * sizeof(FlushRecord) +
+                     scan_cc.MoveBaseIdxVec(i).size() *
+                         sizeof(std::pair<TxKey, int32_t>));
+#else
+                flush_data_size +=
+                    (mi_malloc_usable_size(scan_cc.DataSyncVec(i).data()) +
+                     mi_malloc_usable_size(scan_cc.ArchiveVec(i).data()) +
+                     mi_malloc_usable_size(scan_cc.MoveBaseIdxVec(i).data()));
+#endif
             }
 
             // This thread will wait in AllocatePendingFlushDataMemQuota if
@@ -5005,16 +5012,18 @@ void LocalCcShards::DataSyncForHashPartition(
             }
 
             // The cost of FlushRecord also needs to be considered.
-            FlushRecord flush_record;
-            size_t flush_record_size = mi_malloc_usable_size(&flush_record);
 #ifdef WITH_JEMALLOC
-            flush_record_size = sizeof(FlushRecord);
-#endif
             flush_data_size +=
                 (scan_cc.DataSyncVec().size() * flush_record_size +
                  scan_cc.ArchiveVec().size() * flush_record_size +
                  scan_cc.MoveBaseIdxVec().size() *
                      sizeof(std::pair<TxKey, int32_t>));
+#else
+            flush_data_size +=
+                (mi_malloc_usable_size(scan_cc.DataSyncVec().data()) +
+                 mi_malloc_usable_size(scan_cc.ArchiveVec().data()) +
+                 mi_malloc_usable_size(scan_cc.MoveBaseIdxVec().data()));
+#endif
 
             // this thread will wait in AllocatePendingFlushDataMemQuota if
             // quota is not available
