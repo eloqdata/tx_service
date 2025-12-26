@@ -4095,13 +4095,18 @@ void LocalCcShards::DataSyncForRangePartition(
             }
 
             // The cost of FlushRecord also needs to be considered.
+            FlushRecord flush_record;
+            size_t flush_record_size = mi_malloc_usable_size(&flush_record);
+#ifdef WITH_JEMALLOC
+            flush_record_size = sizeof(FlushRecord);
+#endif
             for (size_t i = 0; i < cc_shards_.size(); ++i)
             {
-                flush_data_size +=
-                    (scan_cc.DataSyncVec(i).size() * sizeof(FlushRecord) +
-                     scan_cc.ArchiveVec(i).size() * sizeof(FlushRecord) +
-                     scan_cc.MoveBaseIdxVec(i).size() *
-                         sizeof(std::pair<TxKey, int32_t>));
+                    flush_data_size +=
+                        (scan_cc.DataSyncVec(i).size() * flush_record_size +
+                         scan_cc.ArchiveVec(i).size() * flush_record_size +
+                         scan_cc.MoveBaseIdxVec(i).size() *
+                             sizeof(std::pair<TxKey, int32_t>));
             }
 
             // This thread will wait in AllocatePendingFlushDataMemQuota if
@@ -5000,9 +5005,14 @@ void LocalCcShards::DataSyncForHashPartition(
             }
 
             // The cost of FlushRecord also needs to be considered.
+            FlushRecord flush_record;
+            size_t flush_record_size = mi_malloc_usable_size(&flush_record);
+#ifdef WITH_JEMALLOC
+            flush_record_size = sizeof(FlushRecord);
+#endif
             flush_data_size +=
-                (scan_cc.DataSyncVec().size() * sizeof(FlushRecord) +
-                 scan_cc.ArchiveVec().size() * sizeof(FlushRecord) +
+                (scan_cc.DataSyncVec().size() * flush_record_size +
+                 scan_cc.ArchiveVec().size() * flush_record_size +
                  scan_cc.MoveBaseIdxVec().size() *
                      sizeof(std::pair<TxKey, int32_t>));
 
