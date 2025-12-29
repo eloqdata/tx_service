@@ -290,7 +290,7 @@ SET(DATA_SUBSTRATE_SOURCES
 )
 
 # Add store handler sources based on data store type
-if(WITH_DATA_STORE STREQUAL "ELOQDSS_ROCKSDB" OR WITH_DATA_STORE STREQUAL "ELOQDSS_ROCKSDB_CLOUD_S3")
+if(WITH_DATA_STORE STREQUAL "ELOQDSS_ROCKSDB" OR WITH_DATA_STORE STREQUAL "ELOQDSS_ROCKSDB_CLOUD_S3" OR WITH_DATA_STORE STREQUAL "ELOQDSS_ROCKSDB_CLOUD_GCS")
     SET(DATA_SUBSTRATE_SOURCES ${DATA_SUBSTRATE_SOURCES}
         store_handler/data_store_service_client.cpp
         store_handler/data_store_service_client_closure.cpp
@@ -317,6 +317,12 @@ if(WITH_DATA_STORE STREQUAL "ELOQDSS_ROCKSDB" OR WITH_DATA_STORE STREQUAL "ELOQD
             store_handler/eloq_data_store_service/purger_event_listener.cpp
             store_handler/eloq_data_store_service/purger_sliding_window.cpp
 	    store_handler/eloq_data_store_service/s3_file_downloader.cpp
+        )
+    elseif(WITH_DATA_STORE STREQUAL "ELOQDSS_ROCKSDB_CLOUD_GCS")
+        SET(DATA_SUBSTRATE_SOURCES ${DATA_SUBSTRATE_SOURCES}
+            store_handler/eloq_data_store_service/rocksdb_cloud_data_store.cpp
+            store_handler/eloq_data_store_service/purger_event_listener.cpp
+            store_handler/eloq_data_store_service/purger_sliding_window.cpp
         )
     endif()
 elseif(WITH_DATA_STORE STREQUAL "ELOQDSS_ELOQSTORE")
@@ -354,7 +360,7 @@ if(WITH_LOG_SERVICE)
     SET(DATA_SUBSTRATE_LINK_LIBS ${DATA_SUBSTRATE_LINK_LIBS} logservice)
 endif()
 
-if(WITH_DATA_STORE STREQUAL "ELOQDSS_ROCKSDB" OR WITH_DATA_STORE STREQUAL "ELOQDSS_ROCKSDB_CLOUD_S3")
+if(WITH_DATA_STORE STREQUAL "ELOQDSS_ROCKSDB" OR WITH_DATA_STORE STREQUAL "ELOQDSS_ROCKSDB_CLOUD_S3" OR WITH_DATA_STORE STREQUAL "ELOQDSS_ROCKSDB_CLOUD_GCS")
     SET(DATA_SUBSTRATE_LINK_LIBS ${DATA_SUBSTRATE_LINK_LIBS} ${ROCKSDB_LIBRARIES})
 elseif(WITH_DATA_STORE STREQUAL "DYNAMODB")
     SET(DATA_SUBSTRATE_LINK_LIBS ${DATA_SUBSTRATE_LINK_LIBS} ${AWSSDK_LINK_LIBRARIES})
