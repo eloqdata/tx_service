@@ -7019,7 +7019,6 @@ public:
     {
         size_t shard_idx =
             forward_msg_grp_ % Sharder::Instance().GetLocalCcShardsCount();
-        status_ = Status::Finished;
         Sharder::Instance().GetCcShard(shard_idx)->Enqueue(this);
     }
 

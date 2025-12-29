@@ -681,6 +681,28 @@ public:
             std::memory_order_acquire);
     }
 
+    void SetStandbyBecomingLeaderNodeTerm(int64_t leader_term)
+    {
+        if (!cc_nodes_init_.load(std::memory_order_acquire))
+        {
+            return;
+        }
+
+        standby_becoming_leader_term_cache_.store(leader_term,
+                                                  std::memory_order_release);
+    }
+
+    int64_t StandbyBecomingLeaderNodeTerm() const
+    {
+        if (!cc_nodes_init_.load(std::memory_order_acquire))
+        {
+            return -1;
+        }
+
+        return standby_becoming_leader_term_cache_.load(
+            std::memory_order_acquire);
+    }
+
     bool IncrInflightStandbyReqCount(uint64_t cnt)
     {
         uint64_t value =
@@ -784,9 +806,11 @@ private:
     std::atomic<int64_t> leader_term_cache_[1000];
     std::atomic<int64_t> candidate_leader_term_cache_[1000];
 
-    // The term that standby is subsribed to. Only used on standby node.
+    // The term that standby is subscribed to. Only used on standby node.
     std::atomic<int64_t> standby_node_term_cache_;
     std::atomic<int64_t> candidate_standby_node_term_cache_;
+    // The term when standby is about to become leader.
+    std::atomic<int64_t> standby_becoming_leader_term_cache_;
 
     std::atomic<uint32_t> subscribe_counter_{0};
     // The number of standby requests that have been received but not yet

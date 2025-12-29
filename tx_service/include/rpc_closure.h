@@ -928,6 +928,8 @@ public:
         std::unique_ptr<FetchCatalogClosure> self_guard(this);
         if (!fetch_cc_->ValidTermCheck())
         {
+            DLOG(ERROR)
+                << "FetchCatalogClosure term check fails, abort fetch_cc_";
             channel_ = nullptr;
             fetch_cc_->SetFinish(RecordStatus::Deleted,
                                  (int) CcErrorCode::NG_TERM_CHANGED);
@@ -973,6 +975,9 @@ public:
                 stub.FetchCatalog(&cntl_, &request_, &response_, this);
                 return;
             }
+            DLOG(ERROR) << "FetchCatalogClosure fails, abort fetch_cc_";
+            fetch_cc_->SetFinish(RecordStatus::Deleted,
+                                 (int) CcErrorCode::LEADER_NODE_UNREACHABLE);
             Sharder::Instance().UpdateCcNodeServiceChannel(node_id_, channel_);
         }
         else
@@ -1014,6 +1019,9 @@ public:
             }
             else
             {
+                DLOG(ERROR)
+                    << "FetchCatalogClosure err: " << CcErrorMessage(err_code)
+                    << ", abort fetch_cc_";
                 fetch_cc_->SetFinish(RecordStatus::Unknown, (int) err_code);
             }
         }

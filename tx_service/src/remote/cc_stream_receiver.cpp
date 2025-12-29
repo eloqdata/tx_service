@@ -194,7 +194,8 @@ int CcStreamReceiver::on_received_messages(brpc::StreamId stream_id,
     else
     {
         assert(!long_msg);
-        if (Sharder::Instance().PrimaryNodeTerm() > 0)
+        if (Sharder::Instance().PrimaryNodeTerm() > 0 &&
+            Sharder::Instance().StandbyBecomingLeaderNodeTerm() == -1)
         {
             bool success =
                 Sharder::Instance().IncrInflightStandbyReqCount(size);
