@@ -422,6 +422,7 @@ static const std::unordered_map<CcErrorCode, std::string> cc_error_messages{
     {CcErrorCode::READ_CATALOG_CONFLICT, "READ_CATALOG_CONFLICT"},
     {CcErrorCode::RPC_CALL_ERR, "RPC_CALL_ERR"},
     {CcErrorCode::UPDATE_SEQUENCE_TABLE_FAIL, "UPDATE_SEQUENCE_TABLE_FAIL"},
+    {CcErrorCode::LEADER_NODE_UNREACHABLE, "LEADER_NODE_UNREACHABLE"},
 
     // NOTICE: please keep this variable at tail.
     {CcErrorCode::LAST_ERROR_CODE, "LAST_ERROR_CODE"},

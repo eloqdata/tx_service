@@ -167,7 +167,7 @@ bool FetchCatalogCc::Execute(CcShard &ccs)
     {
         for (CcRequestBase *req : requesters_)
         {
-            req->AbortCcRequest(CcErrorCode::DATA_STORE_ERR);
+            req->AbortCcRequest(static_cast<CcErrorCode>(error_code_));
         }
     }
 
