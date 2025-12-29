@@ -279,8 +279,8 @@ DEFINE_uint32(rocksdb_cloud_purger_periodicity_secs,
               "Rocksdb cloud purger periodicity seconds");
 #endif
 #if (defined(DATA_STORE_TYPE_ELOQDSS_ROCKSDB_CLOUD_S3))
-DECLARE_string(aws_access_key_id);
-DECLARE_string(aws_secret_key);
+DEFINE_string(aws_access_key_id, "", "AWS SDK access key id");
+DEFINE_string(aws_secret_key, "", "AWS SDK secret key");
 #endif
 
 DEFINE_bool(rocksdb_io_uring_enabled,

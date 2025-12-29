@@ -69,8 +69,10 @@ DEFINE_string(bigtable_instance_id, "", "Instance id of BigTable");
 DEFINE_string(bigtable_keyspace, "eloq", "KeySpace of BigTable");
 #endif
 // aws_secret_key
-#if defined(DATA_STORE_TYPE_ELOQDSS_ROCKSDB_CLOUD_S3) || \
-    defined(DATA_STORE_TYPE_DYNAMODB) || defined(LOG_STATE_TYPE_RKDB_S3)
+#if defined(DATA_STORE_TYPE_ELOQDSS_ROCKSDB_CLOUD_S3)
+DECLARE_string(aws_access_key_id);
+DECLARE_string(aws_secret_key);
+#elif defined(DATA_STORE_TYPE_DYNAMODB) || defined(LOG_STATE_TYPE_RKDB_S3)
 DEFINE_string(aws_access_key_id, "", "AWS SDK access key id");
 DEFINE_string(aws_secret_key, "", "AWS SDK secret key");
 #endif
