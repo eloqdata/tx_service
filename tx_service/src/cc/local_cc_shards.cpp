@@ -23,6 +23,7 @@
 
 #include <bthread/mutex.h>
 #include <butil/time.h>
+#include <malloc.h>
 #include <sys/stat.h>
 
 #include <atomic>
@@ -4095,11 +4096,6 @@ void LocalCcShards::DataSyncForRangePartition(
             }
 
             // The cost of FlushRecord also needs to be considered.
-            FlushRecord flush_record;
-            size_t flush_record_size = mi_malloc_usable_size(&flush_record);
-#ifdef WITH_JEMALLOC
-            flush_record_size = sizeof(FlushRecord);
-#endif
             for (size_t i = 0; i < cc_shards_.size(); ++i)
             {
 #ifdef WITH_JEMALLOC
@@ -4109,10 +4105,40 @@ void LocalCcShards::DataSyncForRangePartition(
                      scan_cc.MoveBaseIdxVec(i).size() *
                          sizeof(std::pair<TxKey, int32_t>));
 #else
+                // Check if vectors are empty before calling malloc_usable_size
+                // to avoid SEGV on nullptr or invalid pointers.
+                // Use malloc_usable_size when ASan is enabled (vectors may be
+                // allocated by ASan's allocator), otherwise use
+                // mi_malloc_usable_size for mimalloc-allocated memory.
+                auto &data_sync_vec_ref = scan_cc.DataSyncVec(i);
+                auto &archive_vec_ref = scan_cc.ArchiveVec(i);
+                auto &move_base_idx_vec_ref = scan_cc.MoveBaseIdxVec(i);
+
+#ifdef __SANITIZE_ADDRESS__
+                // When ASan is enabled, use standard malloc_usable_size
                 flush_data_size +=
-                    (mi_malloc_usable_size(scan_cc.DataSyncVec(i).data()) +
-                     mi_malloc_usable_size(scan_cc.ArchiveVec(i).data()) +
-                     mi_malloc_usable_size(scan_cc.MoveBaseIdxVec(i).data()));
+                    (data_sync_vec_ref.empty()
+                         ? 0
+                         : malloc_usable_size(data_sync_vec_ref.data())) +
+                    (archive_vec_ref.empty()
+                         ? 0
+                         : malloc_usable_size(archive_vec_ref.data())) +
+                    (move_base_idx_vec_ref.empty()
+                         ? 0
+                         : malloc_usable_size(move_base_idx_vec_ref.data()));
+#else
+                // When ASan is not enabled, use mimalloc's API
+                flush_data_size +=
+                    (data_sync_vec_ref.empty()
+                         ? 0
+                         : mi_malloc_usable_size(data_sync_vec_ref.data())) +
+                    (archive_vec_ref.empty()
+                         ? 0
+                         : mi_malloc_usable_size(archive_vec_ref.data())) +
+                    (move_base_idx_vec_ref.empty()
+                         ? 0
+                         : mi_malloc_usable_size(move_base_idx_vec_ref.data()));
+#endif
 #endif
             }
 
@@ -5014,15 +5040,47 @@ void LocalCcShards::DataSyncForHashPartition(
             // The cost of FlushRecord also needs to be considered.
 #ifdef WITH_JEMALLOC
             flush_data_size +=
-                (scan_cc.DataSyncVec().size() * flush_record_size +
-                 scan_cc.ArchiveVec().size() * flush_record_size +
+                (scan_cc.DataSyncVec().size() * sizeof(FlushRecord) +
+                 scan_cc.ArchiveVec().size() * sizeof(FlushRecord) +
                  scan_cc.MoveBaseIdxVec().size() *
                      sizeof(std::pair<TxKey, int32_t>));
 #else
-            flush_data_size +=
-                (mi_malloc_usable_size(scan_cc.DataSyncVec().data()) +
-                 mi_malloc_usable_size(scan_cc.ArchiveVec().data()) +
-                 mi_malloc_usable_size(scan_cc.MoveBaseIdxVec().data()));
+            // Check if vectors are empty before calling malloc_usable_size
+            // to avoid SEGV on nullptr or invalid pointers.
+            // Use malloc_usable_size when ASan is enabled (vectors may be
+            // allocated by ASan's allocator), otherwise use
+            // mi_malloc_usable_size for mimalloc-allocated memory.
+            {
+                auto &data_sync_vec_ref = scan_cc.DataSyncVec();
+                auto &archive_vec_ref = scan_cc.ArchiveVec();
+                auto &move_base_idx_vec_ref = scan_cc.MoveBaseIdxVec();
+
+#ifdef __SANITIZE_ADDRESS__
+                // When ASan is enabled, use standard malloc_usable_size
+                flush_data_size +=
+                    (data_sync_vec_ref.empty()
+                         ? 0
+                         : malloc_usable_size(data_sync_vec_ref.data())) +
+                    (archive_vec_ref.empty()
+                         ? 0
+                         : malloc_usable_size(archive_vec_ref.data())) +
+                    (move_base_idx_vec_ref.empty()
+                         ? 0
+                         : malloc_usable_size(move_base_idx_vec_ref.data()));
+#else
+                // When ASan is not enabled, use mimalloc's API
+                flush_data_size +=
+                    (data_sync_vec_ref.empty()
+                         ? 0
+                         : mi_malloc_usable_size(data_sync_vec_ref.data())) +
+                    (archive_vec_ref.empty()
+                         ? 0
+                         : mi_malloc_usable_size(archive_vec_ref.data())) +
+                    (move_base_idx_vec_ref.empty()
+                         ? 0
+                         : mi_malloc_usable_size(move_base_idx_vec_ref.data()));
+#endif
+            }
 #endif
 
             // this thread will wait in AllocatePendingFlushDataMemQuota if
