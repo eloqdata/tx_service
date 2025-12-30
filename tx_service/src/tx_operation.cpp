@@ -303,7 +303,9 @@ void ReadLocalOperation::Forward(txservice::TransactionExecution *txm)
         {
             assert(hd_result_->ErrorCode() ==
                        CcErrorCode::ACQUIRE_KEY_LOCK_FAILED_FOR_RW_CONFLICT ||
-                   hd_result_->ErrorCode() == CcErrorCode::DATA_STORE_ERR);
+                   hd_result_->ErrorCode() == CcErrorCode::DATA_STORE_ERR ||
+                   hd_result_->ErrorCode() ==
+                       CcErrorCode::LEADER_NODE_UNREACHABLE);
             // If acquire range read lock blocked by DDL, check if tx has
             // already acquired other range read lock. If so we need to abort
             // tx since it might cause dead lock with range split. If this tx
