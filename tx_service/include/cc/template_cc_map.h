@@ -7931,21 +7931,6 @@ public:
 
             if (ccp->last_dirty_commit_ts_ <= req.LastDataSyncTs())
             {
-                if (cce->NeedCkpt())
-                {
-                    DLOG(INFO)
-                        << "scan slice delta size status error for ccp "
-                           "last dirty commit ts: "
-                        << ccp->last_dirty_commit_ts_
-                        << ", req last data sync ts: " << req.LastDataSyncTs()
-                        << ", key : " << key->ToString()
-                        << ", cce commit ts: " << cce->CommitTs()
-                        << ", cce ckpt ts: " << cce->CkptTs()
-                        << ", cce addr: 0x" << std::hex
-                        << static_cast<void *>(cce)
-                        << ", on core: " << shard_->core_id_
-                        << ", for table: " << table_name_.StringView();
-                }
                 assert(!cce->NeedCkpt());
                 // Skip the pages that have no updates since last data sync.
                 if (ccp->next_page_ == PagePosInf())
