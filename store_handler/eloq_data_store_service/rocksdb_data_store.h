@@ -45,9 +45,10 @@ public:
 
     /**
      * @brief Open the cloud database.
+     * @param term The term value to use when starting the database.
      * @return True if open successfully, otherwise false.
      */
-    bool StartDB() override;
+    bool StartDB(int64_t term) override;
 
     /**
      * @brief Close the cloud database.
