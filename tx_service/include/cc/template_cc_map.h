@@ -5183,6 +5183,91 @@ public:
         return export_size;
     }
 
+    /*
+     * RangePartitionDataSyncScanCc Workflow:
+     * ======================================
+     *
+     * This function implements a two-phase execution model for
+     * range-partitioned table data synchronization scanning with two distinct
+     * execution modes:
+     *
+     * Execution Modes:
+     * ----------------
+     * 1. Checkpoint Mode (export_base_table_item_ = false):
+     *   - Used during normal checkpoint operations
+     *   - Exports only dirty data (keys that need checkpointing)
+     *   - The `req.slices_to_scan_` vector determines which slices need to be
+     * scanned.
+     *   - Only pins slices that require splitting(PostCkptSize <= upper_bound)
+     *
+     * 2. Data Migration Mode (export_base_table_item_ = true):
+     *    - Used during range split operations or index creation
+     *    - Exports ALL primary key data in the specified range
+     *    - Processes slices sequentially (idx + 1)
+     *    - Pins all slices in the target range for complete data export
+     *
+     * Two-Phase Execution:
+     * --------------------
+     * Phase 1 - Slice Preparation (Single Core):
+     *   - Executed by the initial core that receives the request
+     *   - Prepares up to MaxBatchSliceCount (128) slices for scanning
+     *   - For each slice:
+     *     * In checkpoint mode: Checks if slice needs splitting (PostCkptSize >
+     * upper_bound)
+     *       - If not, skips pinning and only scans dirty keys
+     *       - If yes, pins the slice for complete export
+     *     * In migration mode: Always pins the slice
+     *   - Stores pinned slice IDs in `slice_coordinator_.pinned_slices_`
+     *   - Sets ready_for_scan flag when preparation completes
+     *   - Distributes the request to all other cores for parallel execution
+     *
+     * Phase 2 - Parallel Data Export (All Cores):
+     *   - All cores (including the initial one) execute in parallel
+     *   - Each core maintains its own:
+     *     * Current slice index (curr_slice_index_[core_id])
+     *     * Pause position (pause_pos_[core_id])
+     *     * Accumulated scan/flush counters
+     *   - For each core's execution:
+     *     1. Finds the first non-empty slice to scan (from pause position or
+     * start key)
+     *     2. Iterates through keys in the slice using ForwardScanStart()
+     *     3. For each key:
+     *        - Checks if export is needed (CommitTs <= data_sync_ts_)
+     *        - In checkpoint mode: Also checks if slice is pinned or
+     * cce->NeedCkpt()
+     *        - Calls ExportForCkpt() to export the key/record data
+     *        - Handles MVCC archive record recycling if enabled
+     *     4. Processes up to DataSyncScanBatchSize (32) pages per round
+     *     5. Stops when:
+     *        - Reaches scan_batch_size_ limit
+     *        - Scan heap is full
+     *        - Reaches end of current batch slices
+     *        - All data is drained (IsLastBatch())
+     *     6. Updates pause position for resume on next execution
+     *     7. Re-enqueues itself if more work remains
+     *
+     * Key Data Structures:
+     * --------------------
+     * - slice_coordinator_: Coordinates slice preparation and tracks pinned
+     * slices
+     * - pause_pos_[core_id]: Tracks where each core paused for resumption
+     * - data_sync_vec_[core_id]: Accumulates flush records per core
+     * - archive_vec_[core_id]: Accumulates archive records for MVCC cleanup
+     *
+     * Termination:
+     * ------------
+     * - When all cores finish (unfinished_cnt_ == 0):
+     *   * All pinned slices are unpinned
+     *   * Condition variable is notified to wake waiting threads
+     * - Each core calls SetFinish() when its portion is complete
+     *
+     * Error Handling:
+     * ---------------
+     * - Schema version mismatches: Returns false with
+     * REQUESTED_TABLE_SCHEMA_MISMATCH
+     * - Pin slice failures: Returns false, request may be retried
+     * - Heap full: Sets scan_heap_is_full_ flag, pauses and waits for cleanup
+     */
     bool Execute(RangePartitionDataSyncScanCc &req) override
     {
         TX_TRACE_ACTION_WITH_CONTEXT(

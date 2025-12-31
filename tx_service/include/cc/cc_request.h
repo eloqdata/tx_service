@@ -4404,7 +4404,7 @@ public:
 private:
     struct SliceCoordinator
     {
-        static constexpr uint16_t MaxBatchSliceCount = 512;
+        static constexpr uint16_t MaxBatchSliceCount = 128;
 
         SliceCoordinator(bool is_continuous,
                          std::vector<std::pair<TxKey, bool>> *slices_keys)
