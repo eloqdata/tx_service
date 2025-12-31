@@ -354,10 +354,12 @@ void SkGenerator::ScanAndEncodeIndex(const TxKey *start_key,
     do
     {
         batch_tuples = 0;
-        for (size_t idx = 0; idx < core_cnt; ++idx)
-        {
-            cc_shards->EnqueueToCcShard(idx, &scan_req);
-        }
+
+        uint32_t core_rand = butil::fast_rand();
+        // The scan slice request is dispatched to the first core. The first
+        // core tries to pin the slice if necessary and if succeeds, further
+        // dispatches the request to remaining cores for parallel scans.
+        cc_shards->EnqueueToCcShard(core_rand % core_cnt, &scan_req);
         scan_req.Wait();
 
         if (scan_req.IsError())
