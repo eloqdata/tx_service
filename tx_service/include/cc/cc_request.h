@@ -4299,6 +4299,8 @@ public:
             while (curr_slice->EndTxKey() < pause_pos_[core_id].first)
             {
                 ++curr_slice_idx;
+                assert(curr_slice_idx <
+                       slice_coordinator_.pinned_slices_.size());
                 curr_slice = slice_coordinator_.pinned_slices_[curr_slice_idx];
             }
             curr_slice_index_[core_id] = curr_slice_idx;

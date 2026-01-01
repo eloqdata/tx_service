@@ -5734,7 +5734,11 @@ public:
         bool no_more_data = (key_it == slice_end_it) && req.IsLastBatch();
         if (!no_more_data)
         {
-            next_pause_key = key_it->first->CloneTxKey();
+            // If key_it == slice_end_it, it means the current slice is
+            // completed. The paused key should be the slice end key.
+            next_pause_key = key_it != slice_end_it
+                                 ? key_it->first->CloneTxKey()
+                                 : slice_end_key->CloneTxKey();
         }
 
         // Set the pause_pos_ to mark resume position.
