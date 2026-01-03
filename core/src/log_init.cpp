@@ -64,6 +64,12 @@ DEFINE_uint32(txlog_rocksdb_cloud_file_deletion_delay,
 DEFINE_uint32(txlog_rocksdb_cloud_log_retention_days,
               90,
               "The number of days for which logs should be retained");
+DEFINE_uint32(
+    txlog_rocksdb_cloud_log_retention_seconds,
+    0,
+    "The number of seconds for which logs should be retained. If both "
+    "log_retention_days and log_retention_seconds are set, the "
+    "log_retention_seconds will be used.");
 DEFINE_string(txlog_rocksdb_cloud_log_purger_schedule,
               "00:00:01",
               "Time (in regular format: HH:MM:SS) to run log purger daily, "
@@ -75,10 +81,10 @@ DEFINE_string(txlog_rocksdb_cloud_s3_endpoint_url,
               "",
               "Endpoint url of cloud storage service");
 DEFINE_string(txlog_rocksdb_cloud_sst_file_cache_size,
-              "1GB",
+              "3GB",
               "Local sst cache size for txlog");
 DEFINE_uint32(txlog_rocksdb_cloud_sst_file_cache_num_shard_bits,
-              5,
+              0,
               "TxLog RocksDB Cloud SST file cache num shard bits");
 DEFINE_string(
     txlog_rocksdb_cloud_object_store_service_url,
@@ -371,6 +377,14 @@ bool DataSubstrate::InitializeLogService(const INIReader &config_reader)
                           "local",
                           "txlog_rocksdb_cloud_log_retention_days",
                           FLAGS_txlog_rocksdb_cloud_log_retention_days);
+            txlog_rocksdb_cloud_config.log_retention_seconds_ =
+                !CheckCommandLineFlagIsDefault(
+                    "txlog_rocksdb_cloud_log_retention_seconds")
+                    ? FLAGS_txlog_rocksdb_cloud_log_retention_seconds
+                    : config_reader.GetInteger(
+                          "local",
+                          "txlog_rocksdb_cloud_log_retention_seconds",
+                          FLAGS_txlog_rocksdb_cloud_log_retention_seconds);
             txlog_rocksdb_cloud_config.sst_file_cache_num_shard_bits_ =
                 !CheckCommandLineFlagIsDefault(
                     "txlog_rocksdb_cloud_sst_file_cache_num_shard_bits")
