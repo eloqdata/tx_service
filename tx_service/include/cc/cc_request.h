@@ -4342,6 +4342,8 @@ public:
 
     bool IsSlicePinned(uint16_t core_id) const
     {
+        assert(export_base_table_item_ ||
+               curr_slice_index_[core_id] < slices_to_scan_.size());
         return export_base_table_item_
                    ? true
                    : slices_to_scan_[curr_slice_index_[core_id]].second;
