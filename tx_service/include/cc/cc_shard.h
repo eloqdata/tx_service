@@ -214,7 +214,7 @@ public:
 class CcShardHeap
 {
     static constexpr double high_water = 0.8;
-    static constexpr double utilization = 0.8;
+    static constexpr double utilization = 0.95;
 
 public:
     CcShardHeap(CcShard *cc_shard, size_t limit);
