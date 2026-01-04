@@ -170,6 +170,11 @@ public:
                     if (catalog_entry->schema_ == nullptr)
                     {
                         res_->SetError(CcErrorCode::REQUESTED_TABLE_NOT_EXISTS);
+                        DLOG(ERROR)
+                            << "[TemplatedCcRequest] Requested range table "
+                            << table_name_->StringView()
+                            << " not exists, base table: "
+                            << base_table_name.StringView();
                         return true;
                     }
                     TableSchema *table_schema = catalog_entry->schema_.get();
@@ -1961,6 +1966,11 @@ public:
                     if (catalog_entry->dirty_schema_ == nullptr)
                     {
                         res_->SetError(CcErrorCode::REQUESTED_TABLE_NOT_EXISTS);
+                        DLOG(ERROR)
+                            << "[ScanNextBatchCc] Requested range table "
+                            << table_name_->StringView()
+                            << " not exists, base table: "
+                            << base_table_name.StringView();
                         return true;
                     }
                     else
@@ -4405,6 +4415,16 @@ public:
 
     size_t scan_count_{0};
 
+    struct SliceMetrics
+    {
+        size_t try_pin_slice_count_{0};
+        size_t success_pin_slice_count_{0};
+        size_t blocked_on_load_slice_count_{0};
+        size_t retry_pin_slice_count_{0};
+        size_t pinned_slice_count_{0};
+    };
+    SliceMetrics slice_metrics_;
+
 private:
     struct SliceCoordinator
     {
@@ -4569,6 +4589,8 @@ private:
     // True means we need to export the data in memory and in kv to ckpt vec.
     // Note: This is only used in range partition.
     bool export_base_table_item_{false};
+
+public:
     SliceCoordinator slice_coordinator_;
 
     // This is used for scan during add index txm.

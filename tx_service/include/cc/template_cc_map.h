@@ -575,6 +575,12 @@ public:
                         // In either case, the data store size of this entry can
                         // be set to 0.
                         cce->entry_info_.SetDataStoreSize(0);
+                        if (table_name_.IsBase())
+                        {
+                            LOG(INFO) << "[PostWriteCc], set data store size "
+                                         "as 0 for table: "
+                                      << table_name_.StringView();
+                        }
                     }
                 }
 
@@ -647,6 +653,14 @@ public:
                         }
                     }
                 }
+            }
+            if (RangePartitioned && table_name_.IsBase() &&
+                (cce->entry_info_.DataStoreSize() == 0 ||
+                 cce->entry_info_.DataStoreSize() == INT32_MAX))
+            {
+                LOG(INFO) << "[PostWriteCc]The key data store size is "
+                          << cce->entry_info_.DataStoreSize()
+                          << " for table: " << table_name_.StringView();
             }
 
             ReleaseCceLock(cce->GetKeyLock(),
@@ -1712,6 +1726,13 @@ public:
                                     1U, RecordStatus::Deleted);
                                 cce->SetCkptTs(1U);
                                 cce->entry_info_.SetDataStoreSize(0);
+                                if (table_name_.IsBase())
+                                {
+                                    LOG(INFO) << "[ReadCc], Deleted, set data "
+                                                 "store size "
+                                                 "as 0 for table: "
+                                              << table_name_.StringView();
+                                }
 
                                 if (pin_status ==
                                     RangeSliceOpStatus::Successful)
@@ -5362,17 +5383,29 @@ public:
             case RangeSliceOpStatus::Successful:
             {
                 succ = true;
+                if (!req.export_base_table_item_)
+                {
+                    req.slice_metrics_.success_pin_slice_count_++;
+                }
                 break;
             }
             case RangeSliceOpStatus::BlockedOnLoad:
             {
                 succ = false;
+                if (!req.export_base_table_item_)
+                {
+                    req.slice_metrics_.blocked_on_load_slice_count_++;
+                }
                 break;
             }
             case RangeSliceOpStatus::Retry:
             {
                 shard_->Enqueue(shard_->LocalCoreId(), &req);
                 succ = false;
+                if (!req.export_base_table_item_)
+                {
+                    req.slice_metrics_.retry_pin_slice_count_++;
+                }
                 break;
             }
             case RangeSliceOpStatus::NotOwner:
@@ -5460,6 +5493,10 @@ public:
                 }
 
                 // Execute the pinslice operation.
+                if (!req.export_base_table_item_)
+                {
+                    req.slice_metrics_.try_pin_slice_count_++;
+                }
                 auto [new_slice_id, succ] = pin_range_slice(*start_key);
                 if (!succ)
                 {
@@ -5471,6 +5508,7 @@ public:
                 if (!req.export_base_table_item_)
                 {
                     req.slice_coordinator_.SlicePinned();
+                    req.slice_metrics_.pinned_slice_count_++;
                 }
 
                 // Store the pinned slice
@@ -5655,6 +5693,12 @@ public:
                     // Update unknown data store size since slice is already
                     // pinned
                     cce->entry_info_.SetDataStoreSize(0);
+                    if (table_name_.IsBase())
+                    {
+                        LOG(INFO) << "[DataSyncScanCc], set data store size "
+                                     "as 0 for table: "
+                                  << table_name_.StringView();
+                    }
                 }
                 else if ((table_name_.Type() == TableType::Secondary ||
                           table_name_.Type() == TableType::UniqueSecondary) &&
@@ -8103,6 +8147,13 @@ public:
                 {
                     assert(cce->CkptTs() == 0);
                     cce->entry_info_.SetDataStoreSize(0);
+                    if (RangePartitioned && table_name_.IsBase())
+                    {
+                        LOG(INFO)
+                            << "[ScanSliceDeltaSizeCc] the key data store size "
+                               "is still unknown, set as 0 for table: "
+                            << table_name_.StringView();
+                    }
                     cce->SetCkptTs(1U);
                 }
                 else if (cce->entry_info_.DataStoreSize() == INT32_MAX)
@@ -8136,6 +8187,15 @@ public:
                             // slice is loaded from data store, that means this
                             // entry does not exist in data store.
                             cce->entry_info_.SetDataStoreSize(0);
+                            if (RangePartitioned && table_name_.IsBase())
+                            {
+                                LOG(INFO)
+                                    << "[ScanSliceDeltaSizeCc] the key data "
+                                       "store size is still unknown after "
+                                       "loading slice from data store, set as "
+                                       "0 for table: "
+                                    << table_name_.StringView();
+                            }
                         }
                         if (cce->CkptTs() == 0)
                         {
@@ -8214,11 +8274,28 @@ public:
                     // Export the delta size of this cce.
                     assert(cce->entry_info_.DataStoreSize() != INT32_MAX &&
                            curr_slice_delta_size);
-                    *curr_slice_delta_size +=
+                    int64_t key_delta_size =
                         (cce->PayloadStatus() != RecordStatus::Deleted
                              ? (key->Size() + cce->PayloadSize() -
                                 cce->entry_info_.DataStoreSize())
                              : (-cce->entry_info_.DataStoreSize()));
+                    *curr_slice_delta_size += key_delta_size;
+                    if (RangePartitioned && table_name_.IsBase() &&
+                        key_delta_size != 0)
+                    {
+                        int64_t key_and_payload_size =
+                            (cce->PayloadStatus() != RecordStatus::Deleted)
+                                ? (key->Size() + cce->PayloadSize())
+                                : 0;
+                        LOG(INFO)
+                            << "[ScanSliceDeltaSizeCc] the key delta size is "
+                            << key_delta_size << ", data store size: "
+                            << cce->entry_info_.DataStoreSize()
+                            << ", key and payload size: "
+                            << key_and_payload_size << ", payload status: "
+                            << static_cast<uint32_t>(cce->PayloadStatus())
+                            << " for table: " << table_name_.StringView();
+                    }
                 }
             }
 
@@ -10351,6 +10428,12 @@ protected:
                     ? 0
                     : cce->payload_.cur_payload_->Size() +
                           ccp->KeyOfEntry(cce)->Size());
+        }
+        if (RangePartitioned && table_name_.IsBase() &&
+            cce->entry_info_.DataStoreSize() == 0)
+        {
+            LOG(INFO) << "[BackFill] the key data store size is 0 for table: "
+                      << table_name_.StringView();
         }
 
         cce->GetKeyGapLockAndExtraData()->ReleasePin();

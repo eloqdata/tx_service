@@ -2394,7 +2394,11 @@ private:
      */
     void UpdateSlicePostCkptSize(
         StoreRange *store_range,
-        const std::map<TxKey, int64_t> &slices_delta_size);
+        const std::map<TxKey, int64_t> &slices_delta_size,
+        bool export_base_table_items,
+        bool primary_table,
+        size_t worker_idx,
+        const std::string_view table_name_sv);
 
     /**
      * @brief Decide the range update plan based on the @@slices_delta_size
@@ -2423,7 +2427,9 @@ private:
                       StoreRange *store_range,
                       bool all_data_exported,
                       const std::vector<FlushRecord> &data_sync_vec,
-                      UpdateSliceStatus &status);
+                      UpdateSliceStatus &status,
+                      size_t &real_split_slice_count,
+                      size_t &fake_split_slice_count);
     /**
      * @brief Worker thread that split the target range and flush the data into
      * data store in their new partitions. This is called during checkpoint on a

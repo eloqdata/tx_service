@@ -1871,6 +1871,11 @@ public:
                 data_item.is_deleted_
                     ? 0
                     : data_item.key_.Size() + data_item.record_->Size());
+            if (ccp->parent_map_ && ccp->parent_map_->table_name_.IsBase() &&
+                this->entry_info_.DataStoreSize() == 0)
+            {
+                LOG(INFO) << "[UpdateCcEntry], set data store size as 0";
+            }
         }
 
         if (VersionedRecord)

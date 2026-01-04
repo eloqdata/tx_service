@@ -3928,7 +3928,12 @@ void LocalCcShards::DataSyncForRangePartition(
     }
 
     // Update slice post ckpt size.
-    UpdateSlicePostCkptSize(store_range, slices_delta_size);
+    UpdateSlicePostCkptSize(store_range,
+                            slices_delta_size,
+                            export_base_table_items,
+                            table_name.IsBase(),
+                            worker_idx,
+                            table_name.StringView());
 
     if (!during_split_range)
     {
@@ -4037,6 +4042,8 @@ void LocalCcShards::DataSyncForRangePartition(
     // Note: `DataSyncScanCc` needs to ensure that no two ckpt_rec with the
     // same Key can be generated. Our subsequent algorithms are based on this
     // assumption.
+    size_t real_split_slice_count = 0;
+    size_t fake_split_slice_count = 0;
 
     RangePartitionDataSyncScanCc scan_cc(table_name,
                                          data_sync_task->data_sync_ts_,
@@ -4060,6 +4067,14 @@ void LocalCcShards::DataSyncForRangePartition(
         std::lock_guard<bthread::Mutex> flight_task_lk(
             data_sync_task->flight_task_mux_);
         data_sync_task->flight_task_cnt_ += 1;
+    }
+    if (!export_base_table_items)
+    {
+        LOG(INFO)
+            << "[RangePartitionDataSyncScanCc] Begin DataSyncScanCc on worker: "
+            << worker_idx << ", slice delta size: " << slices_delta_size.size()
+            << ", range id: " << range_id
+            << ", table name: " << table_name.StringView();
     }
 
     while (!scan_data_drained)
@@ -4308,7 +4323,9 @@ void LocalCcShards::DataSyncForRangePartition(
                          store_range,
                          scan_data_drained,
                          *data_sync_vec,
-                         update_slice_status);
+                         update_slice_status,
+                         real_split_slice_count,
+                         fake_split_slice_count);
 
             if (need_send_range_cache)
             {
@@ -4382,6 +4399,31 @@ void LocalCcShards::DataSyncForRangePartition(
             // Reset
             scan_cc.Reset();
         }
+    }
+    if (!export_base_table_items)
+    {
+        size_t slice_pinned_cnt = 0;
+        for (auto &[key, pinned] : scan_cc.slices_to_scan_)
+        {
+            slice_pinned_cnt += pinned;
+        }
+        LOG(INFO)
+            << "[RangePartitionDataSyncScanCc] End DataSyncScanCc on worker: "
+            << worker_idx << ", pinned slice count: " << slice_pinned_cnt
+            << ", real split slice count: " << real_split_slice_count
+            << ", fake split slice count: " << fake_split_slice_count
+            << ", [scan]try pin slice count: "
+            << scan_cc.slice_metrics_.try_pin_slice_count_
+            << ", [scan]success pin slice count: "
+            << scan_cc.slice_metrics_.success_pin_slice_count_
+            << ", [scan]blocked on load slice count: "
+            << scan_cc.slice_metrics_.blocked_on_load_slice_count_
+            << ", [scan]retry pin slice count: "
+            << scan_cc.slice_metrics_.retry_pin_slice_count_
+            << ", [scan]pinned slice count: "
+            << scan_cc.slice_metrics_.pinned_slice_count_
+            << ", range id: " << range_id
+            << ", table name: " << table_name.StringView();
     }
 
     if (need_send_range_cache)
@@ -5358,8 +5400,14 @@ void LocalCcShards::ClearAllPendingTasks(NodeGroupId ng_id,
 }
 
 void LocalCcShards::UpdateSlicePostCkptSize(
-    StoreRange *store_range, const std::map<TxKey, int64_t> &slices_delta_size)
+    StoreRange *store_range,
+    const std::map<TxKey, int64_t> &slices_delta_size,
+    bool export_base_table_items,
+    bool primary_table,
+    size_t worker_idx,
+    const std::string_view table_name_sv)
 {
+    std::stringstream ss;
     for (auto it = slices_delta_size.cbegin(); it != slices_delta_size.cend();
          ++it)
     {
@@ -5367,6 +5415,19 @@ void LocalCcShards::UpdateSlicePostCkptSize(
         int64_t sum = curr_slice->Size() + it->second;
         uint64_t slice_size = sum > 0 ? sum : 0;
         curr_slice->SetPostCkptSize(slice_size);
+        if (!export_base_table_items && primary_table &&
+            slice_size > StoreSlice::slice_upper_bound)
+        {
+            ss << "slice current size: " << curr_slice->Size() << ", "
+               << "slice delta size: " << it->second << ", "
+               << "slice post ckpt size: " << slice_size << ";\n";
+        }
+    }
+    if (!export_base_table_items && primary_table)
+    {
+        LOG(INFO) << "[UpdateSlicePostCkptSize] primary table: "
+                  << table_name_sv << " worker: " << worker_idx
+                  << " dirty slices info: " << ss.str();
     }
 }
 
@@ -5395,7 +5456,9 @@ void LocalCcShards::UpdateSlices(const TableName &table_name,
                                  StoreRange *store_range,
                                  bool all_data_exported,
                                  const std::vector<FlushRecord> &data_sync_vec,
-                                 UpdateSliceStatus &status)
+                                 UpdateSliceStatus &status,
+                                 size_t &real_split_slice_count,
+                                 size_t &fake_split_slice_count)
 {
     auto lower_bound_cmp = [](const FlushRecord &rec, const TxKey &key)
     { return rec.Key() < key; };
@@ -5433,12 +5496,14 @@ void LocalCcShards::UpdateSlices(const TableName &table_name,
                 // Update the current slice
                 store_range->UpdateSliceSpec(status.paused_slice_,
                                              status.paused_split_keys_);
+                real_split_slice_count++;
             }
             else if (status.paused_split_keys_.size() == 1)
             {
                 // Fix the post ckpt size of this slice
                 status.paused_slice_->SetPostCkptSize(
                     status.paused_split_keys_[0].post_update_size_);
+                fake_split_slice_count++;
             }
             status.Reset();
         }
@@ -5589,6 +5654,7 @@ void LocalCcShards::UpdateSlices(const TableName &table_name,
                 // Split StoreSlice in memory. Slice info in KV store will be
                 // updated after checkpoint.
                 store_range->UpdateSliceSpec(curr_slice, slice_split_keys);
+                real_split_slice_count++;
             }
             else if (slice_split_keys.size() == 1)
             {
@@ -5598,6 +5664,7 @@ void LocalCcShards::UpdateSlices(const TableName &table_name,
                 // need to be split.
                 curr_slice->SetPostCkptSize(
                     slice_split_keys[0].post_update_size_);
+                fake_split_slice_count++;
             }
 
             if (status.paused_slice_)

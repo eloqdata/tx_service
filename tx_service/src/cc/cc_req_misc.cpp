@@ -1205,6 +1205,12 @@ bool UpdateCceCkptTsCc::Execute(CcShard &ccs)
                 VersionedLruEntry<true, true> *v_entry =
                     static_cast<VersionedLruEntry<true, true> *>(ref.cce_);
                 v_entry->entry_info_.SetDataStoreSize(ref.post_flush_size_);
+                if (v_entry->PayloadStatus() != RecordStatus::Deleted &&
+                    v_entry->entry_info_.DataStoreSize() == 0)
+                {
+                    LOG(INFO)
+                        << "[UpdateCceCkptTsCc], set data store size as 0";
+                }
 
                 v_entry->SetCkptTs(ref.commit_ts_);
                 v_entry->ClearBeingCkpt();
@@ -1214,6 +1220,12 @@ bool UpdateCceCkptTsCc::Execute(CcShard &ccs)
                 VersionedLruEntry<false, true> *v_entry =
                     static_cast<VersionedLruEntry<false, true> *>(ref.cce_);
                 v_entry->entry_info_.SetDataStoreSize(ref.post_flush_size_);
+                if (v_entry->PayloadStatus() != RecordStatus::Deleted &&
+                    v_entry->entry_info_.DataStoreSize() == 0)
+                {
+                    LOG(INFO)
+                        << "[UpdateCceCkptTsCc], set data store size as 0";
+                }
 
                 v_entry->SetCkptTs(ref.commit_ts_);
                 v_entry->ClearBeingCkpt();

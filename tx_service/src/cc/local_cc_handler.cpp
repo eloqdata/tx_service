@@ -892,6 +892,10 @@ void txservice::LocalCcHandler::ScanOpen(
         if (catalog_entry == nullptr || catalog_entry->schema_ == nullptr)
         {
             hd_res.SetError(CcErrorCode::REQUESTED_TABLE_NOT_EXISTS);
+            DLOG(ERROR) << "[ScanOpen] Requested sk table "
+                        << table_name.StringView()
+                        << " not exists, base table: "
+                        << base_table_name.StringView();
             return;
         }
 
