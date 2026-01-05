@@ -72,62 +72,57 @@ if(GIT_FOUND AND EXISTS "${ELOQ_STORE_SOURCE_DIR}/.git")
     endif()
 endif()
 
-if(NOT EXISTS "${ELOQ_STORE_SOURCE_DIR}/concurrentqueue/CMakeLists.txt")
+if(NOT EXISTS "${ELOQ_STORE_SOURCE_DIR}/external/concurrentqueue/CMakeLists.txt")
     message(FATAL_ERROR "The submodules were not downloaded! GIT_SUBMODULE was turned off or failed. Please update submodules and try again.")
 endif()
-add_subdirectory(${ELOQ_STORE_SOURCE_DIR}/concurrentqueue)
+add_subdirectory(${ELOQ_STORE_SOURCE_DIR}/external/concurrentqueue)
 
 if (NOT WITH_TXSERVICE)
-    add_subdirectory(${ELOQ_STORE_SOURCE_DIR}/abseil)
+    add_subdirectory(${ELOQ_STORE_SOURCE_DIR}/external/abseil)
 endif()
 
-set(INI_SOURCES ${ELOQ_STORE_SOURCE_DIR}/inih/ini.c ${ELOQ_STORE_SOURCE_DIR}/inih/cpp/INIReader.cpp)
-
 SET(ELOQ_STORE_INCLUDE
-    ${ELOQ_STORE_SOURCE_DIR}
     ${URING_INCLUDE_PATH}
     ${Boost_INCLUDE_DIRS}
+    ${ELOQ_STORE_SOURCE_DIR}/external
+    ${ELOQ_STORE_SOURCE_DIR}/include
+    ${ELOQ_STORE_SOURCE_DIR}
     )
 
 set(ELOQ_STORE_SOURCES
-    ${ELOQ_STORE_SOURCE_DIR}/coding.cpp
-    ${ELOQ_STORE_SOURCE_DIR}/data_page_builder.cpp
-    ${ELOQ_STORE_SOURCE_DIR}/comparator.cpp
-    ${ELOQ_STORE_SOURCE_DIR}/index_page_builder.cpp
-    ${ELOQ_STORE_SOURCE_DIR}/mem_index_page.cpp
-    ${ELOQ_STORE_SOURCE_DIR}/index_page_manager.cpp
-    ${ELOQ_STORE_SOURCE_DIR}/task.cpp
-    ${ELOQ_STORE_SOURCE_DIR}/write_task.cpp
-    ${ELOQ_STORE_SOURCE_DIR}/read_task.cpp
-    ${ELOQ_STORE_SOURCE_DIR}/scan_task.cpp
-    ${ELOQ_STORE_SOURCE_DIR}/prewarm_task.cpp
-    ${ELOQ_STORE_SOURCE_DIR}/batch_write_task.cpp
-    ${ELOQ_STORE_SOURCE_DIR}/background_write.cpp
-    ${ELOQ_STORE_SOURCE_DIR}/async_io_manager.cpp
-    ${ELOQ_STORE_SOURCE_DIR}/data_page.cpp
-    ${ELOQ_STORE_SOURCE_DIR}/page.cpp
-    ${ELOQ_STORE_SOURCE_DIR}/page_mapper.cpp
-    ${ELOQ_STORE_SOURCE_DIR}/task_manager.cpp
-    ${ELOQ_STORE_SOURCE_DIR}/eloq_store.cpp
-    ${ELOQ_STORE_SOURCE_DIR}/shard.cpp
-    ${ELOQ_STORE_SOURCE_DIR}/root_meta.cpp
-    ${ELOQ_STORE_SOURCE_DIR}/replayer.cpp
     ${ELOQ_STORE_SOURCE_DIR}/external/random.cc
     ${ELOQ_STORE_SOURCE_DIR}/external/xxhash.c
-    ${ELOQ_STORE_SOURCE_DIR}/kill_point.cpp
-    ${ELOQ_STORE_SOURCE_DIR}/file_gc.cpp
-    ${ELOQ_STORE_SOURCE_DIR}/archive_crond.cpp
-    ${ELOQ_STORE_SOURCE_DIR}/object_store.cpp
-    ${ELOQ_STORE_SOURCE_DIR}/types.cpp
-    ${ELOQ_STORE_SOURCE_DIR}/kv_options.cpp
-    ${ELOQ_STORE_SOURCE_DIR}/compression.cpp
-    ${ELOQ_STORE_SOURCE_DIR}/eloqstore_module.cpp)
+    ${ELOQ_STORE_SOURCE_DIR}/src/async_io_manager.cpp
+    ${ELOQ_STORE_SOURCE_DIR}/src/coding.cpp
+    ${ELOQ_STORE_SOURCE_DIR}/src/comparator.cpp
+    ${ELOQ_STORE_SOURCE_DIR}/src/compression.cpp
+    ${ELOQ_STORE_SOURCE_DIR}/src/eloq_store.cpp
+    ${ELOQ_STORE_SOURCE_DIR}/src/eloqstore_module.cpp
+    ${ELOQ_STORE_SOURCE_DIR}/src/file_gc.cpp
+    ${ELOQ_STORE_SOURCE_DIR}/src/kill_point.cpp
+    ${ELOQ_STORE_SOURCE_DIR}/src/replayer.cpp
+    ${ELOQ_STORE_SOURCE_DIR}/src/storage/data_page.cpp
+    ${ELOQ_STORE_SOURCE_DIR}/src/storage/data_page_builder.cpp
+    ${ELOQ_STORE_SOURCE_DIR}/src/storage/index_page_builder.cpp
+    ${ELOQ_STORE_SOURCE_DIR}/src/storage/index_page_manager.cpp
+    ${ELOQ_STORE_SOURCE_DIR}/src/storage/mem_index_page.cpp
+    ${ELOQ_STORE_SOURCE_DIR}/src/storage/object_store.cpp
+    ${ELOQ_STORE_SOURCE_DIR}/src/storage/page.cpp
+    ${ELOQ_STORE_SOURCE_DIR}/src/storage/page_mapper.cpp
+    ${ELOQ_STORE_SOURCE_DIR}/src/storage/root_meta.cpp
+    ${ELOQ_STORE_SOURCE_DIR}/src/storage/shard.cpp
+    ${ELOQ_STORE_SOURCE_DIR}/src/tasks/archive_crond.cpp
+    ${ELOQ_STORE_SOURCE_DIR}/src/tasks/background_write.cpp
+    ${ELOQ_STORE_SOURCE_DIR}/src/tasks/batch_write_task.cpp
+    ${ELOQ_STORE_SOURCE_DIR}/src/tasks/prewarm_task.cpp
+    ${ELOQ_STORE_SOURCE_DIR}/src/tasks/read_task.cpp
+    ${ELOQ_STORE_SOURCE_DIR}/src/tasks/scan_task.cpp
+    ${ELOQ_STORE_SOURCE_DIR}/src/tasks/task.cpp
+    ${ELOQ_STORE_SOURCE_DIR}/src/tasks/task_manager.cpp
+    ${ELOQ_STORE_SOURCE_DIR}/src/tasks/write_task.cpp
+    ${ELOQ_STORE_SOURCE_DIR}/src/types.cpp)
 
-add_library(eloqstore STATIC ${ELOQ_STORE_SOURCES} ${INI_SOURCES})
-
-# Rename the inih C++ wrapper symbol when building eloqstore to avoid
-# clashing with the other INIReader implementations (log service / core).
-target_compile_definitions(eloqstore PRIVATE INIReader=EloqStorePrivateINIReader)
+add_library(eloqstore STATIC ${ELOQ_STORE_SOURCES})
 
 target_include_directories(eloqstore PUBLIC ${ELOQ_STORE_INCLUDE})
 target_link_libraries(eloqstore PRIVATE ${URING_LIB} ${BOOST_CONTEXT_TARGET} glog::glog absl::flat_hash_map jsoncpp_lib ${CURL_LIBRARIES} ${ZSTD_LIBRARY} ${AWSSDK_LINK_LIBRARIES})
