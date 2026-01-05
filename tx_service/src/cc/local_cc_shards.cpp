@@ -5462,8 +5462,11 @@ void LocalCcShards::UpdateSlices(const TableName &table_name,
                                                                        : false;
 
         uint64_t slice_post_ckpt_size = curr_slice->PostCkptSize();
+        // If post ckpt size of the slice is less than or equal to the current
+        // size, there is no need to split the slice.
         if (slice_post_ckpt_size == UINT64_MAX ||
-            slice_post_ckpt_size <= StoreSlice::slice_upper_bound)
+            slice_post_ckpt_size <= StoreSlice::slice_upper_bound ||
+            slice_post_ckpt_size <= curr_slice->Size())
         {
             // Case 1: There is no unpersisted data in the current slice, so no
             // need to split the slice. Only to migrate this data from the old
