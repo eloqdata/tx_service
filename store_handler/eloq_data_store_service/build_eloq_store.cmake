@@ -81,8 +81,6 @@ if (NOT WITH_TXSERVICE)
     add_subdirectory(${ELOQ_STORE_SOURCE_DIR}/external/abseil)
 endif()
 
-set(INI_SOURCES ${ELOQ_STORE_SOURCE_DIR}/external/inih/ini.c ${ELOQ_STORE_SOURCE_DIR}/external/inih/cpp/INIReader.cpp)
-
 SET(ELOQ_STORE_INCLUDE
     ${URING_INCLUDE_PATH}
     ${Boost_INCLUDE_DIRS}
@@ -102,7 +100,6 @@ set(ELOQ_STORE_SOURCES
     ${ELOQ_STORE_SOURCE_DIR}/src/eloqstore_module.cpp
     ${ELOQ_STORE_SOURCE_DIR}/src/file_gc.cpp
     ${ELOQ_STORE_SOURCE_DIR}/src/kill_point.cpp
-    ${ELOQ_STORE_SOURCE_DIR}/src/kv_options.cpp
     ${ELOQ_STORE_SOURCE_DIR}/src/replayer.cpp
     ${ELOQ_STORE_SOURCE_DIR}/src/storage/data_page.cpp
     ${ELOQ_STORE_SOURCE_DIR}/src/storage/data_page_builder.cpp
@@ -125,11 +122,7 @@ set(ELOQ_STORE_SOURCES
     ${ELOQ_STORE_SOURCE_DIR}/src/tasks/write_task.cpp
     ${ELOQ_STORE_SOURCE_DIR}/src/types.cpp)
 
-add_library(eloqstore STATIC ${ELOQ_STORE_SOURCES} ${INI_SOURCES})
-
-# Rename the inih C++ wrapper symbol when building eloqstore to avoid
-# clashing with the other INIReader implementations (log service / core).
-target_compile_definitions(eloqstore PRIVATE INIReader=EloqStorePrivateINIReader)
+add_library(eloqstore STATIC ${ELOQ_STORE_SOURCES})
 
 target_include_directories(eloqstore PUBLIC ${ELOQ_STORE_INCLUDE})
 target_link_libraries(eloqstore PRIVATE ${URING_LIB} ${BOOST_CONTEXT_TARGET} glog::glog absl::flat_hash_map jsoncpp_lib ${CURL_LIBRARIES} ${ZSTD_LIBRARY} ${AWSSDK_LINK_LIBRARIES})
