@@ -23,6 +23,7 @@
 
 #include <memory>
 #include <string>
+#include <unordered_set>
 
 #include "data_store.h"
 
@@ -107,6 +108,15 @@ public:
     virtual bool IsOssUrlConfigured() const
     {
         return false;
+    }
+
+    /**
+     * @brief Set the prewarm filter function for eloqstore
+     * @param prewarm_filter The prewarm filter function
+     */
+    virtual void InitializePrewarmFilter(
+        uint32_t ng_id, std::unordered_set<uint16_t> &&bucket_ids)
+    {
     }
 };
 

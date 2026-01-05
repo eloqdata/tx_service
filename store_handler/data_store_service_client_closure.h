@@ -2632,6 +2632,7 @@ struct FetchTableCallbackData : public SyncCallbackData
                const std::function<void()> *resume_fptr = nullptr)
     {
         SyncCallbackData::Reset();
+        key_str_.clear();
         schema_image_ = &schema_image;
         found_ = &found;
         version_ts_ = &version_ts;
@@ -2642,6 +2643,7 @@ struct FetchTableCallbackData : public SyncCallbackData
     void Clear() override
     {
         SyncCallbackData::Clear();
+        key_str_.clear();
         schema_image_ = nullptr;
         found_ = nullptr;
         version_ts_ = nullptr;
@@ -2672,6 +2674,9 @@ struct FetchTableCallbackData : public SyncCallbackData
             SyncCallbackData::Notify();
         }
     }
+
+    // Table name with engine prefix.
+    std::string key_str_;
 
     std::string *schema_image_;
     bool *found_;
@@ -2737,6 +2742,7 @@ struct FetchDatabaseCallbackData : public SyncCallbackData
         found_ = nullptr;
         yield_fptr_ = nullptr;
         resume_fptr_ = nullptr;
+        key_str_.clear();
         SyncCallbackData::Clear();
     }
 
@@ -2768,6 +2774,9 @@ struct FetchDatabaseCallbackData : public SyncCallbackData
     bool *found_;
     const std::function<void()> *yield_fptr_;
     const std::function<void()> *resume_fptr_;
+
+    // db name with engine prefix.
+    std::string key_str_;
 };
 
 /**
@@ -2791,12 +2800,14 @@ struct FetchAllDatabaseCallbackData : public SyncCallbackData
     FetchAllDatabaseCallbackData() = default;
     ~FetchAllDatabaseCallbackData() = default;
 
-    void Reset(std::vector<std::string> &dbnames,
+    void Reset(uint32_t engine_prefix_len,
+               std::vector<std::string> &dbnames,
                const std::function<void()> *yield_fptr,
                const std::function<void()> *resume_fptr)
     {
         SyncCallbackData::Reset();
         dbnames_ = &dbnames;
+        engine_prefix_len_ = engine_prefix_len;
         yield_fptr_ = yield_fptr;
         resume_fptr_ = resume_fptr;
         session_id_.clear();
@@ -2808,6 +2819,7 @@ struct FetchAllDatabaseCallbackData : public SyncCallbackData
     {
         SyncCallbackData::Clear();
         dbnames_ = nullptr;
+        engine_prefix_len_ = 0;
         yield_fptr_ = nullptr;
         resume_fptr_ = nullptr;
         session_id_.clear();
@@ -2846,6 +2858,8 @@ struct FetchAllDatabaseCallbackData : public SyncCallbackData
     std::string session_id_;
     std::string start_key_;
     std::string end_key_;
+
+    uint32_t engine_prefix_len_;
 };
 
 /**
@@ -2883,6 +2897,7 @@ struct UpsertDatabaseCallbackData : public SyncCallbackData
         SyncCallbackData::Clear();
         yield_fptr_ = nullptr;
         resume_fptr_ = nullptr;
+        key_str_.clear();
     }
 
     void Wait() override
@@ -2911,6 +2926,9 @@ struct UpsertDatabaseCallbackData : public SyncCallbackData
 
     const std::function<void()> *yield_fptr_;
     const std::function<void()> *resume_fptr_;
+
+    // db name with engine prefix.
+    std::string key_str_;
 };
 
 /**
@@ -2937,6 +2955,7 @@ struct DropDatabaseCallbackData : public SyncCallbackData
         SyncCallbackData::Clear();
         yield_fptr_ = nullptr;
         resume_fptr_ = nullptr;
+        key_str_.clear();
     }
 
     void Wait() override
@@ -2965,6 +2984,9 @@ struct DropDatabaseCallbackData : public SyncCallbackData
 
     const std::function<void()> *yield_fptr_;
     const std::function<void()> *resume_fptr_;
+
+    // db name with engine prefix.
+    std::string key_str_;
 };
 
 /**
@@ -2999,12 +3021,14 @@ struct DiscoverAllTableNamesCallbackData : public SyncCallbackData
     DiscoverAllTableNamesCallbackData() = default;
     ~DiscoverAllTableNamesCallbackData() = default;
 
-    void Reset(std::vector<std::string> &table_names,
+    void Reset(uint32_t engine_prefix_len,
+               std::vector<std::string> &table_names,
                const std::function<void()> *yield_fptr,
                const std::function<void()> *resume_fptr)
     {
         SyncCallbackData::Reset();
         table_names_ = &table_names;
+        engine_prefix_len_ = engine_prefix_len;
         yield_fptr_ = yield_fptr;
         resume_fptr_ = resume_fptr;
         session_id_.clear();
@@ -3014,6 +3038,7 @@ struct DiscoverAllTableNamesCallbackData : public SyncCallbackData
     {
         SyncCallbackData::Clear();
         table_names_ = nullptr;
+        engine_prefix_len_ = 0;
         yield_fptr_ = nullptr;
         resume_fptr_ = nullptr;
         session_id_.clear();
@@ -3048,6 +3073,9 @@ struct DiscoverAllTableNamesCallbackData : public SyncCallbackData
     const std::function<void()> *resume_fptr_;
 
     std::string session_id_;
+    std::string start_key_;
+    std::string end_key_;
+    uint32_t engine_prefix_len_;
 };
 
 /**

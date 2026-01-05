@@ -621,7 +621,15 @@ void FetchAllDatabaseCallback(void *data,
         for (uint32_t i = 0; i < items_size; i++)
         {
             scan_next_closure->GetItem(i, key, value, ts, ttl);
-            fetch_data->dbnames_->emplace_back(std::move(key));
+            LOG_IF(FATAL, key.size() <= fetch_data->engine_prefix_len_)
+                << "key size is less than engine prefix len, key : " << key
+                << ", engine prefix len: " << fetch_data->engine_prefix_len_;
+            fetch_data->dbnames_->emplace_back(
+                key.substr(fetch_data->engine_prefix_len_));
+            if (i == items_size - 1)
+            {
+                fetch_data->start_key_ = std::move(key);
+            }
         }
 
         if (items_size < scan_next_closure->BatchSize())
@@ -640,7 +648,7 @@ void FetchAllDatabaseCallback(void *data,
             client.ScanNext(kv_database_catalogs_name,
                             0,
                             scan_next_closure->ShardId(),
-                            fetch_data->dbnames_->back(),
+                            fetch_data->start_key_,
                             fetch_data->end_key_,
                             fetch_data->session_id_,
                             true,
@@ -686,11 +694,16 @@ void DiscoverAllTableNamesCallback(void *data,
         for (uint32_t i = 0; i < items_size; i++)
         {
             scan_next_closure->GetItem(i, key, value, ts, ttl);
+            if (i == items_size - 1)
+            {
+                fetch_data->start_key_ = key;
+            }
             if (key == txservice::Sequences::table_name_sv_)
             {
                 continue;
             }
-            fetch_data->table_names_->emplace_back(std::move(key));
+            fetch_data->table_names_->emplace_back(
+                key.substr(fetch_data->engine_prefix_len_));
         }
 
         if (items_size < scan_next_closure->BatchSize())
@@ -709,8 +722,8 @@ void DiscoverAllTableNamesCallback(void *data,
             client.ScanNext(kv_table_catalogs_name,
                             0,
                             scan_next_closure->ShardId(),
-                            fetch_data->table_names_->back(),
-                            "",
+                            fetch_data->start_key_,
+                            fetch_data->end_key_,
                             fetch_data->session_id_,
                             true,
                             false,
