@@ -5722,7 +5722,11 @@ public:
                     std::tie(key_it, slice_end_it, slice_end_key) =
                         find_non_empty_slice(*search_start_key);
 
-                    slice_pinned = req.IsSlicePinned(shard_->core_id_);
+                    // If reach to the batch end, it means there are no slices
+                    // that need to be scanned.
+                    slice_pinned = req.TheBatchEnd(shard_->core_id_)
+                                       ? false
+                                       : req.IsSlicePinned(shard_->core_id_);
                     export_persisted_key_only =
                         !req.export_base_table_item_ && slice_pinned;
                 }
