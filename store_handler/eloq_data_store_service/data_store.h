@@ -25,6 +25,15 @@
 #include <iomanip>
 #include <iostream>
 #include <string>
+#include <unordered_map>
+
+// Forward declarations for metrics
+namespace metrics
+{
+class MetricsRegistry;
+using CommonLabels = std::unordered_map<std::string, std::string>;
+}  // namespace metrics
+
 namespace EloqDS
 {
 
@@ -137,6 +146,22 @@ public:
      * @brief Switch the data store to read write mode.
      */
     virtual void SwitchToReadWrite() = 0;
+
+    /**
+     * @brief Initialize metrics for this data store.
+     * @param metrics_registry Pointer to metrics registry from data_substrate.
+     * @param common_labels Common labels to apply to all metrics (e.g., node_ip, node_port).
+     * Default implementation does nothing. Subclasses can override to initialize
+     * metrics if needed.
+     */
+    virtual void InitializeMetrics(metrics::MetricsRegistry *metrics_registry,
+                                   const metrics::CommonLabels &common_labels)
+    {
+        // Default implementation: do nothing
+        // Subclasses that need metrics can override this method
+        (void)metrics_registry;
+        (void)common_labels;
+    }
 
 protected:
     uint32_t shard_id_;

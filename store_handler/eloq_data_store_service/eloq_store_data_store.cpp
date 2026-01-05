@@ -26,6 +26,11 @@
 #include "eloq_store_data_store_factory.h"
 #include "internal_request.h"
 
+#ifdef DATA_STORE_TYPE_ELOQDSS_ELOQSTORE
+#include "meter.h"
+#include "metrics.h"
+#endif
+
 namespace EloqDS
 {
 thread_local ObjectPool<EloqStoreOperationData<::eloqstore::ReadRequest>>
@@ -802,6 +807,20 @@ void EloqStoreDataStore::OnFloor(::eloqstore::KvRequest *req)
                          0);
 
     ds_scan_req->SetFinish(::EloqDS::remote::DataStoreError::NO_ERROR);
+}
+
+void EloqStoreDataStore::InitializeMetrics(metrics::MetricsRegistry *metrics_registry,
+                                          const metrics::CommonLabels &common_labels)
+{
+    if (metrics_registry == nullptr)
+    {
+        LOG(WARNING) << "Metrics registry is null, skipping eloqstore metrics initialization";
+        return;
+    }
+    
+    // Call eloqstore's metrics initialization
+    // This will be implemented in Phase 3
+    eloq_store_service_->InitializeMetrics(metrics_registry, common_labels);
 }
 
 }  // namespace EloqDS

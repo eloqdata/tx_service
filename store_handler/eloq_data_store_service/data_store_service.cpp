@@ -45,6 +45,8 @@
 #include "rocksdb_cloud_data_store.h"
 #include "s3_file_downloader.h"
 #endif
+#include "meter.h"
+#include "metrics.h"
 
 namespace EloqDS
 {
@@ -354,6 +356,31 @@ bool DataStoreService::StartService(bool create_db_if_missing)
     CheckAndRecoverMigrateTask();
 
     return true;
+}
+
+void DataStoreService::InitializeMetricsForAllShards(metrics::MetricsRegistry *metrics_registry,
+                                                      const metrics::CommonLabels &common_labels)
+{
+    if (metrics_registry == nullptr)
+    {
+        LOG(WARNING) << "Metrics registry is null, skipping metrics initialization";
+        return;
+    }
+    
+    // Iterate through all shards owned by this node and initialize metrics for each
+    // Each DataStore subclass will handle metrics initialization in its own way
+    // (EloqStoreDataStore will initialize, others will use default empty implementation)
+    auto dss_shards = cluster_manager_.GetShardsForThisNode();
+    for (uint32_t shard_id : dss_shards)
+    {
+        auto &ds_ref = data_shards_[shard_id];
+        if (ds_ref.data_store_ != nullptr)
+        {
+            // Call base class method - no type casting needed
+            // EloqStoreDataStore will override this method to perform actual initialization
+            ds_ref.data_store_->InitializeMetrics(metrics_registry, common_labels);
+        }
+    }
 }
 
 bool DataStoreService::ConnectAndStartDataStore(uint32_t data_shard_id,
