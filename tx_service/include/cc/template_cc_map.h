@@ -5422,7 +5422,11 @@ public:
                 range_ptr->FindSlice(slice_key);
 
             assert(slice->PostCkptSize() != UINT64_MAX);
-            return slice->PostCkptSize() > StoreSlice::slice_upper_bound;
+            // Only need to split the slice when the post ckpt size of the slice
+            // is greater than the current size and greater than the slice upper
+            // bound.
+            return (slice->PostCkptSize() > StoreSlice::slice_upper_bound &&
+                    slice->PostCkptSize() > slice->Size());
         };
 
         const KeyT *const req_start_key = req.start_key_ != nullptr
