@@ -126,3 +126,20 @@ add_library(eloqstore STATIC ${ELOQ_STORE_SOURCES})
 
 target_include_directories(eloqstore PUBLIC ${ELOQ_STORE_INCLUDE})
 target_link_libraries(eloqstore PRIVATE ${URING_LIB} ${BOOST_CONTEXT_TARGET} glog::glog absl::flat_hash_map jsoncpp_lib ${CURL_LIBRARIES} ${ZSTD_LIBRARY} ${AWSSDK_LINK_LIBRARIES})
+
+# Conditional linking for metrics when compiled with txservice
+# Note: eloq-metrics target is created by build_eloq_metrics.cmake which is included
+# after this file, so we can't check TARGET eloq-metrics here. CMake will validate
+# the link dependency after all targets are created.
+if(WITH_TXSERVICE)
+    # Link eloq_metrics library (created by build_eloq_metrics.cmake)
+    target_link_libraries(eloqstore PRIVATE eloq-metrics)
+    # Add include directory for metrics headers
+    # From build_eloq_store.cmake location, eloq_metrics is at ../../eloq_metrics
+    # CMAKE_CURRENT_LIST_DIR is the directory of this file
+    target_include_directories(eloqstore PRIVATE 
+        ${CMAKE_CURRENT_LIST_DIR}/../../eloq_metrics/include)
+    # Add compile definition to enable metrics code
+    target_compile_definitions(eloqstore PRIVATE ELOQSTORE_METRICS_ENABLED)
+    message(STATUS "EloqStore metrics enabled: will link eloq-metrics")
+endif()
