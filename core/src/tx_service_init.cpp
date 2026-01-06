@@ -102,7 +102,7 @@ bool DataSubstrate::InitializeTxService(const INIReader &config_reader)
     }
 
     const char *field_mem = "node_memory_limit_mb";
-    uint64_t node_memory_limit_mb = FLAGS_node_memory_limit_mb;
+    uint32_t node_memory_limit_mb = FLAGS_node_memory_limit_mb;
     if (CheckCommandLineFlagIsDefault(field_mem))
     {
         if (config_reader.HasValue("local", field_mem))
@@ -113,7 +113,7 @@ bool DataSubstrate::InitializeTxService(const INIReader &config_reader)
         }
         else
         {
-            node_memory_limit_mb = remaining_node_memory_mb_;
+            node_memory_limit_mb = std::max(512u, remaining_node_memory_mb_);
             LOG(INFO) << "config is automatically set: " << field_mem << "="
                       << node_memory_limit_mb << "(MiB), available memory="
                       << remaining_node_memory_mb_;
