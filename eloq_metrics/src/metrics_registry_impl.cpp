@@ -30,13 +30,15 @@ MetricsRegistryImpl::MetricsRegistryResult MetricsRegistryImpl::GetRegistry()
     struct make_registry_shared : public MetricsRegistryImpl
     {
     };
-    static std::unique_ptr<MetricsRegistryImpl> registry_impl =
-        std::make_unique<make_registry_shared>();
+    // Use shared_ptr for singleton pattern to ensure lifetime
+    static std::shared_ptr<MetricsRegistryImpl> registry_impl =
+        std::make_shared<make_registry_shared>();
 
     if (registry_impl->metrics_mgr_result_.not_ok_ == nullptr)
     {
+        // Return shared_ptr to ensure the singleton instance remains alive
         return MetricsRegistryImpl::MetricsRegistryResult{
-            std::move(registry_impl), nullptr};
+            registry_impl, nullptr};
     }
     else
     {

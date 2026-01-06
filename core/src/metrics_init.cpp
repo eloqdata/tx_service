@@ -136,18 +136,7 @@ bool DataSubstrate::InitializeMetrics(const INIReader &config_reader)
             return false;
         }
 
-        metrics_registry_ =
-            std::move(metrics_registry_result.metrics_registry_);
-
-        if (core_config_.enable_data_store)
-        {
-            metrics::CommonLabels kv_common_common_labels{};
-            kv_common_common_labels["node_ip"] = network_config_.local_ip;
-            kv_common_common_labels["node_port"] =
-                std::to_string(network_config_.local_port);
-            store_hd_->RegisterKvMetrics(metrics_registry_.get(),
-                                         kv_common_common_labels);
-        }
+        metrics_registry_ = metrics_registry_result.metrics_registry_;
 
 #ifdef ELOQ_MODULE_ELOQSQL
         metrics::CommonLabels mysql_common_labels{};
@@ -176,6 +165,26 @@ bool DataSubstrate::InitializeMetrics(const INIReader &config_reader)
             std::to_string(network_config_.local_port);
         tx_service_common_labels_["node_id"] =
             std::to_string(network_config_.node_id);
+    }
+
+    return true;
+}
+
+bool DataSubstrate::RegisterKvStoreMetrics()
+{
+    if (!metrics::enable_metrics || metrics_registry_ == nullptr)
+    {
+        return true;  // Metrics not enabled or registry not initialized
+    }
+
+    if (core_config_.enable_data_store && store_hd_ != nullptr)
+    {
+        metrics::CommonLabels kv_common_common_labels{};
+        kv_common_common_labels["node_ip"] = network_config_.local_ip;
+        kv_common_common_labels["node_port"] =
+            std::to_string(network_config_.local_port);
+        store_hd_->RegisterKvMetrics(metrics_registry_.get(),
+                                     kv_common_common_labels);
     }
 
     return true;

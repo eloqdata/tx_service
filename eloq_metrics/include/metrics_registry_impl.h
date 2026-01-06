@@ -32,7 +32,7 @@ class MetricsRegistryImpl : public metrics::MetricsRegistry
 public:
     struct MetricsRegistryResult
     {
-        std::unique_ptr<metrics::MetricsRegistry> metrics_registry_;
+        std::shared_ptr<metrics::MetricsRegistry> metrics_registry_;
         const char *not_ok_;
     };
 

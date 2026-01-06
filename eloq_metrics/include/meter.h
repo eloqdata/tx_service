@@ -196,8 +196,8 @@ public:
      * labels. The labels are specified as variadic template arguments, and
      * their values are concatenated to form a unique meter key. The function
  * retrieves the corresponding metric handle from the meter_to_metric_map_ and
- * collects the metric using the MetricsRegistry. If the meter key is not
- * found in the map, an assertion failure occurs.
+     * collects the metric using the MetricsRegistry. If the meter key is not
+     * found in the map, an assertion failure occurs.
      */
     template <typename... LabelTypes>
     void Collect(const Name &name,

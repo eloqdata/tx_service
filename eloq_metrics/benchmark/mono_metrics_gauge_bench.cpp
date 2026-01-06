@@ -15,8 +15,8 @@ static std::unique_ptr<metrics::Metric> benchmark_gauge_metric_ptr =
     std::make_unique<metrics::Metric>(benchmark_gauge_metric);
 
 static metrics::MetricHandle benchmark_gauge_metric_handle =
-    (*(metrics::MetricsMgr::GetMetricMgrInstance().mgr_))
-        .MetricsRegistry(std::move(benchmark_gauge_metric_ptr));
+        (*(metrics::MetricsMgr::GetMetricMgrInstance().mgr_))
+            .MetricsRegistry(std::move(benchmark_gauge_metric_ptr));
 
 static std::shared_ptr<metrics::MetricsCollector> benchmark_gauge_collector =
     (*(metrics::MetricsMgr::GetMetricMgrInstance().mgr_)).GetCollector();
