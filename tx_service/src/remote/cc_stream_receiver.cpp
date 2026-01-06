@@ -76,6 +76,9 @@ thread_local CcRequestPool<KeyObjectStandbyForwardCc>
     key_obj_standby_forward_pool_;
 thread_local CcRequestPool<ParseCcMsgCc> parse_standby_forward_pool_;
 
+bvar::LatencyRecorder receive_msg_latency("receive_msg_latency");
+bvar::LatencyRecorder receive_msg_count("receive_msg_count");
+
 CcStreamReceiver::CcStreamReceiver(
     LocalCcShards &local_shards,
     moodycamel::ConcurrentQueue<std::unique_ptr<CcMessage>> &msg_pool)
@@ -234,6 +237,11 @@ int CcStreamReceiver::on_received_messages(brpc::StreamId stream_id,
         {
             // For primary node, on received msg is usually not the bottleneck.
             // Parse the msg immediately to minimize latency.
+            std::chrono::steady_clock::time_point start;
+            if (size > 100)
+            {
+                start = std::chrono::steady_clock::now();
+            }
             for (size_t i = 0; i < size; ++i)
             {
                 std::unique_ptr<CcMessage> cc_msg = GetCcMsg();
@@ -249,6 +257,15 @@ int CcStreamReceiver::on_received_messages(brpc::StreamId stream_id,
                 }
                 OnReceiveCcMsg(std::move(cc_msg));
             }
+
+            if (size > 100)
+            {
+                auto end = std::chrono::steady_clock::now();
+                receive_msg_latency << 
+                    std::chrono::duration_cast<std::chrono::microseconds>(
+                        end - start).count();
+            }
+            receive_msg_count << size;
         }
     }
 
