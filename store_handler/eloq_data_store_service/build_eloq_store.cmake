@@ -139,7 +139,8 @@ if(WITH_TXSERVICE)
     # CMAKE_CURRENT_LIST_DIR is the directory of this file
     target_include_directories(eloqstore PRIVATE 
         ${CMAKE_CURRENT_LIST_DIR}/../../eloq_metrics/include)
-    # Add compile definition to enable metrics code
-    target_compile_definitions(eloqstore PRIVATE ELOQSTORE_METRICS_ENABLED)
+    # ELOQSTORE_WITH_TXSERVICE is already defined via add_compile_definitions in parent CMakeLists.txt
+    # but we ensure it's also set for this target explicitly
+    target_compile_definitions(eloqstore PRIVATE ELOQSTORE_WITH_TXSERVICE)
     message(STATUS "EloqStore metrics enabled: will link eloq-metrics")
 endif()

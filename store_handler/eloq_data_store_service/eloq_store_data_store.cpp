@@ -26,7 +26,7 @@
 #include "eloq_store_data_store_factory.h"
 #include "internal_request.h"
 
-#ifdef ELOQSTORE_METRICS_ENABLED
+#ifdef ELOQSTORE_WITH_TXSERVICE
 #include "metrics.h"
 #include "metrics_registry_impl.h"
 #endif
@@ -93,7 +93,7 @@ EloqStoreDataStore::EloqStoreDataStore(uint32_t shard_id,
 
 bool EloqStoreDataStore::Initialize()
 {
-#ifdef ELOQSTORE_METRICS_ENABLED
+#ifdef ELOQSTORE_WITH_TXSERVICE
     // Initialize metrics for eloqstore
     eloq_metrics_app::MetricsRegistryImpl::MetricsRegistryResult
         metrics_registry_result =
