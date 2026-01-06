@@ -106,6 +106,7 @@ bool EloqStoreDataStore::Initialize()
     }
     else if (metrics_registry_result.metrics_registry_ != nullptr)
     {
+        LOG(INFO) << "yf: EloqStoreDataStore::Initialize: get metric registry";
         // Create common labels
         // Note: node_ip and node_port may not be available at Initialize() time
         // For now, we use empty labels. The shard_id label will be added by EloqStore::InitializeMetrics()
