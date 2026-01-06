@@ -22,6 +22,7 @@
 
 #include <gflags/gflags.h>
 #include <sys/resource.h>
+#include <sys/sysinfo.h>
 
 #include <filesystem>
 #include <iostream>
@@ -68,7 +69,7 @@ DEFINE_bool(
     bind_all,
     false,
     "Listen on all interfaces if enabled, otherwise listen on local.ip");
-DEFINE_uint32(maxclients, 10000, "maxclients");
+DEFINE_uint32(maxclients, 500000, "maxclients");
 DEFINE_string(log_file_name_prefix,
               "eloqdb.log",
               "Sets the prefix for log files. Default is 'eloqdb.log'");
@@ -137,6 +138,15 @@ bool DataSubstrate::Start()
     DataSubstrate &instance = Instance();
 
     txservice::InitializeTscFrequency();
+    struct sysinfo meminfo;
+    if (sysinfo(&meminfo))
+    {
+        LOG(ERROR) << "Failed to get system memory info: " << strerror(errno)
+                   << " when node_memory_limit_mb is not set";
+        return false;
+    }
+    uint32_t mem_mib = meminfo.totalram * meminfo.mem_unit / (1024 * 1024);
+    instance.remaining_node_memory_mb_ = mem_mib * 4 / 5;
 
     if (instance.init_state_ == InitState::NotInitialized)
     {

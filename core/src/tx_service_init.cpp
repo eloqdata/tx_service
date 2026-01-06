@@ -2,7 +2,6 @@
 #include <gflags/gflags.h>
 #include <glog/logging.h>
 #include <limits.h>
-#include <sys/sysinfo.h>
 
 #include "data_substrate.h"
 #include "eloq_log_wrapper.h"
@@ -114,24 +113,21 @@ bool DataSubstrate::InitializeTxService(const INIReader &config_reader)
         }
         else
         {
-            struct sysinfo meminfo;
-            if (sysinfo(&meminfo))
-            {
-                LOG(ERROR) << "Failed to get system memory info: "
-                           << strerror(errno)
-                           << " when node_memory_limit_mb is not set";
-                return false;
-            }
-            uint32_t mem_mib =
-                ((uint64_t) meminfo.totalram * meminfo.mem_unit) /
-                (1024 * 1024);
-            node_memory_limit_mb = std::max(uint32_t(512), (mem_mib * 4) / 5);
+            node_memory_limit_mb = remaining_node_memory_mb_;
             LOG(INFO) << "config is automatically set: " << field_mem << "="
                       << node_memory_limit_mb
-                      << "(MiB), total memory=" << mem_mib;
+                      << "(MiB), total memory=" << remaining_node_memory_mb_;
         }
     }
+    if (node_memory_limit_mb > remaining_node_memory_mb_)
+    {
+        LOG(ERROR) << "node memory exceeds, node_memory_limit_mb="
+                   << node_memory_limit_mb
+                   << ", available memory=" << remaining_node_memory_mb_;
+        return false;
+    }
     FLAGS_node_memory_limit_mb = node_memory_limit_mb;
+    remaining_node_memory_mb_ -= node_memory_limit_mb;
 
     uint64_t range_slice_memory_limit_percent =
         !CheckCommandLineFlagIsDefault("range_slice_memory_limit_percent")

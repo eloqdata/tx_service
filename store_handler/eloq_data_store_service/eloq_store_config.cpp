@@ -36,7 +36,7 @@ DEFINE_string(eloq_store_data_path_list,
               "The data paths of the EloqStore (default is "
               "'{eloq_data_path}/eloq_dss/eloqstore_data').");
 DEFINE_uint32(eloq_store_open_files_limit,
-              1024,
+              400000,
               "EloqStore maximum open files.");
 DEFINE_string(eloq_store_cloud_store_path,
               "",
@@ -238,7 +238,8 @@ inline uint64_t parse_size(const std::string &size_str)
 }
 
 EloqStoreConfig::EloqStoreConfig(const INIReader &config_reader,
-                                 const std::string_view base_data_path)
+                                 const std::string_view base_data_path,
+                                 uint32_t &node_memory_mb)
 {
     eloqstore_configs_.num_threads =
         !CheckCommandLineFlagIsDefault("eloq_store_worker_num")
@@ -348,12 +349,37 @@ EloqStoreConfig::EloqStoreConfig(const INIReader &config_reader,
             : config_reader.GetBoolean("store",
                                        "eloq_store_skip_verify_checksum",
                                        FLAGS_eloq_store_skip_verify_checksum);
-    std::string index_buffer_pool_size =
-        !CheckCommandLineFlagIsDefault("eloq_store_index_buffer_pool_size")
-            ? FLAGS_eloq_store_index_buffer_pool_size
-            : config_reader.GetString("store",
-                                      "eloq_store_index_buffer_pool_size",
-                                      FLAGS_eloq_store_index_buffer_pool_size);
+    std::string index_buffer_pool_size;
+    if (CheckCommandLineFlagIsDefault("eloq_store_index_buffer_pool_size"))
+    {
+        if (config_reader.HasValue("store",
+                                   "eloq_store_index_buffer_pool_size"))
+        {
+            index_buffer_pool_size = config_reader.GetString(
+                "store",
+                "eloq_store_index_buffer_pool_size",
+                FLAGS_eloq_store_index_buffer_pool_size);
+        }
+        else
+        {
+            index_buffer_pool_size = std::to_string(node_memory_mb / 2) + "MB";
+            LOG(INFO) << "config is automatically set: "
+                      << "eloq_store_index_buffer_pool_size="
+                      << index_buffer_pool_size
+                      << ", available memory=" << node_memory_mb << "MB";
+        }
+    }
+    else
+    {
+        index_buffer_pool_size = FLAGS_eloq_store_index_buffer_pool_size;
+    }
+    uint64_t buffer_pool_size = parse_size(index_buffer_pool_size);
+    if (buffer_pool_size / (1024 * 1024) >= node_memory_mb)
+    {
+        LOG(FATAL) << "buffer pool size (" << index_buffer_pool_size
+                   << ") exceeds node memory mb";
+    }
+    node_memory_mb -= buffer_pool_size / (1024 * 1024);
     eloqstore_configs_.index_buffer_pool_size =
         parse_size(index_buffer_pool_size) / eloqstore_configs_.num_threads;
     eloqstore_configs_.manifest_limit =
