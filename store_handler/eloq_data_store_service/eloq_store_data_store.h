@@ -254,16 +254,6 @@ public:
 
     void CreateSnapshotForBackup(CreateSnapshotForBackupRequest *req) override;
 
-
-    /**
-     * @brief Initialize metrics for eloqstore shards.
-     * @param metrics_registry Pointer to metrics registry from data_substrate.
-     * @param common_labels Common labels to apply to all metrics (e.g., node_ip, node_port).
-     */
-    void InitializeMetrics(metrics::MetricsRegistry *metrics_registry,
-                           const metrics::CommonLabels &common_labels) override;
-
-
 private:
     static void OnRead(::eloqstore::KvRequest *req);
     static void OnBatchWrite(::eloqstore::KvRequest *req);

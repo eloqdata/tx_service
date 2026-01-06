@@ -657,17 +657,6 @@ public:
         return cluster_manager_;
     }
 
-    /**
-     * @brief Initialize metrics for all data store shards.
-     * @param metrics_registry Pointer to metrics registry from data_substrate.
-     * @param common_labels Common labels to apply to all metrics (e.g., node_ip, node_port).
-     * This method iterates through all shards and calls InitializeMetrics on each
-     * DataStore instance. DataStore subclasses that support metrics will override
-     * the base class method to perform actual initialization.
-     */
-    void InitializeMetricsForAllShards(metrics::MetricsRegistry *metrics_registry,
-                                       const metrics::CommonLabels &common_labels = {});
-
 private:
     DataStore *GetDataStore(uint32_t shard_id)
     {

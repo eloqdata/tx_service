@@ -316,21 +316,6 @@ bool DataSubstrate::InitializeStorageHandler(const INIReader &config_reader)
         LOG(ERROR) << "Failed to start data store service";
         return false;
     }
-#if ELOQDS
-    // Initialize metrics for data store service if metrics are enabled
-    if (metrics_registry_ != nullptr && data_store_service_ != nullptr)
-    {
-        metrics::CommonLabels dss_common_labels{};
-        dss_common_labels["node_ip"] = network_config_.local_ip;
-        dss_common_labels["node_port"] = std::to_string(network_config_.local_port);
-        
-        // Initialize metrics for all shards
-        // Each DataStore subclass will handle this polymorphically:
-        // - EloqStoreDataStore will initialize eloqstore metrics
-        // - Other DataStore types will use the default empty implementation
-        data_store_service_->InitializeMetricsForAllShards(metrics_registry_.get(), dss_common_labels);
-    }
-#endif
     // setup data store service client
     txservice::CatalogFactory *catalog_factory[NUM_EXTERNAL_ENGINES] = {
         nullptr, nullptr, nullptr};
