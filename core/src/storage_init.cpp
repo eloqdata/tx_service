@@ -289,7 +289,7 @@ bool DataSubstrate::InitializeStorageHandler(const INIReader &config_reader)
 
 #elif defined(DATA_STORE_TYPE_ELOQDSS_ELOQSTORE)
     EloqDS::EloqStoreConfig eloq_store_config(
-        config_reader, eloq_dss_data_path, remaining_node_memory_mb_ );
+        config_reader, eloq_dss_data_path, remaining_node_memory_mb_);
     auto ds_factory = std::make_unique<EloqDS::EloqStoreDataStoreFactory>(
         std::move(eloq_store_config));
 #endif
