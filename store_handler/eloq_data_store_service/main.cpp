@@ -300,7 +300,7 @@ int main(int argc, char *argv[])
     {
         LOG(ERROR) << "Failed to get system memory info: " << strerror(errno)
                    << " when node_memory_limit_mb is not set";
-        return false;
+        return -1;
     }
     uint32_t mem_mib =
         meminfo.totalram * meminfo.mem_unit / (1024 * 1024) * 4 / 5;

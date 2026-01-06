@@ -27,7 +27,6 @@
 #include "data_store_handler.h"
 #include "data_substrate.h"
 #include "kv_store.h"
-#include "log_utils.h"
 #if ELOQDS
 #include <filesystem>
 
