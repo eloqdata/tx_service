@@ -41,7 +41,7 @@ using MeterKey = std::size_t;
  * metric, allowing for fine-grained categorization of data. The class interacts
  * with a MetricsRegistry instance to register and collect metrics. The Meter
  * class uses a mapping between meter keys (constructed from metric names and
- * labels) and metric keys to efficiently collect metric values.
+ * labels) and metric handles to efficiently collect metric values.
  *
  * Usage:
  * 1. Create an instance of the Meter class by providing a pointer to a
@@ -172,7 +172,7 @@ public:
         auto name_str = name.GetName();
         for (const auto &labels : all_labels)
         {
-            auto metric_key =
+            auto metric_handle =
                 metrics_registry_->Register(name_str, type, labels);
             auto meter_key = Hash(name_str);
             for (size_t i = common_label_groups_.size(); i < labels.size(); ++i)
@@ -181,7 +181,7 @@ public:
                 meter_key = Hash(meter_key, pair.second);
             }
             meter_to_metric_map_.emplace(std::move(meter_key),
-                                         std::move(metric_key));
+                                         std::move(metric_handle));
         }
     };
 
@@ -195,9 +195,9 @@ public:
      * This function collects a metric value with the provided name, value, and
      * labels. The labels are specified as variadic template arguments, and
      * their values are concatenated to form a unique meter key. The function
-     * retrieves the corresponding metric key from the meter_to_metric_map_ and
-     * collects the metric using the MetricsRegistry. If the meter key is not
-     * found in the map, an assertion failure occurs.
+ * retrieves the corresponding metric handle from the meter_to_metric_map_ and
+ * collects the metric using the MetricsRegistry. If the meter key is not
+ * found in the map, an assertion failure occurs.
      */
     template <typename... LabelTypes>
     void Collect(const Name &name,
@@ -213,7 +213,7 @@ public:
         // To avoid db crash resulting from a meter key missing
         if (it != meter_to_metric_map_.end())
         {
-            metrics_registry_->Collect(meter_to_metric_map_[meter_key], value);
+            metrics_registry_->Collect(it->second, value);
         }
     }
 
@@ -346,6 +346,6 @@ private:
 
     MetricsRegistry *metrics_registry_{nullptr};
     std::vector<LabelGroup> common_label_groups_{};
-    Map<MeterKey, MetricKey> meter_to_metric_map_{};
+    Map<MeterKey, MetricHandle> meter_to_metric_map_{};
 };
 }  // namespace metrics

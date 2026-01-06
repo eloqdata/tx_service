@@ -43,18 +43,16 @@ public:
     static MetricsRegistryResult GetRegistry();
 
     metrics::MetricsErrors Open() override;
-    metrics::MetricKey Register(const metrics::Name &,
-                                metrics::Type,
-                                const metrics::Labels &) override;
-    void Collect(metrics::MetricKey, const metrics::Value &) override;
+    metrics::MetricHandle Register(const metrics::Name &,
+                                   metrics::Type,
+                                   const metrics::Labels &) override;
+    void Collect(const metrics::MetricHandle &, const metrics::Value &) override;
 
 private:
     MetricsRegistryImpl() = default;
 
     metrics::MetricsMgr::MetricsMgrResult metrics_mgr_result_ =
         metrics::MetricsMgr::GetMetricMgrInstance();
-    metrics::Map<metrics::MetricKey, std::unique_ptr<metrics::CollectorWrapper>>
-        collectors_{};
 };
 
 }  // namespace eloq_metrics_app

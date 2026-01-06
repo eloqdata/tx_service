@@ -71,6 +71,15 @@ enum class Type
     Histogram
 };
 
+struct MetricHandle
+{
+    MetricKey key;
+    Type type;
+
+    MetricHandle() = delete;
+    MetricHandle(MetricKey k, Type t) : key(k), type(t) {}
+};
+
 struct Value
 {
     enum class IncDecValue
@@ -145,8 +154,8 @@ class MetricsRegistry
 {
 public:
     virtual MetricsErrors Open() = 0;
-    virtual MetricKey Register(const Name &, metrics::Type, const Labels &) = 0;
-    virtual void Collect(MetricKey, const Value &) = 0;
+    virtual MetricHandle Register(const Name &, metrics::Type, const Labels &) = 0;
+    virtual void Collect(const MetricHandle &, const Value &) = 0;
     virtual ~MetricsRegistry() = default;
 };
 }  // namespace metrics

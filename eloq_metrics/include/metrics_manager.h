@@ -40,28 +40,6 @@ enum class MetricsMgrErrors
     CollectorOpenErr,
 };
 
-struct CollectorWrapper
-{
-    std::shared_ptr<MetricsCollector> &collector_ptr_;
-    MetricKey metric_key_;
-    Type metric_type_;
-
-    CollectorWrapper() = delete;
-
-    CollectorWrapper(const CollectorWrapper &&) = delete;
-
-    CollectorWrapper(std::shared_ptr<MetricsCollector> &metrics_collector_ptr,
-                     MetricKey metrics_key,
-                     Type metric_type)
-        : collector_ptr_(metrics_collector_ptr),
-          metric_key_(metrics_key),
-          metric_type_(metric_type)
-    {
-    }
-
-    void Collect(const Value &) const;
-};
-
 class MetricsMgr
 {
 public:
@@ -69,8 +47,12 @@ public:
     const std::string default_port_ = "18081";
 
     struct MetricsMgrResult;
-    std::unique_ptr<CollectorWrapper> MetricsRegistry(
-        std::unique_ptr<Metric> metric);
+    MetricHandle MetricsRegistry(std::unique_ptr<Metric> metric);
+
+    std::shared_ptr<MetricsCollector> GetCollector() const
+    {
+        return metrics_collector_;
+    }
 
     static metrics::MetricsMgr::MetricsMgrResult GetMetricMgrInstance();
 

@@ -110,6 +110,8 @@ The usage of `eloq-metrics` follows 3 steps:
 
 3. Registering Metrics and Gathering the values.
 
+**Note**: Metrics can be collected at any time after registration. There is no requirement to register all metrics before collection begins. The `MetricHandle` returned from `Register()` contains all information needed for collection, making the operation thread-safe and lock-free.
+
 For details on how to use it, see also `dummy_executor.cpp` and `meter.h`.
 
 ``` c++

@@ -54,25 +54,23 @@ metrics::MetricsErrors MetricsRegistryImpl::Open()
     return metrics::MetricsErrors::Success;
 }
 
-metrics::MetricKey MetricsRegistryImpl::Register(const metrics::Name &name,
-                                                 metrics::Type type,
-                                                 const metrics::Labels &labels)
+metrics::MetricHandle MetricsRegistryImpl::Register(const metrics::Name &name,
+                                                     metrics::Type type,
+                                                     const metrics::Labels &labels)
 {
     auto metric = metrics::Metric(name.GetName(), type, labels);
 
-    auto metric_collector = metrics_mgr_result_.mgr_->MetricsRegistry(
+    return metrics_mgr_result_.mgr_->MetricsRegistry(
         std::make_unique<metrics::Metric>(metric));
-
-    auto key = metric_collector->metric_key_;
-    collectors_.insert(std::make_pair(key, std::move(metric_collector)));
-    return key;
 }
 
-void MetricsRegistryImpl::Collect(metrics::MetricKey key,
+void MetricsRegistryImpl::Collect(const metrics::MetricHandle &handle,
                                   const metrics::Value &val)
 {
-    auto collector = collectors_[key].get();
-    assert(collector);
-    collector->Collect(val);
+    auto collector = metrics_mgr_result_.mgr_->GetCollector();
+    if (collector != nullptr)
+    {
+        collector->Collect(handle.key, val, handle.type);
+    }
 }
 }  // namespace eloq_metrics_app

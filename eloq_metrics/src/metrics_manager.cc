@@ -25,11 +25,6 @@
 
 namespace metrics
 {
-void CollectorWrapper::Collect(const Value &value) const
-{
-    collector_ptr_->Collect(metric_key_, value, metric_type_);
-}
-
 bool MetricsMgr::operator==(const metrics::MetricsMgr &other)
 {
     if (other.mgr_init_err_ != this->mgr_init_err_)
@@ -43,14 +38,12 @@ bool MetricsMgr::operator==(const metrics::MetricsMgr &other)
     }
     return true;
 }
-std::unique_ptr<CollectorWrapper> MetricsMgr::MetricsRegistry(
-    std::unique_ptr<Metric> metric)
+MetricHandle MetricsMgr::MetricsRegistry(std::unique_ptr<Metric> metric)
 {
     auto metric_ref = metric.get();
     auto metric_type = metric_ref->type_;
     auto metric_key = metrics_collector_->SetMetric(metric);
-    return std::make_unique<CollectorWrapper>(
-        metrics_collector_, metric_key, metric_type);
+    return MetricHandle(metric_key, metric_type);
 }
 
 MetricsMgr::MetricsMgrResult MetricsMgr::GetMetricMgrInstance()
