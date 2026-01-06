@@ -23,6 +23,7 @@
 #include <brpc/server.h>
 #include <gflags/gflags.h>
 #include <gflags/gflags_declare.h>
+#include <sys/sysinfo.h>
 #include <unistd.h>
 
 #include <cassert>
@@ -294,7 +295,17 @@ int main(int argc, char *argv[])
         rocksdb_config, enable_cache_replacement_);
 
 #elif defined(DATA_STORE_TYPE_ELOQDSS_ELOQSTORE)
-    EloqDS::EloqStoreConfig eloq_store_config(config_reader, data_path);
+    struct sysinfo meminfo;
+    if (sysinfo(&meminfo))
+    {
+        LOG(ERROR) << "Failed to get system memory info: " << strerror(errno)
+                   << " when node_memory_limit_mb is not set";
+        return false;
+    }
+    uint32_t mem_mib =
+        meminfo.totalram * meminfo.mem_unit / (1024 * 1024) * 4 / 5;
+    EloqDS::EloqStoreConfig eloq_store_config(
+        config_reader, data_path, mem_mib, true);
 
 #ifdef ELOQ_MODULE_ENABLED
     GFLAGS_NAMESPACE::SetCommandLineOption(

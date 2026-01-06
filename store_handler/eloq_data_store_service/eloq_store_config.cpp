@@ -239,7 +239,8 @@ inline uint64_t parse_size(const std::string &size_str)
 
 EloqStoreConfig::EloqStoreConfig(const INIReader &config_reader,
                                  const std::string_view base_data_path,
-                                 uint32_t &node_memory_mb)
+                                 uint32_t &node_memory_mb,
+                                 bool standalone)
 {
     eloqstore_configs_.num_threads =
         !CheckCommandLineFlagIsDefault("eloq_store_worker_num")
@@ -362,7 +363,10 @@ EloqStoreConfig::EloqStoreConfig(const INIReader &config_reader,
         }
         else
         {
-            index_buffer_pool_size = std::to_string(node_memory_mb / 2) + "MB";
+            index_buffer_pool_size =
+                std::to_string(standalone ? node_memory_mb
+                                          : node_memory_mb / 2) +
+                "MB";
             LOG(INFO) << "config is automatically set: "
                       << "eloq_store_index_buffer_pool_size="
                       << index_buffer_pool_size
@@ -374,7 +378,7 @@ EloqStoreConfig::EloqStoreConfig(const INIReader &config_reader,
         index_buffer_pool_size = FLAGS_eloq_store_index_buffer_pool_size;
     }
     uint64_t buffer_pool_size = parse_size(index_buffer_pool_size);
-    if (buffer_pool_size / (1024 * 1024) >= node_memory_mb)
+    if (buffer_pool_size / (1024 * 1024) > node_memory_mb)
     {
         LOG(FATAL) << "buffer pool size (" << index_buffer_pool_size
                    << ") exceeds node memory mb";

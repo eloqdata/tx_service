@@ -115,8 +115,8 @@ bool DataSubstrate::InitializeTxService(const INIReader &config_reader)
         {
             node_memory_limit_mb = remaining_node_memory_mb_;
             LOG(INFO) << "config is automatically set: " << field_mem << "="
-                      << node_memory_limit_mb
-                      << "(MiB), total memory=" << remaining_node_memory_mb_;
+                      << node_memory_limit_mb << "(MiB), available memory="
+                      << remaining_node_memory_mb_;
         }
     }
     if (node_memory_limit_mb > remaining_node_memory_mb_)
