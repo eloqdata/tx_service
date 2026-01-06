@@ -93,6 +93,24 @@ DEFINE_string(
     "s3://{bucket}/{path}, gs://{bucket}/{path}, or "
     "http(s)://{host}:{port}/{bucket}/{path}. "
     "Takes precedence over legacy config if provided.");
+DEFINE_string(txlog_rocksdb_cloud_archive_bucket_name,
+              "",
+              "S3 bucket name for archiving old log state SST files. "
+              "If not set, defaults to txlog_rocksdb_cloud_bucket_name.");
+DEFINE_string(txlog_rocksdb_cloud_archive_bucket_prefix,
+              "",
+              "S3 bucket prefix for archiving old log state SST files. "
+              "If not set, defaults to txlog_rocksdb_cloud_bucket_prefix.");
+DEFINE_string(
+    txlog_rocksdb_cloud_archive_object_path,
+    "",
+    "S3 object path (prefix) for archiving old log state SST files. "
+    "If not set, defaults to txlog_rocksdb_cloud_object_path + \"_archives\". "
+    "Files will be stored at: {bucket}/{prefix}/{object_path}/{file_name}");
+DEFINE_uint32(txlog_rocksdb_cloud_archive_move_interval_seconds,
+              600,
+              "Interval in seconds for Stage 1 purger to move SST files from "
+              "active DB to archive path. Default: 600 (10 minutes).");
 #endif
 #ifdef WITH_CLOUD_AZ_INFO
 DEFINE_string(txlog_rocksdb_cloud_prefer_zone,
@@ -471,6 +489,35 @@ bool DataSubstrate::InitializeLogService(const INIReader &config_reader)
                                   : txlog_rocksdb_cloud_config.endpoint_url_)
                           << ")";
             }
+
+            // Archive config
+            txlog_rocksdb_cloud_config.archive_bucket_name_ =
+                !CheckCommandLineFlagIsDefault(
+                    "txlog_rocksdb_cloud_archive_bucket_name")
+                    ? FLAGS_txlog_rocksdb_cloud_archive_bucket_name
+                    : txlog_rocksdb_cloud_config.bucket_name_;
+
+            txlog_rocksdb_cloud_config.archive_bucket_prefix_ =
+                !CheckCommandLineFlagIsDefault(
+                    "txlog_rocksdb_cloud_archive_bucket_prefix")
+                    ? FLAGS_txlog_rocksdb_cloud_archive_bucket_prefix
+                    : txlog_rocksdb_cloud_config.bucket_prefix_;
+
+            txlog_rocksdb_cloud_config.archive_object_path_ =
+                !CheckCommandLineFlagIsDefault(
+                    "txlog_rocksdb_cloud_archive_object_path")
+                    ? FLAGS_txlog_rocksdb_cloud_archive_object_path
+                    : (txlog_rocksdb_cloud_config.object_path_ + "_archives");
+
+            txlog_rocksdb_cloud_config.archive_move_interval_seconds_ =
+                !CheckCommandLineFlagIsDefault(
+                    "txlog_rocksdb_cloud_archive_move_interval_seconds")
+                    ? FLAGS_txlog_rocksdb_cloud_archive_move_interval_seconds
+                    : config_reader.GetInteger(
+                          "local",
+                          "txlog_rocksdb_cloud_archive_move_interval_seconds",
+                          FLAGS_txlog_rocksdb_cloud_archive_move_interval_seconds);
+
             if (core_config_.bootstrap)
             {
                 log_server_ = std::make_unique<::txlog::LogServer>(
