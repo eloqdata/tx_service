@@ -59,9 +59,6 @@ DEFINE_string(eloq_store_cloud_secret_key,
 DEFINE_bool(eloq_store_cloud_verify_ssl,
             false,
             "EloqStore cloud provider verify TLS certificates.");
-DEFINE_uint32(eloq_store_cloud_worker_count,
-              1,
-              "EloqStore cloud worker count.");
 DEFINE_uint32(eloq_store_data_page_restart_interval,
               16,
               "EloqStore data page restart interval.");
@@ -123,7 +120,7 @@ DEFINE_uint32(eloq_store_pages_per_file_shift,
               11,
               "EloqStore pages per file shift.");
 DEFINE_uint32(eloq_store_overflow_pointers, 16, "EloqStore overflow pointers.");
-DEFINE_bool(eloq_store_data_append_mode, false, "EloqStore data append mode.");
+DEFINE_bool(eloq_store_data_append_mode, true, "EloqStore data append mode.");
 DEFINE_bool(eloq_store_enable_compression,
             false,
             "EloqStore enable compression.");
