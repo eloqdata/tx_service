@@ -261,6 +261,8 @@ private:
     bool InitializeTxService(const INIReader &config_file_reader);
     bool InitializeMetrics(const INIReader &config_file_reader);
 
+    uint32_t remaining_node_memory_mb_{};
+
     // Configuration storage
     CoreConfig core_config_;
     NetworkConfig network_config_;
