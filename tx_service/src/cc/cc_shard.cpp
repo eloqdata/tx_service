@@ -34,6 +34,7 @@
 #include <sys/syscall.h>
 #include <dlfcn.h>
 #include <cxxabi.h>
+#include <execinfo.h>
 
 #include "cc/catalog_cc_map.h"
 #include "cc/cc_map.h"
@@ -789,24 +790,47 @@ TEntry *CcShard::LocateTx(TxNumber tx_number)
     return nullptr;
 }
 
-// Helper function to get caller function name
+// Helper function to get caller function names (up to 2 levels above)
 static std::string GetCallerFunctionName()
 {
-    void *caller_addr = __builtin_return_address(0);
-    Dl_info info;
-    if (dladdr(caller_addr, &info) != 0 && info.dli_sname != nullptr)
+    void *buffer[4];
+    int size = backtrace(buffer, 4);
+    if (size < 3)
     {
-        int status = 0;
-        char *demangled = abi::__cxa_demangle(info.dli_sname, nullptr, nullptr, &status);
-        if (status == 0 && demangled != nullptr)
-        {
-            std::string result(demangled);
-            free(demangled);
-            return result;
-        }
-        return std::string(info.dli_sname);
+        return "unknown";
     }
-    return "unknown";
+    
+    std::string result;
+    // Skip frame 0 (this function) and frame 1 (DetachLru/UpdateLruList)
+    // Get frame 2 (direct caller) and frame 3 (caller's caller)
+    for (int i = 2; i < size && i < 4; ++i)
+    {
+        Dl_info info;
+        if (dladdr(buffer[i], &info) != 0 && info.dli_sname != nullptr)
+        {
+            int status = 0;
+            char *demangled = abi::__cxa_demangle(info.dli_sname, nullptr, nullptr, &status);
+            if (status == 0 && demangled != nullptr)
+            {
+                if (!result.empty())
+                {
+                    result += " <- ";
+                }
+                result += demangled;
+                free(demangled);
+            }
+            else
+            {
+                if (!result.empty())
+                {
+                    result += " <- ";
+                }
+                result += info.dli_sname;
+            }
+        }
+    }
+    
+    return result.empty() ? "unknown" : result;
 }
 
 void CcShard::DetachLru(LruPage *page)
