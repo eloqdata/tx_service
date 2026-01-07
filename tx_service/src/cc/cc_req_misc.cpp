@@ -1195,6 +1195,19 @@ bool UpdateCceCkptTsCc::Execute(CcShard &ccs)
 
     size_t last_index = std::min(index + SCAN_BATCH_SIZE, records.size());
 
+    struct Timer
+    {
+        ~Timer()
+        {
+            int64_t diff = butil::cpuwide_time_ns() - start;
+            if (diff > 500000)
+            {
+                LOG(INFO) << "UpdateCceCkptTsCc::Execute() cost " << diff
+                          << "ns";
+            }
+        }
+        int64_t start{butil::cpuwide_time_ns()};
+    } timer;
     for (; index < last_index; ++index)
     {
         const CkptTsEntry &ref = records[index];
