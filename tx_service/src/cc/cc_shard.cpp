@@ -1122,46 +1122,6 @@ void CcShard::UpdateLruList(LruPage *page, bool is_emplace)
     }
     // #endregion
     LruPage *second_tail = tail_ccp_.lru_prev_;
-    // #region agent log
-    {
-        std::ofstream log("/mnt/data/debug.log", std::ios::app);
-        if (log.is_open()) {
-            std::ostringstream json;
-            json << "{\"sessionId\":\"debug-session\",\"runId\":\"run1\",\"hypothesisId\":\"G\",\"location\":\"cc_shard.cpp:850\",\"message\":\"UpdateLruList after read tail\",\"data\":{\"page\":\"" << (void*)page << "\",\"second_tail\":\"" << (void*)second_tail << "\",\"tail_prev_after\":\"" << (void*)tail_ccp_.lru_prev_ << "\",\"second_tail_prev\":\"" << (void*)(second_tail ? second_tail->lru_prev_ : nullptr) << "\",\"second_tail_next\":\"" << (void*)(second_tail ? second_tail->lru_next_ : nullptr) << "\",\"tid\":" << syscall(SYS_gettid) << "},\"timestamp\":" << std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::system_clock::now().time_since_epoch()).count() << "}\n";
-            log << json.str();
-        }
-    }
-    // #endregion
-    // #region agent log
-    {
-        std::ofstream log("/mnt/data/debug.log", std::ios::app);
-        if (log.is_open()) {
-            std::ostringstream json;
-            json << "{\"sessionId\":\"debug-session\",\"runId\":\"run1\",\"hypothesisId\":\"I\",\"location\":\"cc_shard.cpp:933\",\"message\":\"UpdateLruList before pointer updates\",\"data\":{\"page\":\"" << (void*)page << "\",\"second_tail\":\"" << (void*)second_tail << "\",\"second_tail_next_before\":\"" << (void*)(second_tail ? second_tail->lru_next_ : nullptr) << "\",\"tid\":" << syscall(SYS_gettid) << "},\"timestamp\":" << std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::system_clock::now().time_since_epoch()).count() << "}\n";
-            log << json.str();
-        }
-    }
-    // #endregion
-    // #region agent log
-    {
-        std::ofstream log("/mnt/data/debug.log", std::ios::app);
-        if (log.is_open()) {
-            std::ostringstream json;
-            json << "{\"sessionId\":\"debug-session\",\"runId\":\"run1\",\"hypothesisId\":\"O\",\"location\":\"cc_shard.cpp:971\",\"message\":\"UpdateLruList before setting page pointers\",\"data\":{\"page\":\"" << (void*)page << "\",\"second_tail\":\"" << (void*)second_tail << "\",\"second_tail_lru_prev_before\":\"" << (void*)second_tail->lru_prev_ << "\",\"second_tail_lru_next_before\":\"" << (void*)second_tail->lru_next_ << "\",\"tid\":" << syscall(SYS_gettid) << "},\"timestamp\":" << std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::system_clock::now().time_since_epoch()).count() << "}\n";
-            log << json.str();
-        }
-    }
-    // #endregion
-    // #region agent log
-    {
-        std::ofstream log("/mnt/data/debug.log", std::ios::app);
-        if (log.is_open()) {
-            std::ostringstream json;
-            json << "{\"sessionId\":\"debug-session\",\"runId\":\"run1\",\"hypothesisId\":\"R\",\"location\":\"cc_shard.cpp:987\",\"message\":\"UpdateLruList: Setting second_tail->lru_next_\",\"data\":{\"second_tail\":\"" << (void*)second_tail << "\",\"old_value\":\"" << (void*)second_tail->lru_next_ << "\",\"new_value\":\"" << (void*)page << "\",\"tid\":" << syscall(SYS_gettid) << "},\"timestamp\":" << std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::system_clock::now().time_since_epoch()).count() << "}\n";
-            log << json.str();
-        }
-    }
-    // #endregion
     second_tail->lru_next_ = page;
     // #region agent log
     {
@@ -1196,26 +1156,6 @@ void CcShard::UpdateLruList(LruPage *page, bool is_emplace)
     }
     // #endregion
     page->lru_prev_ = second_tail;
-    // #region agent log
-    {
-        std::ofstream log("/mnt/data/debug.log", std::ios::app);
-        if (log.is_open()) {
-            std::ostringstream json;
-            json << "{\"sessionId\":\"debug-session\",\"runId\":\"run1\",\"hypothesisId\":\"P\",\"location\":\"cc_shard.cpp:976\",\"message\":\"UpdateLruList after setting page pointers\",\"data\":{\"page\":\"" << (void*)page << "\",\"second_tail\":\"" << (void*)second_tail << "\",\"second_tail_lru_next_after\":\"" << (void*)second_tail->lru_next_ << "\",\"page_lru_prev_after\":\"" << (void*)page->lru_prev_ << "\",\"page_lru_next_after\":\"" << (void*)page->lru_next_ << "\",\"tid\":" << syscall(SYS_gettid) << "},\"timestamp\":" << std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::system_clock::now().time_since_epoch()).count() << "}\n";
-            log << json.str();
-        }
-    }
-    // #endregion
-    // #region agent log
-    {
-        std::ofstream log("/mnt/data/debug.log", std::ios::app);
-        if (log.is_open()) {
-            std::ostringstream json;
-            json << "{\"sessionId\":\"debug-session\",\"runId\":\"run1\",\"hypothesisId\":\"J\",\"location\":\"cc_shard.cpp:937\",\"message\":\"UpdateLruList after pointer updates\",\"data\":{\"page\":\"" << (void*)page << "\",\"lru_prev_\":\"" << (void*)page->lru_prev_ << "\",\"lru_next_\":\"" << (void*)page->lru_next_ << "\",\"second_tail_next_after\":\"" << (void*)(second_tail ? second_tail->lru_next_ : nullptr) << "\",\"tid\":" << syscall(SYS_gettid) << "},\"timestamp\":" << std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::system_clock::now().time_since_epoch()).count() << "}\n";
-            log << json.str();
-        }
-    }
-    // #endregion
     // #region agent log
     {
         std::ofstream log("/mnt/data/debug.log", std::ios::app);

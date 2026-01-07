@@ -11645,15 +11645,6 @@ protected:
             shard_->DetachLru(less_recently_used);
         }
         LruPage *next = more_recently_used->lru_next_;
-        // Before modifying next->lru_prev_, check if next is already in the list
-        // If it is, we need to detach it first to maintain list integrity
-        if (next != nullptr && next->lru_prev_ != nullptr && next->lru_next_ != nullptr)
-        {
-            // next is already in the list, detach it first
-            shard_->DetachLru(next);
-            // Re-read next after detach, as DetachLru may have modified more_recently_used->lru_next_
-            next = more_recently_used->lru_next_;
-        }
         // #region agent log
         {
             std::ofstream log("/mnt/data/debug.log", std::ios::app);
@@ -11675,10 +11666,7 @@ protected:
             }
         }
         // #endregion
-        if (next != nullptr)
-        {
-            next->lru_prev_ = less_recently_used;
-        }
+        next->lru_prev_ = less_recently_used;
         if (next->lru_prev_ == nullptr)
         {
             std::ofstream log("/mnt/data/debug.log", std::ios::app);
