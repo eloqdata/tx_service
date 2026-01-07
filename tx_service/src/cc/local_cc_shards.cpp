@@ -3002,7 +3002,9 @@ void LocalCcShards::DataSyncWorker(size_t worker_idx)
                                WorkerStatus::Active;
                 });
             task_worker_lk.unlock();
+            LOG(INFO) << "DataSyncWorker " << worker_idx << " start scan";
             DataSyncForHashPartition(std::move(task), worker_idx);
+            LOG(INFO) << "DataSyncWorker " << worker_idx << " finish scan";
             if (FLAGS_report_ckpt)
             {
                 ReportHashPartitionCkptHeapUsage();
