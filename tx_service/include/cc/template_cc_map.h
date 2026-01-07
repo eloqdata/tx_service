@@ -5777,6 +5777,19 @@ public:
 
     bool Execute(HashPartitionDataSyncScanCc &req) override
     {
+        struct Timer
+        {
+            ~Timer()
+            {
+                int64_t diff = butil::cpuwide_time_ns() - start;
+                if (diff > 1000000)
+                {
+                    LOG(ERROR)
+                        << "TemplateCcMap execute DataSyncScanCc cost " << diff;
+                }
+            }
+            int64_t start{butil::cpuwide_time_ns()};
+        } timer;
         TX_TRACE_ACTION_WITH_CONTEXT(
             (txservice::CcMap *) this,
             &req,
