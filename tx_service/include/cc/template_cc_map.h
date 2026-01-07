@@ -30,11 +30,15 @@
 #include <cstddef>
 #include <cstdint>
 #include <deque>
+#include <fstream>
 #include <iterator>
 #include <memory>
 #include <optional>
+#include <sstream>
 #include <string>
 #include <string_view>
+#include <unistd.h>
+#include <sys/syscall.h>
 #include <variant>
 #include <vector>
 
@@ -6220,7 +6224,9 @@ public:
 
                         // replace old_cc_page_ptr with new_cc_page_ptr in LRU
                         // list
-                        if (old_cc_page_uptr->lru_next_ != nullptr)
+                        // Check both pointers to ensure old page is actually in the list.
+                        if (old_cc_page_uptr->lru_prev_ != nullptr && 
+                            old_cc_page_uptr->lru_next_ != nullptr)
                         {
                             shard_->ReplaceLru(old_cc_page_uptr.get(),
                                                new_cc_page_ptr);
@@ -10232,11 +10238,60 @@ protected:
             if (target_page->lru_next_ != nullptr)
             {
                 LruPage *next = target_page->lru_next_;
+                // #region agent log
+                {
+                    std::ofstream log("/mnt/data/debug.log", std::ios::app);
+                    if (log.is_open()) {
+                        std::ostringstream json;
+                        json << "{\"sessionId\":\"debug-session\",\"runId\":\"run1\",\"hypothesisId\":\"R\",\"location\":\"template_cc_map.h:10237\",\"message\":\"PageSplit: Setting new_page->lru_next_\",\"data\":{\"new_page\":\"" << (void*)new_page << "\",\"old_value\":\"" << (void*)new_page->lru_next_ << "\",\"new_value\":\"" << (void*)next << "\",\"tid\":" << syscall(SYS_gettid) << "},\"timestamp\":" << std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::system_clock::now().time_since_epoch()).count() << "}\n";
+                        log << json.str();
+                    }
+                }
+                // #endregion
                 new_page->lru_next_ = next;
+                // #region agent log
+                {
+                    std::ofstream log("/mnt/data/debug.log", std::ios::app);
+                    if (log.is_open()) {
+                        std::ostringstream json;
+                        json << "{\"sessionId\":\"debug-session\",\"runId\":\"run1\",\"hypothesisId\":\"R\",\"location\":\"template_cc_map.h:10238\",\"message\":\"PageSplit: Setting next->lru_prev_\",\"data\":{\"next\":\"" << (void*)next << "\",\"old_value\":\"" << (void*)next->lru_prev_ << "\",\"new_value\":\"" << (void*)new_page << "\",\"tid\":" << syscall(SYS_gettid) << "},\"timestamp\":" << std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::system_clock::now().time_since_epoch()).count() << "}\n";
+                        log << json.str();
+                    }
+                }
+                // #endregion
                 next->lru_prev_ = new_page;
+                // #region agent log
+                {
+                    std::ofstream log("/mnt/data/debug.log", std::ios::app);
+                    if (log.is_open()) {
+                        std::ostringstream json;
+                        json << "{\"sessionId\":\"debug-session\",\"runId\":\"run1\",\"hypothesisId\":\"R\",\"location\":\"template_cc_map.h:10239\",\"message\":\"PageSplit: Setting target_page->lru_next_\",\"data\":{\"target_page\":\"" << (void*)target_page << "\",\"old_value\":\"" << (void*)target_page->lru_next_ << "\",\"new_value\":\"" << (void*)new_page << "\",\"tid\":" << syscall(SYS_gettid) << "},\"timestamp\":" << std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::system_clock::now().time_since_epoch()).count() << "}\n";
+                        log << json.str();
+                    }
+                }
+                // #endregion
                 target_page->lru_next_ = new_page;
+                // #region agent log
+                {
+                    std::ofstream log("/mnt/data/debug.log", std::ios::app);
+                    if (log.is_open()) {
+                        std::ostringstream json;
+                        json << "{\"sessionId\":\"debug-session\",\"runId\":\"run1\",\"hypothesisId\":\"R\",\"location\":\"template_cc_map.h:10240\",\"message\":\"PageSplit: Setting new_page->lru_prev_\",\"data\":{\"new_page\":\"" << (void*)new_page << "\",\"old_value\":\"" << (void*)new_page->lru_prev_ << "\",\"new_value\":\"" << (void*)target_page << "\",\"tid\":" << syscall(SYS_gettid) << "},\"timestamp\":" << std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::system_clock::now().time_since_epoch()).count() << "}\n";
+                        log << json.str();
+                    }
+                }
+                // #endregion
                 new_page->lru_prev_ = target_page;
                 new_page->last_access_ts_ = target_page->last_access_ts_;
+            }
+            else if (target_page->lru_prev_ != nullptr)
+            {
+                std::ofstream log("/mnt/data/debug.log", std::ios::app);
+                if (log.is_open()) {
+                    std::ostringstream json;
+                    json << "{\"sessionId\":\"debug-session\",\"runId\":\"run1\",\"hypothesisId\":\"L\",\"location\":\"template_cc_map.h:10246\",\"message\":\"INVALID STATE DETECTED\",\"data\":{\"page\":\"" << (void*)target_page << "\",\"lru_prev_\":\"" << (void*)target_page->lru_prev_ << "\",\"lru_next_\":\"" << (void*)target_page->lru_next_ << "\",\"tid\":" << syscall(SYS_gettid) << "},\"timestamp\":" << std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::system_clock::now().time_since_epoch()).count() << "}\n";
+                    log << json.str();
+                }
             }
 
             // Iterators are invalidated after split. Find the target page.
@@ -11590,9 +11645,69 @@ protected:
             shard_->DetachLru(less_recently_used);
         }
         LruPage *next = more_recently_used->lru_next_;
+        // #region agent log
+        {
+            std::ofstream log("/mnt/data/debug.log", std::ios::app);
+            if (log.is_open()) {
+                std::ostringstream json;
+                json << "{\"sessionId\":\"debug-session\",\"runId\":\"run1\",\"hypothesisId\":\"R\",\"location\":\"template_cc_map.h:11648\",\"message\":\"Redistribute: Setting less_recently_used->lru_next_\",\"data\":{\"less_recently_used\":\"" << (void*)less_recently_used << "\",\"old_value\":\"" << (void*)less_recently_used->lru_next_ << "\",\"new_value\":\"" << (void*)next << "\",\"tid\":" << syscall(SYS_gettid) << "},\"timestamp\":" << std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::system_clock::now().time_since_epoch()).count() << "}\n";
+                log << json.str();
+            }
+        }
+        // #endregion
         less_recently_used->lru_next_ = next;
+        // #region agent log
+        {
+            std::ofstream log("/mnt/data/debug.log", std::ios::app);
+            if (log.is_open()) {
+                std::ostringstream json;
+                json << "{\"sessionId\":\"debug-session\",\"runId\":\"run1\",\"hypothesisId\":\"R\",\"location\":\"template_cc_map.h:11649\",\"message\":\"Redistribute: Setting next->lru_prev_\",\"data\":{\"next\":\"" << (void*)next << "\",\"old_value\":\"" << (void*)next->lru_prev_ << "\",\"new_value\":\"" << (void*)less_recently_used << "\",\"tid\":" << syscall(SYS_gettid) << "},\"timestamp\":" << std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::system_clock::now().time_since_epoch()).count() << "}\n";
+                log << json.str();
+            }
+        }
+        // #endregion
         next->lru_prev_ = less_recently_used;
+        if (next->lru_prev_ == nullptr)
+        {
+            std::ofstream log("/mnt/data/debug.log", std::ios::app);
+            if (log.is_open()) {
+                std::ostringstream json;
+                json << "{\"sessionId\":\"debug-session\",\"runId\":\"run1\",\"hypothesisId\":\"S\",\"location\":\"template_cc_map.h:11606\",\"message\":\"INVALID STATE DETECTED\",\"data\":{\"next\":\"" << (void*)next << "\",\"lru_prev_\":\"" << (void*)next->lru_prev_ << "\",\"tid\":" << syscall(SYS_gettid) << "},\"timestamp\":" << std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::system_clock::now().time_since_epoch()).count() << "}\n";
+                log << json.str();
+            }
+            LOG(FATAL) << "INVALID STATE DETECTED on next " << next;
+        }
+        // #region agent log
+        {
+            std::ofstream log("/mnt/data/debug.log", std::ios::app);
+            if (log.is_open()) {
+                std::ostringstream json;
+                json << "{\"sessionId\":\"debug-session\",\"runId\":\"run1\",\"hypothesisId\":\"R\",\"location\":\"template_cc_map.h:11660\",\"message\":\"Redistribute: Setting less_recently_used->lru_prev_\",\"data\":{\"less_recently_used\":\"" << (void*)less_recently_used << "\",\"old_value\":\"" << (void*)less_recently_used->lru_prev_ << "\",\"new_value\":\"" << (void*)more_recently_used << "\",\"tid\":" << syscall(SYS_gettid) << "},\"timestamp\":" << std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::system_clock::now().time_since_epoch()).count() << "}\n";
+                log << json.str();
+            }
+        }
+        // #endregion
         less_recently_used->lru_prev_ = more_recently_used;
+        if (less_recently_used->lru_prev_ == nullptr)
+        {
+            std::ofstream log("/mnt/data/debug.log", std::ios::app);
+            if (log.is_open()) {
+                std::ostringstream json;
+                json << "{\"sessionId\":\"debug-session\",\"runId\":\"run1\",\"hypothesisId\":\"T\",\"location\":\"template_cc_map.h:11617\",\"message\":\"INVALID STATE DETECTED\",\"data\":{\"less_recently_used\":\"" << (void*)less_recently_used << "\",\"lru_prev_\":\"" << (void*)less_recently_used->lru_prev_ << "\",\"tid\":" << syscall(SYS_gettid) << "},\"timestamp\":" << std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::system_clock::now().time_since_epoch()).count() << "}\n";
+                log << json.str();
+            }
+            LOG(FATAL) << "INVALID STATE DETECTED on less_recently_used " << less_recently_used;
+        }
+        // #region agent log
+        {
+            std::ofstream log("/mnt/data/debug.log", std::ios::app);
+            if (log.is_open()) {
+                std::ostringstream json;
+                json << "{\"sessionId\":\"debug-session\",\"runId\":\"run1\",\"hypothesisId\":\"R\",\"location\":\"template_cc_map.h:11671\",\"message\":\"Redistribute: Setting more_recently_used->lru_next_\",\"data\":{\"more_recently_used\":\"" << (void*)more_recently_used << "\",\"old_value\":\"" << (void*)more_recently_used->lru_next_ << "\",\"new_value\":\"" << (void*)less_recently_used << "\",\"tid\":" << syscall(SYS_gettid) << "},\"timestamp\":" << std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::system_clock::now().time_since_epoch()).count() << "}\n";
+                log << json.str();
+            }
+        }
+        // #endregion
         more_recently_used->lru_next_ = less_recently_used;
         less_recently_used->last_access_ts_ =
             more_recently_used->last_access_ts_;
@@ -11693,18 +11808,69 @@ protected:
                 merge_last_access_ts = page2->last_access_ts_;
             }
 
-            if (merged_page->lru_next_ != nullptr)
+            // Check both pointers to ensure pages are actually in the list.
+            if (merged_page->lru_prev_ != nullptr && merged_page->lru_next_ != nullptr)
             {
                 shard_->DetachLru(merged_page);
             }
-            if (discarded_page->lru_next_ != nullptr)
+            if (discarded_page->lru_prev_ != nullptr && discarded_page->lru_next_ != nullptr)
             {
                 shard_->DetachLru(discarded_page);
             }
             // reinsert the merged page into lru list
+            // #region agent log
+            {
+                std::ofstream log("/mnt/data/debug.log", std::ios::app);
+                if (log.is_open()) {
+                    std::ostringstream json;
+                    json << "{\"sessionId\":\"debug-session\",\"runId\":\"run1\",\"hypothesisId\":\"R\",\"location\":\"template_cc_map.h:11781\",\"message\":\"MergePages: Setting merged_page->lru_prev_\",\"data\":{\"merged_page\":\"" << (void*)merged_page << "\",\"old_value\":\"" << (void*)merged_page->lru_prev_ << "\",\"new_value\":\"" << (void*)lru_prev << "\",\"is_null\":" << (lru_prev == nullptr) << ",\"tid\":" << syscall(SYS_gettid) << "},\"timestamp\":" << std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::system_clock::now().time_since_epoch()).count() << "}\n";
+                    log << json.str();
+                }
+            }
+            // #endregion
             merged_page->lru_prev_ = lru_prev;
+            // #region agent log
+            {
+                std::ofstream log("/mnt/data/debug.log", std::ios::app);
+                if (log.is_open()) {
+                    std::ostringstream json;
+                    json << "{\"sessionId\":\"debug-session\",\"runId\":\"run1\",\"hypothesisId\":\"R\",\"location\":\"template_cc_map.h:11782\",\"message\":\"MergePages: Setting merged_page->lru_next_\",\"data\":{\"merged_page\":\"" << (void*)merged_page << "\",\"old_value\":\"" << (void*)merged_page->lru_next_ << "\",\"new_value\":\"" << (void*)lru_next << "\",\"is_null\":" << (lru_next == nullptr) << ",\"tid\":" << syscall(SYS_gettid) << "},\"timestamp\":" << std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::system_clock::now().time_since_epoch()).count() << "}\n";
+                    log << json.str();
+                }
+            }
+            // #endregion
             merged_page->lru_next_ = lru_next;
+            if (lru_prev == nullptr || lru_next == nullptr)
+            {
+                std::ofstream log("/mnt/data/debug.log", std::ios::app);
+                if (log.is_open()) {
+                    std::ostringstream json;
+                    json << "{\"sessionId\":\"debug-session\",\"runId\":\"run1\",\"hypothesisId\":\"R\",\"location\":\"template_cc_map.h:11719\",\"message\":\"INVALID STATE DETECTED\",\"data\":{\"merged_page\":\"" << (void*)merged_page << "\",\"lru_prev_\":\"" << (void*)lru_prev << "\",\"lru_next_\":\"" << (void*)lru_next << "\",\"tid\":" << syscall(SYS_gettid) << "},\"timestamp\":" << std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::system_clock::now().time_since_epoch()).count() << "}\n";
+                    log << json.str();
+                }
+                LOG(FATAL) << "INVALID STATE DETECTED on merged page " << merged_page;
+            }
+            // #region agent log
+            {
+                std::ofstream log("/mnt/data/debug.log", std::ios::app);
+                if (log.is_open()) {
+                    std::ostringstream json;
+                    json << "{\"sessionId\":\"debug-session\",\"runId\":\"run1\",\"hypothesisId\":\"R\",\"location\":\"template_cc_map.h:11793\",\"message\":\"MergePages: Setting lru_prev->lru_next_\",\"data\":{\"lru_prev\":\"" << (void*)lru_prev << "\",\"old_value\":\"" << (void*)lru_prev->lru_next_ << "\",\"new_value\":\"" << (void*)merged_page << "\",\"tid\":" << syscall(SYS_gettid) << "},\"timestamp\":" << std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::system_clock::now().time_since_epoch()).count() << "}\n";
+                    log << json.str();
+                }
+            }
+            // #endregion
             lru_prev->lru_next_ = merged_page;
+            // #region agent log
+            {
+                std::ofstream log("/mnt/data/debug.log", std::ios::app);
+                if (log.is_open()) {
+                    std::ostringstream json;
+                    json << "{\"sessionId\":\"debug-session\",\"runId\":\"run1\",\"hypothesisId\":\"R\",\"location\":\"template_cc_map.h:11794\",\"message\":\"MergePages: Setting lru_next->lru_prev_\",\"data\":{\"lru_next\":\"" << (void*)lru_next << "\",\"old_value\":\"" << (void*)lru_next->lru_prev_ << "\",\"new_value\":\"" << (void*)merged_page << "\",\"tid\":" << syscall(SYS_gettid) << "},\"timestamp\":" << std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::system_clock::now().time_since_epoch()).count() << "}\n";
+                    log << json.str();
+                }
+            }
+            // #endregion
             lru_next->lru_prev_ = merged_page;
             merged_page->last_access_ts_ = merge_last_access_ts;
         }
