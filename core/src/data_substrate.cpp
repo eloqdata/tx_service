@@ -794,7 +794,7 @@ bool DataSubstrate::LoadCoreAndNetworkConfig(const INIReader &config_reader)
     GFLAGS_NAMESPACE::SetCommandLineOption(
         "bthread_concurrency", std::to_string(core_config_.core_num).c_str());
 #ifdef ELOQ_MODULE_ENABLED
-    GFLAGS_NAMESPACE::SetCommandLineOption("worker_polling_time_us", "1000");
+    GFLAGS_NAMESPACE::SetCommandLineOption("worker_polling_time_us", "100000");
     GFLAGS_NAMESPACE::SetCommandLineOption("brpc_worker_as_ext_processor",
                                            "true");
 #endif
