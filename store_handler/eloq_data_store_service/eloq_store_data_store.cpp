@@ -94,29 +94,32 @@ EloqStoreDataStore::EloqStoreDataStore(uint32_t shard_id,
 bool EloqStoreDataStore::Initialize()
 {
 #ifdef ELOQSTORE_WITH_TXSERVICE
-    // Initialize metrics for eloqstore
-    eloq_metrics_app::MetricsRegistryImpl::MetricsRegistryResult
-        metrics_registry_result =
-            eloq_metrics_app::MetricsRegistryImpl::GetRegistry();
-
-    if (metrics_registry_result.not_ok_ != nullptr)
+    if (metrics::enable_metrics)
     {
-        LOG(WARNING) << "Failed to get metrics registry, skipping eloqstore metrics initialization: "
-                     << metrics_registry_result.not_ok_;
-    }
-    else if (metrics_registry_result.metrics_registry_ != nullptr)
-    {
-        LOG(INFO) << "yf: EloqStoreDataStore::Initialize: get metric registry";
-        // Create common labels
-        // Note: node_ip and node_port may not be available at Initialize() time
-        // For now, we use empty labels. The shard_id label will be added by EloqStore::InitializeMetrics()
-        metrics::CommonLabels common_labels{};
+        // Initialize metrics for eloqstore
+        eloq_metrics_app::MetricsRegistryImpl::MetricsRegistryResult
+            metrics_registry_result =
+                eloq_metrics_app::MetricsRegistryImpl::GetRegistry();
 
-        // Call eloqstore's metrics initialization
-        // This will initialize metrics for all shards with shard_id labels
-        eloq_store_service_->InitializeMetrics(
-            metrics_registry_result.metrics_registry_.get(),
-            common_labels);
+        if (metrics_registry_result.not_ok_ != nullptr)
+        {
+            LOG(WARNING) << "Failed to get metrics registry, skipping eloqstore metrics initialization: "
+                        << metrics_registry_result.not_ok_;
+        }
+        else if (metrics_registry_result.metrics_registry_ != nullptr)
+        {
+            LOG(INFO) << "yf: EloqStoreDataStore::Initialize: get metric registry";
+            // Create common labels
+            // Note: node_ip and node_port may not be available at Initialize() time
+            // For now, we use empty labels. The shard_id label will be added by EloqStore::InitializeMetrics()
+            metrics::CommonLabels common_labels{};
+
+            // Call eloqstore's metrics initialization
+            // This will initialize metrics for all shards with shard_id labels
+            eloq_store_service_->InitializeMetrics(
+                metrics_registry_result.metrics_registry_.get(),
+                common_labels);
+        }
     }
 #endif
 
