@@ -4762,28 +4762,30 @@ void LocalCcShards::DataSyncForHashPartition(
     auto partition_number_this_core =
         total_hash_partitions / core_number +
         (worker_idx < total_hash_partitions % core_number);
-    std::vector<size_t> partition_ids;
-    partition_ids.reserve(partition_number_this_core);
-    for (size_t i = 0; i < partition_number_this_core; ++i)
-    {
-        partition_ids.emplace_back(worker_idx + core_number * i);
-    }
-    assert(partition_number_this_core == partition_ids.size());
-    const auto updated_memory = scan_delta_size_cc.UpdatedMemory();
-    auto updated_memory_per_partition =
-        partition_number_this_core ? updated_memory / partition_number_this_core
-                                   : 0;
-    const size_t flush_buffer_size = cur_flush_buffer_.GetFlushBufferSize();
-    const size_t partition_number_per_scan = std::max(
-        1UL,
-        updated_memory_per_partition != 0
-            ? std::min(core_number,
-                       flush_buffer_size / updated_memory_per_partition)
-            : partition_number_this_core);
-    const size_t scan_concurrency =
-        updated_memory == 0
-            ? core_number
-            : std::min(core_number, flush_buffer_size / updated_memory);
+    // std::vector<size_t> partition_ids;
+    // partition_ids.reserve(partition_number_this_core);
+    // for (size_t i = 0; i < partition_number_this_core; ++i)
+    // {
+    //     partition_ids.emplace_back(worker_idx + core_number * i);
+    // }
+    // assert(partition_number_this_core == partition_ids.size());
+    // const auto updated_memory = scan_delta_size_cc.UpdatedMemory();
+    // auto updated_memory_per_partition =
+    //     partition_number_this_core ? updated_memory /
+    //     partition_number_this_core
+    //                                : 0;
+    // const size_t flush_buffer_size = cur_flush_buffer_.GetFlushBufferSize();
+    // const size_t partition_number_per_scan = std::max(
+    //     1UL,
+    //     updated_memory_per_partition != 0
+    //         ? std::min(core_number,
+    //                    flush_buffer_size / updated_memory_per_partition)
+    //         : partition_number_this_core);
+    // const size_t scan_concurrency =
+    //     updated_memory == 0
+    //         ? core_number
+    //         : std::min(core_number, flush_buffer_size / updated_memory);
+    const size_t scan_concurrency = core_number;
 
     if (scan_concurrency > 0)
     {
@@ -4805,13 +4807,16 @@ void LocalCcShards::DataSyncForHashPartition(
     }
 
     for (size_t i = 0; i < partition_number_this_core;
-         i += partition_number_per_scan)
+         i += partition_number_this_core)
+    // i += partition_number_per_scan)
     {
-        size_t min_partition_id_this_scan = partition_ids[i];
-        size_t max_partition_id_this_scan =
-            partition_ids[std::min(i + partition_number_per_scan,
-                                   partition_number_this_core) -
-                          1];
+        // size_t min_partition_id_this_scan = partition_ids[i];
+        // size_t max_partition_id_this_scan =
+        //     partition_ids[std::min(i + partition_number_per_scan,
+        //                            partition_number_this_core) -
+        //                   1];
+        size_t min_partition_id_this_scan = 0;
+        size_t max_partition_id_this_scan = 100000;
         std::function<bool(size_t)> filter_lambda =
             [min_partition_id_this_scan,
              max_partition_id_this_scan,
