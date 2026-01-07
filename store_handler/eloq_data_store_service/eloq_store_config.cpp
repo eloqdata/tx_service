@@ -124,6 +124,9 @@ DEFINE_bool(eloq_store_data_append_mode, true, "EloqStore data append mode.");
 DEFINE_bool(eloq_store_enable_compression,
             false,
             "EloqStore enable compression.");
+DEFINE_uint32(eloq_store_max_concurrent_writes,
+              1,
+              "EloqStore max write concurrency per core");
 
 namespace EloqDS
 {
@@ -509,6 +512,12 @@ EloqStoreConfig::EloqStoreConfig(const INIReader &config_reader,
             : config_reader.GetBoolean("store",
                                        "eloq_store_enable_compression",
                                        FLAGS_eloq_store_enable_compression);
+    eloqstore_configs_.max_concurrent_writes =
+        !CheckCommandLineFlagIsDefault("eloq_store_max_concurrent_writes")
+            ? FLAGS_eloq_store_max_concurrent_writes
+            : config_reader.GetInteger("store",
+                                       "eloq_store_max_concurrent_writes",
+                                       FLAGS_eloq_store_max_concurrent_writes);
 }
 
 void EloqStoreConfig::ParseStoragePath(

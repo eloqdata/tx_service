@@ -721,17 +721,7 @@ bool DataSubstrate::LoadCoreAndNetworkConfig(const INIReader &config_reader)
                 LOG(ERROR) << "config is missing: " << field_core;
                 return false;
             }
-            const uint min = 1;
-            if (core_config_.enable_data_store)
-            {
-                core_config_.core_num = std::max(min, (NUM_VCPU * 3) / 5);
-                LOG(INFO) << "give cpus to checkpointer "
-                          << core_config_.core_num;
-            }
-            else
-            {
-                core_config_.core_num = std::max(min, (NUM_VCPU * 7) / 10);
-            }
+            core_config_.core_num = std::max(1u, (NUM_VCPU * 9) / 10);
             LOG(INFO) << "config is automatically set: " << field_core << "="
                       << core_config_.core_num << ", vcpu=" << NUM_VCPU;
         }
@@ -794,7 +784,7 @@ bool DataSubstrate::LoadCoreAndNetworkConfig(const INIReader &config_reader)
     GFLAGS_NAMESPACE::SetCommandLineOption(
         "bthread_concurrency", std::to_string(core_config_.core_num).c_str());
 #ifdef ELOQ_MODULE_ENABLED
-    GFLAGS_NAMESPACE::SetCommandLineOption("worker_polling_time_us", "1000");
+    GFLAGS_NAMESPACE::SetCommandLineOption("worker_polling_time_us", "100000");
     GFLAGS_NAMESPACE::SetCommandLineOption("brpc_worker_as_ext_processor",
                                            "true");
 #endif
