@@ -306,7 +306,9 @@ void ReadLocalOperation::Forward(txservice::TransactionExecution *txm)
                    hd_result_->ErrorCode() == CcErrorCode::DATA_STORE_ERR ||
                    hd_result_->ErrorCode() ==
                        CcErrorCode::LEADER_NODE_UNREACHABLE ||
-                   hd_result_->ErrorCode() == CcErrorCode::NG_TERM_CHANGED);
+                   hd_result_->ErrorCode() == CcErrorCode::NG_TERM_CHANGED ||
+                   hd_result_->ErrorCode() ==
+                       CcErrorCode::REQUESTED_TABLE_NOT_EXISTS);
             // If acquire range read lock blocked by DDL, check if tx has
             // already acquired other range read lock. If so we need to abort
             // tx since it might cause dead lock with range split. If this tx
