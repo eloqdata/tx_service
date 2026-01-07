@@ -336,6 +336,7 @@ int Sharder::Init(
             std::string arg_raft_log = "--hm_raft_log_path=" + log_path;
             std::string arg_cluster_config_path =
                 "--cluster_config_path=" + cluster_config_path;
+            std::string fork_from_txservice = "--fork_from_txservice=true";
 #if BRPC_WITH_GLOG
             std::string arg_log_dir = "--log_dir=" + FLAGS_log_dir;
 #endif
@@ -345,6 +346,7 @@ int Sharder::Init(
                             const_cast<char *>(arg_port.c_str()),
                             const_cast<char *>(arg_raft_log.c_str()),
                             const_cast<char *>(arg_cluster_config_path.c_str()),
+                            const_cast<char *>(fork_from_txservice.c_str()),
 #if BRPC_WITH_GLOG
                             const_cast<char *>(arg_log_dir.c_str()),
 #endif
