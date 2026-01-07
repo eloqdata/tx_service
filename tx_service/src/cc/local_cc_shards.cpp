@@ -4796,6 +4796,13 @@ void LocalCcShards::DataSyncForHashPartition(
         updated_memory == 0
             ? core_number
             : std::min(core_number, flush_buffer_size / updated_memory);
+    LOG(INFO) << "Core " << worker_idx << " updated memory=" << updated_memory
+              << ", partition number=" << partition_number_this_core
+              << ", updated_memory_per_partition="
+              << updated_memory_per_partition
+              << ", flush_buffer_size=" << flush_buffer_size
+              << ", partition_number_per_scan=" << partition_number_per_scan
+              << ", scan_concurrency=" << scan_concurrency;
 
     if (scan_concurrency > 0)
     {
