@@ -11645,6 +11645,15 @@ protected:
             shard_->DetachLru(less_recently_used);
         }
         LruPage *next = more_recently_used->lru_next_;
+        // Before modifying next->lru_prev_, check if next is already in the list
+        // If it is, we need to detach it first to maintain list integrity
+        if (next != nullptr && next->lru_prev_ != nullptr && next->lru_next_ != nullptr)
+        {
+            // next is already in the list, detach it first
+            shard_->DetachLru(next);
+            // Re-read next after detach, as DetachLru may have modified more_recently_used->lru_next_
+            next = more_recently_used->lru_next_;
+        }
         // #region agent log
         {
             std::ofstream log("/mnt/data/debug.log", std::ios::app);
@@ -11661,12 +11670,15 @@ protected:
             std::ofstream log("/mnt/data/debug.log", std::ios::app);
             if (log.is_open()) {
                 std::ostringstream json;
-                json << "{\"sessionId\":\"debug-session\",\"runId\":\"run1\",\"hypothesisId\":\"R\",\"location\":\"template_cc_map.h:11649\",\"message\":\"Redistribute: Setting next->lru_prev_\",\"data\":{\"next\":\"" << (void*)next << "\",\"old_value\":\"" << (void*)next->lru_prev_ << "\",\"new_value\":\"" << (void*)less_recently_used << "\",\"tid\":" << syscall(SYS_gettid) << "},\"timestamp\":" << std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::system_clock::now().time_since_epoch()).count() << "}\n";
+                json << "{\"sessionId\":\"debug-session\",\"runId\":\"run1\",\"hypothesisId\":\"R\",\"location\":\"template_cc_map.h:11649\",\"message\":\"Redistribute: Setting next->lru_prev_\",\"data\":{\"next\":\"" << (void*)next << "\",\"old_value\":\"" << (void*)next->lru_prev_ << "\",\"new_value\":\"" << (void*)less_recently_used << "\",\"next_in_list_before\":" << (next != nullptr && next->lru_prev_ != nullptr && next->lru_next_ != nullptr) << ",\"tid\":" << syscall(SYS_gettid) << "},\"timestamp\":" << std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::system_clock::now().time_since_epoch()).count() << "}\n";
                 log << json.str();
             }
         }
         // #endregion
-        next->lru_prev_ = less_recently_used;
+        if (next != nullptr)
+        {
+            next->lru_prev_ = less_recently_used;
+        }
         if (next->lru_prev_ == nullptr)
         {
             std::ofstream log("/mnt/data/debug.log", std::ios::app);

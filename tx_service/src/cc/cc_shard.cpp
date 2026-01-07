@@ -32,6 +32,8 @@
 #include <sstream>
 #include <unistd.h>
 #include <sys/syscall.h>
+#include <dlfcn.h>
+#include <cxxabi.h>
 
 #include "cc/catalog_cc_map.h"
 #include "cc/cc_map.h"
@@ -787,14 +789,35 @@ TEntry *CcShard::LocateTx(TxNumber tx_number)
     return nullptr;
 }
 
+// Helper function to get caller function name
+static std::string GetCallerFunctionName()
+{
+    void *caller_addr = __builtin_return_address(0);
+    Dl_info info;
+    if (dladdr(caller_addr, &info) != 0 && info.dli_sname != nullptr)
+    {
+        int status = 0;
+        char *demangled = abi::__cxa_demangle(info.dli_sname, nullptr, nullptr, &status);
+        if (status == 0 && demangled != nullptr)
+        {
+            std::string result(demangled);
+            free(demangled);
+            return result;
+        }
+        return std::string(info.dli_sname);
+    }
+    return "unknown";
+}
+
 void CcShard::DetachLru(LruPage *page)
 {
+    std::string caller = GetCallerFunctionName();
     // #region agent log
     {
         std::ofstream log("/mnt/data/debug.log", std::ios::app);
         if (log.is_open()) {
             std::ostringstream json;
-            json << "{\"sessionId\":\"debug-session\",\"runId\":\"run1\",\"hypothesisId\":\"A\",\"location\":\"cc_shard.cpp:786\",\"message\":\"DetachLru entry\",\"data\":{\"page\":\"" << (void*)page << "\",\"lru_prev_\":\"" << (void*)page->lru_prev_ << "\",\"lru_next_\":\"" << (void*)page->lru_next_ << "\",\"tid\":" << syscall(SYS_gettid) << "},\"timestamp\":" << std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::system_clock::now().time_since_epoch()).count() << "}\n";
+            json << "{\"sessionId\":\"debug-session\",\"runId\":\"run1\",\"hypothesisId\":\"A\",\"location\":\"cc_shard.cpp:786\",\"message\":\"DetachLru entry\",\"data\":{\"page\":\"" << (void*)page << "\",\"lru_prev_\":\"" << (void*)page->lru_prev_ << "\",\"lru_next_\":\"" << (void*)page->lru_next_ << "\",\"caller\":\"" << caller << "\",\"tid\":" << syscall(SYS_gettid) << "},\"timestamp\":" << std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::system_clock::now().time_since_epoch()).count() << "}\n";
             log << json.str();
         }
     }
@@ -976,12 +999,13 @@ void CcShard::ReplaceLru(LruPage *old_page, LruPage *new_page)
 
 void CcShard::UpdateLruList(LruPage *page, bool is_emplace)
 {
+    std::string caller = GetCallerFunctionName();
     // #region agent log
     {
         std::ofstream log("/mnt/data/debug.log", std::ios::app);
         if (log.is_open()) {
             std::ostringstream json;
-            json << "{\"sessionId\":\"debug-session\",\"runId\":\"run1\",\"hypothesisId\":\"D\",\"location\":\"cc_shard.cpp:823\",\"message\":\"UpdateLruList entry\",\"data\":{\"page\":\"" << (void*)page << "\",\"lru_prev_\":\"" << (void*)page->lru_prev_ << "\",\"lru_next_\":\"" << (void*)page->lru_next_ << "\",\"is_emplace\":" << is_emplace << ",\"tid\":" << syscall(SYS_gettid) << "},\"timestamp\":" << std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::system_clock::now().time_since_epoch()).count() << "}\n";
+            json << "{\"sessionId\":\"debug-session\",\"runId\":\"run1\",\"hypothesisId\":\"D\",\"location\":\"cc_shard.cpp:823\",\"message\":\"UpdateLruList entry\",\"data\":{\"page\":\"" << (void*)page << "\",\"lru_prev_\":\"" << (void*)page->lru_prev_ << "\",\"lru_next_\":\"" << (void*)page->lru_next_ << "\",\"is_emplace\":" << is_emplace << ",\"caller\":\"" << caller << "\",\"tid\":" << syscall(SYS_gettid) << "},\"timestamp\":" << std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::system_clock::now().time_since_epoch()).count() << "}\n";
             log << json.str();
         }
     }
