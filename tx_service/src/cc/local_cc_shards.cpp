@@ -3002,9 +3002,7 @@ void LocalCcShards::DataSyncWorker(size_t worker_idx)
                                WorkerStatus::Active;
                 });
             task_worker_lk.unlock();
-            LOG(INFO) << "DataSyncWorker " << worker_idx << " start scan";
             DataSyncForHashPartition(std::move(task), worker_idx);
-            LOG(INFO) << "DataSyncWorker " << worker_idx << " finish scan";
             if (FLAGS_report_ckpt)
             {
                 ReportHashPartitionCkptHeapUsage();
@@ -4546,6 +4544,17 @@ void LocalCcShards::PostProcessHashPartitionDataSyncTask(
 void LocalCcShards::DataSyncForHashPartition(
     std::shared_ptr<DataSyncTask> data_sync_task, size_t worker_idx)
 {
+    struct Printer
+    {
+        Printer()
+        {
+            LOG(INFO) << "DataSyncWorker " << worker_idx << " start scan";
+        }
+        ~Printer()
+        {
+            LOG(INFO) << "DataSyncWorker " << worker_idx << " finish scan";
+        }
+    } printer;
     // Whether other task worker is processing this table.
     const TableName &table_name = data_sync_task->table_name_;
     uint32_t ng_id = data_sync_task->node_group_id_;
