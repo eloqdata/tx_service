@@ -4546,15 +4546,16 @@ void LocalCcShards::DataSyncForHashPartition(
 {
     struct Printer
     {
-        Printer()
+        Printer(size_t worker_idx) : worker_idx_(worker_idx)
         {
-            LOG(INFO) << "DataSyncWorker " << worker_idx << " start scan";
+            LOG(INFO) << "DataSyncWorker " << worker_idx_ << " start scan";
         }
         ~Printer()
         {
-            LOG(INFO) << "DataSyncWorker " << worker_idx << " finish scan";
+            LOG(INFO) << "DataSyncWorker " << worker_idx_ << " finish scan";
         }
-    } printer;
+        size_t worker_idx_;
+    } printer{worker_idx};
     // Whether other task worker is processing this table.
     const TableName &table_name = data_sync_task->table_name_;
     uint32_t ng_id = data_sync_task->node_group_id_;
