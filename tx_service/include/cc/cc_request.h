@@ -9114,7 +9114,8 @@ struct ScanDeltaSizeCcForHashPartition : public CcRequestBase
             return 0;
         // integer math with rounding up to avoid systematic underestimation
         LOG(INFO) << "updated key count=" << updated_key_count_
-                  << ", memory usage=" << memory_usage_;
+                  << ", memory usage=" << memory_usage_
+                  << ", scanned=" << scanned;
         return static_cast<size_t>(
             (updated_key_count_ * memory_usage_ + scanned - 1) / scanned);
     }
