@@ -5918,7 +5918,7 @@ public:
              it != end_it_next_page_it;
              scan_cnt++)
         {
-            if (export_data_cnt > 0 && export_data_cnt % 4 == 0)
+            if (export_data_cnt > 0 && export_data_cnt % 1 == 0)
             {
                 auto l_now = ReadTimeMicroseconds();
                 if (l_now - l_start >= 50 || l_now < l_start)
