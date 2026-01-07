@@ -4781,6 +4781,7 @@ void LocalCcShards::DataSyncForHashPartition(
         partition_ids.emplace_back(worker_idx + core_number * i);
     }
     assert(partition_number_this_core == partition_ids.size());
+    // TODO buffer size / (core number of per partition * 8M)
     const auto updated_memory = scan_delta_size_cc.UpdatedMemory();
     auto updated_memory_per_partition =
         partition_number_this_core ? updated_memory / partition_number_this_core
