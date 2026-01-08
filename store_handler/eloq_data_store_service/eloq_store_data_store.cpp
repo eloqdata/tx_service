@@ -94,7 +94,7 @@ EloqStoreDataStore::EloqStoreDataStore(uint32_t shard_id,
 bool EloqStoreDataStore::Initialize()
 {
 #ifdef ELOQSTORE_WITH_TXSERVICE
-    if (metrics::enable_metrics)
+    if (metrics::enable_eloqstore_metrics)
     {
         // Initialize metrics for eloqstore
         eloq_metrics_app::MetricsRegistryImpl::MetricsRegistryResult
