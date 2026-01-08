@@ -73,6 +73,22 @@ DEFINE_uint32(maxclients, 500000, "maxclients");
 DEFINE_string(log_file_name_prefix,
               "eloqdb.log",
               "Sets the prefix for log files. Default is 'eloqdb.log'");
+DEFINE_double(ckpt_buffer_ratio,
+              0.125,
+              "Fraction of node memory carved out for checkpoint flush "
+              "buffers and the data-sync memory controller");
+DEFINE_uint32(ckpt_scan_yield_time_us,
+              100,
+              "Max microseconds a checkpoint/data-sync scan may run before "
+              "yielding a Tx processor thread");
+DEFINE_uint64(data_sync_scan_batch_size,
+              100,
+              "Upper bound on the number of CC pages exported in a single "
+              "data-sync scan batch");
+DEFINE_uint64(data_sync_scan_data_size,
+              1000 * 1024,
+              "Per-batch memory budget (bytes) for data exported during a "
+              "data-sync scan");
 
 namespace brpc
 {

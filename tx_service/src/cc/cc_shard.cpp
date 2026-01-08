@@ -55,6 +55,7 @@
 #endif
 
 DECLARE_bool(cmd_read_catalog);
+DECLARE_double(ckpt_buffer_ratio);
 
 namespace txservice
 {
@@ -108,8 +109,9 @@ CcShard::CcShard(
     // percentage.
     double range_slice_reserve_ratio =
         static_cast<double>(range_slice_memory_limit_percent) / 100.0;
-    // 7.5% for data sync memory usage
-    double memory_usage_ratio = 1.0 - range_slice_reserve_ratio - 0.075;
+    // 12.5% for data sync memory usage
+    double memory_usage_ratio =
+        1.0 - range_slice_reserve_ratio - FLAGS_ckpt_buffer_ratio;
 
     memory_limit_ =
         static_cast<uint64_t>(MB(node_memory_limit_mb) * memory_usage_ratio);

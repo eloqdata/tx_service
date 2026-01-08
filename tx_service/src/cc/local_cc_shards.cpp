@@ -63,13 +63,13 @@
 #include "tx_util.h"
 #include "type.h"
 
-DEFINE_double(ckpt_buffer_ratio, 0.10, "");
-DEFINE_uint32(ckpt_scan_yield_time_us, 100, "");
-DEFINE_uint64(data_sync_scan_batch_size, 100, "");
-DEFINE_uint64(data_sync_scan_data_size, 1000 * 1024, "");
 namespace txservice
 {
 DECLARE_bool(report_ckpt);
+DECLARE_double(ckpt_buffer_ratio);
+DECLARE_uint32(ckpt_scan_yield_time_us);
+DECLARE_uint64(data_sync_scan_batch_size);
+DECLARE_uint64(data_sync_scan_data_size);
 
 std::atomic<uint64_t> LocalCcShards::local_clock(0);
 inline thread_local size_t tls_shard_idx = std::numeric_limits<size_t>::max();
@@ -129,11 +129,11 @@ LocalCcShards::LocalCcShards(
           std::min(static_cast<int>(conf.at("core_num")), 10)),
 #endif
 
-      cur_flush_buffer_(static_cast<uint64_t>(
-          MB(conf.at("node_memory_limit_mb")) * FLAGS_ckpt_buffer_ratio)),
-      data_sync_mem_controller_(
+      cur_flush_buffer_(
           static_cast<uint64_t>(MB(conf.at("node_memory_limit_mb")) *
-                                (FLAGS_ckpt_buffer_ratio + 0.025))),
+                                (FLAGS_ckpt_buffer_ratio - 0.025))),
+      data_sync_mem_controller_(static_cast<uint64_t>(
+          MB(conf.at("node_memory_limit_mb")) * FLAGS_ckpt_buffer_ratio)),
       statistics_worker_ctx_(1),
       heartbeat_worker_ctx_(1),
       purge_deleted_worker_ctx_(1),
@@ -4549,18 +4549,6 @@ void LocalCcShards::PostProcessHashPartitionDataSyncTask(
 void LocalCcShards::DataSyncForHashPartition(
     std::shared_ptr<DataSyncTask> data_sync_task, size_t worker_idx)
 {
-    struct Printer
-    {
-        Printer(size_t worker_idx) : worker_idx_(worker_idx)
-        {
-            LOG(INFO) << "DataSyncWorker " << worker_idx_ << " start scan";
-        }
-        ~Printer()
-        {
-            LOG(INFO) << "DataSyncWorker " << worker_idx_ << " finish scan";
-        }
-        size_t worker_idx_;
-    } printer{worker_idx};
     // Whether other task worker is processing this table.
     const TableName &table_name = data_sync_task->table_name_;
     uint32_t ng_id = data_sync_task->node_group_id_;
@@ -4790,18 +4778,12 @@ void LocalCcShards::DataSyncForHashPartition(
     const auto updated_memory = scan_delta_size_cc.UpdatedMemory();
 #endif
     const size_t flush_buffer_size = cur_flush_buffer_.GetFlushBufferSize();
-    // TODO buffer size / (core number of per partition * 8M)
 #ifdef DATA_STORE_TYPE_ELOQDSS_ELOQSTORE
     constexpr size_t default_data_file_size = 8ULL * 1024 * 1024;
     const size_t scan_concurrency =
         flush_buffer_size /
         (default_data_file_size * partition_number_this_core);
     const size_t partition_number_per_scan = partition_number_this_core;
-    LOG(INFO) << "Scan concurrency=" << scan_concurrency
-              << ", flush_buffer_size=" << flush_buffer_size
-              << ", this core limit="
-              << (default_data_file_size * partition_number_this_core)
-              << ", partition_number_per_scan=" << partition_number_per_scan;
 #else
     auto updated_memory_per_partition =
         partition_number_this_core ? updated_memory / partition_number_this_core
@@ -4816,13 +4798,6 @@ void LocalCcShards::DataSyncForHashPartition(
         updated_memory == 0
             ? core_number
             : std::min(core_number, flush_buffer_size / updated_memory);
-    LOG(INFO) << "Core " << worker_idx << " updated memory=" << updated_memory
-              << ", partition number=" << partition_number_this_core
-              << ", updated_memory_per_partition="
-              << updated_memory_per_partition
-              << ", flush_buffer_size=" << flush_buffer_size
-              << ", partition_number_per_scan=" << partition_number_per_scan
-              << ", scan_concurrency=" << scan_concurrency;
 #endif
     if (scan_concurrency > 0)
     {

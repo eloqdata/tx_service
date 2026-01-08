@@ -3704,10 +3704,6 @@ public:
 struct HashPartitionDataSyncScanCc : public CcRequestBase
 {
 public:
-    // how many pages to scan one time
-    // TODO(chenzhao)
-    static constexpr size_t DataSyncScanBatchSize = 100;
-    static constexpr size_t DataSyncScanDataSize = 1000 * 1024;  // 1MB
     enum struct OpType : uint8_t
     {
         // For normal scan
@@ -9117,9 +9113,6 @@ struct ScanDeltaSizeCcForHashPartition : public CcRequestBase
         if (scanned == 0)
             return 0;
         // integer math with rounding up to avoid systematic underestimation
-        LOG(INFO) << "updated key count=" << updated_key_count_
-                  << ", memory usage=" << memory_usage_
-                  << ", scanned=" << scanned;
         return static_cast<size_t>(
             (updated_key_count_ * memory_usage_ + scanned - 1) / scanned);
     }
