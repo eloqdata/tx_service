@@ -4745,6 +4745,18 @@ void LocalCcShards::DataSyncForHashPartition(
 
     assert(table_name.Type() == TableType::Primary);
 
+    auto core_number = cc_shards_.size();
+    auto partition_number_this_core =
+        total_hash_partitions / core_number +
+        (worker_idx < total_hash_partitions % core_number);
+    std::vector<size_t> partition_ids;
+    partition_ids.reserve(partition_number_this_core);
+    for (size_t i = 0; i < partition_number_this_core; ++i)
+    {
+        partition_ids.emplace_back(worker_idx + core_number * i);
+    }
+    assert(partition_number_this_core == partition_ids.size());
+#ifndef DATA_STORE_TYPE_ELOQDSS_ELOQSTORE
     ScanDeltaSizeCcForHashPartition scan_delta_size_cc(
         table_name,
         last_sync_ts,
@@ -4770,23 +4782,25 @@ void LocalCcShards::DataSyncForHashPartition(
         return;
     }
 
-    auto core_number = cc_shards_.size();
-    auto partition_number_this_core =
-        total_hash_partitions / core_number +
-        (worker_idx < total_hash_partitions % core_number);
-    std::vector<size_t> partition_ids;
-    partition_ids.reserve(partition_number_this_core);
-    for (size_t i = 0; i < partition_number_this_core; ++i)
-    {
-        partition_ids.emplace_back(worker_idx + core_number * i);
-    }
-    assert(partition_number_this_core == partition_ids.size());
-    // TODO buffer size / (core number of per partition * 8M)
     const auto updated_memory = scan_delta_size_cc.UpdatedMemory();
+#endif
+    const size_t flush_buffer_size = cur_flush_buffer_.GetFlushBufferSize();
+    // TODO buffer size / (core number of per partition * 8M)
+#ifdef DATA_STORE_TYPE_ELOQDSS_ELOQSTORE
+    constexpr size_t default_data_file_size = 8ULL * 1024 * 1024;
+    const size_t scan_concurrency =
+        flush_buffer_size /
+        (default_data_file_size * partition_number_this_core);
+    const size_t partition_number_per_scan = partition_number_this_core;
+    LOG(INFO) << "Scan concurrency=" << scan_concurrency
+              << ", flush_buffer_size=" << flush_buffer_size
+              << ", this core limit="
+              << (default_data_file_size * partition_number_this_core)
+              << ", partition_number_per_scan=" << partition_number_per_scan;
+#else
     auto updated_memory_per_partition =
         partition_number_this_core ? updated_memory / partition_number_this_core
                                    : 0;
-    const size_t flush_buffer_size = cur_flush_buffer_.GetFlushBufferSize();
     const size_t partition_number_per_scan = std::max(
         1UL,
         updated_memory_per_partition != 0
@@ -4804,7 +4818,7 @@ void LocalCcShards::DataSyncForHashPartition(
               << ", flush_buffer_size=" << flush_buffer_size
               << ", partition_number_per_scan=" << partition_number_per_scan
               << ", scan_concurrency=" << scan_concurrency;
-
+#endif
     if (scan_concurrency > 0)
     {
         bool need_notify = scan_concurrency >
