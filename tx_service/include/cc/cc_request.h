@@ -86,7 +86,7 @@
 #endif
 
 DECLARE_uint64(data_sync_scan_batch_size);
-DECLARE_uint64(data_sync_Scan_data_size);
+DECLARE_uint64(data_sync_scan_data_size);
 
 namespace txservice
 {

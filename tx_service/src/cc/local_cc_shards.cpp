@@ -64,7 +64,7 @@
 #include "type.h"
 
 DEFINE_double(ckpt_buffer_ratio, 0.10, "");
-DEFINE_int32(ckpt_scan_yield_time_us, 100, "");
+DEFINE_uint32(ckpt_scan_yield_time_us, 100, "");
 DEFINE_uint64(data_sync_scan_batch_size, 100, "");
 DEFINE_uint64(data_sync_scan_data_size, 1000 * 1024, "");
 namespace txservice
