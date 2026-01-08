@@ -126,9 +126,9 @@ LocalCcShards::LocalCcShards(
 #endif
 
       cur_flush_buffer_(
-          static_cast<uint64_t>(MB(conf.at("node_memory_limit_mb")) * 0.05)),
+          static_cast<uint64_t>(MB(conf.at("node_memory_limit_mb")) * 0.10)),
       data_sync_mem_controller_(
-          static_cast<uint64_t>(MB(conf.at("node_memory_limit_mb")) * 0.075)),
+          static_cast<uint64_t>(MB(conf.at("node_memory_limit_mb")) * 0.125)),
       statistics_worker_ctx_(1),
       heartbeat_worker_ctx_(1),
       purge_deleted_worker_ctx_(1),
