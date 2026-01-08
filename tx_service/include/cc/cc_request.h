@@ -169,6 +169,16 @@ public:
                     }
                     if (catalog_entry->schema_ == nullptr)
                     {
+                        // This error occurs when a DDL transaction is in its
+                        // commit phase: commit operations execute sequentially
+                        // across all shards, but the dirty schema commit (which
+                        // updates the table catalog entry in the localccshard)
+                        // only happens on the last shard. Consequently,
+                        // concurrent requests may encounter `schema_ ==
+                        // nullptr` because the schema update hasn't been
+                        // applied to the localccshard yet. The request will be
+                        // automatically retried in
+                        // `ReadLocalOperation::Forward()`.
                         res_->SetError(CcErrorCode::REQUESTED_TABLE_NOT_EXISTS);
                         return true;
                     }
