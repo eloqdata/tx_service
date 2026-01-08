@@ -3254,9 +3254,9 @@ bool RocksDBHandlerImpl::StartDB(bool is_ng_leader, uint32_t *next_leader_node)
         std::filesystem::remove_all(old_db_dir, cleanup_error);
         if (cleanup_error.value() != 0)
         {
-            LOG(WARNING)
-                << "Failed to remove backup db directory after start: "
-                << old_db_dir << ", error: " << cleanup_error.message();
+            LOG(WARNING) << "Failed to remove backup db directory after start: "
+                         << old_db_dir
+                         << ", error: " << cleanup_error.message();
         }
     }
 
