@@ -5921,7 +5921,7 @@ public:
             if (export_data_cnt > 0 && export_data_cnt % 4 == 0)
             {
                 auto l_now = ReadTimeMicroseconds();
-                if (l_now - l_start >= 50 || l_now < l_start)
+                if (l_now - l_start >= 100 || l_now < l_start)
                 {
                     LOG(WARNING)
                         << "HashPartitionDataSyncScanCc stop, cost "
