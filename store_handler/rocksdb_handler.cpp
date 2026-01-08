@@ -2977,6 +2977,56 @@ bool RocksDBHandlerImpl::StartDB(bool is_ng_leader, uint32_t *next_leader_node)
         // db is already started, no op
         return true;
     }
+
+    std::filesystem::path db_dir(db_path_);
+    std::error_code error_code;
+    bool db_dir_exists = std::filesystem::exists(db_dir, error_code);
+    if (error_code.value() != 0)
+    {
+        LOG(ERROR) << "Failed to check db directory: " << db_dir
+                   << ", error: " << error_code.message();
+        return false;
+    }
+
+    std::filesystem::path old_db_dir = db_dir;
+    old_db_dir += ".old";
+    if (!db_dir_exists)
+    {
+        error_code.clear();
+        bool old_db_exists = std::filesystem::exists(old_db_dir, error_code);
+        if (error_code.value() != 0)
+        {
+            LOG(ERROR) << "Failed to check backup db directory: " << old_db_dir
+                       << ", error: " << error_code.message();
+            return false;
+        }
+
+        if (old_db_exists)
+        {
+            LOG(INFO) << "Current db directory missing but found backup at "
+                      << old_db_dir << ". Restoring backup.";
+            error_code.clear();
+            std::filesystem::rename(old_db_dir, db_dir, error_code);
+            if (error_code.value() != 0)
+            {
+                LOG(ERROR) << "Failed to restore backup db directory: "
+                           << old_db_dir << " -> " << db_dir
+                           << ", error: " << error_code.message();
+                return false;
+            }
+
+            db_dir_exists = true;
+        }
+        else
+        {
+            LOG(WARNING) << "DB directory " << db_dir
+                         << " missing and no backup found at " << old_db_dir;
+            return false;
+        }
+    }
+
+    LOG(INFO) << "Opening RocksDB at " << db_path_;
+
     rocksdb::Options options;
     options.create_if_missing = create_db_if_missing_;
     options.create_missing_column_families = true;
@@ -3192,6 +3242,21 @@ bool RocksDBHandlerImpl::StartDB(bool is_ng_leader, uint32_t *next_leader_node)
         for (auto cfh : cfhs)
         {
             column_families_.emplace(cfh->GetName(), cfh);
+        }
+    }
+
+    std::error_code cleanup_error;
+    if (std::filesystem::exists(old_db_dir, cleanup_error))
+    {
+        LOG(INFO) << "Cleaning up leftover backup db directory after "
+                     "successful start: "
+                  << old_db_dir;
+        std::filesystem::remove_all(old_db_dir, cleanup_error);
+        if (cleanup_error.value() != 0)
+        {
+            LOG(WARNING)
+                << "Failed to remove backup db directory after start: "
+                << old_db_dir << ", error: " << cleanup_error.message();
         }
     }
 
