@@ -6,7 +6,7 @@ set(DATA_SUBSTRATE_LIB "data_substrate" CACHE STRING "Data substrate library nam
 set(METRICS_LIB "eloq-metrics" CACHE STRING "Metrics library name")
 
 # Options from original eloq CMakeLists
-set(WITH_DATA_STORE "ELOQDSS_ROCKSDB" CACHE STRING "Which key-value storage to use")
+set(WITH_DATA_STORE "ELOQDSS_ELOQSTORE" CACHE STRING "Which key-value storage to use")
 set_property(CACHE WITH_DATA_STORE PROPERTY STRINGS "DYNAMODB" "BIGTABLE" "ROCKSDB" "ELOQDSS_ROCKSDB" "ELOQDSS_ROCKSDB_CLOUD_S3" "ELOQDSS_ROCKSDB_CLOUD_GCS" "ELOQDSS_ELOQSTORE")
 
 option(WITH_LOG_SERVICE "Compile with built-in log service." ON)
