@@ -74,7 +74,6 @@ inline bool enable_remote_request_metrics{false};
 inline bool enable_busy_round_metrics{false};
 inline bool enable_kv_metrics{false};
 inline bool enable_standby_metrics{false};
-inline bool enable_eloqstore_metrics{false};
 
 inline size_t collect_memory_usage_round{0};
 inline size_t collect_tx_duration_round{0};
