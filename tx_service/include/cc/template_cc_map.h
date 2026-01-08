@@ -70,7 +70,7 @@
 #include "tx_trace.h"
 #include "type.h"
 
-DECLARE_uint32(ckpt_scan_yield_time_us);
+DECLARE_uint32(hash_partition_ckpt_scan_yield_time_us);
 
 namespace txservice
 {
@@ -5900,8 +5900,8 @@ public:
         auto l_start = ReadTimeMicroseconds();
 
         for (size_t scan_cnt = 0;
-             scan_cnt < FLAGS_data_sync_scan_batch_size &&
-             export_data_size < FLAGS_data_sync_scan_data_size &&
+             scan_cnt < FLAGS_hash_partition_data_sync_scan_batch_size &&
+             export_data_size < FLAGS_hash_partition_data_sync_scan_data_size &&
              req.accumulated_scan_cnt_ < req.scan_batch_size_ && it != end_it &&
              it != end_it_next_page_it;
              scan_cnt++)
@@ -5909,7 +5909,8 @@ public:
             if (export_data_cnt > 0 && export_data_cnt % 4 == 0)
             {
                 auto l_now = ReadTimeMicroseconds();
-                if (l_now - l_start >= FLAGS_ckpt_scan_yield_time_us ||
+                if (l_now - l_start >=
+                        FLAGS_hash_partition_ckpt_scan_yield_time_us ||
                     l_now < l_start)
                 {
                     break;

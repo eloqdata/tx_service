@@ -77,18 +77,18 @@ DEFINE_double(ckpt_buffer_ratio,
               0.125,
               "Fraction of node memory carved out for checkpoint flush "
               "buffers and the data-sync memory controller");
-DEFINE_uint32(ckpt_scan_yield_time_us,
+DEFINE_uint32(hash_partition_ckpt_scan_yield_time_us,
               100,
-              "Max microseconds a checkpoint/data-sync scan may run before "
-              "yielding a Tx processor thread");
-DEFINE_uint64(data_sync_scan_batch_size,
+              "Max microseconds a hash partition checkpoint/data-sync scan may "
+              "run before yielding a Tx processor thread");
+DEFINE_uint64(hash_partition_data_sync_scan_batch_size,
               100,
               "Upper bound on the number of CC pages exported in a single "
-              "data-sync scan batch");
-DEFINE_uint64(data_sync_scan_data_size,
+              "hash partition data-sync scan batch");
+DEFINE_uint64(hash_partition_data_sync_scan_data_size,
               1000 * 1024,
               "Per-batch memory budget (bytes) for data exported during a "
-              "data-sync scan");
+              "hash partition data-sync scan");
 
 namespace brpc
 {

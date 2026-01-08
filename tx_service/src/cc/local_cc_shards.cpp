@@ -67,9 +67,9 @@ namespace txservice
 {
 DECLARE_bool(report_ckpt);
 DECLARE_double(ckpt_buffer_ratio);
-DECLARE_uint32(ckpt_scan_yield_time_us);
-DECLARE_uint64(data_sync_scan_batch_size);
-DECLARE_uint64(data_sync_scan_data_size);
+DECLARE_uint32(hash_partition_ckpt_scan_yield_time_us);
+DECLARE_uint64(hash_partition_data_sync_scan_batch_size);
+DECLARE_uint64(hash_partition_data_sync_scan_data_size);
 
 std::atomic<uint64_t> LocalCcShards::local_clock(0);
 inline thread_local size_t tls_shard_idx = std::numeric_limits<size_t>::max();
