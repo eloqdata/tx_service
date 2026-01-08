@@ -5923,8 +5923,11 @@ public:
                 auto l_now = ReadTimeMicroseconds();
                 if (l_now - l_start >= 50 || l_now < l_start)
                 {
-                    LOG(WARNING) << "HashPartitionDataSyncScanCc stop, cost "
-                                    "too long time";
+                    LOG(WARNING)
+                        << "HashPartitionDataSyncScanCc stop, cost "
+                           "too long time, export_data_size="
+                        << export_data_size << ", scan_cnt=" << scan_cnt
+                        << ", export_data_cnt=" << export_data_cnt;
                     break;
                 }
             }
