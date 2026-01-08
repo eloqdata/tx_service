@@ -29,6 +29,7 @@
 #ifdef ELOQSTORE_WITH_TXSERVICE
 #include "metrics.h"
 #include "metrics_registry_impl.h"
+#include "tx_service_metrics.h"
 #endif
 
 namespace EloqDS
