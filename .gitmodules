@@ -7,3 +7,6 @@
 [submodule "log_service"]
 	path = log_service
 	url = https://github.com/eloqdata/log_service.git
+[submodule "store_handler/eloq_data_store_service/eloqstore"]
+	path = store_handler/eloq_data_store_service/eloqstore
+	url = https://github.com/eloqdata/eloqstore.git
