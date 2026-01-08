@@ -70,10 +70,9 @@
 #include "tx_trace.h"
 #include "type.h"
 
-DECLARE_uint32(hash_partition_ckpt_scan_yield_time_us);
-
 namespace txservice
 {
+DECLARE_uint32(hash_partition_ckpt_scan_yield_time_us);
 template <typename KeyT, typename ValueT>
 void BackfillSnapshotForScanSlice(FetchSnapshotCc *fetch_cc,
                                   CcRequestBase *requester);

@@ -66,10 +66,22 @@
 namespace txservice
 {
 DECLARE_bool(report_ckpt);
-DECLARE_double(ckpt_buffer_ratio);
-DECLARE_uint32(hash_partition_ckpt_scan_yield_time_us);
-DECLARE_uint64(hash_partition_data_sync_scan_batch_size);
-DECLARE_uint64(hash_partition_data_sync_scan_data_size);
+DEFINE_double(ckpt_buffer_ratio,
+              0.125,
+              "Fraction of node memory carved out for checkpoint flush "
+              "buffers and the data-sync memory controller");
+DEFINE_uint32(hash_partition_ckpt_scan_yield_time_us,
+              100,
+              "Max microseconds a hash partition checkpoint/data-sync scan may "
+              "run before yielding a Tx processor thread");
+DEFINE_uint64(hash_partition_data_sync_scan_batch_size,
+              100,
+              "Upper bound on the number of CC pages exported in a single "
+              "hash partition data-sync scan batch");
+DEFINE_uint64(hash_partition_data_sync_scan_data_size,
+              1000 * 1024,
+              "Per-batch memory budget (bytes) for data exported during a "
+              "hash partition data-sync scan");
 
 std::atomic<uint64_t> LocalCcShards::local_clock(0);
 inline thread_local size_t tls_shard_idx = std::numeric_limits<size_t>::max();

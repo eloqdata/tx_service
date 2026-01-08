@@ -55,10 +55,10 @@
 #endif
 
 DECLARE_bool(cmd_read_catalog);
-DECLARE_double(ckpt_buffer_ratio);
 
 namespace txservice
 {
+DECLARE_double(ckpt_buffer_ratio);
 CcShard::CcShard(
     uint16_t core_id,
     uint32_t core_cnt,
