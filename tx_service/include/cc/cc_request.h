@@ -83,7 +83,6 @@
 #include <jemalloc/jemalloc.h>
 #endif
 
-
 namespace txservice
 {
 DECLARE_uint64(hash_partition_data_sync_scan_batch_size);
