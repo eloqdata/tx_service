@@ -170,7 +170,8 @@ bool DataSubstrate::Start()
         return false;
     }
 
-    // Phase 2: Initialize metrics (basic initialization, before storage handler)
+    // Phase 2: Initialize metrics (basic initialization, before storage
+    // handler)
     if (!instance.InitializeMetrics(config_file_reader))
     {
         LOG(ERROR) << "Failed to initialize metrics";

@@ -103,22 +103,24 @@ bool EloqStoreDataStore::Initialize()
 
         if (metrics_registry_result.not_ok_ != nullptr)
         {
-            LOG(WARNING) << "Failed to get metrics registry, skipping eloqstore metrics initialization: "
-                        << metrics_registry_result.not_ok_;
+            LOG(WARNING) << "Failed to get metrics registry, skipping "
+                            "eloqstore metrics initialization: "
+                         << metrics_registry_result.not_ok_;
         }
         else if (metrics_registry_result.metrics_registry_ != nullptr)
         {
-            LOG(INFO) << "yf: EloqStoreDataStore::Initialize: get metric registry";
+            LOG(INFO)
+                << "yf: EloqStoreDataStore::Initialize: get metric registry";
             // Create common labels
-            // Note: node_ip and node_port may not be available at Initialize() time
-            // For now, we use empty labels. The shard_id label will be added by EloqStore::InitializeMetrics()
+            // Note: node_ip and node_port may not be available at Initialize()
+            // time For now, we use empty labels. The shard_id label will be
+            // added by EloqStore::InitializeMetrics()
             metrics::CommonLabels common_labels{};
 
             // Call eloqstore's metrics initialization
             // This will initialize metrics for all shards with shard_id labels
             eloq_store_service_->InitializeMetrics(
-                metrics_registry_result.metrics_registry_.get(),
-                common_labels);
+                metrics_registry_result.metrics_registry_.get(), common_labels);
         }
     }
 #endif

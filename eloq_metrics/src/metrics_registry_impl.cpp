@@ -37,8 +37,8 @@ MetricsRegistryImpl::MetricsRegistryResult MetricsRegistryImpl::GetRegistry()
     if (registry_impl->metrics_mgr_result_.not_ok_ == nullptr)
     {
         // Return shared_ptr to ensure the singleton instance remains alive
-        return MetricsRegistryImpl::MetricsRegistryResult{
-            registry_impl, nullptr};
+        return MetricsRegistryImpl::MetricsRegistryResult{registry_impl,
+                                                          nullptr};
     }
     else
     {
@@ -56,9 +56,10 @@ metrics::MetricsErrors MetricsRegistryImpl::Open()
     return metrics::MetricsErrors::Success;
 }
 
-metrics::MetricHandle MetricsRegistryImpl::Register(const metrics::Name &name,
-                                                     metrics::Type type,
-                                                     const metrics::Labels &labels)
+metrics::MetricHandle MetricsRegistryImpl::Register(
+    const metrics::Name &name,
+    metrics::Type type,
+    const metrics::Labels &labels)
 {
     auto metric = metrics::Metric(name.GetName(), type, labels);
 
