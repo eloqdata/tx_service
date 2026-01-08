@@ -24,13 +24,11 @@
 #include <bthread/condition_variable.h>
 #include <bthread/mutex.h>
 #include <butil/iobuf.h>
-#include <bvar/latency_recorder.h>
 #include <google/protobuf/stubs/callback.h>
 #include <mimalloc-2.1/mimalloc.h>
 
 #include <algorithm>  // std::min
 #include <atomic>
-#include <chrono>
 #include <condition_variable>
 #include <cstddef>
 #include <cstdint>
@@ -87,6 +85,8 @@
 
 namespace txservice
 {
+DECLARE_uint64(hash_partition_data_sync_scan_batch_size);
+DECLARE_uint64(hash_partition_data_sync_scan_data_size);
 thread_local inline CcRequestPool<ReplayLogCc> replay_cc_pool_;
 thread_local inline CcRequestPool<KeyObjectStandbyForwardCc>
     key_obj_standby_forward_pool_;
@@ -3711,9 +3711,6 @@ public:
 struct HashPartitionDataSyncScanCc : public CcRequestBase
 {
 public:
-    // how many pages to scan one time
-    static constexpr size_t DataSyncScanBatchSize = 32;
-    static constexpr size_t DataSyncScanDataSize = 100 * 1024;  // 100KB
     enum struct OpType : uint8_t
     {
         // For normal scan
@@ -3755,7 +3752,8 @@ public:
           schema_version_(schema_version)
     {
         tx_number_ = txn;
-        assert(scan_batch_size_ > DataSyncScanBatchSize);
+        assert(scan_batch_size_ >
+               FLAGS_hash_partition_data_sync_scan_batch_size);
         data_sync_vec_.resize(scan_batch_size);
 
         archive_vec_.reserve(scan_batch_size);
