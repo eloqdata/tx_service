@@ -85,6 +85,9 @@
 #include <jemalloc/jemalloc.h>
 #endif
 
+DECLARE_uint64(data_sync_scan_batch_size);
+DECLARE_uint64(data_sync_Scan_data_size);
+
 namespace txservice
 {
 thread_local inline CcRequestPool<ReplayLogCc> replay_cc_pool_;
@@ -3702,8 +3705,9 @@ struct HashPartitionDataSyncScanCc : public CcRequestBase
 {
 public:
     // how many pages to scan one time
-    static constexpr size_t DataSyncScanBatchSize = 32;
-    static constexpr size_t DataSyncScanDataSize = 100 * 1024;  // 100KB
+    // TODO(chenzhao)
+    static constexpr size_t DataSyncScanBatchSize = 100;
+    static constexpr size_t DataSyncScanDataSize = 1000 * 1024;  // 1MB
     enum struct OpType : uint8_t
     {
         // For normal scan
@@ -3745,7 +3749,7 @@ public:
           schema_version_(schema_version)
     {
         tx_number_ = txn;
-        assert(scan_batch_size_ > DataSyncScanBatchSize);
+        assert(scan_batch_size_ > FLAGS_data_sync_scan_batch_size);
         data_sync_vec_.resize(scan_batch_size);
 
         archive_vec_.reserve(scan_batch_size);
@@ -9113,6 +9117,9 @@ struct ScanDeltaSizeCcForHashPartition : public CcRequestBase
         if (scanned == 0)
             return 0;
         // integer math with rounding up to avoid systematic underestimation
+        LOG(INFO) << "updated key count=" << updated_key_count_
+                  << ", memory usage=" << memory_usage_
+                  << ", scanned=" << scanned;
         return static_cast<size_t>(
             (updated_key_count_ * memory_usage_ + scanned - 1) / scanned);
     }
