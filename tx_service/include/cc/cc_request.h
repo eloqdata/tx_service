@@ -3745,7 +3745,8 @@ public:
           schema_version_(schema_version)
     {
         tx_number_ = txn;
-        assert(scan_batch_size_ > FLAGS_data_sync_scan_batch_size);
+        assert(scan_batch_size_ >
+               FLAGS_hash_partition_data_sync_scan_batch_size);
         data_sync_vec_.resize(scan_batch_size);
 
         archive_vec_.reserve(scan_batch_size);
