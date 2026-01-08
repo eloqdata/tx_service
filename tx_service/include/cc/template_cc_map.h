@@ -5923,6 +5923,8 @@ public:
                 auto l_now = ReadTimeMicroseconds();
                 if (l_now - l_start >= 50 || l_now < l_start)
                 {
+                    LOG(WARNING) << "HashPartitionDataSyncScanCc stop, cost "
+                                    "too long time";
                     break;
                 }
             }
