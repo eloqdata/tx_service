@@ -46,7 +46,8 @@ public:
     metrics::MetricHandle Register(const metrics::Name &,
                                    metrics::Type,
                                    const metrics::Labels &) override;
-    void Collect(const metrics::MetricHandle &, const metrics::Value &) override;
+    void Collect(const metrics::MetricHandle &,
+                 const metrics::Value &) override;
 
 private:
     MetricsRegistryImpl() = default;
