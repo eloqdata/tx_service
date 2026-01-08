@@ -2978,7 +2978,18 @@ bool RocksDBHandlerImpl::StartDB(bool is_ng_leader, uint32_t *next_leader_node)
         return true;
     }
 
-    std::filesystem::path db_dir(db_path_);
+    std::string db_dir_str = db_path_;
+    while (!db_dir_str.empty() &&
+           (db_dir_str.back() == '/' || db_dir_str.back() == '\\'))
+    {
+        db_dir_str.pop_back();
+    }
+    if (db_dir_str.empty())
+    {
+        db_dir_str = db_path_;
+    }
+
+    std::filesystem::path db_dir(db_dir_str);
     std::error_code error_code;
     bool db_dir_exists = std::filesystem::exists(db_dir, error_code);
     if (error_code.value() != 0)
@@ -3546,7 +3557,18 @@ bool RocksDBHandlerImpl::OverrideDB(const std::string &new_snapshot_path)
 
     assert(GetDBPtr() == nullptr);
 
-    std::filesystem::path db_dir(db_path_);
+    std::string db_dir_str = db_path_;
+    while (!db_dir_str.empty() &&
+           (db_dir_str.back() == '/' || db_dir_str.back() == '\\'))
+    {
+        db_dir_str.pop_back();
+    }
+    if (db_dir_str.empty())
+    {
+        db_dir_str = db_path_;
+    }
+
+    std::filesystem::path db_dir(db_dir_str);
     std::filesystem::path old_db_dir = db_dir;
     old_db_dir += ".old";
 
