@@ -5422,7 +5422,11 @@ public:
                 range_ptr->FindSlice(slice_key);
 
             assert(slice->PostCkptSize() != UINT64_MAX);
-            return slice->PostCkptSize() > StoreSlice::slice_upper_bound;
+            // Only need to split the slice when the post ckpt size of the slice
+            // is greater than the current size and greater than the slice upper
+            // bound.
+            return (slice->PostCkptSize() > StoreSlice::slice_upper_bound &&
+                    slice->PostCkptSize() > slice->Size());
         };
 
         const KeyT *const req_start_key = req.start_key_ != nullptr
@@ -11723,6 +11727,11 @@ protected:
         // remove discarded page from the map
         // note that all iterators are invalid after the erasion
         ccmp_.erase(discarded_page_it);
+        // Update page1_it and page2_it since iterator is invalid after erase
+        page1_it = ccmp_.find(merged_page->FirstKey());
+        assert(page1_it != ccmp_.end());
+        assert(page1_it->second.get() == merged_page);
+        page2_it = ccmp_.end();
     }
 
     CcPage<KeyT, ValueT, VersionedRecord, RangePartitioned> *PageNegInf()

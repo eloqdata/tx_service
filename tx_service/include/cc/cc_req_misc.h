@@ -550,6 +550,7 @@ private:
 public:
     // These variables only be used in DataStoreHandler
     const std::string *kv_table_name_{nullptr};
+    TxKey kv_start_key_owner_;
     std::string_view kv_start_key_;
     std::string_view kv_end_key_;
     std::string kv_session_id_;
