@@ -44,6 +44,7 @@
 // Data Substrate gflags definitions
 DEFINE_string(eloq_data_path, "/tmp/eloq_data", "Data substrate data path");
 DEFINE_int32(core_number, 8, "Number of cores for data substrate");
+DEFINE_int32(node_memory_limit_mb, 8192, "Node memory limit in MB");
 DEFINE_bool(enable_heap_defragment, false, "Enable heap defragmentation");
 DEFINE_bool(enable_wal, true, "Enable WAL");
 DEFINE_bool(enable_data_store, true, "Enable data store");
@@ -138,15 +139,6 @@ bool DataSubstrate::Start()
     DataSubstrate &instance = Instance();
 
     txservice::InitializeTscFrequency();
-    struct sysinfo meminfo;
-    if (sysinfo(&meminfo))
-    {
-        LOG(ERROR) << "Failed to get system memory info: " << strerror(errno)
-                   << " when node_memory_limit_mb is not set";
-        return false;
-    }
-    uint32_t mem_mib = meminfo.totalram * meminfo.mem_unit / (1024 * 1024);
-    instance.remaining_node_memory_mb_ = mem_mib * 4 / 5;
 
     if (instance.init_state_ == InitState::NotInitialized)
     {
@@ -725,6 +717,38 @@ bool DataSubstrate::LoadCoreAndNetworkConfig(const INIReader &config_reader)
             LOG(INFO) << "config is automatically set: " << field_core << "="
                       << core_config_.core_num << ", vcpu=" << NUM_VCPU;
         }
+    }
+    const char *field_mem = "node_memory_limit_mb";
+    if (CheckCommandLineFlagIsDefault(field_mem))
+    {
+        if (config_reader.HasValue("local", field_mem))
+        {
+            core_config_.node_memory_limit_mb =
+                config_reader.GetInteger("local", field_mem, 0);
+            assert(core_config_.node_memory_limit_mb);
+        }
+        else
+        {
+            struct sysinfo meminfo;
+            if (sysinfo(&meminfo))
+            {
+                LOG(ERROR) << "Failed to get system memory info: "
+                           << strerror(errno)
+                           << " when node_memory_limit_mb is not set";
+                return false;
+            }
+            uint32_t mem_limit_mib =
+                meminfo.totalram * meminfo.mem_unit / (1024 * 1024) * 4 / 5;
+            core_config_.node_memory_limit_mb = std::max(2048u, mem_limit_mib);
+            LOG(INFO) << "config is automatically set: " << field_mem << "="
+                      << core_config_.node_memory_limit_mb
+                      << "(MiB), available memory="
+                      << meminfo.totalram * meminfo.mem_unit / (1024 * 1024);
+        }
+    }
+    else
+    {
+        core_config_.node_memory_limit_mb = FLAGS_node_memory_limit_mb;
     }
 
     core_config_.enable_mvcc =

@@ -368,7 +368,7 @@ EloqStoreConfig::EloqStoreConfig(const INIReader &config_reader,
         {
             index_buffer_pool_size =
                 std::to_string(standalone ? node_memory_mb
-                                          : node_memory_mb / 2) +
+                                          : node_memory_mb / 10 * 3) +
                 "MB";
             LOG(INFO) << "config is automatically set: "
                       << "eloq_store_index_buffer_pool_size="
