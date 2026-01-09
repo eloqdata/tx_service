@@ -136,6 +136,7 @@ public:
         bool enable_cache_replacement;
         bool enable_mvcc;
         uint32_t maxclients;
+        uint32_t node_memory_limit_mb;
     };
 
     // Network and cluster configuration
@@ -260,8 +261,6 @@ private:
     bool InitializeLogService(const INIReader &config_file_reader);
     bool InitializeTxService(const INIReader &config_file_reader);
     bool InitializeMetrics(const INIReader &config_file_reader);
-
-    uint32_t remaining_node_memory_mb_{};
 
     // Configuration storage
     CoreConfig core_config_;

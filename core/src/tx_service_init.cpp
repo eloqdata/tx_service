@@ -8,7 +8,6 @@
 #include "sequences/sequences.h"
 #include "tx_service.h"
 DEFINE_int32(checkpointer_interval, 10, "Checkpointer interval in seconds");
-DEFINE_int32(node_memory_limit_mb, 8192, "Node memory limit in MB");
 DEFINE_int32(range_slice_memory_limit_percent,
              10,
              "Range slice memory limit percentage");
@@ -101,34 +100,6 @@ bool DataSubstrate::InitializeTxService(const INIReader &config_reader)
         tx_path.append(tx_service_data_path);
     }
 
-    const char *field_mem = "node_memory_limit_mb";
-    uint32_t node_memory_limit_mb = FLAGS_node_memory_limit_mb;
-    if (CheckCommandLineFlagIsDefault(field_mem))
-    {
-        if (config_reader.HasValue("local", field_mem))
-        {
-            node_memory_limit_mb =
-                config_reader.GetInteger("local", field_mem, 0);
-            assert(node_memory_limit_mb);
-        }
-        else
-        {
-            node_memory_limit_mb = std::max(2048u, remaining_node_memory_mb_);
-            LOG(INFO) << "config is automatically set: " << field_mem << "="
-                      << node_memory_limit_mb << "(MiB), available memory="
-                      << remaining_node_memory_mb_;
-        }
-    }
-    if (node_memory_limit_mb > remaining_node_memory_mb_)
-    {
-        LOG(ERROR) << "node memory exceeds, node_memory_limit_mb="
-                   << node_memory_limit_mb
-                   << ", available memory=" << remaining_node_memory_mb_;
-        return false;
-    }
-    FLAGS_node_memory_limit_mb = node_memory_limit_mb;
-    remaining_node_memory_mb_ -= node_memory_limit_mb;
-
     uint64_t range_slice_memory_limit_percent =
         !CheckCommandLineFlagIsDefault("range_slice_memory_limit_percent")
             ? FLAGS_range_slice_memory_limit_percent
@@ -216,10 +187,13 @@ bool DataSubstrate::InitializeTxService(const INIReader &config_reader)
 #endif
     }
 
+    LOG(INFO) << "Data substrate memory limit: "
+              << core_config_.node_memory_limit_mb << "MB";
+
     std::map<std::string, uint32_t> tx_service_conf{
         {"core_num", core_config_.core_num},
         {"checkpointer_interval", checkpointer_interval},
-        {"node_memory_limit_mb", node_memory_limit_mb},
+        {"node_memory_limit_mb", core_config_.node_memory_limit_mb},
         {"checkpointer_delay_seconds", checkpointer_delay_seconds},
         {"collect_active_tx_ts_interval_seconds",
          collect_active_tx_ts_interval_seconds},
