@@ -1280,19 +1280,12 @@ void LoadRangeSliceCallback(void *data,
     for (uint32_t i = 0; i < items_size; i++)
     {
         scan_next_closure->GetItem(i, key_str, value_str, ts, ttl);
-        txservice::TxKey key =
-            catalog_factory->CreateTxKey(key_str.data(), key_str.size());
-        if (i == items_size - 1)
-        {
-            fill_store_slice_req->kv_start_key_ =
-                std::string_view(key.Data(), key.Size());
-        }
-        std::unique_ptr<txservice::TxRecord> record =
-            catalog_factory->CreateTxRecord();
         bool is_deleted = false;
+        std::unique_ptr<txservice::TxRecord> record = nullptr;
         if (table_name.Engine() == txservice::TableEngine::EloqKv)
         {
             // Hash partition
+            record = catalog_factory->CreateTxRecord();
             txservice::TxObject *tx_object =
                 reinterpret_cast<txservice::TxObject *>(record.get());
             size_t offset = 0;
@@ -1315,7 +1308,7 @@ void LoadRangeSliceCallback(void *data,
             }
 
             if ((snapshot_ts == 0 && is_deleted) ||
-                (snapshot_ts > 0 && snapshot_ts > ts))
+                (snapshot_ts > 0 && snapshot_ts > ts && is_deleted))
             {
                 // if it is not a snapshot read, there is no need to return
                 // deleted keys.
@@ -1324,15 +1317,37 @@ void LoadRangeSliceCallback(void *data,
                 // might be visible archive version of this key for snapshot ts.
                 // The caller will decide if reading archive table is necessary
                 // based on the deleted key version.
+                if (i == items_size - 1 &&
+                    scan_next_closure->ItemsSize() == 1000)
+                {
+                    // Record the last key of the current batch as the start key
+                    // of the next batch. kv_start_key_ is a string view, so we
+                    // need to create a new TxKey object as its owner.
+                    txservice::TxKey key = catalog_factory->CreateTxKey(
+                        key_str.data(), key_str.size());
+                    fill_store_slice_req->kv_start_key_ =
+                        std::string_view(key.Data(), key.Size());
+                    fill_store_slice_req->kv_start_key_owner_ = std::move(key);
+                }
                 continue;
             }
 
+            record = catalog_factory->CreateTxRecord();
             if (!is_deleted)
             {
                 record->Deserialize(value_str.data(), offset);
             }
         }
 
+        txservice::TxKey key =
+            catalog_factory->CreateTxKey(key_str.data(), key_str.size());
+        if (i == items_size - 1 && scan_next_closure->ItemsSize() == 1000)
+        {
+            // Record the last key of the current batch as the start key of the
+            // next batch.
+            fill_store_slice_req->kv_start_key_ =
+                std::string_view(key.Data(), key.Size());
+        }
         fill_store_slice_req->AddDataItem(
             std::move(key), std::move(record), ts, is_deleted);
     }
