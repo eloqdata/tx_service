@@ -350,9 +350,9 @@ bool RocksDBCloudDataStore::StartDB()
     cfs_options_.sst_file_cache =
         rocksdb::NewLRUCache(cloud_config_.sst_file_cache_size_,
                              cloud_config_.sst_file_cache_num_shard_bits_);
-    // delay cloud file deletion forever since we delete obsolete files
-    // using purger
-    cfs_options_.cloud_file_deletion_delay = std::chrono::seconds(INT_MAX);
+    // Disable cloud file deletion totally, since we defer file deletion to
+    // purger
+    cfs_options_.disable_cloud_file_deletion = true;
 
     // keep invisible files in cloud storage since they can be referenced
     // by other nodes with old valid cloud manifest files during leader transfer
