@@ -309,26 +309,35 @@ void ReadLocalOperation::Forward(txservice::TransactionExecution *txm)
                    hd_result_->ErrorCode() == CcErrorCode::NG_TERM_CHANGED ||
                    hd_result_->ErrorCode() ==
                        CcErrorCode::REQUESTED_TABLE_NOT_EXISTS);
-            // If acquire range read lock blocked by DDL, check if tx has
-            // already acquired other range read lock. If so we need to abort
-            // tx since it might cause dead lock with range split. If this tx
-            // has not acquired any range read lock, we can safely retry here.
-            const auto &rset = txm->rw_set_.MetaDataReadSet();
-            for (const auto &[cce_addr, read_entry_pair] : rset)
+            if (hd_result_->ErrorCode() ==
+                CcErrorCode::ACQUIRE_KEY_LOCK_FAILED_FOR_RW_CONFLICT)
             {
-                if (read_entry_pair.second != catalog_ccm_name_sv &&
-                    read_entry_pair.second != cluster_config_ccm_name_sv)
+                // If acquire range read lock blocked by DDL, check if tx has
+                // already acquired other range read lock. If so we need to
+                // abort tx since it might cause dead lock with range split. If
+                // this tx has not acquired any range read lock, we can safely
+                // retry here.
+                const auto &rset = txm->rw_set_.MetaDataReadSet();
+                for (const auto &[cce_addr, read_entry_pair] : rset)
                 {
-                    // Abort tx.
-                    txm->PostProcess(*this);
-                    return;
+                    if (read_entry_pair.second != catalog_ccm_name_sv &&
+                        read_entry_pair.second != cluster_config_ccm_name_sv)
+                    {
+                        // Abort tx.
+                        txm->PostProcess(*this);
+                        return;
+                    }
                 }
+                hd_result_->Value().Reset();
+                hd_result_->Reset();
+                execute_immediately_ = false;
+                txm->Process(*this);
             }
-            hd_result_->Value().Reset();
-            hd_result_->Reset();
-            execute_immediately_ = false;
-            txm->Process(*this);
-            return;
+            else
+            {
+                // Abort the tx.
+                txm->PostProcess(*this);
+            }
         }
         else
         {
