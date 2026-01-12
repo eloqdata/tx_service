@@ -353,34 +353,32 @@ EloqStoreConfig::EloqStoreConfig(const INIReader &config_reader,
             : config_reader.GetBoolean("store",
                                        "eloq_store_skip_verify_checksum",
                                        FLAGS_eloq_store_skip_verify_checksum);
-    std::string buffer_pool_size;
+    std::string buffer_pool_size_str;
     if (CheckCommandLineFlagIsDefault("eloq_store_buffer_pool_size"))
     {
-        if (config_reader.HasValue("store",
-                                   "eloq_store_buffer_pool_size"))
+        if (config_reader.HasValue("store", "eloq_store_buffer_pool_size"))
         {
-            buffer_pool_size = config_reader.GetString(
-                "store",
-                "eloq_store_buffer_pool_size",
-                FLAGS_eloq_store_buffer_pool_size);
+            buffer_pool_size_str =
+                config_reader.GetString("store",
+                                        "eloq_store_buffer_pool_size",
+                                        FLAGS_eloq_store_buffer_pool_size);
         }
         else
         {
-            buffer_pool_size =
+            buffer_pool_size_str =
                 std::to_string(standalone ? node_memory_mb
                                           : node_memory_mb / 2) +
                 "MB";
             LOG(INFO) << "config is automatically set: "
-                      << "eloq_store_buffer_pool_size="
-                      << buffer_pool_size
+                      << "eloq_store_buffer_pool_size=" << buffer_pool_size_str
                       << ", available memory=" << node_memory_mb << "MB";
         }
     }
     else
     {
-        buffer_pool_size = FLAGS_eloq_store_buffer_pool_size;
+        buffer_pool_size_str = FLAGS_eloq_store_buffer_pool_size;
     }
-    uint64_t buffer_pool_size = parse_size(buffer_pool_size);
+    uint64_t buffer_pool_size = parse_size(buffer_pool_size_str);
     if (buffer_pool_size / (1024 * 1024) > node_memory_mb)
     {
         LOG(FATAL) << "buffer pool size (" << buffer_pool_size
@@ -388,7 +386,7 @@ EloqStoreConfig::EloqStoreConfig(const INIReader &config_reader,
     }
     node_memory_mb -= buffer_pool_size / (1024 * 1024);
     eloqstore_configs_.buffer_pool_size =
-        parse_size(buffer_pool_size) / eloqstore_configs_.num_threads;
+        buffer_pool_size / eloqstore_configs_.num_threads;
     eloqstore_configs_.manifest_limit =
         !CheckCommandLineFlagIsDefault("eloq_store_manifest_limit")
             ? FLAGS_eloq_store_manifest_limit
