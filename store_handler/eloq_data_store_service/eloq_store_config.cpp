@@ -71,7 +71,7 @@ DEFINE_uint32(eloq_store_init_page_count,
 DEFINE_bool(eloq_store_skip_verify_checksum,
             false,
             "EloqStore skip verify checksum.");
-DEFINE_string(eloq_store_index_buffer_pool_size,
+DEFINE_string(eloq_store_buffer_pool_size,
               "128MB",
               "EloqStore index buffer pool size.");
 DEFINE_uint32(eloq_store_manifest_limit, 8 << 20, "EloqStore manifest limit.");
@@ -353,42 +353,40 @@ EloqStoreConfig::EloqStoreConfig(const INIReader &config_reader,
             : config_reader.GetBoolean("store",
                                        "eloq_store_skip_verify_checksum",
                                        FLAGS_eloq_store_skip_verify_checksum);
-    std::string index_buffer_pool_size;
-    if (CheckCommandLineFlagIsDefault("eloq_store_index_buffer_pool_size"))
+    std::string buffer_pool_size_str;
+    if (CheckCommandLineFlagIsDefault("eloq_store_buffer_pool_size"))
     {
-        if (config_reader.HasValue("store",
-                                   "eloq_store_index_buffer_pool_size"))
+        if (config_reader.HasValue("store", "eloq_store_buffer_pool_size"))
         {
-            index_buffer_pool_size = config_reader.GetString(
-                "store",
-                "eloq_store_index_buffer_pool_size",
-                FLAGS_eloq_store_index_buffer_pool_size);
+            buffer_pool_size_str =
+                config_reader.GetString("store",
+                                        "eloq_store_buffer_pool_size",
+                                        FLAGS_eloq_store_buffer_pool_size);
         }
         else
         {
-            index_buffer_pool_size =
+            buffer_pool_size_str =
                 std::to_string(standalone ? node_memory_mb
                                           : node_memory_mb / 10 * 3) +
                 "MB";
             LOG(INFO) << "config is automatically set: "
-                      << "eloq_store_index_buffer_pool_size="
-                      << index_buffer_pool_size
+                      << "eloq_store_buffer_pool_size=" << buffer_pool_size_str
                       << ", available memory=" << node_memory_mb << "MB";
         }
     }
     else
     {
-        index_buffer_pool_size = FLAGS_eloq_store_index_buffer_pool_size;
+        buffer_pool_size_str = FLAGS_eloq_store_buffer_pool_size;
     }
-    uint64_t buffer_pool_size = parse_size(index_buffer_pool_size);
+    uint64_t buffer_pool_size = parse_size(buffer_pool_size_str);
     if (buffer_pool_size / (1024 * 1024) > node_memory_mb)
     {
-        LOG(FATAL) << "buffer pool size (" << index_buffer_pool_size
+        LOG(FATAL) << "buffer pool size (" << buffer_pool_size
                    << ") exceeds node memory mb";
     }
     node_memory_mb -= buffer_pool_size / (1024 * 1024);
-    eloqstore_configs_.index_buffer_pool_size =
-        parse_size(index_buffer_pool_size) / eloqstore_configs_.num_threads;
+    eloqstore_configs_.buffer_pool_size =
+        buffer_pool_size / eloqstore_configs_.num_threads;
     eloqstore_configs_.manifest_limit =
         !CheckCommandLineFlagIsDefault("eloq_store_manifest_limit")
             ? FLAGS_eloq_store_manifest_limit

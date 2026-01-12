@@ -82,8 +82,7 @@ EloqStoreDataStore::EloqStoreDataStore(uint32_t shard_id,
                << ", store path: " << opts.store_path.front()
                << ", open files limit: " << opts.fd_limit
                << ", cloud store path: " << opts.cloud_store_path
-               << ", buffer pool size per shard: "
-               << opts.index_buffer_pool_size;
+               << ", buffer pool size per shard: " << opts.buffer_pool_size;
     eloq_store_service_ = std::make_unique<::eloqstore::EloqStore>(opts);
 }
 
