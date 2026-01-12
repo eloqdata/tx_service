@@ -85,6 +85,25 @@ DECLARE_bool(bootstrap);
 namespace EloqKV
 {
 
+namespace
+{
+std::string NormalizeDbPath(const std::string &path)
+{
+    std::string normalized = path;
+    while (!normalized.empty() &&
+           (normalized.back() == '/' || normalized.back() == '\\'))
+    {
+        normalized.pop_back();
+    }
+    if (normalized.empty())
+    {
+        return path;
+    }
+
+    return normalized;
+}
+}  // namespace
+
 RocksDBHandler::RocksDBHandler(const EloqShare::RocksDBConfig &config,
                                bool create_if_missing,
                                bool tx_enable_cache_replacement)
@@ -2977,6 +2996,56 @@ bool RocksDBHandlerImpl::StartDB(bool is_ng_leader, uint32_t *next_leader_node)
         // db is already started, no op
         return true;
     }
+
+    std::filesystem::path db_dir(NormalizeDbPath(db_path_));
+    std::error_code error_code;
+    bool db_dir_exists = std::filesystem::exists(db_dir, error_code);
+    if (error_code.value() != 0)
+    {
+        LOG(ERROR) << "Failed to check db directory: " << db_dir
+                   << ", error: " << error_code.message();
+        return false;
+    }
+
+    std::filesystem::path old_db_dir = db_dir;
+    old_db_dir += ".old";
+    if (!db_dir_exists)
+    {
+        error_code.clear();
+        bool old_db_exists = std::filesystem::exists(old_db_dir, error_code);
+        if (error_code.value() != 0)
+        {
+            LOG(ERROR) << "Failed to check backup db directory: " << old_db_dir
+                       << ", error: " << error_code.message();
+            return false;
+        }
+
+        if (old_db_exists)
+        {
+            LOG(INFO) << "Current db directory missing but found backup at "
+                      << old_db_dir << ". Restoring backup.";
+            error_code.clear();
+            std::filesystem::rename(old_db_dir, db_dir, error_code);
+            if (error_code.value() != 0)
+            {
+                LOG(ERROR) << "Failed to restore backup db directory: "
+                           << old_db_dir << " -> " << db_dir
+                           << ", error: " << error_code.message();
+                return false;
+            }
+
+            db_dir_exists = true;
+        }
+        else
+        {
+            LOG(WARNING) << "DB directory " << db_dir
+                         << " missing and no backup found at " << old_db_dir;
+            return false;
+        }
+    }
+
+    LOG(INFO) << "Opening RocksDB at " << db_path_;
+
     rocksdb::Options options;
     options.create_if_missing = create_db_if_missing_;
     options.create_missing_column_families = true;
@@ -3192,6 +3261,21 @@ bool RocksDBHandlerImpl::StartDB(bool is_ng_leader, uint32_t *next_leader_node)
         for (auto cfh : cfhs)
         {
             column_families_.emplace(cfh->GetName(), cfh);
+        }
+    }
+
+    std::error_code cleanup_error;
+    if (std::filesystem::exists(old_db_dir, cleanup_error))
+    {
+        LOG(INFO) << "Cleaning up leftover backup db directory after "
+                     "successful start: "
+                  << old_db_dir;
+        std::filesystem::remove_all(old_db_dir, cleanup_error);
+        if (cleanup_error.value() != 0)
+        {
+            LOG(WARNING) << "Failed to remove backup db directory after start: "
+                         << old_db_dir
+                         << ", error: " << cleanup_error.message();
         }
     }
 
@@ -3480,14 +3564,85 @@ bool RocksDBHandlerImpl::OverrideDB(const std::string &new_snapshot_path)
     }
 
     assert(GetDBPtr() == nullptr);
-    // First remove current db dir.
-    std::filesystem::remove_all(db_path_);
+
+    std::filesystem::path db_dir(NormalizeDbPath(db_path_));
+    std::filesystem::path old_db_dir = db_dir;
+    old_db_dir += ".old";
+
+    std::error_code error_code;
+    DLOG(INFO) << "Removing previous old db directory: " << old_db_dir;
+    std::filesystem::remove_all(old_db_dir, error_code);
+    if (error_code.value() != 0)
+    {
+        LOG(WARNING) << "Failed to cleanup previous old db directory: "
+                     << old_db_dir << ", error: " << error_code.message();
+        error_code.clear();
+    }
+
+    bool db_dir_exists = std::filesystem::exists(db_dir, error_code);
+    if (error_code.value() != 0)
+    {
+        LOG(ERROR) << "Failed to check db directory: " << db_dir
+                   << ", error: " << error_code.message();
+        return false;
+    }
+
+    if (db_dir_exists)
+    {
+        DLOG(INFO) << "Renaming current db directory from " << db_dir << " to "
+                   << old_db_dir;
+        error_code.clear();
+        std::filesystem::rename(db_dir, old_db_dir, error_code);
+        if (error_code.value() != 0)
+        {
+            LOG(ERROR) << "Failed to rename db directory to old: " << db_dir
+                       << " -> " << old_db_dir
+                       << ", error: " << error_code.message();
+            return false;
+        }
+    }
+
     // atomically switch snapshot to current db dir
-    std::filesystem::rename(new_snapshot_path, db_path_);
+    DLOG(INFO) << "Renaming new snapshot directory from " << new_snapshot_path
+               << " to " << db_path_;
+    error_code.clear();
+    std::filesystem::rename(new_snapshot_path, db_path_, error_code);
+    if (error_code.value() != 0)
+    {
+        LOG(ERROR) << "Failed to rename new snapshot to db directory: "
+                   << new_snapshot_path << " -> " << db_path_
+                   << ", error: " << error_code.message();
+
+        if (db_dir_exists)
+        {
+            DLOG(INFO) << "Restoring original db directory from " << old_db_dir
+                       << " to " << db_dir;
+            std::error_code restore_ec;
+            std::filesystem::rename(old_db_dir, db_dir, restore_ec);
+            if (restore_ec.value() != 0)
+            {
+                LOG(ERROR) << "Failed to restore original db directory after "
+                              "snapshot rename failure: "
+                           << old_db_dir << ", error: " << restore_ec.message();
+            }
+        }
+
+        return false;
+    }
 
     std::filesystem::path new_snapshot_fs_path(new_snapshot_path);
     uint64_t new_snapshot_ts =
         std::stoull(new_snapshot_fs_path.parent_path().filename().string());
+
+    DLOG(INFO) << "Removing old db directory after successful switch: "
+               << old_db_dir;
+    std::filesystem::remove_all(old_db_dir, error_code);
+    if (error_code.value() != 0)
+    {
+        LOG(WARNING) << "Failed to remove old db directory: " << old_db_dir
+                     << ", error: " << error_code.message();
+    }
+
     // remove expired snapshot dirs if there is any
     for (const auto &entry :
          std::filesystem::directory_iterator(received_snapshot_path_))
