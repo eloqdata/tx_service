@@ -240,27 +240,32 @@ public:
     }
 
     virtual bool DiscoverAllTableNames(
+        txservice::TableEngine table_engine,
         std::vector<std::string> &norm_name_vec,
         const std::function<void()> *yield_fptr = nullptr,
         const std::function<void()> *resume_fptr = nullptr) = 0;
 
     //-- database
     virtual bool UpsertDatabase(
+        txservice::TableEngine table_engine,
         std::string_view db,
         std::string_view definition,
         const std::function<void()> *yield_fptr = nullptr,
         const std::function<void()> *resume_fptr = nullptr) = 0;
     virtual bool DropDatabase(
+        txservice::TableEngine table_engine,
         std::string_view db,
         const std::function<void()> *yield_fptr = nullptr,
         const std::function<void()> *resume_fptr = nullptr) = 0;
     virtual bool FetchDatabase(
+        txservice::TableEngine table_engine,
         std::string_view db,
         std::string &definition,
         bool &found,
         const std::function<void()> *yield_fptr = nullptr,
         const std::function<void()> *resume_fptr = nullptr) = 0;
     virtual bool FetchAllDatabase(
+        txservice::TableEngine table_engine,
         std::vector<std::string> &dbnames,
         const std::function<void()> *yield_fptr = nullptr,
         const std::function<void()> *resume_fptr = nullptr) = 0;

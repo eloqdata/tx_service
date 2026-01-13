@@ -76,7 +76,7 @@ public:
         txservice::sequence_table_name_sv};
     inline static const TableName table_name_{txservice::sequence_table_name};
     inline static const std::string_view kv_table_name_sv_{
-        txservice::sequence_table_name_sv};
+        txservice::sequence_kv_table_name_sv};
     inline static const uint64_t seq_schema_version_{100U};
 
     static void InitSequence(TxService *tx_service,

@@ -1512,6 +1512,7 @@ bool RocksDBHandler::FetchTable(const txservice::TableName &table_name,
 }
 
 bool RocksDBHandler::DiscoverAllTableNames(
+    txservice::TableEngine table_engine,
     std::vector<std::string> &norm_name_vec,
     const std::function<void()> *yield_fptr,
     const std::function<void()> *resume_fptr)
@@ -1523,7 +1524,8 @@ bool RocksDBHandler::DiscoverAllTableNames(
 }
 
 //-- database
-bool RocksDBHandler::UpsertDatabase(std::string_view db,
+bool RocksDBHandler::UpsertDatabase(txservice::TableEngine table_engine,
+                                    std::string_view db,
                                     std::string_view definition,
                                     const std::function<void()> *yield_fptr,
                                     const std::function<void()> *resume_fptr)
@@ -1535,7 +1537,8 @@ bool RocksDBHandler::UpsertDatabase(std::string_view db,
     return true;
 }
 
-bool RocksDBHandler::DropDatabase(std::string_view db,
+bool RocksDBHandler::DropDatabase(txservice::TableEngine table_engine,
+                                  std::string_view db,
                                   const std::function<void()> *yield_fptr,
                                   const std::function<void()> *resume_fptr)
 {
@@ -1545,7 +1548,8 @@ bool RocksDBHandler::DropDatabase(std::string_view db,
     return true;
 }
 
-bool RocksDBHandler::FetchDatabase(std::string_view db,
+bool RocksDBHandler::FetchDatabase(txservice::TableEngine table_engine,
+                                   std::string_view db,
                                    std::string &definition,
                                    bool &found,
                                    const std::function<void()> *yield_fptr,
@@ -1557,7 +1561,8 @@ bool RocksDBHandler::FetchDatabase(std::string_view db,
     return true;
 }
 
-bool RocksDBHandler::FetchAllDatabase(std::vector<std::string> &dbnames,
+bool RocksDBHandler::FetchAllDatabase(txservice::TableEngine table_engine,
+                                      std::vector<std::string> &dbnames,
                                       const std::function<void()> *yield_fptr,
                                       const std::function<void()> *resume_fptr)
 {

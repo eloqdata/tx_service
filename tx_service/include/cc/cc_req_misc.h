@@ -127,6 +127,10 @@ public:
 
     void SetFinish(RecordStatus status, int err);
 
+public:
+    // Table name with engine prefix, only used in DataStoreHandler.
+    std::string kv_key_;
+
 private:
     const TableName table_name_;
     std::string catalog_image_;

@@ -649,7 +649,8 @@ public:
     }
 
     void CloseDataStore(uint32_t shard_id);
-    void OpenDataStore(uint32_t shard_id);
+    void OpenDataStore(uint32_t shard_id,
+                       std::unordered_set<uint16_t> &&bucket_ids);
 
     DataStoreServiceClusterManager &GetClusterManager()
     {

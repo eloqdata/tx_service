@@ -33,12 +33,12 @@
 #include <string>
 #include <string_view>
 #include <unordered_map>
+#include <unordered_set>
 #include <utility>
 #include <vector>
 
 #include "cc_req_misc.h"
 #include "data_store_service_client_closure.h"
-#include "data_store_service_scanner.h"
 #include "eloq_data_store_service/data_store_service_config.h"
 #include "eloq_data_store_service/object_pool.h"  // ObjectPool
 #include "eloq_data_store_service/thread_worker_pool.h"
@@ -92,6 +92,18 @@ static const std::string_view kv_table_statistics_version_name(
     "table_statistics_version");
 static const std::string_view kv_mvcc_archive_name("mvcc_archives");
 static const std::string_view KEY_SEPARATOR("\\");
+
+// Notice:
+// In order to distinguish the data tables of different engines at the
+// KV layer, we added the prefix "{EngineType}_" when generating the
+// KvTableName, such as eloqkv_, eloqsql_, eloqdoc_, ihash_, irange_, etc. So,
+// the KvTableName of the system table should not conflict with the names of
+// these data tables.
+// Also, we add the prefix "{EngineType}_" to BaseTableName
+// as the key of schemas records stored in "table_catalogs" table, such as
+// "eloqkv_data_table_0", "eloqsql_t1", "eloqdoc_c1", "ihash_sequence...", etc.
+// And, add the prefix "{EngineType}_" to the key of db catalog records stored
+// in "db_catalogs".
 
 DataStoreServiceClient::~DataStoreServiceClient()
 {
@@ -609,12 +621,13 @@ void DataStoreServiceClient::FetchTableCatalog(
 {
     int32_t kv_partition_id = 0;
     uint32_t shard_id = GetShardIdByPartitionId(kv_partition_id, false);
+    fetch_cc->kv_key_ = txservice::KvTablePrefixOf(ccm_table_name.Engine());
+    fetch_cc->kv_key_.append(ccm_table_name.StringView());
 
-    std::string_view key = fetch_cc->CatalogName().StringView();
     Read(kv_table_catalogs_name,
          kv_partition_id,
          shard_id,
-         key,
+         fetch_cc->kv_key_,
          fetch_cc,
          &FetchTableCatalogCallback);
 }
@@ -2193,11 +2206,13 @@ bool DataStoreServiceClient::FetchTable(
     PoolableGuard guard(callback_data);
     callback_data->Reset(
         schema_image, found, version_ts, yield_fptr, resume_fptr);
+    callback_data->key_str_ = txservice::KvTablePrefixOf(table_name.Engine());
+    callback_data->key_str_.append(table_name.StringView());
     uint32_t shard_id = GetShardIdByPartitionId(0, false);
     Read(kv_table_catalogs_name,
          0,
          shard_id,
-         table_name.StringView(),
+         callback_data->key_str_,
          callback_data,
          &FetchTableCallback);
     callback_data->Wait();
@@ -2227,6 +2242,7 @@ bool DataStoreServiceClient::FetchTable(
  * error occurs.
  */
 bool DataStoreServiceClient::DiscoverAllTableNames(
+    txservice::TableEngine table_engine,
     std::vector<std::string> &norm_name_vec,
     const std::function<void()> *yield_fptr,
     const std::function<void()> *resume_fptr)
@@ -2234,13 +2250,18 @@ bool DataStoreServiceClient::DiscoverAllTableNames(
     DiscoverAllTableNamesCallbackData *callback_data =
         discover_all_tables_callback_data_pool_.NextObject();
     PoolableGuard guard(callback_data);
-    callback_data->Reset(norm_name_vec, yield_fptr, resume_fptr);
+    std::string engine_prefix = txservice::KvTablePrefixOf(table_engine);
+    callback_data->Reset(
+        engine_prefix.size(), norm_name_vec, yield_fptr, resume_fptr);
+    callback_data->start_key_ = std::move(engine_prefix);
+    callback_data->end_key_ = callback_data->start_key_;
+    callback_data->end_key_.back()++;
 
     ScanNext(kv_table_catalogs_name,
              0,  // kv_partition_id
              GetShardIdByPartitionId(0, false),
-             "",
-             "",
+             callback_data->start_key_,
+             callback_data->end_key_,
              callback_data->session_id_,
              true,
              false,
@@ -2269,6 +2290,7 @@ bool DataStoreServiceClient::DiscoverAllTableNames(
  * fails.
  */
 bool DataStoreServiceClient::UpsertDatabase(
+    txservice::TableEngine table_engine,
     std::string_view db,
     std::string_view definition,
     const std::function<void()> *yield_fptr,
@@ -2283,12 +2305,14 @@ bool DataStoreServiceClient::UpsertDatabase(
         upsert_db_callback_data_pool_.NextObject();
     PoolableGuard guard(callback_data);
     callback_data->Reset(yield_fptr, resume_fptr);
+    callback_data->key_str_ = txservice::KvTablePrefixOf(table_engine);
+    callback_data->key_str_.append(db);
     uint64_t now =
         std::chrono::duration_cast<std::chrono::microseconds>(
             std::chrono::high_resolution_clock::now().time_since_epoch())
             .count();
 
-    keys.emplace_back(db);
+    keys.emplace_back(callback_data->key_str_);
     records.emplace_back(definition);
     records_ts.emplace_back(now);
     records_ttl.emplace_back(0);  // no ttl
@@ -2331,6 +2355,7 @@ bool DataStoreServiceClient::UpsertDatabase(
  * fails.
  */
 bool DataStoreServiceClient::DropDatabase(
+    txservice::TableEngine table_engine,
     std::string_view db,
     const std::function<void()> *yield_fptr,
     const std::function<void()> *resume_fptr)
@@ -2344,12 +2369,14 @@ bool DataStoreServiceClient::DropDatabase(
         drop_db_callback_data_pool_.NextObject();
     PoolableGuard guard(callback_data);
     callback_data->Reset(yield_fptr, resume_fptr);
+    callback_data->key_str_ = txservice::KvTablePrefixOf(table_engine);
+    callback_data->key_str_.append(db);
     uint64_t now =
         std::chrono::duration_cast<std::chrono::microseconds>(
             std::chrono::high_resolution_clock::now().time_since_epoch())
             .count();
 
-    keys.emplace_back(db);
+    keys.emplace_back(callback_data->key_str_);
     records.emplace_back(std::string_view());
     records_ts.emplace_back(now);
     records_ttl.emplace_back(0);  // no ttl
@@ -2395,6 +2422,7 @@ bool DataStoreServiceClient::DropDatabase(
  * error occurs.
  */
 bool DataStoreServiceClient::FetchDatabase(
+    txservice::TableEngine table_engine,
     std::string_view db,
     std::string &definition,
     bool &found,
@@ -2405,12 +2433,14 @@ bool DataStoreServiceClient::FetchDatabase(
         fetch_db_callback_data_pool_.NextObject();
     PoolableGuard guard(callback_data);
     callback_data->Reset(definition, found, yield_fptr, resume_fptr);
+    callback_data->key_str_ = txservice::KvTablePrefixOf(table_engine);
+    callback_data->key_str_.append(db);
     uint32_t shard_id = GetShardIdByPartitionId(0, false);
 
     Read(kv_database_catalogs_name,
          0,
          shard_id,
-         db,
+         callback_data->key_str_,
          callback_data,
          &FetchDatabaseCallback);
     callback_data->Wait();
@@ -2419,6 +2449,7 @@ bool DataStoreServiceClient::FetchDatabase(
 }
 
 bool DataStoreServiceClient::FetchAllDatabase(
+    txservice::TableEngine table_engine,
     std::vector<std::string> &dbnames,
     const std::function<void()> *yield_fptr,
     const std::function<void()> *resume_fptr)
@@ -2426,7 +2457,12 @@ bool DataStoreServiceClient::FetchAllDatabase(
     FetchAllDatabaseCallbackData *callback_data =
         fetch_all_dbs_callback_data_pool_.NextObject();
     PoolableGuard guard(callback_data);
-    callback_data->Reset(dbnames, yield_fptr, resume_fptr);
+    std::string engine_prefix = txservice::KvTablePrefixOf(table_engine);
+    callback_data->Reset(
+        engine_prefix.size(), dbnames, yield_fptr, resume_fptr);
+    callback_data->start_key_ = std::move(engine_prefix);
+    callback_data->end_key_ = callback_data->start_key_;
+    callback_data->end_key_.back()++;
 
     ScanNext(kv_database_catalogs_name,
              0,
@@ -2485,30 +2521,35 @@ std::string DataStoreServiceClient::CreateKVCatalogInfo(
     const txservice::TableSchema *table_schema) const
 {
     boost::uuids::random_generator generator;
+    // Add prefix of table engine to kv table name.
+    std::string engine_prefix =
+        txservice::KvTablePrefixOf(table_schema->GetBaseTableName().Engine());
 
     txservice::KVCatalogInfo kv_info;
-    kv_info.kv_table_name_ =
-        std::string("t").append(boost::lexical_cast<std::string>(generator()));
+    kv_info.kv_table_name_.reserve(engine_prefix.size() + 37);
+    kv_info.kv_table_name_.append(engine_prefix);
+    kv_info.kv_table_name_.append("t");
+    kv_info.kv_table_name_.append(
+        boost::lexical_cast<std::string>(generator()));
 
     std::vector<txservice::TableName> index_names = table_schema->IndexNames();
     for (auto idx_it = index_names.begin(); idx_it < index_names.end();
          ++idx_it)
     {
+        std::string index_name;
+        index_name.reserve(engine_prefix.size() + 37);
+        index_name.append(engine_prefix);
         if (idx_it->Type() == txservice::TableType::Secondary)
         {
-            kv_info.kv_index_names_.emplace(
-                *idx_it,
-                std::string("i").append(
-                    boost::lexical_cast<std::string>(generator())));
+            index_name.append("i");
         }
         else
         {
             assert((idx_it->Type() == txservice::TableType::UniqueSecondary));
-            kv_info.kv_index_names_.emplace(
-                *idx_it,
-                std::string("u").append(
-                    boost::lexical_cast<std::string>(generator())));
+            index_name.append("u");
         }
+        index_name.append(boost::lexical_cast<std::string>(generator()));
+        kv_info.kv_index_names_.emplace(*idx_it, std::move(index_name));
     }
     return kv_info.Serialize();
 }
@@ -2588,6 +2629,7 @@ std::string DataStoreServiceClient::CreateNewKVCatalogInfo(
 
     // 2. add new index
     boost::uuids::random_generator generator;
+    std::string engine_prefix = txservice::KvTablePrefixOf(table_name.Engine());
     for (auto add_index_it = alter_table_info.index_add_names_.cbegin();
          alter_table_info.index_add_count_ > 0 &&
          add_index_it != alter_table_info.index_add_names_.cend();
@@ -2595,18 +2637,19 @@ std::string DataStoreServiceClient::CreateNewKVCatalogInfo(
     {
         // get index kv table name
         std::string add_index_kv_name;
+        add_index_kv_name.reserve(engine_prefix.size() + 37);
+        add_index_kv_name.append(engine_prefix);
         if (add_index_it->first.Type() == txservice::TableType::Secondary)
         {
-            add_index_kv_name = std::string("i").append(
-                boost::lexical_cast<std::string>(generator()));
+            add_index_kv_name.append("i");
         }
         else
         {
             assert(add_index_it->first.Type() ==
                    txservice::TableType::UniqueSecondary);
-            add_index_kv_name = std::string("u").append(
-                boost::lexical_cast<std::string>(generator()));
+            add_index_kv_name.append("u");
         }
+        add_index_kv_name.append(boost::lexical_cast<std::string>(generator()));
 
         // Use length-prefixed format:
         // [table_name_len][table_name][kv_name_len][kv_name][engine]
@@ -3664,8 +3707,18 @@ bool DataStoreServiceClient::OnLeaderStart(uint32_t ng_id,
 
     if (data_store_service_ != nullptr)
     {
+        std::unordered_set<uint16_t> bucket_ids;
+        for (auto &[bucket_id, bucket_info] : bucket_infos_)
+        {
+            if (bucket_info->BucketOwner() == ng_id)
+            {
+                bucket_ids.insert(bucket_id);
+            }
+        }
+        LOG_IF(FATAL, bucket_ids.empty())
+            << "bucket_ids is empty, ng_id: " << ng_id;
         // Binded data store shard with ng.
-        data_store_service_->OpenDataStore(ng_id);
+        data_store_service_->OpenDataStore(ng_id, std::move(bucket_ids));
     }
 
     Connect();
@@ -5024,6 +5077,8 @@ bool DataStoreServiceClient::InitPreBuiltTables()
     std::vector<uint64_t> records_ts;
     std::vector<uint64_t> records_ttl;
     std::vector<WriteOpType> op_types;
+    // Table name with engine prefix.
+    std::vector<std::string> keys_with_prefix;
 
     // Only need to store table catalog to catalog tables.
     for (const auto &[table_name, kv_table_name] : pre_built_table_names_)
@@ -5063,16 +5118,23 @@ bool DataStoreServiceClient::InitPreBuiltTables()
             }
         }
 
+        keys_with_prefix.emplace_back(
+            txservice::KvTablePrefixOf(table_name.Engine()));
+        keys_with_prefix.back().append(tbl_sv);
+
         // write catalog to kvstore
-        keys.emplace_back(tbl_sv);
         records.emplace_back(kv_table_name);
         records_ts.emplace_back(table_version);
         records_ttl.emplace_back(0);
         op_types.emplace_back(WriteOpType::PUT);
     }
 
-    if (!keys.empty())
+    if (!keys_with_prefix.empty())
     {
+        for (auto &k : keys_with_prefix)
+        {
+            keys.emplace_back(k);
+        }
         // write init catalog to kvstore
         SyncCallbackData *callback_data = sync_callback_data_pool_.NextObject();
         PoolableGuard guard(callback_data);
@@ -5304,7 +5366,11 @@ bool DataStoreServiceClient::UpsertCatalog(
     int32_t partition_id = 0;
     uint32_t data_shard_id = GetShardIdByPartitionId(partition_id, false);
 
-    keys.emplace_back(base_table_name.StringView());
+    // Add prefix of table engine to key.
+    std::string key_str = txservice::KvTablePrefixOf(base_table_name.Engine());
+    key_str.append(base_table_name.StringView());
+
+    keys.emplace_back(key_str);
     records.emplace_back(
         std::string_view(catalog_image.data(), catalog_image.size()));
     records_ts.emplace_back(write_time);
@@ -5351,7 +5417,11 @@ bool DataStoreServiceClient::DeleteCatalog(
     int32_t partition_id = 0;
     uint32_t data_shard_id = GetShardIdByPartitionId(partition_id, false);
 
-    keys.emplace_back(base_table_name.StringView());
+    // Add prefix of table engine to key.
+    std::string key_str = txservice::KvTablePrefixOf(base_table_name.Engine());
+    key_str.append(base_table_name.StringView());
+
+    keys.emplace_back(key_str);
     records.emplace_back(std::string_view());
     records_ts.emplace_back(write_time);
     records_ttl.emplace_back(0);  // no ttl

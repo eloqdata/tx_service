@@ -22,6 +22,7 @@
 #pragma once
 
 #include <memory>
+#include <unordered_set>
 #include <vector>
 
 #include "data_store_factory.h"
@@ -106,8 +107,39 @@ public:
         return 0;  // Not applicable for EloqStore
     }
 
+    void InitializePrewarmFilter(
+        uint32_t ng_id, std::unordered_set<uint16_t> &&bucket_ids) override
+    {
+        eloq_store_configs_.eloqstore_configs_.prewarm_filter =
+            [bucket_ids = std::move(bucket_ids)](
+                const eloqstore::TableIdent &table_ident) -> bool
+        {
+            const std::string &table_name = table_ident.tbl_name_;
+            uint16_t bucket_id;
+            if (table_name.compare(0, 8, "eloqdoc_") == 0 ||
+                table_name.compare(0, 8, "eloqsql_") == 0 ||
+                table_name.compare(0, 7, "irange_") == 0)
+            {
+                // this table engine use RangePartition.
+                uint32_t hash_val;
+                butil::MurmurHash3_x86_32(&table_ident.partition_id_,
+                                          sizeof(table_ident.partition_id_),
+                                          9001,
+                                          &hash_val);
+                bucket_id = hash_val % 1024;
+            }
+            else
+            {
+                // use HashPartition, hash_partition_id equals to bucket_id
+                bucket_id = static_cast<uint16_t>(table_ident.partition_id_);
+            }
+
+            return bucket_ids.find(bucket_id) != bucket_ids.end();
+        };
+    }
+
 private:
-    const EloqStoreConfig eloq_store_configs_;
+    EloqStoreConfig eloq_store_configs_;
 
     friend class EloqStoreDataStore;
 };

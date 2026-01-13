@@ -167,6 +167,29 @@ enum class TableEngine : uint8_t
     InternalHash = 5,  // eg. Sequence table is a kind of internal hash table.
 };
 
+inline std::string KvTablePrefixOf(TableEngine engine)
+{
+    switch (engine)
+    {
+    case txservice::TableEngine::None:
+        return "";
+    case txservice::TableEngine::EloqSql:
+        return "eloqsql_";
+    case txservice::TableEngine::EloqKv:
+        return "eloqkv_";
+    case txservice::TableEngine::EloqDoc:
+        return "eloqdoc_";
+    case txservice::TableEngine::InternalRange:
+        return "irange_";
+    case txservice::TableEngine::InternalHash:
+        return "ihash_";
+    }
+
+    LOG(FATAL) << "Unimplemnt the KvTablePrefixOf for engine type: "
+               << static_cast<int>(engine);
+    return "";
+}
+
 struct TableName
 {
     TableName() = delete;
@@ -567,11 +590,12 @@ enum class PostReadType
 
 constexpr static std::string_view empty_sv{"__empty"};
 constexpr static std::string_view catalog_ccm_name_sv{"__catalog"};
-constexpr static std::string_view redis_table_name_sv{"redis_table"};
 constexpr static std::string_view range_bucket_ccm_name_sv{"__range_bucket"};
 constexpr static std::string_view cluster_config_ccm_name_sv{
     "__cluster_config"};
 constexpr static std::string_view sequence_table_name_sv{"__sequence_table"};
+constexpr static std::string_view sequence_kv_table_name_sv{
+    "ihash_sequence_table"};
 constexpr static std::string_view internal_range_table_name_sv{
     "__internal_range_table"};
 constexpr static std::string_view internal_hash_table_name_sv{

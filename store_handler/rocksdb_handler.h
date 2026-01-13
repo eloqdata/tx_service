@@ -423,27 +423,32 @@ public:
         const std::function<void()> *resume_fptr = nullptr) override;
 
     bool DiscoverAllTableNames(
+        txservice::TableEngine table_engine,
         std::vector<std::string> &norm_name_vec,
         const std::function<void()> *yield_fptr = nullptr,
         const std::function<void()> *resume_fptr = nullptr) override;
 
     //-- database
     bool UpsertDatabase(
+        txservice::TableEngine table_engine,
         std::string_view db,
         std::string_view definition,
         const std::function<void()> *yield_fptr = nullptr,
         const std::function<void()> *resume_fptr = nullptr) override;
     bool DropDatabase(
+        txservice::TableEngine table_engine,
         std::string_view db,
         const std::function<void()> *yield_fptr = nullptr,
         const std::function<void()> *resume_fptr = nullptr) override;
     bool FetchDatabase(
+        txservice::TableEngine table_engine,
         std::string_view db,
         std::string &definition,
         bool &found,
         const std::function<void()> *yield_fptr = nullptr,
         const std::function<void()> *resume_fptr = nullptr) override;
     bool FetchAllDatabase(
+        txservice::TableEngine table_engine,
         std::vector<std::string> &dbnames,
         const std::function<void()> *yield_fptr = nullptr,
         const std::function<void()> *resume_fptr = nullptr) override;

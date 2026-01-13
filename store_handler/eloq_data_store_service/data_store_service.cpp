@@ -2198,8 +2198,15 @@ void DataStoreService::CloseDataStore(uint32_t shard_id)
     }
 }
 
-void DataStoreService::OpenDataStore(uint32_t shard_id)
+void DataStoreService::OpenDataStore(uint32_t shard_id,
+                                     std::unordered_set<uint16_t> &&bucket_ids)
 {
+    if (data_store_factory_ != nullptr)
+    {
+        data_store_factory_->InitializePrewarmFilter(shard_id,
+                                                     std::move(bucket_ids));
+    }
+
     auto start_time = std::chrono::steady_clock::now();
     auto &ds_ref = data_shards_.at(shard_id);
     if (ds_ref.shard_status_.load() != DSShardStatus::Closed)

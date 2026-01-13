@@ -176,6 +176,12 @@ public:
         const std::unordered_map<uint32_t, uint32_t> &ng_leaders,
         DataStoreServiceClusterManager &cluster_manager);
 
+    static void InitBucketsInfo(
+        const std::set<uint32_t> &node_groups,
+        uint64_t version,
+        std::unordered_map<uint16_t, std::unique_ptr<txservice::BucketInfo>>
+            &ng_bucket_infos);
+
     void ConnectToLocalDataStoreService(
         std::unique_ptr<DataStoreService> ds_serv);
 
@@ -350,27 +356,32 @@ public:
         const std::function<void()> *resume_fptr = nullptr) override;
 
     bool DiscoverAllTableNames(
+        txservice::TableEngine table_engine,
         std::vector<std::string> &norm_name_vec,
         const std::function<void()> *yield_fptr = nullptr,
         const std::function<void()> *resume_fptr = nullptr) override;
 
     //-- database
     bool UpsertDatabase(
+        txservice::TableEngine table_engine,
         std::string_view db,
         std::string_view definition,
         const std::function<void()> *yield_fptr = nullptr,
         const std::function<void()> *resume_fptr = nullptr) override;
     bool DropDatabase(
+        txservice::TableEngine table_engine,
         std::string_view db,
         const std::function<void()> *yield_fptr = nullptr,
         const std::function<void()> *resume_fptr = nullptr) override;
     bool FetchDatabase(
+        txservice::TableEngine table_engine,
         std::string_view db,
         std::string &definition,
         bool &found,
         const std::function<void()> *yield_fptr = nullptr,
         const std::function<void()> *resume_fptr = nullptr) override;
     bool FetchAllDatabase(
+        txservice::TableEngine table_engine,
         std::vector<std::string> &dbnames,
         const std::function<void()> *yield_fptr = nullptr,
         const std::function<void()> *resume_fptr = nullptr) override;
@@ -759,11 +770,6 @@ private:
     bool UpdateOwnerNodeIndexOfShard(uint32_t shard_id,
                                      uint32_t old_node_index,
                                      uint32_t &new_node_index);
-    void InitBucketsInfo(
-        const std::set<uint32_t> &node_groups,
-        uint64_t version,
-        std::unordered_map<uint16_t, std::unique_ptr<txservice::BucketInfo>>
-            &ng_bucket_infos);
 
     void UpdateShardOwner(uint32_t shard_id, uint32_t node_id);
 
