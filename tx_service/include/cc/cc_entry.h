@@ -374,6 +374,8 @@ struct LruEntry
             {
                 RecycleKeyLock(*ccs);
             }
+
+            return ret;
         }
         return true;
     }

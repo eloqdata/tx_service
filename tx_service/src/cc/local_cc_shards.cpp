@@ -4316,6 +4316,10 @@ void LocalCcShards::DataSyncForRangePartition(
                              << data_sync_vec_size;
                 // Reset
                 scan_cc.Reset();
+                // Return the quota to flush data memory usage pool since the
+                // flush data task is not put into flush worker.
+                data_sync_mem_controller_.DeallocateFlushMemQuota(
+                    flush_data_size);
                 continue;
             }
 
@@ -4364,6 +4368,10 @@ void LocalCcShards::DataSyncForRangePartition(
                 {
                     // Terminate this datasync task immediately if the former
                     // flush task failed.
+                    // Return the quota to flush data memory usage pool since
+                    // the flush data task is not put into flush worker.
+                    data_sync_mem_controller_.DeallocateFlushMemQuota(
+                        flush_data_size);
                     break;
                 }
 
