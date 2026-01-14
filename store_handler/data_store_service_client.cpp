@@ -5622,7 +5622,7 @@ void DataStoreServiceClient::PrepareRangePartitionBatches(
         batch_size += tx_key.Size();
 
         const txservice::TxRecord *rec = ckpt_rec.Payload();
-        if (is_deleted)
+        if (is_deleted && enabled_mvcc)
         {
             batch_request.records_ttl.push_back(retired_ttl_for_deleted);
         }
