@@ -368,8 +368,12 @@ struct LruEntry
     {
         if (cc_lock_and_extra_ != nullptr)
         {
-            return cc_lock_and_extra_->KeyLock()->AbortBlockCmdRequest(
+            bool ret = cc_lock_and_extra_->KeyLock()->AbortBlockCmdRequest(
                 txid, err, ccs);
+            if (ret)
+            {
+                RecycleKeyLock(*ccs);
+            }
         }
         return true;
     }
