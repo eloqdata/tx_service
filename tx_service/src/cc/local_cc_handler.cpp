@@ -62,7 +62,8 @@ void txservice::LocalCcHandler::AcquireWrite(
     uint32_t hd_res_idx,
     CcProtocol proto,
     IsolationLevel iso_level,
-    bool abort_if_oom)
+    bool abort_if_oom,
+    bool allow_run_on_candidate)
 {
     uint32_t ng_id = Sharder::Instance().ShardToCcNodeGroup(key_shard_code);
     AcquireKeyResult &acquire_result = hres.Value()[hd_res_idx];
@@ -92,7 +93,8 @@ void txservice::LocalCcHandler::AcquireWrite(
                    hd_res_idx,
                    proto,
                    iso_level,
-                   abort_if_oom);
+                   abort_if_oom,
+                   allow_run_on_candidate);
         TX_TRACE_ACTION(this, req);
         TX_TRACE_DUMP(req);
 
@@ -274,7 +276,8 @@ txservice::CcReqStatus txservice::LocalCcHandler::PostWrite(
     const TxRecord *record,
     OperationType operation_type,
     uint32_t key_shard_code,
-    CcHandlerResult<PostProcessResult> &hres)
+    CcHandlerResult<PostProcessResult> &hres,
+    bool allow_run_on_candidate)
 {
     uint32_t ng_id = cce_addr.NodeGroupId();
     uint32_t dest_node_id = Sharder::Instance().LeaderNodeId(ng_id);
@@ -293,7 +296,8 @@ txservice::CcReqStatus txservice::LocalCcHandler::PostWrite(
                    record,
                    operation_type,
                    key_shard_code,
-                   &hres);
+                   &hres,
+                   allow_run_on_candidate);
         TX_TRACE_ACTION(this, req);
         TX_TRACE_DUMP(req);
         cc_shards_.EnqueueCcRequest(thd_id_, cce_addr.CoreId(), req);
@@ -328,7 +332,8 @@ txservice::CcReqStatus txservice::LocalCcHandler::PostRead(
     CcHandlerResult<PostProcessResult> &hres,
     bool is_local,
     bool need_remote_resp,
-    PostReadType post_read_type)
+    PostReadType post_read_type,
+    bool allow_run_on_candidate)
 {
     if (IsStandbyTx(tx_term))
     {
@@ -369,7 +374,8 @@ txservice::CcReqStatus txservice::LocalCcHandler::PostRead(
                    key_ts,
                    gap_ts,
                    post_read_type,
-                   &hres);
+                   &hres,
+                   allow_run_on_candidate);
         TX_TRACE_ACTION(this, req);
         TX_TRACE_DUMP(req);
         if (thd_id_ == cce_addr.CoreId())
@@ -434,6 +440,7 @@ void txservice::LocalCcHandler::Read(const TableName &table_name,
                                      CcProtocol proto,
                                      bool is_for_write,
                                      bool is_covering_keys,
+                                     bool allow_run_on_candidate,
                                      bool point_read_on_miss,
                                      int32_t partition_id,
                                      bool abort_if_oom)
@@ -469,13 +476,19 @@ void txservice::LocalCcHandler::Read(const TableName &table_name,
                    is_for_write,
                    is_covering_keys,
                    nullptr,
-                   false,
+                   allow_run_on_candidate,
                    point_read_on_miss,
                    partition_id,
                    abort_if_oom);
         TX_TRACE_ACTION(this, req);
         TX_TRACE_DUMP(req);
         cc_shards_.EnqueueCcRequest(thd_id_, key_shard_code, req);
+        // LOG(INFO) << "Read local request, txn: " << req->Txn()
+        //           << ", table name: " << table_name.StringView()
+        //           << ", table type: "
+        //           << static_cast<uint32_t>(table_name.Type())
+        //           << ", key: " << key.ToString()
+        //           << ", partition id: " << partition_id;
     }
     else
     {
@@ -498,6 +511,7 @@ void txservice::LocalCcHandler::Read(const TableName &table_name,
                         proto,
                         is_for_write,
                         is_covering_keys,
+                        allow_run_on_candidate,
                         point_read_on_miss,
                         partition_id,
                         abort_if_oom);
@@ -587,7 +601,7 @@ bool txservice::LocalCcHandler::ReadLocal(const TableName &table_name,
                                           IsolationLevel iso_level,
                                           CcProtocol proto,
                                           bool is_for_write,
-                                          bool is_recovering,
+                                          bool allow_run_on_candidate,
                                           bool execute_immediately)
 {
     ReadKeyResult &read_result = hres.Value();
@@ -609,14 +623,15 @@ bool txservice::LocalCcHandler::ReadLocal(const TableName &table_name,
     {
         ccs = cc_shards_.cc_shards_[thd_id_].get();
     }
-    int64_t term;
+    int64_t term = -1;
     uint32_t shard_code = tx_number >> 32L;
     uint32_t cc_ng_id = shard_code >> 10;
-    if (is_recovering)
+    if (allow_run_on_candidate)
     {
         term = Sharder::Instance().CandidateLeaderTerm(cc_ng_id);
     }
-    else
+
+    if (term < 0)
     {
         int64_t ng_leader_term = Sharder::Instance().LeaderTerm(cc_ng_id);
         int64_t standby_node_term = Sharder::Instance().StandbyNodeTerm();
@@ -632,6 +647,11 @@ bool txservice::LocalCcHandler::ReadLocal(const TableName &table_name,
         // shard to which the tx is bound, if the native cc node is not the
         // leader now, returns an error.
         hres.SetError(CcErrorCode::REQUESTED_NODE_NOT_LEADER);
+        LOG(INFO) << "ReadLocal Execute not leader, table name: "
+                  << table_name.StringView()
+                  << ", allow_run_on_candidate: " << std::boolalpha
+                  << allow_run_on_candidate << ", term: " << term
+                  << ", txn: " << tx_number;
         return true;
     }
 
@@ -659,7 +679,7 @@ bool txservice::LocalCcHandler::ReadLocal(const TableName &table_name,
                     is_for_write,
                     false,
                     nullptr,
-                    is_recovering);
+                    allow_run_on_candidate);
     TX_TRACE_ACTION(this, read_req);
     TX_TRACE_DUMP(read_req);
 
@@ -675,6 +695,13 @@ bool txservice::LocalCcHandler::ReadLocal(const TableName &table_name,
     {
         //__catalog table will be preloaded when ccshard constructed
         finished = ccm->Execute(*read_req);
+        // LOG(INFO) << "ReadLocal Execute, table name: "
+        //           << table_name.StringView()
+        //           << ", allow_run_on_candidate: " << std::boolalpha
+        //           << allow_run_on_candidate << ", term: " << term
+        //           << ", txn: " << tx_number << ", finished: " <<
+        //           std::boolalpha
+        //           << finished;
         if (finished)
         {
             read_req->Free();
@@ -732,7 +759,7 @@ bool txservice::LocalCcHandler::ReadLocal(const TableName &table_name,
                                           IsolationLevel iso_level,
                                           CcProtocol proto,
                                           bool is_for_write,
-                                          bool is_recovering)
+                                          bool allow_run_on_candidate)
 {
     ReadKeyResult &read_result = hres.Value();
     read_result.rec_ = &record;
@@ -756,7 +783,7 @@ bool txservice::LocalCcHandler::ReadLocal(const TableName &table_name,
     int64_t term = -1;
     uint32_t shard_code = tx_number >> 32L;
     uint32_t cc_ng_id = shard_code >> 10;
-    if (is_recovering)
+    if (allow_run_on_candidate)
     {
         term = Sharder::Instance().CandidateLeaderTerm(cc_ng_id);
     }
@@ -777,6 +804,11 @@ bool txservice::LocalCcHandler::ReadLocal(const TableName &table_name,
         // shard to which the tx is bound, if the native cc node is not the
         // leader now, returns an error.
         hres.SetError(CcErrorCode::REQUESTED_NODE_NOT_LEADER);
+        // LOG(INFO) << "ReadLocal Execute, table name: "
+        //           << table_name.StringView()
+        //           << ", allow_run_on_candidate: " << std::boolalpha
+        //           << allow_run_on_candidate << ", term: " << term
+        //           << ", txn: " << tx_number;
         return true;
     }
 
@@ -811,6 +843,13 @@ bool txservice::LocalCcHandler::ReadLocal(const TableName &table_name,
     {
         //__catalog table will be preloaded when ccshard constructed
         finished = ccm->Execute(*read_req);
+        // LOG(INFO) << "ReadLocal Execute, table name: "
+        //           << table_name.StringView()
+        //           << ", allow_run_on_candidate: " << std::boolalpha
+        //           << allow_run_on_candidate << ", term: " << term
+        //           << ", txn: " << tx_number << ", finished: " <<
+        //           std::boolalpha
+        //           << finished;
         if (finished)
         {
             read_req->Free();
@@ -1379,11 +1418,17 @@ void txservice::LocalCcHandler::ScanClose(const TableName &table_name,
 void txservice::LocalCcHandler::NewTxn(CcHandlerResult<InitTxResult> &hres,
                                        IsolationLevel iso_level,
                                        NodeGroupId tx_ng_id,
-                                       uint32_t log_group_id)
+                                       uint32_t log_group_id,
+                                       bool allow_run_on_candidate)
 {
     CcShard &ccs = *(cc_shards_.cc_shards_[thd_id_]);
 
     int64_t term = Sharder::Instance().LeaderTerm(tx_ng_id);
+    if (term < 0 && allow_run_on_candidate)
+    {
+        term = Sharder::Instance().CandidateLeaderTerm(tx_ng_id);
+    }
+
     if (term < 0)
     {
         term = Sharder::Instance().StandbyNodeTerm();

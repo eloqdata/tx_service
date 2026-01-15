@@ -183,7 +183,8 @@ public:
                 NodeGroupId tx_ng_id = UINT32_MAX,
                 bool start_now = false,
                 const std::function<void()> *yield_func = nullptr,
-                const std::function<void()> *resume_func = nullptr);
+                const std::function<void()> *resume_func = nullptr,
+                bool allow_run_on_candidate = false);
     std::unique_ptr<InitTxRequest> init_tx_req_;
     bool CommitTx(CommitTxRequest &commit_req);
     std::unique_ptr<CommitTxRequest> commit_tx_req_;
@@ -268,7 +269,8 @@ public:
     bool CheckLeaderTerm() const
     {
         NodeGroupId ng_id = TxCcNodeId();
-        if (Sharder::Instance().CheckLeaderTerm(ng_id, TxTerm()) ||
+        if (Sharder::Instance().CheckLeaderTerm(
+                ng_id, TxTerm(), allow_run_on_candidate_) ||
             (TxStatus() == TxnStatus::Recovering &&
              Sharder::Instance().CandidateLeaderTerm(ng_id) >= 0))
         {
@@ -685,6 +687,8 @@ private:
     CcProtocol protocol_{CcProtocol::OCC};
 
     bool bind_to_ext_proc_{false};
+
+    bool allow_run_on_candidate_{false};
 
     // Initialization phase.
     InitTxnOperation init_txn_;

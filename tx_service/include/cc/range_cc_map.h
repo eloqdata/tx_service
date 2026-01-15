@@ -217,12 +217,23 @@ public:
         assert(this->table_name_ == *req.GetTableName());
 
         CcHandlerResult<ReadKeyResult> *hd_result = req.Result();
-        int64_t ng_term = Sharder::Instance().LeaderTerm(req.NodeGroupId());
+        int64_t ng_term = req.NodeGroupTerm();
         if (ng_term < 0)
         {
-            hd_result->SetError(CcErrorCode::REQUESTED_NODE_NOT_LEADER);
-            return true;
+            if (req.AllowRunOnCandidate())
+            {
+                ng_term =
+                    Sharder::Instance().CandidateLeaderTerm(req.NodeGroupId());
+            }
+            if (ng_term < 0)
+            {
+                ng_term = Sharder::Instance().LeaderTerm(req.NodeGroupId());
+                int64_t standby_node_term =
+                    Sharder::Instance().StandbyNodeTerm();
+                ng_term = std::max(ng_term, standby_node_term);
+            }
         }
+        assert(ng_term > 0);
 
         // For range cc maps, we assume that all of a table's ranges are loaded
         // into memory for caching when the range cc map is initialized. There
@@ -399,13 +410,6 @@ public:
      */
     bool Execute(PostWriteAllCc &req) override
     {
-        int64_t ng_term = Sharder::Instance().LeaderTerm(req.NodeGroupId());
-        if (ng_term < 0)
-        {
-            req.Result()->SetError(CcErrorCode::REQUESTED_NODE_NOT_LEADER);
-            return false;
-        }
-
         // When the commit ts is 0 or the commit type is DowngradeLock, the
         // request commits nothing and only removes the write intents/locks
         // acquired earlier.
@@ -610,6 +614,8 @@ public:
 
                 if (txservice_enable_key_cache && this->table_name_.IsBase())
                 {
+                    int64_t ng_term = req.NodeGroupTerm();
+                    assert(ng_term > 0);
                     // try to init the key cache for new range if it
                     // lands on this ng
                     for (auto new_range : new_range_entries)

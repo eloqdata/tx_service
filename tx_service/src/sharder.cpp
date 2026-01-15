@@ -614,9 +614,15 @@ std::shared_ptr<brpc::Channel> Sharder::UpdateCcNodeServiceChannel(
     }
 }
 
-bool Sharder::CheckLeaderTerm(uint32_t ng_id, int64_t term) const
+bool Sharder::CheckLeaderTerm(uint32_t ng_id,
+                              int64_t term,
+                              bool check_candidate) const
 {
     int64_t node_term = LeaderTerm(ng_id);
+    if (node_term < 0 && check_candidate)
+    {
+        node_term = CandidateLeaderTerm(ng_id);
+    }
 
     if (node_term < 0)
     {
