@@ -55,7 +55,8 @@ public:
                       uint32_t hd_res_idx,
                       CcProtocol proto,
                       IsolationLevel iso_level,
-                      bool abort_if_oom) override;
+                      bool abort_if_oom,
+                      bool allow_run_on_candidate) override;
 
     void AcquireWriteAll(const TableName &table_name,
                          const TxKey &key,
@@ -103,20 +104,21 @@ public:
                           const TxRecord *record,
                           OperationType operation_type,
                           uint32_t key_shard_code,
-                          CcHandlerResult<PostProcessResult> &hres) override;
+                          CcHandlerResult<PostProcessResult> &hres,
+                          bool allow_run_on_candidate) override;
 
-    CcReqStatus PostRead(
-        uint64_t tx_number,
-        int64_t tx_term,
-        uint16_t command_id,
-        uint64_t key_ts,
-        uint64_t gap_ts,
-        uint64_t commit_ts,
-        const CcEntryAddr &ccentry_addr,
-        CcHandlerResult<PostProcessResult> &hres,
-        bool is_local = false,
-        bool need_remote_resp = true,
-        PostReadType post_read_type = PostReadType::Release) override;
+    CcReqStatus PostRead(uint64_t tx_number,
+                         int64_t tx_term,
+                         uint16_t command_id,
+                         uint64_t key_ts,
+                         uint64_t gap_ts,
+                         uint64_t commit_ts,
+                         const CcEntryAddr &ccentry_addr,
+                         CcHandlerResult<PostProcessResult> &hres,
+                         bool is_local = false,
+                         bool need_remote_resp = true,
+                         PostReadType post_read_type = PostReadType::Release,
+                         bool allow_run_on_candidate = false) override;
 
     /// <summary>
     /// Starts concurrency control for the input key and returns the key's
@@ -146,6 +148,7 @@ public:
               CcProtocol proto = CcProtocol::OCC,
               bool is_for_write = false,
               bool is_covering_keys = false,
+              bool allow_run_on_candidate = false,
               bool point_read_on_miss = false,
               int32_t partition_id = -1,
               bool abort_if_oom = false) override;
@@ -171,7 +174,7 @@ public:
                    IsolationLevel iso_level = IsolationLevel::RepeatableRead,
                    CcProtocol proto = CcProtocol::Locking,
                    bool is_for_write = false,
-                   bool is_recovering = false,
+                   bool allow_run_on_candidate = false,
                    bool execute_immediately = true) override;
 
     std::tuple<txservice::CcErrorCode, txservice::NonBlockingLock *, uint64_t>
@@ -194,7 +197,7 @@ public:
                    IsolationLevel iso_level = IsolationLevel::RepeatableRead,
                    CcProtocol proto = CcProtocol::Locking,
                    bool is_for_write = false,
-                   bool is_recovring = false) override;
+                   bool allow_run_on_candidate = false) override;
 
     void ScanOpen(const TableName &table_name,
                   const uint64_t schema_version,
@@ -281,7 +284,8 @@ public:
     void NewTxn(CcHandlerResult<InitTxResult> &hres,
                 IsolationLevel iso_level,
                 NodeGroupId tx_ng_id,
-                uint32_t log_group_id) override;
+                uint32_t log_group_id,
+                bool allow_run_on_candidate) override;
 
     /// <summary>
     /// Sets the commit timestamp of the input tx.

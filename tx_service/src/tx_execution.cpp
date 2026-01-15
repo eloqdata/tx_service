@@ -179,6 +179,7 @@ void TransactionExecution::Reset()
         tx_req_queue_.Reset();
         req_queue_lock_.Unlock();
     }
+    allow_run_on_candidate_ = false;
 
     ClearCachedBucketInfos();
     lock_cluster_config_op_.Reset();
@@ -244,6 +245,7 @@ void TransactionExecution::SetRecoverTxState(uint64_t txn,
     tx_number_.store(txn, std::memory_order_relaxed);
     tx_term_ = tx_term;
     commit_ts_ = commit_ts;
+    allow_run_on_candidate_ = true;
     tx_status_.store(TxnStatus::Recovering, std::memory_order_relaxed);
 }
 
@@ -551,12 +553,19 @@ void TransactionExecution::InitTx(IsolationLevel iso_level,
                                   NodeGroupId tx_ng_id,
                                   bool start_now,
                                   const std::function<void()> *yield_func,
-                                  const std::function<void()> *resume_func)
+                                  const std::function<void()> *resume_func,
+                                  bool allow_run_on_candidate)
 {
     if (start_now)
     {
-        InitTxRequest init_tx_req{
-            iso_level, protocol, yield_func, resume_func, this, tx_ng_id};
+        InitTxRequest init_tx_req{iso_level,
+                                  protocol,
+                                  yield_func,
+                                  resume_func,
+                                  this,
+                                  tx_ng_id,
+                                  UINT32_MAX,
+                                  allow_run_on_candidate};
         Execute(&init_tx_req);
         init_tx_req.Wait();
     }
@@ -567,6 +576,7 @@ void TransactionExecution::InitTx(IsolationLevel iso_level,
         init_tx_req_->protocol_ = protocol;
         init_tx_req_->tx_ng_id_ = tx_ng_id;
         init_tx_req_->txm_ = this;
+        init_tx_req_->allow_run_on_candidate_ = allow_run_on_candidate;
         Execute(init_tx_req_.get());
     }
 }
@@ -735,6 +745,7 @@ void TransactionExecution::ProcessTxRequest(InitTxRequest &init_txn_req)
                               : init_txn_req.tx_ng_id_;
 
     init_txn_.log_group_id_ = init_txn_req.log_group_id_;
+    allow_run_on_candidate_ = init_txn_req.allow_run_on_candidate_;
     PushOperation(&init_txn_);
     Process(init_txn_);
 }
@@ -1743,7 +1754,8 @@ void TransactionExecution::Process(InitTxnOperation &init_txn)
     cc_handler_->NewTxn(init_txn.hd_result_,
                         iso_level_,
                         init_txn.tx_ng_id_,
-                        init_txn.log_group_id_);
+                        init_txn.log_group_id_,
+                        allow_run_on_candidate_);
 }
 
 void TransactionExecution::PostProcess(InitTxnOperation &init_txn)
@@ -1866,7 +1878,7 @@ void TransactionExecution::Process(ReadOperation &read)
                     read.iso_level_,
                     read.protocol_,
                     read.read_tx_req_->is_for_write_,
-                    read.read_tx_req_->is_recovering_);
+                    allow_run_on_candidate_);
             }
             else
             {
@@ -1883,7 +1895,7 @@ void TransactionExecution::Process(ReadOperation &read)
                     read.iso_level_,
                     read.protocol_,
                     read.read_tx_req_->is_for_write_,
-                    read.read_tx_req_->is_recovering_);
+                    allow_run_on_candidate_);
             }
 
             if (finished)
@@ -1970,6 +1982,12 @@ void TransactionExecution::Process(ReadOperation &read)
                         range_rec_.GetRangeOwnerNg()->BucketOwner();
                     key_shard_code = range_ng << 10 | residual;
                     partition_id = range_rec_.GetRangeInfo()->PartitionId();
+                    // LOG(INFO) << "ReadOperation for range partitioned table:
+                    // "
+                    //           << table_name.StringView()
+                    //           << ", key: " << key.ToString()
+                    //           << ", partition id: " << partition_id
+                    //           << ", txn: " << tx_number_;
                 }
             }
             else
@@ -1991,14 +2009,27 @@ void TransactionExecution::Process(ReadOperation &read)
                 partition_id = Sharder::MapKeyHashToHashPartitionId(key_hash);
                 if (bucket_info != nullptr)
                 {
+                    // LOG(INFO) << "ReadOperation for hash partitioned table: "
+                    //           << table_name.StringView()
+                    //           << ", key: " << key.ToString()
+                    //           << ", get bucket info fast success"
+                    //           << ", read is running: " << std::boolalpha
+                    //           << read.is_running_;
                     // Uses the lower 10 bits of the key's hash code to shard
                     // the key across CPU cores in a cc node.
                     uint32_t residual = key_hash & 0x3FF;
                     NodeGroupId bucket_ng = bucket_info->BucketOwner();
                     key_shard_code = bucket_ng << 10 | residual;
+
+                    // Set the lock range bucket result
+                    lock_range_bucket_result_.SetFinished();
                 }
                 else if (!lock_range_bucket_result_.IsFinished())
                 {
+                    // LOG(INFO)
+                    //     << "ReadOperation for hash partitioned table: "
+                    //     << table_name.StringView()
+                    //     << ", key: " << key.ToString() << ", to lock bucket";
                     read.is_running_ = false;
                     // First read and lock the bucket the key located in through
                     // lock_bucket_op_.
@@ -2023,6 +2054,10 @@ void TransactionExecution::Process(ReadOperation &read)
                 }
                 else  // lock bucket finished and succeeded
                 {
+                    // LOG(INFO) << "ReadOperation for hash partitioned table: "
+                    //           << table_name.StringView()
+                    //           << ", key: " << key.ToString()
+                    //           << ", lock bucket finished and succeeded";
                     // If there is an error when getting the key's bucket info,
                     // the error would be caught when forwarding the read
                     // operation, which forces the tx state machine moves to
@@ -2060,6 +2095,15 @@ void TransactionExecution::Process(ReadOperation &read)
             {
                 read_ts = ts;
             }
+            // LOG(INFO) << "ReadOperation for table: " <<
+            // table_name.StringView()
+            //           << ", key: " << key.ToString() << ", read ts: " <<
+            //           read_ts
+            //           << ", read is running: " << std::boolalpha
+            //           << read.is_running_ << ", txn: " << tx_number_
+            //           << ", is hash partitioned: " << std::boolalpha
+            //           << table_name.IsHashPartitioned()
+            //           << ", partition id: " << partition_id;
 
             cc_handler_->Read(table_name,
                               read.read_tx_req_->schema_version_,
@@ -2076,6 +2120,7 @@ void TransactionExecution::Process(ReadOperation &read)
                               read.protocol_,
                               read.read_tx_req_->is_for_write_,
                               is_covering_keys,
+                              allow_run_on_candidate_,
                               read.read_tx_req_->point_read_on_cache_miss_,
                               partition_id,
                               HoldingRangeReadLock());
@@ -2111,6 +2156,17 @@ void TransactionExecution::Process(ReadOperation &read)
                     StartTiming();
                 }
             }
+            // LOG(INFO) << "ReadOperation sent read request for table: "
+            //           << table_name.StringView()
+            //           << ", key: " << read.read_tx_req_->key_->ToString()
+            //           << ", txn: " << tx_number_
+            //           << ", read is running: " << std::boolalpha
+            //           << read.is_running_ << ", with result: 0x" << std::hex
+            //           << &read.hd_result_ << ". operation: 0x" << std::hex
+            //           << &read << ", op lock range bucket result is finished:
+            //           "
+            //           << std::boolalpha
+            //           << read.lock_range_bucket_result_->IsFinished();
         }
     }
     else
@@ -2309,7 +2365,7 @@ void TransactionExecution::Process(ReadLocalOperation &lock_local)
                                IsolationLevel::RepeatableRead,
                                CcProtocol::Locking,
                                false,
-                               false,
+                               allow_run_on_candidate_,
                                lock_local.execute_immediately_);
     if (finished)
     {
@@ -3712,6 +3768,7 @@ void TransactionExecution::Commit()
 {
     if (tx_term_ < 0)
     {
+        // LOG(INFO) << ">>>>Commit tx " << TxNumber() << ", tx_term < 0";
         bool_resp_->Finish(false);
         bool_resp_ = nullptr;
 
@@ -3760,6 +3817,8 @@ void TransactionExecution::Commit()
         }
         else
         {
+            // LOG(INFO) << ">>>>Commit tx " << TxNumber() << ", push set ts
+            // op";
             PushOperation(&set_ts_);
         }
     }
@@ -4047,7 +4106,8 @@ void TransactionExecution::Process(AcquireWriteOperation &acquire_write)
                 res_idx++,
                 protocol_,
                 iso_level_,
-                abort_if_oom);
+                abort_if_oom,
+                allow_run_on_candidate_);
             for (auto &[forward_shard_code, cce_addr] :
                  write_entry.forward_addr_)
             {
@@ -4065,7 +4125,8 @@ void TransactionExecution::Process(AcquireWriteOperation &acquire_write)
                     res_idx++,
                     protocol_,
                     iso_level_,
-                    abort_if_oom);
+                    abort_if_oom,
+                    allow_run_on_candidate_);
             }
         }
     }
@@ -4128,6 +4189,10 @@ void TransactionExecution::PostProcess(AcquireWriteOperation &acquire_write)
     }
     else if (acquire_write.hd_result_.IsError())
     {
+        DLOG(ERROR) << "AcquireWriteOperation failed for cc error:"
+                    << acquire_write.hd_result_.ErrorMsg() << " ,error code: "
+                    << static_cast<int>(acquire_write.hd_result_.ErrorCode())
+                    << "; txn: " << TxNumber();
         bool_resp_->SetErrorCode(
             ConvertCcError(acquire_write.hd_result_.ErrorCode()));
         Abort();
@@ -4358,7 +4423,11 @@ void TransactionExecution::Process(ValidateOperation &validate)
                                   0,
                                   commit_ts_,
                                   cce_addr,
-                                  validate.hd_result_);
+                                  validate.hd_result_,
+                                  false,
+                                  true,
+                                  PostReadType::Release,
+                                  allow_run_on_candidate_);
 
         if (ret == CcReqStatus::SentLocal)
         {
@@ -5297,7 +5366,8 @@ void TransactionExecution::Process(PostProcessOp &post_process)
                                            write_entry.rec_.get(),
                                            write_entry.op_,
                                            write_entry.key_shard_code_,
-                                           post_process.hd_result_);
+                                           post_process.hd_result_,
+                                           allow_run_on_candidate_);
                 update_post_cnt(ret);
 
                 for (auto &[forward_shard_code, cce_addr] :
@@ -5312,7 +5382,8 @@ void TransactionExecution::Process(PostProcessOp &post_process)
                                                write_entry.rec_.get(),
                                                write_entry.op_,
                                                forward_shard_code,
-                                               post_process.hd_result_);
+                                               post_process.hd_result_,
+                                               allow_run_on_candidate_);
                     update_post_cnt(ret);
                 }
             }
@@ -5336,7 +5407,8 @@ void TransactionExecution::Process(PostProcessOp &post_process)
                     nullptr,
                     OperationType::CommitCommands,
                     0,
-                    post_process.hd_result_);
+                    post_process.hd_result_,
+                    allow_run_on_candidate_);
                 update_post_cnt(ret);
 
                 if (cmd_set_entry.forward_entry_ != nullptr &&
@@ -5388,7 +5460,8 @@ void TransactionExecution::Process(PostProcessOp &post_process)
                             nullptr,
                             write_entry.op_,
                             write_entry.key_shard_code_,
-                            post_process.hd_result_);
+                            post_process.hd_result_,
+                            allow_run_on_candidate_);
                         update_post_cnt(ret);
                     }
                     // Keys that were not successfully locked in the cc
@@ -5409,7 +5482,8 @@ void TransactionExecution::Process(PostProcessOp &post_process)
                                                        nullptr,
                                                        write_entry.op_,
                                                        forward_shard_code,
-                                                       post_process.hd_result_);
+                                                       post_process.hd_result_,
+                                                       allow_run_on_candidate_);
                             update_post_cnt(ret);
                         }
                     }
@@ -5435,7 +5509,8 @@ void TransactionExecution::Process(PostProcessOp &post_process)
                                                nullptr,
                                                OperationType::CommitCommands,
                                                0,
-                                               post_process.hd_result_);
+                                               post_process.hd_result_,
+                                               allow_run_on_candidate_);
                     update_post_cnt(ret);
 
                     if (cmd_set_entry.forward_entry_ != nullptr &&
@@ -5450,7 +5525,8 @@ void TransactionExecution::Process(PostProcessOp &post_process)
                             nullptr,
                             OperationType::CommitCommands,
                             0,
-                            post_process.hd_result_);
+                            post_process.hd_result_,
+                            allow_run_on_candidate_);
                         update_post_cnt(ret);
                     }
                 }
@@ -5473,7 +5549,8 @@ void TransactionExecution::Process(PostProcessOp &post_process)
                 0,
                 0,
                 cce_addr,
-                post_process.hd_result_);
+                post_process.hd_result_,
+                allow_run_on_candidate_);
             update_post_cnt(ret);
         }
     }
@@ -5749,6 +5826,7 @@ void TransactionExecution::ReleaseMetaDataReadLock(
     size_t post_local_cnt = 0;
     for (const auto &[cce_addr, read_entry_pair] : rset)
     {
+        // LOG(INFO) << ">>>>ReleaseMetaDataReadLock, tx " << TxNumber();
         const ReadSetEntry &read_entry = read_entry_pair.first;
         CcReqStatus ret = cc_handler_->PostRead(TxNumber(),
                                                 TxTerm(),
@@ -5758,7 +5836,10 @@ void TransactionExecution::ReleaseMetaDataReadLock(
                                                 commit_ts_,
                                                 cce_addr,
                                                 meta_data_hd_result,
-                                                true);
+                                                true,
+                                                true,
+                                                PostReadType::Release,
+                                                allow_run_on_candidate_);
         --ref_cnt;
 
         if (ret == CcReqStatus::SentLocal)
@@ -6342,7 +6423,11 @@ void TransactionExecution::Process(PostReadOperation &post_read_operation)
                               0,
                               commit_ts_,
                               *post_read_operation.cce_addr_,
-                              post_read_operation.hd_result_);
+                              post_read_operation.hd_result_,
+                              false,
+                              true,
+                              PostReadType::Release,
+                              allow_run_on_candidate_);
     if (ret == CcReqStatus::Processed)
     {
         AdvanceCommand();
@@ -7415,7 +7500,8 @@ void TransactionExecution::Process(CmdForwardAcquireWriteOp &forward_acquire)
                 res_idx++,
                 protocol_,
                 iso_level_,
-                abort_if_oom);
+                abort_if_oom,
+                allow_run_on_candidate_);
         }
     }
 
@@ -7740,6 +7826,17 @@ void TransactionExecution::Process(BatchReadOperation &batch_read_op)
         {
             partition_id = batch_read_op.range_ids_[idx];
         }
+        // LOG(INFO) << "BatchReadOperation, txn: " << TxNumber()
+        //           << ", table name: " << table_name.StringView()
+        //           << ", table type: "
+        //           << static_cast<uint32_t>(table_name.Type())
+        //           << ", is hash partitioned: " << std::boolalpha
+        //           << table_name.IsHashPartitioned()
+        //           << ", batch read op range ids size: "
+        //           << batch_read_op.range_ids_.size()
+        //           << ", key: " << key.ToString()
+        //           << ", partition id: " << partition_id << ", idx: " << idx;
+
         cc_handler_->Read(
             table_name,
             batch_read_op.batch_read_tx_req_->schema_version_,
@@ -7757,6 +7854,7 @@ void TransactionExecution::Process(BatchReadOperation &batch_read_op)
             protocol_,
             batch_read_op.batch_read_tx_req_->is_for_write_,
             false,  // is_covering_keys
+            allow_run_on_candidate_,
             batch_read_op.batch_read_tx_req_->point_read_on_cache_miss_,
             partition_id,
             abort_if_oom);

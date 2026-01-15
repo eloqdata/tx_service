@@ -396,8 +396,30 @@ private:
             // map. At this time, we cannot evict this cce because the read
             // request will still access the old range.
             assert(*dirty_range_ts > 0);
+            // LOG(INFO) << "CanBeCleaned: cce: 0x" << std::hex << (void *) cce
+            //           << ", dirty range ts: " << std::dec << *dirty_range_ts
+            //           << ", range last sync ts: " << *range_last_sync_ts
+            //           << ", ckpt ts: " << cce->CkptTs()
+            //           << ", is free: " << std::boolalpha << cce->IsFree()
+            //           << ", being ckpt: " << std::boolalpha
+            //           << cce->GetBeingCkpt() << ", can not be cleaned.";
             return {false, false};
         }
+
+        // if (!cce->IsFree() || cce->GetBeingCkpt())
+        // {
+        //     LOG(INFO) << "CanBeCleaned: cce: 0x" << std::hex << (void *) cce
+        //               << ", is free: " << std::boolalpha << cce->IsFree()
+        //               << ", being ckpt: " << std::boolalpha
+        //               << cce->GetBeingCkpt() << ", can not be cleaned.";
+        // }
+        // else if (cce->IsFree() && !cce->GetBeingCkpt())
+        // {
+        //     LOG(INFO) << "CanBeCleaned: cce: 0x" << std::hex << (void *) cce
+        //               << ", is free: " << std::boolalpha << cce->IsFree()
+        //               << ", being ckpt: " << std::boolalpha
+        //               << cce->GetBeingCkpt() << ", can be cleaned.";
+        // }
 
         return {(cce->IsFree() && !cce->GetBeingCkpt()), false};
     }

@@ -1071,6 +1071,7 @@ void CcShard::CheckRecoverTx(TxNumber lock_holding_txn,
 
         if (Sharder::Instance().LeaderTerm(cc_ng_id) > 0)
         {
+            // TODO(ysw): check candidate leader term?
             LOG(WARNING) << "orphan lock detected, lock holding txn: "
                          << lock_holding_txn << ", try to recover";
             Sharder::Instance().RecoverTx(lock_holding_txn,
@@ -1159,6 +1160,9 @@ std::pair<size_t, bool> CcShard::Clean()
 
     size_t free_cnt = 0;
     bool yield = false;
+    // LOG(INFO) << "Clean started: clean start page addr: 0x" << std::hex
+    //           << (void *) clean_start_ccp_ << ", ccp: 0x" << (void *) ccp
+    //           << std::dec << ", shard: " << core_id_;
 
 #ifndef RUNNING_TXSERVICE_CTEST
     size_t clean_page_cnt = 0, scan_page_cnt = 0;
@@ -1202,6 +1206,39 @@ std::pair<size_t, bool> CcShard::Clean()
     }
 #endif
     clean_start_ccp_ = ccp;
+    // LOG(INFO) << "Clean finished: free_cnt: " << free_cnt
+    //           << ", yield: " << std::boolalpha << yield
+    //           << ", clean start page addr: 0x" << std::hex
+    //           << (void *) clean_start_ccp_ << ", clean page cnt: " <<
+    //           std::dec
+    //           << clean_page_cnt << ", scan page cnt: " << scan_page_cnt
+    //           << ", shard: " << core_id_;
+    // if (core_id_ == 0 && free_cnt == 0 && !yield)
+    // {
+    //     LOG(INFO) << "Printing cc pages on lru list on shard: 0";
+    //     LruPage *loop_ccp = head_ccp_.lru_next_;
+    //     size_t ccp_cnt = 0;
+    //     while (loop_ccp != &tail_ccp_)
+    //     {
+    //         loop_ccp->parent_map_->PrintCcPage(loop_ccp);
+    //         loop_ccp = loop_ccp->lru_next_;
+    //         ++ccp_cnt;
+    //     }
+    //     LOG(INFO) << "Printing cc pages on lru list on shard: " << core_id_
+    //               << " finished, ccpage count: " << ccp_cnt;
+
+    //     for (const auto &[table_name, ccm] : native_ccms_)
+    //     {
+    //         LOG(INFO) << "Table: " << table_name.StringView()
+    //                   << ", all records on this ccm: " << ccm->size();
+    //         if (!table_name.IsMeta())
+    //         {
+    //             ccm->PrintAllCcPages();
+    //         }
+    //         LOG(INFO) << "Printing cc pages on table: "
+    //                   << table_name.StringView() << " finished";
+    //     }
+    // }
 
     return {free_cnt, yield};
 }

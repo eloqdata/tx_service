@@ -90,12 +90,7 @@ public:
         uint32_t ng_id = req.NodeGroupId();
         if (shard_->IsNative(ng_id) && req.CcOp() == CcOperation::ReadForWrite)
         {
-            int64_t ng_term = Sharder::Instance().LeaderTerm(ng_id);
             CcHandlerResult<AcquireAllResult> *hd_res = req.Result();
-            if (ng_term < 0)
-            {
-                return hd_res->SetError(CcErrorCode::REQUESTED_NODE_NOT_LEADER);
-            }
 
             const CatalogKey *catalog_key = nullptr;
             if (req.Key() != nullptr)
@@ -199,19 +194,17 @@ public:
             }
         });
 
-        int64_t ng_term = Sharder::Instance().LeaderTerm(req.NodeGroupId());
+        int64_t ng_term = req.NodeGroupTerm();
+        assert(ng_term > 0);
         CODE_FAULT_INJECTOR("term_CatalogCcMap_Execute_PostWriteAllCc", {
             LOG(INFO)
                 << "FaultInject  term_CatalogCcMap_Execute_PostWriteAllCc";
             ng_term = -1;
             FaultInject::Instance().InjectFault(
                 "term_CatalogCcMap_Execute_PostWriteAllCc", "remove");
-        });
-        if (ng_term < 0)
-        {
             req.Result()->SetError(CcErrorCode::REQUESTED_NODE_NOT_LEADER);
             return true;
-        }
+        });
 
         const CatalogKey *table_key = nullptr;
         if (req.Key() != nullptr)
@@ -1148,28 +1141,31 @@ public:
         assert(req.IsLocal());
 
         uint32_t ng_id = req.NodeGroupId();
-        int64_t ng_term = Sharder::Instance().LeaderTerm(ng_id);
-        ng_term = std::max(ng_term, Sharder::Instance().StandbyNodeTerm());
-
-        if (req.IsInRecovering())
+        int64_t ng_term = req.NodeGroupTerm();
+        if (ng_term < 0)
         {
-            ng_term = ng_term > 0
-                          ? ng_term
-                          : Sharder::Instance().CandidateLeaderTerm(ng_id);
+            if (req.AllowRunOnCandidate())
+            {
+                ng_term = Sharder::Instance().CandidateLeaderTerm(ng_id);
+            }
+            if (ng_term < 0)
+            {
+                ng_term = Sharder::Instance().LeaderTerm(ng_id);
+                int64_t standby_node_term =
+                    Sharder::Instance().StandbyNodeTerm();
+                ng_term = std::max(ng_term, standby_node_term);
+            }
         }
+        assert(ng_term > 0);
 
         CODE_FAULT_INJECTOR("term_CatalogCcMap_Execute_ReadCc", {
-            LOG(INFO) << "FaultInject  term_CatalogCcMap_Execute_ReadCc";
+            LOG(INFO) << "FaultInject term_CatalogCcMap_Execute_ReadCc";
             ng_term = -1;
             FaultInject::Instance().InjectFault(
                 "term_CatalogCcMap_Execute_ReadCc", "remove");
-        });
-
-        if (ng_term < 0)
-        {
             req.Result()->SetError(CcErrorCode::REQUESTED_NODE_NOT_LEADER);
             return true;
-        }
+        });
 
         const CatalogKey *table_key =
             static_cast<const CatalogKey *>(req.Key());

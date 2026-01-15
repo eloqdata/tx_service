@@ -121,6 +121,7 @@ public:
         int16_t thd_group_id);
 
     static bool ApplyIdOfTableRangePartition(const TableName &table,
+                                             NodeGroupId ng_id,
                                              int64_t desired_vals,
                                              int64_t &first_reserved_id,
                                              int64_t &reserved_vals,

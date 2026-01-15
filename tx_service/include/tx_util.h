@@ -66,7 +66,8 @@ static inline TransactionExecution *NewTxInit(
     int16_t group_id = -1,
     bool start_now = false,
     const std::function<void()> *yield_fptr = nullptr,
-    const std::function<void()> *resume_fptr = nullptr)
+    const std::function<void()> *resume_fptr = nullptr,
+    bool allow_run_on_candidate = false)
 {
     assert(tx_service != nullptr);
     txservice::TransactionExecution *txm = nullptr;
@@ -75,7 +76,13 @@ static inline TransactionExecution *NewTxInit(
 #else
     txm = tx_service->NewTx();
 #endif
-    txm->InitTx(level, proto, tx_owner, start_now, yield_fptr, resume_fptr);
+    txm->InitTx(level,
+                proto,
+                tx_owner,
+                start_now,
+                yield_fptr,
+                resume_fptr,
+                allow_run_on_candidate);
 
     return txm;
 }

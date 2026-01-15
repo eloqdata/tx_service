@@ -138,7 +138,8 @@ public:
           is_dirty_(is_dirty),
           sync_ts_adjustable_(need_adjust_ts),
           task_res_(hres),
-          need_update_ckpt_ts_(true)
+          need_update_ckpt_ts_(true),
+          sync_on_leader_(true)
     {
     }
 
@@ -180,6 +181,11 @@ public:
     void UnsetSyncTsAdjustable()
     {
         sync_ts_adjustable_ = false;
+    }
+
+    void SetSyncOnLeader(bool sync_on_leader)
+    {
+        sync_on_leader_ = sync_on_leader;
     }
 
     const TableName table_name_;
@@ -238,6 +244,7 @@ public:
         cce_entries_;
 
     bool need_update_ckpt_ts_{true};
+    bool sync_on_leader_{true};
 };
 
 struct FlushTaskEntry

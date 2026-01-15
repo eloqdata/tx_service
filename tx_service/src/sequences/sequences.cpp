@@ -74,7 +74,6 @@ bool Sequences::DeleteSequenceInternal(const std::string &seq_name,
                                    0,
                                    false,
                                    false,
-                                   false,
                                    nullptr,
                                    nullptr,
                                    txm);
@@ -276,7 +275,6 @@ int Sequences::ApplySequenceBatch(
                                    0,
                                    false,
                                    false,
-                                   false,
                                    coro_functors.first,
                                    coro_functors.second,
                                    txm);
@@ -302,7 +300,6 @@ int Sequences::ApplySequenceBatch(
                            false,
                            false,
                            0,
-                           false,
                            false,
                            true,
                            coro_functors.first,
@@ -472,7 +469,6 @@ int Sequences::UpdateAutoIncrement(
                            false,
                            0,
                            false,
-                           false,
                            true,
                            coro_functors.first,
                            coro_functors.second,
@@ -548,6 +544,7 @@ int Sequences::UpdateAutoIncrement(
 }
 
 bool Sequences::ApplyIdOfTableRangePartition(const TableName &table,
+                                             NodeGroupId ng_id,
                                              int64_t desired_vals,
                                              int64_t &first_reserved_id,
                                              int64_t &reserved_vals,
@@ -558,7 +555,13 @@ bool Sequences::ApplyIdOfTableRangePartition(const TableName &table,
     TransactionExecution *txm =
         NewTxInit(instance_->tx_service_,
                   txservice::IsolationLevel::RepeatableRead,
-                  txservice::CcProtocol::Locking);
+                  txservice::CcProtocol::Locking,
+                  ng_id,
+                  -1,
+                  false,
+                  nullptr,
+                  nullptr,
+                  true);
 
     if (txm == nullptr)
     {
@@ -578,7 +581,6 @@ bool Sequences::ApplyIdOfTableRangePartition(const TableName &table,
                                    0,
                                    false,
                                    false,
-                                   false,
                                    nullptr,
                                    nullptr,
                                    txm);
@@ -595,6 +597,10 @@ bool Sequences::ApplyIdOfTableRangePartition(const TableName &table,
     TxKey mkey = GenKey(seq_name);
     // std::unique_ptr<EloqRecord> mrec = std::make_unique<EloqRecord>();
     std::unique_ptr<TxRecord> mrec = GenRecord();
+    LOG(INFO) << "ApplyIdOfTableRangePartition: mkey: " << mkey.ToString()
+              << ", table_name: " << table_name_.StringView()
+              << ", seq_schema_version: " << seq_schema_version_
+              << ", txn: " << txm->TxNumber();
     // uint64_t schema_version = Sequences::GetTableSchema()->Version();
     ReadTxRequest read_req(&table_name_,
                            seq_schema_version_,
@@ -605,7 +611,6 @@ bool Sequences::ApplyIdOfTableRangePartition(const TableName &table,
                            false,
                            0,
                            false,
-                           false,
                            true,
                            nullptr,
                            nullptr,
@@ -613,6 +618,9 @@ bool Sequences::ApplyIdOfTableRangePartition(const TableName &table,
 
     txm->Execute(&read_req);
     read_req.Wait();
+    LOG(INFO) << "ApplyIdOfTableRangePartition: done mkey: " << mkey.ToString()
+              << ", error code: " << static_cast<uint32_t>(read_req.ErrorCode())
+              << ", txn: " << txm->TxNumber();
 
     if (read_req.IsError())
     {
@@ -661,10 +669,16 @@ bool Sequences::ApplyIdOfTableRangePartition(const TableName &table,
     if (err != TxErrorCode::NO_ERROR)
     {
         txservice::AbortTx(txm);
+        LOG(INFO) << "ApplyIdOfTableRangePartition: aborted txn: "
+                  << txm->TxNumber();
         return false;
     }
 
     auto [success, commit_err] = txservice::CommitTx(txm);
+    LOG(INFO) << "ApplyIdOfTableRangePartition: committed txn: "
+              << txm->TxNumber()
+              << ", error code: " << static_cast<uint32_t>(commit_err)
+              << ", success: " << std::boolalpha << success;
     assert(success);
     if (success)
     {
@@ -709,7 +723,6 @@ bool Sequences::InitIdOfTableRangePartition(const TableName &table,
                                    0,
                                    false,
                                    false,
-                                   false,
                                    nullptr,
                                    nullptr,
                                    txm);
@@ -735,7 +748,6 @@ bool Sequences::InitIdOfTableRangePartition(const TableName &table,
                            false,
                            false,
                            0,
-                           false,
                            false,
                            true,
                            nullptr,
@@ -798,6 +810,10 @@ bool Sequences::InitIdOfTableRangePartition(const TableName &table,
         txservice::AbortTx(txm, nullptr, nullptr);
         return false;
     }
+    LOG(INFO) << "InitIdOfTableRangePartition: done mkey: " << mkey.ToString()
+              << ", error code: " << static_cast<uint32_t>(err)
+              << ", txn: " << txm->TxNumber()
+              << ", last_range_partition_id: " << last_range_partition_id;
 
     auto [success, commit_err] = txservice::CommitTx(txm, nullptr, nullptr);
     assert(success);
@@ -827,7 +843,6 @@ bool Sequences::InitIdOfAutoIncrementColumn(const TableName &table_name)
                                    false,
                                    true,
                                    0,
-                                   false,
                                    false,
                                    false,
                                    nullptr,

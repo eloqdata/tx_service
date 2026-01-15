@@ -326,6 +326,7 @@ void txservice::remote::RemoteCcHandler::Read(
     CcProtocol proto,
     bool is_for_write,
     bool is_covering_keys,
+    bool allow_run_on_candidate,
     bool point_read_on_miss,
     int32_t partition_id,
     bool abort_if_oom)
@@ -381,6 +382,7 @@ void txservice::remote::RemoteCcHandler::Read(
     read->set_ts(ts);
     read->set_schema_version(schema_version);
     read->set_abort_if_oom(abort_if_oom);
+    read->set_allow_run_on_candidate(allow_run_on_candidate);
 
     stream_sender_.SendMessageToNg(dest_ng_id, send_msg, &hres);
 }

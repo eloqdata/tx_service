@@ -199,16 +199,14 @@ public:
         const KeyT *target_key = nullptr;
         KeyT decoded_key;
 
-        int64_t ng_term = Sharder::Instance().LeaderTerm(req.NodeGroupId());
+        int64_t ng_term = req.NodeGroupTerm();
+        assert(ng_term > 0);
         CODE_FAULT_INJECTOR("term_TemplateCcMap_Execute_AcquireCc", {
-            LOG(INFO) << "FaultInject  term_TemplateCcMap_Execute_AcquireCc";
+            LOG(INFO) << "FaultInject term_TemplateCcMap_Execute_AcquireCc";
             ng_term = -1;
-        });
-        if (ng_term < 0)
-        {
             hd_res->SetError(CcErrorCode::REQUESTED_NODE_NOT_LEADER);
             return true;
-        }
+        });
 
         if (req.SchemaVersion() != 0 && req.SchemaVersion() != schema_ts_)
         {
@@ -511,14 +509,7 @@ public:
                 req.Result()->SetError(CcErrorCode::REQUESTED_NODE_NOT_LEADER);
                 return true;
             }
-        });
-
-        if (!Sharder::Instance().CheckLeaderTerm(cce_addr->NodeGroupId(),
-                                                 cce_addr->Term()))
-        {
-            req.Result()->SetError(CcErrorCode::REQUESTED_NODE_NOT_LEADER);
-            return true;
-        }
+        })
 
         const ValueT *commit_val = static_cast<const ValueT *>(req.Payload());
         TxNumber txn = req.Txn();
@@ -702,11 +693,8 @@ public:
         bool will_insert = false;
 
         uint32_t ng_id = req.NodeGroupId();
-        int64_t ng_term = Sharder::Instance().LeaderTerm(ng_id);
-        if (ng_term < 0)
-        {
-            return hd_res->SetError(CcErrorCode::REQUESTED_NODE_NOT_LEADER);
-        }
+        int64_t ng_term = req.NodeGroupTerm();
+        assert(ng_term > 0);
 
         uint16_t tx_core_id = ((req.Txn() >> 32L) & 0x3FF) % shard_->core_cnt_;
 
@@ -996,13 +984,6 @@ public:
             return false;
         }
 
-        int64_t ng_term = Sharder::Instance().LeaderTerm(req.NodeGroupId());
-        if (ng_term < 0)
-        {
-            req.Result()->SetError(CcErrorCode::REQUESTED_NODE_NOT_LEADER);
-            return true;
-        }
-
         const KeyT *target_key = nullptr;
         if (req.Key() != nullptr)
         {
@@ -1241,19 +1222,6 @@ public:
                 }
             });
 
-        int64_t standby_node_term = Sharder::Instance().StandbyNodeTerm();
-
-        if (!Sharder::Instance().CheckLeaderTerm(cce_addr.NodeGroupId(),
-                                                 cce_addr.Term()) &&
-            (standby_node_term < 0 || standby_node_term != cce_addr.Term()))
-        {
-            LOG(INFO) << "PostReadCc, node_group(#" << cce_addr.NodeGroupId()
-                      << ") term < 0, tx:" << req.Txn()
-                      << " ,cce: " << cce_addr.ExtractCce();
-            hd_res->SetError(CcErrorCode::REQUESTED_NODE_NOT_LEADER);
-            return true;
-        }
-
         uint64_t key_ts = req.KeyTs();
         uint64_t gap_ts = req.GapTs();
         uint64_t commit_ts = req.CommitTs();
@@ -1263,6 +1231,12 @@ public:
         // Do not recycle the lock on Catalog CcEntries since it's frequently
         // accessed.
         recycle_lock = table_name_.Type() != TableType::Catalog;
+
+        // LOG(INFO) << "PostReadCc::Execute: ng_term: " << req.NodeGroupTerm()
+        //           << ", txn: " << txn << ", table: " <<
+        //           table_name_.StringView()
+        //           << ", table type: "
+        //           << static_cast<uint32_t>(table_name_.Type());
 
         // FIXME(lzx): Now, we don't backfill for "Unkown" entry when scanning.
         // So, Validate operation fails if another tx backfilled it. Temporary
@@ -1419,15 +1393,20 @@ public:
         });
 
         uint32_t ng_id = req.NodeGroupId();
-        int64_t ng_term = -1;
-        if (req.IsInRecovering())
+        int64_t ng_term = req.NodeGroupTerm();
+        if (ng_term < 0)
         {
-            ng_term = Sharder::Instance().CandidateLeaderTerm(ng_id);
-        }
-        else
-        {
-            ng_term = Sharder::Instance().LeaderTerm(ng_id);
-            ng_term = std::max(ng_term, Sharder::Instance().StandbyNodeTerm());
+            if (req.AllowRunOnCandidate())
+            {
+                ng_term = Sharder::Instance().CandidateLeaderTerm(ng_id);
+            }
+            if (ng_term < 0)
+            {
+                ng_term = Sharder::Instance().LeaderTerm(ng_id);
+                int64_t standby_node_term =
+                    Sharder::Instance().StandbyNodeTerm();
+                ng_term = std::max(ng_term, standby_node_term);
+            }
         }
 
         if (ng_term < 0)
@@ -1441,6 +1420,8 @@ public:
         if (req.SchemaVersion() != 0 && req.SchemaVersion() != schema_ts_)
         {
             hd_res->SetError(CcErrorCode::REQUESTED_TABLE_SCHEMA_MISMATCH);
+            LOG(INFO) << "ReadCc, schema version mismatch, tx:" << req.Txn()
+                      << ", table name: " << table_name_.StringView();
             return true;
         }
 
@@ -1602,6 +1583,14 @@ public:
                         if (Type() == TableType::Primary ||
                             Type() == TableType::UniqueSecondary)
                         {
+                            // LOG(INFO)
+                            //     << "ReadCc PinRangeSlice with non force
+                            //     load."
+                            //     << ", shard: " << shard_->core_id_
+                            //     << ", table_name: " <<
+                            //     table_name_.StringView()
+                            //     << ", partition id: " << req.PartitionId()
+                            //     << ", txn: " << req.Txn();
                             RangeSliceOpStatus pin_status;
                             RangeSliceId slice_id =
                                 shard_->local_shards_.PinRangeSlice(
@@ -1642,6 +1631,12 @@ public:
                                 req.SetCacheHitMissCollected();
                             }
 
+                            // LOG(INFO)
+                            //     << "ReadCc PinRangeSlice done, pin_status: "
+                            //     << static_cast<uint32_t>(pin_status)
+                            //     << ", shard: " << shard_->core_id_
+                            //     << ", table_name: " <<
+                            //     table_name_.StringView();
                             if (pin_status == RangeSliceOpStatus::Successful ||
                                 pin_status == RangeSliceOpStatus::KeyNotExists)
                             {
@@ -1841,6 +1836,14 @@ public:
                     // But the cc map is full and cannot allocates a new entry.
                     if (cce == nullptr)
                     {
+                        // LOG(INFO)
+                        //     << "ReadCc, cce is nullptr, tx:" << req.Txn()
+                        //     << ", table name: " << table_name_.StringView()
+                        //     << ", key: " << look_key->ToString()
+                        //     << ", txn: " << req.Txn()
+                        //     << ", is for write: " << std::boolalpha
+                        //     << req.IsForWrite()
+                        //     << ", shard: " << shard_->core_id_;
                         shard_->EnqueueWaitListIfMemoryFull(&req);
                         return false;
                     }
@@ -5756,6 +5759,23 @@ public:
                     // round ckpt.
                     need_export = false;
                 }
+                else if (req.RunOnCandidateNode())
+                {
+                    // Just skip the cce in this round ckpt.
+                    // if (req.export_base_table_item_ &&
+                    //     table_name_.StringView() == "./sbtest/history" &&
+                    //     shard_->core_id_ == 0)
+                    // {
+                    //     LOG(INFO)
+                    //         << "DataSync for range split, start key: "
+                    //         << req.start_key_->ToString()
+                    //         << ", end key: " << req.end_key_->ToString()
+                    //         << ", table name: " << table_name_.StringView()
+                    //         << ", with cce: " << std::hex << (void *) (cce)
+                    //         << std::dec << ", txn: " << req.Txn();
+                    // }
+                    need_export = false;
+                }
                 else
                 {
                     LOG(ERROR)
@@ -5786,7 +5806,13 @@ public:
 
                 req.accumulated_flush_data_size_[shard_->core_id_] +=
                     flush_size;
-
+                // if (shard_->core_id_ == 0)
+                // {
+                //     LOG(INFO) << "Exported the cce: 0x" << std::hex
+                //               << (void *) cce << ", on shard: 0"
+                //               << ", table name: " <<
+                //               table_name_.StringView();
+                // }
                 if (export_result.second)
                 {
                     is_scan_mem_full = true;
@@ -5903,15 +5929,6 @@ public:
             return false;
         }
 
-        int64_t ng_term = Sharder::Instance().LeaderTerm(req.NodeGroupId());
-        int64_t standby_node_term = Sharder::Instance().StandbyNodeTerm();
-        int64_t current_term = std::max(ng_term, standby_node_term);
-
-        if (current_term < 0 || current_term != req.node_group_term_)
-        {
-            req.SetError(CcErrorCode::TX_NODE_NOT_LEADER);
-            return false;
-        }
         Iterator it;
         Iterator end_it = End();
 
@@ -6083,6 +6100,10 @@ public:
                             << ", data_sync_ts_: " << req.data_sync_ts_;
                         replay_cmds_notnull = true;
 
+                        int64_t current_term = req.NodeGroupTerm();
+                        assert(current_term > 0);
+                        int64_t leader_term = req.GetNodeGroupLeaderTerm();
+
                         // The fetch record may failed when the
                         // cce is touch at 1st place, so the record status can
                         // be Unknown. If the data is owned by this ng, fetch
@@ -6107,12 +6128,12 @@ public:
                                                     TxKey(key),
                                                     cce,
                                                     cc_ng_id_,
-                                                    ng_term,
+                                                    current_term,
                                                     nullptr,
                                                     part_id);
                             }
                         }
-                        else if (ng_term > 0)
+                        else if (leader_term > 0)
                         {
                             // After node escalate to leader, and we've loaded
                             // from kv, there should be no gap in the buffered
@@ -6949,6 +6970,10 @@ public:
 
             if (cce == nullptr)
             {
+                // LOG(INFO) << "TemplateCcMap::Execute ReplayLogCc, cce is "
+                //              "nullptr, enqueue wait list."
+                //           << ", table name: " << table_name_.StringView()
+                //           << ", on shard: " << shard_->core_id_;
                 // Since we're not holding any range lock that would
                 // block data sync during replay, just keep retrying
                 // until we have free space in cc map.
@@ -8132,6 +8157,16 @@ public:
 
             if (ccp->last_dirty_commit_ts_ <= req.LastDataSyncTs())
             {
+                if (cce->NeedCkpt())
+                {
+                    LOG(INFO) << "ScanSliceDeltaSizeCcForRangePartition: cce "
+                                 "need ckpt."
+                              << ", ccpage last dirty commit ts: "
+                              << ccp->last_dirty_commit_ts_
+                              << ", last data sync ts: " << req.LastDataSyncTs()
+                              << ", on shard: " << shard_->core_id_;
+                    assert(false);
+                }
                 assert(!cce->NeedCkpt());
                 // Skip the pages that have no updates since last data sync.
                 if (ccp->next_page_ == PagePosInf())
@@ -8722,6 +8757,36 @@ public:
             RebalancePage(page, page_it, success, kickout_cc == nullptr);
 
         return {free_cnt, next_page};
+    }
+
+    void PrintCcPage(LruPage *lru_page) override
+    {
+        CcPage<KeyT, ValueT, VersionedRecord, RangePartitioned> *page =
+            static_cast<
+                CcPage<KeyT, ValueT, VersionedRecord, RangePartitioned> *>(
+                lru_page);
+        for (auto &cce : page->entries_)
+        {
+            LOG(INFO) << "cce: 0x" << std::hex << (void *) (cce.get())
+                      << ", is free: " << std::boolalpha << cce->IsFree()
+                      << ", being ckpt: " << std::boolalpha
+                      << cce->GetBeingCkpt()
+                      << ", commit ts: " << cce->CommitTs()
+                      << ", payload status: "
+                      << static_cast<uint32_t>(cce->PayloadStatus())
+                      << ", ckpt ts: " << cce->CkptTs()
+                      << ", for table: " << table_name_.StringView();
+        }
+    }
+
+    void PrintAllCcPages() override
+    {
+        for (auto it = ccmp_.begin(); it != ccmp_.end(); it++)
+        {
+            CcPage<KeyT, ValueT, VersionedRecord, RangePartitioned> &page =
+                *it->second;
+            PrintCcPage(&page);
+        }
     }
 
     void Clean() override
