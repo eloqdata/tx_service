@@ -320,10 +320,13 @@ public:
      *
      * @param ng_id The cc node group ID.
      * @param term The expected leader term.
+     * @param check_candidate Whether to check the candidate leader term.
      * @return true, if the current leader is the expected one.
      * @return false, otherwise.
      */
-    bool CheckLeaderTerm(uint32_t ng_id, int64_t term) const;
+    bool CheckLeaderTerm(uint32_t ng_id,
+                         int64_t term,
+                         bool check_candidate = false) const;
 
     void SetLeaderTerm(NodeGroupId ng_id, int64_t term)
     {

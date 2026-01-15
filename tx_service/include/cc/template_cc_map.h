@@ -700,11 +700,8 @@ public:
         bool will_insert = false;
 
         uint32_t ng_id = req.NodeGroupId();
-        int64_t ng_term = Sharder::Instance().LeaderTerm(ng_id);
-        if (ng_term < 0)
-        {
-            return hd_res->SetError(CcErrorCode::REQUESTED_NODE_NOT_LEADER);
-        }
+        int64_t ng_term = req.NodeGroupTerm();
+        assert(ng_term > 0);
 
         uint16_t tx_core_id = ((req.Txn() >> 32L) & 0x3FF) % shard_->core_cnt_;
 
@@ -994,13 +991,6 @@ public:
             return false;
         }
 
-        int64_t ng_term = Sharder::Instance().LeaderTerm(req.NodeGroupId());
-        if (ng_term < 0)
-        {
-            req.Result()->SetError(CcErrorCode::REQUESTED_NODE_NOT_LEADER);
-            return true;
-        }
-
         const KeyT *target_key = nullptr;
         if (req.Key() != nullptr)
         {
@@ -1237,19 +1227,6 @@ public:
                 }
             });
 
-        int64_t standby_node_term = Sharder::Instance().StandbyNodeTerm();
-
-        if (!Sharder::Instance().CheckLeaderTerm(cce_addr.NodeGroupId(),
-                                                 cce_addr.Term()) &&
-            (standby_node_term < 0 || standby_node_term != cce_addr.Term()))
-        {
-            LOG(INFO) << "PostReadCc, node_group(#" << cce_addr.NodeGroupId()
-                      << ") term < 0, tx:" << req.Txn()
-                      << " ,cce: " << cce_addr.ExtractCce();
-            hd_res->SetError(CcErrorCode::REQUESTED_NODE_NOT_LEADER);
-            return true;
-        }
-
         uint64_t key_ts = req.KeyTs();
         uint64_t gap_ts = req.GapTs();
         uint64_t commit_ts = req.CommitTs();
@@ -1415,15 +1392,20 @@ public:
         });
 
         uint32_t ng_id = req.NodeGroupId();
-        int64_t ng_term = -1;
-        if (req.IsInRecovering())
+        int64_t ng_term = req.NodeGroupTerm();
+        if (ng_term < 0)
         {
-            ng_term = Sharder::Instance().CandidateLeaderTerm(ng_id);
-        }
-        else
-        {
-            ng_term = Sharder::Instance().LeaderTerm(ng_id);
-            ng_term = std::max(ng_term, Sharder::Instance().StandbyNodeTerm());
+            if (req.AllowRunOnCandidate())
+            {
+                ng_term = Sharder::Instance().CandidateLeaderTerm(ng_id);
+            }
+            if (ng_term < 0)
+            {
+                ng_term = Sharder::Instance().LeaderTerm(ng_id);
+                int64_t standby_node_term =
+                    Sharder::Instance().StandbyNodeTerm();
+                ng_term = std::max(ng_term, standby_node_term);
+            }
         }
 
         if (ng_term < 0)
@@ -1598,6 +1580,10 @@ public:
                         if (Type() == TableType::Primary ||
                             Type() == TableType::UniqueSecondary)
                         {
+                            LOG(INFO)
+                                << "ReadCc PinRangeSlice with non force load."
+                                << ", shard: " << shard_->core_id_
+                                << ", table_name: " << table_name_.StringView();
                             RangeSliceOpStatus pin_status;
                             RangeSliceId slice_id =
                                 shard_->local_shards_.PinRangeSlice(
@@ -1638,6 +1624,11 @@ public:
                                 req.SetCacheHitMissCollected();
                             }
 
+                            LOG(INFO)
+                                << "ReadCc PinRangeSlice done, pin_status: "
+                                << static_cast<uint32_t>(pin_status)
+                                << ", shard: " << shard_->core_id_
+                                << ", table_name: " << table_name_.StringView();
                             if (pin_status == RangeSliceOpStatus::Successful ||
                                 pin_status == RangeSliceOpStatus::KeyNotExists)
                             {
@@ -5814,15 +5805,6 @@ public:
             return false;
         }
 
-        int64_t ng_term = Sharder::Instance().LeaderTerm(req.NodeGroupId());
-        int64_t standby_node_term = Sharder::Instance().StandbyNodeTerm();
-        int64_t current_term = std::max(ng_term, standby_node_term);
-
-        if (current_term < 0 || current_term != req.node_group_term_)
-        {
-            req.SetError(CcErrorCode::TX_NODE_NOT_LEADER);
-            return false;
-        }
         Iterator it;
         Iterator end_it = End();
 
@@ -5994,6 +5976,10 @@ public:
                             << ", data_sync_ts_: " << req.data_sync_ts_;
                         replay_cmds_notnull = true;
 
+                        int64_t current_term = req.NodeGroupTerm();
+                        assert(current_term > 0);
+                        int64_t leader_term = req.GetNodeGroupLeaderTerm();
+
                         // The fetch record may failed when the
                         // cce is touch at 1st place, so the record status can
                         // be Unknown. If the data is owned by this ng, fetch
@@ -6018,12 +6004,12 @@ public:
                                                     TxKey(key),
                                                     cce,
                                                     cc_ng_id_,
-                                                    ng_term,
+                                                    current_term,
                                                     nullptr,
                                                     part_id);
                             }
                         }
-                        else if (ng_term > 0)
+                        else if (leader_term > 0)
                         {
                             // After node escalate to leader, and we've loaded
                             // from kv, there should be no gap in the buffered

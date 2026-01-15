@@ -1168,8 +1168,31 @@ bool RunOnTxProcessorCc::Execute(CcShard &ccs)
     return true;
 }
 
+bool UpdateCceCkptTsCc::ValidTermCheck() const
+{
+    int64_t ng_term = Sharder::Instance().LeaderTerm(node_group_id_);
+    int64_t candidate_ng_term =
+        Sharder::Instance().CandidateLeaderTerm(node_group_id_);
+    ng_term = std::max(ng_term, candidate_ng_term);
+    int64_t standby_node_term = Sharder::Instance().StandbyNodeTerm();
+    int64_t current_term = std::max(ng_term, standby_node_term);
+
+    if (current_term < 0 || current_term != term_)
+    {
+        return false;
+    }
+
+    return true;
+}
+
 bool UpdateCceCkptTsCc::Execute(CcShard &ccs)
 {
+    if (!ValidTermCheck())
+    {
+        SetFinished();
+        return false;
+    }
+
     assert(indices_.count(ccs.core_id_) > 0);
 
     auto &index = indices_[ccs.core_id_];
@@ -1179,16 +1202,6 @@ bool UpdateCceCkptTsCc::Execute(CcShard &ccs)
     if (index >= records.size())
     {
         // Set finished. We don't care error code.
-        SetFinished();
-        return false;
-    }
-
-    int64_t ng_leader_term = Sharder::Instance().LeaderTerm(node_group_id_);
-    int64_t standby_node_term = Sharder::Instance().StandbyNodeTerm();
-    int64_t current_term = std::max(ng_leader_term, standby_node_term);
-
-    if (current_term < 0 || current_term != term_)
-    {
         SetFinished();
         return false;
     }

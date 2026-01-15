@@ -716,8 +716,7 @@ void LocalCcShards::CreateSchemaRecoveryTx(
                                    false,
                                    true,
                                    0,
-                                   false,
-                                   true);
+                                   false);
             txm->Execute(&read_req);
             read_req.Wait();
             if (read_req.IsError())
@@ -820,8 +819,7 @@ void LocalCcShards::CreateSplitRangeRecoveryTx(
                                    false,
                                    true,
                                    0,
-                                   false,
-                                   true);
+                                   false);
             txm->Execute(&read_req);
             read_req.Wait();
             // Only case we fail here is that leader gone before replay
@@ -3201,7 +3199,9 @@ void LocalCcShards::PostProcessFlushTaskEntries(
                         }
 
                         if (!Sharder::Instance().CheckLeaderTerm(
-                                task->node_group_id_, task->node_group_term_))
+                                task->node_group_id_,
+                                task->node_group_term_,
+                                true))
                         {
                             err_code = CcErrorCode::REQUESTED_NODE_NOT_LEADER;
                         }
@@ -3287,7 +3287,7 @@ void LocalCcShards::PostProcessFlushTaskEntries(
                 }
 
                 if (!Sharder::Instance().CheckLeaderTerm(
-                        task->node_group_id_, task->node_group_term_))
+                        task->node_group_id_, task->node_group_term_, true))
                 {
                     err_code = CcErrorCode::REQUESTED_NODE_NOT_LEADER;
                 }
@@ -3390,7 +3390,7 @@ void LocalCcShards::PostProcessRangePartitionDataSyncTask(
                            << task->table_name_.Trace() << ", retrying.";
                 std::this_thread::sleep_for(1s);
                 if (!Sharder::Instance().CheckLeaderTerm(
-                        task->node_group_id_, task->node_group_term_))
+                        task->node_group_id_, task->node_group_term_, true))
                 {
                     LOG(ERROR)
                         << "Leader term changed during store slice update";
@@ -3461,8 +3461,8 @@ void LocalCcShards::PostProcessRangePartitionDataSyncTask(
                                task->id_);
             }
 
-            if (!Sharder::Instance().CheckLeaderTerm(task->node_group_id_,
-                                                     task->node_group_term_))
+            if (!Sharder::Instance().CheckLeaderTerm(
+                    task->node_group_id_, task->node_group_term_, true))
             {
                 err_code = CcErrorCode::REQUESTED_NODE_NOT_LEADER;
             }
@@ -3638,7 +3638,12 @@ void LocalCcShards::DataSyncForRangePartition(
         data_sync_txm = txservice::NewTxInit(tx_service_,
                                              IsolationLevel::RepeatableRead,
                                              CcProtocol::Locking,
-                                             ng_id);
+                                             ng_id,
+                                             -1,
+                                             false,
+                                             nullptr,
+                                             nullptr,
+                                             true);
 
         if (data_sync_txm == nullptr)
         {
@@ -3947,7 +3952,12 @@ void LocalCcShards::DataSyncForRangePartition(
     // Update slice post ckpt size.
     UpdateSlicePostCkptSize(store_range, slices_delta_size);
 
-    if (!during_split_range)
+    bool check_range_update = !during_split_range;
+    CODE_FAULT_INJECTOR("check_range_update_skip", {
+        DLOG(INFO) << "FaultInject check_range_update_skip";
+        check_range_update = false;
+    });
+    if (check_range_update)
     {
         // If the task comes from split range transaction, it is assumed that
         // there will be no further splitting.
@@ -4460,7 +4470,7 @@ void LocalCcShards::PostProcessHashPartitionDataSyncTask(
                 // Make sure that the term has not changed so that catalog entry
                 // is still valid.
                 if (!Sharder::Instance().CheckLeaderTerm(
-                        task->node_group_id_, task->node_group_term_))
+                        task->node_group_id_, task->node_group_term_, true))
                 {
                     err_code = CcErrorCode::NG_TERM_CHANGED;
                 }
@@ -4680,7 +4690,12 @@ void LocalCcShards::DataSyncForHashPartition(
         txservice::NewTxInit(tx_service_,
                              IsolationLevel::RepeatableRead,
                              CcProtocol::Locking,
-                             ng_id);
+                             ng_id,
+                             -1,
+                             false,
+                             nullptr,
+                             nullptr,
+                             true);
 
     if (data_sync_txm == nullptr)
     {
@@ -5595,8 +5610,11 @@ void LocalCcShards::SplitFlushRange(
     // by data store are always unique.
     std::vector<std::pair<TxKey, int32_t>> new_range_ids;
     int32_t new_part_id;
-    if (!GetNextRangePartitionId(
-            table_name, table_schema.get(), split_keys.size(), new_part_id))
+    if (!GetNextRangePartitionId(table_name,
+                                 table_schema.get(),
+                                 node_group,
+                                 split_keys.size(),
+                                 new_part_id))
     {
         LOG(ERROR) << "Split range failed due to unable to get next "
                       "partition id. table_name = "
@@ -6666,6 +6684,7 @@ void LocalCcShards::ReportHashPartitionCkptHeapUsage()
 
 bool LocalCcShards::GetNextRangePartitionId(const TableName &tablename,
                                             const TableSchema *table_schema,
+                                            NodeGroupId ng_id,
                                             uint32_t range_cnt,
                                             int32_t &out_next_partition_id)
 {
@@ -6681,8 +6700,12 @@ bool LocalCcShards::GetNextRangePartitionId(const TableName &tablename,
     }
 
     int64_t first_reserved_id = -1;
-    bool res = Sequences::ApplyIdOfTableRangePartition(
-        tablename, range_cnt, first_reserved_id, reserved_cnt, key_schema_ts);
+    bool res = Sequences::ApplyIdOfTableRangePartition(tablename,
+                                                       ng_id,
+                                                       range_cnt,
+                                                       first_reserved_id,
+                                                       reserved_cnt,
+                                                       key_schema_ts);
 
     if (!res)
     {

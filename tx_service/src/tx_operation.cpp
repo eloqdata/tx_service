@@ -4212,7 +4212,9 @@ void SplitFlushRangeOp::Forward(TransactionExecution *txm)
         if (lock_cluster_config_op_.hd_result_->IsError())
         {
             LOG(ERROR) << "Split Flush read cluster config failed, tx_number:"
-                       << txm->TxNumber();
+                       << txm->TxNumber() << ", error code: "
+                       << static_cast<uint32_t>(
+                              lock_cluster_config_op_.hd_result_->ErrorCode());
             ForceToFinish(txm);
             return;
         }

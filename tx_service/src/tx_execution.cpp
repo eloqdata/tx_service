@@ -179,6 +179,7 @@ void TransactionExecution::Reset()
         tx_req_queue_.Reset();
         req_queue_lock_.Unlock();
     }
+    allow_run_on_candidate_ = false;
 
     ClearCachedBucketInfos();
     lock_cluster_config_op_.Reset();
@@ -244,6 +245,7 @@ void TransactionExecution::SetRecoverTxState(uint64_t txn,
     tx_number_.store(txn, std::memory_order_relaxed);
     tx_term_ = tx_term;
     commit_ts_ = commit_ts;
+    allow_run_on_candidate_ = true;
     tx_status_.store(TxnStatus::Recovering, std::memory_order_relaxed);
 }
 
@@ -551,12 +553,19 @@ void TransactionExecution::InitTx(IsolationLevel iso_level,
                                   NodeGroupId tx_ng_id,
                                   bool start_now,
                                   const std::function<void()> *yield_func,
-                                  const std::function<void()> *resume_func)
+                                  const std::function<void()> *resume_func,
+                                  bool allow_run_on_candidate)
 {
     if (start_now)
     {
-        InitTxRequest init_tx_req{
-            iso_level, protocol, yield_func, resume_func, this, tx_ng_id};
+        InitTxRequest init_tx_req{iso_level,
+                                  protocol,
+                                  yield_func,
+                                  resume_func,
+                                  this,
+                                  tx_ng_id,
+                                  UINT32_MAX,
+                                  allow_run_on_candidate};
         Execute(&init_tx_req);
         init_tx_req.Wait();
     }
@@ -567,6 +576,7 @@ void TransactionExecution::InitTx(IsolationLevel iso_level,
         init_tx_req_->protocol_ = protocol;
         init_tx_req_->tx_ng_id_ = tx_ng_id;
         init_tx_req_->txm_ = this;
+        init_tx_req_->allow_run_on_candidate_ = allow_run_on_candidate;
         Execute(init_tx_req_.get());
     }
 }
@@ -735,6 +745,7 @@ void TransactionExecution::ProcessTxRequest(InitTxRequest &init_txn_req)
                               : init_txn_req.tx_ng_id_;
 
     init_txn_.log_group_id_ = init_txn_req.log_group_id_;
+    allow_run_on_candidate_ = init_txn_req.allow_run_on_candidate_;
     PushOperation(&init_txn_);
     Process(init_txn_);
 }
@@ -1743,7 +1754,8 @@ void TransactionExecution::Process(InitTxnOperation &init_txn)
     cc_handler_->NewTxn(init_txn.hd_result_,
                         iso_level_,
                         init_txn.tx_ng_id_,
-                        init_txn.log_group_id_);
+                        init_txn.log_group_id_,
+                        allow_run_on_candidate_);
 }
 
 void TransactionExecution::PostProcess(InitTxnOperation &init_txn)
@@ -1866,7 +1878,7 @@ void TransactionExecution::Process(ReadOperation &read)
                     read.iso_level_,
                     read.protocol_,
                     read.read_tx_req_->is_for_write_,
-                    read.read_tx_req_->is_recovering_);
+                    allow_run_on_candidate_);
             }
             else
             {
@@ -1883,7 +1895,7 @@ void TransactionExecution::Process(ReadOperation &read)
                     read.iso_level_,
                     read.protocol_,
                     read.read_tx_req_->is_for_write_,
-                    read.read_tx_req_->is_recovering_);
+                    allow_run_on_candidate_);
             }
 
             if (finished)
@@ -2309,7 +2321,7 @@ void TransactionExecution::Process(ReadLocalOperation &lock_local)
                                IsolationLevel::RepeatableRead,
                                CcProtocol::Locking,
                                false,
-                               false,
+                               allow_run_on_candidate_,
                                lock_local.execute_immediately_);
     if (finished)
     {
@@ -6342,7 +6354,11 @@ void TransactionExecution::Process(PostReadOperation &post_read_operation)
                               0,
                               commit_ts_,
                               *post_read_operation.cce_addr_,
-                              post_read_operation.hd_result_);
+                              post_read_operation.hd_result_,
+                              false,
+                              true,
+                              PostReadType::Release,
+                              allow_run_on_candidate_);
     if (ret == CcReqStatus::Processed)
     {
         AdvanceCommand();

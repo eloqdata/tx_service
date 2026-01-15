@@ -991,6 +991,8 @@ public:
     UpdateCceCkptTsCc(const UpdateCceCkptTsCc &) = delete;
     UpdateCceCkptTsCc &operator=(const UpdateCceCkptTsCc &) = delete;
 
+    bool ValidTermCheck() const;
+
     bool Execute(CcShard &ccs) override;
 
     void SetFinished()

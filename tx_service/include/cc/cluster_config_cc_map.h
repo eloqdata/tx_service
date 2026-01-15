@@ -67,13 +67,8 @@ public:
         hd_res->ClearRefCnt();
         AcquireAllResult &acquire_all_result = hd_res->Value();
         uint32_t ng_id = req.NodeGroupId();
-        int64_t ng_term = Sharder::Instance().LeaderTerm(ng_id);
-
-        if (ng_term < 0)
-        {
-            hd_res->SetError(CcErrorCode::REQUESTED_NODE_NOT_LEADER);
-            return true;
-        }
+        int64_t ng_term = req.NodeGroupTerm();
+        assert(ng_term > 0);
 
         LockType acquired_lock = LockType::NoLock;
         CcErrorCode err_code = CcErrorCode::NO_ERROR;
