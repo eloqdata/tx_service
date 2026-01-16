@@ -62,7 +62,8 @@ void txservice::LocalCcHandler::AcquireWrite(
     uint32_t hd_res_idx,
     CcProtocol proto,
     IsolationLevel iso_level,
-    bool abort_if_oom)
+    bool abort_if_oom,
+    bool allow_run_on_candidate)
 {
     uint32_t ng_id = Sharder::Instance().ShardToCcNodeGroup(key_shard_code);
     AcquireKeyResult &acquire_result = hres.Value()[hd_res_idx];
@@ -92,7 +93,8 @@ void txservice::LocalCcHandler::AcquireWrite(
                    hd_res_idx,
                    proto,
                    iso_level,
-                   abort_if_oom);
+                   abort_if_oom,
+                   allow_run_on_candidate);
         TX_TRACE_ACTION(this, req);
         TX_TRACE_DUMP(req);
 
@@ -274,7 +276,8 @@ txservice::CcReqStatus txservice::LocalCcHandler::PostWrite(
     const TxRecord *record,
     OperationType operation_type,
     uint32_t key_shard_code,
-    CcHandlerResult<PostProcessResult> &hres)
+    CcHandlerResult<PostProcessResult> &hres,
+    bool allow_run_on_candidate)
 {
     uint32_t ng_id = cce_addr.NodeGroupId();
     uint32_t dest_node_id = Sharder::Instance().LeaderNodeId(ng_id);
@@ -293,7 +296,8 @@ txservice::CcReqStatus txservice::LocalCcHandler::PostWrite(
                    record,
                    operation_type,
                    key_shard_code,
-                   &hres);
+                   &hres,
+                   allow_run_on_candidate);
         TX_TRACE_ACTION(this, req);
         TX_TRACE_DUMP(req);
         cc_shards_.EnqueueCcRequest(thd_id_, cce_addr.CoreId(), req);
@@ -436,6 +440,7 @@ void txservice::LocalCcHandler::Read(const TableName &table_name,
                                      CcProtocol proto,
                                      bool is_for_write,
                                      bool is_covering_keys,
+                                     bool allow_run_on_candidate,
                                      bool point_read_on_miss,
                                      int32_t partition_id,
                                      bool abort_if_oom)
@@ -471,7 +476,7 @@ void txservice::LocalCcHandler::Read(const TableName &table_name,
                    is_for_write,
                    is_covering_keys,
                    nullptr,
-                   false,
+                   allow_run_on_candidate,
                    point_read_on_miss,
                    partition_id,
                    abort_if_oom);
@@ -500,6 +505,7 @@ void txservice::LocalCcHandler::Read(const TableName &table_name,
                         proto,
                         is_for_write,
                         is_covering_keys,
+                        allow_run_on_candidate,
                         point_read_on_miss,
                         partition_id,
                         abort_if_oom);
@@ -611,14 +617,15 @@ bool txservice::LocalCcHandler::ReadLocal(const TableName &table_name,
     {
         ccs = cc_shards_.cc_shards_[thd_id_].get();
     }
-    int64_t term;
+    int64_t term = -1;
     uint32_t shard_code = tx_number >> 32L;
     uint32_t cc_ng_id = shard_code >> 10;
     if (allow_run_on_candidate)
     {
         term = Sharder::Instance().CandidateLeaderTerm(cc_ng_id);
     }
-    else
+
+    if (term < 0)
     {
         int64_t ng_leader_term = Sharder::Instance().LeaderTerm(cc_ng_id);
         int64_t standby_node_term = Sharder::Instance().StandbyNodeTerm();

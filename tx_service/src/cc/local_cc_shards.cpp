@@ -3705,7 +3705,9 @@ void LocalCcShards::DataSyncForRangePartition(
             {
                 LOG(ERROR) << "DataSync add read lock on table failed, "
                               "table name: "
-                           << table_key.Name().StringView();
+                           << table_key.Name().StringView() << ", error code: "
+                           << static_cast<uint32_t>(read_req.ErrorCode())
+                           << ", txn: " << data_sync_txm->TxNumber();
 
                 // If read lock acquire failed, retry next time.
                 // Put back into the beginning.
@@ -3795,6 +3797,11 @@ void LocalCcShards::DataSyncForRangePartition(
             data_sync_worker_ctx_.cv_.notify_one();
             return;
         }
+
+        LOG(INFO) << "DataSyncForHashPartition acuqired read lock on catalog "
+                     "and bucket: ng_term: "
+                  << ng_term << ", txn: " << data_sync_txm->TxNumber()
+                  << ", table: " << table_name.StringView();
 
         // Now that we have acquired read lock on catalog and bucket, there
         // won't be any ddl on this range. Update store_range and check if this
@@ -4786,6 +4793,10 @@ void LocalCcShards::DataSyncForHashPartition(
             data_sync_worker_ctx_.cv_.notify_all();
         }
     }
+
+    LOG(INFO) << "DataSyncForHashPartition: ng_term: " << ng_term
+              << ", txn: " << data_sync_txm->TxNumber()
+              << ", table: " << table_name.StringView();
 
     // 3. Scan records.
     {

@@ -199,16 +199,14 @@ public:
         const KeyT *target_key = nullptr;
         KeyT decoded_key;
 
-        int64_t ng_term = Sharder::Instance().LeaderTerm(req.NodeGroupId());
+        int64_t ng_term = req.NodeGroupTerm();
+        assert(ng_term > 0);
         CODE_FAULT_INJECTOR("term_TemplateCcMap_Execute_AcquireCc", {
-            LOG(INFO) << "FaultInject  term_TemplateCcMap_Execute_AcquireCc";
+            LOG(INFO) << "FaultInject term_TemplateCcMap_Execute_AcquireCc";
             ng_term = -1;
-        });
-        if (ng_term < 0)
-        {
             hd_res->SetError(CcErrorCode::REQUESTED_NODE_NOT_LEADER);
             return true;
-        }
+        });
 
         if (req.SchemaVersion() != 0 && req.SchemaVersion() != schema_ts_)
         {
@@ -511,14 +509,7 @@ public:
                 req.Result()->SetError(CcErrorCode::REQUESTED_NODE_NOT_LEADER);
                 return true;
             }
-        });
-
-        if (!Sharder::Instance().CheckLeaderTerm(cce_addr->NodeGroupId(),
-                                                 cce_addr->Term()))
-        {
-            req.Result()->SetError(CcErrorCode::REQUESTED_NODE_NOT_LEADER);
-            return true;
-        }
+        })
 
         const ValueT *commit_val = static_cast<const ValueT *>(req.Payload());
         TxNumber txn = req.Txn();
@@ -1580,10 +1571,6 @@ public:
                         if (Type() == TableType::Primary ||
                             Type() == TableType::UniqueSecondary)
                         {
-                            LOG(INFO)
-                                << "ReadCc PinRangeSlice with non force load."
-                                << ", shard: " << shard_->core_id_
-                                << ", table_name: " << table_name_.StringView();
                             RangeSliceOpStatus pin_status;
                             RangeSliceId slice_id =
                                 shard_->local_shards_.PinRangeSlice(
@@ -1624,11 +1611,6 @@ public:
                                 req.SetCacheHitMissCollected();
                             }
 
-                            LOG(INFO)
-                                << "ReadCc PinRangeSlice done, pin_status: "
-                                << static_cast<uint32_t>(pin_status)
-                                << ", shard: " << shard_->core_id_
-                                << ", table_name: " << table_name_.StringView();
                             if (pin_status == RangeSliceOpStatus::Successful ||
                                 pin_status == RangeSliceOpStatus::KeyNotExists)
                             {

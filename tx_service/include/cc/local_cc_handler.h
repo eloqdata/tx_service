@@ -55,7 +55,8 @@ public:
                       uint32_t hd_res_idx,
                       CcProtocol proto,
                       IsolationLevel iso_level,
-                      bool abort_if_oom) override;
+                      bool abort_if_oom,
+                      bool allow_run_on_candidate) override;
 
     void AcquireWriteAll(const TableName &table_name,
                          const TxKey &key,
@@ -103,7 +104,8 @@ public:
                           const TxRecord *record,
                           OperationType operation_type,
                           uint32_t key_shard_code,
-                          CcHandlerResult<PostProcessResult> &hres) override;
+                          CcHandlerResult<PostProcessResult> &hres,
+                          bool allow_run_on_candidate) override;
 
     CcReqStatus PostRead(uint64_t tx_number,
                          int64_t tx_term,
@@ -146,6 +148,7 @@ public:
               CcProtocol proto = CcProtocol::OCC,
               bool is_for_write = false,
               bool is_covering_keys = false,
+              bool allow_run_on_candidate = false,
               bool point_read_on_miss = false,
               int32_t partition_id = -1,
               bool abort_if_oom = false) override;

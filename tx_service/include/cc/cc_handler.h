@@ -99,7 +99,8 @@ public:
         uint32_t hd_res_idx,
         CcProtocol proto,
         IsolationLevel iso_level,
-        bool abort_if_oom) = 0;
+        bool abort_if_oom,
+        bool allow_run_on_candidate) = 0;
 
     /**
      * @brief Acquires write locks for the input key in all shards. This method
@@ -166,7 +167,8 @@ public:
                                   const TxRecord *record,
                                   OperationType operation_type,
                                   uint32_t key_shard_code,
-                                  CcHandlerResult<PostProcessResult> &hres) = 0;
+                                  CcHandlerResult<PostProcessResult> &hres,
+                                  bool allow_run_on_candidate) = 0;
 
     /**
      * @briefPost-processes a read/scan key. Post-processing clears the read
@@ -240,6 +242,7 @@ public:
                       CcProtocol proto = CcProtocol::OCC,
                       bool is_for_write = false,
                       bool is_covering_keys = false,
+                      bool allow_run_on_candidate = false,
                       bool point_read_on_miss = false,
                       int32_t partition_id = -1,
                       bool abort_if_oom = false) = 0;

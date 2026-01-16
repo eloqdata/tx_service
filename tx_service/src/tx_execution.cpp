@@ -2008,6 +2008,9 @@ void TransactionExecution::Process(ReadOperation &read)
                     uint32_t residual = key_hash & 0x3FF;
                     NodeGroupId bucket_ng = bucket_info->BucketOwner();
                     key_shard_code = bucket_ng << 10 | residual;
+
+                    // Set the lock range bucket result
+                    lock_range_bucket_result_.SetFinished();
                 }
                 else if (!lock_range_bucket_result_.IsFinished())
                 {
@@ -2088,6 +2091,7 @@ void TransactionExecution::Process(ReadOperation &read)
                               read.protocol_,
                               read.read_tx_req_->is_for_write_,
                               is_covering_keys,
+                              allow_run_on_candidate_,
                               read.read_tx_req_->point_read_on_cache_miss_,
                               partition_id,
                               HoldingRangeReadLock());
@@ -4059,7 +4063,8 @@ void TransactionExecution::Process(AcquireWriteOperation &acquire_write)
                 res_idx++,
                 protocol_,
                 iso_level_,
-                abort_if_oom);
+                abort_if_oom,
+                allow_run_on_candidate_);
             for (auto &[forward_shard_code, cce_addr] :
                  write_entry.forward_addr_)
             {
@@ -4077,7 +4082,8 @@ void TransactionExecution::Process(AcquireWriteOperation &acquire_write)
                     res_idx++,
                     protocol_,
                     iso_level_,
-                    abort_if_oom);
+                    abort_if_oom,
+                    allow_run_on_candidate_);
             }
         }
     }
@@ -4140,6 +4146,10 @@ void TransactionExecution::PostProcess(AcquireWriteOperation &acquire_write)
     }
     else if (acquire_write.hd_result_.IsError())
     {
+        DLOG(ERROR) << "AcquireWriteOperation failed for cc error:"
+                    << acquire_write.hd_result_.ErrorMsg() << " ,error code: "
+                    << static_cast<int>(acquire_write.hd_result_.ErrorCode())
+                    << "; txn: " << TxNumber();
         bool_resp_->SetErrorCode(
             ConvertCcError(acquire_write.hd_result_.ErrorCode()));
         Abort();
@@ -4370,7 +4380,11 @@ void TransactionExecution::Process(ValidateOperation &validate)
                                   0,
                                   commit_ts_,
                                   cce_addr,
-                                  validate.hd_result_);
+                                  validate.hd_result_,
+                                  false,
+                                  true,
+                                  PostReadType::Release,
+                                  allow_run_on_candidate_);
 
         if (ret == CcReqStatus::SentLocal)
         {
@@ -5309,7 +5323,8 @@ void TransactionExecution::Process(PostProcessOp &post_process)
                                            write_entry.rec_.get(),
                                            write_entry.op_,
                                            write_entry.key_shard_code_,
-                                           post_process.hd_result_);
+                                           post_process.hd_result_,
+                                           allow_run_on_candidate_);
                 update_post_cnt(ret);
 
                 for (auto &[forward_shard_code, cce_addr] :
@@ -5324,7 +5339,8 @@ void TransactionExecution::Process(PostProcessOp &post_process)
                                                write_entry.rec_.get(),
                                                write_entry.op_,
                                                forward_shard_code,
-                                               post_process.hd_result_);
+                                               post_process.hd_result_,
+                                               allow_run_on_candidate_);
                     update_post_cnt(ret);
                 }
             }
@@ -5348,7 +5364,8 @@ void TransactionExecution::Process(PostProcessOp &post_process)
                     nullptr,
                     OperationType::CommitCommands,
                     0,
-                    post_process.hd_result_);
+                    post_process.hd_result_,
+                    allow_run_on_candidate_);
                 update_post_cnt(ret);
 
                 if (cmd_set_entry.forward_entry_ != nullptr &&
@@ -5400,7 +5417,8 @@ void TransactionExecution::Process(PostProcessOp &post_process)
                             nullptr,
                             write_entry.op_,
                             write_entry.key_shard_code_,
-                            post_process.hd_result_);
+                            post_process.hd_result_,
+                            allow_run_on_candidate_);
                         update_post_cnt(ret);
                     }
                     // Keys that were not successfully locked in the cc
@@ -5421,7 +5439,8 @@ void TransactionExecution::Process(PostProcessOp &post_process)
                                                        nullptr,
                                                        write_entry.op_,
                                                        forward_shard_code,
-                                                       post_process.hd_result_);
+                                                       post_process.hd_result_,
+                                                       allow_run_on_candidate_);
                             update_post_cnt(ret);
                         }
                     }
@@ -5447,7 +5466,8 @@ void TransactionExecution::Process(PostProcessOp &post_process)
                                                nullptr,
                                                OperationType::CommitCommands,
                                                0,
-                                               post_process.hd_result_);
+                                               post_process.hd_result_,
+                                               allow_run_on_candidate_);
                     update_post_cnt(ret);
 
                     if (cmd_set_entry.forward_entry_ != nullptr &&
@@ -5462,7 +5482,8 @@ void TransactionExecution::Process(PostProcessOp &post_process)
                             nullptr,
                             OperationType::CommitCommands,
                             0,
-                            post_process.hd_result_);
+                            post_process.hd_result_,
+                            allow_run_on_candidate_);
                         update_post_cnt(ret);
                     }
                 }
@@ -5485,7 +5506,8 @@ void TransactionExecution::Process(PostProcessOp &post_process)
                 0,
                 0,
                 cce_addr,
-                post_process.hd_result_);
+                post_process.hd_result_,
+                allow_run_on_candidate_);
             update_post_cnt(ret);
         }
     }
@@ -7431,7 +7453,8 @@ void TransactionExecution::Process(CmdForwardAcquireWriteOp &forward_acquire)
                 res_idx++,
                 protocol_,
                 iso_level_,
-                abort_if_oom);
+                abort_if_oom,
+                allow_run_on_candidate_);
         }
     }
 
@@ -7756,6 +7779,7 @@ void TransactionExecution::Process(BatchReadOperation &batch_read_op)
         {
             partition_id = batch_read_op.range_ids_[idx];
         }
+
         cc_handler_->Read(
             table_name,
             batch_read_op.batch_read_tx_req_->schema_version_,
@@ -7773,6 +7797,7 @@ void TransactionExecution::Process(BatchReadOperation &batch_read_op)
             protocol_,
             batch_read_op.batch_read_tx_req_->is_for_write_,
             false,  // is_covering_keys
+            allow_run_on_candidate_,
             batch_read_op.batch_read_tx_req_->point_read_on_cache_miss_,
             partition_id,
             abort_if_oom);
