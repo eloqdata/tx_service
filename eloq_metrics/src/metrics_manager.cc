@@ -40,10 +40,8 @@ bool MetricsMgr::operator==(const metrics::MetricsMgr &other)
 }
 MetricHandle MetricsMgr::MetricsRegistry(std::unique_ptr<Metric> metric)
 {
-    auto metric_ref = metric.get();
-    auto metric_type = metric_ref->type_;
-    auto metric_key = metrics_collector_->SetMetric(metric);
-    return MetricHandle(metric_key, metric_type);
+    // SetMetric now returns MetricHandle with embedded collector data
+    return metrics_collector_->SetMetric(metric);
 }
 
 MetricsMgr::MetricsMgrResult MetricsMgr::GetMetricMgrInstance()

@@ -27,11 +27,63 @@
 #include <algorithm>
 #include <cassert>
 #include <iostream>
+#include <memory>
 
 #include "metrics.h"
 
 namespace metrics
 {
+
+// PrometheusMetricData implementation
+bool PrometheusMetricData::Collect(const Value &metric_value,
+                                   const Type &metric_type)
+{
+    switch (metric_type)
+    {
+    case Type::Histogram:
+        if (histogram_)
+        {
+            histogram_->Observe(metric_value.value_);
+            return true;
+        }
+        break;
+    case Type::Gauge:
+        if (gauge_)
+        {
+            switch (metric_value.inc_value_)
+            {
+            case Value::IncDecValue::Increment:
+                gauge_->Increment();
+                break;
+            case Value::IncDecValue::Decrement:
+                gauge_->Decrement();
+                break;
+            default:
+                gauge_->Set(metric_value.value_);
+                break;
+            }
+            return true;
+        }
+        break;
+    case Type::Counter:
+        if (counter_)
+        {
+            if (metric_value.HasValue())
+            {
+                counter_->Increment(metric_value.value_);
+            }
+            else
+            {
+                counter_->Increment();
+            }
+            return true;
+        }
+        break;
+    default:
+        break;
+    }
+    return false;
+}
 
 PrometheusCollector::PrometheusCollector(std::string host, uint32_t port)
     : MetricsCollector(std::move(host), port), exposer_(nullptr)
@@ -75,104 +127,115 @@ PrometheusCollector::~PrometheusCollector()
     }
 }
 
-MetricKey PrometheusCollector::SetMetric(std::unique_ptr<Metric> &metric_ptr)
+MetricHandle PrometheusCollector::SetMetric(std::unique_ptr<Metric> &metric_ptr)
 {
     auto option = metric_ptr.get();
     MetricHash metric_hash;
     auto metric_key = metric_hash(*option);
-    PutMetricsIfAbsent(metric_ptr, metric_key);
-    return metric_key;
+
+    auto prometheus_labels = Convert2Labels(metric_ptr->labels_);
+    Type metric_type = metric_ptr->type_;
+
+    std::shared_ptr<PrometheusMetricData> data;
+
+    switch (metric_type)
+    {
+    case Type::Histogram:
+    {
+        auto &histogram_family = prometheus::BuildHistogram()
+                                     .Name(metric_ptr->name_)
+                                     .Register(*registry_);
+        auto &histogram = histogram_family.Add(
+            prometheus_labels, PROMETHEUS_HISTOGRAM_DEF_BUCKETS);
+        data = std::make_shared<PrometheusMetricData>(histogram);
+        break;
+    }
+    case Type::Gauge:
+    {
+        auto &gauge_family = prometheus::BuildGauge()
+                                 .Name(metric_ptr->name_)
+                                 .Register(*registry_);
+        auto &gauge = gauge_family.Add(prometheus_labels);
+        data = std::make_shared<PrometheusMetricData>(gauge);
+        break;
+    }
+    case Type::Counter:
+    {
+        auto &counter_family = prometheus::BuildCounter()
+                                   .Name(metric_ptr->name_)
+                                   .Register(*registry_);
+        auto &counter = counter_family.Add(prometheus_labels);
+        data = std::make_shared<PrometheusMetricData>(counter);
+        break;
+    }
+    default:
+        // Return handle without data for unsupported types
+        return MetricHandle(metric_key, metric_type);
+    }
+
+    return MetricHandle(metric_key, metric_type, data);
 }
 
-bool PrometheusCollector::Collect(MetricKey metric_key,
-                                  const Value &metric_value,
-                                  const Type &metric_type)
+bool PrometheusCollector::Collect(const MetricHandle &handle,
+                                  const Value &metric_value)
 {
     if (!this->exposer_)
     {
 #ifdef WITH_GLOG
         LOG(WARNING) << " Prometheus Collector found exposer_ is null";
 #endif
-        // Warning when exposer_ is null, but still collect the metrics for the
-        // TxThreadScaleService
         return false;
     }
 
-    switch (metric_type)
+    if (!handle.collector_data)
     {
-    case Type::Histogram:
-    {
-        assert(histograms_.find(metric_key) != histograms_.end());
-        histograms_.find(metric_key)->second.get().Observe(metric_value.value_);
-        break;
+        return false;
     }
-    case Type::Gauge:
-    {
-        assert(gauges_.find(metric_key) != gauges_.end());
-        switch (metric_value.inc_value_)
-        {
-        case Value::IncDecValue::Increment:
-            gauges_.find(metric_key)->second.get().Increment();
-            break;
-        case Value::IncDecValue::Decrement:
-            gauges_.find(metric_key)->second.get().Decrement();
-            break;
-        default:
-            gauges_.find(metric_key)->second.get().Set(metric_value.value_);
-            break;
-        }
-        break;
-    }
-    case Type::Counter:
-    {
-        assert(counters_.find(metric_key) != counters_.end());
-        auto &counter = counters_.find(metric_key)->second.get();
-        if (metric_value.HasValue())
-        {
-            counter.Increment(metric_value.value_);
-        }
-        else
-        {
-            counter.Increment();
-        }
-        break;
-    }
-    default:
-        break;
-    }
-    return true;
+
+    return handle.collector_data->Collect(metric_value, handle.type);
 }
 
 prometheus::ClientMetric PrometheusCollector::CollectClientMetrics(
-    MetricKey metric_key, Type metric_type)
+    const MetricHandle &handle)
 {
-    switch (metric_type)
+    if (!handle.collector_data)
     {
-    case Type::Histogram:
-    {
-        assert(histograms_.find(metric_key) != histograms_.end());
-        auto &histogram = histograms_.find(metric_key)->second.get();
-        const prometheus::ClientMetric histogram_metric = histogram.Collect();
-        return histogram_metric;
-    }
-    case Type::Gauge:
-    {
-        assert(gauges_.find(metric_key) != gauges_.end());
-        auto &gauge = gauges_.find(metric_key)->second.get();
-        const prometheus::ClientMetric gauge_metric = gauge.Collect();
-        return gauge_metric;
-    }
-    case Type::Counter:
-    {
-        assert(counters_.find(metric_key) != counters_.end());
-        auto &counter = counters_.find(metric_key)->second.get();
-        const prometheus::ClientMetric counter_metric = counter.Collect();
-        return counter_metric;
-    }
-    default:
-        assert(false);
         return prometheus::ClientMetric{};
     }
+
+    // Cast to PrometheusMetricData to access Prometheus-specific types
+    auto *prom_data =
+        dynamic_cast<PrometheusMetricData *>(handle.collector_data.get());
+    if (!prom_data)
+    {
+        return prometheus::ClientMetric{};
+    }
+
+    // Use type-specific accessors to collect metrics
+    switch (handle.type)
+    {
+    case Type::Histogram:
+        if (auto *hist = prom_data->GetHistogram())
+        {
+            return hist->Collect();
+        }
+        break;
+    case Type::Gauge:
+        if (auto *gauge = prom_data->GetGauge())
+        {
+            return gauge->Collect();
+        }
+        break;
+    case Type::Counter:
+        if (auto *counter = prom_data->GetCounter())
+        {
+            return counter->Collect();
+        }
+        break;
+    default:
+        break;
+    }
+    return prometheus::ClientMetric{};
 }
 
 prometheus::Labels PrometheusCollector::Convert2Labels(const Labels &labels)
@@ -187,63 +250,7 @@ prometheus::Labels PrometheusCollector::Convert2Labels(const Labels &labels)
     return prometheus_labels;
 }
 
-void PrometheusCollector::PutMetricsIfAbsent(
-    std::unique_ptr<Metric> &metric_ptr, std::size_t metric_key)
-{
-    auto prometheus_labels = Convert2Labels(metric_ptr->labels_);
-    Type metric_type = metric_ptr->type_;
-    switch (metric_type)
-    {
-    case Type::Histogram:
-    {
-        if (histograms_.find(metric_key) != histograms_.end())
-        {
-            break;
-        }
-        auto &histogram_family = prometheus::BuildHistogram()
-                                     .Name(metric_ptr->name_)
-                                     .Register(*registry_);
-
-        auto &histogram = histogram_family.Add(
-            prometheus_labels, PROMETHEUS_HISTOGRAM_DEF_BUCKETS);
-
-        histograms_.emplace(metric_key, histogram);
-        break;
-    }
-    case Type::Gauge:
-    {
-        if (gauges_.find(metric_key) != gauges_.end())
-        {
-            break;
-        }
-        auto &gauge_family = prometheus::BuildGauge()
-                                 .Name(metric_ptr->name_)
-                                 .Register(*registry_);
-
-        auto &gauge = gauge_family.Add(prometheus_labels);
-        gauges_.emplace(metric_key, gauge);
-        break;
-    }
-    case Type::Counter:
-    {
-        if (counters_.find(metric_key) != counters_.end())
-        {
-            break;
-        }
-        auto &counter_family = prometheus::BuildCounter()
-                                   .Name(metric_ptr->name_)
-                                   .Register(*registry_);
-
-        auto &counter = counter_family.Add(prometheus_labels);
-        counters_.emplace(metric_key, counter);
-        break;
-    }
-    default:
-#ifdef WITH_GLOG
-        LOG(ERROR) << "ERR: For now not support metrics_type " << &metric_type;
-#endif
-        ;
-    }
-}
+// PutMetricsIfAbsent removed - metric creation is now done directly in
+// SetMetric()
 
 }  // namespace metrics

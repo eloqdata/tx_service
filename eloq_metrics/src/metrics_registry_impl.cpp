@@ -70,10 +70,11 @@ metrics::MetricHandle MetricsRegistryImpl::Register(
 void MetricsRegistryImpl::Collect(const metrics::MetricHandle &handle,
                                   const metrics::Value &val)
 {
-    auto collector = metrics_mgr_result_.mgr_->GetCollector();
-    if (collector != nullptr)
+    // Use collector data directly from handle - no map lookup, no collector
+    // lookup needed
+    if (handle.collector_data)
     {
-        collector->Collect(handle.key, val, handle.type);
+        handle.collector_data->Collect(val, handle.type);
     }
 }
 }  // namespace eloq_metrics_app

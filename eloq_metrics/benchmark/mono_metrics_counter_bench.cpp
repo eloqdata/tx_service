@@ -63,10 +63,8 @@ static void BM_Counter_MonoWrapper_Collect(benchmark::State &state)
 {
     for (auto _ : state)
     {
-        benchmark_counter_collector->Collect(
-            benchmark_counter_metric_handle.key,
-            metrics::Value(1),
-            benchmark_counter_metric_handle.type);
+        benchmark_counter_collector->Collect(benchmark_counter_metric_handle,
+                                             metrics::Value(1));
     }
 }
 

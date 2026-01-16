@@ -69,9 +69,7 @@ static void BM_Histogram_MonoWrapper_Collect(benchmark::State &state)
     for (auto _ : state)
     {
         benchmark_histogram_collector->Collect(
-            benchmark_histogram_metric_handle.key,
-            metrics::Value(1),
-            benchmark_histogram_metric_handle.type);
+            benchmark_histogram_metric_handle, metrics::Value(1));
     }
 }
 

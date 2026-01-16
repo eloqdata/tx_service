@@ -63,9 +63,8 @@ static void BM_Gauge_MonoWrapper_Collect(benchmark::State &state)
 {
     for (auto _ : state)
     {
-        benchmark_gauge_collector->Collect(benchmark_gauge_metric_handle.key,
-                                           metrics::Value(1),
-                                           benchmark_gauge_metric_handle.type);
+        benchmark_gauge_collector->Collect(benchmark_gauge_metric_handle,
+                                           metrics::Value(1));
     }
 }
 

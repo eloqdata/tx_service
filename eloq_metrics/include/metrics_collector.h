@@ -48,11 +48,15 @@ public:
 
     virtual bool Open() = 0;
 
-    virtual prometheus::ClientMetric CollectClientMetrics(MetricKey, Type) = 0;
+    // Updated: Return MetricHandle with embedded data
+    virtual MetricHandle SetMetric(std::unique_ptr<Metric> &) = 0;
 
-    virtual bool Collect(MetricKey, const Value &, const Type &) = 0;
+    // Updated: Accept MetricHandle instead of separate key and type
+    virtual bool Collect(const MetricHandle &, const Value &) = 0;
 
-    virtual MetricKey SetMetric(std::unique_ptr<Metric> &) = 0;
+    // Updated: Accept MetricHandle instead of separate key and type
+    virtual prometheus::ClientMetric CollectClientMetrics(
+        const MetricHandle &) = 0;
 
 protected:
     std::string address_;

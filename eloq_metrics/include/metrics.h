@@ -28,11 +28,14 @@
 #endif
 
 #include <chrono>
+#include <memory>
 #include <string>
 #include <vector>
 
 namespace metrics
 {
+// Forward declaration
+class MetricCollectorData;
 inline bool enable_metrics = false;
 
 class Name
@@ -75,9 +78,17 @@ struct MetricHandle
 {
     MetricKey key;
     Type type;
+    std::shared_ptr<MetricCollectorData>
+        collector_data;  // Collector-specific data
 
     MetricHandle() = delete;
-    MetricHandle(MetricKey k, Type t) : key(k), type(t)
+    MetricHandle(MetricKey k, Type t, std::shared_ptr<MetricCollectorData> data)
+        : key(k), type(t), collector_data(std::move(data))
+    {
+    }
+
+    // Convenience constructor for backward compatibility (without data)
+    MetricHandle(MetricKey k, Type t) : key(k), type(t), collector_data(nullptr)
     {
     }
 };
@@ -135,6 +146,21 @@ struct Metric
 struct MetricHash
 {
     MetricKey operator()(const Metric &metric) const;
+};
+
+// Base class for collector-specific metric data
+class MetricCollectorData
+{
+public:
+    virtual ~MetricCollectorData() = default;
+
+    // Collect metric value
+    virtual bool Collect(const Value &metric_value,
+                         const Type &metric_type) = 0;
+
+    // Note: CollectClientMetrics is collector-specific and should be
+    // implemented in collector classes (e.g., PrometheusCollector), not in base
+    // class
 };
 
 enum class MetricsErrors
