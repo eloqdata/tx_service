@@ -82,6 +82,9 @@ DEFINE_uint64(hash_partition_data_sync_scan_data_size,
               1000 * 1024,
               "Per-batch memory budget (bytes) for data exported during a "
               "hash partition data-sync scan");
+DEFINE_uint64(hash_partition_scan_concurrency,
+              0,
+              "Data sync scan concurrency for hash partition");
 
 std::atomic<uint64_t> LocalCcShards::local_clock(0);
 inline thread_local size_t tls_shard_idx = std::numeric_limits<size_t>::max();
@@ -4758,8 +4761,10 @@ void LocalCcShards::DataSyncForHashPartition(
     const size_t flush_buffer_size = cur_flush_buffer_.GetFlushBufferSize();
     constexpr size_t default_data_file_size = 8ULL * 1024 * 1024;
     const size_t scan_concurrency =
-        flush_buffer_size /
-        (default_data_file_size * approximate_partition_number_this_core);
+        FLAGS_hash_partition_scan_concurrency != 0
+            ? FLAGS_hash_partition_scan_concurrency
+            : flush_buffer_size / (default_data_file_size *
+                                   approximate_partition_number_this_core);
     if (scan_concurrency > 0)
     {
         bool need_notify = scan_concurrency >
