@@ -30,13 +30,15 @@ MetricsRegistryImpl::MetricsRegistryResult MetricsRegistryImpl::GetRegistry()
     struct make_registry_shared : public MetricsRegistryImpl
     {
     };
-    static std::unique_ptr<MetricsRegistryImpl> registry_impl =
-        std::make_unique<make_registry_shared>();
+    // Use shared_ptr for singleton pattern to ensure lifetime
+    static std::shared_ptr<MetricsRegistryImpl> registry_impl =
+        std::make_shared<make_registry_shared>();
 
     if (registry_impl->metrics_mgr_result_.not_ok_ == nullptr)
     {
-        return MetricsRegistryImpl::MetricsRegistryResult{
-            std::move(registry_impl), nullptr};
+        // Return shared_ptr to ensure the singleton instance remains alive
+        return MetricsRegistryImpl::MetricsRegistryResult{registry_impl,
+                                                          nullptr};
     }
     else
     {
@@ -54,25 +56,27 @@ metrics::MetricsErrors MetricsRegistryImpl::Open()
     return metrics::MetricsErrors::Success;
 }
 
-metrics::MetricKey MetricsRegistryImpl::Register(const metrics::Name &name,
-                                                 metrics::Type type,
-                                                 const metrics::Labels &labels)
+metrics::MetricHandle MetricsRegistryImpl::Register(
+    const metrics::Name &name,
+    metrics::Type type,
+    const metrics::Labels &labels)
 {
     auto metric = metrics::Metric(name.GetName(), type, labels);
 
-    auto metric_collector = metrics_mgr_result_.mgr_->MetricsRegistry(
+    return metrics_mgr_result_.mgr_->MetricsRegistry(
         std::make_unique<metrics::Metric>(metric));
-
-    auto key = metric_collector->metric_key_;
-    collectors_.insert(std::make_pair(key, std::move(metric_collector)));
-    return key;
 }
 
-void MetricsRegistryImpl::Collect(metrics::MetricKey key,
+void MetricsRegistryImpl::Collect(const metrics::MetricHandle &handle,
                                   const metrics::Value &val)
 {
-    auto collector = collectors_[key].get();
-    assert(collector);
-    collector->Collect(val);
+    // Get collector from MetricsMgr and delegate to it
+    // This ensures collector-specific checks (e.g., exposer_ validation) are
+    // performed
+    auto collector = metrics_mgr_result_.mgr_->GetCollector();
+    if (collector != nullptr)
+    {
+        collector->Collect(handle, val);
+    }
 }
 }  // namespace eloq_metrics_app

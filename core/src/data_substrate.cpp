@@ -170,7 +170,15 @@ bool DataSubstrate::Start()
         return false;
     }
 
-    // Phase 2: Initialize storage handler
+    // Phase 2: Initialize metrics (basic initialization, before storage
+    // handler)
+    if (!instance.InitializeMetrics(config_file_reader))
+    {
+        LOG(ERROR) << "Failed to initialize metrics";
+        return false;
+    }
+
+    // Phase 3: Initialize storage handler
     if (instance.GetCoreConfig().enable_data_store &&
         !instance.InitializeStorageHandler(config_file_reader))
     {
@@ -178,14 +186,14 @@ bool DataSubstrate::Start()
         return false;
     }
 
-    // Phase 3: Initialize metrics
-    if (!instance.InitializeMetrics(config_file_reader))
+    // Phase 4: Register KV store metrics (after storage handler is initialized)
+    if (!instance.RegisterKvStoreMetrics())
     {
-        LOG(ERROR) << "Failed to initialize metrics";
+        LOG(ERROR) << "Failed to register KV store metrics";
         return false;
     }
 
-    // Phase 4: Initialize TxService
+    // Phase 5: Initialize TxService
     if (!instance.InitializeTxService(config_file_reader))
     {
         LOG(ERROR) << "Failed to initialize TxService";

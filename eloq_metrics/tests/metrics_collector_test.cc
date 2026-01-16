@@ -34,12 +34,14 @@ SCENARIO("Metrics Collector no open", "[MCNoOpen]")
         {
             metrics::Metric metric{
                 "tx_counter", metrics::Type::Counter, {{"core_id", "core-1"}}};
+            auto metrics_opt_unique = std::make_unique<metrics::Metric>(metric);
             metrics::MetricHash hash_func;
             auto hash_value = hash_func(metric);
+            // Create handle without collector data (since Open() wasn't called)
+            metrics::MetricHandle handle(hash_value, metrics::Type::Counter);
             THEN("call collector will return false")
             {
-                auto coll_res =
-                    collector.Collect(hash_value, 100, metrics::Type::Counter);
+                auto coll_res = collector.Collect(handle, metrics::Value(100));
                 INFO("call collect result " << coll_res);
                 REQUIRE(coll_res == false);
             }
@@ -97,11 +99,10 @@ SCENARIO("MetricsCollector collect", "[MCCollectSuccess]")
         REQUIRE(open_success == true);
         WHEN("set metrics and collect")
         {
-            collector.SetMetric(metrics_opt_unique);
+            auto handle = collector.SetMetric(metrics_opt_unique);
             THEN("collect will return success")
             {
-                auto res_val = collector.Collect(
-                    hash_value, metrics::Value{200}, metrics::Type::Counter);
+                auto res_val = collector.Collect(handle, metrics::Value{200});
                 REQUIRE(res_val == true);
             }
         }

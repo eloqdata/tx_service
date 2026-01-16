@@ -39,6 +39,51 @@
 
 namespace metrics
 {
+
+// Prometheus-specific metric data storage
+class PrometheusMetricData : public MetricCollectorData
+{
+public:
+    // Constructor for Histogram
+    explicit PrometheusMetricData(prometheus::Histogram &histogram)
+        : histogram_(&histogram), gauge_(nullptr), counter_(nullptr)
+    {
+    }
+
+    // Constructor for Gauge
+    explicit PrometheusMetricData(prometheus::Gauge &gauge)
+        : histogram_(nullptr), gauge_(&gauge), counter_(nullptr)
+    {
+    }
+
+    // Constructor for Counter
+    explicit PrometheusMetricData(prometheus::Counter &counter)
+        : histogram_(nullptr), gauge_(nullptr), counter_(&counter)
+    {
+    }
+
+    bool Collect(const Value &metric_value, const Type &metric_type) override;
+
+    // Accessors for Prometheus-specific types (used by PrometheusCollector)
+    prometheus::Histogram *GetHistogram() const
+    {
+        return histogram_;
+    }
+    prometheus::Gauge *GetGauge() const
+    {
+        return gauge_;
+    }
+    prometheus::Counter *GetCounter() const
+    {
+        return counter_;
+    }
+
+private:
+    prometheus::Histogram *histogram_;
+    prometheus::Gauge *gauge_;
+    prometheus::Counter *counter_;
+};
+
 static const std::vector<double> PROMETHEUS_HISTOGRAM_DEF_BUCKETS = {
     1e+1, 2e+1, 4e+1, 6e+1, 8e+1,  // <  100 us
     1e+2, 2e+2, 4e+2, 6e+2, 8e+2,  // <    1 ms
@@ -62,14 +107,15 @@ public:
 
     bool Open() override;
 
-    bool Collect(MetricKey metric_hash,
-                 const Value &metric_value,
-                 const Type &metric_type) override;
+    // Updated SetMetric to return MetricHandle with embedded data
+    MetricHandle SetMetric(std::unique_ptr<Metric> &metric_ptr) override;
 
-    prometheus::ClientMetric CollectClientMetrics(MetricKey metric_hash,
-                                                  Type metric_type) override;
+    // Updated Collect to use data from handle
+    bool Collect(const MetricHandle &handle,
+                 const Value &metric_value) override;
 
-    std::size_t SetMetric(std::unique_ptr<Metric> &metric_ptr) override;
+    prometheus::ClientMetric CollectClientMetrics(
+        const MetricHandle &handle) override;
 
     ~PrometheusCollector() override;
 
@@ -77,21 +123,11 @@ private:
     [[nodiscard]] static prometheus::Labels Convert2Labels(
         const Labels &labels);
 
-    void PutMetricsIfAbsent(std::unique_ptr<Metric> &metric_ptr,
-                            std::size_t metric_hash_value);
-
 private:
     std::shared_ptr<prometheus::Registry> registry_ =
         std::make_shared<prometheus::Registry>();
     std::unique_ptr<prometheus::Exposer> exposer_;
-
-    /// The container for storing metrics, or different metrics for metrics
-    /// with other labels, needs to be initialized only once for the metric
-    /// object instance.
-    Map<std::size_t, std::reference_wrapper<prometheus::Histogram>> histograms_;
-
-    Map<std::size_t, std::reference_wrapper<prometheus::Gauge>> gauges_;
-
-    Map<std::size_t, std::reference_wrapper<prometheus::Counter>> counters_;
+    // Removed: histograms_, gauges_, counters_ maps - data is now in
+    // MetricHandle
 };
 }  // namespace metrics

@@ -261,6 +261,7 @@ private:
     bool InitializeLogService(const INIReader &config_file_reader);
     bool InitializeTxService(const INIReader &config_file_reader);
     bool InitializeMetrics(const INIReader &config_file_reader);
+    bool RegisterKvStoreMetrics();
 
     // Configuration storage
     CoreConfig core_config_;
@@ -292,7 +293,7 @@ private:
     std::unique_ptr<EloqDS::DataStoreService> data_store_service_;
 #endif
     std::unique_ptr<txlog::LogServer> log_server_;
-    std::unique_ptr<metrics::MetricsRegistry> metrics_registry_{nullptr};
+    std::shared_ptr<metrics::MetricsRegistry> metrics_registry_{nullptr};
 
     // Engine registry
     EngineConfig engines_[NUM_EXTERNAL_ENGINES];

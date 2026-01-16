@@ -14,10 +14,12 @@ static auto benchmark_counter_metric = metrics::Metric(
 static std::unique_ptr<metrics::Metric> benchmark_counter_metric_ptr =
     std::make_unique<metrics::Metric>(benchmark_counter_metric);
 
-static const std::shared_ptr<metrics::CollectorWrapper>
-    benchmark_counter_metric_collector =
-        (*(metrics::MetricsMgr::GetMetricMgrInstance().mgr_))
-            .MetricsRegistry(std::move(benchmark_counter_metric_ptr));
+static metrics::MetricHandle benchmark_counter_metric_handle =
+    (*(metrics::MetricsMgr::GetMetricMgrInstance().mgr_))
+        .MetricsRegistry(std::move(benchmark_counter_metric_ptr));
+
+static std::shared_ptr<metrics::MetricsCollector> benchmark_counter_collector =
+    (*(metrics::MetricsMgr::GetMetricMgrInstance().mgr_)).GetCollector();
 
 static void BM_Counter_Prometheus_Collect(benchmark::State &state)
 {
@@ -61,7 +63,8 @@ static void BM_Counter_MonoWrapper_Collect(benchmark::State &state)
 {
     for (auto _ : state)
     {
-        benchmark_counter_metric_collector->Collect(1);
+        benchmark_counter_collector->Collect(benchmark_counter_metric_handle,
+                                             metrics::Value(1));
     }
 }
 

@@ -166,10 +166,7 @@ public:
 
     ~EloqStoreDataStore() override = default;
 
-    bool Initialize() override
-    {
-        return true;
-    }
+    bool Initialize() override;
 
     bool StartDB() override
     {

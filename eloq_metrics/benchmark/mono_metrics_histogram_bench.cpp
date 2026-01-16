@@ -14,10 +14,13 @@ static auto benchmark_histogram_metric = metrics::Metric(
 static std::unique_ptr<metrics::Metric> benchmark_histogram_metric_ptr =
     std::make_unique<metrics::Metric>(benchmark_histogram_metric);
 
-static const std::shared_ptr<metrics::CollectorWrapper>
-    benchmark_histogram_metric_collector =
-        (*(metrics::MetricsMgr::GetMetricMgrInstance().mgr_))
-            .MetricsRegistry(std::move(benchmark_histogram_metric_ptr));
+static metrics::MetricHandle benchmark_histogram_metric_handle =
+    (*(metrics::MetricsMgr::GetMetricMgrInstance().mgr_))
+        .MetricsRegistry(std::move(benchmark_histogram_metric_ptr));
+
+static std::shared_ptr<metrics::MetricsCollector>
+    benchmark_histogram_collector =
+        (*(metrics::MetricsMgr::GetMetricMgrInstance().mgr_)).GetCollector();
 
 static void BM_Histogram_Prometheus_Collect(benchmark::State &state)
 {
@@ -65,7 +68,8 @@ static void BM_Histogram_MonoWrapper_Collect(benchmark::State &state)
 {
     for (auto _ : state)
     {
-        benchmark_histogram_metric_collector->Collect(1);
+        benchmark_histogram_collector->Collect(
+            benchmark_histogram_metric_handle, metrics::Value(1));
     }
 }
 

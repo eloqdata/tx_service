@@ -26,6 +26,12 @@
 #include "eloq_store_data_store_factory.h"
 #include "internal_request.h"
 
+#ifdef ELOQSTORE_WITH_TXSERVICE
+#include "metrics.h"
+#include "metrics_registry_impl.h"
+#include "tx_service_metrics.h"
+#endif
+
 namespace EloqDS
 {
 thread_local ObjectPool<EloqStoreOperationData<::eloqstore::ReadRequest>>
@@ -84,6 +90,41 @@ EloqStoreDataStore::EloqStoreDataStore(uint32_t shard_id,
                << ", cloud store path: " << opts.cloud_store_path
                << ", buffer pool size per shard: " << opts.buffer_pool_size;
     eloq_store_service_ = std::make_unique<::eloqstore::EloqStore>(opts);
+}
+
+bool EloqStoreDataStore::Initialize()
+{
+#ifdef ELOQSTORE_WITH_TXSERVICE
+    if (metrics::enable_eloqstore_metrics)
+    {
+        // Initialize metrics for eloqstore
+        eloq_metrics_app::MetricsRegistryImpl::MetricsRegistryResult
+            metrics_registry_result =
+                eloq_metrics_app::MetricsRegistryImpl::GetRegistry();
+
+        if (metrics_registry_result.not_ok_ != nullptr)
+        {
+            LOG(WARNING) << "Failed to get metrics registry, skipping "
+                            "eloqstore metrics initialization: "
+                         << metrics_registry_result.not_ok_;
+        }
+        else if (metrics_registry_result.metrics_registry_ != nullptr)
+        {
+            // Create common labels
+            // Note: node_ip and node_port may not be available at Initialize()
+            // time For now, we use empty labels. The shard_id label will be
+            // added by EloqStore::InitializeMetrics()
+            metrics::CommonLabels common_labels{};
+
+            // Call eloqstore's metrics initialization
+            // This will initialize metrics for all shards with shard_id labels
+            eloq_store_service_->InitializeMetrics(
+                metrics_registry_result.metrics_registry_.get(), common_labels);
+        }
+    }
+#endif
+
+    return true;
 }
 
 void EloqStoreDataStore::Read(ReadRequest *read_req)
