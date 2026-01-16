@@ -453,7 +453,9 @@ public:
     void RestoreTxCache(txservice::NodeGroupId cc_ng_id,
                         int64_t cc_ng_term) override;
 
-    bool OnLeaderStart(uint32_t ng_id, int64_t term, uint32_t *next_leader_node) override;
+    bool OnLeaderStart(uint32_t ng_id,
+                       int64_t term,
+                       uint32_t *next_leader_node) override;
 
     bool OnLeaderStop(uint32_t ng_id, int64_t term) override;
 

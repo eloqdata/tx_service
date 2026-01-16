@@ -2146,7 +2146,9 @@ void RocksDBHandler::RestoreTxCache(txservice::NodeGroupId cc_ng_id,
         });
 }
 
-bool RocksDBHandler::OnLeaderStart(uint32_t ng_id, int64_t term, uint32_t *next_leader_node)
+bool RocksDBHandler::OnLeaderStart(uint32_t ng_id,
+                                   int64_t term,
+                                   uint32_t *next_leader_node)
 {
     bthread::Mutex mux;
     bthread::ConditionVariable cv;
