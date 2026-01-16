@@ -70,11 +70,13 @@ metrics::MetricHandle MetricsRegistryImpl::Register(
 void MetricsRegistryImpl::Collect(const metrics::MetricHandle &handle,
                                   const metrics::Value &val)
 {
-    // Use collector data directly from handle - no map lookup, no collector
-    // lookup needed
-    if (handle.collector_data)
+    // Get collector from MetricsMgr and delegate to it
+    // This ensures collector-specific checks (e.g., exposer_ validation) are
+    // performed
+    auto collector = metrics_mgr_result_.mgr_->GetCollector();
+    if (collector != nullptr)
     {
-        handle.collector_data->Collect(val, handle.type);
+        collector->Collect(handle, val);
     }
 }
 }  // namespace eloq_metrics_app
