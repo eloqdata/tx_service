@@ -3728,6 +3728,7 @@ void TransactionExecution::Commit()
 {
     if (tx_term_ < 0)
     {
+        LOG(INFO) << ">>>>Commit tx " << TxNumber() << ", tx_term < 0";
         bool_resp_->Finish(false);
         bool_resp_ = nullptr;
 
@@ -3776,6 +3777,7 @@ void TransactionExecution::Commit()
         }
         else
         {
+            LOG(INFO) << ">>>>Commit tx " << TxNumber() << ", push set ts op";
             PushOperation(&set_ts_);
         }
     }
@@ -5783,6 +5785,7 @@ void TransactionExecution::ReleaseMetaDataReadLock(
     size_t post_local_cnt = 0;
     for (const auto &[cce_addr, read_entry_pair] : rset)
     {
+        LOG(INFO) << ">>>>ReleaseMetaDataReadLock, tx " << TxNumber();
         const ReadSetEntry &read_entry = read_entry_pair.first;
         CcReqStatus ret = cc_handler_->PostRead(TxNumber(),
                                                 TxTerm(),
@@ -5792,7 +5795,10 @@ void TransactionExecution::ReleaseMetaDataReadLock(
                                                 commit_ts_,
                                                 cce_addr,
                                                 meta_data_hd_result,
-                                                true);
+                                                true,
+                                                true,
+                                                PostReadType::Release,
+                                                allow_run_on_candidate_);
         --ref_cnt;
 
         if (ret == CcReqStatus::SentLocal)
