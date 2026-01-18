@@ -9025,7 +9025,7 @@ public:
         for (auto key : keys)
         {
             bool emplace = false;
-            auto it = FindEmplace(*key, emplace, false, false);
+            auto it = FindEmplace(*key, &emplace, false, false);
             if (!emplace)
             {
                 assert(false);
