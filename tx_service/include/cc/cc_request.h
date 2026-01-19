@@ -4456,8 +4456,6 @@ private:
         {
             first_slice_id_.Reset();
             pinned_slices_.clear();
-            min_paused_key_ = TxKey();
-            min_paused_slice_index_ = 0;
             prepared_slice_cnt_ = 0;
             ready_for_scan_.store(false, std::memory_order_relaxed);
             batch_end_slice_index_ = 0;

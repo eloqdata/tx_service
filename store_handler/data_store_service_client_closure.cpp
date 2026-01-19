@@ -92,7 +92,7 @@ void SyncBatchReadForArchiveCallback(void *data,
     if (err_code == remote::DataStoreError::KEY_NOT_FOUND)
     {
         DLOG(INFO) << "BatchReadForArchiveCallback, key not found: "
-                  << read_closure->Key() << " , set as deleted";
+                   << read_closure->Key() << " , set as deleted";
         std::string_view key_str = read_closure->Key();
         uint64_t ts = 1U;
         uint64_t ttl = 0U;
