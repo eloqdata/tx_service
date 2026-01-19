@@ -127,6 +127,15 @@ DEFINE_bool(eloq_store_enable_compression,
 DEFINE_uint32(eloq_store_max_concurrent_writes,
               1,
               "EloqStore max write concurrency per core");
+DEFINE_uint32(eloq_store_max_upload_batch,
+              100,
+              "EloqStore max upload concurrency per core");
+DEFINE_uint32(eloq_store_max_cloud_concurrency,
+              200,
+              "EloqStore max request concurrency to object storage per core");
+DEFINE_uint32(eloq_store_cloud_request_threads,
+              1,
+              "EloqStore cloud request thread number");
 
 namespace EloqDS
 {
@@ -516,6 +525,24 @@ EloqStoreConfig::EloqStoreConfig(const INIReader &config_reader,
             : config_reader.GetInteger("store",
                                        "eloq_store_max_concurrent_writes",
                                        FLAGS_eloq_store_max_concurrent_writes);
+    eloqstore_configs_.max_upload_batch =
+        !CheckCommandLineFlagIsDefault("eloq_store_max_upload_batch")
+            ? FLAGS_eloq_store_max_upload_batch
+            : config_reader.GetInteger("store",
+                                       "eloq_store_max_upload_batch",
+                                       FLAGS_eloq_store_max_upload_batch);
+    eloqstore_configs_.max_cloud_concurrency =
+        !CheckCommandLineFlagIsDefault("eloq_store_max_cloud_concurrency")
+            ? FLAGS_eloq_store_max_cloud_concurrency
+            : config_reader.GetInteger("store",
+                                       "eloq_store_max_cloud_concurrency",
+                                       FLAGS_eloq_store_max_cloud_concurrency);
+    eloqstore_configs_.cloud_request_threads =
+        !CheckCommandLineFlagIsDefault("eloq_store_cloud_request_threads")
+            ? FLAGS_eloq_store_cloud_request_threads
+            : config_reader.GetInteger("store",
+                                       "eloq_store_cloud_request_threads",
+                                       FLAGS_eloq_store_cloud_request_threads);
 }
 
 void EloqStoreConfig::ParseStoragePath(

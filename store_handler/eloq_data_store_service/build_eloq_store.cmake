@@ -93,6 +93,7 @@ set(ELOQ_STORE_SOURCES
     ${ELOQ_STORE_SOURCE_DIR}/external/random.cc
     ${ELOQ_STORE_SOURCE_DIR}/external/xxhash.c
     ${ELOQ_STORE_SOURCE_DIR}/src/async_io_manager.cpp
+    ${ELOQ_STORE_SOURCE_DIR}/src/cloud_storage_service.cpp
     ${ELOQ_STORE_SOURCE_DIR}/src/coding.cpp
     ${ELOQ_STORE_SOURCE_DIR}/src/comparator.cpp
     ${ELOQ_STORE_SOURCE_DIR}/src/compression.cpp
