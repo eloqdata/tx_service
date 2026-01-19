@@ -3251,7 +3251,9 @@ void LocalCcShards::PostProcessFlushTaskEntries(
             {
                 if (!task->during_split_range_)
                 {
-                    range_entry->UpdateLastDataSyncTS(task->data_sync_ts_);
+                    uint64_t last_sync_ts =
+                        task->sync_on_leader_ ? task->data_sync_ts_ : 0;
+                    range_entry->UpdateLastDataSyncTS(last_sync_ts);
                     range_entry->UnPinStoreRange();
                     // Commit the data sync txm
                     txservice::CommitTx(entry->data_sync_txm_);
@@ -3406,7 +3408,9 @@ void LocalCcShards::PostProcessRangePartitionDataSyncTask(
         {
             if (!task->during_split_range_)
             {
-                range_entry->UpdateLastDataSyncTS(task->data_sync_ts_);
+                uint64_t last_sync_ts =
+                    task->sync_on_leader_ ? task->data_sync_ts_ : 0;
+                range_entry->UpdateLastDataSyncTS(last_sync_ts);
                 range_entry->UnPinStoreRange();
                 // Commit the data sync txm
                 txservice::CommitTx(data_sync_txm);
@@ -3627,6 +3631,7 @@ void LocalCcShards::DataSyncForRangePartition(
             // might miss the data that has not been recovered yet.
             data_sync_task->SetErrorCode(
                 CcErrorCode::REQUESTED_NODE_NOT_LEADER);
+            data_sync_task->SetSyncOnLeader(false);
         }
 
         defer_unpin = std::shared_ptr<void>(
@@ -3924,7 +3929,10 @@ void LocalCcShards::DataSyncForRangePartition(
             txservice::CommitTx(data_sync_txm);
 
             // Update the task status for this range.
-            range_entry->UpdateLastDataSyncTS(data_sync_task->data_sync_ts_);
+            uint64_t last_sync_ts = data_sync_task->sync_on_leader_
+                                        ? data_sync_task->data_sync_ts_
+                                        : 0;
+            range_entry->UpdateLastDataSyncTS(last_sync_ts);
             // Generally, the StoreRange will be pinned only when there are data
             // items in the range that needs to be ckpted.
             if (scan_delta_size_cc.StoreRangePtr() != nullptr)
@@ -4492,7 +4500,9 @@ void LocalCcShards::PostProcessHashPartitionDataSyncTask(
                     // We're still holding catalog read lock here, and the term
                     // has not changed. catalog entry should not be nullptr.
                     assert(catalog_entry);
-                    catalog_entry->UpdateLastDataSyncTS(task->data_sync_ts_,
+                    uint64_t last_sync_ts =
+                        task->sync_on_leader_ ? task->data_sync_ts_ : 0;
+                    catalog_entry->UpdateLastDataSyncTS(last_sync_ts,
                                                         task->id_);
                 }
             }
@@ -4672,6 +4682,7 @@ void LocalCcShards::DataSyncForHashPartition(
             // might miss the data that has not been recovered yet.
             data_sync_task->SetErrorCode(
                 CcErrorCode::REQUESTED_NODE_NOT_LEADER);
+            data_sync_task->SetSyncOnLeader(false);
         }
     }
 
@@ -5702,7 +5713,9 @@ void LocalCcShards::SplitFlushRange(
         return;
     }
 
-    range_entry->UpdateLastDataSyncTS(data_sync_task->data_sync_ts_);
+    uint64_t last_sync_ts =
+        data_sync_task->sync_on_leader_ ? data_sync_task->data_sync_ts_ : 0;
+    range_entry->UpdateLastDataSyncTS(last_sync_ts);
     range_entry->UnPinStoreRange();
 
     data_sync_task->SetFinish();
