@@ -5429,6 +5429,26 @@ public:
                     slice->PostCkptSize() > slice->Size());
         };
 
+        auto next_page_it = [this](Iterator &end_it) -> Iterator
+        {
+            Iterator it = end_it;
+            if (it != End())
+            {
+                CcPage<KeyT, ValueT, VersionedRecord, RangePartitioned> *ccp =
+                    it.GetPage();
+                assert(ccp != nullptr);
+                if (ccp->next_page_ == PagePosInf())
+                {
+                    it = End();
+                }
+                else
+                {
+                    it = Iterator(ccp->next_page_, 0, &neg_inf_);
+                }
+            }
+            return it;
+        };
+
         const KeyT *const req_start_key = req.start_key_ != nullptr
                                               ? req.start_key_->GetKey<KeyT>()
                                               : KeyT::NegativeInfinity();
@@ -5609,6 +5629,12 @@ public:
         std::tie(key_it, slice_end_it, slice_end_key) =
             find_non_empty_slice(*search_start_key);
 
+        // Since we might skip the page that slice_end_it is located on if it's
+        // not updated since last ckpt, it might skip slice_end_it. If the last
+        // page is skipped, the key_it will be set as the first entry on the
+        // next page. Also check if (key_it == slice_end_next_page_it).
+        Iterator slice_end_next_page_it = next_page_it(slice_end_it);
+
         uint64_t recycle_ts = 1U;
         if (shard_->EnableMvcc() && !req.export_base_table_item_only_)
         {
@@ -5633,7 +5659,7 @@ public:
         // blocking other transaction for a long time, we only process
         // CkptScanBatch number of pages in each round.
         for (size_t scan_cnt = 0;
-             key_it != slice_end_it &&
+             key_it != slice_end_it && key_it != slice_end_next_page_it &&
              scan_cnt < RangePartitionDataSyncScanCc::DataSyncScanBatchSize &&
              req.accumulated_scan_cnt_.at(shard_->core_id_) <
                  req.scan_batch_size_;
@@ -5642,6 +5668,54 @@ public:
             const KeyT *key = key_it->first;
             CcEntry<KeyT, ValueT, VersionedRecord, RangePartitioned> *cce =
                 key_it->second;
+            CcPage<KeyT, ValueT, VersionedRecord, RangePartitioned> *ccp =
+                key_it.GetPage();
+            assert(ccp);
+            // Only in the following scenarios, we can skip the ccpage if the
+            // page has no dirty keys since last datasync: 1) The scan is in the
+            // normal checkpoint mode(export_base_table_item_ = false). And 2)
+            // The slice is no need to split(slice_pinned = false).
+            if (!req.export_base_table_item_ && !slice_pinned &&
+                ccp->last_dirty_commit_ts_ <= req.LastDataSyncTs())
+            {
+                // There is no dirty keys in this ccpage since last datasync.
+                // Just skip this ccpage.
+                assert(!cce->NeedCkpt());
+                if (ccp->next_page_ == PagePosInf())
+                {
+                    key_it = End();
+                }
+                else
+                {
+                    key_it = Iterator(ccp->next_page_, 0, &neg_inf_);
+                }
+
+                // Check the slice iterator.
+                if (key_it == slice_end_it || key_it == slice_end_next_page_it)
+                {
+                    // Reach to the end of current slice.
+                    // Move to the next slice.
+                    req.MoveToNextSlice(shard_->core_id_);
+                    if (!req.TheBatchEnd(shard_->core_id_))
+                    {
+                        search_start_key = slice_end_key;
+                        std::tie(key_it, slice_end_it, slice_end_key) =
+                            find_non_empty_slice(*search_start_key);
+
+                        slice_end_next_page_it = next_page_it(slice_end_it);
+
+                        // If reach to the batch end, it means there are no
+                        // slices that need to be scanned.
+                        slice_pinned =
+                            req.TheBatchEnd(shard_->core_id_)
+                                ? false
+                                : req.IsSlicePinned(shard_->core_id_);
+                        export_persisted_key_only =
+                            !req.export_base_table_item_ && slice_pinned;
+                    }
+                }
+                continue;
+            }
 
             if (shard_->EnableMvcc() && !req.export_base_table_item_only_)
             {
@@ -5652,8 +5726,7 @@ public:
             // size.
             bool need_export = cce->CommitTs() <= req.data_sync_ts_ &&
                                (slice_pinned || cce->NeedCkpt());
-            if (RangePartitioned &&
-                cce->entry_info_.DataStoreSize() == INT32_MAX && need_export)
+            if (cce->entry_info_.DataStoreSize() == INT32_MAX && need_export)
             {
                 if (slice_pinned)
                 {
@@ -5727,6 +5800,8 @@ public:
                     std::tie(key_it, slice_end_it, slice_end_key) =
                         find_non_empty_slice(*search_start_key);
 
+                    slice_end_next_page_it = next_page_it(slice_end_it);
+
                     // If reach to the batch end, it means there are no slices
                     // that need to be scanned.
                     slice_pinned = req.TheBatchEnd(shard_->core_id_)
@@ -5741,17 +5816,22 @@ public:
         // The conditions for exiting the main loop are: reaching the maximum
         // scan batch size, or reach to the end slice of the current batch
         // slices.
-        assert(key_it != slice_end_it || req.TheBatchEnd(shard_->core_id_));
+        assert((key_it != slice_end_it && key_it != slice_end_next_page_it) ||
+               req.TheBatchEnd(shard_->core_id_));
         // 4. Check whether the request is finished.
         TxKey next_pause_key;
-        bool no_more_data = (key_it == slice_end_it) && req.IsLastBatch();
+        bool no_more_data =
+            (key_it == slice_end_it || key_it == slice_end_next_page_it) &&
+            req.IsLastBatch();
         if (!no_more_data)
         {
-            // If key_it == slice_end_it, it means the current slice is
-            // completed. The paused key should be the slice end key.
-            next_pause_key = key_it != slice_end_it
-                                 ? key_it->first->CloneTxKey()
-                                 : slice_end_key->CloneTxKey();
+            // If key_it == slice_end_it or key_it == slice_end_next_page_it,
+            // it means the current slice is completed. The paused key should be
+            // the slice end key.
+            next_pause_key =
+                (key_it != slice_end_it && key_it != slice_end_next_page_it)
+                    ? key_it->first->CloneTxKey()
+                    : slice_end_key->CloneTxKey();
         }
 
         // Set the pause_pos_ to mark resume position.

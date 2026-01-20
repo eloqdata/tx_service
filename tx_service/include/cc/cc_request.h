@@ -4026,7 +4026,7 @@ public:
         uint64_t txn,
         const TxKey *target_start_key,
         const TxKey *target_end_key,
-        bool include_persisted_data,
+        uint64_t last_data_sync_ts = 0,
         bool export_base_table_item = false,
         bool export_base_table_item_only = false,
         StoreRange *store_range = nullptr,
@@ -4037,6 +4037,7 @@ public:
           node_group_id_(node_group_id),
           node_group_term_(node_group_term),
           core_cnt_(core_cnt),
+          last_data_sync_ts_(last_data_sync_ts),
           data_sync_ts_(data_sync_ts),
           start_key_(target_start_key),
           end_key_(target_end_key),
@@ -4045,7 +4046,6 @@ public:
           unfinished_cnt_(core_cnt_),
           mux_(),
           cv_(),
-          include_persisted_data_(include_persisted_data),
           export_base_table_item_(export_base_table_item),
           slice_coordinator_(export_base_table_item_, &slices_to_scan_),
           export_base_table_item_only_(export_base_table_item_only),
@@ -4332,6 +4332,7 @@ public:
     {
         assert(!export_base_table_item_);
         size_t curr_slice_index = curr_slice_index_[core_id];
+        assert(curr_slice_index < slices_to_scan_.size());
         return slices_to_scan_[curr_slice_index].first;
     }
 
@@ -4403,6 +4404,11 @@ public:
     bool IsLastBatch() const
     {
         return slice_coordinator_.IsEndSlice();
+    }
+
+    uint64_t LastDataSyncTs() const
+    {
+        return last_data_sync_ts_;
     }
 
     std::vector<size_t> accumulated_scan_cnt_;
@@ -4532,6 +4538,10 @@ private:
     uint32_t node_group_id_;
     int64_t node_group_term_;
     uint16_t core_cnt_;
+    // It is used as a hint to decide if a page has dirty data since last round
+    // of checkpoint. It is guaranteed that all entries committed before this ts
+    // are synced into data store.
+    uint64_t last_data_sync_ts_;
     // Target ts. Collect all data changes committed before this ts into data
     // sync vec.
     uint64_t data_sync_ts_;
@@ -4554,9 +4564,6 @@ private:
     uint32_t unfinished_cnt_;
     std::mutex mux_;
     std::condition_variable cv_;
-    // True means If no larger version exists, we need to export the data which
-    // commit_ts same as ckpt_ts.
-    bool include_persisted_data_{false};
 
     // True means we need to export the data in memory and in kv to ckpt vec.
     // Note: This is only used in range partition.
