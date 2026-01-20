@@ -4423,22 +4423,9 @@ private:
             : is_continuous_(is_continuous), slices_keys_ptr_(slices_keys)
         {
             pinned_slices_.reserve(MaxBatchSliceCount);
-            if (is_continuous_)
-            {
-                min_paused_key_ = TxKey();
-            }
-            else
-            {
-                min_paused_slice_index_ = 0;
-            }
+            min_paused_key_ = TxKey();
+            min_paused_slice_index_ = 0;
             batch_end_slice_index_ = 0;
-        }
-        ~SliceCoordinator()
-        {
-            if (is_continuous_)
-            {
-                min_paused_key_.~TxKey();
-            }
         }
 
         void SetReadyForScan()
@@ -4531,11 +4518,8 @@ private:
         // Used for unpin slices
         RangeSliceId first_slice_id_;
         std::vector<StoreSlice *> pinned_slices_;
-        union
-        {
-            TxKey min_paused_key_;
-            size_t min_paused_slice_index_;
-        };
+        TxKey min_paused_key_{};
+        size_t min_paused_slice_index_{0};
         std::vector<std::pair<TxKey, bool>> *slices_keys_ptr_{nullptr};
         uint16_t prepared_slice_cnt_{0};
         std::atomic<bool> ready_for_scan_{false};

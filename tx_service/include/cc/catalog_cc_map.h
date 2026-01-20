@@ -1174,7 +1174,7 @@ public:
         const CatalogKey *table_key =
             static_cast<const CatalogKey *>(req.Key());
         bool emplace = false;
-        Iterator it = FindEmplace(*table_key, emplace, true, false);
+        Iterator it = FindEmplace(*table_key, &emplace, true, false);
         CcEntry<CatalogKey, CatalogRecord, true, false> *cce = it->second;
         if (cce->PayloadStatus() == RecordStatus::Unknown)
         {
@@ -2348,7 +2348,7 @@ public:
         CatalogKey table_key{base_table_name};
 
         bool emplace = false;
-        Iterator it = FindEmplace(table_key, emplace, true, false);
+        Iterator it = FindEmplace(table_key, &emplace, true, false);
         CcEntry<CatalogKey, CatalogRecord, true, false> *catalog_cce =
             it->second;
 

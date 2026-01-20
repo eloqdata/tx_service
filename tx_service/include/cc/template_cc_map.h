@@ -9025,7 +9025,7 @@ public:
         for (auto key : keys)
         {
             bool emplace = false;
-            auto it = FindEmplace(*key, emplace, false, false);
+            auto it = FindEmplace(*key, &emplace, false, false);
             if (!emplace)
             {
                 assert(false);
@@ -9510,8 +9510,8 @@ protected:
                          bool force_emplace = false,
                          bool read_only_req = false)
     {
-        bool emplace;
-        return FindEmplace(key, emplace, force_emplace, read_only_req);
+        bool emplace = false;
+        return FindEmplace(key, &emplace, force_emplace, read_only_req);
     }
 
     std::pair<bool, size_t> ShuffleKeyAndPageSplit(
@@ -10053,11 +10053,11 @@ protected:
      * @return The Iterator pointing to the target CcEntry
      */
     Iterator FindEmplace(const KeyT &key,
-                         bool &emplace,
+                         bool *emplace,
                          bool force_emplace = false,
                          bool read_only_req = false)
     {
-        emplace = false;
+        *emplace = false;
         bool fail_if_not_found = false;
         if (&key == KeyT::NegativeInfinity())
         {
@@ -10098,8 +10098,12 @@ protected:
             }
             // else: cache replacement is disable or no need to clean shard.
 
-            if (!force_emplace && !table_name_.IsMeta() && !read_only_req)
+            if (!force_emplace && !table_name_.IsMeta() &&
+                table_name_ != sequence_table_name && !read_only_req)
             {
+                // Blocking sequence table update might cause range split fail
+                // to get new range ids, then causing checkpoint to be blocked
+                // and no dirty data can be flushed.
                 return End();
             }
 
@@ -10261,7 +10265,7 @@ protected:
         }
 
         idx_in_page = target_page->Emplace(key);
-        emplace = true;
+        *emplace = true;
         // modify page key in the map if it changed
         TryUpdatePageKey(target_it);
 
