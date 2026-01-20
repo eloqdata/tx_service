@@ -307,10 +307,16 @@ bool DataStoreServiceClient::PutAll(
                << flush_task.size() << " tables to flush.";
     uint64_t now = txservice::LocalCcShards::ClockTsInMillseconds();
 
+    // Create global coordinator
+    SyncPutAllData *sync_putall = sync_putall_data_pool_.NextObject();
+    PoolableGuard sync_putall_guard(sync_putall);
+    sync_putall->Reset();
+    size_t records_count = 0;
+
+    std::vector<PartitionCallbackData *> callback_data_list;
     // Process each table
     for (auto &[kv_table_name, entries] : flush_task)
     {
-        size_t records_count = 0;
         auto &table_name = entries.front()->data_sync_task_->table_name_;
 
         // Group records by partition
@@ -358,11 +364,6 @@ bool DataStoreServiceClient::PutAll(
             flush_task_entry_idx++;
         }
 
-        // Create global coordinator
-        SyncPutAllData *sync_putall = sync_putall_data_pool_.NextObject();
-        PoolableGuard sync_putall_guard(sync_putall);
-        sync_putall->Reset();
-
         uint16_t parts_cnt_per_key = 1;
         uint16_t parts_cnt_per_record = 5;
         if (table_name.IsHashPartitioned() && table_name.IsObjectTable())
@@ -371,13 +372,11 @@ bool DataStoreServiceClient::PutAll(
         }
 
         // Create partition states and prepare batches
-        std::vector<PartitionCallbackData *> callback_data_list;
-
         // Process hash partitions
         for (auto &[partition_id, flush_recs] : hash_partitions_map)
         {
             auto partition_state = partition_flush_state_pool_.NextObject();
-            partition_state->Reset(partition_id);
+            partition_state->Reset(partition_id, false);
             auto callback_data = partition_callback_data_pool_.NextObject();
             callback_data->Reset(partition_state, sync_putall, kv_table_name);
 
@@ -400,7 +399,7 @@ bool DataStoreServiceClient::PutAll(
         for (auto &[partition_id, flush_recs] : range_partitions_map)
         {
             auto partition_state = partition_flush_state_pool_.NextObject();
-            partition_state->Reset(partition_id);
+            partition_state->Reset(partition_id, true);
             auto callback_data = partition_callback_data_pool_.NextObject();
             callback_data->Reset(partition_state, sync_putall, kv_table_name);
 
@@ -418,82 +417,81 @@ bool DataStoreServiceClient::PutAll(
         }
 
         range_partitions_map.clear();
+    }
 
-        // Set up global coordinator
-        sync_putall->total_partitions_ = sync_putall->partition_states_.size();
+    // Set up global coordinator
+    sync_putall->total_partitions_ = sync_putall->partition_states_.size();
 
-        bool is_range_partitioned = !table_name.IsHashPartitioned();
-        // Start concurrent processing for each partition
-        for (size_t i = 0; i < callback_data_list.size(); ++i)
+    // Start concurrent processing for each partition
+    for (size_t i = 0; i < callback_data_list.size(); ++i)
+    {
+        auto *partition_state = sync_putall->partition_states_[i];
+        auto *callback_data = callback_data_list[i];
+
+        // Start the first batch for this partition
+        auto &first_batch = callback_data->inflight_batch;
+        if (partition_state->GetNextBatch(first_batch))
         {
-            auto *partition_state = sync_putall->partition_states_[i];
-            auto *callback_data = callback_data_list[i];
+            BatchWriteRecords(
+                callback_data->table_name,
+                partition_state->partition_id,
+                GetShardIdByPartitionId(partition_state->partition_id,
+                                        partition_state->is_range_partitioned),
+                std::move(first_batch.key_parts),
+                std::move(first_batch.record_parts),
+                std::move(first_batch.records_ts),
+                std::move(first_batch.records_ttl),
+                std::move(first_batch.op_types),
+                true,  // skip_wal
+                callback_data,
+                PartitionBatchCallback,
+                first_batch.parts_cnt_per_key,
+                first_batch.parts_cnt_per_record);
+        }
+        else
+        {
+            // No batches for this partition, mark as completed
+            sync_putall->OnPartitionCompleted();
+        }
+    }
 
-            // Start the first batch for this partition
-            auto &first_batch = callback_data->inflight_batch;
-            if (partition_state->GetNextBatch(first_batch))
+    // Wait for all partitions to complete
+    {
+        std::unique_lock<bthread::Mutex> lk(sync_putall->mux_);
+        while (sync_putall->completed_partitions_ <
+               sync_putall->total_partitions_)
+        {
+            sync_putall->cv_.wait(lk);
+        }
+    }
+
+    // Check for errors
+    for (auto &partition_state : sync_putall->partition_states_)
+    {
+        if (partition_state->IsFailed())
+        {
+            LOG(ERROR) << "PutAll failed for partition "
+                       << partition_state->partition_id << " with error: "
+                       << partition_state->result.error_msg();
+            for (auto &callback_data : callback_data_list)
             {
-                BatchWriteRecords(
-                    callback_data->table_name,
-                    partition_state->partition_id,
-                    GetShardIdByPartitionId(partition_state->partition_id,
-                                            is_range_partitioned),
-                    std::move(first_batch.key_parts),
-                    std::move(first_batch.record_parts),
-                    std::move(first_batch.records_ts),
-                    std::move(first_batch.records_ttl),
-                    std::move(first_batch.op_types),
-                    true,  // skip_wal
-                    callback_data,
-                    PartitionBatchCallback,
-                    first_batch.parts_cnt_per_key,
-                    first_batch.parts_cnt_per_record);
+                callback_data->Clear();
+                callback_data->Free();
             }
-            else
-            {
-                // No batches for this partition, mark as completed
-                sync_putall->OnPartitionCompleted();
-            }
+            return false;
         }
+    }
 
-        // Wait for all partitions to complete
-        {
-            std::unique_lock<bthread::Mutex> lk(sync_putall->mux_);
-            while (sync_putall->completed_partitions_ <
-                   sync_putall->total_partitions_)
-            {
-                sync_putall->cv_.wait(lk);
-            }
-        }
+    for (auto &callback_data : callback_data_list)
+    {
+        callback_data->Clear();
+        callback_data->Free();
+    }
 
-        // Check for errors
-        for (auto &partition_state : sync_putall->partition_states_)
-        {
-            if (partition_state->IsFailed())
-            {
-                LOG(ERROR) << "PutAll failed for partition "
-                           << partition_state->partition_id << " with error: "
-                           << partition_state->result.error_msg();
-                for (auto &callback_data : callback_data_list)
-                {
-                    callback_data->Clear();
-                    callback_data->Free();
-                }
-                return false;
-            }
-        }
-
-        for (auto &callback_data : callback_data_list)
-        {
-            callback_data->Clear();
-            callback_data->Free();
-        }
-
-        if (metrics::enable_kv_metrics)
-        {
-            metrics::kv_meter->Collect(
-                metrics::NAME_KV_FLUSH_ROWS_TOTAL, records_count, "base");
-        }
+    if (metrics::enable_kv_metrics)
+    {
+        metrics::kv_meter->Collect(
+            metrics::NAME_KV_FLUSH_ROWS_TOTAL, records_count, "base");
     }
     return true;
 }
