@@ -677,6 +677,7 @@ void RocksDBHandler::UpsertTableInternal(
                 const std::string &table_name_str = new_schema_table_name;
 
                 // check catalog version
+                assert(table_engine != txservice::TableEngine::None);
                 std::string catalog_cf_name =
                     txservice::KvTablePrefixOf(table_engine) + table_name_str +
                     "_catalog";
@@ -877,7 +878,7 @@ void RocksDBHandler::UpsertTableInternal(
 
                 // step3. write new column family name and version to table
                 // catalog
-                std::string table_key = table_name_str + "_catalog";
+                std::string &table_key = catalog_cf_name;
                 rocksdb::WideColumns table_catalog_wc;
                 table_catalog_wc.emplace_back("kv_cf_name", new_cf_name);
                 uint64_t version = write_time;
