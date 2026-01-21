@@ -49,7 +49,8 @@ public:
         bool create_if_missing,
         uint32_t shard_id,
         DataStoreService *data_store_service,
-        bool start_db = true) override
+        bool start_db = true,
+        int64_t term = 0) override
     {
         // Add shard_id to object_path_ only for legacy configuration
         // When oss_url is configured, the user can include shard path in the
@@ -91,7 +92,7 @@ public:
 
         if (start_db)
         {
-            bool ret = ds->StartDB();
+            bool ret = ds->StartDB(term);
             if (!ret)
             {
                 LOG(ERROR)

@@ -59,10 +59,10 @@ public:
 
     /**
      * @brief Open the cloud database.
-     * @param cfs_options The cloud file system options.
+     * @param term The term value to use when starting the database.
      * @return True if open successfully, otherwise false.
      */
-    bool StartDB() override;
+    bool StartDB(int64_t term) override;
 
     /**
      * @brief Create a snapshot of the data store.

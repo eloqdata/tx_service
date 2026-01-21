@@ -412,7 +412,9 @@ public:
     {
     }
 
-    virtual bool OnLeaderStart(uint32_t ng_id, uint32_t *next_leader_node)
+    virtual bool OnLeaderStart(uint32_t ng_id,
+                               int64_t term,
+                               uint32_t *next_leader_node)
     {
         return true;
     }
@@ -437,7 +439,8 @@ public:
         assert(false);
     }
 
-    virtual bool AppendPreBuiltTable(const txservice::TableName &table_name)
+    virtual bool AppendPreBuiltTable(const txservice::TableName &table_name,
+                                     const std::string &kv_table_name)
     {
         return true;
     }

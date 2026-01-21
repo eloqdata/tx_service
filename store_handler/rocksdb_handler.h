@@ -295,6 +295,7 @@ public:
     // Decouples UpsertTable from TableSchema, which is ephemeral during DDL
     // replay from the commit log on non-shared storage.
     void UpsertTableInternal(
+        txservice::TableEngine table_engine,
         const std::string &old_schema_kv_table_name,
         uint64_t old_schema_version,
         const std::string &new_schema_kv_table_name,
@@ -510,12 +511,13 @@ public:
     bool NeedCopyRange() const override;
 
     // call this function before Connect().
-    bool AppendPreBuiltTable(const txservice::TableName &table_name)
+    bool AppendPreBuiltTable(const txservice::TableName &table_name,
+                             const std::string &kv_table_name) override
     {
         pre_built_tables_.emplace(
             txservice::TableName(
                 table_name.String(), table_name.Type(), table_name.Engine()),
-            table_name.String());
+            kv_table_name);
         return true;
     }
 
@@ -545,7 +547,9 @@ public:
     static std::string DecodeTxKeyFromKvKey(const char *data, size_t size);
     static uint16_t DecodeBucketIdFromKvKey(const char *data, size_t size);
 
-    bool OnLeaderStart(uint32_t ng_id, uint32_t *next_leader_node) override;
+    bool OnLeaderStart(uint32_t ng_id,
+                       int64_t term,
+                       uint32_t *next_leader_node) override;
 
     void OnStartFollowing(uint32_t ng_id,
                           uint32_t leader_node_id,
@@ -618,7 +622,8 @@ protected:
 
     struct UpsertTableReq
     {
-        UpsertTableReq(const std::string &old_schema_kv_table_name,
+        UpsertTableReq(txservice::TableEngine table_engine,
+                       const std::string &old_schema_kv_table_name,
                        uint64_t old_schema_version,
                        const std::string &new_schema_kv_table_name,
                        const std::string &new_schema_table_name,
@@ -630,7 +635,8 @@ protected:
                        txservice::CcRequestBase *cc_req,
                        txservice::CcShard *ccs,
                        txservice::CcErrorCode *err_code)
-            : old_schema_kv_table_name_(old_schema_kv_table_name),
+            : table_engine_(table_engine),
+              old_schema_kv_table_name_(old_schema_kv_table_name),
               old_schema_version_(old_schema_version),
               new_schema_kv_table_name_(new_schema_kv_table_name),
               new_schema_table_name_(new_schema_table_name),
@@ -645,6 +651,7 @@ protected:
         {
         }
 
+        txservice::TableEngine table_engine_;
         const std::string old_schema_kv_table_name_;
         uint64_t old_schema_version_;
         const std::string new_schema_kv_table_name_;

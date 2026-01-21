@@ -46,7 +46,8 @@ public:
         bool create_if_missing,
         uint32_t shard_id,
         DataStoreService *data_store_service,
-        bool start_db = true) = 0;
+        bool start_db = true,
+        int64_t term = 0) = 0;
 
     virtual DataStoreFactoryType DataStoreType() const = 0;
 

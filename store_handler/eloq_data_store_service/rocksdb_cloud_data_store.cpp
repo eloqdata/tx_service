@@ -260,7 +260,7 @@ rocksdb::S3ClientFactory RocksDBCloudDataStore::BuildS3ClientFactory(
 }
 #endif
 
-bool RocksDBCloudDataStore::StartDB()
+bool RocksDBCloudDataStore::StartDB(int64_t term)
 {
     if (db_)
     {

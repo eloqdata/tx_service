@@ -564,6 +564,7 @@ bool RocksDBHandler::PersistKV(const std::vector<std::string> &kv_table_names)
 };
 
 void RocksDBHandler::UpsertTableInternal(
+    txservice::TableEngine table_engine,
     const std::string &old_schema_kv_table_name,
     uint64_t old_schema_version,
     const std::string &new_schema_kv_table_name,
@@ -588,6 +589,7 @@ void RocksDBHandler::UpsertTableInternal(
     case txservice::OperationType::TruncateTable:
         query_worker_pool_->SubmitWork(
             [this,
+             table_engine,
              old_schema_version,
              old_schema_kv_table_name = old_schema_kv_table_name,
              new_schema_kv_table_name = new_schema_kv_table_name,
@@ -655,7 +657,8 @@ void RocksDBHandler::UpsertTableInternal(
                 if (!db)
                 {
                     std::unique_lock<std::mutex> ddl_lk(pending_ddl_mux_);
-                    pending_ddl_req_.emplace(old_schema_kv_table_name,
+                    pending_ddl_req_.emplace(table_engine,
+                                             old_schema_kv_table_name,
                                              old_schema_version,
                                              new_schema_kv_table_name,
                                              new_schema_table_name,
@@ -674,7 +677,10 @@ void RocksDBHandler::UpsertTableInternal(
                 const std::string &table_name_str = new_schema_table_name;
 
                 // check catalog version
-                std::string catalog_cf_name = table_name_str + "_catalog";
+                assert(table_engine != txservice::TableEngine::None);
+                std::string catalog_cf_name =
+                    txservice::KvTablePrefixOf(table_engine) + table_name_str +
+                    "_catalog";
                 rocksdb::ColumnFamilyHandle *catalog_cfh =
                     GetColumnFamilyHandler(rocksdb::kDefaultColumnFamilyName);
                 rocksdb::PinnableWideColumns pinnable_table_catalog;
@@ -872,7 +878,7 @@ void RocksDBHandler::UpsertTableInternal(
 
                 // step3. write new column family name and version to table
                 // catalog
-                std::string table_key = table_name_str + "_catalog";
+                std::string &table_key = catalog_cf_name;
                 rocksdb::WideColumns table_catalog_wc;
                 table_catalog_wc.emplace_back("kv_cf_name", new_cf_name);
                 uint64_t version = write_time;
@@ -980,7 +986,8 @@ void RocksDBHandler::UpsertTable(
     std::string_view new_schema_table_name =
         new_table_schema->GetBaseTableName().StringView();
 
-    UpsertTableInternal(old_schema_kv_table_name,
+    UpsertTableInternal(new_table_schema->GetBaseTableName().Engine(),
+                        old_schema_kv_table_name,
                         old_schema_version,
                         new_schema_kv_table_name,
                         new_schema_table_name,
@@ -1011,7 +1018,9 @@ void RocksDBHandler::FetchTableCatalog(
                     (int) txservice::CcErrorCode::DATA_STORE_ERR);
                 return;
             }
-            std::string table_key = ccm_table_name.String() + "_catalog";
+            std::string table_key =
+                txservice::KvTablePrefixOf(ccm_table_name.Engine()) +
+                ccm_table_name.String() + "_catalog";
             rocksdb::ColumnFamilyHandle *cfh =
                 GetColumnFamilyHandler(rocksdb::kDefaultColumnFamilyName);
             rocksdb::PinnableWideColumns pinnable_table_catalog;
@@ -2062,7 +2071,9 @@ void RocksDBHandler::RestoreTxCache(txservice::NodeGroupId cc_ng_id,
 
             for (const auto &table_name : restore_table_names)
             {
-                std::string table_key = table_name.String() + "_catalog";
+                std::string table_key =
+                    txservice::KvTablePrefixOf(table_name.Engine()) +
+                    table_name.String() + "_catalog";
                 rocksdb::PinnableWideColumns pinnable_table_catalog;
                 GetDBPtr()->GetEntity(rocksdb::ReadOptions(),
                                       default_cfh,
@@ -2146,7 +2157,9 @@ void RocksDBHandler::RestoreTxCache(txservice::NodeGroupId cc_ng_id,
         });
 }
 
-bool RocksDBHandler::OnLeaderStart(uint32_t ng_id, uint32_t *next_leader_node)
+bool RocksDBHandler::OnLeaderStart(uint32_t ng_id,
+                                   int64_t term,
+                                   uint32_t *next_leader_node)
 {
     bthread::Mutex mux;
     bthread::ConditionVariable cv;
@@ -2892,7 +2905,7 @@ bool RocksDBCloudHandlerImpl::OpenCloudDB(
                     bool found = false;
                     for (const auto &pre_built_table : pre_built_tables_)
                     {
-                        if (pre_built_table.first.String() == table_name)
+                        if (pre_built_table.second == table_name)
                         {
                             found = true;
                             rocksdb::WideColumns table_catalog_wc;
@@ -3404,7 +3417,7 @@ bool RocksDBHandlerImpl::StartDB(bool is_ng_leader, uint32_t *next_leader_node)
                          it != pre_built_tables_.end();
                          ++it)
                     {
-                        if (it->first.StringView() == table_name)
+                        if (it->second == table_name)
                         {
                             pre_built_table = it;
                             break;
@@ -3462,7 +3475,8 @@ bool RocksDBHandlerImpl::StartDB(bool is_ng_leader, uint32_t *next_leader_node)
             UpsertTableReq ddl_req = std::move(pending_ddl_req_.front());
             pending_ddl_req_.pop();
             ddl_lk.unlock();
-            UpsertTableInternal(ddl_req.old_schema_kv_table_name_,
+            UpsertTableInternal(ddl_req.table_engine_,
+                                ddl_req.old_schema_kv_table_name_,
                                 ddl_req.old_schema_version_,
                                 ddl_req.new_schema_kv_table_name_,
                                 ddl_req.new_schema_table_name_,

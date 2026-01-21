@@ -123,7 +123,7 @@ bool DataSubstrate::Init(const std::string &config_file_path)
     // Add Sequences table (system table, not engine-specific)
     instance.prebuilt_tables_.try_emplace(
         txservice::Sequences::table_name_,
-        std::string(txservice::Sequences::table_name_sv_));
+        std::string(txservice::Sequences::kv_table_name_sv_));
 
     // Mark as initialized (but not started)
     instance.init_state_ = InitState::ConfigLoaded;

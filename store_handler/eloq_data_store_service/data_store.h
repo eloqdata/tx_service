@@ -57,9 +57,10 @@ public:
 
     /**
      * @brief Start the data store.
+     * @param term The term value to use when starting the database.
      * @return True if start successfully, otherwise false.
      */
-    virtual bool StartDB() = 0;
+    virtual bool StartDB(int64_t term) = 0;
 
     /**
      * @brief Close the data store.

@@ -453,7 +453,9 @@ public:
     void RestoreTxCache(txservice::NodeGroupId cc_ng_id,
                         int64_t cc_ng_term) override;
 
-    bool OnLeaderStart(uint32_t ng_id, uint32_t *next_leader_node) override;
+    bool OnLeaderStart(uint32_t ng_id,
+                       int64_t term,
+                       uint32_t *next_leader_node) override;
 
     bool OnLeaderStop(uint32_t ng_id, int64_t term) override;
 
@@ -530,12 +532,13 @@ public:
 
     bool InitPreBuiltTables();
     // call this function before Connect().
-    bool AppendPreBuiltTable(const txservice::TableName &table_name)
+    bool AppendPreBuiltTable(const txservice::TableName &table_name,
+                             const std::string &kv_table_name) override
     {
         pre_built_table_names_.emplace(
             txservice::TableName(
                 table_name.String(), table_name.Type(), table_name.Engine()),
-            table_name.String());
+            kv_table_name);
         return true;
     }
 

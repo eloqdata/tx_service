@@ -82,7 +82,7 @@ void RocksDBDataStore::Shutdown()
     }
 }
 
-bool RocksDBDataStore::StartDB()
+bool RocksDBDataStore::StartDB(int64_t term)
 {
     if (db_)
     {
