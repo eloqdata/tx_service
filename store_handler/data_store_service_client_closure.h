@@ -130,6 +130,7 @@ private:
  */
 struct PartitionFlushState : public Poolable
 {
+    bool is_range_partitioned{false};
     int32_t partition_id;
     std::queue<PartitionBatchRequest> pending_batches;
     bool failed = false;
@@ -141,9 +142,10 @@ struct PartitionFlushState : public Poolable
         result.Clear();
     }
 
-    void Reset(int32_t pid)
+    void Reset(int32_t pid, bool is_range_partitioned)
     {
         partition_id = pid;
+        this->is_range_partitioned = is_range_partitioned;
         while (!pending_batches.empty())
         {
             pending_batches.pop();
@@ -1756,7 +1758,7 @@ public:
                 ::EloqDS::remote::DataStoreError::REQUESTED_NODE_NOT_OWNER)
             {
                 ds_service_client_->HandleShardingError(result_);
-                // TODO(lzx): retry.
+                need_retry = true;
             }
         }
 

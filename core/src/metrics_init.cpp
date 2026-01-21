@@ -95,7 +95,7 @@ bool DataSubstrate::InitializeMetrics(const INIReader &config_reader)
                       << (metrics::enable_kv_metrics ? "ON" : "OFF");
 
             metrics::enable_eloqstore_metrics = config_reader.GetBoolean(
-                "metrics", "enable_eloqstore_metrics", false);
+                "metrics", "enable_eloqstore_metrics", true);
             LOG(INFO) << "enable_eloqstore_metrics: "
                       << (metrics::enable_eloqstore_metrics ? "ON" : "OFF");
         }
