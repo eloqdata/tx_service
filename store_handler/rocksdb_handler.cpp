@@ -2071,7 +2071,9 @@ void RocksDBHandler::RestoreTxCache(txservice::NodeGroupId cc_ng_id,
 
             for (const auto &table_name : restore_table_names)
             {
-                std::string table_key = table_name.String() + "_catalog";
+                std::string table_key =
+                    txservice::KvTablePrefixOf(table_name.Engine()) +
+                    table_name.String() + "_catalog";
                 rocksdb::PinnableWideColumns pinnable_table_catalog;
                 GetDBPtr()->GetEntity(rocksdb::ReadOptions(),
                                       default_cfh,
