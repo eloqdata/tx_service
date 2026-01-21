@@ -329,7 +329,7 @@ void SkGenerator::ScanAndEncodeIndex(const TxKey *start_key,
                                           tx_number,
                                           start_key,
                                           end_key,
-                                          false,
+                                          0,
                                           true,
                                           true);
 

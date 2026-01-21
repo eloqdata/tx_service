@@ -4064,7 +4064,7 @@ void LocalCcShards::DataSyncForRangePartition(
                                          tx_number,
                                          &start_tx_key,
                                          &end_tx_key,
-                                         false,
+                                         last_sync_ts,
                                          export_base_table_items,
                                          false,
                                          store_range,
