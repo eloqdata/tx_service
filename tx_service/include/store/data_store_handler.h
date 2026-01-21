@@ -439,7 +439,8 @@ public:
         assert(false);
     }
 
-    virtual bool AppendPreBuiltTable(const txservice::TableName &table_name)
+    virtual bool AppendPreBuiltTable(const txservice::TableName &table_name,
+                                     const std::string &kv_table_name)
     {
         return true;
     }

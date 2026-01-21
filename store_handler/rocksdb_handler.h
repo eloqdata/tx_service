@@ -510,12 +510,13 @@ public:
     bool NeedCopyRange() const override;
 
     // call this function before Connect().
-    bool AppendPreBuiltTable(const txservice::TableName &table_name)
+    bool AppendPreBuiltTable(const txservice::TableName &table_name,
+                             const std::string &kv_table_name) override
     {
         pre_built_tables_.emplace(
             txservice::TableName(
                 table_name.String(), table_name.Type(), table_name.Engine()),
-            table_name.String());
+            kv_table_name);
         return true;
     }
 

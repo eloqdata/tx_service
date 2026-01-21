@@ -334,9 +334,9 @@ bool DataSubstrate::InitializeStorageHandler(const INIReader &config_reader)
 
 #endif
 
-    for (const auto &[table_name, _] : prebuilt_tables_)
+    for (const auto &[table_name, kv_table_name] : prebuilt_tables_)
     {
-        store_hd_->AppendPreBuiltTable(table_name);
+        store_hd_->AppendPreBuiltTable(table_name, kv_table_name);
     }
 
     if (!store_hd_->Connect())

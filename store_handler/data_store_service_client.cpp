@@ -5116,7 +5116,6 @@ bool DataStoreServiceClient::InitPreBuiltTables()
                 return false;
             }
         }
-
         keys_with_prefix.emplace_back(
             txservice::KvTablePrefixOf(table_name.Engine()));
         keys_with_prefix.back().append(tbl_sv);
