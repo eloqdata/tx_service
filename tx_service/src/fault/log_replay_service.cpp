@@ -399,7 +399,8 @@ int RecoveryService::on_received_messages(brpc::StreamId stream_id,
     }
     bthread::Mutex &mux = info->mux_;
     bool &recovery_error = info->recovery_error_;
-    uint16_t next_core = 0;
+    uint32_t core_rand = butil::fast_rand();
+    uint16_t next_core = core_rand % local_shards_.Count();
     std::atomic<WaitingStatus> &status = info->status_;
     std::atomic<size_t> &on_fly_cnt = info->on_fly_cnt_;
 
