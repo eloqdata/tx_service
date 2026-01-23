@@ -423,6 +423,7 @@ EloqStoreConfig::EloqStoreConfig(const INIReader &config_reader,
     }
     eloqstore_configs_.root_meta_cache_size =
         parse_size(root_meta_cache_size_str);
+    node_memory_mb -= eloqstore_configs_.root_meta_cache_size / (1024 * 1024);
     eloqstore_configs_.manifest_limit =
         !CheckCommandLineFlagIsDefault("eloq_store_manifest_limit")
             ? FLAGS_eloq_store_manifest_limit
