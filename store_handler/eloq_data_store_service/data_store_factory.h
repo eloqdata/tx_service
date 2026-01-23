@@ -112,10 +112,11 @@ public:
     }
 
     /**
-     * @brief Set the prewarm filter function for eloqstore
-     * @param prewarm_filter The prewarm filter function
+     * @brief Set the partition filter function for eloqstore
+     * @param ng_id The node group id
+     * @param bucket_ids The bucket ids
      */
-    virtual void InitializePrewarmFilter(
+    virtual void InitializePartitionFilter(
         uint32_t ng_id, std::unordered_set<uint16_t> &&bucket_ids)
     {
     }

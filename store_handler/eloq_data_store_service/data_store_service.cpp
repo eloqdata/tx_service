@@ -2207,8 +2207,8 @@ void DataStoreService::OpenDataStore(uint32_t shard_id,
 {
     if (data_store_factory_ != nullptr)
     {
-        data_store_factory_->InitializePrewarmFilter(shard_id,
-                                                     std::move(bucket_ids));
+        data_store_factory_->InitializePartitionFilter(shard_id,
+                                                       std::move(bucket_ids));
     }
 
     auto start_time = std::chrono::steady_clock::now();

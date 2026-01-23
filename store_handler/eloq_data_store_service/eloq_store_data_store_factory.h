@@ -108,10 +108,10 @@ public:
         return 0;  // Not applicable for EloqStore
     }
 
-    void InitializePrewarmFilter(
+    void InitializePartitionFilter(
         uint32_t ng_id, std::unordered_set<uint16_t> &&bucket_ids) override
     {
-        eloq_store_configs_.eloqstore_configs_.prewarm_filter =
+        eloq_store_configs_.eloqstore_configs_.partition_filter =
             [bucket_ids = std::move(bucket_ids)](
                 const eloqstore::TableIdent &table_ident) -> bool
         {
