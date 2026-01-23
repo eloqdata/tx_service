@@ -322,6 +322,12 @@ void Checkpointer::Ckpt(bool is_last_ckpt)
             Sharder::Instance().UpdateNodeGroupCkptTs(node_group,
                                                       last_succ_ckpt_ts);
 
+            // Output diagnostic information
+            if (FLAGS_report_ckpt)
+            {
+                Sharder::Instance().GetLocalCcShards()->ReportDiagnosticStatus();
+            }
+
             if (!is_standby_node)
             {
                 assert(standby_node_term < 0 && leader_term >= 0);
