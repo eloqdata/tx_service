@@ -1858,6 +1858,9 @@ public:
     // multiple threads.
     std::mutex table_ranges_heap_mux_;
 
+    // Diagnostic method
+    void ReportDiagnosticStatus() const;
+
 private:
     static inline int32_t DefaultNextPrefetchSlice(int32_t idx, bool forward)
     {
@@ -2220,7 +2223,8 @@ private:
         }
 
         // Function to allocate memory quota
-        uint64_t AllocateFlushDataMemQuota(uint64_t quota)
+        uint64_t AllocateFlushDataMemQuota(uint64_t quota,
+                                           size_t worker_idx = 0)
         {
             std::unique_lock<bthread::Mutex> lk(mem_mutex_);
 
@@ -2250,10 +2254,11 @@ private:
             // Wait until enough memory is available
             while (!has_enough_memory())
             {
-                DLOG(INFO) << "Flush data memory quota is full "
-                           << flush_data_mem_usage_
-                           << " ,request quota: " << quota
-                           << " total quota: " << flush_data_mem_quota_;
+                LOG(INFO) << "Flush data memory quota is full "
+                          << flush_data_mem_usage_
+                          << " ,request quota: " << quota
+                          << " total quota: " << flush_data_mem_quota_
+                          << ", worker idx = " << worker_idx;
                 mem_cv_.wait(lk);
             }
 
@@ -2540,6 +2545,14 @@ private:
     mi_heap_t *hash_partition_ckpt_heap_{nullptr};
     mi_threadid_t hash_partition_main_thread_id_{0};
     std::mutex hash_partition_ckpt_heap_mux_;
+
+    // Diagnostic related
+    std::atomic<uint64_t> pending_flush_queue_size_{0};
+    std::atomic<uint64_t> pending_flush_queue_max_size_{0};
+    std::atomic<uint64_t> flush_queue_block_count_{0};
+    std::atomic<uint64_t> flush_queue_total_block_time_us_{0};
+    std::atomic<uint64_t> mem_quota_block_count_{0};
+    std::atomic<uint64_t> mem_quota_total_block_time_us_{0};
 
     friend class LocalCcHandler;
     friend class remote::RemoteCcHandler;

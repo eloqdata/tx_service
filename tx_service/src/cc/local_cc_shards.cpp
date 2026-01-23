@@ -71,11 +71,11 @@ DEFINE_double(ckpt_buffer_ratio,
               "Fraction of node memory carved out for checkpoint flush "
               "buffers and the data-sync memory controller");
 DEFINE_uint32(hash_partition_ckpt_scan_yield_time_us,
-              100,
+              32,
               "Max microseconds a hash partition checkpoint/data-sync scan may "
               "run before yielding a Tx processor thread");
 DEFINE_uint64(hash_partition_data_sync_scan_batch_size,
-              100,
+              50,
               "Upper bound on the number of CC pages exported in a single "
               "hash partition data-sync scan batch");
 DEFINE_uint64(hash_partition_data_sync_scan_data_size,
@@ -3010,6 +3010,14 @@ void LocalCcShards::DataSyncWorker(size_t worker_idx)
                 task_worker_lk,
                 [this, worker_idx, core_number]
                 {
+                    LOG(INFO)
+                        << "DataSyncWorker, worker idx = " << worker_idx
+                        << ", yes: "
+                        << (((worker_idx + core_number -
+                              last_data_sync_worker_idx_) %
+                             core_number) <
+                            scan_concurrency_.load(std::memory_order_relaxed));
+
                     return ((worker_idx + core_number -
                              last_data_sync_worker_idx_) %
                             core_number) <
@@ -4498,6 +4506,7 @@ void LocalCcShards::PostProcessHashPartitionDataSyncTask(
                 CommitTx(data_sync_txm);
             }
 
+            LOG(INFO) << "PopPendingTask, worker idx = " << task->id_;
             PopPendingTask(task->node_group_id_,
                            task->node_group_term_,
                            task->table_name_,
@@ -4569,6 +4578,7 @@ void LocalCcShards::PostProcessHashPartitionDataSyncTask(
 void LocalCcShards::DataSyncForHashPartition(
     std::shared_ptr<DataSyncTask> data_sync_task, size_t worker_idx)
 {
+    LOG(INFO) << "data sync worker: " << worker_idx << ", start";
     // Whether other task worker is processing this table.
     const TableName &table_name = data_sync_task->table_name_;
     uint32_t ng_id = data_sync_task->node_group_id_;
@@ -4768,6 +4778,9 @@ void LocalCcShards::DataSyncForHashPartition(
     const size_t scan_concurrency =
         flush_buffer_size /
         (default_data_file_size * approximate_partition_number_this_core);
+
+    scan_concurrency_.store(100);
+    /*
     if (scan_concurrency > 0)
     {
         bool need_notify = scan_concurrency >
@@ -4779,6 +4792,7 @@ void LocalCcShards::DataSyncForHashPartition(
             data_sync_worker_ctx_.cv_.notify_all();
         }
     }
+    */
 
     // 3. Scan records.
     {
@@ -4804,6 +4818,7 @@ void LocalCcShards::DataSyncForHashPartition(
     auto mv_base_vec =
         std::make_unique<std::vector<std::pair<TxKey, int32_t>>>();
     uint64_t vec_mem_usage = 0;
+    uint64_t debug_data_size = 0;
 
     // Note: `DataSyncScanCc` needs to ensure that no two ckpt_rec with the
     // same Key can be generated. Our subsequent algorithms are based on
@@ -5038,14 +5053,46 @@ void LocalCcShards::DataSyncForHashPartition(
 
         // this thread will wait in AllocatePendingFlushDataMemQuota if
         // quota is not available
+        auto quota_start = std::chrono::steady_clock::now();
         uint64_t old_usage =
-            data_sync_mem_controller_.AllocateFlushDataMemQuota(
-                flush_data_size);
-        DLOG(INFO) << "AllocateFlushDataMemQuota old_usage: " << old_usage
-                   << " new_usage: " << old_usage + flush_data_size
-                   << " quota: " << data_sync_mem_controller_.FlushMemoryQuota()
-                   << " flight_tasks: " << data_sync_task->flight_task_cnt_
-                   << " record count: " << scan_cc.accumulated_scan_cnt_;
+            data_sync_mem_controller_.AllocateFlushDataMemQuota(flush_data_size,
+                                                                worker_idx);
+
+        debug_data_size += scan_cc.DataSyncVec().size();
+        auto quota_end = std::chrono::steady_clock::now();
+        auto quota_duration =
+            std::chrono::duration_cast<std::chrono::microseconds>(quota_end -
+                                                                  quota_start)
+                .count();
+
+        uint64_t new_usage = old_usage + flush_data_size;
+        uint64_t quota = data_sync_mem_controller_.FlushMemoryQuota();
+        double usage_ratio = quota > 0 ? (double) new_usage / quota : 0.0;
+
+        if (quota_duration > 1000 ||
+            usage_ratio > 0.8)  // Blocked for more than 1ms or usage > 80%
+        {
+            mem_quota_block_count_.fetch_add(1, std::memory_order_relaxed);
+            mem_quota_total_block_time_us_.fetch_add(quota_duration,
+                                                     std::memory_order_relaxed);
+
+            /*
+            LOG(WARNING) << "Memory quota: "
+                         << "allocation_time_us=" << quota_duration << ", "
+                         << "requested=" << flush_data_size << ", "
+                         << "old_usage=" << old_usage << ", "
+                         << "new_usage=" << new_usage << ", "
+                         << "quota=" << quota << ", "
+                         << "usage_ratio=" << (usage_ratio * 100) << "%"
+                         << ", worker idx = " << worker_idx;
+            */
+        }
+
+        DLOG(INFO) << "AllocateFlushDataMemQuota: "
+                   << "old_usage=" << old_usage << ", new_usage=" << new_usage
+                   << ", quota=" << quota
+                   << ", usage_ratio=" << (usage_ratio * 100) << "%"
+                   << ", allocation_time_us=" << quota_duration;
 
         std::unique_lock<std::mutex> heap_lk(hash_partition_ckpt_heap_mux_);
         mi_threadid_t prev_thd =
@@ -5212,7 +5259,6 @@ void LocalCcShards::DataSyncForHashPartition(
         {
             data_sync_task->flight_task_cnt_ += 1;
             flight_task_lk.unlock();
-
             AddFlushTaskEntry(
                 std::make_unique<FlushTaskEntry>(std::move(data_sync_vec),
                                                  std::move(archive_vec),
@@ -5234,6 +5280,8 @@ void LocalCcShards::DataSyncForHashPartition(
     PostProcessHashPartitionDataSyncTask(std::move(data_sync_task),
                                          data_sync_txm,
                                          DataSyncTask::CkptErrorCode::NO_ERROR);
+    LOG(INFO) << "data sync worker: " << worker_idx
+              << ", data size = " << debug_data_size;
 }
 
 void LocalCcShards::PopPendingTask(NodeGroupId ng_id,
@@ -5719,15 +5767,70 @@ void LocalCcShards::AddFlushTaskEntry(std::unique_ptr<FlushTaskEntry> &&entry)
             }
         }
 
+        // Monitor queue size
+        size_t queue_size = pending_flush_work_.size();
+        pending_flush_queue_size_.store(queue_size, std::memory_order_relaxed);
+        uint64_t max_size =
+            pending_flush_queue_max_size_.load(std::memory_order_relaxed);
+        if (queue_size > max_size)
+        {
+            pending_flush_queue_max_size_.store(queue_size,
+                                                std::memory_order_relaxed);
+        }
+
         // Could not merge, wait if queue is full
         while (pending_flush_work_.size() >=
                static_cast<size_t>(flush_data_worker_ctx_.worker_num_))
         {
+            // Record block start
+            flush_queue_block_count_.fetch_add(1, std::memory_order_relaxed);
+            auto block_start = std::chrono::steady_clock::now();
+
+            // If this is the first block or every 10th block, output diagnostic
+            // info
+            static thread_local uint64_t consecutive_blocks = 0;
+            consecutive_blocks++;
+
+            if (consecutive_blocks == 1 || consecutive_blocks % 10 == 0)
+            {
+                LOG(WARNING)
+                    << "Flush queue is FULL, blocking data sync worker. "
+                    << "consecutive_blocks=" << consecutive_blocks;
+                ReportDiagnosticStatus();
+            }
+
             flush_data_worker_ctx_.cv_.wait(worker_lk);
+
+            // Record block end
+            auto block_end = std::chrono::steady_clock::now();
+            auto block_duration =
+                std::chrono::duration_cast<std::chrono::microseconds>(
+                    block_end - block_start)
+                    .count();
+            flush_queue_total_block_time_us_.fetch_add(
+                block_duration, std::memory_order_relaxed);
+
+            if (block_duration > 1000000)  // Blocked for more than 1 second
+            {
+                LOG(ERROR) << "Flush queue blocked for "
+                           << (block_duration / 1000) << " ms! "
+                           << "This may indicate a serious bottleneck.";
+                ReportDiagnosticStatus();
+            }
+
+            LOG(WARNING) << "Flush queue blocked for " << block_duration
+                         << " us, "
+                         << "queue_size=" << pending_flush_work_.size()
+                         << ", worker_num="
+                         << flush_data_worker_ctx_.worker_num_;
+
+            consecutive_blocks = 0;  // Reset consecutive block count
         }
 
         // Add as new task
         pending_flush_work_.emplace_back(std::move(flush_data_task));
+        pending_flush_queue_size_.store(pending_flush_work_.size(),
+                                        std::memory_order_relaxed);
         flush_data_worker_ctx_.cv_.notify_one();
     }
 }
@@ -5752,6 +5855,17 @@ void LocalCcShards::FlushCurrentFlushBuffer()
             }
         }
 
+        // Monitor queue size
+        size_t queue_size = pending_flush_work_.size();
+        pending_flush_queue_size_.store(queue_size, std::memory_order_relaxed);
+        uint64_t max_size =
+            pending_flush_queue_max_size_.load(std::memory_order_relaxed);
+        if (queue_size > max_size)
+        {
+            pending_flush_queue_max_size_.store(queue_size,
+                                                std::memory_order_relaxed);
+        }
+
         // Could not merge, wait if queue is full
         while (pending_flush_work_.size() >=
                static_cast<size_t>(flush_data_worker_ctx_.worker_num_))
@@ -5761,16 +5875,27 @@ void LocalCcShards::FlushCurrentFlushBuffer()
 
         // Add as new task
         pending_flush_work_.emplace_back(std::move(flush_data_task));
+        pending_flush_queue_size_.store(pending_flush_work_.size(),
+                                        std::memory_order_relaxed);
         flush_data_worker_ctx_.cv_.notify_one();
     }
 }
 
 void LocalCcShards::FlushData(std::unique_lock<std::mutex> &flush_worker_lk)
 {
+    auto flush_start = std::chrono::steady_clock::now();
+
     // Retrieve first pending work and pop it (FIFO).
     std::unique_ptr<FlushDataTask> cur_work =
         std::move(pending_flush_work_.front());
     pending_flush_work_.pop_front();
+
+    size_t task_size = cur_work->GetPendingFlushSize();
+    size_t entry_count = 0;
+    for (const auto &[table_name, entries] : cur_work->flush_task_entries_)
+    {
+        entry_count += entries.size();
+    }
 
     // Notify any threads waiting for queue space
     flush_data_worker_ctx_.cv_.notify_all();
@@ -5780,7 +5905,9 @@ void LocalCcShards::FlushData(std::unique_lock<std::mutex> &flush_worker_lk)
     auto &flush_task_entries = cur_work->flush_task_entries_;
 
     bool succ = true;
-    // Flushes to the data store
+
+    // CopyBaseToArchive timing
+    auto copy_start = std::chrono::steady_clock::now();
     if (EnableMvcc())
     {
         succ = store_hd_->CopyBaseToArchive(flush_task_entries);
@@ -5790,7 +5917,13 @@ void LocalCcShards::FlushData(std::unique_lock<std::mutex> &flush_worker_lk)
                           "storage failed";
         }
     }
+    auto copy_end = std::chrono::steady_clock::now();
+    auto copy_duration = std::chrono::duration_cast<std::chrono::milliseconds>(
+                             copy_end - copy_start)
+                             .count();
 
+    // PutAll timing
+    auto putall_start = std::chrono::steady_clock::now();
     if (succ)
     {
         succ = store_hd_->PutAll(flush_task_entries);
@@ -5800,7 +5933,14 @@ void LocalCcShards::FlushData(std::unique_lock<std::mutex> &flush_worker_lk)
                           "storage failed";
         }
     }
+    auto putall_end = std::chrono::steady_clock::now();
+    auto putall_duration =
+        std::chrono::duration_cast<std::chrono::milliseconds>(putall_end -
+                                                              putall_start)
+            .count();
 
+    // PutArchivesAll timing
+    auto archive_start = std::chrono::steady_clock::now();
     if (succ && EnableMvcc())
     {
         succ = store_hd_->PutArchivesAll(flush_task_entries);
@@ -5810,8 +5950,14 @@ void LocalCcShards::FlushData(std::unique_lock<std::mutex> &flush_worker_lk)
                           "kv storage failed";
         }
     }
+    auto archive_end = std::chrono::steady_clock::now();
+    auto archive_duration =
+        std::chrono::duration_cast<std::chrono::milliseconds>(archive_end -
+                                                              archive_start)
+            .count();
 
-    // Persist data in kv store if needed
+    // PersistKV timing
+    auto persist_start = std::chrono::steady_clock::now();
     if (succ && store_hd_->NeedPersistKV())
     {
         std::vector<std::string> kv_table_names;
@@ -5821,6 +5967,26 @@ void LocalCcShards::FlushData(std::unique_lock<std::mutex> &flush_worker_lk)
         }
         succ = store_hd_->PersistKV(kv_table_names);
     }
+    auto persist_end = std::chrono::steady_clock::now();
+    auto persist_duration =
+        std::chrono::duration_cast<std::chrono::milliseconds>(persist_end -
+                                                              persist_start)
+            .count();
+
+    auto flush_end = std::chrono::steady_clock::now();
+    auto flush_total_duration =
+        std::chrono::duration_cast<std::chrono::milliseconds>(flush_end -
+                                                              flush_start)
+            .count();
+
+    LOG(INFO) << "FlushData completed: "
+              << "total=" << flush_total_duration << "ms, "
+              << "copy=" << copy_duration << "ms, "
+              << "putall=" << putall_duration << "ms, "
+              << "archive=" << archive_duration << "ms, "
+              << "persist=" << persist_duration << "ms, "
+              << "task_size=" << task_size << " bytes, "
+              << "entry_count=" << entry_count;
 
     std::unordered_set<uint16_t> updated_ckpt_ts_core_ids;
     // Update cce ckpt ts in memory
@@ -5915,8 +6081,12 @@ void LocalCcShards::FlushData(std::unique_lock<std::mutex> &flush_worker_lk)
 
 void LocalCcShards::FlushDataWorker()
 {
+    using clock = std::chrono::steady_clock;
     size_t previous_flush_size = 0;
-    auto previous_size_update_time = std::chrono::steady_clock::now();
+    auto previous_size_update_time = clock::now();
+    auto last_report_time = clock::now();
+    const auto report_interval = std::chrono::seconds(5);
+
     std::unique_lock<std::mutex> flush_worker_lk(flush_data_worker_ctx_.mux_);
     while (flush_data_worker_ctx_.status_ == WorkerStatus::Active)
     {
@@ -5976,6 +6146,39 @@ void LocalCcShards::FlushDataWorker()
                 return false;
             });
 
+        // Periodic status report
+        auto current_time = clock::now();
+        if (current_time - last_report_time >= report_interval)
+        {
+            size_t queue_size = pending_flush_work_.size();
+            uint64_t block_count =
+                flush_queue_block_count_.load(std::memory_order_relaxed);
+            uint64_t total_block_time = flush_queue_total_block_time_us_.load(
+                std::memory_order_relaxed);
+
+            uint64_t mem_quota_block_count =
+                mem_quota_block_count_.load(std::memory_order_relaxed);
+            uint64_t mem_quota_total_block_time =
+                mem_quota_total_block_time_us_.load(std::memory_order_relaxed);
+            uint64_t mem_quota = data_sync_mem_controller_.FlushMemoryQuota();
+
+            LOG(INFO) << "Flush Worker Status: "
+                      << "queue_size=" << queue_size << "/"
+                      << flush_data_worker_ctx_.worker_num_
+                      << ", queue_block_count=" << block_count
+                      << ", queue_avg_block_time_us="
+                      << (block_count > 0 ? total_block_time / block_count : 0)
+                      << ", mem_quota_block_count=" << mem_quota_block_count
+                      << ", mem_quota_avg_block_time_us="
+                      << (mem_quota_block_count > 0
+                              ? mem_quota_total_block_time /
+                                    mem_quota_block_count
+                              : 0)
+                      << ", mem_quota=" << mem_quota;
+
+            last_report_time = current_time;
+        }
+
         if (pending_flush_work_.empty())
         {
             continue;
@@ -5988,6 +6191,49 @@ void LocalCcShards::FlushDataWorker()
     {
         FlushData(flush_worker_lk);
     }
+}
+
+void LocalCcShards::ReportDiagnosticStatus() const
+{
+    size_t queue_size = pending_flush_work_.size();
+    uint64_t queue_block_count =
+        flush_queue_block_count_.load(std::memory_order_relaxed);
+    uint64_t queue_total_block_time =
+        flush_queue_total_block_time_us_.load(std::memory_order_relaxed);
+    uint64_t queue_max_size =
+        pending_flush_queue_max_size_.load(std::memory_order_relaxed);
+
+    uint64_t mem_quota_block_count =
+        mem_quota_block_count_.load(std::memory_order_relaxed);
+    uint64_t mem_quota_total_block_time =
+        mem_quota_total_block_time_us_.load(std::memory_order_relaxed);
+    uint64_t mem_quota = data_sync_mem_controller_.FlushMemoryQuota();
+
+    LOG(INFO) << "=== Checkpoint Diagnostic Status ==="
+              << "\n  Flush Queue:"
+              << "\n    current_size=" << queue_size
+              << "\n    max_size=" << queue_max_size
+              << "\n    worker_num=" << flush_data_worker_ctx_.worker_num_
+              << "\n    block_count=" << queue_block_count
+              << "\n    total_block_time_us=" << queue_total_block_time
+              << "\n    avg_block_time_us="
+              << (queue_block_count > 0
+                      ? queue_total_block_time / queue_block_count
+                      : 0)
+              << "\n  Memory Quota:"
+              << "\n    quota=" << mem_quota
+              << "\n    block_count=" << mem_quota_block_count
+              << "\n    total_block_time_us=" << mem_quota_total_block_time
+              << "\n    avg_block_time_us="
+              << (mem_quota_block_count > 0
+                      ? mem_quota_total_block_time / mem_quota_block_count
+                      : 0)
+              << "\n  Flush Workers:"
+              << "\n    worker_num=" << flush_data_worker_ctx_.worker_num_
+              << "\n    status="
+              << (flush_data_worker_ctx_.status_ == WorkerStatus::Active
+                      ? "Active"
+                      : "Terminated");
 }
 
 void LocalCcShards::RangeSplitWorker()
