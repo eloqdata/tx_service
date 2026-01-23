@@ -388,8 +388,6 @@ int RecoveryService::on_received_messages(brpc::StreamId stream_id,
                                           butil::IOBuf *const messages[],
                                           size_t size)
 {
-    std::shared_ptr<std::vector<::txlog::ReplayMessage>> msg_vec =
-        std::make_shared<std::vector<::txlog::ReplayMessage>>(size);
     std::unordered_map<TableName, std::shared_ptr<std::atomic_uint32_t>>
         table_range_split_cnt;
     std::unordered_set<TableName> range_split_tables;
@@ -401,13 +399,14 @@ int RecoveryService::on_received_messages(brpc::StreamId stream_id,
     }
     bthread::Mutex &mux = info->mux_;
     bool &recovery_error = info->recovery_error_;
-    uint16_t next_core = 0;
+    uint32_t core_rand = butil::fast_rand();
+    uint16_t next_core = core_rand % local_shards_.Count();
     std::atomic<WaitingStatus> &status = info->status_;
     std::atomic<size_t> &on_fly_cnt = info->on_fly_cnt_;
 
     for (size_t idx = 0; idx < size; ++idx)
     {
-        ::txlog::ReplayMessage &msg = msg_vec->at(idx);
+        ::txlog::ReplayMessage msg;
         butil::IOBufAsZeroCopyInputStream wrapper(*messages[idx]);
         msg.ParseFromZeroCopyStream(&wrapper);
         const bool is_lock_recovery = msg.is_lock_recovery();
@@ -617,22 +616,37 @@ int RecoveryService::on_received_messages(brpc::StreamId stream_id,
         }
 
         // parse and process log records
-        const std::string &log_records = msg.binary_log_records();
-        ParseDataLogCc *cc_req = parse_datalog_cc_pool_.NextRequest();
-        cc_req->Reset(log_records,
-                      cc_ng_id,
-                      cc_ng_term,
-                      mux,
-                      status,
-                      on_fly_cnt,
-                      recovery_error,
-                      is_lock_recovery);
-        on_fly_cnt.fetch_add(1, std::memory_order_release);
-        local_shards_.EnqueueCcRequest(next_core, cc_req);
-        next_core = (next_core + 1) % local_shards_.Count();
-
-        if (msg.has_finish())
+        if (!msg.has_finish())
         {
+            ParseDataLogCc *cc_req = parse_datalog_cc_pool_.NextRequest();
+            cc_req->Reset(std::move(msg),
+                          cc_ng_id,
+                          cc_ng_term,
+                          mux,
+                          status,
+                          on_fly_cnt,
+                          recovery_error,
+                          is_lock_recovery);
+            on_fly_cnt.fetch_add(1, std::memory_order_release);
+            local_shards_.EnqueueCcRequest(next_core, cc_req);
+            next_core = (next_core + 1) % local_shards_.Count();
+        }
+        else  // has finish message
+        {
+            const std::string &log_records = msg.binary_log_records();
+            ParseDataLogCc *cc_req = parse_datalog_cc_pool_.NextRequest();
+            cc_req->Reset(log_records,
+                          cc_ng_id,
+                          cc_ng_term,
+                          mux,
+                          status,
+                          on_fly_cnt,
+                          recovery_error,
+                          is_lock_recovery);
+            on_fly_cnt.fetch_add(1, std::memory_order_release);
+            local_shards_.EnqueueCcRequest(next_core, cc_req);
+            next_core = (next_core + 1) % local_shards_.Count();
+
             // finish log replay of this log group
             // wait for all preceding ReplayLogCc requests finish
             WaitAndClearRequests(
