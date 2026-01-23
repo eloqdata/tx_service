@@ -1860,6 +1860,9 @@ public:
     // multiple threads.
     std::mutex table_ranges_heap_mux_;
 
+    // Diagnostic method
+    void ReportDiagnosticStatus() const;
+
 private:
     static inline int32_t DefaultNextPrefetchSlice(int32_t idx, bool forward)
     {
@@ -2210,27 +2213,43 @@ private:
     struct DataSyncMemoryController
     {
         explicit DataSyncMemoryController(uint64_t mem_quota)
-            : flush_data_mem_usage_(0), flush_data_mem_quota_(mem_quota)
+            : flush_data_mem_quota_(mem_quota)
         {
         }
 
         DataSyncMemoryController(const DataSyncMemoryController &rhs) = delete;
         DataSyncMemoryController(DataSyncMemoryController &&rhs)
-            : flush_data_mem_usage_(rhs.flush_data_mem_usage_),
+            : flush_data_mem_usage_(std::move(rhs.flush_data_mem_usage_)),
               flush_data_mem_quota_(rhs.flush_data_mem_quota_)
         {
         }
 
+        // Initialize the number of workers
+        void InitializeWorkers(size_t worker_num)
+        {
+            std::lock_guard<bthread::Mutex> lock(mem_mutex_);
+            flush_data_mem_usage_.resize(worker_num, 0);
+        }
+
         // Function to allocate memory quota
-        uint64_t AllocateFlushDataMemQuota(uint64_t quota)
+        uint64_t AllocateFlushDataMemQuota(uint64_t quota,
+                                           size_t worker_idx = 0)
         {
             std::unique_lock<bthread::Mutex> lk(mem_mutex_);
 
+            // Ensure worker_idx is valid
+            if (worker_idx >= flush_data_mem_usage_.size())
+            {
+                flush_data_mem_usage_.resize(worker_idx + 1, 0);
+            }
+
             // Lambda to check if there's enough available memory
-            auto has_enough_memory = [this, quota]()
+            // Check total usage across all workers
+            auto has_enough_memory = [this, quota](size_t worker_idx)
             {
                 // if quota is avaliable
-                if ((flush_data_mem_usage_ + quota) <= flush_data_mem_quota_)
+                if ((flush_data_mem_usage_[worker_idx] + quota) <=
+                    (flush_data_mem_quota_ / 10))
                 {
                     return true;
                 }
@@ -2250,32 +2269,41 @@ private:
             };
 
             // Wait until enough memory is available
-            while (!has_enough_memory())
+            while (!has_enough_memory(worker_idx))
             {
-                DLOG(INFO) << "Flush data memory quota is full "
-                           << flush_data_mem_usage_
-                           << " ,request quota: " << quota
-                           << " total quota: " << flush_data_mem_quota_;
+                LOG(INFO) << "Flush data memory quota is full "
+                          << flush_data_mem_usage_[worker_idx]
+                          << " ,request quota: " << quota
+                          << " total quota: " << flush_data_mem_quota_
+                          << ", worker idx = " << worker_idx;
                 mem_cv_.wait(lk);
             }
 
-            // Allocate the memory quota
-            uint64_t old_usage = flush_data_mem_usage_;
-            flush_data_mem_usage_ += quota;
+            // Allocate the memory quota for this specific worker
+            uint64_t old_usage = flush_data_mem_usage_[worker_idx];
+            flush_data_mem_usage_[worker_idx] += quota;
             return old_usage;
         }
 
         // return the quota to flush data memory usage pool and notify waiting
         // data sync thread
-        uint64_t DeallocateFlushMemQuota(uint64_t quota)
+        uint64_t DeallocateFlushMemQuota(uint64_t quota, size_t worker_idx)
         {
             std::lock_guard<bthread::Mutex> lock(mem_mutex_);
 
-            assert(quota <= flush_data_mem_usage_);
+            // Ensure worker_idx is valid
+            if (worker_idx >= flush_data_mem_usage_.size())
+            {
+                LOG(ERROR) << "Invalid worker_idx: " << worker_idx
+                           << " for DeallocateFlushMemQuota";
+                return 0;
+            }
 
-            // Deallocate the memory quota
-            uint64_t old_usage = flush_data_mem_usage_;
-            flush_data_mem_usage_ -= quota;
+            assert(quota <= flush_data_mem_usage_[worker_idx]);
+
+            // Deallocate the memory quota for this specific worker
+            uint64_t old_usage = flush_data_mem_usage_[worker_idx];
+            flush_data_mem_usage_[worker_idx] -= quota;
 
             // Notify all waiting threads that memory has been freed
             mem_cv_.notify_all();
@@ -2294,8 +2322,8 @@ private:
         // Synchronization primitives
         bthread::Mutex mem_mutex_;
         bthread::ConditionVariable mem_cv_;
-        // Memory usage tracking
-        uint64_t flush_data_mem_usage_{0};
+        // Memory usage tracking per worker
+        std::vector<uint64_t> flush_data_mem_usage_;
         uint64_t flush_data_mem_quota_{0};
     };
 
@@ -2459,20 +2487,26 @@ private:
      * task is full, append it to pending_flush_work_ and create a new flush
      * task.
      */
-    void AddFlushTaskEntry(std::unique_ptr<FlushTaskEntry> &&entry);
+    void AddFlushTaskEntry(std::unique_ptr<FlushTaskEntry> &&entry,
+                           size_t worker_idx);
 
     WorkerThreadContext flush_data_worker_ctx_;
 
-    // The flush task that has not reached the max pending flush size.
-    // New flush task entry will be added to this buffer. This task will
-    // be appended to pending_flush_work_ when it reaches the max pending flush
-    // size, which will then be processed by flush data worker.
-    FlushDataTask cur_flush_buffer_;
-    // Flush task queue for flush data worker to process.
-    std::deque<std::unique_ptr<FlushDataTask>> pending_flush_work_;
+    // Per-worker flush buffers. Each DataSyncWorker has its own buffer.
+    // New flush task entry will be added to the corresponding buffer. This task
+    // will be appended to pending_flush_work_[worker_idx] when it reaches the
+    // max pending flush size, which will then be processed by the corresponding
+    // flush data worker. Store as pointers because FlushDataTask contains a
+    // bthread::Mutex and is non-movable/non-copyable, which cannot be stored
+    // directly in a vector that may reallocate.
+    std::vector<std::unique_ptr<FlushDataTask>> cur_flush_buffers_;
+    // Per-worker flush task queues. Each FlushDataWorker processes its
+    // corresponding queue.
+    std::vector<std::deque<std::unique_ptr<FlushDataTask>>> pending_flush_work_;
 
-    void FlushDataWorker();
-    void FlushData(std::unique_lock<std::mutex> &flush_worker_lk);
+    void FlushDataWorker(size_t worker_idx);
+    void FlushData(std::unique_lock<std::mutex> &flush_worker_lk,
+                   size_t worker_idx);
 
     // Memory controller for data sync.
     DataSyncMemoryController data_sync_mem_controller_;
@@ -2542,6 +2576,14 @@ private:
     mi_heap_t *hash_partition_ckpt_heap_{nullptr};
     mi_threadid_t hash_partition_main_thread_id_{0};
     std::mutex hash_partition_ckpt_heap_mux_;
+
+    // Diagnostic related
+    std::atomic<uint64_t> pending_flush_queue_size_{0};
+    std::atomic<uint64_t> pending_flush_queue_max_size_{0};
+    std::atomic<uint64_t> flush_queue_block_count_{0};
+    std::atomic<uint64_t> flush_queue_total_block_time_us_{0};
+    std::atomic<uint64_t> mem_quota_block_count_{0};
+    std::atomic<uint64_t> mem_quota_total_block_time_us_{0};
 
     friend class LocalCcHandler;
     friend class remote::RemoteCcHandler;
