@@ -87,14 +87,6 @@ DEFINE_string(
     "s3://{bucket}/{path}, gs://{bucket}/{path}, or "
     "http(s)://{host}:{port}/{bucket}/{path}. "
     "Takes precedence over legacy config if provided.");
-DEFINE_string(txlog_rocksdb_cloud_archive_bucket_name,
-              "",
-              "S3 bucket name for archiving old log state SST files. "
-              "If not set, defaults to txlog_rocksdb_cloud_bucket_name.");
-DEFINE_string(txlog_rocksdb_cloud_archive_bucket_prefix,
-              "",
-              "S3 bucket prefix for archiving old log state SST files. "
-              "If not set, defaults to txlog_rocksdb_cloud_bucket_prefix.");
 DEFINE_string(
     txlog_rocksdb_cloud_archive_object_path,
     "",
@@ -477,18 +469,6 @@ bool DataSubstrate::InitializeLogService(const INIReader &config_reader)
             }
 
             // Archive config
-            txlog_rocksdb_cloud_config.archive_bucket_name_ =
-                !CheckCommandLineFlagIsDefault(
-                    "txlog_rocksdb_cloud_archive_bucket_name")
-                    ? FLAGS_txlog_rocksdb_cloud_archive_bucket_name
-                    : txlog_rocksdb_cloud_config.bucket_name_;
-
-            txlog_rocksdb_cloud_config.archive_bucket_prefix_ =
-                !CheckCommandLineFlagIsDefault(
-                    "txlog_rocksdb_cloud_archive_bucket_prefix")
-                    ? FLAGS_txlog_rocksdb_cloud_archive_bucket_prefix
-                    : txlog_rocksdb_cloud_config.bucket_prefix_;
-
             txlog_rocksdb_cloud_config.archive_object_path_ =
                 !CheckCommandLineFlagIsDefault(
                     "txlog_rocksdb_cloud_archive_object_path")
