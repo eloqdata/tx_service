@@ -251,6 +251,22 @@ public:
 
     void CreateSnapshotForBackup(CreateSnapshotForBackupRequest *req) override;
 
+#if defined(DATA_STORE_TYPE_ELOQDSS_ELOQSTORE)
+    /**
+     * @brief Standby node sync file cache operation.
+     * Executes prewarm operation and cleans up files after completion.
+     * Only implemented for EloqStoreDataStore.
+     */
+    void StandbySyncFileCache() override;
+
+    /**
+     * @brief Stop standby sync file cache operation.
+     * Stops the ongoing prewarm operation gracefully.
+     * Only implemented for EloqStoreDataStore.
+     */
+    void StopStandbySyncFileCache() override;
+#endif
+
 private:
     static void OnRead(::eloqstore::KvRequest *req);
     static void OnBatchWrite(::eloqstore::KvRequest *req);
@@ -262,6 +278,15 @@ private:
 
     void ScanDelete(DeleteRangeRequest *delete_range_req);
     void Floor(ScanRequest *scan_req);
+
+#if defined(DATA_STORE_TYPE_ELOQDSS_ELOQSTORE)
+    /**
+     * @brief Clean up non-data files after prewarm completion.
+     * Deletes all non-data files (manifest, etc.) and the data file with
+     * maximum file_id.
+     */
+    void CleanupNonDataFilesAfterPrewarm();
+#endif
 
     std::unique_ptr<::eloqstore::EloqStore> eloq_store_service_{nullptr};
 };

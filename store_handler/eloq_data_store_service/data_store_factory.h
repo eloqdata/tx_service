@@ -120,6 +120,17 @@ public:
         uint32_t ng_id, std::unordered_set<uint16_t> &&bucket_ids)
     {
     }
+
+    /**
+     * @brief Check if cloud storage mode is enabled
+     * @return true if cloud storage mode is enabled, false otherwise
+     * Default implementation returns false (for non-EloqStore factories).
+     * Only EloqStoreDataStoreFactory implements this method.
+     */
+    virtual bool IsCloudStorageMode() const
+    {
+        return false;
+    }
 };
 
 }  // namespace EloqDS

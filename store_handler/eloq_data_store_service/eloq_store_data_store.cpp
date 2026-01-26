@@ -25,10 +25,13 @@
 #include <bthread/mutex.h>
 
 #include <algorithm>
+#include <filesystem>
 #include <memory>
 
+#include "common.h"
 #include "eloq_store_data_store_factory.h"
 #include "internal_request.h"
+#include "tasks/prewarm_task.h"
 
 #ifdef ELOQSTORE_WITH_TXSERVICE
 #include "metrics.h"
@@ -873,5 +876,195 @@ void EloqStoreDataStore::OnFloor(::eloqstore::KvRequest *req)
 
     ds_scan_req->SetFinish(::EloqDS::remote::DataStoreError::NO_ERROR);
 }
+
+#if defined(DATA_STORE_TYPE_ELOQDSS_ELOQSTORE)
+void EloqStoreDataStore::StandbySyncFileCache()
+{
+    if (eloq_store_service_ == nullptr)
+    {
+        LOG(WARNING) << "EloqStore service not available for prewarm";
+        return;
+    }
+
+    // Get PrewarmService from EloqStore
+    ::eloqstore::PrewarmService *prewarm_service =
+        eloq_store_service_->GetPrewarmService();
+
+    if (prewarm_service == nullptr)
+    {
+        LOG(WARNING) << "PrewarmService not available";
+        return;
+    }
+
+    // Start prewarm operation
+    LOG(INFO) << "Starting prewarm operation for standby node, shard_id: "
+              << shard_id_;
+
+    // Trigger prewarm - this will run in a separate thread
+    prewarm_service->Start();
+
+    // Wait for prewarm to complete
+    LOG(INFO) << "Waiting for prewarm operation to complete";
+    prewarm_service->Wait();
+
+    LOG(INFO) << "Prewarm operation completed, starting cleanup non-data files";
+
+    // Clean up non-data files after prewarm completion
+    CleanupNonDataFilesAfterPrewarm();
+    LOG(INFO)
+        << "Prewarm operation completed, cleanup non-data files completed";
+}
+
+void EloqStoreDataStore::StopStandbySyncFileCache()
+{
+    if (eloq_store_service_ == nullptr)
+    {
+        LOG(WARNING) << "EloqStore service not available, cannot stop prewarm";
+        return;
+    }
+
+    // Get PrewarmService from EloqStore
+    ::eloqstore::PrewarmService *prewarm_service =
+        eloq_store_service_->GetPrewarmService();
+
+    if (prewarm_service == nullptr)
+    {
+        LOG(WARNING) << "PrewarmService not available, cannot stop prewarm";
+        return;
+    }
+
+    // Stop the prewarm operation
+    LOG(INFO) << "Stopping prewarm operation for standby node, shard_id: "
+              << shard_id_;
+    prewarm_service->Stop();
+    LOG(INFO) << "Prewarm operation stopped for shard_id: " << shard_id_;
+}
+
+void EloqStoreDataStore::CleanupNonDataFilesAfterPrewarm()
+{
+    if (eloq_store_service_ == nullptr)
+    {
+        return;
+    }
+
+    const auto &opts = eloq_store_service_->Options();
+    if (opts.store_path.empty())
+    {
+        return;
+    }
+
+    // Iterate through all store paths
+    for (const auto &store_path : opts.store_path)
+    {
+        std::error_code ec;
+        if (!std::filesystem::exists(store_path, ec) || ec)
+        {
+            continue;
+        }
+
+        // Iterate through all table directories
+        for (const auto &entry :
+             std::filesystem::directory_iterator(store_path, ec))
+        {
+            if (ec || !entry.is_directory())
+            {
+                continue;
+            }
+
+            std::string dir_name = entry.path().filename().string();
+
+            // Parse table identifier from directory name
+            ::eloqstore::TableIdent tbl_id =
+                ::eloqstore::TableIdent::FromString(dir_name);
+            if (!tbl_id.IsValid())
+            {
+                continue;
+            }
+
+            // Process files in this table directory
+            std::vector<std::pair<std::string, uint64_t>> data_file_ids;
+            // filename, file_id
+            std::vector<std::string> non_data_files;
+
+            for (const auto &file_entry :
+                 std::filesystem::directory_iterator(entry.path(), ec))
+            {
+                if (ec || file_entry.is_directory())
+                {
+                    continue;
+                }
+
+                std::string filename = file_entry.path().filename().string();
+
+                // Skip temporary files
+                if (filename.ends_with(::eloqstore::TmpSuffix))
+                {
+                    continue;
+                }
+
+                // Parse file name
+                auto [type, suffix] = ::eloqstore::ParseFileName(filename);
+
+                if (type == ::eloqstore::FileNameData)
+                {
+                    // Parse data file: data_file_id_term
+                    ::eloqstore::FileId file_id = 0;
+                    uint64_t term = 0;
+                    if (::eloqstore::ParseDataFileSuffix(suffix, file_id, term))
+                    {
+                        data_file_ids.push_back({filename, file_id});
+                    }
+                }
+                else
+                {
+                    // Non-data file (manifest, etc.)
+                    non_data_files.push_back(filename);
+                }
+            }
+
+            // Delete non-data files
+            for (const auto &filename : non_data_files)
+            {
+                std::filesystem::path file_path = entry.path() / filename;
+                std::error_code del_ec;
+                if (std::filesystem::remove(file_path, del_ec))
+                {
+                    LOG(INFO) << "Deleted non-data file: " << file_path;
+                }
+                else if (del_ec)
+                {
+                    LOG(WARNING) << "Failed to delete file: " << file_path
+                                 << ", error: " << del_ec.message();
+                }
+            }
+
+            // Find and delete data file with maximum file_id
+            if (!data_file_ids.empty())
+            {
+                auto max_it = std::max_element(data_file_ids.begin(),
+                                               data_file_ids.end(),
+                                               [](const auto &a, const auto &b)
+                                               { return a.second < b.second; });
+
+                std::filesystem::path max_file_path =
+                    entry.path() / max_it->first;
+                std::error_code del_ec;
+                if (std::filesystem::remove(max_file_path, del_ec))
+                {
+                    LOG(INFO) << "Deleted data file with max file_id: "
+                              << max_file_path
+                              << " (file_id: " << max_it->second << ")";
+                }
+                else if (del_ec)
+                {
+                    LOG(WARNING)
+                        << "Failed to delete max file_id data file: "
+                        << max_file_path << ", error: " << del_ec.message();
+                }
+            }
+        }
+    }
+}
+#endif
 
 }  // namespace EloqDS
