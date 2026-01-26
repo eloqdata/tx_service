@@ -27,9 +27,11 @@
 #include <boost/uuid/uuid.hpp>
 #include <boost/uuid/uuid_generators.hpp>
 #include <boost/uuid/uuid_io.hpp>
+#include <chrono>
 #include <cstdint>
 #include <memory>
 #include <random>
+#include <sstream>
 #include <string>
 #include <string_view>
 #include <unordered_map>
@@ -303,9 +305,14 @@ bool DataStoreServiceClient::PutAll(
                        std::vector<std::unique_ptr<txservice::FlushTaskEntry>>>
         &flush_task)
 {
+    auto start_time = std::chrono::high_resolution_clock::now();
     DLOG(INFO) << "DataStoreServiceClient::PutAll called with "
                << flush_task.size() << " tables to flush.";
     uint64_t now = txservice::LocalCcShards::ClockTsInMillseconds();
+
+    // Bucket statistics: partition_id % 10 -> count
+    std::array<int, 10> hash_bucket_counts = {0};
+    std::array<int, 10> range_bucket_counts = {0};
 
     // Create global coordinator
     SyncPutAllData *sync_putall = sync_putall_data_pool_.NextObject();
@@ -375,6 +382,10 @@ bool DataStoreServiceClient::PutAll(
         // Process hash partitions
         for (auto &[partition_id, flush_recs] : hash_partitions_map)
         {
+            // Count partitions by bucket (partition_id % 10)
+            int bucket = partition_id % 10;
+            hash_bucket_counts[bucket]++;
+
             auto partition_state = partition_flush_state_pool_.NextObject();
             partition_state->Reset(partition_id, false);
             auto callback_data = partition_callback_data_pool_.NextObject();
@@ -398,6 +409,10 @@ bool DataStoreServiceClient::PutAll(
         // Process range partitions
         for (auto &[partition_id, flush_recs] : range_partitions_map)
         {
+            // Count partitions by bucket (partition_id % 10)
+            int bucket = partition_id % 10;
+            range_bucket_counts[bucket]++;
+
             auto partition_state = partition_flush_state_pool_.NextObject();
             partition_state->Reset(partition_id, true);
             auto callback_data = partition_callback_data_pool_.NextObject();
@@ -478,6 +493,15 @@ bool DataStoreServiceClient::PutAll(
                 callback_data->Clear();
                 callback_data->Free();
             }
+
+            // Print execution time even on failure
+            auto end_time = std::chrono::high_resolution_clock::now();
+            auto duration =
+                std::chrono::duration_cast<std::chrono::milliseconds>(
+                    end_time - start_time);
+            LOG(INFO) << "PutAll execution time (failed): " << duration.count()
+                      << " ms";
+
             return false;
         }
     }
@@ -493,6 +517,40 @@ bool DataStoreServiceClient::PutAll(
         metrics::kv_meter->Collect(
             metrics::NAME_KV_FLUSH_ROWS_TOTAL, records_count, "base");
     }
+
+    // Print bucket statistics and execution time in one line
+    auto end_time = std::chrono::high_resolution_clock::now();
+    auto duration = std::chrono::duration_cast<std::chrono::milliseconds>(
+        end_time - start_time);
+
+    std::ostringstream oss;
+    oss << "PutAll: hash_buckets[";
+    bool first = true;
+    for (int i = 0; i < 10; ++i)
+    {
+        if (hash_bucket_counts[i] > 0)
+        {
+            if (!first)
+                oss << ",";
+            oss << i << ":" << hash_bucket_counts[i];
+            first = false;
+        }
+    }
+    oss << "] range_buckets[";
+    first = true;
+    for (int i = 0; i < 10; ++i)
+    {
+        if (range_bucket_counts[i] > 0)
+        {
+            if (!first)
+                oss << ",";
+            oss << i << ":" << range_bucket_counts[i];
+            first = false;
+        }
+    }
+    oss << "] time=" << duration.count() << "ms";
+    LOG(INFO) << oss.str();
+
     return true;
 }
 
