@@ -4361,7 +4361,7 @@ void LocalCcShards::DataSyncForRangePartition(
                 // Return the quota to flush data memory usage pool since the
                 // flush data task is not put into flush worker.
                 data_sync_mem_controller_.DeallocateFlushMemQuota(
-                    flush_data_size, worker_idx);
+                    flush_data_size);
                 continue;
             }
 
@@ -4413,7 +4413,7 @@ void LocalCcShards::DataSyncForRangePartition(
                     // Return the quota to flush data memory usage pool since
                     // the flush data task is not put into flush worker.
                     data_sync_mem_controller_.DeallocateFlushMemQuota(
-                        flush_data_size, worker_idx);
+                        flush_data_size);
                     break;
                 }
 
@@ -5103,8 +5103,8 @@ void LocalCcShards::DataSyncForHashPartition(
         // quota is not available
         auto quota_start = std::chrono::steady_clock::now();
         uint64_t old_usage =
-            data_sync_mem_controller_.AllocateFlushDataMemQuota(flush_data_size,
-                                                                worker_idx);
+            data_sync_mem_controller_.AllocateFlushDataMemQuota(
+                flush_data_size);
 
         debug_data_size += scan_cc.DataSyncVec().size();
         auto quota_end = std::chrono::steady_clock::now();
@@ -5246,8 +5246,8 @@ void LocalCcShards::DataSyncForHashPartition(
                 data_sync_vec->clear();
                 archive_vec->clear();
                 mv_base_vec->clear();
-                data_sync_mem_controller_.DeallocateFlushMemQuota(vec_mem_usage,
-                                                                  worker_idx);
+                data_sync_mem_controller_.DeallocateFlushMemQuota(
+                    vec_mem_usage);
                 break;
             }
 
@@ -5323,8 +5323,7 @@ void LocalCcShards::DataSyncForHashPartition(
             // There are error during flush, and if we do not put the
             // current batch data into flush worker, should release the
             // memory usage.
-            data_sync_mem_controller_.DeallocateFlushMemQuota(vec_mem_usage,
-                                                              worker_idx);
+            data_sync_mem_controller_.DeallocateFlushMemQuota(vec_mem_usage);
         }
     }
 
@@ -6141,7 +6140,7 @@ void LocalCcShards::FlushData(std::unique_lock<std::mutex> &flush_worker_lk,
 
     // notify waiting data sync scan thread
     uint64_t old_usage = data_sync_mem_controller_.DeallocateFlushMemQuota(
-        cur_work->pending_flush_size_, worker_idx);
+        cur_work->pending_flush_size_);
 
     DLOG(INFO) << "DelocateFlushDataMemQuota old_usage: " << old_usage
                << " new_usage: " << old_usage - cur_work->pending_flush_size_
