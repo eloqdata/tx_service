@@ -21,7 +21,11 @@
  */
 #include "eloq_store_data_store.h"
 
+#include <bthread/condition_variable.h>
+#include <bthread/mutex.h>
+
 #include <algorithm>
+#include <memory>
 
 #include "eloq_store_data_store_factory.h"
 #include "internal_request.h"
@@ -580,7 +584,32 @@ void EloqStoreDataStore::SwitchToReadWrite()
 void EloqStoreDataStore::CreateSnapshotForBackup(
     CreateSnapshotForBackupRequest *req)
 {
-    return;
+    PoolableGuard req_guard(req);
+
+    ::eloqstore::GlobalArchiveRequest global_archive_req;
+    global_archive_req.SetSnapshotTimestamp(req->GetBackupTs());
+    eloq_store_service_->ExecSync(&global_archive_req);
+
+    ::EloqDS::remote::DataStoreError ds_error;
+    std::string error_msg;
+    switch (global_archive_req.Error())
+    {
+    case ::eloqstore::KvError::NoError:
+        ds_error = ::EloqDS::remote::DataStoreError::NO_ERROR;
+        break;
+    case ::eloqstore::KvError::NotRunning:
+        ds_error = ::EloqDS::remote::DataStoreError::DB_NOT_OPEN;
+        error_msg = "EloqStore not running";
+        break;
+    default:
+        ds_error = ::EloqDS::remote::DataStoreError::CREATE_SNAPSHOT_ERROR;
+        error_msg =
+            "Snapshot failed with error code: " +
+            std::to_string(static_cast<int>(global_archive_req.Error()));
+        break;
+    }
+
+    req->SetFinish(ds_error, error_msg);
 }
 
 void EloqStoreDataStore::ScanDelete(DeleteRangeRequest *delete_range_req)
