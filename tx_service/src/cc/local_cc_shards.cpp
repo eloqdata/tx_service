@@ -4828,8 +4828,9 @@ void LocalCcShards::DataSyncForHashPartition(
         flush_buffer_size /
         (default_data_file_size * approximate_partition_number_this_core);
 
-    // scan_concurrency_.store(100);
+    scan_concurrency_.store(100);
 
+    /*
     if (scan_concurrency > 0)
     {
         bool need_notify = scan_concurrency >
@@ -4841,6 +4842,7 @@ void LocalCcShards::DataSyncForHashPartition(
             data_sync_worker_ctx_.cv_.notify_all();
         }
     }
+    */
 
     // 3. Scan records.
     {
