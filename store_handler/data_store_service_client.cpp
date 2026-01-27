@@ -378,12 +378,15 @@ bool DataStoreServiceClient::PutAll(
             parts_cnt_per_record = 1;
         }
 
+        size_t core_num =
+            txservice::Sharder::Instance().GetLocalCcShardsCount();
+
         // Create partition states and prepare batches
         // Process hash partitions
         for (auto &[partition_id, flush_recs] : hash_partitions_map)
         {
             // Count partitions by bucket (partition_id % 10)
-            int bucket = partition_id % 10;
+            int bucket = partition_id % core_num;
             hash_bucket_counts[bucket]++;
 
             auto partition_state = partition_flush_state_pool_.NextObject();
@@ -410,7 +413,7 @@ bool DataStoreServiceClient::PutAll(
         for (auto &[partition_id, flush_recs] : range_partitions_map)
         {
             // Count partitions by bucket (partition_id % 10)
-            int bucket = partition_id % 10;
+            int bucket = partition_id % core_num;
             range_bucket_counts[bucket]++;
 
             auto partition_state = partition_flush_state_pool_.NextObject();
