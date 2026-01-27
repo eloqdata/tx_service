@@ -4826,6 +4826,20 @@ void LocalCcShards::DataSyncForHashPartition(
         flush_buffer_size /
         (default_data_file_size * approximate_partition_number_this_core);
 
+    constexpr size_t partition_number = 1024;
+    auto partition_number_this_core =
+        partition_number / core_number +
+        (worker_idx < partition_number % core_number);
+    std::vector<size_t> partition_ids;
+    partition_ids.reserve(partition_number_this_core);
+    for (size_t i = 0; i < partition_number_this_core; ++i)
+    {
+        partition_ids.emplace_back(worker_idx + core_number * i);
+    }
+    assert(partition_number_this_core == partition_ids.size());
+    const size_t partition_number_per_scan =
+        std::max(1UL, (flush_buffer_size / (40UL * 1024 * 1024)));
+
     scan_concurrency_.store(100);
 
     /*
@@ -4849,475 +4863,450 @@ void LocalCcShards::DataSyncForHashPartition(
         data_sync_task->flight_task_cnt_ += 1;
     }
 
-    HashPartitionDataSyncScanCc scan_cc(table_name,
-                                        data_sync_task->data_sync_ts_,
-                                        ng_id,
-                                        ng_term,
-                                        DATA_SYNC_SCAN_BATCH_SIZE,
-                                        data_sync_txm->TxNumber(),
-                                        data_sync_task->forward_cache_,
-                                        last_sync_ts,
-                                        data_sync_task->filter_lambda_,
-                                        catalog_rec.Schema()->Version());
-    bool scan_data_drained = false;
-
-    auto data_sync_vec = std::make_unique<std::vector<FlushRecord>>();
-    auto archive_vec = std::make_unique<std::vector<FlushRecord>>();
-    auto mv_base_vec =
-        std::make_unique<std::vector<std::pair<TxKey, int32_t>>>();
-    uint64_t vec_mem_usage = 0;
     uint64_t debug_data_size = 0;
 
-    // Note: `DataSyncScanCc` needs to ensure that no two ckpt_rec with the
-    // same Key can be generated. Our subsequent algorithms are based on
-    // this assumption.
-
-    assert(worker_idx < cc_shards_.size());
-    size_t yf_debug_data_size = 0;
-    size_t offset = 0;
-
-    while (!scan_data_drained)
+    for (size_t i = 0; i < partition_number_this_core;
+         i += partition_number_per_scan)
     {
-        EnqueueLowPriorityCcRequestToShard(worker_idx, &scan_cc);
-        scan_cc.Wait();
-
-        if (scan_cc.IsError() &&
-            scan_cc.ErrorCode() != CcErrorCode::LOG_NOT_TRUNCATABLE)
+        size_t min_partition_id_this_scan = partition_ids[i];
+        size_t max_partition_id_this_scan =
+            partition_ids[std::min(i + partition_number_per_scan,
+                                   partition_number_this_core) -
+                          1];
+        std::function<bool(size_t)> filter_lambda =
+            [min_partition_id_this_scan,
+             max_partition_id_this_scan,
+             &filter_func =
+                 data_sync_task->filter_lambda_](const size_t hash_code)
         {
-            LOG(ERROR) << "DataSync scan failed on table "
-                       << table_name.StringView() << " with error code: "
-                       << static_cast<int>(scan_cc.ErrorCode());
+            return (hash_code & 0x3FF) >= min_partition_id_this_scan &&
+                   (hash_code & 0x3FF) <= max_partition_id_this_scan &&
+                   (!filter_func || filter_func(hash_code));
+        };
 
-            PostProcessHashPartitionDataSyncTask(
-                std::move(data_sync_task),
-                data_sync_txm,
-                DataSyncTask::CkptErrorCode::SCAN_ERROR);
+        HashPartitionDataSyncScanCc scan_cc(table_name,
+                                            data_sync_task->data_sync_ts_,
+                                            ng_id,
+                                            ng_term,
+                                            DATA_SYNC_SCAN_BATCH_SIZE,
+                                            data_sync_txm->TxNumber(),
+                                            data_sync_task->forward_cache_,
+                                            last_sync_ts,
+                                            filter_lambda,
+                                            catalog_rec.Schema()->Version());
+        bool scan_data_drained = false;
 
-            return;
-        }
-        if (scan_cc.ErrorCode() == CcErrorCode::LOG_NOT_TRUNCATABLE)
+        auto data_sync_vec = std::make_unique<std::vector<FlushRecord>>();
+        auto archive_vec = std::make_unique<std::vector<FlushRecord>>();
+        auto mv_base_vec =
+            std::make_unique<std::vector<std::pair<TxKey, int32_t>>>();
+        uint64_t vec_mem_usage = 0;
+
+        // Note: `DataSyncScanCc` needs to ensure that no two ckpt_rec with the
+        // same Key can be generated. Our subsequent algorithms are based on
+        // this assumption.
+
+        assert(worker_idx < cc_shards_.size());
+
+        while (!scan_data_drained)
         {
-            data_sync_task->status_->SetEntriesSkippedAndNoTruncateLog();
-        }
+            EnqueueLowPriorityCcRequestToShard(worker_idx, &scan_cc);
+            scan_cc.Wait();
 
-        scan_data_drained = true;
-
-        // Send cache to target node group if needed.
-        if (data_sync_task->forward_cache_)
-        {
-            std::shared_lock<std::shared_mutex> meta_lk(meta_data_mux_);
-            const auto bucket_infos = GetAllBucketInfosNoLocking(ng_id);
-            if (bucket_infos == nullptr)
+            if (scan_cc.IsError() &&
+                scan_cc.ErrorCode() != CcErrorCode::LOG_NOT_TRUNCATABLE)
             {
-                // no longer node group owner, abort the task
-                LOG(ERROR) << "DataSync: Failed to get bucket infos for "
-                              "ng#"
-                           << ng_id;
+                LOG(ERROR) << "DataSync scan failed on table "
+                           << table_name.StringView() << " with error code: "
+                           << static_cast<int>(scan_cc.ErrorCode());
+
                 PostProcessHashPartitionDataSyncTask(
                     std::move(data_sync_task),
                     data_sync_txm,
                     DataSyncTask::CkptErrorCode::SCAN_ERROR);
+
                 return;
             }
-
-            std::unordered_map<NodeGroupId, UploadBatchClosure *>
-                send_cache_closures;
-            for (size_t idx = 0; idx < scan_cc.accumulated_scan_cnt_; idx++)
+            if (scan_cc.ErrorCode() == CcErrorCode::LOG_NOT_TRUNCATABLE)
             {
-                FlushRecord &ref = scan_cc.DataSyncVec()[idx];
-                uint16_t bucket_id =
-                    Sharder::MapKeyHashToBucketId(ref.Key().Hash());
-                NodeGroupId dest_ng =
-                    bucket_infos->at(bucket_id)->DirtyBucketOwner();
-                assert(dest_ng != UINT32_MAX);
+                data_sync_task->status_->SetEntriesSkippedAndNoTruncateLog();
+            }
 
-                // Put the record into the request for this node group.
-                auto ins_res = send_cache_closures.try_emplace(dest_ng);
-                remote::UploadBatchRequest *req_ptr = nullptr;
-                if (ins_res.second)
+            scan_data_drained = true;
+
+            // Send cache to target node group if needed.
+            if (data_sync_task->forward_cache_)
+            {
+                std::shared_lock<std::shared_mutex> meta_lk(meta_data_mux_);
+                const auto bucket_infos = GetAllBucketInfosNoLocking(ng_id);
+                if (bucket_infos == nullptr)
                 {
-                    uint32_t node_id =
-                        Sharder::Instance().LeaderNodeId(dest_ng);
-                    std::shared_ptr<brpc::Channel> channel =
-                        Sharder::Instance().GetCcNodeServiceChannel(node_id);
-                    if (channel == nullptr)
+                    // no longer node group owner, abort the task
+                    LOG(ERROR) << "DataSync: Failed to get bucket infos for "
+                                  "ng#"
+                               << ng_id;
+                    PostProcessHashPartitionDataSyncTask(
+                        std::move(data_sync_task),
+                        data_sync_txm,
+                        DataSyncTask::CkptErrorCode::SCAN_ERROR);
+                    return;
+                }
+
+                std::unordered_map<NodeGroupId, UploadBatchClosure *>
+                    send_cache_closures;
+                for (size_t idx = 0; idx < scan_cc.accumulated_scan_cnt_; idx++)
+                {
+                    FlushRecord &ref = scan_cc.DataSyncVec()[idx];
+                    uint16_t bucket_id =
+                        Sharder::MapKeyHashToBucketId(ref.Key().Hash());
+                    NodeGroupId dest_ng =
+                        bucket_infos->at(bucket_id)->DirtyBucketOwner();
+                    assert(dest_ng != UINT32_MAX);
+
+                    // Put the record into the request for this node group.
+                    auto ins_res = send_cache_closures.try_emplace(dest_ng);
+                    remote::UploadBatchRequest *req_ptr = nullptr;
+                    if (ins_res.second)
                     {
-                        // Fail to establish the channel to the tx node.
-                        // Just skip the cache sending since it is a best
-                        // effort try to performance improvement.
-                        LOG(ERROR) << "UploadBatch: Failed to init the "
-                                      "channel of ng#"
-                                   << dest_ng;
-                        send_cache_closures.erase(ins_res.first);
+                        uint32_t node_id =
+                            Sharder::Instance().LeaderNodeId(dest_ng);
+                        std::shared_ptr<brpc::Channel> channel =
+                            Sharder::Instance().GetCcNodeServiceChannel(
+                                node_id);
+                        if (channel == nullptr)
+                        {
+                            // Fail to establish the channel to the tx node.
+                            // Just skip the cache sending since it is a best
+                            // effort try to performance improvement.
+                            LOG(ERROR) << "UploadBatch: Failed to init the "
+                                          "channel of ng#"
+                                       << dest_ng;
+                            send_cache_closures.erase(ins_res.first);
+                        }
+                        else
+                        {
+                            // Create a closure for the first time.
+                            UploadBatchClosure *upload_batch_closure =
+                                new UploadBatchClosure(
+                                    [this, data_sync_task, data_sync_txm](
+                                        CcErrorCode res_code,
+                                        int32_t dest_ng_term)
+                                    {
+                                        // We don't care if
+                                        // the cache send
+                                        // was succeed or
+                                        // not since it's a
+                                        // best effort
+                                        // move. Just pass in no error
+                                        // so that it won't cause data sync
+                                        // failure.
+                                        PostProcessHashPartitionDataSyncTask(
+                                            std::move(data_sync_task),
+                                            data_sync_txm,
+                                            DataSyncTask::CkptErrorCode::
+                                                NO_ERROR);
+                                    },
+                                    10000,
+                                    false);
+
+                            upload_batch_closure->SetChannel(node_id, channel);
+
+                            ins_res.first->second = upload_batch_closure;
+                            req_ptr =
+                                upload_batch_closure->UploadBatchRequest();
+                            req_ptr->set_node_group_id(dest_ng);
+                            req_ptr->set_node_group_term(-1);
+                            req_ptr->set_table_name_str(table_name.String());
+                            req_ptr->set_table_type(
+                                remote::ToRemoteType::ConvertTableType(
+                                    table_name.Type()));
+                            req_ptr->set_table_engine(
+                                remote::ToRemoteType::ConvertTableEngine(
+                                    table_name.Engine()));
+                            req_ptr->set_kind(
+                                remote::UploadBatchKind::DIRTY_BUCKET_DATA);
+                            req_ptr->set_batch_size(0);
+                            // keys
+                            req_ptr->clear_keys();
+                            // records
+                            req_ptr->clear_records();
+                            // commit_ts
+                            req_ptr->clear_commit_ts();
+                            // rec_status
+                            req_ptr->clear_rec_status();
+                        }
                     }
                     else
                     {
-                        // Create a closure for the first time.
-                        UploadBatchClosure *upload_batch_closure =
-                            new UploadBatchClosure(
-                                [this, data_sync_task, data_sync_txm](
-                                    CcErrorCode res_code, int32_t dest_ng_term)
-                                {
-                                    // We don't care if
-                                    // the cache send
-                                    // was succeed or
-                                    // not since it's a
-                                    // best effort
-                                    // move. Just pass in no error
-                                    // so that it won't cause data sync
-                                    // failure.
-                                    PostProcessHashPartitionDataSyncTask(
-                                        std::move(data_sync_task),
-                                        data_sync_txm,
-                                        DataSyncTask::CkptErrorCode::NO_ERROR);
-                                },
-                                10000,
-                                false);
-
-                        upload_batch_closure->SetChannel(node_id, channel);
-
-                        ins_res.first->second = upload_batch_closure;
-                        req_ptr = upload_batch_closure->UploadBatchRequest();
-                        req_ptr->set_node_group_id(dest_ng);
-                        req_ptr->set_node_group_term(-1);
-                        req_ptr->set_table_name_str(table_name.String());
-                        req_ptr->set_table_type(
-                            remote::ToRemoteType::ConvertTableType(
-                                table_name.Type()));
-                        req_ptr->set_table_engine(
-                            remote::ToRemoteType::ConvertTableEngine(
-                                table_name.Engine()));
-                        req_ptr->set_kind(
-                            remote::UploadBatchKind::DIRTY_BUCKET_DATA);
-                        req_ptr->set_batch_size(0);
-                        // keys
-                        req_ptr->clear_keys();
-                        // records
-                        req_ptr->clear_records();
-                        // commit_ts
-                        req_ptr->clear_commit_ts();
-                        // rec_status
-                        req_ptr->clear_rec_status();
+                        req_ptr = ins_res.first->second->UploadBatchRequest();
                     }
-                }
-                else
-                {
-                    req_ptr = ins_res.first->second->UploadBatchRequest();
-                }
 
-                if (req_ptr)
-                {
-                    std::string *keys_str = req_ptr->mutable_keys();
-                    std::string *rec_status_str = req_ptr->mutable_rec_status();
-                    std::string *commit_ts_str = req_ptr->mutable_commit_ts();
-                    size_t len_sizeof = sizeof(uint64_t);
-                    const char *val_ptr = nullptr;
-                    ref.Key().Serialize(*keys_str);
-                    if (ref.payload_status_ == RecordStatus::Normal)
+                    if (req_ptr)
                     {
-                        std::string *recs_str = req_ptr->mutable_records();
-                        ref.Payload()->Serialize(*recs_str);
+                        std::string *keys_str = req_ptr->mutable_keys();
+                        std::string *rec_status_str =
+                            req_ptr->mutable_rec_status();
+                        std::string *commit_ts_str =
+                            req_ptr->mutable_commit_ts();
+                        size_t len_sizeof = sizeof(uint64_t);
+                        const char *val_ptr = nullptr;
+                        ref.Key().Serialize(*keys_str);
+                        if (ref.payload_status_ == RecordStatus::Normal)
+                        {
+                            std::string *recs_str = req_ptr->mutable_records();
+                            ref.Payload()->Serialize(*recs_str);
+                        }
+                        const char *status_ptr = reinterpret_cast<const char *>(
+                            &(ref.payload_status_));
+                        rec_status_str->append(status_ptr,
+                                               sizeof(RecordStatus));
+                        val_ptr =
+                            reinterpret_cast<const char *>(&(ref.commit_ts_));
+                        commit_ts_str->append(val_ptr, len_sizeof);
+                        req_ptr->set_batch_size(req_ptr->batch_size() + 1);
                     }
-                    const char *status_ptr =
-                        reinterpret_cast<const char *>(&(ref.payload_status_));
-                    rec_status_str->append(status_ptr, sizeof(RecordStatus));
-                    val_ptr = reinterpret_cast<const char *>(&(ref.commit_ts_));
-                    commit_ts_str->append(val_ptr, len_sizeof);
-                    req_ptr->set_batch_size(req_ptr->batch_size() + 1);
+                }
+                meta_lk.unlock();
+
+                {
+                    std::unique_lock<bthread::Mutex> flight_lk(
+                        data_sync_task->flight_task_mux_);
+                    data_sync_task->flight_task_cnt_ +=
+                        send_cache_closures.size();
+                }
+                // Send cache to target node groups.
+                for (auto &[ng, upload_batch_closure] : send_cache_closures)
+                {
+                    remote::CcRpcService_Stub stub(
+                        upload_batch_closure->Channel());
+                    brpc::Controller *cntl_ptr =
+                        upload_batch_closure->Controller();
+                    cntl_ptr->set_timeout_ms(10000);
+                    // Asynchronous mode
+                    stub.UploadBatch(
+                        upload_batch_closure->Controller(),
+                        upload_batch_closure->UploadBatchRequest(),
+                        upload_batch_closure->UploadBatchResponse(),
+                        upload_batch_closure);
                 }
             }
-            meta_lk.unlock();
 
+            uint64_t flush_data_size = scan_cc.accumulated_flush_data_size_;
+
+            // nothing to flush
+            if (scan_cc.accumulated_scan_cnt_ == 0)
             {
-                std::unique_lock<bthread::Mutex> flight_lk(
-                    data_sync_task->flight_task_mux_);
-                data_sync_task->flight_task_cnt_ += send_cache_closures.size();
+                scan_cc.Reset();
+                continue;
             }
-            // Send cache to target node groups.
-            for (auto &[ng, upload_batch_closure] : send_cache_closures)
-            {
-                remote::CcRpcService_Stub stub(upload_batch_closure->Channel());
-                brpc::Controller *cntl_ptr = upload_batch_closure->Controller();
-                cntl_ptr->set_timeout_ms(10000);
-                // Asynchronous mode
-                stub.UploadBatch(upload_batch_closure->Controller(),
-                                 upload_batch_closure->UploadBatchRequest(),
-                                 upload_batch_closure->UploadBatchResponse(),
-                                 upload_batch_closure);
-            }
-        }
 
-        uint64_t flush_data_size = scan_cc.accumulated_flush_data_size_;
-
-        // nothing to flush
-        if (scan_cc.accumulated_scan_cnt_ == 0)
-        {
-            scan_cc.Reset();
-            continue;
-        }
-
-        // The cost of FlushRecord also needs to be considered.
+            // The cost of FlushRecord also needs to be considered.
 #ifdef WITH_JEMALLOC
-        flush_data_size += (scan_cc.DataSyncVec().size() * sizeof(FlushRecord) +
-                            scan_cc.ArchiveVec().size() * sizeof(FlushRecord) +
-                            scan_cc.MoveBaseIdxVec().size() *
-                                sizeof(std::pair<TxKey, int32_t>));
+            flush_data_size +=
+                (scan_cc.DataSyncVec().size() * sizeof(FlushRecord) +
+                 scan_cc.ArchiveVec().size() * sizeof(FlushRecord) +
+                 scan_cc.MoveBaseIdxVec().size() *
+                     sizeof(std::pair<TxKey, int32_t>));
 #else
-        // Check if vectors are empty before calling malloc_usable_size
-        // to avoid SEGV on nullptr or invalid pointers.
-        // Use malloc_usable_size when ASan is enabled (vectors may be
-        // allocated by ASan's allocator), otherwise use
-        // mi_malloc_usable_size for mimalloc-allocated memory.
-        {
-            auto &data_sync_vec_ref = scan_cc.DataSyncVec();
-            auto &archive_vec_ref = scan_cc.ArchiveVec();
-            auto &move_base_idx_vec_ref = scan_cc.MoveBaseIdxVec();
+            // Check if vectors are empty before calling malloc_usable_size
+            // to avoid SEGV on nullptr or invalid pointers.
+            // Use malloc_usable_size when ASan is enabled (vectors may be
+            // allocated by ASan's allocator), otherwise use
+            // mi_malloc_usable_size for mimalloc-allocated memory.
+            {
+                auto &data_sync_vec_ref = scan_cc.DataSyncVec();
+                auto &archive_vec_ref = scan_cc.ArchiveVec();
+                auto &move_base_idx_vec_ref = scan_cc.MoveBaseIdxVec();
 
 #ifdef __SANITIZE_ADDRESS__
-            // When ASan is enabled, use standard malloc_usable_size
-            flush_data_size +=
-                (data_sync_vec_ref.empty()
-                     ? 0
-                     : malloc_usable_size(data_sync_vec_ref.data())) +
-                (archive_vec_ref.empty()
-                     ? 0
-                     : malloc_usable_size(archive_vec_ref.data())) +
-                (move_base_idx_vec_ref.empty()
-                     ? 0
-                     : malloc_usable_size(move_base_idx_vec_ref.data()));
+                // When ASan is enabled, use standard malloc_usable_size
+                flush_data_size +=
+                    (data_sync_vec_ref.empty()
+                         ? 0
+                         : malloc_usable_size(data_sync_vec_ref.data())) +
+                    (archive_vec_ref.empty()
+                         ? 0
+                         : malloc_usable_size(archive_vec_ref.data())) +
+                    (move_base_idx_vec_ref.empty()
+                         ? 0
+                         : malloc_usable_size(move_base_idx_vec_ref.data()));
 #else
-            // When ASan is not enabled, use mimalloc's API
-            flush_data_size +=
-                (data_sync_vec_ref.empty()
-                     ? 0
-                     : mi_malloc_usable_size(data_sync_vec_ref.data())) +
-                (archive_vec_ref.empty()
-                     ? 0
-                     : mi_malloc_usable_size(archive_vec_ref.data())) +
-                (move_base_idx_vec_ref.empty()
-                     ? 0
-                     : mi_malloc_usable_size(move_base_idx_vec_ref.data()));
+                // When ASan is not enabled, use mimalloc's API
+                flush_data_size +=
+                    (data_sync_vec_ref.empty()
+                         ? 0
+                         : mi_malloc_usable_size(data_sync_vec_ref.data())) +
+                    (archive_vec_ref.empty()
+                         ? 0
+                         : mi_malloc_usable_size(archive_vec_ref.data())) +
+                    (move_base_idx_vec_ref.empty()
+                         ? 0
+                         : mi_malloc_usable_size(move_base_idx_vec_ref.data()));
 #endif
-        }
+            }
 #endif
-        yf_debug_data_size += flush_data_size;
-        if (yf_debug_data_size > 40UL * 1024 * 1024)
-        {
-            yf_debug_data_size = 0;
-            offset++;
-        }
 
-        // this thread will wait in AllocatePendingFlushDataMemQuota if
-        // quota is not available
-        auto quota_start = std::chrono::steady_clock::now();
-        uint64_t old_usage =
-            data_sync_mem_controller_.AllocateFlushDataMemQuota(
-                flush_data_size);
+            // this thread will wait in AllocatePendingFlushDataMemQuota if
+            // quota is not available
+            auto quota_start = std::chrono::steady_clock::now();
+            uint64_t old_usage =
+                data_sync_mem_controller_.AllocateFlushDataMemQuota(
+                    flush_data_size);
 
-        debug_data_size += scan_cc.DataSyncVec().size();
-        auto quota_end = std::chrono::steady_clock::now();
-        auto quota_duration =
-            std::chrono::duration_cast<std::chrono::microseconds>(quota_end -
-                                                                  quota_start)
-                .count();
+            debug_data_size += scan_cc.DataSyncVec().size();
+            auto quota_end = std::chrono::steady_clock::now();
+            auto quota_duration =
+                std::chrono::duration_cast<std::chrono::microseconds>(
+                    quota_end - quota_start)
+                    .count();
 
-        uint64_t new_usage = old_usage + flush_data_size;
-        uint64_t quota = data_sync_mem_controller_.FlushMemoryQuota();
-        double usage_ratio = quota > 0 ? (double) new_usage / quota : 0.0;
+            uint64_t new_usage = old_usage + flush_data_size;
+            uint64_t quota = data_sync_mem_controller_.FlushMemoryQuota();
+            double usage_ratio = quota > 0 ? (double) new_usage / quota : 0.0;
 
-        if (quota_duration > 1000 ||
-            usage_ratio > 0.8)  // Blocked for more than 1ms or usage > 80%
-        {
-            mem_quota_block_count_.fetch_add(1, std::memory_order_relaxed);
-            mem_quota_total_block_time_us_.fetch_add(quota_duration,
-                                                     std::memory_order_relaxed);
+            if (quota_duration > 1000 ||
+                usage_ratio > 0.8)  // Blocked for more than 1ms or usage > 80%
+            {
+                mem_quota_block_count_.fetch_add(1, std::memory_order_relaxed);
+                mem_quota_total_block_time_us_.fetch_add(
+                    quota_duration, std::memory_order_relaxed);
 
-            /*
-            LOG(WARNING) << "Memory quota: "
-                         << "allocation_time_us=" << quota_duration << ", "
-                         << "requested=" << flush_data_size << ", "
-                         << "old_usage=" << old_usage << ", "
-                         << "new_usage=" << new_usage << ", "
-                         << "quota=" << quota << ", "
-                         << "usage_ratio=" << (usage_ratio * 100) << "%"
-                         << ", worker idx = " << worker_idx;
-            */
-        }
+                /*
+                LOG(WARNING) << "Memory quota: "
+                             << "allocation_time_us=" << quota_duration << ", "
+                             << "requested=" << flush_data_size << ", "
+                             << "old_usage=" << old_usage << ", "
+                             << "new_usage=" << new_usage << ", "
+                             << "quota=" << quota << ", "
+                             << "usage_ratio=" << (usage_ratio * 100) << "%"
+                             << ", worker idx = " << worker_idx;
+                */
+            }
 
-        DLOG(INFO) << "AllocateFlushDataMemQuota: "
-                   << "old_usage=" << old_usage << ", new_usage=" << new_usage
-                   << ", quota=" << quota
-                   << ", usage_ratio=" << (usage_ratio * 100) << "%"
-                   << ", allocation_time_us=" << quota_duration;
+            DLOG(INFO) << "AllocateFlushDataMemQuota: "
+                       << "old_usage=" << old_usage
+                       << ", new_usage=" << new_usage << ", quota=" << quota
+                       << ", usage_ratio=" << (usage_ratio * 100) << "%"
+                       << ", allocation_time_us=" << quota_duration;
 
-        std::unique_lock<std::mutex> heap_lk(hash_partition_ckpt_heap_mux_);
-        mi_threadid_t prev_thd =
-            mi_override_thread(hash_partition_main_thread_id_);
-        mi_heap_t *prev_heap = mi_heap_set_default(hash_partition_ckpt_heap_);
+            std::unique_lock<std::mutex> heap_lk(hash_partition_ckpt_heap_mux_);
+            mi_threadid_t prev_thd =
+                mi_override_thread(hash_partition_main_thread_id_);
+            mi_heap_t *prev_heap =
+                mi_heap_set_default(hash_partition_ckpt_heap_);
 
 #if defined(WITH_JEMALLOC)
-        uint32_t prev_arena;
-        JemallocArenaSwitcher::ReadCurrentArena(prev_arena);
-        JemallocArenaSwitcher::SwitchToArena(hash_partition_ckpt_arena_id_);
+            uint32_t prev_arena;
+            JemallocArenaSwitcher::ReadCurrentArena(prev_arena);
+            JemallocArenaSwitcher::SwitchToArena(hash_partition_ckpt_arena_id_);
 #endif
 
-        data_sync_vec->reserve(scan_cc.accumulated_scan_cnt_);
-        for (size_t j = 0; j < scan_cc.accumulated_scan_cnt_; ++j)
-        {
-            auto &rec = scan_cc.DataSyncVec()[j];
-            // Note. Clone key instead of move key. The memory of
-            // rec.Key() will be reused to avoid memory allocation.
-            if (rec.cce_)
+            data_sync_vec->reserve(scan_cc.accumulated_scan_cnt_);
+            for (size_t j = 0; j < scan_cc.accumulated_scan_cnt_; ++j)
             {
-                // cce_ is null means the key is already persisted on
-                // kv, so we don't need to put it into the flush vec.
+                auto &rec = scan_cc.DataSyncVec()[j];
+                // Note. Clone key instead of move key. The memory of
+                // rec.Key() will be reused to avoid memory allocation.
+                if (rec.cce_)
+                {
+                    // cce_ is null means the key is already persisted on
+                    // kv, so we don't need to put it into the flush vec.
+                    int32_t part_id =
+                        Sharder::MapKeyHashToHashPartitionId(rec.Key().Hash());
+                    if (table_name.Engine() == TableEngine::EloqKv)
+                    {
+                        data_sync_vec->emplace_back(
+                            rec.Key().Clone(),
+                            rec.GetNonVersionedPayload(),
+                            rec.payload_status_,
+                            rec.commit_ts_,
+                            rec.cce_,
+                            rec.post_flush_size_,
+                            part_id);
+                    }
+                    else
+                    {
+                        data_sync_vec->emplace_back(
+                            rec.Key().Clone(),
+                            rec.ReleaseVersionedPayload(),
+                            rec.payload_status_,
+                            rec.commit_ts_,
+                            rec.cce_,
+                            rec.post_flush_size_,
+                            part_id);
+                    }
+                }
+            }
+
+            for (size_t j = 0; j < scan_cc.ArchiveVec().size(); ++j)
+            {
+                auto &rec = scan_cc.ArchiveVec()[j];
+                // Note. We need to ensure the copy constructor of
+                // FlushRecord could not be called.
+                rec.SetKey((*data_sync_vec)[rec.GetKeyIndex()].Key());
+            }
+
+            for (size_t j = 0; j < scan_cc.MoveBaseIdxVec().size(); ++j)
+            {
+                size_t key_idx = scan_cc.MoveBaseIdxVec()[j];
+                TxKey key_raw = (*data_sync_vec)[key_idx].Key();
                 int32_t part_id =
-                    worker_idx +
-                    offset * Sharder::Instance().GetLocalCcShardsCount();
-                if (table_name.Engine() == TableEngine::EloqKv)
-                {
-                    data_sync_vec->emplace_back(rec.Key().Clone(),
-                                                rec.GetNonVersionedPayload(),
-                                                rec.payload_status_,
-                                                rec.commit_ts_,
-                                                rec.cce_,
-                                                rec.post_flush_size_,
-                                                part_id);
-                }
-                else
-                {
-                    data_sync_vec->emplace_back(rec.Key().Clone(),
-                                                rec.ReleaseVersionedPayload(),
-                                                rec.payload_status_,
-                                                rec.commit_ts_,
-                                                rec.cce_,
-                                                rec.post_flush_size_,
-                                                part_id);
-                }
+                    Sharder::MapKeyHashToHashPartitionId(key_raw.Hash());
+                mv_base_vec->emplace_back(std::move(key_raw), part_id);
             }
-        }
-
-        for (size_t j = 0; j < scan_cc.ArchiveVec().size(); ++j)
-        {
-            auto &rec = scan_cc.ArchiveVec()[j];
-            // Note. We need to ensure the copy constructor of
-            // FlushRecord could not be called.
-            rec.SetKey((*data_sync_vec)[rec.GetKeyIndex()].Key());
-        }
-
-        for (size_t j = 0; j < scan_cc.MoveBaseIdxVec().size(); ++j)
-        {
-            size_t key_idx = scan_cc.MoveBaseIdxVec()[j];
-            TxKey key_raw = (*data_sync_vec)[key_idx].Key();
-            int32_t part_id =
-                worker_idx +
-                offset * Sharder::Instance().GetLocalCcShardsCount();
-            mv_base_vec->emplace_back(std::move(key_raw), part_id);
-        }
-        mi_override_thread(prev_thd);
-        mi_heap_set_default(prev_heap);
+            mi_override_thread(prev_thd);
+            mi_heap_set_default(prev_heap);
 
 #if defined(WITH_JEMALLOC)
-        // override arena id
-        JemallocArenaSwitcher::SwitchToArena(prev_arena);
+            // override arena id
+            JemallocArenaSwitcher::SwitchToArena(prev_arena);
 #endif
 
-        heap_lk.unlock();
+            heap_lk.unlock();
 
-        std::move(scan_cc.ArchiveVec().begin(),
-                  scan_cc.ArchiveVec().end(),
-                  std::back_inserter(*archive_vec));
+            std::move(scan_cc.ArchiveVec().begin(),
+                      scan_cc.ArchiveVec().end(),
+                      std::back_inserter(*archive_vec));
 
-        vec_mem_usage += flush_data_size;
+            vec_mem_usage += flush_data_size;
 
-        scan_data_drained = scan_cc.IsDrained() && scan_data_drained;
+            scan_data_drained = scan_cc.IsDrained() && scan_data_drained;
 
-        {
-            std::unique_lock<bthread::Mutex> flight_task_lk(
-                data_sync_task->flight_task_mux_);
-            if (data_sync_task->ckpt_err_ ==
-                DataSyncTask::CkptErrorCode::FLUSH_ERROR)
             {
-                flight_task_lk.unlock();
-
-                LOG(WARNING)
-                    << "There are error during flush for this data sync: "
-                    << data_sync_txm->TxNumber() << " on worker#" << worker_idx
-                    << ". Terminal this datasync task.";
-                // 1. Release read intent on paused key
-                if (!scan_cc.IsDrained())
+                std::unique_lock<bthread::Mutex> flight_task_lk(
+                    data_sync_task->flight_task_mux_);
+                if (data_sync_task->ckpt_err_ ==
+                    DataSyncTask::CkptErrorCode::FLUSH_ERROR)
                 {
-                    scan_cc.Reset(
-                        HashPartitionDataSyncScanCc::OpType::Terminated);
-                    EnqueueLowPriorityCcRequestToShard(worker_idx, &scan_cc);
-                    scan_cc.Wait();
+                    flight_task_lk.unlock();
+
+                    LOG(WARNING)
+                        << "There are error during flush for this data sync: "
+                        << data_sync_txm->TxNumber() << " on worker#"
+                        << worker_idx << ". Terminal this datasync task.";
+                    // 1. Release read intent on paused key
+                    if (!scan_cc.IsDrained())
+                    {
+                        scan_cc.Reset(
+                            HashPartitionDataSyncScanCc::OpType::Terminated);
+                        EnqueueLowPriorityCcRequestToShard(worker_idx,
+                                                           &scan_cc);
+                        scan_cc.Wait();
+                    }
+                    // 2. Release memory usage on this datasync worker.
+                    data_sync_vec->clear();
+                    archive_vec->clear();
+                    mv_base_vec->clear();
+                    data_sync_mem_controller_.DeallocateFlushMemQuota(
+                        vec_mem_usage);
+                    break;
                 }
-                // 2. Release memory usage on this datasync worker.
-                data_sync_vec->clear();
-                archive_vec->clear();
-                mv_base_vec->clear();
-                data_sync_mem_controller_.DeallocateFlushMemQuota(
-                    vec_mem_usage);
-                break;
+
+                // Flush worker will call PostProcessDataSyncTask() to
+                // decrement flight task count.
+                data_sync_task->flight_task_cnt_ += 1;
             }
 
-            // Flush worker will call PostProcessDataSyncTask() to
-            // decrement flight task count.
-            data_sync_task->flight_task_cnt_ += 1;
-        }
-
-        AddFlushTaskEntry(
-            std::make_unique<FlushTaskEntry>(std::move(data_sync_vec),
-                                             std::move(archive_vec),
-                                             std::move(mv_base_vec),
-                                             data_sync_txm,
-                                             data_sync_task,
-                                             catalog_rec.CopySchema(),
-                                             vec_mem_usage),
-            worker_idx);
-
-        data_sync_vec = std::make_unique<std::vector<FlushRecord>>();
-
-        archive_vec = std::make_unique<std::vector<FlushRecord>>();
-
-        mv_base_vec =
-            std::make_unique<std::vector<std::pair<TxKey, int32_t>>>();
-
-        vec_mem_usage = 0;
-
-        if (scan_cc.scan_heap_is_full_ == 1)
-        {
-            // Clear the FlushRecords' memory of scan cc since the
-            // DataSyncScan heap is full.
-            auto &data_sync_vec_ref = scan_cc.DataSyncVec();
-            auto &archive_vec_ref = scan_cc.ArchiveVec();
-            ReleaseDataSyncScanHeapCc release_scan_heap_cc(&data_sync_vec_ref,
-                                                           &archive_vec_ref);
-            EnqueueLowPriorityCcRequestToShard(worker_idx,
-                                               &release_scan_heap_cc);
-            release_scan_heap_cc.Wait();
-        }
-
-        scan_cc.Reset();
-    }
-
-    // release scan heap memory after scan finish
-    auto &data_sync_vec_ref = scan_cc.DataSyncVec();
-    auto &archive_vec_ref = scan_cc.ArchiveVec();
-    ReleaseDataSyncScanHeapCc release_scan_heap_cc(&data_sync_vec_ref,
-                                                   &archive_vec_ref);
-    EnqueueLowPriorityCcRequestToShard(worker_idx, &release_scan_heap_cc);
-    release_scan_heap_cc.Wait();
-
-    if (!data_sync_vec->empty() || !archive_vec->empty() ||
-        !mv_base_vec->empty())
-    {
-        std::unique_lock<bthread::Mutex> flight_task_lk(
-            data_sync_task->flight_task_mux_);
-        if (data_sync_task->ckpt_err_ == DataSyncTask::CkptErrorCode::NO_ERROR)
-        {
-            data_sync_task->flight_task_cnt_ += 1;
-            flight_task_lk.unlock();
             AddFlushTaskEntry(
                 std::make_unique<FlushTaskEntry>(std::move(data_sync_vec),
                                                  std::move(archive_vec),
@@ -5327,13 +5316,68 @@ void LocalCcShards::DataSyncForHashPartition(
                                                  catalog_rec.CopySchema(),
                                                  vec_mem_usage),
                 worker_idx);
+
+            data_sync_vec = std::make_unique<std::vector<FlushRecord>>();
+
+            archive_vec = std::make_unique<std::vector<FlushRecord>>();
+
+            mv_base_vec =
+                std::make_unique<std::vector<std::pair<TxKey, int32_t>>>();
+
+            vec_mem_usage = 0;
+
+            if (scan_cc.scan_heap_is_full_ == 1)
+            {
+                // Clear the FlushRecords' memory of scan cc since the
+                // DataSyncScan heap is full.
+                auto &data_sync_vec_ref = scan_cc.DataSyncVec();
+                auto &archive_vec_ref = scan_cc.ArchiveVec();
+                ReleaseDataSyncScanHeapCc release_scan_heap_cc(
+                    &data_sync_vec_ref, &archive_vec_ref);
+                EnqueueLowPriorityCcRequestToShard(worker_idx,
+                                                   &release_scan_heap_cc);
+                release_scan_heap_cc.Wait();
+            }
+
+            scan_cc.Reset();
         }
-        else
+
+        // release scan heap memory after scan finish
+        auto &data_sync_vec_ref = scan_cc.DataSyncVec();
+        auto &archive_vec_ref = scan_cc.ArchiveVec();
+        ReleaseDataSyncScanHeapCc release_scan_heap_cc(&data_sync_vec_ref,
+                                                       &archive_vec_ref);
+        EnqueueLowPriorityCcRequestToShard(worker_idx, &release_scan_heap_cc);
+        release_scan_heap_cc.Wait();
+
+        if (!data_sync_vec->empty() || !archive_vec->empty() ||
+            !mv_base_vec->empty())
         {
-            // There are error during flush, and if we do not put the
-            // current batch data into flush worker, should release the
-            // memory usage.
-            data_sync_mem_controller_.DeallocateFlushMemQuota(vec_mem_usage);
+            std::unique_lock<bthread::Mutex> flight_task_lk(
+                data_sync_task->flight_task_mux_);
+            if (data_sync_task->ckpt_err_ ==
+                DataSyncTask::CkptErrorCode::NO_ERROR)
+            {
+                data_sync_task->flight_task_cnt_ += 1;
+                flight_task_lk.unlock();
+                AddFlushTaskEntry(
+                    std::make_unique<FlushTaskEntry>(std::move(data_sync_vec),
+                                                     std::move(archive_vec),
+                                                     std::move(mv_base_vec),
+                                                     data_sync_txm,
+                                                     data_sync_task,
+                                                     catalog_rec.CopySchema(),
+                                                     vec_mem_usage),
+                    worker_idx);
+            }
+            else
+            {
+                // There are error during flush, and if we do not put the
+                // current batch data into flush worker, should release the
+                // memory usage.
+                data_sync_mem_controller_.DeallocateFlushMemQuota(
+                    vec_mem_usage);
+            }
         }
     }
 
