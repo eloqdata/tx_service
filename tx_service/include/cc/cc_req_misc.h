@@ -970,14 +970,12 @@ public:
     UpdateCceCkptTsCc(
         NodeGroupId node_group_id,
         int64_t term,
-        absl::flat_hash_map<size_t, std::vector<CkptTsEntry>> &cce_entries,
-        bool range_partitioned,
-        bool versioned_payload)
+        const TableName &table_name,
+        absl::flat_hash_map<size_t, std::vector<CkptTsEntry>> &cce_entries)
         : cce_entries_(cce_entries),
           node_group_id_(node_group_id),
           term_(term),
-          range_partitioned_(range_partitioned),
-          versioned_payload_(versioned_payload)
+          table_name_(table_name)
     {
         unfinished_core_cnt_ = cce_entries_.size();
         assert(unfinished_core_cnt_ > 0);
@@ -1026,8 +1024,7 @@ private:
     size_t unfinished_core_cnt_;
     NodeGroupId node_group_id_;
     int64_t term_;
-    bool range_partitioned_{false};
-    bool versioned_payload_{false};
+    TableName table_name_;
     bthread::Mutex mux_;
     bthread::ConditionVariable cv_;
 };

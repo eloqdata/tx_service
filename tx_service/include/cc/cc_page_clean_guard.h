@@ -134,6 +134,12 @@ public:
         return free_cnt_;
     }
 
+    // Number of dirty keys freed.
+    size_t DirtyFreedCount() const
+    {
+        return dirty_freed_cnt_;
+    }
+
     // If any valid key is evicted. This is used to update if ccm is still fully
     // cached. Note that this does not include
     // 1. Deleted/expired keys. Freeing deleted keys does not affect cache
@@ -317,6 +323,10 @@ protected:
                 evicted_valid_key_ = true;
             }
         }
+        if (cce->CommitTs() > 1 && !cce->IsPersistent())
+        {
+            ++dirty_freed_cnt_;
+        }
 
         cce->ClearLocks(*cc_shard_, cc_ng_id);
         clean_set_.set(idx, true);
@@ -330,6 +340,7 @@ protected:
     CcPage<KeyT, ValueT, VersionedRecord, RangePartitioned> *page_{nullptr};
     uint64_t last_commit_ts_{0};
     uint64_t free_cnt_{0};
+    uint64_t dirty_freed_cnt_{0};
     bool evicted_valid_key_{false};
     uint64_t clean_obj_cnt_{0};
 

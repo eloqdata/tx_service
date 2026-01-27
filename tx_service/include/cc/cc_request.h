@@ -3049,6 +3049,8 @@ public:
             memory_committed_vec_.emplace_back(0);
             heap_full_vec_.emplace_back(false);
             standby_msg_seq_id_vec_.emplace_back(0);
+            total_key_cnt_vec_.emplace_back(0);
+            dirty_key_cnt_vec_.emplace_back(0);
         }
     }
 
@@ -3088,6 +3090,9 @@ public:
         memory_allocated_vec_[ccs.LocalCoreId()] = allocated;
         memory_committed_vec_[ccs.LocalCoreId()] = committed;
         heap_full_vec_[ccs.LocalCoreId()] = full;
+        auto [total_keys, dirty_keys] = ccs.GetDataKeyStats();
+        total_key_cnt_vec_[ccs.LocalCoreId()] = total_keys;
+        dirty_key_cnt_vec_[ccs.LocalCoreId()] = dirty_keys;
 
         std::unique_lock lk(mux_);
         if (--unfinish_cnt_ == 0)
@@ -3149,13 +3154,23 @@ public:
             uint64_t &allocated = memory_allocated_vec_[core_id];
             uint64_t &committed = memory_committed_vec_[core_id];
             bool heap_full = heap_full_vec_[core_id];
+            size_t total_keys = total_key_cnt_vec_[core_id];
+            size_t dirty_keys = dirty_key_cnt_vec_[core_id];
+            double dirty_ratio =
+                total_keys == 0
+                    ? 0.0
+                    : static_cast<double>(dirty_keys) /
+                          static_cast<double>(total_keys);
 
             LOG(INFO) << "ccs " << core_id << " memory usage report, committed "
                       << committed << ", allocated " << allocated
                       << ", frag ratio " << std::setprecision(2)
                       << 100 * (static_cast<float>(committed - allocated) /
                                 committed)
-                      << " , heap full: " << heap_full;
+                      << " , heap full: " << heap_full
+                      << ", dirty key ratio: " << std::setprecision(4)
+                      << dirty_ratio << " (" << dirty_keys << "/"
+                      << total_keys << ")";
         }
     }
 
@@ -3203,6 +3218,8 @@ private:
     size_t unfinish_cnt_;
     std::vector<uint64_t> memory_allocated_vec_;
     std::vector<uint64_t> memory_committed_vec_;
+    std::vector<size_t> total_key_cnt_vec_;
+    std::vector<size_t> dirty_key_cnt_vec_;
     std::vector<uint64_t> standby_msg_seq_id_vec_;
     std::vector<uint32_t> subscribed_node_ids_;
     std::vector<bool> heap_full_vec_;

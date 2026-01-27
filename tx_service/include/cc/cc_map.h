@@ -207,11 +207,16 @@ public:
     virtual bool Execute(ScanSliceDeltaSizeCcForRangePartition &req) = 0;
     virtual bool Execute(ScanDeltaSizeCcForHashPartition &req) = 0;
 
-    virtual size_t size() const = 0;
     virtual size_t NormalObjectSize()
     {
         assert(false);
         return 0;
+    }
+
+    // Notify ccmap when an entry's ckpt ts is updated and persistence may have
+    // changed.
+    virtual void OnEntryFlushed(bool was_dirty, bool is_persistent)
+    {
     }
 
     virtual std::pair<size_t, LruPage *> CleanPageAndReBalance(

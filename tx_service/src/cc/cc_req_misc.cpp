@@ -1195,47 +1195,62 @@ bool UpdateCceCkptTsCc::Execute(CcShard &ccs)
 
     size_t last_index = std::min(index + SCAN_BATCH_SIZE, records.size());
 
+    CcMap *ccm = ccs.GetCcm(table_name_, node_group_id_);
+    assert(ccm != nullptr);
+
+    bool range_partitioned = !table_name_.IsHashPartitioned();
+    bool versioned_payload = table_name_.Engine() != TableEngine::EloqKv;
+
     for (; index < last_index; ++index)
     {
         const CkptTsEntry &ref = records[index];
-        if (range_partitioned_)
+        if (range_partitioned)
         {
-            if (versioned_payload_)
+            if (versioned_payload)
             {
                 VersionedLruEntry<true, true> *v_entry =
                     static_cast<VersionedLruEntry<true, true> *>(ref.cce_);
+
+                assert(v_entry->CommitTs() > 1 && !v_entry->IsPersistent());
                 v_entry->entry_info_.SetDataStoreSize(ref.post_flush_size_);
 
                 v_entry->SetCkptTs(ref.commit_ts_);
                 v_entry->ClearBeingCkpt();
+                ccm->OnEntryFlushed(true, v_entry->IsPersistent());
             }
             else
             {
                 VersionedLruEntry<false, true> *v_entry =
                     static_cast<VersionedLruEntry<false, true> *>(ref.cce_);
+                assert(v_entry->CommitTs() > 1 && !v_entry->IsPersistent());
                 v_entry->entry_info_.SetDataStoreSize(ref.post_flush_size_);
 
                 v_entry->SetCkptTs(ref.commit_ts_);
                 v_entry->ClearBeingCkpt();
+                ccm->OnEntryFlushed(true, v_entry->IsPersistent());
             }
         }
         else
         {
-            if (versioned_payload_)
+            if (versioned_payload)
             {
                 VersionedLruEntry<true, false> *v_entry =
                     static_cast<VersionedLruEntry<true, false> *>(ref.cce_);
 
+                assert(v_entry->CommitTs() > 1 && !v_entry->IsPersistent());
                 v_entry->SetCkptTs(ref.commit_ts_);
                 v_entry->ClearBeingCkpt();
+                ccm->OnEntryFlushed(true, v_entry->IsPersistent());
             }
             else
             {
                 VersionedLruEntry<false, false> *v_entry =
                     static_cast<VersionedLruEntry<false, false> *>(ref.cce_);
 
+                assert(v_entry->CommitTs() > 1 && !v_entry->IsPersistent());
                 v_entry->SetCkptTs(ref.commit_ts_);
                 v_entry->ClearBeingCkpt();
+                ccm->OnEntryFlushed(true, v_entry->IsPersistent());
             }
         }
     }
