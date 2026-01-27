@@ -21,6 +21,11 @@
  */
 #include "fault/fault_inject.h"
 
+#if defined(WITH_LOG_SERVICE) && !defined(OPEN_LOG_SERVICE) && \
+    defined(LOG_STATE_TYPE_RKDB_S3)
+#include "../../../eloq_log_service/include/fault_inject.h"  // txlog::FaultInject from eloq_log_service
+#endif
+
 #include "cc/cc_handler_result.h"
 #include "proto/cc_request.pb.h"
 #include "remote/cc_stream_sender.h"
@@ -243,6 +248,39 @@ void FaultInject::TriggerAction(FaultEntry *entry)
         default:
             break;
         }
+    }
+}
+
+void FaultInject::InjectFault(std::string fault_name, std::string paras)
+{
+    LOG(INFO) << "FaultInject name=" << fault_name << "  paras=" << paras;
+
+#if defined(WITH_LOG_SERVICE) && !defined(OPEN_LOG_SERVICE) && \
+    defined(LOG_STATE_TYPE_RKDB_S3)
+    if (fault_name == "override_log_retention_seconds")
+    {
+        txlog::FaultInject::Instance().InjectFault(fault_name, paras);
+    }
+#endif
+
+    // To remove the pointed fault inject.
+    if (paras.compare("remove") == 0)
+    {
+        std::lock_guard<std::mutex> lk(mux_);
+        injected_fault_map_.erase(fault_name);
+        return;
+    }
+
+    FaultEntry fentry(fault_name, paras);
+    if (fault_name.compare("at_once") == 0)
+    {
+        // If fault name equal "at_once", run it at once
+        TriggerAction(&fentry);
+    }
+    else
+    {
+        std::lock_guard<std::mutex> lk(mux_);
+        injected_fault_map_.try_emplace(fault_name, fentry);
     }
 }
 

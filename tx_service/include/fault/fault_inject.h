@@ -194,29 +194,7 @@ public:
     }
 
     void TriggerAction(FaultEntry *entry);
-    void InjectFault(std::string fault_name, std::string paras)
-    {
-        LOG(INFO) << "FaultInject name=" << fault_name << "  paras=" << paras;
-        // To remove the pointed fault inject.
-        if (paras.compare("remove") == 0)
-        {
-            std::lock_guard<std::mutex> lk(mux_);
-            injected_fault_map_.erase(fault_name);
-            return;
-        }
-
-        FaultEntry fentry(fault_name, paras);
-        if (fault_name.compare("at_once") == 0)
-        {
-            // If fault name equal "at_once", run it at once
-            TriggerAction(&fentry);
-        }
-        else
-        {
-            std::lock_guard<std::mutex> lk(mux_);
-            injected_fault_map_.try_emplace(fault_name, fentry);
-        }
-    }
+    void InjectFault(std::string fault_name, std::string paras);
 
 private:
     FaultInject()
