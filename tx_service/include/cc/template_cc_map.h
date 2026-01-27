@@ -8676,8 +8676,9 @@ public:
             // position to update the map.
             page_it = ccmp_.find(ccpage->FirstKey());
         }
+        const bool was_dirty = (cce->CommitTs() > 1 && !cce->IsPersistent());
+        shard_->AdjustDataKeyStats(table_name_, -1, was_dirty ? -1 : 0);
         ccpage->Remove(cce);
-        shard_->AdjustDataKeyStats(table_name_, -1, 0);
 
         RebalancePage(ccpage, page_it, true);
     }
@@ -11591,9 +11592,10 @@ protected:
         {
             normal_obj_sz_ -= clean_guard->CleanObjectCount();
         }
-        shard_->AdjustDataKeyStats(table_name_,
-                                   -static_cast<int64_t>(clean_guard->FreedCount()),
-                                   -static_cast<int64_t>(clean_guard->DirtyFreedCount()));
+        shard_->AdjustDataKeyStats(
+            table_name_,
+            -static_cast<int64_t>(clean_guard->FreedCount()),
+            -static_cast<int64_t>(clean_guard->DirtyFreedCount()));
         if (clean_guard->EvictedValidKeys())
         {
             ccm_has_full_entries_ = false;

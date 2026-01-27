@@ -381,8 +381,10 @@ public:
         //                 std::forward_as_tuple(map_iter->second->size()));
         //         }
 
-        //         std::cout << "Table '" << tab_name.StringView() << "' core ID "
-        //                   << shard.core_id_ << ": " << map_iter->second->size()
+        //         std::cout << "Table '" << tab_name.StringView() << "' core ID
+        //         "
+        //                   << shard.core_id_ << ": " <<
+        //                   map_iter->second->size()
         //                   << std::endl;
 
         //         assert(map_iter->second->VerifyOrdering() ==

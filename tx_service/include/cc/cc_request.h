@@ -3156,11 +3156,10 @@ public:
             bool heap_full = heap_full_vec_[core_id];
             size_t total_keys = total_key_cnt_vec_[core_id];
             size_t dirty_keys = dirty_key_cnt_vec_[core_id];
-            double dirty_ratio =
-                total_keys == 0
-                    ? 0.0
-                    : static_cast<double>(dirty_keys) /
-                          static_cast<double>(total_keys);
+            double dirty_ratio = total_keys == 0
+                                     ? 0.0
+                                     : static_cast<double>(dirty_keys) /
+                                           static_cast<double>(total_keys);
 
             LOG(INFO) << "ccs " << core_id << " memory usage report, committed "
                       << committed << ", allocated " << allocated
@@ -3169,8 +3168,8 @@ public:
                                 committed)
                       << " , heap full: " << heap_full
                       << ", dirty key ratio: " << std::setprecision(4)
-                      << dirty_ratio << " (" << dirty_keys << "/"
-                      << total_keys << ")";
+                      << dirty_ratio << " (" << dirty_keys << "/" << total_keys
+                      << ")";
         }
     }
 
