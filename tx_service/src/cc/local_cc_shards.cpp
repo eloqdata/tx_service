@@ -132,9 +132,7 @@ LocalCcShards::LocalCcShards(
 
       data_sync_worker_ctx_(conf.at("core_num")),
 #ifdef EXT_TX_PROC_ENABLED
-      flush_data_worker_ctx_(conf.at("core_num") >= 2
-                                 ? std::min(conf.at("core_num"), (uint32_t) 10)
-                                 : 1),
+      flush_data_worker_ctx_(conf.at("core_num")),
 #else
       flush_data_worker_ctx_(
           std::min(static_cast<int>(conf.at("core_num")), 10)),
