@@ -4875,6 +4875,8 @@ void LocalCcShards::DataSyncForHashPartition(
     // this assumption.
 
     assert(worker_idx < cc_shards_.size());
+    size_t yf_debug_data_size = 0;
+    size_t offset = 0;
 
     while (!scan_data_drained)
     {
@@ -5100,6 +5102,12 @@ void LocalCcShards::DataSyncForHashPartition(
 #endif
         }
 #endif
+        yf_debug_data_size += flush_data_size;
+        if (yf_debug_data_size > 40UL * 1024 * 1024)
+        {
+            yf_debug_data_size = 0;
+            offset++;
+        }
 
         // this thread will wait in AllocatePendingFlushDataMemQuota if
         // quota is not available
@@ -5165,8 +5173,7 @@ void LocalCcShards::DataSyncForHashPartition(
             {
                 // cce_ is null means the key is already persisted on
                 // kv, so we don't need to put it into the flush vec.
-                int32_t part_id =
-                    Sharder::MapKeyHashToHashPartitionId(rec.Key().Hash());
+                int32_t part_id = worker_idx + offset * 10;
                 if (table_name.Engine() == TableEngine::EloqKv)
                 {
                     data_sync_vec->emplace_back(rec.Key().Clone(),
@@ -5202,8 +5209,7 @@ void LocalCcShards::DataSyncForHashPartition(
         {
             size_t key_idx = scan_cc.MoveBaseIdxVec()[j];
             TxKey key_raw = (*data_sync_vec)[key_idx].Key();
-            int32_t part_id =
-                Sharder::MapKeyHashToHashPartitionId(key_raw.Hash());
+            int32_t part_id = worker_idx + offset * 10;
             mv_base_vec->emplace_back(std::move(key_raw), part_id);
         }
         mi_override_thread(prev_thd);
