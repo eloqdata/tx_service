@@ -4812,6 +4812,7 @@ void LocalCcShards::DataSyncForHashPartition(
     assert(table_name.Type() == TableType::Primary);
 
     auto core_number = cc_shards_.size();
+    /*
     auto approximate_partition_number_this_node = std::max(
         1U, total_hash_partitions / Sharder::Instance().NodeGroupCount());
     auto approximate_partition_number_this_core =
@@ -4825,6 +4826,32 @@ void LocalCcShards::DataSyncForHashPartition(
     const size_t scan_concurrency =
         flush_buffer_size /
         (default_data_file_size * approximate_partition_number_this_core);
+    */
+
+    ScanDeltaSizeCcForHashPartition scan_delta_size_cc(
+        table_name,
+        last_sync_ts,
+        data_sync_task->data_sync_ts_,
+        ng_id,
+        ng_term,
+        data_sync_txm->TxNumber(),
+        catalog_rec.Schema()->Version());
+
+    EnqueueToCcShard(worker_idx, &scan_delta_size_cc);
+    scan_delta_size_cc.Wait();
+
+    if (scan_delta_size_cc.IsError())
+    {
+        LOG(ERROR) << "DataSync scan slice delta size failed on table "
+                   << table_name.StringView() << " with error code: "
+                   << static_cast<uint32_t>(scan_delta_size_cc.ErrorCode());
+
+        AbortTx(data_sync_txm);
+        std::lock_guard<std::mutex> task_worker_lk(data_sync_worker_ctx_.mux_);
+        data_sync_task_queue_[worker_idx].emplace_front(data_sync_task);
+        data_sync_worker_ctx_.cv_.notify_one();
+        return;
+    }
 
     constexpr size_t partition_number = 1024;
     auto partition_number_this_core =
@@ -4837,10 +4864,29 @@ void LocalCcShards::DataSyncForHashPartition(
         partition_ids.emplace_back(worker_idx + core_number * i);
     }
     assert(partition_number_this_core == partition_ids.size());
-    const size_t partition_number_per_scan =
-        std::max(1UL, (flush_buffer_size / (40UL * 1024 * 1024)));
+    const auto updated_memory = scan_delta_size_cc.UpdatedMemory();
+    auto updated_memory_per_partition =
+        partition_number_this_core ? updated_memory / partition_number_this_core
+                                   : 0;
+    const size_t flush_buffer_size =
+        cur_flush_buffers_[worker_idx]->GetFlushBufferSize();
+    const size_t partition_number_per_scan = std::max(
+        1UL,
+        updated_memory_per_partition != 0
+            ? std::min(core_number,
+                       flush_buffer_size / updated_memory_per_partition)
+            : partition_number_this_core);
 
+    const size_t scan_concurrency =
+        updated_memory == 0
+            ? core_number
+            : std::min(core_number, flush_buffer_size / updated_memory);
     scan_concurrency_.store(100);
+
+    LOG(INFO) << "DataSyncScan: flush buffer size = " << flush_buffer_size
+              << ", updated memory = " << updated_memory
+              << ", partition number per scan = " << partition_number_per_scan
+              << ", scan concurrency = " << scan_concurrency;
 
     /*
     if (scan_concurrency > 0)
