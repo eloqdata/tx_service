@@ -71,11 +71,11 @@ DEFINE_double(ckpt_buffer_ratio,
               "Fraction of node memory carved out for checkpoint flush "
               "buffers and the data-sync memory controller");
 DEFINE_uint32(hash_partition_ckpt_scan_yield_time_us,
-              32,
+              100,
               "Max microseconds a hash partition checkpoint/data-sync scan may "
               "run before yielding a Tx processor thread");
 DEFINE_uint64(hash_partition_data_sync_scan_batch_size,
-              50,
+              100,
               "Upper bound on the number of CC pages exported in a single "
               "hash partition data-sync scan batch");
 DEFINE_uint64(hash_partition_data_sync_scan_data_size,
