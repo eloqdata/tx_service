@@ -139,6 +139,18 @@ public:
         };
     }
 
+#if defined(DATA_STORE_TYPE_ELOQDSS_ELOQSTORE)
+    /**
+     * @brief Check if cloud storage mode is enabled
+     * @return true if cloud_store_path is configured (not empty), false
+     * otherwise
+     */
+    bool IsCloudStorageMode() const override
+    {
+        return !eloq_store_configs_.eloqstore_configs_.cloud_store_path.empty();
+    }
+#endif
+
 private:
     EloqStoreConfig eloq_store_configs_;
 

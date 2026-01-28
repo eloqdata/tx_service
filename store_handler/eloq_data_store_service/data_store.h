@@ -139,6 +139,27 @@ public:
      */
     virtual void SwitchToReadWrite() = 0;
 
+    /**
+     * @brief Standby node sync file cache operation.
+     * For standby nodes in cloud storage mode, this method performs prewarm
+     * operation and cleans up files after completion.
+     * Default implementation does nothing (for non-EloqStore backends).
+     * Only EloqStoreDataStore implements this method.
+     */
+    virtual void StandbySyncFileCache()
+    {
+    }
+
+    /**
+     * @brief Stop standby sync file cache operation.
+     * Stops the ongoing prewarm operation gracefully.
+     * Default implementation does nothing (for non-EloqStore backends).
+     * Only EloqStoreDataStore implements this method.
+     */
+    virtual void StopStandbySyncFileCache()
+    {
+    }
+
 protected:
     uint32_t shard_id_;
     DataStoreService *data_store_service_;
