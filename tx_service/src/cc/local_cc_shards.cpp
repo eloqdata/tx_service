@@ -292,7 +292,7 @@ void LocalCcShards::StartBackgroudWorkers()
     const size_t worker_num = data_sync_worker_ctx_.worker_num_;
     // Calculate buffer size
     const uint64_t buffer_size =
-        data_sync_mem_controller_.FlushMemoryQuota() / (worker_num * 2);
+        data_sync_mem_controller_.FlushMemoryQuota() / (worker_num);
     cur_flush_buffers_.clear();
     for (size_t i = 0; i < worker_num; ++i)
     {
@@ -4858,16 +4858,14 @@ void LocalCcShards::DataSyncForHashPartition(
                                    : 0;
     const size_t flush_buffer_size =
         cur_flush_buffers_[worker_idx]->GetFlushBufferSize();
-    const size_t partition_number_per_scan = std::max(
-        1UL,
-        updated_memory_per_partition != 0
-            ? (flush_buffer_size /
-               std::min(8UL * 1024 * 1024, updated_memory_per_partition))
-            : partition_number_this_core);
 
+    const size_t partition_number_per_scan =
+        std::max(1UL,
+                 updated_memory_per_partition != 0
+                     ? (flush_buffer_size / updated_memory_per_partition)
+                     : partition_number_this_core);
     const size_t scan_concurrency = core_number;
-
-    scan_concurrency_.store(core_number);
+    // scan_concurrency_.store(core_number);
 
     LOG(INFO) << "DataSyncScan: flush buffer size = " << flush_buffer_size
               << ", updated memory = " << updated_memory
