@@ -71,11 +71,11 @@ DEFINE_double(ckpt_buffer_ratio,
               "Fraction of node memory carved out for checkpoint flush "
               "buffers and the data-sync memory controller");
 DEFINE_uint32(hash_partition_ckpt_scan_yield_time_us,
-              50,
+              100,
               "Max microseconds a hash partition checkpoint/data-sync scan may "
               "run before yielding a Tx processor thread");
 DEFINE_uint64(hash_partition_data_sync_scan_batch_size,
-              32,
+              100,
               "Upper bound on the number of CC pages exported in a single "
               "hash partition data-sync scan batch");
 DEFINE_uint64(hash_partition_data_sync_scan_data_size,
@@ -131,13 +131,7 @@ LocalCcShards::LocalCcShards(
 #endif
 
       data_sync_worker_ctx_(conf.at("core_num")),
-#ifdef EXT_TX_PROC_ENABLED
       flush_data_worker_ctx_(conf.at("core_num")),
-#else
-      flush_data_worker_ctx_(
-          std::min(static_cast<int>(conf.at("core_num")), 10)),
-#endif
-
       // cur_flush_buffers_ will be resized in StartBackgroudWorkers()
       // when worker_num_ is determined
       data_sync_mem_controller_(static_cast<uint64_t>(
@@ -296,13 +290,7 @@ void LocalCcShards::StartBackgroudWorkers()
 
     // Initialize per-worker data structures
     const size_t worker_num = data_sync_worker_ctx_.worker_num_;
-    // Calculate buffer size: same as original cur_flush_buffer_ initialization
-    // We need to get node_memory_limit_mb from somewhere - for now, use a
-    // default or calculate from existing data_sync_mem_controller_ quota
-    // const uint64_t buffer_size =
-    //    data_sync_mem_controller_.FlushMemoryQuota() / worker_num;
-
-    // const uint64_t buffer_size =  400 * 1024 * 1024;  // 400MB
+    // Calculate buffer size
     const uint64_t buffer_size =
         data_sync_mem_controller_.FlushMemoryQuota() / (worker_num * 2);
     cur_flush_buffers_.clear();
@@ -4870,17 +4858,18 @@ void LocalCcShards::DataSyncForHashPartition(
                                    : 0;
     const size_t flush_buffer_size =
         cur_flush_buffers_[worker_idx]->GetFlushBufferSize();
-    const size_t partition_number_per_scan = std::max(
-        1UL,
-        updated_memory_per_partition != 0
-            ? std::min(core_number,
-                       flush_buffer_size / updated_memory_per_partition)
-            : partition_number_this_core);
+    const size_t partition_number_per_scan =
+        std::max(1UL,
+                 updated_memory_per_partition != 0
+                     ? (flush_buffer_size / updated_memory_per_partition)
+                     : partition_number_this_core);
 
     const size_t scan_concurrency =
         updated_memory == 0
             ? core_number
-            : std::min(core_number, flush_buffer_size / updated_memory);
+            : std::min(core_number,
+                       data_sync_mem_controller_.FlushMemoryQuota() /
+                           updated_memory);
     scan_concurrency_.store(100);
 
     LOG(INFO) << "DataSyncScan: flush buffer size = " << flush_buffer_size
