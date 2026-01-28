@@ -323,7 +323,7 @@ protected:
                 evicted_valid_key_ = true;
             }
         }
-        if (cce->CommitTs() > 1 && !cce->IsPersistent())
+        if (cce->IsDirty())
         {
             ++dirty_freed_cnt_;
         }

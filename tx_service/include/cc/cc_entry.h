@@ -629,6 +629,17 @@ public:
 
     bool IsPersistent() const;
 
+    /**
+     * @brief Check if the entry is dirty (not yet checkpointed).
+     * This function only relies on CommitTs and CkptTs or
+     * commit_ts_and_status_, and does not consider standby node status. Use
+     * this strictly for dirty size tracking.
+     *
+     * @return true if the entry is dirty (CommitTs > CkptTs for versioned,
+     *         or flush bit not set for non-versioned), false otherwise.
+     */
+    bool IsDirty() const;
+
     RecordStatus PayloadStatus() const;
 
     void SetCommitTsPayloadStatus(uint64_t ts, RecordStatus status);

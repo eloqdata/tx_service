@@ -609,7 +609,7 @@ public:
                 RecordStatus cce_old_status = cce->PayloadStatus();
                 RecordStatus new_status =
                     is_del ? RecordStatus::Deleted : RecordStatus::Normal;
-                bool was_dirty = (cce->CommitTs() > 1 && !cce->IsPersistent());
+                bool was_dirty = cce->IsDirty();
                 cce->SetCommitTsPayloadStatus(commit_ts, new_status);
 
                 if (req.IsInitialInsert())
@@ -1127,8 +1127,7 @@ public:
                                 ? RecordStatus::Deleted
                                 : RecordStatus::Normal;
 
-                        bool was_dirty = (cce_ptr->CommitTs() > 1 &&
-                                          !cce_ptr->IsPersistent());
+                        bool was_dirty = cce_ptr->IsDirty();
                         cce_ptr->SetCommitTsPayloadStatus(commit_ts, status);
                         OnCommittedUpdate(cce_ptr, was_dirty);
                     }
@@ -2027,7 +2026,7 @@ public:
                 tmp_payload_status = RecordStatus::Deleted;
             }
 
-            bool was_dirty = (cce->CommitTs() > 1 && !cce->IsPersistent());
+            bool was_dirty = cce->IsDirty();
             if (cce->PayloadStatus() == RecordStatus::Unknown)
             {
                 cce->payload_.PassInCurrentPayload(std::move(tmp_payload));
@@ -2223,7 +2222,7 @@ public:
                 CcEntry<KeyT, ValueT, VersionedRecord, RangePartitioned> *>(
                 cce_addr.ExtractCce());
 
-        bool was_dirty = (cce->CommitTs() > 1 && !cce->IsPersistent());
+        bool was_dirty = cce->IsDirty();
         if (cce->PayloadStatus() == RecordStatus::Unknown)
         {
             assert(cce->CommitTs() == 1);
@@ -7014,7 +7013,7 @@ public:
                     rec_status = RecordStatus::Deleted;
                 }
                 const uint64_t commit_ts = req.CommitTs();
-                bool was_dirty = (cce->CommitTs() > 1 && !cce->IsPersistent());
+                bool was_dirty = cce->IsDirty();
                 cce->SetCommitTsPayloadStatus(commit_ts, rec_status);
                 OnCommittedUpdate(cce, was_dirty);
 
@@ -7766,7 +7765,7 @@ public:
                 }
             }
 
-            bool was_dirty = (cce->CommitTs() > 1 && !cce->IsPersistent());
+            bool was_dirty = cce->IsDirty();
             cce->SetCommitTsPayloadStatus(commit_ts, rec_status);
             if (req.Kind() == UploadBatchType::DirtyBucketData)
             {
@@ -7977,8 +7976,7 @@ public:
                 if (status == RecordStatus::Normal ||
                     status == RecordStatus::Deleted)
                 {
-                    bool was_dirty =
-                        (cce->CommitTs() > 1 && !cce->IsPersistent());
+                    bool was_dirty = cce->IsDirty();
                     cce->SetCommitTsPayloadStatus(now_ts, status);
                     OnCommittedUpdate(cce, was_dirty);
                     assert(!cce->HasBufferedCommandList());
@@ -7992,8 +7990,7 @@ public:
                 // last ckpt ts.
                 if (cce->CommitTs() <= ckpt_ts)
                 {
-                    bool was_dirty =
-                        (cce->CommitTs() > 1 && !cce->IsPersistent());
+                    bool was_dirty = cce->IsDirty();
                     cce->SetCkptTs(cce->CommitTs());
                     OnFlushed(cce, was_dirty);
                 }
@@ -8676,7 +8673,7 @@ public:
             // position to update the map.
             page_it = ccmp_.find(ccpage->FirstKey());
         }
-        const bool was_dirty = (cce->CommitTs() > 1 && !cce->IsPersistent());
+        const bool was_dirty = cce->IsDirty();
         shard_->AdjustDataKeyStats(table_name_, -1, was_dirty ? -1 : 0);
         ccpage->Remove(cce);
 
@@ -8743,7 +8740,7 @@ public:
 
             for (auto &cce : page.entries_)
             {
-                if (cce->CommitTs() > 1 && !cce->IsPersistent())
+                if (cce->IsDirty())
                 {
                     ++dirty_freed;
                 }
@@ -8778,7 +8775,7 @@ public:
             size_t dirty_freed = 0;
             for (auto &cce : page->entries_)
             {
-                if (cce->CommitTs() > 1 && !cce->IsPersistent())
+                if (cce->IsDirty())
                 {
                     ++dirty_freed;
                 }
@@ -9160,7 +9157,7 @@ public:
             CcPage<KeyT, ValueT, VersionedRecord, RangePartitioned> *ccp =
                 it.GetPage();
             // randomly set ckpt_ts and commit_ts
-            bool was_dirty = (cce->CommitTs() > 1 && !cce->IsPersistent());
+            bool was_dirty = cce->IsDirty();
             cce->SetCommitTsPayloadStatus(distribution(generator),
                                           RecordStatus::Normal);
             cce->SetCkptTs(distribution(generator));
@@ -9177,7 +9174,7 @@ protected:
         const CcEntry<KeyT, ValueT, VersionedRecord, RangePartitioned> *cce,
         bool was_dirty)
     {
-        if (!was_dirty && cce->CommitTs() > 1 && !cce->IsPersistent())
+        if (!was_dirty && cce->IsDirty())
         {
             shard_->AdjustDataKeyStats(table_name_, 0, +1);
         }
@@ -10453,7 +10450,7 @@ protected:
         }
         const uint64_t cce_version = cce->CommitTs();
 
-        bool was_dirty = (cce->CommitTs() > 1 && !cce->IsPersistent());
+        bool was_dirty = cce->IsDirty();
         cce->SetCkptTs(commit_ts);
         OnFlushed(cce, was_dirty);
 

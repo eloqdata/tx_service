@@ -959,8 +959,7 @@ public:
                             cce->ReleaseForwardEntry();
                         shard_->ForwardStandbyMessage(entry_ptr.release());
                     }
-                    bool was_dirty =
-                        (cce->CommitTs() > 1 && !cce->IsPersistent());
+                    bool was_dirty = cce->IsDirty();
                     cce->SetCommitTsPayloadStatus(commit_ts,
                                                   RecordStatus::Deleted);
                     this->OnCommittedUpdate(cce, was_dirty);
@@ -1217,7 +1216,7 @@ public:
                 // PostWriteCc if apply_and_commit_.
                 const uint64_t commit_ts =
                     std::max({cce->CommitTs() + 1, req.TxTs(), shard_->Now()});
-                bool was_dirty = (cce->CommitTs() > 1 && !cce->IsPersistent());
+                bool was_dirty = cce->IsDirty();
                 cce->SetCommitTsPayloadStatus(commit_ts, status);
                 this->OnCommittedUpdate(cce, was_dirty);
 
@@ -1431,7 +1430,7 @@ public:
                     cce->ReleaseForwardEntry();
                 shard_->ForwardStandbyMessage(entry_ptr.release());
             }
-            bool was_dirty = (cce->CommitTs() > 1 && !cce->IsPersistent());
+            bool was_dirty = cce->IsDirty();
             cce->SetCommitTsPayloadStatus(commit_ts, payload_status);
             this->OnCommittedUpdate(cce, was_dirty);
             // It's possible that the cce HasBufferedCommandList and is still in
@@ -1654,7 +1653,7 @@ public:
                 ttl = 0;
             }
 
-            bool was_dirty = (cce->CommitTs() > 1 && !cce->IsPersistent());
+            bool was_dirty = cce->IsDirty();
             cce->SetCommitTsPayloadStatus(commit_ts, rec_status);
             if (req.Kind() == UploadBatchType::DirtyBucketData)
             {
@@ -1787,7 +1786,7 @@ public:
 
             assert(txn_cmd.new_version_ > cce->CommitTs());
             int64_t buffered_cmd_cnt_old = buffered_cmd_list.Size();
-            bool was_dirty = (cce->CommitTs() > 1 && !cce->IsPersistent());
+            bool was_dirty = cce->IsDirty();
             cce->EmplaceAndCommitBufferedTxnCommand(
                 txn_cmd, shard_->NowInMilliseconds());
             this->OnCommittedUpdate(cce, was_dirty);
@@ -2261,7 +2260,7 @@ public:
             uint64_t current_version = cce->CommitTs();
             RecordStatus payload_status = cce->PayloadStatus();
             bool s_obj_exist = (payload_status == RecordStatus::Normal);
-            bool was_dirty = (cce->CommitTs() > 1 && !cce->IsPersistent());
+            bool was_dirty = cce->IsDirty();
             if (commit_ts <= current_version)
             {
                 // If the log record's commit ts is smaller than or equal to the
@@ -2580,7 +2579,7 @@ public:
                 }
 
                 uint64_t commit_version = commit_ts;
-                bool was_dirty = (cce->CommitTs() > 1 && !cce->IsPersistent());
+                bool was_dirty = cce->IsDirty();
                 cce->TryCommitBufferedCommands(commit_version,
                                                shard_->NowInMilliseconds());
                 int64_t buffered_cmd_cnt_new = buffered_cmd_list.Size();
