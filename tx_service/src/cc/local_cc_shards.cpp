@@ -4463,23 +4463,24 @@ void LocalCcShards::PostProcessHashPartitionDataSyncTask(
             CcErrorCode err_code = CcErrorCode::NO_ERROR;
             if (task->data_sync_ts_ != UINT64_MAX && !task->filter_lambda_)
             {
-                bool has_skipped_entries = false;
+                std::shared_lock<std::shared_mutex> meta_data_lk(
+                    meta_data_mux_);
+                // Make sure that the term has not changed so that catalog
+                // entry is still valid.
+                if (!Sharder::Instance().CheckLeaderTerm(
+                        task->node_group_id_, task->node_group_term_))
                 {
-                    std::lock_guard status_lk(task->status_->mux_);
-                    has_skipped_entries = task->status_->has_skipped_entries_;
+                    err_code = CcErrorCode::NG_TERM_CHANGED;
                 }
-                if (!has_skipped_entries)
+                else
                 {
-                    std::shared_lock<std::shared_mutex> meta_data_lk(
-                        meta_data_mux_);
-                    // Make sure that the term has not changed so that catalog
-                    // entry is still valid.
-                    if (!Sharder::Instance().CheckLeaderTerm(
-                            task->node_group_id_, task->node_group_term_))
+                    bool has_skipped_entries = false;
                     {
-                        err_code = CcErrorCode::NG_TERM_CHANGED;
+                        std::lock_guard status_lk(task->status_->mux_);
+                        has_skipped_entries =
+                            task->status_->has_skipped_entries_;
                     }
-                    else
+                    if (!has_skipped_entries)
                     {
                         const TableName base_table_name{
                             task->table_name_.GetBaseTableNameSV(),
