@@ -4858,11 +4858,12 @@ void LocalCcShards::DataSyncForHashPartition(
                                    : 0;
     const size_t flush_buffer_size =
         cur_flush_buffers_[worker_idx]->GetFlushBufferSize();
-    const size_t partition_number_per_scan =
-        std::max(1UL,
-                 updated_memory_per_partition != 0
-                     ? (flush_buffer_size / updated_memory_per_partition)
-                     : partition_number_this_core);
+    const size_t partition_number_per_scan = std::max(
+        1UL,
+        updated_memory_per_partition != 0
+            ? (flush_buffer_size /
+               std::min(8UL * 1024 * 1024, updated_memory_per_partition))
+            : partition_number_this_core);
 
     const size_t scan_concurrency = core_number;
 
