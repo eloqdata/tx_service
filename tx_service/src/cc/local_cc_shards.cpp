@@ -4465,8 +4465,8 @@ void LocalCcShards::PostProcessHashPartitionDataSyncTask(
             {
                 std::shared_lock<std::shared_mutex> meta_data_lk(
                     meta_data_mux_);
-                // Make sure that the term has not changed so that catalog
-                // entry is still valid.
+                // Make sure that the term has not changed so that catalog entry
+                // is still valid.
                 if (!Sharder::Instance().CheckLeaderTerm(
                         task->node_group_id_, task->node_group_term_))
                 {
