@@ -4864,20 +4864,15 @@ void LocalCcShards::DataSyncForHashPartition(
                      ? (flush_buffer_size / updated_memory_per_partition)
                      : partition_number_this_core);
 
-    const size_t scan_concurrency =
-        updated_memory == 0
-            ? core_number
-            : std::min(core_number,
-                       data_sync_mem_controller_.FlushMemoryQuota() /
-                           updated_memory);
-    scan_concurrency_.store(100);
+    const size_t scan_concurrency = core_number;
+
+    scan_concurrency_.store(core_number);
 
     LOG(INFO) << "DataSyncScan: flush buffer size = " << flush_buffer_size
               << ", updated memory = " << updated_memory
               << ", partition number per scan = " << partition_number_per_scan
               << ", scan concurrency = " << scan_concurrency;
 
-    /*
     if (scan_concurrency > 0)
     {
         bool need_notify = scan_concurrency >
@@ -4889,7 +4884,6 @@ void LocalCcShards::DataSyncForHashPartition(
             data_sync_worker_ctx_.cv_.notify_all();
         }
     }
-    */
 
     // 3. Scan records.
     {
