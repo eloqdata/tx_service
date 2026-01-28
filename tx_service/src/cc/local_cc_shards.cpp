@@ -4463,28 +4463,37 @@ void LocalCcShards::PostProcessHashPartitionDataSyncTask(
             CcErrorCode err_code = CcErrorCode::NO_ERROR;
             if (task->data_sync_ts_ != UINT64_MAX && !task->filter_lambda_)
             {
-                std::shared_lock<std::shared_mutex> meta_data_lk(
-                    meta_data_mux_);
-                // Make sure that the term has not changed so that catalog entry
-                // is still valid.
-                if (!Sharder::Instance().CheckLeaderTerm(
-                        task->node_group_id_, task->node_group_term_))
+                bool has_skipped_entries = false;
                 {
-                    err_code = CcErrorCode::NG_TERM_CHANGED;
+                    std::lock_guard status_lk(task->status_->mux_);
+                    has_skipped_entries = task->status_->has_skipped_entries_;
                 }
-                else
+                if (!has_skipped_entries)
                 {
-                    const TableName base_table_name{
-                        task->table_name_.GetBaseTableNameSV(),
-                        TableType::Primary,
-                        task->table_name_.Engine()};
-                    CatalogEntry *catalog_entry = GetCatalogInternal(
-                        base_table_name, task->node_group_id_);
-                    // We're still holding catalog read lock here, and the term
-                    // has not changed. catalog entry should not be nullptr.
-                    assert(catalog_entry);
-                    catalog_entry->UpdateLastDataSyncTS(task->data_sync_ts_,
-                                                        task->id_);
+                    std::shared_lock<std::shared_mutex> meta_data_lk(
+                        meta_data_mux_);
+                    // Make sure that the term has not changed so that catalog
+                    // entry is still valid.
+                    if (!Sharder::Instance().CheckLeaderTerm(
+                            task->node_group_id_, task->node_group_term_))
+                    {
+                        err_code = CcErrorCode::NG_TERM_CHANGED;
+                    }
+                    else
+                    {
+                        const TableName base_table_name{
+                            task->table_name_.GetBaseTableNameSV(),
+                            TableType::Primary,
+                            task->table_name_.Engine()};
+                        CatalogEntry *catalog_entry = GetCatalogInternal(
+                            base_table_name, task->node_group_id_);
+                        // We're still holding catalog read lock here, and the
+                        // term has not changed. catalog entry should not be
+                        // nullptr.
+                        assert(catalog_entry);
+                        catalog_entry->UpdateLastDataSyncTS(task->data_sync_ts_,
+                                                            task->id_);
+                    }
                 }
             }
 
