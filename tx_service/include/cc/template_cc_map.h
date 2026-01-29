@@ -10437,13 +10437,12 @@ protected:
                 CcPage<KeyT, ValueT, VersionedRecord, RangePartitioned> *>(
                 cce->GetCcPage());
         assert(ccp != nullptr);
-        if (status == RecordStatus::Unknown &&
-            cce->PayloadStatus() == RecordStatus::Unknown)
+        if (status == RecordStatus::Unknown)
         {
             // fetch record fails. Remove the pin on the cce.
             cce->GetKeyGapLockAndExtraData()->ReleasePin();
             cce->RecycleKeyLock(*shard_);
-            if (cce->IsFree())
+            if (cce->PayloadStatus() == RecordStatus::Unknown && cce->IsFree())
             {
                 CleanEntry(cce, ccp);
             }

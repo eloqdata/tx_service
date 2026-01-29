@@ -2532,11 +2532,10 @@ public:
         cce->GetKeyGapLockAndExtraData()->ReleasePin();
         cce->RecycleKeyLock(*shard_);
 
-        if (status == RecordStatus::Unknown &&
-            cce->PayloadStatus() == RecordStatus::Unknown)
+        if (status == RecordStatus::Unknown)
         {
             // fetch record fails.
-            if (cce->IsFree())
+            if (cce->PayloadStatus() == RecordStatus::Unknown && cce->IsFree())
             {
                 // Remove cce if it is not referenced by anyone.
                 CleanEntry(entry, ccp);
