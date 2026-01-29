@@ -497,14 +497,6 @@ bool DataStoreServiceClient::PutAll(
                 callback_data->Free();
             }
 
-            // Print execution time even on failure
-            auto end_time = std::chrono::high_resolution_clock::now();
-            auto duration =
-                std::chrono::duration_cast<std::chrono::milliseconds>(
-                    end_time - start_time);
-            LOG(INFO) << "PutAll execution time (failed): " << duration.count()
-                      << " ms";
-
             return false;
         }
     }
@@ -526,6 +518,7 @@ bool DataStoreServiceClient::PutAll(
     auto duration = std::chrono::duration_cast<std::chrono::milliseconds>(
         end_time - start_time);
 
+    /*
     std::ostringstream oss;
     oss << "PutAll: hash_buckets[";
     bool first = true;
@@ -553,6 +546,7 @@ bool DataStoreServiceClient::PutAll(
     }
     oss << "] time=" << duration.count() << "ms";
     LOG(INFO) << oss.str();
+    */
 
     return true;
 }
