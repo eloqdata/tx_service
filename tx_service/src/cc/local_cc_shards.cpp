@@ -5879,9 +5879,8 @@ void LocalCcShards::FlushData(std::unique_lock<std::mutex> &flush_worker_lk)
                     UpdateCceCkptTsCc update_cce_req(
                         entry->data_sync_task_->node_group_id_,
                         entry->data_sync_task_->node_group_term_,
-                        cce_entries_map,
-                        !table_name.IsHashPartitioned(),
-                        table_name.Engine() != TableEngine::EloqKv);
+                        table_name,
+                        cce_entries_map);
                     for (auto &[core_idx, cce_entries] : cce_entries_map)
                     {
                         updated_ckpt_ts_core_ids.insert(core_idx);

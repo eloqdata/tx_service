@@ -313,6 +313,12 @@ public:
      */
     CcMap *GetCcm(const TableName &table_name, uint32_t node_group);
 
+    void AdjustDataKeyStats(const TableName &table_name,
+                            int64_t size_delta,
+                            int64_t dirty_delta);
+
+    std::pair<size_t, size_t> GetDataKeyStats() const;
+
     void InitializeShardHeap()
     {
         if (shard_heap_thread_id_ == 0)
@@ -1280,6 +1286,11 @@ private:
 
     // The number of ccentry in all the ccmap of this ccshard.
     uint64_t size_;
+
+    // The number of keys in data tables only (meta tables excluded).
+    size_t data_key_count_{0};
+    // The number of committed dirty keys in data tables only.
+    size_t dirty_data_key_count_{0};
 
     Checkpointer *ckpter_;
 

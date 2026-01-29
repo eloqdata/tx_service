@@ -377,6 +377,37 @@ CcMap *CcShard::GetCcm(const TableName &table_name, uint32_t node_group)
     }
 }
 
+void CcShard::AdjustDataKeyStats(const TableName &table_name,
+                                 int64_t size_delta,
+                                 int64_t dirty_delta)
+{
+    if (table_name.IsMeta())
+    {
+        return;
+    }
+
+    if (size_delta != 0)
+    {
+        assert(size_delta >= 0 ||
+               data_key_count_ >= static_cast<size_t>(-size_delta));
+        data_key_count_ = static_cast<size_t>(
+            static_cast<int64_t>(data_key_count_) + size_delta);
+    }
+
+    if (dirty_delta != 0)
+    {
+        assert(dirty_delta >= 0 ||
+               dirty_data_key_count_ >= static_cast<size_t>(-dirty_delta));
+        dirty_data_key_count_ = static_cast<size_t>(
+            static_cast<int64_t>(dirty_data_key_count_) + dirty_delta);
+    }
+}
+
+std::pair<size_t, size_t> CcShard::GetDataKeyStats() const
+{
+    return {data_key_count_, dirty_data_key_count_};
+}
+
 void CcShard::Enqueue(uint32_t thd_id, CcRequestBase *req)
 {
     // The memory order in enqueue() of the concurrent queue ensures that the

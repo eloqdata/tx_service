@@ -959,8 +959,10 @@ public:
                             cce->ReleaseForwardEntry();
                         shard_->ForwardStandbyMessage(entry_ptr.release());
                     }
+                    bool was_dirty = cce->IsDirty();
                     cce->SetCommitTsPayloadStatus(commit_ts,
                                                   RecordStatus::Deleted);
+                    this->OnCommittedUpdate(cce, was_dirty);
                     // Release and try to recycle the lock.
                     assert(acquired_lock != LockType::NoLock);
                     ReleaseCceLock(
@@ -1214,7 +1216,9 @@ public:
                 // PostWriteCc if apply_and_commit_.
                 const uint64_t commit_ts =
                     std::max({cce->CommitTs() + 1, req.TxTs(), shard_->Now()});
+                bool was_dirty = cce->IsDirty();
                 cce->SetCommitTsPayloadStatus(commit_ts, status);
+                this->OnCommittedUpdate(cce, was_dirty);
 
                 if (forward_entry)
                 {
@@ -1426,7 +1430,9 @@ public:
                     cce->ReleaseForwardEntry();
                 shard_->ForwardStandbyMessage(entry_ptr.release());
             }
+            bool was_dirty = cce->IsDirty();
             cce->SetCommitTsPayloadStatus(commit_ts, payload_status);
+            this->OnCommittedUpdate(cce, was_dirty);
             // It's possible that the cce HasBufferedCommandList and is still in
             // unknown status (because FetchRecord fails) and this command
             // ignores kv value. Need to clear the buffered commands when a new
@@ -1647,6 +1653,7 @@ public:
                 ttl = 0;
             }
 
+            bool was_dirty = cce->IsDirty();
             cce->SetCommitTsPayloadStatus(commit_ts, rec_status);
             if (req.Kind() == UploadBatchType::DirtyBucketData)
             {
@@ -1682,6 +1689,10 @@ public:
             {
                 cce->SetCommitTsPayloadStatus(commit_ts, RecordStatus::Deleted);
             }
+            // Since we have updated both ckpt ts and commit ts, we need to call
+            // OnFlushed to update the dirty size.
+            this->OnFlushed(cce, was_dirty);
+            this->OnCommittedUpdate(cce, was_dirty);
             DLOG_IF(INFO, TRACE_OCC_ERR)
                 << "UploadBatchCc, txn:" << req.Txn() << " ,cce: " << cce
                 << " ,commit_ts: " << commit_ts;
@@ -1775,8 +1786,10 @@ public:
 
             assert(txn_cmd.new_version_ > cce->CommitTs());
             int64_t buffered_cmd_cnt_old = buffered_cmd_list.Size();
+            bool was_dirty = cce->IsDirty();
             cce->EmplaceAndCommitBufferedTxnCommand(
                 txn_cmd, shard_->NowInMilliseconds());
+            this->OnCommittedUpdate(cce, was_dirty);
             int64_t buffered_cmd_cnt_new = buffered_cmd_list.Size();
             shard_->UpdateBufferedCommandCnt(buffered_cmd_cnt_new -
                                              buffered_cmd_cnt_old);
@@ -1942,7 +1955,9 @@ public:
                     cce->payload_.cur_payload_ == nullptr
                         ? RecordStatus::Deleted
                         : RecordStatus::Normal;
+                bool was_dirty = (cce->CommitTs() > 1 && !cce->IsPersistent());
                 cce->SetCommitTsPayloadStatus(commit_ts, payload_status);
+                this->OnCommittedUpdate(cce, was_dirty);
                 if (s_obj_exist && payload_status != RecordStatus::Normal)
                 {
                     TemplateCcMap<KeyT, ValueT, false, false>::normal_obj_sz_--;
@@ -1976,8 +1991,10 @@ public:
 
                 // Emplace txn_cmd and try to commit all pending commands.
                 int64_t buffered_cmd_cnt_old = buffered_cmd_list.Size();
+                bool was_dirty = (cce->CommitTs() > 1 && !cce->IsPersistent());
                 cce->EmplaceAndCommitBufferedTxnCommand(
                     txn_cmd, shard_->NowInMilliseconds());
+                this->OnCommittedUpdate(cce, was_dirty);
                 RecordStatus new_status = cce->PayloadStatus();
                 if (s_obj_exist && new_status != RecordStatus::Normal)
                 {
@@ -2243,6 +2260,7 @@ public:
             uint64_t current_version = cce->CommitTs();
             RecordStatus payload_status = cce->PayloadStatus();
             bool s_obj_exist = (payload_status == RecordStatus::Normal);
+            bool was_dirty = cce->IsDirty();
             if (commit_ts <= current_version)
             {
                 // If the log record's commit ts is smaller than or equal to the
@@ -2409,6 +2427,8 @@ public:
                 ++TemplateCcMap<KeyT, ValueT, false, false>::normal_obj_sz_;
             }
 
+            this->OnCommittedUpdate(cce, was_dirty);
+
             // Must update dirty_commit_ts. Otherwise, this entry may be
             // skipped by checkpointer.
             if (commit_ts > last_dirty_commit_ts_)
@@ -2559,6 +2579,7 @@ public:
                 }
 
                 uint64_t commit_version = commit_ts;
+                bool was_dirty = cce->IsDirty();
                 cce->TryCommitBufferedCommands(commit_version,
                                                shard_->NowInMilliseconds());
                 int64_t buffered_cmd_cnt_new = buffered_cmd_list.Size();
@@ -2569,6 +2590,7 @@ public:
                         ? RecordStatus::Deleted
                         : RecordStatus::Normal;
                 cce->SetCommitTsPayloadStatus(commit_version, commit_status);
+                this->OnCommittedUpdate(cce, was_dirty);
 
                 if (buffered_cmd_list.Empty())
                 {

@@ -80,6 +80,28 @@ bool VersionedLruEntry<Versioned, RangePartitioned>::IsPersistent() const
 }
 
 template <bool Versioned, bool RangePartitioned>
+bool VersionedLruEntry<Versioned, RangePartitioned>::IsDirty() const
+{
+    // Only check CommitTs > 1 to exclude initial entries
+    if (CommitTs() <= 1)
+    {
+        return false;
+    }
+
+    if (Versioned)
+    {
+        // For versioned records, dirty means CommitTs > CkptTs
+        return CommitTs() > CkptTs();
+    }
+    else
+    {
+        // For non-versioned records, dirty means the flush bit (5th bit) is not
+        // set
+        return !(entry_info_.commit_ts_and_status_ & 0x10);
+    }
+}
+
+template <bool Versioned, bool RangePartitioned>
 bool VersionedLruEntry<Versioned, RangePartitioned>::IsFree() const
 {
     // As long as all locks are released, the lock associated with this cc entry

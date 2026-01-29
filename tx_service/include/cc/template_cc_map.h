@@ -609,6 +609,7 @@ public:
                 RecordStatus cce_old_status = cce->PayloadStatus();
                 RecordStatus new_status =
                     is_del ? RecordStatus::Deleted : RecordStatus::Normal;
+                bool was_dirty = cce->IsDirty();
                 cce->SetCommitTsPayloadStatus(commit_ts, new_status);
 
                 if (req.IsInitialInsert())
@@ -616,6 +617,7 @@ public:
                     // Updates the ckpt ts after commit ts is set.
                     cce->SetCkptTs(1U);
                 }
+                OnCommittedUpdate(cce, was_dirty);
 
                 DLOG_IF(INFO, TRACE_OCC_ERR)
                     << "PostWriteCc, txn:" << txn << " ,cce: " << cce
@@ -1125,7 +1127,9 @@ public:
                                 ? RecordStatus::Deleted
                                 : RecordStatus::Normal;
 
+                        bool was_dirty = cce_ptr->IsDirty();
                         cce_ptr->SetCommitTsPayloadStatus(commit_ts, status);
+                        OnCommittedUpdate(cce_ptr, was_dirty);
                     }
                     else if (req.CommitType() == PostWriteType::PrepareCommit)
                     {
@@ -2022,6 +2026,7 @@ public:
                 tmp_payload_status = RecordStatus::Deleted;
             }
 
+            bool was_dirty = cce->IsDirty();
             if (cce->PayloadStatus() == RecordStatus::Unknown)
             {
                 cce->payload_.PassInCurrentPayload(std::move(tmp_payload));
@@ -2041,6 +2046,8 @@ public:
             // Updates the ckpt timestamp such that it is no smaller than the
             // backfill version.
             cce->SetCkptTs(req.ReadTimestamp());
+            OnFlushed(cce, was_dirty);
+            OnCommittedUpdate(cce, was_dirty);
 
             // Refill mvcc archives
             if (shard_->EnableMvcc() &&
@@ -2215,6 +2222,7 @@ public:
                 CcEntry<KeyT, ValueT, VersionedRecord, RangePartitioned> *>(
                 cce_addr.ExtractCce());
 
+        bool was_dirty = cce->IsDirty();
         if (cce->PayloadStatus() == RecordStatus::Unknown)
         {
             assert(cce->CommitTs() == 1);
@@ -2242,6 +2250,7 @@ public:
         // Updates the ckpt timestamp such that it is no smaller than the
         // backfill version.
         cce->SetCkptTs(req.CommitTs());
+        OnFlushed(cce, was_dirty);
 
         // Refill mvcc archives.
         if (shard_->EnableMvcc())
@@ -7004,7 +7013,9 @@ public:
                     rec_status = RecordStatus::Deleted;
                 }
                 const uint64_t commit_ts = req.CommitTs();
+                bool was_dirty = cce->IsDirty();
                 cce->SetCommitTsPayloadStatus(commit_ts, rec_status);
+                OnCommittedUpdate(cce, was_dirty);
 
                 if (commit_ts > last_dirty_commit_ts_)
                 {
@@ -7754,6 +7765,7 @@ public:
                 }
             }
 
+            bool was_dirty = cce->IsDirty();
             cce->SetCommitTsPayloadStatus(commit_ts, rec_status);
             if (req.Kind() == UploadBatchType::DirtyBucketData)
             {
@@ -7767,6 +7779,8 @@ public:
                 }
                 cce->SetCkptTs(commit_ts);
             }
+            OnCommittedUpdate(cce, was_dirty);
+            OnFlushed(cce, was_dirty);
             DLOG_IF(INFO, TRACE_OCC_ERR)
                 << "UploadBatchCc, txn:" << req.Txn() << " ,cce: " << cce
                 << " ,commit_ts: " << commit_ts;
@@ -7962,7 +7976,9 @@ public:
                 if (status == RecordStatus::Normal ||
                     status == RecordStatus::Deleted)
                 {
+                    bool was_dirty = cce->IsDirty();
                     cce->SetCommitTsPayloadStatus(now_ts, status);
+                    OnCommittedUpdate(cce, was_dirty);
                     assert(!cce->HasBufferedCommandList());
                 }
                 assert(!cce->HasBufferedCommandList() ||
@@ -7974,7 +7990,9 @@ public:
                 // last ckpt ts.
                 if (cce->CommitTs() <= ckpt_ts)
                 {
+                    bool was_dirty = cce->IsDirty();
                     cce->SetCkptTs(cce->CommitTs());
+                    OnFlushed(cce, was_dirty);
                 }
             }
             it++;
@@ -8633,9 +8651,12 @@ public:
         return true;
     }
 
-    size_t size() const override
+    void OnEntryFlushed(bool was_dirty, bool is_persistent) override
     {
-        return size_;
+        if (was_dirty && is_persistent)
+        {
+            shard_->AdjustDataKeyStats(table_name_, 0, -1);
+        }
     }
 
     void CleanEntry(LruEntry *entry, LruPage *page) override
@@ -8652,8 +8673,9 @@ public:
             // position to update the map.
             page_it = ccmp_.find(ccpage->FirstKey());
         }
+        const bool was_dirty = cce->IsDirty();
+        shard_->AdjustDataKeyStats(table_name_, -1, was_dirty ? -1 : 0);
         ccpage->Remove(cce);
-        size_--;
 
         RebalancePage(ccpage, page_it, true);
     }
@@ -8704,6 +8726,8 @@ public:
 
     void Clean() override
     {
+        size_t total_freed = 0;
+        size_t dirty_freed = 0;
         for (auto it = ccmp_.begin(); it != ccmp_.end(); it++)
         {
             CcPage<KeyT, ValueT, VersionedRecord, RangePartitioned> &page =
@@ -8712,15 +8736,26 @@ public:
             {
                 shard_->DetachLru(&page);
             }
+            total_freed += page.Size();
 
             for (auto &cce : page.entries_)
             {
+                if (cce->IsDirty())
+                {
+                    ++dirty_freed;
+                }
                 cce->ClearLocks(*shard_, cc_ng_id_);
             }
         }
 
+        if (total_freed > 0 || dirty_freed > 0)
+        {
+            shard_->AdjustDataKeyStats(table_name_,
+                                       -static_cast<int64_t>(total_freed),
+                                       -static_cast<int64_t>(dirty_freed));
+        }
+
         normal_obj_sz_ = 0;
-        size_ = 0;
         ccmp_.clear();
     }
 
@@ -8737,8 +8772,13 @@ public:
                 shard_->DetachLru(page);
             }
 
+            size_t dirty_freed = 0;
             for (auto &cce : page->entries_)
             {
+                if (cce->IsDirty())
+                {
+                    ++dirty_freed;
+                }
                 if (!VersionedRecord &&
                     cce->PayloadStatus() == RecordStatus::Normal)
                 {
@@ -8747,7 +8787,9 @@ public:
                 cce->ClearLocks(*shard_, cc_ng_id_);
             }
 
-            size_ -= page->Size();
+            shard_->AdjustDataKeyStats(table_name_,
+                                       -static_cast<int64_t>(page->Size()),
+                                       -static_cast<int64_t>(dirty_freed));
             cnt += 1;
 
             it = ccmp_.erase(it);
@@ -8759,7 +8801,6 @@ public:
             return false;
         }
 
-        assert(size_ == 0);
         assert(VersionedRecord || normal_obj_sz_ == 0);
         return true;
     }
@@ -9116,9 +9157,12 @@ public:
             CcPage<KeyT, ValueT, VersionedRecord, RangePartitioned> *ccp =
                 it.GetPage();
             // randomly set ckpt_ts and commit_ts
+            bool was_dirty = cce->IsDirty();
             cce->SetCommitTsPayloadStatus(distribution(generator),
                                           RecordStatus::Normal);
             cce->SetCkptTs(distribution(generator));
+            OnFlushed(cce, was_dirty);
+            OnCommittedUpdate(cce, was_dirty);
             ccp->last_dirty_commit_ts_ =
                 std::max(cce->CommitTs(), ccp->last_dirty_commit_ts_);
         }
@@ -9126,6 +9170,23 @@ public:
     }
 
 protected:
+    void OnCommittedUpdate(
+        const CcEntry<KeyT, ValueT, VersionedRecord, RangePartitioned> *cce,
+        bool was_dirty)
+    {
+        if (!was_dirty && cce->IsDirty())
+        {
+            shard_->AdjustDataKeyStats(table_name_, 0, +1);
+        }
+    }
+
+    void OnFlushed(
+        const CcEntry<KeyT, ValueT, VersionedRecord, RangePartitioned> *cce,
+        bool was_dirty)
+    {
+        OnEntryFlushed(was_dirty, cce->IsPersistent());
+    }
+
     // The CcEntry defragment result
     enum DefragResult
     {
@@ -9986,7 +10047,8 @@ protected:
             {
                 normal_obj_sz_ += normal_rec_change;
             }
-            size_ += (end_idx - first_index);
+            shard_->AdjustDataKeyStats(
+                table_name_, +(end_idx - first_index), 0);
 
             return true;
         }
@@ -10023,7 +10085,7 @@ protected:
 
                     assert(new_key_cnt > 0);
                     // Update CCMap size
-                    size_ += new_key_cnt;
+                    shard_->AdjustDataKeyStats(table_name_, +new_key_cnt, 0);
                 }
                 else
                 {
@@ -10112,7 +10174,7 @@ protected:
 
             assert(new_key_cnt > 0);
             // Update Ccmap size
-            size_ += new_key_cnt;
+            shard_->AdjustDataKeyStats(table_name_, +new_key_cnt, 0);
         }
 
         if (!VersionedRecord)
@@ -10351,7 +10413,7 @@ protected:
 
         // update lru list
         shard_->UpdateLruList(target_page, true);
-        size_++;
+        shard_->AdjustDataKeyStats(table_name_, +1, 0);
 
         return Iterator(target_page, idx_in_page, &neg_inf_);
     }
@@ -10388,7 +10450,9 @@ protected:
         }
         const uint64_t cce_version = cce->CommitTs();
 
+        bool was_dirty = cce->IsDirty();
         cce->SetCkptTs(commit_ts);
+        OnFlushed(cce, was_dirty);
 
         if (cce_version < commit_ts)
         {
@@ -11525,7 +11589,10 @@ protected:
         {
             normal_obj_sz_ -= clean_guard->CleanObjectCount();
         }
-        size_ -= clean_guard->FreedCount();
+        shard_->AdjustDataKeyStats(
+            table_name_,
+            -static_cast<int64_t>(clean_guard->FreedCount()),
+            -static_cast<int64_t>(clean_guard->DirtyFreedCount()));
         if (clean_guard->EvictedValidKeys())
         {
             ccm_has_full_entries_ = false;
@@ -11838,8 +11905,6 @@ protected:
     CcEntry<KeyT, ValueT, VersionedRecord, RangePartitioned> neg_inf_, pos_inf_;
 
     TemplateCcMapSamplePool<KeyT> *sample_pool_;
-    size_t
-        size_{};  // The count of all records, including ones in deleted status.
     size_t normal_obj_sz_{
         0};  // The count of all normal status objects, only used for redis
 };

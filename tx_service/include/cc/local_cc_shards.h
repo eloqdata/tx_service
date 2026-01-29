@@ -352,43 +352,45 @@ public:
 
     void PrintCcMap()
     {
-        std::unordered_map<TableName, size_t>
-            mapsizes;  // not string owner, sv -> native_ccms_
-        for (const auto &cc_shard : cc_shards_)
-        {
-            CcShard &shard = *cc_shard;
+        // std::unordered_map<TableName, size_t>
+        //     mapsizes;  // not string owner, sv -> native_ccms_
+        // for (const auto &cc_shard : cc_shards_)
+        // {
+        //     CcShard &shard = *cc_shard;
 
-            for (auto map_iter = shard.native_ccms_.begin();
-                 map_iter != shard.native_ccms_.end();
-                 ++map_iter)
-            {
-                const TableName &tab_name = map_iter->first;
-                auto find_iter = mapsizes.find(tab_name);
-                size_t cnt = 0;
-                if (find_iter != mapsizes.end())
-                {
-                    cnt = find_iter->second;
-                    cnt += map_iter->second->size();
-                    find_iter->second = cnt;
-                }
-                else
-                {
-                    mapsizes.emplace(
-                        std::piecewise_construct,
-                        std::forward_as_tuple(tab_name.StringView(),
-                                              tab_name.Type(),
-                                              tab_name.Engine()),
-                        std::forward_as_tuple(map_iter->second->size()));
-                }
+        //     for (auto map_iter = shard.native_ccms_.begin();
+        //          map_iter != shard.native_ccms_.end();
+        //          ++map_iter)
+        //     {
+        //         const TableName &tab_name = map_iter->first;
+        //         auto find_iter = mapsizes.find(tab_name);
+        //         size_t cnt = 0;
+        //         if (find_iter != mapsizes.end())
+        //         {
+        //             cnt = find_iter->second;
+        //             cnt += map_iter->second->size();
+        //             find_iter->second = cnt;
+        //         }
+        //         else
+        //         {
+        //             mapsizes.emplace(
+        //                 std::piecewise_construct,
+        //                 std::forward_as_tuple(tab_name.StringView(),
+        //                                       tab_name.Type(),
+        //                                       tab_name.Engine()),
+        //                 std::forward_as_tuple(map_iter->second->size()));
+        //         }
 
-                std::cout << "Table '" << tab_name.StringView() << "' core ID "
-                          << shard.core_id_ << ": " << map_iter->second->size()
-                          << std::endl;
+        //         std::cout << "Table '" << tab_name.StringView() << "' core ID
+        //         "
+        //                   << shard.core_id_ << ": " <<
+        //                   map_iter->second->size()
+        //                   << std::endl;
 
-                assert(map_iter->second->VerifyOrdering() ==
-                       map_iter->second->size());
-            }
-        }
+        //         assert(map_iter->second->VerifyOrdering() ==
+        //                map_iter->second->size());
+        //     }
+        // }
 
         /*for (auto map_iter = mapsizes.begin(); map_iter != mapsizes.end();
              ++map_iter)
