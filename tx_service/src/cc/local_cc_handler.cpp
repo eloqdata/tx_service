@@ -483,12 +483,6 @@ void txservice::LocalCcHandler::Read(const TableName &table_name,
         TX_TRACE_ACTION(this, req);
         TX_TRACE_DUMP(req);
         cc_shards_.EnqueueCcRequest(thd_id_, key_shard_code, req);
-        // LOG(INFO) << "Read local request, txn: " << req->Txn()
-        //           << ", table name: " << table_name.StringView()
-        //           << ", table type: "
-        //           << static_cast<uint32_t>(table_name.Type())
-        //           << ", key: " << key.ToString()
-        //           << ", partition id: " << partition_id;
     }
     else
     {
@@ -647,11 +641,6 @@ bool txservice::LocalCcHandler::ReadLocal(const TableName &table_name,
         // shard to which the tx is bound, if the native cc node is not the
         // leader now, returns an error.
         hres.SetError(CcErrorCode::REQUESTED_NODE_NOT_LEADER);
-        LOG(INFO) << "ReadLocal Execute not leader, table name: "
-                  << table_name.StringView()
-                  << ", allow_run_on_candidate: " << std::boolalpha
-                  << allow_run_on_candidate << ", term: " << term
-                  << ", txn: " << tx_number;
         return true;
     }
 
@@ -695,13 +684,6 @@ bool txservice::LocalCcHandler::ReadLocal(const TableName &table_name,
     {
         //__catalog table will be preloaded when ccshard constructed
         finished = ccm->Execute(*read_req);
-        // LOG(INFO) << "ReadLocal Execute, table name: "
-        //           << table_name.StringView()
-        //           << ", allow_run_on_candidate: " << std::boolalpha
-        //           << allow_run_on_candidate << ", term: " << term
-        //           << ", txn: " << tx_number << ", finished: " <<
-        //           std::boolalpha
-        //           << finished;
         if (finished)
         {
             read_req->Free();
@@ -804,11 +786,6 @@ bool txservice::LocalCcHandler::ReadLocal(const TableName &table_name,
         // shard to which the tx is bound, if the native cc node is not the
         // leader now, returns an error.
         hres.SetError(CcErrorCode::REQUESTED_NODE_NOT_LEADER);
-        // LOG(INFO) << "ReadLocal Execute, table name: "
-        //           << table_name.StringView()
-        //           << ", allow_run_on_candidate: " << std::boolalpha
-        //           << allow_run_on_candidate << ", term: " << term
-        //           << ", txn: " << tx_number;
         return true;
     }
 
@@ -843,13 +820,6 @@ bool txservice::LocalCcHandler::ReadLocal(const TableName &table_name,
     {
         //__catalog table will be preloaded when ccshard constructed
         finished = ccm->Execute(*read_req);
-        // LOG(INFO) << "ReadLocal Execute, table name: "
-        //           << table_name.StringView()
-        //           << ", allow_run_on_candidate: " << std::boolalpha
-        //           << allow_run_on_candidate << ", term: " << term
-        //           << ", txn: " << tx_number << ", finished: " <<
-        //           std::boolalpha
-        //           << finished;
         if (finished)
         {
             read_req->Free();

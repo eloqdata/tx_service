@@ -1125,7 +1125,6 @@ public:
 
     void OnDirtyDataFlushed()
     {
-        LOG(INFO) << "OnDirtyDataFlushed on shard: " << core_id_;
         ResetCleanStart();
         if (WaitListSizeForMemory() > 0)
         {

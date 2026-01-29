@@ -886,9 +886,6 @@ bool FetchRecordCc::Execute(CcShard &ccs)
         {
             if (req)
             {
-                LOG(INFO) << "FetchRecordCc, abort request, tx:" << req->Txn()
-                          << ", table name: " << table_name_.StringView()
-                          << ", key: " << tx_key_.ToString();
                 req->AbortCcRequest(CcErrorCode::NG_TERM_CHANGED);
             }
         }
@@ -950,11 +947,6 @@ bool FetchRecordCc::Execute(CcShard &ccs)
                     cce_->GetKeyGapLockAndExtraData()->ReleasePin();
                     cce_->RecycleKeyLock(ccs);
 
-                    LOG(INFO)
-                        << "FetchRecordCc, abort request, tx:" << req->Txn()
-                        << ", table name: " << table_name_.StringView()
-                        << ", key: " << tx_key_.ToString() << ", error code: "
-                        << static_cast<uint32_t>(error_code_);
                     req->AbortCcRequest(CcErrorCode::DATA_STORE_ERR);
                 }
             }
@@ -1243,17 +1235,6 @@ bool UpdateCceCkptTsCc::Execute(CcShard &ccs)
                 v_entry->SetCkptTs(ref.commit_ts_);
                 v_entry->ClearBeingCkpt();
                 ccm->OnEntryFlushed(true, v_entry->IsPersistent());
-                // if (ccs.core_id_ == 0)
-                // {
-                //     LOG(INFO) << "SetCKptTs for versioned cce: 0x" <<
-                //     std::hex
-                //               << (void *) (ref.cce_)
-                //               << ", commit ts: " << std::dec <<
-                //               ref.commit_ts_
-                //               << ", post flush size: " <<
-                //               ref.post_flush_size_
-                //               << ", on shard: 0";
-                // }
             }
             else
             {
@@ -1265,14 +1246,6 @@ bool UpdateCceCkptTsCc::Execute(CcShard &ccs)
                 v_entry->SetCkptTs(ref.commit_ts_);
                 v_entry->ClearBeingCkpt();
                 ccm->OnEntryFlushed(true, v_entry->IsPersistent());
-                if (ccs.core_id_ == 0)
-                {
-                    LOG(INFO) << "SetCKptTs for non versioned cce: 0x"
-                              << std::hex << (void *) (ref.cce_)
-                              << ", commit ts: " << std::dec << ref.commit_ts_
-                              << ", post flush size: " << ref.post_flush_size_
-                              << ", on shard: 0";
-                }
             }
         }
         else
@@ -1521,13 +1494,6 @@ bool ShardCleanCc::Execute(CcShard &ccs)
         if (shard_heap->Full(&heap_alloc, &heap_commit) &&
             shard_heap->NeedCleanShard(heap_alloc, heap_commit))
         {
-            // LOG(INFO) << "ShardCleanCc::Execute still full after clean shard,
-            // "
-            //              "on shard: "
-            //           << ccs.core_id_ << ", heap committed: " << heap_commit
-            //           << ", heap allocated: " << heap_alloc
-            //           << ", need yield: " << std::boolalpha << need_yield
-            //           << ", free count: " << free_count_;
             if (need_yield)
             {
                 // Continue to clean in the next run one round.
@@ -1559,13 +1525,6 @@ bool ShardCleanCc::Execute(CcShard &ccs)
         {
             // Get the free memory, re-run a batch of the waiting ccrequest.
             bool wait_list_empty = ccs.DequeueWaitListAfterMemoryFree();
-            // LOG(INFO)
-            //     << "ShardCleanCc::Execute after clean shard, wait_list_empty:
-            //     "
-            //     << std::boolalpha << wait_list_empty
-            //     << ", heap committed: " << heap_commit
-            //     << ", heap allocated: " << heap_alloc
-            //     << ", on shard: " << ccs.core_id_;
             if (!wait_list_empty)
             {
                 ccs.Enqueue(this);
@@ -1582,13 +1541,6 @@ bool ShardCleanCc::Execute(CcShard &ccs)
         // waiting ccrequest if has any waiting request, otherwise, finish
         // this shard clean ccrequests.
         bool wait_list_empty = ccs.DequeueWaitListAfterMemoryFree();
-        // LOG(INFO)
-        //     << "ShardCleanCc::Execute no need to clean shard,
-        //     wait_list_empty: "
-        //     << std::boolalpha << wait_list_empty
-        //     << ", heap committed: " << heap_commit
-        //     << ", heap allocated: " << heap_alloc
-        //     << ", on shard: " << ccs.core_id_;
         if (!wait_list_empty)
         {
             ccs.Enqueue(this);

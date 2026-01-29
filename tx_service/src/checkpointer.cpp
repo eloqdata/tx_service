@@ -236,16 +236,11 @@ void Checkpointer::Ckpt(bool is_last_ckpt)
         std::unordered_map<TableName, bool> tables =
             local_shards_.GetCatalogTableNameSnapshot(node_group, ckpt_ts);
 
-        bool truncate_log = true;
-        CODE_FAULT_INJECTOR("datasync_status_no_truncate_log", {
-            DLOG(INFO) << "FaultInject datasync_status_no_truncate_log";
-            truncate_log = false;
-        });
         std::shared_ptr<DataSyncStatus> status =
             std::make_shared<DataSyncStatus>(
                 node_group,
                 is_standby_node ? standby_node_term : leader_term,
-                truncate_log);
+                true);
 
         uint64_t last_succ_ckpt_ts = UINT64_MAX;
         bool can_be_skipped = !is_last_ckpt;
@@ -475,7 +470,6 @@ void Checkpointer::Run()
  */
 void Checkpointer::Notify(bool request_ckpt)
 {
-    ACTION_FAULT_INJECTOR("panic_notify_checkpointer");
     std::unique_lock<std::mutex> lk(ckpt_mux_);
     if (request_ckpt)
     {

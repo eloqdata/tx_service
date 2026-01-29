@@ -597,10 +597,6 @@ bool Sequences::ApplyIdOfTableRangePartition(const TableName &table,
     TxKey mkey = GenKey(seq_name);
     // std::unique_ptr<EloqRecord> mrec = std::make_unique<EloqRecord>();
     std::unique_ptr<TxRecord> mrec = GenRecord();
-    LOG(INFO) << "ApplyIdOfTableRangePartition: mkey: " << mkey.ToString()
-              << ", table_name: " << table_name_.StringView()
-              << ", seq_schema_version: " << seq_schema_version_
-              << ", txn: " << txm->TxNumber();
     // uint64_t schema_version = Sequences::GetTableSchema()->Version();
     ReadTxRequest read_req(&table_name_,
                            seq_schema_version_,
@@ -618,9 +614,6 @@ bool Sequences::ApplyIdOfTableRangePartition(const TableName &table,
 
     txm->Execute(&read_req);
     read_req.Wait();
-    LOG(INFO) << "ApplyIdOfTableRangePartition: done mkey: " << mkey.ToString()
-              << ", error code: " << static_cast<uint32_t>(read_req.ErrorCode())
-              << ", txn: " << txm->TxNumber();
 
     if (read_req.IsError())
     {
@@ -669,16 +662,10 @@ bool Sequences::ApplyIdOfTableRangePartition(const TableName &table,
     if (err != TxErrorCode::NO_ERROR)
     {
         txservice::AbortTx(txm);
-        LOG(INFO) << "ApplyIdOfTableRangePartition: aborted txn: "
-                  << txm->TxNumber();
         return false;
     }
 
     auto [success, commit_err] = txservice::CommitTx(txm);
-    LOG(INFO) << "ApplyIdOfTableRangePartition: committed txn: "
-              << txm->TxNumber()
-              << ", error code: " << static_cast<uint32_t>(commit_err)
-              << ", success: " << std::boolalpha << success;
     assert(success);
     if (success)
     {
@@ -810,10 +797,6 @@ bool Sequences::InitIdOfTableRangePartition(const TableName &table,
         txservice::AbortTx(txm, nullptr, nullptr);
         return false;
     }
-    LOG(INFO) << "InitIdOfTableRangePartition: done mkey: " << mkey.ToString()
-              << ", error code: " << static_cast<uint32_t>(err)
-              << ", txn: " << txm->TxNumber()
-              << ", last_range_partition_id: " << last_range_partition_id;
 
     auto [success, commit_err] = txservice::CommitTx(txm, nullptr, nullptr);
     assert(success);

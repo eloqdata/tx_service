@@ -3711,8 +3711,7 @@ void LocalCcShards::DataSyncForRangePartition(
                 LOG(ERROR) << "DataSync add read lock on table failed, "
                               "table name: "
                            << table_key.Name().StringView() << ", error code: "
-                           << static_cast<uint32_t>(read_req.ErrorCode())
-                           << ", txn: " << data_sync_txm->TxNumber();
+                           << static_cast<uint32_t>(read_req.ErrorCode());
 
                 // If read lock acquire failed, retry next time.
                 // Put back into the beginning.
@@ -3803,12 +3802,6 @@ void LocalCcShards::DataSyncForRangePartition(
             return;
         }
 
-        // LOG(INFO) << "DataSyncForRangePartition acquired read lock on catalog
-        // "
-        //              "and bucket: ng_term: "
-        //           << ng_term << ", txn: " << data_sync_txm->TxNumber()
-        //           << ", table: " << table_name.StringView();
-
         // Now that we have acquired read lock on catalog and bucket, there
         // won't be any ddl on this range. Update store_range and check if this
         // range is still owned by this node group.
@@ -3856,15 +3849,6 @@ void LocalCcShards::DataSyncForRangePartition(
         assert(store_range);
 
         last_sync_ts = is_dirty ? 0 : range_entry->GetLastSyncTs();
-        // if (table_name.StringView() == "./sbtest/history")
-        // {
-        //     LOG(INFO) << "DataSync for range split, range id: " << range_id
-        //               << ", last sync ts: " << last_sync_ts
-        //               << ", table name: " << table_name.StringView()
-        //               << ", start key: " << start_tx_key.ToString()
-        //               << ", end key: " << end_tx_key.ToString()
-        //               << ", txn: " << tx_number;
-        // }
     }
 
     if (table_name.IsBase())
@@ -3933,10 +3917,7 @@ void LocalCcShards::DataSyncForRangePartition(
         DLOG(INFO)
             << "No items need to be sync in this round data sync of range#"
             << range_id << " for table: " << table_name.StringView()
-            << ". Finish this task directly."
-            << ", txn: "
-            << (!during_split_range ? data_sync_txm->TxNumber() : 0)
-            << ", during split range: " << std::boolalpha << during_split_range;
+            << ". Finish this task directly.";
         if (!during_split_range)
         {
             txservice::CommitTx(data_sync_txm);
@@ -3966,11 +3947,6 @@ void LocalCcShards::DataSyncForRangePartition(
         }
         data_sync_task->SetFinish();
         data_sync_task->SetScanTaskFinished();
-        // LOG(INFO) << "Finished this round data sync of range#" << range_id
-        //           << " for table: " << table_name.StringView()
-        //           << ", txn: " << data_sync_txm->TxNumber()
-        //           << ", during split range: " << std::boolalpha
-        //           << during_split_range;
         return;
     }
     assert(slices_delta_size.size() > 0 || export_base_table_items);
@@ -3985,12 +3961,7 @@ void LocalCcShards::DataSyncForRangePartition(
     // Update slice post ckpt size.
     UpdateSlicePostCkptSize(store_range, slices_delta_size);
 
-    bool check_range_update = !during_split_range;
-    CODE_FAULT_INJECTOR("check_range_update_skip", {
-        DLOG(INFO) << "FaultInject check_range_update_skip";
-        check_range_update = false;
-    });
-    if (check_range_update)
+    if (!during_split_range)
     {
         // If the task comes from split range transaction, it is assumed that
         // there will be no further splitting.
@@ -4034,14 +4005,6 @@ void LocalCcShards::DataSyncForRangePartition(
             return;
         }
     }
-
-    // if (table_name.StringView() == "./sbtest/history")
-    // {
-    //     LOG(INFO) << "DataSync for range split, range id: " << range_id
-    //               << ", table name: " << table_name.StringView()
-    //               << ", with slice count with dirty keys: "
-    //               << slices_delta_size.size() << ", txn: " << tx_number;
-    // }
 
     // 3. Scan records.
     // The data sync worker thread is the owner of those vectors.
@@ -4130,7 +4093,6 @@ void LocalCcShards::DataSyncForRangePartition(
         data_sync_task->flight_task_cnt_ += 1;
     }
 
-    size_t loop_count = 0;
     while (!scan_data_drained)
     {
         uint32_t core_rand = butil::fast_rand();
@@ -4140,7 +4102,6 @@ void LocalCcShards::DataSyncForRangePartition(
         EnqueueLowPriorityCcRequestToShard(core_rand % cc_shards_.size(),
                                            &scan_cc);
         scan_cc.Wait();
-        ++loop_count;
 
         if (scan_cc.IsError())
         {
@@ -4233,16 +4194,6 @@ void LocalCcShards::DataSyncForRangePartition(
                 GetCatalogFactory(table_name.Engine())->PositiveInfKey();
             for (size_t i = 0; i < cc_shards_.size(); ++i)
             {
-                // if (table_name.StringView() == "./sbtest/history" && i == 0)
-                // {
-                //     LOG(INFO)
-                //         << "DataSync for range split, range id: " << range_id
-                //         << ", table name: " << table_name.StringView()
-                //         << ", with scan count: "
-                //         << scan_cc.accumulated_scan_cnt_[i]
-                //         << ", the loop count: " << loop_count
-                //         << ", txn: " << tx_number;
-                // }
                 for (size_t j = 0; j < scan_cc.accumulated_scan_cnt_[i]; ++j)
                 {
                     auto &rec = scan_cc.DataSyncVec(i)[j];
@@ -4494,12 +4445,6 @@ void LocalCcShards::DataSyncForRangePartition(
         req_vec.pop_back();
     }
 
-    // LOG(INFO) << "DataSyncForRangePartition: worker: " << worker_idx
-    //           << " finished scan."
-    //           << ", during range split: " << std::boolalpha
-    //           << during_split_range << ", txn: "
-    //           << (data_sync_txm != nullptr ? data_sync_txm->TxNumber() : 0)
-    //           << ", table: " << table_name.StringView();
     PostProcessRangePartitionDataSyncTask(std::move(data_sync_task),
                                           data_sync_txm,
                                           DataSyncTask::CkptErrorCode::NO_ERROR,
@@ -4866,10 +4811,6 @@ void LocalCcShards::DataSyncForHashPartition(
             data_sync_worker_ctx_.cv_.notify_all();
         }
     }
-
-    // LOG(INFO) << "DataSyncForHashPartition: ng_term: " << ng_term
-    //           << ", txn: " << data_sync_txm->TxNumber()
-    //           << ", table: " << table_name.StringView();
 
     // 3. Scan records.
     {
@@ -6005,8 +5946,6 @@ void LocalCcShards::FlushData(std::unique_lock<std::mutex> &flush_worker_lk)
         EnqueueToCcShard(core_idx, &reset_cc);
     }
     reset_cc.Wait();
-    // LOG(INFO) << "FlushData after set dirty data flushed"
-    //           << ", the shard count: " << updated_ckpt_ts_core_ids.size();
 
     auto ckpt_err = succ ? DataSyncTask::CkptErrorCode::NO_ERROR
                          : DataSyncTask::CkptErrorCode::FLUSH_ERROR;

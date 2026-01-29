@@ -178,9 +178,6 @@ public:
         {
         case CcErrorCode::NO_ERROR:
         {
-            // LOG(INFO) << "RangeBucketCcMap::Execute: NO_ERROR, ng_term: "
-            //           << ng_term << ", txn: " << req.Txn() << ", lock type: "
-            //           << static_cast<uint32_t>(acquired_lock);
             CcEntryAddr &cce_addr = hd_result->Value().cce_addr_;
             cce_addr.SetCceLock(
                 reinterpret_cast<uint64_t>(cce->GetKeyGapLockAndExtraData()),

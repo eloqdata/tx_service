@@ -143,21 +143,6 @@ void ReadOperation::Forward(TransactionExecution *txm)
     {
         if (!read_tx_req_->read_local_)
         {
-            // Just returned from lock_bucket_op_, check lock_bucket_result_.
-            // LOG(INFO) << "ReadOperation Forward, lock_range_bucket_result_ is
-            // "
-            //              "not finished"
-            //           << ", tx allow_run_on_candidate: " << std::boolalpha
-            //           << txm->allow_run_on_candidate_ << ", table_name: "
-            //           << read_tx_req_->tab_name_->StringView()
-            //           << ", read key: " << read_tx_req_->key_->ToString()
-            //           << ", txn: " << txm->TxNumber()
-            //           << ", lock range bucket result: " << std::boolalpha
-            //           << lock_range_bucket_result_->IsFinished()
-            //           << ", error code: "
-            //           << static_cast<uint32_t>(
-            //                  lock_range_bucket_result_->ErrorCode())
-            //           << ", this: 0x" << std::hex << this;
             assert(lock_range_bucket_result_->IsFinished());
             if (lock_range_bucket_result_->IsError())
             {
@@ -181,11 +166,6 @@ void ReadOperation::Forward(TransactionExecution *txm)
             txm->PostProcess(*this);
             return;
         }
-        // LOG(INFO) << "ReadOperation Forward, this: 0x" << std::hex << this
-        //           << ", table name: " <<
-        //           read_tx_req_->tab_name_->StringView()
-        //           << ", read key: " << read_tx_req_->key_->ToString()
-        //           << ", txn: " << std::dec << txm->TxNumber();
 
         txm->Process(*this);
         return;
@@ -208,26 +188,11 @@ void ReadOperation::Forward(TransactionExecution *txm)
             }
             if (retry_num_ > 0)
             {
-                // LOG(INFO) << "ReadOperation ReRunOp, this: 0x" << std::hex
-                //           << this << ", table name: "
-                //           << read_tx_req_->tab_name_->StringView()
-                //           << ", read key: " << read_tx_req_->key_->ToString()
-                //           << ", txn: " << std::dec << txm->TxNumber()
-                //           << ", hd result error code: "
-                //           << static_cast<uint32_t>(hd_result_.ErrorCode())
-                //           << ", retry num: " << retry_num_;
                 hd_result_.Value().Reset();
                 hd_result_.Reset();
                 ReRunOp(txm);
                 return;
             }
-            // LOG(INFO) << "ReadOperation topostprocess, this: 0x" << std::hex
-            //           << this << ", table name: "
-            //           << read_tx_req_->tab_name_->StringView()
-            //           << ", read key: " << read_tx_req_->key_->ToString()
-            //           << ", txn: " << std::dec << txm->TxNumber()
-            //           << ", hd result error code: "
-            //           << static_cast<uint32_t>(hd_result_.ErrorCode());
         }
 
         txm->PostProcess(*this);
@@ -251,11 +216,6 @@ void ReadOperation::Forward(TransactionExecution *txm)
         {
             if (!hd_result_.Value().is_local_)
             {
-                // LOG(INFO) << "ReadOperation timeout, tx:" << txm->TxNumber()
-                //           << ", table name: "
-                //           << read_tx_req_->tab_name_->StringView()
-                //           << ", read key: " <<
-                //           read_tx_req_->key_->ToString();
                 if (!txm->CheckLeaderTerm())
                 {
                     hd_result_.SetError(CcErrorCode::TX_NODE_NOT_LEADER);
@@ -265,11 +225,6 @@ void ReadOperation::Forward(TransactionExecution *txm)
 
                 if (cce_addr.Term() > 0)
                 {
-                    // LOG(INFO)
-                    //     << "ReadOperation timeout, ack received, tx:"
-                    //     << txm->TxNumber() << ", table name: "
-                    //     << read_tx_req_->tab_name_->StringView()
-                    //     << ", read key: " << read_tx_req_->key_->ToString();
                     // ack is received, but timeout happens.
 
                     // Trigger deadlock check.
@@ -298,11 +253,6 @@ void ReadOperation::Forward(TransactionExecution *txm)
                     // FIXME(lzx): Is it more appropriate to retry?
                     // If the tx node fails, also force the tx to abort
                     // instantly.
-                    // LOG(INFO)
-                    //     << "ReadOperation timeout, no ack received, tx:"
-                    //     << txm->TxNumber() << ", table name: "
-                    //     << read_tx_req_->tab_name_->StringView()
-                    //     << ", read key: " << read_tx_req_->key_->ToString();
                     bool force_error = hd_result_.ForceError();
                     if (force_error)
                     {
@@ -314,11 +264,6 @@ void ReadOperation::Forward(TransactionExecution *txm)
                     // execution. The tx will be re-executed when the tx
                     // processor visits it in the execution queue.
                 }
-                // LOG(INFO) << "ReadOperation timeout, force error, tx:"
-                //           << txm->TxNumber() << ", table name: "
-                //           << read_tx_req_->tab_name_->StringView()
-                //           << ", read key: " <<
-                //           read_tx_req_->key_->ToString();
             }
             else
             {
@@ -352,9 +297,6 @@ void ReadLocalOperation::Forward(txservice::TransactionExecution *txm)
             hd_result_->SetError(CcErrorCode::TX_NODE_NOT_LEADER);
             hd_result_->ForceError();
             txm->PostProcess(*this);
-            // LOG(INFO) << "ReadLocalOperation error for table: "
-            //           << table_name_.StringView()
-            //           << ", key: " << key_->ToString();
         }
         else if (hd_result_->IsError())
         {
@@ -400,11 +342,6 @@ void ReadLocalOperation::Forward(txservice::TransactionExecution *txm)
         {
             // Read local succeeded
             txm->PostProcess(*this);
-            // LOG(INFO) << "ReadLocalOperation succeeded for table: "
-            //           << table_name_.StringView() << ", table type: "
-            //           << static_cast<uint32_t>(table_name_.Type())
-            //           << ", txn: " << txm->TxNumber()
-            //           << ", key: " << key_->ToString();
         }
     }
     else

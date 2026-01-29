@@ -224,8 +224,6 @@ public:
         KickoutCcEntryCc *kickout_cc = nullptr,
         bool *is_success = nullptr) = 0;
     virtual void Clean() = 0;
-    virtual void PrintCcPage(LruPage *lru_page) = 0;
-    virtual void PrintAllCcPages() = 0;
 
     virtual void CleanEntry(LruEntry *entry, LruPage *page) = 0;
 
