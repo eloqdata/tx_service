@@ -4474,17 +4474,27 @@ void LocalCcShards::PostProcessHashPartitionDataSyncTask(
                 }
                 else
                 {
-                    const TableName base_table_name{
-                        task->table_name_.GetBaseTableNameSV(),
-                        TableType::Primary,
-                        task->table_name_.Engine()};
-                    CatalogEntry *catalog_entry = GetCatalogInternal(
-                        base_table_name, task->node_group_id_);
-                    // We're still holding catalog read lock here, and the term
-                    // has not changed. catalog entry should not be nullptr.
-                    assert(catalog_entry);
-                    catalog_entry->UpdateLastDataSyncTS(task->data_sync_ts_,
-                                                        task->id_);
+                    bool has_skipped_entries = false;
+                    {
+                        std::lock_guard status_lk(task->status_->mux_);
+                        has_skipped_entries =
+                            task->status_->has_skipped_entries_;
+                    }
+                    if (!has_skipped_entries)
+                    {
+                        const TableName base_table_name{
+                            task->table_name_.GetBaseTableNameSV(),
+                            TableType::Primary,
+                            task->table_name_.Engine()};
+                        CatalogEntry *catalog_entry = GetCatalogInternal(
+                            base_table_name, task->node_group_id_);
+                        // We're still holding catalog read lock here, and the
+                        // term has not changed. catalog entry should not be
+                        // nullptr.
+                        assert(catalog_entry);
+                        catalog_entry->UpdateLastDataSyncTS(task->data_sync_ts_,
+                                                            task->id_);
+                    }
                 }
             }
 
