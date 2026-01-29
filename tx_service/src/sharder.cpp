@@ -254,7 +254,7 @@ int Sharder::Init(
                 if (cluster_config_.ng_configs_.at(ng_id).at(idx).node_id_ ==
                     node_id_)
                 {
-                    cluster_config_.cc_nodes_.try_emplace(
+                    auto [it, _] = cluster_config_.cc_nodes_.try_emplace(
                         ng_id,
                         std::make_shared<fault::CcNode>(
                             ng_id,
@@ -262,6 +262,10 @@ int Sharder::Init(
                             *local_shards_,
                             log_agent_ != nullptr ? log_agent_->LogGroupCount()
                                                   : 0));
+                    if (ng_id == native_ng_)
+                    {
+                        native_cc_node_ = it->second.get();
+                    }
                 }
             }
         }
@@ -1004,6 +1008,12 @@ uint64_t Sharder::GetNodeGroupCkptTs(uint32_t cc_ng_id)
         return find_it->second->GetCkptTs();
     }
     return 0;
+}
+
+uint64_t Sharder::NativeNodeGroupCkptTs()
+{
+    assert(native_cc_node_ != nullptr);
+    return native_cc_node_->GetCkptTs();
 }
 
 bool Sharder::UpdateNodeGroupCkptTs(uint32_t cc_ng_id, uint64_t ckpt_ts)

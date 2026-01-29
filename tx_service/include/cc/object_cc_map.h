@@ -1887,9 +1887,11 @@ public:
         assert(cce);
         ccp = it.GetPage();
 
-        if (commit_ts <= cce->CommitTs())
+        if (commit_ts <= cce->CommitTs() ||
+            commit_ts <= Sharder::Instance().NativeNodeGroupCkptTs())
         {
-            // Discard message since cce has a newer version.
+            // Discard message since cce has a newer version or has been
+            // checkpointed by leader node.
             return req.SetFinish(*shard_);
         }
         else
@@ -2530,7 +2532,8 @@ public:
         cce->GetKeyGapLockAndExtraData()->ReleasePin();
         cce->RecycleKeyLock(*shard_);
 
-        if (status == RecordStatus::Unknown)
+        if (status == RecordStatus::Unknown &&
+            cce->PayloadStatus() == RecordStatus::Unknown)
         {
             // fetch record fails.
             if (cce->IsFree())

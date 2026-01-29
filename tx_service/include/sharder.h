@@ -532,6 +532,8 @@ public:
 
     uint64_t GetNodeGroupCkptTs(uint32_t cc_ng_id);
 
+    uint64_t NativeNodeGroupCkptTs();
+
     bool UpdateNodeGroupCkptTs(uint32_t cc_ng_id, uint64_t ckpt_ts);
 
     TxWorkerPool *GetTxWorkerPool()
@@ -784,6 +786,7 @@ private:
 private:
     uint32_t node_id_;
     uint32_t native_ng_;
+    fault::CcNode *native_cc_node_{};
     std::string host_name_;
     uint16_t port_;
     // Whether is candidate of native node group.
