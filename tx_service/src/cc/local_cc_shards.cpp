@@ -3030,14 +3030,6 @@ void LocalCcShards::DataSyncWorker(size_t worker_idx)
                 task_worker_lk,
                 [this, worker_idx, core_number]
                 {
-                    LOG(INFO)
-                        << "DataSyncWorker, worker idx = " << worker_idx
-                        << ", yes: "
-                        << (((worker_idx + core_number -
-                              last_data_sync_worker_idx_) %
-                             core_number) <
-                            scan_concurrency_.load(std::memory_order_relaxed));
-
                     return ((worker_idx + core_number -
                              last_data_sync_worker_idx_) %
                             core_number) <
@@ -5173,48 +5165,17 @@ void LocalCcShards::DataSyncForHashPartition(
             }
 #endif
 
-            // this thread will wait in AllocatePendingFlushDataMemQuota if
-            // quota is not available
-            auto quota_start = std::chrono::steady_clock::now();
             uint64_t old_usage =
                 data_sync_mem_controller_.AllocateFlushDataMemQuota(
                     flush_data_size);
+            DLOG(INFO) << "AllocateFlushDataMemQuota old_usage: " << old_usage
+                       << " new_usage: " << old_usage + flush_data_size
+                       << " quota: "
+                       << data_sync_mem_controller_.FlushMemoryQuota()
+                       << " flight_tasks: " << data_sync_task->flight_task_cnt_
+                       << " record count: " << scan_cc.accumulated_scan_cnt_;
 
             debug_data_size += scan_cc.DataSyncVec().size();
-            auto quota_end = std::chrono::steady_clock::now();
-            auto quota_duration =
-                std::chrono::duration_cast<std::chrono::microseconds>(
-                    quota_end - quota_start)
-                    .count();
-
-            uint64_t new_usage = old_usage + flush_data_size;
-            uint64_t quota = data_sync_mem_controller_.FlushMemoryQuota();
-            double usage_ratio = quota > 0 ? (double) new_usage / quota : 0.0;
-
-            if (quota_duration > 1000 ||
-                usage_ratio > 0.8)  // Blocked for more than 1ms or usage > 80%
-            {
-                mem_quota_block_count_.fetch_add(1, std::memory_order_relaxed);
-                mem_quota_total_block_time_us_.fetch_add(
-                    quota_duration, std::memory_order_relaxed);
-
-                /*
-                LOG(WARNING) << "Memory quota: "
-                             << "allocation_time_us=" << quota_duration << ", "
-                             << "requested=" << flush_data_size << ", "
-                             << "old_usage=" << old_usage << ", "
-                             << "new_usage=" << new_usage << ", "
-                             << "quota=" << quota << ", "
-                             << "usage_ratio=" << (usage_ratio * 100) << "%"
-                             << ", worker idx = " << worker_idx;
-                */
-            }
-
-            DLOG(INFO) << "AllocateFlushDataMemQuota: "
-                       << "old_usage=" << old_usage
-                       << ", new_usage=" << new_usage << ", quota=" << quota
-                       << ", usage_ratio=" << (usage_ratio * 100) << "%"
-                       << ", allocation_time_us=" << quota_duration;
 
             std::unique_lock<std::mutex> heap_lk(hash_partition_ckpt_heap_mux_);
             mi_threadid_t prev_thd =
@@ -5878,17 +5839,14 @@ void LocalCcShards::AddFlushTaskEntry(std::unique_ptr<FlushTaskEntry> &&entry)
 {
     assert(cur_flush_buffers_.size() == data_sync_worker_ctx_.worker_num_);
     assert(pending_flush_work_.size() == data_sync_worker_ctx_.worker_num_);
+    assert(entry->data_sync_task_ != nullptr);
 
     // Compute target buffer/queue based on partition type before adding to
     // buffer
-    size_t target = 0;
-    if (entry->data_sync_task_ != nullptr)
-    {
-        const auto &data_sync_task = entry->data_sync_task_;
-        size_t core_number = cur_flush_buffers_.size();
-        int32_t id = data_sync_task->id_;
-        target = static_cast<size_t>(id) % core_number;
-    }
+    const auto &data_sync_task = entry->data_sync_task_;
+    size_t core_number = cur_flush_buffers_.size();
+    int32_t id = data_sync_task->id_;
+    size_t target = static_cast<size_t>(id) % core_number;
 
     auto &cur_flush_buffer = *cur_flush_buffers_[target];
 
@@ -5900,12 +5858,12 @@ void LocalCcShards::AddFlushTaskEntry(std::unique_ptr<FlushTaskEntry> &&entry)
     {
         std::unique_lock<std::mutex> worker_lk(flush_data_worker_ctx_.mux_);
 
-        auto &target_pending_flush_work = pending_flush_work_[target];
+        auto &pending_flush_work = pending_flush_work_[target];
 
         // Try to merge with the last task if queue is not empty
-        if (!target_pending_flush_work.empty())
+        if (!pending_flush_work.empty())
         {
-            auto &last_task = target_pending_flush_work.back();
+            auto &last_task = pending_flush_work.back();
             if (last_task->MergeFrom(std::move(flush_data_task)))
             {
                 // Merge successful, task was merged into last_task
@@ -5914,69 +5872,17 @@ void LocalCcShards::AddFlushTaskEntry(std::unique_ptr<FlushTaskEntry> &&entry)
             }
         }
 
-        // Monitor queue size
-        size_t queue_size = target_pending_flush_work.size();
-        pending_flush_queue_size_.store(queue_size, std::memory_order_relaxed);
-        uint64_t max_size =
-            pending_flush_queue_max_size_.load(std::memory_order_relaxed);
-        if (queue_size > max_size)
-        {
-            pending_flush_queue_max_size_.store(queue_size,
-                                                std::memory_order_relaxed);
-        }
-
         // Could not merge, wait if queue is full
-        while (target_pending_flush_work.size() >= 2)
+        while (pending_flush_work.size() >= 2)
         {
-            // Record block start
-            flush_queue_block_count_.fetch_add(1, std::memory_order_relaxed);
-            auto block_start = std::chrono::steady_clock::now();
-
-            // If this is the first block or every 10th block, output diagnostic
-            // info
-            static thread_local uint64_t consecutive_blocks = 0;
-            consecutive_blocks++;
-
-            if (consecutive_blocks == 1 || consecutive_blocks % 10 == 0)
-            {
-                LOG(WARNING)
-                    << "Flush queue is FULL, blocking data sync worker. "
-                    << "consecutive_blocks=" << consecutive_blocks;
-                ReportDiagnosticStatus();
-            }
-
+            LOG(INFO) << "FlushDataWorker[" << target << "] Status: "
+                      << "queue_size=" << pending_flush_work.size() << "/"
+                      << flush_data_worker_ctx_.worker_num_ << ", waitting";
             flush_data_worker_ctx_.cv_.wait(worker_lk);
-
-            // Record block end
-            auto block_end = std::chrono::steady_clock::now();
-            auto block_duration =
-                std::chrono::duration_cast<std::chrono::microseconds>(
-                    block_end - block_start)
-                    .count();
-            flush_queue_total_block_time_us_.fetch_add(
-                block_duration, std::memory_order_relaxed);
-
-            if (block_duration > 1000000)  // Blocked for more than 1 second
-            {
-                LOG(ERROR) << "Flush queue blocked for "
-                           << (block_duration / 1000) << " ms! "
-                           << "This may indicate a serious bottleneck.";
-                ReportDiagnosticStatus();
-            }
-
-            LOG(WARNING) << "Flush queue blocked for " << block_duration
-                         << " us, "
-                         << "queue_size=" << target_pending_flush_work.size()
-                         << ", worker_num="
-                         << flush_data_worker_ctx_.worker_num_;
-
-            consecutive_blocks = 0;  // Reset consecutive block count
         }
 
         // Add as new task
-        target_pending_flush_work.emplace_back(std::move(flush_data_task));
-        pending_flush_queue_size_.store(target_pending_flush_work.size(),
-                                        std::memory_order_relaxed);
+        pending_flush_work.emplace_back(std::move(flush_data_task));
         flush_data_worker_ctx_.cv_.notify_all();
     }
 }
@@ -6008,29 +5914,8 @@ void LocalCcShards::FlushCurrentFlushBuffer()
                 }
             }
 
-            // Monitor queue size
-            size_t queue_size = pending_flush_work.size();
-            pending_flush_queue_size_.store(queue_size,
-                                            std::memory_order_relaxed);
-            uint64_t max_size =
-                pending_flush_queue_max_size_.load(std::memory_order_relaxed);
-            if (queue_size > max_size)
-            {
-                pending_flush_queue_max_size_.store(queue_size,
-                                                    std::memory_order_relaxed);
-            }
-
-            // Could not merge, wait if queue is full
-            while (pending_flush_work.size() >=
-                   static_cast<size_t>(flush_data_worker_ctx_.worker_num_))
-            {
-                flush_data_worker_ctx_.cv_.wait(worker_lk);
-            }
-
             // Add as new task
             pending_flush_work.emplace_back(std::move(flush_data_task));
-            pending_flush_queue_size_.store(pending_flush_work.size(),
-                                            std::memory_order_relaxed);
             flush_data_worker_ctx_.cv_.notify_all();
         }
     }
@@ -6248,8 +6133,6 @@ void LocalCcShards::FlushDataWorker(size_t worker_idx)
     using clock = std::chrono::steady_clock;
     size_t previous_flush_size = 0;
     auto previous_size_update_time = clock::now();
-    auto last_report_time = clock::now();
-    const auto report_interval = std::chrono::seconds(5);
 
     std::unique_lock<std::mutex> flush_worker_lk(flush_data_worker_ctx_.mux_);
     while (flush_data_worker_ctx_.status_ == WorkerStatus::Active)
@@ -6314,39 +6197,6 @@ void LocalCcShards::FlushDataWorker(size_t worker_idx)
                 return false;
             });
 
-        // Periodic status report
-        auto current_time = clock::now();
-        if (current_time - last_report_time >= report_interval)
-        {
-            size_t queue_size = pending_flush_work.size();
-            uint64_t block_count =
-                flush_queue_block_count_.load(std::memory_order_relaxed);
-            uint64_t total_block_time = flush_queue_total_block_time_us_.load(
-                std::memory_order_relaxed);
-
-            uint64_t mem_quota_block_count =
-                mem_quota_block_count_.load(std::memory_order_relaxed);
-            uint64_t mem_quota_total_block_time =
-                mem_quota_total_block_time_us_.load(std::memory_order_relaxed);
-            uint64_t mem_quota = data_sync_mem_controller_.FlushMemoryQuota();
-
-            LOG(INFO) << "Flush Worker[" << worker_idx << "] Status: "
-                      << "queue_size=" << queue_size << "/"
-                      << flush_data_worker_ctx_.worker_num_
-                      << ", queue_block_count=" << block_count
-                      << ", queue_avg_block_time_us="
-                      << (block_count > 0 ? total_block_time / block_count : 0)
-                      << ", mem_quota_block_count=" << mem_quota_block_count
-                      << ", mem_quota_avg_block_time_us="
-                      << (mem_quota_block_count > 0
-                              ? mem_quota_total_block_time /
-                                    mem_quota_block_count
-                              : 0)
-                      << ", mem_quota=" << mem_quota;
-
-            last_report_time = current_time;
-        }
-
         if (pending_flush_work.empty())
         {
             continue;
@@ -6359,62 +6209,6 @@ void LocalCcShards::FlushDataWorker(size_t worker_idx)
     {
         FlushData(flush_worker_lk, worker_idx);
     }
-}
-
-void LocalCcShards::ReportDiagnosticStatus() const
-{
-    // Aggregate queue sizes from all workers
-    size_t total_queue_size = 0;
-    size_t max_queue_size = 0;
-    for (const auto &queue : pending_flush_work_)
-    {
-        size_t qsize = queue.size();
-        total_queue_size += qsize;
-        if (qsize > max_queue_size)
-        {
-            max_queue_size = qsize;
-        }
-    }
-
-    uint64_t queue_block_count =
-        flush_queue_block_count_.load(std::memory_order_relaxed);
-    uint64_t queue_total_block_time =
-        flush_queue_total_block_time_us_.load(std::memory_order_relaxed);
-    uint64_t queue_max_size =
-        pending_flush_queue_max_size_.load(std::memory_order_relaxed);
-
-    uint64_t mem_quota_block_count =
-        mem_quota_block_count_.load(std::memory_order_relaxed);
-    uint64_t mem_quota_total_block_time =
-        mem_quota_total_block_time_us_.load(std::memory_order_relaxed);
-    uint64_t mem_quota = data_sync_mem_controller_.FlushMemoryQuota();
-
-    LOG(INFO) << "=== Checkpoint Diagnostic Status ==="
-              << "\n  Flush Queue:"
-              << "\n    total_size=" << total_queue_size
-              << "\n    max_per_worker=" << max_queue_size
-              << "\n    historical_max_size=" << queue_max_size
-              << "\n    worker_num=" << flush_data_worker_ctx_.worker_num_
-              << "\n    block_count=" << queue_block_count
-              << "\n    total_block_time_us=" << queue_total_block_time
-              << "\n    avg_block_time_us="
-              << (queue_block_count > 0
-                      ? queue_total_block_time / queue_block_count
-                      : 0)
-              << "\n  Memory Quota:"
-              << "\n    quota=" << mem_quota
-              << "\n    block_count=" << mem_quota_block_count
-              << "\n    total_block_time_us=" << mem_quota_total_block_time
-              << "\n    avg_block_time_us="
-              << (mem_quota_block_count > 0
-                      ? mem_quota_total_block_time / mem_quota_block_count
-                      : 0)
-              << "\n  Flush Workers:"
-              << "\n    worker_num=" << flush_data_worker_ctx_.worker_num_
-              << "\n    status="
-              << (flush_data_worker_ctx_.status_ == WorkerStatus::Active
-                      ? "Active"
-                      : "Terminated");
 }
 
 void LocalCcShards::RangeSplitWorker()
