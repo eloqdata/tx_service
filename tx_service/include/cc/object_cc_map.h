@@ -1876,6 +1876,21 @@ public:
         decoded_key.Deserialize(key_str->data(), offset, KeySchema());
         const KeyT *look_key = &decoded_key;
 
+        if (Sharder::Instance().StandbyNodeTerm() >= 0 &&
+            Sharder::Instance().GetDataStoreHandler()->IsSharedStorage() &&
+            commit_ts < Sharder::Instance().NativeNodeGroupCkptTs())
+        {
+            auto it = Find(*look_key);
+            if (it == End())
+            {
+                // Discard the forward message since it has already been
+                // checkpointed. And the checkpointed data will be fetched when
+                // a forward message with bigger commit_ts than ckpt_ts is
+                // received.
+                return req.SetFinish(*shard_);
+            }
+        }
+
         // first time the request is processed
         auto it = FindEmplace(*look_key);
         cce = it->second;
@@ -1889,8 +1904,7 @@ public:
 
         if (commit_ts <= cce->CommitTs())
         {
-            // Discard message since cce has a newer version or has been
-            // checkpointed by leader node.
+            // Discard message since cce has a newer version.
             return req.SetFinish(*shard_);
         }
         else
@@ -2541,9 +2555,12 @@ public:
             }
             return true;
         }
-        // It's possible that first ReplayLogCc triggers FetchRecord and the
-        // second ReplayLogCc has_overwrite and overrides the cce.
-        if (cce->PayloadStatus() == RecordStatus::Unknown)
+        // It's possible that first ReplayLogCc/StandbyForwardCc triggers
+        // FetchRecord and the second ReplayLogCc/StandbyForwardCc has_overwrite
+        // and overrides the cce. Overrides the cce if the BackFilled version is
+        // newer.
+        if (cce->PayloadStatus() == RecordStatus::Unknown &&
+            cce->CommitTs() < commit_ts)
         {
             cce->SetCommitTsPayloadStatus(commit_ts, status);
             cce->SetCkptTs(commit_ts);
