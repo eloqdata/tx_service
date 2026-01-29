@@ -4855,8 +4855,10 @@ void LocalCcShards::DataSyncForHashPartition(
                  updated_memory_per_partition != 0
                      ? (flush_buffer_size / updated_memory_per_partition)
                      : partition_number_this_core);
+
+    // const size_t partition_number_per_scan = 200;
+
     const size_t scan_concurrency = core_number;
-    // scan_concurrency_.store(core_number);
 
     LOG(INFO) << "DataSyncScan: flush buffer size = " << flush_buffer_size
               << ", updated memory = " << updated_memory
@@ -5936,10 +5938,12 @@ void LocalCcShards::FlushData(std::unique_lock<std::mutex> &flush_worker_lk,
 
     size_t task_size = cur_work->GetPendingFlushSize();
     size_t entry_count = 0;
+    /*
     for (const auto &[table_name, entries] : cur_work->flush_task_entries_)
     {
         entry_count += entries.size();
     }
+    */
 
     // Notify any threads waiting for queue space
     flush_data_worker_ctx_.cv_.notify_all();
@@ -6032,6 +6036,8 @@ void LocalCcShards::FlushData(std::unique_lock<std::mutex> &flush_worker_lk,
               << "task_size=" << task_size << " bytes, "
               << "entry_count=" << entry_count;
 
+    LOG(INFO) << "== update cce start: worker idx = " << worker_idx;
+
     std::unordered_set<uint16_t> updated_ckpt_ts_core_ids;
     // Update cce ckpt ts in memory
     if (succ)
@@ -6091,6 +6097,8 @@ void LocalCcShards::FlushData(std::unique_lock<std::mutex> &flush_worker_lk,
             }
         }
     }
+
+    LOG(INFO) << "== update cce finished: worker idx = " << worker_idx;
 
     // Notify cc shards that dirty data has been flushed. This will re-enqueue
     // kickout data cc reqs if there are any.
