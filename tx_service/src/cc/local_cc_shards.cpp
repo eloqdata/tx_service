@@ -5920,8 +5920,7 @@ void LocalCcShards::AddFlushTaskEntry(std::unique_ptr<FlushTaskEntry> &&entry,
         }
 
         // Could not merge, wait if queue is full
-        while (pending_flush_work.size() >=
-               static_cast<size_t>(flush_data_worker_ctx_.worker_num_))
+        while (pending_flush_work.size() >= 2)
         {
             // Record block start
             flush_queue_block_count_.fetch_add(1, std::memory_order_relaxed);
@@ -5972,7 +5971,7 @@ void LocalCcShards::AddFlushTaskEntry(std::unique_ptr<FlushTaskEntry> &&entry,
         pending_flush_work.emplace_back(std::move(flush_data_task));
         pending_flush_queue_size_.store(pending_flush_work.size(),
                                         std::memory_order_relaxed);
-        flush_data_worker_ctx_.cv_.notify_one();
+        flush_data_worker_ctx_.cv_.notify_all();
     }
 }
 
