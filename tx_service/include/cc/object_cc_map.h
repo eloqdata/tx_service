@@ -1887,8 +1887,7 @@ public:
         assert(cce);
         ccp = it.GetPage();
 
-        if (commit_ts <= cce->CommitTs() ||
-            commit_ts <= Sharder::Instance().NativeNodeGroupCkptTs())
+        if (commit_ts <= cce->CommitTs())
         {
             // Discard message since cce has a newer version or has been
             // checkpointed by leader node.
