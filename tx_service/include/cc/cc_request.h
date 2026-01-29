@@ -232,12 +232,6 @@ public:
                         // is marked as errored.
                         if (init_res.error != CcErrorCode::NO_ERROR)
                         {
-                            LOG(INFO)
-                                << "AbortCcRequest, tx:" << Txn()
-                                << ", table name: " << table_name_->StringView()
-                                << ", error code: "
-                                << static_cast<uint32_t>(init_res.error)
-                                << ", with result: 0x" << std::hex << res_;
                             AbortCcRequest(init_res.error);
                         }
                         // The req is aborted or will be re-enqueued.
@@ -255,11 +249,6 @@ public:
             {
                 ccm_ = ccm;
             }
-            // LOG(INFO) << "Execute CcRequest, tx:" << Txn()
-            //           << ", table name: " << table_name_->StringView()
-            //           << ", table type: "
-            //           << static_cast<uint32_t>(table_name_->Type())
-            //           << ", txn: " << Txn();
             assert(ccm != nullptr);
             assert(ccs.core_id_ == ccm->shard_->core_id_);
             return ccm->Execute(*typed_req);
@@ -329,10 +318,6 @@ public:
     void AbortCcRequest(CcErrorCode err_code) override
     {
         assert(err_code != CcErrorCode::NO_ERROR);
-        LOG(INFO) << "AbortCcRequest, tx:" << Txn()
-                  << ", table name: " << table_name_->StringView()
-                  << ", error code: " << static_cast<uint32_t>(err_code)
-                  << ", with result: 0x" << std::hex << res_;
         bool finished = res_->SetError(err_code);
 
         if (finished)
@@ -1384,8 +1369,6 @@ public:
         {
             if (tmp_cce_addr.Term() != cc_ng_term)
             {
-                LOG(INFO) << "ReadCc not leader, table name: "
-                          << table_name_->StringView() << ", txn: " << Txn();
                 return false;
             }
 
@@ -1414,8 +1397,6 @@ public:
 
             if (cc_ng_term < 0 || cc_ng_term != ng_term_)
             {
-                LOG(INFO) << "ReadCc not leader, table name: "
-                          << table_name_->StringView() << ", txn: " << Txn();
                 return false;
             }
             else

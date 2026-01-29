@@ -1982,12 +1982,6 @@ void TransactionExecution::Process(ReadOperation &read)
                         range_rec_.GetRangeOwnerNg()->BucketOwner();
                     key_shard_code = range_ng << 10 | residual;
                     partition_id = range_rec_.GetRangeInfo()->PartitionId();
-                    // LOG(INFO) << "ReadOperation for range partitioned table:
-                    // "
-                    //           << table_name.StringView()
-                    //           << ", key: " << key.ToString()
-                    //           << ", partition id: " << partition_id
-                    //           << ", txn: " << tx_number_;
                 }
             }
             else
@@ -2009,12 +2003,6 @@ void TransactionExecution::Process(ReadOperation &read)
                 partition_id = Sharder::MapKeyHashToHashPartitionId(key_hash);
                 if (bucket_info != nullptr)
                 {
-                    // LOG(INFO) << "ReadOperation for hash partitioned table: "
-                    //           << table_name.StringView()
-                    //           << ", key: " << key.ToString()
-                    //           << ", get bucket info fast success"
-                    //           << ", read is running: " << std::boolalpha
-                    //           << read.is_running_;
                     // Uses the lower 10 bits of the key's hash code to shard
                     // the key across CPU cores in a cc node.
                     uint32_t residual = key_hash & 0x3FF;
@@ -2026,10 +2014,6 @@ void TransactionExecution::Process(ReadOperation &read)
                 }
                 else if (!lock_range_bucket_result_.IsFinished())
                 {
-                    // LOG(INFO)
-                    //     << "ReadOperation for hash partitioned table: "
-                    //     << table_name.StringView()
-                    //     << ", key: " << key.ToString() << ", to lock bucket";
                     read.is_running_ = false;
                     // First read and lock the bucket the key located in through
                     // lock_bucket_op_.
@@ -2054,10 +2038,6 @@ void TransactionExecution::Process(ReadOperation &read)
                 }
                 else  // lock bucket finished and succeeded
                 {
-                    // LOG(INFO) << "ReadOperation for hash partitioned table: "
-                    //           << table_name.StringView()
-                    //           << ", key: " << key.ToString()
-                    //           << ", lock bucket finished and succeeded";
                     // If there is an error when getting the key's bucket info,
                     // the error would be caught when forwarding the read
                     // operation, which forces the tx state machine moves to
@@ -2095,15 +2075,6 @@ void TransactionExecution::Process(ReadOperation &read)
             {
                 read_ts = ts;
             }
-            // LOG(INFO) << "ReadOperation for table: " <<
-            // table_name.StringView()
-            //           << ", key: " << key.ToString() << ", read ts: " <<
-            //           read_ts
-            //           << ", read is running: " << std::boolalpha
-            //           << read.is_running_ << ", txn: " << tx_number_
-            //           << ", is hash partitioned: " << std::boolalpha
-            //           << table_name.IsHashPartitioned()
-            //           << ", partition id: " << partition_id;
 
             cc_handler_->Read(table_name,
                               read.read_tx_req_->schema_version_,
@@ -2156,17 +2127,6 @@ void TransactionExecution::Process(ReadOperation &read)
                     StartTiming();
                 }
             }
-            // LOG(INFO) << "ReadOperation sent read request for table: "
-            //           << table_name.StringView()
-            //           << ", key: " << read.read_tx_req_->key_->ToString()
-            //           << ", txn: " << tx_number_
-            //           << ", read is running: " << std::boolalpha
-            //           << read.is_running_ << ", with result: 0x" << std::hex
-            //           << &read.hd_result_ << ". operation: 0x" << std::hex
-            //           << &read << ", op lock range bucket result is finished:
-            //           "
-            //           << std::boolalpha
-            //           << read.lock_range_bucket_result_->IsFinished();
         }
     }
     else
@@ -3768,7 +3728,6 @@ void TransactionExecution::Commit()
 {
     if (tx_term_ < 0)
     {
-        // LOG(INFO) << ">>>>Commit tx " << TxNumber() << ", tx_term < 0";
         bool_resp_->Finish(false);
         bool_resp_ = nullptr;
 
@@ -3817,8 +3776,6 @@ void TransactionExecution::Commit()
         }
         else
         {
-            // LOG(INFO) << ">>>>Commit tx " << TxNumber() << ", push set ts
-            // op";
             PushOperation(&set_ts_);
         }
     }
@@ -4189,10 +4146,6 @@ void TransactionExecution::PostProcess(AcquireWriteOperation &acquire_write)
     }
     else if (acquire_write.hd_result_.IsError())
     {
-        DLOG(ERROR) << "AcquireWriteOperation failed for cc error:"
-                    << acquire_write.hd_result_.ErrorMsg() << " ,error code: "
-                    << static_cast<int>(acquire_write.hd_result_.ErrorCode())
-                    << "; txn: " << TxNumber();
         bool_resp_->SetErrorCode(
             ConvertCcError(acquire_write.hd_result_.ErrorCode()));
         Abort();
@@ -5826,7 +5779,6 @@ void TransactionExecution::ReleaseMetaDataReadLock(
     size_t post_local_cnt = 0;
     for (const auto &[cce_addr, read_entry_pair] : rset)
     {
-        // LOG(INFO) << ">>>>ReleaseMetaDataReadLock, tx " << TxNumber();
         const ReadSetEntry &read_entry = read_entry_pair.first;
         CcReqStatus ret = cc_handler_->PostRead(TxNumber(),
                                                 TxTerm(),
@@ -7826,16 +7778,6 @@ void TransactionExecution::Process(BatchReadOperation &batch_read_op)
         {
             partition_id = batch_read_op.range_ids_[idx];
         }
-        // LOG(INFO) << "BatchReadOperation, txn: " << TxNumber()
-        //           << ", table name: " << table_name.StringView()
-        //           << ", table type: "
-        //           << static_cast<uint32_t>(table_name.Type())
-        //           << ", is hash partitioned: " << std::boolalpha
-        //           << table_name.IsHashPartitioned()
-        //           << ", batch read op range ids size: "
-        //           << batch_read_op.range_ids_.size()
-        //           << ", key: " << key.ToString()
-        //           << ", partition id: " << partition_id << ", idx: " << idx;
 
         cc_handler_->Read(
             table_name,
