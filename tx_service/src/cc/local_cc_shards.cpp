@@ -4415,8 +4415,7 @@ void LocalCcShards::DataSyncForRangePartition(
                                                  data_sync_txm,
                                                  data_sync_task,
                                                  table_schema,
-                                                 flush_data_size),
-                worker_idx);
+                                                 flush_data_size));
 
             for (size_t i = 0; i < cc_shards_.size(); ++i)
             {
@@ -5342,8 +5341,7 @@ void LocalCcShards::DataSyncForHashPartition(
                                                  data_sync_txm,
                                                  data_sync_task,
                                                  catalog_rec.CopySchema(),
-                                                 vec_mem_usage),
-                worker_idx);
+                                                 vec_mem_usage));
 
             data_sync_vec = std::make_unique<std::vector<FlushRecord>>();
 
@@ -5395,8 +5393,7 @@ void LocalCcShards::DataSyncForHashPartition(
                                                      data_sync_txm,
                                                      data_sync_task,
                                                      catalog_rec.CopySchema(),
-                                                     vec_mem_usage),
-                    worker_idx);
+                                                     vec_mem_usage));
             }
             else
             {
@@ -5877,16 +5874,23 @@ void LocalCcShards::SplitFlushRange(
     txservice::CommitTx(split_txm);
 }
 
-void LocalCcShards::AddFlushTaskEntry(std::unique_ptr<FlushTaskEntry> &&entry,
-                                      size_t worker_idx)
+void LocalCcShards::AddFlushTaskEntry(std::unique_ptr<FlushTaskEntry> &&entry)
 {
-    assert(worker_idx < cur_flush_buffers_.size());
-    assert(worker_idx < pending_flush_work_.size());
     assert(cur_flush_buffers_.size() == data_sync_worker_ctx_.worker_num_);
     assert(pending_flush_work_.size() == data_sync_worker_ctx_.worker_num_);
 
-    auto &cur_flush_buffer = *cur_flush_buffers_[worker_idx];
-    auto &pending_flush_work = pending_flush_work_[worker_idx];
+    // Compute target buffer/queue based on partition type before adding to
+    // buffer
+    size_t target = 0;
+    if (entry->data_sync_task_ != nullptr)
+    {
+        const auto &data_sync_task = entry->data_sync_task_;
+        size_t core_number = cur_flush_buffers_.size();
+        int32_t id = data_sync_task->id_;
+        target = static_cast<size_t>(id) % core_number;
+    }
+
+    auto &cur_flush_buffer = *cur_flush_buffers_[target];
 
     cur_flush_buffer.AddFlushTaskEntry(std::move(entry));
 
@@ -5896,20 +5900,22 @@ void LocalCcShards::AddFlushTaskEntry(std::unique_ptr<FlushTaskEntry> &&entry,
     {
         std::unique_lock<std::mutex> worker_lk(flush_data_worker_ctx_.mux_);
 
+        auto &target_pending_flush_work = pending_flush_work_[target];
+
         // Try to merge with the last task if queue is not empty
-        if (!pending_flush_work.empty())
+        if (!target_pending_flush_work.empty())
         {
-            auto &last_task = pending_flush_work.back();
+            auto &last_task = target_pending_flush_work.back();
             if (last_task->MergeFrom(std::move(flush_data_task)))
             {
                 // Merge successful, task was merged into last_task
-                flush_data_worker_ctx_.cv_.notify_one();
+                flush_data_worker_ctx_.cv_.notify_all();
                 return;
             }
         }
 
         // Monitor queue size
-        size_t queue_size = pending_flush_work.size();
+        size_t queue_size = target_pending_flush_work.size();
         pending_flush_queue_size_.store(queue_size, std::memory_order_relaxed);
         uint64_t max_size =
             pending_flush_queue_max_size_.load(std::memory_order_relaxed);
@@ -5920,7 +5926,7 @@ void LocalCcShards::AddFlushTaskEntry(std::unique_ptr<FlushTaskEntry> &&entry,
         }
 
         // Could not merge, wait if queue is full
-        while (pending_flush_work.size() >= 2)
+        while (target_pending_flush_work.size() >= 2)
         {
             // Record block start
             flush_queue_block_count_.fetch_add(1, std::memory_order_relaxed);
@@ -5960,7 +5966,7 @@ void LocalCcShards::AddFlushTaskEntry(std::unique_ptr<FlushTaskEntry> &&entry,
 
             LOG(WARNING) << "Flush queue blocked for " << block_duration
                          << " us, "
-                         << "queue_size=" << pending_flush_work.size()
+                         << "queue_size=" << target_pending_flush_work.size()
                          << ", worker_num="
                          << flush_data_worker_ctx_.worker_num_;
 
@@ -5968,8 +5974,8 @@ void LocalCcShards::AddFlushTaskEntry(std::unique_ptr<FlushTaskEntry> &&entry,
         }
 
         // Add as new task
-        pending_flush_work.emplace_back(std::move(flush_data_task));
-        pending_flush_queue_size_.store(pending_flush_work.size(),
+        target_pending_flush_work.emplace_back(std::move(flush_data_task));
+        pending_flush_queue_size_.store(target_pending_flush_work.size(),
                                         std::memory_order_relaxed);
         flush_data_worker_ctx_.cv_.notify_all();
     }
@@ -5997,7 +6003,7 @@ void LocalCcShards::FlushCurrentFlushBuffer()
                 if (last_task->MergeFrom(std::move(flush_data_task)))
                 {
                     // Merge successful, task was merged into last_task
-                    flush_data_worker_ctx_.cv_.notify_one();
+                    flush_data_worker_ctx_.cv_.notify_all();
                     continue;
                 }
             }
@@ -6025,7 +6031,7 @@ void LocalCcShards::FlushCurrentFlushBuffer()
             pending_flush_work.emplace_back(std::move(flush_data_task));
             pending_flush_queue_size_.store(pending_flush_work.size(),
                                             std::memory_order_relaxed);
-            flush_data_worker_ctx_.cv_.notify_one();
+            flush_data_worker_ctx_.cv_.notify_all();
         }
     }
 }

@@ -2462,8 +2462,7 @@ private:
      * task is full, append it to pending_flush_work_ and create a new flush
      * task.
      */
-    void AddFlushTaskEntry(std::unique_ptr<FlushTaskEntry> &&entry,
-                           size_t worker_idx);
+    void AddFlushTaskEntry(std::unique_ptr<FlushTaskEntry> &&entry);
 
     WorkerThreadContext flush_data_worker_ctx_;
 
