@@ -82,7 +82,7 @@ DEFINE_uint32(eloq_store_max_inflight_write,
               64 << 10,
               "EloqStore max inflight write.");
 DEFINE_uint32(eloq_store_max_write_batch_pages,
-              256,
+              32,
               "EloqStore max write batch pages.");
 DEFINE_uint32(eloq_store_buf_ring_size, 1 << 12, "EloqStore buf ring size.");
 DEFINE_uint32(eloq_store_coroutine_stack_size,
