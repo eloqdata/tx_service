@@ -23,6 +23,7 @@
 
 #include <brpc/closure_guard.h>
 
+#include <cstring>
 #include <string>
 #include <utility>
 #include <vector>
@@ -61,6 +62,19 @@ public:
     virtual uint64_t GetRecordTtl(size_t index) const = 0;
 
     virtual WriteOpType KeyOpType(size_t index) const = 0;
+
+    /// Fill contiguous buffers for indices [start_idx, start_idx + count).
+    /// Enables vectorized scalar fill in callers when implementation uses
+    /// contiguous storage (e.g. memcpy for WriteRecordsLocalRequest).
+    virtual void GetRecordTsBatch(size_t start_idx,
+                                  size_t count,
+                                  uint64_t *out) const = 0;
+    virtual void GetRecordTtlBatch(size_t start_idx,
+                                   size_t count,
+                                   uint64_t *out) const = 0;
+    virtual void KeyOpTypeBatch(size_t start_idx,
+                                size_t count,
+                                WriteOpType *out) const = 0;
 
     virtual bool SkipWal() const = 0;
 
@@ -154,6 +168,31 @@ public:
         {
             assert(req_->items(index).op_type() == remote::WriteOpType::Put);
             return WriteOpType::PUT;
+        }
+    }
+
+    void GetRecordTsBatch(size_t start_idx, size_t count, uint64_t *out) const override
+    {
+        for (size_t i = 0; i < count; ++i)
+        {
+            out[i] = req_->items(static_cast<int>(start_idx + i)).ts();
+        }
+    }
+
+    void GetRecordTtlBatch(size_t start_idx, size_t count, uint64_t *out) const override
+    {
+        for (size_t i = 0; i < count; ++i)
+        {
+            out[i] = req_->items(static_cast<int>(start_idx + i)).ttl();
+        }
+    }
+
+    void KeyOpTypeBatch(size_t start_idx, size_t count, WriteOpType *out) const override
+    {
+        for (size_t i = 0; i < count; ++i)
+        {
+            out[i] = static_cast<WriteOpType>(
+                req_->items(static_cast<int>(start_idx + i)).op_type());
         }
     }
 
@@ -293,6 +332,31 @@ public:
     WriteOpType KeyOpType(size_t index) const override
     {
         return op_types_->at(index);
+    }
+
+    void GetRecordTsBatch(size_t start_idx, size_t count, uint64_t *out) const override
+    {
+        if (count != 0u)
+        {
+            std::memcpy(out, ts_->data() + start_idx, count * sizeof(uint64_t));
+        }
+    }
+
+    void GetRecordTtlBatch(size_t start_idx, size_t count, uint64_t *out) const override
+    {
+        if (count != 0u)
+        {
+            std::memcpy(out, ttl_->data() + start_idx, count * sizeof(uint64_t));
+        }
+    }
+
+    void KeyOpTypeBatch(size_t start_idx, size_t count, WriteOpType *out) const override
+    {
+        if (count != 0u)
+        {
+            std::memcpy(out, op_types_->data() + start_idx,
+                       count * sizeof(WriteOpType));
+        }
     }
 
     bool SkipWal() const override

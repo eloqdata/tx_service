@@ -25,6 +25,7 @@
 #include <bthread/mutex.h>
 
 #include <algorithm>
+#include <cstdint>
 #include <filesystem>
 #include <memory>
 
@@ -244,7 +245,6 @@ void EloqStoreDataStore::BatchWriteRecords(WriteRecordsRequest *write_req)
         val_offset += parts_per_record;
 
         entry.timestamp_ = write_req->GetRecordTs(i);
-        // Branchless: WriteOpType::PUT(1)->Upsert(0), DELETE(0)->Delete(1)
         entry.op_ = static_cast<::eloqstore::WriteOp>(
             1 - static_cast<uint8_t>(write_req->KeyOpType(i)));
         const uint64_t ttl = write_req->GetRecordTtl(i);
