@@ -60,6 +60,12 @@ inline void BuildKey(const WriteRecordsRequest &write_req,
                      uint16_t key_parts,
                      std::string &key_out)
 {
+    size_t total_size = 0;
+    for (uint16_t i = 0; i < key_parts; ++i)
+    {
+        total_size += write_req.GetKeyPart(key_first_idx + i).size();
+    }
+    key_out.reserve(key_out.size() + total_size);
     size_t part_idx = key_first_idx;
     for (uint16_t i = 0; i < key_parts; ++i, ++part_idx)
     {
@@ -73,6 +79,12 @@ inline void BuildValue(const WriteRecordsRequest &write_req,
                        uint16_t rec_parts,
                        std::string &rec_out)
 {
+    size_t total_size = 0;
+    for (uint16_t i = 0; i < rec_parts; ++i)
+    {
+        total_size += write_req.GetRecordPart(rec_first_idx + i).size();
+    }
+    rec_out.reserve(rec_out.size() + total_size);
     size_t part_idx = rec_first_idx;
     for (uint16_t i = 0; i < rec_parts; ++i, ++part_idx)
     {
@@ -215,27 +227,28 @@ void EloqStoreDataStore::BatchWriteRecords(WriteRecordsRequest *write_req)
 
     ::eloqstore::BatchWriteRequest &kv_write_req = write_op->EloqStoreRequest();
 
-    std::vector<::eloqstore::WriteDataEntry> entries;
-    size_t rec_cnt = write_req->RecordsCount();
-    entries.reserve(rec_cnt);
+    const size_t rec_cnt = write_req->RecordsCount();
     const uint16_t parts_per_key = write_req->PartsCountPerKey();
     const uint16_t parts_per_record = write_req->PartsCountPerRecord();
-    size_t first_idx = 0;
+
+    std::vector<::eloqstore::WriteDataEntry> entries(rec_cnt);
+    size_t key_offset = 0;
+    size_t val_offset = 0;
 
     for (size_t i = 0; i < rec_cnt; ++i)
     {
-        ::eloqstore::WriteDataEntry entry;
-        first_idx = i * parts_per_key;
-        BuildKey(*write_req, first_idx, parts_per_key, entry.key_);
-        first_idx = i * parts_per_record;
-        BuildValue(*write_req, first_idx, parts_per_record, entry.val_);
+        ::eloqstore::WriteDataEntry &entry = entries[i];
+        BuildKey(*write_req, key_offset, parts_per_key, entry.key_);
+        BuildValue(*write_req, val_offset, parts_per_record, entry.val_);
+        key_offset += parts_per_key;
+        val_offset += parts_per_record;
+
         entry.timestamp_ = write_req->GetRecordTs(i);
-        entry.op_ = (write_req->KeyOpType(i) == WriteOpType::PUT
-                         ? ::eloqstore::WriteOp::Upsert
-                         : ::eloqstore::WriteOp::Delete);
-        uint64_t ttl = write_req->GetRecordTtl(i);
-        entry.expire_ts_ = ttl == UINT64_MAX ? 0 : ttl;
-        entries.emplace_back(std::move(entry));
+        // Branchless: WriteOpType::PUT(1)->Upsert(0), DELETE(0)->Delete(1)
+        entry.op_ = static_cast<::eloqstore::WriteOp>(
+            1 - static_cast<uint8_t>(write_req->KeyOpType(i)));
+        const uint64_t ttl = write_req->GetRecordTtl(i);
+        entry.expire_ts_ = (ttl == UINT64_MAX) ? 0u : ttl;
     }
 
     if (!std::ranges::is_sorted(
