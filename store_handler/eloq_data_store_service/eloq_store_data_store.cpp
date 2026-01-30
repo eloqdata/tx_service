@@ -253,14 +253,6 @@ void EloqStoreDataStore::BatchWriteRecords(WriteRecordsRequest *write_req)
 
     uint64_t user_data = reinterpret_cast<uint64_t>(write_op);
 
-    if (write_req->GetTableName() == "eloqkv_data_table_0")
-    {
-        remote::CommonResult result;
-        result.set_error_code(::EloqDS::remote::DataStoreError::NO_ERROR);
-        write_req->SetFinish(result);
-        return;
-    }
-
     if (!eloq_store_service_->ExecAsyn(&kv_write_req, user_data, OnBatchWrite))
     {
         LOG(ERROR) << "Send write request to EloqStore failed for table: "
