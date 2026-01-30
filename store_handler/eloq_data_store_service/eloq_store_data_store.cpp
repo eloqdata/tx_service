@@ -244,13 +244,13 @@ void EloqStoreDataStore::BatchWriteRecords(WriteRecordsRequest *write_req)
         val_offset += parts_per_record;
 
         entry.timestamp_ = write_req->GetRecordTs(i);
-        // Branchless: WriteOpType::PUT(1)->Upsert(0), DELETE(0)->Delete(1)
         entry.op_ = static_cast<::eloqstore::WriteOp>(
             1 - static_cast<uint8_t>(write_req->KeyOpType(i)));
         const uint64_t ttl = write_req->GetRecordTtl(i);
         entry.expire_ts_ = (ttl == UINT64_MAX) ? 0u : ttl;
     }
 
+    /*
     if (!std::ranges::is_sorted(
             entries, std::ranges::less{}, &::eloqstore::WriteDataEntry::key_))
     {
@@ -261,6 +261,7 @@ void EloqStoreDataStore::BatchWriteRecords(WriteRecordsRequest *write_req)
         std::ranges::sort(
             entries, std::ranges::less{}, &::eloqstore::WriteDataEntry::key_);
     }
+    */
 
     kv_write_req.SetArgs(eloq_store_table_id, std::move(entries));
 
