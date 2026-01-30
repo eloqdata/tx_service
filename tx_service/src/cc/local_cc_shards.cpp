@@ -5998,7 +5998,8 @@ void LocalCcShards::FlushData(std::unique_lock<std::mutex> &flush_worker_lk,
                     for (auto &[core_idx, cce_entries] : cce_entries_map)
                     {
                         updated_ckpt_ts_core_ids.insert(core_idx);
-                        EnqueueToCcShard(core_idx, &update_cce_req);
+                        EnqueueLowPriorityCcRequestToShard(core_idx,
+                                                           &update_cce_req);
                     }
                     update_cce_req.Wait();
                 }
@@ -6017,7 +6018,7 @@ void LocalCcShards::FlushData(std::unique_lock<std::mutex> &flush_worker_lk,
         updated_ckpt_ts_core_ids.size());
     for (uint16_t core_idx : updated_ckpt_ts_core_ids)
     {
-        EnqueueToCcShard(core_idx, &reset_cc);
+        EnqueueLowPriorityCcRequestToShard(core_idx, &reset_cc);
     }
     reset_cc.Wait();
 
