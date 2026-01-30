@@ -132,7 +132,7 @@ struct PartitionFlushState : public Poolable
 {
     bool is_range_partitioned{false};
     int32_t partition_id;
-    std::queue<PartitionBatchRequest> pending_batches;
+    std::queue<PartitionBatchRequest *> pending_batches;
     bool failed = false;
     remote::CommonResult result;
     mutable bthread::Mutex mux;
@@ -142,26 +142,9 @@ struct PartitionFlushState : public Poolable
         result.Clear();
     }
 
-    void Reset(int32_t pid, bool is_range_partitioned)
-    {
-        partition_id = pid;
-        this->is_range_partitioned = is_range_partitioned;
-        while (!pending_batches.empty())
-        {
-            pending_batches.pop();
-        }
-        failed = false;
-        result.Clear();
-    }
+    void Reset(int32_t pid, bool is_range_partitioned);
 
-    void Clear() override
-    {
-        partition_id = 0;
-        while (!pending_batches.empty())
-        {
-            pending_batches.pop();
-        }
-    }
+    void Clear() override;
     bool IsFailed() const
     {
         std::unique_lock<bthread::Mutex> lk(mux);
@@ -176,12 +159,12 @@ struct PartitionFlushState : public Poolable
         result.set_error_msg(error.error_msg());
     }
 
-    bool GetNextBatch(PartitionBatchRequest &batch);
+    bool GetNextBatch(PartitionBatchRequest *&batch_ptr);
 
-    void AddBatch(PartitionBatchRequest &&batch)
+    void AddBatch(PartitionBatchRequest *batch)
     {
         std::unique_lock<bthread::Mutex> lk(mux);
-        pending_batches.push(std::move(batch));
+        pending_batches.push(batch);
     }
 };
 
@@ -310,7 +293,7 @@ struct SyncConcurrentRequest : public Poolable
 /**
  * @brief Represents a single batch request for a partition
  */
-struct PartitionBatchRequest
+struct PartitionBatchRequest : public Poolable
 {
     std::vector<std::string_view> key_parts;
     std::vector<std::string_view> record_parts;
@@ -342,20 +325,14 @@ struct PartitionBatchRequest
     {
     }
 
-    void Clear()
+    void Clear() override
     {
         key_parts.clear();
-        key_parts.shrink_to_fit();
         record_parts.clear();
-        record_parts.shrink_to_fit();
         records_ts.clear();
-        records_ts.shrink_to_fit();
         records_ttl.clear();
-        records_ttl.shrink_to_fit();
         record_tmp_mem_area.clear();
-        record_tmp_mem_area.shrink_to_fit();
         op_types.clear();
-        op_types.shrink_to_fit();
         parts_cnt_per_key = 1;
         parts_cnt_per_record = 1;
     }
@@ -383,10 +360,13 @@ struct PartitionCallbackData : public Poolable
     PartitionFlushState *partition_state;
     SyncPutAllData *global_coordinator;
     std::string_view table_name;
-    PartitionBatchRequest inflight_batch;
+    PartitionBatchRequest *inflight_batch;
 
     PartitionCallbackData()
-        : partition_state(nullptr), global_coordinator(nullptr), table_name("")
+        : partition_state(nullptr),
+          global_coordinator(nullptr),
+          table_name(""),
+          inflight_batch(nullptr)
     {
     }
 
@@ -397,10 +377,16 @@ struct PartitionCallbackData : public Poolable
         partition_state = ps;
         global_coordinator = gc;
         table_name = tn;
+        inflight_batch = nullptr;
     }
 
     void Clear() override
     {
+        if (inflight_batch != nullptr)
+        {
+            inflight_batch->Free();
+            inflight_batch = nullptr;
+        }
         partition_state = nullptr;
         global_coordinator = nullptr;
         table_name = "";

@@ -531,27 +531,32 @@ void PartitionBatchCallback(void *data,
         return;
     }
 
-    // Try to get the next batch for this partition
-    PartitionBatchRequest &next_batch = callback_data->inflight_batch;
-    if (partition_state->GetNextBatch(next_batch))
+    // Free the batch we just completed, then get the next batch
+    if (callback_data->inflight_batch != nullptr)
+    {
+        callback_data->inflight_batch->Free();
+        callback_data->inflight_batch = nullptr;
+    }
+    if (partition_state->GetNextBatch(callback_data->inflight_batch))
     {
         // Send the next batch
+        PartitionBatchRequest *next_batch = callback_data->inflight_batch;
         BatchWriteRecordsClosure *batch_closure =
             static_cast<BatchWriteRecordsClosure *>(closure);
         uint32_t data_shard_id = batch_closure->ShardId();
         client.BatchWriteRecords(callback_data->table_name,
                                  partition_state->partition_id,
                                  data_shard_id,
-                                 std::move(next_batch.key_parts),
-                                 std::move(next_batch.record_parts),
-                                 std::move(next_batch.records_ts),
-                                 std::move(next_batch.records_ttl),
-                                 std::move(next_batch.op_types),
+                                 std::move(next_batch->key_parts),
+                                 std::move(next_batch->record_parts),
+                                 std::move(next_batch->records_ts),
+                                 std::move(next_batch->records_ttl),
+                                 std::move(next_batch->op_types),
                                  true,  // skip_wal
                                  callback_data,
                                  PartitionBatchCallback,
-                                 next_batch.parts_cnt_per_key,
-                                 next_batch.parts_cnt_per_record);
+                                 next_batch->parts_cnt_per_key,
+                                 next_batch->parts_cnt_per_record);
     }
     else
     {
@@ -1684,14 +1689,39 @@ void CreateSnapshotForBackupCallback(void *data,
     backup_callback_data->Notify();
 }
 
-bool PartitionFlushState::GetNextBatch(PartitionBatchRequest &batch)
+void PartitionFlushState::Reset(int32_t pid, bool is_range_partitioned)
+{
+    partition_id = pid;
+    this->is_range_partitioned = is_range_partitioned;
+    while (!pending_batches.empty())
+    {
+        PartitionBatchRequest *ptr = pending_batches.front();
+        pending_batches.pop();
+        ptr->Free();
+    }
+    failed = false;
+    result.Clear();
+}
+
+void PartitionFlushState::Clear()
+{
+    partition_id = 0;
+    while (!pending_batches.empty())
+    {
+        PartitionBatchRequest *ptr = pending_batches.front();
+        pending_batches.pop();
+        ptr->Free();
+    }
+}
+
+bool PartitionFlushState::GetNextBatch(PartitionBatchRequest *&batch_ptr)
 {
     std::unique_lock<bthread::Mutex> lk(mux);
     if (pending_batches.empty())
     {
         return false;
     }
-    batch = std::move(pending_batches.front());
+    batch_ptr = pending_batches.front();
     pending_batches.pop();
     return true;
 }
