@@ -358,3 +358,4 @@ compile_commands.json
 
 cmake-build-debug/
 .cache
+_codeql_detected_source_root
