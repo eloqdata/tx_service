@@ -2463,16 +2463,21 @@ private:
 
     WorkerThreadContext flush_data_worker_ctx_;
 
-    // The flush task that has not reached the max pending flush size.
-    // New flush task entry will be added to this buffer. This task will
-    // be appended to pending_flush_work_ when it reaches the max pending flush
-    // size, which will then be processed by flush data worker.
-    FlushDataTask cur_flush_buffer_;
-    // Flush task queue for flush data worker to process.
-    std::deque<std::unique_ptr<FlushDataTask>> pending_flush_work_;
+    // Per-worker flush buffers. Each DataSyncWorker has its own buffer.
+    // New flush task entry will be added to the corresponding buffer. This task
+    // will be appended to pending_flush_work_[worker_idx] when it reaches the
+    // max pending flush size, which will then be processed by the corresponding
+    // flush data worker. Store as pointers because FlushDataTask contains a
+    // bthread::Mutex and is non-movable/non-copyable, which cannot be stored
+    // directly in a vector that may reallocate.
+    std::vector<std::unique_ptr<FlushDataTask>> cur_flush_buffers_;
+    // Per-worker flush task queues. Each FlushDataWorker processes its
+    // corresponding queue.
+    std::vector<std::deque<std::unique_ptr<FlushDataTask>>> pending_flush_work_;
 
-    void FlushDataWorker();
-    void FlushData(std::unique_lock<std::mutex> &flush_worker_lk);
+    void FlushDataWorker(size_t worker_idx);
+    void FlushData(std::unique_lock<std::mutex> &flush_worker_lk,
+                   size_t worker_idx);
 
     // Memory controller for data sync.
     DataSyncMemoryController data_sync_mem_controller_;
