@@ -523,27 +523,27 @@ void DeadLockCheck::Run()
         });
 
         std::unique_lock<std::mutex> lk(mutex_);
-        con_var_.wait_for(lk,
-                          1s,
-                          [this]()
-                          {
-                              if (stop_)
-                              {
-                                  return true;
-                              }
+        con_var_.wait_for(
+            lk,
+            1s,
+            [this]()
+            {
+                if (stop_)
+                {
+                    return true;
+                }
 
-                              if (requested_check_)
-                              {
-                                  uint64_t ival = LocalCcShards::ClockTs() -
-                                                  last_check_time_;
-                                  if (ival >= time_interval_)
-                                  {
-                                      return true;
-                                  }
-                              }
+                if (requested_check_.load(std::memory_order_acquire))
+                {
+                    uint64_t ival = LocalCcShards::ClockTs() - last_check_time_;
+                    if (ival >= time_interval_)
+                    {
+                        return true;
+                    }
+                }
 
-                              return false;
-                          });
+                return false;
+            });
 
         if (stop_)
         {
@@ -556,7 +556,7 @@ void DeadLockCheck::Run()
             continue;
         }
 
-        if (!requested_check_)
+        if (!requested_check_.load(std::memory_order_acquire))
         {
             continue;
         }
@@ -566,7 +566,7 @@ void DeadLockCheck::Run()
         }
 
         // Reset the check flag brefore gather lock dependancy
-        requested_check_ = false;
+        requested_check_.store(false, std::memory_order_release);
         lk.unlock();
         GatherLockDependancy();
     }
