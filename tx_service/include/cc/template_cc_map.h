@@ -10442,7 +10442,7 @@ protected:
             // fetch record fails. Remove the pin on the cce.
             cce->GetKeyGapLockAndExtraData()->ReleasePin();
             cce->RecycleKeyLock(*shard_);
-            if (cce->IsFree())
+            if (cce->PayloadStatus() == RecordStatus::Unknown && cce->IsFree())
             {
                 CleanEntry(cce, ccp);
             }
