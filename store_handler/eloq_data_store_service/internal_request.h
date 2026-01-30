@@ -76,6 +76,22 @@ public:
                                 size_t count,
                                 WriteOpType *out) const = 0;
 
+    /// Contiguous array access: returns pointer to [0, RecordsCount()) or
+    /// nullptr. When non-null, callers can read directly for vectorized scalar
+    /// fill without copy.
+    virtual const uint64_t *GetRecordTsPtr() const
+    {
+        return nullptr;
+    }
+    virtual const uint64_t *GetRecordTtlPtr() const
+    {
+        return nullptr;
+    }
+    virtual const WriteOpType *KeyOpTypesPtr() const
+    {
+        return nullptr;
+    }
+
     virtual bool SkipWal() const = 0;
 
     virtual void SetFinish(const remote::CommonResult &result) = 0;
@@ -171,7 +187,9 @@ public:
         }
     }
 
-    void GetRecordTsBatch(size_t start_idx, size_t count, uint64_t *out) const override
+    void GetRecordTsBatch(size_t start_idx,
+                          size_t count,
+                          uint64_t *out) const override
     {
         for (size_t i = 0; i < count; ++i)
         {
@@ -179,7 +197,9 @@ public:
         }
     }
 
-    void GetRecordTtlBatch(size_t start_idx, size_t count, uint64_t *out) const override
+    void GetRecordTtlBatch(size_t start_idx,
+                           size_t count,
+                           uint64_t *out) const override
     {
         for (size_t i = 0; i < count; ++i)
         {
@@ -187,7 +207,9 @@ public:
         }
     }
 
-    void KeyOpTypeBatch(size_t start_idx, size_t count, WriteOpType *out) const override
+    void KeyOpTypeBatch(size_t start_idx,
+                        size_t count,
+                        WriteOpType *out) const override
     {
         for (size_t i = 0; i < count; ++i)
         {
@@ -334,7 +356,9 @@ public:
         return op_types_->at(index);
     }
 
-    void GetRecordTsBatch(size_t start_idx, size_t count, uint64_t *out) const override
+    void GetRecordTsBatch(size_t start_idx,
+                          size_t count,
+                          uint64_t *out) const override
     {
         if (count != 0u)
         {
@@ -342,21 +366,40 @@ public:
         }
     }
 
-    void GetRecordTtlBatch(size_t start_idx, size_t count, uint64_t *out) const override
+    void GetRecordTtlBatch(size_t start_idx,
+                           size_t count,
+                           uint64_t *out) const override
     {
         if (count != 0u)
         {
-            std::memcpy(out, ttl_->data() + start_idx, count * sizeof(uint64_t));
+            std::memcpy(
+                out, ttl_->data() + start_idx, count * sizeof(uint64_t));
         }
     }
 
-    void KeyOpTypeBatch(size_t start_idx, size_t count, WriteOpType *out) const override
+    void KeyOpTypeBatch(size_t start_idx,
+                        size_t count,
+                        WriteOpType *out) const override
     {
         if (count != 0u)
         {
-            std::memcpy(out, op_types_->data() + start_idx,
-                       count * sizeof(WriteOpType));
+            std::memcpy(out,
+                        op_types_->data() + start_idx,
+                        count * sizeof(WriteOpType));
         }
+    }
+
+    const uint64_t *GetRecordTsPtr() const override
+    {
+        return ts_->data();
+    }
+    const uint64_t *GetRecordTtlPtr() const override
+    {
+        return ttl_->data();
+    }
+    const WriteOpType *KeyOpTypesPtr() const override
+    {
+        return op_types_->data();
     }
 
     bool SkipWal() const override

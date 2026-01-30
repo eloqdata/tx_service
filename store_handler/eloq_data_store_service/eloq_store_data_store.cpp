@@ -232,6 +232,38 @@ void EloqStoreDataStore::BatchWriteRecords(WriteRecordsRequest *write_req)
     const uint16_t parts_per_key = write_req->PartsCountPerKey();
     const uint16_t parts_per_record = write_req->PartsCountPerRecord();
 
+    const uint64_t *ts_ptr = write_req->GetRecordTsPtr();
+    std::vector<uint64_t> expire_ts(rec_cnt);
+    std::vector<uint64_t> timestamps;
+    std::vector<WriteOpType> op_types;
+
+    if (ts_ptr != nullptr)
+    {
+        // Contiguous path: read ttl/op directly; only buffer expire_ts
+        // transform.
+        const uint64_t *ttl_ptr = write_req->GetRecordTtlPtr();
+        for (size_t i = 0; i < rec_cnt; ++i)
+        {
+            expire_ts[i] = (ttl_ptr[i] == UINT64_MAX) ? 0u : ttl_ptr[i];
+        }
+    }
+    else
+    {
+        timestamps.resize(rec_cnt);
+        op_types.resize(rec_cnt);
+        write_req->GetRecordTsBatch(0, rec_cnt, timestamps.data());
+        write_req->GetRecordTtlBatch(0, rec_cnt, expire_ts.data());
+        for (size_t i = 0; i < rec_cnt; ++i)
+        {
+            expire_ts[i] = (expire_ts[i] == UINT64_MAX) ? 0u : expire_ts[i];
+        }
+        write_req->KeyOpTypeBatch(0, rec_cnt, op_types.data());
+    }
+
+    const uint64_t *ts_src = (ts_ptr != nullptr) ? ts_ptr : timestamps.data();
+    const WriteOpType *op_src =
+        (ts_ptr != nullptr) ? write_req->KeyOpTypesPtr() : op_types.data();
+
     std::vector<::eloqstore::WriteDataEntry> entries(rec_cnt);
     size_t key_offset = 0;
     size_t val_offset = 0;
@@ -243,12 +275,17 @@ void EloqStoreDataStore::BatchWriteRecords(WriteRecordsRequest *write_req)
         BuildValue(*write_req, val_offset, parts_per_record, entry.val_);
         key_offset += parts_per_key;
         val_offset += parts_per_record;
+    }
 
-        entry.timestamp_ = write_req->GetRecordTs(i);
+    // Scalar-fill loop: contiguous reads (ts_src, expire_ts, op_src), strided
+    // writes. Enables auto-vectorization (e.g. vector loads + scatter stores).
+    for (size_t i = 0; i < rec_cnt; ++i)
+    {
+        ::eloqstore::WriteDataEntry &entry = entries[i];
+        entry.timestamp_ = ts_src[i];
+        entry.expire_ts_ = expire_ts[i];
         entry.op_ = static_cast<::eloqstore::WriteOp>(
-            1 - static_cast<uint8_t>(write_req->KeyOpType(i)));
-        const uint64_t ttl = write_req->GetRecordTtl(i);
-        entry.expire_ts_ = (ttl == UINT64_MAX) ? 0u : ttl;
+            1 - static_cast<uint8_t>(op_src[i]));
     }
 
     if (!std::ranges::is_sorted(
