@@ -212,8 +212,6 @@ int main(int argc, char *argv[])
 
     struct rlimit ulimit
     {
-        .rlim_cur = 0,
-        .rlim_max = 0,
     };
     ulimit.rlim_cur = maxclients;
     ulimit.rlim_max = maxclients;
