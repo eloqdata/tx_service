@@ -55,6 +55,7 @@ thread_local ObjectPool<EloqStoreOperationData<::eloqstore::FloorRequest>>
 thread_local ObjectPool<EloqStoreOperationData<::eloqstore::DropTableRequest>>
     eloq_store_drop_table_op_pool_;
 thread_local ObjectPool<ScanDeleteOperationData> eloq_store_scan_del_op_pool_;
+thread_local std::vector<::eloqstore::WriteDataEntry> g_batch_write_entries;
 
 inline void BuildKey(const WriteRecordsRequest &write_req,
                      const std::size_t key_first_idx,
@@ -233,76 +234,89 @@ void EloqStoreDataStore::BatchWriteRecords(WriteRecordsRequest *write_req)
     const uint16_t parts_per_record = write_req->PartsCountPerRecord();
 
     const uint64_t *ts_ptr = write_req->GetRecordTsPtr();
-    std::vector<uint64_t> expire_ts(rec_cnt);
-    std::vector<uint64_t> timestamps;
-    std::vector<WriteOpType> op_types;
+    const bool contiguous = (ts_ptr != nullptr);
 
-    if (ts_ptr != nullptr)
-    {
-        // Contiguous path: read ttl/op directly; only buffer expire_ts
-        // transform.
-        const uint64_t *ttl_ptr = write_req->GetRecordTtlPtr();
-        for (size_t i = 0; i < rec_cnt; ++i)
-        {
-            expire_ts[i] = (ttl_ptr[i] == UINT64_MAX) ? 0u : ttl_ptr[i];
-        }
-    }
-    else
-    {
-        timestamps.resize(rec_cnt);
-        op_types.resize(rec_cnt);
-        write_req->GetRecordTsBatch(0, rec_cnt, timestamps.data());
-        write_req->GetRecordTtlBatch(0, rec_cnt, expire_ts.data());
-        for (size_t i = 0; i < rec_cnt; ++i)
-        {
-            expire_ts[i] = (expire_ts[i] == UINT64_MAX) ? 0u : expire_ts[i];
-        }
-        write_req->KeyOpTypeBatch(0, rec_cnt, op_types.data());
-    }
-
-    const uint64_t *ts_src = (ts_ptr != nullptr) ? ts_ptr : timestamps.data();
-    const WriteOpType *op_src =
-        (ts_ptr != nullptr) ? write_req->KeyOpTypesPtr() : op_types.data();
-
-    std::vector<::eloqstore::WriteDataEntry> entries(rec_cnt);
+    g_batch_write_entries.resize(rec_cnt);
     size_t key_offset = 0;
     size_t val_offset = 0;
 
     for (size_t i = 0; i < rec_cnt; ++i)
     {
-        ::eloqstore::WriteDataEntry &entry = entries[i];
+        ::eloqstore::WriteDataEntry &entry = g_batch_write_entries[i];
         BuildKey(*write_req, key_offset, parts_per_key, entry.key_);
         BuildValue(*write_req, val_offset, parts_per_record, entry.val_);
         key_offset += parts_per_key;
         val_offset += parts_per_record;
     }
 
-    // Scalar-fill loop: contiguous reads (ts_src, expire_ts, op_src), strided
-    // writes. Enables auto-vectorization (e.g. vector loads + scatter stores).
-    for (size_t i = 0; i < rec_cnt; ++i)
+    if (contiguous)
     {
-        ::eloqstore::WriteDataEntry &entry = entries[i];
-        entry.timestamp_ = ts_src[i];
-        entry.expire_ts_ = expire_ts[i];
-        entry.op_ = static_cast<::eloqstore::WriteOp>(
-            1 - static_cast<uint8_t>(op_src[i]));
+        // Contiguous path: one pointer fetch each, no per-record arrays; fill
+        // ts/expire/op in one loop without extra buffers.
+        const uint64_t *ttl_ptr = write_req->GetRecordTtlPtr();
+        const WriteOpType *op_ptr = write_req->KeyOpTypesPtr();
+        for (size_t i = 0; i < rec_cnt; ++i)
+        {
+            ::eloqstore::WriteDataEntry &entry = g_batch_write_entries[i];
+            entry.timestamp_ = ts_ptr[i];
+            entry.expire_ts_ = (ttl_ptr[i] == UINT64_MAX) ? 0u : ttl_ptr[i];
+            entry.op_ = static_cast<::eloqstore::WriteOp>(
+                1 - static_cast<uint8_t>(op_ptr[i]));
+        }
+    }
+    else
+    {
+        // Non-contiguous path: chunked batch calls to avoid large arrays while
+        // keeping virtual calls to 3 per chunk.
+        constexpr size_t kTsOpChunk = 4096;
+        std::vector<uint64_t> ts_buf(std::min(rec_cnt, kTsOpChunk));
+        std::vector<uint64_t> ttl_buf(ts_buf.size());
+        std::vector<WriteOpType> op_buf(ts_buf.size());
+        for (size_t start = 0; start < rec_cnt; start += kTsOpChunk)
+        {
+            const size_t len =
+                std::min(kTsOpChunk, static_cast<size_t>(rec_cnt - start));
+            if (ts_buf.size() < len)
+            {
+                ts_buf.resize(len);
+                ttl_buf.resize(len);
+                op_buf.resize(len);
+            }
+            write_req->GetRecordTsBatch(start, len, ts_buf.data());
+            write_req->GetRecordTtlBatch(start, len, ttl_buf.data());
+            write_req->KeyOpTypeBatch(start, len, op_buf.data());
+            for (size_t i = 0; i < len; ++i)
+            {
+                ::eloqstore::WriteDataEntry &entry =
+                    g_batch_write_entries[start + i];
+                entry.timestamp_ = ts_buf[i];
+                entry.expire_ts_ = (ttl_buf[i] == UINT64_MAX) ? 0u : ttl_buf[i];
+                entry.op_ = static_cast<::eloqstore::WriteOp>(
+                    1 - static_cast<uint8_t>(op_buf[i]));
+            }
+        }
     }
 
+    /*
     if (!std::ranges::is_sorted(
-            entries, std::ranges::less{}, &::eloqstore::WriteDataEntry::key_))
+            g_batch_write_entries, std::ranges::less{},
+            &::eloqstore::WriteDataEntry::key_))
     {
         DLOG(INFO) << "Sort this batch records in non-descending order before "
                       "send to EloqStore for table: "
                    << eloq_store_table_id;
         // Sort the batch keys
         std::ranges::sort(
-            entries, std::ranges::less{}, &::eloqstore::WriteDataEntry::key_);
+            g_batch_write_entries, std::ranges::less{},
+            &::eloqstore::WriteDataEntry::key_);
     }
+    */
 
-    kv_write_req.SetArgs(eloq_store_table_id, std::move(entries));
+    kv_write_req.SetArgs(eloq_store_table_id, std::move(g_batch_write_entries));
 
     uint64_t user_data = reinterpret_cast<uint64_t>(write_op);
 
+    /*PutA
     if (!eloq_store_service_->ExecAsyn(&kv_write_req, user_data, OnBatchWrite))
     {
         LOG(ERROR) << "Send write request to EloqStore failed for table: "
@@ -313,6 +327,7 @@ void EloqStoreDataStore::BatchWriteRecords(WriteRecordsRequest *write_req)
         write_req->SetFinish(result);
         return;
     }
+    */
 
     op_guard.Release();
 }
