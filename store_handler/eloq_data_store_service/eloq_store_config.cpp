@@ -421,9 +421,14 @@ EloqStoreConfig::EloqStoreConfig(const INIReader &config_reader,
     {
         root_meta_cache_size_str = FLAGS_eloq_store_root_meta_cache_size;
     }
-    eloqstore_configs_.root_meta_cache_size =
-        parse_size(root_meta_cache_size_str);
-    node_memory_mb -= eloqstore_configs_.root_meta_cache_size / (1024 * 1024);
+    uint64_t root_meta_cache_size = parse_size(root_meta_cache_size_str);
+    if (root_meta_cache_size / (1024 * 1024) > node_memory_mb)
+    {
+        LOG(FATAL) << "root meta cache size (" << root_meta_cache_size
+                   << ") exceeds node memory mb";
+    }
+    node_memory_mb -= root_meta_cache_size / (1024 * 1024);
+    eloqstore_configs_.root_meta_cache_size = root_meta_cache_size;
     eloqstore_configs_.manifest_limit =
         !CheckCommandLineFlagIsDefault("eloq_store_manifest_limit")
             ? FLAGS_eloq_store_manifest_limit
