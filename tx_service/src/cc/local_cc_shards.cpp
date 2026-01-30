@@ -4528,7 +4528,6 @@ void LocalCcShards::PostProcessHashPartitionDataSyncTask(
                 CommitTx(data_sync_txm);
             }
 
-            LOG(INFO) << "PopPendingTask, worker idx = " << task->id_;
             PopPendingTask(task->node_group_id_,
                            task->node_group_term_,
                            task->table_name_,
@@ -4600,7 +4599,6 @@ void LocalCcShards::PostProcessHashPartitionDataSyncTask(
 void LocalCcShards::DataSyncForHashPartition(
     std::shared_ptr<DataSyncTask> data_sync_task, size_t worker_idx)
 {
-    LOG(INFO) << "data sync worker: " << worker_idx << ", start";
     // Whether other task worker is processing this table.
     const TableName &table_name = data_sync_task->table_name_;
     uint32_t ng_id = data_sync_task->node_group_id_;
@@ -4837,15 +4835,7 @@ void LocalCcShards::DataSyncForHashPartition(
                  updated_memory_per_partition != 0
                      ? (flush_buffer_size / updated_memory_per_partition)
                      : partition_number_this_core);
-
-    // const size_t partition_number_per_scan = 200;
-
     const size_t scan_concurrency = core_number;
-
-    LOG(INFO) << "DataSyncScan: flush buffer size = " << flush_buffer_size
-              << ", updated memory = " << updated_memory
-              << ", partition number per scan = " << partition_number_per_scan
-              << ", scan concurrency = " << scan_concurrency;
 
     if (scan_concurrency > 0)
     {
@@ -4865,8 +4855,6 @@ void LocalCcShards::DataSyncForHashPartition(
             data_sync_task->flight_task_mux_);
         data_sync_task->flight_task_cnt_ += 1;
     }
-
-    uint64_t debug_data_size = 0;
 
     for (size_t i = 0; i < partition_number_this_core;
          i += partition_number_per_scan)
@@ -5159,8 +5147,6 @@ void LocalCcShards::DataSyncForHashPartition(
                        << " flight_tasks: " << data_sync_task->flight_task_cnt_
                        << " record count: " << scan_cc.accumulated_scan_cnt_;
 
-            debug_data_size += scan_cc.DataSyncVec().size();
-
             std::unique_lock<std::mutex> heap_lk(hash_partition_ckpt_heap_mux_);
             mi_threadid_t prev_thd =
                 mi_override_thread(hash_partition_main_thread_id_);
@@ -5354,8 +5340,6 @@ void LocalCcShards::DataSyncForHashPartition(
     PostProcessHashPartitionDataSyncTask(std::move(data_sync_task),
                                          data_sync_txm,
                                          DataSyncTask::CkptErrorCode::NO_ERROR);
-    LOG(INFO) << "data sync worker: " << worker_idx
-              << ", data size = " << debug_data_size;
 }
 
 void LocalCcShards::PopPendingTask(NodeGroupId ng_id,
@@ -5859,9 +5843,6 @@ void LocalCcShards::AddFlushTaskEntry(std::unique_ptr<FlushTaskEntry> &&entry)
         // Could not merge, wait if queue is full
         while (pending_flush_work.size() >= 2)
         {
-            LOG(INFO) << "FlushDataWorker[" << target << "] Status: "
-                      << "queue_size=" << pending_flush_work.size() << "/"
-                      << flush_data_worker_ctx_.worker_num_ << ", waitting";
             flush_data_worker_ctx_.cv_.wait(worker_lk);
         }
 
@@ -5911,21 +5892,10 @@ void LocalCcShards::FlushData(std::unique_lock<std::mutex> &flush_worker_lk,
     assert(worker_idx < pending_flush_work_.size());
     auto &pending_flush_work = pending_flush_work_[worker_idx];
 
-    auto flush_start = std::chrono::steady_clock::now();
-
     // Retrieve first pending work and pop it (FIFO).
     std::unique_ptr<FlushDataTask> cur_work =
         std::move(pending_flush_work.front());
     pending_flush_work.pop_front();
-
-    size_t task_size = cur_work->GetPendingFlushSize();
-    size_t entry_count = 0;
-    /*
-    for (const auto &[table_name, entries] : cur_work->flush_task_entries_)
-    {
-        entry_count += entries.size();
-    }
-    */
 
     // Notify any threads waiting for queue space
     flush_data_worker_ctx_.cv_.notify_all();
@@ -5936,8 +5906,6 @@ void LocalCcShards::FlushData(std::unique_lock<std::mutex> &flush_worker_lk,
 
     bool succ = true;
 
-    // CopyBaseToArchive timing
-    auto copy_start = std::chrono::steady_clock::now();
     if (EnableMvcc())
     {
         succ = store_hd_->CopyBaseToArchive(flush_task_entries);
@@ -5947,13 +5915,7 @@ void LocalCcShards::FlushData(std::unique_lock<std::mutex> &flush_worker_lk,
                           "storage failed";
         }
     }
-    auto copy_end = std::chrono::steady_clock::now();
-    auto copy_duration = std::chrono::duration_cast<std::chrono::milliseconds>(
-                             copy_end - copy_start)
-                             .count();
 
-    // PutAll timing
-    auto putall_start = std::chrono::steady_clock::now();
     if (succ)
     {
         succ = store_hd_->PutAll(flush_task_entries);
@@ -5963,14 +5925,7 @@ void LocalCcShards::FlushData(std::unique_lock<std::mutex> &flush_worker_lk,
                           "storage failed";
         }
     }
-    auto putall_end = std::chrono::steady_clock::now();
-    auto putall_duration =
-        std::chrono::duration_cast<std::chrono::milliseconds>(putall_end -
-                                                              putall_start)
-            .count();
 
-    // PutArchivesAll timing
-    auto archive_start = std::chrono::steady_clock::now();
     if (succ && EnableMvcc())
     {
         succ = store_hd_->PutArchivesAll(flush_task_entries);
@@ -5980,14 +5935,7 @@ void LocalCcShards::FlushData(std::unique_lock<std::mutex> &flush_worker_lk,
                           "kv storage failed";
         }
     }
-    auto archive_end = std::chrono::steady_clock::now();
-    auto archive_duration =
-        std::chrono::duration_cast<std::chrono::milliseconds>(archive_end -
-                                                              archive_start)
-            .count();
 
-    // PersistKV timing
-    auto persist_start = std::chrono::steady_clock::now();
     if (succ && store_hd_->NeedPersistKV())
     {
         std::vector<std::string> kv_table_names;
@@ -5997,28 +5945,6 @@ void LocalCcShards::FlushData(std::unique_lock<std::mutex> &flush_worker_lk,
         }
         succ = store_hd_->PersistKV(kv_table_names);
     }
-    auto persist_end = std::chrono::steady_clock::now();
-    auto persist_duration =
-        std::chrono::duration_cast<std::chrono::milliseconds>(persist_end -
-                                                              persist_start)
-            .count();
-
-    auto flush_end = std::chrono::steady_clock::now();
-    auto flush_total_duration =
-        std::chrono::duration_cast<std::chrono::milliseconds>(flush_end -
-                                                              flush_start)
-            .count();
-
-    LOG(INFO) << "FlushData completed: "
-              << "total=" << flush_total_duration << "ms, "
-              << "copy=" << copy_duration << "ms, "
-              << "putall=" << putall_duration << "ms, "
-              << "archive=" << archive_duration << "ms, "
-              << "persist=" << persist_duration << "ms, "
-              << "task_size=" << task_size << " bytes, "
-              << "entry_count=" << entry_count;
-
-    LOG(INFO) << "== update cce start: worker idx = " << worker_idx;
 
     std::unordered_set<uint16_t> updated_ckpt_ts_core_ids;
     // Update cce ckpt ts in memory
@@ -6079,8 +6005,6 @@ void LocalCcShards::FlushData(std::unique_lock<std::mutex> &flush_worker_lk,
             }
         }
     }
-
-    LOG(INFO) << "== update cce finished: worker idx = " << worker_idx;
 
     // Notify cc shards that dirty data has been flushed. This will re-enqueue
     // kickout data cc reqs if there are any.
