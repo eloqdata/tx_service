@@ -402,10 +402,10 @@ EloqStoreConfig::EloqStoreConfig(const INIReader &config_reader,
     {
         if (config_reader.HasValue("store", "eloq_store_root_meta_cache_size"))
         {
-            root_meta_cache_size_str = config_reader.GetString(
-                "store",
-                "eloq_store_root_meta_cache_size",
-                FLAGS_eloq_store_root_meta_cache_size);
+            root_meta_cache_size_str =
+                config_reader.GetString("store",
+                                        "eloq_store_root_meta_cache_size",
+                                        FLAGS_eloq_store_root_meta_cache_size);
         }
         else
         {
