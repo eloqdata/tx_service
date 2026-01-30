@@ -23,6 +23,7 @@
 #include <brpc/server.h>
 #include <gflags/gflags.h>
 #include <gflags/gflags_declare.h>
+#include <sys/resource.h>
 #include <sys/sysinfo.h>
 #include <unistd.h>
 
@@ -85,6 +86,8 @@ DEFINE_bool(bootstrap,
             false,
             "Init data store config file and exit. (Only support bootstrap one "
             "node now.)");
+
+DEFINE_uint32(maxclients, 300000, "maxclients");
 
 static bool CheckCommandLineFlagIsDefault(const char *name)
 {
@@ -199,6 +202,24 @@ int main(int argc, char *argv[])
     if (!std::filesystem::exists(data_path))
     {
         std::filesystem::create_directories(data_path);
+    }
+
+    // Set maxclients
+    uint32_t maxclients =
+        !CheckCommandLineFlagIsDefault("maxclients")
+            ? FLAGS_maxclients
+            : config_reader.GetInteger("local", "maxclients", FLAGS_maxclients);
+
+    struct rlimit ulimit
+    {
+        .rlim_cur = 0,
+        .rlim_max = 0,
+    };
+    ulimit.rlim_cur = maxclients;
+    ulimit.rlim_max = maxclients;
+    if (setrlimit(RLIMIT_NOFILE, &ulimit) == -1)
+    {
+        LOG(WARNING) << "Failed to set maxclients.";
     }
 
     std::string ds_config_file_path = data_path + "/dss_config.ini";
