@@ -243,8 +243,8 @@ void EloqStoreDataStore::BatchWriteRecords(WriteRecordsRequest *write_req)
     for (size_t i = 0; i < rec_cnt; ++i)
     {
         ::eloqstore::WriteDataEntry &entry = g_batch_write_entries[i];
-        BuildKey(*write_req, key_offset, parts_per_key, entry.key_);
-        BuildValue(*write_req, val_offset, parts_per_record, entry.val_);
+        // BuildKey(*write_req, key_offset, parts_per_key, entry.key_);
+        // BuildValue(*write_req, val_offset, parts_per_record, entry.val_);
         key_offset += parts_per_key;
         val_offset += parts_per_record;
     }
