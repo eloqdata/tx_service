@@ -74,6 +74,9 @@ DEFINE_bool(eloq_store_skip_verify_checksum,
 DEFINE_string(eloq_store_buffer_pool_size,
               "128MB",
               "EloqStore index buffer pool size.");
+DEFINE_string(eloq_store_root_meta_cache_size,
+              "1GB",
+              "EloqStore RootMeta mappings cache size (global).");
 DEFINE_uint32(eloq_store_manifest_limit, 8 << 20, "EloqStore manifest limit.");
 DEFINE_uint32(eloq_store_io_queue_size,
               4096,
@@ -359,6 +362,38 @@ EloqStoreConfig::EloqStoreConfig(const INIReader &config_reader,
             : config_reader.GetBoolean("store",
                                        "eloq_store_skip_verify_checksum",
                                        FLAGS_eloq_store_skip_verify_checksum);
+    std::string root_meta_cache_size_str;
+    if (CheckCommandLineFlagIsDefault("eloq_store_root_meta_cache_size"))
+    {
+        if (config_reader.HasValue("store", "eloq_store_root_meta_cache_size"))
+        {
+            root_meta_cache_size_str =
+                config_reader.GetString("store",
+                                        "eloq_store_root_meta_cache_size",
+                                        FLAGS_eloq_store_root_meta_cache_size);
+        }
+        else
+        {
+            root_meta_cache_size_str =
+                std::to_string(node_memory_mb / 20) + "MB";
+            LOG(INFO) << "config is automatically set: "
+                      << "eloq_store_root_meta_cache_size="
+                      << root_meta_cache_size_str
+                      << ", available memory=" << node_memory_mb << "MB";
+        }
+    }
+    else
+    {
+        root_meta_cache_size_str = FLAGS_eloq_store_root_meta_cache_size;
+    }
+    uint64_t root_meta_cache_size = parse_size(root_meta_cache_size_str);
+    if (root_meta_cache_size / (1024 * 1024) > node_memory_mb)
+    {
+        LOG(FATAL) << "root meta cache size (" << root_meta_cache_size
+                   << ") exceeds node memory mb";
+    }
+    node_memory_mb -= root_meta_cache_size / (1024 * 1024);
+    eloqstore_configs_.root_meta_cache_size = root_meta_cache_size;
     std::string buffer_pool_size_str;
     if (CheckCommandLineFlagIsDefault("eloq_store_buffer_pool_size"))
     {
@@ -393,6 +428,7 @@ EloqStoreConfig::EloqStoreConfig(const INIReader &config_reader,
     node_memory_mb -= buffer_pool_size / (1024 * 1024);
     eloqstore_configs_.buffer_pool_size =
         buffer_pool_size / eloqstore_configs_.num_threads;
+
     eloqstore_configs_.manifest_limit =
         !CheckCommandLineFlagIsDefault("eloq_store_manifest_limit")
             ? FLAGS_eloq_store_manifest_limit
