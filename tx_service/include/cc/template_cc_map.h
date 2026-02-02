@@ -7965,6 +7965,7 @@ public:
         {
             CcEntry<KeyT, ValueT, VersionedRecord, RangePartitioned> *cce =
                 it->second;
+            auto *ccp = it.current_page_;
             if (txservice_skip_wal)
             {
                 // If wal log is disabled, we need to flush all in memory cache
@@ -7980,6 +7981,10 @@ public:
                     cce->SetCommitTsPayloadStatus(now_ts, status);
                     OnCommittedUpdate(cce, was_dirty);
                     assert(!cce->HasBufferedCommandList());
+                    if (now_ts > ccp->last_dirty_commit_ts_)
+                    {
+                        ccp->last_dirty_commit_ts_ = now_ts;
+                    }
                 }
                 assert(!cce->HasBufferedCommandList() ||
                        status == RecordStatus::Unknown);
@@ -7998,6 +8003,10 @@ public:
             it++;
         }
 
+        if (now_ts > last_dirty_commit_ts_)
+        {
+            last_dirty_commit_ts_ = now_ts;
+        }
         return true;
     }
 
