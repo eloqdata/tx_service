@@ -25,6 +25,7 @@
 #include <bthread/condition_variable.h>
 #include <bthread/mutex.h>
 
+#include <functional>
 #include <memory>
 #include <queue>
 #include <string>
@@ -205,6 +206,8 @@ struct PartitionFlushState : public Poolable
  * considered failed.
  */
 
+struct PartitionCallbackData;
+
 struct SyncPutAllData : public Poolable
 {
     static constexpr int32_t max_flying_write_count = 32;
@@ -230,15 +233,38 @@ struct SyncPutAllData : public Poolable
     }
     void OnPartitionCompleted()
     {
+        std::function<void(bool)> cb;
         std::unique_lock<bthread::Mutex> lk(mux_);
         completed_partitions_++;
         if (completed_partitions_ >= total_partitions_)
         {
             cv_.notify_one();
+            cb = std::move(completion_callback_);
+            completion_callback_ = nullptr;
+        }
+        lk.unlock();
+        if (cb)
+        {
+            bool success = true;
+            for (auto *ps : partition_states_)
+            {
+                if (ps->IsFailed())
+                {
+                    success = false;
+                    break;
+                }
+            }
+            cb(success);
         }
     }
     mutable bthread::Mutex mux_;
     bthread::ConditionVariable cv_;
+
+    // Optional: called when all partitions complete (for PutAllAsync).
+    std::function<void(bool)> completion_callback_;
+
+    // For PutAllAsync: list to free in completion callback
+    std::vector<PartitionCallbackData *> callback_data_list_;
 
     // fields for per-partition coordination
     std::vector<PartitionFlushState *> partition_states_;

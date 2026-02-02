@@ -23,6 +23,7 @@
 
 #include <cstdint>
 #include <deque>
+#include <functional>
 #include <map>
 #include <memory>
 #include <string>
@@ -219,6 +220,13 @@ public:
                 std::string_view,
                 std::vector<std::unique_ptr<txservice::FlushTaskEntry>>>
                     &flush_task) override;
+
+    void PutAllAsync(
+        std::unordered_map<
+            std::string_view,
+            std::vector<std::unique_ptr<txservice::FlushTaskEntry>>>
+            &flush_task,
+        std::function<void(bool)> callback) override;
 
     bool NeedPersistKV() override
     {

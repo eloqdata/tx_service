@@ -497,6 +497,160 @@ bool DataStoreServiceClient::PutAll(
     return true;
 }
 
+void DataStoreServiceClient::PutAllAsync(
+    std::unordered_map<std::string_view,
+                       std::vector<std::unique_ptr<txservice::FlushTaskEntry>>>
+        &flush_task,
+    std::function<void(bool)> callback)
+{
+    DLOG(INFO) << "DataStoreServiceClient::PutAllAsync called with "
+               << flush_task.size() << " tables to flush.";
+    uint64_t now = txservice::LocalCcShards::ClockTsInMillseconds();
+    SyncPutAllData *sync_putall = sync_putall_data_pool_.NextObject();
+    sync_putall->Reset();
+    sync_putall->callback_data_list_.clear();
+    size_t records_count = 0;
+
+    std::vector<PartitionCallbackData *> callback_data_list;
+    for (auto &[kv_table_name, entries] : flush_task)
+    {
+        auto &table_name = entries.front()->data_sync_task_->table_name_;
+
+        std::unordered_map<uint32_t, std::vector<std::pair<size_t, size_t>>>
+            hash_partitions_map;
+        std::unordered_map<uint32_t, std::vector<size_t>> range_partitions_map;
+
+        size_t flush_task_entry_idx = 0;
+        for (auto &entry : entries)
+        {
+            auto &batch = *entry->data_sync_vec_;
+            if (batch.empty())
+                continue;
+            records_count += batch.size();
+
+            if (table_name.IsHashPartitioned())
+            {
+                for (size_t i = 0; i < batch.size(); ++i)
+                {
+                    int32_t kv_partition_id =
+                        KvPartitionIdOf(batch[i].partition_id_, false);
+                    auto [it, inserted] =
+                        hash_partitions_map.try_emplace(kv_partition_id);
+                    if (inserted)
+                        it->second.reserve(batch.size() / 1024 * 2 *
+                                           entries.size());
+                    it->second.emplace_back(
+                        std::make_pair(flush_task_entry_idx, i));
+                }
+            }
+            else
+            {
+                int32_t partition_id =
+                    KvPartitionIdOf(batch[0].partition_id_, true);
+                auto [it, inserted] =
+                    range_partitions_map.try_emplace(partition_id);
+                it->second.emplace_back(flush_task_entry_idx);
+            }
+            flush_task_entry_idx++;
+        }
+
+        uint16_t parts_cnt_per_key = 1;
+        uint16_t parts_cnt_per_record = 5;
+        if (table_name.IsHashPartitioned() && table_name.IsObjectTable())
+            parts_cnt_per_record = 1;
+
+        for (auto &[partition_id, flush_recs] : hash_partitions_map)
+        {
+            auto partition_state = partition_flush_state_pool_.NextObject();
+            partition_state->Reset(partition_id, false);
+            auto callback_data = partition_callback_data_pool_.NextObject();
+            callback_data->Reset(partition_state, sync_putall, kv_table_name);
+
+            PreparePartitionBatches(*partition_state,
+                                    flush_recs,
+                                    entries,
+                                    table_name,
+                                    parts_cnt_per_key,
+                                    parts_cnt_per_record,
+                                    now);
+
+            sync_putall->partition_states_.push_back(partition_state);
+            callback_data_list.push_back(callback_data);
+        }
+
+        for (auto &[partition_id, flush_recs] : range_partitions_map)
+        {
+            auto partition_state = partition_flush_state_pool_.NextObject();
+            partition_state->Reset(partition_id, true);
+            auto callback_data = partition_callback_data_pool_.NextObject();
+            callback_data->Reset(partition_state, sync_putall, kv_table_name);
+
+            PrepareRangePartitionBatches(*partition_state,
+                                         flush_recs,
+                                         entries,
+                                         table_name,
+                                         parts_cnt_per_key,
+                                         parts_cnt_per_record,
+                                         now);
+
+            sync_putall->partition_states_.push_back(partition_state);
+            callback_data_list.push_back(callback_data);
+        }
+    }
+
+    sync_putall->total_partitions_ = sync_putall->partition_states_.size();
+    sync_putall->callback_data_list_ = callback_data_list;
+
+    sync_putall->completion_callback_ =
+        [callback, sync_putall, records_count](bool ok)
+    {
+        callback(ok);
+        for (auto *d : sync_putall->callback_data_list_)
+        {
+            d->Clear();
+            d->Free();
+        }
+        sync_putall->callback_data_list_.clear();
+        sync_putall->Clear();
+        sync_putall->Free();
+        if (ok && metrics::enable_kv_metrics)
+        {
+            metrics::kv_meter->Collect(
+                metrics::NAME_KV_FLUSH_ROWS_TOTAL, records_count, "base");
+        }
+    };
+
+    for (size_t i = 0; i < callback_data_list.size(); ++i)
+    {
+        auto *partition_state = sync_putall->partition_states_[i];
+        auto *callback_data = callback_data_list[i];
+
+        auto &first_batch = callback_data->inflight_batch;
+        if (partition_state->GetNextBatch(first_batch))
+        {
+            BatchWriteRecords(
+                callback_data->table_name,
+                partition_state->partition_id,
+                GetShardIdByPartitionId(partition_state->partition_id,
+                                        partition_state->is_range_partitioned),
+                std::move(first_batch.key_parts),
+                std::move(first_batch.record_parts),
+                std::move(first_batch.records_ts),
+                std::move(first_batch.records_ttl),
+                std::move(first_batch.op_types),
+                true,
+                callback_data,
+                PartitionBatchCallback,
+                first_batch.parts_cnt_per_key,
+                first_batch.parts_cnt_per_record);
+        }
+        else
+        {
+            sync_putall->OnPartitionCompleted();
+        }
+    }
+}
+
 /**
  * @brief Persists data from specified KV tables to storage.
  *

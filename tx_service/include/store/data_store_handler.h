@@ -22,6 +22,7 @@
 #pragma once
 
 #include <cstddef>
+#include <functional>
 #include <memory>
 #include <string>
 #include <string_view>
@@ -86,6 +87,20 @@ public:
                         std::string_view,
                         std::vector<std::unique_ptr<txservice::FlushTaskEntry>>>
                             &flush_task) = 0;
+
+    /**
+     * @brief Async variant: flush entries and invoke \a callback(success) when
+     * done. Default implementation calls PutAll then callback(result).
+     */
+    virtual void PutAllAsync(
+        std::unordered_map<
+            std::string_view,
+            std::vector<std::unique_ptr<txservice::FlushTaskEntry>>>
+            &flush_task,
+        std::function<void(bool)> callback)
+    {
+        callback(PutAll(flush_task));
+    }
 
     /**
      * @brief indicate end of flush entries in a single ckpt for \@param batch

@@ -24,6 +24,7 @@
 #include <algorithm>
 #include <atomic>
 #include <condition_variable>
+#include <coroutine>
 #include <cstddef>
 #include <cstdint>
 #include <deque>
@@ -2485,6 +2486,126 @@ private:
     void FlushDataWorker(size_t worker_idx);
     void FlushData(std::unique_lock<std::mutex> &flush_worker_lk,
                    size_t worker_idx);
+
+    // C++20 coroutine: single FlushDataWorker drives multiple flush tasks.
+    struct FlushDataTaskCo
+    {
+        struct promise_type
+        {
+            FlushDataTaskCo get_return_object()
+            {
+                return FlushDataTaskCo{
+                    std::coroutine_handle<promise_type>::from_promise(*this)};
+            }
+            std::suspend_always initial_suspend()
+            {
+                return {};
+            }
+            std::suspend_always final_suspend() noexcept
+            {
+                return {};
+            }
+            void return_void()
+            {
+            }
+            void unhandled_exception()
+            {
+                std::terminate();
+            }
+        };
+        std::coroutine_handle<promise_type> handle_;
+        explicit FlushDataTaskCo(std::coroutine_handle<promise_type> h)
+            : handle_(h)
+        {
+        }
+        FlushDataTaskCo(FlushDataTaskCo &&other) noexcept
+            : handle_(other.handle_)
+        {
+            other.handle_ = nullptr;
+        }
+        FlushDataTaskCo &operator=(FlushDataTaskCo &&other) noexcept
+        {
+            if (this != &other)
+            {
+                if (handle_)
+                    handle_.destroy();
+                handle_ = other.handle_;
+                other.handle_ = nullptr;
+            }
+            return *this;
+        }
+        FlushDataTaskCo(const FlushDataTaskCo &) = delete;
+        FlushDataTaskCo &operator=(const FlushDataTaskCo &) = delete;
+        ~FlushDataTaskCo()
+        {
+            if (handle_)
+                handle_.destroy();
+        }
+        bool valid() const
+        {
+            return handle_ != nullptr;
+        }
+        bool done() const
+        {
+            return handle_ && handle_.done();
+        }
+        void resume()
+        {
+            if (handle_ && !handle_.done())
+                handle_.resume();
+        }
+        // Release ownership of the handle to the scheduler; caller must
+        // destroy the handle when the coroutine is done.
+        std::coroutine_handle<> ReleaseHandle()
+        {
+            std::coroutine_handle<> h =
+                std::coroutine_handle<>::from_address(handle_.address());
+            handle_ = nullptr;
+            return h;
+        }
+    };
+    static FlushDataTaskCo FlushDataCoroutine(
+        LocalCcShards *self, std::unique_ptr<FlushDataTask> cur_work);
+
+    // Ready queue: store callbacks post coroutine handles here; FlushDataWorker
+    // drains and resumes. Only FlushDataWorker thread calls resume()/destroy().
+    std::mutex flush_ready_handles_mux_;
+    std::deque<std::coroutine_handle<>> flush_ready_handles_;
+    void PostFlushReadyHandle(std::coroutine_handle<> h);
+
+    // Awaitable for PutAllAsync: suspends until store callback posts handle.
+    struct PutAllAwaitable
+    {
+        LocalCcShards *self;
+        std::unordered_map<std::string_view,
+                           std::vector<std::unique_ptr<FlushTaskEntry>>>
+            &flush_task_entries;
+        std::shared_ptr<std::optional<bool>> result_;
+
+        bool await_ready() const
+        {
+            return false;
+        }
+        void await_suspend(std::coroutine_handle<> h)
+        {
+            result_ = std::make_shared<std::optional<bool>>();
+            self->store_hd_->PutAllAsync(
+                flush_task_entries,
+                [self = this->self, h, result = result_](bool ok)
+                {
+                    result->emplace(ok);
+                    self->PostFlushReadyHandle(h);
+                });
+        }
+        bool await_resume()
+        {
+            return result_->value_or(false);
+        }
+    };
+    PutAllAwaitable PutAllAsync(
+        std::unordered_map<std::string_view,
+                           std::vector<std::unique_ptr<FlushTaskEntry>>>
+            &flush_task_entries);
 
     // Memory controller for data sync.
     DataSyncMemoryController data_sync_mem_controller_;
