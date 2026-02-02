@@ -5811,8 +5811,10 @@ size_t LocalCcShards::DataSyncWorkerToFlushDataWorker(
 
 void LocalCcShards::AddFlushTaskEntry(std::unique_ptr<FlushTaskEntry> &&entry)
 {
-    assert(cur_flush_buffers_.size() == flush_data_worker_ctx_.worker_num_);
-    assert(pending_flush_work_.size() == flush_data_worker_ctx_.worker_num_);
+    assert(cur_flush_buffers_.size() ==
+           static_cast<size_t>(flush_data_worker_ctx_.worker_num_));
+    assert(pending_flush_work_.size() ==
+           static_cast<size_t>(flush_data_worker_ctx_.worker_num_));
     assert(entry->data_sync_task_ != nullptr);
 
     // Compute target buffer/queue: map data_sync task id to fixed flush worker
@@ -6043,9 +6045,10 @@ void LocalCcShards::FlushData(std::unique_lock<std::mutex> &flush_worker_lk,
 
 void LocalCcShards::FlushDataWorker(size_t worker_idx)
 {
-    assert(worker_idx < flush_data_worker_ctx_.worker_num_);
-    assert(worker_idx < pending_flush_work_.size());
-    assert(worker_idx < cur_flush_buffers_.size());
+    assert(worker_idx <
+           static_cast<size_t>(flush_data_worker_ctx_.worker_num_));
+    assert(worker_idx < static_cast<size_t>(pending_flush_work_.size()));
+    assert(worker_idx < static_cast<size_t>(cur_flush_buffers_.size()));
 
     auto &pending_flush_work = pending_flush_work_[worker_idx];
     auto &cur_flush_buffer = *cur_flush_buffers_[worker_idx];
