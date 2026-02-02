@@ -2453,6 +2453,13 @@ private:
                                  int32_t &out_next_partition_id);
 
     /**
+     * @brief Map a data_sync_worker index to the fixed flush_data_worker index.
+     * Used when data_sync_worker count != flush_data_worker count so that each
+     * data_sync_worker consistently targets one flush_data_worker.
+     */
+    size_t DataSyncWorkerToFlushDataWorker(size_t data_sync_worker_id) const;
+
+    /**
      * @brief Add a flush task entry to the flush task. If the there's no
      * pending flush task, create a new flush task and add the entry to it.
      * Otherwise, add the entry to the current flush task. If the current flush
