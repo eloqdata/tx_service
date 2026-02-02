@@ -231,7 +231,8 @@ void EloqStoreDataStore::BatchWriteRecords(WriteRecordsRequest *write_req)
     const uint16_t parts_per_key = write_req->PartsCountPerKey();
     const uint16_t parts_per_record = write_req->PartsCountPerRecord();
 
-    std::vector<::eloqstore::WriteDataEntry> entries(rec_cnt);
+    std::vector<::eloqstore::WriteDataEntry> &entries =
+        kv_write_req.GetBatchForWrite(rec_cnt);
     size_t key_offset = 0;
     size_t val_offset = 0;
 
@@ -262,7 +263,7 @@ void EloqStoreDataStore::BatchWriteRecords(WriteRecordsRequest *write_req)
             entries, std::ranges::less{}, &::eloqstore::WriteDataEntry::key_);
     }
 
-    kv_write_req.SetArgs(eloq_store_table_id, std::move(entries));
+    kv_write_req.SetArgs(eloq_store_table_id);
 
     uint64_t user_data = reinterpret_cast<uint64_t>(write_op);
 
