@@ -4179,7 +4179,8 @@ public:
         bool export_base_table_item_only = false,
         StoreRange *store_range = nullptr,
         const std::map<TxKey, int64_t> *old_slices_delta_size = nullptr,
-        uint64_t schema_version = 0)
+        uint64_t schema_version = 0,
+        bool run_on_candidate_node = false)
         : scan_heap_is_full_(false),
           table_name_(&table_name),
           node_group_id_(node_group_id),
@@ -4198,7 +4199,8 @@ public:
           slice_coordinator_(export_base_table_item_, &slices_to_scan_),
           export_base_table_item_only_(export_base_table_item_only),
           store_range_(store_range),
-          schema_version_(schema_version)
+          schema_version_(schema_version),
+          run_on_candidate_node_(run_on_candidate_node)
     {
         tx_number_ = txn;
         assert(scan_batch_size_ > DataSyncScanBatchSize);
@@ -4557,7 +4559,7 @@ public:
 
     bool RunOnCandidateNode() const
     {
-        return true;
+        return run_on_candidate_node_;
     }
 
     std::vector<size_t> accumulated_scan_cnt_;
@@ -4733,6 +4735,8 @@ private:
     // scan is part of range split which block the schema change
     // TODO(xxx) general solution for #1130
     const uint64_t schema_version_{0};
+
+    bool run_on_candidate_node_{false};
 
     template <typename KeyT,
               typename ValueT,

@@ -5731,6 +5731,11 @@ public:
                 }
                 else if (req.RunOnCandidateNode())
                 {
+                    // If the request is running on candidate node(such as
+                    // during ccnode recovery), during the `DataSync` process,
+                    // there may be some ccentry keys that have just been
+                    // replayed from the log. These keys can simply be skipped
+                    // during this round of datasync.
                     need_export = false;
                 }
                 else

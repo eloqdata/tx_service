@@ -3860,6 +3860,9 @@ void LocalCcShards::DataSyncForRangePartition(
         schema_version = table_schema->IndexKeySchema(table_name)->SchemaTs();
     }
 
+    bool run_on_candidate_node =
+        Sharder::Instance().CandidateLeaderTerm(ng_id) > 0;
+
     // Scan the delta slice size
     std::map<TxKey, int64_t> slices_delta_size;
     ScanSliceDeltaSizeCcForRangePartition scan_delta_size_cc(
@@ -4083,7 +4086,8 @@ void LocalCcShards::DataSyncForRangePartition(
                                          false,
                                          store_range,
                                          &slices_delta_size,
-                                         schema_version);
+                                         schema_version,
+                                         run_on_candidate_node);
 
     {
         // DataSync Worker will call PostProcessDataSyncTask() to decrement
