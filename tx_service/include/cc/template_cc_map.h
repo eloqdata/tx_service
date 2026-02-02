@@ -7965,7 +7965,7 @@ public:
         {
             CcEntry<KeyT, ValueT, VersionedRecord, RangePartitioned> *cce =
                 it->second;
-            auto *ccp = it.current_page_;
+            auto *ccp = it.GetPage();
             if (txservice_skip_wal)
             {
                 // If wal log is disabled, we need to flush all in memory cache
