@@ -1229,15 +1229,6 @@ bool UpdateCceCkptTsCc::Execute(CcShard &ccs)
                 VersionedLruEntry<true, true> *v_entry =
                     static_cast<VersionedLruEntry<true, true> *>(ref.cce_);
 
-                if (v_entry->CommitTs() <= 1 || v_entry->IsPersistent())
-                {
-                    LOG(INFO)
-                        << "v_entry->CommitTs() <= 1 || v_entry->IsPersistent()"
-                        << " v_entry->CommitTs(): " << v_entry->CommitTs()
-                        << " v_entry->CkptTs(): " << v_entry->CkptTs()
-                        << " v_entry->IsPersistent(): " << std::boolalpha
-                        << v_entry->IsPersistent();
-                }
                 assert(v_entry->CommitTs() > 1 && !v_entry->IsPersistent());
                 v_entry->entry_info_.SetDataStoreSize(ref.post_flush_size_);
 

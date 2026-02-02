@@ -5765,28 +5765,6 @@ public:
                                   req.export_base_table_item_only_,
                                   export_persisted_key_only,
                                   flush_size);
-                if (cce->IsPersistent())
-                {
-                    size_t entry_idx =
-                        req.accumulated_scan_cnt_[shard_->core_id_] - 1;
-                    FlushRecord &ref =
-                        req.DataSyncVec(shard_->core_id_)[entry_idx];
-                    if (ref.cce_ != nullptr && !req.export_base_table_item_)
-                    {
-                        LOG(ERROR)
-                            << "cce is persistent but cce is not nullptr and "
-                               "export_base_table_item_ is false"
-                            << ". cce addr: " << std::hex << (void *) cce
-                            << ", export persisted key only: " << std::boolalpha
-                            << export_persisted_key_only
-                            << ", export base table term only: "
-                            << std::boolalpha
-                            << req.export_base_table_item_only_
-                            << ", for table: " << table_name_.StringView()
-                            << ", on shard: " << shard_->core_id_;
-                        assert(false);
-                    }
-                }
 
                 req.accumulated_flush_data_size_[shard_->core_id_] +=
                     flush_size;
