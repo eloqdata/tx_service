@@ -240,20 +240,50 @@ void EloqStoreDataStore::BatchWriteRecords(WriteRecordsRequest *write_req)
     size_t key_offset = 0;
     size_t val_offset = 0;
 
-    for (size_t i = 0; i < rec_cnt; ++i)
+    WriteRecordsLocalRequest *local_req =
+        dynamic_cast<WriteRecordsLocalRequest *>(write_req);
+    if (local_req != nullptr)
     {
-        ::eloqstore::WriteDataEntry &entry = entries[i];
-        BuildKey(*write_req, key_offset, parts_per_key, entry.key_);
-        BuildValue(*write_req, val_offset, parts_per_record, entry.val_);
-        key_offset += parts_per_key;
-        val_offset += parts_per_record;
+        const auto &ts_vec = local_req->TsVector();
+        const auto &ttl_vec = local_req->TtlVector();
+        const auto &op_vec = local_req->OpTypesVector();
+        for (size_t i = 0; i < rec_cnt; ++i)
+        {
+            ::eloqstore::WriteDataEntry &entry = entries[i];
+            entry.timestamp_ = ts_vec[i];
+            entry.op_ =
+                (op_vec[i] == WriteOpType::PUT ? ::eloqstore::WriteOp::Upsert
+                                               : ::eloqstore::WriteOp::Delete);
+            const uint64_t ttl = ttl_vec[i];
+            entry.expire_ts_ = (ttl == UINT64_MAX) ? 0u : ttl;
+        }
 
-        entry.timestamp_ = write_req->GetRecordTs(i);
-        entry.op_ = (write_req->KeyOpType(i) == WriteOpType::PUT
-                         ? ::eloqstore::WriteOp::Upsert
-                         : ::eloqstore::WriteOp::Delete);
-        const uint64_t ttl = write_req->GetRecordTtl(i);
-        entry.expire_ts_ = (ttl == UINT64_MAX) ? 0u : ttl;
+        for (size_t i = 0; i < rec_cnt; ++i)
+        {
+            ::eloqstore::WriteDataEntry &entry = entries[i];
+            BuildKey(*write_req, key_offset, parts_per_key, entry.key_);
+            BuildValue(*write_req, val_offset, parts_per_record, entry.val_);
+            key_offset += parts_per_key;
+            val_offset += parts_per_record;
+        }
+    }
+    else
+    {
+        for (size_t i = 0; i < rec_cnt; ++i)
+        {
+            ::eloqstore::WriteDataEntry &entry = entries[i];
+            BuildKey(*write_req, key_offset, parts_per_key, entry.key_);
+            BuildValue(*write_req, val_offset, parts_per_record, entry.val_);
+            key_offset += parts_per_key;
+            val_offset += parts_per_record;
+
+            entry.timestamp_ = write_req->GetRecordTs(i);
+            entry.op_ = (write_req->KeyOpType(i) == WriteOpType::PUT
+                             ? ::eloqstore::WriteOp::Upsert
+                             : ::eloqstore::WriteOp::Delete);
+            const uint64_t ttl = write_req->GetRecordTtl(i);
+            entry.expire_ts_ = (ttl == UINT64_MAX) ? 0u : ttl;
+        }
     }
 
     if (!std::ranges::is_sorted(

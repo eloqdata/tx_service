@@ -300,6 +300,24 @@ public:
         return skip_wal_;
     }
 
+    // Batch access for BatchWriteRecords hot path: avoid per-record virtual
+    // calls when request is local. Caller must use only while request is valid.
+    const std::vector<uint64_t> &TsVector() const
+    {
+        assert(ts_ != nullptr);
+        return *ts_;
+    }
+    const std::vector<uint64_t> &TtlVector() const
+    {
+        assert(ttl_ != nullptr);
+        return *ttl_;
+    }
+    const std::vector<WriteOpType> &OpTypesVector() const
+    {
+        assert(op_types_ != nullptr);
+        return *op_types_;
+    }
+
     void SetFinish(const remote::CommonResult &result) override
     {
         data_store_service_->DecreaseWriteReqCount(shard_id_);
