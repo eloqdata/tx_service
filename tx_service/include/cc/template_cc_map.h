@@ -8543,6 +8543,11 @@ public:
 
     void AdjustDataKeyStats(int64_t size_delta, int64_t dirty_delta)
     {
+        if (table_name_.IsMeta())
+        {
+            return;
+        }
+
         if (size_delta != 0)
         {
             assert(size_delta >= 0 ||
