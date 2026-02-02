@@ -4823,7 +4823,9 @@ void LocalCcShards::DataSyncForHashPartition(
         partition_number_this_core ? updated_memory / partition_number_this_core
                                    : 0;
     const size_t flush_buffer_size =
-        cur_flush_buffers_[DataSyncWorkerToFlushDataWorker(worker_idx)]
+        cur_flush_buffers_[DataSyncWorkerToFlushDataWorker(static_cast<size_t>(
+                               data_sync_task->id_ %
+                               data_sync_worker_ctx_.worker_num_))]
             ->GetFlushBufferSize();
 
     const size_t partition_number_per_scan =
