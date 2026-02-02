@@ -131,7 +131,15 @@ LocalCcShards::LocalCcShards(
 #endif
 
       data_sync_worker_ctx_(conf.at("core_num")),
-      flush_data_worker_ctx_(conf.at("core_num")),
+#ifdef EXT_TX_PROC_ENABLED
+      flush_data_worker_ctx_(
+          conf.at("core_num") >= 2
+              ? std::min(conf.at("core_num") / 2, (uint32_t) 10)
+              : 1),
+#else
+      flush_data_worker_ctx_(
+          std::min(static_cast<int>(conf.at("core_num")), 10)),
+#endif
       // cur_flush_buffers_ will be resized in StartBackgroudWorkers()
       // when worker_num_ is determined
       data_sync_mem_controller_(static_cast<uint64_t>(
@@ -275,6 +283,7 @@ void LocalCcShards::StartBackgroudWorkers()
     // Note: worker_num_ is const, so we can't modify it. We use
     // data_sync_worker_ctx_.worker_num_ to initialize the vectors and assert
     // they match.
+    /*
     assert(flush_data_worker_ctx_.worker_num_ ==
                data_sync_worker_ctx_.worker_num_ &&
            "FlushDataWorker count must equal DataSyncWorker count");
@@ -287,9 +296,10 @@ void LocalCcShards::StartBackgroudWorkers()
                    << "). They must be equal for per-worker flush buffers to "
                       "work correctly.";
     }
+    */
 
     // Initialize per-worker data structures
-    const size_t worker_num = data_sync_worker_ctx_.worker_num_;
+    const size_t worker_num = flush_data_worker_ctx_.worker_num_;
     // Calculate buffer size
     const uint64_t buffer_size =
         data_sync_mem_controller_.FlushMemoryQuota() / (worker_num);
@@ -4812,7 +4822,7 @@ void LocalCcShards::DataSyncForHashPartition(
     }
 
     auto core_number = cc_shards_.size();
-    constexpr size_t partition_number = 1024;
+    const size_t partition_number = total_hash_partitions;
     auto partition_number_this_core =
         partition_number / core_number +
         (worker_idx < partition_number % core_number);
@@ -4828,7 +4838,8 @@ void LocalCcShards::DataSyncForHashPartition(
         partition_number_this_core ? updated_memory / partition_number_this_core
                                    : 0;
     const size_t flush_buffer_size =
-        cur_flush_buffers_[worker_idx]->GetFlushBufferSize();
+        cur_flush_buffers_[DataSyncWorkerToFlushDataWorker(worker_idx)]
+            ->GetFlushBufferSize();
 
     const size_t partition_number_per_scan =
         std::max(1UL,
@@ -4870,8 +4881,10 @@ void LocalCcShards::DataSyncForHashPartition(
              &filter_func =
                  data_sync_task->filter_lambda_](const size_t hash_code)
         {
-            return (hash_code & 0x3FF) >= min_partition_id_this_scan &&
-                   (hash_code & 0x3FF) <= max_partition_id_this_scan &&
+            return (hash_code % total_hash_partitions) >=
+                       min_partition_id_this_scan &&
+                   (hash_code % total_hash_partitions) <=
+                       max_partition_id_this_scan &&
                    (!filter_func || filter_func(hash_code));
         };
 
@@ -5803,19 +5816,24 @@ void LocalCcShards::SplitFlushRange(
     txservice::CommitTx(split_txm);
 }
 
+size_t LocalCcShards::DataSyncWorkerToFlushDataWorker(
+    size_t data_sync_worker_id) const
+{
+    return data_sync_worker_id % flush_data_worker_ctx_.worker_num_;
+}
+
 void LocalCcShards::AddFlushTaskEntry(std::unique_ptr<FlushTaskEntry> &&entry)
 {
-    assert(cur_flush_buffers_.size() == data_sync_worker_ctx_.worker_num_);
-    assert(pending_flush_work_.size() == data_sync_worker_ctx_.worker_num_);
+    assert(cur_flush_buffers_.size() == flush_data_worker_ctx_.worker_num_);
+    assert(pending_flush_work_.size() == flush_data_worker_ctx_.worker_num_);
     assert(entry->data_sync_task_ != nullptr);
 
-    // Compute target buffer/queue based on partition type before adding to
-    // buffer
+    // Compute target buffer/queue: map data_sync task id to fixed flush worker
     const auto &data_sync_task = entry->data_sync_task_;
-    size_t core_number = cur_flush_buffers_.size();
-    int32_t id = data_sync_task->id_;
-    size_t target = static_cast<size_t>(id) % core_number;
+    size_t target = DataSyncWorkerToFlushDataWorker(static_cast<size_t>(
+        data_sync_task->id_ % data_sync_worker_ctx_.worker_num_));
 
+    std::unique_lock<std::mutex> worker_lk(flush_data_worker_ctx_.mux_);
     auto &cur_flush_buffer = *cur_flush_buffers_[target];
 
     cur_flush_buffer.AddFlushTaskEntry(std::move(entry));
@@ -5824,8 +5842,6 @@ void LocalCcShards::AddFlushTaskEntry(std::unique_ptr<FlushTaskEntry> &&entry)
         cur_flush_buffer.MoveFlushData(false);
     if (flush_data_task != nullptr)
     {
-        std::unique_lock<std::mutex> worker_lk(flush_data_worker_ctx_.mux_);
-
         auto &pending_flush_work = pending_flush_work_[target];
 
         // Try to merge with the last task if queue is not empty
@@ -5854,8 +5870,12 @@ void LocalCcShards::AddFlushTaskEntry(std::unique_ptr<FlushTaskEntry> &&entry)
 
 void LocalCcShards::FlushCurrentFlushBuffer()
 {
+    assert(cur_flush_buffers_.size() == flush_data_worker_ctx_.worker_num_);
+    assert(pending_flush_work_.size() == flush_data_worker_ctx_.worker_num_);
+
+    std::unique_lock<std::mutex> worker_lk(flush_data_worker_ctx_.mux_);
     // Flush all workers' buffers
-    for (size_t worker_idx = 0; worker_idx < cur_flush_buffers_.size();
+    for (int worker_idx = 0; worker_idx < flush_data_worker_ctx_.worker_num_;
          ++worker_idx)
     {
         auto &cur_flush_buffer = *cur_flush_buffers_[worker_idx];
@@ -5865,8 +5885,6 @@ void LocalCcShards::FlushCurrentFlushBuffer()
             cur_flush_buffer.MoveFlushData(true);
         if (flush_data_task != nullptr)
         {
-            std::unique_lock<std::mutex> worker_lk(flush_data_worker_ctx_.mux_);
-
             // Try to merge with the last task if queue is not empty
             if (!pending_flush_work.empty())
             {
@@ -5998,8 +6016,7 @@ void LocalCcShards::FlushData(std::unique_lock<std::mutex> &flush_worker_lk,
                     for (auto &[core_idx, cce_entries] : cce_entries_map)
                     {
                         updated_ckpt_ts_core_ids.insert(core_idx);
-                        EnqueueLowPriorityCcRequestToShard(core_idx,
-                                                           &update_cce_req);
+                        EnqueueToCcShard(core_idx, &update_cce_req);
                     }
                     update_cce_req.Wait();
                 }
@@ -6018,7 +6035,7 @@ void LocalCcShards::FlushData(std::unique_lock<std::mutex> &flush_worker_lk,
         updated_ckpt_ts_core_ids.size());
     for (uint16_t core_idx : updated_ckpt_ts_core_ids)
     {
-        EnqueueLowPriorityCcRequestToShard(core_idx, &reset_cc);
+        EnqueueToCcShard(core_idx, &reset_cc);
     }
     reset_cc.Wait();
 
@@ -6039,6 +6056,7 @@ void LocalCcShards::FlushData(std::unique_lock<std::mutex> &flush_worker_lk,
 
 void LocalCcShards::FlushDataWorker(size_t worker_idx)
 {
+    assert(worker_idx < flush_data_worker_ctx_.worker_num_);
     assert(worker_idx < pending_flush_work_.size());
     assert(worker_idx < cur_flush_buffers_.size());
 
