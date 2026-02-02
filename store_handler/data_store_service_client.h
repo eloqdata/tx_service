@@ -467,6 +467,11 @@ public:
 
     void OnShutdown() override;
 
+    bool RemoveBackupSnapshot(const std::string &backup_name) override
+    {
+        return true;
+    }
+
     /**
      * Serialize a record with is_deleted flag and record string.
      * @param is_deleted
