@@ -65,12 +65,14 @@ inline void BuildKey(const WriteRecordsRequest &write_req,
     {
         total_size += write_req.GetKeyPart(key_first_idx + i).size();
     }
-    key_out.reserve(key_out.size() + total_size);
+    key_out.resize(total_size);
     size_t part_idx = key_first_idx;
+    size_t pos = 0;
     for (uint16_t i = 0; i < key_parts; ++i, ++part_idx)
     {
         const std::string_view part = write_req.GetKeyPart(part_idx);
-        key_out.append(part.data(), part.size());
+        std::copy(part.data(), part.data() + part.size(), key_out.data() + pos);
+        pos += part.size();
     }
 }
 
@@ -84,12 +86,14 @@ inline void BuildValue(const WriteRecordsRequest &write_req,
     {
         total_size += write_req.GetRecordPart(rec_first_idx + i).size();
     }
-    rec_out.reserve(rec_out.size() + total_size);
+    rec_out.resize(total_size);
     size_t part_idx = rec_first_idx;
+    size_t pos = 0;
     for (uint16_t i = 0; i < rec_parts; ++i, ++part_idx)
     {
         const std::string_view part = write_req.GetRecordPart(part_idx);
-        rec_out.append(part.data(), part.size());
+        std::copy(part.data(), part.data() + part.size(), rec_out.data() + pos);
+        pos += part.size();
     }
 }
 
