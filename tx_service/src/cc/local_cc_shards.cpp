@@ -283,21 +283,6 @@ void LocalCcShards::StartBackgroudWorkers()
     // Note: worker_num_ is const, so we can't modify it. We use
     // data_sync_worker_ctx_.worker_num_ to initialize the vectors and assert
     // they match.
-    /*
-    assert(flush_data_worker_ctx_.worker_num_ ==
-               data_sync_worker_ctx_.worker_num_ &&
-           "FlushDataWorker count must equal DataSyncWorker count");
-    if (flush_data_worker_ctx_.worker_num_ != data_sync_worker_ctx_.worker_num_)
-    {
-        LOG(FATAL) << "FlushDataWorker count ("
-                   << flush_data_worker_ctx_.worker_num_
-                   << ") != DataSyncWorker count ("
-                   << data_sync_worker_ctx_.worker_num_
-                   << "). They must be equal for per-worker flush buffers to "
-                      "work correctly.";
-    }
-    */
-
     // Initialize per-worker data structures
     const size_t worker_num = flush_data_worker_ctx_.worker_num_;
     // Calculate buffer size
