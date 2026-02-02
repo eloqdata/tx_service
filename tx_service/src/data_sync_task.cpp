@@ -80,7 +80,7 @@ DataSyncTask::DataSyncTask(const TableName &table_name,
       during_split_range_(true),
       export_base_table_items_(export_base_table_items),
       tx_number_(txn),
-      sync_on_leader_(true)
+      run_on_leader_node_(true)
 {
     assert(!table_name_.IsHashPartitioned());
     if (start_key_.KeyPtr() ==

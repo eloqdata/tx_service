@@ -1071,7 +1071,6 @@ void CcShard::CheckRecoverTx(TxNumber lock_holding_txn,
 
         if (Sharder::Instance().LeaderTerm(cc_ng_id) > 0)
         {
-            // TODO(ysw): check candidate leader term?
             LOG(WARNING) << "orphan lock detected, lock holding txn: "
                          << lock_holding_txn << ", try to recover";
             Sharder::Instance().RecoverTx(lock_holding_txn,

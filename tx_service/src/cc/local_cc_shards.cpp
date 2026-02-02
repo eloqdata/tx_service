@@ -3252,7 +3252,7 @@ void LocalCcShards::PostProcessFlushTaskEntries(
                 if (!task->during_split_range_)
                 {
                     uint64_t last_sync_ts =
-                        task->sync_on_leader_ ? task->data_sync_ts_ : 0;
+                        task->run_on_leader_node_ ? task->data_sync_ts_ : 0;
                     range_entry->UpdateLastDataSyncTS(last_sync_ts);
                     range_entry->UnPinStoreRange();
                     // Commit the data sync txm
@@ -3409,7 +3409,7 @@ void LocalCcShards::PostProcessRangePartitionDataSyncTask(
             if (!task->during_split_range_)
             {
                 uint64_t last_sync_ts =
-                    task->sync_on_leader_ ? task->data_sync_ts_ : 0;
+                    task->run_on_leader_node_ ? task->data_sync_ts_ : 0;
                 range_entry->UpdateLastDataSyncTS(last_sync_ts);
                 range_entry->UnPinStoreRange();
                 // Commit the data sync txm
@@ -3631,7 +3631,7 @@ void LocalCcShards::DataSyncForRangePartition(
             // might miss the data that has not been recovered yet.
             data_sync_task->SetErrorCode(
                 CcErrorCode::REQUESTED_NODE_NOT_LEADER);
-            data_sync_task->SetSyncOnLeader(false);
+            data_sync_task->SetRunOnLeaderNode(false);
         }
 
         defer_unpin = std::shared_ptr<void>(
@@ -3849,6 +3849,10 @@ void LocalCcShards::DataSyncForRangePartition(
         assert(store_range);
 
         last_sync_ts = is_dirty ? 0 : range_entry->GetLastSyncTs();
+        if (Sharder::Instance().CandidateLeaderTerm(ng_id) > 0)
+        {
+            data_sync_task->SetRunOnLeaderNode(false);
+        }
     }
 
     if (table_name.IsBase())
@@ -3859,9 +3863,6 @@ void LocalCcShards::DataSyncForRangePartition(
     {
         schema_version = table_schema->IndexKeySchema(table_name)->SchemaTs();
     }
-
-    bool run_on_candidate_node =
-        Sharder::Instance().CandidateLeaderTerm(ng_id) > 0;
 
     // Scan the delta slice size
     std::map<TxKey, int64_t> slices_delta_size;
@@ -3926,7 +3927,7 @@ void LocalCcShards::DataSyncForRangePartition(
             txservice::CommitTx(data_sync_txm);
 
             // Update the task status for this range.
-            uint64_t last_sync_ts = data_sync_task->sync_on_leader_
+            uint64_t last_sync_ts = data_sync_task->run_on_leader_node_
                                         ? data_sync_task->data_sync_ts_
                                         : 0;
             range_entry->UpdateLastDataSyncTS(last_sync_ts);
@@ -4087,7 +4088,7 @@ void LocalCcShards::DataSyncForRangePartition(
                                          store_range,
                                          &slices_delta_size,
                                          schema_version,
-                                         run_on_candidate_node);
+                                         !data_sync_task->run_on_leader_node_);
 
     {
         // DataSync Worker will call PostProcessDataSyncTask() to decrement
@@ -4511,7 +4512,7 @@ void LocalCcShards::PostProcessHashPartitionDataSyncTask(
                         // nullptr.
                         assert(catalog_entry);
                         uint64_t last_sync_ts =
-                            task->sync_on_leader_ ? task->data_sync_ts_ : 0;
+                            task->run_on_leader_node_ ? task->data_sync_ts_ : 0;
                         catalog_entry->UpdateLastDataSyncTS(last_sync_ts,
                                                             task->id_);
                     }
@@ -4693,7 +4694,7 @@ void LocalCcShards::DataSyncForHashPartition(
             // might miss the data that has not been recovered yet.
             data_sync_task->SetErrorCode(
                 CcErrorCode::REQUESTED_NODE_NOT_LEADER);
-            data_sync_task->SetSyncOnLeader(false);
+            data_sync_task->SetRunOnLeaderNode(false);
         }
     }
 
@@ -5734,7 +5735,7 @@ void LocalCcShards::SplitFlushRange(
     }
 
     uint64_t last_sync_ts =
-        data_sync_task->sync_on_leader_ ? data_sync_task->data_sync_ts_ : 0;
+        data_sync_task->run_on_leader_node_ ? data_sync_task->data_sync_ts_ : 0;
     range_entry->UpdateLastDataSyncTS(last_sync_ts);
     range_entry->UnPinStoreRange();
 
