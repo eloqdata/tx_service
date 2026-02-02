@@ -923,7 +923,7 @@ void DataStoreServiceClusterManager::PrepareShardingError(
     DLOG(INFO) << "=====PrepareShardingError";
     result->set_error_msg("Requested data not on local node.");
     auto *key_sharding_changed_message = result->mutable_new_key_sharding();
-    if (IsMemberOfShard(this_node_, shard_id))
+    if (!IsMemberOfShard(this_node_, shard_id))
     {
         // Node group changed - send full cluster config
         key_sharding_changed_message->set_type(
