@@ -68,6 +68,42 @@ private:
     Poolable *data_store_request_ptr_{nullptr};
 };
 
+template <>
+struct EloqStoreOperationData<::eloqstore::BatchWriteRequest> : public Poolable
+{
+    EloqStoreOperationData() = default;
+    EloqStoreOperationData(const EloqStoreOperationData &rhs) = delete;
+    EloqStoreOperationData(EloqStoreOperationData &&rhs) = delete;
+
+    void Reset(Poolable *ds_req_ptr)
+    {
+        data_store_request_ptr_ = ds_req_ptr;
+    }
+
+    void Clear() override
+    {
+        data_store_request_ptr_->Clear();
+        data_store_request_ptr_->Free();
+        data_store_request_ptr_ = nullptr;
+    }
+
+    ::eloqstore::BatchWriteRequest &EloqStoreRequest()
+    {
+        return eloq_store_request_;
+    }
+
+    Poolable *DataStoreRequest() const
+    {
+        return data_store_request_ptr_;
+    }
+
+    std::vector<::eloqstore::WriteDataEntry> batch_;
+
+private:
+    ::eloqstore::BatchWriteRequest eloq_store_request_;
+    Poolable *data_store_request_ptr_{nullptr};
+};
+
 struct ScanDeleteOperationData : public Poolable
 {
 private:
