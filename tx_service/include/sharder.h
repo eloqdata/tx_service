@@ -786,7 +786,6 @@ private:
 private:
     uint32_t node_id_;
     uint32_t native_ng_;
-    fault::CcNode *native_cc_node_{};
     std::string host_name_;
     uint16_t port_;
     // Whether is candidate of native node group.
