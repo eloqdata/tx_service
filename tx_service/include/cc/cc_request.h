@@ -4319,7 +4319,7 @@ public:
         cv_.wait(lk, [this] { return unfinished_cnt_ == 0; });
     }
 
-    void Reset(OpType op_type = OpType::Normal)
+    void Reset()
     {
         std::lock_guard<std::mutex> lk(mux_);
         unfinished_cnt_ = 1;
@@ -4349,7 +4349,6 @@ public:
         }
 
         err_ = CcErrorCode::NO_ERROR;
-        op_type_ = op_type;
         slice_coordinator_.Reset();
     }
 
@@ -4434,11 +4433,6 @@ public:
     {
         std::lock_guard<std::mutex> lk(mux_);
         err_ = CcErrorCode::LOG_NOT_TRUNCATABLE;
-    }
-
-    bool IsTerminated() const
-    {
-        return op_type_ == OpType::Terminated;
     }
 
     StoreRange *StoreRangePtr() const
@@ -4739,8 +4733,6 @@ private:
     // scan is part of range split which block the schema change
     // TODO(xxx) general solution for #1130
     const uint64_t schema_version_{0};
-
-    OpType op_type_{OpType::Normal};
 
     template <typename KeyT,
               typename ValueT,
