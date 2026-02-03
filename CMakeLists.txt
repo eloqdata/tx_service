@@ -351,6 +351,9 @@ endif()
 # Build the library (static or shared based on BUILD_SHARED_LIBS option)
 ADD_LIBRARY(${DATA_SUBSTRATE_LIB} ${DATA_SUBSTRATE_SOURCES})
 
+# C++20 required for PutAllCoro/FlushDataCoro (store handler + txservice)
+target_compile_features(${DATA_SUBSTRATE_LIB} PRIVATE cxx_std_20)
+
 # Link with dependencies
 SET(DATA_SUBSTRATE_LINK_LIBS
     txservice
