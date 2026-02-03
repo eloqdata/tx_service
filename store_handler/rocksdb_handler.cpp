@@ -528,6 +528,15 @@ bool RocksDBHandler::PutAll(
     return true;
 }
 
+txservice::Task<bool> RocksDBHandler::PutAllCoro(
+    txservice::TaskScheduler *,
+    std::unordered_map<std::string_view,
+                       std::vector<std::unique_ptr<txservice::FlushTaskEntry>>>
+        &flush_task)
+{
+    co_return PutAll(flush_task);
+}
+
 bool RocksDBHandler::PersistKV(const std::vector<std::string> &kv_table_names)
 {
     std::shared_lock<std::shared_mutex> db_lk(db_mux_);

@@ -299,8 +299,7 @@ void LocalCcShards::StartBackgroudWorkers()
     flush_coro_schedulers_.clear();
     for (size_t i = 0; i < worker_num; ++i)
     {
-        flush_coro_schedulers_.emplace_back(
-            std::make_unique<FlushCoroTaskScheduler>());
+        flush_coro_schedulers_.emplace_back(std::make_unique<TaskScheduler>());
     }
 
     // Starts flush worker threads firstly.
@@ -5900,8 +5899,8 @@ void LocalCcShards::FlushCurrentFlushBuffer()
     }
 }
 
-FlushCoroTask LocalCcShards::FlushDataCoro(
-    FlushCoroTaskScheduler *sched, std::unique_ptr<FlushDataTask> cur_work)
+Task<void> LocalCcShards::FlushDataCoro(TaskScheduler *sched,
+                                        std::unique_ptr<FlushDataTask> cur_work)
 {
     auto &flush_task_entries = cur_work->flush_task_entries_;
     bool succ = true;
@@ -5915,18 +5914,16 @@ FlushCoroTask LocalCcShards::FlushDataCoro(
                           "storage failed";
         }
     }
-    co_await FlushCoroYield(sched);
 
     if (succ)
     {
-        succ = store_hd_->PutAll(flush_task_entries);
+        succ = co_await store_hd_->PutAllCoro(sched, flush_task_entries);
         if (!succ)
         {
             LOG(ERROR) << "DataSync PutAll flush to kv "
                           "storage failed";
         }
     }
-    co_await FlushCoroYield(sched);
 
     if (succ && EnableMvcc())
     {
@@ -5937,7 +5934,6 @@ FlushCoroTask LocalCcShards::FlushDataCoro(
                           "kv storage failed";
         }
     }
-    co_await FlushCoroYield(sched);
 
     if (succ && store_hd_->NeedPersistKV())
     {
@@ -6002,7 +5998,7 @@ FlushCoroTask LocalCcShards::FlushDataCoro(
                         updated_ckpt_ts_core_ids.insert(core_idx);
                         EnqueueToCcShard(core_idx, &update_cce_req);
                     }
-                    co_await FlushCoroTaskAwaitable<void>{
+                    co_await TaskAwaitable<void>{
                         sched,
                         [&update_cce_req](auto cb)
                         { update_cce_req.WaitAsync(std::move(cb)); },
@@ -6012,7 +6008,6 @@ FlushCoroTask LocalCcShards::FlushDataCoro(
             }
         }
     }
-    co_await FlushCoroYield(sched);
 
     WaitableCc reset_cc(
         [&](CcShard &ccs)
@@ -6025,11 +6020,10 @@ FlushCoroTask LocalCcShards::FlushDataCoro(
     {
         EnqueueToCcShard(core_idx, &reset_cc);
     }
-    co_await FlushCoroTaskAwaitable<void>{
+    co_await TaskAwaitable<void>{
         sched,
         [&reset_cc](auto cb) { reset_cc.WaitAsync(std::move(cb)); },
         [&reset_cc]() { return reset_cc.IsFinished(); }};
-    co_await FlushCoroYield(sched);
 
     auto ckpt_err = succ ? DataSyncTask::CkptErrorCode::NO_ERROR
                          : DataSyncTask::CkptErrorCode::FLUSH_ERROR;
@@ -6051,7 +6045,7 @@ void LocalCcShards::FlushData(std::unique_lock<std::mutex> &flush_worker_lk,
     assert(worker_idx < pending_flush_work_.size());
     assert(worker_idx < flush_coro_schedulers_.size());
     auto &pending_flush_work = pending_flush_work_[worker_idx];
-    FlushCoroTaskScheduler *sched = flush_coro_schedulers_[worker_idx].get();
+    TaskScheduler *sched = flush_coro_schedulers_[worker_idx].get();
 
     // Retrieve first pending work and pop it (FIFO).
     std::unique_ptr<FlushDataTask> cur_work =
@@ -6063,7 +6057,7 @@ void LocalCcShards::FlushData(std::unique_lock<std::mutex> &flush_worker_lk,
 
     flush_worker_lk.unlock();
 
-    FlushCoroTask t = FlushDataCoro(sched, std::move(cur_work));
+    Task<void> t = FlushDataCoro(sched, std::move(cur_work));
     sched->PostReadyHandle(t.handle);
 
     flush_worker_lk.lock();
@@ -6079,7 +6073,7 @@ void LocalCcShards::FlushDataWorker(size_t worker_idx)
 
     auto &pending_flush_work = pending_flush_work_[worker_idx];
     auto &cur_flush_buffer = *cur_flush_buffers_[worker_idx];
-    FlushCoroTaskScheduler *sched = flush_coro_schedulers_[worker_idx].get();
+    TaskScheduler *sched = flush_coro_schedulers_[worker_idx].get();
 
     using clock = std::chrono::steady_clock;
     size_t previous_flush_size = 0;

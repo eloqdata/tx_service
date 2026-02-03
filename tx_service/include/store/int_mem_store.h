@@ -87,6 +87,16 @@ public:
         return true;
     }
 
+    txservice::Task<bool> PutAllCoro(
+        txservice::TaskScheduler *,
+        std::unordered_map<
+            std::string_view,
+            std::vector<std::unique_ptr<txservice::FlushTaskEntry>>>
+            &flush_task) override
+    {
+        co_return PutAll(flush_task);
+    }
+
     void UpsertTable(
         const txservice::TableSchema *old_table_schema,
         const txservice::TableSchema *table_schema,

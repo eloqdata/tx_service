@@ -30,6 +30,7 @@
 #include <vector>
 
 #include "catalog_factory.h"
+#include "cc/flush_coro_scheduler.h"
 #include "cc_handler_result.h"
 #include "cc_req_base.h"
 #include "cc_req_misc.h"  // FetchRangeSlicesReq
@@ -86,6 +87,18 @@ public:
                         std::string_view,
                         std::vector<std::unique_ptr<txservice::FlushTaskEntry>>>
                             &flush_task) = 0;
+
+    /**
+     * @brief Coroutine version of PutAll; use when sched is non-null (e.g. from
+     * FlushDataCoro). Returns an awaitable; co_await to get bool. Uses C++20
+     * coroutines only; no cv_.wait.
+     */
+    virtual Task<bool> PutAllCoro(
+        TaskScheduler *sched,
+        std::unordered_map<
+            std::string_view,
+            std::vector<std::unique_ptr<txservice::FlushTaskEntry>>>
+            &flush_task) = 0;
 
     /**
      * @brief indicate end of flush entries in a single ckpt for \@param batch

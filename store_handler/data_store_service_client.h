@@ -220,6 +220,13 @@ public:
                 std::vector<std::unique_ptr<txservice::FlushTaskEntry>>>
                     &flush_task) override;
 
+    txservice::Task<bool> PutAllCoro(
+        txservice::TaskScheduler *sched,
+        std::unordered_map<
+            std::string_view,
+            std::vector<std::unique_ptr<txservice::FlushTaskEntry>>>
+            &flush_task) override;
+
     bool NeedPersistKV() override
     {
         return true;
@@ -589,6 +596,34 @@ private:
         const uint16_t record_parts_count = 1);
 
     void BatchWriteRecordsInternal(BatchWriteRecordsClosure *closure);
+
+    /**
+     * Coroutine-path: one-shot batch write; completion reported via
+     * TaskAwaitable<bool>. Callback posts handle to sched only.
+     */
+    txservice::TaskAwaitable<bool> BatchWriteRecordsAsync(
+        txservice::TaskScheduler *sched,
+        std::string_view kv_table_name,
+        int32_t partition_id,
+        uint32_t shard_id,
+        std::vector<std::string_view> &&key_parts,
+        std::vector<std::string_view> &&record_parts,
+        std::vector<uint64_t> &&records_ts,
+        std::vector<uint64_t> &&records_ttl,
+        std::vector<WriteOpType> &&op_types,
+        bool skip_wal,
+        PartitionFlushState *partition_state,
+        uint16_t key_parts_count,
+        uint16_t record_parts_count);
+
+    /**
+     * Coroutine-path: process one partition (loop GetNextBatch, co_await
+     * BatchWriteRecordsAsync, optional Yield). Used by PutAllCoro.
+     */
+    txservice::Task<bool> ProcessPartitionCoro(
+        txservice::TaskScheduler *sched,
+        PartitionFlushState *partition_state,
+        PartitionCallbackData *callback_data);
 
     /**
      * Helper methods for concurrent PutAll implementation

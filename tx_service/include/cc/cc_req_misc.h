@@ -1088,7 +1088,7 @@ private:
     NodeGroupId node_group_id_;
     int64_t term_;
     TableName table_name_;
-    bthread::Mutex mux_;
+    mutable bthread::Mutex mux_;
     bthread::ConditionVariable cv_;
 };
 

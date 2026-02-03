@@ -277,6 +277,13 @@ public:
                 std::vector<std::unique_ptr<txservice::FlushTaskEntry>>> &batch)
         override;
 
+    txservice::Task<bool> PutAllCoro(
+        txservice::TaskScheduler *sched,
+        std::unordered_map<
+            std::string_view,
+            std::vector<std::unique_ptr<txservice::FlushTaskEntry>>>
+            &flush_task) override;
+
     /**
      * @brief indicate end of flush entries in a single ckpt for \@param
      * batch to base table or skindex table in data store, stop and return

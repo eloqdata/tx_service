@@ -2472,7 +2472,7 @@ private:
     WorkerThreadContext flush_data_worker_ctx_;
 
     // Per-worker C++20 coroutine scheduler for FlushData (no bthread).
-    std::vector<std::unique_ptr<FlushCoroTaskScheduler>> flush_coro_schedulers_;
+    std::vector<std::unique_ptr<TaskScheduler>> flush_coro_schedulers_;
 
     // Per-worker flush buffers. Each DataSyncWorker has its own buffer.
     // New flush task entry will be added to the corresponding buffer. This task
@@ -2492,8 +2492,8 @@ private:
 
     // C++20 coroutine for one FlushData task (driven by
     // flush_coro_schedulers_).
-    FlushCoroTask FlushDataCoro(FlushCoroTaskScheduler *sched,
-                                std::unique_ptr<FlushDataTask> cur_work);
+    Task<void> FlushDataCoro(TaskScheduler *sched,
+                             std::unique_ptr<FlushDataTask> cur_work);
 
     // Memory controller for data sync.
     DataSyncMemoryController data_sync_mem_controller_;

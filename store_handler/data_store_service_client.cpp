@@ -28,6 +28,7 @@
 #include <boost/uuid/uuid_generators.hpp>
 #include <boost/uuid/uuid_io.hpp>
 #include <cstdint>
+#include <functional>
 #include <memory>
 #include <random>
 #include <string>
@@ -46,6 +47,7 @@
 #include "sharder.h"
 #include "store_util.h"  // host_to_big_endian
 #include "tx_key.h"
+#include "tx_service/include/cc/flush_coro_scheduler.h"
 #include "tx_service/include/cc/local_cc_shards.h"
 #include "tx_service/include/error_messages.h"
 #include "tx_service/include/sequences/sequences.h"
@@ -80,6 +82,33 @@ thread_local ObjectPool<PartitionFlushState> partition_flush_state_pool_;
 thread_local ObjectPool<PartitionCallbackData> partition_callback_data_pool_;
 
 static const uint64_t MAX_WRITE_BATCH_SIZE = 64 * 1024 * 1024;  // 64MB
+
+namespace
+{
+struct BatchWriteRecordsCoroContext
+{
+    std::function<void(bool)> done_cb;
+    remote::CommonResult result;
+    PartitionFlushState *partition_state{nullptr};
+    std::shared_ptr<BatchWriteRecordsCoroContext> self;
+};
+
+void BatchWriteRecordsCoroCallback(void *data,
+                                   ::google::protobuf::Closure *,
+                                   DataStoreServiceClient &,
+                                   const remote::CommonResult &result)
+{
+    auto *ctx = reinterpret_cast<BatchWriteRecordsCoroContext *>(data);
+    ctx->result.CopyFrom(result);
+    bool ok = (result.error_code() == remote::DataStoreError::NO_ERROR);
+    if (!ok && ctx->partition_state)
+    {
+        ctx->partition_state->MarkFailed(ctx->result);
+    }
+    ctx->done_cb(ok);
+    ctx->self.reset();
+}
+}  // namespace
 
 static const std::string_view kv_table_catalogs_name("table_catalogs");
 static const std::string_view kv_database_catalogs_name("db_catalogs");
@@ -495,6 +524,168 @@ bool DataStoreServiceClient::PutAll(
     }
 
     return true;
+}
+
+txservice::Task<bool> DataStoreServiceClient::PutAllCoro(
+    txservice::TaskScheduler *sched,
+    std::unordered_map<std::string_view,
+                       std::vector<std::unique_ptr<txservice::FlushTaskEntry>>>
+        &flush_task)
+{
+    DLOG(INFO) << "DataStoreServiceClient::PutAllCoro called with "
+               << flush_task.size() << " tables to flush.";
+    uint64_t now = txservice::LocalCcShards::ClockTsInMillseconds();
+    SyncPutAllData *sync_putall = sync_putall_data_pool_.NextObject();
+    PoolableGuard sync_putall_guard(sync_putall);
+    sync_putall->Reset();
+    size_t records_count = 0;
+
+    std::vector<PartitionCallbackData *> callback_data_list;
+    for (auto &[kv_table_name, entries] : flush_task)
+    {
+        auto &table_name = entries.front()->data_sync_task_->table_name_;
+
+        std::unordered_map<uint32_t, std::vector<std::pair<size_t, size_t>>>
+            hash_partitions_map;
+        std::unordered_map<uint32_t, std::vector<size_t>> range_partitions_map;
+
+        size_t flush_task_entry_idx = 0;
+        for (auto &entry : entries)
+        {
+            auto &batch = *entry->data_sync_vec_;
+            if (batch.empty())
+            {
+                continue;
+            }
+            records_count += batch.size();
+
+            if (table_name.IsHashPartitioned())
+            {
+                for (size_t i = 0; i < batch.size(); ++i)
+                {
+                    int32_t kv_partition_id =
+                        KvPartitionIdOf(batch[i].partition_id_, false);
+                    auto [it, inserted] =
+                        hash_partitions_map.try_emplace(kv_partition_id);
+                    if (inserted)
+                    {
+                        it->second.reserve(batch.size() / 1024 * 2 *
+                                           entries.size());
+                    }
+                    it->second.emplace_back(
+                        std::make_pair(flush_task_entry_idx, i));
+                }
+            }
+            else
+            {
+                int32_t partition_id =
+                    KvPartitionIdOf(batch[0].partition_id_, true);
+                auto [it, inserted] =
+                    range_partitions_map.try_emplace(partition_id);
+                it->second.emplace_back(flush_task_entry_idx);
+            }
+            flush_task_entry_idx++;
+        }
+
+        uint16_t parts_cnt_per_key = 1;
+        uint16_t parts_cnt_per_record = 5;
+        if (table_name.IsHashPartitioned() && table_name.IsObjectTable())
+        {
+            parts_cnt_per_record = 1;
+        }
+
+        for (auto &[partition_id, flush_recs] : hash_partitions_map)
+        {
+            auto partition_state = partition_flush_state_pool_.NextObject();
+            partition_state->Reset(partition_id, false);
+            auto callback_data = partition_callback_data_pool_.NextObject();
+            callback_data->Reset(partition_state, sync_putall, kv_table_name);
+
+            PreparePartitionBatches(*partition_state,
+                                    flush_recs,
+                                    entries,
+                                    table_name,
+                                    parts_cnt_per_key,
+                                    parts_cnt_per_record,
+                                    now);
+
+            sync_putall->partition_states_.push_back(partition_state);
+            callback_data_list.push_back(callback_data);
+        }
+
+        hash_partitions_map.clear();
+
+        for (auto &[partition_id, flush_recs] : range_partitions_map)
+        {
+            auto partition_state = partition_flush_state_pool_.NextObject();
+            partition_state->Reset(partition_id, true);
+            auto callback_data = partition_callback_data_pool_.NextObject();
+            callback_data->Reset(partition_state, sync_putall, kv_table_name);
+
+            PrepareRangePartitionBatches(*partition_state,
+                                         flush_recs,
+                                         entries,
+                                         table_name,
+                                         parts_cnt_per_key,
+                                         parts_cnt_per_record,
+                                         now);
+
+            sync_putall->partition_states_.push_back(partition_state);
+            callback_data_list.push_back(callback_data);
+        }
+
+        range_partitions_map.clear();
+    }
+
+    sync_putall->total_partitions_ = sync_putall->partition_states_.size();
+
+    std::vector<txservice::Task<bool>> sub_tasks;
+    sub_tasks.reserve(callback_data_list.size());
+    for (size_t i = 0; i < callback_data_list.size(); ++i)
+    {
+        auto *partition_state = sync_putall->partition_states_[i];
+        auto *callback_data = callback_data_list[i];
+        sub_tasks.push_back(
+            ProcessPartitionCoro(sched, partition_state, callback_data));
+        sched->PostReadyHandle(sub_tasks.back().handle);
+    }
+
+    bool ok = true;
+    for (auto &t : sub_tasks)
+    {
+        bool part_ok = co_await t;
+        ok = ok && part_ok;
+    }
+
+    for (auto &partition_state : sync_putall->partition_states_)
+    {
+        if (partition_state->IsFailed())
+        {
+            LOG(ERROR) << "PutAllCoro failed for partition "
+                       << partition_state->partition_id << " with error: "
+                       << partition_state->result.error_msg();
+            for (auto &callback_data : callback_data_list)
+            {
+                callback_data->Clear();
+                callback_data->Free();
+            }
+            co_return false;
+        }
+    }
+
+    for (auto &callback_data : callback_data_list)
+    {
+        callback_data->Clear();
+        callback_data->Free();
+    }
+
+    if (metrics::enable_kv_metrics)
+    {
+        metrics::kv_meter->Collect(
+            metrics::NAME_KV_FLUSH_ROWS_TOTAL, records_count, "base");
+    }
+
+    co_return true;
 }
 
 /**
@@ -5028,6 +5219,90 @@ void DataStoreServiceClient::BatchWriteRecordsInternal(
                                closure->RemoteResponse(),
                                closure);
     }
+}
+
+txservice::TaskAwaitable<bool> DataStoreServiceClient::BatchWriteRecordsAsync(
+    txservice::TaskScheduler *sched,
+    std::string_view kv_table_name,
+    int32_t partition_id,
+    uint32_t shard_id,
+    std::vector<std::string_view> &&key_parts,
+    std::vector<std::string_view> &&record_parts,
+    std::vector<uint64_t> &&records_ts,
+    std::vector<uint64_t> &&records_ttl,
+    std::vector<WriteOpType> &&op_types,
+    bool skip_wal,
+    PartitionFlushState *partition_state,
+    uint16_t key_parts_count,
+    uint16_t record_parts_count)
+{
+    return txservice::TaskAwaitable<bool>{
+        sched,
+        [this,
+         kv_table_name,
+         partition_id,
+         shard_id,
+         key_parts = std::move(key_parts),
+         record_parts = std::move(record_parts),
+         records_ts = std::move(records_ts),
+         records_ttl = std::move(records_ttl),
+         op_types = std::move(op_types),
+         skip_wal,
+         partition_state,
+         key_parts_count,
+         record_parts_count](std::function<void(bool)> cb) mutable
+        {
+            auto ctx = std::make_shared<BatchWriteRecordsCoroContext>();
+            ctx->done_cb = std::move(cb);
+            ctx->partition_state = partition_state;
+            ctx->self = ctx;
+            BatchWriteRecords(kv_table_name,
+                              partition_id,
+                              shard_id,
+                              std::move(key_parts),
+                              std::move(record_parts),
+                              std::move(records_ts),
+                              std::move(records_ttl),
+                              std::move(op_types),
+                              skip_wal,
+                              ctx.get(),
+                              BatchWriteRecordsCoroCallback,
+                              key_parts_count,
+                              record_parts_count);
+        }};
+}
+
+txservice::Task<bool> DataStoreServiceClient::ProcessPartitionCoro(
+    txservice::TaskScheduler *sched,
+    PartitionFlushState *partition_state,
+    PartitionCallbackData *callback_data)
+{
+    PartitionBatchRequest &batch = callback_data->inflight_batch;
+    while (partition_state->GetNextBatch(batch))
+    {
+        uint32_t shard_id =
+            GetShardIdByPartitionId(partition_state->partition_id,
+                                    partition_state->is_range_partitioned);
+        bool ok = co_await BatchWriteRecordsAsync(sched,
+                                                  callback_data->table_name,
+                                                  partition_state->partition_id,
+                                                  shard_id,
+                                                  std::move(batch.key_parts),
+                                                  std::move(batch.record_parts),
+                                                  std::move(batch.records_ts),
+                                                  std::move(batch.records_ttl),
+                                                  std::move(batch.op_types),
+                                                  true,  // skip_wal
+                                                  partition_state,
+                                                  batch.parts_cnt_per_key,
+                                                  batch.parts_cnt_per_record);
+        if (!ok)
+        {
+            co_return false;
+        }
+    }
+
+    co_return true;
 }
 
 std::string DataStoreServiceClient::SerializeTxRecord(

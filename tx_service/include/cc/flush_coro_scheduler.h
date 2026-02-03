@@ -16,7 +16,7 @@ namespace txservice
 {
 
 // --- 1. Task scheduler (ready queue, PostReadyHandle, RunLoopOnce) ---
-struct FlushCoroTaskScheduler
+struct TaskScheduler
 {
     std::queue<std::coroutine_handle<>> ready_queue;
     std::mutex mtx;
@@ -48,14 +48,18 @@ struct FlushCoroTaskScheduler
     }
 };
 
-// --- 2. Task<void> coroutine type (no return value) ---
-struct FlushCoroTask
+// --- 2. Task<T> coroutine type (unified: void and value-returning) ---
+template <typename T>
+struct Task;
+
+template <>
+struct Task<void>
 {
     struct promise_type
     {
         std::coroutine_handle<> continuation;
 
-        FlushCoroTask get_return_object()
+        Task get_return_object()
         {
             return {std::coroutine_handle<promise_type>::from_promise(*this)};
         }
@@ -110,12 +114,77 @@ struct FlushCoroTask
     }
 };
 
+template <typename T>
+struct Task
+{
+    struct promise_type
+    {
+        T result{};
+        std::coroutine_handle<> continuation;
+
+        Task get_return_object()
+        {
+            return {std::coroutine_handle<promise_type>::from_promise(*this)};
+        }
+        std::suspend_always initial_suspend()
+        {
+            return {};
+        }
+        void return_value(T val)
+        {
+            result = std::move(val);
+        }
+
+        struct FinalAwaitable
+        {
+            bool await_ready() noexcept
+            {
+                return false;
+            }
+            void await_suspend(std::coroutine_handle<promise_type> h) noexcept
+            {
+                if (h.promise().continuation)
+                    h.promise().continuation.resume();
+                else
+                    h.destroy();
+            }
+            void await_resume() noexcept
+            {
+            }
+        };
+        FinalAwaitable final_suspend() noexcept
+        {
+            return {};
+        }
+        void unhandled_exception()
+        {
+            std::terminate();
+        }
+    };
+
+    std::coroutine_handle<promise_type> handle;
+
+    bool await_ready()
+    {
+        return false;
+    }
+    void await_suspend(std::coroutine_handle<> h)
+    {
+        handle.promise().continuation = h;
+        handle.resume();
+    }
+    T await_resume()
+    {
+        return std::move(handle.promise().result);
+    }
+};
+
 // --- 3. TaskAwaitable<R> for async ops and Yield ---
 // Optional ready_fn: when set, await_ready() returns ready_fn(); else false.
 template <typename R>
-struct FlushCoroTaskAwaitable
+struct TaskAwaitable
 {
-    FlushCoroTaskScheduler *sched;
+    TaskScheduler *sched;
     std::function<void(std::function<void(R)>)> start_op;
     std::function<bool()> ready_fn_{};
 
@@ -146,9 +215,9 @@ private:
 
 // void specialization: no return value
 template <>
-struct FlushCoroTaskAwaitable<void>
+struct TaskAwaitable<void>
 {
-    FlushCoroTaskScheduler *sched;
+    TaskScheduler *sched;
     std::function<void(std::function<void()>)> start_op;
     std::function<bool()> ready_fn_{};
 
@@ -168,10 +237,9 @@ struct FlushCoroTaskAwaitable<void>
 };
 
 // --- 4. Yield: yield to scheduler ---
-inline FlushCoroTaskAwaitable<void> FlushCoroYield(
-    FlushCoroTaskScheduler *sched)
+inline TaskAwaitable<void> Yield(TaskScheduler *sched)
 {
-    return FlushCoroTaskAwaitable<void>{sched, [](auto cb) { cb(); }};
+    return TaskAwaitable<void>{sched, [](auto cb) { cb(); }};
 }
 
 }  // namespace txservice
