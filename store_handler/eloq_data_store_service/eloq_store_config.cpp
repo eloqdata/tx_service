@@ -87,7 +87,6 @@ DEFINE_uint32(eloq_store_max_inflight_write,
 DEFINE_uint32(eloq_store_max_write_batch_pages,
               32,
               "EloqStore max write batch pages.");
-DEFINE_uint32(eloq_store_buf_ring_size, 1 << 12, "EloqStore buf ring size.");
 DEFINE_uint32(eloq_store_coroutine_stack_size,
               32 * 1024,
               "EloqStore coroutine stack size.");
@@ -455,12 +454,6 @@ EloqStoreConfig::EloqStoreConfig(const INIReader &config_reader,
             : config_reader.GetInteger("store",
                                        "eloq_store_max_write_batch_pages",
                                        FLAGS_eloq_store_max_write_batch_pages);
-    eloqstore_configs_.buf_ring_size =
-        !CheckCommandLineFlagIsDefault("eloq_store_buf_ring_size")
-            ? FLAGS_eloq_store_buf_ring_size
-            : config_reader.GetInteger("store",
-                                       "eloq_store_buf_ring_size",
-                                       FLAGS_eloq_store_buf_ring_size);
     eloqstore_configs_.coroutine_stack_size =
         !CheckCommandLineFlagIsDefault("eloq_store_coroutine_stack_size")
             ? FLAGS_eloq_store_coroutine_stack_size
