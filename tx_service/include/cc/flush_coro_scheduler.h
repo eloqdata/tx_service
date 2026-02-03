@@ -188,6 +188,14 @@ struct TaskAwaitable
     std::function<void(std::function<void(R)>)> start_op;
     std::function<bool()> ready_fn_{};
 
+    TaskAwaitable() = default;
+    TaskAwaitable(TaskScheduler *s,
+                  std::function<void(std::function<void(R)>)> op,
+                  std::function<bool()> ready = {})
+        : sched(s), start_op(std::move(op)), ready_fn_(std::move(ready))
+    {
+    }
+
     bool await_ready() const
     {
         if (ready_fn_)
@@ -220,6 +228,14 @@ struct TaskAwaitable<void>
     TaskScheduler *sched;
     std::function<void(std::function<void()>)> start_op;
     std::function<bool()> ready_fn_{};
+
+    TaskAwaitable() = default;
+    TaskAwaitable(TaskScheduler *s,
+                  std::function<void(std::function<void()>)> op,
+                  std::function<bool()> ready = {})
+        : sched(s), start_op(std::move(op)), ready_fn_(std::move(ready))
+    {
+    }
 
     bool await_ready() const
     {
