@@ -51,6 +51,7 @@
 #include "cc_shard.h"
 #include "data_sync_task.h"
 #include "eloq_basic_catalog_factory.h"
+#include "flush_coro_scheduler.h"
 #include "local_cc_handler.h"
 #include "log.pb.h"
 #include "meter.h"
@@ -2470,6 +2471,9 @@ private:
 
     WorkerThreadContext flush_data_worker_ctx_;
 
+    // Per-worker C++20 coroutine scheduler for FlushData (no bthread).
+    std::vector<std::unique_ptr<FlushCoroTaskScheduler>> flush_coro_schedulers_;
+
     // Per-worker flush buffers. Each DataSyncWorker has its own buffer.
     // New flush task entry will be added to the corresponding buffer. This task
     // will be appended to pending_flush_work_[worker_idx] when it reaches the
@@ -2485,6 +2489,11 @@ private:
     void FlushDataWorker(size_t worker_idx);
     void FlushData(std::unique_lock<std::mutex> &flush_worker_lk,
                    size_t worker_idx);
+
+    // C++20 coroutine for one FlushData task (driven by
+    // flush_coro_schedulers_).
+    FlushCoroTask FlushDataCoro(FlushCoroTaskScheduler *sched,
+                                std::unique_ptr<FlushDataTask> cur_work);
 
     // Memory controller for data sync.
     DataSyncMemoryController data_sync_mem_controller_;

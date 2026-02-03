@@ -29,6 +29,7 @@
 #include <condition_variable>
 #include <cstdint>
 #include <deque>
+#include <functional>
 #include <memory>
 #include <mutex>
 #include <optional>
@@ -886,6 +887,22 @@ public:
         }
     }
 
+    // For C++20 coroutine: when finished, call cb (e.g. post handle to
+    // FlushDataWorker scheduler). cb may run on TxProcessor thread; must not
+    // resume coroutine there, only post to scheduler.
+    void WaitAsync(std::function<void()> cb)
+    {
+        std::lock_guard<bthread::Mutex> lk(mux_);
+        if (unfinished_cnt_ == 0)
+        {
+            cb();
+        }
+        else
+        {
+            continuations_.push_back(std::move(cb));
+        }
+    }
+
     bool IsFinished() const
     {
         std::lock_guard<bthread::Mutex> lk(mux_);
@@ -911,6 +928,7 @@ public:
         error_code_ = error_code;
         if (unfinished_cnt_ == 0)
         {
+            NotifyContinuations();
             cv_.notify_one();
         }
     }
@@ -923,6 +941,7 @@ public:
             error_code_ = CcErrorCode::NO_ERROR;
             if (--unfinished_cnt_ == 0)
             {
+                NotifyContinuations();
                 cv_.notify_one();
             }
         }
@@ -930,6 +949,17 @@ public:
     }
 
 private:
+    void NotifyContinuations()
+    {
+        std::vector<std::function<void()>> ready;
+        ready.swap(continuations_);
+        for (auto &cb : ready)
+        {
+            if (cb)
+                cb();
+        }
+    }
+
     void *operator new(size_t) noexcept
     {
         return nullptr;
@@ -943,6 +973,7 @@ private:
     mutable bthread::Mutex mux_;
     bthread::ConditionVariable cv_;
 
+    std::vector<std::function<void()>> continuations_;
     uint32_t unfinished_cnt_{0};
     CcErrorCode error_code_;
 };
@@ -997,6 +1028,7 @@ public:
         unfinished_core_cnt_--;
         if (unfinished_core_cnt_ == 0)
         {
+            NotifyContinuations();
             cv_.notify_one();
         }
     }
@@ -1010,6 +1042,25 @@ public:
         }
     }
 
+    void WaitAsync(std::function<void()> cb)
+    {
+        std::lock_guard<bthread::Mutex> lk(mux_);
+        if (unfinished_core_cnt_ == 0)
+        {
+            cb();
+        }
+        else
+        {
+            continuations_.push_back(std::move(cb));
+        }
+    }
+
+    bool IsFinished() const
+    {
+        std::lock_guard<bthread::Mutex> lk(mux_);
+        return unfinished_core_cnt_ == 0;
+    }
+
     const absl::flat_hash_map<size_t, std::vector<CkptTsEntry>> &EntriesRef()
         const
     {
@@ -1017,10 +1068,22 @@ public:
     }
 
 private:
+    void NotifyContinuations()
+    {
+        std::vector<std::function<void()>> ready;
+        ready.swap(continuations_);
+        for (auto &cb : ready)
+        {
+            if (cb)
+                cb();
+        }
+    }
+
     absl::flat_hash_map<size_t, std::vector<CkptTsEntry>> &cce_entries_;
     // key: core_idx, value: entry_index
     absl::flat_hash_map<size_t, size_t> indices_;
 
+    std::vector<std::function<void()>> continuations_;
     size_t unfinished_core_cnt_;
     NodeGroupId node_group_id_;
     int64_t term_;

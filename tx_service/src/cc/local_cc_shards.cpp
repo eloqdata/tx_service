@@ -296,6 +296,13 @@ void LocalCcShards::StartBackgroudWorkers()
     }
     pending_flush_work_.resize(worker_num);
 
+    flush_coro_schedulers_.clear();
+    for (size_t i = 0; i < worker_num; ++i)
+    {
+        flush_coro_schedulers_.emplace_back(
+            std::make_unique<FlushCoroTaskScheduler>());
+    }
+
     // Starts flush worker threads firstly.
     for (int id = 0; id < flush_data_worker_ctx_.worker_num_; id++)
     {
@@ -5893,24 +5900,10 @@ void LocalCcShards::FlushCurrentFlushBuffer()
     }
 }
 
-void LocalCcShards::FlushData(std::unique_lock<std::mutex> &flush_worker_lk,
-                              size_t worker_idx)
+FlushCoroTask LocalCcShards::FlushDataCoro(
+    FlushCoroTaskScheduler *sched, std::unique_ptr<FlushDataTask> cur_work)
 {
-    assert(worker_idx < pending_flush_work_.size());
-    auto &pending_flush_work = pending_flush_work_[worker_idx];
-
-    // Retrieve first pending work and pop it (FIFO).
-    std::unique_ptr<FlushDataTask> cur_work =
-        std::move(pending_flush_work.front());
-    pending_flush_work.pop_front();
-
-    // Notify any threads waiting for queue space
-    flush_data_worker_ctx_.cv_.notify_all();
-
-    flush_worker_lk.unlock();
-
     auto &flush_task_entries = cur_work->flush_task_entries_;
-
     bool succ = true;
 
     if (EnableMvcc())
@@ -5922,6 +5915,7 @@ void LocalCcShards::FlushData(std::unique_lock<std::mutex> &flush_worker_lk,
                           "storage failed";
         }
     }
+    co_await FlushCoroYield(sched);
 
     if (succ)
     {
@@ -5932,6 +5926,7 @@ void LocalCcShards::FlushData(std::unique_lock<std::mutex> &flush_worker_lk,
                           "storage failed";
         }
     }
+    co_await FlushCoroYield(sched);
 
     if (succ && EnableMvcc())
     {
@@ -5942,6 +5937,7 @@ void LocalCcShards::FlushData(std::unique_lock<std::mutex> &flush_worker_lk,
                           "kv storage failed";
         }
     }
+    co_await FlushCoroYield(sched);
 
     if (succ && store_hd_->NeedPersistKV())
     {
@@ -5954,7 +5950,6 @@ void LocalCcShards::FlushData(std::unique_lock<std::mutex> &flush_worker_lk,
     }
 
     std::unordered_set<uint16_t> updated_ckpt_ts_core_ids;
-    // Update cce ckpt ts in memory
     if (succ)
     {
         for (auto &[kv_table_name, entries] : flush_task_entries)
@@ -6007,14 +6002,18 @@ void LocalCcShards::FlushData(std::unique_lock<std::mutex> &flush_worker_lk,
                         updated_ckpt_ts_core_ids.insert(core_idx);
                         EnqueueToCcShard(core_idx, &update_cce_req);
                     }
-                    update_cce_req.Wait();
+                    co_await FlushCoroTaskAwaitable<void>{
+                        sched,
+                        [&update_cce_req](auto cb)
+                        { update_cce_req.WaitAsync(std::move(cb)); },
+                        [&update_cce_req]()
+                        { return update_cce_req.IsFinished(); }};
                 }
             }
         }
     }
+    co_await FlushCoroYield(sched);
 
-    // Notify cc shards that dirty data has been flushed. This will re-enqueue
-    // kickout data cc reqs if there are any.
     WaitableCc reset_cc(
         [&](CcShard &ccs)
         {
@@ -6026,12 +6025,15 @@ void LocalCcShards::FlushData(std::unique_lock<std::mutex> &flush_worker_lk,
     {
         EnqueueToCcShard(core_idx, &reset_cc);
     }
-    reset_cc.Wait();
+    co_await FlushCoroTaskAwaitable<void>{
+        sched,
+        [&reset_cc](auto cb) { reset_cc.WaitAsync(std::move(cb)); },
+        [&reset_cc]() { return reset_cc.IsFinished(); }};
+    co_await FlushCoroYield(sched);
 
     auto ckpt_err = succ ? DataSyncTask::CkptErrorCode::NO_ERROR
                          : DataSyncTask::CkptErrorCode::FLUSH_ERROR;
 
-    // notify waiting data sync scan thread
     uint64_t old_usage = data_sync_mem_controller_.DeallocateFlushMemQuota(
         cur_work->pending_flush_size_);
 
@@ -6040,6 +6042,30 @@ void LocalCcShards::FlushData(std::unique_lock<std::mutex> &flush_worker_lk,
                << " quota: " << data_sync_mem_controller_.FlushMemoryQuota();
 
     PostProcessFlushTaskEntries(flush_task_entries, ckpt_err);
+    co_return;
+}
+
+void LocalCcShards::FlushData(std::unique_lock<std::mutex> &flush_worker_lk,
+                              size_t worker_idx)
+{
+    assert(worker_idx < pending_flush_work_.size());
+    assert(worker_idx < flush_coro_schedulers_.size());
+    auto &pending_flush_work = pending_flush_work_[worker_idx];
+    FlushCoroTaskScheduler *sched = flush_coro_schedulers_[worker_idx].get();
+
+    // Retrieve first pending work and pop it (FIFO).
+    std::unique_ptr<FlushDataTask> cur_work =
+        std::move(pending_flush_work.front());
+    pending_flush_work.pop_front();
+
+    // Notify any threads waiting for queue space
+    flush_data_worker_ctx_.cv_.notify_all();
+
+    flush_worker_lk.unlock();
+
+    FlushCoroTask t = FlushDataCoro(sched, std::move(cur_work));
+    sched->PostReadyHandle(t.handle);
+
     flush_worker_lk.lock();
 }
 
@@ -6049,9 +6075,11 @@ void LocalCcShards::FlushDataWorker(size_t worker_idx)
            static_cast<size_t>(flush_data_worker_ctx_.worker_num_));
     assert(worker_idx < static_cast<size_t>(pending_flush_work_.size()));
     assert(worker_idx < static_cast<size_t>(cur_flush_buffers_.size()));
+    assert(worker_idx < static_cast<size_t>(flush_coro_schedulers_.size()));
 
     auto &pending_flush_work = pending_flush_work_[worker_idx];
     auto &cur_flush_buffer = *cur_flush_buffers_[worker_idx];
+    FlushCoroTaskScheduler *sched = flush_coro_schedulers_[worker_idx].get();
 
     using clock = std::chrono::steady_clock;
     size_t previous_flush_size = 0;
@@ -6060,6 +6088,12 @@ void LocalCcShards::FlushDataWorker(size_t worker_idx)
     std::unique_lock<std::mutex> flush_worker_lk(flush_data_worker_ctx_.mux_);
     while (flush_data_worker_ctx_.status_ == WorkerStatus::Active)
     {
+        // Run C++20 coroutines (FlushDataCoro) until scheduler is empty
+        while (!sched->IsEmpty())
+        {
+            sched->RunLoopOnce();
+        }
+
         flush_data_worker_ctx_.cv_.wait_for(
             flush_worker_lk,
             10s,
@@ -6131,6 +6165,10 @@ void LocalCcShards::FlushDataWorker(size_t worker_idx)
     while (!pending_flush_work.empty())
     {
         FlushData(flush_worker_lk, worker_idx);
+        while (!sched->IsEmpty())
+        {
+            sched->RunLoopOnce();
+        }
     }
 }
 

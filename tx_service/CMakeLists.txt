@@ -230,6 +230,8 @@ set(TxService_SOURCES ${TxService_SOURCES} ${LOG_PROTO_SRC}/${LOG_PROTO_NAME}.pb
 
 add_library(txservice STATIC ${TxService_SOURCES})
 
+target_compile_features(txservice PRIVATE cxx_std_20)
+
 target_include_directories(txservice PUBLIC ${INCLUDE_DIR})
 
 target_link_libraries(txservice PUBLIC mimalloc ${LINK_LIB} ${PROTOBUF_LIBRARIES} ${ABSEIL})
