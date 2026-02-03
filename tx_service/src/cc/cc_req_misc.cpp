@@ -1168,6 +1168,19 @@ bool RunOnTxProcessorCc::Execute(CcShard &ccs)
     return true;
 }
 
+void WaitableCc::SetCompletionCallback(std::function<void()> cb)
+{
+    std::unique_lock<bthread::Mutex> lk(mux_);
+    completion_callback_ = std::move(cb);
+    if (unfinished_cnt_ == 0)
+    {
+        std::function<void()> to_call = std::move(completion_callback_);
+        lk.unlock();
+        if (to_call)
+            to_call();
+    }
+}
+
 bool UpdateCceCkptTsCc::Execute(CcShard &ccs)
 {
     assert(indices_.count(ccs.core_id_) > 0);

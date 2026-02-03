@@ -29,6 +29,7 @@
 #include <condition_variable>
 #include <cstdint>
 #include <deque>
+#include <functional>
 #include <memory>
 #include <mutex>
 #include <optional>
@@ -892,6 +893,10 @@ public:
         return unfinished_cnt_ == 0;
     }
 
+    // Optional async completion: when set, invoked when unfinished_cnt_
+    // becomes 0 (instead of or in addition to Wait()). Used for co_await.
+    void SetCompletionCallback(std::function<void()> cb);
+
     bool IsError() const
     {
         std::lock_guard<bthread::Mutex> lk(mux_);
@@ -909,10 +914,15 @@ public:
         std::unique_lock<bthread::Mutex> lk(mux_);
         unfinished_cnt_--;
         error_code_ = error_code;
+        std::function<void()> cb_to_call;
         if (unfinished_cnt_ == 0)
         {
             cv_.notify_one();
+            cb_to_call = std::move(completion_callback_);
         }
+        lk.unlock();
+        if (cb_to_call)
+            cb_to_call();
     }
 
     bool Execute(CcShard &ccs) override
@@ -921,10 +931,15 @@ public:
         {
             std::unique_lock<bthread::Mutex> lk(mux_);
             error_code_ = CcErrorCode::NO_ERROR;
+            std::function<void()> cb_to_call;
             if (--unfinished_cnt_ == 0)
             {
                 cv_.notify_one();
+                cb_to_call = std::move(completion_callback_);
             }
+            lk.unlock();
+            if (cb_to_call)
+                cb_to_call();
         }
         return false;
     }
@@ -945,6 +960,7 @@ private:
 
     uint32_t unfinished_cnt_{0};
     CcErrorCode error_code_;
+    std::function<void()> completion_callback_;
 };
 struct UpdateCceCkptTsCc : public CcRequestBase
 {

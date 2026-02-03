@@ -49,6 +49,7 @@
 #include "catalog_key_record.h"
 #include "cc_entry.h"
 #include "cc_page_clean_guard.h"
+#include "cc_req_misc.h"
 #include "cc_shard.h"
 #include "data_sync_task.h"
 #include "eloq_basic_catalog_factory.h"
@@ -2573,14 +2574,17 @@ private:
     std::deque<std::coroutine_handle<>> flush_ready_handles_;
     void PostFlushReadyHandle(std::coroutine_handle<> h);
 
-    // Awaitable for PutAllAsync: suspends until store callback posts handle.
-    struct PutAllAwaitable
+    // Generic awaitable for any async op that completes via callback. Start the
+    // op in await_suspend; when the callback runs, post h to
+    // flush_ready_handles_. Use for PutAllAsync, WaitableCcAsync, future
+    // PersistKVAsync, CopyBaseToArchiveAsync, etc. Example for future
+    // PersistKVAsync: return FlushWorkerAwaitable<bool>{ this, [this,
+    // &names](auto cb) { store_hd_->PersistKVAsync(names, std::move(cb)); } };
+    template <typename T>
+    struct FlushWorkerAwaitable
     {
         LocalCcShards *self;
-        std::unordered_map<std::string_view,
-                           std::vector<std::unique_ptr<FlushTaskEntry>>>
-            &flush_task_entries;
-        std::shared_ptr<std::optional<bool>> result_;
+        std::function<void(std::function<void(T)>)> start_;
 
         bool await_ready() const
         {
@@ -2588,24 +2592,48 @@ private:
         }
         void await_suspend(std::coroutine_handle<> h)
         {
-            result_ = std::make_shared<std::optional<bool>>();
-            self->store_hd_->PutAllAsync(
-                flush_task_entries,
-                [self = this->self, h, result = result_](bool ok)
+            result_ = std::make_shared<std::optional<T>>();
+            start_(
+                [self = this->self, h, result = result_](T v)
                 {
-                    result->emplace(ok);
+                    result->emplace(std::move(v));
                     self->PostFlushReadyHandle(h);
                 });
         }
-        bool await_resume()
+        T await_resume()
         {
-            return result_->value_or(false);
+            return result_->value_or(T());
+        }
+
+    private:
+        std::shared_ptr<std::optional<T>> result_;
+    };
+
+    template <>
+    struct FlushWorkerAwaitable<void>
+    {
+        LocalCcShards *self;
+        std::function<void(std::function<void()>)> start_;
+
+        bool await_ready() const
+        {
+            return false;
+        }
+        void await_suspend(std::coroutine_handle<> h)
+        {
+            start_([self = this->self, h]() { self->PostFlushReadyHandle(h); });
+        }
+        void await_resume()
+        {
         }
     };
-    PutAllAwaitable PutAllAsync(
+
+    FlushWorkerAwaitable<bool> PutAllAsync(
         std::unordered_map<std::string_view,
                            std::vector<std::unique_ptr<FlushTaskEntry>>>
             &flush_task_entries);
+
+    FlushWorkerAwaitable<void> WaitableCcAsync(WaitableCc *cc);
 
     // Memory controller for data sync.
     DataSyncMemoryController data_sync_mem_controller_;

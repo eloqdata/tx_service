@@ -5877,12 +5877,24 @@ void LocalCcShards::PostFlushReadyHandle(std::coroutine_handle<> h)
     flush_data_worker_ctx_.cv_.notify_one();
 }
 
-LocalCcShards::PutAllAwaitable LocalCcShards::PutAllAsync(
+LocalCcShards::FlushWorkerAwaitable<bool> LocalCcShards::PutAllAsync(
     std::unordered_map<std::string_view,
                        std::vector<std::unique_ptr<FlushTaskEntry>>>
         &flush_task_entries)
 {
-    return PutAllAwaitable{this, flush_task_entries, nullptr};
+    return FlushWorkerAwaitable<bool>{
+        this, [this, &flush_task_entries](std::function<void(bool)> cb) {
+            store_hd_->PutAllAsync(flush_task_entries, std::move(cb));
+        }};
+}
+
+LocalCcShards::FlushWorkerAwaitable<void> LocalCcShards::WaitableCcAsync(
+    WaitableCc *cc)
+{
+    return FlushWorkerAwaitable<void>{
+        this, [cc](std::function<void()> cb) {
+            cc->SetCompletionCallback(std::move(cb));
+        }};
 }
 
 LocalCcShards::FlushDataTaskCo LocalCcShards::FlushDataCoroutine(
@@ -6006,7 +6018,7 @@ LocalCcShards::FlushDataTaskCo LocalCcShards::FlushDataCoroutine(
     {
         self->EnqueueToCcShard(core_idx, &reset_cc);
     }
-    reset_cc.Wait();
+    co_await self->WaitableCcAsync(&reset_cc);
 
     auto ckpt_err = succ ? DataSyncTask::CkptErrorCode::NO_ERROR
                          : DataSyncTask::CkptErrorCode::FLUSH_ERROR;
