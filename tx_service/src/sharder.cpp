@@ -1006,6 +1006,11 @@ uint64_t Sharder::GetNodeGroupCkptTs(uint32_t cc_ng_id)
     return 0;
 }
 
+uint64_t Sharder::NativeNodeGroupCkptTs()
+{
+    return GetNodeGroupCkptTs(native_ng_);
+}
+
 bool Sharder::UpdateNodeGroupCkptTs(uint32_t cc_ng_id, uint64_t ckpt_ts)
 {
     std::shared_lock<std::shared_mutex> lk(cluster_cnf_mux_);

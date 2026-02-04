@@ -7961,10 +7961,12 @@ public:
         auto end_it = End();
         uint64_t ckpt_ts = req.PrimaryCkptTs();
         uint64_t now_ts = shard_->Now();
+        bool update_any = false;
         while (it != end_it)
         {
             CcEntry<KeyT, ValueT, VersionedRecord, RangePartitioned> *cce =
                 it->second;
+            auto *ccp = it.GetPage();
             if (txservice_skip_wal)
             {
                 // If wal log is disabled, we need to flush all in memory cache
@@ -7978,8 +7980,13 @@ public:
                 {
                     bool was_dirty = cce->IsDirty();
                     cce->SetCommitTsPayloadStatus(now_ts, status);
+                    update_any = true;
                     OnCommittedUpdate(cce, was_dirty);
                     assert(!cce->HasBufferedCommandList());
+                    if (now_ts > ccp->last_dirty_commit_ts_)
+                    {
+                        ccp->last_dirty_commit_ts_ = now_ts;
+                    }
                 }
                 assert(!cce->HasBufferedCommandList() ||
                        status == RecordStatus::Unknown);
@@ -7998,6 +8005,10 @@ public:
             it++;
         }
 
+        if (update_any && now_ts > last_dirty_commit_ts_)
+        {
+            last_dirty_commit_ts_ = now_ts;
+        }
         return true;
     }
 
@@ -10442,7 +10453,7 @@ protected:
             // fetch record fails. Remove the pin on the cce.
             cce->GetKeyGapLockAndExtraData()->ReleasePin();
             cce->RecycleKeyLock(*shard_);
-            if (cce->IsFree())
+            if (cce->PayloadStatus() == RecordStatus::Unknown && cce->IsFree())
             {
                 CleanEntry(cce, ccp);
             }

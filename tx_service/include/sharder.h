@@ -532,6 +532,8 @@ public:
 
     uint64_t GetNodeGroupCkptTs(uint32_t cc_ng_id);
 
+    uint64_t NativeNodeGroupCkptTs();
+
     bool UpdateNodeGroupCkptTs(uint32_t cc_ng_id, uint64_t ckpt_ts);
 
     TxWorkerPool *GetTxWorkerPool()

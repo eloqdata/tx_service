@@ -63,9 +63,8 @@ bool VersionedLruEntry<Versioned, RangePartitioned>::IsPersistent() const
     if (Sharder::Instance().StandbyNodeTerm() >= 0 &&
         Sharder::Instance().GetDataStoreHandler()->IsSharedStorage())
     {
-        // If this is a follower with shared kv, all cce is treated as persisted
-        // since primary node will write them to kv.
-        return true;
+        // If this is a follower with shared kv, check the ng leader's ckpt_ts.
+        return CommitTs() <= Sharder::Instance().NativeNodeGroupCkptTs();
     }
 
     if (Versioned)
