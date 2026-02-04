@@ -21,6 +21,7 @@
  */
 #pragma once
 
+#include <thread>
 #include <vector>
 
 #include "tx_operation.h"
@@ -43,6 +44,16 @@ struct UpsertTableIndexOp : public SchemaOp
 
     ~UpsertTableIndexOp()
     {
+        // Make sure background workers exit before the op is destroyed.
+        for (auto &worker : local_task_workers_)
+        {
+            if (worker.joinable())
+            {
+                worker.join();
+            }
+        }
+        local_task_workers_.clear();
+
         if (!is_last_finished_key_str_)
         {
             last_finished_end_key_.~TxKey();
