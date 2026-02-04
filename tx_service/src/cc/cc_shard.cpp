@@ -3120,8 +3120,7 @@ void CcShard::NotifyStandbyOutOfSync(uint32_t node_id)
         {
             DispatchTask(
                 core_idx,
-                [node_id, unsubscribe_standby_term](CcShard &ccs)
-                    -> bool
+                [node_id, unsubscribe_standby_term](CcShard &ccs) -> bool
                 {
                     auto subscribe_node_iter =
                         ccs.subscribed_standby_nodes_.find(node_id);
