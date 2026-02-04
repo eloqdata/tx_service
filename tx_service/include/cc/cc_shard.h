@@ -1061,6 +1061,7 @@ public:
 
     // Try to send previous failed message to standby nodes.
     bool ResendFailedForwardMessages();
+    void NotifyStandbyOutOfSync(uint32_t node_id);
 
     void CollectStandbyMetrics();
 

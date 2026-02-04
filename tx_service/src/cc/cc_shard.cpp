@@ -3059,56 +3059,7 @@ bool CcShard::ResendFailedForwardMessages()
             }
             else
             {
-                // Message not found in map - it has been evicted
-                // This message is already lost and this standby needs to
-                // resubscribe to the primary node again. Notify standby that
-                // it has already fallen behind. Use the latest seq id so that
-                // standby knows which epoch this out of sync msg belongs to.
-                remote::CcMessage cc_msg;
-                cc_msg.set_type(
-                    remote::CcMessage_MessageType::
-                        CcMessage_MessageType_KeyObjectStandbyForwardRequest);
-                auto req = cc_msg.mutable_key_obj_standby_forward_req();
-                req->set_forward_seq_grp(core_id_);
-                req->set_forward_seq_id(next_forward_sequence_id_ - 1);
-                req->set_primary_leader_term(Sharder::Instance().LeaderTerm(
-                    Sharder::Instance().NativeNodeGroup()));
-                req->set_out_of_sync(true);
-                stream_sender_->SendMessageToNode(node_id, cc_msg);
-
-                seq_id = UINT64_MAX;
-                // Remove heartbeat target node
-                local_shards_.RemoveHeartbeatTargetNode(node_id,
-                                                        seq_id_and_term.second);
-
-                for (size_t core_idx = 0; core_idx < core_cnt_; ++core_idx)
-                {
-                    if (core_idx != core_id_)
-                    {
-                        DispatchTask(
-                            core_idx,
-                            [node_id = node_id,
-                             unsubscribe_standby_term =
-                                 seq_id_and_term.second](CcShard &ccs) -> bool
-                            {
-                                auto subscribe_node_iter =
-                                    ccs.subscribed_standby_nodes_.find(node_id);
-                                if (subscribe_node_iter !=
-                                    ccs.subscribed_standby_nodes_.end())
-                                {
-                                    if (subscribe_node_iter->second.second <=
-                                        unsubscribe_standby_term)
-                                    {
-                                        // erase ?
-                                        subscribe_node_iter->second.first =
-                                            UINT64_MAX;
-                                    }
-                                }
-
-                                return true;
-                            });
-                    }
-                }
+                NotifyStandbyOutOfSync(node_id);
                 break;
             }
         }
@@ -3123,6 +3074,71 @@ bool CcShard::ResendFailedForwardMessages()
     CheckAndFreeUnneededEntries();
 
     return all_msgs_sent;
+}
+
+void CcShard::NotifyStandbyOutOfSync(uint32_t node_id)
+{
+    auto seq_node_iter = subscribed_standby_nodes_.find(node_id);
+    if (seq_node_iter == subscribed_standby_nodes_.end())
+    {
+        return;
+    }
+
+    if (!stream_sender_)
+    {
+        stream_sender_ = Sharder::Instance().GetCcStreamSender();
+    }
+    if (!stream_sender_)
+    {
+        LOG(WARNING) << "Failed to notify standby " << node_id
+                     << " of out of sync state because stream sender is null";
+        return;
+    }
+
+    // Message not found in map - it has been evicted. Notify standby that it
+    // has already fallen behind so it can resubscribe to the primary node.
+    remote::CcMessage cc_msg;
+    cc_msg.set_type(remote::CcMessage_MessageType::
+                        CcMessage_MessageType_KeyObjectStandbyForwardRequest);
+    auto req = cc_msg.mutable_key_obj_standby_forward_req();
+    req->set_forward_seq_grp(core_id_);
+    req->set_forward_seq_id(next_forward_sequence_id_ - 1);
+    req->set_primary_leader_term(
+        Sharder::Instance().LeaderTerm(Sharder::Instance().NativeNodeGroup()));
+    req->set_out_of_sync(true);
+    stream_sender_->SendMessageToNode(node_id, cc_msg);
+
+    auto &seq_id_and_term = seq_node_iter->second;
+    seq_id_and_term.first = UINT64_MAX;
+    // Remove heartbeat target node
+    local_shards_.RemoveHeartbeatTargetNode(node_id, seq_id_and_term.second);
+
+    int64_t unsubscribe_standby_term = seq_id_and_term.second;
+    for (size_t core_idx = 0; core_idx < core_cnt_; ++core_idx)
+    {
+        if (core_idx != core_id_)
+        {
+            DispatchTask(
+                core_idx,
+                [node_id, unsubscribe_standby_term](CcShard &ccs)
+                    -> bool
+                {
+                    auto subscribe_node_iter =
+                        ccs.subscribed_standby_nodes_.find(node_id);
+                    if (subscribe_node_iter !=
+                        ccs.subscribed_standby_nodes_.end())
+                    {
+                        if (subscribe_node_iter->second.second <=
+                            unsubscribe_standby_term)
+                        {
+                            subscribe_node_iter->second.first = UINT64_MAX;
+                        }
+                    }
+
+                    return true;
+                });
+        }
+    }
 }
 
 void CcShard::CollectStandbyMetrics()
