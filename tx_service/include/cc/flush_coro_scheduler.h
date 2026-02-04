@@ -5,6 +5,8 @@
  */
 #pragma once
 
+#include <butil/logging.h>
+
 #include <coroutine>
 #include <functional>
 #include <memory>
@@ -25,6 +27,8 @@ struct TaskScheduler
     {
         std::lock_guard<std::mutex> lk(mtx);
         ready_queue.push(h);
+        LOG(INFO) << "TaskScheduler: post ready handle, size = "
+                  << ready_queue.size();
     }
 
     void RunLoopOnce()
@@ -37,7 +41,16 @@ struct TaskScheduler
             h = ready_queue.front();
             ready_queue.pop();
         }
-        if (h)
+
+        if (h && h.done())
+        {
+            LOG(INFO) << "TaskScheduler: handle already done";
+        }
+
+        // Only resume if not already done (avoids double-resume segfault if
+        // the same handle was posted twice; do not destroy when done - the
+        // frame may already have been destroyed in final_suspend).
+        if (h && !h.done())
             h.resume();
     }
 
@@ -199,15 +212,21 @@ struct TaskAwaitable
     bool await_ready() const
     {
         if (ready_fn_)
+        {
+            LOG(INFO) << "TaskAwaitable: await_ready, ready_fn_() = "
+                      << ready_fn_();
             return ready_fn_();
+        }
         return false;
     }
     void await_suspend(std::coroutine_handle<> h)
     {
+        LOG(INFO) << "TaskAwaitable: await_suspend";
         res_ = std::make_shared<std::optional<R>>();
         start_op(
             [this, h, s = this->sched](R v)
             {
+                LOG(INFO) << "TaskAwaitable: post ready handle";
                 res_->emplace(std::move(v));
                 s->PostReadyHandle(h);
             });
@@ -240,7 +259,11 @@ struct TaskAwaitable<void>
     bool await_ready() const
     {
         if (ready_fn_)
+        {
+            LOG(INFO) << "TaskAwaitable: await_ready, ready_fn_() = "
+                      << ready_fn_();
             return ready_fn_();
+        }
         return false;
     }
     void await_suspend(std::coroutine_handle<> h)

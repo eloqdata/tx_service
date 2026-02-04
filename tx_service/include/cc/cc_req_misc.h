@@ -1047,10 +1047,12 @@ public:
         std::lock_guard<bthread::Mutex> lk(mux_);
         if (unfinished_core_cnt_ == 0)
         {
+            LOG(INFO) << "yf: update cce callback";
             cb();
         }
         else
         {
+            LOG(INFO) << "yf: update cce push continuation";
             continuations_.push_back(std::move(cb));
         }
     }
@@ -1075,7 +1077,10 @@ private:
         for (auto &cb : ready)
         {
             if (cb)
+            {
+                LOG(INFO) << "yf: update cce callback";
                 cb();
+            }
         }
     }
 

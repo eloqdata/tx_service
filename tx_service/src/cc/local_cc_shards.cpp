@@ -5913,6 +5913,7 @@ Task<void> LocalCcShards::FlushDataCoro(TaskScheduler *sched,
 
     if (succ)
     {
+        LOG(INFO) << "yf: wait PutAllCoro";
         succ = co_await store_hd_->PutAllCoro(sched, flush_task_entries);
         if (!succ)
         {
@@ -5994,6 +5995,8 @@ Task<void> LocalCcShards::FlushDataCoro(TaskScheduler *sched,
                         updated_ckpt_ts_core_ids.insert(core_idx);
                         EnqueueToCcShard(core_idx, &update_cce_req);
                     }
+
+                    LOG(INFO) << "yf: wait update_cce_req";
                     co_await TaskAwaitable<void>{
                         sched,
                         [&update_cce_req](auto cb)

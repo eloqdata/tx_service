@@ -105,6 +105,7 @@ void BatchWriteRecordsCoroCallback(void *data,
     {
         ctx->partition_state->MarkFailed(ctx->result);
     }
+    LOG(INFO) << "yf: BatchWriteRecordsCoroCallback, ok = " << ok;
     ctx->done_cb(ok);
     ctx->self.reset();
 }
@@ -645,6 +646,8 @@ txservice::Task<bool> DataStoreServiceClient::PutAllCoro(
     {
         auto *partition_state = sync_putall->partition_states_[i];
         auto *callback_data = callback_data_list[i];
+        LOG(INFO) << "yf: push_back ProcessPartitionCoro, task idx = " << i
+                  << ", size = " << callback_data_list.size();
         sub_tasks.push_back(
             ProcessPartitionCoro(sched, partition_state, callback_data));
         sched->PostReadyHandle(sub_tasks.back().handle);
@@ -656,6 +659,8 @@ txservice::Task<bool> DataStoreServiceClient::PutAllCoro(
         bool part_ok = co_await t;
         ok = ok && part_ok;
     }
+
+    LOG(INFO) << "yf: all partitions finished";
 
     for (auto &partition_state : sync_putall->partition_states_)
     {
@@ -5283,6 +5288,7 @@ txservice::Task<bool> DataStoreServiceClient::ProcessPartitionCoro(
         uint32_t shard_id =
             GetShardIdByPartitionId(partition_state->partition_id,
                                     partition_state->is_range_partitioned);
+        LOG(INFO) << "yf: wait BatchWriteRecordsAsync";
         bool ok = co_await BatchWriteRecordsAsync(sched,
                                                   callback_data->table_name,
                                                   partition_state->partition_id,
