@@ -7961,6 +7961,7 @@ public:
         auto end_it = End();
         uint64_t ckpt_ts = req.PrimaryCkptTs();
         uint64_t now_ts = shard_->Now();
+        bool update_any = false;
         while (it != end_it)
         {
             CcEntry<KeyT, ValueT, VersionedRecord, RangePartitioned> *cce =
@@ -7979,6 +7980,7 @@ public:
                 {
                     bool was_dirty = cce->IsDirty();
                     cce->SetCommitTsPayloadStatus(now_ts, status);
+                    update_any = true;
                     OnCommittedUpdate(cce, was_dirty);
                     assert(!cce->HasBufferedCommandList());
                     if (now_ts > ccp->last_dirty_commit_ts_)
@@ -8003,7 +8005,7 @@ public:
             it++;
         }
 
-        if (now_ts > last_dirty_commit_ts_)
+        if (update_any && now_ts > last_dirty_commit_ts_)
         {
             last_dirty_commit_ts_ = now_ts;
         }
