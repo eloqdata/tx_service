@@ -1378,9 +1378,20 @@ public:
         bool s_obj_exist = (cce->PayloadStatus() == RecordStatus::Normal);
 
         StandbyForwardEntry *forward_entry = nullptr;
-        if (!shard_->GetSubscribedStandbys().empty())
+        auto subscribed_standbys = shard_->GetSubscribedStandbys();
+        if (!subscribed_standbys.empty())
         {
             forward_entry = cce->ForwardEntry();
+            if (forward_entry == nullptr)
+            {
+                LOG(ERROR) << "Subscribed standbys exist, but forward_entry is "
+                              "null. Data loss may occur. Notifying standbys "
+                              "to resubscribe.";
+                for (uint32_t node_id : subscribed_standbys)
+                {
+                    shard_->NotifyStandbyOutOfSync(node_id);
+                }
+            }
         }
         if (commit_ts > 0)
         {
