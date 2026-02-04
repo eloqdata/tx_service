@@ -3856,6 +3856,17 @@ public:
         cv_.wait(lk, [this] { return finished_; });
     }
 
+    void WaitAsync(std::function<void()> cb)
+    {
+        std::lock_guard<std::mutex> lk(mux_);
+        if (finished_)
+        {
+            cb();
+            return;
+        }
+        continuations_.push_back(std::move(cb));
+    }
+
     void Reset(OpType op_type = OpType::Normal)
     {
         std::lock_guard<std::mutex> lk(mux_);
@@ -3884,6 +3895,11 @@ public:
         std::lock_guard<std::mutex> lk(mux_);
         err_ = err;
         finished_ = true;
+        for (auto &cb : continuations_)
+        {
+            cb();
+        }
+        continuations_.clear();
         cv_.notify_one();
     }
 
@@ -3893,6 +3909,11 @@ public:
         std::lock_guard<std::mutex> lk(mux_);
         err_ = err_code;
         finished_ = true;
+        for (auto &cb : continuations_)
+        {
+            cb();
+        }
+        continuations_.clear();
         cv_.notify_one();
     }
 
@@ -3912,6 +3933,11 @@ public:
     {
         std::unique_lock<std::mutex> lk(mux_);
         finished_ = true;
+        for (auto &cb : continuations_)
+        {
+            cb();
+        }
+        continuations_.clear();
         cv_.notify_one();
     }
 
@@ -3985,6 +4011,7 @@ private:
     bool finished_{false};
     std::mutex mux_{};
     std::condition_variable cv_{};
+    std::vector<std::function<void()>> continuations_{};
 
     // True means If no larger version exists, we need to export the data which
     // commit_ts same as ckpt_ts.
@@ -4185,6 +4212,17 @@ public:
         cv_.wait(lk, [this] { return unfinished_cnt_ == 0; });
     }
 
+    void WaitAsync(std::function<void()> cb)
+    {
+        std::lock_guard<std::mutex> lk(mux_);
+        if (unfinished_cnt_ == 0)
+        {
+            cb();
+            return;
+        }
+        continuations_.push_back(std::move(cb));
+    }
+
     void Reset(OpType op_type = OpType::Normal)
     {
         std::lock_guard<std::mutex> lk(mux_);
@@ -4226,6 +4264,11 @@ public:
         --unfinished_cnt_;
         if (unfinished_cnt_ == 0)
         {
+            for (auto &cb : continuations_)
+            {
+                cb();
+            }
+            continuations_.clear();
             UnpinSlices();
             cv_.notify_one();
         }
@@ -4265,6 +4308,11 @@ public:
 
         if (unfinished_cnt_ == 0)
         {
+            for (auto &cb : continuations_)
+            {
+                cb();
+            }
+            continuations_.clear();
             // Unpin the slices
             UnpinSlices();
             cv_.notify_one();
@@ -4580,6 +4628,7 @@ private:
     uint32_t unfinished_cnt_;
     std::mutex mux_;
     std::condition_variable cv_;
+    std::vector<std::function<void()>> continuations_;
 
     // True means we need to export the data in memory and in kv to ckpt vec.
     // Note: This is only used in range partition.
@@ -6618,6 +6667,11 @@ public:
         {
             std::lock_guard<std::mutex> lk(mux_);
             is_finished_ = true;
+            for (auto &cb : continuations_)
+            {
+                cb();
+            }
+            continuations_.clear();
             cv_.notify_one();
         }
 
@@ -6630,9 +6684,21 @@ public:
         cv_.wait(lk, [this] { return is_finished_ == true; });
     }
 
+    void WaitAsync(std::function<void()> cb)
+    {
+        std::lock_guard<std::mutex> lk(mux_);
+        if (is_finished_)
+        {
+            cb();
+            return;
+        }
+        continuations_.push_back(std::move(cb));
+    }
+
     std::mutex mux_;
     std::condition_variable cv_;
     bool is_finished_{false};
+    std::vector<std::function<void()>> continuations_{};
     std::vector<FlushRecord> *const data_sync_vec_{nullptr};
     std::vector<FlushRecord> *const archive_vec_{nullptr};
 };

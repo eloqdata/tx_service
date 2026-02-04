@@ -1812,6 +1812,9 @@ public:
         return node_meter_.get();
     }
 
+    TaskScheduler *GetUnifiedCoroScheduler(size_t idx = 0);
+    TaskScheduler *GetUnifiedCoroSchedulerForTask(uint32_t task_id);
+
     void FlushCurrentFlushBuffer();
 
     store::DataStoreHandler *const store_hd_;
@@ -2198,15 +2201,12 @@ private:
     };
 
     /**
-     * DataSync Operation Interface
+     * DataSync Operation Interface (Phase 5: data_sync_task_queue_,
+     * data_sync_done_, last_data_sync_worker_idx_ removed;
+     * data_sync_worker_ctx_ kept for Terminate()).
      */
     WorkerThreadContext data_sync_worker_ctx_;
-    std::vector<bool> data_sync_done_;
     std::atomic<size_t> scan_concurrency_{1};
-    size_t last_data_sync_worker_idx_{0};
-
-    std::vector<std::deque<std::shared_ptr<DataSyncTask>>>
-        data_sync_task_queue_;
 
     struct DataSyncMemoryController
     {
@@ -2388,6 +2388,14 @@ private:
     void DataSyncForRangePartition(std::shared_ptr<DataSyncTask> data_sync_task,
                                    size_t worker_idx);
 
+    // C++20 coroutine entry for DataSync; dispatches to Range/Hash. Phase 3.
+    Task<void> DataSyncCoro(TaskScheduler *sched,
+                            std::shared_ptr<DataSyncTask> task);
+    Task<void> DataSyncCoroForRange(TaskScheduler *sched,
+                                    std::shared_ptr<DataSyncTask> task);
+    Task<void> DataSyncCoroForHash(TaskScheduler *sched,
+                                   std::shared_ptr<DataSyncTask> task);
+
     /**
      * Range & Slice Update Interface
      */
@@ -2453,45 +2461,22 @@ private:
                                  uint32_t range_cnt,
                                  int32_t &out_next_partition_id);
 
-    /**
-     * @brief Map a data_sync_worker index to the fixed flush_data_worker index.
-     * Used when data_sync_worker count != flush_data_worker count so that each
-     * data_sync_worker consistently targets one flush_data_worker.
-     */
-    size_t DataSyncWorkerToFlushDataWorker(size_t data_sync_worker_id) const;
-
-    /**
-     * @brief Add a flush task entry to the flush task. If the there's no
-     * pending flush task, create a new flush task and add the entry to it.
-     * Otherwise, add the entry to the current flush task. If the current flush
-     * task is full, append it to pending_flush_work_ and create a new flush
-     * task.
-     */
-    void AddFlushTaskEntry(std::unique_ptr<FlushTaskEntry> &&entry);
-
     WorkerThreadContext flush_data_worker_ctx_;
 
-    // Per-worker C++20 coroutine scheduler for FlushData (no bthread).
-    std::vector<std::unique_ptr<TaskScheduler>> flush_coro_schedulers_;
+    // Phase 5: Unified C++20 coroutine scheduler (replaces DataSync/Flush
+    // workers). Single scheduler shared by N driver threads.
+    // cur_flush_buffers_, pending_flush_work_, flush_coro_schedulers_,
+    // AddFlushTaskEntry, DataSyncWorkerToFlushDataWorker, FlushData,
+    // FlushDataWorker removed.
+    std::unique_ptr<TaskScheduler> unified_coro_scheduler_;
+    std::mutex unified_coro_mux_;
+    std::condition_variable unified_coro_cv_;
+    int unified_coro_driver_num_{1};
+    std::vector<std::thread> unified_coro_driver_thd_;
+    std::atomic<WorkerStatus> unified_coro_driver_status_{WorkerStatus::Active};
 
-    // Per-worker flush buffers. Each DataSyncWorker has its own buffer.
-    // New flush task entry will be added to the corresponding buffer. This task
-    // will be appended to pending_flush_work_[worker_idx] when it reaches the
-    // max pending flush size, which will then be processed by the corresponding
-    // flush data worker. Store as pointers because FlushDataTask contains a
-    // bthread::Mutex and is non-movable/non-copyable, which cannot be stored
-    // directly in a vector that may reallocate.
-    std::vector<std::unique_ptr<FlushDataTask>> cur_flush_buffers_;
-    // Per-worker flush task queues. Each FlushDataWorker processes its
-    // corresponding queue.
-    std::vector<std::deque<std::unique_ptr<FlushDataTask>>> pending_flush_work_;
+    void UnifiedCoroDriver(size_t driver_idx);
 
-    void FlushDataWorker(size_t worker_idx);
-    void FlushData(std::unique_lock<std::mutex> &flush_worker_lk,
-                   size_t worker_idx);
-
-    // C++20 coroutine for one FlushData task (driven by
-    // flush_coro_schedulers_).
     Task<void> FlushDataCoro(TaskScheduler *sched,
                              std::unique_ptr<FlushDataTask> cur_work);
 

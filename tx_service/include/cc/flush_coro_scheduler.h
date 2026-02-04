@@ -282,4 +282,17 @@ inline TaskAwaitable<void> Yield(TaskScheduler *sched)
     return TaskAwaitable<void>{sched, [](auto cb) { cb(); }};
 }
 
+// --- 5. ScanCcAwaitable: co_await CC completion (for DataSyncScan CC types)
+// --- Any CC type with WaitAsync(std::function<void()> cb) can use this. The
+// callback runs on the CC completion path (e.g. TxProcessor thread); it must
+// only PostReadyHandle(h), not h.resume(), so the coroutine resumes on the
+// driver thread.
+template <typename CC>
+TaskAwaitable<void> ScanCcAwaitable(CC *cc, TaskScheduler *sched)
+{
+    return TaskAwaitable<void>{sched, [cc](std::function<void()> cb) {
+                                   cc->WaitAsync(std::move(cb));
+                               }};
+}
+
 }  // namespace txservice
