@@ -186,6 +186,7 @@ struct Task
         handle.promise().continuation = h;
         handle.resume();
     }
+
     T await_resume()
     {
         return std::move(handle.promise().result);

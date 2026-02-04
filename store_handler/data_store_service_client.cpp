@@ -650,7 +650,13 @@ txservice::Task<bool> DataStoreServiceClient::PutAllCoro(
                   << ", size = " << callback_data_list.size();
         sub_tasks.push_back(
             ProcessPartitionCoro(sched, partition_state, callback_data));
-        sched->PostReadyHandle(sub_tasks.back().handle);
+        // Do NOT post the child to the scheduler: co_await t will start it
+        // via await_suspend (handle.resume()). If we also PostReadyHandle here,
+        // the same handle stays in the ready queue; when RunLoopOnce runs again
+        // it would resume the child from its suspend point (after co_await
+        // BatchWriteRecordsAsync) before the RPC callback runs, causing
+        // PutAllCoro to continue and reach "update cce" before
+        // BatchWriteRecords actually completes.
     }
 
     bool ok = true;
