@@ -6091,11 +6091,14 @@ void LocalCcShards::FlushDataWorker(size_t worker_idx)
     while (flush_data_worker_ctx_.status_ == WorkerStatus::Active)
     {
         // Run C++20 coroutines (FlushDataCoro) until scheduler is empty
+        LOG(INFO) << "yf: Worker start run loop";
+        size_t debug_cnt = 0;
         while (!sched->IsEmpty())
         {
-            // LOG(INFO) << "yf: run loop once";
+            debug_cnt++;
             sched->RunLoopOnce();
         }
+        LOG(INFO) << "yf: Worker stop run loop, debug cnt = " << debug_cnt;
 
         flush_data_worker_ctx_.cv_.wait_for(
             flush_worker_lk,
