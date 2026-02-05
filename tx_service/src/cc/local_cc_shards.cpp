@@ -6001,7 +6001,11 @@ Task<void> LocalCcShards::FlushDataCoro(TaskScheduler *sched,
                          &cce_entries_map,
                          this](auto cb)
                         {
-                            update_cce_req.SetNotifyCallback([&]() { cb(); });
+                            // Capture cb by value, not by reference, because
+                            // cb's lifetime ends when start_op lambda returns,
+                            // but notify_callback_ may be called later by
+                            // SetFinished() from another worker thread.
+                            update_cce_req.SetNotifyCallback([cb]() { cb(); });
                             for (auto &[core_idx, cce_entries] :
                                  cce_entries_map)
                             {
@@ -6026,7 +6030,10 @@ Task<void> LocalCcShards::FlushDataCoro(TaskScheduler *sched,
         sched,
         [&reset_cc, &updated_ckpt_ts_core_ids, this](auto cb)
         {
-            reset_cc.SetNotifyCallback([&]() { cb(); });
+            // Capture cb by value, not by reference, because cb's lifetime
+            // ends when start_op lambda returns, but notify_callback_ may
+            // be called later by SetFinished() from another worker thread.
+            reset_cc.SetNotifyCallback([cb]() { cb(); });
             for (uint16_t core_idx : updated_ckpt_ts_core_ids)
             {
                 this->EnqueueToCcShard(core_idx, &reset_cc);
