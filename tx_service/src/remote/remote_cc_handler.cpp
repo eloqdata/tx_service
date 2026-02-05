@@ -725,15 +725,10 @@ void txservice::remote::RemoteCcHandler::ScanNext(
     // the range. Sets the cc entry addresses where last scan stops.
     if (cc_ng_term > 0)
     {
-        uint32_t remote_core_cnt = scanner.ShardCount();
-
-        for (uint32_t core_id = 0; core_id < remote_core_cnt; ++core_id)
-        {
-            ScanCache *cache = scanner.Cache(core_id);
-            const ScanTuple *last_tuple = cache->LastTuple();
-            scan_slice->add_prior_cce_lock_vec(
-                last_tuple != nullptr ? last_tuple->cce_addr_.CceLockPtr() : 0);
-        }
+        ScanCache *cache = scanner.Cache();
+        const ScanTuple *last_tuple = cache->LastTuple();
+        scan_slice->add_prior_cce_lock_vec(
+            last_tuple != nullptr ? last_tuple->cce_addr_.CceLockPtr() : 0);
 
         scanner.ResetCaches();
     }

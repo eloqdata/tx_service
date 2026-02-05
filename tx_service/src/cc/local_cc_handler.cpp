@@ -1283,34 +1283,34 @@ void txservice::LocalCcHandler::ScanNextBatch(
                  scanner.is_require_recs_,
                  prefetch_size);
 
-        uint32_t core_cnt = cc_shards_.Count();
-        req->SetShardCount(core_cnt);
+        // Determine which core should handle this range based on partition_id
+        // All keys in the same range are on the same core, so we only need
+        // to scan on that specific core.
+        uint32_t target_core_id = range_id % cc_shards_.Count();
+
+        // Set shard count to 1 since only one core will execute the scan
+        req->SetShardCount(1);
 
         // When the cc ng term is less than 0, this is the first scan of the
         // specified range.
         if (cc_ng_term < 0)
         {
-            scanner.ResetShards(core_cnt);
+            scanner.ResetShards(1);  // Only need one core's scan cache
         }
 
-        for (uint32_t core_id = 0; core_id < core_cnt; ++core_id)
-        {
-            ScanCache *cache = scanner.Cache(core_id);
-            const ScanTuple *last_tuple = cache->LastTuple();
+        // Only set prior CCE lock address for the target core
+        // Use the new Cache() method without parameter for single core mode
+        ScanCache *cache = scanner.Cache();
+        const ScanTuple *last_tuple = cache->LastTuple();
 
-            req->SetPriorCceLockAddr(
-                last_tuple != nullptr ? last_tuple->cce_addr_.CceLockPtr() : 0,
-                core_id);
-        }
+        req->SetPriorCceLockAddr(
+            last_tuple != nullptr ? last_tuple->cce_addr_.CceLockPtr() : 0,
+            target_core_id);
 
         scanner.ResetCaches();
 
-        uint32_t core_rand = butil::fast_rand();
-
-        // The scan slice request is dispatched to the first core. The first
-        // core tries to pin the slice in memory and if succeeds, further
-        // dispatches the request to remaining cores for parallel scans.
-        cc_shards_.EnqueueCcRequest(thd_id_, core_rand % core_cnt, req);
+        // Dispatch to the specific core that owns this range
+        cc_shards_.EnqueueCcRequest(thd_id_, target_core_id, req);
     }
     else
     {

@@ -1139,7 +1139,7 @@ void CcStreamReceiver::OnReceiveCcMsg(std::unique_ptr<CcMessage> msg)
 
             if (memory_cache.scan_tuple_size() > 0)
             {
-                ScanCache *scan_cache = scanner->Cache(shard_code);
+                ScanCache *scan_cache = scanner->Cache();
                 scan_cache->Reset();
 
                 for (int idx = 0; idx < memory_cache.scan_tuple_size(); ++idx)

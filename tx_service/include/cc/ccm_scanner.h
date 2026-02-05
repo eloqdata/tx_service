@@ -409,6 +409,7 @@ public:
     virtual ~CcScanner() = default;
 
     virtual ScanCache *Cache(uint32_t shard_code) = 0;
+    virtual ScanCache *Cache() = 0;
     virtual ScanCache *KvCache(uint32_t shard_code,
                                uint16_t bucket_id,
                                size_t batch_size)
@@ -467,11 +468,6 @@ public:
     virtual uint32_t ShardCount() const = 0;
 
     virtual void CommitAtCore(uint16_t core_id)
-    {
-        assert(false);
-    }
-
-    virtual void FinalizeCommit()
     {
         assert(false);
     }
@@ -871,6 +867,12 @@ public:
         // For TemplateCcScanner, shard_code is (ng_id << 10) + core_id.
     }
 
+    ScanCache *Cache() override
+    {
+        assert(false);
+        return nullptr;
+    }
+
     ScanCache *KvCache(uint32_t shard_code,
                        uint16_t bucket_id,
                        size_t batch_size) override
@@ -1260,6 +1262,12 @@ public:
         return &scans_[shard_code];
     }
 
+    ScanCache *Cache() override
+    {
+        assert(scans_.size() == 1);
+        return &scans_[0];
+    }
+
     void ShardCacheSizes(std::vector<std::pair<uint32_t, size_t>>
                              *shard_code_and_sizes) const override
     {
@@ -1389,20 +1397,8 @@ public:
             }
             else
             {
-                // Concat. Delay concat to FinalizeCommit() to avoid lock.
+                // Concat.
             }
-        }
-    }
-
-    void FinalizeCommit() override
-    {
-        if (is_require_sort_)
-        {
-            // Already sorted by CommitAtCore().
-        }
-        else
-        {
-            ConcatAll();
         }
     }
 

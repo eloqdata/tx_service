@@ -727,23 +727,32 @@ void LockWriteRangeBucketsOp::Advance(TransactionExecution *txm)
             txm->range_rec_.GetNewRangeOwnerNgs();
 
         // Updates the sharding codes of the write-set keys belonging to this
-        // range. The higher 22 bits represent the range ID.
+        // range. Uses partition_id to determine which core this range's keys
+        // should be sharded to. All keys in the same range will be on the same
+        // core, while different ranges can be distributed across different
+        // cores for load balancing. The higher 22 bits represent the range
+        // owner node group id.
         NodeGroupId new_range_ng = UINT32_MAX;
         NodeGroupId new_range_new_bucket_ng = UINT32_MAX;
         size_t new_range_idx = 0;
 
         auto *range_info = txm->range_rec_.GetRangeInfo();
+        // Calculate partition_id and residual once for all keys in this range
+        int32_t partition_id = range_info->PartitionId();
+        uint32_t core_count = Sharder::Instance().GetLocalCcShardsCount();
+        // Ensure non-negative result for modulo operation
+        uint32_t residual = static_cast<uint32_t>(partition_id) % core_count;
+
         while (write_key_it_ != next_range_start)
         {
             const TxKey &write_tx_key = write_key_it_->first;
             WriteSetEntry &write_entry = write_key_it_->second;
-            size_t hash = write_tx_key.Hash();
-            write_entry.key_shard_code_ = (range_ng << 10) | (hash & 0x3FF);
+            write_entry.key_shard_code_ = (range_ng << 10) | residual;
             // If current range is migrating, forward to new range owner.
             if (new_bucket_ng != UINT32_MAX)
             {
                 write_entry.forward_addr_.try_emplace((new_bucket_ng << 10) |
-                                                      (hash & 0x3FF));
+                                                      residual);
             }
 
             // If range is splitting and the key will fall on a new range after
@@ -761,10 +770,22 @@ void LockWriteRangeBucketsOp::Advance(TransactionExecution *txm)
             }
             if (new_range_ng != UINT32_MAX)
             {
+                // Calculate residual for new range based on its partition_id
+                uint32_t new_range_residual = residual;
+                if (range_info->IsDirty() &&
+                    range_info->NewPartitionId() != nullptr &&
+                    new_range_idx > 0)
+                {
+                    int32_t new_range_partition_id =
+                        range_info->NewPartitionId()->at(new_range_idx - 1);
+                    new_range_residual =
+                        static_cast<uint32_t>(new_range_partition_id) %
+                        core_count;
+                }
                 if (new_range_ng != range_ng)
                 {
                     write_entry.forward_addr_.try_emplace((new_range_ng << 10) |
-                                                          (hash & 0x3FF));
+                                                          new_range_residual);
                 }
                 // If the new range is migrating, forward to the new owner of
                 // new range.
@@ -772,7 +793,7 @@ void LockWriteRangeBucketsOp::Advance(TransactionExecution *txm)
                     new_range_new_bucket_ng != range_ng)
                 {
                     write_entry.forward_addr_.try_emplace(
-                        (new_range_new_bucket_ng << 10) | (hash & 0x3FF));
+                        (new_range_new_bucket_ng << 10) | new_range_residual);
                 }
             }
 

@@ -1963,13 +1963,19 @@ void TransactionExecution::Process(ReadOperation &read)
                     // error to the tx read request.
                     assert(!lock_range_bucket_result_.IsError());
 
-                    // Uses the lower 10 bits of the key's hash code to shard
-                    // the key across CPU cores in a cc node.
-                    uint32_t residual = key.Hash() & 0x3FF;
+                    // Uses partition_id to determine which core this range's
+                    // keys should be sharded to. All keys in the same range
+                    // will be on the same core, while different ranges can be
+                    // distributed across different cores for load balancing.
+                    partition_id = range_rec_.GetRangeInfo()->PartitionId();
+                    uint32_t core_count =
+                        Sharder::Instance().GetLocalCcShardsCount();
+                    // Ensure non-negative result for modulo operation
+                    uint32_t residual =
+                        static_cast<uint32_t>(partition_id) % core_count;
                     NodeGroupId range_ng =
                         range_rec_.GetRangeOwnerNg()->BucketOwner();
                     key_shard_code = range_ng << 10 | residual;
-                    partition_id = range_rec_.GetRangeInfo()->PartitionId();
                 }
             }
             else

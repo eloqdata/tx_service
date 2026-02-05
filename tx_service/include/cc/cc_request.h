@@ -2688,7 +2688,8 @@ public:
     ScanCache *GetLocalScanCache(size_t shard_id)
     {
         assert(IsLocal());
-        return res_->Value().ccm_scanner_->Cache(shard_id);
+        (void) shard_id;
+        return res_->Value().ccm_scanner_->Cache();
     }
 
     RemoteScanSliceCache *GetRemoteScanCache(size_t shard_id)
@@ -2769,30 +2770,19 @@ public:
      */
     bool SetFinish()
     {
-        uint16_t remaining_cnt =
-            unfinished_core_cnt_.fetch_sub(1, std::memory_order_acq_rel);
-
-        if (remaining_cnt == 1)
+        if (res_->Value().is_local_)
         {
-            // Only update result if this is local request. Remote request
-            // result will be updated by dedicated core.
-            if (res_->Value().is_local_)
+            if (err_.load(std::memory_order_relaxed) == CcErrorCode::NO_ERROR)
             {
-                if (err_.load(std::memory_order_relaxed) ==
-                    CcErrorCode::NO_ERROR)
-                {
-                    res_->Value().ccm_scanner_->FinalizeCommit();
-
-                    res_->SetFinished();
-                }
-                else
-                {
-                    res_->SetError(err_.load(std::memory_order_relaxed));
-                }
+                res_->SetFinished();
+            }
+            else
+            {
+                res_->SetError(err_.load(std::memory_order_relaxed));
             }
         }
 
-        return remaining_cnt == 1;
+        return true;  // Always return true since we're done
     }
 
     bool SetError(CcErrorCode err)
@@ -3368,8 +3358,6 @@ public:
             }
             else
             {
-                hd_res_->Value().ccm_scanner_->FinalizeCommit();
-
                 hd_res_->SetFinished();
             }
 

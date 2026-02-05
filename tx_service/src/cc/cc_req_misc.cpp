@@ -706,11 +706,11 @@ void FillStoreSliceCc::AddDataItem(
         rec_cnt_++;
     }
 
-    size_t hash = key.Hash();
-    // Uses the lower 10 bits of the hash code to shard the key across
-    // CPU cores at this node.
-    uint16_t core_code = hash & 0x3FF;
-    uint16_t core_id = core_code % core_cnt_;
+    // Uses partition_id to determine which core this range's keys
+    // should be sharded to. All keys in the same range will be
+    // on the same core.
+    uint32_t partition_id = range_->PartitionId();
+    uint16_t core_id = partition_id % core_cnt_;
 
     partitioned_slice_data_[core_id].emplace_back(
         std::move(key), std::move(record), version_ts, is_deleted);
