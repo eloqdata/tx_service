@@ -6006,6 +6006,11 @@ Task<void> LocalCcShards::FlushDataCoro(TaskScheduler *sched,
                                  cce_entries_map)
                             {
                                 updated_ckpt_ts_core_ids.insert(core_idx);
+                            }
+
+                            for (auto &[core_idx, cce_entries] :
+                                 cce_entries_map)
+                            {
                                 this->EnqueueToCcShard(core_idx,
                                                        &update_cce_req);
                             }
