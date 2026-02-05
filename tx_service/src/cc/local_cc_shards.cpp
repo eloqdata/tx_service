@@ -132,9 +132,9 @@ LocalCcShards::LocalCcShards(
 
       data_sync_worker_ctx_(conf.at("core_num")),
 #ifdef EXT_TX_PROC_ENABLED
-      flush_data_worker_ctx_(1),
+      flush_data_worker_ctx_(2),
 #else
-      flush_data_worker_ctx_(1),
+      flush_data_worker_ctx_(2),
 #endif
       // cur_flush_buffers_ will be resized in StartBackgroudWorkers()
       // when worker_num_ is determined
