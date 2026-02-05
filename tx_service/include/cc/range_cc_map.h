@@ -325,6 +325,12 @@ public:
         else
         {
             assert(err_code == CcErrorCode::ACQUIRE_LOCK_BLOCKED);
+            // Release the bucket read lock acquired earlier.
+            ReleaseCceLock(bucket_cce->GetKeyLock(),
+                           bucket_cce,
+                           req.Txn(),
+                           req.NodeGroupId(),
+                           LockType::ReadLock);
             DeadLockCheck::RequestCheck();
 
             req.SetBlockType(ReadCc::BlockByLock);
