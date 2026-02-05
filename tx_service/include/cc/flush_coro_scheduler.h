@@ -24,13 +24,28 @@ struct TaskScheduler
 {
     std::queue<std::coroutine_handle<>> ready_queue;
     std::mutex mtx;
+    // Optional callback invoked when a handle is posted (e.g. from async
+    // completion). Used to wake FlushDataWorker so it runs the scheduler
+    // immediately instead of waiting for wait_for timeout.
+    std::function<void()> on_post_ready_;
+
+    void SetOnPostReady(std::function<void()> f)
+    {
+        on_post_ready_ = std::move(f);
+    }
 
     void PostReadyHandle(std::coroutine_handle<> h)
     {
-        std::lock_guard<std::mutex> lk(mtx);
-        ready_queue.push(h);
-        LOG(INFO) << "TaskScheduler: post ready handle, size = "
-                  << ready_queue.size();
+        {
+            std::lock_guard<std::mutex> lk(mtx);
+            ready_queue.push(h);
+            LOG(INFO) << "TaskScheduler: post ready handle, size = "
+                      << ready_queue.size();
+        }
+        if (on_post_ready_)
+        {
+            on_post_ready_();
+        }
     }
 
     void RunLoopOnce()

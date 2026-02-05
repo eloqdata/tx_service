@@ -295,7 +295,10 @@ void LocalCcShards::StartBackgroudWorkers()
     flush_coro_schedulers_.clear();
     for (size_t i = 0; i < worker_num; ++i)
     {
-        flush_coro_schedulers_.emplace_back(std::make_unique<TaskScheduler>());
+        auto sched = std::make_unique<TaskScheduler>();
+        sched->SetOnPostReady([this]()
+                              { flush_data_worker_ctx_.cv_.notify_all(); });
+        flush_coro_schedulers_.emplace_back(std::move(sched));
     }
 
     // Starts flush worker threads firstly.
@@ -6095,10 +6098,17 @@ void LocalCcShards::FlushDataWorker(size_t worker_idx)
              &pending_flush_work,
              &cur_flush_buffer,
              &previous_flush_size,
-             &previous_size_update_time]
+             &previous_size_update_time,
+             sched]
             {
                 if (!pending_flush_work.empty() ||
                     flush_data_worker_ctx_.status_ == WorkerStatus::Terminated)
+                {
+                    return true;
+                }
+                // Wake when a coroutine was posted (e.g. async completion);
+                // otherwise worker would wait up to 10s.
+                if (!sched->IsEmpty())
                 {
                     return true;
                 }
