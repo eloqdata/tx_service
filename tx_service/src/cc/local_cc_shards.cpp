@@ -6084,6 +6084,7 @@ void LocalCcShards::FlushDataWorker(size_t worker_idx)
         // Run C++20 coroutines (FlushDataCoro) until scheduler is empty
         while (!sched->IsEmpty())
         {
+            LOG(INFO) << "yf: run loop once";
             sched->RunLoopOnce();
         }
 
