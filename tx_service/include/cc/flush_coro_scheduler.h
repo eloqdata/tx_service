@@ -7,12 +7,14 @@
 
 #include <butil/logging.h>
 
+#include <atomic>
 #include <coroutine>
 #include <functional>
 #include <memory>
 #include <mutex>
 #include <optional>
 #include <queue>
+#include <vector>
 
 namespace txservice
 {
@@ -71,6 +73,8 @@ struct Task<void>
     struct promise_type
     {
         std::coroutine_handle<> continuation;
+        std::function<void()>
+            on_complete;  // optional; called when task ends (e.g. JoinAll)
 
         Task get_return_object()
         {
@@ -92,6 +96,8 @@ struct Task<void>
             }
             void await_suspend(std::coroutine_handle<promise_type> h) noexcept
             {
+                if (h.promise().on_complete)
+                    h.promise().on_complete();
                 if (h.promise().continuation)
                     h.promise().continuation.resume();
                 else
@@ -113,14 +119,16 @@ struct Task<void>
 
     std::coroutine_handle<promise_type> handle;
 
+    // co_await starts child via symmetric
+    // transfer; await_ready() true if already done.
     bool await_ready()
     {
-        return false;
+        return handle.done();
     }
-    void await_suspend(std::coroutine_handle<> h)
+    std::coroutine_handle<> await_suspend(std::coroutine_handle<> h)
     {
         handle.promise().continuation = h;
-        handle.resume();
+        return handle;  // symmetric transfer: start child, don't go to queue
     }
     void await_resume()
     {
@@ -134,6 +142,8 @@ struct Task
     {
         T result{};
         std::coroutine_handle<> continuation;
+        std::function<void()>
+            on_complete;  // optional; called when task ends (e.g. JoinAll)
 
         Task get_return_object()
         {
@@ -156,6 +166,8 @@ struct Task
             }
             void await_suspend(std::coroutine_handle<promise_type> h) noexcept
             {
+                if (h.promise().on_complete)
+                    h.promise().on_complete();
                 if (h.promise().continuation)
                     h.promise().continuation.resume();
                 else
@@ -177,14 +189,16 @@ struct Task
 
     std::coroutine_handle<promise_type> handle;
 
+    // co_await starts child via symmetric
+    // transfer; await_ready() true if already done.
     bool await_ready()
     {
-        return false;
+        return handle.done();
     }
-    void await_suspend(std::coroutine_handle<> h)
+    std::coroutine_handle<> await_suspend(std::coroutine_handle<> h)
     {
         handle.promise().continuation = h;
-        handle.resume();
+        return handle;  // symmetric transfer: start child, don't go to queue
     }
 
     T await_resume()
@@ -192,6 +206,83 @@ struct Task
         return std::move(handle.promise().result);
     }
 };
+
+// --- 2b. JoinAll (Rust style): Lazy sub-tasks + batch PostReadyHandle ---
+// No gate sub-coroutine: each child's promise has on_complete set to decrement
+// a shared counter; when it reaches 0, post parent once. Children complete
+// and decrement by themselves.
+struct JoinAllState
+{
+    std::atomic<size_t> count{0};
+    TaskScheduler *sched{nullptr};
+    std::coroutine_handle<> parent_h;
+};
+
+template <typename T>
+struct JoinAllAwaitable
+{
+    std::vector<Task<T>> &tasks;
+    TaskScheduler *sched;
+
+    bool await_ready()
+    {
+        if (tasks.empty())
+            return true;
+        for (auto &t : tasks)
+        {
+            if (!t.handle.done())
+                return false;
+        }
+        return true;
+    }
+
+    void await_suspend(std::coroutine_handle<> h)
+    {
+        if (tasks.empty())
+        {
+            sched->PostReadyHandle(h);
+            return;
+        }
+        auto state = std::make_shared<JoinAllState>();
+        state->count = tasks.size();
+        state->sched = sched;
+        state->parent_h = h;
+        for (auto &t : tasks)
+        {
+            t.handle.promise().on_complete = [state]()
+            {
+                state->count--;
+                if (state->count.load() == 0)
+                {
+                    state->sched->PostReadyHandle(state->parent_h);
+                }
+            };
+            t.handle.promise().continuation = nullptr;
+        }
+        for (auto &t : tasks)
+        {
+            sched->PostReadyHandle(t.handle);
+        }
+    }
+
+    std::vector<T> await_resume()
+    {
+        std::vector<T> results;
+        results.reserve(tasks.size());
+        for (auto &t : tasks)
+        {
+            results.push_back(std::move(t.handle.promise().result));
+        }
+        return results;
+    }
+};
+
+template <typename T>
+inline JoinAllAwaitable<T> JoinAll(std::vector<Task<T>> &tasks,
+                                   TaskScheduler *sched)
+{
+    return JoinAllAwaitable<T>{tasks, sched};
+}
 
 // --- 3. TaskAwaitable<R> for async ops and Yield ---
 // Optional ready_fn: when set, await_ready() returns ready_fn(); else false.
@@ -224,14 +315,16 @@ struct TaskAwaitable
     {
         LOG(INFO) << "TaskAwaitable: await_suspend";
         res_ = std::make_shared<std::optional<R>>();
-        start_op(
-            [this, h, s = this->sched](R v)
-            {
-                LOG(INFO) << "TaskAwaitable: post ready handle";
-                res_->emplace(std::move(v));
-                s->PostReadyHandle(h);
-            });
+        auto resume_lambda = [this, h, s = this->sched](R v)
+        {
+            LOG(INFO) << "TaskAwaitable: post ready handle";
+            res_->emplace(std::move(v));
+            s->PostReadyHandle(h);
+        };
+
+        start_op(resume_lambda);
     }
+
     R await_resume()
     {
         return std::move(res_->value_or(R()));

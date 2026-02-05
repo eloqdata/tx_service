@@ -640,6 +640,8 @@ txservice::Task<bool> DataStoreServiceClient::PutAllCoro(
 
     sync_putall->total_partitions_ = sync_putall->partition_states_.size();
 
+    // Rust style: only create sub-coroutines (Lazy), do not Post; then
+    // co_await JoinAll(sub_tasks) to start all and wait for all once.
     std::vector<txservice::Task<bool>> sub_tasks;
     sub_tasks.reserve(callback_data_list.size());
     for (size_t i = 0; i < callback_data_list.size(); ++i)
@@ -650,19 +652,14 @@ txservice::Task<bool> DataStoreServiceClient::PutAllCoro(
                   << ", size = " << callback_data_list.size();
         sub_tasks.push_back(
             ProcessPartitionCoro(sched, partition_state, callback_data));
-        // Do NOT post the child to the scheduler: co_await t will start it
-        // via await_suspend (handle.resume()). If we also PostReadyHandle here,
-        // the same handle stays in the ready queue; when RunLoopOnce runs again
-        // it would resume the child from its suspend point (after co_await
-        // BatchWriteRecordsAsync) before the RPC callback runs, causing
-        // PutAllCoro to continue and reach "update cce" before
-        // BatchWriteRecords actually completes.
     }
 
+    std::vector<bool> part_results =
+        co_await txservice::JoinAll(sub_tasks, sched);
+
     bool ok = true;
-    for (auto &t : sub_tasks)
+    for (bool part_ok : part_results)
     {
-        bool part_ok = co_await t;
         ok = ok && part_ok;
     }
 
