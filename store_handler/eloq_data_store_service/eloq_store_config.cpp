@@ -123,6 +123,12 @@ DEFINE_uint32(eloq_store_pages_per_file_shift,
               "EloqStore pages per file shift.");
 DEFINE_uint32(eloq_store_overflow_pointers, 16, "EloqStore overflow pointers.");
 DEFINE_bool(eloq_store_data_append_mode, true, "EloqStore data append mode.");
+DEFINE_string(eloq_store_write_buffer_size,
+              "1MB",
+              "EloqStore append-mode write buffer size.");
+DEFINE_double(eloq_store_write_buffer_ratio,
+              0.05,
+              "EloqStore ratio of buffer pool reserved for append-mode write buffers.");
 DEFINE_bool(eloq_store_enable_compression,
             false,
             "EloqStore enable compression.");
@@ -539,6 +545,19 @@ EloqStoreConfig::EloqStoreConfig(const INIReader &config_reader,
             : config_reader.GetBoolean("store",
                                        "eloq_store_data_append_mode",
                                        FLAGS_eloq_store_data_append_mode);
+    std::string write_buffer_size_str =
+        !CheckCommandLineFlagIsDefault("eloq_store_write_buffer_size")
+            ? FLAGS_eloq_store_write_buffer_size
+            : config_reader.GetString("store",
+                                      "eloq_store_write_buffer_size",
+                                      FLAGS_eloq_store_write_buffer_size);
+    eloqstore_configs_.write_buffer_size = parse_size(write_buffer_size_str);
+    eloqstore_configs_.write_buffer_ratio =
+        !CheckCommandLineFlagIsDefault("eloq_store_write_buffer_ratio")
+            ? FLAGS_eloq_store_write_buffer_ratio
+            : config_reader.GetReal("store",
+                                    "eloq_store_write_buffer_ratio",
+                                    FLAGS_eloq_store_write_buffer_ratio);
     eloqstore_configs_.enable_compression =
         !CheckCommandLineFlagIsDefault("eloq_store_enable_compression")
             ? FLAGS_eloq_store_enable_compression
