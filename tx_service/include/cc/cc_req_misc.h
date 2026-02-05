@@ -887,19 +887,19 @@ public:
         }
     }
 
-    void SetOnComplete(std::function<void()> on_complete)
+    void SetNotifyCallback(std::function<void()> notify_callback)
     {
         std::lock_guard<bthread::Mutex> lk(mux_);
         if (unfinished_cnt_ == 0)
         {
-            if (on_complete)
+            if (notify_callback)
             {
-                on_complete();
+                notify_callback();
             }
         }
         else
         {
-            on_complete_ = std::move(on_complete);
+            notify_callback_ = std::move(notify_callback);
         }
     }
 
@@ -951,9 +951,9 @@ public:
 private:
     void NotifyContinuations()
     {
-        if (on_complete_)
+        if (notify_callback_)
         {
-            on_complete_();
+            notify_callback_();
         }
     }
 
@@ -970,7 +970,7 @@ private:
     mutable bthread::Mutex mux_;
     bthread::ConditionVariable cv_;
 
-    std::function<void()> on_complete_{nullptr};
+    std::function<void()> notify_callback_{nullptr};
     uint32_t unfinished_cnt_{0};
     CcErrorCode error_code_;
 };
@@ -1025,8 +1025,18 @@ public:
         unfinished_core_cnt_--;
         if (unfinished_core_cnt_ == 0)
         {
-            NotifyContinuations();
-            cv_.notify_one();
+            // If notify_callback_ is set, call it instead of cv_.notify_one().
+            // The callback may resume the coroutine, which could destroy this
+            // object. We need to notify cv before the object is destroyed only
+            // if no callback is set.
+            if (notify_callback_)
+            {
+                NotifyContinuations();
+            }
+            else
+            {
+                cv_.notify_one();
+            }
         }
     }
 
@@ -1039,19 +1049,19 @@ public:
         }
     }
 
-    void SetOnComplete(std::function<void()> on_complete)
+    void SetNotifyCallback(std::function<void()> notify_callback)
     {
         std::lock_guard<bthread::Mutex> lk(mux_);
         if (unfinished_core_cnt_ == 0)
         {
-            if (on_complete)
+            if (notify_callback)
             {
-                on_complete();
+                notify_callback();
             }
         }
         else
         {
-            on_complete_ = std::move(on_complete);
+            notify_callback_ = std::move(notify_callback);
         }
     }
 
@@ -1070,10 +1080,10 @@ public:
 private:
     void NotifyContinuations()
     {
-        if (on_complete_)
+        if (notify_callback_)
         {
-            on_complete_();
-            on_complete_ = nullptr;
+            notify_callback_();
+            notify_callback_ = nullptr;
         }
     }
 
@@ -1081,7 +1091,7 @@ private:
     // key: core_idx, value: entry_index
     absl::flat_hash_map<size_t, size_t> indices_;
 
-    std::function<void()> on_complete_{nullptr};
+    std::function<void()> notify_callback_{nullptr};
     size_t unfinished_core_cnt_;
     NodeGroupId node_group_id_;
     int64_t term_;

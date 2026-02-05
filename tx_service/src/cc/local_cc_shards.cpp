@@ -6001,16 +6001,11 @@ Task<void> LocalCcShards::FlushDataCoro(TaskScheduler *sched,
                          &cce_entries_map,
                          this](auto cb)
                         {
-                            update_cce_req.SetOnComplete([&]() { cb(); });
+                            update_cce_req.SetNotifyCallback([&]() { cb(); });
                             for (auto &[core_idx, cce_entries] :
                                  cce_entries_map)
                             {
                                 updated_ckpt_ts_core_ids.insert(core_idx);
-                            }
-
-                            for (auto &[core_idx, cce_entries] :
-                                 cce_entries_map)
-                            {
                                 this->EnqueueToCcShard(core_idx,
                                                        &update_cce_req);
                             }
@@ -6031,7 +6026,7 @@ Task<void> LocalCcShards::FlushDataCoro(TaskScheduler *sched,
         sched,
         [&reset_cc, &updated_ckpt_ts_core_ids, this](auto cb)
         {
-            reset_cc.SetOnComplete([&]() { cb(); });
+            reset_cc.SetNotifyCallback([&]() { cb(); });
             for (uint16_t core_idx : updated_ckpt_ts_core_ids)
             {
                 this->EnqueueToCcShard(core_idx, &reset_cc);
