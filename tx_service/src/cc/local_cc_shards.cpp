@@ -5916,7 +5916,7 @@ Task<void> LocalCcShards::FlushDataCoro(TaskScheduler *sched,
 
     if (succ)
     {
-        LOG(INFO) << "yf: wait PutAllCoro";
+        // LOG(INFO) << "yf: wait PutAllCoro";
         succ = co_await store_hd_->PutAllCoro(sched, flush_task_entries);
         if (!succ)
         {
@@ -5993,52 +5993,59 @@ Task<void> LocalCcShards::FlushDataCoro(TaskScheduler *sched,
                         entry->data_sync_task_->node_group_term_,
                         table_name,
                         cce_entries_map);
-                    for (auto &[core_idx, cce_entries] : cce_entries_map)
-                    {
-                        updated_ckpt_ts_core_ids.insert(core_idx);
-                        EnqueueToCcShard(core_idx, &update_cce_req);
-                    }
 
-                    LOG(INFO) << "yf: wait update_cce_req";
                     co_await TaskAwaitable<void>{
                         sched,
-                        [&update_cce_req](auto cb)
-                        { update_cce_req.WaitAsync(std::move(cb)); },
+                        [&update_cce_req,
+                         &updated_ckpt_ts_core_ids,
+                         &cce_entries_map](auto cb)
+                        {
+                            update_cce_req.SetOnComplete([&]() { cb(); });
+                            for (auto &[core_idx, cce_entries] :
+                                 cce_entries_map)
+                            {
+                                updated_ckpt_ts_core_ids.insert(core_idx);
+                                EnqueueToCcShard(core_idx, &update_cce_req);
+                            }
+                        },
                         [&update_cce_req]()
                         { return update_cce_req.IsFinished(); }};
-                }
+                };
             }
         }
     }
+}  // namespace txservice
 
-    WaitableCc reset_cc(
-        [&](CcShard &ccs)
-        {
-            ccs.OnDirtyDataFlushed();
-            return true;
-        },
-        updated_ckpt_ts_core_ids.size());
-    for (uint16_t core_idx : updated_ckpt_ts_core_ids)
+WaitableCc reset_cc(
+    [&](CcShard &ccs)
     {
-        EnqueueToCcShard(core_idx, &reset_cc);
-    }
-    co_await TaskAwaitable<void>{
-        sched,
-        [&reset_cc](auto cb) { reset_cc.WaitAsync(std::move(cb)); },
-        [&reset_cc]() { return reset_cc.IsFinished(); }};
+        ccs.OnDirtyDataFlushed();
+        return true;
+    },
+    updated_ckpt_ts_core_ids.size());
+co_await TaskAwaitable<void>{
+    sched,
+    [&reset_cc, &updated_ckpt_ts_core_ids](auto cb)
+    {
+        reset_cc.SetOnComplete([&]() { cb(); });
+        for (uint16_t core_idx : updated_ckpt_ts_core_ids)
+        {
+            EnqueueToCcShard(core_idx, &reset_cc);
+        }
+    }};
 
-    auto ckpt_err = succ ? DataSyncTask::CkptErrorCode::NO_ERROR
-                         : DataSyncTask::CkptErrorCode::FLUSH_ERROR;
+auto ckpt_err = succ ? DataSyncTask::CkptErrorCode::NO_ERROR
+                     : DataSyncTask::CkptErrorCode::FLUSH_ERROR;
 
-    uint64_t old_usage = data_sync_mem_controller_.DeallocateFlushMemQuota(
-        cur_work->pending_flush_size_);
+uint64_t old_usage = data_sync_mem_controller_.DeallocateFlushMemQuota(
+    cur_work->pending_flush_size_);
 
-    DLOG(INFO) << "DelocateFlushDataMemQuota old_usage: " << old_usage
-               << " new_usage: " << old_usage - cur_work->pending_flush_size_
-               << " quota: " << data_sync_mem_controller_.FlushMemoryQuota();
+DLOG(INFO) << "DelocateFlushDataMemQuota old_usage: " << old_usage
+           << " new_usage: " << old_usage - cur_work->pending_flush_size_
+           << " quota: " << data_sync_mem_controller_.FlushMemoryQuota();
 
-    PostProcessFlushTaskEntries(flush_task_entries, ckpt_err);
-    co_return;
+PostProcessFlushTaskEntries(flush_task_entries, ckpt_err);
+co_return;
 }
 
 void LocalCcShards::FlushData(std::unique_lock<std::mutex> &flush_worker_lk,
@@ -6087,7 +6094,7 @@ void LocalCcShards::FlushDataWorker(size_t worker_idx)
         // Run C++20 coroutines (FlushDataCoro) until scheduler is empty
         while (!sched->IsEmpty())
         {
-            LOG(INFO) << "yf: run loop once";
+            // LOG(INFO) << "yf: run loop once";
             sched->RunLoopOnce();
         }
 

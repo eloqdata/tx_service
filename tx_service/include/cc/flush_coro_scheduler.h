@@ -39,8 +39,8 @@ struct TaskScheduler
         {
             std::lock_guard<std::mutex> lk(mtx);
             ready_queue.push(h);
-            LOG(INFO) << "TaskScheduler: post ready handle, size = "
-                      << ready_queue.size();
+            // LOG(INFO) << "TaskScheduler: post ready handle, size = "
+            //          << ready_queue.size();
         }
         if (on_post_ready_)
         {
@@ -61,7 +61,7 @@ struct TaskScheduler
 
         if (h && h.done())
         {
-            LOG(INFO) << "TaskScheduler: handle already done";
+            // LOG(INFO) << "TaskScheduler: handle already done";
         }
 
         // Only resume if not already done (avoids double-resume segfault if
@@ -320,19 +320,19 @@ struct TaskAwaitable
     {
         if (ready_fn_)
         {
-            LOG(INFO) << "TaskAwaitable: await_ready, ready_fn_() = "
-                      << ready_fn_();
+            // LOG(INFO) << "TaskAwaitable: await_ready, ready_fn_() = "
+            //          << ready_fn_();
             return ready_fn_();
         }
         return false;
     }
     void await_suspend(std::coroutine_handle<> h)
     {
-        LOG(INFO) << "TaskAwaitable: await_suspend";
+        // LOG(INFO) << "TaskAwaitable: await_suspend";
         res_ = std::make_shared<std::optional<R>>();
         auto resume_lambda = [this, h, s = this->sched](R v)
         {
-            LOG(INFO) << "TaskAwaitable: post ready handle";
+            //   LOG(INFO) << "TaskAwaitable: post ready handle";
             res_->emplace(std::move(v));
             s->PostReadyHandle(h);
         };
@@ -369,8 +369,8 @@ struct TaskAwaitable<void>
     {
         if (ready_fn_)
         {
-            LOG(INFO) << "TaskAwaitable: await_ready, ready_fn_() = "
-                      << ready_fn_();
+            // LOG(INFO) << "TaskAwaitable: await_ready, ready_fn_() = "
+            // << ready_fn_();
             return ready_fn_();
         }
         return false;

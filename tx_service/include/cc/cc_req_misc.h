@@ -887,19 +887,19 @@ public:
         }
     }
 
-    // For C++20 coroutine: when finished, call cb (e.g. post handle to
-    // FlushDataWorker scheduler). cb may run on TxProcessor thread; must not
-    // resume coroutine there, only post to scheduler.
-    void WaitAsync(std::function<void()> cb)
+    void SetOnComplete(std::function<void()> on_complete)
     {
         std::lock_guard<bthread::Mutex> lk(mux_);
         if (unfinished_cnt_ == 0)
         {
-            cb();
+            if (on_complete)
+            {
+                on_complete();
+            }
         }
         else
         {
-            continuations_.push_back(std::move(cb));
+            on_complete_ = std::move(on_complete);
         }
     }
 
@@ -951,12 +951,9 @@ public:
 private:
     void NotifyContinuations()
     {
-        std::vector<std::function<void()>> ready;
-        ready.swap(continuations_);
-        for (auto &cb : ready)
+        if (on_complete_)
         {
-            if (cb)
-                cb();
+            on_complete_();
         }
     }
 
@@ -973,7 +970,7 @@ private:
     mutable bthread::Mutex mux_;
     bthread::ConditionVariable cv_;
 
-    std::vector<std::function<void()>> continuations_;
+    std::function<void()> on_complete_{nullptr};
     uint32_t unfinished_cnt_{0};
     CcErrorCode error_code_;
 };
@@ -1042,18 +1039,19 @@ public:
         }
     }
 
-    void WaitAsync(std::function<void()> cb)
+    void SetOnComplete(std::function<void()> on_complete)
     {
         std::lock_guard<bthread::Mutex> lk(mux_);
         if (unfinished_core_cnt_ == 0)
         {
-            LOG(INFO) << "yf: update cce callback";
-            cb();
+            if (on_complete)
+            {
+                on_complete();
+            }
         }
         else
         {
-            LOG(INFO) << "yf: update cce push continuation";
-            continuations_.push_back(std::move(cb));
+            on_complete_ = std::move(on_complete);
         }
     }
 
@@ -1072,15 +1070,10 @@ public:
 private:
     void NotifyContinuations()
     {
-        std::vector<std::function<void()>> ready;
-        ready.swap(continuations_);
-        for (auto &cb : ready)
+        if (on_complete_)
         {
-            if (cb)
-            {
-                LOG(INFO) << "yf: update cce callback";
-                cb();
-            }
+            on_complete_();
+            on_complete_ = nullptr;
         }
     }
 
@@ -1088,7 +1081,7 @@ private:
     // key: core_idx, value: entry_index
     absl::flat_hash_map<size_t, size_t> indices_;
 
-    std::vector<std::function<void()>> continuations_;
+    std::function<void()> on_complete_{nullptr};
     size_t unfinished_core_cnt_;
     NodeGroupId node_group_id_;
     int64_t term_;
