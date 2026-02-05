@@ -7397,7 +7397,8 @@ void DataMigrationOp::Forward(TransactionExecution *txm)
             RetrySubOperation(txm, &write_before_locking_log_op_);
             return;
         }
-        if (migrate_bucket_idx_ == 20)
+
+        if (migrate_bucket_idx_ == 1)
         {
             ACTION_FAULT_INJECTOR("data_migrate_before_prepare_log");
         }
