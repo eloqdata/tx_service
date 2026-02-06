@@ -326,7 +326,7 @@ public:
 
     StoreSlice(const StoreSlice &) = delete;
 
-    void StartLoading(FillStoreSliceCc *fill_req, LocalCcShards &cc_shards);
+    void StartLoading(FillStoreSliceCc *fill_req, uint32_t partition_id);
     void CommitLoading(StoreRange &range, uint32_t slice_size);
 
     virtual TxKey StartTxKey() const = 0;

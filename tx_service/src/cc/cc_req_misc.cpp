@@ -592,13 +592,13 @@ void FillStoreSliceCc::Reset(const TableName &table_name,
     cc_ng_term_ = cc_ng_term;
     force_load_ = force_load;
     finish_cnt_ = 0;
-    core_cnt_ = cc_shards.Count();
+    core_cnt_ = 1;
 
     next_idxs_.clear();
-    next_idxs_.resize(cc_shards.Count(), 0);
+    next_idxs_.resize(core_cnt_, 0);
 
     partitioned_slice_data_.clear();
-    partitioned_slice_data_.resize(cc_shards.Count());
+    partitioned_slice_data_.resize(core_cnt_);
 
     range_slice_ = slice;
     range_ = range;
@@ -709,10 +709,8 @@ void FillStoreSliceCc::AddDataItem(
     // Uses partition_id to determine which core this range's keys
     // should be sharded to. All keys in the same range will be
     // on the same core.
-    uint32_t partition_id = range_->PartitionId();
-    uint16_t core_id = partition_id % core_cnt_;
 
-    partitioned_slice_data_[core_id].emplace_back(
+    partitioned_slice_data_[0].emplace_back(
         std::move(key), std::move(record), version_ts, is_deleted);
 }
 
@@ -810,7 +808,8 @@ bool FillStoreSliceCc::SetError(CcErrorCode err_code)
 
 void FillStoreSliceCc::StartFilling()
 {
-    range_slice_->StartLoading(this, *Sharder::Instance().GetLocalCcShards());
+    uint32_t partition_id = range_->PartitionId();
+    range_slice_->StartLoading(this, partition_id);
 }
 
 void FillStoreSliceCc::TerminateFilling()

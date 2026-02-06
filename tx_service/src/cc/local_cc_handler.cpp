@@ -1304,8 +1304,7 @@ void txservice::LocalCcHandler::ScanNextBatch(
         const ScanTuple *last_tuple = cache->LastTuple();
 
         req->SetPriorCceLockAddr(
-            last_tuple != nullptr ? last_tuple->cce_addr_.CceLockPtr() : 0,
-            target_core_id);
+            last_tuple != nullptr ? last_tuple->cce_addr_.CceLockPtr() : 0, 0);
 
         scanner.ResetCaches();
 

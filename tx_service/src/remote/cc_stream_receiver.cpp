@@ -1273,13 +1273,14 @@ void CcStreamReceiver::OnReceiveCcMsg(std::unique_ptr<CcMessage> msg)
     case CcMessage::MessageType::CcMessage_MessageType_ScanSliceRequest:
     {
         RemoteScanSlice *scan_slice_req = scan_slice_pool.NextRequest();
-        uint32_t local_core_cnt = (uint32_t) local_shards_.Count();
+        uint32_t local_core_cnt = 1;
         TX_TRACE_ASSOCIATE(msg.get(), scan_slice_req);
         scan_slice_req->Reset(std::move(msg), local_core_cnt);
-        // The scan slice request is enqueued into the first core, where it pins
-        // the slice and sets the scan's end key. The request is then dispatched
-        // to remaining cores to scan the slice in parallel.
-        local_shards_.EnqueueCcRequest(0, scan_slice_req);
+        uint32_t range_id = scan_slice_req->RangeId();
+        uint32_t target_core_id = range_id % local_shards_.Count();
+        // All keys in the same range are on the same core, so we only need
+        // to scan on that specific core.
+        local_shards_.EnqueueCcRequest(target_core_id, scan_slice_req);
 
         break;
     }

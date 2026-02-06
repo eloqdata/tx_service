@@ -3439,15 +3439,16 @@ public:
             return true;
         }
 
+        uint16_t core_id = 0;
         if (req.SendResponseIfFinished())
         {
             req.UnpinSlices();
             return true;
         }
 
-        if (req.IsWaitForSnapshot(shard_->core_id_))
+        if (req.IsWaitForSnapshot(core_id))
         {
-            assert(req.WaitForSnapshotCnt(shard_->core_id_) == 0);
+            assert(req.WaitForSnapshotCnt(core_id) == 0);
             if (req.SetFinish())
             {
                 if (req.Result()->Value().is_local_)
@@ -3534,7 +3535,6 @@ public:
             req.SetEndKey(TxKey(std::move(decoded_end_key)));
         }
 
-        uint16_t core_id = shard_->LocalCoreId();
         TemplateScanCache<KeyT, ValueT> *scan_cache = nullptr;
         RemoteScanSliceCache *remote_scan_cache = nullptr;
         if (req.IsLocal())
@@ -3720,7 +3720,7 @@ public:
                 case CcErrorCode::MVCC_READ_MUST_WAIT_WRITE:
                 {
                     req.SetBlockingInfo(
-                        shard_->core_id_,
+                        core_id,
                         reinterpret_cast<uint64_t>(cce->GetLockAddr()),
                         scan_type,
                         ScanBlockingType::BlockOnFuture);
@@ -3729,7 +3729,7 @@ public:
                 case CcErrorCode::ACQUIRE_LOCK_BLOCKED:
                 {
                     req.SetBlockingInfo(
-                        shard_->core_id_,
+                        core_id,
                         reinterpret_cast<uint64_t>(cce->GetLockAddr()),
                         scan_type,
                         ScanBlockingType::BlockOnLock);
@@ -3917,9 +3917,9 @@ public:
                         }
 
                         if (is_read_snapshot &&
-                            req.WaitForSnapshotCnt(shard_->core_id_) > 0)
+                            req.WaitForSnapshotCnt(core_id) > 0)
                         {
-                            req.SetIsWaitForSnapshot(shard_->core_id_);
+                            req.SetIsWaitForSnapshot(core_id);
                             req.DeferSetError(lock_pair.second);
                             return false;
                         }
@@ -3988,7 +3988,7 @@ public:
                                store::DataStoreHandler::DataStoreOpStatus::
                                    Success);
                         (void) fetch_ret_status;
-                        req.IncreaseWaitForSnapshotCnt(shard_->core_id_);
+                        req.IncreaseWaitForSnapshotCnt(core_id);
                     }
                 }
                 else
@@ -4039,7 +4039,7 @@ public:
                                store::DataStoreHandler::DataStoreOpStatus::
                                    Success);
                         (void) fetch_ret_status;
-                        req.IncreaseWaitForSnapshotCnt(shard_->core_id_);
+                        req.IncreaseWaitForSnapshotCnt(core_id);
                     }
                 }
             }
@@ -4232,10 +4232,9 @@ public:
                     req.GetLocalScanner()->CommitAtCore(core_id);
                 }
 
-                if (is_read_snapshot &&
-                    req.WaitForSnapshotCnt(shard_->core_id_) > 0)
+                if (is_read_snapshot && req.WaitForSnapshotCnt(core_id) > 0)
                 {
-                    req.SetIsWaitForSnapshot(shard_->core_id_);
+                    req.SetIsWaitForSnapshot(core_id);
                     req.DeferSetError(err);
                     return false;
                 }
@@ -4482,10 +4481,9 @@ public:
                     req.GetLocalScanner()->CommitAtCore(core_id);
                 }
 
-                if (is_read_snapshot &&
-                    req.WaitForSnapshotCnt(shard_->core_id_) > 0)
+                if (is_read_snapshot && req.WaitForSnapshotCnt(core_id) > 0)
                 {
-                    req.SetIsWaitForSnapshot(shard_->core_id_);
+                    req.SetIsWaitForSnapshot(core_id);
                     req.DeferSetError(err);
                     return false;
                 }
@@ -4627,9 +4625,9 @@ public:
             req.GetLocalScanner()->CommitAtCore(core_id);
         }
 
-        if (is_read_snapshot && req.WaitForSnapshotCnt(shard_->core_id_) > 0)
+        if (is_read_snapshot && req.WaitForSnapshotCnt(core_id) > 0)
         {
-            req.SetIsWaitForSnapshot(shard_->core_id_);
+            req.SetIsWaitForSnapshot(core_id);
             return false;
         }
 
@@ -6725,9 +6723,9 @@ public:
 
     bool Execute(FillStoreSliceCc &req) override
     {
-        std::deque<SliceDataItem> &slice_vec = req.SliceData(shard_->core_id_);
+        std::deque<SliceDataItem> &slice_vec = req.SliceData(0);
 
-        size_t index = req.NextIndex(shard_->core_id_);
+        size_t index = req.NextIndex(0);
         size_t last_index = std::min(index + FillStoreSliceCc::MaxScanBatchSize,
                                      slice_vec.size());
 
@@ -6748,7 +6746,7 @@ public:
         }
         else
         {
-            req.SetNextIndex(shard_->core_id_, index);
+            req.SetNextIndex(0, index);
             shard_->Enqueue(shard_->LocalCoreId(), &req);
             return false;
         }
@@ -11439,7 +11437,7 @@ void BackfillSnapshotForScanSlice(FetchSnapshotCc *fetch_cc,
 {
     ScanSliceCc *req = static_cast<ScanSliceCc *>(requester);
     CcShard &shard = *fetch_cc->ccs_;
-    auto core_id = shard.LocalCoreId();
+    auto core_id = 0;
     size_t tuple_idx = fetch_cc->tuple_idx_;
     // backfill fetched snapshot
     if (req->IsLocal())
@@ -11486,7 +11484,7 @@ void BackfillSnapshotForScanSlice(FetchSnapshotCc *fetch_cc,
     if (req->IsWaitForSnapshot(core_id) &&
         req->WaitForSnapshotCnt(core_id) == 0)
     {
-        shard.Enqueue(core_id, req);
+        shard.Enqueue(shard.LocalCoreId(), req);
     }
 }
 

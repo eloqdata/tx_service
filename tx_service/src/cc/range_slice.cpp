@@ -62,18 +62,16 @@ TxKey RangeSliceId::RangeEndTxKey() const
 
 StoreSlice::~StoreSlice() = default;
 
-void StoreSlice::StartLoading(FillStoreSliceCc *fill_req,
-                              LocalCcShards &cc_shards)
+void StoreSlice::StartLoading(FillStoreSliceCc *fill_req, uint32_t partition_id)
 {
     std::unique_lock<std::mutex> lk(slice_mux_);
 
     assert(pins_ == 0);
     status_ = SliceStatus::BeingLoaded;
+    LocalCcShards *cc_shards = Sharder::Instance().GetLocalCcShards();
+    uint16_t core_id = partition_id % cc_shards->Count();
 
-    for (uint16_t core_id = 0; core_id < cc_shards.Count(); ++core_id)
-    {
-        cc_shards.EnqueueCcRequest(core_id, fill_req);
-    }
+    cc_shards->EnqueueCcRequest(core_id, fill_req);
 }
 
 void StoreSlice::CommitLoading(StoreRange &range, uint32_t slice_size)

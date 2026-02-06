@@ -1390,15 +1390,15 @@ public:
             next_chain.emplace_back(Inf());
             assert(next_chain.size() == sz);
 
-            if (is_require_sort_)
+            // if (is_require_sort_)
             {
                 CompoundIndex head_index(core_id, 0);
                 MergeCompoundIndex(head_index);
             }
-            else
-            {
-                // Concat.
-            }
+            // else
+            // {
+            //     // Concat.
+            // }
         }
     }
 
