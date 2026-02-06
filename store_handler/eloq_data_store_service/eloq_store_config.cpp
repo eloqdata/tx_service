@@ -188,6 +188,10 @@ inline std::string_view get_last_two(const std::string_view &str)
 
 inline uint64_t unit_num(const std::string_view &unit_str)
 {
+    if (unit_str == "KB" || unit_str == "kb")
+    {
+        return 1024;
+    }
     if (unit_str == "MB" || unit_str == "mb")
     {
         return 1024 * 1024L;
