@@ -129,9 +129,10 @@ DEFINE_bool(eloq_store_data_append_mode, true, "EloqStore data append mode.");
 DEFINE_string(eloq_store_write_buffer_size,
               "1MB",
               "EloqStore append-mode write buffer size.");
-DEFINE_double(eloq_store_write_buffer_ratio,
-              0.05,
-              "EloqStore ratio of buffer pool reserved for append-mode write buffers.");
+DEFINE_double(
+    eloq_store_write_buffer_ratio,
+    0.05,
+    "EloqStore ratio of buffer pool reserved for append-mode write buffers.");
 DEFINE_bool(eloq_store_enable_compression,
             false,
             "EloqStore enable compression.");
@@ -226,6 +227,7 @@ inline bool ends_with(const std::string_view &str,
 inline bool is_valid_size(const std::string_view &size_str_v)
 {
     bool is_right_end =
+        ends_with(size_str_v, "KB") || ends_with(size_str_v, "kb") ||
         ends_with(size_str_v, "MB") || ends_with(size_str_v, "mb") ||
         ends_with(size_str_v, "GB") || ends_with(size_str_v, "gb") ||
         ends_with(size_str_v, "TB") || ends_with(size_str_v, "tb");
