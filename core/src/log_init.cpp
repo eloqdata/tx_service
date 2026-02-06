@@ -473,7 +473,11 @@ bool DataSubstrate::InitializeLogService(const INIReader &config_reader)
                 !CheckCommandLineFlagIsDefault(
                     "txlog_rocksdb_cloud_archive_object_path")
                     ? FLAGS_txlog_rocksdb_cloud_archive_object_path
-                    : (txlog_rocksdb_cloud_config.object_path_ + "_archives");
+                    : config_reader.Get(
+                          "local",
+                          "txlog_rocksdb_cloud_archive_object_path",
+                          txlog_rocksdb_cloud_config.object_path_ +
+                              "_archives");
 
             txlog_rocksdb_cloud_config.archive_move_interval_seconds_ =
                 !CheckCommandLineFlagIsDefault(
