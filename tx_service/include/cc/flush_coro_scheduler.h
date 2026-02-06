@@ -266,8 +266,11 @@ struct JoinAllAwaitable
         {
             t.handle.promise().on_complete = [state]()
             {
-                state->count--;
-                if (state->count.load() == 0)
+                // Use fetch_sub return value so only the thread that
+                // decrements from 1 to 0 posts the parent. Otherwise
+                // two threads could both see count == 0 after decrementing
+                // and both call PostReadyHandle(parent_h) (double resume).
+                if (state->count.fetch_sub(1) == 1)
                 {
                     state->sched->PostReadyHandle(state->parent_h);
                 }

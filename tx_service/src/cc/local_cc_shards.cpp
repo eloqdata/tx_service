@@ -5994,6 +5994,11 @@ Task<void> LocalCcShards::FlushDataCoro(TaskScheduler *sched,
                         table_name,
                         cce_entries_map);
 
+                    LOG(INFO)
+                        << "yf: UpdateCceCkptTsCc, cce_entries_map size = "
+                        << cce_entries_map.size()
+                        << ", addr = " << &cce_entries_map;
+
                     co_await TaskAwaitable<void>{
                         sched,
                         [&update_cce_req,
@@ -6001,6 +6006,9 @@ Task<void> LocalCcShards::FlushDataCoro(TaskScheduler *sched,
                          &cce_entries_map,
                          this](auto cb)
                         {
+                            LOG(INFO)
+                                << "yf: start op: addr = " << &cce_entries_map
+                                << ", size = " << cce_entries_map.size();
                             // Capture cb by value, not by reference, because
                             // cb's lifetime ends when start_op lambda returns,
                             // but notify_callback_ may be called later by
