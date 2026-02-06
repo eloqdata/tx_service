@@ -168,7 +168,13 @@ public:
 
     virtual ~TemplateCcMap()
     {
+        LOG(INFO) << "TemplateCcMap destructed, table_name: "
+                  << table_name_.StringView()
+                  << ", normal obj cnt: " << normal_obj_sz_ << ", Clean...";
+
         Clean();
+        LOG(INFO) << "TemplateCcMap table_name: " << table_name_.StringView()
+                  << ", Clean finishes";
         neg_inf_.ClearLocks(*shard_, cc_ng_id_);
     }
 
@@ -3555,7 +3561,8 @@ public:
             assert(remote_scan_cache != nullptr);
         }
 
-        auto is_cache_full = [&req, scan_cache, remote_scan_cache] {
+        auto is_cache_full = [&req, scan_cache, remote_scan_cache]
+        {
             return req.IsLocal() ? scan_cache->IsFull()
                                  : remote_scan_cache->IsFull();
         };
@@ -6019,6 +6026,18 @@ public:
             if (ccp->last_dirty_commit_ts_ <= req.previous_ckpt_ts_ &&
                 !req.include_persisted_data_)
             {
+                LOG(INFO) << "DataSyncScan skipping ccp: " << ccp
+                          << ", table name: " << table_name_.StringView()
+                          << ", last_dirty_commit_ts_: "
+                          << ccp->last_dirty_commit_ts_
+                          << ", req.previous_ckpt_ts_: "
+                          << req.previous_ckpt_ts_
+                          << ", req.data_sync_ts_: " << req.data_sync_ts_
+                          << ", req.include_persisted_data_: "
+                          << req.include_persisted_data_
+                          << "\nKey range in page: ["
+                          << ccp->FirstKey().ToString() << ", "
+                          << ccp->LastKey().ToString() << "]";
                 // Skip the pages that have no updates since last data
                 // sync.
                 if (ccp->next_page_ == PagePosInf())
@@ -6090,6 +6109,7 @@ public:
                         // and don't truncate redo log.
                         if (cce->PayloadStatus() == RecordStatus::Unknown)
                         {
+                            LOG(ERROR) << "cce->Payload status unknown";
                             uint16_t bucket_id =
                                 Sharder::Instance().MapKeyHashToBucketId(
                                     key_hash);
@@ -6097,6 +6117,7 @@ public:
                                     cc_ng_id_ &&
                                 current_term > 0)
                             {
+                                LOG(INFO) << "FetchRecord";
                                 cce->GetOrCreateKeyLock(shard_, this, ccp);
                                 TxKey tx_key(key);
                                 int32_t part_id =
@@ -6120,6 +6141,7 @@ public:
                             LOG(ERROR)
                                 << "Buffered cmds found on leader node"
                                 << ", cce key: " << cce->KeyString()
+                                << ", cce: " << cce
                                 << ", cce CommitTs: " << cce->CommitTs() << "\n"
                                 << cce->BufferedCommandList();
                             assert(false);
@@ -7979,6 +8001,15 @@ public:
                     status == RecordStatus::Deleted)
                 {
                     bool was_dirty = cce->IsDirty();
+                    if (cce->HasBufferedCommandList())
+                    {
+                        LOG(ERROR)
+                            << "Buffered cmds found on leader node"
+                            << ", cce key: " << cce->KeyString()
+                            << ", cce: " << cce
+                            << ", cce CommitTs: " << cce->CommitTs() << "\n"
+                            << cce->BufferedCommandList();
+                    }
                     cce->SetCommitTsPayloadStatus(now_ts, status);
                     update_any = true;
                     OnCommittedUpdate(cce, was_dirty);

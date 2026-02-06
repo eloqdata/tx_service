@@ -134,8 +134,12 @@ void SnapshotManager::SyncWithStandby()
     }
 
     uint32_t current_subscribe_id = Sharder::Instance().GetCurrentSubscribeId();
+    LOG(INFO) << "current_subscribe_id: " << current_subscribe_id
+              << ", RunOneRoundCheckpoint";
 
     bool ckpt_res = this->RunOneRoundCheckpoint(node_group, leader_term);
+    LOG(INFO) << "current_subscribe_id: " << current_subscribe_id
+              << ", RunOneRoundCheckpoint ckpt_res: " << ckpt_res;
 
     if (!ckpt_res)
     {
@@ -162,10 +166,15 @@ void SnapshotManager::SyncWithStandby()
     // Dequeue all pending tasks that can be covered by this snapshot.
     {
         std::unique_lock<std::mutex> lk(standby_sync_mux_);
+        LOG(INFO) << "Dequeue all pending tasks that can be covered by this "
+                     "snapshot..."
+                  << ", pending_req size: " << pending_req_.size();
         auto it = pending_req_.begin();
         while (it != pending_req_.end())
         {
             auto &pending_task = it->second;
+            LOG(INFO) << "pending_task: " << &pending_task
+                      << ", pendingreq size: " << pending_req_.size();
             int64_t pending_task_standby_node_term =
                 pending_task.standby_node_term();
             int64_t pending_task_primary_term =
@@ -174,6 +183,10 @@ void SnapshotManager::SyncWithStandby()
             if (pending_task_primary_term < leader_term)
             {
                 // discard the task.
+                LOG(INFO) << "pending_task_primary_term: "
+                          << pending_task_primary_term
+                          << ", leader term: " << leader_term
+                          << ", erase it, continue";
                 it = pending_req_.erase(it);
                 continue;
             }
@@ -199,6 +212,11 @@ void SnapshotManager::SyncWithStandby()
                 covered = false;
             }
 
+            LOG(INFO) << "pending_task_subscribe_id: "
+                      << pending_task_subscribe_id
+                      << ", current_subscribe_id: " << current_subscribe_id
+                      << ", covered: " << covered;
+
             if (!covered)
             {
                 // requested version is newer than cur snapshot. Wait till next
@@ -214,11 +232,13 @@ void SnapshotManager::SyncWithStandby()
             // same element indefinitely.
             it++;
         }
+        LOG(INFO) << "covered tasks size: " << tasks.size();
     }
 
     for (auto &req : tasks)
     {
         uint32_t node_id = req.standby_node_id();
+
         std::string ip;
         uint16_t port;
         Sharder::Instance().GetNodeAddress(node_id, ip, port);
@@ -226,6 +246,9 @@ void SnapshotManager::SyncWithStandby()
         int64_t req_standby_node_term = req.standby_node_term();
         int64_t req_primary_term =
             PrimaryTermFromStandbyTerm(req_standby_node_term);
+        LOG(INFO) << "covered task: " << node_id
+                  << ", req_standby_node_term: " << req.standby_node_term()
+                  << ", req_primary_term: " << req_primary_term;
 
         if (!Sharder::Instance().CheckLeaderTerm(req.ng_id(), req_primary_term))
         {
@@ -238,6 +261,8 @@ void SnapshotManager::SyncWithStandby()
         {
             succ = store_hd_->SendSnapshotToRemote(
                 req.ng_id(), req_primary_term, snapshot_files, remote_dest);
+            LOG(INFO) << "SendSnapshotToRemote, success: " << succ
+                      << ", remotedest: " << remote_dest;
         }
 
         if (succ)
@@ -325,6 +350,8 @@ void SnapshotManager::SyncWithStandby()
 bool SnapshotManager::RunOneRoundCheckpoint(uint32_t node_group,
                                             int64_t ng_leader_term)
 {
+    DLOG(INFO) << "SnapshotManager::RunOneRoundCheckpoint, ng_leader_term: "
+               << ng_leader_term;
     using namespace txservice;
     auto &local_shards = *Sharder::Instance().GetLocalCcShards();
 
@@ -373,6 +400,11 @@ bool SnapshotManager::RunOneRoundCheckpoint(uint32_t node_group,
 
             if (get_commit_ts_cc.LastCommitTs() < last_ckpt_ts)
             {
+                LOG(INFO) << "RunOneRoundCheckpoint, skipping table: "
+                          << table_name.String()
+                          << ", ccm->last_dirty_commit_ts_: "
+                          << get_commit_ts_cc.LastCommitTs()
+                          << ", last_ckpt_ts: " << last_ckpt_ts;
                 continue;
             }
 
@@ -397,6 +429,8 @@ bool SnapshotManager::RunOneRoundCheckpoint(uint32_t node_group,
         task_sender_lk,
         [&data_sync_status]
         { return data_sync_status->unfinished_tasks_ == 0; });
+    LOG(INFO) << "data_sync_status, err_code: "
+              << int(data_sync_status->err_code_);
 
     DLOG_IF(WARNING, data_sync_status->err_code_ != CcErrorCode::NO_ERROR)
         << "SyncWithStandby for node_group: " << node_group

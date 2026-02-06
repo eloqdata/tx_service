@@ -290,10 +290,11 @@ bool CcNode::OnLeaderStart(int64_t term,
         // no longer subscribed to previous term
         assert(prev_standby_term < 0);
         Sharder::Instance().SetCandidateStandbyNodeTerm(-1);
-        LOG(INFO) << "Candidate standby cannot escalate to leader";
+        LOG(INFO) << "Candidate standby cannot escalate to leader, ClearCcNodeGroupData...";
         // A new leader has been elected. The cache needs to be cleared since
         // it is no longer valid.
         ClearCcNodeGroupData();
+        LOG(INFO) << "ClearCcNodeGroupData finishes";
 
         // transfer leader to next node
         retry = false;
@@ -302,6 +303,8 @@ bool CcNode::OnLeaderStart(int64_t term,
 
     if (!txservice_skip_kv)
     {
+        LOG(INFO) << "CC node " << node_id_ << " of ng: " << ng_id_
+          << " term: " << term << "store_handler OnLeaderStart";
         if (!local_cc_shards_.store_hd_->OnLeaderStart(
                 ng_id_, term, next_leader_node))
         {
@@ -316,6 +319,7 @@ bool CcNode::OnLeaderStart(int64_t term,
         // will be discarded.
         Sharder::Instance().SetStandbyBecomingLeaderNodeTerm(term);
 
+        LOG(INFO) << "Unsubscribe...";
         size_t core_cnt = local_cc_shards_.Count();
         WaitableCc sub_cc(
             [](CcShard &ccs)
@@ -339,6 +343,7 @@ bool CcNode::OnLeaderStart(int64_t term,
             local_cc_shards_.EnqueueCcRequest(core_id, &sub_cc);
         }
         sub_cc.Wait();
+        LOG(INFO) << "Unsubscribe finishes, wait inflight standby reqs...";
 
         // We need to wait for all received standby requests to complete
         // execution, so that no buffered command is left on the cc entry.
@@ -351,6 +356,7 @@ bool CcNode::OnLeaderStart(int64_t term,
                 Sharder::Instance().InflightStandbyReqCount();
         }
 
+        LOG(INFO) << "Wait inflight standby reqs finish";
         // Standby pins the node group when processing DDL to avoid leaving
         // inconsistent state caused by term change during DDL. Wait until all
         // pins are cleared on this ng before clearing the standby term.
@@ -432,7 +438,9 @@ bool CcNode::OnLeaderStart(int64_t term,
         if (!cache_survivied)
         {
             //  if cache does not survive to the next term, clear ccm.
+            LOG(INFO) << "!cache_survivied, ClearCcNodeGroupData...";
             ClearCcNodeGroupData();
+            LOG(INFO) << "ClearCcNodeGroupData finishes";
             replay_start_ts = 0;
         }
         else if (!txservice_skip_kv &&
@@ -522,7 +530,9 @@ bool CcNode::OnLeaderStop(int64_t term)
         std::unique_lock lk(pinning_threads_mux_);
         pinning_threads_cv_.wait(lk, [this] { return pinning_threads_ == 0; });
     }
+    LOG(INFO) << "OnLeaderStop, ClearCcNodeGroupData...";
     ClearCcNodeGroupData();
+    LOG(INFO) << "ClearCcNodeGroupData finishes";
     return true;
 }
 
@@ -846,7 +856,9 @@ void CcNode::SubscribePrimaryNode(uint32_t leader_node_id,
                 // have a outdated cache. We do not need delay the clear ccmap
                 // since the ccmap is already outdated and needs to be cleared
                 // anyway.
+                LOG(INFO) << "resubscribe, ClearCcNodeGroupData...";
                 ClearCcNodeGroupData();
+                LOG(INFO) << "ClearCcNodeGroupData finishes";
             }
             else
             {
@@ -975,7 +987,9 @@ void CcNode::SubscribePrimaryNode(uint32_t leader_node_id,
     // qualified to become the leader of the ng.
     if (delay_clear_ccm)
     {
+        LOG(INFO) << "delay_clear_ccm, ClearCcNodeGroupData...";
         ClearCcNodeGroupData();
+        LOG(INFO) << "ClearCcNodeGroupData finishes";
     }
 
     if (!txservice_skip_kv)
@@ -1078,7 +1092,14 @@ void CcNode::SubscribePrimaryNode(uint32_t leader_node_id,
         reset_req.add_seq_grp(i);
     }
 
+    std::string start_seq_ids;
+    for (auto &seq_id : start_follow_resp.start_sequence_id())
+    {
+        start_seq_ids.append(std::to_string(seq_id)).append(", ");
+    }
+
     cntl.Reset();
+    LOG(INFO) << "ResetStandbySequenceId, seq id: " << start_seq_ids;
     stub->ResetStandbySequenceId(&cntl, &reset_req, &reset_resp, nullptr);
 
     // Check rpc result
@@ -1150,12 +1171,16 @@ void CcNode::SubscribePrimaryNode(uint32_t leader_node_id,
         snapshot_req.set_user(username);
         cntl.Reset();
         cntl.set_timeout_ms(10000);
+        LOG(INFO) << "RequestStorageSnapshotSync...standby_node_term: "
+                  << standby_term;
         stub->RequestStorageSnapshotSync(
             &cntl, &snapshot_req, &snapshot_resp, nullptr);
+        LOG(INFO) << "cntl fail: " << cntl.Failed();
         if (snapshot_resp.error())
         {
             LOG(ERROR) << "snapshot sync failed";
         }
+        LOG(INFO) << "RequestStorageSnapshotSync success";
     }
 }
 

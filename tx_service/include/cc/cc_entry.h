@@ -23,6 +23,7 @@
 
 #include <algorithm>  // std::max
 #include <atomic>
+#include <boost/stacktrace/stacktrace.hpp>
 #include <cassert>
 #include <cstdint>
 #include <deque>
@@ -585,9 +586,24 @@ public:
         uint8_t unknown_status = (uint8_t) RecordStatus::Unknown;
         uint64_t init_ts = 0;
         entry_info_.commit_ts_and_status_ = (init_ts << 8) | unknown_status;
+        if (!Versioned && !RangePartitioned)
+        {
+            LOG(INFO) << "cce constructed: " << this;
+        }
     }
 
-    ~VersionedLruEntry() = default;
+    // ~VersionedLruEntry() = default;
+
+    ~VersionedLruEntry()
+    {
+        if (!Versioned && !RangePartitioned)
+        {
+            LOG(INFO) << "cce destructed: " << this;
+            // LOG(INFO) << "cce destructed: " << this
+            //           << "\n, stacktrace: " <<
+            //           boost::stacktrace::stacktrace();
+        }
+    };
 
     /**
      * @brief check whether the entry can be kicked out from ccmap, iff no key

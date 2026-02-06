@@ -232,6 +232,11 @@ int CcStreamReceiver::on_received_messages(brpc::StreamId stream_id,
         }
         else
         {
+            LOG(INFO) << "CcStreamReceiver, PrimaryNodeTerm(): "
+                      << Sharder::Instance().PrimaryNodeTerm()
+                      << ", StandbyBecomingLeaderNodeTerm(): "
+                      << Sharder::Instance().StandbyBecomingLeaderNodeTerm()
+                      << ", discard standby forward reqs";
             // For primary node, on received msg is usually not the bottleneck.
             // Parse the msg immediately to minimize latency.
             for (size_t i = 0; i < size; ++i)
@@ -239,6 +244,18 @@ int CcStreamReceiver::on_received_messages(brpc::StreamId stream_id,
                 std::unique_ptr<CcMessage> cc_msg = GetCcMsg();
                 butil::IOBufAsZeroCopyInputStream wrapper(*messages[i]);
                 cc_msg->ParseFromZeroCopyStream(&wrapper);
+
+                const auto &fwd_req_ = cc_msg->key_obj_standby_forward_req();
+                std::string key_str_ = fwd_req_.key();
+                uint64_t object_version_ = fwd_req_.object_version();
+                uint64_t commit_ts_ = fwd_req_.commit_ts();
+                uint64_t txn = fwd_req_.tx_number();
+                uint64_t seq_id = fwd_req_.forward_seq_id();
+                LOG(INFO) << "discard StandbyForwardRequest, key: " << key_str_
+                          << ", txn: " << txn
+                          << ", obj_ver: " << object_version_
+                          << ", commit_ts: " << commit_ts_
+                          << ", seq_id: " << seq_id;
 
                 if (cc_msg->type() ==
                     remote::CcMessage::MessageType::
@@ -1968,6 +1985,10 @@ void CcStreamReceiver::OnReceiveCcMsg(std::unique_ptr<CcMessage> msg)
     case CcMessage::MessageType::
         CcMessage_MessageType_KeyObjectStandbyForwardRequest:
     {
+        const auto &req = msg->key_obj_standby_forward_req();
+        LOG(INFO) << "Recv ForwardReq, keystr: " << req.key()
+                  << ", obj ver: " << req.object_version()
+                  << ", commit ts: " << req.commit_ts();
         KeyObjectStandbyForwardCc *cc =
             key_obj_standby_forward_pool_.NextRequest();
         cc->Reset(std::move(msg));
