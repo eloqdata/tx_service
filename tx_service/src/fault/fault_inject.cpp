@@ -257,6 +257,8 @@ void FaultInject::InjectFault(std::string fault_name, std::string paras)
 
 #if defined(WITH_LOG_SERVICE) && !defined(OPEN_LOG_SERVICE) && \
     defined(LOG_STATE_TYPE_RKDB_S3)
+    // Forward the override_log_retention_seconds fault to log service's fault
+    // inject system.
     if (fault_name == "override_log_retention_seconds")
     {
         txlog::FaultInject::Instance().InjectFault(fault_name, paras);
