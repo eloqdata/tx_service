@@ -83,12 +83,23 @@ struct UpdateCceCkptTsCcAwaitable
     }
     void await_suspend(std::coroutine_handle<> h)
     {
-        req->SetNotifyCallback([h, s = sched]() { s->PostReadyHandle(h); });
+        req->SetNotifyCallback(
+            [h, s = sched]()
+            {
+                s->PostReadyHandle(h);
+                LOG(INFO) << "== PostReadyHandle == : update cce ckpt ts cc, "
+                             "queue size = "
+                          << s->QueueSize() << ", s = " << s << ", cc = ";
+            });
         for (const auto &[core_idx, cce_entries] : *cce_entries_map)
         {
             updated_ckpt_ts_core_ids->insert(static_cast<uint16_t>(core_idx));
+            // LOG(INFO) << "enqueue to core idx = " << core_idx;
             self->EnqueueToCcShard(static_cast<uint16_t>(core_idx), req);
         }
+
+        LOG(INFO) << "enqueue finsihed: " << req
+                  << ", core num = " << req->CoreNum();
     }
     void await_resume()
     {
@@ -108,7 +119,12 @@ struct ResetCcAwaitable
     }
     void await_suspend(std::coroutine_handle<> h)
     {
-        cc->SetNotifyCallback([h, s = sched]() { s->PostReadyHandle(h); });
+        cc->SetNotifyCallback(
+            [h, s = sched]()
+            {
+                s->PostReadyHandle(h);
+                LOG(INFO) << "==PostReadyHandle: reset cc,";
+            });
         for (uint16_t core_idx : *core_ids)
         {
             self->EnqueueToCcShard(core_idx,
@@ -6006,6 +6022,7 @@ Task<void> LocalCcShards::FlushDataCoro(TaskScheduler *sched,
     std::unordered_set<uint16_t> updated_ckpt_ts_core_ids;
     if (succ)
     {
+        size_t debug_loop_cnt = 0;
         for (auto &[kv_table_name, entries] : flush_task_entries)
         {
             for (auto &entry : entries)
@@ -6014,6 +6031,9 @@ Task<void> LocalCcShards::FlushDataCoro(TaskScheduler *sched,
                 {
                     continue;
                 }
+
+                LOG(INFO) << "yf: UpdateCceCkptTsCc, "
+                          << ", debug_loop_cnt = " << debug_loop_cnt++;
 
                 absl::flat_hash_map<size_t,
                                     std::vector<UpdateCceCkptTsCc::CkptTsEntry>>
@@ -6063,11 +6083,15 @@ Task<void> LocalCcShards::FlushDataCoro(TaskScheduler *sched,
                         &cce_entries_map,
                         &updated_ckpt_ts_core_ids,
                         this};
+
+                    LOG(INFO) << "yf: UpdateCceCkptTsCc, finished";
                 };
             }
         }
     }
 
+    LOG(INFO) << "yf: Reset cc, updated_ckpt_ts_core_ids size = "
+              << updated_ckpt_ts_core_ids.size();
     WaitableCc reset_cc(
         [&](CcShard &ccs)
         {

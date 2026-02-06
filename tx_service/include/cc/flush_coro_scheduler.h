@@ -40,12 +40,18 @@ struct TaskScheduler
             std::lock_guard<std::mutex> lk(mtx);
             ready_queue.push(h);
             // LOG(INFO) << "TaskScheduler: post ready handle, size = "
-            //          << ready_queue.size();
+            //          << ready_queue.size() << ", this = " << this;
         }
         if (on_post_ready_)
         {
             on_post_ready_();
         }
+    }
+
+    size_t QueueSize()
+    {
+        std::lock_guard<std::mutex> lk(mtx);
+        return ready_queue.size();
     }
 
     void RunLoopOnce()

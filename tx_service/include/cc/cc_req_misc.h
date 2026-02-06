@@ -941,8 +941,14 @@ public:
             error_code_ = CcErrorCode::NO_ERROR;
             if (--unfinished_cnt_ == 0)
             {
-                NotifyContinuations();
-                cv_.notify_one();
+                if (notify_callback_)
+                {
+                    NotifyContinuations();
+                }
+                else
+                {
+                    cv_.notify_one();
+                }
             }
         }
         return false;
@@ -1019,6 +1025,11 @@ public:
 
     bool Execute(CcShard &ccs) override;
 
+    size_t CoreNum() const
+    {
+        return unfinished_core_cnt_;
+    }
+
     void SetFinished()
     {
         std::lock_guard<bthread::Mutex> lk(mux_);
@@ -1035,6 +1046,7 @@ public:
             }
             else
             {
+                LOG(FATAL) << "yf: no NotifyCallback, notify one";
                 cv_.notify_one();
             }
         }
@@ -1057,6 +1069,8 @@ public:
             if (notify_callback)
             {
                 notify_callback();
+                // LOG(INFO) << "yf: direct NotifyContinuations, notify_callback
+                // ";
             }
         }
         else
@@ -1084,6 +1098,11 @@ private:
         {
             notify_callback_();
             notify_callback_ = nullptr;
+            // LOG(INFO) << "yf: NotifyContinuations, notify_callback";
+        }
+        else
+        {
+            // LOG(INFO) << "yf: empty NotifyCallback";
         }
     }
 
