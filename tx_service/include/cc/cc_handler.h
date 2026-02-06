@@ -619,6 +619,8 @@ public:
                                 const TxKey &end_key,
                                 StoreRange *store_range,
                                 CcHandlerResult<Void> &hres) = 0;
+
+    virtual uint32_t GetCoreId() const = 0;
 };
 
 }  // namespace txservice

@@ -7187,4 +7187,140 @@ void LocalCcShards::FastMetaDataMutex::unlock_shared()
     ptr->fetch_sub(1, std::memory_order_release);
 }
 
+void LocalCcShards::PrintMetrics()
+{
+    LOG(INFO) << "=============== Print metrics of all cores ================";
+    std::vector<uint64_t> slice_latency_vec;
+    size_t slice_sample_count = 0;
+    std::vector<uint32_t> max_pin_slice_cnt_vec;
+    size_t max_pin_slice_cnt_sample_count = 0;
+    std::vector<uint64_t> next_batch_latency_vec;
+    size_t next_batch_sample_count = 0;
+    for (size_t i = 0; i < cc_shards_.size(); ++i)
+    {
+        slice_sample_count +=
+            (cc_shards_[i]->scan_slice_count_ < CcShard::MaxSampleCount
+                 ? cc_shards_[i]->scan_slice_count_
+                 : CcShard::MaxSampleCount);
+        max_pin_slice_cnt_sample_count +=
+            (cc_shards_[i]->max_pin_slice_cnt_count_ < CcShard::MaxSampleCount
+                 ? cc_shards_[i]->max_pin_slice_cnt_count_
+                 : CcShard::MaxSampleCount);
+        next_batch_sample_count +=
+            (cc_shards_[i]->scan_next_batch_count_ < CcShard::MaxSampleCount
+                 ? cc_shards_[i]->scan_next_batch_count_
+                 : CcShard::MaxSampleCount);
+    }
+    slice_latency_vec.reserve(slice_sample_count);
+    max_pin_slice_cnt_vec.reserve(max_pin_slice_cnt_sample_count);
+    next_batch_latency_vec.reserve(next_batch_sample_count);
+    LOG(INFO) << "slice_sample_count: " << slice_sample_count
+              << ", max_pin_slice_cnt_sample_count: "
+              << max_pin_slice_cnt_sample_count
+              << ", next_batch_sample_count: " << next_batch_sample_count;
+    for (auto &shard : cc_shards_)
+    {
+        size_t shard_slice_sample_cnt =
+            shard->scan_slice_count_ < CcShard::MaxSampleCount
+                ? shard->scan_slice_count_
+                : CcShard::MaxSampleCount;
+        slice_latency_vec.insert(
+            slice_latency_vec.end(),
+            shard->scan_slice_latency_vec_.begin(),
+            shard->scan_slice_latency_vec_.begin() + shard_slice_sample_cnt);
+        size_t shard_max_pin_slice_cnt_sample_cnt =
+            shard->max_pin_slice_cnt_count_ < CcShard::MaxSampleCount
+                ? shard->max_pin_slice_cnt_count_
+                : CcShard::MaxSampleCount;
+        max_pin_slice_cnt_vec.insert(max_pin_slice_cnt_vec.end(),
+                                     shard->max_pin_slice_cnt_vec_.begin(),
+                                     shard->max_pin_slice_cnt_vec_.begin() +
+                                         shard_max_pin_slice_cnt_sample_cnt);
+        size_t shard_next_batch_sample_cnt =
+            shard->scan_next_batch_count_ < CcShard::MaxSampleCount
+                ? shard->scan_next_batch_count_
+                : CcShard::MaxSampleCount;
+        next_batch_latency_vec.insert(
+            next_batch_latency_vec.end(),
+            shard->scan_next_batch_latency_vec_.begin(),
+            shard->scan_next_batch_latency_vec_.begin() +
+                shard_next_batch_sample_cnt);
+        shard->PrintMetrics();
+    }
+
+    if (slice_sample_count == 0 || max_pin_slice_cnt_sample_count == 0 ||
+        next_batch_sample_count == 0)
+    {
+        LOG(INFO) << "    [All cores]No sample data.";
+        return;
+    }
+    // total slice latency metrics
+    std::sort(slice_latency_vec.begin(), slice_latency_vec.end());
+    uint64_t s_min_latency = slice_latency_vec.front();
+    uint64_t s_max_latency = slice_latency_vec.back();
+    uint64_t s_avg_latency =
+        std::accumulate(slice_latency_vec.begin(), slice_latency_vec.end(), 0) /
+        slice_sample_count;
+    uint64_t s_median_latency = slice_latency_vec[slice_sample_count / 2];
+    uint64_t s_p99_latency = slice_latency_vec[slice_sample_count * 0.99];
+    uint64_t s_p999_latency = slice_latency_vec[slice_sample_count * 0.999];
+    uint64_t s_p9999_latency = slice_latency_vec[slice_sample_count * 0.9999];
+    uint64_t s_p99999_latency = slice_latency_vec[slice_sample_count * 0.99999];
+
+    LOG(INFO) << "    [All cores]Scan slice latency: Min->" << s_min_latency
+              << ", Max->" << s_max_latency << ", Avg->" << s_avg_latency
+              << ", Median->" << s_median_latency << ", P99->" << s_p99_latency
+              << ", P999->" << s_p999_latency << ", P9999->" << s_p9999_latency
+              << ", P99999->" << s_p99999_latency;
+    // total max pin slice count metrics
+    std::sort(max_pin_slice_cnt_vec.begin(), max_pin_slice_cnt_vec.end());
+    uint32_t p_min_max_pin_cnt = max_pin_slice_cnt_vec.front();
+    uint32_t p_max_max_pin_cnt = max_pin_slice_cnt_vec.back();
+    uint32_t p_avg_max_pin_cnt =
+        std::accumulate(
+            max_pin_slice_cnt_vec.begin(), max_pin_slice_cnt_vec.end(), 0) /
+        max_pin_slice_cnt_sample_count;
+    uint32_t p_median_max_pin_cnt =
+        max_pin_slice_cnt_vec[max_pin_slice_cnt_sample_count / 2];
+    uint32_t p_p99_max_pin_cnt =
+        max_pin_slice_cnt_vec[max_pin_slice_cnt_sample_count * 0.99];
+    uint32_t p_p999_max_pin_cnt =
+        max_pin_slice_cnt_vec[max_pin_slice_cnt_sample_count * 0.999];
+    uint32_t p_p9999_max_pin_cnt =
+        max_pin_slice_cnt_vec[max_pin_slice_cnt_sample_count * 0.9999];
+    uint32_t p_p99999_max_pin_cnt =
+        max_pin_slice_cnt_vec[max_pin_slice_cnt_sample_count * 0.99999];
+    LOG(INFO) << "    [All cores]Max pin slice count: Min->"
+              << p_min_max_pin_cnt << ", Max->" << p_max_max_pin_cnt
+              << ", Avg->" << p_avg_max_pin_cnt << ", Median->"
+              << p_median_max_pin_cnt << ", P99->" << p_p99_max_pin_cnt
+              << ", P999->" << p_p999_max_pin_cnt << ", P9999->"
+              << p_p9999_max_pin_cnt << ", P99999->" << p_p99999_max_pin_cnt;
+    // total next batch latency metrics
+    std::sort(next_batch_latency_vec.begin(), next_batch_latency_vec.end());
+    uint64_t r_min_latency = next_batch_latency_vec.front();
+    uint64_t r_max_latency = next_batch_latency_vec.back();
+    uint64_t r_avg_latency =
+        std::accumulate(
+            next_batch_latency_vec.begin(), next_batch_latency_vec.end(), 0) /
+        next_batch_sample_count;
+    uint64_t r_median_latency =
+        next_batch_latency_vec[next_batch_sample_count / 2];
+    uint64_t r_p99_latency =
+        next_batch_latency_vec[next_batch_sample_count * 0.99];
+    uint64_t r_p999_latency =
+        next_batch_latency_vec[next_batch_sample_count * 0.999];
+    uint64_t r_p9999_latency =
+        next_batch_latency_vec[next_batch_sample_count * 0.9999];
+    uint64_t r_p99999_latency =
+        next_batch_latency_vec[next_batch_sample_count * 0.99999];
+    LOG(INFO) << "    [All cores]Scan next_batch latency: Min->"
+              << r_min_latency << ", Max->" << r_max_latency << ", Avg->"
+              << r_avg_latency << ", Median->" << r_median_latency << ", P99->"
+              << r_p99_latency << ", P999->" << r_p999_latency << ", P9999->"
+              << r_p9999_latency << ", P99999->" << r_p99999_latency;
+    LOG(INFO)
+        << "=============== End print metrics of all cores ================";
+}
+
 }  // namespace txservice

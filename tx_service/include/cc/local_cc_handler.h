@@ -473,6 +473,11 @@ public:
                               uint64_t command_id,
                               CcHandlerResult<Void> &hres) override;
 
+    uint32_t GetCoreId() const override
+    {
+        return thd_id_;
+    }
+
 private:
     enum struct BlockCheckStatus
     {

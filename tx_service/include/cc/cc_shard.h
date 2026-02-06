@@ -1151,6 +1151,28 @@ public:
     void CollectCacheHit();
     void CollectCacheMiss();
 
+    uint64_t StartScanSlice();
+    void SetMaxPinSliceCnt(uint32_t max_pin_slice_cnt);
+    void EndScanSlice(const uint64_t dur);
+    uint64_t StartScanNextBatch();
+    void EndScanNextBatch(const uint64_t dur);
+    void PrintMetrics();
+
+    // slice metrics
+    std::vector<uint64_t> scan_slice_latency_vec_;
+    size_t scan_slice_sample_head_{0};
+    size_t scan_slice_count_{0};
+    std::vector<uint32_t> max_pin_slice_cnt_vec_;
+    size_t max_pin_slice_cnt_sample_head_{0};
+    size_t max_pin_slice_cnt_count_{0};
+    // next batch metrics
+    std::vector<uint64_t> scan_next_batch_latency_vec_;
+    size_t scan_next_batch_sample_head_{0};
+    size_t scan_next_batch_count_{0};
+
+    size_t sample_frequency_{1};
+    static constexpr size_t MaxSampleCount = 5000000;
+
 private:
     void SetTxProcNotifier(std::atomic<TxProcessorStatus> *tx_proc_status,
                            TxProcCoordinator *tx_coordi)

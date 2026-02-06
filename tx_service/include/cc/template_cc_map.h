@@ -3661,9 +3661,12 @@ public:
 
             assert(pin_status == RangeSliceOpStatus::Successful);
             req.PinSlices(slice_id, last_pinned_slice);
+            shard_->SetMaxPinSliceCnt(max_pin_cnt);
+            req.start_ts_vec_.resize(req.GetShardCount(), 0);
             // Set unfinished count to 1 since only this core will scan.
             req.SetUnfinishedCoreCnt(1);
         }
+        req.start_ts_vec_[core_id] = shard_->StartScanSlice();
 
         Iterator scan_ccm_it;
         const KeyT *cce_key = nullptr;
@@ -4232,6 +4235,11 @@ public:
                     req.GetLocalScanner()->CommitAtCore(core_id);
                 }
 
+                if (uint64_t dur = req.EndScanSlice(core_id); dur > 0)
+                {
+                    shard_->EndScanSlice(dur);
+                }
+
                 if (is_read_snapshot && req.WaitForSnapshotCnt(core_id) > 0)
                 {
                     req.SetIsWaitForSnapshot(core_id);
@@ -4623,6 +4631,11 @@ public:
         if (req.IsLocal())
         {
             req.GetLocalScanner()->CommitAtCore(core_id);
+        }
+
+        if (uint64_t dur = req.EndScanSlice(core_id); dur > 0)
+        {
+            shard_->EndScanSlice(dur);
         }
 
         if (is_read_snapshot && req.WaitForSnapshotCnt(core_id) > 0)

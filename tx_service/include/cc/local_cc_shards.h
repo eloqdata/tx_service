@@ -1813,6 +1813,18 @@ public:
 
     void FlushCurrentFlushBuffer();
 
+    uint64_t StartScanNextBatch(uint32_t core_id)
+    {
+        return cc_shards_[core_id]->StartScanNextBatch();
+    }
+
+    void EndScanNextBatch(uint32_t core_id, const uint64_t dur)
+    {
+        cc_shards_[core_id]->EndScanNextBatch(dur);
+    }
+
+    void PrintMetrics();
+
     store::DataStoreHandler *const store_hd_;
 
     /*

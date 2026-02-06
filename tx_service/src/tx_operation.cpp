@@ -1694,6 +1694,24 @@ void ScanNextOperation::Forward(TransactionExecution *txm)
     }
 }
 
+void ScanNextOperation::StartScanNextBatch(const uint64_t start_ts)
+{
+    scan_start_ts_ = start_ts;
+}
+
+uint64_t ScanNextOperation::EndScanNextBatch()
+{
+    if (scan_start_ts_ != 0)
+    {
+        uint64_t ts =
+            std::chrono::duration_cast<std::chrono::microseconds>(
+                std::chrono::high_resolution_clock::now().time_since_epoch())
+                .count();
+        return (ts - scan_start_ts_);
+    }
+    return 0;
+}
+
 AcquireAllOp::AcquireAllOp(TransactionExecution *txm)
 {
     hd_results_.reserve(8);
@@ -1967,9 +1985,10 @@ void AcquireAllOp::Forward(TransactionExecution *txm)
     }
     else if (txm->IsTimeOut())
     {
-        // For non-blocking concurrency control protocols, the AcquireAllOp is
-        // expected to return instantly. For 2PL, if the request is blocked, the
-        // cc node will send an acknowledgement to update the node term.
+        // For non-blocking concurrency control protocols, the AcquireAllOp
+        // is expected to return instantly. For 2PL, if the request is
+        // blocked, the cc node will send an acknowledgement to update the
+        // node term.
         for (size_t hd_idx = 0; hd_idx < upload_cnt_; ++hd_idx)
         {
             auto &hd_res = hd_results_[hd_idx];
@@ -2617,10 +2636,10 @@ void UpsertTableOp::Forward(TransactionExecution *txm)
         if (post_all_intent_op_.IsFailed())
         {
             // After the prepare log is flushed, the schema op is guaranteed
-            // to proceed. Retry this step to install the dirty schema in the tx
-            // service, if the tx node is still the leader. The tx is also
-            // allowed to proceed if the tx is in the recovery mode and the tx
-            // node is a leader candidate.
+            // to proceed. Retry this step to install the dirty schema in
+            // the tx service, if the tx node is still the leader. The tx is
+            // also allowed to proceed if the tx is in the recovery mode and
+            // the tx node is a leader candidate.
 
             if (txm->CheckLeaderTerm())
             {
@@ -2642,8 +2661,8 @@ void UpsertTableOp::Forward(TransactionExecution *txm)
                  op_type_ == OperationType::TruncateTable)
         {
             // For DROP TABLE and TRUNCATE TABLE operations, the data store
-            // operation of deleting the k-v table happens after the commit log
-            // is flushed.
+            // operation of deleting the k-v table happens after the commit
+            // log is flushed.
             op_ = &acquire_all_lock_op_;
             txm->PushOperation(&acquire_all_lock_op_);
             DLOG(INFO) << "txn: " << txm->TxNumber()
@@ -2728,24 +2747,25 @@ void UpsertTableOp::Forward(TransactionExecution *txm)
                     indicate this error.
 
                     If we skip this commit log and jump to post_all_lock_op_
-                    directly, once the participant crashes at the point between
-                    it releases write intent and the coordinator flushes
-                    clean_log, then during recovery, the participant sees a
-                    prepare_log(whose commit_ts is not 0) and recovers write
-                    lock and dirty_catalog.
+                    directly, once the participant crashes at the point
+                    between it releases write intent and the coordinator
+                    flushes clean_log, then during recovery, the participant
+                    sees a prepare_log(whose commit_ts is not 0) and
+                    recovers write lock and dirty_catalog.
 
                     Since the coordinator has finished its job, the write
-                    lock recovered by participant becomes orphan lock, and the
-                    dirty catalog can not be rejected either.
+                    lock recovered by participant becomes orphan lock, and
+                    the dirty catalog can not be rejected either.
 
-                    Also, in the current design, post_all_intent_op_ does not
-                    release the write intent, which means the write intent is
-                    still being held after upsert_kv_table_op_(during
-                    CreateTable or AddIndex). If create table or add index in kv
-                    fails, the only thing we should do after writing commit_log
-                    is to reject dirty schema. So there is no need to upgrade
-                    write intent to write lock, and it is safe to skip
-                    acquire_all_lock_op_ and jump directly to commit_log_op_.
+                    Also, in the current design, post_all_intent_op_ does
+                    not release the write intent, which means the write
+                    intent is still being held after
+                    upsert_kv_table_op_(during CreateTable or AddIndex). If
+                    create table or add index in kv fails, the only thing we
+                    should do after writing commit_log is to reject dirty
+                    schema. So there is no need to upgrade write intent to
+                    write lock, and it is safe to skip acquire_all_lock_op_
+                    and jump directly to commit_log_op_.
 
                     */
 
@@ -2782,14 +2802,16 @@ void UpsertTableOp::Forward(TransactionExecution *txm)
                     std::atomic_thread_fence(std::memory_order_release);
 #endif
                     assert(txservice::Sequences::Initialized());
-                    // Launch a new thread instead of sending it to workerpool
-                    // to avoid being blocked during write lock is held.
+                    // Launch a new thread instead of sending it to
+                    // workerpool to avoid being blocked during write lock
+                    // is held.
                     async_op.worker_thread_ = std::thread(
                         [this, &hd_res]() mutable
                         {
                             bool succ = true;
                             const TableName &table_name = table_key_.Name();
-                            // Update sequence table about the range id info.
+                            // Update sequence table about the range id
+                            // info.
                             std::vector<TableName> index_names =
                                 op_type_ == OperationType::CreateTable
                                     ? catalog_rec_.DirtySchema()->IndexNames()
@@ -2807,7 +2829,8 @@ void UpsertTableOp::Forward(TransactionExecution *txm)
                                             table_name, init_range_id);
                                 }
 
-                                // secondary index are always range partitioned.
+                                // secondary index are always range
+                                // partitioned.
                                 if (succ && index_names.size() > 0)
                                 {
                                     succ = std::all_of(
@@ -2982,9 +3005,9 @@ void UpsertTableOp::Forward(TransactionExecution *txm)
             clean_ccm_op_.clean_type_ = CleanType::CleanCcm;
             clean_ccm_op_.commit_ts_ = txm->CommitTs();
 
-            LOG(INFO)
-                << "UpsertTableOp: Clean all ccmap on all node groups, txn: "
-                << txm->TxNumber();
+            LOG(INFO) << "UpsertTableOp: Clean all ccmap on all node "
+                         "groups, txn: "
+                      << txm->TxNumber();
 
             op_ = &clean_ccm_op_;
             txm->PushOperation(&clean_ccm_op_);
@@ -3007,8 +3030,8 @@ void UpsertTableOp::Forward(TransactionExecution *txm)
                               "acquire write lock, tx_number:"
                            << txm->TxNumber();
                 // We downgrade catalog write lock to avoid blocking other
-                // transaction which acquiring catalog read lock. And then retry
-                // to acquire catalog write lock.
+                // transaction which acquiring catalog read lock. And then
+                // retry to acquire catalog write lock.
                 if (acquire_all_lock_op_.IsDeadlock())
                 {
                     LOG(ERROR) << "Upsert table schema transaction deadlocks "
@@ -3071,8 +3094,9 @@ void UpsertTableOp::Forward(TransactionExecution *txm)
             if (op_type_ == OperationType::DropTable ||
                 op_type_ == OperationType::TruncateTable)
             {
-                // `clean_ccm_op` will notify each node group leader performs
-                // `UpsertTable` and `KickoutData` independently for rocksdb.
+                // `clean_ccm_op` will notify each node group leader
+                // performs `UpsertTable` and `KickoutData` independently
+                // for rocksdb.
                 if (op_type_ == OperationType::TruncateTable &&
                     !txservice_skip_kv &&
                     !Sharder::Instance()
@@ -3174,17 +3198,17 @@ void UpsertTableOp::Forward(TransactionExecution *txm)
     {
         if (!txm->CheckLeaderTerm())
         {
-            // The tx node is no longer the leader or leader candidate(during
-            // recovery), ForceToFinish.
+            // The tx node is no longer the leader or leader
+            // candidate(during recovery), ForceToFinish.
             ForceToFinish(txm);
             return;
         }
 
         // The tx's modification of the schema has finished. If the tx has
-        // previously read the same schema and keeps a pointer in the read set
-        // to the cc entry of the schema, removes it from the read set. As a
-        // result, the tx will not try to release the read lock of the schema
-        // when committing.
+        // previously read the same schema and keeps a pointer in the read
+        // set to the cc entry of the schema, removes it from the read set.
+        // As a result, the tx will not try to release the read lock of the
+        // schema when committing.
         for (size_t idx = 0; idx < acquire_all_intent_op_.upload_cnt_; ++idx)
         {
             const CcEntryAddr &schema_entry_addr =
@@ -3198,11 +3222,11 @@ void UpsertTableOp::Forward(TransactionExecution *txm)
         if (acquire_all_intent_op_.fail_cnt_.load(std::memory_order_relaxed) >
             0)
         {
-            // The schema operation failed at acquire_all_intent_op_, without
-            // flushing the prepare log. Do not retry post-processing (release
-            // write intents) even if it fails. Remaining write intents on the
-            // schema, if there are any, will be recovered by individual cc
-            // nodes separately.
+            // The schema operation failed at acquire_all_intent_op_,
+            // without flushing the prepare log. Do not retry
+            // post-processing (release write intents) even if it fails.
+            // Remaining write intents on the schema, if there are any, will
+            // be recovered by individual cc nodes separately.
 
             txm->upsert_resp_->Finish(UpsertResult::Failed);
 
@@ -3217,11 +3241,12 @@ void UpsertTableOp::Forward(TransactionExecution *txm)
         else if (post_all_lock_op_.hd_result_.IsError())
         {
             // post_all_lock_op_ returns an error:
-            // 1. if flush kv succeeds, the schema op is guaranteed to succeed
-            // and can only roll forward. Retry this step to install the
-            // committed schema and remove write locks;
-            // 2. if flush kx fails, the schema op has to roll backward. Retry
-            // this step to reject dirty schema and remove write locks.
+            // 1. if flush kv succeeds, the schema op is guaranteed to
+            // succeed and can only roll forward. Retry this step to install
+            // the committed schema and remove write locks;
+            // 2. if flush kx fails, the schema op has to roll backward.
+            // Retry this step to reject dirty schema and remove write
+            // locks.
             txm->PushOperation(&post_all_lock_op_);
             DLOG(INFO) << "txn: " << txm->TxNumber()
                        << " process post_all_lock_op_, "
@@ -3252,12 +3277,12 @@ void UpsertTableOp::Forward(TransactionExecution *txm)
             {
                 assert(post_all_lock_op_.write_type_ !=
                        PostWriteType::DowngradeLock);
-                // Flush kv failed, or it is recovering from a flush kv failure.
-                // This schema op has already been rolled back by now, only need
-                // to flush clean log here.
-                // Also, flush kv failure does not require lock upgrade(write
-                // intent to write lock). So the CcEntryAddr needs to be kept in
-                // rset in order to release the read lock when committing.
+                // Flush kv failed, or it is recovering from a flush kv
+                // failure. This schema op has already been rolled back by
+                // now, only need to flush clean log here. Also, flush kv
+                // failure does not require lock upgrade(write intent to
+                // write lock). So the CcEntryAddr needs to be kept in rset
+                // in order to release the read lock when committing.
             }
 
             op_ = &clean_log_op_;
@@ -3768,10 +3793,10 @@ void AsyncOp<ResultType>::Forward(TransactionExecution *txm)
     {
         if (worker_thread_.joinable())
         {
-            // The worker thread must terminate after the hd_result.SetFinished.
-            // It is the caller's responsibility to ensure that this
-            // worker_thread_ does not have any more work to do after the worker
-            // thread function returns.
+            // The worker thread must terminate after the
+            // hd_result.SetFinished. It is the caller's responsibility to
+            // ensure that this worker_thread_ does not have any more work
+            // to do after the worker thread function returns.
             worker_thread_.join();
         }
         txm->PostProcess(*this);
@@ -3997,11 +4022,11 @@ SplitFlushRangeOp::SplitFlushRangeOp(
       ds_clean_old_range_op_(txm),
       clean_log_op_(txm)
 {
-    // The clone of the input range info makes a new copy of the range's start
-    // key, while the range's end key references that of the old range info in
-    // LocalCcShards. The new copy is necessary, because we may have separate
-    // threads to persist range updates to stable storage, while the tx's node
-    // group fails over and the old range is invalidated.
+    // The clone of the input range info makes a new copy of the range's
+    // start key, while the range's end key references that of the old range
+    // info in LocalCcShards. The new copy is necessary, because we may have
+    // separate threads to persist range updates to stable storage, while
+    // the tx's node group fails over and the old range is invalidated.
     range_info_ = range_entry->GetRangeInfo()->Clone();
     old_start_key_ = range_info_->StartTxKey();
     old_end_key_ = range_info_->EndTxKey();
@@ -4204,13 +4229,14 @@ void SplitFlushRangeOp::Forward(TransactionExecution *txm)
     if (txm->TxStatus() == TxnStatus::Recovering &&
         Sharder::Instance().LeaderTerm(txm->TxCcNodeId()) < 0)
     {
-        // This is a recovered tx and replay is not done yet. We should wait for
-        // replay finish before forwarding tx machine.
+        // This is a recovered tx and replay is not done yet. We should wait
+        // for replay finish before forwarding tx machine.
         if (Sharder::Instance().CandidateLeaderTerm(txm->TxCcNodeId()) !=
             txm->TxTerm())
         {
-            // Recovered term is invalid. Do not call ForceToFinish as it will
-            // cause infinite recursive call. Clean up tx state directly.
+            // Recovered term is invalid. Do not call ForceToFinish as it
+            // will cause infinite recursive call. Clean up tx state
+            // directly.
             txm->bool_resp_->Finish(false);
 
             ClearInfos();
@@ -4513,9 +4539,9 @@ void SplitFlushRangeOp::Forward(TransactionExecution *txm)
         {
             if (txm->CheckLeaderTerm())
             {
-                LOG(ERROR)
-                    << "Split Flush transaction failed to data sync, tx number "
-                    << txm->TxNumber();
+                LOG(ERROR) << "Split Flush transaction failed to data "
+                              "sync, tx number "
+                           << txm->TxNumber();
 
                 bool retry_imme = !(data_sync_op_.hd_result_.ErrorCode() ==
                                     CcErrorCode::DATA_STORE_ERR);
@@ -4586,7 +4612,8 @@ void SplitFlushRangeOp::Forward(TransactionExecution *txm)
                 int64_t tx_term = txm->TxTerm();
                 LocalCcShards *local_shards =
                     Sharder::Instance().GetLocalCcShards();
-                // The new ranges that still lands to the same ng after split.
+                // The new ranges that still lands to the same ng after
+                // split.
                 std::vector<std::pair<const TxKey *, const TxKey *>> ranges;
                 ranges.reserve(new_ranges.size());
                 for (auto iter = new_ranges.begin(); iter != new_ranges.end();
@@ -4618,10 +4645,10 @@ void SplitFlushRangeOp::Forward(TransactionExecution *txm)
                 hd_result.SetRefCnt(ranges.size());
 
                 // For keys that are splitted to another ng, they will be
-                // removed from key cache when they are eviceted from ccm. But
-                // for keys that still lands on the same ng after split, we need
-                // to delete them from key cache to avoid an ever increasing key
-                // cache load factor.
+                // removed from key cache when they are eviceted from ccm.
+                // But for keys that still lands on the same ng after split,
+                // we need to delete them from key cache to avoid an ever
+                // increasing key cache load factor.
                 assert(table_name_.Type() == TableType::Primary);
                 for (auto &key_pair : ranges)
                 {
@@ -4699,8 +4726,8 @@ void SplitFlushRangeOp::Forward(TransactionExecution *txm)
             CcHandlerResult<Void> &hd_res = async_op.hd_result_;
 #ifdef EXT_TX_PROC_ENABLED
             hd_res.SetToBlock();
-            // The memory fence ensures that the block flag is set before the
-            // background data store thread is executed.
+            // The memory fence ensures that the block flag is set before
+            // the background data store thread is executed.
             std::atomic_thread_fence(std::memory_order_release);
 #endif
             // Launch a new thread instead of sending it to workerpool to
@@ -4737,10 +4764,10 @@ void SplitFlushRangeOp::Forward(TransactionExecution *txm)
             if (txm->CheckLeaderTerm())
             {
                 // error & retry
-                LOG(ERROR)
-                    << "Split Flush transaction failed to update range info "
-                       "in data store, tx_number:"
-                    << txm->TxNumber();
+                LOG(ERROR) << "Split Flush transaction failed to update "
+                              "range info "
+                              "in data store, tx_number:"
+                           << txm->TxNumber();
                 RetrySubOperation(txm, &ds_upsert_range_op_, false);
             }
             else
@@ -4753,9 +4780,9 @@ void SplitFlushRangeOp::Forward(TransactionExecution *txm)
         kickout_data_it_ = new_range_info_.cbegin();
         // Kickout old range data. For those data that now falls on a
         // new node, we need to kickout them out from the old node's ccmap.
-        // We don't care about the commit ts of the target cc entry, all entries
-        // fall into the migrated new ranges should be kicked out no matter
-        // what.
+        // We don't care about the commit ts of the target cc entry, all
+        // entries fall into the migrated new ranges should be kicked out no
+        // matter what.
         if (ForwardKickoutIterator(txm))
         {
             LOG(INFO) << "Split Flush transaction post all lock, range id "
@@ -4800,8 +4827,8 @@ void SplitFlushRangeOp::Forward(TransactionExecution *txm)
                       << range_info_->PartitionId()
                       << ", txn: " << txm->TxNumber();
 
-            // Now broadcast slice info to all nodes through PostWriteAll. New
-            // ranges might land on other nodes.
+            // Now broadcast slice info to all nodes through PostWriteAll.
+            // New ranges might land on other nodes.
             range_record_->SetRangeInfo(range_info_.get());
 
             assert(post_all_lock_op_.write_type_ == PostWriteType::PostCommit);
@@ -5116,9 +5143,9 @@ bool SplitFlushRangeOp::ForwardKickoutIterator(TransactionExecution *txm)
             if (new_owner != txm->TxCcNodeId() &&
                 dirty_new_owner != txm->TxCcNodeId())
             {
-                // Note that even if the new node group falls on the same node,
-                // we still need to clean the cc entry from native ccmap since
-                // failover and native ccmaps are separated.
+                // Note that even if the new node group falls on the same
+                // node, we still need to clean the cc entry from native
+                // ccmap since failover and native ccmaps are separated.
                 kickout_old_range_data_op_.start_key_ =
                     kickout_data_it_->first.GetShallowCopy();
                 if (std::next(kickout_data_it_) == new_range_info_.cend())
@@ -5149,9 +5176,9 @@ bool SplitFlushRangeOp::ForwardKickoutIterator(TransactionExecution *txm)
     }
 
     // If the range split happens during data migration, all changes in the
-    // range will be forwarded to the dirty bucket owner. So when we kick out
-    // data that is splitted to another ng, we need to kick out the data on the
-    // dirty bucket owner as well.
+    // range will be forwarded to the dirty bucket owner. So when we kick
+    // out data that is splitted to another ng, we need to kick out the data
+    // on the dirty bucket owner as well.
     if (cleaning_old_range_dirty_owner_)
     {
         NodeGroupId old_range_dirty_owner =
@@ -5173,9 +5200,9 @@ bool SplitFlushRangeOp::ForwardKickoutIterator(TransactionExecution *txm)
             if (new_owner != old_range_dirty_owner &&
                 dirty_new_owner != old_range_dirty_owner)
             {
-                // Note that even if the new node group falls on the same node,
-                // we still need to clean the cc entry from native ccmap since
-                // failover and native ccmaps are separated.
+                // Note that even if the new node group falls on the same
+                // node, we still need to clean the cc entry from native
+                // ccmap since failover and native ccmaps are separated.
                 kickout_old_range_data_op_.start_key_ =
                     kickout_data_it_->first.GetShallowCopy();
                 if (std::next(kickout_data_it_) == new_range_info_.cend())
@@ -5366,7 +5393,8 @@ void ObjectCommandOp::Forward(TransactionExecution *txm)
     {
         if (FLAGS_cmd_read_catalog && !catalog_read_success_)
         {
-            // Just returned from read_catalog_op_, check read_catalog_result_.
+            // Just returned from read_catalog_op_, check
+            // read_catalog_result_.
             const CcHandlerResult<ReadKeyResult> &read_catalog_result =
                 txm->read_catalog_result_;
             assert(read_catalog_result.IsFinished());
@@ -5379,8 +5407,8 @@ void ObjectCommandOp::Forward(TransactionExecution *txm)
                     LOG(ERROR) << "ReadCatalogOp record status not normal: "
                                << int(read_catalog_result.Value().rec_status_);
                 }
-                // There is an error when read the catalog. The read operation
-                // is set to be errored.
+                // There is an error when read the catalog. The read
+                // operation is set to be errored.
                 hd_result_.SetError(read_catalog_result.IsError()
                                         ? read_catalog_result.ErrorCode()
                                         : CcErrorCode::READ_CATALOG_FAIL);
@@ -5404,9 +5432,9 @@ void ObjectCommandOp::Forward(TransactionExecution *txm)
             txm->PostProcess(*this);
             return;
         }
-        // Need to make sure current node is still leader since we will visit
-        // bucket meta data which is only valid if current node is still ng
-        // leader.
+        // Need to make sure current node is still leader since we will
+        // visit bucket meta data which is only valid if current node is
+        // still ng leader.
         if (!txm->CheckLeaderTerm() && !txm->CheckStandbyTerm())
         {
             hd_result_.SetError(CcErrorCode::TX_NODE_NOT_LEADER);
@@ -5426,10 +5454,10 @@ void ObjectCommandOp::Forward(TransactionExecution *txm)
             FaultInject::Instance().InjectFault("ObjectCommandOp_NodeNotLeader",
                                                 "remove");
         });
-        // If ErrorCode() == CcErrorCode::REQUESTED_NODE_NOT_LEADER, it can not
-        // retry, because we cannot know if the command has executed or not,
-        // some commands will lead to unpredictable result, for example lpop
-        // rpush.
+        // If ErrorCode() == CcErrorCode::REQUESTED_NODE_NOT_LEADER, it can
+        // not retry, because we cannot know if the command has executed or
+        // not, some commands will lead to unpredictable result, for example
+        // lpop rpush.
         if (hd_result_.ErrorCode() == CcErrorCode::REQUESTED_NODE_NOT_LEADER)
         {
             // Only update leader but not retry.
@@ -5449,13 +5477,13 @@ void ObjectCommandOp::Forward(TransactionExecution *txm)
             if (cce_addr.Term() < 0 ||
                 (!txm->CheckLeaderTerm() && !txm->CheckStandbyTerm()))
             {
-                // For non-blocking concurrency control protocols, the object
-                // command is expected to return instantly. For 2PL, if the
-                // request is blocked, the cc node will send an
-                // acknowledgement to update the key's term. In either case, if
-                // the object's term is not set, the tx has not received any
-                // response or acknowledgement from the key's cc node group.
-                // The request is forced to be errored upon timeout.
+                // For non-blocking concurrency control protocols, the
+                // object command is expected to return instantly. For 2PL,
+                // if the request is blocked, the cc node will send an
+                // acknowledgement to update the key's term. In either case,
+                // if the object's term is not set, the tx has not received
+                // any response or acknowledgement from the key's cc node
+                // group. The request is forced to be errored upon timeout.
 
                 bool force_error = hd_result_.ForceError();
                 if (force_error)
@@ -5587,7 +5615,8 @@ void MultiObjectCommandOp::Reset(MultiObjectCommandTxRequest *req)
                 }
                 if (res->Value().is_local_)
                 {
-                    // We only increased atm_cnt_ for local discard requests.
+                    // We only increased atm_cnt_ for local discard
+                    // requests.
                     atm_cnt_.fetch_sub(1, std::memory_order_release);
                     atm_local_cnt_.fetch_sub(1, std::memory_order_relaxed);
                 }
@@ -5626,14 +5655,15 @@ void MultiObjectCommandOp::Forward(TransactionExecution *txm)
     {
         if (FLAGS_cmd_read_catalog && !catalog_read_success_)
         {
-            // Just returned from read_catalog_op_, check read_catalog_result_.
+            // Just returned from read_catalog_op_, check
+            // read_catalog_result_.
             const CcHandlerResult<ReadKeyResult> &read_catalog_result =
                 txm->read_catalog_result_;
             assert(read_catalog_result.IsFinished());
             if (read_catalog_result.IsError())
             {
-                // There is an error when reading the catalog. This operation is
-                // set to be errored.
+                // There is an error when reading the catalog. This
+                // operation is set to be errored.
                 atm_err_code_.store(CcErrorCode::READ_CATALOG_FAIL,
                                     std::memory_order_relaxed);
 
@@ -5654,9 +5684,9 @@ void MultiObjectCommandOp::Forward(TransactionExecution *txm)
             txm->PostProcess(*this);
             return;
         }
-        // Need to make sure current node is still leader since we will visit
-        // bucket meta data which is only valid if current node is still ng
-        // leader.
+        // Need to make sure current node is still leader since we will
+        // visit bucket meta data which is only valid if current node is
+        // still ng leader.
         if (!txm->CheckLeaderTerm() && !txm->CheckStandbyTerm())
         {
             atm_err_code_.store(CcErrorCode::TX_NODE_NOT_LEADER,
@@ -5741,8 +5771,8 @@ void MultiObjectCommandOp::Forward(TransactionExecution *txm)
 
         if (local_cnt > 0)
         {
-            // For abort commands, only local commands need to call SetFinished
-            // to avoid to visit freed memory.
+            // For abort commands, only local commands need to call
+            // SetFinished to avoid to visit freed memory.
             atm_local_cnt_.fetch_add(local_cnt, std::memory_order_relaxed);
             atm_cnt_.fetch_add(local_cnt, std::memory_order_relaxed);
         }
@@ -5776,9 +5806,9 @@ void MultiObjectCommandOp::Forward(TransactionExecution *txm)
                     const CcEntryAddr &cce_addr = hd_result.Value().cce_addr_;
                     if (cce_addr.Term() > 0)
                     {
-                        // Received an ack message that the ApplyCc was received
-                        // but was blockedd by lock. We need to check if the
-                        // remote node is still alive.
+                        // Received an ack message that the ApplyCc was
+                        // received but was blockedd by lock. We need to
+                        // check if the remote node is still alive.
 
                         txm->cc_handler_->BlockCcReqCheck(
                             txm->TxNumber(),
@@ -6282,8 +6312,8 @@ void ClusterScaleOp::Forward(TransactionExecution *txm)
             }
             else
             {
-                // We need to roll forward after prepare log is written. Retry
-                // until succeed.
+                // We need to roll forward after prepare log is written.
+                // Retry until succeed.
                 RetrySubOperation(txm, &acquire_cluster_config_write_op_);
             }
             return;
@@ -6899,10 +6929,11 @@ void NotifyStartMigrateOp::InitDataMigration(TxNumber tx_number,
                 std::vector<TxNumber> txns;
                 // Each worker processes 10 buckets at a time.
                 // int worker_tx_cnt =
-                //     bucket_ids.size() > 100 ? 10 : (bucket_ids.size() / 10) +
-                //     1;
+                //     bucket_ids.size() > 100 ? 10 : (bucket_ids.size() /
+                //     10) + 1;
                 // // Each worker processes 10 buckets at a time.
-                // std::vector<std::vector<uint16_t>> bucket_ids_per_task(1);
+                // std::vector<std::vector<uint16_t>>
+                // bucket_ids_per_task(1);
                 // std::vector<std::vector<NodeGroupId>>
                 // new_owner_ngs_per_task(1); std::vector<uint16_t>
                 // *cur_task_bucket_ids =
@@ -6919,7 +6950,8 @@ void NotifyStartMigrateOp::InitDataMigration(TxNumber tx_number,
                 //         bucket_ids_per_task.push_back(std::vector<uint16_t>());
                 //         new_owner_ngs_per_task.push_back(
                 //             std::vector<NodeGroupId>());
-                //         cur_task_bucket_ids = &bucket_ids_per_task.back();
+                //         cur_task_bucket_ids =
+                //         &bucket_ids_per_task.back();
                 //         cur_task_new_owner_ngs =
                 //         &new_owner_ngs_per_task.back();
                 //     }
@@ -7029,8 +7061,9 @@ void NotifyStartMigrateOp::InitDataMigration(TxNumber tx_number,
                     if (migrate_req.ErrorCode() ==
                         TxErrorCode::DUPLICATE_MIGRATION_TX_ERROR)
                     {
-                        // Migration on this node group is already in progress.
-                        // We can mark the migration init as success.
+                        // Migration on this node group is already in
+                        // progress. We can mark the migration init as
+                        // success.
                         migrate_plans[old_owner_id].has_migration_tx_ = true;
                     }
                     else
@@ -7949,8 +7982,8 @@ void DataMigrationOp::Forward(TransactionExecution *txm)
 
                 table_exist = range_keys.has_value();
 
-                // Table has been dropped. So we don't need to kickout data on
-                // this table
+                // Table has been dropped. So we don't need to kickout data
+                // on this table
                 if (!table_exist)
                 {
                     // Move to next table
@@ -7998,7 +8031,8 @@ void DataMigrationOp::Forward(TransactionExecution *txm)
 
         if (kickout_range_tbl_it_ == ranges_in_bucket_snapshot_.cend())
         {
-            // Kickout hash partitioned tables after range partitioned tables.
+            // Kickout hash partitioned tables after range partitioned
+            // tables.
             if (++kickout_hash_partitioned_tbl_it_ ==
                 hash_partitioned_tables_snapshot_.cend())
             {
@@ -8312,8 +8346,8 @@ void BatchReadOperation::Forward(TransactionExecution *txm)
         {
             if (!batch_read_tx_req_->tab_name_->IsHashPartitioned())
             {
-                // A range has been locked. Assigns the range's node group to
-                // all keys belonging to this range.
+                // A range has been locked. Assigns the range's node group
+                // to all keys belonging to this range.
                 const RangeRecord *range_rec = static_cast<RangeRecord *>(
                     lock_range_bucket_result_->Value().rec_);
                 TxKey range_end_key = range_rec->GetRangeInfo()->EndTxKey();

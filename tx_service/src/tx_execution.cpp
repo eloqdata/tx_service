@@ -2779,6 +2779,11 @@ void TransactionExecution::Process(ScanNextOperation &scan_next)
             // the to-be-scanned slice is the last (first) of the range, the
             // range lock is released when the scan request returns.
             scan_next.lock_range_result_.SetFinished();
+            LocalCcShards *local_cc_shards =
+                Sharder::Instance().GetLocalCcShards();
+            uint64_t start_ts =
+                local_cc_shards->StartScanNextBatch(cc_handler_->GetCoreId());
+            scan_next.StartScanNextBatch(start_ts);
 
             cc_handler_->ScanNextBatch(
                 scan_next.tx_req_->table_name_,
@@ -2832,6 +2837,11 @@ void TransactionExecution::Process(ScanNextOperation &scan_next)
                 // post-processing of the scan operation and returns an
                 // error to the tx scan request.
                 assert(!scan_next.lock_range_result_.IsError());
+                LocalCcShards *local_cc_shards =
+                    Sharder::Instance().GetLocalCcShards();
+                uint64_t start_ts = local_cc_shards->StartScanNextBatch(
+                    cc_handler_->GetCoreId());
+                scan_next.StartScanNextBatch(start_ts);
 
                 // The term of the cc node group hosting the to-be-scanned range
                 // is unknown. Sets the term to -1, indicating it is not matched
@@ -2976,6 +2986,12 @@ void TransactionExecution::PostProcess(ScanNextOperation &scan_next)
             ConvertCcError(scan_next.slice_hd_result_.ErrorCode()));
         bool_resp_ = nullptr;
         return;
+    }
+
+    if (uint64_t dur = scan_next.EndScanNextBatch(); dur > 0)
+    {
+        LocalCcShards *local_cc_shards = Sharder::Instance().GetLocalCcShards();
+        local_cc_shards->EndScanNextBatch(cc_handler_->GetCoreId(), dur);
     }
 
     enum struct AdvanceType

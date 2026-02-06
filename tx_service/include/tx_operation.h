@@ -513,6 +513,9 @@ struct ScanNextOperation : TransactionOperation
         return scan_state_->slice_position_;
     }
 
+    void StartScanNextBatch(const uint64_t start_ts);
+    uint64_t EndScanNextBatch();
+
     CcHandlerResult<RangeScanSliceResult> slice_hd_result_;
     TableName range_table_name_{
         empty_sv, TableType::RangePartition, TableEngine::None};
@@ -522,6 +525,7 @@ struct ScanNextOperation : TransactionOperation
 
     size_t alias_{0};
     ScanBatchTxRequest *tx_req_{nullptr};
+    uint64_t scan_start_ts_{0};
 };
 
 struct AcquireAllOp : public TransactionOperation

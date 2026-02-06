@@ -2952,6 +2952,22 @@ public:
         return true;
     }
 
+    uint64_t EndScanSlice(uint16_t core_id) const
+    {
+        uint64_t start_ts = start_ts_vec_[core_id];
+        if (start_ts != 0)
+        {
+            return std::chrono::duration_cast<std::chrono::microseconds>(
+                       std::chrono::high_resolution_clock::now()
+                           .time_since_epoch())
+                       .count() -
+                   start_ts;
+        }
+        return 0;
+    }
+
+    std::vector<uint64_t> start_ts_vec_;
+
 private:
     enum struct RangeKeyType : uint8_t
     {
