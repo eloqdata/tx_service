@@ -63,6 +63,64 @@
 #include "tx_util.h"
 #include "type.h"
 
+namespace
+{
+// Minimal awaitables for CC wait (no TaskAwaitable + closure; memory-safe).
+struct UpdateCceCkptTsCcAwaitable
+{
+    txservice::UpdateCceCkptTsCc *req;
+    txservice::TaskScheduler *sched;
+    const absl::flat_hash_map<
+        size_t,
+        std::vector<txservice::UpdateCceCkptTsCc::CkptTsEntry>>
+        *cce_entries_map;
+    std::unordered_set<uint16_t> *updated_ckpt_ts_core_ids;
+    txservice::LocalCcShards *self;
+
+    bool await_ready() const
+    {
+        return false;
+    }
+    void await_suspend(std::coroutine_handle<> h)
+    {
+        req->SetNotifyCallback([h, s = sched]() { s->PostReadyHandle(h); });
+        for (const auto &[core_idx, cce_entries] : *cce_entries_map)
+        {
+            updated_ckpt_ts_core_ids->insert(static_cast<uint16_t>(core_idx));
+            self->EnqueueToCcShard(static_cast<uint16_t>(core_idx), req);
+        }
+    }
+    void await_resume()
+    {
+    }
+};
+
+struct ResetCcAwaitable
+{
+    txservice::WaitableCc *cc;
+    txservice::TaskScheduler *sched;
+    const std::unordered_set<uint16_t> *core_ids;
+    txservice::LocalCcShards *self;
+
+    bool await_ready() const
+    {
+        return false;
+    }
+    void await_suspend(std::coroutine_handle<> h)
+    {
+        cc->SetNotifyCallback([h, s = sched]() { s->PostReadyHandle(h); });
+        for (uint16_t core_idx : *core_ids)
+        {
+            self->EnqueueToCcShard(core_idx,
+                                   static_cast<txservice::CcRequestBase *>(cc));
+        }
+    }
+    void await_resume()
+    {
+    }
+};
+}  // namespace
+
 namespace txservice
 {
 DECLARE_bool(report_ckpt);
@@ -5999,29 +6057,12 @@ Task<void> LocalCcShards::FlushDataCoro(TaskScheduler *sched,
                         << cce_entries_map.size()
                         << ", addr = " << &cce_entries_map;
 
-                    co_await TaskAwaitable<void>{
+                    co_await UpdateCceCkptTsCcAwaitable{
+                        &update_cce_req,
                         sched,
-                        [&update_cce_req,
-                         &updated_ckpt_ts_core_ids,
-                         &cce_entries_map,
-                         this](auto cb)
-                        {
-                            LOG(INFO)
-                                << "yf: start op: addr = " << &cce_entries_map
-                                << ", size = " << cce_entries_map.size();
-                            // Capture cb by value, not by reference, because
-                            // cb's lifetime ends when start_op lambda returns,
-                            // but notify_callback_ may be called later by
-                            // SetFinished() from another worker thread.
-                            update_cce_req.SetNotifyCallback([cb]() { cb(); });
-                            for (auto &[core_idx, cce_entries] :
-                                 cce_entries_map)
-                            {
-                                updated_ckpt_ts_core_ids.insert(core_idx);
-                                this->EnqueueToCcShard(core_idx,
-                                                       &update_cce_req);
-                            }
-                        }};
+                        &cce_entries_map,
+                        &updated_ckpt_ts_core_ids,
+                        this};
                 };
             }
         }
@@ -6034,19 +6075,8 @@ Task<void> LocalCcShards::FlushDataCoro(TaskScheduler *sched,
             return true;
         },
         updated_ckpt_ts_core_ids.size());
-    co_await TaskAwaitable<void>{
-        sched,
-        [&reset_cc, &updated_ckpt_ts_core_ids, this](auto cb)
-        {
-            // Capture cb by value, not by reference, because cb's lifetime
-            // ends when start_op lambda returns, but notify_callback_ may
-            // be called later by SetFinished() from another worker thread.
-            reset_cc.SetNotifyCallback([cb]() { cb(); });
-            for (uint16_t core_idx : updated_ckpt_ts_core_ids)
-            {
-                this->EnqueueToCcShard(core_idx, &reset_cc);
-            }
-        }};
+    co_await ResetCcAwaitable{
+        &reset_cc, sched, &updated_ckpt_ts_core_ids, this};
 
     auto ckpt_err = succ ? DataSyncTask::CkptErrorCode::NO_ERROR
                          : DataSyncTask::CkptErrorCode::FLUSH_ERROR;

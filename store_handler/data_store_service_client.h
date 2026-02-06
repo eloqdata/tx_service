@@ -558,6 +558,26 @@ public:
     uint32_t GetShardIdByPartitionId(int32_t partition_id,
                                      bool is_range_partition) const;
 
+    /**
+     * Starts a batch write and invokes done_cb(bool) on completion. Used by
+     * BatchWriteRecordsAwaitable (same TU) so the awaitable can use this
+     * public API instead of calling private BatchWriteRecords.
+     */
+    void StartBatchWriteRecordsForCoro(
+        std::string kv_table_name,
+        int32_t partition_id,
+        uint32_t shard_id,
+        std::vector<std::string_view> &&key_parts,
+        std::vector<std::string_view> &&record_parts,
+        std::vector<uint64_t> &&records_ts,
+        std::vector<uint64_t> &&records_ttl,
+        std::vector<WriteOpType> &&op_types,
+        bool skip_wal,
+        PartitionFlushState *partition_state,
+        uint16_t key_parts_count,
+        uint16_t record_parts_count,
+        std::function<void(bool)> done_cb);
+
 private:
     int32_t MapKeyHashToPartitionId(const txservice::TxKey &key) const
     {
@@ -598,10 +618,11 @@ private:
     void BatchWriteRecordsInternal(BatchWriteRecordsClosure *closure);
 
     /**
-     * Coroutine-path: one-shot batch write; completion reported via
-     * TaskAwaitable<bool>. Callback posts handle to sched only.
+     * Coroutine-path: one-shot batch write; returns Task<bool>. Uses minimal
+     * awaitable (no TaskAwaitable + closure); callback only captures
+     * [handle, sched, result] for memory safety.
      */
-    txservice::TaskAwaitable<bool> BatchWriteRecordsAsync(
+    txservice::Task<bool> BatchWriteRecordsCoro(
         txservice::TaskScheduler *sched,
         std::string_view kv_table_name,
         int32_t partition_id,
@@ -618,7 +639,7 @@ private:
 
     /**
      * Coroutine-path: process one partition (loop GetNextBatch, co_await
-     * BatchWriteRecordsAsync, optional Yield). Used by PutAllCoro.
+     * BatchWriteRecordsCoro, optional Yield). Used by PutAllCoro.
      */
     txservice::Task<bool> ProcessPartitionCoro(
         txservice::TaskScheduler *sched,

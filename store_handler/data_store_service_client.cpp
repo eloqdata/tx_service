@@ -27,9 +27,11 @@
 #include <boost/uuid/uuid.hpp>
 #include <boost/uuid/uuid_generators.hpp>
 #include <boost/uuid/uuid_io.hpp>
+#include <coroutine>
 #include <cstdint>
 #include <functional>
 #include <memory>
+#include <optional>
 #include <random>
 #include <string>
 #include <string_view>
@@ -109,6 +111,59 @@ void BatchWriteRecordsCoroCallback(void *data,
     ctx->done_cb(ok);
     ctx->self.reset();
 }
+
+// Minimal awaitable for BatchWriteRecords (no TaskAwaitable + closure;
+// memory-safe: callback in await_suspend only captures [h, sched, result]).
+struct BatchWriteRecordsAwaitable
+{
+    txservice::TaskScheduler *sched;
+    DataStoreServiceClient *client;
+    std::string kv_table_name;
+    int32_t partition_id;
+    uint32_t shard_id;
+    std::vector<std::string_view> key_parts;
+    std::vector<std::string_view> record_parts;
+    std::vector<uint64_t> records_ts;
+    std::vector<uint64_t> records_ttl;
+    std::vector<WriteOpType> op_types;
+    bool skip_wal;
+    PartitionFlushState *partition_state;
+    uint16_t key_parts_count;
+    uint16_t record_parts_count;
+
+    std::shared_ptr<std::optional<bool>> result_;
+
+    bool await_ready() const
+    {
+        return false;
+    }
+    void await_suspend(std::coroutine_handle<> h)
+    {
+        result_ = std::make_shared<std::optional<bool>>();
+        client->StartBatchWriteRecordsForCoro(
+            std::move(kv_table_name),
+            partition_id,
+            shard_id,
+            std::move(key_parts),
+            std::move(record_parts),
+            std::move(records_ts),
+            std::move(records_ttl),
+            std::move(op_types),
+            skip_wal,
+            partition_state,
+            key_parts_count,
+            record_parts_count,
+            [h, s = sched, result = result_](bool ok)
+            {
+                result->emplace(ok);
+                s->PostReadyHandle(h);
+            });
+    }
+    bool await_resume()
+    {
+        return result_->value_or(false);
+    }
+};
 }  // namespace
 
 static const std::string_view kv_table_catalogs_name("table_catalogs");
@@ -5186,6 +5241,40 @@ void DataStoreServiceClient::BatchWriteRecords(
     BatchWriteRecordsInternal(closure);
 }
 
+void DataStoreServiceClient::StartBatchWriteRecordsForCoro(
+    std::string kv_table_name,
+    int32_t partition_id,
+    uint32_t shard_id,
+    std::vector<std::string_view> &&key_parts,
+    std::vector<std::string_view> &&record_parts,
+    std::vector<uint64_t> &&records_ts,
+    std::vector<uint64_t> &&records_ttl,
+    std::vector<WriteOpType> &&op_types,
+    bool skip_wal,
+    PartitionFlushState *partition_state,
+    uint16_t key_parts_count,
+    uint16_t record_parts_count,
+    std::function<void(bool)> done_cb)
+{
+    auto ctx = std::make_shared<BatchWriteRecordsCoroContext>();
+    ctx->done_cb = std::move(done_cb);
+    ctx->partition_state = partition_state;
+    ctx->self = ctx;
+    BatchWriteRecords(std::move(kv_table_name),
+                      partition_id,
+                      shard_id,
+                      std::move(key_parts),
+                      std::move(record_parts),
+                      std::move(records_ts),
+                      std::move(records_ttl),
+                      std::move(op_types),
+                      skip_wal,
+                      ctx.get(),
+                      BatchWriteRecordsCoroCallback,
+                      key_parts_count,
+                      record_parts_count);
+}
+
 void DataStoreServiceClient::BatchWriteRecordsInternal(
     BatchWriteRecordsClosure *closure)
 {
@@ -5227,7 +5316,7 @@ void DataStoreServiceClient::BatchWriteRecordsInternal(
     }
 }
 
-txservice::TaskAwaitable<bool> DataStoreServiceClient::BatchWriteRecordsAsync(
+txservice::Task<bool> DataStoreServiceClient::BatchWriteRecordsCoro(
     txservice::TaskScheduler *sched,
     std::string_view kv_table_name,
     int32_t partition_id,
@@ -5242,40 +5331,20 @@ txservice::TaskAwaitable<bool> DataStoreServiceClient::BatchWriteRecordsAsync(
     uint16_t key_parts_count,
     uint16_t record_parts_count)
 {
-    return txservice::TaskAwaitable<bool>{
-        sched,
-        [this,
-         kv_table_name,
-         partition_id,
-         shard_id,
-         key_parts = std::move(key_parts),
-         record_parts = std::move(record_parts),
-         records_ts = std::move(records_ts),
-         records_ttl = std::move(records_ttl),
-         op_types = std::move(op_types),
-         skip_wal,
-         partition_state,
-         key_parts_count,
-         record_parts_count](std::function<void(bool)> cb) mutable
-        {
-            auto ctx = std::make_shared<BatchWriteRecordsCoroContext>();
-            ctx->done_cb = std::move(cb);
-            ctx->partition_state = partition_state;
-            ctx->self = ctx;
-            BatchWriteRecords(kv_table_name,
-                              partition_id,
-                              shard_id,
-                              std::move(key_parts),
-                              std::move(record_parts),
-                              std::move(records_ts),
-                              std::move(records_ttl),
-                              std::move(op_types),
-                              skip_wal,
-                              ctx.get(),
-                              BatchWriteRecordsCoroCallback,
-                              key_parts_count,
-                              record_parts_count);
-        }};
+    co_return co_await BatchWriteRecordsAwaitable{sched,
+                                                  this,
+                                                  std::string(kv_table_name),
+                                                  partition_id,
+                                                  shard_id,
+                                                  std::move(key_parts),
+                                                  std::move(record_parts),
+                                                  std::move(records_ts),
+                                                  std::move(records_ttl),
+                                                  std::move(op_types),
+                                                  skip_wal,
+                                                  partition_state,
+                                                  key_parts_count,
+                                                  record_parts_count};
 }
 
 txservice::Task<bool> DataStoreServiceClient::ProcessPartitionCoro(
@@ -5292,19 +5361,19 @@ txservice::Task<bool> DataStoreServiceClient::ProcessPartitionCoro(
                                     partition_state->is_range_partitioned);
         LOG(INFO) << "yf: wait BatchWriteRecordsAsync: debug_batch_cnt = "
                   << debug_batch_cnt;
-        bool ok = co_await BatchWriteRecordsAsync(sched,
-                                                  callback_data->table_name,
-                                                  partition_state->partition_id,
-                                                  shard_id,
-                                                  std::move(batch.key_parts),
-                                                  std::move(batch.record_parts),
-                                                  std::move(batch.records_ts),
-                                                  std::move(batch.records_ttl),
-                                                  std::move(batch.op_types),
-                                                  true,  // skip_wal
-                                                  partition_state,
-                                                  batch.parts_cnt_per_key,
-                                                  batch.parts_cnt_per_record);
+        bool ok = co_await BatchWriteRecordsCoro(sched,
+                                                 callback_data->table_name,
+                                                 partition_state->partition_id,
+                                                 shard_id,
+                                                 std::move(batch.key_parts),
+                                                 std::move(batch.record_parts),
+                                                 std::move(batch.records_ts),
+                                                 std::move(batch.records_ttl),
+                                                 std::move(batch.op_types),
+                                                 true,  // skip_wal
+                                                 partition_state,
+                                                 batch.parts_cnt_per_key,
+                                                 batch.parts_cnt_per_record);
         debug_batch_cnt++;
         if (!ok)
         {

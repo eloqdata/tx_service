@@ -302,95 +302,29 @@ inline JoinAllAwaitable<T> JoinAll(std::vector<Task<T>> &tasks,
     return JoinAllAwaitable<T>{tasks, sched};
 }
 
-// --- 3. TaskAwaitable<R> for async ops and Yield ---
-// Optional ready_fn: when set, await_ready() returns ready_fn(); else false.
-template <typename R>
-struct TaskAwaitable
+// --- 3. Yield: minimal awaitable (no TaskAwaitable, no closure) ---
+// Memory-safe: only holds TaskScheduler*; callback created in await_suspend
+// with only [handle, sched].
+struct YieldAwaitable
 {
     TaskScheduler *sched;
-    std::function<void(std::function<void(R)>)> start_op;
-    std::function<bool()> ready_fn_{};
-
-    TaskAwaitable() = default;
-    TaskAwaitable(TaskScheduler *s,
-                  std::function<void(std::function<void(R)>)> op,
-                  std::function<bool()> ready = {})
-        : sched(s), start_op(std::move(op)), ready_fn_(std::move(ready))
-    {
-    }
 
     bool await_ready() const
     {
-        if (ready_fn_)
-        {
-            // LOG(INFO) << "TaskAwaitable: await_ready, ready_fn_() = "
-            //          << ready_fn_();
-            return ready_fn_();
-        }
         return false;
     }
     void await_suspend(std::coroutine_handle<> h)
     {
-        // LOG(INFO) << "TaskAwaitable: await_suspend";
-        res_ = std::make_shared<std::optional<R>>();
-        auto resume_lambda = [this, h, s = this->sched](R v)
-        {
-            //   LOG(INFO) << "TaskAwaitable: post ready handle";
-            res_->emplace(std::move(v));
-            s->PostReadyHandle(h);
-        };
-
-        start_op(resume_lambda);
-    }
-
-    R await_resume()
-    {
-        return std::move(res_->value_or(R()));
-    }
-
-private:
-    std::shared_ptr<std::optional<R>> res_;
-};
-
-// void specialization: no return value
-template <>
-struct TaskAwaitable<void>
-{
-    TaskScheduler *sched;
-    std::function<void(std::function<void()>)> start_op;
-    std::function<bool()> ready_fn_{};
-
-    TaskAwaitable() = default;
-    TaskAwaitable(TaskScheduler *s,
-                  std::function<void(std::function<void()>)> op,
-                  std::function<bool()> ready = {})
-        : sched(s), start_op(std::move(op)), ready_fn_(std::move(ready))
-    {
-    }
-
-    bool await_ready() const
-    {
-        if (ready_fn_)
-        {
-            // LOG(INFO) << "TaskAwaitable: await_ready, ready_fn_() = "
-            // << ready_fn_();
-            return ready_fn_();
-        }
-        return false;
-    }
-    void await_suspend(std::coroutine_handle<> h)
-    {
-        start_op([h, s = this->sched]() { s->PostReadyHandle(h); });
+        sched->PostReadyHandle(h);
     }
     void await_resume()
     {
     }
 };
 
-// --- 4. Yield: yield to scheduler ---
-inline TaskAwaitable<void> Yield(TaskScheduler *sched)
+inline YieldAwaitable Yield(TaskScheduler *sched)
 {
-    return TaskAwaitable<void>{sched, [](auto cb) { cb(); }};
+    return YieldAwaitable{sched};
 }
 
 }  // namespace txservice
