@@ -8400,132 +8400,11 @@ public:
             return false;
         }
 
-        auto &paused_key = req.PausedKey();
-
-        auto deduce_iterator = [this](const KeyT &search_key) -> Iterator
-        {
-            Iterator it;
-            std::pair<Iterator, ScanType> search_pair =
-                ForwardScanStart(search_key, true);
-            it = search_pair.first;
-            if (search_pair.second == ScanType::ScanGap)
-            {
-                ++it;
-            }
-            return it;
-        };
-
-        auto next_page_it = [this](Iterator &end_it) -> Iterator
-        {
-            Iterator it = end_it;
-            if (it != End())
-            {
-                CcPage<KeyT, ValueT, VersionedRecord, RangePartitioned> *ccp =
-                    it.GetPage();
-                assert(ccp != nullptr);
-                if (ccp->next_page_ == PagePosInf())
-                {
-                    it = End();
-                }
-                else
-                {
-                    it = Iterator(ccp->next_page_, 0, &neg_inf_);
-                }
-            }
-            return it;
-        };
-
-        Iterator key_it;
-        Iterator req_end_it;
-
-        // The key iterator.
-        const KeyT *const search_start_key =
-            paused_key.GetKey<KeyT>() == nullptr ? KeyT::NegativeInfinity()
-                                                 : paused_key.GetKey<KeyT>();
-        key_it = deduce_iterator(*search_start_key);
-
-        // The request end iterator
-        req_end_it = deduce_iterator(*KeyT::PositiveInfinity());
-
-        // Since we might skip the page that end_it is on if it's not updated
-        // since last ckpt, it might skip end_it. If the last page is skipped it
-        // will be set as the first entry on the next page. Also check if
-        // (key_it == end_next_page_it).
-        Iterator req_end_next_page_it = next_page_it(req_end_it);
-
-        // The current slice end iterator
-        Iterator slice_end_it = req_end_it;
-        Iterator slice_end_next_page_it = req_end_next_page_it;
-
-        // ScanSliceDeltaSizeCcForRangePartition is running on TxProcessor
-        // thread. To avoid blocking other transaction for a long time, we only
-        // process ScanBatchSize number of keys in each round.
-        for (size_t scan_cnt = 0;
-             scan_cnt < ScanDeltaSizeCcForHashPartition::ScanBatchSize &&
-             key_it != req_end_it && key_it != req_end_next_page_it;
-             ++scan_cnt)
-        {
-            CcEntry<KeyT, ValueT, VersionedRecord, RangePartitioned> *cce =
-                key_it->second;
-            CcPage<KeyT, ValueT, VersionedRecord, RangePartitioned> *ccp =
-                key_it.GetPage();
-            assert(ccp);
-
-            if (ccp->last_dirty_commit_ts_ <= req.LastDataSyncTs())
-            {
-                // Skip the pages that have no updates since last data sync.
-                if (ccp->next_page_ == PagePosInf())
-                {
-                    key_it = End();
-                }
-                else
-                {
-                    key_it = Iterator(ccp->next_page_, 0, &neg_inf_);
-                }
-
-                // Check the slice iterator.
-                if (key_it == slice_end_it || key_it == slice_end_next_page_it)
-                {
-                    // Reset the slice end iterator
-                    slice_end_it = req_end_it;
-                    slice_end_next_page_it = next_page_it(slice_end_it);
-                }
-                continue;
-            }
-
-            const uint64_t commit_ts = cce->CommitTs();
-
-            // The commit_ts <= 1 means the key is non-existed or a new inserted
-            // key that the tx has not finished post-processing.
-            req.UpdateKeyCount(cce->NeedCkpt() && commit_ts > 1 &&
-                               commit_ts <= req.ScanTs());
-
-            // Forward key iterator
-            ++key_it;
-
-            if (key_it == slice_end_it)
-            {
-                // Update the end it.
-                slice_end_it = req_end_it;
-                slice_end_next_page_it = next_page_it(slice_end_it);
-            }
-        }
-
-        if (key_it == req_end_it || key_it == req_end_next_page_it)
-        {
-            int64_t allocated, committed;
-            mi_thread_stats(&allocated, &committed);
-            req.SetMemoryUsage(allocated);
-            req.SetFinish();
-        }
-        else
-        {
-            paused_key = key_it->first->CloneTxKey();
-            shard_->EnqueueLowPriorityCcRequest(&req);
-        }
-
-        // Access ScanSliceDeltaSizeCcForRangePartition member variable is
-        // unsafe after SetFinished().
+        req.SetKeyCounts(data_key_count_, dirty_data_key_count_);
+        int64_t allocated, committed;
+        mi_thread_stats(&allocated, &committed);
+        req.SetMemoryUsage(allocated);
+        req.SetFinish();
         return false;
     }
 
@@ -8662,10 +8541,35 @@ public:
         return true;
     }
 
+    void AdjustDataKeyStats(int64_t size_delta, int64_t dirty_delta)
+    {
+        if (table_name_.IsMeta())
+        {
+            return;
+        }
+
+        if (size_delta != 0)
+        {
+            assert(size_delta >= 0 ||
+                   data_key_count_ >= static_cast<size_t>(-size_delta));
+            data_key_count_ = static_cast<size_t>(
+                static_cast<int64_t>(data_key_count_) + size_delta);
+        }
+
+        if (dirty_delta != 0)
+        {
+            assert(dirty_delta >= 0 ||
+                   dirty_data_key_count_ >= static_cast<size_t>(-dirty_delta));
+            dirty_data_key_count_ = static_cast<size_t>(
+                static_cast<int64_t>(dirty_data_key_count_) + dirty_delta);
+        }
+    }
+
     void OnEntryFlushed(bool was_dirty, bool is_persistent) override
     {
         if (was_dirty && is_persistent)
         {
+            AdjustDataKeyStats(0, -1);
             shard_->AdjustDataKeyStats(table_name_, 0, -1);
         }
     }
@@ -8685,6 +8589,7 @@ public:
             page_it = ccmp_.find(ccpage->FirstKey());
         }
         const bool was_dirty = cce->IsDirty();
+        AdjustDataKeyStats(-1, was_dirty ? -1 : 0);
         shard_->AdjustDataKeyStats(table_name_, -1, was_dirty ? -1 : 0);
         ccpage->Remove(cce);
 
@@ -8761,6 +8666,8 @@ public:
 
         if (total_freed > 0 || dirty_freed > 0)
         {
+            AdjustDataKeyStats(-static_cast<int64_t>(total_freed),
+                               -static_cast<int64_t>(dirty_freed));
             shard_->AdjustDataKeyStats(table_name_,
                                        -static_cast<int64_t>(total_freed),
                                        -static_cast<int64_t>(dirty_freed));
@@ -8798,6 +8705,8 @@ public:
                 cce->ClearLocks(*shard_, cc_ng_id_);
             }
 
+            AdjustDataKeyStats(-static_cast<int64_t>(page->Size()),
+                               -static_cast<int64_t>(dirty_freed));
             shard_->AdjustDataKeyStats(table_name_,
                                        -static_cast<int64_t>(page->Size()),
                                        -static_cast<int64_t>(dirty_freed));
@@ -9187,6 +9096,7 @@ protected:
     {
         if (!was_dirty && cce->IsDirty())
         {
+            AdjustDataKeyStats(0, +1);
             shard_->AdjustDataKeyStats(table_name_, 0, +1);
         }
     }
@@ -10058,6 +9968,7 @@ protected:
             {
                 normal_obj_sz_ += normal_rec_change;
             }
+            AdjustDataKeyStats(+(end_idx - first_index), 0);
             shard_->AdjustDataKeyStats(
                 table_name_, +(end_idx - first_index), 0);
 
@@ -10096,6 +10007,7 @@ protected:
 
                     assert(new_key_cnt > 0);
                     // Update CCMap size
+                    AdjustDataKeyStats(+new_key_cnt, 0);
                     shard_->AdjustDataKeyStats(table_name_, +new_key_cnt, 0);
                 }
                 else
@@ -10185,6 +10097,7 @@ protected:
 
             assert(new_key_cnt > 0);
             // Update Ccmap size
+            AdjustDataKeyStats(+new_key_cnt, 0);
             shard_->AdjustDataKeyStats(table_name_, +new_key_cnt, 0);
         }
 
@@ -10424,6 +10337,7 @@ protected:
 
         // update lru list
         shard_->UpdateLruList(target_page, true);
+        AdjustDataKeyStats(+1, 0);
         shard_->AdjustDataKeyStats(table_name_, +1, 0);
 
         return Iterator(target_page, idx_in_page, &neg_inf_);
@@ -11600,6 +11514,9 @@ protected:
         {
             normal_obj_sz_ -= clean_guard->CleanObjectCount();
         }
+        AdjustDataKeyStats(
+            -static_cast<int64_t>(clean_guard->FreedCount()),
+            -static_cast<int64_t>(clean_guard->DirtyFreedCount()));
         shard_->AdjustDataKeyStats(
             table_name_,
             -static_cast<int64_t>(clean_guard->FreedCount()),
@@ -11918,6 +11835,8 @@ protected:
     TemplateCcMapSamplePool<KeyT> *sample_pool_;
     size_t normal_obj_sz_{
         0};  // The count of all normal status objects, only used for redis
+    size_t data_key_count_{0};
+    size_t dirty_data_key_count_{0};
 };
 
 template <typename KeyT, typename ValueT>
