@@ -1087,7 +1087,7 @@ public:
         else
         {
             notify_callback_ = std::move(notify_callback);
-            LOG(INFO) << "yf: set NotifyCallback, this = " << this;
+            // LOG(INFO) << "yf: set NotifyCallback, this = " << this;
         }
     }
 

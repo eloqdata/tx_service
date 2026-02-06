@@ -87,9 +87,10 @@ struct UpdateCceCkptTsCcAwaitable
             [h, s = sched]()
             {
                 s->PostReadyHandle(h);
-                LOG(INFO) << "== PostReadyHandle == : update cce ckpt ts cc, "
-                             "queue size = "
-                          << s->QueueSize() << ", s = " << s << ", cc = ";
+                // LOG(INFO) << "== PostReadyHandle == : update cce ckpt ts cc,
+                // "
+                //             "queue size = "
+                //          << s->QueueSize() << ", s = " << s << ", cc = ";
             });
 
         for (const auto &[core_idx, cce_entries] : *cce_entries_map)
@@ -99,8 +100,8 @@ struct UpdateCceCkptTsCcAwaitable
             self->EnqueueToCcShard(static_cast<uint16_t>(core_idx), req);
         }
 
-        LOG(INFO) << "enqueue finsihed: " << req
-                  << ", core num = " << req->CoreNum();
+        // LOG(INFO) << "enqueue finsihed: " << req
+        //          << ", core num = " << req->CoreNum();
     }
     void await_resume()
     {
@@ -124,7 +125,7 @@ struct ResetCcAwaitable
             [h, s = sched]()
             {
                 s->PostReadyHandle(h);
-                LOG(INFO) << "==PostReadyHandle: reset cc,";
+                // LOG(INFO) << "==PostReadyHandle: reset cc,";
             });
         for (uint16_t core_idx : *core_ids)
         {
@@ -5928,9 +5929,11 @@ void LocalCcShards::AddFlushTaskEntry(std::unique_ptr<FlushTaskEntry> &&entry)
         // Could not merge, wait if queue is full
         while (pending_flush_work.size() >= 2)
         {
+            LOG(INFO) << "yf: wait for queue to be not full";
             flush_data_worker_ctx_.cv_.wait(worker_lk);
         }
 
+        LOG(INFO) << "yf: push new task to queue";
         // Add as new task
         pending_flush_work.emplace_back(std::move(flush_data_task));
         flush_data_worker_ctx_.cv_.notify_all();
@@ -6020,6 +6023,7 @@ Task<void> LocalCcShards::FlushDataCoro(TaskScheduler *sched,
         succ = store_hd_->PersistKV(kv_table_names);
     }
 
+    size_t task_size = 0;
     std::unordered_set<uint16_t> updated_ckpt_ts_core_ids;
     if (succ)
     {
@@ -6033,8 +6037,8 @@ Task<void> LocalCcShards::FlushDataCoro(TaskScheduler *sched,
                     continue;
                 }
 
-                LOG(INFO) << "yf: UpdateCceCkptTsCc, "
-                          << ", debug_loop_cnt = " << debug_loop_cnt++;
+                // LOG(INFO) << "yf: UpdateCceCkptTsCc, "
+                //          << ", debug_loop_cnt = " << debug_loop_cnt++;
 
                 absl::flat_hash_map<size_t,
                                     std::vector<UpdateCceCkptTsCc::CkptTsEntry>>
@@ -6042,6 +6046,7 @@ Task<void> LocalCcShards::FlushDataCoro(TaskScheduler *sched,
 
                 auto &table_name =
                     entries.front()->data_sync_task_->table_name_;
+                task_size += entry->data_sync_vec_->size();
 
                 for (auto &rec : *(entry->data_sync_vec_))
                 {
@@ -6073,10 +6078,10 @@ Task<void> LocalCcShards::FlushDataCoro(TaskScheduler *sched,
                         table_name,
                         cce_entries_map);
 
-                    LOG(INFO)
-                        << "yf: UpdateCceCkptTsCc, cce_entries_map size = "
-                        << cce_entries_map.size()
-                        << ", addr = " << &cce_entries_map;
+                    // LOG(INFO)
+                    //    << "yf: UpdateCceCkptTsCc, cce_entries_map size = "
+                    //    << cce_entries_map.size()
+                    //    << ", addr = " << &cce_entries_map;
 
                     co_await UpdateCceCkptTsCcAwaitable{
                         &update_cce_req,
@@ -6085,14 +6090,14 @@ Task<void> LocalCcShards::FlushDataCoro(TaskScheduler *sched,
                         &updated_ckpt_ts_core_ids,
                         this};
 
-                    LOG(INFO) << "yf: UpdateCceCkptTsCc, finished";
+                    // LOG(INFO) << "yf: UpdateCceCkptTsCc, finished";
                 };
             }
         }
     }
 
-    LOG(INFO) << "yf: Reset cc, updated_ckpt_ts_core_ids size = "
-              << updated_ckpt_ts_core_ids.size();
+    // LOG(INFO) << "yf: Reset cc, updated_ckpt_ts_core_ids size = "
+    //          << updated_ckpt_ts_core_ids.size();
     WaitableCc reset_cc(
         [&](CcShard &ccs)
         {
@@ -6108,6 +6113,8 @@ Task<void> LocalCcShards::FlushDataCoro(TaskScheduler *sched,
 
     uint64_t old_usage = data_sync_mem_controller_.DeallocateFlushMemQuota(
         cur_work->pending_flush_size_);
+
+    LOG(INFO) << "task size = " << task_size;
 
     DLOG(INFO) << "DelocateFlushDataMemQuota old_usage: " << old_usage
                << " new_usage: " << old_usage - cur_work->pending_flush_size_
@@ -6161,14 +6168,14 @@ void LocalCcShards::FlushDataWorker(size_t worker_idx)
     while (flush_data_worker_ctx_.status_ == WorkerStatus::Active)
     {
         // Run C++20 coroutines (FlushDataCoro) until scheduler is empty
-        LOG(INFO) << "yf: Worker start run loop";
+        // LOG(INFO) << "yf: Worker start run loop";
         size_t debug_cnt = 0;
         while (!sched->IsEmpty())
         {
             debug_cnt++;
             sched->RunLoopOnce();
         }
-        LOG(INFO) << "yf: Worker stop run loop, debug cnt = " << debug_cnt;
+        // LOG(INFO) << "yf: Worker stop run loop, debug cnt = " << debug_cnt;
 
         flush_data_worker_ctx_.cv_.wait_for(
             flush_worker_lk,

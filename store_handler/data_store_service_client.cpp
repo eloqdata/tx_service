@@ -5359,8 +5359,8 @@ txservice::Task<bool> DataStoreServiceClient::ProcessPartitionCoro(
         uint32_t shard_id =
             GetShardIdByPartitionId(partition_state->partition_id,
                                     partition_state->is_range_partitioned);
-        LOG(INFO) << "yf: wait BatchWriteRecordsAsync: debug_batch_cnt = "
-                  << debug_batch_cnt;
+        // LOG(INFO) << "yf: wait BatchWriteRecordsAsync: debug_batch_cnt = "
+        //          << debug_batch_cnt;
         bool ok = co_await BatchWriteRecordsCoro(sched,
                                                  callback_data->table_name,
                                                  partition_state->partition_id,
