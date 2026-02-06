@@ -923,46 +923,43 @@ public:
 
     void AbortCcRequest(CcErrorCode error_code) override
     {
-        std::unique_lock<bthread::Mutex> lk(mux_);
-        unfinished_cnt_--;
-        error_code_ = error_code;
-        if (unfinished_cnt_ == 0)
+        std::function<void()> cb;
         {
-            NotifyContinuations();
-            cv_.notify_one();
+            std::unique_lock<bthread::Mutex> lk(mux_);
+            unfinished_cnt_--;
+            error_code_ = error_code;
+            if (unfinished_cnt_ == 0)
+            {
+                cb = std::move(notify_callback_);
+                cv_.notify_one();
+            }
         }
+        if (cb)
+            cb();
     }
 
     bool Execute(CcShard &ccs) override
     {
         if (RunOnTxProcessorCc::Execute(ccs))
         {
-            std::unique_lock<bthread::Mutex> lk(mux_);
-            error_code_ = CcErrorCode::NO_ERROR;
-            if (--unfinished_cnt_ == 0)
+            std::function<void()> cb;
             {
-                if (notify_callback_)
+                std::unique_lock<bthread::Mutex> lk(mux_);
+                error_code_ = CcErrorCode::NO_ERROR;
+                if (--unfinished_cnt_ == 0)
                 {
-                    NotifyContinuations();
-                }
-                else
-                {
-                    cv_.notify_one();
+                    cb = std::move(notify_callback_);
+                    if (!cb)
+                        cv_.notify_one();
                 }
             }
+            if (cb)
+                cb();
         }
         return false;
     }
 
 private:
-    void NotifyContinuations()
-    {
-        if (notify_callback_)
-        {
-            notify_callback_();
-        }
-    }
-
     void *operator new(size_t) noexcept
     {
         return nullptr;
@@ -1032,23 +1029,36 @@ public:
 
     void SetFinished()
     {
-        std::lock_guard<bthread::Mutex> lk(mux_);
-        unfinished_core_cnt_--;
-        if (unfinished_core_cnt_ == 0)
+        std::function<void()> cb;  // 局部变量，存放在栈上
         {
-            // If notify_callback_ is set, call it instead of cv_.notify_one().
-            // The callback may resume the coroutine, which could destroy this
-            // object. We need to notify cv before the object is destroyed only
-            // if no callback is set.
-            if (notify_callback_)
+            // 缩短锁的生命周期，只保护状态修改
+            std::lock_guard<bthread::Mutex> lk(mux_);
+            unfinished_core_cnt_--;
+            if (unfinished_core_cnt_ == 0)
             {
-                NotifyContinuations();
+                if (notify_callback_)
+                {
+                    debug_cnt_++;
+                    if (debug_cnt_ >= 2)
+                    {
+                        LOG(FATAL)
+                            << "yf: duplicate notify callback, this = " << this;
+                    }
+
+                    cb = std::move(notify_callback_);
+                    notify_callback_ = nullptr;
+                }
+                else
+                {
+                    LOG(FATAL) << "no callback, this=" << this;
+                    cv_.notify_one();
+                }
             }
-            else
-            {
-                LOG(FATAL) << "yf: no NotifyCallback, notify one";
-                cv_.notify_one();
-            }
+        }
+
+        if (cb)
+        {
+            cb();
         }
     }
 
@@ -1068,14 +1078,16 @@ public:
         {
             if (notify_callback)
             {
+                debug_cnt_++;
                 notify_callback();
-                // LOG(INFO) << "yf: direct NotifyContinuations, notify_callback
-                // ";
+                notify_callback_ = nullptr;
+                LOG(INFO) << "yf: direct NotifyContinuations, notify_callback";
             }
         }
         else
         {
             notify_callback_ = std::move(notify_callback);
+            LOG(INFO) << "yf: set NotifyCallback, this = " << this;
         }
     }
 
@@ -1096,9 +1108,15 @@ private:
     {
         if (notify_callback_)
         {
+            debug_cnt_++;
+            if (debug_cnt_ >= 2)
+            {
+                LOG(FATAL) << "yf: duplicate notify callback, this = " << this;
+            }
+            // notify_callback_ = nullptr;
+            // LOG(INFO) << "yf: NotifyContinuations, notify_callback";
             notify_callback_();
             notify_callback_ = nullptr;
-            // LOG(INFO) << "yf: NotifyContinuations, notify_callback";
         }
         else
         {
@@ -1109,7 +1127,7 @@ private:
     absl::flat_hash_map<size_t, std::vector<CkptTsEntry>> &cce_entries_;
     // key: core_idx, value: entry_index
     absl::flat_hash_map<size_t, size_t> indices_;
-
+    size_t debug_cnt_{0};
     std::function<void()> notify_callback_{nullptr};
     size_t unfinished_core_cnt_;
     NodeGroupId node_group_id_;

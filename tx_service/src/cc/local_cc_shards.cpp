@@ -91,6 +91,7 @@ struct UpdateCceCkptTsCcAwaitable
                              "queue size = "
                           << s->QueueSize() << ", s = " << s << ", cc = ";
             });
+
         for (const auto &[core_idx, cce_entries] : *cce_entries_map)
         {
             updated_ckpt_ts_core_ids->insert(static_cast<uint16_t>(core_idx));
