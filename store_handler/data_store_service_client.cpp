@@ -5284,12 +5284,14 @@ txservice::Task<bool> DataStoreServiceClient::ProcessPartitionCoro(
     PartitionCallbackData *callback_data)
 {
     PartitionBatchRequest &batch = callback_data->inflight_batch;
+    size_t debug_batch_cnt = 0;
     while (partition_state->GetNextBatch(batch))
     {
         uint32_t shard_id =
             GetShardIdByPartitionId(partition_state->partition_id,
                                     partition_state->is_range_partitioned);
-        // LOG(INFO) << "yf: wait BatchWriteRecordsAsync";
+        LOG(INFO) << "yf: wait BatchWriteRecordsAsync: debug_batch_cnt = "
+                  << debug_batch_cnt;
         bool ok = co_await BatchWriteRecordsAsync(sched,
                                                   callback_data->table_name,
                                                   partition_state->partition_id,
@@ -5303,8 +5305,10 @@ txservice::Task<bool> DataStoreServiceClient::ProcessPartitionCoro(
                                                   partition_state,
                                                   batch.parts_cnt_per_key,
                                                   batch.parts_cnt_per_record);
+        debug_batch_cnt++;
         if (!ok)
         {
+            LOG(INFO) << "co return false";
             co_return false;
         }
     }
