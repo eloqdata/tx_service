@@ -263,6 +263,8 @@ void FaultInject::InjectFault(std::string fault_name, std::string paras)
     {
         txlog::FaultInject::Instance().InjectFault(fault_name, paras);
     }
+
+    return;
 #endif
 
     // To remove the pointed fault inject.
