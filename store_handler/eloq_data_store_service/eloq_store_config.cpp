@@ -77,6 +77,9 @@ DEFINE_string(eloq_store_buffer_pool_size,
 DEFINE_string(eloq_store_root_meta_cache_size,
               "1GB",
               "EloqStore RootMeta mappings cache size (global).");
+DEFINE_string(eloq_store_non_page_io_batch_size,
+              "1MB",
+              "EloqStore batch size for non-page direct IO in bytes.");
 DEFINE_uint32(eloq_store_manifest_limit, 8 << 20, "EloqStore manifest limit.");
 DEFINE_uint32(eloq_store_io_queue_size,
               4096,
@@ -433,6 +436,18 @@ EloqStoreConfig::EloqStoreConfig(const INIReader &config_reader,
     node_memory_mb -= buffer_pool_size / (1024 * 1024);
     eloqstore_configs_.buffer_pool_size =
         buffer_pool_size / eloqstore_configs_.num_threads;
+
+    std::string non_page_io_batch_size_str =
+        !CheckCommandLineFlagIsDefault("eloq_store_non_page_io_batch_size")
+            ? FLAGS_eloq_store_non_page_io_batch_size
+            : config_reader.GetString("store",
+                                      "eloq_store_non_page_io_batch_size",
+                                      FLAGS_eloq_store_non_page_io_batch_size);
+    if (!non_page_io_batch_size_str.empty())
+    {
+        eloqstore_configs_.non_page_io_batch_size =
+            parse_size(non_page_io_batch_size_str);
+    }
 
     eloqstore_configs_.manifest_limit =
         !CheckCommandLineFlagIsDefault("eloq_store_manifest_limit")
