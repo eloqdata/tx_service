@@ -5934,7 +5934,7 @@ void LocalCcShards::AddFlushTaskEntry(std::unique_ptr<FlushTaskEntry> &&entry)
             // flush_data_worker_ctx_.cv_.wait(worker_lk);
         }
 
-        LOG(INFO) << "yf: push new task to queue";
+        // LOG(INFO) << "yf: push new task to queue";
         // Add as new task
         pending_flush_work.emplace_back(std::move(flush_data_task));
         flush_data_worker_ctx_.cv_.notify_all();
@@ -6116,7 +6116,7 @@ Task<void> LocalCcShards::FlushDataCoro(TaskScheduler *sched,
     uint64_t old_usage = data_sync_mem_controller_.DeallocateFlushMemQuota(
         cur_work->pending_flush_size_);
 
-    LOG(INFO) << "task size = " << task_size;
+    // LOG(INFO) << "task size = " << task_size;
 
     DLOG(INFO) << "DelocateFlushDataMemQuota old_usage: " << old_usage
                << " new_usage: " << old_usage - cur_work->pending_flush_size_
