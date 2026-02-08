@@ -19,8 +19,6 @@
  *    <http://www.gnu.org/licenses/>.
  *
  */
-#include "tx_operation.h"
-
 #include <algorithm>
 #include <atomic>
 #include <chrono>
@@ -48,6 +46,7 @@
 #include "store/data_store_handler.h"
 #include "tx_execution.h"
 #include "tx_key.h"
+#include "tx_operation.h"
 #include "tx_request.h"
 #include "tx_service.h"
 #include "tx_service_common.h"
@@ -4220,20 +4219,15 @@ void SplitFlushRangeOp::Forward(TransactionExecution *txm)
 
                 // Ensure at least one result slot exists.
                 assert(commit_acquire_all_write_op_.hd_results_.size() >= 1);
-                auto &hd_result0 = commit_acquire_all_write_op_.hd_results_[0];
-                hd_result0.Reset();
-                hd_result0.SetToBlock();
-                // Set error on the first hd_result with DEAD_LOCK_ABORT
-                hd_result0.SetError(CcErrorCode::DEAD_LOCK_ABORT);
-                DLOG(INFO)
-                    << "FaultInject split_flush_commit_acquire_all_deadlock, "
-                    << " commit_acquire_all_write_op_.IsDeadlock(): "
-                    << commit_acquire_all_write_op_.IsDeadlock()
-                    << " upload_cnt_: "
-                    << commit_acquire_all_write_op_.upload_cnt_
-                    << " fail_cnt_: "
-                    << commit_acquire_all_write_op_.fail_cnt_.load(
-                           std::memory_order_relaxed);
+                for (size_t i = 0; i < commit_acquire_all_write_op_.upload_cnt_;
+                     ++i)
+                {
+                    auto &hd_res = commit_acquire_all_write_op_.hd_results_[i];
+                    hd_res.Reset();
+                    hd_res.SetToBlock();
+                    hd_res.SetError(CcErrorCode::DEAD_LOCK_ABORT);
+                    hd_res.ForceError();
+                }
                 // Auto-remove the fault to prevent it from being triggered
                 // again
                 FaultInject::Instance().InjectFault(
