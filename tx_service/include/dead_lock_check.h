@@ -28,6 +28,7 @@
 #include <unordered_map>
 #include <unordered_set>
 #include <vector>
+#include <atomic>
 
 #include "proto/cc_request.pb.h"
 
