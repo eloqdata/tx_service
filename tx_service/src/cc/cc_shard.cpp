@@ -390,16 +390,35 @@ void CcShard::AdjustDataKeyStats(const TableName &table_name,
     {
         assert(size_delta >= 0 ||
                data_key_count_ >= static_cast<size_t>(-size_delta));
-        data_key_count_ = static_cast<size_t>(
-            static_cast<int64_t>(data_key_count_) + size_delta);
+        int64_t new_size = static_cast<int64_t>(data_key_count_) + size_delta;
+        if (new_size < 0)
+        {
+            data_key_count_ = 0;
+        }
+        else
+        {
+            data_key_count_ = static_cast<size_t>(new_size);
+        }
     }
 
     if (dirty_delta != 0)
     {
+        // Sanity check in debug mode.
         assert(dirty_delta >= 0 ||
                dirty_data_key_count_ >= static_cast<size_t>(-dirty_delta));
-        dirty_data_key_count_ = static_cast<size_t>(
-            static_cast<int64_t>(dirty_data_key_count_) + dirty_delta);
+        // Clamp to avoid underflow when an entry is flushed but was never
+        // counted dirty (e.g. became dirty via a path that doesn't call
+        // OnCommittedUpdate).
+        int64_t new_dirty =
+            static_cast<int64_t>(dirty_data_key_count_) + dirty_delta;
+        if (new_dirty < 0)
+        {
+            dirty_data_key_count_ = 0;
+        }
+        else
+        {
+            dirty_data_key_count_ = static_cast<size_t>(new_dirty);
+        }
     }
 }
 

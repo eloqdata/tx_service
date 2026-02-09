@@ -10148,13 +10148,17 @@ protected:
                 location_infos.emplace_back(key_idx_in_page, false);
                 // Don't need to empalce key. But we need to update entry's
                 // payload
-                target_page->Entry(key_idx_in_page)
-                    ->UpdateCcEntry(slice_items[item_idx],
-                                    shard_->EnableMvcc(),
-                                    normal_rec_change,
-                                    target_page,
-                                    shard_,
-                                    shard_->NowInMilliseconds());
+                auto *target_cce = target_page->Entry(key_idx_in_page);
+                bool was_dirty = target_cce->IsDirty();
+                target_cce->UpdateCcEntry(slice_items[item_idx],
+                                          shard_->EnableMvcc(),
+                                          normal_rec_change,
+                                          target_page,
+                                          shard_,
+                                          shard_->NowInMilliseconds());
+                // Keep shard-level dirty-key stats in sync for overwrite path.
+                OnFlushed(target_cce, was_dirty);
+                OnCommittedUpdate(target_cce, was_dirty);
                 item_idx++;
                 key_idx_in_page++;
             }
