@@ -120,6 +120,12 @@ public:
         uint32_t ng_id, std::unordered_set<uint16_t> &&bucket_ids)
     {
     }
+
+    /**
+     * @brief Check if the data store is in cloud mode.
+     * @return true if the data store is in cloud mode, false otherwise
+     */
+    virtual bool IsCloudMode() const = 0;
 };
 
 }  // namespace EloqDS

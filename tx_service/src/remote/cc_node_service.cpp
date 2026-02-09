@@ -1672,6 +1672,13 @@ void CcNodeService::UpdateStandbyCkptTs(
 
     if (Sharder::Instance().GetDataStoreHandler()->IsSharedStorage())
     {
+        auto store_hd = Sharder::Instance().GetLocalCcShards()->store_hd_;
+        if (store_hd)
+        {
+            store_hd->StandbyReloadData(request->node_group_id(),
+                                        request->ng_term());
+        }
+
         Sharder::Instance().UpdateNodeGroupCkptTs(
             request->node_group_id(), request->primary_succ_ckpt_ts());
     }

@@ -3808,6 +3808,40 @@ void DataStoreServiceClient::OnShutdown()
 {
 }
 
+bool DataStoreServiceClient::OnSnapshotReceived(
+    uint32_t ng_id, const txservice::remote::OnSnapshotSyncedRequest *req)
+{
+    // TODO(lzx): implement this for eloqstore data store.
+    if (data_store_service_ != nullptr)
+    {
+        std::unordered_set<uint16_t> bucket_ids;
+        for (auto &[bucket_id, bucket_info] : bucket_infos_)
+        {
+            if (bucket_info->BucketOwner() == ng_id)
+            {
+                bucket_ids.insert(bucket_id);
+            }
+        }
+        int64_t term =
+            txservice::PrimaryTermFromStandbyTerm(req->standby_node_term());
+        data_store_service_->OnSnapshotReceived(
+            ng_id, term, std::move(bucket_ids), req->snapshot_path());
+
+        return true;
+    }
+
+    return true;
+}
+
+bool DataStoreServiceClient::StandbyReloadData(uint32_t ng_id, int64_t ng_term)
+{
+    if (data_store_service_ != nullptr)
+    {
+        data_store_service_->OnSnapshotReceived(ng_id, ng_term, {}, "");
+    }
+    return true;
+}
+
 /**
  * @brief Check if the owner of shard is the local DataStoreService node.
  * @param shard_id

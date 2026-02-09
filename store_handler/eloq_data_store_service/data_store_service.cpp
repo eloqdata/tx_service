@@ -2245,6 +2245,60 @@ void DataStoreService::OpenDataStore(uint32_t shard_id,
     }
 }
 
+void DataStoreService::OnSnapshotReceived(
+    uint32_t shard_id,
+    int64_t term,
+    std::unordered_set<uint16_t> &&bucket_ids,
+    const std::string &snapshot_path)
+{
+    auto &ds_ref = data_shards_.at(shard_id);
+
+    if (!data_store_factory_->IsCloudMode())
+    {
+        // TODO(lzx): Handle the case of local data store mode. (replace the
+        // data with the snapshot)
+        LOG(FATAL)
+            << "OnSnapshotReceived not implemented for local data store mode";
+    }
+    else
+    {
+        if (ds_ref.shard_status_.load() == DSShardStatus::Closed)
+        {
+            // If the shard is closed, open it and load data from cloud.
+            LOG(INFO) << "OnSnapshotReceived, open data store for DSS shard "
+                      << shard_id << " and term " << term;
+            OpenDataStore(shard_id, std::move(bucket_ids), term);
+        }
+        else
+        {
+            LOG(INFO)
+                << "OnSnapshotReceived, reload data from cloud for DSS shard "
+                << shard_id << " and term " << term;
+            ds_ref.data_store_->ReloadDataFromCloud(term);
+            return;
+        }
+    }
+}
+
+void DataStoreService::StandbyReloadData(uint32_t shard_id, int64_t term)
+{
+    auto &ds_ref = data_shards_.at(shard_id);
+    if (ds_ref.data_store_ != nullptr &&
+        ds_ref.shard_status_.load() != DSShardStatus::Closed)
+    {
+        LOG(INFO)
+            << "StandbySyncAndReloadData reload data from cloud for DSS shard "
+            << shard_id;
+        ds_ref.data_store_->ReloadDataFromCloud(term);
+    }
+    else
+    {
+        LOG(ERROR) << "StandbySyncAndReloadData no-op for DSS shard status is "
+                      "closed or data store is nullptr, "
+                   << shard_id;
+    }
+}
+
 std::pair<remote::ShardMigrateError, std::string>
 DataStoreService::NewMigrateTask(const std::string &event_id,
                                  int data_shard_id,

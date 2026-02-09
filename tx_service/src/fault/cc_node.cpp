@@ -744,7 +744,7 @@ bool CcNode::OnSnapshotReceived(const remote::OnSnapshotSyncedRequest *req)
         return false;
     }
 
-    bool succ = local_cc_shards_.store_hd_->OnSnapshotReceived(req);
+    bool succ = local_cc_shards_.store_hd_->OnSnapshotReceived(ng_id_, req);
     DLOG(INFO) << "OnSnapshotReceived completed for ng#" << ng_id_
                << ", standby_term=" << req->standby_node_term()
                << ", success=" << succ;

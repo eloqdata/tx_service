@@ -116,6 +116,11 @@ public:
         return 0;  // Not applicable for non-cloud RocksDB
     }
 
+    bool IsCloudMode() const override
+    {
+        return false;
+    }
+
 private:
     ::EloqDS::RocksDBConfig config_;
     bool tx_enable_cache_replacement_;

@@ -139,6 +139,11 @@ public:
         };
     }
 
+    bool IsCloudMode() const override
+    {
+        return !eloq_store_configs_.eloqstore_configs_.cloud_store_path.empty();
+    }
+
 private:
     EloqStoreConfig eloq_store_configs_;
 

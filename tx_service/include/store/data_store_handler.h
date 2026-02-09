@@ -22,6 +22,7 @@
 #pragma once
 
 #include <cstddef>
+#include <cstdint>
 #include <memory>
 #include <string>
 #include <string_view>
@@ -399,7 +400,12 @@ public:
     }
 
     virtual bool OnSnapshotReceived(
-        const txservice::remote::OnSnapshotSyncedRequest *req)
+        uint32_t ng_id, const txservice::remote::OnSnapshotSyncedRequest *req)
+    {
+        return true;
+    }
+
+    virtual bool StandbyReloadData(uint32_t ng_id, int64_t ng_term)
     {
         return true;
     }

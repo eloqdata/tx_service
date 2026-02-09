@@ -139,6 +139,11 @@ public:
      */
     virtual void SwitchToReadWrite() = 0;
 
+    /**
+     * @brief For cloud mode, sync the data from cloud and reload the data.
+     */
+    virtual void ReloadDataFromCloud(int64_t term) = 0;
+
 protected:
     uint32_t shard_id_;
     DataStoreService *data_store_service_;
