@@ -122,15 +122,10 @@ public:
     }
 
     /**
-     * @brief Check if cloud storage mode is enabled
-     * @return true if cloud storage mode is enabled, false otherwise
-     * Default implementation returns false (for non-EloqStore factories).
-     * Only EloqStoreDataStoreFactory implements this method.
+     * @brief Check if the data store is in cloud mode.
+     * @return true if the data store is in cloud mode, false otherwise
      */
-    virtual bool IsCloudStorageMode() const
-    {
-        return false;
-    }
+    virtual bool IsCloudMode() const = 0;
 };
 
 }  // namespace EloqDS

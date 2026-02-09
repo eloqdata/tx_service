@@ -283,6 +283,12 @@ protected:
     rocksdb::InfoLogLevel StringToInfoLogLevel(
         const std::string &log_level_str);
 
+    virtual void ReloadDataFromCloud(int64_t term) override
+    {
+        LOG(ERROR)
+            << "RocksDBDataStoreCommon::ReloadDataFromCloud, not implemented";
+    }
+
 protected:
     rocksdb::InfoLogLevel info_log_level_;
     const bool enable_stats_;

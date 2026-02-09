@@ -151,7 +151,8 @@ void DataSyncTask::SetFinish()
                     {
                         BrocastPrimaryCkptTs(node_group_id_,
                                              node_group_term_,
-                                             status_->truncate_log_ts_);
+                                             status_->truncate_log_ts_,
+                                             status_->HasDataStoreWrite());
                     }
                 }
             }

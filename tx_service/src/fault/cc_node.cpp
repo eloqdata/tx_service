@@ -731,11 +731,6 @@ bool CcNode::OnSnapshotReceived(const remote::OnSnapshotSyncedRequest *req)
         expected = false;
     }
 
-    DLOG(INFO) << "OnSnapshotReceived called for ng#" << ng_id_
-               << ", standby_term=" << req->standby_node_term()
-               << ", node_id=" << node_id_ << ", candidateStandbyTerm="
-               << Sharder::Instance().CandidateStandbyNodeTerm()
-               << ", standbyTerm=" << Sharder::Instance().StandbyNodeTerm();
     if (Sharder::Instance().StandbyNodeTerm() > 0 ||
         Sharder::Instance().CandidateStandbyNodeTerm() !=
             req->standby_node_term())
@@ -745,22 +740,21 @@ bool CcNode::OnSnapshotReceived(const remote::OnSnapshotSyncedRequest *req)
     }
 
     bool succ = local_cc_shards_.store_hd_->OnSnapshotReceived(req);
-    DLOG(INFO) << "OnSnapshotReceived completed for ng#" << ng_id_
-               << ", standby_term=" << req->standby_node_term()
-               << ", success=" << succ;
     if (succ)
     {
         int64_t standby_term = req->standby_node_term();
+        uint32_t ng_id = req->ng_id();
+        assert(ng_id == ng_id_);
         Sharder::Instance().SetStandbyNodeTerm(standby_term);
         Sharder::Instance().SetCandidateStandbyNodeTerm(-1);
         LOG(INFO) << "node #" << node_id_
-                  << " is caught up with primary node in ng#" << ng_id_
+                  << " is caught up with primary node in ng#" << ng_id
                   << ", standby_term=" << standby_term;
         // when kv is enabled, and cache replacement is disabled, then load all
         // datas from kv
         if (!txservice_skip_kv && !txservice_enable_cache_replacement)
         {
-            local_cc_shards_.store_hd_->RestoreTxCache(ng_id_, standby_term);
+            local_cc_shards_.store_hd_->RestoreTxCache(ng_id, standby_term);
         }
     }
 

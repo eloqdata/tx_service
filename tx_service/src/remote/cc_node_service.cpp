@@ -1672,6 +1672,15 @@ void CcNodeService::UpdateStandbyCkptTs(
 
     if (Sharder::Instance().GetDataStoreHandler()->IsSharedStorage())
     {
+        auto store_hd = Sharder::Instance().GetLocalCcShards()->store_hd_;
+        const bool has_data_store_write = request->has_data_store_write();
+
+        if (store_hd && has_data_store_write)
+        {
+            store_hd->OnUpdateStandbyCkptTs(request->node_group_id(),
+                                            request->ng_term());
+        }
+
         Sharder::Instance().UpdateNodeGroupCkptTs(
             request->node_group_id(), request->primary_succ_ckpt_ts());
     }

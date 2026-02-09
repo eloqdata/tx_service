@@ -5846,6 +5846,31 @@ void LocalCcShards::FlushData(std::unique_lock<std::mutex> &flush_worker_lk)
         succ = store_hd_->PersistKV(kv_table_names);
     }
 
+    // Record that data was written in DataSyncStatus if flush succeeded.
+    if (succ)
+    {
+        for (auto &[_, entries] : flush_task_entries)
+        {
+            for (auto &entry : entries)
+            {
+                bool has_data =
+                    (entry->data_sync_vec_ &&
+                     !entry->data_sync_vec_->empty()) ||
+                    (entry->archive_vec_ && !entry->archive_vec_->empty()) ||
+                    (entry->mv_base_vec_ && !entry->mv_base_vec_->empty());
+                if (!has_data)
+                {
+                    continue;
+                }
+                if (entry->data_sync_task_ && entry->data_sync_task_->status_ &&
+                    !entry->data_sync_task_->status_->HasDataStoreWrite())
+                {
+                    entry->data_sync_task_->status_->MarkDataStoreWrite();
+                }
+            }
+        }
+    }
+
     std::unordered_set<uint16_t> updated_ckpt_ts_core_ids;
     // Update cce ckpt ts in memory
     if (succ)

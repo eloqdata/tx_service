@@ -209,6 +209,8 @@ void Topology::UpdateDSShardStatus(uint32_t shard_id, DSShardStatus status)
 
 int Topology::GetShardCount() const
 {
+    // deprecated, use GetAllShards().size() instead
+    assert(false);
     return shard_count_;
 }
 
@@ -393,6 +395,15 @@ DSSNode Topology::ParseHostPort(const std::string &host_port) const
     }
 
     return node;
+}
+
+bool Topology::IsSingleNode() const
+{
+    if (shards_.size() == 1)
+    {
+        return shards_.begin()->second.nodes_.size() == 1;
+    }
+    return false;
 }
 
 void DataStoreServiceClusterManager::Initialize(const std::string &local_ip,
@@ -1011,6 +1022,12 @@ DataStoreServiceClusterManager::CreateShardingAlgorithm(
     // if (algorithm == "hash-key")
     return std::make_unique<ShardingAlgorithm>();
     // Add more sharding algorithms here
+}
+
+bool DataStoreServiceClusterManager::IsSingleNode() const
+{
+    std::shared_lock<std::shared_mutex> lk(mutex_);
+    return topology_.IsSingleNode();
 }
 
 }  // namespace EloqDS

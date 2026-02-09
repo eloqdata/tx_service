@@ -314,8 +314,9 @@ message StandbyStartFollowingResponse
 message UpdateStandbyCkptTsRequest
 {
     uint32 node_group_id = 1;
-    int64 ng_term  =2;
+    int64 ng_term  = 2;
     uint64 primary_succ_ckpt_ts = 3;
+    bool has_data_store_write = 4;
 }
 
 message UpdateStandbyCkptTsResponse
@@ -369,6 +370,7 @@ message StorageSnapshotSyncResponse {
 message OnSnapshotSyncedRequest {
     int64 standby_node_term = 1;
     string snapshot_path = 2;
+    uint32 ng_id = 3;
 }
 
 message OnSnapshotSyncedResponse {

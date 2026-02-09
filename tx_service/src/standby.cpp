@@ -63,7 +63,8 @@ void StandbyForwardEntry::AddOverWriteCommand(TxCommand *cmd)
 
 void BrocastPrimaryCkptTs(NodeGroupId node_group_id,
                           int64_t node_group_term,
-                          uint64_t primary_ckpt_ts)
+                          uint64_t primary_ckpt_ts,
+                          bool has_data_store_write)
 {
     std::vector<uint32_t> subscribe_node_ids;
     WaitableCc get_subscribe_node_ids_cc;
@@ -87,6 +88,8 @@ void BrocastPrimaryCkptTs(NodeGroupId node_group_id,
         update_standby_ckpt_ts_req.set_ng_term(node_group_term);
         update_standby_ckpt_ts_req.set_node_group_id(node_group_id);
         update_standby_ckpt_ts_req.set_primary_succ_ckpt_ts(primary_ckpt_ts);
+        update_standby_ckpt_ts_req.set_has_data_store_write(
+            has_data_store_write);
 
         for (uint32_t node_id : subscribe_node_ids)
         {
