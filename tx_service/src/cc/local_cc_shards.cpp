@@ -5981,6 +5981,7 @@ void LocalCcShards::FlushCurrentFlushBuffer()
 Task<void> LocalCcShards::FlushDataCoro(TaskScheduler *sched,
                                         std::unique_ptr<FlushDataTask> cur_work)
 {
+    auto start_time = std::chrono::steady_clock::now();
     auto &flush_task_entries = cur_work->flush_task_entries_;
     bool succ = true;
 
@@ -6123,6 +6124,11 @@ Task<void> LocalCcShards::FlushDataCoro(TaskScheduler *sched,
                << " quota: " << data_sync_mem_controller_.FlushMemoryQuota();
 
     PostProcessFlushTaskEntries(flush_task_entries, ckpt_err);
+
+    auto stop_time = std::chrono::steady_clock::now();
+    auto duration = std::chrono::duration_cast<std::chrono::milliseconds>(
+        stop_time - start_time);
+    LOG(INFO) << "FlushDataCoro duration: " << duration.count() << "ms";
     co_return;
 }
 
