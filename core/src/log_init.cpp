@@ -87,12 +87,11 @@ DEFINE_string(
     "s3://{bucket}/{path}, gs://{bucket}/{path}, or "
     "http(s)://{host}:{port}/{bucket}/{path}. "
     "Takes precedence over legacy config if provided.");
-DEFINE_string(
-    txlog_rocksdb_cloud_archive_object_path,
-    "",
-    "S3 object path (prefix) for archiving old log state SST files. "
-    "If not set, defaults to txlog_rocksdb_cloud_object_path + \"_archives\". "
-    "Files will be stored at: {bucket}/{prefix}/{object_path}/{file_name}");
+DEFINE_string(txlog_rocksdb_cloud_archive_object_path,
+              "",
+              "S3 object path (prefix) for archiving old log state SST files. "
+              "If not set, defaults to txlog_rocksdb_cloud_object_path + "
+              "\"_archives\". ");
 DEFINE_uint32(txlog_rocksdb_cloud_archive_move_interval_seconds,
               600,
               "Interval in seconds for Stage 1 purger to move SST files from "
