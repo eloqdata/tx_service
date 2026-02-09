@@ -261,7 +261,6 @@ void SnapshotManager::SyncWithStandby()
                     cntl.set_timeout_ms(1000);
                     remote::OnSnapshotSyncedRequest on_synced_req;
                     remote::OnSnapshotSyncedResponse on_sync_resp;
-                    on_synced_req.set_ng_id(req.ng_id());
                     on_synced_req.set_snapshot_path(req.dest_path());
                     on_synced_req.set_standby_node_term(
                         req.standby_node_term());
