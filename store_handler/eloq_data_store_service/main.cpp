@@ -30,6 +30,7 @@
 #include <cassert>
 #include <cstdint>
 #include <filesystem>
+#include <thread>
 
 #if BRPC_WITH_GLOG
 #include "glog_error_logging.h"
@@ -323,8 +324,9 @@ int main(int argc, char *argv[])
     }
     uint32_t mem_mib =
         meminfo.totalram * meminfo.mem_unit / (1024 * 1024) * 4 / 5;
+    uint32_t unused_core_number = 0;
     EloqDS::EloqStoreConfig eloq_store_config(
-        config_reader, data_path, mem_mib, true);
+        config_reader, data_path, mem_mib, unused_core_number, true);
 
 #ifdef ELOQ_MODULE_ENABLED
     GFLAGS_NAMESPACE::SetCommandLineOption(

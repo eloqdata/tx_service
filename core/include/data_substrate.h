@@ -129,6 +129,7 @@ public:
     {
         std::string data_path;
         uint32_t core_num;
+        bool core_num_auto_config_{false};
         bool enable_heap_defragment;
         bool enable_wal;
         bool enable_data_store;
