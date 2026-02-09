@@ -64,12 +64,6 @@ DEFINE_uint32(txlog_rocksdb_cloud_file_deletion_delay,
 DEFINE_uint32(txlog_rocksdb_cloud_log_retention_days,
               90,
               "The number of days for which logs should be retained");
-DEFINE_uint32(
-    txlog_rocksdb_cloud_log_retention_seconds,
-    0,
-    "The number of seconds for which logs should be retained. If both "
-    "log_retention_days and log_retention_seconds are set, the "
-    "log_retention_seconds will be used.");
 DEFINE_string(txlog_rocksdb_cloud_log_purger_schedule,
               "00:00:01",
               "Time (in regular format: HH:MM:SS) to run log purger daily, "
@@ -93,6 +87,15 @@ DEFINE_string(
     "s3://{bucket}/{path}, gs://{bucket}/{path}, or "
     "http(s)://{host}:{port}/{bucket}/{path}. "
     "Takes precedence over legacy config if provided.");
+DEFINE_string(txlog_rocksdb_cloud_archive_object_path,
+              "",
+              "S3 object path (prefix) for archiving old log state SST files. "
+              "If not set, defaults to txlog_rocksdb_cloud_object_path + "
+              "\"_archives\". ");
+DEFINE_uint32(txlog_rocksdb_cloud_archive_move_interval_seconds,
+              600,
+              "Interval in seconds for Stage 1 purger to move SST files from "
+              "active DB to archive path. Default: 600 (10 minutes).");
 #endif
 #ifdef WITH_CLOUD_AZ_INFO
 DEFINE_string(txlog_rocksdb_cloud_prefer_zone,
@@ -377,14 +380,6 @@ bool DataSubstrate::InitializeLogService(const INIReader &config_reader)
                           "local",
                           "txlog_rocksdb_cloud_log_retention_days",
                           FLAGS_txlog_rocksdb_cloud_log_retention_days);
-            txlog_rocksdb_cloud_config.log_retention_seconds_ =
-                !CheckCommandLineFlagIsDefault(
-                    "txlog_rocksdb_cloud_log_retention_seconds")
-                    ? FLAGS_txlog_rocksdb_cloud_log_retention_seconds
-                    : config_reader.GetInteger(
-                          "local",
-                          "txlog_rocksdb_cloud_log_retention_seconds",
-                          FLAGS_txlog_rocksdb_cloud_log_retention_seconds);
             txlog_rocksdb_cloud_config.sst_file_cache_num_shard_bits_ =
                 !CheckCommandLineFlagIsDefault(
                     "txlog_rocksdb_cloud_sst_file_cache_num_shard_bits")
@@ -471,6 +466,27 @@ bool DataSubstrate::InitializeLogService(const INIReader &config_reader)
                                   : txlog_rocksdb_cloud_config.endpoint_url_)
                           << ")";
             }
+
+            // Archive config
+            txlog_rocksdb_cloud_config.archive_object_path_ =
+                !CheckCommandLineFlagIsDefault(
+                    "txlog_rocksdb_cloud_archive_object_path")
+                    ? FLAGS_txlog_rocksdb_cloud_archive_object_path
+                    : config_reader.Get(
+                          "local",
+                          "txlog_rocksdb_cloud_archive_object_path",
+                          txlog_rocksdb_cloud_config.object_path_ +
+                              "_archives");
+
+            txlog_rocksdb_cloud_config.archive_move_interval_seconds_ =
+                !CheckCommandLineFlagIsDefault(
+                    "txlog_rocksdb_cloud_archive_move_interval_seconds")
+                    ? FLAGS_txlog_rocksdb_cloud_archive_move_interval_seconds
+                    : config_reader.GetInteger(
+                          "local",
+                          "txlog_rocksdb_cloud_archive_move_interval_seconds",
+                          FLAGS_txlog_rocksdb_cloud_archive_move_interval_seconds);
+
             if (core_config_.bootstrap)
             {
                 log_server_ = std::make_unique<::txlog::LogServer>(
