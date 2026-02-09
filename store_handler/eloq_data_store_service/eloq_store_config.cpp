@@ -77,6 +77,9 @@ DEFINE_string(eloq_store_buffer_pool_size,
 DEFINE_string(eloq_store_root_meta_cache_size,
               "1GB",
               "EloqStore RootMeta mappings cache size (global).");
+DEFINE_string(eloq_store_non_page_io_batch_size,
+              "1MB",
+              "EloqStore batch size for non-page direct IO in bytes.");
 DEFINE_uint32(eloq_store_manifest_limit, 8 << 20, "EloqStore manifest limit.");
 DEFINE_uint32(eloq_store_io_queue_size,
               4096,
@@ -87,7 +90,6 @@ DEFINE_uint32(eloq_store_max_inflight_write,
 DEFINE_uint32(eloq_store_max_write_batch_pages,
               32,
               "EloqStore max write batch pages.");
-DEFINE_uint32(eloq_store_buf_ring_size, 1 << 12, "EloqStore buf ring size.");
 DEFINE_uint32(eloq_store_coroutine_stack_size,
               32 * 1024,
               "EloqStore coroutine stack size.");
@@ -124,6 +126,13 @@ DEFINE_uint32(eloq_store_pages_per_file_shift,
               "EloqStore pages per file shift.");
 DEFINE_uint32(eloq_store_overflow_pointers, 16, "EloqStore overflow pointers.");
 DEFINE_bool(eloq_store_data_append_mode, true, "EloqStore data append mode.");
+DEFINE_string(eloq_store_write_buffer_size,
+              "1MB",
+              "EloqStore append-mode write buffer size.");
+DEFINE_double(
+    eloq_store_write_buffer_ratio,
+    0.05,
+    "EloqStore ratio of buffer pool reserved for append-mode write buffers.");
 DEFINE_bool(eloq_store_enable_compression,
             false,
             "EloqStore enable compression.");
@@ -180,6 +189,10 @@ inline std::string_view get_last_two(const std::string_view &str)
 
 inline uint64_t unit_num(const std::string_view &unit_str)
 {
+    if (unit_str == "KB" || unit_str == "kb")
+    {
+        return 1024;
+    }
     if (unit_str == "MB" || unit_str == "mb")
     {
         return 1024 * 1024L;
@@ -214,6 +227,7 @@ inline bool ends_with(const std::string_view &str,
 inline bool is_valid_size(const std::string_view &size_str_v)
 {
     bool is_right_end =
+        ends_with(size_str_v, "KB") || ends_with(size_str_v, "kb") ||
         ends_with(size_str_v, "MB") || ends_with(size_str_v, "mb") ||
         ends_with(size_str_v, "GB") || ends_with(size_str_v, "gb") ||
         ends_with(size_str_v, "TB") || ends_with(size_str_v, "tb");
@@ -429,6 +443,18 @@ EloqStoreConfig::EloqStoreConfig(const INIReader &config_reader,
     eloqstore_configs_.buffer_pool_size =
         buffer_pool_size / eloqstore_configs_.num_threads;
 
+    std::string non_page_io_batch_size_str =
+        !CheckCommandLineFlagIsDefault("eloq_store_non_page_io_batch_size")
+            ? FLAGS_eloq_store_non_page_io_batch_size
+            : config_reader.GetString("store",
+                                      "eloq_store_non_page_io_batch_size",
+                                      FLAGS_eloq_store_non_page_io_batch_size);
+    if (!non_page_io_batch_size_str.empty())
+    {
+        eloqstore_configs_.non_page_io_batch_size =
+            parse_size(non_page_io_batch_size_str);
+    }
+
     eloqstore_configs_.manifest_limit =
         !CheckCommandLineFlagIsDefault("eloq_store_manifest_limit")
             ? FLAGS_eloq_store_manifest_limit
@@ -455,12 +481,6 @@ EloqStoreConfig::EloqStoreConfig(const INIReader &config_reader,
             : config_reader.GetInteger("store",
                                        "eloq_store_max_write_batch_pages",
                                        FLAGS_eloq_store_max_write_batch_pages);
-    eloqstore_configs_.buf_ring_size =
-        !CheckCommandLineFlagIsDefault("eloq_store_buf_ring_size")
-            ? FLAGS_eloq_store_buf_ring_size
-            : config_reader.GetInteger("store",
-                                       "eloq_store_buf_ring_size",
-                                       FLAGS_eloq_store_buf_ring_size);
     eloqstore_configs_.coroutine_stack_size =
         !CheckCommandLineFlagIsDefault("eloq_store_coroutine_stack_size")
             ? FLAGS_eloq_store_coroutine_stack_size
@@ -546,6 +566,19 @@ EloqStoreConfig::EloqStoreConfig(const INIReader &config_reader,
             : config_reader.GetBoolean("store",
                                        "eloq_store_data_append_mode",
                                        FLAGS_eloq_store_data_append_mode);
+    std::string write_buffer_size_str =
+        !CheckCommandLineFlagIsDefault("eloq_store_write_buffer_size")
+            ? FLAGS_eloq_store_write_buffer_size
+            : config_reader.GetString("store",
+                                      "eloq_store_write_buffer_size",
+                                      FLAGS_eloq_store_write_buffer_size);
+    eloqstore_configs_.write_buffer_size = parse_size(write_buffer_size_str);
+    eloqstore_configs_.write_buffer_ratio =
+        !CheckCommandLineFlagIsDefault("eloq_store_write_buffer_ratio")
+            ? FLAGS_eloq_store_write_buffer_ratio
+            : config_reader.GetReal("store",
+                                    "eloq_store_write_buffer_ratio",
+                                    FLAGS_eloq_store_write_buffer_ratio);
     eloqstore_configs_.enable_compression =
         !CheckCommandLineFlagIsDefault("eloq_store_enable_compression")
             ? FLAGS_eloq_store_enable_compression
