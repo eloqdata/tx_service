@@ -262,9 +262,8 @@ void FaultInject::InjectFault(std::string fault_name, std::string paras)
     if (fault_name == "override_log_retention_seconds")
     {
         txlog::FaultInject::Instance().InjectFault(fault_name, paras);
+        return;
     }
-
-    return;
 #endif
 
     // To remove the pointed fault inject.
