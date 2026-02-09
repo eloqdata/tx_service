@@ -5891,16 +5891,17 @@ size_t LocalCcShards::DataSyncWorkerToFlushDataWorker(
 
 void LocalCcShards::AddFlushTaskEntry(std::unique_ptr<FlushTaskEntry> &&entry)
 {
-    // assert(cur_flush_buffers_.size() ==
-    //        static_cast<size_t>(flush_data_worker_ctx_.worker_num_));
+    assert(cur_flush_buffers_.size() ==
+           static_cast<size_t>(data_sync_worker_ctx_.worker_num_));
     assert(pending_flush_work_.size() ==
            static_cast<size_t>(flush_data_worker_ctx_.worker_num_));
     assert(entry->data_sync_task_ != nullptr);
 
     // Compute target buffer/queue: map data_sync task id to fixed flush worker
     const auto &data_sync_task = entry->data_sync_task_;
-    size_t target = DataSyncWorkerToFlushDataWorker(static_cast<size_t>(
-        data_sync_task->id_ % data_sync_worker_ctx_.worker_num_));
+    size_t flush_worker_idx =
+        DataSyncWorkerToFlushDataWorker(static_cast<size_t>(
+            data_sync_task->id_ % data_sync_worker_ctx_.worker_num_));
 
     std::unique_lock<std::mutex> worker_lk(flush_data_worker_ctx_.mux_);
     auto &cur_flush_buffer =
@@ -5913,7 +5914,7 @@ void LocalCcShards::AddFlushTaskEntry(std::unique_ptr<FlushTaskEntry> &&entry)
         cur_flush_buffer.MoveFlushData(false);
     if (flush_data_task != nullptr)
     {
-        auto &pending_flush_work = pending_flush_work_[target];
+        auto &pending_flush_work = pending_flush_work_[flush_worker_idx];
 
         // Try to merge with the last task if queue is not empty
         if (!pending_flush_work.empty())
@@ -5943,7 +5944,7 @@ void LocalCcShards::AddFlushTaskEntry(std::unique_ptr<FlushTaskEntry> &&entry)
 
 void LocalCcShards::FlushCurrentFlushBuffer()
 {
-    // assert(cur_flush_buffers_.size() == flush_data_worker_ctx_.worker_num_);
+    assert(cur_flush_buffers_.size() == data_sync_worker_ctx_.worker_num_);
     assert(pending_flush_work_.size() == flush_data_worker_ctx_.worker_num_);
 
     std::unique_lock<std::mutex> worker_lk(flush_data_worker_ctx_.mux_);
@@ -6165,7 +6166,6 @@ void LocalCcShards::FlushDataWorker(size_t worker_idx)
     assert(worker_idx < static_cast<size_t>(flush_coro_schedulers_.size()));
 
     auto &pending_flush_work = pending_flush_work_[worker_idx];
-    auto &cur_flush_buffer = *cur_flush_buffers_[worker_idx];
     TaskScheduler *sched = flush_coro_schedulers_[worker_idx].get();
 
     using clock = std::chrono::steady_clock;
@@ -6190,7 +6190,6 @@ void LocalCcShards::FlushDataWorker(size_t worker_idx)
             10s,
             [this,
              &pending_flush_work,
-             &cur_flush_buffer,
              &previous_flush_size,
              &previous_size_update_time,
              sched]
@@ -6209,42 +6208,57 @@ void LocalCcShards::FlushDataWorker(size_t worker_idx)
                 auto current_time = std::chrono::steady_clock::now();
                 if (current_time - previous_size_update_time > 10s)
                 {
-                    size_t current_flush_size =
-                        cur_flush_buffer.GetPendingFlushSize();
-                    bool flush_size_changed =
-                        current_flush_size != previous_flush_size;
-                    previous_flush_size = current_flush_size;
-                    previous_size_update_time = current_time;
-                    if (!flush_size_changed && current_flush_size > 0)
+                    for (int data_sync_worker_idx = 0;
+                         data_sync_worker_idx <
+                         data_sync_worker_ctx_.worker_num_;
+                         data_sync_worker_idx++)
                     {
-                        // data sync might be stuck due to lock conflict with
-                        // DDL. Flush current flush buffer to release catalog
-                        // read lock held by ongoing data sync tx, which might
-                        // block the DDL.
-                        std::unique_ptr<FlushDataTask> flush_data_task =
-                            cur_flush_buffer.MoveFlushData(true);
-                        if (flush_data_task != nullptr)
+                        if (DataSyncWorkerToFlushDataWorker(
+                                data_sync_worker_idx) != worker_idx)
                         {
-                            // Try to merge with the last task if queue is not
-                            // empty Note: flush_worker_lk is already held here
-                            // (inside condition variable predicate)
-                            if (!pending_flush_work.empty())
-                            {
-                                auto &last_task = pending_flush_work.back();
-                                if (last_task->MergeFrom(
-                                        std::move(flush_data_task)))
-                                {
-                                    // Merge successful, task was merged into
-                                    // last_task
-                                    return true;
-                                }
-                            }
+                            continue;
+                        }
+                        auto &cur_flush_buffer =
+                            *cur_flush_buffers_[data_sync_worker_idx];
 
-                            // Add as new task. We just checked that
-                            // pending_flush_work is empty,
-                            pending_flush_work.emplace_back(
-                                std::move(flush_data_task));
-                            return true;
+                        size_t current_flush_size =
+                            cur_flush_buffer.GetPendingFlushSize();
+                        bool flush_size_changed =
+                            current_flush_size != previous_flush_size;
+                        previous_flush_size = current_flush_size;
+                        previous_size_update_time = current_time;
+                        if (!flush_size_changed && current_flush_size > 0)
+                        {
+                            // data sync might be stuck due to lock conflict
+                            // with DDL. Flush current flush buffer to release
+                            // catalog read lock held by ongoing data sync tx,
+                            // which might block the DDL.
+                            std::unique_ptr<FlushDataTask> flush_data_task =
+                                cur_flush_buffer.MoveFlushData(true);
+                            if (flush_data_task != nullptr)
+                            {
+                                // Try to merge with the last task if queue is
+                                // not empty Note: flush_worker_lk is already
+                                // held here (inside condition variable
+                                // predicate)
+                                if (!pending_flush_work.empty())
+                                {
+                                    auto &last_task = pending_flush_work.back();
+                                    if (last_task->MergeFrom(
+                                            std::move(flush_data_task)))
+                                    {
+                                        // Merge successful, task was merged
+                                        // into last_task
+                                        return true;
+                                    }
+                                }
+
+                                // Add as new task. We just checked that
+                                // pending_flush_work is empty,
+                                pending_flush_work.emplace_back(
+                                    std::move(flush_data_task));
+                                return true;
+                            }
                         }
                     }
                 }
