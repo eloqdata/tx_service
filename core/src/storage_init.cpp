@@ -299,10 +299,10 @@ bool DataSubstrate::InitializeStorageHandler(const INIReader &config_reader)
     if (core_config_.core_num != original_core_num)
     {
         auto adjusted_core_num = std::to_string(core_config_.core_num);
-        GFLAGS_NAMESPACE::SetCommandLineOption(
-            "bthread_concurrency", adjusted_core_num.c_str());
+        GFLAGS_NAMESPACE::SetCommandLineOption("bthread_concurrency",
+                                               adjusted_core_num.c_str());
         GFLAGS_NAMESPACE::SetCommandLineOption("eloq_store_worker_num",
-                                              adjusted_core_num.c_str());
+                                               adjusted_core_num.c_str());
     }
     auto ds_factory = std::make_unique<EloqDS::EloqStoreDataStoreFactory>(
         std::move(eloq_store_config));
