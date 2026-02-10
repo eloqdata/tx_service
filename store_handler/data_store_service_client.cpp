@@ -622,6 +622,9 @@ void DataStoreServiceClient::FetchTableCatalog(
     fetch_cc->kv_key_ = txservice::KvTablePrefixOf(ccm_table_name.Engine());
     fetch_cc->kv_key_.append(ccm_table_name.StringView());
 
+    LOG(INFO) << "yf: fetch table catalog, table name = "
+              << ccm_table_name.StringView();
+
     Read(kv_table_catalogs_name,
          kv_partition_id,
          shard_id,

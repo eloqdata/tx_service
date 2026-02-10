@@ -437,6 +437,7 @@ void FetchTableCatalogCallback(void *data,
                                DataStoreServiceClient &client,
                                const remote::CommonResult &result)
 {
+    LOG(INFO) << "yf: fetch catalog finished";
     auto *read_closure = static_cast<ReadClosure *>(closure);
 
     auto *fetch_cc = static_cast<txservice::FetchCatalogCc *>(data);
