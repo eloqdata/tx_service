@@ -470,7 +470,8 @@ void CcShard::CheckAndTriggerCkptByDirtyMemory()
     bool ratio_exceeded = dirty_memory_ratio > FLAGS_dirty_memory_ratio_threshold;
     bool size_exceeded = dirty_memory > size_threshold;
 
-    if (ratio_exceeded || size_exceeded)
+    // Trigger checkpoint only when BOTH thresholds are exceeded
+    if (ratio_exceeded && size_exceeded)
     {
         DLOG(INFO) << "Shard " << core_id_
                    << " triggering checkpoint - dirty_memory_ratio=" << std::fixed
