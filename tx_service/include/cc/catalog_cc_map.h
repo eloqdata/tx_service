@@ -1178,6 +1178,8 @@ public:
         CcEntry<CatalogKey, CatalogRecord, true, false> *cce = it->second;
         if (cce->PayloadStatus() == RecordStatus::Unknown)
         {
+            LOG(INFO) << "yf: catalogccmap, getcatalog, table name = "
+                      << table_key->Name().StringView();
             const CatalogEntry *catalog_entry =
                 shard_->GetCatalog(table_key->Name(), req.NodeGroupId());
 
@@ -1216,15 +1218,24 @@ public:
                         catalog_entry->schema_version_);
                     cce->SetCommitTsPayloadStatus(
                         catalog_entry->schema_version_, RecordStatus::Normal);
+
+                    LOG(INFO) << "yf: catalogccmap: set commit ts payload "
+                                 "status, table name = "
+                              << table_key->Name().StringView();
                 }
                 else
                 {
                     cce->SetCommitTsPayloadStatus(
                         catalog_entry->schema_version_, RecordStatus::Deleted);
+                    LOG(INFO) << "yf: catalogccmap: set commit ts payload "
+                                 "status to deleted, table name = "
+                              << table_key->Name().StringView();
                 }
             }
             else
             {
+                LOG(INFO) << "yf: catalogccmap, fetchcatalog, table name = "
+                          << table_key->Name().StringView();
                 shard_->FetchCatalog(
                     table_key->Name(), req.NodeGroupId(), ng_term, &req);
                 return false;
@@ -1245,6 +1256,7 @@ public:
         // writer and no pending dirty schema. The control block provides a fast
         // path for runtime to keep a cache of the schema and to coordinate
         // modifications of the schema.
+        LOG(INFO) << "yf: start set schema cntl";
         if (success && shard_->IsNative(ng_id) &&
             result.rec_status_ == RecordStatus::Normal &&
             sch_rec->DirtySchema() == nullptr)
