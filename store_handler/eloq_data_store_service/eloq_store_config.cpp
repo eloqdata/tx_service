@@ -21,6 +21,7 @@
  */
 #include "eloq_store_config.h"
 
+#include <algorithm>
 #include <cassert>
 #include <filesystem>
 #include <regex>
@@ -266,6 +267,8 @@ inline uint64_t parse_size(const std::string &size_str)
 EloqStoreConfig::EloqStoreConfig(const INIReader &config_reader,
                                  const std::string_view base_data_path,
                                  uint32_t &node_memory_mb,
+                                 uint32_t &core_number,
+                                 bool core_number_auto_config,
                                  bool standalone)
 {
     eloqstore_configs_.num_threads =
@@ -597,12 +600,43 @@ EloqStoreConfig::EloqStoreConfig(const INIReader &config_reader,
             : config_reader.GetInteger("store",
                                        "eloq_store_max_cloud_concurrency",
                                        FLAGS_eloq_store_max_cloud_concurrency);
-    eloqstore_configs_.cloud_request_threads =
-        !CheckCommandLineFlagIsDefault("eloq_store_cloud_request_threads")
-            ? FLAGS_eloq_store_cloud_request_threads
-            : config_reader.GetInteger("store",
-                                       "eloq_store_cloud_request_threads",
-                                       FLAGS_eloq_store_cloud_request_threads);
+    if (!eloqstore_configs_.cloud_store_path.empty())
+    {
+        if (CheckCommandLineFlagIsDefault("eloq_store_cloud_request_threads"))
+        {
+            if (config_reader.HasValue("store",
+                                       "eloq_store_cloud_request_threads"))
+            {
+                eloqstore_configs_.cloud_request_threads =
+                    config_reader.GetInteger(
+                        "store", "eloq_store_cloud_request_threads", 0);
+            }
+            else
+            {
+                eloqstore_configs_.cloud_request_threads =
+                    std::max<size_t>(1, core_number / 4);
+            }
+        }
+        else
+        {
+            eloqstore_configs_.cloud_request_threads =
+                FLAGS_eloq_store_cloud_request_threads;
+        }
+        if (core_number_auto_config &&
+            eloqstore_configs_.cloud_request_threads > 0)
+        {
+            // reserve cpu for eloqstore curl thread (always at least one)
+            auto reserved_cpu = std::max<size_t>(
+                1, (eloqstore_configs_.cloud_request_threads + 2) / 3);
+            if (core_number > 1)
+            {
+                auto decrease = std::min<size_t>(reserved_cpu, core_number - 1);
+                core_number -= decrease;
+                LOG(INFO) << "decrease core_number to " << core_number
+                          << " to reserve cpu for eloqstore threads.";
+            }
+        }
+    }
 }
 
 void EloqStoreConfig::ParseStoragePath(

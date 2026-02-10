@@ -34,6 +34,8 @@ public:
     EloqStoreConfig(const INIReader &config_reader,
                     const std::string_view base_data_path,
                     uint32_t &node_memory_mb,
+                    uint32_t &core_number,
+                    bool core_number_auto_config,
                     bool standalone = false);
 
     EloqStoreConfig(const EloqStoreConfig &rhs) = delete;

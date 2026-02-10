@@ -722,6 +722,7 @@ bool DataSubstrate::LoadCoreAndNetworkConfig(const INIReader &config_reader)
                 return false;
             }
             core_config_.core_num = std::max(1u, (NUM_VCPU * 9) / 10);
+            core_config_.core_num_auto_config_ = true;
             LOG(INFO) << "config is automatically set: " << field_core << "="
                       << core_config_.core_num << ", vcpu=" << NUM_VCPU;
         }
