@@ -3706,6 +3706,9 @@ bool DataStoreServiceClient::OnLeaderStart(uint32_t ng_id,
 
     if (data_store_service_ != nullptr)
     {
+        // If the node is standby, close the data store opened before.
+        data_store_service_->CloseDataStore(ng_id);
+
         std::unordered_set<uint16_t> bucket_ids;
         for (auto &[bucket_id, bucket_info] : bucket_infos_)
         {

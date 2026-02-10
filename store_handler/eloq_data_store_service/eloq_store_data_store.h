@@ -251,6 +251,8 @@ public:
 
     void CreateSnapshotForBackup(CreateSnapshotForBackupRequest *req) override;
 
+    void ReloadDataFromCloud(int64_t term) override;
+
 private:
     static void OnRead(::eloqstore::KvRequest *req);
     static void OnBatchWrite(::eloqstore::KvRequest *req);

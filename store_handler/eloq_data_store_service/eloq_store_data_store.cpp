@@ -874,4 +874,21 @@ void EloqStoreDataStore::OnFloor(::eloqstore::KvRequest *req)
     ds_scan_req->SetFinish(::EloqDS::remote::DataStoreError::NO_ERROR);
 }
 
+void EloqStoreDataStore::ReloadDataFromCloud(int64_t term)
+{
+    // TODO(lzx): implement this for eloqstore data store.
+    LOG(INFO) << "EloqStoreDataStore::ReloadDataFromCloud, term: " << term;
+    if (eloq_store_service_->Term() != term)
+    {
+        LOG(ERROR) << "EloqStoreDataStore::ReloadDataFromCloud, term mismatch, "
+                      "expected: "
+                   << term << ", actual: " << eloq_store_service_->Term();
+        return;
+    }
+    // eloq_store_service_->ReOpen(term);
+
+    assert(false);
+    return;
+}
+
 }  // namespace EloqDS
