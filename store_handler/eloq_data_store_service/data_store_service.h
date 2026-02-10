@@ -34,7 +34,6 @@
 #include <set>
 #include <shared_mutex>
 #include <string>
-#include <thread>
 #include <unordered_map>
 #include <unordered_set>
 #include <utility>
@@ -651,38 +650,30 @@ public:
                DSShardStatus::Closed;
     }
 
+    bool IsCloudMode() const
+    {
+        return data_store_factory_->IsCloudMode();
+    }
+
     void CloseDataStore(uint32_t shard_id);
     void OpenDataStore(uint32_t shard_id,
                        std::unordered_set<uint16_t> &&bucket_ids,
                        int64_t term = 0);
+    // When the standby node receives the snapshot from the primary node (local
+    // mode) or primary node flush data to cloud (cloud mode), it will call this
+    // function to reload the snapshot or sync from cloud.
+    void OnSnapshotReceived(uint32_t shard_id,
+                            int64_t term,
+                            std::unordered_set<uint16_t> &&bucket_ids,
+                            const std::string &snapshot_path);
+    // When primary flush data to cloud, the standby node will call this
+    // function to sync the data from cloud.
+    void StandbyReloadData(uint32_t shard_id, int64_t ng_term);
 
     DataStoreServiceClusterManager &GetClusterManager()
     {
         return cluster_manager_;
     }
-
-#if defined(DATA_STORE_TYPE_ELOQDSS_ELOQSTORE)
-    /**
-     * @brief Start prewarm operations for standby node
-     * Creates ReadOnly EloqStoreDataStore and starts periodic timer
-     * Only available for EloqStore data store type
-     * @param shard_id Shard ID for the prewarm instance
-     * @param bucket_ids Bucket IDs owned by this node group
-     * @param term Current term
-     * @return true if successful, false otherwise
-     */
-    bool StartPrewarmOperation(uint32_t shard_id,
-                               std::unordered_set<uint16_t> &&bucket_ids,
-                               int64_t term);
-
-    /**
-     * @brief Stop prewarm operations
-     * Stops periodic timer and destroys prewarm data store
-     * Only available for EloqStore data store type
-     * @param shard_id Shard ID for the prewarm instance
-     */
-    void StopPrewarmOperation(uint32_t shard_id);
-#endif
 
 private:
     DataStore *GetDataStore(uint32_t shard_id)
@@ -769,47 +760,6 @@ private:
     // Now, only for update client's config
     std::function<void(DataStoreServiceClusterManager &)>
         update_config_listener_;
-
-#if defined(DATA_STORE_TYPE_ELOQDSS_ELOQSTORE)
-    /**
-     * @brief ReadOnly EloqStoreDataStore instance for prewarm operations
-     * Only created in cloud storage mode for standby nodes
-     */
-    std::unique_ptr<DataStore> prewarm_data_store_{nullptr};
-
-    /**
-     * @brief Worker thread for periodic prewarm operations
-     */
-    std::thread prewarm_timer_thread_;
-
-    /**
-     * @brief Flag to signal the timer thread to stop
-     */
-    std::atomic<bool> prewarm_timer_stop_{false};
-
-    /**
-     * @brief Worker function for periodic prewarm
-     * @param interval_sec Prewarm interval in seconds (obtained from
-     * cluster_manager)
-     */
-    void PrewarmTimerWorker(uint32_t interval_sec);
-
-    /**
-     * @brief Create and start ReadOnly EloqStoreDataStore for prewarm
-     * @param shard_id Shard ID for the prewarm instance
-     * @param bucket_ids Bucket IDs owned by this node group
-     * @param term Current term
-     * @return true if successful, false otherwise
-     */
-    bool CreatePrewarmDataStore(uint32_t shard_id,
-                                std::unordered_set<uint16_t> &&bucket_ids,
-                                int64_t term);
-
-    /**
-     * @brief Shutdown and destroy prewarm data store
-     */
-    void DestroyPrewarmDataStore();
-#endif
 
 private:
     struct MigrateLog
