@@ -860,6 +860,9 @@ void FetchTableRangesCallback(void *data,
                 fetch_range_cc->kv_end_key_ = fetch_range_cc->kv_start_key_;
                 fetch_range_cc->kv_end_key_.back()++;
                 fetch_range_cc->kv_session_id_.clear();
+
+                LOG(INFO) << "yf: FetchTableRanges callback, table name = "
+                          << fetch_range_cc->table_name_.StringView();
                 client.ScanNext(kv_range_table_name,
                                 fetch_range_cc->kv_partition_id_,
                                 data_shard_id,
@@ -897,6 +900,10 @@ void FetchTableRangesCallback(void *data,
                     fetch_range_cc->kv_partition_id_, std::move(range_vec));
 
                 fetch_range_cc->Merge();
+
+                LOG(INFO) << "yf: FetchTableRanges callback, table name = "
+                          << fetch_range_cc->table_name_.StringView()
+                          << ", finished";
                 fetch_range_cc->SetFinish(0);
             }
         }

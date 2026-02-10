@@ -977,6 +977,9 @@ void DataStoreServiceClient::FetchTableRanges(
 
     fetch_cc->partition_ranges_vec_.resize(TotalRangeSlicesKvPartitions());
 
+    LOG(INFO) << "yf: FetchTableRanges client, table name = "
+              << fetch_cc->table_name_.StringView();
+
     ScanNext(kv_range_table_name,
              fetch_cc->kv_partition_id_,
              data_shard_id,

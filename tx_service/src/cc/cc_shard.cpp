@@ -1396,6 +1396,7 @@ void CcShard::FetchTableStatistics(const TableName &table_name,
                                    int64_t cc_ng_term,
                                    CcRequestBase *requester)
 {
+    LOG(INFO) << "yf: ccshard, fetch table stat";
     FetchTableStatisticsCc *fetch_req = nullptr;
     auto tab_it = fetch_reqs_.find(table_name);
     if (tab_it != fetch_reqs_.end())
@@ -1537,6 +1538,8 @@ const StatisticsEntry *CcShard::LoadRangesAndStatisticsNx(
     int64_t cc_ng_term,
     CcRequestBase *requester)
 {
+    LOG(INFO) << "yf: LoadRangeAndStatisticsNx, table name = "
+              << curr_schema->GetBaseTableName().StringView();
     const StatisticsEntry *statistics_entry =
         GetTableStatistics(curr_schema->GetBaseTableName(), cc_ng_id);
     if (statistics_entry)
@@ -1556,6 +1559,8 @@ const StatisticsEntry *CcShard::LoadRangesAndStatisticsNx(
         GetTableRangesForATable(base_range_table_name, cc_ng_id);
     if (ranges == nullptr)
     {
+        LOG(INFO) << "yf: FetchTableRanges, table name = "
+                  << base_range_table_name.StringView();
         FetchTableRanges(
             base_range_table_name, requester, cc_ng_id, cc_ng_term);
         return nullptr;
@@ -1581,6 +1586,8 @@ const StatisticsEntry *CcShard::LoadRangesAndStatisticsNx(
         GetTableStatistics(curr_schema->GetBaseTableName(), cc_ng_id);
     if (statistics_entry == nullptr)
     {
+        LOG(INFO) << "yf: FetchTableStatistics, table name = "
+                  << curr_schema->GetBaseTableName().StringView();
         FetchTableStatistics(
             curr_schema->GetBaseTableName(), cc_ng_id, cc_ng_term, requester);
         return nullptr;
