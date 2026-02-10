@@ -754,8 +754,31 @@ void FetchTableRangesCallback(void *data,
         DLOG(INFO) << "FetchTableRangesCallback, error_code:" << err_code
                    << ", error_msg: " << result.error_msg();
 
-        fetch_range_cc->SetFinish(
-            static_cast<int>(txservice::CcErrorCode::DATA_STORE_ERR));
+        // Mark this partition as completed with error and only call SetFinish
+        // after all partitions have completed (success or error).
+        const int32_t kv_part_id = scan_next_closure->PartitionId();
+        (void) kv_part_id;  // currently unused, but kept for symmetry.
+
+        int32_t remaining = 0;
+        int error_code = 0;
+        {
+            // Record the first error code and update remaining_partitions_
+            // in a threadsafe manner.
+            std::unique_lock<bthread::Mutex> lk(fetch_range_cc->finish_mux_);
+            if (fetch_range_cc->error_code_ == 0)
+            {
+                fetch_range_cc->error_code_ =
+                    static_cast<int>(txservice::CcErrorCode::DATA_STORE_ERR);
+            }
+
+            remaining = --fetch_range_cc->remaining_partitions_;
+            error_code = fetch_range_cc->error_code_;
+        }
+        if (remaining == 0)
+        {
+            // release lock before SetFinish
+            fetch_range_cc->SetFinish(error_code);
+        }
     }
     else
     {
@@ -840,88 +863,66 @@ void FetchTableRangesCallback(void *data,
 #endif
         heap_lk.unlock();
 
+        const int32_t kv_part_id = scan_next_closure->PartitionId();
+        fetch_range_cc->AppendTableRanges(kv_part_id, std::move(range_vec));
+
         if (items_size < scan_next_closure->BatchSize())
         {
-            // Has no more data, notify.
-            if (static_cast<uint32_t>(fetch_range_cc->kv_partition_id_) + 1 <
-                client.TotalRangeSlicesKvPartitions())
+            // This KV partition has no more data.
+            int32_t remaining = 0;
+            int error_code = 0;
             {
-                fetch_range_cc->AppendTableRanges(
-                    fetch_range_cc->kv_partition_id_, std::move(range_vec));
-
-                fetch_range_cc->kv_partition_id_++;
-                uint32_t data_shard_id = client.GetShardIdByPartitionId(
-                    fetch_range_cc->kv_partition_id_, false);
-
-                fetch_range_cc->kv_start_key_.clear();
-                fetch_range_cc->kv_start_key_.append(
-                    fetch_range_cc->table_name_.StringView());
-                fetch_range_cc->kv_start_key_.append(KEY_SEPARATOR);
-                fetch_range_cc->kv_end_key_ = fetch_range_cc->kv_start_key_;
-                fetch_range_cc->kv_end_key_.back()++;
-                fetch_range_cc->kv_session_id_.clear();
-
-                LOG(INFO) << "yf: FetchTableRanges callback, table name = "
-                          << fetch_range_cc->table_name_.StringView();
-                client.ScanNext(kv_range_table_name,
-                                fetch_range_cc->kv_partition_id_,
-                                data_shard_id,
-                                fetch_range_cc->kv_start_key_,
-                                fetch_range_cc->kv_end_key_,
-                                fetch_range_cc->kv_session_id_,
-                                true,
-                                true,
-                                false,
-                                true,
-                                100,
-                                nullptr,
-                                fetch_range_cc,
-                                &FetchTableRangesCallback);
+                std::unique_lock<bthread::Mutex> lk(
+                    fetch_range_cc->finish_mux_);
+                remaining = --fetch_range_cc->remaining_partitions_;
+                error_code = fetch_range_cc->error_code_;
+                if (remaining > 0)
+                {
+                    // not the last partition, nothing more to do
+                    return;
+                }
             }
-            else
-            {
-                assert(static_cast<size_t>(fetch_range_cc->kv_partition_id_) +
-                           1 ==
-                       client.TotalRangeSlicesKvPartitions());
 
+            // All partitions completed (remaining == 0).
+            if (fetch_range_cc->EmptyRanges())
+            {
                 // When ddl_skip_kv_ is enabled and the range entry is not
                 // physically ready, initializes the original range from
                 // negative infinity to positive infinity.
-                if (range_vec.empty() && fetch_range_cc->EmptyRanges())
-                {
-                    range_vec.emplace_back(
-                        catalog_factory->NegativeInfKey(),
-                        txservice::Sequences::InitialRangePartitionIdOf(
-                            fetch_range_cc->table_name_),
-                        1);
-                }
-
-                fetch_range_cc->AppendTableRanges(
-                    fetch_range_cc->kv_partition_id_, std::move(range_vec));
-
-                fetch_range_cc->Merge();
-
-                LOG(INFO) << "yf: FetchTableRanges callback, table name = "
-                          << fetch_range_cc->table_name_.StringView()
-                          << ", finished";
-                fetch_range_cc->SetFinish(0);
+                std::vector<txservice::InitRangeEntry> default_ranges;
+                default_ranges.emplace_back(
+                    catalog_factory->NegativeInfKey(),
+                    txservice::Sequences::InitialRangePartitionIdOf(
+                        fetch_range_cc->table_name_),
+                    1);
+                // Use kv_part_id 0 for the synthetic default range bucket.
+                fetch_range_cc->AppendTableRanges(0, std::move(default_ranges));
             }
+
+            fetch_range_cc->Merge();
+
+            LOG(INFO) << "yf: FetchTableRanges callback, table name = "
+                      << fetch_range_cc->table_name_.StringView()
+                      << ", finished";
+
+            fetch_range_cc->SetFinish(error_code);
         }
         else
         {
-            // has more data, continue to scan.
-            fetch_range_cc->kv_session_id_ = scan_next_closure->SessionId();
-            fetch_range_cc->kv_start_key_.clear();
-            fetch_range_cc->kv_start_key_.append(key);
-            fetch_range_cc->AppendTableRanges(fetch_range_cc->kv_partition_id_,
-                                              std::move(range_vec));
+            // This KV partition still has more data, continue scanning it.
+            auto &scan_state =
+                fetch_range_cc->partition_scan_states_.at(kv_part_id);
+
+            scan_state.kv_session_id_ = scan_next_closure->SessionId();
+            scan_state.kv_start_key_.clear();
+            scan_state.kv_start_key_.append(key);
 
             client.ScanNext(kv_range_table_name,
-                            fetch_range_cc->kv_partition_id_,
+                            kv_part_id,
                             scan_next_closure->ShardId(),
-                            fetch_range_cc->kv_start_key_,
-                            fetch_range_cc->kv_end_key_,
-                            fetch_range_cc->kv_session_id_,
+                            scan_state.kv_start_key_,
+                            scan_state.kv_end_key_,
+                            scan_state.kv_session_id_,
                             true,
                             false,
                             false,
