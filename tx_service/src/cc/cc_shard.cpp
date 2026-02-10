@@ -461,7 +461,8 @@ void CcShard::CheckAndTriggerCkptByDirtyMemory()
                              static_cast<double>(data_key_count_);
     uint64_t dirty_memory = static_cast<uint64_t>(allocated * dirty_key_ratio);
 
-    // Determine threshold: use configured value or default to 10% of memory_limit
+    // Determine threshold: use configured value or default to 10% of
+    // memory_limit
     uint64_t threshold;
     if (FLAGS_dirty_memory_size_threshold_mb == 0)
     {
@@ -478,8 +479,8 @@ void CcShard::CheckAndTriggerCkptByDirtyMemory()
     {
         DLOG(INFO) << "Shard " << core_id_
                    << " triggering checkpoint - dirty_memory="
-                   << (dirty_memory / (1024 * 1024)) << "MB (threshold="
-                   << (threshold / (1024 * 1024))
+                   << (dirty_memory / (1024 * 1024))
+                   << "MB (threshold=" << (threshold / (1024 * 1024))
                    << "MB), dirty_keys=" << dirty_data_key_count_ << "/"
                    << data_key_count_;
 
