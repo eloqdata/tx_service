@@ -219,10 +219,12 @@ bool FetchTableStatisticsCc::Execute(CcShard &ccs)
 
             CatalogEntry *catalog_entry =
                 ccs.GetCatalog(table_name_, cc_ng_id_);
+            LOG(INFO) << "yf: fetchtablestatisticscc: init table statistics";
             ccs.InitTableStatistics(catalog_entry->schema_.get(),
                                     catalog_entry->dirty_schema_.get(),
                                     cc_ng_id_,
                                     std::move(sample_pool_map_));
+            LOG(INFO) << "yf: fetchTableStat: init table stat finished";
             for (CcRequestBase *req : requesters_)
             {
                 ccs.Enqueue(ccs.core_id_, req);
