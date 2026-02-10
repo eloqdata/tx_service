@@ -716,8 +716,7 @@ void LocalCcShards::CreateSchemaRecoveryTx(
                                    false,
                                    true,
                                    0,
-                                   false,
-                                   true);
+                                   false);
             txm->Execute(&read_req);
             read_req.Wait();
             if (read_req.IsError())
@@ -820,8 +819,7 @@ void LocalCcShards::CreateSplitRangeRecoveryTx(
                                    false,
                                    true,
                                    0,
-                                   false,
-                                   true);
+                                   false);
             txm->Execute(&read_req);
             read_req.Wait();
             // Only case we fail here is that leader gone before replay
@@ -3201,7 +3199,9 @@ void LocalCcShards::PostProcessFlushTaskEntries(
                         }
 
                         if (!Sharder::Instance().CheckLeaderTerm(
-                                task->node_group_id_, task->node_group_term_))
+                                task->node_group_id_,
+                                task->node_group_term_,
+                                true))
                         {
                             err_code = CcErrorCode::REQUESTED_NODE_NOT_LEADER;
                         }
@@ -3251,7 +3251,9 @@ void LocalCcShards::PostProcessFlushTaskEntries(
             {
                 if (!task->during_split_range_)
                 {
-                    range_entry->UpdateLastDataSyncTS(task->data_sync_ts_);
+                    uint64_t last_sync_ts =
+                        task->run_on_leader_node_ ? task->data_sync_ts_ : 0;
+                    range_entry->UpdateLastDataSyncTS(last_sync_ts);
                     range_entry->UnPinStoreRange();
                     // Commit the data sync txm
                     txservice::CommitTx(entry->data_sync_txm_);
@@ -3287,7 +3289,7 @@ void LocalCcShards::PostProcessFlushTaskEntries(
                 }
 
                 if (!Sharder::Instance().CheckLeaderTerm(
-                        task->node_group_id_, task->node_group_term_))
+                        task->node_group_id_, task->node_group_term_, true))
                 {
                     err_code = CcErrorCode::REQUESTED_NODE_NOT_LEADER;
                 }
@@ -3390,7 +3392,7 @@ void LocalCcShards::PostProcessRangePartitionDataSyncTask(
                            << task->table_name_.Trace() << ", retrying.";
                 std::this_thread::sleep_for(1s);
                 if (!Sharder::Instance().CheckLeaderTerm(
-                        task->node_group_id_, task->node_group_term_))
+                        task->node_group_id_, task->node_group_term_, true))
                 {
                     LOG(ERROR)
                         << "Leader term changed during store slice update";
@@ -3406,7 +3408,9 @@ void LocalCcShards::PostProcessRangePartitionDataSyncTask(
         {
             if (!task->during_split_range_)
             {
-                range_entry->UpdateLastDataSyncTS(task->data_sync_ts_);
+                uint64_t last_sync_ts =
+                    task->run_on_leader_node_ ? task->data_sync_ts_ : 0;
+                range_entry->UpdateLastDataSyncTS(last_sync_ts);
                 range_entry->UnPinStoreRange();
                 // Commit the data sync txm
                 txservice::CommitTx(data_sync_txm);
@@ -3461,8 +3465,8 @@ void LocalCcShards::PostProcessRangePartitionDataSyncTask(
                                task->id_);
             }
 
-            if (!Sharder::Instance().CheckLeaderTerm(task->node_group_id_,
-                                                     task->node_group_term_))
+            if (!Sharder::Instance().CheckLeaderTerm(
+                    task->node_group_id_, task->node_group_term_, true))
             {
                 err_code = CcErrorCode::REQUESTED_NODE_NOT_LEADER;
             }
@@ -3627,6 +3631,7 @@ void LocalCcShards::DataSyncForRangePartition(
             // might miss the data that has not been recovered yet.
             data_sync_task->SetErrorCode(
                 CcErrorCode::REQUESTED_NODE_NOT_LEADER);
+            data_sync_task->SetRunOnLeaderNode(false);
         }
 
         defer_unpin = std::shared_ptr<void>(
@@ -3638,7 +3643,12 @@ void LocalCcShards::DataSyncForRangePartition(
         data_sync_txm = txservice::NewTxInit(tx_service_,
                                              IsolationLevel::RepeatableRead,
                                              CcProtocol::Locking,
-                                             ng_id);
+                                             ng_id,
+                                             -1,
+                                             false,
+                                             nullptr,
+                                             nullptr,
+                                             true);
 
         if (data_sync_txm == nullptr)
         {
@@ -3700,7 +3710,8 @@ void LocalCcShards::DataSyncForRangePartition(
             {
                 LOG(ERROR) << "DataSync add read lock on table failed, "
                               "table name: "
-                           << table_key.Name().StringView();
+                           << table_key.Name().StringView() << ", error code: "
+                           << static_cast<uint32_t>(read_req.ErrorCode());
 
                 // If read lock acquire failed, retry next time.
                 // Put back into the beginning.
@@ -3838,6 +3849,10 @@ void LocalCcShards::DataSyncForRangePartition(
         assert(store_range);
 
         last_sync_ts = is_dirty ? 0 : range_entry->GetLastSyncTs();
+        if (Sharder::Instance().CandidateLeaderTerm(ng_id) > 0)
+        {
+            data_sync_task->SetRunOnLeaderNode(false);
+        }
     }
 
     if (table_name.IsBase())
@@ -3912,7 +3927,10 @@ void LocalCcShards::DataSyncForRangePartition(
             txservice::CommitTx(data_sync_txm);
 
             // Update the task status for this range.
-            range_entry->UpdateLastDataSyncTS(data_sync_task->data_sync_ts_);
+            uint64_t last_sync_ts = data_sync_task->run_on_leader_node_
+                                        ? data_sync_task->data_sync_ts_
+                                        : 0;
+            range_entry->UpdateLastDataSyncTS(last_sync_ts);
             // Generally, the StoreRange will be pinned only when there are data
             // items in the range that needs to be ckpted.
             if (scan_delta_size_cc.StoreRangePtr() != nullptr)
@@ -4069,7 +4087,8 @@ void LocalCcShards::DataSyncForRangePartition(
                                          false,
                                          store_range,
                                          &slices_delta_size,
-                                         schema_version);
+                                         schema_version,
+                                         !data_sync_task->run_on_leader_node_);
 
     {
         // DataSync Worker will call PostProcessDataSyncTask() to decrement
@@ -4468,7 +4487,7 @@ void LocalCcShards::PostProcessHashPartitionDataSyncTask(
                 // Make sure that the term has not changed so that catalog entry
                 // is still valid.
                 if (!Sharder::Instance().CheckLeaderTerm(
-                        task->node_group_id_, task->node_group_term_))
+                        task->node_group_id_, task->node_group_term_, true))
                 {
                     err_code = CcErrorCode::NG_TERM_CHANGED;
                 }
@@ -4492,7 +4511,9 @@ void LocalCcShards::PostProcessHashPartitionDataSyncTask(
                         // term has not changed. catalog entry should not be
                         // nullptr.
                         assert(catalog_entry);
-                        catalog_entry->UpdateLastDataSyncTS(task->data_sync_ts_,
+                        uint64_t last_sync_ts =
+                            task->run_on_leader_node_ ? task->data_sync_ts_ : 0;
+                        catalog_entry->UpdateLastDataSyncTS(last_sync_ts,
                                                             task->id_);
                     }
                 }
@@ -4673,6 +4694,7 @@ void LocalCcShards::DataSyncForHashPartition(
             // might miss the data that has not been recovered yet.
             data_sync_task->SetErrorCode(
                 CcErrorCode::REQUESTED_NODE_NOT_LEADER);
+            data_sync_task->SetRunOnLeaderNode(false);
         }
     }
 
@@ -4698,7 +4720,12 @@ void LocalCcShards::DataSyncForHashPartition(
         txservice::NewTxInit(tx_service_,
                              IsolationLevel::RepeatableRead,
                              CcProtocol::Locking,
-                             ng_id);
+                             ng_id,
+                             -1,
+                             false,
+                             nullptr,
+                             nullptr,
+                             true);
 
     if (data_sync_txm == nullptr)
     {
@@ -5451,6 +5478,19 @@ void LocalCcShards::UpdateSlices(const TableName &table_name,
                 paused_subslice_post_ckpt_size < avg_subslice_size
                     ? paused_subslice_post_ckpt_size
                     : 0;
+            // For very large slices that require multiple rounds of data sync
+            // scan, each round flushes exported keys to storage and updates the
+            // checkpoint timestamp, allowing data to be evicted from memory.
+            // When a scan round finishes, the pinned slice is unpinned. In
+            // subsequent rounds, the slice is re-pinned, triggering a load
+            // operation that updates `StoreSlice::size_` with the flushed keys'
+            // size. This can cause a mismatch with the slice size from previous
+            // batches.
+            if (slice_split_keys.size() > 0 &&
+                slice_split_keys.back().cur_size_ != subslice_size)
+            {
+                subslice_size = slice_split_keys.back().cur_size_;
+            }
         }
         else
         {
@@ -5613,8 +5653,11 @@ void LocalCcShards::SplitFlushRange(
     // by data store are always unique.
     std::vector<std::pair<TxKey, int32_t>> new_range_ids;
     int32_t new_part_id;
-    if (!GetNextRangePartitionId(
-            table_name, table_schema.get(), split_keys.size(), new_part_id))
+    if (!GetNextRangePartitionId(table_name,
+                                 table_schema.get(),
+                                 node_group,
+                                 split_keys.size(),
+                                 new_part_id))
     {
         LOG(ERROR) << "Split range failed due to unable to get next "
                       "partition id. table_name = "
@@ -5691,7 +5734,9 @@ void LocalCcShards::SplitFlushRange(
         return;
     }
 
-    range_entry->UpdateLastDataSyncTS(data_sync_task->data_sync_ts_);
+    uint64_t last_sync_ts =
+        data_sync_task->run_on_leader_node_ ? data_sync_task->data_sync_ts_ : 0;
+    range_entry->UpdateLastDataSyncTS(last_sync_ts);
     range_entry->UnPinStoreRange();
 
     data_sync_task->SetFinish();
@@ -6683,6 +6728,7 @@ void LocalCcShards::ReportHashPartitionCkptHeapUsage()
 
 bool LocalCcShards::GetNextRangePartitionId(const TableName &tablename,
                                             const TableSchema *table_schema,
+                                            NodeGroupId ng_id,
                                             uint32_t range_cnt,
                                             int32_t &out_next_partition_id)
 {
@@ -6698,8 +6744,12 @@ bool LocalCcShards::GetNextRangePartitionId(const TableName &tablename,
     }
 
     int64_t first_reserved_id = -1;
-    bool res = Sequences::ApplyIdOfTableRangePartition(
-        tablename, range_cnt, first_reserved_id, reserved_cnt, key_schema_ts);
+    bool res = Sequences::ApplyIdOfTableRangePartition(tablename,
+                                                       ng_id,
+                                                       range_cnt,
+                                                       first_reserved_id,
+                                                       reserved_cnt,
+                                                       key_schema_ts);
 
     if (!res)
     {

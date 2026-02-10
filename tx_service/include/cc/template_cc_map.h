@@ -199,16 +199,14 @@ public:
         const KeyT *target_key = nullptr;
         KeyT decoded_key;
 
-        int64_t ng_term = Sharder::Instance().LeaderTerm(req.NodeGroupId());
+        int64_t ng_term = req.NodeGroupTerm();
+        assert(ng_term > 0);
         CODE_FAULT_INJECTOR("term_TemplateCcMap_Execute_AcquireCc", {
-            LOG(INFO) << "FaultInject  term_TemplateCcMap_Execute_AcquireCc";
+            LOG(INFO) << "FaultInject term_TemplateCcMap_Execute_AcquireCc";
             ng_term = -1;
-        });
-        if (ng_term < 0)
-        {
             hd_res->SetError(CcErrorCode::REQUESTED_NODE_NOT_LEADER);
             return true;
-        }
+        });
 
         if (req.SchemaVersion() != 0 && req.SchemaVersion() != schema_ts_)
         {
@@ -511,14 +509,7 @@ public:
                 req.Result()->SetError(CcErrorCode::REQUESTED_NODE_NOT_LEADER);
                 return true;
             }
-        });
-
-        if (!Sharder::Instance().CheckLeaderTerm(cce_addr->NodeGroupId(),
-                                                 cce_addr->Term()))
-        {
-            req.Result()->SetError(CcErrorCode::REQUESTED_NODE_NOT_LEADER);
-            return true;
-        }
+        })
 
         const ValueT *commit_val = static_cast<const ValueT *>(req.Payload());
         TxNumber txn = req.Txn();
@@ -702,11 +693,8 @@ public:
         bool will_insert = false;
 
         uint32_t ng_id = req.NodeGroupId();
-        int64_t ng_term = Sharder::Instance().LeaderTerm(ng_id);
-        if (ng_term < 0)
-        {
-            return hd_res->SetError(CcErrorCode::REQUESTED_NODE_NOT_LEADER);
-        }
+        int64_t ng_term = req.NodeGroupTerm();
+        assert(ng_term > 0);
 
         uint16_t tx_core_id = ((req.Txn() >> 32L) & 0x3FF) % shard_->core_cnt_;
 
@@ -996,13 +984,6 @@ public:
             return false;
         }
 
-        int64_t ng_term = Sharder::Instance().LeaderTerm(req.NodeGroupId());
-        if (ng_term < 0)
-        {
-            req.Result()->SetError(CcErrorCode::REQUESTED_NODE_NOT_LEADER);
-            return true;
-        }
-
         const KeyT *target_key = nullptr;
         if (req.Key() != nullptr)
         {
@@ -1241,19 +1222,6 @@ public:
                 }
             });
 
-        int64_t standby_node_term = Sharder::Instance().StandbyNodeTerm();
-
-        if (!Sharder::Instance().CheckLeaderTerm(cce_addr.NodeGroupId(),
-                                                 cce_addr.Term()) &&
-            (standby_node_term < 0 || standby_node_term != cce_addr.Term()))
-        {
-            LOG(INFO) << "PostReadCc, node_group(#" << cce_addr.NodeGroupId()
-                      << ") term < 0, tx:" << req.Txn()
-                      << " ,cce: " << cce_addr.ExtractCce();
-            hd_res->SetError(CcErrorCode::REQUESTED_NODE_NOT_LEADER);
-            return true;
-        }
-
         uint64_t key_ts = req.KeyTs();
         uint64_t gap_ts = req.GapTs();
         uint64_t commit_ts = req.CommitTs();
@@ -1419,15 +1387,20 @@ public:
         });
 
         uint32_t ng_id = req.NodeGroupId();
-        int64_t ng_term = -1;
-        if (req.IsInRecovering())
+        int64_t ng_term = req.NodeGroupTerm();
+        if (ng_term < 0)
         {
-            ng_term = Sharder::Instance().CandidateLeaderTerm(ng_id);
-        }
-        else
-        {
-            ng_term = Sharder::Instance().LeaderTerm(ng_id);
-            ng_term = std::max(ng_term, Sharder::Instance().StandbyNodeTerm());
+            if (req.AllowRunOnCandidate())
+            {
+                ng_term = Sharder::Instance().CandidateLeaderTerm(ng_id);
+            }
+            if (ng_term < 0)
+            {
+                ng_term = Sharder::Instance().LeaderTerm(ng_id);
+                int64_t standby_node_term =
+                    Sharder::Instance().StandbyNodeTerm();
+                ng_term = std::max(ng_term, standby_node_term);
+            }
         }
 
         if (ng_term < 0)
@@ -5756,6 +5729,15 @@ public:
                     // round ckpt.
                     need_export = false;
                 }
+                else if (req.RunOnCandidateNode())
+                {
+                    // If the request is running on candidate node(such as
+                    // during ccnode recovery), during the `DataSync` process,
+                    // there may be some ccentry keys that have just been
+                    // replayed from the log. These keys can simply be skipped
+                    // during this round of datasync.
+                    need_export = false;
+                }
                 else
                 {
                     LOG(ERROR)
@@ -5786,7 +5768,6 @@ public:
 
                 req.accumulated_flush_data_size_[shard_->core_id_] +=
                     flush_size;
-
                 if (export_result.second)
                 {
                     is_scan_mem_full = true;
@@ -5903,15 +5884,6 @@ public:
             return false;
         }
 
-        int64_t ng_term = Sharder::Instance().LeaderTerm(req.NodeGroupId());
-        int64_t standby_node_term = Sharder::Instance().StandbyNodeTerm();
-        int64_t current_term = std::max(ng_term, standby_node_term);
-
-        if (current_term < 0 || current_term != req.node_group_term_)
-        {
-            req.SetError(CcErrorCode::TX_NODE_NOT_LEADER);
-            return false;
-        }
         Iterator it;
         Iterator end_it = End();
 
@@ -6083,6 +6055,10 @@ public:
                             << ", data_sync_ts_: " << req.data_sync_ts_;
                         replay_cmds_notnull = true;
 
+                        int64_t current_term = req.NodeGroupTerm();
+                        assert(current_term > 0);
+                        int64_t leader_term = req.GetNodeGroupLeaderTerm();
+
                         // The fetch record may failed when the
                         // cce is touch at 1st place, so the record status can
                         // be Unknown. If the data is owned by this ng, fetch
@@ -6107,12 +6083,12 @@ public:
                                                     TxKey(key),
                                                     cce,
                                                     cc_ng_id_,
-                                                    ng_term,
+                                                    current_term,
                                                     nullptr,
                                                     part_id);
                             }
                         }
-                        else if (ng_term > 0)
+                        else if (leader_term > 0)
                         {
                             // After node escalate to leader, and we've loaded
                             // from kv, there should be no gap in the buffered

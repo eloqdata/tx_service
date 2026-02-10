@@ -251,8 +251,8 @@ void Checkpointer::Ckpt(bool is_last_ckpt)
         for (auto it = tables.begin(); it != tables.end(); ++it)
         {
             // Check leader term for leader node
-            if (!is_standby_node &&
-                Sharder::Instance().LeaderTerm(node_group) != leader_term)
+            if (!is_standby_node && !Sharder::Instance().CheckLeaderTerm(
+                                        node_group, leader_term, true))
             {
                 break;
             }
@@ -307,7 +307,7 @@ void Checkpointer::Ckpt(bool is_last_ckpt)
 
         // Check leadter term for leader node
         if (!is_standby_node &&
-            Sharder::Instance().LeaderTerm(node_group) != leader_term)
+            !Sharder::Instance().CheckLeaderTerm(node_group, leader_term, true))
         {
             continue;
         }

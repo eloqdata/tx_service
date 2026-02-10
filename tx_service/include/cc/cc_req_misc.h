@@ -437,7 +437,8 @@ public:
     {
         assert(err_code != CcErrorCode::NO_ERROR);
         DLOG(ERROR) << "Abort this FillStoreSliceCc request with error: "
-                    << CcErrorMessage(err_code);
+                    << CcErrorMessage(err_code)
+                    << ", table name: " << table_name_->StringView();
         bool finish_all = SetError(err_code);
         // Recycle request
         if (finish_all)
@@ -988,6 +989,8 @@ public:
 
     UpdateCceCkptTsCc(const UpdateCceCkptTsCc &) = delete;
     UpdateCceCkptTsCc &operator=(const UpdateCceCkptTsCc &) = delete;
+
+    bool ValidTermCheck() const;
 
     bool Execute(CcShard &ccs) override;
 

@@ -600,6 +600,9 @@ public:
         uint64_t min_ts = UINT64_MAX;
 
         int64_t cc_ng_term = Sharder::Instance().LeaderTerm(cc_ng_id);
+        int64_t candidate_ng_term =
+            Sharder::Instance().CandidateLeaderTerm(cc_ng_id);
+        cc_ng_term = std::max(cc_ng_term, candidate_ng_term);
         if (cc_ng_term < 0)
         {
             cc_ng_term = Sharder::Instance().StandbyNodeTerm();

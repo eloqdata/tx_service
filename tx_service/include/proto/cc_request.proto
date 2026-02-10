@@ -888,6 +888,7 @@ message ReadRequest {
     uint64 schema_version = 15;
     int32 partition_id = 16;
     bool abort_if_oom = 17;
+    bool allow_run_on_candidate = 18;
 }
 
 message ReadResponse {

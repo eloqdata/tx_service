@@ -79,7 +79,8 @@ DataSyncTask::DataSyncTask(const TableName &table_name,
       range_entry_(range_entry),
       during_split_range_(true),
       export_base_table_items_(export_base_table_items),
-      tx_number_(txn)
+      tx_number_(txn),
+      run_on_leader_node_(true)
 {
     assert(!table_name_.IsHashPartitioned());
     if (start_key_.KeyPtr() ==

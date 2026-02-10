@@ -143,7 +143,6 @@ void ReadOperation::Forward(TransactionExecution *txm)
     {
         if (!read_tx_req_->read_local_)
         {
-            // Just returned from lock_bucket_op_, check lock_bucket_result_.
             assert(lock_range_bucket_result_->IsFinished());
             if (lock_range_bucket_result_->IsError())
             {
@@ -4221,7 +4220,9 @@ void SplitFlushRangeOp::Forward(TransactionExecution *txm)
         if (lock_cluster_config_op_.hd_result_->IsError())
         {
             LOG(ERROR) << "Split Flush read cluster config failed, tx_number:"
-                       << txm->TxNumber();
+                       << txm->TxNumber() << ", error code: "
+                       << static_cast<uint32_t>(
+                              lock_cluster_config_op_.hd_result_->ErrorCode());
             ForceToFinish(txm);
             return;
         }

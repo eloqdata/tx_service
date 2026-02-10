@@ -89,22 +89,23 @@ public:
         TX_TRACE_DUMP(&req);
 
         assert(req.IsLocal());
-        uint32_t ng_id = req.NodeGroupId();
-        int64_t ng_term = Sharder::Instance().LeaderTerm(ng_id);
-        if (req.IsInRecovering())
-        {
-            ng_term = Sharder::Instance().CandidateLeaderTerm(ng_id);
-        }
-        else
-        {
-            ng_term = std::max(ng_term, Sharder::Instance().StandbyNodeTerm());
-        }
-
+        int64_t ng_term = req.NodeGroupTerm();
         if (ng_term < 0)
         {
-            req.Result()->SetError(CcErrorCode::REQUESTED_NODE_NOT_LEADER);
-            return true;
+            if (req.AllowRunOnCandidate())
+            {
+                ng_term =
+                    Sharder::Instance().CandidateLeaderTerm(req.NodeGroupId());
+            }
+            if (ng_term < 0)
+            {
+                ng_term = Sharder::Instance().LeaderTerm(req.NodeGroupId());
+                int64_t standby_node_term =
+                    Sharder::Instance().StandbyNodeTerm();
+                ng_term = std::max(ng_term, standby_node_term);
+            }
         }
+        assert(ng_term > 0);
 
         const RangeBucketKey *bucket_key =
             static_cast<const RangeBucketKey *>(req.Key());
