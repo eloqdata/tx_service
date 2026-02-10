@@ -963,37 +963,58 @@ bool DataStoreServiceClient::UpsertTableStatistics(
 void DataStoreServiceClient::FetchTableRanges(
     txservice::FetchTableRangesCc *fetch_cc)
 {
-    fetch_cc->kv_partition_id_ = 0;
-    uint32_t data_shard_id =
-        GetShardIdByPartitionId(fetch_cc->kv_partition_id_, false);
+    const std::string_view table_name_sv = fetch_cc->table_name_.StringView();
+    const size_t total_partitions = TotalRangeSlicesKvPartitions();
 
-    fetch_cc->kv_start_key_.reserve(fetch_cc->table_name_.StringView().size() +
-                                    KEY_SEPARATOR.size());
-    fetch_cc->kv_start_key_.append(fetch_cc->table_name_.StringView());
-    fetch_cc->kv_start_key_.append(KEY_SEPARATOR);
-    fetch_cc->kv_end_key_ = fetch_cc->kv_start_key_;
-    fetch_cc->kv_end_key_.back()++;
-    fetch_cc->kv_session_id_.clear();
+    fetch_cc->partition_ranges_vec_.clear();
+    fetch_cc->partition_ranges_vec_.resize(total_partitions);
 
-    fetch_cc->partition_ranges_vec_.resize(TotalRangeSlicesKvPartitions());
+    fetch_cc->partition_scan_states_.clear();
+    fetch_cc->partition_scan_states_.resize(total_partitions);
 
-    LOG(INFO) << "yf: FetchTableRanges client, table name = "
-              << fetch_cc->table_name_.StringView();
+    {
+        std::unique_lock<bthread::Mutex> lk(fetch_cc->finish_mux_);
+        fetch_cc->error_code_ = 0;
+        fetch_cc->remaining_partitions_ =
+            static_cast<int32_t>(total_partitions);
+    }
 
-    ScanNext(kv_range_table_name,
-             fetch_cc->kv_partition_id_,
-             data_shard_id,
-             fetch_cc->kv_start_key_,
-             fetch_cc->kv_end_key_,
-             fetch_cc->kv_session_id_,
-             true,
-             true,
-             false,
-             true,
-             100,
-             nullptr,
-             fetch_cc,
-             &FetchTableRangesCallback);
+    LOG(INFO) << "yf: FetchTableRanges client, table name = " << table_name_sv;
+
+    for (int32_t kv_part_id = 0;
+         kv_part_id < static_cast<int32_t>(total_partitions);
+         ++kv_part_id)
+    {
+        auto &scan_state = fetch_cc->partition_scan_states_[kv_part_id];
+
+        scan_state.kv_start_key_.clear();
+        scan_state.kv_start_key_.reserve(table_name_sv.size() +
+                                         KEY_SEPARATOR.size());
+        scan_state.kv_start_key_.append(table_name_sv);
+        scan_state.kv_start_key_.append(KEY_SEPARATOR);
+
+        scan_state.kv_end_key_ = scan_state.kv_start_key_;
+        scan_state.kv_end_key_.back()++;
+        scan_state.kv_session_id_.clear();
+        scan_state.completed_ = false;
+
+        uint32_t data_shard_id = GetShardIdByPartitionId(kv_part_id, false);
+
+        ScanNext(kv_range_table_name,
+                 kv_part_id,
+                 data_shard_id,
+                 scan_state.kv_start_key_,
+                 scan_state.kv_end_key_,
+                 scan_state.kv_session_id_,
+                 true,
+                 true,
+                 false,
+                 true,
+                 100,
+                 nullptr,
+                 fetch_cc,
+                 &FetchTableRangesCallback);
+    }
 }
 
 /**

@@ -228,16 +228,25 @@ public:
     void Merge();
 
 public:
+    struct PartitionScanState
+    {
+        std::string kv_start_key_;
+        std::string kv_end_key_;
+        std::string kv_session_id_;
+    };
+
     const TableName table_name_;
     int error_code_{0};
     std::vector<InitRangeEntry> ranges_vec_;
     std::vector<std::vector<InitRangeEntry>> partition_ranges_vec_;
 
     // These variables only be used in DataStoreHandler
-    std::string kv_start_key_;
-    std::string kv_end_key_;
-    std::string kv_session_id_;
-    int32_t kv_partition_id_{0};
+    // Per-partition scan states used for concurrent FetchTableRanges
+    std::vector<PartitionScanState> partition_scan_states_;
+    int32_t remaining_partitions_{0};
+    // Protects error_code_ and remaining_partitions_ when completing from
+    // callbacks
+    mutable bthread::Mutex finish_mux_;
 };
 
 struct FetchRangeSlicesReq
