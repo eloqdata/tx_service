@@ -295,6 +295,22 @@ public:
             std::string_view,
             std::vector<std::unique_ptr<txservice::FlushTaskEntry>>>
             &flush_task) = 0;
+
+    /**
+     * @brief Coroutine version of PutArchivesAll; use from FlushDataCoro.
+     * Default: Yield + sync PutArchivesAll. Override for full coroutine path.
+     */
+    virtual Task<bool> PutArchivesAllCoro(
+        TaskScheduler *sched,
+        std::unordered_map<
+            std::string_view,
+            std::vector<std::unique_ptr<txservice::FlushTaskEntry>>>
+            &flush_task)
+    {
+        co_await Yield(sched);
+        co_return PutArchivesAll(flush_task);
+    }
+
     /**
      * @brief Copy record from base/sk table to mvcc_archives.
      */
@@ -303,6 +319,33 @@ public:
             std::string_view,
             std::vector<std::unique_ptr<txservice::FlushTaskEntry>>>
             &flush_task) = 0;
+
+    /**
+     * @brief Coroutine version of CopyBaseToArchive; use from FlushDataCoro.
+     * Default: Yield + sync CopyBaseToArchive. Override for full coroutine
+     * path.
+     */
+    virtual Task<bool> CopyBaseToArchiveCoro(
+        TaskScheduler *sched,
+        std::unordered_map<
+            std::string_view,
+            std::vector<std::unique_ptr<txservice::FlushTaskEntry>>>
+            &flush_task)
+    {
+        co_await Yield(sched);
+        co_return CopyBaseToArchive(flush_task);
+    }
+
+    /**
+     * @brief Coroutine version of PersistKV; use from FlushDataCoro.
+     * Default: Yield + sync PersistKV. Override for minimal awaitable path.
+     */
+    virtual Task<bool> PersistKVCoro(
+        TaskScheduler *sched, const std::vector<std::string> &kv_table_names)
+    {
+        co_await Yield(sched);
+        co_return PersistKV(kv_table_names);
+    }
 
     /**
      * @brief  Get the latest visible(commit_ts <= upper_bound_ts) historical

@@ -416,6 +416,14 @@ public:
                         std::string_view,
                         std::vector<std::unique_ptr<txservice::FlushTaskEntry>>>
                             &flush_task) override;
+
+    txservice::Task<bool> PutArchivesAllCoro(
+        txservice::TaskScheduler *sched,
+        std::unordered_map<
+            std::string_view,
+            std::vector<std::unique_ptr<txservice::FlushTaskEntry>>>
+            &flush_task) override;
+
     /**
      * @brief Copy record from base/sk table to mvcc_archives.
      */
@@ -424,6 +432,17 @@ public:
             std::string_view,
             std::vector<std::unique_ptr<txservice::FlushTaskEntry>>>
             &flush_task) override;
+
+    txservice::Task<bool> CopyBaseToArchiveCoro(
+        txservice::TaskScheduler *sched,
+        std::unordered_map<
+            std::string_view,
+            std::vector<std::unique_ptr<txservice::FlushTaskEntry>>>
+            &flush_task) override;
+
+    txservice::Task<bool> PersistKVCoro(
+        txservice::TaskScheduler *sched,
+        const std::vector<std::string> &kv_table_names) override;
 
     /**
      * @brief  Get the latest visible(commit_ts <= upper_bound_ts)
@@ -645,6 +664,16 @@ private:
         txservice::TaskScheduler *sched,
         PartitionFlushState *partition_state,
         PartitionCallbackData *callback_data);
+
+    /**
+     * Coroutine-path: process one partition of archive records (batch and
+     * co_await BatchWriteRecordsCoro). Used by PutArchivesAllCoro.
+     */
+    txservice::Task<bool> ProcessArchivePartitionCoro(
+        txservice::TaskScheduler *sched,
+        uint32_t partition_id,
+        const std::vector<std::pair<std::string_view, txservice::FlushRecord *>>
+            &archive_ptrs);
 
     /**
      * Helper methods for concurrent PutAll implementation
@@ -934,6 +963,18 @@ private:
                                        ::google::protobuf::Closure *closure,
                                        DataStoreServiceClient &client,
                                        const remote::CommonResult &result);
+    friend void PersistKVCoroFlushData(
+        DataStoreServiceClient *client,
+        const std::vector<std::string> &kv_table_names,
+        void *callback_data,
+        DataStoreCallback callback);
+    friend void ReadBaseForArchiveCoroStartRead(DataStoreServiceClient *client,
+                                                std::string_view kv_table_name,
+                                                int32_t partition_id,
+                                                uint32_t shard_id,
+                                                std::string_view key,
+                                                void *callback_data,
+                                                DataStoreCallback callback);
     friend class SinglePartitionScanner;
     friend void FetchAllDatabaseCallback(void *data,
                                          ::google::protobuf::Closure *closure,

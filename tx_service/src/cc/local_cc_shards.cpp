@@ -5988,7 +5988,8 @@ Task<void> LocalCcShards::FlushDataCoro(TaskScheduler *sched,
 
     if (EnableMvcc())
     {
-        succ = store_hd_->CopyBaseToArchive(flush_task_entries);
+        succ = co_await store_hd_->CopyBaseToArchiveCoro(sched,
+                                                         flush_task_entries);
         if (!succ)
         {
             LOG(ERROR) << "DataSync CopyBaseToArchive flush to kv "
@@ -5998,7 +5999,6 @@ Task<void> LocalCcShards::FlushDataCoro(TaskScheduler *sched,
 
     if (succ)
     {
-        // LOG(INFO) << "yf: wait PutAllCoro";
         succ = co_await store_hd_->PutAllCoro(sched, flush_task_entries);
         if (!succ)
         {
@@ -6009,7 +6009,8 @@ Task<void> LocalCcShards::FlushDataCoro(TaskScheduler *sched,
 
     if (succ && EnableMvcc())
     {
-        succ = store_hd_->PutArchivesAll(flush_task_entries);
+        succ =
+            co_await store_hd_->PutArchivesAllCoro(sched, flush_task_entries);
         if (!succ)
         {
             LOG(ERROR) << "DataSync PutArchivesAll flush to "
@@ -6024,7 +6025,7 @@ Task<void> LocalCcShards::FlushDataCoro(TaskScheduler *sched,
         {
             kv_table_names.push_back(table_name.data());
         }
-        succ = store_hd_->PersistKV(kv_table_names);
+        succ = co_await store_hd_->PersistKVCoro(sched, kv_table_names);
     }
 
     size_t task_size = 0;

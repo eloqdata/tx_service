@@ -131,7 +131,7 @@ struct BatchWriteRecordsAwaitable
     uint16_t key_parts_count;
     uint16_t record_parts_count;
 
-    std::shared_ptr<std::optional<bool>> result_;
+    mutable std::optional<bool> result_;
 
     bool await_ready() const
     {
@@ -139,7 +139,7 @@ struct BatchWriteRecordsAwaitable
     }
     void await_suspend(std::coroutine_handle<> h)
     {
-        result_ = std::make_shared<std::optional<bool>>();
+        std::optional<bool> *result_ptr = &result_;
         client->StartBatchWriteRecordsForCoro(
             std::move(kv_table_name),
             partition_id,
@@ -153,18 +153,202 @@ struct BatchWriteRecordsAwaitable
             partition_state,
             key_parts_count,
             record_parts_count,
-            [h, s = sched, result = result_](bool ok)
+            [h, s = sched, result_ptr](bool ok)
             {
-                result->emplace(ok);
+                result_ptr->emplace(ok);
                 s->PostReadyHandle(h);
             });
     }
     bool await_resume()
     {
-        return result_->value_or(false);
+        return result_.value_or(false);
+    }
+};
+
+// Minimal awaitable for PersistKV (FlushData async; no callback_data->Wait()).
+// Context holds only [handle, sched, result_ptr]; result stored in awaitable.
+struct PersistKVCoroContext
+{
+    std::coroutine_handle<> h;
+    txservice::TaskScheduler *sched{nullptr};
+    std::optional<bool> *result_ptr{nullptr};
+};
+
+void PersistKVCoroFlushCallback(void *data,
+                                ::google::protobuf::Closure *,
+                                DataStoreServiceClient &,
+                                const remote::CommonResult &result)
+{
+    auto *ctx = static_cast<PersistKVCoroContext *>(data);
+    if (ctx->result_ptr)
+        ctx->result_ptr->emplace(result.error_code() ==
+                                 remote::DataStoreError::NO_ERROR);
+    ctx->sched->PostReadyHandle(ctx->h);
+}
+
+// --- CopyBaseToArchiveCoro: single Read result (no cv) ---
+struct ReadOneResult
+{
+    int32_t partition_id{0};
+    std::string key_str;
+    std::string value_str;
+    uint64_t ts{0};
+    uint64_t ttl{0};
+    int error_code{0};
+};
+
+struct ReadBaseForArchiveCoroContext
+{
+    std::coroutine_handle<> h;
+    txservice::TaskScheduler *sched{nullptr};
+    ReadOneResult *result_ptr{nullptr};
+};
+
+void ReadBaseForArchiveCoroCallback(void *data,
+                                    ::google::protobuf::Closure *closure,
+                                    DataStoreServiceClient &client,
+                                    const remote::CommonResult &result)
+{
+    auto *ctx = static_cast<ReadBaseForArchiveCoroContext *>(data);
+    ReadOneResult *out = ctx->result_ptr;
+    if (!out)
+        return;
+    ReadClosure *read_closure = static_cast<ReadClosure *>(closure);
+    auto err_code = result.error_code();
+    if (err_code == remote::DataStoreError::KEY_NOT_FOUND)
+    {
+        std::string_view key_str = read_closure->Key();
+        uint64_t ts = 1U;
+        uint64_t ttl = 0U;
+        std::string value_str = client.SerializeTxRecord(true, nullptr);
+        out->partition_id = read_closure->PartitionId();
+        out->key_str = key_str;
+        out->value_str = std::move(value_str);
+        out->ts = ts;
+        out->ttl = ttl;
+        out->error_code = 0;
+    }
+    else if (err_code != remote::DataStoreError::NO_ERROR)
+    {
+        LOG(ERROR) << "ReadBaseForArchiveCoroCallback, error_code: " << err_code
+                   << ", error_msg: " << result.error_msg();
+        out->error_code =
+            static_cast<int>(txservice::CcErrorCode::DATA_STORE_ERR);
+    }
+    else
+    {
+        std::string_view key_str = read_closure->Key();
+        std::string value_str = std::move(read_closure->ValueStringRef());
+        out->partition_id = read_closure->PartitionId();
+        out->key_str = key_str;
+        out->value_str = std::move(value_str);
+        out->ts = read_closure->Ts();
+        out->ttl = read_closure->Ttl();
+        out->error_code = 0;
+    }
+    ctx->sched->PostReadyHandle(ctx->h);
+}
+
+struct ReadBaseForArchiveAwaitable
+{
+    DataStoreServiceClient *client;
+    txservice::TaskScheduler *sched;
+    std::string kv_table_name;
+    int32_t partition_id;
+    uint32_t shard_id;
+    std::string key;
+
+    mutable ReadOneResult result_holder_;
+    mutable std::unique_ptr<ReadBaseForArchiveCoroContext> ctx_;
+
+    bool await_ready() const
+    {
+        return false;
+    }
+    void await_suspend(std::coroutine_handle<> h)
+    {
+        ctx_ = std::make_unique<ReadBaseForArchiveCoroContext>();
+        ctx_->h = h;
+        ctx_->sched = sched;
+        ctx_->result_ptr = &result_holder_;
+        EloqDS::ReadBaseForArchiveCoroStartRead(client,
+                                                kv_table_name,
+                                                partition_id,
+                                                shard_id,
+                                                key,
+                                                ctx_.get(),
+                                                ReadBaseForArchiveCoroCallback);
+    }
+    ReadOneResult await_resume()
+    {
+        return std::move(result_holder_);
+    }
+};
+
+txservice::Task<ReadOneResult> ReadOneBaseEntryCoro(
+    txservice::TaskScheduler *sched,
+    DataStoreServiceClient *client,
+    std::string_view base_kv_table_name,
+    int32_t kv_part_id,
+    uint32_t shard_id,
+    std::string key_copy)
+{
+    co_return co_await ReadBaseForArchiveAwaitable{
+        client,
+        sched,
+        std::string(base_kv_table_name),
+        kv_part_id,
+        shard_id,
+        std::move(key_copy)};
+}
+
+struct PersistKVAwaitable
+{
+    DataStoreServiceClient *client;
+    txservice::TaskScheduler *sched;
+    const std::vector<std::string> *kv_table_names;
+    mutable std::optional<bool> result_;
+    mutable std::unique_ptr<PersistKVCoroContext> ctx_;
+
+    bool await_ready() const
+    {
+        return false;
+    }
+    void await_suspend(std::coroutine_handle<> h)
+    {
+        ctx_ = std::make_unique<PersistKVCoroContext>();
+        ctx_->h = h;
+        ctx_->sched = sched;
+        ctx_->result_ptr = &result_;
+        EloqDS::PersistKVCoroFlushData(
+            client, *kv_table_names, ctx_.get(), PersistKVCoroFlushCallback);
+    }
+    bool await_resume()
+    {
+        return result_.value_or(false);
     }
 };
 }  // namespace
+
+void PersistKVCoroFlushData(DataStoreServiceClient *client,
+                            const std::vector<std::string> &kv_table_names,
+                            void *callback_data,
+                            DataStoreCallback callback)
+{
+    client->FlushData(kv_table_names, callback_data, callback);
+}
+
+void ReadBaseForArchiveCoroStartRead(DataStoreServiceClient *client,
+                                     std::string_view kv_table_name,
+                                     int32_t partition_id,
+                                     uint32_t shard_id,
+                                     std::string_view key,
+                                     void *callback_data,
+                                     DataStoreCallback callback)
+{
+    client->Read(
+        kv_table_name, partition_id, shard_id, key, callback_data, callback);
+}
 
 static const std::string_view kv_table_catalogs_name("table_catalogs");
 static const std::string_view kv_database_catalogs_name("db_catalogs");
@@ -779,6 +963,20 @@ bool DataStoreServiceClient::PersistKV(
     LOG(INFO) << "DataStoreHandler::PersistKV success.";
 
     return true;
+}
+
+txservice::Task<bool> DataStoreServiceClient::PersistKVCoro(
+    txservice::TaskScheduler *sched,
+    const std::vector<std::string> &kv_table_names)
+{
+    bool ok = co_await PersistKVAwaitable{this, sched, &kv_table_names};
+    if (!ok)
+    {
+        LOG(WARNING) << "DataStoreHandler: Failed to do PersistKV (coro path).";
+        co_return false;
+    }
+    LOG(INFO) << "DataStoreHandler::PersistKV success.";
+    co_return true;
 }
 
 /**
@@ -3314,6 +3512,182 @@ bool DataStoreServiceClient::PutArchivesAll(
     return true;
 }
 
+txservice::Task<bool> DataStoreServiceClient::ProcessArchivePartitionCoro(
+    txservice::TaskScheduler *sched,
+    uint32_t partition_id,
+    const std::vector<std::pair<std::string_view, txservice::FlushRecord *>>
+        &archive_ptrs)
+{
+    const uint16_t parts_cnt_per_key = 5;
+    const uint16_t parts_cnt_per_record = 5;
+    size_t recs_cnt = archive_ptrs.size();
+    uint32_t data_shard_id = GetShardIdByPartitionId(partition_id, false);
+    uint64_t now = txservice::LocalCcShards::ClockTsInMillseconds();
+    const uint64_t archive_ttl =
+        now + 1000 * 60 * 60 * 24;  // 1 day for archive record
+
+    std::vector<std::string_view> keys;
+    std::vector<std::string_view> records;
+    std::vector<uint64_t> records_ts;
+    std::vector<uint64_t> records_ttl;
+    std::vector<WriteOpType> op_types;
+    std::vector<size_t> record_tmp_mem_area(archive_ptrs.size() * 2);
+    size_t write_batch_size = 0;
+    keys.reserve(recs_cnt * parts_cnt_per_key);
+    records.reserve(recs_cnt * parts_cnt_per_record);
+    records_ts.reserve(recs_cnt);
+    records_ttl.reserve(recs_cnt);
+    op_types.reserve(recs_cnt);
+
+    for (size_t i = 0; i < archive_ptrs.size(); ++i)
+    {
+        if (write_batch_size >= MAX_WRITE_BATCH_SIZE)
+        {
+            bool ok = co_await BatchWriteRecordsCoro(sched,
+                                                     kv_mvcc_archive_name,
+                                                     partition_id,
+                                                     data_shard_id,
+                                                     std::move(keys),
+                                                     std::move(records),
+                                                     std::move(records_ts),
+                                                     std::move(records_ttl),
+                                                     std::move(op_types),
+                                                     true,
+                                                     nullptr,
+                                                     parts_cnt_per_key,
+                                                     parts_cnt_per_record);
+            if (!ok)
+                co_return false;
+            keys.clear();
+            records.clear();
+            records_ts.clear();
+            records_ttl.clear();
+            op_types.clear();
+            keys.reserve(recs_cnt * parts_cnt_per_key);
+            records.reserve(recs_cnt * parts_cnt_per_record);
+            records_ts.reserve(recs_cnt);
+            records_ttl.reserve(recs_cnt);
+            op_types.reserve(recs_cnt);
+            write_batch_size = 0;
+        }
+
+        txservice::FlushRecord &ckpt_rec = *archive_ptrs[i].second;
+        std::string_view kv_table_name = archive_ptrs[i].first;
+        txservice::TxKey tx_key = ckpt_rec.Key();
+
+        assert(ckpt_rec.payload_status_ == txservice::RecordStatus::Normal ||
+               ckpt_rec.payload_status_ == txservice::RecordStatus::Deleted);
+
+        records_ts.push_back(ckpt_rec.commit_ts_);
+        write_batch_size += sizeof(uint64_t);
+        records_ttl.push_back(archive_ttl);
+        write_batch_size += sizeof(uint64_t);
+        op_types.push_back(WriteOpType::PUT);
+        write_batch_size += sizeof(WriteOpType);
+
+        ckpt_rec.commit_ts_ =
+            EloqShare::host_to_big_endian(ckpt_rec.commit_ts_);
+        EncodeArchiveKey(kv_table_name,
+                         std::string_view(tx_key.Data(), tx_key.Size()),
+                         ckpt_rec.commit_ts_,
+                         keys,
+                         write_batch_size);
+
+        const txservice::TxRecord *rec = ckpt_rec.Payload();
+        size_t &unpack_info_size = record_tmp_mem_area[i * 2];
+        size_t &encode_blob_size = record_tmp_mem_area[i * 2 + 1];
+        if (rec != nullptr)
+        {
+            unpack_info_size = rec->UnpackInfoSize();
+            encode_blob_size = rec->EncodedBlobSize();
+        }
+        EncodeArchiveValue(
+            ckpt_rec.payload_status_ == txservice::RecordStatus::Deleted,
+            rec,
+            unpack_info_size,
+            encode_blob_size,
+            records,
+            write_batch_size);
+    }
+
+    if (!keys.empty())
+    {
+        bool ok = co_await BatchWriteRecordsCoro(sched,
+                                                 kv_mvcc_archive_name,
+                                                 partition_id,
+                                                 data_shard_id,
+                                                 std::move(keys),
+                                                 std::move(records),
+                                                 std::move(records_ts),
+                                                 std::move(records_ttl),
+                                                 std::move(op_types),
+                                                 true,
+                                                 nullptr,
+                                                 parts_cnt_per_key,
+                                                 parts_cnt_per_record);
+        if (!ok)
+            co_return false;
+    }
+
+    if (metrics::enable_kv_metrics)
+    {
+        metrics::kv_meter->Collect(
+            metrics::NAME_KV_FLUSH_ROWS_TOTAL, recs_cnt, "archive");
+    }
+    co_return true;
+}
+
+txservice::Task<bool> DataStoreServiceClient::PutArchivesAllCoro(
+    txservice::TaskScheduler *sched,
+    std::unordered_map<std::string_view,
+                       std::vector<std::unique_ptr<txservice::FlushTaskEntry>>>
+        &flush_task)
+{
+    std::unordered_map<
+        uint32_t,
+        std::vector<std::pair<std::string_view, txservice::FlushRecord *>>>
+        partitions_map;
+    for (auto &[kv_table_name, flush_task_entry] : flush_task)
+    {
+        for (auto &entry : flush_task_entry)
+        {
+            auto &archive_vec = *entry->archive_vec_;
+            if (archive_vec.empty())
+                continue;
+            for (size_t i = 0; i < archive_vec.size(); ++i)
+            {
+                txservice::TxKey tx_key = archive_vec[i].Key();
+                int32_t partition_id =
+                    HashArchiveKey(kv_table_name.data(), tx_key);
+                auto [it, inserted] = partitions_map.try_emplace(
+                    KvPartitionIdOf(partition_id, false));
+                if (inserted)
+                {
+                    it->second.reserve(archive_vec.size() / 1024 * 2 *
+                                       flush_task_entry.size() *
+                                       flush_task.size());
+                }
+                it->second.emplace_back(kv_table_name, &archive_vec[i]);
+            }
+        }
+    }
+
+    std::vector<txservice::Task<bool>> sub_tasks;
+    sub_tasks.reserve(partitions_map.size());
+    for (auto &[partition_id, archive_ptrs] : partitions_map)
+    {
+        sub_tasks.push_back(
+            ProcessArchivePartitionCoro(sched, partition_id, archive_ptrs));
+    }
+    std::vector<bool> results = co_await txservice::JoinAll(sub_tasks, sched);
+    for (bool r : results)
+    {
+        if (!r)
+            co_return false;
+    }
+    co_return true;
+}
+
 /**
  * @brief Copies base table data to archive storage.
  *
@@ -3512,6 +3886,154 @@ bool DataStoreServiceClient::CopyBaseToArchive(
     }
 
     return true;
+}
+
+txservice::Task<bool> DataStoreServiceClient::CopyBaseToArchiveCoro(
+    txservice::TaskScheduler *sched,
+    std::unordered_map<std::string_view,
+                       std::vector<std::unique_ptr<txservice::FlushTaskEntry>>>
+        &flush_task)
+{
+    std::unordered_map<std::string_view,
+                       std::vector<std::unique_ptr<txservice::FlushTaskEntry>>>
+        archive_flush_task;
+
+    for (auto &[base_kv_table_name, flush_task_entry] : flush_task)
+    {
+        auto &table_name =
+            flush_task_entry.front()->data_sync_task_->table_name_;
+        auto &table_schema = flush_task_entry.front()->table_schema_;
+        bool is_range_partitioned = !table_name.IsHashPartitioned();
+        auto *catalog_factory = GetCatalogFactory(table_name.Engine());
+        assert(catalog_factory != nullptr);
+
+        for (auto &entry : flush_task_entry)
+        {
+            auto &base_vec = *entry->mv_base_vec_;
+            if (base_vec.empty())
+                continue;
+
+            std::unique_ptr<std::vector<txservice::FlushRecord>> archive_vec =
+                std::make_unique<std::vector<txservice::FlushRecord>>();
+            archive_vec->reserve(base_vec.size());
+            size_t batch_size = 0;
+
+            std::vector<txservice::Task<ReadOneResult>> sub_tasks;
+            sub_tasks.reserve(base_vec.size());
+            for (size_t base_idx = 0; base_idx < base_vec.size(); ++base_idx)
+            {
+                txservice::TxKey &tx_key = base_vec[base_idx].first;
+                assert(tx_key.Data() != nullptr && tx_key.Size() > 0);
+                int32_t partition_id = base_vec[base_idx].second;
+                int32_t kv_part_id =
+                    KvPartitionIdOf(partition_id, is_range_partitioned);
+                uint32_t shard_id =
+                    GetShardIdByPartitionId(kv_part_id, is_range_partitioned);
+                sub_tasks.push_back(ReadOneBaseEntryCoro(
+                    sched,
+                    this,
+                    base_kv_table_name,
+                    kv_part_id,
+                    shard_id,
+                    std::string(tx_key.Data(), tx_key.Size())));
+            }
+
+            std::vector<ReadOneResult> read_results =
+                co_await txservice::JoinAll(sub_tasks, sched);
+
+            int error_code = 0;
+            for (size_t i = 0; i < read_results.size(); ++i)
+            {
+                if (read_results[i].error_code != 0)
+                {
+                    error_code = read_results[i].error_code;
+                    LOG(ERROR)
+                        << "CopyBaseToArchiveCoro failed for read base table.";
+                    break;
+                }
+            }
+            if (error_code != 0)
+            {
+                co_return false;
+            }
+
+            for (size_t i = 0; i < base_vec.size(); i++)
+            {
+                ReadOneResult &r = read_results[i];
+                txservice::TxKey tx_key = catalog_factory->CreateTxKey(
+                    r.key_str.data(), r.key_str.size());
+                batch_size += r.key_str.size();
+                batch_size += r.value_str.size();
+                std::string_view val = r.value_str;
+                size_t offset = 0;
+                bool is_deleted = false;
+                std::unique_ptr<txservice::TxRecord> record =
+                    catalog_factory->CreateTxRecord();
+                if (table_name.Engine() == txservice::TableEngine::EloqKv)
+                {
+                    LOG(WARNING) << "EloqKv engine not support mvcc feature";
+                    txservice::TxObject *tx_object =
+                        static_cast<txservice::TxObject *>(record.get());
+                    record = tx_object->DeserializeObject(val.data(), offset);
+                }
+                else
+                {
+                    DeserializeTxRecordStr(val, is_deleted, offset);
+                    if (!is_deleted)
+                    {
+                        record->Deserialize(val.data(), offset);
+                    }
+                }
+
+                auto &ref = archive_vec->emplace_back();
+                ref.SetKey(std::move(tx_key));
+                ref.commit_ts_ = r.ts;
+                ref.partition_id_ = r.partition_id;
+
+                if (!is_deleted)
+                {
+                    if (table_name.Engine() == txservice::TableEngine::EloqKv)
+                    {
+                        ref.SetNonVersionedPayload(record.get());
+                    }
+                    else
+                    {
+                        assert(table_name ==
+                                   txservice::Sequences::table_name_ ||
+                               table_name.Engine() !=
+                                   txservice::TableEngine::None);
+                        ref.SetVersionedPayload(std::move(record));
+                    }
+                    ref.payload_status_ = txservice::RecordStatus::Normal;
+                }
+                else
+                {
+                    ref.payload_status_ = txservice::RecordStatus::Deleted;
+                }
+            }
+
+            auto insert_it = archive_flush_task.try_emplace(
+                base_kv_table_name,
+                std::vector<std::unique_ptr<txservice::FlushTaskEntry>>());
+            insert_it.first->second.emplace_back(
+                std::make_unique<txservice::FlushTaskEntry>(
+                    nullptr,
+                    std::move(archive_vec),
+                    nullptr,
+                    nullptr,
+                    flush_task_entry.front()->data_sync_task_,
+                    table_schema,
+                    batch_size));
+        }
+    }
+
+    if (!archive_flush_task.empty())
+    {
+        bool ret = co_await PutArchivesAllCoro(sched, archive_flush_task);
+        if (!ret)
+            co_return false;
+    }
+    co_return true;
 }
 
 /**
