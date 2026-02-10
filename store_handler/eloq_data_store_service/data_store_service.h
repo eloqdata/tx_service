@@ -650,6 +650,11 @@ public:
                DSShardStatus::Closed;
     }
 
+    bool IsCloudMode() const
+    {
+        return data_store_factory_->IsCloudMode();
+    }
+
     void CloseDataStore(uint32_t shard_id);
     void OpenDataStore(uint32_t shard_id,
                        std::unordered_set<uint16_t> &&bucket_ids,

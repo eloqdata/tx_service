@@ -194,7 +194,14 @@ public:
 
     bool IsSharedStorage() const override
     {
-        return true;
+        if (data_store_service_ != nullptr)
+        {
+            return data_store_service_->IsCloudMode();
+        }
+        else
+        {
+            return true;
+        }
     }
 
     void ScheduleTimerTasks() override;
