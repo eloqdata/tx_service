@@ -61,16 +61,15 @@ namespace txservice
 {
 DECLARE_double(ckpt_buffer_ratio);
 
-// Checkpoint trigger thresholds based on dirty memory
+// Checkpoint trigger threshold based on dirty memory size
+// Default is 0, which means 10% of memory_limit will be used as threshold
 DEFINE_uint64(dirty_memory_check_interval,
               1000,
               "Check dirty memory every N calls to AdjustDataKeyStats");
-DEFINE_double(dirty_memory_ratio_threshold,
-              0.20,
-              "Trigger checkpoint when dirty memory / memory_limit exceeds this");
 DEFINE_uint64(dirty_memory_size_threshold_mb,
-              50,
-              "Trigger checkpoint when dirty memory exceeds this (MB)");
+              0,
+              "Trigger checkpoint when dirty memory exceeds this (MB). "
+              "0 means use 10% of memory_limit as default");
 CcShard::CcShard(
     uint16_t core_id,
     uint32_t core_cnt,
@@ -461,25 +460,26 @@ void CcShard::CheckAndTriggerCkptByDirtyMemory()
     double dirty_key_ratio = static_cast<double>(dirty_data_key_count_) /
                              static_cast<double>(data_key_count_);
     uint64_t dirty_memory = static_cast<uint64_t>(allocated * dirty_key_ratio);
-    double dirty_memory_ratio =
-        static_cast<double>(dirty_memory) / static_cast<double>(memory_limit_);
 
-    // Check thresholds
-    uint64_t size_threshold =
-        FLAGS_dirty_memory_size_threshold_mb * 1024 * 1024;
-    bool ratio_exceeded = dirty_memory_ratio > FLAGS_dirty_memory_ratio_threshold;
-    bool size_exceeded = dirty_memory > size_threshold;
+    // Determine threshold: use configured value or default to 10% of memory_limit
+    uint64_t threshold;
+    if (FLAGS_dirty_memory_size_threshold_mb == 0)
+    {
+        // Default: 10% of memory limit
+        threshold = static_cast<uint64_t>(memory_limit_ * 0.1);
+    }
+    else
+    {
+        threshold = FLAGS_dirty_memory_size_threshold_mb * 1024 * 1024;
+    }
 
-    // Trigger checkpoint only when BOTH thresholds are exceeded
-    if (ratio_exceeded && size_exceeded)
+    // Trigger checkpoint when dirty memory exceeds threshold
+    if (dirty_memory > threshold)
     {
         DLOG(INFO) << "Shard " << core_id_
-                   << " triggering checkpoint - dirty_memory_ratio=" << std::fixed
-                   << std::setprecision(1) << (dirty_memory_ratio * 100) << "%"
-                   << " (threshold="
-                   << (FLAGS_dirty_memory_ratio_threshold * 100)
-                   << "%), dirty_memory=" << (dirty_memory / (1024 * 1024))
-                   << "MB (threshold=" << FLAGS_dirty_memory_size_threshold_mb
+                   << " triggering checkpoint - dirty_memory="
+                   << (dirty_memory / (1024 * 1024)) << "MB (threshold="
+                   << (threshold / (1024 * 1024))
                    << "MB), dirty_keys=" << dirty_data_key_count_ << "/"
                    << data_key_count_;
 
