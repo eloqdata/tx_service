@@ -1493,14 +1493,8 @@ bool ShardCleanCc::Execute(CcShard &ccs)
                 // waiting ccrequests.
                 ccs.AbortRequestsAfterMemoryFree();
 
-                // Notify the checkpointer thread to do checkpoint if there
-                // is not freeable entries to be kicked out from ccmap and
-                // if the shard is not doing defrag.
-                if (free_count_ == 0 && !shard_heap->IsDefragHeapCcOnFly() &&
-                    !Sharder::Instance().GetCheckpointer()->IsOngoingDataSync())
-                {
-                    ccs.NotifyCkpt();
-                }
+                // Note: Checkpoint is now triggered based on dirty memory
+                // thresholds in AdjustDataKeyStats, not on memory-full events.
                 free_count_ = 0;
                 // Return true will set the request as free, which means the
                 // request is not in working state.

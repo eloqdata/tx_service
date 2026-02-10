@@ -319,6 +319,12 @@ public:
 
     std::pair<size_t, size_t> GetDataKeyStats() const;
 
+    /**
+     * @brief Check dirty memory thresholds and trigger checkpoint if exceeded.
+     * Called periodically from AdjustDataKeyStats based on sampling interval.
+     */
+    void CheckAndTriggerCkptByDirtyMemory();
+
     void InitializeShardHeap()
     {
         if (shard_heap_thread_id_ == 0)
@@ -1291,6 +1297,8 @@ private:
     size_t data_key_count_{0};
     // The number of committed dirty keys in data tables only.
     size_t dirty_data_key_count_{0};
+    // Counter for sampling dirty memory checks in AdjustDataKeyStats.
+    uint64_t adjust_stats_call_count_{0};
 
     Checkpointer *ckpter_;
 

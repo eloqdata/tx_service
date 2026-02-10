@@ -27,6 +27,7 @@
 
 #include <chrono>  // std::chrono
 #include <cstdint>
+#include <iomanip>  // std::setprecision
 #include <string>
 
 #include "cc/catalog_cc_map.h"
@@ -59,6 +60,17 @@ DECLARE_bool(cmd_read_catalog);
 namespace txservice
 {
 DECLARE_double(ckpt_buffer_ratio);
+
+// Checkpoint trigger thresholds based on dirty memory
+DEFINE_uint64(dirty_memory_check_interval,
+              1000,
+              "Check dirty memory every N calls to AdjustDataKeyStats");
+DEFINE_double(dirty_memory_ratio_threshold,
+              0.20,
+              "Trigger checkpoint when dirty memory / memory_limit exceeds this");
+DEFINE_uint64(dirty_memory_size_threshold_mb,
+              50,
+              "Trigger checkpoint when dirty memory exceeds this (MB)");
 CcShard::CcShard(
     uint16_t core_id,
     uint32_t core_cnt,
@@ -419,12 +431,59 @@ void CcShard::AdjustDataKeyStats(const TableName &table_name,
         {
             dirty_data_key_count_ = static_cast<size_t>(new_dirty);
         }
+
+        // Check dirty memory thresholds periodically
+        if (FLAGS_dirty_memory_check_interval > 0 &&
+            ++adjust_stats_call_count_ % FLAGS_dirty_memory_check_interval == 0)
+        {
+            CheckAndTriggerCkptByDirtyMemory();
+        }
     }
 }
 
 std::pair<size_t, size_t> CcShard::GetDataKeyStats() const
 {
     return {data_key_count_, dirty_data_key_count_};
+}
+
+void CcShard::CheckAndTriggerCkptByDirtyMemory()
+{
+    if (memory_limit_ == 0 || data_key_count_ == 0 || ckpter_ == nullptr)
+    {
+        return;
+    }
+
+    // Get current memory usage
+    int64_t allocated = 0, committed = 0;
+    GetShardHeap()->Full(&allocated, &committed);
+
+    // Calculate dirty memory
+    double dirty_key_ratio = static_cast<double>(dirty_data_key_count_) /
+                             static_cast<double>(data_key_count_);
+    uint64_t dirty_memory = static_cast<uint64_t>(allocated * dirty_key_ratio);
+    double dirty_memory_ratio =
+        static_cast<double>(dirty_memory) / static_cast<double>(memory_limit_);
+
+    // Check thresholds
+    uint64_t size_threshold =
+        FLAGS_dirty_memory_size_threshold_mb * 1024 * 1024;
+    bool ratio_exceeded = dirty_memory_ratio > FLAGS_dirty_memory_ratio_threshold;
+    bool size_exceeded = dirty_memory > size_threshold;
+
+    if (ratio_exceeded || size_exceeded)
+    {
+        DLOG(INFO) << "Shard " << core_id_
+                   << " triggering checkpoint - dirty_memory_ratio=" << std::fixed
+                   << std::setprecision(1) << (dirty_memory_ratio * 100) << "%"
+                   << " (threshold="
+                   << (FLAGS_dirty_memory_ratio_threshold * 100)
+                   << "%), dirty_memory=" << (dirty_memory / (1024 * 1024))
+                   << "MB (threshold=" << FLAGS_dirty_memory_size_threshold_mb
+                   << "MB), dirty_keys=" << dirty_data_key_count_ << "/"
+                   << data_key_count_;
+
+        ckpter_->Notify(true);  // Request immediate checkpoint
+    }
 }
 
 void CcShard::Enqueue(uint32_t thd_id, CcRequestBase *req)
