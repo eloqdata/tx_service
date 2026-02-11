@@ -19,6 +19,8 @@
  *    <http://www.gnu.org/licenses/>.
  *
  */
+#include "tx_operation.h"
+
 #include <algorithm>
 #include <atomic>
 #include <chrono>
@@ -46,7 +48,6 @@
 #include "store/data_store_handler.h"
 #include "tx_execution.h"
 #include "tx_key.h"
-#include "tx_operation.h"
 #include "tx_request.h"
 #include "tx_service.h"
 #include "tx_service_common.h"
