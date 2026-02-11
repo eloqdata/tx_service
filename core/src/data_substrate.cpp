@@ -668,7 +668,9 @@ bool DataSubstrate::LoadCoreAndNetworkConfig(const INIReader &config_reader)
         !CheckCommandLineFlagIsDefault("maxclients")
             ? FLAGS_maxclients
             : config_reader.GetInteger("local", "maxclients", FLAGS_maxclients);
-    struct rlimit ulimit{};
+    struct rlimit ulimit
+    {
+    };
     ulimit.rlim_cur = core_config_.maxclients;
     ulimit.rlim_max = core_config_.maxclients;
     if (setrlimit(RLIMIT_NOFILE, &ulimit) == -1)
