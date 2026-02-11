@@ -42,6 +42,16 @@ DEFINE_bool(auto_redirect,
             false,
             "If redirect remote object command to remote node internally");
 
+// Checkpoint trigger threshold based on dirty memory size
+// Default is 0, which means 10% of memory_limit will be used as threshold
+DEFINE_uint64(dirty_memory_check_interval,
+              1000,
+              "Check dirty memory every N calls to AdjustDataKeyStats");
+DEFINE_uint64(dirty_memory_size_threshold_mb,
+              0,
+              "Trigger checkpoint when dirty memory exceeds this (MB). "
+              "0 means use 10% of memory_limit as default");
+
 bool DataSubstrate::InitializeTxService(const INIReader &config_reader)
 {
     uint64_t checkpointer_interval =
@@ -134,6 +144,20 @@ bool DataSubstrate::InitializeTxService(const INIReader &config_reader)
             : config_reader.GetBoolean(
                   "local", "auto_redirect", FLAGS_auto_redirect);
 
+    uint64_t dirty_memory_check_interval =
+        !CheckCommandLineFlagIsDefault("dirty_memory_check_interval")
+            ? FLAGS_dirty_memory_check_interval
+            : config_reader.GetInteger("local",
+                                       "dirty_memory_check_interval",
+                                       FLAGS_dirty_memory_check_interval);
+
+    uint64_t dirty_memory_size_threshold_mb =
+        !CheckCommandLineFlagIsDefault("dirty_memory_size_threshold_mb")
+            ? FLAGS_dirty_memory_size_threshold_mb
+            : config_reader.GetInteger("local",
+                                       "dirty_memory_size_threshold_mb",
+                                       FLAGS_dirty_memory_size_threshold_mb);
+
     bool fork_hm_process = false;
     std::string hm_ip = "";
     std::string hm_bin_path = "";
@@ -205,7 +229,9 @@ bool DataSubstrate::InitializeTxService(const INIReader &config_reader)
         {"enable_key_cache", enable_key_cache},
         {"max_standby_lag", max_standby_lag},
         {"kickout_data_for_test", kickout_data_for_test ? 1 : 0},
-        {"range_slice_memory_limit_percent", range_slice_memory_limit_percent}};
+        {"range_slice_memory_limit_percent", range_slice_memory_limit_percent},
+        {"dirty_memory_check_interval", dirty_memory_check_interval},
+        {"dirty_memory_size_threshold_mb", dirty_memory_size_threshold_mb}};
 
     txservice::CatalogFactory *catalog_factory[NUM_EXTERNAL_ENGINES] = {
         nullptr, nullptr, nullptr};

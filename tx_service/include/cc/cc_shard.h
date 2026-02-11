@@ -299,7 +299,9 @@ public:
             uint64_t cluster_config_version,
             metrics::MetricsRegistry *metrics_registry = nullptr,
             metrics::CommonLabels common_labels = {},
-            uint32_t range_slice_memory_limit_percent = 10);
+            uint32_t range_slice_memory_limit_percent = 10,
+            uint64_t dirty_memory_check_interval = 1000,
+            uint64_t dirty_memory_size_threshold_mb = 0);
 
     void Init();
 
@@ -1299,6 +1301,10 @@ private:
     size_t dirty_data_key_count_{0};
     // Counter for sampling dirty memory checks in AdjustDataKeyStats.
     uint64_t adjust_stats_call_count_{0};
+
+    // Config for dirty memory checkpoint triggering.
+    uint64_t dirty_memory_check_interval_{1000};
+    uint64_t dirty_memory_size_threshold_mb_{0};
 
     Checkpointer *ckpter_;
 

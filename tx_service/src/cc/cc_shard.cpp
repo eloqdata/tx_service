@@ -60,16 +60,6 @@ DECLARE_bool(cmd_read_catalog);
 namespace txservice
 {
 DECLARE_double(ckpt_buffer_ratio);
-
-// Checkpoint trigger threshold based on dirty memory size
-// Default is 0, which means 10% of memory_limit will be used as threshold
-DEFINE_uint64(dirty_memory_check_interval,
-              1000,
-              "Check dirty memory every N calls to AdjustDataKeyStats");
-DEFINE_uint64(dirty_memory_size_threshold_mb,
-              0,
-              "Trigger checkpoint when dirty memory exceeds this (MB). "
-              "0 means use 10% of memory_limit as default");
 CcShard::CcShard(
     uint16_t core_id,
     uint32_t core_cnt,
@@ -83,7 +73,9 @@ CcShard::CcShard(
     uint64_t cluster_config_version,
     metrics::MetricsRegistry *metrics_registry,
     metrics::CommonLabels common_labels,
-    uint32_t range_slice_memory_limit_percent)
+    uint32_t range_slice_memory_limit_percent,
+    uint64_t dirty_memory_check_interval,
+    uint64_t dirty_memory_size_threshold_mb)
     : core_id_(core_id),
       core_cnt_(core_cnt),
       ng_id_(ng_id),
@@ -113,7 +105,9 @@ CcShard::CcShard(
                        catalog_factory[3],
                        catalog_factory[4]},
       system_handler_(system_handler),
-      active_si_txs_()
+      active_si_txs_(),
+      dirty_memory_check_interval_(dirty_memory_check_interval),
+      dirty_memory_size_threshold_mb_(dirty_memory_size_threshold_mb)
 {
     // Reserve range_slice_memory_limit_percent% for range slice info.
     // We update this to dynamically reserve the configured range slice
@@ -432,8 +426,8 @@ void CcShard::AdjustDataKeyStats(const TableName &table_name,
         }
 
         // Check dirty memory thresholds periodically
-        if (FLAGS_dirty_memory_check_interval > 0 &&
-            ++adjust_stats_call_count_ % FLAGS_dirty_memory_check_interval == 0)
+        if (dirty_memory_check_interval_ > 0 &&
+            ++adjust_stats_call_count_ % dirty_memory_check_interval_ == 0)
         {
             CheckAndTriggerCkptByDirtyMemory();
         }
@@ -464,14 +458,14 @@ void CcShard::CheckAndTriggerCkptByDirtyMemory()
     // Determine threshold: use configured value or default to 10% of
     // memory_limit
     uint64_t threshold;
-    if (FLAGS_dirty_memory_size_threshold_mb == 0)
+    if (dirty_memory_size_threshold_mb_ == 0)
     {
         // Default: 10% of memory limit
         threshold = static_cast<uint64_t>(memory_limit_ * 0.1);
     }
     else
     {
-        threshold = FLAGS_dirty_memory_size_threshold_mb * 1024 * 1024;
+        threshold = dirty_memory_size_threshold_mb_ * 1024 * 1024;
     }
 
     // Trigger checkpoint when dirty memory exceeds threshold
