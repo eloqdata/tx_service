@@ -3817,8 +3817,12 @@ void LocalCcShards::DataSyncForRangePartition(
             LOG(WARNING)
                 << "DataSync range version mismatch with data sync ts: "
                 << data_sync_task->data_sync_ts_;
-            data_sync_task->SetErrorCode(CcErrorCode::GET_RANGE_ID_ERR);
+            txservice::AbortTx(data_sync_txm);
+            data_sync_task->SetError(CcErrorCode::GET_RANGE_ID_ERR);
             data_sync_task->SetScanTaskFinished();
+            PopPendingTask(ng_id, expected_ng_term, table_name, range_id);
+
+            return;
         }
 
         assert(!store_range);

@@ -21,6 +21,7 @@
  */
 #pragma once
 
+#include <atomic>
 #include <condition_variable>
 #include <map>
 #include <mutex>
@@ -193,8 +194,7 @@ public:
     {
         if (inst_)
         {
-            std::unique_lock<std::mutex> lk(inst_->mutex_);
-            inst_->requested_check_ = true;
+            inst_->requested_check_.store(true, std::memory_order_release);
             inst_->con_var_.notify_one();
         }
     }
@@ -242,6 +242,6 @@ protected:
     // The node to rise dead lock check.
     uint32_t check_node_id_;
     // If the dead lock check is requested by this node.
-    bool requested_check_{false};
+    std::atomic<bool> requested_check_{false};
 };
 }  // namespace txservice
