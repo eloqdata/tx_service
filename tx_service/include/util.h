@@ -579,43 +579,44 @@ static void InitializeTscFrequency()
  */
 static inline uint64_t ReadTimeMicroseconds()
 {
-#if defined(__x86_64__) || defined(_M_X64)
-    uint64_t cycles_per_us =
-        tsc_cycles_per_microsecond_.load(std::memory_order_relaxed);
-    if (__builtin_expect(cycles_per_us == 0, 0))
-    {
-        // Ensure TSC frequency is initialized (thread-safe, only initializes
-        // once)
-        InitializeTscFrequency();
-        cycles_per_us =
-            tsc_cycles_per_microsecond_.load(std::memory_order_acquire);
-    }
-    assert(cycles_per_us != 0);
-    // Read TSC (Time Stamp Counter) - returns CPU cycles
-    uint64_t cycles = __rdtsc();
-    return cycles / cycles_per_us;
-#elif defined(__aarch64__)
-    // Ensure ARM timer frequency is initialized (thread-safe, only initializes
-    // once)
-    uint64_t cycles_per_us =
-        tsc_cycles_per_microsecond_.load(std::memory_order_relaxed);
-    if (__builtin_expect(cycles_per_us == 0, 0))
-    {
-        InitializeTscFrequency();
-        cycles_per_us =
-            tsc_cycles_per_microsecond_.load(std::memory_order_acquire);
-    }
-    assert(cycles_per_us != 0);
-    // Read ARM virtual counter - returns timer ticks
-    uint64_t ticks;
-    __asm__ volatile("mrs %0, cntvct_el0" : "=r"(ticks));
-    return ticks / cycles_per_us;
-#else
-    // Fallback to std::chrono (slower but portable and precise)
-    using namespace std::chrono;
-    auto now = steady_clock::now();
-    return duration_cast<microseconds>(now.time_since_epoch()).count();
-#endif
+    return absl::GetCurrentTimeNanos() / 1000;
+// #if defined(__x86_64__) || defined(_M_X64)
+//     uint64_t cycles_per_us =
+//         tsc_cycles_per_microsecond_.load(std::memory_order_relaxed);
+//     if (__builtin_expect(cycles_per_us == 0, 0))
+//     {
+//         // Ensure TSC frequency is initialized (thread-safe, only initializes
+//         // once)
+//         InitializeTscFrequency();
+//         cycles_per_us =
+//             tsc_cycles_per_microsecond_.load(std::memory_order_acquire);
+//     }
+//     assert(cycles_per_us != 0);
+//     // Read TSC (Time Stamp Counter) - returns CPU cycles
+//     uint64_t cycles = __rdtsc();
+//     return cycles / cycles_per_us;
+// #elif defined(__aarch64__)
+//     // Ensure ARM timer frequency is initialized (thread-safe, only initializes
+//     // once)
+//     uint64_t cycles_per_us =
+//         tsc_cycles_per_microsecond_.load(std::memory_order_relaxed);
+//     if (__builtin_expect(cycles_per_us == 0, 0))
+//     {
+//         InitializeTscFrequency();
+//         cycles_per_us =
+//             tsc_cycles_per_microsecond_.load(std::memory_order_acquire);
+//     }
+//     assert(cycles_per_us != 0);
+//     // Read ARM virtual counter - returns timer ticks
+//     uint64_t ticks;
+//     __asm__ volatile("mrs %0, cntvct_el0" : "=r"(ticks));
+//     return ticks / cycles_per_us;
+// #else
+//     // Fallback to std::chrono (slower but portable and precise)
+//     using namespace std::chrono;
+//     auto now = steady_clock::now();
+//     return duration_cast<microseconds>(now.time_since_epoch()).count();
+// #endif
 }
 
 }  // namespace txservice
