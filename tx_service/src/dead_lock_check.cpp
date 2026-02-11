@@ -565,7 +565,7 @@ void DeadLockCheck::Run()
             continue;
         }
 
-        // Reset the check flag brefore gather lock dependancy
+        // Reset the check flag before gather lock dependancy
         requested_check_.store(false, std::memory_order_release);
         lk.unlock();
         GatherLockDependancy();
