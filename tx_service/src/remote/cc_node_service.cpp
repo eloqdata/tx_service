@@ -1675,8 +1675,8 @@ void CcNodeService::UpdateStandbyCkptTs(
         auto store_hd = Sharder::Instance().GetLocalCcShards()->store_hd_;
         if (store_hd)
         {
-            store_hd->StandbyReloadData(request->node_group_id(),
-                                        request->ng_term());
+            store_hd->OnUpdateStandbyCkptTs(request->node_group_id(),
+                                            request->ng_term());
         }
 
         Sharder::Instance().UpdateNodeGroupCkptTs(

@@ -405,7 +405,7 @@ public:
         return true;
     }
 
-    virtual bool StandbyReloadData(uint32_t ng_id, int64_t ng_term)
+    virtual bool OnUpdateStandbyCkptTs(uint32_t ng_id, int64_t ng_term)
     {
         return true;
     }
