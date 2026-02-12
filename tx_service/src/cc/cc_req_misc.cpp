@@ -1212,22 +1212,24 @@ bool UpdateCceCkptTsCc::Execute(CcShard &ccs)
                     static_cast<VersionedLruEntry<true, true> *>(ref.cce_);
 
                 assert(v_entry->CommitTs() > 1 && !v_entry->IsPersistent());
+                bool was_dirty = v_entry->IsDirty();
                 v_entry->entry_info_.SetDataStoreSize(ref.post_flush_size_);
 
                 v_entry->SetCkptTs(ref.commit_ts_);
                 v_entry->ClearBeingCkpt();
-                ccm->OnEntryFlushed(true, v_entry->IsPersistent());
+                ccm->OnEntryFlushed(was_dirty, v_entry->IsPersistent());
             }
             else
             {
                 VersionedLruEntry<false, true> *v_entry =
                     static_cast<VersionedLruEntry<false, true> *>(ref.cce_);
                 assert(v_entry->CommitTs() > 1 && !v_entry->IsPersistent());
+                bool was_dirty = v_entry->IsDirty();
                 v_entry->entry_info_.SetDataStoreSize(ref.post_flush_size_);
 
                 v_entry->SetCkptTs(ref.commit_ts_);
                 v_entry->ClearBeingCkpt();
-                ccm->OnEntryFlushed(true, v_entry->IsPersistent());
+                ccm->OnEntryFlushed(was_dirty, v_entry->IsPersistent());
             }
         }
         else
@@ -1238,9 +1240,10 @@ bool UpdateCceCkptTsCc::Execute(CcShard &ccs)
                     static_cast<VersionedLruEntry<true, false> *>(ref.cce_);
 
                 assert(v_entry->CommitTs() > 1 && !v_entry->IsPersistent());
+                bool was_dirty = v_entry->IsDirty();
                 v_entry->SetCkptTs(ref.commit_ts_);
                 v_entry->ClearBeingCkpt();
-                ccm->OnEntryFlushed(true, v_entry->IsPersistent());
+                ccm->OnEntryFlushed(was_dirty, v_entry->IsPersistent());
             }
             else
             {
@@ -1248,9 +1251,10 @@ bool UpdateCceCkptTsCc::Execute(CcShard &ccs)
                     static_cast<VersionedLruEntry<false, false> *>(ref.cce_);
 
                 assert(v_entry->CommitTs() > 1 && !v_entry->IsPersistent());
+                bool was_dirty = v_entry->IsDirty();
                 v_entry->SetCkptTs(ref.commit_ts_);
                 v_entry->ClearBeingCkpt();
-                ccm->OnEntryFlushed(true, v_entry->IsPersistent());
+                ccm->OnEntryFlushed(was_dirty, v_entry->IsPersistent());
             }
         }
     }

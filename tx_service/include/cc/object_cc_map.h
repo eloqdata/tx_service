@@ -1970,7 +1970,7 @@ public:
                     cce->payload_.cur_payload_ == nullptr
                         ? RecordStatus::Deleted
                         : RecordStatus::Normal;
-                bool was_dirty = (cce->CommitTs() > 1 && !cce->IsPersistent());
+                bool was_dirty = cce->IsDirty();
                 cce->SetCommitTsPayloadStatus(commit_ts, payload_status);
                 this->OnCommittedUpdate(cce, was_dirty);
                 if (s_obj_exist && payload_status != RecordStatus::Normal)
@@ -2006,7 +2006,7 @@ public:
 
                 // Emplace txn_cmd and try to commit all pending commands.
                 int64_t buffered_cmd_cnt_old = buffered_cmd_list.Size();
-                bool was_dirty = (cce->CommitTs() > 1 && !cce->IsPersistent());
+                bool was_dirty = cce->IsDirty();
                 cce->EmplaceAndCommitBufferedTxnCommand(
                     txn_cmd, shard_->NowInMilliseconds());
                 this->OnCommittedUpdate(cce, was_dirty);
