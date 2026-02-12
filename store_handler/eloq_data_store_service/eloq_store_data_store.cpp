@@ -888,7 +888,6 @@ void EloqStoreDataStore::ReloadDataFromCloud(int64_t term)
                    << term << ", actual: " << eloq_store_service_->Term();
         return;
     }
-    // eloq_store_service_->ReOpen(term);
     EloqStoreOperationData<::eloqstore::GlobalReopenRequest> *global_reopen_op =
         eloq_store_global_reopen_op_pool_.NextObject();
     global_reopen_op->Reset(nullptr);
@@ -896,6 +895,11 @@ void EloqStoreDataStore::ReloadDataFromCloud(int64_t term)
 
     ::eloqstore::GlobalReopenRequest &global_reopen_req =
         global_reopen_op->EloqStoreRequest();
+
+    DLOG(INFO)
+        << "===============EloqStoreDataStore::ReloadDataFromCloud, send "
+           "reopen request: "
+        << &global_reopen_req << " to EloqStore";
     uint64_t user_data = reinterpret_cast<uint64_t>(global_reopen_op);
     if (!eloq_store_service_->ExecAsyn(
             &global_reopen_req, user_data, OnReLoaded))
@@ -916,6 +920,10 @@ void EloqStoreDataStore::OnReLoaded(::eloqstore::KvRequest *req)
     ::eloqstore::GlobalReopenRequest *global_reopen_req =
         static_cast<::eloqstore::GlobalReopenRequest *>(req);
     PoolableGuard op_guard(global_reopen_op);
+
+    DLOG(INFO)
+        << "===============EloqStoreDataStore::OnReLoaded, reopen request: "
+        << &global_reopen_req << " from EloqStore";
 
     if (global_reopen_req->Error() == ::eloqstore::KvError::NoError)
     {
