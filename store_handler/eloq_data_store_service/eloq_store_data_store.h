@@ -48,9 +48,12 @@ struct EloqStoreOperationData : public Poolable
 
     void Clear() override
     {
-        data_store_request_ptr_->Clear();
-        data_store_request_ptr_->Free();
-        data_store_request_ptr_ = nullptr;
+        if (data_store_request_ptr_)
+        {
+            data_store_request_ptr_->Clear();
+            data_store_request_ptr_->Free();
+            data_store_request_ptr_ = nullptr;
+        }
     }
 
     ReqT &EloqStoreRequest()
@@ -261,6 +264,7 @@ private:
     static void OnScanNext(::eloqstore::KvRequest *req);
     static void OnScanDelete(::eloqstore::KvRequest *req);
     static void OnFloor(::eloqstore::KvRequest *req);
+    static void OnReLoaded(::eloqstore::KvRequest *req);
 
     void ScanDelete(DeleteRangeRequest *delete_range_req);
     void Floor(ScanRequest *scan_req);

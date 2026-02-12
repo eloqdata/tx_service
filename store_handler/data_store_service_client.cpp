@@ -3836,11 +3836,12 @@ bool DataStoreServiceClient::OnSnapshotReceived(
     return true;
 }
 
-bool DataStoreServiceClient::StandbyReloadData(uint32_t ng_id, int64_t ng_term)
+bool DataStoreServiceClient::OnUpdateStandbyCkptTs(uint32_t ng_id,
+                                                   int64_t ng_term)
 {
     if (data_store_service_ != nullptr)
     {
-        data_store_service_->OnSnapshotReceived(ng_id, ng_term, {}, "");
+        data_store_service_->OnUpdateStandbyCkptTs(ng_id, ng_term);
     }
     return true;
 }

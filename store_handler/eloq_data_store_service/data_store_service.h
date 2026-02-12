@@ -668,7 +668,7 @@ public:
                             const std::string &snapshot_path);
     // When primary flush data to cloud, the standby node will call this
     // function to sync the data from cloud.
-    void StandbyReloadData(uint32_t shard_id, int64_t ng_term);
+    void OnUpdateStandbyCkptTs(uint32_t shard_id, int64_t ng_term);
 
     DataStoreServiceClusterManager &GetClusterManager()
     {

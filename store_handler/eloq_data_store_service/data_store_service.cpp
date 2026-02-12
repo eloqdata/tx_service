@@ -2280,7 +2280,7 @@ void DataStoreService::OnSnapshotReceived(
     }
 }
 
-void DataStoreService::StandbyReloadData(uint32_t shard_id, int64_t term)
+void DataStoreService::OnUpdateStandbyCkptTs(uint32_t shard_id, int64_t term)
 {
     auto &ds_ref = data_shards_.at(shard_id);
     if (ds_ref.data_store_ != nullptr &&

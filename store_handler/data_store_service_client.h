@@ -483,7 +483,7 @@ public:
         uint32_t ng_id,
         const txservice::remote::OnSnapshotSyncedRequest *req) override;
 
-    bool StandbyReloadData(uint32_t ng_id, int64_t ng_term) override;
+    bool OnUpdateStandbyCkptTs(uint32_t ng_id, int64_t ng_term) override;
 
     /**
      * Serialize a record with is_deleted flag and record string.

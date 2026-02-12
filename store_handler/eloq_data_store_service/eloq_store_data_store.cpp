@@ -51,6 +51,9 @@ thread_local ObjectPool<EloqStoreOperationData<::eloqstore::FloorRequest>>
 thread_local ObjectPool<EloqStoreOperationData<::eloqstore::DropTableRequest>>
     eloq_store_drop_table_op_pool_;
 thread_local ObjectPool<ScanDeleteOperationData> eloq_store_scan_del_op_pool_;
+thread_local ObjectPool<
+    EloqStoreOperationData<::eloqstore::GlobalReopenRequest>>
+    eloq_store_global_reopen_op_pool_;
 
 inline void BuildKey(const WriteRecordsRequest &write_req,
                      const std::size_t key_first_idx,
@@ -878,7 +881,7 @@ void EloqStoreDataStore::ReloadDataFromCloud(int64_t term)
 {
     // TODO(lzx): implement this for eloqstore data store.
     LOG(INFO) << "EloqStoreDataStore::ReloadDataFromCloud, term: " << term;
-    if (eloq_store_service_->Term() != term)
+    if (eloq_store_service_->Term() != static_cast<uint64_t>(term))
     {
         LOG(ERROR) << "EloqStoreDataStore::ReloadDataFromCloud, term mismatch, "
                       "expected: "
@@ -886,9 +889,43 @@ void EloqStoreDataStore::ReloadDataFromCloud(int64_t term)
         return;
     }
     // eloq_store_service_->ReOpen(term);
+    EloqStoreOperationData<::eloqstore::GlobalReopenRequest> *global_reopen_op =
+        eloq_store_global_reopen_op_pool_.NextObject();
+    global_reopen_op->Reset(nullptr);
+    PoolableGuard op_guard(global_reopen_op);
 
-    assert(false);
-    return;
+    ::eloqstore::GlobalReopenRequest &global_reopen_req =
+        global_reopen_op->EloqStoreRequest();
+    uint64_t user_data = reinterpret_cast<uint64_t>(global_reopen_op);
+    if (!eloq_store_service_->ExecAsyn(
+            &global_reopen_req, user_data, OnReLoaded))
+    {
+        LOG(ERROR) << "Send reopen request to EloqStore failed";
+        return;
+    }
+
+    op_guard.Release();
 }
 
+void EloqStoreDataStore::OnReLoaded(::eloqstore::KvRequest *req)
+{
+    EloqStoreOperationData<::eloqstore::GlobalReopenRequest> *global_reopen_op =
+        static_cast<EloqStoreOperationData<::eloqstore::GlobalReopenRequest> *>(
+            reinterpret_cast<void *>(req->UserData()));
+    assert(req == &global_reopen_op->EloqStoreRequest());
+    ::eloqstore::GlobalReopenRequest *global_reopen_req =
+        static_cast<::eloqstore::GlobalReopenRequest *>(req);
+    PoolableGuard op_guard(global_reopen_op);
+
+    if (global_reopen_req->Error() == ::eloqstore::KvError::NoError)
+    {
+        LOG(INFO) << "Reopen EloqStore succeeded";
+    }
+    else
+    {
+        LOG(ERROR) << "Reopen EloqStore failed with error code: "
+                   << static_cast<uint32_t>(global_reopen_req->Error())
+                   << ", error message: " << global_reopen_req->ErrMessage();
+    }
+}
 }  // namespace EloqDS
