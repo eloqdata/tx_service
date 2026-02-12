@@ -40,6 +40,10 @@
 #ifdef ELOQDS
 #include "eloq_data_store_service/data_store_service.h"
 #endif
+#ifdef DATA_STORE_TYPE_ELOQDSS_ELOQSTORE
+DECLARE_string(eloq_store_cloud_store_path);
+DECLARE_uint32(eloq_store_cloud_request_threads);
+#endif
 
 // Data Substrate gflags definitions
 DEFINE_string(eloq_data_path, "/tmp/eloq_data", "Data substrate data path");
@@ -722,8 +726,67 @@ bool DataSubstrate::LoadCoreAndNetworkConfig(const INIReader &config_reader)
                 return false;
             }
             core_config_.core_num = std::max(1u, (NUM_VCPU * 9) / 10);
+            core_config_.core_num_auto_config_ = true;
             LOG(INFO) << "config is automatically set: " << field_core << "="
                       << core_config_.core_num << ", vcpu=" << NUM_VCPU;
+#ifdef DATA_STORE_TYPE_ELOQDSS_ELOQSTORE
+            if (core_config_.enable_data_store)
+            {
+                std::string cloud_store_path =
+                    !CheckCommandLineFlagIsDefault(
+                        "eloq_store_cloud_store_path")
+                        ? FLAGS_eloq_store_cloud_store_path
+                        : config_reader.GetString(
+                              "store",
+                              "eloq_store_cloud_store_path",
+                              FLAGS_eloq_store_cloud_store_path);
+                if (!cloud_store_path.empty())
+                {
+                    size_t cloud_request_threads = 0;
+                    if (!CheckCommandLineFlagIsDefault(
+                            "eloq_store_cloud_request_threads"))
+                    {
+                        cloud_request_threads =
+                            FLAGS_eloq_store_cloud_request_threads;
+                    }
+                    else if (config_reader.HasValue(
+                                 "store", "eloq_store_cloud_request_threads"))
+                    {
+                        cloud_request_threads = config_reader.GetInteger(
+                            "store", "eloq_store_cloud_request_threads", 0);
+                    }
+                    else
+                    {
+                        cloud_request_threads =
+                            std::max<size_t>(1, core_config_.core_num / 4);
+                    }
+
+                    if (cloud_request_threads > 0 && core_config_.core_num > 1)
+                    {
+                        auto reserved_cpu =
+                            std::max<size_t>(1, cloud_request_threads);
+                        auto decrease = std::min<size_t>(
+                            reserved_cpu, core_config_.core_num - 1);
+                        if (decrease > 0)
+                        {
+                            core_config_.core_num -= decrease;
+                            LOG(INFO) << "decrease core_number to "
+                                      << core_config_.core_num
+                                      << " to reserve cpu for eloqstore "
+                                         "threads.";
+                            auto adjusted_core_num =
+                                std::to_string(core_config_.core_num);
+                            GFLAGS_NAMESPACE::SetCommandLineOption(
+                                "bthread_concurrency",
+                                adjusted_core_num.c_str());
+                            GFLAGS_NAMESPACE::SetCommandLineOption(
+                                "eloq_store_worker_num",
+                                adjusted_core_num.c_str());
+                        }
+                    }
+                }
+            }
+#endif
         }
     }
     const char *field_mem = "node_memory_limit_mb";

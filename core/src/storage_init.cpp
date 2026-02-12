@@ -22,6 +22,7 @@
 #include <gflags/gflags.h>
 
 #include <memory>
+#include <string>
 
 #include "INIReader.h"
 #include "data_store_handler.h"
@@ -288,8 +289,10 @@ bool DataSubstrate::InitializeStorageHandler(const INIReader &config_reader)
         rocksdb_config, core_config_.enable_cache_replacement);
 
 #elif defined(DATA_STORE_TYPE_ELOQDSS_ELOQSTORE)
-    EloqDS::EloqStoreConfig eloq_store_config(
-        config_reader, eloq_dss_data_path, core_config_.node_memory_limit_mb);
+    EloqDS::EloqStoreConfig eloq_store_config(config_reader,
+                                              eloq_dss_data_path,
+                                              core_config_.node_memory_limit_mb,
+                                              core_config_.core_num);
     auto ds_factory = std::make_unique<EloqDS::EloqStoreDataStoreFactory>(
         std::move(eloq_store_config));
 #endif
