@@ -230,8 +230,12 @@ bool DataSubstrate::InitializeTxService(const INIReader &config_reader)
         {"max_standby_lag", max_standby_lag},
         {"kickout_data_for_test", kickout_data_for_test ? 1 : 0},
         {"range_slice_memory_limit_percent", range_slice_memory_limit_percent},
-        {"dirty_memory_check_interval", dirty_memory_check_interval},
-        {"dirty_memory_size_threshold_mb", dirty_memory_size_threshold_mb}};
+        {"dirty_memory_check_interval",
+         static_cast<uint32_t>(std::min(dirty_memory_check_interval,
+                                        static_cast<uint64_t>(UINT32_MAX)))},
+        {"dirty_memory_size_threshold_mb",
+         static_cast<uint32_t>(std::min(dirty_memory_size_threshold_mb,
+                                        static_cast<uint64_t>(UINT32_MAX)))}};
 
     txservice::CatalogFactory *catalog_factory[NUM_EXTERNAL_ENGINES] = {
         nullptr, nullptr, nullptr};

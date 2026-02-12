@@ -122,6 +122,23 @@ CcShard::CcShard(
         static_cast<uint64_t>(MB(node_memory_limit_mb) * memory_usage_ratio);
     memory_limit_ /= core_cnt_;
 
+    // Pre-calculate dirty memory threshold in bytes
+    if (dirty_memory_size_threshold_mb_ == 0)
+    {
+        // Default: 10% of memory limit per shard, with minimum floor of 1 MB
+        dirty_memory_threshold_bytes_ =
+            static_cast<uint64_t>(memory_limit_ * 0.1);
+        if (dirty_memory_threshold_bytes_ == 0)
+        {
+            dirty_memory_threshold_bytes_ = 1024 * 1024;  // 1 MB minimum
+        }
+    }
+    else
+    {
+        dirty_memory_threshold_bytes_ =
+            dirty_memory_size_threshold_mb_ * 1024 * 1024;
+    }
+
     // Calculate standby buffer memory limit: 10% of node memory limit per
     // shard. These part of memory is calculated together with shard memory so
     // no need to subtract it from memory_limit_.
@@ -427,8 +444,9 @@ void CcShard::AdjustDataKeyStats(const TableName &table_name,
 
         // Check dirty memory thresholds periodically
         if (dirty_memory_check_interval_ > 0 &&
-            ++adjust_stats_call_count_ % dirty_memory_check_interval_ == 0)
+            ++adjust_stats_call_count_ >= dirty_memory_check_interval_)
         {
+            adjust_stats_call_count_ = 0;
             CheckAndTriggerCkptByDirtyMemory();
         }
     }
@@ -447,38 +465,38 @@ void CcShard::CheckAndTriggerCkptByDirtyMemory()
     }
 
     // Get current memory usage
+    if (GetShardHeap() == nullptr)
+    {
+        return;
+    }
     int64_t allocated = 0, committed = 0;
     GetShardHeap()->Full(&allocated, &committed);
+
+    if (allocated <= 0)
+    {
+        return;
+    }
 
     // Calculate dirty memory
     double dirty_key_ratio = static_cast<double>(dirty_data_key_count_) /
                              static_cast<double>(data_key_count_);
     uint64_t dirty_memory = static_cast<uint64_t>(allocated * dirty_key_ratio);
 
-    // Determine threshold: use configured value or default to 10% of
-    // memory_limit
-    uint64_t threshold;
-    if (dirty_memory_size_threshold_mb_ == 0)
-    {
-        // Default: 10% of memory limit
-        threshold = static_cast<uint64_t>(memory_limit_ * 0.1);
-    }
-    else
-    {
-        threshold = dirty_memory_size_threshold_mb_ * 1024 * 1024;
-    }
-
     // Trigger checkpoint when dirty memory exceeds threshold
-    if (dirty_memory > threshold)
+    if (dirty_memory > dirty_memory_threshold_bytes_)
     {
         DLOG(INFO) << "Shard " << core_id_
                    << " triggering checkpoint - dirty_memory="
-                   << (dirty_memory / (1024 * 1024))
-                   << "MB (threshold=" << (threshold / (1024 * 1024))
+                   << (dirty_memory / (1024 * 1024)) << "MB (threshold="
+                   << (dirty_memory_threshold_bytes_ / (1024 * 1024))
                    << "MB), dirty_keys=" << dirty_data_key_count_ << "/"
                    << data_key_count_;
 
-        ckpter_->Notify(true);  // Request immediate checkpoint
+        // Only notify if no checkpoint is already requested to avoid spamming
+        if (!ckpter_->IsCheckpointRequested())
+        {
+            ckpter_->Notify(true);  // Request immediate checkpoint
+        }
     }
 }
 

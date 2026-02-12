@@ -143,6 +143,16 @@ public:
         return ongoing_data_sync_cnt_.load(std::memory_order_relaxed) > 0;
     }
 
+    /**
+     * @brief Check if a checkpoint has been requested but not yet completed.
+     * This is useful to avoid spamming checkpoint notifications when a
+     * checkpoint is already queued.
+     */
+    bool IsCheckpointRequested() const
+    {
+        return request_ckpt_.load(std::memory_order_relaxed);
+    }
+
 private:
     enum struct Status
     {
@@ -152,10 +162,10 @@ private:
     };
 
     LocalCcShards &local_shards_;
-    // protects request_ckpt_ and status_
+    // protects status_
     std::mutex ckpt_mux_;
     std::condition_variable ckpt_cv_;
-    bool request_ckpt_;
+    std::atomic<bool> request_ckpt_{false};
     store::DataStoreHandler *store_hd_;
     std::thread thd_;
     Status ckpt_thd_status_;

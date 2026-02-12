@@ -1305,6 +1305,8 @@ private:
     // Config for dirty memory checkpoint triggering.
     uint64_t dirty_memory_check_interval_{1000};
     uint64_t dirty_memory_size_threshold_mb_{0};
+    // Pre-calculated threshold in bytes (0 means use 10% of memory_limit_).
+    uint64_t dirty_memory_threshold_bytes_{0};
 
     Checkpointer *ckpter_;
 
