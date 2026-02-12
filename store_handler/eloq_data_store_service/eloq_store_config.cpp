@@ -146,6 +146,9 @@ DEFINE_uint32(eloq_store_cloud_request_threads,
 DEFINE_uint32(eloq_store_max_write_concurrency,
               0,
               "EloqStore max write concurrency");
+DEFINE_uint32(eloq_store_direct_io_buffer_pool_size,
+              16,
+              "EloqStore DirectIO buffer pool size per shard.");
 
 namespace EloqDS
 {
@@ -605,6 +608,13 @@ EloqStoreConfig::EloqStoreConfig(const INIReader &config_reader,
             : config_reader.GetInteger("store",
                                        "eloq_store_max_write_concurrency",
                                        FLAGS_eloq_store_max_write_concurrency);
+    eloqstore_configs_.direct_io_buffer_pool_size =
+        !CheckCommandLineFlagIsDefault("eloq_store_direct_io_buffer_pool_size")
+            ? FLAGS_eloq_store_direct_io_buffer_pool_size
+            : config_reader.GetInteger(
+                  "store",
+                  "eloq_store_direct_io_buffer_pool_size",
+                  FLAGS_eloq_store_direct_io_buffer_pool_size);
     if (!eloqstore_configs_.cloud_store_path.empty())
     {
         if (CheckCommandLineFlagIsDefault("eloq_store_cloud_request_threads"))
