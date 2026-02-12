@@ -609,8 +609,7 @@ EloqStoreConfig::EloqStoreConfig(const INIReader &config_reader,
                                        "eloq_store_max_write_concurrency",
                                        FLAGS_eloq_store_max_write_concurrency);
     eloqstore_configs_.direct_io_buffer_pool_size =
-        !CheckCommandLineFlagIsDefault(
-            "eloq_store_direct_io_buffer_pool_size")
+        !CheckCommandLineFlagIsDefault("eloq_store_direct_io_buffer_pool_size")
             ? FLAGS_eloq_store_direct_io_buffer_pool_size
             : config_reader.GetInteger(
                   "store",
