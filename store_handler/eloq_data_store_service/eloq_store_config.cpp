@@ -95,10 +95,10 @@ DEFINE_uint32(eloq_store_coroutine_stack_size,
               32 * 1024,
               "EloqStore coroutine stack size.");
 DEFINE_uint32(eloq_store_num_retained_archives,
-              0,
+              100,
               "EloqStore num retained archives.");
 DEFINE_uint32(eloq_store_archive_interval_secs,
-              86400,
+              0,
               "EloqStore archive interval secs.");
 DEFINE_uint32(eloq_store_max_archive_tasks,
               256,
@@ -113,13 +113,13 @@ DEFINE_uint32(eloq_store_reserve_space_ratio,
               100,
               "EloqStore reserve space ratio.");
 DEFINE_bool(eloq_store_prewarm_cloud_cache,
-            false,
+            true,
             "EloqStore prewarm cloud cache during startup.");
 DEFINE_uint32(eloq_store_prewarm_task_count,
               3,
               "EloqStore prewarm task count per shard.");
 DEFINE_bool(eloq_store_reuse_local_files,
-            false,
+            true,
             "EloqStore reuse local files in cloud mode");
 DEFINE_uint32(eloq_store_data_page_size, 1 << 12, "EloqStore data page size.");
 DEFINE_uint32(eloq_store_pages_per_file_shift,
