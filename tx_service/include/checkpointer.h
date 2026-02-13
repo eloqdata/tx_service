@@ -143,16 +143,6 @@ public:
         return ongoing_data_sync_cnt_.load(std::memory_order_relaxed) > 0;
     }
 
-    /**
-     * @brief Check if a checkpoint has been requested but not yet completed.
-     * This is useful to avoid spamming checkpoint notifications when a
-     * checkpoint is already queued.
-     */
-    bool IsCheckpointRequested() const
-    {
-        return request_ckpt_.load(std::memory_order_relaxed);
-    }
-
 private:
     enum struct Status
     {

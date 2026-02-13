@@ -422,7 +422,7 @@ void Checkpointer::Run()
                 // Either have requested a checkpoint, or
                 // we've sleeped for at least checkpoint_interval_ seconds.
                 // Only enqueue new checkpoint task if there's idle worker.
-                return (request_ckpt_.load(std::memory_order_relaxed) ||
+                return (request_ckpt_.load(std::memory_order_acquire) ||
                         std::chrono::high_resolution_clock::now() >=
                             last_checkpoint_ts_ +
                                 std::chrono::seconds(checkpoint_interval_));
@@ -432,7 +432,7 @@ void Checkpointer::Run()
         }
 
         CODE_FAULT_INJECTOR("checkpointer_skip_ckpt", {
-            request_ckpt_.store(false, std::memory_order_relaxed);
+            request_ckpt_.store(false, std::memory_order_release);
             last_checkpoint_ts_ = std::chrono::high_resolution_clock::now();
             continue;
         });
@@ -449,7 +449,7 @@ void Checkpointer::Run()
         // notify all waiting that one round checkpoint is done.
         ckpt_cv_.notify_all();
 
-        request_ckpt_.store(false, std::memory_order_relaxed);
+        request_ckpt_.store(false, std::memory_order_release);
     }
 
     // ensure normal shutdown execute checkpoint since we could receive
@@ -471,7 +471,12 @@ void Checkpointer::Notify(bool request_ckpt)
 {
     if (request_ckpt)
     {
-        request_ckpt_.store(true, std::memory_order_relaxed);
+        bool expected = false;
+        if (!request_ckpt_.compare_exchange_strong(
+                expected, true, std::memory_order_release))
+        {
+            return;
+        }
     }
     std::unique_lock<std::mutex> lk(ckpt_mux_);
     ckpt_cv_.notify_one();

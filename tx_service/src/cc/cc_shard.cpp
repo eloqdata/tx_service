@@ -1318,7 +1318,7 @@ bool CcShard::FlushEntryForTest(
 
 void CcShard::NotifyCkpt(bool request_ckpt)
 {
-    if (ckpter_ != nullptr && !ckpter_->IsCheckpointRequested())
+    if (ckpter_ != nullptr)
     {
         ckpter_->Notify(request_ckpt);
     }
