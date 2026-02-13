@@ -4170,32 +4170,32 @@ void SplitFlushRangeOp::ClearInfos()
 void SplitFlushRangeOp::Forward(TransactionExecution *txm)
 {
     if (txm->TxStatus() == TxnStatus::Recovering &&
-        Sharder::Instance().LeaderTerm(txm->TxCcNodeId()) < 0)
+        (Sharder::Instance().CandidateLeaderTerm(txm->TxCcNodeId()) !=
+             txm->TxTerm() &&
+         Sharder::Instance().LeaderTerm(txm->TxCcNodeId()) != txm->TxTerm()))
     {
-        // This is a recovered tx and replay is not done yet. We should wait for
-        // replay finish before forwarding tx machine.
-        if (Sharder::Instance().CandidateLeaderTerm(txm->TxCcNodeId()) !=
-            txm->TxTerm())
-        {
-            // Recovered term is invalid. Do not call ForceToFinish as it will
-            // cause infinite recursive call. Clean up tx state directly.
-            txm->bool_resp_->Finish(false);
+        // Recovered term is invalid. Do not call ForceToFinish as it will
+        // cause infinite recursive call. Clean up tx state directly.
+        txm->bool_resp_->Finish(false);
 
-            ClearInfos();
+        ClearInfos();
 
-            txm->state_stack_.pop_back();
-            assert(txm->state_stack_.empty());
+        txm->state_stack_.pop_back();
+        assert(txm->state_stack_.empty());
 
-            assert(this == txm->split_flush_op_.get());
-            LocalCcShards *shards = Sharder::Instance().GetLocalCcShards();
-            std::unique_lock<std::mutex> lk(
-                shards->split_flush_range_op_pool_mux_);
-            shards->split_flush_range_op_pool_.emplace_back(
-                std::move(txm->split_flush_op_));
-            assert(txm->split_flush_op_ == nullptr);
-        }
+        assert(this == txm->split_flush_op_.get());
+        LocalCcShards *shards = Sharder::Instance().GetLocalCcShards();
+        std::unique_lock<std::mutex> lk(shards->split_flush_range_op_pool_mux_);
+        shards->split_flush_range_op_pool_.emplace_back(
+            std::move(txm->split_flush_op_));
+        assert(txm->split_flush_op_ == nullptr);
         return;
     }
+    // else: allow forwarding recovered split flush tx on the candidate leader,
+    // otherwise, a deadlock might occur in the following scenario:  If the
+    // replay data cannot be completed due to insufficient memory, the recovered
+    // split transaction will have to wait for the leader to complete log replay
+    // before it can continue forwarding.
     if (op_ == nullptr)
     {
         // Initialize commit ts as the start time of tx. This value will

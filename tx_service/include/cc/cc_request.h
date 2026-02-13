@@ -283,6 +283,11 @@ public:
         return node_group_id_;
     }
 
+    int64_t NodeGroupTerm() const
+    {
+        return ng_term_;
+    }
+
     int64_t TxTerm() const
     {
         return tx_term_;
@@ -525,6 +530,40 @@ public:
 
     AcquireAllCc(const AcquireAllCc &rhs) = delete;
     AcquireAllCc(AcquireAllCc &&rhs) = delete;
+
+    bool ValidTermCheck() override
+    {
+        int64_t ng_term = Sharder::Instance().LeaderTerm(node_group_id_);
+        int64_t ng_candidate_term =
+            Sharder::Instance().CandidateLeaderTerm(node_group_id_);
+        ng_term = std::max(ng_term, ng_candidate_term);
+
+        if (ng_term < 0)
+        {
+            return false;
+        }
+        else
+        {
+            uint32_t tx_ng_id = (Txn() >> 32L) >> 10;
+            if (tx_ng_id == node_group_id_ && ng_term != tx_term_)
+            {
+                // The request is processed on the coordinator candidate leader,
+                // but the term is mismatch.
+                return false;
+            }
+        }
+        assert(ng_term > 0);
+
+        if (ng_term_ < 0)
+        {
+            ng_term_ = ng_term;
+        }
+        else if (ng_term != ng_term_)
+        {
+            return false;
+        }
+        return true;
+    }
 
     void Reset(const TableName *tname,
                const TxKey *key,
@@ -918,6 +957,40 @@ public:
     PostWriteAllCc() = default;
     PostWriteAllCc(const PostWriteAllCc &rhs) = delete;
     PostWriteAllCc(PostWriteAllCc &&rhs) = delete;
+
+    bool ValidTermCheck() override
+    {
+        int64_t ng_term = Sharder::Instance().LeaderTerm(node_group_id_);
+        int64_t ng_candidate_term =
+            Sharder::Instance().CandidateLeaderTerm(node_group_id_);
+        ng_term = std::max(ng_term, ng_candidate_term);
+
+        if (ng_term < 0)
+        {
+            return false;
+        }
+        else
+        {
+            uint32_t tx_ng_id = (Txn() >> 32L) >> 10;
+            if (tx_ng_id == node_group_id_ && ng_term != tx_term_)
+            {
+                // The request is processed on the coordinator candidate leader,
+                // but the term is mismatch.
+                return false;
+            }
+        }
+        assert(ng_term > 0);
+
+        if (ng_term_ < 0)
+        {
+            ng_term_ = ng_term;
+        }
+        else if (ng_term != ng_term_)
+        {
+            return false;
+        }
+        return true;
+    }
 
     void Reset(const TableName *tname,
                const TxKey *key,

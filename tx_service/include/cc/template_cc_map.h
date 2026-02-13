@@ -702,11 +702,8 @@ public:
         bool will_insert = false;
 
         uint32_t ng_id = req.NodeGroupId();
-        int64_t ng_term = Sharder::Instance().LeaderTerm(ng_id);
-        if (ng_term < 0)
-        {
-            return hd_res->SetError(CcErrorCode::REQUESTED_NODE_NOT_LEADER);
-        }
+        int64_t ng_term = req.NodeGroupTerm();
+        assert(ng_term > 0);
 
         uint16_t tx_core_id = ((req.Txn() >> 32L) & 0x3FF) % shard_->core_cnt_;
 
@@ -994,13 +991,6 @@ public:
         {
             assert(false);
             return false;
-        }
-
-        int64_t ng_term = Sharder::Instance().LeaderTerm(req.NodeGroupId());
-        if (ng_term < 0)
-        {
-            req.Result()->SetError(CcErrorCode::REQUESTED_NODE_NOT_LEADER);
-            return true;
         }
 
         const KeyT *target_key = nullptr;
@@ -5599,6 +5589,21 @@ public:
                 it = deduce_iterator(*start_key);
                 slice_end_key = typed_slice->EndKey();
                 end_it = deduce_iterator(*slice_end_key);
+                if (!(*start_key < *slice_end_key))
+                {
+                    DLOG(ERROR)
+                        << "!!!ERROR!!! start key: " << start_key->ToString()
+                        << ", search key: " << search_key.ToString()
+                        << ", slice start key: "
+                        << typed_slice->StartKey()->ToString()
+                        << ", slice end key: " << slice_end_key->ToString()
+                        << ", export base table item: " << std::boolalpha
+                        << req.export_base_table_item_
+                        << ", current slice index: "
+                        << req.curr_slice_index_[shard_->core_id_]
+                        << " on core: " << shard_->core_id_
+                        << ", table: " << table_name_.StringView();
+                }
 
                 if (it != end_it)
                 {
