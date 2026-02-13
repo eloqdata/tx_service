@@ -492,11 +492,7 @@ void CcShard::CheckAndTriggerCkptByDirtyMemory()
                    << "MB), dirty_keys=" << dirty_data_key_count_ << "/"
                    << data_key_count_;
 
-        // Only notify if no checkpoint is already requested to avoid spamming
-        if (!ckpter_->IsCheckpointRequested())
-        {
-            ckpter_->Notify(true);  // Request immediate checkpoint
-        }
+        NotifyCkpt(true);  // Request immediate checkpoint
     }
 }
 
@@ -1322,7 +1318,7 @@ bool CcShard::FlushEntryForTest(
 
 void CcShard::NotifyCkpt(bool request_ckpt)
 {
-    if (ckpter_ != nullptr)
+    if (ckpter_ != nullptr && !ckpter_->IsCheckpointRequested())
     {
         ckpter_->Notify(request_ckpt);
     }
