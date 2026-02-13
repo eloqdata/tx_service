@@ -55,13 +55,15 @@ Checkpointer::Checkpointer(LocalCcShards &shards,
                            store::DataStoreHandler *write_hd,
                            const uint32_t &checkpoint_interval,
                            TxLog *log_agent,
-                           uint32_t ckpt_delay_seconds)
+                           uint32_t ckpt_delay_seconds,
+                           uint32_t min_checkpoint_interval)
     : local_shards_(shards),
       ckpt_mux_(),
       ckpt_cv_(),
       store_hd_(write_hd),
       ckpt_thd_status_(Status::Active),
       checkpoint_interval_(checkpoint_interval),
+      min_checkpoint_interval_(min_checkpoint_interval),
       ckpt_delay_time_(ckpt_delay_seconds * 1000000),
       log_agent_(log_agent)
 {
@@ -79,6 +81,7 @@ Checkpointer::Checkpointer(LocalCcShards &shards,
 
     DLOG(INFO) << "checkpointer init, checkpoint_interval_: "
                << checkpoint_interval_
+               << " ,min_checkpoint_interval_: " << min_checkpoint_interval_
                << " ,ckpt_delay_seconds: " << ckpt_delay_seconds;
 }
 
@@ -471,6 +474,13 @@ void Checkpointer::Notify(bool request_ckpt)
 {
     if (request_ckpt)
     {
+        if (std::chrono::high_resolution_clock::now() <
+            last_checkpoint_ts_ +
+                std::chrono::seconds(min_checkpoint_interval_))
+        {
+            return;
+        }
+
         bool expected = false;
         if (!request_ckpt_.compare_exchange_strong(
                 expected, true, std::memory_order_release))
