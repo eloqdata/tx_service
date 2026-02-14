@@ -9,7 +9,7 @@
 #include "tx_service.h"
 DEFINE_int32(checkpointer_interval, 10, "Checkpointer interval in seconds");
 DEFINE_int32(checkpointer_min_interval,
-             10,
+             9,
              "Minimum checkpointer interval in seconds");
 DEFINE_int32(range_slice_memory_limit_percent,
              10,
