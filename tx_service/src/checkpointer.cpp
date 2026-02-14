@@ -55,14 +55,15 @@ Checkpointer::Checkpointer(LocalCcShards &shards,
                            store::DataStoreHandler *write_hd,
                            const uint32_t &checkpoint_interval,
                            TxLog *log_agent,
-                           uint32_t ckpt_delay_seconds)
+                           uint32_t ckpt_delay_seconds,
+                           uint32_t min_checkpoint_interval)
     : local_shards_(shards),
       ckpt_mux_(),
       ckpt_cv_(),
-      request_ckpt_(false),
       store_hd_(write_hd),
       ckpt_thd_status_(Status::Active),
       checkpoint_interval_(checkpoint_interval),
+      min_checkpoint_interval_(min_checkpoint_interval),
       ckpt_delay_time_(ckpt_delay_seconds * 1000000),
       log_agent_(log_agent)
 {
@@ -80,6 +81,7 @@ Checkpointer::Checkpointer(LocalCcShards &shards,
 
     DLOG(INFO) << "checkpointer init, checkpoint_interval_: "
                << checkpoint_interval_
+               << " ,min_checkpoint_interval_: " << min_checkpoint_interval_
                << " ,ckpt_delay_seconds: " << ckpt_delay_seconds;
 }
 
@@ -420,10 +422,10 @@ void Checkpointer::Run()
                     return true;
                 }
 
-                // Either cc shards are full and have requested a checkpoint, or
+                // Either have requested a checkpoint, or
                 // we've sleeped for at least checkpoint_interval_ seconds.
                 // Only enqueue new checkpoint task if there's idle worker.
-                return (request_ckpt_ ||
+                return (request_ckpt_.load(std::memory_order_acquire) ||
                         std::chrono::high_resolution_clock::now() >=
                             last_checkpoint_ts_ +
                                 std::chrono::seconds(checkpoint_interval_));
@@ -433,7 +435,7 @@ void Checkpointer::Run()
         }
 
         CODE_FAULT_INJECTOR("checkpointer_skip_ckpt", {
-            request_ckpt_ = false;
+            request_ckpt_.store(false, std::memory_order_release);
             last_checkpoint_ts_ = std::chrono::high_resolution_clock::now();
             continue;
         });
@@ -450,7 +452,7 @@ void Checkpointer::Run()
         // notify all waiting that one round checkpoint is done.
         ckpt_cv_.notify_all();
 
-        request_ckpt_ = false;
+        request_ckpt_.store(false, std::memory_order_release);
     }
 
     // ensure normal shutdown execute checkpoint since we could receive
@@ -470,11 +472,23 @@ void Checkpointer::Run()
  */
 void Checkpointer::Notify(bool request_ckpt)
 {
-    std::unique_lock<std::mutex> lk(ckpt_mux_);
     if (request_ckpt)
     {
-        request_ckpt_ = true;
+        if (std::chrono::high_resolution_clock::now() <
+            last_checkpoint_ts_ +
+                std::chrono::seconds(min_checkpoint_interval_))
+        {
+            return;
+        }
+
+        bool expected = false;
+        if (!request_ckpt_.compare_exchange_strong(
+                expected, true, std::memory_order_release))
+        {
+            return;
+        }
     }
+    std::unique_lock<std::mutex> lk(ckpt_mux_);
     ckpt_cv_.notify_one();
 }
 
