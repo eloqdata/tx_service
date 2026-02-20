@@ -64,9 +64,12 @@ Checkpointer::Checkpointer(LocalCcShards &shards,
       ckpt_thd_status_(Status::Active),
       checkpoint_interval_(checkpoint_interval),
       min_ckpt_request_interval_(min_ckpt_request_interval),
+      last_checkpoint_ts_(std::chrono::system_clock::now()),
+      last_checkpoint_request_ts_(std::chrono::system_clock::now()),
       ckpt_delay_time_(ckpt_delay_seconds * 1000000),
-      log_agent_(log_agent),
-      last_checkpoint_request_ts_(std::chrono::system_clock::now())
+      ongoing_data_sync_cnt_(0),
+      tx_service_(nullptr),
+      log_agent_(log_agent)
 {
     tx_service_ = shards.tx_service_;
     for (std::unique_ptr<CcShard> &ccs : shards.cc_shards_)
