@@ -8,9 +8,10 @@
 #include "sequences/sequences.h"
 #include "tx_service.h"
 DEFINE_int32(checkpointer_interval, 10, "Checkpointer interval in seconds");
-DEFINE_int32(checkpointer_min_interval,
-             9,
-             "Minimum checkpointer interval in seconds");
+DEFINE_int32(checkpointer_min_ckpt_request_interval,
+             5,
+             "Minimum checkpoint request interval in seconds, to avoid too "
+             "frequent checkpoint requests");
 DEFINE_int32(range_slice_memory_limit_percent,
              10,
              "Range slice memory limit percentage");
@@ -71,20 +72,13 @@ bool DataSubstrate::InitializeTxService(const INIReader &config_reader)
                                        "checkpointer_delay_seconds",
                                        FLAGS_checkpointer_delay_seconds);
 
-    uint64_t checkpointer_min_interval =
-        !CheckCommandLineFlagIsDefault("checkpointer_min_interval")
-            ? FLAGS_checkpointer_min_interval
-            : config_reader.GetInteger("local",
-                                       "checkpointer_min_interval",
-                                       FLAGS_checkpointer_min_interval);
-
-    if (checkpointer_min_interval >= checkpointer_interval)
-    {
-        LOG(ERROR) << "checkpointer_min_interval (" << checkpointer_min_interval
-                   << ") must be smaller than checkpointer_interval ("
-                   << checkpointer_interval << ")";
-        return false;
-    }
+    uint64_t checkpointer_min_ckpt_request_interval =
+        !CheckCommandLineFlagIsDefault("checkpointer_min_ckpt_request_interval")
+            ? FLAGS_checkpointer_min_ckpt_request_interval
+            : config_reader.GetInteger(
+                  "local",
+                  "checkpointer_min_ckpt_request_interval",
+                  FLAGS_checkpointer_min_ckpt_request_interval);
 
     uint64_t collect_active_tx_ts_interval_seconds =
         !CheckCommandLineFlagIsDefault("collect_active_tx_ts_interval_seconds")
@@ -235,7 +229,8 @@ bool DataSubstrate::InitializeTxService(const INIReader &config_reader)
     std::map<std::string, uint32_t> tx_service_conf{
         {"core_num", core_config_.core_num},
         {"checkpointer_interval", checkpointer_interval},
-        {"checkpointer_min_interval", checkpointer_min_interval},
+        {"checkpointer_min_ckpt_request_interval",
+         checkpointer_min_ckpt_request_interval},
         {"node_memory_limit_mb", core_config_.node_memory_limit_mb},
         {"checkpointer_delay_seconds", checkpointer_delay_seconds},
         {"collect_active_tx_ts_interval_seconds",

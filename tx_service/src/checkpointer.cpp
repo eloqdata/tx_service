@@ -56,16 +56,17 @@ Checkpointer::Checkpointer(LocalCcShards &shards,
                            const uint32_t &checkpoint_interval,
                            TxLog *log_agent,
                            uint32_t ckpt_delay_seconds,
-                           uint32_t min_checkpoint_interval)
+                           uint32_t min_ckpt_request_interval)
     : local_shards_(shards),
       ckpt_mux_(),
       ckpt_cv_(),
       store_hd_(write_hd),
       ckpt_thd_status_(Status::Active),
       checkpoint_interval_(checkpoint_interval),
-      min_checkpoint_interval_(min_checkpoint_interval),
+      min_ckpt_request_interval_(min_ckpt_request_interval),
       ckpt_delay_time_(ckpt_delay_seconds * 1000000),
-      log_agent_(log_agent)
+      log_agent_(log_agent),
+      last_checkpoint_request_ts_(std::chrono::high_resolution_clock::now())
 {
     tx_service_ = shards.tx_service_;
     for (std::unique_ptr<CcShard> &ccs : shards.cc_shards_)
@@ -81,7 +82,7 @@ Checkpointer::Checkpointer(LocalCcShards &shards,
 
     DLOG(INFO) << "checkpointer init, checkpoint_interval_: "
                << checkpoint_interval_
-               << " ,min_checkpoint_interval_: " << min_checkpoint_interval_
+               << " ,min_ckpt_request_interval_: " << min_ckpt_request_interval_
                << " ,ckpt_delay_seconds: " << ckpt_delay_seconds;
 }
 
@@ -475,8 +476,8 @@ void Checkpointer::Notify(bool request_ckpt)
     if (request_ckpt)
     {
         if (std::chrono::high_resolution_clock::now() <
-            last_checkpoint_ts_ +
-                std::chrono::seconds(min_checkpoint_interval_))
+            last_checkpoint_request_ts_.load(std::memory_order_acquire) +
+                std::chrono::seconds(min_ckpt_request_interval_))
         {
             return;
         }
@@ -487,6 +488,10 @@ void Checkpointer::Notify(bool request_ckpt)
         {
             return;
         }
+
+        last_checkpoint_request_ts_.store(
+            std::chrono::high_resolution_clock::now(),
+            std::memory_order_release);
     }
     std::unique_lock<std::mutex> lk(ckpt_mux_);
     ckpt_cv_.notify_one();

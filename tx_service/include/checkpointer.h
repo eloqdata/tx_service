@@ -51,7 +51,7 @@ public:
                  const uint32_t &checkpoint_interval,
                  TxLog *log_agent,
                  uint32_t ckpt_delay_seconds,
-                 uint32_t min_checkpoint_interval);
+                 uint32_t min_ckpt_request_interval);
 
     ~Checkpointer() = default;
 
@@ -161,8 +161,10 @@ private:
     std::thread thd_;
     Status ckpt_thd_status_;
     const uint32_t checkpoint_interval_;
-    const uint32_t min_checkpoint_interval_;
+    const uint32_t min_ckpt_request_interval_;
     std::chrono::system_clock::time_point last_checkpoint_ts_;
+    std::atomic<std::chrono::high_resolution_clock::time_point>
+        last_checkpoint_request_ts_;
     uint32_t ckpt_delay_time_;  // unit: Microsecond
     std::atomic<uint64_t> ongoing_data_sync_cnt_{0};
     TxService *tx_service_;
