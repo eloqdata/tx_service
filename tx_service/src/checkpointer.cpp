@@ -66,7 +66,7 @@ Checkpointer::Checkpointer(LocalCcShards &shards,
       min_ckpt_request_interval_(min_ckpt_request_interval),
       ckpt_delay_time_(ckpt_delay_seconds * 1000000),
       log_agent_(log_agent),
-      last_checkpoint_request_ts_(std::chrono::high_resolution_clock::now())
+      last_checkpoint_request_ts_(std::chrono::system_clock::now())
 {
     tx_service_ = shards.tx_service_;
     for (std::unique_ptr<CcShard> &ccs : shards.cc_shards_)
@@ -410,7 +410,7 @@ void Checkpointer::Ckpt(bool is_last_ckpt)
 void Checkpointer::Run()
 {
     std::unique_lock<std::mutex> lk(ckpt_mux_);
-    last_checkpoint_ts_ = std::chrono::high_resolution_clock::now();
+    last_checkpoint_ts_ = std::chrono::system_clock::now();
     while (ckpt_thd_status_ == Status::Active)
     {
         while (!ckpt_cv_.wait_for(
@@ -427,7 +427,7 @@ void Checkpointer::Run()
                 // we've sleeped for at least checkpoint_interval_ seconds.
                 // Only enqueue new checkpoint task if there's idle worker.
                 return (request_ckpt_.load(std::memory_order_acquire) ||
-                        std::chrono::high_resolution_clock::now() >=
+                        std::chrono::system_clock::now() >=
                             last_checkpoint_ts_ +
                                 std::chrono::seconds(checkpoint_interval_));
             }))
@@ -437,7 +437,7 @@ void Checkpointer::Run()
 
         CODE_FAULT_INJECTOR("checkpointer_skip_ckpt", {
             request_ckpt_.store(false, std::memory_order_release);
-            last_checkpoint_ts_ = std::chrono::high_resolution_clock::now();
+            last_checkpoint_ts_ = std::chrono::system_clock::now();
             continue;
         });
 
@@ -446,7 +446,7 @@ void Checkpointer::Run()
             break;
         }
 
-        last_checkpoint_ts_ = std::chrono::high_resolution_clock::now();
+        last_checkpoint_ts_ = std::chrono::system_clock::now();
         lk.unlock();
         Ckpt(false);
         lk.lock();
@@ -475,23 +475,20 @@ void Checkpointer::Notify(bool request_ckpt)
 {
     if (request_ckpt)
     {
-        if (std::chrono::high_resolution_clock::now() <
-            last_checkpoint_request_ts_.load(std::memory_order_acquire) +
-                std::chrono::seconds(min_ckpt_request_interval_))
+        auto now = std::chrono::system_clock::now();
+        if (now < last_checkpoint_request_ts_.load(std::memory_order_relaxed) +
+                      std::chrono::seconds(min_ckpt_request_interval_))
         {
             return;
         }
 
         bool expected = false;
-        if (!request_ckpt_.compare_exchange_strong(
-                expected, true, std::memory_order_release))
+        if (!request_ckpt_.compare_exchange_strong(expected, true))
         {
             return;
         }
 
-        last_checkpoint_request_ts_.store(
-            std::chrono::high_resolution_clock::now(),
-            std::memory_order_release);
+        last_checkpoint_request_ts_.store(now);
     }
     std::unique_lock<std::mutex> lk(ckpt_mux_);
     ckpt_cv_.notify_one();

@@ -106,8 +106,7 @@ CcShard::CcShard(
                        catalog_factory[4]},
       system_handler_(system_handler),
       active_si_txs_(),
-      dirty_memory_check_interval_(dirty_memory_check_interval),
-      dirty_memory_size_threshold_mb_(dirty_memory_size_threshold_mb)
+      dirty_memory_check_interval_(dirty_memory_check_interval)
 {
     // Reserve range_slice_memory_limit_percent% for range slice info.
     // We update this to dynamically reserve the configured range slice
@@ -123,7 +122,7 @@ CcShard::CcShard(
     memory_limit_ /= core_cnt_;
 
     // Pre-calculate dirty memory threshold in bytes
-    if (dirty_memory_size_threshold_mb_ == 0)
+    if (dirty_memory_size_threshold_mb == 0)
     {
         // Default: 10% of memory limit per shard, with minimum floor of 1 MB
         dirty_memory_threshold_bytes_ =
@@ -136,7 +135,7 @@ CcShard::CcShard(
     else
     {
         dirty_memory_threshold_bytes_ =
-            dirty_memory_size_threshold_mb_ * 1024 * 1024;
+            dirty_memory_size_threshold_mb * 1024 * 1024;
     }
 
     // Calculate standby buffer memory limit: 10% of node memory limit per

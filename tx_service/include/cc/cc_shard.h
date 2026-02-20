@@ -1306,8 +1306,6 @@ private:
     // The interval (in number of calls to AdjustDataKeyStats) to check whether
     // dirty memory exceeds the threshold.
     uint64_t dirty_memory_check_interval_{1000};
-    // The threshold of dirty memory size (in MB) to trigger checkpoint.
-    uint64_t dirty_memory_size_threshold_mb_{0};
     // Pre-calculated threshold in bytes (0 means use 10% of memory_limit_).
     uint64_t dirty_memory_threshold_bytes_{0};
 
