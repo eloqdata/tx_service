@@ -65,7 +65,12 @@ Checkpointer::Checkpointer(LocalCcShards &shards,
       checkpoint_interval_(checkpoint_interval),
       min_ckpt_request_interval_(min_ckpt_request_interval),
       last_checkpoint_ts_(std::chrono::system_clock::now()),
-      last_checkpoint_request_ts_(std::chrono::system_clock::now()),
+      // Initialize last_checkpoint_request_ts_ to a time point that is
+      // sufficiently in the past, so that the first checkpoint request can be
+      // processed immediately
+      last_checkpoint_request_ts_(
+          std::chrono::system_clock::now() -
+          std::chrono::seconds(2 * min_ckpt_request_interval)),
       ckpt_delay_time_(ckpt_delay_seconds * 1000000),
       ongoing_data_sync_cnt_(0),
       tx_service_(nullptr),
