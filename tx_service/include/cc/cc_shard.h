@@ -299,7 +299,9 @@ public:
             uint64_t cluster_config_version,
             metrics::MetricsRegistry *metrics_registry = nullptr,
             metrics::CommonLabels common_labels = {},
-            uint32_t range_slice_memory_limit_percent = 10);
+            uint32_t range_slice_memory_limit_percent = 10,
+            uint64_t dirty_memory_check_interval = 1000,
+            uint64_t dirty_memory_size_threshold_mb = 0);
 
     void Init();
 
@@ -318,6 +320,12 @@ public:
                             int64_t dirty_delta);
 
     std::pair<size_t, size_t> GetDataKeyStats() const;
+
+    /**
+     * @brief Check dirty memory thresholds and trigger checkpoint if exceeded.
+     * Called periodically from AdjustDataKeyStats based on sampling interval.
+     */
+    void CheckAndTriggerCkptByDirtyMemory();
 
     void InitializeShardHeap()
     {
@@ -1291,6 +1299,15 @@ private:
     size_t data_key_count_{0};
     // The number of committed dirty keys in data tables only.
     size_t dirty_data_key_count_{0};
+    // Counter for sampling dirty memory checks in AdjustDataKeyStats.
+    uint64_t adjust_stats_call_count_{0};
+
+    // Config for dirty memory checkpoint triggering.
+    // The interval (in number of calls to AdjustDataKeyStats) to check whether
+    // dirty memory exceeds the threshold.
+    uint64_t dirty_memory_check_interval_{1000};
+    // Pre-calculated threshold in bytes (0 means use 10% of memory_limit_).
+    uint64_t dirty_memory_threshold_bytes_{0};
 
     Checkpointer *ckpter_;
 

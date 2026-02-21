@@ -8,6 +8,10 @@
 #include "sequences/sequences.h"
 #include "tx_service.h"
 DEFINE_int32(checkpointer_interval, 10, "Checkpointer interval in seconds");
+DEFINE_int32(checkpointer_min_ckpt_request_interval,
+             5,
+             "Minimum checkpoint request interval in seconds, to avoid too "
+             "frequent checkpoint requests");
 DEFINE_int32(range_slice_memory_limit_percent,
              10,
              "Range slice memory limit percentage");
@@ -42,6 +46,16 @@ DEFINE_bool(auto_redirect,
             false,
             "If redirect remote object command to remote node internally");
 
+// Checkpoint trigger threshold based on dirty memory size
+// Default is 0, which means 10% of memory_limit will be used as threshold
+DEFINE_uint64(dirty_memory_check_interval,
+              1000,
+              "Check dirty memory every N calls to AdjustDataKeyStats");
+DEFINE_uint64(dirty_memory_size_threshold_mb,
+              0,
+              "Trigger checkpoint when dirty memory exceeds this (MB). "
+              "0 means use 10% of memory_limit as default");
+
 bool DataSubstrate::InitializeTxService(const INIReader &config_reader)
 {
     uint64_t checkpointer_interval =
@@ -57,6 +71,14 @@ bool DataSubstrate::InitializeTxService(const INIReader &config_reader)
             : config_reader.GetInteger("local",
                                        "checkpointer_delay_seconds",
                                        FLAGS_checkpointer_delay_seconds);
+
+    uint64_t checkpointer_min_ckpt_request_interval =
+        !CheckCommandLineFlagIsDefault("checkpointer_min_ckpt_request_interval")
+            ? FLAGS_checkpointer_min_ckpt_request_interval
+            : config_reader.GetInteger(
+                  "local",
+                  "checkpointer_min_ckpt_request_interval",
+                  FLAGS_checkpointer_min_ckpt_request_interval);
 
     uint64_t collect_active_tx_ts_interval_seconds =
         !CheckCommandLineFlagIsDefault("collect_active_tx_ts_interval_seconds")
@@ -134,6 +156,20 @@ bool DataSubstrate::InitializeTxService(const INIReader &config_reader)
             : config_reader.GetBoolean(
                   "local", "auto_redirect", FLAGS_auto_redirect);
 
+    uint64_t dirty_memory_check_interval =
+        !CheckCommandLineFlagIsDefault("dirty_memory_check_interval")
+            ? FLAGS_dirty_memory_check_interval
+            : config_reader.GetInteger("local",
+                                       "dirty_memory_check_interval",
+                                       FLAGS_dirty_memory_check_interval);
+
+    uint64_t dirty_memory_size_threshold_mb =
+        !CheckCommandLineFlagIsDefault("dirty_memory_size_threshold_mb")
+            ? FLAGS_dirty_memory_size_threshold_mb
+            : config_reader.GetInteger("local",
+                                       "dirty_memory_size_threshold_mb",
+                                       FLAGS_dirty_memory_size_threshold_mb);
+
     bool fork_hm_process = false;
     std::string hm_ip = "";
     std::string hm_bin_path = "";
@@ -193,6 +229,8 @@ bool DataSubstrate::InitializeTxService(const INIReader &config_reader)
     std::map<std::string, uint32_t> tx_service_conf{
         {"core_num", core_config_.core_num},
         {"checkpointer_interval", checkpointer_interval},
+        {"checkpointer_min_ckpt_request_interval",
+         checkpointer_min_ckpt_request_interval},
         {"node_memory_limit_mb", core_config_.node_memory_limit_mb},
         {"checkpointer_delay_seconds", checkpointer_delay_seconds},
         {"collect_active_tx_ts_interval_seconds",
@@ -205,7 +243,13 @@ bool DataSubstrate::InitializeTxService(const INIReader &config_reader)
         {"enable_key_cache", enable_key_cache},
         {"max_standby_lag", max_standby_lag},
         {"kickout_data_for_test", kickout_data_for_test ? 1 : 0},
-        {"range_slice_memory_limit_percent", range_slice_memory_limit_percent}};
+        {"range_slice_memory_limit_percent", range_slice_memory_limit_percent},
+        {"dirty_memory_check_interval",
+         static_cast<uint32_t>(std::min(dirty_memory_check_interval,
+                                        static_cast<uint64_t>(UINT32_MAX)))},
+        {"dirty_memory_size_threshold_mb",
+         static_cast<uint32_t>(std::min(dirty_memory_size_threshold_mb,
+                                        static_cast<uint64_t>(UINT32_MAX)))}};
 
     txservice::CatalogFactory *catalog_factory[NUM_EXTERNAL_ENGINES] = {
         nullptr, nullptr, nullptr};
