@@ -21,6 +21,8 @@
  */
 #include "eloq_store_config.h"
 
+#include <sys/stat.h>
+
 #include <algorithm>
 #include <cassert>
 #include <cerrno>
@@ -32,8 +34,6 @@
 #include <sstream>
 #include <system_error>
 #include <unordered_set>
-
-#include <sys/stat.h>
 
 #include "gflags/gflags.h"
 #include "glog/logging.h"
@@ -298,8 +298,7 @@ inline std::filesystem::path ResolveExistingPath(
     const std::filesystem::path &raw_path)
 {
     std::error_code ec;
-    std::filesystem::path candidate =
-        std::filesystem::absolute(raw_path, ec);
+    std::filesystem::path candidate = std::filesystem::absolute(raw_path, ec);
     if (ec)
     {
         candidate = raw_path;
@@ -332,8 +331,7 @@ struct DiskCapacitySummary
 };
 
 inline DiskCapacitySummary CalculateAutoLocalSpaceLimit(
-    const std::vector<std::string> &storage_paths,
-    double ratio)
+    const std::vector<std::string> &storage_paths, double ratio)
 {
     DiskCapacitySummary summary;
     std::unordered_set<dev_t> visited_devices;
@@ -357,8 +355,7 @@ inline DiskCapacitySummary CalculateAutoLocalSpaceLimit(
         };
         if (::stat(existing_path.c_str(), &path_stat) != 0)
         {
-            LOG(WARNING) << "stat failed for path '"
-                         << existing_path.string()
+            LOG(WARNING) << "stat failed for path '" << existing_path.string()
                          << "' when calculating eloq_store_local_space_limit: "
                          << std::strerror(errno);
             continue;
@@ -397,8 +394,7 @@ inline DiskCapacitySummary CalculateAutoLocalSpaceLimit(
     }
     else
     {
-        summary.usable_capacity_bytes =
-            static_cast<uint64_t>(scaled_capacity);
+        summary.usable_capacity_bytes = static_cast<uint64_t>(scaled_capacity);
     }
     return summary;
 }
@@ -658,13 +654,12 @@ EloqStoreConfig::EloqStoreConfig(const INIReader &config_reader,
     {
         local_space_limit = FLAGS_eloq_store_local_space_limit;
     }
-    else if (config_reader.HasValue("store",
-                                    "eloq_store_local_space_limit"))
+    else if (config_reader.HasValue("store", "eloq_store_local_space_limit"))
     {
-        local_space_limit = config_reader.GetString(
-            "store",
-            "eloq_store_local_space_limit",
-            FLAGS_eloq_store_local_space_limit);
+        local_space_limit =
+            config_reader.GetString("store",
+                                    "eloq_store_local_space_limit",
+                                    FLAGS_eloq_store_local_space_limit);
     }
     else
     {
@@ -676,12 +671,10 @@ EloqStoreConfig::EloqStoreConfig(const INIReader &config_reader,
             auto_local_space_limit = disk_summary.usable_capacity_bytes;
             LOG(INFO) << "config is automatically set: "
                       << "eloq_store_local_space_limit="
-                      << HumanReadableBytes(auto_local_space_limit)
-                      << " ("
+                      << HumanReadableBytes(auto_local_space_limit) << " ("
                       << static_cast<int>(kAutoLocalSpaceRatio * 100)
                       << "% of total storage capacity "
-                      << HumanReadableBytes(
-                             disk_summary.total_capacity_bytes)
+                      << HumanReadableBytes(disk_summary.total_capacity_bytes)
                       << ")";
         }
         else
