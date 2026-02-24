@@ -114,6 +114,7 @@ set(ELOQ_STORE_SOURCES
     ${ELOQ_STORE_SOURCE_DIR}/src/storage/shard.cpp
     ${ELOQ_STORE_SOURCE_DIR}/src/tasks/write_buffer_aggregator.cpp
     ${ELOQ_STORE_SOURCE_DIR}/src/tasks/archive_crond.cpp
+    ${ELOQ_STORE_SOURCE_DIR}/src/tasks/reopen_task.cpp
     ${ELOQ_STORE_SOURCE_DIR}/src/tasks/background_write.cpp
     ${ELOQ_STORE_SOURCE_DIR}/src/tasks/batch_write_task.cpp
     ${ELOQ_STORE_SOURCE_DIR}/src/tasks/prewarm_task.cpp
