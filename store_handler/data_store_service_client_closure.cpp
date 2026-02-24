@@ -437,7 +437,7 @@ void FetchTableCatalogCallback(void *data,
                                DataStoreServiceClient &client,
                                const remote::CommonResult &result)
 {
-    LOG(INFO) << "yf: fetch catalog finished";
+    // LOG(INFO) << "yf: fetch catalog finished";
     auto *read_closure = static_cast<ReadClosure *>(closure);
 
     auto *fetch_cc = static_cast<txservice::FetchCatalogCc *>(data);
@@ -896,9 +896,9 @@ void FetchTableRangesCallback(void *data,
 
             fetch_range_cc->Merge();
 
-            LOG(INFO) << "yf: FetchTableRanges callback, table name = "
-                      << fetch_range_cc->table_name_.StringView()
-                      << ", finished";
+            // LOG(INFO) << "yf: FetchTableRanges callback, table name = "
+            //          << fetch_range_cc->table_name_.StringView()
+            //          << ", finished";
 
             fetch_range_cc->SetFinish(error_code);
         }
