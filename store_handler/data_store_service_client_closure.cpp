@@ -754,11 +754,6 @@ void FetchTableRangesCallback(void *data,
         DLOG(INFO) << "FetchTableRangesCallback, error_code:" << err_code
                    << ", error_msg: " << result.error_msg();
 
-        // Mark this partition as completed with error and only call SetFinish
-        // after all partitions have completed (success or error).
-        const int32_t kv_part_id = scan_next_closure->PartitionId();
-        (void) kv_part_id;  // currently unused, but kept for symmetry.
-
         int32_t remaining = 0;
         int error_code = 0;
         {
@@ -896,7 +891,9 @@ void FetchTableRangesCallback(void *data,
                         fetch_range_cc->table_name_),
                     1);
                 // Use kv_part_id 0 for the synthetic default range bucket.
-                fetch_range_cc->AppendTableRanges(0, std::move(default_ranges));
+                fetch_range_cc->AppendTableRanges(
+                    fetch_range_cc->kv_partition_id_,
+                    std::move(default_ranges));
             }
 
             fetch_range_cc->Merge();
