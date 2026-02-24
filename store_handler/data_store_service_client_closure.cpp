@@ -891,9 +891,7 @@ void FetchTableRangesCallback(void *data,
                         fetch_range_cc->table_name_),
                     1);
                 // Use kv_part_id 0 for the synthetic default range bucket.
-                fetch_range_cc->AppendTableRanges(
-                    fetch_range_cc->kv_partition_id_,
-                    std::move(default_ranges));
+                fetch_range_cc->AppendTableRanges(0, std::move(default_ranges));
             }
 
             fetch_range_cc->Merge();

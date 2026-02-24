@@ -996,7 +996,6 @@ void DataStoreServiceClient::FetchTableRanges(
         scan_state.kv_end_key_ = scan_state.kv_start_key_;
         scan_state.kv_end_key_.back()++;
         scan_state.kv_session_id_.clear();
-        scan_state.completed_ = false;
 
         uint32_t data_shard_id = GetShardIdByPartitionId(kv_part_id, false);
 
