@@ -23,9 +23,17 @@
 
 #include <algorithm>
 #include <cassert>
+#include <cerrno>
+#include <cstring>
 #include <filesystem>
+#include <iomanip>
+#include <limits>
 #include <regex>
 #include <sstream>
+#include <system_error>
+#include <unordered_set>
+
+#include <sys/stat.h>
 
 #include "gflags/gflags.h"
 #include "glog/logging.h"
@@ -265,6 +273,134 @@ inline uint64_t parse_size(const std::string &size_str)
     std::string_view num_str = remove_last_two(size_str_v);
     uint64_t num = std::stoull(std::string(num_str));
     return num * unit;
+}
+
+inline std::string HumanReadableBytes(uint64_t bytes)
+{
+    static constexpr const char *kSuffixes[] = {
+        "B", "KB", "MB", "GB", "TB", "PB", "EB"};
+    constexpr size_t suffix_count = sizeof(kSuffixes) / sizeof(kSuffixes[0]);
+    double value = static_cast<double>(bytes);
+    size_t index = 0;
+    while (value >= 1024.0 && index + 1 < suffix_count)
+    {
+        value /= 1024.0;
+        ++index;
+    }
+    std::ostringstream oss;
+    oss << std::fixed
+        << std::setprecision((value >= 10.0 || index == 0) ? 0 : 2) << value
+        << kSuffixes[index];
+    return oss.str();
+}
+
+inline std::filesystem::path ResolveExistingPath(
+    const std::filesystem::path &raw_path)
+{
+    std::error_code ec;
+    std::filesystem::path candidate =
+        std::filesystem::absolute(raw_path, ec);
+    if (ec)
+    {
+        candidate = raw_path;
+    }
+    while (!candidate.empty())
+    {
+        bool exists = std::filesystem::exists(candidate, ec);
+        if (!ec && exists)
+        {
+            return candidate;
+        }
+        if (ec)
+        {
+            break;
+        }
+        std::filesystem::path parent = candidate.parent_path();
+        if (parent == candidate)
+        {
+            break;
+        }
+        candidate = parent;
+    }
+    return {};
+}
+
+struct DiskCapacitySummary
+{
+    uint64_t total_capacity_bytes = 0;
+    uint64_t usable_capacity_bytes = 0;
+};
+
+inline DiskCapacitySummary CalculateAutoLocalSpaceLimit(
+    const std::vector<std::string> &storage_paths,
+    double ratio)
+{
+    DiskCapacitySummary summary;
+    std::unordered_set<dev_t> visited_devices;
+    for (const auto &path_str : storage_paths)
+    {
+        if (path_str.empty())
+        {
+            continue;
+        }
+        std::filesystem::path requested_path(path_str);
+        std::filesystem::path existing_path =
+            ResolveExistingPath(requested_path);
+        if (existing_path.empty())
+        {
+            LOG(WARNING) << "Unable to resolve path '" << path_str
+                         << "' when calculating eloq_store_local_space_limit";
+            continue;
+        }
+        struct stat path_stat
+        {
+        };
+        if (::stat(existing_path.c_str(), &path_stat) != 0)
+        {
+            LOG(WARNING) << "stat failed for path '"
+                         << existing_path.string()
+                         << "' when calculating eloq_store_local_space_limit: "
+                         << std::strerror(errno);
+            continue;
+        }
+        if (!visited_devices.emplace(path_stat.st_dev).second)
+        {
+            continue;
+        }
+        std::error_code ec;
+        auto space_info = std::filesystem::space(existing_path, ec);
+        if (ec)
+        {
+            LOG(WARNING) << "Failed to query filesystem space for path '"
+                         << existing_path.string()
+                         << "' when calculating eloq_store_local_space_limit: "
+                         << ec.message();
+            continue;
+        }
+        summary.total_capacity_bytes += space_info.capacity;
+    }
+    if (summary.total_capacity_bytes == 0 || ratio <= 0.0)
+    {
+        summary.usable_capacity_bytes = 0;
+        return summary;
+    }
+    long double scaled_capacity =
+        static_cast<long double>(summary.total_capacity_bytes) * ratio;
+    if (scaled_capacity <= 0)
+    {
+        summary.usable_capacity_bytes = 0;
+    }
+    else if (scaled_capacity >=
+             static_cast<long double>(std::numeric_limits<uint64_t>::max()))
+    {
+        summary.usable_capacity_bytes = std::numeric_limits<uint64_t>::max();
+    }
+    else
+    {
+        summary.usable_capacity_bytes =
+            static_cast<uint64_t>(scaled_capacity);
+    }
+    return summary;
 }
 
 EloqStoreConfig::EloqStoreConfig(const INIReader &config_reader,
@@ -516,13 +652,55 @@ EloqStoreConfig::EloqStoreConfig(const INIReader &config_reader,
             : config_reader.GetInteger("store",
                                        "eloq_store_file_amplify_factor",
                                        FLAGS_eloq_store_file_amplify_factor);
-    std::string local_space_limit =
-        !CheckCommandLineFlagIsDefault("eloq_store_local_space_limit")
-            ? FLAGS_eloq_store_local_space_limit
-            : config_reader.GetString("store",
-                                      "eloq_store_local_space_limit",
-                                      FLAGS_eloq_store_local_space_limit);
-    eloqstore_configs_.local_space_limit = parse_size(local_space_limit);
+    uint64_t auto_local_space_limit = 0;
+    std::string local_space_limit;
+    if (!CheckCommandLineFlagIsDefault("eloq_store_local_space_limit"))
+    {
+        local_space_limit = FLAGS_eloq_store_local_space_limit;
+    }
+    else if (config_reader.HasValue("store",
+                                    "eloq_store_local_space_limit"))
+    {
+        local_space_limit = config_reader.GetString(
+            "store",
+            "eloq_store_local_space_limit",
+            FLAGS_eloq_store_local_space_limit);
+    }
+    else
+    {
+        constexpr double kAutoLocalSpaceRatio = 0.8;
+        DiskCapacitySummary disk_summary = CalculateAutoLocalSpaceLimit(
+            eloqstore_configs_.store_path, kAutoLocalSpaceRatio);
+        if (disk_summary.usable_capacity_bytes > 0)
+        {
+            auto_local_space_limit = disk_summary.usable_capacity_bytes;
+            LOG(INFO) << "config is automatically set: "
+                      << "eloq_store_local_space_limit="
+                      << HumanReadableBytes(auto_local_space_limit)
+                      << " ("
+                      << static_cast<int>(kAutoLocalSpaceRatio * 100)
+                      << "% of total storage capacity "
+                      << HumanReadableBytes(
+                             disk_summary.total_capacity_bytes)
+                      << ")";
+        }
+        else
+        {
+            LOG(WARNING)
+                << "Failed to derive eloq_store_local_space_limit from "
+                << "eloq_store_data_path_list; falling back to default value "
+                << FLAGS_eloq_store_local_space_limit;
+            local_space_limit = FLAGS_eloq_store_local_space_limit;
+        }
+    }
+    if (auto_local_space_limit > 0)
+    {
+        eloqstore_configs_.local_space_limit = auto_local_space_limit;
+    }
+    else
+    {
+        eloqstore_configs_.local_space_limit = parse_size(local_space_limit);
+    }
     eloqstore_configs_.reserve_space_ratio =
         !CheckCommandLineFlagIsDefault("eloq_store_reserve_space_ratio")
             ? FLAGS_eloq_store_reserve_space_ratio
