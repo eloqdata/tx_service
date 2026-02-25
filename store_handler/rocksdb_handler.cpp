@@ -208,7 +208,16 @@ bool RocksDBHandler::Connect()
         for (const auto &entry :
              std::filesystem::directory_iterator(ckpt_path_))
         {
-            std::filesystem::remove_all(entry.path());
+            error_code.clear();
+            std::filesystem::remove_all(entry.path(), error_code);
+            if (error_code.value() != 0)
+            {
+                LOG(ERROR) << "unable to remove rocksdb checkpoint entry: "
+                           << entry.path()
+                           << ", error code: " << error_code.value()
+                           << ", error message: " << error_code.message();
+                return false;
+            }
         }
     }
 
@@ -241,7 +250,16 @@ bool RocksDBHandler::Connect()
         for (const auto &entry :
              std::filesystem::directory_iterator(received_snapshot_path_))
         {
-            std::filesystem::remove_all(entry.path());
+            error_code.clear();
+            std::filesystem::remove_all(entry.path(), error_code);
+            if (error_code.value() != 0)
+            {
+                LOG(ERROR) << "unable to remove received snapshot entry: "
+                           << entry.path()
+                           << ", error code: " << error_code.value()
+                           << ", error message: " << error_code.message();
+                return false;
+            }
         }
     }
 
