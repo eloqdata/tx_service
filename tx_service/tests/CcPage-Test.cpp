@@ -29,6 +29,7 @@
 #include "template_cc_map.h"
 #include "tx_key.h"     // CompositeKey
 #include "tx_record.h"  // CompositeRecord
+#include "tx_service_common.h"
 #include "type.h"
 
 namespace txservice
@@ -175,6 +176,140 @@ TEST_CASE("CcPage clean tests", "[cc-page]")
     local_cc_shards.Terminate();
 
     REQUIRE(total_remain + total_free == MAP_NUM * MAP_SIZE);
+}
+
+// A CompositeRecord<int> subclass that reports an artificially large payload
+// size. Used to test the payload-size-aware cache eviction protection.
+struct LargeCompositeRecord : public CompositeRecord<int>
+{
+    explicit LargeCompositeRecord(int val, size_t reported_size)
+        : CompositeRecord<int>(val), reported_size_(reported_size)
+    {
+    }
+
+    size_t Size() const override
+    {
+        return reported_size_;
+    }
+
+    TxRecord::Uptr Clone() const override
+    {
+        return std::make_unique<LargeCompositeRecord>(*this);
+    }
+
+    size_t reported_size_;
+};
+
+TEST_CASE("Large-value eviction protection test", "[cc-page]")
+{
+    std::unordered_map<uint32_t, std::vector<NodeConfig>> ng_configs{
+        {0, {NodeConfig(0, "127.0.0.1", 8600)}}};
+    std::map<std::string, uint32_t> tx_cnf{{"node_memory_limit_mb", 1000},
+                                           {"enable_key_cache", 0},
+                                           {"reltime_sampling", 0},
+                                           {"range_split_worker_num", 1},
+                                           {"core_num", 1},
+                                           {"realtime_sampling", 0},
+                                           {"checkpointer_interval", 10},
+                                           {"enable_shard_heap_defragment", 0},
+                                           {"node_log_limit_mb", 1000}};
+    LocalCcShards local_cc_shards(
+        0, 0, tx_cnf, nullptr, nullptr, &ng_configs, 2, nullptr, nullptr, true);
+    CcShard shard(0,
+                  1,
+                  10000,
+                  10000,
+                  false,
+                  0,
+                  local_cc_shards,
+                  nullptr,
+                  nullptr,
+                  &ng_configs,
+                  2);
+    shard.Init();
+    std::string raft_path("");
+    Sharder::Instance(0,
+                      &ng_configs,
+                      0,
+                      nullptr,
+                      nullptr,
+                      &local_cc_shards,
+                      nullptr,
+                      &raft_path);
+
+    const size_t MAP_SIZE = 500;
+    const size_t LARGE_PAYLOAD_SIZE = 1024;  // 1 KB per entry
+
+    std::string table_name = "large_val_test";
+    TableName tname(table_name, TableType::Primary, TableEngine::EloqSql);
+    auto cc_map = std::make_unique<TemplateCcMap<CompositeKey<std::string, int>,
+                                                 CompositeRecord<int>,
+                                                 true,
+                                                 true>>(
+        &shard, 0, tname, 1, nullptr, true);
+
+    // Insert entries that are guaranteed to be free (persistent, no locks).
+    std::vector<CompositeKey<std::string, int>> keys;
+    for (size_t i = 0; i < MAP_SIZE; i++)
+    {
+        keys.emplace_back(std::make_tuple(table_name, static_cast<int>(i)));
+    }
+    std::vector<CompositeKey<std::string, int> *> key_ptrs;
+    for (auto &k : keys)
+    {
+        key_ptrs.push_back(&k);
+    }
+    REQUIRE(cc_map->BulkEmplaceFreeForTest(key_ptrs));
+    REQUIRE(cc_map->VerifyOrdering() == MAP_SIZE);
+
+    // Assign a shared large-payload object to every entry so that
+    // PayloadSize() > LARGE_PAYLOAD_SIZE / 2 (the threshold we will use).
+    auto large_payload =
+        std::make_shared<LargeCompositeRecord>(42, LARGE_PAYLOAD_SIZE);
+    cc_map->SetPayloadForTest(large_payload);
+
+    // PART 1: Protection active – entries must NOT be evicted.
+    txservice_large_value_threshold = LARGE_PAYLOAD_SIZE / 2;
+    txservice_large_value_eviction_age = UINT64_MAX;
+
+    size_t freed_with_protection = 0;
+    while (true)
+    {
+        auto [free_cnt, yield] = shard.Clean();
+        shard.VerifyLruList();
+        if (free_cnt == 0)
+        {
+            break;
+        }
+        freed_with_protection += free_cnt;
+    }
+    REQUIRE(freed_with_protection == 0);
+    REQUIRE(cc_map->VerifyOrdering() == MAP_SIZE);
+
+    // Reset the clean cursor so Part 2 rescans from the beginning.
+    shard.ResetCleanStart();
+
+    // PART 2: Protection disabled – all free entries must be evicted.
+    txservice_large_value_threshold = 0;
+
+    size_t freed_without_protection = 0;
+    while (true)
+    {
+        auto [free_cnt, yield] = shard.Clean();
+        shard.VerifyLruList();
+        if (free_cnt == 0)
+        {
+            break;
+        }
+        freed_without_protection += free_cnt;
+    }
+    REQUIRE(freed_without_protection == MAP_SIZE);
+
+    // Restore global defaults so other tests are not affected.
+    txservice_large_value_threshold = 0;
+    txservice_large_value_eviction_age = 1000;
+
+    local_cc_shards.Terminate();
 }
 
 }  // namespace txservice

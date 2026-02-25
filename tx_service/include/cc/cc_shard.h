@@ -1010,6 +1010,11 @@ public:
         return clean_start_ccp_ != nullptr && clean_start_ccp_ == &tail_ccp_;
     }
 
+    uint64_t AccessCounter() const
+    {
+        return access_counter_;
+    }
+
     SystemHandler *GetSystemHandler()
     {
         return system_handler_;

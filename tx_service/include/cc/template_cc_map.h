@@ -9180,6 +9180,57 @@ public:
         return true;
     }
 
+    /**
+     * @brief Inserts keys with all entries guaranteed to be free (persistent,
+     * unlocked). Used in tests for large-value eviction protection.
+     *
+     * @param keys Keys to insert.
+     * @return true on success.
+     */
+    bool BulkEmplaceFreeForTest(std::vector<KeyT *> &keys)
+    {
+        for (auto key : keys)
+        {
+            bool emplace = false;
+            auto it = FindEmplace(*key, &emplace, false, false);
+            if (!emplace)
+            {
+                assert(false);
+                return false;
+            }
+            CcEntry<KeyT, ValueT, VersionedRecord, RangePartitioned> *cce =
+                it->second;
+            CcPage<KeyT, ValueT, VersionedRecord, RangePartitioned> *ccp =
+                it.GetPage();
+            // Set commit_ts = 1, ckpt_ts = UINT64_MAX so entry is persistent.
+            bool was_dirty = cce->IsDirty();
+            cce->SetCommitTsPayloadStatus(1, RecordStatus::Normal);
+            cce->SetCkptTs(UINT64_MAX);
+            OnFlushed(cce, was_dirty);
+            OnCommittedUpdate(cce, was_dirty);
+            ccp->last_dirty_commit_ts_ =
+                std::max(cce->CommitTs(), ccp->last_dirty_commit_ts_);
+        }
+        return true;
+    }
+
+    /**
+     * @brief Sets the payload of all entries in the cc map to the given shared
+     * pointer. Used in tests for large-value eviction protection.
+     *
+     * @param payload The payload to assign to every entry.
+     */
+    void SetPayloadForTest(std::shared_ptr<ValueT> payload)
+    {
+        for (auto &[key, page_ptr] : ccmp_)
+        {
+            for (auto &cce : page_ptr->entries_)
+            {
+                cce->payload_.cur_payload_ = payload;
+            }
+        }
+    }
+
 protected:
     void OnCommittedUpdate(
         const CcEntry<KeyT, ValueT, VersionedRecord, RangePartitioned> *cce,

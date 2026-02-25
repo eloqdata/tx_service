@@ -399,7 +399,27 @@ private:
             return {false, false};
         }
 
-        return {(cce->IsFree() && !cce->GetBeingCkpt()), false};
+        if (!cce->IsFree() || cce->GetBeingCkpt())
+        {
+            return {false, false};
+        }
+
+        // Payload-size-aware eviction: protect large-value entries from early
+        // eviction. An entry whose payload size exceeds the configured
+        // threshold is kept in memory until the page's LRU age is at least
+        // txservice_large_value_eviction_age access-counter units old.
+        if (txservice_large_value_threshold > 0 &&
+            cce->PayloadSize() > txservice_large_value_threshold)
+        {
+            uint64_t age =
+                this->cc_shard_->AccessCounter() - this->page_->last_access_ts_;
+            if (age < txservice_large_value_eviction_age)
+            {
+                return {false, false};
+            }
+        }
+
+        return {true, false};
     }
 
     bool IsCleanTarget(

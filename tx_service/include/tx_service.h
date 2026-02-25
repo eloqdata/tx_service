@@ -1207,6 +1207,16 @@ public:
                 conf.at("enable_key_cache") && !enable_mvcc;
         }
 
+        if (conf.find("large_value_threshold") != conf.end())
+        {
+            txservice_large_value_threshold = conf.at("large_value_threshold");
+        }
+        if (conf.find("large_value_eviction_age") != conf.end())
+        {
+            txservice_large_value_eviction_age =
+                conf.at("large_value_eviction_age");
+        }
+
         if (txservice_skip_kv)
         {
             if (txservice_enable_cache_replacement)
