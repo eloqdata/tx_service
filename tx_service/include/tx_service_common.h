@@ -43,14 +43,11 @@ inline uint64_t txservice_max_standby_lag = 400000;
 // off, all data will be cached in memory.
 inline bool txservice_enable_cache_replacement = true;
 // Payload size threshold in bytes for large-value protection during cache
-// eviction. Entries whose payload size exceeds this threshold are protected
-// from eviction until their LRU age reaches txservice_large_value_eviction_age.
+// eviction. Entries whose payload size exceeds this threshold are considered
+// "large values" and are protected from eviction when their page is in the
+// recent half of the LRU list (see CcPageCleanGuardWithoutKickoutCc).
 // A value of 0 disables large-value protection (default behaviour).
 inline size_t txservice_large_value_threshold = 0;
-// Minimum LRU access age (measured in access counter units) that a page must
-// have before its large-value entries become eligible for eviction.
-// Only relevant when txservice_large_value_threshold > 0.
-inline uint64_t txservice_large_value_eviction_age = 1000;
 
 // Whether to automatically redirect redis command to the leader node when the
 // data is not on the local node.

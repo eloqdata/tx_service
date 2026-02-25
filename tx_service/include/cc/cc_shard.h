@@ -1015,6 +1015,32 @@ public:
         return access_counter_;
     }
 
+    /**
+     * @brief Returns the last_access_ts_ of the oldest page in the LRU list
+     * (i.e. the page immediately after the sentinel head). This is the
+     * smallest last_access_ts_ among all data pages currently in the list.
+     *
+     * The difference (access_counter_ - LruOldestTs()) equals the total span
+     * of last_access_ts_ values across all LRU pages, which is used as the
+     * denominator when computing a page's *relative* LRU age:
+     *
+     *   relative_age_pct = (access_counter_ - page->last_access_ts_)
+     *                      / (access_counter_ - LruOldestTs())
+     *
+     * Returns access_counter_ when the LRU list is empty (making total_span 0,
+     * which bypasses the large-value protection check).
+     */
+    uint64_t LruOldestTs() const
+    {
+        const LruPage *oldest = head_ccp_.lru_next_;
+        if (oldest == &tail_ccp_)
+        {
+            // Empty LRU list: return access_counter_ so total_span == 0.
+            return access_counter_;
+        }
+        return oldest->last_access_ts_;
+    }
+
     SystemHandler *GetSystemHandler()
     {
         return system_handler_;
