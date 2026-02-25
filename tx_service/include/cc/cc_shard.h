@@ -1278,12 +1278,26 @@ private:
     // simplifies handling of empty and one-element lists.
     LruPage head_ccp_, tail_ccp_;
     /**
-     * @brief Each time a page is accessed and moved to the tail of the LRU
-     * list, the counter is incremented and assigned to the page. Since in a
-     * double-linked list there is no way to determine the relative order of two
-     * pages, we use the number to indicate if a page precedes or succeeds the
-     * other in the list.
+     * @brief A monotonically-increasing shard-wide counter. It is
+     * incremented and assigned to a page's last_access_ts_ every time
+     * UpdateLruList() is called, i.e. whenever any page in this shard is
+     * moved to the LRU tail on a read, write, or emplace operation.
      *
+     * Primary use: since a doubly-linked list provides no O(1) way to compare
+     * the positions of two arbitrary nodes, comparing page1.last_access_ts_
+     * against page2.last_access_ts_ lets the merge/redistribute code determine
+     * which of the two pages was accessed more recently without traversing the
+     * list.
+     *
+     * Secondary use: the expression (access_counter_ - page->last_access_ts_)
+     * is a valid measure of the page's LRU age — it equals the number of
+     * global page-access events that have occurred since this page was last
+     * moved to the LRU tail. Because access_counter_ is monotonically
+     * increasing and last_access_ts_ is always set to the current value of
+     * access_counter_ when the page is accessed, the difference is always ≥ 0;
+     * a recently-accessed page has age ≈ 0 while a page sitting near the LRU
+     * head has a large age. This property is exploited by the payload-size-
+     * aware eviction guard (CcPageCleanGuardWithoutKickoutCc::CanBeCleaned).
      */
     uint64_t access_counter_{0};
 

@@ -406,8 +406,23 @@ private:
 
         // Payload-size-aware eviction: protect large-value entries from early
         // eviction. An entry whose payload size exceeds the configured
-        // threshold is kept in memory until the page's LRU age is at least
-        // txservice_large_value_eviction_age access-counter units old.
+        // threshold is kept in memory until the page's LRU age reaches
+        // txservice_large_value_eviction_age.
+        //
+        // LRU age is computed as:
+        //   age = access_counter_ - page->last_access_ts_
+        //
+        // access_counter_ is a shard-wide monotonic counter incremented on
+        // every call to UpdateLruList() (i.e. every page access). When a page
+        // is moved to the LRU tail, last_access_ts_ is set to the current
+        // value of access_counter_. Because access_counter_ only ever
+        // increases and last_access_ts_ is always assigned from
+        // access_counter_, the difference is always >= 0 and measures the
+        // number of page-access events that have occurred *since* this page
+        // was last touched — a valid proxy for LRU age. A recently accessed
+        // page has age ≈ 0; a page sitting near the LRU head (cold) has a
+        // large age. The protection is therefore lifted naturally as the page
+        // ages through the LRU list, cooperating with the standard LRU policy.
         if (txservice_large_value_threshold > 0 &&
             cce->PayloadSize() > txservice_large_value_threshold)
         {

@@ -2030,6 +2030,14 @@ struct LruPage
 
     CcMap *parent_map_{nullptr};
 
+    // The value of CcShard::access_counter_ at the time this page was last
+    // moved to the LRU tail by UpdateLruList(). Comparing two pages'
+    // last_access_ts_ values determines which was accessed more recently
+    // (the larger value is more recent). The difference
+    //   (shard.access_counter_ - last_access_ts_)
+    // is always non-negative and represents the number of global page-access
+    // events that have occurred since this page was last touched — a valid
+    // proxy for LRU age used by the payload-size-aware eviction guard.
     uint64_t last_access_ts_{0};
 
     // The largest commit ts of dirty cc entries on this page. This value might
