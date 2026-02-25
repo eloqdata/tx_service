@@ -405,30 +405,31 @@ private:
         }
 
         // Payload-size-aware eviction: protect large-value entries from early
-        // eviction. An entry whose payload size exceeds the configured
-        // threshold is kept in memory until the page's LRU age reaches
-        // txservice_large_value_eviction_age.
+        // eviction while they are still in the recent half of the LRU list.
         //
-        // LRU age is computed as:
-        //   age = access_counter_ - page->last_access_ts_
+        // A page's LRU age is:
+        //   page_age  = access_counter_ - page->last_access_ts_
         //
-        // access_counter_ is a shard-wide monotonic counter incremented on
-        // every call to UpdateLruList() (i.e. every page access). When a page
-        // is moved to the LRU tail, last_access_ts_ is set to the current
-        // value of access_counter_. Because access_counter_ only ever
-        // increases and last_access_ts_ is always assigned from
-        // access_counter_, the difference is always >= 0 and measures the
-        // number of page-access events that have occurred *since* this page
-        // was last touched — a valid proxy for LRU age. A recently accessed
-        // page has age ≈ 0; a page sitting near the LRU head (cold) has a
-        // large age. The protection is therefore lifted naturally as the page
-        // ages through the LRU list, cooperating with the standard LRU policy.
+        // The total span of the LRU list (distance between the oldest and
+        // newest page) is:
+        //   total_span = access_counter_ - LruOldestTs()
+        //
+        // A large-value entry is protected (not evictable) when its page is
+        // in the *recent half* of the list, i.e.:
+        //   page_age * 2 < total_span   →  protect (return false)
+        //   page_age * 2 >= total_span  →  allow eviction (fall through)
+        //
+        // This is self-calibrating: it does not depend on any user-configured
+        // threshold and automatically adapts to the actual access rate.
+        // When the LRU list is empty (total_span == 0) the condition
+        // "0 * 2 < 0" is false, so the entry is always evictable.
         if (txservice_large_value_threshold > 0 &&
             cce->PayloadSize() > txservice_large_value_threshold)
         {
-            uint64_t age =
-                this->cc_shard_->AccessCounter() - this->page_->last_access_ts_;
-            if (age < txservice_large_value_eviction_age)
+            uint64_t now = this->cc_shard_->AccessCounter();
+            uint64_t page_age = now - this->page_->last_access_ts_;
+            uint64_t total_span = now - this->cc_shard_->LruOldestTs();
+            if (page_age * 2 < total_span)
             {
                 return {false, false};
             }

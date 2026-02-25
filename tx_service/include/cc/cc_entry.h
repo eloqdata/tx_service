@@ -2034,10 +2034,12 @@ struct LruPage
     // moved to the LRU tail by UpdateLruList(). Comparing two pages'
     // last_access_ts_ values determines which was accessed more recently
     // (the larger value is more recent). The difference
-    //   (shard.access_counter_ - last_access_ts_)
-    // is always non-negative and represents the number of global page-access
-    // events that have occurred since this page was last touched — a valid
-    // proxy for LRU age used by the payload-size-aware eviction guard.
+    //   page_age  = (shard.access_counter_ - last_access_ts_)
+    // is always non-negative. The ratio
+    //   page_age * 2 / (shard.access_counter_ - oldest_page.last_access_ts_)
+    // indicates relative LRU position: < 1 means the page is in the recent
+    // half of the list (protected from large-value eviction); >= 1 means it
+    // is in the old half (eligible for eviction).
     uint64_t last_access_ts_{0};
 
     // The largest commit ts of dirty cc entries on this page. This value might

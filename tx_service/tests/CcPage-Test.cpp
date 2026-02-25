@@ -237,42 +237,79 @@ TEST_CASE("Large-value eviction protection test", "[cc-page]")
                       nullptr,
                       &raft_path);
 
-    const size_t MAP_SIZE = 500;
+    const size_t MAP_SIZE = 100;
     const size_t LARGE_PAYLOAD_SIZE = 1024;  // 1 KB per entry
 
-    std::string table_name = "large_val_test";
-    TableName tname(table_name, TableType::Primary, TableEngine::EloqSql);
-    auto cc_map = std::make_unique<TemplateCcMap<CompositeKey<std::string, int>,
-                                                 CompositeRecord<int>,
-                                                 true,
-                                                 true>>(
-        &shard, 0, tname, 1, nullptr, true);
+    // "Old" cc map: inserted first, so its pages have older last_access_ts_.
+    std::string old_table_name = "large_val_old";
+    TableName old_tname(
+        old_table_name, TableType::Primary, TableEngine::EloqSql);
+    auto old_map =
+        std::make_unique<TemplateCcMap<CompositeKey<std::string, int>,
+                                       CompositeRecord<int>,
+                                       true,
+                                       true>>(
+            &shard, 0, old_tname, 1, nullptr, true);
 
-    // Insert entries that are guaranteed to be free (persistent, no locks).
-    std::vector<CompositeKey<std::string, int>> keys;
-    for (size_t i = 0; i < MAP_SIZE; i++)
-    {
-        keys.emplace_back(std::make_tuple(table_name, static_cast<int>(i)));
-    }
-    std::vector<CompositeKey<std::string, int> *> key_ptrs;
-    for (auto &k : keys)
-    {
-        key_ptrs.push_back(&k);
-    }
-    REQUIRE(cc_map->BulkEmplaceFreeForTest(key_ptrs));
-    REQUIRE(cc_map->VerifyOrdering() == MAP_SIZE);
+    // "New" cc map: inserted after, so its pages have newer last_access_ts_.
+    std::string new_table_name = "large_val_new";
+    TableName new_tname(
+        new_table_name, TableType::Primary, TableEngine::EloqSql);
+    auto new_map =
+        std::make_unique<TemplateCcMap<CompositeKey<std::string, int>,
+                                       CompositeRecord<int>,
+                                       true,
+                                       true>>(
+            &shard, 0, new_tname, 1, nullptr, true);
 
-    // Assign a shared large-payload object to every entry so that
-    // PayloadSize() > LARGE_PAYLOAD_SIZE / 2 (the threshold we will use).
+    auto make_keys =
+        [](const std::string &tname,
+           size_t cnt,
+           std::vector<CompositeKey<std::string, int>> &key_storage)
+        -> std::vector<CompositeKey<std::string, int> *>
+    {
+        for (size_t i = 0; i < cnt; i++)
+        {
+            key_storage.emplace_back(
+                std::make_tuple(tname, static_cast<int>(i)));
+        }
+        std::vector<CompositeKey<std::string, int> *> ptrs;
+        for (auto &k : key_storage)
+        {
+            ptrs.push_back(&k);
+        }
+        return ptrs;
+    };
+
+    std::vector<CompositeKey<std::string, int>> old_key_storage;
+    auto old_ptrs = make_keys(old_table_name, MAP_SIZE, old_key_storage);
+    // Insert old map first (its pages will have smaller last_access_ts_).
+    REQUIRE(old_map->BulkEmplaceFreeForTest(old_ptrs));
+    REQUIRE(old_map->VerifyOrdering() == MAP_SIZE);
+
+    std::vector<CompositeKey<std::string, int>> new_key_storage;
+    auto new_ptrs = make_keys(new_table_name, MAP_SIZE, new_key_storage);
+    // Insert new map after (its pages will have larger last_access_ts_).
+    REQUIRE(new_map->BulkEmplaceFreeForTest(new_ptrs));
+    REQUIRE(new_map->VerifyOrdering() == MAP_SIZE);
+
+    // Give every entry a large payload (> threshold).
     auto large_payload =
         std::make_shared<LargeCompositeRecord>(42, LARGE_PAYLOAD_SIZE);
-    cc_map->SetPayloadForTest(large_payload);
+    old_map->SetPayloadForTest(large_payload);
+    new_map->SetPayloadForTest(large_payload);
 
-    // PART 1: Protection active – entries must NOT be evicted.
+    // Enable large-value protection with threshold = LARGE_PAYLOAD_SIZE / 2.
     txservice_large_value_threshold = LARGE_PAYLOAD_SIZE / 2;
-    txservice_large_value_eviction_age = UINT64_MAX;
 
-    size_t freed_with_protection = 0;
+    // The LRU list now has old_map pages near the head and new_map pages near
+    // the tail. For a page in old_map:
+    //   page_age  ≈ total_span  (near the oldest end)
+    //   page_age * 2 >= total_span  →  evictable
+    // For a page in new_map:
+    //   page_age  ≈ 0  (near the newest end)
+    //   page_age * 2 < total_span   →  protected
+    size_t freed = 0;
     while (true)
     {
         auto [free_cnt, yield] = shard.Clean();
@@ -281,18 +318,20 @@ TEST_CASE("Large-value eviction protection test", "[cc-page]")
         {
             break;
         }
-        freed_with_protection += free_cnt;
+        freed += free_cnt;
     }
-    REQUIRE(freed_with_protection == 0);
-    REQUIRE(cc_map->VerifyOrdering() == MAP_SIZE);
 
-    // Reset the clean cursor so Part 2 rescans from the beginning.
+    // Old-map entries (cold, in the older half) must all be evicted.
+    REQUIRE(freed == MAP_SIZE);
+    // New-map entries (hot, in the newer half) must all be retained.
+    REQUIRE(new_map->VerifyOrdering() == MAP_SIZE);
+
+    // PART 2: With protection disabled, the remaining new_map entries must be
+    // evicted normally.
     shard.ResetCleanStart();
-
-    // PART 2: Protection disabled – all free entries must be evicted.
     txservice_large_value_threshold = 0;
 
-    size_t freed_without_protection = 0;
+    size_t freed2 = 0;
     while (true)
     {
         auto [free_cnt, yield] = shard.Clean();
@@ -301,13 +340,12 @@ TEST_CASE("Large-value eviction protection test", "[cc-page]")
         {
             break;
         }
-        freed_without_protection += free_cnt;
+        freed2 += free_cnt;
     }
-    REQUIRE(freed_without_protection == MAP_SIZE);
+    REQUIRE(freed2 == MAP_SIZE);
 
-    // Restore global defaults so other tests are not affected.
+    // Restore global defaults.
     txservice_large_value_threshold = 0;
-    txservice_large_value_eviction_age = 1000;
 
     local_cc_shards.Terminate();
 }

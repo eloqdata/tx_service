@@ -1315,15 +1315,16 @@ private:
      * which of the two pages was accessed more recently without traversing the
      * list.
      *
-     * Secondary use: the expression (access_counter_ - page->last_access_ts_)
-     * is a valid measure of the page's LRU age — it equals the number of
-     * global page-access events that have occurred since this page was last
-     * moved to the LRU tail. Because access_counter_ is monotonically
-     * increasing and last_access_ts_ is always set to the current value of
-     * access_counter_ when the page is accessed, the difference is always ≥ 0;
-     * a recently-accessed page has age ≈ 0 while a page sitting near the LRU
-     * head has a large age. This property is exploited by the payload-size-
-     * aware eviction guard (CcPageCleanGuardWithoutKickoutCc::CanBeCleaned).
+     * Secondary use: the expressions
+     *   page_age   = access_counter_ - page->last_access_ts_
+     *   total_span = access_counter_ - oldest_page->last_access_ts_
+     * together indicate the *relative* LRU position of a page. The test
+     *   page_age * 2 < total_span
+     * is true for pages in the recent half of the list and false for pages
+     * in the old half. This self-calibrating check is used by the
+     * payload-size-aware eviction guard
+     * (CcPageCleanGuardWithoutKickoutCc::CanBeCleaned) to protect large-value
+     * entries from being evicted while they are still "hot".
      */
     uint64_t access_counter_{0};
 

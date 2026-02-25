@@ -1211,11 +1211,6 @@ public:
         {
             txservice_large_value_threshold = conf.at("large_value_threshold");
         }
-        if (conf.find("large_value_eviction_age") != conf.end())
-        {
-            txservice_large_value_eviction_age =
-                conf.at("large_value_eviction_age");
-        }
 
         if (txservice_skip_kv)
         {
