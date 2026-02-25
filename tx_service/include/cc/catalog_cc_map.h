@@ -1272,7 +1272,8 @@ public:
                 sch_rec->SetSchemaCntl(std::move(sch_cntl));
             }
         }
-        LOG(INFO) << "yf: catalogccmap: set finished";
+        LOG(INFO) << "yf: catalogccmap: set finished, result status = "
+                  << (int) result.rec_status_;
         hd_res->SetFinished();
 
         return success;

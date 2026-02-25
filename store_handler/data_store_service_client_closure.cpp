@@ -445,6 +445,8 @@ void FetchTableCatalogCallback(void *data,
 
     if (err_code == remote::DataStoreError::KEY_NOT_FOUND)
     {
+        LOG(INFO) << "yf: fetch table catalog, key not found, key = "
+                  << fetch_cc->kv_key_;
         fetch_cc->CatalogImage().clear();
         fetch_cc->SetCommitTs(1);
         fetch_cc->SetFinish(txservice::RecordStatus::Deleted, 0);

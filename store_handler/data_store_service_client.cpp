@@ -5442,6 +5442,9 @@ bool DataStoreServiceClient::UpsertCatalog(
     records_ttl.emplace_back(0);  // no ttl
     op_types.emplace_back(WriteOpType::PUT);
 
+    LOG(INFO) << "yf: UpsertCatalog, key = " << key_str
+              << ", catalog image size = " << catalog_image.size();
+
     BatchWriteRecords(kv_table_catalogs_name,
                       partition_id,
                       data_shard_id,
