@@ -254,7 +254,7 @@ bool RocksDBHandler::Connect()
             std::filesystem::remove_all(entry.path(), error_code);
             if (error_code.value() != 0)
             {
-                LOG(ERROR) << "unable to remove rocksdb checkpoint entry: "
+                LOG(ERROR) << "unable to remove received snapshot entry: "
                            << entry.path()
                            << ", error code: " << error_code.value()
                            << ", error message: " << error_code.message();
