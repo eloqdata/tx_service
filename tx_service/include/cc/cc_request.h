@@ -877,6 +877,12 @@ public:
         return key_shard_code_;
     }
 
+    // Low 10 bits of key_shard_code_: range partition id (when range-partitioned).
+    uint32_t PartitionId() const
+    {
+        return key_shard_code_ & 0x3FF;
+    }
+
     const void *Key() const
     {
         return is_remote_ ? nullptr : key_;

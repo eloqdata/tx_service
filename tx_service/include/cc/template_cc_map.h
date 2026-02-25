@@ -592,6 +592,8 @@ public:
                     cce->ArchiveBeforeUpdate();
                 }
 
+                [[maybe_unused]] const size_t old_payload_size =
+                    cce->PayloadSize();
                 if (is_del)
                 {
                     cce->payload_.SetCurrentPayload(nullptr);
@@ -612,6 +614,23 @@ public:
                     is_del ? RecordStatus::Deleted : RecordStatus::Normal;
                 bool was_dirty = cce->IsDirty();
                 cce->SetCommitTsPayloadStatus(commit_ts, new_status);
+
+                if constexpr (RangePartitioned)
+                {
+                    const int64_t key_delta_size =
+                        (new_status == RecordStatus::Deleted)
+                            ? (-static_cast<int64_t>(write_key->Size() +
+                                                     old_payload_size))
+                            : (static_cast<int64_t>(cce->PayloadSize()) -
+                               static_cast<int64_t>(old_payload_size));
+                    const uint32_t range_id = req.PartitionId();
+                    auto it = range_sizes_.find(range_id);
+                    assert(it != range_sizes_.end());
+                    assert(key_delta_size >= 0 ||
+                           it->second >= static_cast<size_t>(-key_delta_size));
+                    it->second = static_cast<size_t>(
+                        static_cast<int64_t>(it->second) + key_delta_size);
+                }
 
                 if (req.IsInitialInsert())
                 {
