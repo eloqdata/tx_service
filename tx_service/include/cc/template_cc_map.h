@@ -38,6 +38,7 @@
 #include <variant>
 #include <vector>
 
+#include "absl/container/flat_hash_map.h"
 #include "cc_entry.h"
 #include "cc_map.h"
 #include "cc_page_clean_guard.h"
@@ -8771,6 +8772,10 @@ public:
         }
 
         normal_obj_sz_ = 0;
+        if constexpr (RangePartitioned)
+        {
+            range_sizes_.clear();
+        }
         ccmp_.clear();
     }
 
@@ -11912,6 +11917,74 @@ protected:
     CcPage<KeyT, ValueT, VersionedRecord, RangePartitioned> *PagePosInf()
     {
         return &pos_inf_page_;
+    }
+
+    bool UpdateRangeSize(uint32_t partition_id,
+                         int32_t delta_size,
+                         bool is_dirty)
+    {
+        if constexpr (RangePartitioned)
+        {
+            auto it = range_sizes_.find(partition_id);
+            if (it == range_sizes_.end())
+            {
+                it = range_sizes_
+                         .emplace(partition_id,
+                                  std::make_tuple(
+                                      static_cast<int32_t>(
+                                          RangeSizeStatus::kNotInitialized),
+                                      0,
+                                      false))
+                         .first;
+            }
+            if (std::get<0>(it->second) ==
+                    static_cast<int32_t>(RangeSizeStatus::kNotInitialized) &&
+                !is_dirty)
+            {
+                std::get<1>(it->second) += delta_size;
+                // Init the range size of this range.
+                std::get<0>(it->second) =
+                    static_cast<int32_t>(RangeSizeStatus::kLoading);
+
+                int64_t ng_term = Sharder::Instance().LeaderTerm(cc_ng_id_);
+                shard_->FetchTableRangeSize(table_name_,
+                                            static_cast<int32_t>(partition_id),
+                                            cc_ng_id_,
+                                            ng_term);
+                return false;
+            }
+
+            if (std::get<0>(it->second) ==
+                    static_cast<int32_t>(RangeSizeStatus::kLoading) ||
+                is_dirty)
+            {
+                // Loading or split: record delta in delta part (.second).
+                std::get<1>(it->second) += delta_size;
+            }
+            else
+            {
+                int32_t new_range_size = std::get<0>(it->second) + delta_size;
+                std::get<0>(it->second) =
+                    new_range_size > 0 ? new_range_size : 0;
+
+                bool trigger_split =
+                    !is_dirty && !std::get<2>(it->second) &&
+                    std::get<0>(it->second) >=
+                        static_cast<int32_t>(StoreRange::range_max_size);
+
+                DLOG_IF(INFO, trigger_split)
+                    << "Range size is too large, need to split. table: "
+                    << table_name_.StringView()
+                    << " partition: " << partition_id
+                    << " range size: " << std::get<0>(it->second)
+                    << " range max size: " << StoreRange::range_max_size;
+                std::get<2>(it->second) =
+                    trigger_split == true ? true : std::get<2>(it->second);
+                return trigger_split;
+            }
+        }  // RangePartitioned
+
+        return false;
     }
 
     absl::btree_map<
