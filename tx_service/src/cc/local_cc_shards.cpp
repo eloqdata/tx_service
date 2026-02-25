@@ -198,6 +198,14 @@ LocalCcShards::LocalCcShards(
     uint64_t node_memory_limit_mb = conf.at("node_memory_limit_mb");
     uint32_t range_slice_memory_limit_percent =
         conf.at("range_slice_memory_limit_percent");
+    uint64_t dirty_memory_check_interval =
+        conf.count("dirty_memory_check_interval") > 0
+            ? conf.at("dirty_memory_check_interval")
+            : 1000;
+    uint64_t dirty_memory_size_threshold_mb =
+        conf.count("dirty_memory_size_threshold_mb") > 0
+            ? conf.at("dirty_memory_size_threshold_mb")
+            : 0;
     uint16_t core_cnt = conf.at("core_num");
     for (uint16_t thd_idx = 0; thd_idx < core_cnt; ++thd_idx)
     {
@@ -215,7 +223,9 @@ LocalCcShards::LocalCcShards(
                                       cluster_config_version,
                                       metrics_registry,
                                       common_labels,
-                                      range_slice_memory_limit_percent));
+                                      range_slice_memory_limit_percent,
+                                      dirty_memory_check_interval,
+                                      dirty_memory_size_threshold_mb));
     }
     for (size_t i = 0; i < cc_shards_.size(); ++i)
     {

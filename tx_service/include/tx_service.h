@@ -1163,7 +1163,8 @@ public:
                 store_hd,
                 conf.at("checkpointer_interval"),
                 log_hd,
-                conf.at("checkpointer_delay_seconds"))
+                conf.at("checkpointer_delay_seconds"),
+                conf.at("checkpointer_min_ckpt_request_interval"))
     {
         assert(store_hd != nullptr || skip_kv);
         uint32_t core_cnt = conf.at("core_num");

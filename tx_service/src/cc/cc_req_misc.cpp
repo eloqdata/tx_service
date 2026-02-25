@@ -1499,8 +1499,9 @@ bool ShardCleanCc::Execute(CcShard &ccs)
                 if (free_count_ == 0 && !shard_heap->IsDefragHeapCcOnFly() &&
                     !Sharder::Instance().GetCheckpointer()->IsOngoingDataSync())
                 {
-                    ccs.NotifyCkpt();
+                    ccs.NotifyCkpt(true);
                 }
+
                 free_count_ = 0;
                 // Return true will set the request as free, which means the
                 // request is not in working state.
