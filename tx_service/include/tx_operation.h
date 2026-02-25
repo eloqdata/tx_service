@@ -21,7 +21,6 @@
  */
 #pragma once
 
-#include <atomic>
 #include <cstdint>
 #include <map>
 #include <memory>
@@ -57,7 +56,6 @@ struct ScanBatchTuple;
 struct AnalyzeTableTxRequest;
 struct BroadcastStatisticsTxRequest;
 struct BatchReadTxRequest;
-struct BatchReadCatalogTxRequest;
 struct DataMigrationStatus;
 struct ObjectCommandTxRequest;
 struct BackfillRec;
@@ -1541,28 +1539,6 @@ public:
     CcHandlerResult<ReadKeyResult> *lock_range_bucket_result_{nullptr};
     size_t lock_index_{0};
     std::vector<int32_t> range_ids_;
-};
-
-// Batch read catalog for N tables. One Execute + one Wait; Process() issues
-// N ReadLocal(catalog_ccm_name) concurrently; Forward() collects when all done.
-struct BatchReadCatalogOperation : TransactionOperation
-{
-public:
-    explicit BatchReadCatalogOperation(TransactionExecution *txm);
-
-    void Reset();
-    void Forward(TransactionExecution *txm) override;
-
-    bool IsFinished() const
-    {
-        return unfinished_cnt_.load(std::memory_order_relaxed) == 0;
-    }
-
-    BatchReadCatalogTxRequest *batch_req_{nullptr};
-    std::vector<CatalogKey> catalog_keys_;
-    std::vector<CatalogRecord> catalog_records_;
-    std::vector<CcHandlerResult<ReadKeyResult>> hd_result_vec_;
-    std::atomic<uint32_t> unfinished_cnt_{0};
 };
 
 struct InvalidateTableCacheOp : TransactionOperation

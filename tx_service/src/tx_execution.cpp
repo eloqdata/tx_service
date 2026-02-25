@@ -109,8 +109,7 @@ TransactionExecution::TransactionExecution(CcHandler *handler,
       fault_inject_op_(this),
       clean_entry_op_(this),
       abundant_lock_op_(this),
-      batch_read_op_(this, &lock_range_bucket_result_),
-      batch_read_catalog_op_(this)
+      batch_read_op_(this, &lock_range_bucket_result_)
 {
     TX_TRACE_ASSOCIATE(this, cc_handler_);
 
@@ -7572,75 +7571,6 @@ void TransactionExecution::ProcessTxRequest(BatchReadTxRequest &batch_read_req)
     Process(batch_read_op_);
 }
 
-void TransactionExecution::ProcessTxRequest(
-    BatchReadCatalogTxRequest &batch_read_catalog_req)
-{
-    TX_TRACE_ACTION_WITH_CONTEXT(
-        this,
-        &batch_read_catalog_req,
-        [this]() -> std::string
-        {
-            return std::string("\"tx_number\":")
-                .append(std::to_string(this->TxNumber()))
-                .append(",\"tx_term\":")
-                .append(std::to_string(this->tx_term_));
-        });
-
-    if (tx_term_ < 0)
-    {
-        batch_read_catalog_req.SetError(TxErrorCode::TX_INIT_FAIL);
-        return;
-    }
-
-    void_resp_ = &batch_read_catalog_req.tx_result_;
-    batch_read_catalog_op_.batch_req_ = &batch_read_catalog_req;
-    batch_read_catalog_op_.Reset();
-    PushOperation(&batch_read_catalog_op_);
-    Process(batch_read_catalog_op_);
-}
-
-void TransactionExecution::Process(BatchReadCatalogOperation &batch_read_catalog_op)
-{
-    TX_TRACE_ACTION_WITH_CONTEXT(
-        this,
-        &batch_read_catalog_op,
-        [this]() -> std::string
-        {
-            return std::string("\"tx_number\":")
-                .append(std::to_string(this->TxNumber()))
-                .append(",\"tx_term\":")
-                .append(std::to_string(this->tx_term_));
-        });
-
-    const std::vector<std::string> *table_names =
-        batch_read_catalog_op.batch_req_->table_names_;
-    const size_t N = table_names->size();
-    for (size_t i = 0; i < N; ++i)
-    {
-        TxKey catalog_tx_key(&batch_read_catalog_op.catalog_keys_[i]);
-        bool finished = cc_handler_->ReadLocal(
-            catalog_ccm_name,
-            catalog_tx_key,
-            batch_read_catalog_op.catalog_records_[i],
-            ReadType::Inside,
-            tx_number_.load(std::memory_order_relaxed),
-            tx_term_,
-            CommandId(),
-            start_ts_,
-            batch_read_catalog_op.hd_result_vec_[i],
-            IsolationLevel::RepeatableRead,
-            CcProtocol::Locking,
-            false,
-            false,
-            true);
-        if (finished)
-        {
-            command_id_.fetch_add(1, std::memory_order_relaxed);
-        }
-    }
-    StartTiming();
-}
-
 void TransactionExecution::Process(BatchReadOperation &batch_read_op)
 {
     TX_TRACE_ACTION_WITH_CONTEXT(
@@ -7653,6 +7583,40 @@ void TransactionExecution::Process(BatchReadOperation &batch_read_op)
                 .append("\"tx_term\":")
                 .append(std::to_string(this->tx_term_));
         });
+
+    if (batch_read_op.batch_read_tx_req_->is_catalog_batch_)
+    {
+        batch_read_op.is_running_ = true;
+        std::vector<txservice::ScanBatchTuple> &read_batch =
+            batch_read_op.batch_read_tx_req_->read_batch_;
+        const size_t N = read_batch.size();
+        for (size_t i = 0; i < N; ++i)
+        {
+            TxKey &key = read_batch[i].key_;
+            TxRecord &rec = *read_batch[i].record_;
+            bool finished = cc_handler_->ReadLocal(
+                catalog_ccm_name,
+                key,
+                rec,
+                ReadType::Inside,
+                tx_number_.load(std::memory_order_relaxed),
+                tx_term_,
+                CommandId(),
+                start_ts_,
+                batch_read_op.hd_result_vec_[i],
+                IsolationLevel::RepeatableRead,
+                CcProtocol::Locking,
+                false,
+                false,
+                true);
+            if (finished)
+            {
+                command_id_.fetch_add(1, std::memory_order_relaxed);
+            }
+        }
+        StartTiming();
+        return;
+    }
 
     batch_read_op.is_running_ = true;
     const TableName &table_name = *batch_read_op.batch_read_tx_req_->tab_name_;
@@ -7850,7 +7814,8 @@ void TransactionExecution::PostProcess(BatchReadOperation &batch_read_op)
     state_stack_.pop_back();
     assert(state_stack_.empty());
 
-    if (lock_range_bucket_result_.IsError())
+    if (!batch_read_op.batch_read_tx_req_->is_catalog_batch_ &&
+        lock_range_bucket_result_.IsError())
     {
         DLOG(ERROR)
             << "BatchReadOperation failed when acquire range bucket locks. "
@@ -7863,7 +7828,9 @@ void TransactionExecution::PostProcess(BatchReadOperation &batch_read_op)
     }
 
     const BatchReadTxRequest *read_req = batch_read_op.batch_read_tx_req_;
-    const TableName *table_name = read_req->tab_name_;
+    const TableName *table_name = read_req->is_catalog_batch_
+        ? &catalog_ccm_name
+        : read_req->tab_name_;
     std::vector<ScanBatchTuple> &read_batch = read_req->read_batch_;
     CcErrorCode err = CcErrorCode::NO_ERROR;
 
