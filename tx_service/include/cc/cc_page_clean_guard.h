@@ -157,6 +157,14 @@ public:
         return clean_obj_cnt_;
     }
 
+    // Returns true if CanBeCleaned refused to evict at least one entry because
+    // it has a large payload. When this is set, CleanPageAndReBalance will
+    // boost the page to the LRU tail so it does not accumulate at the head.
+    bool HasBlockedLargeValue() const
+    {
+        return has_blocked_large_value_;
+    }
+
 protected:
     struct CanBeCleanedResult
     {
@@ -343,6 +351,9 @@ protected:
     uint64_t dirty_freed_cnt_{0};
     bool evicted_valid_key_{false};
     uint64_t clean_obj_cnt_{0};
+    // Set by CanBeCleaned when a large-value entry is protected. Mutable so it
+    // can be set from the const CanBeCleaned override.
+    mutable bool has_blocked_large_value_{false};
 
 private:
     std::bitset<CcPage<KeyT, ValueT, VersionedRecord, RangePartitioned>::
@@ -404,35 +415,17 @@ private:
             return {false, false};
         }
 
-        // Payload-size-aware eviction: protect large-value entries from early
-        // eviction while they are still in the recent half of the LRU list.
-        //
-        // A page's LRU age is:
-        //   page_age  = access_counter_ - page->last_access_ts_
-        //
-        // The total span of the LRU list (distance between the oldest and
-        // newest page) is:
-        //   total_span = access_counter_ - LruOldestTs()
-        //
-        // A large-value entry is protected (not evictable) when its page is
-        // in the *recent half* of the list, i.e.:
-        //   page_age * 2 < total_span   →  protect (return false)
-        //   page_age * 2 >= total_span  →  allow eviction (fall through)
-        //
-        // This is self-calibrating: it does not depend on any user-configured
-        // threshold and automatically adapts to the actual access rate.
-        // When the LRU list is empty (total_span == 0) the condition
-        // "0 * 2 < 0" is false, so the entry is always evictable.
+        // Payload-size-aware eviction: protect large-value entries from
+        // eviction. When this guard refuses to evict an entry because of its
+        // payload size, it sets has_blocked_large_value_ so that
+        // CleanPageAndReBalance can boost the page to the LRU tail, preventing
+        // it from accumulating at the head and being repeatedly visited by the
+        // scan without making progress.
         if (txservice_large_value_threshold > 0 &&
             cce->PayloadSize() > txservice_large_value_threshold)
         {
-            uint64_t now = this->cc_shard_->AccessCounter();
-            uint64_t page_age = now - this->page_->last_access_ts_;
-            uint64_t total_span = now - this->cc_shard_->LruOldestTs();
-            if (page_age * 2 < total_span)
-            {
-                return {false, false};
-            }
+            this->has_blocked_large_value_ = true;
+            return {false, false};
         }
 
         return {true, false};

@@ -1015,32 +1015,6 @@ public:
         return access_counter_;
     }
 
-    /**
-     * @brief Returns the last_access_ts_ of the oldest page in the LRU list
-     * (i.e. the page immediately after the sentinel head). This is the
-     * smallest last_access_ts_ among all data pages currently in the list.
-     *
-     * The difference (access_counter_ - LruOldestTs()) equals the total span
-     * of last_access_ts_ values across all LRU pages, which is used as the
-     * denominator when computing a page's *relative* LRU age:
-     *
-     *   relative_age_pct = (access_counter_ - page->last_access_ts_)
-     *                      / (access_counter_ - LruOldestTs())
-     *
-     * Returns access_counter_ when the LRU list is empty (making total_span 0,
-     * which bypasses the large-value protection check).
-     */
-    uint64_t LruOldestTs() const
-    {
-        const LruPage *oldest = head_ccp_.lru_next_;
-        if (oldest == &tail_ccp_)
-        {
-            // Empty LRU list: return access_counter_ so total_span == 0.
-            return access_counter_;
-        }
-        return oldest->last_access_ts_;
-    }
-
     SystemHandler *GetSystemHandler()
     {
         return system_handler_;
@@ -1315,16 +1289,11 @@ private:
      * which of the two pages was accessed more recently without traversing the
      * list.
      *
-     * Secondary use: the expressions
-     *   page_age   = access_counter_ - page->last_access_ts_
-     *   total_span = access_counter_ - oldest_page->last_access_ts_
-     * together indicate the *relative* LRU position of a page. The test
-     *   page_age * 2 < total_span
-     * is true for pages in the recent half of the list and false for pages
-     * in the old half. This self-calibrating check is used by the
-     * payload-size-aware eviction guard
-     * (CcPageCleanGuardWithoutKickoutCc::CanBeCleaned) to protect large-value
-     * entries from being evicted while they are still "hot".
+     * Secondary use: when the large-value eviction guard protects a page
+     * (CcPageCleanGuardWithoutKickoutCc::CanBeCleaned), CleanPageAndReBalance
+     * calls UpdateLruList to boost the page to the tail. This keeps large-
+     * value pages away from the LRU head, preventing both premature eviction
+     * and wasted scan work.
      */
     uint64_t access_counter_{0};
 

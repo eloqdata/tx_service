@@ -43,10 +43,11 @@ inline uint64_t txservice_max_standby_lag = 400000;
 // off, all data will be cached in memory.
 inline bool txservice_enable_cache_replacement = true;
 // Payload size threshold in bytes for large-value protection during cache
-// eviction. Entries whose payload size exceeds this threshold are considered
-// "large values" and are protected from eviction when their page is in the
-// recent half of the LRU list (see CcPageCleanGuardWithoutKickoutCc).
-// A value of 0 disables large-value protection (default behaviour).
+// eviction. When a free entry's payload size exceeds this threshold, the
+// regular LRU scan will not evict it; instead it boosts the page to the LRU
+// tail so it stays away from the head and is not repeatedly visited by the
+// scan without making progress. A value of 0 disables large-value protection
+// (default behaviour).
 inline size_t txservice_large_value_threshold = 0;
 
 // Whether to automatically redirect redis command to the leader node when the

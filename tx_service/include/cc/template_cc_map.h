@@ -8721,7 +8721,15 @@ public:
                 CcPage<KeyT, ValueT, VersionedRecord, RangePartitioned> *>(
                 lru_page);
         auto page_it = ccmp_.end();
-        bool success = CleanPage(page, page_it, free_cnt, kickout_cc);
+
+        // Only collect the large-value block flag for regular LRU scans
+        // (no kickout_cc). Forced evictions (range migration etc.) should
+        // not be affected by the large-value protection.
+        bool has_blocked_large_value = false;
+        bool *out_flag =
+            (kickout_cc == nullptr) ? &has_blocked_large_value : nullptr;
+
+        bool success = CleanPage(page, page_it, free_cnt, kickout_cc, out_flag);
 
         // Output the operation result if the caller care it.
         if (is_success != nullptr)
@@ -8731,6 +8739,21 @@ public:
 
         LruPage *next_page =
             RebalancePage(page, page_it, success, kickout_cc == nullptr);
+
+        // Large-value boost: if CanBeCleaned refused to evict at least one
+        // entry because of its payload size, move this page to the LRU tail.
+        // This prevents large-value pages from accumulating at the LRU head
+        // and being repeatedly scanned without progress. After calling
+        // UpdateLruList the page is at the tail (page->lru_next_ == &tail),
+        // so returning page->lru_next_ as the next scan page naturally stops
+        // the current scan. The next scan starts from the head, which will
+        // no longer contain this large-value page.
+        if (has_blocked_large_value && !page->Empty() &&
+            page->lru_next_ != nullptr)
+        {
+            shard_->UpdateLruList(page, false);
+            next_page = page->lru_next_;  // == &tail_ccp_ after the boost
+        }
 
         return {free_cnt, next_page};
     }
@@ -11609,7 +11632,8 @@ protected:
         CcPage<KeyT, ValueT, VersionedRecord, RangePartitioned> *page,
         BtreeMapIterator &page_it,
         size_t &free_cnt,
-        KickoutCcEntryCc *kickout_cc = nullptr)
+        KickoutCcEntryCc *kickout_cc = nullptr,
+        bool *out_has_blocked_large_value = nullptr)
     {
         bool success;
 
@@ -11665,6 +11689,11 @@ protected:
         }
 
         success = clean_guard->CleanSuccess();
+
+        if (out_has_blocked_large_value != nullptr)
+        {
+            *out_has_blocked_large_value = clean_guard->HasBlockedLargeValue();
+        }
 
         std::destroy_at(buffer);
         return success;
