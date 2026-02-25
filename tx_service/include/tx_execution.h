@@ -68,6 +68,7 @@ struct SchemaRecoveryTxRequest;
 struct RangeSplitRecoveryTxRequest;
 struct UnlockTuple;
 struct BatchReadTxRequest;
+struct BatchReadCatalogTxRequest;
 struct DataMigrationTxRequest;
 struct InvalidateTableCacheTxRequest;
 
@@ -165,6 +166,7 @@ public:
     void ProcessTxRequest(SchemaRecoveryTxRequest &recover_req);
     void ProcessTxRequest(RangeSplitRecoveryTxRequest &recover_req);
     void ProcessTxRequest(BatchReadTxRequest &batch_read_req);
+    void ProcessTxRequest(BatchReadCatalogTxRequest &batch_read_catalog_req);
     void ProcessTxRequest(DataMigrationTxRequest &data_migration_req);
     void ProcessTxRequest(InvalidateTableCacheTxRequest &req);
 
@@ -498,6 +500,7 @@ private:
 
     void Process(BatchReadOperation &batch_read_op);
     void PostProcess(BatchReadOperation &batch_read_op);
+    void Process(BatchReadCatalogOperation &batch_read_catalog_op);
 
     TxRequest *DequeueTxRequest()
     {
@@ -762,6 +765,7 @@ private:
 
     ReleaseScanExtraLockOp abundant_lock_op_;
     BatchReadOperation batch_read_op_;
+    BatchReadCatalogOperation batch_read_catalog_op_;
 
     metrics::TimePoint tx_duration_start_;
     bool is_collecting_duration_round_{false};
@@ -814,6 +818,7 @@ private:
     friend struct NotifyStartMigrateOp;
     friend struct CheckMigrationIsFinishedOp;
     friend struct BatchReadOperation;
+    friend struct BatchReadCatalogOperation;
     friend struct InvalidateTableCacheOp;
     friend struct InvalidateTableCacheCompositeOp;
     friend class TxProcessor;

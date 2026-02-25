@@ -29,6 +29,7 @@
 #include <vector>
 
 #include "absl/container/flat_hash_map.h"
+#include "catalog_key_record.h"
 #include "range_slice.h"
 #include "scan.h"
 #include "tx_command.h"
@@ -1370,6 +1371,28 @@ public:
     uint64_t corresponding_sk_commit_ts_;
     uint64_t schema_version_;
     bool local_cache_checked_;
+};
+
+// Batch read catalog for N tables. One Execute + one Wait; result_out is
+// filled with N entries (exists, CatalogRecord) corresponding to table_names.
+struct BatchReadCatalogTxRequest
+    : public TemplateTxRequest<BatchReadCatalogTxRequest, Void>
+{
+public:
+    BatchReadCatalogTxRequest(
+        const std::vector<std::string> *table_names,
+        std::vector<std::pair<bool, CatalogRecord>> *result_out,
+        const std::function<void()> *yield_fptr = nullptr,
+        const std::function<void()> *resume_fptr = nullptr,
+        TransactionExecution *txm = nullptr)
+        : TemplateTxRequest(yield_fptr, resume_fptr, txm),
+          table_names_(table_names),
+          result_out_(result_out)
+    {
+    }
+
+    const std::vector<std::string> *table_names_;
+    std::vector<std::pair<bool, CatalogRecord>> *result_out_;
 };
 
 struct InvalidateTableCacheTxRequest

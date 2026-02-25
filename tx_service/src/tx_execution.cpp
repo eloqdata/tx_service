@@ -109,7 +109,8 @@ TransactionExecution::TransactionExecution(CcHandler *handler,
       fault_inject_op_(this),
       clean_entry_op_(this),
       abundant_lock_op_(this),
-      batch_read_op_(this, &lock_range_bucket_result_)
+      batch_read_op_(this, &lock_range_bucket_result_),
+      batch_read_catalog_op_(this)
 {
     TX_TRACE_ASSOCIATE(this, cc_handler_);
 
@@ -7569,6 +7570,75 @@ void TransactionExecution::ProcessTxRequest(BatchReadTxRequest &batch_read_req)
 
     PushOperation(&batch_read_op_);
     Process(batch_read_op_);
+}
+
+void TransactionExecution::ProcessTxRequest(
+    BatchReadCatalogTxRequest &batch_read_catalog_req)
+{
+    TX_TRACE_ACTION_WITH_CONTEXT(
+        this,
+        &batch_read_catalog_req,
+        [this]() -> std::string
+        {
+            return std::string("\"tx_number\":")
+                .append(std::to_string(this->TxNumber()))
+                .append(",\"tx_term\":")
+                .append(std::to_string(this->tx_term_));
+        });
+
+    if (tx_term_ < 0)
+    {
+        batch_read_catalog_req.SetError(TxErrorCode::TX_INIT_FAIL);
+        return;
+    }
+
+    void_resp_ = &batch_read_catalog_req.tx_result_;
+    batch_read_catalog_op_.batch_req_ = &batch_read_catalog_req;
+    batch_read_catalog_op_.Reset();
+    PushOperation(&batch_read_catalog_op_);
+    Process(batch_read_catalog_op_);
+}
+
+void TransactionExecution::Process(BatchReadCatalogOperation &batch_read_catalog_op)
+{
+    TX_TRACE_ACTION_WITH_CONTEXT(
+        this,
+        &batch_read_catalog_op,
+        [this]() -> std::string
+        {
+            return std::string("\"tx_number\":")
+                .append(std::to_string(this->TxNumber()))
+                .append(",\"tx_term\":")
+                .append(std::to_string(this->tx_term_));
+        });
+
+    const std::vector<std::string> *table_names =
+        batch_read_catalog_op.batch_req_->table_names_;
+    const size_t N = table_names->size();
+    for (size_t i = 0; i < N; ++i)
+    {
+        TxKey catalog_tx_key(&batch_read_catalog_op.catalog_keys_[i]);
+        bool finished = cc_handler_->ReadLocal(
+            catalog_ccm_name,
+            catalog_tx_key,
+            batch_read_catalog_op.catalog_records_[i],
+            ReadType::Inside,
+            tx_number_.load(std::memory_order_relaxed),
+            tx_term_,
+            CommandId(),
+            start_ts_,
+            batch_read_catalog_op.hd_result_vec_[i],
+            IsolationLevel::RepeatableRead,
+            CcProtocol::Locking,
+            false,
+            false,
+            true);
+        if (finished)
+        {
+            command_id_.fetch_add(1, std::memory_order_relaxed);
+        }
+    }
+    StartTiming();
 }
 
 void TransactionExecution::Process(BatchReadOperation &batch_read_op)
