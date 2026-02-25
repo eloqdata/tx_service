@@ -38,6 +38,7 @@
 #include <variant>
 #include <vector>
 
+#include "absl/container/flat_hash_map.h"
 #include "cc_entry.h"
 #include "cc_map.h"
 #include "cc_page_clean_guard.h"
@@ -8771,6 +8772,10 @@ public:
         }
 
         normal_obj_sz_ = 0;
+        if constexpr (RangePartitioned)
+        {
+            range_sizes_.clear();
+        }
         ccmp_.clear();
     }
 
@@ -11926,6 +11931,9 @@ protected:
     TemplateCcMapSamplePool<KeyT> *sample_pool_;
     size_t normal_obj_sz_{
         0};  // The count of all normal status objects, only used for redis
+
+    // Range id -> total size; only used when RangePartitioned.
+    absl::flat_hash_map<uint32_t, size_t> range_sizes_;
 };
 
 template <typename KeyT, typename ValueT>
