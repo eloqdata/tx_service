@@ -124,6 +124,10 @@ public:
             {
             case AddWriterResult::WriteConflict:
                 // There is a write-write conflict
+                DLOG(WARNING)
+                    << "AcquireAllCc from txn: " << req.Txn()
+                    << ", on table: " << table_name_.StringView()
+                    << ", key: " << catalog_key->ToString() << " is conflict.";
                 return hd_res->SetError(
                     CcErrorCode::ACQUIRE_KEY_LOCK_FAILED_FOR_WW_CONFLICT);
             case AddWriterResult::WritePending:

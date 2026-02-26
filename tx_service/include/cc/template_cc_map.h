@@ -965,6 +965,9 @@ public:
             }
             default:
             {
+                DLOG(WARNING) << "AcquireAllCc from txn: " << req.Txn()
+                           << ", on table: " << table_name_.StringView()
+                           << ", key: " << cce_ptr->KeyString() << " conflict.";
                 // lock confilct: back off and retry.
                 return hd_res->SetError(err_code);
             }

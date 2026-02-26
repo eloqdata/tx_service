@@ -1907,6 +1907,9 @@ void AcquireAllOp::Forward(TransactionExecution *txm)
                             return;
                         }
                     }
+                    LOG(ERROR) << "AcquireAll of idx: " << idx
+                               << " err code: " << int(hd_result.ErrorCode())
+                               << ", err msg: " << hd_result.ErrorMsg();
                     fail_cnt_.fetch_add(1, std::memory_order_relaxed);
                 }
                 else
