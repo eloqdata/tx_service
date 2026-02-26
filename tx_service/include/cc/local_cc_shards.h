@@ -63,6 +63,8 @@
 #include "tx_start_ts_collector.h"
 #include "type.h"
 
+#include <boost/context/continuation.hpp>
+
 #ifdef WITH_JEMALLOC
 // we use uint32_t instead of unsigned to make the code more readable
 static_assert(std::is_same_v<unsigned, uint32_t>,
@@ -84,6 +86,15 @@ struct InvalidateTableCacheCompositeOp;
 class SkGenerator;
 class UploadBatchSlicesClosure;
 struct FlushDataTask;
+
+struct CoroCtx
+{
+    boost::context::continuation coro_;
+    std::unique_ptr<FlushDataTask> task_;
+    std::function<void()> sync_yield_func;  // 同步 yield：入队后让出
+    std::function<void()> yield_fn;         // 异步 yield
+    std::function<void()> resume_fn;        // 用 weak_ptr 捕获 ctx，无参调用
+};
 
 struct DataMigrationStatus
 {
@@ -2481,6 +2492,9 @@ private:
     // Per-worker flush task queues. Each FlushDataWorker processes its
     // corresponding queue.
     std::vector<std::deque<std::unique_ptr<FlushDataTask>>> pending_flush_work_;
+    // Per-worker queues of coroutine contexts ready to resume (yielded by
+    // sync_yield_func or resume_fn).
+    std::vector<std::deque<std::shared_ptr<CoroCtx>>> resume_queue_;
 
     void FlushDataWorker(size_t worker_idx);
     void FlushData(std::unique_lock<std::mutex> &flush_worker_lk,
