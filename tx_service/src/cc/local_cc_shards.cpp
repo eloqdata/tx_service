@@ -6076,28 +6076,48 @@ void LocalCcShards::FlushDataWorker(size_t worker_idx)
            static_cast<size_t>(flush_data_worker_ctx_.worker_num_));
     assert(worker_idx < static_cast<size_t>(pending_flush_work_.size()));
     assert(worker_idx < static_cast<size_t>(cur_flush_buffers_.size()));
+    assert(worker_idx < static_cast<size_t>(resume_queue_.size()));
 
     auto &pending_flush_work = pending_flush_work_[worker_idx];
     auto &cur_flush_buffer = *cur_flush_buffers_[worker_idx];
+    auto &resume_queue = resume_queue_[worker_idx];
 
     using clock = std::chrono::steady_clock;
+    using continuation = boost::context::continuation;
     size_t previous_flush_size = 0;
     auto previous_size_update_time = clock::now();
 
     std::unique_lock<std::mutex> flush_worker_lk(flush_data_worker_ctx_.mux_);
     while (flush_data_worker_ctx_.status_ == WorkerStatus::Active)
     {
+        // 1. 从 resume_queue 获取被唤醒的协程
+        if (!resume_queue.empty())
+        {
+            std::shared_ptr<CoroCtx> ctx =
+                std::move(resume_queue.front());
+            resume_queue.pop_front();
+            flush_worker_lk.unlock();
+
+            ctx->coro_ = ctx->coro_.resume();  // 单次 resume，无循环
+
+            flush_worker_lk.lock();
+            continue;
+        }
+
+        // 2. 等待新任务或 resume_queue 通知
         flush_data_worker_ctx_.cv_.wait_for(
             flush_worker_lk,
             10s,
             [this,
              &pending_flush_work,
+             &resume_queue,
              &cur_flush_buffer,
              &previous_flush_size,
              &previous_size_update_time]
             {
-                if (!pending_flush_work.empty() ||
-                    flush_data_worker_ctx_.status_ == WorkerStatus::Terminated)
+                if (!pending_flush_work.empty() || !resume_queue.empty() ||
+                    flush_data_worker_ctx_.status_ ==
+                        WorkerStatus::Terminated)
                 {
                     return true;
                 }
@@ -6152,9 +6172,69 @@ void LocalCcShards::FlushDataWorker(size_t worker_idx)
             continue;
         }
 
-        FlushData(flush_worker_lk, worker_idx);
+        // 3. 取任务，以协程执行 FlushData
+        std::unique_ptr<FlushDataTask> cur_work =
+            std::move(pending_flush_work.front());
+        pending_flush_work.pop_front();
+        flush_data_worker_ctx_.cv_.notify_all();
+        flush_worker_lk.unlock();
+
+        auto ctx = std::make_shared<CoroCtx>();
+        ctx->task_ = std::move(cur_work);
+        ctx->coro_ = boost::context::callcc(
+            std::allocator_arg,
+            flush_coro_stack_allocator_,
+            [this, ctx, worker_idx](continuation &&sink)
+            {
+                ctx->yield_fn = [&sink]() { sink = sink.resume(); };
+                ctx->sync_yield_func =
+                    [&sink, weak_ctx = std::weak_ptr<CoroCtx>(ctx), this,
+                     worker_idx]()
+                {
+                    if (auto c = weak_ctx.lock())
+                    {
+                        {
+                            std::lock_guard<std::mutex> lk(
+                                flush_data_worker_ctx_.mux_);
+                            resume_queue_[worker_idx].push_back(std::move(c));
+                            flush_data_worker_ctx_.cv_.notify_all();
+                        }
+                        sink = sink.resume();
+                    }
+                };
+                ctx->resume_fn =
+                    [this, worker_idx,
+                     weak_ctx = std::weak_ptr<CoroCtx>(ctx)]()
+                {
+                    if (auto c = weak_ctx.lock())
+                    {
+                        std::lock_guard<std::mutex> lk(
+                            flush_data_worker_ctx_.mux_);
+                        resume_queue_[worker_idx].push_back(std::move(c));
+                        flush_data_worker_ctx_.cv_.notify_all();
+                    }
+                };
+                FlushDataImpl(ctx->task_.get(),
+                              worker_idx,
+                              ctx->sync_yield_func,
+                              ctx->yield_fn,
+                              ctx->resume_fn);
+                return std::move(sink);
+            });
+
+        flush_worker_lk.lock();
     }
 
+    // Terminate 时清空队列
+    while (!resume_queue.empty())
+    {
+        std::shared_ptr<CoroCtx> ctx =
+            std::move(resume_queue.front());
+        resume_queue.pop_front();
+        flush_worker_lk.unlock();
+        ctx->coro_ = ctx->coro_.resume();
+        flush_worker_lk.lock();
+    }
     while (!pending_flush_work.empty())
     {
         FlushData(flush_worker_lk, worker_idx);
