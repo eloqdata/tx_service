@@ -133,7 +133,6 @@ bool FetchCatalogCc::Execute(CcShard &ccs)
             // If on_leader_stop and Enqueue(ClearCcNodeGroup) happens at this
             // time, the creating catalog will be cleaned by ClearCcNodeGroup,
             // and the running cc_requests will check term invalid.
-            LOG(INFO) << "yf: fetchcatalogcc: create catalog";
             if (status_ == RecordStatus::Normal)
             {
                 assert(commit_ts_ > 0);
@@ -149,8 +148,6 @@ bool FetchCatalogCc::Execute(CcShard &ccs)
                 // of history, i.e., ts=1.
                 ccs.CreateCatalog(table_name_, cc_ng_id_, catalog_image_, 1);
             }
-
-            LOG(INFO) << "yf: fetchcatalogcc: create catalog finished";
 
             for (CcRequestBase *req : requesters_)
             {
@@ -219,12 +216,10 @@ bool FetchTableStatisticsCc::Execute(CcShard &ccs)
 
             CatalogEntry *catalog_entry =
                 ccs.GetCatalog(table_name_, cc_ng_id_);
-            LOG(INFO) << "yf: fetchtablestatisticscc: init table statistics";
             ccs.InitTableStatistics(catalog_entry->schema_.get(),
                                     catalog_entry->dirty_schema_.get(),
                                     cc_ng_id_,
                                     std::move(sample_pool_map_));
-            LOG(INFO) << "yf: fetchTableStat: init table stat finished";
             for (CcRequestBase *req : requesters_)
             {
                 ccs.Enqueue(ccs.core_id_, req);

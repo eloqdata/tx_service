@@ -437,7 +437,6 @@ void FetchTableCatalogCallback(void *data,
                                DataStoreServiceClient &client,
                                const remote::CommonResult &result)
 {
-    // LOG(INFO) << "yf: fetch catalog finished";
     auto *read_closure = static_cast<ReadClosure *>(closure);
 
     auto *fetch_cc = static_cast<txservice::FetchCatalogCc *>(data);
@@ -445,8 +444,6 @@ void FetchTableCatalogCallback(void *data,
 
     if (err_code == remote::DataStoreError::KEY_NOT_FOUND)
     {
-        LOG(INFO) << "yf: fetch table catalog, key not found, key = "
-                  << fetch_cc->kv_key_;
         fetch_cc->CatalogImage().clear();
         fetch_cc->SetCommitTs(1);
         fetch_cc->SetFinish(txservice::RecordStatus::Deleted, 0);
@@ -897,10 +894,6 @@ void FetchTableRangesCallback(void *data,
             }
 
             fetch_range_cc->Merge();
-
-            // LOG(INFO) << "yf: FetchTableRanges callback, table name = "
-            //          << fetch_range_cc->table_name_.StringView()
-            //          << ", finished";
 
             fetch_range_cc->SetFinish(error_code);
         }

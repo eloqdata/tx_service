@@ -622,9 +622,6 @@ void DataStoreServiceClient::FetchTableCatalog(
     fetch_cc->kv_key_ = txservice::KvTablePrefixOf(ccm_table_name.Engine());
     fetch_cc->kv_key_.append(ccm_table_name.StringView());
 
-    // LOG(INFO) << "yf: fetch table catalog, table name = "
-    //          << ccm_table_name.StringView();
-
     Read(kv_table_catalogs_name,
          kv_partition_id,
          shard_id,
@@ -978,9 +975,6 @@ void DataStoreServiceClient::FetchTableRanges(
         fetch_cc->remaining_partitions_ =
             static_cast<int32_t>(total_partitions);
     }
-
-    // LOG(INFO) << "yf: FetchTableRanges client, table name = " <<
-    // table_name_sv;
 
     for (int32_t kv_part_id = 0;
          kv_part_id < static_cast<int32_t>(total_partitions);
@@ -5441,9 +5435,6 @@ bool DataStoreServiceClient::UpsertCatalog(
     records_ts.emplace_back(write_time);
     records_ttl.emplace_back(0);  // no ttl
     op_types.emplace_back(WriteOpType::PUT);
-
-    LOG(INFO) << "yf: UpsertCatalog, key = " << key_str
-              << ", catalog image size = " << catalog_image.size();
 
     BatchWriteRecords(kv_table_catalogs_name,
                       partition_id,

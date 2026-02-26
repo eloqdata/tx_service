@@ -7595,7 +7595,6 @@ void TransactionExecution::Process(BatchReadOperation &batch_read_op)
             TxKey &key = read_batch[i].key_;
             TxRecord &rec = *read_batch[i].record_;
 
-            LOG(INFO) << ", key = " << key.ToString();
             bool finished = cc_handler_->ReadLocal(
                 catalog_ccm_name,
                 key,
@@ -7851,7 +7850,6 @@ void TransactionExecution::PostProcess(BatchReadOperation &batch_read_op)
 
         if (hd_res.IsError())
         {
-            LOG(INFO) << "yf: error code = " << (int) err;
             // Only returns the first error code.
             if (err == CcErrorCode::NO_ERROR)
             {
@@ -7865,8 +7863,6 @@ void TransactionExecution::PostProcess(BatchReadOperation &batch_read_op)
             // the record status and timestamp.
             tuple.status_ = read_res.rec_status_;
             tuple.version_ts_ = read_res.ts_;
-
-            LOG(INFO) << "yf: status = " << (int) tuple.status_;
 
             LockType lock_type = read_res.lock_type_;
             if (lock_type != LockType::NoLock)

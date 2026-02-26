@@ -21,8 +21,6 @@
  */
 #pragma once
 
-#include <butil/logging.h>
-
 #include "cc_protocol.h"
 #include "error_messages.h"
 #include "tx_execution.h"
@@ -87,10 +85,8 @@ static inline TxErrorCode TxReadCatalog(TransactionExecution *txm,
                                         bool &exists)
 {
     assert(txm != nullptr);
-    LOG(INFO) << "yf: execute read catalog request";
     txm->Execute(&read_tx_req);
     read_tx_req.Wait();
-    LOG(INFO) << "yf: read catalog request finished";
     if (read_tx_req.IsError())
     {
         return read_tx_req.ErrorCode();
