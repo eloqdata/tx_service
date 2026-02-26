@@ -312,6 +312,9 @@ struct SyncConcurrentRequest : public Poolable
         unfinished_request_cnt_ = 0;
         all_request_started_ = false;
         result_.Clear();
+        waiting_.store(false);
+        yield_fn_ = nullptr;
+        resume_fn_ = nullptr;
     }
 
     virtual void Clear() override
@@ -319,7 +322,21 @@ struct SyncConcurrentRequest : public Poolable
         unfinished_request_cnt_ = 0;
         all_request_started_ = false;
         result_.Clear();
+        waiting_.store(false);
+        yield_fn_ = nullptr;
+        resume_fn_ = nullptr;
     }
+
+    void SetCoroCallbacks(const std::function<void()> *yield_fn,
+                         const std::function<void()> *resume_fn)
+    {
+        yield_fn_ = yield_fn;
+        resume_fn_ = resume_fn;
+    }
+
+    void WaitForCapacityAndIncrement();
+
+    void WaitForAll();
 
     void Finish(const remote::CommonResult &res)
     {
@@ -334,7 +351,17 @@ struct SyncConcurrentRequest : public Poolable
         if ((all_request_started_ && unfinished_request_cnt_ == 0) ||
             unfinished_request_cnt_ == max_flying_write_count - 1)
         {
-            cv_.notify_one();
+            if (resume_fn_ && waiting_.load(std::memory_order_acquire))
+            {
+                waiting_.store(false, std::memory_order_release);
+                lk.unlock();
+                (*resume_fn_)();
+                // Do not re-lock: resume_fn may acquire flush_worker_mux
+            }
+            else if (!resume_fn_)
+            {
+                cv_.notify_one();
+            }
         }
     }
 
@@ -342,6 +369,11 @@ struct SyncConcurrentRequest : public Poolable
     int32_t unfinished_request_cnt_{0};
     bool all_request_started_{false};
     remote::CommonResult result_;
+
+    // Coroutine yield/resume support
+    const std::function<void()> *yield_fn_{nullptr};
+    const std::function<void()> *resume_fn_{nullptr};
+    std::atomic<bool> waiting_{false};
     mutable bthread::Mutex mux_;
     bthread::ConditionVariable cv_;
 };

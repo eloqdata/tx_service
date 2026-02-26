@@ -410,6 +410,7 @@ public:
                         std::string_view,
                         std::vector<std::unique_ptr<txservice::FlushTaskEntry>>>
                             &flush_task) override;
+
     /**
      * @brief Copy record from base/sk table to mvcc_archives.
      */
@@ -558,6 +559,14 @@ public:
                                      bool is_range_partition) const;
 
 private:
+    bool PutArchivesAllImpl(std::unordered_map<
+                                std::string_view,
+                                std::vector<
+                                    std::unique_ptr<txservice::FlushTaskEntry>>>
+                                &flush_task,
+                            const std::function<void()> *yield_fptr = nullptr,
+                            const std::function<void()> *resume_fptr = nullptr);
+
     bool PutAllImpl(std::unordered_map<
                         std::string_view,
                         std::vector<std::unique_ptr<txservice::FlushTaskEntry>>>
