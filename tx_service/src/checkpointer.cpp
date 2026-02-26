@@ -556,7 +556,7 @@ bool Checkpointer::CkptEntryForTest(
                        std::vector<std::unique_ptr<FlushTaskEntry>>>
         &flush_task_entries)
 {
-    return store_hd_->PutAll(flush_task_entries);
+    return store_hd_->PutAll(flush_task_entries, nullptr, nullptr);
 }
 
 bool Checkpointer::FlushArchiveForTest(
@@ -564,6 +564,6 @@ bool Checkpointer::FlushArchiveForTest(
                        std::vector<std::unique_ptr<FlushTaskEntry>>>
         &flush_task_entries)
 {
-    return store_hd_->PutArchivesAll(flush_task_entries);
+    return store_hd_->PutArchivesAll(flush_task_entries, nullptr, nullptr);
 }
 }  // namespace txservice
