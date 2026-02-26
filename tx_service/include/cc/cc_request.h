@@ -8991,11 +8991,7 @@ private:
 
 struct ScanDeltaSizeCcForHashPartition : public CcRequestBase
 {
-    static constexpr size_t ScanBatchSize = 128;
-
     ScanDeltaSizeCcForHashPartition(const TableName &table_name,
-                                    uint64_t last_datasync_ts,
-                                    uint64_t scan_ts,
                                     uint64_t ng_id,
                                     int64_t ng_term,
                                     uint64_t txn,
@@ -9003,8 +8999,6 @@ struct ScanDeltaSizeCcForHashPartition : public CcRequestBase
         : table_name_(table_name),
           node_group_id_(ng_id),
           node_group_term_(ng_term),
-          last_datasync_ts_(last_datasync_ts),
-          scan_ts_(scan_ts),
           schema_version_(schema_version)
     {
         tx_number_ = txn;
@@ -9096,44 +9090,27 @@ struct ScanDeltaSizeCcForHashPartition : public CcRequestBase
         return node_group_term_;
     }
 
-    uint64_t LastDataSyncTs() const
-    {
-        return last_datasync_ts_;
-    }
-
-    uint64_t ScanTs() const
-    {
-        return scan_ts_;
-    }
-
     void AbortCcRequest(CcErrorCode err_code) override
     {
         assert(err_code != CcErrorCode::NO_ERROR);
         SetError(err_code);
     }
 
-    TxKey &PausedKey()
+    void SetKeyCounts(const size_t data_key_count, const size_t dirty_key_count)
     {
-        return pause_key_;
-    }
-
-    void UpdateKeyCount(const bool need_ckpt)
-    {
-        ++scanned_key_count_;
-        if (need_ckpt)
-        {
-            ++updated_key_count_;
-        }
+        data_key_count_ = data_key_count;
+        dirty_key_count_ = dirty_key_count;
     }
 
     size_t UpdatedMemory() const
     {
-        const uint64_t scanned = scanned_key_count_;
-        if (scanned == 0)
+        if (data_key_count_ == 0)
             return 0;
+        // Use cc map's data_key_count_ and dirty_key_count_ for estimation.
         // integer math with rounding up to avoid systematic underestimation
         return static_cast<size_t>(
-            (updated_key_count_ * memory_usage_ + scanned - 1) / scanned);
+            (dirty_key_count_ * memory_usage_ + data_key_count_ - 1) /
+            data_key_count_);
     }
 
     void SetMemoryUsage(const uint64_t memory)
@@ -9150,20 +9127,11 @@ private:
     const TableName &table_name_;
     uint32_t node_group_id_;
     int64_t node_group_term_;
-    // It is used as a hint to decide if a page has dirty data since last round
-    // of checkpoint. It is guaranteed that all entries committed before this ts
-    // are synced into data store.
-    uint64_t last_datasync_ts_;
-    // Target ts. Collect all data changes committed before this ts into data
-    // sync vec.
-    uint64_t scan_ts_;
-    //  Position that we left off during last round of scan.
-    TxKey pause_key_;
     uint64_t schema_version_;
 
-    // Number of keys scanned / updated, and per-core memory usage.
-    uint64_t scanned_key_count_{0};
-    uint64_t updated_key_count_{0};
+    // From cc map: total data keys and dirty keys needing checkpoint.
+    size_t data_key_count_{0};
+    size_t dirty_key_count_{0};
     uint64_t memory_usage_{0};
 
     CcErrorCode err_{CcErrorCode::NO_ERROR};
