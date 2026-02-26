@@ -6017,12 +6017,13 @@ void LocalCcShards::FlushDataImpl(FlushDataTask *cur_work,
                         entry->data_sync_task_->node_group_term_,
                         table_name,
                         cce_entries_map);
+                    update_cce_req.SetCoroCallbacks(&yield_fn, &resume_fn);
                     for (auto &[core_idx, cce_entries] : cce_entries_map)
                     {
                         updated_ckpt_ts_core_ids.insert(core_idx);
                         EnqueueToCcShard(core_idx, &update_cce_req);
                     }
-                    update_cce_req.Wait();
+                    update_cce_req.Wait(&yield_fn, &resume_fn);
                 }
             }
         }
@@ -6037,11 +6038,12 @@ void LocalCcShards::FlushDataImpl(FlushDataTask *cur_work,
             return true;
         },
         updated_ckpt_ts_core_ids.size());
+    reset_cc.SetCoroCallbacks(&yield_fn, &resume_fn);
     for (uint16_t core_idx : updated_ckpt_ts_core_ids)
     {
         EnqueueToCcShard(core_idx, &reset_cc);
     }
-    reset_cc.Wait();
+    reset_cc.Wait(&yield_fn, &resume_fn);
 
     auto ckpt_err = succ ? DataSyncTask::CkptErrorCode::NO_ERROR
                          : DataSyncTask::CkptErrorCode::FLUSH_ERROR;

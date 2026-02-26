@@ -27,6 +27,7 @@
 #include <atomic>
 #include <chrono>
 #include <condition_variable>
+#include <functional>
 #include <cstdint>
 #include <deque>
 #include <memory>
@@ -877,12 +878,38 @@ public:
         error_code_ = CcErrorCode::NO_ERROR;
     }
 
+    void SetCoroCallbacks(const std::function<void()> *yield_fn,
+                          const std::function<void()> *resume_fn)
+    {
+        yield_fn_ = yield_fn;
+        resume_fn_ = resume_fn;
+    }
+
     void Wait()
     {
         std::unique_lock<bthread::Mutex> lk(mux_);
         while (unfinished_cnt_)
         {
             cv_.wait(lk);
+        }
+    }
+
+    void Wait(const std::function<void()> *yield_fn,
+              const std::function<void()> *resume_fn)
+    {
+        if (yield_fn == nullptr || resume_fn == nullptr)
+        {
+            Wait();
+            return;
+        }
+        std::unique_lock<bthread::Mutex> lk(mux_);
+        while (unfinished_cnt_)
+        {
+            waiting_.store(true, std::memory_order_release);
+            lk.unlock();
+            (*yield_fn)();
+            lk.lock();
+            waiting_.store(false, std::memory_order_release);
         }
     }
 
@@ -911,7 +938,17 @@ public:
         error_code_ = error_code;
         if (unfinished_cnt_ == 0)
         {
-            cv_.notify_one();
+            if (resume_fn_ != nullptr &&
+                waiting_.load(std::memory_order_acquire))
+            {
+                waiting_.store(false, std::memory_order_release);
+                lk.unlock();
+                (*resume_fn_)();
+            }
+            else
+            {
+                cv_.notify_one();
+            }
         }
     }
 
@@ -923,7 +960,17 @@ public:
             error_code_ = CcErrorCode::NO_ERROR;
             if (--unfinished_cnt_ == 0)
             {
-                cv_.notify_one();
+                if (resume_fn_ != nullptr &&
+                    waiting_.load(std::memory_order_acquire))
+                {
+                    waiting_.store(false, std::memory_order_release);
+                    lk.unlock();
+                    (*resume_fn_)();
+                }
+                else
+                {
+                    cv_.notify_one();
+                }
             }
         }
         return false;
@@ -945,6 +992,11 @@ private:
 
     uint32_t unfinished_cnt_{0};
     CcErrorCode error_code_;
+
+    // Coroutine yield/resume support
+    const std::function<void()> *yield_fn_{nullptr};
+    const std::function<void()> *resume_fn_{nullptr};
+    std::atomic<bool> waiting_{false};
 };
 struct UpdateCceCkptTsCc : public CcRequestBase
 {
@@ -991,13 +1043,30 @@ public:
 
     bool Execute(CcShard &ccs) override;
 
+    void SetCoroCallbacks(const std::function<void()> *yield_fn,
+                          const std::function<void()> *resume_fn)
+    {
+        yield_fn_ = yield_fn;
+        resume_fn_ = resume_fn;
+    }
+
     void SetFinished()
     {
-        std::lock_guard<bthread::Mutex> lk(mux_);
+        std::unique_lock<bthread::Mutex> lk(mux_);
         unfinished_core_cnt_--;
         if (unfinished_core_cnt_ == 0)
         {
-            cv_.notify_one();
+            if (resume_fn_ != nullptr &&
+                waiting_.load(std::memory_order_acquire))
+            {
+                waiting_.store(false, std::memory_order_release);
+                lk.unlock();
+                (*resume_fn_)();
+            }
+            else
+            {
+                cv_.notify_one();
+            }
         }
     }
 
@@ -1006,7 +1075,26 @@ public:
         std::unique_lock<bthread::Mutex> lk(mux_);
         while (unfinished_core_cnt_ > 0)
         {
-            cv_.wait_for(lk, 10000);
+            cv_.wait_for(lk, 10000L);  // timeout_us, preserve original value
+        }
+    }
+
+    void Wait(const std::function<void()> *yield_fn,
+              const std::function<void()> *resume_fn)
+    {
+        if (yield_fn == nullptr || resume_fn == nullptr)
+        {
+            Wait();
+            return;
+        }
+        std::unique_lock<bthread::Mutex> lk(mux_);
+        while (unfinished_core_cnt_ > 0)
+        {
+            waiting_.store(true, std::memory_order_release);
+            lk.unlock();
+            (*yield_fn)();
+            lk.lock();
+            waiting_.store(false, std::memory_order_release);
         }
     }
 
@@ -1027,6 +1115,11 @@ private:
     TableName table_name_;
     bthread::Mutex mux_;
     bthread::ConditionVariable cv_;
+
+    // Coroutine yield/resume support
+    const std::function<void()> *yield_fn_{nullptr};
+    const std::function<void()> *resume_fn_{nullptr};
+    std::atomic<bool> waiting_{false};
 };
 
 struct WaitNoNakedBucketRefCc : public CcRequestBase
