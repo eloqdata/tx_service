@@ -64,6 +64,8 @@
 #include "type.h"
 
 #include <boost/context/continuation.hpp>
+#include <boost/context/pooled_fixedsize_stack.hpp>
+#include <boost/context/protected_fixedsize_stack.hpp>
 
 #ifdef WITH_JEMALLOC
 // we use uint32_t instead of unsigned to make the code more readable
@@ -2495,6 +2497,14 @@ private:
     // Per-worker queues of coroutine contexts ready to resume (yielded by
     // sync_yield_func or resume_fn).
     std::vector<std::deque<std::shared_ptr<CoroCtx>>> resume_queue_;
+
+#ifndef NDEBUG
+    boost::context::protected_fixedsize_stack flush_coro_stack_allocator_{
+        256 * 1024};  // 256KB, guard page for stack overflow detection
+#else
+    boost::context::pooled_fixedsize_stack flush_coro_stack_allocator_{
+        256 * 1024};  // 256KB for FlushData call chain
+#endif
 
     void FlushDataWorker(size_t worker_idx);
     void FlushData(std::unique_lock<std::mutex> &flush_worker_lk,
