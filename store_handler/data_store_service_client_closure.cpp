@@ -793,9 +793,9 @@ void FetchTableRangesCallback(void *data,
         for (uint32_t i = 0; i < items_size; i++)
         {
             scan_next_closure->GetItem(i, key, value, ts, ttl);
-            assert(value.size() == (sizeof(int32_t) + sizeof(uint64_t) +
-                                    sizeof(uint64_t) + sizeof(uint32_t) +
-                                    sizeof(uint32_t)));
+            assert(value.size() ==
+                   (sizeof(int32_t) + sizeof(uint64_t) + sizeof(uint64_t) +
+                    sizeof(uint32_t) + sizeof(uint32_t)));
             const char *buf = value.data();
             int32_t partition_id = *(reinterpret_cast<const int32_t *>(buf));
             buf += sizeof(partition_id);

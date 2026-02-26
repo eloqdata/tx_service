@@ -355,7 +355,11 @@ std::unique_ptr<TableRangeEntry> EloqRangeCatalogFactory::CreateTableRange(
         range_ptr};
 
     return std::make_unique<txservice::TemplateTableRangeEntry<EloqStringKey>>(
-        start, version_ts, partition_id, store_range_size, std::move(typed_range));
+        start,
+        version_ts,
+        partition_id,
+        store_range_size,
+        std::move(typed_range));
 }
 
 TxKey EloqRangeCatalogFactory::NegativeInfKey() const
