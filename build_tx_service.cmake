@@ -30,6 +30,17 @@ find_package(Protobuf REQUIRED)
 find_package(GFLAGS REQUIRED)
 find_package(MIMALLOC REQUIRED)
 
+# boost_context for FlushDataWorker coroutine refactor (Phase 1)
+if(CMAKE_BUILD_TYPE STREQUAL "Debug" AND CMAKE_CXX_FLAGS MATCHES "fsanitize=address")
+    find_library(Boost_CONTEXT_LIBRARY NAMES boost_context-asan)
+else()
+    find_library(Boost_CONTEXT_LIBRARY NAMES boost_context)
+endif()
+if(NOT Boost_CONTEXT_LIBRARY)
+    message(FATAL_ERROR "libboost_context not found")
+endif()
+find_package(Boost 1.70 REQUIRED)
+
 find_path(GFLAGS_INCLUDE_PATH gflags/gflags.h)
 find_library(GFLAGS_LIBRARY NAMES gflags libgflags)
 
@@ -211,9 +222,9 @@ set(ELOQ_SOURCES ${ELOQ_SOURCES} ${PROTO_CC_FILES})
 
 ADD_LIBRARY(txservice ${ELOQ_SOURCES})
 
-target_include_directories(txservice PUBLIC ${INCLUDE_DIR})
+target_include_directories(txservice PUBLIC ${INCLUDE_DIR} ${Boost_INCLUDE_DIRS})
 
-target_link_libraries(txservice PUBLIC ${LINK_LIB} ${PROTOBUF_LIBRARIES})
+target_link_libraries(txservice PUBLIC ${LINK_LIB} ${PROTOBUF_LIBRARIES} ${Boost_CONTEXT_LIBRARY})
 
 if(WITH_JEMALLOC)
     target_link_libraries(txservice PUBLIC jemalloc_cfg)
