@@ -5907,26 +5907,28 @@ void LocalCcShards::FlushCurrentFlushBuffer()
     }
 }
 
-void LocalCcShards::FlushData(std::unique_lock<std::mutex> &flush_worker_lk,
-                              size_t worker_idx)
+bool LocalCcShards::ShouldYieldFlushData(size_t worker_idx) const
 {
-    assert(worker_idx < pending_flush_work_.size());
-    auto &pending_flush_work = pending_flush_work_[worker_idx];
+    return !pending_flush_work_[worker_idx].empty();
+}
 
-    // Retrieve first pending work and pop it (FIFO).
-    std::unique_ptr<FlushDataTask> cur_work =
-        std::move(pending_flush_work.front());
-    pending_flush_work.pop_front();
-
-    // Notify any threads waiting for queue space
-    flush_data_worker_ctx_.cv_.notify_all();
-
-    flush_worker_lk.unlock();
+void LocalCcShards::FlushDataImpl(
+    FlushDataTask *cur_work,
+    size_t worker_idx,
+    const std::function<void()> &sync_yield_func,
+    const std::function<void()> &yield_fn,
+    const std::function<void()> &resume_fn)
+{
+    (void)yield_fn;
+    (void)resume_fn;
 
     auto &flush_task_entries = cur_work->flush_task_entries_;
-
     bool succ = true;
 
+    if (ShouldYieldFlushData(worker_idx))
+    {
+        sync_yield_func();
+    }
     if (EnableMvcc())
     {
         succ = store_hd_->CopyBaseToArchive(flush_task_entries);
@@ -5937,6 +5939,10 @@ void LocalCcShards::FlushData(std::unique_lock<std::mutex> &flush_worker_lk,
         }
     }
 
+    if (ShouldYieldFlushData(worker_idx))
+    {
+        sync_yield_func();
+    }
     if (succ)
     {
         succ = store_hd_->PutAll(flush_task_entries);
@@ -5947,6 +5953,10 @@ void LocalCcShards::FlushData(std::unique_lock<std::mutex> &flush_worker_lk,
         }
     }
 
+    if (ShouldYieldFlushData(worker_idx))
+    {
+        sync_yield_func();
+    }
     if (succ && EnableMvcc())
     {
         succ = store_hd_->PutArchivesAll(flush_task_entries);
@@ -5957,6 +5967,10 @@ void LocalCcShards::FlushData(std::unique_lock<std::mutex> &flush_worker_lk,
         }
     }
 
+    if (ShouldYieldFlushData(worker_idx))
+    {
+        sync_yield_func();
+    }
     if (succ && store_hd_->NeedPersistKV())
     {
         std::vector<std::string> kv_table_names;
@@ -5998,6 +6012,10 @@ void LocalCcShards::FlushData(std::unique_lock<std::mutex> &flush_worker_lk,
     {
         for (auto &[kv_table_name, entries] : flush_task_entries)
         {
+            if (ShouldYieldFlushData(worker_idx))
+            {
+                sync_yield_func();
+            }
             for (auto &entry : entries)
             {
                 if (!entry->data_sync_task_->need_update_ckpt_ts_)
@@ -6052,6 +6070,10 @@ void LocalCcShards::FlushData(std::unique_lock<std::mutex> &flush_worker_lk,
         }
     }
 
+    if (ShouldYieldFlushData(worker_idx))
+    {
+        sync_yield_func();
+    }
     // Notify cc shards that dirty data has been flushed. This will re-enqueue
     // kickout data cc reqs if there are any.
     WaitableCc reset_cc(
@@ -6079,6 +6101,28 @@ void LocalCcShards::FlushData(std::unique_lock<std::mutex> &flush_worker_lk,
                << " quota: " << data_sync_mem_controller_.FlushMemoryQuota();
 
     PostProcessFlushTaskEntries(flush_task_entries, ckpt_err);
+}
+
+void LocalCcShards::FlushData(std::unique_lock<std::mutex> &flush_worker_lk,
+                              size_t worker_idx)
+{
+    assert(worker_idx < pending_flush_work_.size());
+    auto &pending_flush_work = pending_flush_work_[worker_idx];
+
+    // Retrieve first pending work and pop it (FIFO).
+    std::unique_ptr<FlushDataTask> cur_work =
+        std::move(pending_flush_work.front());
+    pending_flush_work.pop_front();
+
+    // Notify any threads waiting for queue space
+    flush_data_worker_ctx_.cv_.notify_all();
+
+    flush_worker_lk.unlock();
+
+    // Phase 2: Pass no-op callbacks; Phase 4/5 will pass real coroutine
+    // callbacks.
+    FlushDataImpl(cur_work.get(), worker_idx, []() {}, []() {}, []() {});
+
     flush_worker_lk.lock();
 }
 
