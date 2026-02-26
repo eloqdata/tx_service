@@ -1273,6 +1273,31 @@ LocalCcShards::GetTableRangeIdsForATableInternal(
     return ng_it == table_it->second.end() ? nullptr : &ng_it->second;
 }
 
+absl::flat_hash_map<uint32_t, size_t> LocalCcShards::GetStoreRangeSizes(
+    const TableName &range_table_name,
+    const NodeGroupId ng_id,
+    const uint16_t core_id)
+{
+    absl::flat_hash_map<uint32_t, size_t> range_sizes;
+    std::shared_lock<FastMetaDataMutex> lk(fast_meta_data_mux_);
+    std::unordered_map<uint32_t, TableRangeEntry *> *range_ids =
+        GetTableRangeIdsForATableInternal(range_table_name, ng_id);
+    assert(range_ids != nullptr);
+    for (const auto &[partition_id, entry] : *range_ids)
+    {
+        BucketInfo *owner =
+            GetRangeOwnerInternal(static_cast<int32_t>(partition_id), ng_id);
+        NodeGroupId range_owner = owner->BucketOwner();
+        uint16_t range_shard_idx =
+            static_cast<uint16_t>(partition_id % Count());
+        if (range_owner == ng_id && range_shard_idx == core_id)
+        {
+            range_sizes.emplace(partition_id, entry->StoreRangeSize());
+        }
+    }
+    return range_sizes;
+}
+
 void LocalCcShards::CleanTableRange(const TableName &table_name,
                                     NodeGroupId ng_id)
 {

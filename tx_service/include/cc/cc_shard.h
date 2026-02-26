@@ -315,6 +315,16 @@ public:
      */
     CcMap *GetCcm(const TableName &table_name, uint32_t node_group);
 
+    /**
+     * Returns partition_id -> store_range_size for ranges that belong to this
+     * node group and this shard (core). Used to lazy-init
+     * TemplateCcMap::range_sizes_.
+     * @param range_table_name Range table name.
+     * @param node_group Node group id.
+     */
+    absl::flat_hash_map<uint32_t, size_t> GetStoreRangeSizes(
+        const TableName &range_table_name, const NodeGroupId node_group);
+
     void AdjustDataKeyStats(const TableName &table_name,
                             int64_t size_delta,
                             int64_t dirty_delta);
