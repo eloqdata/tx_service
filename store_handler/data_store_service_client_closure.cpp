@@ -513,6 +513,34 @@ void SyncConcurrentRequestCallback(void *data,
     callback_data->Finish(result);
 }
 
+void SyncPutAllData::Wait()
+{
+    std::unique_lock<bthread::Mutex> lk(mux_);
+    while (completed_partitions_ < total_partitions_)
+    {
+        cv_.wait(lk);
+    }
+}
+
+void SyncPutAllData::Wait(const std::function<void()> *yield_fn,
+                         const std::function<void()> *resume_fn)
+{
+    if (yield_fn == nullptr || resume_fn == nullptr)
+    {
+        Wait();
+        return;
+    }
+    std::unique_lock<bthread::Mutex> lk(mux_);
+    while (completed_partitions_ < total_partitions_)
+    {
+        waiting_.store(true, std::memory_order_release);
+        lk.unlock();
+        (*yield_fn)();
+        lk.lock();
+        waiting_.store(false, std::memory_order_release);
+    }
+}
+
 void PartitionBatchCallback(void *data,
                             ::google::protobuf::Closure *closure,
                             DataStoreServiceClient &client,
