@@ -1034,6 +1034,20 @@ public:
         return lru_large_value_zone_head_;
     }
 
+    /// Number of pages currently in the large-value zone. Used in tests to
+    /// verify zone-ratio enforcement.
+    uint64_t LargeValueZonePageCount() const
+    {
+        return large_value_zone_page_count_;
+    }
+
+    /// Total number of data pages currently in the LRU list (both zones).
+    /// Used in tests to verify zone-ratio enforcement.
+    uint64_t TotalLruPageCount() const
+    {
+        return total_lru_page_count_;
+    }
+
     SystemHandler *GetSystemHandler()
     {
         return system_handler_;
@@ -1323,6 +1337,17 @@ private:
     //
     // It equals &tail_ccp_ when no large-value pages are in the list.
     LruPage *lru_large_value_zone_head_;
+
+    // Number of data pages currently in the large-value zone (between
+    // lru_large_value_zone_head_ and the tail sentinel, inclusive of zone
+    // head).
+    uint64_t large_value_zone_page_count_{0};
+
+    // Total number of data pages currently in the LRU list (both zones
+    // combined). Maintained by UpdateLruList (increment on new insertion) and
+    // DetachLru (decrement on removal). Together with
+    // large_value_zone_page_count_ this enables O(1) zone-ratio enforcement.
+    uint64_t total_lru_page_count_{0};
 
     // The number of ccentry in all the ccmap of this ccshard.
     uint64_t size_;

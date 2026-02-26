@@ -9276,6 +9276,13 @@ public:
         }
     }
 
+    /// Returns the number of CcPage objects (btree nodes) in this cc map.
+    /// Used in tests that verify zone-page-count invariants.
+    size_t PageCount() const
+    {
+        return ccmp_.size();
+    }
+
 protected:
     void OnCommittedUpdate(
         const CcEntry<KeyT, ValueT, VersionedRecord, RangePartitioned> *cce,

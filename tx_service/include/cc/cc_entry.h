@@ -2046,6 +2046,13 @@ struct LruPage
     // that they are evicted only after all small-value pages have been evicted.
     bool has_large_value_{false};
 
+    // True when this page is currently residing in the large-value zone
+    // (i.e. at or after lru_large_value_zone_head_ in the LRU list). Maintained
+    // by UpdateLruList and cleared by DetachLru. Used by DetachLru to update
+    // CcShard::large_value_zone_page_count_ in O(1) without traversing the
+    // list.
+    bool in_large_value_zone_{false};
+
     // The largest commit ts of dirty cc entries on this page. This value might
     // be larger than the actual max commit ts of cc entries. Currently used to
     // decide if this page has dirty data after a given ts.

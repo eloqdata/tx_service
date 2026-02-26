@@ -852,6 +852,16 @@ void CcShard::DetachLru(LruPage *page)
     {
         lru_large_value_zone_head_ = page->lru_next_;
     }
+    // Update zone-page counts before unlinking so the flags are still valid.
+    if (page->in_large_value_zone_)
+    {
+        assert(large_value_zone_page_count_ > 0);
+        --large_value_zone_page_count_;
+        page->in_large_value_zone_ = false;
+    }
+    assert(total_lru_page_count_ > 0);
+    --total_lru_page_count_;
+
     assert(prev != nullptr && next != nullptr);
     prev->lru_next_ = next;
     next->lru_prev_ = prev;
@@ -873,8 +883,10 @@ void CcShard::ReplaceLru(LruPage *old_page, LruPage *new_page)
     {
         clean_start_ccp_ = new_page;
     }
-    // The replacement page inherits the large-value flag and the zone head.
+    // The replacement page inherits the large-value flag, zone membership, and
+    // the zone-head role. Page counts do not change (1:1 replacement).
     new_page->has_large_value_ = old_page->has_large_value_;
+    new_page->in_large_value_zone_ = old_page->in_large_value_zone_;
     if (lru_large_value_zone_head_ == old_page)
     {
         lru_large_value_zone_head_ = new_page;
@@ -919,6 +931,8 @@ void CcShard::UpdateLruList(LruPage *page, bool is_emplace)
     }
 
     // Remove the page from its current position in the list (if present).
+    // DetachLru also decrements total_lru_page_count_ and, if the page was in
+    // the LV zone, decrements large_value_zone_page_count_.
     if (page->lru_next_ != nullptr)
     {
         DetachLru(page);
@@ -934,12 +948,42 @@ void CcShard::UpdateLruList(LruPage *page, bool is_emplace)
     ++access_counter_;
     page->last_access_ts_ = access_counter_;
 
-    // Maintain lru_large_value_zone_head_: when a large-value page is inserted
-    // and the zone was empty (lru_large_value_zone_head_ == &tail_ccp_), the
-    // new page becomes the zone head.
-    if (page->has_large_value_ && lru_large_value_zone_head_ == &tail_ccp_)
+    // Update page counts after re-insertion.
+    ++total_lru_page_count_;
+    if (page->has_large_value_)
     {
-        lru_large_value_zone_head_ = page;
+        page->in_large_value_zone_ = true;
+        ++large_value_zone_page_count_;
+
+        // Maintain lru_large_value_zone_head_: when a large-value page is
+        // inserted and the zone was empty, the new page becomes the zone head.
+        if (lru_large_value_zone_head_ == &tail_ccp_)
+        {
+            lru_large_value_zone_head_ = page;
+        }
+
+        // Zone-ratio enforcement (analogous to SLRU protected-segment cap):
+        // if the large-value zone now exceeds
+        // txservice_large_value_zone_max_ratio of all LRU pages, demote the
+        // oldest LV page(s) until the zone is within the limit. Each demotion
+        // advances lru_large_value_zone_head_ one step (O(1), no list surgery).
+        // The demoted page stays in the list at its current position, now
+        // belonging to the SV zone; it will be re-promoted if accessed again.
+        while (txservice_large_value_zone_max_ratio < 1.0 &&
+               lru_large_value_zone_head_ != &tail_ccp_ &&
+               large_value_zone_page_count_ >
+                   static_cast<uint64_t>(total_lru_page_count_ *
+                                         txservice_large_value_zone_max_ratio))
+        {
+            LruPage *demote = lru_large_value_zone_head_;
+            lru_large_value_zone_head_ = demote->lru_next_;
+            demote->in_large_value_zone_ = false;
+            --large_value_zone_page_count_;
+        }
+    }
+    else
+    {
+        page->in_large_value_zone_ = false;
     }
 
     // If the update is a emplace update, these new loaded data might be
