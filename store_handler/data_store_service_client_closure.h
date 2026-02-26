@@ -238,7 +238,7 @@ struct SyncPutAllData : public Poolable
     }
 
     void SetCoroCallbacks(const std::function<void()> *yield_fn,
-                         const std::function<void()> *resume_fn)
+                          const std::function<void()> *resume_fn)
     {
         yield_fn_ = yield_fn;
         resume_fn_ = resume_fn;
@@ -328,7 +328,7 @@ struct SyncConcurrentRequest : public Poolable
     }
 
     void SetCoroCallbacks(const std::function<void()> *yield_fn,
-                         const std::function<void()> *resume_fn)
+                          const std::function<void()> *resume_fn)
     {
         yield_fn_ = yield_fn;
         resume_fn_ = resume_fn;
@@ -520,17 +520,25 @@ struct ReadBaseForArchiveCallbackData
     ReadBaseForArchiveCallbackData(bthread::Mutex &mtx,
                                    bthread::ConditionVariable &cv,
                                    size_t &flying_read_cnt,
-                                   int &error_code)
+                                   int &error_code,
+                                   const std::function<void()> *resume_fn =
+                                       nullptr)
         : mtx_(mtx),
           cv_(cv),
           flying_read_cnt_(flying_read_cnt),
           error_code_(error_code),
+          resume_fn_(resume_fn),
           partition_id_(0),
           key_str_(),
           value_str_(),
           ts_(0),
           ttl_(0)
     {
+    }
+
+    void SetCoroCallbacks(const std::function<void()> *resume_fn)
+    {
+        resume_fn_ = resume_fn;
     }
 
     void ResetResult()
@@ -551,6 +559,30 @@ struct ReadBaseForArchiveCallbackData
         }
     }
 
+    void Wait(const std::function<void()> *yield_fn,
+              const std::function<void()> *resume_fn)
+    {
+        if (!yield_fn || !resume_fn)
+        {
+            Wait();
+            return;
+        }
+        std::unique_lock<bthread::Mutex> lk(mtx_);
+        resume_fn_ = resume_fn;
+        while (flying_read_cnt_ > 0)
+        {
+            waiting_.store(true, std::memory_order_release);
+            lk.unlock();
+            (*yield_fn)();
+            lk.lock();
+            waiting_.store(false, std::memory_order_release);
+            while (flying_read_cnt_ > 0)
+            {
+                cv_.wait(lk);
+            }
+        }
+    }
+
     size_t AddFlyingReadCount()
     {
         std::unique_lock<bthread::Mutex> lk(mtx_);
@@ -564,7 +596,17 @@ struct ReadBaseForArchiveCallbackData
         flying_read_cnt_--;
         if (flying_read_cnt_ == 0)
         {
-            cv_.notify_one();
+            if (resume_fn_ && waiting_.load(std::memory_order_acquire))
+            {
+                waiting_.store(false, std::memory_order_release);
+                lk.unlock();
+                (*resume_fn_)();
+                // Do not re-lock: resume_fn may acquire flush_worker_mux
+            }
+            else
+            {
+                cv_.notify_one();
+            }
         }
         return flying_read_cnt_;
     }
@@ -608,6 +650,8 @@ struct ReadBaseForArchiveCallbackData
     bthread::ConditionVariable &cv_;
     size_t &flying_read_cnt_;
     int &error_code_;
+    const std::function<void()> *resume_fn_{nullptr};
+    std::atomic<bool> waiting_{false};
     int32_t partition_id_;
     std::string_view key_str_;
     std::string value_str_;

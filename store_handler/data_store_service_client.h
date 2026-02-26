@@ -232,7 +232,9 @@ public:
     bool PutAll(std::unordered_map<
                 std::string_view,
                 std::vector<std::unique_ptr<txservice::FlushTaskEntry>>>
-                    &flush_task) override;
+                    &flush_task,
+                const std::function<void()> *yield_fptr = nullptr,
+                const std::function<void()> *resume_fptr = nullptr) override;
 
     bool NeedPersistKV() override
     {
@@ -426,7 +428,10 @@ public:
     bool PutArchivesAll(std::unordered_map<
                         std::string_view,
                         std::vector<std::unique_ptr<txservice::FlushTaskEntry>>>
-                            &flush_task) override;
+                            &flush_task,
+                        const std::function<void()> *yield_fptr = nullptr,
+                        const std::function<void()> *resume_fptr = nullptr)
+        override;
 
     /**
      * @brief Copy record from base/sk table to mvcc_archives.
@@ -435,7 +440,9 @@ public:
         std::unordered_map<
             std::string_view,
             std::vector<std::unique_ptr<txservice::FlushTaskEntry>>>
-            &flush_task) override;
+            &flush_task,
+        const std::function<void()> *yield_fptr = nullptr,
+        const std::function<void()> *resume_fptr = nullptr) override;
 
     /**
      * @brief  Get the latest visible(commit_ts <= upper_bound_ts)
@@ -613,6 +620,15 @@ private:
                         &flush_task,
                     const std::function<void()> *yield_fptr = nullptr,
                     const std::function<void()> *resume_fptr = nullptr);
+
+    bool CopyBaseToArchiveImpl(std::unordered_map<
+                                  std::string_view,
+                                  std::vector<
+                                      std::unique_ptr<
+                                          txservice::FlushTaskEntry>>>
+                                  &flush_task,
+                              const std::function<void()> *yield_fptr = nullptr,
+                              const std::function<void()> *resume_fptr = nullptr);
 
     int32_t MapKeyHashToPartitionId(const txservice::TxKey &key) const
     {

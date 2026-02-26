@@ -433,8 +433,12 @@ void RocksDBHandler::DeserializeRecord(const char *payload,
 bool RocksDBHandler::PutAll(
     std::unordered_map<std::string_view,
                        std::vector<std::unique_ptr<txservice::FlushTaskEntry>>>
-        &batch)
+        &batch,
+    const std::function<void()> *yield_fptr,
+    const std::function<void()> *resume_fptr)
 {
+    (void)yield_fptr;
+    (void)resume_fptr;
     std::thread::id this_id = std::this_thread::get_id();
     if (batch.empty())
     {
@@ -1663,8 +1667,12 @@ std::string RocksDBHandler::CreateNewKVCatalogInfo(
 bool RocksDBHandler::PutArchivesAll(
     std::unordered_map<std::string_view,
                        std::vector<std::unique_ptr<txservice::FlushTaskEntry>>>
-        &batch)
+        &batch,
+    const std::function<void()> *yield_fptr,
+    const std::function<void()> *resume_fptr)
 {
+    (void)yield_fptr;
+    (void)resume_fptr;
     LOG(ERROR) << "RocksDBHandler::PutArchivesAll not implemented";
     // Not implemented
     assert(false);
@@ -1676,8 +1684,12 @@ bool RocksDBHandler::PutArchivesAll(
 bool RocksDBHandler::CopyBaseToArchive(
     std::unordered_map<std::string_view,
                        std::vector<std::unique_ptr<txservice::FlushTaskEntry>>>
-        &batch)
+        &batch,
+    const std::function<void()> *yield_fptr,
+    const std::function<void()> *resume_fptr)
 {
+    (void)yield_fptr;
+    (void)resume_fptr;
     LOG(ERROR) << "RocksDBHandler::CopyBaseToArchive not implemented";
     // Not implemented
     assert(false);

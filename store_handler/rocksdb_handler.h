@@ -274,8 +274,9 @@ public:
      */
     bool PutAll(std::unordered_map<
                 std::string_view,
-                std::vector<std::unique_ptr<txservice::FlushTaskEntry>>> &batch)
-        override;
+                std::vector<std::unique_ptr<txservice::FlushTaskEntry>>> &batch,
+                const std::function<void()> *yield_fptr = nullptr,
+                const std::function<void()> *resume_fptr = nullptr) override;
 
     /**
      * @brief indicate end of flush entries in a single ckpt for \@param
@@ -480,15 +481,19 @@ public:
     bool PutArchivesAll(std::unordered_map<
                         std::string_view,
                         std::vector<std::unique_ptr<txservice::FlushTaskEntry>>>
-                            &batch) override;
+                            &batch,
+                        const std::function<void()> *yield_fptr = nullptr,
+                        const std::function<void()> *resume_fptr = nullptr)
+        override;
     /**
      * @brief Copy record from base/sk table to mvcc_archives.
      */
     bool CopyBaseToArchive(
         std::unordered_map<
             std::string_view,
-            std::vector<std::unique_ptr<txservice::FlushTaskEntry>>> &batch)
-        override;
+            std::vector<std::unique_ptr<txservice::FlushTaskEntry>>> &batch,
+        const std::function<void()> *yield_fptr = nullptr,
+        const std::function<void()> *resume_fptr = nullptr) override;
 
     /**
      * @brief  Get the latest visible(commit_ts <= upper_bound_ts)

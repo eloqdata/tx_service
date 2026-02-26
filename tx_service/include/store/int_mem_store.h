@@ -57,8 +57,12 @@ public:
     bool PutAll(std::unordered_map<
                 std::string_view,
                 std::vector<std::unique_ptr<txservice::FlushTaskEntry>>>
-                    &flush_task) override
+                    &flush_task,
+                const std::function<void()> *yield_fptr = nullptr,
+                const std::function<void()> *resume_fptr = nullptr) override
     {
+        (void)yield_fptr;
+        (void)resume_fptr;
         assert(false);
         // for (const auto &ref : batch)
         // {
@@ -246,8 +250,13 @@ public:
     bool PutArchivesAll(std::unordered_map<
                         std::string_view,
                         std::vector<std::unique_ptr<txservice::FlushTaskEntry>>>
-                            &flush_task) override
+                            &flush_task,
+                        const std::function<void()> *yield_fptr = nullptr,
+                        const std::function<void()> *resume_fptr = nullptr)
+        override
     {
+        (void)yield_fptr;
+        (void)resume_fptr;
         assert(false);
         return true;
     }
@@ -258,8 +267,12 @@ public:
         std::unordered_map<
             std::string_view,
             std::vector<std::unique_ptr<txservice::FlushTaskEntry>>>
-            &flush_task) override
+            &flush_task,
+        const std::function<void()> *yield_fptr = nullptr,
+        const std::function<void()> *resume_fptr = nullptr) override
     {
+        (void)yield_fptr;
+        (void)resume_fptr;
         assert(false);
         return true;
     }
