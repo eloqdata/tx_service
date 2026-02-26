@@ -303,6 +303,16 @@ bool DataStoreServiceClient::PutAll(
                        std::vector<std::unique_ptr<txservice::FlushTaskEntry>>>
         &flush_task)
 {
+    return PutAllImpl(flush_task, nullptr, nullptr);
+}
+
+bool DataStoreServiceClient::PutAllImpl(
+    std::unordered_map<std::string_view,
+                       std::vector<std::unique_ptr<txservice::FlushTaskEntry>>>
+        &flush_task,
+    const std::function<void()> *yield_fptr,
+    const std::function<void()> *resume_fptr)
+{
     DLOG(INFO) << "DataStoreServiceClient::PutAll called with "
                << flush_task.size() << " tables to flush.";
     uint64_t now = txservice::LocalCcShards::ClockTsInMillseconds();
@@ -421,6 +431,12 @@ bool DataStoreServiceClient::PutAll(
     // Set up global coordinator
     sync_putall->total_partitions_ = sync_putall->partition_states_.size();
 
+    // Set coroutine callbacks BEFORE starting async work (see plan risk analysis)
+    if (yield_fptr != nullptr && resume_fptr != nullptr)
+    {
+        sync_putall->SetCoroCallbacks(yield_fptr, resume_fptr);
+    }
+
     // Start concurrent processing for each partition
     for (size_t i = 0; i < callback_data_list.size(); ++i)
     {
@@ -455,13 +471,13 @@ bool DataStoreServiceClient::PutAll(
     }
 
     // Wait for all partitions to complete
+    if (yield_fptr != nullptr && resume_fptr != nullptr)
     {
-        std::unique_lock<bthread::Mutex> lk(sync_putall->mux_);
-        while (sync_putall->completed_partitions_ <
-               sync_putall->total_partitions_)
-        {
-            sync_putall->cv_.wait(lk);
-        }
+        sync_putall->Wait(yield_fptr, resume_fptr);
+    }
+    else
+    {
+        sync_putall->Wait();
     }
 
     // Check for errors
