@@ -539,14 +539,27 @@ bool DataStoreServiceClient::PutAllImpl(
  * fails.
  */
 bool DataStoreServiceClient::PersistKV(
-    const std::vector<std::string> &kv_table_names)
+    const std::vector<std::string> &kv_table_names,
+    const std::function<void()> *yield_fptr,
+    const std::function<void()> *resume_fptr)
 {
     SyncCallbackData *callback_data = sync_callback_data_pool_.NextObject();
     PoolableGuard guard(callback_data);
     callback_data->Reset();
 
+    if (yield_fptr != nullptr && resume_fptr != nullptr)
+    {
+        callback_data->SetCoroCallbacks(yield_fptr, resume_fptr);
+    }
     FlushData(kv_table_names, callback_data, &SyncCallback);
-    callback_data->Wait();
+    if (yield_fptr != nullptr && resume_fptr != nullptr)
+    {
+        callback_data->Wait(yield_fptr, resume_fptr);
+    }
+    else
+    {
+        callback_data->Wait();
+    }
     if (callback_data->Result().error_code() !=
         EloqDS::remote::DataStoreError::NO_ERROR)
     {

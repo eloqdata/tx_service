@@ -84,19 +84,42 @@ struct SyncCallbackData : public Poolable
     {
         finished_ = false;
         result_.Clear();
+        waiting_.store(false);
+        yield_fn_ = nullptr;
+        resume_fn_ = nullptr;
     }
 
     virtual void Clear() override
     {
         finished_ = false;
         result_.Clear();
+        waiting_.store(false);
+        yield_fn_ = nullptr;
+        resume_fn_ = nullptr;
+    }
+
+    void SetCoroCallbacks(const std::function<void()> *yield_fn,
+                          const std::function<void()> *resume_fn)
+    {
+        yield_fn_ = yield_fn;
+        resume_fn_ = resume_fn;
     }
 
     virtual void Notify()
     {
         std::unique_lock<bthread::Mutex> lk(mtx_);
         finished_ = true;
-        cv_.notify_one();
+        if (resume_fn_ != nullptr &&
+            waiting_.load(std::memory_order_acquire))
+        {
+            waiting_.store(false, std::memory_order_release);
+            lk.unlock();
+            (*resume_fn_)();
+        }
+        else
+        {
+            cv_.notify_one();
+        }
     }
 
     virtual void Wait()
@@ -105,6 +128,25 @@ struct SyncCallbackData : public Poolable
         while (!finished_)
         {
             cv_.wait(lk);
+        }
+    }
+
+    void Wait(const std::function<void()> *yield_fn,
+              const std::function<void()> *resume_fn)
+    {
+        if (yield_fn == nullptr || resume_fn == nullptr)
+        {
+            Wait();
+            return;
+        }
+        std::unique_lock<bthread::Mutex> lk(mtx_);
+        while (!finished_)
+        {
+            waiting_.store(true, std::memory_order_release);
+            lk.unlock();
+            (*yield_fn)();
+            lk.lock();
+            waiting_.store(false, std::memory_order_release);
         }
     }
 
@@ -125,6 +167,11 @@ private:
     bool finished_;
 
     remote::CommonResult result_;
+
+    // Coroutine yield/resume support
+    const std::function<void()> *yield_fn_{nullptr};
+    const std::function<void()> *resume_fn_{nullptr};
+    std::atomic<bool> waiting_{false};
 };
 
 /**

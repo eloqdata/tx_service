@@ -549,8 +549,13 @@ bool RocksDBHandler::PutAll(
     return true;
 }
 
-bool RocksDBHandler::PersistKV(const std::vector<std::string> &kv_table_names)
+bool RocksDBHandler::PersistKV(
+    const std::vector<std::string> &kv_table_names,
+    const std::function<void()> *yield_fptr,
+    const std::function<void()> *resume_fptr)
 {
+    (void)yield_fptr;
+    (void)resume_fptr;
     std::shared_lock<std::shared_mutex> db_lk(db_mux_);
     auto db = GetDBPtr();
     if (!db)
@@ -582,7 +587,7 @@ bool RocksDBHandler::PersistKV(const std::vector<std::string> &kv_table_names)
     }
 
     return true;
-};
+}
 
 void RocksDBHandler::UpsertTableInternal(
     txservice::TableEngine table_engine,
