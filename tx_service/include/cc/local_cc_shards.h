@@ -985,7 +985,11 @@ public:
 
             if (last_sync_ts > 0)
             {
-                new_range_ptr->UpdateLastDataSyncTS(last_sync_ts);
+                StoreRange *store_range = new_range_ptr->RangeSlices();
+                size_t range_size =
+                    store_range != nullptr ? store_range->PostCkptSize() : 0;
+                new_range_ptr->UpdateLastDataSyncTS(
+                    last_sync_ts, static_cast<uint32_t>(range_size));
             }
 
             return new_range_ptr;

@@ -239,6 +239,7 @@ public:
         TxKey start_key,
         uint64_t version_ts,
         int64_t partition_id,
+        uint32_t store_range_size = 0,
         std::unique_ptr<StoreRange> slices = nullptr) override
     {
         // No range partitioning supported for hash catalog factory
@@ -311,6 +312,7 @@ public:
         TxKey start_key,
         uint64_t version_ts,
         int64_t partition_id,
+        uint32_t store_range_size = 0,
         std::unique_ptr<StoreRange> slices = nullptr) override;
 
     TxKey NegativeInfKey() const override;
