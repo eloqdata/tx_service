@@ -318,7 +318,6 @@ bool DataStoreServiceClient::PutAll(
     DLOG(INFO) << "DataStoreServiceClient::PutAll called with "
                << flush_task.size() << " tables to flush.";
     uint64_t now = txservice::LocalCcShards::ClockTsInMillseconds();
-
     // Create global coordinator
     SyncPutAllData *sync_putall = sync_putall_data_pool_.NextObject();
     PoolableGuard sync_putall_guard(sync_putall);
@@ -490,6 +489,7 @@ bool DataStoreServiceClient::PutAll(
                 callback_data->Clear();
                 callback_data->Free();
             }
+
             return false;
         }
     }
@@ -505,6 +505,7 @@ bool DataStoreServiceClient::PutAll(
         metrics::kv_meter->Collect(
             metrics::NAME_KV_FLUSH_ROWS_TOTAL, records_count, "base");
     }
+
     return true;
 }
 
