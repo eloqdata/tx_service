@@ -305,6 +305,7 @@ void LocalCcShards::StartBackgroudWorkers()
             std::make_unique<FlushDataTask>(buffer_size));
     }
     pending_flush_work_.resize(worker_num);
+    resume_queue_.resize(worker_num);
 
     // Starts flush worker threads firstly.
     for (int id = 0; id < flush_data_worker_ctx_.worker_num_; id++)
