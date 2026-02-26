@@ -794,7 +794,8 @@ void FetchTableRangesCallback(void *data,
         {
             scan_next_closure->GetItem(i, key, value, ts, ttl);
             assert(value.size() == (sizeof(int32_t) + sizeof(uint64_t) +
-                                    sizeof(uint64_t) + sizeof(uint32_t)));
+                                    sizeof(uint64_t) + sizeof(uint32_t) +
+                                    sizeof(uint32_t)));
             const char *buf = value.data();
             int32_t partition_id = *(reinterpret_cast<const int32_t *>(buf));
             buf += sizeof(partition_id);
@@ -802,6 +803,8 @@ void FetchTableRangesCallback(void *data,
             buf += sizeof(range_version);
             uint64_t slice_version = *(reinterpret_cast<const uint64_t *>(buf));
             buf += sizeof(slice_version);
+            buf += sizeof(uint32_t);  // segment_cnt
+            uint32_t range_size = *(reinterpret_cast<const uint32_t *>(buf));
 
             std::string_view start_key_sv(
                 key.data() + (table_name_sv.size() + KEY_SEPARATOR.size()),
@@ -813,14 +816,17 @@ void FetchTableRangesCallback(void *data,
             {
                 txservice::TxKey start_key = catalog_factory->CreateTxKey(
                     start_key_sv.data(), start_key_sv.size());
-                range_vec.emplace_back(
-                    std::move(start_key), partition_id, range_version);
+                range_vec.emplace_back(std::move(start_key),
+                                       partition_id,
+                                       range_version,
+                                       range_size);
             }
             else
             {
                 range_vec.emplace_back(catalog_factory->NegativeInfKey(),
                                        partition_id,
-                                       range_version);
+                                       range_version,
+                                       range_size);
             }
         }
 
@@ -889,7 +895,8 @@ void FetchTableRangesCallback(void *data,
                         catalog_factory->NegativeInfKey(),
                         txservice::Sequences::InitialRangePartitionIdOf(
                             fetch_range_cc->table_name_),
-                        1);
+                        1,
+                        0);
                 }
 
                 fetch_range_cc->AppendTableRanges(

@@ -1036,7 +1036,11 @@ void LocalCcShards::CreateSplitRangeRecoveryTx(
             }
             else
             {
-                range_entry->UpdateLastDataSyncTS(0);
+                StoreRange *store_range = range_entry->RangeSlices();
+                assert(store_range);
+                size_t range_size = store_range->PostCkptSize();
+                range_entry->UpdateLastDataSyncTS(
+                    0, static_cast<uint32_t>(range_size));
                 range_entry->UnPinStoreRange();
                 txservice::CommitTx(txm);
             }
@@ -1099,7 +1103,8 @@ void LocalCcShards::InitTableRanges(const TableName &range_table_name,
                 GetCatalogFactory(range_table_name.Engine())
                     ->CreateTableRange(std::move(range_start_key),
                                        range_entry.version_ts_,
-                                       range_entry.partition_id_);
+                                       range_entry.partition_id_,
+                                       range_entry.size_);
             range_it = ranges
                            .try_emplace(new_range->RangeStartTxKey(),
                                         std::move(new_range))
@@ -3261,7 +3266,11 @@ void LocalCcShards::PostProcessFlushTaskEntries(
             {
                 if (!task->during_split_range_)
                 {
-                    range_entry->UpdateLastDataSyncTS(task->data_sync_ts_);
+                    StoreRange *store_range = range_entry->RangeSlices();
+                    assert(store_range);
+                    size_t range_size = store_range->PostCkptSize();
+                    range_entry->UpdateLastDataSyncTS(
+                        task->data_sync_ts_, static_cast<uint32_t>(range_size));
                     range_entry->UnPinStoreRange();
                     // Commit the data sync txm
                     txservice::CommitTx(entry->data_sync_txm_);
@@ -3416,7 +3425,11 @@ void LocalCcShards::PostProcessRangePartitionDataSyncTask(
         {
             if (!task->during_split_range_)
             {
-                range_entry->UpdateLastDataSyncTS(task->data_sync_ts_);
+                StoreRange *store_range = range_entry->RangeSlices();
+                assert(store_range);
+                size_t range_size = store_range->PostCkptSize();
+                range_entry->UpdateLastDataSyncTS(
+                    task->data_sync_ts_, static_cast<uint32_t>(range_size));
                 range_entry->UnPinStoreRange();
                 // Commit the data sync txm
                 txservice::CommitTx(data_sync_txm);
@@ -3926,7 +3939,12 @@ void LocalCcShards::DataSyncForRangePartition(
             txservice::CommitTx(data_sync_txm);
 
             // Update the task status for this range.
-            range_entry->UpdateLastDataSyncTS(data_sync_task->data_sync_ts_);
+            StoreRange *store_range = range_entry->RangeSlices();
+            assert(store_range);
+            size_t range_size = store_range->PostCkptSize();
+            range_entry->UpdateLastDataSyncTS(
+                data_sync_task->data_sync_ts_,
+                static_cast<uint32_t>(range_size));
             // Generally, the StoreRange will be pinned only when there are data
             // items in the range that needs to be ckpted.
             if (scan_delta_size_cc.StoreRangePtr() != nullptr)
@@ -5705,7 +5723,12 @@ void LocalCcShards::SplitFlushRange(
         return;
     }
 
-    range_entry->UpdateLastDataSyncTS(data_sync_task->data_sync_ts_);
+    StoreRange *store_range = range_entry->RangeSlices();
+    assert(store_range);
+    size_t range_size = store_range->PostCkptSize();
+    range_entry->UpdateLastDataSyncTS(data_sync_task->data_sync_ts_,
+                                      static_cast<uint32_t>(range_size));
+
     range_entry->UnPinStoreRange();
 
     data_sync_task->SetFinish();

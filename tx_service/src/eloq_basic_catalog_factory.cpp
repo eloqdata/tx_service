@@ -338,6 +338,7 @@ std::unique_ptr<TableRangeEntry> EloqRangeCatalogFactory::CreateTableRange(
     TxKey start_key,
     uint64_t version_ts,
     int64_t partition_id,
+    uint32_t store_range_size,
     std::unique_ptr<StoreRange> slices)
 {
     assert(start_key.Type() == KeyType::NegativeInf || start_key.IsOwner());
@@ -354,7 +355,7 @@ std::unique_ptr<TableRangeEntry> EloqRangeCatalogFactory::CreateTableRange(
         range_ptr};
 
     return std::make_unique<txservice::TemplateTableRangeEntry<EloqStringKey>>(
-        start, version_ts, partition_id, std::move(typed_range));
+        start, version_ts, partition_id, store_range_size, std::move(typed_range));
 }
 
 TxKey EloqRangeCatalogFactory::NegativeInfKey() const

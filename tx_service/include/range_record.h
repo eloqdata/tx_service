@@ -71,10 +71,22 @@ struct InitRangeEntry
     {
     }
 
+    InitRangeEntry(TxKey start_key,
+                   int32_t partition_id,
+                   uint64_t version_ts,
+                   uint32_t size)
+        : key_(std::move(start_key)),
+          partition_id_(partition_id),
+          version_ts_(version_ts),
+          size_(size)
+    {
+    }
+
     InitRangeEntry(InitRangeEntry &&rhs) noexcept
         : key_(std::move(rhs.key_)),
           partition_id_(rhs.partition_id_),
-          version_ts_(rhs.version_ts_)
+          version_ts_(rhs.version_ts_),
+          size_(rhs.size_)
     {
     }
 
@@ -85,6 +97,7 @@ struct InitRangeEntry
             key_ = std::move(rhs.key_);
             partition_id_ = rhs.partition_id_;
             version_ts_ = rhs.version_ts_;
+            size_ = rhs.size_;
         }
 
         return *this;
@@ -93,6 +106,8 @@ struct InitRangeEntry
     TxKey key_;
     int32_t partition_id_{0};
     uint64_t version_ts_{0};
+    // Store range size
+    uint32_t size_{0};
 };
 
 struct RangeInfo
@@ -427,8 +442,12 @@ public:
     TableRangeEntry(const TableRangeEntry &) = delete;
     TableRangeEntry &operator=(const TableRangeEntry &) = delete;
 
-    TableRangeEntry(uint64_t version_ts, int64_t partition_id)
-        : mux_(), fetch_range_slices_req_(nullptr)
+    TableRangeEntry(uint64_t version_ts,
+                    int64_t partition_id,
+                    uint32_t store_range_size)
+        : mux_(),
+          fetch_range_slices_req_(nullptr),
+          store_range_size_(store_range_size)
     {
     }
 
@@ -491,7 +510,7 @@ public:
         return last_sync_ts_;
     }
 
-    void UpdateLastDataSyncTS(uint64_t last_sync_ts)
+    void UpdateLastDataSyncTS(uint64_t last_sync_ts, uint32_t range_size)
     {
         std::unique_lock<WritePreferSharedMutex> lk(mux_);
 
@@ -500,6 +519,12 @@ public:
             // data sync succeeded, update last sync ts
             last_sync_ts_ = last_sync_ts;
         }
+        store_range_size_ = range_size;
+    }
+
+    uint32_t StoreRangeSize() const
+    {
+        return store_range_size_;
     }
 
     void FetchRangeSlices(const TableName &range_tbl_name,
@@ -521,6 +546,7 @@ protected:
 
     WritePreferSharedMutex mux_;
     std::unique_ptr<FetchRangeSlicesReq> fetch_range_slices_req_{nullptr};
+    uint32_t store_range_size_{0};
 
     template <typename KeyT>
     friend class RangeCcMap;
@@ -536,8 +562,10 @@ public:
         const KeyT *start_key,
         uint64_t version_ts,
         int64_t partition_id,
+        uint32_t store_range_size = 0,
         std::unique_ptr<TemplateStoreRange<KeyT>> slices = nullptr)
-        : range_info_(start_key, version_ts, partition_id),
+        : TableRangeEntry(version_ts, partition_id, store_range_size),
+          range_info_(start_key, version_ts, partition_id),
           range_slices_(std::move(slices))
     {
     }
