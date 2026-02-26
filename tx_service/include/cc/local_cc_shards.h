@@ -23,6 +23,9 @@
 
 #include <algorithm>
 #include <atomic>
+#include <boost/context/continuation.hpp>
+#include <boost/context/pooled_fixedsize_stack.hpp>
+#include <boost/context/protected_fixedsize_stack.hpp>
 #include <condition_variable>
 #include <cstddef>
 #include <cstdint>
@@ -63,10 +66,6 @@
 #include "tx_start_ts_collector.h"
 #include "type.h"
 
-#include <boost/context/continuation.hpp>
-#include <boost/context/pooled_fixedsize_stack.hpp>
-#include <boost/context/protected_fixedsize_stack.hpp>
-
 #ifdef WITH_JEMALLOC
 // we use uint32_t instead of unsigned to make the code more readable
 static_assert(std::is_same_v<unsigned, uint32_t>,
@@ -95,7 +94,7 @@ struct CoroCtx
     std::unique_ptr<FlushDataTask> task_;
     std::function<void()> sync_yield_func;  // 同步 yield：入队后让出
     std::function<void()> yield_fn;         // 异步 yield
-    std::function<void()> resume_fn;        // 用 weak_ptr 捕获 ctx，无参调用
+    std::function<void()> resume_fn;  // 用 weak_ptr 捕获 ctx，无参调用
 };
 
 struct DataMigrationStatus
@@ -2524,10 +2523,10 @@ private:
 
 #ifndef NDEBUG
     boost::context::protected_fixedsize_stack flush_coro_stack_allocator_{
-        256 * 1024};  // 256KB, guard page for stack overflow detection
+        512 * 1024};  // 512KB, guard page for stack overflow detection
 #else
     boost::context::pooled_fixedsize_stack flush_coro_stack_allocator_{
-        256 * 1024};  // 256KB for FlushData call chain
+        1024 * 1024};  // 512KB for FlushData call chain
 #endif
 
     void FlushDataWorker(size_t worker_idx);
@@ -2535,12 +2534,11 @@ private:
                    size_t worker_idx);
 
     bool ShouldYieldFlushData(size_t worker_idx) const;
-    void FlushDataImpl(
-        FlushDataTask *cur_work,
-        size_t worker_idx,
-        const std::function<void()> &sync_yield_func,
-        const std::function<void()> &yield_fn,
-        const std::function<void()> &resume_fn);
+    void FlushDataImpl(FlushDataTask *cur_work,
+                       size_t worker_idx,
+                       const std::function<void()> &sync_yield_func,
+                       const std::function<void()> &yield_fn,
+                       const std::function<void()> &resume_fn);
 
     // Memory controller for data sync.
     DataSyncMemoryController data_sync_mem_controller_;

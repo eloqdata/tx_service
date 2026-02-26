@@ -598,6 +598,13 @@ public:
                                      bool is_range_partition) const;
 
 private:
+    bool PutAllImpl(std::unordered_map<
+                        std::string_view,
+                        std::vector<std::unique_ptr<txservice::FlushTaskEntry>>>
+                        &flush_task,
+                    const std::function<void()> *yield_fptr = nullptr,
+                    const std::function<void()> *resume_fptr = nullptr);
+
     int32_t MapKeyHashToPartitionId(const txservice::TxKey &key) const
     {
         return txservice::Sharder::MapKeyHashToHashPartitionId(key.Hash());

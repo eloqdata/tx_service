@@ -25,6 +25,8 @@
 #include <bthread/condition_variable.h>
 #include <bthread/mutex.h>
 
+#include <atomic>
+#include <functional>
 #include <memory>
 #include <queue>
 #include <string>
@@ -215,12 +217,18 @@ struct SyncPutAllData : public Poolable
         partition_states_.clear();
         completed_partitions_ = 0;
         total_partitions_ = 0;
+        waiting_.store(false);
+        yield_fn_ = nullptr;
+        resume_fn_ = nullptr;
     }
 
     virtual void Clear() override
     {
         completed_partitions_ = 0;
         total_partitions_ = 0;
+        waiting_.store(false);
+        yield_fn_ = nullptr;
+        resume_fn_ = nullptr;
         for (auto *partition_state : partition_states_)
         {
             partition_state->Clear();
@@ -228,15 +236,41 @@ struct SyncPutAllData : public Poolable
         }
         partition_states_.clear();
     }
+
+    void SetCoroCallbacks(const std::function<void()> *yield_fn,
+                         const std::function<void()> *resume_fn)
+    {
+        yield_fn_ = yield_fn;
+        resume_fn_ = resume_fn;
+    }
+
+    void Wait();
+
+    void Wait(const std::function<void()> *yield_fn,
+              const std::function<void()> *resume_fn);
+
     void OnPartitionCompleted()
     {
         std::unique_lock<bthread::Mutex> lk(mux_);
         completed_partitions_++;
         if (completed_partitions_ >= total_partitions_)
         {
-            cv_.notify_one();
+            if (resume_fn_ && waiting_.load(std::memory_order_acquire))
+            {
+                waiting_.store(false, std::memory_order_release);
+                lk.unlock();
+                (*resume_fn_)();
+                // Do not re-lock: resume_fn may acquire flush_worker_mux;
+                // coroutine will need mux_ when it resumes. Unlock before
+                // resume_fn avoids deadlock.
+            }
+            else if (!resume_fn_)
+            {
+                cv_.notify_one();
+            }
         }
     }
+
     mutable bthread::Mutex mux_;
     bthread::ConditionVariable cv_;
 
@@ -244,6 +278,11 @@ struct SyncPutAllData : public Poolable
     std::vector<PartitionFlushState *> partition_states_;
     int32_t completed_partitions_{0};
     int32_t total_partitions_{0};
+
+    // Coroutine yield/resume support
+    const std::function<void()> *yield_fn_{nullptr};
+    const std::function<void()> *resume_fn_{nullptr};
+    std::atomic<bool> waiting_{false};
 };
 
 /**
