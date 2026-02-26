@@ -301,9 +301,11 @@ void DataStoreServiceClient::ScheduleTimerTasks()
 bool DataStoreServiceClient::PutAll(
     std::unordered_map<std::string_view,
                        std::vector<std::unique_ptr<txservice::FlushTaskEntry>>>
-        &flush_task)
+        &flush_task,
+    const std::function<void()> *yield_fptr,
+    const std::function<void()> *resume_fptr)
 {
-    return PutAllImpl(flush_task, nullptr, nullptr);
+    return PutAllImpl(flush_task, yield_fptr, resume_fptr);
 }
 
 bool DataStoreServiceClient::PutAllImpl(
@@ -2778,9 +2780,11 @@ void DataStoreServiceClient::DecodeArchiveValue(
 bool DataStoreServiceClient::PutArchivesAll(
     std::unordered_map<std::string_view,
                        std::vector<std::unique_ptr<txservice::FlushTaskEntry>>>
-        &flush_task)
+        &flush_task,
+    const std::function<void()> *yield_fptr,
+    const std::function<void()> *resume_fptr)
 {
-    return PutArchivesAllImpl(flush_task, nullptr, nullptr);
+    return PutArchivesAllImpl(flush_task, yield_fptr, resume_fptr);
 }
 
 bool DataStoreServiceClient::PutArchivesAllImpl(
@@ -3017,7 +3021,19 @@ bool DataStoreServiceClient::PutArchivesAllImpl(
 bool DataStoreServiceClient::CopyBaseToArchive(
     std::unordered_map<std::string_view,
                        std::vector<std::unique_ptr<txservice::FlushTaskEntry>>>
-        &flush_task)
+        &flush_task,
+    const std::function<void()> *yield_fptr,
+    const std::function<void()> *resume_fptr)
+{
+    return CopyBaseToArchiveImpl(flush_task, yield_fptr, resume_fptr);
+}
+
+bool DataStoreServiceClient::CopyBaseToArchiveImpl(
+    std::unordered_map<std::string_view,
+                       std::vector<std::unique_ptr<txservice::FlushTaskEntry>>>
+        &flush_task,
+    const std::function<void()> *yield_fptr,
+    const std::function<void()> *resume_fptr)
 {
     // Prepare for the copied base table data to be flushed to the archive table
     std::unordered_map<std::string_view,
@@ -3055,7 +3071,8 @@ bool DataStoreServiceClient::CopyBaseToArchive(
             callback_datas.reserve(base_vec.size());
             for (size_t i = 0; i < base_vec.size(); ++i)
             {
-                callback_datas.emplace_back(mtx, cv, flying_cnt, error_code);
+                callback_datas.emplace_back(mtx, cv, flying_cnt, error_code,
+                                           resume_fptr);
             }
 
             for (size_t base_idx = 0; base_idx < base_vec.size(); ++base_idx)
@@ -3082,7 +3099,14 @@ bool DataStoreServiceClient::CopyBaseToArchive(
 
                 if (flying_cnt >= MAX_FLYING_READ_COUNT)
                 {
-                    callback_data->Wait();
+                    if (yield_fptr && resume_fptr)
+                    {
+                        callback_data->Wait(yield_fptr, resume_fptr);
+                    }
+                    else
+                    {
+                        callback_data->Wait();
+                    }
                 }
                 if (callback_data->GetErrorCode() != 0)
                 {
@@ -3093,6 +3117,11 @@ bool DataStoreServiceClient::CopyBaseToArchive(
             }
             // Wait the result all return before returning to avoid referencing
             // invalid memory in callback.
+            if (yield_fptr && resume_fptr)
+            {
+                callback_datas[0].Wait(yield_fptr, resume_fptr);
+            }
+            else
             {
                 std::unique_lock<bthread::Mutex> lk(mtx);
                 while (flying_cnt > 0)
@@ -3191,7 +3220,7 @@ bool DataStoreServiceClient::CopyBaseToArchive(
     {
         // Put the archive records to the archive table.
         // This is a sync call
-        bool ret = PutArchivesAll(archive_flush_task);
+        bool ret = PutArchivesAll(archive_flush_task, yield_fptr, resume_fptr);
         if (!ret)
         {
             return false;

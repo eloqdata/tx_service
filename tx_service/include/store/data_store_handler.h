@@ -22,6 +22,7 @@
 #pragma once
 
 #include <cstddef>
+#include <functional>
 #include <memory>
 #include <string>
 #include <string_view>
@@ -85,7 +86,9 @@ public:
     virtual bool PutAll(std::unordered_map<
                         std::string_view,
                         std::vector<std::unique_ptr<txservice::FlushTaskEntry>>>
-                            &flush_task) = 0;
+                            &flush_task,
+                        const std::function<void()> *yield_fptr = nullptr,
+                        const std::function<void()> *resume_fptr = nullptr) = 0;
 
     /**
      * @brief indicate end of flush entries in a single ckpt for \@param batch
@@ -281,7 +284,9 @@ public:
         std::unordered_map<
             std::string_view,
             std::vector<std::unique_ptr<txservice::FlushTaskEntry>>>
-            &flush_task) = 0;
+            &flush_task,
+        const std::function<void()> *yield_fptr = nullptr,
+        const std::function<void()> *resume_fptr = nullptr) = 0;
     /**
      * @brief Copy record from base/sk table to mvcc_archives.
      */
@@ -289,7 +294,9 @@ public:
         std::unordered_map<
             std::string_view,
             std::vector<std::unique_ptr<txservice::FlushTaskEntry>>>
-            &flush_task) = 0;
+            &flush_task,
+        const std::function<void()> *yield_fptr = nullptr,
+        const std::function<void()> *resume_fptr = nullptr) = 0;
 
     /**
      * @brief  Get the latest visible(commit_ts <= upper_bound_ts) historical
