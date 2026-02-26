@@ -8722,12 +8722,11 @@ public:
                 lru_page);
         auto page_it = ccmp_.end();
 
-        // Only collect the large-value block flag for regular LRU scans
-        // (no kickout_cc). Forced evictions (range migration etc.) should
-        // not be affected by the large-value protection.
-        bool has_blocked_large_value = false;
-        bool *out_flag =
-            (kickout_cc == nullptr) ? &has_blocked_large_value : nullptr;
+        // Only collect the re-zone flag for regular LRU scans (no kickout_cc).
+        // Forced evictions (range migration etc.) should not be affected by
+        // the large-value protection.
+        bool needs_rezoning = false;
+        bool *out_flag = (kickout_cc == nullptr) ? &needs_rezoning : nullptr;
 
         bool success = CleanPage(page, page_it, free_cnt, kickout_cc, out_flag);
 
@@ -8737,22 +8736,21 @@ public:
             *is_success = success;
         }
 
+        // Capture next_page BEFORE potentially moving page (re-zoning changes
+        // page->lru_next_).
         LruPage *next_page =
             RebalancePage(page, page_it, success, kickout_cc == nullptr);
 
-        // Large-value boost: if CanBeCleaned refused to evict at least one
-        // entry because of its payload size, move this page to the LRU tail.
-        // This prevents large-value pages from accumulating at the LRU head
-        // and being repeatedly scanned without progress. After calling
-        // UpdateLruList the page is at the tail (page->lru_next_ == &tail),
-        // so returning page->lru_next_ as the next scan page naturally stops
-        // the current scan. The next scan starts from the head, which will
-        // no longer contain this large-value page.
-        if (has_blocked_large_value && !page->Empty() &&
-            page->lru_next_ != nullptr)
+        // Re-zone: CanBeCleaned just discovered that this page has a large-
+        // value entry (has_large_value_ was freshly set). Move the page into
+        // the large-value zone (LRU tail end) via UpdateLruList so that future
+        // small-value insertions are placed before it and it is only evicted
+        // after all small-value pages are gone.
+        if (needs_rezoning && !page->Empty() && page->lru_next_ != nullptr)
         {
             shard_->UpdateLruList(page, false);
-            next_page = page->lru_next_;  // == &tail_ccp_ after the boost
+            // The scan should continue from the page we had lined up before
+            // the re-zone, not from the page's new position at the tail.
         }
 
         return {free_cnt, next_page};
@@ -9250,6 +9248,30 @@ public:
             for (auto &cce : page_ptr->entries_)
             {
                 cce->payload_.cur_payload_ = payload;
+            }
+        }
+    }
+
+    /**
+     * @brief Marks all pages in this cc map as large-value pages and
+     * immediately re-zones them via UpdateLruList so that they are placed in
+     * the large-value zone (tail end) of the LRU list. Used in tests for the
+     * zone-separation eviction policy.
+     */
+    void RezoneAsLargeValueForTest()
+    {
+        for (auto &[key, page_ptr] : ccmp_)
+        {
+            CcPage<KeyT, ValueT, VersionedRecord, RangePartitioned> *page =
+                page_ptr.get();
+            if (!page->has_large_value_)
+            {
+                page->has_large_value_ = true;
+            }
+            // Move page to large-value zone.
+            if (page->lru_next_ != nullptr)
+            {
+                shard_->UpdateLruList(page, false);
             }
         }
     }

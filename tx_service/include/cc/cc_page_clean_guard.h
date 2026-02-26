@@ -157,9 +157,11 @@ public:
         return clean_obj_cnt_;
     }
 
-    // Returns true if CanBeCleaned refused to evict at least one entry because
-    // it has a large payload. When this is set, CleanPageAndReBalance will
-    // boost the page to the LRU tail so it does not accumulate at the head.
+    // Returns true if CanBeCleaned freshly set the has_large_value_ flag on
+    // the page during this clean pass (i.e. the page was just discovered to
+    // have a large-value entry for the first time). When this is set,
+    // CleanPageAndReBalance will call UpdateLruList to move the page from the
+    // small-value zone into the large-value zone immediately.
     bool HasBlockedLargeValue() const
     {
         return has_blocked_large_value_;
@@ -415,17 +417,21 @@ private:
             return {false, false};
         }
 
-        // Payload-size-aware eviction: protect large-value entries from
-        // eviction. When this guard refuses to evict an entry because of its
-        // payload size, it sets has_blocked_large_value_ so that
-        // CleanPageAndReBalance can boost the page to the LRU tail, preventing
-        // it from accumulating at the head and being repeatedly visited by the
-        // scan without making progress.
+        // Payload-size-aware eviction: mark the page as a large-value page so
+        // that UpdateLruList places it in the large-value zone (tail end) of
+        // the LRU list. The page is still evictable here — protection is
+        // enforced positionally (large-value pages are evicted only after all
+        // small-value pages). Setting has_blocked_large_value_ signals
+        // CleanPageAndReBalance to re-zone the page immediately via
+        // UpdateLruList in case it was in the small-value zone.
         if (txservice_large_value_threshold > 0 &&
             cce->PayloadSize() > txservice_large_value_threshold)
         {
-            this->has_blocked_large_value_ = true;
-            return {false, false};
+            if (!this->page_->has_large_value_)
+            {
+                this->page_->has_large_value_ = true;
+                this->has_blocked_large_value_ = true;
+            }
         }
 
         return {true, false};

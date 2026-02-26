@@ -2036,6 +2036,16 @@ struct LruPage
     // (the larger value is more recent).
     uint64_t last_access_ts_{0};
 
+    // True when at least one entry on this page has a payload whose size
+    // exceeds txservice_large_value_threshold. Set lazily by CanBeCleaned when
+    // a large payload is first detected. Once set it is never cleared (even if
+    // the large entries are later evicted) because the flag is only used as a
+    // cheap signal to keep the page in the large-value zone.
+    //
+    // Large-value pages are kept in the tail (recent) zone of the LRU list so
+    // that they are evicted only after all small-value pages have been evicted.
+    bool has_large_value_{false};
+
     // The largest commit ts of dirty cc entries on this page. This value might
     // be larger than the actual max commit ts of cc entries. Currently used to
     // decide if this page has dirty data after a given ts.

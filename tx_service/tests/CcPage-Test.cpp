@@ -237,75 +237,138 @@ TEST_CASE("Large-value eviction protection test", "[cc-page]")
                       nullptr,
                       &raft_path);
 
-    const size_t MAP_SIZE = 500;
-    const size_t LARGE_PAYLOAD_SIZE = 1024;  // 1 KB per entry
+    const size_t MAP_SIZE = 200;
+    const size_t LARGE_PAYLOAD_SIZE = 1024;
 
-    std::string table_name = "large_val_test";
-    TableName tname(table_name, TableType::Primary, TableEngine::EloqSql);
-    auto cc_map = std::make_unique<TemplateCcMap<CompositeKey<std::string, int>,
-                                                 CompositeRecord<int>,
-                                                 true,
-                                                 true>>(
-        &shard, 0, tname, 1, nullptr, true);
+    using TestCcMap = TemplateCcMap<CompositeKey<std::string, int>,
+                                    CompositeRecord<int>,
+                                    true,
+                                    true>;
 
-    // Insert free (persistent, unlocked) entries.
-    std::vector<CompositeKey<std::string, int>> keys;
-    for (size_t i = 0; i < MAP_SIZE; i++)
+    // Small-value map – pages stay in the head (small-value) zone.
+    std::string small_table = "small_val_test";
+    TableName small_tname(
+        small_table, TableType::Primary, TableEngine::EloqSql);
+    auto small_map =
+        std::make_unique<TestCcMap>(&shard, 0, small_tname, 1, nullptr, true);
+
+    // Large-value map – pages will be re-zoned to the tail (large-value) zone.
+    std::string large_table = "large_val_test";
+    TableName large_tname(
+        large_table, TableType::Primary, TableEngine::EloqSql);
+    auto large_map =
+        std::make_unique<TestCcMap>(&shard, 0, large_tname, 1, nullptr, true);
+
+    auto make_keys = [](const std::string &tname,
+                        size_t cnt,
+                        std::vector<CompositeKey<std::string, int>> &storage)
+        -> std::vector<CompositeKey<std::string, int> *>
     {
-        keys.emplace_back(std::make_tuple(table_name, static_cast<int>(i)));
-    }
-    std::vector<CompositeKey<std::string, int> *> key_ptrs;
-    for (auto &k : keys)
-    {
-        key_ptrs.push_back(&k);
-    }
-    REQUIRE(cc_map->BulkEmplaceFreeForTest(key_ptrs));
-    REQUIRE(cc_map->VerifyOrdering() == MAP_SIZE);
+        for (size_t i = 0; i < cnt; i++)
+        {
+            storage.emplace_back(std::make_tuple(tname, static_cast<int>(i)));
+        }
+        std::vector<CompositeKey<std::string, int> *> ptrs;
+        for (auto &k : storage)
+        {
+            ptrs.push_back(&k);
+        }
+        return ptrs;
+    };
 
-    // Give every entry a large payload (> threshold we will use).
+    // Insert entries for both maps.  Both maps start in the small-value zone
+    // because has_large_value_ is false on insertion.
+    std::vector<CompositeKey<std::string, int>> small_keys;
+    REQUIRE(small_map->BulkEmplaceFreeForTest(
+        make_keys(small_table, MAP_SIZE, small_keys)));
+    REQUIRE(small_map->VerifyOrdering() == MAP_SIZE);
+
+    std::vector<CompositeKey<std::string, int>> large_keys;
+    REQUIRE(large_map->BulkEmplaceFreeForTest(
+        make_keys(large_table, MAP_SIZE, large_keys)));
+    REQUIRE(large_map->VerifyOrdering() == MAP_SIZE);
+
+    // Assign large payloads to the large-value map entries.
     auto large_payload =
         std::make_shared<LargeCompositeRecord>(42, LARGE_PAYLOAD_SIZE);
-    cc_map->SetPayloadForTest(large_payload);
+    large_map->SetPayloadForTest(large_payload);
 
-    // PART 1: Protection enabled.
-    // The scan visits a page with large values, boosts it to the LRU tail,
-    // and stops (returns tail_ccp_ as next). No entries are evicted.
     txservice_large_value_threshold = LARGE_PAYLOAD_SIZE / 2;
 
-    size_t freed_with_protection = 0;
+    // PART 1: Verify zone-separation structure.
+    //
+    // Use RezoneAsLargeValueForTest() to set has_large_value_ on large_map
+    // pages and call UpdateLruList to move them into the large-value zone.
+    // This simulates what happens in production when those pages are accessed
+    // after CanBeCleaned has set has_large_value_ on them.
+    large_map->RezoneAsLargeValueForTest();
+    shard.VerifyLruList();
+
+    // lru_large_value_zone_head_ must now point into the large-value zone.
+    const LruPage *zone_head = shard.LruLargeValueZoneHead();
+    REQUIRE(zone_head != nullptr);
+    REQUIRE(zone_head->parent_map_ != nullptr);  // not a sentinel
+
+    // Walk the LRU list and verify:
+    //   head → [small_map pages] → zone_head → [large_map pages] → tail
+    {
+        bool in_large_zone = false;
+        for (const LruPage *p = shard.LruHead()->lru_next_;
+             p->parent_map_ != nullptr;  // sentinel tail has parent_map_==null
+             p = p->lru_next_)
+        {
+            if (p == zone_head)
+            {
+                in_large_zone = true;
+            }
+            if (in_large_zone)
+            {
+                REQUIRE(p->parent_map_ == large_map.get());
+            }
+            else
+            {
+                REQUIRE(p->parent_map_ == small_map.get());
+            }
+        }
+        // We must have entered the large zone.
+        REQUIRE(in_large_zone);
+    }
+
+    // PART 2: Verify a small-value page access stays in the small-value zone.
+    //
+    // Access the first small_map page (simulate a read by looking up a key via
+    // VerifyOrdering which scans ccmp_; UpdateLruList is not called there, so
+    // we simulate by checking the zone directly).  The zone_head must not
+    // change after inserting a new small-value page.
+    const LruPage *zone_head_before = shard.LruLargeValueZoneHead();
+
+    // Insert one more small-value key and verify it lands BEFORE zone_head.
+    CompositeKey<std::string, int> extra_key =
+        std::make_tuple(small_table, static_cast<int>(MAP_SIZE + 1));
+    std::vector<CompositeKey<std::string, int> *> extra_ptr = {&extra_key};
+    REQUIRE(small_map->BulkEmplaceFreeForTest(extra_ptr));
+    shard.VerifyLruList();
+
+    // The zone head must not have changed (the new small-value page is before
+    // the zone head, not inside the large-value zone).
+    REQUIRE(shard.LruLargeValueZoneHead() == zone_head_before);
+
+    // PART 3: Full scan – all pages are evicted (CTEST mode scans everything).
+    size_t total_freed = 0;
     while (true)
     {
         auto [free_cnt, yield] = shard.Clean();
         shard.VerifyLruList();
+        total_freed += free_cnt;
         if (free_cnt == 0)
         {
             break;
         }
-        freed_with_protection += free_cnt;
     }
-    REQUIRE(freed_with_protection == 0);
-    REQUIRE(cc_map->VerifyOrdering() == MAP_SIZE);
+    // Small pages + the extra key + large pages must all be gone.
+    REQUIRE(total_freed == MAP_SIZE + 1 + MAP_SIZE);
 
-    // PART 2: Protection disabled – all free entries must be evicted normally.
-    shard.ResetCleanStart();
     txservice_large_value_threshold = 0;
-
-    size_t freed_without_protection = 0;
-    while (true)
-    {
-        auto [free_cnt, yield] = shard.Clean();
-        shard.VerifyLruList();
-        if (free_cnt == 0)
-        {
-            break;
-        }
-        freed_without_protection += free_cnt;
-    }
-    REQUIRE(freed_without_protection == MAP_SIZE);
-
-    // Restore global defaults so other tests are not affected.
-    txservice_large_value_threshold = 0;
-
     local_cc_shards.Terminate();
 }
 
