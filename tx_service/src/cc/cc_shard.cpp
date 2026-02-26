@@ -98,6 +98,7 @@ CcShard::CcShard(
       tail_ccp_(nullptr),
       clean_start_ccp_(nullptr),
       size_(0),
+      dirty_memory_check_interval_(dirty_memory_check_interval),
       ckpter_(nullptr),
       catalog_factory_{catalog_factory[0],
                        catalog_factory[1],
@@ -105,8 +106,7 @@ CcShard::CcShard(
                        catalog_factory[3],
                        catalog_factory[4]},
       system_handler_(system_handler),
-      active_si_txs_(),
-      dirty_memory_check_interval_(dirty_memory_check_interval)
+      active_si_txs_()
 {
     // Reserve range_slice_memory_limit_percent% for range slice info.
     // We update this to dynamically reserve the configured range slice
