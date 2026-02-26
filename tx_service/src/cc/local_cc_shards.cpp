@@ -5961,7 +5961,7 @@ void LocalCcShards::FlushDataImpl(FlushDataTask *cur_work,
         {
             kv_table_names.push_back(table_name.data());
         }
-        succ = store_hd_->PersistKV(kv_table_names);
+        succ = store_hd_->PersistKV(kv_table_names, &yield_fn, &resume_fn);
     }
 
     // Record that data was written in DataSyncStatus if flush succeeded.
@@ -5995,10 +5995,6 @@ void LocalCcShards::FlushDataImpl(FlushDataTask *cur_work,
     {
         for (auto &[kv_table_name, entries] : flush_task_entries)
         {
-            if (ShouldYieldFlushData(worker_idx))
-            {
-                sync_yield_func();
-            }
             for (auto &entry : entries)
             {
                 if (!entry->data_sync_task_->need_update_ckpt_ts_)

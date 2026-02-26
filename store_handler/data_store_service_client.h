@@ -243,7 +243,9 @@ public:
      * @param node_group
      * @return whether all entries are written to data store successfully
      */
-    bool PersistKV(const std::vector<std::string> &kv_table_names) override;
+    bool PersistKV(const std::vector<std::string> &kv_table_names,
+                   const std::function<void()> *yield_fptr = nullptr,
+                   const std::function<void()> *resume_fptr = nullptr) override;
 
     void UpsertTable(
         const txservice::TableSchema *old_table_schema,
