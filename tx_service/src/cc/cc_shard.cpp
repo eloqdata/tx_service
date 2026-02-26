@@ -377,6 +377,13 @@ CcMap *CcShard::GetCcm(const TableName &table_name, uint32_t node_group)
     }
 }
 
+absl::flat_hash_map<uint32_t, size_t> CcShard::GetStoreRangeSizes(
+    const TableName &range_table_name, const NodeGroupId node_group)
+{
+    return local_shards_.GetStoreRangeSizes(
+        range_table_name, node_group, core_id_);
+}
+
 void CcShard::AdjustDataKeyStats(const TableName &table_name,
                                  int64_t size_delta,
                                  int64_t dirty_delta)

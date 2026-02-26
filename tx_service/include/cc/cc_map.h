@@ -25,6 +25,7 @@
 #include <memory>
 #include <utility>  // std::pair
 
+#include "absl/container/flat_hash_map.h"
 #include "cc/cc_req_base.h"
 #include "cc_protocol.h"
 #include "error_messages.h"  // CcErrorCode
@@ -259,6 +260,23 @@ public:
     virtual TableType Type() const = 0;
     virtual const txservice::KeySchema *KeySchema() const = 0;
     virtual const txservice::RecordSchema *RecordSchema() const = 0;
+
+    /**
+     * Whether range_sizes_ has been loaded from store (for range-partitioned
+     * tables). Default: true (no lazy init needed for non-range-partitioned).
+     */
+    virtual bool RangeSizesInited() const
+    {
+        return true;
+    }
+
+    /**
+     * Initialize range_sizes_ from store (e.g.
+     * TableRangeEntry::StoreRangeSize). No-op for non-range-partitioned CcMaps.
+     */
+    virtual void InitRangeSizes(absl::flat_hash_map<uint32_t, size_t> &&)
+    {
+    }
 
     uint64_t SchemaTs() const
     {
