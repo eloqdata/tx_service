@@ -104,8 +104,8 @@ public:
                            const std::function<void()> *yield_fptr = nullptr,
                            const std::function<void()> *resume_fptr = nullptr)
     {
-        (void)yield_fptr;
-        (void)resume_fptr;
+        (void) yield_fptr;
+        (void) resume_fptr;
         return true;
     }
 
@@ -238,8 +238,8 @@ public:
         const std::function<void()> *yield_fptr = nullptr,
         const std::function<void()> *resume_fptr = nullptr)
     {
-        (void)yield_fptr;
-        (void)resume_fptr;
+        (void) yield_fptr;
+        (void) resume_fptr;
         return false;
     }
 
