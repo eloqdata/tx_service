@@ -2518,7 +2518,8 @@ private:
     void FlushData(std::unique_lock<std::mutex> &flush_worker_lk,
                    size_t worker_idx);
 
-    bool ShouldYieldFlushData(size_t worker_idx) const;
+    bool ShouldYieldFlushData(size_t worker_idx);
+    bool HasOtherWorkToDo(size_t worker_idx);
     void FlushDataImpl(FlushDataTask *cur_work,
                        size_t worker_idx,
                        const std::function<void()> &sync_yield_func,

@@ -435,10 +435,14 @@ bool RocksDBHandler::PutAll(
                        std::vector<std::unique_ptr<txservice::FlushTaskEntry>>>
         &batch,
     const std::function<void()> *yield_fptr,
-    const std::function<void()> *resume_fptr)
+    const std::function<void()> *resume_fptr,
+    const std::function<void()> *sync_yield_fptr,
+    const std::function<bool()> *has_other_work_fptr)
 {
     (void)yield_fptr;
     (void)resume_fptr;
+    (void)sync_yield_fptr;
+    (void)has_other_work_fptr;
     std::thread::id this_id = std::this_thread::get_id();
     if (batch.empty())
     {

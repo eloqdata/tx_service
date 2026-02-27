@@ -5907,9 +5907,17 @@ void LocalCcShards::FlushCurrentFlushBuffer()
     }
 }
 
-bool LocalCcShards::ShouldYieldFlushData(size_t worker_idx) const
+bool LocalCcShards::ShouldYieldFlushData(size_t worker_idx)
 {
+    std::lock_guard<std::mutex> lk(flush_data_worker_ctx_.mux_);
     return !pending_flush_work_[worker_idx].empty();
+}
+
+bool LocalCcShards::HasOtherWorkToDo(size_t worker_idx)
+{
+    std::lock_guard<std::mutex> lk(flush_data_worker_ctx_.mux_);
+    return !resume_queue_[worker_idx].empty() ||
+           !pending_flush_work_[worker_idx].empty();
 }
 
 void LocalCcShards::FlushDataImpl(FlushDataTask *cur_work,
@@ -5934,7 +5942,10 @@ void LocalCcShards::FlushDataImpl(FlushDataTask *cur_work,
 
     if (succ)
     {
-        succ = store_hd_->PutAll(flush_task_entries, &yield_fn, &resume_fn);
+        std::function<bool()> has_other_work =
+            [this, worker_idx]() { return HasOtherWorkToDo(worker_idx); };
+        succ = store_hd_->PutAll(flush_task_entries, &yield_fn, &resume_fn,
+                                 &sync_yield_func, &has_other_work);
         if (!succ)
         {
             LOG(ERROR) << "DataSync PutAll flush to kv "
@@ -5969,6 +5980,11 @@ void LocalCcShards::FlushDataImpl(FlushDataTask *cur_work,
     // Update cce ckpt ts in memory
     if (succ)
     {
+        size_t iterations_since_yield = 0;
+        auto last_yield_time = std::chrono::steady_clock::now();
+        constexpr size_t MAX_ITERATIONS_WITHOUT_YIELD = 10;
+        constexpr auto MAX_TIME_WITHOUT_YIELD = std::chrono::milliseconds(5);
+
         for (auto &[kv_table_name, entries] : flush_task_entries)
         {
             for (auto &entry : entries)
@@ -6019,6 +6035,12 @@ void LocalCcShards::FlushDataImpl(FlushDataTask *cur_work,
 
                 if (cce_entries_map.size() > 0)
                 {
+                    iterations_since_yield++;
+                    auto now = std::chrono::steady_clock::now();
+                    bool should_sync_yield = HasOtherWorkToDo(worker_idx) &&
+                        (iterations_since_yield >= MAX_ITERATIONS_WITHOUT_YIELD ||
+                         (now - last_yield_time) >= MAX_TIME_WITHOUT_YIELD);
+
                     UpdateCceCkptTsCc update_cce_req(
                         entry->data_sync_task_->node_group_id_,
                         entry->data_sync_task_->node_group_term_,
@@ -6030,7 +6052,34 @@ void LocalCcShards::FlushDataImpl(FlushDataTask *cur_work,
                         updated_ckpt_ts_core_ids.insert(core_idx);
                         EnqueueToCcShard(core_idx, &update_cce_req);
                     }
+                    if (should_sync_yield)
+                    {
+                        sync_yield_func();
+                        iterations_since_yield = 0;
+                        last_yield_time = std::chrono::steady_clock::now();
+                    }
+
+                    bool was_finished_before_wait = update_cce_req.IsFinished();
                     update_cce_req.Wait(&yield_fn, &resume_fn);
+                    if (!was_finished_before_wait)
+                    {
+                        iterations_since_yield = 0;
+                        last_yield_time = std::chrono::steady_clock::now();
+                    }
+                    else
+                    {
+                        now = std::chrono::steady_clock::now();
+                        bool should_sync_yield_after_wait =
+                            HasOtherWorkToDo(worker_idx) &&
+                            (iterations_since_yield >= MAX_ITERATIONS_WITHOUT_YIELD ||
+                             (now - last_yield_time) >= MAX_TIME_WITHOUT_YIELD);
+                        if (should_sync_yield_after_wait)
+                        {
+                            sync_yield_func();
+                            iterations_since_yield = 0;
+                            last_yield_time = std::chrono::steady_clock::now();
+                        }
+                    }
                 }
             }
         }
