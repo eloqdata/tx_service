@@ -605,6 +605,9 @@ public:
                     cce->payload_.DeserializeCurrentPayload(payload_str->data(),
                                                             offset);
                 }
+                // Eagerly move to the large-value zone when the committed
+                // payload exceeds the threshold.
+                MaybeMarkAndRezoneAsLargeValue(cc_page, cce->PayloadSize());
 
                 RecordStatus cce_old_status = cce->PayloadStatus();
                 RecordStatus new_status =
@@ -1116,6 +1119,9 @@ public:
                     req.CommitType() != PostWriteType::DowngradeLock)
                 {
                     cce_ptr->payload_.SetCurrentPayload(payload);
+                    // Eagerly move to the large-value zone if needed.
+                    MaybeMarkAndRezoneAsLargeValue(cce_ptr->GetCcPage(),
+                                                   cce_ptr->PayloadSize());
                     // A prepare commit request only installs the dirty value,
                     // and does not change the record status and commit_ts.
                     if (req.CommitType() == PostWriteType::Commit ||
@@ -2030,6 +2036,9 @@ public:
             if (cce->PayloadStatus() == RecordStatus::Unknown)
             {
                 cce->payload_.PassInCurrentPayload(std::move(tmp_payload));
+                // Eagerly move to the large-value zone if needed.
+                MaybeMarkAndRezoneAsLargeValue(cce->GetCcPage(),
+                                               cce->PayloadSize());
                 cce->SetCommitTsPayloadStatus(req.ReadTimestamp(),
                                               tmp_payload_status);
             }
@@ -2231,6 +2240,9 @@ public:
                 size_t offset = 0;
                 cce->payload_.DeserializeCurrentPayload(req.rec_str_->data(),
                                                         offset);
+                // Eagerly move to the large-value zone if needed.
+                MaybeMarkAndRezoneAsLargeValue(cce->GetCcPage(),
+                                               cce->PayloadSize());
             }
             cce->SetCommitTsPayloadStatus(req.CommitTs(), req.RecordStatus());
         }
@@ -7002,6 +7014,8 @@ public:
                 {
                     cce->payload_.DeserializeCurrentPayload(log_blob.data(),
                                                             offset);
+                    // Eagerly move to the large-value zone if needed.
+                    MaybeMarkAndRezoneAsLargeValue(ccp, cce->PayloadSize());
                     rec_status = RecordStatus::Normal;
                 }
                 else
@@ -7758,6 +7772,8 @@ public:
                 if (rec_status == RecordStatus::Normal)
                 {
                     cce->payload_.SetCurrentPayload(commit_val);
+                    // Eagerly move to the large-value zone if needed.
+                    MaybeMarkAndRezoneAsLargeValue(cc_page, cce->PayloadSize());
                 }
                 else
                 {
@@ -9276,6 +9292,30 @@ public:
         }
     }
 
+    /**
+     * @brief Iterates over all pages and calls MaybeMarkAndRezoneAsLargeValue
+     * with the maximum PayloadSize() found among each page's entries.
+     *
+     * This simulates the eager re-zone that happens in production when a write
+     * commits a large payload via PostWriteCc / BackFill / ReplayLogCc etc.
+     * Used in tests to verify that the eager path works without going through
+     * a clean-page scan.
+     */
+    void TriggerEagerRezoneForTest()
+    {
+        for (auto &[key, page_ptr] : ccmp_)
+        {
+            CcPage<KeyT, ValueT, VersionedRecord, RangePartitioned> *page =
+                page_ptr.get();
+            size_t max_payload = 0;
+            for (const auto &cce : page->entries_)
+            {
+                max_payload = std::max(max_payload, cce->PayloadSize());
+            }
+            MaybeMarkAndRezoneAsLargeValue(page, max_payload);
+        }
+    }
+
     /// Returns the number of CcPage objects (btree nodes) in this cc map.
     /// Used in tests that verify zone-page-count invariants.
     size_t PageCount() const
@@ -10603,6 +10643,8 @@ protected:
                 size_t offset = 0;
                 cce->payload_.DeserializeCurrentPayload(rec_str.c_str(),
                                                         offset);
+                // Eagerly move to the large-value zone if needed.
+                MaybeMarkAndRezoneAsLargeValue(ccp, cce->PayloadSize());
             }
         }
         else if (cce_version > 1 && commit_ts < cce_version &&
@@ -12017,6 +12059,37 @@ protected:
     CcPage<KeyT, ValueT, VersionedRecord, RangePartitioned> *PagePosInf()
     {
         return &pos_inf_page_;
+    }
+
+    /**
+     * @brief Eagerly marks a page as a large-value page and moves it into the
+     * large-value zone of the LRU list when the installed payload exceeds
+     * txservice_large_value_threshold.
+     *
+     * Called from every payload-assignment path (PostWriteCc, BackFill,
+     * ReplayLogCc, UploadBatchCc, etc.) so that large-value pages are
+     * immediately clustered near the LRU tail and are only evicted after all
+     * small-value pages have been evicted.
+     *
+     * The lazy fallback in CanBeCleaned (has_blocked_large_value_) is kept as
+     * a safety net for any path not covered here.
+     *
+     * @param page         The LRU page that owns the updated entry.
+     * @param payload_size The serialized size of the newly installed payload.
+     */
+    void MaybeMarkAndRezoneAsLargeValue(LruPage *page, size_t payload_size)
+    {
+        if (txservice_large_value_threshold == 0 || page == nullptr ||
+            page->has_large_value_ ||
+            payload_size <= txservice_large_value_threshold)
+        {
+            return;
+        }
+        page->has_large_value_ = true;
+        if (page->lru_next_ != nullptr)
+        {
+            shard_->UpdateLruList(page, false);
+        }
     }
 
     absl::btree_map<
