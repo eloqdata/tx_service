@@ -1967,7 +1967,9 @@ private:
             std::string_view,
             std::vector<std::unique_ptr<txservice::FlushTaskEntry>>>
             &flush_task_entries,
-        DataSyncTask::CkptErrorCode ckpt_err);
+        DataSyncTask::CkptErrorCode ckpt_err,
+        const std::function<void()> *yield_fptr = nullptr,
+        const std::function<void()> *resume_fptr = nullptr);
 
     const uint32_t node_id_;
     // Native node group
@@ -2457,7 +2459,10 @@ private:
                           const TxKey *end_key,
                           bool flush_res);
 
-    bool UpdateStoreSlices(std::vector<FlushTaskEntry *> &task);
+    bool UpdateStoreSlices(
+        std::vector<FlushTaskEntry *> &task,
+        const std::function<void()> *yield_fptr = nullptr,
+        const std::function<void()> *resume_fptr = nullptr);
 
     bool GetNextRangePartitionId(const TableName &tablename,
                                  const TableSchema *table_schema,
