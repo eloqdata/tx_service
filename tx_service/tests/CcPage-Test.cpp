@@ -305,48 +305,51 @@ TEST_CASE("Large-value eviction protection test", "[cc-page]")
     large_map->RezoneAsLargeValueForTest();
     shard.VerifyLruList();
 
-    // lru_large_value_zone_head_ must now point into the large-value zone.
-    const LruPage *zone_head = shard.LruLargeValueZoneHead();
-    REQUIRE(zone_head != nullptr);
-    REQUIRE(zone_head->parent_map_ != nullptr);  // not a sentinel
+    // LruLargeValueZoneHead() now returns the permanent dummy sentinel
+    // head_large_ccp_ (parent_map_ == nullptr). The sentinel is always in the
+    // list as the immovable boundary between SV and LV zones.
+    const LruPage *zone_sentinel = shard.LruLargeValueZoneHead();
+    REQUIRE(zone_sentinel != nullptr);
+    REQUIRE(zone_sentinel->parent_map_ == nullptr);  // IS a sentinel
 
-    // Walk the LRU list and verify:
-    //   head → [small_map pages] → zone_head → [large_map pages] → tail
+    // Walk the LRU list and verify zone structure:
+    //   head_ccp_ → [SV pages] → zone_sentinel → [LV pages] → tail_ccp_
     {
-        bool in_large_zone = false;
-        for (const LruPage *p = shard.LruHead()->lru_next_;
-             p->parent_map_ != nullptr;  // sentinel tail has parent_map_==null
+        // SV zone: every page between head_ccp_ and zone_sentinel belongs to
+        // small_map.
+        for (const LruPage *p = shard.LruHead()->lru_next_; p != zone_sentinel;
              p = p->lru_next_)
         {
-            if (p == zone_head)
-            {
-                in_large_zone = true;
-            }
-            if (in_large_zone)
-            {
-                REQUIRE(p->parent_map_ == large_map.get());
-            }
-            else
-            {
-                REQUIRE(p->parent_map_ == small_map.get());
-            }
+            REQUIRE(p->parent_map_ == small_map.get());
         }
-        // We must have entered the large zone.
-        REQUIRE(in_large_zone);
+
+        // LV zone: every data page after zone_sentinel belongs to large_map.
+        bool has_lv_pages = false;
+        for (const LruPage *p = zone_sentinel->lru_next_;
+             p->parent_map_ != nullptr;  // tail_ccp_ has parent_map_==nullptr
+             p = p->lru_next_)
+        {
+            REQUIRE(p->parent_map_ == large_map.get());
+            has_lv_pages = true;
+        }
+        REQUIRE(has_lv_pages);
     }
 
     // -----------------------------------------------------------------------
-    // PART 2: Small-value insertion stays before the zone head.
+    // PART 2: Small-value insertion stays before the zone sentinel.
     // -----------------------------------------------------------------------
-    const LruPage *zone_head_before = shard.LruLargeValueZoneHead();
+    // zone_sentinel is the permanent dummy page and must never move.
+    REQUIRE(shard.LruLargeValueZoneHead() == zone_sentinel);
     CompositeKey<std::string, int> extra_sv_key =
         std::make_tuple(small_table, static_cast<int>(MAP_SIZE + 1));
     std::vector<CompositeKey<std::string, int> *> extra_sv_ptr = {
         &extra_sv_key};
     REQUIRE(small_map->BulkEmplaceFreeForTest(extra_sv_ptr));
     shard.VerifyLruList();
-    // SV insertion must not change the zone head.
-    REQUIRE(shard.LruLargeValueZoneHead() == zone_head_before);
+    // Sentinel must not have moved after SV insertion.
+    REQUIRE(shard.LruLargeValueZoneHead() == zone_sentinel);
+    // The newly inserted SV page must be immediately before the sentinel.
+    REQUIRE(zone_sentinel->lru_prev_->parent_map_ == small_map.get());
 
     // -----------------------------------------------------------------------
     // PART 3: Full scan – all pages are evicted.

@@ -94,7 +94,7 @@ CcShard::CcShard(
       head_ccp_(nullptr),
       tail_ccp_(nullptr),
       clean_start_ccp_(nullptr),
-      lru_large_value_zone_head_(nullptr),
+      head_large_ccp_(nullptr),
       size_(0),
       ckpter_(nullptr),
       catalog_factory_{catalog_factory[0],
@@ -125,10 +125,11 @@ CcShard::CcShard(
         (uint64_t) MB(node_memory_limit_mb) * 0.1 / core_cnt_;
 
     head_ccp_.lru_prev_ = nullptr;
-    head_ccp_.lru_next_ = &tail_ccp_;
-    tail_ccp_.lru_prev_ = &head_ccp_;
+    head_ccp_.lru_next_ = &head_large_ccp_;
+    head_large_ccp_.lru_prev_ = &head_ccp_;
+    head_large_ccp_.lru_next_ = &tail_ccp_;
+    tail_ccp_.lru_prev_ = &head_large_ccp_;
     tail_ccp_.lru_next_ = nullptr;
-    lru_large_value_zone_head_ = &tail_ccp_;
 
     thd_token_.reserve((size_t) core_cnt_ + 1);
     for (size_t idx = 0; idx < core_cnt_; ++idx)
@@ -847,11 +848,6 @@ void CcShard::DetachLru(LruPage *page)
     {
         clean_start_ccp_ = page->lru_next_;
     }
-    // If page is the head of the large-value zone, advance the zone head.
-    if (lru_large_value_zone_head_ == page)
-    {
-        lru_large_value_zone_head_ = page->lru_next_;
-    }
     assert(prev != nullptr && next != nullptr);
     prev->lru_next_ = next;
     next->lru_prev_ = prev;
@@ -867,18 +863,11 @@ void CcShard::ReplaceLru(LruPage *old_page, LruPage *new_page)
     old_page->lru_prev_ = nullptr;
     LruPage *lru_next = old_page->lru_next_;
     old_page->lru_next_ = nullptr;
-    // If page is the head to start looking for cc entry to kickout, move
-    // the clean head to the next page
+    // The replacement page inherits the large-value flag.
+    new_page->has_large_value_ = old_page->has_large_value_;
     if (clean_start_ccp_ == old_page)
     {
         clean_start_ccp_ = new_page;
-    }
-    // The replacement page inherits the large-value flag and the zone-head
-    // role.
-    new_page->has_large_value_ = old_page->has_large_value_;
-    if (lru_large_value_zone_head_ == old_page)
-    {
-        lru_large_value_zone_head_ = new_page;
     }
     lru_prev->lru_next_ = new_page;
     lru_next->lru_prev_ = new_page;
@@ -900,16 +889,14 @@ void CcShard::UpdateLruList(LruPage *page, bool is_emplace)
 
     // Determine insertion point depending on whether the page has large values.
     //
-    // Large-value pages (has_large_value_ == true) always go at the true tail
-    // (most-recently-used end). This clusters them in the tail zone and ensures
-    // they are evicted only after all small-value pages have been evicted.
+    // Large-value pages (has_large_value_ == true) are inserted before
+    // tail_ccp_ (MRU end of the LV zone). Small-value pages are inserted
+    // before head_large_ccp_ (MRU end of the SV zone). This keeps the
+    // permanent list structure:
     //
-    // Small-value pages (has_large_value_ == false) are inserted just before
-    // the large-value zone (at lru_large_value_zone_head_->lru_prev_). When
-    // there are no large-value pages lru_large_value_zone_head_ == &tail_ccp_,
-    // so the behaviour is identical to the standard tail insertion.
+    //   head_ccp_ ← [SV pages] ← head_large_ccp_ ← [LV pages] ← tail_ccp_
     LruPage *insert_before =
-        page->has_large_value_ ? &tail_ccp_ : lru_large_value_zone_head_;
+        page->has_large_value_ ? &tail_ccp_ : &head_large_ccp_;
 
     // page already at the correct insertion position, just update the counter.
     if (page->lru_next_ == insert_before && insert_before->lru_prev_ == page)
@@ -934,14 +921,6 @@ void CcShard::UpdateLruList(LruPage *page, bool is_emplace)
 
     ++access_counter_;
     page->last_access_ts_ = access_counter_;
-
-    // Maintain lru_large_value_zone_head_: when a large-value page is inserted
-    // and the zone was empty (lru_large_value_zone_head_ == &tail_ccp_), the
-    // new page becomes the zone head.
-    if (page->has_large_value_ && lru_large_value_zone_head_ == &tail_ccp_)
-    {
-        lru_large_value_zone_head_ = page;
-    }
 
     // If the update is a emplace update, these new loaded data might be
     // kickable from cc map. Usually if the clean_start_page is at tail we're
@@ -1223,6 +1202,12 @@ std::pair<size_t, bool> CcShard::Clean()
             .count();
     while (scan_page_cnt < CcShard::freeBatchSize && ccp != &tail_ccp_)
     {
+        // Skip sentinel pages (e.g., head_large_ccp_).
+        if (ccp->parent_map_ == nullptr)
+        {
+            ccp = ccp->lru_next_;
+            continue;
+        }
         // merge and removal might happen during Clean so ccp and ccp->lru_next_
         // might change
         auto [freed, next] = ccp->parent_map_->CleanPageAndReBalance(ccp);
@@ -1249,6 +1234,12 @@ std::pair<size_t, bool> CcShard::Clean()
     ccp = head_ccp_.lru_next_;
     while (ccp != &tail_ccp_)
     {
+        // Skip sentinel pages (e.g., head_large_ccp_).
+        if (ccp->parent_map_ == nullptr)
+        {
+            ccp = ccp->lru_next_;
+            continue;
+        }
         // merge and removal might happen during Clean so ccp and ccp->lru_next_
         // might change
         auto [freed, next] = ccp->parent_map_->CleanPageAndReBalance(ccp);
