@@ -50,30 +50,6 @@ inline bool txservice_enable_cache_replacement = true;
 // been evicted. A value of 0 disables large-value protection (default).
 inline size_t txservice_large_value_threshold = 0;
 
-// Maximum fraction (0.0 < max_ratio <= 1.0) of all LRU pages that the
-// large-value zone may occupy at any time.
-//
-// The algorithm is analogous to SLRU's protected-segment capacity:
-//
-//   SLRU                           | Our zone-separation algorithm
-//   -------------------------------|------------------------------
-//   Classification: access freq    | Classification: payload size
-//   Protected tail ← LRU re-hit   | LV zone tail ← large payload detected
-//   Probationary head ← demotion  | SV zone boundary ← demotion
-//   Fixed segment size             | Configurable max_ratio
-//
-// When a large-value page is inserted into the LV zone and the zone would
-// exceed max_ratio * total_lru_page_count_, the oldest LV page (zone head)
-// is demoted to the SV zone: the zone head pointer is advanced one step
-// forward (O(1), no list surgery). The demoted page remains in the list at
-// its current position, now in the SV zone. On next access it tries to
-// re-enter the LV zone; if the zone is still full it will be demoted again,
-// matching classic SLRU promotion/demotion semantics.
-//
-// Set to 1.0 (default) to impose no ratio limit. Set to 0.5 to allow at
-// most 50% of LRU pages in the large-value zone.
-inline double txservice_large_value_zone_max_ratio = 1.0;
-
 // Whether to automatically redirect redis command to the leader node when the
 // data is not on the local node.
 inline bool txservice_auto_redirect_redis_cmd = true;

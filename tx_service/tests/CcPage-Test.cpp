@@ -296,7 +296,7 @@ TEST_CASE("Large-value eviction protection test", "[cc-page]")
     txservice_large_value_threshold = LARGE_PAYLOAD_SIZE / 2;
 
     // -----------------------------------------------------------------------
-    // PART 1: Zone-separation structure (no ratio limit, max_ratio == 1.0).
+    // PART 1: Zone-separation structure.
     // -----------------------------------------------------------------------
     // Use RezoneAsLargeValueForTest() to set has_large_value_ on large_map
     // pages and call UpdateLruList to move them into the large-value zone.
@@ -309,12 +309,6 @@ TEST_CASE("Large-value eviction protection test", "[cc-page]")
     const LruPage *zone_head = shard.LruLargeValueZoneHead();
     REQUIRE(zone_head != nullptr);
     REQUIRE(zone_head->parent_map_ != nullptr);  // not a sentinel
-
-    // With max_ratio == 1.0 (no limit), ALL MAP_SIZE large-value pages are in
-    // the LV zone.
-    REQUIRE(shard.LargeValueZonePageCount() == small_map->PageCount());
-    REQUIRE(shard.TotalLruPageCount() ==
-            small_map->PageCount() + large_map->PageCount());
 
     // Walk the LRU list and verify:
     //   head → [small_map pages] → zone_head → [large_map pages] → tail
@@ -342,54 +336,7 @@ TEST_CASE("Large-value eviction protection test", "[cc-page]")
     }
 
     // -----------------------------------------------------------------------
-    // PART 2: Zone-ratio enforcement.
-    //
-    // Analogous to SLRU's protected-segment cap: when the LV zone would exceed
-    // max_ratio * total_pages, the oldest LV page is demoted to the SV zone
-    // (zone head pointer advanced one step, O(1), no list surgery).
-    //
-    // We now restrict max_ratio to 0.5 and re-zone the large_map pages again.
-    // With MAP_SIZE SV pages and MAP_SIZE LV pages (total 2*MAP_SIZE), the LV
-    // zone is capped at floor(2*MAP_SIZE * 0.5) = MAP_SIZE pages.  Since the
-    // LV pages equal exactly the cap, no demotion is expected (strict > check).
-    // Then insert one additional LV page: the cap is exceeded by 1, triggering
-    // exactly 1 demotion.
-    // -----------------------------------------------------------------------
-    txservice_large_value_zone_max_ratio = 0.5;
-    const uint64_t total_pages = shard.TotalLruPageCount();
-    const uint64_t max_lv = static_cast<uint64_t>(total_pages * 0.5);
-
-    // Current LV count must be <= max_lv (no demotion happened yet with 1.0
-    // ratio; re-zoning was already done above).
-    REQUIRE(shard.LargeValueZonePageCount() <= max_lv);
-
-    // Now add one more large-value entry to a new large-value map, which
-    // will cause the LV zone to go over max_lv and trigger a demotion.
-    std::string extra_large_table = "extra_large_val";
-    TableName extra_large_tname(
-        extra_large_table, TableType::Primary, TableEngine::EloqSql);
-    auto extra_large_map = std::make_unique<TestCcMap>(
-        &shard, 0, extra_large_tname, 1, nullptr, true);
-
-    CompositeKey<std::string, int> extra_lv_key =
-        std::make_tuple(extra_large_table, 0);
-    std::vector<CompositeKey<std::string, int> *> extra_lv_ptr = {
-        &extra_lv_key};
-    REQUIRE(extra_large_map->BulkEmplaceFreeForTest(extra_lv_ptr));
-
-    // Give it a large payload so it gets re-zoned to the LV zone.
-    extra_large_map->SetPayloadForTest(large_payload);
-    extra_large_map->RezoneAsLargeValueForTest();
-    shard.VerifyLruList();
-
-    // After the demotion the LV zone must satisfy the ratio constraint.
-    const uint64_t new_total = shard.TotalLruPageCount();
-    const uint64_t new_lv = shard.LargeValueZonePageCount();
-    REQUIRE(new_lv <= static_cast<uint64_t>(
-                          new_total * txservice_large_value_zone_max_ratio));
-
-    // -----------------------------------------------------------------------
-    // PART 3: Small-value insertion stays before the zone head.
+    // PART 2: Small-value insertion stays before the zone head.
     // -----------------------------------------------------------------------
     const LruPage *zone_head_before = shard.LruLargeValueZoneHead();
     CompositeKey<std::string, int> extra_sv_key =
@@ -402,7 +349,7 @@ TEST_CASE("Large-value eviction protection test", "[cc-page]")
     REQUIRE(shard.LruLargeValueZoneHead() == zone_head_before);
 
     // -----------------------------------------------------------------------
-    // PART 4: Full scan – all pages are evicted.
+    // PART 3: Full scan – all pages are evicted.
     // -----------------------------------------------------------------------
     size_t total_freed = 0;
     while (true)
@@ -415,12 +362,10 @@ TEST_CASE("Large-value eviction protection test", "[cc-page]")
             break;
         }
     }
-    REQUIRE(total_freed ==
-            MAP_SIZE + MAP_SIZE + 1 /* extra sv */ + 1 /* extra lv */);
+    REQUIRE(total_freed == MAP_SIZE + MAP_SIZE + 1 /* extra sv */);
 
     // Restore global defaults.
     txservice_large_value_threshold = 0;
-    txservice_large_value_zone_max_ratio = 1.0;
     local_cc_shards.Terminate();
 }
 
