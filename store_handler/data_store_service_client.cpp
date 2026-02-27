@@ -1773,7 +1773,9 @@ void DataStoreServiceClient::DispatchRangeMetadataBatches(
 }
 
 bool DataStoreServiceClient::UpdateRangeSlices(
-    const std::vector<txservice::UpdateRangeSlicesReq> &update_range_slice_reqs)
+    const std::vector<txservice::UpdateRangeSlicesReq> &update_range_slice_reqs,
+    const std::function<void()> *yield_fptr,
+    const std::function<void()> *resume_fptr)
 {
     if (update_range_slice_reqs.empty())
     {
@@ -1829,6 +1831,10 @@ bool DataStoreServiceClient::UpdateRangeSlices(
         sync_concurrent_request_pool_.NextObject();
     PoolableGuard slice_guard(slice_sync_concurrent);
     slice_sync_concurrent->Reset();
+    if (yield_fptr != nullptr && resume_fptr != nullptr)
+    {
+        slice_sync_concurrent->SetCoroCallbacks(yield_fptr, resume_fptr);
+    }
     for (const auto &[kv_partition_id, slice_plans] : slice_plans)
     {
         // Call DispatchRangeSliceBatches once with all plans
@@ -1856,11 +1862,23 @@ bool DataStoreServiceClient::UpdateRangeSlices(
             sync_callback_data_pool_.NextObject();
         PoolableGuard guard(flush_slices_callback_data);
         flush_slices_callback_data->Reset();
+        if (yield_fptr != nullptr && resume_fptr != nullptr)
+        {
+            flush_slices_callback_data->SetCoroCallbacks(yield_fptr,
+                                                        resume_fptr);
+        }
         std::vector<std::string> kv_slices_table_names;
         kv_slices_table_names.emplace_back(kv_range_slices_table_name);
         FlushData(
             kv_slices_table_names, flush_slices_callback_data, &SyncCallback);
-        flush_slices_callback_data->Wait();
+        if (yield_fptr != nullptr && resume_fptr != nullptr)
+        {
+            flush_slices_callback_data->Wait(yield_fptr, resume_fptr);
+        }
+        else
+        {
+            flush_slices_callback_data->Wait();
+        }
         if (flush_slices_callback_data->Result().error_code() !=
             EloqDS::remote::DataStoreError::NO_ERROR)
         {
@@ -1875,6 +1893,10 @@ bool DataStoreServiceClient::UpdateRangeSlices(
         sync_concurrent_request_pool_.NextObject();
     PoolableGuard meta_guard(meta_sync_concurrent);
     meta_sync_concurrent->Reset();
+    if (yield_fptr != nullptr && resume_fptr != nullptr)
+    {
+        meta_sync_concurrent->SetCoroCallbacks(yield_fptr, resume_fptr);
+    }
     DispatchRangeMetadataBatches(
         kv_range_table_name, meta_acc, meta_sync_concurrent);
 
@@ -1896,10 +1918,21 @@ bool DataStoreServiceClient::UpdateRangeSlices(
         SyncCallbackData *callback_data = sync_callback_data_pool_.NextObject();
         PoolableGuard guard(callback_data);
         callback_data->Reset();
+        if (yield_fptr != nullptr && resume_fptr != nullptr)
+        {
+            callback_data->SetCoroCallbacks(yield_fptr, resume_fptr);
+        }
         std::vector<std::string> kv_range_table_names;
         kv_range_table_names.emplace_back(kv_range_table_name);
         FlushData(kv_range_table_names, callback_data, &SyncCallback);
-        callback_data->Wait();
+        if (yield_fptr != nullptr && resume_fptr != nullptr)
+        {
+            callback_data->Wait(yield_fptr, resume_fptr);
+        }
+        else
+        {
+            callback_data->Wait();
+        }
         if (callback_data->Result().error_code() !=
             EloqDS::remote::DataStoreError::NO_ERROR)
         {
