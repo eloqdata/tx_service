@@ -109,14 +109,14 @@ struct SyncCallbackData : public Poolable
     {
         std::unique_lock<bthread::Mutex> lk(mtx_);
         finished_ = true;
-        if (resume_fn_ != nullptr &&
-            waiting_.load(std::memory_order_acquire))
+        if (resume_fn_ != nullptr && waiting_.load(std::memory_order_acquire))
         {
             waiting_.store(false, std::memory_order_release);
+            auto *fn = resume_fn_;
             lk.unlock();
-            (*resume_fn_)();
+            (*fn)();
         }
-        else
+        else if (resume_fn_ == nullptr)
         {
             cv_.notify_one();
         }
@@ -305,8 +305,9 @@ struct SyncPutAllData : public Poolable
             if (resume_fn_ && waiting_.load(std::memory_order_acquire))
             {
                 waiting_.store(false, std::memory_order_release);
+                auto *fn = resume_fn_;
                 lk.unlock();
-                (*resume_fn_)();
+                (*fn)();
                 // Do not re-lock: resume_fn may acquire flush_worker_mux;
                 // coroutine will need mux_ when it resumes. Unlock before
                 // resume_fn avoids deadlock.
@@ -401,8 +402,9 @@ struct SyncConcurrentRequest : public Poolable
             if (resume_fn_ && waiting_.load(std::memory_order_acquire))
             {
                 waiting_.store(false, std::memory_order_release);
+                auto *fn = resume_fn_;
                 lk.unlock();
-                (*resume_fn_)();
+                (*fn)();
                 // Do not re-lock: resume_fn may acquire flush_worker_mux
             }
             else if (!resume_fn_)
@@ -564,12 +566,12 @@ void SyncCallback(void *data,
 
 struct ReadBaseForArchiveCallbackData
 {
-    ReadBaseForArchiveCallbackData(bthread::Mutex &mtx,
-                                   bthread::ConditionVariable &cv,
-                                   size_t &flying_read_cnt,
-                                   int &error_code,
-                                   const std::function<void()> *resume_fn =
-                                       nullptr)
+    ReadBaseForArchiveCallbackData(
+        bthread::Mutex &mtx,
+        bthread::ConditionVariable &cv,
+        size_t &flying_read_cnt,
+        int &error_code,
+        const std::function<void()> *resume_fn = nullptr)
         : mtx_(mtx),
           cv_(cv),
           flying_read_cnt_(flying_read_cnt),
@@ -646,11 +648,14 @@ struct ReadBaseForArchiveCallbackData
             if (resume_fn_ && waiting_.load(std::memory_order_acquire))
             {
                 waiting_.store(false, std::memory_order_release);
+                auto *fn = resume_fn_;
                 lk.unlock();
-                (*resume_fn_)();
-                // Do not re-lock: resume_fn may acquire flush_worker_mux
+                (*fn)();
+                // Do not re-lock: resume_fn may acquire flush_worker_mux.
+                // Do not access members after fn(): object may be destroyed.
+                return 0;
             }
-            else
+            else if (!resume_fn_)
             {
                 cv_.notify_one();
             }
