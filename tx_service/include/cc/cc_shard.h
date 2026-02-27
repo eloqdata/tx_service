@@ -1023,16 +1023,15 @@ public:
     }
 
     /**
-     * @brief Returns the dummy sentinel that permanently marks the boundary
-     * between the small-value zone and the large-value zone in the LRU list.
+     * @brief Returns the current head of the large-value zone — the first
+     * large-value page in the LRU list (the one closest to the sentinel head).
      *
-     * Used for testing: verify zone structure.
-     * head_large_ccp_.parent_map_ is always nullptr (it is a sentinel, not a
-     * data page).
+     * Used for testing: verifies that the large-value zone is non-empty and
+     * correctly maintained.
      */
     const LruPage *LruLargeValueZoneHead() const
     {
-        return &head_large_ccp_;
+        return lru_large_value_zone_head_;
     }
 
     SystemHandler *GetSystemHandler()
@@ -1314,18 +1313,16 @@ private:
     // Page to start looking for cc entries to kick out on LRU chain.
     LruPage *clean_start_ccp_;
 
-    // Dummy sentinel that permanently marks the boundary between the
-    // small-value zone (SV) and the large-value zone (LV) in the LRU list.
-    // The LRU list always has the structure:
+    // Head of the large-value zone in the LRU list. Large-value pages are
+    // clustered at the tail (recent) end of the list so they are evicted only
+    // after all small-value pages have been evicted. This pointer points to the
+    // first (oldest) large-value page, i.e. the boundary between the two zones:
     //
-    //   head_ccp_ ← [SV pages] ← head_large_ccp_ ← [LV pages] ← tail_ccp_
+    //   head ← [small-value pages] ← lru_large_value_zone_head_ ← [large-value
+    //   pages] ← tail
     //
-    // When the LV zone is empty head_large_ccp_.lru_next_ == &tail_ccp_.
-    // Small-value pages are inserted before head_large_ccp_ (SV MRU end);
-    // large-value pages are inserted before tail_ccp_ (LV MRU end).
-    // Because head_large_ccp_ is immovable, DetachLru and ReplaceLru need no
-    // zone-boundary maintenance, unlike the previous pointer-based approach.
-    LruPage head_large_ccp_;
+    // It equals &tail_ccp_ when no large-value pages are in the list.
+    LruPage *lru_large_value_zone_head_;
 
     // The number of ccentry in all the ccmap of this ccshard.
     uint64_t size_;
