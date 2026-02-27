@@ -132,13 +132,9 @@ LocalCcShards::LocalCcShards(
 
       data_sync_worker_ctx_(conf.at("core_num")),
 #ifdef EXT_TX_PROC_ENABLED
-      flush_data_worker_ctx_(
-          conf.at("core_num") >= 2
-              ? std::min(conf.at("core_num") / 2, (uint32_t) 10)
-              : 1),
+      flush_data_worker_ctx_(1),
 #else
-      flush_data_worker_ctx_(
-          std::min(static_cast<int>(conf.at("core_num")), 10)),
+      flush_data_worker_ctx_(1),
 #endif
       // cur_flush_buffers_ will be resized in StartBackgroudWorkers()
       // when worker_num_ is determined
@@ -5992,6 +5988,9 @@ void LocalCcShards::FlushDataImpl(FlushDataTask *cur_work,
         }
     }
 
+    LOG(INFO) << "FlushDataImpl: start update cce ts, task addr = " << cur_work
+              << ", worker idx = " << worker_idx;
+
     std::unordered_set<uint16_t> updated_ckpt_ts_core_ids;
     // Update cce ckpt ts in memory
     if (succ)
@@ -6004,6 +6003,8 @@ void LocalCcShards::FlushDataImpl(FlushDataTask *cur_work,
                 {
                     continue;
                 }
+
+                auto start_time = std::chrono::steady_clock::now();
 
                 absl::flat_hash_map<size_t,
                                     std::vector<UpdateCceCkptTsCc::CkptTsEntry>>
@@ -6034,6 +6035,14 @@ void LocalCcShards::FlushDataImpl(FlushDataTask *cur_work,
                     }
                 }
 
+                auto stop_time = std::chrono::steady_clock::now();
+                auto duration =
+                    std::chrono::duration_cast<std::chrono::microseconds>(
+                        stop_time - start_time);
+                LOG(INFO) << "FlushDataImpl: UpdateCceCkptTsCc duration = "
+                          << duration.count() << "us"
+                          << ", rec size = " << entry->data_sync_vec_->size();
+
                 if (cce_entries_map.size() > 0)
                 {
                     UpdateCceCkptTsCc update_cce_req(
@@ -6053,6 +6062,8 @@ void LocalCcShards::FlushDataImpl(FlushDataTask *cur_work,
         }
     }
 
+    LOG(INFO) << "FlushDataImpl: start reset cc, task addr = " << cur_work
+              << ", worker idx = " << worker_idx;
     // Notify cc shards that dirty data has been flushed. This will re-enqueue
     // kickout data cc reqs if there are any.
     WaitableCc reset_cc(
@@ -6127,20 +6138,18 @@ void LocalCcShards::FlushDataWorker(size_t worker_idx)
     std::unique_lock<std::mutex> flush_worker_lk(flush_data_worker_ctx_.mux_);
     while (flush_data_worker_ctx_.status_ == WorkerStatus::Active)
     {
-        // 1. 从 resume_queue 获取被唤醒的协程
         if (!resume_queue.empty())
         {
             std::shared_ptr<CoroCtx> ctx = std::move(resume_queue.front());
             resume_queue.pop_front();
             flush_worker_lk.unlock();
 
-            ctx->coro_ = ctx->coro_.resume();  // 单次 resume，无循环
+            ctx->coro_ = ctx->coro_.resume();
 
             flush_worker_lk.lock();
             continue;
         }
 
-        // 2. 等待新任务或 resume_queue 通知
         flush_data_worker_ctx_.cv_.wait_for(
             flush_worker_lk,
             10s,
@@ -6207,7 +6216,6 @@ void LocalCcShards::FlushDataWorker(size_t worker_idx)
             continue;
         }
 
-        // 3. 取任务，以协程执行 FlushData
         std::unique_ptr<FlushDataTask> cur_work =
             std::move(pending_flush_work.front());
         pending_flush_work.pop_front();
@@ -6221,7 +6229,11 @@ void LocalCcShards::FlushDataWorker(size_t worker_idx)
             flush_coro_stack_allocator_,
             [this, ctx, worker_idx](continuation &&sink)
             {
-                ctx->yield_fn = [&sink]() { sink = sink.resume(); };
+                ctx->yield_fn = [&sink]()
+                {
+                    LOG(INFO) << "CoroCtx yield_fn";
+                    sink = sink.resume();
+                };
                 ctx->sync_yield_func = [&sink,
                                         weak_ctx = std::weak_ptr<CoroCtx>(ctx),
                                         this,
@@ -6243,10 +6255,16 @@ void LocalCcShards::FlushDataWorker(size_t worker_idx)
                 {
                     if (auto c = weak_ctx.lock())
                     {
+                        LOG(INFO)
+                            << "CoroCtx resume_fn: coro ctx = " << c.get();
                         std::lock_guard<std::mutex> lk(
                             flush_data_worker_ctx_.mux_);
                         resume_queue_[worker_idx].push_back(std::move(c));
                         flush_data_worker_ctx_.cv_.notify_all();
+                    }
+                    else
+                    {
+                        LOG(FATAL) << "CoroCtx resume_fn: weak_ctx is expired";
                     }
                 };
                 FlushDataImpl(ctx->task_.get(),
@@ -6260,10 +6278,8 @@ void LocalCcShards::FlushDataWorker(size_t worker_idx)
         flush_worker_lk.lock();
     }
 
-    // Terminate 时清空队列，使用协程方式执行
     while (!resume_queue.empty() || !pending_flush_work.empty())
     {
-        // 1. 优先处理 resume_queue 中的协程
         if (!resume_queue.empty())
         {
             std::shared_ptr<CoroCtx> ctx = std::move(resume_queue.front());
@@ -6274,7 +6290,6 @@ void LocalCcShards::FlushDataWorker(size_t worker_idx)
             continue;
         }
 
-        // 2. pending_flush_work 中有任务，以协程方式启动
         std::unique_ptr<FlushDataTask> cur_work =
             std::move(pending_flush_work.front());
         pending_flush_work.pop_front();
