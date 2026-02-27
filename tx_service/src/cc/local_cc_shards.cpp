@@ -3096,7 +3096,9 @@ void LocalCcShards::PostProcessFlushTaskEntries(
     std::unordered_map<std::string_view,
                        std::vector<std::unique_ptr<txservice::FlushTaskEntry>>>
         &flush_task_entries,
-    DataSyncTask::CkptErrorCode ckpt_err)
+    DataSyncTask::CkptErrorCode ckpt_err,
+    const std::function<void()> *yield_fptr,
+    const std::function<void()> *resume_fptr)
 {
     assert(ckpt_err != DataSyncTask::CkptErrorCode::SCAN_ERROR);
 
@@ -3252,7 +3254,8 @@ void LocalCcShards::PostProcessFlushTaskEntries(
 
     if (!pending_update_entries.empty())
     {
-        bool success = UpdateStoreSlices(pending_update_entries);
+        bool success =
+            UpdateStoreSlices(pending_update_entries, yield_fptr, resume_fptr);
 
         for (auto &entry : pending_update_entries)
         {
@@ -6052,7 +6055,8 @@ void LocalCcShards::FlushDataImpl(FlushDataTask *cur_work,
                << " new_usage: " << old_usage - cur_work->pending_flush_size_
                << " quota: " << data_sync_mem_controller_.FlushMemoryQuota();
 
-    PostProcessFlushTaskEntries(flush_task_entries, ckpt_err);
+    PostProcessFlushTaskEntries(
+        flush_task_entries, ckpt_err, &yield_fn, &resume_fn);
 }
 
 void LocalCcShards::FlushData(std::unique_lock<std::mutex> &flush_worker_lk,
@@ -6329,7 +6333,9 @@ void LocalCcShards::RangeSplitWorker()
 }
 
 bool LocalCcShards::UpdateStoreSlices(
-    std::vector<FlushTaskEntry *> &flush_tasks)
+    std::vector<FlushTaskEntry *> &flush_tasks,
+    const std::function<void()> *yield_fptr,
+    const std::function<void()> *resume_fptr)
 {
     std::vector<UpdateRangeSlicesReq> update_range_slice_reqs;
 
@@ -6372,7 +6378,8 @@ bool LocalCcShards::UpdateStoreSlices(
 
     if (!update_range_slice_reqs.empty())
     {
-        bool success = store_hd_->UpdateRangeSlices(update_range_slice_reqs);
+        bool success = store_hd_->UpdateRangeSlices(
+            update_range_slice_reqs, yield_fptr, resume_fptr);
         return success;
     }
 

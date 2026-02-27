@@ -412,7 +412,10 @@ public:
                            uint64_t range_version) override;
 
     bool UpdateRangeSlices(const std::vector<txservice::UpdateRangeSlicesReq>
-                               &update_range_slice_reqs) override;
+                               &update_range_slice_reqs,
+                           const std::function<void()> *yield_fptr = nullptr,
+                           const std::function<void()> *resume_fptr = nullptr)
+        override;
 
     bool UpsertRanges(const txservice::TableName &table_name,
                       std::vector<txservice::SplitRangeInfo> range_info,
