@@ -173,24 +173,6 @@ public:
         neg_inf_.ClearLocks(*shard_, cc_ng_id_);
     }
 
-    bool RangeSizesInited() const override
-    {
-        if constexpr (RangePartitioned)
-        {
-            return range_sizes_.size() > 0;
-        }
-        return true;
-    }
-
-    void InitRangeSizes(
-        absl::flat_hash_map<uint32_t, size_t> &&range_sizes) override
-    {
-        if constexpr (RangePartitioned)
-        {
-            range_sizes_ = std::move(range_sizes);
-        }
-    }
-
     bool Execute(AcquireCc &req) override
     {
         TX_TRACE_ACTION_WITH_CONTEXT(
@@ -11954,6 +11936,24 @@ protected:
     CcPage<KeyT, ValueT, VersionedRecord, RangePartitioned> *PagePosInf()
     {
         return &pos_inf_page_;
+    }
+
+    bool RangeSizesInited() const override
+    {
+        if constexpr (RangePartitioned)
+        {
+            return range_sizes_.size() > 0;
+        }
+        return true;
+    }
+
+    void InitRangeSizes(
+        absl::flat_hash_map<uint32_t, size_t> &&range_sizes) override
+    {
+        if constexpr (RangePartitioned)
+        {
+            range_sizes_ = std::move(range_sizes);
+        }
     }
 
     absl::btree_map<
