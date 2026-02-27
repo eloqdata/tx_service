@@ -1123,6 +1123,12 @@ public:
         return cce_entries_;
     }
 
+    bool IsFinished() const
+    {
+        std::lock_guard<bthread::Mutex> lk(mux_);
+        return unfinished_core_cnt_ == 0;
+    }
+
 private:
     absl::flat_hash_map<size_t, std::vector<CkptTsEntry>> &cce_entries_;
     // key: core_idx, value: entry_index
@@ -1132,7 +1138,7 @@ private:
     NodeGroupId node_group_id_;
     int64_t term_;
     TableName table_name_;
-    bthread::Mutex mux_;
+    mutable bthread::Mutex mux_;
     bthread::ConditionVariable cv_;
 
     // Coroutine yield/resume support
