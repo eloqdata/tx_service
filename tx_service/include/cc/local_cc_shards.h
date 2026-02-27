@@ -90,11 +90,16 @@ struct FlushDataTask;
 
 struct CoroCtx
 {
+    ~CoroCtx()
+    {
+        LOG(INFO) << "CoroCtx destructor, this = " << this;
+    }
+
     boost::context::continuation coro_;
     std::unique_ptr<FlushDataTask> task_;
-    std::function<void()> sync_yield_func;  // 同步 yield：入队后让出
-    std::function<void()> yield_fn;         // 异步 yield
-    std::function<void()> resume_fn;  // 用 weak_ptr 捕获 ctx，无参调用
+    std::function<void()> sync_yield_func;
+    std::function<void()> yield_fn;
+    std::function<void()> resume_fn;
 };
 
 struct DataMigrationStatus
@@ -2483,10 +2488,9 @@ private:
                           const TxKey *end_key,
                           bool flush_res);
 
-    bool UpdateStoreSlices(
-        std::vector<FlushTaskEntry *> &task,
-        const std::function<void()> *yield_fptr = nullptr,
-        const std::function<void()> *resume_fptr = nullptr);
+    bool UpdateStoreSlices(std::vector<FlushTaskEntry *> &task,
+                           const std::function<void()> *yield_fptr = nullptr,
+                           const std::function<void()> *resume_fptr = nullptr);
 
     bool GetNextRangePartitionId(const TableName &tablename,
                                  const TableSchema *table_schema,
@@ -2531,7 +2535,7 @@ private:
         512 * 1024};  // 512KB, guard page for stack overflow detection
 #else
     boost::context::pooled_fixedsize_stack flush_coro_stack_allocator_{
-        1024 * 1024};  // 512KB for FlushData call chain
+        1024 * 1024};  // 1MB for FlushData call chain
 #endif
 
     void FlushDataWorker(size_t worker_idx);

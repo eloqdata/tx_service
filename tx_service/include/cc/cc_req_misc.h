@@ -27,14 +27,15 @@
 #include <atomic>
 #include <chrono>
 #include <condition_variable>
-#include <functional>
 #include <cstdint>
 #include <deque>
+#include <functional>
 #include <memory>
 #include <mutex>
 #include <optional>
 #include <string>
 #include <string_view>
+#include <thread>
 #include <unordered_map>
 #include <utility>
 #include <variant>
@@ -906,7 +907,9 @@ public:
         {
             waiting_.store(true, std::memory_order_release);
             lk.unlock();
+            LOG(INFO) << "WaitableCc Wait: Before yield";
             (*yield_fn)();
+            LOG(INFO) << "WaitableCc Wait: After Yield";
             lk.lock();
             waiting_.store(false, std::memory_order_release);
         }
@@ -941,10 +944,11 @@ public:
                 waiting_.load(std::memory_order_acquire))
             {
                 waiting_.store(false, std::memory_order_release);
+                auto *fn = resume_fn_;
                 lk.unlock();
-                (*resume_fn_)();
+                (*fn)();
             }
-            else
+            else if (resume_fn_ == nullptr)
             {
                 cv_.notify_one();
             }
@@ -963,10 +967,12 @@ public:
                     waiting_.load(std::memory_order_acquire))
                 {
                     waiting_.store(false, std::memory_order_release);
+                    auto *fn = resume_fn_;
                     lk.unlock();
-                    (*resume_fn_)();
+                    LOG(INFO) << "WaitableCc Execute: before resume";
+                    (*fn)();
                 }
-                else
+                else if (resume_fn_ == nullptr)
                 {
                     cv_.notify_one();
                 }
@@ -1059,10 +1065,12 @@ public:
                 waiting_.load(std::memory_order_acquire))
             {
                 waiting_.store(false, std::memory_order_release);
+                auto *fn = resume_fn_;
                 lk.unlock();
-                (*resume_fn_)();
+                LOG(INFO) << "UpdateCceCkptTsCc SetFinished: before resume";
+                (*fn)();
             }
-            else
+            else if (resume_fn_ == nullptr)
             {
                 cv_.notify_one();
             }
@@ -1091,7 +1099,9 @@ public:
         {
             waiting_.store(true, std::memory_order_release);
             lk.unlock();
+            LOG(INFO) << "UpdateCceCkptTsCc Wait: Before yield";
             (*yield_fn)();
+            LOG(INFO) << "UpdateCceCkptTsCc Wait: After Yield";
             lk.lock();
             waiting_.store(false, std::memory_order_release);
         }

@@ -33,6 +33,7 @@
 #include <chrono>
 #include <cstdint>
 #include <cstdlib>
+#include <deque>
 #include <memory>
 #include <random>
 #include <string>
@@ -445,7 +446,8 @@ bool DataStoreServiceClient::PutAllImpl(
     // Set up global coordinator
     sync_putall->total_partitions_ = sync_putall->partition_states_.size();
 
-    // Set coroutine callbacks BEFORE starting async work (see plan risk analysis)
+    // Set coroutine callbacks BEFORE starting async work (see plan risk
+    // analysis)
     if (yield_fptr != nullptr && resume_fptr != nullptr)
     {
         sync_putall->SetCoroCallbacks(yield_fptr, resume_fptr);
@@ -487,7 +489,9 @@ bool DataStoreServiceClient::PutAllImpl(
     // Wait for all partitions to complete
     if (yield_fptr != nullptr && resume_fptr != nullptr)
     {
+        LOG(INFO) << "PutAllImpl: Before Wait, this = " << sync_putall;
         sync_putall->Wait(yield_fptr, resume_fptr);
+        LOG(INFO) << "PutAllImpl: After Wait, this = " << sync_putall;
     }
     else
     {
@@ -1865,7 +1869,7 @@ bool DataStoreServiceClient::UpdateRangeSlices(
         if (yield_fptr != nullptr && resume_fptr != nullptr)
         {
             flush_slices_callback_data->SetCoroCallbacks(yield_fptr,
-                                                        resume_fptr);
+                                                         resume_fptr);
         }
         std::vector<std::string> kv_slices_table_names;
         kv_slices_table_names.emplace_back(kv_range_slices_table_name);
@@ -3183,12 +3187,14 @@ bool DataStoreServiceClient::CopyBaseToArchiveImpl(
             bthread::ConditionVariable cv;
             size_t flying_cnt = 0;
             int error_code = 0;
-            std::vector<ReadBaseForArchiveCallbackData> callback_datas;
-            callback_datas.reserve(base_vec.size());
+            // Use deque: ReadBaseForArchiveCallbackData contains std::atomic
+            // which is non-copyable/non-movable; vector requires element
+            // move/copy on realloc, deque does not.
+            std::deque<ReadBaseForArchiveCallbackData> callback_datas;
             for (size_t i = 0; i < base_vec.size(); ++i)
             {
-                callback_datas.emplace_back(mtx, cv, flying_cnt, error_code,
-                                           resume_fptr);
+                callback_datas.emplace_back(
+                    mtx, cv, flying_cnt, error_code, resume_fptr);
             }
 
             for (size_t base_idx = 0; base_idx < base_vec.size(); ++base_idx)
