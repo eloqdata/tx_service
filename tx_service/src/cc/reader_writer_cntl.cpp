@@ -119,6 +119,7 @@ void ReaderWriterCntl::FinishReader()
 AddWriterResult ReaderWriterCntl::AddWriter(CcRequestBase *write_req)
 {
     ReaderWriterCntlBlock cntl = cntl_block_.load(std::memory_order_relaxed);
+    uint64_t requester_txn = write_req->Txn();
     while (true)
     {
         // Requests adding a writer are always processed serially at a
@@ -135,8 +136,10 @@ AddWriterResult ReaderWriterCntl::AddWriter(CcRequestBase *write_req)
             uint64_t writer_txn = IsWriterPtr(writer)
                                       ? DecodeWriterPtr(writer)->Txn()
                                       : DecodeWriterTxn(writer);
-            if (writer_txn != write_req->Txn())
+            if (writer_txn != requester_txn)
             {
+                DLOG(WARNING) << "WriteConflict, writer_txn: " << writer_txn
+                              << ", req txn: " << requester_txn;
                 return AddWriterResult::WriteConflict;
             }
             else
@@ -157,9 +160,11 @@ AddWriterResult ReaderWriterCntl::AddWriter(CcRequestBase *write_req)
             uint64_t writer_txn = IsWriterPtr(writer)
                                       ? DecodeWriterPtr(writer)->Txn()
                                       : DecodeWriterTxn(writer);
-            return writer_txn == write_req->Txn()
-                       ? AddWriterResult::Success
-                       : AddWriterResult::WriteConflict;
+            DLOG_IF(WARNING, writer_txn != requester_txn)
+                << "WriteConflict, writer_txn: " << writer_txn
+                << ", req txn: " << requester_txn;
+            return writer_txn == requester_txn ? AddWriterResult::Success
+                                               : AddWriterResult::WriteConflict;
         }
         else if (cntl.write_status_ == WriteStatus::Invalid)
         {
@@ -195,7 +200,7 @@ AddWriterResult ReaderWriterCntl::AddWriter(CcRequestBase *write_req)
     {
         // Store the writer txn after setting the write status to
         // ProcessedWriter.
-        writer_.store(EncodeWriterTxn(write_req->Txn()),
+        writer_.store(EncodeWriterTxn(requester_txn),
                       std::memory_order_relaxed);
     }
     return success ? AddWriterResult::Success : AddWriterResult::WritePending;

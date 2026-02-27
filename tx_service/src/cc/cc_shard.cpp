@@ -1187,6 +1187,7 @@ void CcShard::ClearTx(TxNumber txn)
         }
 
         TxLockInfo::uptr &lk_info = tx_it->second;
+        const bool track_schema_cntl = IsNative(ng_pair.first);
         for (auto &lru_ptr : lk_info->cce_list_)
         {
             // This is only called when a tx is aborted after asking log/tx
@@ -1210,6 +1211,16 @@ void CcShard::ClearTx(TxNumber txn)
                 }
 
                 lru_ptr->RecycleKeyLock(*this);
+            }
+        }
+        if (track_schema_cntl)
+        {
+            for (auto &[tbl_name, schema_cntl] : catalog_rw_cntl_)
+            {
+                if (schema_cntl != nullptr)
+                {
+                    schema_cntl->FinishWriter(txn);
+                }
             }
         }
         RecycleTxLockInfo(std::move(lk_info));
