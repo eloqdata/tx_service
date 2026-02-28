@@ -1278,18 +1278,19 @@ std::string DataStoreServiceClient::EncodeRangeKey(
  * @param range_version The version of the range.
  * @param version The general version number.
  * @param segment_cnt The number of segments in the range.
+ * @param range_size The size of the range.
  * @return Binary string containing the encoded range value.
  */
 std::string DataStoreServiceClient::EncodeRangeValue(int32_t range_id,
                                                      uint64_t range_version,
                                                      uint64_t version,
                                                      uint32_t segment_cnt,
-                                                     uint32_t range_size)
+                                                     int32_t range_size)
 {
     std::string kv_range_record;
     kv_range_record.reserve(sizeof(int32_t) + sizeof(uint64_t) +
                             sizeof(uint64_t) + sizeof(uint32_t) +
-                            sizeof(uint32_t));
+                            sizeof(int32_t));
     kv_range_record.append(reinterpret_cast<const char *>(&range_id),
                            sizeof(int32_t));
     kv_range_record.append(reinterpret_cast<const char *>(&range_version),
@@ -1300,7 +1301,7 @@ std::string DataStoreServiceClient::EncodeRangeValue(int32_t range_id,
     kv_range_record.append(reinterpret_cast<const char *>(&segment_cnt),
                            sizeof(uint32_t));
     kv_range_record.append(reinterpret_cast<const char *>(&range_size),
-                           sizeof(uint32_t));
+                           sizeof(int32_t));
     return kv_range_record;
 }
 
@@ -1417,7 +1418,7 @@ RangeSliceBatchPlan DataStoreServiceClient::PrepareRangeSliceBatches(
                               sizeof(uint32_t));
         segment_record.append(slice_start_key.Data(), key_size);
         uint32_t slice_size = static_cast<uint32_t>(slices[i]->Size());
-        plan.range_size += slice_size;
+        plan.range_size += static_cast<int32_t>(slice_size);
         segment_record.append(reinterpret_cast<const char *>(&slice_size),
                               sizeof(uint32_t));
     }
@@ -1583,7 +1584,7 @@ void DataStoreServiceClient::EnqueueRangeMetadataRecord(
     uint64_t range_version,
     uint64_t version,
     uint32_t segment_cnt,
-    uint32_t range_size,
+    int32_t range_size,
     RangeMetadataAccumulator &accumulator)
 {
     // Compute kv_table_name and kv_partition_id
@@ -1763,7 +1764,7 @@ bool DataStoreServiceClient::UpdateRangeSlices(
                                                    req.range_slices_,
                                                    req.partition_id_);
         uint32_t segment_cnt = slice_plan.segment_cnt;
-        uint32_t range_size = slice_plan.range_size;
+        int32_t range_size = slice_plan.range_size;
         int32_t kv_partition_id =
             KvPartitionIdOfRangeSlices(*req.table_name_, req.partition_id_);
         auto iter = slice_plans.find(kv_partition_id);
@@ -2082,7 +2083,7 @@ bool DataStoreServiceClient::UpsertRanges(
         auto slice_plan = PrepareRangeSliceBatches(
             table_name, version, range.slices_, range.partition_id_);
         uint32_t segment_cnt = slice_plan.segment_cnt;
-        uint32_t range_size = slice_plan.range_size;
+        int32_t range_size = slice_plan.range_size;
 
         int32_t kv_partition_id =
             KvPartitionIdOfRangeSlices(table_name, range.partition_id_);
