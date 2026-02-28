@@ -1740,6 +1740,8 @@ bool DataStoreServiceClient::UpdateRangeSlices(
     slice_plans.reserve(update_range_slice_reqs.size());
     RangeMetadataAccumulator meta_acc;
 
+    auto start_time = std::chrono::steady_clock::now();
+
     // 1- First pass: Prepare slice batches and accumulate metadata for all
     // ranges
     for (auto &req : update_range_slice_reqs)
@@ -1777,6 +1779,14 @@ bool DataStoreServiceClient::UpdateRangeSlices(
                                    meta_acc);
     }
 
+    auto end_time = std::chrono::steady_clock::now();
+    auto duration = std::chrono::duration_cast<std::chrono::microseconds>(
+        end_time - start_time);
+    LOG(INFO) << "UpdateRangeSlices: Prepare slice batches and accumulate "
+                 "metadata for all ranges took "
+              << duration.count() << "us"
+              << ", req size = " << update_range_slice_reqs.size();
+
     // 2- Dispatch slice batches for all ranges concurrently (shared
     // SyncConcurrentRequest)
     SyncConcurrentRequest *slice_sync_concurrent =
@@ -1796,8 +1806,10 @@ bool DataStoreServiceClient::UpdateRangeSlices(
                                   slice_sync_concurrent);
     }
 
+    LOG(INFO) << "UpdateRangeSlices: before WaitAll slice sync";
     // 3- Wait for slice requests to complete
     slice_sync_concurrent->WaitForAll();
+    LOG(INFO) << "UpdateRangeSlices: after WaitAll slice sync";
 
     if (slice_sync_concurrent->result_.error_code() !=
         remote::DataStoreError::NO_ERROR)
@@ -1852,8 +1864,10 @@ bool DataStoreServiceClient::UpdateRangeSlices(
     DispatchRangeMetadataBatches(
         kv_range_table_name, meta_acc, meta_sync_concurrent);
 
+    LOG(INFO) << "UpdateRangeSlices: before WaitAll meta sync";
     // 5- Wait for metadata requests to complete
     meta_sync_concurrent->WaitForAll();
+    LOG(INFO) << "UpdateRangeSlices: after WaitAll meta sync";
 
     // 6- Check for errors
     if (meta_sync_concurrent->result_.error_code() !=
@@ -1879,7 +1893,9 @@ bool DataStoreServiceClient::UpdateRangeSlices(
         FlushData(kv_range_table_names, callback_data, &SyncCallback);
         if (yield_fptr != nullptr && resume_fptr != nullptr)
         {
+            LOG(INFO) << "UpdateRangeSlices: before Wait meta sync";
             callback_data->Wait(yield_fptr, resume_fptr);
+            LOG(INFO) << "UpdateRangeSlices: after Wait meta sync";
         }
         else
         {
