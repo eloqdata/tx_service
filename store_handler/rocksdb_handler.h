@@ -277,8 +277,7 @@ public:
                 std::vector<std::unique_ptr<txservice::FlushTaskEntry>>> &batch,
                 const std::function<void()> *yield_fptr = nullptr,
                 const std::function<void()> *resume_fptr = nullptr,
-                const std::function<void()> *sync_yield_fptr = nullptr,
-                const std::function<bool()> *has_other_work_fptr = nullptr)
+                const std::function<void()> *sync_yield_fptr = nullptr)
         override;
 
     /**
