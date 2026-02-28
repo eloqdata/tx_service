@@ -285,23 +285,20 @@ LocalCcShards::~LocalCcShards()
 
 void LocalCcShards::StartBackgroudWorkers()
 {
-    // Ensure FlushDataWorker count matches DataSyncWorker count
-    // Note: worker_num_ is const, so we can't modify it. We use
-    // data_sync_worker_ctx_.worker_num_ to initialize the vectors and assert
-    // they match.
-    // Initialize per-worker data structures
-    const size_t worker_num = flush_data_worker_ctx_.worker_num_;
-    // Calculate buffer size
+    // cur_flush_buffers_ sized by data_sync_worker_num (one buffer per data
+    // sync worker). pending_flush_work_ and resume_queue_ sized by flush worker
+    // num.
+    const size_t data_sync_worker_num = data_sync_worker_ctx_.worker_num_;
     const uint64_t buffer_size =
-        data_sync_mem_controller_.FlushMemoryQuota() / (worker_num);
+        data_sync_mem_controller_.FlushMemoryQuota() / data_sync_worker_num;
     cur_flush_buffers_.clear();
-    for (size_t i = 0; i < worker_num; ++i)
+    for (size_t i = 0; i < data_sync_worker_num; ++i)
     {
         cur_flush_buffers_.emplace_back(
             std::make_unique<FlushDataTask>(buffer_size));
     }
-    pending_flush_work_.resize(worker_num);
-    resume_queue_.resize(worker_num);
+    pending_flush_work_.resize(flush_data_worker_ctx_.worker_num_);
+    resume_queue_.resize(flush_data_worker_ctx_.worker_num_);
 
     // Starts flush worker threads firstly.
     for (int id = 0; id < flush_data_worker_ctx_.worker_num_; id++)
@@ -4770,11 +4767,10 @@ void LocalCcShards::DataSyncForHashPartition(
     auto updated_memory_per_partition =
         partition_number_this_core ? updated_memory / partition_number_this_core
                                    : 0;
+    const size_t data_sync_worker_id = static_cast<size_t>(
+        data_sync_task->id_ % data_sync_worker_ctx_.worker_num_);
     const size_t flush_buffer_size =
-        cur_flush_buffers_[DataSyncWorkerToFlushDataWorker(static_cast<size_t>(
-                               data_sync_task->id_ %
-                               data_sync_worker_ctx_.worker_num_))]
-            ->GetFlushBufferSize();
+        cur_flush_buffers_[data_sync_worker_id]->GetFlushBufferSize();
 
     const size_t partition_number_per_scan =
         std::max(1UL,
@@ -5779,18 +5775,19 @@ size_t LocalCcShards::DataSyncWorkerToFlushDataWorker(
 void LocalCcShards::AddFlushTaskEntry(std::unique_ptr<FlushTaskEntry> &&entry)
 {
     assert(cur_flush_buffers_.size() ==
-           static_cast<size_t>(flush_data_worker_ctx_.worker_num_));
+           static_cast<size_t>(data_sync_worker_ctx_.worker_num_));
     assert(pending_flush_work_.size() ==
            static_cast<size_t>(flush_data_worker_ctx_.worker_num_));
     assert(entry->data_sync_task_ != nullptr);
 
-    // Compute target buffer/queue: map data_sync task id to fixed flush worker
     const auto &data_sync_task = entry->data_sync_task_;
-    size_t target = DataSyncWorkerToFlushDataWorker(static_cast<size_t>(
-        data_sync_task->id_ % data_sync_worker_ctx_.worker_num_));
+    const size_t data_sync_worker_id = static_cast<size_t>(
+        data_sync_task->id_ % data_sync_worker_ctx_.worker_num_);
+    const size_t flush_target =
+        DataSyncWorkerToFlushDataWorker(data_sync_worker_id);
 
     std::unique_lock<std::mutex> worker_lk(flush_data_worker_ctx_.mux_);
-    auto &cur_flush_buffer = *cur_flush_buffers_[target];
+    auto &cur_flush_buffer = *cur_flush_buffers_[data_sync_worker_id];
 
     cur_flush_buffer.AddFlushTaskEntry(std::move(entry));
 
@@ -5798,7 +5795,7 @@ void LocalCcShards::AddFlushTaskEntry(std::unique_ptr<FlushTaskEntry> &&entry)
         cur_flush_buffer.MoveFlushData(false);
     if (flush_data_task != nullptr)
     {
-        auto &pending_flush_work = pending_flush_work_[target];
+        auto &pending_flush_work = pending_flush_work_[flush_target];
 
         // Try to merge with the last task if queue is not empty
         if (!pending_flush_work.empty())
@@ -5815,10 +5812,12 @@ void LocalCcShards::AddFlushTaskEntry(std::unique_ptr<FlushTaskEntry> &&entry)
         }
 
         // Could not merge, wait if queue is full
+        /*
         while (pending_flush_work.size() >= 2)
         {
             flush_data_worker_ctx_.cv_.wait(worker_lk);
         }
+        */
 
         // Add as new task
         pending_flush_work.emplace_back(std::move(flush_data_task));
@@ -5828,16 +5827,18 @@ void LocalCcShards::AddFlushTaskEntry(std::unique_ptr<FlushTaskEntry> &&entry)
 
 void LocalCcShards::FlushCurrentFlushBuffer()
 {
-    assert(cur_flush_buffers_.size() == flush_data_worker_ctx_.worker_num_);
-    assert(pending_flush_work_.size() == flush_data_worker_ctx_.worker_num_);
+    assert(cur_flush_buffers_.size() ==
+           static_cast<size_t>(data_sync_worker_ctx_.worker_num_));
+    assert(pending_flush_work_.size() ==
+           static_cast<size_t>(flush_data_worker_ctx_.worker_num_));
 
     std::unique_lock<std::mutex> worker_lk(flush_data_worker_ctx_.mux_);
-    // Flush all workers' buffers
-    for (int worker_idx = 0; worker_idx < flush_data_worker_ctx_.worker_num_;
-         ++worker_idx)
+    for (int i = 0; i < data_sync_worker_ctx_.worker_num_; ++i)
     {
-        auto &cur_flush_buffer = *cur_flush_buffers_[worker_idx];
-        auto &pending_flush_work = pending_flush_work_[worker_idx];
+        auto &cur_flush_buffer = *cur_flush_buffers_[i];
+        size_t flush_target =
+            DataSyncWorkerToFlushDataWorker(static_cast<size_t>(i));
+        auto &pending_flush_work = pending_flush_work_[flush_target];
 
         std::unique_ptr<FlushDataTask> flush_data_task =
             cur_flush_buffer.MoveFlushData(true);
@@ -5849,6 +5850,9 @@ void LocalCcShards::FlushCurrentFlushBuffer()
                 auto &last_task = pending_flush_work.back();
                 if (last_task->MergeFrom(std::move(flush_data_task)))
                 {
+                    LOG(INFO) << "FlushCurrentFlushBuffer: Merge successful, "
+                                 "task was "
+                                 "merged into last_task";
                     // Merge successful, task was merged into last_task
                     flush_data_worker_ctx_.cv_.notify_all();
                     continue;
@@ -6102,16 +6106,15 @@ void LocalCcShards::FlushDataWorker(size_t worker_idx)
     assert(worker_idx <
            static_cast<size_t>(flush_data_worker_ctx_.worker_num_));
     assert(worker_idx < static_cast<size_t>(pending_flush_work_.size()));
-    assert(worker_idx < static_cast<size_t>(cur_flush_buffers_.size()));
     assert(worker_idx < static_cast<size_t>(resume_queue_.size()));
 
     auto &pending_flush_work = pending_flush_work_[worker_idx];
-    auto &cur_flush_buffer = *cur_flush_buffers_[worker_idx];
     auto &resume_queue = resume_queue_[worker_idx];
 
     using clock = std::chrono::steady_clock;
     using continuation = boost::context::continuation;
-    size_t previous_flush_size = 0;
+    std::vector<size_t> previous_flush_sizes(data_sync_worker_ctx_.worker_num_,
+                                             0);
     auto previous_size_update_time = clock::now();
 
     std::unique_lock<std::mutex> flush_worker_lk(flush_data_worker_ctx_.mux_);
@@ -6206,10 +6209,10 @@ void LocalCcShards::FlushDataWorker(size_t worker_idx)
             flush_worker_lk,
             10s,
             [this,
+             worker_idx,
              &pending_flush_work,
              &resume_queue,
-             &cur_flush_buffer,
-             &previous_flush_size,
+             &previous_flush_sizes,
              &previous_size_update_time]
             {
                 if (!pending_flush_work.empty() || !resume_queue.empty() ||
@@ -6220,42 +6223,41 @@ void LocalCcShards::FlushDataWorker(size_t worker_idx)
                 auto current_time = std::chrono::steady_clock::now();
                 if (current_time - previous_size_update_time > 10s)
                 {
-                    size_t current_flush_size =
-                        cur_flush_buffer.GetPendingFlushSize();
-                    bool flush_size_changed =
-                        current_flush_size != previous_flush_size;
-                    previous_flush_size = current_flush_size;
                     previous_size_update_time = current_time;
-                    if (!flush_size_changed && current_flush_size > 0)
+                    for (int i = 0; i < data_sync_worker_ctx_.worker_num_; ++i)
                     {
-                        // data sync might be stuck due to lock conflict with
-                        // DDL. Flush current flush buffer to release catalog
-                        // read lock held by ongoing data sync tx, which might
-                        // block the DDL.
-                        std::unique_ptr<FlushDataTask> flush_data_task =
-                            cur_flush_buffer.MoveFlushData(true);
-                        if (flush_data_task != nullptr)
+                        if (DataSyncWorkerToFlushDataWorker(
+                                static_cast<size_t>(i)) != worker_idx)
                         {
-                            // Try to merge with the last task if queue is not
-                            // empty Note: flush_worker_lk is already held here
-                            // (inside condition variable predicate)
-                            if (!pending_flush_work.empty())
+                            continue;
+                        }
+                        size_t current_flush_size =
+                            cur_flush_buffers_[i]->GetPendingFlushSize();
+                        bool flush_size_changed =
+                            current_flush_size != previous_flush_sizes[i];
+                        previous_flush_sizes[i] = current_flush_size;
+                        if (!flush_size_changed && current_flush_size > 0)
+                        {
+                            // data sync might be stuck due to lock conflict
+                            // with DDL. Flush buffer to release catalog read
+                            // lock held by ongoing data sync tx.
+                            std::unique_ptr<FlushDataTask> flush_data_task =
+                                cur_flush_buffers_[i]->MoveFlushData(true);
+                            if (flush_data_task != nullptr)
                             {
-                                auto &last_task = pending_flush_work.back();
-                                if (last_task->MergeFrom(
-                                        std::move(flush_data_task)))
+                                if (!pending_flush_work.empty())
                                 {
-                                    // Merge successful, task was merged into
-                                    // last_task
-                                    return true;
+                                    auto &last_task = pending_flush_work.back();
+                                    if (last_task->MergeFrom(
+                                            std::move(flush_data_task)))
+                                    {
+                                        return true;
+                                    }
                                 }
+                                pending_flush_work.emplace_back(
+                                    std::move(flush_data_task));
+                                return true;
                             }
-
-                            // Add as new task. We just checked that
-                            // pending_flush_work is empty,
-                            pending_flush_work.emplace_back(
-                                std::move(flush_data_task));
-                            return true;
                         }
                     }
                 }
