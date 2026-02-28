@@ -329,7 +329,8 @@ public:
     bool UpdateRangeSlices(const std::vector<txservice::UpdateRangeSlicesReq>
                                &update_range_slice_reqs,
                            const std::function<void()> *yield_fptr = nullptr,
-                           const std::function<void()> *resume_fptr = nullptr)
+                           const std::function<void()> *resume_fptr = nullptr,
+                           const std::function<void()> *sync_yield_fptr = nullptr)
         override;
 
     bool UpdateRangeSlices(const txservice::TableName &table_name,

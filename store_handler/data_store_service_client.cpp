@@ -1729,7 +1729,8 @@ void DataStoreServiceClient::DispatchRangeMetadataBatches(
 bool DataStoreServiceClient::UpdateRangeSlices(
     const std::vector<txservice::UpdateRangeSlicesReq> &update_range_slice_reqs,
     const std::function<void()> *yield_fptr,
-    const std::function<void()> *resume_fptr)
+    const std::function<void()> *resume_fptr,
+    const std::function<void()> *sync_yield_fptr)
 {
     if (update_range_slice_reqs.empty())
     {
@@ -1741,6 +1742,9 @@ bool DataStoreServiceClient::UpdateRangeSlices(
     RangeMetadataAccumulator meta_acc;
 
     auto start_time = std::chrono::steady_clock::now();
+
+    constexpr size_t MAX_ITERATIONS_WITHOUT_YIELD = 10;
+    size_t iterations_since_yield = 0;
 
     // 1- First pass: Prepare slice batches and accumulate metadata for all
     // ranges
@@ -1777,6 +1781,18 @@ bool DataStoreServiceClient::UpdateRangeSlices(
                                    req.ckpt_ts_,
                                    segment_cnt,
                                    meta_acc);
+
+        if (sync_yield_fptr != nullptr)
+        {
+            ++iterations_since_yield;
+            if (iterations_since_yield >= MAX_ITERATIONS_WITHOUT_YIELD)
+            {
+                LOG(INFO) << "UpdateRangeSlices: prepare Before sync yield";
+                (*sync_yield_fptr)();
+                LOG(INFO) << "UpdateRangeSlices: prepare After sync yield";
+                iterations_since_yield = 0;
+            }
+        }
     }
 
     auto end_time = std::chrono::steady_clock::now();
@@ -1797,13 +1813,26 @@ bool DataStoreServiceClient::UpdateRangeSlices(
     {
         slice_sync_concurrent->SetCoroCallbacks(yield_fptr, resume_fptr);
     }
-    for (const auto &[kv_partition_id, slice_plans] : slice_plans)
+    iterations_since_yield = 0;
+    for (const auto &[kv_partition_id, plans] : slice_plans)
     {
         // Call DispatchRangeSliceBatches once with all plans
         DispatchRangeSliceBatches(kv_range_slices_table_name,
                                   kv_partition_id,
-                                  slice_plans,
+                                  plans,
                                   slice_sync_concurrent);
+
+        if (sync_yield_fptr != nullptr)
+        {
+            ++iterations_since_yield;
+            if (iterations_since_yield >= MAX_ITERATIONS_WITHOUT_YIELD)
+            {
+                LOG(INFO) << "UpdateRangeSlices: Before sync yield";
+                (*sync_yield_fptr)();
+                LOG(INFO) << "UpdateRangeSlices: After sync yield";
+                iterations_since_yield = 0;
+            }
+        }
     }
 
     LOG(INFO) << "UpdateRangeSlices: before WaitAll slice sync";

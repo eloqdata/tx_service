@@ -233,10 +233,12 @@ public:
     virtual bool UpdateRangeSlices(
         const std::vector<UpdateRangeSlicesReq> &update_range_slice_reqs,
         const std::function<void()> *yield_fptr = nullptr,
-        const std::function<void()> *resume_fptr = nullptr)
+        const std::function<void()> *resume_fptr = nullptr,
+        const std::function<void()> *sync_yield_fptr = nullptr)
     {
         (void)yield_fptr;
         (void)resume_fptr;
+        (void)sync_yield_fptr;
         return false;
     }
 
