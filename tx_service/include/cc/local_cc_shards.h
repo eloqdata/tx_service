@@ -2526,11 +2526,9 @@ private:
     // Per-worker flush task queues. Each FlushDataWorker processes its
     // corresponding queue.
     std::vector<std::deque<std::unique_ptr<FlushDataTask>>> pending_flush_work_;
-    // Per-worker queues of coroutine contexts ready to resume.
-    // resume_queue_: async resume (resume_fn, e.g. PutAll Wait done).
-    // sync_yield_queue_: voluntary sync yield (sync_yield_func), lower priority.
+    // Per-worker queues of coroutine contexts ready to resume (resume_fn or
+    // sync_yield_func).
     std::vector<std::deque<std::shared_ptr<CoroCtx>>> resume_queue_;
-    std::vector<std::deque<std::shared_ptr<CoroCtx>>> sync_yield_queue_;
 
 #ifndef NDEBUG
     boost::context::protected_fixedsize_stack flush_coro_stack_allocator_{
