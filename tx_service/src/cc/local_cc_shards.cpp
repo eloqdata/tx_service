@@ -302,6 +302,7 @@ void LocalCcShards::StartBackgroudWorkers()
     }
     pending_flush_work_.resize(worker_num);
     resume_queue_.resize(worker_num);
+    sync_yield_queue_.resize(worker_num);
 
     // Starts flush worker threads firstly.
     for (int id = 0; id < flush_data_worker_ctx_.worker_num_; id++)
@@ -5917,7 +5918,8 @@ bool LocalCcShards::HasOtherWorkToDo(size_t worker_idx)
 {
     std::lock_guard<std::mutex> lk(flush_data_worker_ctx_.mux_);
     return !resume_queue_[worker_idx].empty() ||
-           !pending_flush_work_[worker_idx].empty();
+           !pending_flush_work_[worker_idx].empty() ||
+           !sync_yield_queue_[worker_idx].empty();
 }
 
 void LocalCcShards::FlushDataImpl(FlushDataTask *cur_work,
@@ -5942,10 +5944,13 @@ void LocalCcShards::FlushDataImpl(FlushDataTask *cur_work,
 
     if (succ)
     {
-        std::function<bool()> has_other_work =
-            [this, worker_idx]() { return HasOtherWorkToDo(worker_idx); };
-        succ = store_hd_->PutAll(flush_task_entries, &yield_fn, &resume_fn,
-                                 &sync_yield_func, &has_other_work);
+        std::function<bool()> has_other_work = [this, worker_idx]()
+        { return HasOtherWorkToDo(worker_idx); };
+        succ = store_hd_->PutAll(flush_task_entries,
+                                 &yield_fn,
+                                 &resume_fn,
+                                 &sync_yield_func,
+                                 &has_other_work);
         if (!succ)
         {
             LOG(ERROR) << "DataSync PutAll flush to kv "
@@ -6037,8 +6042,10 @@ void LocalCcShards::FlushDataImpl(FlushDataTask *cur_work,
                 {
                     iterations_since_yield++;
                     auto now = std::chrono::steady_clock::now();
-                    bool should_sync_yield = HasOtherWorkToDo(worker_idx) &&
-                        (iterations_since_yield >= MAX_ITERATIONS_WITHOUT_YIELD ||
+                    bool should_sync_yield =
+                        HasOtherWorkToDo(worker_idx) &&
+                        (iterations_since_yield >=
+                             MAX_ITERATIONS_WITHOUT_YIELD ||
                          (now - last_yield_time) >= MAX_TIME_WITHOUT_YIELD);
 
                     UpdateCceCkptTsCc update_cce_req(
@@ -6071,7 +6078,8 @@ void LocalCcShards::FlushDataImpl(FlushDataTask *cur_work,
                         now = std::chrono::steady_clock::now();
                         bool should_sync_yield_after_wait =
                             HasOtherWorkToDo(worker_idx) &&
-                            (iterations_since_yield >= MAX_ITERATIONS_WITHOUT_YIELD ||
+                            (iterations_since_yield >=
+                                 MAX_ITERATIONS_WITHOUT_YIELD ||
                              (now - last_yield_time) >= MAX_TIME_WITHOUT_YIELD);
                         if (should_sync_yield_after_wait)
                         {
@@ -6148,10 +6156,12 @@ void LocalCcShards::FlushDataWorker(size_t worker_idx)
     assert(worker_idx < static_cast<size_t>(pending_flush_work_.size()));
     assert(worker_idx < static_cast<size_t>(cur_flush_buffers_.size()));
     assert(worker_idx < static_cast<size_t>(resume_queue_.size()));
+    assert(worker_idx < static_cast<size_t>(sync_yield_queue_.size()));
 
     auto &pending_flush_work = pending_flush_work_[worker_idx];
     auto &cur_flush_buffer = *cur_flush_buffers_[worker_idx];
     auto &resume_queue = resume_queue_[worker_idx];
+    auto &sync_yield_queue = sync_yield_queue_[worker_idx];
 
     using clock = std::chrono::steady_clock;
     using continuation = boost::context::continuation;
@@ -6173,17 +6183,100 @@ void LocalCcShards::FlushDataWorker(size_t worker_idx)
             continue;
         }
 
+        if (!pending_flush_work.empty())
+        {
+            std::unique_ptr<FlushDataTask> cur_work =
+                std::move(pending_flush_work.front());
+            pending_flush_work.pop_front();
+            flush_data_worker_ctx_.cv_.notify_all();
+            flush_worker_lk.unlock();
+
+            auto ctx = std::make_shared<CoroCtx>();
+            ctx->task_ = std::move(cur_work);
+            ctx->coro_ = boost::context::callcc(
+                std::allocator_arg,
+                flush_coro_stack_allocator_,
+                [this, ctx, worker_idx](continuation &&sink)
+                {
+                    ctx->yield_fn = [&sink]()
+                    {
+                        LOG(INFO) << "CoroCtx yield_fn";
+                        sink = sink.resume();
+                    };
+                    ctx->sync_yield_func =
+                        [&sink,
+                         weak_ctx = std::weak_ptr<CoroCtx>(ctx),
+                         this,
+                         worker_idx]()
+                    {
+                        if (auto c = weak_ctx.lock())
+                        {
+                            {
+                                std::lock_guard<std::mutex> lk(
+                                    flush_data_worker_ctx_.mux_);
+                                sync_yield_queue_[worker_idx].push_back(
+                                    std::move(c));
+                                flush_data_worker_ctx_.cv_.notify_all();
+                            }
+                            sink = sink.resume();
+                        }
+                    };
+                    ctx->resume_fn = [this,
+                                      worker_idx,
+                                      weak_ctx = std::weak_ptr<CoroCtx>(ctx)]()
+                    {
+                        if (auto c = weak_ctx.lock())
+                        {
+                            LOG(INFO)
+                                << "CoroCtx resume_fn: coro ctx = " << c.get();
+                            std::lock_guard<std::mutex> lk(
+                                flush_data_worker_ctx_.mux_);
+                            resume_queue_[worker_idx].push_back(std::move(c));
+                            flush_data_worker_ctx_.cv_.notify_all();
+                        }
+                        else
+                        {
+                            LOG(FATAL)
+                                << "CoroCtx resume_fn: weak_ctx is expired";
+                        }
+                    };
+                    FlushDataImpl(ctx->task_.get(),
+                                  worker_idx,
+                                  ctx->sync_yield_func,
+                                  ctx->yield_fn,
+                                  ctx->resume_fn);
+                    return std::move(sink);
+                });
+
+            flush_worker_lk.lock();
+            continue;
+        }
+
+        if (!sync_yield_queue.empty())
+        {
+            std::shared_ptr<CoroCtx> ctx = std::move(sync_yield_queue.front());
+            sync_yield_queue.pop_front();
+            flush_worker_lk.unlock();
+
+            ctx->coro_ = ctx->coro_.resume();
+
+            flush_worker_lk.lock();
+            continue;
+        }
+
         flush_data_worker_ctx_.cv_.wait_for(
             flush_worker_lk,
             10s,
             [this,
              &pending_flush_work,
              &resume_queue,
+             &sync_yield_queue,
              &cur_flush_buffer,
              &previous_flush_size,
              &previous_size_update_time]
             {
                 if (!pending_flush_work.empty() || !resume_queue.empty() ||
+                    !sync_yield_queue.empty() ||
                     flush_data_worker_ctx_.status_ == WorkerStatus::Terminated)
                 {
                     return true;
@@ -6234,74 +6327,11 @@ void LocalCcShards::FlushDataWorker(size_t worker_idx)
                 return false;
             });
 
-        if (pending_flush_work.empty())
-        {
-            continue;
-        }
-
-        std::unique_ptr<FlushDataTask> cur_work =
-            std::move(pending_flush_work.front());
-        pending_flush_work.pop_front();
-        flush_data_worker_ctx_.cv_.notify_all();
-        flush_worker_lk.unlock();
-
-        auto ctx = std::make_shared<CoroCtx>();
-        ctx->task_ = std::move(cur_work);
-        ctx->coro_ = boost::context::callcc(
-            std::allocator_arg,
-            flush_coro_stack_allocator_,
-            [this, ctx, worker_idx](continuation &&sink)
-            {
-                ctx->yield_fn = [&sink]()
-                {
-                    LOG(INFO) << "CoroCtx yield_fn";
-                    sink = sink.resume();
-                };
-                ctx->sync_yield_func = [&sink,
-                                        weak_ctx = std::weak_ptr<CoroCtx>(ctx),
-                                        this,
-                                        worker_idx]()
-                {
-                    if (auto c = weak_ctx.lock())
-                    {
-                        {
-                            std::lock_guard<std::mutex> lk(
-                                flush_data_worker_ctx_.mux_);
-                            resume_queue_[worker_idx].push_back(std::move(c));
-                            flush_data_worker_ctx_.cv_.notify_all();
-                        }
-                        sink = sink.resume();
-                    }
-                };
-                ctx->resume_fn =
-                    [this, worker_idx, weak_ctx = std::weak_ptr<CoroCtx>(ctx)]()
-                {
-                    if (auto c = weak_ctx.lock())
-                    {
-                        LOG(INFO)
-                            << "CoroCtx resume_fn: coro ctx = " << c.get();
-                        std::lock_guard<std::mutex> lk(
-                            flush_data_worker_ctx_.mux_);
-                        resume_queue_[worker_idx].push_back(std::move(c));
-                        flush_data_worker_ctx_.cv_.notify_all();
-                    }
-                    else
-                    {
-                        LOG(FATAL) << "CoroCtx resume_fn: weak_ctx is expired";
-                    }
-                };
-                FlushDataImpl(ctx->task_.get(),
-                              worker_idx,
-                              ctx->sync_yield_func,
-                              ctx->yield_fn,
-                              ctx->resume_fn);
-                return std::move(sink);
-            });
-
-        flush_worker_lk.lock();
+        continue;
     }
 
-    while (!resume_queue.empty() || !pending_flush_work.empty())
+    while (!resume_queue.empty() || !pending_flush_work.empty() ||
+           !sync_yield_queue.empty())
     {
         if (!resume_queue.empty())
         {
@@ -6313,56 +6343,73 @@ void LocalCcShards::FlushDataWorker(size_t worker_idx)
             continue;
         }
 
-        std::unique_ptr<FlushDataTask> cur_work =
-            std::move(pending_flush_work.front());
-        pending_flush_work.pop_front();
-        flush_data_worker_ctx_.cv_.notify_all();
-        flush_worker_lk.unlock();
+        if (!pending_flush_work.empty())
+        {
+            std::unique_ptr<FlushDataTask> cur_work =
+                std::move(pending_flush_work.front());
+            pending_flush_work.pop_front();
+            flush_data_worker_ctx_.cv_.notify_all();
+            flush_worker_lk.unlock();
 
-        auto ctx = std::make_shared<CoroCtx>();
-        ctx->task_ = std::move(cur_work);
-        ctx->coro_ = boost::context::callcc(
-            std::allocator_arg,
-            flush_coro_stack_allocator_,
-            [this, ctx, worker_idx](continuation &&sink)
-            {
-                ctx->yield_fn = [&sink]() { sink = sink.resume(); };
-                ctx->sync_yield_func = [&sink,
-                                        weak_ctx = std::weak_ptr<CoroCtx>(ctx),
-                                        this,
-                                        worker_idx]()
+            auto ctx = std::make_shared<CoroCtx>();
+            ctx->task_ = std::move(cur_work);
+            ctx->coro_ = boost::context::callcc(
+                std::allocator_arg,
+                flush_coro_stack_allocator_,
+                [this, ctx, worker_idx](continuation &&sink)
                 {
-                    if (auto c = weak_ctx.lock())
+                    ctx->yield_fn = [&sink]() { sink = sink.resume(); };
+                    ctx->sync_yield_func =
+                        [&sink,
+                         weak_ctx = std::weak_ptr<CoroCtx>(ctx),
+                         this,
+                         worker_idx]()
                     {
+                        if (auto c = weak_ctx.lock())
+                        {
+                            {
+                                std::lock_guard<std::mutex> lk(
+                                    flush_data_worker_ctx_.mux_);
+                                sync_yield_queue_[worker_idx].push_back(
+                                    std::move(c));
+                                flush_data_worker_ctx_.cv_.notify_all();
+                            }
+                            sink = sink.resume();
+                        }
+                    };
+                    ctx->resume_fn = [this,
+                                      worker_idx,
+                                      weak_ctx = std::weak_ptr<CoroCtx>(ctx)]()
+                    {
+                        if (auto c = weak_ctx.lock())
                         {
                             std::lock_guard<std::mutex> lk(
                                 flush_data_worker_ctx_.mux_);
                             resume_queue_[worker_idx].push_back(std::move(c));
                             flush_data_worker_ctx_.cv_.notify_all();
                         }
-                        sink = sink.resume();
-                    }
-                };
-                ctx->resume_fn =
-                    [this, worker_idx, weak_ctx = std::weak_ptr<CoroCtx>(ctx)]()
-                {
-                    if (auto c = weak_ctx.lock())
-                    {
-                        std::lock_guard<std::mutex> lk(
-                            flush_data_worker_ctx_.mux_);
-                        resume_queue_[worker_idx].push_back(std::move(c));
-                        flush_data_worker_ctx_.cv_.notify_all();
-                    }
-                };
-                FlushDataImpl(ctx->task_.get(),
-                              worker_idx,
-                              ctx->sync_yield_func,
-                              ctx->yield_fn,
-                              ctx->resume_fn);
-                return std::move(sink);
-            });
+                    };
+                    FlushDataImpl(ctx->task_.get(),
+                                  worker_idx,
+                                  ctx->sync_yield_func,
+                                  ctx->yield_fn,
+                                  ctx->resume_fn);
+                    return std::move(sink);
+                });
 
-        flush_worker_lk.lock();
+            flush_worker_lk.lock();
+            continue;
+        }
+
+        if (!sync_yield_queue.empty())
+        {
+            std::shared_ptr<CoroCtx> ctx = std::move(sync_yield_queue.front());
+            sync_yield_queue.pop_front();
+            flush_worker_lk.unlock();
+            ctx->coro_ = ctx->coro_.resume();
+            flush_worker_lk.lock();
+            continue;
+        }
     }
 }
 
