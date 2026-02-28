@@ -60,14 +60,12 @@ public:
                     &flush_task,
                 const std::function<void()> *yield_fptr = nullptr,
                 const std::function<void()> *resume_fptr = nullptr,
-                const std::function<void()> *sync_yield_fptr = nullptr,
-                const std::function<bool()> *has_other_work_fptr = nullptr)
+                const std::function<void()> *sync_yield_fptr = nullptr)
         override
     {
         (void)yield_fptr;
         (void)resume_fptr;
         (void)sync_yield_fptr;
-        (void)has_other_work_fptr;
         assert(false);
         // for (const auto &ref : batch)
         // {

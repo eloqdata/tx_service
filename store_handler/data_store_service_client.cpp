@@ -305,11 +305,9 @@ bool DataStoreServiceClient::PutAll(
         &flush_task,
     const std::function<void()> *yield_fptr,
     const std::function<void()> *resume_fptr,
-    const std::function<void()> *sync_yield_fptr,
-    const std::function<bool()> *has_other_work_fptr)
+    const std::function<void()> *sync_yield_fptr)
 {
-    return PutAllImpl(flush_task, yield_fptr, resume_fptr, sync_yield_fptr,
-                      has_other_work_fptr);
+    return PutAllImpl(flush_task, yield_fptr, resume_fptr, sync_yield_fptr);
 }
 
 bool DataStoreServiceClient::PutAllImpl(
@@ -318,8 +316,7 @@ bool DataStoreServiceClient::PutAllImpl(
         &flush_task,
     const std::function<void()> *yield_fptr,
     const std::function<void()> *resume_fptr,
-    const std::function<void()> *sync_yield_fptr,
-    const std::function<bool()> *has_other_work_fptr)
+    const std::function<void()> *sync_yield_fptr)
 {
     DLOG(INFO) << "DataStoreServiceClient::PutAll called with "
                << flush_task.size() << " tables to flush.";
@@ -475,10 +472,12 @@ bool DataStoreServiceClient::PutAllImpl(
                 first_batch.parts_cnt_per_key,
                 first_batch.parts_cnt_per_record);
             batch_writes_since_yield++;
-            if (sync_yield_fptr != nullptr && has_other_work_fptr != nullptr &&
-                batch_writes_since_yield >= MAX_BATCH_WRITES_WITHOUT_YIELD &&
-                (*has_other_work_fptr)())
+            if (sync_yield_fptr != nullptr &&
+                batch_writes_since_yield >= MAX_BATCH_WRITES_WITHOUT_YIELD)
             {
+                LOG(INFO) << "PutAllImpl: Before sync yield, this = "
+                          << sync_putall << ", batch_writes_since_yield = "
+                          << batch_writes_since_yield;
                 (*sync_yield_fptr)();
                 batch_writes_since_yield = 0;
             }
