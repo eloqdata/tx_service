@@ -251,15 +251,6 @@ public:
             }
             assert(ccm != nullptr);
             assert(ccs.core_id_ == ccm->shard_->core_id_);
-            if (!table_name_->IsMeta() && !ccm->RangeSizesInited())
-            {
-                TableName range_table_name(table_name_->StringView(),
-                                           TableType::RangePartition,
-                                           table_name_->Engine());
-                absl::flat_hash_map<uint32_t, size_t> range_sizes =
-                    ccs.GetStoreRangeSizes(range_table_name, node_group_id_);
-                ccm->InitRangeSizes(std::move(range_sizes));
-            }
             return ccm->Execute(*typed_req);
         }
         else
@@ -268,15 +259,6 @@ public:
             // execution blocked by lock.
             assert(ccm_ != nullptr);
             assert(ccs.core_id_ == ccm_->shard_->core_id_);
-            if (!table_name_->IsMeta() && !ccm_->RangeSizesInited())
-            {
-                TableName range_table_name(table_name_->StringView(),
-                                           TableType::RangePartition,
-                                           table_name_->Engine());
-                absl::flat_hash_map<uint32_t, size_t> range_sizes =
-                    ccs.GetStoreRangeSizes(range_table_name, node_group_id_);
-                ccm_->InitRangeSizes(std::move(range_sizes));
-            }
             return ccm_->Execute(*typed_req);
         }
     }
@@ -2572,15 +2554,6 @@ public:
                 ccm_ = ccm;
             }
             assert(ccm != nullptr);
-            if (!table_name_->IsMeta() && !ccm->RangeSizesInited())
-            {
-                TableName range_table_name(table_name_->StringView(),
-                                           TableType::RangePartition,
-                                           table_name_->Engine());
-                absl::flat_hash_map<uint32_t, size_t> range_sizes =
-                    ccs.GetStoreRangeSizes(range_table_name, node_group_id_);
-                ccm->InitRangeSizes(std::move(range_sizes));
-            }
             return ccm->Execute(*this);
         }
         else
@@ -2588,15 +2561,6 @@ public:
             // non parallel request which is executed again, e.g. initial
             // execution blocked by lock.
             assert(ccm_ != nullptr);
-            if (!table_name_->IsMeta() && !ccm_->RangeSizesInited())
-            {
-                TableName range_table_name(table_name_->StringView(),
-                                           TableType::RangePartition,
-                                           table_name_->Engine());
-                absl::flat_hash_map<uint32_t, size_t> range_sizes =
-                    ccs.GetStoreRangeSizes(range_table_name, node_group_id_);
-                ccm_->InitRangeSizes(std::move(range_sizes));
-            }
             return ccm_->Execute(*this);
         }
     }
@@ -5066,15 +5030,6 @@ public:
             {
                 table_schema_ = ccm_->GetTableSchema();
             }
-        }
-        if (!table_name_->IsMeta() && !ccm_->RangeSizesInited())
-        {
-            TableName range_table_name(table_name_->StringView(),
-                                       TableType::RangePartition,
-                                       table_name_->Engine());
-            absl::flat_hash_map<uint32_t, size_t> range_sizes =
-                ccs.GetStoreRangeSizes(range_table_name, node_group_id_);
-            ccm_->InitRangeSizes(std::move(range_sizes));
         }
         return ccm_->Execute(*this);
     }
@@ -7911,16 +7866,6 @@ public:
         }
 
         assert(ccm != nullptr);
-        assert(!table_name_->IsMeta());
-        if (!ccm->RangeSizesInited())
-        {
-            TableName range_table_name(table_name_->StringView(),
-                                       TableType::RangePartition,
-                                       table_name_->Engine());
-            absl::flat_hash_map<uint32_t, size_t> range_sizes =
-                ccs.GetStoreRangeSizes(range_table_name, node_group_id_);
-            ccm->InitRangeSizes(std::move(range_sizes));
-        }
         return ccm->Execute(*this);
     }
 

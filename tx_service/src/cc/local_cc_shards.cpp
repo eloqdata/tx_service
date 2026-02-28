@@ -1036,11 +1036,7 @@ void LocalCcShards::CreateSplitRangeRecoveryTx(
             }
             else
             {
-                StoreRange *store_range = range_entry->RangeSlices();
-                assert(store_range);
-                size_t range_size = store_range->PostCkptSize();
-                range_entry->UpdateLastDataSyncTS(
-                    0, static_cast<uint32_t>(range_size));
+                range_entry->UpdateLastDataSyncTS(0);
                 range_entry->UnPinStoreRange();
                 txservice::CommitTx(txm);
             }
@@ -1103,8 +1099,7 @@ void LocalCcShards::InitTableRanges(const TableName &range_table_name,
                 GetCatalogFactory(range_table_name.Engine())
                     ->CreateTableRange(std::move(range_start_key),
                                        range_entry.version_ts_,
-                                       range_entry.partition_id_,
-                                       range_entry.size_);
+                                       range_entry.partition_id_);
             range_it = ranges
                            .try_emplace(new_range->RangeStartTxKey(),
                                         std::move(new_range))
@@ -1271,31 +1266,6 @@ LocalCcShards::GetTableRangeIdsForATableInternal(
     }
     auto ng_it = table_it->second.find(ng_id);
     return ng_it == table_it->second.end() ? nullptr : &ng_it->second;
-}
-
-absl::flat_hash_map<uint32_t, size_t> LocalCcShards::GetStoreRangeSizes(
-    const TableName &range_table_name,
-    const NodeGroupId ng_id,
-    const uint16_t core_id)
-{
-    absl::flat_hash_map<uint32_t, size_t> range_sizes;
-    std::shared_lock<FastMetaDataMutex> lk(fast_meta_data_mux_);
-    std::unordered_map<uint32_t, TableRangeEntry *> *range_ids =
-        GetTableRangeIdsForATableInternal(range_table_name, ng_id);
-    assert(range_ids != nullptr);
-    for (const auto &[partition_id, entry] : *range_ids)
-    {
-        BucketInfo *owner =
-            GetRangeOwnerInternal(static_cast<int32_t>(partition_id), ng_id);
-        NodeGroupId range_owner = owner->BucketOwner();
-        uint16_t range_shard_idx =
-            static_cast<uint16_t>(partition_id % Count());
-        if (range_owner == ng_id && range_shard_idx == core_id)
-        {
-            range_sizes.emplace(partition_id, entry->StoreRangeSize());
-        }
-    }
-    return range_sizes;
 }
 
 void LocalCcShards::CleanTableRange(const TableName &table_name,
@@ -3291,11 +3261,7 @@ void LocalCcShards::PostProcessFlushTaskEntries(
             {
                 if (!task->during_split_range_)
                 {
-                    StoreRange *store_range = range_entry->RangeSlices();
-                    assert(store_range);
-                    size_t range_size = store_range->PostCkptSize();
-                    range_entry->UpdateLastDataSyncTS(
-                        task->data_sync_ts_, static_cast<uint32_t>(range_size));
+                    range_entry->UpdateLastDataSyncTS(task->data_sync_ts_);
                     range_entry->UnPinStoreRange();
                     // Commit the data sync txm
                     txservice::CommitTx(entry->data_sync_txm_);
@@ -3450,11 +3416,7 @@ void LocalCcShards::PostProcessRangePartitionDataSyncTask(
         {
             if (!task->during_split_range_)
             {
-                StoreRange *store_range = range_entry->RangeSlices();
-                assert(store_range);
-                size_t range_size = store_range->PostCkptSize();
-                range_entry->UpdateLastDataSyncTS(
-                    task->data_sync_ts_, static_cast<uint32_t>(range_size));
+                range_entry->UpdateLastDataSyncTS(task->data_sync_ts_);
                 range_entry->UnPinStoreRange();
                 // Commit the data sync txm
                 txservice::CommitTx(data_sync_txm);
@@ -3964,12 +3926,7 @@ void LocalCcShards::DataSyncForRangePartition(
             txservice::CommitTx(data_sync_txm);
 
             // Update the task status for this range.
-            StoreRange *store_range = range_entry->RangeSlices();
-            assert(store_range);
-            size_t range_size = store_range->PostCkptSize();
-            range_entry->UpdateLastDataSyncTS(
-                data_sync_task->data_sync_ts_,
-                static_cast<uint32_t>(range_size));
+            range_entry->UpdateLastDataSyncTS(data_sync_task->data_sync_ts_);
             // Generally, the StoreRange will be pinned only when there are data
             // items in the range that needs to be ckpted.
             if (scan_delta_size_cc.StoreRangePtr() != nullptr)
@@ -5748,12 +5705,7 @@ void LocalCcShards::SplitFlushRange(
         return;
     }
 
-    StoreRange *store_range = range_entry->RangeSlices();
-    assert(store_range);
-    size_t range_size = store_range->PostCkptSize();
-    range_entry->UpdateLastDataSyncTS(data_sync_task->data_sync_ts_,
-                                      static_cast<uint32_t>(range_size));
-
+    range_entry->UpdateLastDataSyncTS(data_sync_task->data_sync_ts_);
     range_entry->UnPinStoreRange();
 
     data_sync_task->SetFinish();

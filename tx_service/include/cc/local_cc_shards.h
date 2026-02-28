@@ -985,11 +985,7 @@ public:
 
             if (last_sync_ts > 0)
             {
-                StoreRange *store_range = new_range_ptr->RangeSlices();
-                size_t range_size =
-                    store_range != nullptr ? store_range->PostCkptSize() : 0;
-                new_range_ptr->UpdateLastDataSyncTS(
-                    last_sync_ts, static_cast<uint32_t>(range_size));
+                new_range_ptr->UpdateLastDataSyncTS(last_sync_ts);
             }
 
             return new_range_ptr;
@@ -1052,17 +1048,6 @@ public:
      */
     std::map<TxKey, TableRangeEntry::uptr> *GetTableRangesForATable(
         const TableName &range_table_name, const NodeGroupId ng_id);
-
-    /**
-     * Returns partition_id -> StoreRangeSize() for ranges that belong to ng_id
-     * and the given core_id (partition_id % Count() == core_id).
-     * Caller must hold shared lock on table range meta if needed; this method
-     * takes shared_lock on fast_meta_data_mux_.
-     */
-    absl::flat_hash_map<uint32_t, size_t> GetStoreRangeSizes(
-        const TableName &range_table_name,
-        const NodeGroupId ng_id,
-        const uint16_t core_id);
 
     /**
      * @brief Upload new range info into range_info_ in TableRangeEntry

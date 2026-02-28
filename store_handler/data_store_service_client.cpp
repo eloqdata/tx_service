@@ -1038,6 +1038,30 @@ void DataStoreServiceClient::FetchRangeSlices(
          &FetchRangeSlicesCallback);
 }
 
+void DataStoreServiceClient::FetchTableRangeSize(
+    txservice::FetchTableRangeSizeCc *fetch_cc)
+{
+    txservice::TableName range_table_name(fetch_cc->table_name_->StringView(),
+                                          txservice::TableType::RangePartition,
+                                          fetch_cc->table_name_->Engine());
+
+    int32_t kv_partition_id =
+        KvPartitionIdOfRangeSlices(range_table_name, fetch_cc->partition_id_);
+    uint32_t shard_id = GetShardIdByPartitionId(kv_partition_id, false);
+
+    auto catalog_factory = GetCatalogFactory(range_table_name.Engine());
+    assert(catalog_factory != nullptr);
+    fetch_cc->kv_start_key_ =
+        EncodeRangeKey(catalog_factory, range_table_name, fetch_cc->start_key_);
+
+    Read(kv_range_table_name,
+         kv_partition_id,
+         shard_id,
+         fetch_cc->kv_start_key_,
+         fetch_cc,
+         &FetchRangeSizeCallback);
+}
+
 /**
  * @brief Deletes data that is out of the specified range.
  *

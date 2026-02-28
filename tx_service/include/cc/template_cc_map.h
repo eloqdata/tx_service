@@ -11936,33 +11936,6 @@ protected:
         return &pos_inf_page_;
     }
 
-    bool RangeSizesInited() const override
-    {
-        if constexpr (RangePartitioned)
-        {
-            return range_sizes_.size() > 0;
-        }
-        return true;
-    }
-
-    void InitRangeSizes(
-        absl::flat_hash_map<uint32_t, size_t> &&range_sizes) override
-    {
-        if constexpr (RangePartitioned)
-        {
-            range_sizes_.clear();
-            for (auto &[range_id, size] : range_sizes)
-            {
-                constexpr size_t kMaxInt32 =
-                    static_cast<size_t>(std::numeric_limits<int32_t>::max());
-                int32_t clamped = (size > kMaxInt32)
-                                      ? std::numeric_limits<int32_t>::max()
-                                      : static_cast<int32_t>(size);
-                range_sizes_[range_id] = {clamped, 0};
-            }
-        }
-    }
-
     void UpdateRangeSize(uint32_t partition_id,
                          int32_t delta_size,
                          bool is_dirty)
@@ -11987,8 +11960,11 @@ protected:
                 it->second.first =
                     static_cast<int32_t>(RangeSizeStatus::kLoading);
 
-                // TODO: fetch the range size. Implementation in
-                // range-size-tracking-phase3-persist-implementation-v1.md
+                int64_t ng_term = Sharder::Instance().LeaderTerm(cc_ng_id_);
+                shard_->FetchTableRangeSize(table_name_,
+                                            static_cast<int32_t>(partition_id),
+                                            cc_ng_id_,
+                                            ng_term);
                 return;
             }
 

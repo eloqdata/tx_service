@@ -263,21 +263,13 @@ public:
     virtual const txservice::RecordSchema *RecordSchema() const = 0;
 
     /**
-     * Whether range_sizes_ has been loaded from store (for range-partitioned
-     * tables). Default: true (no lazy init needed for non-range-partitioned).
+     * Called by FetchTableRangeSizeCc::Execute when async load completes.
+     * Merges loaded size with accumulated delta (second), or resets to
+     * kNotInitialized on failure.
      */
-    virtual bool RangeSizesInited() const
-    {
-        return true;
-    }
-
-    /**
-     * Initialize range_sizes_ from store (e.g.
-     * TableRangeEntry::StoreRangeSize). No-op for non-range-partitioned CcMaps.
-     */
-    virtual void InitRangeSizes(absl::flat_hash_map<uint32_t, size_t> &&)
-    {
-    }
+    void InitRangeSize(uint32_t partition_id,
+                       int32_t persisted_size,
+                       bool succeed = true);
 
     uint64_t SchemaTs() const
     {

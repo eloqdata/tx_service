@@ -273,6 +273,9 @@ public:
 
     void FetchRangeSlices(txservice::FetchRangeSlicesReq *fetch_cc) override;
 
+    void FetchTableRangeSize(
+        txservice::FetchTableRangeSizeCc *fetch_cc) override;
+
     bool DeleteOutOfRangeData(
         const txservice::TableName &table_name,
         int32_t partition_id,
@@ -926,6 +929,11 @@ private:
         ::google::protobuf::Closure *closure,
         DataStoreServiceClient &client,
         const remote::CommonResult &result);
+
+    friend void FetchRangeSizeCallback(void *data,
+                                       ::google::protobuf::Closure *closure,
+                                       DataStoreServiceClient &client,
+                                       const remote::CommonResult &result);
 };
 
 struct UpsertTableData

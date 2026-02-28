@@ -315,15 +315,10 @@ public:
      */
     CcMap *GetCcm(const TableName &table_name, uint32_t node_group);
 
-    /**
-     * Returns partition_id -> store_range_size for ranges that belong to this
-     * node group and this shard (core). Used to lazy-init
-     * TemplateCcMap::range_sizes_.
-     * @param range_table_name Range table name.
-     * @param node_group Node group id.
-     */
-    absl::flat_hash_map<uint32_t, size_t> GetStoreRangeSizes(
-        const TableName &range_table_name, const NodeGroupId node_group);
+    void FetchTableRangeSize(const TableName &table_name,
+                             int32_t partition_id,
+                             NodeGroupId cc_ng_id,
+                             int64_t cc_ng_term);
 
     void AdjustDataKeyStats(const TableName &table_name,
                             int64_t size_delta,
@@ -1232,6 +1227,7 @@ private:
 
     CcRequestPool<FillStoreSliceCc> fill_store_slice_cc_pool_;
     CcRequestPool<InitKeyCacheCc> init_key_cache_cc_pool_;
+    CcRequestPool<FetchTableRangeSizeCc> fetch_range_size_cc_pool_;
 
     // CcRequest queue on this shard/core.
     moodycamel::ConcurrentQueue<CcRequestBase *> cc_queue_;
