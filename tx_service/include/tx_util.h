@@ -85,7 +85,6 @@ static inline TxErrorCode TxReadCatalog(TransactionExecution *txm,
                                         bool &exists)
 {
     assert(txm != nullptr);
-
     txm->Execute(&read_tx_req);
     read_tx_req.Wait();
     if (read_tx_req.IsError())

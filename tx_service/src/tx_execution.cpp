@@ -7584,6 +7584,41 @@ void TransactionExecution::Process(BatchReadOperation &batch_read_op)
                 .append(std::to_string(this->tx_term_));
         });
 
+    if (batch_read_op.batch_read_tx_req_->is_catalog_batch_)
+    {
+        batch_read_op.is_running_ = true;
+        std::vector<txservice::ScanBatchTuple> &read_batch =
+            batch_read_op.batch_read_tx_req_->read_batch_;
+        const size_t N = read_batch.size();
+        for (size_t i = 0; i < N; ++i)
+        {
+            TxKey &key = read_batch[i].key_;
+            TxRecord &rec = *read_batch[i].record_;
+
+            bool finished = cc_handler_->ReadLocal(
+                catalog_ccm_name,
+                key,
+                rec,
+                ReadType::Inside,
+                tx_number_.load(std::memory_order_relaxed),
+                tx_term_,
+                CommandId(),
+                start_ts_,
+                batch_read_op.hd_result_vec_[i],
+                IsolationLevel::RepeatableRead,
+                CcProtocol::Locking,
+                false,
+                false,
+                true);
+            if (finished)
+            {
+                command_id_.fetch_add(1, std::memory_order_relaxed);
+            }
+        }
+        StartTiming();
+        return;
+    }
+
     batch_read_op.is_running_ = true;
     const TableName &table_name = *batch_read_op.batch_read_tx_req_->tab_name_;
     std::vector<txservice::ScanBatchTuple> &read_batch =
@@ -7780,7 +7815,8 @@ void TransactionExecution::PostProcess(BatchReadOperation &batch_read_op)
     state_stack_.pop_back();
     assert(state_stack_.empty());
 
-    if (lock_range_bucket_result_.IsError())
+    if (!batch_read_op.batch_read_tx_req_->is_catalog_batch_ &&
+        lock_range_bucket_result_.IsError())
     {
         DLOG(ERROR)
             << "BatchReadOperation failed when acquire range bucket locks. "
@@ -7793,7 +7829,8 @@ void TransactionExecution::PostProcess(BatchReadOperation &batch_read_op)
     }
 
     const BatchReadTxRequest *read_req = batch_read_op.batch_read_tx_req_;
-    const TableName *table_name = read_req->tab_name_;
+    const TableName *table_name =
+        read_req->is_catalog_batch_ ? &catalog_ccm_name : read_req->tab_name_;
     std::vector<ScanBatchTuple> &read_batch = read_req->read_batch_;
     CcErrorCode err = CcErrorCode::NO_ERROR;
 
