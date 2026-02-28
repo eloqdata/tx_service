@@ -605,10 +605,6 @@ public:
                     cce->payload_.DeserializeCurrentPayload(payload_str->data(),
                                                             offset);
                 }
-                // Eagerly move to the large-value zone when the committed
-                // payload exceeds the threshold.
-                MaybeMarkAndRezoneAsLargeValue(cc_page, cce->PayloadSize());
-
                 RecordStatus cce_old_status = cce->PayloadStatus();
                 RecordStatus new_status =
                     is_del ? RecordStatus::Deleted : RecordStatus::Normal;
@@ -1119,9 +1115,6 @@ public:
                     req.CommitType() != PostWriteType::DowngradeLock)
                 {
                     cce_ptr->payload_.SetCurrentPayload(payload);
-                    // Eagerly move to the large-value zone if needed.
-                    MaybeMarkAndRezoneAsLargeValue(cce_ptr->GetCcPage(),
-                                                   cce_ptr->PayloadSize());
                     // A prepare commit request only installs the dirty value,
                     // and does not change the record status and commit_ts.
                     if (req.CommitType() == PostWriteType::Commit ||
@@ -2036,9 +2029,6 @@ public:
             if (cce->PayloadStatus() == RecordStatus::Unknown)
             {
                 cce->payload_.PassInCurrentPayload(std::move(tmp_payload));
-                // Eagerly move to the large-value zone if needed.
-                MaybeMarkAndRezoneAsLargeValue(cce->GetCcPage(),
-                                               cce->PayloadSize());
                 cce->SetCommitTsPayloadStatus(req.ReadTimestamp(),
                                               tmp_payload_status);
             }
@@ -2240,9 +2230,6 @@ public:
                 size_t offset = 0;
                 cce->payload_.DeserializeCurrentPayload(req.rec_str_->data(),
                                                         offset);
-                // Eagerly move to the large-value zone if needed.
-                MaybeMarkAndRezoneAsLargeValue(cce->GetCcPage(),
-                                               cce->PayloadSize());
             }
             cce->SetCommitTsPayloadStatus(req.CommitTs(), req.RecordStatus());
         }
@@ -7014,8 +7001,6 @@ public:
                 {
                     cce->payload_.DeserializeCurrentPayload(log_blob.data(),
                                                             offset);
-                    // Eagerly move to the large-value zone if needed.
-                    MaybeMarkAndRezoneAsLargeValue(ccp, cce->PayloadSize());
                     rec_status = RecordStatus::Normal;
                 }
                 else
@@ -7772,8 +7757,6 @@ public:
                 if (rec_status == RecordStatus::Normal)
                 {
                     cce->payload_.SetCurrentPayload(commit_val);
-                    // Eagerly move to the large-value zone if needed.
-                    MaybeMarkAndRezoneAsLargeValue(cc_page, cce->PayloadSize());
                 }
                 else
                 {
@@ -10643,8 +10626,6 @@ protected:
                 size_t offset = 0;
                 cce->payload_.DeserializeCurrentPayload(rec_str.c_str(),
                                                         offset);
-                // Eagerly move to the large-value zone if needed.
-                MaybeMarkAndRezoneAsLargeValue(ccp, cce->PayloadSize());
             }
         }
         else if (cce_version > 1 && commit_ts < cce_version &&
@@ -12069,13 +12050,14 @@ protected:
      * Only active when IsLargeValueZoneEnabled() returns true (i.e. for
      * ObjectCcMap / EloqKV). Has no effect on RangeCcMap (EloqSQL / EloqDoc).
      *
-     * Called from every payload-assignment path (PostWriteCc, BackFill,
-     * ReplayLogCc, UploadBatchCc, etc.) so that large-value pages are
-     * immediately clustered near the LRU tail and are only evicted after all
-     * small-value pages have been evicted.
+     * Called from ObjectCcMap at every payload-assignment site (ApplyCc,
+     * PostWriteCc, UploadBatchCc, KeyObjectStandbyForwardCc, ReplayLogCc,
+     * BackFill) so that large-value pages are immediately clustered near the
+     * LRU tail and are only evicted after all small-value pages have been
+     * evicted.
      *
      * The lazy fallback in CanBeCleaned (has_blocked_large_value_) is kept as
-     * a safety net for any path not covered here.
+     * a safety net for any path not covered above.
      *
      * @param page         The LRU page that owns the updated entry.
      * @param payload_size The serialized size of the newly installed payload.
