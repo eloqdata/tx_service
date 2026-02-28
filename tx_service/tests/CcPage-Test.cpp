@@ -200,6 +200,20 @@ struct LargeCompositeRecord : public CompositeRecord<int>
     size_t reported_size_;
 };
 
+// Test-only subclass of TemplateCcMap that enables the large-value zone
+// (simulating ObjectCcMap behaviour for tests that use different template
+// parameters such as VersionedRecord=true / RangePartitioned=true).
+template <typename KeyT, typename ValueT, bool VR, bool RP>
+class LargeValueTestCcMap : public TemplateCcMap<KeyT, ValueT, VR, RP>
+{
+public:
+    using TemplateCcMap<KeyT, ValueT, VR, RP>::TemplateCcMap;
+    bool IsLargeValueZoneEnabled() const override
+    {
+        return txservice_large_value_threshold > 0;
+    }
+};
+
 TEST_CASE("Large-value eviction protection test", "[cc-page]")
 {
     std::unordered_map<uint32_t, std::vector<NodeConfig>> ng_configs{
@@ -240,10 +254,10 @@ TEST_CASE("Large-value eviction protection test", "[cc-page]")
     const size_t MAP_SIZE = 200;
     const size_t LARGE_PAYLOAD_SIZE = 1024;
 
-    using TestCcMap = TemplateCcMap<CompositeKey<std::string, int>,
-                                    CompositeRecord<int>,
-                                    true,
-                                    true>;
+    using TestCcMap = LargeValueTestCcMap<CompositeKey<std::string, int>,
+                                          CompositeRecord<int>,
+                                          true,
+                                          true>;
 
     // Small-value map – pages stay in the head (small-value) zone.
     std::string small_table = "small_val_test";
@@ -413,10 +427,10 @@ TEST_CASE("Eager re-zone on large-value payload", "[cc-page]")
     const size_t MAP_SIZE = 200;
     const size_t LARGE_PAYLOAD_SIZE = 1024;
 
-    using TestCcMap = TemplateCcMap<CompositeKey<std::string, int>,
-                                    CompositeRecord<int>,
-                                    true,
-                                    true>;
+    using TestCcMap = LargeValueTestCcMap<CompositeKey<std::string, int>,
+                                          CompositeRecord<int>,
+                                          true,
+                                          true>;
 
     // Small-value map — pages stay in the SV zone at all times.
     std::string small_table = "eager_sv_test";

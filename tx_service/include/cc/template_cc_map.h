@@ -12066,6 +12066,9 @@ protected:
      * large-value zone of the LRU list when the installed payload exceeds
      * txservice_large_value_threshold.
      *
+     * Only active when IsLargeValueZoneEnabled() returns true (i.e. for
+     * ObjectCcMap / EloqKV). Has no effect on RangeCcMap (EloqSQL / EloqDoc).
+     *
      * Called from every payload-assignment path (PostWriteCc, BackFill,
      * ReplayLogCc, UploadBatchCc, etc.) so that large-value pages are
      * immediately clustered near the LRU tail and are only evicted after all
@@ -12079,7 +12082,7 @@ protected:
      */
     void MaybeMarkAndRezoneAsLargeValue(LruPage *page, size_t payload_size)
     {
-        if (txservice_large_value_threshold == 0 || page == nullptr ||
+        if (!IsLargeValueZoneEnabled() || page == nullptr ||
             page->has_large_value_ ||
             payload_size <= txservice_large_value_threshold)
         {

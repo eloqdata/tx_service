@@ -219,6 +219,15 @@ public:
     {
     }
 
+    // Returns true if the payload-size-aware large-value zone eviction policy
+    // is active for this map. Only ObjectCcMap (EloqKV) overrides this to
+    // return true; all other maps (RangeCcMap, CatalogCcMap, etc.) return false
+    // so the policy has no effect on EloqSQL / EloqDoc tables.
+    virtual bool IsLargeValueZoneEnabled() const
+    {
+        return false;
+    }
+
     virtual std::pair<size_t, LruPage *> CleanPageAndReBalance(
         LruPage *page,
         KickoutCcEntryCc *kickout_cc = nullptr,

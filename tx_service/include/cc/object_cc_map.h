@@ -104,6 +104,12 @@ public:
     using TemplateCcMap<KeyT, ValueT, false, false>::Type;
     using TemplateCcMap<KeyT, ValueT, false, false>::CleanEntry;
 
+    // Enable the payload-size-aware large-value zone policy for EloqKV.
+    bool IsLargeValueZoneEnabled() const override
+    {
+        return txservice_large_value_threshold > 0;
+    }
+
     bool Execute(ApplyCc &req) override
     {
         TX_TRACE_ACTION_WITH_CONTEXT(

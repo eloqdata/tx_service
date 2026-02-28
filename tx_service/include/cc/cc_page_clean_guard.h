@@ -417,14 +417,19 @@ private:
             return {false, false};
         }
 
-        // Payload-size-aware eviction: mark the page as a large-value page so
-        // that UpdateLruList places it in the large-value zone (tail end) of
-        // the LRU list. The page is still evictable here — protection is
-        // enforced positionally (large-value pages are evicted only after all
-        // small-value pages). Setting has_blocked_large_value_ signals
-        // CleanPageAndReBalance to re-zone the page immediately via
-        // UpdateLruList in case it was in the small-value zone.
-        if (txservice_large_value_threshold > 0 &&
+        // Payload-size-aware eviction (ObjectCcMap / EloqKV only): mark the
+        // page as a large-value page so that UpdateLruList places it in the
+        // large-value zone (tail end) of the LRU list. The page is still
+        // evictable here — protection is positional (large-value pages are
+        // evicted only after all small-value pages). Setting
+        // has_blocked_large_value_ signals CleanPageAndReBalance to re-zone
+        // the page immediately via UpdateLruList in case it was in the
+        // small-value zone.
+        // IsLargeValueZoneEnabled() returns false for all non-ObjectCcMap
+        // types (RangeCcMap, CatalogCcMap, etc.), so this block is a no-op
+        // for EloqSQL and EloqDoc tables.
+        if (this->page_->parent_map_ != nullptr &&
+            this->page_->parent_map_->IsLargeValueZoneEnabled() &&
             cce->PayloadSize() > txservice_large_value_threshold)
         {
             if (!this->page_->has_large_value_)
