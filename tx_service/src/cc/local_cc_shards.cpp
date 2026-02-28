@@ -3094,7 +3094,8 @@ void LocalCcShards::PostProcessFlushTaskEntries(
         &flush_task_entries,
     DataSyncTask::CkptErrorCode ckpt_err,
     const std::function<void()> *yield_fptr,
-    const std::function<void()> *resume_fptr)
+    const std::function<void()> *resume_fptr,
+    const std::function<void()> *sync_yield_fptr)
 {
     assert(ckpt_err != DataSyncTask::CkptErrorCode::SCAN_ERROR);
 
@@ -3250,8 +3251,8 @@ void LocalCcShards::PostProcessFlushTaskEntries(
 
     if (!pending_update_entries.empty())
     {
-        bool success =
-            UpdateStoreSlices(pending_update_entries, yield_fptr, resume_fptr);
+        bool success = UpdateStoreSlices(
+            pending_update_entries, yield_fptr, resume_fptr, sync_yield_fptr);
 
         for (auto &entry : pending_update_entries)
         {
@@ -4868,6 +4869,9 @@ void LocalCcShards::DataSyncForHashPartition(
         data_sync_task->flight_task_cnt_ += 1;
     }
 
+    auto start_scan_time = std::chrono::steady_clock::now();
+    size_t debug_data_size = 0;
+
     for (size_t i = 0; i < partition_number_this_core;
          i += partition_number_per_scan)
     {
@@ -5151,6 +5155,8 @@ void LocalCcShards::DataSyncForHashPartition(
             }
 #endif
 
+            debug_data_size += flush_data_size;
+
             uint64_t old_usage =
                 data_sync_mem_controller_.AllocateFlushDataMemQuota(
                     flush_data_size);
@@ -5350,6 +5356,12 @@ void LocalCcShards::DataSyncForHashPartition(
             }
         }
     }
+
+    auto stop_scan_time = std::chrono::steady_clock::now();
+    auto duration = std::chrono::duration_cast<std::chrono::microseconds>(
+        stop_scan_time - start_scan_time);
+    LOG(INFO) << "FlushDataImpl: scan duration = " << duration.count() << "us"
+              << ", data size = " << debug_data_size;
 
     PostProcessHashPartitionDataSyncTask(std::move(data_sync_task),
                                          data_sync_txm,
@@ -5853,6 +5865,8 @@ void LocalCcShards::AddFlushTaskEntry(std::unique_ptr<FlushTaskEntry> &&entry)
             auto &last_task = pending_flush_work.back();
             if (last_task->MergeFrom(std::move(flush_data_task)))
             {
+                LOG(INFO) << "AddFlushTaskEntry: Merge successful, task was "
+                             "merged into last_task";
                 // Merge successful, task was merged into last_task
                 flush_data_worker_ctx_.cv_.notify_all();
                 return;
@@ -6114,7 +6128,7 @@ void LocalCcShards::FlushDataImpl(FlushDataTask *cur_work,
                << " quota: " << data_sync_mem_controller_.FlushMemoryQuota();
 
     PostProcessFlushTaskEntries(
-        flush_task_entries, ckpt_err, &yield_fn, &resume_fn);
+        flush_task_entries, ckpt_err, &yield_fn, &resume_fn, &sync_yield_func);
 }
 
 void LocalCcShards::FlushData(std::unique_lock<std::mutex> &flush_worker_lk,
@@ -6162,6 +6176,8 @@ void LocalCcShards::FlushDataWorker(size_t worker_idx)
     {
         if (!pending_flush_work.empty())
         {
+            LOG(INFO) << "FlushDataWorker: flush work size = "
+                      << pending_flush_work.size();
             std::unique_ptr<FlushDataTask> cur_work =
                 std::move(pending_flush_work.front());
             pending_flush_work.pop_front();
@@ -6411,7 +6427,8 @@ void LocalCcShards::RangeSplitWorker()
 bool LocalCcShards::UpdateStoreSlices(
     std::vector<FlushTaskEntry *> &flush_tasks,
     const std::function<void()> *yield_fptr,
-    const std::function<void()> *resume_fptr)
+    const std::function<void()> *resume_fptr,
+    const std::function<void()> *sync_yield_fptr)
 {
     std::vector<UpdateRangeSlicesReq> update_range_slice_reqs;
 
@@ -6455,7 +6472,7 @@ bool LocalCcShards::UpdateStoreSlices(
     if (!update_range_slice_reqs.empty())
     {
         bool success = store_hd_->UpdateRangeSlices(
-            update_range_slice_reqs, yield_fptr, resume_fptr);
+            update_range_slice_reqs, yield_fptr, resume_fptr, sync_yield_fptr);
         return success;
     }
 
