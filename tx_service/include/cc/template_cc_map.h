@@ -624,24 +624,10 @@ public:
                             : (static_cast<int64_t>(cce->PayloadSize()) -
                                static_cast<int64_t>(old_payload_size));
                     const uint32_t range_id = req.PartitionId();
-                    auto it = range_sizes_.find(range_id);
-                    assert(it != range_sizes_.end());
-                    int32_t &first = it->second.first;
-                    int32_t &second = it->second.second;
-                    if (first >= 0)
-                    {
-                        assert(key_delta_size >= 0 ||
-                               static_cast<int64_t>(first) >= -key_delta_size);
-                        first = static_cast<int32_t>(
-                            static_cast<int64_t>(first) + key_delta_size);
-                        assert(first >= 0);
-                    }
-                    else
-                    {
-                        // Loading (-1) or Uninitialized (-2): accumulate delta
-                        second = static_cast<int32_t>(
-                            static_cast<int64_t>(second) + key_delta_size);
-                    }
+                    // is_dirty: true when range is splitting.
+                    UpdateRangeSize(range_id,
+                                    static_cast<int32_t>(key_delta_size),
+                                    req.OnDirtyRange());
                 }
 
                 if (req.IsInitialInsert())
@@ -11975,6 +11961,51 @@ protected:
                 range_sizes_[range_id] = {clamped, 0};
             }
         }
+    }
+
+    void UpdateRangeSize(uint32_t partition_id,
+                         int32_t delta_size,
+                         bool is_dirty)
+    {
+        if constexpr (RangePartitioned)
+        {
+            auto it = range_sizes_.find(partition_id);
+            if (it == range_sizes_.end())
+            {
+                it = range_sizes_
+                         .emplace(partition_id,
+                                  std::make_pair(
+                                      static_cast<int32_t>(
+                                          RangeSizeStatus::kNotInitialized),
+                                      0))
+                         .first;
+            }
+            if (it->second.first ==
+                static_cast<int32_t>(RangeSizeStatus::kNotInitialized))
+            {
+                // Init the range size of this range.
+                it->second.first =
+                    static_cast<int32_t>(RangeSizeStatus::kLoading);
+
+                // TODO: fetch the range size. Implementation in
+                // range-size-tracking-phase3-persist-implementation-v1.md
+                return;
+            }
+
+            if (it->second.first ==
+                    static_cast<int32_t>(RangeSizeStatus::kLoading) ||
+                is_dirty)
+            {
+                // Loading or split: record delta in delta part (.second).
+                it->second.second += delta_size;
+            }
+            else
+            {
+                assert(delta_size >= 0 ||
+                       it->second.first >= static_cast<int32_t>(-delta_size));
+                it->second.first += delta_size;
+            }
+        }  // RangePartitioned
     }
 
     absl::btree_map<
