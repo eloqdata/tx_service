@@ -758,7 +758,8 @@ public:
                const TxRecord *rec,
                OperationType operation_type,
                uint32_t key_shard_code,
-               CcHandlerResult<PostProcessResult> *res)
+               CcHandlerResult<PostProcessResult> *res,
+               bool on_dirty_range = false)
     {
         TemplatedCcRequest<PostWriteCc, PostProcessResult>::Reset(
             nullptr, res, addr->NodeGroupId(), tx_number, tx_term);
@@ -772,6 +773,7 @@ public:
         is_remote_ = false;
         ccm_ = nullptr;
         is_initial_insert_ = false;
+        on_dirty_range_ = on_dirty_range;
     }
 
     void Reset(const TxKey *key,
@@ -785,7 +787,8 @@ public:
                uint32_t key_shard_code,
                CcHandlerResult<PostProcessResult> *res,
                bool initial_insertion = false,
-               int64_t ng_term = INIT_TERM)
+               int64_t ng_term = INIT_TERM,
+               bool on_dirty_range = false)
     {
         TemplatedCcRequest<PostWriteCc, PostProcessResult>::Reset(
             &table_name,
@@ -806,6 +809,7 @@ public:
         is_remote_ = false;
         ccm_ = nullptr;
         is_initial_insert_ = initial_insertion;
+        on_dirty_range_ = on_dirty_range;
     }
 
     void Reset(const CcEntryAddr *addr,
@@ -815,7 +819,8 @@ public:
                const std::string *rec,
                OperationType operation_type,
                uint32_t key_shard_code,
-               CcHandlerResult<PostProcessResult> *res)
+               CcHandlerResult<PostProcessResult> *res,
+               bool on_dirty_range = false)
     {
         TemplatedCcRequest<PostWriteCc, PostProcessResult>::Reset(
             nullptr, res, addr->NodeGroupId(), tx_number, tx_term);
@@ -829,6 +834,7 @@ public:
         is_remote_ = true;
         ccm_ = nullptr;
         is_initial_insert_ = false;
+        on_dirty_range_ = on_dirty_range;
     }
 
     void Reset(const TableName *table_name,
@@ -842,7 +848,8 @@ public:
                uint32_t key_shard_code,
                CcHandlerResult<PostProcessResult> *res,
                bool initial_insertion = false,
-               int64_t ng_term = INIT_TERM)
+               int64_t ng_term = INIT_TERM,
+               bool on_dirty_range = false)
     {
         TemplatedCcRequest<PostWriteCc, PostProcessResult>::Reset(
             table_name,
@@ -863,6 +870,7 @@ public:
         is_remote_ = true;
         ccm_ = nullptr;
         is_initial_insert_ = initial_insertion;
+        on_dirty_range_ = on_dirty_range;
     }
 
     const CcEntryAddr *CceAddr() const
@@ -917,6 +925,11 @@ public:
         return is_initial_insert_;
     }
 
+    bool OnDirtyRange() const
+    {
+        return on_dirty_range_;
+    }
+
 private:
     const CcEntryAddr *cce_addr_;
     uint64_t commit_ts_;
@@ -934,6 +947,8 @@ private:
         const void *key_;
         const std::string *key_str_;
     };
+    // True if the range that the key belongs to is being splitting.
+    bool on_dirty_range_{false};
 };
 
 struct PostWriteAllCc
