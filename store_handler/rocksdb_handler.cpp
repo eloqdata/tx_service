@@ -1525,10 +1525,12 @@ bool RocksDBHandler::UpdateRangeSlices(
 bool RocksDBHandler::UpdateRangeSlices(
     const std::vector<txservice::UpdateRangeSlicesReq> &update_range_slice_reqs,
     const std::function<void()> *yield_fptr,
-    const std::function<void()> *resume_fptr)
+    const std::function<void()> *resume_fptr,
+    const std::function<void()> *sync_yield_fptr)
 {
     (void)yield_fptr;
     (void)resume_fptr;
+    (void)sync_yield_fptr;
     LOG(ERROR) << "RocksDBHandler::UpdateRangeSlices not implemented";
     // Not implemented
     assert(false);

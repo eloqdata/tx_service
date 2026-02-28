@@ -1992,7 +1992,8 @@ private:
             &flush_task_entries,
         DataSyncTask::CkptErrorCode ckpt_err,
         const std::function<void()> *yield_fptr = nullptr,
-        const std::function<void()> *resume_fptr = nullptr);
+        const std::function<void()> *resume_fptr = nullptr,
+        const std::function<void()> *sync_yield_fptr = nullptr);
 
     const uint32_t node_id_;
     // Native node group
@@ -2490,7 +2491,8 @@ private:
 
     bool UpdateStoreSlices(std::vector<FlushTaskEntry *> &task,
                            const std::function<void()> *yield_fptr = nullptr,
-                           const std::function<void()> *resume_fptr = nullptr);
+                           const std::function<void()> *resume_fptr = nullptr,
+                           const std::function<void()> *sync_yield_fptr = nullptr);
 
     bool GetNextRangePartitionId(const TableName &tablename,
                                  const TableSchema *table_schema,
