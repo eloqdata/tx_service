@@ -626,10 +626,22 @@ public:
                     const uint32_t range_id = req.PartitionId();
                     auto it = range_sizes_.find(range_id);
                     assert(it != range_sizes_.end());
-                    assert(key_delta_size >= 0 ||
-                           it->second >= static_cast<size_t>(-key_delta_size));
-                    it->second = static_cast<size_t>(
-                        static_cast<int64_t>(it->second) + key_delta_size);
+                    int32_t &first = it->second.first;
+                    int32_t &second = it->second.second;
+                    if (first >= 0)
+                    {
+                        assert(key_delta_size >= 0 ||
+                               static_cast<int64_t>(first) >= -key_delta_size);
+                        first = static_cast<int32_t>(
+                            static_cast<int64_t>(first) + key_delta_size);
+                        assert(first >= 0);
+                    }
+                    else
+                    {
+                        // Loading (-1) or Uninitialized (-2): accumulate delta
+                        second = static_cast<int32_t>(
+                            static_cast<int64_t>(second) + key_delta_size);
+                    }
                 }
 
                 if (req.IsInitialInsert())
@@ -11933,7 +11945,16 @@ protected:
     {
         if constexpr (RangePartitioned)
         {
-            range_sizes_ = std::move(range_sizes);
+            range_sizes_.clear();
+            for (auto &[range_id, size] : range_sizes)
+            {
+                constexpr size_t kMaxInt32 =
+                    static_cast<size_t>(std::numeric_limits<int32_t>::max());
+                int32_t clamped = (size > kMaxInt32)
+                                      ? std::numeric_limits<int32_t>::max()
+                                      : static_cast<int32_t>(size);
+                range_sizes_[range_id] = {clamped, 0};
+            }
         }
     }
 
@@ -11949,9 +11970,6 @@ protected:
     TemplateCcMapSamplePool<KeyT> *sample_pool_;
     size_t normal_obj_sz_{
         0};  // The count of all normal status objects, only used for redis
-
-    // Range id -> total size; only used when RangePartitioned.
-    absl::flat_hash_map<uint32_t, size_t> range_sizes_;
 };
 
 template <typename KeyT, typename ValueT>
