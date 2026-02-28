@@ -134,6 +134,8 @@ public:
 
     virtual void FetchRangeSlices(FetchRangeSlicesReq *fetch_cc) = 0;
 
+    virtual void FetchTableRangeSize(FetchTableRangeSizeCc *fetch_cc) = 0;
+
     /**
      * @brief Read a row from base table or skindex table in datastore with
      * specified key. Caller should pass in complete primary key or skindex key.

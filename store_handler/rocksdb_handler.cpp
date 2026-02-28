@@ -1110,6 +1110,13 @@ void RocksDBHandler::FetchRangeSlices(txservice::FetchRangeSlicesReq *fetch_cc)
     assert(false);
 }
 
+void RocksDBHandler::FetchTableRangeSize(
+    txservice::FetchTableRangeSizeCc *fetch_cc)
+{
+    LOG(ERROR) << "RocksDBHandler::FetchTableRangeSize not implemented";
+    assert(false);
+}
+
 bool DeleteOutOfRangeDataInternal(std::string delete_from_partition_sql,
                                   int32_t partition_id,
                                   const txservice::TxKey *start_k)
