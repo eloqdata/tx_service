@@ -537,8 +537,7 @@ public:
         uint64_t version_ts,
         int64_t partition_id,
         std::unique_ptr<TemplateStoreRange<KeyT>> slices = nullptr)
-        : TableRangeEntry(version_ts, partition_id),
-          range_info_(start_key, version_ts, partition_id),
+        : range_info_(start_key, version_ts, partition_id),
           range_slices_(std::move(slices))
     {
     }
