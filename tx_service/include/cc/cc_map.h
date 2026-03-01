@@ -266,10 +266,13 @@ public:
      * Called by FetchTableRangeSizeCc::Execute when async load completes.
      * Merges loaded size with accumulated delta (second), or resets to
      * kNotInitialized on failure.
+     * When emplace is true and partition_id is absent, inserts (partition_id,
+     * (0,0)) before merging; used for new ranges after split.
      */
     void InitRangeSize(uint32_t partition_id,
                        int32_t persisted_size,
-                       bool succeed = true);
+                       bool succeed = true,
+                       bool emplace = false);
 
     uint64_t SchemaTs() const
     {

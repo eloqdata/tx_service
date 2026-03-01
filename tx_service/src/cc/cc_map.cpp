@@ -464,13 +464,17 @@ void CcMap::DecrReadIntent(NonBlockingLock *lock,
 
 void CcMap::InitRangeSize(uint32_t partition_id,
                           int32_t persisted_size,
-                          bool succeed)
+                          bool succeed,
+                          bool emplace)
 {
     auto it = range_sizes_.find(partition_id);
     if (it == range_sizes_.end())
     {
-        // Should not happen: UpdateRangeSize already inserted entry.
-        return;
+        if (!emplace)
+        {
+            return;
+        }
+        it = range_sizes_.emplace(partition_id, std::make_pair(0, 0)).first;
     }
     if (succeed)
     {
