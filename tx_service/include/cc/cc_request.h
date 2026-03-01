@@ -283,6 +283,11 @@ public:
         return node_group_id_;
     }
 
+    int64_t NodeGroupTerm() const
+    {
+        return ng_term_;
+    }
+
     int64_t TxTerm() const
     {
         return tx_term_;
@@ -366,6 +371,34 @@ public:
     AcquireCc(const AcquireCc &rhs) = delete;
     AcquireCc(AcquireCc &&rhs) = delete;
 
+    bool ValidTermCheck() override
+    {
+        int64_t cc_ng_term = -1;
+        if (allow_run_on_candidate_)
+        {
+            cc_ng_term =
+                Sharder::Instance().CandidateLeaderTerm(node_group_id_);
+        }
+        if (cc_ng_term < 0)
+        {
+            cc_ng_term = Sharder::Instance().LeaderTerm(node_group_id_);
+        }
+
+        if (ng_term_ < 0)
+        {
+            ng_term_ = cc_ng_term;
+        }
+
+        if (cc_ng_term < 0 || cc_ng_term != ng_term_)
+        {
+            return false;
+        }
+        else
+        {
+            return true;
+        }
+    }
+
     void Reset(const TableName *tname,
                const uint64_t schema_version,
                const TxKey *key,
@@ -378,7 +411,8 @@ public:
                uint32_t hd_res_idx,
                CcProtocol proto,
                IsolationLevel iso_level,
-               bool abort_if_oom)
+               bool abort_if_oom,
+               bool allow_run_on_candidate)
     {
         uint32_t ng_id = Sharder::Instance().ShardToCcNodeGroup(key_shard_code);
         TemplatedCcRequest<AcquireCc, std::vector<AcquireKeyResult>>::Reset(
@@ -395,6 +429,7 @@ public:
         is_local_ = true;
         block_by_lock_ = false;
         abort_if_oom_ = abort_if_oom;
+        allow_run_on_candidate_ = allow_run_on_candidate;
     }
 
     void Reset(const TableName *tname,
@@ -512,6 +547,7 @@ private:
     bool is_local_{true};
     bool block_by_lock_{false};
     bool abort_if_oom_{false};
+    bool allow_run_on_candidate_{false};
 };
 
 struct AcquireAllCc : public TemplatedCcRequest<AcquireAllCc, AcquireAllResult>
@@ -525,6 +561,28 @@ public:
 
     AcquireAllCc(const AcquireAllCc &rhs) = delete;
     AcquireAllCc(AcquireAllCc &&rhs) = delete;
+
+    bool ValidTermCheck() override
+    {
+        int64_t cc_ng_term = Sharder::Instance().LeaderTerm(node_group_id_);
+        int64_t candidate_ng_term =
+            Sharder::Instance().CandidateLeaderTerm(node_group_id_);
+        cc_ng_term = std::max(cc_ng_term, candidate_ng_term);
+
+        if (ng_term_ < 0)
+        {
+            ng_term_ = cc_ng_term;
+        }
+
+        if (cc_ng_term < 0 || cc_ng_term != ng_term_)
+        {
+            return false;
+        }
+        else
+        {
+            return true;
+        }
+    }
 
     void Reset(const TableName *tname,
                const TxKey *key,
@@ -689,7 +747,17 @@ public:
 
     bool ValidTermCheck() override
     {
-        int64_t cc_ng_term = Sharder::Instance().LeaderTerm(node_group_id_);
+        int64_t cc_ng_term = -1;
+        if (allow_run_on_candidate_)
+        {
+            cc_ng_term =
+                Sharder::Instance().CandidateLeaderTerm(node_group_id_);
+        }
+        if (cc_ng_term < 0)
+        {
+            cc_ng_term = Sharder::Instance().LeaderTerm(node_group_id_);
+        }
+
         if (cce_addr_ != nullptr)
         {
             if (cce_addr_->Term() != cc_ng_term)
@@ -740,7 +808,8 @@ public:
                const TxRecord *rec,
                OperationType operation_type,
                uint32_t key_shard_code,
-               CcHandlerResult<PostProcessResult> *res)
+               CcHandlerResult<PostProcessResult> *res,
+               bool allow_run_on_candidate)
     {
         TemplatedCcRequest<PostWriteCc, PostProcessResult>::Reset(
             nullptr, res, addr->NodeGroupId(), tx_number, tx_term);
@@ -754,6 +823,7 @@ public:
         is_remote_ = false;
         ccm_ = nullptr;
         is_initial_insert_ = false;
+        allow_run_on_candidate_ = allow_run_on_candidate;
     }
 
     void Reset(const TxKey *key,
@@ -788,6 +858,7 @@ public:
         is_remote_ = false;
         ccm_ = nullptr;
         is_initial_insert_ = initial_insertion;
+        allow_run_on_candidate_ = false;
     }
 
     void Reset(const CcEntryAddr *addr,
@@ -811,6 +882,7 @@ public:
         is_remote_ = true;
         ccm_ = nullptr;
         is_initial_insert_ = false;
+        allow_run_on_candidate_ = false;
     }
 
     void Reset(const TableName *table_name,
@@ -845,6 +917,7 @@ public:
         is_remote_ = true;
         ccm_ = nullptr;
         is_initial_insert_ = initial_insertion;
+        allow_run_on_candidate_ = false;
     }
 
     const CcEntryAddr *CceAddr() const
@@ -909,6 +982,7 @@ private:
         const void *key_;
         const std::string *key_str_;
     };
+    bool allow_run_on_candidate_{false};
 };
 
 struct PostWriteAllCc
@@ -918,6 +992,28 @@ public:
     PostWriteAllCc() = default;
     PostWriteAllCc(const PostWriteAllCc &rhs) = delete;
     PostWriteAllCc(PostWriteAllCc &&rhs) = delete;
+
+    bool ValidTermCheck() override
+    {
+        int64_t cc_ng_term = Sharder::Instance().LeaderTerm(node_group_id_);
+        int64_t candidate_ng_term =
+            Sharder::Instance().CandidateLeaderTerm(node_group_id_);
+        cc_ng_term = std::max(cc_ng_term, candidate_ng_term);
+
+        if (ng_term_ < 0)
+        {
+            ng_term_ = cc_ng_term;
+        }
+
+        if (cc_ng_term < 0 || cc_ng_term != ng_term_)
+        {
+            return false;
+        }
+        else
+        {
+            return true;
+        }
+    }
 
     void Reset(const TableName *tname,
                const TxKey *key,
@@ -1117,9 +1213,29 @@ public:
 
     bool ValidTermCheck() override
     {
-        int64_t cc_ng_term = Sharder::Instance().LeaderTerm(node_group_id_);
-        int64_t standby_node_term = Sharder::Instance().StandbyNodeTerm();
-        cc_ng_term = std::max(cc_ng_term, standby_node_term);
+        int64_t cc_ng_term = -1;
+        if (allow_run_on_candidate_)
+        {
+            cc_ng_term =
+                Sharder::Instance().CandidateLeaderTerm(node_group_id_);
+        }
+
+        if (cc_ng_term < 0)
+        {
+            cc_ng_term = Sharder::Instance().LeaderTerm(node_group_id_);
+            int64_t standby_node_term = Sharder::Instance().StandbyNodeTerm();
+            cc_ng_term = std::max(cc_ng_term, standby_node_term);
+        }
+
+        if (ng_term_ < 0)
+        {
+            ng_term_ = cc_ng_term;
+        }
+
+        if (cc_ng_term < 0 || cc_ng_term != ng_term_)
+        {
+            return false;
+        }
 
         assert(cce_addr_ != nullptr);
         if (cce_addr_->Term() != cc_ng_term)
@@ -1152,7 +1268,8 @@ public:
                uint64_t key_ts,
                uint64_t gap_ts,
                PostReadType post_read_type,
-               CcHandlerResult<PostProcessResult> *res)
+               CcHandlerResult<PostProcessResult> *res,
+               bool allow_run_on_candidate = false)
     {
         TemplatedCcRequest<PostReadCc, PostProcessResult>::Reset(
             nullptr, res, addr->NodeGroupId(), tx_number, tx_term);
@@ -1163,6 +1280,7 @@ public:
         gap_ts_ = gap_ts;
         post_read_type_ = post_read_type;
         ccm_ = nullptr;
+        allow_run_on_candidate_ = allow_run_on_candidate;
     }
 
     const CcEntryAddr *CceAddr() const
@@ -1196,6 +1314,7 @@ private:
     uint64_t key_ts_;
     uint64_t gap_ts_;
     PostReadType post_read_type_;
+    bool allow_run_on_candidate_{false};
 };
 
 struct ReadCc : public TemplatedCcRequest<ReadCc, ReadKeyResult>
@@ -1233,7 +1352,7 @@ public:
     bool ValidTermCheck() override
     {
         int64_t cc_ng_term = -1;
-        if (is_in_recovering_)
+        if (allow_run_on_candidate_)
         {
             cc_ng_term =
                 Sharder::Instance().CandidateLeaderTerm(node_group_id_);
@@ -1304,7 +1423,7 @@ public:
                bool is_for_write = false,
                bool is_covering_keys = false,
                std::vector<VersionTxRecord> *archives = nullptr,
-               bool is_in_recovering = false,
+               bool allow_run_on_candidate = false,
                bool point_read_on_miss = false,
                int32_t partition_id = -1,
                bool abort_if_oom = false)
@@ -1326,7 +1445,7 @@ public:
         cce_ptr_ = nullptr;
         archives_ = archives;
         is_local_ = true;
-        is_in_recovering_ = is_in_recovering;
+        allow_run_on_candidate_ = allow_run_on_candidate;
         is_covering_keys_ = is_covering_keys;
         point_read_on_cache_miss_ = point_read_on_miss;
         blk_type_ = NotBlocked;
@@ -1359,6 +1478,7 @@ public:
                bool is_for_write = false,
                bool is_covering_keys = false,
                std::vector<VersionTxRecord> *archives = nullptr,
+               bool allow_run_on_candidate = false,
                bool point_read_on_miss = false,
                int32_t partition_id = -1,
                bool abort_if_oom = false)
@@ -1380,7 +1500,7 @@ public:
         cce_ptr_ = nullptr;
         archives_ = archives;
         is_local_ = false;
-        is_in_recovering_ = false;
+        allow_run_on_candidate_ = allow_run_on_candidate;
         is_covering_keys_ = is_covering_keys;
         point_read_on_cache_miss_ = point_read_on_miss;
         blk_type_ = NotBlocked;
@@ -1434,7 +1554,7 @@ public:
         cce_ptr_ = nullptr;
         archives_ = archives;
         is_local_ = true;
-        is_in_recovering_ = false;
+        allow_run_on_candidate_ = false;
         is_covering_keys_ = is_covering_keys;
         point_read_on_cache_miss_ = point_read_on_miss;
         blk_type_ = NotBlocked;
@@ -1533,9 +1653,9 @@ public:
         return is_local_;
     }
 
-    bool IsInRecovering() const
+    bool AllowRunOnCandidate() const
     {
-        return is_in_recovering_;
+        return allow_run_on_candidate_;
     }
 
     bool IsCoveringKeys() const
@@ -1610,8 +1730,9 @@ private:
     LruEntry *cce_ptr_{nullptr};
     bool is_local_{true};
 
-    // Is issued in a recovering process
-    bool is_in_recovering_{false};
+    // True if this ccrequest is allowed to run on candidate node, such as
+    // issued in a recovering process
+    bool allow_run_on_candidate_{false};
     // Reserved for unique sk read
     bool is_covering_keys_{false};
     bool point_read_on_cache_miss_{false};
@@ -3783,8 +3904,11 @@ public:
     bool ValidTermCheck()
     {
         int64_t cc_ng_term = Sharder::Instance().LeaderTerm(node_group_id_);
+        int64_t candidate_ng_term =
+            Sharder::Instance().CandidateLeaderTerm(node_group_id_);
         int64_t standby_node_term = Sharder::Instance().StandbyNodeTerm();
-        int64_t current_term = std::max(cc_ng_term, standby_node_term);
+        int64_t current_term =
+            std::max({cc_ng_term, standby_node_term, candidate_ng_term});
 
         if (node_group_term_ < 0)
         {
@@ -3838,6 +3962,14 @@ public:
         // return false since DataSyncScanCc is not re-used and does not need to
         // call CcRequestBase::Free
         return false;
+    }
+
+    int64_t GetNodeGroupLeaderTerm() const
+    {
+        int64_t leader_term = Sharder::Instance().LeaderTerm(node_group_id_);
+        int64_t candidate_term =
+            Sharder::Instance().CandidateLeaderTerm(node_group_id_);
+        return std::max(leader_term, candidate_term);
     }
 
     bool IsDrained() const
@@ -4047,7 +4179,8 @@ public:
         bool export_base_table_item_only = false,
         StoreRange *store_range = nullptr,
         const std::map<TxKey, int64_t> *old_slices_delta_size = nullptr,
-        uint64_t schema_version = 0)
+        uint64_t schema_version = 0,
+        bool run_on_candidate_node = false)
         : scan_heap_is_full_(false),
           table_name_(&table_name),
           node_group_id_(node_group_id),
@@ -4066,7 +4199,8 @@ public:
           slice_coordinator_(export_base_table_item_, &slices_to_scan_),
           export_base_table_item_only_(export_base_table_item_only),
           store_range_(store_range),
-          schema_version_(schema_version)
+          schema_version_(schema_version),
+          run_on_candidate_node_(run_on_candidate_node)
     {
         tx_number_ = txn;
         assert(scan_batch_size_ > DataSyncScanBatchSize);
@@ -4105,8 +4239,11 @@ public:
     bool ValidTermCheck()
     {
         int64_t cc_ng_term = Sharder::Instance().LeaderTerm(node_group_id_);
+        int64_t candidate_ng_term =
+            Sharder::Instance().CandidateLeaderTerm(node_group_id_);
         int64_t standby_node_term = Sharder::Instance().StandbyNodeTerm();
-        int64_t current_term = std::max(cc_ng_term, standby_node_term);
+        int64_t current_term =
+            std::max({cc_ng_term, standby_node_term, candidate_ng_term});
 
         if (node_group_term_ < 0)
         {
@@ -4133,7 +4270,6 @@ public:
             SetError(CcErrorCode::REQUESTED_NODE_NOT_LEADER);
             return false;
         }
-        scan_count_++;
         CcMap *ccm = ccs.GetCcm(*table_name_, node_group_id_);
         if (ccm == nullptr)
         {
@@ -4185,7 +4321,7 @@ public:
         cv_.wait(lk, [this] { return unfinished_cnt_ == 0; });
     }
 
-    void Reset(OpType op_type = OpType::Normal)
+    void Reset()
     {
         std::lock_guard<std::mutex> lk(mux_);
         unfinished_cnt_ = 1;
@@ -4215,7 +4351,6 @@ public:
         }
 
         err_ = CcErrorCode::NO_ERROR;
-        op_type_ = op_type;
         slice_coordinator_.Reset();
     }
 
@@ -4300,11 +4435,6 @@ public:
     {
         std::lock_guard<std::mutex> lk(mux_);
         err_ = CcErrorCode::LOG_NOT_TRUNCATABLE;
-    }
-
-    bool IsTerminated() const
-    {
-        return op_type_ == OpType::Terminated;
     }
 
     StoreRange *StoreRangePtr() const
@@ -4427,13 +4557,16 @@ public:
         return last_data_sync_ts_;
     }
 
+    bool RunOnCandidateNode() const
+    {
+        return run_on_candidate_node_;
+    }
+
     std::vector<size_t> accumulated_scan_cnt_;
     std::vector<uint64_t> accumulated_flush_data_size_;
 
     // std::vector<bool> is not safe to use in multi-threaded environment,
     std::vector<uint32_t> scan_heap_is_full_{0};
-
-    size_t scan_count_{0};
 
 private:
     struct SliceCoordinator
@@ -4603,7 +4736,7 @@ private:
     // TODO(xxx) general solution for #1130
     const uint64_t schema_version_{0};
 
-    OpType op_type_{OpType::Normal};
+    bool run_on_candidate_node_{false};
 
     template <typename KeyT,
               typename ValueT,
@@ -6024,6 +6157,9 @@ public:
     bool Execute(CcShard &ccs) override
     {
         int64_t ng_term = Sharder::Instance().LeaderTerm(node_group_id_);
+        int64_t candidate_ng_term =
+            Sharder::Instance().CandidateLeaderTerm(node_group_id_);
+        ng_term = std::max(ng_term, candidate_ng_term);
         if (ng_term < 0 && clean_type_ == CleanType::CleanDeletedData)
         {
             // Purge deleted data is the only type of kickout cc that will
@@ -6036,7 +6172,7 @@ public:
 
         if (ng_term < 0)
         {
-            return SetError(CcErrorCode::TX_NODE_NOT_LEADER);
+            return SetError(CcErrorCode::REQUESTED_NODE_NOT_LEADER);
         }
 
         if (clean_type_ == CleanType::CleanCcm)
@@ -6672,6 +6808,9 @@ struct UpdateKeyCacheCc : public CcRequestBase
     bool Execute(CcShard &ccs) override
     {
         int64_t ng_term = Sharder::Instance().LeaderTerm(node_group_id_);
+        int64_t candidate_ng_term =
+            Sharder::Instance().CandidateLeaderTerm(node_group_id_);
+        ng_term = std::max(ng_term, candidate_ng_term);
         if (ng_term < 0 || ng_term != ng_term_)
         {
             return SetFinish();
@@ -8783,6 +8922,9 @@ struct ScanSliceDeltaSizeCcForRangePartition : public CcRequestBase
     bool ValidTermCheck() const
     {
         int64_t cc_ng_term = Sharder::Instance().LeaderTerm(node_group_id_);
+        int64_t candidate_ng_term =
+            Sharder::Instance().CandidateLeaderTerm(node_group_id_);
+        cc_ng_term = std::max(cc_ng_term, candidate_ng_term);
         assert(node_group_term_ > 0);
 
         return cc_ng_term >= 0 && cc_ng_term == node_group_term_;
@@ -9240,6 +9382,9 @@ public:
     bool ValidTermCheck()
     {
         int64_t cc_ng_term = Sharder::Instance().LeaderTerm(node_group_id_);
+        int64_t candidate_ng_term =
+            Sharder::Instance().CandidateLeaderTerm(node_group_id_);
+        cc_ng_term = std::max(cc_ng_term, candidate_ng_term);
         assert(node_group_term_ > 0);
 
         if (cc_ng_term < 0 || cc_ng_term != node_group_term_)

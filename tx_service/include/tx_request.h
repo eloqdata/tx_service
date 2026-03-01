@@ -193,12 +193,14 @@ struct InitTxRequest : public TemplateTxRequest<InitTxRequest, size_t>
                   const std::function<void()> *resume_fptr = nullptr,
                   TransactionExecution *txm = nullptr,
                   uint32_t tx_ng_id = UINT32_MAX,
-                  uint32_t log_group_id = UINT32_MAX)
+                  uint32_t log_group_id = UINT32_MAX,
+                  bool allow_run_on_candidate = false)
         : TemplateTxRequest(yield_fptr, resume_fptr, txm),
           iso_level_(level),
           protocol_(proto),
           tx_ng_id_(tx_ng_id),
-          log_group_id_(log_group_id)
+          log_group_id_(log_group_id),
+          allow_run_on_candidate_(allow_run_on_candidate)
     {
     }
 
@@ -208,6 +210,7 @@ struct InitTxRequest : public TemplateTxRequest<InitTxRequest, size_t>
     CcProtocol protocol_{CcProtocol::OCC};
     uint32_t tx_ng_id_{UINT32_MAX};
     uint32_t log_group_id_{UINT32_MAX};
+    bool allow_run_on_candidate_{false};
 };
 
 struct ReadTxRequest
@@ -223,7 +226,6 @@ public:
                   bool read_local = false,
                   uint64_t ts = 0,
                   bool is_covering_keys = false,
-                  bool is_recovering = false,
                   bool point_read_on_cache_miss = false,
                   const std::function<void()> *yield_fptr = nullptr,
                   const std::function<void()> *resume_fptr = nullptr,
@@ -239,7 +241,6 @@ public:
           ts_(ts),
           schema_version_(schema_version),
           is_covering_keys_(is_covering_keys),
-          is_recovering_(is_recovering),
           point_read_on_cache_miss_(point_read_on_cache_miss)
     {
     }
@@ -253,7 +254,6 @@ public:
              bool read_local = false,
              uint64_t ts = 0,
              bool is_covering_keys = false,
-             bool is_recovering = false,
              bool point_read_on_cache_miss = false)
     {
         tab_name_ = tab_name;
@@ -266,7 +266,6 @@ public:
         ts_ = ts;
         schema_version_ = schema_version;
         is_covering_keys_ = is_covering_keys;
-        is_recovering_ = is_recovering;
         point_read_on_cache_miss_ = point_read_on_cache_miss;
     }
 
@@ -279,7 +278,6 @@ public:
              bool read_local = false,
              uint64_t ts = 0,
              bool is_covering_keys = false,
-             bool is_recovering = false,
              bool point_read_on_cache_miss = false)
     {
         tab_name_ = tab_name;
@@ -292,7 +290,6 @@ public:
         ts_ = ts;
         schema_version_ = schema_version;
         is_covering_keys_ = is_covering_keys;
-        is_recovering_ = is_recovering;
         point_read_on_cache_miss_ = point_read_on_cache_miss;
     }
 
@@ -332,11 +329,6 @@ public:
 
     // For unique_sk point query
     bool is_covering_keys_;
-
-    // If this is a read request for recovering. If true we should
-    // rely on candidate leader term instead of current term to decide
-    // if node is valid leader.
-    bool is_recovering_;
 
     bool point_read_on_cache_miss_;
 };

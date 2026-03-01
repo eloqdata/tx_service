@@ -99,7 +99,8 @@ public:
         uint32_t hd_res_idx,
         CcProtocol proto,
         IsolationLevel iso_level,
-        bool abort_if_oom) = 0;
+        bool abort_if_oom,
+        bool allow_run_on_candidate) = 0;
 
     /**
      * @brief Acquires write locks for the input key in all shards. This method
@@ -166,7 +167,8 @@ public:
                                   const TxRecord *record,
                                   OperationType operation_type,
                                   uint32_t key_shard_code,
-                                  CcHandlerResult<PostProcessResult> &hres) = 0;
+                                  CcHandlerResult<PostProcessResult> &hres,
+                                  bool allow_run_on_candidate) = 0;
 
     /**
      * @briefPost-processes a read/scan key. Post-processing clears the read
@@ -202,7 +204,8 @@ public:
         CcHandlerResult<PostProcessResult> &hres,
         bool is_local = false,
         bool need_remote_resp = true,
-        PostReadType post_read_type = PostReadType::Release) = 0;
+        PostReadType post_read_type = PostReadType::Release,
+        bool allow_run_on_candidate = false) = 0;
 
     /**
      * @brief Reads the input key and returns the key's record. The request puts
@@ -239,6 +242,7 @@ public:
                       CcProtocol proto = CcProtocol::OCC,
                       bool is_for_write = false,
                       bool is_covering_keys = false,
+                      bool allow_run_on_candidate = false,
                       bool point_read_on_miss = false,
                       int32_t partition_id = -1,
                       bool abort_if_oom = false) = 0;
@@ -297,7 +301,7 @@ public:
         IsolationLevel iso_level = IsolationLevel::RepeatableRead,
         CcProtocol proto = CcProtocol::Locking,
         bool is_for_write = false,
-        bool is_recovring = false,
+        bool allow_run_on_candidate = false,
         bool execute_immediately = true) = 0;
 
     virtual bool ReadLocal(
@@ -313,7 +317,7 @@ public:
         IsolationLevel iso_level = IsolationLevel::RepeatableRead,
         CcProtocol proto = CcProtocol::Locking,
         bool is_for_write = false,
-        bool is_recovring = false) = 0;
+        bool allow_run_on_candidate = false) = 0;
 
     virtual void ScanOpen(
         const TableName &table_name,
@@ -404,7 +408,8 @@ public:
     virtual void NewTxn(CcHandlerResult<InitTxResult> &hres,
                         IsolationLevel iso_level,
                         NodeGroupId tx_ng_id,
-                        uint32_t log_group_id) = 0;
+                        uint32_t log_group_id,
+                        bool allow_run_on_candidate) = 0;
 
     /// <summary>
     /// Sets the commit timestamp of the input tx.

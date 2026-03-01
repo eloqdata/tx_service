@@ -2449,6 +2449,7 @@ private:
 
     bool GetNextRangePartitionId(const TableName &tablename,
                                  const TableSchema *table_schema,
+                                 NodeGroupId ng_id,
                                  uint32_t range_cnt,
                                  int32_t &out_next_partition_id);
 
