@@ -84,7 +84,8 @@ public:
                    const TxRecord *record,
                    OperationType operation_type,
                    uint32_t key_shard_code,
-                   CcHandlerResult<PostProcessResult> &hres);
+                   CcHandlerResult<PostProcessResult> &hres,
+                   uint8_t range_size_flags = 0x10);
 
     void PostWriteAll(uint32_t src_node_id,
                       const TableName &table_name,

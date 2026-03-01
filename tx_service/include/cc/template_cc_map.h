@@ -617,17 +617,20 @@ public:
 
                 if constexpr (RangePartitioned)
                 {
-                    const int64_t key_delta_size =
-                        (new_status == RecordStatus::Deleted)
-                            ? (-static_cast<int64_t>(write_key->Size() +
-                                                     old_payload_size))
-                            : (static_cast<int64_t>(cce->PayloadSize()) -
-                               static_cast<int64_t>(old_payload_size));
-                    const uint32_t range_id = req.PartitionId();
-                    // is_dirty: true when range is splitting.
-                    UpdateRangeSize(range_id,
-                                    static_cast<int32_t>(key_delta_size),
-                                    req.OnDirtyRange());
+                    if (req.NeedUpdateRangeSize())
+                    {
+                        const int64_t key_delta_size =
+                            (new_status == RecordStatus::Deleted)
+                                ? (-static_cast<int64_t>(write_key->Size() +
+                                                         old_payload_size))
+                                : (static_cast<int64_t>(cce->PayloadSize()) -
+                                   static_cast<int64_t>(old_payload_size));
+                        const uint32_t range_id = req.PartitionId();
+                        // is_dirty: true when range is splitting.
+                        UpdateRangeSize(range_id,
+                                        static_cast<int32_t>(key_delta_size),
+                                        req.OnDirtyRange());
+                    }
                 }
 
                 if (req.IsInitialInsert())

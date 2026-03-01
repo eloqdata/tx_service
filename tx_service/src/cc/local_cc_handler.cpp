@@ -274,7 +274,8 @@ txservice::CcReqStatus txservice::LocalCcHandler::PostWrite(
     const TxRecord *record,
     OperationType operation_type,
     uint32_t key_shard_code,
-    CcHandlerResult<PostProcessResult> &hres)
+    CcHandlerResult<PostProcessResult> &hres,
+    uint8_t range_size_flags)
 {
     uint32_t ng_id = cce_addr.NodeGroupId();
     uint32_t dest_node_id = Sharder::Instance().LeaderNodeId(ng_id);
@@ -293,7 +294,8 @@ txservice::CcReqStatus txservice::LocalCcHandler::PostWrite(
                    record,
                    operation_type,
                    key_shard_code,
-                   &hres);
+                   &hres,
+                   range_size_flags);
         TX_TRACE_ACTION(this, req);
         TX_TRACE_DUMP(req);
         cc_shards_.EnqueueCcRequest(thd_id_, cce_addr.CoreId(), req);
@@ -312,7 +314,8 @@ txservice::CcReqStatus txservice::LocalCcHandler::PostWrite(
                              record,
                              operation_type,
                              key_shard_code,
-                             hres);
+                             hres,
+                             range_size_flags);
     }
     return req_status;
 }
