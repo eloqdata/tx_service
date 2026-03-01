@@ -918,6 +918,7 @@ message PostCommitRequest {
     bytes record = 5;
     uint32 operation_type = 6;
     uint32 key_shard_code = 7;
+    uint32 range_size_flags = 8;
 }
 
 message ForwardPostCommitRequest {

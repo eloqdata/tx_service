@@ -159,7 +159,8 @@ void txservice::remote::RemoteCcHandler::PostWrite(
     const TxRecord *record,
     OperationType operation_type,
     uint32_t key_shard_code,
-    CcHandlerResult<PostProcessResult> &hres)
+    CcHandlerResult<PostProcessResult> &hres,
+    uint8_t range_size_flags)
 {
     CcMessage send_msg;
 
@@ -194,6 +195,7 @@ void txservice::remote::RemoteCcHandler::PostWrite(
     post_commit->set_commit_ts(commit_ts);
     post_commit->set_operation_type(static_cast<uint32_t>(operation_type));
     post_commit->set_key_shard_code(key_shard_code);
+    post_commit->set_range_size_flags(range_size_flags);
 
     stream_sender_.SendMessageToNg(cce_addr.NodeGroupId(), send_msg, &hres);
 }
