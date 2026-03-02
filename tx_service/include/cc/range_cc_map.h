@@ -1208,6 +1208,14 @@ public:
             // add new range entry to range cc map
             auto bucket_map = static_cast<RangeBucketCcMap *>(
                 shard_->GetCcm(range_bucket_ccm_name, this->cc_ng_id_));
+            TableType data_table_type =
+                TableName::Type(this->table_name_.StringView());
+            TableName data_table_name(this->table_name_.StringView(),
+                                      data_table_type,
+                                      this->table_name_.Engine());
+            CcMap *data_ccm = shard_->GetCcm(data_table_name, this->cc_ng_id_);
+            assert(data_ccm != nullptr);
+
             for (uint idx = 0; idx < new_range_infos.size(); idx++)
             {
                 const TemplateRangeInfo<KeyT> *new_range_info =
@@ -1230,6 +1238,51 @@ public:
                         new_range_info->PartitionId()));
                 cce->SetCommitTsPayloadStatus(new_range_info->version_ts_,
                                               RecordStatus::Normal);
+
+                // Reset new range size on data table ccmap if this core owns
+                // it.
+                int32_t new_range_id = new_range_info->PartitionId();
+                NodeGroupId new_range_owner =
+                    shard_->GetRangeOwner(new_range_id, this->cc_ng_id_)
+                        ->BucketOwner();
+                if (new_range_owner == this->cc_ng_id_ &&
+                    static_cast<uint16_t>((new_range_id & 0x3FF) %
+                                          shard_->core_cnt_) ==
+                        shard_->core_id_)
+                {
+                    const TableRangeEntry *new_range_entry =
+                        shard_->GetTableRangeEntry(
+                            this->table_name_, this->cc_ng_id_, new_range_id);
+                    assert(new_range_entry != nullptr);
+                    size_t range_size =
+                        static_cast<const TemplateTableRangeEntry<KeyT> *>(
+                            new_range_entry)
+                            ->TypedStoreRange()
+                            ->PostCkptSize();
+                    data_ccm->InitRangeSize(static_cast<uint32_t>(new_range_id),
+                                            static_cast<int32_t>(range_size),
+                                            true,
+                                            true);
+                }
+            }
+
+            // Reset old range size on the data table ccmap if this core owns
+            // it.
+            int32_t old_range_id =
+                old_table_range_entry->GetRangeInfo()->PartitionId();
+            NodeGroupId range_owner =
+                shard_->GetRangeOwner(old_range_id, this->cc_ng_id_)
+                    ->BucketOwner();
+            if (range_owner == this->cc_ng_id_ &&
+                static_cast<uint16_t>((old_range_id & 0x3FF) %
+                                      shard_->core_cnt_) == shard_->core_id_)
+            {
+                size_t old_range_size =
+                    old_table_range_entry->RangeSlices()->PostCkptSize();
+                data_ccm->InitRangeSize(static_cast<uint32_t>(old_range_id),
+                                        static_cast<int32_t>(old_range_size),
+                                        true,
+                                        true);
             }
         }
 
