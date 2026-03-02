@@ -771,8 +771,6 @@ public:
                                        true);
                 }
             }
-            // range_owner_rec_ needs to be reset on each core since they point
-            // to bucket records on different cores.
             // Reset old range size on the data table ccmap (no emplace).
             int32_t old_partition_id =
                 upload_range_rec->GetRangeInfo()->PartitionId();
@@ -792,6 +790,9 @@ public:
                 ccm->InitRangeSize(static_cast<uint32_t>(old_partition_id),
                                    static_cast<int32_t>(old_range_size));
             }
+
+            // range_owner_rec_ needs to be reset on each core since they point
+            // to bucket records on different cores.
             upload_range_rec->range_owner_rec_ =
                 target_cce->payload_.cur_payload_->range_owner_rec_;
 
