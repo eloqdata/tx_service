@@ -6858,7 +6858,114 @@ public:
 
             offset += sizeof(uint8_t);
 
-            uint16_t core_id = (key.Hash() & 0x3FF) % shard_->core_cnt_;
+            uint16_t core_id = 0;
+            bool is_dirty = false;
+            bool need_update_size = true;
+            int32_t partition_id = -1;
+
+            if constexpr (RangePartitioned)
+            {
+                const TableRangeEntry *range_entry = shard_->GetTableRangeEntry(
+                    table_name_, cc_ng_id_, TxKey(&key));
+                if (range_entry == nullptr)
+                {
+                    // range metadata missing, conservative handling: only
+                    // consume value / skip.
+                    if (op_type == OperationType::Insert ||
+                        op_type == OperationType::Update)
+                    {
+                        rec.Deserialize(log_blob.data(), offset);
+                    }
+                    continue;
+                }
+
+                partition_id = range_entry->GetRangeInfo()->PartitionId();
+                const BucketInfo *bucket_info = shard_->GetBucketInfo(
+                    Sharder::MapRangeIdToBucketId(partition_id), cc_ng_id_);
+
+                // Old range bucket does not belong to this ng, nor is it a
+                // "dirty bucket" migrating to this ng.
+                if (bucket_info->BucketOwner() != cc_ng_id_ &&
+                    bucket_info->DirtyBucketOwner() != cc_ng_id_)
+                {
+                    int32_t new_range_id =
+                        range_entry->GetRangeInfo()->GetKeyNewRangeId(
+                            TxKey(&key));
+                    // If range is splitting, check if new range belongs to
+                    // this ng.
+                    if (new_range_id >= 0)
+                    {
+                        const BucketInfo *new_bucket_info =
+                            shard_->GetBucketInfo(
+                                Sharder::MapRangeIdToBucketId(new_range_id),
+                                cc_ng_id_);
+                        if (new_bucket_info->BucketOwner() != cc_ng_id_ &&
+                            new_bucket_info->DirtyBucketOwner() != cc_ng_id_)
+                        {
+                            // Neither old bucket nor new bucket belongs to this
+                            // ng: only consume value and continue.
+                            if (op_type != OperationType::Delete)
+                            {
+                                rec.Deserialize(log_blob.data(), offset);
+                            }
+                            continue;
+                        }
+
+                        // new range belongs to this ng: determine core based on
+                        // new_range_id and mark dirty.
+                        core_id = static_cast<uint16_t>((new_range_id & 0x3FF) %
+                                                        shard_->core_cnt_);
+                        is_dirty = true;
+
+                        uint64_t range_split_commit_ts =
+                            req.RangeSplitCommitTs(partition_id);
+                        // Only update range size for keys updated during the
+                        // double-write phase.
+                        need_update_size =
+                            (range_split_commit_ts == 0) ||
+                            (req.CommitTs() > range_split_commit_ts);
+                    }
+                    else
+                    {
+                        // new_range_id < 0: key still belongs to old range, but
+                        // old range bucket does not belong to this ng.
+                        // Semantically, it should not be applied to this ng:
+                        // only consume and continue.
+                        if (op_type != OperationType::Delete)
+                        {
+                            rec.Deserialize(log_blob.data(), offset);
+                        }
+                        continue;
+                    }
+                }
+                else
+                {
+                    // Old range bucket belongs to this ng or is migrating to
+                    // this ng.
+                    core_id = static_cast<uint16_t>((partition_id & 0x3FF) %
+                                                    shard_->core_cnt_);
+                    is_dirty = range_entry->GetRangeInfo()->IsDirty();
+
+                    uint64_t range_split_commit_ts =
+                        req.RangeSplitCommitTs(partition_id);
+                    need_update_size = (range_split_commit_ts == 0) ||
+                                       (req.CommitTs() > range_split_commit_ts);
+                }
+            }
+            else
+            {
+                uint16_t bucket_id = Sharder::MapKeyHashToBucketId(key.Hash());
+                const BucketInfo *bucket_info =
+                    shard_->GetBucketInfo(bucket_id, cc_ng_id_);
+                if (bucket_info->BucketOwner() != cc_ng_id_ &&
+                    bucket_info->DirtyBucketOwner() != cc_ng_id_)
+                {
+                    continue;
+                }
+                core_id = static_cast<uint16_t>((key.Hash() & 0x3FF) %
+                                                shard_->core_cnt_);
+            }
+
             if (core_id != shard_->core_id_)
             {
                 // Skips the key in the log record that is not sharded
@@ -6875,57 +6982,6 @@ public:
                     next_core = std::min(core_id, next_core);
                 }
                 continue;
-            }
-
-            // Skip records that no longer belong to this ng.
-            if (RangePartitioned)
-            {
-                const TableRangeEntry *range_entry = shard_->GetTableRangeEntry(
-                    table_name_, cc_ng_id_, TxKey(&key));
-
-                const BucketInfo *bucket_info = shard_->GetBucketInfo(
-                    Sharder::MapRangeIdToBucketId(
-                        range_entry->GetRangeInfo()->PartitionId()),
-                    cc_ng_id_);
-                // Check if range bucket belongs to this ng or is migrating
-                // to this ng.
-                if (bucket_info->BucketOwner() != cc_ng_id_ &&
-                    bucket_info->DirtyBucketOwner() != cc_ng_id_)
-                {
-                    int32_t new_range_id =
-                        range_entry->GetRangeInfo()->GetKeyNewRangeId(
-                            TxKey(&key));
-                    // If range is splitting, check if new range belongs to
-                    // this ng.
-                    if (new_range_id >= 0)
-                    {
-                        const BucketInfo *new_bucket_info =
-                            shard_->GetBucketInfo(
-                                Sharder::MapRangeIdToBucketId(
-                                    range_entry->GetRangeInfo()->PartitionId()),
-                                cc_ng_id_);
-                        if (new_bucket_info->BucketOwner() != cc_ng_id_ &&
-                            new_bucket_info->DirtyBucketOwner() != cc_ng_id_)
-                        {
-                            if (op_type != OperationType::Delete)
-                            {
-                                rec.Deserialize(log_blob.data(), offset);
-                            }
-                            continue;
-                        }
-                    }
-                }
-            }
-            else
-            {
-                uint16_t bucket_id = Sharder::MapKeyHashToBucketId(key.Hash());
-                const BucketInfo *bucket_info =
-                    shard_->GetBucketInfo(bucket_id, cc_ng_id_);
-                if (bucket_info->BucketOwner() != cc_ng_id_ &&
-                    bucket_info->DirtyBucketOwner() != cc_ng_id_)
-                {
-                    continue;
-                }
             }
 
             Iterator it = FindEmplace(key);
@@ -7000,6 +7056,12 @@ public:
                 {
                     cce->ArchiveBeforeUpdate();
                 }
+
+                [[maybe_unused]] const size_t old_payload_size =
+                    cce->PayloadSize();
+                [[maybe_unused]] const RecordStatus cce_old_status =
+                    cce->PayloadStatus();
+
                 RecordStatus rec_status;
                 if (op_type == OperationType::Insert ||
                     op_type == OperationType::Update)
@@ -7020,6 +7082,26 @@ public:
                 bool was_dirty = cce->IsDirty();
                 cce->SetCommitTsPayloadStatus(commit_ts, rec_status);
                 OnCommittedUpdate(cce, was_dirty);
+
+                if constexpr (RangePartitioned)
+                {
+                    if (need_update_size)
+                    {
+                        int32_t delta_size =
+                            (rec_status == RecordStatus::Deleted)
+                                ? -static_cast<int32_t>(key.Size() +
+                                                        old_payload_size)
+                                : static_cast<int32_t>(
+                                      cce_old_status != RecordStatus::Normal
+                                          ? (key.Size() + cce->PayloadSize())
+                                          : (cce->PayloadSize() -
+                                             old_payload_size));
+
+                        UpdateRangeSize(static_cast<uint32_t>(partition_id),
+                                        delta_size,
+                                        is_dirty);
+                    }
+                }
 
                 if (commit_ts > last_dirty_commit_ts_)
                 {
