@@ -902,7 +902,6 @@ struct NonVersionedPayload
         ValueT tx_obj;
         cur_payload_.reset(static_cast<ValueT *>(
             tx_obj.DeserializeObject(data, offset).release()));
-        ;
     }
 
     std::shared_ptr<ValueT> VersionedCurrentPayload()
@@ -2041,6 +2040,9 @@ struct LruPage
     // without TTL set is UINT64_MAX. This value is used to decide if this page
     // needs to be scanned when purging deleted entries in memory.
     uint64_t smallest_ttl_{UINT64_MAX};
+
+    // Large object occupies one page exclusively.
+    bool large_obj_page_ : 1 {false};
 };
 
 template <typename KeyT,
@@ -2280,6 +2282,24 @@ struct CcPage : public LruPage
             entries_.begin() + insert_pos,
             std::make_unique<
                 CcEntry<KeyT, ValueT, VersionedRecord, RangePartitioned>>());
+        return insert_pos;
+    }
+
+    size_t Emplace(
+        const KeyT &key,
+        std::unique_ptr<
+            CcEntry<KeyT, ValueT, VersionedRecord, RangePartitioned>> entry)
+    {
+        // append check
+        auto insert_it =
+            keys_.size() > 0 && keys_.back() < key
+                ? keys_.end()
+                : std::lower_bound(keys_.begin(), keys_.end(), key);
+        assert(insert_it == keys_.end() || *insert_it != key);
+
+        size_t insert_pos = insert_it - keys_.begin();
+        keys_.emplace(insert_it, key);
+        entries_.emplace(entries_.begin() + insert_pos, entry);
         return insert_pos;
     }
 
@@ -2530,6 +2550,16 @@ struct CcPage : public LruPage
     {
         size_t idx = FindEntry(entry);
         return Remove(idx);
+    }
+
+    std::unique_ptr<CcEntry<KeyT, ValueT, VersionedRecord, RangePartitioned>>
+    MoveEntry(size_t idx)
+    {
+        std::unique_ptr<
+            CcEntry<KeyT, ValueT, VersionedRecord, RangePartitioned>>
+            entry = std::move(entries_[idx]);
+        assert(entry != nullptr);
+        return entry;
     }
 
     size_t Size() const
