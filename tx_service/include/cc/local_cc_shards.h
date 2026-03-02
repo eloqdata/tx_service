@@ -1818,6 +1818,18 @@ public:
 
     void FlushCurrentFlushBuffer();
 
+    void SetupPolicyLRU()
+    {
+        cache_evict_policy_ = CacheEvictPolicy::LRU;
+    }
+
+    void SetupPolicyLoLRU(uint32_t large_obj_threshold_kb)
+    {
+        cache_evict_policy_ = CacheEvictPolicy::LO_LRU;
+        u_cache_evict_policy_.lo_lru.large_obj_threshold_bytes =
+            large_obj_threshold_kb * 1024ul;
+    }
+
     store::DataStoreHandler *const store_hd_;
 
     /*
@@ -2050,6 +2062,13 @@ private:
     bool enable_mvcc_;
 
     bool realtime_sampling_;
+
+    CacheEvictPolicy cache_evict_policy_{CacheEvictPolicy::LRU};
+    union
+    {
+        CacheEvictPolicyLRU lru;
+        CacheEvictPolicyLoLRU lo_lru;
+    } u_cache_evict_policy_;
 
     struct RangeSplitTask
     {

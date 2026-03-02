@@ -95,6 +95,7 @@ public:
     using CcMap::shard_;
     using CcMap::table_name_;
     using CcMap::table_schema_;
+    using TemplateCcMap<KeyT, ValueT, false, false>::ccmp_;
     using TemplateCcMap<KeyT, ValueT, false, false>::Find;
     using TemplateCcMap<KeyT, ValueT, false, false>::FindEmplace;
     using TemplateCcMap<KeyT, ValueT, false, false>::End;
@@ -103,6 +104,7 @@ public:
     using TemplateCcMap<KeyT, ValueT, false, false>::RecordSchema;
     using TemplateCcMap<KeyT, ValueT, false, false>::Type;
     using TemplateCcMap<KeyT, ValueT, false, false>::CleanEntry;
+    using TemplateCcMap<KeyT, ValueT, false, false>::TryUpdatePageKey;
 
     bool Execute(ApplyCc &req) override
     {
@@ -1046,6 +1048,10 @@ public:
                 }
                 CommitCommandOnDirtyPayload(
                     dirty_payload, dirty_payload_status, *cmd);
+                if (shard_->GetCacheEvictPolicy() == CacheEvictPolicy::LO_LRU)
+                {
+                    EnsureLargeObjOccupyPageAlone(ccp, cce);
+                }
             }
             // if cmd.ExecuteOn() telling ttl reset is not going to happen
             else if (obj_result.ttl_reset_ == true)
@@ -1201,6 +1207,11 @@ public:
                 {
                     CommitCommandOnPayload(
                         cce->payload_.cur_payload_, status, *cmd);
+                    if (shard_->GetCacheEvictPolicy() ==
+                        CacheEvictPolicy::LO_LRU)
+                    {
+                        EnsureLargeObjOccupyPageAlone(ccp, cce);
+                    }
                 }
 
                 // Reset the dirty status.
@@ -1418,6 +1429,11 @@ public:
                     CommitCommandOnPayload(cce->payload_.cur_payload_,
                                            payload_status,
                                            *pending_cmd);
+                    if (shard_->GetCacheEvictPolicy() ==
+                        CacheEvictPolicy::LO_LRU)
+                    {
+                        EnsureLargeObjOccupyPageAlone(ccp, cce);
+                    }
                 }
                 else
                 {
@@ -2553,7 +2569,8 @@ public:
 
         CcEntry<KeyT, ValueT, false, false> *cce =
             static_cast<CcEntry<KeyT, ValueT, false, false> *>(entry);
-        LruPage *ccp = cce->GetCcPage();
+        CcPage<KeyT, ValueT, false, false> *ccp =
+            static_cast<CcPage<KeyT, ValueT, false, false> *>(cce->GetCcPage());
 
         cce->GetKeyGapLockAndExtraData()->ReleasePin();
         cce->RecycleKeyLock(*shard_);
@@ -2692,6 +2709,11 @@ public:
                 {
                     ccp->smallest_ttl_ = cce->payload_.cur_payload_->GetTTL();
                 }
+
+                if (shard_->GetCacheEvictPolicy() == CacheEvictPolicy::LO_LRU)
+                {
+                    EnsureLargeObjOccupyPageAlone(ccp, cce);
+                }
             }
             else
             {
@@ -2777,6 +2799,14 @@ private:
             // Commit the pending command.
             CommitCommandOnDirtyPayload(
                 dirty_payload, dirty_payload_status, *pending_cmd);
+            if (shard_->GetCacheEvictPolicy() == CacheEvictPolicy::LO_LRU)
+            {
+                CcPage<KeyT, ValueT, false, false> *ccp =
+                    static_cast<CcPage<KeyT, ValueT, false, false> *>(
+                        cce->GetCcPage());
+                EnsureLargeObjOccupyPageAlone(ccp, cce);
+            }
+
             cce->SetDirtyPayload(std::move(dirty_payload));
             cce->SetDirtyPayloadStatus(dirty_payload_status);
             cce->SetPendingCmd(nullptr);
@@ -2881,6 +2911,55 @@ private:
         return cce->payload_.cur_payload_ != nullptr
                    ? cce->payload_.cur_payload_->GetObjectType()
                    : -1;
+    }
+
+    void EnsureLargeObjOccupyPageAlone(CcPage<KeyT, ValueT, false, false> *ccp,
+                                       CcEntry<KeyT, ValueT, false, false> *cce)
+    {
+        assert(cce->PayloadStatus() == RecordStatus::Normal);
+        if (cce->payload_.cur_payload_.SerializedLength() >
+            shard_->LargeObjThresholdBytes())
+        {
+            if (ccp->Size() == 1)
+            {
+                ccp->large_obj_page_ = true;
+            }
+            else
+            {
+                assert(ccp->large_obj_page_ == false);
+                size_t idx_in_ccp = ccp->FindEntry(cce);
+                const KeyT *key = ccp->Key(idx_in_ccp);
+
+                auto large_obj_ccp_uptr =
+                    std::make_unique<CcPage<KeyT, ValueT, false, false>>(
+                        this, ccp, ccp->next_page_);
+                CcPage<KeyT, ValueT, false, false> *large_obj_ccp_ptr =
+                    large_obj_ccp_uptr.get();
+
+                large_obj_ccp_ptr->prev_page_ = ccp;
+                large_obj_ccp_ptr->next_page_ = ccp->next_page_;
+                ccp->next_page_->prev_page_ = large_obj_ccp_ptr;
+                ccp->next_page_ = large_obj_ccp_ptr;
+
+                large_obj_ccp_ptr->large_obj_ccp = true;
+                large_obj_ccp_ptr->Emplace(*key, ccp->MoveEntry(idx_in_ccp));
+                large_obj_ccp_ptr->smallest_ttl_ =
+                    cce->payload_.cur_payload_->GetTTL();
+                large_obj_ccp_ptr->last_dirty_commit_ts_ = cce->CommitTs();
+                large_obj_ccp_ptr->last_access_ts_ = 0;
+
+                auto ccp_it = ccmp_.upper_bound(*key);
+                if (ccp_it == ccmp_.end() || *key < ccp_it->first)
+                {
+                    --ccp_it;
+                }
+
+                ccp->Remove(idx_in_ccp);
+                TryUpdatePageKey(ccp_it);
+
+                ccmp_.try_emplace(*key, std::move(large_obj_ccp_uptr));
+            }
+        }
     }
 };
 }  // namespace txservice

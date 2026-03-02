@@ -666,6 +666,21 @@ enum struct TxProcessorStatus
     Standby
 };
 
+enum CacheEvictPolicy
+{
+    LRU = 0,
+    LO_LRU,
+};
+struct CacheEvictPolicyLRU
+{
+    static constexpr std::string_view NAME = "LRU";
+};
+struct CacheEvictPolicyLoLRU
+{
+    static constexpr std::string_view NAME = "LO_LRU";
+    uint64_t large_obj_threshold_bytes;
+};
+
 enum struct WorkerStatus
 {
     Active,
