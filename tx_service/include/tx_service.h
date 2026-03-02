@@ -89,9 +89,6 @@ class TxServiceModule;
 class TxProcessor
 {
 public:
-    static const int64_t t1sec = 1000000L;
-    static const int64_t t2sec = 4000000L;
-
     TxProcessor(size_t thd_id,
                 LocalCcShards &shards,
                 TxLog *txlog_hd,
@@ -1301,6 +1298,16 @@ public:
         }
         local_cc_shards_.StartBackgroudWorkers();
         return 0;
+    }
+
+    void SetupPolicyLRU()
+    {
+        local_cc_shards_.SetupPolicyLRU();
+    }
+
+    void SetupPolicyLoLRU(uint32_t large_obj_threshold_kb)
+    {
+        local_cc_shards_.SetupPolicyLoLRU(large_obj_threshold_kb);
     }
 
     void WaitClusterReady()
