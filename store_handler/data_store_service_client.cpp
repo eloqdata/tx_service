@@ -303,7 +303,7 @@ bool DataStoreServiceClient::PutAll(
                        std::vector<std::unique_ptr<txservice::FlushTaskEntry>>>
         &flush_task)
 {
-    auto start_time = std::chrono::steady_clock::now();
+    auto prepare_time = std::chrono::steady_clock::now();
     DLOG(INFO) << "DataStoreServiceClient::PutAll called with "
                << flush_task.size() << " tables to flush.";
     uint64_t now = txservice::LocalCcShards::ClockTsInMillseconds();
@@ -420,9 +420,12 @@ bool DataStoreServiceClient::PutAll(
         range_partitions_map.clear();
     }
 
+    auto prepare_end = std::chrono::steady_clock::now();
+
     // Set up global coordinator
     sync_putall->total_partitions_ = sync_putall->partition_states_.size();
 
+    auto write_start = std::chrono::steady_clock::now();
     // Start concurrent processing for each partition
     for (size_t i = 0; i < callback_data_list.size(); ++i)
     {
@@ -456,6 +459,8 @@ bool DataStoreServiceClient::PutAll(
         }
     }
 
+    auto write_end = std::chrono::steady_clock::now();
+
     auto wait_start = std::chrono::steady_clock::now();
     // Wait for all partitions to complete
     {
@@ -469,10 +474,16 @@ bool DataStoreServiceClient::PutAll(
 
     auto wait_end = std::chrono::steady_clock::now();
 
-    auto stop_time = std::chrono::steady_clock::now();
-    auto duration = std::chrono::duration_cast<std::chrono::microseconds>(
-        stop_time - start_time);
-    LOG(INFO) << "PutAll(...) duration = " << duration.count() << "us"
+    LOG(INFO) << "PutAll(...) prepare duration = "
+              << std::chrono::duration_cast<std::chrono::microseconds>(
+                     prepare_end - prepare_time)
+                     .count()
+              << "us"
+              << ", write duration = "
+              << std::chrono::duration_cast<std::chrono::microseconds>(
+                     write_end - write_start)
+                     .count()
+              << "us"
               << ", wait duration = "
               << std::chrono::duration_cast<std::chrono::microseconds>(
                      wait_end - wait_start)
