@@ -29,6 +29,7 @@
 #include "template_cc_map.h"
 #include "tx_key.h"     // CompositeKey
 #include "tx_record.h"  // CompositeRecord
+#include "tx_service_common.h"
 #include "type.h"
 
 namespace txservice
@@ -175,6 +176,379 @@ TEST_CASE("CcPage clean tests", "[cc-page]")
     local_cc_shards.Terminate();
 
     REQUIRE(total_remain + total_free == MAP_NUM * MAP_SIZE);
+}
+
+// A CompositeRecord<int> subclass that reports an artificially large payload
+// size. Used to test the payload-size-aware cache eviction protection.
+struct LargeCompositeRecord : public CompositeRecord<int>
+{
+    explicit LargeCompositeRecord(int val, size_t reported_size)
+        : CompositeRecord<int>(val), reported_size_(reported_size)
+    {
+    }
+
+    size_t Size() const override
+    {
+        return reported_size_;
+    }
+
+    TxRecord::Uptr Clone() const override
+    {
+        return std::make_unique<LargeCompositeRecord>(*this);
+    }
+
+    size_t reported_size_;
+};
+
+// Test-only subclass of TemplateCcMap that enables the large-value zone
+// (simulating ObjectCcMap behaviour for tests that use different template
+// parameters such as VersionedRecord=true / RangePartitioned=true).
+template <typename KeyT, typename ValueT, bool VR, bool RP>
+class LargeValueTestCcMap : public TemplateCcMap<KeyT, ValueT, VR, RP>
+{
+public:
+    using TemplateCcMap<KeyT, ValueT, VR, RP>::TemplateCcMap;
+    bool IsLargeValueZoneEnabled() const override
+    {
+        return txservice_large_value_threshold > 0;
+    }
+};
+
+TEST_CASE("Large-value eviction protection test", "[cc-page]")
+{
+    std::unordered_map<uint32_t, std::vector<NodeConfig>> ng_configs{
+        {0, {NodeConfig(0, "127.0.0.1", 8600)}}};
+    std::map<std::string, uint32_t> tx_cnf{{"node_memory_limit_mb", 1000},
+                                           {"enable_key_cache", 0},
+                                           {"reltime_sampling", 0},
+                                           {"range_split_worker_num", 1},
+                                           {"core_num", 1},
+                                           {"realtime_sampling", 0},
+                                           {"checkpointer_interval", 10},
+                                           {"enable_shard_heap_defragment", 0},
+                                           {"node_log_limit_mb", 1000}};
+    LocalCcShards local_cc_shards(
+        0, 0, tx_cnf, nullptr, nullptr, &ng_configs, 2, nullptr, nullptr, true);
+    CcShard shard(0,
+                  1,
+                  10000,
+                  10000,
+                  false,
+                  0,
+                  local_cc_shards,
+                  nullptr,
+                  nullptr,
+                  &ng_configs,
+                  2);
+    shard.Init();
+    std::string raft_path("");
+    Sharder::Instance(0,
+                      &ng_configs,
+                      0,
+                      nullptr,
+                      nullptr,
+                      &local_cc_shards,
+                      nullptr,
+                      &raft_path);
+
+    const size_t MAP_SIZE = 200;
+    const size_t LARGE_PAYLOAD_SIZE = 1024;
+
+    using TestCcMap = LargeValueTestCcMap<CompositeKey<std::string, int>,
+                                          CompositeRecord<int>,
+                                          true,
+                                          true>;
+
+    // Small-value map – pages stay in the head (small-value) zone.
+    std::string small_table = "small_val_test";
+    TableName small_tname(
+        small_table, TableType::Primary, TableEngine::EloqSql);
+    auto small_map =
+        std::make_unique<TestCcMap>(&shard, 0, small_tname, 1, nullptr, true);
+
+    // Large-value map – pages will be re-zoned to the tail (large-value) zone.
+    std::string large_table = "large_val_test";
+    TableName large_tname(
+        large_table, TableType::Primary, TableEngine::EloqSql);
+    auto large_map =
+        std::make_unique<TestCcMap>(&shard, 0, large_tname, 1, nullptr, true);
+
+    auto make_keys = [](const std::string &tname,
+                        size_t cnt,
+                        std::vector<CompositeKey<std::string, int>> &storage)
+        -> std::vector<CompositeKey<std::string, int> *>
+    {
+        for (size_t i = 0; i < cnt; i++)
+        {
+            storage.emplace_back(std::make_tuple(tname, static_cast<int>(i)));
+        }
+        std::vector<CompositeKey<std::string, int> *> ptrs;
+        for (auto &k : storage)
+        {
+            ptrs.push_back(&k);
+        }
+        return ptrs;
+    };
+
+    // Insert entries for both maps.  Both maps start in the small-value zone
+    // because has_large_value_ is false on insertion.
+    std::vector<CompositeKey<std::string, int>> small_keys;
+    REQUIRE(small_map->BulkEmplaceFreeForTest(
+        make_keys(small_table, MAP_SIZE, small_keys)));
+    REQUIRE(small_map->VerifyOrdering() == MAP_SIZE);
+
+    std::vector<CompositeKey<std::string, int>> large_keys;
+    REQUIRE(large_map->BulkEmplaceFreeForTest(
+        make_keys(large_table, MAP_SIZE, large_keys)));
+    REQUIRE(large_map->VerifyOrdering() == MAP_SIZE);
+
+    // Assign large payloads to the large-value map entries.
+    auto large_payload =
+        std::make_shared<LargeCompositeRecord>(42, LARGE_PAYLOAD_SIZE);
+    large_map->SetPayloadForTest(large_payload);
+
+    txservice_large_value_threshold = LARGE_PAYLOAD_SIZE / 2;
+
+    // -----------------------------------------------------------------------
+    // PART 1: Zone-separation structure.
+    // -----------------------------------------------------------------------
+    // Use RezoneAsLargeValueForTest() to set has_large_value_ on large_map
+    // pages and call UpdateLruList to move them into the large-value zone.
+    // This simulates what happens in production when those pages are accessed
+    // after CanBeCleaned has set has_large_value_ on them.
+    large_map->RezoneAsLargeValueForTest();
+    shard.VerifyLruList();
+
+    // lru_large_value_zone_head_ must now point into the large-value zone.
+    const LruPage *zone_head = shard.LruLargeValueZoneHead();
+    REQUIRE(zone_head != nullptr);
+    REQUIRE(zone_head->parent_map_ != nullptr);  // not a sentinel
+
+    // Walk the LRU list and verify:
+    //   head → [small_map pages] → zone_head → [large_map pages] → tail
+    {
+        bool in_large_zone = false;
+        for (const LruPage *p = shard.LruHead()->lru_next_;
+             p->parent_map_ != nullptr;  // sentinel tail has parent_map_==null
+             p = p->lru_next_)
+        {
+            if (p == zone_head)
+            {
+                in_large_zone = true;
+            }
+            if (in_large_zone)
+            {
+                REQUIRE(p->parent_map_ == large_map.get());
+            }
+            else
+            {
+                REQUIRE(p->parent_map_ == small_map.get());
+            }
+        }
+        // We must have entered the large zone.
+        REQUIRE(in_large_zone);
+    }
+
+    // -----------------------------------------------------------------------
+    // PART 2: Small-value insertion stays before the zone head.
+    // -----------------------------------------------------------------------
+    const LruPage *zone_head_before = shard.LruLargeValueZoneHead();
+    CompositeKey<std::string, int> extra_sv_key =
+        std::make_tuple(small_table, static_cast<int>(MAP_SIZE + 1));
+    std::vector<CompositeKey<std::string, int> *> extra_sv_ptr = {
+        &extra_sv_key};
+    REQUIRE(small_map->BulkEmplaceFreeForTest(extra_sv_ptr));
+    shard.VerifyLruList();
+    // SV insertion must not change the zone head.
+    REQUIRE(shard.LruLargeValueZoneHead() == zone_head_before);
+
+    // -----------------------------------------------------------------------
+    // PART 3: Full scan – all pages are evicted.
+    // -----------------------------------------------------------------------
+    size_t total_freed = 0;
+    while (true)
+    {
+        auto [free_cnt, yield] = shard.Clean();
+        shard.VerifyLruList();
+        total_freed += free_cnt;
+        if (free_cnt == 0)
+        {
+            break;
+        }
+    }
+    REQUIRE(total_freed == MAP_SIZE + MAP_SIZE + 1 /* extra sv */);
+
+    // Restore global defaults.
+    txservice_large_value_threshold = 0;
+    local_cc_shards.Terminate();
+}
+
+// ---------------------------------------------------------------------------
+// Test that MaybeMarkAndRezoneAsLargeValue fires eagerly at payload-set time,
+// BEFORE any clean-page scan takes place.
+// ---------------------------------------------------------------------------
+TEST_CASE("Eager re-zone on large-value payload", "[cc-page]")
+{
+    std::unordered_map<uint32_t, std::vector<NodeConfig>> ng_configs{
+        {0, {NodeConfig(0, "127.0.0.1", 8600)}}};
+    std::map<std::string, uint32_t> tx_cnf{{"node_memory_limit_mb", 1000},
+                                           {"enable_key_cache", 0},
+                                           {"reltime_sampling", 0},
+                                           {"range_split_worker_num", 1},
+                                           {"core_num", 1},
+                                           {"realtime_sampling", 0},
+                                           {"checkpointer_interval", 10},
+                                           {"enable_shard_heap_defragment", 0},
+                                           {"node_log_limit_mb", 1000}};
+    LocalCcShards local_cc_shards(
+        0, 0, tx_cnf, nullptr, nullptr, &ng_configs, 2, nullptr, nullptr, true);
+    CcShard shard(0,
+                  1,
+                  10000,
+                  10000,
+                  false,
+                  0,
+                  local_cc_shards,
+                  nullptr,
+                  nullptr,
+                  &ng_configs,
+                  2);
+    shard.Init();
+    std::string raft_path("");
+    Sharder::Instance(0,
+                      &ng_configs,
+                      0,
+                      nullptr,
+                      nullptr,
+                      &local_cc_shards,
+                      nullptr,
+                      &raft_path);
+
+    const size_t MAP_SIZE = 200;
+    const size_t LARGE_PAYLOAD_SIZE = 1024;
+
+    using TestCcMap = LargeValueTestCcMap<CompositeKey<std::string, int>,
+                                          CompositeRecord<int>,
+                                          true,
+                                          true>;
+
+    // Small-value map — pages stay in the SV zone at all times.
+    std::string small_table = "eager_sv_test";
+    TableName small_tname(
+        small_table, TableType::Primary, TableEngine::EloqSql);
+    auto small_map =
+        std::make_unique<TestCcMap>(&shard, 0, small_tname, 1, nullptr, true);
+
+    // Large-value map — pages will be re-zoned eagerly once we assign a large
+    // payload and call TriggerEagerRezoneForTest().
+    std::string large_table = "eager_lv_test";
+    TableName large_tname(
+        large_table, TableType::Primary, TableEngine::EloqSql);
+    auto large_map =
+        std::make_unique<TestCcMap>(&shard, 0, large_tname, 1, nullptr, true);
+
+    auto make_keys = [](const std::string &tname,
+                        size_t cnt,
+                        std::vector<CompositeKey<std::string, int>> &storage)
+        -> std::vector<CompositeKey<std::string, int> *>
+    {
+        for (size_t i = 0; i < cnt; i++)
+        {
+            storage.emplace_back(std::make_tuple(tname, static_cast<int>(i)));
+        }
+        std::vector<CompositeKey<std::string, int> *> ptrs;
+        for (auto &k : storage)
+        {
+            ptrs.push_back(&k);
+        }
+        return ptrs;
+    };
+
+    std::vector<CompositeKey<std::string, int>> small_keys;
+    REQUIRE(small_map->BulkEmplaceFreeForTest(
+        make_keys(small_table, MAP_SIZE, small_keys)));
+    std::vector<CompositeKey<std::string, int>> large_keys;
+    REQUIRE(large_map->BulkEmplaceFreeForTest(
+        make_keys(large_table, MAP_SIZE, large_keys)));
+
+    // Threshold = half the payload size so all large_map entries qualify
+    // (LARGE_PAYLOAD_SIZE > LARGE_PAYLOAD_SIZE / 2).
+    txservice_large_value_threshold = LARGE_PAYLOAD_SIZE / 2;
+
+    // -----------------------------------------------------------------------
+    // Before re-zone: both maps are in the SV zone (has_large_value_ == false).
+    // The LRU large-value zone is empty: zone head points to the tail sentinel
+    // (parent_map_ == nullptr).
+    // -----------------------------------------------------------------------
+    {
+        const LruPage *zone_head_before = shard.LruLargeValueZoneHead();
+        REQUIRE(zone_head_before != nullptr);
+        REQUIRE(zone_head_before->parent_map_ == nullptr);  // tail sentinel = empty zone
+    }
+
+    // Assign large payloads to the large-value map entries.
+    auto large_payload =
+        std::make_shared<LargeCompositeRecord>(42, LARGE_PAYLOAD_SIZE);
+    large_map->SetPayloadForTest(large_payload);
+    shard.VerifyLruList();
+
+    // -----------------------------------------------------------------------
+    // Eager re-zone: simulate what happens when the payload is installed via
+    // PostWriteCc / BackFill / ReplayLogCc.  No clean scan is involved.
+    // -----------------------------------------------------------------------
+    large_map->TriggerEagerRezoneForTest();
+    shard.VerifyLruList();
+
+    // After TriggerEagerRezoneForTest the zone must be non-empty.
+    const LruPage *zone_head = shard.LruLargeValueZoneHead();
+    REQUIRE(zone_head != nullptr);
+    REQUIRE(zone_head->parent_map_ != nullptr);  // must point to a real page
+
+    // All pages of large_map must be in the LV zone (at or after zone_head),
+    // and all pages of small_map must be in the SV zone (before zone_head).
+    {
+        bool in_large_zone = false;
+        for (const LruPage *p = shard.LruHead()->lru_next_;
+             p->parent_map_ != nullptr;
+             p = p->lru_next_)
+        {
+            if (p == zone_head)
+            {
+                in_large_zone = true;
+            }
+            if (in_large_zone)
+            {
+                INFO("page parent_map should be large_map in LV zone");
+                REQUIRE(p->parent_map_ == large_map.get());
+            }
+            else
+            {
+                INFO("page parent_map should be small_map in SV zone");
+                REQUIRE(p->parent_map_ == small_map.get());
+            }
+        }
+        REQUIRE(in_large_zone);
+    }
+
+    // -----------------------------------------------------------------------
+    // Clean scan: all entries should be evictable (all IsFree).
+    // -----------------------------------------------------------------------
+    size_t total_freed = 0;
+    while (true)
+    {
+        auto [free_cnt, yield] = shard.Clean();
+        shard.VerifyLruList();
+        total_freed += free_cnt;
+        if (free_cnt == 0)
+        {
+            break;
+        }
+    }
+    REQUIRE(total_freed == MAP_SIZE + MAP_SIZE);
+
+    // Restore global defaults.
+    txservice_large_value_threshold = 0;
+    local_cc_shards.Terminate();
 }
 
 }  // namespace txservice

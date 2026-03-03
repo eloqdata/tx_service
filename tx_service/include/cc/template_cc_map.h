@@ -605,7 +605,6 @@ public:
                     cce->payload_.DeserializeCurrentPayload(payload_str->data(),
                                                             offset);
                 }
-
                 RecordStatus cce_old_status = cce->PayloadStatus();
                 RecordStatus new_status =
                     is_del ? RecordStatus::Deleted : RecordStatus::Normal;
@@ -8725,7 +8724,14 @@ public:
                 CcPage<KeyT, ValueT, VersionedRecord, RangePartitioned> *>(
                 lru_page);
         auto page_it = ccmp_.end();
-        bool success = CleanPage(page, page_it, free_cnt, kickout_cc);
+
+        // Only collect the re-zone flag for regular LRU scans (no kickout_cc).
+        // Forced evictions (range migration etc.) should not be affected by
+        // the large-value protection.
+        bool needs_rezoning = false;
+        bool *out_flag = (kickout_cc == nullptr) ? &needs_rezoning : nullptr;
+
+        bool success = CleanPage(page, page_it, free_cnt, kickout_cc, out_flag);
 
         // Output the operation result if the caller care it.
         if (is_success != nullptr)
@@ -8733,8 +8739,22 @@ public:
             *is_success = success;
         }
 
+        // Capture next_page BEFORE potentially moving page (re-zoning changes
+        // page->lru_next_).
         LruPage *next_page =
             RebalancePage(page, page_it, success, kickout_cc == nullptr);
+
+        // Re-zone: CanBeCleaned just discovered that this page has a large-
+        // value entry (has_large_value_ was freshly set). Move the page into
+        // the large-value zone (LRU tail end) via UpdateLruList so that future
+        // small-value insertions are placed before it and it is only evicted
+        // after all small-value pages are gone.
+        if (needs_rezoning && !page->Empty() && page->lru_next_ != nullptr)
+        {
+            shard_->UpdateLruList(page, false);
+            // The scan should continue from the page we had lined up before
+            // the re-zone, not from the page's new position at the tail.
+        }
 
         return {free_cnt, next_page};
     }
@@ -9182,6 +9202,112 @@ public:
                 std::max(cce->CommitTs(), ccp->last_dirty_commit_ts_);
         }
         return true;
+    }
+
+    /**
+     * @brief Inserts keys with all entries guaranteed to be free (persistent,
+     * unlocked). Used in tests for large-value eviction protection.
+     *
+     * @param keys Keys to insert.
+     * @return true on success.
+     */
+    bool BulkEmplaceFreeForTest(std::vector<KeyT *> &keys)
+    {
+        for (auto key : keys)
+        {
+            bool emplace = false;
+            auto it = FindEmplace(*key, &emplace, false, false);
+            if (!emplace)
+            {
+                assert(false);
+                return false;
+            }
+            CcEntry<KeyT, ValueT, VersionedRecord, RangePartitioned> *cce =
+                it->second;
+            CcPage<KeyT, ValueT, VersionedRecord, RangePartitioned> *ccp =
+                it.GetPage();
+            // Set commit_ts = 1, ckpt_ts = UINT64_MAX so entry is persistent.
+            bool was_dirty = cce->IsDirty();
+            cce->SetCommitTsPayloadStatus(1, RecordStatus::Normal);
+            cce->SetCkptTs(UINT64_MAX);
+            OnFlushed(cce, was_dirty);
+            OnCommittedUpdate(cce, was_dirty);
+            ccp->last_dirty_commit_ts_ =
+                std::max(cce->CommitTs(), ccp->last_dirty_commit_ts_);
+        }
+        return true;
+    }
+
+    /**
+     * @brief Sets the payload of all entries in the cc map to the given shared
+     * pointer. Used in tests for large-value eviction protection.
+     *
+     * @param payload The payload to assign to every entry.
+     */
+    void SetPayloadForTest(std::shared_ptr<ValueT> payload)
+    {
+        for (auto &[key, page_ptr] : ccmp_)
+        {
+            for (auto &cce : page_ptr->entries_)
+            {
+                cce->payload_.cur_payload_ = payload;
+            }
+        }
+    }
+
+    /**
+     * @brief Marks all pages in this cc map as large-value pages and
+     * immediately re-zones them via UpdateLruList so that they are placed in
+     * the large-value zone (tail end) of the LRU list. Used in tests for the
+     * zone-separation eviction policy.
+     */
+    void RezoneAsLargeValueForTest()
+    {
+        for (auto &[key, page_ptr] : ccmp_)
+        {
+            CcPage<KeyT, ValueT, VersionedRecord, RangePartitioned> *page =
+                page_ptr.get();
+            if (!page->has_large_value_)
+            {
+                page->has_large_value_ = true;
+            }
+            // Move page to large-value zone.
+            if (page->lru_next_ != nullptr)
+            {
+                shard_->UpdateLruList(page, false);
+            }
+        }
+    }
+
+    /**
+     * @brief Iterates over all pages and calls MaybeMarkAndRezoneAsLargeValue
+     * with the maximum PayloadSize() found among each page's entries.
+     *
+     * This simulates the eager re-zone that happens in production when a write
+     * commits a large payload via PostWriteCc / BackFill / ReplayLogCc etc.
+     * Used in tests to verify that the eager path works without going through
+     * a clean-page scan.
+     */
+    void TriggerEagerRezoneForTest()
+    {
+        for (auto &[key, page_ptr] : ccmp_)
+        {
+            CcPage<KeyT, ValueT, VersionedRecord, RangePartitioned> *page =
+                page_ptr.get();
+            size_t max_payload = 0;
+            for (const auto &cce : page->entries_)
+            {
+                max_payload = std::max(max_payload, cce->PayloadSize());
+            }
+            MaybeMarkAndRezoneAsLargeValue(page, max_payload);
+        }
+    }
+
+    /// Returns the number of CcPage objects (btree nodes) in this cc map.
+    /// Used in tests that verify zone-page-count invariants.
+    size_t PageCount() const
+    {
+        return ccmp_.size();
     }
 
 protected:
@@ -11562,7 +11688,8 @@ protected:
         CcPage<KeyT, ValueT, VersionedRecord, RangePartitioned> *page,
         BtreeMapIterator &page_it,
         size_t &free_cnt,
-        KickoutCcEntryCc *kickout_cc = nullptr)
+        KickoutCcEntryCc *kickout_cc = nullptr,
+        bool *out_has_blocked_large_value = nullptr)
     {
         bool success;
 
@@ -11618,6 +11745,11 @@ protected:
         }
 
         success = clean_guard->CleanSuccess();
+
+        if (out_has_blocked_large_value != nullptr)
+        {
+            *out_has_blocked_large_value = clean_guard->HasBlockedLargeValue();
+        }
 
         std::destroy_at(buffer);
         return success;
@@ -11912,6 +12044,41 @@ protected:
     CcPage<KeyT, ValueT, VersionedRecord, RangePartitioned> *PagePosInf()
     {
         return &pos_inf_page_;
+    }
+
+    /**
+     * @brief Eagerly marks a page as a large-value page and moves it into the
+     * large-value zone of the LRU list when the installed payload exceeds
+     * txservice_large_value_threshold.
+     *
+     * Only active when IsLargeValueZoneEnabled() returns true (i.e. for
+     * ObjectCcMap / EloqKV). Has no effect on RangeCcMap (EloqSQL / EloqDoc).
+     *
+     * Called from ObjectCcMap at every payload-assignment site (ApplyCc,
+     * PostWriteCc, UploadBatchCc, KeyObjectStandbyForwardCc, ReplayLogCc,
+     * BackFill) so that large-value pages are immediately clustered near the
+     * LRU tail and are only evicted after all small-value pages have been
+     * evicted.
+     *
+     * The lazy fallback in CanBeCleaned (has_blocked_large_value_) is kept as
+     * a safety net for any path not covered above.
+     *
+     * @param page         The LRU page that owns the updated entry.
+     * @param payload_size The serialized size of the newly installed payload.
+     */
+    void MaybeMarkAndRezoneAsLargeValue(LruPage *page, size_t payload_size)
+    {
+        if (!IsLargeValueZoneEnabled() || page == nullptr ||
+            page->has_large_value_ ||
+            payload_size <= txservice_large_value_threshold)
+        {
+            return;
+        }
+        page->has_large_value_ = true;
+        if (page->lru_next_ != nullptr)
+        {
+            shard_->UpdateLruList(page, false);
+        }
     }
 
     absl::btree_map<

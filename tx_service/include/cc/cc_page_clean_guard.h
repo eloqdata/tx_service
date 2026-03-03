@@ -157,6 +157,16 @@ public:
         return clean_obj_cnt_;
     }
 
+    // Returns true if CanBeCleaned freshly set the has_large_value_ flag on
+    // the page during this clean pass (i.e. the page was just discovered to
+    // have a large-value entry for the first time). When this is set,
+    // CleanPageAndReBalance will call UpdateLruList to move the page from the
+    // small-value zone into the large-value zone immediately.
+    bool HasBlockedLargeValue() const
+    {
+        return has_blocked_large_value_;
+    }
+
 protected:
     struct CanBeCleanedResult
     {
@@ -343,6 +353,9 @@ protected:
     uint64_t dirty_freed_cnt_{0};
     bool evicted_valid_key_{false};
     uint64_t clean_obj_cnt_{0};
+    // Set by CanBeCleaned when a large-value entry is protected. Mutable so it
+    // can be set from the const CanBeCleaned override.
+    mutable bool has_blocked_large_value_{false};
 
 private:
     std::bitset<CcPage<KeyT, ValueT, VersionedRecord, RangePartitioned>::
@@ -399,7 +412,34 @@ private:
             return {false, false};
         }
 
-        return {(cce->IsFree() && !cce->GetBeingCkpt()), false};
+        if (!cce->IsFree() || cce->GetBeingCkpt())
+        {
+            return {false, false};
+        }
+
+        // Payload-size-aware eviction (ObjectCcMap / EloqKV only): mark the
+        // page as a large-value page so that UpdateLruList places it in the
+        // large-value zone (tail end) of the LRU list. The page is still
+        // evictable here — protection is positional (large-value pages are
+        // evicted only after all small-value pages). Setting
+        // has_blocked_large_value_ signals CleanPageAndReBalance to re-zone
+        // the page immediately via UpdateLruList in case it was in the
+        // small-value zone.
+        // IsLargeValueZoneEnabled() returns false for all non-ObjectCcMap
+        // types (RangeCcMap, CatalogCcMap, etc.), so this block is a no-op
+        // for EloqSQL and EloqDoc tables.
+        if (this->page_->parent_map_ != nullptr &&
+            this->page_->parent_map_->IsLargeValueZoneEnabled() &&
+            cce->PayloadSize() > txservice_large_value_threshold)
+        {
+            if (!this->page_->has_large_value_)
+            {
+                this->page_->has_large_value_ = true;
+                this->has_blocked_large_value_ = true;
+            }
+        }
+
+        return {true, false};
     }
 
     bool IsCleanTarget(

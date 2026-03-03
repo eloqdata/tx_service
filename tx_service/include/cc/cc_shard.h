@@ -1013,9 +1013,33 @@ public:
         clean_start_ccp_ = ccp;
     }
 
+    /// Returns the sentinel head of the LRU list. The first real page is
+    /// LruHead()->lru_next_. Used by tests to traverse the list.
+    const LruPage *LruHead() const
+    {
+        return &head_ccp_;
+    }
+
     bool OutOfMemory()
     {
         return clean_start_ccp_ != nullptr && clean_start_ccp_ == &tail_ccp_;
+    }
+
+    uint64_t AccessCounter() const
+    {
+        return access_counter_;
+    }
+
+    /**
+     * @brief Returns the current head of the large-value zone — the first
+     * large-value page in the LRU list (the one closest to the sentinel head).
+     *
+     * Used for testing: verifies that the large-value zone is non-empty and
+     * correctly maintained.
+     */
+    const LruPage *LruLargeValueZoneHead() const
+    {
+        return lru_large_value_zone_head_;
     }
 
     SystemHandler *GetSystemHandler()
@@ -1281,17 +1305,32 @@ private:
     // simplifies handling of empty and one-element lists.
     LruPage head_ccp_, tail_ccp_;
     /**
-     * @brief Each time a page is accessed and moved to the tail of the LRU
-     * list, the counter is incremented and assigned to the page. Since in a
-     * double-linked list there is no way to determine the relative order of two
-     * pages, we use the number to indicate if a page precedes or succeeds the
-     * other in the list.
+     * @brief A monotonically-increasing shard-wide counter. It is
+     * incremented and assigned to a page's last_access_ts_ every time
+     * UpdateLruList() is called, i.e. whenever any page in this shard is
+     * moved to its target position in the LRU list.
      *
+     * Primary use: since a doubly-linked list provides no O(1) way to compare
+     * the positions of two arbitrary nodes, comparing page1.last_access_ts_
+     * against page2.last_access_ts_ lets the merge/redistribute code determine
+     * which of the two pages was accessed more recently without traversing the
+     * list.
      */
     uint64_t access_counter_{0};
 
     // Page to start looking for cc entries to kick out on LRU chain.
     LruPage *clean_start_ccp_;
+
+    // Head of the large-value zone in the LRU list. Large-value pages are
+    // clustered at the tail (recent) end of the list so they are evicted only
+    // after all small-value pages have been evicted. This pointer points to the
+    // first (oldest) large-value page, i.e. the boundary between the two zones:
+    //
+    //   head ← [small-value pages] ← lru_large_value_zone_head_ ← [large-value
+    //   pages] ← tail
+    //
+    // It equals &tail_ccp_ when no large-value pages are in the list.
+    LruPage *lru_large_value_zone_head_;
 
     // The number of ccentry in all the ccmap of this ccshard.
     uint64_t size_;
