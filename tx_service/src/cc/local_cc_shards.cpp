@@ -5260,16 +5260,15 @@ void LocalCcShards::DataSyncForHashPartition(
         }
     }
 
-    PostProcessHashPartitionDataSyncTask(std::move(data_sync_task),
-                                         data_sync_txm,
-                                         DataSyncTask::CkptErrorCode::NO_ERROR);
-
     auto stop_time = std::chrono::steady_clock::now();
     auto duration = std::chrono::duration_cast<std::chrono::microseconds>(
         stop_time - start_time);
     LOG(INFO) << "DataSyncForRangePartition duration = " << duration.count()
               << "us"
               << ", debug_size = " << debug_size;
+    PostProcessHashPartitionDataSyncTask(std::move(data_sync_task),
+                                         data_sync_txm,
+                                         DataSyncTask::CkptErrorCode::NO_ERROR);
 }
 
 void LocalCcShards::PopPendingTask(NodeGroupId ng_id,
