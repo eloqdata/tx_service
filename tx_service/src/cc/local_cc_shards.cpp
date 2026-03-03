@@ -4811,6 +4811,9 @@ void LocalCcShards::DataSyncForHashPartition(
         data_sync_task->flight_task_cnt_ += 1;
     }
 
+    size_t debug_size = 0;
+    auto start_time = std::chrono::steady_clock::now();
+
     HashPartitionDataSyncScanCc scan_cc(table_name,
                                         data_sync_task->data_sync_ts_,
                                         ng_id,
@@ -5060,6 +5063,8 @@ void LocalCcShards::DataSyncForHashPartition(
         }
 #endif
 
+        debug_size += flush_data_size;
+
         // this thread will wait in AllocatePendingFlushDataMemQuota if
         // quota is not available
         uint64_t old_usage =
@@ -5258,6 +5263,13 @@ void LocalCcShards::DataSyncForHashPartition(
     PostProcessHashPartitionDataSyncTask(std::move(data_sync_task),
                                          data_sync_txm,
                                          DataSyncTask::CkptErrorCode::NO_ERROR);
+
+    auto stop_time = std::chrono::steady_clock::now();
+    auto duration = std::chrono::duration_cast<std::chrono::microseconds>(
+        stop_time - start_time);
+    LOG(INFO) << "DataSyncForRangePartition duration = " << duration.count()
+              << "us"
+              << ", debug_size = " << debug_size;
 }
 
 void LocalCcShards::PopPendingTask(NodeGroupId ng_id,
@@ -5791,6 +5803,7 @@ void LocalCcShards::FlushCurrentFlushBuffer()
 
 void LocalCcShards::FlushData(std::unique_lock<std::mutex> &flush_worker_lk)
 {
+    auto start_time = std::chrono::steady_clock::now();
     // Retrieve first pending work and pop it (FIFO).
     std::unique_ptr<FlushDataTask> cur_work =
         std::move(pending_flush_work_.front());
@@ -5934,6 +5947,10 @@ void LocalCcShards::FlushData(std::unique_lock<std::mutex> &flush_worker_lk)
 
     PostProcessFlushTaskEntries(flush_task_entries, ckpt_err);
     flush_worker_lk.lock();
+    auto stop_time = std::chrono::steady_clock::now();
+    auto duration = std::chrono::duration_cast<std::chrono::microseconds>(
+        stop_time - start_time);
+    LOG(INFO) << "FlushData duration = " << duration.count() << "us";
 }
 
 void LocalCcShards::FlushDataWorker()
