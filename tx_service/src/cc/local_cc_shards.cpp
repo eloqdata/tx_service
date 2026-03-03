@@ -5862,8 +5862,8 @@ void LocalCcShards::AddFlushTaskEntry(std::unique_ptr<FlushTaskEntry> &&entry)
             auto &last_task = pending_flush_work.back();
             if (last_task->MergeFrom(std::move(flush_data_task)))
             {
-                LOG(INFO) << "AddFlushTaskEntry: Merge successful, task was "
-                             "merged into last_task";
+                // LOG(INFO) << "AddFlushTaskEntry: Merge successful, task was "
+                //             "merged into last_task";
                 // Merge successful, task was merged into last_task
                 flush_data_worker_ctx_.cv_.notify_all();
                 return;
@@ -5909,9 +5909,10 @@ void LocalCcShards::FlushCurrentFlushBuffer()
                 auto &last_task = pending_flush_work.back();
                 if (last_task->MergeFrom(std::move(flush_data_task)))
                 {
-                    LOG(INFO) << "FlushCurrentFlushBuffer: Merge successful, "
-                                 "task was "
-                                 "merged into last_task";
+                    // LOG(INFO) << "FlushCurrentFlushBuffer: Merge successful,
+                    // "
+                    //             "task was "
+                    //             "merged into last_task";
                     // Merge successful, task was merged into last_task
                     flush_data_worker_ctx_.cv_.notify_all();
                     continue;
@@ -5937,6 +5938,7 @@ void LocalCcShards::FlushDataImpl(FlushDataTask *cur_work,
                                   const std::function<void()> &yield_fn,
                                   const std::function<void()> &resume_fn)
 {
+    auto start_time = std::chrono::steady_clock::now();
     auto &flush_task_entries = cur_work->flush_task_entries_;
     bool succ = true;
 
@@ -5983,8 +5985,9 @@ void LocalCcShards::FlushDataImpl(FlushDataTask *cur_work,
         succ = store_hd_->PersistKV(kv_table_names, &yield_fn, &resume_fn);
     }
 
-    LOG(INFO) << "FlushDataImpl: start update cce ts, task addr = " << cur_work
-              << ", worker idx = " << worker_idx;
+    // LOG(INFO) << "FlushDataImpl: start update cce ts, task addr = " <<
+    // cur_work
+    //          << ", worker idx = " << worker_idx;
     std::unordered_set<uint16_t> updated_ckpt_ts_core_ids;
     // Update cce ckpt ts in memory
     if (succ)
@@ -6036,9 +6039,9 @@ void LocalCcShards::FlushDataImpl(FlushDataTask *cur_work,
                 auto duration =
                     std::chrono::duration_cast<std::chrono::microseconds>(
                         stop_time - start_time);
-                LOG(INFO) << "FlushDataImpl: UpdateCceCkptTsCc duration = "
-                          << duration.count() << "us"
-                          << ", rec size = " << entry->data_sync_vec_->size();
+                // LOG(INFO) << "FlushDataImpl: UpdateCceCkptTsCc duration = "
+                //          << duration.count() << "us"
+                //          << ", rec size = " << entry->data_sync_vec_->size();
 
                 if (cce_entries_map.size() > 0)
                 {
@@ -6061,10 +6064,11 @@ void LocalCcShards::FlushDataImpl(FlushDataTask *cur_work,
                         if (iterations_since_yield >=
                             MAX_ITERATIONS_WITHOUT_YIELD)
                         {
-                            LOG(INFO)
-                                << "FlushDataImpl: Before sync yield, task "
-                                   "addr = "
-                                << cur_work << ", worker idx = " << worker_idx;
+                            // LOG(INFO)
+                            //    << "FlushDataImpl: Before sync yield, task "
+                            //       "addr = "
+                            //    << cur_work << ", worker idx = " <<
+                            //    worker_idx;
                             sync_yield_func();
                             iterations_since_yield = 0;
                         }
@@ -6076,8 +6080,8 @@ void LocalCcShards::FlushDataImpl(FlushDataTask *cur_work,
         }
     }
 
-    LOG(INFO) << "FlushDataImpl: start reset cc, task addr = " << cur_work
-              << ", worker idx = " << worker_idx;
+    // LOG(INFO) << "FlushDataImpl: start reset cc, task addr = " << cur_work
+    //          << ", worker idx = " << worker_idx;
     // Notify cc shards that dirty data has been flushed. This will re-enqueue
     // kickout data cc reqs if there are any.
     WaitableCc reset_cc(
@@ -6107,6 +6111,10 @@ void LocalCcShards::FlushDataImpl(FlushDataTask *cur_work,
 
     PostProcessFlushTaskEntries(
         flush_task_entries, ckpt_err, &yield_fn, &resume_fn, &sync_yield_func);
+    auto stop_time = std::chrono::steady_clock::now();
+    auto duration = std::chrono::duration_cast<std::chrono::microseconds>(
+        stop_time - start_time);
+    LOG(INFO) << "FlushDataImpl duration = " << duration.count() << "us";
 }
 
 void LocalCcShards::FlushData(std::unique_lock<std::mutex> &flush_worker_lk,
@@ -6153,8 +6161,8 @@ void LocalCcShards::FlushDataWorker(size_t worker_idx)
     {
         if (!pending_flush_work.empty())
         {
-            LOG(INFO) << "FlushDataWorker: flush work size = "
-                      << pending_flush_work.size();
+            // LOG(INFO) << "FlushDataWorker: flush work size = "
+            //          << pending_flush_work.size();
             std::unique_ptr<FlushDataTask> cur_work =
                 std::move(pending_flush_work.front());
             pending_flush_work.pop_front();
@@ -6170,7 +6178,7 @@ void LocalCcShards::FlushDataWorker(size_t worker_idx)
                 {
                     ctx->yield_fn = [&sink]()
                     {
-                        LOG(INFO) << "CoroCtx yield_fn";
+                        // LOG(INFO) << "CoroCtx yield_fn";
                         sink = sink.resume();
                     };
                     ctx->sync_yield_func =
@@ -6184,8 +6192,8 @@ void LocalCcShards::FlushDataWorker(size_t worker_idx)
                             {
                                 std::lock_guard<std::mutex> lk(
                                     flush_data_worker_ctx_.mux_);
-                                LOG(INFO) << "CoroCtx sync_yield_func: push "
-                                             "ctx to resume_queue";
+                                // LOG(INFO) << "CoroCtx sync_yield_func: push "
+                                //             "ctx to resume_queue";
                                 resume_queue_[worker_idx].push_back(
                                     std::move(c));
                                 flush_data_worker_ctx_.cv_.notify_all();
@@ -6199,8 +6207,9 @@ void LocalCcShards::FlushDataWorker(size_t worker_idx)
                     {
                         if (auto c = weak_ctx.lock())
                         {
-                            LOG(INFO)
-                                << "CoroCtx resume_fn: coro ctx = " << c.get();
+                            // LOG(INFO)
+                            //    << "CoroCtx resume_fn: coro ctx = " <<
+                            //    c.get();
                             std::lock_guard<std::mutex> lk(
                                 flush_data_worker_ctx_.mux_);
                             resume_queue_[worker_idx].push_back(std::move(c));
