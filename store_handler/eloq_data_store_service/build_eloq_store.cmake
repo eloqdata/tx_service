@@ -124,7 +124,6 @@ set(ELOQ_STORE_SOURCES
     ${ELOQ_STORE_SOURCE_DIR}/src/tasks/task.cpp
     ${ELOQ_STORE_SOURCE_DIR}/src/tasks/task_manager.cpp
     ${ELOQ_STORE_SOURCE_DIR}/src/tasks/write_task.cpp
-    ${ELOQ_STORE_SOURCE_DIR}/src/tasks/reopen_task.cpp
     ${ELOQ_STORE_SOURCE_DIR}/src/types.cpp)
 
 add_library(eloqstore STATIC ${ELOQ_STORE_SOURCES})

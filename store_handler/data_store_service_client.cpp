@@ -3835,7 +3835,7 @@ void DataStoreServiceClient::OnShutdown()
 bool DataStoreServiceClient::OnSnapshotReceived(
     const txservice::remote::OnSnapshotSyncedRequest *req)
 {
-    // TODO(lzx): implement this for eloqstore data store.
+#ifdef DATA_STORE_TYPE_ELOQDSS_ELOQSTORE
     if (data_store_service_ != nullptr)
     {
         uint32_t ng_id = req->ng_id();
@@ -3854,17 +3854,19 @@ bool DataStoreServiceClient::OnSnapshotReceived(
 
         return true;
     }
-
+#endif
     return true;
 }
 
 bool DataStoreServiceClient::OnUpdateStandbyCkptTs(uint32_t ng_id,
                                                    int64_t ng_term)
 {
+#ifdef DATA_STORE_TYPE_ELOQDSS_ELOQSTORE
     if (data_store_service_ != nullptr)
     {
         data_store_service_->OnUpdateStandbyCkptTs(ng_id, ng_term);
     }
+#endif
     return true;
 }
 
