@@ -4865,7 +4865,10 @@ public:
         std::shared_ptr<std::atomic_uint32_t> range_split_started = nullptr,
         std::unordered_set<TableName> *range_splitting = nullptr,
         uint16_t first_core = 0,
-        ParseDataLogCc *parse_cc = nullptr)
+        ParseDataLogCc *parse_cc = nullptr,
+        const std::unordered_map<TableName,
+                                 std::unordered_map<int32_t, uint64_t>>
+            *split_range_info = nullptr)
     {
         table_name_holder_ =
             TableName(table_name_view, table_type, table_engine);
@@ -4893,6 +4896,15 @@ public:
         is_lock_recovery_ = is_lock_recovery;
         upsert_kv_err_code_ = {true, CcErrorCode::NO_ERROR};
         parse_cc_ = parse_cc;
+        split_ranges_ = nullptr;
+        if (split_range_info != nullptr)
+        {
+            auto table_it = split_range_info->find(table_name_holder_);
+            if (table_it != split_range_info->end())
+            {
+                split_ranges_ = &table_it->second;
+            }
+        }
     }
 
     ReplayLogCc(const ReplayLogCc &rhs) = delete;
@@ -5091,6 +5103,16 @@ public:
         return first_core_;
     }
 
+    uint64_t RangeSplitCommitTs(int32_t range_id) const
+    {
+        if (split_ranges_ == nullptr)
+        {
+            return 0;
+        }
+        auto it = split_ranges_->find(range_id);
+        return it == split_ranges_->end() ? 0 : it->second;
+    }
+
     void SetOffset(size_t offset)
     {
         offset_ = offset;
@@ -5158,6 +5180,9 @@ private:
                                                      CcErrorCode::NO_ERROR};
     ParseDataLogCc *parse_cc_{nullptr};
 
+    // Range split commit ts per range for the current table, if available.
+    const std::unordered_map<int32_t, uint64_t> *split_ranges_{nullptr};
+
     friend std::ostream &operator<<(std::ostream &outs,
                                     txservice::ReplayLogCc *r);
 };
@@ -5174,7 +5199,10 @@ public:
                std::atomic<fault::RecoveryService::WaitingStatus> &status,
                std::atomic<uint64_t> &on_fly_cnt,
                bool &recovery_error,
-               const bool is_lock_recovery = false)
+               const bool is_lock_recovery = false,
+               const std::unordered_map<TableName,
+                                        std::unordered_map<int32_t, uint64_t>>
+                   *split_range_info = nullptr)
     {
         log_records_sv_ =
             std::string_view(log_records.data(), log_records.size());
@@ -5186,6 +5214,7 @@ public:
         on_fly_cnt_ = &on_fly_cnt;
         recovery_error_ = &recovery_error;
         is_lock_recovery_ = is_lock_recovery;
+        split_range_info_ = split_range_info;
     }
 
     void Reset(::txlog::ReplayMessage &&replay_message,
@@ -5195,7 +5224,10 @@ public:
                std::atomic<fault::RecoveryService::WaitingStatus> &status,
                std::atomic<uint64_t> &on_fly_cnt,
                bool &recovery_error,
-               const bool is_lock_recovery = false)
+               const bool is_lock_recovery = false,
+               const std::unordered_map<TableName,
+                                        std::unordered_map<int32_t, uint64_t>>
+                   *split_range_info = nullptr)
     {
         replay_message_ =
             std::make_unique<::txlog::ReplayMessage>(std::move(replay_message));
@@ -5210,13 +5242,15 @@ public:
         on_fly_cnt_ = &on_fly_cnt;
         recovery_error_ = &recovery_error;
         is_lock_recovery_ = is_lock_recovery;
+        split_range_info_ = split_range_info;
     }
 
     bool Execute(CcShard &ccs) override
     {
         size_t offset = 0;
         // core of first key in log
-        int dest_core = 0;
+        uint32_t core_rand = butil::fast_rand();
+        uint16_t dest_core = static_cast<uint16_t>(core_rand % ccs.core_cnt_);
         std::vector<ReplayLogCc *> replay_cc_list;
         replay_cc_list.reserve(160);
         while (offset < log_records_sv_.size())
@@ -5287,10 +5321,19 @@ public:
                 uint32_t kv_len = *reinterpret_cast<const uint32_t *>(
                     blob.data() + blob_offset);
                 blob_offset += sizeof(uint32_t);
-                size_t hash = ccs.GetCatalogFactory(table_engine)
-                                  ->KeyHash(blob.data(), blob_offset, nullptr);
-                dest_core = hash ? (hash & 0x3FF) % ccs.core_cnt_
-                                 : (dest_core + 1) % ccs.core_cnt_;
+                if (table_engine == TableEngine::EloqSql ||
+                    table_engine == TableEngine::EloqDoc)
+                {
+                    dest_core = (dest_core + 1) % ccs.core_cnt_;
+                }
+                else
+                {
+                    size_t hash =
+                        ccs.GetCatalogFactory(table_engine)
+                            ->KeyHash(blob.data(), blob_offset, nullptr);
+                    dest_core = hash ? (hash & 0x3FF) % ccs.core_cnt_
+                                     : (dest_core + 1) % ccs.core_cnt_;
+                }
                 ReplayLogCc *cc_req = replay_cc_pool_.NextRequest();
                 replay_cc_list.push_back(cc_req);
                 assert(cc_ng_term_ >= 0);
@@ -5311,7 +5354,8 @@ public:
                     nullptr,
                     nullptr,
                     dest_core,
-                    this);
+                    this,
+                    split_range_info_);
 
                 blob_offset += kv_len;
             }
@@ -5349,6 +5393,8 @@ private:
     std::atomic<uint64_t> *on_fly_cnt_;
     bool *recovery_error_;
     bool is_lock_recovery_;
+    const std::unordered_map<TableName, std::unordered_map<int32_t, uint64_t>>
+        *split_range_info_{nullptr};
 };
 
 struct BroadcastStatisticsCc
