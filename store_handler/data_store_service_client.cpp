@@ -330,6 +330,7 @@ bool DataStoreServiceClient::PutAllImpl(
     const std::function<void()> *resume_fptr,
     const std::function<void()> *sync_yield_fptr)
 {
+    auto prepare_start = std::chrono::steady_clock::now();
     DLOG(INFO) << "DataStoreServiceClient::PutAll called with "
                << flush_task.size() << " tables to flush.";
     uint64_t now = txservice::LocalCcShards::ClockTsInMillseconds();
@@ -445,6 +446,8 @@ bool DataStoreServiceClient::PutAllImpl(
         range_partitions_map.clear();
     }
 
+    auto prepare_end = std::chrono::steady_clock::now();
+
     // Set up global coordinator
     sync_putall->total_partitions_ = sync_putall->partition_states_.size();
 
@@ -458,6 +461,8 @@ bool DataStoreServiceClient::PutAllImpl(
     // Start concurrent processing for each partition
     constexpr size_t MAX_BATCH_WRITES_WITHOUT_YIELD = 10;
     size_t batch_writes_since_yield = 0;
+
+    auto write_start = std::chrono::steady_clock::now();
 
     for (size_t i = 0; i < callback_data_list.size(); ++i)
     {
@@ -501,6 +506,9 @@ bool DataStoreServiceClient::PutAllImpl(
         }
     }
 
+    auto write_end = std::chrono::steady_clock::now();
+
+    auto wait_start = std::chrono::steady_clock::now();
     // Wait for all partitions to complete
     if (yield_fptr != nullptr && resume_fptr != nullptr)
     {
@@ -512,6 +520,23 @@ bool DataStoreServiceClient::PutAllImpl(
     {
         sync_putall->Wait();
     }
+
+    auto wait_end = std::chrono::steady_clock::now();
+    LOG(INFO) << "PutAll(...) prepare duration = "
+              << std::chrono::duration_cast<std::chrono::microseconds>(
+                     prepare_end - prepare_start)
+                     .count()
+              << "us"
+              << ", write duration = "
+              << std::chrono::duration_cast<std::chrono::microseconds>(
+                     write_end - write_start)
+                     .count()
+              << "us"
+              << ", wait duration = "
+              << std::chrono::duration_cast<std::chrono::microseconds>(
+                     wait_end - wait_start)
+                     .count()
+              << "us";
 
     // Check for errors
     for (auto &partition_state : sync_putall->partition_states_)
