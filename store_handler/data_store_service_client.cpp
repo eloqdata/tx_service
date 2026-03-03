@@ -475,9 +475,9 @@ bool DataStoreServiceClient::PutAllImpl(
             if (sync_yield_fptr != nullptr &&
                 batch_writes_since_yield >= MAX_BATCH_WRITES_WITHOUT_YIELD)
             {
-                LOG(INFO) << "PutAllImpl: Before sync yield, this = "
-                          << sync_putall << ", batch_writes_since_yield = "
-                          << batch_writes_since_yield;
+                // LOG(INFO) << "PutAllImpl: Before sync yield, this = "
+                //          << sync_putall << ", batch_writes_since_yield = "
+                //          << batch_writes_since_yield;
                 (*sync_yield_fptr)();
                 batch_writes_since_yield = 0;
             }
@@ -492,9 +492,9 @@ bool DataStoreServiceClient::PutAllImpl(
     // Wait for all partitions to complete
     if (yield_fptr != nullptr && resume_fptr != nullptr)
     {
-        LOG(INFO) << "PutAllImpl: Before Wait, this = " << sync_putall;
+        // LOG(INFO) << "PutAllImpl: Before Wait, this = " << sync_putall;
         sync_putall->Wait(yield_fptr, resume_fptr);
-        LOG(INFO) << "PutAllImpl: After Wait, this = " << sync_putall;
+        // LOG(INFO) << "PutAllImpl: After Wait, this = " << sync_putall;
     }
     else
     {
@@ -1808,9 +1808,9 @@ bool DataStoreServiceClient::UpdateRangeSlices(
             ++iterations_since_yield;
             if (iterations_since_yield >= MAX_ITERATIONS_WITHOUT_YIELD)
             {
-                LOG(INFO) << "UpdateRangeSlices: prepare Before sync yield";
+                // LOG(INFO) << "UpdateRangeSlices: prepare Before sync yield";
                 (*sync_yield_fptr)();
-                LOG(INFO) << "UpdateRangeSlices: prepare After sync yield";
+                // LOG(INFO) << "UpdateRangeSlices: prepare After sync yield";
                 iterations_since_yield = 0;
             }
         }
@@ -1819,10 +1819,10 @@ bool DataStoreServiceClient::UpdateRangeSlices(
     auto end_time = std::chrono::steady_clock::now();
     auto duration = std::chrono::duration_cast<std::chrono::microseconds>(
         end_time - start_time);
-    LOG(INFO) << "UpdateRangeSlices: Prepare slice batches and accumulate "
-                 "metadata for all ranges took "
-              << duration.count() << "us"
-              << ", req size = " << update_range_slice_reqs.size();
+    // LOG(INFO) << "UpdateRangeSlices: Prepare slice batches and accumulate "
+    //              "metadata for all ranges took "
+    //           << duration.count() << "us"
+    //           << ", req size = " << update_range_slice_reqs.size();
 
     // 2- Dispatch slice batches for all ranges concurrently (shared
     // SyncConcurrentRequest)
@@ -1848,18 +1848,18 @@ bool DataStoreServiceClient::UpdateRangeSlices(
             ++iterations_since_yield;
             if (iterations_since_yield >= MAX_ITERATIONS_WITHOUT_YIELD)
             {
-                LOG(INFO) << "UpdateRangeSlices: Before sync yield";
+                // LOG(INFO) << "UpdateRangeSlices: Before sync yield";
                 (*sync_yield_fptr)();
-                LOG(INFO) << "UpdateRangeSlices: After sync yield";
+                // LOG(INFO) << "UpdateRangeSlices: After sync yield";
                 iterations_since_yield = 0;
             }
         }
     }
 
-    LOG(INFO) << "UpdateRangeSlices: before WaitAll slice sync";
+    // LOG(INFO) << "UpdateRangeSlices: before WaitAll slice sync";
     // 3- Wait for slice requests to complete
     slice_sync_concurrent->WaitForAll();
-    LOG(INFO) << "UpdateRangeSlices: after WaitAll slice sync";
+    // LOG(INFO) << "UpdateRangeSlices: after WaitAll slice sync";
 
     if (slice_sync_concurrent->result_.error_code() !=
         remote::DataStoreError::NO_ERROR)
@@ -1914,10 +1914,10 @@ bool DataStoreServiceClient::UpdateRangeSlices(
     DispatchRangeMetadataBatches(
         kv_range_table_name, meta_acc, meta_sync_concurrent);
 
-    LOG(INFO) << "UpdateRangeSlices: before WaitAll meta sync";
+    // LOG(INFO) << "UpdateRangeSlices: before WaitAll meta sync";
     // 5- Wait for metadata requests to complete
     meta_sync_concurrent->WaitForAll();
-    LOG(INFO) << "UpdateRangeSlices: after WaitAll meta sync";
+    // LOG(INFO) << "UpdateRangeSlices: after WaitAll meta sync";
 
     // 6- Check for errors
     if (meta_sync_concurrent->result_.error_code() !=
@@ -1943,9 +1943,9 @@ bool DataStoreServiceClient::UpdateRangeSlices(
         FlushData(kv_range_table_names, callback_data, &SyncCallback);
         if (yield_fptr != nullptr && resume_fptr != nullptr)
         {
-            LOG(INFO) << "UpdateRangeSlices: before Wait meta sync";
+            // LOG(INFO) << "UpdateRangeSlices: before Wait meta sync";
             callback_data->Wait(yield_fptr, resume_fptr);
-            LOG(INFO) << "UpdateRangeSlices: after Wait meta sync";
+            // LOG(INFO) << "UpdateRangeSlices: after Wait meta sync";
         }
         else
         {

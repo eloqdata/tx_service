@@ -92,7 +92,7 @@ struct CoroCtx
 {
     ~CoroCtx()
     {
-        LOG(INFO) << "CoroCtx destructor, this = " << this;
+        // LOG(INFO) << "CoroCtx destructor, this = " << this;
     }
 
     boost::context::continuation coro_;
@@ -2465,10 +2465,11 @@ private:
                           const TxKey *end_key,
                           bool flush_res);
 
-    bool UpdateStoreSlices(std::vector<FlushTaskEntry *> &task,
-                           const std::function<void()> *yield_fptr = nullptr,
-                           const std::function<void()> *resume_fptr = nullptr,
-                           const std::function<void()> *sync_yield_fptr = nullptr);
+    bool UpdateStoreSlices(
+        std::vector<FlushTaskEntry *> &task,
+        const std::function<void()> *yield_fptr = nullptr,
+        const std::function<void()> *resume_fptr = nullptr,
+        const std::function<void()> *sync_yield_fptr = nullptr);
 
     bool GetNextRangePartitionId(const TableName &tablename,
                                  const TableSchema *table_schema,

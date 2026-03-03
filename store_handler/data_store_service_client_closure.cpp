@@ -535,9 +535,9 @@ void SyncPutAllData::Wait(const std::function<void()> *yield_fn,
     {
         waiting_.store(true, std::memory_order_release);
         lk.unlock();
-        LOG(INFO) << "SyncPutAllData Wait: Before yield, this = " << this;
+        // LOG(INFO) << "SyncPutAllData Wait: Before yield, this = " << this;
         (*yield_fn)();
-        LOG(INFO) << "SynPutAllData Wait: After yield, this = " << this;
+        // LOG(INFO) << "SynPutAllData Wait: After yield, this = " << this;
         lk.lock();
         waiting_.store(false, std::memory_order_release);
     }
@@ -552,15 +552,17 @@ void SyncConcurrentRequest::WaitForCapacityAndIncrement()
         {
             waiting_.store(true, std::memory_order_release);
             lk.unlock();
-            LOG(INFO) << "SyncConcurrentRequest WaitForCapacityAndIncrement: "
-                         "Before yield, this = "
-                      << this;
+            // LOG(INFO) << "SyncConcurrentRequest WaitForCapacityAndIncrement:
+            // "
+            //             "Before yield, this = "
+            //          << this;
 
             (*yield_fn_)();
 
-            LOG(INFO) << "SyncConcurrentRequest WaitForCapacityAndIncrement: "
-                         "After yield, this = "
-                      << this;
+            // LOG(INFO) << "SyncConcurrentRequest WaitForCapacityAndIncrement:
+            // "
+            //             "After yield, this = "
+            //          << this;
             lk.lock();
             waiting_.store(false, std::memory_order_release);
         }
@@ -582,15 +584,15 @@ void SyncConcurrentRequest::WaitForAll()
         {
             waiting_.store(true, std::memory_order_release);
             lk.unlock();
-            LOG(INFO)
-                << "SyncConcurrentRequest WaitForAll: Before yield, this = "
-                << this;
+            // LOG(INFO)
+            //    << "SyncConcurrentRequest WaitForAll: Before yield, this = "
+            //    << this;
 
             (*yield_fn_)();
 
-            LOG(INFO)
-                << "SyncConcurrentRequest WaitForAll: After yield, this = "
-                << this;
+            // LOG(INFO)
+            //     << "SyncConcurrentRequest WaitForAll: After yield, this = "
+            //     << this;
             lk.lock();
             waiting_.store(false, std::memory_order_release);
         }
