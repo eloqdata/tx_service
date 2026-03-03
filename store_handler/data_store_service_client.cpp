@@ -303,6 +303,7 @@ bool DataStoreServiceClient::PutAll(
                        std::vector<std::unique_ptr<txservice::FlushTaskEntry>>>
         &flush_task)
 {
+    auto start_time = std::chrono::steady_clock::now();
     DLOG(INFO) << "DataStoreServiceClient::PutAll called with "
                << flush_task.size() << " tables to flush.";
     uint64_t now = txservice::LocalCcShards::ClockTsInMillseconds();
@@ -455,6 +456,7 @@ bool DataStoreServiceClient::PutAll(
         }
     }
 
+    auto wait_start = std::chrono::steady_clock::now();
     // Wait for all partitions to complete
     {
         std::unique_lock<bthread::Mutex> lk(sync_putall->mux_);
@@ -464,6 +466,18 @@ bool DataStoreServiceClient::PutAll(
             sync_putall->cv_.wait(lk);
         }
     }
+
+    auto wait_end = std::chrono::steady_clock::now();
+
+    auto stop_time = std::chrono::steady_clock::now();
+    auto duration = std::chrono::duration_cast<std::chrono::microseconds>(
+        stop_time - start_time);
+    LOG(INFO) << "PutAll(...) duration = " << duration.count() << "us"
+              << ", wait duration = "
+              << std::chrono::duration_cast<std::chrono::microseconds>(
+                     wait_end - wait_start)
+                     .count()
+              << "us";
 
     // Check for errors
     for (auto &partition_state : sync_putall->partition_states_)
