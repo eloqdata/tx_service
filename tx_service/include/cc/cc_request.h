@@ -2437,12 +2437,12 @@ public:
         is_require_keys_ = is_require_keys;
         is_require_recs_ = is_require_recs;
 
-        unfinished_core_cnt_.store(1, std::memory_order_relaxed);
         range_slice_id_.Reset();
         last_pinned_slice_ = nullptr;
         prefetch_size_ = prefetch_size;
-        err_.store(CcErrorCode::NO_ERROR, std::memory_order_relaxed);
+        err_ = CcErrorCode::NO_ERROR;
         cache_hit_miss_collected_ = false;
+        blocking_info_.Reset();
     }
 
     void Set(const TableName &tbl_name,
@@ -2500,11 +2500,11 @@ public:
         is_require_recs_ = is_require_recs;
         prefetch_size_ = prefetch_size;
 
-        unfinished_core_cnt_.store(1, std::memory_order_relaxed);
         range_slice_id_.Reset();
         last_pinned_slice_ = nullptr;
-        err_.store(CcErrorCode::NO_ERROR, std::memory_order_relaxed);
+        err_ = CcErrorCode::NO_ERROR;
         cache_hit_miss_collected_ = false;
+        blocking_info_.Reset();
     }
 
     bool Execute(CcShard &ccs) override
@@ -2513,7 +2513,8 @@ public:
         {
             // Do not modify res_ directly since there could be other cores
             // still working on this cc req.
-            return SetError(CcErrorCode::REQUESTED_NODE_NOT_LEADER);
+            SetError(CcErrorCode::REQUESTED_NODE_NOT_LEADER);
+            return true;
         }
 
         CcMap *ccm = nullptr;
@@ -2546,7 +2547,8 @@ public:
                     // is marked as errored.
                     if (init_res.error != CcErrorCode::NO_ERROR)
                     {
-                        return SetError(init_res.error);
+                        SetError(init_res.error);
+                        return true;
                     }
                     // The req will be re-enqueued.
                     return false;
@@ -2573,16 +2575,13 @@ public:
 
     void AbortCcRequest(CcErrorCode err_code) override
     {
-        if (SetError(err_code))
+        SetError(err_code);
+        // If the request has pinned any slice, unpin it.
+        if (range_slice_id_.Range() != nullptr)
         {
-            // Last core finished. If the request has pinned any slice, unpin
-            // it.
-            if (range_slice_id_.Range() != nullptr)
-            {
-                UnpinSlices();
-            }
-            Free();
+            UnpinSlices();
         }
+        Free();
     }
 
     bool IsLocal() const
@@ -2713,18 +2712,19 @@ public:
         return ts_;
     }
 
-    ScanCache *GetLocalScanCache(size_t shard_id)
+    ScanCache *GetLocalScanCache()
     {
         assert(IsLocal());
-        return res_->Value().ccm_scanner_->Cache(shard_id);
+        return res_->Value().ccm_scanner_->Cache(0);
     }
 
-    RemoteScanSliceCache *GetRemoteScanCache(size_t shard_id)
+    RemoteScanSliceCache *GetRemoteScanCache()
     {
         assert(!IsLocal());
         RangeScanSliceResult &slice_result = res_->Value();
-        assert(shard_id < slice_result.remote_scan_caches_->size());
-        return &slice_result.remote_scan_caches_->at(shard_id);
+        assert(slice_result.remote_scan_caches_ != nullptr);
+        assert(slice_result.remote_scan_caches_->size() == 1);
+        return &slice_result.remote_scan_caches_->at(0);
     }
 
     CcScanner *GetLocalScanner()
@@ -2732,161 +2732,70 @@ public:
         return IsLocal() ? res_->Value().ccm_scanner_ : nullptr;
     }
 
-    uint64_t BlockingCceLockAddr(uint16_t core_id)
+    uint64_t BlockingCceLockAddr() const
     {
-        assert(core_id < blocking_vec_.size());
-        return blocking_vec_[core_id].cce_lock_addr_;
+        return blocking_info_.cce_lock_addr_;
     }
 
-    std::pair<ScanBlockingType, ScanType> BlockingPair(uint16_t core_id)
+    std::pair<ScanBlockingType, ScanType> BlockingPair() const
     {
-        assert(core_id < blocking_vec_.size());
-        return {blocking_vec_[core_id].type_,
-                blocking_vec_[core_id].scan_type_};
+        return {blocking_info_.type_, blocking_info_.scan_type_};
     }
 
-    void SetBlockingInfo(uint16_t core_id,
-                         uint64_t cce_lock_addr,
+    void SetBlockingInfo(uint64_t cce_lock_addr,
                          ScanType scan_type,
                          ScanBlockingType blocking_type)
     {
-        assert(core_id < blocking_vec_.size());
-        blocking_vec_[core_id] = {cce_lock_addr, scan_type, blocking_type};
+        blocking_info_.cce_lock_addr_ = cce_lock_addr;
+        blocking_info_.scan_type_ = scan_type;
+        blocking_info_.type_ = blocking_type;
     }
 
-    void SetShardCount(uint16_t shard_cnt)
+    void SetPriorCceLockAddr(uint64_t addr)
     {
-        blocking_vec_.resize(shard_cnt);
-        for (auto &it : blocking_vec_)
-        {
-            it.cce_lock_addr_ = 0;
-            it.scan_type_ = ScanType::ScanUnknow;
-            it.type_ = ScanBlockingType::NoBlocking;
-        }
-
-        wait_for_snapshot_cnt_.resize(shard_cnt);
-        for (uint16_t i = 0; i < shard_cnt; ++i)
-        {
-            wait_for_snapshot_cnt_[i] = 0;
-        }
-    }
-
-    uint64_t GetShardCount() const
-    {
-        return blocking_vec_.size();
-    }
-
-    void SetUnfinishedCoreCnt(uint16_t core_cnt)
-    {
-        unfinished_core_cnt_.store(core_cnt, std::memory_order_release);
-    }
-
-    void SetPriorCceLockAddr(uint64_t addr, uint16_t shard_id)
-    {
-        assert(shard_id < blocking_vec_.size());
-        blocking_vec_[shard_id] = {
-            addr, ScanType::ScanUnknow, ScanBlockingType::NoBlocking};
+        blocking_info_.cce_lock_addr_ = addr;
+        blocking_info_.scan_type_ = ScanType::ScanUnknow;
+        blocking_info_.type_ = ScanBlockingType::NoBlocking;
     }
 
     /**
      * @brief Notifies the scan slice request that the scan at the calling core
      * has finished.
      *
-     * @return true, if all cores have finished the scan.
-     * @return false, if the scan is not completed in all cores.
      */
-    bool SetFinish()
+    void SetFinish()
     {
-        uint16_t remaining_cnt =
-            unfinished_core_cnt_.fetch_sub(1, std::memory_order_acq_rel);
-
-        if (remaining_cnt == 1)
+        if (err_ == CcErrorCode::NO_ERROR)
         {
-            // Only update result if this is local request. Remote request
-            // result will be updated by dedicated core.
-            if (res_->Value().is_local_)
-            {
-                if (err_.load(std::memory_order_relaxed) ==
-                    CcErrorCode::NO_ERROR)
-                {
-                    res_->Value().ccm_scanner_->FinalizeCommit();
-
-                    res_->SetFinished();
-                }
-                else
-                {
-                    res_->SetError(err_.load(std::memory_order_relaxed));
-                }
-            }
+            res_->SetFinished();
         }
-
-        return remaining_cnt == 1;
+        else
+        {
+            res_->SetError(err_);
+        }
     }
 
-    bool SetError(CcErrorCode err)
+    void SetError(CcErrorCode err)
     {
-        CcErrorCode expected = CcErrorCode::NO_ERROR;
-        err_.compare_exchange_strong(expected,
-                                     err,
-                                     std::memory_order_relaxed,
-                                     std::memory_order_relaxed);
-        uint16_t remaining_cnt =
-            unfinished_core_cnt_.fetch_sub(1, std::memory_order_acq_rel);
-
-        // remaining_cnt might be 0 if all cores have finished and the req is
-        // put back into the result sending core's queue.
-        if (remaining_cnt <= 1)
+        if (err_ == CcErrorCode::NO_ERROR)
         {
-            res_->SetError(err_.load(std::memory_order_relaxed));
+            err_ = err;
         }
 
-        return remaining_cnt <= 1;
+        res_->SetError(err_);
     }
 
     void DeferSetError(CcErrorCode err)
     {
-        CcErrorCode expected = CcErrorCode::NO_ERROR;
-        err_.compare_exchange_strong(expected,
-                                     err,
-                                     std::memory_order_relaxed,
-                                     std::memory_order_relaxed);
+        if (err_ == CcErrorCode::NO_ERROR)
+        {
+            err_ = err;
+        }
     }
 
     CcErrorCode GetError() const
     {
-        return err_.load(std::memory_order_acquire);
-    }
-
-    /**
-     * @brief Send response to src node if all cores have finished.
-     * We use this method to send scan slice response if this request is
-     * a remote request.
-     * We assign a dedicated core to be the response sender instead of directly
-     * sending the response on the last finished core. This is to avoid
-     * serialization of response message causing one core to become
-     * significantly slower than others and would end up being the sender of all
-     * scan slice response.
-     */
-    bool SendResponseIfFinished()
-    {
-        if (unfinished_core_cnt_.load(std::memory_order_relaxed) == 0)
-        {
-            if (err_.load(std::memory_order_relaxed) == CcErrorCode::NO_ERROR)
-            {
-                res_->SetFinished();
-            }
-            else
-            {
-                res_->SetError(err_.load(std::memory_order_relaxed));
-            }
-            return true;
-        }
-        return false;
-    }
-
-    bool IsResponseSender(uint16_t core_id) const
-    {
-        return ((tx_number_ & 0x3FF) % blocking_vec_.size()) == core_id;
+        return err_;
     }
 
     bool IsForWrite() const
@@ -2959,30 +2868,30 @@ public:
         cache_hit_miss_collected_ = true;
     }
 
-    bool IsWaitForSnapshot(uint16_t core_id) const
+    bool IsWaitForSnapshot() const
     {
-        return blocking_vec_[core_id].type_ ==
-               ScanBlockingType::BlockOnWaitSnapshots;
+        return blocking_info_.type_ == ScanBlockingType::BlockOnWaitSnapshots;
     }
 
-    void SetIsWaitForSnapshot(uint16_t core_id)
+    void SetIsWaitForSnapshot()
     {
-        blocking_vec_[core_id].type_ = ScanBlockingType::BlockOnWaitSnapshots;
+        blocking_info_.type_ = ScanBlockingType::BlockOnWaitSnapshots;
     }
 
-    size_t WaitForSnapshotCnt(uint16_t core_id) const
+    size_t WaitForSnapshotCnt() const
     {
-        return wait_for_snapshot_cnt_[core_id];
+        return wait_for_snapshot_cnt_;
     }
 
-    void DecreaseWaitForSnapshotCnt(uint16_t core_id)
+    void DecreaseWaitForSnapshotCnt()
     {
-        wait_for_snapshot_cnt_[core_id]--;
+        assert(wait_for_snapshot_cnt_ > 0);
+        wait_for_snapshot_cnt_--;
     }
 
-    void IncreaseWaitForSnapshotCnt(uint16_t core_id)
+    void IncreaseWaitForSnapshotCnt()
     {
-        wait_for_snapshot_cnt_[core_id]++;
+        wait_for_snapshot_cnt_++;
     }
 
     bool AbortIfOom() const override
@@ -3036,8 +2945,7 @@ private:
 
     uint32_t range_id_{0};
 
-    std::atomic<uint16_t> unfinished_core_cnt_{1};
-    std::atomic<CcErrorCode> err_{CcErrorCode::NO_ERROR};
+    CcErrorCode err_{CcErrorCode::NO_ERROR};
 
     uint64_t ts_{0};
 
@@ -3047,13 +2955,20 @@ private:
 
     struct ScanBlockingInfo
     {
-        uint64_t cce_lock_addr_;
-        ScanType scan_type_;
-        ScanBlockingType type_;
-    };
-    std::vector<ScanBlockingInfo> blocking_vec_;
+        void Reset()
+        {
+            cce_lock_addr_ = 0;
+            scan_type_ = ScanType::ScanUnknow;
+            type_ = ScanBlockingType::NoBlocking;
+        }
 
-    std::vector<size_t> wait_for_snapshot_cnt_;
+        uint64_t cce_lock_addr_{0};
+        ScanType scan_type_{ScanType::ScanUnknow};
+        ScanBlockingType type_{ScanBlockingType::NoBlocking};
+    };
+    ScanBlockingInfo blocking_info_;
+
+    size_t wait_for_snapshot_cnt_{0};
 
     RangeSliceId range_slice_id_;
 

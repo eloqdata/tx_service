@@ -773,7 +773,7 @@ private:
     TableName remote_tbl_name_{
         empty_sv, TableType::Primary, txservice::TableEngine::None};
     CcHandlerResult<RangeScanSliceResult> cc_res_{nullptr};
-    std::vector<RemoteScanSliceCache> scan_cache_vec_;
+    RemoteScanSliceCache scan_cache_;
 };
 
 struct RemoteReloadCacheCc : public ReloadCacheCc

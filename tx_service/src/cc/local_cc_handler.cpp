@@ -1286,34 +1286,19 @@ void txservice::LocalCcHandler::ScanNextBatch(
                  scanner.is_require_recs_,
                  prefetch_size);
 
-        uint32_t core_cnt = cc_shards_.Count();
-        req->SetShardCount(core_cnt);
+        // todo:
 
-        // When the cc ng term is less than 0, this is the first scan of the
-        // specified range.
-        if (cc_ng_term < 0)
-        {
-            scanner.ResetShards(core_cnt);
-        }
+        ScanCache *cache = scanner.Cache(0);
+        const ScanTuple *last_tuple = cache->LastTuple();
 
-        for (uint32_t core_id = 0; core_id < core_cnt; ++core_id)
-        {
-            ScanCache *cache = scanner.Cache(core_id);
-            const ScanTuple *last_tuple = cache->LastTuple();
-
-            req->SetPriorCceLockAddr(
-                last_tuple != nullptr ? last_tuple->cce_addr_.CceLockPtr() : 0,
-                core_id);
-        }
+        req->SetPriorCceLockAddr(
+            last_tuple != nullptr ? last_tuple->cce_addr_.CceLockPtr() : 0);
 
         scanner.ResetCaches();
 
-        uint32_t core_rand = butil::fast_rand();
+        uint16_t dest_core = range_id % cc_shards_.Count();
 
-        // The scan slice request is dispatched to the first core. The first
-        // core tries to pin the slice in memory and if succeeds, further
-        // dispatches the request to remaining cores for parallel scans.
-        cc_shards_.EnqueueCcRequest(thd_id_, core_rand % core_cnt, req);
+        cc_shards_.EnqueueCcRequest(thd_id_, dest_core, req);
     }
     else
     {
