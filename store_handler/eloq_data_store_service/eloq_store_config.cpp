@@ -26,6 +26,7 @@
 #include <algorithm>
 #include <cassert>
 #include <cerrno>
+#include <cctype>
 #include <cstring>
 #include <filesystem>
 #include <iomanip>
@@ -153,13 +154,39 @@ DEFINE_uint32(eloq_store_cloud_request_threads,
               "EloqStore cloud request thread number");
 DEFINE_uint32(eloq_store_max_write_concurrency,
               0,
-              "EloqStore max write concurrency");
+              "EloqStore maximum number of concurrent write tasks per shard; "
+              "0 keeps legacy unlimited behavior and is rewritten to "
+              "max_cloud_concurrency in cloud mode.");
 DEFINE_uint32(eloq_store_direct_io_buffer_pool_size,
               16,
-              "EloqStore DirectIO buffer pool size per shard");
+              "EloqStore maximum number of cached DirectIO buffers per shard.");
 DEFINE_bool(eloq_store_cloud_auto_credentials,
             true,
-            "EloqStore automatically detect OSS credentials");
+            "EloqStore automatically retrieves cloud credentials from the "
+            "environment or instance metadata instead of explicit access/secret "
+            "keys.");
+DEFINE_string(eloq_store_store_path_weights,
+              "",
+              "EloqStore optional comma-separated per-store-path weights; "
+              "must match eloq_store_data_path_list in size and disables "
+              "automatic disk-capacity-based weighting.");
+DEFINE_bool(eloq_store_enable_local_standby,
+            false,
+            "EloqStore enables standby replication mode for local storage; "
+            "cloud mode handles standby automatically.");
+DEFINE_string(eloq_store_standby_master_path,
+              "",
+              "EloqStore standby source in the form "
+              "host_name:/absolute/storage/path; when set, the store rsyncs "
+              "from the specified master instead of using cloud storage.");
+DEFINE_string(eloq_store_standby_master_snapshot_roots,
+              "",
+              "EloqStore comma-separated relative snapshot roots on the "
+              "standby master corresponding to eloq_store_standby_master_path.");
+DEFINE_string(eloq_store_standby_master_store_path_weights,
+              "",
+              "EloqStore comma-separated store_path_weights for the standby "
+              "master.");
 
 namespace EloqDS
 {
@@ -237,6 +264,55 @@ inline bool ends_with(const std::string_view &str,
     }
 
     return true;
+}
+
+inline std::string TrimAsciiWhitespace(std::string value)
+{
+    auto is_space = [](unsigned char c) { return std::isspace(c) != 0; };
+    auto begin = std::find_if_not(value.begin(), value.end(), is_space);
+    auto end = std::find_if_not(value.rbegin(), value.rend(), is_space).base();
+    if (begin >= end)
+    {
+        return "";
+    }
+    return std::string(begin, end);
+}
+
+inline void ParseUint64List(const std::string_view input,
+                            std::vector<uint64_t> &values)
+{
+    values.clear();
+    std::string token;
+    std::istringstream token_stream{std::string(input)};
+    while (std::getline(token_stream, token, ','))
+    {
+        token = TrimAsciiWhitespace(token);
+        if (token.empty())
+        {
+            continue;
+        }
+        if (!is_number(token))
+        {
+            LOG(FATAL) << "Invalid uint64 list entry: " << token;
+        }
+        values.emplace_back(std::stoull(token));
+    }
+}
+
+inline void ParseCsvStringList(const std::string_view input,
+                               std::vector<std::string> &values)
+{
+    values.clear();
+    std::string token;
+    std::istringstream token_stream{std::string(input)};
+    while (std::getline(token_stream, token, ','))
+    {
+        token = TrimAsciiWhitespace(token);
+        if (!token.empty())
+        {
+            values.emplace_back(std::move(token));
+        }
+    }
 }
 
 inline bool is_valid_size(const std::string_view &size_str_v)
@@ -437,6 +513,17 @@ EloqStoreConfig::EloqStoreConfig(const INIReader &config_reader,
             std::filesystem::create_directories(
                 eloqstore_configs_.store_path.back());
         }
+    }
+    std::string store_path_weights =
+        !CheckCommandLineFlagIsDefault("eloq_store_store_path_weights")
+            ? FLAGS_eloq_store_store_path_weights
+            : config_reader.GetString("store",
+                                      "eloq_store_store_path_weights",
+                                      FLAGS_eloq_store_store_path_weights);
+    if (!store_path_weights.empty())
+    {
+        ParseUint64List(store_path_weights,
+                        eloqstore_configs_.store_path_weights);
     }
 
     eloqstore_configs_.fd_limit =
@@ -721,6 +808,45 @@ EloqStoreConfig::EloqStoreConfig(const INIReader &config_reader,
             : config_reader.GetBoolean("store",
                                        "eloq_store_reuse_local_files",
                                        FLAGS_eloq_store_reuse_local_files);
+    eloqstore_configs_.enable_local_standby =
+        !CheckCommandLineFlagIsDefault("eloq_store_enable_local_standby")
+            ? FLAGS_eloq_store_enable_local_standby
+            : config_reader.GetBoolean("store",
+                                       "eloq_store_enable_local_standby",
+                                       FLAGS_eloq_store_enable_local_standby);
+    eloqstore_configs_.standby_master_path =
+        !CheckCommandLineFlagIsDefault("eloq_store_standby_master_path")
+            ? FLAGS_eloq_store_standby_master_path
+            : config_reader.GetString("store",
+                                      "eloq_store_standby_master_path",
+                                      FLAGS_eloq_store_standby_master_path);
+    std::string standby_master_snapshot_roots =
+        !CheckCommandLineFlagIsDefault(
+            "eloq_store_standby_master_snapshot_roots")
+            ? FLAGS_eloq_store_standby_master_snapshot_roots
+            : config_reader.GetString(
+                  "store",
+                  "eloq_store_standby_master_snapshot_roots",
+                  FLAGS_eloq_store_standby_master_snapshot_roots);
+    if (!standby_master_snapshot_roots.empty())
+    {
+        ParseCsvStringList(standby_master_snapshot_roots,
+                           eloqstore_configs_.standby_master_snapshot_roots);
+    }
+    std::string standby_master_store_path_weights =
+        !CheckCommandLineFlagIsDefault(
+            "eloq_store_standby_master_store_path_weights")
+            ? FLAGS_eloq_store_standby_master_store_path_weights
+            : config_reader.GetString(
+                  "store",
+                  "eloq_store_standby_master_store_path_weights",
+                  FLAGS_eloq_store_standby_master_store_path_weights);
+    if (!standby_master_store_path_weights.empty())
+    {
+        ParseUint64List(standby_master_store_path_weights,
+                        eloqstore_configs_
+                            .standby_master_store_path_weights);
+    }
     eloqstore_configs_.data_page_size =
         !CheckCommandLineFlagIsDefault("eloq_store_data_page_size")
             ? FLAGS_eloq_store_data_page_size
