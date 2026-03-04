@@ -2341,7 +2341,6 @@ public:
           end_key_type_(RangeKeyType::RawPtr),
           schema_version_(0)
     {
-        parallel_req_ = true;
     }
 
     ~ScanSliceCc()
@@ -2409,12 +2408,12 @@ public:
         is_require_keys_ = is_require_keys;
         is_require_recs_ = is_require_recs;
 
-        unfinished_core_cnt_.store(1, std::memory_order_relaxed);
         range_slice_id_.Reset();
         last_pinned_slice_ = nullptr;
         prefetch_size_ = prefetch_size;
-        err_.store(CcErrorCode::NO_ERROR, std::memory_order_relaxed);
+        err_ = CcErrorCode::NO_ERROR;
         cache_hit_miss_collected_ = false;
+        blocking_info_.Reset();
     }
 
     void Set(const TableName &tbl_name,
@@ -2472,11 +2471,11 @@ public:
         is_require_recs_ = is_require_recs;
         prefetch_size_ = prefetch_size;
 
-        unfinished_core_cnt_.store(1, std::memory_order_relaxed);
         range_slice_id_.Reset();
         last_pinned_slice_ = nullptr;
-        err_.store(CcErrorCode::NO_ERROR, std::memory_order_relaxed);
+        err_ = CcErrorCode::NO_ERROR;
         cache_hit_miss_collected_ = false;
+        blocking_info_.Reset();
     }
 
     bool Execute(CcShard &ccs) override
@@ -2485,7 +2484,8 @@ public:
         {
             // Do not modify res_ directly since there could be other cores
             // still working on this cc req.
-            return SetError(CcErrorCode::REQUESTED_NODE_NOT_LEADER);
+            SetError(CcErrorCode::REQUESTED_NODE_NOT_LEADER);
+            return true;
         }
 
         CcMap *ccm = nullptr;
@@ -2518,7 +2518,8 @@ public:
                     // is marked as errored.
                     if (init_res.error != CcErrorCode::NO_ERROR)
                     {
-                        return SetError(init_res.error);
+                        SetError(init_res.error);
+                        return true;
                     }
                     // The req will be re-enqueued.
                     return false;
@@ -2545,16 +2546,13 @@ public:
 
     void AbortCcRequest(CcErrorCode err_code) override
     {
-        if (SetError(err_code))
+        SetError(err_code);
+        // If the request has pinned any slice, unpin it.
+        if (range_slice_id_.Range() != nullptr)
         {
-            // Last core finished. If the request has pinned any slice, unpin
-            // it.
-            if (range_slice_id_.Range() != nullptr)
-            {
-                UnpinSlices();
-            }
-            Free();
+            UnpinSlices();
         }
+        Free();
     }
 
     bool IsLocal() const
@@ -2685,18 +2683,18 @@ public:
         return ts_;
     }
 
-    ScanCache *GetLocalScanCache(size_t shard_id)
+    ScanCache *GetLocalScanCache()
     {
         assert(IsLocal());
-        return res_->Value().ccm_scanner_->Cache(shard_id);
+        return res_->Value().ccm_scanner_->Cache(0);
     }
 
-    RemoteScanSliceCache *GetRemoteScanCache(size_t shard_id)
+    RemoteScanSliceCache *GetRemoteScanCache()
     {
         assert(!IsLocal());
         RangeScanSliceResult &slice_result = res_->Value();
-        assert(shard_id < slice_result.remote_scan_caches_->size());
-        return &slice_result.remote_scan_caches_->at(shard_id);
+        assert(slice_result.remote_scan_caches_ != nullptr);
+        return slice_result.remote_scan_caches_;
     }
 
     CcScanner *GetLocalScanner()
@@ -2704,161 +2702,70 @@ public:
         return IsLocal() ? res_->Value().ccm_scanner_ : nullptr;
     }
 
-    uint64_t BlockingCceLockAddr(uint16_t core_id)
+    uint64_t BlockingCceLockAddr() const
     {
-        assert(core_id < blocking_vec_.size());
-        return blocking_vec_[core_id].cce_lock_addr_;
+        return blocking_info_.cce_lock_addr_;
     }
 
-    std::pair<ScanBlockingType, ScanType> BlockingPair(uint16_t core_id)
+    std::pair<ScanBlockingType, ScanType> BlockingPair() const
     {
-        assert(core_id < blocking_vec_.size());
-        return {blocking_vec_[core_id].type_,
-                blocking_vec_[core_id].scan_type_};
+        return {blocking_info_.type_, blocking_info_.scan_type_};
     }
 
-    void SetBlockingInfo(uint16_t core_id,
-                         uint64_t cce_lock_addr,
+    void SetBlockingInfo(uint64_t cce_lock_addr,
                          ScanType scan_type,
                          ScanBlockingType blocking_type)
     {
-        assert(core_id < blocking_vec_.size());
-        blocking_vec_[core_id] = {cce_lock_addr, scan_type, blocking_type};
+        blocking_info_.cce_lock_addr_ = cce_lock_addr;
+        blocking_info_.scan_type_ = scan_type;
+        blocking_info_.type_ = blocking_type;
     }
 
-    void SetShardCount(uint16_t shard_cnt)
+    void SetPriorCceLockAddr(uint64_t addr)
     {
-        blocking_vec_.resize(shard_cnt);
-        for (auto &it : blocking_vec_)
-        {
-            it.cce_lock_addr_ = 0;
-            it.scan_type_ = ScanType::ScanUnknow;
-            it.type_ = ScanBlockingType::NoBlocking;
-        }
-
-        wait_for_snapshot_cnt_.resize(shard_cnt);
-        for (uint16_t i = 0; i < shard_cnt; ++i)
-        {
-            wait_for_snapshot_cnt_[i] = 0;
-        }
-    }
-
-    uint64_t GetShardCount() const
-    {
-        return blocking_vec_.size();
-    }
-
-    void SetUnfinishedCoreCnt(uint16_t core_cnt)
-    {
-        unfinished_core_cnt_.store(core_cnt, std::memory_order_release);
-    }
-
-    void SetPriorCceLockAddr(uint64_t addr, uint16_t shard_id)
-    {
-        assert(shard_id < blocking_vec_.size());
-        blocking_vec_[shard_id] = {
-            addr, ScanType::ScanUnknow, ScanBlockingType::NoBlocking};
+        blocking_info_.cce_lock_addr_ = addr;
+        blocking_info_.scan_type_ = ScanType::ScanUnknow;
+        blocking_info_.type_ = ScanBlockingType::NoBlocking;
     }
 
     /**
      * @brief Notifies the scan slice request that the scan at the calling core
      * has finished.
      *
-     * @return true, if all cores have finished the scan.
-     * @return false, if the scan is not completed in all cores.
      */
-    bool SetFinish()
+    void SetFinish()
     {
-        uint16_t remaining_cnt =
-            unfinished_core_cnt_.fetch_sub(1, std::memory_order_acq_rel);
-
-        if (remaining_cnt == 1)
+        if (err_ == CcErrorCode::NO_ERROR)
         {
-            // Only update result if this is local request. Remote request
-            // result will be updated by dedicated core.
-            if (res_->Value().is_local_)
-            {
-                if (err_.load(std::memory_order_relaxed) ==
-                    CcErrorCode::NO_ERROR)
-                {
-                    res_->Value().ccm_scanner_->FinalizeCommit();
-
-                    res_->SetFinished();
-                }
-                else
-                {
-                    res_->SetError(err_.load(std::memory_order_relaxed));
-                }
-            }
+            res_->SetFinished();
         }
-
-        return remaining_cnt == 1;
+        else
+        {
+            res_->SetError(err_);
+        }
     }
 
-    bool SetError(CcErrorCode err)
+    void SetError(CcErrorCode err)
     {
-        CcErrorCode expected = CcErrorCode::NO_ERROR;
-        err_.compare_exchange_strong(expected,
-                                     err,
-                                     std::memory_order_relaxed,
-                                     std::memory_order_relaxed);
-        uint16_t remaining_cnt =
-            unfinished_core_cnt_.fetch_sub(1, std::memory_order_acq_rel);
-
-        // remaining_cnt might be 0 if all cores have finished and the req is
-        // put back into the result sending core's queue.
-        if (remaining_cnt <= 1)
+        if (err_ == CcErrorCode::NO_ERROR)
         {
-            res_->SetError(err_.load(std::memory_order_relaxed));
+            err_ = err;
         }
 
-        return remaining_cnt <= 1;
+        res_->SetError(err_);
     }
 
     void DeferSetError(CcErrorCode err)
     {
-        CcErrorCode expected = CcErrorCode::NO_ERROR;
-        err_.compare_exchange_strong(expected,
-                                     err,
-                                     std::memory_order_relaxed,
-                                     std::memory_order_relaxed);
+        if (err_ == CcErrorCode::NO_ERROR)
+        {
+            err_ = err;
+        }
     }
 
     CcErrorCode GetError() const
     {
-        return err_.load(std::memory_order_acquire);
-    }
-
-    /**
-     * @brief Send response to src node if all cores have finished.
-     * We use this method to send scan slice response if this request is
-     * a remote request.
-     * We assign a dedicated core to be the response sender instead of directly
-     * sending the response on the last finished core. This is to avoid
-     * serialization of response message causing one core to become
-     * significantly slower than others and would end up being the sender of all
-     * scan slice response.
-     */
-    bool SendResponseIfFinished()
-    {
-        if (unfinished_core_cnt_.load(std::memory_order_relaxed) == 0)
-        {
-            if (err_.load(std::memory_order_relaxed) == CcErrorCode::NO_ERROR)
-            {
-                res_->SetFinished();
-            }
-            else
-            {
-                res_->SetError(err_.load(std::memory_order_relaxed));
-            }
-            return true;
-        }
-        return false;
-    }
-
-    bool IsResponseSender(uint16_t core_id) const
-    {
-        return ((tx_number_ & 0x3FF) % blocking_vec_.size()) == core_id;
+        return err_;
     }
 
     bool IsForWrite() const
@@ -2931,30 +2838,30 @@ public:
         cache_hit_miss_collected_ = true;
     }
 
-    bool IsWaitForSnapshot(uint16_t core_id) const
+    bool IsWaitForSnapshot() const
     {
-        return blocking_vec_[core_id].type_ ==
-               ScanBlockingType::BlockOnWaitSnapshots;
+        return blocking_info_.type_ == ScanBlockingType::BlockOnWaitSnapshots;
     }
 
-    void SetIsWaitForSnapshot(uint16_t core_id)
+    void SetIsWaitForSnapshot()
     {
-        blocking_vec_[core_id].type_ = ScanBlockingType::BlockOnWaitSnapshots;
+        blocking_info_.type_ = ScanBlockingType::BlockOnWaitSnapshots;
     }
 
-    size_t WaitForSnapshotCnt(uint16_t core_id) const
+    size_t WaitForSnapshotCnt() const
     {
-        return wait_for_snapshot_cnt_[core_id];
+        return wait_for_snapshot_cnt_;
     }
 
-    void DecreaseWaitForSnapshotCnt(uint16_t core_id)
+    void DecreaseWaitForSnapshotCnt()
     {
-        wait_for_snapshot_cnt_[core_id]--;
+        assert(wait_for_snapshot_cnt_ > 0);
+        wait_for_snapshot_cnt_--;
     }
 
-    void IncreaseWaitForSnapshotCnt(uint16_t core_id)
+    void IncreaseWaitForSnapshotCnt()
     {
-        wait_for_snapshot_cnt_[core_id]++;
+        wait_for_snapshot_cnt_++;
     }
 
     bool AbortIfOom() const override
@@ -3008,8 +2915,7 @@ private:
 
     uint32_t range_id_{0};
 
-    std::atomic<uint16_t> unfinished_core_cnt_{1};
-    std::atomic<CcErrorCode> err_{CcErrorCode::NO_ERROR};
+    CcErrorCode err_{CcErrorCode::NO_ERROR};
 
     uint64_t ts_{0};
 
@@ -3019,13 +2925,20 @@ private:
 
     struct ScanBlockingInfo
     {
-        uint64_t cce_lock_addr_;
-        ScanType scan_type_;
-        ScanBlockingType type_;
-    };
-    std::vector<ScanBlockingInfo> blocking_vec_;
+        void Reset()
+        {
+            cce_lock_addr_ = 0;
+            scan_type_ = ScanType::ScanUnknow;
+            type_ = ScanBlockingType::NoBlocking;
+        }
 
-    std::vector<size_t> wait_for_snapshot_cnt_;
+        uint64_t cce_lock_addr_{0};
+        ScanType scan_type_{ScanType::ScanUnknow};
+        ScanBlockingType type_{ScanBlockingType::NoBlocking};
+    };
+    ScanBlockingInfo blocking_info_;
+
+    size_t wait_for_snapshot_cnt_{0};
 
     RangeSliceId range_slice_id_;
 
@@ -3234,36 +3147,14 @@ public:
 
     void Reset(remote::CcStreamReceiver *receiver,
                std::unique_ptr<remote::ScanSliceResponse> resp_msg,
-               std::vector<size_t> &&offset_tables,
-               CcHandlerResult<RangeScanSliceResult> *hd_res,
-               size_t worker_cnt)
+               CcHandlerResult<RangeScanSliceResult> *hd_res)
     {
         receiver_ = receiver;
         resp_msg_ = std::move(resp_msg);
-        offset_tables_ = std::move(offset_tables);
         hd_res_ = hd_res;
-
-        unfinished_cnt_ = worker_cnt;
-        next_remote_core_idx_ = worker_cnt;
-
-        assert(offset_tables_.size() == RemoteCoreCnt());
-        assert(worker_cnt <= RemoteCoreCnt());
-
-        cur_idxs_.clear();
-        key_offsets_.clear();
-        rec_offsets_.clear();
-
-        assert(cur_idxs_.empty());
-        assert(key_offsets_.empty());
-        assert(rec_offsets_.empty());
-
-        for (size_t worker_idx = 0; worker_idx < worker_cnt; ++worker_idx)
-        {
-            // worker idx must be less or equal than remote core count
-            cur_idxs_.push_back({worker_idx, 0});
-            key_offsets_.push_back(KeyStartOffset(worker_idx));
-            rec_offsets_.push_back(RecStartOffset(worker_idx));
-        }
+        cur_tuple_idx_ = 0;
+        key_offset_ = 0;
+        rec_offset_ = 0;
     }
 
     ProcessRemoteScanRespCc(const ProcessRemoteScanRespCc &) = delete;
@@ -3276,74 +3167,56 @@ public:
 
         do
         {
-            auto &[remote_core_idx, tuple_idx] = cur_idxs_.at(ccs.core_id_);
-
+            uint32_t remote_core_idx = resp_msg_->core_id();
             const uint64_t *key_ts_ptr =
                 (const uint64_t *) resp_msg_->key_ts().data();
-            key_ts_ptr += MetaOffset(remote_core_idx);
 
             const uint64_t *gap_ts_ptr =
                 (const uint64_t *) resp_msg_->gap_ts().data();
-            gap_ts_ptr += MetaOffset(remote_core_idx);
 
             const uint64_t *term_ptr =
                 (const uint64_t *) resp_msg_->term().data();
-            term_ptr += MetaOffset(remote_core_idx);
 
             const uint64_t *cce_lock_ptr_ptr =
                 (const uint64_t *) resp_msg_->cce_lock_ptr().data();
-            cce_lock_ptr_ptr += MetaOffset(remote_core_idx);
 
             const remote::RecordStatusType *rec_status_ptr =
                 (const remote::RecordStatusType *) resp_msg_->rec_status()
                     .data();
-            rec_status_ptr += MetaOffset(remote_core_idx);
 
             RangeScanSliceResult &scan_slice_result = hd_res_->Value();
             CcScanner &range_scanner = *scan_slice_result.ccm_scanner_;
-            ScanCache *shard_cache = range_scanner.Cache(remote_core_idx);
+            ScanCache *shard_cache = range_scanner.Cache(0);
 
-            size_t &key_offset = key_offsets_[ccs.core_id_];
-            size_t &rec_offset = rec_offsets_[ccs.core_id_];
-            size_t tuple_cnt = TupleCnt(remote_core_idx);
+            size_t tuple_cnt = TupleCnt();
 
-            for (; tuple_idx < tuple_cnt && scan_cnt < SCAN_BATCH_SIZE;
-                 ++tuple_idx, ++scan_cnt)
+            for (; cur_tuple_idx_ < tuple_cnt && scan_cnt < SCAN_BATCH_SIZE;
+                 ++cur_tuple_idx_, ++scan_cnt)
             {
                 RecordStatus rec_status =
                     remote::ToLocalType::ConvertRecordStatusType(
-                        rec_status_ptr[tuple_idx]);
+                        rec_status_ptr[cur_tuple_idx_]);
 
                 shard_cache->AddScanTuple(resp_msg_->keys(),
-                                          key_offset,
-                                          key_ts_ptr[tuple_idx],
+                                          key_offset_,
+                                          key_ts_ptr[cur_tuple_idx_],
                                           resp_msg_->records(),
-                                          rec_offset,
+                                          rec_offset_,
                                           rec_status,
                                           -1,
-                                          gap_ts_ptr[tuple_idx],
-                                          cce_lock_ptr_ptr[tuple_idx],
-                                          term_ptr[tuple_idx],
+                                          gap_ts_ptr[cur_tuple_idx_],
+                                          cce_lock_ptr_ptr[cur_tuple_idx_],
+                                          term_ptr[cur_tuple_idx_],
                                           remote_core_idx,
                                           scan_slice_result.cc_ng_id_,
                                           true);
             }
 
-            if (tuple_idx == tuple_cnt)
+            if (cur_tuple_idx_ == tuple_cnt)
             {
-                size_t trailing_cnt = TrailingCnt(remote_core_idx);
-                while (trailing_cnt-- > 0)
-                {
-                    shard_cache->RemoveLast();
-                }
-
-                range_scanner.CommitAtCore(remote_core_idx);
-
-                if (!MoveForward(ccs.core_id_))
-                {
-                    // No more data
-                    return SetFinished();
-                }
+                // No more data
+                SetFinished();
+                return true;
             }
 
             //  To avoid blocking other request for a long time, we only process
@@ -3355,115 +3228,43 @@ public:
         return false;
     }
 
-    bool SetFinished()
+    void SetFinished()
     {
-        // This core is last finished worker. We need to set handler result and
-        // recycle message.
-        if (unfinished_cnt_.fetch_sub(1, std::memory_order_release) == 1)
+        if (resp_msg_->error_code() != 0)
         {
-            if (resp_msg_->error_code() != 0)
-            {
-                hd_res_->SetError(remote::ToLocalType::ConvertCcErrorCode(
-                    resp_msg_->error_code()));
-            }
-            else
-            {
-                hd_res_->Value().ccm_scanner_->FinalizeCommit();
-
-                hd_res_->SetFinished();
-            }
-
-            TransactionExecution *txm =
-                reinterpret_cast<TransactionExecution *>(resp_msg_->txm_addr());
-            txm->ReleaseSharedForwardLatch();
-
-            // Recycle message
-            receiver_->RecycleScanSliceResp(std::move(resp_msg_));
-
-            // Return true to recycle this request
-            return true;
+            hd_res_->SetError(remote::ToLocalType::ConvertCcErrorCode(
+                resp_msg_->error_code()));
+        }
+        else
+        {
+            hd_res_->SetFinished();
         }
 
-        return false;
+        TransactionExecution *txm =
+            reinterpret_cast<TransactionExecution *>(resp_msg_->txm_addr());
+        txm->ReleaseSharedForwardLatch();
+
+        // Recycle message
+        receiver_->RecycleScanSliceResp(std::move(resp_msg_));
     }
 
 private:
-    bool MoveForward(size_t worker_idx)
-    {
-        size_t new_remote_core_idx = next_remote_core_idx_.fetch_add(1);
-        if (new_remote_core_idx < RemoteCoreCnt())
-        {
-            cur_idxs_.at(worker_idx) = {new_remote_core_idx, 0};
-            key_offsets_.at(worker_idx) = KeyStartOffset(new_remote_core_idx);
-            rec_offsets_.at(worker_idx) = RecStartOffset(new_remote_core_idx);
-
-            return true;
-        }
-
-        // No more data
-        return false;
-    }
-
-    size_t KeyStartOffset(size_t remote_core_idx) const
-    {
-        const size_t *ptr = reinterpret_cast<const size_t *>(
-            resp_msg_->key_start_offsets().data());
-        ptr += remote_core_idx;
-        return *ptr;
-    }
-
-    size_t RecStartOffset(size_t remote_core_idx) const
-    {
-        const size_t *ptr = reinterpret_cast<const size_t *>(
-            resp_msg_->record_start_offsets().data());
-        ptr += remote_core_idx;
-        return *ptr;
-    }
-
-    size_t MetaOffset(size_t remote_core_idx) const
-    {
-        return offset_tables_[remote_core_idx];
-    }
-
-    size_t TupleCnt(size_t remote_core_idx) const
+    size_t TupleCnt() const
     {
         const char *tuple_cnt_info = resp_msg_->tuple_cnt().data();
-        // remote core count
-        tuple_cnt_info += sizeof(uint16_t);
-        // tuple count
-        tuple_cnt_info += remote_core_idx * sizeof(size_t);
         return *(reinterpret_cast<const size_t *>(tuple_cnt_info));
-    }
-
-    size_t TrailingCnt(size_t remote_core_idx) const
-    {
-        const size_t *ptr =
-            reinterpret_cast<const size_t *>(resp_msg_->trailing_cnts().data());
-        ptr += remote_core_idx;
-        return *ptr;
-    }
-
-    uint16_t RemoteCoreCnt() const
-    {
-        const char *tuple_cnt_info = resp_msg_->tuple_cnt().data();
-        return *reinterpret_cast<const uint16_t *>(tuple_cnt_info);
     }
 
     remote::CcStreamReceiver *receiver_{nullptr};
     std::unique_ptr<remote::ScanSliceResponse> resp_msg_{nullptr};
-    // Store the start postition of meta data like `key_ts`.
-    std::vector<size_t> offset_tables_;
-    // The vector of {remote_core_idx, current_tuple_idx}.
-    std::vector<std::pair<size_t, size_t>> cur_idxs_;
+    // current_tuple_idx}.
+    size_t cur_tuple_idx_;
 
     // We need to store key/rec offset so that we could restart from pause
     // point.
-    std::vector<size_t> key_offsets_;
-    std::vector<size_t> rec_offsets_;
+    size_t key_offset_;
+    size_t rec_offset_;
 
-    // Unfinished worker count. std::min(this_node_core_count,
-    // remote_core_count)
-    std::atomic<size_t> unfinished_cnt_{0};
     // Next remote core idx we need to process.
     std::atomic<size_t> next_remote_core_idx_{0};
     CcHandlerResult<RangeScanSliceResult> *hd_res_{nullptr};
