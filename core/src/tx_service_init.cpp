@@ -261,6 +261,9 @@ bool DataSubstrate::InitializeTxService(const INIReader &config_reader)
     LOG(INFO) << "Data substrate memory limit: "
               << core_config_.node_memory_limit_mb << "MB";
 
+    LOG(INFO) << ">> lru: " << (int) cache_evict_policy
+              << ", threshold: " << lolru_large_obj_threshold_kb;
+
     std::map<std::string, uint32_t> tx_service_conf{
         {"core_num", core_config_.core_num},
         {"checkpointer_interval", checkpointer_interval},

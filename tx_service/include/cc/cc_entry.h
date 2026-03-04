@@ -2296,10 +2296,13 @@ struct CcPage : public LruPage
                 ? keys_.end()
                 : std::lower_bound(keys_.begin(), keys_.end(), key);
         assert(insert_it == keys_.end() || *insert_it != key);
+        assert(Size() < split_threshold_);
+
+        entry->UpdateCcPage(this);
 
         size_t insert_pos = insert_it - keys_.begin();
         keys_.emplace(insert_it, key);
-        entries_.emplace(entries_.begin() + insert_pos, entry);
+        entries_.emplace(entries_.begin() + insert_pos, std::move(entry));
         return insert_pos;
     }
 

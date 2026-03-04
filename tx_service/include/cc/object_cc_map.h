@@ -1048,10 +1048,6 @@ public:
                 }
                 CommitCommandOnDirtyPayload(
                     dirty_payload, dirty_payload_status, *cmd);
-                if (shard_->GetCacheEvictPolicy() == CacheEvictPolicy::LO_LRU)
-                {
-                    EnsureLargeObjOccupyPageAlone(ccp, cce);
-                }
             }
             // if cmd.ExecuteOn() telling ttl reset is not going to happen
             else if (obj_result.ttl_reset_ == true)
@@ -1207,11 +1203,6 @@ public:
                 {
                     CommitCommandOnPayload(
                         cce->payload_.cur_payload_, status, *cmd);
-                    if (shard_->GetCacheEvictPolicy() ==
-                        CacheEvictPolicy::LO_LRU)
-                    {
-                        EnsureLargeObjOccupyPageAlone(ccp, cce);
-                    }
                 }
 
                 // Reset the dirty status.
@@ -1269,6 +1260,11 @@ public:
                         assert(cce->PayloadStatus() == RecordStatus::Deleted);
                         ccp->smallest_ttl_ = 0;
                     }
+                }
+
+                if (shard_->GetCacheEvictPolicy() == CacheEvictPolicy::LO_LRU)
+                {
+                    EnsureLargeObjOccupyPageAlone(ccp, cce);
                 }
             }
             else
@@ -1439,11 +1435,6 @@ public:
                     CommitCommandOnPayload(cce->payload_.cur_payload_,
                                            payload_status,
                                            *pending_cmd);
-                    if (shard_->GetCacheEvictPolicy() ==
-                        CacheEvictPolicy::LO_LRU)
-                    {
-                        EnsureLargeObjOccupyPageAlone(ccp, cce);
-                    }
                 }
                 else
                 {
@@ -1525,6 +1516,12 @@ public:
                        LockType::WriteLock,
                        true,
                        cce->payload_.cur_payload_.get());
+
+        if (shard_->GetCacheEvictPolicy() == CacheEvictPolicy::LO_LRU)
+        {
+            EnsureLargeObjOccupyPageAlone(ccp, cce);
+        }
+
         if (cce->PayloadStatus() == RecordStatus::Unknown && cce->IsFree())
         {
             // If the finished cmd ignores kv value and the tx aborts, we will
@@ -1868,6 +1865,12 @@ public:
                     ccp->smallest_ttl_ = 0;
                 }
             }
+
+            if (shard_->GetCacheEvictPolicy() == CacheEvictPolicy::LO_LRU &&
+                payload_status == RecordStatus::Normal)
+            {
+                EnsureLargeObjOccupyPageAlone(ccp, cce);
+            }
         }
 
         ReleaseCceLock(lk, cce, txn, req.NodeGroupId(), LockType::WriteLock);
@@ -2093,6 +2096,12 @@ public:
             {
                 ccp->smallest_ttl_ = 0;
             }
+        }
+
+        if (shard_->GetCacheEvictPolicy() == CacheEvictPolicy::LO_LRU &&
+            cce->PayloadStatus() == RecordStatus::Normal)
+        {
+            EnsureLargeObjOccupyPageAlone(ccp, cce);
         }
 
         return req.SetFinish(*shard_);
@@ -2540,6 +2549,12 @@ public:
                                true,
                                cce->payload_.cur_payload_.get());
             }
+
+            if (shard_->GetCacheEvictPolicy() == CacheEvictPolicy::LO_LRU &&
+                payload_status == RecordStatus::Normal)
+            {
+                EnsureLargeObjOccupyPageAlone(ccp, cce);
+            }
         }
 
         if (next_core != UINT16_MAX)
@@ -2709,16 +2724,16 @@ public:
                 {
                     ccp->smallest_ttl_ = cce->payload_.cur_payload_->GetTTL();
                 }
-
-                if (shard_->GetCacheEvictPolicy() == CacheEvictPolicy::LO_LRU)
-                {
-                    EnsureLargeObjOccupyPageAlone(ccp, cce);
-                }
             }
             else
             {
                 assert(cce->PayloadStatus() == RecordStatus::Deleted);
                 ccp->smallest_ttl_ = 0;
+            }
+
+            if (shard_->GetCacheEvictPolicy() == CacheEvictPolicy::LO_LRU)
+            {
+                EnsureLargeObjOccupyPageAlone(ccp, cce);
             }
         }
 
@@ -2799,17 +2814,18 @@ private:
             // Commit the pending command.
             CommitCommandOnDirtyPayload(
                 dirty_payload, dirty_payload_status, *pending_cmd);
-            if (shard_->GetCacheEvictPolicy() == CacheEvictPolicy::LO_LRU)
-            {
-                CcPage<KeyT, ValueT, false, false> *ccp =
-                    static_cast<CcPage<KeyT, ValueT, false, false> *>(
-                        cce->GetCcPage());
-                EnsureLargeObjOccupyPageAlone(ccp, cce);
-            }
 
             cce->SetDirtyPayload(std::move(dirty_payload));
             cce->SetDirtyPayloadStatus(dirty_payload_status);
             cce->SetPendingCmd(nullptr);
+        }
+
+        if (shard_->GetCacheEvictPolicy() == CacheEvictPolicy::LO_LRU)
+        {
+            CcPage<KeyT, ValueT, false, false> *ccp =
+                static_cast<CcPage<KeyT, ValueT, false, false> *>(
+                    cce->GetCcPage());
+            EnsureLargeObjOccupyPageAlone(ccp, cce);
         }
     }
 
@@ -2916,48 +2932,55 @@ private:
     void EnsureLargeObjOccupyPageAlone(CcPage<KeyT, ValueT, false, false> *ccp,
                                        CcEntry<KeyT, ValueT, false, false> *cce)
     {
-        assert(cce->PayloadStatus() == RecordStatus::Normal);
-        if (cce->payload_.cur_payload_.SerializedLength() >
-            shard_->LargeObjThresholdBytes())
+        assert(cce->GetKeyLock() == nullptr);
+        if (cce->PayloadStatus() == RecordStatus::Deleted)
         {
-            if (ccp->Size() == 1)
+            ccp->large_obj_page_ = false;
+        }
+        else
+        {
+            assert(cce->PayloadStatus() == RecordStatus::Normal);
+            if (cce->payload_.cur_payload_->SerializedLength() >
+                shard_->LargeObjThresholdBytes())
             {
-                ccp->large_obj_page_ = true;
+                if (ccp->Size() <= 1)
+                {
+                    ccp->large_obj_page_ = true;
+                }
+                else
+                {
+                    assert(ccp->large_obj_page_ == false);
+                    size_t idx_in_ccp = ccp->FindEntry(cce);
+                    const KeyT *key = ccp->Key(idx_in_ccp);
+
+                    auto large_obj_ccp_uptr =
+                        std::make_unique<CcPage<KeyT, ValueT, false, false>>(
+                            this, ccp, ccp->next_page_);
+                    large_obj_ccp_uptr->large_obj_page_ = true;
+                    large_obj_ccp_uptr->Emplace(*key,
+                                                ccp->MoveEntry(idx_in_ccp));
+                    large_obj_ccp_uptr->smallest_ttl_ =
+                        cce->payload_.cur_payload_->GetTTL();
+                    large_obj_ccp_uptr->last_dirty_commit_ts_ = cce->CommitTs();
+
+                    auto ccp_it = ccmp_.upper_bound(*key);
+                    if (ccp_it == ccmp_.end() || *key < ccp_it->first)
+                    {
+                        --ccp_it;
+                    }
+
+                    ccp->Remove(idx_in_ccp);
+                    TryUpdatePageKey(ccp_it);
+
+                    CcPage<KeyT, ValueT, false, false> *large_obj_ccp_ptr =
+                        large_obj_ccp_uptr.get();
+                    ccmp_.try_emplace(*key, std::move(large_obj_ccp_uptr));
+                    shard_->UpdateLruList(large_obj_ccp_ptr, false);
+                }
             }
             else
             {
-                assert(ccp->large_obj_page_ == false);
-                size_t idx_in_ccp = ccp->FindEntry(cce);
-                const KeyT *key = ccp->Key(idx_in_ccp);
-
-                auto large_obj_ccp_uptr =
-                    std::make_unique<CcPage<KeyT, ValueT, false, false>>(
-                        this, ccp, ccp->next_page_);
-                CcPage<KeyT, ValueT, false, false> *large_obj_ccp_ptr =
-                    large_obj_ccp_uptr.get();
-
-                large_obj_ccp_ptr->prev_page_ = ccp;
-                large_obj_ccp_ptr->next_page_ = ccp->next_page_;
-                ccp->next_page_->prev_page_ = large_obj_ccp_ptr;
-                ccp->next_page_ = large_obj_ccp_ptr;
-
-                large_obj_ccp_ptr->large_obj_ccp = true;
-                large_obj_ccp_ptr->Emplace(*key, ccp->MoveEntry(idx_in_ccp));
-                large_obj_ccp_ptr->smallest_ttl_ =
-                    cce->payload_.cur_payload_->GetTTL();
-                large_obj_ccp_ptr->last_dirty_commit_ts_ = cce->CommitTs();
-                large_obj_ccp_ptr->last_access_ts_ = 0;
-
-                auto ccp_it = ccmp_.upper_bound(*key);
-                if (ccp_it == ccmp_.end() || *key < ccp_it->first)
-                {
-                    --ccp_it;
-                }
-
-                ccp->Remove(idx_in_ccp);
-                TryUpdatePageKey(ccp_it);
-
-                ccmp_.try_emplace(*key, std::move(large_obj_ccp_uptr));
+                ccp->large_obj_page_ = false;
             }
         }
     }
