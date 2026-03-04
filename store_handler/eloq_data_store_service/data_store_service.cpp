@@ -2270,7 +2270,8 @@ void DataStoreService::OnSnapshotReceived(
     }
     else
     {
-        if (ds_ref.shard_status_.load() == DSShardStatus::Closed)
+        if (ds_ref.shard_status_.load(std::memory_order_acquire) ==
+            DSShardStatus::Closed)
         {
             // If the shard is closed, open it and load data from cloud.
             LOG(INFO) << "OnSnapshotReceived, open data store for DSS shard "
@@ -2279,6 +2280,14 @@ void DataStoreService::OnSnapshotReceived(
         }
         else
         {
+            while (ds_ref.shard_status_.load(std::memory_order_acquire) ==
+                   DSShardStatus::Starting)
+            {
+                bthread_usleep(1000);
+                LOG(INFO) << "OnSnapshotReceived, data store is starting, "
+                             "waiting for data store to be ready";
+            }
+
             LOG(INFO)
                 << "OnSnapshotReceived, reload data from cloud for DSS shard "
                 << shard_id << " and term " << term;

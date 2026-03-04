@@ -883,7 +883,7 @@ void EloqStoreDataStore::ReloadDataFromCloud(int64_t term)
     LOG(INFO) << "EloqStoreDataStore::ReloadDataFromCloud, term: " << term;
     if (eloq_store_service_->Term() != static_cast<uint64_t>(term))
     {
-        LOG(ERROR) << "EloqStoreDataStore::ReloadDataFromCloud, term mismatch, "
+        LOG(FATAL) << "EloqStoreDataStore::ReloadDataFromCloud, term mismatch, "
                       "expected: "
                    << term << ", actual: " << eloq_store_service_->Term();
         return;
