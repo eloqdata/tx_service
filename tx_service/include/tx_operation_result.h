@@ -691,7 +691,7 @@ struct RangeScanSliceResult
     union
     {
         CcScanner *ccm_scanner_;
-        std::vector<RemoteScanSliceCache> *remote_scan_caches_;
+        RemoteScanSliceCache *remote_scan_caches_;
     };
     bool is_local_{true};
 

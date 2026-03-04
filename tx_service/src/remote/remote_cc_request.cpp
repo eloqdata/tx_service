@@ -1377,7 +1377,8 @@ txservice::remote::RemoteScanSlice::RemoteScanSlice()
         output_msg_.set_slice_position(
             ToRemoteType::ConvertSlicePosition(slice_result.slice_position_));
 
-        uint16_t core_cnt = GetShardCount();
+        // todo
+        uint16_t core_cnt = 1;
         // Add core cnt first
         output_msg_.mutable_tuple_cnt()->append((const char *) &core_cnt,
                                                 sizeof(uint16_t));
@@ -1509,30 +1510,15 @@ void txservice::remote::RemoteScanSlice::Reset(
     output_msg_.set_tx_term(input_msg->tx_term());
     output_msg_.set_command_id(input_msg->command_id());
 
-    SetShardCount(core_cnt);
-
-    size_t vec_size = scan_slice_req.prior_cce_lock_vec_size();
-    for (size_t core_id = 0; core_id < core_cnt; ++core_id)
-    {
-        uint64_t cce_lock_addr =
-            core_id < vec_size ? scan_slice_req.prior_cce_lock_vec(core_id) : 0;
-        SetPriorCceLockAddr(cce_lock_addr, core_id);
-    }
+    // todo
+    uint64_t cce_lock_addr = scan_slice_req.prior_cce_lock_addr_vec(0);
+    SetPriorCceLockAddr(cce_lock_addr);
 
     RangeScanSliceResult &slice_result = cc_res_.Value();
 
-    for (uint16_t core_id = 0; core_id < core_cnt; ++core_id)
-    {
-        if (core_id == scan_cache_vec_.size())
-        {
-            scan_cache_vec_.emplace_back(core_cnt);
-        }
-        else
-        {
-            scan_cache_vec_[core_id].Reset(core_cnt);
-        }
-    }
-    slice_result.remote_scan_caches_ = &scan_cache_vec_;
+    // todo:
+    scan_cache_.Reset(1);
+    slice_result.remote_scan_caches_ = &scan_cache_;
 
     input_msg_ = std::move(input_msg);
 

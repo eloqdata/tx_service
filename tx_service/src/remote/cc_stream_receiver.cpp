@@ -376,10 +376,10 @@ void CcStreamReceiver::PreProcessScanResp(
     scan_slice_result.slice_position_ =
         ToLocalType::ConvertSlicePosition(msg->slice_position());
 
+    // todo:
     const char *tuple_cnt_info = msg->tuple_cnt().data();
     uint16_t remote_core_cnt = *((const uint16_t *) tuple_cnt_info);
     tuple_cnt_info += sizeof(uint16_t);
-    range_scanner.ResetShards(remote_core_cnt);
 
     const uint64_t *term_ptr = (const uint64_t *) msg->term().data();
 
