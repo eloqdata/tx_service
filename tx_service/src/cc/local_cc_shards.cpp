@@ -5761,6 +5761,7 @@ void LocalCcShards::AddFlushTaskEntry(std::unique_ptr<FlushTaskEntry> &&entry)
             flush_data_worker_ctx_.cv_.wait(worker_lk);
         }
 
+        LOG(INFO) << "AddFlushTaskEntry: Add as new task";
         // Add as new task
         pending_flush_work_.emplace_back(std::move(flush_data_task));
         flush_data_worker_ctx_.cv_.notify_one();
