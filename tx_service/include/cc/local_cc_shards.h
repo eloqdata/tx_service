@@ -23,6 +23,7 @@
 
 #include <algorithm>
 #include <atomic>
+#include <chrono>
 #include <condition_variable>
 #include <cstddef>
 #include <cstdint>
@@ -2470,6 +2471,9 @@ private:
     FlushDataTask cur_flush_buffer_;
     // Flush task queue for flush data worker to process.
     std::deque<std::unique_ptr<FlushDataTask>> pending_flush_work_;
+    // Timestamp when flush buffer was last empty, for measuring time from
+    // buffer size 0 to push into queue.
+    std::chrono::steady_clock::time_point last_flush_buffer_empty_time_;
 
     void FlushDataWorker();
     void FlushData(std::unique_lock<std::mutex> &flush_worker_lk);

@@ -144,6 +144,7 @@ LocalCcShards::LocalCcShards(
       cur_flush_buffer_(
           static_cast<uint64_t>(MB(conf.at("node_memory_limit_mb")) *
                                 (FLAGS_ckpt_buffer_ratio - 0.025))),
+      last_flush_buffer_empty_time_(std::chrono::steady_clock::now()),
       data_sync_mem_controller_(static_cast<uint64_t>(
           MB(conf.at("node_memory_limit_mb")) * FLAGS_ckpt_buffer_ratio)),
       statistics_worker_ctx_(1),
@@ -4792,6 +4793,9 @@ void LocalCcShards::DataSyncForHashPartition(
     const size_t scan_concurrency =
         flush_buffer_size /
         (default_data_file_size * approximate_partition_number_this_core);
+    LOG(INFO) << "scan concurrency = " << scan_concurrency
+              << ", worker idx = " << worker_idx
+              << ", flush buffer size = " << flush_buffer_size;
     if (scan_concurrency > 0)
     {
         bool need_notify = scan_concurrency >
@@ -5740,6 +5744,15 @@ void LocalCcShards::AddFlushTaskEntry(std::unique_ptr<FlushTaskEntry> &&entry)
         cur_flush_buffer_.MoveFlushData(false);
     if (flush_data_task != nullptr)
     {
+        auto now = std::chrono::steady_clock::now();
+        auto duration_ms =
+            std::chrono::duration_cast<std::chrono::milliseconds>(
+                now - last_flush_buffer_empty_time_)
+                .count();
+        LOG(INFO) << "AddFlushTaskEntry: buffer size 0 to push into queue took "
+                  << duration_ms << " ms";
+        last_flush_buffer_empty_time_ = now;
+
         std::unique_lock<std::mutex> worker_lk(flush_data_worker_ctx_.mux_);
 
         // Try to merge with the last task if queue is not empty
@@ -5774,6 +5787,16 @@ void LocalCcShards::FlushCurrentFlushBuffer()
         cur_flush_buffer_.MoveFlushData(true);
     if (flush_data_task != nullptr)
     {
+        auto now = std::chrono::steady_clock::now();
+        auto duration_ms =
+            std::chrono::duration_cast<std::chrono::milliseconds>(
+                now - last_flush_buffer_empty_time_)
+                .count();
+        LOG(INFO) << "FlushCurrentFlushBuffer: buffer size 0 to push into "
+                     "queue took "
+                  << duration_ms << " ms";
+        last_flush_buffer_empty_time_ = now;
+
         std::unique_lock<std::mutex> worker_lk(flush_data_worker_ctx_.mux_);
 
         // Try to merge with the last task if queue is not empty
@@ -5990,6 +6013,18 @@ void LocalCcShards::FlushDataWorker()
                             cur_flush_buffer_.MoveFlushData(true);
                         if (flush_data_task != nullptr)
                         {
+                            auto now = std::chrono::steady_clock::now();
+                            auto duration_ms =
+                                std::chrono::duration_cast<
+                                    std::chrono::milliseconds>(
+                                    now - last_flush_buffer_empty_time_)
+                                    .count();
+                            LOG(INFO)
+                                << "FlushDataWorker(stuck): buffer size 0 to "
+                                   "push into queue took "
+                                << duration_ms << " ms";
+                            last_flush_buffer_empty_time_ = now;
+
                             // Try to merge with the last task if queue is not
                             // empty Note: flush_worker_lk is already held here
                             // (inside condition variable predicate)

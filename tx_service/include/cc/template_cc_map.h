@@ -10245,6 +10245,7 @@ protected:
         if (shard_heap != nullptr &&
             shard_heap->Full(&heap_alloc, &heap_commit))
         {
+            LOG(INFO) << "ccmap is full, core id = " << shard_->core_id_;
             if (txservice_enable_cache_replacement &&
                 shard_heap->NeedCleanShard(heap_alloc, heap_commit))
             {
