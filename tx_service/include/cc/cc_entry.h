@@ -2042,7 +2042,7 @@ struct LruPage
     uint64_t smallest_ttl_{UINT64_MAX};
 
     // Large object occupies one page exclusively.
-    bool large_obj_page_ : 1 {false};
+    bool large_obj_page_{false};
 };
 
 template <typename KeyT,
@@ -2296,10 +2296,26 @@ struct CcPage : public LruPage
                 ? keys_.end()
                 : std::lower_bound(keys_.begin(), keys_.end(), key);
         assert(insert_it == keys_.end() || *insert_it != key);
+        assert(Size() < split_threshold_);
+
+        entry->UpdateCcPage(this);
+
+        if (entry->payload_.cur_payload_->HasTTL())
+        {
+            uint64_t ttl = entry->payload_.cur_payload_->GetTTL();
+            if (ttl < smallest_ttl_)
+            {
+                smallest_ttl_ = ttl;
+            }
+        }
+        if (entry->CommitTs() > last_dirty_commit_ts_)
+        {
+            last_dirty_commit_ts_ = entry->CommitTs();
+        }
 
         size_t insert_pos = insert_it - keys_.begin();
         keys_.emplace(insert_it, key);
-        entries_.emplace(entries_.begin() + insert_pos, entry);
+        entries_.emplace(entries_.begin() + insert_pos, std::move(entry));
         return insert_pos;
     }
 
@@ -2560,6 +2576,24 @@ struct CcPage : public LruPage
             entry = std::move(entries_[idx]);
         assert(entry != nullptr);
         return entry;
+    }
+
+    void UpdateSmallestTTL()
+    {
+        smallest_ttl_ = UINT64_MAX;
+        for (std::unique_ptr<
+                 CcEntry<KeyT, ValueT, VersionedRecord, RangePartitioned>>
+                 &entry : entries_)
+        {
+            if (entry->payload_.cur_payload_->HasTTL())
+            {
+                uint64_t ttl = entry->payload_.cur_payload_->GetTTL();
+                if (ttl < smallest_ttl_)
+                {
+                    smallest_ttl_ = ttl;
+                }
+            }
+        }
     }
 
     size_t Size() const

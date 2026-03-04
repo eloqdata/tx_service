@@ -66,6 +66,8 @@ TEST_CASE("TxStartTsCollector GlobalMinSiTxStartTs unit test",
         std::pair<std::string, uint32_t>("core_num", core_num));
     tx_service_conf.insert(
         std::pair<std::string, uint32_t>("range_split_worker_num", 0));
+    tx_service_conf.insert(std::pair<std::string, uint32_t>(
+        "range_slice_memory_limit_percent", 20));
     tx_service_conf.insert(
         std::pair<std::string, uint32_t>("node_memory_limit_mb", 1000));
     tx_service_conf.insert(
@@ -76,6 +78,8 @@ TEST_CASE("TxStartTsCollector GlobalMinSiTxStartTs unit test",
         std::pair<std::string, uint32_t>("checkpointer_interval", 10));
     tx_service_conf.insert(
         std::pair<std::string, uint32_t>("checkpointer_delay_seconds", 0));
+    tx_service_conf.insert(std::pair<std::string, uint32_t>(
+        "checkpointer_min_ckpt_request_interval", 5));
     tx_service_conf.insert(
         std::pair<std::string, uint32_t>("enable_shard_heap_defragment", 0));
     tx_service_conf.insert(

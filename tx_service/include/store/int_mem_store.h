@@ -148,6 +148,7 @@ public:
     }
 
     bool DiscoverAllTableNames(
+        TableEngine table_engine,
         std::vector<std::string> &norm_name_vec,
         const std::function<void()> *yield_fptr = nullptr,
         const std::function<void()> *resume_fptr = nullptr) override
@@ -158,6 +159,7 @@ public:
 
     //-- database
     bool UpsertDatabase(
+        TableEngine table_engine,
         std::string_view db,
         std::string_view definition,
         const std::function<void()> *yield_fptr = nullptr,
@@ -167,6 +169,7 @@ public:
         return false;
     }
     bool DropDatabase(
+        TableEngine table_engine,
         std::string_view db,
         const std::function<void()> *yield_fptr = nullptr,
         const std::function<void()> *resume_fptr = nullptr) override
@@ -175,6 +178,7 @@ public:
         return false;
     }
     bool FetchDatabase(
+        TableEngine table_engine,
         std::string_view db,
         std::string &definition,
         bool &found,
@@ -185,6 +189,7 @@ public:
         return false;
     }
     bool FetchAllDatabase(
+        TableEngine table_engine,
         std::vector<std::string> &dbnames,
         const std::function<void()> *yield_fptr = nullptr,
         const std::function<void()> *resume_fptr = nullptr) override

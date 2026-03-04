@@ -31,6 +31,7 @@ set( SOURCES_SINGLE_FILE
     CcEntry-Test.cpp
     CcPage-Test.cpp
     StartTsCollector-Test.cpp
+    LargeObjLRU-Test.cpp
 )
 
 set( SOURCES_ALL
