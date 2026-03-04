@@ -623,8 +623,13 @@ public:
                             (new_status == RecordStatus::Deleted)
                                 ? (-static_cast<int64_t>(write_key->Size() +
                                                          old_payload_size))
-                                : (static_cast<int64_t>(cce->PayloadSize()) -
-                                   static_cast<int64_t>(old_payload_size));
+                                : (cce_old_status != RecordStatus::Normal
+                                       ? static_cast<int64_t>(
+                                             write_key->Size() +
+                                             cce->PayloadSize())
+                                       : static_cast<int64_t>(
+                                             cce->PayloadSize() -
+                                             old_payload_size));
                         const uint32_t range_id = req.PartitionId();
                         // is_dirty: true when range is splitting.
                         UpdateRangeSize(range_id,
@@ -7806,6 +7811,7 @@ public:
                 continue;
             }
 
+            [[maybe_unused]] const size_t old_payload_size = cce->PayloadSize();
             // Now, all versions of non-unique SecondaryIndex key shared
             // the unpack info in current version's payload, though the
             // unpack info will not be used for deleted key, we must not
@@ -7825,6 +7831,8 @@ public:
             }
 
             bool was_dirty = cce->IsDirty();
+            [[maybe_unused]] const RecordStatus cce_old_status =
+                cce->PayloadStatus();
             cce->SetCommitTsPayloadStatus(commit_ts, rec_status);
             if (req.Kind() == UploadBatchType::DirtyBucketData)
             {
@@ -7845,10 +7853,13 @@ public:
                 {
                     int32_t delta =
                         (rec_status == RecordStatus::Deleted)
-                            ? -static_cast<int32_t>(write_key->Size())
-                            : static_cast<int32_t>(
-                                  write_key->Size() +
-                                  (commit_val ? commit_val->Size() : 0));
+                            ? -(static_cast<int32_t>(write_key->Size() +
+                                                     old_payload_size))
+                            : (cce_old_status != RecordStatus::Normal
+                                   ? static_cast<int32_t>(write_key->Size() +
+                                                          cce->PayloadSize())
+                                   : static_cast<int32_t>(cce->PayloadSize() -
+                                                          old_payload_size));
                     UpdateRangeSize(static_cast<uint32_t>(partition_id),
                                     delta,
                                     (range_size_flags & 0x0F) != 0);
