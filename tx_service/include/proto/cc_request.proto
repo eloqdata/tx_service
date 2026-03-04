@@ -176,6 +176,10 @@ message UploadBatchRequest
     bytes commit_ts = 9;
     bytes rec_status = 10;
     UploadBatchKind kind = 11;
+    // Target range partition;
+    int32 partition_id = 12;
+    // Per-key one byte: [uint8_t, ...]
+    bytes range_size_flags = 13;
 }
 
 message UploadBatchSlicesRequest
