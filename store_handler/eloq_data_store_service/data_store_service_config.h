@@ -304,6 +304,12 @@ public:
      */
     DSSNode ParseHostPort(const std::string &host_port) const;
 
+    /**
+     * @brief Check if the topology has only one node.
+     * @return True if the topology has only one node, false otherwise.
+     */
+    bool IsSingleNode() const;
+
 private:
     // Fields parsed from the INI file
     int shard_count_{0};
@@ -501,6 +507,8 @@ public:
         const DSSNode &node);
     std::shared_ptr<brpc::Channel> UpdateDataStoreServiceChannel(
         const DSSNode &node);
+
+    bool IsSingleNode() const;
 
 private:
     std::unique_ptr<ShardingAlgorithm> CreateShardingAlgorithm(

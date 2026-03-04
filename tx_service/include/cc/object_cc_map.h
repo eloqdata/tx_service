@@ -1174,7 +1174,8 @@ public:
             assert(acquired_lock != LockType::NoLock);
             ReleaseCceLock(cce->GetKeyLock(), cce, txn, ng_id, acquired_lock);
             obj_result.lock_acquired_ = LockType::NoLock;
-            obj_result.commit_ts_ = shard_->Now();
+            obj_result.commit_ts_ = 1;
+            obj_result.lock_ts_ = shard_->Now();
             obj_result.rec_status_ = RecordStatus::Deleted;
             obj_result.ttl_ = UINT64_MAX;
             hd_res->SetFinished();
@@ -1309,7 +1310,8 @@ public:
             // If this command ignores the old kv value, just pass
             // in as deleted and current ts so that the tx will
             // commit at a larger commit ts.
-            obj_result.commit_ts_ = shard_->Now();
+            obj_result.commit_ts_ = 1;
+            obj_result.lock_ts_ = shard_->Now();
             obj_result.rec_status_ = RecordStatus::Deleted;
         }
         else

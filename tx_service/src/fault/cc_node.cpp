@@ -731,11 +731,6 @@ bool CcNode::OnSnapshotReceived(const remote::OnSnapshotSyncedRequest *req)
         expected = false;
     }
 
-    DLOG(INFO) << "OnSnapshotReceived called for ng#" << ng_id_
-               << ", standby_term=" << req->standby_node_term()
-               << ", node_id=" << node_id_ << ", candidateStandbyTerm="
-               << Sharder::Instance().CandidateStandbyNodeTerm()
-               << ", standbyTerm=" << Sharder::Instance().StandbyNodeTerm();
     if (Sharder::Instance().StandbyNodeTerm() > 0 ||
         Sharder::Instance().CandidateStandbyNodeTerm() !=
             req->standby_node_term())
@@ -744,10 +739,8 @@ bool CcNode::OnSnapshotReceived(const remote::OnSnapshotSyncedRequest *req)
         return false;
     }
 
+    DLOG_IF(FATAL, ng_id_ != req->ng_id()) << "ng_id_ != req->ng_id()";
     bool succ = local_cc_shards_.store_hd_->OnSnapshotReceived(req);
-    DLOG(INFO) << "OnSnapshotReceived completed for ng#" << ng_id_
-               << ", standby_term=" << req->standby_node_term()
-               << ", success=" << succ;
     if (succ)
     {
         int64_t standby_term = req->standby_node_term();

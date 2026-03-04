@@ -338,8 +338,10 @@ void Checkpointer::Ckpt(bool is_last_ckpt)
                 assert(standby_node_term < 0 && leader_term >= 0);
                 NotifyLogOfCkptTs(node_group, leader_term, last_succ_ckpt_ts);
 
-                BrocastPrimaryCkptTs(
-                    node_group, leader_term, last_succ_ckpt_ts);
+                BrocastPrimaryCkptTs(node_group,
+                                     leader_term,
+                                     last_succ_ckpt_ts,
+                                     status->HasDataStoreWrite());
             }
         }
 
@@ -404,7 +406,8 @@ void Checkpointer::Ckpt(bool is_last_ckpt)
 
                             BrocastPrimaryCkptTs(node_group,
                                                  leader_term,
-                                                 status->truncate_log_ts_);
+                                                 status->truncate_log_ts_,
+                                                 status->HasDataStoreWrite());
                         }
                     }
                 }

@@ -153,6 +153,11 @@ public:
         return cloud_config_.IsOssUrlConfigured();
     }
 
+    bool IsCloudMode() const override
+    {
+        return true;
+    }
+
 private:
     ::EloqDS::RocksDBConfig config_;
     ::EloqDS::RocksDBCloudConfig cloud_config_;

@@ -3727,13 +3727,9 @@ bool DataStoreServiceClient::OnLeaderStart(uint32_t ng_id,
 
     if (data_store_service_ != nullptr)
     {
-#if defined(DATA_STORE_TYPE_ELOQDSS_ELOQSTORE)
-        // Stop prewarm operation first (node is becoming leader, no longer
-        // standby)
-        data_store_service_->StopPrewarmOperation(ng_id);
-#endif
+        // If the node is standby, close the data store opened before.
+        data_store_service_->CloseDataStore(ng_id);
 
-        // Then proceed with leader startup
         std::unordered_set<uint16_t> bucket_ids;
         for (auto &[bucket_id, bucket_info] : bucket_infos_)
         {
@@ -3823,39 +3819,6 @@ void DataStoreServiceClient::OnStartFollowing(uint32_t ng_id,
     // Update the client config
     SetupConfig(cluster_manager);
 
-#if defined(DATA_STORE_TYPE_ELOQDSS_ELOQSTORE)
-    // Start prewarm operation for standby node
-    if (data_store_service_ != nullptr)
-    {
-        // Get bucket_ids for this node group (similar to OnLeaderStart)
-        std::unordered_set<uint16_t> bucket_ids;
-        for (auto &[bucket_id, bucket_info] : bucket_infos_)
-        {
-            if (bucket_info->BucketOwner() == ng_id)
-            {
-                bucket_ids.insert(bucket_id);
-            }
-        }
-
-        if (!bucket_ids.empty())
-        {
-            size_t bucket_count = bucket_ids.size();
-            if (data_store_service_->StartPrewarmOperation(
-                    ng_id, std::move(bucket_ids), term))
-            {
-                LOG(INFO) << "Started prewarm operation for standby node, "
-                          << "shard_id: " << ng_id
-                          << ", bucket_ids count: " << bucket_count;
-            }
-        }
-        else
-        {
-            LOG(WARNING) << "No bucket_ids found for ng_id: " << ng_id
-                         << ", skip starting prewarm operation";
-        }
-    }
-#endif
-
     Connect();
 }
 
@@ -3867,6 +3830,44 @@ void DataStoreServiceClient::OnStartFollowing(uint32_t ng_id,
  */
 void DataStoreServiceClient::OnShutdown()
 {
+}
+
+bool DataStoreServiceClient::OnSnapshotReceived(
+    const txservice::remote::OnSnapshotSyncedRequest *req)
+{
+#ifdef DATA_STORE_TYPE_ELOQDSS_ELOQSTORE
+    if (data_store_service_ != nullptr)
+    {
+        uint32_t ng_id = req->ng_id();
+        std::unordered_set<uint16_t> bucket_ids;
+        for (auto &[bucket_id, bucket_info] : bucket_infos_)
+        {
+            if (bucket_info->BucketOwner() == ng_id)
+            {
+                bucket_ids.insert(bucket_id);
+            }
+        }
+        int64_t term =
+            txservice::PrimaryTermFromStandbyTerm(req->standby_node_term());
+        data_store_service_->OnSnapshotReceived(
+            ng_id, term, std::move(bucket_ids), req->snapshot_path());
+
+        return true;
+    }
+#endif
+    return true;
+}
+
+bool DataStoreServiceClient::OnUpdateStandbyCkptTs(uint32_t ng_id,
+                                                   int64_t ng_term)
+{
+#ifdef DATA_STORE_TYPE_ELOQDSS_ELOQSTORE
+    if (data_store_service_ != nullptr)
+    {
+        data_store_service_->OnUpdateStandbyCkptTs(ng_id, ng_term);
+    }
+#endif
+    return true;
 }
 
 /**

@@ -23,6 +23,7 @@
 
 #include <bthread/condition_variable.h>
 
+#include <atomic>
 #include <condition_variable>
 #include <cstdint>
 #include <deque>
@@ -66,6 +67,16 @@ struct DataSyncStatus
         need_truncate_log_ = false;
     }
 
+    void MarkDataStoreWrite()
+    {
+        has_data_store_write_.store(true, std::memory_order_release);
+    }
+
+    bool HasDataStoreWrite() const
+    {
+        return has_data_store_write_.load(std::memory_order_acquire);
+    }
+
     NodeGroupId node_group_id_;
     int64_t node_group_term_;
     // Number of unfinished scan tasks. We keep track of this separately since
@@ -86,6 +97,9 @@ struct DataSyncStatus
     // Whether there are entries being skipped by DataSyncScan. For EloqKV,
     // entries with buffer commands might be skipped.
     bool has_skipped_entries_{false};
+
+    // Whether there is any data written to datastore in this DataSync round.
+    std::atomic<bool> has_data_store_write_{false};
 
     // If kvstore need do PersistKV after PutAll, we must update ccentry's
     // ckpt_ts after PersistKV done. Since we do data sync in small baches and

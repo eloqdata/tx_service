@@ -135,6 +135,7 @@ struct StandbySequenceGroup
 
 void BrocastPrimaryCkptTs(NodeGroupId node_group_id,
                           int64_t node_group_term,
-                          uint64_t primary_ckpt_ts);
+                          uint64_t primary_ckpt_ts,
+                          bool has_data_store_write);
 
 };  // namespace txservice
