@@ -680,37 +680,41 @@ CcErrorCode UploadIndexContext::UploadIndexInternal(
     size_t finished_upload_count = 0;
     CcErrorCode upload_res_code = CcErrorCode::NO_ERROR;
     size_t upload_req_count = 0;
+
     for (auto &[table_name, ng_entries] : ng_index_set)
     {
-        for (auto &[ng_id, entry_vec] : ng_entries)
+        for (auto &[ng_id, range_entries] : ng_entries)
         {
-            entry_vec_size = entry_vec.size();
-            batch_req_cnt = (entry_vec_size / upload_batch_size_ +
-                             (entry_vec_size % upload_batch_size_ ? 1 : 0));
-
             int64_t &expected_term = leader_terms_.at(ng_id);
 
-            size_t start_idx = 0;
-            size_t end_idx =
-                (batch_req_cnt > 1 ? upload_batch_size_ : entry_vec_size);
-            for (size_t idx = 0; idx < batch_req_cnt; ++idx)
+            for (auto &[range_id, entry_vec] : range_entries)
             {
-                SendIndexes(table_name,
-                            ng_id,
-                            expected_term,
-                            entry_vec,
-                            (end_idx - start_idx),
-                            start_idx,
-                            req_mux,
-                            req_cv,
-                            finished_upload_count,
-                            upload_res_code);
-                ++upload_req_count;
-                // Next batch
-                start_idx = end_idx;
-                end_idx = ((start_idx + upload_batch_size_) > entry_vec_size
-                               ? entry_vec_size
-                               : (start_idx + upload_batch_size_));
+                entry_vec_size = entry_vec.size();
+                batch_req_cnt = (entry_vec_size / upload_batch_size_ +
+                                 (entry_vec_size % upload_batch_size_ ? 1 : 0));
+
+                size_t start_idx = 0;
+                size_t end_idx =
+                    (batch_req_cnt > 1 ? upload_batch_size_ : entry_vec_size);
+                for (size_t idx = 0; idx < batch_req_cnt; ++idx)
+                {
+                    SendIndexes(table_name,
+                                ng_id,
+                                expected_term,
+                                range_id,
+                                entry_vec,
+                                (end_idx - start_idx),
+                                start_idx,
+                                req_mux,
+                                req_cv,
+                                finished_upload_count,
+                                upload_res_code);
+                    ++upload_req_count;
+                    start_idx = end_idx;
+                    end_idx = ((start_idx + upload_batch_size_) > entry_vec_size
+                                   ? entry_vec_size
+                                   : (start_idx + upload_batch_size_));
+                }
             }
         }
     }
@@ -730,7 +734,8 @@ void UploadIndexContext::SendIndexes(
     const TableName &table_name,
     NodeGroupId dest_ng_id,
     int64_t &ng_term,
-    const std::vector<WriteEntry *> &write_entry_vec,
+    int32_t partition_id,
+    const std::vector<std::pair<uint8_t, WriteEntry *>> &write_entry_vec,
     size_t batch_size,
     size_t start_key_idx,
     bthread::Mutex &req_mux,
@@ -740,14 +745,13 @@ void UploadIndexContext::SendIndexes(
 {
     uint32_t dest_node_id = Sharder::Instance().LeaderNodeId(dest_ng_id);
     LocalCcShards *cc_shards = Sharder::Instance().GetLocalCcShards();
-    size_t core_cnt = cc_shards->Count();
     if (dest_node_id == cc_shards->NodeId())
     {
         UploadBatchCc *req_ptr = NextRequest();
         req_ptr->Reset(table_name,
                        dest_ng_id,
                        ng_term,
-                       core_cnt,
+                       partition_id,
                        batch_size,
                        start_key_idx,
                        write_entry_vec,
@@ -757,10 +761,9 @@ void UploadIndexContext::SendIndexes(
                        res_code,
                        UploadBatchType::SkIndexData);
 
-        for (size_t core = 0; core < core_cnt; ++core)
-        {
-            cc_shards->EnqueueToCcShard(core, req_ptr);
-        }
+        uint16_t dest_core =
+            static_cast<uint16_t>(partition_id % cc_shards->Count());
+        cc_shards->EnqueueToCcShard(dest_core, req_ptr);
     }
     else
     {
@@ -834,6 +837,7 @@ void UploadIndexContext::SendIndexes(
             remote::ToRemoteType::ConvertTableType(table_name.Type()));
         req_ptr->set_table_engine(
             remote::ToRemoteType::ConvertTableEngine(table_name.Engine()));
+        req_ptr->set_partition_id(partition_id);
         size_t end_key_idx = start_key_idx + batch_size;
         req_ptr->set_kind(remote::UploadBatchKind::SK_DATA);
         req_ptr->set_batch_size(batch_size);
@@ -853,15 +857,24 @@ void UploadIndexContext::SendIndexes(
         std::string *rec_status_str = req_ptr->mutable_rec_status();
         // All generated sk should be normal status.
         const RecordStatus rec_status = RecordStatus::Normal;
+        // range_size_flags
+        req_ptr->clear_range_size_flags();
+        std::string *range_size_flags_str = req_ptr->mutable_range_size_flags();
+
         for (size_t idx = start_key_idx; idx < end_key_idx; ++idx)
         {
-            write_entry_vec.at(idx)->key_.Serialize(*keys_str);
-            write_entry_vec.at(idx)->rec_->Serialize(*recs_str);
-            val_ptr = reinterpret_cast<const char *>(
-                &(write_entry_vec.at(idx)->commit_ts_));
+            uint8_t range_size_flags = write_entry_vec.at(idx).first;
+            WriteEntry *write_entry = write_entry_vec.at(idx).second;
+            write_entry->key_.Serialize(*keys_str);
+            write_entry->rec_->Serialize(*recs_str);
+            val_ptr =
+                reinterpret_cast<const char *>(&(write_entry->commit_ts_));
             commit_ts_str->append(val_ptr, len_sizeof);
             rec_status_str->append(reinterpret_cast<const char *>(&rec_status),
                                    sizeof(rec_status));
+            range_size_flags_str->append(
+                reinterpret_cast<const char *>(&range_size_flags),
+                sizeof(range_size_flags));
         }
 
         brpc::Controller *cntl_ptr = upload_batch_closure->Controller();
@@ -989,17 +1002,24 @@ void UploadIndexContext::AdvanceWriteEntryForRangeInfo(
     size_t new_range_idx = 0;
 
     auto *range_info = range_record.GetRangeInfo();
+    const int32_t range_id = range_info->PartitionId();
+    const uint8_t default_flags =
+        0x10 | static_cast<uint8_t>(range_info->IsDirty());
     while (cur_write_entry_it != next_range_start)
     {
         WriteEntry &write_entry = *cur_write_entry_it;
-        auto ng_it = ng_write_entrys.try_emplace(range_ng);
-        ng_it.first->second.push_back(&write_entry);
 
+        auto &range_vec = ng_write_entrys[range_ng][range_id];
+        range_vec.emplace_back(default_flags, &write_entry);
+        uint8_t *old_range_flags_ptr = &range_vec.back().first;
+
+        uint8_t *new_bucket_flags_ptr = nullptr;
         // If current range is migrating, forward to new range owner.
         if (new_bucket_ng != UINT32_MAX)
         {
-            ng_write_entrys.try_emplace(new_bucket_ng)
-                .first->second.push_back(&write_entry);
+            auto &new_bucket_vec = ng_write_entrys[new_bucket_ng][range_id];
+            new_bucket_vec.emplace_back(default_flags, &write_entry);
+            new_bucket_flags_ptr = &new_bucket_vec.back().first;
         }
 
         // If range is splitting and the key will fall on a new range after
@@ -1016,18 +1036,25 @@ void UploadIndexContext::AdvanceWriteEntryForRangeInfo(
         }
         if (new_range_ng != UINT32_MAX)
         {
-            if (new_range_ng != range_ng)
-            {
-                ng_write_entrys.try_emplace(new_range_ng)
-                    .first->second.push_back(&write_entry);
-            }
+            const int32_t new_range_id =
+                range_info->NewPartitionId()->at(new_range_idx - 1);
+
+            ng_write_entrys[new_range_ng][new_range_id].emplace_back(
+                default_flags, &write_entry);
+            // Only update range size on the new range
+            *old_range_flags_ptr &= 0x0F;
+
             // If the new range is migrating, forward to the new owner of new
             // range.
             if (new_range_new_bucket_ng != UINT32_MAX &&
                 new_range_new_bucket_ng != range_ng)
             {
-                ng_write_entrys.try_emplace(new_range_new_bucket_ng)
-                    .first->second.push_back(&write_entry);
+                ng_write_entrys[new_range_new_bucket_ng][new_range_id]
+                    .emplace_back(default_flags, &write_entry);
+                if (new_bucket_flags_ptr)
+                {
+                    *new_bucket_flags_ptr &= 0x0F;
+                }
             }
         }
 

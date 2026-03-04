@@ -740,7 +740,8 @@ public:
                const TxRecord *rec,
                OperationType operation_type,
                uint32_t key_shard_code,
-               CcHandlerResult<PostProcessResult> *res)
+               CcHandlerResult<PostProcessResult> *res,
+               uint8_t range_size_flags = 0x10)
     {
         TemplatedCcRequest<PostWriteCc, PostProcessResult>::Reset(
             nullptr, res, addr->NodeGroupId(), tx_number, tx_term);
@@ -754,6 +755,7 @@ public:
         is_remote_ = false;
         ccm_ = nullptr;
         is_initial_insert_ = false;
+        range_size_flags_ = range_size_flags;
     }
 
     void Reset(const TxKey *key,
@@ -767,7 +769,8 @@ public:
                uint32_t key_shard_code,
                CcHandlerResult<PostProcessResult> *res,
                bool initial_insertion = false,
-               int64_t ng_term = INIT_TERM)
+               int64_t ng_term = INIT_TERM,
+               uint8_t range_size_flags = 0x10)
     {
         TemplatedCcRequest<PostWriteCc, PostProcessResult>::Reset(
             &table_name,
@@ -788,6 +791,7 @@ public:
         is_remote_ = false;
         ccm_ = nullptr;
         is_initial_insert_ = initial_insertion;
+        range_size_flags_ = range_size_flags;
     }
 
     void Reset(const CcEntryAddr *addr,
@@ -797,7 +801,8 @@ public:
                const std::string *rec,
                OperationType operation_type,
                uint32_t key_shard_code,
-               CcHandlerResult<PostProcessResult> *res)
+               CcHandlerResult<PostProcessResult> *res,
+               uint8_t range_size_flags = 0x10)
     {
         TemplatedCcRequest<PostWriteCc, PostProcessResult>::Reset(
             nullptr, res, addr->NodeGroupId(), tx_number, tx_term);
@@ -811,6 +816,7 @@ public:
         is_remote_ = true;
         ccm_ = nullptr;
         is_initial_insert_ = false;
+        range_size_flags_ = range_size_flags;
     }
 
     void Reset(const TableName *table_name,
@@ -824,7 +830,8 @@ public:
                uint32_t key_shard_code,
                CcHandlerResult<PostProcessResult> *res,
                bool initial_insertion = false,
-               int64_t ng_term = INIT_TERM)
+               int64_t ng_term = INIT_TERM,
+               uint8_t range_size_flags = 0x10)
     {
         TemplatedCcRequest<PostWriteCc, PostProcessResult>::Reset(
             table_name,
@@ -845,6 +852,7 @@ public:
         is_remote_ = true;
         ccm_ = nullptr;
         is_initial_insert_ = initial_insertion;
+        range_size_flags_ = range_size_flags;
     }
 
     const CcEntryAddr *CceAddr() const
@@ -877,6 +885,13 @@ public:
         return key_shard_code_;
     }
 
+    // Low 10 bits of key_shard_code_: range partition id (when
+    // range-partitioned).
+    uint32_t PartitionId() const
+    {
+        return key_shard_code_ & 0x3FF;
+    }
+
     const void *Key() const
     {
         return is_remote_ ? nullptr : key_;
@@ -890,6 +905,16 @@ public:
     bool IsInitialInsert() const
     {
         return is_initial_insert_;
+    }
+
+    bool OnDirtyRange() const
+    {
+        return (range_size_flags_ & 0x0F) != 0;
+    }
+
+    bool NeedUpdateRangeSize() const
+    {
+        return (range_size_flags_ >> 4) != 0;
     }
 
 private:
@@ -909,6 +934,9 @@ private:
         const void *key_;
         const std::string *key_str_;
     };
+    // High 4 bits: need update range size; low 4 bits: on dirty (splitting)
+    // range.
+    uint8_t range_size_flags_{0x10};
 };
 
 struct PostWriteAllCc
@@ -7714,7 +7742,9 @@ private:
 
 struct UploadBatchCc : public CcRequestBase
 {
+    // keys, records, commit_ts, rec_status, range_size_flags
     using WriteEntryTuple = std::tuple<const std::string &,
+                                       const std::string &,
                                        const std::string &,
                                        const std::string &,
                                        const std::string &>;
@@ -7731,10 +7761,10 @@ public:
     void Reset(const TableName &table_name,
                txservice::NodeGroupId ng_id,
                int64_t &ng_term,
-               size_t core_cnt,
+               int32_t partition_id,
                size_t batch_size,
                size_t start_key_idx,
-               const std::vector<WriteEntry *> &entry_vec,
+               const std::vector<std::pair<uint8_t, WriteEntry *>> &entry_vec,
                bthread::Mutex &req_mux,
                bthread::ConditionVariable &req_cv,
                size_t &finished_req_cnt,
@@ -7745,6 +7775,7 @@ public:
         node_group_id_ = ng_id;
         node_group_term_ = &ng_term;
         is_remote_ = false;
+        partition_id_ = partition_id;
         batch_size_ = batch_size;
         start_key_idx_ = start_key_idx;
         entry_vector_ = &entry_vec;
@@ -7752,16 +7783,17 @@ public:
         req_cv_ = &req_cv;
         finished_req_cnt_ = &finished_req_cnt;
         req_result_ = &req_result;
-        unfinished_cnt_.store(core_cnt, std::memory_order_relaxed);
+        unfinished_cnt_.store(1, std::memory_order_relaxed);
         err_code_.store(CcErrorCode::NO_ERROR, std::memory_order_relaxed);
         paused_pos_.clear();
-        paused_pos_.resize(core_cnt, {});
+        paused_pos_.resize(1, {});
         data_type_ = data_type;
     }
 
     void Reset(const TableName &table_name,
                txservice::NodeGroupId ng_id,
                int64_t &ng_term,
+               int32_t partition_id,
                size_t core_cnt,
                uint32_t batch_size,
                const WriteEntryTuple &entry_tuple,
@@ -7774,6 +7806,7 @@ public:
         node_group_id_ = ng_id;
         node_group_term_ = &ng_term;
         is_remote_ = true;
+        partition_id_ = partition_id;
         batch_size_ = batch_size;
         start_key_idx_ = 0;
         entry_tuples_ = &entry_tuple;
@@ -7916,7 +7949,12 @@ public:
         return batch_size_;
     }
 
-    const std::vector<WriteEntry *> *EntryVector() const
+    int32_t PartitionId() const
+    {
+        return partition_id_;
+    }
+
+    const std::vector<std::pair<uint8_t, WriteEntry *>> *EntryVector() const
     {
         return is_remote_ ? nullptr : entry_vector_;
     }
@@ -7931,7 +7969,8 @@ public:
                            size_t key_off,
                            size_t rec_off,
                            size_t ts_off,
-                           size_t status_off)
+                           size_t status_off,
+                           size_t flags_off)
     {
         auto &key_pos = paused_pos_.at(core_id);
         std::get<0>(key_pos) = key_index;
@@ -7939,10 +7978,11 @@ public:
         std::get<2>(key_pos) = rec_off;
         std::get<3>(key_pos) = ts_off;
         std::get<4>(key_pos) = status_off;
+        std::get<5>(key_pos) = flags_off;
     }
 
-    const std::tuple<size_t, size_t, size_t, size_t, size_t> &GetPausedPosition(
-        uint16_t core_id) const
+    const std::tuple<size_t, size_t, size_t, size_t, size_t, size_t> &
+    GetPausedPosition(uint16_t core_id) const
     {
         return paused_pos_.at(core_id);
     }
@@ -7967,12 +8007,14 @@ private:
     uint32_t node_group_id_{0};
     int64_t *node_group_term_{nullptr};
     bool is_remote_{false};
+    // -1 means broadcast to all shards(used by hash partition)
+    int32_t partition_id_{-1};
     uint32_t batch_size_{0};
     size_t start_key_idx_{0};
     union
     {
-        // for local request
-        const std::vector<WriteEntry *> *entry_vector_;
+        // for local request: (range_size_flags, WriteEntry*)
+        const std::vector<std::pair<uint8_t, WriteEntry *>> *entry_vector_;
         // for remote request
         const WriteEntryTuple *entry_tuples_;
     };
@@ -7984,8 +8026,10 @@ private:
     // This two variables may be accessed by multi-cores.
     std::atomic<size_t> unfinished_cnt_{0};
     std::atomic<CcErrorCode> err_code_{CcErrorCode::NO_ERROR};
-    // key index, key offset, record offset, ts offset, record status offset
-    std::vector<std::tuple<size_t, size_t, size_t, size_t, size_t>> paused_pos_;
+    // key index, key offset, record offset, ts offset, record status offset,
+    // range_size_flags offset
+    std::vector<std::tuple<size_t, size_t, size_t, size_t, size_t, size_t>>
+        paused_pos_;
 
     UploadBatchType data_type_{UploadBatchType::SkIndexData};
 };

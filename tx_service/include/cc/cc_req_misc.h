@@ -1157,4 +1157,35 @@ public:
 private:
     size_t free_count_{0};
 };
+
+struct FetchTableRangeSizeCc : public CcRequestBase
+{
+public:
+    FetchTableRangeSizeCc() = default;
+    ~FetchTableRangeSizeCc() = default;
+
+    void Reset(const TableName &table_name,
+               int32_t partition_id,
+               const TxKey &start_key,
+               CcShard *ccs,
+               NodeGroupId ng_id,
+               int64_t ng_term);
+
+    bool ValidTermCheck();
+    bool Execute(CcShard &ccs) override;
+    void SetFinish(uint32_t error);
+
+    const TableName *table_name_;
+    int32_t partition_id_{0};
+    TxKey start_key_{};
+    NodeGroupId node_group_id_{0};
+    int64_t node_group_term_{-1};
+    CcShard *ccs_{nullptr};
+
+    uint32_t error_code_{0};
+    int32_t store_range_size_{0};
+
+    // Only used in DataStoreHandler
+    std::string kv_start_key_;
+};
 }  // namespace txservice

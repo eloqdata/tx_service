@@ -103,7 +103,8 @@ public:
                           const TxRecord *record,
                           OperationType operation_type,
                           uint32_t key_shard_code,
-                          CcHandlerResult<PostProcessResult> &hres) override;
+                          CcHandlerResult<PostProcessResult> &hres,
+                          uint8_t range_size_flags = 0x10) override;
 
     CcReqStatus PostRead(
         uint64_t tx_number,

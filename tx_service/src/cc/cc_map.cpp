@@ -27,6 +27,7 @@
 #include "cc/local_cc_shards.h"
 #include "cc_entry.h"
 #include "tx_trace.h"
+#include "type.h"
 
 namespace txservice
 {
@@ -458,6 +459,34 @@ void CcMap::DecrReadIntent(NonBlockingLock *lock,
     {
         shard_->DeleteLockHoldingTx(tx_number, cce, ng_id);
         cce->RecycleKeyLock(*shard_);
+    }
+}
+
+void CcMap::InitRangeSize(uint32_t partition_id,
+                          int32_t persisted_size,
+                          bool succeed,
+                          bool emplace)
+{
+    auto it = range_sizes_.find(partition_id);
+    if (it == range_sizes_.end())
+    {
+        if (!emplace)
+        {
+            return;
+        }
+        it = range_sizes_.emplace(partition_id, std::make_pair(0, 0)).first;
+    }
+    if (succeed)
+    {
+        int32_t final_size = persisted_size + it->second.second;
+        it->second.first = final_size < 0 ? 0 : final_size;
+        it->second.second = 0;
+    }
+    else
+    {
+        // Load range size failed; reset to not-initialized for retry.
+        it->second.first =
+            static_cast<int32_t>(RangeSizeStatus::kNotInitialized);
     }
 }
 

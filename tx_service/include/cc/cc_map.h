@@ -21,10 +21,12 @@
  */
 #pragma once
 
+#include <cstdint>
 #include <map>
 #include <memory>
 #include <utility>  // std::pair
 
+#include "absl/container/flat_hash_map.h"
 #include "cc/cc_req_base.h"
 #include "cc_protocol.h"
 #include "error_messages.h"  // CcErrorCode
@@ -260,6 +262,18 @@ public:
     virtual const txservice::KeySchema *KeySchema() const = 0;
     virtual const txservice::RecordSchema *RecordSchema() const = 0;
 
+    /**
+     * Called by FetchTableRangeSizeCc::Execute when async load completes.
+     * Merges loaded size with accumulated delta (second), or resets to
+     * kNotInitialized on failure.
+     * When emplace is true and partition_id is absent, inserts (partition_id,
+     * (0,0)) before merging; used for new ranges after split.
+     */
+    void InitRangeSize(uint32_t partition_id,
+                       int32_t persisted_size,
+                       bool succeed = true,
+                       bool emplace = false);
+
     uint64_t SchemaTs() const
     {
         return schema_ts_;
@@ -294,6 +308,13 @@ public:
     uint64_t last_dirty_commit_ts_{0};
 
 protected:
+    // Range id -> (range_size, delta_range_size). Only used when
+    // RangePartitioned.
+    // - first: current range size; RangeSizeState::Loading (-1) = loading from
+    //   store; RangeSizeState::Uninitialized (-2) = not yet loaded.
+    // - second: delta accumulated during load (first==-1) or split (first>=0).
+    absl::flat_hash_map<uint32_t, std::pair<int32_t, int32_t>> range_sizes_;
+
     /**
      * @brief After the input request is executed at the current shard, moves
      * the request to another shard for execution.

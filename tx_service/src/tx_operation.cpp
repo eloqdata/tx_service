@@ -726,6 +726,8 @@ void LockWriteRangeBucketsOp::Advance(TransactionExecution *txm)
             WriteSetEntry &write_entry = write_key_it_->second;
             size_t hash = write_tx_key.Hash();
             write_entry.key_shard_code_ = (range_ng << 10) | (hash & 0x3FF);
+            write_entry.range_size_flags_ =
+                0x10 | static_cast<uint8_t>(range_info->IsDirty());
             // If current range is migrating, forward to new range owner.
             if (new_bucket_ng != UINT32_MAX)
             {
@@ -752,6 +754,8 @@ void LockWriteRangeBucketsOp::Advance(TransactionExecution *txm)
                 {
                     write_entry.forward_addr_.try_emplace((new_range_ng << 10) |
                                                           (hash & 0x3FF));
+                    write_entry.range_size_flags_ =
+                        0x0F & write_entry.range_size_flags_;
                 }
                 // If the new range is migrating, forward to the new owner of
                 // new range.

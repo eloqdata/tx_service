@@ -5297,22 +5297,24 @@ void TransactionExecution::Process(PostProcessOp &post_process)
                                            write_entry.rec_.get(),
                                            write_entry.op_,
                                            write_entry.key_shard_code_,
-                                           post_process.hd_result_);
+                                           post_process.hd_result_,
+                                           write_entry.range_size_flags_);
                 update_post_cnt(ret);
 
                 for (auto &[forward_shard_code, cce_addr] :
                      write_entry.forward_addr_)
                 {
-                    CcReqStatus ret =
-                        cc_handler_->PostWrite(tx_number,
-                                               tx_term_,
-                                               command_id,
-                                               commit_ts_,
-                                               cce_addr,
-                                               write_entry.rec_.get(),
-                                               write_entry.op_,
-                                               forward_shard_code,
-                                               post_process.hd_result_);
+                    CcReqStatus ret = cc_handler_->PostWrite(
+                        tx_number,
+                        tx_term_,
+                        command_id,
+                        commit_ts_,
+                        cce_addr,
+                        write_entry.rec_.get(),
+                        write_entry.op_,
+                        forward_shard_code,
+                        post_process.hd_result_,
+                        (0x10 | write_entry.range_size_flags_));
                     update_post_cnt(ret);
                 }
             }

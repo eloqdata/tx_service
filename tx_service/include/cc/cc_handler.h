@@ -166,7 +166,8 @@ public:
                                   const TxRecord *record,
                                   OperationType operation_type,
                                   uint32_t key_shard_code,
-                                  CcHandlerResult<PostProcessResult> &hres) = 0;
+                                  CcHandlerResult<PostProcessResult> &hres,
+                                  uint8_t range_size_flags = 0x10) = 0;
 
     /**
      * @briefPost-processes a read/scan key. Post-processing clears the read
