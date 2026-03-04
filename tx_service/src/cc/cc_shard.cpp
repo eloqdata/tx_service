@@ -932,7 +932,10 @@ void CcShard::DetachLru(LruPage *page)
         // head to the next page.
         if (protected_head_page_ == page)
         {
-            protected_head_page_ = page->lru_next_;
+            assert(protected_head_page_ != &tail_ccp_);
+            protected_head_page_ = protected_head_page_->lru_next_;
+            assert(protected_head_page_ == &tail_ccp_ ||
+                   protected_head_page_->large_obj_page_ == true);
         }
     }
 
@@ -960,11 +963,20 @@ void CcShard::ReplaceLru(LruPage *old_page, LruPage *new_page)
 
     if (GetCacheEvictPolicy() == CacheEvictPolicy::LO_LRU)
     {
+        assert(old_page->large_obj_page_ == new_page->large_obj_page_);
         // If old page is the head of the protected list, move the protected
         // list head to the new page.
-        if (protected_head_page_ == old_page)
+        if (protected_head_page_ != &tail_ccp_)
         {
-            protected_head_page_ = new_page;
+            if (protected_head_page_ == old_page)
+            {
+                protected_head_page_ = new_page;
+            }
+            assert(protected_head_page_->large_obj_page_ == true);
+        }
+        else
+        {
+            assert(old_page->large_obj_page_ == false);
         }
     }
 
@@ -985,32 +997,43 @@ void CcShard::UpdateLruList(LruPage *page, bool is_emplace)
         assert(page->lru_next_ == nullptr && page->lru_prev_ == nullptr);
         return;
     }
-    // page already at the tail, do nothing
-    if (page->lru_next_ == &tail_ccp_ && tail_ccp_.lru_prev_ == page)
-    {
-        ++access_counter_;
-        page->last_access_ts_ = access_counter_;
-        return;
-    }
 
-    LruPage *insert_before = nullptr;
+    LruPage *tail_cpp_ptr = &tail_ccp_;
+    LruPage **insert_before = nullptr;
     if (GetCacheEvictPolicy() == CacheEvictPolicy::LRU)
     {
-        insert_before = &tail_ccp_;
+        insert_before = &tail_cpp_ptr;
     }
     else if (GetCacheEvictPolicy() == CacheEvictPolicy::LO_LRU)
     {
         // Determine insertion point depending on whether the page holds large
         // object.
-        insert_before =
-            page->large_obj_page_ ? &tail_ccp_ : protected_head_page_;
+        if (page->large_obj_page_)
+        {
+            if (protected_head_page_ == &tail_ccp_)
+            {
+                protected_head_page_ = page;
+            }
+            insert_before = &tail_cpp_ptr;
+        }
+        else
+        {
+            if (protected_head_page_ == page)
+            {
+                assert(page != &tail_ccp_);
+                protected_head_page_ = page->lru_next_;
+            }
+            insert_before = &protected_head_page_;
+        }
     }
     else
     {
         assert(false);
     }
 
-    if (page->lru_next_ == insert_before && insert_before->lru_prev_ == page)
+    // page already at the tail/protected_head_page_, do nothing
+    if (page->lru_next_ == *insert_before &&
+        (*insert_before)->lru_prev_ == page)
     {
         ++access_counter_;
         page->last_access_ts_ = access_counter_;
@@ -1023,10 +1046,10 @@ void CcShard::UpdateLruList(LruPage *page, bool is_emplace)
         DetachLru(page);
     }
 
-    LruPage *insert_after = insert_before->lru_prev_;
+    LruPage *insert_after = (*insert_before)->lru_prev_;
     insert_after->lru_next_ = page;
-    insert_before->lru_prev_ = page;
-    page->lru_next_ = insert_before;
+    (*insert_before)->lru_prev_ = page;
+    page->lru_next_ = *insert_before;
     page->lru_prev_ = insert_after;
 
     ++access_counter_;
@@ -1037,9 +1060,16 @@ void CcShard::UpdateLruList(LruPage *page, bool is_emplace)
         // Maintain protected_head_page_: when a large object page is inserted
         // and the protected list was empty (protected_head_page_ ==
         // &tail_ccp_), the new page becomes the protected head.
-        if (page->large_obj_page_ && protected_head_page_ == &tail_ccp_)
+        if (protected_head_page_ == &tail_ccp_)
         {
-            protected_head_page_ = page;
+            if (page->large_obj_page_)
+            {
+                protected_head_page_ = page;
+            }
+        }
+        else
+        {
+            assert(protected_head_page_->large_obj_page_ == true);
         }
     }
 

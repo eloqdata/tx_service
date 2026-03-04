@@ -230,8 +230,9 @@ bool DataSubstrate::InitializeTxService(const INIReader &config_reader)
 #endif
     }
 
-    txservice::CacheEvictPolicy cache_evict_policy;
-    uint32_t lolru_large_obj_threshold_kb;
+    txservice::CacheEvictPolicy cache_evict_policy =
+        txservice::CacheEvictPolicy::LRU;
+    uint32_t lolru_large_obj_threshold_kb = 0;
     std::string cache_evict_policy_str =
         !CheckCommandLineFlagIsDefault("cache_evict_policy")
             ? FLAGS_cache_evict_policy
