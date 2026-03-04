@@ -293,16 +293,39 @@ public:
         return nullptr;
     }
 
-    TxKey NegativeInfKey() override
+    TxKey NegativeInfKey() const override
     {
         assert(false);
         return TxKey();
     }
 
-    TxKey PositiveInfKey() override
+    TxKey PositiveInfKey() const override
     {
         assert(false);
         return TxKey();
+    }
+
+    TxKey CreateTxKey() const override
+    {
+        assert(false);
+        return TxKey();
+    }
+
+    TxKey CreateTxKey(const char *data, size_t size) const override
+    {
+        assert(false);
+        return TxKey();
+    }
+
+    const TxKey *PackedNegativeInfinity() const override
+    {
+        assert(false);
+        return nullptr;
+    }
+
+    std::unique_ptr<TxRecord> CreateTxRecord() const override
+    {
+        return nullptr;
     }
 };
 

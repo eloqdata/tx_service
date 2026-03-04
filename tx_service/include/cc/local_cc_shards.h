@@ -1827,7 +1827,7 @@ public:
     {
         cache_evict_policy_ = CacheEvictPolicy::LO_LRU;
         u_cache_evict_policy_.lo_lru.large_obj_threshold_bytes =
-            large_obj_threshold_kb * 1024ul;
+            large_obj_threshold_kb * 1024ull;
     }
 
     store::DataStoreHandler *const store_hd_;
