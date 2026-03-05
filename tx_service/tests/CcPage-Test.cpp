@@ -88,7 +88,6 @@ TEST_CASE("CcPage clean tests", "[cc-page]")
     CcShard shard(0,
                   1,
                   10000,
-                  10000,
                   false,
                   0,
                   local_cc_shards,
