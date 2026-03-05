@@ -376,10 +376,8 @@ void CcStreamReceiver::PreProcessScanResp(
     scan_slice_result.slice_position_ =
         ToLocalType::ConvertSlicePosition(msg->slice_position());
 
-    // todo:
     const char *tuple_cnt_info = msg->tuple_cnt().data();
     size_t tuple_cnt = *((const size_t *) tuple_cnt_info);
-    tuple_cnt_info += sizeof(size_t);
 
     bool remote_no_more_data = tuple_cnt == 0;
 
