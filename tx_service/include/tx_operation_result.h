@@ -447,11 +447,8 @@ struct RemoteScanSliceCache
     static constexpr size_t MetaDataSize = 8;
     static constexpr size_t DefaultCacheMaxBytes = 10 * 1024 * 1024;
 
-    RemoteScanSliceCache(uint16_t shard_cnt)
-        : cache_mem_size_(0),
-          mem_max_bytes_(DefaultCacheMaxBytes),
-          shard_cnt_(shard_cnt),
-          trailing_cnt_(0)
+    RemoteScanSliceCache()
+        : cache_mem_size_(0), mem_max_bytes_(DefaultCacheMaxBytes)
     {
     }
 
@@ -465,7 +462,7 @@ struct RemoteScanSliceCache
         mem_max_bytes_ = max_bytes;
     }
 
-    void Reset(uint16_t shard_cnt)
+    void Reset()
     {
         key_ts_.clear();
         gap_ts_.clear();
@@ -476,26 +473,19 @@ struct RemoteScanSliceCache
         keys_.clear();
         records_.clear();
         cache_mem_size_ = 0;
-        trailing_cnt_ = 0;
         mem_max_bytes_ = DefaultCacheMaxBytes;
-        shard_cnt_ = shard_cnt;
         archive_positions_.clear();
         archive_records_.clear();
     }
 
-    void RemoveLast()
-    {
-        trailing_cnt_++;
-    }
-
     uint64_t LastCce()
     {
-        return cce_ptr_.at(cce_ptr_.size() - 1 - trailing_cnt_);
+        return cce_ptr_.at(cce_ptr_.size() - 1);
     }
 
     size_t Size() const
     {
-        return cce_ptr_.size() - trailing_cnt_;
+        return cce_ptr_.size();
     }
 
     void SetLastCceLock(uint64_t lock_ptr)
@@ -514,8 +504,6 @@ struct RemoteScanSliceCache
     std::string records_;
     uint32_t cache_mem_size_;
     uint32_t mem_max_bytes_;
-    uint16_t shard_cnt_;
-    size_t trailing_cnt_;
 
     // The first element of archive_positions_ is the index of key_ts_ to
     // backfill and the second element is the position in records_ to be

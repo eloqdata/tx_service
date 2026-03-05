@@ -465,16 +465,6 @@ public:
 
     virtual uint32_t ShardCount() const = 0;
 
-    virtual void CommitAtCore(uint16_t core_id)
-    {
-        assert(false);
-    }
-
-    virtual void FinalizeCommit()
-    {
-        assert(false);
-    }
-
     ScanDirection Direction() const
     {
         return direct_;
