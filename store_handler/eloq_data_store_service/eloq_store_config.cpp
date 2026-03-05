@@ -182,7 +182,7 @@ DEFINE_string(eloq_store_standby_master_addr,
               "the store rsyncs from the specified master instead of using "
               "cloud storage.");
 DEFINE_string(
-    eloq_store_stanby_master_store_paths,
+    eloq_store_standby_master_store_paths,
     "",
     "EloqStore comma-separated absolute store paths on the standby master. "
     "These must match the master store paths selected by the standby LUT.");
@@ -823,17 +823,17 @@ EloqStoreConfig::EloqStoreConfig(const INIReader &config_reader,
             : config_reader.GetString("store",
                                       "eloq_store_standby_master_addr",
                                       FLAGS_eloq_store_standby_master_addr);
-    std::string stanby_master_store_paths =
-        !CheckCommandLineFlagIsDefault("eloq_store_stanby_master_store_paths")
-            ? FLAGS_eloq_store_stanby_master_store_paths
+    std::string standby_master_store_paths =
+        !CheckCommandLineFlagIsDefault("eloq_store_standby_master_store_paths")
+            ? FLAGS_eloq_store_standby_master_store_paths
             : config_reader.GetString(
                   "store",
-                  "eloq_store_stanby_master_store_paths",
-                  FLAGS_eloq_store_stanby_master_store_paths);
-    if (!stanby_master_store_paths.empty())
+                  "eloq_store_standby_master_store_paths",
+                  FLAGS_eloq_store_standby_master_store_paths);
+    if (!standby_master_store_paths.empty())
     {
-        ParseCsvStringList(stanby_master_store_paths,
-                           eloqstore_configs_.stanby_master_store_paths);
+        ParseCsvStringList(standby_master_store_paths,
+                           eloqstore_configs_.standby_master_store_paths);
     }
     std::string standby_master_store_path_weights =
         !CheckCommandLineFlagIsDefault(
