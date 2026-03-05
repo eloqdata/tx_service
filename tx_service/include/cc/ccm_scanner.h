@@ -1223,13 +1223,27 @@ public:
 
     const ScanTuple *Current() override
     {
-        // todo:
-        return scan_cache_.Current();
+        if (status_ != ScannerStatus::Open)
+        {
+            return nullptr;
+        }
+
+        const TemplateScanTuple<KeyT, ValueT> *tuple = scan_cache_.Current();
+        if (tuple == nullptr)
+        {
+            status_ = ScannerStatus::Blocked;
+        }
+
+        return tuple;
     }
 
     void MoveNext() override
     {
-        // todo:
+        if (status_ != ScannerStatus::Open)
+        {
+            return;
+        }
+
         scan_cache_.MoveNext();
     }
 
@@ -1271,7 +1285,6 @@ public:
     void Close() override
     {
         status_ = ScannerStatus::Closed;
-        // todo
         scan_cache_.Reset();
     }
 

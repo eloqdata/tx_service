@@ -1286,8 +1286,6 @@ void txservice::LocalCcHandler::ScanNextBatch(
                  scanner.is_require_recs_,
                  prefetch_size);
 
-        // todo:
-
         ScanCache *cache = scanner.Cache(0);
         const ScanTuple *last_tuple = cache->LastTuple();
 
