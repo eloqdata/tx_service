@@ -25,8 +25,8 @@
 
 #include <algorithm>
 #include <cassert>
-#include <cerrno>
 #include <cctype>
+#include <cerrno>
 #include <cstring>
 #include <filesystem>
 #include <iomanip>
@@ -160,11 +160,12 @@ DEFINE_uint32(eloq_store_max_write_concurrency,
 DEFINE_uint32(eloq_store_direct_io_buffer_pool_size,
               16,
               "EloqStore maximum number of cached DirectIO buffers per shard.");
-DEFINE_bool(eloq_store_cloud_auto_credentials,
-            true,
-            "EloqStore automatically retrieves cloud credentials from the "
-            "environment or instance metadata instead of explicit access/secret "
-            "keys.");
+DEFINE_bool(
+    eloq_store_cloud_auto_credentials,
+    true,
+    "EloqStore automatically retrieves cloud credentials from the "
+    "environment or instance metadata instead of explicit access/secret "
+    "keys.");
 DEFINE_string(eloq_store_store_path_weights,
               "",
               "EloqStore optional comma-separated per-store-path weights; "
@@ -174,15 +175,17 @@ DEFINE_bool(eloq_store_enable_local_standby,
             false,
             "EloqStore enables standby replication mode for local storage; "
             "cloud mode handles standby automatically.");
-DEFINE_string(eloq_store_standby_master_path,
+DEFINE_string(eloq_store_standby_master_addr,
               "",
-              "EloqStore standby source in the form "
-              "host_name:/absolute/storage/path; when set, the store rsyncs "
-              "from the specified master instead of using cloud storage.");
-DEFINE_string(eloq_store_standby_master_snapshot_roots,
-              "",
-              "EloqStore comma-separated relative snapshot roots on the "
-              "standby master corresponding to eloq_store_standby_master_path.");
+              "EloqStore standby source address. Use 'local' for a local "
+              "master or username@host_addr for a remote master; when set, "
+              "the store rsyncs from the specified master instead of using "
+              "cloud storage.");
+DEFINE_string(
+    eloq_store_stanby_master_store_paths,
+    "",
+    "EloqStore comma-separated absolute store paths on the standby master. "
+    "These must match the master store paths selected by the standby LUT.");
 DEFINE_string(eloq_store_standby_master_store_path_weights,
               "",
               "EloqStore comma-separated store_path_weights for the standby "
@@ -814,24 +817,23 @@ EloqStoreConfig::EloqStoreConfig(const INIReader &config_reader,
             : config_reader.GetBoolean("store",
                                        "eloq_store_enable_local_standby",
                                        FLAGS_eloq_store_enable_local_standby);
-    eloqstore_configs_.standby_master_path =
-        !CheckCommandLineFlagIsDefault("eloq_store_standby_master_path")
-            ? FLAGS_eloq_store_standby_master_path
+    eloqstore_configs_.standby_master_addr =
+        !CheckCommandLineFlagIsDefault("eloq_store_standby_master_addr")
+            ? FLAGS_eloq_store_standby_master_addr
             : config_reader.GetString("store",
-                                      "eloq_store_standby_master_path",
-                                      FLAGS_eloq_store_standby_master_path);
-    std::string standby_master_snapshot_roots =
-        !CheckCommandLineFlagIsDefault(
-            "eloq_store_standby_master_snapshot_roots")
-            ? FLAGS_eloq_store_standby_master_snapshot_roots
+                                      "eloq_store_standby_master_addr",
+                                      FLAGS_eloq_store_standby_master_addr);
+    std::string stanby_master_store_paths =
+        !CheckCommandLineFlagIsDefault("eloq_store_stanby_master_store_paths")
+            ? FLAGS_eloq_store_stanby_master_store_paths
             : config_reader.GetString(
                   "store",
-                  "eloq_store_standby_master_snapshot_roots",
-                  FLAGS_eloq_store_standby_master_snapshot_roots);
-    if (!standby_master_snapshot_roots.empty())
+                  "eloq_store_stanby_master_store_paths",
+                  FLAGS_eloq_store_stanby_master_store_paths);
+    if (!stanby_master_store_paths.empty())
     {
-        ParseCsvStringList(standby_master_snapshot_roots,
-                           eloqstore_configs_.standby_master_snapshot_roots);
+        ParseCsvStringList(stanby_master_store_paths,
+                           eloqstore_configs_.stanby_master_store_paths);
     }
     std::string standby_master_store_path_weights =
         !CheckCommandLineFlagIsDefault(
@@ -844,8 +846,7 @@ EloqStoreConfig::EloqStoreConfig(const INIReader &config_reader,
     if (!standby_master_store_path_weights.empty())
     {
         ParseUint64List(standby_master_store_path_weights,
-                        eloqstore_configs_
-                            .standby_master_store_path_weights);
+                        eloqstore_configs_.standby_master_store_path_weights);
     }
     eloqstore_configs_.data_page_size =
         !CheckCommandLineFlagIsDefault("eloq_store_data_page_size")
