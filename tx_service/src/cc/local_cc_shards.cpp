@@ -3871,7 +3871,6 @@ void LocalCcShards::DataSyncForRangePartition(
         data_sync_task->data_sync_ts_,
         ng_id,
         ng_term,
-        cc_shards_.size(),
         tx_number,
         start_tx_key,
         end_tx_key,
@@ -3879,10 +3878,10 @@ void LocalCcShards::DataSyncForRangePartition(
         is_dirty,
         schema_version);
 
-    for (size_t i = 0; i < cc_shards_.size(); i++)
-    {
-        EnqueueLowPriorityCcRequestToShard(i, &scan_delta_size_cc);
-    }
+    uint16_t dest_core = static_cast<uint16_t>(
+        range_entry->GetRangeInfo()->PartitionId() % Count());
+    EnqueueLowPriorityCcRequestToShard(dest_core, &scan_delta_size_cc);
+
     scan_delta_size_cc.Wait();
 
     if (scan_delta_size_cc.IsError())
@@ -3905,14 +3904,10 @@ void LocalCcShards::DataSyncForRangePartition(
         return;
     }
 
-    for (size_t i = 0; i < cc_shards_.size(); ++i)
+    auto &delta_size = scan_delta_size_cc.SliceDeltaSize();
+    for (auto &delta : delta_size)
     {
-        auto &delta_size = scan_delta_size_cc.SliceDeltaSize(i);
-        for (size_t j = 0; j < delta_size.size(); ++j)
-        {
-            slices_delta_size[std::move(delta_size[j].first)] +=
-                delta_size[j].second;
-        }
+        slices_delta_size[std::move(delta.first)] += delta.second;
     }
 
     if (!export_base_table_items && slices_delta_size.size() == 0)

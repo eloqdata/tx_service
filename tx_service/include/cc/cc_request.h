@@ -8638,7 +8638,6 @@ struct ScanSliceDeltaSizeCcForRangePartition : public CcRequestBase
                                           uint64_t scan_ts,
                                           uint64_t ng_id,
                                           int64_t ng_term,
-                                          uint64_t core_cnt,
                                           uint64_t txn,
                                           const TxKey &target_start_key,
                                           const TxKey &target_end_key,
@@ -8655,20 +8654,14 @@ struct ScanSliceDeltaSizeCcForRangePartition : public CcRequestBase
           store_range_(store_range),
           is_dirty_(is_dirty),
           has_dml_since_ddl_(false),
-          unfinished_cnt_(core_cnt),
+          finished_(false),
           schema_version_(schema_version)
     {
         tx_number_ = txn;
-        pause_pos_.resize(core_cnt);
+        pause_pos_.first = std::move(TxKey());
+        pause_pos_.second = nullptr;
         size_t slice_cnt = store_range ? store_range->SlicesCount() : 0;
-        for (size_t i = 0; i < core_cnt; ++i)
-        {
-            slice_delta_size_.emplace_back();
-            if (slice_cnt > 0)
-            {
-                slice_delta_size_.back().reserve(slice_cnt);
-            }
-        }
+        slice_delta_size_.reserve(slice_cnt);
     }
 
     bool ValidTermCheck() const
@@ -8711,26 +8704,22 @@ struct ScanSliceDeltaSizeCcForRangePartition : public CcRequestBase
     void Wait()
     {
         std::unique_lock<std::mutex> lk(mux_);
-        cv_.wait(lk, [this] { return unfinished_cnt_ == 0; });
+        cv_.wait(lk, [this] { return finished_; });
     }
 
     void SetFinish()
     {
         std::unique_lock<std::mutex> lk(mux_);
-        if (--unfinished_cnt_ == 0)
-        {
-            cv_.notify_one();
-        }
+        finished_ = true;
+        cv_.notify_one();
     }
 
     void SetError(CcErrorCode err)
     {
         std::unique_lock<std::mutex> lk(mux_);
         err_ = err;
-        if (--unfinished_cnt_ == 0)
-        {
-            cv_.notify_one();
-        }
+        finished_ = true;
+        cv_.notify_one();
     }
 
     bool IsError()
@@ -8792,18 +8781,18 @@ struct ScanSliceDeltaSizeCcForRangePartition : public CcRequestBase
         assert(store_range);
         bool res = store_range_.compare_exchange_strong(
             expect, store_range, std::memory_order_acq_rel);
-        slice_delta_size_[core_id].reserve(store_range->SlicesCount());
+        slice_delta_size_.reserve(store_range->SlicesCount());
         return res;
     }
 
-    std::pair<TxKey, StoreSlice *> &PausedPos(size_t core_id)
+    std::pair<TxKey, StoreSlice *> &PausedPos()
     {
-        return pause_pos_[core_id];
+        return pause_pos_;
     }
 
-    std::vector<std::pair<TxKey, int64_t>> &SliceDeltaSize(size_t core_id)
+    std::vector<std::pair<TxKey, int64_t>> &SliceDeltaSize()
     {
-        return slice_delta_size_[core_id];
+        return slice_delta_size_;
     }
 
     bool IsDirty() const
@@ -8847,10 +8836,10 @@ private:
     // pause_pos_.first is the key that we stopped at (has not been scanned
     // though), .second is the slice that we stopped in (has not been scanned
     // completed yet).
-    std::vector<std::pair<TxKey, StoreSlice *>> pause_pos_;
+    std::pair<TxKey, StoreSlice *> pause_pos_;
     // The delta size of the slices. First is the TxKey of the slice, second is
     // the delta size. The TxKey is not the owner of the key.
-    std::vector<std::vector<std::pair<TxKey, int64_t>>> slice_delta_size_;
+    std::vector<std::pair<TxKey, int64_t>> slice_delta_size_;
 
     // Generally, if the size of a key in the data store is unknown (the
     // data_store_size_ is INT32_MAX), we need to read the storage (via
@@ -8868,7 +8857,7 @@ private:
     std::atomic<bool> has_dml_since_ddl_{false};
 
     CcErrorCode err_{CcErrorCode::NO_ERROR};
-    uint32_t unfinished_cnt_;
+    bool finished_{false};
     uint64_t schema_version_;
     std::mutex mux_;
     std::condition_variable cv_;
