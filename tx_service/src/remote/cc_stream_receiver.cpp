@@ -1110,7 +1110,7 @@ void CcStreamReceiver::OnReceiveCcMsg(std::unique_ptr<CcMessage> msg)
                 msg->handler_addr());
 
             if (txm->TxNumber() != msg->tx_number() ||
-                txm->CommandId() != msg->command_id())
+                txm->CommandId() != msg->command_id() || hd_res->IsFinished())
             {
                 // The original tx has terminated and the tx machine has been
                 // recycled. The response message is directed to an obsolete tx.
@@ -1128,7 +1128,18 @@ void CcStreamReceiver::OnReceiveCcMsg(std::unique_ptr<CcMessage> msg)
         // result into read set to release acquired lock.
 
         uint32_t node_group_id = scan_next_res.node_group_id();
-        CcScanner *scanner = hd_res->Value().ccm_scanner_;
+        ScanNextResult &scan_next_result = hd_res->Value();
+        CcScanner *scanner = scan_next_result.ccm_scanner_;
+        BucketScanPlan *current_scan_plan = scan_next_result.current_scan_plan_;
+        if (scanner == nullptr || current_scan_plan == nullptr)
+        {
+            // The handler result has been reset while this response is in
+            // transit. Drops this stale response to avoid dereferencing a
+            // recycled scanner pointer.
+            msg_pool_.enqueue(std::move(msg));
+            txm->ReleaseSharedForwardLatch();
+            break;
+        }
         ::txservice::remote::ShardCacheMsgMap *shard_caches =
             scan_next_res.mutable_shard_cache_map();
         for (auto &[shard_code, shard_cache] :
@@ -1225,11 +1236,10 @@ void CcStreamReceiver::OnReceiveCcMsg(std::unique_ptr<CcMessage> msg)
         }
         else
         {
-            hd_res->Value().current_scan_plan_->UpdateNodeGroupTerm(
-                node_group_id, scan_next_res.term());
+            current_scan_plan->UpdateNodeGroupTerm(node_group_id,
+                                                   scan_next_res.term());
             auto *ng_bucket_scan_progress =
-                hd_res->Value().current_scan_plan_->GetBucketScanProgress(
-                    node_group_id);
+                current_scan_plan->GetBucketScanProgress(node_group_id);
             assert(ng_bucket_scan_progress);
 
             for (const auto &[core_idx, progress] :
