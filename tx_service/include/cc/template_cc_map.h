@@ -4929,37 +4929,17 @@ public:
             req.slice_coordinator_.UpdatePreparedSliceCnt(prepared_slice_cnt);
             req.slice_coordinator_.UpdateBatchEnd();
 
-            if (req.export_base_table_item_)
-            {
-                // Fix the slice index of the current core
-                for (uint16_t core_id = 0; core_id < shard_->core_cnt_;
-                     ++core_id)
-                {
-                    req.FixCurrentSliceIndex(core_id);
-                }
-            }
             req.slice_coordinator_.SetReadyForScan();
-            req.SetUnfinishedCoreCnt(shard_->core_cnt_);
-
-            // Dispatch the request to the cores
-            for (uint16_t core_id = 0; core_id < shard_->core_cnt_; ++core_id)
-            {
-                if (core_id == shard_->core_id_)
-                {
-                    continue;
-                }
-                shard_->Enqueue(shard_->LocalCoreId(), core_id, &req);
-            }
         }
 
-        if (req.IsDrained(shard_->core_id_))
+        if (req.IsDrained())
         {
             // scan is already finished on this core
-            req.SetFinish(shard_->core_id_);
+            req.SetFinish();
             return false;
         }
 
-        auto &pause_key_and_is_drained = req.PausePos(shard_->core_id_);
+        auto &pause_key_and_is_drained = req.PausePos();
 
         auto find_non_empty_slice =
             [this, &req, &deduce_iterator](const KeyT &search_key)
@@ -4973,8 +4953,7 @@ public:
             }
             else
             {
-                const TxKey &curr_start_tx_key =
-                    req.CurrentSliceKey(shard_->core_id_);
+                const TxKey &curr_start_tx_key = req.CurrentSliceKey();
                 const KeyT *curr_start_key = curr_start_tx_key.GetKey<KeyT>();
                 start_key = (*curr_start_key < search_key ? &search_key
                                                           : curr_start_key);
@@ -4999,7 +4978,7 @@ public:
             const KeyT *slice_end_key = nullptr;
             do
             {
-                store_slice = req.CurrentSlice(shard_->core_id_);
+                store_slice = req.CurrentSlice();
                 const TemplateStoreSlice<KeyT> *typed_slice =
                     static_cast<const TemplateStoreSlice<KeyT> *>(store_slice);
                 start_key =
@@ -5016,11 +4995,11 @@ public:
                 }
 
                 // The current slice is empty, try to find next slice.
-                req.MoveToNextSlice(shard_->core_id_);
+                req.MoveToNextSlice();
                 start_key = nullptr;
 
                 // Continue to handle the next slice if not the batch end
-            } while (!req.TheBatchEnd(shard_->core_id_));
+            } while (!req.TheBatchEnd());
 
             return {it, end_it, slice_end_key};
         };
@@ -5061,16 +5040,14 @@ public:
 
         // If reach to the batch end, it means there are no slices that need to
         // be scanned.
-        bool slice_pinned = req.TheBatchEnd(shard_->core_id_)
-                                ? false
-                                : req.IsSlicePinned(shard_->core_id_);
+        bool slice_pinned = req.TheBatchEnd() ? false : req.IsSlicePinned();
         // The following flag is used to mark the behavior of one slice.
         // Only need to export the key if the key is already persisted, this
         // will happen when the slice need to split, and should export all the
         // keys in this slice to get the subslice keys.
         bool export_persisted_key_only =
             !req.export_base_table_item_ && slice_pinned;
-        assert(key_it != slice_end_it || req.TheBatchEnd(shard_->core_id_));
+        assert(key_it != slice_end_it || req.TheBatchEnd());
 
         // 3. Loop to scan keys
         // DataSyncScanCc is running on TxProcessor thread. To avoid
@@ -5079,8 +5056,7 @@ public:
         for (size_t scan_cnt = 0;
              key_it != slice_end_it && key_it != slice_end_next_page_it &&
              scan_cnt < RangePartitionDataSyncScanCc::DataSyncScanBatchSize &&
-             req.accumulated_scan_cnt_.at(shard_->core_id_) <
-                 req.scan_batch_size_;
+             req.accumulated_scan_cnt_ < req.scan_batch_size_;
              ++scan_cnt)
         {
             const KeyT *key = key_it->first;
@@ -5113,8 +5089,8 @@ public:
                 {
                     // Reach to the end of current slice.
                     // Move to the next slice.
-                    req.MoveToNextSlice(shard_->core_id_);
-                    if (!req.TheBatchEnd(shard_->core_id_))
+                    req.MoveToNextSlice();
+                    if (!req.TheBatchEnd())
                     {
                         search_start_key = slice_end_key;
                         std::tie(key_it, slice_end_it, slice_end_key) =
@@ -5125,9 +5101,7 @@ public:
                         // If reach to the batch end, it means there are no
                         // slices that need to be scanned.
                         slice_pinned =
-                            req.TheBatchEnd(shard_->core_id_)
-                                ? false
-                                : req.IsSlicePinned(shard_->core_id_);
+                            req.TheBatchEnd() ? false : req.IsSlicePinned();
                         export_persisted_key_only =
                             !req.export_base_table_item_ && slice_pinned;
                     }
@@ -5181,20 +5155,19 @@ public:
                 auto export_result =
                     ExportForCkpt(cce,
                                   *key,
-                                  req.DataSyncVec(shard_->core_id_),
-                                  req.ArchiveVec(shard_->core_id_),
-                                  req.MoveBaseIdxVec(shard_->core_id_),
+                                  req.DataSyncVec(),
+                                  req.ArchiveVec(),
+                                  req.MoveBaseIdxVec(),
                                   req.data_sync_ts_,
                                   recycle_ts,
                                   shard_->EnableMvcc(),
-                                  req.accumulated_scan_cnt_[shard_->core_id_],
+                                  req.accumulated_scan_cnt_,
                                   req.export_base_table_item_,
                                   req.export_base_table_item_only_,
                                   export_persisted_key_only,
                                   flush_size);
 
-                req.accumulated_flush_data_size_[shard_->core_id_] +=
-                    flush_size;
+                req.accumulated_flush_data_size_ += flush_size;
 
                 if (export_result.second)
                 {
@@ -5211,8 +5184,8 @@ public:
             {
                 slice_pinned = false;
                 // Reach to the end of current slice. Move to the next slice.
-                req.MoveToNextSlice(shard_->core_id_);
-                if (!req.TheBatchEnd(shard_->core_id_))
+                req.MoveToNextSlice();
+                if (!req.TheBatchEnd())
                 {
                     search_start_key = slice_end_key;
                     std::tie(key_it, slice_end_it, slice_end_key) =
@@ -5222,9 +5195,8 @@ public:
 
                     // If reach to the batch end, it means there are no slices
                     // that need to be scanned.
-                    slice_pinned = req.TheBatchEnd(shard_->core_id_)
-                                       ? false
-                                       : req.IsSlicePinned(shard_->core_id_);
+                    slice_pinned =
+                        req.TheBatchEnd() ? false : req.IsSlicePinned();
                     export_persisted_key_only =
                         !req.export_base_table_item_ && slice_pinned;
                 }
@@ -5235,7 +5207,7 @@ public:
         // scan batch size, or reach to the end slice of the current batch
         // slices.
         assert((key_it != slice_end_it && key_it != slice_end_next_page_it) ||
-               req.TheBatchEnd(shard_->core_id_));
+               req.TheBatchEnd());
         // 4. Check whether the request is finished.
         TxKey next_pause_key;
         bool no_more_data =
@@ -5257,16 +5229,15 @@ public:
 
         if (is_scan_mem_full)
         {
-            req.scan_heap_is_full_[shard_->core_id_] = 1;
+            req.scan_heap_is_full_ = 1;
         }
 
         if (is_scan_mem_full || no_more_data ||
-            req.accumulated_scan_cnt_[shard_->core_id_] >=
-                req.scan_batch_size_ ||
-            req.TheBatchEnd(shard_->core_id_))
+            req.accumulated_scan_cnt_ >= req.scan_batch_size_ ||
+            req.TheBatchEnd())
         {
             // Request is finished
-            req.SetFinish(shard_->core_id_);
+            req.SetFinish();
             return false;
         }
 
@@ -7588,7 +7559,7 @@ public:
         const KeyT *const req_start_key = req.StartTxKey().GetKey<KeyT>();
         const KeyT *const req_end_key = req.EndTxKey().GetKey<KeyT>();
 
-        auto &paused_position = req.PausedPos(shard_->core_id_);
+        auto &paused_position = req.PausedPos();
 
         bool is_dirty = req.IsDirty();
 
@@ -7659,8 +7630,7 @@ public:
 
             slice_end_next_page_it = next_page_it(slice_end_it);
 
-            curr_slice_delta_size =
-                &(req.SliceDeltaSize(shard_->core_id_).back().second);
+            curr_slice_delta_size = &(req.SliceDeltaSize().back().second);
         }
 
         bool has_dml_since_ddl = false;
@@ -7862,8 +7832,7 @@ public:
 
                         slice_end_next_page_it = next_page_it(slice_end_it);
 
-                        auto &slice_delta_size =
-                            req.SliceDeltaSize(shard_->core_id_);
+                        auto &slice_delta_size = req.SliceDeltaSize();
                         slice_delta_size.emplace_back(slice->StartTxKey(), 0);
                         curr_slice_delta_size = &slice_delta_size.back().second;
                     }
