@@ -763,7 +763,7 @@ struct RemoteScanSlice : public ScanSliceCc
 {
 public:
     RemoteScanSlice();
-    void Reset(std::unique_ptr<CcMessage> input_msg, uint16_t core_cnt);
+    void Reset(std::unique_ptr<CcMessage> input_msg);
 
 private:
     ScanSliceResponse output_msg_;

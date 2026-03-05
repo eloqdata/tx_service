@@ -4437,7 +4437,6 @@ public:
                                 // locks, because those locks might acquired by
                                 // other ScanSliceCc/ReadCc from the
                                 // transaction.
-                                remote_scan_cache->RemoveLast();
                             }
                             else
                             {
@@ -4840,7 +4839,6 @@ public:
                                 (*last_key == *end_key && !end_inclusive))
                             {
                                 trailing_cnt++;
-                                remote_scan_cache->RemoveLast();
                             }
                             else
                             {
