@@ -7588,7 +7588,7 @@ public:
         const KeyT *const req_start_key = req.StartTxKey().GetKey<KeyT>();
         const KeyT *const req_end_key = req.EndTxKey().GetKey<KeyT>();
 
-        auto &paused_position = req.PausedPos(shard_->core_id_);
+        auto &paused_position = req.PausedPos();
 
         bool is_dirty = req.IsDirty();
 
@@ -7659,8 +7659,7 @@ public:
 
             slice_end_next_page_it = next_page_it(slice_end_it);
 
-            curr_slice_delta_size =
-                &(req.SliceDeltaSize(shard_->core_id_).back().second);
+            curr_slice_delta_size = &(req.SliceDeltaSize().back().second);
         }
 
         bool has_dml_since_ddl = false;
@@ -7862,8 +7861,7 @@ public:
 
                         slice_end_next_page_it = next_page_it(slice_end_it);
 
-                        auto &slice_delta_size =
-                            req.SliceDeltaSize(shard_->core_id_);
+                        auto &slice_delta_size = req.SliceDeltaSize();
                         slice_delta_size.emplace_back(slice->StartTxKey(), 0);
                         curr_slice_delta_size = &slice_delta_size.back().second;
                     }
