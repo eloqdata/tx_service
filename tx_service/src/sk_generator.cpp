@@ -324,7 +324,6 @@ void SkGenerator::ScanAndEncodeIndex(const TxKey *start_key,
                                           scan_ts_,
                                           node_group_id_,
                                           ng_term,
-                                          core_cnt,
                                           scan_batch_size_,
                                           tx_number,
                                           start_key,
@@ -336,12 +335,7 @@ void SkGenerator::ScanAndEncodeIndex(const TxKey *start_key,
     CcErrorCode scan_res = CcErrorCode::NO_ERROR;
     bool scan_data_drained = false;
     bool scan_pk_finished = false;
-    std::vector<TxKey> last_finished_pos;
-    last_finished_pos.reserve(core_cnt);
-    for (size_t i = 0; i < core_cnt; ++i)
-    {
-        last_finished_pos.emplace_back(start_key->Clone());
-    }
+    TxKey last_finished_pos = start_key->Clone();
 
     TxKey target_key;
     const TxRecord *target_rec = nullptr;
@@ -355,11 +349,8 @@ void SkGenerator::ScanAndEncodeIndex(const TxKey *start_key,
     {
         batch_tuples = 0;
 
-        uint32_t core_rand = butil::fast_rand();
-        // The scan slice request is dispatched to the first core. The first
-        // core tries to pin the slice if necessary and if succeeds, further
-        // dispatches the request to remaining cores for parallel scans.
-        cc_shards->EnqueueToCcShard(core_rand % core_cnt, &scan_req);
+        uint16_t dest_core = partition_id_ % cc_shards->Count();
+        cc_shards->EnqueueToCcShard(dest_core, &scan_req);
         scan_req.Wait();
 
         if (scan_req.IsError())
@@ -381,17 +372,14 @@ void SkGenerator::ScanAndEncodeIndex(const TxKey *start_key,
             {
                 std::this_thread::sleep_for(std::chrono::seconds(30));
                 // Reset the paused key.
-                for (size_t i = 0; i < core_cnt; ++i)
+                const TxKey &paused_key = scan_req.PausePos().first;
+                if (!scan_req.IsDrained())
                 {
-                    const TxKey &paused_key = scan_req.PausePos(i).first;
-                    if (!scan_req.IsDrained(i))
-                    {
-                        // Should use one copy of the key, instead of move the
-                        // ownership of the key, because this round of scan may
-                        // failed again.
-                        assert(paused_key.IsOwner());
-                        paused_key.Copy(last_finished_pos[i]);
-                    }
+                    // Should use one copy of the key, instead of move the
+                    // ownership of the key, because this round of scan may
+                    // failed again.
+                    assert(paused_key.IsOwner());
+                    paused_key.Copy(last_finished_pos);
                 }
                 scan_req.Reset();
                 scan_pk_finished = false;
@@ -431,71 +419,63 @@ void SkGenerator::ScanAndEncodeIndex(const TxKey *start_key,
             }
             sk_encoder = sk_encoder_vec_[vec_idx].get();
 
-            for (size_t core_idx = 0; core_idx < core_cnt; ++core_idx)
+            for (size_t key_idx = 0; key_idx < scan_req.accumulated_scan_cnt_;
+                 ++key_idx)
             {
-                for (size_t key_idx = 0;
-                     key_idx < scan_req.accumulated_scan_cnt_.at(core_idx);
-                     ++key_idx)
+                auto &tuple = scan_req.DataSyncVec().at(key_idx);
+                target_key = tuple.Key();
+                target_rec = tuple.Payload();
+                version_ts = tuple.commit_ts_;
+                if (tuple.payload_status_ == RecordStatus::Deleted)
                 {
-                    auto &tuple = scan_req.DataSyncVec(core_idx).at(key_idx);
-                    target_key = tuple.Key();
-                    target_rec = tuple.Payload();
-                    version_ts = tuple.commit_ts_;
-                    if (tuple.payload_status_ == RecordStatus::Deleted)
-                    {
-                        // Skip the deleted record.
-                        continue;
-                    }
-                    assert(target_key.KeyPtr() != nullptr &&
-                           target_rec != nullptr);
-
-                    int32_t appended_sk_size = sk_encoder->AppendPackedSk(
-                        &target_key, target_rec, version_ts, index_set);
-                    if (appended_sk_size < 0)
-                    {
-                        LOG(ERROR)
-                            << "ScanAndEncodeIndex: Failed to encode "
-                            << "key for index: " << tbl_name_it->StringView()
-                            << "of ng#" << node_group_id_;
-                        // Finish the pack sk operation
-                        task_result_ = CcErrorCode::PACK_SK_ERR;
-                        pack_sk_err_ = std::move(sk_encoder->GetError());
-                        return;
-                    }
-                } /* End of each key */
-
-                if (tbl_name_it == new_indexes_name_->cbegin())
-                {
-                    batch_tuples += scan_req.accumulated_scan_cnt_.at(core_idx);
-                    if (batch_tuples % 10240 == 0 &&
-                        !task_status_->CheckTxTermStatus())
-                    {
-                        LOG(WARNING)
-                            << "ScanAndEncodeIndex: Terminate this task cause "
-                            << "the tx leader transferred of ng#"
-                            << node_group_id_;
-                        task_status_->TerminateGenerateSk();
-                        task_result_ = CcErrorCode::TX_NODE_NOT_LEADER;
-                        return;
-                    }
-                    // Update the last finished key.
-                    auto &paused_key = scan_req.PausePos(core_idx).first;
-                    if (!scan_req.IsDrained(core_idx))
-                    {
-                        if (last_finished_pos[core_idx].IsOwner())
-                        {
-                            last_finished_pos[core_idx].Copy(paused_key);
-                        }
-                        else
-                        {
-                            last_finished_pos[core_idx] = paused_key.Clone();
-                        }
-                    }
-                    // If the data is drained
-                    scan_data_drained =
-                        scan_req.IsDrained(core_idx) && scan_data_drained;
+                    // Skip the deleted record.
+                    continue;
                 }
-            } /* End of each core */
+                assert(target_key.KeyPtr() != nullptr && target_rec != nullptr);
+
+                int32_t appended_sk_size = sk_encoder->AppendPackedSk(
+                    &target_key, target_rec, version_ts, index_set);
+                if (appended_sk_size < 0)
+                {
+                    LOG(ERROR) << "ScanAndEncodeIndex: Failed to encode "
+                               << "key for index: " << tbl_name_it->StringView()
+                               << "of ng#" << node_group_id_;
+                    // Finish the pack sk operation
+                    task_result_ = CcErrorCode::PACK_SK_ERR;
+                    pack_sk_err_ = std::move(sk_encoder->GetError());
+                    return;
+                }
+            } /* End of each key */
+
+            if (tbl_name_it == new_indexes_name_->cbegin())
+            {
+                batch_tuples += scan_req.accumulated_scan_cnt_;
+                if (batch_tuples % 10240 == 0 &&
+                    !task_status_->CheckTxTermStatus())
+                {
+                    LOG(WARNING)
+                        << "ScanAndEncodeIndex: Terminate this task cause "
+                        << "the tx leader transferred of ng#" << node_group_id_;
+                    task_status_->TerminateGenerateSk();
+                    task_result_ = CcErrorCode::TX_NODE_NOT_LEADER;
+                    return;
+                }
+                // Update the last finished key.
+                auto &paused_key = scan_req.PausePos().first;
+                if (!scan_req.IsDrained())
+                {
+                    if (last_finished_pos.IsOwner())
+                    {
+                        last_finished_pos.Copy(paused_key);
+                    }
+                    else
+                    {
+                        last_finished_pos = paused_key.Clone();
+                    }
+                }
+                // If the data is drained
+                scan_data_drained = scan_req.IsDrained();
+            }
         } /* End of foreach new_indexes_name */
 
         scan_pk_finished = scan_data_drained;

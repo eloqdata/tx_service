@@ -3866,7 +3866,6 @@ public:
         uint64_t data_sync_ts,
         uint64_t node_group_id,
         int64_t node_group_term,
-        uint16_t core_cnt,
         size_t scan_batch_size,
         uint64_t txn,
         const TxKey *target_start_key,
@@ -3881,14 +3880,13 @@ public:
           table_name_(&table_name),
           node_group_id_(node_group_id),
           node_group_term_(node_group_term),
-          core_cnt_(core_cnt),
           last_data_sync_ts_(last_data_sync_ts),
           data_sync_ts_(data_sync_ts),
           start_key_(target_start_key),
           end_key_(target_end_key),
           scan_batch_size_(scan_batch_size),
           err_(CcErrorCode::NO_ERROR),
-          unfinished_cnt_(core_cnt_),
+          finished_(false),
           mux_(),
           cv_(),
           export_base_table_item_(export_base_table_item),
@@ -3911,24 +3909,19 @@ public:
                                   false);
                           });
         }
-        for (size_t i = 0; i < core_cnt; i++)
+        data_sync_vec_.resize(scan_batch_size);
+        if (!export_base_table_item_only_)
         {
-            data_sync_vec_.emplace_back();
-            data_sync_vec_.back().resize(scan_batch_size);
-            if (!export_base_table_item_only_)
-            {
-                archive_vec_.emplace_back();
-                archive_vec_.back().reserve(scan_batch_size);
-                mv_base_idx_vec_.emplace_back();
-                mv_base_idx_vec_.back().reserve(scan_batch_size);
-            }
-
-            pause_pos_.emplace_back(TxKey(), false);
-            curr_slice_index_.emplace_back(0);
-            accumulated_scan_cnt_.emplace_back(0);
-            accumulated_flush_data_size_.emplace_back(0);
-            scan_heap_is_full_.emplace_back(0);
+            archive_vec_.resize(scan_batch_size);
+            mv_base_idx_vec_.resize(scan_batch_size);
         }
+
+        pause_pos_.first = std::move(TxKey());
+        pause_pos_.second = false;
+        curr_slice_index_ = 0;
+        accumulated_scan_cnt_ = 0;
+        accumulated_flush_data_size_ = 0;
+        scan_heap_is_full_ = 0;
     }
 
     bool ValidTermCheck()
@@ -3962,7 +3955,6 @@ public:
             SetError(CcErrorCode::REQUESTED_NODE_NOT_LEADER);
             return false;
         }
-        scan_count_++;
         CcMap *ccm = ccs.GetCcm(*table_name_, node_group_id_);
         if (ccm == nullptr)
         {
@@ -3998,49 +3990,44 @@ public:
         return false;
     }
 
-    bool IsDrained(size_t core_idx) const
+    bool IsDrained() const
     {
-        return pause_pos_[core_idx].second;
+        return pause_pos_.second;
     }
 
-    std::pair<TxKey, bool> &PausePos(size_t core_idx)
+    std::pair<TxKey, bool> &PausePos()
     {
-        return pause_pos_[core_idx];
+        return pause_pos_;
     }
 
     void Wait()
     {
         std::unique_lock<std::mutex> lk(mux_);
-        cv_.wait(lk, [this] { return unfinished_cnt_ == 0; });
+        cv_.wait(lk, [this] { return finished_; });
     }
 
     void Reset(OpType op_type = OpType::Normal)
     {
         std::lock_guard<std::mutex> lk(mux_);
-        unfinished_cnt_ = 1;
-        for (size_t i = 0; i < core_cnt_; i++)
+        finished_ = false;
+        if (!export_base_table_item_only_)
         {
-            if (!export_base_table_item_only_)
-            {
-                archive_vec_.at(i).clear();
-                archive_vec_.at(i).reserve(scan_batch_size_);
-                mv_base_idx_vec_.at(i).clear();
-                mv_base_idx_vec_.at(i).reserve(scan_batch_size_);
-            }
+            archive_vec_.clear();
+            mv_base_idx_vec_.clear();
+        }
 
-            accumulated_scan_cnt_.at(i) = 0;
-            accumulated_flush_data_size_.at(i) = 0;
-            if (scan_heap_is_full_[i] == 1)
-            {
-                // vec has been cleared during ReleaseDataSyncScanHeapCc,
-                // resize to prepared size
-                data_sync_vec_[i].resize(scan_batch_size_);
-                scan_heap_is_full_[i] = 0;
-            }
-            if (export_base_table_item_)
-            {
-                curr_slice_index_[i] = 0;
-            }
+        accumulated_scan_cnt_ = 0;
+        accumulated_flush_data_size_ = 0;
+        if (scan_heap_is_full_ == 1)
+        {
+            // vec has been cleared during ReleaseDataSyncScanHeapCc,
+            // resize to prepared size
+            data_sync_vec_.resize(scan_batch_size_);
+            scan_heap_is_full_ = 0;
+        }
+        if (export_base_table_item_)
+        {
+            curr_slice_index_ = 0;
         }
 
         err_ = CcErrorCode::NO_ERROR;
@@ -4052,12 +4039,9 @@ public:
     {
         std::lock_guard<std::mutex> lk(mux_);
         err_ = err;
-        --unfinished_cnt_;
-        if (unfinished_cnt_ == 0)
-        {
-            UnpinSlices();
-            cv_.notify_one();
-        }
+        finished_ = true;
+        UnpinSlices();
+        cv_.notify_one();
     }
 
     void AbortCcRequest(CcErrorCode err_code) override
@@ -4078,26 +4062,22 @@ public:
         return err_;
     }
 
-    void SetFinish(size_t core_id)
+    void SetFinish()
     {
         std::unique_lock<std::mutex> lk(mux_);
-        --unfinished_cnt_;
-        if (export_base_table_item_ && !pause_pos_[core_id].second)
+        finished_ = true;
+        if (export_base_table_item_ && !pause_pos_.second)
         {
             // Only not drained on this core, should set the paused key.
-            UpdateMinPausedSlice(&pause_pos_[core_id].first);
+            UpdateMinPausedSlice(&pause_pos_.first);
         }
         else if (!export_base_table_item_)
         {
-            UpdateMinPausedSlice(curr_slice_index_[core_id]);
+            UpdateMinPausedSlice(curr_slice_index_);
         }
-
-        if (unfinished_cnt_ == 0)
-        {
-            // Unpin the slices
-            UnpinSlices();
-            cv_.notify_one();
-        }
+        // Unpin the slices
+        UnpinSlices();
+        cv_.notify_one();
     }
 
     uint32_t NodeGroupId()
@@ -4105,19 +4085,19 @@ public:
         return node_group_id_;
     }
 
-    std::vector<FlushRecord> &DataSyncVec(uint16_t core_id)
+    std::vector<FlushRecord> &DataSyncVec()
     {
-        return data_sync_vec_[core_id];
+        return data_sync_vec_;
     }
 
-    std::vector<FlushRecord> &ArchiveVec(uint16_t core_id)
+    std::vector<FlushRecord> &ArchiveVec()
     {
-        return archive_vec_[core_id];
+        return archive_vec_;
     }
 
-    std::vector<size_t> &MoveBaseIdxVec(uint16_t core_id)
+    std::vector<size_t> &MoveBaseIdxVec()
     {
-        return mv_base_idx_vec_[core_id];
+        return mv_base_idx_vec_;
     }
 
     int64_t NodeGroupTerm() const
@@ -4141,76 +4121,52 @@ public:
         return store_range_;
     }
 
-    void FixCurrentSliceIndex(uint16_t core_id)
+    StoreSlice *CurrentSlice() const
     {
-        assert(export_base_table_item_);
-        if (pause_pos_[core_id].first.KeyPtr() != nullptr)
-        {
-            size_t curr_slice_idx = 0;
-            StoreSlice *curr_slice =
-                slice_coordinator_.pinned_slices_[curr_slice_idx];
-            while (curr_slice->EndTxKey() < pause_pos_[core_id].first)
-            {
-                ++curr_slice_idx;
-                assert(curr_slice_idx <
-                       slice_coordinator_.pinned_slices_.size());
-                curr_slice = slice_coordinator_.pinned_slices_[curr_slice_idx];
-            }
-            curr_slice_index_[core_id] = curr_slice_idx;
-        }
-    }
-
-    StoreSlice *CurrentSlice(uint16_t core_id) const
-    {
-        size_t curr_slice_idx = curr_slice_index_[core_id];
         if (export_base_table_item_)
         {
-            assert(curr_slice_idx < slice_coordinator_.pinned_slices_.size());
-            return slice_coordinator_.pinned_slices_.at(curr_slice_idx);
+            assert(curr_slice_index_ <
+                   slice_coordinator_.pinned_slices_.size());
+            return slice_coordinator_.pinned_slices_.at(curr_slice_index_);
         }
-        assert(curr_slice_idx < slices_to_scan_.size());
-        const TxKey &curr_slice_key = slices_to_scan_.at(curr_slice_idx).first;
+        assert(curr_slice_index_ < slices_to_scan_.size());
+        const TxKey &curr_slice_key =
+            slices_to_scan_.at(curr_slice_index_).first;
         return store_range_->FindSlice(curr_slice_key);
     }
 
-    const TxKey &CurrentSliceKey(uint16_t core_id) const
+    const TxKey &CurrentSliceKey() const
     {
         assert(!export_base_table_item_);
-        size_t curr_slice_index = curr_slice_index_[core_id];
-        assert(curr_slice_index < slices_to_scan_.size());
-        return slices_to_scan_[curr_slice_index].first;
+        assert(curr_slice_index_ < slices_to_scan_.size());
+        return slices_to_scan_[curr_slice_index_].first;
     }
 
-    void MoveToNextSlice(uint16_t core_id)
+    void MoveToNextSlice()
     {
-        curr_slice_index_[core_id]++;
+        curr_slice_index_++;
     }
 
-    bool TheBatchEnd(uint16_t core_id) const
+    bool TheBatchEnd() const
     {
-        return curr_slice_index_[core_id] >=
+        return curr_slice_index_ >=
                (export_base_table_item_
                     ? slice_coordinator_.pinned_slices_.size()
                     : slice_coordinator_.batch_end_slice_index_);
     }
 
-    bool IsSlicePinned(uint16_t core_id) const
+    bool IsSlicePinned() const
     {
         assert(export_base_table_item_ ||
-               curr_slice_index_[core_id] < slices_to_scan_.size());
+               curr_slice_index_ < slices_to_scan_.size());
         return export_base_table_item_
                    ? true
-                   : slices_to_scan_[curr_slice_index_[core_id]].second;
+                   : slices_to_scan_[curr_slice_index_].second;
     }
 
     uint64_t SchemaVersion() const override
     {
         return schema_version_;
-    }
-
-    void SetUnfinishedCoreCnt(uint16_t core_cnt)
-    {
-        unfinished_cnt_ = core_cnt;
     }
 
     void UnpinSlices()
@@ -4256,13 +4212,10 @@ public:
         return last_data_sync_ts_;
     }
 
-    std::vector<size_t> accumulated_scan_cnt_;
-    std::vector<uint64_t> accumulated_flush_data_size_;
+    size_t accumulated_scan_cnt_;
+    uint64_t accumulated_flush_data_size_;
 
-    // std::vector<bool> is not safe to use in multi-threaded environment,
-    std::vector<uint32_t> scan_heap_is_full_{0};
-
-    size_t scan_count_{0};
+    uint32_t scan_heap_is_full_{0};
 
 private:
     struct SliceCoordinator
@@ -4382,7 +4335,6 @@ private:
     const TableName *table_name_{nullptr};
     uint32_t node_group_id_;
     int64_t node_group_term_;
-    uint16_t core_cnt_;
     // It is used as a hint to decide if a page has dirty data since last round
     // of checkpoint. It is guaranteed that all entries committed before this ts
     // are synced into data store.
@@ -4390,10 +4342,10 @@ private:
     // Target ts. Collect all data changes committed before this ts into data
     // sync vec.
     uint64_t data_sync_ts_;
-    std::vector<std::vector<FlushRecord>> data_sync_vec_;
-    std::vector<std::vector<FlushRecord>> archive_vec_;
+    std::vector<FlushRecord> data_sync_vec_;
+    std::vector<FlushRecord> archive_vec_;
     // Cache the entries to move record from "base" table to "archive" table
-    std::vector<std::vector<size_t>> mv_base_idx_vec_;
+    std::vector<size_t> mv_base_idx_vec_;
 
     // Start/end key of target range if the scan is on a range only, nullptr if
     // it's on entire table.
@@ -4402,11 +4354,11 @@ private:
     // Position that we left off during last round of ckpt scan.
     // pause_pos_.first is the key that we stopped at (has not been scanned
     // though), bool is if this core has finished scanning all keys already.
-    std::vector<std::pair<TxKey, bool>> pause_pos_;
+    std::pair<TxKey, bool> pause_pos_;
     size_t scan_batch_size_;
 
     CcErrorCode err_{CcErrorCode::NO_ERROR};
-    uint32_t unfinished_cnt_;
+    bool finished_{false};
     std::mutex mux_;
     std::condition_variable cv_;
 
@@ -4424,7 +4376,7 @@ private:
     // The index of the current slice to be scanned. If export_base_table_item_
     // is true, it is the index of the SliceCoordinator::pinned_slices_ vector,
     // and if false, it is the index of the slices_to_scan_ vector.
-    std::vector<size_t> curr_slice_index_;
+    size_t curr_slice_index_;
     // keep schema vesion after acquire read lock on catalog, to prevent the
     // concurrency issue with Truncate Table, detail ref to tx issue #1130
     // If schema_version_ is 0, the check will be bypassed, since this data sync
