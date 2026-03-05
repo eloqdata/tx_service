@@ -1963,13 +1963,13 @@ void TransactionExecution::Process(ReadOperation &read)
                     // error to the tx read request.
                     assert(!lock_range_bucket_result_.IsError());
 
-                    // Uses the lower 10 bits of the key's hash code to shard
-                    // the key across CPU cores in a cc node.
-                    uint32_t residual = key.Hash() & 0x3FF;
+                    // Uses the partition id to shard the key across CPU cores
+                    // in a cc node.
+                    partition_id = range_rec_.GetRangeInfo()->PartitionId();
+                    uint32_t residual = static_cast<uint32_t>(partition_id);
                     NodeGroupId range_ng =
                         range_rec_.GetRangeOwnerNg()->BucketOwner();
                     key_shard_code = range_ng << 10 | residual;
-                    partition_id = range_rec_.GetRangeInfo()->PartitionId();
                 }
             }
             else
@@ -4611,12 +4611,17 @@ bool TransactionExecution::FillDataLogRequest(WriteToLogOp &write_log)
                 // ngs, write log for both ngs.
                 uint32_t forward_ng_id =
                     Sharder::Instance().ShardToCcNodeGroup(forward_shard_code);
-                auto table_rec_it = ng_table_set.try_emplace(forward_ng_id);
+                auto [table_rec_it, inserted] =
+                    ng_table_set.try_emplace(forward_ng_id);
+                if (!inserted)
+                {
+                    continue;
+                }
                 std::unordered_map<
                     TableName,
                     std::vector<
                         std::pair<const TxKey *, const WriteSetEntry *>>>
-                    &table_rec_set = table_rec_it.first->second.second;
+                    &table_rec_set = table_rec_it->second.second;
 
                 auto rec_vec_it = table_rec_set.emplace(
                     std::piecewise_construct,
