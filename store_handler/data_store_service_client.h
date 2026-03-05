@@ -451,6 +451,9 @@ public:
      * @param snapshot_files The output snapshot files.
      * @return True if create successfully, otherwise false.
      */
+    bool CreateSnapshotForStandby(
+        std::vector<std::string> &snapshot_files) override;
+
     bool CreateSnapshotForBackup(const std::string &backup_name,
                                  std::vector<std::string> &backup_files,
                                  uint64_t backup_ts = 0) override;
@@ -482,7 +485,9 @@ public:
     bool OnSnapshotReceived(
         const txservice::remote::OnSnapshotSyncedRequest *req) override;
 
-    bool OnUpdateStandbyCkptTs(uint32_t ng_id, int64_t ng_term) override;
+    bool OnUpdateStandbyCkptTs(uint32_t ng_id,
+                               int64_t ng_term,
+                               uint64_t snapshot_ts) override;
 
     /**
      * Serialize a record with is_deleted flag and record string.

@@ -26,6 +26,7 @@
 #include <cstdint>
 #include <cstdio>
 #include <string>
+#include <vector>
 
 #include "catalog_key_record.h"
 #include "cc_request.h"
@@ -338,6 +339,14 @@ void Checkpointer::Ckpt(bool is_last_ckpt)
                 assert(standby_node_term < 0 && leader_term >= 0);
                 NotifyLogOfCkptTs(node_group, leader_term, last_succ_ckpt_ts);
 
+#ifdef DATA_STORE_TYPE_ELOQDSS_ELOQSTORE
+                auto store_handler = Sharder::Instance().GetDataStoreHandler();
+                if (!store_handler->IsSharedStorage())
+                {
+                    std::vector<std::string> snapshot_files;
+                    store_handler->CreateSnapshotForStandby(snapshot_files);
+                }
+#endif
                 BrocastPrimaryCkptTs(node_group,
                                      leader_term,
                                      last_succ_ckpt_ts,
@@ -403,6 +412,17 @@ void Checkpointer::Ckpt(bool is_last_ckpt)
                             NotifyLogOfCkptTs(node_group,
                                               leader_term,
                                               status->truncate_log_ts_);
+
+#ifdef DATA_STORE_TYPE_ELOQDSS_ELOQSTORE
+                            auto store_handler =
+                                Sharder::Instance().GetDataStoreHandler();
+                            if (!store_handler->IsSharedStorage())
+                            {
+                                std::vector<std::string> snapshot_files;
+                                store_handler->CreateSnapshotForStandby(
+                                    snapshot_files);
+                            }
+#endif
 
                             BrocastPrimaryCkptTs(node_group,
                                                  leader_term,

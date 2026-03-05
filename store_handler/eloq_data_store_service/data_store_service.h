@@ -668,7 +668,9 @@ public:
                             const std::string &snapshot_path);
     // When primary flush data to cloud, the standby node will call this
     // function to sync the data from cloud.
-    void OnUpdateStandbyCkptTs(uint32_t shard_id, int64_t ng_term);
+    void OnUpdateStandbyCkptTs(uint32_t shard_id,
+                               int64_t ng_term,
+                               uint64_t snapshot_ts);
 
     DataStoreServiceClusterManager &GetClusterManager()
     {
@@ -751,6 +753,13 @@ private:
         // Whether the file cache sync is running. Used to avoid concurrent
         // local ssd file operations between db and file sync worker.
         std::atomic<bool> is_file_sync_running_{false};
+
+        // Guard standby reload state for this shard.
+        bthread::Mutex standby_reload_mutex_;
+        // Latest applied standby snapshot timestamp for this shard.
+        uint64_t latest_snapshot_ts_{0};
+        bool is_standby_reloading_{false};
+        uint64_t reloading_snapshot_ts_{0};
     };
 
     std::array<DataShard, 1000> data_shards_;

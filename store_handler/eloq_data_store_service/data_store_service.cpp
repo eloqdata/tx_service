@@ -39,6 +39,7 @@
 #include <vector>
 
 #include "data_store_fault_inject.h"  // ACTION_FAULT_INJECTOR
+#include "eloq_store_data_store_factory.h"
 #include "internal_request.h"
 #include "object_pool.h"
 #if defined(DATA_STORE_TYPE_ELOQDSS_ROCKSDB_CLOUD_S3)
@@ -2261,12 +2262,41 @@ void DataStoreService::OnSnapshotReceived(
 #ifdef DATA_STORE_TYPE_ELOQDSS_ELOQSTORE
     auto &ds_ref = data_shards_.at(shard_id);
 
+    if (!snapshot_path.empty())
+    {
+        std::vector<std::string> standby_master_store_paths;
+        std::vector<uint64_t> standby_master_store_path_weights;
+        std::string error_message;
+        if (!::eloqstore::ParseStorePathListWithWeights(
+                snapshot_path,
+                standby_master_store_paths,
+                standby_master_store_path_weights,
+                &error_message))
+        {
+            LOG(ERROR) << "OnSnapshotReceived invalid snapshot_path format: "
+                       << snapshot_path << ", error: " << error_message;
+            return;
+        }
+
+        auto *eloq_store_factory =
+            static_cast<EloqStoreDataStoreFactory *>(data_store_factory_.get());
+        eloq_store_factory->UpdateStandbyMasterStorePaths(
+            standby_master_store_paths, standby_master_store_path_weights);
+
+        if (ds_ref.data_store_ != nullptr)
+        {
+            ds_ref.data_store_->UpdateStandbyMasterStorePaths(
+                standby_master_store_paths,
+                standby_master_store_path_weights);
+        }
+    }
+
     if (!data_store_factory_->IsCloudMode())
     {
-        // TODO(lzx): Handle the case of local data store mode. (replace the
-        // data with the snapshot)
-        LOG(FATAL)
-            << "OnSnapshotReceived not implemented for local data store mode";
+        LOG(INFO) << "OnSnapshotReceived updated standby master store paths "
+                     "for local mode, shard "
+                  << shard_id << ", term " << term;
+        return;
     }
     else
     {
@@ -2300,17 +2330,67 @@ void DataStoreService::OnSnapshotReceived(
 #endif
 }
 
-void DataStoreService::OnUpdateStandbyCkptTs(uint32_t shard_id, int64_t term)
+void DataStoreService::OnUpdateStandbyCkptTs(uint32_t shard_id,
+                                             int64_t term,
+                                             uint64_t snapshot_ts)
 {
 #ifdef DATA_STORE_TYPE_ELOQDSS_ELOQSTORE
     auto &ds_ref = data_shards_.at(shard_id);
+    {
+        std::unique_lock<bthread::Mutex> lk(ds_ref.standby_reload_mutex_);
+        if (ds_ref.latest_snapshot_ts_ >= snapshot_ts)
+        {
+            LOG(INFO) << "StandbySyncAndReloadData discard request by latest "
+                         "snapshot ts for DSS shard "
+                      << shard_id << ", current snapshot ts "
+                      << ds_ref.latest_snapshot_ts_
+                      << ", incoming snapshot ts " << snapshot_ts;
+            return;
+        }
+        if (snapshot_ts <= ds_ref.reloading_snapshot_ts_)
+        {
+            LOG(INFO)
+                << "StandbySyncAndReloadData discard request by reloading "
+                   "snapshot ts for DSS shard "
+                << shard_id << ", reloading snapshot ts "
+                << ds_ref.reloading_snapshot_ts_ << ", incoming snapshot ts "
+                << snapshot_ts;
+            return;
+        }
+        ds_ref.is_standby_reloading_ = true;
+        ds_ref.reloading_snapshot_ts_ = snapshot_ts;
+    }
+
+    auto clear_reloading_flag = [&ds_ref, snapshot_ts]() {
+        std::unique_lock<bthread::Mutex> lk(ds_ref.standby_reload_mutex_);
+        if (ds_ref.reloading_snapshot_ts_ == snapshot_ts)
+        {
+            if (snapshot_ts > ds_ref.latest_snapshot_ts_)
+            {
+                ds_ref.latest_snapshot_ts_ = snapshot_ts;
+            }
+            ds_ref.is_standby_reloading_ = false;
+        }
+    };
+
     if (ds_ref.data_store_ != nullptr &&
         ds_ref.shard_status_.load() != DSShardStatus::Closed)
     {
-        LOG(INFO)
-            << "StandbySyncAndReloadData reload data from cloud for DSS shard "
-            << shard_id;
-        ds_ref.data_store_->ReloadDataFromCloud(term);
+        if (data_store_factory_->IsCloudMode())
+        {
+            LOG(INFO) << "StandbySyncAndReloadData reload data from cloud for "
+                         "DSS shard "
+                      << shard_id;
+            ds_ref.data_store_->ReloadDataFromCloud(term);
+        }
+        else
+        {
+            LOG(INFO) << "StandbySyncAndReloadData reload data from master "
+                         "node for DSS shard "
+                      << shard_id;
+            ds_ref.data_store_->ReloadDataFromMasterNode(term, snapshot_ts);
+        }
+
     }
     else
     {
@@ -2318,6 +2398,8 @@ void DataStoreService::OnUpdateStandbyCkptTs(uint32_t shard_id, int64_t term)
                       "closed or data store is nullptr, "
                    << shard_id;
     }
+
+    clear_reloading_flag();
 
 #else
     LOG(INFO) << "OnUpdateStandbyCkptTs no-op for non-eloqstore data store";

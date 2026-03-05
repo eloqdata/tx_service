@@ -405,10 +405,13 @@ public:
         return true;
     }
 
-    virtual bool OnUpdateStandbyCkptTs(uint32_t ng_id, int64_t ng_term)
+    virtual bool OnUpdateStandbyCkptTs(uint32_t ng_id,
+                                       int64_t ng_term,
+                                       uint64_t snapshot_ts)
     {
         (void) ng_id;
         (void) ng_term;
+        (void) snapshot_ts;
         return true;
     }
 

@@ -1678,7 +1678,8 @@ void CcNodeService::UpdateStandbyCkptTs(
         if (store_hd && has_data_store_write)
         {
             store_hd->OnUpdateStandbyCkptTs(request->node_group_id(),
-                                            request->ng_term());
+                                            request->ng_term(),
+                                            request->primary_succ_ckpt_ts());
         }
 
         Sharder::Instance().UpdateNodeGroupCkptTs(

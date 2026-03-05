@@ -43,8 +43,9 @@ DEFINE_uint32(eloq_store_worker_num, 1, "EloqStore server worker num.");
 
 DEFINE_string(eloq_store_data_path_list,
               "",
-              "The data paths of the EloqStore (default is "
-              "'{eloq_data_path}/eloq_dss/eloqstore_data').");
+              "EloqStore local store paths in format "
+              "path1,path2,...[,pathN][:weight1,weight2,...,weightN]. "
+              "Weights are optional.");
 DEFINE_uint32(eloq_store_open_files_limit,
               400000,
               "EloqStore maximum open files.");
@@ -166,11 +167,6 @@ DEFINE_bool(
     "EloqStore automatically retrieves cloud credentials from the "
     "environment or instance metadata instead of explicit access/secret "
     "keys.");
-DEFINE_string(eloq_store_store_path_weights,
-              "",
-              "EloqStore optional comma-separated per-store-path weights; "
-              "must match eloq_store_data_path_list in size and disables "
-              "automatic disk-capacity-based weighting.");
 DEFINE_bool(eloq_store_enable_local_standby,
             false,
             "EloqStore enables standby replication mode for local storage; "
@@ -181,15 +177,6 @@ DEFINE_string(eloq_store_standby_master_addr,
               "master or username@host_addr for a remote master; when set, "
               "the store rsyncs from the specified master instead of using "
               "cloud storage.");
-DEFINE_string(
-    eloq_store_standby_master_store_paths,
-    "",
-    "EloqStore comma-separated absolute store paths on the standby master. "
-    "These must match the master store paths selected by the standby LUT.");
-DEFINE_string(eloq_store_standby_master_store_path_weights,
-              "",
-              "EloqStore comma-separated store_path_weights for the standby "
-              "master.");
 
 namespace EloqDS
 {
@@ -267,55 +254,6 @@ inline bool ends_with(const std::string_view &str,
     }
 
     return true;
-}
-
-inline std::string TrimAsciiWhitespace(std::string value)
-{
-    auto is_space = [](unsigned char c) { return std::isspace(c) != 0; };
-    auto begin = std::find_if_not(value.begin(), value.end(), is_space);
-    auto end = std::find_if_not(value.rbegin(), value.rend(), is_space).base();
-    if (begin >= end)
-    {
-        return "";
-    }
-    return std::string(begin, end);
-}
-
-inline void ParseUint64List(const std::string_view input,
-                            std::vector<uint64_t> &values)
-{
-    values.clear();
-    std::string token;
-    std::istringstream token_stream{std::string(input)};
-    while (std::getline(token_stream, token, ','))
-    {
-        token = TrimAsciiWhitespace(token);
-        if (token.empty())
-        {
-            continue;
-        }
-        if (!is_number(token))
-        {
-            LOG(FATAL) << "Invalid uint64 list entry: " << token;
-        }
-        values.emplace_back(std::stoull(token));
-    }
-}
-
-inline void ParseCsvStringList(const std::string_view input,
-                               std::vector<std::string> &values)
-{
-    values.clear();
-    std::string token;
-    std::istringstream token_stream{std::string(input)};
-    while (std::getline(token_stream, token, ','))
-    {
-        token = TrimAsciiWhitespace(token);
-        if (!token.empty())
-        {
-            values.emplace_back(std::move(token));
-        }
-    }
 }
 
 inline bool is_valid_size(const std::string_view &size_str_v)
@@ -502,11 +440,7 @@ EloqStoreConfig::EloqStoreConfig(const INIReader &config_reader,
             : config_reader.GetString("store",
                                       "eloq_store_data_path_list",
                                       FLAGS_eloq_store_data_path_list);
-    if (!storage_path_list.empty())
-    {
-        ParseStoragePath(storage_path_list, eloqstore_configs_.store_path);
-    }
-    else
+    if (storage_path_list.empty())
     {
         eloqstore_configs_.store_path.emplace_back()
             .append(base_data_path)
@@ -517,16 +451,18 @@ EloqStoreConfig::EloqStoreConfig(const INIReader &config_reader,
                 eloqstore_configs_.store_path.back());
         }
     }
-    std::string store_path_weights =
-        !CheckCommandLineFlagIsDefault("eloq_store_store_path_weights")
-            ? FLAGS_eloq_store_store_path_weights
-            : config_reader.GetString("store",
-                                      "eloq_store_store_path_weights",
-                                      FLAGS_eloq_store_store_path_weights);
-    if (!store_path_weights.empty())
+    if (!storage_path_list.empty())
     {
-        ParseUint64List(store_path_weights,
-                        eloqstore_configs_.store_path_weights);
+        std::string error_message;
+        if (!::eloqstore::ParseStorePathListWithWeights(
+                storage_path_list,
+                eloqstore_configs_.store_path,
+                eloqstore_configs_.store_path_weights,
+                &error_message))
+        {
+            LOG(FATAL) << "Invalid eloq_store_data_path_list: "
+                       << storage_path_list << ", error: " << error_message;
+        }
     }
 
     eloqstore_configs_.fd_limit =
@@ -823,31 +759,6 @@ EloqStoreConfig::EloqStoreConfig(const INIReader &config_reader,
             : config_reader.GetString("store",
                                       "eloq_store_standby_master_addr",
                                       FLAGS_eloq_store_standby_master_addr);
-    std::string standby_master_store_paths =
-        !CheckCommandLineFlagIsDefault("eloq_store_standby_master_store_paths")
-            ? FLAGS_eloq_store_standby_master_store_paths
-            : config_reader.GetString(
-                  "store",
-                  "eloq_store_standby_master_store_paths",
-                  FLAGS_eloq_store_standby_master_store_paths);
-    if (!standby_master_store_paths.empty())
-    {
-        ParseCsvStringList(standby_master_store_paths,
-                           eloqstore_configs_.standby_master_store_paths);
-    }
-    std::string standby_master_store_path_weights =
-        !CheckCommandLineFlagIsDefault(
-            "eloq_store_standby_master_store_path_weights")
-            ? FLAGS_eloq_store_standby_master_store_path_weights
-            : config_reader.GetString(
-                  "store",
-                  "eloq_store_standby_master_store_path_weights",
-                  FLAGS_eloq_store_standby_master_store_path_weights);
-    if (!standby_master_store_path_weights.empty())
-    {
-        ParseUint64List(standby_master_store_path_weights,
-                        eloqstore_configs_.standby_master_store_path_weights);
-    }
     eloqstore_configs_.data_page_size =
         !CheckCommandLineFlagIsDefault("eloq_store_data_page_size")
             ? FLAGS_eloq_store_data_page_size
@@ -945,20 +856,6 @@ EloqStoreConfig::EloqStoreConfig(const INIReader &config_reader,
             : config_reader.GetBoolean("store",
                                        "eloq_store_cloud_auto_credentials",
                                        FLAGS_eloq_store_cloud_auto_credentials);
-}
-
-void EloqStoreConfig::ParseStoragePath(
-    const std::string_view storage_path_list,
-    std::vector<std::string> &storage_path_vector)
-{
-    storage_path_vector.clear();
-    const char path_delimiter = ',';
-    std::string token;
-    std::istringstream tokenStream(storage_path_list.data());
-    while (std::getline(tokenStream, token, path_delimiter))
-    {
-        storage_path_vector.emplace_back(token);
-    }
 }
 
 }  // namespace EloqDS

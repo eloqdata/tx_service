@@ -25,6 +25,8 @@
 #include <iomanip>
 #include <iostream>
 #include <string>
+#include <string_view>
+#include <vector>
 namespace EloqDS
 {
 
@@ -129,6 +131,13 @@ public:
     virtual void CreateSnapshotForBackup(
         CreateSnapshotForBackupRequest *req) = 0;
 
+    // Default no-op. EloqStoreDataStore overrides this to delete a standby
+    // snapshot archive by tag.
+    virtual void DeleteStandbySnapshot(std::string_view tag)
+    {
+        (void) tag;
+    }
+
     /**
      * @brief Switch the data store to read only mode.
      */
@@ -143,6 +152,24 @@ public:
      * @brief For cloud mode, sync the data from cloud and reload the data.
      */
     virtual void ReloadDataFromCloud(int64_t term) = 0;
+
+    /**
+     * @brief For local standby mode, sync/reload data from master node.
+     * Default no-op for stores that don't need this path.
+     */
+    virtual void ReloadDataFromMasterNode(int64_t term, uint64_t snapshot_ts)
+    {
+        (void) term;
+        (void) snapshot_ts;
+    }
+
+    virtual void UpdateStandbyMasterStorePaths(
+        const std::vector<std::string> &store_paths,
+        const std::vector<uint64_t> &store_path_weights)
+    {
+        (void) store_paths;
+        (void) store_path_weights;
+    }
 
 protected:
     uint32_t shard_id_;

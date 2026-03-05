@@ -27,6 +27,7 @@
 #include <boost/uuid/uuid.hpp>
 #include <boost/uuid/uuid_generators.hpp>
 #include <boost/uuid/uuid_io.hpp>
+#include <chrono>
 #include <cstdint>
 #include <memory>
 #include <random>
@@ -3624,6 +3625,19 @@ bool DataStoreServiceClient::CreateSnapshotForBackup(
     return !callback_data->HasError();
 }
 
+bool DataStoreServiceClient::CreateSnapshotForStandby(
+    std::vector<std::string> &snapshot_files)
+{
+    const uint64_t snapshot_ts =
+        static_cast<uint64_t>(std::chrono::duration_cast<
+                                  std::chrono::microseconds>(
+                                  std::chrono::system_clock::now()
+                                      .time_since_epoch())
+                                  .count());
+    return CreateSnapshotForBackup(
+        "standby_snapshot", snapshot_files, snapshot_ts);
+}
+
 /**
  * @brief Internal method for creating snapshots for backup operations.
  *
@@ -3859,12 +3873,14 @@ bool DataStoreServiceClient::OnSnapshotReceived(
 }
 
 bool DataStoreServiceClient::OnUpdateStandbyCkptTs(uint32_t ng_id,
-                                                   int64_t ng_term)
+                                                   int64_t ng_term,
+                                                   uint64_t snapshot_ts)
 {
 #ifdef DATA_STORE_TYPE_ELOQDSS_ELOQSTORE
     if (data_store_service_ != nullptr)
     {
-        data_store_service_->OnUpdateStandbyCkptTs(ng_id, ng_term);
+        data_store_service_->OnUpdateStandbyCkptTs(
+            ng_id, ng_term, snapshot_ts);
     }
 #endif
     return true;
