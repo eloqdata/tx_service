@@ -70,10 +70,9 @@ void StoreSlice::StartLoading(FillStoreSliceCc *fill_req,
     assert(pins_ == 0);
     status_ = SliceStatus::BeingLoaded;
 
-    for (uint16_t core_id = 0; core_id < cc_shards.Count(); ++core_id)
-    {
-        cc_shards.EnqueueCcRequest(core_id, fill_req);
-    }
+    uint16_t dest_core = static_cast<uint16_t>(
+        (fill_req->PartitionId() & 0x3FF) % cc_shards.Count());
+    cc_shards.EnqueueToCcShard(dest_core, fill_req);
 }
 
 void StoreSlice::CommitLoading(StoreRange &range, uint32_t slice_size)

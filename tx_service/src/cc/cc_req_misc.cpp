@@ -590,14 +590,9 @@ void FillStoreSliceCc::Reset(const TableName &table_name,
     cc_ng_id_ = cc_ng_id;
     cc_ng_term_ = cc_ng_term;
     force_load_ = force_load;
-    finish_cnt_ = 0;
-    core_cnt_ = cc_shards.Count();
 
-    next_idxs_.clear();
-    next_idxs_.resize(cc_shards.Count(), 0);
-
-    partitioned_slice_data_.clear();
-    partitioned_slice_data_.resize(cc_shards.Count());
+    next_idx_ = 0;
+    slice_data_.clear();
 
     range_slice_ = slice;
     range_ = range;
@@ -619,7 +614,7 @@ void FillStoreSliceCc::SetKvFinish(bool success)
 {
     CODE_FAULT_INJECTOR("LoadRangeSliceRequest_SetFinish_Error", {
         success = false;
-        partitioned_slice_data_.clear();
+        slice_data_.clear();
         slice_size_ = 0;
         snapshot_ts_ = 0;
     });
@@ -656,7 +651,8 @@ bool FillStoreSliceCc::Execute(CcShard &ccs)
     int64_t cc_ng_term = Sharder::Instance().LeaderTerm(cc_ng_id_);
     if (std::max(cc_ng_candid_term, cc_ng_term) != cc_ng_term_)
     {
-        return SetError(CcErrorCode::NG_TERM_CHANGED);
+        SetError(CcErrorCode::NG_TERM_CHANGED);
+        return true;
     }
 
     CcMap *ccm = ccs.GetCcm(*table_name_, cc_ng_id_);
@@ -705,106 +701,65 @@ void FillStoreSliceCc::AddDataItem(
         rec_cnt_++;
     }
 
-    size_t hash = key.Hash();
-    // Uses the lower 10 bits of the hash code to shard the key across
-    // CPU cores at this node.
-    uint16_t core_code = hash & 0x3FF;
-    uint16_t core_id = core_code % core_cnt_;
-
-    partitioned_slice_data_[core_id].emplace_back(
+    slice_data_.emplace_back(
         std::move(key), std::move(record), version_ts, is_deleted);
 }
 
-bool FillStoreSliceCc::SetFinish(CcShard *cc_shard)
+void FillStoreSliceCc::SetFinish(CcShard *cc_shard)
 {
-    bool finish_all = false;
-    CcErrorCode err_code;
+    if (err_code_ == CcErrorCode::NO_ERROR)
     {
-        std::lock_guard<std::mutex> lk(mux_);
-        ++finish_cnt_;
+        bool init_key_cache =
+            txservice_enable_key_cache && table_name_->IsBase();
+        // Cache  the pointer since FillStoreSliceCc will be freed after
+        // CommitLoading.
 
-        if (finish_cnt_ == core_cnt_)
+        const TableName *tbl_name = table_name_;
+        auto cc_ng_id = cc_ng_id_;
+        auto cc_ng_term = cc_ng_term_;
+        if (init_key_cache && rec_cnt_ > 0)
         {
-            finish_all = true;
-            err_code = err_code_;
-        }
-    }
+            LocalCcShards *shards = Sharder::Instance().GetLocalCcShards();
+            size_t estimate_rec_size = UINT64_MAX;
 
-    if (finish_all)
-    {
-        if (err_code == CcErrorCode::NO_ERROR)
-        {
-            bool init_key_cache =
-                txservice_enable_key_cache && table_name_->IsBase();
-            // Cache  the pointer since FillStoreSliceCc will be freed after
-            // CommitLoading.
-
-            const TableName *tbl_name = table_name_;
-            auto cc_ng_id = cc_ng_id_;
-            auto cc_ng_term = cc_ng_term_;
-            if (init_key_cache && rec_cnt_ > 0)
+            // Get estiamte record size for key cache
+            auto schema = shards->GetSharedTableSchema(
+                TableName(table_name_->GetBaseTableNameSV(),
+                          TableType::Primary,
+                          table_name_->Engine()),
+                cc_ng_id_);
+            auto stats = schema->StatisticsObject();
+            assert(slice_size_ > 0);
+            estimate_rec_size = slice_size_ / rec_cnt_;
+            if (stats)
             {
-                LocalCcShards *shards = Sharder::Instance().GetLocalCcShards();
-                size_t estimate_rec_size = UINT64_MAX;
-
-                // Get estiamte record size for key cache
-                auto schema = shards->GetSharedTableSchema(
-                    TableName(table_name_->GetBaseTableNameSV(),
-                              TableType::Primary,
-                              table_name_->Engine()),
-                    cc_ng_id_);
-                auto stats = schema->StatisticsObject();
-                assert(slice_size_ > 0);
-                estimate_rec_size = slice_size_ / rec_cnt_;
-                if (stats)
-                {
-                    // Update estimate size in table stats with the loaded
-                    // slice.
-                    stats->SetEstimateRecordSize(estimate_rec_size);
-                }
-            }
-            range_slice_->CommitLoading(*range_, slice_size_);
-            if (init_key_cache)
-            {
-                range_slice_->InitKeyCache(
-                    cc_shard, range_, tbl_name, cc_ng_id, cc_ng_term);
+                // Update estimate size in table stats with the loaded
+                // slice.
+                stats->SetEstimateRecordSize(estimate_rec_size);
             }
         }
-        else
+        range_slice_->CommitLoading(*range_, slice_size_);
+        if (init_key_cache)
         {
-            range_slice_->SetLoadingError(*range_, err_code);
-        }
-
-        next_idxs_.clear();
-        partitioned_slice_data_.clear();
-    }
-
-    return finish_all;
-}
-
-bool FillStoreSliceCc::SetError(CcErrorCode err_code)
-{
-    bool finish_all = false;
-    {
-        std::lock_guard<std::mutex> lk(mux_);
-        ++finish_cnt_;
-        err_code_ = err_code;
-
-        if (finish_cnt_ == core_cnt_)
-        {
-            finish_all = true;
+            range_slice_->InitKeyCache(
+                cc_shard, range_, tbl_name, cc_ng_id, cc_ng_term);
         }
     }
-
-    if (finish_all)
+    else
     {
         range_slice_->SetLoadingError(*range_, err_code_);
-
-        next_idxs_.clear();
-        partitioned_slice_data_.clear();
     }
 
-    return finish_all;
+    next_idx_ = 0;
+    slice_data_.clear();
+}
+
+void FillStoreSliceCc::SetError(CcErrorCode err_code)
+{
+    err_code_ = err_code;
+    range_slice_->SetLoadingError(*range_, err_code_);
+    next_idx_ = 0;
+    slice_data_.clear();
 }
 
 void FillStoreSliceCc::StartFilling()
@@ -818,8 +773,14 @@ void FillStoreSliceCc::TerminateFilling()
     // The slice has not been filled into memory. So, the out-of-memory flag is
     // false.
     range_slice_->SetLoadingError(*range_, CcErrorCode::DATA_STORE_ERR);
-    next_idxs_.clear();
-    partitioned_slice_data_.clear();
+    next_idx_ = 0;
+    slice_data_.clear();
+}
+
+int32_t FillStoreSliceCc::PartitionId() const
+{
+    assert(range_ != nullptr);
+    return range_->PartitionId();
 }
 
 FetchRecordCc::FetchRecordCc(const TableName *tbl_name,
