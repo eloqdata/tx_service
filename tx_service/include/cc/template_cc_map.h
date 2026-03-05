@@ -3596,10 +3596,6 @@ public:
 
         if (req.SliceId().Slice() == nullptr)
         {
-            // The scan slice request is first dispatched to one core, which
-            // pins the slice in memory. After the slice is pinned, the request
-            // is dispatched to other cores to scan in parallel. The slice is
-            // unpinned by the last core finishing the scan batch.
             RangeSliceOpStatus pin_status = RangeSliceOpStatus::NotPinned;
             uint32_t max_pin_cnt = req.PrefetchSize();
             const StoreSlice *last_pinned_slice;
@@ -4072,90 +4068,39 @@ public:
         }
 
         RangeScanSliceResult &slice_result = hd_res->Value();
-        auto [final_end_tx_key, end_finalized] = slice_result.PeekLastKey();
         if (req.Direction() == ScanDirection::Forward)
         {
             const TemplateStoreSlice<KeyT> *last_slice =
                 static_cast<const TemplateStoreSlice<KeyT> *>(
                     req.LastPinnedSlice());
 
-            // The scan at core 0 sets the scan's end key. By default, the
-            // scan's end is the exclusive end of the slice or the request's
-            // specified end key, whichever is smaller. In case keys in the
-            // slice are too many to fit into the scan cache, the key right
-            // after the last scanned tuple at core 0 becomes the exclusive end
-            // of scans at other cores. In such a case, it is mandatory that all
-            // keys smaller than the end key at other cores are returned in this
-            // batch. So, scans at other cores may slightly exceed the scan
-            // cache's capacity.
-
+            // By default, the scan's end is the exclusive end of the slice or
+            // the request's specified end key, whichever is smaller. In case
+            // keys in the slice are too many to fit into the scan cache, the
+            // key right after the last scanned tuple becomes the exclusive end
+            // of scans.
             const KeyT *initial_end = nullptr;
             bool init_end_inclusive = false;
 
-            // Given the scan batch's final end key, deduces the local scan's
-            // end and inclusiveness.
-            auto deduce_scan_end =
-                [](const KeyT *batch_end_key,
-                   const KeyT *req_end_key,
-                   bool req_inclusive) -> std::pair<const KeyT *, bool>
+            // Takes the smaller of the slice's last key and the request's end
+            // key as the local scan's initial end.
+            const KeyT *slice_end = last_slice->EndKey();
+            assert(slice_end != nullptr);
+
+            // If the request specifies the end key and it falls into the
+            // slice, initializes the local scan's end to the request's end
+            // key. Or, the scan end is the slice's end.
+            if (req_end_key != nullptr &&
+                (*req_end_key < *slice_end ||
+                 (*req_end_key == *slice_end && !req.EndInclusive())))
             {
-                const KeyT *end = nullptr;
-                bool inclusive = false;
-
-                assert(batch_end_key != nullptr);
-                // If the request specifies the end key and it is the scan
-                // batch's end key, the scan's inclusiveness is determined by
-                // the request. Or, the scan batch's end must be the exclusive
-                // end of a slice or positive infinity.
-                if (batch_end_key == req_end_key)
-                {
-                    end = req_end_key;
-                    inclusive = req_inclusive;
-                }
-                else
-                {
-                    end = batch_end_key;
-                    inclusive = false;
-                }
-
-                return {end, inclusive};
-            };
-
-            if (!end_finalized)
-            {
-                // This scan batch's end key has not been set. Takes the smaller
-                // of the slice's last key and the request's end key as the
-                // local scan's initial end. The initial end may be modified, if
-                // another core finishes earlier and finalizes the batch's end
-                // before this core. The final end may be smaller or greater
-                // than the initial end.
-                const KeyT *slice_end = last_slice->EndKey();
-                assert(slice_end != nullptr);
-
-                // If the request specifies the end key and it falls into the
-                // slice, initializes the local scan's end to the request's end
-                // key. Or, the scan end is the slice's end.
-                if (req_end_key != nullptr &&
-                    (*req_end_key < *slice_end ||
-                     (*req_end_key == *slice_end && !req.EndInclusive())))
-                {
-                    initial_end = req_end_key;
-                    init_end_inclusive = req.EndInclusive();
-                }
-                else
-                {
-                    initial_end = slice_end;
-                    init_end_inclusive = false;
-                }
+                initial_end = req_end_key;
+                init_end_inclusive = req.EndInclusive();
             }
             else
             {
-                // This scan batch's end key has been finalized by one of the
-                // cores. Deduces the local scan's end and inclusiveness.
-                std::tie(initial_end, init_end_inclusive) =
-                    deduce_scan_end(final_end_tx_key->GetKey<KeyT>(),
-                                    req_end_key,
-                                    req.EndInclusive());
+                initial_end = slice_end;
+                init_end_inclusive = false;
             }
 
             auto scan_batch_func =
@@ -4182,12 +4127,11 @@ public:
                 return {scan_ret, err_code};
             };
 
-            auto scan_loop_func = [this, &scan_batch_func, &is_cache_full](
-                                      Iterator &scan_ccm_it,
-                                      const KeyT &end_key,
-                                      bool inclusive,
-                                      bool end_finalized)
-                -> std::pair<ScanReturnType, CcErrorCode>
+            auto scan_loop_func =
+                [this, &scan_batch_func, &is_cache_full](
+                    Iterator &scan_ccm_it,
+                    const KeyT &end_key,
+                    bool inclusive) -> std::pair<ScanReturnType, CcErrorCode>
             {
                 ScanReturnType scan_ret = ScanReturnType::Success;
                 CcErrorCode err_code = CcErrorCode::NO_ERROR;
@@ -4239,7 +4183,7 @@ public:
                             scan_ccm_it = End();
                             ccp = nullptr;
                         }
-                        else if (!end_finalized && is_cache_full())
+                        else if (is_cache_full())
                         {
                             scan_ccm_it =
                                 Iterator(ccp->next_page_, 0, &neg_inf_);
@@ -4261,8 +4205,8 @@ public:
                 return {scan_ret, err_code};
             };
 
-            auto [scan_ret, err] = scan_loop_func(
-                scan_ccm_it, *initial_end, init_end_inclusive, end_finalized);
+            auto [scan_ret, err] =
+                scan_loop_func(scan_ccm_it, *initial_end, init_end_inclusive);
             switch (scan_ret)
             {
             case ScanReturnType::Blocked:
@@ -4285,220 +4229,62 @@ public:
                 break;
             }
 
-            // If the end of this scan batch is not finalized when the local
-            // scan at this core started, tries to set the batch's end using the
-            // local end. If another core has finalized the batch's end, the
-            // scan at this core may need to be adjusted: if the batch's final
-            // end is less than the end at this core, keys after the final end
-            // needs to be removed from the local scan cache; if the batch's
-            // final end is greater than the end of this core, keys smaller than
-            // the batch's final end but greater than the local end need to be
-            // included in the local scan cache.
-            if (!end_finalized)
+            const KeyT *local_end = nullptr;
+            SlicePosition slice_position;
+
+            // scan_ccm_it points to the entry after the last scanned tuple.
+            // If the slice ends with positive infinity and has been fully
+            // scanned, scan_ccm_it would point to positive infinity.
+            auto pos_inf_it = End();
+            if (scan_ccm_it != pos_inf_it &&
+                (*scan_ccm_it->first < *initial_end ||
+                 (init_end_inclusive && *scan_ccm_it->first == *initial_end)))
             {
-                const KeyT *local_end = nullptr;
-                SlicePosition slice_position;
-
-                // scan_ccm_it points to the entry after the last scanned tuple.
-                // If the slice ends with positive infinity and has been fully
-                // scanned, scan_ccm_it would point to positive infinity.
-                auto pos_inf_it = End();
-                if (scan_ccm_it != pos_inf_it &&
-                    (*scan_ccm_it->first < *initial_end ||
-                     (init_end_inclusive &&
-                      *scan_ccm_it->first == *initial_end)))
+                // The slice is too large. The scan has not fully scanned
+                // the slice, before reaching the cache's size limit.
+                // Pretends the slice's exclusive end to be the key after
+                // the last scanned tuple, from which the next scan batch
+                // resume.
+                local_end = scan_ccm_it->first;
+                slice_position = SlicePosition::Middle;
+            }
+            else
+            {
+                // The slice has been fully scanned. If the request
+                // specifies the end key, which falls into the slice, given
+                // that the slice has been fully scanned, no future scan
+                // batches are needed. So, we pretend that the scan has
+                // reached the last slice ending with positive infinity.
+                // The calling tx will terminate the scan.
+                if (initial_end == KeyT::PositiveInfinity() ||
+                    req_end_key == initial_end)
                 {
-                    // The slice is too large. The scan has not fully scanned
-                    // the slice, before reaching the cache's size limit.
-                    // Pretends the slice's exclusive end to be the key after
-                    // the last scanned tuple, from which the next scan batch
-                    // resume.
-                    local_end = scan_ccm_it->first;
-                    slice_position = SlicePosition::Middle;
+                    local_end = initial_end;
+                    slice_position = SlicePosition::LastSlice;
                 }
                 else
                 {
-                    // The slice has been fully scanned. If the request
-                    // specifies the end key, which falls into the slice, given
-                    // that the slice has been fully scanned, no future scan
-                    // batches are needed. So, we pretend that the scan has
-                    // reached the last slice ending with positive infinity.
-                    // The calling tx will terminate the scan.
-                    if (initial_end == KeyT::PositiveInfinity() ||
-                        req_end_key == initial_end)
+                    // The local scan end must be the end of the slice.
+                    local_end = initial_end;
+                    const TemplateStoreRange<KeyT> *range =
+                        static_cast<const TemplateStoreRange<KeyT> *>(
+                            req.SliceId().Range());
+                    const KeyT *range_end = range->RangeEndKey();
+                    if (range_end != nullptr && *initial_end == *range_end)
                     {
-                        local_end = initial_end;
-                        slice_position = SlicePosition::LastSlice;
+                        slice_position = SlicePosition::LastSliceInRange;
                     }
                     else
                     {
-                        // The local scan end must be the end of the slice.
-                        local_end = initial_end;
-                        const TemplateStoreRange<KeyT> *range =
-                            static_cast<const TemplateStoreRange<KeyT> *>(
-                                req.SliceId().Range());
-                        const KeyT *range_end = range->RangeEndKey();
-                        if (range_end != nullptr && *initial_end == *range_end)
-                        {
-                            slice_position = SlicePosition::LastSliceInRange;
-                        }
-                        else
-                        {
-                            slice_position = SlicePosition::Middle;
-                        }
-                    }
-                }
-
-                auto [batch_end, set_success] =
-                    slice_result.UpdateLastKey(local_end, slice_position);
-
-                if (set_success)
-                {
-                    req.SetRangeCcNgTerm(ng_term);
-                }
-                else
-                {
-                    // The local scan tries to set the scan batch's end, but the
-                    // scan at another core have set the batch's end. The scan
-                    // results need to be adjusted, if the results include the
-                    // keys greater than the batch's end, or the results miss
-                    // some keys smaller than the batch's end.
-                    auto [end_key, end_inclusive] = deduce_scan_end(
-                        batch_end, req_end_key, req.EndInclusive());
-                    size_t trailing_cnt = 0;
-
-                    // Excludes keys from the scan cache greater than the
-                    // batch's end.
-                    if (req.IsLocal())
-                    {
-                        while (scan_cache->Size() > 0)
-                        {
-                            // If req.is_require_keys_ is false, the KeyT object
-                            // in scan cache is invalid, so, should use the cce,
-                            // which is valid in any situation, to get the
-                            // corresponding key.
-                            auto last_cce =
-                                reinterpret_cast<CcEntry<KeyT,
-                                                         ValueT,
-                                                         VersionedRecord,
-                                                         RangePartitioned> *>(
-                                    scan_cache->Last()->cce_ptr_);
-                            while (scan_ccm_it->second != last_cce)
-                            {
-                                --scan_ccm_it;
-                                assert(scan_ccm_it != Begin());
-                            }
-                            const KeyT *last_key =
-                                static_cast<const KeyT *>(scan_ccm_it->first);
-                            if (*end_key < *last_key ||
-                                (*end_key == *last_key && !end_inclusive))
-                            {
-                                ++trailing_cnt;
-                                // Remove cce from scan cache, but keep possible
-                                // locks, because those locks might acquired by
-                                // other ScanSliceCc/ReadCc from the
-                                // transaction.
-                                scan_cache->RemoveLast();
-                            }
-                            else
-                            {
-                                // Reset iterator to the key after the last
-                                // scanned tuple since we might need to continue
-                                // scanning if trailing_cnt == 0.
-                                ++scan_ccm_it;
-                                break;
-                            }
-                        }
-                    }
-                    else
-                    {
-                        while (remote_scan_cache->Size() > 0)
-                        {
-                            // Cc entry pointers here are always valid since
-                            // the slices are still pinned so the cce cannot
-                            // be kicked from memory regardless of the lock
-                            // type.
-                            auto last_remote_cce =
-                                reinterpret_cast<CcEntry<KeyT,
-                                                         ValueT,
-                                                         VersionedRecord,
-                                                         RangePartitioned> *>(
-                                    remote_scan_cache->LastCce());
-                            while (scan_ccm_it->second != last_remote_cce)
-                            {
-                                // As long as remote scan cache is not empty,
-                                // iterator should not reach neg inf.
-                                --scan_ccm_it;
-                                assert(scan_ccm_it != Begin());
-                            }
-                            const KeyT *last_key =
-                                static_cast<const KeyT *>(scan_ccm_it->first);
-                            if (*end_key < *last_key ||
-                                (*end_key == *last_key && !end_inclusive))
-                            {
-                                trailing_cnt++;
-                                // Remove cce from scan cache, but keep possible
-                                // locks, because those locks might acquired by
-                                // other ScanSliceCc/ReadCc from the
-                                // transaction.
-                            }
-                            else
-                            {
-                                // Reset iterator to the key after the last
-                                // scanned tuple since we might need to continue
-                                // scanning if trailing_cnt == 0.
-                                ++scan_ccm_it;
-                                break;
-                            }
-                        }
-                    }
-
-                    // If no key is removed from the scan cache, it's possible
-                    // that the local scan may miss keys smaller than the
-                    // batch's end. Re-scans the cc map using the batch's end.
-                    if (trailing_cnt == 0)
-                    {
-                        auto [scan_ret, err] = scan_loop_func(
-                            scan_ccm_it, *end_key, end_inclusive, true);
-                        switch (scan_ret)
-                        {
-                        case ScanReturnType::Blocked:
-                            return false;
-                        case ScanReturnType::Error:
-                            if (is_read_snapshot &&
-                                req.WaitForSnapshotCnt() > 0)
-                            {
-                                req.SetIsWaitForSnapshot();
-                                req.DeferSetError(err);
-                                return false;
-                            }
-
-                            req.UnpinSlices();
-                            req.SetError(err);
-                            return true;
-                        case ScanReturnType::Yield:
-                            shard_->Enqueue(shard_->core_id_, &req);
-                            return false;
-                        default:
-                            break;
-                        }
+                        slice_position = SlicePosition::Middle;
                     }
                 }
             }
 
-            // Sets the iterator to the last cce, which may need to be pinned to
-            // resume the next scan batch.
-            if (CcEntry<KeyT, ValueT, VersionedRecord, RangePartitioned>
-                    *last_cce = last_cce_of_cache();
-                last_cce)
-            {
-                while (scan_ccm_it->second != last_cce)
-                {
-                    --scan_ccm_it;
-                }
-            }
+            slice_result.SetLastKey(local_end, slice_position);
+            req.SetRangeCcNgTerm(ng_term);
         }
-        else
+        else  // Backward scan
         {
             const TemplateStoreSlice<KeyT> *last_slice =
                 static_cast<const TemplateStoreSlice<KeyT> *>(
@@ -4507,53 +4293,19 @@ public:
             const KeyT *initial_end = nullptr;
             bool init_end_inclusive = false;
 
-            auto deduce_scan_end =
-                [](const KeyT *batch_end_key,
-                   const KeyT *req_end_key,
-                   bool req_inclusive) -> std::pair<const KeyT *, bool>
+            const KeyT *slice_begin = last_slice->StartKey();
+            assert(slice_begin != nullptr);
+
+            if (req_end_key != nullptr &&
+                (*slice_begin < *req_end_key || *slice_begin == *req_end_key))
             {
-                const KeyT *end = nullptr;
-                bool inclusive = false;
-
-                if (batch_end_key == req_end_key)
-                {
-                    end = req_end_key;
-                    inclusive = req_inclusive;
-                }
-                else
-                {
-                    end = batch_end_key;
-                    inclusive = true;
-                }
-
-                return {end, inclusive};
-            };
-
-            if (!end_finalized)
-            {
-                const KeyT *slice_begin = last_slice->StartKey();
-                assert(slice_begin != nullptr);
-
-                if (req_end_key != nullptr && (*slice_begin < *req_end_key ||
-                                               *slice_begin == *req_end_key))
-                {
-                    initial_end = req_end_key;
-                    init_end_inclusive = req.EndInclusive();
-                }
-                else
-                {
-                    initial_end = slice_begin;
-                    init_end_inclusive = true;
-                }
+                initial_end = req_end_key;
+                init_end_inclusive = req.EndInclusive();
             }
             else
             {
-                // This scan batch's end key has been finalized by one of the
-                // cores. Deduces the local scan's end and inclusiveness.
-                std::tie(initial_end, init_end_inclusive) =
-                    deduce_scan_end(final_end_tx_key->GetKey<KeyT>(),
-                                    req_end_key,
-                                    req.EndInclusive());
+                initial_end = slice_begin;
+                init_end_inclusive = true;
             }
 
             auto scan_batch_func =
@@ -4580,12 +4332,11 @@ public:
                 return {scan_ret, err_code};
             };
 
-            auto scan_loop_func = [this, &scan_batch_func, &is_cache_full](
-                                      Iterator &scan_ccm_it,
-                                      const KeyT &end_key,
-                                      bool inclusive,
-                                      bool end_finalized)
-                -> std::pair<ScanReturnType, CcErrorCode>
+            auto scan_loop_func =
+                [this, &scan_batch_func, &is_cache_full](
+                    Iterator &scan_ccm_it,
+                    const KeyT &end_key,
+                    bool inclusive) -> std::pair<ScanReturnType, CcErrorCode>
             {
                 ScanReturnType scan_ret = ScanReturnType::Success;
                 CcErrorCode err_code = CcErrorCode::NO_ERROR;
@@ -4640,7 +4391,7 @@ public:
                             scan_ccm_it = Begin();
                             ccp = nullptr;
                         }
-                        else if (!end_finalized && is_cache_full())
+                        else if (is_cache_full())
                         {
                             scan_ccm_it = Iterator(ccp->prev_page_,
                                                    ccp->prev_page_->Size() - 1,
@@ -4663,8 +4414,8 @@ public:
                 return {scan_ret, err_code};
             };
 
-            auto [scan_ret, err] = scan_loop_func(
-                scan_ccm_it, *initial_end, init_end_inclusive, end_finalized);
+            auto [scan_ret, err] =
+                scan_loop_func(scan_ccm_it, *initial_end, init_end_inclusive);
             switch (scan_ret)
             {
             case ScanReturnType::Blocked:
@@ -4687,218 +4438,60 @@ public:
                 break;
             }
 
-            // If the end of this scan batch is not finalized when the local
-            // scan at this core started, tries to set the batch's end using the
-            // local end. If another core has finalized the batch's end, the
-            // scan at this core may need to be adjusted: if the batch's final
-            // end is less than the end at this core, keys before the final end
-            // needs to be removed from the local scan cache; if the batch's
-            // final end is smaller than the end of this core, keys greater than
-            // the batch's final end but less than the local end need to be
-            // included in the local scan cache.
+            const KeyT *local_end = nullptr;
+            SlicePosition slice_position;
 
-            if (!end_finalized)
+            // scan_ccm_it points to the entry before the last scanned
+            // tuple.
+            auto neg_inf_it = Begin();
+            if (scan_ccm_it != neg_inf_it &&
+                (*initial_end < *scan_ccm_it->first ||
+                 (init_end_inclusive && *scan_ccm_it->first == *initial_end)))
             {
-                const KeyT *local_end = nullptr;
-                SlicePosition slice_position;
-
-                // scan_ccm_it points to the entry before the last scanned
-                // tuple.
-                auto neg_inf_it = Begin();
-                if (scan_ccm_it != neg_inf_it &&
-                    (*initial_end < *scan_ccm_it->first ||
-                     (init_end_inclusive &&
-                      *scan_ccm_it->first == *initial_end)))
+                // The slice is too large. The scan has not fully scanned
+                // the slice, before reaching the cache's size limit.
+                // Pretends the slice's inclusive start to be the last
+                // scanned key, from which the next scan batch resumes.
+                ++scan_ccm_it;
+                local_end = scan_ccm_it->first;
+                slice_position = SlicePosition::Middle;
+            }
+            else
+            {
+                // The slice has been fully scanned. If the request
+                // specifies the end key, which falls into the slice, given
+                // that the slice has been fully scanned, no future scan
+                // batches are needed. So, we pretend that the scan has
+                // reached the first slice (starting with negative
+                // infinity). The calling tx will terminate the scan.
+                if (initial_end == KeyT::NegativeInfinity() ||
+                    req_end_key == initial_end)
                 {
-                    // The slice is too large. The scan has not fully scanned
-                    // the slice, before reaching the cache's size limit.
-                    // Pretends the slice's inclusive start to be the last
-                    // scanned key, from which the next scan batch resumes.
-                    ++scan_ccm_it;
-                    local_end = scan_ccm_it->first;
-                    slice_position = SlicePosition::Middle;
+                    local_end = initial_end;
+                    slice_position = SlicePosition::FirstSlice;
                 }
                 else
                 {
-                    // The slice has been fully scanned. If the request
-                    // specifies the end key, which falls into the slice, given
-                    // that the slice has been fully scanned, no future scan
-                    // batches are needed. So, we pretend that the scan has
-                    // reached the first slice (starting with negative
-                    // infinity). The calling tx will terminate the scan.
-                    if (initial_end == KeyT::NegativeInfinity() ||
-                        req_end_key == initial_end)
+                    // The local scan end must be the start of the slice.
+                    local_end = initial_end;
+
+                    const TemplateStoreRange<KeyT> *range =
+                        static_cast<const TemplateStoreRange<KeyT> *>(
+                            req.SliceId().Range());
+                    const KeyT *range_start = range->RangeStartKey();
+                    if (range_start != nullptr && *initial_end == *range_start)
                     {
-                        local_end = initial_end;
-                        slice_position = SlicePosition::FirstSlice;
+                        slice_position = SlicePosition::FirstSliceInRange;
                     }
                     else
                     {
-                        // The local scan end must be the start of the slice.
-                        local_end = initial_end;
-
-                        const TemplateStoreRange<KeyT> *range =
-                            static_cast<const TemplateStoreRange<KeyT> *>(
-                                req.SliceId().Range());
-                        const KeyT *range_start = range->RangeStartKey();
-                        if (range_start != nullptr &&
-                            *initial_end == *range_start)
-                        {
-                            slice_position = SlicePosition::FirstSliceInRange;
-                        }
-                        else
-                        {
-                            slice_position = SlicePosition::Middle;
-                        }
-                    }
-                }
-
-                auto [batch_end, set_success] =
-                    slice_result.UpdateLastKey(local_end, slice_position);
-
-                if (set_success)
-                {
-                    req.SetRangeCcNgTerm(ng_term);
-                }
-                else
-                {
-                    // The local scan tries to set the scan batch's end, but the
-                    // scan at another core have set the batch's end. The scan
-                    // results need to be adjusted, if the results include the
-                    // keys smaller than the batch's end, or the results miss
-                    // some keys greater than the batch's end.
-                    auto [end_key, end_inclusive] = deduce_scan_end(
-                        batch_end, req_end_key, req.EndInclusive());
-                    size_t trailing_cnt = 0;
-
-                    // Excludes keys from the scan cache smaller than the
-                    // batch's end.
-                    if (req.IsLocal())
-                    {
-                        while (scan_cache->Size() > 0)
-                        {
-                            // If req.is_require_keys_ is false, the KeyT object
-                            // in scan cache is invalid, so, should use the cce,
-                            // which is valid in any situation, to get the
-                            // corresponding key.
-                            CcEntry<KeyT,
-                                    ValueT,
-                                    VersionedRecord,
-                                    RangePartitioned> *last_cce =
-                                reinterpret_cast<CcEntry<KeyT,
-                                                         ValueT,
-                                                         VersionedRecord,
-                                                         RangePartitioned> *>(
-                                    scan_cache->Last()->cce_ptr_);
-                            while (scan_ccm_it->second != last_cce)
-                            {
-                                ++scan_ccm_it;
-                                assert(scan_ccm_it != End());
-                            }
-                            const KeyT *last_key =
-                                static_cast<const KeyT *>(scan_ccm_it->first);
-                            if (*last_key < *end_key ||
-                                (*last_key == *end_key && !end_inclusive))
-                            {
-                                ++trailing_cnt;
-                                scan_cache->RemoveLast();
-                            }
-                            else
-                            {
-                                // Reset iterator to the key after the last
-                                // scanned tuple since we might need to continue
-                                // scanning if trailing_cnt == 0.
-                                --scan_ccm_it;
-                                break;
-                            }
-                        }
-                    }
-                    else
-                    {
-                        while (remote_scan_cache->Size() > 0)
-                        {
-                            // Cc entry pointers here are always valid since
-                            // the slices are still pinned so the cce cannot
-                            // be kicked from memory regardless of the lock
-                            // type.
-                            CcEntry<KeyT,
-                                    ValueT,
-                                    VersionedRecord,
-                                    RangePartitioned> *last_remote_cce =
-                                reinterpret_cast<CcEntry<KeyT,
-                                                         ValueT,
-                                                         VersionedRecord,
-                                                         RangePartitioned> *>(
-                                    remote_scan_cache->LastCce());
-                            while (scan_ccm_it->second != last_remote_cce)
-                            {
-                                // As long as remote scan cache is not empty,
-                                // iterator should not reach pos inf.
-                                ++scan_ccm_it;
-                                assert(scan_ccm_it != End());
-                            }
-                            const KeyT *last_key =
-                                static_cast<const KeyT *>(scan_ccm_it->first);
-                            if (*last_key < *end_key ||
-                                (*last_key == *end_key && !end_inclusive))
-                            {
-                                trailing_cnt++;
-                            }
-                            else
-                            {
-                                // Reset iterator to the key after the last
-                                // scanned tuple since we might need to continue
-                                // scanning if trailing_cnt == 0.
-                                --scan_ccm_it;
-                                break;
-                            }
-                        }
-                    }
-
-                    // If no key is removed from the scan cache, it's possible
-                    // that the local scan may miss keys greater than the
-                    // batch's end. Re-scans the cc map using the batch's end.
-                    if (trailing_cnt == 0)
-                    {
-                        auto [scan_ret, err] = scan_loop_func(
-                            scan_ccm_it, *end_key, end_inclusive, true);
-                        switch (scan_ret)
-                        {
-                        case ScanReturnType::Blocked:
-                            return false;
-                        case ScanReturnType::Error:
-                            if (is_read_snapshot &&
-                                req.WaitForSnapshotCnt() > 0)
-                            {
-                                req.SetIsWaitForSnapshot();
-                                req.DeferSetError(err);
-                                return false;
-                            }
-
-                            req.UnpinSlices();
-                            req.SetError(err);
-                            return true;
-                        case ScanReturnType::Yield:
-                            shard_->Enqueue(shard_->core_id_, &req);
-                            return false;
-                        default:
-                            break;
-                        }
+                        slice_position = SlicePosition::Middle;
                     }
                 }
             }
 
-            // Sets the iterator to the last cce, which may need to be pinned to
-            // resume the next scan batch.
-            if (CcEntry<KeyT, ValueT, VersionedRecord, RangePartitioned>
-                    *last_cce = last_cce_of_cache();
-                last_cce)
-            {
-                while (scan_ccm_it->second != last_cce)
-                {
-                    ++scan_ccm_it;
-                }
-            }
+            slice_result.SetLastKey(local_end, slice_position);
+            req.SetRangeCcNgTerm(ng_term);
         }
 
         if (slice_result.slice_position_ == SlicePosition::Middle)

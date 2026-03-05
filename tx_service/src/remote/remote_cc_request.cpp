@@ -1359,8 +1359,8 @@ txservice::remote::RemoteScanSlice::RemoteScanSlice()
 
         const RangeScanSliceResult &slice_result = cc_res_.Value();
         output_msg_.clear_last_key();
-        auto [last_key, key_set] = slice_result.PeekLastKey();
-        assert(key_set || cc_res_.IsError());
+        const TxKey *last_key = slice_result.LastKey();
+        assert(last_key != nullptr || cc_res_.IsError());
         // Only sends back the last key if this scan batch is not the last. The
         // next scan batch will use this last key as the beginning of the next
         // batch.
