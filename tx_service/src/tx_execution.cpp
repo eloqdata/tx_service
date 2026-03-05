@@ -1963,13 +1963,14 @@ void TransactionExecution::Process(ReadOperation &read)
                     // error to the tx read request.
                     assert(!lock_range_bucket_result_.IsError());
 
-                    // Uses the lower 10 bits of the key's hash code to shard
-                    // the key across CPU cores in a cc node.
-                    uint32_t residual = key.Hash() & 0x3FF;
+                    // Uses the partition id to shard the key across CPU cores
+                    // in a cc node.
+                    partition_id = range_rec_.GetRangeInfo()->PartitionId();
+                    uint32_t residual =
+                        static_cast<uint32_t>((partition_id & 0x3FF));
                     NodeGroupId range_ng =
                         range_rec_.GetRangeOwnerNg()->BucketOwner();
                     key_shard_code = range_ng << 10 | residual;
-                    partition_id = range_rec_.GetRangeInfo()->PartitionId();
                 }
             }
             else
@@ -7728,17 +7729,19 @@ void TransactionExecution::Process(BatchReadOperation &batch_read_op)
         TxRecord &rec = *read_batch[idx].record_;
 
         uint32_t sharding_code = 0;
-        size_t key_hash = key.Hash();
-        sharding_code =
-            read_batch[idx].cce_addr_.NodeGroupId() << 10 | (key_hash & 0x3FF);
         int32_t partition_id = -1;
         if (table_name.IsHashPartitioned())
         {
+            size_t key_hash = key.Hash();
+            sharding_code = read_batch[idx].cce_addr_.NodeGroupId() << 10 |
+                            (key_hash & 0x3FF);
             partition_id = Sharder::MapKeyHashToHashPartitionId(key_hash);
         }
         else
         {
             partition_id = batch_read_op.range_ids_[idx];
+            sharding_code = read_batch[idx].cce_addr_.NodeGroupId() << 10 |
+                            (partition_id & 0x3FF);
         }
         cc_handler_->Read(
             table_name,
