@@ -293,6 +293,7 @@ bool DataSubstrate::InitializeStorageHandler(const INIReader &config_reader)
                                               eloq_dss_data_path,
                                               core_config_.node_memory_limit_mb,
                                               core_config_.core_num);
+    eloq_store_config.branch_name_ = FLAGS_eloq_dss_branch_name;
     auto ds_factory = std::make_unique<EloqDS::EloqStoreDataStoreFactory>(
         std::move(eloq_store_config));
 #endif

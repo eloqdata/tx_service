@@ -44,5 +44,11 @@ public:
                                  std::vector<std::string> &storage_path_vector);
 
     ::eloqstore::KvOptions eloqstore_configs_{};
+
+    // Branch name passed to EloqStore::Start().  Populated from
+    // FLAGS_eloq_dss_branch_name by the caller before the factory is
+    // constructed.  Defaults to "main" so that code paths that never set this
+    // field (e.g. unit tests) still work.
+    std::string branch_name_{"main"};
 };
 }  // namespace EloqDS
