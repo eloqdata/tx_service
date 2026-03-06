@@ -167,6 +167,7 @@ void Checkpointer::Ckpt(bool is_last_ckpt)
             snapshot_req.set_standby_node_term(candidate_standby_node_term);
             snapshot_req.set_standby_node_id(Sharder::Instance().NodeId());
 
+#ifndef DATA_STORE_TYPE_ELOQDSS_ELOQSTORE
             std::array<char, 200> buffer;
             std::string username;
             FILE *output_stream = popen("echo $USER", "r");
@@ -183,7 +184,15 @@ void Checkpointer::Ckpt(bool is_last_ckpt)
             pclose(output_stream);
 
             snapshot_req.set_user(username);
-            snapshot_req.set_dest_path(store_hd_->SnapshotSyncDestPath());
+            const std::string dest_path = store_hd_->SnapshotSyncDestPath();
+            snapshot_req.set_dest_path(dest_path);
+#endif
+            DLOG(INFO) << "Checkpointer send RequestStorageSnapshotSync, ng_id="
+                       << snapshot_req.ng_id()
+                       << ", standby_node_id="
+                       << snapshot_req.standby_node_id()
+                       << ", standby_node_term="
+                       << snapshot_req.standby_node_term();
             brpc::Controller cntl;
             stub.RequestStorageSnapshotSync(
                 &cntl, &snapshot_req, &snapshot_resp, nullptr);

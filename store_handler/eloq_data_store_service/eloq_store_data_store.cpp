@@ -589,10 +589,16 @@ void EloqStoreDataStore::CreateSnapshotForBackup(
 {
     PoolableGuard req_guard(req);
 
+    std::string tag = std::to_string(req->GetBackupTs());
+    if (req->IsStandbySnapshot())
+    {
+        tag = "snapshot_" + tag;
+    }
+
     ::eloqstore::GlobalArchiveRequest global_archive_req;
     global_archive_req.SetAction(
         ::eloqstore::GlobalArchiveRequest::Action::Create);
-    global_archive_req.SetTag(std::to_string(req->GetBackupTs()));
+    global_archive_req.SetTag(tag);
     eloq_store_service_->ExecSync(&global_archive_req);
 
     ::EloqDS::remote::DataStoreError ds_error;
@@ -928,36 +934,54 @@ void EloqStoreDataStore::ReloadDataFromCloud(int64_t term)
     op_guard.Release();
 }
 
-void EloqStoreDataStore::ReloadDataFromMasterNode(int64_t term,
+bool EloqStoreDataStore::ReloadDataFromMasterNode(int64_t term,
                                                   uint64_t snapshot_ts)
 {
+    const auto mode = eloq_store_service_->Mode();
+    const char *mode_str = "Unknown";
+    switch (mode)
+    {
+    case ::eloqstore::StoreMode::Local:
+        mode_str = "Local";
+        break;
+    case ::eloqstore::StoreMode::StandbyMaster:
+        mode_str = "StandbyMaster";
+        break;
+    case ::eloqstore::StoreMode::StandbyReplica:
+        mode_str = "StandbyReplica";
+        break;
+    case ::eloqstore::StoreMode::Cloud:
+        mode_str = "Cloud";
+        break;
+    }
     LOG(INFO) << "EloqStoreDataStore::ReloadDataFromMasterNode, term: " << term
-              << ", snapshot_ts: " << snapshot_ts;
+              << ", snapshot_ts: " << snapshot_ts
+              << ", mode=" << mode_str
+              << "(" << static_cast<int>(mode) << ")"
+              << ", current_term=" << eloq_store_service_->Term();
     if (eloq_store_service_->Term() != static_cast<uint64_t>(term))
     {
-        LOG(FATAL)
+        LOG(ERROR)
             << "EloqStoreDataStore::ReloadDataFromMasterNode, term mismatch, "
                "expected: "
-            << term << ", actual: " << eloq_store_service_->Term();
-        return;
+            << term << ", actual: " << eloq_store_service_->Term()
+            << ", mode=" << mode_str << "(" << static_cast<int>(mode) << ")";
+        return false;
     }
-    EloqStoreOperationData<::eloqstore::GlobalReopenRequest> *global_reopen_op =
-        eloq_store_global_reopen_op_pool_.NextObject();
-    global_reopen_op->Reset(nullptr);
-    PoolableGuard op_guard(global_reopen_op);
-
-    ::eloqstore::GlobalReopenRequest &global_reopen_req =
-        global_reopen_op->EloqStoreRequest();
+    ::eloqstore::GlobalReopenRequest global_reopen_req;
     global_reopen_req.SetTag("snapshot_" + std::to_string(snapshot_ts));
-
-    uint64_t user_data = reinterpret_cast<uint64_t>(global_reopen_op);
-    if (!eloq_store_service_->ExecAsyn(
-            &global_reopen_req, user_data, OnReLoaded))
+    eloq_store_service_->ExecSync(&global_reopen_req);
+    if (global_reopen_req.Error() != ::eloqstore::KvError::NoError)
     {
-        LOG(ERROR) << "Send reopen-from-master request to EloqStore failed";
-        return;
+        LOG(ERROR) << "ReloadDataFromMasterNode reopen failed, snapshot_ts="
+                   << snapshot_ts << ", error="
+                   << static_cast<uint32_t>(global_reopen_req.Error())
+                   << ", msg=" << global_reopen_req.ErrMessage();
+        return false;
     }
-    op_guard.Release();
+    DLOG(INFO) << "ReloadDataFromMasterNode reopen succeeded, snapshot_ts="
+               << snapshot_ts;
+    return true;
 }
 
 void EloqStoreDataStore::UpdateStandbyMasterStorePaths(
@@ -971,6 +995,17 @@ void EloqStoreDataStore::UpdateStandbyMasterStorePaths(
     if (res != ::eloqstore::KvError::NoError)
     {
         LOG(WARNING) << "UpdateStandbyMasterStorePaths failed with error: "
+                     << static_cast<uint32_t>(res);
+    }
+}
+
+void EloqStoreDataStore::UpdateStandbyMasterAddr(
+    const std::string &standby_master_addr)
+{
+    auto res = eloq_store_service_->UpdateStandbyMasterAddr(standby_master_addr);
+    if (res != ::eloqstore::KvError::NoError)
+    {
+        LOG(WARNING) << "UpdateStandbyMasterAddr failed with error: "
                      << static_cast<uint32_t>(res);
     }
 }

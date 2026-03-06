@@ -167,16 +167,6 @@ DEFINE_bool(
     "EloqStore automatically retrieves cloud credentials from the "
     "environment or instance metadata instead of explicit access/secret "
     "keys.");
-DEFINE_bool(eloq_store_enable_local_standby,
-            false,
-            "EloqStore enables standby replication mode for local storage; "
-            "cloud mode handles standby automatically.");
-DEFINE_string(eloq_store_standby_master_addr,
-              "",
-              "EloqStore standby source address. Use 'local' for a local "
-              "master or username@host_addr for a remote master; when set, "
-              "the store rsyncs from the specified master instead of using "
-              "cloud storage.");
 
 namespace EloqDS
 {
@@ -450,6 +440,9 @@ EloqStoreConfig::EloqStoreConfig(const INIReader &config_reader,
             std::filesystem::create_directories(
                 eloqstore_configs_.store_path.back());
         }
+        storage_path_list = eloqstore_configs_.store_path.back();
+        GFLAGS_NAMESPACE::SetCommandLineOption("eloq_store_data_path_list",
+                                               storage_path_list.c_str());
     }
     if (!storage_path_list.empty())
     {
@@ -463,6 +456,8 @@ EloqStoreConfig::EloqStoreConfig(const INIReader &config_reader,
             LOG(FATAL) << "Invalid eloq_store_data_path_list: "
                        << storage_path_list << ", error: " << error_message;
         }
+        GFLAGS_NAMESPACE::SetCommandLineOption("eloq_store_data_path_list",
+                                               storage_path_list.c_str());
     }
 
     eloqstore_configs_.fd_limit =
@@ -747,18 +742,8 @@ EloqStoreConfig::EloqStoreConfig(const INIReader &config_reader,
             : config_reader.GetBoolean("store",
                                        "eloq_store_reuse_local_files",
                                        FLAGS_eloq_store_reuse_local_files);
-    eloqstore_configs_.enable_local_standby =
-        !CheckCommandLineFlagIsDefault("eloq_store_enable_local_standby")
-            ? FLAGS_eloq_store_enable_local_standby
-            : config_reader.GetBoolean("store",
-                                       "eloq_store_enable_local_standby",
-                                       FLAGS_eloq_store_enable_local_standby);
-    eloqstore_configs_.standby_master_addr =
-        !CheckCommandLineFlagIsDefault("eloq_store_standby_master_addr")
-            ? FLAGS_eloq_store_standby_master_addr
-            : config_reader.GetString("store",
-                                      "eloq_store_standby_master_addr",
-                                      FLAGS_eloq_store_standby_master_addr);
+    eloqstore_configs_.standby_master_addr.clear();
+    eloqstore_configs_.enable_local_standby = false;
     eloqstore_configs_.data_page_size =
         !CheckCommandLineFlagIsDefault("eloq_store_data_page_size")
             ? FLAGS_eloq_store_data_page_size

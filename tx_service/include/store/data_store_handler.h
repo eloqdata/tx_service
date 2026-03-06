@@ -387,8 +387,10 @@ public:
     virtual bool SendSnapshotToRemote(uint32_t ng_id,
                                       int64_t ng_term,
                                       std::vector<std::string> &snapshot_files,
-                                      const std::string &remote_dest)
+                                      const std::string &remote_dest,
+                                      uint32_t standby_node_id = UINT32_MAX)
     {
+        (void) standby_node_id;
         assert(false);
         return true;
     }
@@ -413,6 +415,34 @@ public:
         (void) ng_term;
         (void) snapshot_ts;
         return true;
+    }
+
+    virtual bool OnStandbySnapshotReady(uint32_t ng_id,
+                                        int64_t ng_term,
+                                        uint64_t snapshot_ts)
+    {
+        (void) ng_id;
+        (void) ng_term;
+        (void) snapshot_ts;
+        return true;
+    }
+
+    virtual uint64_t LatestStandbySnapshotTs() const
+    {
+        return 0;
+    }
+
+    virtual void DeleteStandbySnapshot(uint32_t ng_id, uint64_t snapshot_ts)
+    {
+        (void) ng_id;
+        (void) snapshot_ts;
+    }
+
+    virtual void SetStandbySnapshotPayload(uint32_t ng_id,
+                                           const std::string &snapshot_path)
+    {
+        (void) ng_id;
+        (void) snapshot_path;
     }
 
     virtual void OnStartFollowing(uint32_t ng_id,

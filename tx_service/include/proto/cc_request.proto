@@ -309,6 +309,7 @@ message StandbyStartFollowingResponse
     bool error = 1;
     repeated uint64 start_sequence_id = 2;
     uint32 subscribe_id = 3;
+    string snapshot_path = 4;
 }
 
 message UpdateStandbyCkptTsRequest
@@ -374,6 +375,16 @@ message OnSnapshotSyncedRequest {
 }
 
 message OnSnapshotSyncedResponse {
+    bool error = 1;
+}
+
+message StandbySnapshotReadyRequest {
+    uint32 ng_id = 1;
+    int64 ng_term = 2;
+    uint64 snapshot_ts = 3;
+}
+
+message StandbySnapshotReadyResponse {
     bool error = 1;
 }
 
@@ -514,6 +525,7 @@ service CcRpcService {
     rpc UpdateStandbyCkptTs(UpdateStandbyCkptTsRequest) returns (UpdateStandbyCkptTsResponse);
     rpc RequestStorageSnapshotSync(StorageSnapshotSyncRequest) returns (StorageSnapshotSyncResponse);
     rpc OnSnapshotSynced(OnSnapshotSyncedRequest) returns (OnSnapshotSyncedResponse);
+    rpc NotifyStandbySnapshotReady(StandbySnapshotReadyRequest) returns (StandbySnapshotReadyResponse);
     rpc FetchNodeInfo(FetchNodeInfoRequest) returns (FetchNodeInfoResponse);
     rpc ResetStandbySequenceId(ResetStandbySequenceIdRequest) returns (ResetStandbySequenceIdResponse);
     rpc CreateBackup(CreateBackupRequest) returns (FetchBackupResponse);

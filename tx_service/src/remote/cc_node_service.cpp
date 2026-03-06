@@ -24,9 +24,11 @@
 #include <brpc/controller.h>
 #include <bthread/condition_variable.h>
 #include <bthread/mutex.h>
+#include <gflags/gflags.h>
 
 #include <memory>
 #include <mutex>
+#include <cstdlib>
 #include <utility>
 
 #include "cc/local_cc_shards.h"
@@ -1659,6 +1661,33 @@ void CcNodeService::StandbyStartFollowing(
     auto subscribe_id = Sharder::Instance().GetNextSubscribeId();
 
     response->set_subscribe_id(subscribe_id);
+#ifdef DATA_STORE_TYPE_ELOQDSS_ELOQSTORE
+    auto *store_hd = local_shards_.store_hd_;
+    if (store_hd != nullptr && !store_hd->IsSharedStorage())
+    {
+        std::string leader_ip;
+        uint16_t leader_port = 0;
+        Sharder::Instance().GetNodeAddress(
+            Sharder::Instance().NodeId(), leader_ip, leader_port);
+        (void) leader_port;
+        const char *user = std::getenv("USER");
+        std::string snapshot_path;
+        if (user != nullptr && user[0] != '\0')
+        {
+            snapshot_path =
+                std::string(user) + "@" + leader_ip + ":" +
+                store_hd->SnapshotSyncDestPath();
+        }
+        else
+        {
+            snapshot_path = leader_ip + ":" + store_hd->SnapshotSyncDestPath();
+        }
+        response->set_snapshot_path(snapshot_path);
+        DLOG(INFO) << "StandbyStartFollowing set snapshot_path, ng_id="
+                   << request->node_group_id() << ", node_id="
+                   << request->node_id() << ", snapshot_path=" << snapshot_path;
+    }
+#endif
     response->set_error(false);
 }
 
@@ -1751,16 +1780,32 @@ void CcNodeService::RequestStorageSnapshotSync(
     if (!store_hd)
     {
         // kv store not enabled
+        DLOG(INFO) << "RequestStorageSnapshotSync rejected: store handler is "
+                      "nullptr, ng_id="
+                   << request->ng_id()
+                   << ", standby_node_id=" << request->standby_node_id()
+                   << ", standby_term=" << request->standby_node_term();
         response->set_error(true);
         return;
     }
 
     int64_t standby_node_term = request->standby_node_term();
     int64_t primary_leader_term = PrimaryTermFromStandbyTerm(standby_node_term);
+    DLOG(INFO) << "RequestStorageSnapshotSync received, ng_id="
+               << request->ng_id()
+               << ", standby_node_id=" << request->standby_node_id()
+               << ", standby_term=" << standby_node_term
+               << ", primary_term=" << primary_leader_term
+               << ", dest_path=" << request->dest_path();
 
     if (!Sharder::Instance().CheckLeaderTerm(request->ng_id(),
                                              primary_leader_term))
     {
+        DLOG(INFO) << "RequestStorageSnapshotSync rejected by term check, "
+                      "ng_id="
+                   << request->ng_id()
+                   << ", standby_term=" << standby_node_term
+                   << ", primary_term=" << primary_leader_term;
         response->set_error(true);
         return;
     }
@@ -1778,6 +1823,10 @@ void CcNodeService::RequestStorageSnapshotSync(
     // has been flushed to kvstore. (standby nodes begin fetch record from
     // kvstore on cache miss).
     store::SnapshotManager::Instance().OnSnapshotSyncRequested(request);
+    DLOG(INFO) << "RequestStorageSnapshotSync enqueued, ng_id="
+               << request->ng_id()
+               << ", standby_node_id=" << request->standby_node_id()
+               << ", standby_term=" << standby_node_term;
     response->set_error(false);
 }
 
@@ -1788,15 +1837,83 @@ void CcNodeService::OnSnapshotSynced(
     ::google::protobuf::Closure *done)
 {
     brpc::ClosureGuard done_guard(done);
+    const uint32_t local_node_id = Sharder::Instance().NodeId();
+    DLOG(INFO) << "OnSnapshotSynced RPC received, ng_id="
+               << request->ng_id()
+               << ", standby_term=" << request->standby_node_term()
+               << ", snapshot_path=" << request->snapshot_path()
+               << ", local_node_id=" << local_node_id
+               << ", role=follower";
     auto store_hd = Sharder::Instance().GetLocalCcShards()->store_hd_;
     if (!store_hd)
     {
         // kv store not enabled or does not need to sync
+        DLOG(INFO) << "OnSnapshotSynced rejected: store handler is nullptr, "
+                      "ng_id="
+                   << request->ng_id()
+                   << ", standby_term=" << request->standby_node_term()
+                   << ", role=follower";
         response->set_error(true);
         return;
     }
 
+    DLOG(INFO) << "OnSnapshotSynced received, ng_id=" << request->ng_id()
+               << ", standby_term=" << request->standby_node_term()
+               << ", snapshot_path=" << request->snapshot_path()
+               << ", local_node_id=" << local_node_id
+               << ", role=follower";
     bool succ = Sharder::Instance().OnSnapshotReceived(request);
+    DLOG(INFO) << "OnSnapshotSynced handled, ng_id=" << request->ng_id()
+               << ", standby_term=" << request->standby_node_term()
+               << ", success=" << succ
+               << ", local_node_id=" << local_node_id
+               << ", role=follower";
+    response->set_error(!succ);
+}
+
+void CcNodeService::NotifyStandbySnapshotReady(
+    ::google::protobuf::RpcController *controller,
+    const ::txservice::remote::StandbySnapshotReadyRequest *request,
+    ::txservice::remote::StandbySnapshotReadyResponse *response,
+    ::google::protobuf::Closure *done)
+{
+    brpc::ClosureGuard done_guard(done);
+    const uint32_t local_node_id = Sharder::Instance().NodeId();
+    DLOG(INFO) << "NotifyStandbySnapshotReady RPC received, ng_id="
+               << request->ng_id() << ", ng_term=" << request->ng_term()
+               << ", snapshot_ts=" << request->snapshot_ts()
+               << ", local_node_id=" << local_node_id
+               << ", role=follower";
+    auto *store_hd = Sharder::Instance().GetLocalCcShards()->store_hd_;
+    if (store_hd == nullptr)
+    {
+        DLOG(INFO) << "NotifyStandbySnapshotReady rejected: store handler is "
+                      "nullptr, ng_id="
+                   << request->ng_id() << ", ng_term=" << request->ng_term()
+                   << ", snapshot_ts=" << request->snapshot_ts()
+                   << ", role=follower";
+        response->set_error(true);
+        return;
+    }
+
+    if (store_hd->IsSharedStorage())
+    {
+        DLOG(INFO)
+            << "NotifyStandbySnapshotReady ignored on shared storage, ng_id="
+            << request->ng_id() << ", ng_term=" << request->ng_term()
+            << ", snapshot_ts=" << request->snapshot_ts()
+            << ", role=follower";
+        response->set_error(false);
+        return;
+    }
+
+    DLOG(INFO) << "NotifyStandbySnapshotReady apply standby reopen, ng_id="
+               << request->ng_id() << ", ng_term=" << request->ng_term()
+               << ", snapshot_ts=" << request->snapshot_ts()
+               << ", local_node_id=" << local_node_id
+               << ", role=follower";
+    const bool succ = store_hd->OnStandbySnapshotReady(
+        request->ng_id(), request->ng_term(), request->snapshot_ts());
     response->set_error(!succ);
 }
 

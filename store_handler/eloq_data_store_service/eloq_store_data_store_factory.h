@@ -22,6 +22,7 @@
 #pragma once
 
 #include <memory>
+#include <string>
 #include <unordered_set>
 #include <vector>
 
@@ -152,6 +153,19 @@ public:
             store_paths;
         eloq_store_configs_.eloqstore_configs_.standby_master_store_path_weights =
             store_path_weights;
+    }
+
+    void UpdateStandbyMasterAddr(const std::string &standby_master_addr)
+    {
+        eloq_store_configs_.eloqstore_configs_.standby_master_addr =
+            standby_master_addr;
+        eloq_store_configs_.eloqstore_configs_.enable_local_standby =
+            !standby_master_addr.empty();
+    }
+
+    void SetEnableLocalStandby(bool enable)
+    {
+        eloq_store_configs_.eloqstore_configs_.enable_local_standby = enable;
     }
 
 private:

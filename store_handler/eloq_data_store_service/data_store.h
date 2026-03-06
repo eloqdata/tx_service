@@ -157,10 +157,11 @@ public:
      * @brief For local standby mode, sync/reload data from master node.
      * Default no-op for stores that don't need this path.
      */
-    virtual void ReloadDataFromMasterNode(int64_t term, uint64_t snapshot_ts)
+    virtual bool ReloadDataFromMasterNode(int64_t term, uint64_t snapshot_ts)
     {
         (void) term;
         (void) snapshot_ts;
+        return true;
     }
 
     virtual void UpdateStandbyMasterStorePaths(
@@ -169,6 +170,11 @@ public:
     {
         (void) store_paths;
         (void) store_path_weights;
+    }
+
+    virtual void UpdateStandbyMasterAddr(const std::string &standby_master_addr)
+    {
+        (void) standby_master_addr;
     }
 
 protected:
