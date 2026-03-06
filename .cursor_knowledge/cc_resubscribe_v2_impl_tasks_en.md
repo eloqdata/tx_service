@@ -35,8 +35,6 @@ Each task includes:
 - Function Changes:
   - No direct function logic changes in this task (protocol-only).
 - Detailed Changes:
-  - Add `uint32 subscribe_round_id` to `OnStartFollowingRequest` (optional, default 0).
-  - Add `bool resubscribe_intent` to `OnStartFollowingRequest` (optional, default false).
   - Add `uint32 subscribe_round_id` to `StandbyStartFollowingRequest` (optional hint).
   - Add `bool resubscribe_intent` to `StandbyStartFollowingRequest` (optional, default false).
   - Add `uint32 subscribe_round_id` to `KeyObjectStandbyForwardRequest` (optional).
@@ -47,17 +45,15 @@ Each task includes:
 
 ---
 
-### T2. End-to-End `subscribe_round_id + resubscribe_intent` Propagation in `OnStartFollowing`
+### T2. Local Trigger Propagation of `subscribe_round_id + resubscribe_intent`
 
 - Status: `TODO`
-- Goal: allow host manager triggers, standby-local triggers, and out-of-sync triggers to enter the unified path with round hints.
+- Goal: ensure standby-local and out-of-sync triggers can carry round hints and land uniformly in `StandbyStartFollowingRequest`; keep host manager entry semantics unchanged.
 - Files Involved:
   - `data_substrate/tx_service/include/sharder.h`
   - `data_substrate/tx_service/src/sharder.cpp`
   - `data_substrate/tx_service/include/fault/cc_node.h`
   - `data_substrate/tx_service/src/fault/cc_node.cpp`
-  - `data_substrate/tx_service/include/remote/cc_node_service.h`
-  - `data_substrate/tx_service/src/remote/cc_node_service.cpp`
   - `data_substrate/tx_service/src/cc/cc_shard.cpp`
   - `data_substrate/tx_service/src/remote/cc_stream_receiver.cpp`
   - `data_substrate/tx_service/include/cc/catalog_cc_map.h` (fault-inject path)
@@ -68,14 +64,15 @@ Each task includes:
   - Add `resubscribe_intent` parameter to `Sharder::OnStartFollowing(...)` (default false).
   - Add `subscribe_round_id` parameter to `CcNode::OnStartFollowing(...)`.
   - Add `resubscribe_intent` parameter to `CcNode::OnStartFollowing(...)`.
-  - Update `CcNodeService::OnStartFollowing(...)` to read and pass through new field.
-  - Update trigger call sites: lag, stream idle timeout, out-of-sync, host manager path.
+  - Keep `CcNodeService::OnStartFollowing(...)` protocol unchanged; it remains a trigger entry.
+  - Update trigger call sites: lag, stream idle timeout, out-of-sync path.
   - Semantic constraints:
     - lag / idle timeout: pass `current_round + resubscribe_intent=true`.
     - out-of-sync (round pre-assigned by primary): pass `subscribe_round_id=<msg_round> + resubscribe_intent=false`.
+    - host manager path: no round/intention payload (default values).
 - Definition of Done:
   - All compile-time call sites updated.
-  - `subscribe_round_id + resubscribe_intent` are propagated correctly end-to-end.
+  - `subscribe_round_id + resubscribe_intent` are propagated correctly along the “local trigger -> StandbyStartFollowingRequest” path.
 
 ---
 
@@ -278,7 +275,7 @@ Each task includes:
   3. Late `StandbyStartFollowingResponse` is dropped.
   4. Late `ResetStandbySequenceId` is rejected or handled idempotently.
   5. Snapshot coverage remains monotonic by round (no rollback).
-  6. Host manager trigger using `current_round + resubscribe_intent=true` does not conflict with concurrent resubscribe.
+  6. Host manager `OnStartFollowing` trigger (without round/intention payload) does not conflict with concurrent resubscribe.
   7. Forwarding messages that lack round fields are rejected.
   8. Repeated same-term standby-local triggers (lag/idle) produce only one `resubscribe_intent=true` request; all others are coalesced.
   9. After round=`R` is resolved, all follow-up retries carry `R` with `resubscribe_intent=false`.

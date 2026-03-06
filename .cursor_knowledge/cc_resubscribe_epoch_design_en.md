@@ -42,21 +42,16 @@ Note: `follow_req_id` is not a protocol field and does not participate in cross-
 
 ### 5. Protocol and Message Changes
 
-1. `OnStartFollowingRequest`
-   - Add optional `uint32 subscribe_round_id` (default `0`).
-   - Add optional `bool resubscribe_intent` (default `false`).
-   - Semantics: `subscribe_round_id` is the caller-known current round; `resubscribe_intent=true` means “request primary to allocate a newer round.”
-
-2. `KeyObjectStandbyForwardRequest`
+1. `KeyObjectStandbyForwardRequest`
    - Add optional `uint32 subscribe_round_id`.
    - Both out-of-sync notifications and regular forwarding messages must carry round.
 
-3. `StandbyStartFollowingRequest / Response`
+2. `StandbyStartFollowingRequest / Response`
    - Request adds optional `subscribe_round_id` hint.
    - Request adds optional `resubscribe_intent` (default `false`).
    - Response keeps `subscribe_id`, with semantics explicitly defined as `subscribe_round_id`.
 
-4. `ResetStandbySequenceIdRequest / Response`
+3. `ResetStandbySequenceIdRequest / Response`
    - No new mandatory field. Continue using `standby_node_term` to carry `(term, round)`.
    - Server must explicitly parse and validate round.
 
@@ -65,9 +60,9 @@ Note: `follow_req_id` is not a protocol field and does not participate in cross-
 #### 6.1 Unified Trigger Entrypoints
 
 - out-of-sync: primary first checks `out_of_sync_ctrl_[node_id]` for dedup, then decides whether to allocate/reuse `subscribe_round_id` before notifying standby.
-- lag threshold (standby local trigger): `OnStartFollowing(..., subscribe_round_id=current_round, resubscribe_intent=true, resubscribe=true)`.
+- lag threshold (standby local trigger): call `OnStartFollowing(..., resubscribe=true)` to start the resubscribe workflow; carry `current_round + resubscribe_intent=true` in subsequent `StandbyStartFollowingRequest`.
 - stream idle timeout (standby local trigger): same as above.
-- host manager `OnStartFollowing`: can also trigger a new round with `current_round + resubscribe_intent=true`.
+- host manager `OnStartFollowing`: trigger-only entry; it does not carry round/intention, and standby still provides them in `StandbyStartFollowingRequest`.
 
 #### 6.2 Standby Local Preemption
 
@@ -150,7 +145,7 @@ Note: `follow_req_id` is not a protocol field and does not participate in cross-
 3. Late `StandbyStartFollowingResponse` (old round) is dropped.
 4. Late `ResetStandbySequenceId` (old round) is rejected or handled idempotently as expected.
 5. Snapshot request coverage and round monotonicity are consistent (no rollback).
-6. Host manager `OnStartFollowing` (`current_round + resubscribe_intent=true`) does not conflict with concurrent resubscribe.
+6. Host manager `OnStartFollowing` (without round/intention payload) does not conflict with concurrent resubscribe.
 7. Forwarding messages missing round field are rejected, and warning metrics are correct.
 8. Multiple standby-local triggers in the same term (lag/idle) must result in only one “request-new-round (`resubscribe_intent=true`)” request; all others are locally coalesced.
 9. After standby gets round=`R`, all follow-up retries must carry `R` with `resubscribe_intent=false`.
