@@ -1327,8 +1327,7 @@ public:
                        TransactionExecution *txm = nullptr,
                        bool point_read_on_cache_miss = false,
                        uint64_t corresponding_sk_commit_ts = 0,
-                       bool local_cache_checked = false,
-                       bool is_catalog_batch = false)
+                       bool local_cache_checked = false)
         : TemplateTxRequest(yield_fptr, resume_fptr, txm),
           tab_name_(tab_name),
           read_batch_(tuple_batch),
@@ -1338,8 +1337,7 @@ public:
           point_read_on_cache_miss_(point_read_on_cache_miss),
           corresponding_sk_commit_ts_(corresponding_sk_commit_ts),
           schema_version_(schema_version),
-          local_cache_checked_(local_cache_checked),
-          is_catalog_batch_(is_catalog_batch)
+          local_cache_checked_(local_cache_checked)
     {
     }
 
@@ -1372,7 +1370,6 @@ public:
     uint64_t corresponding_sk_commit_ts_;
     uint64_t schema_version_;
     bool local_cache_checked_;
-    bool is_catalog_batch_;  // true: batch ReadLocal on catalog_ccm_name
 };
 
 struct InvalidateTableCacheTxRequest

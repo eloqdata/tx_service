@@ -133,6 +133,7 @@ bool FetchCatalogCc::Execute(CcShard &ccs)
             // If on_leader_stop and Enqueue(ClearCcNodeGroup) happens at this
             // time, the creating catalog will be cleaned by ClearCcNodeGroup,
             // and the running cc_requests will check term invalid.
+
             if (status_ == RecordStatus::Normal)
             {
                 assert(commit_ts_ > 0);
