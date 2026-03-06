@@ -1488,7 +1488,7 @@ void CcShard::FetchCatalog(const TableName &table_name,
 
             int64_t primary_node_term = PrimaryTermFromStandbyTerm(cc_ng_term);
             req->set_primary_leader_term(primary_node_term);
-            req->set_key_shard_code(cc_ng_id << 10);
+            req->set_key_shard_code(cc_ng_id << 12);
             closure->Controller()->set_timeout_ms(5000);
             closure->Controller()->set_write_to_socket_in_background(true);
             remote::CcRpcService_Stub stub(channel.get());

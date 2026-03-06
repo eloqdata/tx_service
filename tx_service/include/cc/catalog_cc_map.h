@@ -837,7 +837,7 @@ public:
                     forward_req->set_table_engine(
                         remote::ToRemoteType::ConvertTableEngine(
                             table_name_.Engine()));
-                    forward_req->set_key_shard_code(cc_ng_id_ << 10);
+                    forward_req->set_key_shard_code(cc_ng_id_ << 12);
                     std::string key_str;
                     table_key->Serialize(key_str);
                     forward_req->set_key(std::move(key_str));

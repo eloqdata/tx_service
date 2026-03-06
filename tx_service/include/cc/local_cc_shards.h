@@ -231,7 +231,7 @@ public:
                           uint32_t shard_code,
                           CcRequestBase *req)
     {
-        uint32_t residual = shard_code & 0x3FF;
+        uint32_t residual = shard_code & 0xFFF;
         size_t core_idx = residual % cc_shards_.size();
 
         cc_shards_[core_idx]->Enqueue(thd_id, req);
@@ -239,7 +239,7 @@ public:
 
     void EnqueueCcRequest(uint32_t shard_code, CcRequestBase *req)
     {
-        uint32_t residual = shard_code & 0x3FF;
+        uint32_t residual = shard_code & 0xFFF;
         size_t core_idx = residual % cc_shards_.size();
         cc_shards_.at(core_idx)->Enqueue(req);
     }

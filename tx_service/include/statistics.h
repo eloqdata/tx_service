@@ -67,7 +67,7 @@ public:
         auto hash_code = std::hash<std::string_view>{}(
             table_or_index_name.GetBaseTableNameSV());
 
-        uint32_t residual = hash_code & 0x3FF;
+        uint32_t residual = hash_code & 0xFFF;
         uint16_t core_id =
             (residual) % Sharder::Instance().GetLocalCcShardsCount();
         return core_id;
@@ -80,7 +80,7 @@ public:
 
         // Map table statistics to some one node group.
         auto all_ng = Sharder::Instance().AllNodeGroups();
-        uint32_t ng_idx = (hash_code >> 10) % all_ng->size();
+        uint32_t ng_idx = (hash_code >> 12) % all_ng->size();
         uint32_t target_ng = UINT32_MAX;
         for (auto ng_id : *all_ng)
         {

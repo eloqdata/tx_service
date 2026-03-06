@@ -1592,7 +1592,7 @@ public:
 
             hash = key->Hash();
             uint16_t bucket_id = Sharder::MapKeyHashToBucketId(hash);
-            size_t core_idx = (hash & 0x3FF) % shard_->core_cnt_;
+            size_t core_idx = (hash & 0xFFF) % shard_->core_cnt_;
             if (!(core_idx == shard_->core_id_) || commit_ts <= 1 ||
                 !shard_->GetBucketInfo(bucket_id, cc_ng_id_)
                      ->AcceptsUploadBatch())
@@ -2240,7 +2240,7 @@ public:
                 continue;
             }
 
-            uint16_t core_id = (key_hash & 0x3FF) % shard_->core_cnt_;
+            uint16_t core_id = (key_hash & 0xFFF) % shard_->core_cnt_;
             if (core_id != shard_->core_id_)
             {
                 // Skips the key in the log record that is not sharded to this
