@@ -733,19 +733,20 @@ void LockWriteRangeBucketsOp::Advance(TransactionExecution *txm)
         size_t new_range_idx = 0;
 
         auto *range_info = txm->range_rec_.GetRangeInfo();
+        uint32_t residual = static_cast<uint32_t>(range_info->PartitionId());
         while (write_key_it_ != next_range_start)
         {
             const TxKey &write_tx_key = write_key_it_->first;
             WriteSetEntry &write_entry = write_key_it_->second;
-            size_t hash = write_tx_key.Hash();
-            write_entry.key_shard_code_ = (range_ng << 10) | (hash & 0x3FF);
+            write_entry.key_shard_code_ = (range_ng << 10) | residual;
             write_entry.range_size_flags_ =
                 0x10 | static_cast<uint8_t>(range_info->IsDirty());
             // If current range is migrating, forward to new range owner.
             if (new_bucket_ng != UINT32_MAX)
             {
+                assert(new_bucket_ng != range_ng);
                 write_entry.forward_addr_.try_emplace((new_bucket_ng << 10) |
-                                                      (hash & 0x3FF));
+                                                      residual);
             }
 
             // If range is splitting and the key will fall on a new range after
@@ -763,20 +764,24 @@ void LockWriteRangeBucketsOp::Advance(TransactionExecution *txm)
             }
             if (new_range_ng != UINT32_MAX)
             {
-                if (new_range_ng != range_ng)
-                {
-                    write_entry.forward_addr_.try_emplace((new_range_ng << 10) |
-                                                          (hash & 0x3FF));
-                    write_entry.range_size_flags_ =
-                        0x0F & write_entry.range_size_flags_;
-                }
+                int32_t new_range_id =
+                    range_info->NewPartitionId()->at(new_range_idx - 1);
+                uint32_t new_residual = static_cast<uint32_t>(new_range_id);
+                // The range size info on ccmap is grouped according to the
+                // range ID. Therefore, even if the new and old ranges are on
+                // the same shard in the same node group, "double writing" must
+                // still be performed.
+                write_entry.forward_addr_.try_emplace((new_range_ng << 10) |
+                                                      new_residual);
+                write_entry.range_size_flags_ =
+                    0x0F & write_entry.range_size_flags_;
+
                 // If the new range is migrating, forward to the new owner of
                 // new range.
-                if (new_range_new_bucket_ng != UINT32_MAX &&
-                    new_range_new_bucket_ng != range_ng)
+                if (new_range_new_bucket_ng != UINT32_MAX)
                 {
                     write_entry.forward_addr_.try_emplace(
-                        (new_range_new_bucket_ng << 10) | (hash & 0x3FF));
+                        (new_range_new_bucket_ng << 10) | new_residual);
                 }
             }
 
