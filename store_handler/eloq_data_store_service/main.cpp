@@ -327,6 +327,7 @@ int main(int argc, char *argv[])
     uint32_t unused_core_number = 0;
     EloqDS::EloqStoreConfig eloq_store_config(
         config_reader, data_path, mem_mib, unused_core_number, true);
+    eloq_store_config.branch_name_ = FLAGS_eloq_dss_branch_name;
 
 #ifdef ELOQ_MODULE_ENABLED
     GFLAGS_NAMESPACE::SetCommandLineOption(
