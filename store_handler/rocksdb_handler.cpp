@@ -2463,8 +2463,14 @@ bool RocksDBCloudHandlerImpl::SendSnapshotToRemote(
     uint32_t ng_id,
     int64_t ng_term,
     std::vector<std::string> &snapshot_files,
-    const std::string &remote_dest)
+    const std::string &remote_dest,
+    uint32_t standby_node_id)
 {
+    (void) ng_id;
+    (void) ng_term;
+    (void) snapshot_files;
+    (void) remote_dest;
+    (void) standby_node_id;
     return true;
 }
 
@@ -3797,8 +3803,10 @@ bool RocksDBHandlerImpl::SendSnapshotToRemote(
     uint32_t ng_id,
     int64_t ng_term,
     std::vector<std::string> &snapshot_files,
-    const std::string &remote_dest)
+    const std::string &remote_dest,
+    uint32_t standby_node_id)
 {
+    (void) standby_node_id;
     using namespace txservice;
 
     if (snapshot_files.empty())

@@ -451,9 +451,18 @@ public:
      * @param snapshot_files The output snapshot files.
      * @return True if create successfully, otherwise false.
      */
+    bool CreateSnapshotForStandby(
+        std::vector<std::string> &snapshot_files) override;
+
     bool CreateSnapshotForBackup(const std::string &backup_name,
                                  std::vector<std::string> &backup_files,
                                  uint64_t backup_ts = 0) override;
+
+    bool SendSnapshotToRemote(uint32_t ng_id,
+                              int64_t ng_term,
+                              std::vector<std::string> &snapshot_files,
+                              const std::string &remote_dest,
+                              uint32_t standby_node_id = UINT32_MAX) override;
 
     bool NeedCopyRange() const override;
 
@@ -474,6 +483,13 @@ public:
 
     void OnShutdown() override;
 
+    /**
+     * For EloqStore local-standby mode, snapshot sync is pull-based:
+     * standby/follower pulls data from master. This returns the master-side
+     * source path list (optionally with weights) to send to standby.
+     */
+    std::string SnapshotSyncDestPath() const override;
+
     bool RemoveBackupSnapshot(const std::string &backup_name) override
     {
         return true;
@@ -482,7 +498,16 @@ public:
     bool OnSnapshotReceived(
         const txservice::remote::OnSnapshotSyncedRequest *req) override;
 
-    bool OnUpdateStandbyCkptTs(uint32_t ng_id, int64_t ng_term) override;
+    bool OnUpdateStandbyCkptTs(uint32_t ng_id,
+                               int64_t ng_term,
+                               uint64_t snapshot_ts) override;
+    bool OnStandbySnapshotReady(uint32_t ng_id,
+                                int64_t ng_term,
+                                uint64_t snapshot_ts) override;
+    uint64_t LatestStandbySnapshotTs() const override;
+    void DeleteStandbySnapshot(uint32_t ng_id, uint64_t snapshot_ts) override;
+    void SetStandbySnapshotPayload(
+        uint32_t ng_id, const std::string &snapshot_path) override;
 
     /**
      * Serialize a record with is_deleted flag and record string.
@@ -872,6 +897,7 @@ private:
     // shard owner.
     std::array<std::atomic<uint32_t>, 1000> dss_shards_;
     std::atomic<uint64_t> dss_topology_version_{0};
+    std::atomic<uint64_t> latest_standby_snapshot_ts_{0};
 
     std::shared_mutex dss_shard_ids_mutex_;
     std::set<uint32_t> dss_shard_ids_;

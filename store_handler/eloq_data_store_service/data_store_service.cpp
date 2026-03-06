@@ -39,6 +39,7 @@
 #include <vector>
 
 #include "data_store_fault_inject.h"  // ACTION_FAULT_INJECTOR
+#include "eloq_store_data_store_factory.h"
 #include "internal_request.h"
 #include "object_pool.h"
 #if defined(DATA_STORE_TYPE_ELOQDSS_ROCKSDB_CLOUD_S3)
@@ -2263,54 +2264,243 @@ void DataStoreService::OnSnapshotReceived(
 
     if (!data_store_factory_->IsCloudMode())
     {
-        // TODO(lzx): Handle the case of local data store mode. (replace the
-        // data with the snapshot)
-        LOG(FATAL)
-            << "OnSnapshotReceived not implemented for local data store mode";
+        // For local standby eloqstore, opening/reopening is triggered by
+        // NotifyStandbySnapshotReady.
+        DLOG(INFO) << "OnSnapshotReceived skip OpenDataStore for local "
+                      "eloqstore standby, shard "
+                   << shard_id << ", term " << term;
+        return;
+    }
+
+    if (!snapshot_path.empty())
+    {
+        std::string standby_addr;
+        std::string store_path_list = snapshot_path;
+        const size_t addr_delim_pos = snapshot_path.find(':');
+        if (addr_delim_pos != std::string::npos)
+        {
+            const std::string addr_candidate =
+                snapshot_path.substr(0, addr_delim_pos);
+            if (addr_candidate.empty() || addr_candidate == "local" ||
+                (addr_candidate.find('/') == std::string::npos &&
+                 addr_candidate.find('@') != std::string::npos))
+            {
+                standby_addr = addr_candidate;
+                store_path_list = snapshot_path.substr(addr_delim_pos + 1);
+            }
+        }
+
+        if (!standby_addr.empty())
+        {
+            auto *eloq_store_factory = static_cast<EloqStoreDataStoreFactory *>(
+                data_store_factory_.get());
+            eloq_store_factory->UpdateStandbyMasterAddr(standby_addr);
+            if (ds_ref.data_store_ != nullptr)
+            {
+                ds_ref.data_store_->UpdateStandbyMasterAddr(standby_addr);
+            }
+            DLOG(INFO) << "OnSnapshotReceived updated standby master addr for "
+                          "local mode, shard "
+                       << shard_id << ", term " << term
+                       << ", standby_addr=" << standby_addr;
+        }
+
+        std::vector<std::string> standby_master_store_paths;
+        std::vector<uint64_t> standby_master_store_path_weights;
+        std::string error_message;
+        if (!::eloqstore::ParseStorePathListWithWeights(
+                store_path_list,
+                standby_master_store_paths,
+                standby_master_store_path_weights,
+                &error_message))
+        {
+            LOG(ERROR) << "OnSnapshotReceived invalid snapshot_path format: "
+                       << snapshot_path << ", error: " << error_message;
+            return;
+        }
+
+        auto *eloq_store_factory =
+            static_cast<EloqStoreDataStoreFactory *>(data_store_factory_.get());
+        eloq_store_factory->UpdateStandbyMasterStorePaths(
+            standby_master_store_paths, standby_master_store_path_weights);
+
+        if (ds_ref.data_store_ != nullptr)
+        {
+            ds_ref.data_store_->UpdateStandbyMasterStorePaths(
+                standby_master_store_paths,
+                standby_master_store_path_weights);
+        }
+    }
+
+    if (ds_ref.shard_status_.load(std::memory_order_acquire) ==
+        DSShardStatus::Closed)
+    {
+        // If the shard is closed, open it and load data from cloud.
+        LOG(INFO) << "OnSnapshotReceived, open data store for DSS shard "
+                  << shard_id << " and term " << term;
+        OpenDataStore(shard_id, std::move(bucket_ids), term);
     }
     else
     {
-        if (ds_ref.shard_status_.load(std::memory_order_acquire) ==
-            DSShardStatus::Closed)
+        while (ds_ref.shard_status_.load(std::memory_order_acquire) ==
+               DSShardStatus::Starting)
         {
-            // If the shard is closed, open it and load data from cloud.
-            LOG(INFO) << "OnSnapshotReceived, open data store for DSS shard "
-                      << shard_id << " and term " << term;
-            OpenDataStore(shard_id, std::move(bucket_ids), term);
+            bthread_usleep(1000);
+            LOG(INFO) << "OnSnapshotReceived, data store is starting, "
+                         "waiting for data store to be ready";
         }
-        else
-        {
-            while (ds_ref.shard_status_.load(std::memory_order_acquire) ==
-                   DSShardStatus::Starting)
-            {
-                bthread_usleep(1000);
-                LOG(INFO) << "OnSnapshotReceived, data store is starting, "
-                             "waiting for data store to be ready";
-            }
 
-            LOG(INFO)
-                << "OnSnapshotReceived, reload data from cloud for DSS shard "
-                << shard_id << " and term " << term;
-            ds_ref.data_store_->ReloadDataFromCloud(term);
-            return;
-        }
+        LOG(INFO) << "OnSnapshotReceived, reload data from cloud for DSS shard "
+                  << shard_id << " and term " << term;
+        ds_ref.data_store_->ReloadDataFromCloud(term);
+        return;
     }
 #else
     LOG(INFO) << "OnSnapshotReceived no-op for non-eloqstore data store";
 #endif
 }
 
-void DataStoreService::OnUpdateStandbyCkptTs(uint32_t shard_id, int64_t term)
+void DataStoreService::SetStandbySnapshotPayload(
+    uint32_t shard_id, const std::string &snapshot_path)
 {
 #ifdef DATA_STORE_TYPE_ELOQDSS_ELOQSTORE
     auto &ds_ref = data_shards_.at(shard_id);
+    {
+        std::unique_lock<bthread::Mutex> lk(ds_ref.standby_reload_mutex_);
+        DLOG(INFO) << "SetStandbySnapshotPayload " << snapshot_path;
+        ds_ref.pending_standby_snapshot_path_ = snapshot_path;
+    }
+
+    std::string standby_addr;
+    std::string store_path_list = snapshot_path;
+    const size_t addr_delim_pos = snapshot_path.find(':');
+    if (addr_delim_pos != std::string::npos)
+    {
+        const std::string addr_candidate = snapshot_path.substr(0, addr_delim_pos);
+        if (addr_candidate.empty() || addr_candidate == "local" ||
+            (addr_candidate.find('/') == std::string::npos &&
+             addr_candidate.find('@') != std::string::npos))
+        {
+            standby_addr = addr_candidate;
+            store_path_list = snapshot_path.substr(addr_delim_pos + 1);
+        }
+    }
+
+    std::vector<std::string> standby_master_store_paths;
+    std::vector<uint64_t> standby_master_store_path_weights;
+    std::string error_message;
+    if (!::eloqstore::ParseStorePathListWithWeights(store_path_list,
+                                                    standby_master_store_paths,
+                                                    standby_master_store_path_weights,
+                                                    &error_message))
+    {
+        LOG(ERROR) << "SetStandbySnapshotPayload invalid payload, shard "
+                   << shard_id << ", payload=" << snapshot_path
+                   << ", error=" << error_message;
+        return;
+    }
+
+    auto *eloq_store_factory =
+        static_cast<EloqStoreDataStoreFactory *>(data_store_factory_.get());
+    if (!standby_addr.empty())
+    {
+        eloq_store_factory->UpdateStandbyMasterAddr(standby_addr);
+    }
+    eloq_store_factory->UpdateStandbyMasterStorePaths(
+        standby_master_store_paths, standby_master_store_path_weights);
+    if (ds_ref.data_store_ != nullptr)
+    {
+        if (!standby_addr.empty())
+        {
+            ds_ref.data_store_->UpdateStandbyMasterAddr(standby_addr);
+        }
+        ds_ref.data_store_->UpdateStandbyMasterStorePaths(
+            standby_master_store_paths, standby_master_store_path_weights);
+    }
+
+    DLOG(INFO) << "SetStandbySnapshotPayload assigned, shard " << shard_id
+               << ", payload=" << snapshot_path << ", standby_addr="
+               << standby_addr
+               << ", path_count=" << standby_master_store_paths.size();
+#else
+    (void) shard_id;
+    (void) snapshot_path;
+#endif
+}
+
+void DataStoreService::SetEnableLocalStandbyForEloqStore(bool enable)
+{
+#ifdef DATA_STORE_TYPE_ELOQDSS_ELOQSTORE
+    auto *eloq_store_factory =
+        static_cast<EloqStoreDataStoreFactory *>(data_store_factory_.get());
+    eloq_store_factory->SetEnableLocalStandby(enable);
+    DLOG(INFO) << "SetEnableLocalStandbyForEloqStore, enable=" << enable;
+#else
+    (void) enable;
+#endif
+}
+
+void DataStoreService::OnUpdateStandbyCkptTs(uint32_t shard_id,
+                                             int64_t term,
+                                             uint64_t snapshot_ts)
+{
+#ifdef DATA_STORE_TYPE_ELOQDSS_ELOQSTORE
+    auto &ds_ref = data_shards_.at(shard_id);
+    {
+        std::unique_lock<bthread::Mutex> lk(ds_ref.standby_reload_mutex_);
+        if (ds_ref.latest_snapshot_ts_ >= snapshot_ts)
+        {
+            LOG(INFO) << "StandbySyncAndReloadData discard request by latest "
+                         "snapshot ts for DSS shard "
+                      << shard_id << ", current snapshot ts "
+                      << ds_ref.latest_snapshot_ts_
+                      << ", incoming snapshot ts " << snapshot_ts;
+            return;
+        }
+        if (snapshot_ts <= ds_ref.reloading_snapshot_ts_)
+        {
+            LOG(INFO)
+                << "StandbySyncAndReloadData discard request by reloading "
+                   "snapshot ts for DSS shard "
+                << shard_id << ", reloading snapshot ts "
+                << ds_ref.reloading_snapshot_ts_ << ", incoming snapshot ts "
+                << snapshot_ts;
+            return;
+        }
+        ds_ref.is_standby_reloading_ = true;
+        ds_ref.reloading_snapshot_ts_ = snapshot_ts;
+    }
+
+    auto clear_reloading_flag = [&ds_ref, snapshot_ts]() {
+        std::unique_lock<bthread::Mutex> lk(ds_ref.standby_reload_mutex_);
+        if (ds_ref.reloading_snapshot_ts_ == snapshot_ts)
+        {
+            if (snapshot_ts > ds_ref.latest_snapshot_ts_)
+            {
+                ds_ref.latest_snapshot_ts_ = snapshot_ts;
+            }
+            ds_ref.is_standby_reloading_ = false;
+        }
+    };
+
     if (ds_ref.data_store_ != nullptr &&
         ds_ref.shard_status_.load() != DSShardStatus::Closed)
     {
-        LOG(INFO)
-            << "StandbySyncAndReloadData reload data from cloud for DSS shard "
-            << shard_id;
-        ds_ref.data_store_->ReloadDataFromCloud(term);
+        if (data_store_factory_->IsCloudMode())
+        {
+            LOG(INFO) << "StandbySyncAndReloadData reload data from cloud for "
+                         "DSS shard "
+                      << shard_id;
+            ds_ref.data_store_->ReloadDataFromCloud(term);
+        }
+        else
+        {
+            LOG(INFO) << "StandbySyncAndReloadData skip local-standby reload "
+                         "in OnUpdateStandbyCkptTs for DSS shard "
+                      << shard_id
+                      << "; local standby uses NotifyStandbySnapshotReady";
+        }
+
     }
     else
     {
@@ -2319,8 +2509,93 @@ void DataStoreService::OnUpdateStandbyCkptTs(uint32_t shard_id, int64_t term)
                    << shard_id;
     }
 
+    clear_reloading_flag();
+
 #else
     LOG(INFO) << "OnUpdateStandbyCkptTs no-op for non-eloqstore data store";
+#endif
+}
+
+bool DataStoreService::OnStandbySnapshotReady(
+    uint32_t shard_id,
+    int64_t term,
+    uint64_t snapshot_ts,
+    std::unordered_set<uint16_t> &&bucket_ids)
+{
+#ifdef DATA_STORE_TYPE_ELOQDSS_ELOQSTORE
+    auto &ds_ref = data_shards_.at(shard_id);
+    if (data_store_factory_->IsCloudMode())
+    {
+        LOG(INFO) << "OnStandbySnapshotReady ignored in shared storage mode, "
+                  << "shard " << shard_id;
+        return false;
+    }
+
+    std::string snapshot_path_payload;
+    {
+        std::unique_lock<bthread::Mutex> lk(ds_ref.standby_reload_mutex_);
+        snapshot_path_payload = ds_ref.pending_standby_snapshot_path_;
+    }
+    if (snapshot_path_payload.empty())
+    {
+        LOG(ERROR) << "OnStandbySnapshotReady missing standby snapshot payload "
+                      "for shard "
+                   << shard_id;
+        return false;
+    }
+
+    if (ds_ref.shard_status_.load(std::memory_order_acquire) ==
+        DSShardStatus::Closed)
+    {
+        LOG(INFO) << "OnStandbySnapshotReady open data store for local standby, "
+                  << "shard " << shard_id << ", bucket_count "
+                  << bucket_ids.size();
+        OpenDataStore(shard_id, std::move(bucket_ids), term);
+    }
+
+    if (ds_ref.data_store_ != nullptr &&
+        ds_ref.shard_status_.load() != DSShardStatus::Closed)
+    {
+        LOG(INFO) << "OnStandbySnapshotReady reload data from master node for "
+                     "DSS shard "
+                  << shard_id << ", snapshot_ts " << snapshot_ts
+                  << ", incoming_term " << term
+                  << ", reopen_term " << term;
+        return ds_ref.data_store_->ReloadDataFromMasterNode(term, snapshot_ts);
+    }
+    else
+    {
+        LOG(ERROR) << "OnStandbySnapshotReady no-op for DSS shard status is "
+                      "closed or data store is nullptr, "
+                   << shard_id;
+        return false;
+    }
+#else
+    LOG(INFO) << "OnStandbySnapshotReady no-op for non-eloqstore data store";
+    return false;
+#endif
+}
+
+bool DataStoreService::DeleteStandbySnapshot(uint32_t shard_id,
+                                             uint64_t snapshot_ts)
+{
+#ifdef DATA_STORE_TYPE_ELOQDSS_ELOQSTORE
+    auto &ds_ref = data_shards_.at(shard_id);
+    if (ds_ref.data_store_ == nullptr)
+    {
+        LOG(WARNING) << "DeleteStandbySnapshot skipped: data store is nullptr, "
+                     << "shard " << shard_id << ", snapshot_ts " << snapshot_ts;
+        return false;
+    }
+    const std::string tag = "snapshot_" + std::to_string(snapshot_ts);
+    ds_ref.data_store_->DeleteStandbySnapshot(tag);
+    DLOG(INFO) << "DeleteStandbySnapshot submitted, shard " << shard_id
+               << ", tag " << tag;
+    return true;
+#else
+    (void) shard_id;
+    (void) snapshot_ts;
+    return false;
 #endif
 }
 

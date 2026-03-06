@@ -184,6 +184,12 @@ public:
         ::txservice::remote::OnSnapshotSyncedResponse *response,
         ::google::protobuf::Closure *done) override;
 
+    void NotifyStandbySnapshotReady(
+        ::google::protobuf::RpcController *controller,
+        const ::txservice::remote::StandbySnapshotReadyRequest *request,
+        ::txservice::remote::StandbySnapshotReadyResponse *response,
+        ::google::protobuf::Closure *done) override;
+
     void FetchNodeInfo(::google::protobuf::RpcController *controller,
                        const ::txservice::remote::FetchNodeInfoRequest *request,
                        ::txservice::remote::FetchNodeInfoResponse *response,

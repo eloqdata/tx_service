@@ -21,13 +21,18 @@
  */
 #include "data_store_service_client.h"
 
+#include <bthread/condition_variable.h>
+#include <bthread/mutex.h>
 #include <glog/logging.h>
 
 #include <boost/lexical_cast.hpp>
 #include <boost/uuid/uuid.hpp>
 #include <boost/uuid/uuid_generators.hpp>
 #include <boost/uuid/uuid_io.hpp>
+#include <chrono>
+#include <cctype>
 #include <cstdint>
+#include <cstdlib>
 #include <memory>
 #include <random>
 #include <string>
@@ -50,8 +55,52 @@
 #include "tx_service/include/error_messages.h"
 #include "tx_service/include/sequences/sequences.h"
 
+#ifdef DATA_STORE_TYPE_ELOQDSS_ELOQSTORE
+#include "gflags/gflags.h"
+DECLARE_string(eloq_store_data_path_list);
+DECLARE_string(tx_standby_ip_port_list);
+#endif
+
 namespace EloqDS
 {
+
+#ifdef DATA_STORE_TYPE_ELOQDSS_ELOQSTORE
+namespace
+{
+struct StandbySnapshotReadyRpcCtx
+{
+    bthread::Mutex mux;
+    bthread::ConditionVariable cv;
+    bool done{false};
+    brpc::Controller cntl;
+    txservice::remote::StandbySnapshotReadyRequest req;
+    txservice::remote::StandbySnapshotReadyResponse resp;
+};
+
+class StandbySnapshotReadyRpcDone : public ::google::protobuf::Closure
+{
+public:
+    explicit StandbySnapshotReadyRpcDone(
+        std::shared_ptr<StandbySnapshotReadyRpcCtx> ctx)
+        : ctx_(std::move(ctx))
+    {
+    }
+
+    void Run() override
+    {
+        {
+            std::unique_lock<bthread::Mutex> lk(ctx_->mux);
+            ctx_->done = true;
+            ctx_->cv.notify_one();
+        }
+        delete this;
+    }
+
+private:
+    std::shared_ptr<StandbySnapshotReadyRpcCtx> ctx_;
+};
+}  // namespace
+#endif
 
 thread_local ObjectPool<BatchWriteRecordsClosure> batch_write_closure_pool_;
 thread_local ObjectPool<FlushDataClosure> flush_data_closure_pool_;
@@ -3624,6 +3673,131 @@ bool DataStoreServiceClient::CreateSnapshotForBackup(
     return !callback_data->HasError();
 }
 
+bool DataStoreServiceClient::CreateSnapshotForStandby(
+    std::vector<std::string> &snapshot_files)
+{
+    const uint64_t snapshot_ts =
+        static_cast<uint64_t>(std::chrono::duration_cast<
+                                  std::chrono::microseconds>(
+                                  std::chrono::system_clock::now()
+                                      .time_since_epoch())
+                                  .count());
+    const bool ok =
+        CreateSnapshotForBackup("standby_snapshot", snapshot_files, snapshot_ts);
+    if (ok)
+    {
+        latest_standby_snapshot_ts_.store(snapshot_ts,
+                                          std::memory_order_release);
+    }
+    return ok;
+}
+
+bool DataStoreServiceClient::SendSnapshotToRemote(
+    uint32_t ng_id,
+    int64_t ng_term,
+    std::vector<std::string> &snapshot_files,
+    const std::string &remote_dest,
+    uint32_t standby_node_id)
+{
+    (void) snapshot_files;
+    DLOG(INFO) << "DataStoreServiceClient::SendSnapshotToRemote begin, ng_id="
+               << ng_id << ", ng_term=" << ng_term
+               << ", snapshot_files=" << snapshot_files.size()
+               << ", remote_dest=" << remote_dest;
+
+#ifdef DATA_STORE_TYPE_ELOQDSS_ELOQSTORE
+    if (IsSharedStorage())
+    {
+        DLOG(INFO) << "SendSnapshotToRemote skip standby reopen notify in "
+                      "shared storage mode, ng_id="
+                   << ng_id << ", ng_term=" << ng_term;
+        return true;
+    }
+    if (standby_node_id == UINT32_MAX)
+    {
+        LOG(ERROR) << "SendSnapshotToRemote missing standby_node_id for "
+                      "eloqstore, ng_id="
+                   << ng_id;
+        return false;
+    }
+
+    auto channel =
+        txservice::Sharder::Instance().GetCcNodeServiceChannel(standby_node_id);
+    if (channel == nullptr)
+    {
+        LOG(ERROR) << "SendSnapshotToRemote cannot get standby cc channel, "
+                   << "ng_id=" << ng_id
+                   << ", standby_node_id=" << standby_node_id;
+        return false;
+    }
+
+    const uint64_t snapshot_ts =
+        latest_standby_snapshot_ts_.load(std::memory_order_acquire);
+    txservice::remote::CcRpcService_Stub stub(channel.get());
+    auto rpc_ctx = std::make_shared<StandbySnapshotReadyRpcCtx>();
+    rpc_ctx->cntl.set_timeout_ms(60000);
+    rpc_ctx->req.set_ng_id(ng_id);
+    rpc_ctx->req.set_ng_term(ng_term);
+    rpc_ctx->req.set_snapshot_ts(snapshot_ts);
+    DLOG(INFO) << "SendSnapshotToRemote notify standby reopen, ng_id=" << ng_id
+               << ", ng_term=" << ng_term
+               << ", standby_node_id=" << standby_node_id
+               << ", snapshot_ts=" << snapshot_ts
+               << ", role=leader";
+    stub.NotifyStandbySnapshotReady(
+        &rpc_ctx->cntl,
+        &rpc_ctx->req,
+        &rpc_ctx->resp,
+        new StandbySnapshotReadyRpcDone(rpc_ctx));
+
+    constexpr int64_t kWaitSliceUs = 1000 * 1000;      // 1s
+    constexpr int64_t kTotalTimeoutUs = 60 * 1000 * 1000;  // 60s
+    int64_t waited_us = 0;
+    {
+        std::unique_lock<bthread::Mutex> lk(rpc_ctx->mux);
+        while (!rpc_ctx->done && waited_us < kTotalTimeoutUs)
+        {
+            const int64_t step_us = std::min(
+                kWaitSliceUs, static_cast<int64_t>(kTotalTimeoutUs - waited_us));
+            rpc_ctx->cv.wait_for(lk, step_us);
+            waited_us += step_us;
+        }
+    }
+    if (!rpc_ctx->done)
+    {
+        LOG(ERROR)
+            << "SendSnapshotToRemote NotifyStandbySnapshotReady timeout, "
+            << "ng_id=" << ng_id << ", standby_node_id=" << standby_node_id
+            << ", wait_us=" << waited_us << ", role=leader";
+        return false;
+    }
+
+    if (rpc_ctx->cntl.Failed() || rpc_ctx->resp.error())
+    {
+        LOG(ERROR) << "SendSnapshotToRemote NotifyStandbySnapshotReady failed, "
+                   << "ng_id=" << ng_id
+                   << ", standby_node_id=" << standby_node_id
+                   << ", brpc_failed=" << rpc_ctx->cntl.Failed()
+                   << ", error_code=" << rpc_ctx->cntl.ErrorCode()
+                   << ", error_text=" << rpc_ctx->cntl.ErrorText()
+                   << ", resp_error=" << rpc_ctx->resp.error()
+                   << ", role=leader";
+        return false;
+    }
+    DLOG(INFO) << "SendSnapshotToRemote notify standby reopen succeeded, ng_id="
+               << ng_id << ", standby_node_id=" << standby_node_id
+               << ", snapshot_ts=" << snapshot_ts
+               << ", role=leader";
+    return true;
+#else
+    (void) ng_id;
+    (void) ng_term;
+    (void) remote_dest;
+    (void) standby_node_id;
+    return true;
+#endif
+}
+
 /**
  * @brief Internal method for creating snapshots for backup operations.
  *
@@ -3727,6 +3901,15 @@ bool DataStoreServiceClient::OnLeaderStart(uint32_t ng_id,
 
     if (data_store_service_ != nullptr)
     {
+#ifdef DATA_STORE_TYPE_ELOQDSS_ELOQSTORE
+        const bool enable_local_standby = !FLAGS_tx_standby_ip_port_list.empty();
+        data_store_service_->SetEnableLocalStandbyForEloqStore(
+            enable_local_standby);
+        DLOG(INFO) << "OnLeaderStart set eloqstore enable_local_standby="
+                   << enable_local_standby
+                   << ", tx_standby_ip_port_list="
+                   << FLAGS_tx_standby_ip_port_list;
+#endif
         // If the node is standby, close the data store opened before.
         data_store_service_->CloseDataStore(ng_id);
 
@@ -3784,6 +3967,15 @@ void DataStoreServiceClient::OnStartFollowing(uint32_t ng_id,
 
     if (data_store_service_ != nullptr)
     {
+#ifdef DATA_STORE_TYPE_ELOQDSS_ELOQSTORE
+        const bool enable_local_standby = !FLAGS_tx_standby_ip_port_list.empty();
+        data_store_service_->SetEnableLocalStandbyForEloqStore(
+            enable_local_standby);
+        DLOG(INFO) << "OnStartFollowing set eloqstore enable_local_standby="
+                   << enable_local_standby
+                   << ", tx_standby_ip_port_list="
+                   << FLAGS_tx_standby_ip_port_list;
+#endif
         data_store_service_->CloseDataStore(ng_id);
     }
 
@@ -3832,6 +4024,15 @@ void DataStoreServiceClient::OnShutdown()
 {
 }
 
+std::string DataStoreServiceClient::SnapshotSyncDestPath() const
+{
+#ifdef DATA_STORE_TYPE_ELOQDSS_ELOQSTORE
+    return FLAGS_eloq_store_data_path_list;
+#else
+    return std::string("");
+#endif
+}
+
 bool DataStoreServiceClient::OnSnapshotReceived(
     const txservice::remote::OnSnapshotSyncedRequest *req)
 {
@@ -3839,6 +4040,10 @@ bool DataStoreServiceClient::OnSnapshotReceived(
     if (data_store_service_ != nullptr)
     {
         uint32_t ng_id = req->ng_id();
+        DLOG(INFO) << "DataStoreServiceClient::OnSnapshotReceived, ng_id="
+                   << ng_id
+                   << ", standby_term=" << req->standby_node_term()
+                   << ", snapshot_path=<ignored>";
         std::unordered_set<uint16_t> bucket_ids;
         for (auto &[bucket_id, bucket_info] : bucket_infos_)
         {
@@ -3849,8 +4054,12 @@ bool DataStoreServiceClient::OnSnapshotReceived(
         }
         int64_t term =
             txservice::PrimaryTermFromStandbyTerm(req->standby_node_term());
+        DLOG(INFO) << "DataStoreServiceClient::OnSnapshotReceived dispatch to "
+                      "data store service, ng_id="
+                   << ng_id << ", primary_term=" << term
+                   << ", bucket_count=" << bucket_ids.size();
         data_store_service_->OnSnapshotReceived(
-            ng_id, term, std::move(bucket_ids), req->snapshot_path());
+            ng_id, term, std::move(bucket_ids), std::string());
 
         return true;
     }
@@ -3859,15 +4068,79 @@ bool DataStoreServiceClient::OnSnapshotReceived(
 }
 
 bool DataStoreServiceClient::OnUpdateStandbyCkptTs(uint32_t ng_id,
-                                                   int64_t ng_term)
+                                                   int64_t ng_term,
+                                                   uint64_t snapshot_ts)
 {
 #ifdef DATA_STORE_TYPE_ELOQDSS_ELOQSTORE
     if (data_store_service_ != nullptr)
     {
-        data_store_service_->OnUpdateStandbyCkptTs(ng_id, ng_term);
+        data_store_service_->OnUpdateStandbyCkptTs(
+            ng_id, ng_term, snapshot_ts);
     }
 #endif
     return true;
+}
+
+bool DataStoreServiceClient::OnStandbySnapshotReady(uint32_t ng_id,
+                                                    int64_t ng_term,
+                                                    uint64_t snapshot_ts)
+{
+#ifdef DATA_STORE_TYPE_ELOQDSS_ELOQSTORE
+    if (data_store_service_ != nullptr)
+    {
+        std::unordered_set<uint16_t> bucket_ids;
+        for (auto &[bucket_id, bucket_info] : bucket_infos_)
+        {
+            if (bucket_info->BucketOwner() == ng_id)
+            {
+                bucket_ids.insert(bucket_id);
+            }
+        }
+        return data_store_service_->OnStandbySnapshotReady(
+            ng_id, ng_term, snapshot_ts, std::move(bucket_ids));
+    }
+#else
+    (void) ng_id;
+    (void) ng_term;
+    (void) snapshot_ts;
+#endif
+    return false;
+}
+
+uint64_t DataStoreServiceClient::LatestStandbySnapshotTs() const
+{
+    return latest_standby_snapshot_ts_.load(std::memory_order_acquire);
+}
+
+void DataStoreServiceClient::DeleteStandbySnapshot(uint32_t ng_id,
+                                                   uint64_t snapshot_ts)
+{
+#ifdef DATA_STORE_TYPE_ELOQDSS_ELOQSTORE
+    if (data_store_service_ == nullptr)
+    {
+        return;
+    }
+    const bool ok = data_store_service_->DeleteStandbySnapshot(ng_id, snapshot_ts);
+    DLOG(INFO) << "DataStoreServiceClient::DeleteStandbySnapshot, ng_id=" << ng_id
+               << ", snapshot_ts=" << snapshot_ts << ", ok=" << ok;
+#else
+    (void) ng_id;
+    (void) snapshot_ts;
+#endif
+}
+
+void DataStoreServiceClient::SetStandbySnapshotPayload(
+    uint32_t ng_id, const std::string &snapshot_path)
+{
+#ifdef DATA_STORE_TYPE_ELOQDSS_ELOQSTORE
+    if (data_store_service_ != nullptr)
+    {
+        data_store_service_->SetStandbySnapshotPayload(ng_id, snapshot_path);
+    }
+#else
+    (void) ng_id;
+    (void) snapshot_path;
+#endif
 }
 
 /**

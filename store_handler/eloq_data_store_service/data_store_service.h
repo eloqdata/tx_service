@@ -655,6 +655,8 @@ public:
         return data_store_factory_->IsCloudMode();
     }
 
+    void SetEnableLocalStandbyForEloqStore(bool enable);
+
     void CloseDataStore(uint32_t shard_id);
     void OpenDataStore(uint32_t shard_id,
                        std::unordered_set<uint16_t> &&bucket_ids,
@@ -666,9 +668,20 @@ public:
                             int64_t term,
                             std::unordered_set<uint16_t> &&bucket_ids,
                             const std::string &snapshot_path);
+    void SetStandbySnapshotPayload(uint32_t shard_id,
+                                   const std::string &snapshot_path);
     // When primary flush data to cloud, the standby node will call this
     // function to sync the data from cloud.
-    void OnUpdateStandbyCkptTs(uint32_t shard_id, int64_t ng_term);
+    void OnUpdateStandbyCkptTs(uint32_t shard_id,
+                               int64_t ng_term,
+                               uint64_t snapshot_ts);
+    // Standby notification for non-shared storage mode: trigger reopen from
+    // master snapshot tag directly.
+    bool OnStandbySnapshotReady(uint32_t shard_id,
+                                int64_t ng_term,
+                                uint64_t snapshot_ts,
+                                std::unordered_set<uint16_t> &&bucket_ids);
+    bool DeleteStandbySnapshot(uint32_t shard_id, uint64_t snapshot_ts);
 
     DataStoreServiceClusterManager &GetClusterManager()
     {
@@ -751,6 +764,14 @@ private:
         // Whether the file cache sync is running. Used to avoid concurrent
         // local ssd file operations between db and file sync worker.
         std::atomic<bool> is_file_sync_running_{false};
+
+        // Guard standby reload state for this shard.
+        bthread::Mutex standby_reload_mutex_;
+        // Latest applied standby snapshot timestamp for this shard.
+        uint64_t latest_snapshot_ts_{0};
+        bool is_standby_reloading_{false};
+        uint64_t reloading_snapshot_ts_{0};
+        std::string pending_standby_snapshot_path_;
     };
 
     std::array<DataShard, 1000> data_shards_;

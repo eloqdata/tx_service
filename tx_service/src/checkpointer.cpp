@@ -26,6 +26,7 @@
 #include <cstdint>
 #include <cstdio>
 #include <string>
+#include <vector>
 
 #include "catalog_key_record.h"
 #include "cc_request.h"
@@ -166,6 +167,7 @@ void Checkpointer::Ckpt(bool is_last_ckpt)
             snapshot_req.set_standby_node_term(candidate_standby_node_term);
             snapshot_req.set_standby_node_id(Sharder::Instance().NodeId());
 
+#ifndef DATA_STORE_TYPE_ELOQDSS_ELOQSTORE
             std::array<char, 200> buffer;
             std::string username;
             FILE *output_stream = popen("echo $USER", "r");
@@ -182,7 +184,15 @@ void Checkpointer::Ckpt(bool is_last_ckpt)
             pclose(output_stream);
 
             snapshot_req.set_user(username);
-            snapshot_req.set_dest_path(store_hd_->SnapshotSyncDestPath());
+            const std::string dest_path = store_hd_->SnapshotSyncDestPath();
+            snapshot_req.set_dest_path(dest_path);
+#endif
+            DLOG(INFO) << "Checkpointer send RequestStorageSnapshotSync, ng_id="
+                       << snapshot_req.ng_id()
+                       << ", standby_node_id="
+                       << snapshot_req.standby_node_id()
+                       << ", standby_node_term="
+                       << snapshot_req.standby_node_term();
             brpc::Controller cntl;
             stub.RequestStorageSnapshotSync(
                 &cntl, &snapshot_req, &snapshot_resp, nullptr);
@@ -338,6 +348,14 @@ void Checkpointer::Ckpt(bool is_last_ckpt)
                 assert(standby_node_term < 0 && leader_term >= 0);
                 NotifyLogOfCkptTs(node_group, leader_term, last_succ_ckpt_ts);
 
+#ifdef DATA_STORE_TYPE_ELOQDSS_ELOQSTORE
+                auto store_handler = Sharder::Instance().GetDataStoreHandler();
+                if (!store_handler->IsSharedStorage())
+                {
+                    std::vector<std::string> snapshot_files;
+                    store_handler->CreateSnapshotForStandby(snapshot_files);
+                }
+#endif
                 BrocastPrimaryCkptTs(node_group,
                                      leader_term,
                                      last_succ_ckpt_ts,
@@ -403,6 +421,17 @@ void Checkpointer::Ckpt(bool is_last_ckpt)
                             NotifyLogOfCkptTs(node_group,
                                               leader_term,
                                               status->truncate_log_ts_);
+
+#ifdef DATA_STORE_TYPE_ELOQDSS_ELOQSTORE
+                            auto store_handler =
+                                Sharder::Instance().GetDataStoreHandler();
+                            if (!store_handler->IsSharedStorage())
+                            {
+                                std::vector<std::string> snapshot_files;
+                                store_handler->CreateSnapshotForStandby(
+                                    snapshot_files);
+                            }
+#endif
 
                             BrocastPrimaryCkptTs(node_group,
                                                  leader_term,

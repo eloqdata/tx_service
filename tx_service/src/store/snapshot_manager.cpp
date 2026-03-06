@@ -21,6 +21,8 @@
  */
 #include "store/snapshot_manager.h"
 
+#include <gflags/gflags.h>
+
 #include <vector>
 
 #include "cc/local_cc_shards.h"
@@ -30,7 +32,6 @@ namespace txservice
 
 namespace store
 {
-
 void SnapshotManager::Start()
 {
     standby_sync_worker_ = std::thread([this] { StandbySyncWorker(); });
@@ -74,7 +75,9 @@ void SnapshotManager::OnSnapshotSyncRequested(
 {
     DLOG(INFO) << "Received snapshot sync request from standby node #"
                << req->standby_node_id()
-               << " for standby term: " << req->standby_node_term();
+               << " for standby term: " << req->standby_node_term()
+               << ", ng_id=" << req->ng_id()
+               << ", dest_path=" << req->dest_path();
     assert(store_hd_ != nullptr);
     if (store_hd_ == nullptr)
     {
@@ -147,6 +150,7 @@ void SnapshotManager::SyncWithStandby()
     // Now take a snapshot for non-shared storage, and then send to standby
     // node.
     std::vector<std::string> snapshot_files;
+    uint64_t standby_snapshot_ts = 0;
     if (!store_hd_->IsSharedStorage())
     {
         bool res = store_hd_->CreateSnapshotForStandby(snapshot_files);
@@ -155,6 +159,10 @@ void SnapshotManager::SyncWithStandby()
             LOG(ERROR) << "Failed to create snpashot for sync with standby";
             return;
         }
+        standby_snapshot_ts = store_hd_->LatestStandbySnapshotTs();
+        DLOG(INFO) << "SyncWithStandby created standby snapshot, ng_id="
+                   << node_group << ", term=" << leader_term
+                   << ", snapshot_ts=" << standby_snapshot_ts;
     }
 
     std::vector<remote::StorageSnapshotSyncRequest> tasks;
@@ -216,13 +224,16 @@ void SnapshotManager::SyncWithStandby()
         }
     }
 
+    bool all_notify_succeeded = true;
     for (auto &req : tasks)
     {
         uint32_t node_id = req.standby_node_id();
         std::string ip;
         uint16_t port;
         Sharder::Instance().GetNodeAddress(node_id, ip, port);
+#ifndef DATA_STORE_TYPE_ELOQDSS_ELOQSTORE
         std::string remote_dest = req.user() + "@" + ip + ":" + req.dest_path();
+#endif
         int64_t req_standby_node_term = req.standby_node_term();
         int64_t req_primary_term =
             PrimaryTermFromStandbyTerm(req_standby_node_term);
@@ -230,14 +241,31 @@ void SnapshotManager::SyncWithStandby()
         if (!Sharder::Instance().CheckLeaderTerm(req.ng_id(), req_primary_term))
         {
             // Abort immediately if term no longer match.
+            DLOG(INFO) << "Skip snapshot sync send due to term mismatch, ng_id="
+                       << req.ng_id() << ", standby_node_id=" << node_id
+                       << ", standby_term=" << req_standby_node_term
+                       << ", primary_term=" << req_primary_term;
             return;
         }
 
         bool succ = true;
-        if (!snapshot_files.empty())
+        if (!store_hd_->IsSharedStorage() || !snapshot_files.empty())
         {
+            DLOG(INFO) << "SyncWithStandby sending snapshot to standby, ng_id="
+                       << req.ng_id() << ", standby_node_id=" << node_id
+                       << ", standby_term=" << req_standby_node_term
+                       << ", primary_term=" << req_primary_term
+                       << ", shared_storage=" << store_hd_->IsSharedStorage()
+                       << ", snapshot_files=" << snapshot_files.size();
             succ = store_hd_->SendSnapshotToRemote(
-                req.ng_id(), req_primary_term, snapshot_files, remote_dest);
+                req.ng_id(),
+                req_primary_term,
+                snapshot_files,
+                "",
+                req.standby_node_id());
+            DLOG(INFO) << "SyncWithStandby send snapshot finished, ng_id="
+                       << req.ng_id() << ", standby_node_id=" << node_id
+                       << ", success=" << succ;
         }
 
         if (succ)
@@ -257,11 +285,26 @@ void SnapshotManager::SyncWithStandby()
                 int retry_times = 5;
                 while (retry_times-- > 0)
                 {
+                    DLOG(INFO) << "OnSnapshotSynced notify attempt, ng_id="
+                               << req.ng_id()
+                               << ", standby_node_id=" << req.standby_node_id()
+                               << ", standby_term=" << req.standby_node_term()
+                               << ", retries_left=" << retry_times;
                     brpc::Controller cntl;
                     cntl.set_timeout_ms(1000);
                     remote::OnSnapshotSyncedRequest on_synced_req;
                     remote::OnSnapshotSyncedResponse on_sync_resp;
-                    on_synced_req.set_snapshot_path(req.dest_path());
+                    std::string synced_snapshot_path;
+#ifdef DATA_STORE_TYPE_ELOQDSS_ELOQSTORE
+                    synced_snapshot_path.clear();
+#endif
+                    DLOG(INFO) << "Assign snapshot_path for OnSnapshotSynced, "
+                               << "ng_id=" << req.ng_id()
+                               << ", standby_node_id="
+                               << req.standby_node_id()
+                               << ", standby_term=" << req.standby_node_term()
+                               << ", snapshot_path=" << synced_snapshot_path;
+                    on_synced_req.set_snapshot_path(synced_snapshot_path);
                     on_synced_req.set_standby_node_term(
                         req.standby_node_term());
                     on_synced_req.set_ng_id(req.ng_id());
@@ -279,6 +322,11 @@ void SnapshotManager::SyncWithStandby()
                     }
                     else
                     {
+                        DLOG(INFO)
+                            << "OnSnapshotSynced notify succeeded, ng_id="
+                            << req.ng_id() << ", standby_node_id="
+                            << req.standby_node_id() << ", standby_term="
+                            << req.standby_node_term();
                         break;
                     }
                 }
@@ -320,7 +368,23 @@ void SnapshotManager::SyncWithStandby()
                 }
             }
         }
+        else
+        {
+            all_notify_succeeded = false;
+        }
     }
+
+#ifdef DATA_STORE_TYPE_ELOQDSS_ELOQSTORE
+    if (!store_hd_->IsSharedStorage() && standby_snapshot_ts != 0 &&
+        all_notify_succeeded)
+    {
+        DLOG(INFO) << "SyncWithStandby deleting standby snapshot archive, ng_id="
+                   << node_group << ", term=" << leader_term
+                   << ", snapshot_ts=" << standby_snapshot_ts
+                   << ", follower_count=" << tasks.size();
+        store_hd_->DeleteStandbySnapshot(node_group, standby_snapshot_ts);
+    }
+#endif
 }
 
 bool SnapshotManager::RunOneRoundCheckpoint(uint32_t node_group,

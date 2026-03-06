@@ -253,8 +253,15 @@ public:
     void SwitchToReadWrite() override;
 
     void CreateSnapshotForBackup(CreateSnapshotForBackupRequest *req) override;
+    void DeleteStandbySnapshot(std::string_view tag) override;
 
     void ReloadDataFromCloud(int64_t term) override;
+    bool ReloadDataFromMasterNode(int64_t term, uint64_t snapshot_ts) override;
+    void UpdateStandbyMasterStorePaths(
+        const std::vector<std::string> &store_paths,
+        const std::vector<uint64_t> &store_path_weights) override;
+    void UpdateStandbyMasterAddr(
+        const std::string &standby_master_addr) override;
 
 private:
     static void OnRead(::eloqstore::KvRequest *req);

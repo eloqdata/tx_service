@@ -698,7 +698,8 @@ public:
     bool SendSnapshotToRemote(uint32_t ng_id,
                               int64_t ng_term,
                               std::vector<std::string> &snapshot_files,
-                              const std::string &remote_dest) override;
+                              const std::string &remote_dest,
+                              uint32_t standby_node_id = UINT32_MAX) override;
 
     bool OnSnapshotReceived(
         const txservice::remote::OnSnapshotSyncedRequest *req) override;
@@ -754,7 +755,8 @@ public:
     bool SendSnapshotToRemote(uint32_t ng_id,
                               int64_t ng_term,
                               std::vector<std::string> &snapshot_files,
-                              const std::string &remote_dest) override;
+                              const std::string &remote_dest,
+                              uint32_t standby_node_id = UINT32_MAX) override;
 
     bool OnSnapshotReceived(
         const txservice::remote::OnSnapshotSyncedRequest *req) override;

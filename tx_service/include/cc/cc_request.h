@@ -6024,7 +6024,8 @@ public:
     bool Execute(CcShard &ccs) override
     {
         int64_t ng_term = Sharder::Instance().LeaderTerm(node_group_id_);
-        if (ng_term < 0 && clean_type_ == CleanType::CleanDeletedData)
+        if (ng_term < 0 && (clean_type_ == CleanType::CleanDeletedData ||
+            clean_type_ == CleanType::CleanDataForTest))
         {
             // Purge deleted data is the only type of kickout cc that will
             // be executed on standby node.

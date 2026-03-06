@@ -1531,6 +1531,7 @@ public:
     virtual uint32_t GetShardId() const = 0;
 
     virtual std::string_view GetBackupName() const = 0;
+    virtual bool IsStandbySnapshot() const = 0;
     virtual uint64_t GetBackupTs() const = 0;
     virtual void AddBackupFile(const std::string &file) = 0;
 
@@ -1575,6 +1576,11 @@ public:
     std::string_view GetBackupName() const override
     {
         return req_->backup_name();
+    }
+
+    bool IsStandbySnapshot() const override
+    {
+        return req_->backup_name() == "standby_snapshot";
     }
 
     uint64_t GetBackupTs() const override
@@ -1650,6 +1656,11 @@ public:
     std::string_view GetBackupName() const override
     {
         return backup_name_;
+    }
+
+    bool IsStandbySnapshot() const override
+    {
+        return backup_name_ == "standby_snapshot";
     }
 
     void AddBackupFile(const std::string &file) override
