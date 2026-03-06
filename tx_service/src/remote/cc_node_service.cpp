@@ -1395,30 +1395,32 @@ void CcNodeService::UploadBatchSlices(
     }
 
     UploadBatchSlicesCc req;
-    req.Reset(
-        table_name, ng_id, ng_term, core_cnt, write_entry_tuple, slices_info);
+    req.Reset(table_name, ng_id, ng_term, write_entry_tuple, slices_info);
 
-    // Select a core randomly to parse items. After parsed, this core will push
-    // the request to other cores to emplace keys.
-    uint16_t rand_core = std::rand() % core_cnt;
-    cc_shards->EnqueueToCcShard(rand_core, &req);
+    uint16_t dest_core =
+        static_cast<uint16_t>((slices_info->new_range_ & 0x3FF) % core_cnt);
+    cc_shards->EnqueueToCcShard(dest_core, &req);
     req.Wait();
 
     CcErrorCode err = CcErrorCode::NO_ERROR;
     if (req.ErrorCode() != CcErrorCode::NO_ERROR)
     {
-        LOG(INFO) << "CcNodeService UploadBatch RPC of #ng" << ng_id
+        LOG(INFO) << "CcNodeService UploadBatchRecordCache RPC of #ng" << ng_id
+                  << " for range#" << slices_info->range_ << ", new_range#"
+                  << slices_info->new_range_
                   << " finished with error: " << static_cast<uint32_t>(err);
         err = req.ErrorCode();
     }
     else
     {
-        DLOG(INFO) << "CcNodeService UploadBatch RPC of #ng" << ng_id
+        DLOG(INFO) << "CcNodeService UploadBatchRecordCache RPC of #ng" << ng_id
+                   << " for range#" << slices_info->range_ << ", new_range#"
+                   << slices_info->new_range_
                    << " finished with error: " << static_cast<uint32_t>(err);
     }
 
     response->set_error_code(ToRemoteType::ConvertCcErrorCode(err));
-    response->set_ng_term(ng_term);
+    response->set_ng_term(req.CcNgTerm());
 }
 
 void CcNodeService::FetchPayload(
