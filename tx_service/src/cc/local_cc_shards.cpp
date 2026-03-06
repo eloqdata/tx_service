@@ -5755,7 +5755,9 @@ void LocalCcShards::FlushData(std::unique_lock<std::mutex> &flush_worker_lk)
                         size_t key_core_idx = 0;
                         if (!table_name.IsHashPartitioned())
                         {
-                            key_core_idx = (rec.Key().Hash() & 0x3FF) % Count();
+                            int32_t range_id = entry->data_sync_task_->id_;
+                            key_core_idx =
+                                static_cast<size_t>(range_id % Count());
                         }
                         else
                         {
