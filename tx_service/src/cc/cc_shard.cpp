@@ -3467,6 +3467,31 @@ void CcShard::RecycleTxLockInfo(TxLockInfo::uptr lock_info)
     tx_lock_info_head_.next_ = std::move(lock_info);
 }
 
+void CcShard::CreateSplitRangeDataSyncTask(const TableName &table_name,
+                                           uint32_t ng_id,
+                                           int64_t ng_term,
+                                           int32_t range_id)
+{
+    std::shared_ptr<DataSyncStatus> status =
+        std::make_shared<DataSyncStatus>(ng_id, ng_term, false);
+    TableRangeEntry *range_entry = const_cast<TableRangeEntry *>(
+        local_shards_.GetTableRangeEntry(table_name, ng_id, range_id));
+    assert(range_entry != nullptr);
+    uint64_t data_sync_ts = local_shards_.ClockTs();
+    uint64_t last_sync_ts = 0;
+    local_shards_.EnqueueRangeDataSyncTask(table_name,
+                                           ng_id,
+                                           ng_term,
+                                           range_entry,
+                                           data_sync_ts,
+                                           false,
+                                           false,
+                                           last_sync_ts,
+                                           status,
+                                           nullptr,
+                                           true);
+}
+
 void CcShard::CollectCacheHit()
 {
     assert(metrics::enable_cache_hit_rate);

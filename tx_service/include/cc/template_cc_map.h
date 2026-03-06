@@ -632,9 +632,21 @@ public:
                                              old_payload_size));
                         const uint32_t range_id = req.PartitionId();
                         // is_dirty: true when range is splitting.
-                        UpdateRangeSize(range_id,
-                                        static_cast<int32_t>(key_delta_size),
-                                        req.OnDirtyRange());
+                        bool need_split = UpdateRangeSize(
+                            range_id,
+                            static_cast<int32_t>(key_delta_size),
+                            req.OnDirtyRange());
+
+                        if (need_split)
+                        {
+                            assert(!req.OnDirtyRange());
+                            // Create a data sync task for the range.
+                            shard_->CreateSplitRangeDataSyncTask(
+                                table_name_,
+                                cc_ng_id_,
+                                cce_addr->Term(),
+                                range_id);
+                        }
                     }
                 }
 
@@ -11422,7 +11434,7 @@ protected:
         return &pos_inf_page_;
     }
 
-    void UpdateRangeSize(uint32_t partition_id,
+    bool UpdateRangeSize(uint32_t partition_id,
                          int32_t delta_size,
                          bool is_dirty)
     {
@@ -11451,7 +11463,7 @@ protected:
                                             static_cast<int32_t>(partition_id),
                                             cc_ng_id_,
                                             ng_term);
-                return;
+                return false;
             }
 
             if (it->second.first ==
@@ -11466,8 +11478,14 @@ protected:
                 assert(delta_size >= 0 ||
                        it->second.first >= static_cast<int32_t>(-delta_size));
                 it->second.first += delta_size;
+
+                return !is_dirty &&
+                       it->second.first >=
+                           static_cast<int32_t>(StoreRange::range_max_size);
             }
         }  // RangePartitioned
+
+        return false;
     }
 
     absl::btree_map<
