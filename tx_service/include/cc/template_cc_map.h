@@ -7439,22 +7439,12 @@ public:
             {
                 // Parsed all records
                 req.SetParsed();
-
-                // Emplace key on all cores
-                for (size_t core = 0; core < shard_->core_cnt_; ++core)
-                {
-                    if (core != shard_->core_id_)
-                    {
-                        shard_->Enqueue(shard_->core_id_, core, &req);
-                    }
-                }
             }
-
         }  // end-parsed
 
-        std::deque<SliceDataItem> &slice_vec = req.SliceData(shard_->core_id_);
+        std::deque<SliceDataItem> &slice_vec = req.SliceData();
 
-        size_t index = req.NextIndex(shard_->core_id_);
+        size_t index = req.NextIndex();
         size_t last_index = std::min(
             index + UploadBatchSlicesCc::MaxEmplaceBatchSize, slice_vec.size());
 
@@ -7490,7 +7480,7 @@ public:
         else
         {
             index = last_index;
-            req.SetNextIndex(shard_->core_id_, index);
+            req.SetNextIndex(index);
             shard_->Enqueue(shard_->LocalCoreId(), &req);
         }
         return false;
