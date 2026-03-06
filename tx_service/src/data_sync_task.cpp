@@ -79,7 +79,8 @@ DataSyncTask::DataSyncTask(const TableName &table_name,
       range_entry_(range_entry),
       during_split_range_(true),
       export_base_table_items_(export_base_table_items),
-      tx_number_(txn)
+      tx_number_(txn),
+      high_priority_(false)
 {
     assert(!table_name_.IsHashPartitioned());
     if (start_key_.KeyPtr() ==
@@ -98,7 +99,15 @@ DataSyncTask::DataSyncTask(const TableName &table_name,
                                   .GetLocalCcShards()
                                   ->GetRangeOwner(id_, ng_id)
                                   ->BucketOwner();
-    need_update_ckpt_ts_ = range_owner == ng_id;
+
+    size_t local_shard_count = Sharder::Instance().GetLocalCcShardsCount();
+    int32_t old_range_id = range_entry_->GetRangeInfo()->PartitionId();
+    uint16_t old_range_owner_shard =
+        static_cast<uint16_t>((old_range_id & 0x3FF) % local_shard_count);
+    uint16_t new_range_owner_shard =
+        static_cast<uint16_t>((id_ & 0x3FF) % local_shard_count);
+    need_update_ckpt_ts_ =
+        range_owner == ng_id && old_range_owner_shard == new_range_owner_shard;
 }
 
 void DataSyncTask::SetFinish()
