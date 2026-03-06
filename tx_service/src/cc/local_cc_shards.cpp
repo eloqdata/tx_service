@@ -131,15 +131,7 @@ LocalCcShards::LocalCcShards(
 #endif
 
       data_sync_worker_ctx_(conf.at("core_num")),
-#ifdef EXT_TX_PROC_ENABLED
-      flush_data_worker_ctx_(
-          conf.at("core_num") >= 2
-              ? std::min(conf.at("core_num") / 2, (uint32_t) 10)
-              : 1),
-#else
-      flush_data_worker_ctx_(
-          std::min(static_cast<int>(conf.at("core_num")), 10)),
-#endif
+      flush_data_worker_ctx_(conf.at("core_num")),
       // cur_flush_buffers_ will be resized in StartBackgroudWorkers()
       // when worker_num_ is determined
       data_sync_mem_controller_(static_cast<uint64_t>(
