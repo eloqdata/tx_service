@@ -1161,6 +1161,11 @@ public:
 
     void DeleteSchemaCntl(const TableName &tbl_name);
 
+    void CreateSplitRangeDataSyncTask(const TableName &table_name,
+                                      uint32_t ng_id,
+                                      int64_t ng_term,
+                                      int32_t range_id);
+
     void ClearNativeSchemaCntl();
     void CollectCacheHit();
     void CollectCacheMiss();
