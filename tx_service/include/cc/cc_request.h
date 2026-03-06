@@ -8113,25 +8113,19 @@ public:
     void Reset(const TableName &table_name,
                txservice::NodeGroupId ng_id,
                int64_t &ng_term,
-               size_t core_cnt,
                const WriteEntryTuple &entry_tuple,
                std::shared_ptr<SliceUpdation> slice_info)
     {
         table_name_ = &table_name;
         node_group_id_ = ng_id;
         node_group_term_ = &ng_term;
-        core_cnt_ = core_cnt;
-        partitioned_slice_data_.resize(core_cnt);
-        next_idxs_.resize(core_cnt);
-        for (size_t i = 0; i < core_cnt; i++)
-        {
-            next_idxs_[i] = 0;
-        }
+        slice_data_.clear();
+        next_idx_ = 0;
 
         entry_tuples_ = &entry_tuple;
         slices_info_ = slice_info;
 
-        unfinished_cnt_ = core_cnt;
+        finished_ = false;
         err_code_ = CcErrorCode::NO_ERROR;
     }
 
@@ -8197,14 +8191,12 @@ public:
     std::pair<bool, std::shared_ptr<SliceUpdation>> SetFinish()
     {
         std::unique_lock<bthread::Mutex> req_lk(req_mux_);
-        if (--unfinished_cnt_ == 0)
-        {
-            // Make a copy of slices_info_ to avoid race condition.
-            std::shared_ptr<SliceUpdation> slices_info = slices_info_;
-            req_cv_.notify_one();
-            return {true, std::move(slices_info)};
-        }
-        return {false, nullptr};
+        finished_ = true;
+
+        // Make a copy of slices_info_ to avoid race condition.
+        std::shared_ptr<SliceUpdation> slices_info = slices_info_;
+        req_cv_.notify_one();
+        return {true, std::move(slices_info)};
     }
 
     bool SetError(CcErrorCode err_code)
@@ -8214,13 +8206,9 @@ public:
         {
             err_code_ = err_code;
         }
-        if (--unfinished_cnt_ == 0)
-        {
-            req_cv_.notify_one();
-
-            return true;
-        }
-        return false;
+        finished_ = true;
+        req_cv_.notify_one();
+        return true;
     }
 
     void AbortCcRequest(CcErrorCode err_code) override
@@ -8237,7 +8225,7 @@ public:
     void Wait()
     {
         std::unique_lock<bthread::Mutex> lk(req_mux_);
-        while (unfinished_cnt_ != 0)
+        while (!finished_)
         {
             req_cv_.wait(lk);
         }
@@ -8300,7 +8288,7 @@ public:
     }
     void SetParsed()
     {
-        parsed_.store(true, std::memory_order_release);
+        parsed_ = true;
     }
 
     void AddDataItem(TxKey key,
@@ -8308,34 +8296,26 @@ public:
                      uint64_t version_ts,
                      bool is_deleted)
     {
-        size_t hash = key.Hash();
-        // Uses the lower 10 bits of the hash code to shard the key across
-        // CPU cores at this node.
-        uint16_t core_code = hash & 0x3FF;
-        uint16_t core_id = core_code % core_cnt_;
-
-        partitioned_slice_data_[core_id].emplace_back(
+        slice_data_.emplace_back(
             std::move(key), std::move(record), version_ts, is_deleted);
     }
 
-    size_t NextIndex(size_t core_idx) const
+    size_t NextIndex() const
     {
-        size_t next_idx = next_idxs_[core_idx];
-        assert(next_idx <= partitioned_slice_data_[core_idx].size());
-        return next_idx;
+        assert(next_idx_ <= slice_data_.size());
+        return next_idx_;
     }
 
-    void SetNextIndex(size_t core_idx, size_t index)
+    void SetNextIndex(size_t index)
     {
-        assert(index <= partitioned_slice_data_[core_idx].size());
-        next_idxs_[core_idx] = index;
+        assert(index <= slice_data_.size());
+        next_idx_ = index;
     }
 
     // Notice: these data items belong to multi slices.
-    std::deque<SliceDataItem> &SliceData(uint16_t core_id)
+    std::deque<SliceDataItem> &SliceData()
     {
-        assert(core_id < partitioned_slice_data_.size());
-        return partitioned_slice_data_[core_id];
+        return slice_data_;
     }
 
     bool AbortIfOom() const override
@@ -8344,7 +8324,6 @@ public:
     }
 
 private:
-    uint16_t core_cnt_;
     const TableName *table_name_{nullptr};
     uint32_t node_group_id_{0};
     int64_t *node_group_term_{nullptr};
@@ -8357,17 +8336,16 @@ private:
     // key offset, record offset, ts offset, record status offset
     // when parse items
     std::tuple<size_t, size_t, size_t, size_t> parse_offset_{0, 0, 0, 0};
-    // parse items on one core, then put the req to other cores.
-    std::atomic_bool parsed_{false};
+    bool parsed_{false};
 
-    std::vector<std::deque<SliceDataItem>> partitioned_slice_data_;
+    std::deque<SliceDataItem> slice_data_;
     // pause position when emplace keys into ccmap in batches
-    std::vector<size_t> next_idxs_;
+    size_t next_idx_;
 
     bthread::Mutex req_mux_{};
     bthread::ConditionVariable req_cv_{};
     // This two variables may be accessed by multi-cores.
-    size_t unfinished_cnt_{0};
+    bool finished_{false};
     CcErrorCode err_code_{CcErrorCode::NO_ERROR};
 };
 
