@@ -2120,7 +2120,6 @@ private:
                                    .GetLocalCcShards()
                                    ->GetRangeOwner(new_range_id_, ng_id_)
                                    ->BucketOwner();
-            assert(new_range_owner_ != ng_id_);
 
             dest_node_id_ = Sharder::Instance().LeaderNodeId(new_range_owner_);
             channel_ =
