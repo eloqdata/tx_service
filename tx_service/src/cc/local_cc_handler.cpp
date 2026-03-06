@@ -1920,12 +1920,22 @@ void txservice::LocalCcHandler::KickoutData(const TableName &table_name,
                 Sharder::Instance().ShardBucketIdToCoreIdx((*bucket_id)[0]),
                 req);
         }
-        else
+        else if (clean_type == CleanType::CleanRangeData)
         {
             assert(range_id != INT32_MAX);
             uint16_t dest_core = static_cast<uint16_t>(
                 range_id % Sharder::Instance().GetLocalCcShardsCount());
             cc_shards_.EnqueueToCcShard(dest_core, req);
+        }
+        else
+        {
+            // Dispatch the request to all cores and run in parallel
+            for (uint16_t idx = 0;
+                 idx < Sharder::Instance().GetLocalCcShardsCount();
+                 idx++)
+            {
+                cc_shards_.EnqueueToCcShard(idx, req);
+            }
         }
     }
     else
