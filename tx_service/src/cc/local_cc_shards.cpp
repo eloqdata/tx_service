@@ -4028,8 +4028,11 @@ void LocalCcShards::DataSyncForRangePartition(
             GetRangeOwner(old_range_id, ng_id)->BucketOwner();
         NodeGroupId new_range_owner =
             GetRangeOwner(range_id, ng_id)->BucketOwner();
+        uint16_t old_range_owner_shard = old_range_id % Count();
+        uint16_t new_range_owner_shard = range_id % Count();
 
-        need_send_range_cache = new_range_owner != old_range_owner;
+        need_send_range_cache = new_range_owner != old_range_owner ||
+                                new_range_owner_shard != old_range_owner_shard;
         if (need_send_range_cache)
         {
             range_cache_sender = std::make_unique<RangeCacheSender>(
@@ -6836,79 +6839,84 @@ void LocalCcShards::RangeCacheSender::SendRangeCacheRequest(
 
     // 1- upload dirty range slices info (with PartiallyCached)
     int64_t ng_term = INIT_TERM;
-    remote::CcRpcService_Stub stub(channel_.get());
-
-    brpc::Controller cntl;
-    cntl.set_timeout_ms(10000);
-    cntl.set_write_to_socket_in_background(true);
-    // cntl.ignore_eovercrowded(true);
-    remote::UploadRangeSlicesRequest req;
-    remote::UploadRangeSlicesResponse resp;
-
-    req.set_node_group_id(new_range_owner_);
-    req.set_ng_term(ng_term);
-    req.set_table_name_str(table_name_.String());
-    req.set_table_engine(
-        remote::ToRemoteType::ConvertTableEngine(table_name_.Engine()));
-    req.set_old_partition_id(old_range_id_);
-    req.set_version_ts(version_ts_);
-    req.set_new_partition_id(new_range_id_);
-    req.set_new_slices_num(slices_vec_.size());
-    std::string *keys_str = req.mutable_new_slices_keys();
-    std::string *sizes_str = req.mutable_new_slices_sizes();
-    std::string *status_str = req.mutable_new_slices_status();
-    for (const StoreSlice *slice : slices_vec_)
+    if (new_range_owner_ != ng_id_)
     {
-        // key
-        TxKey slice_key = slice->StartTxKey();
-        slice_key.Serialize(*keys_str);
-        // size
-        // If post ckpt size of the slice is UINT64_MAX, it means that there is
-        // no item need to be ckpt in this slice, so should use the current size
-        // of the slice.
-        uint32_t slice_size =
-            (slice->PostCkptSize() == UINT64_MAX ? slice->Size()
-                                                 : slice->PostCkptSize());
-        const char *slice_size_ptr =
-            reinterpret_cast<const char *>(&slice_size);
-        sizes_str->append(slice_size_ptr, sizeof(slice_size));
-        // status
-        int8_t slice_status = static_cast<int8_t>(SliceStatus::PartiallyCached);
-        const char *slice_status_ptr =
-            reinterpret_cast<const char *>(&slice_status);
-        status_str->append(slice_status_ptr, sizeof(slice_status));
-    }
-    req.set_has_dml_since_ddl(store_range_->HasDmlSinceDdl());
-    stub.UploadRangeSlices(&cntl, &req, &resp, nullptr);
+        remote::CcRpcService_Stub stub(channel_.get());
 
-    if (cntl.Failed())
-    {
-        LOG(WARNING) << "SendRangeCacheRequest: Fail to upload dirty range "
-                        "slices RPC ng#"
-                     << new_range_owner_ << ". Error code: " << cntl.ErrorCode()
-                     << ". Msg: " << cntl.ErrorText();
-        return;
-    }
+        brpc::Controller cntl;
+        cntl.set_timeout_ms(10000);
+        cntl.set_write_to_socket_in_background(true);
+        // cntl.ignore_eovercrowded(true);
+        remote::UploadRangeSlicesRequest req;
+        remote::UploadRangeSlicesResponse resp;
 
-    if (remote::ToLocalType::ConvertCcErrorCode(resp.error_code()) !=
-        CcErrorCode::NO_ERROR)
-    {
-        LOG(WARNING) << "SendRangeCacheRequest: New owner ng#"
-                     << new_range_owner_
-                     << " reject to receive dirty range data";
-        return;
-    }
+        req.set_node_group_id(new_range_owner_);
+        req.set_ng_term(ng_term);
+        req.set_table_name_str(table_name_.String());
+        req.set_table_engine(
+            remote::ToRemoteType::ConvertTableEngine(table_name_.Engine()));
+        req.set_old_partition_id(old_range_id_);
+        req.set_version_ts(version_ts_);
+        req.set_new_partition_id(new_range_id_);
+        req.set_new_slices_num(slices_vec_.size());
+        std::string *keys_str = req.mutable_new_slices_keys();
+        std::string *sizes_str = req.mutable_new_slices_sizes();
+        std::string *status_str = req.mutable_new_slices_status();
+        for (const StoreSlice *slice : slices_vec_)
+        {
+            // key
+            TxKey slice_key = slice->StartTxKey();
+            slice_key.Serialize(*keys_str);
+            // size
+            // If post ckpt size of the slice is UINT64_MAX, it means that there
+            // is no item need to be ckpt in this slice, so should use the
+            // current size of the slice.
+            uint32_t slice_size =
+                (slice->PostCkptSize() == UINT64_MAX ? slice->Size()
+                                                     : slice->PostCkptSize());
+            const char *slice_size_ptr =
+                reinterpret_cast<const char *>(&slice_size);
+            sizes_str->append(slice_size_ptr, sizeof(slice_size));
+            // status
+            int8_t slice_status =
+                static_cast<int8_t>(SliceStatus::PartiallyCached);
+            const char *slice_status_ptr =
+                reinterpret_cast<const char *>(&slice_status);
+            status_str->append(slice_status_ptr, sizeof(slice_status));
+        }
+        req.set_has_dml_since_ddl(store_range_->HasDmlSinceDdl());
+        stub.UploadRangeSlices(&cntl, &req, &resp, nullptr);
 
-    ng_term = resp.ng_term();
-    LOG(INFO) << "SendRangeCacheRequest: Uploaded new range slices info to "
-                 "future owner, range#"
-              << old_range_id_ << ", new_range#" << new_range_id_;
+        if (cntl.Failed())
+        {
+            LOG(WARNING) << "SendRangeCacheRequest: Fail to upload dirty range "
+                            "slices RPC ng#"
+                         << new_range_owner_
+                         << ". Error code: " << cntl.ErrorCode()
+                         << ". Msg: " << cntl.ErrorText();
+            return;
+        }
+
+        if (remote::ToLocalType::ConvertCcErrorCode(resp.error_code()) !=
+            CcErrorCode::NO_ERROR)
+        {
+            LOG(WARNING) << "SendRangeCacheRequest: New owner ng#"
+                         << new_range_owner_
+                         << " reject to receive dirty range data";
+            return;
+        }
+
+        ng_term = resp.ng_term();
+        LOG(INFO) << "SendRangeCacheRequest: Uploaded new range slices info to "
+                     "future owner, range#"
+                  << old_range_id_ << ", new_range#" << new_range_id_;
+    }
 
     // 2- upload records belongs to dirty range
     assert(closure_vec_->size() > 0);
     LOG(INFO) << "SendRangeCacheRequest: Sending range data, old_range_id: "
               << old_range_id_ << ", to upload " << closure_vec_->size()
-              << " batches to ng#" << new_range_owner_;
+              << " batches to ng#" << new_range_owner_ << " from ng#" << ng_id_;
 
     uint32_t sender_cnt = 5;
     auto closures_idx = std::make_shared<std::atomic_uint64_t>(sender_cnt);
@@ -6928,6 +6936,8 @@ void LocalCcShards::RangeCacheSender::SendRangeCacheRequest(
                     size_t vec_size = vec.size();
                     size_t end_idx = std::min(begin_idx + 5, vec_size);
                     bool rejected = false;
+                    int64_t term =
+                        ng_term == INIT_TERM ? dest_ng_term : ng_term;
                     while (begin_idx < end_idx)
                     {
                         std::unique_ptr<UploadBatchSlicesClosure> closure(
@@ -6940,6 +6950,7 @@ void LocalCcShards::RangeCacheSender::SendRangeCacheRequest(
                             end_idx = std::min(begin_idx + 5, vec_size);
                         }
 
+                        rejected = rejected || term != dest_ng_term;
                         if (rejected)
                         {
                             // Must continue to delete left closures in
@@ -6954,7 +6965,7 @@ void LocalCcShards::RangeCacheSender::SendRangeCacheRequest(
                         cntl_ptr->set_timeout_ms(closure->TimeoutValue());
                         // Fix the term
                         closure->UploadBatchRequest()->set_node_group_term(
-                            ng_term);
+                            term);
                         stub.UploadBatchSlices(cntl_ptr,
                                                closure->UploadBatchRequest(),
                                                closure->UploadBatchResponse(),
@@ -6975,6 +6986,7 @@ void LocalCcShards::RangeCacheSender::SendRangeCacheRequest(
                                        << closure->NodeId()
                                        << " is reject for no free memory";
                         }
+                        term = resp->ng_term();
                     }
 
                     LOG(INFO) << "Old_Range#" << range_id
