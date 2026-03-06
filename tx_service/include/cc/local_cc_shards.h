@@ -1757,6 +1757,12 @@ public:
         uint64_t txn,
         CcHandlerResult<Void> *hres);
 
+    void CreateSplitRangeDataSyncTask(const TableName &table_name,
+                                      uint32_t ng_id,
+                                      int64_t ng_term,
+                                      int32_t range_id,
+                                      uint64_t data_sync_ts);
+
     std::pair<TableRangeEntry *, StoreRange *> PinStoreRange(
         const TableName &table_name,
         const NodeGroupId ng_id,
@@ -1913,7 +1919,8 @@ private:
                                   bool can_be_skipped,
                                   uint64_t &last_sync_ts,
                                   std::shared_ptr<DataSyncStatus> status,
-                                  CcHandlerResult<Void> *hres);
+                                  CcHandlerResult<Void> *hres,
+                                  bool high_priority = false);
     bool EnqueueDataSyncTaskToCore(
         const TableName &table_name,
         uint32_t ng_id,
@@ -2303,7 +2310,7 @@ private:
     {
         // `0` means no pending task
         uint64_t latest_pending_task_ts_{0};
-        std::queue<std::shared_ptr<DataSyncTask>> pending_tasks_;
+        std::deque<std::shared_ptr<DataSyncTask>> pending_tasks_;
 
         uint64_t UnsetLatestPendingTs()
         {
