@@ -4295,6 +4295,18 @@ public:
 
             slice_result.SetLastKey(local_end, slice_position);
             req.SetRangeCcNgTerm(ng_term);
+
+            // Sets the iterator to the last cce, which may need to be pinned to
+            // resume the next scan batch.
+            if (CcEntry<KeyT, ValueT, VersionedRecord, RangePartitioned>
+                    *last_cce = last_cce_of_cache();
+                last_cce)
+            {
+                while (scan_ccm_it->second != last_cce)
+                {
+                    --scan_ccm_it;
+                }
+            }
         }
         else  // Backward scan
         {
@@ -4504,6 +4516,18 @@ public:
 
             slice_result.SetLastKey(local_end, slice_position);
             req.SetRangeCcNgTerm(ng_term);
+
+            // Sets the iterator to the last cce, which may need to be pinned to
+            // resume the next scan batch.
+            if (CcEntry<KeyT, ValueT, VersionedRecord, RangePartitioned>
+                    *last_cce = last_cce_of_cache();
+                last_cce)
+            {
+                while (scan_ccm_it->second != last_cce)
+                {
+                    ++scan_ccm_it;
+                }
+            }
         }
 
         if (slice_result.slice_position_ == SlicePosition::Middle)
