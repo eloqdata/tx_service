@@ -1893,7 +1893,8 @@ void txservice::LocalCcHandler::KickoutData(const TableName &table_name,
         KickoutCcEntryCc *req = kickout_ccentry_pool_.NextRequest();
         // For hash partition, all data in a single bucket should be hashed to
         // the same core.
-        uint16_t core_cnt = clean_type == CleanType::CleanBucketData
+        uint16_t core_cnt = (clean_type == CleanType::CleanBucketData ||
+                             clean_type == CleanType::CleanRangeData)
                                 ? 1
                                 : Sharder::Instance().GetLocalCcShardsCount();
         req->Reset(table_name,
