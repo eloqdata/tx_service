@@ -84,7 +84,7 @@ DEFINE_string(eloq_dss_peer_node,
               "EloqDataStoreService peer node address. Used to fetch eloq-dss "
               "topology from a working eloq-dss server.");
 DEFINE_string(eloq_dss_branch_name,
-              "development",
+              "main",
               "Branch name of EloqDataStore");
 DEFINE_string(eloq_dss_config_file_path,
               "",
