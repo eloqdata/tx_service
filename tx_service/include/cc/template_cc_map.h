@@ -11485,7 +11485,8 @@ protected:
                          .first;
             }
             if (it->second.first ==
-                static_cast<int32_t>(RangeSizeStatus::kNotInitialized))
+                    static_cast<int32_t>(RangeSizeStatus::kNotInitialized) &&
+                !is_dirty)
             {
                 // Init the range size of this range.
                 it->second.first =
