@@ -303,7 +303,11 @@ int main(int argc, char *argv[])
     // INIReader config_reader(nullptr, 0);
     EloqDS::RocksDBConfig rocksdb_config(config_reader, data_path);
     EloqDS::RocksDBCloudConfig rocksdb_cloud_config(config_reader);
-    rocksdb_cloud_config.branch_name_ = FLAGS_eloq_dss_branch_name;
+    rocksdb_cloud_config.branch_name_ =
+        !CheckCommandLineFlagIsDefault("eloq_dss_branch_name")
+            ? FLAGS_eloq_dss_branch_name
+            : config_reader.GetString(
+                  "local", "eloq_dss_branch_name", FLAGS_eloq_dss_branch_name);
     auto ds_factory = std::make_unique<EloqDS::RocksDBCloudDataStoreFactory>(
         rocksdb_config, rocksdb_cloud_config, enable_cache_replacement_);
 
@@ -327,7 +331,11 @@ int main(int argc, char *argv[])
     uint32_t unused_core_number = 0;
     EloqDS::EloqStoreConfig eloq_store_config(
         config_reader, data_path, mem_mib, unused_core_number, true);
-    eloq_store_config.branch_name_ = FLAGS_eloq_dss_branch_name;
+    eloq_store_config.branch_name_ =
+        !CheckCommandLineFlagIsDefault("eloq_dss_branch_name")
+            ? FLAGS_eloq_dss_branch_name
+            : config_reader.GetString(
+                  "local", "eloq_dss_branch_name", FLAGS_eloq_dss_branch_name);
 
 #ifdef ELOQ_MODULE_ENABLED
     GFLAGS_NAMESPACE::SetCommandLineOption(
