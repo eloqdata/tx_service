@@ -875,9 +875,27 @@ public:
                 new_range_entries.push_back(new_range);
             }
         }
-        if (TableRangesMemoryFull())
         {
-            KickoutRangeSlices();
+            std::unique_lock<std::mutex> heap_lk(table_ranges_heap_mux_);
+            bool is_override_thd = mi_is_override_thread();
+            mi_threadid_t prev_thd =
+                mi_override_thread(GetTableRangesHeapThreadId());
+            mi_heap_t *prev_heap = mi_heap_set_default(GetTableRangesHeap());
+            bool range_slice_mem_full = TableRangesMemoryFull();
+            mi_heap_set_default(prev_heap);
+            if (is_override_thd)
+            {
+                mi_override_thread(prev_thd);
+            }
+            else
+            {
+                mi_restore_default_thread_id();
+            }
+            heap_lk.unlock();
+            if (range_slice_mem_full)
+            {
+                KickoutRangeSlices();
+            }
         }
         return new_range_entries;
     }
@@ -1034,6 +1052,7 @@ public:
             range_entry->UpdateRangeEntry(version, std::move(range_slices));
         }
 
+        mi_heap_set_default(prev_heap);
         if (is_override_thd)
         {
             mi_override_thread(prev_thd);
@@ -1042,7 +1061,6 @@ public:
         {
             mi_restore_default_thread_id();
         }
-        mi_heap_set_default(prev_heap);
 
 #if defined(WITH_JEMALLOC)
         JemallocArenaSwitcher::SwitchToArena(prev_arena_id);
