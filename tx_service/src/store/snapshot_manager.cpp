@@ -92,7 +92,8 @@ void SnapshotManager::OnSnapshotSyncRequested(
             // check if the queued task is newer than the new received req. If
             // so, discard the new req, otherwise, update the task.
             auto &cur_task = ins_pair.first->second;
-            int64_t cur_task_standby_node_term = cur_task.standby_node_term();
+            int64_t cur_task_standby_node_term =
+                cur_task.req.standby_node_term();
             int64_t req_standby_node_term = req->standby_node_term();
 
             if (cur_task_standby_node_term >= req_standby_node_term)
@@ -102,7 +103,7 @@ void SnapshotManager::OnSnapshotSyncRequested(
             }
         }
 
-        ins_pair.first->second.CopyFrom(*req);
+        ins_pair.first->second.req.CopyFrom(*req);
         standby_sync_cv_.notify_all();
     }
 }
@@ -224,7 +225,7 @@ void SnapshotManager::SyncWithStandby()
         }
     }
 
-    std::vector<remote::StorageSnapshotSyncRequest> tasks;
+    std::vector<PendingSnapshotSyncTask> tasks;
 
     // Dequeue all pending tasks that can be covered by this snapshot.
     {
@@ -234,7 +235,7 @@ void SnapshotManager::SyncWithStandby()
         {
             auto &pending_task = it->second;
             int64_t pending_task_standby_node_term =
-                pending_task.standby_node_term();
+                pending_task.req.standby_node_term();
             int64_t pending_task_primary_term =
                 PrimaryTermFromStandbyTerm(pending_task_standby_node_term);
 
@@ -283,8 +284,9 @@ void SnapshotManager::SyncWithStandby()
         }
     }
 
-    for (auto &req : tasks)
+    for (auto &task : tasks)
     {
+        auto &req = task.req;
         uint32_t node_id = req.standby_node_id();
         std::string ip;
         uint16_t port;
@@ -362,7 +364,7 @@ void SnapshotManager::SyncWithStandby()
                 // Check again to see if the request has been updated.
                 auto &next_pending_task = pending_req_iter->second;
                 int64_t next_pending_task_standby_term =
-                    next_pending_task.standby_node_term();
+                    next_pending_task.req.standby_node_term();
                 int64_t next_pending_task_primary_term =
                     PrimaryTermFromStandbyTerm(next_pending_task_standby_term);
 
