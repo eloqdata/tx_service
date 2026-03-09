@@ -866,7 +866,8 @@ public:
 
         StandbyForwardEntry *forward_entry = nullptr;
         remote::KeyObjectStandbyForwardRequest *forward_req = nullptr;
-        if (!shard_->GetSubscribedStandbys().empty())
+        if (!shard_->GetSubscribedStandbys().empty() ||
+            shard_->HasCandidateStandbys())
         {
             forward_entry = cce->ForwardEntry();
             if (!forward_entry)
