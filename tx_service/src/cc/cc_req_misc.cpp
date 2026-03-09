@@ -340,6 +340,8 @@ void FetchTableRangesCc::SetFinish(int err)
         error_code_ = static_cast<int>(CcErrorCode::DATA_STORE_ERR);
         ranges_vec_.clear();
         partition_ranges_vec_.clear();
+        partition_scan_states_.clear();
+        remaining_partitions_ = 0;
     });
     ccs_.Enqueue(this);
 }
