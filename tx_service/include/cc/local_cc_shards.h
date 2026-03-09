@@ -1017,6 +1017,7 @@ public:
             range_entry->UpdateRangeEntry(version, std::move(range_slices));
         }
 
+        mi_heap_set_default(prev_heap);
         if (is_override_thd)
         {
             mi_override_thread(prev_thd);
@@ -1025,7 +1026,6 @@ public:
         {
             mi_restore_default_thread_id();
         }
-        mi_heap_set_default(prev_heap);
 
 #if defined(WITH_JEMALLOC)
         JemallocArenaSwitcher::SwitchToArena(prev_arena_id);
