@@ -107,6 +107,73 @@ void SnapshotManager::OnSnapshotSyncRequested(
     }
 }
 
+void SnapshotManager::RegisterSubscriptionBarrier(uint32_t standby_node_id,
+                                                  int64_t standby_node_term,
+                                                  uint64_t active_tx_max_ts)
+{
+    std::unique_lock<std::mutex> lk(standby_sync_mux_);
+    auto &node_barriers = subscription_barrier_[standby_node_id];
+
+    // Keep only current and newer terms for this node.
+    auto it = node_barriers.begin();
+    while (it != node_barriers.end())
+    {
+        if (it->first < standby_node_term)
+        {
+            it = node_barriers.erase(it);
+        }
+        else
+        {
+            ++it;
+        }
+    }
+
+    node_barriers[standby_node_term] = active_tx_max_ts;
+}
+
+bool SnapshotManager::GetSubscriptionBarrier(uint32_t standby_node_id,
+                                             int64_t standby_node_term,
+                                             uint64_t *active_tx_max_ts)
+{
+    if (active_tx_max_ts == nullptr)
+    {
+        return false;
+    }
+
+    std::unique_lock<std::mutex> lk(standby_sync_mux_);
+    auto node_it = subscription_barrier_.find(standby_node_id);
+    if (node_it == subscription_barrier_.end())
+    {
+        return false;
+    }
+
+    auto barrier_it = node_it->second.find(standby_node_term);
+    if (barrier_it == node_it->second.end())
+    {
+        return false;
+    }
+
+    *active_tx_max_ts = barrier_it->second;
+    return true;
+}
+
+void SnapshotManager::EraseSubscriptionBarrier(uint32_t standby_node_id,
+                                               int64_t standby_node_term)
+{
+    std::unique_lock<std::mutex> lk(standby_sync_mux_);
+    auto node_it = subscription_barrier_.find(standby_node_id);
+    if (node_it == subscription_barrier_.end())
+    {
+        return;
+    }
+
+    node_it->second.erase(standby_node_term);
+    if (node_it->second.empty())
+    {
+        subscription_barrier_.erase(node_it);
+    }
+}
+
 // If kvstore is enabled, we must flush data in-memory to kvstore firstly.
 // For non-shared kvstore, also we create and send the snapshot to standby
 // nodes.
