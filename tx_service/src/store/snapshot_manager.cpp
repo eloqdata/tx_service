@@ -186,6 +186,19 @@ void SnapshotManager::EraseSubscriptionBarrier(uint32_t standby_node_id,
                                                int64_t standby_node_term)
 {
     std::unique_lock<std::mutex> lk(standby_sync_mux_);
+    EraseSubscriptionBarrierLocked(standby_node_id, standby_node_term);
+}
+
+void SnapshotManager::EraseSubscriptionBarriersByNode(uint32_t standby_node_id)
+{
+    std::unique_lock<std::mutex> lk(standby_sync_mux_);
+    pending_req_.erase(standby_node_id);
+    subscription_barrier_.erase(standby_node_id);
+}
+
+void SnapshotManager::EraseSubscriptionBarrierLocked(uint32_t standby_node_id,
+                                                     int64_t standby_node_term)
+{
     auto node_it = subscription_barrier_.find(standby_node_id);
     if (node_it == subscription_barrier_.end())
     {
@@ -222,6 +235,9 @@ void SnapshotManager::SyncWithStandby()
         std::unique_lock<std::mutex> lk(standby_sync_mux_);
         // clear all requests
         pending_req_.clear();
+        // clear barriers as well, all queued sync states are stale when this
+        // leader term is no longer valid.
+        subscription_barrier_.clear();
         return;
     }
 
@@ -259,6 +275,7 @@ void SnapshotManager::SyncWithStandby()
         auto it = pending_req_.begin();
         while (it != pending_req_.end())
         {
+            uint32_t pending_node_id = it->first;
             auto &pending_task = it->second;
             int64_t pending_task_standby_node_term =
                 pending_task.req.standby_node_term();
@@ -268,6 +285,8 @@ void SnapshotManager::SyncWithStandby()
             if (pending_task_primary_term < leader_term)
             {
                 // discard the task.
+                EraseSubscriptionBarrierLocked(pending_node_id,
+                                               pending_task_standby_node_term);
                 it = pending_req_.erase(it);
                 continue;
             }
@@ -312,7 +331,10 @@ void SnapshotManager::SyncWithStandby()
                 it++;
                 continue;
             }
-            tasks.emplace_back(std::move(pending_task));
+            // Keep a copy for current round execution. Do not move out of
+            // pending_req_, because completion logic still needs the original
+            // standby term to decide whether the queued task is stale.
+            tasks.emplace_back(pending_task);
 
             // Keep the request entry so completion logic can check whether it
             // needs to stay queued, but make sure to advance the iterator so we
@@ -412,6 +434,9 @@ void SnapshotManager::SyncWithStandby()
 
                     if (next_pending_task_primary_term < leader_term)
                     {
+                        EraseSubscriptionBarrierLocked(
+                            req.standby_node_id(),
+                            next_pending_task_standby_term);
                         pending_req_.erase(pending_req_iter);
                     }
                     else if (next_pending_task_primary_term == leader_term)
@@ -424,6 +449,9 @@ void SnapshotManager::SyncWithStandby()
                         if (next_pending_task_subscribe_id <=
                             cur_task_subscribe_id)
                         {
+                            EraseSubscriptionBarrierLocked(
+                                req.standby_node_id(),
+                                next_pending_task_standby_term);
                             pending_req_.erase(pending_req_iter);
                         }
                     }
