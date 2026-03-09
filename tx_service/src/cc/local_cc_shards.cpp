@@ -2393,6 +2393,11 @@ bool LocalCcShards::EnqueueRangeDataSyncTask(
                                                high_priority);
             if (high_priority)
             {
+                LOG(INFO) << "Push high priority datasync task to front of "
+                             "task queue"
+                          << " for table: " << table_name.StringView()
+                          << " range: " << range_info->PartitionId()
+                          << ". task queue size: " << task_queue.size();
                 task_queue.push_front(std::move(task));
             }
             else
@@ -2457,6 +2462,12 @@ bool LocalCcShards::EnqueueRangeDataSyncTask(
                                                    high_priority);
                 if (high_priority)
                 {
+                    LOG(INFO) << "Push high priority datasync task to front of "
+                                 "pending task queue"
+                              << " for table: " << table_name.StringView()
+                              << " range: " << range_info->PartitionId()
+                              << ". pending task queue size: "
+                              << iter->second->pending_tasks_.size();
                     iter->second->pending_tasks_.push_front(std::move(task));
                 }
                 else
@@ -2938,6 +2949,37 @@ void LocalCcShards::EnqueueDataSyncTaskForBucket(
             return;
         }
     }
+    data_sync_worker_ctx_.cv_.notify_all();
+}
+
+void LocalCcShards::CreateSplitRangeDataSyncTask(const TableName &table_name,
+                                                 uint32_t ng_id,
+                                                 int64_t ng_term,
+                                                 int32_t range_id,
+                                                 uint64_t data_sync_ts)
+{
+    std::shared_ptr<DataSyncStatus> status =
+        std::make_shared<DataSyncStatus>(ng_id, ng_term, false);
+    TableRangeEntry *range_entry = const_cast<TableRangeEntry *>(
+        GetTableRangeEntry(table_name, ng_id, range_id));
+    assert(range_entry != nullptr);
+    // uint64_t data_sync_ts = ClockTs();
+    // std::chrono::duration_cast<std::chrono::microseconds>(
+    //     std::chrono::high_resolution_clock::now().time_since_epoch())
+    //     .count();  // ClockTs();
+    uint64_t last_sync_ts = 0;
+    EnqueueRangeDataSyncTask(table_name,
+                             ng_id,
+                             ng_term,
+                             range_entry,
+                             data_sync_ts,
+                             false,
+                             false,
+                             last_sync_ts,
+                             status,
+                             nullptr,
+                             true);
+
     data_sync_worker_ctx_.cv_.notify_all();
 }
 
@@ -3890,6 +3932,8 @@ void LocalCcShards::DataSyncForRangePartition(
     {
         schema_version = table_schema->IndexKeySchema(table_name)->SchemaTs();
     }
+    DLOG(INFO) << "DataSync for table " << table_name.StringView()
+               << " range: " << range_id;
 
     // Scan the delta slice size
     std::map<TxKey, int64_t> slices_delta_size;
@@ -3935,6 +3979,10 @@ void LocalCcShards::DataSyncForRangePartition(
     auto &delta_size = scan_delta_size_cc.SliceDeltaSize();
     for (auto &delta : delta_size)
     {
+        DLOG(INFO) << "Slice delta size: " << table_name.StringView()
+                   << " range: " << range_id
+                   << " key: " << delta.first.ToString()
+                   << " delta size: " << delta.second;
         slices_delta_size[std::move(delta.first)] += delta.second;
     }
 
@@ -4026,6 +4074,13 @@ void LocalCcShards::DataSyncForRangePartition(
             pending_range_split_task_.push_back(std::move(range_split_task));
             range_split_worker_ctx_.cv_.notify_one();
             return;
+        }
+        else
+        {
+            DLOG(INFO) << "No split keys need to be generated for table "
+                       << table_name.StringView() << " range: " << range_id
+                       << ". range post ckpt size: "
+                       << store_range->PostCkptSize();
         }
     }
 
@@ -5165,6 +5220,10 @@ void LocalCcShards::PopPendingTask(NodeGroupId ng_id,
             data_sync_task_queue_[id % data_sync_task_queue_.size()];
         if (task->high_priority_)
         {
+            DLOG(INFO) << "Push high priority datasync task to front of "
+                       << "task queue from pending task queue"
+                       << " for table: " << table_name.StringView()
+                       << " range: " << id;
             task_queue.push_front(std::move(task));
         }
         else
@@ -5218,6 +5277,10 @@ void LocalCcShards::UpdateSlicePostCkptSize(
         int64_t sum = curr_slice->Size() + it->second;
         uint64_t slice_size = sum > 0 ? sum : 0;
         curr_slice->SetPostCkptSize(slice_size);
+        DLOG(INFO) << "UpdateSlicePostCkptSize: range: "
+                   << store_range->PartitionId()
+                   << " key: " << it->first.ToString()
+                   << " post ckptsize: " << slice_size;
     }
 }
 

@@ -645,7 +645,8 @@ public:
                                 table_name_,
                                 cc_ng_id_,
                                 cce_addr->Term(),
-                                range_id);
+                                range_id,
+                                commit_ts);
                         }
                     }
                 }
@@ -4046,6 +4047,10 @@ public:
             {
                 scan_ccm_it--;
             }
+            DLOG(INFO) << "ScanSliceCc, with addr forward scan, table_name: "
+                       << table_name_.StringView() << " , iterator start key: "
+                       << scan_ccm_it->first->ToString() << ". on shard#"
+                       << shard_->core_id_ << ". txn: " << req.Txn();
         }
         else
         {
@@ -4077,6 +4082,10 @@ public:
                     scan_ccm_it--;
                 }
             }
+            DLOG(INFO) << "ScanSliceCc, forward scan, table_name: "
+                       << table_name_.StringView() << " , iterator start key: "
+                       << scan_ccm_it->first->ToString() << ". on shard#"
+                       << shard_->core_id_ << ". txn: " << req.Txn();
         }
 
         RangeScanSliceResult &slice_result = hd_res->Value();
@@ -4140,7 +4149,7 @@ public:
             };
 
             auto scan_loop_func =
-                [this, &scan_batch_func, &is_cache_full](
+                [this, &scan_batch_func, &is_cache_full, tx_number = req.Txn()](
                     Iterator &scan_ccm_it,
                     const KeyT &end_key,
                     bool inclusive) -> std::pair<ScanReturnType, CcErrorCode>
@@ -4157,6 +4166,16 @@ public:
                     return {scan_ret, err_code};
                 }
 
+                if (idx_in_page >= ccp->keys_.size())
+                {
+                    DLOG(INFO)
+                        << "ScanSliceCc, with error index, table_name: "
+                        << table_name_.StringView() << " , iterator start key: "
+                        << scan_ccm_it->first->ToString()
+                        << ", index in page: " << idx_in_page
+                        << ", page size: " << ccp->keys_.size() << ". on shard#"
+                        << shard_->core_id_ << ". txn: " << tx_number;
+                }
                 assert(idx_in_page < ccp->keys_.size());
 
                 while (ccp)
@@ -7336,9 +7355,26 @@ public:
                                                           cce->PayloadSize())
                                    : static_cast<int32_t>(cce->PayloadSize() -
                                                           old_payload_size));
-                    UpdateRangeSize(static_cast<uint32_t>(partition_id),
-                                    delta,
-                                    (range_size_flags & 0x0F) != 0);
+                    bool need_split =
+                        UpdateRangeSize(static_cast<uint32_t>(partition_id),
+                                        delta,
+                                        (range_size_flags & 0x0F) != 0);
+                    if (need_split)
+                    {
+                        // Create a data sync task for the range.
+                        uint64_t data_sync_ts =
+                            std::chrono::duration_cast<
+                                std::chrono::microseconds>(
+                                std::chrono::high_resolution_clock::now()
+                                    .time_since_epoch())
+                                .count();
+                        shard_->CreateSplitRangeDataSyncTask(
+                            table_name_,
+                            cc_ng_id_,
+                            req.CcNgTerm(),
+                            static_cast<uint32_t>(partition_id),
+                            data_sync_ts);
+                    }
                 }
             }
 
@@ -11481,18 +11517,19 @@ protected:
             {
                 it = range_sizes_
                          .emplace(partition_id,
-                                  std::make_pair(
+                                  std::make_tuple(
                                       static_cast<int32_t>(
                                           RangeSizeStatus::kNotInitialized),
-                                      0))
+                                      0,
+                                      false))
                          .first;
             }
-            if (it->second.first ==
+            if (std::get<0>(it->second) ==
                     static_cast<int32_t>(RangeSizeStatus::kNotInitialized) &&
                 !is_dirty)
             {
                 // Init the range size of this range.
-                it->second.first =
+                std::get<0>(it->second) =
                     static_cast<int32_t>(RangeSizeStatus::kLoading);
 
                 int64_t ng_term = Sharder::Instance().LeaderTerm(cc_ng_id_);
@@ -11503,22 +11540,35 @@ protected:
                 return false;
             }
 
-            if (it->second.first ==
+            if (std::get<0>(it->second) ==
                     static_cast<int32_t>(RangeSizeStatus::kLoading) ||
                 is_dirty)
             {
                 // Loading or split: record delta in delta part (.second).
-                it->second.second += delta_size;
+                std::get<1>(it->second) += delta_size;
             }
             else
             {
-                assert(delta_size >= 0 ||
-                       it->second.first >= static_cast<int32_t>(-delta_size));
-                it->second.first += delta_size;
+                int32_t new_range_size = std::get<0>(it->second) + delta_size;
+                std::get<0>(it->second) =
+                    new_range_size > 0 ? new_range_size : 0;
 
-                return !is_dirty &&
-                       it->second.first >=
-                           static_cast<int32_t>(StoreRange::range_max_size);
+                bool need_split =
+                    !is_dirty && !std::get<2>(it->second) &&
+                    std::get<0>(it->second) >=
+                        static_cast<int32_t>(StoreRange::range_max_size);
+
+                if (need_split)
+                {
+                    DLOG(INFO)
+                        << "Range size is too large, need to split. table: "
+                        << table_name_.StringView()
+                        << " partition: " << partition_id
+                        << " range size: " << std::get<0>(it->second)
+                        << " range max size: " << StoreRange::range_max_size;
+                    std::get<2>(it->second) = true;
+                }
+                return need_split;
             }
         }  // RangePartitioned
 

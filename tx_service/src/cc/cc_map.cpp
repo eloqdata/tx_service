@@ -474,20 +474,34 @@ void CcMap::InitRangeSize(uint32_t partition_id,
         {
             return;
         }
-        it = range_sizes_.emplace(partition_id, std::make_pair(0, 0)).first;
+        it = range_sizes_.emplace(partition_id, std::make_tuple(0, 0, false))
+                 .first;
     }
     if (succeed)
     {
-        int32_t final_size = persisted_size + it->second.second;
-        it->second.first = final_size < 0 ? 0 : final_size;
-        it->second.second = 0;
+        int32_t final_size = persisted_size + std::get<1>(it->second);
+        std::get<0>(it->second) = final_size < 0 ? 0 : final_size;
+        std::get<1>(it->second) = 0;
     }
     else
     {
         // Load range size failed; reset to not-initialized for retry.
-        it->second.first =
+        std::get<0>(it->second) =
             static_cast<int32_t>(RangeSizeStatus::kNotInitialized);
     }
+}
+
+void CcMap::ResetRangeStatus(uint32_t partition_id)
+{
+    auto it = range_sizes_.find(partition_id);
+    if (it == range_sizes_.end())
+    {
+        return;
+    }
+    std::get<2>(it->second) = false;
+    DLOG(INFO) << "ResetRangeStatus: table: " << table_name_.StringView()
+               << " partition: " << partition_id
+               << " status: " << std::boolalpha << std::get<2>(it->second);
 }
 
 }  // namespace txservice

@@ -1164,7 +1164,8 @@ public:
     void CreateSplitRangeDataSyncTask(const TableName &table_name,
                                       uint32_t ng_id,
                                       int64_t ng_term,
-                                      int32_t range_id);
+                                      int32_t range_id,
+                                      uint64_t data_sync_ts);
 
     void ClearNativeSchemaCntl();
     void CollectCacheHit();

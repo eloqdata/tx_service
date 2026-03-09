@@ -274,6 +274,8 @@ public:
                        bool succeed = true,
                        bool emplace = false);
 
+    void ResetRangeStatus(uint32_t partition_id);
+
     uint64_t SchemaTs() const
     {
         return schema_ts_;
@@ -313,7 +315,9 @@ protected:
     // - first: current range size; RangeSizeState::Loading (-1) = loading from
     //   store; RangeSizeState::Uninitialized (-2) = not yet loaded.
     // - second: delta accumulated during load (first==-1) or split (first>=0).
-    absl::flat_hash_map<uint32_t, std::pair<int32_t, int32_t>> range_sizes_;
+    // - third: whether the range size is splitting.
+    absl::flat_hash_map<uint32_t, std::tuple<int32_t, int32_t, bool>>
+        range_sizes_;
 
     /**
      * @brief After the input request is executed at the current shard, moves

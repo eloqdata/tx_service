@@ -1514,6 +1514,16 @@ void ScanNextOperation::Forward(TransactionExecution *txm)
                         range_rec_.GetRangeInfo()->PartitionId();
                     scan_state_->range_ng_ =
                         range_rec_.GetRangeOwnerNg()->BucketOwner();
+                    DLOG(INFO)
+                        << "ScanNextOperation after lock range, table_name: "
+                        << tx_req_->table_name_.StringView()
+                        << " ,range_id: " << scan_state_->range_id_
+                        << " ,range_ng: " << scan_state_->range_ng_
+                        << ". range start key: "
+                        << range_rec_.GetRangeInfo()->StartTxKey().ToString()
+                        << ". range end key: "
+                        << range_rec_.GetRangeInfo()->EndTxKey().ToString()
+                        << ". txn: " << txm->TxNumber();
                     txm->Process(*this);
                 }
                 return;
@@ -1609,6 +1619,14 @@ void ScanNextOperation::Forward(TransactionExecution *txm)
             scan_state_->inclusive_ =
                 Direction() == ScanDirection::Forward ? false : true;
             scan_state_->slice_position_ = scan_slice_result.slice_position_;
+            DLOG(INFO)
+                << "ScanNextOperation::Forward, after scanslice, table_name: "
+                << tx_req_->table_name_.StringView()
+                << " ,range_id: " << scan_state_->range_id_
+                << " ,slice last key: "
+                << scan_state_->SliceLastKey()->ToString()
+                << " ,slice position: " << int(scan_state_->slice_position_)
+                << ", txn: " << txm->TxNumber();
         }
 
         scanner.SetStatus(ScannerStatus::Open);

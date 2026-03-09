@@ -7771,6 +7771,7 @@ public:
                            size_t status_off,
                            size_t flags_off)
     {
+        core_id = partition_id_ >= 0 ? 0 : core_id;
         auto &key_pos = paused_pos_.at(core_id);
         std::get<0>(key_pos) = key_index;
         std::get<1>(key_pos) = key_off;
@@ -7783,6 +7784,7 @@ public:
     const std::tuple<size_t, size_t, size_t, size_t, size_t, size_t> &
     GetPausedPosition(uint16_t core_id) const
     {
+        core_id = partition_id_ >= 0 ? 0 : core_id;
         return paused_pos_.at(core_id);
     }
 

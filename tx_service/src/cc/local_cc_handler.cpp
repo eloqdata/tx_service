@@ -1286,15 +1286,24 @@ void txservice::LocalCcHandler::ScanNextBatch(
                  scanner.is_require_recs_,
                  prefetch_size);
 
-        ScanCache *cache = scanner.Cache(0);
-        const ScanTuple *last_tuple = cache->LastTuple();
+        // When the cc ng term is less than 0, this is the first scan of the
+        // specified range.
+        if (cc_ng_term >= 0)
+        {
+            ScanCache *cache = scanner.Cache(0);
+            const ScanTuple *last_tuple = cache->LastTuple();
 
-        req->SetPriorCceLockAddr(
-            last_tuple != nullptr ? last_tuple->cce_addr_.CceLockPtr() : 0);
+            req->SetPriorCceLockAddr(
+                last_tuple != nullptr ? last_tuple->cce_addr_.CceLockPtr() : 0);
+        }
 
         scanner.ResetCaches();
 
         uint16_t dest_core = range_id % cc_shards_.Count();
+        DLOG(INFO) << "ScanNextBatch, table_name: " << tbl_name.StringView()
+                   << " ,range_id: " << range_id
+                   << ", start key: " << start_key->ToString()
+                   << " ,dest_core: " << dest_core << " ,txn: " << tx_number;
 
         cc_shards_.EnqueueCcRequest(thd_id_, dest_core, req);
     }

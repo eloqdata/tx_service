@@ -2773,6 +2773,13 @@ void TransactionExecution::Process(ScanNextOperation &scan_next)
             // the to-be-scanned slice is the last (first) of the range, the
             // range lock is released when the scan request returns.
             scan_next.lock_range_result_.SetFinished();
+            DLOG(INFO) << "ScanNextOperation from the middle of the slice, "
+                          "table_name: "
+                       << scan_next.tx_req_->table_name_.StringView()
+                       << " ,range_id: " << scan_state.range_id_
+                       << ", slice last key: "
+                       << scan_state.SliceLastKey()->ToString()
+                       << ". txn: " << TxNumber();
 
             cc_handler_->ScanNextBatch(
                 scan_next.tx_req_->table_name_,
@@ -2826,6 +2833,13 @@ void TransactionExecution::Process(ScanNextOperation &scan_next)
                 // post-processing of the scan operation and returns an
                 // error to the tx scan request.
                 assert(!scan_next.lock_range_result_.IsError());
+                DLOG(INFO) << "ScanNextOperation from the begin of the range, "
+                              "table_name: "
+                           << scan_next.tx_req_->table_name_.StringView()
+                           << " ,range_id: " << scan_state.range_id_
+                           << ", slice last key: "
+                           << scan_state.SliceLastKey()->ToString()
+                           << ". txn: " << TxNumber();
 
                 // The term of the cc node group hosting the to-be-scanned range
                 // is unknown. Sets the term to -1, indicating it is not matched
@@ -2873,6 +2887,13 @@ void TransactionExecution::Process(ScanNextOperation &scan_next)
                     scanner.Direction() == ScanDirection::Forward
                         ? ReadType::RangeLeftInclusive
                         : ReadType::RangeRightExclusive;
+
+                DLOG(INFO)
+                    << "ScanNextOperation to lock the range, table_name: "
+                    << scan_next.tx_req_->table_name_.StringView()
+                    << " ,slice_last_key: "
+                    << scan_state.SliceLastKey()->ToString()
+                    << ". txn: " << TxNumber();
 
                 bool finished = cc_handler_->ReadLocal(
                     scan_next.range_table_name_,

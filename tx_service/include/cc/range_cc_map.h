@@ -789,6 +789,7 @@ public:
                     old_entry->TypedStoreRange()->PostCkptSize();
                 ccm->InitRangeSize(static_cast<uint32_t>(old_partition_id),
                                    static_cast<int32_t>(old_range_size));
+                ccm->ResetRangeStatus(static_cast<uint32_t>(old_partition_id));
             }
 
             // range_owner_rec_ needs to be reset on each core since they point

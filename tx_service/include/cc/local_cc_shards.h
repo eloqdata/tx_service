@@ -1757,6 +1757,12 @@ public:
         uint64_t txn,
         CcHandlerResult<Void> *hres);
 
+    void CreateSplitRangeDataSyncTask(const TableName &table_name,
+                                      uint32_t ng_id,
+                                      int64_t ng_term,
+                                      int32_t range_id,
+                                      uint64_t data_sync_ts);
+
     std::pair<TableRangeEntry *, StoreRange *> PinStoreRange(
         const TableName &table_name,
         const NodeGroupId ng_id,
