@@ -57,7 +57,9 @@ public:
     void Start();
     void Shutdown();
 
-    void OnSnapshotSyncRequested(
+    // Handle snapshot sync request from standby node. Returns true if the
+    // request is accepted (queued or safely deduped), false otherwise.
+    bool OnSnapshotSyncRequested(
         const txservice::remote::StorageSnapshotSyncRequest *req);
 
     /**
@@ -105,8 +107,12 @@ public:
     void TerminateBackup(txservice::NodeGroupId ng_id,
                          const std::string &backup_name);
 
-    // Run one round checkpoint to flush data in memory to kvstore.
-    bool RunOneRoundCheckpoint(uint32_t node_group, int64_t ng_leader_term);
+    // Run one round checkpoint to flush data in memory to kvstore. When
+    // out_ckpt_ts is not nullptr, it is filled with current round checkpoint
+    // ts.
+    bool RunOneRoundCheckpoint(uint32_t node_group,
+                               int64_t ng_leader_term,
+                               uint64_t *out_ckpt_ts = nullptr);
 
 private:
     struct PendingSnapshotSyncTask

@@ -69,7 +69,7 @@ void SnapshotManager::StandbySyncWorker()
     }
 }
 
-void SnapshotManager::OnSnapshotSyncRequested(
+bool SnapshotManager::OnSnapshotSyncRequested(
     const txservice::remote::StorageSnapshotSyncRequest *req)
 {
     DLOG(INFO) << "Received snapshot sync request from standby node #"
@@ -79,13 +79,33 @@ void SnapshotManager::OnSnapshotSyncRequested(
     if (store_hd_ == nullptr)
     {
         LOG(ERROR) << "Store handler is nullptr but standby feature enabled.";
-        return;
+        return false;
     }
 
     std::unique_lock<std::mutex> lk(standby_sync_mux_);
 
     if (!terminated_)
     {
+        auto node_it = subscription_barrier_.find(req->standby_node_id());
+        if (node_it == subscription_barrier_.end())
+        {
+            LOG(WARNING) << "No subscription barrier found for standby node #"
+                         << req->standby_node_id()
+                         << ", standby term: " << req->standby_node_term();
+            return false;
+        }
+
+        auto barrier_it = node_it->second.find(req->standby_node_term());
+        if (barrier_it == node_it->second.end())
+        {
+            LOG(WARNING) << "No barrier found for standby node #"
+                         << req->standby_node_id()
+                         << " at standby term: " << req->standby_node_term();
+            return false;
+        }
+
+        uint64_t active_tx_max_ts = barrier_it->second;
+
         auto ins_pair = pending_req_.try_emplace(req->standby_node_id());
         if (!ins_pair.second)
         {
@@ -99,13 +119,17 @@ void SnapshotManager::OnSnapshotSyncRequested(
             if (cur_task_standby_node_term >= req_standby_node_term)
             {
                 // discard the task.
-                return;
+                return true;
             }
         }
 
         ins_pair.first->second.req.CopyFrom(*req);
+        ins_pair.first->second.subscription_active_tx_max_ts = active_tx_max_ts;
         standby_sync_cv_.notify_all();
+        return true;
     }
+
+    return false;
 }
 
 void SnapshotManager::RegisterSubscriptionBarrier(uint32_t standby_node_id,
@@ -203,7 +227,9 @@ void SnapshotManager::SyncWithStandby()
 
     uint32_t current_subscribe_id = Sharder::Instance().GetCurrentSubscribeId();
 
-    bool ckpt_res = this->RunOneRoundCheckpoint(node_group, leader_term);
+    uint64_t ckpt_ts = 0;
+    bool ckpt_res =
+        this->RunOneRoundCheckpoint(node_group, leader_term, &ckpt_ts);
 
     if (!ckpt_res)
     {
@@ -264,6 +290,18 @@ void SnapshotManager::SyncWithStandby()
                     << current_subscribe_id
                     << ", does not cover the task subscribe id: "
                     << pending_task_subscribe_id << ". Wait for next round";
+                covered = false;
+            }
+            else if (ckpt_ts <= pending_task.subscription_active_tx_max_ts)
+            {
+                LOG(INFO) << "Snapshot checkpoint ts " << ckpt_ts
+                          << " does not pass subscription barrier ts "
+                          << pending_task.subscription_active_tx_max_ts
+                          << " for standby node #"
+                          << pending_task.req.standby_node_id()
+                          << ", standby term "
+                          << pending_task.req.standby_node_term()
+                          << ". Wait for next round";
                 covered = false;
             }
 
@@ -357,43 +395,50 @@ void SnapshotManager::SyncWithStandby()
             // We just need to erase the same request. Even if the notification
             // fails, after a while, the standby node will resend the
             // request.
-            std::unique_lock<std::mutex> lk(standby_sync_mux_);
-            auto pending_req_iter = pending_req_.find(req.standby_node_id());
-            if (pending_req_iter != pending_req_.end())
             {
-                // Check again to see if the request has been updated.
-                auto &next_pending_task = pending_req_iter->second;
-                int64_t next_pending_task_standby_term =
-                    next_pending_task.req.standby_node_term();
-                int64_t next_pending_task_primary_term =
-                    PrimaryTermFromStandbyTerm(next_pending_task_standby_term);
-
-                assert(PrimaryTermFromStandbyTerm(req.standby_node_term()) ==
-                       leader_term);
-
-                if (next_pending_task_primary_term < leader_term)
+                std::unique_lock<std::mutex> lk(standby_sync_mux_);
+                auto pending_req_iter = pending_req_.find(req.standby_node_id());
+                if (pending_req_iter != pending_req_.end())
                 {
-                    pending_req_.erase(pending_req_iter);
-                }
-                else if (next_pending_task_primary_term == leader_term)
-                {
-                    uint32_t next_pending_task_subscribe_id =
-                        SubscribeIdFromStandbyTerm(
-                            next_pending_task_standby_term);
-                    uint32_t cur_task_subscribe_id =
-                        SubscribeIdFromStandbyTerm(req.standby_node_term());
-                    if (next_pending_task_subscribe_id <= cur_task_subscribe_id)
+                    // Check again to see if the request has been updated.
+                    auto &next_pending_task = pending_req_iter->second;
+                    int64_t next_pending_task_standby_term =
+                        next_pending_task.req.standby_node_term();
+                    int64_t next_pending_task_primary_term =
+                        PrimaryTermFromStandbyTerm(next_pending_task_standby_term);
+
+                    assert(PrimaryTermFromStandbyTerm(req.standby_node_term()) ==
+                           leader_term);
+
+                    if (next_pending_task_primary_term < leader_term)
                     {
                         pending_req_.erase(pending_req_iter);
                     }
+                    else if (next_pending_task_primary_term == leader_term)
+                    {
+                        uint32_t next_pending_task_subscribe_id =
+                            SubscribeIdFromStandbyTerm(
+                                next_pending_task_standby_term);
+                        uint32_t cur_task_subscribe_id =
+                            SubscribeIdFromStandbyTerm(req.standby_node_term());
+                        if (next_pending_task_subscribe_id <=
+                            cur_task_subscribe_id)
+                        {
+                            pending_req_.erase(pending_req_iter);
+                        }
+                    }
                 }
             }
+
+            EraseSubscriptionBarrier(req.standby_node_id(),
+                                     req.standby_node_term());
         }
     }
 }
 
 bool SnapshotManager::RunOneRoundCheckpoint(uint32_t node_group,
-                                            int64_t ng_leader_term)
+                                            int64_t ng_leader_term,
+                                            uint64_t *out_ckpt_ts)
 {
     using namespace txservice;
     auto &local_shards = *Sharder::Instance().GetLocalCcShards();
@@ -421,6 +466,11 @@ bool SnapshotManager::RunOneRoundCheckpoint(uint32_t node_group,
         local_shards.EnqueueCcRequest(i, &ckpt_req);
     }
     ckpt_req.Wait();
+
+    if (out_ckpt_ts != nullptr)
+    {
+        *out_ckpt_ts = ckpt_req.GetCkptTs();
+    }
 
     // Iterate all the tables and execute CkptScanCc requests on this node
     // group's ccmaps on each ccshard. The result of CkptScanCc is stored in
