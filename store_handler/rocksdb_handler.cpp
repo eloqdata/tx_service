@@ -26,6 +26,7 @@
 #include <brpc/server.h>
 #include <brpc/stream.h>
 #include <bthread/condition_variable.h>
+#include <bthread/mutex.h>
 #include <butil/file_util.h>
 #include <butil/iobuf.h>
 #include <fcntl.h>
@@ -87,6 +88,83 @@ namespace EloqKV
 
 namespace
 {
+/**
+ * Minimal sync callback for RocksDB PutAll/PersistKV yield/resume offload.
+ * Mirrors SyncCallbackData pattern from data_store_service_client_closure.h.
+ */
+struct RocksDBWriteSyncCallback
+{
+    bthread::Mutex mtx_;
+    bthread::ConditionVariable cv_;
+    bool finished_{false};
+    bool success_{true};
+    const std::function<void()> *yield_fn_{nullptr};
+    const std::function<void()> *resume_fn_{nullptr};
+    std::atomic<bool> waiting_{false};
+
+    void Reset()
+    {
+        finished_ = false;
+        success_ = true;
+        waiting_.store(false);
+        yield_fn_ = nullptr;
+        resume_fn_ = nullptr;
+    }
+
+    void SetCoroCallbacks(const std::function<void()> *yield_fn,
+                          const std::function<void()> *resume_fn)
+    {
+        yield_fn_ = yield_fn;
+        resume_fn_ = resume_fn;
+    }
+
+    void Notify(bool ok)
+    {
+        std::unique_lock<bthread::Mutex> lk(mtx_);
+        success_ = ok;
+        finished_ = true;
+        if (resume_fn_ != nullptr && waiting_.load(std::memory_order_acquire))
+        {
+            waiting_.store(false, std::memory_order_release);
+            auto *fn = resume_fn_;
+            lk.unlock();
+            (*fn)();
+        }
+        else if (resume_fn_ == nullptr)
+        {
+            cv_.notify_one();
+        }
+    }
+
+    void Wait()
+    {
+        std::unique_lock<bthread::Mutex> lk(mtx_);
+        while (!finished_)
+        {
+            cv_.wait(lk);
+        }
+    }
+
+    void Wait(const std::function<void()> *yield_fn,
+              const std::function<void()> *resume_fn)
+    {
+        if (yield_fn == nullptr || resume_fn == nullptr)
+        {
+            Wait();
+            return;
+        }
+        std::unique_lock<bthread::Mutex> lk(mtx_);
+        while (!finished_)
+        {
+            waiting_.store(true, std::memory_order_release);
+            lk.unlock();
+            (*yield_fn)();
+            lk.lock();
+            waiting_.store(false, std::memory_order_release);
+        }
+    }
+};
+
 std::string NormalizeDbPath(const std::string &path)
 {
     std::string normalized = path;
@@ -438,14 +516,142 @@ bool RocksDBHandler::PutAll(
     const std::function<void()> *resume_fptr,
     const std::function<void()> *sync_yield_fptr)
 {
-    (void)yield_fptr;
-    (void)resume_fptr;
-    (void)sync_yield_fptr;
+    (void) sync_yield_fptr;
     std::thread::id this_id = std::this_thread::get_id();
     if (batch.empty())
     {
         return true;
     }
+
+    if (yield_fptr != nullptr && resume_fptr != nullptr)
+    {
+        RocksDBWriteSyncCallback callback;
+        callback.Reset();
+        callback.SetCoroCallbacks(yield_fptr, resume_fptr);
+
+        query_worker_pool_->SubmitWork(
+            [this, &batch, &callback, this_id](size_t)
+            {
+                std::shared_lock<std::shared_mutex> db_lk(db_mux_);
+                auto db = GetDBPtr();
+                if (!db)
+                {
+                    callback.Notify(false);
+                    return;
+                }
+                rocksdb::WriteOptions write_options;
+                write_options.disableWAL = true;
+                write_options.no_slowdown = false;
+                rocksdb::WriteBatch write_batch;
+                uint64_t write_batch_size = 0;
+
+                for (auto &[kv_cf_name, flush_task_entries] : batch)
+                {
+                    rocksdb::ColumnFamilyHandle *cfh =
+                        GetColumnFamilyHandler(kv_cf_name.data());
+                    if (cfh == nullptr)
+                    {
+                        LOG(ERROR) << "Failed to get column family, cf name: "
+                                   << kv_cf_name;
+                        callback.Notify(false);
+                        return;
+                    }
+                    uint64_t now =
+                        txservice::LocalCcShards::ClockTsInMillseconds();
+                    for (auto &flush_task_entry : flush_task_entries)
+                    {
+                        for (auto &flush_rec :
+                             *flush_task_entry->data_sync_vec_)
+                        {
+                            txservice::TxKey key = flush_rec.Key();
+                            std::string rocksdb_key;
+                            EncodeToKvKey(key, rocksdb_key);
+
+                            if (flush_rec.payload_status_ ==
+                                    txservice::RecordStatus::Normal &&
+                                flush_rec.Payload()->GetTTL() > now)
+                            {
+                                std::vector<char> rec_buf;
+                                SerializeFlushRecord(flush_rec, rec_buf);
+                                write_batch_size += rocksdb_key.size();
+                                write_batch_size += rec_buf.size();
+                                write_batch.Put(
+                                    cfh,
+                                    rocksdb::Slice(rocksdb_key.data(),
+                                                   rocksdb_key.size()),
+                                    rocksdb::Slice(rec_buf.data(),
+                                                   rec_buf.size()));
+                            }
+                            else
+                            {
+                                write_batch_size += rocksdb_key.size();
+                                write_batch.Delete(
+                                    cfh,
+                                    rocksdb::Slice(rocksdb_key.data(),
+                                                   rocksdb_key.size()));
+                            }
+
+                            if (write_batch_size >= batch_write_size_)
+                            {
+                                auto status =
+                                    db->Write(write_options, &write_batch);
+                                if (!status.ok())
+                                {
+                                    LOG(ERROR)
+                                        << "PutAll end failed "
+                                        << ", thread id: " << this_id
+                                        << ", result:"
+                                        << static_cast<int>(status.ok())
+                                        << ", batch size:" << batch.size()
+                                        << ", error: " << status.ToString()
+                                        << ", error code: " << status.code();
+                                    callback.Notify(false);
+                                    return;
+                                }
+                                if (metrics::enable_kv_metrics)
+                                {
+                                    metrics::kv_meter->Collect(
+                                        metrics::NAME_KV_FLUSH_ROWS_TOTAL,
+                                        write_batch.Count(),
+                                        "base");
+                                }
+                                write_batch.Clear();
+                                write_batch_size = 0;
+                            }
+                        }
+                    }
+                }
+
+                if (write_batch_size > 0)
+                {
+                    auto status = db->Write(write_options, &write_batch);
+                    if (!status.ok())
+                    {
+                        LOG(ERROR)
+                            << "PutAll end failed "
+                            << ", thread id: " << this_id
+                            << ", result:" << static_cast<int>(status.ok())
+                            << ", batch size:" << batch.size()
+                            << ", error: " << status.ToString()
+                            << ", error code: " << status.code();
+                        callback.Notify(false);
+                        return;
+                    }
+                    if (metrics::enable_kv_metrics)
+                    {
+                        metrics::kv_meter->Collect(
+                            metrics::NAME_KV_FLUSH_ROWS_TOTAL,
+                            write_batch.Count(),
+                            "base");
+                    }
+                }
+                callback.Notify(true);
+            });
+
+        callback.Wait(yield_fptr, resume_fptr);
+        return callback.success_;
+    }
+
     std::shared_lock<std::shared_mutex> db_lk(db_mux_);
     auto db = GetDBPtr();
     if (!db)
@@ -552,13 +758,56 @@ bool RocksDBHandler::PutAll(
     return true;
 }
 
-bool RocksDBHandler::PersistKV(
-    const std::vector<std::string> &kv_table_names,
-    const std::function<void()> *yield_fptr,
-    const std::function<void()> *resume_fptr)
+bool RocksDBHandler::PersistKV(const std::vector<std::string> &kv_table_names,
+                               const std::function<void()> *yield_fptr,
+                               const std::function<void()> *resume_fptr)
 {
-    (void)yield_fptr;
-    (void)resume_fptr;
+    if (yield_fptr != nullptr && resume_fptr != nullptr)
+    {
+        RocksDBWriteSyncCallback callback;
+        callback.Reset();
+        callback.SetCoroCallbacks(yield_fptr, resume_fptr);
+
+        query_worker_pool_->SubmitWork(
+            [this, &kv_table_names, &callback](size_t)
+            {
+                std::shared_lock<std::shared_mutex> db_lk(db_mux_);
+                auto db = GetDBPtr();
+                if (!db)
+                {
+                    callback.Notify(false);
+                    return;
+                }
+                for (const std::string &kv_cf_name : kv_table_names)
+                {
+                    rocksdb::ColumnFamilyHandle *cfh =
+                        GetColumnFamilyHandler(kv_cf_name);
+                    if (cfh == nullptr)
+                    {
+                        LOG(ERROR) << "Failed to get column family, cf name: "
+                                   << kv_cf_name;
+                        callback.Notify(false);
+                        return;
+                    }
+                    rocksdb::FlushOptions flush_options;
+                    flush_options.allow_write_stall = true;
+                    flush_options.wait = true;
+                    auto status = db->Flush(flush_options, cfh);
+                    if (!status.ok())
+                    {
+                        LOG(ERROR) << "Unable to flush db with error: "
+                                   << status.ToString();
+                        callback.Notify(false);
+                        return;
+                    }
+                }
+                callback.Notify(true);
+            });
+
+        callback.Wait(yield_fptr, resume_fptr);
+        return callback.success_;
+    }
+
     std::shared_lock<std::shared_mutex> db_lk(db_mux_);
     auto db = GetDBPtr();
     if (!db)
@@ -1522,9 +1771,9 @@ bool RocksDBHandler::UpdateRangeSlices(
     const std::function<void()> *resume_fptr,
     const std::function<void()> *sync_yield_fptr)
 {
-    (void)yield_fptr;
-    (void)resume_fptr;
-    (void)sync_yield_fptr;
+    (void) yield_fptr;
+    (void) resume_fptr;
+    (void) sync_yield_fptr;
     LOG(ERROR) << "RocksDBHandler::UpdateRangeSlices not implemented";
     // Not implemented
     assert(false);
@@ -1678,8 +1927,8 @@ bool RocksDBHandler::PutArchivesAll(
     const std::function<void()> *yield_fptr,
     const std::function<void()> *resume_fptr)
 {
-    (void)yield_fptr;
-    (void)resume_fptr;
+    (void) yield_fptr;
+    (void) resume_fptr;
     LOG(ERROR) << "RocksDBHandler::PutArchivesAll not implemented";
     // Not implemented
     assert(false);
@@ -1695,8 +1944,8 @@ bool RocksDBHandler::CopyBaseToArchive(
     const std::function<void()> *yield_fptr,
     const std::function<void()> *resume_fptr)
 {
-    (void)yield_fptr;
-    (void)resume_fptr;
+    (void) yield_fptr;
+    (void) resume_fptr;
     LOG(ERROR) << "RocksDBHandler::CopyBaseToArchive not implemented";
     // Not implemented
     assert(false);
