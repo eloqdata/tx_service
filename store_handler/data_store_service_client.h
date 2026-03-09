@@ -194,7 +194,7 @@ public:
 
     bool IsSharedStorage() const override
     {
-        if (data_store_service_ != nullptr)
+        if (bind_data_shard_with_ng_ && data_store_service_ != nullptr)
         {
             return data_store_service_->IsCloudMode();
         }

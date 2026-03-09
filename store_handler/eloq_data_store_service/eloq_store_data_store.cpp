@@ -879,7 +879,6 @@ void EloqStoreDataStore::OnFloor(::eloqstore::KvRequest *req)
 
 void EloqStoreDataStore::ReloadDataFromCloud(int64_t term)
 {
-    // TODO(lzx): implement this for eloqstore data store.
     LOG(INFO) << "EloqStoreDataStore::ReloadDataFromCloud, term: " << term;
     if (eloq_store_service_->Term() != static_cast<uint64_t>(term))
     {
