@@ -1109,6 +1109,17 @@ public:
         return node_ids;
     }
 
+    std::vector<uint32_t> GetCandidateStandbys()
+    {
+        std::vector<uint32_t> node_ids;
+        node_ids.reserve(candidate_standby_nodes_.size());
+        for (const auto &it : candidate_standby_nodes_)
+        {
+            node_ids.push_back(it.first);
+        }
+        return node_ids;
+    }
+
     bool HasCandidateStandbys() const
     {
         return !candidate_standby_nodes_.empty();

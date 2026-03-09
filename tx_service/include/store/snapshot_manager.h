@@ -96,6 +96,13 @@ public:
     void EraseSubscriptionBarrier(uint32_t standby_node_id,
                                   int64_t standby_node_term);
 
+    /**
+     * @brief Remove all subscription barriers and queued sync task for one
+     * standby node.
+     * @param standby_node_id Standby's node id.
+     */
+    void EraseSubscriptionBarriersByNode(uint32_t standby_node_id);
+
     txservice::remote::BackupTaskStatus CreateBackup(
         const txservice::remote::CreateBackupRequest *req);
 
@@ -115,6 +122,13 @@ public:
                                uint64_t *out_ckpt_ts = nullptr);
 
 private:
+    /**
+     * @brief Remove one subscription barrier entry while caller already holds
+     * standby_sync_mux_.
+     */
+    void EraseSubscriptionBarrierLocked(uint32_t standby_node_id,
+                                        int64_t standby_node_term);
+
     struct PendingSnapshotSyncTask
     {
         txservice::remote::StorageSnapshotSyncRequest req;
