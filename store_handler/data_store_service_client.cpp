@@ -3836,6 +3836,11 @@ bool DataStoreServiceClient::OnSnapshotReceived(
     const txservice::remote::OnSnapshotSyncedRequest *req)
 {
 #ifdef DATA_STORE_TYPE_ELOQDSS_ELOQSTORE
+    if (!bind_data_shard_with_ng_)
+    {
+        return true;
+    }
+
     if (data_store_service_ != nullptr)
     {
         uint32_t ng_id = req->ng_id();
@@ -3862,6 +3867,11 @@ bool DataStoreServiceClient::OnUpdateStandbyCkptTs(uint32_t ng_id,
                                                    int64_t ng_term)
 {
 #ifdef DATA_STORE_TYPE_ELOQDSS_ELOQSTORE
+    if (!bind_data_shard_with_ng_)
+    {
+        return true;
+    }
+
     if (data_store_service_ != nullptr)
     {
         data_store_service_->OnUpdateStandbyCkptTs(ng_id, ng_term);
