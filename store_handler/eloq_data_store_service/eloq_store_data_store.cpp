@@ -595,12 +595,12 @@ void EloqStoreDataStore::CreateSnapshotForBackup(
     PoolableGuard req_guard(req);
 
     std::string_view backup_name = req->GetBackupName();
+    assert(req->GetBackupTs() != 0);
 
     if (backup_name.empty() || backup_name == eloq_store_service_->Branch())
     {
         // If backup_name is empty or matches the current branch, create
         // snapshot for current branch.
-        assert(req->GetBackupTs() != 0);
         ::eloqstore::GlobalArchiveRequest global_archive_req;
         global_archive_req.SetSnapshotTimestamp(req->GetBackupTs());
         eloq_store_service_->ExecSync(&global_archive_req);
@@ -636,7 +636,6 @@ void EloqStoreDataStore::CreateSnapshotForBackup(
         // forked from the current branch.  Use backup_ts as the salt so the
         // internal filename is deterministic and correlated with the backup
         // timestamp.
-        assert(req->GetBackupTs() != 0);
         ::eloqstore::GlobalCreateBranchRequest create_branch_req;
         create_branch_req.SetArgs(std::string(backup_name),
                                   std::string(eloq_store_service_->Branch()));
@@ -649,6 +648,7 @@ void EloqStoreDataStore::CreateSnapshotForBackup(
         {
         case ::eloqstore::KvError::NoError:
             ds_error = ::EloqDS::remote::DataStoreError::NO_ERROR;
+            req->AddBackupFile(create_branch_req.result_branch);
             break;
         case ::eloqstore::KvError::NotRunning:
             ds_error = ::EloqDS::remote::DataStoreError::DB_NOT_OPEN;
