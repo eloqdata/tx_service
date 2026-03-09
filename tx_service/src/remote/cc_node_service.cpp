@@ -1656,7 +1656,20 @@ void CcNodeService::StandbyStartFollowing(
         response->add_start_sequence_id(start_seq);
     }
 
+    ActiveTxMaxTsCc active_tx_max_ts_cc(local_shards_.Count(),
+                                        request->node_group_id());
+    for (uint16_t core_id = 0; core_id < local_shards_.Count(); core_id++)
+    {
+        local_shards_.EnqueueCcRequest(core_id, &active_tx_max_ts_cc);
+    }
+    active_tx_max_ts_cc.Wait();
+    uint64_t global_active_tx_max_ts = active_tx_max_ts_cc.GetActiveTxMaxTs();
+
     auto subscribe_id = Sharder::Instance().GetNextSubscribeId();
+    int64_t standby_node_term =
+        (request->ng_term() << 32) | static_cast<int64_t>(subscribe_id);
+    store::SnapshotManager::Instance().RegisterSubscriptionBarrier(
+        request->node_id(), standby_node_term, global_active_tx_max_ts);
 
     response->set_subscribe_id(subscribe_id);
     response->set_error(false);
@@ -1776,8 +1789,9 @@ void CcNodeService::RequestStorageSnapshotSync(
     // Then, notify standby nodes that data committed before subscribe timepoint
     // has been flushed to kvstore. (standby nodes begin fetch record from
     // kvstore on cache miss).
-    store::SnapshotManager::Instance().OnSnapshotSyncRequested(request);
-    response->set_error(false);
+    bool accepted =
+        store::SnapshotManager::Instance().OnSnapshotSyncRequested(request);
+    response->set_error(!accepted);
 }
 
 void CcNodeService::OnSnapshotSynced(
