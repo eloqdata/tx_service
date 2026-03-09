@@ -109,6 +109,12 @@ public:
     bool RunOneRoundCheckpoint(uint32_t node_group, int64_t ng_leader_term);
 
 private:
+    struct PendingSnapshotSyncTask
+    {
+        txservice::remote::StorageSnapshotSyncRequest req;
+        uint64_t subscription_active_tx_max_ts{0};
+    };
+
     SnapshotManager() = default;
     ~SnapshotManager() = default;
 
@@ -127,8 +133,7 @@ private:
     std::thread standby_sync_worker_;
     std::mutex standby_sync_mux_;
     std::condition_variable standby_sync_cv_;
-    std::unordered_map<uint32_t, txservice::remote::StorageSnapshotSyncRequest>
-        pending_req_;
+    std::unordered_map<uint32_t, PendingSnapshotSyncTask> pending_req_;
     // standby node id -> (standby node term -> subscription-time active tx
     // max ts)
     std::unordered_map<uint32_t, std::unordered_map<int64_t, uint64_t>>
