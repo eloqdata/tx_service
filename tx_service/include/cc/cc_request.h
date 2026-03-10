@@ -741,7 +741,8 @@ public:
                OperationType operation_type,
                uint32_t key_shard_code,
                CcHandlerResult<PostProcessResult> *res,
-               uint8_t range_size_flags = 0x10)
+               int32_t partition_id = -1,
+               bool on_dirty_range = false)
     {
         TemplatedCcRequest<PostWriteCc, PostProcessResult>::Reset(
             nullptr, res, addr->NodeGroupId(), tx_number, tx_term);
@@ -755,7 +756,8 @@ public:
         is_remote_ = false;
         ccm_ = nullptr;
         is_initial_insert_ = false;
-        range_size_flags_ = range_size_flags;
+        partition_id_ = partition_id;
+        on_dirty_range_ = on_dirty_range;
     }
 
     void Reset(const TxKey *key,
@@ -770,7 +772,8 @@ public:
                CcHandlerResult<PostProcessResult> *res,
                bool initial_insertion = false,
                int64_t ng_term = INIT_TERM,
-               uint8_t range_size_flags = 0x10)
+               int32_t partition_id = -1,
+               bool on_dirty_range = false)
     {
         TemplatedCcRequest<PostWriteCc, PostProcessResult>::Reset(
             &table_name,
@@ -791,7 +794,8 @@ public:
         is_remote_ = false;
         ccm_ = nullptr;
         is_initial_insert_ = initial_insertion;
-        range_size_flags_ = range_size_flags;
+        partition_id_ = partition_id;
+        on_dirty_range_ = on_dirty_range;
     }
 
     void Reset(const CcEntryAddr *addr,
@@ -802,7 +806,8 @@ public:
                OperationType operation_type,
                uint32_t key_shard_code,
                CcHandlerResult<PostProcessResult> *res,
-               uint8_t range_size_flags = 0x10)
+               int32_t partition_id = -1,
+               bool on_dirty_range = false)
     {
         TemplatedCcRequest<PostWriteCc, PostProcessResult>::Reset(
             nullptr, res, addr->NodeGroupId(), tx_number, tx_term);
@@ -816,7 +821,8 @@ public:
         is_remote_ = true;
         ccm_ = nullptr;
         is_initial_insert_ = false;
-        range_size_flags_ = range_size_flags;
+        partition_id_ = partition_id;
+        on_dirty_range_ = on_dirty_range;
     }
 
     void Reset(const TableName *table_name,
@@ -831,7 +837,8 @@ public:
                CcHandlerResult<PostProcessResult> *res,
                bool initial_insertion = false,
                int64_t ng_term = INIT_TERM,
-               uint8_t range_size_flags = 0x10)
+               int32_t partition_id = -1,
+               bool on_dirty_range = false)
     {
         TemplatedCcRequest<PostWriteCc, PostProcessResult>::Reset(
             table_name,
@@ -852,7 +859,8 @@ public:
         is_remote_ = true;
         ccm_ = nullptr;
         is_initial_insert_ = initial_insertion;
-        range_size_flags_ = range_size_flags;
+        partition_id_ = partition_id;
+        on_dirty_range_ = on_dirty_range;
     }
 
     const CcEntryAddr *CceAddr() const
@@ -885,11 +893,9 @@ public:
         return key_shard_code_;
     }
 
-    // Low 10 bits of key_shard_code_: range partition id (when
-    // range-partitioned).
-    uint32_t PartitionId() const
+    int32_t PartitionId() const
     {
-        return key_shard_code_ & 0x3FF;
+        return partition_id_;
     }
 
     const void *Key() const
@@ -909,12 +915,12 @@ public:
 
     bool OnDirtyRange() const
     {
-        return (range_size_flags_ & 0x0F) != 0;
+        return on_dirty_range_;
     }
 
     bool NeedUpdateRangeSize() const
     {
-        return (range_size_flags_ >> 4) != 0;
+        return partition_id_ >= 0;
     }
 
 private:
@@ -934,9 +940,9 @@ private:
         const void *key_;
         const std::string *key_str_;
     };
-    // High 4 bits: need update range size; low 4 bits: on dirty (splitting)
-    // range.
-    uint8_t range_size_flags_{0x10};
+    int32_t partition_id_{-1};
+    // True if the key is located in a splitting range.
+    bool on_dirty_range_{false};
 };
 
 struct PostWriteAllCc

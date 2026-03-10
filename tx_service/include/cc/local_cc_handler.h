@@ -104,7 +104,8 @@ public:
                           OperationType operation_type,
                           uint32_t key_shard_code,
                           CcHandlerResult<PostProcessResult> &hres,
-                          uint8_t range_size_flags = 0x10) override;
+                          int32_t partition_id = -1,
+                          bool on_dirty_range = false) override;
 
     CcReqStatus PostRead(
         uint64_t tx_number,

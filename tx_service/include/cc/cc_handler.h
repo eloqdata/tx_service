@@ -167,7 +167,8 @@ public:
                                   OperationType operation_type,
                                   uint32_t key_shard_code,
                                   CcHandlerResult<PostProcessResult> &hres,
-                                  uint8_t range_size_flags = 0x10) = 0;
+                                  int32_t partition_id = -1,
+                                  bool on_dirty_range = false) = 0;
 
     /**
      * @briefPost-processes a read/scan key. Post-processing clears the read

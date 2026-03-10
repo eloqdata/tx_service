@@ -595,7 +595,8 @@ void txservice::remote::RemotePostWrite::Reset(
             static_cast<OperationType>(post_commit.operation_type()),
             post_commit.key_shard_code(),
             &cc_res_,
-            static_cast<uint8_t>(post_commit.range_size_flags()));
+            post_commit.partition_id(),
+            post_commit.on_dirty_range());
     }
     else
     {

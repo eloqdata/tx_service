@@ -5314,6 +5314,7 @@ void TransactionExecution::Process(PostProcessOp &post_process)
         {
             for (const auto &[key, write_entry] : pair.second)
             {
+                bool on_dirty_range = write_entry.on_dirty_range_;
                 CcReqStatus ret =
                     cc_handler_->PostWrite(tx_number,
                                            tx_term_,
@@ -5324,23 +5325,25 @@ void TransactionExecution::Process(PostProcessOp &post_process)
                                            write_entry.op_,
                                            write_entry.key_shard_code_,
                                            post_process.hd_result_,
-                                           write_entry.range_size_flags_);
+                                           write_entry.partition_id_,
+                                           on_dirty_range);
                 update_post_cnt(ret);
 
-                for (auto &[forward_shard_code, cce_addr] :
+                for (auto &[forward_shard_code, forward_pair] :
                      write_entry.forward_addr_)
                 {
-                    CcReqStatus ret = cc_handler_->PostWrite(
-                        tx_number,
-                        tx_term_,
-                        command_id,
-                        commit_ts_,
-                        cce_addr,
-                        write_entry.rec_.get(),
-                        write_entry.op_,
-                        forward_shard_code,
-                        post_process.hd_result_,
-                        (0x10 | write_entry.range_size_flags_));
+                    CcReqStatus ret =
+                        cc_handler_->PostWrite(tx_number,
+                                               tx_term_,
+                                               command_id,
+                                               commit_ts_,
+                                               forward_pair.second,
+                                               write_entry.rec_.get(),
+                                               write_entry.op_,
+                                               forward_shard_code,
+                                               post_process.hd_result_,
+                                               forward_pair.first,
+                                               on_dirty_range);
                     update_post_cnt(ret);
                 }
             }
@@ -5422,9 +5425,10 @@ void TransactionExecution::Process(PostProcessOp &post_process)
                     // Keys that were not successfully locked in the cc
                     // map do not need post-processing.
 
-                    for (const auto &[forward_shard_code, cce_addr] :
+                    for (const auto &[forward_shard_code, forward_pair] :
                          write_entry.forward_addr_)
                     {
+                        const CcEntryAddr &cce_addr = forward_pair.second;
                         if (cce_addr.Term() >= 0)
                         {
                             assert(!cce_addr.Empty());

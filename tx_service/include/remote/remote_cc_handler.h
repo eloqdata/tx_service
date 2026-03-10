@@ -85,7 +85,8 @@ public:
                    OperationType operation_type,
                    uint32_t key_shard_code,
                    CcHandlerResult<PostProcessResult> &hres,
-                   uint8_t range_size_flags = 0x10);
+                   int32_t partition_id = -1,
+                   bool on_dirty_range = false);
 
     void PostWriteAll(uint32_t src_node_id,
                       const TableName &table_name,
