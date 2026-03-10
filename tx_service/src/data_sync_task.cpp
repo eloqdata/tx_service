@@ -103,9 +103,9 @@ DataSyncTask::DataSyncTask(const TableName &table_name,
     size_t local_shard_count = Sharder::Instance().GetLocalCcShardsCount();
     int32_t old_range_id = range_entry_->GetRangeInfo()->PartitionId();
     uint16_t old_range_owner_shard =
-        static_cast<uint16_t>(old_range_id % local_shard_count);
+        static_cast<uint16_t>((old_range_id & 0x3FF) % local_shard_count);
     uint16_t new_range_owner_shard =
-        static_cast<uint16_t>(id_ % local_shard_count);
+        static_cast<uint16_t>((id_ & 0x3FF) % local_shard_count);
     need_update_ckpt_ts_ =
         range_owner == ng_id && old_range_owner_shard == new_range_owner_shard;
 }
