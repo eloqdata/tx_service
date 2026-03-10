@@ -1382,16 +1382,9 @@ public:
         auto subscribed_standbys = shard_->GetSubscribedStandbys();
         bool has_subscribed_standby = !subscribed_standbys.empty();
         StandbyForwardEntry *forward_entry = cce->ForwardEntry();
-        if (has_subscribed_standby && forward_entry == nullptr)
-        {
-            LOG(ERROR) << "Subscribed standbys exist, but forward_entry is "
-                          "null. Data loss may occur. Notifying standbys "
-                          "to resubscribe.";
-            for (uint32_t node_id : subscribed_standbys)
-            {
-                shard_->NotifyStandbyOutOfSync(node_id);
-            }
-        }
+        LOG_IF(WARNING, has_subscribed_standby && forward_entry == nullptr)
+            << "Subscribed standbys exist, but forward_entry is null. "
+               "Data loss may occur.";
         if (commit_ts > 0)
         {
             RecordStatus dirty_payload_status = cce->DirtyPayloadStatus();
