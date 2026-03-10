@@ -358,7 +358,6 @@ public:
 
     void Reset(StoreRange *range,
                StoreSlice *slice,
-               uint16_t core_cnt,
                const TableName &tbl_name,
                int64_t term,
                NodeGroupId ng_id)
@@ -371,18 +370,15 @@ public:
         ng_id_ = ng_id;
         range_ = range;
         slice_ = slice;
-        unfinished_cnt_ = core_cnt;
-
-        pause_pos_.clear();
-        pause_pos_.resize(core_cnt);
+        pause_pos_ = TxKey();
     }
 
     bool Execute(CcShard &ccs) override;
-    bool SetFinish(uint16_t core, bool succ);
+    void SetFinish(bool succ);
     StoreSlice &Slice();
     StoreRange &Range();
-    void SetPauseKey(TxKey &key, uint16_t core_id);
-    TxKey &PauseKey(uint16_t core_id);
+    void SetPauseKey(TxKey &key);
+    TxKey &PauseKey();
 
 private:
     TableName tbl_name_{std::string(""), TableType::Primary, TableEngine::None};
@@ -390,8 +386,7 @@ private:
     NodeGroupId ng_id_;
     StoreRange *range_;
     StoreSlice *slice_;
-    std::atomic<uint16_t> unfinished_cnt_{0};
-    std::vector<TxKey> pause_pos_;
+    TxKey pause_pos_;
 };
 
 struct FillStoreSliceCc : public CcRequestBase

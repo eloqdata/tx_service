@@ -6649,7 +6649,6 @@ struct UpdateKeyCacheCc : public CcRequestBase
     void Reset(const TableName &tbl_name,
                uint32_t ng_id,
                int64_t ng_term,
-               size_t core_cnt,
                const TxKey &start_key,
                const TxKey &end_key,
                StoreRange *range,
@@ -6663,10 +6662,8 @@ struct UpdateKeyCacheCc : public CcRequestBase
         start_key_ = &start_key;
         end_key_ = &end_key;
         store_range_ = range;
-        unfinished_core_ = core_cnt;
         hd_res_ = res;
-        paused_pos_.clear();
-        paused_pos_.resize(core_cnt);
+        paused_pos_ = TxKey();
     }
 
     bool Execute(CcShard &ccs) override
@@ -6674,7 +6671,8 @@ struct UpdateKeyCacheCc : public CcRequestBase
         int64_t ng_term = Sharder::Instance().LeaderTerm(node_group_id_);
         if (ng_term < 0 || ng_term != ng_term_)
         {
-            return SetFinish();
+            SetFinish();
+            return true;
         }
 
         CcMap *ccm = ccs.GetCcm(*table_name_, node_group_id_);
@@ -6683,14 +6681,9 @@ struct UpdateKeyCacheCc : public CcRequestBase
         return ccm->Execute(*this);
     }
 
-    bool SetFinish()
+    void SetFinish()
     {
-        if (unfinished_core_.fetch_sub(1, std::memory_order_acq_rel) == 1)
-        {
-            hd_res_->SetFinished();
-            return true;
-        }
-        return false;
+        hd_res_->SetFinished();
     }
 
     const TableName *table_name_{nullptr};
@@ -6699,8 +6692,7 @@ struct UpdateKeyCacheCc : public CcRequestBase
     const TxKey *start_key_{nullptr};
     const TxKey *end_key_{nullptr};
     StoreRange *store_range_{nullptr};
-    std::vector<TxKey> paused_pos_;
-    std::atomic<size_t> unfinished_core_;
+    TxKey paused_pos_;
     CcHandlerResult<Void> *hd_res_{nullptr};
 };
 

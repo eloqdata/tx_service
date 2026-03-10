@@ -510,27 +510,20 @@ bool ClearCcNodeGroup::Execute(CcShard &ccs)
     return false;
 }
 
-bool InitKeyCacheCc::SetFinish(uint16_t core, bool succ)
+void InitKeyCacheCc::SetFinish(bool succ)
 {
     if (succ)
     {
-        slice_->SetKeyCacheValidity(core, succ);
+        slice_->SetKeyCacheValidity(succ);
     }
-    slice_->SetLoadingKeyCache(core, false);
+    slice_->SetLoadingKeyCache(false);
 
-    if (unfinished_cnt_.fetch_sub(1, std::memory_order_relaxed) == 1)
-    {
-        pause_pos_.clear();
+    pause_pos_ = TxKey();
 
-        // Unpin the slice.
-        range_->UnpinSlice(slice_, true);
-        std::unique_lock<std::mutex> slice_lk(slice_->slice_mux_);
-        slice_->init_key_cache_cc_ = nullptr;
-
-        return true;
-    }
-
-    return false;
+    // Unpin the slice.
+    range_->UnpinSlice(slice_, true);
+    std::unique_lock<std::mutex> slice_lk(slice_->slice_mux_);
+    slice_->init_key_cache_cc_ = nullptr;
 }
 
 bool InitKeyCacheCc::Execute(CcShard &ccs)
@@ -539,15 +532,15 @@ bool InitKeyCacheCc::Execute(CcShard &ccs)
     int64_t cc_ng_term = Sharder::Instance().LeaderTerm(ng_id_);
     if (std::max(cc_ng_candid_term, cc_ng_term) != term_)
     {
-        return SetFinish(ccs.core_id_, false);
+        SetFinish(false);
+        return true;
     }
 
     CcMap *ccm = ccs.GetCcm(tbl_name_, ng_id_);
     if (ccm == nullptr)
     {
-        // ccm is empty when slice is fully cached. That means this slice is
-        // empty on this core.
-        return SetFinish(ccs.core_id_, true);
+        SetFinish(true);
+        return true;
     }
 
     return ccm->Execute(*this);
@@ -562,14 +555,14 @@ StoreSlice &InitKeyCacheCc::Slice()
     return *slice_;
 }
 
-void InitKeyCacheCc::SetPauseKey(TxKey &key, uint16_t core_id)
+void InitKeyCacheCc::SetPauseKey(TxKey &key)
 {
-    pause_pos_[core_id] = key.Clone();
+    pause_pos_ = key.Clone();
 }
 
-TxKey &InitKeyCacheCc::PauseKey(uint16_t core_id)
+TxKey &InitKeyCacheCc::PauseKey()
 {
-    return pause_pos_[core_id];
+    return pause_pos_;
 }
 
 void FillStoreSliceCc::Reset(const TableName &table_name,
