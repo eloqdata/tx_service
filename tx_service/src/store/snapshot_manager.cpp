@@ -153,7 +153,12 @@ void SnapshotManager::RegisterSubscriptionBarrier(uint32_t standby_node_id,
         }
     }
 
-    node_barriers[standby_node_term] = active_tx_max_ts;
+    // Keep the first registered barrier for the same standby term to make
+    // duplicate reset/subscribe retries idempotent.
+    if (node_barriers.find(standby_node_term) == node_barriers.end())
+    {
+        node_barriers[standby_node_term] = active_tx_max_ts;
+    }
 }
 
 bool SnapshotManager::GetSubscriptionBarrier(uint32_t standby_node_id,

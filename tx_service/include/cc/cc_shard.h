@@ -1120,10 +1120,6 @@ public:
         return node_ids;
     }
 
-    bool HasCandidateStandbys() const
-    {
-        return !candidate_standby_nodes_.empty();
-    }
     void ResetStandbySequence();
 
     void DecrInflightStandbyReqCount(uint32_t seq_grp);
