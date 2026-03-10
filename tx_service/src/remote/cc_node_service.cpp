@@ -1398,7 +1398,7 @@ void CcNodeService::UploadBatchSlices(
     req.Reset(table_name, ng_id, ng_term, write_entry_tuple, slices_info);
 
     uint16_t dest_core =
-        static_cast<uint16_t>(slices_info->new_range_ % core_cnt);
+        static_cast<uint16_t>((slices_info->new_range_ & 0x3FF) % core_cnt);
     cc_shards->EnqueueToCcShard(dest_core, &req);
     req.Wait();
 
