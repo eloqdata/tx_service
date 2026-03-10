@@ -1075,8 +1075,17 @@ void CcNode::SubscribePrimaryNode(uint32_t leader_node_id,
     stub->ResetStandbySequenceId(&cntl, &reset_req, &reset_resp, nullptr);
 
     // Check rpc result
-    while (cntl.Failed())
+    while (cntl.Failed() || reset_resp.error())
     {
+        if (reset_resp.error())
+        {
+            LOG(WARNING)
+                << "ResetStandbySequenceId rejected by primary, ng_id: "
+                << ng_id_ << ", standby_term: " << standby_term
+                << ", primary_node_id: " << leader_node_id;
+            return;
+        }
+
         // We only need to retry if the message is not delivered.
         if (Sharder::Instance().LeaderTerm(ng_id_) > 0 ||
             Sharder::Instance().CandidateLeaderTerm(ng_id_) > 0 ||

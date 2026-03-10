@@ -866,8 +866,7 @@ public:
 
         StandbyForwardEntry *forward_entry = nullptr;
         remote::KeyObjectStandbyForwardRequest *forward_req = nullptr;
-        if (!shard_->GetSubscribedStandbys().empty() ||
-            shard_->HasCandidateStandbys())
+        if (!shard_->GetSubscribedStandbys().empty())
         {
             forward_entry = cce->ForwardEntry();
             if (!forward_entry)
@@ -1380,20 +1379,17 @@ public:
         assert(ccp != nullptr);
         bool s_obj_exist = (cce->PayloadStatus() == RecordStatus::Normal);
 
-        StandbyForwardEntry *forward_entry = nullptr;
         auto subscribed_standbys = shard_->GetSubscribedStandbys();
-        if (!subscribed_standbys.empty())
+        bool has_subscribed_standby = !subscribed_standbys.empty();
+        StandbyForwardEntry *forward_entry = cce->ForwardEntry();
+        if (has_subscribed_standby && forward_entry == nullptr)
         {
-            forward_entry = cce->ForwardEntry();
-            if (forward_entry == nullptr)
+            LOG(ERROR) << "Subscribed standbys exist, but forward_entry is "
+                          "null. Data loss may occur. Notifying standbys "
+                          "to resubscribe.";
+            for (uint32_t node_id : subscribed_standbys)
             {
-                LOG(ERROR) << "Subscribed standbys exist, but forward_entry is "
-                              "null. Data loss may occur. Notifying standbys "
-                              "to resubscribe.";
-                for (uint32_t node_id : subscribed_standbys)
-                {
-                    shard_->NotifyStandbyOutOfSync(node_id);
-                }
+                shard_->NotifyStandbyOutOfSync(node_id);
             }
         }
         if (commit_ts > 0)
@@ -1437,12 +1433,20 @@ public:
             }
             if (forward_entry)
             {
-                // Set commit ts and send the msg to standby node
-                forward_entry->Request().set_commit_ts(commit_ts);
-                forward_entry->Request().set_schema_version(schema_ts_);
-                std::unique_ptr<StandbyForwardEntry> entry_ptr =
+                if (has_subscribed_standby)
+                {
+                    // Set commit ts and send the msg to standby node.
+                    forward_entry->Request().set_commit_ts(commit_ts);
+                    forward_entry->Request().set_schema_version(schema_ts_);
+                    std::unique_ptr<StandbyForwardEntry> entry_ptr =
+                        cce->ReleaseForwardEntry();
+                    shard_->ForwardStandbyMessage(entry_ptr.release());
+                }
+                else
+                {
+                    // No standby needs this entry anymore.
                     cce->ReleaseForwardEntry();
-                shard_->ForwardStandbyMessage(entry_ptr.release());
+                }
             }
             bool was_dirty = cce->IsDirty();
             cce->SetCommitTsPayloadStatus(commit_ts, payload_status);
