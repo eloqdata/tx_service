@@ -349,7 +349,7 @@ void SkGenerator::ScanAndEncodeIndex(const TxKey *start_key,
     {
         batch_tuples = 0;
 
-        uint16_t dest_core = partition_id_ % cc_shards->Count();
+        uint16_t dest_core = (partition_id_ & 0x3FF) % cc_shards->Count();
         cc_shards->EnqueueToCcShard(dest_core, &scan_req);
         scan_req.Wait();
 
@@ -742,7 +742,7 @@ void UploadIndexContext::SendIndexes(
                        UploadBatchType::SkIndexData);
 
         uint16_t dest_core =
-            static_cast<uint16_t>(partition_id % cc_shards->Count());
+            static_cast<uint16_t>((partition_id & 0x3FF) % cc_shards->Count());
         cc_shards->EnqueueToCcShard(dest_core, req_ptr);
     }
     else
