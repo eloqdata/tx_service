@@ -6344,7 +6344,7 @@ public:
 
                         // new range belongs to this ng: determine core based on
                         // new_range_id and mark dirty.
-                        core_id = static_cast<uint16_t>(new_range_id %
+                        core_id = static_cast<uint16_t>((new_range_id & 0x3FF) %
                                                         shard_->core_cnt_);
                         is_dirty = true;
 
@@ -6373,8 +6373,8 @@ public:
                 {
                     // Old range bucket belongs to this ng or is migrating to
                     // this ng.
-                    core_id =
-                        static_cast<uint16_t>(partition_id % shard_->core_cnt_);
+                    core_id = static_cast<uint16_t>((partition_id & 0x3FF) %
+                                                    shard_->core_cnt_);
                     is_dirty = range_entry->GetRangeInfo()->IsDirty();
 
                     uint64_t range_split_commit_ts =
