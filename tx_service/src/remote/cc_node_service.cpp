@@ -1230,7 +1230,7 @@ void CcNodeService::UploadBatch(
     if (partition_id >= 0)
     {
         uint16_t dest_core =
-            static_cast<uint16_t>(partition_id % cc_shards->Count());
+            static_cast<uint16_t>((partition_id & 0x3FF) % cc_shards->Count());
         cc_shards->EnqueueToCcShard(dest_core, &req);
     }
     else
