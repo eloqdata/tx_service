@@ -5194,9 +5194,9 @@ bool SplitFlushRangeOp::ForwardKickoutIterator(TransactionExecution *txm)
             NodeGroupId dirty_new_owner =
                 new_range_bucket_info->DirtyBucketOwner();
             uint16_t range_shard_id = static_cast<uint16_t>(
-                range_info_->PartitionId() % local_shards->Count());
+                (range_info_->PartitionId() & 0x3FF) % local_shards->Count());
             uint16_t new_range_shard_id = static_cast<uint16_t>(
-                kickout_data_it_->second % local_shards->Count());
+                (kickout_data_it_->second & 0x3FF) % local_shards->Count());
             if ((new_owner != txm->TxCcNodeId() &&
                  dirty_new_owner != txm->TxCcNodeId()) ||
                 (range_shard_id != new_range_shard_id))
