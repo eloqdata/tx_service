@@ -1966,7 +1966,8 @@ void TransactionExecution::Process(ReadOperation &read)
                     // Uses the partition id to shard the key across CPU cores
                     // in a cc node.
                     partition_id = range_rec_.GetRangeInfo()->PartitionId();
-                    uint32_t residual = static_cast<uint32_t>(partition_id);
+                    uint32_t residual =
+                        static_cast<uint32_t>((partition_id & 0x3FF));
                     NodeGroupId range_ng =
                         range_rec_.GetRangeOwnerNg()->BucketOwner();
                     key_shard_code = range_ng << 10 | residual;
