@@ -1431,7 +1431,7 @@ txservice::remote::RemoteScanSlice::RemoteScanSlice()
         const ScanSliceRequest &req = input_msg_->scan_slice_req();
         uint32_t range_id = req.range_id();
         uint32_t core_id =
-            range_id % Sharder::Instance().GetLocalCcShardsCount();
+            (range_id & 0x3FF) % Sharder::Instance().GetLocalCcShardsCount();
         output_msg_.set_core_id(core_id);
         hd_->SendScanRespToNode(req.src_node_id(), output_msg_, false);
         hd_->RecycleCcMsg(std::move(input_msg_));
