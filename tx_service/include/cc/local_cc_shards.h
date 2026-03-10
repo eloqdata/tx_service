@@ -1129,7 +1129,6 @@ public:
     template <typename KeyT>
     RangeSliceOpStatus AddKeyToKeyCache(const TableName &table_name,
                                         NodeGroupId cc_ng_id,
-                                        uint16_t core_id,
                                         const KeyT &key)
     {
         std::shared_lock<std::shared_mutex> lk(meta_data_mux_);
@@ -1156,7 +1155,7 @@ public:
             return RangeSliceOpStatus::Error;
         }
         store_range->UpdateLastAccessedTs(ClockTs());
-        return store_range->AddKey(key, core_id);
+        return store_range->AddKey(key);
     }
 
     template <typename KeyT>

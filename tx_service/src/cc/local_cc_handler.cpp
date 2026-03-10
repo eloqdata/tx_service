@@ -2016,20 +2016,13 @@ void txservice::LocalCcHandler::UpdateKeyCache(const TableName &table_name,
     hres.SetToBlock();
 #endif
 
-    size_t core_cnt = cc_shards_.Count();
     UpdateKeyCacheCc *req = update_key_cache_pool_.NextRequest();
-    req->Reset(table_name,
-               ng_id,
-               tx_term,
-               core_cnt,
-               start_key,
-               end_key,
-               store_range,
-               &hres);
-    for (size_t idx = 0; idx < core_cnt; ++idx)
-    {
-        cc_shards_.EnqueueCcRequest(idx, req);
-    }
+    req->Reset(
+        table_name, ng_id, tx_term, start_key, end_key, store_range, &hres);
+
+    uint16_t dest_core = static_cast<uint16_t>(
+        (store_range->PartitionId() & 0x3FF) % cc_shards_.Count());
+    cc_shards_.EnqueueCcRequest(dest_core, req);
 }
 
 /*

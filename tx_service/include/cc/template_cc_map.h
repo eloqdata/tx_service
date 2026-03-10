@@ -251,7 +251,7 @@ public:
                 auto it = Iterator(cce_ptr, ccp, &neg_inf_);
                 target_key = it->first;
                 auto res = shard_->local_shards_.AddKeyToKeyCache(
-                    table_name_, cc_ng_id_, shard_->core_id_, *target_key);
+                    table_name_, cc_ng_id_, *target_key);
                 if (res == RangeSliceOpStatus::Retry)
                 {
                     // If the insert fails due to key cache is being
@@ -419,10 +419,7 @@ public:
                         // or auto incr pk insert, the ReadCc is skipped and we
                         // need to update key cache here.
                         auto res = shard_->local_shards_.AddKeyToKeyCache(
-                            table_name_,
-                            cc_ng_id_,
-                            shard_->core_id_,
-                            *target_key);
+                            table_name_, cc_ng_id_, *target_key);
                         if (res == RangeSliceOpStatus::Retry)
                         {
                             // If the insert fails due to key cache is being
@@ -1712,7 +1709,6 @@ public:
                                         static_cast<TemplateStoreRange<KeyT> *>(
                                             slice_id.Range());
                                     auto res = range->AddKey(*look_key,
-                                                             shard_->core_id_,
                                                              slice_id.Slice());
                                     if (res == RangeSliceOpStatus::Error)
                                     {
@@ -6755,17 +6751,18 @@ public:
     bool Execute(InitKeyCacheCc &req) override
     {
         Iterator map_it, map_end_it;
-        TxKey &resume_key = req.PauseKey(shard_->core_id_);
+        TxKey &resume_key = req.PauseKey();
         const KeyT *start_key = nullptr;
         if (!resume_key.KeyPtr())
         {
             // First time being processed.
-            if (req.Slice().IsValidInKeyCache(shard_->core_id_))
+            if (req.Slice().IsValidInKeyCache())
             {
                 // No need to init key cache.
-                return req.SetFinish(shard_->core_id_, true);
+                req.SetFinish(true);
+                return true;
             }
-            req.Slice().SetLoadingKeyCache(shard_->core_id_, true);
+            req.Slice().SetLoadingKeyCache(true);
             start_key = req.Slice().StartTxKey().GetKey<KeyT>();
         }
         else
@@ -6825,24 +6822,25 @@ public:
                 continue;
             }
             const KeyT *key = map_it->first;
-            auto ret =
-                range->AddKey(*key, shard_->core_id_, &req.Slice(), true);
+            auto ret = range->AddKey(*key, &req.Slice(), true);
             if (ret == RangeSliceOpStatus::Error)
             {
                 // Stop immediately if one of the add key fails.
-                return req.SetFinish(shard_->core_id_, false);
+                req.SetFinish(false);
+                return true;
             }
         }
 
         if (map_it == map_end_it)
         {
-            return req.SetFinish(shard_->core_id_, true);
+            req.SetFinish(true);
+            return true;
         }
         else
         {
             // record pause position and resume in next round.
             TxKey pause_key(map_it->first);
-            req.SetPauseKey(pause_key, shard_->core_id_);
+            req.SetPauseKey(pause_key);
             shard_->Enqueue(&req);
             return false;
         }
@@ -7022,8 +7020,8 @@ public:
                                             : KeyT::PositiveInfinity();
 
         const KeyT *start_key =
-            req.paused_pos_[shard_->core_id_].KeyPtr() != nullptr
-                ? req.paused_pos_[shard_->core_id_].GetKey<KeyT>()
+            req.paused_pos_.KeyPtr() != nullptr
+                ? req.paused_pos_.GetKey<KeyT>()
                 : (req.end_key_ != nullptr ? req.start_key_->GetKey<KeyT>()
                                            : KeyT::NegativeInfinity());
 
@@ -7060,8 +7058,7 @@ public:
                 curr_slice = range->FindSlice(*key);
                 it = deduce_iterator(*key);
                 end_it = deduce_iterator(*(curr_slice->EndKey()));
-                if ((!curr_slice->IsValidInKeyCache(shard_->core_id_) ||
-                     it == end_it) &&
+                if ((!curr_slice->IsValidInKeyCache() || it == end_it) &&
                     end_it != req_end_it)
                 {
                     // The slice is empty or the slice is invalid in key cache,
@@ -7070,7 +7067,7 @@ public:
                     key = curr_slice->EndKey();
                     curr_slice = nullptr;
                 }
-                else if (!curr_slice->IsValidInKeyCache(shard_->core_id_) &&
+                else if (!curr_slice->IsValidInKeyCache() &&
                          end_it == req_end_it)
                 {
                     // Reach to the last slice, and the slice is invalid in key
@@ -7098,7 +7095,7 @@ public:
             {
                 assert(cce->PayloadStatus() == RecordStatus::Normal ||
                        cce->PayloadStatus() == RecordStatus::Deleted);
-                range->DeleteKey(*cce_key, shard_->core_id_);
+                range->DeleteKey(*cce_key);
             }
 
             // Forward the iterator.
@@ -7114,12 +7111,13 @@ public:
 
         if (key_it == slice_end_it)
         {
-            req.paused_pos_[shard_->core_id_] = TxKey();
-            return req.SetFinish();
+            req.paused_pos_ = TxKey();
+            req.SetFinish();
+            return true;
         }
         else
         {
-            req.paused_pos_[shard_->core_id_] = key_it->first->CloneTxKey();
+            req.paused_pos_ = key_it->first->CloneTxKey();
             shard_->Enqueue(&req);
             return false;
         }
@@ -10075,10 +10073,7 @@ protected:
                 // status, it should already be in the key cache. Only add it if
                 // it's in DELETED.
                 auto res = shard_->local_shards_.AddKeyToKeyCache(
-                    table_name_,
-                    cc_ng_id_,
-                    shard_->core_id_,
-                    *ccp->KeyOfEntry(cce));
+                    table_name_, cc_ng_id_, *ccp->KeyOfEntry(cce));
                 if (res == RangeSliceOpStatus::Retry)
                 {
                     // Retry if the slice key cache is being loaded.
