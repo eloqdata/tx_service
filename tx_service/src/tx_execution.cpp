@@ -7756,17 +7756,19 @@ void TransactionExecution::Process(BatchReadOperation &batch_read_op)
         TxRecord &rec = *read_batch[idx].record_;
 
         uint32_t sharding_code = 0;
-        size_t key_hash = key.Hash();
-        sharding_code =
-            read_batch[idx].cce_addr_.NodeGroupId() << 12 | (key_hash & 0xFFF);
         int32_t partition_id = -1;
         if (table_name.IsHashPartitioned())
         {
+            size_t key_hash = key.Hash();
+            sharding_code = read_batch[idx].cce_addr_.NodeGroupId() << 12 |
+                            (key_hash & 0xFFF);
             partition_id = Sharder::MapKeyHashToHashPartitionId(key_hash);
         }
         else
         {
             partition_id = batch_read_op.range_ids_[idx];
+            sharding_code =
+                read_batch[idx].cce_addr_.NodeGroupId() << 12 | partition_id;
         }
         cc_handler_->Read(
             table_name,
