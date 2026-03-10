@@ -3951,7 +3951,7 @@ void LocalCcShards::DataSyncForRangePartition(
         schema_version);
 
     uint16_t dest_core = static_cast<uint16_t>(
-        range_entry->GetRangeInfo()->PartitionId() % Count());
+        (range_entry->GetRangeInfo()->PartitionId() & 0x3FF) % Count());
     EnqueueLowPriorityCcRequestToShard(dest_core, &scan_delta_size_cc);
 
     scan_delta_size_cc.Wait();
@@ -4097,8 +4097,8 @@ void LocalCcShards::DataSyncForRangePartition(
             GetRangeOwner(old_range_id, ng_id)->BucketOwner();
         NodeGroupId new_range_owner =
             GetRangeOwner(range_id, ng_id)->BucketOwner();
-        uint16_t old_range_owner_shard = old_range_id % Count();
-        uint16_t new_range_owner_shard = range_id % Count();
+        uint16_t old_range_owner_shard = (old_range_id & 0x3FF) % Count();
+        uint16_t new_range_owner_shard = (range_id & 0x3FF) % Count();
 
         need_send_range_cache = new_range_owner != old_range_owner ||
                                 new_range_owner_shard != old_range_owner_shard;
@@ -5822,8 +5822,8 @@ void LocalCcShards::FlushData(std::unique_lock<std::mutex> &flush_worker_lk)
                         if (!table_name.IsHashPartitioned())
                         {
                             int32_t range_id = entry->data_sync_task_->id_;
-                            key_core_idx =
-                                static_cast<size_t>(range_id % Count());
+                            key_core_idx = static_cast<size_t>(
+                                (range_id & 0x3FF) % Count());
                         }
                         else
                         {
