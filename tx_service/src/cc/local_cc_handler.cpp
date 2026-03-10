@@ -548,7 +548,7 @@ void txservice::LocalCcHandler::ReadOutside(
         req->Reset(nullptr,
                    0,
                    nullptr,
-                   ng_id << 12,
+                   ng_id << 10,
                    &rec,
                    read_type,
                    0,

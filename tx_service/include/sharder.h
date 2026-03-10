@@ -203,7 +203,7 @@ public:
 
     uint32_t ShardToCcNodeGroup(uint32_t sharding_code)
     {
-        return sharding_code >> 12;
+        return sharding_code >> 10;
     }
 
     static inline uint16_t MapRangeIdToBucketId(int32_t range_id)

@@ -1164,7 +1164,7 @@ void txservice::remote::RemoteScanNextBatch::Reset(
     // create scan cahe
     for (const auto &[core_id, progress] : scan_buckets_)
     {
-        uint32_t shard_code = (node_group_id_ << 12) + core_id;
+        uint32_t shard_code = (node_group_id_ << 10) + core_id;
         auto iter =
             shard_cache_map->mutable_shard_caches()->emplace(shard_code);
         assert(iter.second);

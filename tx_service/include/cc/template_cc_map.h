@@ -2489,7 +2489,7 @@ public:
             return bucket_ids.count(bucket_id) > 0;
         };
 
-        uint32_t shard_code = (ng_id << 12) + shard_->core_id_;
+        uint32_t shard_code = (ng_id << 10) + shard_->core_id_;
         TemplateScanCache<KeyT, ValueT> *typed_cache =
             static_cast<TemplateScanCache<KeyT, ValueT> *>(
                 req.GetLocalMemoryCache(shard_code));
@@ -6393,7 +6393,7 @@ public:
                 {
                     continue;
                 }
-                core_id = static_cast<uint16_t>((key.Hash() & 0xFFF) %
+                core_id = static_cast<uint16_t>((key.Hash() & 0x3FF) %
                                                 shard_->core_cnt_);
             }
 
@@ -7254,7 +7254,7 @@ public:
             if constexpr (!RangePartitioned)
             {
                 hash = key->Hash();
-                size_t core_idx = (hash & 0xFFF) % shard_->core_cnt_;
+                size_t core_idx = (hash & 0x3FF) % shard_->core_cnt_;
                 if (core_idx != shard_->core_id_)
                 {
                     // skip the key that does not belong to this core.
@@ -11651,7 +11651,7 @@ void BackfillForScanNextBatch(FetchBucketDataCc *fetch_cc,
         ScanNextBatchCc *req = static_cast<ScanNextBatchCc *>(requester);
         int32_t obj_type = req->GetRedisObjectType();
         const auto &pattern = req->GetRedisScanPattern();
-        uint32_t shard_code = (req->NodeGroupId() << 12) + shard.core_id_;
+        uint32_t shard_code = (req->NodeGroupId() << 10) + shard.core_id_;
         TemplateScanCache<KeyT, ValueT> *scan_cache =
             static_cast<TemplateScanCache<KeyT, ValueT> *>(req->GetLocalKvCache(
                 shard_code, bucket_id, fetch_cc->batch_size_));

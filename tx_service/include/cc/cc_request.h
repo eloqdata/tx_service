@@ -889,7 +889,7 @@ public:
     // range-partitioned).
     uint32_t PartitionId() const
     {
-        return key_shard_code_ & 0xFFF;
+        return key_shard_code_ & 0x3FF;
     }
 
     const void *Key() const
@@ -2118,7 +2118,7 @@ public:
         {
             BucketScanProgress &progress = bucket_scan_progress_->at(core_id);
             // Merge data
-            uint32_t shard_code = (NodeGroupId() << 12) + core_id;
+            uint32_t shard_code = (NodeGroupId() << 10) + core_id;
             auto last_key = res_->Value().ccm_scanner_->Merge(
                 shard_code,
                 progress.memory_scan_is_finished_,
@@ -5084,7 +5084,7 @@ public:
                     size_t hash =
                         ccs.GetCatalogFactory(table_engine)
                             ->KeyHash(blob.data(), blob_offset, nullptr);
-                    dest_core = hash ? (hash & 0xFFF) % ccs.core_cnt_
+                    dest_core = hash ? (hash & 0x3FF) % ccs.core_cnt_
                                      : (dest_core + 1) % ccs.core_cnt_;
                 }
                 ReplayLogCc *cc_req = replay_cc_pool_.NextRequest();
@@ -7125,7 +7125,7 @@ public:
                     return SetFinish(ccs);
                 }
             }
-            uint16_t data_core_id = (key_shard_code_ & 0xFFF) % ccs.core_cnt_;
+            uint16_t data_core_id = (key_shard_code_ & 0x3FF) % ccs.core_cnt_;
             if (data_core_id != ccs.core_id_)
             {
                 // Move the request to where the data belongs to.

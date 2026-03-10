@@ -674,12 +674,12 @@ void LockWriteRangeBucketsOp::Advance(TransactionExecution *txm)
                 size_t hash = write_tx_key.Hash();
                 WriteSetEntry &write_entry = write_key_it_->second;
                 write_entry.key_shard_code_ =
-                    (bucket_ng << 12) | (hash & 0xFFF);
+                    (bucket_ng << 10) | (hash & 0x3FF);
                 // If current bucket is migrating, forward to new range owner.
                 if (new_bucket_ng != UINT32_MAX)
                 {
                     write_entry.forward_addr_.try_emplace(
-                        (new_bucket_ng << 12) | (hash & 0xFFF));
+                        (new_bucket_ng << 10) | (hash & 0x3FF));
                     txm->rw_set_.IncreaseFowardWriteCnt(1);
                 }
                 write_key_it_++;
@@ -725,14 +725,14 @@ void LockWriteRangeBucketsOp::Advance(TransactionExecution *txm)
         {
             const TxKey &write_tx_key = write_key_it_->first;
             WriteSetEntry &write_entry = write_key_it_->second;
-            write_entry.key_shard_code_ = (range_ng << 12) | residual;
+            write_entry.key_shard_code_ = (range_ng << 10) | residual;
             write_entry.range_size_flags_ =
                 0x10 | static_cast<uint8_t>(range_info->IsDirty());
             // If current range is migrating, forward to new range owner.
             if (new_bucket_ng != UINT32_MAX)
             {
                 assert(new_bucket_ng != range_ng);
-                write_entry.forward_addr_.try_emplace((new_bucket_ng << 12) |
+                write_entry.forward_addr_.try_emplace((new_bucket_ng << 10) |
                                                       residual);
             }
 
@@ -758,7 +758,7 @@ void LockWriteRangeBucketsOp::Advance(TransactionExecution *txm)
                 // range ID. Therefore, even if the new and old ranges are on
                 // the same shard in the same node group, "double writing" must
                 // still be performed.
-                write_entry.forward_addr_.try_emplace((new_range_ng << 12) |
+                write_entry.forward_addr_.try_emplace((new_range_ng << 10) |
                                                       new_residual);
                 write_entry.range_size_flags_ =
                     0x0F & write_entry.range_size_flags_;
@@ -768,7 +768,7 @@ void LockWriteRangeBucketsOp::Advance(TransactionExecution *txm)
                 if (new_range_new_bucket_ng != UINT32_MAX)
                 {
                     write_entry.forward_addr_.try_emplace(
-                        (new_range_new_bucket_ng << 12) | new_residual);
+                        (new_range_new_bucket_ng << 10) | new_residual);
                 }
             }
 

@@ -851,7 +851,7 @@ public:
     {
         ShardCache *shard_cache = GetShardCache(shard_code);
         return shard_cache->memory_cache_.get();
-        // For TemplateCcScanner, shard_code is (ng_id << 12) + core_id.
+        // For TemplateCcScanner, shard_code is (ng_id << 10) + core_id.
     }
 
     ScanCache *KvCache(uint32_t shard_code,

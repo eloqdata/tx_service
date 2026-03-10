@@ -1854,9 +1854,9 @@ void RocksDBHandler::ParallelIterateTable(
             rocksdb::Slice val = it->value();
             std::string val_str = std::string(val.data(), val.size());
             size_t hash = EloqKey::Hash(key_str.data(), key_str.size());
-            // Uses the lower 12 bits of the hash code to shard the key across
+            // Uses the lower 10 bits of the hash code to shard the key across
             // CPU cores at this node.
-            uint16_t core_code = hash & 0xFFF;
+            uint16_t core_code = hash & 0x3FF;
             uint16_t core_id = core_code % core_cnt;
             int64_t version_ts;
             bool is_deleted;

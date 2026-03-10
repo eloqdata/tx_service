@@ -1969,7 +1969,7 @@ void TransactionExecution::Process(ReadOperation &read)
                     uint32_t residual = static_cast<uint32_t>(partition_id);
                     NodeGroupId range_ng =
                         range_rec_.GetRangeOwnerNg()->BucketOwner();
-                    key_shard_code = range_ng << 12 | residual;
+                    key_shard_code = range_ng << 10 | residual;
                 }
             }
             else
@@ -1991,11 +1991,11 @@ void TransactionExecution::Process(ReadOperation &read)
                 partition_id = Sharder::MapKeyHashToHashPartitionId(key_hash);
                 if (bucket_info != nullptr)
                 {
-                    // Uses the lower 12 bits of the key's hash code to shard
+                    // Uses the lower 10 bits of the key's hash code to shard
                     // the key across CPU cores in a cc node.
-                    uint32_t residual = key_hash & 0xFFF;
+                    uint32_t residual = key_hash & 0x3FF;
                     NodeGroupId bucket_ng = bucket_info->BucketOwner();
-                    key_shard_code = bucket_ng << 12 | residual;
+                    key_shard_code = bucket_ng << 10 | residual;
                 }
                 else if (!lock_range_bucket_result_.IsFinished())
                 {
@@ -2035,11 +2035,11 @@ void TransactionExecution::Process(ReadOperation &read)
                     uint16_t bucket_id = bucket_key_.BucketId();
                     locked_buckets_.emplace(bucket_id, bucket_info);
 
-                    // Uses the lower 12 bits of the key's hash code to shard
+                    // Uses the lower 10 bits of the key's hash code to shard
                     // the key across CPU cores in a cc node.
-                    uint32_t residual = key.Hash() & 0xFFF;
+                    uint32_t residual = key.Hash() & 0x3FF;
                     NodeGroupId bucket_ng = bucket_info->BucketOwner();
-                    key_shard_code = bucket_ng << 12 | residual;
+                    key_shard_code = bucket_ng << 10 | residual;
                 }
             }
 
@@ -6650,22 +6650,22 @@ void TransactionExecution::Process(ObjectCommandOp &obj_cmd_op)
         }
 
         uint64_t key_hash = key.Hash();
-        uint32_t residual = key_hash & 0xFFF;
+        uint32_t residual = key_hash & 0x3FF;
         uint16_t bucket_id = Sharder::MapKeyHashToBucketId(key_hash);
         const BucketInfo *bucket_info = FastToGetBucket(bucket_id);
         if (bucket_info != nullptr)
         {
-            // Uses the lower 12 bits of the key's hash code to shard the
+            // Uses the lower 10 bits of the key's hash code to shard the
             // key across CPU cores in a cc node.
             NodeGroupId bucket_ng = bucket_info->BucketOwner();
-            key_shard_code = bucket_ng << 12 | residual;
+            key_shard_code = bucket_ng << 10 | residual;
 
             // If current bucket is migrating, forward to new bucket owner.
             NodeGroupId new_bucket_ng = bucket_info->DirtyBucketOwner();
             if (new_bucket_ng != UINT32_MAX &&
                 !obj_cmd_op.command_->IsReadOnly())
             {
-                obj_cmd_op.forward_key_shard_ = new_bucket_ng << 12 | residual;
+                obj_cmd_op.forward_key_shard_ = new_bucket_ng << 10 | residual;
             }
         }
         else if (lock_range_bucket_result_.IsFinished())
@@ -6681,17 +6681,17 @@ void TransactionExecution::Process(ObjectCommandOp &obj_cmd_op)
             uint16_t bucket_id = bucket_key_.BucketId();
             locked_buckets_.emplace(bucket_id, bucket_info);
 
-            // Uses the lower 12 bits of the key's hash code to shard the
+            // Uses the lower 10 bits of the key's hash code to shard the
             // key across CPU cores in a cc node.
             NodeGroupId bucket_ng = bucket_info->BucketOwner();
-            key_shard_code = bucket_ng << 12 | residual;
+            key_shard_code = bucket_ng << 10 | residual;
 
             // If current bucket is migrating, forward to new bucket owner.
             NodeGroupId new_bucket_ng = bucket_info->DirtyBucketOwner();
             if (new_bucket_ng != UINT32_MAX &&
                 !obj_cmd_op.command_->IsReadOnly())
             {
-                obj_cmd_op.forward_key_shard_ = new_bucket_ng << 12 | residual;
+                obj_cmd_op.forward_key_shard_ = new_bucket_ng << 10 | residual;
             }
         }
         else
@@ -7080,10 +7080,10 @@ void TransactionExecution::Process(MultiObjectCommandOp &obj_cmd_op)
         locked_buckets_.emplace(bucket_id, bucket_info);
 
         const TxKey &key = vct_key->at(obj_cmd_op.bucket_lock_cur_);
-        uint32_t residual = key.Hash() & 0xFFF;
+        uint32_t residual = key.Hash() & 0x3FF;
         NodeGroupId bucket_ng = bucket_info->BucketOwner();
         vct_key_shard_code[obj_cmd_op.bucket_lock_cur_].first =
-            bucket_ng << 12 | residual;
+            bucket_ng << 10 | residual;
 
         // If current bucket is migrating, forward to new bucket owner.
         NodeGroupId new_bucket_ng = bucket_info->DirtyBucketOwner();
@@ -7092,7 +7092,7 @@ void TransactionExecution::Process(MultiObjectCommandOp &obj_cmd_op)
         {
             // forward key shard code
             vct_key_shard_code[obj_cmd_op.bucket_lock_cur_].second =
-                new_bucket_ng << 12 | residual;
+                new_bucket_ng << 10 | residual;
         }
         obj_cmd_op.bucket_lock_cur_++;
     }
@@ -7104,12 +7104,12 @@ void TransactionExecution::Process(MultiObjectCommandOp &obj_cmd_op)
         const BucketInfo *bucket_info = FastToGetBucket(bucket_id);
         if (bucket_info != nullptr)
         {
-            // Uses the lower 12 bits of the key's hash code to shard the
+            // Uses the lower 10 bits of the key's hash code to shard the
             // key across CPU cores in a cc node.
-            uint32_t residual = key_hash & 0xFFF;
+            uint32_t residual = key_hash & 0x3FF;
             NodeGroupId bucket_ng = bucket_info->BucketOwner();
             vct_key_shard_code[obj_cmd_op.bucket_lock_cur_].first =
-                bucket_ng << 12 | residual;
+                bucket_ng << 10 | residual;
 
             // If current bucket is migrating, forward to new bucket owner.
             NodeGroupId new_bucket_ng = bucket_info->DirtyBucketOwner();
@@ -7118,7 +7118,7 @@ void TransactionExecution::Process(MultiObjectCommandOp &obj_cmd_op)
             {
                 // forward key shard code
                 vct_key_shard_code[obj_cmd_op.bucket_lock_cur_].second =
-                    new_bucket_ng << 12 | residual;
+                    new_bucket_ng << 10 | residual;
             }
             obj_cmd_op.bucket_lock_cur_++;
         }
@@ -7760,15 +7760,15 @@ void TransactionExecution::Process(BatchReadOperation &batch_read_op)
         if (table_name.IsHashPartitioned())
         {
             size_t key_hash = key.Hash();
-            sharding_code = read_batch[idx].cce_addr_.NodeGroupId() << 12 |
-                            (key_hash & 0xFFF);
+            sharding_code = read_batch[idx].cce_addr_.NodeGroupId() << 10 |
+                            (key_hash & 0x3FF);
             partition_id = Sharder::MapKeyHashToHashPartitionId(key_hash);
         }
         else
         {
             partition_id = batch_read_op.range_ids_[idx];
-            sharding_code =
-                read_batch[idx].cce_addr_.NodeGroupId() << 12 | partition_id;
+            sharding_code = read_batch[idx].cce_addr_.NodeGroupId() << 10 |
+                            (partition_id & 0x3FF);
         }
         cc_handler_->Read(
             table_name,
