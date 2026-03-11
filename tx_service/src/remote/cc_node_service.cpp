@@ -1657,7 +1657,6 @@ void CcNodeService::StandbyStartFollowing(
     }
 
     auto subscribe_id = Sharder::Instance().GetNextSubscribeId();
-
     response->set_subscribe_id(subscribe_id);
     response->set_error(false);
 }
@@ -1776,8 +1775,9 @@ void CcNodeService::RequestStorageSnapshotSync(
     // Then, notify standby nodes that data committed before subscribe timepoint
     // has been flushed to kvstore. (standby nodes begin fetch record from
     // kvstore on cache miss).
-    store::SnapshotManager::Instance().OnSnapshotSyncRequested(request);
-    response->set_error(false);
+    bool accepted =
+        store::SnapshotManager::Instance().OnSnapshotSyncRequested(request);
+    response->set_error(!accepted);
 }
 
 void CcNodeService::OnSnapshotSynced(
@@ -1883,6 +1883,37 @@ void CcNodeService::ResetStandbySequenceId(
         local_shards_.EnqueueCcRequest(seq_grp, &reset_seq_cc);
     }
     reset_seq_cc.Wait();
+
+    if (!Sharder::Instance().CheckLeaderTerm(
+            ng_id, PrimaryTermFromStandbyTerm(standby_node_term)))
+    {
+        LOG(WARNING)
+            << "Reject ResetStandbySequenceId due to leader term mismatch, "
+            << "ng_id: " << ng_id << ", node_id: " << node_id
+            << ", standby_term: " << standby_node_term;
+        response->set_error(true);
+        return;
+    }
+
+    uint64_t existing_barrier_ts = 0;
+    bool has_existing_barrier =
+        store::SnapshotManager::Instance().GetSubscriptionBarrier(
+            node_id, standby_node_term, &existing_barrier_ts);
+    (void) existing_barrier_ts;
+    if (!has_existing_barrier)
+    {
+        ActiveTxMaxTsCc active_tx_max_ts_cc(local_shards_.Count(), ng_id);
+        for (uint16_t core_id = 0; core_id < local_shards_.Count(); core_id++)
+        {
+            local_shards_.EnqueueCcRequest(core_id, &active_tx_max_ts_cc);
+        }
+        active_tx_max_ts_cc.Wait();
+        uint64_t global_active_tx_max_ts =
+            active_tx_max_ts_cc.GetActiveTxMaxTs();
+
+        store::SnapshotManager::Instance().RegisterSubscriptionBarrier(
+            node_id, standby_node_term, global_active_tx_max_ts);
+    }
 
     response->set_error(false);
 }

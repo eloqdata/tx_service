@@ -39,6 +39,7 @@
 #include "remote/cc_node_service.h"
 #include "remote/cc_stream_receiver.h"
 #include "remote/cc_stream_sender.h"
+#include "store/snapshot_manager.h"
 #include "tx_command.h"
 #include "tx_service.h"
 #include "tx_worker_pool.h"
@@ -1299,6 +1300,7 @@ void Sharder::UpdateInMemoryClusterConfig(
     std::shared_ptr<std::unordered_map<uint32_t, NodeConfig>> new_nodes_sptr,
     uint64_t version)
 {
+    std::vector<uint32_t> removed_node_ids;
     {
         std::unique_lock<std::shared_mutex> lk(cluster_cnf_mux_);
         if (cluster_config_.version_ >= version)
@@ -1368,6 +1370,16 @@ void Sharder::UpdateInMemoryClusterConfig(
                 cluster_config_.ng_configs_.try_emplace(ng_pair.first);
             ng_cnf_it.first->second = ng_pair.second;
         }
+
+        // Nodes removed from cluster config in this update.
+        for (const auto &[node_id, _] : *cluster_config_.nodes_configs_)
+        {
+            if (new_nodes_sptr->find(node_id) == new_nodes_sptr->end())
+            {
+                removed_node_ids.emplace_back(node_id);
+            }
+        }
+
         cluster_config_.version_ = version;
         cluster_config_.nodes_configs_ = std::move(new_nodes_sptr);
         if (cluster_config_.ng_ids_.use_count() == 1)
@@ -1402,6 +1414,15 @@ void Sharder::UpdateInMemoryClusterConfig(
                     ccs.RemoveSubscribedStandby(node_id);
                 }
             }
+            std::vector<uint32_t> candidate_standby_nodes =
+                ccs.GetCandidateStandbys();
+            for (auto node_id : candidate_standby_nodes)
+            {
+                if (nodes_configs->find(node_id) == nodes_configs->end())
+                {
+                    ccs.RemoveCandidateStandby(node_id);
+                }
+            }
 
             return true;
         },
@@ -1413,6 +1434,12 @@ void Sharder::UpdateInMemoryClusterConfig(
     }
 
     remove_subscribed_standby_cc.Wait();
+
+    for (auto node_id : removed_node_ids)
+    {
+        store::SnapshotManager::Instance().EraseSubscriptionBarriersByNode(
+            node_id);
+    }
 }
 
 void Sharder::UpdateClusterConfig(

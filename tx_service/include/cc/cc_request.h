@@ -3225,6 +3225,65 @@ private:
     NodeGroupId cc_ng_id_;
 };
 
+struct ActiveTxMaxTsCc : public CcRequestBase
+{
+public:
+    ActiveTxMaxTsCc(size_t shard_cnt, NodeGroupId ng_id)
+        : active_tx_max_ts_(0),
+          mux_(),
+          cv_(),
+          unfinish_cnt_(shard_cnt),
+          cc_ng_id_(ng_id)
+    {
+    }
+
+    ActiveTxMaxTsCc() = delete;
+    ActiveTxMaxTsCc(const ActiveTxMaxTsCc &) = delete;
+    ActiveTxMaxTsCc(ActiveTxMaxTsCc &&) = delete;
+
+    bool Execute(CcShard &ccs) override
+    {
+        uint64_t shard_active_tx_max_ts = ccs.ActiveTxMaxTs(cc_ng_id_);
+
+        uint64_t old_val = active_tx_max_ts_.load(std::memory_order_relaxed);
+        while (old_val < shard_active_tx_max_ts &&
+               !active_tx_max_ts_.compare_exchange_weak(
+                   old_val, shard_active_tx_max_ts, std::memory_order_acq_rel))
+            ;
+
+        std::unique_lock lk(mux_);
+        if (--unfinish_cnt_ == 0)
+        {
+            cv_.notify_one();
+        }
+
+        // return false since ActiveTxMaxTsCc is not reused and does not need
+        // to call CcRequestBase::Free
+        return false;
+    }
+
+    void Wait()
+    {
+        std::unique_lock lk(mux_);
+        while (unfinish_cnt_ > 0)
+        {
+            cv_.wait(lk);
+        }
+    }
+
+    uint64_t GetActiveTxMaxTs() const
+    {
+        return active_tx_max_ts_.load(std::memory_order_relaxed);
+    }
+
+private:
+    std::atomic<uint64_t> active_tx_max_ts_;
+    bthread::Mutex mux_;
+    bthread::ConditionVariable cv_;
+    size_t unfinish_cnt_;
+    NodeGroupId cc_ng_id_;
+};
+
 struct ProcessRemoteScanRespCc : public CcRequestBase
 {
 public:

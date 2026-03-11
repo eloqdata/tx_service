@@ -52,6 +52,7 @@ void SnapshotManager::Shutdown()
 
 void SnapshotManager::StandbySyncWorker()
 {
+    constexpr auto kBlockedTaskRetryInterval = std::chrono::milliseconds(200);
     while (true)
     {
         std::unique_lock<std::mutex> lk(standby_sync_mux_);
@@ -66,10 +67,22 @@ void SnapshotManager::StandbySyncWorker()
         lk.unlock();
         SyncWithStandby();
         lk.lock();
+
+        if (terminated_)
+        {
+            return;
+        }
+
+        if (!pending_req_.empty())
+        {
+            // Pending requests are still blocked by subscribe/barrier checks.
+            // Back off to avoid tight checkpoint retry loops.
+            standby_sync_cv_.wait_for(lk, kBlockedTaskRetryInterval);
+        }
     }
 }
 
-void SnapshotManager::OnSnapshotSyncRequested(
+bool SnapshotManager::OnSnapshotSyncRequested(
     const txservice::remote::StorageSnapshotSyncRequest *req)
 {
     DLOG(INFO) << "Received snapshot sync request from standby node #"
@@ -79,31 +92,182 @@ void SnapshotManager::OnSnapshotSyncRequested(
     if (store_hd_ == nullptr)
     {
         LOG(ERROR) << "Store handler is nullptr but standby feature enabled.";
-        return;
+        return false;
     }
 
     std::unique_lock<std::mutex> lk(standby_sync_mux_);
 
     if (!terminated_)
     {
+        auto node_it = subscription_barrier_.find(req->standby_node_id());
+        if (node_it == subscription_barrier_.end())
+        {
+            LOG(WARNING) << "No subscription barrier found for standby node #"
+                         << req->standby_node_id()
+                         << ", standby term: " << req->standby_node_term();
+            return false;
+        }
+
+        auto barrier_it = node_it->second.find(req->standby_node_term());
+        if (barrier_it == node_it->second.end())
+        {
+            LOG(WARNING) << "No barrier found for standby node #"
+                         << req->standby_node_id()
+                         << " at standby term: " << req->standby_node_term();
+            return false;
+        }
+
+        uint64_t active_tx_max_ts = barrier_it->second;
+
         auto ins_pair = pending_req_.try_emplace(req->standby_node_id());
         if (!ins_pair.second)
         {
             // check if the queued task is newer than the new received req. If
             // so, discard the new req, otherwise, update the task.
             auto &cur_task = ins_pair.first->second;
-            int64_t cur_task_standby_node_term = cur_task.standby_node_term();
+            int64_t cur_task_standby_node_term =
+                cur_task.req.standby_node_term();
             int64_t req_standby_node_term = req->standby_node_term();
 
             if (cur_task_standby_node_term >= req_standby_node_term)
             {
                 // discard the task.
-                return;
+                return true;
             }
         }
 
-        ins_pair.first->second.CopyFrom(*req);
+        ins_pair.first->second.req.CopyFrom(*req);
+        ins_pair.first->second.subscription_active_tx_max_ts = active_tx_max_ts;
         standby_sync_cv_.notify_all();
+        return true;
+    }
+
+    return false;
+}
+
+void SnapshotManager::RegisterSubscriptionBarrier(uint32_t standby_node_id,
+                                                  int64_t standby_node_term,
+                                                  uint64_t active_tx_max_ts)
+{
+    std::unique_lock<std::mutex> lk(standby_sync_mux_);
+
+    // Ignore out-of-order old barrier registrations when a newer standby term
+    // is already known for this standby node.
+    auto node_it = subscription_barrier_.find(standby_node_id);
+    if (node_it != subscription_barrier_.end())
+    {
+        for (const auto &entry : node_it->second)
+        {
+            int64_t existing_term = entry.first;
+            if (existing_term > standby_node_term)
+            {
+                DLOG(INFO)
+                    << "Ignore stale subscription barrier registration for "
+                       "standby node #"
+                    << standby_node_id << ", term " << standby_node_term
+                    << " because newer term " << existing_term
+                    << " already exists";
+                return;
+            }
+        }
+    }
+
+    // Drop queued work from older standby terms. They are superseded by this
+    // new subscription barrier and should not be synced anymore.
+    auto pending_it = pending_req_.find(standby_node_id);
+    if (pending_it != pending_req_.end() &&
+        pending_it->second.req.standby_node_term() > standby_node_term)
+    {
+        DLOG(INFO) << "Ignore stale barrier registration for standby node #"
+                   << standby_node_id << ", term " << standby_node_term
+                   << " because queued pending task term "
+                   << pending_it->second.req.standby_node_term() << " is newer";
+        return;
+    }
+
+    if (pending_it != pending_req_.end() &&
+        pending_it->second.req.standby_node_term() < standby_node_term)
+    {
+        pending_req_.erase(pending_it);
+    }
+
+    auto &node_barriers = subscription_barrier_[standby_node_id];
+
+    // Keep only current and newer terms for this node.
+    auto it = node_barriers.begin();
+    while (it != node_barriers.end())
+    {
+        if (it->first < standby_node_term)
+        {
+            it = node_barriers.erase(it);
+        }
+        else
+        {
+            ++it;
+        }
+    }
+
+    // Keep the first registered barrier for the same standby term to make
+    // duplicate reset/subscribe retries idempotent.
+    if (node_barriers.find(standby_node_term) == node_barriers.end())
+    {
+        node_barriers[standby_node_term] = active_tx_max_ts;
+    }
+}
+
+bool SnapshotManager::GetSubscriptionBarrier(uint32_t standby_node_id,
+                                             int64_t standby_node_term,
+                                             uint64_t *active_tx_max_ts)
+{
+    if (active_tx_max_ts == nullptr)
+    {
+        return false;
+    }
+
+    std::unique_lock<std::mutex> lk(standby_sync_mux_);
+    auto node_it = subscription_barrier_.find(standby_node_id);
+    if (node_it == subscription_barrier_.end())
+    {
+        return false;
+    }
+
+    auto barrier_it = node_it->second.find(standby_node_term);
+    if (barrier_it == node_it->second.end())
+    {
+        return false;
+    }
+
+    *active_tx_max_ts = barrier_it->second;
+    return true;
+}
+
+void SnapshotManager::EraseSubscriptionBarrier(uint32_t standby_node_id,
+                                               int64_t standby_node_term)
+{
+    std::unique_lock<std::mutex> lk(standby_sync_mux_);
+    EraseSubscriptionBarrierLocked(standby_node_id, standby_node_term);
+}
+
+void SnapshotManager::EraseSubscriptionBarriersByNode(uint32_t standby_node_id)
+{
+    std::unique_lock<std::mutex> lk(standby_sync_mux_);
+    pending_req_.erase(standby_node_id);
+    subscription_barrier_.erase(standby_node_id);
+}
+
+void SnapshotManager::EraseSubscriptionBarrierLocked(uint32_t standby_node_id,
+                                                     int64_t standby_node_term)
+{
+    auto node_it = subscription_barrier_.find(standby_node_id);
+    if (node_it == subscription_barrier_.end())
+    {
+        return;
+    }
+
+    node_it->second.erase(standby_node_term);
+    if (node_it->second.empty())
+    {
+        subscription_barrier_.erase(node_it);
     }
 }
 
@@ -130,50 +294,36 @@ void SnapshotManager::SyncWithStandby()
         std::unique_lock<std::mutex> lk(standby_sync_mux_);
         // clear all requests
         pending_req_.clear();
+        // clear barriers as well, all queued sync states are stale when this
+        // leader term is no longer valid.
+        subscription_barrier_.clear();
         return;
     }
 
     uint32_t current_subscribe_id = Sharder::Instance().GetCurrentSubscribeId();
 
-    bool ckpt_res = this->RunOneRoundCheckpoint(node_group, leader_term);
+    uint64_t cur_ckpt_ts = GetCurrentCheckpointTs(node_group);
 
-    if (!ckpt_res)
-    {
-        // data flush failed. Retry on next run.
-        LOG(ERROR) << "Failed to do checkpoint on SyncWithStandby";
-        return;
-    }
+    std::vector<PendingSnapshotSyncTask> tasks;
 
-    // Now take a snapshot for non-shared storage, and then send to standby
-    // node.
-    std::vector<std::string> snapshot_files;
-    if (!store_hd_->IsSharedStorage())
-    {
-        bool res = store_hd_->CreateSnapshotForStandby(snapshot_files);
-        if (!res)
-        {
-            LOG(ERROR) << "Failed to create snpashot for sync with standby";
-            return;
-        }
-    }
-
-    std::vector<remote::StorageSnapshotSyncRequest> tasks;
-
-    // Dequeue all pending tasks that can be covered by this snapshot.
+    // Pick all pending tasks that can be covered by current checkpoint ts.
     {
         std::unique_lock<std::mutex> lk(standby_sync_mux_);
         auto it = pending_req_.begin();
         while (it != pending_req_.end())
         {
+            uint32_t pending_node_id = it->first;
             auto &pending_task = it->second;
             int64_t pending_task_standby_node_term =
-                pending_task.standby_node_term();
+                pending_task.req.standby_node_term();
             int64_t pending_task_primary_term =
                 PrimaryTermFromStandbyTerm(pending_task_standby_node_term);
 
             if (pending_task_primary_term < leader_term)
             {
                 // discard the task.
+                EraseSubscriptionBarrierLocked(pending_node_id,
+                                               pending_task_standby_node_term);
                 it = pending_req_.erase(it);
                 continue;
             }
@@ -198,6 +348,18 @@ void SnapshotManager::SyncWithStandby()
                     << pending_task_subscribe_id << ". Wait for next round";
                 covered = false;
             }
+            else if (cur_ckpt_ts <= pending_task.subscription_active_tx_max_ts)
+            {
+                LOG(INFO) << "Current checkpoint ts " << cur_ckpt_ts
+                          << " does not pass subscription barrier ts "
+                          << pending_task.subscription_active_tx_max_ts
+                          << " for standby node #"
+                          << pending_task.req.standby_node_id()
+                          << ", standby term "
+                          << pending_task.req.standby_node_term()
+                          << ". Wait for next round";
+                covered = false;
+            }
 
             if (!covered)
             {
@@ -206,7 +368,10 @@ void SnapshotManager::SyncWithStandby()
                 it++;
                 continue;
             }
-            tasks.emplace_back(std::move(pending_task));
+            // Keep a copy for current round execution. Do not move out of
+            // pending_req_, because completion logic still needs the original
+            // standby term to decide whether the queued task is stale.
+            tasks.emplace_back(pending_task);
 
             // Keep the request entry so completion logic can check whether it
             // needs to stay queued, but make sure to advance the iterator so we
@@ -216,14 +381,56 @@ void SnapshotManager::SyncWithStandby()
         }
     }
 
-    for (auto &req : tasks)
+    if (tasks.empty())
     {
+        return;
+    }
+
+    bool ckpt_res = this->RunOneRoundCheckpoint(node_group, leader_term);
+
+    if (!ckpt_res)
+    {
+        // Data flush failed. Retry on next run.
+        LOG(ERROR) << "Failed to do checkpoint on SyncWithStandby";
+        return;
+    }
+
+    // Now take a snapshot for non-shared storage, and then send to standby
+    // node.
+    std::vector<std::string> snapshot_files;
+    if (!store_hd_->IsSharedStorage())
+    {
+        bool res = store_hd_->CreateSnapshotForStandby(snapshot_files);
+        if (!res)
+        {
+            LOG(ERROR) << "Failed to create snpashot for sync with standby";
+            return;
+        }
+    }
+
+    for (auto &task : tasks)
+    {
+        auto &req = task.req;
         uint32_t node_id = req.standby_node_id();
+        int64_t req_standby_node_term = req.standby_node_term();
+
+        // Skip stale copied tasks that have already been superseded/removed
+        // after this round snapshot task list was built.
+        {
+            std::unique_lock<std::mutex> lk(standby_sync_mux_);
+            auto pending_it = pending_req_.find(node_id);
+            if (pending_it == pending_req_.end() ||
+                pending_it->second.req.standby_node_term() !=
+                    req_standby_node_term)
+            {
+                continue;
+            }
+        }
+
         std::string ip;
         uint16_t port;
         Sharder::Instance().GetNodeAddress(node_id, ip, port);
         std::string remote_dest = req.user() + "@" + ip + ":" + req.dest_path();
-        int64_t req_standby_node_term = req.standby_node_term();
         int64_t req_primary_term =
             PrimaryTermFromStandbyTerm(req_standby_node_term);
 
@@ -288,39 +495,71 @@ void SnapshotManager::SyncWithStandby()
             // We just need to erase the same request. Even if the notification
             // fails, after a while, the standby node will resend the
             // request.
-            std::unique_lock<std::mutex> lk(standby_sync_mux_);
-            auto pending_req_iter = pending_req_.find(req.standby_node_id());
-            if (pending_req_iter != pending_req_.end())
             {
-                // Check again to see if the request has been updated.
-                auto &next_pending_task = pending_req_iter->second;
-                int64_t next_pending_task_standby_term =
-                    next_pending_task.standby_node_term();
-                int64_t next_pending_task_primary_term =
-                    PrimaryTermFromStandbyTerm(next_pending_task_standby_term);
-
-                assert(PrimaryTermFromStandbyTerm(req.standby_node_term()) ==
-                       leader_term);
-
-                if (next_pending_task_primary_term < leader_term)
+                std::unique_lock<std::mutex> lk(standby_sync_mux_);
+                auto pending_req_iter =
+                    pending_req_.find(req.standby_node_id());
+                if (pending_req_iter != pending_req_.end())
                 {
-                    pending_req_.erase(pending_req_iter);
-                }
-                else if (next_pending_task_primary_term == leader_term)
-                {
-                    uint32_t next_pending_task_subscribe_id =
-                        SubscribeIdFromStandbyTerm(
+                    // Check again to see if the request has been updated.
+                    auto &next_pending_task = pending_req_iter->second;
+                    int64_t next_pending_task_standby_term =
+                        next_pending_task.req.standby_node_term();
+                    int64_t next_pending_task_primary_term =
+                        PrimaryTermFromStandbyTerm(
                             next_pending_task_standby_term);
-                    uint32_t cur_task_subscribe_id =
-                        SubscribeIdFromStandbyTerm(req.standby_node_term());
-                    if (next_pending_task_subscribe_id <= cur_task_subscribe_id)
+
+                    assert(PrimaryTermFromStandbyTerm(
+                               req.standby_node_term()) == leader_term);
+
+                    if (next_pending_task_primary_term < leader_term)
                     {
+                        EraseSubscriptionBarrierLocked(
+                            req.standby_node_id(),
+                            next_pending_task_standby_term);
                         pending_req_.erase(pending_req_iter);
+                    }
+                    else if (next_pending_task_primary_term == leader_term)
+                    {
+                        uint32_t next_pending_task_subscribe_id =
+                            SubscribeIdFromStandbyTerm(
+                                next_pending_task_standby_term);
+                        uint32_t cur_task_subscribe_id =
+                            SubscribeIdFromStandbyTerm(req.standby_node_term());
+                        if (next_pending_task_subscribe_id <=
+                            cur_task_subscribe_id)
+                        {
+                            EraseSubscriptionBarrierLocked(
+                                req.standby_node_id(),
+                                next_pending_task_standby_term);
+                            pending_req_.erase(pending_req_iter);
+                        }
                     }
                 }
             }
+
+            EraseSubscriptionBarrier(req.standby_node_id(),
+                                     req.standby_node_term());
         }
     }
+}
+
+uint64_t SnapshotManager::GetCurrentCheckpointTs(uint32_t node_group)
+{
+    auto local_shards = Sharder::Instance().GetLocalCcShards();
+    assert(local_shards != nullptr);
+    if (local_shards == nullptr)
+    {
+        return 0;
+    }
+
+    CkptTsCc ckpt_req(local_shards->Count(), node_group);
+    for (size_t i = 0; i < local_shards->Count(); i++)
+    {
+        local_shards->EnqueueCcRequest(i, &ckpt_req);
+    }
+    ckpt_req.Wait();
+    return ckpt_req.GetCkptTs();
 }
 
 bool SnapshotManager::RunOneRoundCheckpoint(uint32_t node_group,
@@ -341,17 +580,6 @@ bool SnapshotManager::RunOneRoundCheckpoint(uint32_t node_group,
 
     bool can_be_skipped = false;
     uint64_t last_ckpt_ts = Sharder::Instance().GetNodeGroupCkptTs(node_group);
-    size_t core_cnt = local_shards.Count();
-    CkptTsCc ckpt_req(core_cnt, node_group);
-
-    // Find minimum ckpt_ts from all the ccshards in parallel. ckpt_ts is
-    // the minimum timestamp minus 1 among all the active transactions, thus
-    // it's safe to flush all the entries smaller than or equal to ckpt_ts.
-    for (size_t i = 0; i < local_shards.Count(); i++)
-    {
-        local_shards.EnqueueCcRequest(i, &ckpt_req);
-    }
-    ckpt_req.Wait();
 
     // Iterate all the tables and execute CkptScanCc requests on this node
     // group's ccmaps on each ccshard. The result of CkptScanCc is stored in
