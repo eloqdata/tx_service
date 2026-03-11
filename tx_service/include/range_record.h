@@ -32,6 +32,8 @@
 #include <utility>
 #include <vector>
 
+#include "glog/logging.h"
+
 // #include "cc_req_misc.h"
 #include "data_sync_task.h"
 #include "range_bucket_key_record.h"
@@ -634,6 +636,9 @@ public:
         if (range_slices_)
         {
             assert(range_slices_->Pins() == 0);
+            LOG(INFO) << "StoreRange DropStoreRange: addr="
+                      << static_cast<void *>(range_slices_.get())
+                      << " partition_id=" << range_slices_->PartitionId();
             range_slices_ = nullptr;
         }
     }
