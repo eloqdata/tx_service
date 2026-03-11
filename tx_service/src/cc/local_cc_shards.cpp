@@ -2328,11 +2328,16 @@ std::pair<TableRangeEntry *, StoreRange *> LocalCcShards::PinStoreRange(
                            ->BucketOwner() == ng_id;
             }());
 
+        DLOG(INFO) << "fetch range slices, ng id = " << ng_id
+                   << ", ng term = " << ng_term
+                   << ", range table name = " << range_table_name.StringView();
         // Fetch range slices info from data store if it's not loaded yet.
         range_entry->FetchRangeSlices(
             range_table_name, cc_request, ng_id, ng_term, cc_shard);
         return {range_entry, nullptr};
     }
+
+    DLOG(INFO) << "store range slice count = " << store_range->SlicesCount();
     return {range_entry, store_range};
 }
 

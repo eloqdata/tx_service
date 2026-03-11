@@ -462,6 +462,30 @@ void UpsertTableIndexOp::Forward(TransactionExecution *txm)
         {
             if (txm->CheckLeaderTerm())
             {
+                const CcEntryAddr *cluster_config_addr = nullptr;
+                const auto &meta_rset = txm->rw_set_.MetaDataReadSet();
+                for (const auto &[cce_addr, read_entry_pair] : meta_rset)
+                {
+                    if (read_entry_pair.second == cluster_config_ccm_name_sv)
+                    {
+                        cluster_config_addr = &cce_addr;
+                        break;
+                    }
+                }
+                LOG(INFO)
+                    << "Alter Table Index transaction unlock cluster config "
+                       "lock failed, txn: "
+                    << txm->TxNumber() << ", error code: "
+                    << (int) unlock_cluster_config_op_.hd_result_.ErrorCode()
+                    << ", error message: "
+                    << unlock_cluster_config_op_.hd_result_.ErrorMsg()
+                    << ", cluster config addr term"
+                    << cluster_config_addr->Term()
+                    << ", cluster config addr node group id: "
+                    << cluster_config_addr->NodeGroupId()
+                    << ", node group term: "
+                    << Sharder::Instance().LeaderTerm(
+                           cluster_config_addr->NodeGroupId());
                 // Releasing a local read lock should never fail
                 assert(false);
             }
