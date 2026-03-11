@@ -2,10 +2,10 @@
 
 ## 1. Scope of code changes
 - `tx_service/src/remote/cc_node_service.cpp`
+- `tx_service/src/fault/cc_node.cpp`
+- `tx_service/include/cc/cc_request.h` (`ActiveTxMaxTsCc`)
 - `tx_service/include/store/snapshot_manager.h`
 - `tx_service/src/store/snapshot_manager.cpp`
-- `tx_service/include/cc/cc_shard.h` (if `ActiveTxMaxTs` is missing)
-- Optional helper request class for cross-shard max-ts aggregation
 
 ## 2. New/updated state
 
@@ -14,83 +14,88 @@ Add a map keyed by standby node and standby term:
 - `subscription_barrier_[standby_node_id][standby_term] = barrier_ts`
 
 ### 2.2 Pending snapshot task extension
-Replace pending value from raw request to task struct, e.g.:
+Pending value is a task struct:
 - `req` (`StorageSnapshotSyncRequest`)
 - `subscription_active_tx_max_ts`
-- optional `created_at`
 
 ## 3. New APIs in `SnapshotManager`
 - `RegisterSubscriptionBarrier(standby_node_id, standby_term, barrier_ts)`
 - `GetSubscriptionBarrier(standby_node_id, standby_term, uint64_t* out)`
 - `EraseSubscriptionBarrier(standby_node_id, standby_term)`
-- optional cleanup utility for old terms
+- `EraseSubscriptionBarriersByNode(standby_node_id)`
+- `GetCurrentCheckpointTs(node_group) -> uint64_t`
+- `RunOneRoundCheckpoint(node_group, leader_term) -> bool`
 
-All above plus pending-task updates should be protected by `standby_sync_mux_`.
+Barrier/pending updates are protected by `standby_sync_mux_`.
 
-## 4. Barrier collection in `StandbyStartFollowing`
-In `CcNodeService::StandbyStartFollowing` on primary:
-1. Validate leader term.
-2. Compute `global_max_active_tx_ts = max(shard.ActiveTxMaxTs(ng_id))`.
-3. Generate `subscribe_id`.
-4. Form `standby_term`.
-5. Call `SnapshotManager::RegisterSubscriptionBarrier(...)`.
+## 4. Barrier collection in `ResetStandbySequenceId`
+In `CcNodeService::ResetStandbySequenceId` on primary:
+1. Move standby from candidate to subscribed on all shards.
+2. Validate leader term.
+3. If barrier for `(node_id, standby_term)` does not exist:
+   - run `ActiveTxMaxTsCc` across all shards
+   - compute global max
+   - call `SnapshotManager::RegisterSubscriptionBarrier(...)`
 
-Implementation note:
-- Keep collection in shard-safe context (same pattern as existing cross-shard requests).
+This makes the sampling point aligned with "subscription success".
 
 ## 5. `RequestStorageSnapshotSync` path changes
 In `SnapshotManager::OnSnapshotSyncRequested`:
-1. Parse `standby_term` from request.
+1. Parse `(standby_node_id, standby_term)` from request.
 2. Query barrier by `(standby_node_id, standby_term)`.
-3. If not found: reject / do not enqueue.
+3. If not found: reject request.
 4. If found: enqueue task with barrier ts.
 
-Dedup logic remains term-based; when task is replaced by newer term, barrier ts is replaced accordingly.
+Dedup is still term-based per standby node.
 
 ## 6. Snapshot gating logic
-In `SnapshotManager::SyncWithStandby` keep existing checks and add barrier check:
-- Obtain current-round `ckpt_ts`.
-- For each candidate pending task, require:
-  - `ckpt_ts > task.subscription_active_tx_max_ts`
+`SnapshotManager::SyncWithStandby` now runs in two phases:
+1. Lightweight phase:
+   - `current_ckpt_ts = GetCurrentCheckpointTs(node_group)`
+   - Select tasks that satisfy:
+     - term alignment
+     - `subscribe_id < current_subscribe_id`
+     - `current_ckpt_ts > subscription_active_tx_max_ts`
+   - If no task is eligible, return directly.
+2. Heavy phase:
+   - Run `RunOneRoundCheckpoint(...)` (flush)
+   - Create/send snapshot and notify standby for selected tasks.
 
-If condition fails, leave task pending for next round.
+## 7. Worker retry pacing
+`StandbySyncWorker` keeps existing wake condition on non-empty pending queue, and
+adds short wait-for backoff (`200ms`) when requests remain pending after a
+round, to avoid tight retry loops.
 
-## 7. Checkpoint API adjustment
-Current `RunOneRoundCheckpoint` returns `bool` only.
-Prefer changing signature to:
-- `bool RunOneRoundCheckpoint(uint32_t node_group, int64_t term, uint64_t* out_ckpt_ts)`
-
-Set `*out_ckpt_ts` from round checkpoint request result (`CkptTsCc::GetCkptTs()`).
-
-## 8. `ActiveTxMaxTs` helper
-If missing, add in `CcShard`:
-- `uint64_t ActiveTxMaxTs(NodeGroupId cc_ng_id)`
-
-Expected behavior:
-- Traverse `lock_holding_txs_[cc_ng_id]`
-- Use write-lock timestamp domain aligned with existing checkpoint min-ts logic
-- Exclude meta-table tx entries (same scope policy as min-ts path)
-
-## 9. Cleanup rules
+## 8. Cleanup rules
 - On successful snapshot completion for `(node_id, standby_term)`: erase barrier entry.
-- On registering newer term for same node: prune older-term barriers.
-- On standby reset/unsubscribe: remove all barriers for that node (if hook available).
-- Optional TTL sweep as fallback.
+- On registering newer term for same node: prune older barriers and drop older
+  pending task.
+- On node removal: `EraseSubscriptionBarriersByNode(node_id)` clears both
+  pending and barrier entries.
+- On leader loss in sync loop: clear all pending and barriers.
 
-## 10. Failure behavior
+## 9. Failure behavior
 - Missing barrier on sync request: reject request (safe default).
-- Checkpoint failure: keep task queued.
-- Snapshot transfer or callback failure: preserve existing retry behavior.
+- Checkpoint failure: keep task queued for next rounds.
+- Snapshot transfer failure: task stays pending and retries in later rounds.
+
+## 10. Standby-side rejection handling
+In `CcNode::SubscribePrimaryNode`, if `ResetStandbySequenceId` is rejected by
+primary, local standby following state is rolled back:
+- unsubscribe per-shard standby sequence groups
+- reset standby/candidate standby term if still on the failed term
+- guard against clobbering newer resubscribe attempts.
 
 ## 11. Tests
 
 ### Unit tests
 - barrier register/get/erase and supersession behavior
 - pending dedup with barrier replacement
-- gating predicate boundaries (`ckpt_ts == barrier_ts`, `ckpt_ts < barrier_ts`, `ckpt_ts > barrier_ts`)
+- gating boundaries (`current_ckpt_ts == / < / > barrier_ts`)
 
 ### Integration tests
-- long-running active tx at subscription time blocks snapshot until ckpt passes barrier
+- long-running active tx at subscription success blocks snapshot until
+  `current_ckpt_ts > barrier`
 - multiple standbys with independent barriers
 - repeated sync-request retries with same standby term
 - leader term switch cleanup correctness
