@@ -52,6 +52,7 @@ void SnapshotManager::Shutdown()
 
 void SnapshotManager::StandbySyncWorker()
 {
+    constexpr auto kBlockedTaskRetryInterval = std::chrono::milliseconds(200);
     while (true)
     {
         std::unique_lock<std::mutex> lk(standby_sync_mux_);
@@ -66,6 +67,18 @@ void SnapshotManager::StandbySyncWorker()
         lk.unlock();
         SyncWithStandby();
         lk.lock();
+
+        if (terminated_)
+        {
+            return;
+        }
+
+        if (!pending_req_.empty())
+        {
+            // Pending requests are still blocked by subscribe/barrier checks.
+            // Back off to avoid tight checkpoint retry loops.
+            standby_sync_cv_.wait_for(lk, kBlockedTaskRetryInterval);
+        }
     }
 }
 
@@ -290,33 +303,11 @@ void SnapshotManager::SyncWithStandby()
 
     uint32_t current_subscribe_id = Sharder::Instance().GetCurrentSubscribeId();
 
-    uint64_t ckpt_ts = 0;
-    bool ckpt_res =
-        this->RunOneRoundCheckpoint(node_group, leader_term, &ckpt_ts);
-
-    if (!ckpt_res)
-    {
-        // data flush failed. Retry on next run.
-        LOG(ERROR) << "Failed to do checkpoint on SyncWithStandby";
-        return;
-    }
-
-    // Now take a snapshot for non-shared storage, and then send to standby
-    // node.
-    std::vector<std::string> snapshot_files;
-    if (!store_hd_->IsSharedStorage())
-    {
-        bool res = store_hd_->CreateSnapshotForStandby(snapshot_files);
-        if (!res)
-        {
-            LOG(ERROR) << "Failed to create snpashot for sync with standby";
-            return;
-        }
-    }
+    uint64_t cur_ckpt_ts = GetCurrentCheckpointTs(node_group);
 
     std::vector<PendingSnapshotSyncTask> tasks;
 
-    // Dequeue all pending tasks that can be covered by this snapshot.
+    // Pick all pending tasks that can be covered by current checkpoint ts.
     {
         std::unique_lock<std::mutex> lk(standby_sync_mux_);
         auto it = pending_req_.begin();
@@ -358,9 +349,9 @@ void SnapshotManager::SyncWithStandby()
                     << pending_task_subscribe_id << ". Wait for next round";
                 covered = false;
             }
-            else if (ckpt_ts <= pending_task.subscription_active_tx_max_ts)
+            else if (cur_ckpt_ts <= pending_task.subscription_active_tx_max_ts)
             {
-                LOG(INFO) << "Snapshot checkpoint ts " << ckpt_ts
+                LOG(INFO) << "Current checkpoint ts " << cur_ckpt_ts
                           << " does not pass subscription barrier ts "
                           << pending_task.subscription_active_tx_max_ts
                           << " for standby node #"
@@ -388,6 +379,33 @@ void SnapshotManager::SyncWithStandby()
             // don't loop on the
             // same element indefinitely.
             it++;
+        }
+    }
+
+    if (tasks.empty())
+    {
+        return;
+    }
+
+    bool ckpt_res = this->RunOneRoundCheckpoint(node_group, leader_term);
+
+    if (!ckpt_res)
+    {
+        // Data flush failed. Retry on next run.
+        LOG(ERROR) << "Failed to do checkpoint on SyncWithStandby";
+        return;
+    }
+
+    // Now take a snapshot for non-shared storage, and then send to standby
+    // node.
+    std::vector<std::string> snapshot_files;
+    if (!store_hd_->IsSharedStorage())
+    {
+        bool res = store_hd_->CreateSnapshotForStandby(snapshot_files);
+        if (!res)
+        {
+            LOG(ERROR) << "Failed to create snpashot for sync with standby";
+            return;
         }
     }
 
@@ -525,9 +543,26 @@ void SnapshotManager::SyncWithStandby()
     }
 }
 
+uint64_t SnapshotManager::GetCurrentCheckpointTs(uint32_t node_group)
+{
+    auto local_shards = Sharder::Instance().GetLocalCcShards();
+    assert(local_shards != nullptr);
+    if (local_shards == nullptr)
+    {
+        return 0;
+    }
+
+    CkptTsCc ckpt_req(local_shards->Count(), node_group);
+    for (size_t i = 0; i < local_shards->Count(); i++)
+    {
+        local_shards->EnqueueCcRequest(i, &ckpt_req);
+    }
+    ckpt_req.Wait();
+    return ckpt_req.GetCkptTs();
+}
+
 bool SnapshotManager::RunOneRoundCheckpoint(uint32_t node_group,
-                                            int64_t ng_leader_term,
-                                            uint64_t *out_ckpt_ts)
+                                            int64_t ng_leader_term)
 {
     using namespace txservice;
     auto &local_shards = *Sharder::Instance().GetLocalCcShards();
@@ -544,22 +579,6 @@ bool SnapshotManager::RunOneRoundCheckpoint(uint32_t node_group,
 
     bool can_be_skipped = false;
     uint64_t last_ckpt_ts = Sharder::Instance().GetNodeGroupCkptTs(node_group);
-    size_t core_cnt = local_shards.Count();
-    CkptTsCc ckpt_req(core_cnt, node_group);
-
-    // Find minimum ckpt_ts from all the ccshards in parallel. ckpt_ts is
-    // the minimum timestamp minus 1 among all the active transactions, thus
-    // it's safe to flush all the entries smaller than or equal to ckpt_ts.
-    for (size_t i = 0; i < local_shards.Count(); i++)
-    {
-        local_shards.EnqueueCcRequest(i, &ckpt_req);
-    }
-    ckpt_req.Wait();
-
-    if (out_ckpt_ts != nullptr)
-    {
-        *out_ckpt_ts = ckpt_req.GetCkptTs();
-    }
 
     // Iterate all the tables and execute CkptScanCc requests on this node
     // group's ccmaps on each ccshard. The result of CkptScanCc is stored in

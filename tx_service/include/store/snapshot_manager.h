@@ -114,12 +114,12 @@ public:
     void TerminateBackup(txservice::NodeGroupId ng_id,
                          const std::string &backup_name);
 
-    // Run one round checkpoint to flush data in memory to kvstore. When
-    // out_ckpt_ts is not nullptr, it is filled with current round checkpoint
-    // ts.
-    bool RunOneRoundCheckpoint(uint32_t node_group,
-                               int64_t ng_leader_term,
-                               uint64_t *out_ckpt_ts = nullptr);
+    // Run one round checkpoint to flush data in memory to kvstore.
+    bool RunOneRoundCheckpoint(uint32_t node_group, int64_t ng_leader_term);
+
+    // Collect current checkpoint ts from cc shards without triggering data
+    // flush.
+    uint64_t GetCurrentCheckpointTs(uint32_t node_group);
 
 private:
     /**
