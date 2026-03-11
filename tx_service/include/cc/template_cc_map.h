@@ -7663,6 +7663,7 @@ public:
         auto entry_tuples = req.EntryTuple();
         size_t batch_size = req.BatchSize();
         size_t start_key_index = req.StartKeyIndex();
+        const int32_t partition_id = req.PartitionId();
 
         const TxRecord *req_rec = nullptr;
 
@@ -7672,6 +7673,7 @@ public:
         ValueT decoded_rec;
         uint64_t commit_ts = 0;
         RecordStatus rec_status = RecordStatus::Normal;
+        uint8_t range_size_flags = 0;
 
         auto &resume_pos = req.GetPausedPosition(shard_->core_id_);
         size_t key_pos = std::get<0>(resume_pos);
@@ -7679,6 +7681,7 @@ public:
         size_t rec_offset = std::get<2>(resume_pos);
         size_t ts_offset = std::get<3>(resume_pos);
         size_t status_offset = std::get<4>(resume_pos);
+        size_t flags_offset = std::get<5>(resume_pos);
         size_t hash = 0;
 
         Iterator it;
@@ -7691,6 +7694,7 @@ public:
         size_t next_rec_offset = 0;
         size_t next_ts_offset = 0;
         size_t next_status_offset = 0;
+        size_t next_flags_offset = 0;
         for (size_t cnt = 0;
              key_pos < batch_size && cnt < UploadBatchCc::UploadBatchBatchSize;
              ++key_pos, ++cnt)
@@ -7699,13 +7703,16 @@ public:
             next_rec_offset = rec_offset;
             next_ts_offset = ts_offset;
             next_status_offset = status_offset;
+            next_flags_offset = flags_offset;
+
             if (entry_vec != nullptr)
             {
                 key_idx = start_key_index + key_pos;
-                // get key
-                key = entry_vec->at(key_idx)->key_.GetKey<KeyT>();
-                // get record
-                req_rec = entry_vec->at(key_idx)->rec_.get();
+                const auto &pair = entry_vec->at(key_idx);
+                range_size_flags = pair.first;
+                const WriteEntry *we = pair.second;
+                key = we->key_.GetKey<KeyT>();
+                req_rec = we->rec_.get();
                 if (req_rec)
                 {
                     rec_status = RecordStatus::Normal;
@@ -7717,11 +7724,12 @@ public:
                     commit_val = nullptr;
                 }
                 // get commit ts
-                commit_ts = entry_vec->at(key_idx)->commit_ts_;
+                commit_ts = we->commit_ts_;
             }
             else
             {
-                auto [key_str, rec_str, ts_str, status_str] = *entry_tuples;
+                auto [key_str, rec_str, ts_str, status_str, flags_str] =
+                    *entry_tuples;
                 // deserialize key
                 decoded_key.Deserialize(
                     key_str.data(), next_key_offset, KeySchema());
@@ -7744,19 +7752,41 @@ public:
                 // deserialize commit ts
                 commit_ts = *((uint64_t *) (ts_str.data() + next_ts_offset));
                 next_ts_offset += sizeof(uint64_t);
+                if (RangePartitioned)
+                {
+                    range_size_flags =
+                        static_cast<uint8_t>(flags_str[next_flags_offset]);
+                    next_flags_offset += sizeof(uint8_t);
+                }
             }
 
-            hash = key->Hash();
-            size_t core_idx = (hash & 0x3FF) % shard_->core_cnt_;
-            if (!(core_idx == shard_->core_id_) || commit_ts <= 1)
+            if (commit_ts <= 1)
             {
-                // Skip the key that does not belong to this core or
-                // commit ts does not greater than 1. Move to next key.
+                // skip the key that commit ts does not greater than 1.
                 key_offset = next_key_offset;
                 rec_offset = next_rec_offset;
                 ts_offset = next_ts_offset;
                 status_offset = next_status_offset;
+                if constexpr (RangePartitioned)
+                {
+                    flags_offset = next_flags_offset;
+                }
                 continue;
+            }
+
+            if constexpr (!RangePartitioned)
+            {
+                hash = key->Hash();
+                size_t core_idx = (hash & 0x3FF) % shard_->core_cnt_;
+                if (core_idx != shard_->core_id_)
+                {
+                    // skip the key that does not belong to this core.
+                    key_offset = next_key_offset;
+                    rec_offset = next_rec_offset;
+                    ts_offset = next_ts_offset;
+                    status_offset = next_status_offset;
+                    continue;
+                }
             }
 
             it = FindEmplace(*key);
@@ -7790,9 +7820,14 @@ public:
                 rec_offset = next_rec_offset;
                 ts_offset = next_ts_offset;
                 status_offset = next_status_offset;
+                if constexpr (RangePartitioned)
+                {
+                    flags_offset = next_flags_offset;
+                }
                 continue;
             }
 
+            [[maybe_unused]] const size_t old_payload_size = cce->PayloadSize();
             // Now, all versions of non-unique SecondaryIndex key shared
             // the unpack info in current version's payload, though the
             // unpack info will not be used for deleted key, we must not
@@ -7812,6 +7847,8 @@ public:
             }
 
             bool was_dirty = cce->IsDirty();
+            [[maybe_unused]] const RecordStatus cce_old_status =
+                cce->PayloadStatus();
             cce->SetCommitTsPayloadStatus(commit_ts, rec_status);
             if (req.Kind() == UploadBatchType::DirtyBucketData)
             {
@@ -7825,6 +7862,43 @@ public:
                 }
                 cce->SetCkptTs(commit_ts);
             }
+
+            if constexpr (RangePartitioned)
+            {
+                if ((range_size_flags >> 4) != 0)
+                {
+                    int32_t delta =
+                        (rec_status == RecordStatus::Deleted)
+                            ? -(static_cast<int32_t>(write_key->Size() +
+                                                     old_payload_size))
+                            : (cce_old_status != RecordStatus::Normal
+                                   ? static_cast<int32_t>(write_key->Size() +
+                                                          cce->PayloadSize())
+                                   : static_cast<int32_t>(cce->PayloadSize() -
+                                                          old_payload_size));
+                    bool need_split =
+                        UpdateRangeSize(static_cast<uint32_t>(partition_id),
+                                        delta,
+                                        (range_size_flags & 0x0F) != 0);
+                    if (need_split)
+                    {
+                        // Create a data sync task for the range.
+                        uint64_t data_sync_ts =
+                            std::chrono::duration_cast<
+                                std::chrono::microseconds>(
+                                std::chrono::high_resolution_clock::now()
+                                    .time_since_epoch())
+                                .count();
+                        shard_->CreateSplitRangeDataSyncTask(
+                            table_name_,
+                            cc_ng_id_,
+                            req.CcNgTerm(),
+                            static_cast<uint32_t>(partition_id),
+                            data_sync_ts);
+                    }
+                }
+            }
+
             OnCommittedUpdate(cce, was_dirty);
             OnFlushed(cce, was_dirty);
             DLOG_IF(INFO, TRACE_OCC_ERR)
@@ -7851,6 +7925,10 @@ public:
             rec_offset = next_rec_offset;
             ts_offset = next_ts_offset;
             status_offset = next_status_offset;
+            if constexpr (RangePartitioned)
+            {
+                flags_offset = next_flags_offset;
+            }
         }
         if (key_pos < batch_size)
         {
@@ -7862,7 +7940,8 @@ public:
                                   key_offset,
                                   rec_offset,
                                   ts_offset,
-                                  status_offset);
+                                  status_offset,
+                                  flags_offset);
             shard_->Enqueue(shard_->LocalCoreId(), &req);
             return false;
         }
