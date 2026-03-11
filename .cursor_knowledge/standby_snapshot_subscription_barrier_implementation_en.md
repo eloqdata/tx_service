@@ -20,7 +20,7 @@ Replace pending value from raw request to task struct, e.g.:
 - optional `created_at`
 
 ## 3. New APIs in `SnapshotManager`
-- `RegisterSubscriptionBarrier(ng_id, standby_node_id, standby_term, barrier_ts)`
+- `RegisterSubscriptionBarrier(standby_node_id, standby_term, barrier_ts)`
 - `GetSubscriptionBarrier(standby_node_id, standby_term, uint64_t* out)`
 - `EraseSubscriptionBarrier(standby_node_id, standby_term)`
 - optional cleanup utility for old terms
