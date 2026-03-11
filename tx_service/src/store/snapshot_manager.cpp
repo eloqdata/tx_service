@@ -181,8 +181,7 @@ void SnapshotManager::RegisterSubscriptionBarrier(uint32_t standby_node_id,
         DLOG(INFO) << "Ignore stale barrier registration for standby node #"
                    << standby_node_id << ", term " << standby_node_term
                    << " because queued pending task term "
-                   << pending_it->second.req.standby_node_term()
-                   << " is newer";
+                   << pending_it->second.req.standby_node_term() << " is newer";
         return;
     }
 
@@ -498,7 +497,8 @@ void SnapshotManager::SyncWithStandby()
             // request.
             {
                 std::unique_lock<std::mutex> lk(standby_sync_mux_);
-                auto pending_req_iter = pending_req_.find(req.standby_node_id());
+                auto pending_req_iter =
+                    pending_req_.find(req.standby_node_id());
                 if (pending_req_iter != pending_req_.end())
                 {
                     // Check again to see if the request has been updated.
@@ -506,10 +506,11 @@ void SnapshotManager::SyncWithStandby()
                     int64_t next_pending_task_standby_term =
                         next_pending_task.req.standby_node_term();
                     int64_t next_pending_task_primary_term =
-                        PrimaryTermFromStandbyTerm(next_pending_task_standby_term);
+                        PrimaryTermFromStandbyTerm(
+                            next_pending_task_standby_term);
 
-                    assert(PrimaryTermFromStandbyTerm(req.standby_node_term()) ==
-                           leader_term);
+                    assert(PrimaryTermFromStandbyTerm(
+                               req.standby_node_term()) == leader_term);
 
                     if (next_pending_task_primary_term < leader_term)
                     {
