@@ -131,7 +131,7 @@ DEFINE_bool(eloq_store_reuse_local_files,
             "EloqStore reuse local files in cloud mode");
 DEFINE_uint32(eloq_store_data_page_size, 1 << 12, "EloqStore data page size.");
 DEFINE_uint32(eloq_store_pages_per_file_shift,
-              11,
+              2,
               "EloqStore pages per file shift.");
 DEFINE_uint32(eloq_store_overflow_pointers, 16, "EloqStore overflow pointers.");
 DEFINE_bool(eloq_store_data_append_mode, true, "EloqStore data append mode.");
