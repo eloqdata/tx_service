@@ -743,7 +743,56 @@ public:
                 // update previous cce's end key
                 cce->SetCommitTsPayloadStatus(new_range_info->version_ts_,
                                               RecordStatus::Normal);
+
+                // Reset new range size on the data table ccmap (emplace if
+                // absent).
+                int32_t new_range_id = new_range_info->PartitionId();
+                NodeGroupId new_range_owner =
+                    shard_->GetRangeOwner(new_range_id, this->cc_ng_id_)
+                        ->BucketOwner();
+                if (new_range_owner == this->cc_ng_id_ &&
+                    static_cast<uint16_t>((new_range_id & 0x3FF) %
+                                          shard_->core_cnt_) ==
+                        shard_->core_id_)
+                {
+                    TableType data_table_type =
+                        TableName::Type(this->table_name_.StringView());
+                    TableName data_table_name(this->table_name_.StringView(),
+                                              data_table_type,
+                                              this->table_name_.Engine());
+                    CcMap *ccm =
+                        shard_->GetCcm(data_table_name, this->cc_ng_id_);
+                    assert(ccm != nullptr);
+                    size_t range_size = new_range_entries.at(idx)
+                                            ->TypedStoreRange()
+                                            ->PostCkptSize();
+                    ccm->InitRangeSize(static_cast<uint32_t>(new_range_id),
+                                       static_cast<int32_t>(range_size),
+                                       true,
+                                       true);
+                }
             }
+            // Reset old range size on the data table ccmap (no emplace).
+            int32_t old_partition_id =
+                upload_range_rec->GetRangeInfo()->PartitionId();
+            if (range_owner == this->cc_ng_id_ &&
+                static_cast<uint16_t>((old_partition_id & 0x3FF) %
+                                      shard_->core_cnt_) == shard_->core_id_)
+            {
+                TableType data_table_type =
+                    TableName::Type(this->table_name_.StringView());
+                TableName data_table_name(this->table_name_.StringView(),
+                                          data_table_type,
+                                          this->table_name_.Engine());
+                CcMap *ccm = shard_->GetCcm(data_table_name, this->cc_ng_id_);
+                assert(ccm != nullptr);
+                size_t old_range_size =
+                    old_entry->TypedStoreRange()->PostCkptSize();
+                ccm->InitRangeSize(static_cast<uint32_t>(old_partition_id),
+                                   static_cast<int32_t>(old_range_size));
+                ccm->ResetRangeStatus(static_cast<uint32_t>(old_partition_id));
+            }
+
             // range_owner_rec_ needs to be reset on each core since they point
             // to bucket records on different cores.
             upload_range_rec->range_owner_rec_ =
