@@ -7399,9 +7399,12 @@ public:
         }
         LruPage *lru_page;
         uint16_t pause_idx = shard_->core_id_;
-        if (req.GetCleanType() == CleanType::CleanBucketData)
+        CleanType clean_type = req.GetCleanType();
+        if (clean_type == CleanType::CleanBucketData ||
+            clean_type == CleanType::CleanRangeData)
         {
-            // For clean bucket data, cc req is only sent to 1 core.
+            // For clean bucket data and range data, cc req is only sent to 1
+            // core.
             pause_idx = 0;
         }
         if (req.ResumeKey(pause_idx)->KeyPtr() != nullptr)

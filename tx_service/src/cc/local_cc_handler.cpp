@@ -1907,7 +1907,8 @@ void txservice::LocalCcHandler::KickoutData(const TableName &table_name,
         KickoutCcEntryCc *req = kickout_ccentry_pool_.NextRequest();
         // For hash partition, all data in a single bucket should be hashed to
         // the same core.
-        uint16_t core_cnt = clean_type == CleanType::CleanBucketData
+        uint16_t core_cnt = (clean_type == CleanType::CleanBucketData ||
+                             clean_type == CleanType::CleanRangeData)
                                 ? 1
                                 : Sharder::Instance().GetLocalCcShardsCount();
         req->Reset(table_name,
@@ -1933,6 +1934,14 @@ void txservice::LocalCcHandler::KickoutData(const TableName &table_name,
             cc_shards_.EnqueueToCcShard(
                 Sharder::Instance().ShardBucketIdToCoreIdx((*bucket_id)[0]),
                 req);
+        }
+        else if (clean_type == CleanType::CleanRangeData)
+        {
+            assert(range_id != INT32_MAX);
+            uint16_t dest_core = static_cast<uint16_t>(
+                (range_id & 0x3FF) %
+                Sharder::Instance().GetLocalCcShardsCount());
+            cc_shards_.EnqueueToCcShard(dest_core, req);
         }
         else
         {

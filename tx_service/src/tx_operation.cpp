@@ -5132,8 +5132,13 @@ bool SplitFlushRangeOp::ForwardKickoutIterator(TransactionExecution *txm)
             NodeGroupId new_owner = new_range_bucket_info->BucketOwner();
             NodeGroupId dirty_new_owner =
                 new_range_bucket_info->DirtyBucketOwner();
-            if (new_owner != txm->TxCcNodeId() &&
-                dirty_new_owner != txm->TxCcNodeId())
+            uint16_t range_shard_id = static_cast<uint16_t>(
+                (range_info_->PartitionId() & 0x3FF) % local_shards->Count());
+            uint16_t new_range_shard_id = static_cast<uint16_t>(
+                (kickout_data_it_->second & 0x3FF) % local_shards->Count());
+            if ((new_owner != txm->TxCcNodeId() &&
+                 dirty_new_owner != txm->TxCcNodeId()) ||
+                (range_shard_id != new_range_shard_id))
             {
                 // Note that even if the new node group falls on the same node,
                 // we still need to clean the cc entry from native ccmap since
@@ -5152,11 +5157,14 @@ bool SplitFlushRangeOp::ForwardKickoutIterator(TransactionExecution *txm)
                 }
                 kickout_old_range_data_op_.clean_type_ =
                     CleanType::CleanRangeData;
+                kickout_old_range_data_op_.range_id_ =
+                    range_info_->PartitionId();
                 kickout_old_range_data_op_.node_group_ = txm->TxCcNodeId();
                 LOG(INFO)
                     << "Split Flush transaction kickout old data in range "
                     << kickout_data_it_->second << ", original range id "
                     << range_info_->PartitionId()
+                    << ", new range id: " << kickout_data_it_->second
                     << ", txn: " << txm->TxNumber();
                 kickout_data_it_++;
                 return false;
