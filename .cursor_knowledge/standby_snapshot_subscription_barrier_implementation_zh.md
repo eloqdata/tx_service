@@ -20,7 +20,7 @@
 - 可选 `created_at`
 
 ## 3. `SnapshotManager` 新接口
-- `RegisterSubscriptionBarrier(ng_id, standby_node_id, standby_term, barrier_ts)`
+- `RegisterSubscriptionBarrier(standby_node_id, standby_term, barrier_ts)`
 - `GetSubscriptionBarrier(standby_node_id, standby_term, uint64_t* out)`
 - `EraseSubscriptionBarrier(standby_node_id, standby_term)`
 - 可选：清理旧 term 的辅助方法

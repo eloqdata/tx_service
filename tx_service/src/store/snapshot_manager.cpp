@@ -137,6 +137,48 @@ void SnapshotManager::RegisterSubscriptionBarrier(uint32_t standby_node_id,
                                                   uint64_t active_tx_max_ts)
 {
     std::unique_lock<std::mutex> lk(standby_sync_mux_);
+
+    // Ignore out-of-order old barrier registrations when a newer standby term
+    // is already known for this standby node.
+    auto node_it = subscription_barrier_.find(standby_node_id);
+    if (node_it != subscription_barrier_.end())
+    {
+        for (const auto &entry : node_it->second)
+        {
+            int64_t existing_term = entry.first;
+            if (existing_term > standby_node_term)
+            {
+                DLOG(INFO)
+                    << "Ignore stale subscription barrier registration for "
+                       "standby node #"
+                    << standby_node_id << ", term " << standby_node_term
+                    << " because newer term " << existing_term
+                    << " already exists";
+                return;
+            }
+        }
+    }
+
+    // Drop queued work from older standby terms. They are superseded by this
+    // new subscription barrier and should not be synced anymore.
+    auto pending_it = pending_req_.find(standby_node_id);
+    if (pending_it != pending_req_.end() &&
+        pending_it->second.req.standby_node_term() > standby_node_term)
+    {
+        DLOG(INFO) << "Ignore stale barrier registration for standby node #"
+                   << standby_node_id << ", term " << standby_node_term
+                   << " because queued pending task term "
+                   << pending_it->second.req.standby_node_term()
+                   << " is newer";
+        return;
+    }
+
+    if (pending_it != pending_req_.end() &&
+        pending_it->second.req.standby_node_term() < standby_node_term)
+    {
+        pending_req_.erase(pending_it);
+    }
+
     auto &node_barriers = subscription_barrier_[standby_node_id];
 
     // Keep only current and newer terms for this node.
@@ -353,11 +395,25 @@ void SnapshotManager::SyncWithStandby()
     {
         auto &req = task.req;
         uint32_t node_id = req.standby_node_id();
+        int64_t req_standby_node_term = req.standby_node_term();
+
+        // Skip stale copied tasks that have already been superseded/removed
+        // after this round snapshot task list was built.
+        {
+            std::unique_lock<std::mutex> lk(standby_sync_mux_);
+            auto pending_it = pending_req_.find(node_id);
+            if (pending_it == pending_req_.end() ||
+                pending_it->second.req.standby_node_term() !=
+                    req_standby_node_term)
+            {
+                continue;
+            }
+        }
+
         std::string ip;
         uint16_t port;
         Sharder::Instance().GetNodeAddress(node_id, ip, port);
         std::string remote_dest = req.user() + "@" + ip + ":" + req.dest_path();
-        int64_t req_standby_node_term = req.standby_node_term();
         int64_t req_primary_term =
             PrimaryTermFromStandbyTerm(req_standby_node_term);
 
