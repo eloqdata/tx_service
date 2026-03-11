@@ -1038,6 +1038,30 @@ void DataStoreServiceClient::FetchRangeSlices(
          &FetchRangeSlicesCallback);
 }
 
+void DataStoreServiceClient::FetchTableRangeSize(
+    txservice::FetchTableRangeSizeCc *fetch_cc)
+{
+    txservice::TableName range_table_name(fetch_cc->table_name_->StringView(),
+                                          txservice::TableType::RangePartition,
+                                          fetch_cc->table_name_->Engine());
+
+    int32_t kv_partition_id =
+        KvPartitionIdOfRangeSlices(range_table_name, fetch_cc->partition_id_);
+    uint32_t shard_id = GetShardIdByPartitionId(kv_partition_id, false);
+
+    auto catalog_factory = GetCatalogFactory(range_table_name.Engine());
+    assert(catalog_factory != nullptr);
+    fetch_cc->kv_start_key_ =
+        EncodeRangeKey(catalog_factory, range_table_name, fetch_cc->start_key_);
+
+    Read(kv_range_table_name,
+         kv_partition_id,
+         shard_id,
+         fetch_cc->kv_start_key_,
+         fetch_cc,
+         &FetchRangeSizeCallback);
+}
+
 /**
  * @brief Deletes data that is out of the specified range.
  *
@@ -1254,16 +1278,19 @@ std::string DataStoreServiceClient::EncodeRangeKey(
  * @param range_version The version of the range.
  * @param version The general version number.
  * @param segment_cnt The number of segments in the range.
+ * @param range_size The size of the range.
  * @return Binary string containing the encoded range value.
  */
 std::string DataStoreServiceClient::EncodeRangeValue(int32_t range_id,
                                                      uint64_t range_version,
                                                      uint64_t version,
-                                                     uint32_t segment_cnt)
+                                                     uint32_t segment_cnt,
+                                                     int32_t range_size)
 {
     std::string kv_range_record;
     kv_range_record.reserve(sizeof(int32_t) + sizeof(uint64_t) +
-                            sizeof(uint64_t) + sizeof(uint32_t));
+                            sizeof(uint64_t) + sizeof(uint32_t) +
+                            sizeof(int32_t));
     kv_range_record.append(reinterpret_cast<const char *>(&range_id),
                            sizeof(int32_t));
     kv_range_record.append(reinterpret_cast<const char *>(&range_version),
@@ -1273,6 +1300,8 @@ std::string DataStoreServiceClient::EncodeRangeValue(int32_t range_id,
     // segment_cnt of slices
     kv_range_record.append(reinterpret_cast<const char *>(&segment_cnt),
                            sizeof(uint32_t));
+    kv_range_record.append(reinterpret_cast<const char *>(&range_size),
+                           sizeof(int32_t));
     return kv_range_record;
 }
 
@@ -1340,6 +1369,7 @@ RangeSliceBatchPlan DataStoreServiceClient::PrepareRangeSliceBatches(
     RangeSliceBatchPlan plan;
     plan.segment_cnt = 0;
     plan.version = version;
+    plan.range_size = 0;
 
     // Estimate capacity based on slices size
     plan.segment_keys.reserve(slices.size() / 10 + 1);  // Rough estimate
@@ -1388,6 +1418,7 @@ RangeSliceBatchPlan DataStoreServiceClient::PrepareRangeSliceBatches(
                               sizeof(uint32_t));
         segment_record.append(slice_start_key.Data(), key_size);
         uint32_t slice_size = static_cast<uint32_t>(slices[i]->Size());
+        plan.range_size += static_cast<int32_t>(slice_size);
         segment_record.append(reinterpret_cast<const char *>(&slice_size),
                               sizeof(uint32_t));
     }
@@ -1553,6 +1584,7 @@ void DataStoreServiceClient::EnqueueRangeMetadataRecord(
     uint64_t range_version,
     uint64_t version,
     uint32_t segment_cnt,
+    int32_t range_size,
     RangeMetadataAccumulator &accumulator)
 {
     // Compute kv_table_name and kv_partition_id
@@ -1563,8 +1595,8 @@ void DataStoreServiceClient::EnqueueRangeMetadataRecord(
     // Encode key and value
     std::string key_str =
         EncodeRangeKey(catalog_factory, table_name, range_start_key);
-    std::string rec_str =
-        EncodeRangeValue(partition_id, range_version, version, segment_cnt);
+    std::string rec_str = EncodeRangeValue(
+        partition_id, range_version, version, segment_cnt, range_size);
 
     // Get or create entry in accumulator
     auto key = std::make_pair(kv_table_name, kv_partition_id);
@@ -1732,6 +1764,7 @@ bool DataStoreServiceClient::UpdateRangeSlices(
                                                    req.range_slices_,
                                                    req.partition_id_);
         uint32_t segment_cnt = slice_plan.segment_cnt;
+        int32_t range_size = slice_plan.range_size;
         int32_t kv_partition_id =
             KvPartitionIdOfRangeSlices(*req.table_name_, req.partition_id_);
         auto iter = slice_plans.find(kv_partition_id);
@@ -1756,6 +1789,7 @@ bool DataStoreServiceClient::UpdateRangeSlices(
                                    req.range_version_,
                                    req.ckpt_ts_,
                                    segment_cnt,
+                                   range_size,
                                    meta_acc);
     }
 
@@ -1957,6 +1991,7 @@ bool DataStoreServiceClient::UpdateRangeSlices(
                                range_version,
                                version,
                                segment_cnt,
+                               slice_plans[0].range_size,
                                meta_acc);
 
     SyncConcurrentRequest *meta_sync_concurrent =
@@ -2048,6 +2083,7 @@ bool DataStoreServiceClient::UpsertRanges(
         auto slice_plan = PrepareRangeSliceBatches(
             table_name, version, range.slices_, range.partition_id_);
         uint32_t segment_cnt = slice_plan.segment_cnt;
+        int32_t range_size = slice_plan.range_size;
 
         int32_t kv_partition_id =
             KvPartitionIdOfRangeSlices(table_name, range.partition_id_);
@@ -2071,6 +2107,7 @@ bool DataStoreServiceClient::UpsertRanges(
             version,  // range_version (using version for now)
             version,
             segment_cnt,
+            range_size,
             meta_acc);
     }
 
@@ -4651,7 +4688,8 @@ bool DataStoreServiceClient::InitTableRanges(
 
     std::string key_str =
         EncodeRangeKey(catalog_factory, table_name, *neg_inf_key);
-    std::string rec_str = EncodeRangeValue(init_range_id, version, version, 0);
+    std::string rec_str =
+        EncodeRangeValue(init_range_id, version, version, 0, 0);
 
     keys.emplace_back(std::string_view(key_str.data(), key_str.size()));
     records.emplace_back(std::string_view(rec_str.data(), rec_str.size()));

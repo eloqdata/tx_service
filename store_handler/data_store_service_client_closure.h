@@ -3103,6 +3103,14 @@ void FetchTableRangesCallback(void *data,
                               const remote::CommonResult &result);
 
 /**
+ * Callback for fetching range size from table_ranges.
+ */
+void FetchRangeSizeCallback(void *data,
+                            ::google::protobuf::Closure *closure,
+                            DataStoreServiceClient &client,
+                            const remote::CommonResult &result);
+
+/**
  * Callback for fetching range slices.
  *
  * Handles the completion of range slice fetch operations and processes the
