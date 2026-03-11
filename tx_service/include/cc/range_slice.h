@@ -888,9 +888,15 @@ public:
                 init_key_cache,
                 empty_range ? init_key_cache : false);
         slices_.emplace_back(std::move(slice));
+        LOG(INFO) << "StoreRange init: addr=" << static_cast<void *>(this)
+                  << " partition_id=" << partition_id_;
     }
 
-    ~TemplateStoreRange() = default;
+    ~TemplateStoreRange()
+    {
+        LOG(INFO) << "StoreRange destructor: addr=" << static_cast<void *>(this)
+                  << " partition_id=" << partition_id_;
+    }
 
     void SetRangeEndKey(const KeyT *end_key)
     {
