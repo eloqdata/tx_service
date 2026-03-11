@@ -1172,6 +1172,7 @@ void CcNodeService::UploadBatch(
 
     NodeGroupId ng_id = request->node_group_id();
     int64_t ng_term = request->node_group_term();
+    int32_t partition_id = request->partition_id();
 
     std::string_view table_name_sv{request->table_name_str()};
     TableType table_type =
@@ -1199,14 +1200,15 @@ void CcNodeService::UploadBatch(
                << " for table:" << table_name.Trace();
 
     LocalCcShards *cc_shards = Sharder::Instance().GetLocalCcShards();
-    size_t core_cnt = cc_shards->Count();
+    size_t core_cnt = (partition_id >= 0) ? 1 : cc_shards->Count();
     uint32_t batch_size = request->batch_size();
 
     auto write_entry_tuple =
         UploadBatchCc::WriteEntryTuple(request->keys(),
                                        request->records(),
                                        request->commit_ts(),
-                                       request->rec_status());
+                                       request->rec_status(),
+                                       request->range_size_flags());
 
     size_t finished_req = 0;
     bthread::Mutex req_mux;
@@ -1217,6 +1219,7 @@ void CcNodeService::UploadBatch(
     req.Reset(table_name,
               ng_id,
               ng_term,
+              partition_id,
               core_cnt,
               batch_size,
               write_entry_tuple,
@@ -1224,9 +1227,18 @@ void CcNodeService::UploadBatch(
               req_cv,
               finished_req,
               data_type);
-    for (size_t core = 0; core < core_cnt; ++core)
+    if (partition_id >= 0)
     {
-        cc_shards->EnqueueToCcShard(core, &req);
+        uint16_t dest_core =
+            static_cast<uint16_t>((partition_id & 0x3FF) % cc_shards->Count());
+        cc_shards->EnqueueToCcShard(dest_core, &req);
+    }
+    else
+    {
+        for (size_t core = 0; core < cc_shards->Count(); ++core)
+        {
+            cc_shards->EnqueueToCcShard(core, &req);
+        }
     }
 
     {
