@@ -1138,6 +1138,10 @@ public:
         }
     }
 
+    void ResetRangeSplittingStatus(const TableName &table_name,
+                                   uint32_t ng_id,
+                                   uint32_t range_id);
+
     FillStoreSliceCc *NewFillStoreSliceCc()
     {
         return fill_store_slice_cc_pool_.NextRequest();

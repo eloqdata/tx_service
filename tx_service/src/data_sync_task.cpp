@@ -226,4 +226,24 @@ void DataSyncTask::SetScanTaskFinished()
     }
 }
 
+void DataSyncTask::ResetRangeSplittingStatus()
+{
+    if (!high_priority_ || during_split_range_)
+    {
+        return;
+    }
+
+    WaitableCc reset_cc(
+        [&](CcShard &ccs)
+        {
+            ccs.ResetRangeSplittingStatus(table_name_, node_group_id_, id_);
+            return true;
+        });
+
+    LocalCcShards *local_cc_shards = Sharder::Instance().GetLocalCcShards();
+    uint16_t dest_core = (id_ & 0x3FF) % local_cc_shards->Count();
+    local_cc_shards->EnqueueToCcShard(dest_core, &reset_cc);
+    reset_cc.Wait();
+}
+
 }  // namespace txservice
