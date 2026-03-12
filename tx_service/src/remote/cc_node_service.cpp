@@ -1910,7 +1910,8 @@ void CcNodeService::CreateBackup(
     assert(store_hd != nullptr);
     if (store_hd && !request->backup_name().empty())
     {
-        assert(!request->dest_path().empty());
+        // dest_path may be empty for cloud/shared-storage mode where the
+        // snapshot is written directly to cloud (no rsync transfer needed).
         auto st = store::SnapshotManager::Instance().CreateBackup(request);
         response->set_status(st);
         if (st == BackupTaskStatus::Finished)

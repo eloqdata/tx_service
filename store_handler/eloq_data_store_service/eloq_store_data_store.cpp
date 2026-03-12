@@ -19,14 +19,18 @@
  *    <http://www.gnu.org/licenses/>.
  *
  */
-#include "eloq_store_data_store.h"
-
 #include <bthread/condition_variable.h>
 #include <bthread/mutex.h>
 
 #include <algorithm>
 #include <memory>
 
+#include <cassert>
+#include <filesystem>
+#include <memory>
+
+#include "common.h"
+#include "eloq_store_data_store.h"
 #include "eloq_store_data_store_factory.h"
 #include "internal_request.h"
 
@@ -91,6 +95,7 @@ EloqStoreDataStore::EloqStoreDataStore(uint32_t shard_id,
     assert(factory != nullptr);
     ::eloqstore::KvOptions opts =
         factory->eloq_store_configs_.eloqstore_configs_;
+    branch_name_ = factory->eloq_store_configs_.branch_name_;
     DLOG(INFO) << "Create EloqStore storage with workers: " << opts.num_threads
                << ", store path: " << opts.store_path.front()
                << ", open files limit: " << opts.fd_limit
@@ -589,30 +594,80 @@ void EloqStoreDataStore::CreateSnapshotForBackup(
 {
     PoolableGuard req_guard(req);
 
-    ::eloqstore::GlobalArchiveRequest global_archive_req;
-    global_archive_req.SetSnapshotTimestamp(req->GetBackupTs());
-    eloq_store_service_->ExecSync(&global_archive_req);
+    std::string_view backup_name = req->GetBackupName();
+    assert(req->GetBackupTs() != 0);
 
-    ::EloqDS::remote::DataStoreError ds_error;
-    std::string error_msg;
-    switch (global_archive_req.Error())
+    if (backup_name.empty() || backup_name == eloq_store_service_->Branch())
     {
-    case ::eloqstore::KvError::NoError:
-        ds_error = ::EloqDS::remote::DataStoreError::NO_ERROR;
-        break;
-    case ::eloqstore::KvError::NotRunning:
-        ds_error = ::EloqDS::remote::DataStoreError::DB_NOT_OPEN;
-        error_msg = "EloqStore not running";
-        break;
-    default:
-        ds_error = ::EloqDS::remote::DataStoreError::CREATE_SNAPSHOT_ERROR;
-        error_msg =
-            "Snapshot failed with error code: " +
-            std::to_string(static_cast<int>(global_archive_req.Error()));
-        break;
-    }
+        // If backup_name is empty or matches the current branch, create
+        // snapshot for current branch.
+        ::eloqstore::GlobalArchiveRequest global_archive_req;
+        global_archive_req.SetSnapshotTimestamp(req->GetBackupTs());
+        eloq_store_service_->ExecSync(&global_archive_req);
 
-    req->SetFinish(ds_error, error_msg);
+        ::EloqDS::remote::DataStoreError ds_error;
+        std::string error_msg;
+        switch (global_archive_req.Error())
+        {
+        case ::eloqstore::KvError::NoError:
+            ds_error = ::EloqDS::remote::DataStoreError::NO_ERROR;
+            req->AddBackupFile(::eloqstore::BranchArchiveName(
+                eloq_store_service_->Branch(),
+                eloq_store_service_->Term(),
+                req->GetBackupTs()));
+            break;
+        case ::eloqstore::KvError::NotRunning:
+            ds_error = ::EloqDS::remote::DataStoreError::DB_NOT_OPEN;
+            error_msg = "EloqStore not running";
+            break;
+        default:
+            ds_error = ::EloqDS::remote::DataStoreError::CREATE_SNAPSHOT_ERROR;
+            error_msg =
+                "Snapshot failed with error code: " +
+                std::to_string(static_cast<int>(global_archive_req.Error()));
+            break;
+        }
+
+        req->SetFinish(ds_error, error_msg);
+    }
+    else
+    {
+        // backup_name differs from the current branch — create a new branch
+        // forked from the current branch.  Use backup_ts as the salt so the
+        // internal filename is deterministic and correlated with the backup
+        // timestamp.
+        ::eloqstore::GlobalCreateBranchRequest create_branch_req;
+        create_branch_req.SetArgs(std::string(backup_name),
+                                  std::string(eloq_store_service_->Branch()));
+        create_branch_req.SetSaltTimestamp(req->GetBackupTs());
+        eloq_store_service_->ExecSync(&create_branch_req);
+
+        ::EloqDS::remote::DataStoreError ds_error;
+        std::string error_msg;
+        switch (create_branch_req.Error())
+        {
+        case ::eloqstore::KvError::NoError:
+            ds_error = ::EloqDS::remote::DataStoreError::NO_ERROR;
+            req->AddBackupFile(create_branch_req.result_branch);
+            break;
+        case ::eloqstore::KvError::NotRunning:
+            ds_error = ::EloqDS::remote::DataStoreError::DB_NOT_OPEN;
+            error_msg = "EloqStore not running";
+            break;
+        case ::eloqstore::KvError::InvalidArgs:
+            ds_error = ::EloqDS::remote::DataStoreError::CREATE_SNAPSHOT_ERROR;
+            error_msg = "Invalid branch name: " + std::string(backup_name);
+            break;
+        default:
+            ds_error = ::EloqDS::remote::DataStoreError::CREATE_SNAPSHOT_ERROR;
+            error_msg =
+                "Create branch failed with error code: " +
+                std::to_string(static_cast<int>(create_branch_req.Error()));
+            break;
+        }
+
+        req->SetFinish(ds_error, error_msg);
+    }
 }
 
 void EloqStoreDataStore::ScanDelete(DeleteRangeRequest *delete_range_req)
