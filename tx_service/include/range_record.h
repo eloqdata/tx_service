@@ -601,6 +601,11 @@ public:
             range_slices->InitSlices(std::move(slices));
         }
         range_slices_ = std::move(range_slices);
+        LOG(INFO) << "TemplateTableRangeEntry InitRangeSlices: addr="
+                  << static_cast<void *>(range_slices_.get())
+                  << " partition_id=" << range_slices_->PartitionId()
+                  << ", start key = "
+                  << range_slices_->RangeStartKey()->ToString();
     }
 
     /**
