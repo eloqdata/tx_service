@@ -536,6 +536,10 @@ public:
         return catalog_factory_[static_cast<int>(table_engine) - 1];
     }
 
+    CacheEvictPolicy GetCacheEvictPolicy() const;
+
+    uint64_t LargeObjThresholdBytes() const;
+
     /**
      * Insert page at the end of the lru list as the most-recently accessed
      * page.
@@ -965,13 +969,6 @@ public:
         return ng_id == ng_id_;
     }
 
-    // native node group
-    const uint16_t core_id_;
-    const uint16_t core_cnt_;
-    const NodeGroupId ng_id_;
-    std::atomic<int32_t> meta_data_mux_{};
-    LocalCcShards &local_shards_;
-
     bool EnableMvcc() const;
     void AddActiveSiTx(TxNumber txn, uint64_t start_ts);
     void RemoveActiveSiTx(TxNumber txn);
@@ -987,11 +984,6 @@ public:
     void ClearActiveBlockingTxs();
     size_t ActiveBlockingTxSize() const;
     void RemoveExpiredActiveBlockingTxs();
-
-    // shard level memory limit.
-    uint64_t memory_limit_{0};
-
-    const bool realtime_sampling_{true};
 
     // Search lock_holding_txs_, find the entrys with waited transactions and
     // save them into CheckDeadLockResult.
@@ -1160,6 +1152,19 @@ public:
     void CollectCacheHit();
     void CollectCacheMiss();
 
+public:
+    // native node group
+    const uint16_t core_id_;
+    const uint16_t core_cnt_;
+    const NodeGroupId ng_id_;
+    std::atomic<int32_t> meta_data_mux_{};
+    LocalCcShards &local_shards_;
+
+    // shard level memory limit.
+    uint64_t memory_limit_{0};
+
+    const bool realtime_sampling_{true};
+
 private:
     void SetTxProcNotifier(std::atomic<TxProcessorStatus> *tx_proc_status,
                            TxProcCoordinator *tx_coordi)
@@ -1280,6 +1285,13 @@ private:
     // Reserved head and tail for the double-linked list of cc entries, which
     // simplifies handling of empty and one-element lists.
     LruPage head_ccp_, tail_ccp_;
+
+    // head --- [small pages] --- protected_head_ --- [large pages] -- tail
+    //
+    // Declare as a pointer instead of as a dummy page. Eviction policies(SLRU)
+    // might share it.
+    LruPage *protected_head_page_;
+
     /**
      * @brief Each time a page is accessed and moved to the tail of the LRU
      * list, the counter is incremented and assigned to the page. Since in a

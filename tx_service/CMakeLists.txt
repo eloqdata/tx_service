@@ -329,8 +329,14 @@ if(RUN_TX_SERVICE_TESTS)
     target_include_directories(StartTsCollector-Test PUBLIC ${TX_SERVICE_SOURCE_DIR}/tests/include ${INCLUDE_DIR})
     target_link_libraries(StartTsCollector-Test PUBLIC txservice Catch2::Catch2)
 
+    # LargeObjLRU-Test
+    add_executable(LargeObjLRU-Test ${TX_SERVICE_SOURCE_DIR}/tests/LargeObjLRU-Test.cpp)
+    target_include_directories(LargeObjLRU-Test PUBLIC ${TX_SERVICE_SOURCE_DIR}/tests/include ${INCLUDE_DIR})
+    target_link_libraries(LargeObjLRU-Test PUBLIC txservice Catch2::Catch2)
+
     # Register tests with CTest
     add_test(NAME CcEntry-Test COMMAND CcEntry-Test)
     add_test(NAME CcPage-Test COMMAND CcPage-Test)
     add_test(NAME StartTsCollector-Test COMMAND StartTsCollector-Test)
+    add_test(NAME LargeObjLRU-Test COMMAND LargeObjLRU-Test)
 endif()

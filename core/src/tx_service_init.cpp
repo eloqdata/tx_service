@@ -21,6 +21,13 @@ DEFINE_int32(collect_active_tx_ts_interval_seconds,
              "Active transaction timestamp collection interval");
 DEFINE_bool(kickout_data_for_test, false, "Kickout data for test");
 DEFINE_bool(enable_key_cache, false, "Enable key cache");
+DEFINE_string(cache_evict_policy,
+              "LRU",
+              "Cache eviction policy. Optional policy includes LRU|LO_LRU."
+              "LO_LRU is a variant LRU which is adapt for large objects.");
+DEFINE_uint32(lolru_large_obj_threshold_kb,
+              1024,
+              "LO_LRU policy option. Threshold of large object in KB.");
 DEFINE_uint32(max_standby_lag,
               400000,
               "txservice max msg lag between primary and standby");
@@ -223,6 +230,35 @@ bool DataSubstrate::InitializeTxService(const INIReader &config_reader)
 #endif
     }
 
+    txservice::CacheEvictPolicy cache_evict_policy =
+        txservice::CacheEvictPolicy::LRU;
+    uint32_t lolru_large_obj_threshold_kb = 0;
+    std::string cache_evict_policy_str =
+        !CheckCommandLineFlagIsDefault("cache_evict_policy")
+            ? FLAGS_cache_evict_policy
+            : config_reader.GetString(
+                  "local", "cache_evict_policy", FLAGS_cache_evict_policy);
+    if (cache_evict_policy_str == txservice::CacheEvictPolicyLRU::NAME)
+    {
+        cache_evict_policy = txservice::CacheEvictPolicy::LRU;
+    }
+    else if (cache_evict_policy_str == txservice::CacheEvictPolicyLoLRU::NAME)
+    {
+        cache_evict_policy = txservice::CacheEvictPolicy::LO_LRU;
+        lolru_large_obj_threshold_kb =
+            !CheckCommandLineFlagIsDefault("lolru_large_obj_threshold_kb")
+                ? FLAGS_lolru_large_obj_threshold_kb
+                : config_reader.GetInteger("local",
+                                           "lolru_large_obj_threshold_kb",
+                                           FLAGS_lolru_large_obj_threshold_kb);
+    }
+    else
+    {
+        LOG(ERROR) << "Invalidate `cache_evict_policy` "
+                   << cache_evict_policy_str;
+        return false;
+    }
+
     LOG(INFO) << "Data substrate memory limit: "
               << core_config_.node_memory_limit_mb << "MB";
 
@@ -286,6 +322,15 @@ bool DataSubstrate::InitializeTxService(const INIReader &config_reader)
     if (core_config_.enable_data_store)
     {
         store_hd_->SetTxService(tx_service_.get());
+    }
+
+    if (cache_evict_policy == txservice::CacheEvictPolicy::LRU)
+    {
+        tx_service_->SetupPolicyLRU();
+    }
+    else if (cache_evict_policy == txservice::CacheEvictPolicy::LO_LRU)
+    {
+        tx_service_->SetupPolicyLoLRU(lolru_large_obj_threshold_kb);
     }
 
     if (tx_service_->Start(network_config_.node_id,
