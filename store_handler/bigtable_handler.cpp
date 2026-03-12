@@ -613,25 +613,25 @@ void EloqDS::BigTableHandler::FetchTableRanges(
             LocalCcShards *shards = Sharder::Instance().GetLocalCcShards();
             std::unique_lock<std::mutex> heap_lk(
                 shards->table_ranges_heap_mux_);
-            bool is_override_thd = mi_is_override_thread();
-            mi_threadid_t prev_thd =
-                mi_override_thread(shards->GetTableRangesHeapThreadId());
-            mi_heap_t *prev_heap =
-                mi_heap_set_default(shards->GetTableRangesHeap());
+            // bool is_override_thd = mi_is_override_thread();
+            // mi_threadid_t prev_thd =
+            //     mi_override_thread(shards->GetTableRangesHeapThreadId());
+            // mi_heap_t *prev_heap =
+            //     mi_heap_set_default(shards->GetTableRangesHeap());
 
             start_key = std::make_unique<EloqKey>(
                 reinterpret_cast<const uchar *>(mono_key.data()),
                 mono_key.size());
 
-            mi_heap_set_default(prev_heap);
-            if (is_override_thd)
-            {
-                mi_override_thread(prev_thd);
-            }
-            else
-            {
-                mi_restore_default_thread_id();
-            }
+            // mi_heap_set_default(prev_heap);
+            // if (is_override_thd)
+            // {
+            //     mi_override_thread(prev_thd);
+            // }
+            // else
+            // {
+            //     mi_restore_default_thread_id();
+            // }
         }
 
         int32_t partition_id =
@@ -767,11 +767,11 @@ void EloqDS::BigTableHandler::OnFetchRangeSlices(
             LocalCcShards *shards = Sharder::Instance().GetLocalCcShards();
             std::unique_lock<std::mutex> heap_lk(
                 shards->table_ranges_heap_mux_);
-            bool is_override_thd = mi_is_override_thread();
-            mi_threadid_t prev_thd =
-                mi_override_thread(shards->GetTableRangesHeapThreadId());
-            mi_heap_t *prev_heap =
-                mi_heap_set_default(shards->GetTableRangesHeap());
+            // bool is_override_thd = mi_is_override_thread();
+            // mi_threadid_t prev_thd =
+            //     mi_override_thread(shards->GetTableRangesHeapThreadId());
+            // mi_heap_t *prev_heap =
+            //     mi_heap_set_default(shards->GetTableRangesHeap());
 
             size_t offset = 0;
             while (offset < slice_keys_str.size())

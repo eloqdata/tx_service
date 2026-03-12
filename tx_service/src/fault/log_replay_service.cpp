@@ -873,6 +873,7 @@ void RecoveryService::on_closed(brpc::StreamId id)
         std::lock_guard<bthread::Mutex> lk(inbound_mux_);
         info = &inbound_connections_.find(id)->second;
     }
+    DLOG(INFO) << "replay service stream: " << id << " wait and clear requests";
     WaitAndClearRequests(id,
                          info->mux_,
                          info->on_fly_cnt_,

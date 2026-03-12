@@ -455,11 +455,12 @@ public:
     void InitializeTableRangesHeap()
     {
         std::unique_lock<std::mutex> lk(table_ranges_heap_mux_);
-        if (!table_ranges_heap_)
-        {
-            table_ranges_thread_id_ = mi_thread_id();
-            table_ranges_heap_ = mi_heap_new();
-        }
+        // table_ranges_heap_ usage commented out - use default heap
+        // if (!table_ranges_heap_)
+        // {
+        //     table_ranges_thread_id_ = mi_thread_id();
+        //     table_ranges_heap_ = mi_heap_new();
+        // }
 
 #if defined(WITH_JEMALLOC)
         // create table ranges arena
@@ -497,7 +498,9 @@ public:
 
     mi_heap_t *GetTableRangesHeap() const
     {
-        return table_ranges_heap_;
+        // table_ranges_heap_ usage commented out
+        // return table_ranges_heap_;
+        return nullptr;
     }
 
     uint32_t GetTableRangesArenaId() const
@@ -520,17 +523,19 @@ public:
         return (static_cast<size_t>(allocated) >= range_slice_memory_limit_);
 
 #else
-        if (table_ranges_heap_ != nullptr)
-        {
-            int64_t allocated, committed;
-            mi_thread_stats(&allocated, &committed);
-            return (static_cast<size_t>(allocated) >=
-                    range_slice_memory_limit_);
-        }
-        else
-        {
-            return false;
-        }
+        // table_ranges_heap_ usage commented out - use default heap
+        // if (table_ranges_heap_ != nullptr)
+        // {
+        //     int64_t allocated, committed;
+        //     mi_thread_stats(&allocated, &committed);
+        //     return (static_cast<size_t>(allocated) >=
+        //             range_slice_memory_limit_);
+        // }
+        // else
+        // {
+        //     return false;
+        // }
+        return false;
 #endif
     }
 
@@ -551,17 +556,19 @@ public:
         return (static_cast<size_t>(allocated) <= target_memory_size);
 
 #else
-        if (table_ranges_heap_ != nullptr)
-        {
-            size_t target_memory_size = range_slice_memory_limit_ / 10 * 9;
-            int64_t allocated, committed;
-            mi_thread_stats(&allocated, &committed);
-            return (static_cast<size_t>(allocated) <= target_memory_size);
-        }
-        else
-        {
-            return false;
-        }
+        // table_ranges_heap_ usage commented out - use default heap
+        // if (table_ranges_heap_ != nullptr)
+        // {
+        //     size_t target_memory_size = range_slice_memory_limit_ / 10 * 9;
+        //     int64_t allocated, committed;
+        //     mi_thread_stats(&allocated, &committed);
+        //     return (static_cast<size_t>(allocated) <= target_memory_size);
+        // }
+        // else
+        // {
+        //     return false;
+        // }
+        return true;
 #endif
     }
 
@@ -576,29 +583,31 @@ public:
                   << (bool) (static_cast<size_t>(allocated) >=
                              range_slice_memory_limit_);
 #else
-        std::unique_lock<std::mutex> heap_lk(table_ranges_heap_mux_);
-        bool is_override_thd = mi_is_override_thread();
-        mi_threadid_t prev_thd =
-            mi_override_thread(GetTableRangesHeapThreadId());
-        mi_heap_t *prev_heap = mi_heap_set_default(GetTableRangesHeap());
-
-        int64_t allocated, committed;
-        mi_thread_stats(&allocated, &committed);
-        LOG(INFO) << "Table range memory report: allocated " << allocated
-                  << ", committed " << committed << ", full: "
-                  << (bool) (static_cast<size_t>(allocated) >=
-                             range_slice_memory_limit_);
-
-        mi_heap_set_default(prev_heap);
-        if (is_override_thd)
-        {
-            mi_override_thread(prev_thd);
-        }
-        else
-        {
-            mi_restore_default_thread_id();
-        }
-        heap_lk.unlock();
+        // table_ranges_heap_ usage commented out - use default heap
+        // std::unique_lock<std::mutex> heap_lk(table_ranges_heap_mux_);
+        // bool is_override_thd = mi_is_override_thread();
+        // mi_threadid_t prev_thd =
+        //     mi_override_thread(GetTableRangesHeapThreadId());
+        // mi_heap_t *prev_heap = mi_heap_set_default(GetTableRangesHeap());
+        //
+        // int64_t allocated, committed;
+        // mi_thread_stats(&allocated, &committed);
+        // LOG(INFO) << "Table range memory report: allocated " << allocated
+        //           << ", committed " << committed << ", full: "
+        //           << (bool) (static_cast<size_t>(allocated) >=
+        //                      range_slice_memory_limit_);
+        //
+        // mi_heap_set_default(prev_heap);
+        // if (is_override_thd)
+        // {
+        //     mi_override_thread(prev_thd);
+        // }
+        // else
+        // {
+        //     mi_restore_default_thread_id();
+        // }
+        // heap_lk.unlock();
+        LOG(INFO) << "Table range memory report: table_ranges_heap_ disabled";
 #endif
     }
 
@@ -877,20 +886,21 @@ public:
         }
         {
             std::unique_lock<std::mutex> heap_lk(table_ranges_heap_mux_);
-            bool is_override_thd = mi_is_override_thread();
-            mi_threadid_t prev_thd =
-                mi_override_thread(GetTableRangesHeapThreadId());
-            mi_heap_t *prev_heap = mi_heap_set_default(GetTableRangesHeap());
+            // bool is_override_thd = mi_is_override_thread();
+            // mi_threadid_t prev_thd =
+            //     mi_override_thread(GetTableRangesHeapThreadId());
+            // table_ranges_heap_ usage commented out
+            // mi_heap_t *prev_heap = mi_heap_set_default(GetTableRangesHeap());
             bool range_slice_mem_full = TableRangesMemoryFull();
-            mi_heap_set_default(prev_heap);
-            if (is_override_thd)
-            {
-                mi_override_thread(prev_thd);
-            }
-            else
-            {
-                mi_restore_default_thread_id();
-            }
+            // mi_heap_set_default(prev_heap);
+            // if (is_override_thd)
+            // {
+            //     mi_override_thread(prev_thd);
+            // }
+            // else
+            // {
+            //     mi_restore_default_thread_id();
+            // }
             heap_lk.unlock();
             if (range_slice_mem_full)
             {
@@ -939,9 +949,10 @@ public:
             GetRangeOwnerInternal(partition_id, ng_id)->BucketOwner();
 
         std::unique_lock<std::mutex> heap_lk(table_ranges_heap_mux_);
-        bool is_override_thd = mi_is_override_thread();
-        mi_threadid_t prev_thd = mi_override_thread(table_ranges_thread_id_);
-        mi_heap_t *prev_heap = mi_heap_set_default(table_ranges_heap_);
+        // bool is_override_thd = mi_is_override_thread();
+        // mi_threadid_t prev_thd = mi_override_thread(table_ranges_thread_id_);
+        // table_ranges_heap_ usage commented out
+        // mi_heap_t *prev_heap = mi_heap_set_default(table_ranges_heap_);
 
 #if defined(WITH_JEMALLOC)
         uint32_t prev_arena_id;
@@ -1004,7 +1015,8 @@ public:
                                                has_dml_since_ddl);
             }
 
-            mi_heap_set_default(prev_heap);
+            // mi_heap_set_default(prev_heap);
+            /*
             if (is_override_thd)
             {
                 mi_override_thread(prev_thd);
@@ -1013,6 +1025,7 @@ public:
             {
                 mi_restore_default_thread_id();
             }
+            */
 
 #if defined(WITH_JEMALLOC)
             JemallocArenaSwitcher::SwitchToArena(prev_arena_id);
@@ -1052,7 +1065,9 @@ public:
             range_entry->UpdateRangeEntry(version, std::move(range_slices));
         }
 
-        mi_heap_set_default(prev_heap);
+        // table_ranges_heap_ usage commented out
+        // mi_heap_set_default(prev_heap);
+        /*
         if (is_override_thd)
         {
             mi_override_thread(prev_thd);
@@ -1061,6 +1076,7 @@ public:
         {
             mi_restore_default_thread_id();
         }
+        */
 
 #if defined(WITH_JEMALLOC)
         JemallocArenaSwitcher::SwitchToArena(prev_arena_id);

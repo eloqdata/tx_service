@@ -869,11 +869,11 @@ void FetchTableRangesCallback(void *data,
         txservice::LocalCcShards *shards =
             txservice::Sharder::Instance().GetLocalCcShards();
         std::unique_lock<std::mutex> heap_lk(shards->table_ranges_heap_mux_);
-        bool is_override_thd = mi_is_override_thread();
-        mi_threadid_t prev_thd =
-            mi_override_thread(shards->GetTableRangesHeapThreadId());
-        mi_heap_t *prev_heap =
-            mi_heap_set_default(shards->GetTableRangesHeap());
+        // bool is_override_thd = mi_is_override_thread();
+        // mi_threadid_t prev_thd =
+        //     mi_override_thread(shards->GetTableRangesHeapThreadId());
+        // mi_heap_t *prev_heap =
+        //     mi_heap_set_default(shards->GetTableRangesHeap());
 
 #if defined(WITH_JEMALLOC)
         uint32_t prev_arena;
@@ -933,15 +933,15 @@ void FetchTableRangesCallback(void *data,
             }
         }
 
-        mi_heap_set_default(prev_heap);
-        if (is_override_thd)
-        {
-            mi_override_thread(prev_thd);
-        }
-        else
-        {
-            mi_restore_default_thread_id();
-        }
+        // mi_heap_set_default(prev_heap);
+        // if (is_override_thd)
+        // {
+        //     mi_override_thread(prev_thd);
+        // }
+        // else
+        // {
+        //     mi_restore_default_thread_id();
+        // }
 
 #if defined(WITH_JEMALLOC)
         txservice::JemallocArenaSwitcher::SwitchToArena(prev_arena);
@@ -1179,11 +1179,11 @@ void FetchRangeSlicesCallback(void *data,
                 txservice::Sharder::Instance().GetLocalCcShards();
             std::unique_lock<std::mutex> heap_lk(
                 shards->table_ranges_heap_mux_);
-            bool is_override_thd = mi_is_override_thread();
-            mi_threadid_t prev_thd =
-                mi_override_thread(shards->GetTableRangesHeapThreadId());
-            mi_heap_t *prev_heap =
-                mi_heap_set_default(shards->GetTableRangesHeap());
+            // bool is_override_thd = mi_is_override_thread();
+            // mi_threadid_t prev_thd =
+            //     mi_override_thread(shards->GetTableRangesHeapThreadId());
+            // mi_heap_t *prev_heap =
+            //     mi_heap_set_default(shards->GetTableRangesHeap());
 
 #if defined(WITH_JEMALLOC)
             uint32_t prev_arena;
@@ -1219,15 +1219,15 @@ void FetchRangeSlicesCallback(void *data,
                 offset += (sizeof(uint32_t) + key_len + sizeof(uint32_t));
             }
 
-            mi_heap_set_default(prev_heap);
-            if (is_override_thd)
-            {
-                mi_override_thread(prev_thd);
-            }
-            else
-            {
-                mi_restore_default_thread_id();
-            }
+            // mi_heap_set_default(prev_heap);
+            // if (is_override_thd)
+            // {
+            //     mi_override_thread(prev_thd);
+            // }
+            // else
+            // {
+            //     mi_restore_default_thread_id();
+            // }
 #if defined(WITH_JEMALLOC)
             txservice::JemallocArenaSwitcher::SwitchToArena(prev_arena);
 #endif

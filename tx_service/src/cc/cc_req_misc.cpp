@@ -408,11 +408,11 @@ void FetchRangeSlicesReq::SetFinish(CcErrorCode err)
         assert(range_entry_->RangeSlices() == nullptr);
 
         std::unique_lock<std::mutex> heap_lk(shards->table_ranges_heap_mux_);
-        bool is_override_thd = mi_is_override_thread();
-        mi_threadid_t prev_thd =
-            mi_override_thread(shards->GetTableRangesHeapThreadId());
-        mi_heap_t *prev_heap =
-            mi_heap_set_default(shards->GetTableRangesHeap());
+        // bool is_override_thd = mi_is_override_thread();
+        // mi_threadid_t prev_thd =
+        //     mi_override_thread(shards->GetTableRangesHeapThreadId());
+        // mi_heap_t *prev_heap =
+        //     mi_heap_set_default(shards->GetTableRangesHeap());
 
 #if defined(WITH_JEMALLOC)
         uint32_t prev_arena;
@@ -429,15 +429,15 @@ void FetchRangeSlicesReq::SetFinish(CcErrorCode err)
                                       estimate_rec_size);
         bool range_slice_mem_full = shards->TableRangesMemoryFull();
 
-        mi_heap_set_default(prev_heap);
-        if (is_override_thd)
-        {
-            mi_override_thread(prev_thd);
-        }
-        else
-        {
-            mi_restore_default_thread_id();
-        }
+        // mi_heap_set_default(prev_heap);
+        // if (is_override_thd)
+        // {
+        //     mi_override_thread(prev_thd);
+        // }
+        // else
+        // {
+        //     mi_restore_default_thread_id();
+        // }
 
 #if defined(WITH_JEMALLOC)
         JemallocArenaSwitcher::SwitchToArena(prev_arena);
