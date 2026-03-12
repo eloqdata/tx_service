@@ -2440,8 +2440,13 @@ bool RocksDBCloudHandlerImpl::CreateSnapshot(
 }
 
 bool RocksDBCloudHandlerImpl::CreateSnapshotForStandby(
-    std::vector<std::string> &snapshot_files)
+    std::vector<std::string> &snapshot_files,
+    uint64_t *snapshot_ts)
 {
+    if (snapshot_ts != nullptr)
+    {
+        *snapshot_ts = 0;
+    }
     return CreateSnapshot(ckpt_path_, snapshot_files);
 }
 
@@ -2463,8 +2468,14 @@ bool RocksDBCloudHandlerImpl::SendSnapshotToRemote(
     uint32_t ng_id,
     int64_t ng_term,
     std::vector<std::string> &snapshot_files,
-    const std::string &remote_dest)
+    const std::string &remote_dest,
+    uint32_t standby_node_id)
 {
+    (void) ng_id;
+    (void) ng_term;
+    (void) snapshot_files;
+    (void) remote_dest;
+    (void) standby_node_id;
     return true;
 }
 
@@ -3762,8 +3773,13 @@ bool RocksDBHandlerImpl::CreateSnapshot(
 }
 
 bool RocksDBHandlerImpl::CreateSnapshotForStandby(
-    std::vector<std::string> &snapshot_files)
+    std::vector<std::string> &snapshot_files,
+    uint64_t *snapshot_ts)
 {
+    if (snapshot_ts != nullptr)
+    {
+        *snapshot_ts = 0;
+    }
     return CreateSnapshot(ckpt_path_, snapshot_files);
 }
 bool RocksDBHandlerImpl::CreateSnapshotForBackup(
@@ -3797,8 +3813,10 @@ bool RocksDBHandlerImpl::SendSnapshotToRemote(
     uint32_t ng_id,
     int64_t ng_term,
     std::vector<std::string> &snapshot_files,
-    const std::string &remote_dest)
+    const std::string &remote_dest,
+    uint32_t standby_node_id)
 {
+    (void) standby_node_id;
     using namespace txservice;
 
     if (snapshot_files.empty())

@@ -943,6 +943,17 @@ void CcNode::SubscribePrimaryNode(uint32_t leader_node_id,
             &cntl, &start_follow_req, &start_follow_resp, nullptr);
     }
 
+#ifdef DATA_STORE_TYPE_ELOQDSS_ELOQSTORE
+    if (!txservice_skip_kv && store_hd != nullptr)
+    {
+        store_hd->SetStandbySnapshotPayload(
+            ng_id_, start_follow_resp.snapshot_path());
+        DLOG(INFO) << "SubscribePrimaryNode set standby snapshot payload, ng_id="
+                   << ng_id_ << ", leader_node_id=" << leader_node_id
+                   << ", payload=" << start_follow_resp.snapshot_path();
+    }
+#endif
+
     expected = false;
     while (!is_processing_.compare_exchange_strong(
         expected, true, std::memory_order_acq_rel))
@@ -1139,8 +1150,16 @@ void CcNode::SubscribePrimaryNode(uint32_t leader_node_id,
 
         // Checkpointer will retry if snapshot sync failed. Do not retry here
         // too frequently since it might overwhelm the primary node.
-        snapshot_req.set_dest_path(store_hd->SnapshotSyncDestPath());
+        const std::string dest_path = store_hd->SnapshotSyncDestPath();
+        snapshot_req.set_dest_path(dest_path);
         snapshot_req.set_user(username);
+        DLOG(INFO) << "CcNode::SubscribePrimaryNode send "
+                      "RequestStorageSnapshotSync, ng_id="
+                   << snapshot_req.ng_id()
+                   << ", standby_node_id=" << snapshot_req.standby_node_id()
+                   << ", standby_node_term="
+                   << snapshot_req.standby_node_term()
+                   << ", dest_path=" << dest_path;
         cntl.Reset();
         cntl.set_timeout_ms(10000);
         stub->RequestStorageSnapshotSync(

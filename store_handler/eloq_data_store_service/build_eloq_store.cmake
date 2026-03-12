@@ -102,6 +102,7 @@ set(ELOQ_STORE_SOURCES
     ${ELOQ_STORE_SOURCE_DIR}/src/file_gc.cpp
     ${ELOQ_STORE_SOURCE_DIR}/src/kill_point.cpp
     ${ELOQ_STORE_SOURCE_DIR}/src/replayer.cpp
+    ${ELOQ_STORE_SOURCE_DIR}/src/standby_service.cpp
     ${ELOQ_STORE_SOURCE_DIR}/src/storage/cloud_backend.cpp
     ${ELOQ_STORE_SOURCE_DIR}/src/storage/data_page.cpp
     ${ELOQ_STORE_SOURCE_DIR}/src/storage/data_page_builder.cpp
@@ -143,7 +144,7 @@ if(WITH_TXSERVICE)
     # Add include directory for metrics headers
     # From build_eloq_store.cmake location, eloq_metrics is at ../../eloq_metrics
     # CMAKE_CURRENT_LIST_DIR is the directory of this file
-    target_include_directories(eloqstore PRIVATE 
+    target_include_directories(eloqstore PRIVATE
         ${CMAKE_CURRENT_LIST_DIR}/../../eloq_metrics/include)
     # ELOQSTORE_WITH_TXSERVICE is already defined via add_compile_definitions in parent CMakeLists.txt
     # but we ensure it's also set for this target explicitly

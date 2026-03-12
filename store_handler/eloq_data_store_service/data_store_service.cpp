@@ -28,6 +28,7 @@
 #include <chrono>
 #include <filesystem>
 #include <fstream>
+#include <limits>
 #include <map>
 #include <memory>
 #include <random>
@@ -39,6 +40,9 @@
 #include <vector>
 
 #include "data_store_fault_inject.h"  // ACTION_FAULT_INJECTOR
+#include "eloq_store_data_store.h"
+#include "eloq_store_data_store_factory.h"
+#include "eloqstore/include/common.h"
 #include "internal_request.h"
 #include "object_pool.h"
 #if defined(DATA_STORE_TYPE_ELOQDSS_ROCKSDB_CLOUD_S3)
@@ -2205,6 +2209,12 @@ void DataStoreService::OpenDataStore(uint32_t shard_id,
                                      std::unordered_set<uint16_t> &&bucket_ids,
                                      int64_t term)
 {
+    auto &ds_ref = data_shards_.at(shard_id);
+    const size_t bucket_count = bucket_ids.size();
+    DLOG(INFO) << "OpenDataStore begin for DSS shard " << shard_id
+               << ", term " << term << ", bucket_count " << bucket_count
+               << ", shard_status "
+               << static_cast<int>(ds_ref.shard_status_.load());
     if (data_store_factory_ != nullptr)
     {
         data_store_factory_->InitializePartitionFilter(shard_id,
@@ -2212,7 +2222,6 @@ void DataStoreService::OpenDataStore(uint32_t shard_id,
     }
 
     auto start_time = std::chrono::steady_clock::now();
-    auto &ds_ref = data_shards_.at(shard_id);
     if (ds_ref.shard_status_.load() != DSShardStatus::Closed)
     {
         LOG(INFO) << "OpenDataStore no-op for DSS shard status is not closed, "
@@ -2241,6 +2250,7 @@ void DataStoreService::OpenDataStore(uint32_t shard_id,
         LOG(ERROR) << "OpenDataStore failed for DSS shard " << shard_id
                    << ", shard_id_: " << ds_ref.shard_id_ << ", shard_status_: "
                    << static_cast<int>(ds_ref.shard_status_.load())
+                   << ", term " << term << ", bucket_count " << bucket_count
                    << ", use time: " << use_time << " ms";
     }
     else
@@ -2248,6 +2258,7 @@ void DataStoreService::OpenDataStore(uint32_t shard_id,
         LOG(INFO) << "OpenDataStore success for DSS shard " << shard_id
                   << ", shard_id_: " << ds_ref.shard_id_ << ", shard_status_: "
                   << static_cast<int>(ds_ref.shard_status_.load())
+                  << ", term " << term << ", bucket_count " << bucket_count
                   << ", use time: " << use_time << " ms";
     }
 }
@@ -2255,72 +2266,313 @@ void DataStoreService::OpenDataStore(uint32_t shard_id,
 void DataStoreService::OnSnapshotReceived(
     uint32_t shard_id,
     int64_t term,
-    std::unordered_set<uint16_t> &&bucket_ids,
-    const std::string &snapshot_path)
+    std::unordered_set<uint16_t> &&bucket_ids)
+{
+    (void) shard_id;
+    (void) term;
+    (void) bucket_ids;
+}
+
+void DataStoreService::SetStandbySnapshotPayload(
+    uint32_t shard_id, const std::string &snapshot_path)
 {
 #ifdef DATA_STORE_TYPE_ELOQDSS_ELOQSTORE
     auto &ds_ref = data_shards_.at(shard_id);
+    DLOG(INFO) << "SetStandbySnapshotPayload " << snapshot_path;
 
-    if (!data_store_factory_->IsCloudMode())
+    std::string standby_addr;
+    std::string store_path_list = snapshot_path;
+    const size_t addr_delim_pos = snapshot_path.find(':');
+    if (addr_delim_pos != std::string::npos)
     {
-        // TODO(lzx): Handle the case of local data store mode. (replace the
-        // data with the snapshot)
-        LOG(FATAL)
-            << "OnSnapshotReceived not implemented for local data store mode";
-    }
-    else
-    {
-        if (ds_ref.shard_status_.load(std::memory_order_acquire) ==
-            DSShardStatus::Closed)
+        const std::string addr_candidate =
+            snapshot_path.substr(0, addr_delim_pos);
+        if (addr_candidate.empty() || addr_candidate == "local" ||
+            (addr_candidate.find('/') == std::string::npos &&
+             addr_candidate.find('@') != std::string::npos))
         {
-            // If the shard is closed, open it and load data from cloud.
-            LOG(INFO) << "OnSnapshotReceived, open data store for DSS shard "
-                      << shard_id << " and term " << term;
-            OpenDataStore(shard_id, std::move(bucket_ids), term);
-        }
-        else
-        {
-            while (ds_ref.shard_status_.load(std::memory_order_acquire) ==
-                   DSShardStatus::Starting)
-            {
-                bthread_usleep(1000);
-                LOG(INFO) << "OnSnapshotReceived, data store is starting, "
-                             "waiting for data store to be ready";
-            }
-
-            LOG(INFO)
-                << "OnSnapshotReceived, reload data from cloud for DSS shard "
-                << shard_id << " and term " << term;
-            ds_ref.data_store_->ReloadDataFromCloud(term);
-            return;
+            standby_addr = addr_candidate;
+            store_path_list = snapshot_path.substr(addr_delim_pos + 1);
         }
     }
+
+    std::vector<std::string> standby_master_store_paths;
+    std::vector<uint64_t> standby_master_store_path_weights;
+    std::string error_message;
+    if (!::eloqstore::ParseStorePathListWithWeights(
+            store_path_list,
+            standby_master_store_paths,
+            standby_master_store_path_weights,
+            &error_message))
+    {
+        LOG(ERROR) << "SetStandbySnapshotPayload invalid payload, shard "
+                   << shard_id << ", payload=" << snapshot_path
+                   << ", error=" << error_message;
+        return;
+    }
+
+    auto *eloq_store_factory =
+        static_cast<EloqStoreDataStoreFactory *>(data_store_factory_.get());
+    if (!standby_addr.empty())
+    {
+        eloq_store_factory->UpdateStandbyMasterAddr(standby_addr);
+    }
+    eloq_store_factory->UpdateStandbyMasterStorePaths(
+        standby_master_store_paths, standby_master_store_path_weights);
+    if (ds_ref.data_store_ != nullptr)
+    {
+        if (!standby_addr.empty())
+        {
+            ds_ref.data_store_->UpdateStandbyMasterAddr(standby_addr);
+        }
+        ds_ref.data_store_->UpdateStandbyMasterStorePaths(
+            standby_master_store_paths, standby_master_store_path_weights);
+    }
+
+    DLOG(INFO) << "SetStandbySnapshotPayload assigned, shard " << shard_id
+               << ", payload=" << snapshot_path
+               << ", standby_addr=" << standby_addr
+               << ", path_count=" << standby_master_store_paths.size();
 #else
-    LOG(INFO) << "OnSnapshotReceived no-op for non-eloqstore data store";
+    (void) shard_id;
+    (void) snapshot_path;
 #endif
 }
 
-void DataStoreService::OnUpdateStandbyCkptTs(uint32_t shard_id, int64_t term)
+void DataStoreService::ClearStandbySnapshotPayloadForEloqStore(uint32_t shard_id)
 {
 #ifdef DATA_STORE_TYPE_ELOQDSS_ELOQSTORE
     auto &ds_ref = data_shards_.at(shard_id);
+    auto *eloq_store_factory =
+        static_cast<EloqStoreDataStoreFactory *>(data_store_factory_.get());
+    eloq_store_factory->UpdateStandbyMasterAddr("");
+    eloq_store_factory->UpdateStandbyMasterStorePaths({}, {});
+    if (ds_ref.data_store_ != nullptr)
+    {
+        ds_ref.data_store_->UpdateStandbyMasterAddr("");
+        ds_ref.data_store_->UpdateStandbyMasterStorePaths({}, {});
+    }
+    DLOG(INFO) << "ClearStandbySnapshotPayloadForEloqStore, shard=" << shard_id;
+#else
+    (void) shard_id;
+#endif
+}
+
+void DataStoreService::SetEnableLocalStandbyForEloqStore(bool enable)
+{
+#ifdef DATA_STORE_TYPE_ELOQDSS_ELOQSTORE
+    auto *eloq_store_factory =
+        static_cast<EloqStoreDataStoreFactory *>(data_store_factory_.get());
+    eloq_store_factory->SetEnableLocalStandby(enable);
+    DLOG(INFO) << "SetEnableLocalStandbyForEloqStore, enable=" << enable;
+#else
+    (void) enable;
+#endif
+}
+
+bool DataStoreService::ReloadData(uint32_t shard_id,
+                                  int64_t term,
+                                  uint64_t snapshot_ts)
+{
+#ifdef DATA_STORE_TYPE_ELOQDSS_ELOQSTORE
+    auto &ds_ref = data_shards_.at(shard_id);
+    const uint64_t latest_snapshot_ts =
+        ds_ref.latest_snapshot_ts_.load(std::memory_order_acquire);
+    if (snapshot_ts < latest_snapshot_ts)
+    {
+        LOG(INFO) << "ReloadData discard stale snapshot for DSS shard "
+                  << shard_id << ", term " << term << ", snapshot_ts "
+                  << snapshot_ts << ", latest_snapshot_ts "
+                  << latest_snapshot_ts;
+        return false;
+    }
+
+    bool ok = false;
     if (ds_ref.data_store_ != nullptr &&
         ds_ref.shard_status_.load() != DSShardStatus::Closed)
     {
-        LOG(INFO)
-            << "StandbySyncAndReloadData reload data from cloud for DSS shard "
-            << shard_id;
-        ds_ref.data_store_->ReloadDataFromCloud(term);
+        LOG(INFO) << "ReloadData for DSS shard " << shard_id << ", term "
+                  << term << ", snapshot_ts " << snapshot_ts;
+        ok = ds_ref.data_store_->ReloadData(term, snapshot_ts);
+        if (ok)
+        {
+            ds_ref.latest_snapshot_ts_.store(
+                snapshot_ts, std::memory_order_release);
+        }
     }
     else
     {
-        LOG(ERROR) << "StandbySyncAndReloadData no-op for DSS shard status is "
+        LOG(ERROR) << "ReloadData no-op for DSS shard status is "
                       "closed or data store is nullptr, "
                    << shard_id;
     }
-
+    DLOG(INFO) << "ReloadData finished, shard " << shard_id << ", term " << term
+               << ", snapshot_ts " << snapshot_ts << ", ok=" << ok;
+    return ok;
 #else
-    LOG(INFO) << "OnUpdateStandbyCkptTs no-op for non-eloqstore data store";
+    LOG(INFO) << "ReloadData no-op for non-eloqstore data store";
+    (void) shard_id;
+    (void) term;
+    (void) snapshot_ts;
+    return false;
+#endif
+}
+
+bool DataStoreService::CreateSnapshotForStandby(uint32_t shard_id,
+                                                uint32_t ng_id,
+                                                uint64_t snapshot_ts)
+{
+#ifdef DATA_STORE_TYPE_ELOQDSS_ELOQSTORE
+    auto &ds_ref = data_shards_.at(shard_id);
+    if (ds_ref.data_store_ == nullptr ||
+        ds_ref.shard_status_.load(std::memory_order_acquire) ==
+            DSShardStatus::Closed)
+    {
+        LOG(ERROR)
+            << "CreateSnapshotForStandby no-op for DSS shard status is closed "
+               "or data store is nullptr, "
+            << shard_id;
+        return false;
+    }
+    auto *eloq_store =
+        static_cast<EloqStoreDataStore *>(ds_ref.data_store_.get());
+    const std::string tag =
+        std::string(DataStoreService::kStandbySnapshotTagPrefix) +
+        std::to_string(snapshot_ts);
+    const bool ok = eloq_store->CreateSnapshotForStandby(ng_id, tag);
+    DLOG(INFO) << "CreateSnapshotForStandby finished, shard " << shard_id
+               << ", ng_id " << ng_id << ", snapshot_ts " << snapshot_ts
+               << ", tag " << tag << ", ok=" << ok;
+    return ok;
+#else
+    (void) shard_id;
+    (void) ng_id;
+    (void) snapshot_ts;
+    return false;
+#endif
+}
+
+bool DataStoreService::DeleteStandbySnapshot(uint32_t shard_id,
+                                             uint64_t snapshot_ts)
+{
+#ifdef DATA_STORE_TYPE_ELOQDSS_ELOQSTORE
+    auto &ds_ref = data_shards_.at(shard_id);
+    if (ds_ref.data_store_ == nullptr)
+    {
+        LOG(WARNING) << "DeleteStandbySnapshot skipped: data store is nullptr, "
+                     << "shard " << shard_id << ", snapshot_ts " << snapshot_ts;
+        return false;
+    }
+    const std::string tag = "snapshot_" + std::to_string(snapshot_ts);
+    ds_ref.data_store_->DeleteStandbySnapshot(
+        std::numeric_limits<uint64_t>::max(), tag);
+    DLOG(INFO) << "DeleteStandbySnapshot submitted, shard " << shard_id
+               << ", tag " << tag;
+    return true;
+#else
+    (void) shard_id;
+    (void) snapshot_ts;
+    return false;
+#endif
+}
+
+void DataStoreService::DeleteStandbySnapshotsBefore(uint32_t shard_id,
+                                                    uint64_t snapshot_ts)
+{
+#ifdef DATA_STORE_TYPE_ELOQDSS_ELOQSTORE
+    auto &ds_ref = data_shards_.at(shard_id);
+    const uint64_t latest_delete_archive_ts =
+        ds_ref.latest_delete_archive_ts_.load(std::memory_order_acquire);
+    if (snapshot_ts <= latest_delete_archive_ts)
+    {
+        DLOG(INFO) << "DeleteStandbySnapshotsBefore skipped by threshold, "
+                   << "shard " << shard_id
+                   << ", snapshot_ts " << snapshot_ts
+                   << ", latest_delete_archive_ts "
+                   << latest_delete_archive_ts;
+        return;
+    }
+    if (ds_ref.data_store_ == nullptr)
+    {
+        LOG(WARNING)
+            << "DeleteStandbySnapshotsBefore skipped: data store is nullptr, "
+            << "shard " << shard_id << ", snapshot_ts " << snapshot_ts;
+        return;
+    }
+    std::vector<EloqStoreDataStore::ArchiveEntry> entries;
+    auto *eloq_store =
+        static_cast<EloqStoreDataStore *>(ds_ref.data_store_.get());
+    if (!eloq_store->ListArchiveTags("snapshot_", &entries))
+    {
+        LOG(WARNING) << "DeleteStandbySnapshotsBefore failed to list entries, "
+                     << "shard " << shard_id;
+        return;
+    }
+    for (const auto &entry : entries)
+    {
+        const std::string &tag = entry.tag;
+        if (tag.rfind("snapshot_", 0) != 0)
+        {
+            continue;
+        }
+        const std::string ts_str = tag.substr(std::size("snapshot_") - 1);
+        uint64_t tag_ts = 0;
+        if (!eloqstore::ParseUint64(ts_str, tag_ts))
+        {
+            continue;
+        }
+        if (tag_ts < snapshot_ts)
+        {
+            ds_ref.data_store_->DeleteStandbySnapshot(entry.term, tag);
+            DLOG(INFO) << "DeleteStandbySnapshotsBefore removed entry, shard "
+                       << shard_id << ", term " << entry.term << ", tag " << tag
+                       << ", threshold_snapshot_ts " << snapshot_ts;
+        }
+    }
+    UpdateLatestDeleteArchiveTs(shard_id, snapshot_ts);
+#else
+    (void) shard_id;
+    (void) snapshot_ts;
+#endif
+}
+
+uint64_t DataStoreService::CurrentStandbySnapshotTs(uint32_t shard_id)
+{
+#ifdef DATA_STORE_TYPE_ELOQDSS_ELOQSTORE
+    auto &ds_ref = data_shards_.at(shard_id);
+    return ds_ref.latest_snapshot_ts_.load(std::memory_order_acquire);
+#else
+    (void) shard_id;
+    return 0;
+#endif
+}
+
+uint64_t DataStoreService::LatestDeleteArchiveTs(uint32_t shard_id)
+{
+#ifdef DATA_STORE_TYPE_ELOQDSS_ELOQSTORE
+    auto &ds_ref = data_shards_.at(shard_id);
+    return ds_ref.latest_delete_archive_ts_.load(std::memory_order_acquire);
+#else
+    (void) shard_id;
+    return 0;
+#endif
+}
+
+void DataStoreService::UpdateLatestDeleteArchiveTs(uint32_t shard_id,
+                                                   uint64_t ts)
+{
+#ifdef DATA_STORE_TYPE_ELOQDSS_ELOQSTORE
+    auto &ds_ref = data_shards_.at(shard_id);
+    uint64_t cur = ds_ref.latest_delete_archive_ts_.load(
+        std::memory_order_acquire);
+    while (ts > cur &&
+           !ds_ref.latest_delete_archive_ts_.compare_exchange_weak(
+               cur, ts, std::memory_order_release, std::memory_order_acquire))
+    {
+    }
+#else
+    (void) shard_id;
+    (void) ts;
 #endif
 }
 
@@ -2746,7 +2998,7 @@ bool DataStoreService::SwitchReadOnlyToClosed(uint32_t shard_id)
     auto &ds_ref = data_shards_.at(shard_id);
     DSShardStatus expected = DSShardStatus::ReadOnly;
     if (!ds_ref.shard_status_.compare_exchange_strong(expected,
-                                                      DSShardStatus::Closed) &&
+                                                      DSShardStatus::Starting) &&
         expected != DSShardStatus::Closed)
     {
         DLOG(ERROR) << "SwitchReadOnlyToClosed failed, shard status is not "
@@ -2756,8 +3008,14 @@ bool DataStoreService::SwitchReadOnlyToClosed(uint32_t shard_id)
 
     if (expected == DSShardStatus::ReadOnly)
     {
-        cluster_manager_.SwitchShardToClosed(shard_id, expected);
+        DLOG(INFO) << "SwitchReadOnlyToClosed enter shutdown, shard "
+                   << shard_id;
         ds_ref.data_store_->Shutdown();
+        DSShardStatus expected_after_shutdown = DSShardStatus::Starting;
+        const bool switched = ds_ref.shard_status_.compare_exchange_strong(
+            expected_after_shutdown, DSShardStatus::Closed);
+        CHECK(switched);
+        cluster_manager_.SwitchShardToClosed(shard_id, DSShardStatus::ReadOnly);
     }
     return true;
 }

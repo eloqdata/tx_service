@@ -24,7 +24,9 @@
 #include <brpc/controller.h>
 #include <bthread/condition_variable.h>
 #include <bthread/mutex.h>
+#include <gflags/gflags.h>
 
+#include <cstdlib>
 #include <memory>
 #include <mutex>
 #include <utility>
@@ -55,6 +57,51 @@ namespace remote
 CcNodeService::CcNodeService(LocalCcShards &local_shards)
     : local_shards_(local_shards)
 {
+    standby_task_worker_ = std::thread([this]() { StandbyTaskWorkerMain(); });
+}
+
+CcNodeService::~CcNodeService()
+{
+    {
+        std::lock_guard<std::mutex> lk(standby_task_mu_);
+        standby_task_running_ = false;
+    }
+    standby_task_cv_.notify_all();
+    if (standby_task_worker_.joinable())
+    {
+        standby_task_worker_.join();
+    }
+}
+
+void CcNodeService::EnqueueStandbyTask(std::function<void()> task)
+{
+    {
+        std::lock_guard<std::mutex> lk(standby_task_mu_);
+        standby_tasks_.push_back(std::move(task));
+    }
+    standby_task_cv_.notify_one();
+}
+
+void CcNodeService::StandbyTaskWorkerMain()
+{
+    while (true)
+    {
+        std::function<void()> task;
+        {
+            std::unique_lock<std::mutex> lk(standby_task_mu_);
+            while (standby_task_running_ && standby_tasks_.empty())
+            {
+                standby_task_cv_.wait_for(lk, std::chrono::milliseconds(100));
+            }
+            if (!standby_task_running_)
+            {
+                break;
+            }
+            task = std::move(standby_tasks_.front());
+            standby_tasks_.pop_front();
+        }
+        task();
+    }
 }
 
 void CcNodeService::OnLeaderStart(::google::protobuf::RpcController *controller,
@@ -1659,6 +1706,33 @@ void CcNodeService::StandbyStartFollowing(
     auto subscribe_id = Sharder::Instance().GetNextSubscribeId();
 
     response->set_subscribe_id(subscribe_id);
+#ifdef DATA_STORE_TYPE_ELOQDSS_ELOQSTORE
+    auto *store_hd = local_shards_.store_hd_;
+    if (store_hd != nullptr)
+    {
+        std::string leader_ip;
+        uint16_t leader_port = 0;
+        Sharder::Instance().GetNodeAddress(
+            Sharder::Instance().NodeId(), leader_ip, leader_port);
+        (void) leader_port;
+        const char *user = std::getenv("USER");
+        std::string snapshot_path;
+        if (user != nullptr && user[0] != '\0')
+        {
+            snapshot_path = std::string(user) + "@" + leader_ip + ":" +
+                            store_hd->SnapshotSyncDestPath();
+        }
+        else
+        {
+            snapshot_path = leader_ip + ":" + store_hd->SnapshotSyncDestPath();
+        }
+        response->set_snapshot_path(snapshot_path);
+        DLOG(INFO) << "StandbyStartFollowing set snapshot_path, ng_id="
+                   << request->node_group_id()
+                   << ", node_id=" << request->node_id()
+                   << ", snapshot_path=" << snapshot_path;
+    }
+#endif
     response->set_error(false);
 }
 
@@ -1670,6 +1744,46 @@ void CcNodeService::UpdateStandbyCkptTs(
 {
     brpc::ClosureGuard done_guard(done);
 
+#ifdef DATA_STORE_TYPE_ELOQDSS_ELOQSTORE
+    DLOG(INFO) << "Receive UpdateStandbyCkptTs req, req ckpt ts:"
+               << request->primary_succ_ckpt_ts() << ", has_data_store_write: "
+               << (int) request->has_data_store_write();
+    if (request->primary_succ_ckpt_ts() <=
+        Sharder::Instance().NativeNodeGroupCkptTs())
+    {
+        DLOG(INFO) << "Discard UpdateStandbyCkptTs req, req ckpt ts:"
+                   << request->primary_succ_ckpt_ts()
+                   << ", own:" << Sharder::Instance().NativeNodeGroupCkptTs();
+        response->set_error(false);
+        response->set_current_ckpt_ts(
+            Sharder::Instance().NativeNodeGroupCkptTs());
+        return;
+    }
+    auto store_hd = Sharder::Instance().GetLocalCcShards()->store_hd_;
+    const bool has_data_store_write = request->has_data_store_write();
+
+    if (store_hd && has_data_store_write)
+    {
+        EnqueueStandbyTask(
+            [store_hd,
+             ng_id = request->node_group_id(),
+             ng_term = request->ng_term(),
+             ckpt_ts = request->primary_succ_ckpt_ts()]()
+            {
+                if (store_hd->OnUpdateStandbyCkptTs(ng_id, ng_term, ckpt_ts))
+                {
+                    Sharder::Instance().UpdateNodeGroupCkptTs(ng_id, ckpt_ts);
+                }
+            });
+        DLOG(INFO) << "Enqueued UpdateStandbyCkptTs req, req ckpt ts:"
+                   << request->primary_succ_ckpt_ts();
+    }
+    else
+    {
+        Sharder::Instance().UpdateNodeGroupCkptTs(
+            request->node_group_id(), request->primary_succ_ckpt_ts());
+    }
+#else
     if (Sharder::Instance().GetDataStoreHandler()->IsSharedStorage())
     {
         auto store_hd = Sharder::Instance().GetLocalCcShards()->store_hd_;
@@ -1678,15 +1792,20 @@ void CcNodeService::UpdateStandbyCkptTs(
         if (store_hd && has_data_store_write)
         {
             store_hd->OnUpdateStandbyCkptTs(request->node_group_id(),
-                                            request->ng_term());
+                                            request->ng_term(),
+                                            request->primary_succ_ckpt_ts());
         }
 
         Sharder::Instance().UpdateNodeGroupCkptTs(
             request->node_group_id(), request->primary_succ_ckpt_ts());
     }
+#endif
 
     // response does not matter
     response->set_error(false);
+    response->set_current_ckpt_ts(Sharder::Instance().NativeNodeGroupCkptTs());
+    DLOG(INFO) << "Finished UpdateStandbyCkptTs req, req ckpt ts:"
+               << request->primary_succ_ckpt_ts();
 }
 
 void CcNodeService::UpdateStandbyConsistentTs(
@@ -1750,16 +1869,31 @@ void CcNodeService::RequestStorageSnapshotSync(
     if (!store_hd)
     {
         // kv store not enabled
+        DLOG(INFO) << "RequestStorageSnapshotSync rejected: store handler is "
+                      "nullptr, ng_id="
+                   << request->ng_id()
+                   << ", standby_node_id=" << request->standby_node_id()
+                   << ", standby_term=" << request->standby_node_term();
         response->set_error(true);
         return;
     }
 
     int64_t standby_node_term = request->standby_node_term();
     int64_t primary_leader_term = PrimaryTermFromStandbyTerm(standby_node_term);
+    DLOG(INFO) << "RequestStorageSnapshotSync received, ng_id="
+               << request->ng_id()
+               << ", standby_node_id=" << request->standby_node_id()
+               << ", standby_term=" << standby_node_term
+               << ", primary_term=" << primary_leader_term
+               << ", dest_path=" << request->dest_path();
 
     if (!Sharder::Instance().CheckLeaderTerm(request->ng_id(),
                                              primary_leader_term))
     {
+        DLOG(INFO) << "RequestStorageSnapshotSync rejected by term check, "
+                      "ng_id="
+                   << request->ng_id() << ", standby_term=" << standby_node_term
+                   << ", primary_term=" << primary_leader_term;
         response->set_error(true);
         return;
     }
@@ -1777,6 +1911,10 @@ void CcNodeService::RequestStorageSnapshotSync(
     // has been flushed to kvstore. (standby nodes begin fetch record from
     // kvstore on cache miss).
     store::SnapshotManager::Instance().OnSnapshotSyncRequested(request);
+    DLOG(INFO) << "RequestStorageSnapshotSync enqueued, ng_id="
+               << request->ng_id()
+               << ", standby_node_id=" << request->standby_node_id()
+               << ", standby_term=" << standby_node_term;
     response->set_error(false);
 }
 
@@ -1796,7 +1934,66 @@ void CcNodeService::OnSnapshotSynced(
     }
 
     bool succ = Sharder::Instance().OnSnapshotReceived(request);
+    const uint64_t current_ckpt_ts =
+        store_hd->CurrentStandbySnapshotTs(request->ng_id());
     response->set_error(!succ);
+    response->set_current_ckpt_ts(current_ckpt_ts);
+}
+
+void CcNodeService::RequestSyncSnapshot(
+    ::google::protobuf::RpcController *controller,
+    const ::txservice::remote::RequestSyncSnapshotRequest *request,
+    ::txservice::remote::RequestSyncSnapshotResponse *response,
+    ::google::protobuf::Closure *done)
+{
+    brpc::ClosureGuard done_guard(done);
+    const uint32_t local_node_id = Sharder::Instance().NodeId();
+    DLOG(INFO) << "RequestSyncSnapshot RPC received, ng_id=" << request->ng_id()
+               << ", snapshot_ts=" << request->snapshot_ts()
+               << ", local_node_id=" << local_node_id << ", role=follower";
+    auto store_hd = Sharder::Instance().GetLocalCcShards()->store_hd_;
+    if (!store_hd)
+    {
+        response->set_error(true);
+        return;
+    }
+    const int64_t term =
+        PrimaryTermFromStandbyTerm(request->standby_node_term());
+    EnqueueStandbyTask(
+        [store_hd,
+         ng_id = request->ng_id(),
+         standby_term = request->standby_node_term(),
+         term,
+         snapshot_ts = request->snapshot_ts()]()
+        {
+            const bool ok =
+                store_hd->RequestSyncSnapshot(ng_id, term, snapshot_ts);
+            if (ok)
+            {
+                Sharder::Instance().SetStandbyNodeTerm(standby_term);
+                Sharder::Instance().SetCandidateStandbyNodeTerm(-1);
+                if (!txservice::txservice_skip_kv &&
+                    !txservice::txservice_enable_cache_replacement)
+                {
+                    store_hd->RestoreTxCache(ng_id, standby_term);
+                }
+            }
+            DLOG(INFO) << "RequestSyncSnapshot async RequestSyncSnapshot done, "
+                          "ng_id="
+                       << ng_id << ", standby_term=" << standby_term
+                       << ", snapshot_ts=" << snapshot_ts << ", success=" << ok
+                       << ", role=follower";
+        });
+    const uint64_t current_ckpt_ts =
+        store_hd->CurrentStandbySnapshotTs(request->ng_id());
+    DLOG(INFO) << "RequestSyncSnapshot handled, ng_id=" << request->ng_id()
+               << ", standby_term=" << request->standby_node_term()
+               << ", term=" << term
+               << ", snapshot_ts=" << request->snapshot_ts() << ", success=1"
+               << ", current_ckpt_ts=" << current_ckpt_ts
+               << ", local_node_id=" << local_node_id << ", role=follower";
+    response->set_error(false);
+    response->set_current_ckpt_ts(current_ckpt_ts);
 }
 
 void CcNodeService::FetchNodeInfo(
