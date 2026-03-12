@@ -544,6 +544,13 @@ public:
     {
     }
 
+    ~TemplateTableRangeEntry()
+    {
+        LOG(INFO) << "TemplateTableRangeEntry destructor: addr="
+                  << static_cast<void *>(this)
+                  << " partition_id=" << range_info_.PartitionId();
+    }
+
     void UpdateRangeEntry(uint64_t version_ts,
                           std::unique_ptr<TemplateStoreRange<KeyT>> slices)
     {
@@ -596,9 +603,21 @@ public:
                 estimate_rec_size,
                 has_dml_since_ddl);
 
+        LOG(INFO) << "Start init slice, TemplateTableRangeEntry "
+                     "InitRangeSlices: addr="
+                  << static_cast<void *>(range_slices.get())
+                  << " partition_id=" << range_slices->PartitionId()
+                  << ", start key = "
+                  << range_slices->RangeStartKey()->ToString();
+
         if (!empty_range)
         {
             range_slices->InitSlices(std::move(slices));
+            LOG(INFO) << "TemplateTableRangeEntry InitRangeSlices: addr="
+                      << static_cast<void *>(range_slices.get())
+                      << " partition_id=" << range_slices->PartitionId()
+                      << ", start key = "
+                      << range_slices->RangeStartKey()->ToString();
         }
         range_slices_ = std::move(range_slices);
         LOG(INFO) << "TemplateTableRangeEntry InitRangeSlices: addr="
