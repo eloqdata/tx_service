@@ -3590,6 +3590,19 @@ void CcShard::CreateSplitRangeDataSyncTask(const TableName &table_name,
         table_name, ng_id, ng_term, range_id, data_sync_ts);
 }
 
+void CcShard::ResetRangeSplittingStatus(const TableName &table_name,
+                                        uint32_t ng_id,
+                                        uint32_t range_id)
+{
+    CcMap *ccm = GetCcm(table_name, ng_id);
+    if (ccm == nullptr)
+    {
+        return;
+    }
+
+    ccm->ResetRangeStatus(range_id);
+}
+
 void CcShard::CollectCacheHit()
 {
     assert(metrics::enable_cache_hit_rate);
