@@ -254,7 +254,7 @@ bool DataSubstrate::InitializeTxService(const INIReader &config_reader)
     }
     else
     {
-        LOG(ERROR) << "Invalidate `cache_evict_policy` "
+        LOG(ERROR) << "Invalid `cache_evict_policy` "
                    << cache_evict_policy_str;
         return false;
     }

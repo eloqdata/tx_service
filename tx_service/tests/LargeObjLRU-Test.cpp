@@ -496,6 +496,410 @@ TEST_CASE("Test D: LRU partition invariant", "[large-obj-lru][partition-inv]")
     delete p2;
 }
 
+// ---------------------------------------------------------------------------
+// Helper: verify LO_LRU partition invariant for a shard.
+//
+// Checks:
+//   1. protected_head_page_ is either &tail_ccp_ or a large page.
+//   2. Every page in [head, protected_head_page_) has large_obj_page_==false.
+//   3. Every page in [protected_head_page_, tail_ccp_) has large_obj_page_==true.
+//   4. The list is not empty and forward/backward links are consistent
+//      (no dangling next/prev pointers).
+// ---------------------------------------------------------------------------
+static void VerifyLruListInvariant(CcShard &shard)
+{
+    // 1. protected_head_page_ is tail or a large page.
+    REQUIRE(((shard.protected_head_page_ == &shard.tail_ccp_) ||
+             (shard.protected_head_page_->large_obj_page_ == true)));
+
+    // 2 & 3. Walk forward and verify partition.
+    bool reached_prot = false;
+    size_t count = 0;
+    LruPage *prev = &shard.head_ccp_;
+    for (LruPage *cur = shard.head_ccp_.lru_next_; cur != &shard.tail_ccp_;
+         cur = cur->lru_next_)
+    {
+        // Backward link must be consistent.
+        REQUIRE(cur->lru_prev_ == prev);
+
+        if (cur == shard.protected_head_page_)
+        {
+            reached_prot = true;
+        }
+        if (!reached_prot)
+        {
+            INFO("Page at position " << count << " expected small");
+            REQUIRE(cur->large_obj_page_ == false);
+        }
+        else
+        {
+            INFO("Page at position " << count << " expected large");
+            REQUIRE(cur->large_obj_page_ == true);
+        }
+        prev = cur;
+        ++count;
+    }
+    // Tail's backward link must also be consistent.
+    REQUIRE(shard.tail_ccp_.lru_prev_ == prev);
+}
+
+// ---------------------------------------------------------------------------
+// State-flip test infrastructure.
+//
+// All flip tests reuse the same KeyT/ValT and call make_ccmap_and_pages()
+// to obtain a ccmap whose parent_map_ is of type Primary (required for
+// UpdateLruList to actually update the LRU list rather than early-return).
+// ---------------------------------------------------------------------------
+using FlipKeyT = CompositeKey<std::string, int>;
+using FlipValT = CompositeRecord<int>;
+
+// Convenience: allocate a fresh small page and return it.
+static CcPage<FlipKeyT, FlipValT, true, true> *NewPage(
+    TemplateCcMap<FlipKeyT, FlipValT, true, true> *cc_map,
+    CcPage<FlipKeyT, FlipValT, true, true> *neg_inf,
+    CcPage<FlipKeyT, FlipValT, true, true> *pos_inf)
+{
+    auto *p = new CcPage<FlipKeyT, FlipValT, true, true>(cc_map, neg_inf,
+                                                         pos_inf);
+    p->large_obj_page_ = false;
+    return p;
+}
+
+// ---------------------------------------------------------------------------
+// Scenario A1:
+//   - LRU list has two small pages and one large page (the protected_head).
+//   - The large page is flipped to small (large→small).
+//   - UpdateLruList is called on it.
+//   - Expected: protected_head_page_ resets to &tail_ccp_ (empty protected
+//     segment), and partition invariant holds.
+// ---------------------------------------------------------------------------
+TEST_CASE("Flip A1: large→small for sole protected_head resets to tail",
+          "[large-obj-lru][flip-A1]")
+{
+    auto [local, shard_uptr] = make_shard();
+    CcShard &shard = *shard_uptr;
+
+    std::unique_ptr<TemplateCcMap<FlipKeyT, FlipValT, true, true>> ccmap_uptr;
+    CcPage<FlipKeyT, FlipValT, true, true> *neg_inf, *pos_inf, *dummy1,
+        *dummy2;
+    std::tie(neg_inf, pos_inf, dummy1, dummy2) =
+        make_ccmap_and_pages<FlipKeyT, FlipValT>(shard, ccmap_uptr);
+
+    // Allocate two small and one large page.
+    auto *s1 = NewPage(ccmap_uptr.get(), neg_inf, pos_inf);
+    auto *s2 = NewPage(ccmap_uptr.get(), neg_inf, pos_inf);
+    auto *ph = NewPage(ccmap_uptr.get(), neg_inf, pos_inf);
+    ph->large_obj_page_ = true;
+
+    // Build LRU: s1 → s2 → ph(large, protected_head) → tail
+    shard.UpdateLruList(s1, false);
+    shard.UpdateLruList(s2, false);
+    shard.UpdateLruList(ph, false);
+
+    REQUIRE(shard.protected_head_page_ == ph);
+    VerifyLruListInvariant(shard);
+
+    // -- Flip ph from large to small --
+    ph->large_obj_page_ = false;
+    shard.UpdateLruList(ph, false);
+
+    // Protected segment must now be empty.
+    REQUIRE(shard.protected_head_page_ == &shard.tail_ccp_);
+    // Partition invariant: all pages are small.
+    VerifyLruListInvariant(shard);
+
+    delete neg_inf;
+    delete pos_inf;
+    delete dummy1;
+    delete dummy2;
+    delete s1;
+    delete s2;
+    delete ph;
+}
+
+// ---------------------------------------------------------------------------
+// Scenario A2:
+//   - LRU list has one small, one large protected_head, and one more large.
+//   - The protected_head is flipped to small (large→small).
+//   - UpdateLruList is called on it.
+//   - Expected: protected_head_page_ advances to l2, partition invariant holds.
+// ---------------------------------------------------------------------------
+TEST_CASE("Flip A2: large→small for protected_head advances to next large page",
+          "[large-obj-lru][flip-A2]")
+{
+    auto [local, shard_uptr] = make_shard();
+    CcShard &shard = *shard_uptr;
+
+    std::unique_ptr<TemplateCcMap<FlipKeyT, FlipValT, true, true>> ccmap_uptr;
+    CcPage<FlipKeyT, FlipValT, true, true> *neg_inf, *pos_inf, *dummy1,
+        *dummy2;
+    std::tie(neg_inf, pos_inf, dummy1, dummy2) =
+        make_ccmap_and_pages<FlipKeyT, FlipValT>(shard, ccmap_uptr);
+
+    auto *s1 = NewPage(ccmap_uptr.get(), neg_inf, pos_inf);
+    auto *ph = NewPage(ccmap_uptr.get(), neg_inf, pos_inf);
+    auto *l2 = NewPage(ccmap_uptr.get(), neg_inf, pos_inf);
+    ph->large_obj_page_ = true;
+    l2->large_obj_page_ = true;
+
+    // Build LRU: s1(small) → ph(large, protected_head) → l2(large) → tail
+    shard.UpdateLruList(s1, false);
+    shard.UpdateLruList(ph, false);
+    shard.UpdateLruList(l2, false);
+
+    REQUIRE(shard.protected_head_page_ == ph);
+    VerifyLruListInvariant(shard);
+
+    // -- Flip ph from large to small --
+    ph->large_obj_page_ = false;
+    shard.UpdateLruList(ph, false);
+
+    // protected_head_page_ must have advanced to l2.
+    REQUIRE(shard.protected_head_page_ == l2);
+    VerifyLruListInvariant(shard);
+
+    // ph (now small) should be positioned before l2 (the new protected_head).
+    REQUIRE(ph->lru_next_ == l2);
+
+    delete neg_inf;
+    delete pos_inf;
+    delete dummy1;
+    delete dummy2;
+    delete s1;
+    delete ph;
+    delete l2;
+}
+
+// ---------------------------------------------------------------------------
+// Scenario B1:
+//   - LRU list has only small pages; protected segment is empty
+//     (protected_head_page_ == &tail_ccp_).
+//   - A small page that is already at the "just-before-tail" position is
+//     flipped to large (small→large).
+//   - UpdateLruList is called on it.
+//   - Expected: protected_head_page_ is set to that page (no longer tail),
+//     and partition invariant holds.
+//
+// This scenario exposes the early-return bug: without the fix, the early
+// return in UpdateLruList (page already at correct insertion point) would
+// skip the protected_head_page_ update.
+// ---------------------------------------------------------------------------
+TEST_CASE(
+    "Flip B1: small→large for page already at tail sets protected_head_page_",
+    "[large-obj-lru][flip-B1]")
+{
+    auto [local, shard_uptr] = make_shard();
+    CcShard &shard = *shard_uptr;
+
+    std::unique_ptr<TemplateCcMap<FlipKeyT, FlipValT, true, true>> ccmap_uptr;
+    CcPage<FlipKeyT, FlipValT, true, true> *neg_inf, *pos_inf, *dummy1,
+        *dummy2;
+    std::tie(neg_inf, pos_inf, dummy1, dummy2) =
+        make_ccmap_and_pages<FlipKeyT, FlipValT>(shard, ccmap_uptr);
+
+    auto *s1 = NewPage(ccmap_uptr.get(), neg_inf, pos_inf);
+    auto *s2 = NewPage(ccmap_uptr.get(), neg_inf, pos_inf);
+
+    // Build LRU: s1 → s2 → tail, protected_head == tail (empty large segment)
+    shard.UpdateLruList(s1, false);
+    shard.UpdateLruList(s2, false);
+
+    REQUIRE(shard.protected_head_page_ == &shard.tail_ccp_);
+    // s2 is the most-recently-used small page, positioned just before tail.
+    REQUIRE(s2->lru_next_ == &shard.tail_ccp_);
+
+    // -- Flip s2 from small to large (s2 already sits just before tail) --
+    s2->large_obj_page_ = true;
+    shard.UpdateLruList(s2, false);
+
+    // protected_head_page_ must now point to s2 (not tail).
+    REQUIRE(shard.protected_head_page_ == s2);
+    VerifyLruListInvariant(shard);
+
+    delete neg_inf;
+    delete pos_inf;
+    delete dummy1;
+    delete dummy2;
+    delete s1;
+    delete s2;
+}
+
+// ---------------------------------------------------------------------------
+// Scenario B2:
+//   - LRU list has one small page and one large page (non-empty protected
+//     segment).
+//   - The small page is flipped to large (small→large).
+//   - UpdateLruList is called on it.
+//   - Expected: protected_head_page_ remains at the original large page (l1),
+//     the flipped page is moved after l1 into the large segment, partition
+//     invariant holds.
+// ---------------------------------------------------------------------------
+TEST_CASE("Flip B2: small→large with non-empty protected segment moves page",
+          "[large-obj-lru][flip-B2]")
+{
+    auto [local, shard_uptr] = make_shard();
+    CcShard &shard = *shard_uptr;
+
+    std::unique_ptr<TemplateCcMap<FlipKeyT, FlipValT, true, true>> ccmap_uptr;
+    CcPage<FlipKeyT, FlipValT, true, true> *neg_inf, *pos_inf, *dummy1,
+        *dummy2;
+    std::tie(neg_inf, pos_inf, dummy1, dummy2) =
+        make_ccmap_and_pages<FlipKeyT, FlipValT>(shard, ccmap_uptr);
+
+    auto *s1 = NewPage(ccmap_uptr.get(), neg_inf, pos_inf);
+    auto *l1 = NewPage(ccmap_uptr.get(), neg_inf, pos_inf);
+    l1->large_obj_page_ = true;
+
+    // Build LRU: s1(small) → l1(large, protected_head) → tail
+    shard.UpdateLruList(s1, false);
+    shard.UpdateLruList(l1, false);
+
+    REQUIRE(shard.protected_head_page_ == l1);
+    VerifyLruListInvariant(shard);
+
+    // -- Flip s1 from small to large --
+    s1->large_obj_page_ = true;
+    shard.UpdateLruList(s1, false);
+
+    // protected_head_page_ must still be l1 (the original first large page).
+    REQUIRE(shard.protected_head_page_ == l1);
+    // s1 must now reside in the large segment (after l1).
+    REQUIRE(l1->lru_next_ == s1);
+    REQUIRE(s1->lru_next_ == &shard.tail_ccp_);
+    VerifyLruListInvariant(shard);
+
+    delete neg_inf;
+    delete pos_inf;
+    delete dummy1;
+    delete dummy2;
+    delete s1;
+    delete l1;
+}
+
+// ---------------------------------------------------------------------------
+// Scenario A via EnsureLargeObjOccupyPageAlone:
+//   - A single-entry page is marked large (large_obj_page_=true) and is the
+//     protected_head in the LRU list.
+//   - EnsureLargeObjOccupyPageAlone is called when the entry is Deleted.
+//   - Expected: page.large_obj_page_ becomes false, protected_head_page_
+//     resets to tail, and partition invariant holds.
+// ---------------------------------------------------------------------------
+TEST_CASE("Flip A via ELOOPA: deleted entry resets large page to small",
+          "[large-obj-lru][flip-A-eloopa]")
+{
+    auto [local, shard_uptr] = make_shard_config(64, 1);  // 1 KB threshold
+    CcShard &shard = *shard_uptr;
+
+    using KeyT = EloqStringKey;
+    using ValT = EloqStringRecord;
+
+    TableName tname(
+        std::string("tbl_flip_a"), TableType::Primary, TableEngine::EloqSql);
+    auto ccmap_uptr =
+        std::make_unique<TemplateCcMap<KeyT, ValT, true, true>>(
+            &shard, 0, tname, 1, nullptr, false);
+
+    // Insert one entry that is large (exceeds threshold).
+    EloqStringKey k1("key_large", 9);
+    auto it1 = ccmap_uptr->FindEmplace(k1);
+    auto *cce = it1->second;
+    auto *ccp = static_cast<CcPage<KeyT, ValT, true, true> *>(it1.GetPage());
+
+    auto rec = std::make_unique<ValT>();
+    std::string big(shard.LargeObjThresholdBytes() + 256, 'L');
+    rec->SetEncodedBlob(reinterpret_cast<const unsigned char *>(big.data()),
+                        big.size());
+    cce->payload_.cur_payload_ = std::move(rec);
+    cce->SetCommitTsPayloadStatus(1, RecordStatus::Normal);
+
+    // Make the page large and register it in the LRU protected segment.
+    ccp->large_obj_page_ = true;
+    shard.UpdateLruList(ccp, false);
+    REQUIRE(shard.protected_head_page_ == ccp);
+    VerifyLruListInvariant(shard);
+
+    // -- Flip: mark the entry as deleted --
+    cce->SetCommitTsPayloadStatus(2, RecordStatus::Deleted);
+    REQUIRE(cce->PayloadStatus() == RecordStatus::Deleted);
+
+    // EnsureLargeObjOccupyPageAlone should set large_obj_page_=false and
+    // update the LRU list.
+    ccmap_uptr->EnsureLargeObjOccupyPageAlone(ccp, cce);
+
+    REQUIRE(ccp->large_obj_page_ == false);
+    // Protected segment must now be empty.
+    REQUIRE(shard.protected_head_page_ == &shard.tail_ccp_);
+    VerifyLruListInvariant(shard);
+}
+
+// ---------------------------------------------------------------------------
+// Scenario B via EnsureLargeObjOccupyPageAlone:
+//   - A single-entry page is small (large_obj_page_=false) and is already in
+//     the LRU list just before tail (protected segment is empty).
+//   - EnsureLargeObjOccupyPageAlone is called with an entry whose serialized
+//     size exceeds the threshold.
+//   - Expected: page.large_obj_page_ becomes true, protected_head_page_ is
+//     updated to that page (not left at tail), and partition invariant holds.
+//
+// Without the UpdateLruList early-return fix this test would fail because
+// the early return would skip the protected_head_page_ update.
+// ---------------------------------------------------------------------------
+TEST_CASE("Flip B via ELOOPA: single large entry sets page large and updates "
+          "protected_head",
+          "[large-obj-lru][flip-B-eloopa]")
+{
+    auto [local, shard_uptr] = make_shard_config(64, 1);  // 1 KB threshold
+    CcShard &shard = *shard_uptr;
+
+    using KeyT = EloqStringKey;
+    using ValT = EloqStringRecord;
+
+    TableName tname(
+        std::string("tbl_flip_b"), TableType::Primary, TableEngine::EloqSql);
+    auto ccmap_uptr =
+        std::make_unique<TemplateCcMap<KeyT, ValT, true, true>>(
+            &shard, 0, tname, 1, nullptr, false);
+
+    // Insert one entry that is initially small.
+    EloqStringKey k1("key_small", 9);
+    auto it1 = ccmap_uptr->FindEmplace(k1);
+    auto *cce = it1->second;
+    auto *ccp = static_cast<CcPage<KeyT, ValT, true, true> *>(it1.GetPage());
+
+    auto small_rec = std::make_unique<ValT>();
+    std::string small_blob("tiny", 4);
+    small_rec->SetEncodedBlob(
+        reinterpret_cast<const unsigned char *>(small_blob.data()),
+        small_blob.size());
+    cce->payload_.cur_payload_ = std::move(small_rec);
+    cce->SetCommitTsPayloadStatus(1, RecordStatus::Normal);
+
+    // Page starts as small; put it in the LRU list.
+    ccp->large_obj_page_ = false;
+    shard.UpdateLruList(ccp, false);
+    REQUIRE(shard.protected_head_page_ == &shard.tail_ccp_);
+    // Page must be just before tail (only page in list).
+    REQUIRE(ccp->lru_next_ == &shard.tail_ccp_);
+
+    // -- Flip: entry grows beyond the threshold --
+    auto big_rec = std::make_unique<ValT>();
+    std::string big(shard.LargeObjThresholdBytes() + 512, 'B');
+    big_rec->SetEncodedBlob(reinterpret_cast<const unsigned char *>(big.data()),
+                            big.size());
+    cce->payload_.cur_payload_ = std::move(big_rec);
+    cce->SetCommitTsPayloadStatus(2, RecordStatus::Normal);
+
+    // ccp still has size == 1, so EnsureLargeObjOccupyPageAlone should mark it
+    // large in-place (no migration).
+    REQUIRE(ccp->Size() == 1);
+    ccmap_uptr->EnsureLargeObjOccupyPageAlone(ccp, cce);
+
+    REQUIRE(ccp->large_obj_page_ == true);
+    // protected_head_page_ must now point to ccp (not remain at tail).
+    REQUIRE(shard.protected_head_page_ == ccp);
+    VerifyLruListInvariant(shard);
+}
+
 }  // namespace txservice
 
 int main(int argc, char **argv)

@@ -1033,6 +1033,16 @@ void CcShard::UpdateLruList(LruPage *page, bool is_emplace)
     {
         ++access_counter_;
         page->last_access_ts_ = access_counter_;
+
+        // For LO_LRU: if this page was just flipped from small to large while
+        // already residing at the correct position (just before tail), the
+        // post-insert protected_head_page_ update is skipped by this early
+        // return.  Repair it here so the partition invariant is maintained.
+        if (GetCacheEvictPolicy() == CacheEvictPolicy::LO_LRU &&
+            page->large_obj_page_ && protected_head_page_ == &tail_ccp_)
+        {
+            protected_head_page_ = page;
+        }
         return;
     }
 
