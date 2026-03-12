@@ -25,6 +25,7 @@
 
 #include "cc_entry.h"
 #include "cc_shard.h"
+#include "include/mock/mock_catalog_factory.h"
 #include "local_cc_shards.h"
 #include "template_cc_map.h"
 #include "tx_key.h"     // CompositeKey
@@ -33,6 +34,7 @@
 
 namespace txservice
 {
+static MockCatalogFactory mock_catalog_factory{};
 
 void PrepareCcMap(TemplateCcMap<CompositeKey<std::string, int>,
                                 CompositeRecord<int>,
@@ -74,25 +76,47 @@ TEST_CASE("CcPage clean tests", "[cc-page]")
 {
     std::unordered_map<uint32_t, std::vector<NodeConfig>> ng_configs{
         {0, {NodeConfig(0, "127.0.0.1", 8600)}}};
-    std::map<std::string, uint32_t> tx_cnf{{"node_memory_limit_mb", 1000},
-                                           {"enable_key_cache", 0},
-                                           {"reltime_sampling", 0},
-                                           {"range_split_worker_num", 1},
-                                           {"core_num", 1},
-                                           {"realtime_sampling", 0},
-                                           {"checkpointer_interval", 10},
-                                           {"enable_shard_heap_defragment", 0},
-                                           {"node_log_limit_mb", 1000}};
-    LocalCcShards local_cc_shards(
-        0, 0, tx_cnf, nullptr, nullptr, &ng_configs, 2, nullptr, nullptr, true);
+    std::map<std::string, uint32_t> tx_cnf{
+        {"node_memory_limit_mb", 1000},
+        {"enable_key_cache", 0},
+        {"reltime_sampling", 0},
+        {"range_split_worker_num", 1},
+        {"range_slice_memory_limit_percent", 20},
+        {"core_num", 1},
+        {"realtime_sampling", 0},
+        {"checkpointer_interval", 10},
+        {"checkpointer_delay_seconds", 0},
+        {"checkpointer_min_ckpt_request_interval", 5},
+        {"enable_shard_heap_defragment", 0},
+        {"node_log_limit_mb", 1000},
+        {"collect_active_tx_ts_interval_seconds", 2},
+        {"rep_group_cnt", 1},
+    };
+
+    CatalogFactory *catalog_factory[5] = {
+        &mock_catalog_factory,
+        &mock_catalog_factory,
+        &mock_catalog_factory,
+        &mock_catalog_factory,
+        &mock_catalog_factory,
+    };
+    LocalCcShards local_cc_shards(0,
+                                  0,
+                                  tx_cnf,
+                                  catalog_factory,
+                                  nullptr,
+                                  &ng_configs,
+                                  2,
+                                  nullptr,
+                                  nullptr,
+                                  true);
     CcShard shard(0,
                   1,
-                  10000,
                   10000,
                   false,
                   0,
                   local_cc_shards,
-                  nullptr,
+                  catalog_factory,
                   nullptr,
                   &ng_configs,
                   2);

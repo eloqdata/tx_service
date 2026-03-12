@@ -96,6 +96,7 @@ CcShard::CcShard(
       next_forward_sequence_id_(1),
       head_ccp_(nullptr),
       tail_ccp_(nullptr),
+      protected_head_page_(&tail_ccp_),
       clean_start_ccp_(nullptr),
       size_(0),
       dirty_memory_check_interval_(dirty_memory_check_interval),
@@ -903,6 +904,17 @@ TEntry *CcShard::LocateTx(TxNumber tx_number)
     return nullptr;
 }
 
+CacheEvictPolicy CcShard::GetCacheEvictPolicy() const
+{
+    return local_shards_.cache_evict_policy_;
+}
+
+uint64_t CcShard::LargeObjThresholdBytes() const
+{
+    assert(local_shards_.cache_evict_policy_ == CacheEvictPolicy::LO_LRU);
+    return local_shards_.u_cache_evict_policy_.lo_lru.large_obj_threshold_bytes;
+}
+
 void CcShard::DetachLru(LruPage *page)
 {
     LruPage *prev = page->lru_prev_;
@@ -913,6 +925,20 @@ void CcShard::DetachLru(LruPage *page)
     {
         clean_start_ccp_ = page->lru_next_;
     }
+
+    if (GetCacheEvictPolicy() == CacheEvictPolicy::LO_LRU)
+    {
+        // If page is the head of the protected list, advance the protected list
+        // head to the next page.
+        if (protected_head_page_ == page)
+        {
+            assert(protected_head_page_ != &tail_ccp_);
+            protected_head_page_ = protected_head_page_->lru_next_;
+            assert(protected_head_page_ == &tail_ccp_ ||
+                   protected_head_page_->large_obj_page_ == true);
+        }
+    }
+
     assert(prev != nullptr && next != nullptr);
     prev->lru_next_ = next;
     next->lru_prev_ = prev;
@@ -928,12 +954,32 @@ void CcShard::ReplaceLru(LruPage *old_page, LruPage *new_page)
     old_page->lru_prev_ = nullptr;
     LruPage *lru_next = old_page->lru_next_;
     old_page->lru_next_ = nullptr;
-    // If page is the head to start looking for cc entry to kickout, move
-    // the clean head to the next page
+    // If old page is the head to start looking for cc entry to kickout, move
+    // the clean head to the new page
     if (clean_start_ccp_ == old_page)
     {
         clean_start_ccp_ = new_page;
     }
+
+    if (GetCacheEvictPolicy() == CacheEvictPolicy::LO_LRU)
+    {
+        assert(old_page->large_obj_page_ == new_page->large_obj_page_);
+        // If old page is the head of the protected list, move the protected
+        // list head to the new page.
+        if (protected_head_page_ != &tail_ccp_)
+        {
+            if (protected_head_page_ == old_page)
+            {
+                protected_head_page_ = new_page;
+            }
+            assert(protected_head_page_->large_obj_page_ == true);
+        }
+        else
+        {
+            assert(old_page->large_obj_page_ == false);
+        }
+    }
+
     lru_prev->lru_next_ = new_page;
     lru_next->lru_prev_ = new_page;
     new_page->lru_next_ = lru_next;
@@ -951,29 +997,81 @@ void CcShard::UpdateLruList(LruPage *page, bool is_emplace)
         assert(page->lru_next_ == nullptr && page->lru_prev_ == nullptr);
         return;
     }
-    // page already at the tail, do nothing
-    if (page->lru_next_ == &tail_ccp_ && tail_ccp_.lru_prev_ == page)
+
+    LruPage *tail_cpp_ptr = &tail_ccp_;
+    LruPage **insert_before = nullptr;
+    if (GetCacheEvictPolicy() == CacheEvictPolicy::LRU)
+    {
+        insert_before = &tail_cpp_ptr;
+    }
+    else if (GetCacheEvictPolicy() == CacheEvictPolicy::LO_LRU)
+    {
+        // Determine insertion point depending on whether the page holds large
+        // object.
+        if (page->large_obj_page_)
+        {
+            if (protected_head_page_ == &tail_ccp_)
+            {
+                protected_head_page_ = page;
+            }
+            insert_before = &tail_cpp_ptr;
+        }
+        else
+        {
+            if (protected_head_page_ == page)
+            {
+                assert(page != &tail_ccp_);
+                protected_head_page_ = page->lru_next_;
+            }
+            insert_before = &protected_head_page_;
+        }
+    }
+    else
+    {
+        assert(false);
+    }
+
+    // page already at the tail/protected_head_page_, do nothing
+    if (page->lru_next_ == *insert_before &&
+        (*insert_before)->lru_prev_ == page)
     {
         ++access_counter_;
         page->last_access_ts_ = access_counter_;
         return;
     }
-    // Removes the page from the list, if it's already in the list. This is
-    // used to keep the updated page at the end(tail) of the LRU list. A
-    // page's prev and post are both not-null when the page is in the
-    // list. This is because we have a reserved head and tail for the list.
+
+    // Remove the page from its current position in the list (if present).
     if (page->lru_next_ != nullptr)
     {
         DetachLru(page);
     }
-    LruPage *second_tail = tail_ccp_.lru_prev_;
-    second_tail->lru_next_ = page;
-    tail_ccp_.lru_prev_ = page;
-    page->lru_next_ = &tail_ccp_;
-    page->lru_prev_ = second_tail;
+
+    LruPage *insert_after = (*insert_before)->lru_prev_;
+    insert_after->lru_next_ = page;
+    (*insert_before)->lru_prev_ = page;
+    page->lru_next_ = *insert_before;
+    page->lru_prev_ = insert_after;
 
     ++access_counter_;
     page->last_access_ts_ = access_counter_;
+
+    if (GetCacheEvictPolicy() == CacheEvictPolicy::LO_LRU)
+    {
+        // Maintain protected_head_page_: when a large object page is inserted
+        // and the protected list was empty (protected_head_page_ ==
+        // &tail_ccp_), the new page becomes the protected head.
+        if (protected_head_page_ == &tail_ccp_)
+        {
+            if (page->large_obj_page_)
+            {
+                protected_head_page_ = page;
+            }
+        }
+        else
+        {
+            assert(protected_head_page_->large_obj_page_ == true);
+        }
+    }
 
     // If the update is a emplace update, these new loaded data might be
     // kickable from cc map. Usually if the clean_start_page is at tail we're
