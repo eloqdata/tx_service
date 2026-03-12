@@ -463,6 +463,14 @@ public:
                                         UINT64_MAX,
                                         false);
 
+                                    LOG(INFO)
+                                        << "catalog init range slices: addr="
+                                        << static_cast<void *>(
+                                               range.second->RangeSlices())
+                                        << " partition_id="
+                                        << range.second->RangeSlices()
+                                               ->PartitionId();
+
                                     mi_heap_set_default(prev_heap);
                                     if (is_override_thd)
                                     {
