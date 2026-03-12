@@ -1078,11 +1078,11 @@ public:
 
                     std::unique_lock<std::mutex> heap_lk(
                         shard_->local_shards_.table_ranges_heap_mux_);
-                    bool is_override_thd = mi_is_override_thread();
-                    mi_threadid_t prev_thd = mi_override_thread(
-                        shard_->local_shards_.GetTableRangesHeapThreadId());
-                    mi_heap_t *prev_heap = mi_heap_set_default(
-                        shard_->local_shards_.GetTableRangesHeap());
+                    // bool is_override_thd = mi_is_override_thread();
+                    // mi_threadid_t prev_thd = mi_override_thread(
+                    //     shard_->local_shards_.GetTableRangesHeapThreadId());
+                    // mi_heap_t *prev_heap = mi_heap_set_default(
+                    //     shard_->local_shards_.GetTableRangesHeap());
 
 #if defined(WITH_JEMALLOC)
                     uint32_t prev_arena;
@@ -1097,15 +1097,15 @@ public:
                         this->cc_ng_id_,
                         this->table_name_.IsBase());
 
-                    mi_heap_set_default(prev_heap);
-                    if (is_override_thd)
-                    {
-                        mi_override_thread(prev_thd);
-                    }
-                    else
-                    {
-                        mi_restore_default_thread_id();
-                    }
+                    // mi_heap_set_default(prev_heap);
+                    // if (is_override_thd)
+                    // {
+                    //     mi_override_thread(prev_thd);
+                    // }
+                    // else
+                    // {
+                    //     mi_restore_default_thread_id();
+                    // }
 
 #if defined(WITH_JEMALLOC)
                     JemallocArenaSwitcher::SwitchToArena(prev_arena);

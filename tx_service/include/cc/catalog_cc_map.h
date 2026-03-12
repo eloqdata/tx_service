@@ -434,6 +434,7 @@ public:
                                     std::unique_lock<std::mutex> heap_lk(
                                         shard_->local_shards_
                                             .table_ranges_heap_mux_);
+                                    /*
                                     bool is_override_thd =
                                         mi_is_override_thread();
                                     mi_threadid_t prev_thd = mi_override_thread(
@@ -442,6 +443,7 @@ public:
                                     mi_heap_t *prev_heap = mi_heap_set_default(
                                         shard_->local_shards_
                                             .GetTableRangesHeap());
+                                    */
 
 #if defined(WITH_JEMALLOC)
                                     uint32_t prev_arena;
@@ -471,6 +473,7 @@ public:
                                         << range.second->RangeSlices()
                                                ->PartitionId();
 
+                                    /*
                                     mi_heap_set_default(prev_heap);
                                     if (is_override_thd)
                                     {
@@ -480,6 +483,7 @@ public:
                                     {
                                         mi_restore_default_thread_id();
                                     }
+                                    */
 
 #if defined(WITH_JEMALLOC)
                                     JemallocArenaSwitcher::SwitchToArena(
