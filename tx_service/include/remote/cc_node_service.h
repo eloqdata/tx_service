@@ -24,6 +24,12 @@
 #include <brpc/channel.h>
 #include <bthread/condition_variable.h>
 
+#include <condition_variable>
+#include <deque>
+#include <functional>
+#include <mutex>
+#include <thread>
+
 #include "proto/cc_request.pb.h"
 
 namespace txservice
@@ -43,6 +49,7 @@ class CcNodeService : public CcRpcService
 {
 public:
     CcNodeService(LocalCcShards &local_shards);
+    ~CcNodeService() override;
 
     void OnLeaderStart(::google::protobuf::RpcController *controller,
                        const OnLeaderStartRequest *request,
@@ -184,6 +191,12 @@ public:
         ::txservice::remote::OnSnapshotSyncedResponse *response,
         ::google::protobuf::Closure *done) override;
 
+    void RequestSyncSnapshot(
+        ::google::protobuf::RpcController *controller,
+        const ::txservice::remote::RequestSyncSnapshotRequest *request,
+        ::txservice::remote::RequestSyncSnapshotResponse *response,
+        ::google::protobuf::Closure *done) override;
+
     void FetchNodeInfo(::google::protobuf::RpcController *controller,
                        const ::txservice::remote::FetchNodeInfoRequest *request,
                        ::txservice::remote::FetchNodeInfoResponse *response,
@@ -242,7 +255,15 @@ public:
         ::google::protobuf::Closure *done) override;
 
 private:
+    void EnqueueStandbyTask(std::function<void()> task);
+    void StandbyTaskWorkerMain();
+
     LocalCcShards &local_shards_;
+    std::mutex standby_task_mu_;
+    std::condition_variable standby_task_cv_;
+    std::deque<std::function<void()>> standby_tasks_;
+    bool standby_task_running_{true};
+    std::thread standby_task_worker_;
 };
 }  // namespace remote
 }  // namespace txservice

@@ -2163,6 +2163,12 @@ public:
                 }
                 else
                 {
+                    DLOG(INFO) << "Unexpected DDLKvOpErrorCode in KvOpPhase, "
+                               << "table=" << table_key->Name().StringView()
+                               << ", ng_id=" << cc_ng_id_
+                               << ", commit_ts=" << commit_ts
+                               << ", ddl_kv_op_err="
+                               << static_cast<int>(req.DDLKvOpErrorCode());
                     assert(false);
                 }
             }

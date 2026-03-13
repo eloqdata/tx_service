@@ -145,10 +145,25 @@ void DataSyncTask::SetFinish()
                         }
                     }
 
+#ifndef DATA_STORE_TYPE_ELOQDSS_ELOQSTORE
                     if (!is_standby_node_ckpt_ && Sharder::Instance()
                                                       .GetDataStoreHandler()
                                                       ->IsSharedStorage())
                     {
+#else
+                    if (!is_standby_node_ckpt_)
+                    {
+                        if (status_->HasDataStoreWrite())
+                        {
+                            auto store_handler =
+                                Sharder::Instance().GetDataStoreHandler();
+                            std::vector<std::string> snapshot_files;
+                            store_handler->CreateSnapshotForStandby(
+                                node_group_id_,
+                                snapshot_files,
+                                status_->truncate_log_ts_);
+                        }
+#endif
                         BrocastPrimaryCkptTs(node_group_id_,
                                              node_group_term_,
                                              status_->truncate_log_ts_,
