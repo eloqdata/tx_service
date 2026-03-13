@@ -6704,9 +6704,9 @@ public:
 
     bool Execute(FillStoreSliceCc &req) override
     {
-        std::deque<SliceDataItem> &slice_vec = req.SliceData(shard_->core_id_);
+        std::deque<SliceDataItem> &slice_vec = req.SliceData();
 
-        size_t index = req.NextIndex(shard_->core_id_);
+        size_t index = req.NextIndex();
         size_t last_index = std::min(index + FillStoreSliceCc::MaxScanBatchSize,
                                      slice_vec.size());
 
@@ -6723,11 +6723,12 @@ public:
         if (index == slice_vec.size())
         {
             slice_vec.clear();
-            return req.SetFinish(shard_);
+            req.SetFinish(shard_);
+            return true;
         }
         else
         {
-            req.SetNextIndex(shard_->core_id_, index);
+            req.SetNextIndex(index);
             shard_->Enqueue(shard_->LocalCoreId(), &req);
             return false;
         }
