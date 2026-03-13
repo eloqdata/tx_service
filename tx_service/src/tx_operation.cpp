@@ -4641,14 +4641,21 @@ void SplitFlushRangeOp::Forward(TransactionExecution *txm)
                 int64_t tx_term = txm->TxTerm();
                 LocalCcShards *local_shards =
                     Sharder::Instance().GetLocalCcShards();
-                // The new ranges that still lands to the same ng after split.
+                // The new ranges that still lands to the same core of same ng
+                // after split.
                 std::vector<std::pair<const TxKey *, const TxKey *>> ranges;
                 ranges.reserve(new_ranges.size());
+                uint16_t range_shard_id =
+                    static_cast<uint16_t>((range_info_->PartitionId() & 0x3FF) %
+                                          local_shards->Count());
                 for (auto iter = new_ranges.begin(); iter != new_ranges.end();
                      ++iter)
                 {
+                    uint16_t new_range_shard_id = static_cast<uint16_t>(
+                        (iter->second & 0x3FF) % local_shards->Count());
                     if (local_shards->GetRangeOwner(iter->second, node_group)
-                            ->BucketOwner() == node_group)
+                                ->BucketOwner() == node_group &&
+                        (new_range_shard_id == range_shard_id))
                     {
                         const TxKey *start_key = &(iter->first);
                         const TxKey *end_key =

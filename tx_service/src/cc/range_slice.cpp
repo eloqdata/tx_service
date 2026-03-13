@@ -172,19 +172,9 @@ void StoreSlice::InitKeyCache(CcShard *cc_shard,
         pins_++;
 
         init_key_cache_cc_ = cc_shard->NewInitKeyCacheCc();
-        init_key_cache_cc_->Reset(range,
-                                  this,
-                                  range->local_cc_shards_.Count(),
-                                  *tbl_name,
-                                  term,
-                                  ng_id);
+        init_key_cache_cc_->Reset(range, this, *tbl_name, term, ng_id);
 
-        uint16_t core_cnt = range->local_cc_shards_.Count();
-        for (uint16_t core_id = 0; core_id < core_cnt; core_id++)
-        {
-            Sharder::Instance().GetLocalCcShards()->EnqueueToCcShard(
-                core_id, init_key_cache_cc_);
-        }
+        cc_shard->Enqueue(init_key_cache_cc_);
     }
 }
 
@@ -253,17 +243,12 @@ StoreRange::StoreRange(uint32_t partition_id,
                                    estimate_rec_size));
         }
 
-        uint16_t core_cnt = Sharder::Instance().GetLocalCcShardsCount();
-        for (uint16_t id = 0; id < core_cnt; id++)
-        {
-            key_cache_.push_back(
-                std::make_unique<cuckoofilter::CuckooFilter<size_t, 12>>(
-                    key_cache_size / core_cnt));
-        }
+        key_cache_ = std::make_unique<cuckoofilter::CuckooFilter<size_t, 12>>(
+            key_cache_size);
     }
     else
     {
-        key_cache_.resize(0);
+        key_cache_ = nullptr;
     }
 }
 
