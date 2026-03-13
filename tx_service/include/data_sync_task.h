@@ -152,7 +152,8 @@ public:
           is_dirty_(is_dirty),
           sync_ts_adjustable_(need_adjust_ts),
           task_res_(hres),
-          need_update_ckpt_ts_(true)
+          need_update_ckpt_ts_(true),
+          run_on_leader_node_(true)
     {
     }
 
@@ -194,6 +195,11 @@ public:
     void UnsetSyncTsAdjustable()
     {
         sync_ts_adjustable_ = false;
+    }
+
+    void SetRunOnLeaderNode(bool run_on_leader_node)
+    {
+        run_on_leader_node_ = run_on_leader_node;
     }
 
     const TableName table_name_;
@@ -252,6 +258,7 @@ public:
         cce_entries_;
 
     bool need_update_ckpt_ts_{true};
+    bool run_on_leader_node_{true};
 };
 
 struct FlushTaskEntry
