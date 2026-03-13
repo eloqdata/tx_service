@@ -447,11 +447,8 @@ struct RemoteScanSliceCache
     static constexpr size_t MetaDataSize = 8;
     static constexpr size_t DefaultCacheMaxBytes = 10 * 1024 * 1024;
 
-    RemoteScanSliceCache(uint16_t shard_cnt)
-        : cache_mem_size_(0),
-          mem_max_bytes_(DefaultCacheMaxBytes),
-          shard_cnt_(shard_cnt),
-          trailing_cnt_(0)
+    RemoteScanSliceCache()
+        : cache_mem_size_(0), mem_max_bytes_(DefaultCacheMaxBytes)
     {
     }
 
@@ -465,7 +462,7 @@ struct RemoteScanSliceCache
         mem_max_bytes_ = max_bytes;
     }
 
-    void Reset(uint16_t shard_cnt)
+    void Reset()
     {
         key_ts_.clear();
         gap_ts_.clear();
@@ -476,26 +473,19 @@ struct RemoteScanSliceCache
         keys_.clear();
         records_.clear();
         cache_mem_size_ = 0;
-        trailing_cnt_ = 0;
         mem_max_bytes_ = DefaultCacheMaxBytes;
-        shard_cnt_ = shard_cnt;
         archive_positions_.clear();
         archive_records_.clear();
     }
 
-    void RemoveLast()
-    {
-        trailing_cnt_++;
-    }
-
     uint64_t LastCce()
     {
-        return cce_ptr_.at(cce_ptr_.size() - 1 - trailing_cnt_);
+        return cce_ptr_.at(cce_ptr_.size() - 1);
     }
 
     size_t Size() const
     {
-        return cce_ptr_.size() - trailing_cnt_;
+        return cce_ptr_.size();
     }
 
     void SetLastCceLock(uint64_t lock_ptr)
@@ -514,8 +504,6 @@ struct RemoteScanSliceCache
     std::string records_;
     uint32_t cache_mem_size_;
     uint32_t mem_max_bytes_;
-    uint16_t shard_cnt_;
-    size_t trailing_cnt_;
 
     // The first element of archive_positions_ is the index of key_ts_ to
     // backfill and the second element is the position in records_ to be
@@ -531,8 +519,7 @@ struct RangeScanSliceResult
           slice_position_(SlicePosition::FirstSlice),
           cc_ng_id_(0),
           ccm_scanner_(nullptr),
-          is_local_(true),
-          last_key_status_(LastKeySetStatus::Unset)
+          is_local_(true)
     {
     }
 
@@ -541,8 +528,7 @@ struct RangeScanSliceResult
           slice_position_(status),
           cc_ng_id_(0),
           ccm_scanner_(nullptr),
-          is_local_(true),
-          last_key_status_(LastKeySetStatus::Setup)
+          is_local_(true)
     {
     }
 
@@ -550,8 +536,7 @@ struct RangeScanSliceResult
         : last_key_(std::move(rhs.last_key_)),
           slice_position_(rhs.slice_position_),
           cc_ng_id_(rhs.cc_ng_id_),
-          is_local_(rhs.is_local_),
-          last_key_status_(rhs.last_key_status_.load(std::memory_order_acquire))
+          is_local_(rhs.is_local_)
     {
         if (rhs.is_local_)
         {
@@ -576,9 +561,6 @@ struct RangeScanSliceResult
         slice_position_ = rhs.slice_position_;
         is_local_ = rhs.is_local_;
         cc_ng_id_ = rhs.cc_ng_id_;
-        last_key_status_.store(
-            rhs.last_key_status_.load(std::memory_order_acquire),
-            std::memory_order_release);
 
         if (rhs.is_local_)
         {
@@ -594,85 +576,47 @@ struct RangeScanSliceResult
 
     void Reset()
     {
-        last_key_status_.store(LastKeySetStatus::Unset,
-                               std::memory_order_release);
         last_key_ = TxKey();
     }
 
     const TxKey *SetLastKey(TxKey key)
     {
-        assert(last_key_status_.load(std::memory_order_acquire) ==
-               LastKeySetStatus::Unset);
         last_key_ = std::move(key);
-        last_key_status_.store(LastKeySetStatus::Setup,
-                               std::memory_order_release);
-
         return &last_key_;
     }
 
     template <typename KeyT>
-    std::pair<const KeyT *, bool> UpdateLastKey(const KeyT *key,
-                                                SlicePosition slice_pos)
+    void SetLastKey(const KeyT *key, SlicePosition slice_pos)
     {
-        bool success = false;
+        slice_position_ = slice_pos;
 
-        LastKeySetStatus actual = LastKeySetStatus::Unset;
-        if (last_key_status_.compare_exchange_strong(
-                actual, LastKeySetStatus::Setting, std::memory_order_acq_rel))
+        // If the slice position is the last or the first, this is the last
+        // scan batch, which must end with positive/negative infinity or the
+        // request's end key. In both cases, the input key is a valid
+        // reference throughout the lifetime of RangeScanSliceResult. So,
+        // the tx key does not own a new copy of the input key.
+        if (slice_pos == SlicePosition::FirstSlice ||
+            slice_pos == SlicePosition::LastSlice)
         {
-            slice_position_ = slice_pos;
-
-            // If the slice position is the last or the first, this is the last
-            // scan batch, which must end with positive/negative infinity or the
-            // request's end key. In both cases, the input key is a valid
-            // reference throughout the lifetime of RangeScanSliceResult. So,
-            // the tx key does not own a new copy of the input key.
-            if (slice_pos == SlicePosition::FirstSlice ||
-                slice_pos == SlicePosition::LastSlice)
-            {
-                last_key_ = TxKey(key);
-            }
-            else
-            {
-                last_key_ = key->CloneTxKey();
-            }
-
-            last_key_status_.store(LastKeySetStatus::Setup,
-                                   std::memory_order_release);
-            success = true;
+            last_key_ = TxKey(key);
         }
         else
         {
-            if (actual != LastKeySetStatus::Setup)
-            {
-                while (last_key_status_.load(std::memory_order_acquire) !=
-                       LastKeySetStatus::Setup)
-                {
-                    // Busy poll.
-                }
-            }
+            last_key_ = key->CloneTxKey();
         }
-
-        return {last_key_.GetKey<KeyT>(), success};
     }
 
-    std::pair<const TxKey *, bool> PeekLastKey() const
+    const TxKey *LastKey() const
     {
-        if (last_key_status_.load(std::memory_order_acquire) ==
-            LastKeySetStatus::Setup)
+        if (last_key_.KeyPtr() != nullptr)
         {
-            return {&last_key_, true};
+            return &last_key_;
         }
-        else
-        {
-            return {nullptr, false};
-        }
+        return nullptr;
     }
 
     TxKey MoveLastKey()
     {
-        last_key_status_.store(LastKeySetStatus::Unset,
-                               std::memory_order_release);
         return std::move(last_key_);
     }
 
@@ -691,23 +635,9 @@ struct RangeScanSliceResult
     union
     {
         CcScanner *ccm_scanner_;
-        std::vector<RemoteScanSliceCache> *remote_scan_caches_;
+        RemoteScanSliceCache *remote_scan_caches_;
     };
     bool is_local_{true};
-
-    /**
-     * For scene like: (1-write, n-read), atomic variable has obvious
-     * performance advantage over mutex/shared_mutex. For readers, mutex needs
-     * to modify a flag, and shared_mutex needs to modify a counter. However,
-     * atomic variable merely load a variable.
-     */
-    enum struct LastKeySetStatus : uint8_t
-    {
-        Unset,
-        Setting,
-        Setup,
-    };
-    std::atomic<LastKeySetStatus> last_key_status_;
 };
 
 struct BucketScanProgress
