@@ -29,6 +29,7 @@
 #include <cstdlib>
 #include <memory>
 #include <mutex>
+#include <optional>
 #include <utility>
 
 #include "cc/local_cc_shards.h"
@@ -54,6 +55,19 @@ thread_local CcRequestPool<ReadCc> read_pool;
 
 namespace remote
 {
+namespace
+{
+int64_t CurrentSyncedPrimaryTerm()
+{
+    const int64_t standby_term = Sharder::Instance().StandbyNodeTerm();
+    if (standby_term <= 0)
+    {
+        return -1;
+    }
+    return PrimaryTermFromStandbyTerm(standby_term);
+}
+}  // namespace
+
 CcNodeService::CcNodeService(LocalCcShards &local_shards)
     : local_shards_(local_shards)
 {
@@ -73,7 +87,7 @@ CcNodeService::~CcNodeService()
     }
 }
 
-void CcNodeService::EnqueueStandbyTask(std::function<void()> task)
+void CcNodeService::EnqueueStandbyTask(StandbyTask task)
 {
     {
         std::lock_guard<std::mutex> lk(standby_task_mu_);
@@ -84,9 +98,16 @@ void CcNodeService::EnqueueStandbyTask(std::function<void()> task)
 
 void CcNodeService::StandbyTaskWorkerMain()
 {
+    std::optional<StandbyTask> deferred_task;
     while (true)
     {
-        std::function<void()> task;
+        StandbyTask task{StandbyTaskType::RequestSyncSnapshot, 0, 0, 0, {}};
+        if (deferred_task.has_value())
+        {
+            task = std::move(*deferred_task);
+            deferred_task.reset();
+        }
+        else
         {
             std::unique_lock<std::mutex> lk(standby_task_mu_);
             while (standby_task_running_ && standby_tasks_.empty())
@@ -100,7 +121,76 @@ void CcNodeService::StandbyTaskWorkerMain()
             task = std::move(standby_tasks_.front());
             standby_tasks_.pop_front();
         }
-        task();
+
+        if (task.type == StandbyTaskType::UpdateStandbyCkptTs)
+        {
+            while (true)
+            {
+                std::unique_lock<std::mutex> lk(standby_task_mu_);
+                if (standby_tasks_.empty())
+                {
+                    break;
+                }
+                StandbyTask next_task = std::move(standby_tasks_.front());
+                standby_tasks_.pop_front();
+                lk.unlock();
+
+                if (next_task.type == StandbyTaskType::UpdateStandbyCkptTs &&
+                    next_task.ng_id == task.ng_id &&
+                    (next_task.ng_term > task.ng_term ||
+                     (next_task.ng_term == task.ng_term &&
+                      next_task.ts >= task.ts)))
+                {
+                    task = std::move(next_task);
+                    continue;
+                }
+
+                deferred_task = std::move(next_task);
+                break;
+            }
+
+            const int64_t current_synced_term = CurrentSyncedPrimaryTerm();
+            if (current_synced_term > task.ng_term)
+            {
+                DLOG(INFO) << "Skip stale UpdateStandbyCkptTs task by term, "
+                           << "ng_id=" << task.ng_id
+                           << ", task_ng_term=" << task.ng_term
+                           << ", current_synced_term="
+                           << current_synced_term
+                           << ", task_ckpt_ts=" << task.ts;
+                continue;
+            }
+
+            const uint64_t current_ckpt_ts =
+                Sharder::Instance().NativeNodeGroupCkptTs();
+            if (task.ts <= current_ckpt_ts)
+            {
+                DLOG(INFO) << "Skip stale UpdateStandbyCkptTs task, ng_id="
+                           << task.ng_id << ", ng_term=" << task.ng_term
+                           << ", task_ckpt_ts=" << task.ts
+                           << ", current_ckpt_ts=" << current_ckpt_ts;
+                continue;
+            }
+        }
+        else
+        {
+            const int64_t current_synced_term = CurrentSyncedPrimaryTerm();
+            const int64_t task_primary_term =
+                PrimaryTermFromStandbyTerm(task.ng_term);
+            if (current_synced_term > task_primary_term)
+            {
+                DLOG(INFO) << "Skip stale RequestSyncSnapshot task by term, "
+                           << "ng_id=" << task.ng_id
+                           << ", task_standby_term=" << task.ng_term
+                           << ", task_primary_term=" << task_primary_term
+                           << ", current_synced_term="
+                           << current_synced_term
+                           << ", snapshot_ts=" << task.ts;
+                continue;
+            }
+        }
+
+        task.fn();
     }
 }
 
@@ -1762,27 +1852,29 @@ void CcNodeService::UpdateStandbyCkptTs(
     auto store_hd = Sharder::Instance().GetLocalCcShards()->store_hd_;
     const bool has_data_store_write = request->has_data_store_write();
 
-    if (store_hd && has_data_store_write)
-    {
-        EnqueueStandbyTask(
-            [store_hd,
-             ng_id = request->node_group_id(),
-             ng_term = request->ng_term(),
-             ckpt_ts = request->primary_succ_ckpt_ts()]()
-            {
-                if (store_hd->OnUpdateStandbyCkptTs(ng_id, ng_term, ckpt_ts))
-                {
-                    Sharder::Instance().UpdateNodeGroupCkptTs(ng_id, ckpt_ts);
-                }
-            });
-        DLOG(INFO) << "Enqueued UpdateStandbyCkptTs req, req ckpt ts:"
-                   << request->primary_succ_ckpt_ts();
-    }
-    else
-    {
-        Sharder::Instance().UpdateNodeGroupCkptTs(
-            request->node_group_id(), request->primary_succ_ckpt_ts());
-    }
+    const uint32_t ng_id = request->node_group_id();
+    const int64_t ng_term = request->ng_term();
+    const uint64_t ckpt_ts = request->primary_succ_ckpt_ts();
+    EnqueueStandbyTask(
+        {StandbyTaskType::UpdateStandbyCkptTs,
+         ng_id,
+         ng_term,
+         ckpt_ts,
+         [store_hd, ng_id, ng_term, ckpt_ts, has_data_store_write]()
+         {
+             const bool ok =
+                 store_hd == nullptr
+                     ? true
+                     : store_hd->OnUpdateStandbyCkptTs(
+                           ng_id, ng_term, ckpt_ts, !has_data_store_write);
+             if (ok)
+             {
+                 Sharder::Instance().UpdateNodeGroupCkptTs(ng_id, ckpt_ts);
+             }
+         }});
+    DLOG(INFO) << "Enqueued UpdateStandbyCkptTs req, req ckpt ts:"
+               << request->primary_succ_ckpt_ts()
+               << ", has_data_store_write: " << (int) has_data_store_write;
 #else
     if (Sharder::Instance().GetDataStoreHandler()->IsSharedStorage())
     {
@@ -1959,31 +2051,34 @@ void CcNodeService::RequestSyncSnapshot(
     }
     const int64_t term =
         PrimaryTermFromStandbyTerm(request->standby_node_term());
+    const uint32_t ng_id = request->ng_id();
+    const int64_t standby_term = request->standby_node_term();
+    const uint64_t snapshot_ts = request->snapshot_ts();
     EnqueueStandbyTask(
-        [store_hd,
-         ng_id = request->ng_id(),
-         standby_term = request->standby_node_term(),
-         term,
-         snapshot_ts = request->snapshot_ts()]()
-        {
-            const bool ok =
-                store_hd->RequestSyncSnapshot(ng_id, term, snapshot_ts);
-            if (ok)
-            {
-                Sharder::Instance().SetStandbyNodeTerm(standby_term);
-                Sharder::Instance().SetCandidateStandbyNodeTerm(-1);
-                if (!txservice::txservice_skip_kv &&
-                    !txservice::txservice_enable_cache_replacement)
-                {
-                    store_hd->RestoreTxCache(ng_id, standby_term);
-                }
-            }
-            DLOG(INFO) << "RequestSyncSnapshot async RequestSyncSnapshot done, "
-                          "ng_id="
-                       << ng_id << ", standby_term=" << standby_term
-                       << ", snapshot_ts=" << snapshot_ts << ", success=" << ok
-                       << ", role=follower";
-        });
+        {StandbyTaskType::RequestSyncSnapshot,
+         ng_id,
+         standby_term,
+         snapshot_ts,
+         [store_hd, ng_id, standby_term, term, snapshot_ts]()
+         {
+             const bool ok =
+                 store_hd->RequestSyncSnapshot(ng_id, term, snapshot_ts);
+             if (ok)
+             {
+                 Sharder::Instance().SetStandbyNodeTerm(standby_term);
+                 Sharder::Instance().SetCandidateStandbyNodeTerm(-1);
+                 if (!txservice::txservice_skip_kv &&
+                     !txservice::txservice_enable_cache_replacement)
+                 {
+                     store_hd->RestoreTxCache(ng_id, standby_term);
+                 }
+             }
+             DLOG(INFO) << "RequestSyncSnapshot async RequestSyncSnapshot done, "
+                           "ng_id="
+                        << ng_id << ", standby_term=" << standby_term
+                        << ", snapshot_ts=" << snapshot_ts
+                        << ", success=" << ok << ", role=follower";
+         }});
     const uint64_t current_ckpt_ts =
         store_hd->CurrentStandbySnapshotTs(request->ng_id());
     DLOG(INFO) << "RequestSyncSnapshot handled, ng_id=" << request->ng_id()

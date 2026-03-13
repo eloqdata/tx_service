@@ -3910,7 +3910,8 @@ bool DataStoreServiceClient::OnSnapshotReceived(
 
 bool DataStoreServiceClient::OnUpdateStandbyCkptTs(uint32_t ng_id,
                                                    int64_t ng_term,
-                                                   uint64_t snapshot_ts)
+                                                   uint64_t snapshot_ts,
+                                                   bool skip_reload_data)
 {
 #ifdef DATA_STORE_TYPE_ELOQDSS_ELOQSTORE
     if (!bind_data_shard_with_ng_)
@@ -3919,15 +3920,19 @@ bool DataStoreServiceClient::OnUpdateStandbyCkptTs(uint32_t ng_id,
         return true;
     }
     assert(data_store_service_ != nullptr);
-    const bool reload_ok =
-        data_store_service_->ReloadData(ng_id, ng_term, snapshot_ts);
-    if (!reload_ok)
+    if (!skip_reload_data)
     {
-        LOG(WARNING)
-            << "DataStoreServiceClient::OnUpdateStandbyCkptTs skip ckpt "
-               "update because reload failed, ng_id="
-            << ng_id << ", term=" << ng_term << ", snapshot_ts=" << snapshot_ts;
-        return false;
+        const bool reload_ok =
+            data_store_service_->ReloadData(ng_id, ng_term, snapshot_ts);
+        if (!reload_ok)
+        {
+            LOG(WARNING)
+                << "DataStoreServiceClient::OnUpdateStandbyCkptTs skip ckpt "
+                   "update because reload failed, ng_id="
+                << ng_id << ", term=" << ng_term << ", snapshot_ts="
+                << snapshot_ts;
+            return false;
+        }
     }
 #endif
     return true;

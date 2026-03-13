@@ -415,11 +415,13 @@ public:
 
     virtual bool OnUpdateStandbyCkptTs(uint32_t ng_id,
                                        int64_t ng_term,
-                                       uint64_t snapshot_ts)
+                                       uint64_t snapshot_ts,
+                                       bool skip_reload_data = false)
     {
         (void) ng_id;
         (void) ng_term;
         (void) snapshot_ts;
+        (void) skip_reload_data;
         assert(false);
         return false;
     }

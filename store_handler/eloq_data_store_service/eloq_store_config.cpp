@@ -158,6 +158,9 @@ DEFINE_uint32(eloq_store_max_write_concurrency,
               "EloqStore maximum number of concurrent write tasks per shard; "
               "0 keeps legacy unlimited behavior and is rewritten to "
               "max_cloud_concurrency in cloud mode.");
+DEFINE_uint32(eloq_store_standby_max_concurrency,
+              100,
+              "EloqStore maximum number of concurrent standby rsync/ssh jobs.");
 DEFINE_uint32(eloq_store_direct_io_buffer_pool_size,
               16,
               "EloqStore maximum number of cached DirectIO buffers per shard.");
@@ -805,6 +808,13 @@ EloqStoreConfig::EloqStoreConfig(const INIReader &config_reader,
             : config_reader.GetInteger("store",
                                        "eloq_store_max_write_concurrency",
                                        FLAGS_eloq_store_max_write_concurrency);
+    eloqstore_configs_.standby_max_concurrency =
+        !CheckCommandLineFlagIsDefault("eloq_store_standby_max_concurrency")
+            ? FLAGS_eloq_store_standby_max_concurrency
+            : config_reader.GetInteger(
+                  "store",
+                  "eloq_store_standby_max_concurrency",
+                  FLAGS_eloq_store_standby_max_concurrency);
     eloqstore_configs_.direct_io_buffer_pool_size =
         !CheckCommandLineFlagIsDefault("eloq_store_direct_io_buffer_pool_size")
             ? FLAGS_eloq_store_direct_io_buffer_pool_size

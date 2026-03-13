@@ -495,7 +495,8 @@ public:
 
     bool OnUpdateStandbyCkptTs(uint32_t ng_id,
                                int64_t ng_term,
-                               uint64_t snapshot_ts) override;
+                               uint64_t snapshot_ts,
+                               bool skip_reload_data = false) override;
     bool RequestSyncSnapshot(uint32_t ng_id,
                              int64_t ng_term,
                              uint64_t snapshot_ts) override;

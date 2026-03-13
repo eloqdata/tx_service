@@ -232,6 +232,7 @@ DataStoreService::DataStoreService(
     {
         data_shards_[i].shard_id_ = i;
         data_shards_[i].shard_status_.store(DSShardStatus::Closed);
+        data_shards_[i].latest_term_.store(0, std::memory_order_release);
     }
 }
 
@@ -2255,6 +2256,7 @@ void DataStoreService::OpenDataStore(uint32_t shard_id,
     }
     else
     {
+        ds_ref.latest_term_.store(term, std::memory_order_release);
         LOG(INFO) << "OpenDataStore success for DSS shard " << shard_id
                   << ", shard_id_: " << ds_ref.shard_id_ << ", shard_status_: "
                   << static_cast<int>(ds_ref.shard_status_.load())
@@ -2376,6 +2378,15 @@ bool DataStoreService::ReloadData(uint32_t shard_id,
 {
 #ifdef DATA_STORE_TYPE_ELOQDSS_ELOQSTORE
     auto &ds_ref = data_shards_.at(shard_id);
+    const int64_t latest_term =
+        ds_ref.latest_term_.load(std::memory_order_acquire);
+    if (term < latest_term)
+    {
+        LOG(INFO) << "ReloadData discard stale term for DSS shard " << shard_id
+                  << ", term " << term << ", latest_term " << latest_term
+                  << ", snapshot_ts " << snapshot_ts;
+        return false;
+    }
     const uint64_t latest_snapshot_ts =
         ds_ref.latest_snapshot_ts_.load(std::memory_order_acquire);
     if (snapshot_ts < latest_snapshot_ts)
@@ -2396,6 +2407,7 @@ bool DataStoreService::ReloadData(uint32_t shard_id,
         ok = ds_ref.data_store_->ReloadData(term, snapshot_ts);
         if (ok)
         {
+            ds_ref.latest_term_.store(term, std::memory_order_release);
             ds_ref.latest_snapshot_ts_.store(
                 snapshot_ts, std::memory_order_release);
         }

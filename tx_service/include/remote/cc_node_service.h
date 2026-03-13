@@ -255,13 +255,34 @@ public:
         ::google::protobuf::Closure *done) override;
 
 private:
-    void EnqueueStandbyTask(std::function<void()> task);
+    enum class StandbyTaskType
+    {
+        UpdateStandbyCkptTs,
+        RequestSyncSnapshot,
+    };
+
+    struct StandbyTask
+    {
+        StandbyTaskType type;
+        uint32_t ng_id{0};
+        int64_t ng_term{0};
+        uint64_t ts{0};
+        std::function<void()> fn;
+    };
+
+    void EnqueueStandbyTask(StandbyTask task);
     void StandbyTaskWorkerMain();
 
     LocalCcShards &local_shards_;
+    // This queue is only used for standby snapshot/checkpoint coordination,
+    // which is low-frequency compared with the normal tx path, so a std::mutex
+    // is acceptable here. A generic MPSC queue is not suitable because it does
+    // not guarantee a single global order across multiple producers, while
+    // RequestSyncSnapshot and UpdateStandbyCkptTs rely on strict cross-thread
+    // enqueue order.
     std::mutex standby_task_mu_;
     std::condition_variable standby_task_cv_;
-    std::deque<std::function<void()>> standby_tasks_;
+    std::deque<StandbyTask> standby_tasks_;
     bool standby_task_running_{true};
     std::thread standby_task_worker_;
 };

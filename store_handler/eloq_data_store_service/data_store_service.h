@@ -762,6 +762,7 @@ private:
         std::unique_ptr<DataStore> data_store_{nullptr};
         std::atomic<DSShardStatus> shard_status_{DSShardStatus::Closed};
         std::atomic<uint64_t> ongoing_write_requests_{0};
+        std::atomic<int64_t> latest_term_{0};
         // NOTE: latest_snapshot_ts_ ordering relies on ReloadData calls being
         // sequential for a shard. This is true when tx_service and DSS run in
         // the same process. Standalone DSS server mode does not guarantee it.

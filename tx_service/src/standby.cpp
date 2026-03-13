@@ -39,6 +39,7 @@ struct UpdateStandbyCkptAgg
     bthread::Mutex mux;
     bthread::ConditionVariable cv;
     size_t pending{0};
+    size_t total{0};
     size_t success{0};
     uint64_t min_ack_ckpt_ts{std::numeric_limits<uint64_t>::max()};
 };
@@ -159,6 +160,7 @@ void BrocastPrimaryCkptTs(NodeGroupId node_group_id,
             {
                 std::lock_guard<bthread::Mutex> lk(agg.mux);
                 agg.pending++;
+                agg.total++;
             }
             DLOG(INFO) << "send UpdateStandbyCkptTs to node " << node_id << ", snapshot_ts " << primary_ckpt_ts;
             stub.UpdateStandbyCkptTs(&rpc_ctx->cntl,
@@ -180,9 +182,10 @@ void BrocastPrimaryCkptTs(NodeGroupId node_group_id,
         DLOG(INFO) << "BrocastPrimaryCkptTs cleanup check, ng_id="
                    << node_group_id
                    << ", has_data_store_write=" << has_data_store_write
+                   << ", ack_total=" << agg.total
                    << ", ack_success=" << agg.success
                    << ", min_ack_ckpt_ts=" << agg.min_ack_ckpt_ts;
-        if (agg.success > 0 &&
+        if (agg.total > 0 && agg.success == agg.total &&
             agg.min_ack_ckpt_ts != std::numeric_limits<uint64_t>::max())
         {
             store_hd->DeleteStandbySnapshotsBefore(node_group_id,
@@ -194,6 +197,7 @@ void BrocastPrimaryCkptTs(NodeGroupId node_group_id,
                           "DeleteStandbySnapshotsBefore, ng_id="
                        << node_group_id
                        << ", has_data_store_write=" << has_data_store_write
+                       << ", ack_total=" << agg.total
                        << ", ack_success=" << agg.success
                        << ", min_ack_ckpt_ts=" << agg.min_ack_ckpt_ts;
         }

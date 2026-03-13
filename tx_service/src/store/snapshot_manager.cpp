@@ -44,6 +44,7 @@ struct RequestSyncSnapshotAggregate
     bthread::Mutex mux;
     bthread::ConditionVariable cv;
     size_t pending{0};
+    size_t success{0};
     uint64_t min_ack_ckpt_ts{std::numeric_limits<uint64_t>::max()};
 };
 
@@ -76,6 +77,7 @@ public:
             std::lock_guard<bthread::Mutex> lk(agg->mux);
             if (succ)
             {
+                agg->success++;
                 agg->min_ack_ckpt_ts = std::min(agg->min_ack_ckpt_ts,
                                                 ctx_->resp.current_ckpt_ts());
             }
@@ -284,6 +286,8 @@ void SnapshotManager::SyncWithStandby()
     }
 
     uint64_t min_ack_ckpt_ts = std::numeric_limits<uint64_t>::max();
+    size_t sync_snapshot_rpc_count = 0;
+    size_t sync_snapshot_success = 0;
 #ifdef DATA_STORE_TYPE_ELOQDSS_ELOQSTORE
     RequestSyncSnapshotAggregate sync_snapshot_agg;
 #endif
@@ -342,6 +346,7 @@ void SnapshotManager::SyncWithStandby()
                 {
                     std::lock_guard<bthread::Mutex> lk(sync_snapshot_agg.mux);
                     sync_snapshot_agg.pending++;
+                    sync_snapshot_rpc_count++;
                 }
                 DLOG(INFO) << "RequestSyncSnapshot async dispatch, ng_id="
                            << req.ng_id()
@@ -432,11 +437,13 @@ void SnapshotManager::SyncWithStandby()
             sync_snapshot_agg.cv.wait(lk);
         }
         min_ack_ckpt_ts = sync_snapshot_agg.min_ack_ckpt_ts;
+        sync_snapshot_success = sync_snapshot_agg.success;
     }
 #endif
 
 #ifdef DATA_STORE_TYPE_ELOQDSS_ELOQSTORE
-    if (standby_snapshot_ts != 0 &&
+    if (standby_snapshot_ts != 0 && sync_snapshot_rpc_count > 0 &&
+        sync_snapshot_success == sync_snapshot_rpc_count &&
         min_ack_ckpt_ts != std::numeric_limits<uint64_t>::max())
     {
         DLOG(INFO)
@@ -444,8 +451,19 @@ void SnapshotManager::SyncWithStandby()
                "acked ts, ng_id="
             << node_group << ", term=" << leader_term
             << ", current_snapshot_ts=" << standby_snapshot_ts
+            << ", sync_snapshot_rpc_count=" << sync_snapshot_rpc_count
+            << ", sync_snapshot_success=" << sync_snapshot_success
             << ", min_ack_ckpt_ts=" << min_ack_ckpt_ts;
         store_hd_->DeleteStandbySnapshotsBefore(node_group, min_ack_ckpt_ts);
+    }
+    else if (standby_snapshot_ts != 0)
+    {
+        DLOG(INFO) << "SyncWithStandby skip DeleteStandbySnapshotsBefore, "
+                   << "ng_id=" << node_group << ", term=" << leader_term
+                   << ", current_snapshot_ts=" << standby_snapshot_ts
+                   << ", sync_snapshot_rpc_count=" << sync_snapshot_rpc_count
+                   << ", sync_snapshot_success=" << sync_snapshot_success
+                   << ", min_ack_ckpt_ts=" << min_ack_ckpt_ts;
     }
 #endif
 }
