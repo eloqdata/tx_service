@@ -2337,7 +2337,8 @@ bool LocalCcShards::EnqueueRangeDataSyncTask(
     bool can_be_skipped,
     uint64_t &last_sync_ts,
     std::shared_ptr<DataSyncStatus> status,
-    CcHandlerResult<Void> *hres)
+    CcHandlerResult<Void> *hres,
+    bool high_priority)
 {
     const RangeInfo *range_info = range_entry->GetRangeInfo();
     NodeGroupId range_ng =
@@ -2371,19 +2372,33 @@ bool LocalCcShards::EnqueueRangeDataSyncTask(
             // Push task to worker task queue.
             std::lock_guard<std::mutex> task_worker_lk(
                 data_sync_worker_ctx_.mux_);
-            data_sync_task_queue_[range_info->PartitionId() %
-                                  data_sync_task_queue_.size()]
-                .emplace_back(
-                    std::make_shared<DataSyncTask>(table_name,
-                                                   range_info->PartitionId(),
-                                                   range_info->VersionTs(),
-                                                   ng_id,
-                                                   ng_term,
-                                                   data_sync_ts,
-                                                   status,
-                                                   is_dirty,
-                                                   can_be_skipped,
-                                                   hres));
+            std::deque<std::shared_ptr<DataSyncTask>> &task_queue =
+                data_sync_task_queue_[range_info->PartitionId() %
+                                      data_sync_task_queue_.size()];
+
+            auto task =
+                std::make_shared<DataSyncTask>(table_name,
+                                               range_info->PartitionId(),
+                                               range_info->VersionTs(),
+                                               ng_id,
+                                               ng_term,
+                                               data_sync_ts,
+                                               status,
+                                               is_dirty,
+                                               can_be_skipped,
+                                               hres,
+                                               nullptr,
+                                               false,
+                                               false,
+                                               high_priority);
+            if (high_priority)
+            {
+                task_queue.push_front(std::move(task));
+            }
+            else
+            {
+                task_queue.push_back(std::move(task));
+            }
             return true;
         }
         else
@@ -2391,11 +2406,12 @@ bool LocalCcShards::EnqueueRangeDataSyncTask(
             if (can_be_skipped)
             {
                 assert(hres == nullptr);
+                assert(!high_priority);
                 // '0' means have no pending task on queue.
                 if (iter->second->latest_pending_task_ts_ == 0)
                 {
                     iter->second->latest_pending_task_ts_ = data_sync_ts;
-                    iter->second->pending_tasks_.push(
+                    iter->second->pending_tasks_.push_back(
                         std::make_shared<DataSyncTask>(
                             table_name,
                             range_info->PartitionId(),
@@ -2424,7 +2440,7 @@ bool LocalCcShards::EnqueueRangeDataSyncTask(
                 // This task can't be skipped(DataMigration, CraeteIndex,
                 // LastCheckpoint). So we push this task to the pending task
                 // queue of `Limiter`
-                iter->second->pending_tasks_.push(
+                auto task =
                     std::make_shared<DataSyncTask>(table_name,
                                                    range_info->PartitionId(),
                                                    range_info->VersionTs(),
@@ -2434,7 +2450,19 @@ bool LocalCcShards::EnqueueRangeDataSyncTask(
                                                    status,
                                                    is_dirty,
                                                    can_be_skipped,
-                                                   hres));
+                                                   hres,
+                                                   nullptr,
+                                                   false,
+                                                   false,
+                                                   high_priority);
+                if (high_priority)
+                {
+                    iter->second->pending_tasks_.push_front(std::move(task));
+                }
+                else
+                {
+                    iter->second->pending_tasks_.push_back(std::move(task));
+                }
                 return true;
             }
         }
@@ -2509,22 +2537,24 @@ void LocalCcShards::EnqueueDataSyncTaskForSplittingRange(
     TxKey old_start_key = range_entry->GetRangeInfo()->StartTxKey();
     TxKey old_end_key = range_entry->GetRangeInfo()->EndTxKey();
     // The old range
-    data_sync_task_queue_[range_entry->GetRangeInfo()->PartitionId() %
-                          data_sync_task_queue_.size()]
-        .emplace_back(std::make_shared<DataSyncTask>(
-            table_name,
-            ng_id,
-            ng_term,
-            table_schema,
-            range_entry,
-            range_entry->GetRangeInfo()->StartTxKey(),
-            *new_keys->begin(),
-            data_sync_ts,
-            is_dirty,
-            false,
-            txn,
-            status,
-            hres));
+    auto task_queue =
+        data_sync_task_queue_[range_entry->GetRangeInfo()->PartitionId() %
+                              data_sync_task_queue_.size()];
+    auto old_range_task = std::make_shared<DataSyncTask>(
+        table_name,
+        ng_id,
+        ng_term,
+        table_schema,
+        range_entry,
+        range_entry->GetRangeInfo()->StartTxKey(),
+        *new_keys->begin(),
+        data_sync_ts,
+        is_dirty,
+        false,
+        txn,
+        status,
+        hres);
+    task_queue.push_front(std::move(old_range_task));
 
     bool need_copy_range = store_hd_->NeedCopyRange();
 
@@ -2534,20 +2564,22 @@ void LocalCcShards::EnqueueDataSyncTaskForSplittingRange(
         TxKey end_key =
             (i == new_keys->size() - 1 ? range_entry->GetRangeInfo()->EndTxKey()
                                        : (*new_keys)[i + 1].GetShallowCopy());
-        data_sync_task_queue_[new_range_id % data_sync_task_queue_.size()]
-            .emplace_back(std::make_shared<DataSyncTask>(table_name,
-                                                         ng_id,
-                                                         ng_term,
-                                                         table_schema,
-                                                         range_entry,
-                                                         (*new_keys)[i],
-                                                         end_key,
-                                                         data_sync_ts,
-                                                         is_dirty,
-                                                         need_copy_range,
-                                                         txn,
-                                                         status,
-                                                         hres));
+        auto task_queue =
+            data_sync_task_queue_[new_range_id % data_sync_task_queue_.size()];
+        auto new_range_task = std::make_shared<DataSyncTask>(table_name,
+                                                             ng_id,
+                                                             ng_term,
+                                                             table_schema,
+                                                             range_entry,
+                                                             (*new_keys)[i],
+                                                             end_key,
+                                                             data_sync_ts,
+                                                             is_dirty,
+                                                             need_copy_range,
+                                                             txn,
+                                                             status,
+                                                             hres);
+        task_queue.push_front(std::move(new_range_task));
     }
 
     data_sync_worker_ctx_.cv_.notify_all();
@@ -2641,7 +2673,7 @@ bool LocalCcShards::EnqueueDataSyncTaskToCore(
             if (iter->second->latest_pending_task_ts_ == 0)
             {
                 iter->second->latest_pending_task_ts_ = data_sync_ts;
-                iter->second->pending_tasks_.push(
+                iter->second->pending_tasks_.push_back(
                     std::make_shared<DataSyncTask>(table_name,
                                                    core_idx,
                                                    0,
@@ -2672,7 +2704,7 @@ bool LocalCcShards::EnqueueDataSyncTaskToCore(
             // LastCheckpoint). Because these operations need to explicitly
             // flush data into storage, rather than relying on other
             // checkpoint tasks.
-            iter->second->pending_tasks_.push(
+            iter->second->pending_tasks_.push_back(
                 std::make_shared<DataSyncTask>(table_name,
                                                core_idx,
                                                0,
@@ -2910,6 +2942,33 @@ void LocalCcShards::EnqueueDataSyncTaskForBucket(
             return;
         }
     }
+    data_sync_worker_ctx_.cv_.notify_all();
+}
+
+void LocalCcShards::CreateSplitRangeDataSyncTask(const TableName &table_name,
+                                                 uint32_t ng_id,
+                                                 int64_t ng_term,
+                                                 int32_t range_id,
+                                                 uint64_t data_sync_ts)
+{
+    std::shared_ptr<DataSyncStatus> status =
+        std::make_shared<DataSyncStatus>(ng_id, ng_term, false);
+    TableRangeEntry *range_entry = const_cast<TableRangeEntry *>(
+        GetTableRangeEntry(table_name, ng_id, range_id));
+    assert(range_entry != nullptr);
+    uint64_t last_sync_ts = 0;
+    EnqueueRangeDataSyncTask(table_name,
+                             ng_id,
+                             ng_term,
+                             range_entry,
+                             data_sync_ts,
+                             false,
+                             false,
+                             last_sync_ts,
+                             status,
+                             nullptr,
+                             true);
+
     data_sync_worker_ctx_.cv_.notify_all();
 }
 
@@ -5126,12 +5185,20 @@ void LocalCcShards::PopPendingTask(NodeGroupId ng_id,
     {
         std::shared_ptr<DataSyncTask> task =
             iter->second->pending_tasks_.front();
-        iter->second->pending_tasks_.pop();
+        iter->second->pending_tasks_.pop_front();
         task_limiter_lk.unlock();
 
         std::lock_guard<std::mutex> task_worker_lk(data_sync_worker_ctx_.mux_);
-        data_sync_task_queue_[id % data_sync_task_queue_.size()].push_back(
-            std::move(task));
+        auto &task_queue =
+            data_sync_task_queue_[id % data_sync_task_queue_.size()];
+        if (task->high_priority_)
+        {
+            task_queue.push_front(std::move(task));
+        }
+        else
+        {
+            task_queue.push_back(std::move(task));
+        }
         data_sync_worker_ctx_.cv_.notify_all();
     }
     else
@@ -5163,7 +5230,7 @@ void LocalCcShards::ClearAllPendingTasks(NodeGroupId ng_id,
         auto &task = iter->second->pending_tasks_.front();
         task->SetError(CcErrorCode::REQUESTED_TABLE_NOT_EXISTS);
         task->SetScanTaskFinished();
-        iter->second->pending_tasks_.pop();
+        iter->second->pending_tasks_.pop_front();
     }
 
     task_limiters_.erase(iter);
