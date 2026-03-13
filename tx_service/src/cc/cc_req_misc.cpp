@@ -1535,4 +1535,59 @@ bool ShardCleanCc::Execute(CcShard &ccs)
     }
 }
 
+void FetchTableRangeSizeCc::Reset(const TableName &table_name,
+                                  int32_t partition_id,
+                                  const TxKey &start_key,
+                                  CcShard *ccs,
+                                  NodeGroupId ng_id,
+                                  int64_t ng_term)
+{
+    table_name_ = &table_name;
+    partition_id_ = partition_id;
+    start_key_ = start_key.GetShallowCopy();
+    node_group_id_ = ng_id;
+    node_group_term_ = ng_term;
+    ccs_ = ccs;
+    error_code_ = 0;
+    store_range_size_ = 0;
+}
+
+bool FetchTableRangeSizeCc::ValidTermCheck()
+{
+    int64_t ng_leader_term = Sharder::Instance().LeaderTerm(node_group_id_);
+    return ng_leader_term == node_group_term_;
+}
+
+bool FetchTableRangeSizeCc::Execute(CcShard &ccs)
+{
+    if (!ValidTermCheck())
+    {
+        error_code_ = static_cast<uint32_t>(CcErrorCode::NG_TERM_CHANGED);
+    }
+
+    bool succ = (error_code_ == 0);
+    CcMap *ccm = ccs.GetCcm(*table_name_, node_group_id_);
+    assert(ccm != nullptr);
+    bool need_split = ccm->InitRangeSize(
+        static_cast<uint32_t>(partition_id_), store_range_size_, succ);
+
+    if (need_split)
+    {
+        uint64_t data_sync_ts = ccs.local_shards_.ClockTs();
+        ccs.CreateSplitRangeDataSyncTask(*table_name_,
+                                         node_group_id_,
+                                         node_group_term_,
+                                         partition_id_,
+                                         data_sync_ts);
+    }
+
+    return true;
+}
+
+void FetchTableRangeSizeCc::SetFinish(uint32_t error)
+{
+    error_code_ = error;
+    ccs_->Enqueue(this);
+}
+
 }  // namespace txservice

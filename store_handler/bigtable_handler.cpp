@@ -710,6 +710,13 @@ void EloqDS::BigTableHandler::FetchRangeSlices(
                      fetch_cc));
 }
 
+void EloqDS::BigTableHandler::FetchTableRangeSize(
+    txservice::FetchTableRangeSizeCc *fetch_cc)
+{
+    LOG(ERROR) << "BigTableHandler::FetchTableRangeSize not implemented";
+    assert(false);
+}
+
 void EloqDS::BigTableHandler::OnFetchRangeSlices(
     google::cloud::future<google::cloud::StatusOr<
         std::pair<bool, google::cloud::bigtable::Row>>> f,
