@@ -156,7 +156,10 @@ DEFINE_uint32(eloq_store_max_write_concurrency,
               "EloqStore max write concurrency");
 DEFINE_uint32(eloq_store_direct_io_buffer_pool_size,
               16,
-              "EloqStore DirectIO buffer pool size per shard.");
+              "EloqStore DirectIO buffer pool size per shard");
+DEFINE_bool(eloq_store_cloud_auto_credentials,
+            true,
+            "EloqStore automatically detect OSS credentials");
 
 namespace EloqDS
 {
@@ -809,6 +812,12 @@ EloqStoreConfig::EloqStoreConfig(const INIReader &config_reader,
                 FLAGS_eloq_store_cloud_request_threads;
         }
     }
+    eloqstore_configs_.cloud_auto_credentials =
+        !CheckCommandLineFlagIsDefault("eloq_store_cloud_auto_credentials")
+            ? FLAGS_eloq_store_cloud_auto_credentials
+            : config_reader.GetBoolean("store",
+                                       "eloq_store_cloud_auto_credentials",
+                                       FLAGS_eloq_store_cloud_auto_credentials);
 }
 
 void EloqStoreConfig::ParseStoragePath(

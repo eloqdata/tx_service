@@ -264,6 +264,7 @@ void SnapshotManager::SyncWithStandby()
                     on_synced_req.set_snapshot_path(req.dest_path());
                     on_synced_req.set_standby_node_term(
                         req.standby_node_term());
+                    on_synced_req.set_ng_id(req.ng_id());
                     stub.OnSnapshotSynced(
                         &cntl, &on_synced_req, &on_sync_resp, nullptr);
                     if (cntl.Failed())

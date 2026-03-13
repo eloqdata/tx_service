@@ -66,6 +66,7 @@ struct RangeSliceBatchPlan
     std::vector<std::string> segment_keys;     // Owned string buffers
     std::vector<std::string> segment_records;  // Owned string buffers
     size_t version;
+    int32_t range_size{0};
 
     // Clear method for reuse
     void Clear()
@@ -74,6 +75,7 @@ struct RangeSliceBatchPlan
         segment_keys.clear();
         segment_records.clear();
         version = 0;
+        range_size = 0;
     }
 };
 
@@ -194,7 +196,14 @@ public:
 
     bool IsSharedStorage() const override
     {
-        return true;
+        if (bind_data_shard_with_ng_ && data_store_service_ != nullptr)
+        {
+            return data_store_service_->IsCloudMode();
+        }
+        else
+        {
+            return true;
+        }
     }
 
     void ScheduleTimerTasks() override;
@@ -271,6 +280,9 @@ public:
 
     void FetchRangeSlices(txservice::FetchRangeSlicesReq *fetch_cc) override;
 
+    void FetchTableRangeSize(
+        txservice::FetchTableRangeSizeCc *fetch_cc) override;
+
     bool DeleteOutOfRangeData(
         const txservice::TableName &table_name,
         int32_t partition_id,
@@ -339,7 +351,8 @@ public:
     std::string EncodeRangeValue(int32_t range_id,
                                  uint64_t range_version,
                                  uint64_t version,
-                                 uint32_t segment_cnt);
+                                 uint32_t segment_cnt,
+                                 int32_t range_size);
     std::string EncodeRangeSliceKey(const txservice::TableName &table_name,
                                     int32_t range_id,
                                     uint32_t segment_id);
@@ -471,6 +484,11 @@ public:
     {
         return true;
     }
+
+    bool OnSnapshotReceived(
+        const txservice::remote::OnSnapshotSyncedRequest *req) override;
+
+    bool OnUpdateStandbyCkptTs(uint32_t ng_id, int64_t ng_term) override;
 
     /**
      * Serialize a record with is_deleted flag and record string.
@@ -642,6 +660,7 @@ private:
         uint64_t range_version,
         uint64_t version,
         uint32_t segment_cnt,
+        int32_t range_size,
         RangeMetadataAccumulator &accumulator);
 
     void DispatchRangeMetadataBatches(
@@ -922,6 +941,11 @@ private:
         ::google::protobuf::Closure *closure,
         DataStoreServiceClient &client,
         const remote::CommonResult &result);
+
+    friend void FetchRangeSizeCallback(void *data,
+                                       ::google::protobuf::Closure *closure,
+                                       DataStoreServiceClient &client,
+                                       const remote::CommonResult &result);
 };
 
 struct UpsertTableData

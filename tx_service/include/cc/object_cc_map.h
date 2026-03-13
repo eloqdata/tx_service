@@ -1174,7 +1174,8 @@ public:
             assert(acquired_lock != LockType::NoLock);
             ReleaseCceLock(cce->GetKeyLock(), cce, txn, ng_id, acquired_lock);
             obj_result.lock_acquired_ = LockType::NoLock;
-            obj_result.commit_ts_ = shard_->Now();
+            obj_result.commit_ts_ = 1;
+            obj_result.lock_ts_ = shard_->Now();
             obj_result.rec_status_ = RecordStatus::Deleted;
             obj_result.ttl_ = UINT64_MAX;
             hd_res->SetFinished();
@@ -1309,7 +1310,8 @@ public:
             // If this command ignores the old kv value, just pass
             // in as deleted and current ts so that the tx will
             // commit at a larger commit ts.
-            obj_result.commit_ts_ = shard_->Now();
+            obj_result.commit_ts_ = 1;
+            obj_result.lock_ts_ = shard_->Now();
             obj_result.rec_status_ = RecordStatus::Deleted;
         }
         else
@@ -1569,7 +1571,8 @@ public:
             next_ts_offset = ts_offset;
             next_status_offset = status_offset;
 
-            auto [key_str, rec_str, ts_str, status_str] = *entry_tuples;
+            auto [key_str, rec_str, ts_str, status_str, flags_str] =
+                *entry_tuples;
             // deserialize key
             decoded_key.Deserialize(
                 key_str.data(), next_key_offset, KeySchema());
@@ -1737,7 +1740,8 @@ public:
                                   key_offset,
                                   rec_offset,
                                   ts_offset,
-                                  status_offset);
+                                  status_offset,
+                                  0);
             shard_->Enqueue(shard_->LocalCoreId(), &req);
             return false;
         }

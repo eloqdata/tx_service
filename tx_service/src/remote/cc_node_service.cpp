@@ -1172,6 +1172,7 @@ void CcNodeService::UploadBatch(
 
     NodeGroupId ng_id = request->node_group_id();
     int64_t ng_term = request->node_group_term();
+    int32_t partition_id = request->partition_id();
 
     std::string_view table_name_sv{request->table_name_str()};
     TableType table_type =
@@ -1199,14 +1200,15 @@ void CcNodeService::UploadBatch(
                << " for table:" << table_name.Trace();
 
     LocalCcShards *cc_shards = Sharder::Instance().GetLocalCcShards();
-    size_t core_cnt = cc_shards->Count();
+    size_t core_cnt = (partition_id >= 0) ? 1 : cc_shards->Count();
     uint32_t batch_size = request->batch_size();
 
     auto write_entry_tuple =
         UploadBatchCc::WriteEntryTuple(request->keys(),
                                        request->records(),
                                        request->commit_ts(),
-                                       request->rec_status());
+                                       request->rec_status(),
+                                       request->range_size_flags());
 
     size_t finished_req = 0;
     bthread::Mutex req_mux;
@@ -1217,6 +1219,7 @@ void CcNodeService::UploadBatch(
     req.Reset(table_name,
               ng_id,
               ng_term,
+              partition_id,
               core_cnt,
               batch_size,
               write_entry_tuple,
@@ -1224,9 +1227,18 @@ void CcNodeService::UploadBatch(
               req_cv,
               finished_req,
               data_type);
-    for (size_t core = 0; core < core_cnt; ++core)
+    if (partition_id >= 0)
     {
-        cc_shards->EnqueueToCcShard(core, &req);
+        uint16_t dest_core =
+            static_cast<uint16_t>((partition_id & 0x3FF) % cc_shards->Count());
+        cc_shards->EnqueueToCcShard(dest_core, &req);
+    }
+    else
+    {
+        for (size_t core = 0; core < cc_shards->Count(); ++core)
+        {
+            cc_shards->EnqueueToCcShard(core, &req);
+        }
     }
 
     {
@@ -1383,30 +1395,32 @@ void CcNodeService::UploadBatchSlices(
     }
 
     UploadBatchSlicesCc req;
-    req.Reset(
-        table_name, ng_id, ng_term, core_cnt, write_entry_tuple, slices_info);
+    req.Reset(table_name, ng_id, ng_term, write_entry_tuple, slices_info);
 
-    // Select a core randomly to parse items. After parsed, this core will push
-    // the request to other cores to emplace keys.
-    uint16_t rand_core = std::rand() % core_cnt;
-    cc_shards->EnqueueToCcShard(rand_core, &req);
+    uint16_t dest_core =
+        static_cast<uint16_t>((slices_info->new_range_ & 0x3FF) % core_cnt);
+    cc_shards->EnqueueToCcShard(dest_core, &req);
     req.Wait();
 
     CcErrorCode err = CcErrorCode::NO_ERROR;
     if (req.ErrorCode() != CcErrorCode::NO_ERROR)
     {
-        LOG(INFO) << "CcNodeService UploadBatch RPC of #ng" << ng_id
+        LOG(INFO) << "CcNodeService UploadBatchRecordCache RPC of #ng" << ng_id
+                  << " for range#" << slices_info->range_ << ", new_range#"
+                  << slices_info->new_range_
                   << " finished with error: " << static_cast<uint32_t>(err);
         err = req.ErrorCode();
     }
     else
     {
-        DLOG(INFO) << "CcNodeService UploadBatch RPC of #ng" << ng_id
+        DLOG(INFO) << "CcNodeService UploadBatchRecordCache RPC of #ng" << ng_id
+                   << " for range#" << slices_info->range_ << ", new_range#"
+                   << slices_info->new_range_
                    << " finished with error: " << static_cast<uint32_t>(err);
     }
 
     response->set_error_code(ToRemoteType::ConvertCcErrorCode(err));
-    response->set_ng_term(ng_term);
+    response->set_ng_term(req.CcNgTerm());
 }
 
 void CcNodeService::FetchPayload(
@@ -1672,6 +1686,15 @@ void CcNodeService::UpdateStandbyCkptTs(
 
     if (Sharder::Instance().GetDataStoreHandler()->IsSharedStorage())
     {
+        auto store_hd = Sharder::Instance().GetLocalCcShards()->store_hd_;
+        const bool has_data_store_write = request->has_data_store_write();
+
+        if (store_hd && has_data_store_write)
+        {
+            store_hd->OnUpdateStandbyCkptTs(request->node_group_id(),
+                                            request->ng_term());
+        }
+
         Sharder::Instance().UpdateNodeGroupCkptTs(
             request->node_group_id(), request->primary_succ_ckpt_ts());
     }

@@ -158,6 +158,7 @@ public:
     //-- range partition
     void FetchTableRanges(FetchTableRangesCc *fetch_cc) override;
     void FetchRangeSlices(FetchRangeSlicesReq *fetch_cc) override;
+    void FetchTableRangeSize(FetchTableRangeSizeCc *fetch_cc) override;
 
     bool DeleteOutOfRangeData(
         const txservice::TableName &table_name,

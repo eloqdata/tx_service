@@ -377,44 +377,14 @@ void CcStreamReceiver::PreProcessScanResp(
         ToLocalType::ConvertSlicePosition(msg->slice_position());
 
     const char *tuple_cnt_info = msg->tuple_cnt().data();
-    uint16_t remote_core_cnt = *((const uint16_t *) tuple_cnt_info);
-    tuple_cnt_info += sizeof(uint16_t);
-    range_scanner.ResetShards(remote_core_cnt);
+    size_t tuple_cnt = *((const size_t *) tuple_cnt_info);
+
+    bool remote_no_more_data = tuple_cnt == 0;
 
     const uint64_t *term_ptr = (const uint64_t *) msg->term().data();
 
-    // The offset_table stores the start postition of meta data like `key_ts`
-    // for all remote cores
-    std::vector<size_t> offset_table;
-    size_t meta_offset = 0;
-
-    range_scanner.SetPartitionNgTerm(-1);
-
-    bool all_remote_core_no_more_data = true;
-
-    for (uint16_t core_id = 0; core_id < remote_core_cnt; ++core_id)
-    {
-        size_t tuple_cnt = *((const size_t *) tuple_cnt_info);
-        tuple_cnt_info += sizeof(size_t);
-
-        all_remote_core_no_more_data =
-            all_remote_core_no_more_data && (tuple_cnt == 0);
-
-        // All term value are same. We only set `partition_ng_term` once.
-        if (range_scanner.PartitionNgTerm() == -1 && tuple_cnt != 0)
-        {
-            range_scanner.SetPartitionNgTerm(term_ptr[0]);
-        }
-
-        offset_table.push_back(meta_offset);
-        meta_offset += tuple_cnt;
-        term_ptr += tuple_cnt;
-    }
-
-    assert(offset_table.size() == remote_core_cnt);
-
     // No more data.
-    if (all_remote_core_no_more_data)
+    if (remote_no_more_data)
     {
         if (msg->error_code() != 0)
         {
@@ -430,21 +400,18 @@ void CcStreamReceiver::PreProcessScanResp(
         RecycleScanSliceResp(std::move(msg));
         return;
     }
-
-    // Worker count means how many tx processer to parallel deserialize msg.
-    // remote core count is not always equal to local core count
-    size_t worker_cnt = std::min((size_t) remote_core_cnt,
-                                 Sharder::Instance().GetLocalCcShardsCount());
+    else
+    {
+        range_scanner.SetPartitionNgTerm(term_ptr[0]);
+    }
 
     ProcessRemoteScanRespCc *request =
         process_remote_scan_resp_pool_.NextRequest();
-    request->Reset(
-        this, std::move(msg), std::move(offset_table), hd_res, worker_cnt);
+    request->Reset(this, std::move(msg), hd_res);
 
-    for (size_t idx = 0; idx < worker_cnt; ++idx)
-    {
-        local_shards_.EnqueueCcRequest(idx, request);
-    }
+    uint32_t core_rand = butil::fast_rand();
+    uint16_t dest_core = core_rand % local_shards_.Count();
+    local_shards_.EnqueueCcRequest(dest_core, request);
 }
 
 void CcStreamReceiver::OnReceiveCcMsg(std::unique_ptr<CcMessage> msg)
@@ -1110,7 +1077,7 @@ void CcStreamReceiver::OnReceiveCcMsg(std::unique_ptr<CcMessage> msg)
                 msg->handler_addr());
 
             if (txm->TxNumber() != msg->tx_number() ||
-                txm->CommandId() != msg->command_id())
+                txm->CommandId() != msg->command_id() || hd_res->IsFinished())
             {
                 // The original tx has terminated and the tx machine has been
                 // recycled. The response message is directed to an obsolete tx.
@@ -1128,7 +1095,18 @@ void CcStreamReceiver::OnReceiveCcMsg(std::unique_ptr<CcMessage> msg)
         // result into read set to release acquired lock.
 
         uint32_t node_group_id = scan_next_res.node_group_id();
-        CcScanner *scanner = hd_res->Value().ccm_scanner_;
+        ScanNextResult &scan_next_result = hd_res->Value();
+        CcScanner *scanner = scan_next_result.ccm_scanner_;
+        BucketScanPlan *current_scan_plan = scan_next_result.current_scan_plan_;
+        if (scanner == nullptr || current_scan_plan == nullptr)
+        {
+            // The handler result has been reset while this response is in
+            // transit. Drops this stale response to avoid dereferencing a
+            // recycled scanner pointer.
+            msg_pool_.enqueue(std::move(msg));
+            txm->ReleaseSharedForwardLatch();
+            break;
+        }
         ::txservice::remote::ShardCacheMsgMap *shard_caches =
             scan_next_res.mutable_shard_cache_map();
         for (auto &[shard_code, shard_cache] :
@@ -1225,11 +1203,10 @@ void CcStreamReceiver::OnReceiveCcMsg(std::unique_ptr<CcMessage> msg)
         }
         else
         {
-            hd_res->Value().current_scan_plan_->UpdateNodeGroupTerm(
-                node_group_id, scan_next_res.term());
+            current_scan_plan->UpdateNodeGroupTerm(node_group_id,
+                                                   scan_next_res.term());
             auto *ng_bucket_scan_progress =
-                hd_res->Value().current_scan_plan_->GetBucketScanProgress(
-                    node_group_id);
+                current_scan_plan->GetBucketScanProgress(node_group_id);
             assert(ng_bucket_scan_progress);
 
             for (const auto &[core_idx, progress] :
@@ -1273,9 +1250,8 @@ void CcStreamReceiver::OnReceiveCcMsg(std::unique_ptr<CcMessage> msg)
     case CcMessage::MessageType::CcMessage_MessageType_ScanSliceRequest:
     {
         RemoteScanSlice *scan_slice_req = scan_slice_pool.NextRequest();
-        uint32_t local_core_cnt = (uint32_t) local_shards_.Count();
         TX_TRACE_ASSOCIATE(msg.get(), scan_slice_req);
-        scan_slice_req->Reset(std::move(msg), local_core_cnt);
+        scan_slice_req->Reset(std::move(msg));
         // The scan slice request is enqueued into the first core, where it pins
         // the slice and sets the scan's end key. The request is then dispatched
         // to remaining cores to scan the slice in parallel.

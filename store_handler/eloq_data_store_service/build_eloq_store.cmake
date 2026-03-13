@@ -102,6 +102,7 @@ set(ELOQ_STORE_SOURCES
     ${ELOQ_STORE_SOURCE_DIR}/src/file_gc.cpp
     ${ELOQ_STORE_SOURCE_DIR}/src/kill_point.cpp
     ${ELOQ_STORE_SOURCE_DIR}/src/replayer.cpp
+    ${ELOQ_STORE_SOURCE_DIR}/src/storage/cloud_backend.cpp
     ${ELOQ_STORE_SOURCE_DIR}/src/storage/data_page.cpp
     ${ELOQ_STORE_SOURCE_DIR}/src/storage/data_page_builder.cpp
     ${ELOQ_STORE_SOURCE_DIR}/src/storage/index_page_builder.cpp

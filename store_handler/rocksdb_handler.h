@@ -346,6 +346,9 @@ public:
 
     void FetchRangeSlices(txservice::FetchRangeSlicesReq *fetch_cc) override;
 
+    void FetchTableRangeSize(
+        txservice::FetchTableRangeSizeCc *fetch_cc) override;
+
     bool DeleteOutOfRangeDataInternal(std::string delete_from_partition_sql,
                                       int32_t partition_id,
                                       const txservice::TxKey *start_k);

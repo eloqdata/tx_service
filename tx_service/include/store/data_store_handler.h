@@ -22,6 +22,7 @@
 #pragma once
 
 #include <cstddef>
+#include <cstdint>
 #include <memory>
 #include <string>
 #include <string_view>
@@ -133,6 +134,8 @@ public:
     virtual void FetchTableRanges(FetchTableRangesCc *fetch_cc) = 0;
 
     virtual void FetchRangeSlices(FetchRangeSlicesReq *fetch_cc) = 0;
+
+    virtual void FetchTableRangeSize(FetchTableRangeSizeCc *fetch_cc) = 0;
 
     /**
      * @brief Read a row from base table or skindex table in datastore with
@@ -401,6 +404,13 @@ public:
     virtual bool OnSnapshotReceived(
         const txservice::remote::OnSnapshotSyncedRequest *req)
     {
+        return true;
+    }
+
+    virtual bool OnUpdateStandbyCkptTs(uint32_t ng_id, int64_t ng_term)
+    {
+        (void) ng_id;
+        (void) ng_term;
         return true;
     }
 

@@ -960,34 +960,55 @@ bool DataStoreServiceClient::UpsertTableStatistics(
 void DataStoreServiceClient::FetchTableRanges(
     txservice::FetchTableRangesCc *fetch_cc)
 {
-    fetch_cc->kv_partition_id_ = 0;
-    uint32_t data_shard_id =
-        GetShardIdByPartitionId(fetch_cc->kv_partition_id_, false);
+    const std::string_view table_name_sv = fetch_cc->table_name_.StringView();
+    const size_t total_partitions = TotalRangeSlicesKvPartitions();
 
-    fetch_cc->kv_start_key_.reserve(fetch_cc->table_name_.StringView().size() +
-                                    KEY_SEPARATOR.size());
-    fetch_cc->kv_start_key_.append(fetch_cc->table_name_.StringView());
-    fetch_cc->kv_start_key_.append(KEY_SEPARATOR);
-    fetch_cc->kv_end_key_ = fetch_cc->kv_start_key_;
-    fetch_cc->kv_end_key_.back()++;
-    fetch_cc->kv_session_id_.clear();
+    fetch_cc->partition_ranges_vec_.clear();
+    fetch_cc->partition_ranges_vec_.resize(total_partitions);
 
-    fetch_cc->partition_ranges_vec_.resize(TotalRangeSlicesKvPartitions());
+    fetch_cc->partition_scan_states_.clear();
+    fetch_cc->partition_scan_states_.resize(total_partitions);
 
-    ScanNext(kv_range_table_name,
-             fetch_cc->kv_partition_id_,
-             data_shard_id,
-             fetch_cc->kv_start_key_,
-             fetch_cc->kv_end_key_,
-             fetch_cc->kv_session_id_,
-             true,
-             true,
-             false,
-             true,
-             100,
-             nullptr,
-             fetch_cc,
-             &FetchTableRangesCallback);
+    {
+        std::unique_lock<bthread::Mutex> lk(fetch_cc->finish_mux_);
+        fetch_cc->error_code_ = 0;
+        fetch_cc->remaining_partitions_ =
+            static_cast<int32_t>(total_partitions);
+    }
+
+    for (int32_t kv_part_id = 0;
+         kv_part_id < static_cast<int32_t>(total_partitions);
+         ++kv_part_id)
+    {
+        auto &scan_state = fetch_cc->partition_scan_states_[kv_part_id];
+
+        scan_state.kv_start_key_.clear();
+        scan_state.kv_start_key_.reserve(table_name_sv.size() +
+                                         KEY_SEPARATOR.size());
+        scan_state.kv_start_key_.append(table_name_sv);
+        scan_state.kv_start_key_.append(KEY_SEPARATOR);
+
+        scan_state.kv_end_key_ = scan_state.kv_start_key_;
+        scan_state.kv_end_key_.back()++;
+        scan_state.kv_session_id_.clear();
+
+        uint32_t data_shard_id = GetShardIdByPartitionId(kv_part_id, false);
+
+        ScanNext(kv_range_table_name,
+                 kv_part_id,
+                 data_shard_id,
+                 scan_state.kv_start_key_,
+                 scan_state.kv_end_key_,
+                 scan_state.kv_session_id_,
+                 true,
+                 true,
+                 false,
+                 true,
+                 100,
+                 nullptr,
+                 fetch_cc,
+                 &FetchTableRangesCallback);
+    }
 }
 
 /**
@@ -1036,6 +1057,30 @@ void DataStoreServiceClient::FetchRangeSlices(
          fetch_cc->kv_start_key_,
          fetch_cc,
          &FetchRangeSlicesCallback);
+}
+
+void DataStoreServiceClient::FetchTableRangeSize(
+    txservice::FetchTableRangeSizeCc *fetch_cc)
+{
+    txservice::TableName range_table_name(fetch_cc->table_name_->StringView(),
+                                          txservice::TableType::RangePartition,
+                                          fetch_cc->table_name_->Engine());
+
+    int32_t kv_partition_id =
+        KvPartitionIdOfRangeSlices(range_table_name, fetch_cc->partition_id_);
+    uint32_t shard_id = GetShardIdByPartitionId(kv_partition_id, false);
+
+    auto catalog_factory = GetCatalogFactory(range_table_name.Engine());
+    assert(catalog_factory != nullptr);
+    fetch_cc->kv_start_key_ =
+        EncodeRangeKey(catalog_factory, range_table_name, fetch_cc->start_key_);
+
+    Read(kv_range_table_name,
+         kv_partition_id,
+         shard_id,
+         fetch_cc->kv_start_key_,
+         fetch_cc,
+         &FetchRangeSizeCallback);
 }
 
 /**
@@ -1254,16 +1299,19 @@ std::string DataStoreServiceClient::EncodeRangeKey(
  * @param range_version The version of the range.
  * @param version The general version number.
  * @param segment_cnt The number of segments in the range.
+ * @param range_size The size of the range.
  * @return Binary string containing the encoded range value.
  */
 std::string DataStoreServiceClient::EncodeRangeValue(int32_t range_id,
                                                      uint64_t range_version,
                                                      uint64_t version,
-                                                     uint32_t segment_cnt)
+                                                     uint32_t segment_cnt,
+                                                     int32_t range_size)
 {
     std::string kv_range_record;
     kv_range_record.reserve(sizeof(int32_t) + sizeof(uint64_t) +
-                            sizeof(uint64_t) + sizeof(uint32_t));
+                            sizeof(uint64_t) + sizeof(uint32_t) +
+                            sizeof(int32_t));
     kv_range_record.append(reinterpret_cast<const char *>(&range_id),
                            sizeof(int32_t));
     kv_range_record.append(reinterpret_cast<const char *>(&range_version),
@@ -1273,6 +1321,8 @@ std::string DataStoreServiceClient::EncodeRangeValue(int32_t range_id,
     // segment_cnt of slices
     kv_range_record.append(reinterpret_cast<const char *>(&segment_cnt),
                            sizeof(uint32_t));
+    kv_range_record.append(reinterpret_cast<const char *>(&range_size),
+                           sizeof(int32_t));
     return kv_range_record;
 }
 
@@ -1340,6 +1390,7 @@ RangeSliceBatchPlan DataStoreServiceClient::PrepareRangeSliceBatches(
     RangeSliceBatchPlan plan;
     plan.segment_cnt = 0;
     plan.version = version;
+    plan.range_size = 0;
 
     // Estimate capacity based on slices size
     plan.segment_keys.reserve(slices.size() / 10 + 1);  // Rough estimate
@@ -1388,6 +1439,7 @@ RangeSliceBatchPlan DataStoreServiceClient::PrepareRangeSliceBatches(
                               sizeof(uint32_t));
         segment_record.append(slice_start_key.Data(), key_size);
         uint32_t slice_size = static_cast<uint32_t>(slices[i]->Size());
+        plan.range_size += static_cast<int32_t>(slice_size);
         segment_record.append(reinterpret_cast<const char *>(&slice_size),
                               sizeof(uint32_t));
     }
@@ -1553,6 +1605,7 @@ void DataStoreServiceClient::EnqueueRangeMetadataRecord(
     uint64_t range_version,
     uint64_t version,
     uint32_t segment_cnt,
+    int32_t range_size,
     RangeMetadataAccumulator &accumulator)
 {
     // Compute kv_table_name and kv_partition_id
@@ -1563,8 +1616,8 @@ void DataStoreServiceClient::EnqueueRangeMetadataRecord(
     // Encode key and value
     std::string key_str =
         EncodeRangeKey(catalog_factory, table_name, range_start_key);
-    std::string rec_str =
-        EncodeRangeValue(partition_id, range_version, version, segment_cnt);
+    std::string rec_str = EncodeRangeValue(
+        partition_id, range_version, version, segment_cnt, range_size);
 
     // Get or create entry in accumulator
     auto key = std::make_pair(kv_table_name, kv_partition_id);
@@ -1732,6 +1785,7 @@ bool DataStoreServiceClient::UpdateRangeSlices(
                                                    req.range_slices_,
                                                    req.partition_id_);
         uint32_t segment_cnt = slice_plan.segment_cnt;
+        int32_t range_size = slice_plan.range_size;
         int32_t kv_partition_id =
             KvPartitionIdOfRangeSlices(*req.table_name_, req.partition_id_);
         auto iter = slice_plans.find(kv_partition_id);
@@ -1756,6 +1810,7 @@ bool DataStoreServiceClient::UpdateRangeSlices(
                                    req.range_version_,
                                    req.ckpt_ts_,
                                    segment_cnt,
+                                   range_size,
                                    meta_acc);
     }
 
@@ -1957,6 +2012,7 @@ bool DataStoreServiceClient::UpdateRangeSlices(
                                range_version,
                                version,
                                segment_cnt,
+                               slice_plans[0].range_size,
                                meta_acc);
 
     SyncConcurrentRequest *meta_sync_concurrent =
@@ -2048,6 +2104,7 @@ bool DataStoreServiceClient::UpsertRanges(
         auto slice_plan = PrepareRangeSliceBatches(
             table_name, version, range.slices_, range.partition_id_);
         uint32_t segment_cnt = slice_plan.segment_cnt;
+        int32_t range_size = slice_plan.range_size;
 
         int32_t kv_partition_id =
             KvPartitionIdOfRangeSlices(table_name, range.partition_id_);
@@ -2071,6 +2128,7 @@ bool DataStoreServiceClient::UpsertRanges(
             version,  // range_version (using version for now)
             version,
             segment_cnt,
+            range_size,
             meta_acc);
     }
 
@@ -3706,13 +3764,9 @@ bool DataStoreServiceClient::OnLeaderStart(uint32_t ng_id,
 
     if (data_store_service_ != nullptr)
     {
-#if defined(DATA_STORE_TYPE_ELOQDSS_ELOQSTORE)
-        // Stop prewarm operation first (node is becoming leader, no longer
-        // standby)
-        data_store_service_->StopPrewarmOperation(ng_id);
-#endif
+        // If the node is standby, close the data store opened before.
+        data_store_service_->CloseDataStore(ng_id);
 
-        // Then proceed with leader startup
         std::unordered_set<uint16_t> bucket_ids;
         for (auto &[bucket_id, bucket_info] : bucket_infos_)
         {
@@ -3802,39 +3856,6 @@ void DataStoreServiceClient::OnStartFollowing(uint32_t ng_id,
     // Update the client config
     SetupConfig(cluster_manager);
 
-#if defined(DATA_STORE_TYPE_ELOQDSS_ELOQSTORE)
-    // Start prewarm operation for standby node
-    if (data_store_service_ != nullptr)
-    {
-        // Get bucket_ids for this node group (similar to OnLeaderStart)
-        std::unordered_set<uint16_t> bucket_ids;
-        for (auto &[bucket_id, bucket_info] : bucket_infos_)
-        {
-            if (bucket_info->BucketOwner() == ng_id)
-            {
-                bucket_ids.insert(bucket_id);
-            }
-        }
-
-        if (!bucket_ids.empty())
-        {
-            size_t bucket_count = bucket_ids.size();
-            if (data_store_service_->StartPrewarmOperation(
-                    ng_id, std::move(bucket_ids), term))
-            {
-                LOG(INFO) << "Started prewarm operation for standby node, "
-                          << "shard_id: " << ng_id
-                          << ", bucket_ids count: " << bucket_count;
-            }
-        }
-        else
-        {
-            LOG(WARNING) << "No bucket_ids found for ng_id: " << ng_id
-                         << ", skip starting prewarm operation";
-        }
-    }
-#endif
-
     Connect();
 }
 
@@ -3846,6 +3867,54 @@ void DataStoreServiceClient::OnStartFollowing(uint32_t ng_id,
  */
 void DataStoreServiceClient::OnShutdown()
 {
+}
+
+bool DataStoreServiceClient::OnSnapshotReceived(
+    const txservice::remote::OnSnapshotSyncedRequest *req)
+{
+#ifdef DATA_STORE_TYPE_ELOQDSS_ELOQSTORE
+    if (!bind_data_shard_with_ng_)
+    {
+        return true;
+    }
+
+    if (data_store_service_ != nullptr)
+    {
+        uint32_t ng_id = req->ng_id();
+        std::unordered_set<uint16_t> bucket_ids;
+        for (auto &[bucket_id, bucket_info] : bucket_infos_)
+        {
+            if (bucket_info->BucketOwner() == ng_id)
+            {
+                bucket_ids.insert(bucket_id);
+            }
+        }
+        int64_t term =
+            txservice::PrimaryTermFromStandbyTerm(req->standby_node_term());
+        data_store_service_->OnSnapshotReceived(
+            ng_id, term, std::move(bucket_ids), req->snapshot_path());
+
+        return true;
+    }
+#endif
+    return true;
+}
+
+bool DataStoreServiceClient::OnUpdateStandbyCkptTs(uint32_t ng_id,
+                                                   int64_t ng_term)
+{
+#ifdef DATA_STORE_TYPE_ELOQDSS_ELOQSTORE
+    if (!bind_data_shard_with_ng_)
+    {
+        return true;
+    }
+
+    if (data_store_service_ != nullptr)
+    {
+        data_store_service_->OnUpdateStandbyCkptTs(ng_id, ng_term);
+    }
+#endif
+    return true;
 }
 
 /**
@@ -4651,7 +4720,8 @@ bool DataStoreServiceClient::InitTableRanges(
 
     std::string key_str =
         EncodeRangeKey(catalog_factory, table_name, *neg_inf_key);
-    std::string rec_str = EncodeRangeValue(init_range_id, version, version, 0);
+    std::string rec_str =
+        EncodeRangeValue(init_range_id, version, version, 0, 0);
 
     keys.emplace_back(std::string_view(key_str.data(), key_str.size()));
     records.emplace_back(std::string_view(rec_str.data(), rec_str.size()));

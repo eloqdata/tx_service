@@ -1963,13 +1963,14 @@ void TransactionExecution::Process(ReadOperation &read)
                     // error to the tx read request.
                     assert(!lock_range_bucket_result_.IsError());
 
-                    // Uses the lower 10 bits of the key's hash code to shard
-                    // the key across CPU cores in a cc node.
-                    uint32_t residual = key.Hash() & 0x3FF;
+                    // Uses the partition id to shard the key across CPU cores
+                    // in a cc node.
+                    partition_id = range_rec_.GetRangeInfo()->PartitionId();
+                    uint32_t residual =
+                        static_cast<uint32_t>((partition_id & 0x3FF));
                     NodeGroupId range_ng =
                         range_rec_.GetRangeOwnerNg()->BucketOwner();
                     key_shard_code = range_ng << 10 | residual;
-                    partition_id = range_rec_.GetRangeInfo()->PartitionId();
                 }
             }
             else
@@ -4611,12 +4612,17 @@ bool TransactionExecution::FillDataLogRequest(WriteToLogOp &write_log)
                 // ngs, write log for both ngs.
                 uint32_t forward_ng_id =
                     Sharder::Instance().ShardToCcNodeGroup(forward_shard_code);
-                auto table_rec_it = ng_table_set.try_emplace(forward_ng_id);
+                auto [table_rec_it, inserted] =
+                    ng_table_set.try_emplace(forward_ng_id);
+                if (!inserted)
+                {
+                    continue;
+                }
                 std::unordered_map<
                     TableName,
                     std::vector<
                         std::pair<const TxKey *, const WriteSetEntry *>>>
-                    &table_rec_set = table_rec_it.first->second.second;
+                    &table_rec_set = table_rec_it->second.second;
 
                 auto rec_vec_it = table_rec_set.emplace(
                     std::piecewise_construct,
@@ -5288,6 +5294,7 @@ void TransactionExecution::Process(PostProcessOp &post_process)
         {
             for (const auto &[key, write_entry] : pair.second)
             {
+                bool on_dirty_range = write_entry.on_dirty_range_;
                 CcReqStatus ret =
                     cc_handler_->PostWrite(tx_number,
                                            tx_term_,
@@ -5297,10 +5304,12 @@ void TransactionExecution::Process(PostProcessOp &post_process)
                                            write_entry.rec_.get(),
                                            write_entry.op_,
                                            write_entry.key_shard_code_,
-                                           post_process.hd_result_);
+                                           post_process.hd_result_,
+                                           write_entry.partition_id_,
+                                           on_dirty_range);
                 update_post_cnt(ret);
 
-                for (auto &[forward_shard_code, cce_addr] :
+                for (auto &[forward_shard_code, forward_pair] :
                      write_entry.forward_addr_)
                 {
                     CcReqStatus ret =
@@ -5308,11 +5317,13 @@ void TransactionExecution::Process(PostProcessOp &post_process)
                                                tx_term_,
                                                command_id,
                                                commit_ts_,
-                                               cce_addr,
+                                               forward_pair.second,
                                                write_entry.rec_.get(),
                                                write_entry.op_,
                                                forward_shard_code,
-                                               post_process.hd_result_);
+                                               post_process.hd_result_,
+                                               forward_pair.first,
+                                               on_dirty_range);
                     update_post_cnt(ret);
                 }
             }
@@ -5394,9 +5405,10 @@ void TransactionExecution::Process(PostProcessOp &post_process)
                     // Keys that were not successfully locked in the cc
                     // map do not need post-processing.
 
-                    for (const auto &[forward_shard_code, cce_addr] :
+                    for (const auto &[forward_shard_code, forward_pair] :
                          write_entry.forward_addr_)
                     {
+                        const CcEntryAddr &cce_addr = forward_pair.second;
                         if (cce_addr.Term() >= 0)
                         {
                             assert(!cce_addr.Empty());
@@ -7584,6 +7596,41 @@ void TransactionExecution::Process(BatchReadOperation &batch_read_op)
                 .append(std::to_string(this->tx_term_));
         });
 
+    if (batch_read_op.batch_read_tx_req_->is_catalog_batch_)
+    {
+        batch_read_op.is_running_ = true;
+        std::vector<txservice::ScanBatchTuple> &read_batch =
+            batch_read_op.batch_read_tx_req_->read_batch_;
+        const size_t N = read_batch.size();
+        for (size_t i = 0; i < N; ++i)
+        {
+            TxKey &key = read_batch[i].key_;
+            TxRecord &rec = *read_batch[i].record_;
+
+            bool finished = cc_handler_->ReadLocal(
+                catalog_ccm_name,
+                key,
+                rec,
+                ReadType::Inside,
+                tx_number_.load(std::memory_order_relaxed),
+                tx_term_,
+                CommandId(),
+                start_ts_,
+                batch_read_op.hd_result_vec_[i],
+                IsolationLevel::RepeatableRead,
+                CcProtocol::Locking,
+                false,
+                false,
+                true);
+            if (finished)
+            {
+                command_id_.fetch_add(1, std::memory_order_relaxed);
+            }
+        }
+        StartTiming();
+        return;
+    }
+
     batch_read_op.is_running_ = true;
     const TableName &table_name = *batch_read_op.batch_read_tx_req_->tab_name_;
     std::vector<txservice::ScanBatchTuple> &read_batch =
@@ -7728,17 +7775,19 @@ void TransactionExecution::Process(BatchReadOperation &batch_read_op)
         TxRecord &rec = *read_batch[idx].record_;
 
         uint32_t sharding_code = 0;
-        size_t key_hash = key.Hash();
-        sharding_code =
-            read_batch[idx].cce_addr_.NodeGroupId() << 10 | (key_hash & 0x3FF);
         int32_t partition_id = -1;
         if (table_name.IsHashPartitioned())
         {
+            size_t key_hash = key.Hash();
+            sharding_code = read_batch[idx].cce_addr_.NodeGroupId() << 10 |
+                            (key_hash & 0x3FF);
             partition_id = Sharder::MapKeyHashToHashPartitionId(key_hash);
         }
         else
         {
             partition_id = batch_read_op.range_ids_[idx];
+            sharding_code = read_batch[idx].cce_addr_.NodeGroupId() << 10 |
+                            (partition_id & 0x3FF);
         }
         cc_handler_->Read(
             table_name,
@@ -7780,7 +7829,8 @@ void TransactionExecution::PostProcess(BatchReadOperation &batch_read_op)
     state_stack_.pop_back();
     assert(state_stack_.empty());
 
-    if (lock_range_bucket_result_.IsError())
+    if (!batch_read_op.batch_read_tx_req_->is_catalog_batch_ &&
+        lock_range_bucket_result_.IsError())
     {
         DLOG(ERROR)
             << "BatchReadOperation failed when acquire range bucket locks. "
@@ -7793,7 +7843,8 @@ void TransactionExecution::PostProcess(BatchReadOperation &batch_read_op)
     }
 
     const BatchReadTxRequest *read_req = batch_read_op.batch_read_tx_req_;
-    const TableName *table_name = read_req->tab_name_;
+    const TableName *table_name =
+        read_req->is_catalog_batch_ ? &catalog_ccm_name : read_req->tab_name_;
     std::vector<ScanBatchTuple> &read_batch = read_req->read_batch_;
     CcErrorCode err = CcErrorCode::NO_ERROR;
 

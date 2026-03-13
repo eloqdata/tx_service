@@ -23,6 +23,7 @@
 
 #include <bthread/condition_variable.h>
 
+#include <atomic>
 #include <condition_variable>
 #include <cstdint>
 #include <deque>
@@ -66,6 +67,16 @@ struct DataSyncStatus
         need_truncate_log_ = false;
     }
 
+    void MarkDataStoreWrite()
+    {
+        has_data_store_write_.store(true, std::memory_order_release);
+    }
+
+    bool HasDataStoreWrite() const
+    {
+        return has_data_store_write_.load(std::memory_order_acquire);
+    }
+
     NodeGroupId node_group_id_;
     int64_t node_group_term_;
     // Number of unfinished scan tasks. We keep track of this separately since
@@ -86,6 +97,9 @@ struct DataSyncStatus
     // Whether there are entries being skipped by DataSyncScan. For EloqKV,
     // entries with buffer commands might be skipped.
     bool has_skipped_entries_{false};
+
+    // Whether there is any data written to datastore in this DataSync round.
+    std::atomic<bool> has_data_store_write_{false};
 
     // If kvstore need do PersistKV after PutAll, we must update ccentry's
     // ckpt_ts after PersistKV done. Since we do data sync in small baches and
@@ -124,7 +138,8 @@ public:
         CcHandlerResult<Void> *hres,
         std::function<bool(size_t)> filter_lambda = nullptr,
         bool forward_cache = false,
-        bool is_standby_node_ckpt = false)
+        bool is_standby_node_ckpt = false,
+        bool high_priority = false)
         : table_name_(table_name),
           id_(id),
           range_version_(range_version),
@@ -138,7 +153,8 @@ public:
           is_dirty_(is_dirty),
           sync_ts_adjustable_(need_adjust_ts),
           task_res_(hres),
-          need_update_ckpt_ts_(true)
+          need_update_ckpt_ts_(true),
+          high_priority_(high_priority)
     {
     }
 
@@ -244,6 +260,7 @@ public:
         cce_entries_;
 
     bool need_update_ckpt_ts_{true};
+    bool high_priority_{false};
 };
 
 struct FlushTaskEntry
