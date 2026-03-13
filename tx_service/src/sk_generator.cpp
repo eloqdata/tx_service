@@ -324,7 +324,6 @@ void SkGenerator::ScanAndEncodeIndex(const TxKey *start_key,
                                           scan_ts_,
                                           node_group_id_,
                                           ng_term,
-                                          core_cnt,
                                           scan_batch_size_,
                                           tx_number,
                                           start_key,
@@ -336,12 +335,7 @@ void SkGenerator::ScanAndEncodeIndex(const TxKey *start_key,
     CcErrorCode scan_res = CcErrorCode::NO_ERROR;
     bool scan_data_drained = false;
     bool scan_pk_finished = false;
-    std::vector<TxKey> last_finished_pos;
-    last_finished_pos.reserve(core_cnt);
-    for (size_t i = 0; i < core_cnt; ++i)
-    {
-        last_finished_pos.emplace_back(start_key->Clone());
-    }
+    TxKey last_finished_pos = start_key->Clone();
 
     TxKey target_key;
     const TxRecord *target_rec = nullptr;
@@ -355,11 +349,8 @@ void SkGenerator::ScanAndEncodeIndex(const TxKey *start_key,
     {
         batch_tuples = 0;
 
-        uint32_t core_rand = butil::fast_rand();
-        // The scan slice request is dispatched to the first core. The first
-        // core tries to pin the slice if necessary and if succeeds, further
-        // dispatches the request to remaining cores for parallel scans.
-        cc_shards->EnqueueToCcShard(core_rand % core_cnt, &scan_req);
+        uint16_t dest_core = (partition_id_ & 0x3FF) % cc_shards->Count();
+        cc_shards->EnqueueToCcShard(dest_core, &scan_req);
         scan_req.Wait();
 
         if (scan_req.IsError())
@@ -381,17 +372,14 @@ void SkGenerator::ScanAndEncodeIndex(const TxKey *start_key,
             {
                 std::this_thread::sleep_for(std::chrono::seconds(30));
                 // Reset the paused key.
-                for (size_t i = 0; i < core_cnt; ++i)
+                const TxKey &paused_key = scan_req.PausePos().first;
+                if (!scan_req.IsDrained())
                 {
-                    const TxKey &paused_key = scan_req.PausePos(i).first;
-                    if (!scan_req.IsDrained(i))
-                    {
-                        // Should use one copy of the key, instead of move the
-                        // ownership of the key, because this round of scan may
-                        // failed again.
-                        assert(paused_key.IsOwner());
-                        paused_key.Copy(last_finished_pos[i]);
-                    }
+                    // Should use one copy of the key, instead of move the
+                    // ownership of the key, because this round of scan may
+                    // failed again.
+                    assert(paused_key.IsOwner());
+                    paused_key.Copy(last_finished_pos);
                 }
                 scan_req.Reset();
                 scan_pk_finished = false;
@@ -431,71 +419,63 @@ void SkGenerator::ScanAndEncodeIndex(const TxKey *start_key,
             }
             sk_encoder = sk_encoder_vec_[vec_idx].get();
 
-            for (size_t core_idx = 0; core_idx < core_cnt; ++core_idx)
+            for (size_t key_idx = 0; key_idx < scan_req.accumulated_scan_cnt_;
+                 ++key_idx)
             {
-                for (size_t key_idx = 0;
-                     key_idx < scan_req.accumulated_scan_cnt_.at(core_idx);
-                     ++key_idx)
+                auto &tuple = scan_req.DataSyncVec().at(key_idx);
+                target_key = tuple.Key();
+                target_rec = tuple.Payload();
+                version_ts = tuple.commit_ts_;
+                if (tuple.payload_status_ == RecordStatus::Deleted)
                 {
-                    auto &tuple = scan_req.DataSyncVec(core_idx).at(key_idx);
-                    target_key = tuple.Key();
-                    target_rec = tuple.Payload();
-                    version_ts = tuple.commit_ts_;
-                    if (tuple.payload_status_ == RecordStatus::Deleted)
-                    {
-                        // Skip the deleted record.
-                        continue;
-                    }
-                    assert(target_key.KeyPtr() != nullptr &&
-                           target_rec != nullptr);
-
-                    int32_t appended_sk_size = sk_encoder->AppendPackedSk(
-                        &target_key, target_rec, version_ts, index_set);
-                    if (appended_sk_size < 0)
-                    {
-                        LOG(ERROR)
-                            << "ScanAndEncodeIndex: Failed to encode "
-                            << "key for index: " << tbl_name_it->StringView()
-                            << "of ng#" << node_group_id_;
-                        // Finish the pack sk operation
-                        task_result_ = CcErrorCode::PACK_SK_ERR;
-                        pack_sk_err_ = std::move(sk_encoder->GetError());
-                        return;
-                    }
-                } /* End of each key */
-
-                if (tbl_name_it == new_indexes_name_->cbegin())
-                {
-                    batch_tuples += scan_req.accumulated_scan_cnt_.at(core_idx);
-                    if (batch_tuples % 10240 == 0 &&
-                        !task_status_->CheckTxTermStatus())
-                    {
-                        LOG(WARNING)
-                            << "ScanAndEncodeIndex: Terminate this task cause "
-                            << "the tx leader transferred of ng#"
-                            << node_group_id_;
-                        task_status_->TerminateGenerateSk();
-                        task_result_ = CcErrorCode::TX_NODE_NOT_LEADER;
-                        return;
-                    }
-                    // Update the last finished key.
-                    auto &paused_key = scan_req.PausePos(core_idx).first;
-                    if (!scan_req.IsDrained(core_idx))
-                    {
-                        if (last_finished_pos[core_idx].IsOwner())
-                        {
-                            last_finished_pos[core_idx].Copy(paused_key);
-                        }
-                        else
-                        {
-                            last_finished_pos[core_idx] = paused_key.Clone();
-                        }
-                    }
-                    // If the data is drained
-                    scan_data_drained =
-                        scan_req.IsDrained(core_idx) && scan_data_drained;
+                    // Skip the deleted record.
+                    continue;
                 }
-            } /* End of each core */
+                assert(target_key.KeyPtr() != nullptr && target_rec != nullptr);
+
+                int32_t appended_sk_size = sk_encoder->AppendPackedSk(
+                    &target_key, target_rec, version_ts, index_set);
+                if (appended_sk_size < 0)
+                {
+                    LOG(ERROR) << "ScanAndEncodeIndex: Failed to encode "
+                               << "key for index: " << tbl_name_it->StringView()
+                               << "of ng#" << node_group_id_;
+                    // Finish the pack sk operation
+                    task_result_ = CcErrorCode::PACK_SK_ERR;
+                    pack_sk_err_ = std::move(sk_encoder->GetError());
+                    return;
+                }
+            } /* End of each key */
+
+            if (tbl_name_it == new_indexes_name_->cbegin())
+            {
+                batch_tuples += scan_req.accumulated_scan_cnt_;
+                if (batch_tuples % 10240 == 0 &&
+                    !task_status_->CheckTxTermStatus())
+                {
+                    LOG(WARNING)
+                        << "ScanAndEncodeIndex: Terminate this task cause "
+                        << "the tx leader transferred of ng#" << node_group_id_;
+                    task_status_->TerminateGenerateSk();
+                    task_result_ = CcErrorCode::TX_NODE_NOT_LEADER;
+                    return;
+                }
+                // Update the last finished key.
+                auto &paused_key = scan_req.PausePos().first;
+                if (!scan_req.IsDrained())
+                {
+                    if (last_finished_pos.IsOwner())
+                    {
+                        last_finished_pos.Copy(paused_key);
+                    }
+                    else
+                    {
+                        last_finished_pos = paused_key.Clone();
+                    }
+                }
+                // If the data is drained
+                scan_data_drained = scan_req.IsDrained();
+            }
         } /* End of foreach new_indexes_name */
 
         scan_pk_finished = scan_data_drained;
@@ -680,37 +660,41 @@ CcErrorCode UploadIndexContext::UploadIndexInternal(
     size_t finished_upload_count = 0;
     CcErrorCode upload_res_code = CcErrorCode::NO_ERROR;
     size_t upload_req_count = 0;
+
     for (auto &[table_name, ng_entries] : ng_index_set)
     {
-        for (auto &[ng_id, entry_vec] : ng_entries)
+        for (auto &[ng_id, range_entries] : ng_entries)
         {
-            entry_vec_size = entry_vec.size();
-            batch_req_cnt = (entry_vec_size / upload_batch_size_ +
-                             (entry_vec_size % upload_batch_size_ ? 1 : 0));
-
             int64_t &expected_term = leader_terms_.at(ng_id);
 
-            size_t start_idx = 0;
-            size_t end_idx =
-                (batch_req_cnt > 1 ? upload_batch_size_ : entry_vec_size);
-            for (size_t idx = 0; idx < batch_req_cnt; ++idx)
+            for (auto &[range_id, entry_vec] : range_entries)
             {
-                SendIndexes(table_name,
-                            ng_id,
-                            expected_term,
-                            entry_vec,
-                            (end_idx - start_idx),
-                            start_idx,
-                            req_mux,
-                            req_cv,
-                            finished_upload_count,
-                            upload_res_code);
-                ++upload_req_count;
-                // Next batch
-                start_idx = end_idx;
-                end_idx = ((start_idx + upload_batch_size_) > entry_vec_size
-                               ? entry_vec_size
-                               : (start_idx + upload_batch_size_));
+                entry_vec_size = entry_vec.size();
+                batch_req_cnt = (entry_vec_size / upload_batch_size_ +
+                                 (entry_vec_size % upload_batch_size_ ? 1 : 0));
+
+                size_t start_idx = 0;
+                size_t end_idx =
+                    (batch_req_cnt > 1 ? upload_batch_size_ : entry_vec_size);
+                for (size_t idx = 0; idx < batch_req_cnt; ++idx)
+                {
+                    SendIndexes(table_name,
+                                ng_id,
+                                expected_term,
+                                range_id,
+                                entry_vec,
+                                (end_idx - start_idx),
+                                start_idx,
+                                req_mux,
+                                req_cv,
+                                finished_upload_count,
+                                upload_res_code);
+                    ++upload_req_count;
+                    start_idx = end_idx;
+                    end_idx = ((start_idx + upload_batch_size_) > entry_vec_size
+                                   ? entry_vec_size
+                                   : (start_idx + upload_batch_size_));
+                }
             }
         }
     }
@@ -730,7 +714,8 @@ void UploadIndexContext::SendIndexes(
     const TableName &table_name,
     NodeGroupId dest_ng_id,
     int64_t &ng_term,
-    const std::vector<WriteEntry *> &write_entry_vec,
+    int32_t partition_id,
+    const std::vector<std::pair<uint8_t, WriteEntry *>> &write_entry_vec,
     size_t batch_size,
     size_t start_key_idx,
     bthread::Mutex &req_mux,
@@ -740,14 +725,13 @@ void UploadIndexContext::SendIndexes(
 {
     uint32_t dest_node_id = Sharder::Instance().LeaderNodeId(dest_ng_id);
     LocalCcShards *cc_shards = Sharder::Instance().GetLocalCcShards();
-    size_t core_cnt = cc_shards->Count();
     if (dest_node_id == cc_shards->NodeId())
     {
         UploadBatchCc *req_ptr = NextRequest();
         req_ptr->Reset(table_name,
                        dest_ng_id,
                        ng_term,
-                       core_cnt,
+                       partition_id,
                        batch_size,
                        start_key_idx,
                        write_entry_vec,
@@ -757,10 +741,9 @@ void UploadIndexContext::SendIndexes(
                        res_code,
                        UploadBatchType::SkIndexData);
 
-        for (size_t core = 0; core < core_cnt; ++core)
-        {
-            cc_shards->EnqueueToCcShard(core, req_ptr);
-        }
+        uint16_t dest_core =
+            static_cast<uint16_t>((partition_id & 0x3FF) % cc_shards->Count());
+        cc_shards->EnqueueToCcShard(dest_core, req_ptr);
     }
     else
     {
@@ -834,6 +817,7 @@ void UploadIndexContext::SendIndexes(
             remote::ToRemoteType::ConvertTableType(table_name.Type()));
         req_ptr->set_table_engine(
             remote::ToRemoteType::ConvertTableEngine(table_name.Engine()));
+        req_ptr->set_partition_id(partition_id);
         size_t end_key_idx = start_key_idx + batch_size;
         req_ptr->set_kind(remote::UploadBatchKind::SK_DATA);
         req_ptr->set_batch_size(batch_size);
@@ -853,15 +837,24 @@ void UploadIndexContext::SendIndexes(
         std::string *rec_status_str = req_ptr->mutable_rec_status();
         // All generated sk should be normal status.
         const RecordStatus rec_status = RecordStatus::Normal;
+        // range_size_flags
+        req_ptr->clear_range_size_flags();
+        std::string *range_size_flags_str = req_ptr->mutable_range_size_flags();
+
         for (size_t idx = start_key_idx; idx < end_key_idx; ++idx)
         {
-            write_entry_vec.at(idx)->key_.Serialize(*keys_str);
-            write_entry_vec.at(idx)->rec_->Serialize(*recs_str);
-            val_ptr = reinterpret_cast<const char *>(
-                &(write_entry_vec.at(idx)->commit_ts_));
+            uint8_t range_size_flags = write_entry_vec.at(idx).first;
+            WriteEntry *write_entry = write_entry_vec.at(idx).second;
+            write_entry->key_.Serialize(*keys_str);
+            write_entry->rec_->Serialize(*recs_str);
+            val_ptr =
+                reinterpret_cast<const char *>(&(write_entry->commit_ts_));
             commit_ts_str->append(val_ptr, len_sizeof);
             rec_status_str->append(reinterpret_cast<const char *>(&rec_status),
                                    sizeof(rec_status));
+            range_size_flags_str->append(
+                reinterpret_cast<const char *>(&range_size_flags),
+                sizeof(range_size_flags));
         }
 
         brpc::Controller *cntl_ptr = upload_batch_closure->Controller();
@@ -989,17 +982,24 @@ void UploadIndexContext::AdvanceWriteEntryForRangeInfo(
     size_t new_range_idx = 0;
 
     auto *range_info = range_record.GetRangeInfo();
+    const int32_t range_id = range_info->PartitionId();
+    const uint8_t default_flags =
+        0x10 | static_cast<uint8_t>(range_info->IsDirty());
     while (cur_write_entry_it != next_range_start)
     {
         WriteEntry &write_entry = *cur_write_entry_it;
-        auto ng_it = ng_write_entrys.try_emplace(range_ng);
-        ng_it.first->second.push_back(&write_entry);
 
+        auto &range_vec = ng_write_entrys[range_ng][range_id];
+        range_vec.emplace_back(default_flags, &write_entry);
+        uint8_t *old_range_flags_ptr = &range_vec.back().first;
+
+        uint8_t *new_bucket_flags_ptr = nullptr;
         // If current range is migrating, forward to new range owner.
         if (new_bucket_ng != UINT32_MAX)
         {
-            ng_write_entrys.try_emplace(new_bucket_ng)
-                .first->second.push_back(&write_entry);
+            auto &new_bucket_vec = ng_write_entrys[new_bucket_ng][range_id];
+            new_bucket_vec.emplace_back(default_flags, &write_entry);
+            new_bucket_flags_ptr = &new_bucket_vec.back().first;
         }
 
         // If range is splitting and the key will fall on a new range after
@@ -1016,18 +1016,25 @@ void UploadIndexContext::AdvanceWriteEntryForRangeInfo(
         }
         if (new_range_ng != UINT32_MAX)
         {
-            if (new_range_ng != range_ng)
-            {
-                ng_write_entrys.try_emplace(new_range_ng)
-                    .first->second.push_back(&write_entry);
-            }
+            const int32_t new_range_id =
+                range_info->NewPartitionId()->at(new_range_idx - 1);
+
+            ng_write_entrys[new_range_ng][new_range_id].emplace_back(
+                default_flags, &write_entry);
+            // Only update range size on the new range
+            *old_range_flags_ptr &= 0x0F;
+
             // If the new range is migrating, forward to the new owner of new
             // range.
             if (new_range_new_bucket_ng != UINT32_MAX &&
                 new_range_new_bucket_ng != range_ng)
             {
-                ng_write_entrys.try_emplace(new_range_new_bucket_ng)
-                    .first->second.push_back(&write_entry);
+                ng_write_entrys[new_range_new_bucket_ng][new_range_id]
+                    .emplace_back(default_flags, &write_entry);
+                if (new_bucket_flags_ptr)
+                {
+                    *new_bucket_flags_ptr &= 0x0F;
+                }
             }
         }
 
