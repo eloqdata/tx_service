@@ -104,6 +104,12 @@ public:
     using TemplateCcMap<KeyT, ValueT, false, false>::Type;
     using TemplateCcMap<KeyT, ValueT, false, false>::CleanEntry;
 
+    // Enable the payload-size-aware large-value zone policy for EloqKV.
+    bool IsLargeValueZoneEnabled() const override
+    {
+        return txservice_large_value_threshold > 0;
+    }
+
     bool Execute(ApplyCc &req) override
     {
         TX_TRACE_ACTION_WITH_CONTEXT(
@@ -1202,6 +1208,10 @@ public:
                     CommitCommandOnPayload(
                         cce->payload_.cur_payload_, status, *cmd);
                 }
+                if (status == RecordStatus::Normal)
+                {
+                    MaybeMarkAndRezoneAsLargeValue(ccp, cce->PayloadSize());
+                }
 
                 // Reset the dirty status.
                 cce->SetDirtyPayload(nullptr);
@@ -1443,6 +1453,10 @@ public:
                     cce->ReleaseForwardEntry();
                 shard_->ForwardStandbyMessage(entry_ptr.release());
             }
+            if (payload_status == RecordStatus::Normal)
+            {
+                MaybeMarkAndRezoneAsLargeValue(ccp, cce->PayloadSize());
+            }
             bool was_dirty = cce->IsDirty();
             cce->SetCommitTsPayloadStatus(commit_ts, payload_status);
             this->OnCommittedUpdate(cce, was_dirty);
@@ -1655,6 +1669,7 @@ public:
                 }
                 cce->payload_.PassInCurrentPayload(std::move(object_uptr));
                 object_uptr = nullptr;
+                MaybeMarkAndRezoneAsLargeValue(cc_page, cce->PayloadSize());
             }
             else
             {
@@ -1983,6 +1998,10 @@ public:
                     cce->payload_.cur_payload_ == nullptr
                         ? RecordStatus::Deleted
                         : RecordStatus::Normal;
+                if (payload_status == RecordStatus::Normal)
+                {
+                    MaybeMarkAndRezoneAsLargeValue(ccp, cce->PayloadSize());
+                }
                 bool was_dirty = cce->IsDirty();
                 cce->SetCommitTsPayloadStatus(commit_ts, payload_status);
                 this->OnCommittedUpdate(cce, was_dirty);
@@ -2455,6 +2474,11 @@ public:
                 ++TemplateCcMap<KeyT, ValueT, false, false>::normal_obj_sz_;
             }
 
+            if (payload_status == RecordStatus::Normal)
+            {
+                MaybeMarkAndRezoneAsLargeValue(ccp, cce->PayloadSize());
+            }
+
             this->OnCommittedUpdate(cce, was_dirty);
 
             // Must update dirty_commit_ts. Otherwise, this entry may be
@@ -2585,6 +2609,10 @@ public:
             {
                 size_t offset = 0;
                 cce->payload_.DeserializeCurrentPayload(rec_str.data(), offset);
+                if (status == RecordStatus::Normal)
+                {
+                    MaybeMarkAndRezoneAsLargeValue(ccp, cce->PayloadSize());
+                }
             }
             else
             {
