@@ -456,11 +456,11 @@ public:
     {
         std::unique_lock<std::mutex> lk(table_ranges_heap_mux_);
         // table_ranges_heap_ usage commented out - use default heap
-        // if (!table_ranges_heap_)
-        // {
-        //     table_ranges_thread_id_ = mi_thread_id();
-        //     table_ranges_heap_ = mi_heap_new();
-        // }
+        if (!table_ranges_heap_)
+        {
+            table_ranges_thread_id_ = mi_thread_id();
+            table_ranges_heap_ = mi_heap_new();
+        }
 
 #if defined(WITH_JEMALLOC)
         // create table ranges arena
@@ -499,8 +499,8 @@ public:
     mi_heap_t *GetTableRangesHeap() const
     {
         // table_ranges_heap_ usage commented out
-        // return table_ranges_heap_;
-        return nullptr;
+        return table_ranges_heap_;
+        // return nullptr;
     }
 
     uint32_t GetTableRangesArenaId() const
