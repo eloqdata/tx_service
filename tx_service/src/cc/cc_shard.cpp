@@ -3580,6 +3580,19 @@ void CcShard::RecycleTxLockInfo(TxLockInfo::uptr lock_info)
     tx_lock_info_head_.next_ = std::move(lock_info);
 }
 
+void CcShard::ResetRangeSplittingStatus(const TableName &table_name,
+                                        uint32_t ng_id,
+                                        uint32_t range_id)
+{
+    CcMap *ccm = GetCcm(table_name, ng_id);
+    if (ccm == nullptr)
+    {
+        return;
+    }
+
+    ccm->ResetRangeStatus(range_id);
+}
+
 void CcShard::CreateSplitRangeDataSyncTask(const TableName &table_name,
                                            uint32_t ng_id,
                                            int64_t ng_term,

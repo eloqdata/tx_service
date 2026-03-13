@@ -182,6 +182,12 @@ public:
     // flush data buffer.
     void SetScanTaskFinished();
 
+    // Once the range size reaches the threshold, a DataSyncTask is created to
+    // trigger the split range operation, and a flag is set indicating that the
+    // range has been split. This flag needs to be reset after the DataSyncTask
+    // completes.
+    void ResetRangeSplittingStatus();
+
     void SetErrorCode(CcErrorCode err_code)
     {
         std::unique_lock<std::mutex> lk(status_->mux_);

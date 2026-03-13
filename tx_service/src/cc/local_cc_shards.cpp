@@ -3217,6 +3217,7 @@ void LocalCcShards::PostProcessFlushTaskEntries(
                                            task->id_);
                         }
                         task->SetError(CcErrorCode::REQUESTED_NODE_NOT_LEADER);
+                        task->ResetRangeSplittingStatus();
                         continue;
                     }
 
@@ -3276,6 +3277,7 @@ void LocalCcShards::PostProcessFlushTaskEntries(
                         }
 
                         task->SetError(err_code);
+                        task->ResetRangeSplittingStatus();
                     }
                     else
                     {
@@ -3287,6 +3289,7 @@ void LocalCcShards::PostProcessFlushTaskEntries(
                             txservice::AbortTx(entry->data_sync_txm_);
                         }
                         task->SetError(CcErrorCode::DATA_STORE_ERR);
+                        task->ResetRangeSplittingStatus();
                     }
                 }
             }
@@ -3331,6 +3334,7 @@ void LocalCcShards::PostProcessFlushTaskEntries(
                 }
 
                 task->SetFinish();
+                task->ResetRangeSplittingStatus();
             }
             else
             {
@@ -3362,6 +3366,7 @@ void LocalCcShards::PostProcessFlushTaskEntries(
                 }
 
                 task->SetError(err_code);
+                task->ResetRangeSplittingStatus();
             }
         }
     }
@@ -3418,6 +3423,7 @@ void LocalCcShards::PostProcessRangePartitionDataSyncTask(
                                task->id_);
             }
             task->SetError(CcErrorCode::REQUESTED_NODE_NOT_LEADER);
+            task->ResetRangeSplittingStatus();
             if (ng_term >= 0)
             {
                 Sharder::Instance().UnpinNodeGroupData(task->node_group_id_);
@@ -3486,6 +3492,7 @@ void LocalCcShards::PostProcessRangePartitionDataSyncTask(
             }
 
             task->SetFinish();
+            task->ResetRangeSplittingStatus();
         }
         else if (task_ckpt_err == DataSyncTask::CkptErrorCode::SCAN_ERROR)
         {
@@ -3537,6 +3544,7 @@ void LocalCcShards::PostProcessRangePartitionDataSyncTask(
             }
 
             task->SetError(err_code);
+            task->ResetRangeSplittingStatus();
         }
         else
         {
@@ -3548,6 +3556,7 @@ void LocalCcShards::PostProcessRangePartitionDataSyncTask(
                 txservice::AbortTx(data_sync_txm);
             }
             task->SetError(CcErrorCode::DATA_STORE_ERR);
+            task->ResetRangeSplittingStatus();
         }
     }
 
@@ -3600,6 +3609,7 @@ void LocalCcShards::DataSyncForRangePartition(
             // table dropped
             data_sync_task->SetError(CcErrorCode::REQUESTED_TABLE_NOT_EXISTS);
             data_sync_task->SetScanTaskFinished();
+            data_sync_task->ResetRangeSplittingStatus();
             ClearAllPendingTasks(ng_id, expected_ng_term, table_name, range_id);
         }
         else
@@ -3637,6 +3647,7 @@ void LocalCcShards::DataSyncForRangePartition(
                 {
                     data_sync_task->SetFinish();
                     data_sync_task->SetScanTaskFinished();
+                    data_sync_task->ResetRangeSplittingStatus();
                     PopPendingTask(
                         ng_id, expected_ng_term, table_name, range_id);
                     assert(need_process == false);
@@ -3652,6 +3663,7 @@ void LocalCcShards::DataSyncForRangePartition(
                 data_sync_task->SetError(
                     CcErrorCode::REQUESTED_NODE_NOT_LEADER);
                 data_sync_task->SetScanTaskFinished();
+                data_sync_task->ResetRangeSplittingStatus();
                 PopPendingTask(ng_id, expected_ng_term, table_name, range_id);
             }
         }
@@ -3677,6 +3689,7 @@ void LocalCcShards::DataSyncForRangePartition(
             // Finish this task and notify the caller.
             data_sync_task->SetError(CcErrorCode::REQUESTED_NODE_NOT_LEADER);
             data_sync_task->SetScanTaskFinished();
+            data_sync_task->ResetRangeSplittingStatus();
             PopPendingTask(ng_id, expected_ng_term, table_name, range_id);
 
             if (ng_term >= 0)
@@ -3761,6 +3774,7 @@ void LocalCcShards::DataSyncForRangePartition(
                 // directly.
                 data_sync_task->SetError();
                 data_sync_task->SetScanTaskFinished();
+                data_sync_task->ResetRangeSplittingStatus();
 
                 ClearAllPendingTasks(
                     ng_id, expected_ng_term, table_name, range_id);
@@ -3820,6 +3834,7 @@ void LocalCcShards::DataSyncForRangePartition(
 
                 data_sync_task->SetFinish();
                 data_sync_task->SetScanTaskFinished();
+                data_sync_task->ResetRangeSplittingStatus();
                 PopPendingTask(ng_id, expected_ng_term, table_name, range_id);
 
                 return;
@@ -3874,6 +3889,7 @@ void LocalCcShards::DataSyncForRangePartition(
 
             data_sync_task->SetError();
             data_sync_task->SetScanTaskFinished();
+            data_sync_task->ResetRangeSplittingStatus();
             PopPendingTask(ng_id, expected_ng_term, table_name, range_id);
 
             return;
@@ -3889,6 +3905,7 @@ void LocalCcShards::DataSyncForRangePartition(
             txservice::AbortTx(data_sync_txm);
             data_sync_task->SetError(CcErrorCode::GET_RANGE_ID_ERR);
             data_sync_task->SetScanTaskFinished();
+            data_sync_task->ResetRangeSplittingStatus();
             PopPendingTask(ng_id, expected_ng_term, table_name, range_id);
 
             return;
@@ -4001,6 +4018,7 @@ void LocalCcShards::DataSyncForRangePartition(
         }
         data_sync_task->SetFinish();
         data_sync_task->SetScanTaskFinished();
+        data_sync_task->ResetRangeSplittingStatus();
         return;
     }
     assert(slices_delta_size.size() > 0 || export_base_table_items);
@@ -4033,6 +4051,7 @@ void LocalCcShards::DataSyncForRangePartition(
 
             data_sync_task->SetError();
             data_sync_task->SetScanTaskFinished();
+            data_sync_task->ResetRangeSplittingStatus();
             // Handle the pending tasks for the same range
             PopPendingTask(ng_id, expected_ng_term, table_name, range_id);
 
