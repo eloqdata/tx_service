@@ -315,6 +315,11 @@ public:
      */
     CcMap *GetCcm(const TableName &table_name, uint32_t node_group);
 
+    void FetchTableRangeSize(const TableName &table_name,
+                             int32_t partition_id,
+                             NodeGroupId cc_ng_id,
+                             int64_t cc_ng_term);
+
     void AdjustDataKeyStats(const TableName &table_name,
                             int64_t size_delta,
                             int64_t dirty_delta);
@@ -1138,6 +1143,10 @@ public:
         }
     }
 
+    void ResetRangeSplittingStatus(const TableName &table_name,
+                                   uint32_t ng_id,
+                                   uint32_t range_id);
+
     FillStoreSliceCc *NewFillStoreSliceCc()
     {
         return fill_store_slice_cc_pool_.NextRequest();
@@ -1155,6 +1164,12 @@ public:
         const TableName &tbl_name);
 
     void DeleteSchemaCntl(const TableName &tbl_name);
+
+    void CreateSplitRangeDataSyncTask(const TableName &table_name,
+                                      uint32_t ng_id,
+                                      int64_t ng_term,
+                                      int32_t range_id,
+                                      uint64_t data_sync_ts);
 
     void ClearNativeSchemaCntl();
     void CollectCacheHit();
@@ -1222,6 +1237,7 @@ private:
 
     CcRequestPool<FillStoreSliceCc> fill_store_slice_cc_pool_;
     CcRequestPool<InitKeyCacheCc> init_key_cache_cc_pool_;
+    CcRequestPool<FetchTableRangeSizeCc> fetch_range_size_cc_pool_;
 
     // CcRequest queue on this shard/core.
     moodycamel::ConcurrentQueue<CcRequestBase *> cc_queue_;

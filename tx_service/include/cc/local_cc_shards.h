@@ -1129,7 +1129,6 @@ public:
     template <typename KeyT>
     RangeSliceOpStatus AddKeyToKeyCache(const TableName &table_name,
                                         NodeGroupId cc_ng_id,
-                                        uint16_t core_id,
                                         const KeyT &key)
     {
         std::shared_lock<std::shared_mutex> lk(meta_data_mux_);
@@ -1156,7 +1155,7 @@ public:
             return RangeSliceOpStatus::Error;
         }
         store_range->UpdateLastAccessedTs(ClockTs());
-        return store_range->AddKey(key, core_id);
+        return store_range->AddKey(key);
     }
 
     template <typename KeyT>
@@ -1757,6 +1756,12 @@ public:
         uint64_t txn,
         CcHandlerResult<Void> *hres);
 
+    void CreateSplitRangeDataSyncTask(const TableName &table_name,
+                                      uint32_t ng_id,
+                                      int64_t ng_term,
+                                      int32_t range_id,
+                                      uint64_t data_sync_ts);
+
     std::pair<TableRangeEntry *, StoreRange *> PinStoreRange(
         const TableName &table_name,
         const NodeGroupId ng_id,
@@ -1913,7 +1918,8 @@ private:
                                   bool can_be_skipped,
                                   uint64_t &last_sync_ts,
                                   std::shared_ptr<DataSyncStatus> status,
-                                  CcHandlerResult<Void> *hres);
+                                  CcHandlerResult<Void> *hres,
+                                  bool high_priority = false);
     bool EnqueueDataSyncTaskToCore(
         const TableName &table_name,
         uint32_t ng_id,
@@ -2120,7 +2126,6 @@ private:
                                    .GetLocalCcShards()
                                    ->GetRangeOwner(new_range_id_, ng_id_)
                                    ->BucketOwner();
-            assert(new_range_owner_ != ng_id_);
 
             dest_node_id_ = Sharder::Instance().LeaderNodeId(new_range_owner_);
             channel_ =
@@ -2303,7 +2308,7 @@ private:
     {
         // `0` means no pending task
         uint64_t latest_pending_task_ts_{0};
-        std::queue<std::shared_ptr<DataSyncTask>> pending_tasks_;
+        std::deque<std::shared_ptr<DataSyncTask>> pending_tasks_;
 
         uint64_t UnsetLatestPendingTs()
         {

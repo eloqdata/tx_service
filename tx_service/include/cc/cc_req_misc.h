@@ -367,7 +367,6 @@ public:
 
     void Reset(StoreRange *range,
                StoreSlice *slice,
-               uint16_t core_cnt,
                const TableName &tbl_name,
                int64_t term,
                NodeGroupId ng_id)
@@ -380,18 +379,15 @@ public:
         ng_id_ = ng_id;
         range_ = range;
         slice_ = slice;
-        unfinished_cnt_ = core_cnt;
-
-        pause_pos_.clear();
-        pause_pos_.resize(core_cnt);
+        pause_pos_ = TxKey();
     }
 
     bool Execute(CcShard &ccs) override;
-    bool SetFinish(uint16_t core, bool succ);
+    void SetFinish(bool succ);
     StoreSlice &Slice();
     StoreRange &Range();
-    void SetPauseKey(TxKey &key, uint16_t core_id);
-    TxKey &PauseKey(uint16_t core_id);
+    void SetPauseKey(TxKey &key);
+    TxKey &PauseKey();
 
 private:
     TableName tbl_name_{std::string(""), TableType::Primary, TableEngine::None};
@@ -399,8 +395,7 @@ private:
     NodeGroupId ng_id_;
     StoreRange *range_;
     StoreSlice *slice_;
-    std::atomic<uint16_t> unfinished_cnt_{0};
-    std::vector<TxKey> pause_pos_;
+    TxKey pause_pos_;
 };
 
 struct FillStoreSliceCc : public CcRequestBase
@@ -426,10 +421,9 @@ public:
 
     bool Execute(CcShard &ccs) override;
 
-    std::deque<SliceDataItem> &SliceData(uint16_t core_id)
+    std::deque<SliceDataItem> &SliceData()
     {
-        assert(core_id < partitioned_slice_data_.size());
-        return partitioned_slice_data_[core_id];
+        return slice_data_;
     }
 
     void AddDataItem(TxKey key,
@@ -437,8 +431,8 @@ public:
                      uint64_t version_ts,
                      bool is_deleted);
 
-    bool SetFinish(CcShard *cc_shard);
-    bool SetError(CcErrorCode err_code);
+    void SetFinish(CcShard *cc_shard);
+    void SetError(CcErrorCode err_code);
 
     void SetKvFinish(bool success);
 
@@ -447,12 +441,9 @@ public:
         assert(err_code != CcErrorCode::NO_ERROR);
         DLOG(ERROR) << "Abort this FillStoreSliceCc request with error: "
                     << CcErrorMessage(err_code);
-        bool finish_all = SetError(err_code);
+        SetError(err_code);
         // Recycle request
-        if (finish_all)
-        {
-            Free();
-        }
+        Free();
     }
 
     const TableName &TblName() const
@@ -485,17 +476,16 @@ public:
         force_load_ = force_load;
     }
 
-    size_t NextIndex(size_t core_idx) const
+    size_t NextIndex() const
     {
-        size_t next_idx = next_idxs_[core_idx];
-        assert(next_idx <= partitioned_slice_data_[core_idx].size());
-        return next_idx;
+        assert(next_idx_ <= slice_data_.size());
+        return next_idx_;
     }
 
-    void SetNextIndex(size_t core_idx, size_t index)
+    void SetNextIndex(size_t index)
     {
-        assert(index <= partitioned_slice_data_[core_idx].size());
-        next_idxs_[core_idx] = index;
+        assert(index <= slice_data_.size());
+        next_idx_ = index;
     }
 
     NodeGroupId NodeGroup() const
@@ -533,6 +523,8 @@ public:
         return true;
     }
 
+    int32_t PartitionId() const;
+
     metrics::TimePoint start_;
 
 private:
@@ -540,13 +532,11 @@ private:
     NodeGroupId cc_ng_id_;
     int64_t cc_ng_term_;
     bool force_load_;
-    uint16_t finish_cnt_;
-    uint16_t core_cnt_;
     std::mutex mux_;
     CcErrorCode err_code_{CcErrorCode::NO_ERROR};
 
-    std::vector<size_t> next_idxs_;
-    std::vector<std::deque<SliceDataItem>> partitioned_slice_data_;
+    size_t next_idx_;
+    std::deque<SliceDataItem> slice_data_;
 
     StoreSlice *range_slice_ = nullptr;
     StoreRange *range_ = nullptr;
@@ -1156,5 +1146,36 @@ public:
 
 private:
     size_t free_count_{0};
+};
+
+struct FetchTableRangeSizeCc : public CcRequestBase
+{
+public:
+    FetchTableRangeSizeCc() = default;
+    ~FetchTableRangeSizeCc() = default;
+
+    void Reset(const TableName &table_name,
+               int32_t partition_id,
+               const TxKey &start_key,
+               CcShard *ccs,
+               NodeGroupId ng_id,
+               int64_t ng_term);
+
+    bool ValidTermCheck();
+    bool Execute(CcShard &ccs) override;
+    void SetFinish(uint32_t error);
+
+    const TableName *table_name_;
+    int32_t partition_id_{0};
+    TxKey start_key_{};
+    NodeGroupId node_group_id_{0};
+    int64_t node_group_term_{-1};
+    CcShard *ccs_{nullptr};
+
+    uint32_t error_code_{0};
+    int32_t store_range_size_{0};
+
+    // Only used in DataStoreHandler
+    std::string kv_start_key_;
 };
 }  // namespace txservice

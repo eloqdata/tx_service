@@ -1571,7 +1571,8 @@ public:
             next_ts_offset = ts_offset;
             next_status_offset = status_offset;
 
-            auto [key_str, rec_str, ts_str, status_str] = *entry_tuples;
+            auto [key_str, rec_str, ts_str, status_str, flags_str] =
+                *entry_tuples;
             // deserialize key
             decoded_key.Deserialize(
                 key_str.data(), next_key_offset, KeySchema());
@@ -1739,7 +1740,8 @@ public:
                                   key_offset,
                                   rec_offset,
                                   ts_offset,
-                                  status_offset);
+                                  status_offset,
+                                  0);
             shard_->Enqueue(shard_->LocalCoreId(), &req);
             return false;
         }

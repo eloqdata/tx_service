@@ -584,6 +584,21 @@ int RecoveryService::on_received_messages(brpc::StreamId stream_id,
             auto res_pair = table_range_split_cnt.try_emplace(
                 base_table_name, std::make_shared<std::atomic_uint32_t>(0));
 
+            // Record split range commit ts for data log replay.
+            ::txlog::SplitRangeOpMessage ds_split_range_op_msg;
+            if (!ds_split_range_op_msg.ParseFromArray(
+                    split_range_op_blob.data() + blob_offset,
+                    split_range_op_blob.length() - blob_offset))
+            {
+                recovery_error = true;
+                CleanSplitRangeInfo(cc_ng_id);
+                return 0;
+            }
+            int32_t range_id = ds_split_range_op_msg.partition_id();
+            uint64_t split_commit_ts = split_range_msg.commit_ts();
+            SetSplitRangeInfo(
+                cc_ng_id, base_table_name, range_id, split_commit_ts);
+
             // Replay Split
             ReplayLogCc *cc_req = replay_cc_pool_.NextRequest();
             cc_req->Reset(
@@ -611,6 +626,7 @@ int RecoveryService::on_received_messages(brpc::StreamId stream_id,
                 stream_id, mux, on_fly_cnt, status, recovery_error);
             if (recovery_error)
             {
+                CleanSplitRangeInfo(cc_ng_id);
                 return 0;
             }
         }
@@ -618,6 +634,7 @@ int RecoveryService::on_received_messages(brpc::StreamId stream_id,
         // parse and process log records
         if (!msg.has_finish())
         {
+            const auto *split_range_info = GetSplitRangeInfo(cc_ng_id);
             ParseDataLogCc *cc_req = parse_datalog_cc_pool_.NextRequest();
             cc_req->Reset(std::move(msg),
                           cc_ng_id,
@@ -626,7 +643,8 @@ int RecoveryService::on_received_messages(brpc::StreamId stream_id,
                           status,
                           on_fly_cnt,
                           recovery_error,
-                          is_lock_recovery);
+                          is_lock_recovery,
+                          split_range_info);
             on_fly_cnt.fetch_add(1, std::memory_order_release);
             local_shards_.EnqueueCcRequest(next_core, cc_req);
             next_core = (next_core + 1) % local_shards_.Count();
@@ -634,6 +652,7 @@ int RecoveryService::on_received_messages(brpc::StreamId stream_id,
         else  // has finish message
         {
             const std::string &log_records = msg.binary_log_records();
+            const auto *split_range_info = GetSplitRangeInfo(cc_ng_id);
             ParseDataLogCc *cc_req = parse_datalog_cc_pool_.NextRequest();
             cc_req->Reset(log_records,
                           cc_ng_id,
@@ -642,7 +661,8 @@ int RecoveryService::on_received_messages(brpc::StreamId stream_id,
                           status,
                           on_fly_cnt,
                           recovery_error,
-                          is_lock_recovery);
+                          is_lock_recovery,
+                          split_range_info);
             on_fly_cnt.fetch_add(1, std::memory_order_release);
             local_shards_.EnqueueCcRequest(next_core, cc_req);
             next_core = (next_core + 1) % local_shards_.Count();
@@ -687,6 +707,8 @@ int RecoveryService::on_received_messages(brpc::StreamId stream_id,
                           << ", log group: " << info->log_group_id_
                           << ", set recovering status to finished";
             }
+            // Clean up split range info for this node group.
+            CleanSplitRangeInfo(cc_ng_id);
             brpc::StreamClose(stream_id);
             // assumption: finish message must be the last message so return
             return 0;
@@ -1058,6 +1080,41 @@ void RecoveryService::ProcessRecoverTxTask(RecoverTxTask &task)
             // the coordinator.
         }
     }
+}
+
+void RecoveryService::SetSplitRangeInfo(uint32_t ng_id,
+                                        TableName table_name,
+                                        int32_t range_id,
+                                        uint64_t commit_ts)
+{
+    auto ng_it = split_range_info_.try_emplace(ng_id).first;
+    auto &table_map = ng_it->second;
+    auto table_it =
+        table_map
+            .try_emplace(table_name, std::unordered_map<int32_t, uint64_t>{})
+            .first;
+    auto &range_map = table_it->second;
+    auto [it, inserted] = range_map.try_emplace(range_id, commit_ts);
+    if (!inserted)
+    {
+        it->second = commit_ts;
+    }
+}
+
+const std::unordered_map<TableName, std::unordered_map<int32_t, uint64_t>> *
+RecoveryService::GetSplitRangeInfo(uint32_t ng_id) const
+{
+    auto ng_it = split_range_info_.find(ng_id);
+    if (ng_it == split_range_info_.end())
+    {
+        return nullptr;
+    }
+    return &ng_it->second;
+}
+
+void RecoveryService::CleanSplitRangeInfo(uint32_t ng_id)
+{
+    split_range_info_.erase(ng_id);
 }
 
 }  // namespace fault

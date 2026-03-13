@@ -811,8 +811,9 @@ void FetchTableRangesCallback(void *data,
         for (uint32_t i = 0; i < items_size; i++)
         {
             scan_next_closure->GetItem(i, key, value, ts, ttl);
-            assert(value.size() == (sizeof(int32_t) + sizeof(uint64_t) +
-                                    sizeof(uint64_t) + sizeof(uint32_t)));
+            assert(value.size() ==
+                   (sizeof(int32_t) + sizeof(uint64_t) + sizeof(uint64_t) +
+                    sizeof(uint32_t) + sizeof(int32_t)));
             const char *buf = value.data();
             int32_t partition_id = *(reinterpret_cast<const int32_t *>(buf));
             buf += sizeof(partition_id);
@@ -925,6 +926,45 @@ void FetchTableRangesCallback(void *data,
     }
 }
 
+void FetchRangeSizeCallback(void *data,
+                            ::google::protobuf::Closure *closure,
+                            DataStoreServiceClient &client,
+                            const remote::CommonResult &result)
+{
+    txservice::FetchTableRangeSizeCc *fetch_range_size_cc =
+        static_cast<txservice::FetchTableRangeSizeCc *>(data);
+
+    if (result.error_code() == remote::DataStoreError::KEY_NOT_FOUND)
+    {
+        fetch_range_size_cc->store_range_size_ = 0;
+        fetch_range_size_cc->SetFinish(
+            static_cast<uint32_t>(txservice::CcErrorCode::NO_ERROR));
+    }
+    else if (result.error_code() != remote::DataStoreError::NO_ERROR)
+    {
+        LOG(ERROR) << "Fetch range size failed with error code: "
+                   << result.error_code();
+        fetch_range_size_cc->SetFinish(
+            static_cast<uint32_t>(txservice::CcErrorCode::DATA_STORE_ERR));
+    }
+    else
+    {
+        ReadClosure *read_closure = static_cast<ReadClosure *>(closure);
+        std::string_view read_val = read_closure->Value();
+        assert(read_closure->TableName() == kv_range_table_name);
+        assert(read_val.size() ==
+               (sizeof(int32_t) + sizeof(uint64_t) + sizeof(uint64_t) +
+                sizeof(uint32_t) + sizeof(int32_t)));
+        const char *buf = read_val.data();
+        buf += read_val.size() - sizeof(int32_t);
+        fetch_range_size_cc->store_range_size_ =
+            *reinterpret_cast<const int32_t *>(buf);
+
+        fetch_range_size_cc->SetFinish(
+            static_cast<uint32_t>(txservice::CcErrorCode::NO_ERROR));
+    }
+}
+
 void FetchRangeSlicesCallback(void *data,
                               ::google::protobuf::Closure *closure,
                               DataStoreServiceClient &client,
@@ -965,8 +1005,9 @@ void FetchRangeSlicesCallback(void *data,
         else
         {
             assert(read_closure->TableName() == kv_range_table_name);
-            assert(read_val.size() == (sizeof(int32_t) + sizeof(uint64_t) +
-                                       sizeof(uint64_t) + sizeof(uint32_t)));
+            assert(read_val.size() ==
+                   (sizeof(int32_t) + sizeof(uint64_t) + sizeof(uint64_t) +
+                    sizeof(uint32_t) + sizeof(int32_t)));
             const char *buf = read_val.data();
             int32_t range_partition_id =
                 *(reinterpret_cast<const int32_t *>(buf));
