@@ -592,6 +592,8 @@ public:
                     cce->ArchiveBeforeUpdate();
                 }
 
+                [[maybe_unused]] const size_t old_payload_size =
+                    cce->PayloadSize();
                 if (is_del)
                 {
                     cce->payload_.SetCurrentPayload(nullptr);
@@ -612,6 +614,42 @@ public:
                     is_del ? RecordStatus::Deleted : RecordStatus::Normal;
                 bool was_dirty = cce->IsDirty();
                 cce->SetCommitTsPayloadStatus(commit_ts, new_status);
+
+                if constexpr (RangePartitioned)
+                {
+                    if (req.NeedUpdateRangeSize())
+                    {
+                        const int64_t key_delta_size =
+                            (new_status == RecordStatus::Deleted)
+                                ? (-static_cast<int64_t>(write_key->Size() +
+                                                         old_payload_size))
+                                : (cce_old_status != RecordStatus::Normal
+                                       ? static_cast<int64_t>(
+                                             write_key->Size() +
+                                             cce->PayloadSize())
+                                       : static_cast<int64_t>(
+                                             cce->PayloadSize() -
+                                             old_payload_size));
+                        const uint32_t range_id = req.PartitionId();
+                        // is_dirty: true when range is splitting.
+                        bool need_split = UpdateRangeSize(
+                            range_id,
+                            static_cast<int32_t>(key_delta_size),
+                            req.OnDirtyRange());
+
+                        if (need_split)
+                        {
+                            assert(!req.OnDirtyRange());
+                            // Create a data sync task for the range.
+                            shard_->CreateSplitRangeDataSyncTask(
+                                table_name_,
+                                cc_ng_id_,
+                                cce_addr->Term(),
+                                range_id,
+                                commit_ts);
+                        }
+                    }
+                }
 
                 if (req.IsInitialInsert())
                 {

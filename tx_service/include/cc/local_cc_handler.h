@@ -103,7 +103,9 @@ public:
                           const TxRecord *record,
                           OperationType operation_type,
                           uint32_t key_shard_code,
-                          CcHandlerResult<PostProcessResult> &hres) override;
+                          CcHandlerResult<PostProcessResult> &hres,
+                          int32_t partition_id = -1,
+                          bool on_dirty_range = false) override;
 
     CcReqStatus PostRead(
         uint64_t tx_number,

@@ -464,19 +464,20 @@ void AcquireWriteOperation::AggregateAcquiredKeys(TransactionExecution *txm)
             }
         }
 
-        for (auto &[forward_shard_code, cce_addr] : write_entry->forward_addr_)
+        for (auto &[forward_shard_code, forward_pair] :
+             write_entry->forward_addr_)
         {
             AcquireKeyResult &acquire_key_res = acquire_key_vec[res_idx++];
             CcEntryAddr &addr = acquire_key_res.cce_addr_;
             term = addr.Term();
             if (term < 0)
             {
-                cce_addr.SetCceLock(0, -1, 0);
+                forward_pair.second.SetCceLock(0, -1, 0);
             }
             else if (acquire_key_res.commit_ts_ == 0)
             {
                 // acqurie write failed on forward addr.
-                cce_addr.SetCceLock(0, -1, 0);
+                forward_pair.second.SetCceLock(0, -1, 0);
                 // Set term to -1 so that post write will not be sent to this
                 // addr.
                 addr.SetTerm(-1);
@@ -485,7 +486,7 @@ void AcquireWriteOperation::AggregateAcquiredKeys(TransactionExecution *txm)
             {
                 // Assigns to the write entry the cc entry address obtained
                 // in the acquire phase.
-                cce_addr = addr;
+                forward_pair.second = addr;
             }
 
             // No need to dedup forwarded req since they are not visible to read
@@ -720,17 +721,23 @@ void LockWriteRangeBucketsOp::Advance(TransactionExecution *txm)
         size_t new_range_idx = 0;
 
         auto *range_info = txm->range_rec_.GetRangeInfo();
+        int32_t range_id = range_info->PartitionId();
+        uint32_t residual = static_cast<uint32_t>(range_id & 0x3FF);
+        bool on_dirty_range = range_info->IsDirty();
         while (write_key_it_ != next_range_start)
         {
             const TxKey &write_tx_key = write_key_it_->first;
             WriteSetEntry &write_entry = write_key_it_->second;
-            size_t hash = write_tx_key.Hash();
-            write_entry.key_shard_code_ = (range_ng << 10) | (hash & 0x3FF);
+            write_entry.key_shard_code_ = (range_ng << 10) | residual;
+            write_entry.partition_id_ = range_id;
+            write_entry.on_dirty_range_ = on_dirty_range;
             // If current range is migrating, forward to new range owner.
             if (new_bucket_ng != UINT32_MAX)
             {
-                write_entry.forward_addr_.try_emplace((new_bucket_ng << 10) |
-                                                      (hash & 0x3FF));
+                assert(new_bucket_ng != range_ng);
+                write_entry.forward_addr_.try_emplace(
+                    ((new_bucket_ng << 10) | residual),
+                    std::make_pair(range_id, CcEntryAddr()));
             }
 
             // If range is splitting and the key will fall on a new range after
@@ -748,18 +755,47 @@ void LockWriteRangeBucketsOp::Advance(TransactionExecution *txm)
             }
             if (new_range_ng != UINT32_MAX)
             {
-                if (new_range_ng != range_ng)
-                {
-                    write_entry.forward_addr_.try_emplace((new_range_ng << 10) |
-                                                          (hash & 0x3FF));
-                }
-                // If the new range is migrating, forward to the new owner of
-                // new range.
-                if (new_range_new_bucket_ng != UINT32_MAX &&
-                    new_range_new_bucket_ng != range_ng)
+                int32_t new_range_id =
+                    range_info->NewPartitionId()->at(new_range_idx - 1);
+                uint32_t new_residual =
+                    static_cast<uint32_t>(new_range_id & 0x3FF);
+                uint16_t core_cnt =
+                    Sharder::Instance().GetLocalCcShards()->Count();
+                uint16_t new_range_shard =
+                    static_cast<uint16_t>(new_residual % core_cnt);
+                uint16_t range_shard =
+                    static_cast<uint16_t>(residual % core_cnt);
+                if (new_range_ng != range_ng || new_range_shard != range_shard)
                 {
                     write_entry.forward_addr_.try_emplace(
-                        (new_range_new_bucket_ng << 10) | (hash & 0x3FF));
+                        ((new_range_ng << 10) | new_residual),
+                        std::make_pair(new_range_id, CcEntryAddr()));
+                    // There is no need to update the range size of the old
+                    // range.
+                    write_entry.partition_id_ = -1;
+                }
+                else if (new_range_ng == range_ng &&
+                         new_range_shard == range_shard)
+                {
+                    // Only update the range size on the new range id in case of
+                    // the new range and the old range are located on the same
+                    // shard.
+                    write_entry.partition_id_ = new_range_id;
+                }
+
+                // If the new range is migrating, forward to the new owner of
+                // new range.
+                // TODO(ysw): double check the logic here.
+                if (new_range_new_bucket_ng != UINT32_MAX)
+                {
+                    assert(new_range_new_bucket_ng != new_range_ng);
+                    if (new_range_new_bucket_ng != range_ng ||
+                        new_range_shard != range_shard)
+                    {
+                        write_entry.forward_addr_.try_emplace(
+                            ((new_range_new_bucket_ng << 10) | new_residual),
+                            std::make_pair(new_range_id, CcEntryAddr()));
+                    }
                 }
             }
 
