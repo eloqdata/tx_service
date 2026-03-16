@@ -664,6 +664,24 @@ public:
         return min_ts;
     }
 
+    uint64_t ActiveTxMaxTs(NodeGroupId cc_ng_id) const
+    {
+        uint64_t max_ts = 0;
+        auto it = lock_holding_txs_.find(cc_ng_id);
+        if (it != lock_holding_txs_.end())
+        {
+            for (const auto &tx_pair : it->second)
+            {
+                if (!TableName::IsMeta(tx_pair.second->table_type_) &&
+                    tx_pair.second->wlock_ts_ != 0)
+                {
+                    max_ts = std::max(max_ts, tx_pair.second->wlock_ts_);
+                }
+            }
+        }
+        return max_ts;
+    }
+
     /**
      * Try to reduce the size of lock array if it becomes sparse.
      *
@@ -1090,6 +1108,18 @@ public:
         }
         return node_ids;
     }
+
+    std::vector<uint32_t> GetCandidateStandbys()
+    {
+        std::vector<uint32_t> node_ids;
+        node_ids.reserve(candidate_standby_nodes_.size());
+        for (const auto &it : candidate_standby_nodes_)
+        {
+            node_ids.push_back(it.first);
+        }
+        return node_ids;
+    }
+
     void ResetStandbySequence();
 
     void DecrInflightStandbyReqCount(uint32_t seq_grp);

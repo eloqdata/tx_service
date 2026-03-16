@@ -1074,9 +1074,92 @@ void CcNode::SubscribePrimaryNode(uint32_t leader_node_id,
     cntl.Reset();
     stub->ResetStandbySequenceId(&cntl, &reset_req, &reset_resp, nullptr);
 
-    // Check rpc result
-    while (cntl.Failed())
+    auto rollback_failed_following_state = [this, standby_term, primary_term]()
     {
+        // If a newer subscribe term has already taken over, do not touch local
+        // standby state here.
+        if (requested_subscribe_primary_term_.load(std::memory_order_acquire) !=
+            primary_term)
+        {
+            return false;
+        }
+
+        if (Sharder::Instance().StandbyNodeTerm() != standby_term &&
+            Sharder::Instance().CandidateStandbyNodeTerm() != standby_term)
+        {
+            return false;
+        }
+
+        // Reset per-shard subscribe state only when this failed standby term is
+        // still the active local follow term.
+        WaitableCc rollback_cc(
+            [this, standby_term, primary_term](CcShard &ccs)
+            {
+                if (requested_subscribe_primary_term_.load(
+                        std::memory_order_acquire) != primary_term)
+                {
+                    return true;
+                }
+
+                if (Sharder::Instance().StandbyNodeTerm() != standby_term &&
+                    Sharder::Instance().CandidateStandbyNodeTerm() !=
+                        standby_term)
+                {
+                    return true;
+                }
+
+                auto &grps = ccs.GetStandbysequenceGrps();
+                for (auto &entry : grps)
+                {
+                    auto &grp_info = entry.second;
+                    if (grp_info.subscribed_)
+                    {
+                        grp_info.Unsubscribe();
+                    }
+                }
+
+                return true;
+            },
+            local_cc_shards_.Count());
+        for (uint32_t core_id = 0; core_id < local_cc_shards_.Count();
+             core_id++)
+        {
+            local_cc_shards_.EnqueueCcRequest(core_id, &rollback_cc);
+        }
+        rollback_cc.Wait();
+
+        if (requested_subscribe_primary_term_.load(std::memory_order_acquire) !=
+            primary_term)
+        {
+            return false;
+        }
+
+        if (Sharder::Instance().StandbyNodeTerm() == standby_term)
+        {
+            Sharder::Instance().SetStandbyNodeTerm(-1);
+        }
+        if (Sharder::Instance().CandidateStandbyNodeTerm() == standby_term)
+        {
+            Sharder::Instance().SetCandidateStandbyNodeTerm(-1);
+        }
+
+        return true;
+    };
+
+    // Check rpc result
+    while (cntl.Failed() || reset_resp.error())
+    {
+        if (reset_resp.error())
+        {
+            bool rolled_back = rollback_failed_following_state();
+            LOG(WARNING)
+                << "ResetStandbySequenceId rejected by primary, ng_id: "
+                << ng_id_ << ", standby_term: " << standby_term
+                << ", primary_node_id: " << leader_node_id
+                << ", rolled_back_local_state: " << rolled_back;
+            return;
+        }
+
         // We only need to retry if the message is not delivered.
         if (Sharder::Instance().LeaderTerm(ng_id_) > 0 ||
             Sharder::Instance().CandidateLeaderTerm(ng_id_) > 0 ||

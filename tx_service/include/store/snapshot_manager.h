@@ -57,8 +57,51 @@ public:
     void Start();
     void Shutdown();
 
-    void OnSnapshotSyncRequested(
+    // Handle snapshot sync request from standby node. Returns true if the
+    // request is accepted (queued or safely deduped), false otherwise.
+    bool OnSnapshotSyncRequested(
         const txservice::remote::StorageSnapshotSyncRequest *req);
+
+    /**
+     * @brief Register the active-tx barrier captured at standby subscription
+     * time.
+     * @param standby_node_id Standby's node id.
+     * @param standby_node_term Standby's term ((primary_term << 32) |
+     * subscribe_id).
+     * @param active_tx_max_ts Maximum active write-tx timestamp observed at
+     * subscription time.
+     */
+    void RegisterSubscriptionBarrier(uint32_t standby_node_id,
+                                     int64_t standby_node_term,
+                                     uint64_t active_tx_max_ts);
+
+    /**
+     * @brief Lookup subscription barrier by standby node id and standby term.
+     * @param standby_node_id Standby's node id.
+     * @param standby_node_term Standby's term ((primary_term << 32) |
+     * subscribe_id).
+     * @param active_tx_max_ts Output barrier timestamp if found.
+     * @return true if barrier exists, false otherwise.
+     */
+    bool GetSubscriptionBarrier(uint32_t standby_node_id,
+                                int64_t standby_node_term,
+                                uint64_t *active_tx_max_ts);
+
+    /**
+     * @brief Remove an existing subscription barrier.
+     * @param standby_node_id Standby's node id.
+     * @param standby_node_term Standby's term ((primary_term << 32) |
+     * subscribe_id).
+     */
+    void EraseSubscriptionBarrier(uint32_t standby_node_id,
+                                  int64_t standby_node_term);
+
+    /**
+     * @brief Remove all subscription barriers and queued sync task for one
+     * standby node.
+     * @param standby_node_id Standby's node id.
+     */
+    void EraseSubscriptionBarriersByNode(uint32_t standby_node_id);
 
     txservice::remote::BackupTaskStatus CreateBackup(
         const txservice::remote::CreateBackupRequest *req);
@@ -74,7 +117,24 @@ public:
     // Run one round checkpoint to flush data in memory to kvstore.
     bool RunOneRoundCheckpoint(uint32_t node_group, int64_t ng_leader_term);
 
+    // Collect current checkpoint ts from cc shards without triggering data
+    // flush.
+    uint64_t GetCurrentCheckpointTs(uint32_t node_group);
+
 private:
+    /**
+     * @brief Remove one subscription barrier entry while caller already holds
+     * standby_sync_mux_.
+     */
+    void EraseSubscriptionBarrierLocked(uint32_t standby_node_id,
+                                        int64_t standby_node_term);
+
+    struct PendingSnapshotSyncTask
+    {
+        txservice::remote::StorageSnapshotSyncRequest req;
+        uint64_t subscription_active_tx_max_ts{0};
+    };
+
     SnapshotManager() = default;
     ~SnapshotManager() = default;
 
@@ -93,8 +153,11 @@ private:
     std::thread standby_sync_worker_;
     std::mutex standby_sync_mux_;
     std::condition_variable standby_sync_cv_;
-    std::unordered_map<uint32_t, txservice::remote::StorageSnapshotSyncRequest>
-        pending_req_;
+    std::unordered_map<uint32_t, PendingSnapshotSyncTask> pending_req_;
+    // standby node id -> (standby node term -> subscription-time active tx
+    // max ts)
+    std::unordered_map<uint32_t, std::unordered_map<int64_t, uint64_t>>
+        subscription_barrier_;
     bool terminated_{false};
 
     const std::string backup_path_;
