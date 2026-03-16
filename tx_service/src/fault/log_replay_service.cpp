@@ -133,7 +133,8 @@ RecoveryService::RecoveryService(LocalCcShards &local_shards,
                             for (const auto &entry : inbound_connections_)
                             {
                                 if (entry.second.cc_ng_id_ == ng_id &&
-                                    entry.second.cc_ng_term_ == candidate_term &&
+                                    entry.second.cc_ng_term_ ==
+                                        candidate_term &&
                                     entry.second.recovering_)
                                 {
                                     has_replay_connection = true;
@@ -146,7 +147,8 @@ RecoveryService::RecoveryService(LocalCcShards &local_shards,
                             continue;
                         }
 
-                        if (now_ts - watch.first_seen_ts < kReplayCheckIntervalUs)
+                        if (now_ts - watch.first_seen_ts <
+                            kReplayCheckIntervalUs)
                         {
                             continue;
                         }
