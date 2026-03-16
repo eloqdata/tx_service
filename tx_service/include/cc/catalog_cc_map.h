@@ -1297,8 +1297,8 @@ public:
         {
             LOG(INFO) << "ReplayLogCc, node_group(#" << req.NodeGroupId()
                       << ") term < 0, tx:" << req.Txn();
-            req.Result()->SetError(CcErrorCode::REQUESTED_NODE_NOT_LEADER);
-            return false;
+            req.AbortCcRequest(CcErrorCode::REQUESTED_NODE_NOT_LEADER);
+            return true;
         }
 
         ::txlog::SchemaOpMessage schema_op_msg;
@@ -1359,7 +1359,7 @@ public:
                         << ", catalog entry of the same or higher "
                            "version exists, stop replaying this schema op";
                     req.SetFinish();
-                    return false;
+                    return true;
                 }
                 catalog_entry = new_catalog_entry;
             }
@@ -1432,8 +1432,8 @@ public:
                 else if (!need_to_upsert_kv_table &&
                          upsert_kv_err_code.second != CcErrorCode::NO_ERROR)
                 {
-                    req.Result()->SetError(upsert_kv_err_code.second);
-                    return false;
+                    req.AbortCcRequest(upsert_kv_err_code.second);
+                    return true;
                 }
 
                 auto [success, new_catalog_entry] = shard_->CreateCatalog(
@@ -1455,7 +1455,7 @@ public:
                         << ", catalog entry of the same or higher version "
                            "exists, stop replaying this schema op";
                     req.SetFinish();
-                    return false;
+                    return true;
                 }
                 catalog_entry = new_catalog_entry;
             }
@@ -1743,7 +1743,7 @@ public:
             }
         }
 
-        return false;
+        return true;
     }
 
     bool Execute(BroadcastStatisticsCc &req) override

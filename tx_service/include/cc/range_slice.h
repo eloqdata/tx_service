@@ -902,8 +902,8 @@ public:
 
     ~TemplateStoreRange()
     {
-        // LOG(INFO) << "StoreRange destructor: addr=" << static_cast<void
-        // *>(this)
+        LOG(INFO) << "StoreRange destructor: addr="
+                  << static_cast<void *>(this);
         //          << " partition_id=" << partition_id_;
     }
 

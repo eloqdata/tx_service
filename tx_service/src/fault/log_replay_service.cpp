@@ -303,14 +303,14 @@ void RecoveryService::Connect(::google::protobuf::RpcController *controller,
         // Clean up old log group stream connection.
         for (auto &[stream_id, info] : inbound_connections_)
         {
-            if (info.cc_ng_id_ == cc_ng_id &&
-                info.log_group_id_ == log_group_id)
+            if (info->cc_ng_id_ == cc_ng_id &&
+                info->log_group_id_ == log_group_id)
             {
-                if (cc_ng_term > info.cc_ng_term_)
+                if (cc_ng_term > info->cc_ng_term_)
                 {
                     // cc_ng_term > info.cc_ng_term_, the cc_ng has failed over
                 }
-                else if (cc_ng_term == info.cc_ng_term_)
+                else if (cc_ng_term == info->cc_ng_term_)
                 {
                     // the cc_ng is still recovering, and this request is a
                     // response for RecoveryService's stream timeout and resend
@@ -345,12 +345,10 @@ void RecoveryService::Connect(::google::protobuf::RpcController *controller,
         return;
     }
 
-    inbound_connections_.try_emplace(stream_socket,
-                                     log_group_id,
-                                     cc_ng_id,
-                                     cc_ng_term,
-                                     replay_start_ts,
-                                     recovering);
+    inbound_connections_.try_emplace(
+        stream_socket,
+        std::make_unique<ConnectionInfo>(
+            log_group_id, cc_ng_id, cc_ng_term, replay_start_ts, recovering));
 
     // Initialize/refresh the global DDL barrier for recovering streams.
     if (recovering)
@@ -442,7 +440,12 @@ int RecoveryService::on_received_messages(brpc::StreamId stream_id,
     NodeGroupReplayBarrier *barrier;
     {
         std::lock_guard<bthread::Mutex> lk(inbound_mux_);
-        info = &inbound_connections_.find(stream_id)->second;
+        auto it = inbound_connections_.find(stream_id);
+        if (it == inbound_connections_.end())
+        {
+            return -1;
+        }
+        info = it->second.get();
         barrier = GetReplayBarrier(info->cc_ng_id_);
     }
     bthread::Mutex &mux = info->mux_;
@@ -837,7 +840,7 @@ void RecoveryService::on_idle_timeout(brpc::StreamId id)
             // this stream has been replaced by a newer one
             return;
         }
-        info = &it->second;
+        info = it->second.get();
     }
     BAIDU_SCOPED_LOCK(info->mux_);
     if (info->recovering_)
@@ -872,7 +875,12 @@ void RecoveryService::on_closed(brpc::StreamId id)
     ConnectionInfo *info;
     {
         std::lock_guard<bthread::Mutex> lk(inbound_mux_);
-        info = &inbound_connections_.find(id)->second;
+        auto it = inbound_connections_.find(id);
+        if (it == inbound_connections_.end())
+        {
+            return;
+        }
+        info = it->second.get();
     }
     DLOG(INFO) << "replay service stream: " << id << " wait and clear requests";
     WaitAndClearRequests(id,
@@ -933,18 +941,18 @@ void RecoveryService::WaitAndClearRequests(brpc::StreamId stream_id,
             return;
         }
 
-        error_node_group_id = it->second.cc_ng_id_;
-        error_term = it->second.cc_ng_term_;
+        error_node_group_id = it->second->cc_ng_id_;
+        error_term = it->second->cc_ng_term_;
         uint64_t replay_start_ts = 0;
 
         // close all the streams belonging to the current node group and term.
         for (const auto &[stream_id, info] : inbound_connections_)
         {
             assert(replay_start_ts == 0 ||
-                   replay_start_ts == info.replay_start_ts_);
-            replay_start_ts = info.replay_start_ts_;
-            if (info.cc_ng_id_ == error_node_group_id &&
-                info.cc_ng_term_ == error_term)
+                   replay_start_ts == info->replay_start_ts_);
+            replay_start_ts = info->replay_start_ts_;
+            if (info->cc_ng_id_ == error_node_group_id &&
+                info->cc_ng_term_ == error_term)
             {
                 DLOG(INFO) << "RecoveryService, close stream, stream id = "
                            << stream_id;

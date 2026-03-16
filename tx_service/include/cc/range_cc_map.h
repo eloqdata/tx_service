@@ -826,7 +826,7 @@ public:
         int64_t ng_term = Sharder::Instance().CandidateLeaderTerm(group_id);
         if (ng_term < 0)
         {
-            req.Result()->SetError(CcErrorCode::REQUESTED_NODE_NOT_LEADER);
+            req.AbortCcRequest(CcErrorCode::REQUESTED_NODE_NOT_LEADER);
             return true;
         }
 
