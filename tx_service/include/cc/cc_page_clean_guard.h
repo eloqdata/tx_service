@@ -263,8 +263,7 @@ protected:
                               cce->PayloadStatus() != RecordStatus::Unknown) ||
                              cce->PayloadStatus() == RecordStatus::Deleted))
                         {
-                            store_range->DeleteKey(
-                                key, cc_shard_->core_id_, store_slice);
+                            store_range->DeleteKey(key, store_slice);
                         }
 
                         MarkClean(cc_ng_id_, idx, delay_free);

@@ -82,6 +82,9 @@ public:
 
     void FetchRangeSlices(txservice::FetchRangeSlicesReq *fetch_cc) override;
 
+    void FetchTableRangeSize(
+        txservice::FetchTableRangeSizeCc *fetch_cc) override;
+
     /**
      * @brief Read a row from base table or skindex table in datastore with
      * specified key. Caller should pass in complete primary key or skindex key.

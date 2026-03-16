@@ -138,7 +138,8 @@ public:
         CcHandlerResult<Void> *hres,
         std::function<bool(size_t)> filter_lambda = nullptr,
         bool forward_cache = false,
-        bool is_standby_node_ckpt = false)
+        bool is_standby_node_ckpt = false,
+        bool high_priority = false)
         : table_name_(table_name),
           id_(id),
           range_version_(range_version),
@@ -152,7 +153,8 @@ public:
           is_dirty_(is_dirty),
           sync_ts_adjustable_(need_adjust_ts),
           task_res_(hres),
-          need_update_ckpt_ts_(true)
+          need_update_ckpt_ts_(true),
+          high_priority_(high_priority)
     {
     }
 
@@ -179,6 +181,12 @@ public:
     // be in flight flush task in the flush data buffer. Manually flush the
     // flush data buffer.
     void SetScanTaskFinished();
+
+    // Once the range size reaches the threshold, a DataSyncTask is created to
+    // trigger the split range operation, and a flag is set indicating that the
+    // range has been split. This flag needs to be reset after the DataSyncTask
+    // completes.
+    void ResetRangeSplittingStatus();
 
     void SetErrorCode(CcErrorCode err_code)
     {
@@ -252,6 +260,7 @@ public:
         cce_entries_;
 
     bool need_update_ckpt_ts_{true};
+    bool high_priority_{false};
 };
 
 struct FlushTaskEntry

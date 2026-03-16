@@ -740,7 +740,9 @@ public:
                const TxRecord *rec,
                OperationType operation_type,
                uint32_t key_shard_code,
-               CcHandlerResult<PostProcessResult> *res)
+               CcHandlerResult<PostProcessResult> *res,
+               int32_t partition_id = -1,
+               bool on_dirty_range = false)
     {
         TemplatedCcRequest<PostWriteCc, PostProcessResult>::Reset(
             nullptr, res, addr->NodeGroupId(), tx_number, tx_term);
@@ -754,6 +756,8 @@ public:
         is_remote_ = false;
         ccm_ = nullptr;
         is_initial_insert_ = false;
+        partition_id_ = partition_id;
+        on_dirty_range_ = on_dirty_range;
     }
 
     void Reset(const TxKey *key,
@@ -767,7 +771,9 @@ public:
                uint32_t key_shard_code,
                CcHandlerResult<PostProcessResult> *res,
                bool initial_insertion = false,
-               int64_t ng_term = INIT_TERM)
+               int64_t ng_term = INIT_TERM,
+               int32_t partition_id = -1,
+               bool on_dirty_range = false)
     {
         TemplatedCcRequest<PostWriteCc, PostProcessResult>::Reset(
             &table_name,
@@ -788,6 +794,8 @@ public:
         is_remote_ = false;
         ccm_ = nullptr;
         is_initial_insert_ = initial_insertion;
+        partition_id_ = partition_id;
+        on_dirty_range_ = on_dirty_range;
     }
 
     void Reset(const CcEntryAddr *addr,
@@ -797,7 +805,9 @@ public:
                const std::string *rec,
                OperationType operation_type,
                uint32_t key_shard_code,
-               CcHandlerResult<PostProcessResult> *res)
+               CcHandlerResult<PostProcessResult> *res,
+               int32_t partition_id = -1,
+               bool on_dirty_range = false)
     {
         TemplatedCcRequest<PostWriteCc, PostProcessResult>::Reset(
             nullptr, res, addr->NodeGroupId(), tx_number, tx_term);
@@ -811,6 +821,8 @@ public:
         is_remote_ = true;
         ccm_ = nullptr;
         is_initial_insert_ = false;
+        partition_id_ = partition_id;
+        on_dirty_range_ = on_dirty_range;
     }
 
     void Reset(const TableName *table_name,
@@ -824,7 +836,9 @@ public:
                uint32_t key_shard_code,
                CcHandlerResult<PostProcessResult> *res,
                bool initial_insertion = false,
-               int64_t ng_term = INIT_TERM)
+               int64_t ng_term = INIT_TERM,
+               int32_t partition_id = -1,
+               bool on_dirty_range = false)
     {
         TemplatedCcRequest<PostWriteCc, PostProcessResult>::Reset(
             table_name,
@@ -845,6 +859,8 @@ public:
         is_remote_ = true;
         ccm_ = nullptr;
         is_initial_insert_ = initial_insertion;
+        partition_id_ = partition_id;
+        on_dirty_range_ = on_dirty_range;
     }
 
     const CcEntryAddr *CceAddr() const
@@ -877,6 +893,11 @@ public:
         return key_shard_code_;
     }
 
+    int32_t PartitionId() const
+    {
+        return partition_id_;
+    }
+
     const void *Key() const
     {
         return is_remote_ ? nullptr : key_;
@@ -890,6 +911,16 @@ public:
     bool IsInitialInsert() const
     {
         return is_initial_insert_;
+    }
+
+    bool OnDirtyRange() const
+    {
+        return on_dirty_range_;
+    }
+
+    bool NeedUpdateRangeSize() const
+    {
+        return partition_id_ >= 0;
     }
 
 private:
@@ -909,6 +940,9 @@ private:
         const void *key_;
         const std::string *key_str_;
     };
+    int32_t partition_id_{-1};
+    // True if the key is located in a splitting range.
+    bool on_dirty_range_{false};
 };
 
 struct PostWriteAllCc
@@ -2341,7 +2375,6 @@ public:
           end_key_type_(RangeKeyType::RawPtr),
           schema_version_(0)
     {
-        parallel_req_ = true;
     }
 
     ~ScanSliceCc()
@@ -2409,12 +2442,12 @@ public:
         is_require_keys_ = is_require_keys;
         is_require_recs_ = is_require_recs;
 
-        unfinished_core_cnt_.store(1, std::memory_order_relaxed);
         range_slice_id_.Reset();
         last_pinned_slice_ = nullptr;
         prefetch_size_ = prefetch_size;
-        err_.store(CcErrorCode::NO_ERROR, std::memory_order_relaxed);
+        err_ = CcErrorCode::NO_ERROR;
         cache_hit_miss_collected_ = false;
+        blocking_info_.Reset();
     }
 
     void Set(const TableName &tbl_name,
@@ -2472,11 +2505,11 @@ public:
         is_require_recs_ = is_require_recs;
         prefetch_size_ = prefetch_size;
 
-        unfinished_core_cnt_.store(1, std::memory_order_relaxed);
         range_slice_id_.Reset();
         last_pinned_slice_ = nullptr;
-        err_.store(CcErrorCode::NO_ERROR, std::memory_order_relaxed);
+        err_ = CcErrorCode::NO_ERROR;
         cache_hit_miss_collected_ = false;
+        blocking_info_.Reset();
     }
 
     bool Execute(CcShard &ccs) override
@@ -2485,7 +2518,8 @@ public:
         {
             // Do not modify res_ directly since there could be other cores
             // still working on this cc req.
-            return SetError(CcErrorCode::REQUESTED_NODE_NOT_LEADER);
+            SetError(CcErrorCode::REQUESTED_NODE_NOT_LEADER);
+            return true;
         }
 
         CcMap *ccm = nullptr;
@@ -2518,7 +2552,8 @@ public:
                     // is marked as errored.
                     if (init_res.error != CcErrorCode::NO_ERROR)
                     {
-                        return SetError(init_res.error);
+                        SetError(init_res.error);
+                        return true;
                     }
                     // The req will be re-enqueued.
                     return false;
@@ -2545,16 +2580,13 @@ public:
 
     void AbortCcRequest(CcErrorCode err_code) override
     {
-        if (SetError(err_code))
+        SetError(err_code);
+        // If the request has pinned any slice, unpin it.
+        if (range_slice_id_.Range() != nullptr)
         {
-            // Last core finished. If the request has pinned any slice, unpin
-            // it.
-            if (range_slice_id_.Range() != nullptr)
-            {
-                UnpinSlices();
-            }
-            Free();
+            UnpinSlices();
         }
+        Free();
     }
 
     bool IsLocal() const
@@ -2685,18 +2717,18 @@ public:
         return ts_;
     }
 
-    ScanCache *GetLocalScanCache(size_t shard_id)
+    ScanCache *GetLocalScanCache()
     {
         assert(IsLocal());
-        return res_->Value().ccm_scanner_->Cache(shard_id);
+        return res_->Value().ccm_scanner_->Cache(0);
     }
 
-    RemoteScanSliceCache *GetRemoteScanCache(size_t shard_id)
+    RemoteScanSliceCache *GetRemoteScanCache()
     {
         assert(!IsLocal());
         RangeScanSliceResult &slice_result = res_->Value();
-        assert(shard_id < slice_result.remote_scan_caches_->size());
-        return &slice_result.remote_scan_caches_->at(shard_id);
+        assert(slice_result.remote_scan_caches_ != nullptr);
+        return slice_result.remote_scan_caches_;
     }
 
     CcScanner *GetLocalScanner()
@@ -2704,161 +2736,70 @@ public:
         return IsLocal() ? res_->Value().ccm_scanner_ : nullptr;
     }
 
-    uint64_t BlockingCceLockAddr(uint16_t core_id)
+    uint64_t BlockingCceLockAddr() const
     {
-        assert(core_id < blocking_vec_.size());
-        return blocking_vec_[core_id].cce_lock_addr_;
+        return blocking_info_.cce_lock_addr_;
     }
 
-    std::pair<ScanBlockingType, ScanType> BlockingPair(uint16_t core_id)
+    std::pair<ScanBlockingType, ScanType> BlockingPair() const
     {
-        assert(core_id < blocking_vec_.size());
-        return {blocking_vec_[core_id].type_,
-                blocking_vec_[core_id].scan_type_};
+        return {blocking_info_.type_, blocking_info_.scan_type_};
     }
 
-    void SetBlockingInfo(uint16_t core_id,
-                         uint64_t cce_lock_addr,
+    void SetBlockingInfo(uint64_t cce_lock_addr,
                          ScanType scan_type,
                          ScanBlockingType blocking_type)
     {
-        assert(core_id < blocking_vec_.size());
-        blocking_vec_[core_id] = {cce_lock_addr, scan_type, blocking_type};
+        blocking_info_.cce_lock_addr_ = cce_lock_addr;
+        blocking_info_.scan_type_ = scan_type;
+        blocking_info_.type_ = blocking_type;
     }
 
-    void SetShardCount(uint16_t shard_cnt)
+    void SetPriorCceLockAddr(uint64_t addr)
     {
-        blocking_vec_.resize(shard_cnt);
-        for (auto &it : blocking_vec_)
-        {
-            it.cce_lock_addr_ = 0;
-            it.scan_type_ = ScanType::ScanUnknow;
-            it.type_ = ScanBlockingType::NoBlocking;
-        }
-
-        wait_for_snapshot_cnt_.resize(shard_cnt);
-        for (uint16_t i = 0; i < shard_cnt; ++i)
-        {
-            wait_for_snapshot_cnt_[i] = 0;
-        }
-    }
-
-    uint64_t GetShardCount() const
-    {
-        return blocking_vec_.size();
-    }
-
-    void SetUnfinishedCoreCnt(uint16_t core_cnt)
-    {
-        unfinished_core_cnt_.store(core_cnt, std::memory_order_release);
-    }
-
-    void SetPriorCceLockAddr(uint64_t addr, uint16_t shard_id)
-    {
-        assert(shard_id < blocking_vec_.size());
-        blocking_vec_[shard_id] = {
-            addr, ScanType::ScanUnknow, ScanBlockingType::NoBlocking};
+        blocking_info_.cce_lock_addr_ = addr;
+        blocking_info_.scan_type_ = ScanType::ScanUnknow;
+        blocking_info_.type_ = ScanBlockingType::NoBlocking;
     }
 
     /**
      * @brief Notifies the scan slice request that the scan at the calling core
      * has finished.
      *
-     * @return true, if all cores have finished the scan.
-     * @return false, if the scan is not completed in all cores.
      */
-    bool SetFinish()
+    void SetFinish()
     {
-        uint16_t remaining_cnt =
-            unfinished_core_cnt_.fetch_sub(1, std::memory_order_acq_rel);
-
-        if (remaining_cnt == 1)
+        if (err_ == CcErrorCode::NO_ERROR)
         {
-            // Only update result if this is local request. Remote request
-            // result will be updated by dedicated core.
-            if (res_->Value().is_local_)
-            {
-                if (err_.load(std::memory_order_relaxed) ==
-                    CcErrorCode::NO_ERROR)
-                {
-                    res_->Value().ccm_scanner_->FinalizeCommit();
-
-                    res_->SetFinished();
-                }
-                else
-                {
-                    res_->SetError(err_.load(std::memory_order_relaxed));
-                }
-            }
+            res_->SetFinished();
         }
-
-        return remaining_cnt == 1;
+        else
+        {
+            res_->SetError(err_);
+        }
     }
 
-    bool SetError(CcErrorCode err)
+    void SetError(CcErrorCode err)
     {
-        CcErrorCode expected = CcErrorCode::NO_ERROR;
-        err_.compare_exchange_strong(expected,
-                                     err,
-                                     std::memory_order_relaxed,
-                                     std::memory_order_relaxed);
-        uint16_t remaining_cnt =
-            unfinished_core_cnt_.fetch_sub(1, std::memory_order_acq_rel);
-
-        // remaining_cnt might be 0 if all cores have finished and the req is
-        // put back into the result sending core's queue.
-        if (remaining_cnt <= 1)
+        if (err_ == CcErrorCode::NO_ERROR)
         {
-            res_->SetError(err_.load(std::memory_order_relaxed));
+            err_ = err;
         }
 
-        return remaining_cnt <= 1;
+        res_->SetError(err_);
     }
 
     void DeferSetError(CcErrorCode err)
     {
-        CcErrorCode expected = CcErrorCode::NO_ERROR;
-        err_.compare_exchange_strong(expected,
-                                     err,
-                                     std::memory_order_relaxed,
-                                     std::memory_order_relaxed);
+        if (err_ == CcErrorCode::NO_ERROR)
+        {
+            err_ = err;
+        }
     }
 
     CcErrorCode GetError() const
     {
-        return err_.load(std::memory_order_acquire);
-    }
-
-    /**
-     * @brief Send response to src node if all cores have finished.
-     * We use this method to send scan slice response if this request is
-     * a remote request.
-     * We assign a dedicated core to be the response sender instead of directly
-     * sending the response on the last finished core. This is to avoid
-     * serialization of response message causing one core to become
-     * significantly slower than others and would end up being the sender of all
-     * scan slice response.
-     */
-    bool SendResponseIfFinished()
-    {
-        if (unfinished_core_cnt_.load(std::memory_order_relaxed) == 0)
-        {
-            if (err_.load(std::memory_order_relaxed) == CcErrorCode::NO_ERROR)
-            {
-                res_->SetFinished();
-            }
-            else
-            {
-                res_->SetError(err_.load(std::memory_order_relaxed));
-            }
-            return true;
-        }
-        return false;
-    }
-
-    bool IsResponseSender(uint16_t core_id) const
-    {
-        return ((tx_number_ & 0x3FF) % blocking_vec_.size()) == core_id;
+        return err_;
     }
 
     bool IsForWrite() const
@@ -2931,30 +2872,30 @@ public:
         cache_hit_miss_collected_ = true;
     }
 
-    bool IsWaitForSnapshot(uint16_t core_id) const
+    bool IsWaitForSnapshot() const
     {
-        return blocking_vec_[core_id].type_ ==
-               ScanBlockingType::BlockOnWaitSnapshots;
+        return blocking_info_.type_ == ScanBlockingType::BlockOnWaitSnapshots;
     }
 
-    void SetIsWaitForSnapshot(uint16_t core_id)
+    void SetIsWaitForSnapshot()
     {
-        blocking_vec_[core_id].type_ = ScanBlockingType::BlockOnWaitSnapshots;
+        blocking_info_.type_ = ScanBlockingType::BlockOnWaitSnapshots;
     }
 
-    size_t WaitForSnapshotCnt(uint16_t core_id) const
+    size_t WaitForSnapshotCnt() const
     {
-        return wait_for_snapshot_cnt_[core_id];
+        return wait_for_snapshot_cnt_;
     }
 
-    void DecreaseWaitForSnapshotCnt(uint16_t core_id)
+    void DecreaseWaitForSnapshotCnt()
     {
-        wait_for_snapshot_cnt_[core_id]--;
+        assert(wait_for_snapshot_cnt_ > 0);
+        wait_for_snapshot_cnt_--;
     }
 
-    void IncreaseWaitForSnapshotCnt(uint16_t core_id)
+    void IncreaseWaitForSnapshotCnt()
     {
-        wait_for_snapshot_cnt_[core_id]++;
+        wait_for_snapshot_cnt_++;
     }
 
     bool AbortIfOom() const override
@@ -3008,8 +2949,7 @@ private:
 
     uint32_t range_id_{0};
 
-    std::atomic<uint16_t> unfinished_core_cnt_{1};
-    std::atomic<CcErrorCode> err_{CcErrorCode::NO_ERROR};
+    CcErrorCode err_{CcErrorCode::NO_ERROR};
 
     uint64_t ts_{0};
 
@@ -3019,13 +2959,20 @@ private:
 
     struct ScanBlockingInfo
     {
-        uint64_t cce_lock_addr_;
-        ScanType scan_type_;
-        ScanBlockingType type_;
-    };
-    std::vector<ScanBlockingInfo> blocking_vec_;
+        void Reset()
+        {
+            cce_lock_addr_ = 0;
+            scan_type_ = ScanType::ScanUnknow;
+            type_ = ScanBlockingType::NoBlocking;
+        }
 
-    std::vector<size_t> wait_for_snapshot_cnt_;
+        uint64_t cce_lock_addr_{0};
+        ScanType scan_type_{ScanType::ScanUnknow};
+        ScanBlockingType type_{ScanBlockingType::NoBlocking};
+    };
+    ScanBlockingInfo blocking_info_;
+
+    size_t wait_for_snapshot_cnt_{0};
 
     RangeSliceId range_slice_id_;
 
@@ -3293,36 +3240,14 @@ public:
 
     void Reset(remote::CcStreamReceiver *receiver,
                std::unique_ptr<remote::ScanSliceResponse> resp_msg,
-               std::vector<size_t> &&offset_tables,
-               CcHandlerResult<RangeScanSliceResult> *hd_res,
-               size_t worker_cnt)
+               CcHandlerResult<RangeScanSliceResult> *hd_res)
     {
         receiver_ = receiver;
         resp_msg_ = std::move(resp_msg);
-        offset_tables_ = std::move(offset_tables);
         hd_res_ = hd_res;
-
-        unfinished_cnt_ = worker_cnt;
-        next_remote_core_idx_ = worker_cnt;
-
-        assert(offset_tables_.size() == RemoteCoreCnt());
-        assert(worker_cnt <= RemoteCoreCnt());
-
-        cur_idxs_.clear();
-        key_offsets_.clear();
-        rec_offsets_.clear();
-
-        assert(cur_idxs_.empty());
-        assert(key_offsets_.empty());
-        assert(rec_offsets_.empty());
-
-        for (size_t worker_idx = 0; worker_idx < worker_cnt; ++worker_idx)
-        {
-            // worker idx must be less or equal than remote core count
-            cur_idxs_.push_back({worker_idx, 0});
-            key_offsets_.push_back(KeyStartOffset(worker_idx));
-            rec_offsets_.push_back(RecStartOffset(worker_idx));
-        }
+        cur_tuple_idx_ = 0;
+        key_offset_ = 0;
+        rec_offset_ = 0;
     }
 
     ProcessRemoteScanRespCc(const ProcessRemoteScanRespCc &) = delete;
@@ -3335,74 +3260,56 @@ public:
 
         do
         {
-            auto &[remote_core_idx, tuple_idx] = cur_idxs_.at(ccs.core_id_);
-
+            uint32_t remote_core_idx = resp_msg_->core_id();
             const uint64_t *key_ts_ptr =
                 (const uint64_t *) resp_msg_->key_ts().data();
-            key_ts_ptr += MetaOffset(remote_core_idx);
 
             const uint64_t *gap_ts_ptr =
                 (const uint64_t *) resp_msg_->gap_ts().data();
-            gap_ts_ptr += MetaOffset(remote_core_idx);
 
             const uint64_t *term_ptr =
                 (const uint64_t *) resp_msg_->term().data();
-            term_ptr += MetaOffset(remote_core_idx);
 
             const uint64_t *cce_lock_ptr_ptr =
                 (const uint64_t *) resp_msg_->cce_lock_ptr().data();
-            cce_lock_ptr_ptr += MetaOffset(remote_core_idx);
 
             const remote::RecordStatusType *rec_status_ptr =
                 (const remote::RecordStatusType *) resp_msg_->rec_status()
                     .data();
-            rec_status_ptr += MetaOffset(remote_core_idx);
 
             RangeScanSliceResult &scan_slice_result = hd_res_->Value();
             CcScanner &range_scanner = *scan_slice_result.ccm_scanner_;
-            ScanCache *shard_cache = range_scanner.Cache(remote_core_idx);
+            ScanCache *shard_cache = range_scanner.Cache(0);
 
-            size_t &key_offset = key_offsets_[ccs.core_id_];
-            size_t &rec_offset = rec_offsets_[ccs.core_id_];
-            size_t tuple_cnt = TupleCnt(remote_core_idx);
+            size_t tuple_cnt = TupleCnt();
 
-            for (; tuple_idx < tuple_cnt && scan_cnt < SCAN_BATCH_SIZE;
-                 ++tuple_idx, ++scan_cnt)
+            for (; cur_tuple_idx_ < tuple_cnt && scan_cnt < SCAN_BATCH_SIZE;
+                 ++cur_tuple_idx_, ++scan_cnt)
             {
                 RecordStatus rec_status =
                     remote::ToLocalType::ConvertRecordStatusType(
-                        rec_status_ptr[tuple_idx]);
+                        rec_status_ptr[cur_tuple_idx_]);
 
                 shard_cache->AddScanTuple(resp_msg_->keys(),
-                                          key_offset,
-                                          key_ts_ptr[tuple_idx],
+                                          key_offset_,
+                                          key_ts_ptr[cur_tuple_idx_],
                                           resp_msg_->records(),
-                                          rec_offset,
+                                          rec_offset_,
                                           rec_status,
                                           -1,
-                                          gap_ts_ptr[tuple_idx],
-                                          cce_lock_ptr_ptr[tuple_idx],
-                                          term_ptr[tuple_idx],
+                                          gap_ts_ptr[cur_tuple_idx_],
+                                          cce_lock_ptr_ptr[cur_tuple_idx_],
+                                          term_ptr[cur_tuple_idx_],
                                           remote_core_idx,
                                           scan_slice_result.cc_ng_id_,
                                           true);
             }
 
-            if (tuple_idx == tuple_cnt)
+            if (cur_tuple_idx_ == tuple_cnt)
             {
-                size_t trailing_cnt = TrailingCnt(remote_core_idx);
-                while (trailing_cnt-- > 0)
-                {
-                    shard_cache->RemoveLast();
-                }
-
-                range_scanner.CommitAtCore(remote_core_idx);
-
-                if (!MoveForward(ccs.core_id_))
-                {
-                    // No more data
-                    return SetFinished();
-                }
+                // No more data
+                SetFinished();
+                return true;
             }
 
             //  To avoid blocking other request for a long time, we only process
@@ -3414,115 +3321,43 @@ public:
         return false;
     }
 
-    bool SetFinished()
+    void SetFinished()
     {
-        // This core is last finished worker. We need to set handler result and
-        // recycle message.
-        if (unfinished_cnt_.fetch_sub(1, std::memory_order_release) == 1)
+        if (resp_msg_->error_code() != 0)
         {
-            if (resp_msg_->error_code() != 0)
-            {
-                hd_res_->SetError(remote::ToLocalType::ConvertCcErrorCode(
-                    resp_msg_->error_code()));
-            }
-            else
-            {
-                hd_res_->Value().ccm_scanner_->FinalizeCommit();
-
-                hd_res_->SetFinished();
-            }
-
-            TransactionExecution *txm =
-                reinterpret_cast<TransactionExecution *>(resp_msg_->txm_addr());
-            txm->ReleaseSharedForwardLatch();
-
-            // Recycle message
-            receiver_->RecycleScanSliceResp(std::move(resp_msg_));
-
-            // Return true to recycle this request
-            return true;
+            hd_res_->SetError(remote::ToLocalType::ConvertCcErrorCode(
+                resp_msg_->error_code()));
+        }
+        else
+        {
+            hd_res_->SetFinished();
         }
 
-        return false;
+        TransactionExecution *txm =
+            reinterpret_cast<TransactionExecution *>(resp_msg_->txm_addr());
+        txm->ReleaseSharedForwardLatch();
+
+        // Recycle message
+        receiver_->RecycleScanSliceResp(std::move(resp_msg_));
     }
 
 private:
-    bool MoveForward(size_t worker_idx)
-    {
-        size_t new_remote_core_idx = next_remote_core_idx_.fetch_add(1);
-        if (new_remote_core_idx < RemoteCoreCnt())
-        {
-            cur_idxs_.at(worker_idx) = {new_remote_core_idx, 0};
-            key_offsets_.at(worker_idx) = KeyStartOffset(new_remote_core_idx);
-            rec_offsets_.at(worker_idx) = RecStartOffset(new_remote_core_idx);
-
-            return true;
-        }
-
-        // No more data
-        return false;
-    }
-
-    size_t KeyStartOffset(size_t remote_core_idx) const
-    {
-        const size_t *ptr = reinterpret_cast<const size_t *>(
-            resp_msg_->key_start_offsets().data());
-        ptr += remote_core_idx;
-        return *ptr;
-    }
-
-    size_t RecStartOffset(size_t remote_core_idx) const
-    {
-        const size_t *ptr = reinterpret_cast<const size_t *>(
-            resp_msg_->record_start_offsets().data());
-        ptr += remote_core_idx;
-        return *ptr;
-    }
-
-    size_t MetaOffset(size_t remote_core_idx) const
-    {
-        return offset_tables_[remote_core_idx];
-    }
-
-    size_t TupleCnt(size_t remote_core_idx) const
+    size_t TupleCnt() const
     {
         const char *tuple_cnt_info = resp_msg_->tuple_cnt().data();
-        // remote core count
-        tuple_cnt_info += sizeof(uint16_t);
-        // tuple count
-        tuple_cnt_info += remote_core_idx * sizeof(size_t);
         return *(reinterpret_cast<const size_t *>(tuple_cnt_info));
-    }
-
-    size_t TrailingCnt(size_t remote_core_idx) const
-    {
-        const size_t *ptr =
-            reinterpret_cast<const size_t *>(resp_msg_->trailing_cnts().data());
-        ptr += remote_core_idx;
-        return *ptr;
-    }
-
-    uint16_t RemoteCoreCnt() const
-    {
-        const char *tuple_cnt_info = resp_msg_->tuple_cnt().data();
-        return *reinterpret_cast<const uint16_t *>(tuple_cnt_info);
     }
 
     remote::CcStreamReceiver *receiver_{nullptr};
     std::unique_ptr<remote::ScanSliceResponse> resp_msg_{nullptr};
-    // Store the start postition of meta data like `key_ts`.
-    std::vector<size_t> offset_tables_;
-    // The vector of {remote_core_idx, current_tuple_idx}.
-    std::vector<std::pair<size_t, size_t>> cur_idxs_;
+    // current_tuple_idx}.
+    size_t cur_tuple_idx_;
 
     // We need to store key/rec offset so that we could restart from pause
     // point.
-    std::vector<size_t> key_offsets_;
-    std::vector<size_t> rec_offsets_;
+    size_t key_offset_;
+    size_t rec_offset_;
 
-    // Unfinished worker count. std::min(this_node_core_count,
-    // remote_core_count)
-    std::atomic<size_t> unfinished_cnt_{0};
     // Next remote core idx we need to process.
     std::atomic<size_t> next_remote_core_idx_{0};
     CcHandlerResult<RangeScanSliceResult> *hd_res_{nullptr};
@@ -4096,7 +3931,6 @@ public:
         uint64_t data_sync_ts,
         uint64_t node_group_id,
         int64_t node_group_term,
-        uint16_t core_cnt,
         size_t scan_batch_size,
         uint64_t txn,
         const TxKey *target_start_key,
@@ -4111,14 +3945,13 @@ public:
           table_name_(&table_name),
           node_group_id_(node_group_id),
           node_group_term_(node_group_term),
-          core_cnt_(core_cnt),
           last_data_sync_ts_(last_data_sync_ts),
           data_sync_ts_(data_sync_ts),
           start_key_(target_start_key),
           end_key_(target_end_key),
           scan_batch_size_(scan_batch_size),
           err_(CcErrorCode::NO_ERROR),
-          unfinished_cnt_(core_cnt_),
+          finished_(false),
           mux_(),
           cv_(),
           export_base_table_item_(export_base_table_item),
@@ -4141,24 +3974,19 @@ public:
                                   false);
                           });
         }
-        for (size_t i = 0; i < core_cnt; i++)
+        data_sync_vec_.resize(scan_batch_size);
+        if (!export_base_table_item_only_)
         {
-            data_sync_vec_.emplace_back();
-            data_sync_vec_.back().resize(scan_batch_size);
-            if (!export_base_table_item_only_)
-            {
-                archive_vec_.emplace_back();
-                archive_vec_.back().reserve(scan_batch_size);
-                mv_base_idx_vec_.emplace_back();
-                mv_base_idx_vec_.back().reserve(scan_batch_size);
-            }
-
-            pause_pos_.emplace_back(TxKey(), false);
-            curr_slice_index_.emplace_back(0);
-            accumulated_scan_cnt_.emplace_back(0);
-            accumulated_flush_data_size_.emplace_back(0);
-            scan_heap_is_full_.emplace_back(0);
+            archive_vec_.reserve(scan_batch_size);
+            mv_base_idx_vec_.reserve(scan_batch_size);
         }
+
+        pause_pos_.first = std::move(TxKey());
+        pause_pos_.second = false;
+        curr_slice_index_ = 0;
+        accumulated_scan_cnt_ = 0;
+        accumulated_flush_data_size_ = 0;
+        scan_heap_is_full_ = 0;
     }
 
     bool ValidTermCheck()
@@ -4192,7 +4020,6 @@ public:
             SetError(CcErrorCode::REQUESTED_NODE_NOT_LEADER);
             return false;
         }
-        scan_count_++;
         CcMap *ccm = ccs.GetCcm(*table_name_, node_group_id_);
         if (ccm == nullptr)
         {
@@ -4228,49 +4055,44 @@ public:
         return false;
     }
 
-    bool IsDrained(size_t core_idx) const
+    bool IsDrained() const
     {
-        return pause_pos_[core_idx].second;
+        return pause_pos_.second;
     }
 
-    std::pair<TxKey, bool> &PausePos(size_t core_idx)
+    std::pair<TxKey, bool> &PausePos()
     {
-        return pause_pos_[core_idx];
+        return pause_pos_;
     }
 
     void Wait()
     {
         std::unique_lock<std::mutex> lk(mux_);
-        cv_.wait(lk, [this] { return unfinished_cnt_ == 0; });
+        cv_.wait(lk, [this] { return finished_; });
     }
 
     void Reset(OpType op_type = OpType::Normal)
     {
         std::lock_guard<std::mutex> lk(mux_);
-        unfinished_cnt_ = 1;
-        for (size_t i = 0; i < core_cnt_; i++)
+        finished_ = false;
+        if (!export_base_table_item_only_)
         {
-            if (!export_base_table_item_only_)
-            {
-                archive_vec_.at(i).clear();
-                archive_vec_.at(i).reserve(scan_batch_size_);
-                mv_base_idx_vec_.at(i).clear();
-                mv_base_idx_vec_.at(i).reserve(scan_batch_size_);
-            }
+            archive_vec_.clear();
+            mv_base_idx_vec_.clear();
+        }
 
-            accumulated_scan_cnt_.at(i) = 0;
-            accumulated_flush_data_size_.at(i) = 0;
-            if (scan_heap_is_full_[i] == 1)
-            {
-                // vec has been cleared during ReleaseDataSyncScanHeapCc,
-                // resize to prepared size
-                data_sync_vec_[i].resize(scan_batch_size_);
-                scan_heap_is_full_[i] = 0;
-            }
-            if (export_base_table_item_)
-            {
-                curr_slice_index_[i] = 0;
-            }
+        accumulated_scan_cnt_ = 0;
+        accumulated_flush_data_size_ = 0;
+        if (scan_heap_is_full_ == 1)
+        {
+            // vec has been cleared during ReleaseDataSyncScanHeapCc,
+            // resize to prepared size
+            data_sync_vec_.resize(scan_batch_size_);
+            scan_heap_is_full_ = 0;
+        }
+        if (export_base_table_item_)
+        {
+            curr_slice_index_ = 0;
         }
 
         err_ = CcErrorCode::NO_ERROR;
@@ -4282,12 +4104,9 @@ public:
     {
         std::lock_guard<std::mutex> lk(mux_);
         err_ = err;
-        --unfinished_cnt_;
-        if (unfinished_cnt_ == 0)
-        {
-            UnpinSlices();
-            cv_.notify_one();
-        }
+        finished_ = true;
+        UnpinSlices();
+        cv_.notify_one();
     }
 
     void AbortCcRequest(CcErrorCode err_code) override
@@ -4308,26 +4127,22 @@ public:
         return err_;
     }
 
-    void SetFinish(size_t core_id)
+    void SetFinish()
     {
         std::unique_lock<std::mutex> lk(mux_);
-        --unfinished_cnt_;
-        if (export_base_table_item_ && !pause_pos_[core_id].second)
+        finished_ = true;
+        if (export_base_table_item_ && !pause_pos_.second)
         {
             // Only not drained on this core, should set the paused key.
-            UpdateMinPausedSlice(&pause_pos_[core_id].first);
+            UpdateMinPausedSlice(&pause_pos_.first);
         }
         else if (!export_base_table_item_)
         {
-            UpdateMinPausedSlice(curr_slice_index_[core_id]);
+            UpdateMinPausedSlice(curr_slice_index_);
         }
-
-        if (unfinished_cnt_ == 0)
-        {
-            // Unpin the slices
-            UnpinSlices();
-            cv_.notify_one();
-        }
+        // Unpin the slices
+        UnpinSlices();
+        cv_.notify_one();
     }
 
     uint32_t NodeGroupId()
@@ -4335,19 +4150,19 @@ public:
         return node_group_id_;
     }
 
-    std::vector<FlushRecord> &DataSyncVec(uint16_t core_id)
+    std::vector<FlushRecord> &DataSyncVec()
     {
-        return data_sync_vec_[core_id];
+        return data_sync_vec_;
     }
 
-    std::vector<FlushRecord> &ArchiveVec(uint16_t core_id)
+    std::vector<FlushRecord> &ArchiveVec()
     {
-        return archive_vec_[core_id];
+        return archive_vec_;
     }
 
-    std::vector<size_t> &MoveBaseIdxVec(uint16_t core_id)
+    std::vector<size_t> &MoveBaseIdxVec()
     {
-        return mv_base_idx_vec_[core_id];
+        return mv_base_idx_vec_;
     }
 
     int64_t NodeGroupTerm() const
@@ -4371,76 +4186,52 @@ public:
         return store_range_;
     }
 
-    void FixCurrentSliceIndex(uint16_t core_id)
+    StoreSlice *CurrentSlice() const
     {
-        assert(export_base_table_item_);
-        if (pause_pos_[core_id].first.KeyPtr() != nullptr)
-        {
-            size_t curr_slice_idx = 0;
-            StoreSlice *curr_slice =
-                slice_coordinator_.pinned_slices_[curr_slice_idx];
-            while (curr_slice->EndTxKey() < pause_pos_[core_id].first)
-            {
-                ++curr_slice_idx;
-                assert(curr_slice_idx <
-                       slice_coordinator_.pinned_slices_.size());
-                curr_slice = slice_coordinator_.pinned_slices_[curr_slice_idx];
-            }
-            curr_slice_index_[core_id] = curr_slice_idx;
-        }
-    }
-
-    StoreSlice *CurrentSlice(uint16_t core_id) const
-    {
-        size_t curr_slice_idx = curr_slice_index_[core_id];
         if (export_base_table_item_)
         {
-            assert(curr_slice_idx < slice_coordinator_.pinned_slices_.size());
-            return slice_coordinator_.pinned_slices_.at(curr_slice_idx);
+            assert(curr_slice_index_ <
+                   slice_coordinator_.pinned_slices_.size());
+            return slice_coordinator_.pinned_slices_.at(curr_slice_index_);
         }
-        assert(curr_slice_idx < slices_to_scan_.size());
-        const TxKey &curr_slice_key = slices_to_scan_.at(curr_slice_idx).first;
+        assert(curr_slice_index_ < slices_to_scan_.size());
+        const TxKey &curr_slice_key =
+            slices_to_scan_.at(curr_slice_index_).first;
         return store_range_->FindSlice(curr_slice_key);
     }
 
-    const TxKey &CurrentSliceKey(uint16_t core_id) const
+    const TxKey &CurrentSliceKey() const
     {
         assert(!export_base_table_item_);
-        size_t curr_slice_index = curr_slice_index_[core_id];
-        assert(curr_slice_index < slices_to_scan_.size());
-        return slices_to_scan_[curr_slice_index].first;
+        assert(curr_slice_index_ < slices_to_scan_.size());
+        return slices_to_scan_[curr_slice_index_].first;
     }
 
-    void MoveToNextSlice(uint16_t core_id)
+    void MoveToNextSlice()
     {
-        curr_slice_index_[core_id]++;
+        curr_slice_index_++;
     }
 
-    bool TheBatchEnd(uint16_t core_id) const
+    bool TheBatchEnd() const
     {
-        return curr_slice_index_[core_id] >=
+        return curr_slice_index_ >=
                (export_base_table_item_
                     ? slice_coordinator_.pinned_slices_.size()
                     : slice_coordinator_.batch_end_slice_index_);
     }
 
-    bool IsSlicePinned(uint16_t core_id) const
+    bool IsSlicePinned() const
     {
         assert(export_base_table_item_ ||
-               curr_slice_index_[core_id] < slices_to_scan_.size());
+               curr_slice_index_ < slices_to_scan_.size());
         return export_base_table_item_
                    ? true
-                   : slices_to_scan_[curr_slice_index_[core_id]].second;
+                   : slices_to_scan_[curr_slice_index_].second;
     }
 
     uint64_t SchemaVersion() const override
     {
         return schema_version_;
-    }
-
-    void SetUnfinishedCoreCnt(uint16_t core_cnt)
-    {
-        unfinished_cnt_ = core_cnt;
     }
 
     void UnpinSlices()
@@ -4486,13 +4277,10 @@ public:
         return last_data_sync_ts_;
     }
 
-    std::vector<size_t> accumulated_scan_cnt_;
-    std::vector<uint64_t> accumulated_flush_data_size_;
+    size_t accumulated_scan_cnt_;
+    uint64_t accumulated_flush_data_size_;
 
-    // std::vector<bool> is not safe to use in multi-threaded environment,
-    std::vector<uint32_t> scan_heap_is_full_{0};
-
-    size_t scan_count_{0};
+    uint32_t scan_heap_is_full_{0};
 
 private:
     struct SliceCoordinator
@@ -4612,7 +4400,6 @@ private:
     const TableName *table_name_{nullptr};
     uint32_t node_group_id_;
     int64_t node_group_term_;
-    uint16_t core_cnt_;
     // It is used as a hint to decide if a page has dirty data since last round
     // of checkpoint. It is guaranteed that all entries committed before this ts
     // are synced into data store.
@@ -4620,10 +4407,10 @@ private:
     // Target ts. Collect all data changes committed before this ts into data
     // sync vec.
     uint64_t data_sync_ts_;
-    std::vector<std::vector<FlushRecord>> data_sync_vec_;
-    std::vector<std::vector<FlushRecord>> archive_vec_;
+    std::vector<FlushRecord> data_sync_vec_;
+    std::vector<FlushRecord> archive_vec_;
     // Cache the entries to move record from "base" table to "archive" table
-    std::vector<std::vector<size_t>> mv_base_idx_vec_;
+    std::vector<size_t> mv_base_idx_vec_;
 
     // Start/end key of target range if the scan is on a range only, nullptr if
     // it's on entire table.
@@ -4632,11 +4419,11 @@ private:
     // Position that we left off during last round of ckpt scan.
     // pause_pos_.first is the key that we stopped at (has not been scanned
     // though), bool is if this core has finished scanning all keys already.
-    std::vector<std::pair<TxKey, bool>> pause_pos_;
+    std::pair<TxKey, bool> pause_pos_;
     size_t scan_batch_size_;
 
     CcErrorCode err_{CcErrorCode::NO_ERROR};
-    uint32_t unfinished_cnt_;
+    bool finished_{false};
     std::mutex mux_;
     std::condition_variable cv_;
 
@@ -4654,7 +4441,7 @@ private:
     // The index of the current slice to be scanned. If export_base_table_item_
     // is true, it is the index of the SliceCoordinator::pinned_slices_ vector,
     // and if false, it is the index of the slices_to_scan_ vector.
-    std::vector<size_t> curr_slice_index_;
+    size_t curr_slice_index_;
     // keep schema vesion after acquire read lock on catalog, to prevent the
     // concurrency issue with Truncate Table, detail ref to tx issue #1130
     // If schema_version_ is 0, the check will be bypassed, since this data sync
@@ -4896,7 +4683,10 @@ public:
         std::shared_ptr<std::atomic_uint32_t> range_split_started = nullptr,
         std::unordered_set<TableName> *range_splitting = nullptr,
         uint16_t first_core = 0,
-        ParseDataLogCc *parse_cc = nullptr)
+        ParseDataLogCc *parse_cc = nullptr,
+        const std::unordered_map<TableName,
+                                 std::unordered_map<int32_t, uint64_t>>
+            *split_range_info = nullptr)
     {
         table_name_holder_ =
             TableName(table_name_view, table_type, table_engine);
@@ -4924,6 +4714,15 @@ public:
         is_lock_recovery_ = is_lock_recovery;
         upsert_kv_err_code_ = {true, CcErrorCode::NO_ERROR};
         parse_cc_ = parse_cc;
+        split_ranges_ = nullptr;
+        if (split_range_info != nullptr)
+        {
+            auto table_it = split_range_info->find(table_name_holder_);
+            if (table_it != split_range_info->end())
+            {
+                split_ranges_ = &table_it->second;
+            }
+        }
     }
 
     ReplayLogCc(const ReplayLogCc &rhs) = delete;
@@ -5122,6 +4921,16 @@ public:
         return first_core_;
     }
 
+    uint64_t RangeSplitCommitTs(int32_t range_id) const
+    {
+        if (split_ranges_ == nullptr)
+        {
+            return 0;
+        }
+        auto it = split_ranges_->find(range_id);
+        return it == split_ranges_->end() ? 0 : it->second;
+    }
+
     void SetOffset(size_t offset)
     {
         offset_ = offset;
@@ -5189,6 +4998,9 @@ private:
                                                      CcErrorCode::NO_ERROR};
     ParseDataLogCc *parse_cc_{nullptr};
 
+    // Range split commit ts per range for the current table, if available.
+    const std::unordered_map<int32_t, uint64_t> *split_ranges_{nullptr};
+
     friend std::ostream &operator<<(std::ostream &outs,
                                     txservice::ReplayLogCc *r);
 };
@@ -5205,7 +5017,10 @@ public:
                std::atomic<fault::RecoveryService::WaitingStatus> &status,
                std::atomic<uint64_t> &on_fly_cnt,
                bool &recovery_error,
-               const bool is_lock_recovery = false)
+               const bool is_lock_recovery = false,
+               const std::unordered_map<TableName,
+                                        std::unordered_map<int32_t, uint64_t>>
+                   *split_range_info = nullptr)
     {
         log_records_sv_ =
             std::string_view(log_records.data(), log_records.size());
@@ -5217,6 +5032,7 @@ public:
         on_fly_cnt_ = &on_fly_cnt;
         recovery_error_ = &recovery_error;
         is_lock_recovery_ = is_lock_recovery;
+        split_range_info_ = split_range_info;
     }
 
     void Reset(::txlog::ReplayMessage &&replay_message,
@@ -5226,7 +5042,10 @@ public:
                std::atomic<fault::RecoveryService::WaitingStatus> &status,
                std::atomic<uint64_t> &on_fly_cnt,
                bool &recovery_error,
-               const bool is_lock_recovery = false)
+               const bool is_lock_recovery = false,
+               const std::unordered_map<TableName,
+                                        std::unordered_map<int32_t, uint64_t>>
+                   *split_range_info = nullptr)
     {
         replay_message_ =
             std::make_unique<::txlog::ReplayMessage>(std::move(replay_message));
@@ -5241,13 +5060,15 @@ public:
         on_fly_cnt_ = &on_fly_cnt;
         recovery_error_ = &recovery_error;
         is_lock_recovery_ = is_lock_recovery;
+        split_range_info_ = split_range_info;
     }
 
     bool Execute(CcShard &ccs) override
     {
         size_t offset = 0;
         // core of first key in log
-        int dest_core = 0;
+        uint32_t core_rand = butil::fast_rand();
+        uint16_t dest_core = static_cast<uint16_t>(core_rand % ccs.core_cnt_);
         std::vector<ReplayLogCc *> replay_cc_list;
         replay_cc_list.reserve(160);
         while (offset < log_records_sv_.size())
@@ -5318,10 +5139,19 @@ public:
                 uint32_t kv_len = *reinterpret_cast<const uint32_t *>(
                     blob.data() + blob_offset);
                 blob_offset += sizeof(uint32_t);
-                size_t hash = ccs.GetCatalogFactory(table_engine)
-                                  ->KeyHash(blob.data(), blob_offset, nullptr);
-                dest_core = hash ? (hash & 0x3FF) % ccs.core_cnt_
-                                 : (dest_core + 1) % ccs.core_cnt_;
+                if (table_engine == TableEngine::EloqSql ||
+                    table_engine == TableEngine::EloqDoc)
+                {
+                    dest_core = (dest_core + 1) % ccs.core_cnt_;
+                }
+                else
+                {
+                    size_t hash =
+                        ccs.GetCatalogFactory(table_engine)
+                            ->KeyHash(blob.data(), blob_offset, nullptr);
+                    dest_core = hash ? (hash & 0x3FF) % ccs.core_cnt_
+                                     : (dest_core + 1) % ccs.core_cnt_;
+                }
                 ReplayLogCc *cc_req = replay_cc_pool_.NextRequest();
                 replay_cc_list.push_back(cc_req);
                 assert(cc_ng_term_ >= 0);
@@ -5342,7 +5172,8 @@ public:
                     nullptr,
                     nullptr,
                     dest_core,
-                    this);
+                    this,
+                    split_range_info_);
 
                 blob_offset += kv_len;
             }
@@ -5380,6 +5211,8 @@ private:
     std::atomic<uint64_t> *on_fly_cnt_;
     bool *recovery_error_;
     bool is_lock_recovery_;
+    const std::unordered_map<TableName, std::unordered_map<int32_t, uint64_t>>
+        *split_range_info_{nullptr};
 };
 
 struct BroadcastStatisticsCc
@@ -6708,7 +6541,6 @@ struct UpdateKeyCacheCc : public CcRequestBase
     void Reset(const TableName &tbl_name,
                uint32_t ng_id,
                int64_t ng_term,
-               size_t core_cnt,
                const TxKey &start_key,
                const TxKey &end_key,
                StoreRange *range,
@@ -6722,10 +6554,8 @@ struct UpdateKeyCacheCc : public CcRequestBase
         start_key_ = &start_key;
         end_key_ = &end_key;
         store_range_ = range;
-        unfinished_core_ = core_cnt;
         hd_res_ = res;
-        paused_pos_.clear();
-        paused_pos_.resize(core_cnt);
+        paused_pos_ = TxKey();
     }
 
     bool Execute(CcShard &ccs) override
@@ -6733,7 +6563,8 @@ struct UpdateKeyCacheCc : public CcRequestBase
         int64_t ng_term = Sharder::Instance().LeaderTerm(node_group_id_);
         if (ng_term < 0 || ng_term != ng_term_)
         {
-            return SetFinish();
+            SetFinish();
+            return true;
         }
 
         CcMap *ccm = ccs.GetCcm(*table_name_, node_group_id_);
@@ -6742,14 +6573,9 @@ struct UpdateKeyCacheCc : public CcRequestBase
         return ccm->Execute(*this);
     }
 
-    bool SetFinish()
+    void SetFinish()
     {
-        if (unfinished_core_.fetch_sub(1, std::memory_order_acq_rel) == 1)
-        {
-            hd_res_->SetFinished();
-            return true;
-        }
-        return false;
+        hd_res_->SetFinished();
     }
 
     const TableName *table_name_{nullptr};
@@ -6758,8 +6584,7 @@ struct UpdateKeyCacheCc : public CcRequestBase
     const TxKey *start_key_{nullptr};
     const TxKey *end_key_{nullptr};
     StoreRange *store_range_{nullptr};
-    std::vector<TxKey> paused_pos_;
-    std::atomic<size_t> unfinished_core_;
+    TxKey paused_pos_;
     CcHandlerResult<Void> *hd_res_{nullptr};
 };
 
@@ -7773,7 +7598,9 @@ private:
 
 struct UploadBatchCc : public CcRequestBase
 {
+    // keys, records, commit_ts, rec_status, range_size_flags
     using WriteEntryTuple = std::tuple<const std::string &,
+                                       const std::string &,
                                        const std::string &,
                                        const std::string &,
                                        const std::string &>;
@@ -7790,10 +7617,10 @@ public:
     void Reset(const TableName &table_name,
                txservice::NodeGroupId ng_id,
                int64_t &ng_term,
-               size_t core_cnt,
+               int32_t partition_id,
                size_t batch_size,
                size_t start_key_idx,
-               const std::vector<WriteEntry *> &entry_vec,
+               const std::vector<std::pair<uint8_t, WriteEntry *>> &entry_vec,
                bthread::Mutex &req_mux,
                bthread::ConditionVariable &req_cv,
                size_t &finished_req_cnt,
@@ -7804,6 +7631,7 @@ public:
         node_group_id_ = ng_id;
         node_group_term_ = &ng_term;
         is_remote_ = false;
+        partition_id_ = partition_id;
         batch_size_ = batch_size;
         start_key_idx_ = start_key_idx;
         entry_vector_ = &entry_vec;
@@ -7811,16 +7639,17 @@ public:
         req_cv_ = &req_cv;
         finished_req_cnt_ = &finished_req_cnt;
         req_result_ = &req_result;
-        unfinished_cnt_.store(core_cnt, std::memory_order_relaxed);
+        unfinished_cnt_.store(1, std::memory_order_relaxed);
         err_code_.store(CcErrorCode::NO_ERROR, std::memory_order_relaxed);
         paused_pos_.clear();
-        paused_pos_.resize(core_cnt, {});
+        paused_pos_.resize(1, {});
         data_type_ = data_type;
     }
 
     void Reset(const TableName &table_name,
                txservice::NodeGroupId ng_id,
                int64_t &ng_term,
+               int32_t partition_id,
                size_t core_cnt,
                uint32_t batch_size,
                const WriteEntryTuple &entry_tuple,
@@ -7833,6 +7662,7 @@ public:
         node_group_id_ = ng_id;
         node_group_term_ = &ng_term;
         is_remote_ = true;
+        partition_id_ = partition_id;
         batch_size_ = batch_size;
         start_key_idx_ = 0;
         entry_tuples_ = &entry_tuple;
@@ -7975,7 +7805,12 @@ public:
         return batch_size_;
     }
 
-    const std::vector<WriteEntry *> *EntryVector() const
+    int32_t PartitionId() const
+    {
+        return partition_id_;
+    }
+
+    const std::vector<std::pair<uint8_t, WriteEntry *>> *EntryVector() const
     {
         return is_remote_ ? nullptr : entry_vector_;
     }
@@ -7990,19 +7825,23 @@ public:
                            size_t key_off,
                            size_t rec_off,
                            size_t ts_off,
-                           size_t status_off)
+                           size_t status_off,
+                           size_t flags_off)
     {
+        core_id = partition_id_ >= 0 ? 0 : core_id;
         auto &key_pos = paused_pos_.at(core_id);
         std::get<0>(key_pos) = key_index;
         std::get<1>(key_pos) = key_off;
         std::get<2>(key_pos) = rec_off;
         std::get<3>(key_pos) = ts_off;
         std::get<4>(key_pos) = status_off;
+        std::get<5>(key_pos) = flags_off;
     }
 
-    const std::tuple<size_t, size_t, size_t, size_t, size_t> &GetPausedPosition(
-        uint16_t core_id) const
+    const std::tuple<size_t, size_t, size_t, size_t, size_t, size_t> &
+    GetPausedPosition(uint16_t core_id) const
     {
+        core_id = partition_id_ >= 0 ? 0 : core_id;
         return paused_pos_.at(core_id);
     }
 
@@ -8026,12 +7865,14 @@ private:
     uint32_t node_group_id_{0};
     int64_t *node_group_term_{nullptr};
     bool is_remote_{false};
+    // -1 means broadcast to all shards(used by hash partition)
+    int32_t partition_id_{-1};
     uint32_t batch_size_{0};
     size_t start_key_idx_{0};
     union
     {
-        // for local request
-        const std::vector<WriteEntry *> *entry_vector_;
+        // for local request: (range_size_flags, WriteEntry*)
+        const std::vector<std::pair<uint8_t, WriteEntry *>> *entry_vector_;
         // for remote request
         const WriteEntryTuple *entry_tuples_;
     };
@@ -8043,8 +7884,10 @@ private:
     // This two variables may be accessed by multi-cores.
     std::atomic<size_t> unfinished_cnt_{0};
     std::atomic<CcErrorCode> err_code_{CcErrorCode::NO_ERROR};
-    // key index, key offset, record offset, ts offset, record status offset
-    std::vector<std::tuple<size_t, size_t, size_t, size_t, size_t>> paused_pos_;
+    // key index, key offset, record offset, ts offset, record status offset,
+    // range_size_flags offset
+    std::vector<std::tuple<size_t, size_t, size_t, size_t, size_t, size_t>>
+        paused_pos_;
 
     UploadBatchType data_type_{UploadBatchType::SkIndexData};
 };
@@ -8329,25 +8172,19 @@ public:
     void Reset(const TableName &table_name,
                txservice::NodeGroupId ng_id,
                int64_t &ng_term,
-               size_t core_cnt,
                const WriteEntryTuple &entry_tuple,
                std::shared_ptr<SliceUpdation> slice_info)
     {
         table_name_ = &table_name;
         node_group_id_ = ng_id;
         node_group_term_ = &ng_term;
-        core_cnt_ = core_cnt;
-        partitioned_slice_data_.resize(core_cnt);
-        next_idxs_.resize(core_cnt);
-        for (size_t i = 0; i < core_cnt; i++)
-        {
-            next_idxs_[i] = 0;
-        }
+        slice_data_.clear();
+        next_idx_ = 0;
 
         entry_tuples_ = &entry_tuple;
         slices_info_ = slice_info;
 
-        unfinished_cnt_ = core_cnt;
+        finished_ = false;
         err_code_ = CcErrorCode::NO_ERROR;
     }
 
@@ -8413,14 +8250,12 @@ public:
     std::pair<bool, std::shared_ptr<SliceUpdation>> SetFinish()
     {
         std::unique_lock<bthread::Mutex> req_lk(req_mux_);
-        if (--unfinished_cnt_ == 0)
-        {
-            // Make a copy of slices_info_ to avoid race condition.
-            std::shared_ptr<SliceUpdation> slices_info = slices_info_;
-            req_cv_.notify_one();
-            return {true, std::move(slices_info)};
-        }
-        return {false, nullptr};
+        finished_ = true;
+
+        // Make a copy of slices_info_ to avoid race condition.
+        std::shared_ptr<SliceUpdation> slices_info = slices_info_;
+        req_cv_.notify_one();
+        return {true, std::move(slices_info)};
     }
 
     bool SetError(CcErrorCode err_code)
@@ -8430,13 +8265,9 @@ public:
         {
             err_code_ = err_code;
         }
-        if (--unfinished_cnt_ == 0)
-        {
-            req_cv_.notify_one();
-
-            return true;
-        }
-        return false;
+        finished_ = true;
+        req_cv_.notify_one();
+        return true;
     }
 
     void AbortCcRequest(CcErrorCode err_code) override
@@ -8453,7 +8284,7 @@ public:
     void Wait()
     {
         std::unique_lock<bthread::Mutex> lk(req_mux_);
-        while (unfinished_cnt_ != 0)
+        while (!finished_)
         {
             req_cv_.wait(lk);
         }
@@ -8516,7 +8347,7 @@ public:
     }
     void SetParsed()
     {
-        parsed_.store(true, std::memory_order_release);
+        parsed_ = true;
     }
 
     void AddDataItem(TxKey key,
@@ -8524,34 +8355,26 @@ public:
                      uint64_t version_ts,
                      bool is_deleted)
     {
-        size_t hash = key.Hash();
-        // Uses the lower 10 bits of the hash code to shard the key across
-        // CPU cores at this node.
-        uint16_t core_code = hash & 0x3FF;
-        uint16_t core_id = core_code % core_cnt_;
-
-        partitioned_slice_data_[core_id].emplace_back(
+        slice_data_.emplace_back(
             std::move(key), std::move(record), version_ts, is_deleted);
     }
 
-    size_t NextIndex(size_t core_idx) const
+    size_t NextIndex() const
     {
-        size_t next_idx = next_idxs_[core_idx];
-        assert(next_idx <= partitioned_slice_data_[core_idx].size());
-        return next_idx;
+        assert(next_idx_ <= slice_data_.size());
+        return next_idx_;
     }
 
-    void SetNextIndex(size_t core_idx, size_t index)
+    void SetNextIndex(size_t index)
     {
-        assert(index <= partitioned_slice_data_[core_idx].size());
-        next_idxs_[core_idx] = index;
+        assert(index <= slice_data_.size());
+        next_idx_ = index;
     }
 
     // Notice: these data items belong to multi slices.
-    std::deque<SliceDataItem> &SliceData(uint16_t core_id)
+    std::deque<SliceDataItem> &SliceData()
     {
-        assert(core_id < partitioned_slice_data_.size());
-        return partitioned_slice_data_[core_id];
+        return slice_data_;
     }
 
     bool AbortIfOom() const override
@@ -8560,7 +8383,6 @@ public:
     }
 
 private:
-    uint16_t core_cnt_;
     const TableName *table_name_{nullptr};
     uint32_t node_group_id_{0};
     int64_t *node_group_term_{nullptr};
@@ -8573,17 +8395,16 @@ private:
     // key offset, record offset, ts offset, record status offset
     // when parse items
     std::tuple<size_t, size_t, size_t, size_t> parse_offset_{0, 0, 0, 0};
-    // parse items on one core, then put the req to other cores.
-    std::atomic_bool parsed_{false};
+    bool parsed_{false};
 
-    std::vector<std::deque<SliceDataItem>> partitioned_slice_data_;
+    std::deque<SliceDataItem> slice_data_;
     // pause position when emplace keys into ccmap in batches
-    std::vector<size_t> next_idxs_;
+    size_t next_idx_;
 
     bthread::Mutex req_mux_{};
     bthread::ConditionVariable req_cv_{};
     // This two variables may be accessed by multi-cores.
-    size_t unfinished_cnt_{0};
+    bool finished_{false};
     CcErrorCode err_code_{CcErrorCode::NO_ERROR};
 };
 
@@ -8806,7 +8627,6 @@ struct ScanSliceDeltaSizeCcForRangePartition : public CcRequestBase
                                           uint64_t scan_ts,
                                           uint64_t ng_id,
                                           int64_t ng_term,
-                                          uint64_t core_cnt,
                                           uint64_t txn,
                                           const TxKey &target_start_key,
                                           const TxKey &target_end_key,
@@ -8823,20 +8643,14 @@ struct ScanSliceDeltaSizeCcForRangePartition : public CcRequestBase
           store_range_(store_range),
           is_dirty_(is_dirty),
           has_dml_since_ddl_(false),
-          unfinished_cnt_(core_cnt),
+          finished_(false),
           schema_version_(schema_version)
     {
         tx_number_ = txn;
-        pause_pos_.resize(core_cnt);
+        pause_pos_.first = std::move(TxKey());
+        pause_pos_.second = nullptr;
         size_t slice_cnt = store_range ? store_range->SlicesCount() : 0;
-        for (size_t i = 0; i < core_cnt; ++i)
-        {
-            slice_delta_size_.emplace_back();
-            if (slice_cnt > 0)
-            {
-                slice_delta_size_.back().reserve(slice_cnt);
-            }
-        }
+        slice_delta_size_.reserve(slice_cnt);
     }
 
     bool ValidTermCheck() const
@@ -8879,26 +8693,22 @@ struct ScanSliceDeltaSizeCcForRangePartition : public CcRequestBase
     void Wait()
     {
         std::unique_lock<std::mutex> lk(mux_);
-        cv_.wait(lk, [this] { return unfinished_cnt_ == 0; });
+        cv_.wait(lk, [this] { return finished_; });
     }
 
     void SetFinish()
     {
         std::unique_lock<std::mutex> lk(mux_);
-        if (--unfinished_cnt_ == 0)
-        {
-            cv_.notify_one();
-        }
+        finished_ = true;
+        cv_.notify_one();
     }
 
     void SetError(CcErrorCode err)
     {
         std::unique_lock<std::mutex> lk(mux_);
         err_ = err;
-        if (--unfinished_cnt_ == 0)
-        {
-            cv_.notify_one();
-        }
+        finished_ = true;
+        cv_.notify_one();
     }
 
     bool IsError()
@@ -8960,18 +8770,18 @@ struct ScanSliceDeltaSizeCcForRangePartition : public CcRequestBase
         assert(store_range);
         bool res = store_range_.compare_exchange_strong(
             expect, store_range, std::memory_order_acq_rel);
-        slice_delta_size_[core_id].reserve(store_range->SlicesCount());
+        slice_delta_size_.reserve(store_range->SlicesCount());
         return res;
     }
 
-    std::pair<TxKey, StoreSlice *> &PausedPos(size_t core_id)
+    std::pair<TxKey, StoreSlice *> &PausedPos()
     {
-        return pause_pos_[core_id];
+        return pause_pos_;
     }
 
-    std::vector<std::pair<TxKey, int64_t>> &SliceDeltaSize(size_t core_id)
+    std::vector<std::pair<TxKey, int64_t>> &SliceDeltaSize()
     {
-        return slice_delta_size_[core_id];
+        return slice_delta_size_;
     }
 
     bool IsDirty() const
@@ -9015,10 +8825,10 @@ private:
     // pause_pos_.first is the key that we stopped at (has not been scanned
     // though), .second is the slice that we stopped in (has not been scanned
     // completed yet).
-    std::vector<std::pair<TxKey, StoreSlice *>> pause_pos_;
+    std::pair<TxKey, StoreSlice *> pause_pos_;
     // The delta size of the slices. First is the TxKey of the slice, second is
     // the delta size. The TxKey is not the owner of the key.
-    std::vector<std::vector<std::pair<TxKey, int64_t>>> slice_delta_size_;
+    std::vector<std::pair<TxKey, int64_t>> slice_delta_size_;
 
     // Generally, if the size of a key in the data store is unknown (the
     // data_store_size_ is INT32_MAX), we need to read the storage (via
@@ -9036,7 +8846,7 @@ private:
     std::atomic<bool> has_dml_since_ddl_{false};
 
     CcErrorCode err_{CcErrorCode::NO_ERROR};
-    uint32_t unfinished_cnt_;
+    bool finished_{false};
     uint64_t schema_version_;
     std::mutex mux_;
     std::condition_variable cv_;

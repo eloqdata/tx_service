@@ -594,7 +594,9 @@ void txservice::remote::RemotePostWrite::Reset(
             rec_str,
             static_cast<OperationType>(post_commit.operation_type()),
             post_commit.key_shard_code(),
-            &cc_res_);
+            &cc_res_,
+            post_commit.partition_id(),
+            post_commit.on_dirty_range());
     }
     else
     {
@@ -1317,7 +1319,6 @@ bool txservice::remote::RemoteScanNextBatch::EndKeyInclusive()
 
 txservice::remote::RemoteScanSlice::RemoteScanSlice()
 {
-    parallel_req_ = true;
     res_ = &cc_res_;
 
     cc_res_.Value().is_local_ = false;
@@ -1359,8 +1360,8 @@ txservice::remote::RemoteScanSlice::RemoteScanSlice()
 
         const RangeScanSliceResult &slice_result = cc_res_.Value();
         output_msg_.clear_last_key();
-        auto [last_key, key_set] = slice_result.PeekLastKey();
-        assert(key_set || cc_res_.IsError());
+        const TxKey *last_key = slice_result.LastKey();
+        assert(last_key != nullptr || cc_res_.IsError());
         // Only sends back the last key if this scan batch is not the last. The
         // next scan batch will use this last key as the beginning of the next
         // batch.
@@ -1376,95 +1377,69 @@ txservice::remote::RemoteScanSlice::RemoteScanSlice()
         output_msg_.set_slice_position(
             ToRemoteType::ConvertSlicePosition(slice_result.slice_position_));
 
-        uint16_t core_cnt = GetShardCount();
-        // Add core cnt first
-        output_msg_.mutable_tuple_cnt()->append((const char *) &core_cnt,
-                                                sizeof(uint16_t));
-        // Add tuple count for each core
-        for (size_t idx = 0; idx < core_cnt; ++idx)
-        {
-            size_t tuple_cnt;
-            if (send_cache)
-            {
-                tuple_cnt = scan_cache_vec_[idx].rec_status_.size();
-            }
-            else
-            {
-                tuple_cnt = 0;
-            }
-            output_msg_.mutable_tuple_cnt()->append((const char *) &tuple_cnt,
-                                                    sizeof(size_t));
-        }
+        // Add tuple count
+        size_t tuple_cnt =
+            send_cache ? slice_result.remote_scan_caches_->Size() : 0;
+        output_msg_.mutable_tuple_cnt()->append((const char *) &tuple_cnt,
+                                                sizeof(size_t));
 
         if (send_cache)
         {
-            // Merge scan cache info into a single byte array to reduce
-            // deserialization time on the receiver side.
-            for (size_t idx = 0; idx < core_cnt; ++idx)
+            output_msg_.mutable_keys()->append(scan_cache_.keys_);
+
+            if (scan_cache_.archive_positions_.size() > 0)
             {
-                RemoteScanSliceCache &cache = scan_cache_vec_[idx];
-
-                size_t keys_start_offset = output_msg_.keys().size();
-                output_msg_.mutable_key_start_offsets()->append(
-                    (const char *) &keys_start_offset, sizeof(size_t));
-                size_t record_start_offset = output_msg_.records().size();
-                output_msg_.mutable_record_start_offsets()->append(
-                    (const char *) &record_start_offset, sizeof(size_t));
-
-                output_msg_.mutable_keys()->append(cache.keys_);
-
-                if (cache.archive_positions_.size() > 0)
+                // Merge the backfilled archive records.
+                size_t rec_offset = 0;
+                for (size_t j = 0; j < scan_cache_.archive_positions_.size();
+                     j++)
                 {
-                    // Merge the backfilled archive records.
-                    size_t rec_offset = 0;
-                    for (size_t j = 0; j < cache.archive_positions_.size(); j++)
-                    {
-                        output_msg_.mutable_records()->append(
-                            cache.records_.data() + rec_offset,
-                            cache.records_.data() +
-                                cache.archive_positions_[j].second);
-                        rec_offset = cache.archive_positions_[j].second;
-                        assert(cache.archive_records_[j].size() > 0);
-                        output_msg_.mutable_records()->append(
-                            cache.archive_records_[j]);
-                    }
                     output_msg_.mutable_records()->append(
-                        cache.records_.data() + rec_offset,
-                        cache.records_.data() + cache.records_.size());
+                        scan_cache_.records_.data() + rec_offset,
+                        scan_cache_.records_.data() +
+                            scan_cache_.archive_positions_[j].second);
+                    rec_offset = scan_cache_.archive_positions_[j].second;
+                    assert(scan_cache_.archive_records_[j].size() > 0);
+                    output_msg_.mutable_records()->append(
+                        scan_cache_.archive_records_[j]);
                 }
-                else
-                {
-                    output_msg_.mutable_records()->append(cache.records_);
-                }
-
-                output_msg_.mutable_key_ts()->append(
-                    (const char *) cache.key_ts_.data(),
-                    cache.key_ts_.size() * sizeof(uint64_t));
-                output_msg_.mutable_gap_ts()->append(
-                    (const char *) cache.gap_ts_.data(),
-                    cache.gap_ts_.size() * sizeof(uint64_t));
-                output_msg_.mutable_term()->append(
-                    (const char *) cache.term_.data(),
-                    cache.term_.size() * sizeof(uint64_t));
-                output_msg_.mutable_cce_lock_ptr()->append(
-                    (const char *) cache.cce_lock_ptr_.data(),
-                    cache.cce_lock_ptr_.size() * sizeof(uint64_t));
-                output_msg_.mutable_rec_status()->append(
-                    (const char *) cache.rec_status_.data(),
-                    cache.rec_status_.size() * sizeof(RecordStatusType));
-
-                output_msg_.mutable_trailing_cnts()->append(
-                    (const char *) &cache.trailing_cnt_, sizeof(size_t));
+                output_msg_.mutable_records()->append(
+                    scan_cache_.records_.data() + rec_offset,
+                    scan_cache_.records_.data() + scan_cache_.records_.size());
             }
+            else
+            {
+                output_msg_.mutable_records()->append(scan_cache_.records_);
+            }
+
+            output_msg_.mutable_key_ts()->append(
+                (const char *) scan_cache_.key_ts_.data(),
+                scan_cache_.key_ts_.size() * sizeof(uint64_t));
+            output_msg_.mutable_gap_ts()->append(
+                (const char *) scan_cache_.gap_ts_.data(),
+                scan_cache_.gap_ts_.size() * sizeof(uint64_t));
+            output_msg_.mutable_term()->append(
+                (const char *) scan_cache_.term_.data(),
+                scan_cache_.term_.size() * sizeof(uint64_t));
+            output_msg_.mutable_cce_lock_ptr()->append(
+                (const char *) scan_cache_.cce_lock_ptr_.data(),
+                scan_cache_.cce_lock_ptr_.size() * sizeof(uint64_t));
+            output_msg_.mutable_rec_status()->append(
+                (const char *) scan_cache_.rec_status_.data(),
+                scan_cache_.rec_status_.size() * sizeof(RecordStatusType));
         }
         const ScanSliceRequest &req = input_msg_->scan_slice_req();
+        uint32_t range_id = req.range_id();
+        uint32_t core_id =
+            (range_id & 0x3FF) % Sharder::Instance().GetLocalCcShardsCount();
+        output_msg_.set_core_id(core_id);
         hd_->SendScanRespToNode(req.src_node_id(), output_msg_, false);
         hd_->RecycleCcMsg(std::move(input_msg_));
     };
 }
 
 void txservice::remote::RemoteScanSlice::Reset(
-    std::unique_ptr<CcMessage> input_msg, uint16_t core_cnt)
+    std::unique_ptr<CcMessage> input_msg)
 {
     assert(input_msg->has_scan_slice_req());
 
@@ -1508,30 +1483,13 @@ void txservice::remote::RemoteScanSlice::Reset(
     output_msg_.set_tx_term(input_msg->tx_term());
     output_msg_.set_command_id(input_msg->command_id());
 
-    SetShardCount(core_cnt);
-
-    size_t vec_size = scan_slice_req.prior_cce_lock_vec_size();
-    for (size_t core_id = 0; core_id < core_cnt; ++core_id)
-    {
-        uint64_t cce_lock_addr =
-            core_id < vec_size ? scan_slice_req.prior_cce_lock_vec(core_id) : 0;
-        SetPriorCceLockAddr(cce_lock_addr, core_id);
-    }
+    uint64_t cce_lock_addr = scan_slice_req.prior_cce_lock();
+    SetPriorCceLockAddr(cce_lock_addr);
 
     RangeScanSliceResult &slice_result = cc_res_.Value();
 
-    for (uint16_t core_id = 0; core_id < core_cnt; ++core_id)
-    {
-        if (core_id == scan_cache_vec_.size())
-        {
-            scan_cache_vec_.emplace_back(core_cnt);
-        }
-        else
-        {
-            scan_cache_vec_[core_id].Reset(core_cnt);
-        }
-    }
-    slice_result.remote_scan_caches_ = &scan_cache_vec_;
+    scan_cache_.Reset();
+    slice_result.remote_scan_caches_ = &scan_cache_;
 
     input_msg_ = std::move(input_msg);
 

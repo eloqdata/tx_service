@@ -303,22 +303,12 @@ public:
                SliceStatus status,
                bool init_key_cache,
                bool empty_slice)
-        : size_(size),
-          status_(status),
-          fetch_slice_cc_(nullptr),
-          cache_validity_((txservice_enable_key_cache && init_key_cache)
-                              ? Sharder::Instance().GetLocalCcShardsCount()
-                              : 0)
+        : size_(size), status_(status), fetch_slice_cc_(nullptr)
     {
-        if (empty_slice && !cache_validity_.empty())
+        if (empty_slice && (txservice_enable_key_cache && init_key_cache))
         {
             // If slice is empty, set the key cache as valid at the start.
-            for (uint16_t i = 0;
-                 i < Sharder::Instance().GetLocalCcShardsCount();
-                 i++)
-            {
-                SetKeyCacheValidity(i, true);
-            }
+            SetKeyCacheValidity(true);
         }
     }
 
@@ -419,42 +409,38 @@ public:
         last_load_ts_ = load_ts;
     }
 
-    bool IsValidInKeyCache(uint16_t core_id) const
+    bool IsValidInKeyCache() const
     {
-        assert(!cache_validity_.empty());
-        return cache_validity_[core_id] & 1;
+        return cache_validity_ & 1;
     }
 
-    void SetKeyCacheValidity(uint16_t core_id, bool valid)
+    void SetKeyCacheValidity(bool valid)
     {
-        assert(!cache_validity_.empty());
         if (valid)
         {
-            cache_validity_[core_id] |= 1;
+            cache_validity_ |= 1;
         }
         else
         {
-            cache_validity_[core_id] &= ~(1);
+            cache_validity_ &= ~(1);
         }
     }
 
-    void SetLoadingKeyCache(uint16_t core_id, bool status)
+    void SetLoadingKeyCache(bool status)
     {
-        assert(!cache_validity_.empty());
         if (status)
         {
-            cache_validity_[core_id] |= (1 << 1);
+            cache_validity_ |= (1 << 1);
         }
         else
         {
-            cache_validity_[core_id] &= ~(1 << 1);
+            cache_validity_ &= ~(1 << 1);
         }
     }
 
-    bool IsLoadingKeyCache(uint16_t core_id)
+    bool IsLoadingKeyCache()
     {
-        assert(!cache_validity_.empty());
-        return cache_validity_[core_id] & (1 << 1);
+        return cache_validity_ & (1 << 1);
     }
 
     void InitKeyCache(CcShard *cc_shard,
@@ -508,13 +494,12 @@ protected:
 
     std::mutex slice_mux_;
 
-    // If this slice is included in the range key filter. Each core should only
-    // access its own bitset, so we do not need mutex protection.
-    // Note that byte is the smallest unit c++ sync across threads. To avoid
-    // data corruption we need at least 1 byte for each core mask.
-    // The first bit implies if the key cache is valid on this core, the second
-    // bit implies if the key cache is being loaded on this core.
-    std::vector<uint8_t> cache_validity_;
+    // If this slice is included in the range key filter. The first bit implies
+    // if the key cache is valid, the second bit implies if the key cache is
+    // being loaded.
+    // All keys in this range are sharding to the same core, so we only need to
+    // maintain one cache validity for this range.
+    uint8_t cache_validity_{0};
 
     friend class StoreRange;
     template <typename KeyT>
@@ -722,10 +707,9 @@ public:
         return last_accessed_ts_.load(std::memory_order_relaxed);
     }
 
-    std::string KeyCacheInfo(uint16_t core_id) const
+    std::string KeyCacheInfo() const
     {
-        assert(core_id < key_cache_.size());
-        return key_cache_[core_id]->Info();
+        return key_cache_->Info();
     }
 
     void SetHasDmlSinceDdl()
@@ -856,8 +840,9 @@ protected:
     // cache. Removing keys from cache when they are evicted reduces the number
     // of look ups to find the slice of the key since we can evict the keys in
     // batch.
-    std::vector<std::unique_ptr<cuckoofilter::CuckooFilter<size_t, 12>>>
-        key_cache_;
+    // All keys in this range are sharding to the same core, so we only need to
+    // maintain one key cache for this range.
+    std::unique_ptr<cuckoofilter::CuckooFilter<size_t, 12>> key_cache_;
     std::atomic<uint64_t> last_init_key_cache_time_{0};
 
     // This variable is used during the upsert table scheme transaction(such as,
@@ -957,7 +942,7 @@ public:
                                                        slice_end,
                                                        slice_size,
                                                        slice_status,
-                                                       !key_cache_.empty());
+                                                       key_cache_ != nullptr);
 
         slices_.emplace_back(std::move(slice));
 
@@ -970,12 +955,12 @@ public:
             slice_size = slice_keys[idx].size_;
             slice_status = slice_keys[idx].status_;
 
-            slice =
-                std::make_unique<TemplateStoreSlice<KeyT>>(slice_start,
-                                                           slice_end,
-                                                           slice_size,
-                                                           slice_status,
-                                                           !key_cache_.empty());
+            slice = std::make_unique<TemplateStoreSlice<KeyT>>(
+                slice_start,
+                slice_end,
+                slice_size,
+                slice_status,
+                key_cache_ != nullptr);
 
             slices_.emplace_back(std::move(slice));
 
@@ -1063,25 +1048,24 @@ public:
         return slices_;
     }
 
-    void InvalidateKeyCache(uint16_t core_id)
+    void InvalidateKeyCache()
     {
-        if (key_cache_.empty())
+        if (key_cache_ == nullptr)
         {
             return;
         }
         LOG(INFO) << "Invalidate key cache of range " << partition_id_
-                  << " on core " << core_id << " due to collision";
+                  << " due to collision";
         std::shared_lock<std::shared_mutex> s_lk(mux_);
         // shared lock to avoid slice split
         for (auto &slice : slices_)
         {
-            slice->SetKeyCacheValidity(core_id, false);
+            slice->SetKeyCacheValidity(false);
         }
         // Create a larger key cache if the old one cannot hold enough keys.
-        size_t last_key_cache_size = key_cache_[core_id]->Size();
-        key_cache_[core_id] =
-            std::make_unique<cuckoofilter::CuckooFilter<size_t, 12>>(
-                last_key_cache_size * 1.2);
+        size_t last_key_cache_size = key_cache_->Size();
+        key_cache_ = std::make_unique<cuckoofilter::CuckooFilter<size_t, 12>>(
+            last_key_cache_size * 1.2);
     }
     /**
      * @brief Split the range with new_end. new_end will be the new
@@ -1212,7 +1196,7 @@ public:
         }
         CODE_FAULT_INJECTOR("PinSlices_Fail", {
             LOG(INFO) << "FaultInject  PinSlices_Fail, " << check_key_cache
-                      << ", is valid " << slice->IsValidInKeyCache(shard_id);
+                      << ", is valid " << slice->IsValidInKeyCache();
             if (slice->status_ == SliceStatus::FullyCached)
             {
                 slice->status_ = SliceStatus::PartiallyCached;
@@ -1305,9 +1289,9 @@ public:
         else if (check_key_cache)
         {
             assert(to_prefetch == false);
-            if (slice->IsValidInKeyCache(shard_id))
+            if (slice->IsValidInKeyCache())
             {
-                bool found = ContainsKey(search_key, shard_id);
+                bool found = ContainsKey(search_key);
                 if (!found)
                 {
                     // If the key is not found in range, directly return and
@@ -1318,7 +1302,7 @@ public:
                 // If key is found in range key cache, the key must exist in kv
                 // store. Load slice from kv to get the value.
             }
-            else if (!slice->IsLoadingKeyCache(shard_id))
+            else if (!slice->IsLoadingKeyCache())
             {
                 // If this slice can use key cache but the key cache is not
                 // intialized, always load slice from kv to initialize the key
@@ -1628,17 +1612,16 @@ public:
         return true;
     }
 
-    void DeleteKey(const KeyT &key, uint16_t core_id, StoreSlice *slice)
+    void DeleteKey(const KeyT &key, StoreSlice *slice)
     {
         if (slice == nullptr)
         {
             TxKey search_key(&key);
             slice = FindSlice(search_key);
         }
-        if (slice->IsValidInKeyCache(core_id))
+        if (slice->IsValidInKeyCache())
         {
-            cuckoofilter::Status status =
-                key_cache_[core_id]->Delete(key.Hash());
+            cuckoofilter::Status status = key_cache_->Delete(key.Hash());
             // We should not try to delete a non-existing key.
             if (status == cuckoofilter::Status::NotFound)
             {
@@ -1651,9 +1634,9 @@ public:
     }
 
     // NOTE: The slice to which the @@key belong must be valid in key cache.
-    void DeleteKey(const KeyT &key, uint16_t core_id)
+    void DeleteKey(const KeyT &key)
     {
-        cuckoofilter::Status status = key_cache_[core_id]->Delete(key.Hash());
+        cuckoofilter::Status status = key_cache_->Delete(key.Hash());
         // We should not try to delete a non-existing key.
         if (status == cuckoofilter::Status::NotFound)
         {
@@ -1663,7 +1646,6 @@ public:
     }
 
     RangeSliceOpStatus AddKey(const KeyT &key,
-                              uint16_t core_id,
                               StoreSlice *slice = nullptr,
                               bool init = false)
     {
@@ -1673,10 +1655,10 @@ public:
             TxKey search_key(&key);
             slice = FindSlice(search_key);
         }
-        if (init || slice->IsValidInKeyCache(core_id))
+        if (init || slice->IsValidInKeyCache())
         {
-            assert(init || !slice->IsLoadingKeyCache(core_id));
-            cuckoofilter::Status status = key_cache_[core_id]->Add(key.Hash());
+            assert(init || !slice->IsLoadingKeyCache());
+            cuckoofilter::Status status = key_cache_->Add(key.Hash());
             if (status == cuckoofilter::Status::Ok)
             {
                 return RangeSliceOpStatus::Successful;
@@ -1685,11 +1667,11 @@ public:
             {
                 assert(status == cuckoofilter::Status::NotEnoughSpace);
                 // Add failed, we need to invalidate the filter.
-                InvalidateKeyCache(core_id);
+                InvalidateKeyCache();
                 return RangeSliceOpStatus::Error;
             }
         }
-        else if (slice->IsLoadingKeyCache(core_id))
+        else if (slice->IsLoadingKeyCache())
         {
             // Retry later when key cache is initialized.
             return RangeSliceOpStatus::Retry;
@@ -1720,10 +1702,9 @@ public:
         }
     }
 
-    bool ContainsKey(const KeyT &key, uint16_t core_id)
+    bool ContainsKey(const KeyT &key)
     {
-        return key_cache_[core_id]->Contain(key.Hash()) ==
-               cuckoofilter::Status::Ok;
+        return key_cache_->Contain(key.Hash()) == cuckoofilter::Status::Ok;
     }
 
     size_t PostCkptSize() override
@@ -1940,7 +1921,7 @@ private:
                     sub_slice_end,
                     split_keys[idx].cur_size_,
                     SliceStatus::PartiallyCached,
-                    !slice->cache_validity_.empty());
+                    slice->cache_validity_ != 0);
 
             sub_slice->post_ckpt_size_ = split_keys[idx].post_update_size_;
             sub_slice->status_ = slice->status_;
