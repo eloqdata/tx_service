@@ -87,7 +87,7 @@ RecoveryService::RecoveryService(LocalCcShards &local_shards,
                 std::unique_lock<std::mutex> lk(queue_mux_);
                 bool timed_out = !queue_cv_.wait_for(
                     lk,
-                    std::chrono::seconds(10),
+                    std::chrono::seconds(5),
                     [this]
                     {
                         return !replay_log_queue_.empty() ||
@@ -98,42 +98,71 @@ RecoveryService::RecoveryService(LocalCcShards &local_shards,
                 // Only check for orphaned ng recovery on timeout, not on notify
                 if (timed_out)
                 {
-                    // Check every 10s if there are any orphaned ng
-                    // recovery.
+                    // Periodically check candidate leaders that still do not
+                    // have replay stream connections.
                     lk.unlock();
+                    uint64_t now_ts = LocalCcShards::ClockTs();
                     auto ngs = Sharder::Instance().AllNodeGroups();
                     for (auto ng_id : *ngs)
                     {
                         int64_t candidate_term =
                             Sharder::Instance().CandidateLeaderTerm(ng_id);
-                        if (candidate_term != -1)
+                        if (candidate_term < 0)
                         {
-                            // ng should be replaying
-                            bool need_replay = true;
+                            candidate_replay_watch_.erase(ng_id);
+                            continue;
+                        }
+
+                        CandidateReplayWatch &watch =
+                            candidate_replay_watch_[ng_id];
+                        if (watch.term != candidate_term)
+                        {
+                            watch.term = candidate_term;
+                            watch.first_seen_ts = now_ts;
+                            watch.last_replay_ts = 0;
+                        }
+                        else if (watch.first_seen_ts == 0)
+                        {
+                            watch.first_seen_ts = now_ts;
+                        }
+
+                        bool has_replay_connection = false;
+                        {
+                            std::unique_lock<bthread::Mutex> inbound_lk(
+                                inbound_mux_);
+                            for (const auto &entry : inbound_connections_)
                             {
-                                std::unique_lock<bthread::Mutex> inbound_lk(
-                                    inbound_mux_);
-                                for (const auto &entry : inbound_connections_)
+                                if (entry.second.cc_ng_id_ == ng_id &&
+                                    entry.second.cc_ng_term_ == candidate_term &&
+                                    entry.second.recovering_)
                                 {
-                                    if (entry.second.cc_ng_id_ == ng_id)
-                                    {
-                                        need_replay = false;
-                                        break;
-                                    }
+                                    has_replay_connection = true;
+                                    break;
                                 }
                             }
-                            if (need_replay)
-                            {
-                                // ng is not recovering, send replay log
-                                // request
-                                LOG(INFO)
-                                    << "Requesting log replay for ng: " << ng_id
-                                    << " at term: " << candidate_term
-                                    << " as there is no recovery "
-                                       "connection";
-                                ReplayLog(ng_id, candidate_term, -1, 0, false);
-                            }
                         }
+                        if (has_replay_connection)
+                        {
+                            continue;
+                        }
+
+                        if (now_ts - watch.first_seen_ts < kReplayCheckIntervalUs)
+                        {
+                            continue;
+                        }
+
+                        if (watch.last_replay_ts != 0 &&
+                            now_ts - watch.last_replay_ts <
+                                kReplayCheckIntervalUs)
+                        {
+                            continue;
+                        }
+
+                        LOG(INFO) << "Requesting log replay for ng: " << ng_id
+                                  << " at term: " << candidate_term
+                                  << " as there is no recovery connection";
+                        ReplayLog(ng_id, candidate_term, -1, 0, false);
+                        watch.last_replay_ts = now_ts;
                     }
                     lk.lock();
                 }
