@@ -1521,7 +1521,11 @@ bool FetchTableRangeSizeCc::Execute(CcShard &ccs)
 
     bool succ = (error_code_ == 0);
     CcMap *ccm = ccs.GetCcm(*table_name_, node_group_id_);
-    assert(ccm != nullptr);
+    if (ccm == nullptr)
+    {
+        assert(error_code_ != 0);
+        return true;
+    }
     bool need_split = ccm->InitRangeSize(
         static_cast<uint32_t>(partition_id_), store_range_size_, succ);
 
