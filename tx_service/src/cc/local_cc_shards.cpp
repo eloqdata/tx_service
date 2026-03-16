@@ -2537,7 +2537,7 @@ void LocalCcShards::EnqueueDataSyncTaskForSplittingRange(
     TxKey old_start_key = range_entry->GetRangeInfo()->StartTxKey();
     TxKey old_end_key = range_entry->GetRangeInfo()->EndTxKey();
     // The old range
-    auto task_queue =
+    auto &task_queue =
         data_sync_task_queue_[range_entry->GetRangeInfo()->PartitionId() %
                               data_sync_task_queue_.size()];
     auto old_range_task = std::make_shared<DataSyncTask>(
@@ -2564,7 +2564,7 @@ void LocalCcShards::EnqueueDataSyncTaskForSplittingRange(
         TxKey end_key =
             (i == new_keys->size() - 1 ? range_entry->GetRangeInfo()->EndTxKey()
                                        : (*new_keys)[i + 1].GetShallowCopy());
-        auto task_queue =
+        auto &task_queue =
             data_sync_task_queue_[new_range_id % data_sync_task_queue_.size()];
         auto new_range_task = std::make_shared<DataSyncTask>(table_name,
                                                              ng_id,
@@ -2951,10 +2951,14 @@ void LocalCcShards::CreateSplitRangeDataSyncTask(const TableName &table_name,
                                                  int32_t range_id,
                                                  uint64_t data_sync_ts)
 {
+    std::shared_lock<std::shared_mutex> meta_lk(meta_data_mux_);
     std::shared_ptr<DataSyncStatus> status =
         std::make_shared<DataSyncStatus>(ng_id, ng_term, false);
+    TableName range_table_name(table_name.StringView(),
+                               TableType::RangePartition,
+                               table_name.Engine());
     TableRangeEntry *range_entry = const_cast<TableRangeEntry *>(
-        GetTableRangeEntry(table_name, ng_id, range_id));
+        GetTableRangeEntryInternal(range_table_name, ng_id, range_id));
     assert(range_entry != nullptr);
     uint64_t last_sync_ts = 0;
     EnqueueRangeDataSyncTask(table_name,
