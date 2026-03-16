@@ -154,10 +154,15 @@ void DataSyncTask::SetFinish()
                         }
                     }
 
+#ifndef DATA_STORE_TYPE_ELOQDSS_ELOQSTORE
                     if (!is_standby_node_ckpt_ && Sharder::Instance()
                                                       .GetDataStoreHandler()
                                                       ->IsSharedStorage())
                     {
+#else
+                    if (!is_standby_node_ckpt_)
+                    {
+#endif
                         BrocastPrimaryCkptTs(node_group_id_,
                                              node_group_term_,
                                              status_->truncate_log_ts_,

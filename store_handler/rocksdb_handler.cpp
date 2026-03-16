@@ -527,8 +527,7 @@ bool RocksDBHandler::PutAll(
 
         if (!status.ok())
         {
-            LOG(ERROR) << "PutAll end failed "
-                       << ", thread id: " << this_id
+            LOG(ERROR) << "PutAll end failed " << ", thread id: " << this_id
                        << ", result:" << static_cast<int>(status.ok())
                        << ", batch size:" << batch.size()
                        << ", error: " << status.ToString()
@@ -2447,8 +2446,12 @@ bool RocksDBCloudHandlerImpl::CreateSnapshot(
 }
 
 bool RocksDBCloudHandlerImpl::CreateSnapshotForStandby(
-    std::vector<std::string> &snapshot_files)
+    uint32_t ng_id,
+    std::vector<std::string> &snapshot_files,
+    uint64_t snapshot_ts)
 {
+    (void) ng_id;
+    (void) snapshot_ts;
     return CreateSnapshot(ckpt_path_, snapshot_files);
 }
 
@@ -2472,6 +2475,10 @@ bool RocksDBCloudHandlerImpl::SendSnapshotToRemote(
     std::vector<std::string> &snapshot_files,
     const std::string &remote_dest)
 {
+    (void) ng_id;
+    (void) ng_term;
+    (void) snapshot_files;
+    (void) remote_dest;
     return true;
 }
 
@@ -3768,9 +3775,13 @@ bool RocksDBHandlerImpl::CreateSnapshot(
     }
 }
 
-bool RocksDBHandlerImpl::CreateSnapshotForStandby(
-    std::vector<std::string> &snapshot_files)
+bool RocksDBHandlerImpl::CreateSnapshotForStandby(uint32_t ng_id,
+                                                  std::vector<std::string>
+                                                      &snapshot_files,
+                                                  uint64_t snapshot_ts)
 {
+    (void) ng_id;
+    (void) snapshot_ts;
     return CreateSnapshot(ckpt_path_, snapshot_files);
 }
 bool RocksDBHandlerImpl::CreateSnapshotForBackup(

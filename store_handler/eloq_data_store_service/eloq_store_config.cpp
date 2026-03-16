@@ -25,6 +25,7 @@
 
 #include <algorithm>
 #include <cassert>
+#include <cctype>
 #include <cerrno>
 #include <cstring>
 #include <filesystem>
@@ -42,8 +43,9 @@ DEFINE_uint32(eloq_store_worker_num, 1, "EloqStore server worker num.");
 
 DEFINE_string(eloq_store_data_path_list,
               "",
-              "The data paths of the EloqStore (default is "
-              "'{eloq_data_path}/eloq_dss/eloqstore_data').");
+              "EloqStore local store paths in format "
+              "path1,path2,...[,pathN][:weight1,weight2,...,weightN]. "
+              "Weights are optional.");
 DEFINE_uint32(eloq_store_open_files_limit,
               400000,
               "EloqStore maximum open files.");
@@ -153,13 +155,21 @@ DEFINE_uint32(eloq_store_cloud_request_threads,
               "EloqStore cloud request thread number");
 DEFINE_uint32(eloq_store_max_write_concurrency,
               0,
-              "EloqStore max write concurrency");
+              "EloqStore maximum number of concurrent write tasks per shard; "
+              "0 keeps legacy unlimited behavior and is rewritten to "
+              "max_cloud_concurrency in cloud mode.");
+DEFINE_uint32(eloq_store_standby_max_concurrency,
+              100,
+              "EloqStore maximum number of concurrent standby rsync/ssh jobs.");
 DEFINE_uint32(eloq_store_direct_io_buffer_pool_size,
               16,
-              "EloqStore DirectIO buffer pool size per shard");
-DEFINE_bool(eloq_store_cloud_auto_credentials,
-            true,
-            "EloqStore automatically detect OSS credentials");
+              "EloqStore maximum number of cached DirectIO buffers per shard.");
+DEFINE_bool(
+    eloq_store_cloud_auto_credentials,
+    true,
+    "EloqStore automatically retrieves cloud credentials from the "
+    "environment or instance metadata instead of explicit access/secret "
+    "keys.");
 
 namespace EloqDS
 {
@@ -423,11 +433,7 @@ EloqStoreConfig::EloqStoreConfig(const INIReader &config_reader,
             : config_reader.GetString("store",
                                       "eloq_store_data_path_list",
                                       FLAGS_eloq_store_data_path_list);
-    if (!storage_path_list.empty())
-    {
-        ParseStoragePath(storage_path_list, eloqstore_configs_.store_path);
-    }
-    else
+    if (storage_path_list.empty())
     {
         eloqstore_configs_.store_path.emplace_back()
             .append(base_data_path)
@@ -437,6 +443,24 @@ EloqStoreConfig::EloqStoreConfig(const INIReader &config_reader,
             std::filesystem::create_directories(
                 eloqstore_configs_.store_path.back());
         }
+        storage_path_list = eloqstore_configs_.store_path.back();
+        GFLAGS_NAMESPACE::SetCommandLineOption("eloq_store_data_path_list",
+                                               storage_path_list.c_str());
+    }
+    if (!storage_path_list.empty())
+    {
+        std::string error_message;
+        if (!::eloqstore::ParseStorePathListWithWeights(
+                storage_path_list,
+                eloqstore_configs_.store_path,
+                eloqstore_configs_.store_path_weights,
+                &error_message))
+        {
+            LOG(FATAL) << "Invalid eloq_store_data_path_list: "
+                       << storage_path_list << ", error: " << error_message;
+        }
+        GFLAGS_NAMESPACE::SetCommandLineOption("eloq_store_data_path_list",
+                                               storage_path_list.c_str());
     }
 
     eloqstore_configs_.fd_limit =
@@ -721,6 +745,8 @@ EloqStoreConfig::EloqStoreConfig(const INIReader &config_reader,
             : config_reader.GetBoolean("store",
                                        "eloq_store_reuse_local_files",
                                        FLAGS_eloq_store_reuse_local_files);
+    eloqstore_configs_.standby_master_addr.clear();
+    eloqstore_configs_.enable_local_standby = false;
     eloqstore_configs_.data_page_size =
         !CheckCommandLineFlagIsDefault("eloq_store_data_page_size")
             ? FLAGS_eloq_store_data_page_size
@@ -782,6 +808,13 @@ EloqStoreConfig::EloqStoreConfig(const INIReader &config_reader,
             : config_reader.GetInteger("store",
                                        "eloq_store_max_write_concurrency",
                                        FLAGS_eloq_store_max_write_concurrency);
+    eloqstore_configs_.standby_max_concurrency =
+        !CheckCommandLineFlagIsDefault("eloq_store_standby_max_concurrency")
+            ? FLAGS_eloq_store_standby_max_concurrency
+            : config_reader.GetInteger(
+                  "store",
+                  "eloq_store_standby_max_concurrency",
+                  FLAGS_eloq_store_standby_max_concurrency);
     eloqstore_configs_.direct_io_buffer_pool_size =
         !CheckCommandLineFlagIsDefault("eloq_store_direct_io_buffer_pool_size")
             ? FLAGS_eloq_store_direct_io_buffer_pool_size
@@ -818,20 +851,6 @@ EloqStoreConfig::EloqStoreConfig(const INIReader &config_reader,
             : config_reader.GetBoolean("store",
                                        "eloq_store_cloud_auto_credentials",
                                        FLAGS_eloq_store_cloud_auto_credentials);
-}
-
-void EloqStoreConfig::ParseStoragePath(
-    const std::string_view storage_path_list,
-    std::vector<std::string> &storage_path_vector)
-{
-    storage_path_vector.clear();
-    const char path_delimiter = ',';
-    std::string token;
-    std::istringstream tokenStream(storage_path_list.data());
-    while (std::getline(tokenStream, token, path_delimiter))
-    {
-        storage_path_vector.emplace_back(token);
-    }
 }
 
 }  // namespace EloqDS

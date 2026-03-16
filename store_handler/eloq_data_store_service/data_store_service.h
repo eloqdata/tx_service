@@ -28,6 +28,7 @@
 #include <atomic>
 #include <chrono>
 #include <condition_variable>
+#include <functional>
 #include <map>
 #include <memory>
 #include <mutex>
@@ -655,6 +656,13 @@ public:
         return data_store_factory_->IsCloudMode();
     }
 
+#ifdef DATA_STORE_TYPE_ELOQDSS_ELOQSTORE
+    static constexpr const char *kStandbySnapshotTagPrefix = "snapshot_";
+#endif
+
+    void SetEnableLocalStandbyForEloqStore(bool enable);
+    void ClearStandbySnapshotPayloadForEloqStore(uint32_t shard_id);
+
     void CloseDataStore(uint32_t shard_id);
     void OpenDataStore(uint32_t shard_id,
                        std::unordered_set<uint16_t> &&bucket_ids,
@@ -664,11 +672,20 @@ public:
     // function to reload the snapshot or sync from cloud.
     void OnSnapshotReceived(uint32_t shard_id,
                             int64_t term,
-                            std::unordered_set<uint16_t> &&bucket_ids,
-                            const std::string &snapshot_path);
+                            std::unordered_set<uint16_t> &&bucket_ids);
+    void SetStandbySnapshotPayload(uint32_t shard_id,
+                                   const std::string &snapshot_path);
     // When primary flush data to cloud, the standby node will call this
     // function to sync the data from cloud.
-    void OnUpdateStandbyCkptTs(uint32_t shard_id, int64_t ng_term);
+    bool ReloadData(uint32_t shard_id, int64_t ng_term, uint64_t snapshot_ts);
+    bool CreateSnapshotForStandby(uint32_t shard_id,
+                                  uint32_t ng_id,
+                                  uint64_t snapshot_ts);
+    bool DeleteStandbySnapshot(uint32_t shard_id, uint64_t snapshot_ts);
+    void DeleteStandbySnapshotsBefore(uint32_t shard_id, uint64_t snapshot_ts);
+    uint64_t CurrentStandbySnapshotTs(uint32_t shard_id);
+    uint64_t LatestDeleteArchiveTs(uint32_t shard_id);
+    void UpdateLatestDeleteArchiveTs(uint32_t shard_id, uint64_t ts);
 
     DataStoreServiceClusterManager &GetClusterManager()
     {
@@ -696,7 +713,6 @@ private:
     bool SwitchReadWriteToReadOnly(uint32_t shard_id);
     bool SwitchReadOnlyToClosed(uint32_t shard_id);
     bool SwitchReadOnlyToReadWrite(uint32_t shard_id);
-
     bool WriteMigrationLog(uint32_t shard_id,
                            const std::string &event_id,
                            const std::string &target_node_ip,
@@ -746,6 +762,12 @@ private:
         std::unique_ptr<DataStore> data_store_{nullptr};
         std::atomic<DSShardStatus> shard_status_{DSShardStatus::Closed};
         std::atomic<uint64_t> ongoing_write_requests_{0};
+        std::atomic<int64_t> latest_term_{0};
+        // NOTE: latest_snapshot_ts_ ordering relies on ReloadData calls being
+        // sequential for a shard. This is true when tx_service and DSS run in
+        // the same process. Standalone DSS server mode does not guarantee it.
+        std::atomic<uint64_t> latest_snapshot_ts_{0};
+        std::atomic<uint64_t> latest_delete_archive_ts_{0};
         std::unique_ptr<TTLWrapperCache> scan_iter_cache_{nullptr};
 
         // Whether the file cache sync is running. Used to avoid concurrent

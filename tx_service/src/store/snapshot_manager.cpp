@@ -21,6 +21,12 @@
  */
 #include "store/snapshot_manager.h"
 
+#include <bthread/condition_variable.h>
+#include <bthread/mutex.h>
+#include <gflags/gflags.h>
+
+#include <limits>
+#include <memory>
 #include <vector>
 
 #include "cc/local_cc_shards.h"
@@ -30,6 +36,61 @@ namespace txservice
 
 namespace store
 {
+namespace
+{
+#ifdef DATA_STORE_TYPE_ELOQDSS_ELOQSTORE
+struct RequestSyncSnapshotAggregate
+{
+    bthread::Mutex mux;
+    bthread::ConditionVariable cv;
+    size_t pending{0};
+    size_t success{0};
+    uint64_t min_ack_ckpt_ts{std::numeric_limits<uint64_t>::max()};
+};
+
+struct RequestSyncSnapshotRpcCtx
+{
+    brpc::Controller cntl;
+    remote::RequestSyncSnapshotRequest req;
+    remote::RequestSyncSnapshotResponse resp;
+    RequestSyncSnapshotAggregate *aggregate{nullptr};
+    uint32_t standby_node_id{0};
+    int64_t standby_term{0};
+    uint32_t ng_id{0};
+};
+
+class RequestSyncSnapshotDone : public google::protobuf::Closure
+{
+public:
+    explicit RequestSyncSnapshotDone(
+        std::shared_ptr<RequestSyncSnapshotRpcCtx> ctx)
+        : ctx_(std::move(ctx))
+    {
+    }
+
+    void Run() override
+    {
+        std::unique_ptr<RequestSyncSnapshotDone> self_guard(this);
+        auto *agg = ctx_->aggregate;
+        const bool succ = !ctx_->cntl.Failed() && !ctx_->resp.error();
+        {
+            std::lock_guard<bthread::Mutex> lk(agg->mux);
+            if (succ)
+            {
+                agg->success++;
+                agg->min_ack_ckpt_ts = std::min(agg->min_ack_ckpt_ts,
+                                                ctx_->resp.current_ckpt_ts());
+            }
+            agg->pending--;
+        }
+        agg->cv.notify_all();
+    }
+
+private:
+    std::shared_ptr<RequestSyncSnapshotRpcCtx> ctx_;
+};
+#endif
+}  // namespace
 
 void SnapshotManager::Start()
 {
@@ -87,7 +148,9 @@ bool SnapshotManager::OnSnapshotSyncRequested(
 {
     DLOG(INFO) << "Received snapshot sync request from standby node #"
                << req->standby_node_id()
-               << " for standby term: " << req->standby_node_term();
+               << " for standby term: " << req->standby_node_term()
+               << ", ng_id=" << req->ng_id()
+               << ", dest_path=" << req->dest_path();
     assert(store_hd_ != nullptr);
     if (store_hd_ == nullptr)
     {
@@ -380,6 +443,7 @@ void SnapshotManager::EraseSnapshotSyncCompletedByNodeLocked(
 // kvstore on cache miss).
 void SnapshotManager::SyncWithStandby()
 {
+    DLOG(INFO) << "SyncWithStandby";
     assert(store_hd_ != nullptr);
     if (store_hd_ == nullptr)
     {
@@ -408,7 +472,7 @@ void SnapshotManager::SyncWithStandby()
 
     std::vector<PendingSnapshotSyncTask> tasks;
 
-    // Pick all pending tasks that can be covered by current checkpoint ts.
+    // Dequeue all pending tasks that can be covered by this snapshot.
     {
         std::unique_lock<std::mutex> lk(standby_sync_mux_);
         auto it = pending_req_.begin();
@@ -489,7 +553,6 @@ void SnapshotManager::SyncWithStandby()
     }
 
     bool ckpt_res = this->RunOneRoundCheckpoint(node_group, leader_term);
-
     if (!ckpt_res)
     {
         // Data flush failed. Retry on next run.
@@ -497,18 +560,29 @@ void SnapshotManager::SyncWithStandby()
         return;
     }
 
-    // Now take a snapshot for non-shared storage, and then send to standby
-    // node.
+    // Create a fresh standby snapshot after the checkpoint completed.
     std::vector<std::string> snapshot_files;
-    if (!store_hd_->IsSharedStorage())
+    const uint64_t standby_snapshot_ts = static_cast<uint64_t>(
+        std::chrono::duration_cast<std::chrono::microseconds>(
+            std::chrono::system_clock::now().time_since_epoch())
+            .count());
+    bool res = store_hd_->CreateSnapshotForStandby(
+        node_group, snapshot_files, standby_snapshot_ts);
+    if (!res)
     {
-        bool res = store_hd_->CreateSnapshotForStandby(snapshot_files);
-        if (!res)
-        {
-            LOG(ERROR) << "Failed to create snpashot for sync with standby";
-            return;
-        }
+        LOG(ERROR) << "Failed to create snpashot for sync with standby";
+        return;
     }
+    DLOG(INFO) << "SyncWithStandby created standby snapshot, ng_id="
+               << node_group << ", term=" << leader_term
+               << ", snapshot_ts=" << standby_snapshot_ts;
+
+    uint64_t min_ack_ckpt_ts = std::numeric_limits<uint64_t>::max();
+    size_t sync_snapshot_rpc_count = 0;
+    size_t sync_snapshot_success = 0;
+#ifdef DATA_STORE_TYPE_ELOQDSS_ELOQSTORE
+    RequestSyncSnapshotAggregate sync_snapshot_agg;
+#endif
 
     for (auto &task : tasks)
     {
@@ -532,7 +606,9 @@ void SnapshotManager::SyncWithStandby()
         std::string ip;
         uint16_t port;
         Sharder::Instance().GetNodeAddress(node_id, ip, port);
+#ifndef DATA_STORE_TYPE_ELOQDSS_ELOQSTORE
         std::string remote_dest = req.user() + "@" + ip + ":" + req.dest_path();
+#endif
         int64_t req_primary_term =
             PrimaryTermFromStandbyTerm(req_standby_node_term);
 
@@ -543,11 +619,15 @@ void SnapshotManager::SyncWithStandby()
         }
 
         bool succ = true;
+#ifndef DATA_STORE_TYPE_ELOQDSS_ELOQSTORE
         if (!snapshot_files.empty())
         {
             succ = store_hd_->SendSnapshotToRemote(
                 req.ng_id(), req_primary_term, snapshot_files, remote_dest);
         }
+#else
+        assert(snapshot_files.empty());
+#endif
 
         if (succ)
         {
@@ -561,6 +641,32 @@ void SnapshotManager::SyncWithStandby()
             bool notify_succ = false;
             if (channel)
             {
+#ifdef DATA_STORE_TYPE_ELOQDSS_ELOQSTORE
+                remote::CcRpcService_Stub stub(channel.get());
+                auto rpc_ctx = std::make_shared<RequestSyncSnapshotRpcCtx>();
+                rpc_ctx->cntl.set_timeout_ms(1000);
+                rpc_ctx->req.set_standby_node_term(req.standby_node_term());
+                rpc_ctx->req.set_ng_id(req.ng_id());
+                rpc_ctx->req.set_snapshot_ts(standby_snapshot_ts);
+                rpc_ctx->aggregate = &sync_snapshot_agg;
+                rpc_ctx->standby_node_id = req.standby_node_id();
+                rpc_ctx->standby_term = req.standby_node_term();
+                rpc_ctx->ng_id = req.ng_id();
+                {
+                    std::lock_guard<bthread::Mutex> lk(sync_snapshot_agg.mux);
+                    sync_snapshot_agg.pending++;
+                    sync_snapshot_rpc_count++;
+                }
+                DLOG(INFO) << "RequestSyncSnapshot async dispatch, ng_id="
+                           << req.ng_id()
+                           << ", standby_node_id=" << req.standby_node_id()
+                           << ", standby_term=" << req.standby_node_term()
+                           << ", snapshot_ts=" << standby_snapshot_ts;
+                stub.RequestSyncSnapshot(&rpc_ctx->cntl,
+                                         &rpc_ctx->req,
+                                         &rpc_ctx->resp,
+                                         new RequestSyncSnapshotDone(rpc_ctx));
+#else
                 // needs retry if failed
                 // since the standby node may be still spinning up.
                 remote::CcRpcService_Stub stub(channel.get());
@@ -601,6 +707,7 @@ void SnapshotManager::SyncWithStandby()
                     notify_succ = true;
                     break;
                 }
+#endif
             }
             else
             {
@@ -665,6 +772,43 @@ void SnapshotManager::SyncWithStandby()
                                      req.standby_node_term());
         }
     }
+#ifdef DATA_STORE_TYPE_ELOQDSS_ELOQSTORE
+    {
+        std::unique_lock<bthread::Mutex> lk(sync_snapshot_agg.mux);
+        while (sync_snapshot_agg.pending != 0)
+        {
+            sync_snapshot_agg.cv.wait(lk);
+        }
+        min_ack_ckpt_ts = sync_snapshot_agg.min_ack_ckpt_ts;
+        sync_snapshot_success = sync_snapshot_agg.success;
+    }
+#endif
+
+#ifdef DATA_STORE_TYPE_ELOQDSS_ELOQSTORE
+    if (standby_snapshot_ts != 0 && sync_snapshot_rpc_count > 0 &&
+        sync_snapshot_success == sync_snapshot_rpc_count &&
+        min_ack_ckpt_ts != std::numeric_limits<uint64_t>::max())
+    {
+        DLOG(INFO)
+            << "SyncWithStandby deleting standby snapshot archives by min "
+               "acked ts, ng_id="
+            << node_group << ", term=" << leader_term
+            << ", current_snapshot_ts=" << standby_snapshot_ts
+            << ", sync_snapshot_rpc_count=" << sync_snapshot_rpc_count
+            << ", sync_snapshot_success=" << sync_snapshot_success
+            << ", min_ack_ckpt_ts=" << min_ack_ckpt_ts;
+        store_hd_->DeleteStandbySnapshotsBefore(node_group, min_ack_ckpt_ts);
+    }
+    else if (standby_snapshot_ts != 0)
+    {
+        DLOG(INFO) << "SyncWithStandby skip DeleteStandbySnapshotsBefore, "
+                   << "ng_id=" << node_group << ", term=" << leader_term
+                   << ", current_snapshot_ts=" << standby_snapshot_ts
+                   << ", sync_snapshot_rpc_count=" << sync_snapshot_rpc_count
+                   << ", sync_snapshot_success=" << sync_snapshot_success
+                   << ", min_ack_ckpt_ts=" << min_ack_ckpt_ts;
+    }
+#endif
 }
 
 uint64_t SnapshotManager::GetCurrentCheckpointTs(uint32_t node_group)
