@@ -515,32 +515,4 @@ void CcMap::ResetRangeStatus(uint32_t partition_id)
                << " status: " << std::boolalpha << std::get<2>(it->second);
 }
 
-void CcMap::LoadStoreRangeSize(uint32_t partition_id)
-{
-    auto it = range_sizes_.find(partition_id);
-    if (it == range_sizes_.end())
-    {
-        it = range_sizes_
-                 .emplace(partition_id,
-                          std::make_tuple(static_cast<int32_t>(
-                                              RangeSizeStatus::kNotInitialized),
-                                          0,
-                                          false))
-                 .first;
-    }
-
-    if (std::get<0>(it->second) ==
-        static_cast<int32_t>(RangeSizeStatus::kLoading))
-    {
-        // Another request is already loading the range size.
-        return;
-    }
-
-    std::get<0>(it->second) = static_cast<int32_t>(RangeSizeStatus::kLoading);
-
-    int64_t ng_term = Sharder::Instance().LeaderTerm(cc_ng_id_);
-    shard_->FetchTableRangeSize(
-        table_name_, static_cast<int32_t>(partition_id), cc_ng_id_, ng_term);
-}
-
 }  // namespace txservice

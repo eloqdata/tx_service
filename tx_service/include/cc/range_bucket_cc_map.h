@@ -356,52 +356,8 @@ public:
                     }
                 }
                 upload_bucket_rec->SetBucketInfo(bucket_info);
-
-                // Get ranges in this bucket id.
-                auto range_ids = shard_->local_shards_.GetRangesInBucket(
-                    target_key->bucket_id_, this->cc_ng_id_);
-                const_cast<BucketInfo *>(bucket_info)
-                    ->SetRangesInBucket(std::move(range_ids));
             }
-
-            if (upload_bucket_rec->GetBucketInfo()->BucketOwner() ==
-                this->cc_ng_id_)
-            {
-                // Init the rane size info for the ranges that are being
-                // migrated to the new owner node group.
-                auto ranges_in_bucket =
-                    upload_bucket_rec->GetBucketInfo()->GetRangesInBucket();
-                for (auto &[tbl, range_ids] : ranges_in_bucket)
-                {
-                    CcMap *data_ccm = shard_->GetCcm(tbl, this->cc_ng_id_);
-                    if (data_ccm == nullptr)
-                    {
-                        continue;
-                    }
-
-                    for (auto range_id : range_ids)
-                    {
-                        if ((range_id & 0x3FF) % shard_->core_cnt_ ==
-                            shard_->core_id_)
-                        {
-                            // The shard is the owner of the range. We should
-                            // load the store range size as the baseline for
-                            // this range.
-                            data_ccm->LoadStoreRangeSize(
-                                static_cast<uint32_t>(range_id));
-                        }
-                    }
-                }
-            }  // range partition
-
-            if (shard_->core_id_ == shard_->core_cnt_ - 1)
-            {
-                // All ranges in this bucket have been migrated to the new owner
-                // node group. We can now clear the ranges in bucket info.
-                const_cast<BucketInfo *>(upload_bucket_rec->GetBucketInfo())
-                    ->ClearRangesInBucket();
-            }
-        }  // post commit or commit
+        }
         else
         {
             assert(req.CommitType() == PostWriteType::DowngradeLock);

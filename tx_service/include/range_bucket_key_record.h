@@ -24,7 +24,6 @@
 #include <atomic>
 #include <cstdint>
 #include <memory>
-#include <unordered_set>
 #include <utility>
 #include <variant>
 
@@ -148,24 +147,6 @@ public:
         dirty_version_ = 0;
     }
 
-    void SetRangesInBucket(
-        std::unordered_map<TableName, std::unordered_set<int32_t>>
-            &&ranges_in_bucket)
-    {
-        ranges_in_bucket_snapshot_ = std::move(ranges_in_bucket);
-    }
-
-    const std::unordered_map<TableName, std::unordered_set<int32_t>> &
-    GetRangesInBucket() const
-    {
-        return ranges_in_bucket_snapshot_;
-    }
-
-    void ClearRangesInBucket()
-    {
-        ranges_in_bucket_snapshot_.clear();
-    }
-
 private:
     NodeGroupId bucket_owner_{UINT32_MAX};
     uint64_t version_{0};
@@ -182,10 +163,6 @@ private:
     // We use atomic here since it might be updated by any tx processor without
     // bucket write lock.
     std::atomic_bool accepts_upload_batch_{false};
-    // The ranges in this bucket. Only used during the post commit phase of the
-    // data migration.
-    std::unordered_map<TableName, std::unordered_set<int32_t>>
-        ranges_in_bucket_snapshot_;
     friend struct RangeBucketRecord;
     friend class RangeBucketCcMap;
 };
