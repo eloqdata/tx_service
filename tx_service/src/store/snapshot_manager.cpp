@@ -560,8 +560,9 @@ void SnapshotManager::SyncWithStandby()
         return;
     }
 
-    // Create a fresh standby snapshot after the checkpoint completed.
     std::vector<std::string> snapshot_files;
+#ifdef DATA_STORE_TYPE_ELOQDSS_ELOQSTORE
+    // Create a fresh standby snapshot after the checkpoint completed.
     const uint64_t standby_snapshot_ts = static_cast<uint64_t>(
         std::chrono::duration_cast<std::chrono::microseconds>(
             std::chrono::system_clock::now().time_since_epoch())
@@ -580,7 +581,6 @@ void SnapshotManager::SyncWithStandby()
     uint64_t min_ack_ckpt_ts = std::numeric_limits<uint64_t>::max();
     size_t sync_snapshot_rpc_count = 0;
     size_t sync_snapshot_success = 0;
-#ifdef DATA_STORE_TYPE_ELOQDSS_ELOQSTORE
     RequestSyncSnapshotAggregate sync_snapshot_agg;
 #endif
 
