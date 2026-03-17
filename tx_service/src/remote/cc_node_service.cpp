@@ -26,8 +26,6 @@
 #include <bthread/mutex.h>
 #include <gflags/gflags.h>
 
-#include <array>
-#include <atomic>
 #include <cstdlib>
 #include <memory>
 #include <mutex>
@@ -59,26 +57,6 @@ namespace remote
 {
 namespace
 {
-constexpr uint32_t kMaxTrackedNgId = 1000;
-
-std::array<uint32_t, kMaxTrackedNgId> &SyncCountsInstance()
-{
-    static std::array<uint32_t, kMaxTrackedNgId> sync_counts{};
-    return sync_counts;
-}
-
-bthread::Mutex &SyncStateMuxInstance()
-{
-    static bthread::Mutex sync_state_mux;
-    return sync_state_mux;
-}
-
-std::array<std::atomic<int64_t>, kMaxTrackedNgId> &SyncTermsInstance()
-{
-    static std::array<std::atomic<int64_t>, kMaxTrackedNgId> sync_terms{};
-    return sync_terms;
-}
-
 int64_t CurrentSyncedPrimaryTerm()
 {
     const int64_t standby_term = Sharder::Instance().StandbyNodeTerm();
@@ -2085,8 +2063,6 @@ void CcNodeService::RequestSyncSnapshot(
     const uint32_t ng_id = request->ng_id();
     const int64_t standby_term = request->standby_node_term();
     const uint64_t snapshot_ts = request->snapshot_ts();
-    assert(ng_id < kMaxTrackedNgId);
-    SyncTermsInstance()[ng_id].store(term, std::memory_order_release);
     EnqueueStandbyTask(
         {StandbyTaskType::RequestSyncSnapshot,
          ng_id,
@@ -2098,10 +2074,6 @@ void CcNodeService::RequestSyncSnapshot(
                  store_hd->RequestSyncSnapshot(ng_id, term, snapshot_ts);
              if (ok)
              {
-                 {
-                     std::lock_guard<bthread::Mutex> lk(SyncStateMuxInstance());
-                     SyncCountsInstance()[ng_id] = 0;
-                 }
                  Sharder::Instance().SetStandbyNodeTerm(standby_term);
                  Sharder::Instance().SetCandidateStandbyNodeTerm(-1);
                  if (!txservice::txservice_skip_kv &&
@@ -2114,46 +2086,11 @@ void CcNodeService::RequestSyncSnapshot(
                             << ng_id << ", standby_term=" << standby_term
                             << ", snapshot_ts=" << snapshot_ts;
              }
-             else
-             {
-                 uint32_t retry_count = 0;
-                 int64_t current_sync_term =
-                     SyncTermsInstance()[ng_id].load(std::memory_order_acquire);
-                 {
-                     std::lock_guard<bthread::Mutex> lk(SyncStateMuxInstance());
-                     retry_count = ++SyncCountsInstance()[ng_id];
-                 }
-                 if (Sharder::Instance().CandidateStandbyNodeTerm() ==
-                     standby_term)
-                 {
-                     // Drop the failed subscribe session so a resubscribe gets
-                     // a fresh subscribe id instead of polling forever.
-                     Sharder::Instance().SetCandidateStandbyNodeTerm(-1);
-                 }
-
-                 if (current_sync_term != term)
-                 {
-                     LOG(INFO)
-                         << "RequestSyncSnapshot failed on stale primary term, "
-                         << "skip retry, ng_id=" << ng_id
-                         << ", standby_term=" << standby_term
-                         << ", request_primary_term=" << term
-                         << ", current_primary_term=" << current_sync_term;
-                 }
-                 else
-                 {
-                     const uint32_t leader_node_id =
-                         Sharder::Instance().LeaderNodeId(ng_id);
-                     LOG(WARNING)
-                         << "RequestSyncSnapshot failed, resubscribe retry "
-                         << retry_count << ", ng_id=" << ng_id
-                         << ", standby_term=" << standby_term
-                         << ", primary_term=" << term
-                         << ", leader_node_id=" << leader_node_id;
-                     Sharder::Instance().OnStartFollowing(
-                         ng_id, term, leader_node_id, true);
-                 }
-             }
+             DLOG(INFO) << "RequestSyncSnapshot async RequestSyncSnapshot "
+                           "done, ng_id="
+                        << ng_id << ", standby_term=" << standby_term
+                        << ", snapshot_ts=" << snapshot_ts
+                        << ", success=" << ok << ", role=follower";
          }});
     const uint64_t current_ckpt_ts =
         store_hd->CurrentStandbySnapshotTs(request->ng_id());
