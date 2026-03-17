@@ -26,13 +26,14 @@
 #include <bthread/mutex.h>
 #include <gflags/gflags.h>
 
+#include <atomic>
+#include <array>
 #include <cstdlib>
 #include <memory>
 #include <mutex>
 #include <optional>
 #include <utility>
 
-#include "absl/container/flat_hash_map.h"
 #include "cc/local_cc_shards.h"
 #include "cc_handler_result.h"
 #include "cc_protocol.h"
@@ -58,28 +59,24 @@ namespace remote
 {
 namespace
 {
-bthread::Mutex &StandbyRetryMux()
+constexpr uint32_t kMaxTrackedNgId = 1000;
+
+std::array<uint32_t, kMaxTrackedNgId> &SyncCountsInstance()
 {
-    static bthread::Mutex mux;
-    return mux;
+    static std::array<uint32_t, kMaxTrackedNgId> sync_counts{};
+    return sync_counts;
 }
 
-absl::flat_hash_map<uint32_t, uint32_t> &StandbyRetryCounts()
+bthread::Mutex &SyncStateMuxInstance()
 {
-    static absl::flat_hash_map<uint32_t, uint32_t> retry_counts;
-    return retry_counts;
+    static bthread::Mutex sync_state_mux;
+    return sync_state_mux;
 }
 
-void ResetStandbyRetryCount(uint32_t ng_id)
+std::array<std::atomic<int64_t>, kMaxTrackedNgId> &SyncTermsInstance()
 {
-    std::lock_guard<bthread::Mutex> lk(StandbyRetryMux());
-    StandbyRetryCounts().erase(ng_id);
-}
-
-uint32_t IncrementStandbyRetryCount(uint32_t ng_id)
-{
-    std::lock_guard<bthread::Mutex> lk(StandbyRetryMux());
-    return ++StandbyRetryCounts()[ng_id];
+    static std::array<std::atomic<int64_t>, kMaxTrackedNgId> sync_terms{};
+    return sync_terms;
 }
 
 int64_t CurrentSyncedPrimaryTerm()
@@ -2088,6 +2085,8 @@ void CcNodeService::RequestSyncSnapshot(
     const uint32_t ng_id = request->ng_id();
     const int64_t standby_term = request->standby_node_term();
     const uint64_t snapshot_ts = request->snapshot_ts();
+    assert(ng_id < kMaxTrackedNgId);
+    SyncTermsInstance()[ng_id].store(term, std::memory_order_release);
     EnqueueStandbyTask(
         {StandbyTaskType::RequestSyncSnapshot,
          ng_id,
@@ -2099,7 +2098,11 @@ void CcNodeService::RequestSyncSnapshot(
                  store_hd->RequestSyncSnapshot(ng_id, term, snapshot_ts);
              if (ok)
              {
-                 ResetStandbyRetryCount(ng_id);
+                 {
+                     std::lock_guard<bthread::Mutex> lk(
+                         SyncStateMuxInstance());
+                     SyncCountsInstance()[ng_id] = 0;
+                 }
                  Sharder::Instance().SetStandbyNodeTerm(standby_term);
                  Sharder::Instance().SetCandidateStandbyNodeTerm(-1);
                  if (!txservice::txservice_skip_kv &&
@@ -2114,7 +2117,14 @@ void CcNodeService::RequestSyncSnapshot(
              }
              else
              {
-                 const uint32_t retry_count = IncrementStandbyRetryCount(ng_id);
+                 uint32_t retry_count = 0;
+                 int64_t current_sync_term =
+                     SyncTermsInstance()[ng_id].load(std::memory_order_acquire);
+                 {
+                     std::lock_guard<bthread::Mutex> lk(
+                         SyncStateMuxInstance());
+                     retry_count = ++SyncCountsInstance()[ng_id];
+                 }
                  if (Sharder::Instance().CandidateStandbyNodeTerm() ==
                      standby_term)
                  {
@@ -2123,16 +2133,14 @@ void CcNodeService::RequestSyncSnapshot(
                      Sharder::Instance().SetCandidateStandbyNodeTerm(-1);
                  }
 
-                 const int64_t current_primary_term =
-                     Sharder::Instance().LeaderTerm(ng_id);
-                 if (current_primary_term != term)
+                 if (current_sync_term != term)
                  {
                      LOG(INFO)
                          << "RequestSyncSnapshot failed on stale primary term, "
                          << "skip retry, ng_id=" << ng_id
                          << ", standby_term=" << standby_term
                          << ", request_primary_term=" << term
-                         << ", current_primary_term=" << current_primary_term;
+                         << ", current_primary_term=" << current_sync_term;
                  }
                  else
                  {
@@ -2145,7 +2153,7 @@ void CcNodeService::RequestSyncSnapshot(
                          << ", primary_term=" << term
                          << ", leader_node_id=" << leader_node_id;
                      Sharder::Instance().OnStartFollowing(
-                         ng_id, current_primary_term, leader_node_id, true);
+                         ng_id, term, leader_node_id, true);
                  }
              }
          }});
