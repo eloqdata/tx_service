@@ -165,6 +165,12 @@ private:
 class EloqStoreDataStore : public DataStore
 {
 public:
+    struct ArchiveEntry
+    {
+        uint64_t term{0};
+        std::string tag;
+    };
+
     EloqStoreDataStore(uint32_t shard_id, DataStoreService *data_store_service);
 
     ~EloqStoreDataStore() override = default;
@@ -253,8 +259,17 @@ public:
     void SwitchToReadWrite() override;
 
     void CreateSnapshotForBackup(CreateSnapshotForBackupRequest *req) override;
+    bool CreateSnapshotForStandby(uint32_t ng_id, std::string_view tag);
+    void DeleteStandbySnapshot(uint64_t term, std::string_view tag) override;
+    bool ListArchiveTags(std::string_view prefix,
+                         std::vector<ArchiveEntry> *entries);
 
-    void ReloadDataFromCloud(int64_t term) override;
+    bool ReloadData(int64_t term, uint64_t snapshot_ts) override;
+    void UpdateStandbyMasterStorePaths(
+        const std::vector<std::string> &store_paths,
+        const std::vector<uint64_t> &store_path_weights) override;
+    void UpdateStandbyMasterAddr(
+        const std::string &standby_master_addr) override;
 
 private:
     static void OnRead(::eloqstore::KvRequest *req);
@@ -264,8 +279,6 @@ private:
     static void OnScanNext(::eloqstore::KvRequest *req);
     static void OnScanDelete(::eloqstore::KvRequest *req);
     static void OnFloor(::eloqstore::KvRequest *req);
-    static void OnReLoaded(::eloqstore::KvRequest *req);
-
     void ScanDelete(DeleteRangeRequest *delete_range_req);
     void Floor(ScanRequest *scan_req);
 

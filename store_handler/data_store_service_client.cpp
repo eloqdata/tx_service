@@ -21,13 +21,18 @@
  */
 #include "data_store_service_client.h"
 
+#include <bthread/condition_variable.h>
+#include <bthread/mutex.h>
 #include <glog/logging.h>
 
 #include <boost/lexical_cast.hpp>
 #include <boost/uuid/uuid.hpp>
 #include <boost/uuid/uuid_generators.hpp>
 #include <boost/uuid/uuid_io.hpp>
+#include <cctype>
+#include <chrono>
 #include <cstdint>
+#include <cstdlib>
 #include <memory>
 #include <random>
 #include <string>
@@ -40,6 +45,7 @@
 #include "cc_req_misc.h"
 #include "data_store_service_client_closure.h"
 #include "eloq_data_store_service/data_store_service_config.h"
+#include "eloq_data_store_service/data_store_service_util.h"
 #include "eloq_data_store_service/object_pool.h"  // ObjectPool
 #include "eloq_data_store_service/thread_worker_pool.h"
 #include "metrics.h"
@@ -49,6 +55,12 @@
 #include "tx_service/include/cc/local_cc_shards.h"
 #include "tx_service/include/error_messages.h"
 #include "tx_service/include/sequences/sequences.h"
+
+#ifdef DATA_STORE_TYPE_ELOQDSS_ELOQSTORE
+#include "gflags/gflags.h"
+DECLARE_string(eloq_store_data_path_list);
+DECLARE_string(tx_standby_ip_port_list);
+#endif
 
 namespace EloqDS
 {
@@ -3661,6 +3673,33 @@ bool DataStoreServiceClient::CreateSnapshotForBackup(
     return !callback_data->HasError();
 }
 
+bool DataStoreServiceClient::CreateSnapshotForStandby(
+    uint32_t ng_id,
+    std::vector<std::string> &snapshot_files,
+    uint64_t snapshot_ts)
+{
+#ifdef DATA_STORE_TYPE_ELOQDSS_ELOQSTORE
+    if (!bind_data_shard_with_ng_ || data_store_service_ == nullptr)
+    {
+        return false;
+    }
+    DLOG(INFO) << "CreateSnapshotForStandby begin, generated_snapshot_ts="
+               << snapshot_ts;
+    const bool ok = data_store_service_->CreateSnapshotForStandby(
+        ng_id, ng_id, snapshot_ts);
+    snapshot_files.clear();
+    DLOG(INFO) << "CreateSnapshotForStandby success, snapshot_ts="
+               << snapshot_ts << ", snapshot_files=" << snapshot_files.size()
+               << ", ok=" << ok;
+    return ok;
+#else
+    (void) ng_id;
+    (void) snapshot_files;
+    (void) snapshot_ts;
+    return false;
+#endif
+}
+
 /**
  * @brief Internal method for creating snapshots for backup operations.
  *
@@ -3778,6 +3817,17 @@ bool DataStoreServiceClient::OnLeaderStart(uint32_t ng_id,
         LOG_IF(FATAL, bucket_ids.empty())
             << "bucket_ids is empty, ng_id: " << ng_id;
         // Binded data store shard with ng.
+#ifdef DATA_STORE_TYPE_ELOQDSS_ELOQSTORE
+        const bool enable_local_standby =
+            !FLAGS_tx_standby_ip_port_list.empty();
+        data_store_service_->SetEnableLocalStandbyForEloqStore(
+            enable_local_standby);
+        data_store_service_->ClearStandbySnapshotPayloadForEloqStore(ng_id);
+        DLOG(INFO) << "OnLeaderStart reset eloqstore standby snapshot payload, "
+                   << "enable_local_standby=" << enable_local_standby
+                   << ", tx_standby_ip_port_list="
+                   << FLAGS_tx_standby_ip_port_list;
+#endif
         data_store_service_->OpenDataStore(ng_id, std::move(bucket_ids), term);
     }
 
@@ -3796,6 +3846,8 @@ bool DataStoreServiceClient::OnLeaderStop(uint32_t ng_id, int64_t term)
     if (data_store_service_ != nullptr)
     {
         // Close the data store shard.
+        LOG(INFO) << "DataStoreServiceClient::OnLeaderStop closing data store, "
+                  << "ng_id=" << ng_id << ", term=" << term << ", role=leader";
         data_store_service_->CloseDataStore(ng_id);
     }
     return true;
@@ -3821,6 +3873,15 @@ void DataStoreServiceClient::OnStartFollowing(uint32_t ng_id,
 
     if (data_store_service_ != nullptr)
     {
+#ifdef DATA_STORE_TYPE_ELOQDSS_ELOQSTORE
+        const bool enable_local_standby =
+            !FLAGS_tx_standby_ip_port_list.empty();
+        data_store_service_->SetEnableLocalStandbyForEloqStore(
+            enable_local_standby);
+        DLOG(INFO) << "OnStartFollowing set eloqstore enable_local_standby="
+                   << enable_local_standby << ", tx_standby_ip_port_list="
+                   << FLAGS_tx_standby_ip_port_list;
+#endif
         data_store_service_->CloseDataStore(ng_id);
     }
 
@@ -3869,52 +3930,158 @@ void DataStoreServiceClient::OnShutdown()
 {
 }
 
+std::string DataStoreServiceClient::SnapshotSyncDestPath() const
+{
+#ifdef DATA_STORE_TYPE_ELOQDSS_ELOQSTORE
+    return FLAGS_eloq_store_data_path_list;
+#else
+    return std::string("");
+#endif
+}
+
 bool DataStoreServiceClient::OnSnapshotReceived(
     const txservice::remote::OnSnapshotSyncedRequest *req)
+{
+    (void) req;
+    return true;
+}
+
+bool DataStoreServiceClient::OnUpdateStandbyCkptTs(uint32_t ng_id,
+                                                   int64_t ng_term,
+                                                   uint64_t snapshot_ts,
+                                                   bool skip_reload_data)
 {
 #ifdef DATA_STORE_TYPE_ELOQDSS_ELOQSTORE
     if (!bind_data_shard_with_ng_)
     {
+        DLOG(INFO) << "bind_data_shard_with_ng_ is false, return";
         return true;
     }
-
-    if (data_store_service_ != nullptr)
+    assert(data_store_service_ != nullptr);
+    if (!skip_reload_data)
     {
-        uint32_t ng_id = req->ng_id();
-        std::unordered_set<uint16_t> bucket_ids;
-        for (auto &[bucket_id, bucket_info] : bucket_infos_)
+        const bool reload_ok =
+            data_store_service_->ReloadData(ng_id, ng_term, snapshot_ts);
+        if (!reload_ok)
         {
-            if (bucket_info->BucketOwner() == ng_id)
-            {
-                bucket_ids.insert(bucket_id);
-            }
+            LOG(WARNING)
+                << "DataStoreServiceClient::OnUpdateStandbyCkptTs skip ckpt "
+                   "update because reload failed, ng_id="
+                << ng_id << ", term=" << ng_term
+                << ", snapshot_ts=" << snapshot_ts;
+            return false;
         }
-        int64_t term =
-            txservice::PrimaryTermFromStandbyTerm(req->standby_node_term());
-        data_store_service_->OnSnapshotReceived(
-            ng_id, term, std::move(bucket_ids), req->snapshot_path());
-
-        return true;
     }
 #endif
     return true;
 }
 
-bool DataStoreServiceClient::OnUpdateStandbyCkptTs(uint32_t ng_id,
-                                                   int64_t ng_term)
+bool DataStoreServiceClient::RequestSyncSnapshot(uint32_t ng_id,
+                                                 int64_t ng_term,
+                                                 uint64_t snapshot_ts)
 {
 #ifdef DATA_STORE_TYPE_ELOQDSS_ELOQSTORE
     if (!bind_data_shard_with_ng_)
     {
         return true;
     }
+    assert(data_store_service_ != nullptr);
+    std::unordered_set<uint16_t> bucket_ids;
+    for (auto &[bucket_id, bucket_info] : bucket_infos_)
+    {
+        if (bucket_info->BucketOwner() == ng_id)
+        {
+            bucket_ids.insert(bucket_id);
+        }
+    }
+    DLOG(INFO) << "DataStoreServiceClient::RequestSyncSnapshot prepare open "
+                  "data store, ng_id="
+               << ng_id << ", term=" << ng_term
+               << ", bucket_count=" << bucket_ids.size()
+               << ", snapshot_ts=" << snapshot_ts;
+    if (data_store_service_->FetchDSShardStatus(ng_id) == DSShardStatus::Closed)
+    {
+        data_store_service_->OpenDataStore(
+            ng_id, std::move(bucket_ids), ng_term);
+    }
+    return data_store_service_->ReloadData(ng_id, ng_term, snapshot_ts);
+#else
+    (void) ng_id;
+    (void) ng_term;
+    (void) snapshot_ts;
+    return false;
+#endif
+}
+
+void DataStoreServiceClient::DeleteStandbySnapshot(uint32_t ng_id,
+                                                   uint64_t snapshot_ts)
+{
+#ifdef DATA_STORE_TYPE_ELOQDSS_ELOQSTORE
+    if (data_store_service_ == nullptr)
+    {
+        return;
+    }
+    const bool ok =
+        data_store_service_->DeleteStandbySnapshot(ng_id, snapshot_ts);
+    DLOG(INFO) << "DataStoreServiceClient::DeleteStandbySnapshot, ng_id="
+               << ng_id << ", snapshot_ts=" << snapshot_ts << ", ok=" << ok;
+#else
+    (void) ng_id;
+    (void) snapshot_ts;
+#endif
+}
+
+void DataStoreServiceClient::DeleteStandbySnapshotsBefore(uint32_t ng_id,
+                                                          uint64_t snapshot_ts)
+{
+    if (!bind_data_shard_with_ng_)
+    {
+        return;
+    }
+    assert(data_store_service_ != nullptr);
+#ifdef DATA_STORE_TYPE_ELOQDSS_ELOQSTORE
+    data_store_service_->DeleteStandbySnapshotsBefore(ng_id, snapshot_ts);
+#else
+    (void) ng_id;
+    (void) snapshot_ts;
+#endif
+}
+
+uint64_t DataStoreServiceClient::CurrentStandbySnapshotTs(uint32_t ng_id)
+{
+    if (!bind_data_shard_with_ng_)
+    {
+        return 0;
+    }
+    assert(data_store_service_ != nullptr);
+#ifdef DATA_STORE_TYPE_ELOQDSS_ELOQSTORE
+    const uint64_t ts = data_store_service_->CurrentStandbySnapshotTs(ng_id);
+    DLOG(INFO) << "CurrentStandbySnapshotTs from data_store_service, ng_id="
+               << ng_id << ", snapshot_ts=" << ts;
+    return ts;
+#else
+    (void) ng_id;
+    return 0;
+#endif
+}
+
+void DataStoreServiceClient::SetStandbySnapshotPayload(
+    uint32_t ng_id, const std::string &snapshot_path)
+{
+#ifdef DATA_STORE_TYPE_ELOQDSS_ELOQSTORE
+    if (!bind_data_shard_with_ng_)
+    {
+        return;
+    }
 
     if (data_store_service_ != nullptr)
     {
-        data_store_service_->OnUpdateStandbyCkptTs(ng_id, ng_term);
+        data_store_service_->SetStandbySnapshotPayload(ng_id, snapshot_path);
     }
+#else
+    (void) ng_id;
+    (void) snapshot_path;
 #endif
-    return true;
 }
 
 /**

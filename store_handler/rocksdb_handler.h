@@ -691,8 +691,9 @@ public:
 
     bool CreateSnapshot(const std::string &snapshot_path,
                         std::vector<std::string> &snapshot_files);
-    bool CreateSnapshotForStandby(
-        std::vector<std::string> &snapshot_files) override;
+    bool CreateSnapshotForStandby(uint32_t ng_id,
+                                  std::vector<std::string> &snapshot_files,
+                                  uint64_t snapshot_ts) override;
     bool CreateSnapshotForBackup(
         const std::string &backup_name,
         std::vector<std::string> &snapshot_files) override;
@@ -747,8 +748,9 @@ public:
 
     bool CreateSnapshot(const std::string &snapshot_path,
                         std::vector<std::string> &snapshot_files);
-    bool CreateSnapshotForStandby(
-        std::vector<std::string> &snapshot_files) override;
+    bool CreateSnapshotForStandby(uint32_t ng_id,
+                                  std::vector<std::string> &snapshot_files,
+                                  uint64_t snapshot_ts) override;
     bool CreateSnapshotForBackup(const std::string &backup_name,
                                  std::vector<std::string> &snapshot_files,
                                  uint64_t backup_ts) override;

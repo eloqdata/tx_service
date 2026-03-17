@@ -23,6 +23,7 @@
 
 #include <cstdint>
 #include <deque>
+#include <functional>
 #include <map>
 #include <memory>
 #include <string>
@@ -198,7 +199,11 @@ public:
     {
         if (bind_data_shard_with_ng_ && data_store_service_ != nullptr)
         {
+#ifdef DATA_STORE_TYPE_ELOQDSS_ELOQSTORE
+            return true;
+#else
             return data_store_service_->IsCloudMode();
+#endif
         }
         else
         {
@@ -452,11 +457,10 @@ public:
                        std::vector<txservice::VersionTxRecord> &archives,
                        uint64_t from_ts) override;
 
-    /**
-     * @brief Create a snapshot for backup.
-     * @param snapshot_files The output snapshot files.
-     * @return True if create successfully, otherwise false.
-     */
+    bool CreateSnapshotForStandby(uint32_t ng_id,
+                                  std::vector<std::string> &snapshot_files,
+                                  uint64_t snapshot_ts) override;
+
     bool CreateSnapshotForBackup(const std::string &backup_name,
                                  std::vector<std::string> &backup_files,
                                  uint64_t backup_ts = 0) override;
@@ -480,6 +484,13 @@ public:
 
     void OnShutdown() override;
 
+    /**
+     * For EloqStore local-standby mode, snapshot sync is pull-based:
+     * standby/follower pulls data from master. This returns the master-side
+     * source path list (optionally with weights) to send to standby.
+     */
+    std::string SnapshotSyncDestPath() const override;
+
     bool RemoveBackupSnapshot(const std::string &backup_name) override
     {
         return true;
@@ -488,7 +499,19 @@ public:
     bool OnSnapshotReceived(
         const txservice::remote::OnSnapshotSyncedRequest *req) override;
 
-    bool OnUpdateStandbyCkptTs(uint32_t ng_id, int64_t ng_term) override;
+    bool OnUpdateStandbyCkptTs(uint32_t ng_id,
+                               int64_t ng_term,
+                               uint64_t snapshot_ts,
+                               bool skip_reload_data = false) override;
+    bool RequestSyncSnapshot(uint32_t ng_id,
+                             int64_t ng_term,
+                             uint64_t snapshot_ts) override;
+    void DeleteStandbySnapshot(uint32_t ng_id, uint64_t snapshot_ts) override;
+    void DeleteStandbySnapshotsBefore(uint32_t ng_id,
+                                      uint64_t snapshot_ts) override;
+    uint64_t CurrentStandbySnapshotTs(uint32_t ng_id) override;
+    void SetStandbySnapshotPayload(uint32_t ng_id,
+                                   const std::string &snapshot_path) override;
 
     /**
      * Serialize a record with is_deleted flag and record string.

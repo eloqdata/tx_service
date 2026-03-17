@@ -21,6 +21,12 @@
  */
 #include "store/snapshot_manager.h"
 
+#include <bthread/condition_variable.h>
+#include <bthread/mutex.h>
+#include <gflags/gflags.h>
+
+#include <limits>
+#include <memory>
 #include <vector>
 
 #include "cc/local_cc_shards.h"
@@ -30,6 +36,121 @@ namespace txservice
 
 namespace store
 {
+namespace
+{
+#ifdef DATA_STORE_TYPE_ELOQDSS_ELOQSTORE
+struct RequestSyncSnapshotAggregate
+{
+    bthread::Mutex mux;
+    bthread::ConditionVariable cv;
+    size_t pending{0};
+    size_t success{0};
+    uint64_t min_ack_ckpt_ts{std::numeric_limits<uint64_t>::max()};
+};
+
+struct RequestSyncSnapshotRpcCtx
+{
+    brpc::Controller cntl;
+    remote::RequestSyncSnapshotRequest req;
+    remote::RequestSyncSnapshotResponse resp;
+    RequestSyncSnapshotAggregate *aggregate{nullptr};
+    uint32_t standby_node_id{0};
+    int64_t standby_term{0};
+    uint32_t ng_id{0};
+};
+
+class RequestSyncSnapshotDone : public google::protobuf::Closure
+{
+public:
+    explicit RequestSyncSnapshotDone(
+        std::shared_ptr<RequestSyncSnapshotRpcCtx> ctx)
+        : ctx_(std::move(ctx))
+    {
+    }
+
+    void Run() override
+    {
+        std::unique_ptr<RequestSyncSnapshotDone> self_guard(this);
+        auto *agg = ctx_->aggregate;
+        const bool succ = !ctx_->cntl.Failed() && !ctx_->resp.error();
+        if (agg == nullptr)
+        {
+            if (!succ)
+            {
+                LOG(WARNING)
+                    << "RequestSyncSnapshot async dispatch failed, ng_id="
+                    << ctx_->ng_id
+                    << ", standby_node_id=" << ctx_->standby_node_id
+                    << ", standby_term=" << ctx_->standby_term
+                    << ", error=" << ctx_->cntl.ErrorText()
+                    << ", failed=" << ctx_->cntl.Failed()
+                    << ", resp_error=" << ctx_->resp.error();
+            }
+            return;
+        }
+        {
+            std::lock_guard<bthread::Mutex> lk(agg->mux);
+            if (succ)
+            {
+                agg->success++;
+                agg->min_ack_ckpt_ts = std::min(agg->min_ack_ckpt_ts,
+                                                ctx_->resp.current_ckpt_ts());
+            }
+            agg->pending--;
+        }
+        agg->cv.notify_all();
+    }
+
+private:
+    std::shared_ptr<RequestSyncSnapshotRpcCtx> ctx_;
+};
+
+bool DispatchRequestSyncSnapshotAsync(uint32_t ng_id,
+                                      uint32_t standby_node_id,
+                                      int64_t standby_term,
+                                      uint64_t snapshot_ts,
+                                      RequestSyncSnapshotAggregate *aggregate)
+{
+    auto channel = Sharder::Instance().GetCcNodeServiceChannel(standby_node_id);
+    if (!channel)
+    {
+        LOG(WARNING) << "RequestSyncSnapshot channel is nullptr for standby "
+                     << "node #" << standby_node_id << " at standby term "
+                     << standby_term << ", ng_id=" << ng_id
+                     << ", snapshot_ts=" << snapshot_ts;
+        return false;
+    }
+
+    auto rpc_ctx = std::make_shared<RequestSyncSnapshotRpcCtx>();
+    rpc_ctx->cntl.set_timeout_ms(1000);
+    rpc_ctx->req.set_standby_node_term(standby_term);
+    rpc_ctx->req.set_ng_id(ng_id);
+    rpc_ctx->req.set_snapshot_ts(snapshot_ts);
+    rpc_ctx->aggregate = aggregate;
+    rpc_ctx->standby_node_id = standby_node_id;
+    rpc_ctx->standby_term = standby_term;
+    rpc_ctx->ng_id = ng_id;
+
+    if (aggregate != nullptr)
+    {
+        std::lock_guard<bthread::Mutex> lk(aggregate->mux);
+        aggregate->pending++;
+    }
+
+    remote::CcRpcService_Stub stub(channel.get());
+    DLOG(INFO) << "RequestSyncSnapshot async dispatch, ng_id=" << ng_id
+               << ", standby_node_id=" << standby_node_id
+               << ", standby_term=" << standby_term
+               << ", snapshot_ts=" << snapshot_ts
+               << ", aggregate=" << (aggregate != nullptr);
+    stub.RequestSyncSnapshot(&rpc_ctx->cntl,
+                             &rpc_ctx->req,
+                             &rpc_ctx->resp,
+                             new RequestSyncSnapshotDone(rpc_ctx));
+    return true;
+}
+#endif
+}  // namespace
 
 void SnapshotManager::Start()
 {
@@ -87,7 +208,9 @@ bool SnapshotManager::OnSnapshotSyncRequested(
 {
     DLOG(INFO) << "Received snapshot sync request from standby node #"
                << req->standby_node_id()
-               << " for standby term: " << req->standby_node_term();
+               << " for standby term: " << req->standby_node_term()
+               << ", ng_id=" << req->ng_id()
+               << ", dest_path=" << req->dest_path();
     assert(store_hd_ != nullptr);
     if (store_hd_ == nullptr)
     {
@@ -95,54 +218,146 @@ bool SnapshotManager::OnSnapshotSyncRequested(
         return false;
     }
 
-    std::unique_lock<std::mutex> lk(standby_sync_mux_);
-
-    if (!terminated_)
+#ifdef DATA_STORE_TYPE_ELOQDSS_ELOQSTORE
+    bool should_resend_completed_snapshot = false;
+    uint64_t completed_snapshot_ts = 0;
+    uint32_t completed_ng_id = 0;
+    uint32_t completed_standby_node_id = 0;
+    int64_t completed_standby_term = 0;
+#endif
     {
+        std::unique_lock<std::mutex> lk(standby_sync_mux_);
+
+        if (terminated_)
+        {
+            return false;
+        }
+
         auto node_it = subscription_barrier_.find(req->standby_node_id());
         if (node_it == subscription_barrier_.end())
         {
-            LOG(WARNING) << "No subscription barrier found for standby node #"
-                         << req->standby_node_id()
-                         << ", standby term: " << req->standby_node_term();
-            return false;
-        }
-
-        auto barrier_it = node_it->second.find(req->standby_node_term());
-        if (barrier_it == node_it->second.end())
-        {
-            LOG(WARNING) << "No barrier found for standby node #"
-                         << req->standby_node_id()
-                         << " at standby term: " << req->standby_node_term();
-            return false;
-        }
-
-        uint64_t active_tx_max_ts = barrier_it->second;
-
-        auto ins_pair = pending_req_.try_emplace(req->standby_node_id());
-        if (!ins_pair.second)
-        {
-            // check if the queued task is newer than the new received req. If
-            // so, discard the new req, otherwise, update the task.
-            auto &cur_task = ins_pair.first->second;
-            int64_t cur_task_standby_node_term =
-                cur_task.req.standby_node_term();
-            int64_t req_standby_node_term = req->standby_node_term();
-
-            if (cur_task_standby_node_term >= req_standby_node_term)
+            if (IsSnapshotSyncCompletedLocked(req->standby_node_id(),
+                                              req->standby_node_term()))
             {
-                // discard the task.
+#ifdef DATA_STORE_TYPE_ELOQDSS_ELOQSTORE
+                if (!GetCompletedSnapshotTsLocked(req->standby_node_id(),
+                                                  req->standby_node_term(),
+                                                  &completed_snapshot_ts))
+                {
+                    LOG(WARNING)
+                        << "Completed term found without snapshot ts, "
+                        << "standby node #" << req->standby_node_id()
+                        << ", standby term: " << req->standby_node_term();
+                    return false;
+                }
+                DLOG(INFO) << "Received duplicate snapshot sync request for "
+                              "completed standby node #"
+                           << req->standby_node_id()
+                           << ", standby term: " << req->standby_node_term()
+                           << ", snapshot_ts=" << completed_snapshot_ts;
+                should_resend_completed_snapshot = true;
+                completed_ng_id = req->ng_id();
+                completed_standby_node_id = req->standby_node_id();
+                completed_standby_term = req->standby_node_term();
+#else
+                return true;
+#endif
+            }
+            else
+            {
+                LOG(WARNING) << "No subscription barrier found for standby "
+                                "node #"
+                             << req->standby_node_id()
+                             << ", standby term: " << req->standby_node_term();
+                return false;
+            }
+        }
+        else
+        {
+            auto barrier_it = node_it->second.find(req->standby_node_term());
+            if (barrier_it == node_it->second.end())
+            {
+                if (IsSnapshotSyncCompletedLocked(req->standby_node_id(),
+                                                  req->standby_node_term()))
+                {
+#ifdef DATA_STORE_TYPE_ELOQDSS_ELOQSTORE
+                    if (!GetCompletedSnapshotTsLocked(req->standby_node_id(),
+                                                      req->standby_node_term(),
+                                                      &completed_snapshot_ts))
+                    {
+                        LOG(WARNING)
+                            << "Completed term found without snapshot ts, "
+                            << "standby node #" << req->standby_node_id()
+                            << ", standby term: " << req->standby_node_term();
+                        return false;
+                    }
+                    DLOG(INFO)
+                        << "Received duplicate snapshot sync request for "
+                           "completed standby node #"
+                        << req->standby_node_id()
+                        << ", standby term: " << req->standby_node_term()
+                        << ", snapshot_ts=" << completed_snapshot_ts;
+                    should_resend_completed_snapshot = true;
+                    completed_ng_id = req->ng_id();
+                    completed_standby_node_id = req->standby_node_id();
+                    completed_standby_term = req->standby_node_term();
+#else
+                    return true;
+#endif
+                }
+                else
+                {
+                    LOG(WARNING)
+                        << "No barrier found for standby node #"
+                        << req->standby_node_id()
+                        << " at standby term: " << req->standby_node_term();
+                    return false;
+                }
+            }
+            else
+            {
+                uint64_t active_tx_max_ts = barrier_it->second;
+
+                auto ins_pair =
+                    pending_req_.try_emplace(req->standby_node_id());
+                if (!ins_pair.second)
+                {
+                    // check if the queued task is newer than the new received
+                    // req. If so, discard the new req, otherwise, update the
+                    // task.
+                    auto &cur_task = ins_pair.first->second;
+                    int64_t cur_task_standby_node_term =
+                        cur_task.req.standby_node_term();
+                    int64_t req_standby_node_term = req->standby_node_term();
+
+                    if (cur_task_standby_node_term >= req_standby_node_term)
+                    {
+                        // discard the task.
+                        return true;
+                    }
+                }
+
+                ins_pair.first->second.req.CopyFrom(*req);
+                ins_pair.first->second.subscription_active_tx_max_ts =
+                    active_tx_max_ts;
+                standby_sync_cv_.notify_all();
                 return true;
             }
         }
-
-        ins_pair.first->second.req.CopyFrom(*req);
-        ins_pair.first->second.subscription_active_tx_max_ts = active_tx_max_ts;
-        standby_sync_cv_.notify_all();
-        return true;
     }
 
-    return false;
+#ifdef DATA_STORE_TYPE_ELOQDSS_ELOQSTORE
+    if (should_resend_completed_snapshot)
+    {
+        return DispatchRequestSyncSnapshotAsync(completed_ng_id,
+                                                completed_standby_node_id,
+                                                completed_standby_term,
+                                                completed_snapshot_ts,
+                                                nullptr);
+    }
+#endif
+
+    return true;
 }
 
 void SnapshotManager::RegisterSubscriptionBarrier(uint32_t standby_node_id,
@@ -150,6 +365,60 @@ void SnapshotManager::RegisterSubscriptionBarrier(uint32_t standby_node_id,
                                                   uint64_t active_tx_max_ts)
 {
     std::unique_lock<std::mutex> lk(standby_sync_mux_);
+#ifdef DATA_STORE_TYPE_ELOQDSS_ELOQSTORE
+    auto completed_it = completed_snapshot_term_and_ts_.find(standby_node_id);
+    if (completed_it != completed_snapshot_term_and_ts_.end())
+    {
+        for (const auto &entry : completed_it->second)
+        {
+            int64_t completed_term = entry.first;
+            if (completed_term > standby_node_term)
+            {
+                DLOG(INFO) << "Ignore stale subscription barrier registration "
+                              "for standby node #"
+                           << standby_node_id << ", term " << standby_node_term
+                           << " because completed term " << completed_term
+                           << " is newer";
+                return;
+            }
+        }
+
+        if (completed_it->second.find(standby_node_term) !=
+            completed_it->second.end())
+        {
+            DLOG(INFO) << "Skip barrier registration for already completed "
+                          "standby node #"
+                       << standby_node_id << ", term " << standby_node_term;
+            return;
+        }
+    }
+#else
+    auto completed_it = completed_snapshot_terms_.find(standby_node_id);
+    if (completed_it != completed_snapshot_terms_.end())
+    {
+        for (int64_t completed_term : completed_it->second)
+        {
+            if (completed_term > standby_node_term)
+            {
+                DLOG(INFO) << "Ignore stale subscription barrier registration "
+                              "for standby node #"
+                           << standby_node_id << ", term " << standby_node_term
+                           << " because completed term " << completed_term
+                           << " is newer";
+                return;
+            }
+        }
+
+        if (completed_it->second.find(standby_node_term) !=
+            completed_it->second.end())
+        {
+            DLOG(INFO) << "Skip barrier registration for already completed "
+                          "standby node #"
+                       << standby_node_id << ", term " << standby_node_term;
+            return;
+        }
+    }
+#endif
 
     // Ignore out-of-order old barrier registrations when a newer standby term
     // is already known for this standby node.
@@ -190,6 +459,48 @@ void SnapshotManager::RegisterSubscriptionBarrier(uint32_t standby_node_id,
     {
         pending_req_.erase(pending_it);
     }
+
+#ifdef DATA_STORE_TYPE_ELOQDSS_ELOQSTORE
+    if (completed_it != completed_snapshot_term_and_ts_.end())
+    {
+        auto term_it = completed_it->second.begin();
+        while (term_it != completed_it->second.end())
+        {
+            if (term_it->first < standby_node_term)
+            {
+                term_it = completed_it->second.erase(term_it);
+            }
+            else
+            {
+                ++term_it;
+            }
+        }
+        if (completed_it->second.empty())
+        {
+            completed_snapshot_term_and_ts_.erase(completed_it);
+        }
+    }
+#else
+    if (completed_it != completed_snapshot_terms_.end())
+    {
+        auto term_it = completed_it->second.begin();
+        while (term_it != completed_it->second.end())
+        {
+            if (*term_it < standby_node_term)
+            {
+                term_it = completed_it->second.erase(term_it);
+            }
+            else
+            {
+                ++term_it;
+            }
+        }
+        if (completed_it->second.empty())
+        {
+            completed_snapshot_terms_.erase(completed_it);
+        }
+    }
+#endif
 
     auto &node_barriers = subscription_barrier_[standby_node_id];
 
@@ -253,6 +564,7 @@ void SnapshotManager::EraseSubscriptionBarriersByNode(uint32_t standby_node_id)
     std::unique_lock<std::mutex> lk(standby_sync_mux_);
     pending_req_.erase(standby_node_id);
     subscription_barrier_.erase(standby_node_id);
+    EraseSnapshotSyncCompletedByNodeLocked(standby_node_id);
 }
 
 void SnapshotManager::EraseSubscriptionBarrierLocked(uint32_t standby_node_id,
@@ -271,6 +583,104 @@ void SnapshotManager::EraseSubscriptionBarrierLocked(uint32_t standby_node_id,
     }
 }
 
+bool SnapshotManager::IsSnapshotSyncCompletedLocked(
+    uint32_t standby_node_id, int64_t standby_node_term) const
+{
+#ifdef DATA_STORE_TYPE_ELOQDSS_ELOQSTORE
+    auto node_it = completed_snapshot_term_and_ts_.find(standby_node_id);
+    if (node_it == completed_snapshot_term_and_ts_.end())
+    {
+        return false;
+    }
+#else
+    auto node_it = completed_snapshot_terms_.find(standby_node_id);
+    if (node_it == completed_snapshot_terms_.end())
+    {
+        return false;
+    }
+#endif
+    return node_it->second.find(standby_node_term) != node_it->second.end();
+}
+
+#ifdef DATA_STORE_TYPE_ELOQDSS_ELOQSTORE
+bool SnapshotManager::GetCompletedSnapshotTsLocked(
+    uint32_t standby_node_id,
+    int64_t standby_node_term,
+    uint64_t *standby_snapshot_ts) const
+{
+    if (standby_snapshot_ts == nullptr)
+    {
+        return false;
+    }
+
+    auto node_it = completed_snapshot_term_and_ts_.find(standby_node_id);
+    if (node_it == completed_snapshot_term_and_ts_.end())
+    {
+        return false;
+    }
+
+    auto term_it = node_it->second.find(standby_node_term);
+    if (term_it == node_it->second.end())
+    {
+        return false;
+    }
+
+    *standby_snapshot_ts = term_it->second;
+    return true;
+}
+#endif
+
+void SnapshotManager::MarkSnapshotSyncCompletedLocked(
+    uint32_t standby_node_id,
+    int64_t standby_node_term,
+    uint64_t standby_snapshot_ts)
+{
+#ifdef DATA_STORE_TYPE_ELOQDSS_ELOQSTORE
+    auto &snapshot_term_and_ts =
+        completed_snapshot_term_and_ts_[standby_node_id];
+    snapshot_term_and_ts[standby_node_term] = standby_snapshot_ts;
+    auto it = snapshot_term_and_ts.begin();
+    while (it != snapshot_term_and_ts.end())
+    {
+        if (it->first < standby_node_term)
+        {
+            it = snapshot_term_and_ts.erase(it);
+        }
+        else
+        {
+            ++it;
+        }
+    }
+#else
+    auto &completed_terms = completed_snapshot_terms_[standby_node_id];
+    completed_terms.insert(standby_node_term);
+
+    auto it = completed_terms.begin();
+    while (it != completed_terms.end())
+    {
+        if (*it < standby_node_term)
+        {
+            it = completed_terms.erase(it);
+        }
+        else
+        {
+            ++it;
+        }
+    }
+    (void) standby_snapshot_ts;
+#endif
+}
+
+void SnapshotManager::EraseSnapshotSyncCompletedByNodeLocked(
+    uint32_t standby_node_id)
+{
+#ifdef DATA_STORE_TYPE_ELOQDSS_ELOQSTORE
+    completed_snapshot_term_and_ts_.erase(standby_node_id);
+#else
+    completed_snapshot_terms_.erase(standby_node_id);
+#endif
+}
+
 // If kvstore is enabled, we must flush data in-memory to kvstore firstly.
 // For non-shared kvstore, also we create and send the snapshot to standby
 // nodes.
@@ -279,6 +689,7 @@ void SnapshotManager::EraseSubscriptionBarrierLocked(uint32_t standby_node_id,
 // kvstore on cache miss).
 void SnapshotManager::SyncWithStandby()
 {
+    DLOG(INFO) << "SyncWithStandby";
     assert(store_hd_ != nullptr);
     if (store_hd_ == nullptr)
     {
@@ -297,6 +708,11 @@ void SnapshotManager::SyncWithStandby()
         // clear barriers as well, all queued sync states are stale when this
         // leader term is no longer valid.
         subscription_barrier_.clear();
+#ifdef DATA_STORE_TYPE_ELOQDSS_ELOQSTORE
+        completed_snapshot_term_and_ts_.clear();
+#else
+        completed_snapshot_terms_.clear();
+#endif
         return;
     }
 
@@ -306,7 +722,7 @@ void SnapshotManager::SyncWithStandby()
 
     std::vector<PendingSnapshotSyncTask> tasks;
 
-    // Pick all pending tasks that can be covered by current checkpoint ts.
+    // Dequeue all pending tasks that can be covered by this snapshot.
     {
         std::unique_lock<std::mutex> lk(standby_sync_mux_);
         auto it = pending_req_.begin();
@@ -387,7 +803,6 @@ void SnapshotManager::SyncWithStandby()
     }
 
     bool ckpt_res = this->RunOneRoundCheckpoint(node_group, leader_term);
-
     if (!ckpt_res)
     {
         // Data flush failed. Retry on next run.
@@ -395,18 +810,29 @@ void SnapshotManager::SyncWithStandby()
         return;
     }
 
-    // Now take a snapshot for non-shared storage, and then send to standby
-    // node.
     std::vector<std::string> snapshot_files;
-    if (!store_hd_->IsSharedStorage())
+#ifdef DATA_STORE_TYPE_ELOQDSS_ELOQSTORE
+    // Create a fresh standby snapshot after the checkpoint completed.
+    const uint64_t standby_snapshot_ts = static_cast<uint64_t>(
+        std::chrono::duration_cast<std::chrono::microseconds>(
+            std::chrono::system_clock::now().time_since_epoch())
+            .count());
+    bool res = store_hd_->CreateSnapshotForStandby(
+        node_group, snapshot_files, standby_snapshot_ts);
+    if (!res)
     {
-        bool res = store_hd_->CreateSnapshotForStandby(snapshot_files);
-        if (!res)
-        {
-            LOG(ERROR) << "Failed to create snpashot for sync with standby";
-            return;
-        }
+        LOG(ERROR) << "Failed to create snpashot for sync with standby";
+        return;
     }
+    DLOG(INFO) << "SyncWithStandby created standby snapshot, ng_id="
+               << node_group << ", term=" << leader_term
+               << ", snapshot_ts=" << standby_snapshot_ts;
+
+    uint64_t min_ack_ckpt_ts = std::numeric_limits<uint64_t>::max();
+    size_t sync_snapshot_rpc_count = 0;
+    size_t sync_snapshot_success = 0;
+    RequestSyncSnapshotAggregate sync_snapshot_agg;
+#endif
 
     for (auto &task : tasks)
     {
@@ -430,7 +856,9 @@ void SnapshotManager::SyncWithStandby()
         std::string ip;
         uint16_t port;
         Sharder::Instance().GetNodeAddress(node_id, ip, port);
+#ifndef DATA_STORE_TYPE_ELOQDSS_ELOQSTORE
         std::string remote_dest = req.user() + "@" + ip + ":" + req.dest_path();
+#endif
         int64_t req_primary_term =
             PrimaryTermFromStandbyTerm(req_standby_node_term);
 
@@ -441,21 +869,37 @@ void SnapshotManager::SyncWithStandby()
         }
 
         bool succ = true;
+#ifndef DATA_STORE_TYPE_ELOQDSS_ELOQSTORE
         if (!snapshot_files.empty())
         {
             succ = store_hd_->SendSnapshotToRemote(
                 req.ng_id(), req_primary_term, snapshot_files, remote_dest);
         }
+#else
+        assert(snapshot_files.empty());
+#endif
 
         if (succ)
         {
+            bool notify_succ = false;
+#ifdef DATA_STORE_TYPE_ELOQDSS_ELOQSTORE
+            notify_succ =
+                DispatchRequestSyncSnapshotAsync(req.ng_id(),
+                                                 req.standby_node_id(),
+                                                 req.standby_node_term(),
+                                                 standby_snapshot_ts,
+                                                 &sync_snapshot_agg);
+            if (notify_succ)
+            {
+                sync_snapshot_rpc_count++;
+            }
+#else
             auto channel = Sharder::Instance().GetCcNodeServiceChannel(
                 req.standby_node_id());
             DLOG(INFO) << "Notifying standby node #" << req.standby_node_id()
                        << " for snapshot synced at term "
                        << req.standby_node_term()
                        << ", channel: " << (channel ? "valid" : "null");
-
             if (channel)
             {
                 // needs retry if failed
@@ -484,19 +928,46 @@ void SnapshotManager::SyncWithStandby()
                         std::this_thread::sleep_for(std::chrono::seconds(1));
                         continue;
                     }
-                    else
+                    if (on_sync_resp.error())
                     {
-                        break;
+                        LOG(WARNING)
+                            << "OnSnapshotSynced to standby node #"
+                            << req.standby_node_id()
+                            << " returned error response at standby term "
+                            << req.standby_node_term();
+                        std::this_thread::sleep_for(std::chrono::seconds(1));
+                        continue;
                     }
+
+                    notify_succ = true;
+                    break;
                 }
             }
+            else
+            {
+                LOG(WARNING) << "OnSnapshotSynced channel is nullptr for "
+                             << "standby node #" << req.standby_node_id()
+                             << " at standby term " << req.standby_node_term();
+            }
+#endif
 
-            // We don't care if the notification is successful or not.
-            // We just need to erase the same request. Even if the notification
-            // fails, after a while, the standby node will resend the
-            // request.
+            if (!notify_succ)
+            {
+                // Keep pending/barrier so standby can retry with the same
+                // standby term.
+                continue;
+            }
+
             {
                 std::unique_lock<std::mutex> lk(standby_sync_mux_);
+#ifdef DATA_STORE_TYPE_ELOQDSS_ELOQSTORE
+                const uint64_t completed_snapshot_ts = standby_snapshot_ts;
+#else
+                const uint64_t completed_snapshot_ts = 0;
+#endif
+                MarkSnapshotSyncCompletedLocked(req.standby_node_id(),
+                                                req.standby_node_term(),
+                                                completed_snapshot_ts);
                 auto pending_req_iter =
                     pending_req_.find(req.standby_node_id());
                 if (pending_req_iter != pending_req_.end())
@@ -542,6 +1013,43 @@ void SnapshotManager::SyncWithStandby()
                                      req.standby_node_term());
         }
     }
+#ifdef DATA_STORE_TYPE_ELOQDSS_ELOQSTORE
+    {
+        std::unique_lock<bthread::Mutex> lk(sync_snapshot_agg.mux);
+        while (sync_snapshot_agg.pending != 0)
+        {
+            sync_snapshot_agg.cv.wait(lk);
+        }
+        min_ack_ckpt_ts = sync_snapshot_agg.min_ack_ckpt_ts;
+        sync_snapshot_success = sync_snapshot_agg.success;
+    }
+#endif
+
+#ifdef DATA_STORE_TYPE_ELOQDSS_ELOQSTORE
+    if (standby_snapshot_ts != 0 && sync_snapshot_rpc_count > 0 &&
+        sync_snapshot_success == sync_snapshot_rpc_count &&
+        min_ack_ckpt_ts != std::numeric_limits<uint64_t>::max())
+    {
+        DLOG(INFO)
+            << "SyncWithStandby deleting standby snapshot archives by min "
+               "acked ts, ng_id="
+            << node_group << ", term=" << leader_term
+            << ", current_snapshot_ts=" << standby_snapshot_ts
+            << ", sync_snapshot_rpc_count=" << sync_snapshot_rpc_count
+            << ", sync_snapshot_success=" << sync_snapshot_success
+            << ", min_ack_ckpt_ts=" << min_ack_ckpt_ts;
+        store_hd_->DeleteStandbySnapshotsBefore(node_group, min_ack_ckpt_ts);
+    }
+    else if (standby_snapshot_ts != 0)
+    {
+        DLOG(INFO) << "SyncWithStandby skip DeleteStandbySnapshotsBefore, "
+                   << "ng_id=" << node_group << ", term=" << leader_term
+                   << ", current_snapshot_ts=" << standby_snapshot_ts
+                   << ", sync_snapshot_rpc_count=" << sync_snapshot_rpc_count
+                   << ", sync_snapshot_success=" << sync_snapshot_success
+                   << ", min_ack_ckpt_ts=" << min_ack_ckpt_ts;
+    }
+#endif
 }
 
 uint64_t SnapshotManager::GetCurrentCheckpointTs(uint32_t node_group)

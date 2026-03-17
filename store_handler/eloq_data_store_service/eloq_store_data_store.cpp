@@ -25,8 +25,10 @@
 #include <bthread/mutex.h>
 
 #include <algorithm>
+#include <chrono>
 #include <memory>
 
+#include "common.h"
 #include "eloq_store_data_store_factory.h"
 #include "internal_request.h"
 
@@ -51,9 +53,6 @@ thread_local ObjectPool<EloqStoreOperationData<::eloqstore::FloorRequest>>
 thread_local ObjectPool<EloqStoreOperationData<::eloqstore::DropTableRequest>>
     eloq_store_drop_table_op_pool_;
 thread_local ObjectPool<ScanDeleteOperationData> eloq_store_scan_del_op_pool_;
-thread_local ObjectPool<
-    EloqStoreOperationData<::eloqstore::GlobalReopenRequest>>
-    eloq_store_global_reopen_op_pool_;
 
 inline void BuildKey(const WriteRecordsRequest &write_req,
                      const std::size_t key_first_idx,
@@ -589,8 +588,12 @@ void EloqStoreDataStore::CreateSnapshotForBackup(
 {
     PoolableGuard req_guard(req);
 
+    const std::string tag = std::to_string(req->GetBackupTs());
+
     ::eloqstore::GlobalArchiveRequest global_archive_req;
-    global_archive_req.SetSnapshotTimestamp(req->GetBackupTs());
+    global_archive_req.SetAction(
+        ::eloqstore::GlobalArchiveRequest::Action::Create);
+    global_archive_req.SetTag(tag);
     eloq_store_service_->ExecSync(&global_archive_req);
 
     ::EloqDS::remote::DataStoreError ds_error;
@@ -613,6 +616,65 @@ void EloqStoreDataStore::CreateSnapshotForBackup(
     }
 
     req->SetFinish(ds_error, error_msg);
+}
+
+bool EloqStoreDataStore::CreateSnapshotForStandby(uint32_t ng_id,
+                                                  std::string_view tag)
+{
+    (void) ng_id;
+    ::eloqstore::GlobalArchiveRequest global_archive_req;
+    global_archive_req.SetAction(
+        ::eloqstore::GlobalArchiveRequest::Action::Create);
+    global_archive_req.SetTag(std::string(tag));
+    eloq_store_service_->ExecSync(&global_archive_req);
+    if (global_archive_req.Error() != ::eloqstore::KvError::NoError)
+    {
+        LOG(WARNING) << "CreateSnapshotForStandby failed, tag=" << tag
+                     << ", error="
+                     << static_cast<uint32_t>(global_archive_req.Error());
+        return false;
+    }
+    return true;
+}
+
+void EloqStoreDataStore::DeleteStandbySnapshot(uint64_t term,
+                                               std::string_view tag)
+{
+    ::eloqstore::GlobalArchiveRequest global_archive_req;
+    global_archive_req.SetAction(
+        ::eloqstore::GlobalArchiveRequest::Action::Delete);
+    global_archive_req.SetTerm(term);
+    global_archive_req.SetTag(std::string(tag));
+    eloq_store_service_->ExecSync(&global_archive_req);
+    if (global_archive_req.Error() != ::eloqstore::KvError::NoError)
+    {
+        LOG(WARNING) << "DeleteStandbySnapshot failed for tag=" << tag
+                     << ", error="
+                     << static_cast<uint32_t>(global_archive_req.Error());
+    }
+}
+
+bool EloqStoreDataStore::ListArchiveTags(std::string_view prefix,
+                                         std::vector<ArchiveEntry> *entries)
+{
+    if (entries == nullptr)
+    {
+        return false;
+    }
+    ::eloqstore::GlobalListArchiveTagsRequest req;
+    req.SetPrefix(std::string(prefix));
+    eloq_store_service_->ExecSync(&req);
+    if (req.Error() != ::eloqstore::KvError::NoError)
+    {
+        return false;
+    }
+    entries->clear();
+    entries->reserve(req.Entries().size());
+    for (const auto &entry : req.Entries())
+    {
+        entries->push_back(ArchiveEntry{.term = entry.term, .tag = entry.tag});
+    }
+    return true;
 }
 
 void EloqStoreDataStore::ScanDelete(DeleteRangeRequest *delete_range_req)
@@ -877,62 +939,63 @@ void EloqStoreDataStore::OnFloor(::eloqstore::KvRequest *req)
     ds_scan_req->SetFinish(::EloqDS::remote::DataStoreError::NO_ERROR);
 }
 
-void EloqStoreDataStore::ReloadDataFromCloud(int64_t term)
+bool EloqStoreDataStore::ReloadData(int64_t term, uint64_t snapshot_ts)
 {
-    LOG(INFO) << "EloqStoreDataStore::ReloadDataFromCloud, term: " << term;
+    LOG(INFO) << "EloqStoreDataStore::ReloadData, term: " << term
+              << ", snapshot_ts: " << snapshot_ts;
     if (eloq_store_service_->Term() != static_cast<uint64_t>(term))
     {
-        LOG(FATAL) << "EloqStoreDataStore::ReloadDataFromCloud, term mismatch, "
+        LOG(ERROR) << "EloqStoreDataStore::ReloadData, term mismatch, "
                       "expected: "
-                   << term << ", actual: " << eloq_store_service_->Term();
-        return;
+                   << term << ", actual: " << eloq_store_service_->Term()
+                   << ")";
+        return false;
     }
-    EloqStoreOperationData<::eloqstore::GlobalReopenRequest> *global_reopen_op =
-        eloq_store_global_reopen_op_pool_.NextObject();
-    global_reopen_op->Reset(nullptr);
-    PoolableGuard op_guard(global_reopen_op);
+    const std::string reopen_tag = "snapshot_" + std::to_string(snapshot_ts);
+    DLOG(INFO) << "EloqStoreDataStore::ReloadData issue reopen, term: " << term
+               << ", snapshot_ts: " << snapshot_ts << ", tag: " << reopen_tag;
+    ::eloqstore::GlobalReopenRequest global_reopen_req;
+    global_reopen_req.SetTag(reopen_tag);
+    eloq_store_service_->ExecSync(&global_reopen_req);
 
-    ::eloqstore::GlobalReopenRequest &global_reopen_req =
-        global_reopen_op->EloqStoreRequest();
-
-    DLOG(INFO)
-        << "===============EloqStoreDataStore::ReloadDataFromCloud, send "
-           "reopen request: "
-        << &global_reopen_req << " to EloqStore";
-    uint64_t user_data = reinterpret_cast<uint64_t>(global_reopen_op);
-    if (!eloq_store_service_->ExecAsyn(
-            &global_reopen_req, user_data, OnReLoaded))
+    if (global_reopen_req.Error() != ::eloqstore::KvError::NoError)
     {
-        LOG(ERROR) << "Send reopen request to EloqStore failed";
-        return;
+        LOG(ERROR) << "ReloadData reopen failed, snapshot_ts=" << snapshot_ts
+                   << ", tag=" << reopen_tag << ", error="
+                   << static_cast<uint32_t>(global_reopen_req.Error())
+                   << ", msg=" << global_reopen_req.ErrMessage();
+        return false;
     }
-
-    op_guard.Release();
+    DLOG(INFO) << "ReloadData reopen succeeded, snapshot_ts=" << snapshot_ts
+               << ", tag=" << reopen_tag;
+    return true;
 }
 
-void EloqStoreDataStore::OnReLoaded(::eloqstore::KvRequest *req)
+void EloqStoreDataStore::UpdateStandbyMasterStorePaths(
+    const std::vector<std::string> &store_paths,
+    const std::vector<uint64_t> &store_path_weights)
 {
-    EloqStoreOperationData<::eloqstore::GlobalReopenRequest> *global_reopen_op =
-        static_cast<EloqStoreOperationData<::eloqstore::GlobalReopenRequest> *>(
-            reinterpret_cast<void *>(req->UserData()));
-    assert(req == &global_reopen_op->EloqStoreRequest());
-    ::eloqstore::GlobalReopenRequest *global_reopen_req =
-        static_cast<::eloqstore::GlobalReopenRequest *>(req);
-    PoolableGuard op_guard(global_reopen_op);
-
-    DLOG(INFO)
-        << "===============EloqStoreDataStore::OnReLoaded, reopen request: "
-        << &global_reopen_req << " from EloqStore";
-
-    if (global_reopen_req->Error() == ::eloqstore::KvError::NoError)
+    auto res = eloq_store_service_->UpdateStandbyMasterStorePaths(
+        std::vector<std::string>(store_paths.begin(), store_paths.end()),
+        std::vector<uint64_t>(store_path_weights.begin(),
+                              store_path_weights.end()));
+    if (res != ::eloqstore::KvError::NoError)
     {
-        LOG(INFO) << "Reopen EloqStore succeeded";
-    }
-    else
-    {
-        LOG(ERROR) << "Reopen EloqStore failed with error code: "
-                   << static_cast<uint32_t>(global_reopen_req->Error())
-                   << ", error message: " << global_reopen_req->ErrMessage();
+        LOG(WARNING) << "UpdateStandbyMasterStorePaths failed with error: "
+                     << static_cast<uint32_t>(res);
     }
 }
+
+void EloqStoreDataStore::UpdateStandbyMasterAddr(
+    const std::string &standby_master_addr)
+{
+    auto res =
+        eloq_store_service_->UpdateStandbyMasterAddr(standby_master_addr);
+    if (res != ::eloqstore::KvError::NoError)
+    {
+        LOG(WARNING) << "UpdateStandbyMasterAddr failed with error: "
+                     << static_cast<uint32_t>(res);
+    }
+}
+
 }  // namespace EloqDS

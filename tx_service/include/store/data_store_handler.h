@@ -23,6 +23,7 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <functional>
 #include <memory>
 #include <string>
 #include <string_view>
@@ -372,8 +373,12 @@ public:
     }
 
     virtual bool CreateSnapshotForStandby(
-        std::vector<std::string> &snapshot_files)
+        uint32_t ng_id,
+        std::vector<std::string> &snapshot_files,
+        uint64_t snapshot_ts)
     {
+        (void) ng_id, (void) snapshot_ts;
+        (void) snapshot_files;
         assert(false);
         return true;
     }
@@ -407,11 +412,54 @@ public:
         return true;
     }
 
-    virtual bool OnUpdateStandbyCkptTs(uint32_t ng_id, int64_t ng_term)
+    virtual bool OnUpdateStandbyCkptTs(uint32_t ng_id,
+                                       int64_t ng_term,
+                                       uint64_t snapshot_ts,
+                                       bool skip_reload_data = false)
     {
         (void) ng_id;
         (void) ng_term;
-        return true;
+        (void) snapshot_ts;
+        (void) skip_reload_data;
+        assert(false);
+        return false;
+    }
+
+    virtual bool RequestSyncSnapshot(uint32_t ng_id,
+                                     int64_t ng_term,
+                                     uint64_t snapshot_ts)
+    {
+        (void) ng_id;
+        (void) ng_term;
+        (void) snapshot_ts;
+        assert(false);
+        return false;
+    }
+
+    virtual void DeleteStandbySnapshot(uint32_t ng_id, uint64_t snapshot_ts)
+    {
+        (void) ng_id;
+        (void) snapshot_ts;
+    }
+
+    virtual void DeleteStandbySnapshotsBefore(uint32_t ng_id,
+                                              uint64_t snapshot_ts)
+    {
+        (void) ng_id;
+        (void) snapshot_ts;
+    }
+
+    virtual uint64_t CurrentStandbySnapshotTs(uint32_t ng_id)
+    {
+        (void) ng_id;
+        return 0;
+    }
+
+    virtual void SetStandbySnapshotPayload(uint32_t ng_id,
+                                           const std::string &snapshot_path)
+    {
+        (void) ng_id;
+        (void) snapshot_path;
     }
 
     virtual void OnStartFollowing(uint32_t ng_id,
