@@ -2124,7 +2124,7 @@ void CcNodeService::RequestSyncSnapshot(
                  }
 
                  const int64_t current_primary_term =
-                     Sharder::Instance().PrimaryNodeTerm();
+                     Sharder::Instance().LeaderTerm(ng_id);
                  if (current_primary_term != term)
                  {
                      LOG(INFO)
