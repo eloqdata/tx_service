@@ -6983,6 +6983,14 @@ public:
 
         if (ccp == &pos_inf_page_ || !(ccp->FirstKey() < *end_key))
         {
+            if (req.GetCleanType() == CleanType::CleanRangeDataForMigration)
+            {
+                // For data migration, we need to delete the range size info
+                // for the range that has been migrated to other node group.
+                int32_t partition_id = req.GetPartitionId();
+                assert(partition_id != INT32_MAX);
+                RemoveRangeSize(static_cast<uint32_t>(partition_id));
+            }
             return req.SetFinish();
         }
         else
@@ -11550,6 +11558,14 @@ protected:
         }  // RangePartitioned
 
         return false;
+    }
+
+    void RemoveRangeSize(uint32_t partition_id)
+    {
+        if constexpr (RangePartitioned)
+        {
+            range_sizes_.erase(partition_id);
+        }
     }
 
     absl::btree_map<
