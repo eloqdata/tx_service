@@ -276,6 +276,8 @@ public:
 
     void ResetRangeStatus(uint32_t partition_id);
 
+    void LoadStoreRangeSize(uint32_t partition_id);
+
     uint64_t SchemaTs() const
     {
         return schema_ts_;
