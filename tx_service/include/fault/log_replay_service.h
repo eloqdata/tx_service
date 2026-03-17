@@ -162,6 +162,13 @@ public:
     void on_closed(brpc::StreamId id) override;
 
 private:
+    struct CandidateReplayWatch
+    {
+        int64_t term{-1};
+        uint64_t first_seen_ts{0};
+        uint64_t last_replay_ts{0};
+    };
+
     /**
      * @brief ReplayNow() check whether the replay request can be processed
      * immediately. When replay error happens, we will put the replay request
@@ -240,9 +247,14 @@ private:
     std::deque<ReplayLogTask> replay_log_queue_;
     std::deque<ReplayLogTask> delayed_replay_queue_;
     std::deque<RecoverTxTask> recover_tx_queue_;
+    std::unordered_map<uint32_t, CandidateReplayWatch> candidate_replay_watch_;
     std::mutex queue_mux_;
     std::condition_variable queue_cv_;
     std::atomic<bool> finish_;
+
+    // Candidate leader has no replay stream for this duration, then trigger
+    // ReplayLog and keep retrying with the same interval until stream appears.
+    static constexpr uint64_t kReplayCheckIntervalUs = 5ULL * 1000 * 1000;
 
     // ip and port of log replay server of this node
     std::string ip_;
