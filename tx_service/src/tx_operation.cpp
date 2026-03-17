@@ -723,21 +723,27 @@ void LockWriteRangeBucketsOp::Advance(TransactionExecution *txm)
         auto *range_info = txm->range_rec_.GetRangeInfo();
         int32_t range_id = range_info->PartitionId();
         uint32_t residual = static_cast<uint32_t>(range_id & 0x3FF);
-        bool on_dirty_range = range_info->IsDirty();
+        bool range_splitting = range_info->IsDirty();
         while (write_key_it_ != next_range_start)
         {
             const TxKey &write_tx_key = write_key_it_->first;
             WriteSetEntry &write_entry = write_key_it_->second;
             write_entry.key_shard_code_ = (range_ng << 10) | residual;
             write_entry.partition_id_ = range_id;
-            write_entry.on_dirty_range_ = on_dirty_range;
+            write_entry.on_dirty_range_ = range_splitting;
+
+            int32_t *new_bucket_range_id_ptr = nullptr;
             // If current range is migrating, forward to new range owner.
             if (new_bucket_ng != UINT32_MAX)
             {
                 assert(new_bucket_ng != range_ng);
-                write_entry.forward_addr_.try_emplace(
-                    ((new_bucket_ng << 10) | residual),
-                    std::make_pair(range_id, CcEntryAddr()));
+                auto it =
+                    write_entry.forward_addr_
+                        .try_emplace(((new_bucket_ng << 10) | residual),
+                                     std::make_pair(range_id, CcEntryAddr()))
+                        .first;
+                new_bucket_range_id_ptr = &it->second.first;
+                write_entry.on_dirty_range_ = true;
             }
 
             // If range is splitting and the key will fall on a new range after
@@ -765,7 +771,10 @@ void LockWriteRangeBucketsOp::Advance(TransactionExecution *txm)
                     static_cast<uint16_t>(new_residual % core_cnt);
                 uint16_t range_shard =
                     static_cast<uint16_t>(residual % core_cnt);
-                if (new_range_ng != range_ng || new_range_shard != range_shard)
+                if ((new_range_ng != range_ng &&
+                     (new_bucket_ng == UINT32_MAX ||
+                      new_range_ng != new_bucket_ng)) ||
+                    new_range_shard != range_shard)
                 {
                     write_entry.forward_addr_.try_emplace(
                         ((new_range_ng << 10) | new_residual),
@@ -773,28 +782,56 @@ void LockWriteRangeBucketsOp::Advance(TransactionExecution *txm)
                     // There is no need to update the range size of the old
                     // range.
                     write_entry.partition_id_ = -1;
+                    if (new_bucket_range_id_ptr != nullptr)
+                    {
+                        *new_bucket_range_id_ptr = -1;
+                    }
                 }
-                else if (new_range_ng == range_ng &&
-                         new_range_shard == range_shard)
+                else if (new_range_ng == range_ng)
                 {
+                    assert(new_range_shard == range_shard);
                     // Only update the range size on the new range id in case of
                     // the new range and the old range are located on the same
                     // shard.
                     write_entry.partition_id_ = new_range_id;
                 }
+                else if (new_bucket_ng != UINT32_MAX &&
+                         new_range_ng == new_bucket_ng)
+                {
+                    assert(new_range_shard == range_shard);
+                    assert(new_bucket_range_id_ptr != nullptr);
+                    *new_bucket_range_id_ptr = new_range_id;
+                }
 
                 // If the new range is migrating, forward to the new owner of
                 // new range.
-                // TODO(ysw): double check the logic here.
                 if (new_range_new_bucket_ng != UINT32_MAX)
                 {
                     assert(new_range_new_bucket_ng != new_range_ng);
-                    if (new_range_new_bucket_ng != range_ng ||
+                    if ((new_range_new_bucket_ng != range_ng &&
+                         (new_bucket_ng == UINT32_MAX ||
+                          new_range_new_bucket_ng != new_bucket_ng)) ||
                         new_range_shard != range_shard)
                     {
                         write_entry.forward_addr_.try_emplace(
                             ((new_range_new_bucket_ng << 10) | new_residual),
                             std::make_pair(new_range_id, CcEntryAddr()));
+                        write_entry.on_dirty_range_ = true;
+                    }
+                    else if (new_range_new_bucket_ng == range_ng)
+                    {
+                        assert(new_range_shard == range_shard);
+                        // Only update the range size on the new range id in
+                        // case of the new range and the old range are located
+                        // on the same shard.
+                        write_entry.partition_id_ = new_range_id;
+                    }
+                    else if (new_bucket_ng != UINT32_MAX &&
+                             new_range_new_bucket_ng == new_bucket_ng)
+                    {
+                        assert(new_range_shard == range_shard);
+                        assert(new_bucket_range_id_ptr != nullptr);
+                        *new_bucket_range_id_ptr = new_range_id;
                     }
                 }
             }
