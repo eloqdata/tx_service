@@ -121,10 +121,6 @@ RecoveryService::RecoveryService(LocalCcShards &local_shards,
                             watch.first_seen_ts = now_ts;
                             watch.last_replay_ts = 0;
                         }
-                        else if (watch.first_seen_ts == 0)
-                        {
-                            watch.first_seen_ts = now_ts;
-                        }
 
                         bool has_replay_connection = false;
                         {
@@ -144,7 +140,13 @@ RecoveryService::RecoveryService(LocalCcShards &local_shards,
                         }
                         if (has_replay_connection)
                         {
+                            watch.first_seen_ts = 0;
                             continue;
+                        }
+
+                        if (watch.first_seen_ts == 0)
+                        {
+                            watch.first_seen_ts = now_ts;
                         }
 
                         if (now_ts - watch.first_seen_ts <
