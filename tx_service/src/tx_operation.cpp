@@ -1754,6 +1754,9 @@ AcquireAllOp::AcquireAllOp(TransactionExecution *txm)
         {
             if (hres->IsError())
             {
+                LOG(ERROR) << "AcquireAll cc error, err code: "
+                           << int(hres->ErrorCode())
+                           << ", msg: " << hres->ErrorMsg();
                 fail_cnt_.fetch_add(1, std::memory_order_relaxed);
 
                 const AcquireAllResult &acq_result = hres->Value();
@@ -1786,6 +1789,10 @@ void AcquireAllOp::Resize(size_t new_size)
             {
                 if (hres->IsError())
                 {
+                    LOG(ERROR) << "AcquireAll cc error, err code: "
+                               << int(hres->ErrorCode())
+                               << ", msg: " << hres->ErrorMsg();
+
                     fail_cnt_.fetch_add(1, std::memory_order_relaxed);
 
                     const AcquireAllResult &acq_result = hres->Value();
@@ -1861,6 +1868,7 @@ void AcquireAllOp::Forward(TransactionExecution *txm)
     {
         if (txm->IsTimeOut())
         {
+            LOG(INFO) << "AcquireAllOp times out";
             TX_TRACE_ACTION_WITH_CONTEXT(
                 this,
                 "Forward.IsTimeOut",
@@ -1899,6 +1907,11 @@ void AcquireAllOp::Forward(TransactionExecution *txm)
                         // the write key has been read before and the key's
                         // commit ts mismatches the prior version, this is
                         // not a repeatable read.
+                        LOG(ERROR)
+                            << "AcquireAll read version mismatch, idx: " << idx
+                            << ", read_version: " << read_version
+                            << ", acquire_res.commit_ts_: "
+                            << acquire_res.commit_ts_;
                         fail_cnt_.fetch_add(1, std::memory_order_relaxed);
                     }
                 }
@@ -1964,6 +1977,11 @@ void AcquireAllOp::Forward(TransactionExecution *txm)
                     // key has been read before and the key's commit ts
                     // mismatches the prior version, this is not a
                     // repeatable read.
+                    LOG(ERROR)
+                        << "AcquireAll read version mismatch, idx: " << idx
+                        << ", read_version: " << read_version
+                        << ", acquire_res.commit_ts_: "
+                        << acquire_res.commit_ts_;
                     fail_cnt_.fetch_add(1, std::memory_order_relaxed);
                 }
             }
@@ -2009,6 +2027,11 @@ void AcquireAllOp::Forward(TransactionExecution *txm)
                         // the write key has been read before and the key's
                         // commit ts mismatches the prior version, this is
                         // not a repeatable read.
+                        LOG(ERROR)
+                            << "AcquireAll read version mismatch, idx: " << idx
+                            << ", read_version: " << read_version
+                            << ", acquire_res.commit_ts_: "
+                            << acquire_all_result.commit_ts_;
                         fail_cnt_.fetch_add(1, std::memory_order_relaxed);
                     }
                 }

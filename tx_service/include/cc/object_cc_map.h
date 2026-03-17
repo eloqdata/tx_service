@@ -527,10 +527,11 @@ public:
                 if (cce->HasBufferedCommandList() && !is_standby_tx &&
                     cce->PayloadStatus() != RecordStatus::Unknown)
                 {
-                    LOG(ERROR) << "Buffered cmds found on leader node"
-                               << ", cce key: " << cce->KeyString()
-                               << ", cce CommitTs: " << cce->CommitTs() << "\n"
-                               << cce->BufferedCommandList();
+                    LOG(ERROR)
+                        << "Buffered cmds found on leader node"
+                        << ", cce key: " << cce->KeyString() << ", cce: " << cce
+                        << ", cce CommitTs: " << cce->CommitTs() << "\n"
+                        << cce->BufferedCommandList();
                     assert(false);
                 }
             }
@@ -961,6 +962,14 @@ public:
                         forward_entry->Request().set_schema_version(schema_ts_);
                         std::unique_ptr<StandbyForwardEntry> entry_ptr =
                             cce->ReleaseForwardEntry();
+                        LOG(INFO)
+                            << "ForwardStandbyMessage in ApplyCc ttl expired, "
+                               "key: "
+                            << cce->KeyString() << ", commit ts: " << commit_ts
+                            << ", cce: " << cce
+
+                            << ", command: " << typeid(*cmd).name();
+
                         shard_->ForwardStandbyMessage(entry_ptr.release());
                     }
                     bool was_dirty = cce->IsDirty();
@@ -1194,6 +1203,8 @@ public:
                 // lock.
                 assert(acquired_lock == LockType::WriteLock);
                 RecordStatus status = cce->PayloadStatus();
+                RecordStatus old_status = status;
+                uint64_t old_commit_ts = cce->CommitTs();
                 if (dirty_payload_status == RecordStatus::Normal ||
                     dirty_payload_status == RecordStatus::Deleted)
                 {
@@ -1232,6 +1243,23 @@ public:
                     forward_entry->Request().set_schema_version(schema_ts_);
                     std::unique_ptr<StandbyForwardEntry> entry_ptr =
                         cce->ReleaseForwardEntry();
+
+                    LOG(INFO)
+                        << "ForwardStandbyMessage in ApplyCc "
+                           "apply_and_commit_, key: "
+                        << cce->KeyString() << ", commit ts: " << commit_ts
+                        << ", cce: " << cce
+
+                        << ", command: " << typeid(*cmd).name()
+                        << ", old status: " << int(old_status)
+                        << ", old commit ts: " << old_commit_ts
+                        << ", new status: " << int(status)
+                        << ", forward req has_overwrite: "
+                        << forward_req->has_overwrite();
+                    if (old_status == RecordStatus::Deleted)
+                    {
+                        assert(forward_req->has_overwrite());
+                    }
                     shard_->ForwardStandbyMessage(entry_ptr.release());
                 }
 
@@ -1442,10 +1470,25 @@ public:
                     forward_entry->Request().set_schema_version(schema_ts_);
                     std::unique_ptr<StandbyForwardEntry> entry_ptr =
                         cce->ReleaseForwardEntry();
+                    LOG(INFO)
+                        << "ForwardStandbyMessage in PostWriteCc, key: "
+                        << cce->KeyString() << ", commit ts: " << commit_ts
+                        << ", cce: " << cce
+                        << ", cce commit ts: " << cce->CommitTs()
+                        << ", new status: " << int(payload_status)
+                        << ", forward req has_overwrite: "
+                        << forward_entry->Request().has_overwrite();
+
                     shard_->ForwardStandbyMessage(entry_ptr.release());
                 }
                 else
                 {
+                    LOG(INFO)
+                        << "Forward entry exists but no subscribed standby, "
+                           "key: "
+                        << cce->KeyString() << ", commit ts: " << commit_ts
+                        << ", cce: " << cce
+                        << ", cce commit ts: " << cce->CommitTs();
                     // No standby needs this entry anymore.
                     cce->ReleaseForwardEntry();
                 }
@@ -1881,15 +1924,18 @@ public:
 
     bool Execute(KeyObjectStandbyForwardCc &req) override
     {
+        LOG(INFO) << "KeyObjectStandbyForwardCc: " << req.CommitTs();
         uint64_t schema_version = req.SchemaVersion();
         if (schema_version < schema_ts_)
         {
             // Discard message since it expired.
+            LOG(INFO) << "Discard message since it expired.";
             return req.SetFinish(*shard_);
         }
         else if (schema_version > schema_ts_)
         {
             // Wait for DDL operation clearring this ccm.
+            LOG(INFO) << "Wait for DDL operation clearring this ccm.";
             shard_->EnqueueWaitListIfSchemaMismatch(&req);
             return false;
         }
@@ -1920,6 +1966,17 @@ public:
                 // checkpointed. And the checkpointed data will be fetched when
                 // a forward message with bigger commit_ts than ckpt_ts is
                 // received.
+                LOG(INFO) << "core: " << shard_->core_id_
+                          << " KeyObjectStandbyForwardCc operates on key: "
+                          << look_key->ToString()
+                          << ", req commit ts: " << req.CommitTs()
+                          << ", req.obj_ver: " << req.ObjectVersion()
+                          << ", has_overwrite: " << has_overwrite;
+                DLOG(INFO) << "Discard non-existent cce "
+                              "KeyObjectStandbyForwardCc on key: "
+                           << look_key->ToString()
+                           << ", commit ts: " << commit_ts << ", ng ckpt ts: "
+                           << Sharder::Instance().NativeNodeGroupCkptTs();
                 return req.SetFinish(*shard_);
             }
         }
@@ -1935,15 +1992,26 @@ public:
         assert(cce);
         ccp = it.GetPage();
 
+        LOG(INFO) << "core: " << shard_->core_id_
+                  << " KeyObjectStandbyForwardCc operates on key: "
+                  << look_key->ToString()
+                  << ", req commit ts: " << req.CommitTs()
+                  << ", req.obj_ver: " << req.ObjectVersion()
+                  << ", has_overwrite: " << has_overwrite;
+
         if (commit_ts <= cce->CommitTs())
         {
             // Discard message since cce has a newer version.
+            DLOG(INFO) << "Discard KeyObjectStandbyForwardCc on key: "
+                       << look_key->ToString() << ", commit ts: " << commit_ts
+                       << ", cce commit ts: " << cce->CommitTs();
             return req.SetFinish(*shard_);
         }
         else
         {
             if (cce->PayloadStatus() == RecordStatus::Unknown)
             {
+                LOG(INFO) << "cce->PayloadStatus() == RecordStatus::Unknown";
                 if (!has_overwrite && obj_version != 1 &&
                     !ccm_has_full_entries_)
                 {
@@ -1954,6 +2022,8 @@ public:
                         cce->GetOrCreateKeyLock(shard_, this, ccp);
                         int32_t part_id = Sharder::MapKeyHashToHashPartitionId(
                             look_key->Hash());
+                        LOG(INFO)
+                            << "KeyObjectStandbyForwardCc, FetchRecord...";
                         shard_->FetchRecord(table_name_,
                                             table_schema_,
                                             TxKey(look_key),
@@ -2380,7 +2450,8 @@ public:
                            << " has_overwrite: " << ignore_previous_version
                            << ", valid scope: " << valid_scope
                            << ", expired: " << txn_expired
-                           << ", cce version: " << cce->CommitTs();
+                           << ", cce version: " << cce->CommitTs()
+                           << ", cce: " << cce << ", ccp: " << ccp;
 
                 // load payload from kvstore before committing pending
                 // commands. If there's already read intent on cce, that
@@ -2486,10 +2557,15 @@ public:
             // skipped by checkpointer.
             if (commit_ts > last_dirty_commit_ts_)
             {
+                LOG(INFO) << "Update ccm last_dirty_commit_ts_ from: "
+                          << last_dirty_commit_ts_ << ", to: " << commit_ts;
                 last_dirty_commit_ts_ = commit_ts;
             }
             if (commit_ts > ccp->last_dirty_commit_ts_)
             {
+                LOG(INFO) << "Update ccp last_dirty_commit_ts_ from: "
+                          << ccp->last_dirty_commit_ts_
+                          << ", to: " << commit_ts;
                 ccp->last_dirty_commit_ts_ = commit_ts;
             }
 
@@ -2537,6 +2613,12 @@ public:
                     forward_entry->Request().set_schema_version(schema_ts_);
                     std::unique_ptr<StandbyForwardEntry> entry_ptr =
                         cce->ReleaseForwardEntry();
+                    LOG(INFO)
+                        << "ForwardStandbyMessage in ReplayLogCc, key: "
+                        << ccp->KeyOfEntry(cce)->ToString()
+                        << ", commit ts: " << commit_ts << ", cce: " << cce
+
+                        << ", commands: " << entry_ptr->OutputCommands();
                     shard_->ForwardStandbyMessage(entry_ptr.release());
                 }
 
@@ -2579,6 +2661,11 @@ public:
                   RecordStatus status,
                   const std::string &rec_str) override
     {
+        LOG(INFO) << "BackFill, key: "
+                  << static_cast<CcEntry<KeyT, ValueT, false, false> *>(entry)
+                         ->KeyString()
+                  << ", cce: " << entry << ", commit ts: " << commit_ts
+                  << ", status: " << int(status);
         if (commit_ts > 1 && commit_ts < schema_ts_)
         {
             DLOG(INFO) << "BackFill: discard, commit_ts: " << commit_ts
@@ -2596,9 +2683,11 @@ public:
 
         if (status == RecordStatus::Unknown)
         {
+            LOG(INFO) << "BackFill failure";
             // fetch record fails.
             if (cce->PayloadStatus() == RecordStatus::Unknown && cce->IsFree())
             {
+                LOG(INFO) << "CleanEntry: " << entry;
                 // Remove cce if it is not referenced by anyone.
                 CleanEntry(entry, ccp);
             }
@@ -2613,8 +2702,8 @@ public:
         {
             cce->SetCommitTsPayloadStatus(commit_ts, status);
             cce->SetCkptTs(commit_ts);
-            DLOG(INFO) << "BackFill key: " << cce->KeyString()
-                       << ", status: " << int(status)
+            DLOG(INFO) << "BackFill success, key: " << cce->KeyString()
+                       << ", cce: " << cce << ", status: " << int(status)
                        << ", commit_ts: " << commit_ts;
 
             if (!rec_str.empty())
@@ -2694,7 +2783,7 @@ public:
                             << "The data log all processed, but there "
                                "are still some commands in buffered cmd list.\n"
                             << "cce payload status: "
-                            << int(cce->PayloadStatus())
+                            << int(cce->PayloadStatus()) << ", cce: " << cce
                             << ", cce CommitTs: " << cce->CommitTs() << "\n"
                             << buffered_cmd_list;
                         assert(false);

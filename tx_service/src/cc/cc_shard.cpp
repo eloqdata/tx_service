@@ -1427,6 +1427,8 @@ std::pair<size_t, bool> CcShard::Clean()
 #endif
     clean_start_ccp_ = ccp;
 
+    LOG(INFO) << "CcShard::Clean, return free_cnt: " << free_cnt
+              << ", yield: " << yield;
     return {free_cnt, yield};
 }
 
@@ -3136,6 +3138,12 @@ void CcShard::ForwardStandbyMessage(StandbyForwardEntry *entry)
                 }
             });
 
+            LOG(INFO) << "core: " << core_id_
+                      << " Send forward standby message to node: " << node_id
+                      << ", seq id: " << seq_id
+                      << ", req commit ts: " << req.commit_ts()
+                      << ", req object version: " << req.object_version()
+                      << ", key: " << req.key();
             write_succ = stream_sender_->SendStandbyMessageToNode(
                 node_id, entry_ptr->Message());
             if (write_succ)
@@ -3144,12 +3152,20 @@ void CcShard::ForwardStandbyMessage(StandbyForwardEntry *entry)
             }
             else
             {
+                LOG(INFO) << "sent failure";
                 any_send_failed = true;
             }
         }
         else
         {
             // Previous message not sent yet, this one will be retried later
+            LOG(INFO)
+                << "Previous message not sent yet, this one will be retried"
+                << ", req commit ts: " << req.commit_ts()
+                << ", key: " << req.key()
+                << ", last_sent_seq_id: " << last_sent_seq_id
+                << ", seq id: " << seq_id;
+
             any_send_failed = true;
         }
     }
@@ -3268,10 +3284,20 @@ bool CcShard::ResendFailedForwardMessages()
             if (entry_it != seq_id_to_entry_map_.end())
             {
                 StandbyForwardEntry *entry = entry_it->second;
+                auto &req = entry->Request();
+
+                LOG(INFO) << "core: " << core_id_
+                          << " Resend failed forward standby message to node: "
+                          << node_id << ", seq id: " << seq_id
+                          << ", entry seq_id: " << entry->SequenceId()
+                          << ", req commit ts: " << req.commit_ts()
+                          << ", key: " << req.key();
+
                 bool succ = stream_sender_->SendStandbyMessageToNode(
                     node_id, entry->Message());
                 if (!succ)
                 {
+                    LOG(INFO) << "sent failure";
                     all_msgs_sent = false;
                     break;
                 }
@@ -3330,7 +3356,13 @@ void CcShard::NotifyStandbyOutOfSync(uint32_t node_id)
     req->set_primary_leader_term(
         Sharder::Instance().LeaderTerm(Sharder::Instance().NativeNodeGroup()));
     req->set_out_of_sync(true);
-    stream_sender_->SendMessageToNode(node_id, cc_msg);
+    LOG(INFO) << "NotifyStandbyOutOfSync node: " << node_id << ", SendMessage"
+              << ", seq_grp: " << core_id_
+              << ", forward_sequence_id: " << next_forward_sequence_id_ - 1;
+    auto res = stream_sender_->SendMessageToNode(node_id, cc_msg);
+    LOG(INFO) << "NotifyStandbyOutOfSync SendMessage, res.sent:" << res.sent
+              << ", res.queued_for_retry: " << res.queued_for_retry
+              << ", res.need_reconnect:" << res.need_reconnect;
 
     auto &seq_id_and_term = seq_node_iter->second;
     seq_id_and_term.first = UINT64_MAX;

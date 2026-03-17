@@ -75,6 +75,19 @@ struct StandbyForwardEntry
                sizeof(uint64_t);
     }
 
+    std::string OutputCommands()
+    {
+        return "";
+        std::string res;
+        auto &req = Request();
+        auto &cmd_list = req.cmd_list();
+        for (auto &cmd_str : cmd_list)
+        {
+            res.append(cmd_str).append(". ");
+        }
+        return res;
+    }
+
 private:
     uint64_t sequence_id_{UINT64_MAX};
     remote::CcMessage msg;

@@ -2808,6 +2808,8 @@ void LocalCcShards::EnqueueDataSyncTaskForTable(
 
     if (table_name.IsHashPartitioned())
     {
+        LOG(INFO) << "EnqueueDataSyncTaskForTable: " << table_name.StringView()
+                  << ", data_sync_ts: " << data_sync_ts;
         CatalogEntry *catalog_entry = GetCatalogInternal(table_name, ng_id);
         if (!catalog_entry)
         {
@@ -4498,6 +4500,10 @@ void LocalCcShards::PostProcessHashPartitionDataSyncTask(
                     }
                     if (!has_skipped_entries)
                     {
+                        LOG(INFO)
+                            << "DataSyncScan with ts: " << task->data_sync_ts_
+                            << " flushed all entries, "
+                               "catalog_entry->UpdateLastDataSyncTS";
                         const TableName base_table_name{
                             task->table_name_.GetBaseTableNameSV(),
                             TableType::Primary,
@@ -4510,6 +4516,13 @@ void LocalCcShards::PostProcessHashPartitionDataSyncTask(
                         assert(catalog_entry);
                         catalog_entry->UpdateLastDataSyncTS(task->data_sync_ts_,
                                                             task->id_);
+                    }
+                    else
+                    {
+                        LOG(INFO)
+                            << "DataSyncScan with ts: " << task->data_sync_ts_
+                            << " has skipped entries, do not "
+                               "UpdateLastDataSyncTS";
                     }
                 }
             }
@@ -5988,6 +6001,7 @@ void LocalCcShards::FlushDataImpl(FlushDataTask *cur_work,
             }
         }
     }
+    LOG(INFO) << "FlushData succ: " << succ << ", updated_ckpt_ts";
 
     std::unordered_set<uint16_t> updated_ckpt_ts_core_ids;
     // Update cce ckpt ts in memory
@@ -6472,7 +6486,8 @@ void LocalCcShards::SyncTableStatisticsWorker()
         statistics_worker_ctx_.cv_.wait_for(
             worker_lk,
             10s,
-            [this] {
+            [this]
+            {
                 return statistics_worker_ctx_.status_ ==
                        WorkerStatus::Terminated;
             });
@@ -6744,7 +6759,8 @@ void LocalCcShards::HeartbeatWorker()
         bool wait_res = heartbeat_worker_ctx_.cv_.wait_for(
             heartbeat_worker_lk,
             std::chrono::seconds(1),
-            [this] {
+            [this]
+            {
                 return heartbeat_worker_ctx_.status_ ==
                        WorkerStatus::Terminated;
             });
@@ -6832,7 +6848,8 @@ void LocalCcShards::PurgeDeletedData()
         bool wait_res = purge_deleted_worker_ctx_.cv_.wait_for(
             worker_lk,
             std::chrono::seconds(10),
-            [this] {
+            [this]
+            {
                 return purge_deleted_worker_ctx_.status_ ==
                        WorkerStatus::Terminated;
             });

@@ -1806,6 +1806,16 @@ void CcNodeService::StandbyStartFollowing(
     }
 
     auto subscribe_id = Sharder::Instance().GetNextSubscribeId();
+
+    std::string start_seq_ids;
+    for (auto &seq_id : response->start_sequence_id())
+    {
+        start_seq_ids.append(std::to_string(seq_id)).append(", ");
+    }
+
+    LOG(INFO) << "‼️‼️‼️‼️StandByStartFollowing"
+              << ", subscribe_id: " << subscribe_id
+              << ", start_seq_id: " << start_seq_ids;
     response->set_subscribe_id(subscribe_id);
 #ifdef DATA_STORE_TYPE_ELOQDSS_ELOQSTORE
     auto *store_hd = local_shards_.store_hd_;
@@ -1999,6 +2009,9 @@ void CcNodeService::RequestStorageSnapshotSync(
                << ", primary_term=" << primary_leader_term
                << ", dest_path=" << request->dest_path();
 
+    LOG(INFO) << "RequestStorageSnapshotSync of standby term: "
+              << standby_node_term
+              << ", primary leader term: " << primary_leader_term;
     if (!Sharder::Instance().CheckLeaderTerm(request->ng_id(),
                                              primary_leader_term))
     {
@@ -2025,6 +2038,9 @@ void CcNodeService::RequestStorageSnapshotSync(
     bool accepted =
         store::SnapshotManager::Instance().OnSnapshotSyncRequested(request);
     response->set_error(!accepted);
+    LOG(INFO) << "RequestStorageSnapshotSync OnSnapshotSyncRequested done, "
+                 "return RPC, success: "
+              << accepted;
 }
 
 void CcNodeService::OnSnapshotSynced(

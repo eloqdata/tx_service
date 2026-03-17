@@ -719,17 +719,24 @@ void SnapshotManager::SyncWithStandby()
     uint32_t current_subscribe_id = Sharder::Instance().GetCurrentSubscribeId();
 
     uint64_t cur_ckpt_ts = GetCurrentCheckpointTs(node_group);
+    LOG(INFO) << "current_subscribe_id: " << current_subscribe_id
+              << ", ckpt_ts: " << cur_ckpt_ts;
 
     std::vector<PendingSnapshotSyncTask> tasks;
 
     // Dequeue all pending tasks that can be covered by this snapshot.
     {
         std::unique_lock<std::mutex> lk(standby_sync_mux_);
+        LOG(INFO) << "Dequeue all pending tasks that can be covered by this "
+                     "snapshot..."
+                  << ", pending_req size: " << pending_req_.size();
         auto it = pending_req_.begin();
         while (it != pending_req_.end())
         {
             uint32_t pending_node_id = it->first;
             auto &pending_task = it->second;
+            LOG(INFO) << "pending_task: " << &pending_task
+                      << ", pendingreq size: " << pending_req_.size();
             int64_t pending_task_standby_node_term =
                 pending_task.req.standby_node_term();
             int64_t pending_task_primary_term =
@@ -740,6 +747,10 @@ void SnapshotManager::SyncWithStandby()
                 // discard the task.
                 EraseSubscriptionBarrierLocked(pending_node_id,
                                                pending_task_standby_node_term);
+                LOG(INFO) << "pending_task_primary_term: "
+                          << pending_task_primary_term
+                          << ", leader term: " << leader_term
+                          << ", erase it, continue";
                 it = pending_req_.erase(it);
                 continue;
             }
@@ -777,6 +788,14 @@ void SnapshotManager::SyncWithStandby()
                 covered = false;
             }
 
+            LOG(INFO) << "pending_task_subscribe_id: "
+                      << pending_task_subscribe_id
+                      << ", current_subscribe_id: " << current_subscribe_id
+                      << ", cur_ckpt_ts: " << cur_ckpt_ts
+                      << ", subscription barrier ts: "
+                      << pending_task.subscription_active_tx_max_ts
+                      << ", covered: " << covered;
+
             if (!covered)
             {
                 // requested version is newer than cur snapshot. Wait till next
@@ -795,14 +814,21 @@ void SnapshotManager::SyncWithStandby()
             // same element indefinitely.
             it++;
         }
+        LOG(INFO) << "covered tasks size: " << tasks.size();
     }
 
     if (tasks.empty())
     {
+        LOG(INFO) << "No task can be covered by cur_ckpt_ts: " << cur_ckpt_ts
+                  << ", return";
         return;
     }
 
+    LOG(INFO) << "covered task size: " << tasks.size()
+              << ", RunOneRoundCheckpoint...";
     bool ckpt_res = this->RunOneRoundCheckpoint(node_group, leader_term);
+
+    LOG(INFO) << "RunOneRoundCheckpoint, res: " << ckpt_res;
     if (!ckpt_res)
     {
         // Data flush failed. Retry on next run.
@@ -861,6 +887,9 @@ void SnapshotManager::SyncWithStandby()
 #endif
         int64_t req_primary_term =
             PrimaryTermFromStandbyTerm(req_standby_node_term);
+        LOG(INFO) << "covered task: " << node_id
+                  << ", req_standby_node_term: " << req.standby_node_term()
+                  << ", req_primary_term: " << req_primary_term;
 
         if (!Sharder::Instance().CheckLeaderTerm(req.ng_id(), req_primary_term))
         {
@@ -874,6 +903,8 @@ void SnapshotManager::SyncWithStandby()
         {
             succ = store_hd_->SendSnapshotToRemote(
                 req.ng_id(), req_primary_term, snapshot_files, remote_dest);
+            LOG(INFO) << "SendSnapshotToRemote, success: " << succ
+                      << ", remotedest: " << remote_dest;
         }
 #else
         assert(snapshot_files.empty());
@@ -1073,6 +1104,8 @@ uint64_t SnapshotManager::GetCurrentCheckpointTs(uint32_t node_group)
 bool SnapshotManager::RunOneRoundCheckpoint(uint32_t node_group,
                                             int64_t ng_leader_term)
 {
+    DLOG(INFO) << "SnapshotManager::RunOneRoundCheckpoint, ng_leader_term: "
+               << ng_leader_term;
     using namespace txservice;
     auto &local_shards = *Sharder::Instance().GetLocalCcShards();
 
@@ -1110,6 +1143,11 @@ bool SnapshotManager::RunOneRoundCheckpoint(uint32_t node_group,
 
             if (get_commit_ts_cc.LastCommitTs() < last_ckpt_ts)
             {
+                LOG(INFO) << "RunOneRoundCheckpoint, skipping table: "
+                          << table_name.String()
+                          << ", ccm->last_dirty_commit_ts_: "
+                          << get_commit_ts_cc.LastCommitTs()
+                          << ", last_ckpt_ts: " << last_ckpt_ts;
                 continue;
             }
 
@@ -1134,6 +1172,8 @@ bool SnapshotManager::RunOneRoundCheckpoint(uint32_t node_group,
         task_sender_lk,
         [&data_sync_status]
         { return data_sync_status->unfinished_tasks_ == 0; });
+    LOG(INFO) << "data_sync_status, err_code: "
+              << int(data_sync_status->err_code_);
 
     DLOG_IF(WARNING, data_sync_status->err_code_ != CcErrorCode::NO_ERROR)
         << "SyncWithStandby for node_group: " << node_group

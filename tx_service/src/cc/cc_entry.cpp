@@ -47,6 +47,10 @@ void VersionedLruEntry<Versioned, RangePartitioned>::SetCommitTsPayloadStatus(
 
     if (curr_ts < ts)
     {
+        LOG(INFO) << "SetCommitTsPayloadStatus, cce: " << this << ", ts: " << ts
+                  << ", status: " << int(status) << ", cur ts: " << curr_ts
+                  << ", cur status: "
+                  << (entry_info_.commit_ts_and_status_ & 0x0F);
         entry_info_.commit_ts_and_status_ = (ts << 8) | stat;
     }
 
@@ -64,6 +68,11 @@ bool VersionedLruEntry<Versioned, RangePartitioned>::IsPersistent() const
         Sharder::Instance().GetDataStoreHandler()->IsSharedStorage())
     {
         // If this is a follower with shared kv, check the ng leader's ckpt_ts.
+        // bool persistent = CommitTs() <= Sharder::Instance().NativeNodeGroupCkptTs();
+        // LOG(INFO) << "cce: " << this
+        //   << " IsPersistent? "<< persistent <<", Sharder::Instance().StandbyNodeTerm(): " << Sharder::Instance().StandbyNodeTerm()
+        // << ", Sharder::Instance().NativeNodeGroupCkptTs(): " << Sharder::Instance().NativeNodeGroupCkptTs();
+        // return persistent;
         return CommitTs() <= Sharder::Instance().NativeNodeGroupCkptTs();
     }
 
@@ -74,6 +83,11 @@ bool VersionedLruEntry<Versioned, RangePartitioned>::IsPersistent() const
     else
     {
         // The fifth bit represents if the latest version has been flushed.
+        // if (entry_info_.commit_ts_and_status_ & 0x10 != 0)
+        // {
+        //     LOG(INFO) << "cce: " << this
+        //               << " IsPersistent, commit_ts: " << CommitTs();
+        // }
         return entry_info_.commit_ts_and_status_ & 0x10;
     }
 }
@@ -106,6 +120,12 @@ bool VersionedLruEntry<Versioned, RangePartitioned>::IsFree() const
     // As long as all locks are released, the lock associated with this cc entry
     // should be recycled.
     assert(cc_lock_and_extra_ == nullptr || !cc_lock_and_extra_->IsEmpty());
+
+    // bool res = cc_lock_and_extra_ == nullptr && IsPersistent();
+    // if (res)
+    // {
+    //     LOG(INFO) << "cce: " << this << " IsFree";
+    // }
 
     return cc_lock_and_extra_ == nullptr && IsPersistent();
 }

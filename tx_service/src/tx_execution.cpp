@@ -126,6 +126,7 @@ void TransactionExecution::Reset()
     {
         ReleaseCatalogsRead();
     }
+    LOG(INFO) << "txm: " << this << " Reset";
     cache_miss_read_cce_addr_.SetCceLock(0, -1, 0, 0);
     state_stack_.clear();
     txid_.Reset();
@@ -1790,6 +1791,7 @@ void TransactionExecution::PostProcess(InitTxnOperation &init_txn)
     const InitTxResult &init_result = init_txn.hd_result_.Value();
     txid_ = init_result.txid_;
     uint64_t tx_number = txid_.TxNumber();
+    LOG(INFO) << "txm: " << this << ", init, txn: " << tx_number;
     tx_number_.store(tx_number, std::memory_order_release);
     start_ts_ = init_result.start_ts_;
     commit_ts_bound_ = init_result.start_ts_ + 1;
@@ -4261,6 +4263,7 @@ void TransactionExecution::PostProcess(SetCommitTsOperation &set_ts)
     else
     {
         commit_ts_ = set_ts.hd_result_.Value();
+        LOG(INFO) << "txm: " << this << ", set commit ts to: " << commit_ts_;
         if (rw_set_.DataReadSetSize() > 0)
         {
             PushOperation(&validate_);

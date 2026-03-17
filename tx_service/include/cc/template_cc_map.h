@@ -169,7 +169,13 @@ public:
 
     virtual ~TemplateCcMap()
     {
+        LOG(INFO) << "TemplateCcMap destructed, table_name: "
+                  << table_name_.StringView()
+                  << ", normal obj cnt: " << normal_obj_sz_ << ", Clean...";
+
         Clean();
+        LOG(INFO) << "TemplateCcMap table_name: " << table_name_.StringView()
+                  << ", Clean finishes";
         neg_inf_.ClearLocks(*shard_, cc_ng_id_);
     }
 
@@ -1007,6 +1013,10 @@ public:
                     << ", on table: " << table_name_.StringView()
                     << ", key: " << cce_ptr->KeyString() << " conflict.";
                 // lock confilct: back off and retry.
+                DLOG(INFO) << "AcquireAllCc from txn: " << req.Txn()
+                           << ", on table: " << table_name_.StringView()
+                           << ", key: " << cce_ptr->KeyString()
+                           << " is conflicted.";
                 return hd_res->SetError(err_code);
             }
             }  //-- end: switch
@@ -3568,7 +3578,8 @@ public:
             assert(remote_scan_cache != nullptr);
         }
 
-        auto is_cache_full = [&req, scan_cache, remote_scan_cache] {
+        auto is_cache_full = [&req, scan_cache, remote_scan_cache]
+        {
             return req.IsLocal() ? scan_cache->IsFull()
                                  : remote_scan_cache->IsFull();
         };
@@ -5437,6 +5448,64 @@ public:
             if (ccp->last_dirty_commit_ts_ <= req.previous_ckpt_ts_ &&
                 !req.include_persisted_data_)
             {
+                if (ccp != &neg_inf_page_ && ccp != &pos_inf_page_)
+                {
+                    LOG(INFO)
+                        << "DataSyncScan skipping ccp: " << ccp
+                        << ", table name: " << table_name_.StringView()
+                        << ", ccp last_dirty_commit_ts_: "
+                        << ccp->last_dirty_commit_ts_
+                        << ", req.previous_ckpt_ts_: " << req.previous_ckpt_ts_
+                        << ", req.data_sync_ts_: " << req.data_sync_ts_
+                        << ", req.include_persisted_data_: "
+                        << req.include_persisted_data_
+                        << ", ccp size: " << ccp->Size()
+                        << "\nKey range in page: ["
+                        << ccp->FirstKey().ToString() << ", "
+                        << ccp->LastKey().ToString() << "]";
+                    if (ccp->Size() == 0)
+                    {
+                        LOG(INFO) << "ccp size 0, ccp: " << ccp
+                                  << "neg_inf_page_: " << &neg_inf_page_
+                                  << ", pos_inf_page_: " << &pos_inf_page_;
+                        assert(false);
+                    }
+
+                    const auto &entries = ccp->entries_;
+                    bool abort = false;
+                    for (const auto &entry : entries)
+                    {
+                        LOG(INFO) << "cce: " << entry.get() << ", key: "
+                                  << ccp->KeyOfEntry(entry.get())->ToString()
+                                  << ", payload status: "
+                                  << int(entry->PayloadStatus())
+                                  << ", commit ts: " << entry->CommitTs()
+                                  << ", HasBufferCommands: "
+                                  << entry->HasBufferedCommandList();
+                        if (entry->CommitTs() > ccp->last_dirty_commit_ts_)
+                        {
+                            LOG(WARNING)
+                                << "cce commit ts bigger than ccp last dirty "
+                                   "commit ts, "
+                                   "cce commit ts: "
+                                << entry->CommitTs() << ", cce: " << entry.get()
+                                << ", ccp last_dirty_commit_ts_: "
+                                << ccp->last_dirty_commit_ts_;
+                            if (entry->CommitTs() > 1 && entry->NeedCkpt())
+                            {
+                                LOG(ERROR) << "cce needs ckpt";
+                                abort = true;
+                            }
+                        }
+                    }
+
+                    if (abort)
+                    {
+                        LOG(INFO) << "Abort";
+                        assert(false);
+                    }
+                }
+
                 // Skip the pages that have no updates since last data
                 // sync.
                 if (ccp->next_page_ == PagePosInf())
@@ -5495,7 +5564,8 @@ public:
                         DLOG(INFO)
                             << "cce has buffer command, skip "
                                "ckpt cce: "
-                            << cce->KeyString()
+                            << cce
+                            << ", key:" << ccp->KeyOfEntry(cce)->ToString()
                             << ", cce status: " << int(cce->PayloadStatus())
                             << ", BufferCommand: " << cce->BufferedCommandList()
                             << ", data_sync_ts_: " << req.data_sync_ts_;
@@ -5508,6 +5578,7 @@ public:
                         // and don't truncate redo log.
                         if (cce->PayloadStatus() == RecordStatus::Unknown)
                         {
+                            LOG(ERROR) << "cce->Payload status unknown";
                             uint16_t bucket_id =
                                 Sharder::Instance().MapKeyHashToBucketId(
                                     key_hash);
@@ -5515,6 +5586,7 @@ public:
                                     cc_ng_id_ &&
                                 current_term > 0)
                             {
+                                LOG(INFO) << "FetchRecord";
                                 cce->GetOrCreateKeyLock(shard_, this, ccp);
                                 TxKey tx_key(key);
                                 int32_t part_id =
@@ -5537,7 +5609,9 @@ public:
                             // cmd list.
                             LOG(ERROR)
                                 << "Buffered cmds found on leader node"
-                                << ", cce key: " << cce->KeyString()
+                                << ", cce key: "
+                                << ccp->KeyOfEntry(cce)->ToString()
+                                << ", cce: " << cce
                                 << ", cce CommitTs: " << cce->CommitTs() << "\n"
                                 << cce->BufferedCommandList();
                             assert(false);
@@ -5567,6 +5641,16 @@ public:
                                           false,
                                           false,
                                           flush_data_size);
+                        LOG(INFO)
+                            << "cce NeedCkpt: " << "cce: " << cce
+                            << ", ccp: " << ccp
+                            << ", key: " << ccp->KeyOfEntry(cce)->ToString()
+                            << ", payload status: " << int(cce->PayloadStatus())
+                            << ", commit ts: " << cce->CommitTs()
+                            << ", export records number: "
+                            << export_result.first
+                            << ", flush_data_size: " << flush_data_size;
+
                         req.accumulated_flush_data_size_ += flush_data_size;
                         export_data_size += flush_data_size;
                         if (export_result.second)
@@ -7564,6 +7648,15 @@ public:
                     status == RecordStatus::Deleted)
                 {
                     bool was_dirty = cce->IsDirty();
+                    if (cce->HasBufferedCommandList())
+                    {
+                        LOG(ERROR)
+                            << "Buffered cmds found on leader node"
+                            << ", cce key: " << ccp->KeyOfEntry(cce)->ToString()
+                            << ", cce: " << cce
+                            << ", cce CommitTs: " << cce->CommitTs() << "\n"
+                            << cce->BufferedCommandList();
+                    }
                     cce->SetCommitTsPayloadStatus(now_ts, status);
                     update_any = true;
                     OnCommittedUpdate(cce, was_dirty);
