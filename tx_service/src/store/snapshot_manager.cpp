@@ -115,9 +115,8 @@ bool DispatchRequestSyncSnapshotAsync(uint32_t ng_id,
     if (!channel)
     {
         LOG(WARNING) << "RequestSyncSnapshot channel is nullptr for standby "
-                     << "node #" << standby_node_id
-                     << " at standby term " << standby_term
-                     << ", ng_id=" << ng_id
+                     << "node #" << standby_node_id << " at standby term "
+                     << standby_term << ", ng_id=" << ng_id
                      << ", snapshot_ts=" << snapshot_ts;
         return false;
     }
@@ -245,10 +244,10 @@ bool SnapshotManager::OnSnapshotSyncRequested(
                                                   req->standby_node_term(),
                                                   &completed_snapshot_ts))
                 {
-                    LOG(WARNING) << "Completed term found without snapshot ts, "
-                                 << "standby node #" << req->standby_node_id()
-                                 << ", standby term: "
-                                 << req->standby_node_term();
+                    LOG(WARNING)
+                        << "Completed term found without snapshot ts, "
+                        << "standby node #" << req->standby_node_id()
+                        << ", standby term: " << req->standby_node_term();
                     return false;
                 }
                 DLOG(INFO) << "Received duplicate snapshot sync request for "
@@ -289,8 +288,7 @@ bool SnapshotManager::OnSnapshotSyncRequested(
                         LOG(WARNING)
                             << "Completed term found without snapshot ts, "
                             << "standby node #" << req->standby_node_id()
-                            << ", standby term: "
-                            << req->standby_node_term();
+                            << ", standby term: " << req->standby_node_term();
                         return false;
                     }
                     DLOG(INFO)
@@ -309,10 +307,10 @@ bool SnapshotManager::OnSnapshotSyncRequested(
                 }
                 else
                 {
-                    LOG(WARNING) << "No barrier found for standby node #"
-                                 << req->standby_node_id()
-                                 << " at standby term: "
-                                 << req->standby_node_term();
+                    LOG(WARNING)
+                        << "No barrier found for standby node #"
+                        << req->standby_node_id()
+                        << " at standby term: " << req->standby_node_term();
                     return false;
                 }
             }
@@ -320,7 +318,8 @@ bool SnapshotManager::OnSnapshotSyncRequested(
             {
                 uint64_t active_tx_max_ts = barrier_it->second;
 
-                auto ins_pair = pending_req_.try_emplace(req->standby_node_id());
+                auto ins_pair =
+                    pending_req_.try_emplace(req->standby_node_id());
                 if (!ins_pair.second)
                 {
                     // check if the queued task is newer than the new received
@@ -631,12 +630,14 @@ bool SnapshotManager::GetCompletedSnapshotTsLocked(
 }
 #endif
 
-void SnapshotManager::MarkSnapshotSyncCompletedLocked(uint32_t standby_node_id,
-                                                      int64_t standby_node_term,
-                                                      uint64_t standby_snapshot_ts)
+void SnapshotManager::MarkSnapshotSyncCompletedLocked(
+    uint32_t standby_node_id,
+    int64_t standby_node_term,
+    uint64_t standby_snapshot_ts)
 {
 #ifdef DATA_STORE_TYPE_ELOQDSS_ELOQSTORE
-    auto &snapshot_term_and_ts = completed_snapshot_term_and_ts_[standby_node_id];
+    auto &snapshot_term_and_ts =
+        completed_snapshot_term_and_ts_[standby_node_id];
     snapshot_term_and_ts[standby_node_term] = standby_snapshot_ts;
     auto it = snapshot_term_and_ts.begin();
     while (it != snapshot_term_and_ts.end())
@@ -882,11 +883,12 @@ void SnapshotManager::SyncWithStandby()
         {
             bool notify_succ = false;
 #ifdef DATA_STORE_TYPE_ELOQDSS_ELOQSTORE
-            notify_succ = DispatchRequestSyncSnapshotAsync(req.ng_id(),
-                                                           req.standby_node_id(),
-                                                           req.standby_node_term(),
-                                                           standby_snapshot_ts,
-                                                           &sync_snapshot_agg);
+            notify_succ =
+                DispatchRequestSyncSnapshotAsync(req.ng_id(),
+                                                 req.standby_node_id(),
+                                                 req.standby_node_term(),
+                                                 standby_snapshot_ts,
+                                                 &sync_snapshot_agg);
             if (notify_succ)
             {
                 sync_snapshot_rpc_count++;

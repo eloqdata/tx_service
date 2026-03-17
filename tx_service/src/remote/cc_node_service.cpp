@@ -2089,17 +2089,17 @@ void CcNodeService::RequestSyncSnapshot(
              DLOG(INFO) << "RequestSyncSnapshot async RequestSyncSnapshot "
                            "done, ng_id="
                         << ng_id << ", standby_term=" << standby_term
-                        << ", snapshot_ts=" << snapshot_ts
-                        << ", success=" << ok << ", role=follower";
+                        << ", snapshot_ts=" << snapshot_ts << ", success=" << ok
+                        << ", role=follower";
          }});
     const uint64_t current_ckpt_ts =
         store_hd->CurrentStandbySnapshotTs(request->ng_id());
     DLOG(INFO) << "RequestSyncSnapshot handled, ng_id=" << request->ng_id()
                << ", standby_term=" << request->standby_node_term()
                << ", term=" << term
-               << ", snapshot_ts=" << request->snapshot_ts() << ", success=1"
+               << ", snapshot_ts=" << request->snapshot_ts()
                << ", current_ckpt_ts=" << current_ckpt_ts
-               << ", local_node_id=" << local_node_id << ", role=follower";
+               << ", local_node_id=" << local_node_id;
     response->set_error(false);
     response->set_current_ckpt_ts(current_ckpt_ts);
 }
