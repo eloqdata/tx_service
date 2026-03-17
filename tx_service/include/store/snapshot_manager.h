@@ -28,6 +28,7 @@
 #include <string>
 #include <thread>
 #include <unordered_map>
+#include <unordered_set>
 #include <vector>
 
 #include "store/data_store_handler.h"
@@ -128,6 +129,11 @@ private:
      */
     void EraseSubscriptionBarrierLocked(uint32_t standby_node_id,
                                         int64_t standby_node_term);
+    bool IsSnapshotSyncCompletedLocked(uint32_t standby_node_id,
+                                       int64_t standby_node_term) const;
+    void MarkSnapshotSyncCompletedLocked(uint32_t standby_node_id,
+                                         int64_t standby_node_term);
+    void EraseSnapshotSyncCompletedByNodeLocked(uint32_t standby_node_id);
 
     struct PendingSnapshotSyncTask
     {
@@ -158,6 +164,9 @@ private:
     // max ts)
     std::unordered_map<uint32_t, std::unordered_map<int64_t, uint64_t>>
         subscription_barrier_;
+    // standby node id -> completed standby terms
+    std::unordered_map<uint32_t, std::unordered_set<int64_t>>
+        completed_snapshot_terms_;
     bool terminated_{false};
 
     const std::string backup_path_;
