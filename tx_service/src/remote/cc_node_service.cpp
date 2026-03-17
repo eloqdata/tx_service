@@ -26,8 +26,8 @@
 #include <bthread/mutex.h>
 #include <gflags/gflags.h>
 
-#include <atomic>
 #include <array>
+#include <atomic>
 #include <cstdlib>
 #include <memory>
 #include <mutex>
@@ -2099,8 +2099,7 @@ void CcNodeService::RequestSyncSnapshot(
              if (ok)
              {
                  {
-                     std::lock_guard<bthread::Mutex> lk(
-                         SyncStateMuxInstance());
+                     std::lock_guard<bthread::Mutex> lk(SyncStateMuxInstance());
                      SyncCountsInstance()[ng_id] = 0;
                  }
                  Sharder::Instance().SetStandbyNodeTerm(standby_term);
@@ -2121,8 +2120,7 @@ void CcNodeService::RequestSyncSnapshot(
                  int64_t current_sync_term =
                      SyncTermsInstance()[ng_id].load(std::memory_order_acquire);
                  {
-                     std::lock_guard<bthread::Mutex> lk(
-                         SyncStateMuxInstance());
+                     std::lock_guard<bthread::Mutex> lk(SyncStateMuxInstance());
                      retry_count = ++SyncCountsInstance()[ng_id];
                  }
                  if (Sharder::Instance().CandidateStandbyNodeTerm() ==
