@@ -32,6 +32,7 @@
 #include <optional>
 #include <utility>
 
+#include "absl/container/flat_hash_map.h"
 #include "cc/local_cc_shards.h"
 #include "cc_handler_result.h"
 #include "cc_protocol.h"
@@ -57,6 +58,30 @@ namespace remote
 {
 namespace
 {
+bthread::Mutex &StandbyRetryMux()
+{
+    static bthread::Mutex mux;
+    return mux;
+}
+
+absl::flat_hash_map<uint32_t, uint32_t> &StandbyRetryCounts()
+{
+    static absl::flat_hash_map<uint32_t, uint32_t> retry_counts;
+    return retry_counts;
+}
+
+void ResetStandbyRetryCount(uint32_t ng_id)
+{
+    std::lock_guard<bthread::Mutex> lk(StandbyRetryMux());
+    StandbyRetryCounts().erase(ng_id);
+}
+
+uint32_t IncrementStandbyRetryCount(uint32_t ng_id)
+{
+    std::lock_guard<bthread::Mutex> lk(StandbyRetryMux());
+    return ++StandbyRetryCounts()[ng_id];
+}
+
 int64_t CurrentSyncedPrimaryTerm()
 {
     const int64_t standby_term = Sharder::Instance().StandbyNodeTerm();
@@ -2074,6 +2099,7 @@ void CcNodeService::RequestSyncSnapshot(
                  store_hd->RequestSyncSnapshot(ng_id, term, snapshot_ts);
              if (ok)
              {
+                 ResetStandbyRetryCount(ng_id);
                  Sharder::Instance().SetStandbyNodeTerm(standby_term);
                  Sharder::Instance().SetCandidateStandbyNodeTerm(-1);
                  if (!txservice::txservice_skip_kv &&
@@ -2081,13 +2107,47 @@ void CcNodeService::RequestSyncSnapshot(
                  {
                      store_hd->RestoreTxCache(ng_id, standby_term);
                  }
+                 DLOG(INFO) << "RequestSyncSnapshot async RequestSyncSnapshot "
+                               "successfully, ng_id="
+                            << ng_id << ", standby_term=" << standby_term
+                            << ", snapshot_ts=" << snapshot_ts;
              }
-             DLOG(INFO)
-                 << "RequestSyncSnapshot async RequestSyncSnapshot done, "
-                    "ng_id="
-                 << ng_id << ", standby_term=" << standby_term
-                 << ", snapshot_ts=" << snapshot_ts << ", success=" << ok
-                 << ", role=follower";
+             else
+             {
+                 const uint32_t retry_count = IncrementStandbyRetryCount(ng_id);
+                 if (Sharder::Instance().CandidateStandbyNodeTerm() ==
+                     standby_term)
+                 {
+                     // Drop the failed subscribe session so a resubscribe gets
+                     // a fresh subscribe id instead of polling forever.
+                     Sharder::Instance().SetCandidateStandbyNodeTerm(-1);
+                 }
+
+                 const int64_t current_primary_term =
+                     Sharder::Instance().PrimaryNodeTerm();
+                 if (current_primary_term != term)
+                 {
+                     LOG(INFO)
+                         << "RequestSyncSnapshot failed on stale primary term, "
+                         << "skip retry, ng_id=" << ng_id
+                         << ", standby_term=" << standby_term
+                         << ", request_primary_term=" << term
+                         << ", current_primary_term=" << current_primary_term;
+                 }
+                 else
+                 {
+                     const uint32_t leader_node_id =
+                         Sharder::Instance().LeaderNodeId(ng_id);
+                     LOG(WARNING)
+                         << "RequestSyncSnapshot failed, resubscribe retry "
+                         << retry_count << ", ng_id=" << ng_id
+                         << ", standby_term=" << standby_term
+                         << ", primary_term=" << term
+                         << ", leader_node_id=" << leader_node_id;
+                     Sharder::Instance().OnStartFollowing(
+                         ng_id, current_primary_term, leader_node_id, true);
+                 }
+             }
          }});
     const uint64_t current_ckpt_ts =
         store_hd->CurrentStandbySnapshotTs(request->ng_id());
