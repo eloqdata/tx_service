@@ -7847,20 +7847,8 @@ void DataMigrationOp::Forward(TransactionExecution *txm)
 
             // Table name is ranges_in_bucket_snapshot_ is of type range
             // partition, need to convert it first.
-            TableType type;
-            if (TableName::IsBase(kickout_range_tbl_it_->first.StringView()))
-            {
-                type = TableType::Primary;
-            }
-            else if (TableName::IsUniqueSecondary(
-                         kickout_range_tbl_it_->first.StringView()))
-            {
-                type = TableType::UniqueSecondary;
-            }
-            else
-            {
-                type = TableType::Secondary;
-            }
+            TableType type =
+                TableName::Type(kickout_range_tbl_it_->first.StringView());
             kickout_range_table_ =
                 TableName{kickout_range_tbl_it_->first.StringView(),
                           type,
@@ -7892,21 +7880,8 @@ void DataMigrationOp::Forward(TransactionExecution *txm)
                         break;
                     }
 
-                    TableType type;
-                    if (TableName::IsBase(
-                            kickout_range_tbl_it_->first.StringView()))
-                    {
-                        type = TableType::Primary;
-                    }
-                    else if (TableName::IsUniqueSecondary(
-                                 kickout_range_tbl_it_->first.StringView()))
-                    {
-                        type = TableType::UniqueSecondary;
-                    }
-                    else
-                    {
-                        type = TableType::Secondary;
-                    }
+                    TableType type = TableName::Type(
+                        kickout_range_tbl_it_->first.StringView());
                     kickout_range_table_ =
                         TableName{kickout_range_tbl_it_->first.StringView(),
                                   type,
@@ -7978,28 +7953,31 @@ void DataMigrationOp::Forward(TransactionExecution *txm)
                 if (++kickout_range_tbl_it_ ==
                     ranges_in_bucket_snapshot_.cend())
                 {
-                    LOG(INFO) << "Data migration: post write all"
-                              << ", txn: " << txm->TxNumber();
-                    post_all_bucket_lock_op_.write_type_ =
-                        PostWriteType::PostCommit;
-                    ForwardToSubOperation(txm, &post_all_bucket_lock_op_);
+                    // Try handle hash partitioned tables
+                    if (kickout_hash_partitioned_tbl_it_ ==
+                        hash_partitioned_tables_snapshot_.cend())
+                    {
+                        LOG(INFO) << "Data migration: post write all"
+                                  << ", txn: " << txm->TxNumber();
+                        post_all_bucket_lock_op_.write_type_ =
+                            PostWriteType::PostCommit;
+                        ForwardToSubOperation(txm, &post_all_bucket_lock_op_);
+                        return;
+                    }
+                    kickout_data_op_.node_group_ = txm->TxCcNodeId();
+                    kickout_data_op_.table_name_ =
+                        &(*kickout_hash_partitioned_tbl_it_);
+                    kickout_data_op_.start_key_ = TxKey();
+                    kickout_data_op_.end_key_ = TxKey();
+                    kickout_data_op_.bucket_ids_ =
+                        &status_->bucket_ids_[migrate_bucket_idx_];
+                    // Check if the key is hashed to this bucket
+                    kickout_data_op_.clean_type_ = CleanType::CleanBucketData;
+                    ForwardToSubOperation(txm, &kickout_data_op_);
                     return;
                 }
-                TableType type;
-                if (TableName::IsBase(
-                        kickout_range_tbl_it_->first.StringView()))
-                {
-                    type = TableType::Primary;
-                }
-                else if (TableName::IsUniqueSecondary(
-                             kickout_range_tbl_it_->first.StringView()))
-                {
-                    type = TableType::UniqueSecondary;
-                }
-                else
-                {
-                    type = TableType::Secondary;
-                }
+                TableType type =
+                    TableName::Type(kickout_range_tbl_it_->first.StringView());
                 kickout_range_table_ =
                     TableName{kickout_range_tbl_it_->first.StringView(),
                               type,
@@ -8031,21 +8009,8 @@ void DataMigrationOp::Forward(TransactionExecution *txm)
                         // Move to hash partitioned tables
                         break;
                     }
-                    TableType type;
-                    if (TableName::IsBase(
-                            kickout_range_tbl_it_->first.StringView()))
-                    {
-                        type = TableType::Primary;
-                    }
-                    else if (TableName::IsUniqueSecondary(
-                                 kickout_range_tbl_it_->first.StringView()))
-                    {
-                        type = TableType::UniqueSecondary;
-                    }
-                    else
-                    {
-                        type = TableType::Secondary;
-                    }
+                    TableType type = TableName::Type(
+                        kickout_range_tbl_it_->first.StringView());
                     kickout_range_table_ =
                         TableName{kickout_range_tbl_it_->first.StringView(),
                                   type,

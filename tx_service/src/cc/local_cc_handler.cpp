@@ -1901,10 +1901,12 @@ void txservice::LocalCcHandler::KickoutData(const TableName &table_name,
         KickoutCcEntryCc *req = kickout_ccentry_pool_.NextRequest();
         // For hash partition, all data in a single bucket should be hashed to
         // the same core.
-        uint16_t core_cnt = (clean_type == CleanType::CleanBucketData ||
-                             clean_type == CleanType::CleanRangeData)
-                                ? 1
-                                : Sharder::Instance().GetLocalCcShardsCount();
+        uint16_t core_cnt =
+            (clean_type == CleanType::CleanBucketData ||
+             clean_type == CleanType::CleanRangeData ||
+             clean_type == CleanType::CleanRangeDataForMigration)
+                ? 1
+                : Sharder::Instance().GetLocalCcShardsCount();
         req->Reset(table_name,
                    ng_id,
                    &hres,
@@ -1929,7 +1931,8 @@ void txservice::LocalCcHandler::KickoutData(const TableName &table_name,
                 Sharder::Instance().ShardBucketIdToCoreIdx((*bucket_id)[0]),
                 req);
         }
-        else if (clean_type == CleanType::CleanRangeData)
+        else if (clean_type == CleanType::CleanRangeData ||
+                 clean_type == CleanType::CleanRangeDataForMigration)
         {
             assert(range_id != INT32_MAX);
             uint16_t dest_core = static_cast<uint16_t>(
