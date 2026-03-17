@@ -3775,10 +3775,10 @@ bool RocksDBHandlerImpl::CreateSnapshot(
     }
 }
 
-bool RocksDBHandlerImpl::CreateSnapshotForStandby(uint32_t ng_id,
-                                                  std::vector<std::string>
-                                                      &snapshot_files,
-                                                  uint64_t snapshot_ts)
+bool RocksDBHandlerImpl::CreateSnapshotForStandby(
+    uint32_t ng_id,
+    std::vector<std::string> &snapshot_files,
+    uint64_t snapshot_ts)
 {
     (void) ng_id;
     (void) snapshot_ts;
