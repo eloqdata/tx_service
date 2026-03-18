@@ -732,17 +732,15 @@ void LockWriteRangeBucketsOp::Advance(TransactionExecution *txm)
             write_entry.partition_id_ = range_id;
             write_entry.on_dirty_range_ = range_splitting;
 
-            int32_t *new_bucket_range_id_ptr = nullptr;
+            uint32_t new_bucket_forward_key = UINT32_MAX;
             // If current range is migrating, forward to new range owner.
             if (new_bucket_ng != UINT32_MAX)
             {
                 assert(new_bucket_ng != range_ng);
-                auto it =
-                    write_entry.forward_addr_
-                        .try_emplace(((new_bucket_ng << 10) | residual),
-                                     std::make_pair(range_id, CcEntryAddr()))
-                        .first;
-                new_bucket_range_id_ptr = &it->second.first;
+                new_bucket_forward_key = (new_bucket_ng << 10) | residual;
+                write_entry.forward_addr_.try_emplace(
+                    new_bucket_forward_key,
+                    std::make_pair(range_id, CcEntryAddr()));
                 write_entry.on_dirty_range_ = true;
             }
 
@@ -782,9 +780,12 @@ void LockWriteRangeBucketsOp::Advance(TransactionExecution *txm)
                     // There is no need to update the range size of the old
                     // range.
                     write_entry.partition_id_ = -1;
-                    if (new_bucket_range_id_ptr != nullptr)
+                    if (new_bucket_forward_key != UINT32_MAX)
                     {
-                        *new_bucket_range_id_ptr = -1;
+                        auto fwd_it = write_entry.forward_addr_.find(
+                            new_bucket_forward_key);
+                        assert(fwd_it != write_entry.forward_addr_.end());
+                        fwd_it->second.first = -1;
                     }
                 }
                 else if (new_range_ng == range_ng)
@@ -799,8 +800,11 @@ void LockWriteRangeBucketsOp::Advance(TransactionExecution *txm)
                          new_range_ng == new_bucket_ng)
                 {
                     assert(new_range_shard == range_shard);
-                    assert(new_bucket_range_id_ptr != nullptr);
-                    *new_bucket_range_id_ptr = new_range_id;
+                    assert(new_bucket_forward_key != UINT32_MAX);
+                    auto fwd_it =
+                        write_entry.forward_addr_.find(new_bucket_forward_key);
+                    assert(fwd_it != write_entry.forward_addr_.end());
+                    fwd_it->second.first = new_range_id;
                 }
 
                 // If the new range is migrating, forward to the new owner of
@@ -830,8 +834,11 @@ void LockWriteRangeBucketsOp::Advance(TransactionExecution *txm)
                              new_range_new_bucket_ng == new_bucket_ng)
                     {
                         assert(new_range_shard == range_shard);
-                        assert(new_bucket_range_id_ptr != nullptr);
-                        *new_bucket_range_id_ptr = new_range_id;
+                        assert(new_bucket_forward_key != UINT32_MAX);
+                        auto fwd_it = write_entry.forward_addr_.find(
+                            new_bucket_forward_key);
+                        assert(fwd_it != write_entry.forward_addr_.end());
+                        fwd_it->second.first = new_range_id;
                     }
                 }
             }
@@ -7974,9 +7981,8 @@ void DataMigrationOp::Forward(TransactionExecution *txm)
 
         if (kickout_data_op_.hd_result_.IsError())
         {
-            LOG(ERROR) << "Data migration: fail to kickout range data"
-                       << ", table name "
-                       << kickout_range_tbl_it_->first.StringView()
+            LOG(ERROR) << "Data migration: fail to kickout data, table name: "
+                       << kickout_data_op_.table_name_->StringView()
                        << ", tx_number:" << txm->TxNumber()
                        << ", keep retrying";
             RetrySubOperation(txm, &kickout_data_op_);
@@ -8044,7 +8050,29 @@ void DataMigrationOp::Forward(TransactionExecution *txm)
                         ranges_in_bucket_snapshot_.cend())
                     {
                         // Move to hash partitioned tables
-                        break;
+                        if (kickout_hash_partitioned_tbl_it_ ==
+                            hash_partitioned_tables_snapshot_.cend())
+                        {
+                            LOG(INFO) << "Data migration: post write all"
+                                      << ", txn: " << txm->TxNumber();
+                            post_all_bucket_lock_op_.write_type_ =
+                                PostWriteType::PostCommit;
+                            ForwardToSubOperation(txm,
+                                                  &post_all_bucket_lock_op_);
+                            return;
+                        }
+                        kickout_data_op_.node_group_ = txm->TxCcNodeId();
+                        kickout_data_op_.table_name_ =
+                            &(*kickout_hash_partitioned_tbl_it_);
+                        kickout_data_op_.start_key_ = TxKey();
+                        kickout_data_op_.end_key_ = TxKey();
+                        kickout_data_op_.bucket_ids_ =
+                            &status_->bucket_ids_[migrate_bucket_idx_];
+                        // Check if the key is hashed to this bucket
+                        kickout_data_op_.clean_type_ =
+                            CleanType::CleanBucketData;
+                        ForwardToSubOperation(txm, &kickout_data_op_);
+                        return;
                     }
                     TableType type = TableName::Type(
                         kickout_range_tbl_it_->first.StringView());

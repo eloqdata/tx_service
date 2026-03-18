@@ -6988,7 +6988,7 @@ public:
                 // For data migration, we need to delete the range size info
                 // for the range that has been migrated to other node group.
                 int32_t partition_id = req.GetPartitionId();
-                assert(partition_id != INT32_MAX);
+                assert(partition_id > 0 && partition_id != INT32_MAX);
                 RemoveRangeSize(static_cast<uint32_t>(partition_id));
             }
             return req.SetFinish();
