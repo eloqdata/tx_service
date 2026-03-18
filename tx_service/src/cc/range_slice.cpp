@@ -510,11 +510,11 @@ void StoreRange::UpdateSliceSpec(StoreSlice *slice,
 
     std::unique_lock<std::mutex> heap_lk(
         local_cc_shards_.table_ranges_heap_mux_);
-    // bool is_override_thd = mi_is_override_thread();
-    // mi_threadid_t prev_thd =
-    //     mi_override_thread(local_cc_shards_.GetTableRangesHeapThreadId());
-    // mi_heap_t *prev_heap =
-    //     mi_heap_set_default(local_cc_shards_.GetTableRangesHeap());
+    bool is_override_thd = mi_is_override_thread();
+    mi_threadid_t prev_thd =
+        mi_override_thread(local_cc_shards_.GetTableRangesHeapThreadId());
+    mi_heap_t *prev_heap =
+        mi_heap_set_default(local_cc_shards_.GetTableRangesHeap());
 
 #if defined(WITH_JEMALLOC)
     uint32_t prev_arena;
@@ -527,15 +527,15 @@ void StoreRange::UpdateSliceSpec(StoreSlice *slice,
     UpdateSlice(slice, split_keys);
 
     bool range_slice_mem_full = local_cc_shards_.TableRangesMemoryFull();
-    // mi_heap_set_default(prev_heap);
-    // if (is_override_thd)
-    // {
-    //     mi_override_thread(prev_thd);
-    // }
-    // else
-    // {
-    //     mi_restore_default_thread_id();
-    // }
+    mi_heap_set_default(prev_heap);
+    if (is_override_thd)
+    {
+        mi_override_thread(prev_thd);
+    }
+    else
+    {
+        mi_restore_default_thread_id();
+    }
 #if defined(WITH_JEMALLOC)
     JemallocArenaSwitcher::SwitchToArena(prev_arena);
 #endif

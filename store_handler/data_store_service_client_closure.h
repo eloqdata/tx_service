@@ -625,10 +625,8 @@ struct ReadBaseForArchiveCallbackData
             (*yield_fn)();
             lk.lock();
             waiting_.store(false, std::memory_order_release);
-            while (flying_read_cnt_ > 0)
-            {
-                cv_.wait(lk);
-            }
+            // If flying_read_cnt_ still > 0 after resume, loop and yield again.
+            // Do not use cv_.wait(): resume_fn path never notifies cv_.
         }
     }
 

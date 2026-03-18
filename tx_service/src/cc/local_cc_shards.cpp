@@ -178,8 +178,18 @@ LocalCcShards::LocalCcShards(
     timer_thd_ = std::thread([this] { TimerRun(); });
     pthread_setname_np(timer_thd_.native_handle(), "tx_timer");
 
-    // For mariadb, this thread is the main thread of the mariadb process.
-    InitializeTableRangesHeap();
+    // Start background thread to initialize table_ranges_heap. For mariadb, the
+    // main thread is the mariadb process thread; offload heap init to avoid
+    // blocking it.
+    table_ranges_heap_thd_ =
+        std::thread([this] { TableRangesHeapThreadRun(); });
+    pthread_setname_np(table_ranges_heap_thd_.native_handle(),
+                       "table_ranges_heap");
+    {
+        std::unique_lock<std::mutex> lk(table_ranges_heap_thd_mux_);
+        table_ranges_heap_thd_cv_.wait(
+            lk, [this] { return table_ranges_heap_ready_; });
+    }
 
     InitializeHashPartitionCkptHeap();
 
@@ -281,6 +291,13 @@ LocalCcShards::~LocalCcShards()
     }
     timer_thd_.join();
     cc_shards_.clear();
+
+    {
+        std::scoped_lock<std::mutex> lk(table_ranges_heap_thd_mux_);
+        table_ranges_heap_terminate_ = true;
+        table_ranges_heap_thd_cv_.notify_one();
+    }
+    table_ranges_heap_thd_.join();
 }
 
 void LocalCcShards::StartBackgroudWorkers()
@@ -414,6 +431,19 @@ void LocalCcShards::BindThreadToFastMetaDataShard(size_t shard_idx)
     {
         tls_shard_idx = shard_idx;
     }
+}
+
+void LocalCcShards::TableRangesHeapThreadRun()
+{
+    InitializeTableRangesHeap();
+    {
+        std::lock_guard<std::mutex> lk(table_ranges_heap_thd_mux_);
+        table_ranges_heap_ready_ = true;
+        table_ranges_heap_thd_cv_.notify_one();
+    }
+    std::unique_lock<std::mutex> lk(table_ranges_heap_thd_mux_);
+    table_ranges_heap_thd_cv_.wait(
+        lk, [this] { return table_ranges_heap_terminate_; });
 }
 
 void LocalCcShards::TimerRun()
@@ -1064,9 +1094,9 @@ void LocalCcShards::InitTableRanges(const TableName &range_table_name,
     std::unique_lock<FastMetaDataMutex> lk(fast_meta_data_mux_);
 
     std::unique_lock<std::mutex> heap_lk(table_ranges_heap_mux_);
-    // bool is_override_thd = mi_is_override_thread();
-    // mi_threadid_t prev_thd = mi_override_thread(table_ranges_thread_id_);
-    // mi_heap_t *prev_heap = mi_heap_set_default(table_ranges_heap_);
+    bool is_override_thd = mi_is_override_thread();
+    mi_threadid_t prev_thd = mi_override_thread(table_ranges_thread_id_);
+    mi_heap_t *prev_heap = mi_heap_set_default(table_ranges_heap_);
 
 #if defined(WITH_JEMALLOC)
     uint32_t prev_arena;
@@ -1159,15 +1189,15 @@ void LocalCcShards::InitTableRanges(const TableName &range_table_name,
         }
     }
 
-    // mi_heap_set_default(prev_heap);
-    // if (is_override_thd)
-    // {
-    //     mi_override_thread(prev_thd);
-    // }
-    // else
-    // {
-    //     mi_restore_default_thread_id();
-    // }
+    mi_heap_set_default(prev_heap);
+    if (is_override_thd)
+    {
+        mi_override_thread(prev_thd);
+    }
+    else
+    {
+        mi_restore_default_thread_id();
+    }
 
 #if defined(WITH_JEMALLOC)
     JemallocArenaSwitcher::SwitchToArena(prev_arena);
@@ -1337,11 +1367,11 @@ void LocalCcShards::KickoutRangeSlices()
                         {
                             std::unique_lock<std::mutex> heap_lk(
                                 table_ranges_heap_mux_);
-                            // bool is_override_thd = mi_is_override_thread();
-                            // mi_threadid_t prev_thd = mi_override_thread(
-                            //     GetTableRangesHeapThreadId());
-                            // mi_heap_t *prev_heap =
-                            //     mi_heap_set_default(GetTableRangesHeap());
+                            bool is_override_thd = mi_is_override_thread();
+                            mi_threadid_t prev_thd = mi_override_thread(
+                                GetTableRangesHeapThreadId());
+                            mi_heap_t *prev_heap =
+                                mi_heap_set_default(GetTableRangesHeap());
 
 #if defined(WITH_JEMALLOC)
                             uint32_t prev_arena;
@@ -1355,15 +1385,15 @@ void LocalCcShards::KickoutRangeSlices()
                             range_entry->DropStoreRange();
 
                             bool has_enough_mem = HasEnoughTableRangesMemory();
-                            // mi_heap_set_default(prev_heap);
-                            // if (is_override_thd)
-                            // {
-                            //     mi_override_thread(prev_thd);
-                            // }
-                            // else
-                            // {
-                            //     mi_restore_default_thread_id();
-                            // }
+                            mi_heap_set_default(prev_heap);
+                            if (is_override_thd)
+                            {
+                                mi_override_thread(prev_thd);
+                            }
+                            else
+                            {
+                                mi_restore_default_thread_id();
+                            }
 
 #if defined(WITH_JEMALLOC)
                             JemallocArenaSwitcher::SwitchToArena(prev_arena);
@@ -1401,12 +1431,10 @@ void LocalCcShards::KickoutRangeSlices()
         if (entry->IsStoreRangeFree())
         {
             std::unique_lock<std::mutex> heap_lk(table_ranges_heap_mux_);
-            /*
             bool is_override_thd = mi_is_override_thread();
             mi_threadid_t prev_thd =
                 mi_override_thread(GetTableRangesHeapThreadId());
             mi_heap_t *prev_heap = mi_heap_set_default(GetTableRangesHeap());
-            */
 #if defined(WITH_JEMALLOC)
             uint32_t prev_arena;
             JemallocArenaSwitcher::ReadCurrentArena(prev_arena);
@@ -1418,7 +1446,6 @@ void LocalCcShards::KickoutRangeSlices()
             entry->DropStoreRange();
 
             bool has_enough_mem = HasEnoughTableRangesMemory();
-            /*
             mi_heap_set_default(prev_heap);
             if (is_override_thd)
             {
@@ -1428,7 +1455,6 @@ void LocalCcShards::KickoutRangeSlices()
             {
                 mi_restore_default_thread_id();
             }
-            */
 
 #if defined(WITH_JEMALLOC)
             JemallocArenaSwitcher::SwitchToArena(prev_arena);
@@ -2148,13 +2174,11 @@ bool LocalCcShards::DropStoreRangesInBucket(NodeGroupId ng_id,
                     {
                         std::unique_lock<std::mutex> heap_lk(
                             table_ranges_heap_mux_);
-                        /*
                         bool is_override_thd = mi_is_override_thread();
                         mi_threadid_t prev_thd =
                             mi_override_thread(GetTableRangesHeapThreadId());
                         mi_heap_t *prev_heap =
                             mi_heap_set_default(GetTableRangesHeap());
-                        */
 
 #if defined(WITH_JEMALLOC)
                         uint32_t prev_arena;
@@ -2167,7 +2191,6 @@ bool LocalCcShards::DropStoreRangesInBucket(NodeGroupId ng_id,
 
                         entry->DropStoreRange();
 
-                        /*
                         mi_heap_set_default(prev_heap);
                         if (is_override_thd)
                         {
@@ -2177,7 +2200,6 @@ bool LocalCcShards::DropStoreRangesInBucket(NodeGroupId ng_id,
                         {
                             mi_restore_default_thread_id();
                         }
-                        */
 
 #if defined(WITH_JEMALLOC)
                         JemallocArenaSwitcher::SwitchToArena(prev_arena);
