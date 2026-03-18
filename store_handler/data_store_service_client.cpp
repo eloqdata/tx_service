@@ -3269,6 +3269,7 @@ bool DataStoreServiceClient::CopyBaseToArchiveImpl(
                 {
                     if (yield_fptr && resume_fptr)
                     {
+                        LOG(INFO) << "== wait: this = " << callback_data;
                         callback_data->Wait(yield_fptr, resume_fptr);
                     }
                     else
@@ -3287,10 +3288,12 @@ bool DataStoreServiceClient::CopyBaseToArchiveImpl(
             // invalid memory in callback.
             if (yield_fptr && resume_fptr)
             {
+                LOG(INFO) << "== wait: this = " << &callback_datas[0];
                 callback_datas[0].Wait(yield_fptr, resume_fptr);
             }
             else
             {
+                LOG(INFO) << "== wait: this = " << &callback_datas[0];
                 std::unique_lock<bthread::Mutex> lk(mtx);
                 while (flying_cnt > 0)
                 {
