@@ -125,6 +125,10 @@ public:
     {
     }
 
+    void FetchTableRangeSize(FetchTableRangeSizeCc *fetch_cc) override
+    {
+    }
+
     bool Read(const txservice::TableName &table_name,
               const txservice::TxKey &key,
               txservice::TxRecord &rec,

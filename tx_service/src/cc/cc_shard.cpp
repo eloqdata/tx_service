@@ -1030,10 +1030,6 @@ void CcShard::UpdateLruList(LruPage *page, bool is_emplace)
         // object.
         if (page->large_obj_page_)
         {
-            if (protected_head_page_ == &tail_ccp_)
-            {
-                protected_head_page_ = page;
-            }
             insert_before = &tail_cpp_ptr;
         }
         else
@@ -1055,6 +1051,18 @@ void CcShard::UpdateLruList(LruPage *page, bool is_emplace)
     if (page->lru_next_ == *insert_before &&
         (*insert_before)->lru_prev_ == page)
     {
+        // Even when the page is already at the correct position, we still need
+        // to update protected_head_page_ for the case where a large object page
+        // sits just before tail_ccp_ while protected_head_page_ has not been
+        // set yet (i.e. protected_head_page_ == &tail_ccp_).  This happens in
+        // production when EnsureLargeObjOccupyPageAlone() promotes the most-
+        // recently-accessed small page (already at tail->lru_prev_) to a large
+        // page and calls UpdateLruList immediately after.
+        if (GetCacheEvictPolicy() == CacheEvictPolicy::LO_LRU &&
+            page->large_obj_page_ && protected_head_page_ == &tail_ccp_)
+        {
+            protected_head_page_ = page;
+        }
         ++access_counter_;
         page->last_access_ts_ = access_counter_;
         return;

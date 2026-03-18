@@ -1868,8 +1868,7 @@ public:
                 }
             }
 
-            if (shard_->GetCacheEvictPolicy() == CacheEvictPolicy::LO_LRU &&
-                payload_status == RecordStatus::Normal)
+            if (shard_->GetCacheEvictPolicy() == CacheEvictPolicy::LO_LRU)
             {
                 EnsureLargeObjOccupyPageAlone(ccp, cce);
             }
@@ -2100,8 +2099,7 @@ public:
             }
         }
 
-        if (shard_->GetCacheEvictPolicy() == CacheEvictPolicy::LO_LRU &&
-            cce->PayloadStatus() == RecordStatus::Normal)
+        if (shard_->GetCacheEvictPolicy() == CacheEvictPolicy::LO_LRU)
         {
             EnsureLargeObjOccupyPageAlone(ccp, cce);
         }
@@ -2552,8 +2550,7 @@ public:
                                cce->payload_.cur_payload_.get());
             }
 
-            if (shard_->GetCacheEvictPolicy() == CacheEvictPolicy::LO_LRU &&
-                payload_status == RecordStatus::Normal)
+            if (shard_->GetCacheEvictPolicy() == CacheEvictPolicy::LO_LRU)
             {
                 EnsureLargeObjOccupyPageAlone(ccp, cce);
             }
