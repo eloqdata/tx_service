@@ -128,10 +128,10 @@ RecoveryService::RecoveryService(LocalCcShards &local_shards,
                                 inbound_mux_);
                             for (const auto &entry : inbound_connections_)
                             {
-                                if (entry.second.cc_ng_id_ == ng_id &&
-                                    entry.second.cc_ng_term_ ==
+                                if (entry.second->cc_ng_id_ == ng_id &&
+                                    entry.second->cc_ng_term_ ==
                                         candidate_term &&
-                                    entry.second.recovering_)
+                                    entry.second->recovering_)
                                 {
                                     has_replay_connection = true;
                                     break;

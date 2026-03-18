@@ -455,7 +455,6 @@ public:
     void InitializeTableRangesHeap()
     {
         std::unique_lock<std::mutex> lk(table_ranges_heap_mux_);
-        // table_ranges_heap_ usage commented out - use default heap
         if (!table_ranges_heap_)
         {
             table_ranges_thread_id_ = mi_thread_id();
@@ -498,9 +497,7 @@ public:
 
     mi_heap_t *GetTableRangesHeap() const
     {
-        // table_ranges_heap_ usage commented out
         return table_ranges_heap_;
-        // return nullptr;
     }
 
     uint32_t GetTableRangesArenaId() const
