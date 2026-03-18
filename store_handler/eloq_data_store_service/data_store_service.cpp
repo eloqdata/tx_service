@@ -425,7 +425,7 @@ bool DataStoreService::ConnectAndStartDataStore(uint32_t data_shard_id,
             return false;
         }
 
-        res = shard_ref.data_store_->StartDB(term);
+        res = shard_ref.data_store_->StartDB(term, data_shard_id);
         if (!res)
         {
             LOG(ERROR) << "Failed to start db instance in data store service";

@@ -1849,6 +1849,16 @@ void CcNodeService::UpdateStandbyCkptTs(
     DLOG(INFO) << "Receive UpdateStandbyCkptTs req, req ckpt ts:"
                << request->primary_succ_ckpt_ts() << ", has_data_store_write: "
                << (int) request->has_data_store_write();
+    auto standby_node_term = Sharder::Instance().StandbyNodeTerm();
+    if (standby_node_term == -1 ||
+        (standby_node_term >> 32) != request->ng_term())
+    {
+        DLOG(INFO) << "Discard UpdateStandbyCkptTs req, req ckpt ts:"
+                   << request->primary_succ_ckpt_ts()
+                   << ", standby_node_term=" << standby_node_term;
+        response->set_error(true);
+        return;
+    }
     if (request->primary_succ_ckpt_ts() <=
         Sharder::Instance().NativeNodeGroupCkptTs())
     {
@@ -2051,7 +2061,7 @@ void CcNodeService::RequestSyncSnapshot(
     const uint32_t local_node_id = Sharder::Instance().NodeId();
     DLOG(INFO) << "RequestSyncSnapshot RPC received, ng_id=" << request->ng_id()
                << ", snapshot_ts=" << request->snapshot_ts()
-               << ", local_node_id=" << local_node_id << ", role=follower";
+               << ", local_node_id=" << local_node_id;
     auto store_hd = Sharder::Instance().GetLocalCcShards()->store_hd_;
     if (!store_hd)
     {
