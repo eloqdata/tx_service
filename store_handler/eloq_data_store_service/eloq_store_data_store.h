@@ -177,7 +177,7 @@ public:
 
     bool Initialize() override;
 
-    bool StartDB(int64_t term, uint32_t data_shard_id = 0) override
+    bool StartDB(int64_t term, uint32_t data_shard_id) override
     {
         ::eloqstore::KvError res =
             eloq_store_service_->Start(term, data_shard_id);

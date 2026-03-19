@@ -51,7 +51,7 @@ public:
         ds->Initialize();
         if (start_db)
         {
-            if (!ds->StartDB(term))
+            if (!ds->StartDB(term, shard_id))
             {
                 return nullptr;
             }
