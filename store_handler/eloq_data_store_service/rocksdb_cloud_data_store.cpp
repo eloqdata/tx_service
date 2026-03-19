@@ -674,6 +674,17 @@ bool RocksDBCloudDataStore::OpenCloudDB(
     // Disable auto compactions before blocking purger
     options.disable_auto_compactions = true;
 
+    LOG(INFO) << "Open RocksDB Cloud with options create_if_missing: "
+              << create_db_if_missing_ << ", db_path: " << db_path_
+              << ", bucket_name: " << cfs_options_.src_bucket.GetBucketName()
+              << ", bucket_prefix: "
+              << cfs_options_.src_bucket.GetBucketPrefix()
+              << ", object_path: " << cfs_options_.src_bucket.GetObjectPath()
+              << ", endpoint: "
+              << (cloud_config_.s3_endpoint_url_.empty()
+                      ? "default"
+                      : cloud_config_.s3_endpoint_url_);
+
     auto start = std::chrono::steady_clock::now();
     std::unique_lock<std::shared_mutex> db_lk(db_mux_);
     rocksdb::Status status;
@@ -692,6 +703,14 @@ bool RocksDBCloudDataStore::OpenCloudDB(
         LOG(WARNING) << "Open rocksdb cloud error : " << status.ToString()
                      << ", retrying ...";
         bthread_usleep(retry_num * 200000);
+    }
+
+    if (!status.ok())
+    {
+        LOG(ERROR) << "Unable to open db at path " << storage_path_
+                   << " with bucket " << cfs_options.src_bucket.GetBucketName()
+                   << " with error: " << status.ToString();
+        return false;
     }
 
     auto end = std::chrono::steady_clock::now();

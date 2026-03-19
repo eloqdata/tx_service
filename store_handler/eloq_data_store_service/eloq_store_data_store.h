@@ -180,7 +180,7 @@ public:
     bool StartDB(int64_t term, uint32_t data_shard_id) override
     {
         ::eloqstore::KvError res =
-            eloq_store_service_->Start(term, data_shard_id);
+            eloq_store_service_->Start(branch_name_, term, data_shard_id);
         if (res != ::eloqstore::KvError::NoError)
         {
             LOG(ERROR) << "EloqStore start failed with error code: "
@@ -284,5 +284,9 @@ private:
     void Floor(ScanRequest *scan_req);
 
     std::unique_ptr<::eloqstore::EloqStore> eloq_store_service_{nullptr};
+
+    // Branch name passed to EloqStore::Start().  Populated from the factory
+    // config in the EloqStoreDataStore constructor.
+    std::string branch_name_{"main"};
 };
 }  // namespace EloqDS

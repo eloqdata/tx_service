@@ -1411,7 +1411,15 @@ txservice::remote::BackupTaskStatus SnapshotManager::CreateBackup(
             auto backup_it = ng_it->second.find(backup_name);
             if (backup_it != ng_it->second.end())
             {
-                assert(false);
+                // Idempotency: if the backup already exists and is finished,
+                // return success. This allows retrying CreateBackup after a
+                // previous successful completion.
+                if (backup_it->second.status() ==
+                    txservice::remote::BackupTaskStatus::Finished)
+                {
+                    return txservice::remote::BackupTaskStatus::Finished;
+                }
+                // If backup exists but is not finished, it's an error
                 return txservice::remote::BackupTaskStatus::Failed;
             }
         }
