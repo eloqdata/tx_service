@@ -571,11 +571,13 @@ struct ReadBaseForArchiveCallbackData
         bthread::ConditionVariable &cv,
         size_t &flying_read_cnt,
         int &error_code,
+        std::atomic<bool> &waiting,
         const std::function<void()> *resume_fn = nullptr)
         : mtx_(mtx),
           cv_(cv),
           flying_read_cnt_(flying_read_cnt),
           error_code_(error_code),
+          waiting_(waiting),
           resume_fn_(resume_fn),
           partition_id_(0),
           key_str_(),
@@ -705,8 +707,8 @@ struct ReadBaseForArchiveCallbackData
     bthread::ConditionVariable &cv_;
     size_t &flying_read_cnt_;
     int &error_code_;
+    std::atomic<bool> &waiting_;  // shared: any callback's DecreaseFlyingReadCount can notify
     const std::function<void()> *resume_fn_{nullptr};
-    std::atomic<bool> waiting_{false};
     int32_t partition_id_;
     std::string_view key_str_;
     std::string value_str_;

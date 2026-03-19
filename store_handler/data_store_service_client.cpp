@@ -3233,6 +3233,7 @@ bool DataStoreServiceClient::CopyBaseToArchiveImpl(
             bthread::ConditionVariable cv;
             size_t flying_cnt = 0;
             int error_code = 0;
+            std::atomic<bool> waiting{false};  // shared: last callback must notify Wait
             // Use deque: ReadBaseForArchiveCallbackData contains std::atomic
             // which is non-copyable/non-movable; vector requires element
             // move/copy on realloc, deque does not.
@@ -3240,7 +3241,7 @@ bool DataStoreServiceClient::CopyBaseToArchiveImpl(
             for (size_t i = 0; i < base_vec.size(); ++i)
             {
                 callback_datas.emplace_back(
-                    mtx, cv, flying_cnt, error_code, resume_fptr);
+                    mtx, cv, flying_cnt, error_code, waiting, resume_fptr);
             }
 
             for (size_t base_idx = 0; base_idx < base_vec.size(); ++base_idx)
