@@ -2585,7 +2585,13 @@ struct CcPage : public LruPage
                  CcEntry<KeyT, ValueT, VersionedRecord, RangePartitioned>>
                  &entry : entries_)
         {
-            if (entry->payload_.cur_payload_->HasTTL())
+            if (entry->PayloadStatus() == RecordStatus::Deleted)
+            {
+                smallest_ttl_ = 0;
+                break;
+            }
+            if (entry->PayloadStatus() == RecordStatus::Normal &&
+                entry->payload_.cur_payload_->HasTTL())
             {
                 uint64_t ttl = entry->payload_.cur_payload_->GetTTL();
                 if (ttl < smallest_ttl_)

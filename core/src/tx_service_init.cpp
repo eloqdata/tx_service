@@ -330,6 +330,7 @@ bool DataSubstrate::InitializeTxService(const INIReader &config_reader)
     }
     else if (cache_evict_policy == txservice::CacheEvictPolicy::LO_LRU)
     {
+        assert(core_config_.enable_data_store);
         tx_service_->SetupPolicyLoLRU(lolru_large_obj_threshold_kb);
     }
 

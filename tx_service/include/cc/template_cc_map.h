@@ -9929,19 +9929,9 @@ protected:
             if (target_page->large_obj_page_)
             {
                 target_it++;
-                bool emplace_page = false;
                 if (target_it == ccmp_.end())
                 {
-                    emplace_page = true;
-                }
-                else
-                {
-                    target_page = target_it->second.get();
-                    emplace_page =
-                        target_page->large_obj_page_ || target_page->Full();
-                }
-                if (emplace_page)
-                {
+                    // target_page still points to the large page A.
                     target_it = ccmp_.try_emplace(
                         target_it,
                         key,
@@ -9950,6 +9940,25 @@ protected:
                                                 VersionedRecord,
                                                 RangePartitioned>>(
                             this, target_page, target_page->next_page_));
+                }
+                else
+                {
+                    // target_page still points to the large page A.
+                    // Peek at the next page B without yet updating target_page,
+                    // so that if a new page must be inserted between A and B
+                    // the constructor receives the correct prev=A, next=B.
+                    if (target_it->second->large_obj_page_ ||
+                        target_it->second->Full())
+                    {
+                        target_it = ccmp_.try_emplace(
+                            target_it,
+                            key,
+                            std::make_unique<CcPage<KeyT,
+                                                    ValueT,
+                                                    VersionedRecord,
+                                                    RangePartitioned>>(
+                                this, target_page, target_page->next_page_));
+                    }
                     target_page = target_it->second.get();
                 }
             }
