@@ -153,6 +153,10 @@ DEFINE_uint32(eloq_store_max_cloud_concurrency,
 DEFINE_uint32(eloq_store_cloud_request_threads,
               1,
               "EloqStore cloud request thread number");
+DEFINE_uint32(eloq_store_max_global_request_batch,
+              1000,
+              "EloqStore maximum number of requests processed in one global "
+              "batch.");
 DEFINE_uint32(eloq_store_max_write_concurrency,
               0,
               "EloqStore maximum number of concurrent write tasks per shard; "
@@ -802,6 +806,13 @@ EloqStoreConfig::EloqStoreConfig(const INIReader &config_reader,
             : config_reader.GetInteger("store",
                                        "eloq_store_cloud_request_threads",
                                        FLAGS_eloq_store_cloud_request_threads);
+    eloqstore_configs_.max_global_request_batch =
+        !CheckCommandLineFlagIsDefault("eloq_store_max_global_request_batch")
+            ? FLAGS_eloq_store_max_global_request_batch
+            : config_reader.GetInteger(
+                  "store",
+                  "eloq_store_max_global_request_batch",
+                  FLAGS_eloq_store_max_global_request_batch);
     eloqstore_configs_.max_write_concurrency =
         !CheckCommandLineFlagIsDefault("eloq_store_max_write_concurrency")
             ? FLAGS_eloq_store_max_write_concurrency

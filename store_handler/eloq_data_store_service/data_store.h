@@ -57,12 +57,22 @@ public:
      */
     virtual bool Initialize() = 0;
 
+#ifdef DATA_STORE_TYPE_ELOQDSS_ELOQSTORE
+    /**
+     * @brief Start the data store.
+     * @param term The term value to use when starting the database.
+     * @param shard_id The id of data shard.
+     * @return True if start successfully, otherwise false.
+     */
+    virtual bool StartDB(int64_t term, uint32_t shard_id) = 0;
+#else
     /**
      * @brief Start the data store.
      * @param term The term value to use when starting the database.
      * @return True if start successfully, otherwise false.
      */
     virtual bool StartDB(int64_t term) = 0;
+#endif
 
     /**
      * @brief Close the data store.
