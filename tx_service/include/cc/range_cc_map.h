@@ -763,9 +763,13 @@ public:
                     CcMap *ccm =
                         shard_->GetCcm(data_table_name, this->cc_ng_id_);
                     assert(ccm != nullptr);
-                    size_t range_size = new_range_entries.at(idx)
-                                            ->TypedStoreRange()
-                                            ->PostCkptSize();
+                    TemplateStoreRange<KeyT> *typed_store_range =
+                        new_range_entries.at(idx)->TypedStoreRange();
+                    if (typed_store_range == nullptr)
+                    {
+                        continue;
+                    }
+                    size_t range_size = typed_store_range->PostCkptSize();
                     ccm->InitRangeSize(static_cast<uint32_t>(new_range_id),
                                        static_cast<int32_t>(range_size),
                                        true,
@@ -1214,6 +1218,30 @@ public:
                                       data_table_type,
                                       this->table_name_.Engine());
             CcMap *data_ccm = shard_->GetCcm(data_table_name, this->cc_ng_id_);
+            if (data_ccm == nullptr)
+            {
+                InitCcmResult init_res = this->shard_->InitCcm(
+                    data_table_name, this->cc_ng_id_, ng_term, &req);
+                if (!init_res.success)
+                {
+                    if (init_res.error != CcErrorCode::NO_ERROR)
+                    {
+                        LOG(ERROR)
+                            << "InitCcm failed for data table: "
+                            << data_table_name.StringView() << ", error: "
+                            << static_cast<uint32_t>(init_res.error);
+                        req.AbortCcRequest(init_res.error);
+                    }
+                    // The req is aborted or will be re-enqueued.
+                    return false;
+                }
+                else
+                {
+                    assert(init_res.schema != nullptr);
+                    data_ccm =
+                        this->shard_->GetCcm(data_table_name, this->cc_ng_id_);
+                }
+            }
             assert(data_ccm != nullptr);
 
             for (uint idx = 0; idx < new_range_infos.size(); idx++)

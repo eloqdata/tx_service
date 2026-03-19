@@ -2951,6 +2951,10 @@ void LocalCcShards::CreateSplitRangeDataSyncTask(const TableName &table_name,
                                                  int32_t range_id,
                                                  uint64_t data_sync_ts)
 {
+    CODE_FAULT_INJECTOR("term_skip_auto_split_range", {
+        DLOG(INFO) << "FaultInject term_skip_auto_split_range";
+        return;
+    });
     std::shared_lock<std::shared_mutex> meta_lk(meta_data_mux_);
     std::shared_ptr<DataSyncStatus> status =
         std::make_shared<DataSyncStatus>(ng_id, ng_term, false);
