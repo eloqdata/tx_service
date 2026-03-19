@@ -546,9 +546,6 @@ public:
 
     ~TemplateTableRangeEntry()
     {
-        // LOG(INFO) << "TemplateTableRangeEntry destructor: addr="
-        //          << static_cast<void *>(this)
-        //          << " partition_id=" << range_info_.PartitionId();
     }
 
     void UpdateRangeEntry(uint64_t version_ts,
@@ -606,18 +603,8 @@ public:
         if (!empty_range)
         {
             range_slices->InitSlices(std::move(slices));
-            LOG(INFO) << "TemplateTableRangeEntry InitRangeSlices: addr="
-                      << static_cast<void *>(range_slices.get())
-                      << " partition_id=" << range_slices->PartitionId()
-                      << ", start key = "
-                      << range_slices->RangeStartKey()->ToString();
         }
         range_slices_ = std::move(range_slices);
-        LOG(INFO) << "TemplateTableRangeEntry InitRangeSlices: addr="
-                  << static_cast<void *>(range_slices_.get())
-                  << " partition_id=" << range_slices_->PartitionId()
-                  << ", start key = "
-                  << range_slices_->RangeStartKey()->ToString();
     }
 
     /**
@@ -653,9 +640,6 @@ public:
         if (range_slices_)
         {
             assert(range_slices_->Pins() == 0);
-            LOG(INFO) << "StoreRange DropStoreRange: addr="
-                      << static_cast<void *>(range_slices_.get())
-                      << " partition_id=" << range_slices_->PartitionId();
             range_slices_ = nullptr;
         }
     }

@@ -624,8 +624,6 @@ struct ReadBaseForArchiveCallbackData
         {
             waiting_.store(true, std::memory_order_release);
             lk.unlock();
-            LOG(INFO) << "== wait: this = " << this
-                      << ", flying read cnt = " << flying_read_cnt_;
             (*yield_fn)();
             lk.lock();
             waiting_.store(false, std::memory_order_release);
@@ -645,8 +643,6 @@ struct ReadBaseForArchiveCallbackData
     {
         std::unique_lock<bthread::Mutex> lk(mtx_);
         flying_read_cnt_--;
-        LOG(INFO) << "== decrease flying read cnt: this = " << this
-                  << ", flying read cnt = " << flying_read_cnt_;
         if (flying_read_cnt_ == 0)
         {
             if (resume_fn_ && waiting_.load(std::memory_order_acquire))
@@ -654,7 +650,6 @@ struct ReadBaseForArchiveCallbackData
                 waiting_.store(false, std::memory_order_release);
                 auto *fn = resume_fn_;
                 lk.unlock();
-                LOG(INFO) << "== notify, this = " << this;
                 (*fn)();
                 // Do not re-lock: resume_fn may acquire flush_worker_mux.
                 // Do not access members after fn(): object may be destroyed.
@@ -707,7 +702,8 @@ struct ReadBaseForArchiveCallbackData
     bthread::ConditionVariable &cv_;
     size_t &flying_read_cnt_;
     int &error_code_;
-    std::atomic<bool> &waiting_;  // shared: any callback's DecreaseFlyingReadCount can notify
+    std::atomic<bool>
+        &waiting_;  // shared: any callback's DecreaseFlyingReadCount can notify
     const std::function<void()> *resume_fn_{nullptr};
     int32_t partition_id_;
     std::string_view key_str_;
