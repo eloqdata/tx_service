@@ -474,8 +474,13 @@ public:
 
     void InitializeHashPartitionCkptHeap()
     {
-        hash_partition_ckpt_heap_ = mi_heap_new();
-        hash_partition_main_thread_id_ = mi_thread_id();
+        std::unique_lock<std::mutex> lk(hash_partition_ckpt_heap_mux_);
+        if (!hash_partition_ckpt_heap_)
+        {
+            hash_partition_main_thread_id_ = mi_thread_id();
+            hash_partition_ckpt_heap_ = mi_heap_new();
+        }
+
 #if defined(WITH_JEMALLOC)
         // create hash partition ckpt arena
         size_t sz = sizeof(uint32_t);
@@ -1925,6 +1930,7 @@ private:
 
     void TimerRun();
     void TableRangesHeapThreadRun();
+    void HashPartitionCkptHeapThreadRun();
     // Internal interface that exposes non const return type and does
     // not acquire mutex lock.
     TableRangeEntry *GetTableRangeEntryInternal(
@@ -2039,6 +2045,14 @@ private:
     bool table_ranges_heap_terminate_{false};
     std::mutex table_ranges_heap_thd_mux_;
     std::condition_variable table_ranges_heap_thd_cv_;
+
+    // Background thread that initializes hash_partition_ckpt_heap. After init,
+    // it sleeps until Shutdown.
+    std::thread hash_partition_ckpt_heap_thd_;
+    bool hash_partition_ckpt_heap_ready_{false};
+    bool hash_partition_ckpt_heap_terminate_{false};
+    std::mutex hash_partition_ckpt_heap_thd_mux_;
+    std::condition_variable hash_partition_ckpt_heap_thd_cv_;
 
     // When ccshard is full and no ccentry can be kicked-out, it will notify
     // checkpointer to do checkpoint and set flag is_wait_ckpt_ to true.

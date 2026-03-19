@@ -191,7 +191,16 @@ LocalCcShards::LocalCcShards(
             lk, [this] { return table_ranges_heap_ready_; });
     }
 
-    InitializeHashPartitionCkptHeap();
+    // Start background thread to initialize hash_partition_ckpt_heap.
+    hash_partition_ckpt_heap_thd_ =
+        std::thread([this] { HashPartitionCkptHeapThreadRun(); });
+    pthread_setname_np(hash_partition_ckpt_heap_thd_.native_handle(),
+                       "hash_part_ckpt_heap");
+    {
+        std::unique_lock<std::mutex> lk(hash_partition_ckpt_heap_thd_mux_);
+        hash_partition_ckpt_heap_thd_cv_.wait(
+            lk, [this] { return hash_partition_ckpt_heap_ready_; });
+    }
 
     std::set<NodeGroupId> ng_ids;
     for (auto &[ng_id, _] : *ng_configs)
@@ -291,6 +300,13 @@ LocalCcShards::~LocalCcShards()
     }
     timer_thd_.join();
     cc_shards_.clear();
+
+    {
+        std::scoped_lock<std::mutex> lk(hash_partition_ckpt_heap_thd_mux_);
+        hash_partition_ckpt_heap_terminate_ = true;
+        hash_partition_ckpt_heap_thd_cv_.notify_one();
+    }
+    hash_partition_ckpt_heap_thd_.join();
 
     {
         std::scoped_lock<std::mutex> lk(table_ranges_heap_thd_mux_);
@@ -436,14 +452,23 @@ void LocalCcShards::BindThreadToFastMetaDataShard(size_t shard_idx)
 void LocalCcShards::TableRangesHeapThreadRun()
 {
     InitializeTableRangesHeap();
-    {
-        std::lock_guard<std::mutex> lk(table_ranges_heap_thd_mux_);
-        table_ranges_heap_ready_ = true;
-        table_ranges_heap_thd_cv_.notify_one();
-    }
+
     std::unique_lock<std::mutex> lk(table_ranges_heap_thd_mux_);
+    table_ranges_heap_ready_ = true;
+    table_ranges_heap_thd_cv_.notify_one();
     table_ranges_heap_thd_cv_.wait(
         lk, [this] { return table_ranges_heap_terminate_; });
+}
+
+void LocalCcShards::HashPartitionCkptHeapThreadRun()
+{
+    InitializeHashPartitionCkptHeap();
+
+    std::unique_lock<std::mutex> lk(hash_partition_ckpt_heap_thd_mux_);
+    hash_partition_ckpt_heap_ready_ = true;
+    hash_partition_ckpt_heap_thd_cv_.notify_one();
+    hash_partition_ckpt_heap_thd_cv_.wait(
+        lk, [this] { return hash_partition_ckpt_heap_terminate_; });
 }
 
 void LocalCcShards::TimerRun()
