@@ -274,9 +274,7 @@ txservice::CcReqStatus txservice::LocalCcHandler::PostWrite(
     const TxRecord *record,
     OperationType operation_type,
     uint32_t key_shard_code,
-    CcHandlerResult<PostProcessResult> &hres,
-    int32_t partition_id,
-    bool on_dirty_range)
+    CcHandlerResult<PostProcessResult> &hres)
 {
     uint32_t ng_id = cce_addr.NodeGroupId();
     uint32_t dest_node_id = Sharder::Instance().LeaderNodeId(ng_id);
@@ -295,9 +293,7 @@ txservice::CcReqStatus txservice::LocalCcHandler::PostWrite(
                    record,
                    operation_type,
                    key_shard_code,
-                   &hres,
-                   partition_id,
-                   on_dirty_range);
+                   &hres);
         TX_TRACE_ACTION(this, req);
         TX_TRACE_DUMP(req);
         cc_shards_.EnqueueCcRequest(thd_id_, cce_addr.CoreId(), req);
@@ -316,9 +312,7 @@ txservice::CcReqStatus txservice::LocalCcHandler::PostWrite(
                              record,
                              operation_type,
                              key_shard_code,
-                             hres,
-                             partition_id,
-                             on_dirty_range);
+                             hres);
     }
     return req_status;
 }
@@ -1289,22 +1283,34 @@ void txservice::LocalCcHandler::ScanNextBatch(
                  scanner.is_require_recs_,
                  prefetch_size);
 
+        uint32_t core_cnt = cc_shards_.Count();
+        req->SetShardCount(core_cnt);
+
         // When the cc ng term is less than 0, this is the first scan of the
         // specified range.
-        if (cc_ng_term >= 0)
+        if (cc_ng_term < 0)
         {
-            ScanCache *cache = scanner.Cache(0);
+            scanner.ResetShards(core_cnt);
+        }
+
+        for (uint32_t core_id = 0; core_id < core_cnt; ++core_id)
+        {
+            ScanCache *cache = scanner.Cache(core_id);
             const ScanTuple *last_tuple = cache->LastTuple();
 
             req->SetPriorCceLockAddr(
-                last_tuple != nullptr ? last_tuple->cce_addr_.CceLockPtr() : 0);
+                last_tuple != nullptr ? last_tuple->cce_addr_.CceLockPtr() : 0,
+                core_id);
         }
 
         scanner.ResetCaches();
 
-        uint16_t dest_core = (range_id & 0x3FF) % cc_shards_.Count();
+        uint32_t core_rand = butil::fast_rand();
 
-        cc_shards_.EnqueueCcRequest(thd_id_, dest_core, req);
+        // The scan slice request is dispatched to the first core. The first
+        // core tries to pin the slice in memory and if succeeds, further
+        // dispatches the request to remaining cores for parallel scans.
+        cc_shards_.EnqueueCcRequest(thd_id_, core_rand % core_cnt, req);
     }
     else
     {
@@ -1901,8 +1907,7 @@ void txservice::LocalCcHandler::KickoutData(const TableName &table_name,
         KickoutCcEntryCc *req = kickout_ccentry_pool_.NextRequest();
         // For hash partition, all data in a single bucket should be hashed to
         // the same core.
-        uint16_t core_cnt = (clean_type == CleanType::CleanBucketData ||
-                             clean_type == CleanType::CleanRangeData)
+        uint16_t core_cnt = clean_type == CleanType::CleanBucketData
                                 ? 1
                                 : Sharder::Instance().GetLocalCcShardsCount();
         req->Reset(table_name,
@@ -1928,14 +1933,6 @@ void txservice::LocalCcHandler::KickoutData(const TableName &table_name,
             cc_shards_.EnqueueToCcShard(
                 Sharder::Instance().ShardBucketIdToCoreIdx((*bucket_id)[0]),
                 req);
-        }
-        else if (clean_type == CleanType::CleanRangeData)
-        {
-            assert(range_id != INT32_MAX);
-            uint16_t dest_core = static_cast<uint16_t>(
-                (range_id & 0x3FF) %
-                Sharder::Instance().GetLocalCcShardsCount());
-            cc_shards_.EnqueueToCcShard(dest_core, req);
         }
         else
         {
@@ -2016,13 +2013,20 @@ void txservice::LocalCcHandler::UpdateKeyCache(const TableName &table_name,
     hres.SetToBlock();
 #endif
 
+    size_t core_cnt = cc_shards_.Count();
     UpdateKeyCacheCc *req = update_key_cache_pool_.NextRequest();
-    req->Reset(
-        table_name, ng_id, tx_term, start_key, end_key, store_range, &hres);
-
-    uint16_t dest_core = static_cast<uint16_t>(
-        (store_range->PartitionId() & 0x3FF) % cc_shards_.Count());
-    cc_shards_.EnqueueCcRequest(dest_core, req);
+    req->Reset(table_name,
+               ng_id,
+               tx_term,
+               core_cnt,
+               start_key,
+               end_key,
+               store_range,
+               &hres);
+    for (size_t idx = 0; idx < core_cnt; ++idx)
+    {
+        cc_shards_.EnqueueCcRequest(idx, req);
+    }
 }
 
 /*

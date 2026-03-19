@@ -398,26 +398,6 @@ CcMap *CcShard::GetCcm(const TableName &table_name, uint32_t node_group)
     }
 }
 
-void CcShard::FetchTableRangeSize(const TableName &table_name,
-                                  int32_t partition_id,
-                                  NodeGroupId cc_ng_id,
-                                  int64_t cc_ng_term)
-{
-    FetchTableRangeSizeCc *fetch_cc = fetch_range_size_cc_pool_.NextRequest();
-
-    const TableName range_table_name(table_name.StringView(),
-                                     TableType::RangePartition,
-                                     table_name.Engine());
-    const TableRangeEntry *range_entry =
-        GetTableRangeEntry(range_table_name, cc_ng_id, partition_id);
-    assert(range_entry != nullptr);
-    TxKey start_key = range_entry->GetRangeInfo()->StartTxKey();
-
-    fetch_cc->Reset(
-        table_name, partition_id, start_key, this, cc_ng_id, cc_ng_term);
-    local_shards_.store_hd_->FetchTableRangeSize(fetch_cc);
-}
-
 void CcShard::AdjustDataKeyStats(const TableName &table_name,
                                  int64_t size_delta,
                                  int64_t dirty_delta)
@@ -3578,29 +3558,6 @@ void CcShard::RecycleTxLockInfo(TxLockInfo::uptr lock_info)
     assert(lock_info->next_ == nullptr);
     lock_info->next_ = std::move(tx_lock_info_head_.next_);
     tx_lock_info_head_.next_ = std::move(lock_info);
-}
-
-void CcShard::ResetRangeSplittingStatus(const TableName &table_name,
-                                        uint32_t ng_id,
-                                        uint32_t range_id)
-{
-    CcMap *ccm = GetCcm(table_name, ng_id);
-    if (ccm == nullptr)
-    {
-        return;
-    }
-
-    ccm->ResetRangeStatus(range_id);
-}
-
-void CcShard::CreateSplitRangeDataSyncTask(const TableName &table_name,
-                                           uint32_t ng_id,
-                                           int64_t ng_term,
-                                           int32_t range_id,
-                                           uint64_t data_sync_ts)
-{
-    local_shards_.CreateSplitRangeDataSyncTask(
-        table_name, ng_id, ng_term, range_id, data_sync_ts);
 }
 
 void CcShard::CollectCacheHit()

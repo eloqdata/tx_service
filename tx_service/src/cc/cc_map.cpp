@@ -27,7 +27,6 @@
 #include "cc/local_cc_shards.h"
 #include "cc_entry.h"
 #include "tx_trace.h"
-#include "type.h"
 
 namespace txservice
 {
@@ -460,59 +459,6 @@ void CcMap::DecrReadIntent(NonBlockingLock *lock,
         shard_->DeleteLockHoldingTx(tx_number, cce, ng_id);
         cce->RecycleKeyLock(*shard_);
     }
-}
-
-bool CcMap::InitRangeSize(uint32_t partition_id,
-                          int32_t persisted_size,
-                          bool succeed,
-                          bool emplace)
-{
-    auto it = range_sizes_.find(partition_id);
-    if (it == range_sizes_.end())
-    {
-        if (!emplace)
-        {
-            return false;
-        }
-        it = range_sizes_.emplace(partition_id, std::make_tuple(0, 0, false))
-                 .first;
-    }
-
-    if (succeed)
-    {
-        int32_t final_size = persisted_size + std::get<1>(it->second);
-        std::get<0>(it->second) = final_size < 0 ? 0 : final_size;
-        std::get<1>(it->second) = 0;
-
-        bool trigger_split =
-            !std::get<2>(it->second) &&
-            std::get<0>(it->second) >=
-                static_cast<int32_t>(StoreRange::range_max_size);
-        std::get<2>(it->second) =
-            trigger_split == true ? true : std::get<2>(it->second);
-        return trigger_split;
-    }
-    else
-    {
-        // Load range size failed; reset to not-initialized for retry.
-        std::get<0>(it->second) =
-            static_cast<int32_t>(RangeSizeStatus::kNotInitialized);
-    }
-    return false;
-}
-
-void CcMap::ResetRangeStatus(uint32_t partition_id)
-{
-    auto it = range_sizes_.find(partition_id);
-    if (it == range_sizes_.end())
-    {
-        return;
-    }
-    std::get<2>(it->second) = false;
-
-    DLOG(INFO) << "ResetRangeStatus: table: " << table_name_.StringView()
-               << " partition: " << partition_id
-               << " status: " << std::boolalpha << std::get<2>(it->second);
 }
 
 }  // namespace txservice

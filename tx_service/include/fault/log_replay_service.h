@@ -35,7 +35,6 @@
 #include <unordered_map>
 
 #include "txlog.h"
-#include "type.h"
 
 namespace txservice
 {
@@ -182,17 +181,6 @@ private:
 
     void ProcessRecoverTxTask(RecoverTxTask &task);
 
-    // Range split info management.
-    void SetSplitRangeInfo(uint32_t ng_id,
-                           TableName table_name,
-                           int32_t range_id,
-                           uint64_t commit_ts);
-
-    const std::unordered_map<TableName, std::unordered_map<int32_t, uint64_t>> *
-    GetSplitRangeInfo(uint32_t ng_id) const;
-
-    void CleanSplitRangeInfo(uint32_t ng_id);
-
     struct ConnectionInfo
     {
         ConnectionInfo() = default;
@@ -261,13 +249,6 @@ private:
     uint16_t port_;
 
     void ClearTx(uint64_t tx_number);
-
-    // Range split info for each node group:
-    // ng_id -> <data_table_name -> <partition id -> split range commit ts>>
-    std::unordered_map<
-        uint32_t,
-        std::unordered_map<TableName, std::unordered_map<int32_t, uint64_t>>>
-        split_range_info_;
 };
 }  // namespace fault
 }  // namespace txservice

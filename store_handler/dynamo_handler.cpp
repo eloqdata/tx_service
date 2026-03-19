@@ -2534,12 +2534,6 @@ void EloqDS::DynamoHandler::FetchRangeSlices(FetchRangeSlicesReq *fetch_cc)
     assert(false);
 }
 
-void EloqDS::DynamoHandler::FetchTableRangeSize(FetchTableRangeSizeCc *fetch_cc)
-{
-    LOG(ERROR) << "DynamoHandler::FetchTableRangeSize not implemented";
-    assert(false);
-}
-
 void EloqDS::DynamoHandler::OnFetchRangeSlices(
     const Aws::DynamoDB::DynamoDBClient *client,
     const Aws::DynamoDB::Model::GetItemRequest &request,

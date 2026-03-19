@@ -176,10 +176,6 @@ message UploadBatchRequest
     bytes commit_ts = 9;
     bytes rec_status = 10;
     UploadBatchKind kind = 11;
-    // Target range partition;
-    int32 partition_id = 12;
-    // Per-key one byte: [uint8_t, ...]
-    bytes range_size_flags = 13;
 }
 
 message UploadBatchSlicesRequest
@@ -940,8 +936,6 @@ message PostCommitRequest {
     bytes record = 5;
     uint32 operation_type = 6;
     uint32 key_shard_code = 7;
-    int32 partition_id = 8;
-    bool on_dirty_range = 9;
 }
 
 message ForwardPostCommitRequest {
@@ -1110,7 +1104,7 @@ message ScanSliceRequest {
     bool end_inclusive = 11;
     bool is_forward = 12;
     uint64 ts = 13;
-    uint64 prior_cce_lock = 14;
+    repeated uint64 prior_cce_lock_vec = 14;
     IsolationType iso_level = 15;
     CcProtocolType protocol = 16;
     bool is_for_write = 17;
@@ -1127,7 +1121,6 @@ message ScanSliceResponse {
     int64 tx_term = 3;
     uint32 command_id=4;
     int32 error_code = 5;
-    uint32 core_id = 16;
     bytes tuple_cnt = 6;
     bytes last_key = 7;
     SlicePosition slice_position = 8;
@@ -1138,6 +1131,9 @@ message ScanSliceResponse {
     bytes gap_ts = 13;
     bytes cce_lock_ptr = 14;
     bytes term = 15;
+    bytes key_start_offsets = 16;
+    bytes record_start_offsets = 17;
+    bytes trailing_cnts = 18;
     uint64 txm_addr = 19;
 }
 

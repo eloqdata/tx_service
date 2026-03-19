@@ -70,9 +70,10 @@ void StoreSlice::StartLoading(FillStoreSliceCc *fill_req,
     assert(pins_ == 0);
     status_ = SliceStatus::BeingLoaded;
 
-    uint16_t dest_core = static_cast<uint16_t>(
-        (fill_req->PartitionId() & 0x3FF) % cc_shards.Count());
-    cc_shards.EnqueueToCcShard(dest_core, fill_req);
+    for (uint16_t core_id = 0; core_id < cc_shards.Count(); ++core_id)
+    {
+        cc_shards.EnqueueCcRequest(core_id, fill_req);
+    }
 }
 
 void StoreSlice::CommitLoading(StoreRange &range, uint32_t slice_size)
@@ -172,9 +173,19 @@ void StoreSlice::InitKeyCache(CcShard *cc_shard,
         pins_++;
 
         init_key_cache_cc_ = cc_shard->NewInitKeyCacheCc();
-        init_key_cache_cc_->Reset(range, this, *tbl_name, term, ng_id);
+        init_key_cache_cc_->Reset(range,
+                                  this,
+                                  range->local_cc_shards_.Count(),
+                                  *tbl_name,
+                                  term,
+                                  ng_id);
 
-        cc_shard->Enqueue(init_key_cache_cc_);
+        uint16_t core_cnt = range->local_cc_shards_.Count();
+        for (uint16_t core_id = 0; core_id < core_cnt; core_id++)
+        {
+            Sharder::Instance().GetLocalCcShards()->EnqueueToCcShard(
+                core_id, init_key_cache_cc_);
+        }
     }
 }
 
@@ -243,12 +254,17 @@ StoreRange::StoreRange(uint32_t partition_id,
                                    estimate_rec_size));
         }
 
-        key_cache_ = std::make_unique<cuckoofilter::CuckooFilter<size_t, 12>>(
-            key_cache_size);
+        uint16_t core_cnt = Sharder::Instance().GetLocalCcShardsCount();
+        for (uint16_t id = 0; id < core_cnt; id++)
+        {
+            key_cache_.push_back(
+                std::make_unique<cuckoofilter::CuckooFilter<size_t, 12>>(
+                    key_cache_size / core_cnt));
+        }
     }
     else
     {
-        key_cache_ = nullptr;
+        key_cache_.resize(0);
     }
 }
 
@@ -433,11 +449,12 @@ bool StoreRange::SampleSubRangeKeys(StoreSlice *slice,
                                         &end_key,
                                         key_cnt);
 
-    uint16_t dest_core = static_cast<uint16_t>((partition_id_ & 0x3FF) %
-                                               local_cc_shards_.Count());
-    local_cc_shards_.EnqueueLowPriorityCcRequestToShard(dest_core,
-                                                        &sample_keys_cc);
-    DLOG(INFO) << "Send the sample range keys request to shard#" << dest_core;
+    // Send the request to one shard randomly.
+    uint64_t core_rand = butil::fast_rand();
+    local_cc_shards_.EnqueueLowPriorityCcRequestToShard(
+        core_rand % local_cc_shards_.Count(), &sample_keys_cc);
+    DLOG(INFO) << "Send the sample range keys request to shard#"
+               << core_rand % local_cc_shards_.Count();
 
     sample_keys_cc.Wait();
     CcErrorCode res = sample_keys_cc.ErrorCode();

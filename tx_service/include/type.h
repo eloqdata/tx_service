@@ -167,13 +167,6 @@ enum class TableEngine : uint8_t
     InternalHash = 5,  // eg. Sequence table is a kind of internal hash table.
 };
 
-// Status values for range_sizes_.first (range size not yet known).
-enum RangeSizeStatus : int32_t
-{
-    kNotInitialized = -2,  // Range size not yet initialized; need to fetch.
-    kLoading = -1,         // Range size is being loaded; delta goes to .second.
-};
-
 inline std::string KvTablePrefixOf(TableEngine engine)
 {
     switch (engine)

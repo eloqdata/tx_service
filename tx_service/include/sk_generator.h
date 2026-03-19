@@ -40,11 +40,8 @@ class UploadIndexContext
 public:
     using TableIndexSet =
         std::unordered_map<TableName, std::vector<WriteEntry>>;
-    // ng_id -> (range_id -> vector of (range_size_flags, WriteEntry*))
-    using NGIndexSet = std::unordered_map<
-        NodeGroupId,
-        std::unordered_map<int32_t,
-                           std::vector<std::pair<uint8_t, WriteEntry *>>>>;
+    using NGIndexSet =
+        std::unordered_map<NodeGroupId, std::vector<WriteEntry *>>;
 
 private:
     enum struct UploadTaskStatus
@@ -104,18 +101,16 @@ private:
     CcErrorCode UploadEncodedIndex(UploadIndexTask &upload_task);
     CcErrorCode UploadIndexInternal(
         std::unordered_map<TableName, NGIndexSet> &ng_index_set);
-    void SendIndexes(
-        const TableName &table_name,
-        NodeGroupId dest_ng_id,
-        int64_t &ng_term,
-        int32_t partition_id,
-        const std::vector<std::pair<uint8_t, WriteEntry *>> &write_entry_vec,
-        size_t batch_size,
-        size_t start_key_idx,
-        bthread::Mutex &req_mux,
-        bthread::ConditionVariable &req_cv,
-        size_t &finished_req_cnt,
-        CcErrorCode &res_code);
+    void SendIndexes(const TableName &table_name,
+                     NodeGroupId dest_ng_id,
+                     int64_t &ng_term,
+                     const std::vector<WriteEntry *> &write_entry_vec,
+                     size_t batch_size,
+                     size_t start_key_idx,
+                     bthread::Mutex &req_mux,
+                     bthread::ConditionVariable &req_cv,
+                     size_t &finished_req_cnt,
+                     CcErrorCode &res_code);
     // Acquire and release range read lock.
     CcErrorCode AcquireRangeReadLocks(
         TransactionExecution *acq_lock_txm,

@@ -159,9 +159,7 @@ void txservice::remote::RemoteCcHandler::PostWrite(
     const TxRecord *record,
     OperationType operation_type,
     uint32_t key_shard_code,
-    CcHandlerResult<PostProcessResult> &hres,
-    int32_t partition_id,
-    bool on_dirty_range)
+    CcHandlerResult<PostProcessResult> &hres)
 {
     CcMessage send_msg;
 
@@ -196,8 +194,6 @@ void txservice::remote::RemoteCcHandler::PostWrite(
     post_commit->set_commit_ts(commit_ts);
     post_commit->set_operation_type(static_cast<uint32_t>(operation_type));
     post_commit->set_key_shard_code(key_shard_code);
-    post_commit->set_partition_id(partition_id);
-    post_commit->set_on_dirty_range(on_dirty_range);
 
     stream_sender_.SendMessageToNg(cce_addr.NodeGroupId(), send_msg, &hres);
 }
@@ -724,15 +720,20 @@ void txservice::remote::RemoteCcHandler::ScanNext(
 
     CcScanner &scanner = *hd_res.Value().ccm_scanner_;
 
-    scan_slice->clear_prior_cce_lock();
+    scan_slice->clear_prior_cce_lock_vec();
     // When the cc ng term is greater than 0, this scan resumes the last scan in
     // the range. Sets the cc entry addresses where last scan stops.
     if (cc_ng_term > 0)
     {
-        ScanCache *cache = scanner.Cache(0);
-        const ScanTuple *last_tuple = cache->LastTuple();
-        scan_slice->set_prior_cce_lock(
-            last_tuple != nullptr ? last_tuple->cce_addr_.CceLockPtr() : 0);
+        uint32_t remote_core_cnt = scanner.ShardCount();
+
+        for (uint32_t core_id = 0; core_id < remote_core_cnt; ++core_id)
+        {
+            ScanCache *cache = scanner.Cache(core_id);
+            const ScanTuple *last_tuple = cache->LastTuple();
+            scan_slice->add_prior_cce_lock_vec(
+                last_tuple != nullptr ? last_tuple->cce_addr_.CceLockPtr() : 0);
+        }
 
         scanner.ResetCaches();
     }

@@ -67,7 +67,6 @@ struct RangeSliceBatchPlan
     std::vector<std::string> segment_keys;     // Owned string buffers
     std::vector<std::string> segment_records;  // Owned string buffers
     size_t version;
-    int32_t range_size{0};
 
     // Clear method for reuse
     void Clear()
@@ -76,7 +75,6 @@ struct RangeSliceBatchPlan
         segment_keys.clear();
         segment_records.clear();
         version = 0;
-        range_size = 0;
     }
 };
 
@@ -285,9 +283,6 @@ public:
 
     void FetchRangeSlices(txservice::FetchRangeSlicesReq *fetch_cc) override;
 
-    void FetchTableRangeSize(
-        txservice::FetchTableRangeSizeCc *fetch_cc) override;
-
     bool DeleteOutOfRangeData(
         const txservice::TableName &table_name,
         int32_t partition_id,
@@ -356,8 +351,7 @@ public:
     std::string EncodeRangeValue(int32_t range_id,
                                  uint64_t range_version,
                                  uint64_t version,
-                                 uint32_t segment_cnt,
-                                 int32_t range_size);
+                                 uint32_t segment_cnt);
     std::string EncodeRangeSliceKey(const txservice::TableName &table_name,
                                     int32_t range_id,
                                     uint32_t segment_id);
@@ -683,7 +677,6 @@ private:
         uint64_t range_version,
         uint64_t version,
         uint32_t segment_cnt,
-        int32_t range_size,
         RangeMetadataAccumulator &accumulator);
 
     void DispatchRangeMetadataBatches(
@@ -964,11 +957,6 @@ private:
         ::google::protobuf::Closure *closure,
         DataStoreServiceClient &client,
         const remote::CommonResult &result);
-
-    friend void FetchRangeSizeCallback(void *data,
-                                       ::google::protobuf::Closure *closure,
-                                       DataStoreServiceClient &client,
-                                       const remote::CommonResult &result);
 };
 
 struct UpsertTableData

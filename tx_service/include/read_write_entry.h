@@ -49,25 +49,17 @@ struct WriteSetEntry
           op_(other.op_),
           cce_addr_(other.cce_addr_),
           key_shard_code_(other.key_shard_code_),
-          partition_id_(other.partition_id_),
-          forward_addr_(std::move(other.forward_addr_)),
-          on_dirty_range_(other.on_dirty_range_)
+          forward_addr_(std::move(other.forward_addr_))
     {
     }
 
     WriteSetEntry &operator=(WriteSetEntry &&other) noexcept
     {
-        if (this == &other)
-        {
-            return *this;
-        }
         rec_ = std::move(other.rec_);
         op_ = other.op_;
         cce_addr_ = other.cce_addr_;
         key_shard_code_ = other.key_shard_code_;
-        partition_id_ = other.partition_id_;
         forward_addr_ = std::move(other.forward_addr_);
-        on_dirty_range_ = other.on_dirty_range_;
 
         return *this;
     }
@@ -76,11 +68,8 @@ struct WriteSetEntry
     OperationType op_;
     CcEntryAddr cce_addr_;
     uint32_t key_shard_code_{};
-    int32_t partition_id_{-1};
     // Used in double write scenarios during online DDL.
-    // key shard code -> (partition id, cce addr)
-    std::unordered_map<uint32_t, std::pair<int32_t, CcEntryAddr>> forward_addr_;
-    bool on_dirty_range_{false};
+    std::unordered_map<uint32_t, CcEntryAddr> forward_addr_;
 };
 
 /**

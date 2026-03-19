@@ -38,7 +38,6 @@
 #include <variant>
 #include <vector>
 
-#include "absl/container/flat_hash_map.h"
 #include "cc_entry.h"
 #include "cc_map.h"
 #include "cc_page_clean_guard.h"
@@ -251,7 +250,7 @@ public:
                 auto it = Iterator(cce_ptr, ccp, &neg_inf_);
                 target_key = it->first;
                 auto res = shard_->local_shards_.AddKeyToKeyCache(
-                    table_name_, cc_ng_id_, *target_key);
+                    table_name_, cc_ng_id_, shard_->core_id_, *target_key);
                 if (res == RangeSliceOpStatus::Retry)
                 {
                     // If the insert fails due to key cache is being
@@ -419,7 +418,10 @@ public:
                         // or auto incr pk insert, the ReadCc is skipped and we
                         // need to update key cache here.
                         auto res = shard_->local_shards_.AddKeyToKeyCache(
-                            table_name_, cc_ng_id_, *target_key);
+                            table_name_,
+                            cc_ng_id_,
+                            shard_->core_id_,
+                            *target_key);
                         if (res == RangeSliceOpStatus::Retry)
                         {
                             // If the insert fails due to key cache is being
@@ -589,8 +591,6 @@ public:
                     cce->ArchiveBeforeUpdate();
                 }
 
-                [[maybe_unused]] const size_t old_payload_size =
-                    cce->PayloadSize();
                 if (is_del)
                 {
                     cce->payload_.SetCurrentPayload(nullptr);
@@ -611,42 +611,6 @@ public:
                     is_del ? RecordStatus::Deleted : RecordStatus::Normal;
                 bool was_dirty = cce->IsDirty();
                 cce->SetCommitTsPayloadStatus(commit_ts, new_status);
-
-                if constexpr (RangePartitioned)
-                {
-                    if (req.NeedUpdateRangeSize())
-                    {
-                        const int64_t key_delta_size =
-                            (new_status == RecordStatus::Deleted)
-                                ? (-static_cast<int64_t>(write_key->Size() +
-                                                         old_payload_size))
-                                : (cce_old_status != RecordStatus::Normal
-                                       ? static_cast<int64_t>(
-                                             write_key->Size() +
-                                             cce->PayloadSize())
-                                       : static_cast<int64_t>(
-                                             cce->PayloadSize() -
-                                             old_payload_size));
-                        const uint32_t range_id = req.PartitionId();
-                        // is_dirty: true when range is splitting.
-                        bool need_split = UpdateRangeSize(
-                            range_id,
-                            static_cast<int32_t>(key_delta_size),
-                            req.OnDirtyRange());
-
-                        if (need_split)
-                        {
-                            assert(!req.OnDirtyRange());
-                            // Create a data sync task for the range.
-                            shard_->CreateSplitRangeDataSyncTask(
-                                table_name_,
-                                cc_ng_id_,
-                                cce_addr->Term(),
-                                range_id,
-                                commit_ts);
-                        }
-                    }
-                }
 
                 if (req.IsInitialInsert())
                 {
@@ -1709,6 +1673,7 @@ public:
                                         static_cast<TemplateStoreRange<KeyT> *>(
                                             slice_id.Range());
                                     auto res = range->AddKey(*look_key,
+                                                             shard_->core_id_,
                                                              slice_id.Slice());
                                     if (res == RangeSliceOpStatus::Error)
                                     {
@@ -3469,8 +3434,7 @@ public:
         if (ng_term < 0 ||
             (req.RangeCcNgTerm() > 0 && req.RangeCcNgTerm() != ng_term))
         {
-            req.SetError(CcErrorCode::REQUESTED_NODE_NOT_LEADER);
-            return true;
+            return req.SetError(CcErrorCode::REQUESTED_NODE_NOT_LEADER);
         }
 
         if (req.SchemaVersion() != 0 && req.SchemaVersion() != schema_ts_)
@@ -3479,12 +3443,39 @@ public:
             return true;
         }
 
-        if (req.IsWaitForSnapshot())
+        if (req.SendResponseIfFinished())
         {
-            assert(req.WaitForSnapshotCnt() == 0);
             req.UnpinSlices();
-            req.SetFinish();
             return true;
+        }
+
+        if (req.IsWaitForSnapshot(shard_->core_id_))
+        {
+            assert(req.WaitForSnapshotCnt(shard_->core_id_) == 0);
+            if (req.SetFinish())
+            {
+                if (req.Result()->Value().is_local_)
+                {
+                    req.UnpinSlices();
+                    return true;
+                }
+                else if (req.IsResponseSender(shard_->core_id_))
+                {
+                    req.SendResponseIfFinished();
+                    req.UnpinSlices();
+                    return true;
+                }
+                else
+                {
+                    shard_->local_shards_.EnqueueCcRequest(
+                        shard_->core_id_, req.Txn(), &req);
+                    return false;
+                }
+            }
+            else
+            {
+                return false;
+            }
         }
 
         CcOperation cc_op;
@@ -3553,17 +3544,18 @@ public:
             req.SetEndKey(TxKey(std::move(decoded_end_key)));
         }
 
+        uint16_t core_id = shard_->LocalCoreId();
         TemplateScanCache<KeyT, ValueT> *scan_cache = nullptr;
         RemoteScanSliceCache *remote_scan_cache = nullptr;
         if (req.IsLocal())
         {
             scan_cache = static_cast<TemplateScanCache<KeyT, ValueT> *>(
-                req.GetLocalScanCache());
+                req.GetLocalScanCache(core_id));
             assert(scan_cache != nullptr);
         }
         else
         {
-            remote_scan_cache = req.GetRemoteScanCache();
+            remote_scan_cache = req.GetRemoteScanCache(core_id);
             assert(remote_scan_cache != nullptr);
         }
 
@@ -3605,6 +3597,10 @@ public:
 
         if (req.SliceId().Slice() == nullptr)
         {
+            // The scan slice request is first dispatched to one core, which
+            // pins the slice in memory. After the slice is pinned, the request
+            // is dispatched to other cores to scan in parallel. The slice is
+            // unpinned by the last core finishing the scan batch.
             RangeSliceOpStatus pin_status = RangeSliceOpStatus::NotPinned;
             uint32_t max_pin_cnt = req.PrefetchSize();
             const StoreSlice *last_pinned_slice;
@@ -3654,8 +3650,7 @@ public:
             {
                 if (slice_id.Range()->HasLock())
                 {
-                    req.SetError(CcErrorCode::OUT_OF_MEMORY);
-                    return true;
+                    return req.SetError(CcErrorCode::OUT_OF_MEMORY);
                 }
                 else
                 {
@@ -3672,12 +3667,27 @@ public:
             {
                 // If the pin operation returns an error, the data store
                 // is inaccessible.
-                req.SetError(CcErrorCode::PIN_RANGE_SLICE_FAILED);
-                return true;
+                return req.SetError(CcErrorCode::PIN_RANGE_SLICE_FAILED);
             }
 
             assert(pin_status == RangeSliceOpStatus::Successful);
             req.PinSlices(slice_id, last_pinned_slice);
+            // Update unfinished cnt before dispatching to remaining cores.
+            req.SetUnfinishedCoreCnt(req.GetShardCount());
+
+            // Dispatches to remaining cores to scan pinned slice(s) in
+            // parallel.
+            for (uint16_t core_id = 0; core_id < shard_->local_shards_.Count();
+                 ++core_id)
+            {
+                if (core_id == shard_->core_id_)
+                {
+                    continue;
+                }
+
+                shard_->local_shards_.EnqueueCcRequest(
+                    shard_->core_id_, core_id, &req);
+            }
         }
 
         Iterator scan_ccm_it;
@@ -3735,6 +3745,7 @@ public:
                 case CcErrorCode::MVCC_READ_MUST_WAIT_WRITE:
                 {
                     req.SetBlockingInfo(
+                        shard_->core_id_,
                         reinterpret_cast<uint64_t>(cce->GetLockAddr()),
                         scan_type,
                         ScanBlockingType::BlockOnFuture);
@@ -3743,6 +3754,7 @@ public:
                 case CcErrorCode::ACQUIRE_LOCK_BLOCKED:
                 {
                     req.SetBlockingInfo(
+                        shard_->core_id_,
                         reinterpret_cast<uint64_t>(cce->GetLockAddr()),
                         scan_type,
                         ScanBlockingType::BlockOnLock);
@@ -3802,7 +3814,7 @@ public:
                     assert(fetch_ret_status ==
                            store::DataStoreHandler::DataStoreOpStatus::Success);
                     (void) fetch_ret_status;
-                    req.IncreaseWaitForSnapshotCnt();
+                    req.IncreaseWaitForSnapshotCnt(shard_->core_id_);
                 }
             }
             else
@@ -3852,14 +3864,14 @@ public:
                     assert(fetch_ret_status ==
                            store::DataStoreHandler::DataStoreOpStatus::Success);
                     (void) fetch_ret_status;
-                    req.IncreaseWaitForSnapshotCnt();
+                    req.IncreaseWaitForSnapshotCnt(shard_->core_id_);
                 }
             }
 
             return {ScanReturnType::Success, CcErrorCode::NO_ERROR};
         };
 
-        uint64_t cce_lock_addr = req.BlockingCceLockAddr();
+        uint64_t cce_lock_addr = req.BlockingCceLockAddr(core_id);
         if (cce_lock_addr != 0)
         {
             KeyGapLockAndExtraData *lock =
@@ -3869,7 +3881,7 @@ public:
                 CcEntry<KeyT, ValueT, VersionedRecord, RangePartitioned> *>(
                 lock->GetCcEntry());
 
-            auto [blocking_type, scan_type] = req.BlockingPair();
+            auto [blocking_type, scan_type] = req.BlockingPair(core_id);
             CcPage<KeyT, ValueT, VersionedRecord, RangePartitioned> *ccp =
                 static_cast<
                     CcPage<KeyT, ValueT, VersionedRecord, RangePartitioned> *>(
@@ -3924,16 +3936,43 @@ public:
                         assert(lock_pair.second ==
                                CcErrorCode::MVCC_READ_FOR_WRITE_CONFLICT);
 
-                        if (is_read_snapshot && req.WaitForSnapshotCnt() > 0)
+                        if (req.IsLocal())
                         {
-                            req.SetIsWaitForSnapshot();
+                            req.GetLocalScanner()->CommitAtCore(core_id);
+                        }
+
+                        if (is_read_snapshot &&
+                            req.WaitForSnapshotCnt(shard_->core_id_) > 0)
+                        {
+                            req.SetIsWaitForSnapshot(shard_->core_id_);
                             req.DeferSetError(lock_pair.second);
                             return false;
                         }
 
-                        req.UnpinSlices();
-                        req.SetError(lock_pair.second);
-                        return true;
+                        if (req.SetError(lock_pair.second))
+                        {
+                            if (req.Result()->Value().is_local_)
+                            {
+                                req.UnpinSlices();
+                                return true;
+                            }
+                            else if (req.IsResponseSender(shard_->core_id_))
+                            {
+                                req.SendResponseIfFinished();
+                                req.UnpinSlices();
+                                return true;
+                            }
+                            else
+                            {
+                                shard_->local_shards_.EnqueueCcRequest(
+                                    shard_->core_id_, req.Txn(), &req);
+                                return false;
+                            }
+                        }
+                        else
+                        {
+                            return false;
+                        }
                     }
 
                     is_locked = lock_pair.first != LockType::NoLock;
@@ -3980,7 +4019,7 @@ public:
                                store::DataStoreHandler::DataStoreOpStatus::
                                    Success);
                         (void) fetch_ret_status;
-                        req.IncreaseWaitForSnapshotCnt();
+                        req.IncreaseWaitForSnapshotCnt(shard_->core_id_);
                     }
                 }
                 else
@@ -4031,7 +4070,7 @@ public:
                                store::DataStoreHandler::DataStoreOpStatus::
                                    Success);
                         (void) fetch_ret_status;
-                        req.IncreaseWaitForSnapshotCnt();
+                        req.IncreaseWaitForSnapshotCnt(shard_->core_id_);
                     }
                 }
             }
@@ -4077,39 +4116,90 @@ public:
         }
 
         RangeScanSliceResult &slice_result = hd_res->Value();
+        auto [final_end_tx_key, end_finalized] = slice_result.PeekLastKey();
         if (req.Direction() == ScanDirection::Forward)
         {
             const TemplateStoreSlice<KeyT> *last_slice =
                 static_cast<const TemplateStoreSlice<KeyT> *>(
                     req.LastPinnedSlice());
 
-            // By default, the scan's end is the exclusive end of the slice or
-            // the request's specified end key, whichever is smaller. In case
-            // keys in the slice are too many to fit into the scan cache, the
-            // key right after the last scanned tuple becomes the exclusive end
-            // of scans.
+            // The scan at core 0 sets the scan's end key. By default, the
+            // scan's end is the exclusive end of the slice or the request's
+            // specified end key, whichever is smaller. In case keys in the
+            // slice are too many to fit into the scan cache, the key right
+            // after the last scanned tuple at core 0 becomes the exclusive end
+            // of scans at other cores. In such a case, it is mandatory that all
+            // keys smaller than the end key at other cores are returned in this
+            // batch. So, scans at other cores may slightly exceed the scan
+            // cache's capacity.
+
             const KeyT *initial_end = nullptr;
             bool init_end_inclusive = false;
 
-            // Takes the smaller of the slice's last key and the request's end
-            // key as the local scan's initial end.
-            const KeyT *slice_end = last_slice->EndKey();
-            assert(slice_end != nullptr);
-
-            // If the request specifies the end key and it falls into the
-            // slice, initializes the local scan's end to the request's end
-            // key. Or, the scan end is the slice's end.
-            if (req_end_key != nullptr &&
-                (*req_end_key < *slice_end ||
-                 (*req_end_key == *slice_end && !req.EndInclusive())))
+            // Given the scan batch's final end key, deduces the local scan's
+            // end and inclusiveness.
+            auto deduce_scan_end =
+                [](const KeyT *batch_end_key,
+                   const KeyT *req_end_key,
+                   bool req_inclusive) -> std::pair<const KeyT *, bool>
             {
-                initial_end = req_end_key;
-                init_end_inclusive = req.EndInclusive();
+                const KeyT *end = nullptr;
+                bool inclusive = false;
+
+                assert(batch_end_key != nullptr);
+                // If the request specifies the end key and it is the scan
+                // batch's end key, the scan's inclusiveness is determined by
+                // the request. Or, the scan batch's end must be the exclusive
+                // end of a slice or positive infinity.
+                if (batch_end_key == req_end_key)
+                {
+                    end = req_end_key;
+                    inclusive = req_inclusive;
+                }
+                else
+                {
+                    end = batch_end_key;
+                    inclusive = false;
+                }
+
+                return {end, inclusive};
+            };
+
+            if (!end_finalized)
+            {
+                // This scan batch's end key has not been set. Takes the smaller
+                // of the slice's last key and the request's end key as the
+                // local scan's initial end. The initial end may be modified, if
+                // another core finishes earlier and finalizes the batch's end
+                // before this core. The final end may be smaller or greater
+                // than the initial end.
+                const KeyT *slice_end = last_slice->EndKey();
+                assert(slice_end != nullptr);
+
+                // If the request specifies the end key and it falls into the
+                // slice, initializes the local scan's end to the request's end
+                // key. Or, the scan end is the slice's end.
+                if (req_end_key != nullptr &&
+                    (*req_end_key < *slice_end ||
+                     (*req_end_key == *slice_end && !req.EndInclusive())))
+                {
+                    initial_end = req_end_key;
+                    init_end_inclusive = req.EndInclusive();
+                }
+                else
+                {
+                    initial_end = slice_end;
+                    init_end_inclusive = false;
+                }
             }
             else
             {
-                initial_end = slice_end;
-                init_end_inclusive = false;
+                // This scan batch's end key has been finalized by one of the
+                // cores. Deduces the local scan's end and inclusiveness.
+                std::tie(initial_end, init_end_inclusive) =
+                    deduce_scan_end(final_end_tx_key->GetKey<KeyT>(),
+                                    req_end_key,
+                                    req.EndInclusive());
             }
 
             auto scan_batch_func =
@@ -4136,11 +4226,12 @@ public:
                 return {scan_ret, err_code};
             };
 
-            auto scan_loop_func =
-                [this, &scan_batch_func, &is_cache_full](
-                    Iterator &scan_ccm_it,
-                    const KeyT &end_key,
-                    bool inclusive) -> std::pair<ScanReturnType, CcErrorCode>
+            auto scan_loop_func = [this, &scan_batch_func, &is_cache_full](
+                                      Iterator &scan_ccm_it,
+                                      const KeyT &end_key,
+                                      bool inclusive,
+                                      bool end_finalized)
+                -> std::pair<ScanReturnType, CcErrorCode>
             {
                 ScanReturnType scan_ret = ScanReturnType::Success;
                 CcErrorCode err_code = CcErrorCode::NO_ERROR;
@@ -4192,7 +4283,7 @@ public:
                             scan_ccm_it = End();
                             ccp = nullptr;
                         }
-                        else if (is_cache_full())
+                        else if (!end_finalized && is_cache_full())
                         {
                             scan_ccm_it =
                                 Iterator(ccp->next_page_, 0, &neg_inf_);
@@ -4214,23 +4305,50 @@ public:
                 return {scan_ret, err_code};
             };
 
-            auto [scan_ret, err] =
-                scan_loop_func(scan_ccm_it, *initial_end, init_end_inclusive);
+            auto [scan_ret, err] = scan_loop_func(
+                scan_ccm_it, *initial_end, init_end_inclusive, end_finalized);
             switch (scan_ret)
             {
             case ScanReturnType::Blocked:
                 return false;
             case ScanReturnType::Error:
-                if (is_read_snapshot && req.WaitForSnapshotCnt() > 0)
+                if (req.IsLocal())
                 {
-                    req.SetIsWaitForSnapshot();
+                    req.GetLocalScanner()->CommitAtCore(core_id);
+                }
+
+                if (is_read_snapshot &&
+                    req.WaitForSnapshotCnt(shard_->core_id_) > 0)
+                {
+                    req.SetIsWaitForSnapshot(shard_->core_id_);
                     req.DeferSetError(err);
                     return false;
                 }
 
-                req.UnpinSlices();
-                req.SetError(err);
-                return true;
+                if (req.SetError(err))
+                {
+                    if (req.Result()->Value().is_local_)
+                    {
+                        req.UnpinSlices();
+                        return true;
+                    }
+                    else if (req.IsResponseSender(shard_->core_id_))
+                    {
+                        req.SendResponseIfFinished();
+                        req.UnpinSlices();
+                        return true;
+                    }
+                    else
+                    {
+                        shard_->local_shards_.EnqueueCcRequest(
+                            shard_->core_id_, req.Txn(), &req);
+                        return false;
+                    }
+                }
+                else
+                {
+                    return false;
+                }
             case ScanReturnType::Yield:
                 shard_->Enqueue(shard_->core_id_, &req);
                 return false;
@@ -4238,60 +4356,233 @@ public:
                 break;
             }
 
-            const KeyT *local_end = nullptr;
-            SlicePosition slice_position;
+            // If the end of this scan batch is not finalized when the local
+            // scan at this core started, tries to set the batch's end using the
+            // local end. If another core has finalized the batch's end, the
+            // scan at this core may need to be adjusted: if the batch's final
+            // end is less than the end at this core, keys after the final end
+            // needs to be removed from the local scan cache; if the batch's
+            // final end is greater than the end of this core, keys smaller than
+            // the batch's final end but greater than the local end need to be
+            // included in the local scan cache.
+            if (!end_finalized)
+            {
+                const KeyT *local_end = nullptr;
+                SlicePosition slice_position;
 
-            // scan_ccm_it points to the entry after the last scanned tuple.
-            // If the slice ends with positive infinity and has been fully
-            // scanned, scan_ccm_it would point to positive infinity.
-            auto pos_inf_it = End();
-            if (scan_ccm_it != pos_inf_it &&
-                (*scan_ccm_it->first < *initial_end ||
-                 (init_end_inclusive && *scan_ccm_it->first == *initial_end)))
-            {
-                // The slice is too large. The scan has not fully scanned
-                // the slice, before reaching the cache's size limit.
-                // Pretends the slice's exclusive end to be the key after
-                // the last scanned tuple, from which the next scan batch
-                // resume.
-                local_end = scan_ccm_it->first;
-                slice_position = SlicePosition::Middle;
-            }
-            else
-            {
-                // The slice has been fully scanned. If the request
-                // specifies the end key, which falls into the slice, given
-                // that the slice has been fully scanned, no future scan
-                // batches are needed. So, we pretend that the scan has
-                // reached the last slice ending with positive infinity.
-                // The calling tx will terminate the scan.
-                if (initial_end == KeyT::PositiveInfinity() ||
-                    req_end_key == initial_end)
+                // scan_ccm_it points to the entry after the last scanned tuple.
+                // If the slice ends with positive infinity and has been fully
+                // scanned, scan_ccm_it would point to positive infinity.
+                auto pos_inf_it = End();
+                if (scan_ccm_it != pos_inf_it &&
+                    (*scan_ccm_it->first < *initial_end ||
+                     (init_end_inclusive &&
+                      *scan_ccm_it->first == *initial_end)))
                 {
-                    local_end = initial_end;
-                    slice_position = SlicePosition::LastSlice;
+                    // The slice is too large. The scan has not fully scanned
+                    // the slice, before reaching the cache's size limit.
+                    // Pretends the slice's exclusive end to be the key after
+                    // the last scanned tuple, from which the next scan batch
+                    // resume.
+                    local_end = scan_ccm_it->first;
+                    slice_position = SlicePosition::Middle;
                 }
                 else
                 {
-                    // The local scan end must be the end of the slice.
-                    local_end = initial_end;
-                    const TemplateStoreRange<KeyT> *range =
-                        static_cast<const TemplateStoreRange<KeyT> *>(
-                            req.SliceId().Range());
-                    const KeyT *range_end = range->RangeEndKey();
-                    if (range_end != nullptr && *initial_end == *range_end)
+                    // The slice has been fully scanned. If the request
+                    // specifies the end key, which falls into the slice, given
+                    // that the slice has been fully scanned, no future scan
+                    // batches are needed. So, we pretend that the scan has
+                    // reached the last slice ending with positive infinity.
+                    // The calling tx will terminate the scan.
+                    if (initial_end == KeyT::PositiveInfinity() ||
+                        req_end_key == initial_end)
                     {
-                        slice_position = SlicePosition::LastSliceInRange;
+                        local_end = initial_end;
+                        slice_position = SlicePosition::LastSlice;
                     }
                     else
                     {
-                        slice_position = SlicePosition::Middle;
+                        // The local scan end must be the end of the slice.
+                        local_end = initial_end;
+                        const TemplateStoreRange<KeyT> *range =
+                            static_cast<const TemplateStoreRange<KeyT> *>(
+                                req.SliceId().Range());
+                        const KeyT *range_end = range->RangeEndKey();
+                        if (range_end != nullptr && *initial_end == *range_end)
+                        {
+                            slice_position = SlicePosition::LastSliceInRange;
+                        }
+                        else
+                        {
+                            slice_position = SlicePosition::Middle;
+                        }
+                    }
+                }
+
+                auto [batch_end, set_success] =
+                    slice_result.UpdateLastKey(local_end, slice_position);
+
+                if (set_success)
+                {
+                    req.SetRangeCcNgTerm(ng_term);
+                }
+                else
+                {
+                    // The local scan tries to set the scan batch's end, but the
+                    // scan at another core have set the batch's end. The scan
+                    // results need to be adjusted, if the results include the
+                    // keys greater than the batch's end, or the results miss
+                    // some keys smaller than the batch's end.
+                    auto [end_key, end_inclusive] = deduce_scan_end(
+                        batch_end, req_end_key, req.EndInclusive());
+                    size_t trailing_cnt = 0;
+
+                    // Excludes keys from the scan cache greater than the
+                    // batch's end.
+                    if (req.IsLocal())
+                    {
+                        while (scan_cache->Size() > 0)
+                        {
+                            // If req.is_require_keys_ is false, the KeyT object
+                            // in scan cache is invalid, so, should use the cce,
+                            // which is valid in any situation, to get the
+                            // corresponding key.
+                            auto last_cce =
+                                reinterpret_cast<CcEntry<KeyT,
+                                                         ValueT,
+                                                         VersionedRecord,
+                                                         RangePartitioned> *>(
+                                    scan_cache->Last()->cce_ptr_);
+                            while (scan_ccm_it->second != last_cce)
+                            {
+                                --scan_ccm_it;
+                                assert(scan_ccm_it != Begin());
+                            }
+                            const KeyT *last_key =
+                                static_cast<const KeyT *>(scan_ccm_it->first);
+                            if (*end_key < *last_key ||
+                                (*end_key == *last_key && !end_inclusive))
+                            {
+                                ++trailing_cnt;
+                                // Remove cce from scan cache, but keep possible
+                                // locks, because those locks might acquired by
+                                // other ScanSliceCc/ReadCc from the
+                                // transaction.
+                                scan_cache->RemoveLast();
+                            }
+                            else
+                            {
+                                // Reset iterator to the key after the last
+                                // scanned tuple since we might need to continue
+                                // scanning if trailing_cnt == 0.
+                                ++scan_ccm_it;
+                                break;
+                            }
+                        }
+                    }
+                    else
+                    {
+                        while (remote_scan_cache->Size() > 0)
+                        {
+                            // Cc entry pointers here are always valid since
+                            // the slices are still pinned so the cce cannot
+                            // be kicked from memory regardless of the lock
+                            // type.
+                            auto last_remote_cce =
+                                reinterpret_cast<CcEntry<KeyT,
+                                                         ValueT,
+                                                         VersionedRecord,
+                                                         RangePartitioned> *>(
+                                    remote_scan_cache->LastCce());
+                            while (scan_ccm_it->second != last_remote_cce)
+                            {
+                                // As long as remote scan cache is not empty,
+                                // iterator should not reach neg inf.
+                                --scan_ccm_it;
+                                assert(scan_ccm_it != Begin());
+                            }
+                            const KeyT *last_key =
+                                static_cast<const KeyT *>(scan_ccm_it->first);
+                            if (*end_key < *last_key ||
+                                (*end_key == *last_key && !end_inclusive))
+                            {
+                                trailing_cnt++;
+                                // Remove cce from scan cache, but keep possible
+                                // locks, because those locks might acquired by
+                                // other ScanSliceCc/ReadCc from the
+                                // transaction.
+                                remote_scan_cache->RemoveLast();
+                            }
+                            else
+                            {
+                                // Reset iterator to the key after the last
+                                // scanned tuple since we might need to continue
+                                // scanning if trailing_cnt == 0.
+                                ++scan_ccm_it;
+                                break;
+                            }
+                        }
+                    }
+
+                    // If no key is removed from the scan cache, it's possible
+                    // that the local scan may miss keys smaller than the
+                    // batch's end. Re-scans the cc map using the batch's end.
+                    if (trailing_cnt == 0)
+                    {
+                        auto [scan_ret, err] = scan_loop_func(
+                            scan_ccm_it, *end_key, end_inclusive, true);
+                        switch (scan_ret)
+                        {
+                        case ScanReturnType::Blocked:
+                            return false;
+                        case ScanReturnType::Error:
+                            if (req.IsLocal())
+                            {
+                                req.GetLocalScanner()->CommitAtCore(core_id);
+                            }
+
+                            if (is_read_snapshot &&
+                                req.WaitForSnapshotCnt(shard_->core_id_) > 0)
+                            {
+                                req.SetIsWaitForSnapshot(shard_->core_id_);
+                                req.DeferSetError(err);
+                                return false;
+                            }
+
+                            if (req.SetError(err))
+                            {
+                                if (req.Result()->Value().is_local_)
+                                {
+                                    req.UnpinSlices();
+                                    return true;
+                                }
+                                else if (req.IsResponseSender(shard_->core_id_))
+                                {
+                                    req.SendResponseIfFinished();
+                                    req.UnpinSlices();
+                                    return true;
+                                }
+                                else
+                                {
+                                    shard_->local_shards_.EnqueueCcRequest(
+                                        shard_->core_id_, req.Txn(), &req);
+                                    return false;
+                                }
+                            }
+                            else
+                            {
+                                return false;
+                            }
+                        case ScanReturnType::Yield:
+                            shard_->Enqueue(shard_->core_id_, &req);
+                            return false;
+                        default:
+                            break;
+                        }
                     }
                 }
             }
-
-            slice_result.SetLastKey(local_end, slice_position);
-            req.SetRangeCcNgTerm(ng_term);
 
             // Sets the iterator to the last cce, which may need to be pinned to
             // resume the next scan batch.
@@ -4305,7 +4596,7 @@ public:
                 }
             }
         }
-        else  // Backward scan
+        else
         {
             const TemplateStoreSlice<KeyT> *last_slice =
                 static_cast<const TemplateStoreSlice<KeyT> *>(
@@ -4314,19 +4605,53 @@ public:
             const KeyT *initial_end = nullptr;
             bool init_end_inclusive = false;
 
-            const KeyT *slice_begin = last_slice->StartKey();
-            assert(slice_begin != nullptr);
-
-            if (req_end_key != nullptr &&
-                (*slice_begin < *req_end_key || *slice_begin == *req_end_key))
+            auto deduce_scan_end =
+                [](const KeyT *batch_end_key,
+                   const KeyT *req_end_key,
+                   bool req_inclusive) -> std::pair<const KeyT *, bool>
             {
-                initial_end = req_end_key;
-                init_end_inclusive = req.EndInclusive();
+                const KeyT *end = nullptr;
+                bool inclusive = false;
+
+                if (batch_end_key == req_end_key)
+                {
+                    end = req_end_key;
+                    inclusive = req_inclusive;
+                }
+                else
+                {
+                    end = batch_end_key;
+                    inclusive = true;
+                }
+
+                return {end, inclusive};
+            };
+
+            if (!end_finalized)
+            {
+                const KeyT *slice_begin = last_slice->StartKey();
+                assert(slice_begin != nullptr);
+
+                if (req_end_key != nullptr && (*slice_begin < *req_end_key ||
+                                               *slice_begin == *req_end_key))
+                {
+                    initial_end = req_end_key;
+                    init_end_inclusive = req.EndInclusive();
+                }
+                else
+                {
+                    initial_end = slice_begin;
+                    init_end_inclusive = true;
+                }
             }
             else
             {
-                initial_end = slice_begin;
-                init_end_inclusive = true;
+                // This scan batch's end key has been finalized by one of the
+                // cores. Deduces the local scan's end and inclusiveness.
+                std::tie(initial_end, init_end_inclusive) =
+                    deduce_scan_end(final_end_tx_key->GetKey<KeyT>(),
+                                    req_end_key,
+                                    req.EndInclusive());
             }
 
             auto scan_batch_func =
@@ -4353,11 +4678,12 @@ public:
                 return {scan_ret, err_code};
             };
 
-            auto scan_loop_func =
-                [this, &scan_batch_func, &is_cache_full](
-                    Iterator &scan_ccm_it,
-                    const KeyT &end_key,
-                    bool inclusive) -> std::pair<ScanReturnType, CcErrorCode>
+            auto scan_loop_func = [this, &scan_batch_func, &is_cache_full](
+                                      Iterator &scan_ccm_it,
+                                      const KeyT &end_key,
+                                      bool inclusive,
+                                      bool end_finalized)
+                -> std::pair<ScanReturnType, CcErrorCode>
             {
                 ScanReturnType scan_ret = ScanReturnType::Success;
                 CcErrorCode err_code = CcErrorCode::NO_ERROR;
@@ -4412,7 +4738,7 @@ public:
                             scan_ccm_it = Begin();
                             ccp = nullptr;
                         }
-                        else if (is_cache_full())
+                        else if (!end_finalized && is_cache_full())
                         {
                             scan_ccm_it = Iterator(ccp->prev_page_,
                                                    ccp->prev_page_->Size() - 1,
@@ -4435,23 +4761,50 @@ public:
                 return {scan_ret, err_code};
             };
 
-            auto [scan_ret, err] =
-                scan_loop_func(scan_ccm_it, *initial_end, init_end_inclusive);
+            auto [scan_ret, err] = scan_loop_func(
+                scan_ccm_it, *initial_end, init_end_inclusive, end_finalized);
             switch (scan_ret)
             {
             case ScanReturnType::Blocked:
                 return false;
             case ScanReturnType::Error:
-                if (is_read_snapshot && req.WaitForSnapshotCnt() > 0)
+                if (req.IsLocal())
                 {
-                    req.SetIsWaitForSnapshot();
+                    req.GetLocalScanner()->CommitAtCore(core_id);
+                }
+
+                if (is_read_snapshot &&
+                    req.WaitForSnapshotCnt(shard_->core_id_) > 0)
+                {
+                    req.SetIsWaitForSnapshot(shard_->core_id_);
                     req.DeferSetError(err);
                     return false;
                 }
 
-                req.UnpinSlices();
-                req.SetError(err);
-                return true;
+                if (req.SetError(err))
+                {
+                    if (req.Result()->Value().is_local_)
+                    {
+                        req.UnpinSlices();
+                        return true;
+                    }
+                    else if (req.IsResponseSender(shard_->core_id_))
+                    {
+                        req.SendResponseIfFinished();
+                        req.UnpinSlices();
+                        return true;
+                    }
+                    else
+                    {
+                        shard_->local_shards_.EnqueueCcRequest(
+                            shard_->core_id_, req.Txn(), &req);
+                        return false;
+                    }
+                }
+                else
+                {
+                    return false;
+                }
             case ScanReturnType::Yield:
                 shard_->Enqueue(shard_->core_id_, &req);
                 return false;
@@ -4459,60 +4812,233 @@ public:
                 break;
             }
 
-            const KeyT *local_end = nullptr;
-            SlicePosition slice_position;
+            // If the end of this scan batch is not finalized when the local
+            // scan at this core started, tries to set the batch's end using the
+            // local end. If another core has finalized the batch's end, the
+            // scan at this core may need to be adjusted: if the batch's final
+            // end is less than the end at this core, keys before the final end
+            // needs to be removed from the local scan cache; if the batch's
+            // final end is smaller than the end of this core, keys greater than
+            // the batch's final end but less than the local end need to be
+            // included in the local scan cache.
 
-            // scan_ccm_it points to the entry before the last scanned
-            // tuple.
-            auto neg_inf_it = Begin();
-            if (scan_ccm_it != neg_inf_it &&
-                (*initial_end < *scan_ccm_it->first ||
-                 (init_end_inclusive && *scan_ccm_it->first == *initial_end)))
+            if (!end_finalized)
             {
-                // The slice is too large. The scan has not fully scanned
-                // the slice, before reaching the cache's size limit.
-                // Pretends the slice's inclusive start to be the last
-                // scanned key, from which the next scan batch resumes.
-                ++scan_ccm_it;
-                local_end = scan_ccm_it->first;
-                slice_position = SlicePosition::Middle;
-            }
-            else
-            {
-                // The slice has been fully scanned. If the request
-                // specifies the end key, which falls into the slice, given
-                // that the slice has been fully scanned, no future scan
-                // batches are needed. So, we pretend that the scan has
-                // reached the first slice (starting with negative
-                // infinity). The calling tx will terminate the scan.
-                if (initial_end == KeyT::NegativeInfinity() ||
-                    req_end_key == initial_end)
+                const KeyT *local_end = nullptr;
+                SlicePosition slice_position;
+
+                // scan_ccm_it points to the entry before the last scanned
+                // tuple.
+                auto neg_inf_it = Begin();
+                if (scan_ccm_it != neg_inf_it &&
+                    (*initial_end < *scan_ccm_it->first ||
+                     (init_end_inclusive &&
+                      *scan_ccm_it->first == *initial_end)))
                 {
-                    local_end = initial_end;
-                    slice_position = SlicePosition::FirstSlice;
+                    // The slice is too large. The scan has not fully scanned
+                    // the slice, before reaching the cache's size limit.
+                    // Pretends the slice's inclusive start to be the last
+                    // scanned key, from which the next scan batch resumes.
+                    ++scan_ccm_it;
+                    local_end = scan_ccm_it->first;
+                    slice_position = SlicePosition::Middle;
                 }
                 else
                 {
-                    // The local scan end must be the start of the slice.
-                    local_end = initial_end;
-
-                    const TemplateStoreRange<KeyT> *range =
-                        static_cast<const TemplateStoreRange<KeyT> *>(
-                            req.SliceId().Range());
-                    const KeyT *range_start = range->RangeStartKey();
-                    if (range_start != nullptr && *initial_end == *range_start)
+                    // The slice has been fully scanned. If the request
+                    // specifies the end key, which falls into the slice, given
+                    // that the slice has been fully scanned, no future scan
+                    // batches are needed. So, we pretend that the scan has
+                    // reached the first slice (starting with negative
+                    // infinity). The calling tx will terminate the scan.
+                    if (initial_end == KeyT::NegativeInfinity() ||
+                        req_end_key == initial_end)
                     {
-                        slice_position = SlicePosition::FirstSliceInRange;
+                        local_end = initial_end;
+                        slice_position = SlicePosition::FirstSlice;
                     }
                     else
                     {
-                        slice_position = SlicePosition::Middle;
+                        // The local scan end must be the start of the slice.
+                        local_end = initial_end;
+
+                        const TemplateStoreRange<KeyT> *range =
+                            static_cast<const TemplateStoreRange<KeyT> *>(
+                                req.SliceId().Range());
+                        const KeyT *range_start = range->RangeStartKey();
+                        if (range_start != nullptr &&
+                            *initial_end == *range_start)
+                        {
+                            slice_position = SlicePosition::FirstSliceInRange;
+                        }
+                        else
+                        {
+                            slice_position = SlicePosition::Middle;
+                        }
+                    }
+                }
+
+                auto [batch_end, set_success] =
+                    slice_result.UpdateLastKey(local_end, slice_position);
+
+                if (set_success)
+                {
+                    req.SetRangeCcNgTerm(ng_term);
+                }
+                else
+                {
+                    // The local scan tries to set the scan batch's end, but the
+                    // scan at another core have set the batch's end. The scan
+                    // results need to be adjusted, if the results include the
+                    // keys smaller than the batch's end, or the results miss
+                    // some keys greater than the batch's end.
+                    auto [end_key, end_inclusive] = deduce_scan_end(
+                        batch_end, req_end_key, req.EndInclusive());
+                    size_t trailing_cnt = 0;
+
+                    // Excludes keys from the scan cache smaller than the
+                    // batch's end.
+                    if (req.IsLocal())
+                    {
+                        while (scan_cache->Size() > 0)
+                        {
+                            // If req.is_require_keys_ is false, the KeyT object
+                            // in scan cache is invalid, so, should use the cce,
+                            // which is valid in any situation, to get the
+                            // corresponding key.
+                            CcEntry<KeyT,
+                                    ValueT,
+                                    VersionedRecord,
+                                    RangePartitioned> *last_cce =
+                                reinterpret_cast<CcEntry<KeyT,
+                                                         ValueT,
+                                                         VersionedRecord,
+                                                         RangePartitioned> *>(
+                                    scan_cache->Last()->cce_ptr_);
+                            while (scan_ccm_it->second != last_cce)
+                            {
+                                ++scan_ccm_it;
+                                assert(scan_ccm_it != End());
+                            }
+                            const KeyT *last_key =
+                                static_cast<const KeyT *>(scan_ccm_it->first);
+                            if (*last_key < *end_key ||
+                                (*last_key == *end_key && !end_inclusive))
+                            {
+                                ++trailing_cnt;
+                                scan_cache->RemoveLast();
+                            }
+                            else
+                            {
+                                // Reset iterator to the key after the last
+                                // scanned tuple since we might need to continue
+                                // scanning if trailing_cnt == 0.
+                                --scan_ccm_it;
+                                break;
+                            }
+                        }
+                    }
+                    else
+                    {
+                        while (remote_scan_cache->Size() > 0)
+                        {
+                            // Cc entry pointers here are always valid since
+                            // the slices are still pinned so the cce cannot
+                            // be kicked from memory regardless of the lock
+                            // type.
+                            CcEntry<KeyT,
+                                    ValueT,
+                                    VersionedRecord,
+                                    RangePartitioned> *last_remote_cce =
+                                reinterpret_cast<CcEntry<KeyT,
+                                                         ValueT,
+                                                         VersionedRecord,
+                                                         RangePartitioned> *>(
+                                    remote_scan_cache->LastCce());
+                            while (scan_ccm_it->second != last_remote_cce)
+                            {
+                                // As long as remote scan cache is not empty,
+                                // iterator should not reach pos inf.
+                                ++scan_ccm_it;
+                                assert(scan_ccm_it != End());
+                            }
+                            const KeyT *last_key =
+                                static_cast<const KeyT *>(scan_ccm_it->first);
+                            if (*last_key < *end_key ||
+                                (*last_key == *end_key && !end_inclusive))
+                            {
+                                trailing_cnt++;
+                                remote_scan_cache->RemoveLast();
+                            }
+                            else
+                            {
+                                // Reset iterator to the key after the last
+                                // scanned tuple since we might need to continue
+                                // scanning if trailing_cnt == 0.
+                                --scan_ccm_it;
+                                break;
+                            }
+                        }
+                    }
+
+                    // If no key is removed from the scan cache, it's possible
+                    // that the local scan may miss keys greater than the
+                    // batch's end. Re-scans the cc map using the batch's end.
+                    if (trailing_cnt == 0)
+                    {
+                        auto [scan_ret, err] = scan_loop_func(
+                            scan_ccm_it, *end_key, end_inclusive, true);
+                        switch (scan_ret)
+                        {
+                        case ScanReturnType::Blocked:
+                            return false;
+                        case ScanReturnType::Error:
+                            if (req.IsLocal())
+                            {
+                                req.GetLocalScanner()->CommitAtCore(core_id);
+                            }
+
+                            if (is_read_snapshot &&
+                                req.WaitForSnapshotCnt(shard_->core_id_) > 0)
+                            {
+                                req.SetIsWaitForSnapshot(shard_->core_id_);
+                                req.DeferSetError(err);
+                                return false;
+                            }
+
+                            if (req.SetError(err))
+                            {
+                                if (req.Result()->Value().is_local_)
+                                {
+                                    req.UnpinSlices();
+                                    return true;
+                                }
+                                else if (req.IsResponseSender(shard_->core_id_))
+                                {
+                                    req.SendResponseIfFinished();
+                                    req.UnpinSlices();
+                                    return true;
+                                }
+                                else
+                                {
+                                    shard_->local_shards_.EnqueueCcRequest(
+                                        shard_->core_id_, req.Txn(), &req);
+                                    return false;
+                                }
+                            }
+                            else
+                            {
+                                return false;
+                            }
+                        case ScanReturnType::Yield:
+                            shard_->Enqueue(shard_->core_id_, &req);
+                            return false;
+                        default:
+                            break;
+                        }
                     }
                 }
             }
-
-            slice_result.SetLastKey(local_end, slice_position);
-            req.SetRangeCcNgTerm(ng_term);
 
             // Sets the iterator to the last cce, which may need to be pinned to
             // resume the next scan batch.
@@ -4564,15 +5090,47 @@ public:
             }
         }
 
-        if (is_read_snapshot && req.WaitForSnapshotCnt() > 0)
+        if (req.IsLocal())
         {
-            req.SetIsWaitForSnapshot();
+            req.GetLocalScanner()->CommitAtCore(core_id);
+        }
+
+        if (is_read_snapshot && req.WaitForSnapshotCnt(shard_->core_id_) > 0)
+        {
+            req.SetIsWaitForSnapshot(shard_->core_id_);
             return false;
         }
 
-        req.UnpinSlices();
-        req.SetFinish();
-        return true;
+        if (req.SetFinish())
+        {
+            if (req.Result()->Value().is_local_)
+            {
+                req.UnpinSlices();
+                return true;
+            }
+            else if (req.IsResponseSender(shard_->core_id_))
+            {
+                req.SendResponseIfFinished();
+                req.UnpinSlices();
+                return true;
+            }
+            else
+            {
+                // Renqueue the cc req to the sender req list.
+                // We assign a dedicated core to be the response sender instead
+                // of directly sending the response on the last finished core.
+                // This is to avoid serialization of response message causing
+                // one core to become significantly slower than others and would
+                // end up being the sender of all scan slice response.
+                shard_->local_shards_.EnqueueCcRequest(
+                    shard_->core_id_, req.Txn(), &req);
+                return false;
+            }
+        }
+        else
+        {
+            return false;
+        }
     }
 
     /**
@@ -4966,17 +5524,37 @@ public:
             req.slice_coordinator_.UpdatePreparedSliceCnt(prepared_slice_cnt);
             req.slice_coordinator_.UpdateBatchEnd();
 
+            if (req.export_base_table_item_)
+            {
+                // Fix the slice index of the current core
+                for (uint16_t core_id = 0; core_id < shard_->core_cnt_;
+                     ++core_id)
+                {
+                    req.FixCurrentSliceIndex(core_id);
+                }
+            }
             req.slice_coordinator_.SetReadyForScan();
+            req.SetUnfinishedCoreCnt(shard_->core_cnt_);
+
+            // Dispatch the request to the cores
+            for (uint16_t core_id = 0; core_id < shard_->core_cnt_; ++core_id)
+            {
+                if (core_id == shard_->core_id_)
+                {
+                    continue;
+                }
+                shard_->Enqueue(shard_->LocalCoreId(), core_id, &req);
+            }
         }
 
-        if (req.IsDrained())
+        if (req.IsDrained(shard_->core_id_))
         {
             // scan is already finished on this core
-            req.SetFinish();
+            req.SetFinish(shard_->core_id_);
             return false;
         }
 
-        auto &pause_key_and_is_drained = req.PausePos();
+        auto &pause_key_and_is_drained = req.PausePos(shard_->core_id_);
 
         auto find_non_empty_slice =
             [this, &req, &deduce_iterator](const KeyT &search_key)
@@ -4990,7 +5568,8 @@ public:
             }
             else
             {
-                const TxKey &curr_start_tx_key = req.CurrentSliceKey();
+                const TxKey &curr_start_tx_key =
+                    req.CurrentSliceKey(shard_->core_id_);
                 const KeyT *curr_start_key = curr_start_tx_key.GetKey<KeyT>();
                 start_key = (*curr_start_key < search_key ? &search_key
                                                           : curr_start_key);
@@ -5015,7 +5594,7 @@ public:
             const KeyT *slice_end_key = nullptr;
             do
             {
-                store_slice = req.CurrentSlice();
+                store_slice = req.CurrentSlice(shard_->core_id_);
                 const TemplateStoreSlice<KeyT> *typed_slice =
                     static_cast<const TemplateStoreSlice<KeyT> *>(store_slice);
                 start_key =
@@ -5032,11 +5611,11 @@ public:
                 }
 
                 // The current slice is empty, try to find next slice.
-                req.MoveToNextSlice();
+                req.MoveToNextSlice(shard_->core_id_);
                 start_key = nullptr;
 
                 // Continue to handle the next slice if not the batch end
-            } while (!req.TheBatchEnd());
+            } while (!req.TheBatchEnd(shard_->core_id_));
 
             return {it, end_it, slice_end_key};
         };
@@ -5077,14 +5656,16 @@ public:
 
         // If reach to the batch end, it means there are no slices that need to
         // be scanned.
-        bool slice_pinned = req.TheBatchEnd() ? false : req.IsSlicePinned();
+        bool slice_pinned = req.TheBatchEnd(shard_->core_id_)
+                                ? false
+                                : req.IsSlicePinned(shard_->core_id_);
         // The following flag is used to mark the behavior of one slice.
         // Only need to export the key if the key is already persisted, this
         // will happen when the slice need to split, and should export all the
         // keys in this slice to get the subslice keys.
         bool export_persisted_key_only =
             !req.export_base_table_item_ && slice_pinned;
-        assert(key_it != slice_end_it || req.TheBatchEnd());
+        assert(key_it != slice_end_it || req.TheBatchEnd(shard_->core_id_));
 
         // 3. Loop to scan keys
         // DataSyncScanCc is running on TxProcessor thread. To avoid
@@ -5093,7 +5674,8 @@ public:
         for (size_t scan_cnt = 0;
              key_it != slice_end_it && key_it != slice_end_next_page_it &&
              scan_cnt < RangePartitionDataSyncScanCc::DataSyncScanBatchSize &&
-             req.accumulated_scan_cnt_ < req.scan_batch_size_;
+             req.accumulated_scan_cnt_.at(shard_->core_id_) <
+                 req.scan_batch_size_;
              ++scan_cnt)
         {
             const KeyT *key = key_it->first;
@@ -5126,8 +5708,8 @@ public:
                 {
                     // Reach to the end of current slice.
                     // Move to the next slice.
-                    req.MoveToNextSlice();
-                    if (!req.TheBatchEnd())
+                    req.MoveToNextSlice(shard_->core_id_);
+                    if (!req.TheBatchEnd(shard_->core_id_))
                     {
                         search_start_key = slice_end_key;
                         std::tie(key_it, slice_end_it, slice_end_key) =
@@ -5138,7 +5720,9 @@ public:
                         // If reach to the batch end, it means there are no
                         // slices that need to be scanned.
                         slice_pinned =
-                            req.TheBatchEnd() ? false : req.IsSlicePinned();
+                            req.TheBatchEnd(shard_->core_id_)
+                                ? false
+                                : req.IsSlicePinned(shard_->core_id_);
                         export_persisted_key_only =
                             !req.export_base_table_item_ && slice_pinned;
                     }
@@ -5192,19 +5776,20 @@ public:
                 auto export_result =
                     ExportForCkpt(cce,
                                   *key,
-                                  req.DataSyncVec(),
-                                  req.ArchiveVec(),
-                                  req.MoveBaseIdxVec(),
+                                  req.DataSyncVec(shard_->core_id_),
+                                  req.ArchiveVec(shard_->core_id_),
+                                  req.MoveBaseIdxVec(shard_->core_id_),
                                   req.data_sync_ts_,
                                   recycle_ts,
                                   shard_->EnableMvcc(),
-                                  req.accumulated_scan_cnt_,
+                                  req.accumulated_scan_cnt_[shard_->core_id_],
                                   req.export_base_table_item_,
                                   req.export_base_table_item_only_,
                                   export_persisted_key_only,
                                   flush_size);
 
-                req.accumulated_flush_data_size_ += flush_size;
+                req.accumulated_flush_data_size_[shard_->core_id_] +=
+                    flush_size;
 
                 if (export_result.second)
                 {
@@ -5221,8 +5806,8 @@ public:
             {
                 slice_pinned = false;
                 // Reach to the end of current slice. Move to the next slice.
-                req.MoveToNextSlice();
-                if (!req.TheBatchEnd())
+                req.MoveToNextSlice(shard_->core_id_);
+                if (!req.TheBatchEnd(shard_->core_id_))
                 {
                     search_start_key = slice_end_key;
                     std::tie(key_it, slice_end_it, slice_end_key) =
@@ -5232,8 +5817,9 @@ public:
 
                     // If reach to the batch end, it means there are no slices
                     // that need to be scanned.
-                    slice_pinned =
-                        req.TheBatchEnd() ? false : req.IsSlicePinned();
+                    slice_pinned = req.TheBatchEnd(shard_->core_id_)
+                                       ? false
+                                       : req.IsSlicePinned(shard_->core_id_);
                     export_persisted_key_only =
                         !req.export_base_table_item_ && slice_pinned;
                 }
@@ -5244,7 +5830,7 @@ public:
         // scan batch size, or reach to the end slice of the current batch
         // slices.
         assert((key_it != slice_end_it && key_it != slice_end_next_page_it) ||
-               req.TheBatchEnd());
+               req.TheBatchEnd(shard_->core_id_));
         // 4. Check whether the request is finished.
         TxKey next_pause_key;
         bool no_more_data =
@@ -5266,15 +5852,16 @@ public:
 
         if (is_scan_mem_full)
         {
-            req.scan_heap_is_full_ = 1;
+            req.scan_heap_is_full_[shard_->core_id_] = 1;
         }
 
         if (is_scan_mem_full || no_more_data ||
-            req.accumulated_scan_cnt_ >= req.scan_batch_size_ ||
-            req.TheBatchEnd())
+            req.accumulated_scan_cnt_[shard_->core_id_] >=
+                req.scan_batch_size_ ||
+            req.TheBatchEnd(shard_->core_id_))
         {
             // Request is finished
-            req.SetFinish();
+            req.SetFinish(shard_->core_id_);
             return false;
         }
 
@@ -6271,114 +6858,7 @@ public:
 
             offset += sizeof(uint8_t);
 
-            uint16_t core_id = 0;
-            bool is_dirty = false;
-            bool need_update_size = true;
-            int32_t partition_id = -1;
-
-            if constexpr (RangePartitioned)
-            {
-                const TableRangeEntry *range_entry = shard_->GetTableRangeEntry(
-                    table_name_, cc_ng_id_, TxKey(&key));
-                if (range_entry == nullptr)
-                {
-                    // range metadata missing, conservative handling: only
-                    // consume value / skip.
-                    if (op_type == OperationType::Insert ||
-                        op_type == OperationType::Update)
-                    {
-                        rec.Deserialize(log_blob.data(), offset);
-                    }
-                    continue;
-                }
-
-                partition_id = range_entry->GetRangeInfo()->PartitionId();
-                const BucketInfo *bucket_info = shard_->GetBucketInfo(
-                    Sharder::MapRangeIdToBucketId(partition_id), cc_ng_id_);
-
-                // Old range bucket does not belong to this ng, nor is it a
-                // "dirty bucket" migrating to this ng.
-                if (bucket_info->BucketOwner() != cc_ng_id_ &&
-                    bucket_info->DirtyBucketOwner() != cc_ng_id_)
-                {
-                    int32_t new_range_id =
-                        range_entry->GetRangeInfo()->GetKeyNewRangeId(
-                            TxKey(&key));
-                    // If range is splitting, check if new range belongs to
-                    // this ng.
-                    if (new_range_id >= 0)
-                    {
-                        const BucketInfo *new_bucket_info =
-                            shard_->GetBucketInfo(
-                                Sharder::MapRangeIdToBucketId(new_range_id),
-                                cc_ng_id_);
-                        if (new_bucket_info->BucketOwner() != cc_ng_id_ &&
-                            new_bucket_info->DirtyBucketOwner() != cc_ng_id_)
-                        {
-                            // Neither old bucket nor new bucket belongs to this
-                            // ng: only consume value and continue.
-                            if (op_type != OperationType::Delete)
-                            {
-                                rec.Deserialize(log_blob.data(), offset);
-                            }
-                            continue;
-                        }
-
-                        // new range belongs to this ng: determine core based on
-                        // new_range_id and mark dirty.
-                        core_id = static_cast<uint16_t>((new_range_id & 0x3FF) %
-                                                        shard_->core_cnt_);
-                        is_dirty = true;
-
-                        uint64_t range_split_commit_ts =
-                            req.RangeSplitCommitTs(partition_id);
-                        // Only update range size for keys updated during the
-                        // double-write phase.
-                        need_update_size =
-                            (range_split_commit_ts == 0) ||
-                            (req.CommitTs() > range_split_commit_ts);
-                    }
-                    else
-                    {
-                        // new_range_id < 0: key still belongs to old range, but
-                        // old range bucket does not belong to this ng.
-                        // Semantically, it should not be applied to this ng:
-                        // only consume and continue.
-                        if (op_type != OperationType::Delete)
-                        {
-                            rec.Deserialize(log_blob.data(), offset);
-                        }
-                        continue;
-                    }
-                }
-                else
-                {
-                    // Old range bucket belongs to this ng or is migrating to
-                    // this ng.
-                    core_id = static_cast<uint16_t>((partition_id & 0x3FF) %
-                                                    shard_->core_cnt_);
-                    is_dirty = range_entry->GetRangeInfo()->IsDirty();
-
-                    uint64_t range_split_commit_ts =
-                        req.RangeSplitCommitTs(partition_id);
-                    need_update_size = (range_split_commit_ts == 0) ||
-                                       (req.CommitTs() > range_split_commit_ts);
-                }
-            }
-            else
-            {
-                uint16_t bucket_id = Sharder::MapKeyHashToBucketId(key.Hash());
-                const BucketInfo *bucket_info =
-                    shard_->GetBucketInfo(bucket_id, cc_ng_id_);
-                if (bucket_info->BucketOwner() != cc_ng_id_ &&
-                    bucket_info->DirtyBucketOwner() != cc_ng_id_)
-                {
-                    continue;
-                }
-                core_id = static_cast<uint16_t>((key.Hash() & 0x3FF) %
-                                                shard_->core_cnt_);
-            }
-
+            uint16_t core_id = (key.Hash() & 0x3FF) % shard_->core_cnt_;
             if (core_id != shard_->core_id_)
             {
                 // Skips the key in the log record that is not sharded
@@ -6395,6 +6875,57 @@ public:
                     next_core = std::min(core_id, next_core);
                 }
                 continue;
+            }
+
+            // Skip records that no longer belong to this ng.
+            if (RangePartitioned)
+            {
+                const TableRangeEntry *range_entry = shard_->GetTableRangeEntry(
+                    table_name_, cc_ng_id_, TxKey(&key));
+
+                const BucketInfo *bucket_info = shard_->GetBucketInfo(
+                    Sharder::MapRangeIdToBucketId(
+                        range_entry->GetRangeInfo()->PartitionId()),
+                    cc_ng_id_);
+                // Check if range bucket belongs to this ng or is migrating
+                // to this ng.
+                if (bucket_info->BucketOwner() != cc_ng_id_ &&
+                    bucket_info->DirtyBucketOwner() != cc_ng_id_)
+                {
+                    int32_t new_range_id =
+                        range_entry->GetRangeInfo()->GetKeyNewRangeId(
+                            TxKey(&key));
+                    // If range is splitting, check if new range belongs to
+                    // this ng.
+                    if (new_range_id >= 0)
+                    {
+                        const BucketInfo *new_bucket_info =
+                            shard_->GetBucketInfo(
+                                Sharder::MapRangeIdToBucketId(
+                                    range_entry->GetRangeInfo()->PartitionId()),
+                                cc_ng_id_);
+                        if (new_bucket_info->BucketOwner() != cc_ng_id_ &&
+                            new_bucket_info->DirtyBucketOwner() != cc_ng_id_)
+                        {
+                            if (op_type != OperationType::Delete)
+                            {
+                                rec.Deserialize(log_blob.data(), offset);
+                            }
+                            continue;
+                        }
+                    }
+                }
+            }
+            else
+            {
+                uint16_t bucket_id = Sharder::MapKeyHashToBucketId(key.Hash());
+                const BucketInfo *bucket_info =
+                    shard_->GetBucketInfo(bucket_id, cc_ng_id_);
+                if (bucket_info->BucketOwner() != cc_ng_id_ &&
+                    bucket_info->DirtyBucketOwner() != cc_ng_id_)
+                {
+                    continue;
+                }
             }
 
             Iterator it = FindEmplace(key);
@@ -6469,12 +7000,6 @@ public:
                 {
                     cce->ArchiveBeforeUpdate();
                 }
-
-                [[maybe_unused]] const size_t old_payload_size =
-                    cce->PayloadSize();
-                [[maybe_unused]] const RecordStatus cce_old_status =
-                    cce->PayloadStatus();
-
                 RecordStatus rec_status;
                 if (op_type == OperationType::Insert ||
                     op_type == OperationType::Update)
@@ -6495,26 +7020,6 @@ public:
                 bool was_dirty = cce->IsDirty();
                 cce->SetCommitTsPayloadStatus(commit_ts, rec_status);
                 OnCommittedUpdate(cce, was_dirty);
-
-                if constexpr (RangePartitioned)
-                {
-                    if (need_update_size)
-                    {
-                        int32_t delta_size =
-                            (rec_status == RecordStatus::Deleted)
-                                ? -static_cast<int32_t>(key.Size() +
-                                                        old_payload_size)
-                                : static_cast<int32_t>(
-                                      cce_old_status != RecordStatus::Normal
-                                          ? (key.Size() + cce->PayloadSize())
-                                          : (cce->PayloadSize() -
-                                             old_payload_size));
-
-                        UpdateRangeSize(static_cast<uint32_t>(partition_id),
-                                        delta_size,
-                                        is_dirty);
-                    }
-                }
 
                 if (commit_ts > last_dirty_commit_ts_)
                 {
@@ -6700,9 +7205,9 @@ public:
 
     bool Execute(FillStoreSliceCc &req) override
     {
-        std::deque<SliceDataItem> &slice_vec = req.SliceData();
+        std::deque<SliceDataItem> &slice_vec = req.SliceData(shard_->core_id_);
 
-        size_t index = req.NextIndex();
+        size_t index = req.NextIndex(shard_->core_id_);
         size_t last_index = std::min(index + FillStoreSliceCc::MaxScanBatchSize,
                                      slice_vec.size());
 
@@ -6719,12 +7224,11 @@ public:
         if (index == slice_vec.size())
         {
             slice_vec.clear();
-            req.SetFinish(shard_);
-            return true;
+            return req.SetFinish(shard_);
         }
         else
         {
-            req.SetNextIndex(index);
+            req.SetNextIndex(shard_->core_id_, index);
             shard_->Enqueue(shard_->LocalCoreId(), &req);
             return false;
         }
@@ -6733,18 +7237,17 @@ public:
     bool Execute(InitKeyCacheCc &req) override
     {
         Iterator map_it, map_end_it;
-        TxKey &resume_key = req.PauseKey();
+        TxKey &resume_key = req.PauseKey(shard_->core_id_);
         const KeyT *start_key = nullptr;
         if (!resume_key.KeyPtr())
         {
             // First time being processed.
-            if (req.Slice().IsValidInKeyCache())
+            if (req.Slice().IsValidInKeyCache(shard_->core_id_))
             {
                 // No need to init key cache.
-                req.SetFinish(true);
-                return true;
+                return req.SetFinish(shard_->core_id_, true);
             }
-            req.Slice().SetLoadingKeyCache(true);
+            req.Slice().SetLoadingKeyCache(shard_->core_id_, true);
             start_key = req.Slice().StartTxKey().GetKey<KeyT>();
         }
         else
@@ -6804,25 +7307,24 @@ public:
                 continue;
             }
             const KeyT *key = map_it->first;
-            auto ret = range->AddKey(*key, &req.Slice(), true);
+            auto ret =
+                range->AddKey(*key, shard_->core_id_, &req.Slice(), true);
             if (ret == RangeSliceOpStatus::Error)
             {
                 // Stop immediately if one of the add key fails.
-                req.SetFinish(false);
-                return true;
+                return req.SetFinish(shard_->core_id_, false);
             }
         }
 
         if (map_it == map_end_it)
         {
-            req.SetFinish(true);
-            return true;
+            return req.SetFinish(shard_->core_id_, true);
         }
         else
         {
             // record pause position and resume in next round.
             TxKey pause_key(map_it->first);
-            req.SetPauseKey(pause_key);
+            req.SetPauseKey(pause_key, shard_->core_id_);
             shard_->Enqueue(&req);
             return false;
         }
@@ -6897,12 +7399,9 @@ public:
         }
         LruPage *lru_page;
         uint16_t pause_idx = shard_->core_id_;
-        CleanType clean_type = req.GetCleanType();
-        if (clean_type == CleanType::CleanBucketData ||
-            clean_type == CleanType::CleanRangeData)
+        if (req.GetCleanType() == CleanType::CleanBucketData)
         {
-            // For clean bucket data and range data, cc req is only sent to 1
-            // core.
+            // For clean bucket data, cc req is only sent to 1 core.
             pause_idx = 0;
         }
         if (req.ResumeKey(pause_idx)->KeyPtr() != nullptr)
@@ -7002,8 +7501,8 @@ public:
                                             : KeyT::PositiveInfinity();
 
         const KeyT *start_key =
-            req.paused_pos_.KeyPtr() != nullptr
-                ? req.paused_pos_.GetKey<KeyT>()
+            req.paused_pos_[shard_->core_id_].KeyPtr() != nullptr
+                ? req.paused_pos_[shard_->core_id_].GetKey<KeyT>()
                 : (req.end_key_ != nullptr ? req.start_key_->GetKey<KeyT>()
                                            : KeyT::NegativeInfinity());
 
@@ -7040,7 +7539,8 @@ public:
                 curr_slice = range->FindSlice(*key);
                 it = deduce_iterator(*key);
                 end_it = deduce_iterator(*(curr_slice->EndKey()));
-                if ((!curr_slice->IsValidInKeyCache() || it == end_it) &&
+                if ((!curr_slice->IsValidInKeyCache(shard_->core_id_) ||
+                     it == end_it) &&
                     end_it != req_end_it)
                 {
                     // The slice is empty or the slice is invalid in key cache,
@@ -7049,7 +7549,7 @@ public:
                     key = curr_slice->EndKey();
                     curr_slice = nullptr;
                 }
-                else if (!curr_slice->IsValidInKeyCache() &&
+                else if (!curr_slice->IsValidInKeyCache(shard_->core_id_) &&
                          end_it == req_end_it)
                 {
                     // Reach to the last slice, and the slice is invalid in key
@@ -7077,7 +7577,7 @@ public:
             {
                 assert(cce->PayloadStatus() == RecordStatus::Normal ||
                        cce->PayloadStatus() == RecordStatus::Deleted);
-                range->DeleteKey(*cce_key);
+                range->DeleteKey(*cce_key, shard_->core_id_);
             }
 
             // Forward the iterator.
@@ -7093,13 +7593,12 @@ public:
 
         if (key_it == slice_end_it)
         {
-            req.paused_pos_ = TxKey();
-            req.SetFinish();
-            return true;
+            req.paused_pos_[shard_->core_id_] = TxKey();
+            return req.SetFinish();
         }
         else
         {
-            req.paused_pos_ = key_it->first->CloneTxKey();
+            req.paused_pos_[shard_->core_id_] = key_it->first->CloneTxKey();
             shard_->Enqueue(&req);
             return false;
         }
@@ -7122,7 +7621,6 @@ public:
         auto entry_tuples = req.EntryTuple();
         size_t batch_size = req.BatchSize();
         size_t start_key_index = req.StartKeyIndex();
-        const int32_t partition_id = req.PartitionId();
 
         const TxRecord *req_rec = nullptr;
 
@@ -7132,7 +7630,6 @@ public:
         ValueT decoded_rec;
         uint64_t commit_ts = 0;
         RecordStatus rec_status = RecordStatus::Normal;
-        uint8_t range_size_flags = 0;
 
         auto &resume_pos = req.GetPausedPosition(shard_->core_id_);
         size_t key_pos = std::get<0>(resume_pos);
@@ -7140,7 +7637,6 @@ public:
         size_t rec_offset = std::get<2>(resume_pos);
         size_t ts_offset = std::get<3>(resume_pos);
         size_t status_offset = std::get<4>(resume_pos);
-        size_t flags_offset = std::get<5>(resume_pos);
         size_t hash = 0;
 
         Iterator it;
@@ -7153,7 +7649,6 @@ public:
         size_t next_rec_offset = 0;
         size_t next_ts_offset = 0;
         size_t next_status_offset = 0;
-        size_t next_flags_offset = 0;
         for (size_t cnt = 0;
              key_pos < batch_size && cnt < UploadBatchCc::UploadBatchBatchSize;
              ++key_pos, ++cnt)
@@ -7162,16 +7657,13 @@ public:
             next_rec_offset = rec_offset;
             next_ts_offset = ts_offset;
             next_status_offset = status_offset;
-            next_flags_offset = flags_offset;
-
             if (entry_vec != nullptr)
             {
                 key_idx = start_key_index + key_pos;
-                const auto &pair = entry_vec->at(key_idx);
-                range_size_flags = pair.first;
-                const WriteEntry *we = pair.second;
-                key = we->key_.GetKey<KeyT>();
-                req_rec = we->rec_.get();
+                // get key
+                key = entry_vec->at(key_idx)->key_.GetKey<KeyT>();
+                // get record
+                req_rec = entry_vec->at(key_idx)->rec_.get();
                 if (req_rec)
                 {
                     rec_status = RecordStatus::Normal;
@@ -7183,12 +7675,11 @@ public:
                     commit_val = nullptr;
                 }
                 // get commit ts
-                commit_ts = we->commit_ts_;
+                commit_ts = entry_vec->at(key_idx)->commit_ts_;
             }
             else
             {
-                auto [key_str, rec_str, ts_str, status_str, flags_str] =
-                    *entry_tuples;
+                auto [key_str, rec_str, ts_str, status_str] = *entry_tuples;
                 // deserialize key
                 decoded_key.Deserialize(
                     key_str.data(), next_key_offset, KeySchema());
@@ -7211,41 +7702,19 @@ public:
                 // deserialize commit ts
                 commit_ts = *((uint64_t *) (ts_str.data() + next_ts_offset));
                 next_ts_offset += sizeof(uint64_t);
-                if (RangePartitioned)
-                {
-                    range_size_flags =
-                        static_cast<uint8_t>(flags_str[next_flags_offset]);
-                    next_flags_offset += sizeof(uint8_t);
-                }
             }
 
-            if (commit_ts <= 1)
+            hash = key->Hash();
+            size_t core_idx = (hash & 0x3FF) % shard_->core_cnt_;
+            if (!(core_idx == shard_->core_id_) || commit_ts <= 1)
             {
-                // skip the key that commit ts does not greater than 1.
+                // Skip the key that does not belong to this core or
+                // commit ts does not greater than 1. Move to next key.
                 key_offset = next_key_offset;
                 rec_offset = next_rec_offset;
                 ts_offset = next_ts_offset;
                 status_offset = next_status_offset;
-                if constexpr (RangePartitioned)
-                {
-                    flags_offset = next_flags_offset;
-                }
                 continue;
-            }
-
-            if constexpr (!RangePartitioned)
-            {
-                hash = key->Hash();
-                size_t core_idx = (hash & 0x3FF) % shard_->core_cnt_;
-                if (core_idx != shard_->core_id_)
-                {
-                    // skip the key that does not belong to this core.
-                    key_offset = next_key_offset;
-                    rec_offset = next_rec_offset;
-                    ts_offset = next_ts_offset;
-                    status_offset = next_status_offset;
-                    continue;
-                }
             }
 
             it = FindEmplace(*key);
@@ -7279,14 +7748,9 @@ public:
                 rec_offset = next_rec_offset;
                 ts_offset = next_ts_offset;
                 status_offset = next_status_offset;
-                if constexpr (RangePartitioned)
-                {
-                    flags_offset = next_flags_offset;
-                }
                 continue;
             }
 
-            [[maybe_unused]] const size_t old_payload_size = cce->PayloadSize();
             // Now, all versions of non-unique SecondaryIndex key shared
             // the unpack info in current version's payload, though the
             // unpack info will not be used for deleted key, we must not
@@ -7306,8 +7770,6 @@ public:
             }
 
             bool was_dirty = cce->IsDirty();
-            [[maybe_unused]] const RecordStatus cce_old_status =
-                cce->PayloadStatus();
             cce->SetCommitTsPayloadStatus(commit_ts, rec_status);
             if (req.Kind() == UploadBatchType::DirtyBucketData)
             {
@@ -7321,43 +7783,6 @@ public:
                 }
                 cce->SetCkptTs(commit_ts);
             }
-
-            if constexpr (RangePartitioned)
-            {
-                if ((range_size_flags >> 4) != 0)
-                {
-                    int32_t delta =
-                        (rec_status == RecordStatus::Deleted)
-                            ? -(static_cast<int32_t>(write_key->Size() +
-                                                     old_payload_size))
-                            : (cce_old_status != RecordStatus::Normal
-                                   ? static_cast<int32_t>(write_key->Size() +
-                                                          cce->PayloadSize())
-                                   : static_cast<int32_t>(cce->PayloadSize() -
-                                                          old_payload_size));
-                    bool need_split =
-                        UpdateRangeSize(static_cast<uint32_t>(partition_id),
-                                        delta,
-                                        (range_size_flags & 0x0F) != 0);
-                    if (need_split)
-                    {
-                        // Create a data sync task for the range.
-                        uint64_t data_sync_ts =
-                            std::chrono::duration_cast<
-                                std::chrono::microseconds>(
-                                std::chrono::high_resolution_clock::now()
-                                    .time_since_epoch())
-                                .count();
-                        shard_->CreateSplitRangeDataSyncTask(
-                            table_name_,
-                            cc_ng_id_,
-                            req.CcNgTerm(),
-                            static_cast<uint32_t>(partition_id),
-                            data_sync_ts);
-                    }
-                }
-            }
-
             OnCommittedUpdate(cce, was_dirty);
             OnFlushed(cce, was_dirty);
             DLOG_IF(INFO, TRACE_OCC_ERR)
@@ -7384,10 +7809,6 @@ public:
             rec_offset = next_rec_offset;
             ts_offset = next_ts_offset;
             status_offset = next_status_offset;
-            if constexpr (RangePartitioned)
-            {
-                flags_offset = next_flags_offset;
-            }
         }
         if (key_pos < batch_size)
         {
@@ -7399,8 +7820,7 @@ public:
                                   key_offset,
                                   rec_offset,
                                   ts_offset,
-                                  status_offset,
-                                  flags_offset);
+                                  status_offset);
             shard_->Enqueue(shard_->LocalCoreId(), &req);
             return false;
         }
@@ -7482,12 +7902,22 @@ public:
             {
                 // Parsed all records
                 req.SetParsed();
+
+                // Emplace key on all cores
+                for (size_t core = 0; core < shard_->core_cnt_; ++core)
+                {
+                    if (core != shard_->core_id_)
+                    {
+                        shard_->Enqueue(shard_->core_id_, core, &req);
+                    }
+                }
             }
+
         }  // end-parsed
 
-        std::deque<SliceDataItem> &slice_vec = req.SliceData();
+        std::deque<SliceDataItem> &slice_vec = req.SliceData(shard_->core_id_);
 
-        size_t index = req.NextIndex();
+        size_t index = req.NextIndex(shard_->core_id_);
         size_t last_index = std::min(
             index + UploadBatchSlicesCc::MaxEmplaceBatchSize, slice_vec.size());
 
@@ -7523,7 +7953,7 @@ public:
         else
         {
             index = last_index;
-            req.SetNextIndex(index);
+            req.SetNextIndex(shard_->core_id_, index);
             shard_->Enqueue(shard_->LocalCoreId(), &req);
         }
         return false;
@@ -7620,7 +8050,7 @@ public:
         const KeyT *const req_start_key = req.StartTxKey().GetKey<KeyT>();
         const KeyT *const req_end_key = req.EndTxKey().GetKey<KeyT>();
 
-        auto &paused_position = req.PausedPos();
+        auto &paused_position = req.PausedPos(shard_->core_id_);
 
         bool is_dirty = req.IsDirty();
 
@@ -7691,7 +8121,8 @@ public:
 
             slice_end_next_page_it = next_page_it(slice_end_it);
 
-            curr_slice_delta_size = &(req.SliceDeltaSize().back().second);
+            curr_slice_delta_size =
+                &(req.SliceDeltaSize(shard_->core_id_).back().second);
         }
 
         bool has_dml_since_ddl = false;
@@ -7893,7 +8324,8 @@ public:
 
                         slice_end_next_page_it = next_page_it(slice_end_it);
 
-                        auto &slice_delta_size = req.SliceDeltaSize();
+                        auto &slice_delta_size =
+                            req.SliceDeltaSize(shard_->core_id_);
                         slice_delta_size.emplace_back(slice->StartTxKey(), 0);
                         curr_slice_delta_size = &slice_delta_size.back().second;
                     }
@@ -8339,10 +8771,6 @@ public:
         }
 
         normal_obj_sz_ = 0;
-        if constexpr (RangePartitioned)
-        {
-            range_sizes_.clear();
-        }
         ccmp_.clear();
     }
 
@@ -10055,7 +10483,10 @@ protected:
                 // status, it should already be in the key cache. Only add it if
                 // it's in DELETED.
                 auto res = shard_->local_shards_.AddKeyToKeyCache(
-                    table_name_, cc_ng_id_, *ccp->KeyOfEntry(cce));
+                    table_name_,
+                    cc_ng_id_,
+                    shard_->core_id_,
+                    *ccp->KeyOfEntry(cce));
                 if (res == RangeSliceOpStatus::Retry)
                 {
                     // Retry if the slice key cache is being loaded.
@@ -11483,74 +11914,6 @@ protected:
         return &pos_inf_page_;
     }
 
-    bool UpdateRangeSize(uint32_t partition_id,
-                         int32_t delta_size,
-                         bool is_dirty)
-    {
-        if constexpr (RangePartitioned)
-        {
-            auto it = range_sizes_.find(partition_id);
-            if (it == range_sizes_.end())
-            {
-                it = range_sizes_
-                         .emplace(partition_id,
-                                  std::make_tuple(
-                                      static_cast<int32_t>(
-                                          RangeSizeStatus::kNotInitialized),
-                                      0,
-                                      false))
-                         .first;
-            }
-            if (std::get<0>(it->second) ==
-                    static_cast<int32_t>(RangeSizeStatus::kNotInitialized) &&
-                !is_dirty)
-            {
-                std::get<1>(it->second) += delta_size;
-                // Init the range size of this range.
-                std::get<0>(it->second) =
-                    static_cast<int32_t>(RangeSizeStatus::kLoading);
-
-                int64_t ng_term = Sharder::Instance().LeaderTerm(cc_ng_id_);
-                shard_->FetchTableRangeSize(table_name_,
-                                            static_cast<int32_t>(partition_id),
-                                            cc_ng_id_,
-                                            ng_term);
-                return false;
-            }
-
-            if (std::get<0>(it->second) ==
-                    static_cast<int32_t>(RangeSizeStatus::kLoading) ||
-                is_dirty)
-            {
-                // Loading or split: record delta in delta part (.second).
-                std::get<1>(it->second) += delta_size;
-            }
-            else
-            {
-                int32_t new_range_size = std::get<0>(it->second) + delta_size;
-                std::get<0>(it->second) =
-                    new_range_size > 0 ? new_range_size : 0;
-
-                bool trigger_split =
-                    !is_dirty && !std::get<2>(it->second) &&
-                    std::get<0>(it->second) >=
-                        static_cast<int32_t>(StoreRange::range_max_size);
-
-                DLOG_IF(INFO, trigger_split)
-                    << "Range size is too large, need to split. table: "
-                    << table_name_.StringView()
-                    << " partition: " << partition_id
-                    << " range size: " << std::get<0>(it->second)
-                    << " range max size: " << StoreRange::range_max_size;
-                std::get<2>(it->second) =
-                    trigger_split == true ? true : std::get<2>(it->second);
-                return trigger_split;
-            }
-        }  // RangePartitioned
-
-        return false;
-    }
-
     absl::btree_map<
         KeyT,
         std::unique_ptr<
@@ -11578,7 +11941,7 @@ void BackfillSnapshotForScanSlice(FetchSnapshotCc *fetch_cc,
     {
         TemplateScanCache<KeyT, ValueT> *scan_cache =
             static_cast<TemplateScanCache<KeyT, ValueT> *>(
-                req->GetLocalScanCache());
+                req->GetLocalScanCache(core_id));
         assert(scan_cache != nullptr);
         auto *scan_tuple = const_cast<TemplateScanTuple<KeyT, ValueT> *>(
             scan_cache->At(tuple_idx));
@@ -11597,7 +11960,8 @@ void BackfillSnapshotForScanSlice(FetchSnapshotCc *fetch_cc,
     }
     else
     {
-        RemoteScanSliceCache *remote_scan_cache = req->GetRemoteScanCache();
+        RemoteScanSliceCache *remote_scan_cache =
+            req->GetRemoteScanCache(core_id);
         assert(remote_scan_cache != nullptr);
         assert(remote_scan_cache->archive_records_.size() >= tuple_idx);
         auto &tmp_pair = remote_scan_cache->archive_positions_[tuple_idx];
@@ -11613,8 +11977,9 @@ void BackfillSnapshotForScanSlice(FetchSnapshotCc *fetch_cc,
     }
 
     // trigger request
-    req->DecreaseWaitForSnapshotCnt();
-    if (req->IsWaitForSnapshot() && req->WaitForSnapshotCnt() == 0)
+    req->DecreaseWaitForSnapshotCnt(core_id);
+    if (req->IsWaitForSnapshot(core_id) &&
+        req->WaitForSnapshotCnt(core_id) == 0)
     {
         shard.Enqueue(core_id, req);
     }

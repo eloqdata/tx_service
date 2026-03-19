@@ -1963,14 +1963,13 @@ void TransactionExecution::Process(ReadOperation &read)
                     // error to the tx read request.
                     assert(!lock_range_bucket_result_.IsError());
 
-                    // Uses the partition id to shard the key across CPU cores
-                    // in a cc node.
-                    partition_id = range_rec_.GetRangeInfo()->PartitionId();
-                    uint32_t residual =
-                        static_cast<uint32_t>((partition_id & 0x3FF));
+                    // Uses the lower 10 bits of the key's hash code to shard
+                    // the key across CPU cores in a cc node.
+                    uint32_t residual = key.Hash() & 0x3FF;
                     NodeGroupId range_ng =
                         range_rec_.GetRangeOwnerNg()->BucketOwner();
                     key_shard_code = range_ng << 10 | residual;
+                    partition_id = range_rec_.GetRangeInfo()->PartitionId();
                 }
             }
             else
@@ -4612,17 +4611,12 @@ bool TransactionExecution::FillDataLogRequest(WriteToLogOp &write_log)
                 // ngs, write log for both ngs.
                 uint32_t forward_ng_id =
                     Sharder::Instance().ShardToCcNodeGroup(forward_shard_code);
-                auto [table_rec_it, inserted] =
-                    ng_table_set.try_emplace(forward_ng_id);
-                if (!inserted)
-                {
-                    continue;
-                }
+                auto table_rec_it = ng_table_set.try_emplace(forward_ng_id);
                 std::unordered_map<
                     TableName,
                     std::vector<
                         std::pair<const TxKey *, const WriteSetEntry *>>>
-                    &table_rec_set = table_rec_it->second.second;
+                    &table_rec_set = table_rec_it.first->second.second;
 
                 auto rec_vec_it = table_rec_set.emplace(
                     std::piecewise_construct,
@@ -5294,7 +5288,6 @@ void TransactionExecution::Process(PostProcessOp &post_process)
         {
             for (const auto &[key, write_entry] : pair.second)
             {
-                bool on_dirty_range = write_entry.on_dirty_range_;
                 CcReqStatus ret =
                     cc_handler_->PostWrite(tx_number,
                                            tx_term_,
@@ -5304,12 +5297,10 @@ void TransactionExecution::Process(PostProcessOp &post_process)
                                            write_entry.rec_.get(),
                                            write_entry.op_,
                                            write_entry.key_shard_code_,
-                                           post_process.hd_result_,
-                                           write_entry.partition_id_,
-                                           on_dirty_range);
+                                           post_process.hd_result_);
                 update_post_cnt(ret);
 
-                for (auto &[forward_shard_code, forward_pair] :
+                for (auto &[forward_shard_code, cce_addr] :
                      write_entry.forward_addr_)
                 {
                     CcReqStatus ret =
@@ -5317,13 +5308,11 @@ void TransactionExecution::Process(PostProcessOp &post_process)
                                                tx_term_,
                                                command_id,
                                                commit_ts_,
-                                               forward_pair.second,
+                                               cce_addr,
                                                write_entry.rec_.get(),
                                                write_entry.op_,
                                                forward_shard_code,
-                                               post_process.hd_result_,
-                                               forward_pair.first,
-                                               on_dirty_range);
+                                               post_process.hd_result_);
                     update_post_cnt(ret);
                 }
             }
@@ -5405,10 +5394,9 @@ void TransactionExecution::Process(PostProcessOp &post_process)
                     // Keys that were not successfully locked in the cc
                     // map do not need post-processing.
 
-                    for (const auto &[forward_shard_code, forward_pair] :
+                    for (const auto &[forward_shard_code, cce_addr] :
                          write_entry.forward_addr_)
                     {
-                        const CcEntryAddr &cce_addr = forward_pair.second;
                         if (cce_addr.Term() >= 0)
                         {
                             assert(!cce_addr.Empty());
@@ -7775,19 +7763,17 @@ void TransactionExecution::Process(BatchReadOperation &batch_read_op)
         TxRecord &rec = *read_batch[idx].record_;
 
         uint32_t sharding_code = 0;
+        size_t key_hash = key.Hash();
+        sharding_code =
+            read_batch[idx].cce_addr_.NodeGroupId() << 10 | (key_hash & 0x3FF);
         int32_t partition_id = -1;
         if (table_name.IsHashPartitioned())
         {
-            size_t key_hash = key.Hash();
-            sharding_code = read_batch[idx].cce_addr_.NodeGroupId() << 10 |
-                            (key_hash & 0x3FF);
             partition_id = Sharder::MapKeyHashToHashPartitionId(key_hash);
         }
         else
         {
             partition_id = batch_read_op.range_ids_[idx];
-            sharding_code = read_batch[idx].cce_addr_.NodeGroupId() << 10 |
-                            (partition_id & 0x3FF);
         }
         cc_handler_->Read(
             table_name,

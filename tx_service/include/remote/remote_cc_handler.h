@@ -84,9 +84,7 @@ public:
                    const TxRecord *record,
                    OperationType operation_type,
                    uint32_t key_shard_code,
-                   CcHandlerResult<PostProcessResult> &hres,
-                   int32_t partition_id = -1,
-                   bool on_dirty_range = false);
+                   CcHandlerResult<PostProcessResult> &hres);
 
     void PostWriteAll(uint32_t src_node_id,
                       const TableName &table_name,
