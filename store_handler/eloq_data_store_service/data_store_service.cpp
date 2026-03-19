@@ -425,7 +425,11 @@ bool DataStoreService::ConnectAndStartDataStore(uint32_t data_shard_id,
             return false;
         }
 
+#ifdef DATA_STORE_TYPE_ELOQDSS_ELOQSTORE
         res = shard_ref.data_store_->StartDB(term, data_shard_id);
+#else
+        res = shard_ref.data_store_->StartDB(term);
+#endif
         if (!res)
         {
             LOG(ERROR) << "Failed to start db instance in data store service";
