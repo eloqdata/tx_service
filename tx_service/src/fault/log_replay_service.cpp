@@ -774,7 +774,8 @@ int RecoveryService::on_received_messages(brpc::StreamId stream_id,
 
                     // Finish all in-flight requests; now this log group can be
                     // marked done for global barrier cleanup.
-                    if (barrier != nullptr && barrier->Finished(lg_id))
+                    if (barrier != nullptr &&
+                        barrier->Finished(stream_id, lg_id))
                     {
                         CleanupReplayBarrier(cc_ng_id);
                     }
@@ -1200,6 +1201,12 @@ bool RecoveryService::NodeGroupReplayBarrier::WaitSplitTableCollected(
         return it != current_stream_.end() && it->second == stream_id;
     };
 
+    // Reject stale or superseded streams before mutating shared state.
+    if (!is_current_stream() || info->cc_ng_term_ != current_term_)
+    {
+        return false;
+    }
+
     // If already beyond CollectSplitTable, do not accept new contributions.
     if (phase_ != ReplayPhase::CollectSplitTable)
     {
@@ -1254,6 +1261,12 @@ bool RecoveryService::NodeGroupReplayBarrier::WaitDdlReplayed(
         auto it = current_stream_.find(log_group_id);
         return it != current_stream_.end() && it->second == stream_id;
     };
+
+    // Reject stale or superseded streams before mutating shared state.
+    if (!is_current_stream() || info->cc_ng_term_ != current_term_)
+    {
+        return false;
+    }
 
     // Only participate in Barrier #2 while DDL replay is still pending.
     if (phase_ != ReplayPhase::ReplayDdlLog)
@@ -1319,9 +1332,15 @@ void RecoveryService::NodeGroupReplayBarrier::UpdateBarrier(
     cv_.notify_all();
 }
 
-bool RecoveryService::NodeGroupReplayBarrier::Finished(uint32_t lg_id)
+bool RecoveryService::NodeGroupReplayBarrier::Finished(brpc::StreamId stream_id,
+                                                       uint32_t lg_id)
 {
     std::unique_lock<bthread::Mutex> barrier_lk(mux_);
+    if (current_stream_.find(lg_id) == current_stream_.end() ||
+        current_stream_[lg_id] != stream_id)
+    {
+        return false;
+    }
     // done_log_groups_ is reused to count finish completion.
     done_log_groups_.insert(lg_id);
     if (done_log_groups_.size() == expected_log_group_cnt_)

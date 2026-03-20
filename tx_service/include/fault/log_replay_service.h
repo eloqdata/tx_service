@@ -241,7 +241,7 @@ private:
                            uint32_t lg_count,
                            int64_t ng_term);
 
-        bool Finished(uint32_t lg_id);
+        bool Finished(brpc::StreamId stream_id, uint32_t lg_id);
 
         int64_t current_term_{-1};
         uint32_t expected_log_group_cnt_{0};
@@ -264,7 +264,6 @@ private:
         bthread::ConditionVariable cv_;
     };
 
-    void ResetReplayBarrier(NodeGroupReplayBarrier &barrier, int64_t term);
     void CleanupReplayBarrier(uint32_t cc_ng_id);
     NodeGroupReplayBarrier *GetReplayBarrier(uint32_t cc_ng_id,
                                              bool emplace = false);
