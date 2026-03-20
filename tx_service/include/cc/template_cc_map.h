@@ -6899,10 +6899,11 @@ public:
         uint16_t pause_idx = shard_->core_id_;
         CleanType clean_type = req.GetCleanType();
         if (clean_type == CleanType::CleanBucketData ||
-            clean_type == CleanType::CleanRangeData)
+            clean_type == CleanType::CleanRangeData ||
+            clean_type == CleanType::CleanRangeDataForMigration)
         {
-            // For clean bucket data and range data, cc req is only sent to 1
-            // core.
+            // For clean bucket data and range data (for data migration), cc req
+            // is only sent to 1 core.
             pause_idx = 0;
         }
         if (req.ResumeKey(pause_idx)->KeyPtr() != nullptr)
@@ -6982,6 +6983,14 @@ public:
 
         if (ccp == &pos_inf_page_ || !(ccp->FirstKey() < *end_key))
         {
+            if (req.GetCleanType() == CleanType::CleanRangeDataForMigration)
+            {
+                // For data migration, we need to delete the range size info
+                // for the range that has been migrated to other node group.
+                int32_t partition_id = req.GetPartitionId();
+                assert(partition_id > 0 && partition_id != INT32_MAX);
+                RemoveRangeSize(static_cast<uint32_t>(partition_id));
+            }
             return req.SetFinish();
         }
         else
@@ -11549,6 +11558,14 @@ protected:
         }  // RangePartitioned
 
         return false;
+    }
+
+    void RemoveRangeSize(uint32_t partition_id)
+    {
+        if constexpr (RangePartitioned)
+        {
+            range_sizes_.erase(partition_id);
+        }
     }
 
     absl::btree_map<

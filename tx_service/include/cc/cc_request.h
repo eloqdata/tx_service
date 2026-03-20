@@ -6373,6 +6373,11 @@ public:
         return clean_type_;
     }
 
+    int32_t GetPartitionId() const
+    {
+        return range_id_;
+    }
+
 private:
     CleanType clean_type_;
     // Target buckets to be cleaned if clean type is CleanBucketData.

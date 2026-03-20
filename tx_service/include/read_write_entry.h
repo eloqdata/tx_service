@@ -80,6 +80,7 @@ struct WriteSetEntry
     // Used in double write scenarios during online DDL.
     // key shard code -> (partition id, cce addr)
     std::unordered_map<uint32_t, std::pair<int32_t, CcEntryAddr>> forward_addr_;
+    // True if the keys is located in a splitting/migrating range.
     bool on_dirty_range_{false};
 };
 
