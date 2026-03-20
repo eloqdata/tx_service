@@ -350,6 +350,17 @@ void RecoveryService::Connect(::google::protobuf::RpcController *controller,
                                      cc_ng_term,
                                      replay_start_ts,
                                      recovering);
+
+    // Initialize/refresh the global DDL barrier for recovering streams.
+    if (recovering)
+    {
+        NodeGroupReplayBarrier *barrier = GetReplayBarrier(cc_ng_id, true);
+        barrier->UpdateBarrier(stream_socket,
+                               log_group_id,
+                               log_agent_->LogGroupCount(),
+                               cc_ng_term);
+    }
+
     response->set_success(true);
     LOG(INFO) << "replay service accepting new stream: " << stream_socket
               << " from log group: " << log_group_id
@@ -423,12 +434,15 @@ int RecoveryService::on_received_messages(brpc::StreamId stream_id,
 {
     std::unordered_map<TableName, std::shared_ptr<std::atomic_uint32_t>>
         table_range_split_cnt;
-    std::unordered_set<TableName> range_split_tables;
+    std::unordered_map<TableName, std::unordered_map<int32_t, uint64_t>>
+        split_range_info;
 
     ConnectionInfo *info;
+    NodeGroupReplayBarrier *barrier;
     {
         std::lock_guard<bthread::Mutex> lk(inbound_mux_);
         info = &inbound_connections_.find(stream_id)->second;
+        barrier = GetReplayBarrier(info->cc_ng_id_);
     }
     bthread::Mutex &mux = info->mux_;
     bool &recovery_error = info->recovery_error_;
@@ -445,6 +459,7 @@ int RecoveryService::on_received_messages(brpc::StreamId stream_id,
         const bool is_lock_recovery = msg.is_lock_recovery();
         if (idx == 0)
         {
+            std::unordered_set<TableName> range_split_tables;
             // All of the shema and range split logs should be in the first msg.
             // Collect which tables are range splitting. For these table we only
             // need to recover write intent on catalog entry instead of write
@@ -478,6 +493,15 @@ int RecoveryService::on_received_messages(brpc::StreamId stream_id,
                                           TableType::Primary,
                                           table_engine};
                 range_split_tables.insert(base_table_name);
+            }
+
+            // Barrier #1: collect global range splitting tables (base
+            // tables) before starting schema replay.
+            if (barrier != nullptr &&
+                !barrier->WaitSplitTableCollected(
+                    info, stream_id, std::move(range_split_tables)))
+            {
+                return 0;
             }
         }
 
@@ -553,6 +577,8 @@ int RecoveryService::on_received_messages(brpc::StreamId stream_id,
             const std::string &schema_op_blob = schema_op_msg.schema_op_blob();
 
             ReplayLogCc *cc_req = replay_cc_pool_.NextRequest();
+            std::unordered_set<TableName> *splitting_tables =
+                (barrier != nullptr) ? &barrier->range_split_tables_ : nullptr;
             cc_req->Reset(cc_ng_id,
                           cc_ng_term,
                           catalog_ccm_name_sv,
@@ -568,7 +594,7 @@ int RecoveryService::on_received_messages(brpc::StreamId stream_id,
                           recovery_error,
                           is_lock_recovery,
                           nullptr,
-                          &range_split_tables);
+                          splitting_tables);
 
             on_fly_cnt.fetch_add(1, std::memory_order_release);
             local_shards_.EnqueueCcRequest(0, cc_req);
@@ -624,13 +650,16 @@ int RecoveryService::on_received_messages(brpc::StreamId stream_id,
                     split_range_op_blob.length() - blob_offset))
             {
                 recovery_error = true;
-                CleanSplitRangeInfo(cc_ng_id);
                 return 0;
             }
             int32_t range_id = ds_split_range_op_msg.partition_id();
-            uint64_t split_commit_ts = split_range_msg.commit_ts();
-            SetSplitRangeInfo(
-                cc_ng_id, base_table_name, range_id, split_commit_ts);
+            // Record split range commit ts for data log replay.
+            auto &range_map = split_range_info[base_table_name];
+            auto [it, inserted] = range_map.try_emplace(range_id, ts);
+            if (!inserted)
+            {
+                it->second = ts;
+            }
 
             // Replay Split
             ReplayLogCc *cc_req = replay_cc_pool_.NextRequest();
@@ -659,15 +688,25 @@ int RecoveryService::on_received_messages(brpc::StreamId stream_id,
                 stream_id, mux, on_fly_cnt, status, recovery_error);
             if (recovery_error)
             {
-                CleanSplitRangeInfo(cc_ng_id);
                 return 0;
             }
         }
 
+        // Barrier #2: wait until all log groups complete global DDL
+        // replay before allowing any data/finish replay.
+        if (barrier != nullptr &&
+            !barrier->WaitDdlReplayed(
+                info, stream_id, std::move(split_range_info)))
+        {
+            return 0;
+        }
+
+        const auto *split_range_info_ptr =
+            (barrier != nullptr) ? &barrier->split_range_info_ : nullptr;
+
         // parse and process log records
         if (!msg.has_finish())
         {
-            const auto *split_range_info = GetSplitRangeInfo(cc_ng_id);
             ParseDataLogCc *cc_req = parse_datalog_cc_pool_.NextRequest();
             cc_req->Reset(std::move(msg),
                           cc_ng_id,
@@ -677,7 +716,7 @@ int RecoveryService::on_received_messages(brpc::StreamId stream_id,
                           on_fly_cnt,
                           recovery_error,
                           is_lock_recovery,
-                          split_range_info);
+                          split_range_info_ptr);
             on_fly_cnt.fetch_add(1, std::memory_order_release);
             local_shards_.EnqueueCcRequest(next_core, cc_req);
             next_core = (next_core + 1) % local_shards_.Count();
@@ -685,7 +724,6 @@ int RecoveryService::on_received_messages(brpc::StreamId stream_id,
         else  // has finish message
         {
             const std::string &log_records = msg.binary_log_records();
-            const auto *split_range_info = GetSplitRangeInfo(cc_ng_id);
             ParseDataLogCc *cc_req = parse_datalog_cc_pool_.NextRequest();
             cc_req->Reset(log_records,
                           cc_ng_id,
@@ -695,7 +733,7 @@ int RecoveryService::on_received_messages(brpc::StreamId stream_id,
                           on_fly_cnt,
                           recovery_error,
                           is_lock_recovery,
-                          split_range_info);
+                          split_range_info_ptr);
             on_fly_cnt.fetch_add(1, std::memory_order_release);
             local_shards_.EnqueueCcRequest(next_core, cc_req);
             next_core = (next_core + 1) % local_shards_.Count();
@@ -733,6 +771,13 @@ int RecoveryService::on_received_messages(brpc::StreamId stream_id,
                                                         latest_txn_no,
                                                         latest_commit_ts,
                                                         last_ckpt_ts);
+
+                    // Finish all in-flight requests; now this log group can be
+                    // marked done for global barrier cleanup.
+                    if (barrier != nullptr && barrier->Finished(lg_id))
+                    {
+                        CleanupReplayBarrier(cc_ng_id);
+                    }
                 }
 
                 LOG(INFO) << "replay connection: cc node group: "
@@ -740,8 +785,6 @@ int RecoveryService::on_received_messages(brpc::StreamId stream_id,
                           << ", log group: " << info->log_group_id_
                           << ", set recovering status to finished";
             }
-            // Clean up split range info for this node group.
-            CleanSplitRangeInfo(cc_ng_id);
             brpc::StreamClose(stream_id);
             // assumption: finish message must be the last message so return
             return 0;
@@ -1115,39 +1158,178 @@ void RecoveryService::ProcessRecoverTxTask(RecoverTxTask &task)
     }
 }
 
-void RecoveryService::SetSplitRangeInfo(uint32_t ng_id,
-                                        TableName table_name,
-                                        int32_t range_id,
-                                        uint64_t commit_ts)
+RecoveryService::NodeGroupReplayBarrier *RecoveryService::GetReplayBarrier(
+    uint32_t cc_ng_id, bool emplace)
 {
-    auto ng_it = split_range_info_.try_emplace(ng_id).first;
-    auto &table_map = ng_it->second;
-    auto table_it =
-        table_map
-            .try_emplace(table_name, std::unordered_map<int32_t, uint64_t>{})
-            .first;
-    auto &range_map = table_it->second;
-    auto [it, inserted] = range_map.try_emplace(range_id, commit_ts);
-    if (!inserted)
+    // The caller hold the iobound mutex
+    if (emplace)
     {
-        it->second = commit_ts;
+        return &replay_barriers_.try_emplace(cc_ng_id).first->second;
     }
-}
-
-const std::unordered_map<TableName, std::unordered_map<int32_t, uint64_t>> *
-RecoveryService::GetSplitRangeInfo(uint32_t ng_id) const
-{
-    auto ng_it = split_range_info_.find(ng_id);
-    if (ng_it == split_range_info_.end())
+    auto it = replay_barriers_.find(cc_ng_id);
+    if (it == replay_barriers_.end())
     {
         return nullptr;
     }
-    return &ng_it->second;
+    return &it->second;
 }
 
-void RecoveryService::CleanSplitRangeInfo(uint32_t ng_id)
+void RecoveryService::CleanupReplayBarrier(uint32_t cc_ng_id)
 {
-    split_range_info_.erase(ng_id);
+    std::unique_lock<bthread::Mutex> inbound_lk(inbound_mux_);
+    replay_barriers_.erase(cc_ng_id);
+}
+
+bool RecoveryService::NodeGroupReplayBarrier::WaitSplitTableCollected(
+    const ConnectionInfo *info,
+    brpc::StreamId stream_id,
+    std::unordered_set<TableName> &&range_split_tables)
+{
+    // Non-recovering streams never participate in the barrier.
+    if (!info->recovering_)
+    {
+        return true;
+    }
+
+    const uint32_t log_group_id = info->log_group_id_;
+    std::unique_lock<bthread::Mutex> lk(mux_);
+
+    auto is_current_stream = [&]()
+    {
+        auto it = current_stream_.find(log_group_id);
+        return it != current_stream_.end() && it->second == stream_id;
+    };
+
+    // If already beyond CollectSplitTable, do not accept new contributions.
+    if (phase_ != ReplayPhase::CollectSplitTable)
+    {
+        return is_current_stream();
+    }
+
+    // Merge local base tables into the global union.
+    for (auto &t : range_split_tables)
+    {
+        range_split_tables_.insert(std::move(t));
+    }
+
+    // Mark this log group done.
+    done_log_groups_.insert(log_group_id);
+
+    // If all log groups are collected, switch to DDL replay phase.
+    if (phase_ == ReplayPhase::CollectSplitTable &&
+        done_log_groups_.size() == expected_log_group_cnt_)
+    {
+        phase_ = ReplayPhase::ReplayDdlLog;
+        done_log_groups_.clear();
+        cv_.notify_all();
+        return true;
+    }
+
+    // Otherwise, wait until phase switch or this stream is no longer current.
+    while (phase_ == ReplayPhase::CollectSplitTable && is_current_stream())
+    {
+        cv_.wait(lk);
+    }
+
+    return is_current_stream();
+}
+
+bool RecoveryService::NodeGroupReplayBarrier::WaitDdlReplayed(
+    const ConnectionInfo *info,
+    brpc::StreamId stream_id,
+    std::unordered_map<TableName, std::unordered_map<int32_t, uint64_t>>
+        &&split_range_info)
+{
+    // Non-recovering streams never participate in the barrier.
+    if (!info->recovering_)
+    {
+        return true;
+    }
+
+    const uint32_t log_group_id = info->log_group_id_;
+    std::unique_lock<bthread::Mutex> lk(mux_);
+
+    auto is_current_stream = [&]()
+    {
+        auto it = current_stream_.find(log_group_id);
+        return it != current_stream_.end() && it->second == stream_id;
+    };
+
+    // Only participate in Barrier #2 while DDL replay is still pending.
+    if (phase_ != ReplayPhase::ReplayDdlLog)
+    {
+        return is_current_stream();
+    }
+
+    // Merge this log group's split ranges into the global view.
+    for (auto &[table_name, range_map] : split_range_info)
+    {
+        auto &global_range_map = split_range_info_[table_name];
+        for (auto &[range_id, commit_ts] : range_map)
+        {
+            auto [it, inserted] =
+                global_range_map.try_emplace(range_id, commit_ts);
+            if (!inserted)
+            {
+                it->second = commit_ts;
+            }
+        }
+    }
+
+    // Mark this log group DDL done.
+    done_log_groups_.insert(log_group_id);
+    if (done_log_groups_.size() == expected_log_group_cnt_)
+    {
+        // Switch to data replay phase and wake up all waiters.
+        phase_ = ReplayPhase::ReplayDataLog;
+        done_log_groups_.clear();
+        cv_.notify_all();
+        return is_current_stream();
+    }
+
+    while (phase_ == ReplayPhase::ReplayDdlLog && is_current_stream())
+    {
+        cv_.wait(lk);
+    }
+
+    return is_current_stream();
+}
+
+void RecoveryService::NodeGroupReplayBarrier::UpdateBarrier(
+    brpc::StreamId stream_id,
+    uint32_t lg_id,
+    uint32_t lg_count,
+    int64_t ng_term)
+{
+    std::unique_lock<bthread::Mutex> barrier_lk(mux_);
+
+    if (current_term_ == -1 || current_term_ != ng_term)
+    {
+        current_term_ = ng_term;
+        phase_ = ReplayPhase::CollectSplitTable;
+        done_log_groups_.clear();
+        range_split_tables_.clear();
+        split_range_info_.clear();
+    }
+
+    expected_log_group_cnt_ = lg_count;
+    current_stream_[lg_id] = stream_id;
+    // Roll back any previous contribution from an outdated stream.
+    done_log_groups_.erase(lg_id);
+    cv_.notify_all();
+}
+
+bool RecoveryService::NodeGroupReplayBarrier::Finished(uint32_t lg_id)
+{
+    std::unique_lock<bthread::Mutex> barrier_lk(mux_);
+    // done_log_groups_ is reused to count finish completion.
+    done_log_groups_.insert(lg_id);
+    if (done_log_groups_.size() == expected_log_group_cnt_)
+    {
+        cv_.notify_all();
+        return true;
+    }
+    return false;
 }
 
 }  // namespace fault

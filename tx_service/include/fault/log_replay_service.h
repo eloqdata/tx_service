@@ -33,6 +33,7 @@
 #include <string>
 #include <thread>
 #include <unordered_map>
+#include <unordered_set>
 
 #include "txlog.h"
 #include "type.h"
@@ -182,17 +183,6 @@ private:
 
     void ProcessRecoverTxTask(RecoverTxTask &task);
 
-    // Range split info management.
-    void SetSplitRangeInfo(uint32_t ng_id,
-                           TableName table_name,
-                           int32_t range_id,
-                           uint64_t commit_ts);
-
-    const std::unordered_map<TableName, std::unordered_map<int32_t, uint64_t>> *
-    GetSplitRangeInfo(uint32_t ng_id) const;
-
-    void CleanSplitRangeInfo(uint32_t ng_id);
-
     struct ConnectionInfo
     {
         ConnectionInfo() = default;
@@ -223,6 +213,61 @@ private:
         bool recovering_;
         bool recovery_error_{false};
     };
+
+    enum class ReplayPhase : uint8_t
+    {
+        CollectSplitTable = 0,
+        ReplayDdlLog = 1,
+        ReplayDataLog = 2,
+    };
+
+    struct NodeGroupReplayBarrier
+    {
+        NodeGroupReplayBarrier() = default;
+
+        bool WaitSplitTableCollected(
+            const ConnectionInfo *info,
+            brpc::StreamId stream_id,
+            std::unordered_set<TableName> &&range_split_tables);
+
+        bool WaitDdlReplayed(
+            const ConnectionInfo *info,
+            brpc::StreamId stream_id,
+            std::unordered_map<TableName, std::unordered_map<int32_t, uint64_t>>
+                &&split_range_info);
+
+        void UpdateBarrier(brpc::StreamId stream_id,
+                           uint32_t lg_id,
+                           uint32_t lg_count,
+                           int64_t ng_term);
+
+        bool Finished(uint32_t lg_id);
+
+        int64_t current_term_{-1};
+        uint32_t expected_log_group_cnt_{0};
+        ReplayPhase phase_{ReplayPhase::CollectSplitTable};
+
+        // Log group id set that has completed related phase.
+        std::unordered_set<uint32_t> done_log_groups_;
+
+        // Current active stream for each log group.
+        std::unordered_map<uint32_t, brpc::StreamId> current_stream_;
+
+        // Cross log group aggregation: schema replay range splitting tables.
+        std::unordered_set<TableName> range_split_tables_;
+
+        // Cross log group aggregation: split range commit ts for data replay.
+        std::unordered_map<TableName, std::unordered_map<int32_t, uint64_t>>
+            split_range_info_;
+
+        bthread::Mutex mux_;
+        bthread::ConditionVariable cv_;
+    };
+
+    void ResetReplayBarrier(NodeGroupReplayBarrier &barrier, int64_t term);
+    void CleanupReplayBarrier(uint32_t cc_ng_id);
+    NodeGroupReplayBarrier *GetReplayBarrier(uint32_t cc_ng_id,
+                                             bool emplace = false);
 
     LocalCcShards &local_shards_;
     // Each ConnectionInfo is uniquely identified by <cc_ng_id, log_group_id>
@@ -261,13 +306,8 @@ private:
     uint16_t port_;
 
     void ClearTx(uint64_t tx_number);
-
-    // Range split info for each node group:
-    // ng_id -> <data_table_name -> <partition id -> split range commit ts>>
-    std::unordered_map<
-        uint32_t,
-        std::unordered_map<TableName, std::unordered_map<int32_t, uint64_t>>>
-        split_range_info_;
+    // key: cc_ng_id
+    std::unordered_map<uint32_t, NodeGroupReplayBarrier> replay_barriers_;
 };
 }  // namespace fault
 }  // namespace txservice
