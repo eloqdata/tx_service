@@ -101,6 +101,7 @@ public:
     // Only called when a standby node starts following
     void OnStartFollowing(uint32_t node_id, int64_t term, bool resubscribe);
     bool OnSnapshotReceived(const remote::OnSnapshotSyncedRequest *req);
+    bool PromoteStandbyTermIfCandidate(int64_t standby_term);
 
 private:
     void NotifyNewLeaderStart(uint32_t leader_ng_id, uint32_t leader_node_id);

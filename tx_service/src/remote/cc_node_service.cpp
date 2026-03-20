@@ -2084,17 +2084,28 @@ void CcNodeService::RequestSyncSnapshot(
                  store_hd->RequestSyncSnapshot(ng_id, term, snapshot_ts);
              if (ok)
              {
-                 Sharder::Instance().SetStandbyNodeTerm(standby_term);
-                 Sharder::Instance().SetCandidateStandbyNodeTerm(-1);
-                 if (!txservice::txservice_skip_kv &&
+                 const bool promoted = Sharder::Instance()
+                                           .PromoteStandbyTermIfCandidate(
+                                               ng_id, standby_term);
+                 if (promoted && !txservice::txservice_skip_kv &&
                      !txservice::txservice_enable_cache_replacement)
                  {
                      store_hd->RestoreTxCache(ng_id, standby_term);
                  }
-                 DLOG(INFO) << "RequestSyncSnapshot async RequestSyncSnapshot "
-                               "successfully, ng_id="
-                            << ng_id << ", standby_term=" << standby_term
-                            << ", snapshot_ts=" << snapshot_ts;
+                 if (promoted)
+                 {
+                     DLOG(INFO) << "RequestSyncSnapshot async "
+                                   "RequestSyncSnapshot successfully, ng_id="
+                                << ng_id << ", standby_term=" << standby_term
+                                << ", snapshot_ts=" << snapshot_ts;
+                 }
+                 else
+                 {
+                     DLOG(INFO) << "RequestSyncSnapshot async stale term is "
+                                   "discarded, ng_id="
+                                << ng_id << ", standby_term=" << standby_term
+                                << ", snapshot_ts=" << snapshot_ts;
+                 }
              }
              DLOG(INFO) << "RequestSyncSnapshot async RequestSyncSnapshot "
                            "done, ng_id="

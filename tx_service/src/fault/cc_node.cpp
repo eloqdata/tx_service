@@ -762,6 +762,39 @@ bool CcNode::OnSnapshotReceived(const remote::OnSnapshotSyncedRequest *req)
     return succ;
 }
 
+bool CcNode::PromoteStandbyTermIfCandidate(int64_t standby_term)
+{
+    bool expected = false;
+    while (!is_processing_.compare_exchange_strong(
+        expected, true, std::memory_order_acq_rel))
+    {
+        bthread_usleep(100);
+        expected = false;
+    }
+    std::shared_ptr<void> defer_release(
+        nullptr,
+        [this](void *)
+        { is_processing_.store(false, std::memory_order_release); });
+
+    const int64_t candidate_standby_term =
+        Sharder::Instance().CandidateStandbyNodeTerm();
+    if (candidate_standby_term != standby_term)
+    {
+        DLOG(INFO) << "Skip promoting standby term due to candidate mismatch, "
+                   << "ng_id=" << ng_id_ << ", requested=" << standby_term
+                   << ", candidate=" << candidate_standby_term
+                   << ", current_standby="
+                   << Sharder::Instance().StandbyNodeTerm();
+        return false;
+    }
+
+    Sharder::Instance().SetStandbyNodeTerm(standby_term);
+    Sharder::Instance().SetCandidateStandbyNodeTerm(-1);
+    DLOG(INFO) << "Promoted standby term from candidate, ng_id=" << ng_id_
+               << ", standby_term=" << standby_term;
+    return true;
+}
+
 void CcNode::ClearCcNodeGroupData()
 {
     uint16_t core_cnt = local_cc_shards_.Count();

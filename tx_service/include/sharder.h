@@ -390,6 +390,7 @@ public:
                           bool resubscribe = false);
 
     bool OnSnapshotReceived(const remote::OnSnapshotSyncedRequest *req);
+    bool PromoteStandbyTermIfCandidate(uint32_t ng_id, int64_t standby_term);
 
     /**
      * @brief Update the log group's leader node id when the log group leader
