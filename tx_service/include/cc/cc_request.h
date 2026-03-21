@@ -6229,8 +6229,41 @@ public:
         case CleanType::CleanRangeData:
         case CleanType::CleanRangeDataForMigration:
         case CleanType::CleanBucketData:
-            // All data in the target range/bucket can be cleaned.
-            return true;
+        {
+            // Cannot clean entries being checkpointed — the checkpoint
+            // callback will decrement dirty count, and cleaning here
+            // would cause a double-decrement.
+            if (versioned_cce)
+            {
+                if (range_partitioned)
+                {
+                    return !static_cast<const VersionedLruEntry<true, true> *>(
+                                entry)
+                                ->GetBeingCkpt();
+                }
+                else
+                {
+                    return !static_cast<const VersionedLruEntry<true, false> *>(
+                                entry)
+                                ->GetBeingCkpt();
+                }
+            }
+            else
+            {
+                if (range_partitioned)
+                {
+                    return !static_cast<const VersionedLruEntry<false, true> *>(
+                                entry)
+                                ->GetBeingCkpt();
+                }
+                else
+                {
+                    return !static_cast<
+                                const VersionedLruEntry<false, false> *>(entry)
+                                ->GetBeingCkpt();
+                }
+            }
+        }
         case CleanType::CleanForAlterTable:
         {
             if (versioned_cce)
