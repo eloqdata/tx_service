@@ -8480,6 +8480,13 @@ public:
                                        ValueT,
                                        VersionedRecord,
                                        RangePartitioned>::split_threshold_;
+                        if (shard_->GetCacheEvictPolicy() ==
+                                CacheEvictPolicy::LO_LRU &&
+                            *borrow_from_prev)
+                        {
+                            borrow_from_prev = page->large_obj_page_ == false &&
+                                               prev->large_obj_page_ == false;
+                        }
                     }
                     return *borrow_from_prev;
                 };
@@ -8495,6 +8502,13 @@ public:
                                        ValueT,
                                        VersionedRecord,
                                        RangePartitioned>::split_threshold_;
+                        if (shard_->GetCacheEvictPolicy() ==
+                                CacheEvictPolicy::LO_LRU &&
+                            *borrow_from_next)
+                        {
+                            borrow_from_next = page->large_obj_page_ == false &&
+                                               next->large_obj_page_ == false;
+                        }
                     }
                     return *borrow_from_next;
                 };
@@ -8510,6 +8524,13 @@ public:
                                        ValueT,
                                        VersionedRecord,
                                        RangePartitioned>::split_threshold_;
+                        if (shard_->GetCacheEvictPolicy() ==
+                                CacheEvictPolicy::LO_LRU &&
+                            *merge_with_prev)
+                        {
+                            merge_with_prev = page->large_obj_page_ == false &&
+                                              prev->large_obj_page_ == false;
+                        }
                     }
                     return *merge_with_prev;
                 };
@@ -8525,6 +8546,13 @@ public:
                                        ValueT,
                                        VersionedRecord,
                                        RangePartitioned>::split_threshold_;
+                        if (shard_->GetCacheEvictPolicy() ==
+                                CacheEvictPolicy::LO_LRU &&
+                            *merge_with_next)
+                        {
+                            merge_with_next = page->large_obj_page_ == false &&
+                                              next->large_obj_page_ == false;
+                        }
                     }
                     return *merge_with_next;
                 };
@@ -9896,6 +9924,46 @@ protected:
             return End();
         }
 
+        if (shard_->GetCacheEvictPolicy() == CacheEvictPolicy::LO_LRU)
+        {
+            if (target_page->large_obj_page_)
+            {
+                target_it++;
+                if (target_it == ccmp_.end())
+                {
+                    // target_page still points to the large page A.
+                    target_it = ccmp_.try_emplace(
+                        target_it,
+                        key,
+                        std::make_unique<CcPage<KeyT,
+                                                ValueT,
+                                                VersionedRecord,
+                                                RangePartitioned>>(
+                            this, target_page, target_page->next_page_));
+                }
+                else
+                {
+                    // target_page still points to the large page A.
+                    // Peek at the next page B without yet updating target_page,
+                    // so that if a new page must be inserted between A and B
+                    // the constructor receives the correct prev=A, next=B.
+                    if (target_it->second->large_obj_page_ ||
+                        target_it->second->Full())
+                    {
+                        target_it = ccmp_.try_emplace(
+                            target_it,
+                            key,
+                            std::make_unique<CcPage<KeyT,
+                                                    ValueT,
+                                                    VersionedRecord,
+                                                    RangePartitioned>>(
+                                this, target_page, target_page->next_page_));
+                    }
+                    target_page = target_it->second.get();
+                }
+            }
+        }
+
         // not found, emplace key into target page, split the page if
         // it's full
         if (target_page->Full())
@@ -11223,6 +11291,8 @@ protected:
         assert(page1.next_page_ == &page2 && &page1 == page2.prev_page_);
         assert(page1_it->first == page1.FirstKey());
         assert(page2_it->first == page2.FirstKey());
+        assert(page1.large_obj_page_ == false);
+        assert(page2.large_obj_page_ == false);
 
         if (page1.Size() > page2.Size())
         {
@@ -11366,6 +11436,9 @@ protected:
         CcPage<KeyT, ValueT, VersionedRecord, RangePartitioned> *page2 =
             page2_it->second.get();
 
+        assert(page1->large_obj_page_ == false);
+        assert(page2->large_obj_page_ == false);
+
         auto merged_page_it = page1_it;
         auto discarded_page_it = page2_it;
         CcPage<KeyT, ValueT, VersionedRecord, RangePartitioned> *merged_page =
@@ -11480,6 +11553,66 @@ protected:
         assert(page1_it != ccmp_.end());
         assert(page1_it->second.get() == merged_page);
         page2_it = ccmp_.end();
+    }
+
+    void EnsureLargeObjOccupyPageAlone(
+        CcPage<KeyT, ValueT, VersionedRecord, RangePartitioned> *ccp,
+        CcEntry<KeyT, ValueT, VersionedRecord, RangePartitioned> *cce)
+    {
+        if (cce->PayloadStatus() == RecordStatus::Deleted)
+        {
+            ccp->large_obj_page_ = false;
+        }
+        else
+        {
+            assert(cce->PayloadStatus() == RecordStatus::Normal);
+            if (cce->payload_.cur_payload_->SerializedLength() >
+                shard_->LargeObjThresholdBytes())
+            {
+                if (ccp->Size() <= 1)
+                {
+                    ccp->large_obj_page_ = true;
+                }
+                else
+                {
+                    assert(ccp->large_obj_page_ == false);
+                    size_t idx_in_ccp = ccp->FindEntry(cce);
+                    const KeyT *key = ccp->Key(idx_in_ccp);
+
+                    auto large_obj_ccp_uptr =
+                        std::make_unique<CcPage<KeyT,
+                                                ValueT,
+                                                VersionedRecord,
+                                                RangePartitioned>>(
+                            this, ccp, ccp->next_page_);
+                    large_obj_ccp_uptr->large_obj_page_ = true;
+                    large_obj_ccp_uptr->Emplace(*key,
+                                                ccp->MoveEntry(idx_in_ccp));
+                    ccp->Remove(idx_in_ccp);
+                    ccp->UpdateSmallestTTL();
+                    key = large_obj_ccp_uptr->Key(0);
+
+                    auto ccp_it = ccmp_.upper_bound(*key);
+                    if (ccp_it == ccmp_.end() || *key < ccp_it->first)
+                    {
+                        --ccp_it;
+                    }
+
+                    TryUpdatePageKey(ccp_it);
+
+                    CcPage<KeyT, ValueT, VersionedRecord, RangePartitioned>
+                        *large_obj_ccp_ptr = large_obj_ccp_uptr.get();
+                    ccmp_.try_emplace(*key, std::move(large_obj_ccp_uptr));
+                    shard_->UpdateLruList(large_obj_ccp_ptr, false);
+                }
+            }
+            else
+            {
+                ccp->large_obj_page_ = false;
+            }
+        }
+
+        shard_->UpdateLruList(ccp, false);
     }
 
     CcPage<KeyT, ValueT, VersionedRecord, RangePartitioned> *PageNegInf()
