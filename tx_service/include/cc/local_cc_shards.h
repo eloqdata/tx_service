@@ -92,7 +92,6 @@ struct CoroCtx
 {
     ~CoroCtx()
     {
-        // LOG(INFO) << "CoroCtx destructor, this = " << this;
     }
 
     boost::context::continuation coro_;
@@ -536,8 +535,6 @@ public:
         {
             return false;
         }
-
-        return false;
 #endif
     }
 
@@ -2581,10 +2578,10 @@ private:
 
 #ifndef NDEBUG
     boost::context::protected_fixedsize_stack flush_coro_stack_allocator_{
-        512 * 1024};  // 512KB, guard page for stack overflow detection
+        128 * 1024};  // 128KB, guard page for stack overflow detection
 #else
     boost::context::pooled_fixedsize_stack flush_coro_stack_allocator_{
-        1024 * 1024};  // 1MB for FlushData call chain
+        128 * 1024};  // 128KB for FlushData call chain
 #endif
 
     void FlushDataWorker(size_t worker_idx);

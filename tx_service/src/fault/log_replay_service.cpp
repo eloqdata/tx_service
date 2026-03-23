@@ -882,7 +882,7 @@ void RecoveryService::on_closed(brpc::StreamId id)
         }
         info = it->second.get();
     }
-    DLOG(INFO) << "replay service stream: " << id << " wait and clear requests";
+
     WaitAndClearRequests(id,
                          info->mux_,
                          info->on_fly_cnt_,
@@ -908,8 +908,6 @@ void RecoveryService::WaitAndClearRequests(brpc::StreamId stream_id,
                                            WaitingStatus waiting_status)
 {
     size_t on_fly_cnt = on_fly_cnt_.load(std::memory_order_relaxed);
-    DLOG(INFO) << "wait replay requests, stream id = " << stream_id
-               << ", on fly cnt = " << on_fly_cnt;
     if ((on_fly_cnt > 0 && waiting_status == WaitingStatus::WaitForAll) ||
         (on_fly_cnt > 10000 && waiting_status == WaitingStatus::WaitForMany))
     {
@@ -925,7 +923,6 @@ void RecoveryService::WaitAndClearRequests(brpc::StreamId stream_id,
         }
         status.store(WaitingStatus::Active, std::memory_order_relaxed);
     }
-    DLOG(INFO) << "wait finished, stream id = " << stream_id;
     std::unique_lock<bthread::Mutex> lk(mux);
     if (recovery_error)
     {
@@ -954,8 +951,6 @@ void RecoveryService::WaitAndClearRequests(brpc::StreamId stream_id,
             if (info->cc_ng_id_ == error_node_group_id &&
                 info->cc_ng_term_ == error_term)
             {
-                DLOG(INFO) << "RecoveryService, close stream, stream id = "
-                           << stream_id;
                 brpc::StreamClose(stream_id);
             }
         }

@@ -229,14 +229,14 @@ public:
      * @param node_group
      * @return whether all entries are written to data store successfully
      */
-    bool PutAll(std::unordered_map<
-                std::string_view,
-                std::vector<std::unique_ptr<txservice::FlushTaskEntry>>>
-                    &flush_task,
-                const std::function<void()> *yield_fptr = nullptr,
-                const std::function<void()> *resume_fptr = nullptr,
-                const std::function<void()> *sync_yield_fptr = nullptr)
-        override;
+    bool PutAll(
+        std::unordered_map<
+            std::string_view,
+            std::vector<std::unique_ptr<txservice::FlushTaskEntry>>>
+            &flush_task,
+        const std::function<void()> *yield_fptr = nullptr,
+        const std::function<void()> *resume_fptr = nullptr,
+        const std::function<void()> *sync_yield_fptr = nullptr) override;
 
     bool NeedPersistKV() override
     {
@@ -342,12 +342,12 @@ public:
         uint32_t range_partition_id,
         txservice::FillStoreSliceCc *load_slice_req) override;
 
-    bool UpdateRangeSlices(const std::vector<txservice::UpdateRangeSlicesReq>
-                               &update_range_slice_reqs,
-                           const std::function<void()> *yield_fptr = nullptr,
-                           const std::function<void()> *resume_fptr = nullptr,
-                           const std::function<void()> *sync_yield_fptr = nullptr)
-        override;
+    bool UpdateRangeSlices(
+        const std::vector<txservice::UpdateRangeSlicesReq>
+            &update_range_slice_reqs,
+        const std::function<void()> *yield_fptr = nullptr,
+        const std::function<void()> *resume_fptr = nullptr,
+        const std::function<void()> *sync_yield_fptr = nullptr) override;
 
     bool UpdateRangeSlices(const txservice::TableName &table_name,
                            uint64_t version,
@@ -433,13 +433,13 @@ public:
      * @brief Write batch historical versions into DataStore.
      *
      */
-    bool PutArchivesAll(std::unordered_map<
-                        std::string_view,
-                        std::vector<std::unique_ptr<txservice::FlushTaskEntry>>>
-                            &flush_task,
-                        const std::function<void()> *yield_fptr = nullptr,
-                        const std::function<void()> *resume_fptr = nullptr)
-        override;
+    bool PutArchivesAll(
+        std::unordered_map<
+            std::string_view,
+            std::vector<std::unique_ptr<txservice::FlushTaskEntry>>>
+            &flush_task,
+        const std::function<void()> *yield_fptr = nullptr,
+        const std::function<void()> *resume_fptr = nullptr) override;
 
     /**
      * @brief Copy record from base/sk table to mvcc_archives.
@@ -614,13 +614,13 @@ public:
                                      bool is_range_partition) const;
 
 private:
-    bool PutArchivesAllImpl(std::unordered_map<
-                                std::string_view,
-                                std::vector<
-                                    std::unique_ptr<txservice::FlushTaskEntry>>>
-                                &flush_task,
-                            const std::function<void()> *yield_fptr = nullptr,
-                            const std::function<void()> *resume_fptr = nullptr);
+    bool PutArchivesAllImpl(
+        std::unordered_map<
+            std::string_view,
+            std::vector<std::unique_ptr<txservice::FlushTaskEntry>>>
+            &flush_task,
+        const std::function<void()> *yield_fptr = nullptr,
+        const std::function<void()> *resume_fptr = nullptr);
 
     bool PutAllImpl(std::unordered_map<
                         std::string_view,
@@ -630,14 +630,13 @@ private:
                     const std::function<void()> *resume_fptr = nullptr,
                     const std::function<void()> *sync_yield_fptr = nullptr);
 
-    bool CopyBaseToArchiveImpl(std::unordered_map<
-                                  std::string_view,
-                                  std::vector<
-                                      std::unique_ptr<
-                                          txservice::FlushTaskEntry>>>
-                                  &flush_task,
-                              const std::function<void()> *yield_fptr = nullptr,
-                              const std::function<void()> *resume_fptr = nullptr);
+    bool CopyBaseToArchiveImpl(
+        std::unordered_map<
+            std::string_view,
+            std::vector<std::unique_ptr<txservice::FlushTaskEntry>>>
+            &flush_task,
+        const std::function<void()> *yield_fptr = nullptr,
+        const std::function<void()> *resume_fptr = nullptr);
 
     int32_t MapKeyHashToPartitionId(const txservice::TxKey &key) const
     {

@@ -890,9 +890,7 @@ public:
         slices_.emplace_back(std::move(slice));
     }
 
-    ~TemplateStoreRange()
-    {
-    }
+    ~TemplateStoreRange() = default;
 
     void SetRangeEndKey(const KeyT *end_key)
     {

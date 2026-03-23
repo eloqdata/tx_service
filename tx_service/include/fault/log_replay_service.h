@@ -120,10 +120,7 @@ public:
                     TxLog *log_agent,
                     std::string ip,
                     uint16_t port);
-    ~RecoveryService()
-    {
-        DLOG(INFO) << "RecoveryService destructor";
-    }
+    ~RecoveryService() = default;
 
     void Shutdown();
 

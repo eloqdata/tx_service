@@ -472,20 +472,26 @@ void UpsertTableIndexOp::Forward(TransactionExecution *txm)
                         break;
                     }
                 }
-                LOG(INFO)
-                    << "Alter Table Index transaction unlock cluster config "
-                       "lock failed, txn: "
-                    << txm->TxNumber() << ", error code: "
-                    << (int) unlock_cluster_config_op_.hd_result_.ErrorCode()
-                    << ", error message: "
-                    << unlock_cluster_config_op_.hd_result_.ErrorMsg()
-                    << ", cluster config addr term"
-                    << cluster_config_addr->Term()
-                    << ", cluster config addr node group id: "
-                    << cluster_config_addr->NodeGroupId()
-                    << ", node group term: "
-                    << Sharder::Instance().LeaderTerm(
-                           cluster_config_addr->NodeGroupId());
+
+                if (cluster_config_addr)
+                {
+                    DLOG(INFO)
+                        << "Alter Table Index transaction unlock cluster "
+                           "config "
+                           "lock failed, txn: "
+                        << txm->TxNumber() << ", error code: "
+                        << (int)
+                               unlock_cluster_config_op_.hd_result_.ErrorCode()
+                        << ", error message: "
+                        << unlock_cluster_config_op_.hd_result_.ErrorMsg()
+                        << ", cluster config addr term"
+                        << cluster_config_addr->Term()
+                        << ", cluster config addr node group id: "
+                        << cluster_config_addr->NodeGroupId()
+                        << ", node group term: "
+                        << Sharder::Instance().LeaderTerm(
+                               cluster_config_addr->NodeGroupId());
+                }
                 // Releasing a local read lock should never fail
                 assert(false);
             }

@@ -32,8 +32,6 @@
 #include <utility>
 #include <vector>
 
-#include "glog/logging.h"
-
 // #include "cc_req_misc.h"
 #include "data_sync_task.h"
 #include "range_bucket_key_record.h"
@@ -544,9 +542,7 @@ public:
     {
     }
 
-    ~TemplateTableRangeEntry()
-    {
-    }
+    ~TemplateTableRangeEntry() = default;
 
     void UpdateRangeEntry(uint64_t version_ts,
                           std::unique_ptr<TemplateStoreRange<KeyT>> slices)

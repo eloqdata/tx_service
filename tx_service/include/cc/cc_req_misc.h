@@ -907,9 +907,7 @@ public:
         {
             waiting_.store(true, std::memory_order_release);
             lk.unlock();
-            // LOG(INFO) << "WaitableCc Wait: Before yield";
             (*yield_fn)();
-            // LOG(INFO) << "WaitableCc Wait: After Yield";
             lk.lock();
             waiting_.store(false, std::memory_order_release);
         }
@@ -969,7 +967,6 @@ public:
                     waiting_.store(false, std::memory_order_release);
                     auto *fn = resume_fn_;
                     lk.unlock();
-                    // LOG(INFO) << "WaitableCc Execute: before resume";
                     (*fn)();
                 }
                 else if (resume_fn_ == nullptr)
@@ -1067,7 +1064,6 @@ public:
                 waiting_.store(false, std::memory_order_release);
                 auto *fn = resume_fn_;
                 lk.unlock();
-                // LOG(INFO) << "UpdateCceCkptTsCc SetFinished: before resume";
                 (*fn)();
             }
             else if (resume_fn_ == nullptr)
@@ -1099,9 +1095,7 @@ public:
         {
             waiting_.store(true, std::memory_order_release);
             lk.unlock();
-            // LOG(INFO) << "UpdateCceCkptTsCc Wait: Before yield";
             (*yield_fn)();
-            // LOG(INFO) << "UpdateCceCkptTsCc Wait: After Yield";
             lk.lock();
             waiting_.store(false, std::memory_order_release);
         }

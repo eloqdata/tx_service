@@ -178,9 +178,8 @@ LocalCcShards::LocalCcShards(
     timer_thd_ = std::thread([this] { TimerRun(); });
     pthread_setname_np(timer_thd_.native_handle(), "tx_timer");
 
-    // Start background thread to initialize table_ranges_heap. For mariadb, the
-    // main thread is the mariadb process thread; offload heap init to avoid
-    // blocking it.
+    // Start background thread to initialize table_ranges_heap. offload heap
+    // init to avoid concurrent access to heap with main thread.
     table_ranges_heap_thd_ =
         std::thread([this] { TableRangesHeapThreadRun(); });
     pthread_setname_np(table_ranges_heap_thd_.native_handle(),
@@ -2383,16 +2382,12 @@ std::pair<TableRangeEntry *, StoreRange *> LocalCcShards::PinStoreRange(
                            ->BucketOwner() == ng_id;
             }());
 
-        DLOG(INFO) << "fetch range slices, ng id = " << ng_id
-                   << ", ng term = " << ng_term
-                   << ", range table name = " << range_table_name.StringView();
         // Fetch range slices info from data store if it's not loaded yet.
         range_entry->FetchRangeSlices(
             range_table_name, cc_request, ng_id, ng_term, cc_shard);
         return {range_entry, nullptr};
     }
 
-    DLOG(INFO) << "store range slice count = " << store_range->SlicesCount();
     return {range_entry, store_range};
 }
 
@@ -4858,9 +4853,6 @@ void LocalCcShards::DataSyncForHashPartition(
         data_sync_task->flight_task_cnt_ += 1;
     }
 
-    auto start_scan_time = std::chrono::steady_clock::now();
-    size_t debug_data_size = 0;
-
     for (size_t i = 0; i < partition_number_this_core;
          i += partition_number_per_scan)
     {
@@ -5144,8 +5136,6 @@ void LocalCcShards::DataSyncForHashPartition(
             }
 #endif
 
-            debug_data_size += flush_data_size;
-
             uint64_t old_usage =
                 data_sync_mem_controller_.AllocateFlushDataMemQuota(
                     flush_data_size);
@@ -5345,12 +5335,6 @@ void LocalCcShards::DataSyncForHashPartition(
             }
         }
     }
-
-    auto stop_scan_time = std::chrono::steady_clock::now();
-    auto duration = std::chrono::duration_cast<std::chrono::microseconds>(
-        stop_scan_time - start_scan_time);
-    LOG(INFO) << "FlushDataImpl: scan duration = " << duration.count() << "us"
-              << ", data size = " << debug_data_size;
 
     PostProcessHashPartitionDataSyncTask(std::move(data_sync_task),
                                          data_sync_txm,
@@ -5863,8 +5847,6 @@ void LocalCcShards::AddFlushTaskEntry(std::unique_ptr<FlushTaskEntry> &&entry)
             auto &last_task = pending_flush_work.back();
             if (last_task->MergeFrom(std::move(flush_data_task)))
             {
-                // LOG(INFO) << "AddFlushTaskEntry: Merge successful, task was "
-                //             "merged into last_task";
                 // Merge successful, task was merged into last_task
                 flush_data_worker_ctx_.cv_.notify_all();
                 return;
@@ -5910,10 +5892,6 @@ void LocalCcShards::FlushCurrentFlushBuffer()
                 auto &last_task = pending_flush_work.back();
                 if (last_task->MergeFrom(std::move(flush_data_task)))
                 {
-                    // LOG(INFO) << "FlushCurrentFlushBuffer: Merge successful,
-                    // "
-                    //             "task was "
-                    //             "merged into last_task";
                     // Merge successful, task was merged into last_task
                     flush_data_worker_ctx_.cv_.notify_all();
                     continue;
@@ -5939,7 +5917,6 @@ void LocalCcShards::FlushDataImpl(FlushDataTask *cur_work,
                                   const std::function<void()> &yield_fn,
                                   const std::function<void()> &resume_fn)
 {
-    auto start_time = std::chrono::steady_clock::now();
     auto &flush_task_entries = cur_work->flush_task_entries_;
     bool succ = true;
 
@@ -6011,9 +5988,6 @@ void LocalCcShards::FlushDataImpl(FlushDataTask *cur_work,
         }
     }
 
-    LOG(INFO) << "FlushDataImpl: start update cce ts, task addr = " << cur_work
-              << ", worker idx = " << worker_idx;
-
     std::unordered_set<uint16_t> updated_ckpt_ts_core_ids;
     // Update cce ckpt ts in memory
     if (succ)
@@ -6029,8 +6003,6 @@ void LocalCcShards::FlushDataImpl(FlushDataTask *cur_work,
                 {
                     continue;
                 }
-
-                auto start_time = std::chrono::steady_clock::now();
 
                 absl::flat_hash_map<size_t,
                                     std::vector<UpdateCceCkptTsCc::CkptTsEntry>>
@@ -6063,14 +6035,6 @@ void LocalCcShards::FlushDataImpl(FlushDataTask *cur_work,
                     }
                 }
 
-                auto stop_time = std::chrono::steady_clock::now();
-                auto duration =
-                    std::chrono::duration_cast<std::chrono::microseconds>(
-                        stop_time - start_time);
-                // LOG(INFO) << "FlushDataImpl: UpdateCceCkptTsCc duration = "
-                //          << duration.count() << "us"
-                //          << ", rec size = " << entry->data_sync_vec_->size();
-
                 if (cce_entries_map.size() > 0)
                 {
                     UpdateCceCkptTsCc update_cce_req(
@@ -6092,11 +6056,6 @@ void LocalCcShards::FlushDataImpl(FlushDataTask *cur_work,
                         if (iterations_since_yield >=
                             MAX_ITERATIONS_WITHOUT_YIELD)
                         {
-                            // LOG(INFO)
-                            //    << "FlushDataImpl: Before sync yield, task "
-                            //       "addr = "
-                            //    << cur_work << ", worker idx = " <<
-                            //    worker_idx;
                             sync_yield_func();
                             iterations_since_yield = 0;
                         }
@@ -6108,8 +6067,6 @@ void LocalCcShards::FlushDataImpl(FlushDataTask *cur_work,
         }
     }
 
-    // LOG(INFO) << "FlushDataImpl: start reset cc, task addr = " << cur_work
-    //          << ", worker idx = " << worker_idx;
     // Notify cc shards that dirty data has been flushed. This will re-enqueue
     // kickout data cc reqs if there are any.
     WaitableCc reset_cc(
@@ -6139,10 +6096,6 @@ void LocalCcShards::FlushDataImpl(FlushDataTask *cur_work,
 
     PostProcessFlushTaskEntries(
         flush_task_entries, ckpt_err, &yield_fn, &resume_fn, &sync_yield_func);
-    auto stop_time = std::chrono::steady_clock::now();
-    auto duration = std::chrono::duration_cast<std::chrono::microseconds>(
-        stop_time - start_time);
-    LOG(INFO) << "FlushDataImpl duration = " << duration.count() << "us";
 }
 
 void LocalCcShards::FlushData(std::unique_lock<std::mutex> &flush_worker_lk,
@@ -6161,8 +6114,6 @@ void LocalCcShards::FlushData(std::unique_lock<std::mutex> &flush_worker_lk,
 
     flush_worker_lk.unlock();
 
-    // Phase 2: Pass no-op callbacks; Phase 4/5 will pass real coroutine
-    // callbacks.
     FlushDataImpl(cur_work.get(), worker_idx, []() {}, []() {}, []() {});
 
     flush_worker_lk.lock();
@@ -6189,8 +6140,6 @@ void LocalCcShards::FlushDataWorker(size_t worker_idx)
     {
         if (!pending_flush_work.empty())
         {
-            // LOG(INFO) << "FlushDataWorker: flush work size = "
-            //          << pending_flush_work.size();
             std::unique_ptr<FlushDataTask> cur_work =
                 std::move(pending_flush_work.front());
             pending_flush_work.pop_front();
@@ -6204,11 +6153,7 @@ void LocalCcShards::FlushDataWorker(size_t worker_idx)
                 flush_coro_stack_allocator_,
                 [this, ctx, worker_idx](continuation &&sink)
                 {
-                    ctx->yield_fn = [&sink]()
-                    {
-                        // LOG(INFO) << "CoroCtx yield_fn";
-                        sink = sink.resume();
-                    };
+                    ctx->yield_fn = [&sink]() { sink = sink.resume(); };
                     ctx->sync_yield_func =
                         [&sink,
                          weak_ctx = std::weak_ptr<CoroCtx>(ctx),
@@ -6220,8 +6165,6 @@ void LocalCcShards::FlushDataWorker(size_t worker_idx)
                             {
                                 std::lock_guard<std::mutex> lk(
                                     flush_data_worker_ctx_.mux_);
-                                // LOG(INFO) << "CoroCtx sync_yield_func: push "
-                                //             "ctx to resume_queue";
                                 resume_queue_[worker_idx].push_back(
                                     std::move(c));
                                 flush_data_worker_ctx_.cv_.notify_all();
@@ -6235,9 +6178,6 @@ void LocalCcShards::FlushDataWorker(size_t worker_idx)
                     {
                         if (auto c = weak_ctx.lock())
                         {
-                            // LOG(INFO)
-                            //    << "CoroCtx resume_fn: coro ctx = " <<
-                            //    c.get();
                             std::lock_guard<std::mutex> lk(
                                 flush_data_worker_ctx_.mux_);
                             resume_queue_[worker_idx].push_back(std::move(c));

@@ -500,9 +500,7 @@ bool DataStoreServiceClient::PutAllImpl(
     // Wait for all partitions to complete
     if (yield_fptr != nullptr && resume_fptr != nullptr)
     {
-        // LOG(INFO) << "PutAllImpl: Before Wait, this = " << sync_putall;
         sync_putall->Wait(yield_fptr, resume_fptr);
-        // LOG(INFO) << "PutAllImpl: After Wait, this = " << sync_putall;
     }
     else
     {
@@ -1848,9 +1846,7 @@ bool DataStoreServiceClient::UpdateRangeSlices(
             ++iterations_since_yield;
             if (iterations_since_yield >= MAX_ITERATIONS_WITHOUT_YIELD)
             {
-                // LOG(INFO) << "UpdateRangeSlices: prepare Before sync yield";
                 (*sync_yield_fptr)();
-                // LOG(INFO) << "UpdateRangeSlices: prepare After sync yield";
                 iterations_since_yield = 0;
             }
         }
@@ -1880,18 +1876,14 @@ bool DataStoreServiceClient::UpdateRangeSlices(
             ++iterations_since_yield;
             if (iterations_since_yield >= MAX_ITERATIONS_WITHOUT_YIELD)
             {
-                // LOG(INFO) << "UpdateRangeSlices: Before sync yield";
                 (*sync_yield_fptr)();
-                // LOG(INFO) << "UpdateRangeSlices: After sync yield";
                 iterations_since_yield = 0;
             }
         }
     }
 
-    // LOG(INFO) << "UpdateRangeSlices: before WaitAll slice sync";
     // 3- Wait for slice requests to complete
     slice_sync_concurrent->WaitForAll();
-    // LOG(INFO) << "UpdateRangeSlices: after WaitAll slice sync";
 
     if (slice_sync_concurrent->result_.error_code() !=
         remote::DataStoreError::NO_ERROR)
@@ -1946,10 +1938,8 @@ bool DataStoreServiceClient::UpdateRangeSlices(
     DispatchRangeMetadataBatches(
         kv_range_table_name, meta_acc, meta_sync_concurrent);
 
-    // LOG(INFO) << "UpdateRangeSlices: before WaitAll meta sync";
     // 5- Wait for metadata requests to complete
     meta_sync_concurrent->WaitForAll();
-    // LOG(INFO) << "UpdateRangeSlices: after WaitAll meta sync";
 
     // 6- Check for errors
     if (meta_sync_concurrent->result_.error_code() !=
@@ -1975,9 +1965,7 @@ bool DataStoreServiceClient::UpdateRangeSlices(
         FlushData(kv_range_table_names, callback_data, &SyncCallback);
         if (yield_fptr != nullptr && resume_fptr != nullptr)
         {
-            // LOG(INFO) << "UpdateRangeSlices: before Wait meta sync";
             callback_data->Wait(yield_fptr, resume_fptr);
-            // LOG(INFO) << "UpdateRangeSlices: after Wait meta sync";
         }
         else
         {

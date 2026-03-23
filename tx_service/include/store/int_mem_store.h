@@ -55,17 +55,16 @@ public:
      * @return whether all entries are written to data store successfully
      */
     bool PutAll(std::unordered_map<
-                std::string_view,
-                std::vector<std::unique_ptr<txservice::FlushTaskEntry>>>
+                    std::string_view,
+                    std::vector<std::unique_ptr<txservice::FlushTaskEntry>>>
                     &flush_task,
                 const std::function<void()> *yield_fptr = nullptr,
                 const std::function<void()> *resume_fptr = nullptr,
-                const std::function<void()> *sync_yield_fptr = nullptr)
-        override
+                const std::function<void()> *sync_yield_fptr = nullptr) override
     {
-        (void)yield_fptr;
-        (void)resume_fptr;
-        (void)sync_yield_fptr;
+        (void) yield_fptr;
+        (void) resume_fptr;
+        (void) sync_yield_fptr;
         assert(false);
         // for (const auto &ref : batch)
         // {
@@ -250,16 +249,16 @@ public:
      * @brief Write batch historical versions into DataStore.
      *
      */
-    bool PutArchivesAll(std::unordered_map<
-                        std::string_view,
-                        std::vector<std::unique_ptr<txservice::FlushTaskEntry>>>
-                            &flush_task,
-                        const std::function<void()> *yield_fptr = nullptr,
-                        const std::function<void()> *resume_fptr = nullptr)
-        override
+    bool PutArchivesAll(
+        std::unordered_map<
+            std::string_view,
+            std::vector<std::unique_ptr<txservice::FlushTaskEntry>>>
+            &flush_task,
+        const std::function<void()> *yield_fptr = nullptr,
+        const std::function<void()> *resume_fptr = nullptr) override
     {
-        (void)yield_fptr;
-        (void)resume_fptr;
+        (void) yield_fptr;
+        (void) resume_fptr;
         assert(false);
         return true;
     }
@@ -274,8 +273,8 @@ public:
         const std::function<void()> *yield_fptr = nullptr,
         const std::function<void()> *resume_fptr = nullptr) override
     {
-        (void)yield_fptr;
-        (void)resume_fptr;
+        (void) yield_fptr;
+        (void) resume_fptr;
         assert(false);
         return true;
     }
