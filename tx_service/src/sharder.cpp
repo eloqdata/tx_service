@@ -901,7 +901,8 @@ bool Sharder::OnSnapshotReceived(const remote::OnSnapshotSyncedRequest *req)
     return node->OnSnapshotReceived(req);
 }
 
-bool Sharder::PromoteStandbyTermIfCandidate(uint32_t ng_id, int64_t standby_term)
+bool Sharder::PromoteStandbyTermIfCandidate(uint32_t ng_id,
+                                            int64_t standby_term)
 {
     std::shared_ptr<fault::CcNode> node;
     {
