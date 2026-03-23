@@ -2091,9 +2091,9 @@ void CcNodeService::RequestSyncSnapshot(
                  store_hd->RequestSyncSnapshot(ng_id, term, snapshot_ts);
              if (ok)
              {
-                 const bool promoted = Sharder::Instance()
-                                           .PromoteStandbyTermIfCandidate(
-                                               ng_id, standby_term);
+                 const bool promoted =
+                     Sharder::Instance().PromoteStandbyTermIfCandidate(
+                         ng_id, standby_term);
                  if (promoted && !txservice::txservice_skip_kv &&
                      !txservice::txservice_enable_cache_replacement)
                  {
