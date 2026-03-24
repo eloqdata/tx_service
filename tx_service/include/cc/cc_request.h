@@ -6231,8 +6231,28 @@ public:
         case CleanType::CleanBucketData:
         {
             // Cannot clean entries being checkpointed — the checkpoint
-            // callback will decrement dirty count, and cleaning here
-            // would cause a double-decrement.
+            // callback (UpdateCceCkptTsCc) will decrement dirty count,
+            // and cleaning here would cause a double-decrement.
+            //
+            // An alternative approach would be to have
+            // DataSyncForHashPartition acquire bucket read locks (as
+            // DataSyncForRangePartition already does), which would
+            // serialize checkpoint with migration and prevent this race
+            // entirely. However, that has significant downsides for hash
+            // partitions: checkpoint is dispatched per-core, and each
+            // core owns 1024/num_cores buckets (e.g. 128 on an 8-core
+            // node), so locking all of them via ReadTxRequest adds
+            // overhead to every checkpoint cycle even when no migration
+            // is in progress.
+            //
+            // Instead, we skip entries with BeingCkpt=true here and
+            // rely on the KickoutCcEntryCc retry loop
+            // (template_cc_map.h, Execute(KickoutCcEntryCc&)) to
+            // re-enqueue the request. Once the checkpoint callback
+            // clears BeingCkpt, the entry is cleaned on the next retry.
+            // This only delays migration when there is an active
+            // checkpoint on the same bucket — a rare overlap in
+            // practice.
             if (versioned_cce)
             {
                 if (range_partitioned)
