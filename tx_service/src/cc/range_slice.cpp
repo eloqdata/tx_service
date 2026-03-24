@@ -174,7 +174,10 @@ void StoreSlice::InitKeyCache(CcShard *cc_shard,
         init_key_cache_cc_ = cc_shard->NewInitKeyCacheCc();
         init_key_cache_cc_->Reset(range, this, *tbl_name, term, ng_id);
 
-        cc_shard->Enqueue(init_key_cache_cc_);
+        LocalCcShards *cc_shards = Sharder::Instance().GetLocalCcShards();
+        uint16_t dest_core = static_cast<uint16_t>(
+            (range->PartitionId() & 0x3FF) % cc_shards->Count());
+        cc_shards->EnqueueToCcShard(dest_core, init_key_cache_cc_);
     }
 }
 
