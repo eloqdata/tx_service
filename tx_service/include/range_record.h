@@ -542,6 +542,8 @@ public:
     {
     }
 
+    ~TemplateTableRangeEntry() = default;
+
     void UpdateRangeEntry(uint64_t version_ts,
                           std::unique_ptr<TemplateStoreRange<KeyT>> slices)
     {

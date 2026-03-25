@@ -23,6 +23,9 @@
 
 #include <algorithm>
 #include <atomic>
+#include <boost/context/continuation.hpp>
+#include <boost/context/pooled_fixedsize_stack.hpp>
+#include <boost/context/protected_fixedsize_stack.hpp>
 #include <condition_variable>
 #include <cstddef>
 #include <cstdint>
@@ -84,6 +87,19 @@ struct InvalidateTableCacheCompositeOp;
 class SkGenerator;
 class UploadBatchSlicesClosure;
 struct FlushDataTask;
+
+struct CoroCtx
+{
+    ~CoroCtx()
+    {
+    }
+
+    boost::context::continuation coro_;
+    std::unique_ptr<FlushDataTask> task_;
+    std::function<void()> sync_yield_func;
+    std::function<void()> yield_fn;
+    std::function<void()> resume_fn;
+};
 
 struct DataMigrationStatus
 {
@@ -457,8 +473,13 @@ public:
 
     void InitializeHashPartitionCkptHeap()
     {
-        hash_partition_ckpt_heap_ = mi_heap_new();
-        hash_partition_main_thread_id_ = mi_thread_id();
+        std::unique_lock<std::mutex> lk(hash_partition_ckpt_heap_mux_);
+        if (!hash_partition_ckpt_heap_)
+        {
+            hash_partition_main_thread_id_ = mi_thread_id();
+            hash_partition_ckpt_heap_ = mi_heap_new();
+        }
+
 #if defined(WITH_JEMALLOC)
         // create hash partition ckpt arena
         size_t sz = sizeof(uint32_t);
@@ -559,6 +580,7 @@ public:
                   << (bool) (static_cast<size_t>(allocated) >=
                              range_slice_memory_limit_);
 #else
+
         std::unique_lock<std::mutex> heap_lk(table_ranges_heap_mux_);
         bool is_override_thd = mi_is_override_thread();
         mi_threadid_t prev_thd =
@@ -858,9 +880,27 @@ public:
                 new_range_entries.push_back(new_range);
             }
         }
-        if (TableRangesMemoryFull())
         {
-            KickoutRangeSlices();
+            std::unique_lock<std::mutex> heap_lk(table_ranges_heap_mux_);
+            bool is_override_thd = mi_is_override_thread();
+            mi_threadid_t prev_thd =
+                mi_override_thread(GetTableRangesHeapThreadId());
+            mi_heap_t *prev_heap = mi_heap_set_default(GetTableRangesHeap());
+            bool range_slice_mem_full = TableRangesMemoryFull();
+            mi_heap_set_default(prev_heap);
+            if (is_override_thd)
+            {
+                mi_override_thread(prev_thd);
+            }
+            else
+            {
+                mi_restore_default_thread_id();
+            }
+            heap_lk.unlock();
+            if (range_slice_mem_full)
+            {
+                KickoutRangeSlices();
+            }
         }
         return new_range_entries;
     }
@@ -970,6 +1010,7 @@ public:
             }
 
             mi_heap_set_default(prev_heap);
+
             if (is_override_thd)
             {
                 mi_override_thread(prev_thd);
@@ -1017,6 +1058,8 @@ public:
             range_entry->UpdateRangeEntry(version, std::move(range_slices));
         }
 
+        mi_heap_set_default(prev_heap);
+
         if (is_override_thd)
         {
             mi_override_thread(prev_thd);
@@ -1025,7 +1068,6 @@ public:
         {
             mi_restore_default_thread_id();
         }
-        mi_heap_set_default(prev_heap);
 
 #if defined(WITH_JEMALLOC)
         JemallocArenaSwitcher::SwitchToArena(prev_arena_id);
@@ -1884,6 +1926,8 @@ private:
     }
 
     void TimerRun();
+    void TableRangesHeapThreadRun();
+    void HashPartitionCkptHeapThreadRun();
     // Internal interface that exposes non const return type and does
     // not acquire mutex lock.
     TableRangeEntry *GetTableRangeEntryInternal(
@@ -1973,7 +2017,10 @@ private:
             std::string_view,
             std::vector<std::unique_ptr<txservice::FlushTaskEntry>>>
             &flush_task_entries,
-        DataSyncTask::CkptErrorCode ckpt_err);
+        DataSyncTask::CkptErrorCode ckpt_err,
+        const std::function<void()> *yield_fptr = nullptr,
+        const std::function<void()> *resume_fptr = nullptr,
+        const std::function<void()> *sync_yield_fptr = nullptr);
 
     const uint32_t node_id_;
     // Native node group
@@ -1987,6 +2034,22 @@ private:
     std::mutex timer_terminate_mux_;
     std::condition_variable timer_terminate_cv_;
     // std::atomic<bool> timer_terminate_;
+
+    // Background thread that initializes table_ranges_heap. After init, it
+    // sleeps until Shutdown.
+    std::thread table_ranges_heap_thd_;
+    bool table_ranges_heap_ready_{false};
+    bool table_ranges_heap_terminate_{false};
+    std::mutex table_ranges_heap_thd_mux_;
+    std::condition_variable table_ranges_heap_thd_cv_;
+
+    // Background thread that initializes hash_partition_ckpt_heap. After init,
+    // it sleeps until Shutdown.
+    std::thread hash_partition_ckpt_heap_thd_;
+    bool hash_partition_ckpt_heap_ready_{false};
+    bool hash_partition_ckpt_heap_terminate_{false};
+    std::mutex hash_partition_ckpt_heap_thd_mux_;
+    std::condition_variable hash_partition_ckpt_heap_thd_cv_;
 
     // When ccshard is full and no ccentry can be kicked-out, it will notify
     // checkpointer to do checkpoint and set flag is_wait_ckpt_ to true.
@@ -2469,12 +2532,23 @@ private:
                           const TxKey *end_key,
                           bool flush_res);
 
-    bool UpdateStoreSlices(std::vector<FlushTaskEntry *> &task);
+    bool UpdateStoreSlices(
+        std::vector<FlushTaskEntry *> &task,
+        const std::function<void()> *yield_fptr = nullptr,
+        const std::function<void()> *resume_fptr = nullptr,
+        const std::function<void()> *sync_yield_fptr = nullptr);
 
     bool GetNextRangePartitionId(const TableName &tablename,
                                  const TableSchema *table_schema,
                                  uint32_t range_cnt,
                                  int32_t &out_next_partition_id);
+
+    /**
+     * @brief Map a data_sync_worker index to the fixed flush_data_worker index.
+     * Used when data_sync_worker count != flush_data_worker count so that each
+     * data_sync_worker consistently targets one flush_data_worker.
+     */
+    size_t DataSyncWorkerToFlushDataWorker(size_t data_sync_worker_id) const;
 
     /**
      * @brief Add a flush task entry to the flush task. If the there's no
@@ -2487,16 +2561,39 @@ private:
 
     WorkerThreadContext flush_data_worker_ctx_;
 
-    // The flush task that has not reached the max pending flush size.
-    // New flush task entry will be added to this buffer. This task will
-    // be appended to pending_flush_work_ when it reaches the max pending flush
-    // size, which will then be processed by flush data worker.
-    FlushDataTask cur_flush_buffer_;
-    // Flush task queue for flush data worker to process.
-    std::deque<std::unique_ptr<FlushDataTask>> pending_flush_work_;
+    // Per-worker flush buffers. Each DataSyncWorker has its own buffer.
+    // New flush task entry will be added to the corresponding buffer. This task
+    // will be appended to pending_flush_work_[worker_idx] when it reaches the
+    // max pending flush size, which will then be processed by the corresponding
+    // flush data worker. Store as pointers because FlushDataTask contains a
+    // bthread::Mutex and is non-movable/non-copyable, which cannot be stored
+    // directly in a vector that may reallocate.
+    std::vector<std::unique_ptr<FlushDataTask>> cur_flush_buffers_;
+    // Per-worker flush task queues. Each FlushDataWorker processes its
+    // corresponding queue.
+    std::vector<std::deque<std::unique_ptr<FlushDataTask>>> pending_flush_work_;
+    // Per-worker queues of coroutine contexts ready to resume (resume_fn or
+    // sync_yield_func).
+    std::vector<std::deque<std::shared_ptr<CoroCtx>>> resume_queue_;
 
-    void FlushDataWorker();
-    void FlushData(std::unique_lock<std::mutex> &flush_worker_lk);
+#ifndef NDEBUG
+    boost::context::protected_fixedsize_stack flush_coro_stack_allocator_{
+        128 * 1024};  // 128KB, guard page for stack overflow detection
+#else
+    boost::context::pooled_fixedsize_stack flush_coro_stack_allocator_{
+        128 * 1024};  // 128KB for FlushData call chain
+#endif
+
+    void FlushDataWorker(size_t worker_idx);
+    void FlushData(std::unique_lock<std::mutex> &flush_worker_lk,
+                   size_t worker_idx);
+
+    bool ShouldYieldFlushData(size_t worker_idx);
+    void FlushDataImpl(FlushDataTask *cur_work,
+                       size_t worker_idx,
+                       const std::function<void()> &sync_yield_func,
+                       const std::function<void()> &yield_fn,
+                       const std::function<void()> &resume_fn);
 
     // Memory controller for data sync.
     DataSyncMemoryController data_sync_mem_controller_;

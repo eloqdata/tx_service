@@ -84,10 +84,15 @@ public:
      * data_sync_vec_ in each flush task entry.
      * @return whether all entries are written to data store successfully
      */
-    virtual bool PutAll(std::unordered_map<
-                        std::string_view,
-                        std::vector<std::unique_ptr<txservice::FlushTaskEntry>>>
-                            &flush_task) = 0;
+
+    virtual bool PutAll(
+        std::unordered_map<
+            std::string_view,
+            std::vector<std::unique_ptr<txservice::FlushTaskEntry>>>
+            &flush_task,
+        const std::function<void()> *yield_fptr = nullptr,
+        const std::function<void()> *resume_fptr = nullptr,
+        const std::function<void()> *sync_yield_fptr = nullptr) = 0;
 
     /**
      * @brief indicate end of flush entries in a single ckpt for \@param batch
@@ -97,8 +102,12 @@ public:
      * @param node_group
      * @return whether all entries are written to data store successfully
      */
-    virtual bool PersistKV(const std::vector<std::string> &kv_table_names)
+    virtual bool PersistKV(const std::vector<std::string> &kv_table_names,
+                           const std::function<void()> *yield_fptr = nullptr,
+                           const std::function<void()> *resume_fptr = nullptr)
     {
+        (void) yield_fptr;
+        (void) resume_fptr;
         return true;
     }
 
@@ -227,8 +236,14 @@ public:
     }
 
     virtual bool UpdateRangeSlices(
-        const std::vector<UpdateRangeSlicesReq> &update_range_slice_reqs)
+        const std::vector<UpdateRangeSlicesReq> &update_range_slice_reqs,
+        const std::function<void()> *yield_fptr = nullptr,
+        const std::function<void()> *resume_fptr = nullptr,
+        const std::function<void()> *sync_yield_fptr = nullptr)
     {
+        (void) yield_fptr;
+        (void) resume_fptr;
+        (void) sync_yield_fptr;
         return false;
     }
 
@@ -285,7 +300,9 @@ public:
         std::unordered_map<
             std::string_view,
             std::vector<std::unique_ptr<txservice::FlushTaskEntry>>>
-            &flush_task) = 0;
+            &flush_task,
+        const std::function<void()> *yield_fptr = nullptr,
+        const std::function<void()> *resume_fptr = nullptr) = 0;
     /**
      * @brief Copy record from base/sk table to mvcc_archives.
      */
@@ -293,7 +310,9 @@ public:
         std::unordered_map<
             std::string_view,
             std::vector<std::unique_ptr<txservice::FlushTaskEntry>>>
-            &flush_task) = 0;
+            &flush_task,
+        const std::function<void()> *yield_fptr = nullptr,
+        const std::function<void()> *resume_fptr = nullptr) = 0;
 
     /**
      * @brief  Get the latest visible(commit_ts <= upper_bound_ts) historical

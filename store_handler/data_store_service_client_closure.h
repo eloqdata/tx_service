@@ -25,6 +25,8 @@
 #include <bthread/condition_variable.h>
 #include <bthread/mutex.h>
 
+#include <atomic>
+#include <functional>
 #include <memory>
 #include <queue>
 #include <string>
@@ -82,19 +84,42 @@ struct SyncCallbackData : public Poolable
     {
         finished_ = false;
         result_.Clear();
+        waiting_.store(false);
+        yield_fn_ = nullptr;
+        resume_fn_ = nullptr;
     }
 
     virtual void Clear() override
     {
         finished_ = false;
         result_.Clear();
+        waiting_.store(false);
+        yield_fn_ = nullptr;
+        resume_fn_ = nullptr;
+    }
+
+    void SetCoroCallbacks(const std::function<void()> *yield_fn,
+                          const std::function<void()> *resume_fn)
+    {
+        yield_fn_ = yield_fn;
+        resume_fn_ = resume_fn;
     }
 
     virtual void Notify()
     {
         std::unique_lock<bthread::Mutex> lk(mtx_);
         finished_ = true;
-        cv_.notify_one();
+        if (resume_fn_ != nullptr && waiting_.load(std::memory_order_acquire))
+        {
+            waiting_.store(false, std::memory_order_release);
+            auto *fn = resume_fn_;
+            lk.unlock();
+            (*fn)();
+        }
+        else if (resume_fn_ == nullptr)
+        {
+            cv_.notify_one();
+        }
     }
 
     virtual void Wait()
@@ -103,6 +128,25 @@ struct SyncCallbackData : public Poolable
         while (!finished_)
         {
             cv_.wait(lk);
+        }
+    }
+
+    void Wait(const std::function<void()> *yield_fn,
+              const std::function<void()> *resume_fn)
+    {
+        if (yield_fn == nullptr || resume_fn == nullptr)
+        {
+            Wait();
+            return;
+        }
+        std::unique_lock<bthread::Mutex> lk(mtx_);
+        while (!finished_)
+        {
+            waiting_.store(true, std::memory_order_release);
+            lk.unlock();
+            (*yield_fn)();
+            lk.lock();
+            waiting_.store(false, std::memory_order_release);
         }
     }
 
@@ -123,6 +167,11 @@ private:
     bool finished_;
 
     remote::CommonResult result_;
+
+    // Coroutine yield/resume support
+    const std::function<void()> *yield_fn_{nullptr};
+    const std::function<void()> *resume_fn_{nullptr};
+    std::atomic<bool> waiting_{false};
 };
 
 /**
@@ -215,12 +264,18 @@ struct SyncPutAllData : public Poolable
         partition_states_.clear();
         completed_partitions_ = 0;
         total_partitions_ = 0;
+        waiting_.store(false);
+        yield_fn_ = nullptr;
+        resume_fn_ = nullptr;
     }
 
     virtual void Clear() override
     {
         completed_partitions_ = 0;
         total_partitions_ = 0;
+        waiting_.store(false);
+        yield_fn_ = nullptr;
+        resume_fn_ = nullptr;
         for (auto *partition_state : partition_states_)
         {
             partition_state->Clear();
@@ -228,15 +283,42 @@ struct SyncPutAllData : public Poolable
         }
         partition_states_.clear();
     }
+
+    void SetCoroCallbacks(const std::function<void()> *yield_fn,
+                          const std::function<void()> *resume_fn)
+    {
+        yield_fn_ = yield_fn;
+        resume_fn_ = resume_fn;
+    }
+
+    void Wait();
+
+    void Wait(const std::function<void()> *yield_fn,
+              const std::function<void()> *resume_fn);
+
     void OnPartitionCompleted()
     {
         std::unique_lock<bthread::Mutex> lk(mux_);
         completed_partitions_++;
         if (completed_partitions_ >= total_partitions_)
         {
-            cv_.notify_one();
+            if (resume_fn_ && waiting_.load(std::memory_order_acquire))
+            {
+                waiting_.store(false, std::memory_order_release);
+                auto *fn = resume_fn_;
+                lk.unlock();
+                (*fn)();
+                // Do not re-lock: resume_fn may acquire flush_worker_mux;
+                // coroutine will need mux_ when it resumes. Unlock before
+                // resume_fn avoids deadlock.
+            }
+            else if (!resume_fn_)
+            {
+                cv_.notify_one();
+            }
         }
     }
+
     mutable bthread::Mutex mux_;
     bthread::ConditionVariable cv_;
 
@@ -244,6 +326,11 @@ struct SyncPutAllData : public Poolable
     std::vector<PartitionFlushState *> partition_states_;
     int32_t completed_partitions_{0};
     int32_t total_partitions_{0};
+
+    // Coroutine yield/resume support
+    const std::function<void()> *yield_fn_{nullptr};
+    const std::function<void()> *resume_fn_{nullptr};
+    std::atomic<bool> waiting_{false};
 };
 
 /**
@@ -273,6 +360,9 @@ struct SyncConcurrentRequest : public Poolable
         unfinished_request_cnt_ = 0;
         all_request_started_ = false;
         result_.Clear();
+        waiting_.store(false);
+        yield_fn_ = nullptr;
+        resume_fn_ = nullptr;
     }
 
     virtual void Clear() override
@@ -280,7 +370,21 @@ struct SyncConcurrentRequest : public Poolable
         unfinished_request_cnt_ = 0;
         all_request_started_ = false;
         result_.Clear();
+        waiting_.store(false);
+        yield_fn_ = nullptr;
+        resume_fn_ = nullptr;
     }
+
+    void SetCoroCallbacks(const std::function<void()> *yield_fn,
+                          const std::function<void()> *resume_fn)
+    {
+        yield_fn_ = yield_fn;
+        resume_fn_ = resume_fn;
+    }
+
+    void WaitForCapacityAndIncrement();
+
+    void WaitForAll();
 
     void Finish(const remote::CommonResult &res)
     {
@@ -295,7 +399,18 @@ struct SyncConcurrentRequest : public Poolable
         if ((all_request_started_ && unfinished_request_cnt_ == 0) ||
             unfinished_request_cnt_ == max_flying_write_count - 1)
         {
-            cv_.notify_one();
+            if (resume_fn_ && waiting_.load(std::memory_order_acquire))
+            {
+                waiting_.store(false, std::memory_order_release);
+                auto *fn = resume_fn_;
+                lk.unlock();
+                (*fn)();
+                // Do not re-lock: resume_fn may acquire flush_worker_mux
+            }
+            else if (!resume_fn_)
+            {
+                cv_.notify_one();
+            }
         }
     }
 
@@ -303,6 +418,11 @@ struct SyncConcurrentRequest : public Poolable
     int32_t unfinished_request_cnt_{0};
     bool all_request_started_{false};
     remote::CommonResult result_;
+
+    // Coroutine yield/resume support
+    const std::function<void()> *yield_fn_{nullptr};
+    const std::function<void()> *resume_fn_{nullptr};
+    std::atomic<bool> waiting_{false};
     mutable bthread::Mutex mux_;
     bthread::ConditionVariable cv_;
 };
@@ -446,20 +566,30 @@ void SyncCallback(void *data,
 
 struct ReadBaseForArchiveCallbackData
 {
-    ReadBaseForArchiveCallbackData(bthread::Mutex &mtx,
-                                   bthread::ConditionVariable &cv,
-                                   size_t &flying_read_cnt,
-                                   int &error_code)
+    ReadBaseForArchiveCallbackData(
+        bthread::Mutex &mtx,
+        bthread::ConditionVariable &cv,
+        size_t &flying_read_cnt,
+        int &error_code,
+        std::atomic<bool> &waiting,
+        const std::function<void()> *resume_fn = nullptr)
         : mtx_(mtx),
           cv_(cv),
           flying_read_cnt_(flying_read_cnt),
           error_code_(error_code),
+          waiting_(waiting),
+          resume_fn_(resume_fn),
           partition_id_(0),
           key_str_(),
           value_str_(),
           ts_(0),
           ttl_(0)
     {
+    }
+
+    void SetCoroCallbacks(const std::function<void()> *resume_fn)
+    {
+        resume_fn_ = resume_fn;
     }
 
     void ResetResult()
@@ -480,6 +610,28 @@ struct ReadBaseForArchiveCallbackData
         }
     }
 
+    void Wait(const std::function<void()> *yield_fn,
+              const std::function<void()> *resume_fn)
+    {
+        if (!yield_fn || !resume_fn)
+        {
+            Wait();
+            return;
+        }
+        std::unique_lock<bthread::Mutex> lk(mtx_);
+        resume_fn_ = resume_fn;
+        while (flying_read_cnt_ > 0)
+        {
+            waiting_.store(true, std::memory_order_release);
+            lk.unlock();
+            (*yield_fn)();
+            lk.lock();
+            waiting_.store(false, std::memory_order_release);
+            // If flying_read_cnt_ still > 0 after resume, loop and yield again.
+            // Do not use cv_.wait(): resume_fn path never notifies cv_.
+        }
+    }
+
     size_t AddFlyingReadCount()
     {
         std::unique_lock<bthread::Mutex> lk(mtx_);
@@ -493,7 +645,20 @@ struct ReadBaseForArchiveCallbackData
         flying_read_cnt_--;
         if (flying_read_cnt_ == 0)
         {
-            cv_.notify_one();
+            if (resume_fn_ && waiting_.load(std::memory_order_acquire))
+            {
+                waiting_.store(false, std::memory_order_release);
+                auto *fn = resume_fn_;
+                lk.unlock();
+                (*fn)();
+                // Do not re-lock: resume_fn may acquire flush_worker_mux.
+                // Do not access members after fn(): object may be destroyed.
+                return 0;
+            }
+            else if (!resume_fn_)
+            {
+                cv_.notify_one();
+            }
         }
         return flying_read_cnt_;
     }
@@ -537,6 +702,9 @@ struct ReadBaseForArchiveCallbackData
     bthread::ConditionVariable &cv_;
     size_t &flying_read_cnt_;
     int &error_code_;
+    std::atomic<bool>
+        &waiting_;  // shared: any callback's DecreaseFlyingReadCount can notify
+    const std::function<void()> *resume_fn_{nullptr};
     int32_t partition_id_;
     std::string_view key_str_;
     std::string value_str_;

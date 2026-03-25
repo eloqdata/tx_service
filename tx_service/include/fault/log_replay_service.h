@@ -29,6 +29,7 @@
 
 #include <condition_variable>
 #include <deque>
+#include <memory>
 #include <mutex>
 #include <string>
 #include <thread>
@@ -270,8 +271,9 @@ private:
 
     LocalCcShards &local_shards_;
     // Each ConnectionInfo is uniquely identified by <cc_ng_id, log_group_id>
-    // pair.
-    std::unordered_map<brpc::StreamId, ConnectionInfo> inbound_connections_;
+    // pair. unique_ptr ensures pointer stability across map rehashing.
+    std::unordered_map<brpc::StreamId, std::unique_ptr<ConnectionInfo>>
+        inbound_connections_;
     int active_stream_cnt_ = 0;
     bthread::Mutex inbound_mux_;
     bthread::ConditionVariable inbound_cv_;

@@ -33,6 +33,7 @@
 #include <chrono>
 #include <cstdint>
 #include <cstdlib>
+#include <deque>
 #include <memory>
 #include <random>
 #include <string>
@@ -313,12 +314,25 @@ void DataStoreServiceClient::ScheduleTimerTasks()
 bool DataStoreServiceClient::PutAll(
     std::unordered_map<std::string_view,
                        std::vector<std::unique_ptr<txservice::FlushTaskEntry>>>
-        &flush_task)
+        &flush_task,
+    const std::function<void()> *yield_fptr,
+    const std::function<void()> *resume_fptr,
+    const std::function<void()> *sync_yield_fptr)
+{
+    return PutAllImpl(flush_task, yield_fptr, resume_fptr, sync_yield_fptr);
+}
+
+bool DataStoreServiceClient::PutAllImpl(
+    std::unordered_map<std::string_view,
+                       std::vector<std::unique_ptr<txservice::FlushTaskEntry>>>
+        &flush_task,
+    const std::function<void()> *yield_fptr,
+    const std::function<void()> *resume_fptr,
+    const std::function<void()> *sync_yield_fptr)
 {
     DLOG(INFO) << "DataStoreServiceClient::PutAll called with "
                << flush_task.size() << " tables to flush.";
     uint64_t now = txservice::LocalCcShards::ClockTsInMillseconds();
-
     // Create global coordinator
     SyncPutAllData *sync_putall = sync_putall_data_pool_.NextObject();
     PoolableGuard sync_putall_guard(sync_putall);
@@ -434,7 +448,17 @@ bool DataStoreServiceClient::PutAll(
     // Set up global coordinator
     sync_putall->total_partitions_ = sync_putall->partition_states_.size();
 
+    // Set coroutine callbacks BEFORE starting async work (see plan risk
+    // analysis)
+    if (yield_fptr != nullptr && resume_fptr != nullptr)
+    {
+        sync_putall->SetCoroCallbacks(yield_fptr, resume_fptr);
+    }
+
     // Start concurrent processing for each partition
+    constexpr size_t MAX_BATCH_WRITES_WITHOUT_YIELD = 10;
+    size_t batch_writes_since_yield = 0;
+
     for (size_t i = 0; i < callback_data_list.size(); ++i)
     {
         auto *partition_state = sync_putall->partition_states_[i];
@@ -459,6 +483,13 @@ bool DataStoreServiceClient::PutAll(
                 PartitionBatchCallback,
                 first_batch.parts_cnt_per_key,
                 first_batch.parts_cnt_per_record);
+            batch_writes_since_yield++;
+            if (sync_yield_fptr != nullptr &&
+                batch_writes_since_yield >= MAX_BATCH_WRITES_WITHOUT_YIELD)
+            {
+                (*sync_yield_fptr)();
+                batch_writes_since_yield = 0;
+            }
         }
         else
         {
@@ -466,15 +497,14 @@ bool DataStoreServiceClient::PutAll(
             sync_putall->OnPartitionCompleted();
         }
     }
-
     // Wait for all partitions to complete
+    if (yield_fptr != nullptr && resume_fptr != nullptr)
     {
-        std::unique_lock<bthread::Mutex> lk(sync_putall->mux_);
-        while (sync_putall->completed_partitions_ <
-               sync_putall->total_partitions_)
-        {
-            sync_putall->cv_.wait(lk);
-        }
+        sync_putall->Wait(yield_fptr, resume_fptr);
+    }
+    else
+    {
+        sync_putall->Wait();
     }
 
     // Check for errors
@@ -490,6 +520,7 @@ bool DataStoreServiceClient::PutAll(
                 callback_data->Clear();
                 callback_data->Free();
             }
+
             return false;
         }
     }
@@ -505,6 +536,7 @@ bool DataStoreServiceClient::PutAll(
         metrics::kv_meter->Collect(
             metrics::NAME_KV_FLUSH_ROWS_TOTAL, records_count, "base");
     }
+
     return true;
 }
 
@@ -520,14 +552,27 @@ bool DataStoreServiceClient::PutAll(
  * fails.
  */
 bool DataStoreServiceClient::PersistKV(
-    const std::vector<std::string> &kv_table_names)
+    const std::vector<std::string> &kv_table_names,
+    const std::function<void()> *yield_fptr,
+    const std::function<void()> *resume_fptr)
 {
     SyncCallbackData *callback_data = sync_callback_data_pool_.NextObject();
     PoolableGuard guard(callback_data);
     callback_data->Reset();
 
+    if (yield_fptr != nullptr && resume_fptr != nullptr)
+    {
+        callback_data->SetCoroCallbacks(yield_fptr, resume_fptr);
+    }
     FlushData(kv_table_names, callback_data, &SyncCallback);
-    callback_data->Wait();
+    if (yield_fptr != nullptr && resume_fptr != nullptr)
+    {
+        callback_data->Wait(yield_fptr, resume_fptr);
+    }
+    else
+    {
+        callback_data->Wait();
+    }
     if (callback_data->Result().error_code() !=
         EloqDS::remote::DataStoreError::NO_ERROR)
     {
@@ -1529,16 +1574,7 @@ void DataStoreServiceClient::DispatchRangeSliceBatches(
                 keys.size() > 0)
             {
                 // Concurrency control: wait if limit reached, then increment
-                // counter
-                {
-                    std::unique_lock<bthread::Mutex> lk(sync_concurrent->mux_);
-                    while (sync_concurrent->unfinished_request_cnt_ >=
-                           SyncConcurrentRequest::max_flying_write_count)
-                    {
-                        sync_concurrent->cv_.wait(lk);
-                    }
-                    sync_concurrent->unfinished_request_cnt_++;
-                }
+                sync_concurrent->WaitForCapacityAndIncrement();
 
                 // Dispatch current batch
                 BatchWriteRecords(kv_table_name,
@@ -1583,15 +1619,7 @@ void DataStoreServiceClient::DispatchRangeSliceBatches(
     if (keys.size() > 0)
     {
         // Concurrency control: wait if limit reached, then increment counter
-        {
-            std::unique_lock<bthread::Mutex> lk(sync_concurrent->mux_);
-            while (sync_concurrent->unfinished_request_cnt_ >=
-                   SyncConcurrentRequest::max_flying_write_count)
-            {
-                sync_concurrent->cv_.wait(lk);
-            }
-            sync_concurrent->unfinished_request_cnt_++;
-        }
+        sync_concurrent->WaitForCapacityAndIncrement();
 
         BatchWriteRecords(kv_table_name,
                           kv_partition_id,
@@ -1693,16 +1721,7 @@ void DataStoreServiceClient::DispatchRangeMetadataBatches(
                 keys.size() > 0)
             {
                 // Concurrency control: wait if limit reached, then increment
-                // counter
-                {
-                    std::unique_lock<bthread::Mutex> lk(sync_concurrent->mux_);
-                    while (sync_concurrent->unfinished_request_cnt_ >=
-                           SyncConcurrentRequest::max_flying_write_count)
-                    {
-                        sync_concurrent->cv_.wait(lk);
-                    }
-                    sync_concurrent->unfinished_request_cnt_++;
-                }
+                sync_concurrent->WaitForCapacityAndIncrement();
 
                 // Dispatch current batch
                 BatchWriteRecords(target_table_name,
@@ -1747,16 +1766,7 @@ void DataStoreServiceClient::DispatchRangeMetadataBatches(
         if (keys.size() > 0)
         {
             // Concurrency control: wait if limit reached, then increment
-            // counter
-            {
-                std::unique_lock<bthread::Mutex> lk(sync_concurrent->mux_);
-                while (sync_concurrent->unfinished_request_cnt_ >=
-                       SyncConcurrentRequest::max_flying_write_count)
-                {
-                    sync_concurrent->cv_.wait(lk);
-                }
-                sync_concurrent->unfinished_request_cnt_++;
-            }
+            sync_concurrent->WaitForCapacityAndIncrement();
 
             BatchWriteRecords(target_table_name,
                               kv_partition_id,
@@ -1776,7 +1786,10 @@ void DataStoreServiceClient::DispatchRangeMetadataBatches(
 }
 
 bool DataStoreServiceClient::UpdateRangeSlices(
-    const std::vector<txservice::UpdateRangeSlicesReq> &update_range_slice_reqs)
+    const std::vector<txservice::UpdateRangeSlicesReq> &update_range_slice_reqs,
+    const std::function<void()> *yield_fptr,
+    const std::function<void()> *resume_fptr,
+    const std::function<void()> *sync_yield_fptr)
 {
     if (update_range_slice_reqs.empty())
     {
@@ -1786,6 +1799,9 @@ bool DataStoreServiceClient::UpdateRangeSlices(
     std::unordered_map<int32_t, std::vector<RangeSliceBatchPlan>> slice_plans;
     slice_plans.reserve(update_range_slice_reqs.size());
     RangeMetadataAccumulator meta_acc;
+
+    constexpr size_t MAX_ITERATIONS_WITHOUT_YIELD = 10;
+    size_t iterations_since_yield = 0;
 
     // 1- First pass: Prepare slice batches and accumulate metadata for all
     // ranges
@@ -1824,6 +1840,16 @@ bool DataStoreServiceClient::UpdateRangeSlices(
                                    segment_cnt,
                                    range_size,
                                    meta_acc);
+
+        if (sync_yield_fptr != nullptr)
+        {
+            ++iterations_since_yield;
+            if (iterations_since_yield >= MAX_ITERATIONS_WITHOUT_YIELD)
+            {
+                (*sync_yield_fptr)();
+                iterations_since_yield = 0;
+            }
+        }
     }
 
     // 2- Dispatch slice batches for all ranges concurrently (shared
@@ -1832,24 +1858,32 @@ bool DataStoreServiceClient::UpdateRangeSlices(
         sync_concurrent_request_pool_.NextObject();
     PoolableGuard slice_guard(slice_sync_concurrent);
     slice_sync_concurrent->Reset();
-    for (const auto &[kv_partition_id, slice_plans] : slice_plans)
+    if (yield_fptr != nullptr && resume_fptr != nullptr)
+    {
+        slice_sync_concurrent->SetCoroCallbacks(yield_fptr, resume_fptr);
+    }
+    iterations_since_yield = 0;
+    for (const auto &[kv_partition_id, plans] : slice_plans)
     {
         // Call DispatchRangeSliceBatches once with all plans
         DispatchRangeSliceBatches(kv_range_slices_table_name,
                                   kv_partition_id,
-                                  slice_plans,
+                                  plans,
                                   slice_sync_concurrent);
+
+        if (sync_yield_fptr != nullptr)
+        {
+            ++iterations_since_yield;
+            if (iterations_since_yield >= MAX_ITERATIONS_WITHOUT_YIELD)
+            {
+                (*sync_yield_fptr)();
+                iterations_since_yield = 0;
+            }
+        }
     }
 
     // 3- Wait for slice requests to complete
-    {
-        std::unique_lock<bthread::Mutex> lk(slice_sync_concurrent->mux_);
-        slice_sync_concurrent->all_request_started_ = true;
-        while (slice_sync_concurrent->unfinished_request_cnt_ != 0)
-        {
-            slice_sync_concurrent->cv_.wait(lk);
-        }
-    }
+    slice_sync_concurrent->WaitForAll();
 
     if (slice_sync_concurrent->result_.error_code() !=
         remote::DataStoreError::NO_ERROR)
@@ -1866,11 +1900,23 @@ bool DataStoreServiceClient::UpdateRangeSlices(
             sync_callback_data_pool_.NextObject();
         PoolableGuard guard(flush_slices_callback_data);
         flush_slices_callback_data->Reset();
+        if (yield_fptr != nullptr && resume_fptr != nullptr)
+        {
+            flush_slices_callback_data->SetCoroCallbacks(yield_fptr,
+                                                         resume_fptr);
+        }
         std::vector<std::string> kv_slices_table_names;
         kv_slices_table_names.emplace_back(kv_range_slices_table_name);
         FlushData(
             kv_slices_table_names, flush_slices_callback_data, &SyncCallback);
-        flush_slices_callback_data->Wait();
+        if (yield_fptr != nullptr && resume_fptr != nullptr)
+        {
+            flush_slices_callback_data->Wait(yield_fptr, resume_fptr);
+        }
+        else
+        {
+            flush_slices_callback_data->Wait();
+        }
         if (flush_slices_callback_data->Result().error_code() !=
             EloqDS::remote::DataStoreError::NO_ERROR)
         {
@@ -1885,18 +1931,15 @@ bool DataStoreServiceClient::UpdateRangeSlices(
         sync_concurrent_request_pool_.NextObject();
     PoolableGuard meta_guard(meta_sync_concurrent);
     meta_sync_concurrent->Reset();
+    if (yield_fptr != nullptr && resume_fptr != nullptr)
+    {
+        meta_sync_concurrent->SetCoroCallbacks(yield_fptr, resume_fptr);
+    }
     DispatchRangeMetadataBatches(
         kv_range_table_name, meta_acc, meta_sync_concurrent);
 
     // 5- Wait for metadata requests to complete
-    {
-        std::unique_lock<bthread::Mutex> lk(meta_sync_concurrent->mux_);
-        meta_sync_concurrent->all_request_started_ = true;
-        while (meta_sync_concurrent->unfinished_request_cnt_ != 0)
-        {
-            meta_sync_concurrent->cv_.wait(lk);
-        }
-    }
+    meta_sync_concurrent->WaitForAll();
 
     // 6- Check for errors
     if (meta_sync_concurrent->result_.error_code() !=
@@ -1913,10 +1956,21 @@ bool DataStoreServiceClient::UpdateRangeSlices(
         SyncCallbackData *callback_data = sync_callback_data_pool_.NextObject();
         PoolableGuard guard(callback_data);
         callback_data->Reset();
+        if (yield_fptr != nullptr && resume_fptr != nullptr)
+        {
+            callback_data->SetCoroCallbacks(yield_fptr, resume_fptr);
+        }
         std::vector<std::string> kv_range_table_names;
         kv_range_table_names.emplace_back(kv_range_table_name);
         FlushData(kv_range_table_names, callback_data, &SyncCallback);
-        callback_data->Wait();
+        if (yield_fptr != nullptr && resume_fptr != nullptr)
+        {
+            callback_data->Wait(yield_fptr, resume_fptr);
+        }
+        else
+        {
+            callback_data->Wait();
+        }
         if (callback_data->Result().error_code() !=
             EloqDS::remote::DataStoreError::NO_ERROR)
         {
@@ -1977,14 +2031,7 @@ bool DataStoreServiceClient::UpdateRangeSlices(
         slice_sync_concurrent);
     // 3- Wait for slice requests to complete. Make sure meta data is updated
     // after all slice info is written.
-    {
-        std::unique_lock<bthread::Mutex> lk(slice_sync_concurrent->mux_);
-        slice_sync_concurrent->all_request_started_ = true;
-        while (slice_sync_concurrent->unfinished_request_cnt_ != 0)
-        {
-            slice_sync_concurrent->cv_.wait(lk);
-        }
-    }
+    slice_sync_concurrent->WaitForAll();
 
     if (slice_sync_concurrent->result_.error_code() !=
         remote::DataStoreError::NO_ERROR)
@@ -2035,14 +2082,7 @@ bool DataStoreServiceClient::UpdateRangeSlices(
         kv_range_table_name, meta_acc, meta_sync_concurrent);
 
     // 5- Wait for metadata requests to complete
-    {
-        std::unique_lock<bthread::Mutex> lk(meta_sync_concurrent->mux_);
-        meta_sync_concurrent->all_request_started_ = true;
-        while (meta_sync_concurrent->unfinished_request_cnt_ != 0)
-        {
-            meta_sync_concurrent->cv_.wait(lk);
-        }
-    }
+    meta_sync_concurrent->WaitForAll();
 
     // 6- Check for errors
     if (meta_sync_concurrent->result_.error_code() !=
@@ -2161,14 +2201,7 @@ bool DataStoreServiceClient::UpsertRanges(
     }
 
     // 3- Wait for slice requests to complete
-    {
-        std::unique_lock<bthread::Mutex> lk(slice_sync_concurrent->mux_);
-        slice_sync_concurrent->all_request_started_ = true;
-        while (slice_sync_concurrent->unfinished_request_cnt_ != 0)
-        {
-            slice_sync_concurrent->cv_.wait(lk);
-        }
-    }
+    slice_sync_concurrent->WaitForAll();
     if (slice_sync_concurrent->result_.error_code() !=
         remote::DataStoreError::NO_ERROR)
     {
@@ -2207,14 +2240,7 @@ bool DataStoreServiceClient::UpsertRanges(
         kv_range_table_name, meta_acc, meta_sync_concurrent);
 
     // 5- Wait for metadata requests to complete
-    {
-        std::unique_lock<bthread::Mutex> lk(meta_sync_concurrent->mux_);
-        meta_sync_concurrent->all_request_started_ = true;
-        while (meta_sync_concurrent->unfinished_request_cnt_ != 0)
-        {
-            meta_sync_concurrent->cv_.wait(lk);
-        }
-    }
+    meta_sync_concurrent->WaitForAll();
 
     // 6- Check for errors
     if (meta_sync_concurrent->result_.error_code() !=
@@ -2908,7 +2934,19 @@ void DataStoreServiceClient::DecodeArchiveValue(
 bool DataStoreServiceClient::PutArchivesAll(
     std::unordered_map<std::string_view,
                        std::vector<std::unique_ptr<txservice::FlushTaskEntry>>>
-        &flush_task)
+        &flush_task,
+    const std::function<void()> *yield_fptr,
+    const std::function<void()> *resume_fptr)
+{
+    return PutArchivesAllImpl(flush_task, yield_fptr, resume_fptr);
+}
+
+bool DataStoreServiceClient::PutArchivesAllImpl(
+    std::unordered_map<std::string_view,
+                       std::vector<std::unique_ptr<txservice::FlushTaskEntry>>>
+        &flush_task,
+    const std::function<void()> *yield_fptr,
+    const std::function<void()> *resume_fptr)
 {
     std::unordered_map<
         uint32_t,
@@ -2971,6 +3009,11 @@ bool DataStoreServiceClient::PutArchivesAll(
         PoolableGuard guard(sync_concurrent);
         sync_concurrent->Reset();
 
+        if (yield_fptr != nullptr && resume_fptr != nullptr)
+        {
+            sync_concurrent->SetCoroCallbacks(yield_fptr, resume_fptr);
+        }
+
         size_t recs_cnt = archive_ptrs.size();
         keys.reserve(recs_cnt * parts_cnt_per_key);
         records.reserve(recs_cnt * parts_cnt_per_record);
@@ -2986,15 +3029,7 @@ bool DataStoreServiceClient::PutArchivesAll(
             if (write_batch_size >= MAX_WRITE_BATCH_SIZE)
             {
                 // Wait for in-flight requests to decrease if limit reached
-                {
-                    std::unique_lock<bthread::Mutex> lk(sync_concurrent->mux_);
-                    while (sync_concurrent->unfinished_request_cnt_ >=
-                           SyncConcurrentRequest::max_flying_write_count)
-                    {
-                        sync_concurrent->cv_.wait(lk);
-                    }
-                    sync_concurrent->unfinished_request_cnt_++;
-                }
+                sync_concurrent->WaitForCapacityAndIncrement();
                 BatchWriteRecords(kv_mvcc_archive_name,
                                   partition_id,
                                   data_shard_id,
@@ -3104,14 +3139,7 @@ bool DataStoreServiceClient::PutArchivesAll(
         }
 
         // Wait the result.
-        {
-            std::unique_lock<bthread::Mutex> lk(sync_concurrent->mux_);
-            sync_concurrent->all_request_started_ = true;
-            while (sync_concurrent->unfinished_request_cnt_ != 0)
-            {
-                sync_concurrent->cv_.wait(lk);
-            }
-        }
+        sync_concurrent->WaitForAll();
 
         if (sync_concurrent->result_.error_code() !=
             remote::DataStoreError::NO_ERROR)
@@ -3147,7 +3175,19 @@ bool DataStoreServiceClient::PutArchivesAll(
 bool DataStoreServiceClient::CopyBaseToArchive(
     std::unordered_map<std::string_view,
                        std::vector<std::unique_ptr<txservice::FlushTaskEntry>>>
-        &flush_task)
+        &flush_task,
+    const std::function<void()> *yield_fptr,
+    const std::function<void()> *resume_fptr)
+{
+    return CopyBaseToArchiveImpl(flush_task, yield_fptr, resume_fptr);
+}
+
+bool DataStoreServiceClient::CopyBaseToArchiveImpl(
+    std::unordered_map<std::string_view,
+                       std::vector<std::unique_ptr<txservice::FlushTaskEntry>>>
+        &flush_task,
+    const std::function<void()> *yield_fptr,
+    const std::function<void()> *resume_fptr)
 {
     // Prepare for the copied base table data to be flushed to the archive table
     std::unordered_map<std::string_view,
@@ -3181,11 +3221,16 @@ bool DataStoreServiceClient::CopyBaseToArchive(
             bthread::ConditionVariable cv;
             size_t flying_cnt = 0;
             int error_code = 0;
-            std::vector<ReadBaseForArchiveCallbackData> callback_datas;
-            callback_datas.reserve(base_vec.size());
+            std::atomic<bool> waiting{
+                false};  // shared: last callback must notify Wait
+            // Use deque: ReadBaseForArchiveCallbackData contains std::atomic
+            // which is non-copyable/non-movable; vector requires element
+            // move/copy on realloc, deque does not.
+            std::deque<ReadBaseForArchiveCallbackData> callback_datas;
             for (size_t i = 0; i < base_vec.size(); ++i)
             {
-                callback_datas.emplace_back(mtx, cv, flying_cnt, error_code);
+                callback_datas.emplace_back(
+                    mtx, cv, flying_cnt, error_code, waiting, resume_fptr);
             }
 
             for (size_t base_idx = 0; base_idx < base_vec.size(); ++base_idx)
@@ -3212,7 +3257,14 @@ bool DataStoreServiceClient::CopyBaseToArchive(
 
                 if (flying_cnt >= MAX_FLYING_READ_COUNT)
                 {
-                    callback_data->Wait();
+                    if (yield_fptr && resume_fptr)
+                    {
+                        callback_data->Wait(yield_fptr, resume_fptr);
+                    }
+                    else
+                    {
+                        callback_data->Wait();
+                    }
                 }
                 if (callback_data->GetErrorCode() != 0)
                 {
@@ -3223,6 +3275,11 @@ bool DataStoreServiceClient::CopyBaseToArchive(
             }
             // Wait the result all return before returning to avoid referencing
             // invalid memory in callback.
+            if (yield_fptr && resume_fptr)
+            {
+                callback_datas[0].Wait(yield_fptr, resume_fptr);
+            }
+            else
             {
                 std::unique_lock<bthread::Mutex> lk(mtx);
                 while (flying_cnt > 0)
@@ -3321,7 +3378,7 @@ bool DataStoreServiceClient::CopyBaseToArchive(
     {
         // Put the archive records to the archive table.
         // This is a sync call
-        bool ret = PutArchivesAll(archive_flush_task);
+        bool ret = PutArchivesAll(archive_flush_task, yield_fptr, resume_fptr);
         if (!ret)
         {
             return false;
@@ -4936,14 +4993,7 @@ bool DataStoreServiceClient::DeleteTableRanges(
     for (uint32_t kv_partition_id = 0; kv_partition_id < kv_partition_cnt;
          ++kv_partition_id)
     {
-        std::unique_lock<bthread::Mutex> lk(
-            delete_slices_sync_concurrent->mux_);
-        while (delete_slices_sync_concurrent->unfinished_request_cnt_ >=
-               SyncConcurrentRequest::max_flying_write_count)
-        {
-            delete_slices_sync_concurrent->cv_.wait(lk);
-        }
-        delete_slices_sync_concurrent->unfinished_request_cnt_++;
+        delete_slices_sync_concurrent->WaitForCapacityAndIncrement();
 
         // get shard id
         uint32_t data_shard_id =
@@ -4959,16 +5009,7 @@ bool DataStoreServiceClient::DeleteTableRanges(
                     SyncConcurrentRequestCallback);
     }
 
-    // callback_data->Wait();
-    {
-        std::unique_lock<bthread::Mutex> lk(
-            delete_slices_sync_concurrent->mux_);
-        delete_slices_sync_concurrent->all_request_started_ = true;
-        while (delete_slices_sync_concurrent->unfinished_request_cnt_ != 0)
-        {
-            delete_slices_sync_concurrent->cv_.wait(lk);
-        }
-    }
+    delete_slices_sync_concurrent->WaitForAll();
 
     if (delete_slices_sync_concurrent->result_.error_code() !=
         EloqDS::remote::DataStoreError::NO_ERROR)
@@ -4984,14 +5025,7 @@ bool DataStoreServiceClient::DeleteTableRanges(
     for (int32_t kv_partition_id = 0; kv_partition_id < kv_partition_cnt;
          ++kv_partition_id)
     {
-        std::unique_lock<bthread::Mutex> lk(
-            delete_slices_sync_concurrent->mux_);
-        while (delete_slices_sync_concurrent->unfinished_request_cnt_ >=
-               SyncConcurrentRequest::max_flying_write_count)
-        {
-            delete_slices_sync_concurrent->cv_.wait(lk);
-        }
-        delete_slices_sync_concurrent->unfinished_request_cnt_++;
+        delete_slices_sync_concurrent->WaitForCapacityAndIncrement();
 
         // get shard id
         uint32_t data_shard_id =
@@ -5006,15 +5040,7 @@ bool DataStoreServiceClient::DeleteTableRanges(
                     SyncConcurrentRequestCallback);
     }
 
-    {
-        std::unique_lock<bthread::Mutex> lk(
-            delete_slices_sync_concurrent->mux_);
-        delete_slices_sync_concurrent->all_request_started_ = true;
-        while (delete_slices_sync_concurrent->unfinished_request_cnt_ != 0)
-        {
-            delete_slices_sync_concurrent->cv_.wait(lk);
-        }
-    }
+    delete_slices_sync_concurrent->WaitForAll();
 
     if (delete_slices_sync_concurrent->result_.error_code() !=
         EloqDS::remote::DataStoreError::NO_ERROR)

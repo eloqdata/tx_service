@@ -513,6 +513,76 @@ void SyncConcurrentRequestCallback(void *data,
     callback_data->Finish(result);
 }
 
+void SyncPutAllData::Wait()
+{
+    std::unique_lock<bthread::Mutex> lk(mux_);
+    while (completed_partitions_ < total_partitions_)
+    {
+        cv_.wait(lk);
+    }
+}
+
+void SyncPutAllData::Wait(const std::function<void()> *yield_fn,
+                          const std::function<void()> *resume_fn)
+{
+    if (yield_fn == nullptr || resume_fn == nullptr)
+    {
+        Wait();
+        return;
+    }
+    std::unique_lock<bthread::Mutex> lk(mux_);
+    while (completed_partitions_ < total_partitions_)
+    {
+        waiting_.store(true, std::memory_order_release);
+        lk.unlock();
+        (*yield_fn)();
+        lk.lock();
+        waiting_.store(false, std::memory_order_release);
+    }
+}
+
+void SyncConcurrentRequest::WaitForCapacityAndIncrement()
+{
+    std::unique_lock<bthread::Mutex> lk(mux_);
+    while (unfinished_request_cnt_ >= max_flying_write_count)
+    {
+        if (yield_fn_ != nullptr && resume_fn_ != nullptr)
+        {
+            waiting_.store(true, std::memory_order_release);
+            lk.unlock();
+            (*yield_fn_)();
+            lk.lock();
+            waiting_.store(false, std::memory_order_release);
+        }
+        else
+        {
+            cv_.wait(lk);
+        }
+    }
+    unfinished_request_cnt_++;
+}
+
+void SyncConcurrentRequest::WaitForAll()
+{
+    std::unique_lock<bthread::Mutex> lk(mux_);
+    all_request_started_ = true;
+    while (unfinished_request_cnt_ != 0)
+    {
+        if (yield_fn_ != nullptr && resume_fn_ != nullptr)
+        {
+            waiting_.store(true, std::memory_order_release);
+            lk.unlock();
+            (*yield_fn_)();
+            lk.lock();
+            waiting_.store(false, std::memory_order_release);
+        }
+        else
+        {
+            cv_.wait(lk);
+        }
+    }
+}
+
 void PartitionBatchCallback(void *data,
                             ::google::protobuf::Closure *closure,
                             DataStoreServiceClient &client,
