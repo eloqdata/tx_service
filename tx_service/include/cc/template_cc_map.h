@@ -643,7 +643,8 @@ public:
                                 cc_ng_id_,
                                 cce_addr->Term(),
                                 range_id,
-                                commit_ts);
+                                commit_ts,
+                                false);
                         }
                     }
                 }
@@ -7362,7 +7363,8 @@ public:
                             cc_ng_id_,
                             req.CcNgTerm(),
                             static_cast<uint32_t>(partition_id),
-                            data_sync_ts);
+                            data_sync_ts,
+                            req.Kind() == UploadBatchType::SkIndexData);
                     }
                 }
             }
@@ -7776,8 +7778,7 @@ public:
                                                             req.StartTxKey(),
                                                             &req,
                                                             shard_);
-                    if (store_range &&
-                        !req.SetStoreRange(store_range, shard_->core_id_))
+                    if (store_range && !req.SetStoreRange(store_range))
                     {
                         // StoreRange already been pinned by other core, unpin
                         // on the current core.
