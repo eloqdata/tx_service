@@ -901,6 +901,20 @@ bool Sharder::OnSnapshotReceived(const remote::OnSnapshotSyncedRequest *req)
     return node->OnSnapshotReceived(req);
 }
 
+bool Sharder::PromoteStandbyTermIfCandidate(uint32_t ng_id,
+                                            int64_t standby_term)
+{
+    std::shared_ptr<fault::CcNode> node;
+    {
+        std::shared_lock<std::shared_mutex> lk(cluster_cnf_mux_);
+        auto find_it = cluster_config_.cc_nodes_.find(ng_id);
+        assert(find_it != cluster_config_.cc_nodes_.end());
+        node = find_it->second;
+    }
+
+    return node->PromoteStandbyTermIfCandidate(standby_term);
+}
+
 void Sharder::OnStartFollowing(uint32_t ng_id,
                                int64_t term,
                                uint32_t leader_node,

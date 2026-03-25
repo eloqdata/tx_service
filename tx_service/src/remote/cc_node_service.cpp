@@ -1859,17 +1859,6 @@ void CcNodeService::UpdateStandbyCkptTs(
         response->set_error(true);
         return;
     }
-    if (request->primary_succ_ckpt_ts() <=
-        Sharder::Instance().NativeNodeGroupCkptTs())
-    {
-        DLOG(INFO) << "Discard UpdateStandbyCkptTs req, req ckpt ts:"
-                   << request->primary_succ_ckpt_ts()
-                   << ", own:" << Sharder::Instance().NativeNodeGroupCkptTs();
-        response->set_error(false);
-        response->set_current_ckpt_ts(
-            Sharder::Instance().NativeNodeGroupCkptTs());
-        return;
-    }
     auto store_hd = Sharder::Instance().GetLocalCcShards()->store_hd_;
     const bool has_data_store_write = request->has_data_store_write();
 
@@ -1883,6 +1872,15 @@ void CcNodeService::UpdateStandbyCkptTs(
          ckpt_ts,
          [store_hd, ng_id, ng_term, ckpt_ts, has_data_store_write]()
          {
+             const uint64_t current_ckpt_ts =
+                 Sharder::Instance().NativeNodeGroupCkptTs();
+             if (ckpt_ts <= current_ckpt_ts)
+             {
+                 DLOG(INFO) << "Discard UpdateStandbyCkptTs task, req ckpt ts:"
+                            << ckpt_ts << ", own:" << current_ckpt_ts;
+                 return;
+             }
+
              const bool ok =
                  store_hd == nullptr
                      ? true
@@ -2080,21 +2078,41 @@ void CcNodeService::RequestSyncSnapshot(
          snapshot_ts,
          [store_hd, ng_id, standby_term, term, snapshot_ts]()
          {
+             const uint64_t current_ckpt_ts =
+                 Sharder::Instance().NativeNodeGroupCkptTs();
+             if (snapshot_ts <= current_ckpt_ts)
+             {
+                 DLOG(INFO) << "Discard RequestSyncSnapshot task, snapshot_ts="
+                            << snapshot_ts << ", own:" << current_ckpt_ts;
+                 return;
+             }
+
              const bool ok =
                  store_hd->RequestSyncSnapshot(ng_id, term, snapshot_ts);
              if (ok)
              {
-                 Sharder::Instance().SetStandbyNodeTerm(standby_term);
-                 Sharder::Instance().SetCandidateStandbyNodeTerm(-1);
-                 if (!txservice::txservice_skip_kv &&
+                 const bool promoted =
+                     Sharder::Instance().PromoteStandbyTermIfCandidate(
+                         ng_id, standby_term);
+                 if (promoted && !txservice::txservice_skip_kv &&
                      !txservice::txservice_enable_cache_replacement)
                  {
                      store_hd->RestoreTxCache(ng_id, standby_term);
                  }
-                 DLOG(INFO) << "RequestSyncSnapshot async RequestSyncSnapshot "
-                               "successfully, ng_id="
-                            << ng_id << ", standby_term=" << standby_term
-                            << ", snapshot_ts=" << snapshot_ts;
+                 if (promoted)
+                 {
+                     DLOG(INFO) << "RequestSyncSnapshot async "
+                                   "RequestSyncSnapshot successfully, ng_id="
+                                << ng_id << ", standby_term=" << standby_term
+                                << ", snapshot_ts=" << snapshot_ts;
+                 }
+                 else
+                 {
+                     DLOG(INFO) << "RequestSyncSnapshot async stale term is "
+                                   "discarded, ng_id="
+                                << ng_id << ", standby_term=" << standby_term
+                                << ", snapshot_ts=" << snapshot_ts;
+                 }
              }
              DLOG(INFO) << "RequestSyncSnapshot async RequestSyncSnapshot "
                            "done, ng_id="
