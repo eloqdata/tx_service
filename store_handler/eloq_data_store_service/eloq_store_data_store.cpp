@@ -623,7 +623,7 @@ void EloqStoreDataStore::CreateSnapshotForBackup(
         {
         case ::eloqstore::KvError::NoError:
             ds_error = ::EloqDS::remote::DataStoreError::NO_ERROR;
-            req->AddBackupFile(global_archive_req.ResultArchive());
+            req->AddBackupFile(global_archive_req.Tag());
             break;
         case ::eloqstore::KvError::NotRunning:
             ds_error = ::EloqDS::remote::DataStoreError::DB_NOT_OPEN;
