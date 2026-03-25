@@ -1536,7 +1536,8 @@ bool FetchTableRangeSizeCc::Execute(CcShard &ccs)
                                          node_group_id_,
                                          node_group_term_,
                                          partition_id_,
-                                         data_sync_ts);
+                                         data_sync_ts,
+                                         false);
     }
 
     return true;

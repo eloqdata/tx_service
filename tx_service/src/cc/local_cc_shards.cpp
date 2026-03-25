@@ -2949,7 +2949,8 @@ void LocalCcShards::CreateSplitRangeDataSyncTask(const TableName &table_name,
                                                  uint32_t ng_id,
                                                  int64_t ng_term,
                                                  int32_t range_id,
-                                                 uint64_t data_sync_ts)
+                                                 uint64_t data_sync_ts,
+                                                 bool is_dirty)
 {
     CODE_FAULT_INJECTOR("term_skip_auto_split_range", {
         DLOG(INFO) << "FaultInject term_skip_auto_split_range";
@@ -2970,7 +2971,7 @@ void LocalCcShards::CreateSplitRangeDataSyncTask(const TableName &table_name,
                              ng_term,
                              range_entry,
                              data_sync_ts,
-                             false,
+                             is_dirty,
                              false,
                              last_sync_ts,
                              status,

@@ -3703,10 +3703,11 @@ void CcShard::CreateSplitRangeDataSyncTask(const TableName &table_name,
                                            uint32_t ng_id,
                                            int64_t ng_term,
                                            int32_t range_id,
-                                           uint64_t data_sync_ts)
+                                           uint64_t data_sync_ts,
+                                           bool is_dirty)
 {
     local_shards_.CreateSplitRangeDataSyncTask(
-        table_name, ng_id, ng_term, range_id, data_sync_ts);
+        table_name, ng_id, ng_term, range_id, data_sync_ts, is_dirty);
 }
 
 void CcShard::CollectCacheHit()

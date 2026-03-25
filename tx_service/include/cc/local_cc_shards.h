@@ -1756,11 +1756,23 @@ public:
         uint64_t txn,
         CcHandlerResult<Void> *hres);
 
+    /**
+     * @brief Create a data sync task for triggering the split range operation.
+     *
+     * @param table_name - The name of the table.
+     * @param ng_id - The id of the node group.
+     * @param ng_term - The term of the node group.
+     * @param range_id - The id of the range.
+     * @param data_sync_ts - The timestamp of the data sync.
+     * @param is_dirty - Whether the table is dirty (such as the secondary index
+     * table that is being built).
+     */
     void CreateSplitRangeDataSyncTask(const TableName &table_name,
                                       uint32_t ng_id,
                                       int64_t ng_term,
                                       int32_t range_id,
-                                      uint64_t data_sync_ts);
+                                      uint64_t data_sync_ts,
+                                      bool is_dirty);
 
     std::pair<TableRangeEntry *, StoreRange *> PinStoreRange(
         const TableName &table_name,

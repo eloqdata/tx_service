@@ -8769,7 +8769,7 @@ struct ScanSliceDeltaSizeCcForRangePartition : public CcRequestBase
         return store_range_.load(std::memory_order_relaxed);
     }
 
-    bool SetStoreRange(StoreRange *store_range, uint16_t core_id)
+    bool SetStoreRange(StoreRange *store_range)
     {
         StoreRange *expect = nullptr;
         assert(store_range);
