@@ -2550,8 +2550,13 @@ public:
                                cce->payload_.cur_payload_.get());
             }
 
-            if (shard_->GetCacheEvictPolicy() == CacheEvictPolicy::LO_LRU)
+            if (shard_->GetCacheEvictPolicy() == CacheEvictPolicy::LO_LRU &&
+                cce->PayloadStatus() != RecordStatus::Unknown)
             {
+                // Skip when payload is not yet backfilled from KV store.
+                // BackFill() will call EnsureLargeObjOccupyPageAlone()
+                // after the record is fetched and buffered commands are
+                // committed.
                 EnsureLargeObjOccupyPageAlone(ccp, cce);
             }
         }
