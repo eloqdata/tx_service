@@ -282,7 +282,22 @@ const BucketInfo *TransactionExecution::FastToGetBucket(uint16_t bucket_id)
 
     if (all_bucket_infos_ != nullptr)
     {
-        return all_bucket_infos_->at(bucket_id).get();
+        auto it = all_bucket_infos_->find(bucket_id);
+        if (BAIDU_UNLIKELY(it == all_bucket_infos_->end()))
+        {
+            LOG(ERROR) << "FastToGetBucket miss in cached bucket map, tx="
+                       << TxNumber() << ", tx_term=" << TxTerm()
+                       << ", tx_cc_ng=" << TxCcNodeId()
+                       << ", bucket_id=" << bucket_id
+                       << ", map_ptr=" << all_bucket_infos_
+                       << ", map_size=" << all_bucket_infos_->size()
+                       << ", standby_term_cache="
+                       << Sharder::Instance().StandbyNodeTerm()
+                       << ", candidate_standby_term_cache="
+                       << Sharder::Instance().CandidateStandbyNodeTerm();
+            return all_bucket_infos_->at(bucket_id).get();
+        }
+        return it->second.get();
     }
     else
     {
@@ -293,7 +308,25 @@ const BucketInfo *TransactionExecution::FastToGetBucket(uint16_t bucket_id)
             all_bucket_infos_ = ccs.GetAllBucketInfos(TxCcNodeId());
             assert(all_bucket_infos_ != nullptr);
             ccs.IncrNakedBucketReader();
-            return all_bucket_infos_->at(bucket_id).get();
+            auto it = all_bucket_infos_->find(bucket_id);
+            if (BAIDU_UNLIKELY(it == all_bucket_infos_->end()))
+            {
+                LOG(ERROR)
+                    << "FastToGetBucket miss after loading bucket map, tx="
+                    << TxNumber() << ", tx_term=" << TxTerm()
+                    << ", tx_cc_ng=" << TxCcNodeId()
+                    << ", bucket_id=" << bucket_id
+                    << ", map_ptr=" << all_bucket_infos_
+                    << ", map_size=" << all_bucket_infos_->size()
+                    << ", standby_term_cache="
+                    << Sharder::Instance().StandbyNodeTerm()
+                    << ", candidate_standby_term_cache="
+                    << Sharder::Instance().CandidateStandbyNodeTerm();
+                LOG(INFO) << "boost stacktrace: "
+                          << boost::stacktrace::stacktrace();
+                return all_bucket_infos_->at(bucket_id).get();
+            }
+            return it->second.get();
         }
     }
 
@@ -6629,6 +6662,9 @@ void TransactionExecution::Process(ObjectCommandOp &obj_cmd_op)
         // Make sure current node is still ng leader since we may visit bucket
         // info meta data here which is only valid when current node is still ng
         // leader.
+        bool res = CheckStandbyTermWithLog();
+        LOG(INFO) << "CheckLeaderTerm(): " << CheckLeaderTerm()
+                  << ", CheckStandbyTermWithLog(): " << res;
         if (!CheckLeaderTerm() && !CheckStandbyTerm())
         {
             obj_cmd_op.hd_result_.SetError(CcErrorCode::TX_NODE_NOT_LEADER);

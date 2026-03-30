@@ -26,6 +26,7 @@
 #include <stdint.h>
 
 #include <atomic>
+#include <boost/stacktrace/stacktrace.hpp>
 #include <condition_variable>
 #include <cstdint>
 #include <shared_mutex>
@@ -645,6 +646,12 @@ public:
             return;
         }
 
+        LOG(INFO) << "SetStandbyNodeTerm: " << standby_term
+                  << ", current standby term: "
+                  << standby_node_term_cache_.load()
+                  << ", candidate standby term: "
+                  << candidate_standby_node_term_cache_.load()
+                  << boost::stacktrace::stacktrace();
         standby_node_term_cache_.store(standby_term, std::memory_order_release);
     }
 

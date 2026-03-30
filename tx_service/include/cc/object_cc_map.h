@@ -108,6 +108,122 @@ public:
     using TemplateCcMap<KeyT, ValueT, false, false>::
         EnsureLargeObjOccupyPageAlone;
 
+private:
+    std::pair<LockType, CcErrorCode> AcquireCceKeyLockWithLog(
+        CcEntry<KeyT, ValueT, false, false> *cce,
+        CcPage<KeyT, ValueT, false, false> *ccp,
+        uint64_t commit_ts,
+        RecordStatus cce_payload_status,
+        CcRequestBase *req,
+        uint32_t ng_id,
+        int64_t ng_term,
+        int64_t tx_term,
+        CcOperation cc_op,
+        IsolationLevel iso_level,
+        CcProtocol protocol,
+        uint64_t read_ts,
+        bool is_covering_keys,
+        const char *scene)
+    {
+        auto result = AcquireCceKeyLock(cce,
+                                        commit_ts,
+                                        ccp,
+                                        cce_payload_status,
+                                        req,
+                                        ng_id,
+                                        ng_term,
+                                        tx_term,
+                                        cc_op,
+                                        iso_level,
+                                        protocol,
+                                        read_ts,
+                                        is_covering_keys);
+        LOG(INFO) << scene << ", txn: " << req->Txn()
+                  << ", key: " << cce->KeyString() << ", cce: " << cce
+                  << ", cc_op: " << int(cc_op)
+                  << ", acquired_lock: " << int(result.first)
+                  << ", err_code: " << int(result.second);
+        return result;
+    }
+
+    std::pair<LockType, CcErrorCode> LockHandleForResumedRequestWithLog(
+        CcEntry<KeyT, ValueT, false, false> *cce,
+        uint64_t commit_ts,
+        RecordStatus cce_payload_status,
+        CcRequestBase *req,
+        uint32_t ng_id,
+        int64_t ng_term,
+        int64_t tx_term,
+        CcOperation cc_op,
+        IsolationLevel iso_level,
+        CcProtocol protocol,
+        uint64_t read_ts,
+        bool is_covering_keys,
+        const char *scene)
+    {
+        auto result = LockHandleForResumedRequest(cce,
+                                                  commit_ts,
+                                                  cce_payload_status,
+                                                  req,
+                                                  ng_id,
+                                                  ng_term,
+                                                  tx_term,
+                                                  cc_op,
+                                                  iso_level,
+                                                  protocol,
+                                                  read_ts,
+                                                  is_covering_keys);
+        LOG(INFO) << scene << ", txn: " << req->Txn()
+                  << ", key: " << cce->KeyString() << ", cce: " << cce
+                  << ", cc_op: " << int(cc_op)
+                  << ", acquired_lock: " << int(result.first)
+                  << ", err_code: " << int(result.second);
+        return result;
+    }
+
+    void ReleaseCceLockWithLog(NonBlockingLock *lock,
+                               CcEntry<KeyT, ValueT, false, false> *cce,
+                               TxNumber tx_number,
+                               uint32_t ng_id,
+                               LockType lk_type,
+                               const char *scene,
+                               bool recycle_lock = true,
+                               TxObject *object = nullptr) const
+    {
+        LockType lock_before =
+            lock == nullptr ? LockType::NoLock : lock->SearchLock(tx_number);
+        std::pair<TxNumber, NonBlockingLock::WriteLockType> write_before =
+            lock == nullptr
+                ? std::make_pair(TxNumber(0),
+                                 NonBlockingLock::WriteLockType::NoWritelock)
+                : lock->WriteTx();
+
+        LOG(INFO) << scene << " begin, txn: " << tx_number
+                  << ", key: " << (cce == nullptr ? "<null>" : cce->KeyString())
+                  << ", cce: " << cce << ", release_lock_type: " << int(lk_type)
+                  << ", lock_before: " << int(lock_before)
+                  << ", write_before_txn: " << write_before.first
+                  << ", write_before_type: " << int(write_before.second);
+
+        ReleaseCceLock(
+            lock, cce, tx_number, ng_id, lk_type, recycle_lock, object);
+
+        LockType lock_after =
+            lock == nullptr ? LockType::NoLock : lock->SearchLock(tx_number);
+        std::pair<TxNumber, NonBlockingLock::WriteLockType> write_after =
+            lock == nullptr
+                ? std::make_pair(TxNumber(0),
+                                 NonBlockingLock::WriteLockType::NoWritelock)
+                : lock->WriteTx();
+
+        LOG(INFO) << scene << " done, txn: " << tx_number
+                  << ", key: " << (cce == nullptr ? "<null>" : cce->KeyString())
+                  << ", cce: " << cce << ", lock_after: " << int(lock_after)
+                  << ", write_after_txn: " << write_after.first
+                  << ", write_after_type: " << int(write_after.second);
+    }
+
+public:
     bool Execute(ApplyCc &req) override
     {
         TX_TRACE_ACTION_WITH_CONTEXT(
@@ -325,18 +441,25 @@ public:
                 // For ON_KEY_OBJECT, we add lock regardless of whether the
                 // record is deleted, so just pass RecordStatus::Normal.
                 std::tie(acquired_lock, err_code) =
-                    LockHandleForResumedRequest(cce,
-                                                cce->CommitTs(),
-                                                RecordStatus::Normal,
-                                                &req,
-                                                req.NodeGroupId(),
-                                                ng_term,
-                                                req.TxTerm(),
-                                                cc_op,
-                                                req.Isolation(),
-                                                req.Protocol(),
-                                                0,
-                                                false);
+                    LockHandleForResumedRequestWithLog(
+                        cce,
+                        cce->CommitTs(),
+                        RecordStatus::Normal,
+                        &req,
+                        req.NodeGroupId(),
+                        ng_term,
+                        req.TxTerm(),
+                        cc_op,
+                        req.Isolation(),
+                        req.Protocol(),
+                        0,
+                        false,
+                        "ApplyCc acquire lock(resumed)");
+                LOG(INFO) << "txn: " << txn
+                          << ", resumed from blocking on lock, block type: "
+                          << int(req.block_type_)
+                          << ", acquired_lock: " << int(acquired_lock)
+                          << ", err_code: " << int(err_code);
                 req.block_type_ = ApplyCc::ApplyBlockType::NoBlocking;
             }
             else
@@ -541,19 +664,20 @@ public:
             assert(cce != nullptr);
             assert(ccp != nullptr);
             std::tie(acquired_lock, err_code) =
-                AcquireCceKeyLock(cce,
-                                  cce->CommitTs(),
-                                  ccp,
-                                  RecordStatus::Normal,
-                                  &req,
-                                  req.NodeGroupId(),
-                                  ng_term,
-                                  req.TxTerm(),
-                                  cc_op,
-                                  req.Isolation(),
-                                  req.Protocol(),
-                                  0,
-                                  false);
+                AcquireCceKeyLockWithLog(cce,
+                                         ccp,
+                                         cce->CommitTs(),
+                                         RecordStatus::Normal,
+                                         &req,
+                                         req.NodeGroupId(),
+                                         ng_term,
+                                         req.TxTerm(),
+                                         cc_op,
+                                         req.Isolation(),
+                                         req.Protocol(),
+                                         0,
+                                         false,
+                                         "ApplyCc acquire lock");
         }
 
         switch (err_code)
@@ -587,6 +711,9 @@ public:
             {
                 static_cast<remote::RemoteApplyCc *>(&req)->Acknowledge();
             }
+            LOG(INFO) << "txn: " << txn
+                      << ", ApplyCc blocked on key: " << cce->KeyString()
+                      << ", cce: " << cce << ", BlockOnRead";
             req.block_type_ = ApplyCc::ApplyBlockType::BlockOnRead;
             // Acquire lock fail should stop the execution of current
             // ApplyCc request since it's already in blocking queue.
@@ -759,8 +886,12 @@ public:
                 if (acquired_lock != LockType::NoLock)
                 {
                     assert(req.Isolation() > IsolationLevel::ReadCommitted);
-                    ReleaseCceLock(
-                        cce->GetKeyLock(), cce, txn, ng_id, acquired_lock);
+                    ReleaseCceLockWithLog(cce->GetKeyLock(),
+                                          cce,
+                                          txn,
+                                          ng_id,
+                                          acquired_lock,
+                                          "ApplyCc release lock(readonly)");
                 }
                 obj_result.lock_acquired_ = LockType::NoLock;
             }
@@ -788,19 +919,20 @@ public:
             {
                 // Upgrade to write lock
                 std::tie(acquired_lock, err_code) =
-                    AcquireCceKeyLock(cce,
-                                      cce->CommitTs(),
-                                      ccp,
-                                      RecordStatus::Normal,
-                                      &req,
-                                      req.NodeGroupId(),
-                                      ng_term,
-                                      req.TxTerm(),
-                                      CcOperation::Write,
-                                      req.Isolation(),
-                                      req.Protocol(),
-                                      0,
-                                      false);
+                    AcquireCceKeyLockWithLog(cce,
+                                             ccp,
+                                             cce->CommitTs(),
+                                             RecordStatus::Normal,
+                                             &req,
+                                             req.NodeGroupId(),
+                                             ng_term,
+                                             req.TxTerm(),
+                                             CcOperation::Write,
+                                             req.Isolation(),
+                                             req.Protocol(),
+                                             0,
+                                             false,
+                                             "ApplyCc upgrade to write lock");
             }
             else
             {
@@ -809,8 +941,12 @@ public:
                 {
                     // Release and try to recycle the lock.
                     assert(acquired_lock != LockType::NoLock);
-                    ReleaseCceLock(
-                        cce->GetKeyLock(), cce, txn, ng_id, acquired_lock);
+                    ReleaseCceLockWithLog(cce->GetKeyLock(),
+                                          cce,
+                                          txn,
+                                          ng_id,
+                                          acquired_lock,
+                                          "ApplyCc release lock(no-write)");
                     obj_result.lock_acquired_ = LockType::NoLock;
                 }
 
@@ -850,6 +986,9 @@ public:
                 {
                     static_cast<remote::RemoteApplyCc *>(&req)->Acknowledge();
                 }
+                LOG(INFO) << "txn: " << txn
+                          << ", ApplyCc blocked on key: " << cce->KeyString()
+                          << ", cce: " << cce << ", BlockOnWriteLock";
                 req.block_type_ = ApplyCc::ApplyBlockType::BlockOnWriteLock;
                 // Acquire lock fail should stop the execution of current
                 // ApplyCc request since it's already in blocking queue.
@@ -978,8 +1117,12 @@ public:
                     this->OnCommittedUpdate(cce, was_dirty);
                     // Release and try to recycle the lock.
                     assert(acquired_lock != LockType::NoLock);
-                    ReleaseCceLock(
-                        cce->GetKeyLock(), cce, txn, ng_id, acquired_lock);
+                    ReleaseCceLockWithLog(cce->GetKeyLock(),
+                                          cce,
+                                          txn,
+                                          ng_id,
+                                          acquired_lock,
+                                          "ApplyCc release lock(ttl-expired)");
                     obj_result.lock_acquired_ = LockType::NoLock;
                 }
                 obj_result.rec_status_ = RecordStatus::Deleted;
@@ -1167,7 +1310,12 @@ public:
             cce->SetDirtyPayload(nullptr);
             cce->SetDirtyPayloadStatus(RecordStatus::NonExistent);
             assert(acquired_lock != LockType::NoLock);
-            ReleaseCceLock(cce->GetKeyLock(), cce, txn, ng_id, acquired_lock);
+            ReleaseCceLockWithLog(cce->GetKeyLock(),
+                                  cce,
+                                  txn,
+                                  ng_id,
+                                  acquired_lock,
+                                  "ApplyCc release lock(block-cmd)");
             // TODO(zkl): acquire ReadIntent before blocking?
             obj_result.lock_acquired_ = LockType::NoLock;
             req.block_type_ = ApplyCc::ApplyBlockType::BlockOnCondition;
@@ -1185,7 +1333,12 @@ public:
             cce->SetDirtyPayload(nullptr);
             cce->SetDirtyPayloadStatus(RecordStatus::NonExistent);
             assert(acquired_lock != LockType::NoLock);
-            ReleaseCceLock(cce->GetKeyLock(), cce, txn, ng_id, acquired_lock);
+            ReleaseCceLockWithLog(cce->GetKeyLock(),
+                                  cce,
+                                  txn,
+                                  ng_id,
+                                  acquired_lock,
+                                  "ApplyCc release lock(exec-unlock)");
             obj_result.lock_acquired_ = LockType::NoLock;
             obj_result.commit_ts_ = 1;
             obj_result.lock_ts_ = shard_->Now();
@@ -1310,12 +1463,13 @@ public:
 
             // Release and try to recycle the lock.
             assert(acquired_lock != LockType::NoLock);
-            ReleaseCceLock(
+            ReleaseCceLockWithLog(
                 cce->GetKeyLock(),
                 cce,
                 txn,
                 ng_id,
                 acquired_lock,
+                "ApplyCc release lock(apply_and_commit)",
                 true,
                 object_modified ? cce->payload_.cur_payload_.get() : nullptr);
             obj_result.lock_acquired_ = LockType::NoLock;
@@ -1552,13 +1706,14 @@ public:
             TemplateCcMap<KeyT, ValueT, false, false>::normal_obj_sz_++;
         }
 
-        ReleaseCceLock(lk,
-                       cce,
-                       txn,
-                       req.NodeGroupId(),
-                       LockType::WriteLock,
-                       true,
-                       cce->payload_.cur_payload_.get());
+        ReleaseCceLockWithLog(lk,
+                              cce,
+                              txn,
+                              req.NodeGroupId(),
+                              LockType::WriteLock,
+                              "PostWriteCc release lock",
+                              true,
+                              cce->payload_.cur_payload_.get());
 
         if (shard_->GetCacheEvictPolicy() == CacheEvictPolicy::LO_LRU)
         {
@@ -1917,7 +2072,12 @@ public:
             }
         }
 
-        ReleaseCceLock(lk, cce, txn, req.NodeGroupId(), LockType::WriteLock);
+        ReleaseCceLockWithLog(lk,
+                              cce,
+                              txn,
+                              req.NodeGroupId(),
+                              LockType::WriteLock,
+                              "UploadTxCommandsCc release lock");
         req.Result()->SetFinished();
         return true;
     }
@@ -2623,13 +2783,14 @@ public:
                 }
 
                 TxNumber txn = lk->WriteLockTx();
-                ReleaseCceLock(lk,
-                               cce,
-                               txn,
-                               req.NodeGroupId(),
-                               LockType::WriteLock,
-                               true,
-                               cce->payload_.cur_payload_.get());
+                ReleaseCceLockWithLog(lk,
+                                      cce,
+                                      txn,
+                                      req.NodeGroupId(),
+                                      LockType::WriteLock,
+                                      "ReplayLogCc release lock",
+                                      true,
+                                      cce->payload_.cur_payload_.get());
             }
 
             if (shard_->GetCacheEvictPolicy() == CacheEvictPolicy::LO_LRU &&

@@ -284,6 +284,15 @@ public:
                Sharder::Instance().StandbyNodeTerm() == TxTerm();
     }
 
+    bool CheckStandbyTermWithLog() const
+    {
+        LOG(INFO) << "StandbyNodeTerm: "
+                  << Sharder::Instance().StandbyNodeTerm()
+                  << ", TxTerm: " << TxTerm();
+        return TxCcNodeId() == Sharder::Instance().NativeNodeGroup() &&
+               Sharder::Instance().StandbyNodeTerm() == TxTerm();
+    }
+
 #ifdef EXT_TX_PROC_ENABLED
     void Enlist();
     /**

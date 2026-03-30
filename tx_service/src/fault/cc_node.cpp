@@ -27,6 +27,7 @@
 #include <bthread/mutex.h>
 
 #include <atomic>
+#include <boost/stacktrace/stacktrace.hpp>
 #include <cstdio>
 #include <iostream>
 #include <mutex>
@@ -259,6 +260,7 @@ bool CcNode::OnLeaderStart(int64_t term,
                            bool &retry,
                            uint32_t *next_leader_node)
 {
+    LOG(INFO) << "OnLeaderStart" << boost::stacktrace::stacktrace();
     bool expected = false;
     if (!is_processing_.compare_exchange_strong(
             expected, true, std::memory_order_acq_rel))
@@ -724,7 +726,8 @@ void CcNode::OnStartFollowing(uint32_t node_id, int64_t term, bool resubscribe)
     {
         // resubscribe is called on tx processor and on start following needs
         // to be handled on a worker thread.
-        LOG(INFO) << "SubmitWork Resubscribe";
+        LOG(INFO) << "SubmitWork Resubscribe"
+                  << boost::stacktrace::stacktrace();
         Sharder::Instance().GetTxWorkerPool()->SubmitWork(
             [this, node_id, term](size_t)
             { SubscribePrimaryNode(node_id, term, true); });
@@ -811,6 +814,7 @@ bool CcNode::PromoteStandbyTermIfCandidate(int64_t standby_term)
 
 void CcNode::ClearCcNodeGroupData()
 {
+    LOG(INFO) << "ClearCcNodeGroupData..." << boost::stacktrace::stacktrace();
     uint16_t core_cnt = local_cc_shards_.Count();
     ClearCcNodeGroup clear_ccm_req(ng_id_, core_cnt);
     for (uint16_t core_id = 0; core_id < core_cnt; ++core_id)
@@ -826,7 +830,8 @@ void CcNode::SubscribePrimaryNode(uint32_t leader_node_id,
 {
     DLOG(INFO) << "SubscribePrimaryNode called for leader_node_id "
                << leader_node_id << " at term " << primary_term
-               << ", resubscribe: " << resubscribe;
+               << ", resubscribe: " << resubscribe
+               << boost::stacktrace::stacktrace();
     assert(ng_id_ == Sharder::Instance().NativeNodeGroup());
     bool expected = false;
     while (!is_processing_.compare_exchange_strong(

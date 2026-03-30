@@ -82,6 +82,8 @@ public:
 
     bool Execute(AcquireAllCc &req) override
     {
+        LOG(INFO) << "Execute AcquireAllCc, txn: " << req.Txn()
+                  << ", req: " << &req;
         // For the first AcuireWriteAll request (which acquires write intents),
         // sets the reader-writer-control block to coordinate with runtime
         // queries that are accessing the schema w/o concurrency control and

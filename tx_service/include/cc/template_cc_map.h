@@ -735,6 +735,8 @@ public:
             return false;
         }
 
+        LOG(INFO) << "Execute AcquireAllCc, txn: " << req.Txn()
+                  << ", req: " << &req;
         CcHandlerResult<AcquireAllResult> *hd_res = req.Result();
         AcquireAllResult &acquire_all_result = hd_res->Value();
         CcEntry<KeyT, ValueT, VersionedRecord, RangePartitioned> *cce_ptr =

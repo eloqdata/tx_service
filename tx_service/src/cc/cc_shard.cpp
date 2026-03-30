@@ -28,6 +28,7 @@
 #include <chrono>  // std::chrono
 #include <cstdint>
 #include <iomanip>  // std::setprecision
+#include <sstream>
 #include <string>
 
 #include "cc/catalog_cc_map.h"
@@ -2794,19 +2795,50 @@ void CcShard::CollectLockWaitingInfo(CheckDeadLockResult &dlr)
                     continue;
                 }
 
-                std::vector<uint64_t> vct =
-                    key_lock->GetBlockTxIds(it_tx->first);
-                if (vct.size() == 0)
+                std::vector<std::pair<TxNumber, LockType>> wait_infos =
+                    key_lock->GetBlockingQueueInfo();
+                if (wait_infos.empty())
                 {
                     continue;
                 }
+
+                std::ostringstream wait_info_stream;
+                bool first_waiter = true;
+                for (const auto &[wait_txn, wait_lock_type] : wait_infos)
+                {
+                    if (!first_waiter)
+                    {
+                        wait_info_stream << ",";
+                    }
+                    first_waiter = false;
+                    wait_info_stream << wait_txn << ":" << int(wait_lock_type);
+                }
+
+                auto [write_holder_txn, write_holder_type] = key_lock->WriteTx();
+                LockType holder_lock_type = key_lock->SearchLock(it_tx->first);
+                LOG(INFO)
+                    << "[DeadLockCheck] shard lock state, shard: " << core_id_
+                    << ", ng_id: " << it_ng->first
+                    << ", cce: " << *it_cce
+                    << ", holder_txn: " << it_tx->first
+                    << ", holder_lock_type: " << int(holder_lock_type)
+                    << ", write_holder_txn: " << write_holder_txn
+                    << ", write_holder_type: " << int(write_holder_type)
+                    << ", waiting_txns(lock_type): ["
+                    << wait_info_stream.str() << "]"
+                    << ", lock_debug: " << key_lock->DebugInfo();
 
                 auto itet =
                     entry_lock_info_map.try_emplace((uint64_t) (*it_cce));
                 itet.first->second.lock_txids.insert(it_tx->first);
 
-                for (uint64_t id : vct)
+                for (const auto &wait_info : wait_infos)
                 {
+                    uint64_t id = wait_info.first;
+                    if (id == it_tx->first)
+                    {
+                        continue;
+                    }
                     itet.first->second.wait_txids.insert(id);
                 }
             }

@@ -250,6 +250,7 @@ public:
         return debug_string;
     }
     std::vector<TxNumber> GetBlockTxIds(TxNumber exclude_id);
+    std::vector<std::pair<TxNumber, LockType>> GetBlockingQueueInfo();
     void AbortQueueRequest(TxNumber txid,
                            CcErrorCode err = CcErrorCode::DEAD_LOCK_ABORT);
     bool FindQueueRequest(TxNumber txid);

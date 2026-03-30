@@ -2035,7 +2035,16 @@ LocalCcShards::GetAllBucketInfos(NodeGroupId ng_id) const
     auto ng_bucket_it = bucket_infos_.find(ng_id);
     if (ng_bucket_it == bucket_infos_.end())
     {
+        LOG(WARNING) << "GetAllBucketInfos miss node_group, ng_id=" << ng_id
+                     << ", bucket_infos_size=" << bucket_infos_.size()
+                     << ", tls_shard_idx=" << tls_shard_idx;
         return nullptr;
+    }
+    if (BAIDU_UNLIKELY(ng_bucket_it->second.empty()))
+    {
+        LOG(WARNING) << "GetAllBucketInfos returns empty map, ng_id=" << ng_id
+                     << ", map_ptr=" << &ng_bucket_it->second
+                     << ", tls_shard_idx=" << tls_shard_idx;
     }
     return &ng_bucket_it->second;
 }
@@ -2056,7 +2065,16 @@ void LocalCcShards::DropBucketInfo(NodeGroupId ng_id)
     std::unique_lock<FastMetaDataMutex> lk(fast_meta_data_mux_);
     // bucket_infos_.erase(ng_id);
     assert(bucket_infos_.find(ng_id) != bucket_infos_.end());
-    bucket_infos_.at(ng_id).clear();
+    auto &ng_bucket_infos = bucket_infos_.at(ng_id);
+    LOG(INFO) << "DropBucketInfo begin, ng_id=" << ng_id
+              << ", map_ptr=" << &ng_bucket_infos
+              << ", old_bucket_cnt=" << ng_bucket_infos.size()
+              << ", tls_shard_idx=" << tls_shard_idx;
+    ng_bucket_infos.clear();
+    LOG(INFO) << "DropBucketInfo end, ng_id=" << ng_id
+              << ", map_ptr=" << &ng_bucket_infos
+              << ", new_bucket_cnt=" << ng_bucket_infos.size()
+              << ", tls_shard_idx=" << tls_shard_idx;
 }
 
 bool LocalCcShards::IsRangeBucketsInitialized(NodeGroupId ng_id)
@@ -2097,6 +2115,12 @@ void LocalCcShards::InitRangeBuckets(NodeGroupId ng_id,
     // larger than the bucket id.
     std::unordered_map<uint16_t, std::unique_ptr<BucketInfo>> &ng_bucket_infos =
         bucket_infos_.at(ng_id);
+    LOG(INFO) << "InitRangeBuckets begin, ng_id=" << ng_id
+              << ", version=" << version
+              << ", node_group_cnt=" << node_groups.size()
+              << ", map_ptr=" << &ng_bucket_infos
+              << ", old_bucket_cnt=" << ng_bucket_infos.size()
+              << ", tls_shard_idx=" << tls_shard_idx;
     ng_bucket_infos.clear();
     std::map<uint16_t, NodeGroupId> rand_num_to_ng;
     // use ng id as seed to generate random numbers
@@ -2145,6 +2169,11 @@ void LocalCcShards::InitRangeBuckets(NodeGroupId ng_id,
             insert_res.first->second->Set(ng_id, version);
         }
     }
+    LOG(INFO) << "InitRangeBuckets end, ng_id=" << ng_id
+              << ", version=" << version
+              << ", map_ptr=" << &ng_bucket_infos
+              << ", new_bucket_cnt=" << ng_bucket_infos.size()
+              << ", tls_shard_idx=" << tls_shard_idx;
 }
 
 const BucketInfo *LocalCcShards::UploadNewBucketInfo(NodeGroupId ng_id,

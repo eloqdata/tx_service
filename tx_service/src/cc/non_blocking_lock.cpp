@@ -97,6 +97,9 @@ void NonBlockingLock::TryPopBlockingQueue(CcShard *ccs)
         {
             if (NoWriteConflict(queued_txn) && NoReadLockConflict(queued_txn))
             {
+                LOG(INFO) << "NoReadLockConflict txn: " << queued_txn
+                          << ", Upgrade write lock and re-execute cc: "
+                          << queue_head.req_;
                 UpgradeLock(queued_txn, LockType::WriteLock);
 
                 // re-execute the head request in the queue.
@@ -614,6 +617,19 @@ std::vector<TxNumber> NonBlockingLock::GetBlockTxIds(TxNumber exclude_id)
     }
 
     return vct;
+}
+
+std::vector<std::pair<TxNumber, LockType>>
+NonBlockingLock::GetBlockingQueueInfo()
+{
+    std::vector<std::pair<TxNumber, LockType>> wait_infos;
+    wait_infos.reserve(blocking_queue_.Size());
+    for (size_t i = 0; i < blocking_queue_.Size(); i++)
+    {
+        LockQueueEntry &lqe = blocking_queue_.Get(i);
+        wait_infos.emplace_back(lqe.req_->Txn(), lqe.lk_type_);
+    }
+    return wait_infos;
 }
 
 void NonBlockingLock::AbortAllQueuedRequests(CcErrorCode err)
