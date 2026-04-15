@@ -270,12 +270,14 @@ void FetchBucketDataCallback(void *data,
     uint32_t items_size = scan_next_closure->ItemsSize();
     std::string key_str;
     std::string value_str;
+    std::string last_scanned_key;
     uint64_t ts = UINT64_MAX;
     uint64_t ttl = UINT64_MAX;
     uint64_t now = txservice::LocalCcShards::ClockTsInMillseconds();
     for (uint32_t item_idx = 0; item_idx < items_size; ++item_idx)
     {
         scan_next_closure->GetItem(item_idx, key_str, value_str, ts, ttl);
+        last_scanned_key = key_str;
         if (ttl > 0 && ttl < now)
         {
             // fetch_bucket_data_cc->AddDataItem(std::move(tx_key), "", 1,
@@ -298,6 +300,15 @@ void FetchBucketDataCallback(void *data,
         fetch_bucket_data_cc->is_drained_ = false;
         if (fetch_bucket_data_cc->bucket_data_items_.empty())
         {
+            // Advance the next scan from the last scanned key even if all
+            // records in this batch were filtered out by upper-layer TTL
+            // checks. Otherwise we can repeatedly rescan the same batch.
+            if (!last_scanned_key.empty())
+            {
+                fetch_bucket_data_cc->kv_start_key_ =
+                    std::move(last_scanned_key);
+                fetch_bucket_data_cc->start_key_inclusive_ = false;
+            }
             int32_t partition_id =
                 txservice::Sharder::MapBucketIdToHashPartitionId(
                     fetch_bucket_data_cc->bucket_id_);
@@ -310,7 +321,7 @@ void FetchBucketDataCallback(void *data,
                             data_shard_id,
                             fetch_bucket_data_cc->kv_start_key_,
                             fetch_bucket_data_cc->kv_end_key_,
-                            "",
+                            scan_next_closure->SessionId(),
                             false,
                             fetch_bucket_data_cc->start_key_inclusive_,
                             fetch_bucket_data_cc->end_key_inclusive_,
@@ -322,8 +333,6 @@ void FetchBucketDataCallback(void *data,
             return;
         }
     }
-
-    // callback_data->session_id_ = scan_next_closure->GetSessionId();
     fetch_bucket_data_cc->SetFinish(
         static_cast<int32_t>(txservice::CcErrorCode::NO_ERROR));
 }
