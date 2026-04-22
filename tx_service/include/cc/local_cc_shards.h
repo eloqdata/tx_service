@@ -1884,6 +1884,8 @@ public:
             large_obj_threshold_kb * 1024ull;
     }
 
+    std::atomic<int> kv_refresh_owner_{-1};
+
     store::DataStoreHandler *const store_hd_;
 
     /*

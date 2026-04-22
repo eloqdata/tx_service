@@ -341,10 +341,15 @@ public:
             }
             else
             {
-                assert(req.block_type_ ==
-                       ApplyCc::ApplyBlockType::BlockOnFetch);
-                cce->GetKeyGapLockAndExtraData()->ReleasePin();
-                cce->RecycleKeyLock(*shard_);
+                assert(req.block_type_ == ApplyCc::ApplyBlockType::BlockOnFetch ||
+                       req.block_type_ ==
+                           ApplyCc::ApplyBlockType::BlockOnRefresh);
+                if (req.block_type_ == ApplyCc::ApplyBlockType::BlockOnFetch)
+                {
+                    cce->GetKeyGapLockAndExtraData()->ReleasePin();
+                    cce->RecycleKeyLock(*shard_);
+                }
+                req.block_type_ = ApplyCc::ApplyBlockType::NoBlocking;
             }
         }
 

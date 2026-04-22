@@ -283,10 +283,13 @@ protected:
     rocksdb::InfoLogLevel StringToInfoLogLevel(
         const std::string &log_level_str);
 
-    virtual bool ReloadData(int64_t term, uint64_t snapshot_ts) override
+    virtual bool ReloadData(int64_t term,
+                            uint64_t snapshot_ts,
+                            bool from_snapshot) override
     {
         (void) term;
         (void) snapshot_ts;
+        (void) from_snapshot;
         LOG(ERROR) << "RocksDBDataStoreCommon::ReloadData, not implemented";
         return false;
     }

@@ -999,10 +999,13 @@ void EloqStoreDataStore::OnFloor(::eloqstore::KvRequest *req)
     ds_scan_req->SetFinish(::EloqDS::remote::DataStoreError::NO_ERROR);
 }
 
-bool EloqStoreDataStore::ReloadData(int64_t term, uint64_t snapshot_ts)
+bool EloqStoreDataStore::ReloadData(int64_t term,
+                                    uint64_t snapshot_ts,
+                                    bool from_snapshot)
 {
     LOG(INFO) << "EloqStoreDataStore::ReloadData, term: " << term
-              << ", snapshot_ts: " << snapshot_ts;
+              << ", snapshot_ts: " << snapshot_ts
+              << ", from_snapshot: " << from_snapshot;
     if (eloq_store_service_->Term() != static_cast<uint64_t>(term))
     {
         LOG(ERROR) << "EloqStoreDataStore::ReloadData, term mismatch, "
@@ -1011,23 +1014,34 @@ bool EloqStoreDataStore::ReloadData(int64_t term, uint64_t snapshot_ts)
                    << ")";
         return false;
     }
-    const std::string reopen_tag = "snapshot_" + std::to_string(snapshot_ts);
-    DLOG(INFO) << "EloqStoreDataStore::ReloadData issue reopen, term: " << term
-               << ", snapshot_ts: " << snapshot_ts << ", tag: " << reopen_tag;
     ::eloqstore::GlobalReopenRequest global_reopen_req;
-    global_reopen_req.SetTag(reopen_tag);
+    if (from_snapshot)
+    {
+        const std::string reopen_tag =
+            "snapshot_" + std::to_string(snapshot_ts);
+        DLOG(INFO) << "EloqStoreDataStore::ReloadData issue reopen, term: "
+                   << term << ", snapshot_ts: " << snapshot_ts
+                   << ", tag: " << reopen_tag;
+        global_reopen_req.SetTag(reopen_tag);
+    }
+    else
+    {
+        DLOG(INFO) << "EloqStoreDataStore::ReloadData issue reopen, term: "
+                   << term << ", snapshot_ts: " << snapshot_ts
+                   << ", tag: <latest>";
+    }
     eloq_store_service_->ExecSync(&global_reopen_req);
 
     if (global_reopen_req.Error() != ::eloqstore::KvError::NoError)
     {
         LOG(ERROR) << "ReloadData reopen failed, snapshot_ts=" << snapshot_ts
-                   << ", tag=" << reopen_tag << ", error="
+                   << ", from_snapshot=" << from_snapshot << ", error="
                    << static_cast<uint32_t>(global_reopen_req.Error())
                    << ", msg=" << global_reopen_req.ErrMessage();
         return false;
     }
     DLOG(INFO) << "ReloadData reopen succeeded, snapshot_ts=" << snapshot_ts
-               << ", tag=" << reopen_tag;
+               << ", from_snapshot=" << from_snapshot;
     return true;
 }
 

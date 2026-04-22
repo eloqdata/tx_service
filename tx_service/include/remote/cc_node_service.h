@@ -270,10 +270,9 @@ private:
         std::function<void()> fn;
     };
 
+#ifdef DATA_STORE_TYPE_ELOQDSS_ELOQSTORE
     void EnqueueStandbyTask(StandbyTask task);
     void StandbyTaskWorkerMain();
-
-    LocalCcShards &local_shards_;
     // This queue is only used for standby snapshot/checkpoint coordination,
     // which is low-frequency compared with the normal tx path, so a std::mutex
     // is acceptable here. A generic MPSC queue is not suitable because it does
@@ -285,6 +284,9 @@ private:
     std::deque<StandbyTask> standby_tasks_;
     bool standby_task_running_{true};
     std::thread standby_task_worker_;
+#endif
+
+    LocalCcShards &local_shards_;
 };
 }  // namespace remote
 }  // namespace txservice

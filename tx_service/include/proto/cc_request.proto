@@ -327,7 +327,6 @@ message UpdateStandbyCkptTsRequest
 message UpdateStandbyCkptTsResponse
 {
     bool error = 1;
-    uint64 current_ckpt_ts = 2;
 }
 
 message UpdateStandbyConsistentTsRequest

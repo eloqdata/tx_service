@@ -163,10 +163,13 @@ public:
      * @brief Reload data for standby sync (both cloud and local modes).
      * Default no-op for stores that don't need this path.
      */
-    virtual bool ReloadData(int64_t term, uint64_t snapshot_ts)
+    virtual bool ReloadData(int64_t term,
+                            uint64_t snapshot_ts,
+                            bool from_snapshot)
     {
         (void) term;
         (void) snapshot_ts;
+        (void) from_snapshot;
         return true;
     }
 
