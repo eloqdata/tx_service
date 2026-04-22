@@ -27,6 +27,7 @@
 
 #include <limits>
 #include <memory>
+#include <utility>
 #include <vector>
 
 #include "cc/local_cc_shards.h"
@@ -39,6 +40,8 @@ namespace store
 namespace
 {
 #ifdef DATA_STORE_TYPE_ELOQDSS_ELOQSTORE
+constexpr auto kStandbySnapshotCleanupTtl = std::chrono::minutes(5);
+
 struct RequestSyncSnapshotAggregate
 {
     bthread::Mutex mux;
@@ -177,12 +180,79 @@ void SnapshotManager::StandbySyncWorker()
     while (true)
     {
         std::unique_lock<std::mutex> lk(standby_sync_mux_);
-        standby_sync_cv_.wait(
-            lk, [this] { return !pending_req_.empty() || terminated_; });
+        std::vector<std::pair<uint32_t, uint64_t>> snapshots_to_delete;
+#ifdef DATA_STORE_TYPE_ELOQDSS_ELOQSTORE
+        CollectStandbySnapshotCleanupLocked(std::chrono::system_clock::now(),
+                                            &snapshots_to_delete);
+#endif
+        if (terminated_)
+        {
+            return;
+        }
+        if (!snapshots_to_delete.empty())
+        {
+            lk.unlock();
+            for (const auto &[ng_id, snapshot_ts] : snapshots_to_delete)
+            {
+                store_hd_->DeleteStandbySnapshot(ng_id, snapshot_ts);
+            }
+            continue;
+        }
+
+        if (pending_req_.empty())
+        {
+#ifdef DATA_STORE_TYPE_ELOQDSS_ELOQSTORE
+            const auto deadline = NextStandbySnapshotCleanupDeadlineLocked();
+            if (deadline == std::chrono::system_clock::time_point::max())
+            {
+                standby_sync_cv_.wait(lk,
+                                      [this]
+                                      {
+                                          return !pending_req_.empty() ||
+                                                 !pending_cleanup_.empty() ||
+                                                 terminated_;
+                                      });
+            }
+            else
+            {
+                standby_sync_cv_.wait_until(
+                    lk,
+                    deadline,
+                    [this, deadline]
+                    {
+                        return !pending_req_.empty() || terminated_ ||
+                               NextStandbySnapshotCleanupDeadlineLocked() <
+                                   deadline;
+                    });
+            }
+#else
+            standby_sync_cv_.wait(
+                lk, [this] { return !pending_req_.empty() || terminated_; });
+#endif
+        }
 
         if (terminated_)
         {
             return;
+        }
+
+#ifdef DATA_STORE_TYPE_ELOQDSS_ELOQSTORE
+        CollectStandbySnapshotCleanupLocked(std::chrono::system_clock::now(),
+                                            &snapshots_to_delete);
+#endif
+        if (!snapshots_to_delete.empty())
+        {
+            lk.unlock();
+            for (const auto &[ng_id, snapshot_ts] : snapshots_to_delete)
+            {
+                store_hd_->DeleteStandbySnapshot(ng_id, snapshot_ts);
+            }
+            continue;
+        }
+
+        if (pending_req_.empty())
+        {
+            continue;
         }
         assert(!pending_req_.empty());
         lk.unlock();
@@ -202,6 +272,55 @@ void SnapshotManager::StandbySyncWorker()
         }
     }
 }
+
+#ifdef DATA_STORE_TYPE_ELOQDSS_ELOQSTORE
+void SnapshotManager::EnqueueStandbySnapshotCleanupLocked(uint32_t ng_id,
+                                                          uint64_t snapshot_ts)
+{
+    if (snapshot_ts == 0)
+    {
+        return;
+    }
+
+    pending_cleanup_.push_back(
+        {ng_id,
+         snapshot_ts,
+         std::chrono::system_clock::now() + kStandbySnapshotCleanupTtl});
+}
+
+void SnapshotManager::CollectStandbySnapshotCleanupLocked(
+    std::chrono::system_clock::time_point now,
+    std::vector<std::pair<uint32_t, uint64_t>> *snapshots_to_delete)
+{
+    if (snapshots_to_delete == nullptr)
+    {
+        return;
+    }
+
+    while (!pending_cleanup_.empty())
+    {
+        const auto &entry = pending_cleanup_.front();
+        if (entry.expire_at > now)
+        {
+            break;
+        }
+        EraseSnapshotSyncCompletedBySnapshotTsLocked(entry.snapshot_ts);
+        snapshots_to_delete->emplace_back(entry.ng_id, entry.snapshot_ts);
+        pending_cleanup_.pop_front();
+    }
+}
+
+std::chrono::system_clock::time_point
+SnapshotManager::NextStandbySnapshotCleanupDeadlineLocked()
+{
+    if (!pending_cleanup_.empty())
+    {
+        return pending_cleanup_.front().expire_at;
+    }
+
+    return std::chrono::system_clock::time_point::max();
+}
+#endif
 
 bool SnapshotManager::OnSnapshotSyncRequested(
     const txservice::remote::StorageSnapshotSyncRequest *req)
@@ -681,6 +800,38 @@ void SnapshotManager::EraseSnapshotSyncCompletedByNodeLocked(
 #endif
 }
 
+#ifdef DATA_STORE_TYPE_ELOQDSS_ELOQSTORE
+void SnapshotManager::EraseSnapshotSyncCompletedBySnapshotTsLocked(
+    uint64_t snapshot_ts)
+{
+    for (auto node_it = completed_snapshot_term_and_ts_.begin();
+         node_it != completed_snapshot_term_and_ts_.end();)
+    {
+        auto &term_and_ts = node_it->second;
+        for (auto term_it = term_and_ts.begin(); term_it != term_and_ts.end();)
+        {
+            if (term_it->second == snapshot_ts)
+            {
+                term_it = term_and_ts.erase(term_it);
+            }
+            else
+            {
+                ++term_it;
+            }
+        }
+
+        if (term_and_ts.empty())
+        {
+            node_it = completed_snapshot_term_and_ts_.erase(node_it);
+        }
+        else
+        {
+            ++node_it;
+        }
+    }
+}
+#endif
+
 // If kvstore is enabled, we must flush data in-memory to kvstore firstly.
 // For non-shared kvstore, also we create and send the snapshot to standby
 // nodes.
@@ -710,6 +861,7 @@ void SnapshotManager::SyncWithStandby()
         subscription_barrier_.clear();
 #ifdef DATA_STORE_TYPE_ELOQDSS_ELOQSTORE
         completed_snapshot_term_and_ts_.clear();
+        pending_cleanup_.clear();
 #else
         completed_snapshot_terms_.clear();
 #endif
@@ -824,11 +976,14 @@ void SnapshotManager::SyncWithStandby()
         LOG(ERROR) << "Failed to create snpashot for sync with standby";
         return;
     }
+    {
+        std::unique_lock<std::mutex> lk(standby_sync_mux_);
+        EnqueueStandbySnapshotCleanupLocked(node_group, standby_snapshot_ts);
+        standby_sync_cv_.notify_all();
+    }
     DLOG(INFO) << "SyncWithStandby created standby snapshot, ng_id="
                << node_group << ", term=" << leader_term
                << ", snapshot_ts=" << standby_snapshot_ts;
-
-    uint64_t min_ack_ckpt_ts = std::numeric_limits<uint64_t>::max();
     size_t sync_snapshot_rpc_count = 0;
     size_t sync_snapshot_success = 0;
     RequestSyncSnapshotAggregate sync_snapshot_agg;
@@ -1020,34 +1175,7 @@ void SnapshotManager::SyncWithStandby()
         {
             sync_snapshot_agg.cv.wait(lk);
         }
-        min_ack_ckpt_ts = sync_snapshot_agg.min_ack_ckpt_ts;
         sync_snapshot_success = sync_snapshot_agg.success;
-    }
-#endif
-
-#ifdef DATA_STORE_TYPE_ELOQDSS_ELOQSTORE
-    if (standby_snapshot_ts != 0 && sync_snapshot_rpc_count > 0 &&
-        sync_snapshot_success == sync_snapshot_rpc_count &&
-        min_ack_ckpt_ts != std::numeric_limits<uint64_t>::max())
-    {
-        DLOG(INFO)
-            << "SyncWithStandby deleting standby snapshot archives by min "
-               "acked ts, ng_id="
-            << node_group << ", term=" << leader_term
-            << ", current_snapshot_ts=" << standby_snapshot_ts
-            << ", sync_snapshot_rpc_count=" << sync_snapshot_rpc_count
-            << ", sync_snapshot_success=" << sync_snapshot_success
-            << ", min_ack_ckpt_ts=" << min_ack_ckpt_ts;
-        store_hd_->DeleteStandbySnapshotsBefore(node_group, min_ack_ckpt_ts);
-    }
-    else if (standby_snapshot_ts != 0)
-    {
-        DLOG(INFO) << "SyncWithStandby skip DeleteStandbySnapshotsBefore, "
-                   << "ng_id=" << node_group << ", term=" << leader_term
-                   << ", current_snapshot_ts=" << standby_snapshot_ts
-                   << ", sync_snapshot_rpc_count=" << sync_snapshot_rpc_count
-                   << ", sync_snapshot_success=" << sync_snapshot_success
-                   << ", min_ack_ckpt_ts=" << min_ack_ckpt_ts;
     }
 #endif
 }

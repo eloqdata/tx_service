@@ -2378,7 +2378,8 @@ void DataStoreService::SetEnableLocalStandbyForEloqStore(bool enable)
 
 bool DataStoreService::ReloadData(uint32_t shard_id,
                                   int64_t term,
-                                  uint64_t snapshot_ts)
+                                  uint64_t snapshot_ts,
+                                  bool from_snapshot)
 {
 #ifdef DATA_STORE_TYPE_ELOQDSS_ELOQSTORE
     auto &ds_ref = data_shards_.at(shard_id);
@@ -2407,8 +2408,10 @@ bool DataStoreService::ReloadData(uint32_t shard_id,
         ds_ref.shard_status_.load() != DSShardStatus::Closed)
     {
         LOG(INFO) << "ReloadData for DSS shard " << shard_id << ", term "
-                  << term << ", snapshot_ts " << snapshot_ts;
-        ok = ds_ref.data_store_->ReloadData(term, snapshot_ts);
+                  << term << ", snapshot_ts " << snapshot_ts
+                  << ", from_snapshot=" << from_snapshot;
+        ok = ds_ref.data_store_->ReloadData(
+            term, snapshot_ts, from_snapshot);
         if (ok)
         {
             ds_ref.latest_term_.store(term, std::memory_order_release);
@@ -2423,13 +2426,15 @@ bool DataStoreService::ReloadData(uint32_t shard_id,
                    << shard_id;
     }
     DLOG(INFO) << "ReloadData finished, shard " << shard_id << ", term " << term
-               << ", snapshot_ts " << snapshot_ts << ", ok=" << ok;
+               << ", snapshot_ts " << snapshot_ts
+               << ", from_snapshot=" << from_snapshot << ", ok=" << ok;
     return ok;
 #else
     LOG(INFO) << "ReloadData no-op for non-eloqstore data store";
     (void) shard_id;
     (void) term;
     (void) snapshot_ts;
+    (void) from_snapshot;
     return false;
 #endif
 }

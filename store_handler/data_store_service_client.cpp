@@ -4018,7 +4018,8 @@ bool DataStoreServiceClient::OnUpdateStandbyCkptTs(uint32_t ng_id,
     if (!skip_reload_data)
     {
         const bool reload_ok =
-            data_store_service_->ReloadData(ng_id, ng_term, snapshot_ts);
+            data_store_service_->ReloadData(
+                ng_id, ng_term, snapshot_ts, false);
         if (!reload_ok)
         {
             LOG(WARNING)
@@ -4061,7 +4062,7 @@ bool DataStoreServiceClient::RequestSyncSnapshot(uint32_t ng_id,
         data_store_service_->OpenDataStore(
             ng_id, std::move(bucket_ids), ng_term);
     }
-    return data_store_service_->ReloadData(ng_id, ng_term, snapshot_ts);
+    return data_store_service_->ReloadData(ng_id, ng_term, snapshot_ts, true);
 #else
     (void) ng_id;
     (void) ng_term;

@@ -1914,7 +1914,6 @@ void CcNodeService::UpdateStandbyCkptTs(
 
     // response does not matter
     response->set_error(false);
-    response->set_current_ckpt_ts(Sharder::Instance().NativeNodeGroupCkptTs());
     DLOG(INFO) << "Finished UpdateStandbyCkptTs req, req ckpt ts:"
                << request->primary_succ_ckpt_ts() << ", current ckpt ts:"
                << Sharder::Instance().NativeNodeGroupCkptTs();
