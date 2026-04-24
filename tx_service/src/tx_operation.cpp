@@ -3828,7 +3828,7 @@ void AsyncOp<ResultType>::Forward(TransactionExecution *txm)
         }
         txm->PostProcess(*this);
     }
-    else if (txm->IsTimeOut())
+    else if (timeout_secs_.has_value() && txm->IsTimeOut(*timeout_secs_))
     {
         TX_TRACE_ACTION_WITH_CONTEXT(
             this,
@@ -3858,6 +3858,7 @@ template <typename ResultType>
 void AsyncOp<ResultType>::Reset()
 {
     hd_result_.Reset();
+    timeout_secs_ = 10;
     if (worker_thread_.joinable())
     {
         worker_thread_.join();
@@ -4588,6 +4589,7 @@ void SplitFlushRangeOp::Forward(TransactionExecution *txm)
                     txn,
                     &hd_res);
             };
+            data_sync_op_.timeout_secs_ = std::nullopt;
 
             LOG(INFO) << "Split Flush transaction data sync, range id "
                       << range_info_->PartitionId()
@@ -7719,6 +7721,7 @@ void DataMigrationOp::Forward(TransactionExecution *txm)
                 txm->CommitTs(),
                 &async_op.hd_result_);
         };
+        data_sync_op_.timeout_secs_ = std::nullopt;
 
         ACTION_FAULT_INJECTOR("data_migrate_after_install_dirty");
         ForwardToSubOperation(txm, &data_sync_op_);
