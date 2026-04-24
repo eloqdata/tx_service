@@ -2291,6 +2291,7 @@ public:
         // backfill version.
         cce->SetCkptTs(req.CommitTs());
         OnFlushed(cce, was_dirty);
+        OnCommittedUpdate(cce, was_dirty);
 
         // Refill mvcc archives.
         if (shard_->EnableMvcc())
@@ -10034,8 +10035,6 @@ protected:
         const uint64_t cce_version = cce->CommitTs();
 
         bool was_dirty = cce->IsDirty();
-        cce->SetCkptTs(commit_ts);
-        OnFlushed(cce, was_dirty);
 
         if (cce_version < commit_ts)
         {
@@ -10054,6 +10053,7 @@ protected:
                     return false;
                 }
             }
+            // Update commit ts and payload status first (clears flush bit).
             cce->SetCommitTsPayloadStatus(commit_ts, status);
 
             if (status == RecordStatus::Deleted)
@@ -10078,6 +10078,11 @@ protected:
             payload->Deserialize(rec_str.c_str(), offset);
             cce->AddArchiveRecord(payload, status, commit_ts);
         }
+        // Set ckpt ts after SetCommitTsPayloadStatus so that the flush
+        // bit is not cleared by the overwrite.
+        cce->SetCkptTs(commit_ts);
+        OnFlushed(cce, was_dirty);
+        OnCommittedUpdate(cce, was_dirty);
         if (RangePartitioned && cce->entry_info_.DataStoreSize() == INT32_MAX)
         {
             cce->entry_info_.SetDataStoreSize(

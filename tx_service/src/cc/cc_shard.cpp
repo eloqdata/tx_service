@@ -445,12 +445,8 @@ void CcShard::AdjustDataKeyStats(const TableName &table_name,
 
     if (dirty_delta != 0)
     {
-        // Sanity check in debug mode.
         assert(dirty_delta >= 0 ||
                dirty_data_key_count_ >= static_cast<size_t>(-dirty_delta));
-        // Clamp to avoid underflow when an entry is flushed but was never
-        // counted dirty (e.g. became dirty via a path that doesn't call
-        // OnCommittedUpdate).
         int64_t new_dirty =
             static_cast<int64_t>(dirty_data_key_count_) + dirty_delta;
         if (new_dirty < 0)
