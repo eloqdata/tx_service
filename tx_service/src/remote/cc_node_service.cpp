@@ -71,11 +71,14 @@ int64_t CurrentSyncedPrimaryTerm()
 CcNodeService::CcNodeService(LocalCcShards &local_shards)
     : local_shards_(local_shards)
 {
+#ifdef DATA_STORE_TYPE_ELOQDSS_ELOQSTORE
     standby_task_worker_ = std::thread([this]() { StandbyTaskWorkerMain(); });
+#endif
 }
 
 CcNodeService::~CcNodeService()
 {
+#ifdef DATA_STORE_TYPE_ELOQDSS_ELOQSTORE
     {
         std::lock_guard<std::mutex> lk(standby_task_mu_);
         standby_task_running_ = false;
@@ -85,8 +88,10 @@ CcNodeService::~CcNodeService()
     {
         standby_task_worker_.join();
     }
+#endif
 }
 
+#ifdef DATA_STORE_TYPE_ELOQDSS_ELOQSTORE
 void CcNodeService::EnqueueStandbyTask(StandbyTask task)
 {
     {
@@ -95,7 +100,6 @@ void CcNodeService::EnqueueStandbyTask(StandbyTask task)
     }
     standby_task_cv_.notify_one();
 }
-
 void CcNodeService::StandbyTaskWorkerMain()
 {
     std::optional<StandbyTask> deferred_task;
@@ -112,11 +116,18 @@ void CcNodeService::StandbyTaskWorkerMain()
             std::unique_lock<std::mutex> lk(standby_task_mu_);
             while (standby_task_running_ && standby_tasks_.empty())
             {
-                standby_task_cv_.wait_for(lk, std::chrono::milliseconds(100));
+                standby_task_cv_.wait(
+                    lk,
+                    [this]
+                    { return !standby_task_running_ || !standby_tasks_.empty(); });
             }
             if (!standby_task_running_)
             {
                 break;
+            }
+            if (standby_tasks_.empty())
+            {
+                continue;
             }
             task = std::move(standby_tasks_.front());
             standby_tasks_.pop_front();
@@ -191,6 +202,7 @@ void CcNodeService::StandbyTaskWorkerMain()
         task.fn();
     }
 }
+#endif
 
 void CcNodeService::OnLeaderStart(::google::protobuf::RpcController *controller,
                                   const OnLeaderStartRequest *request,
@@ -2055,6 +2067,7 @@ void CcNodeService::RequestSyncSnapshot(
     ::google::protobuf::Closure *done)
 {
     brpc::ClosureGuard done_guard(done);
+#ifdef DATA_STORE_TYPE_ELOQDSS_ELOQSTORE
     const uint32_t local_node_id = Sharder::Instance().NodeId();
     DLOG(INFO) << "RequestSyncSnapshot RPC received, ng_id=" << request->ng_id()
                << ", snapshot_ts=" << request->snapshot_ts()
@@ -2129,6 +2142,14 @@ void CcNodeService::RequestSyncSnapshot(
                << ", local_node_id=" << local_node_id;
     response->set_error(false);
     response->set_current_ckpt_ts(current_ckpt_ts);
+#else
+    (void) controller;
+    DLOG(INFO) << "RequestSyncSnapshot noop for non-eloqstore datastore, "
+               << "ng_id=" << request->ng_id()
+               << ", snapshot_ts=" << request->snapshot_ts();
+    response->set_error(false);
+    response->set_current_ckpt_ts(Sharder::Instance().NativeNodeGroupCkptTs());
+#endif
 }
 
 void CcNodeService::FetchNodeInfo(

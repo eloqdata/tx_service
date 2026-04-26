@@ -26,6 +26,7 @@
 
 #include <atomic>
 #include <chrono>
+#include <deque>
 #include <string>
 #include <thread>
 #include <unordered_map>
@@ -36,6 +37,11 @@
 
 namespace txservice
 {
+
+namespace remote
+{
+class StorageSnapshotSyncRequest;
+}  // namespace remote
 
 namespace store
 {
@@ -136,13 +142,12 @@ private:
     bool GetCompletedSnapshotTsLocked(uint32_t standby_node_id,
                                       int64_t standby_node_term,
                                       uint64_t *standby_snapshot_ts) const;
-    void EnqueueStandbySnapshotCleanupLocked(uint32_t ng_id,
-                                             uint64_t snapshot_ts);
-    void CollectStandbySnapshotCleanupLocked(
+    void TrackSnapshotLocked(uint32_t ng_id, uint64_t snapshot_ts);
+    void CollectExpiredSnapshotsLocked(
         std::chrono::system_clock::time_point now,
         std::vector<std::pair<uint32_t, uint64_t>> *snapshots_to_delete);
-    std::chrono::system_clock::time_point
-    NextStandbySnapshotCleanupDeadlineLocked();
+    std::chrono::system_clock::time_point NextSnapshotCleanupDeadlineLocked()
+        const;
 #endif
     void MarkSnapshotSyncCompletedLocked(uint32_t standby_node_id,
                                          int64_t standby_node_term,
@@ -159,12 +164,13 @@ private:
     };
 
 #ifdef DATA_STORE_TYPE_ELOQDSS_ELOQSTORE
-    struct PendingStandbySnapshotCleanup
+    struct SnapshotCleanupEntry
     {
         uint32_t ng_id{0};
         uint64_t snapshot_ts{0};
         std::chrono::system_clock::time_point expire_at{};
     };
+
 #endif
 
     SnapshotManager() = default;
@@ -194,7 +200,7 @@ private:
     // standby node id -> (completed standby term -> standby snapshot ts)
     std::unordered_map<uint32_t, std::unordered_map<int64_t, uint64_t>>
         completed_snapshot_term_and_ts_;
-    std::deque<PendingStandbySnapshotCleanup> pending_cleanup_;
+    std::deque<SnapshotCleanupEntry> snapshot_cleanup_queue_;
 #else
     // standby node id -> completed standby terms
     std::unordered_map<uint32_t, std::unordered_set<int64_t>>
