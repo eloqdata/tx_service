@@ -116,10 +116,11 @@ void CcNodeService::StandbyTaskWorkerMain()
             std::unique_lock<std::mutex> lk(standby_task_mu_);
             while (standby_task_running_ && standby_tasks_.empty())
             {
-                standby_task_cv_.wait(
-                    lk,
-                    [this]
-                    { return !standby_task_running_ || !standby_tasks_.empty(); });
+                standby_task_cv_.wait(lk,
+                                      [this] {
+                                          return !standby_task_running_ ||
+                                                 !standby_tasks_.empty();
+                                      });
             }
             if (!standby_task_running_)
             {

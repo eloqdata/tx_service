@@ -2410,8 +2410,7 @@ bool DataStoreService::ReloadData(uint32_t shard_id,
         LOG(INFO) << "ReloadData for DSS shard " << shard_id << ", term "
                   << term << ", snapshot_ts " << snapshot_ts
                   << ", from_snapshot=" << from_snapshot;
-        ok = ds_ref.data_store_->ReloadData(
-            term, snapshot_ts, from_snapshot);
+        ok = ds_ref.data_store_->ReloadData(term, snapshot_ts, from_snapshot);
         if (ok)
         {
             ds_ref.latest_term_.store(term, std::memory_order_release);
