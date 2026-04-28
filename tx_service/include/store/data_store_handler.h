@@ -166,6 +166,11 @@ public:
         return DataStoreOpStatus::Error;
     }
 
+    virtual DataStoreOpStatus RefreshKvStorage()
+    {
+        return DataStoreOpStatus::Error;
+    }
+
     virtual DataStoreOpStatus FetchBucketData(
         FetchBucketDataCc *fetch_bucket_data_cc)
     {

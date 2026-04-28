@@ -4482,6 +4482,64 @@ DataStoreServiceClient::FetchRecord(
 }
 
 txservice::store::DataStoreHandler::DataStoreOpStatus
+DataStoreServiceClient::RefreshKvStorage()
+{
+#ifdef DATA_STORE_TYPE_ELOQDSS_ELOQSTORE
+    if (!bind_data_shard_with_ng_)
+    {
+        return DataStoreOpStatus::Success;
+    }
+    if (data_store_service_ == nullptr)
+    {
+        return DataStoreOpStatus::Error;
+    }
+
+    const uint32_t ng_id = Sharder::Instance().NativeNodeGroup();
+    int64_t ng_term = Sharder::Instance().StandbyNodeTerm();
+    if (ng_term < 0)
+    {
+        ng_term = Sharder::Instance().CandidateStandbyNodeTerm();
+    }
+    if (ng_term < 0)
+    {
+        ng_term = Sharder::Instance().LeaderTerm(ng_id);
+    }
+    if (ng_term < 0)
+    {
+        ng_term = Sharder::Instance().CandidateLeaderTerm(ng_id);
+    }
+    if (ng_term < 0)
+    {
+        LOG(WARNING) << "RefreshKvStorage skipped because term is unavailable, "
+                     << "ng_id=" << ng_id;
+        return DataStoreOpStatus::Retry;
+    }
+
+    std::unordered_set<uint16_t> bucket_ids;
+    for (auto &[bucket_id, bucket_info] : bucket_infos_)
+    {
+        if (bucket_info->BucketOwner() == ng_id)
+        {
+            bucket_ids.insert(bucket_id);
+        }
+    }
+
+    if (data_store_service_->FetchDSShardStatus(ng_id) == DSShardStatus::Closed)
+    {
+        data_store_service_->OpenDataStore(
+            ng_id, std::move(bucket_ids), ng_term);
+    }
+
+    const uint64_t snapshot_ts = Sharder::Instance().NativeNodeGroupCkptTs();
+    const bool ok =
+        data_store_service_->ReloadData(ng_id, ng_term, snapshot_ts, false);
+    return ok ? DataStoreOpStatus::Success : DataStoreOpStatus::Error;
+#else
+    return DataStoreOpStatus::Error;
+#endif
+}
+
+txservice::store::DataStoreHandler::DataStoreOpStatus
 DataStoreServiceClient::FetchBucketData(
     std::vector<txservice::FetchBucketDataCc *> fetch_bucket_data_ccs)
 {

@@ -6983,6 +6983,7 @@ public:
         BlockOnRead,  // this could be ReadLock or WriteIntent
         BlockOnWriteLock,
         BlockOnFetch,
+        BlockOnRefresh,
         BlockOnCondition  // for blocking commands like blpop
     };
     ApplyBlockType block_type_{ApplyBlockType::NoBlocking};

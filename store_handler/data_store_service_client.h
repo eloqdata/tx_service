@@ -321,6 +321,8 @@ public:
         txservice::FetchRecordCc *fetch_cc,
         txservice::FetchSnapshotCc *fetch_snapshot_cc = nullptr) override;
 
+    DataStoreOpStatus RefreshKvStorage() override;
+
     DataStoreOpStatus FetchSnapshot(txservice::FetchSnapshotCc *fetch_cc);
 
     /**

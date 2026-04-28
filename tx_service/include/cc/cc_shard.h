@@ -418,6 +418,9 @@ public:
      * @param req The pointer to the cc request.
      */
     void Enqueue(CcRequestBase *req);
+    void EnqueueRefreshWaiter(CcRequestBase *req);
+    size_t DrainRefreshWaiters(std::vector<CcRequestBase *> &waiters);
+    bool HasRefreshWaiters() const;
 
     /**
      * @brief Puts a cc request into the shard's low priority request queue to
@@ -870,6 +873,9 @@ public:
         uint64_t snapshot_read_ts = 0,
         bool only_fetch_archives = false);
 
+    store::DataStoreHandler::DataStoreOpStatus RefreshKvStorage(
+        CcRequestBase *requester);
+
     store::DataStoreHandler::DataStoreOpStatus FetchSnapshot(
         const TableName &table_name,
         const TableSchema *tbl_schema,
@@ -1273,6 +1279,11 @@ private:
 
     // For load record from kvstore asynchronously
     std::unordered_map<LruEntry *, FetchRecordCc> fetch_record_reqs_;
+
+    // For refreshing kvstore
+    bool kv_store_is_refreshing_{false};
+    std::vector<CcRequestBase *> cc_reqs_blocked_on_refreshing_;
+    moodycamel::ConcurrentQueue<CcRequestBase *> refresh_wait_queue_;
 
     // For load snapshot from kvstore asynchronously
     CcRequestPool<FetchSnapshotCc> fetch_snapshot_cc_pool_;

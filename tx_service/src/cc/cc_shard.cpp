@@ -620,6 +620,30 @@ void CcShard::Enqueue(CcRequestBase *req)
     NotifyTxProcessor();
 }
 
+void CcShard::EnqueueRefreshWaiter(CcRequestBase *req)
+{
+    bool ret = refresh_wait_queue_.enqueue(req);
+    assert(ret == true);
+    (void) ret;
+}
+
+size_t CcShard::DrainRefreshWaiters(std::vector<CcRequestBase *> &waiters)
+{
+    CcRequestBase *req = nullptr;
+    size_t drained = 0;
+    while (refresh_wait_queue_.try_dequeue(req))
+    {
+        waiters.emplace_back(req);
+        drained++;
+    }
+    return drained;
+}
+
+bool CcShard::HasRefreshWaiters() const
+{
+    return refresh_wait_queue_.size_approx() > 0;
+}
+
 void CcShard::EnqueueLowPriorityCcRequest(uint32_t thd_id, CcRequestBase *req)
 {
     // The memory order in enqueue() of the concurrent queue ensures that the
@@ -1971,6 +1995,74 @@ store::DataStoreHandler::DataStoreOpStatus CcShard::FetchRecord(
         // again or be aborted.
         // The responsibility of releasing this pin is the ccrequest.
         cce->GetKeyGapLockAndExtraData()->AddPin();
+    }
+
+    return store::DataStoreHandler::DataStoreOpStatus::Success;
+}
+
+store::DataStoreHandler::DataStoreOpStatus CcShard::RefreshKvStorage(
+    CcRequestBase *requester)
+{
+    if (local_shards_.store_hd_ == nullptr)
+    {
+        return store::DataStoreHandler::DataStoreOpStatus::Error;
+    }
+
+    if (requester != nullptr)
+    {
+        EnqueueRefreshWaiter(requester);
+    }
+
+    int expected_owner = -1;
+    if (local_shards_.kv_refresh_owner_.compare_exchange_strong(
+            expected_owner,
+            static_cast<int>(core_id_),
+            std::memory_order_acq_rel))
+    {
+        DispatchTask(core_id_,
+                     [](CcShard &ccs)
+                     {
+                         (void) ccs.local_shards_.store_hd_->RefreshKvStorage();
+
+                         std::vector<CcRequestBase *> waiters;
+                         for (uint16_t idx = 0;
+                              idx < ccs.local_shards_.Count();
+                              ++idx)
+                         {
+                             waiters.clear();
+                             CcShard *target =
+                                 ccs.local_shards_.GetCcShard(idx);
+                             target->DrainRefreshWaiters(waiters);
+                             for (CcRequestBase *req : waiters)
+                             {
+                                 if (req != nullptr)
+                                 {
+                                     target->Enqueue(req);
+                                 }
+                             }
+                         }
+
+                         ccs.local_shards_.kv_refresh_owner_.store(
+                             -1, std::memory_order_release);
+
+                         // New waiters may be enqueued while this round is
+                         // draining existing waiters. Trigger another round
+                         // so they won't be left blocked without a future
+                         // external refresh trigger.
+                         for (uint16_t idx = 0;
+                              idx < ccs.local_shards_.Count();
+                              ++idx)
+                         {
+                             if (ccs.local_shards_.GetCcShard(idx)
+                                     ->HasRefreshWaiters())
+                             {
+                                 (void) ccs.RefreshKvStorage(nullptr);
+                                 break;
+                             }
+                         }
+
+                         return true;
+                     });
     }
 
     return store::DataStoreHandler::DataStoreOpStatus::Success;
