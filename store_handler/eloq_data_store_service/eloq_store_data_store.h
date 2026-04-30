@@ -265,7 +265,9 @@ public:
     bool ListArchiveTags(std::string_view prefix,
                          std::vector<ArchiveEntry> *entries);
 
-    bool ReloadData(int64_t term, uint64_t snapshot_ts) override;
+    bool ReloadData(int64_t term,
+                    uint64_t snapshot_ts,
+                    bool from_snapshot) override;
     void UpdateStandbyMasterStorePaths(
         const std::vector<std::string> &store_paths,
         const std::vector<uint64_t> &store_path_weights) override;

@@ -677,7 +677,10 @@ public:
                                    const std::string &snapshot_path);
     // When primary flush data to cloud, the standby node will call this
     // function to sync the data from cloud.
-    bool ReloadData(uint32_t shard_id, int64_t ng_term, uint64_t snapshot_ts);
+    bool ReloadData(uint32_t shard_id,
+                    int64_t ng_term,
+                    uint64_t snapshot_ts,
+                    bool from_snapshot);
     bool CreateSnapshotForStandby(uint32_t shard_id,
                                   uint32_t ng_id,
                                   uint64_t snapshot_ts);

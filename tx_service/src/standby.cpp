@@ -21,10 +21,6 @@
  */
 #include "standby.h"
 
-#include <bthread/condition_variable.h>
-#include <bthread/mutex.h>
-
-#include <limits>
 #include <memory>
 
 #include "cc_request.h"
@@ -34,21 +30,12 @@ namespace txservice
 {
 namespace
 {
-struct UpdateStandbyCkptAgg
-{
-    bthread::Mutex mux;
-    bthread::ConditionVariable cv;
-    size_t pending{0};
-    size_t total{0};
-    size_t success{0};
-    uint64_t min_ack_ckpt_ts{std::numeric_limits<uint64_t>::max()};
-};
-
 struct UpdateStandbyCkptRpcCtx
 {
     brpc::Controller cntl;
     remote::UpdateStandbyCkptTsResponse resp;
-    UpdateStandbyCkptAgg *agg{nullptr};
+    uint32_t node_id{0};
+    uint64_t snapshot_ts{0};
 };
 
 class UpdateStandbyCkptDone : public google::protobuf::Closure
@@ -62,19 +49,20 @@ public:
     void Run() override
     {
         std::unique_ptr<UpdateStandbyCkptDone> self_guard(this);
-        auto *agg = ctx_->agg;
-        const bool succ = !ctx_->cntl.Failed() && !ctx_->resp.error();
+        if (ctx_->cntl.Failed())
         {
-            std::lock_guard<bthread::Mutex> lk(agg->mux);
-            if (succ)
-            {
-                agg->success++;
-                agg->min_ack_ckpt_ts = std::min(agg->min_ack_ckpt_ts,
-                                                ctx_->resp.current_ckpt_ts());
-            }
-            agg->pending--;
+            LOG(WARNING) << "UpdateStandbyCkptTs RPC failed for node "
+                         << ctx_->node_id
+                         << ", snapshot_ts=" << ctx_->snapshot_ts
+                         << ", error=" << ctx_->cntl.ErrorText();
+            return;
         }
-        agg->cv.notify_all();
+        if (ctx_->resp.error())
+        {
+            LOG(WARNING) << "UpdateStandbyCkptTs RPC returned error for node "
+                         << ctx_->node_id
+                         << ", snapshot_ts=" << ctx_->snapshot_ts;
+        }
     }
 
 private:
@@ -137,16 +125,6 @@ void BrocastPrimaryCkptTs(NodeGroupId node_group_id,
 
     if (!subscribe_node_ids.empty())
     {
-#ifdef DATA_STORE_TYPE_ELOQDSS_ELOQSTORE
-        if (has_data_store_write)
-        {
-            auto *store_hd = Sharder::Instance().GetDataStoreHandler();
-            std::vector<std::string> snapshot_files;
-            store_hd->CreateSnapshotForStandby(
-                node_group_id, snapshot_files, primary_ckpt_ts);
-        }
-#endif
-
         remote::UpdateStandbyCkptTsRequest update_standby_ckpt_ts_req;
 
         update_standby_ckpt_ts_req.set_ng_term(node_group_term);
@@ -155,7 +133,6 @@ void BrocastPrimaryCkptTs(NodeGroupId node_group_id,
         update_standby_ckpt_ts_req.set_has_data_store_write(
             has_data_store_write);
 
-        UpdateStandbyCkptAgg agg;
         for (uint32_t node_id : subscribe_node_ids)
         {
             auto channel = Sharder::Instance().GetCcNodeServiceChannel(node_id);
@@ -166,12 +143,8 @@ void BrocastPrimaryCkptTs(NodeGroupId node_group_id,
             remote::CcRpcService_Stub stub(channel.get());
             auto rpc_ctx = std::make_shared<UpdateStandbyCkptRpcCtx>();
             rpc_ctx->cntl.set_timeout_ms(300);
-            rpc_ctx->agg = &agg;
-            {
-                std::lock_guard<bthread::Mutex> lk(agg.mux);
-                agg.pending++;
-                agg.total++;
-            }
+            rpc_ctx->node_id = node_id;
+            rpc_ctx->snapshot_ts = primary_ckpt_ts;
             DLOG(INFO) << "send UpdateStandbyCkptTs to node " << node_id
                        << ", snapshot_ts " << primary_ckpt_ts;
             stub.UpdateStandbyCkptTs(&rpc_ctx->cntl,
@@ -179,40 +152,6 @@ void BrocastPrimaryCkptTs(NodeGroupId node_group_id,
                                      &rpc_ctx->resp,
                                      new UpdateStandbyCkptDone(rpc_ctx));
         }
-
-        {
-            std::unique_lock<bthread::Mutex> lk(agg.mux);
-            while (agg.pending != 0)
-            {
-                agg.cv.wait(lk);
-            }
-        }
-
-#ifdef DATA_STORE_TYPE_ELOQDSS_ELOQSTORE
-        auto *store_hd = Sharder::Instance().GetDataStoreHandler();
-        DLOG(INFO) << "BrocastPrimaryCkptTs cleanup check, ng_id="
-                   << node_group_id
-                   << ", has_data_store_write=" << has_data_store_write
-                   << ", ack_total=" << agg.total
-                   << ", ack_success=" << agg.success
-                   << ", min_ack_ckpt_ts=" << agg.min_ack_ckpt_ts;
-        if (agg.total > 0 && agg.success == agg.total &&
-            agg.min_ack_ckpt_ts != std::numeric_limits<uint64_t>::max())
-        {
-            store_hd->DeleteStandbySnapshotsBefore(node_group_id,
-                                                   agg.min_ack_ckpt_ts);
-        }
-        else
-        {
-            DLOG(INFO) << "BrocastPrimaryCkptTs skip "
-                          "DeleteStandbySnapshotsBefore, ng_id="
-                       << node_group_id
-                       << ", has_data_store_write=" << has_data_store_write
-                       << ", ack_total=" << agg.total
-                       << ", ack_success=" << agg.success
-                       << ", min_ack_ckpt_ts=" << agg.min_ack_ckpt_ts;
-        }
-#endif
     }
 }
 

@@ -25,8 +25,10 @@
 #include <bthread/mutex.h>
 #include <gflags/gflags.h>
 
+#include <chrono>
 #include <limits>
 #include <memory>
+#include <utility>
 #include <vector>
 
 #include "cc/local_cc_shards.h"
@@ -39,6 +41,8 @@ namespace store
 namespace
 {
 #ifdef DATA_STORE_TYPE_ELOQDSS_ELOQSTORE
+constexpr auto kStandbySnapshotTtl = std::chrono::hours(1);
+
 struct RequestSyncSnapshotAggregate
 {
     bthread::Mutex mux;
@@ -154,6 +158,17 @@ bool DispatchRequestSyncSnapshotAsync(uint32_t ng_id,
 
 void SnapshotManager::Start()
 {
+#ifdef DATA_STORE_TYPE_ELOQDSS_ELOQSTORE
+    if (store_hd_ != nullptr)
+    {
+        auto local_ngs = Sharder::Instance().LocalNodeGroups();
+        for (uint32_t ng_id : local_ngs)
+        {
+            store_hd_->DeleteStandbySnapshotsBefore(
+                ng_id, std::numeric_limits<uint64_t>::max());
+        }
+    }
+#endif
     standby_sync_worker_ = std::thread([this] { StandbySyncWorker(); });
     pthread_setname_np(standby_sync_worker_.native_handle(), "ss_standby_sync");
 }
@@ -174,12 +189,12 @@ void SnapshotManager::Shutdown()
 void SnapshotManager::StandbySyncWorker()
 {
     constexpr auto kBlockedTaskRetryInterval = std::chrono::milliseconds(200);
+#ifndef DATA_STORE_TYPE_ELOQDSS_ELOQSTORE
     while (true)
     {
         std::unique_lock<std::mutex> lk(standby_sync_mux_);
         standby_sync_cv_.wait(
             lk, [this] { return !pending_req_.empty() || terminated_; });
-
         if (terminated_)
         {
             return;
@@ -201,6 +216,92 @@ void SnapshotManager::StandbySyncWorker()
             standby_sync_cv_.wait_for(lk, kBlockedTaskRetryInterval);
         }
     }
+#else
+    while (true)
+    {
+        std::unique_lock<std::mutex> lk(standby_sync_mux_);
+        std::vector<std::pair<uint32_t, uint64_t>> snapshots_to_delete;
+        CollectExpiredSnapshotsLocked(std::chrono::system_clock::now(),
+                                      &snapshots_to_delete);
+        if (terminated_)
+        {
+            return;
+        }
+        if (!snapshots_to_delete.empty())
+        {
+            lk.unlock();
+            for (const auto &[ng_id, snapshot_ts] : snapshots_to_delete)
+            {
+                store_hd_->DeleteStandbySnapshot(ng_id, snapshot_ts);
+            }
+            continue;
+        }
+
+        if (pending_req_.empty())
+        {
+            const auto deadline = NextSnapshotCleanupDeadlineLocked();
+            if (deadline == std::chrono::system_clock::time_point::max())
+            {
+                standby_sync_cv_.wait(
+                    lk,
+                    [this]
+                    {
+                        return !pending_req_.empty() ||
+                               !snapshot_cleanup_queue_.empty() || terminated_;
+                    });
+            }
+            else
+            {
+                standby_sync_cv_.wait_until(
+                    lk,
+                    deadline,
+                    [this, deadline]
+                    {
+                        return !pending_req_.empty() || terminated_ ||
+                               NextSnapshotCleanupDeadlineLocked() < deadline;
+                    });
+            }
+        }
+
+        if (terminated_)
+        {
+            return;
+        }
+
+        CollectExpiredSnapshotsLocked(std::chrono::system_clock::now(),
+                                      &snapshots_to_delete);
+        if (!snapshots_to_delete.empty())
+        {
+            lk.unlock();
+            for (const auto &[ng_id, snapshot_ts] : snapshots_to_delete)
+            {
+                store_hd_->DeleteStandbySnapshot(ng_id, snapshot_ts);
+            }
+            continue;
+        }
+
+        if (pending_req_.empty())
+        {
+            continue;
+        }
+        assert(!pending_req_.empty());
+        lk.unlock();
+        SyncWithStandby();
+        lk.lock();
+
+        if (terminated_)
+        {
+            return;
+        }
+
+        if (!pending_req_.empty())
+        {
+            // Pending requests are still blocked by subscribe/barrier checks.
+            // Back off to avoid tight checkpoint retry loops.
+            standby_sync_cv_.wait_for(lk, kBlockedTaskRetryInterval);
+        }
+    }
+#endif
 }
 
 bool SnapshotManager::OnSnapshotSyncRequested(
@@ -244,11 +345,11 @@ bool SnapshotManager::OnSnapshotSyncRequested(
                                                   req->standby_node_term(),
                                                   &completed_snapshot_ts))
                 {
-                    LOG(WARNING)
-                        << "Completed term found without snapshot ts, "
-                        << "standby node #" << req->standby_node_id()
-                        << ", standby term: " << req->standby_node_term();
-                    return false;
+                    return true;
+                }
+                if (completed_snapshot_ts == 0)
+                {
+                    return true;
                 }
                 DLOG(INFO) << "Received duplicate snapshot sync request for "
                               "completed standby node #"
@@ -285,11 +386,11 @@ bool SnapshotManager::OnSnapshotSyncRequested(
                                                       req->standby_node_term(),
                                                       &completed_snapshot_ts))
                     {
-                        LOG(WARNING)
-                            << "Completed term found without snapshot ts, "
-                            << "standby node #" << req->standby_node_id()
-                            << ", standby term: " << req->standby_node_term();
-                        return false;
+                        return true;
+                    }
+                    if (completed_snapshot_ts == 0)
+                    {
+                        return true;
                     }
                     DLOG(INFO)
                         << "Received duplicate snapshot sync request for "
@@ -603,6 +704,46 @@ bool SnapshotManager::IsSnapshotSyncCompletedLocked(
 }
 
 #ifdef DATA_STORE_TYPE_ELOQDSS_ELOQSTORE
+void SnapshotManager::TrackSnapshotLocked(uint32_t ng_id, uint64_t snapshot_ts)
+{
+    snapshot_cleanup_queue_.push_back(
+        {ng_id,
+         snapshot_ts,
+         std::chrono::system_clock::now() + kStandbySnapshotTtl});
+}
+
+void SnapshotManager::CollectExpiredSnapshotsLocked(
+    std::chrono::system_clock::time_point now,
+    std::vector<std::pair<uint32_t, uint64_t>> *snapshots_to_delete)
+{
+    if (snapshots_to_delete == nullptr)
+    {
+        return;
+    }
+
+    while (!snapshot_cleanup_queue_.empty())
+    {
+        const auto &entry = snapshot_cleanup_queue_.front();
+        if (entry.expire_at > now)
+        {
+            break;
+        }
+        snapshots_to_delete->emplace_back(entry.ng_id, entry.snapshot_ts);
+        EraseSnapshotSyncCompletedBySnapshotTsLocked(entry.snapshot_ts);
+        snapshot_cleanup_queue_.pop_front();
+    }
+}
+
+std::chrono::system_clock::time_point
+SnapshotManager::NextSnapshotCleanupDeadlineLocked() const
+{
+    if (snapshot_cleanup_queue_.empty())
+    {
+        return std::chrono::system_clock::time_point::max();
+    }
+    return snapshot_cleanup_queue_.front().expire_at;
+}
+
 bool SnapshotManager::GetCompletedSnapshotTsLocked(
     uint32_t standby_node_id,
     int64_t standby_node_term,
@@ -681,6 +822,38 @@ void SnapshotManager::EraseSnapshotSyncCompletedByNodeLocked(
 #endif
 }
 
+#ifdef DATA_STORE_TYPE_ELOQDSS_ELOQSTORE
+void SnapshotManager::EraseSnapshotSyncCompletedBySnapshotTsLocked(
+    uint64_t snapshot_ts)
+{
+    for (auto node_it = completed_snapshot_term_and_ts_.begin();
+         node_it != completed_snapshot_term_and_ts_.end();)
+    {
+        auto &term_and_ts = node_it->second;
+        for (auto term_it = term_and_ts.begin(); term_it != term_and_ts.end();)
+        {
+            if (term_it->second == snapshot_ts)
+            {
+                term_it = term_and_ts.erase(term_it);
+            }
+            else
+            {
+                ++term_it;
+            }
+        }
+
+        if (term_and_ts.empty())
+        {
+            node_it = completed_snapshot_term_and_ts_.erase(node_it);
+        }
+        else
+        {
+            ++node_it;
+        }
+    }
+}
+#endif
+
 // If kvstore is enabled, we must flush data in-memory to kvstore firstly.
 // For non-shared kvstore, also we create and send the snapshot to standby
 // nodes.
@@ -710,6 +883,7 @@ void SnapshotManager::SyncWithStandby()
         subscription_barrier_.clear();
 #ifdef DATA_STORE_TYPE_ELOQDSS_ELOQSTORE
         completed_snapshot_term_and_ts_.clear();
+        snapshot_cleanup_queue_.clear();
 #else
         completed_snapshot_terms_.clear();
 #endif
@@ -824,11 +998,13 @@ void SnapshotManager::SyncWithStandby()
         LOG(ERROR) << "Failed to create snpashot for sync with standby";
         return;
     }
+    {
+        std::unique_lock<std::mutex> lk(standby_sync_mux_);
+        TrackSnapshotLocked(node_group, standby_snapshot_ts);
+    }
     DLOG(INFO) << "SyncWithStandby created standby snapshot, ng_id="
                << node_group << ", term=" << leader_term
                << ", snapshot_ts=" << standby_snapshot_ts;
-
-    uint64_t min_ack_ckpt_ts = std::numeric_limits<uint64_t>::max();
     size_t sync_snapshot_rpc_count = 0;
     size_t sync_snapshot_success = 0;
     RequestSyncSnapshotAggregate sync_snapshot_agg;
@@ -1020,35 +1196,16 @@ void SnapshotManager::SyncWithStandby()
         {
             sync_snapshot_agg.cv.wait(lk);
         }
-        min_ack_ckpt_ts = sync_snapshot_agg.min_ack_ckpt_ts;
         sync_snapshot_success = sync_snapshot_agg.success;
     }
 #endif
 
 #ifdef DATA_STORE_TYPE_ELOQDSS_ELOQSTORE
-    if (standby_snapshot_ts != 0 && sync_snapshot_rpc_count > 0 &&
-        sync_snapshot_success == sync_snapshot_rpc_count &&
-        min_ack_ckpt_ts != std::numeric_limits<uint64_t>::max())
-    {
-        DLOG(INFO)
-            << "SyncWithStandby deleting standby snapshot archives by min "
-               "acked ts, ng_id="
-            << node_group << ", term=" << leader_term
-            << ", current_snapshot_ts=" << standby_snapshot_ts
-            << ", sync_snapshot_rpc_count=" << sync_snapshot_rpc_count
-            << ", sync_snapshot_success=" << sync_snapshot_success
-            << ", min_ack_ckpt_ts=" << min_ack_ckpt_ts;
-        store_hd_->DeleteStandbySnapshotsBefore(node_group, min_ack_ckpt_ts);
-    }
-    else if (standby_snapshot_ts != 0)
-    {
-        DLOG(INFO) << "SyncWithStandby skip DeleteStandbySnapshotsBefore, "
-                   << "ng_id=" << node_group << ", term=" << leader_term
-                   << ", current_snapshot_ts=" << standby_snapshot_ts
-                   << ", sync_snapshot_rpc_count=" << sync_snapshot_rpc_count
-                   << ", sync_snapshot_success=" << sync_snapshot_success
-                   << ", min_ack_ckpt_ts=" << min_ack_ckpt_ts;
-    }
+    DLOG(INFO) << "SyncWithStandby dispatched bootstrap snapshot, ng_id="
+               << node_group << ", term=" << leader_term
+               << ", current_snapshot_ts=" << standby_snapshot_ts
+               << ", sync_snapshot_rpc_count=" << sync_snapshot_rpc_count
+               << ", sync_snapshot_success=" << sync_snapshot_success;
 #endif
 }
 

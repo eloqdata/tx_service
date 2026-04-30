@@ -36,6 +36,7 @@
 #include "error_messages.h"  //CcErrorCode
 #include "remote/remote_type.h"
 #include "sharder.h"
+#include "store/snapshot_manager.h"
 #include "tx_execution.h"
 #include "tx_operation_result.h"
 #include "tx_trace.h"
