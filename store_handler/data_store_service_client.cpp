@@ -5590,7 +5590,6 @@ void DataStoreServiceClient::UpsertTable(UpsertTableData *table_data)
     else if (op_type == txservice::OperationType::TruncateTable)
     {
         // 1- Drop kv tables of base table
-        assert(kv_info->kv_index_names_.empty());
         ok = ok && DropKvTable(kv_info->kv_table_name_);
 
         // 2- Reset table ranges of  base and index tables
