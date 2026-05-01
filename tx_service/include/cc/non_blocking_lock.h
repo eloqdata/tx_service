@@ -553,14 +553,7 @@ public:
 
     bool HasBufferedCommandList()
     {
-        if (!buffered_cmd_list_.Empty())
-        {
-            return true;
-        }
-        else
-        {
-            return false;
-        }
+        return !buffered_cmd_list_.Empty();
     }
     StandbyForwardEntry *ForwardEntry();
     void SetForwardEntry(std::unique_ptr<StandbyForwardEntry> entry);

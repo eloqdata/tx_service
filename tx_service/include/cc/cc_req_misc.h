@@ -614,6 +614,47 @@ public:
     std::string kv_end_key_;
 };
 
+struct FetchRecordWithRefreshCc : public CcRequestBase
+{
+public:
+    FetchRecordWithRefreshCc() = default;
+
+    void Reset(const TableName &table_name,
+               const TableSchema *tbl_schema,
+               TxKey key,
+               LruEntry *cce,
+               NodeGroupId cc_ng_id,
+               int64_t cc_ng_term,
+               CcRequestBase *requester,
+               int32_t partition_id,
+               bool fetch_from_primary = false,
+               uint32_t key_shard_code = 0,
+               uint64_t snapshot_read_ts = 0,
+               bool only_fetch_archives = false);
+
+    bool Execute(CcShard &ccs) override;
+
+    void SetPinnedCce(bool pinned)
+    {
+        pinned_cce_ = pinned;
+    }
+
+private:
+    std::optional<TableName> table_name_;
+    const TableSchema *table_schema_{nullptr};
+    TxKey tx_key_;
+    LruEntry *cce_{nullptr};
+    NodeGroupId cc_ng_id_{0};
+    int64_t cc_ng_term_{0};
+    CcRequestBase *requester_{nullptr};
+    int32_t partition_id_{0};
+    bool fetch_from_primary_{false};
+    uint32_t key_shard_code_{0};
+    uint64_t snapshot_read_ts_{0};
+    bool only_fetch_archives_{false};
+    bool pinned_cce_{false};
+};
+
 struct FetchBucketDataCc;
 typedef void (*OnFetchedBucketData)(FetchBucketDataCc *fetch_cc,
                                     CcRequestBase *requester);

@@ -341,14 +341,10 @@ public:
             }
             else
             {
-                assert(req.block_type_ == ApplyCc::ApplyBlockType::BlockOnFetch ||
-                       req.block_type_ ==
-                           ApplyCc::ApplyBlockType::BlockOnRefresh);
-                if (req.block_type_ == ApplyCc::ApplyBlockType::BlockOnFetch)
-                {
-                    cce->GetKeyGapLockAndExtraData()->ReleasePin();
-                    cce->RecycleKeyLock(*shard_);
-                }
+                assert(req.block_type_ ==
+                       ApplyCc::ApplyBlockType::BlockOnFetch);
+                cce->GetKeyGapLockAndExtraData()->ReleasePin();
+                cce->RecycleKeyLock(*shard_);
                 req.block_type_ = ApplyCc::ApplyBlockType::NoBlocking;
             }
         }
@@ -2070,6 +2066,19 @@ public:
                     // applied and there is no pending command.
                     cce->RecycleKeyLock(*shard_);
                 }
+                else
+                {
+                    int32_t part_id = Sharder::MapKeyHashToHashPartitionId(
+                        look_key->Hash());
+                    (void) shard_->FetchRecordWithRefresh(table_name_,
+                                                          table_schema_,
+                                                          TxKey(look_key),
+                                                          cce,
+                                                          cc_ng_id_,
+                                                          req.StandbyNodeTerm(),
+                                                          nullptr,
+                                                          part_id);
+                }
             }
         }
 
@@ -2472,6 +2481,26 @@ public:
                     assert(lock_recycled);
                 }
                 (void) lock_recycled;
+            }
+            else if (buffered_cmd_list != nullptr)
+            {
+                int64_t cc_ng_candid_term =
+                    Sharder::Instance().CandidateLeaderTerm(cc_ng_id_);
+                int64_t cc_ng_term = Sharder::Instance().LeaderTerm(cc_ng_id_);
+                int64_t ng_term = std::max(cc_ng_candid_term, cc_ng_term);
+                if (ng_term >= 0)
+                {
+                    int32_t part_id =
+                        Sharder::MapKeyHashToHashPartitionId(key.Hash());
+                    (void) shard_->FetchRecordWithRefresh(table_name_,
+                                                          table_schema_,
+                                                          TxKey(&key),
+                                                          cce,
+                                                          cc_ng_id_,
+                                                          ng_term,
+                                                          nullptr,
+                                                          part_id);
+                }
             }
 
             payload_status = cce->PayloadStatus();

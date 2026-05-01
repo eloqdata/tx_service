@@ -2000,6 +2000,48 @@ store::DataStoreHandler::DataStoreOpStatus CcShard::FetchRecord(
     return store::DataStoreHandler::DataStoreOpStatus::Success;
 }
 
+store::DataStoreHandler::DataStoreOpStatus CcShard::FetchRecordWithRefresh(
+    const TableName &table_name,
+    const TableSchema *tbl_schema,
+    TxKey key,
+    LruEntry *cce,
+    NodeGroupId cc_ng_id,
+    int64_t cc_ng_term,
+    CcRequestBase *requester,
+    int32_t partition_id,
+    bool fetch_from_primary,
+    uint32_t key_shard_code,
+    uint64_t snapshot_read_ts,
+    bool only_fetch_archives)
+{
+    FetchRecordWithRefreshCc *fetch_cc =
+        fetch_record_refresh_cc_pool_.NextRequest();
+    fetch_cc->Reset(table_name,
+                    tbl_schema,
+                    std::move(key),
+                    cce,
+                    cc_ng_id,
+                    cc_ng_term,
+                    requester,
+                    partition_id,
+                    fetch_from_primary,
+                    key_shard_code,
+                    snapshot_read_ts,
+                    only_fetch_archives);
+
+    cce->GetKeyGapLockAndExtraData()->AddPin();
+    fetch_cc->SetPinnedCce(true);
+    auto refresh_ret_status = RefreshKvStorage(fetch_cc);
+    if (refresh_ret_status != store::DataStoreHandler::DataStoreOpStatus::Success)
+    {
+        cce->GetKeyGapLockAndExtraData()->ReleasePin();
+        cce->RecycleKeyLock(*this);
+        fetch_cc->SetPinnedCce(false);
+        fetch_cc->Free();
+    }
+    return refresh_ret_status;
+}
+
 store::DataStoreHandler::DataStoreOpStatus CcShard::RefreshKvStorage(
     CcRequestBase *requester)
 {

@@ -873,6 +873,20 @@ public:
         uint64_t snapshot_read_ts = 0,
         bool only_fetch_archives = false);
 
+    store::DataStoreHandler::DataStoreOpStatus FetchRecordWithRefresh(
+        const TableName &table_name,
+        const TableSchema *tbl_schema,
+        TxKey key,
+        LruEntry *cce,
+        NodeGroupId cc_ng_id,
+        int64_t cc_ng_term,
+        CcRequestBase *requester,
+        int32_t partition_id,
+        bool fetch_from_primary = false,
+        uint32_t key_shard_code = 0,
+        uint64_t snapshot_read_ts = 0,
+        bool only_fetch_archives = false);
+
     store::DataStoreHandler::DataStoreOpStatus RefreshKvStorage(
         CcRequestBase *requester);
 
@@ -1279,6 +1293,7 @@ private:
 
     // For load record from kvstore asynchronously
     std::unordered_map<LruEntry *, FetchRecordCc> fetch_record_reqs_;
+    CcRequestPool<FetchRecordWithRefreshCc> fetch_record_refresh_cc_pool_;
 
     // For refreshing kvstore
     bool kv_store_is_refreshing_{false};

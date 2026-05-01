@@ -916,6 +916,63 @@ void FetchRecordCc::SetFinish(int err)
     ccs_.Enqueue(this);
 }
 
+void FetchRecordWithRefreshCc::Reset(const TableName &table_name,
+                                     const TableSchema *tbl_schema,
+                                     TxKey key,
+                                     LruEntry *cce,
+                                     NodeGroupId cc_ng_id,
+                                     int64_t cc_ng_term,
+                                     CcRequestBase *requester,
+                                     int32_t partition_id,
+                                     bool fetch_from_primary,
+                                     uint32_t key_shard_code,
+                                     uint64_t snapshot_read_ts,
+                                     bool only_fetch_archives)
+{
+    table_name_.emplace(
+        table_name.StringView(), table_name.Type(), table_name.Engine());
+    table_schema_ = tbl_schema;
+    tx_key_ = std::move(key);
+    cce_ = cce;
+    cc_ng_id_ = cc_ng_id;
+    cc_ng_term_ = cc_ng_term;
+    requester_ = requester;
+    partition_id_ = partition_id;
+    fetch_from_primary_ = fetch_from_primary;
+    key_shard_code_ = key_shard_code;
+    snapshot_read_ts_ = snapshot_read_ts;
+    only_fetch_archives_ = only_fetch_archives;
+    pinned_cce_ = false;
+}
+
+bool FetchRecordWithRefreshCc::Execute(CcShard &ccs)
+{
+    assert(pinned_cce_);
+    auto fetch_ret_status = ccs.FetchRecord(*table_name_,
+                                            table_schema_,
+                                            tx_key_.Clone(),
+                                            cce_,
+                                            cc_ng_id_,
+                                            cc_ng_term_,
+                                            requester_,
+                                            partition_id_,
+                                            fetch_from_primary_,
+                                            key_shard_code_,
+                                            snapshot_read_ts_,
+                                            only_fetch_archives_);
+
+    if (fetch_ret_status == store::DataStoreHandler::DataStoreOpStatus::Retry)
+    {
+        ccs.Enqueue(ccs.core_id_, this);
+        return false;
+    }
+
+    cce_->GetKeyGapLockAndExtraData()->ReleasePin();
+    cce_->RecycleKeyLock(ccs);
+    pinned_cce_ = false;
+    return true;
+}
+
 void FetchBucketDataCc::Reset(
     const TableName *table_name,
     const TableSchema *table_schema,

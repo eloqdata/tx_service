@@ -4494,19 +4494,19 @@ DataStoreServiceClient::RefreshKvStorage()
         return DataStoreOpStatus::Error;
     }
 
-    const uint32_t ng_id = Sharder::Instance().NativeNodeGroup();
-    int64_t ng_term = Sharder::Instance().StandbyNodeTerm();
+    const uint32_t ng_id = txservice::Sharder::Instance().NativeNodeGroup();
+    int64_t ng_term = txservice::Sharder::Instance().StandbyNodeTerm();
     if (ng_term < 0)
     {
-        ng_term = Sharder::Instance().CandidateStandbyNodeTerm();
+        ng_term = txservice::Sharder::Instance().CandidateStandbyNodeTerm();
     }
     if (ng_term < 0)
     {
-        ng_term = Sharder::Instance().LeaderTerm(ng_id);
+        ng_term = txservice::Sharder::Instance().LeaderTerm(ng_id);
     }
     if (ng_term < 0)
     {
-        ng_term = Sharder::Instance().CandidateLeaderTerm(ng_id);
+        ng_term = txservice::Sharder::Instance().CandidateLeaderTerm(ng_id);
     }
     if (ng_term < 0)
     {
@@ -4530,7 +4530,8 @@ DataStoreServiceClient::RefreshKvStorage()
             ng_id, std::move(bucket_ids), ng_term);
     }
 
-    const uint64_t snapshot_ts = Sharder::Instance().NativeNodeGroupCkptTs();
+    const uint64_t snapshot_ts =
+        txservice::Sharder::Instance().NativeNodeGroupCkptTs();
     const bool ok =
         data_store_service_->ReloadData(ng_id, ng_term, snapshot_ts, false);
     return ok ? DataStoreOpStatus::Success : DataStoreOpStatus::Error;
