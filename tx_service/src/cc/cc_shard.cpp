@@ -47,6 +47,7 @@
 #include "sharder.h"  // Sharder
 #include "store/data_store_handler.h"
 #include "tx_id.h"
+#include "tx_object.h"
 #include "tx_service_common.h"
 #include "tx_start_ts_collector.h"
 #include "type.h"
@@ -241,6 +242,9 @@ CcShard::CcShard(
 
 CcShard::~CcShard()
 {
+    lazy_free_queue_.clear();
+    lazy_free_queue_size_.store(0, std::memory_order_relaxed);
+
     // Free all remaining entries in history queue (unique_ptr will auto-delete)
     history_standby_msg_.clear();
 
@@ -765,6 +769,57 @@ size_t CcShard::ProcessLowPriorityRequests()
             // Wraparound detected, use max value to break loop
             total_elapsed_microseconds = MAX_PROCESSING_TIME_MICROSECONDS;
         }
+    }
+
+    return total;
+}
+
+void CcShard::EnqueueLazyFree(std::unique_ptr<TxObject> obj)
+{
+    if (obj == nullptr)
+    {
+        return;
+    }
+
+    lazy_free_queue_.emplace_back(std::move(obj));
+    lazy_free_queue_size_.fetch_add(1, std::memory_order_relaxed);
+    NotifyTxProcessor();
+}
+
+size_t CcShard::ProcessLazyFreeQueue()
+{
+    constexpr uint64_t MAX_PROCESSING_TIME_MICROSECONDS = 50;
+
+    if (lazy_free_queue_.empty())
+    {
+        return 0;
+    }
+
+    uint64_t start_time_microseconds = ReadTimeMicroseconds();
+    size_t total = 0;
+
+    while (!lazy_free_queue_.empty())
+    {
+        lazy_free_queue_.pop_back();
+        lazy_free_queue_size_.fetch_sub(1, std::memory_order_relaxed);
+        ++total;
+
+        uint64_t current_time_microseconds = ReadTimeMicroseconds();
+        if (current_time_microseconds < start_time_microseconds ||
+            current_time_microseconds - start_time_microseconds >=
+                MAX_PROCESSING_TIME_MICROSECONDS)
+        {
+            break;
+        }
+    }
+
+    if (lazy_free_queue_.empty())
+    {
+        lazy_free_queue_.shrink_to_fit();
+    }
+    else
+    {
+        NotifyTxProcessor();
     }
 
     return total;

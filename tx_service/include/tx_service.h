@@ -408,6 +408,7 @@ public:
         size_t low_priority_req_cnt =
             local_cc_shards_.ProcessLowPriorityRequests(thd_id_);
         req_cnt += low_priority_req_cnt;
+        req_cnt += local_cc_shards_.ProcessLazyFreeQueue(thd_id_);
         active_cnt =
             on_fly_txs_.Size() + new_tx_cnt_.load(std::memory_order_relaxed);
 

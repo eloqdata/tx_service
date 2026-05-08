@@ -2846,7 +2846,15 @@ private:
             {
                 // This is a DEL command and the object is deleted.
                 payload_status = RecordStatus::Deleted;
-                payload = nullptr;
+                if (cmd.IsLazyDelete())
+                {
+                    shard_->EnqueueLazyFree(
+                        std::unique_ptr<TxObject>(std::move(payload)));
+                }
+                else
+                {
+                    payload = nullptr;
+                }
             }
             else
             {
@@ -2871,8 +2879,16 @@ private:
             if (new_obj_ptr == nullptr)
             {
                 // This is a DEL command and the object is deleted.
-                dirty_payload = nullptr;
                 dirty_payload_status = RecordStatus::Deleted;
+                if (cmd.IsLazyDelete())
+                {
+                    shard_->EnqueueLazyFree(
+                        std::unique_ptr<TxObject>(std::move(dirty_payload)));
+                }
+                else
+                {
+                    dirty_payload = nullptr;
+                }
             }
             else
             {
