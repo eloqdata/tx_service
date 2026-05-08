@@ -69,6 +69,7 @@
 
 namespace txservice
 {
+struct TxObject;
 class SingleShardScanner;
 class CcMapScanner;
 class TxProcessor;
@@ -442,12 +443,18 @@ public:
     bool IsIdle()
     {
         return cc_queue_size_.load(std::memory_order_relaxed) == 0 &&
-               low_priority_cc_queue_size_.load(std::memory_order_relaxed) == 0;
+               low_priority_cc_queue_size_.load(std::memory_order_relaxed) ==
+                   0 &&
+               lazy_free_queue_size_.load(std::memory_order_relaxed) == 0;
     }
 
     size_t ProcessRequests();
 
     size_t ProcessLowPriorityRequests();
+
+    void EnqueueLazyFree(std::unique_ptr<TxObject> obj);
+
+    size_t ProcessLazyFreeQueue();
 
     /**
      * @brief Find an available TEntry in tranaction array and initialize it.
@@ -1295,6 +1302,8 @@ private:
     moodycamel::ConcurrentQueue<CcRequestBase *> low_priority_cc_queue_;
     std::atomic<uint32_t> low_priority_cc_queue_size_{0};
     std::vector<moodycamel::ProducerToken> low_priority_thd_token_;
+    std::vector<std::unique_ptr<TxObject>> lazy_free_queue_;
+    std::atomic<uint32_t> lazy_free_queue_size_{0};
     // Cc requests waiting for the free memory.
     std::list<CcRequestBase *> cc_wait_list_for_memory_;
 
