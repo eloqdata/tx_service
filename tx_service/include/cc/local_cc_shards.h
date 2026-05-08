@@ -270,6 +270,11 @@ public:
         return cc_shards_[thd_id]->ProcessLowPriorityRequests();
     }
 
+    size_t ProcessLazyFreeQueue(size_t thd_id)
+    {
+        return cc_shards_[thd_id]->ProcessLazyFreeQueue();
+    }
+
     size_t QueueSize(size_t thd_id)
     {
         return cc_shards_[thd_id]->QueueSize();
