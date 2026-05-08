@@ -813,7 +813,11 @@ size_t CcShard::ProcessLazyFreeQueue()
         }
     }
 
-    if (!lazy_free_queue_.empty())
+    if (lazy_free_queue_.empty())
+    {
+        lazy_free_queue_.shrink_to_fit();
+    }
+    else
     {
         NotifyTxProcessor();
     }
