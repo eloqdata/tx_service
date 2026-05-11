@@ -575,9 +575,8 @@ bool RocksDBCloudDataStore::OpenCloudDB(
     if (cloud_config_.enable_bloom_filter_)
     {
         rocksdb::BlockBasedTableOptions table_options;
-        table_options.filter_policy.reset(
-            rocksdb::NewBloomFilterPolicy(
-                cloud_config_.bloom_filter_bits_per_key_, false));
+        table_options.filter_policy.reset(rocksdb::NewBloomFilterPolicy(
+            cloud_config_.bloom_filter_bits_per_key_, false));
         table_options.whole_key_filtering = true;
         options.table_factory.reset(
             rocksdb::NewBlockBasedTableFactory(table_options));
