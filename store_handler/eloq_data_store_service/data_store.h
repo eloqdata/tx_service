@@ -104,6 +104,16 @@ public:
      */
     virtual void FlushData(FlushDataRequest *flush_data_req) = 0;
 
+    virtual uint64_t ApproxStoreKeyCount()
+    {
+        return 0;
+    }
+
+    virtual bool CompactStore()
+    {
+        return false;
+    }
+
     /**
      * @brief Delete records in a range from data store.
      * @param delete_range_req The pointer of the request.

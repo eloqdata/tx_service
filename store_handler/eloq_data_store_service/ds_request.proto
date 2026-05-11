@@ -9,6 +9,9 @@ service DataStoreRpcService {
   rpc BatchWriteRecords(BatchWriteRecordsRequest)
       returns (BatchWriteRecordsResponse);
   rpc FlushData(FlushDataRequest) returns (FlushDataResponse);
+  rpc GetApproxStoreKeyCount(ApproxStoreKeyCountRequest)
+      returns (ApproxStoreKeyCountResponse);
+  rpc CompactStore(CompactStoreRequest) returns (CompactStoreResponse);
   rpc DeleteRange(DeleteRangeRequest) returns (DeleteRangeResponse);
   rpc CreateTable(CreateTableRequest) returns (CreateTableResponse);
   rpc DropTable(DropTableRequest) returns (DropTableResponse);
@@ -158,6 +161,23 @@ message FlushDataRequest {
 }
 
 message FlushDataResponse {
+  CommonResult result = 1;
+}
+
+message ApproxStoreKeyCountRequest {
+  uint32 shard_id = 1;
+}
+
+message ApproxStoreKeyCountResponse {
+  CommonResult result = 1;
+  uint64 key_count = 2;
+}
+
+message CompactStoreRequest {
+  uint32 shard_id = 1;
+}
+
+message CompactStoreResponse {
   CommonResult result = 1;
 }
 

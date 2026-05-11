@@ -300,6 +300,46 @@ void RocksDBDataStoreCommon::Shutdown()
     }
 }
 
+uint64_t RocksDBDataStoreCommon::ApproxStoreKeyCount()
+{
+    std::shared_lock<std::shared_mutex> db_lk(db_mux_);
+    auto *db = GetDBPtr();
+    if (db == nullptr)
+    {
+        return 0;
+    }
+
+    uint64_t key_count = 0;
+    if (db->GetIntProperty("rocksdb.estimate-num-keys", &key_count))
+    {
+        return key_count;
+    }
+
+    return 0;
+}
+
+bool RocksDBDataStoreCommon::CompactStore()
+{
+    std::shared_lock<std::shared_mutex> db_lk(db_mux_);
+    auto *db = GetDBPtr();
+    if (db == nullptr)
+    {
+        return false;
+    }
+
+    rocksdb::CompactRangeOptions compact_options;
+    rocksdb::Status compact_status =
+        db->CompactRange(compact_options, nullptr, nullptr);
+    if (!compact_status.ok())
+    {
+        LOG(WARNING) << "Failed to compact RocksDB: "
+                     << compact_status.ToString();
+        return false;
+    }
+
+    return true;
+}
+
 void RocksDBDataStoreCommon::FlushData(FlushDataRequest *flush_data_req)
 {
     bool res = query_worker_pool_->SubmitWork(
