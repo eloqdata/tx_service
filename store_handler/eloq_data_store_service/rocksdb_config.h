@@ -213,6 +213,8 @@ struct RocksDBCloudConfig
     size_t warm_up_thread_num_;
     bool run_purger_{true};
     size_t purger_periodicity_millis_{10 * 60 * 1000};  // 10 minutes
+    bool enable_bloom_filter_{false};
+    double bloom_filter_bits_per_key_{10};
     std::string branch_name_;
 
     // Returns true if OSS URL configuration is being used

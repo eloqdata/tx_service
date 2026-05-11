@@ -138,6 +138,16 @@ These flags are only applicable when RocksDB Cloud is enabled with either S3 or 
 | `rocksdb_cloud_db_file_deletion_delay_sec` | No | `3600` | Integer | Delay for file deletion in cloud storage (seconds) |
 | `rocksdb_cloud_warm_up_thread_num` | No | `1` | Integer | Number of warm-up threads |
 | `rocksdb_cloud_purger_periodicity_secs` | No | `600` (10 minutes) | Integer | Periodicity for cloud purger in seconds |
+| `rocksdb_cloud_enable_bloom_filter` | No | `false` | Boolean | Whether to enable Bloom filter for newly generated RocksDB Cloud SST files |
+| `rocksdb_cloud_bloom_filter_bits_per_key` | No | `10` | Real number | Bloom filter bits per key when `rocksdb_cloud_enable_bloom_filter` is true |
+
+Example:
+
+```ini
+[store]
+rocksdb_cloud_enable_bloom_filter = true
+rocksdb_cloud_bloom_filter_bits_per_key = 10
+```
 
 ### AWS S3-specific Configuration
 
@@ -155,8 +165,9 @@ Different flags have different format requirements:
 1. **String Flags**: Can be any valid string value.
 2. **Boolean Flags**: Must be `true` or `false`.
 3. **Integer Flags**: Must be valid integers.
-4. **Size Flags**: Must be in the format of a number followed by `MB`, `GB`, or `TB` (case insensitive). For example: `64MB`, `20GB`, `1TB`.
-5. **Time Range Flags**: Must be in the format `HH:MM-HH:MM` in UTC time.
+4. **Real Number Flags**: Must be valid numbers. For example: `10`, `9.5`.
+5. **Size Flags**: Must be in the format of a number followed by `MB`, `GB`, or `TB` (case insensitive). For example: `64MB`, `20GB`, `1TB`.
+6. **Time Range Flags**: Must be in the format `HH:MM-HH:MM` in UTC time.
 
 ## Notes
 
@@ -166,4 +177,3 @@ Different flags have different format requirements:
 4. Size values must include units (`MB`, `GB`, or `TB`).
 5. A write rate limit of "0MB" means no limit is applied.
 6. The off-peak time is converted from local time to UTC by default.
-
