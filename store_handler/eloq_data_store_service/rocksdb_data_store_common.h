@@ -172,6 +172,9 @@ public:
      */
     void FlushData(FlushDataRequest *flush_data_req) override;
 
+    uint64_t ApproxStoreKeyCount() override;
+    bool CompactStore() override;
+
     /**
      * @brief Write records to the data store.
      * @param batch_write_req The pointer of the request.
