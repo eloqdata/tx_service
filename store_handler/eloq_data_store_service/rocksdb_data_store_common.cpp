@@ -280,12 +280,26 @@ bool RocksDBDataStoreCommon::Initialize()
     {
         query_worker_pool_->Initialize();
     }
+    if (compact_worker_pool_ == nullptr)
+    {
+        compact_worker_pool_ =
+            std::make_unique<ThreadWorkerPool>("dss_comp", 1);
+    }
+    else
+    {
+        compact_worker_pool_->Initialize();
+    }
 
     return true;
 }
 
 void RocksDBDataStoreCommon::Shutdown()
 {
+    if (compact_worker_pool_ != nullptr)
+    {
+        compact_worker_pool_->Shutdown();
+    }
+
     // shutdown query worker pool
     if (query_worker_pool_ != nullptr)
     {
@@ -320,20 +334,59 @@ uint64_t RocksDBDataStoreCommon::ApproxStoreKeyCount()
 
 bool RocksDBDataStoreCommon::CompactStore()
 {
-    std::shared_lock<std::shared_mutex> db_lk(db_mux_);
-    auto *db = GetDBPtr();
-    if (db == nullptr)
     {
+        std::shared_lock<std::shared_mutex> db_lk(db_mux_);
+        if (GetDBPtr() == nullptr)
+        {
+            return false;
+        }
+    }
+
+    bool expected = false;
+    if (!compact_running_.compare_exchange_strong(
+            expected, true, std::memory_order_acq_rel))
+    {
+        LOG(WARNING) << "Manual RocksDB compact is already running.";
         return false;
     }
 
-    rocksdb::CompactRangeOptions compact_options;
-    rocksdb::Status compact_status =
-        db->CompactRange(compact_options, nullptr, nullptr);
-    if (!compact_status.ok())
+    if (compact_worker_pool_ == nullptr)
     {
-        LOG(WARNING) << "Failed to compact RocksDB: "
-                     << compact_status.ToString();
+        compact_running_.store(false, std::memory_order_release);
+        return false;
+    }
+
+    bool submitted = compact_worker_pool_->SubmitWork(
+        [this]()
+        {
+            auto reset_compact_running = [this]()
+            {
+                compact_running_.store(false, std::memory_order_release);
+            };
+
+            std::shared_lock<std::shared_mutex> db_lk(db_mux_);
+            auto *db = GetDBPtr();
+            if (db == nullptr)
+            {
+                LOG(WARNING) << "Skip manual RocksDB compact: DB is not open.";
+                reset_compact_running();
+                return;
+            }
+
+            rocksdb::CompactRangeOptions compact_options;
+            rocksdb::Status compact_status =
+                db->CompactRange(compact_options, nullptr, nullptr);
+            if (!compact_status.ok())
+            {
+                LOG(WARNING) << "Failed to compact RocksDB: "
+                             << compact_status.ToString();
+            }
+
+            reset_compact_running();
+        });
+    if (!submitted)
+    {
+        compact_running_.store(false, std::memory_order_release);
         return false;
     }
 
