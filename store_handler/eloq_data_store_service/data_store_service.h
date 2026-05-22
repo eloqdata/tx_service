@@ -305,11 +305,10 @@ public:
         const ::EloqDS::remote::ApproxStoreKeyCountRequest *request,
         ::EloqDS::remote::ApproxStoreKeyCountResponse *response,
         ::google::protobuf::Closure *done) override;
-    void CompactStore(
-        ::google::protobuf::RpcController *controller,
-        const ::EloqDS::remote::CompactStoreRequest *request,
-        ::EloqDS::remote::CompactStoreResponse *response,
-        ::google::protobuf::Closure *done) override;
+    void CompactStore(::google::protobuf::RpcController *controller,
+                      const ::EloqDS::remote::CompactStoreRequest *request,
+                      ::EloqDS::remote::CompactStoreResponse *response,
+                      ::google::protobuf::Closure *done) override;
 
     uint64_t GetApproxStoreKeyCount(uint32_t shard_id);
     bool CompactStore(uint32_t shard_id);

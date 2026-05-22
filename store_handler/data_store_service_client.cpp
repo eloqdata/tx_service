@@ -616,8 +616,7 @@ uint64_t DataStoreServiceClient::ApproxStoreKeyCount()
         stub.GetApproxStoreKeyCount(&cntl, &req, &resp, nullptr);
 
         if (cntl.Failed() ||
-            resp.result().error_code() !=
-                remote::DataStoreError::NO_ERROR)
+            resp.result().error_code() != remote::DataStoreError::NO_ERROR)
         {
             continue;
         }
