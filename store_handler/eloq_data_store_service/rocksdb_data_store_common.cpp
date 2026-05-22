@@ -360,9 +360,7 @@ bool RocksDBDataStoreCommon::CompactStore()
         [this]()
         {
             auto reset_compact_running = [this]()
-            {
-                compact_running_.store(false, std::memory_order_release);
-            };
+            { compact_running_.store(false, std::memory_order_release); };
 
             std::shared_lock<std::shared_mutex> db_lk(db_mux_);
             auto *db = GetDBPtr();
