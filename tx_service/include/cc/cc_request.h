@@ -3037,7 +3037,7 @@ public:
         total_key_cnt_vec_[ccs.LocalCoreId()] = total_keys;
         dirty_key_cnt_vec_[ccs.LocalCoreId()] = dirty_keys;
 
-        unfinish_cnt_.fetch_sub(1, std::memory_order_release);
+        unfinish_cnt_.fetch_sub(1, std::memory_order_acq_rel);
 
         // return false since CkptTsCc is not reused and does not need to
         // call CcRequestBase::Free
