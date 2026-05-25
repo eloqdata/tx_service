@@ -2984,17 +2984,13 @@ struct CkptTsCc : public CcRequestBase
 {
 public:
     CkptTsCc(size_t shard_cnt, NodeGroupId ng_id)
-        : ckpt_ts_(UINT64_MAX),
-          mux_(),
-          cv_(),
-          unfinish_cnt_(shard_cnt),
-          cc_ng_id_(ng_id)
+        : ckpt_ts_(UINT64_MAX), unfinish_cnt_(shard_cnt), cc_ng_id_(ng_id)
     {
         for (size_t i = 0; i < unfinish_cnt_; i++)
         {
             memory_allocated_vec_.emplace_back(0);
             memory_committed_vec_.emplace_back(0);
-            heap_full_vec_.emplace_back(false);
+            heap_full_vec_.emplace_back(0);
             standby_msg_seq_id_vec_.emplace_back(0);
             total_key_cnt_vec_.emplace_back(0);
             dirty_key_cnt_vec_.emplace_back(0);
@@ -3036,30 +3032,19 @@ public:
         }
         memory_allocated_vec_[ccs.LocalCoreId()] = allocated;
         memory_committed_vec_[ccs.LocalCoreId()] = committed;
-        heap_full_vec_[ccs.LocalCoreId()] = full;
+        heap_full_vec_[ccs.LocalCoreId()] = full ? 1 : 0;
         auto [total_keys, dirty_keys] = ccs.GetDataKeyStats();
         total_key_cnt_vec_[ccs.LocalCoreId()] = total_keys;
         dirty_key_cnt_vec_[ccs.LocalCoreId()] = dirty_keys;
 
-        std::unique_lock lk(mux_);
-        if (--unfinish_cnt_ == 0)
-        {
-            cv_.notify_one();
-        }
+        unfinish_cnt_.fetch_sub(1, std::memory_order_acq_rel);
 
-        // return false since CkptTsCc is not reused and does not need to call
-        // CcRequestBase::Free
+        // return false since CkptTsCc is not reused and does not need to
+        // call CcRequestBase::Free
         return false;
     }
 
-    void Wait()
-    {
-        std::unique_lock lk(mux_);
-        while (unfinish_cnt_ > 0)
-        {
-            cv_.wait(lk);
-        }
-    }
+    void Wait();
 
     uint64_t GetCkptTs() const
     {
@@ -3100,7 +3085,7 @@ public:
         {
             uint64_t &allocated = memory_allocated_vec_[core_id];
             uint64_t &committed = memory_committed_vec_[core_id];
-            bool heap_full = heap_full_vec_[core_id];
+            bool heap_full = heap_full_vec_[core_id] != 0;
             size_t total_keys = total_key_cnt_vec_[core_id];
             size_t dirty_keys = dirty_key_cnt_vec_[core_id];
             double dirty_ratio = total_keys == 0
@@ -3159,16 +3144,14 @@ public:
 
 private:
     std::atomic<uint64_t> ckpt_ts_;
-    bthread::Mutex mux_;
-    bthread::ConditionVariable cv_;
-    size_t unfinish_cnt_;
+    std::atomic<size_t> unfinish_cnt_;
     std::vector<uint64_t> memory_allocated_vec_;
     std::vector<uint64_t> memory_committed_vec_;
     std::vector<size_t> total_key_cnt_vec_;
     std::vector<size_t> dirty_key_cnt_vec_;
     std::vector<uint64_t> standby_msg_seq_id_vec_;
     std::vector<uint32_t> subscribed_node_ids_;
-    std::vector<bool> heap_full_vec_;
+    std::vector<int8_t> heap_full_vec_;
     NodeGroupId cc_ng_id_;
 };
 

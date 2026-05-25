@@ -76,4 +76,15 @@ void ReplayLogCc::AbortCcRequest(CcErrorCode err_code)
     }
 }
 
+void CkptTsCc::Wait()
+{
+    uint64_t interval_us = 100;
+    constexpr uint64_t max_interval = 100000;
+    while (unfinish_cnt_.load(std::memory_order_acquire) > 0)
+    {
+        bthread_usleep(interval_us);
+        if ((interval_us << 1) < max_interval)
+            interval_us <<= 1;
+    }
+}
 }  // namespace txservice

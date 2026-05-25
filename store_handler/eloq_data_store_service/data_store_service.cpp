@@ -588,6 +588,116 @@ void DataStoreService::FlushData(
     ds_ref.data_store_->FlushData(req);
 }
 
+void DataStoreService::GetApproxStoreKeyCount(
+    ::google::protobuf::RpcController *controller,
+    const ::EloqDS::remote::ApproxStoreKeyCountRequest *request,
+    ::EloqDS::remote::ApproxStoreKeyCountResponse *response,
+    ::google::protobuf::Closure *done)
+{
+    brpc::ClosureGuard done_guard(done);
+
+    uint32_t shard_id = request->shard_id();
+    auto *result = response->mutable_result();
+    response->set_key_count(0);
+
+    if (!IsOwnerOfShard(shard_id))
+    {
+        PrepareShardingError(shard_id, result);
+        return;
+    }
+
+    DataShard &ds_ref = data_shards_.at(shard_id);
+    auto shard_status = ds_ref.shard_status_.load(std::memory_order_acquire);
+    if (shard_status != DSShardStatus::ReadOnly &&
+        shard_status != DSShardStatus::ReadWrite)
+    {
+        result->set_error_code(::EloqDS::remote::DataStoreError::DB_NOT_OPEN);
+        result->set_error_msg("KV store not opened yet.");
+        return;
+    }
+
+    assert(ds_ref.data_store_ != nullptr);
+    response->set_key_count(ds_ref.data_store_->ApproxStoreKeyCount());
+    result->set_error_code(::EloqDS::remote::DataStoreError::NO_ERROR);
+}
+
+uint64_t DataStoreService::GetApproxStoreKeyCount(uint32_t shard_id)
+{
+    if (!IsOwnerOfShard(shard_id))
+    {
+        return 0;
+    }
+
+    DataShard &ds_ref = data_shards_.at(shard_id);
+    auto shard_status = ds_ref.shard_status_.load(std::memory_order_acquire);
+    if (shard_status != DSShardStatus::ReadOnly &&
+        shard_status != DSShardStatus::ReadWrite)
+    {
+        return 0;
+    }
+
+    assert(ds_ref.data_store_ != nullptr);
+    return ds_ref.data_store_->ApproxStoreKeyCount();
+}
+
+void DataStoreService::CompactStore(
+    ::google::protobuf::RpcController *controller,
+    const ::EloqDS::remote::CompactStoreRequest *request,
+    ::EloqDS::remote::CompactStoreResponse *response,
+    ::google::protobuf::Closure *done)
+{
+    brpc::ClosureGuard done_guard(done);
+
+    uint32_t shard_id = request->shard_id();
+    auto *result = response->mutable_result();
+
+    if (!IsOwnerOfShard(shard_id))
+    {
+        PrepareShardingError(shard_id, result);
+        return;
+    }
+
+    DataShard &ds_ref = data_shards_.at(shard_id);
+    auto shard_status = ds_ref.shard_status_.load(std::memory_order_acquire);
+    if (shard_status != DSShardStatus::ReadOnly &&
+        shard_status != DSShardStatus::ReadWrite)
+    {
+        result->set_error_code(::EloqDS::remote::DataStoreError::DB_NOT_OPEN);
+        result->set_error_msg("KV store not opened yet.");
+        return;
+    }
+
+    assert(ds_ref.data_store_ != nullptr);
+    if (ds_ref.data_store_->CompactStore())
+    {
+        result->set_error_code(::EloqDS::remote::DataStoreError::NO_ERROR);
+    }
+    else
+    {
+        result->set_error_code(::EloqDS::remote::DataStoreError::UNKNOWN_ERROR);
+        result->set_error_msg("Failed to compact data store.");
+    }
+}
+
+bool DataStoreService::CompactStore(uint32_t shard_id)
+{
+    if (!IsOwnerOfShard(shard_id))
+    {
+        return false;
+    }
+
+    DataShard &ds_ref = data_shards_.at(shard_id);
+    auto shard_status = ds_ref.shard_status_.load(std::memory_order_acquire);
+    if (shard_status != DSShardStatus::ReadOnly &&
+        shard_status != DSShardStatus::ReadWrite)
+    {
+        return false;
+    }
+
+    assert(ds_ref.data_store_ != nullptr);
+    return ds_ref.data_store_->CompactStore();
+}
+
 void DataStoreService::FlushData(const std::vector<std::string> &kv_table_names,
                                  const uint32_t shard_id,
                                  remote::CommonResult &result,

@@ -116,6 +116,16 @@ public:
         return false;
     }
 
+    virtual uint64_t ApproxStoreKeyCount()
+    {
+        return 0;
+    }
+
+    virtual bool CompactStore()
+    {
+        return false;
+    }
+
     /**
      * @param write_time is used to maintain idempotence. For eventual
      * consistency storage, records with larger write_time wins. Cassandra

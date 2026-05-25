@@ -243,6 +243,9 @@ public:
         return true;
     }
 
+    uint64_t ApproxStoreKeyCount() override;
+    bool CompactStore() override;
+
     /**
      * @brief indicate end of flush entries in a single ckpt for \@param
      * batch to base table or skindex table in data store, stop and return

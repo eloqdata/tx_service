@@ -585,6 +585,88 @@ bool DataStoreServiceClient::PersistKV(
     return true;
 }
 
+uint64_t DataStoreServiceClient::ApproxStoreKeyCount()
+{
+    uint64_t total_key_count = 0;
+    std::vector<uint32_t> shard_ids = GetAllDataShards();
+
+    for (uint32_t shard_id : shard_ids)
+    {
+        if (IsLocalShard(shard_id))
+        {
+            total_key_count +=
+                data_store_service_->GetApproxStoreKeyCount(shard_id);
+            continue;
+        }
+
+        uint32_t node_index = GetOwnerNodeIndexOfShard(shard_id);
+        auto *channel = dss_nodes_[node_index].Channel();
+        if (channel == nullptr)
+        {
+            continue;
+        }
+
+        remote::DataStoreRpcService_Stub stub(channel);
+        brpc::Controller cntl;
+        cntl.set_timeout_ms(60000);
+
+        remote::ApproxStoreKeyCountRequest req;
+        remote::ApproxStoreKeyCountResponse resp;
+        req.set_shard_id(shard_id);
+        stub.GetApproxStoreKeyCount(&cntl, &req, &resp, nullptr);
+
+        if (cntl.Failed() ||
+            resp.result().error_code() != remote::DataStoreError::NO_ERROR)
+        {
+            continue;
+        }
+
+        total_key_count += resp.key_count();
+    }
+
+    return total_key_count;
+}
+
+bool DataStoreServiceClient::CompactStore()
+{
+    bool success = true;
+    std::vector<uint32_t> shard_ids = GetAllDataShards();
+
+    for (uint32_t shard_id : shard_ids)
+    {
+        if (IsLocalShard(shard_id))
+        {
+            success = data_store_service_->CompactStore(shard_id) && success;
+            continue;
+        }
+
+        uint32_t node_index = GetOwnerNodeIndexOfShard(shard_id);
+        auto *channel = dss_nodes_[node_index].Channel();
+        if (channel == nullptr)
+        {
+            success = false;
+            continue;
+        }
+
+        remote::DataStoreRpcService_Stub stub(channel);
+        brpc::Controller cntl;
+        cntl.set_timeout_ms(60000);
+
+        remote::CompactStoreRequest req;
+        remote::CompactStoreResponse resp;
+        req.set_shard_id(shard_id);
+        stub.CompactStore(&cntl, &req, &resp, nullptr);
+
+        if (cntl.Failed() ||
+            resp.result().error_code() != remote::DataStoreError::NO_ERROR)
+        {
+            success = false;
+        }
+    }
+
+    return success;
+}
+
 /**
  * @brief Upserts table schema information to the data store.
  *

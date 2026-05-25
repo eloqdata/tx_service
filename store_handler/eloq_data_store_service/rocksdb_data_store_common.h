@@ -28,13 +28,16 @@
 #include <rocksdb/listener.h>
 #include <rocksdb/slice.h>
 
+#include <atomic>
 #include <cassert>
 #include <chrono>
+#include <shared_mutex>
 #include <string>
 
 #include "data_store.h"
 #include "data_store_service.h"
 #include "rocksdb_config.h"
+#include "thread_worker_pool.h"
 
 namespace EloqDS
 {
@@ -171,6 +174,9 @@ public:
      * @param flush_data_req The pointer of the request.
      */
     void FlushData(FlushDataRequest *flush_data_req) override;
+
+    uint64_t ApproxStoreKeyCount() override;
+    bool CompactStore() override;
 
     /**
      * @brief Write records to the data store.
@@ -332,6 +338,8 @@ protected:
     size_t query_worker_number_{4};
 
     std::unique_ptr<ThreadWorkerPool> query_worker_pool_;
+    std::unique_ptr<ThreadWorkerPool> compact_worker_pool_;
+    std::atomic<bool> compact_running_{false};
     std::shared_mutex db_mux_;
     std::mutex ddl_mux_;
 };
