@@ -55,6 +55,7 @@ thread_local CcRequestPool<ReadCc> read_pool;
 
 namespace remote
 {
+#ifdef DATA_STORE_TYPE_ELOQDSS_ELOQSTORE
 namespace
 {
 int64_t CurrentSyncedPrimaryTerm()
@@ -67,6 +68,7 @@ int64_t CurrentSyncedPrimaryTerm()
     return PrimaryTermFromStandbyTerm(standby_term);
 }
 }  // namespace
+#endif
 
 CcNodeService::CcNodeService(LocalCcShards &local_shards)
     : local_shards_(local_shards)
