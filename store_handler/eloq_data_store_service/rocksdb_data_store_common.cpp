@@ -785,12 +785,14 @@ void RocksDBDataStoreCommon::DropTable(DropTableRequest *drop_table_req)
 
             const std::string_view table_name = drop_table_req->GetTableName();
 
-            // build start key
-            std::string start_key_str = BuildKey(table_name, 0, "");
+            // Delete every partition for this table. Partition ids are encoded
+            // as decimal strings, so a range from partition 0 to UINT32_MAX is
+            // not lexicographically contiguous.
+            std::string start_key_str(table_name);
+            start_key_str.append(KEY_SEPARATOR);
             rocksdb::Slice start_key(start_key_str);
 
-            // build end key
-            std::string end_key_str = BuildKey(table_name, UINT32_MAX, "");
+            std::string end_key_str = start_key_str;
             end_key_str.back()++;
             rocksdb::Slice end_key(end_key_str);
 
