@@ -24,6 +24,7 @@ bool DataSubstrate::InitializeMetrics(const INIReader &config_reader)
 {
     /* Parse metrics config */
     metrics::enable_metrics =
+        FLAGS_enable_metrics ||
         config_reader.GetBoolean("metrics", "enable_metrics", false);
     DLOG(INFO) << "enable_metrics: "
                << (metrics::enable_metrics ? "ON" : "OFF");
