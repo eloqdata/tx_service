@@ -871,11 +871,11 @@ public:
     void Reset(std::function<bool(CcShard &ccs)> task = {},
                uint16_t core_cnt = 1)
     {
-        std::lock_guard<bthread::Mutex> lk(mux_);
         RunOnTxProcessorCc::Reset(std::move(task));
 
-        unfinished_cnt_ = core_cnt;
-        error_code_ = CcErrorCode::NO_ERROR;
+        unfinished_cnt_.store(core_cnt, std::memory_order_relaxed);
+        error_code_.store(CcErrorCode::NO_ERROR, std::memory_order_relaxed);
+        waiting_.store(false, std::memory_order_relaxed);
     }
 
     void SetCoroCallbacks(const std::function<void()> *yield_fn,
@@ -887,10 +887,13 @@ public:
 
     void Wait()
     {
-        std::unique_lock<bthread::Mutex> lk(mux_);
-        while (unfinished_cnt_)
+        uint64_t interval_us = 100;
+        constexpr uint64_t kMaxIntervalUs = 100000;
+        while (unfinished_cnt_.load(std::memory_order_acquire) > 0)
         {
-            cv_.wait(lk);
+            bthread_usleep(interval_us);
+            if ((interval_us << 1) < kMaxIntervalUs)
+                interval_us <<= 1;
         }
     }
 
@@ -902,53 +905,47 @@ public:
             Wait();
             return;
         }
-        std::unique_lock<bthread::Mutex> lk(mux_);
-        while (unfinished_cnt_)
+        while (unfinished_cnt_.load(std::memory_order_acquire) > 0)
         {
             waiting_.store(true, std::memory_order_release);
-            lk.unlock();
+            if (unfinished_cnt_.load(std::memory_order_acquire) == 0)
+            {
+                waiting_.store(false, std::memory_order_release);
+                break;
+            }
             (*yield_fn)();
-            lk.lock();
-            waiting_.store(false, std::memory_order_release);
         }
+        waiting_.store(false, std::memory_order_release);
     }
 
     bool IsFinished() const
     {
-        std::lock_guard<bthread::Mutex> lk(mux_);
-        return unfinished_cnt_ == 0;
+        return unfinished_cnt_.load(std::memory_order_acquire) == 0;
     }
 
     bool IsError() const
     {
-        std::lock_guard<bthread::Mutex> lk(mux_);
-        return error_code_ != CcErrorCode::NO_ERROR;
+        return error_code_.load(std::memory_order_acquire) !=
+               CcErrorCode::NO_ERROR;
     }
 
     CcErrorCode ErrorCode() const
     {
-        std::lock_guard<bthread::Mutex> lk(mux_);
-        return error_code_;
+        return error_code_.load(std::memory_order_acquire);
     }
 
     void AbortCcRequest(CcErrorCode error_code) override
     {
-        std::unique_lock<bthread::Mutex> lk(mux_);
-        unfinished_cnt_--;
-        error_code_ = error_code;
-        if (unfinished_cnt_ == 0)
+        error_code_.store(error_code, std::memory_order_release);
+        if (unfinished_cnt_.fetch_sub(1, std::memory_order_acq_rel) == 1)
         {
-            if (resume_fn_ != nullptr &&
-                waiting_.load(std::memory_order_acquire))
+            if (resume_fn_ != nullptr)
             {
-                waiting_.store(false, std::memory_order_release);
                 auto *fn = resume_fn_;
-                lk.unlock();
-                (*fn)();
-            }
-            else if (resume_fn_ == nullptr)
-            {
-                cv_.notify_one();
+                if (waiting_.exchange(false, std::memory_order_acq_rel))
+                {
+                    (*fn)();
+                }
             }
         }
     }
@@ -957,21 +954,15 @@ public:
     {
         if (RunOnTxProcessorCc::Execute(ccs))
         {
-            std::unique_lock<bthread::Mutex> lk(mux_);
-            error_code_ = CcErrorCode::NO_ERROR;
-            if (--unfinished_cnt_ == 0)
+            if (unfinished_cnt_.fetch_sub(1, std::memory_order_acq_rel) == 1)
             {
-                if (resume_fn_ != nullptr &&
-                    waiting_.load(std::memory_order_acquire))
+                if (resume_fn_ != nullptr)
                 {
-                    waiting_.store(false, std::memory_order_release);
                     auto *fn = resume_fn_;
-                    lk.unlock();
-                    (*fn)();
-                }
-                else if (resume_fn_ == nullptr)
-                {
-                    cv_.notify_one();
+                    if (waiting_.exchange(false, std::memory_order_acq_rel))
+                    {
+                        (*fn)();
+                    }
                 }
             }
         }
@@ -989,11 +980,8 @@ private:
     }
 
 private:
-    mutable bthread::Mutex mux_;
-    bthread::ConditionVariable cv_;
-
-    uint32_t unfinished_cnt_{0};
-    CcErrorCode error_code_;
+    std::atomic<uint32_t> unfinished_cnt_{0};
+    std::atomic<CcErrorCode> error_code_;
 
     // Coroutine yield/resume support
     const std::function<void()> *yield_fn_{nullptr};

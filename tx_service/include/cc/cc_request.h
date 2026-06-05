@@ -3159,11 +3159,7 @@ struct ActiveTxMaxTsCc : public CcRequestBase
 {
 public:
     ActiveTxMaxTsCc(size_t shard_cnt, NodeGroupId ng_id)
-        : active_tx_max_ts_(0),
-          mux_(),
-          cv_(),
-          unfinish_cnt_(shard_cnt),
-          cc_ng_id_(ng_id)
+        : active_tx_max_ts_(0), unfinish_cnt_(shard_cnt), cc_ng_id_(ng_id)
     {
     }
 
@@ -3181,11 +3177,7 @@ public:
                    old_val, shard_active_tx_max_ts, std::memory_order_acq_rel))
             ;
 
-        std::unique_lock lk(mux_);
-        if (--unfinish_cnt_ == 0)
-        {
-            cv_.notify_one();
-        }
+        unfinish_cnt_.fetch_sub(1, std::memory_order_acq_rel);
 
         // return false since ActiveTxMaxTsCc is not reused and does not need
         // to call CcRequestBase::Free
@@ -3194,10 +3186,13 @@ public:
 
     void Wait()
     {
-        std::unique_lock lk(mux_);
-        while (unfinish_cnt_ > 0)
+        uint64_t interval_us = 100;
+        constexpr uint64_t kMaxIntervalUs = 100000;
+        while (unfinish_cnt_.load(std::memory_order_acquire) > 0)
         {
-            cv_.wait(lk);
+            bthread_usleep(interval_us);
+            if ((interval_us << 1) < kMaxIntervalUs)
+                interval_us <<= 1;
         }
     }
 
@@ -3208,9 +3203,7 @@ public:
 
 private:
     std::atomic<uint64_t> active_tx_max_ts_;
-    bthread::Mutex mux_;
-    bthread::ConditionVariable cv_;
-    size_t unfinish_cnt_;
+    std::atomic_size_t unfinish_cnt_;
     NodeGroupId cc_ng_id_;
 };
 
@@ -8410,8 +8403,9 @@ public:
         Clear();
         table_names_ = table_names;
 
-        total_ref_cnt_ = local_ref_cnt + remote_ref_cnt;
-        remote_ref_cnt_ = remote_ref_cnt;
+        total_ref_cnt_.store(local_ref_cnt + remote_ref_cnt,
+                             std::memory_order_relaxed);
+        remote_ref_cnt_.store(remote_ref_cnt, std::memory_order_relaxed);
         total_obj_sizes_.resize(table_names_->size(), 0);
     }
 
@@ -8433,13 +8427,7 @@ public:
             }
         }
 
-        std::unique_lock lk(mux_);
-        if (--total_ref_cnt_ == 0)
-        {
-            cv_.notify_one();
-        }
-
-        return false;
+        return OnLocalRefFinished();
     }
 
     std::vector<int64_t> GetTotalObjSizes()
@@ -8473,13 +8461,7 @@ public:
                 idx, total_obj_sizes[idx], std::memory_order_relaxed);
         }
 
-        std::unique_lock lk(mux_);
-        --remote_ref_cnt_;
-        --total_ref_cnt_;
-        if (total_ref_cnt_ == 0)
-        {
-            cv_.notify_one();
-        }
+        OnRemoteRefFinished();
     }
 
     int32_t GetTerm()
@@ -8496,25 +8478,35 @@ public:
         total_obj_sizes_.clear();
         total_obj_sizes_.shrink_to_fit();
 
-        total_ref_cnt_ = 0;
-        remote_ref_cnt_ = 0;
+        total_ref_cnt_.store(0, std::memory_order_relaxed);
+        remote_ref_cnt_.store(0, std::memory_order_relaxed);
         table_names_ = nullptr;
         vct_ng_id_.clear();
     }
 
     void Wait()
     {
-        const uint64_t MAX_WAIT_TS = 2000000;
-        std::unique_lock lk(mux_);
+        uint64_t remaining_wait_us = 2000000;
+        uint64_t interval_us = 100;
+        constexpr uint64_t kMaxIntervalUs = 100000;
 
-        while (total_ref_cnt_ > 0)
+        while (total_ref_cnt_.load(std::memory_order_acquire) > 0)
         {
-            int wait_res = cv_.wait_for(lk, MAX_WAIT_TS);
-            if (wait_res == ETIMEDOUT && total_ref_cnt_ <= remote_ref_cnt_)
+            bthread_usleep(interval_us);
+            if (total_ref_cnt_.load(std::memory_order_acquire) <=
+                remote_ref_cnt_.load(std::memory_order_acquire))
             {
-                LOG(WARNING) << "Waitting timeout for dbsize";
-                break;
+                remaining_wait_us = remaining_wait_us > interval_us
+                                        ? remaining_wait_us - interval_us
+                                        : 0;
+                if (remaining_wait_us == 0)
+                {
+                    LOG(WARNING) << "Waitting timeout for dbsize";
+                    break;
+                }
             }
+            if ((interval_us << 1) < kMaxIntervalUs)
+                interval_us <<= 1;
         }
     }
 
@@ -8538,15 +8530,23 @@ public:
         return total_obj_sizes_.size();
     }
 
-    bthread::Mutex mux_;
-    bthread::ConditionVariable cv_;
-
 private:
     std::vector<int64_t /*atomic*/> total_obj_sizes_;
 
 protected:
-    size_t total_ref_cnt_{0};
-    size_t remote_ref_cnt_{0};
+    bool OnLocalRefFinished()
+    {
+        return total_ref_cnt_.fetch_sub(1, std::memory_order_acq_rel) == 1;
+    }
+
+    bool OnRemoteRefFinished()
+    {
+        remote_ref_cnt_.fetch_sub(1, std::memory_order_acq_rel);
+        return total_ref_cnt_.fetch_sub(1, std::memory_order_acq_rel) == 1;
+    }
+
+    std::atomic_size_t total_ref_cnt_{0};
+    std::atomic_size_t remote_ref_cnt_{0};
     int32_t term_{0};
     std::vector<uint32_t> vct_ng_id_;
     std::vector<TableName> *table_names_{nullptr};
