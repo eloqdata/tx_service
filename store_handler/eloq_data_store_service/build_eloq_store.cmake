@@ -58,8 +58,13 @@ if ((NOT URING_INCLUDE_PATH) OR (NOT URING_LIB))
 endif()
 
 find_package(Git QUIET)
+# EloqDB (lintao-mod): default OFF. The EloqDB umbrella build prebuilds and symlinks every
+# submodule (concurrentqueue/inih under external/, abseil shared from tx_service) into place
+# before configuring, so the in-CMake `git submodule update` must NOT run — it would re-clone
+# them over the symlinks (slow, network-bound, and pollutes the shared checkout). Pass
+# -DGIT_SUBMODULE=ON to restore upstream behavior for a standalone source build.
 if(GIT_FOUND AND EXISTS "${ELOQ_STORE_SOURCE_DIR}/.git")
-    option(GIT_SUBMODULE "Check submodules during build" ON)
+    option(GIT_SUBMODULE "Check submodules during build" OFF)
     if(GIT_SUBMODULE)
         # Update submodules as needed
         message(STATUS "Submodule update")
