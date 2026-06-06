@@ -1,6 +1,16 @@
 SET(TX_SERVICE_SOURCE_DIR ${CMAKE_CURRENT_SOURCE_DIR}/tx_service)
 SET(METRICS_SERVICE_SOURCE_DIR ${CMAKE_CURRENT_SOURCE_DIR}/eloq_metrics)
 
+# EloqDB (lintao-mod): let the umbrella point these submodules at the single shared checkout in
+# dependencies/ instead of in-tree paths, so the build needs no directory symlinks and no
+# submodule pulls. Defaults preserve the upstream in-tree layout for a standalone build.
+if(NOT ELOQ_ABSEIL_DIR)
+    set(ELOQ_ABSEIL_DIR ${TX_SERVICE_SOURCE_DIR}/abseil-cpp CACHE PATH "abseil source dir")
+endif()
+if(NOT ELOQ_TXLOG_PROTO_DIR)
+    set(ELOQ_TXLOG_PROTO_DIR ${TX_SERVICE_SOURCE_DIR}/tx-log-protos CACHE PATH "tx-log-protos source dir")
+endif()
+
 set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -Wno-parentheses -Wno-error")
 set(CMAKE_CXX_FLAGS_DEBUG "${CMAKE_CXX_FLAGS_DEBUG} -DFAULT_INJECTOR")
 
@@ -118,7 +128,7 @@ FOREACH(PROTO_FILE ${PROTO_FILES})
     )
 ENDFOREACH(PROTO_FILE)
 
-set(LOG_PROTO_SRC ${CMAKE_CURRENT_SOURCE_DIR}/tx_service/tx-log-protos)
+set(LOG_PROTO_SRC ${ELOQ_TXLOG_PROTO_DIR})
 set(LOG_PROTO_NAME log)
 execute_process(
     COMMAND protoc ./${LOG_PROTO_NAME}.proto --cpp_out=./ --proto_path=./
@@ -130,16 +140,16 @@ if(BUILD_SHARED_LIBS)
 else()
     set(ABSL_ENABLE_INSTALL OFF CACHE INTERNAL "Install Abseil libs" FORCE)
 endif()
-add_subdirectory(tx_service/abseil-cpp)
+add_subdirectory(${ELOQ_ABSEIL_DIR} abseil-cpp)
 
 message(${TX_SERVICE_SOURCE_DIR})
 set(INCLUDE_DIR
-    ${TX_SERVICE_SOURCE_DIR}/abseil-cpp
+    ${ELOQ_ABSEIL_DIR}
     ${TX_SERVICE_SOURCE_DIR}/include
     ${TX_SERVICE_SOURCE_DIR}/include/cc
     ${TX_SERVICE_SOURCE_DIR}/include/remote
     ${TX_SERVICE_SOURCE_DIR}/include/fault
-    ${TX_SERVICE_SOURCE_DIR}/tx-log-protos
+    ${ELOQ_TXLOG_PROTO_DIR}
     ${METRICS_SERVICE_SOURCE_DIR}/include
     ${Protobuf_INCLUDE_DIR}
     ${MIMALLOC_INCLUDE_DIR})
@@ -212,8 +222,8 @@ SET(ELOQ_SOURCES
     ${TX_SERVICE_SOURCE_DIR}/src/data_sync_task.cpp
     ${TX_SERVICE_SOURCE_DIR}/src/store/snapshot_manager.cpp
     ${TX_SERVICE_SOURCE_DIR}/src/sequences/sequences.cpp
-    ${TX_SERVICE_SOURCE_DIR}/tx-log-protos/log_agent.cpp
-    ${TX_SERVICE_SOURCE_DIR}/tx-log-protos/log.pb.cc
+    ${ELOQ_TXLOG_PROTO_DIR}/log_agent.cpp
+    ${ELOQ_TXLOG_PROTO_DIR}/log.pb.cc
     ${METRICS_SERVICE_SOURCE_DIR}/src/metrics.cc
 )
 
@@ -304,7 +314,7 @@ if (FORK_HM_PROCESS)
     SET (HOST_MANAGER_SOURCE_DIR ${CMAKE_CURRENT_SOURCE_DIR}/tx_service/raft_host_manager)
     set(HOST_MANAGER_INCLUDE_DIR
         ${HOST_MANAGER_SOURCE_DIR}/include
-        ${TX_SERVICE_SOURCE_DIR}/tx-log-protos
+        ${ELOQ_TXLOG_PROTO_DIR}
         ${OPENSSL_INCLUDE_DIR}
         ${PROTO_SRC}
         ${LOG_PROTO_SRC})

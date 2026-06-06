@@ -267,7 +267,7 @@ include_directories(
     ${CMAKE_CURRENT_SOURCE_DIR}/tx_service/include/remote
     ${CMAKE_CURRENT_SOURCE_DIR}/tx_service/include/fault
     ${CMAKE_CURRENT_SOURCE_DIR}/tx_service/include/store
-    ${CMAKE_CURRENT_SOURCE_DIR}/tx_service/tx-log-protos
+    ${ELOQ_TXLOG_PROTO_DIR}
     ${CMAKE_CURRENT_SOURCE_DIR}/eloq_metrics/include
     ${CMAKE_CURRENT_SOURCE_DIR}/store_handler
 )
