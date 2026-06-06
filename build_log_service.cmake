@@ -1,5 +1,10 @@
 SET (LOG_SOURCE_DIR ${CMAKE_CURRENT_SOURCE_DIR}/log_service)
-SET(TX_LOG_PROTOS_SOURCE_DIR ${CMAKE_CURRENT_SOURCE_DIR}/tx_service/tx-log-protos)
+# EloqDB (lintao-mod): use the shared tx-log-protos checkout when the umbrella provides it.
+if(ELOQ_TXLOG_PROTO_DIR)
+    SET(TX_LOG_PROTOS_SOURCE_DIR ${ELOQ_TXLOG_PROTO_DIR})
+else()
+    SET(TX_LOG_PROTOS_SOURCE_DIR ${CMAKE_CURRENT_SOURCE_DIR}/tx_service/tx-log-protos)
+endif()
 
 set(CMAKE_CXX_FLAGS  "${CMAKE_CXX_FLAGS} -Wno-error")
 
