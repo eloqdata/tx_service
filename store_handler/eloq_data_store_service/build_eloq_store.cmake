@@ -49,7 +49,17 @@ message("BOOST_CONTEXT_TARGET: ${BOOST_CONTEXT_TARGET}")
 find_package(jsoncpp REQUIRED)
 find_package(CURL REQUIRED)
 find_library(ZSTD_LIBRARY zstd)
-find_package(AWSSDK REQUIRED COMPONENTS s3)
+
+# EloqDB (lintao-mod): cloud (S3/GCS) object storage is a runtime-optional EloqStore backend
+# (StoreMode::Cloud) — gate its compile-time AWS SDK dependency (matches the corresponding
+# WITH_CLOUD_STORAGE option in eloqstore's own CMakeLists.txt) so local-only umbrella builds
+# don't need to fetch/build aws-sdk-cpp. Default ON to match upstream behavior.
+option(WITH_CLOUD_STORAGE "Build EloqStore with AWS S3 / GCS cloud storage backend support" ON)
+message(STATUS "WITH_CLOUD_STORAGE: ${WITH_CLOUD_STORAGE}")
+if (WITH_CLOUD_STORAGE)
+    add_compile_definitions(ELOQSTORE_WITH_CLOUD)
+    find_package(AWSSDK REQUIRED COMPONENTS s3)
+endif()
 
 find_path(URING_INCLUDE_PATH NAMES liburing.h)
 find_library(URING_LIB NAMES uring)
@@ -135,9 +145,12 @@ set(ELOQ_STORE_SOURCES
 add_library(eloqstore STATIC ${ELOQ_STORE_SOURCES})
 
 target_include_directories(eloqstore PUBLIC ${ELOQ_STORE_INCLUDE})
-target_link_libraries(eloqstore PRIVATE ${URING_LIB} ${BOOST_CONTEXT_TARGET} glog::glog jsoncpp_lib ${CURL_LIBRARIES} ${ZSTD_LIBRARY} ${AWSSDK_LINK_LIBRARIES}
+target_link_libraries(eloqstore PRIVATE ${URING_LIB} ${BOOST_CONTEXT_TARGET} glog::glog jsoncpp_lib ${CURL_LIBRARIES} ${ZSTD_LIBRARY}
     PUBLIC absl::flat_hash_map
 )
+if (WITH_CLOUD_STORAGE)
+    target_link_libraries(eloqstore PRIVATE ${AWSSDK_LINK_LIBRARIES})
+endif()
 
 # Conditional linking for metrics when compiled with txservice
 # Note: eloq-metrics target is created by build_eloq_metrics.cmake which is included
