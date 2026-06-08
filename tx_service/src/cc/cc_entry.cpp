@@ -60,10 +60,16 @@ void VersionedLruEntry<Versioned, RangePartitioned>::SetCommitTsPayloadStatus(
 template <bool Versioned, bool RangePartitioned>
 bool VersionedLruEntry<Versioned, RangePartitioned>::IsPersistent() const
 {
-    if (Sharder::Instance().StandbyNodeTerm() >= 0 &&
+    const int64_t standby_term = Sharder::Instance().StandbyNodeTerm();
+    const int64_t candidate_standby_term =
+        Sharder::Instance().CandidateStandbyNodeTerm();
+    if ((standby_term >= 0 || candidate_standby_term >= 0) &&
         Sharder::Instance().GetDataStoreHandler()->IsSharedStorage())
     {
-        // If this is a follower with shared kv, check the ng leader's ckpt_ts.
+        // For shared-storage standby cache, entries are persistent once the
+        // primary's checkpoint ts has advanced past the entry's commit ts. This
+        // must apply during candidate-standby as well, otherwise entries loaded
+        // while following cannot be reclaimed before snapshot sync finishes.
         return CommitTs() <= Sharder::Instance().NativeNodeGroupCkptTs();
     }
 

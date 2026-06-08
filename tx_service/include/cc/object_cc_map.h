@@ -1909,7 +1909,8 @@ public:
         decoded_key.Deserialize(key_str->data(), offset, KeySchema());
         const KeyT *look_key = &decoded_key;
 
-        if (Sharder::Instance().StandbyNodeTerm() >= 0 &&
+        if ((Sharder::Instance().StandbyNodeTerm() >= 0 ||
+             Sharder::Instance().CandidateStandbyNodeTerm() >= 0) &&
             Sharder::Instance().GetDataStoreHandler()->IsSharedStorage() &&
             commit_ts < Sharder::Instance().NativeNodeGroupCkptTs())
         {
