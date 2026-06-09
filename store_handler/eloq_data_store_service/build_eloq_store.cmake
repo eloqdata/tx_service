@@ -100,6 +100,8 @@ set(ELOQ_STORE_SOURCES
     ${ELOQ_STORE_SOURCE_DIR}/src/eloq_store.cpp
     ${ELOQ_STORE_SOURCE_DIR}/src/eloqstore_module.cpp
     ${ELOQ_STORE_SOURCE_DIR}/src/file_gc.cpp
+    ${ELOQ_STORE_SOURCE_DIR}/src/global_registered_memory.cpp
+    ${ELOQ_STORE_SOURCE_DIR}/src/io_string_buffer.cpp
     ${ELOQ_STORE_SOURCE_DIR}/src/kill_point.cpp
     ${ELOQ_STORE_SOURCE_DIR}/src/replayer.cpp
     ${ELOQ_STORE_SOURCE_DIR}/src/standby_service.cpp
@@ -107,11 +109,11 @@ set(ELOQ_STORE_SOURCES
     ${ELOQ_STORE_SOURCE_DIR}/src/storage/data_page.cpp
     ${ELOQ_STORE_SOURCE_DIR}/src/storage/data_page_builder.cpp
     ${ELOQ_STORE_SOURCE_DIR}/src/storage/index_page_builder.cpp
-    ${ELOQ_STORE_SOURCE_DIR}/src/storage/index_page_manager.cpp
-    ${ELOQ_STORE_SOURCE_DIR}/src/storage/mem_index_page.cpp
+    ${ELOQ_STORE_SOURCE_DIR}/src/storage/mem_cached_page.cpp
     ${ELOQ_STORE_SOURCE_DIR}/src/storage/object_store.cpp
     ${ELOQ_STORE_SOURCE_DIR}/src/storage/page.cpp
     ${ELOQ_STORE_SOURCE_DIR}/src/storage/page_mapper.cpp
+    ${ELOQ_STORE_SOURCE_DIR}/src/storage/page_manager.cpp
     ${ELOQ_STORE_SOURCE_DIR}/src/storage/root_meta.cpp
     ${ELOQ_STORE_SOURCE_DIR}/src/storage/shard.cpp
     ${ELOQ_STORE_SOURCE_DIR}/src/tasks/write_buffer_aggregator.cpp
