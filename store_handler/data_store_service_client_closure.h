@@ -778,6 +778,7 @@ public:
                const int32_t partition_id,
                const uint32_t shard_id,
                std::string_view key,
+               bool reopen,
                void *callback_data,
                DataStoreCallback callback)
     {
@@ -789,6 +790,7 @@ public:
         shard_id_ = shard_id;
         key_ = key;
         ds_service_client_ = client;
+        reopen_ = reopen;
         callback_data_ = callback_data;
         callback_ = callback;
         remote_node_index_ = UINT32_MAX;
@@ -820,6 +822,7 @@ public:
         ts_ = 0;
         callback_ = nullptr;
         callback_data_ = nullptr;
+        reopen_ = false;
     }
 
     void PrepareRequest(const bool is_local_request)
@@ -844,6 +847,7 @@ public:
             request_.set_shard_id(shard_id_);
             request_.set_partition_id(partition_id_);
             request_.set_key_str(key_.data(), key_.size());
+            request_.set_reopen(reopen_);
             rpc_request_prepare_ = true;
         }
     }
@@ -951,6 +955,11 @@ public:
     const std::string_view Key()
     {
         return key_;
+    }
+
+    bool Reopen() const
+    {
+        return reopen_;
     }
 
     std::string &LocalValueRef()
@@ -1080,6 +1089,7 @@ private:
     // callback function
     DataStoreCallback callback_;
     void *callback_data_;
+    bool reopen_{false};
 };
 
 /**

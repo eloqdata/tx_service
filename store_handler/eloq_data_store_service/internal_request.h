@@ -678,6 +678,8 @@ public:
 
     virtual uint32_t GetShardId() const = 0;
 
+    virtual bool GetReopen() const = 0;
+
     // parameters out
     virtual void SetRecord(std::string &&record) = 0;
 
@@ -736,6 +738,11 @@ public:
         return req_->shard_id();
     }
 
+    bool GetReopen() const override
+    {
+        return req_->reopen();
+    }
+
     void SetRecord(std::string &&record) override
     {
         resp_->set_value(std::move(record));
@@ -776,6 +783,7 @@ public:
                const int32_t partition_id,
                const uint32_t shard_id,
                const std::string_view key,
+               bool reopen,
                std::string *record,
                uint64_t *record_ts,
                uint64_t *record_ttl,
@@ -787,6 +795,7 @@ public:
         key_ = key;
         partition_id_ = partition_id;
         shard_id_ = shard_id;
+        reopen_ = reopen;
         record_ = record;
         record_ts_ = record_ts;
         record_ttl_ = record_ttl;
@@ -806,6 +815,7 @@ public:
         record_ttl_ = nullptr;
         result_ = nullptr;
         done_ = nullptr;
+        reopen_ = false;
     }
 
     const std::string_view GetTableName() const override
@@ -826,6 +836,11 @@ public:
     uint32_t GetShardId() const override
     {
         return shard_id_;
+    }
+
+    bool GetReopen() const override
+    {
+        return reopen_;
     }
 
     void SetRecord(std::string &&record) override
@@ -860,6 +875,7 @@ private:
     uint64_t *record_ttl_{nullptr};
     EloqDS::remote::CommonResult *result_{nullptr};
     google::protobuf::Closure *done_{nullptr};
+    bool reopen_{false};
 };
 
 class CreateTableRequest : public Poolable

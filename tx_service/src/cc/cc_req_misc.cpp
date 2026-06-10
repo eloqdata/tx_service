@@ -800,7 +800,8 @@ FetchRecordCc::FetchRecordCc(const TableName *tbl_name,
                              int32_t partition_id,
                              bool fetch_from_primary,
                              uint64_t snapshot_read_ts,
-                             bool only_fetch_archives)
+                             bool only_fetch_archives,
+                             bool reopen)
     : FetchCc(ccs, cc_ng_id, cc_ng_term),
       table_name_(tbl_name->StringView(), tbl_name->Type(), tbl_name->Engine()),
       table_schema_(tbl_schema),
@@ -812,7 +813,8 @@ FetchRecordCc::FetchRecordCc(const TableName *tbl_name,
       partition_id_(partition_id),
       fetch_from_primary_(fetch_from_primary),
       snapshot_read_ts_(snapshot_read_ts),
-      only_fetch_archives_(only_fetch_archives)
+      only_fetch_archives_(only_fetch_archives),
+      reopen_(reopen)
 {
 }
 
@@ -864,7 +866,6 @@ bool FetchRecordCc::Execute(CcShard &ccs)
     {
         assert(lock_->GetCcMap() != nullptr);
         assert(lock_->GetCcEntry() == cce_);
-        // if the referenced cce is already invalid, we do not need to care
         // about the fetch result and pending reqs since they are all
         // invalid.
         bool succ;
@@ -920,7 +921,41 @@ bool FetchRecordCc::Execute(CcShard &ccs)
         }
     }
 
+#ifdef DATA_STORE_TYPE_ELOQDSS_ELOQSTORE
+    bool should_reopen = error_code_ == 0 && cce_->HasBufferedCommandList();
+    TableName reopen_table_name = table_name_;
+    const TableSchema *reopen_table_schema = table_schema_;
+    TxKey reopen_key;
+    LruEntry *reopen_cce = cce_;
+    NodeGroupId reopen_cc_ng_id = cc_ng_id_;
+    int64_t reopen_cc_ng_term = cc_ng_term_;
+    int32_t reopen_partition_id = partition_id_;
+    if (should_reopen)
+    {
+        reopen_key = tx_key_.Clone();
+    }
+#endif
+
     ccs.RemoveFetchRecordRequest(cce_);
+
+#ifdef DATA_STORE_TYPE_ELOQDSS_ELOQSTORE
+    if (should_reopen)
+    {
+        ccs.FetchRecord(reopen_table_name,
+                        reopen_table_schema,
+                        std::move(reopen_key),
+                        reopen_cce,
+                        reopen_cc_ng_id,
+                        reopen_cc_ng_term,
+                        nullptr,
+                        reopen_partition_id,
+                        false,
+                        0,
+                        0,
+                        false,
+                        true);  // reopen
+    }
+#endif
     return false;
 }
 

@@ -1930,7 +1930,8 @@ store::DataStoreHandler::DataStoreOpStatus CcShard::FetchRecord(
     bool fetch_from_primary,
     uint32_t key_shard_code,
     uint64_t snapshot_read_ts,
-    bool only_fetch_archives)
+    bool only_fetch_archives,
+    bool reopen)
 {
     auto tab_it = fetch_record_reqs_.try_emplace(cce,
                                                  &table_name,
@@ -1943,7 +1944,8 @@ store::DataStoreHandler::DataStoreOpStatus CcShard::FetchRecord(
                                                  partition_id,
                                                  fetch_from_primary,
                                                  snapshot_read_ts,
-                                                 only_fetch_archives);
+                                                 only_fetch_archives,
+                                                 reopen);
     FetchRecordCc *fetch_req = &(tab_it.first->second);
     fetch_req->AddRequester(requester);
 

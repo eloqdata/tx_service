@@ -1821,9 +1821,25 @@ public:
             int64_t buffered_cmd_cnt_new = buffered_cmd_list.Size();
             shard_->UpdateBufferedCommandCnt(buffered_cmd_cnt_new -
                                              buffered_cmd_cnt_old);
+#ifdef DATA_STORE_TYPE_ELOQDSS_ELOQSTORE
+            if (!buffered_cmd_list.Empty())
+            {
+                const KeyT *key_ptr = ccp->KeyOfEntry(cce);
+                int32_t part_id =
+                    Sharder::MapKeyHashToHashPartitionId(key_ptr->Hash());
+                int64_t ng_term = Sharder::Instance().StandbyNodeTerm();
+                shard_->FetchRecord(this->table_name_,
+                                    this->GetTableSchema(),
+                                    TxKey(key_ptr).Clone(),
+                                    cce,
+                                    this->cc_ng_id_,
+                                    ng_term,
+                                    nullptr,
+                                    part_id);
+            }
+#endif
             // update payload status
             payload_status = cce->PayloadStatus();
-
             if (s_obj_exist && payload_status != RecordStatus::Normal)
             {
                 TemplateCcMap<KeyT, ValueT, false, false>::normal_obj_sz_--;
@@ -2064,6 +2080,23 @@ public:
                     // Recycles the lock if this and prior commands have been
                     // applied and there is no pending command.
                     cce->RecycleKeyLock(*shard_);
+                }
+                else
+                {
+#ifdef DATA_STORE_TYPE_ELOQDSS_ELOQSTORE
+                    const KeyT *key_ptr = ccp->KeyOfEntry(cce);
+                    int32_t part_id =
+                        Sharder::MapKeyHashToHashPartitionId(key_ptr->Hash());
+                    int64_t ng_term = Sharder::Instance().StandbyNodeTerm();
+                    shard_->FetchRecord(this->table_name_,
+                                        this->GetTableSchema(),
+                                        TxKey(key_ptr).Clone(),
+                                        cce,
+                                        this->cc_ng_id_,
+                                        ng_term,
+                                        nullptr,  // requester
+                                        part_id);
+#endif
                 }
             }
         }
@@ -2468,6 +2501,23 @@ public:
                 }
                 (void) lock_recycled;
             }
+#ifdef DATA_STORE_TYPE_ELOQDSS_ELOQSTORE
+            else if (buffered_cmd_list != nullptr)
+            {
+                const KeyT *key_ptr = ccp->KeyOfEntry(cce);
+                int32_t part_id =
+                    Sharder::MapKeyHashToHashPartitionId(key_ptr->Hash());
+                int64_t ng_term = Sharder::Instance().StandbyNodeTerm();
+                shard_->FetchRecord(this->table_name_,
+                                    this->GetTableSchema(),
+                                    TxKey(key_ptr).Clone(),
+                                    cce,
+                                    this->cc_ng_id_,
+                                    ng_term,
+                                    nullptr,  // requester
+                                    part_id);
+            }
+#endif
 
             payload_status = cce->PayloadStatus();
 
@@ -2608,7 +2658,7 @@ public:
         // FetchRecord and the second ReplayLogCc/StandbyForwardCc has_overwrite
         // and overrides the cce. Overrides the cce if the BackFilled version is
         // newer.
-        if (cce->PayloadStatus() == RecordStatus::Unknown &&
+        if (cce->PayloadStatus() == RecordStatus::Unknown ||
             cce->CommitTs() < commit_ts)
         {
             cce->SetCommitTsPayloadStatus(commit_ts, status);

@@ -572,7 +572,8 @@ public:
                   int32_t partition_id,
                   bool fetch_from_primary = false,
                   uint64_t snapshot_read_ts = 0,
-                  bool only_fetch_archives = false);
+                  bool only_fetch_archives = false,
+                  bool reopen = false);
     ~FetchRecordCc() = default;
 
     bool ValidTermCheck();
@@ -600,6 +601,7 @@ public:
     uint64_t snapshot_read_ts_{0};
     // If set only_fetch_archives_ (true), don't fetch record from base table.
     bool only_fetch_archives_{false};
+    bool reopen_{false};
     std::unique_ptr<
         std::vector<std::tuple<uint64_t, RecordStatus, std::string>>>
         archive_records_{nullptr};
