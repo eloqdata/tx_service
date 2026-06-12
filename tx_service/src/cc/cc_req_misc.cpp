@@ -21,6 +21,8 @@
  */
 #include "cc/cc_req_misc.h"
 
+#include <bthread/bthread.h>
+
 #include <algorithm>
 #include <atomic>
 #include <cstddef>
@@ -490,9 +492,8 @@ bool ClearCcNodeGroup::Execute(CcShard &ccs)
         ccs.ClearActiveBlockingTxs();
     }
 
-    std::unique_lock lk(mux_);
-    ++finish_cnt_;
-    if (finish_cnt_ == core_cnt_)
+    uint16_t finished = finish_cnt_.fetch_add(1, std::memory_order_acq_rel);
+    if (finished + 1 == core_cnt_)
     {
         ccs.local_shards_.DropTableStatistics(cc_ng_id_);
         ccs.local_shards_.DropCatalogs(cc_ng_id_);
@@ -500,13 +501,25 @@ bool ClearCcNodeGroup::Execute(CcShard &ccs)
         ccs.local_shards_.DropBucketInfo(cc_ng_id_);
         LOG(INFO) << "ccshard: " << ccs.core_id_
                   << "; clear ccmaps and catalogs of node group: " << cc_ng_id_;
-        wait_cv_.notify_one();
+        done_.store(true, std::memory_order_release);
     }
 
     // The owner of this request is the raft thread that downgrades the cc
     // ng leader to a non-leader node. The request is not in a resource pool
     // and re-used. So, always returns false.
     return false;
+}
+
+void ClearCcNodeGroup::Wait()
+{
+    uint64_t interval_us = 100;
+    constexpr uint64_t max_interval = 100000;
+    while (!done_.load(std::memory_order_acquire))
+    {
+        bthread_usleep(interval_us);
+        if ((interval_us << 1) < max_interval)
+            interval_us <<= 1;
+    }
 }
 
 void InitKeyCacheCc::SetFinish(bool succ)
@@ -1119,6 +1132,18 @@ bool RunOnTxProcessorCc::Execute(CcShard &ccs)
         }
     }
     return true;
+}
+
+void WaitableCc::Wait()
+{
+    uint64_t interval_us = 100;
+    constexpr uint64_t max_interval = 100000;
+    while (unfinished_cnt_.load(std::memory_order_acquire) > 0)
+    {
+        bthread_usleep(interval_us);
+        if ((interval_us << 1) < max_interval)
+            interval_us <<= 1;
+    }
 }
 
 bool UpdateCceCkptTsCc::Execute(CcShard &ccs)

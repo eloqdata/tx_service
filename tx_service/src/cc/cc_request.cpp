@@ -87,4 +87,66 @@ void CkptTsCc::Wait()
             interval_us <<= 1;
     }
 }
+
+void ClearTxCc::Wait()
+{
+    uint64_t interval_us = 100;
+    constexpr uint64_t max_interval = 100000;
+    while (finish_cnt_.load(std::memory_order_acquire) < core_cnt_)
+    {
+        bthread_usleep(interval_us);
+        if ((interval_us << 1) < max_interval)
+            interval_us <<= 1;
+    }
+}
+
+void ActiveTxMaxTsCc::Wait()
+{
+    uint64_t interval_us = 100;
+    constexpr uint64_t max_interval = 100000;
+    while (unfinish_cnt_.load(std::memory_order_acquire) > 0)
+    {
+        bthread_usleep(interval_us);
+        if ((interval_us << 1) < max_interval)
+            interval_us <<= 1;
+    }
+}
+
+void EscalateStandbyCcmCc::Wait()
+{
+    uint64_t interval_us = 100;
+    constexpr uint64_t max_interval = 100000;
+    while (unfinished_cnt_.load(std::memory_order_acquire) > 0)
+    {
+        bthread_usleep(interval_us);
+        if ((interval_us << 1) < max_interval)
+            interval_us <<= 1;
+    }
+}
+
+void DbSizeCc::Wait()
+{
+    // Wait for all local cores and remote node groups to report. After
+    // roughly 2 seconds, if only remote responses are missing, give up on
+    // them; a late response of the same term is dropped by the term check
+    // in AddRemoteObjSize().
+    constexpr uint64_t max_wait_us = 2000000;
+    uint64_t waited_us = 0;
+    uint64_t interval_us = 100;
+    constexpr uint64_t max_interval = 100000;
+    while (total_ref_cnt_.load(std::memory_order_acquire) > 0)
+    {
+        if (waited_us >= max_wait_us &&
+            total_ref_cnt_.load(std::memory_order_acquire) <=
+                remote_ref_cnt_.load(std::memory_order_acquire))
+        {
+            LOG(WARNING) << "Waitting timeout for dbsize";
+            break;
+        }
+        bthread_usleep(interval_us);
+        waited_us += interval_us;
+        if ((interval_us << 1) < max_interval)
+            interval_us <<= 1;
+    }
+}
 }  // namespace txservice

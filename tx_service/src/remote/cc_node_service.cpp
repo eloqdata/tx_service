@@ -1358,21 +1358,21 @@ void CcNodeService::UploadBatch(
                                        request->rec_status(),
                                        request->range_size_flags());
 
-    size_t finished_req = 0;
-    bthread::Mutex req_mux;
-    bthread::ConditionVariable req_cv;
+    // This RPC handler runs on a bthread while UploadBatchCc executes on tx
+    // processors (the brpc worker main stack). The two sides must not share
+    // a bthread::Mutex, so the handler polls atomics instead.
+    std::atomic<size_t> finished_req{0};
+    std::atomic<int64_t> upload_ng_term{ng_term};
 
     UploadBatchCc req;
     req.Use();
     req.Reset(table_name,
               ng_id,
-              ng_term,
+              upload_ng_term,
               partition_id,
               core_cnt,
               batch_size,
               write_entry_tuple,
-              req_mux,
-              req_cv,
               finished_req,
               data_type);
     if (partition_id >= 0)
@@ -1390,10 +1390,16 @@ void CcNodeService::UploadBatch(
     }
 
     {
-        std::unique_lock<bthread::Mutex> req_lk(req_mux);
-        while (finished_req != 1 || req.InUse())
+        uint64_t interval_us = 100;
+        constexpr uint64_t max_interval = 100000;
+        while (finished_req.load(std::memory_order_acquire) != 1 ||
+               req.InUse())
         {
-            req_cv.wait_for(req_lk, 1000000);
+            bthread_usleep(interval_us);
+            if ((interval_us << 1) < max_interval)
+            {
+                interval_us <<= 1;
+            }
         }
     }
 

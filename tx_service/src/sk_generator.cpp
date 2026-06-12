@@ -21,6 +21,8 @@
  */
 #include "sk_generator.h"
 
+#include <bthread/bthread.h>
+
 #include <mutex>
 #include <optional>
 
@@ -655,17 +657,25 @@ CcErrorCode UploadIndexContext::UploadIndexInternal(
 {
     size_t entry_vec_size = 0;
     size_t batch_req_cnt = 0;
-    bthread::Mutex req_mux;
-    bthread::ConditionVariable req_cv;
-    size_t finished_upload_count = 0;
-    CcErrorCode upload_res_code = CcErrorCode::NO_ERROR;
+    // The upload requests run on tx processors (the brpc worker main stack)
+    // and the remote-response closures run on bthreads, so the shared
+    // completion state must be lock-free: a bthread::Mutex shared with the
+    // tx processors can deadlock the worker.
+    std::atomic<size_t> finished_upload_count{0};
+    std::atomic<CcErrorCode> upload_res_code{CcErrorCode::NO_ERROR};
     size_t upload_req_count = 0;
+
+    std::vector<std::atomic<int64_t>> ng_terms(leader_terms_.size());
+    for (size_t idx = 0; idx < leader_terms_.size(); ++idx)
+    {
+        ng_terms[idx].store(leader_terms_[idx], std::memory_order_relaxed);
+    }
 
     for (auto &[table_name, ng_entries] : ng_index_set)
     {
         for (auto &[ng_id, range_entries] : ng_entries)
         {
-            int64_t &expected_term = leader_terms_.at(ng_id);
+            std::atomic<int64_t> &expected_term = ng_terms.at(ng_id);
 
             for (auto &[range_id, entry_vec] : range_entries)
             {
@@ -685,8 +695,6 @@ CcErrorCode UploadIndexContext::UploadIndexInternal(
                                 entry_vec,
                                 (end_idx - start_idx),
                                 start_idx,
-                                req_mux,
-                                req_cv,
                                 finished_upload_count,
                                 upload_res_code);
                     ++upload_req_count;
@@ -700,28 +708,37 @@ CcErrorCode UploadIndexContext::UploadIndexInternal(
     }
 
     {
-        std::unique_lock<bthread::Mutex> req_lk(req_mux);
-        while (upload_req_count != finished_upload_count)
+        uint64_t interval_us = 100;
+        constexpr uint64_t max_interval = 100000;
+        while (finished_upload_count.load(std::memory_order_acquire) !=
+               upload_req_count)
         {
-            req_cv.wait(req_lk);
+            bthread_usleep(interval_us);
+            if ((interval_us << 1) < max_interval)
+            {
+                interval_us <<= 1;
+            }
         }
     }
 
-    return upload_res_code;
+    for (size_t idx = 0; idx < leader_terms_.size(); ++idx)
+    {
+        leader_terms_[idx] = ng_terms[idx].load(std::memory_order_relaxed);
+    }
+
+    return upload_res_code.load(std::memory_order_acquire);
 }
 
 void UploadIndexContext::SendIndexes(
     const TableName &table_name,
     NodeGroupId dest_ng_id,
-    int64_t &ng_term,
+    std::atomic<int64_t> &ng_term,
     int32_t partition_id,
     const std::vector<std::pair<uint8_t, WriteEntry *>> &write_entry_vec,
     size_t batch_size,
     size_t start_key_idx,
-    bthread::Mutex &req_mux,
-    bthread::ConditionVariable &req_cv,
-    size_t &finished_req_cnt,
-    CcErrorCode &res_code)
+    std::atomic<size_t> &finished_req_cnt,
+    std::atomic<CcErrorCode> &res_code)
 {
     uint32_t dest_node_id = Sharder::Instance().LeaderNodeId(dest_ng_id);
     LocalCcShards *cc_shards = Sharder::Instance().GetLocalCcShards();
@@ -735,8 +752,6 @@ void UploadIndexContext::SendIndexes(
                        batch_size,
                        start_key_idx,
                        write_entry_vec,
-                       req_mux,
-                       req_cv,
                        finished_req_cnt,
                        res_code,
                        UploadBatchType::SkIndexData);
@@ -756,43 +771,33 @@ void UploadIndexContext::SendIndexes(
             // leader term of input node group.
             LOG(ERROR) << "SendIndexes: Failed to init the channel of ng#"
                        << dest_ng_id;
-            std::unique_lock<bthread::Mutex> req_lk(req_mux);
-            res_code = CcErrorCode::ESTABLISH_NODE_CHANNEL_FAILED;
-            ++finished_req_cnt;
-            req_cv.notify_one();
+            res_code.store(CcErrorCode::ESTABLISH_NODE_CHANNEL_FAILED,
+                           std::memory_order_relaxed);
+            finished_req_cnt.fetch_add(1, std::memory_order_acq_rel);
             return;
         }
 
         remote::CcRpcService_Stub stub(channel.get());
 
         UploadBatchClosure *upload_batch_closure = new UploadBatchClosure(
-            [dest_ng_id,
-             &res_code,
-             &finished_req_cnt,
-             &req_mux,
-             &req_cv,
-             &ng_term](CcErrorCode res, int32_t dest_term)
+            [dest_ng_id, &res_code, &finished_req_cnt, &ng_term](
+                CcErrorCode res, int32_t dest_term)
             {
-                std::unique_lock<bthread::Mutex> req_lk(req_mux);
-                res_code = res;
+                res_code.store(res, std::memory_order_relaxed);
                 if (res == CcErrorCode::NO_ERROR)
                 {
-                    if (ng_term == INIT_TERM)
-                    {
-                        ng_term = dest_term;
-                    }
-                    else if (ng_term != dest_term)
+                    int64_t expected = INIT_TERM;
+                    if (!ng_term.compare_exchange_strong(
+                            expected, dest_term, std::memory_order_acq_rel) &&
+                        expected != dest_term)
                     {
                         LOG(ERROR)
                             << "Response for upload batch failed of ng#"
                             << dest_ng_id
                             << " of term mismatch, with expected term: "
-                            << ng_term << " and actual term: " << dest_term;
-                        res_code = CcErrorCode::REQUESTED_NODE_NOT_LEADER;
-                    }
-                    else
-                    {
-                        assert(ng_term == dest_term);
+                            << expected << " and actual term: " << dest_term;
+                        res_code.store(CcErrorCode::REQUESTED_NODE_NOT_LEADER,
+                                       std::memory_order_relaxed);
                     }
                 }
                 else
@@ -801,8 +806,7 @@ void UploadIndexContext::SendIndexes(
                         << "Response for upload batch failed of ng#"
                         << dest_ng_id << ", with error: " << (uint32_t) res;
                 }
-                ++finished_req_cnt;
-                req_cv.notify_one();
+                finished_req_cnt.fetch_add(1, std::memory_order_acq_rel);
             },
             UploadTimeout,
             true);
@@ -811,7 +815,8 @@ void UploadIndexContext::SendIndexes(
         remote::UploadBatchRequest *req_ptr =
             upload_batch_closure->UploadBatchRequest();
         req_ptr->set_node_group_id(dest_ng_id);
-        req_ptr->set_node_group_term(ng_term);
+        req_ptr->set_node_group_term(
+            ng_term.load(std::memory_order_acquire));
         req_ptr->set_table_name_str(table_name.String());
         req_ptr->set_table_type(
             remote::ToRemoteType::ConvertTableType(table_name.Type()));

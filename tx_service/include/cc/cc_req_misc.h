@@ -339,23 +339,19 @@ public:
 
     bool Execute(CcShard &ccs) override;
 
-    void Wait()
-    {
-        std::unique_lock lk(mux_);
-        while (finish_cnt_ != core_cnt_)
-        {
-            wait_cv_.wait(lk);
-        }
-    }
+    // ClearCcNodeGroup is issued and Waited on RPC handler bthread, while
+    // Execute() runs on tx processors (the brpc worker main stack), so the
+    // two sides must not share a bthread::Mutex. Wait() polls an atomic
+    // flag instead.
+    void Wait();
 
 private:
     const uint32_t cc_ng_id_;
     const uint16_t core_cnt_;
-    uint16_t finish_cnt_{0};
-    // ClearCcNodeGroup is issued and Waited on RPC handler bthread, use bthread
-    // mutex and condition variable.
-    bthread::Mutex mux_;
-    bthread::ConditionVariable wait_cv_;
+    std::atomic<uint16_t> finish_cnt_{0};
+    // Set by the last core after it has dropped the node group's table
+    // statistics, catalogs, ranges and bucket info.
+    std::atomic<bool> done_{false};
 };
 
 struct FillStoreSliceCc;
@@ -871,11 +867,10 @@ public:
     void Reset(std::function<bool(CcShard &ccs)> task = {},
                uint16_t core_cnt = 1)
     {
-        std::lock_guard<bthread::Mutex> lk(mux_);
         RunOnTxProcessorCc::Reset(std::move(task));
 
-        unfinished_cnt_ = core_cnt;
-        error_code_ = CcErrorCode::NO_ERROR;
+        error_code_.store(CcErrorCode::NO_ERROR, std::memory_order_relaxed);
+        unfinished_cnt_.store(core_cnt, std::memory_order_release);
     }
 
     void SetCoroCallbacks(const std::function<void()> *yield_fn,
@@ -885,14 +880,11 @@ public:
         resume_fn_ = resume_fn;
     }
 
-    void Wait()
-    {
-        std::unique_lock<bthread::Mutex> lk(mux_);
-        while (unfinished_cnt_)
-        {
-            cv_.wait(lk);
-        }
-    }
+    // The owner of a WaitableCc may be a bthread while Execute() runs on tx
+    // processors (the brpc worker main stack). The two sides must not share
+    // a bthread::Mutex, so Wait() polls atomics. mux_ is only used for the
+    // yield/resume handshake whose waiter is a dedicated worker thread.
+    void Wait();
 
     void Wait(const std::function<void()> *yield_fn,
               const std::function<void()> *resume_fn)
@@ -903,7 +895,7 @@ public:
             return;
         }
         std::unique_lock<bthread::Mutex> lk(mux_);
-        while (unfinished_cnt_)
+        while (unfinished_cnt_.load(std::memory_order_acquire) > 0)
         {
             waiting_.store(true, std::memory_order_release);
             lk.unlock();
@@ -915,70 +907,60 @@ public:
 
     bool IsFinished() const
     {
-        std::lock_guard<bthread::Mutex> lk(mux_);
-        return unfinished_cnt_ == 0;
+        return unfinished_cnt_.load(std::memory_order_acquire) == 0;
     }
 
     bool IsError() const
     {
-        std::lock_guard<bthread::Mutex> lk(mux_);
-        return error_code_ != CcErrorCode::NO_ERROR;
+        return error_code_.load(std::memory_order_acquire) !=
+               CcErrorCode::NO_ERROR;
     }
 
     CcErrorCode ErrorCode() const
     {
-        std::lock_guard<bthread::Mutex> lk(mux_);
-        return error_code_;
+        return error_code_.load(std::memory_order_acquire);
     }
 
     void AbortCcRequest(CcErrorCode error_code) override
     {
-        std::unique_lock<bthread::Mutex> lk(mux_);
-        unfinished_cnt_--;
-        error_code_ = error_code;
-        if (unfinished_cnt_ == 0)
-        {
-            if (resume_fn_ != nullptr &&
-                waiting_.load(std::memory_order_acquire))
-            {
-                waiting_.store(false, std::memory_order_release);
-                auto *fn = resume_fn_;
-                lk.unlock();
-                (*fn)();
-            }
-            else if (resume_fn_ == nullptr)
-            {
-                cv_.notify_one();
-            }
-        }
+        error_code_.store(error_code, std::memory_order_release);
+        FinishOne();
     }
 
     bool Execute(CcShard &ccs) override
     {
         if (RunOnTxProcessorCc::Execute(ccs))
         {
-            std::unique_lock<bthread::Mutex> lk(mux_);
-            error_code_ = CcErrorCode::NO_ERROR;
-            if (--unfinished_cnt_ == 0)
+            error_code_.store(CcErrorCode::NO_ERROR,
+                              std::memory_order_release);
+            FinishOne();
+        }
+        return false;
+    }
+
+private:
+    void FinishOne()
+    {
+        if (unfinished_cnt_.fetch_sub(1, std::memory_order_acq_rel) == 1)
+        {
+            if (resume_fn_ != nullptr)
             {
-                if (resume_fn_ != nullptr &&
-                    waiting_.load(std::memory_order_acquire))
+                // The coroutine waiter checks unfinished_cnt_ and sets
+                // waiting_ under mux_, so the last finisher either observes
+                // waiting_ here, or the waiter re-checks the count and never
+                // yields.
+                std::unique_lock<bthread::Mutex> lk(mux_);
+                if (waiting_.load(std::memory_order_acquire))
                 {
                     waiting_.store(false, std::memory_order_release);
                     auto *fn = resume_fn_;
                     lk.unlock();
                     (*fn)();
                 }
-                else if (resume_fn_ == nullptr)
-                {
-                    cv_.notify_one();
-                }
             }
         }
-        return false;
     }
 
-private:
     void *operator new(size_t) noexcept
     {
         return nullptr;
@@ -989,11 +971,12 @@ private:
     }
 
 private:
+    // Only guards the coroutine yield/resume handshake. Never taken by
+    // bthread owners.
     mutable bthread::Mutex mux_;
-    bthread::ConditionVariable cv_;
 
-    uint32_t unfinished_cnt_{0};
-    CcErrorCode error_code_;
+    std::atomic<uint32_t> unfinished_cnt_{0};
+    std::atomic<CcErrorCode> error_code_;
 
     // Coroutine yield/resume support
     const std::function<void()> *yield_fn_{nullptr};
