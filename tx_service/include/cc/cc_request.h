@@ -8501,7 +8501,7 @@ public:
                                         : 0;
                 if (remaining_wait_us == 0)
                 {
-                    LOG(WARNING) << "Waitting timeout for dbsize";
+                    LOG(WARNING) << "Waiting timeout for dbsize";
                     break;
                 }
             }
