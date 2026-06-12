@@ -83,8 +83,9 @@ void CkptTsCc::Wait()
     while (unfinish_cnt_.load(std::memory_order_acquire) > 0)
     {
         bthread_usleep(interval_us);
-        if ((interval_us << 1) < max_interval)
-            interval_us <<= 1;
+        interval_us <<= 1;
+        if (interval_us > max_interval)
+            interval_us = max_interval;
     }
 }
 
@@ -95,8 +96,9 @@ void ClearTxCc::Wait()
     while (finish_cnt_.load(std::memory_order_acquire) < core_cnt_)
     {
         bthread_usleep(interval_us);
-        if ((interval_us << 1) < max_interval)
-            interval_us <<= 1;
+        interval_us <<= 1;
+        if (interval_us > max_interval)
+            interval_us = max_interval;
     }
 }
 
@@ -107,8 +109,9 @@ void ActiveTxMaxTsCc::Wait()
     while (unfinish_cnt_.load(std::memory_order_acquire) > 0)
     {
         bthread_usleep(interval_us);
-        if ((interval_us << 1) < max_interval)
-            interval_us <<= 1;
+        interval_us <<= 1;
+        if (interval_us > max_interval)
+            interval_us = max_interval;
     }
 }
 
@@ -119,8 +122,9 @@ void EscalateStandbyCcmCc::Wait()
     while (unfinished_cnt_.load(std::memory_order_acquire) > 0)
     {
         bthread_usleep(interval_us);
-        if ((interval_us << 1) < max_interval)
-            interval_us <<= 1;
+        interval_us <<= 1;
+        if (interval_us > max_interval)
+            interval_us = max_interval;
     }
 }
 
@@ -140,13 +144,14 @@ void DbSizeCc::Wait()
             total_ref_cnt_.load(std::memory_order_acquire) <=
                 remote_ref_cnt_.load(std::memory_order_acquire))
         {
-            LOG(WARNING) << "Waitting timeout for dbsize";
+            LOG(WARNING) << "Waiting timeout for dbsize";
             break;
         }
         bthread_usleep(interval_us);
         waited_us += interval_us;
-        if ((interval_us << 1) < max_interval)
-            interval_us <<= 1;
+        interval_us <<= 1;
+        if (interval_us > max_interval)
+            interval_us = max_interval;
     }
 }
 }  // namespace txservice

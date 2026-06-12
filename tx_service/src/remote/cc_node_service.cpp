@@ -1396,9 +1396,10 @@ void CcNodeService::UploadBatch(
                req.InUse())
         {
             bthread_usleep(interval_us);
-            if ((interval_us << 1) < max_interval)
+            interval_us <<= 1;
+            if (interval_us > max_interval)
             {
-                interval_us <<= 1;
+                interval_us = max_interval;
             }
         }
     }

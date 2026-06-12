@@ -8378,7 +8378,10 @@ public:
         total_ref_cnt_.store(local_ref_cnt + remote_ref_cnt,
                              std::memory_order_relaxed);
         remote_ref_cnt_.store(remote_ref_cnt, std::memory_order_relaxed);
-        total_obj_sizes_.resize(table_names_->size(), 0);
+        // Value-initialized, i.e. all zeros. std::atomic is not movable, so
+        // the vector is replaced instead of resized.
+        total_obj_sizes_ =
+            std::vector<std::atomic<int64_t>>(table_names_->size());
     }
 
     bool Execute(CcShard &ccs) override
@@ -8424,7 +8427,7 @@ public:
     void AddRemoteObjSize(int32_t term,
                           const std::vector<int64_t> &total_obj_sizes)
     {
-        if (term != term_)
+        if (term != term_.load(std::memory_order_acquire))
         {
             return;
         }
@@ -8444,17 +8447,16 @@ public:
 
     int32_t GetTerm()
     {
-        return term_;
+        return term_.load(std::memory_order_acquire);
     }
     void IncTerm()
     {
-        term_++;
+        term_.fetch_add(1, std::memory_order_acq_rel);
     }
 
     void Clear()
     {
-        total_obj_sizes_.clear();
-        total_obj_sizes_.shrink_to_fit();
+        total_obj_sizes_ = std::vector<std::atomic<int64_t>>();
 
         total_ref_cnt_.store(0, std::memory_order_relaxed);
         remote_ref_cnt_.store(0, std::memory_order_relaxed);
@@ -8468,15 +8470,12 @@ public:
                                int64_t size,
                                std::memory_order order)
     {
-        reinterpret_cast<std::atomic_int64_t &>(total_obj_sizes_[idx])
-            .fetch_add(size, order);
+        total_obj_sizes_[idx].fetch_add(size, order);
     }
 
     int64_t TotalObjSizesLoad(size_t idx, std::memory_order order) const
     {
-        return reinterpret_cast<const std::atomic_int64_t &>(
-                   total_obj_sizes_[idx])
-            .load(order);
+        return total_obj_sizes_[idx].load(order);
     }
 
     size_t TotalObjSizesCount() const
@@ -8485,12 +8484,12 @@ public:
     }
 
 private:
-    std::vector<int64_t /*atomic*/> total_obj_sizes_;
+    std::vector<std::atomic<int64_t>> total_obj_sizes_;
 
 protected:
     std::atomic<size_t> total_ref_cnt_{0};
     std::atomic<size_t> remote_ref_cnt_{0};
-    int32_t term_{0};
+    std::atomic<int32_t> term_{0};
     std::vector<uint32_t> vct_ng_id_;
     std::vector<TableName> *table_names_{nullptr};
 };

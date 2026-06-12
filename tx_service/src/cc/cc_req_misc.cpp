@@ -517,8 +517,9 @@ void ClearCcNodeGroup::Wait()
     while (!done_.load(std::memory_order_acquire))
     {
         bthread_usleep(interval_us);
-        if ((interval_us << 1) < max_interval)
-            interval_us <<= 1;
+        interval_us <<= 1;
+        if (interval_us > max_interval)
+            interval_us = max_interval;
     }
 }
 
@@ -1141,8 +1142,9 @@ void WaitableCc::Wait()
     while (unfinished_cnt_.load(std::memory_order_acquire) > 0)
     {
         bthread_usleep(interval_us);
-        if ((interval_us << 1) < max_interval)
-            interval_us <<= 1;
+        interval_us <<= 1;
+        if (interval_us > max_interval)
+            interval_us = max_interval;
     }
 }
 

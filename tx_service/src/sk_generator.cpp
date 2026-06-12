@@ -714,9 +714,10 @@ CcErrorCode UploadIndexContext::UploadIndexInternal(
                upload_req_count)
         {
             bthread_usleep(interval_us);
-            if ((interval_us << 1) < max_interval)
+            interval_us <<= 1;
+            if (interval_us > max_interval)
             {
-                interval_us <<= 1;
+                interval_us = max_interval;
             }
         }
     }
@@ -771,8 +772,13 @@ void UploadIndexContext::SendIndexes(
             // leader term of input node group.
             LOG(ERROR) << "SendIndexes: Failed to init the channel of ng#"
                        << dest_ng_id;
-            res_code.store(CcErrorCode::ESTABLISH_NODE_CHANNEL_FAILED,
-                           std::memory_order_relaxed);
+            // Latch the first error; later successful batches must not
+            // reset it.
+            CcErrorCode expected = CcErrorCode::NO_ERROR;
+            res_code.compare_exchange_strong(
+                expected,
+                CcErrorCode::ESTABLISH_NODE_CHANNEL_FAILED,
+                std::memory_order_acq_rel);
             finished_req_cnt.fetch_add(1, std::memory_order_acq_rel);
             return;
         }
@@ -783,7 +789,8 @@ void UploadIndexContext::SendIndexes(
             [dest_ng_id, &res_code, &finished_req_cnt, &ng_term](
                 CcErrorCode res, int32_t dest_term)
             {
-                res_code.store(res, std::memory_order_relaxed);
+                // Latch the first error; later successful batches must not
+                // reset res_code back to NO_ERROR.
                 if (res == CcErrorCode::NO_ERROR)
                 {
                     int64_t expected = INIT_TERM;
@@ -796,12 +803,18 @@ void UploadIndexContext::SendIndexes(
                             << dest_ng_id
                             << " of term mismatch, with expected term: "
                             << expected << " and actual term: " << dest_term;
-                        res_code.store(CcErrorCode::REQUESTED_NODE_NOT_LEADER,
-                                       std::memory_order_relaxed);
+                        CcErrorCode code = CcErrorCode::NO_ERROR;
+                        res_code.compare_exchange_strong(
+                            code,
+                            CcErrorCode::REQUESTED_NODE_NOT_LEADER,
+                            std::memory_order_acq_rel);
                     }
                 }
                 else
                 {
+                    CcErrorCode code = CcErrorCode::NO_ERROR;
+                    res_code.compare_exchange_strong(
+                        code, res, std::memory_order_acq_rel);
                     LOG(ERROR)
                         << "Response for upload batch failed of ng#"
                         << dest_ng_id << ", with error: " << (uint32_t) res;

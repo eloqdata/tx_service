@@ -923,7 +923,13 @@ public:
 
     void AbortCcRequest(CcErrorCode error_code) override
     {
-        error_code_.store(error_code, std::memory_order_release);
+        // Latch the first error; a later success on another core must not
+        // erase it.
+        CcErrorCode expected = CcErrorCode::NO_ERROR;
+        error_code_.compare_exchange_strong(expected,
+                                            error_code,
+                                            std::memory_order_acq_rel,
+                                            std::memory_order_relaxed);
         FinishOne();
     }
 
@@ -931,8 +937,6 @@ public:
     {
         if (RunOnTxProcessorCc::Execute(ccs))
         {
-            error_code_.store(CcErrorCode::NO_ERROR,
-                              std::memory_order_release);
             FinishOne();
         }
         return false;
