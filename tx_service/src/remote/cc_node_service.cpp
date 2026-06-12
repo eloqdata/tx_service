@@ -1392,8 +1392,7 @@ void CcNodeService::UploadBatch(
     {
         uint64_t interval_us = 100;
         constexpr uint64_t max_interval = 100000;
-        while (finished_req.load(std::memory_order_acquire) != 1 ||
-               req.InUse())
+        while (finished_req.load(std::memory_order_acquire) != 1 || req.InUse())
         {
             bthread_usleep(interval_us);
             interval_us <<= 1;

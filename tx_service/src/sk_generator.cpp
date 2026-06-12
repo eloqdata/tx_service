@@ -828,8 +828,7 @@ void UploadIndexContext::SendIndexes(
         remote::UploadBatchRequest *req_ptr =
             upload_batch_closure->UploadBatchRequest();
         req_ptr->set_node_group_id(dest_ng_id);
-        req_ptr->set_node_group_term(
-            ng_term.load(std::memory_order_acquire));
+        req_ptr->set_node_group_term(ng_term.load(std::memory_order_acquire));
         req_ptr->set_table_name_str(table_name.String());
         req_ptr->set_table_type(
             remote::ToRemoteType::ConvertTableType(table_name.Type()));
