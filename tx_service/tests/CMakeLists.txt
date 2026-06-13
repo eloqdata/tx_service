@@ -40,6 +40,20 @@ target_include_directories(cluster_harness PUBLIC
 target_link_libraries(cluster_harness PUBLIC data_substrate)
 set_property(TARGET cluster_harness PROPERTY CXX_STANDARD 20)
 
+# --- Standalone tx-service node binary (driven by the cluster test driver) ---
+# Not a Catch test: it has its own main() and parses gflags. cluster_harness
+# provides TxNode + the generated WorkloadService; test_harness provides the
+# MemDataStore object whose vtable txnode_bringup.cpp references. The two
+# harness libs do not share sources, so linking both is duplicate-symbol-free.
+# Key/Rec are duplicated (as MakeKey/MakeRec) in txnode_main.cpp, so it does not
+# rely on test_harness's test_node.cpp symbols.
+add_executable(txnode ${CMAKE_CURRENT_SOURCE_DIR}/cluster/txnode_main.cpp)
+target_include_directories(txnode PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR} ${CMAKE_CURRENT_BINARY_DIR} ${HARNESS_DIR}
+    ${CMAKE_CURRENT_SOURCE_DIR}/cluster)
+target_link_libraries(txnode PRIVATE cluster_harness test_harness data_substrate)
+set_property(TARGET txnode PROPERTY CXX_STANDARD 20)
+
 # --- Test executables ---
 # Tests that rely on Catch2 to provide main() (the "Let Catch provide main()"
 # files). They link Catch2::Catch2WithMain.
