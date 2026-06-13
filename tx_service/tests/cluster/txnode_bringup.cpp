@@ -22,8 +22,6 @@
 #include "cluster/txnode_bringup.h"
 
 #include <gflags/gflags.h>
-#include <netinet/in.h>
-#include <sys/socket.h>
 #include <unistd.h>
 
 #include <cstdint>
@@ -42,6 +40,7 @@
 #include "eloq_data_store_service/data_store_service.h"
 #include "eloq_data_store_service/data_store_service_config.h"
 #include "harness/mem_data_store_factory.h"
+#include "harness/port_util.h"  // BindEphemeralPort (shared with test_node.cpp)
 #include "include/mock/mock_catalog_factory.h"  // MockCatalogFactory, MockSystemHandler
 #include "sharder.h"                            // NodeConfig
 #include "tx_service.h"
@@ -58,35 +57,6 @@ namespace
 [[noreturn]] void FailBringup(const char *what)
 {
     throw std::runtime_error(std::string("TxNode bring-up failed: ") + what);
-}
-
-// Binds an ephemeral TCP port on loopback and returns (fd, port) without
-// closing the socket, so the kernel will not hand the same port to a later
-// call. Caller must close the fd once it has claimed the port.
-std::pair<int, uint16_t> BindEphemeralPort()
-{
-    int fd = ::socket(AF_INET, SOCK_STREAM, 0);
-    if (fd < 0)
-    {
-        FailBringup("socket");
-    }
-    sockaddr_in addr{};
-    addr.sin_family = AF_INET;
-    // Probe on INADDR_ANY (0.0.0.0), matching how brpc binds the DSS server.
-    addr.sin_addr.s_addr = htonl(INADDR_ANY);
-    addr.sin_port = 0;  // let the kernel choose
-    if (::bind(fd, reinterpret_cast<sockaddr *>(&addr), sizeof(addr)) != 0)
-    {
-        ::close(fd);
-        FailBringup("bind");
-    }
-    socklen_t len = sizeof(addr);
-    if (::getsockname(fd, reinterpret_cast<sockaddr *>(&addr), &len) != 0)
-    {
-        ::close(fd);
-        FailBringup("getsockname");
-    }
-    return {fd, ntohs(addr.sin_port)};
 }
 }  // namespace
 

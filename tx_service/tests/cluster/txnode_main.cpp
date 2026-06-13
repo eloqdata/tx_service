@@ -166,7 +166,15 @@ ParseTopology(const std::string &topology)
         {
             uint32_t ng_id = static_cast<uint32_t>(std::stoul(ng_str));
             uint32_t node_id = static_cast<uint32_t>(std::stoul(node_str));
-            uint16_t port = static_cast<uint16_t>(std::stoul(port_str));
+            // std::stoul succeeds for values > 65535; reject out-of-range ports
+            // explicitly so a typo surfaces here instead of silently truncating
+            // to a bogus 16-bit port.
+            unsigned long port_ul = std::stoul(port_str);
+            if (port_ul > 65535)
+            {
+                throw std::runtime_error("port out of range");
+            }
+            uint16_t port = static_cast<uint16_t>(port_ul);
             ng_members[ng_id].emplace_back(node_id, host, port);
         }
         catch (const std::exception &)

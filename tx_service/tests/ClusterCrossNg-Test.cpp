@@ -51,6 +51,11 @@ using WorkloadStub = txnode_workload::WorkloadService_Stub;
 
 namespace
 {
+// One transport-level timeout shared by every workload-RPC helper below. These
+// run against a local-loopback cluster, so 5s is generous headroom over the
+// expected sub-millisecond round-trip.
+constexpr int kRpcTimeoutMs = 5000;
+
 // --- Workload-RPC helper wrappers over a WorkloadService_Stub. Each opens a
 // fresh brpc::Controller (a Controller is single-use) and asserts the RPC did
 // not fail at the transport level before inspecting the reply. ---
@@ -61,7 +66,7 @@ namespace
 int64_t LeaderTerm(WorkloadStub &stub, uint32_t ng_id)
 {
     brpc::Controller cntl;
-    cntl.set_timeout_ms(5000);
+    cntl.set_timeout_ms(kRpcTimeoutMs);
     txnode_workload::NodeInfoReq req;
     req.set_ng_id(ng_id);
     txnode_workload::NodeInfoResp resp;
@@ -76,7 +81,7 @@ int64_t LeaderTerm(WorkloadStub &stub, uint32_t ng_id)
 uint32_t NodeId(WorkloadStub &stub)
 {
     brpc::Controller cntl;
-    cntl.set_timeout_ms(5000);
+    cntl.set_timeout_ms(kRpcTimeoutMs);
     txnode_workload::NodeInfoReq req;
     req.set_ng_id(0);
     txnode_workload::NodeInfoResp resp;
@@ -90,7 +95,7 @@ uint32_t NodeId(WorkloadStub &stub)
 uint64_t Begin(WorkloadStub &stub)
 {
     brpc::Controller cntl;
-    cntl.set_timeout_ms(5000);
+    cntl.set_timeout_ms(kRpcTimeoutMs);
     txnode_workload::BeginTxReq req;
     req.set_isolation(1);  // Snapshot
     req.set_protocol(1);   // OccRead
@@ -104,7 +109,7 @@ uint64_t Begin(WorkloadStub &stub)
 bool Upsert(WorkloadStub &stub, uint64_t handle, int key, int value)
 {
     brpc::Controller cntl;
-    cntl.set_timeout_ms(5000);
+    cntl.set_timeout_ms(kRpcTimeoutMs);
     txnode_workload::UpsertReq req;
     req.set_tx_handle(handle);
     req.set_key(key);
@@ -119,7 +124,7 @@ bool Upsert(WorkloadStub &stub, uint64_t handle, int key, int value)
 bool Commit(WorkloadStub &stub, uint64_t handle)
 {
     brpc::Controller cntl;
-    cntl.set_timeout_ms(5000);
+    cntl.set_timeout_ms(kRpcTimeoutMs);
     txnode_workload::CommitReq req;
     req.set_tx_handle(handle);
     txnode_workload::CommitResp resp;
