@@ -262,9 +262,9 @@ TxNode::TxNode(const TxNodeConfig &cfg) : impl_(std::make_unique<Impl>(cfg))
     // 4b. Build the FULL multi-node topology from cfg.ng_members: every node's
     // ng_configs describes ALL node-groups and ALL members. The ports were
     // assigned by the driver (it reserved a 4-wide window per node: cc-stream =
-    // base, cc-node = base+1, log-replay = base+3); we just plumb the assigned
-    // base port through as each member's NodeConfig port. tx_ips/tx_ports
-    // reflect THIS node's own (host, base port) entry.
+    // base, cc-node = base+1, log-group = base+2, log-replay = base+3); we just
+    // plumb the assigned base port through as each member's NodeConfig port.
+    // tx_ips/tx_ports reflect THIS node's own (host, base port) entry.
     for (const auto &[member_ng_id, members] : impl.cfg.ng_members)
     {
         std::vector<NodeConfig> group_config;

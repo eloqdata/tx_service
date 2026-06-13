@@ -29,6 +29,7 @@
 #include <sys/wait.h>  // ::waitpid
 #include <unistd.h>    // ::readlink, STDOUT_FILENO, STDERR_FILENO
 
+#include <cerrno>
 #include <chrono>
 #include <cstdint>
 #include <cstdlib>
@@ -220,12 +221,44 @@ void TestCluster::Start()
 
 void TestCluster::AwaitWorkloadServers(std::chrono::milliseconds timeout)
 {
-    const auto deadline = std::chrono::steady_clock::now() + timeout;
     for (NodeProc &node : nodes_)
     {
+        // Each node gets its own full timeout budget: a slow first node must
+        // not starve later nodes of the time they need to come up.
+        const auto deadline = std::chrono::steady_clock::now() + timeout;
         bool up = false;
         while (std::chrono::steady_clock::now() < deadline)
         {
+            // Detect a child that died during bring-up (bad flags, a startup
+            // assertion, a stolen port) instead of burning the full timeout on
+            // connection-refused RPCs. waitpid(WNOHANG) reaps it if it has
+            // already exited so the dtor's later waitpid does not block.
+            int status = 0;
+            pid_t r = ::waitpid(node.pid, &status, WNOHANG);
+            if (r == node.pid)
+            {
+                node.pid = -1;  // reaped; do not wait on it again in the dtor
+                std::string how;
+                if (WIFEXITED(status))
+                {
+                    how = "exited with status " +
+                          std::to_string(WEXITSTATUS(status));
+                }
+                else if (WIFSIGNALED(status))
+                {
+                    how =
+                        "killed by signal " + std::to_string(WTERMSIG(status));
+                }
+                else
+                {
+                    how = "terminated abnormally";
+                }
+                throw std::runtime_error(
+                    "TestCluster failed: node " + std::to_string(node.node_id) +
+                    " (txnode process) " + how +
+                    " during startup; see logs under " + base_dir_);
+            }
+
             brpc::Controller cntl;
             cntl.set_timeout_ms(1000);
             txnode_workload::NodeInfoReq req;
@@ -278,7 +311,13 @@ void TestCluster::DriveLeader(uint32_t ng_id,
         req.set_config_version(kClusterConfigVersion);
         ::txservice::remote::OnLeaderStartResponse resp;
         stub.OnLeaderStart(&cntl, &req, &resp, nullptr);
-        if (!cntl.Failed() && !resp.error())
+        // Success only if the RPC landed AND the handler neither errored nor
+        // asked us to retry. resp.retry() is set (together with error=true)
+        // when another OnLeaderStart for this NG is already processing; in this
+        // single-candidate foundation that resolves on a later attempt.
+        // Checking it explicitly keeps the loop correct if the engine ever
+        // returns retry=true without error=true.
+        if (!cntl.Failed() && !resp.error() && !resp.retry())
         {
             return;
         }
@@ -379,14 +418,28 @@ void TestCluster::AwaitClusterReady(std::chrono::milliseconds timeout)
                     txnode_workload::WaitReadyReq req;
                     txnode_workload::WaitReadyResp resp;
                     node.stub->WaitReady(&cntl, &req, &resp, nullptr);
-                    if (!cntl.Failed() && resp.ready())
+                    if (cntl.Failed())
+                    {
+                        // Transient transport error (the handshake can take a
+                        // few seconds); retry until the deadline.
+                        bthread_usleep(200 * 1000);  // 200 ms
+                        continue;
+                    }
+                    if (resp.ready())
                     {
                         return;
                     }
                     // A non-failed reply with ready=false means OnLeaderStart
-                    // was never driven for this node (a driver bug); retrying
-                    // will not help, but the deadline below bounds it anyway.
-                    bthread_usleep(200 * 1000);  // 200 ms
+                    // was never driven for this node before WaitReady ran (a
+                    // driver-ordering bug). Retrying cannot help, so fail
+                    // loudly and immediately rather than spinning to the
+                    // deadline.
+                    ready_errors[i] =
+                        "node " + std::to_string(node.node_id) +
+                        " reported not-ready (its native NG has no leader "
+                        "term; "
+                        "OnLeaderStart was not driven before WaitReady)";
+                    return;
                 }
                 ready_errors[i] = "node " + std::to_string(node.node_id) +
                                   " never reached cluster-ready";
@@ -519,7 +572,9 @@ std::string TestCluster::BuildTopologyString() const
 {
     // ';'-separated "ng:node@127.0.0.1:tx_port" members for every node. This
     // round-trips ParseTopology() in txnode_main.cpp; the port is each node's
-    // reserved tx base port (cc-node = base+1, log-replay = base+3).
+    // reserved tx base port. The engine derives the other services from it
+    // (cc-stream = base, cc-node = base+1, log-group = base+2, log-replay =
+    // base+3), which is why the driver reserves a 4-wide window per node.
     std::string topology;
     for (const NodeProc &node : nodes_)
     {
@@ -575,16 +630,33 @@ void TestCluster::SpawnNode(NodeProc &node, const std::string &topology)
         (std::filesystem::path(base_dir_) /
          ("node_" + std::to_string(node.node_id) + ".log"))
             .string();
+    // All posix_spawn setup calls return 0 on success; a non-zero return means
+    // the attr/file-actions object is not in a usable state. Check them: a
+    // silently-failed setpgroup would leave the child in the driver's group, so
+    // node.pgid (set to pid below) would be wrong and the dtor's group-kill
+    // backstop would target the wrong group.
     posix_spawn_file_actions_t actions;
-    posix_spawn_file_actions_init(&actions);
+    if (posix_spawn_file_actions_init(&actions) != 0)
+    {
+        FailCluster("posix_spawn_file_actions_init");
+    }
     // Open the log file as fd; then dup2 it onto 1 and 2 and close the
     // original.
-    posix_spawn_file_actions_addopen(&actions,
-                                     STDOUT_FILENO,
-                                     log_path.c_str(),
-                                     O_WRONLY | O_CREAT | O_TRUNC,
-                                     0644);
-    posix_spawn_file_actions_adddup2(&actions, STDOUT_FILENO, STDERR_FILENO);
+    int rc = posix_spawn_file_actions_addopen(&actions,
+                                              STDOUT_FILENO,
+                                              log_path.c_str(),
+                                              O_WRONLY | O_CREAT | O_TRUNC,
+                                              0644);
+    if (rc == 0)
+    {
+        rc = posix_spawn_file_actions_adddup2(
+            &actions, STDOUT_FILENO, STDERR_FILENO);
+    }
+    if (rc != 0)
+    {
+        posix_spawn_file_actions_destroy(&actions);
+        FailCluster("posix_spawn_file_actions setup");
+    }
 
     // Put the child in its OWN process group (it becomes its own group leader,
     // pgid == its pid). POSIX_SPAWN_SETPGROUP + a pgroup of 0 tells the spawned
@@ -593,9 +665,18 @@ void TestCluster::SpawnNode(NodeProc &node, const std::string &topology)
     // any process the txnode itself forks is reaped too -- no orphans survive a
     // failed/aborted test.
     posix_spawnattr_t attr;
-    posix_spawnattr_init(&attr);
-    posix_spawnattr_setflags(&attr, POSIX_SPAWN_SETPGROUP);
-    posix_spawnattr_setpgroup(&attr, 0);
+    if (posix_spawnattr_init(&attr) != 0)
+    {
+        posix_spawn_file_actions_destroy(&actions);
+        FailCluster("posix_spawnattr_init");
+    }
+    if (posix_spawnattr_setflags(&attr, POSIX_SPAWN_SETPGROUP) != 0 ||
+        posix_spawnattr_setpgroup(&attr, 0) != 0)
+    {
+        posix_spawnattr_destroy(&attr);
+        posix_spawn_file_actions_destroy(&actions);
+        FailCluster("posix_spawnattr process-group setup");
+    }
 
     pid_t pid = -1;
     int ret = posix_spawn(&pid, bin.c_str(), &actions, &attr, argv, environ);
@@ -616,7 +697,12 @@ void TestCluster::BuildClient(NodeProc &node)
     brpc::ChannelOptions options;
     options.protocol = brpc::PROTOCOL_BAIDU_STD;
     options.timeout_ms = 5000;
-    options.max_retry = 3;
+    // No transport-level retries: the workload RPCs (BeginTx/Upsert/Commit/
+    // Abort) are NOT idempotent. A retry after a lost response would, e.g.,
+    // leak a second tx handle or re-Commit an already-erased one. The driver's
+    // own bring-up loops (AwaitWorkloadServers/DriveLeader/WaitReady) do their
+    // own bounded application-level retries where retrying is safe.
+    options.max_retry = 0;
 
     auto channel = std::make_unique<brpc::Channel>();
     const std::string addr = "127.0.0.1:" + std::to_string(node.workload_port);
@@ -646,8 +732,12 @@ void TestCluster::KillNode(NodeProc &node) noexcept
         ::kill(node.pid, SIGKILL);
         int status = 0;
         // Reap the direct child so it does not linger as a zombie. waitpid only
-        // works on a direct child; group members are not ours to reap.
-        ::waitpid(node.pid, &status, 0);
+        // works on a direct child; group members are not ours to reap. Retry on
+        // EINTR so a signal delivered mid-wait does not leave the child
+        // unreaped.
+        while (::waitpid(node.pid, &status, 0) < 0 && errno == EINTR)
+        {
+        }
         node.pid = -1;
         node.pgid = -1;
     }

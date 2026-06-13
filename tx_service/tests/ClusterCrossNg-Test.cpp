@@ -70,6 +70,21 @@ int64_t LeaderTerm(WorkloadStub &stub, uint32_t ng_id)
     return resp.leader_term();
 }
 
+// The node id `stub`'s node reports for itself. Used to confirm the two stubs
+// reach two DISTINCT nodes -- otherwise a topology/port misconfiguration could
+// silently degenerate the "cross-NG" test into two transactions on one node.
+uint32_t NodeId(WorkloadStub &stub)
+{
+    brpc::Controller cntl;
+    cntl.set_timeout_ms(5000);
+    txnode_workload::NodeInfoReq req;
+    req.set_ng_id(0);
+    txnode_workload::NodeInfoResp resp;
+    stub.NodeInfo(&cntl, &req, &resp, nullptr);
+    REQUIRE_FALSE(cntl.Failed());
+    return resp.node_id();
+}
+
 // Begin a transaction with the Phase-1-proven defaults: isolation=1 (Snapshot),
 // protocol=1 (OccRead). Returns the tx handle.
 uint64_t Begin(WorkloadStub &stub)
@@ -154,15 +169,23 @@ TEST_CASE("two-node cluster: bring-up + cross-NG write commit", "[cluster]")
     WorkloadStub &c0 = cluster.Client(0);
     WorkloadStub &c1 = cluster.Client(1);
 
+    // The two stubs reach two distinct nodes (guards against a topology/port
+    // mix-up that would make this a single-node test in disguise).
+    REQUIRE(NodeId(c0) == 0);
+    REQUIRE(NodeId(c1) == 1);
+
     // Both node groups are led after bring-up: node 0 leads ng0, node 1 leads
-    // ng1, each with a positive leader term.
+    // ng1, each with a positive leader term. (NodeInfo reports the LOCAL leader
+    // term, so this only goes positive on each node's OWN ng; cross-NG leader
+    // resolution is proven instead by the cross-NG commits below succeeding.)
     REQUIRE(LeaderTerm(c0, /*ng_id=*/0) > 0);
     REQUIRE(LeaderTerm(c1, /*ng_id=*/1) > 0);
 
     // Cross-NG write from node 0: 20 keys (k=1..20, value k*10) hashing across
-    // BOTH NGs. The commit succeeds only if node 0 acquires write locks on
-    // ng1's leader (node 1) for the remote keys and 2PC-coordinates the commit
-    // across both NGs.
+    // BOTH NGs. Upsert only buffers into the tx write set locally (it cannot
+    // fail for a resolvable table), so the real cross-NG work is at Commit: it
+    // succeeds only if node 0 acquires write locks on ng1's leader (node 1) for
+    // the remote keys and 2PC-coordinates the commit across both NGs.
     uint64_t t0 = Begin(c0);
     for (int k = 1; k <= 20; ++k)
     {
@@ -170,9 +193,11 @@ TEST_CASE("two-node cluster: bring-up + cross-NG write commit", "[cluster]")
     }
     REQUIRE(Commit(c0, t0));
 
-    // Cross-NG write from node 1: a DIFFERENT span of 20 keys (k=101..120),
-    // proving the cross-NG write path works symmetrically -- node 1 coordinates
-    // against ng0 (node 0) for the keys ng0 owns.
+    // Cross-NG write from node 1: a DIFFERENT span of 20 keys (k=101..120).
+    // With node 1 as coordinator these keys hash predominantly to ng0, so the
+    // commit exercises the remote write-lock + 2PC path against ng0's leader
+    // (node 0) -- the mirror of the node-0 case, with the coordinator/remote
+    // roles swapped.
     uint64_t t1 = Begin(c1);
     for (int k = 101; k <= 120; ++k)
     {

@@ -64,7 +64,8 @@ DEFINE_uint32(core_num, 2, "Number of cores (TxProcessors) for this node.");
 //   semicolon-separated members, each "ng:node@host:port".
 //   e.g. for two single-member node-groups:
 //     0:0@127.0.0.1:31000;1:1@127.0.0.1:31010
-// `port` is the tx base port; cc-stream binds it, cc-node binds base+1,
+// `port` is the tx base port; the engine derives the other services from it:
+// cc-stream binds base, cc-node binds base+1, log-group binds base+2, and
 // log-replay binds base+3 (the driver reserves a 4-wide window per node).
 DEFINE_string(topology,
               "",
@@ -351,12 +352,14 @@ public:
         // The driver has already driven CcRpcService.OnLeaderStart for this
         // node's native NG, which set the *candidate* leader term but did NOT
         // promote it to a real leader term: under skip_wal with log_hd=nullptr
-        // there is no log service to call FinishLogReplay, so candidate->leader
-        // promotion never happens on its own. The hm-less self-promote path in
-        // Sharder::Start (sharder.cpp, the `else` branch) finishes this
-        // directly in the test env; we mirror that exact sequence here because
-        // the multi-node bring-up takes the HM branch instead. Idempotent: once
-        // the leader term is already positive there is nothing to do.
+        // there is no log service to drive FinishLogGroupReplay (the method
+        // that normally promotes candidate->leader after log replay completes),
+        // so promotion never happens on its own. The hm-less self-promote path
+        // in Sharder::Start (sharder.cpp, the `else` branch) runs this same
+        // SetLeaderTerm/SetCandidateTerm(-1)/NodeGroupFinishRecovery sequence
+        // directly; the multi-node bring-up takes the HM branch instead, so we
+        // reproduce it here. Idempotent: once the leader term is already
+        // positive there is nothing to do.
         if (sharder.LeaderTerm(native_ng_id_) <= 0)
         {
             int64_t candidate_term = sharder.CandidateLeaderTerm(native_ng_id_);
@@ -378,6 +381,27 @@ public:
             return;
         }
 
+        // Single-flight the cross-NG handshake. The driver sets a finite
+        // per-RPC timeout on WaitReady and retries on a transport error; if the
+        // first call's WaitClusterReady is still in progress when that timeout
+        // fires, a naive retry would launch a SECOND concurrent
+        // WaitClusterReady in this process. Guard so exactly one runs: the
+        // first caller drives it and publishes the result; concurrent/later
+        // callers report ready=true once it has finished, ready=false while it
+        // is still running (the driver then retries).
+        if (cluster_ready_.load(std::memory_order_acquire))
+        {
+            resp->set_ready(true);
+            return;
+        }
+        if (wait_ready_in_flight_.exchange(true, std::memory_order_acq_rel))
+        {
+            // Another WaitReady is already driving WaitClusterReady; do not
+            // start a second one. Report the current (not-yet-ready) state.
+            resp->set_ready(cluster_ready_.load(std::memory_order_acquire));
+            return;
+        }
+
         // Drive the cross-NG readiness handshake. For every remote NG this
         // sends a RecoverStateCheckRequest over the cc-stream and blocks until
         // the remote leader (whose LeaderTerm is now > 0) answers, populating
@@ -386,6 +410,7 @@ public:
         // resolves the remote targets and the cc-stream routes the checks
         // correctly.
         svc_->WaitClusterReady();
+        cluster_ready_.store(true, std::memory_order_release);
         resp->set_ready(true);
     }
 
@@ -431,6 +456,12 @@ private:
     std::mutex mutex_;
     std::unordered_map<uint64_t, TransactionExecution *> txns_;
     uint64_t next_handle_{0};
+
+    // Single-flight state for WaitReady's WaitClusterReady call (see
+    // WaitReady): wait_ready_in_flight_ admits exactly one driver of the
+    // handshake; cluster_ready_ latches true once it has completed.
+    std::atomic<bool> wait_ready_in_flight_{false};
+    std::atomic<bool> cluster_ready_{false};
 };
 
 // SIGTERM/SIGINT set this so main() can drain and shut down cleanly. A process

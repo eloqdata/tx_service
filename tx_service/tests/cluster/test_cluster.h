@@ -124,8 +124,11 @@ private:
 
     // Drive a single NG's leader: open a channel to `node`'s cc-node RPC port
     // and call CcRpcService.OnLeaderStart(ng, term=1, config_version) until it
-    // succeeds (mirrors raft_host_manager.cpp's on_leader_start). Retries on
-    // cntl.Failed() / resp.error()/resp.retry(), bounded. FailCluster on
+    // succeeds. This sends just the OnLeaderStart RPC that
+    // raft_host_manager.cpp's on_leader_start issues; the follow-up
+    // NotifyNewLeaderStart and recovery handshake are driven separately (see
+    // NotifyLeader / AwaitClusterReady). Retries while cntl.Failed() ||
+    // resp.error() || resp.retry(), bounded. FailCluster on
     // timeout. The cluster_config / node_configs are left empty: the nodes were
     // started with config_version=kClusterConfigVersion and already hold the
     // full topology, so OnLeaderStart's UpdateInMemoryClusterConfig
