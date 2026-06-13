@@ -45,9 +45,17 @@ namespace test
 class ScriptedHostManager : public txservice::remote::HostMangerService
 {
 public:
-    // Binds the HM brpc server to ip:port. Returns true on success.
-    bool Start(const std::string &ip, uint16_t port);
+    // Starts the HM brpc server on `ip`, letting brpc atomically pick and bind
+    // a free port from the ephemeral range (no reserve-then-bind TOCTOU).
+    // Returns true on success; Port() then gives the bound port.
+    bool Start(const std::string &ip);
     void Stop();
+
+    // The port the server actually bound (valid after a successful Start()).
+    uint16_t Port() const
+    {
+        return port_;
+    }
 
     // Record that ng_id's leader is node_id, so GetLeader resolves it.
     void SetLeader(uint32_t ng_id, uint32_t node_id);
@@ -70,6 +78,7 @@ private:
     std::mutex mux_;
     std::map<uint32_t, uint32_t> ng_leader_;  // ng_id -> node_id
     brpc::Server server_;
+    uint16_t port_{0};  // bound port, set by Start()
 };
 }  // namespace test
 }  // namespace txservice

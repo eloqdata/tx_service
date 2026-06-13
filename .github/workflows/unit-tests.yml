@@ -32,20 +32,14 @@ jobs:
       - name: Build
         run: cmake --build bld --parallel "$(nproc)"
 
-      - name: Test (gating — excludes ClusterCrossNg-Test)
+      - name: Test (gating — full suite)
         working-directory: bld
-        # ctest -LE takes a regex matched against test labels. LargeObjLRU-Test
-        # now gates: the FastMetaDataMutex tls_shard_idx fix made it
-        # deterministic, the FindEmplace LO-LRU last-page routing bug
-        # (assert(!keys_.empty())) is fixed, and the dirty_data_key_count_
-        # underflow it surfaced was a test-setup bug (shard-only dirty
-        # compensation) now corrected. All 23 cases pass.
-        run: ctest --output-on-failure --timeout 180 -LE "ClusterCrossNg-Test"
-
-      # ClusterCrossNg-Test spawns real `txnode` subprocesses and is slower /
-      # heavier than the in-process unit tests; until it is proven stable across
-      # CI runs it stays non-gating, run for information only.
-      - name: Cluster test (non-gating; informational)
-        working-directory: bld
-        continue-on-error: true
-        run: ctest --output-on-failure --timeout 180 -L "ClusterCrossNg-Test"
+        # The entire suite gates now. LargeObjLRU-Test: the FastMetaDataMutex
+        # tls_shard_idx spin, the FindEmplace LO-LRU last-page routing bug
+        # (assert(!keys_.empty())), and the dirty_data_key_count_ underflow
+        # (a test-setup bug) are all fixed; all 23 cases pass deterministically.
+        # ClusterCrossNg-Test spawns real `txnode` subprocesses but is
+        # stress-validated (sequential + heavy parallel) and self-heals
+        # port-contention bring-up failures by re-spawning on fresh ports, so it
+        # is stable in a solo CI run.
+        run: ctest --output-on-failure --timeout 180

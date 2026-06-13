@@ -31,7 +31,7 @@ namespace txservice
 {
 namespace test
 {
-bool ScriptedHostManager::Start(const std::string &ip, uint16_t port)
+bool ScriptedHostManager::Start(const std::string &ip)
 {
     if (server_.AddService(this, brpc::SERVER_DOESNT_OWN_SERVICE) != 0)
     {
@@ -43,14 +43,21 @@ bool ScriptedHostManager::Start(const std::string &ip, uint16_t port)
     // num_threads == 0 means use the default bthread worker count.
     options.num_threads = 0;
 
-    // Bind to the requested interface so nodes can reach the HM at ip:port.
-    std::string ip_port = ip + ":" + std::to_string(port);
-    if (server_.Start(ip_port.c_str(), &options) != 0)
+    // Let brpc find and atomically bind a free port in the ephemeral range.
+    // This avoids the reserve-then-bind TOCTOU of pre-picking a port in the
+    // driver and passing it in: brpc holds the listening socket the instant it
+    // succeeds, so no other process can steal it between probe and bind.
+    constexpr int kMinPort = 20000;
+    constexpr int kMaxPort = 60000;
+    if (server_.Start(
+            ip.c_str(), brpc::PortRange(kMinPort, kMaxPort), &options) != 0)
     {
-        LOG(ERROR) << "Failed to start the scripted host manager server at "
-                   << ip_port;
+        LOG(ERROR) << "Failed to start the scripted host manager server on "
+                   << ip << " in port range [" << kMinPort << ", " << kMaxPort
+                   << "]";
         return false;
     }
+    port_ = static_cast<uint16_t>(server_.listen_address().port);
     return true;
 }
 

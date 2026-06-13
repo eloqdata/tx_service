@@ -121,8 +121,13 @@ private:
 
     // Poll every node's NodeInfo RPC until it answers (TxService::Start
     // returned, i.e. the node registered with the HM and its workload server is
-    // up), bounded by `timeout`. FailCluster on timeout.
-    void AwaitWorkloadServers(std::chrono::milliseconds timeout);
+    // up), bounded by `timeout`. A node that dies during bring-up (e.g. its
+    // workload port was stolen between reserve and bind) is re-spawned on a
+    // fresh workload port, up to a few times, using `bin`/`topology`.
+    // FailCluster on timeout or once respawns are exhausted.
+    void AwaitWorkloadServers(const std::string &bin,
+                              const std::string &topology,
+                              std::chrono::milliseconds timeout);
 
     // Drive a single NG's leader: open a channel to `node`'s cc-node RPC port
     // and call CcRpcService.OnLeaderStart(ng, term=1, config_version) until it

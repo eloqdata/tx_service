@@ -124,14 +124,8 @@ TestCluster::TestCluster(const ClusterOptions &opts) : opts_(opts)
         nodes_.push_back(std::move(node));
     }
 
-    // 3. Reserve an ephemeral port for the in-driver ScriptedHostManager. The
-    //    HM is started in Start() (C2); reserve the port now so the topology /
-    //    spawn flags can reference it.
-    {
-        auto [fd, port] = BindEphemeralPort();
-        ::close(fd);
-        hm_port_ = port;
-    }
+    // The ScriptedHostManager picks and binds its own port atomically in
+    // Start() (brpc PortRange), so there is no HM port to reserve here.
 }
 
 TestCluster::~TestCluster()
@@ -161,29 +155,65 @@ void TestCluster::Start()
     // 1. Start the scripted host manager FIRST. A node's TxService::Start
     //    retries StartNode against the HM for ~10s, so the HM must be listening
     //    before any node is spawned or the bring-up RPC may exhaust its
-    //    retries.
-    if (!hm_.Start("127.0.0.1", hm_port_))
+    //    retries. The HM binds a free ephemeral port itself; capture it so the
+    //    spawn flags (--hm_port) below point the nodes at it.
+    if (!hm_.Start("127.0.0.1"))
     {
         FailCluster("host manager start");
     }
+    hm_port_ = hm_.Port();
 
-    // 2. Spawn every node with the shared topology, then build its workload
-    //    stub. brpc connects lazily; step 3 verifies connectivity with a real
-    //    RPC. The binary path and topology are identical for every node, so
-    //    resolve/build them once here rather than per spawn.
+    // 2-3. Spawn every node with the shared topology, build its workload stub,
+    //    and wait until each node's workload server answers NodeInfo (i.e.
+    //    TxService::Start returned). Only then is OnLeaderStart safe to send.
+    //
+    //    Retry the WHOLE bring-up on failure, re-picking every node's ports and
+    //    rebuilding the topology each attempt. Reason: under heavy port
+    //    contention a tx-port-window slot reserved by this driver can be stolen
+    //    between reserve and the child's bind, aborting TxService::Start. The
+    //    workload port self-heals per-node inside AwaitWorkloadServers, but the
+    //    tx-port window is shared across the topology (every node must agree on
+    //    every peer's ports), so it cannot be re-picked for one node alone --
+    //    only a full re-pick + re-spawn fixes it. Idempotent: KillAllNodes
+    //    tears down the partial attempt; the txnode clears its data dir on
+    //    bring-up.
     const std::string bin = LocateTxnodeBinary();
-    const std::string topology = BuildTopologyString();
-    for (NodeProc &node : nodes_)
+    constexpr int kMaxBringupAttempts = 4;
+    for (int attempt = 1;; ++attempt)
     {
-        SpawnNode(node, bin, topology);
-        BuildClient(node);
+        const std::string topology = BuildTopologyString();
+        for (NodeProc &node : nodes_)
+        {
+            SpawnNode(node, bin, topology);
+            BuildClient(node);
+        }
+        try
+        {
+            AwaitWorkloadServers(bin, topology, 30s);
+            break;
+        }
+        catch (const std::exception &e)
+        {
+            KillAllNodes();
+            if (attempt >= kMaxBringupAttempts)
+            {
+                throw std::runtime_error(
+                    std::string("TestCluster failed: cluster bring-up did not "
+                                "succeed after ") +
+                    std::to_string(kMaxBringupAttempts) +
+                    " attempts (last error: " + e.what() + ")");
+            }
+            // Re-pick every node's ports so the retry uses a fresh, currently
+            // free tx-port window and workload port.
+            for (NodeProc &node : nodes_)
+            {
+                node.tx_port = ReserveTxPortWindow();
+                auto [fd, port] = BindEphemeralPort();
+                ::close(fd);
+                node.workload_port = port;
+            }
+        }
     }
-
-    // 3. Wait until each node's workload server answers NodeInfo -- i.e.
-    //    TxService::Start returned (the node registered with the HM and its
-    //    cc-node / workload servers are listening). Only then is OnLeaderStart
-    //    safe to send.
-    AwaitWorkloadServers(30s);
 
     // 4. Drive leadership for every NG: send CcRpcService.OnLeaderStart to the
     //    member node and record it on the HM so GetLeader resolves. This sets
@@ -219,14 +249,27 @@ void TestCluster::Start()
     AwaitClusterReady(30s);
 }
 
-void TestCluster::AwaitWorkloadServers(std::chrono::milliseconds timeout)
+void TestCluster::AwaitWorkloadServers(const std::string &bin,
+                                       const std::string &topology,
+                                       std::chrono::milliseconds timeout)
 {
+    // A node binds its workload port (and only that port) AFTER spawn, so the
+    // workload port carries a reserve-then-bind TOCTOU: the driver picked it
+    // and closed the socket, and another process can grab it before the child
+    // does. If that happens the child dies immediately at server.Start. Rather
+    // than fail the whole cluster on that rare race, re-pick a fresh workload
+    // port and re-spawn the node, a few times, before giving up. (The tx-port
+    // window is part of the topology shared by every node, so it cannot be
+    // re-picked for one node here; it is reserved as a held 4-wide window
+    // instead.)
+    constexpr int kMaxRespawn = 5;
     for (NodeProc &node : nodes_)
     {
+        int respawns = 0;
+        bool up = false;
         // Each node gets its own full timeout budget: a slow first node must
         // not starve later nodes of the time they need to come up.
-        const auto deadline = std::chrono::steady_clock::now() + timeout;
-        bool up = false;
+        auto deadline = std::chrono::steady_clock::now() + timeout;
         while (std::chrono::steady_clock::now() < deadline)
         {
             // Detect a child that died during bring-up (bad flags, a startup
@@ -253,10 +296,25 @@ void TestCluster::AwaitWorkloadServers(std::chrono::milliseconds timeout)
                 {
                     how = "terminated abnormally";
                 }
+
+                if (respawns < kMaxRespawn)
+                {
+                    // Most likely a workload-port collision. Re-pick the port
+                    // and re-spawn the node on a fresh full timeout budget.
+                    ++respawns;
+                    auto [fd, port] = BindEphemeralPort();
+                    ::close(fd);
+                    node.workload_port = port;
+                    SpawnNode(node, bin, topology);
+                    BuildClient(node);  // rebuild the stub for the new port
+                    deadline = std::chrono::steady_clock::now() + timeout;
+                    continue;
+                }
                 throw std::runtime_error(
                     "TestCluster failed: node " + std::to_string(node.node_id) +
-                    " (txnode process) " + how +
-                    " during startup; see logs under " + base_dir_);
+                    " (txnode process) " + how + " during startup after " +
+                    std::to_string(respawns) + " respawns; see logs under " +
+                    base_dir_);
             }
 
             brpc::Controller cntl;
