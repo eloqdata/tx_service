@@ -64,8 +64,19 @@ public:
                       table_name.Type(),
                       table_name.Engine()),
           schema_image_(std::move(catalog_image)),
-          version_(version)
+          version_(version),
+          key_schema_(std::make_unique<MockKeySchema>())
     {
+        // Back VersionStringView() with an owning member; returning a view into
+        // a std::to_string() temporary would dangle.
+        version_str_ = std::to_string(version_);
+        // A KV catalog info is required for any storage-backed use: the
+        // checkpoint/data-sync path resolves the kv table name through
+        // GetKVCatalogInfo()->GetKvTableName(). Mirror EloqBasicTableSchema:
+        // the kv table name is just the base table name, which is unique per
+        // table and round-trips through KVCatalogInfo's Serialize/Deserialize.
+        kv_info_ = std::make_unique<KVCatalogInfo>();
+        kv_info_->kv_table_name_ = table_name_.String();
     }
     ~MockTableSchema()
     {
@@ -120,7 +131,7 @@ public:
     }
     std::string_view VersionStringView() const override
     {
-        return std::string_view(std::to_string(version_));
+        return std::string_view(version_str_);
     }
     std::vector<TableName> IndexNames() const override
     {
@@ -150,12 +161,16 @@ public:
     }
     KVCatalogInfo *GetKVCatalogInfo() const override
     {
-        assert(false);
-        return nullptr;
+        return kv_info_.get();
     }
     void SetKVCatalogInfo(const std::string &kv_info_str) override
     {
-        assert(false);
+        if (kv_info_ == nullptr)
+        {
+            kv_info_ = std::make_unique<KVCatalogInfo>();
+        }
+        size_t offset = 0;
+        kv_info_->Deserialize(kv_info_str.data(), offset);
     }
     size_t IndexesSize() const override
     {
@@ -183,6 +198,7 @@ private:
     TableName table_name_;  // string owner
     std::string schema_image_;
     uint64_t version_;
+    std::string version_str_;  // owning backing for VersionStringView()
     std::unique_ptr<MockKeySchema> key_schema_;
     MockRecordSchema record_schema_;
     KVCatalogInfo::uptr kv_info_;
@@ -211,10 +227,17 @@ public:
                               txservice::NodeGroupId cc_ng_id) override
     {
         uint64_t schema_ts = table_schema->KeySchema()->SchemaTs();
+        // RangePartitioned=false: tables created through this factory are
+        // EloqKv-engine tables (TableName::IsHashPartitioned() == true), so the
+        // CcMap must be hash-partitioned. A range-partitioned map would route
+        // point reads through PinRangeSlice (which needs range slices and a KV
+        // catalog the mock does not provide) instead of the hash-partition fast
+        // path that, with full entries, resolves a cache miss to Deleted
+        // without touching the store.
         return std::make_unique<txservice::TemplateCcMap<CompositeKey<int>,
                                                          CompositeRecord<int>,
                                                          true,
-                                                         true>>(
+                                                         false>>(
             shard,
             cc_ng_id,
             table_name,

@@ -804,11 +804,38 @@ public:
 
     TxKey CloneTxKey() const
     {
-        return TxKey();
+        // Must return an owning TxKey (mirrors VoidKey::CloneTxKey): the
+        // data-sync/checkpoint flush path clones each key via TxKey::Clone() ->
+        // clone_func_ -> CloneTxKey() and then dereferences it (e.g.
+        // TxKey::Hash()). Returning an empty TxKey() here yields a null
+        // interface and segfaults on first use.
+        if (this == NegativeInfinity())
+        {
+            return TxKey(NegativeInfinity());
+        }
+        else if (this == PositiveInfinity())
+        {
+            return TxKey(PositiveInfinity());
+        }
+        else
+        {
+            return TxKey(std::make_unique<CompositeKey<Types...>>(*this));
+        }
     }
 
     KeyType Type() const
     {
+        // Recognize the singleton ±∞ sentinels (mirrors CloneTxKey above and
+        // VoidKey::Type), so cloned/boundary keys report the correct enum
+        // through TxKey::Type() instead of always looking like Normal keys.
+        if (this == NegativeInfinity())
+        {
+            return KeyType::NegativeInf;
+        }
+        else if (this == PositiveInfinity())
+        {
+            return KeyType::PositiveInf;
+        }
         return KeyType::Normal;
     }
 
