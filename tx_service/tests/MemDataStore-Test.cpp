@@ -362,6 +362,74 @@ TEST_CASE("MemDataStore forward scan returns keys in order", "[mem-data-store]")
     REQUIRE(items[3].value_ == "vd");
 }
 
+TEST_CASE("MemDataStore paginated scan reseeks correctly across batches",
+          "[mem-data-store]")
+{
+    ServiceFixture fx;
+
+    const std::string table = "page_table";
+    const int32_t partition = 0;
+
+    // Five keys scanned with batch_size=2 forces multi-batch continuation
+    // (2 + 2 + 1). This mirrors exactly how the production
+    // SinglePartitionScanner drives a multi-batch scan: advance start_key to
+    // the last returned key with inclusive_start=false, set
+    // generate_session_id=true, and carry the returned session_id forward. It
+    // proves MemDataStore's session-less re-seek yields the same complete,
+    // in-order, gap-free result the server-side iterator backend would -- i.e.
+    // the continuation contract is preserved despite MemDataStore not keeping a
+    // server-side iterator.
+    const std::vector<std::string> keys = {"a", "b", "c", "d", "e"};
+    for (const auto &k : keys)
+    {
+        remote::CommonResult result;
+        Put(fx, table, partition, k, "v_" + k, /*ts=*/300, result);
+        REQUIRE(result.error_code() == kNoError);
+    }
+
+    constexpr uint32_t kBatch = 2;
+    std::vector<std::string> collected;
+    std::string session_id;
+    std::string start_key;
+    bool first_batch = true;
+    for (int guard = 0; guard < 100; ++guard)  // guard against an infinite loop
+    {
+        std::vector<ScanTuple> items;
+        remote::CommonResult result;
+        NoopClosure done;
+        fx.service().ScanNext(table,
+                              partition,
+                              ServiceFixture::kShardId,
+                              start_key,
+                              /*end_key=*/"",
+                              /*inclusive_start=*/first_batch,
+                              /*inclusive_end=*/true,
+                              /*scan_forward=*/true,
+                              kBatch,
+                              /*search_conditions=*/nullptr,
+                              &items,
+                              &session_id,
+                              /*generate_session_id=*/true,
+                              &result,
+                              &done);
+        REQUIRE(result.error_code() == kNoError);
+        REQUIRE(items.size() <= kBatch);
+        for (const auto &it : items)
+        {
+            collected.push_back(it.key_);
+        }
+        if (items.size() < kBatch)
+        {
+            break;  // a short batch means the scan is drained
+        }
+        start_key = items.back().key_;
+        first_batch = false;
+    }
+
+    // All five keys, in order, no duplicates, no gaps -- across three batches.
+    REQUIRE(collected == keys);
+}
+
 TEST_CASE("MemDataStore backward scan returns keys in descending order",
           "[mem-data-store]")
 {

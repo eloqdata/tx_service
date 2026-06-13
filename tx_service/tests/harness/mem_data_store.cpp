@@ -247,16 +247,22 @@ void MemDataStore::ScanNext(ScanRequest *req)
     bool scan_forward = req->ScanForward();
     uint32_t batch = req->BatchSize();
 
-    // Continuation differs from production. The real DataStoreService keeps a
-    // server-side iterator alive across batches and resumes it via a session_id
-    // (stored in scan_iter_cache_), so it does not re-seek per call. This
-    // MemDataStore instead clears the session and re-positions by key each
-    // call: when a batch returns BatchSize() items, the client re-issues
-    // ScanNext with start_key set to the last returned key
-    // (inclusive_start=false), and the backend re-seeks the ordered map from
-    // there. The scan is treated as drained once fewer than BatchSize() items
-    // come back. Re-seeking an in-memory std::map per batch is a valid
-    // simplification (no persistent iterator/session to keep alive).
+    // Continuation: re-seek by key, ignoring the session. The real
+    // DataStoreService keeps a server-side iterator alive across batches and
+    // resumes it via a session_id (stored in scan_iter_cache_); MemDataStore
+    // keeps no such iterator and clears the session instead. This is
+    // functionally equivalent for the production continuation contract, NOT a
+    // weaker one: the client's SinglePartitionScanner::FetchNextBatch always
+    // re-issues ScanNext with start_key advanced to the last returned key and
+    // inclusive_start=false (data_store_service_scanner.cpp), so re-seeking the
+    // ordered map from that start_key yields exactly the same next batch the
+    // server-side iterator would. The session_id the client also passes is
+    // purely a server-side iterator optimization; honoring it would only avoid
+    // the O(log n) re-seek, never change results. The scan is drained once a
+    // batch returns fewer than BatchSize() items. (A hypothetical caller that
+    // resumed by session_id WITHOUT advancing start_key would diverge, but the
+    // production client never does that. The MemDataStore-Test paginated-scan
+    // case exercises this multi-batch reseek path.)
     req->ClearSessionId();
 
     std::lock_guard<std::mutex> lk(mux_);
