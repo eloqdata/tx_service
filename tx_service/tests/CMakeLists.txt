@@ -21,6 +21,25 @@ target_include_directories(test_harness PUBLIC
 target_link_libraries(test_harness PUBLIC data_substrate)
 set_property(TARGET test_harness PROPERTY CXX_STANDARD 20)
 
+# --- Phase 2 cluster harness: workload proto + driver lib ---
+set(WORKLOAD_PROTO ${CMAKE_CURRENT_SOURCE_DIR}/cluster/txnode_workload.proto)
+add_custom_command(
+    OUTPUT ${CMAKE_CURRENT_BINARY_DIR}/txnode_workload.pb.cc
+           ${CMAKE_CURRENT_BINARY_DIR}/txnode_workload.pb.h
+    COMMAND protoc --cpp_out=${CMAKE_CURRENT_BINARY_DIR}
+            -I ${CMAKE_CURRENT_SOURCE_DIR}/cluster ${WORKLOAD_PROTO}
+    DEPENDS ${WORKLOAD_PROTO}
+    COMMENT "Generating txnode_workload.pb.{h,cc}")
+add_library(cluster_harness STATIC
+    ${CMAKE_CURRENT_BINARY_DIR}/txnode_workload.pb.cc
+    ${CMAKE_CURRENT_SOURCE_DIR}/cluster/scripted_host_manager.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/cluster/test_cluster.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/cluster/txnode_bringup.cpp)
+target_include_directories(cluster_harness PUBLIC
+    ${CMAKE_CURRENT_SOURCE_DIR} ${CMAKE_CURRENT_BINARY_DIR} ${HARNESS_DIR})
+target_link_libraries(cluster_harness PUBLIC data_substrate)
+set_property(TARGET cluster_harness PROPERTY CXX_STANDARD 20)
+
 # --- Test executables ---
 # Tests that rely on Catch2 to provide main() (the "Let Catch provide main()"
 # files). They link Catch2::Catch2WithMain.

@@ -1,0 +1,34 @@
+syntax = "proto3";
+package txnode_workload;
+option cc_generic_services = true;
+
+message BeginTxReq { uint32 isolation = 1; uint32 protocol = 2; }
+message BeginTxResp { uint64 tx_handle = 1; bool error = 2; }
+
+message UpsertReq { uint64 tx_handle = 1; int32 key = 2; int32 value = 3; bool is_delete = 4; }
+message UpsertResp { bool ok = 1; }
+
+message ReadReq { uint64 tx_handle = 1; int32 key = 2; }
+message ReadResp { bool found = 1; int32 value = 2; bool error = 3; }
+
+message CommitReq { uint64 tx_handle = 1; }
+message CommitResp { bool committed = 1; }
+
+message AbortReq { uint64 tx_handle = 1; }
+message AbortResp { bool ok = 1; }
+
+message NodeInfoReq { uint32 ng_id = 1; }
+message NodeInfoResp { int64 leader_term = 1; uint32 node_id = 2; bool cluster_ready = 3; }
+
+message ShutdownReq {}
+message ShutdownResp {}
+
+service WorkloadService {
+  rpc BeginTx(BeginTxReq) returns (BeginTxResp);
+  rpc Upsert(UpsertReq) returns (UpsertResp);
+  rpc Read(ReadReq) returns (ReadResp);
+  rpc Commit(CommitReq) returns (CommitResp);
+  rpc Abort(AbortReq) returns (AbortResp);
+  rpc NodeInfo(NodeInfoReq) returns (NodeInfoResp);
+  rpc Shutdown(ShutdownReq) returns (ShutdownResp);
+}
