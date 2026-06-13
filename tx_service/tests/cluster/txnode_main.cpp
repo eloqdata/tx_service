@@ -339,6 +339,56 @@ public:
                                 0);
     }
 
+    void WaitReady(::google::protobuf::RpcController *,
+                   const txnode_workload::WaitReadyReq *,
+                   txnode_workload::WaitReadyResp *resp,
+                   ::google::protobuf::Closure *done) override
+    {
+        brpc::ClosureGuard done_guard(done);
+        Sharder &sharder = Sharder::Instance();
+
+        // Finish the native-NG recovery for the skip_wal/external-HM bring-up.
+        // The driver has already driven CcRpcService.OnLeaderStart for this
+        // node's native NG, which set the *candidate* leader term but did NOT
+        // promote it to a real leader term: under skip_wal with log_hd=nullptr
+        // there is no log service to call FinishLogReplay, so candidate->leader
+        // promotion never happens on its own. The hm-less self-promote path in
+        // Sharder::Start (sharder.cpp, the `else` branch) finishes this
+        // directly in the test env; we mirror that exact sequence here because
+        // the multi-node bring-up takes the HM branch instead. Idempotent: once
+        // the leader term is already positive there is nothing to do.
+        if (sharder.LeaderTerm(native_ng_id_) <= 0)
+        {
+            int64_t candidate_term = sharder.CandidateLeaderTerm(native_ng_id_);
+            if (candidate_term > 0)
+            {
+                sharder.SetLeaderTerm(native_ng_id_, candidate_term);
+                sharder.SetCandidateTerm(native_ng_id_, -1);
+                sharder.NodeGroupFinishRecovery(native_ng_id_);
+            }
+        }
+
+        if (sharder.LeaderTerm(native_ng_id_) <= 0)
+        {
+            // OnLeaderStart was never driven for this node (a driver-ordering
+            // bug). Report not-ready rather than block forever in
+            // WaitClusterReady waiting for a native leader that will never
+            // come.
+            resp->set_ready(false);
+            return;
+        }
+
+        // Drive the cross-NG readiness handshake. For every remote NG this
+        // sends a RecoverStateCheckRequest over the cc-stream and blocks until
+        // the remote leader (whose LeaderTerm is now > 0) answers, populating
+        // recovered_leader_set_. The driver propagated every NG's leader to
+        // this node's cache via NotifyNewLeaderStart, so LeaderNodeId()
+        // resolves the remote targets and the cc-stream routes the checks
+        // correctly.
+        svc_->WaitClusterReady();
+        resp->set_ready(true);
+    }
+
     void Shutdown(::google::protobuf::RpcController *,
                   const txnode_workload::ShutdownReq *,
                   txnode_workload::ShutdownResp *,

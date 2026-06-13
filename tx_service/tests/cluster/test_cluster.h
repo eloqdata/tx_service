@@ -24,6 +24,7 @@
 #include <brpc/channel.h>
 #include <sys/types.h>  // pid_t
 
+#include <chrono>
 #include <cstdint>
 #include <memory>
 #include <string>
@@ -111,6 +112,37 @@ private:
     // for `node` (brpc connects lazily; connectivity is verified by an actual
     // RPC in C2). C2 calls this from Start().
     void BuildClient(NodeProc &node);
+
+    // Poll every node's NodeInfo RPC until it answers (TxService::Start
+    // returned, i.e. the node registered with the HM and its workload server is
+    // up), bounded by `timeout`. FailCluster on timeout.
+    void AwaitWorkloadServers(std::chrono::milliseconds timeout);
+
+    // Drive a single NG's leader: open a channel to `node`'s cc-node RPC port
+    // and call CcRpcService.OnLeaderStart(ng, term=1, config_version) until it
+    // succeeds (mirrors raft_host_manager.cpp's on_leader_start). Retries on
+    // cntl.Failed() / resp.error()/resp.retry(), bounded. FailCluster on
+    // timeout. The cluster_config / node_configs are left empty: the nodes were
+    // started with config_version=kClusterConfigVersion and already hold the
+    // full topology, so OnLeaderStart's UpdateInMemoryClusterConfig
+    // early-returns (version not advanced) and does not clobber it.
+    void DriveLeader(uint32_t ng_id,
+                     const NodeProc &node,
+                     std::chrono::milliseconds timeout);
+
+    // Tell `target` node that `ng_id`'s leader is `leader_node_id` (term 1) via
+    // CcRpcService.NotifyNewLeaderStart, so the target's ng_leader_cache_
+    // resolves cross-NG routing. Retries on RPC failure, bounded.
+    void NotifyLeader(const NodeProc &target,
+                      uint32_t ng_id,
+                      uint32_t leader_node_id,
+                      std::chrono::milliseconds timeout);
+
+    // Call every node's WaitReady RPC (finishes native-NG recovery + drives the
+    // cross-NG RecoverStateCheck handshake) and then verify a trivial empty tx
+    // commits and a cross-NG read returns without an RPC error. FailCluster on
+    // timeout / not-ready, pointing at the per-node logs.
+    void AwaitClusterReady(std::chrono::milliseconds timeout);
 
     // SIGKILL + waitpid one NodeProc; marks pid = -1. Safe if already reaped.
     void KillNode(NodeProc &node);

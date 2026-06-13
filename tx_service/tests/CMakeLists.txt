@@ -88,3 +88,19 @@ endforeach()
 foreach(name ${OWN_MAIN_TESTS})
     add_substrate_test(${name} Catch2::Catch2)
 endforeach()
+
+# --- Phase 2 cross-NG cluster test (own main; links cluster_harness) ---
+# Drives a real 2-node out-of-process cluster, so it links cluster_harness (the
+# TestCluster driver + generated WorkloadService stub) and must be built after
+# the `txnode` binary it spawns (TestCluster locates txnode next to the test
+# binary, in the same tests/ dir).
+add_executable(ClusterCrossNg-Test ${TESTS_DIR}/ClusterCrossNg-Test.cpp)
+target_include_directories(ClusterCrossNg-Test PRIVATE
+    ${TESTS_DIR} ${HARNESS_DIR} ${CMAKE_CURRENT_BINARY_DIR}
+    ${CMAKE_CURRENT_SOURCE_DIR}/cluster)
+target_link_libraries(ClusterCrossNg-Test PRIVATE
+    cluster_harness test_harness data_substrate Catch2::Catch2)
+set_property(TARGET ClusterCrossNg-Test PROPERTY CXX_STANDARD 20)
+set_property(TARGET ClusterCrossNg-Test PROPERTY CXX_EXTENSIONS OFF)
+add_dependencies(ClusterCrossNg-Test txnode)
+catch_discover_tests(ClusterCrossNg-Test PROPERTIES LABELS "ClusterCrossNg-Test")

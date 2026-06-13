@@ -23,6 +23,15 @@ message NodeInfoResp { int64 leader_term = 1; uint32 node_id = 2; bool cluster_r
 message ShutdownReq {}
 message ShutdownResp {}
 
+// Finish this node's native-NG recovery (skip_wal path) and wait until the
+// whole cluster is ready. The driver calls this once per node after it has
+// driven OnLeaderStart for every NG and propagated the leader caches via
+// NotifyNewLeaderStart, so the cross-NG RecoverStateCheck handshake inside
+// WaitClusterReady can resolve. Returns ready=false if the node never reached a
+// leader term for its native NG before the call (a bring-up bug).
+message WaitReadyReq {}
+message WaitReadyResp { bool ready = 1; }
+
 service WorkloadService {
   rpc BeginTx(BeginTxReq) returns (BeginTxResp);
   rpc Upsert(UpsertReq) returns (UpsertResp);
@@ -30,5 +39,6 @@ service WorkloadService {
   rpc Commit(CommitReq) returns (CommitResp);
   rpc Abort(AbortReq) returns (AbortResp);
   rpc NodeInfo(NodeInfoReq) returns (NodeInfoResp);
+  rpc WaitReady(WaitReadyReq) returns (WaitReadyResp);
   rpc Shutdown(ShutdownReq) returns (ShutdownResp);
 }
