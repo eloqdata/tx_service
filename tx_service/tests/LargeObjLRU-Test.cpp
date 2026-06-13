@@ -2595,8 +2595,16 @@ TEST_CASE(
         page_L = it.GetPage();
         FLCcEntry *cce = it->second;
 
-        // Partial commit: set PayloadStatus=Normal but skip ckpt/flush/commit.
+        // Partial commit: set PayloadStatus=Normal but skip ckpt/flush so the
+        // entry stays dirty (ckpt_ts 0 < commit_ts 100). OnCommittedUpdate
+        // keeps BOTH the map's and the shard's dirty_data_key_count_ in step
+        // with the clean->dirty transition, so the matching decrement during
+        // Terminate() does not underflow. (Compensating only the shard counter,
+        // as an earlier version did, left the map's count at 0 and tripped the
+        // dirty_data_key_count_ assert in TemplateCcMap::AdjustDataKeyStats.)
+        bool was_dirty = cce->IsDirty();
         cce->SetCommitTsPayloadStatus(100, RecordStatus::Normal);
+        cc_map.OnCommittedUpdate(cce, was_dirty);
         // Inject large payload (needed by EnsureLargeObjOccupyPageAlone).
         cce->payload_.cur_payload_ = std::make_shared<FakeLargeRecord>(2048);
         cc_map.EnsureLargeObjOccupyPageAlone(page_L, cce);
@@ -2604,8 +2612,6 @@ TEST_CASE(
         REQUIRE(page_L->large_obj_page_ == true);
         REQUIRE(page_L->Size() == 1u);
     }
-    // Pre-register L's entry as dirty so Terminate() can safely decrement.
-    f.shard.AdjustDataKeyStats(tn, 0, 1);
 
     // -----------------------------------------------------------------------
     // Step 2: Insert 5 entries into page S.
@@ -2670,11 +2676,14 @@ TEST_CASE(
         auto it = cc_map.FindEmplace(k4, &emplace, false, false);
         REQUIRE(emplace == false);
         REQUIRE(it.GetPage() == page_S);
-        it->second->SetCommitTsPayloadStatus(100, RecordStatus::Normal);
-        // No SetCkptTs/OnFlushed/OnCommittedUpdate → stays non-free.
+        // Skip SetCkptTs/OnFlushed so it stays dirty (ckpt 0 < commit 100), but
+        // DO call OnCommittedUpdate so the dirty_data_key_count_ (map + shard)
+        // tracks it and Terminate()'s decrement stays balanced.
+        FLCcEntry *cce = it->second;
+        bool was_dirty = cce->IsDirty();
+        cce->SetCommitTsPayloadStatus(100, RecordStatus::Normal);
+        cc_map.OnCommittedUpdate(cce, was_dirty);
     }
-    // Pre-register s4 as dirty so Terminate() can safely decrement.
-    f.shard.AdjustDataKeyStats(tn, 0, 1);
 
     // Sanity: S has 5 entries, L has 1, two pages total, LRU intact.
     REQUIRE(page_S->Size() == 5u);
@@ -2801,13 +2810,15 @@ TEST_CASE(
             REQUIRE(p == page_L);
         }
         // Partial commit → IsFree()==false (commit_ts=100 > ckpt_ts=0).
+        // OnCommittedUpdate keeps the map + shard dirty_data_key_count_ in step
+        // with the clean->dirty transition so Terminate()'s decrement does not
+        // underflow.
+        bool was_dirty = it->second->IsDirty();
         it->second->SetCommitTsPayloadStatus(100, RecordStatus::Normal);
+        cc_map.OnCommittedUpdate(it->second, was_dirty);
     }
     REQUIRE(page_L != nullptr);
     REQUIRE(page_L->Size() == static_cast<size_t>(L_COUNT));
-
-    // Pre-register all L entries as dirty so Terminate() can safely decrement.
-    f.shard.AdjustDataKeyStats(tn, 0, L_COUNT);
 
     // Manually promote L to large-object page so the borrow/merge guard fires.
     // This bypasses EnsureLargeObjOccupyPageAlone's exclusivity enforcement
@@ -2873,17 +2884,21 @@ TEST_CASE(
         page_S->last_dirty_commit_ts_ =
             std::max(cce->CommitTs(), page_S->last_dirty_commit_ts_);
     }
-    // Partial commit s4: commit_ts=100, ckpt_ts=0 → IsFree()==false.
+    // Partial commit s4: commit_ts=100, ckpt_ts=0 → IsFree()==false. Skip
+    // SetCkptTs/OnFlushed so it stays dirty, but call OnCommittedUpdate so the
+    // dirty_data_key_count_ (map + shard) tracks it and Terminate()'s decrement
+    // stays balanced.
     {
         TestKey k4 = std::make_tuple(std::string("merge02_s4"), 0);
         bool emplace = false;
         auto it = cc_map.FindEmplace(k4, &emplace, false, false);
         REQUIRE(emplace == false);
         REQUIRE(it.GetPage() == page_S);
-        it->second->SetCommitTsPayloadStatus(100, RecordStatus::Normal);
+        FLCcEntry *cce = it->second;
+        bool was_dirty = cce->IsDirty();
+        cce->SetCommitTsPayloadStatus(100, RecordStatus::Normal);
+        cc_map.OnCommittedUpdate(cce, was_dirty);
     }
-    // Pre-register s4 as dirty so Terminate() can safely decrement.
-    f.shard.AdjustDataKeyStats(tn, 0, 1);
 
     REQUIRE(page_S->Size() == 5u);
     REQUIRE(page_L->Size() == static_cast<size_t>(L_COUNT));
@@ -3084,17 +3099,20 @@ TEST_CASE(
             std::max(cce->CommitTs(), page_A->last_dirty_commit_ts_);
     }
 
-    // a4: partial commit → IsFree()==false.
+    // a4: partial commit → IsFree()==false. Skip SetCkptTs/OnFlushed so it
+    // stays dirty, but call OnCommittedUpdate so the dirty_data_key_count_
+    // (map + shard) tracks it and Terminate()'s decrement stays balanced.
     {
         TestKey k4 = std::make_tuple(std::string("merge03_a4"), 0);
         bool emplace = false;
         auto it = cc_map.FindEmplace(k4, &emplace, false, false);
         REQUIRE(emplace == false);
         REQUIRE(it.GetPage() == page_A);
-        it->second->SetCommitTsPayloadStatus(100, RecordStatus::Normal);
+        FLCcEntry *cce = it->second;
+        bool was_dirty = cce->IsDirty();
+        cce->SetCommitTsPayloadStatus(100, RecordStatus::Normal);
+        cc_map.OnCommittedUpdate(cce, was_dirty);
     }
-    // Pre-register a4 as dirty so Terminate() can safely decrement.
-    f.shard.AdjustDataKeyStats(tn, 0, 1);
 
     // b0-b4: full commit → IsFree()=true (not cleaned since we only target A).
     for (int i = 0; i < 5; ++i)

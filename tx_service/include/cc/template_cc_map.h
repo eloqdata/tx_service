@@ -9845,7 +9845,11 @@ protected:
                 target_it++;
                 if (target_it == ccmp_.end())
                 {
-                    // target_page still points to the large page A.
+                    // The large page A is the last page in the map. target_page
+                    // still points to A while we build the new page, so the
+                    // constructor receives prev=A, next=A->next_page_. After
+                    // the emplace, repoint target_page to the new page so the
+                    // key is inserted there and not back into the large page A.
                     target_it = ccmp_.try_emplace(
                         target_it,
                         key,
@@ -9854,6 +9858,7 @@ protected:
                                                 VersionedRecord,
                                                 RangePartitioned>>(
                             this, target_page, target_page->next_page_));
+                    target_page = target_it->second.get();
                 }
                 else
                 {

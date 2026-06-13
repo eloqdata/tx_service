@@ -32,23 +32,20 @@ jobs:
       - name: Build
         run: cmake --build bld --parallel "$(nproc)"
 
-      - name: Test (gating — excludes LargeObjLRU-Test and ClusterCrossNg-Test)
+      - name: Test (gating — excludes ClusterCrossNg-Test)
         working-directory: bld
-        # ctest -LE takes a regex matched against test labels; '|' is regex
-        # alternation, so this excludes both labels from the gating run.
-        run: ctest --output-on-failure --timeout 180 -LE "LargeObjLRU-Test|ClusterCrossNg-Test"
+        # ctest -LE takes a regex matched against test labels. LargeObjLRU-Test
+        # now gates: the FastMetaDataMutex tls_shard_idx fix made it
+        # deterministic, the FindEmplace LO-LRU last-page routing bug
+        # (assert(!keys_.empty())) is fixed, and the dirty_data_key_count_
+        # underflow it surfaced was a test-setup bug (shard-only dirty
+        # compensation) now corrected. All 23 cases pass.
+        run: ctest --output-on-failure --timeout 180 -LE "ClusterCrossNg-Test"
 
-      # LargeObjLRU-Test is now deterministic after the FastMetaDataMutex
-      # tls_shard_idx fix (14/15 cases pass), but TC-FE-01 hits a separate,
-      # pre-existing assert(!keys_.empty()) in the LO-LRU FindEmplace path that
-      # was previously masked by memory corruption. Kept non-gating until that
-      # is resolved. See docs/.../2026-06-13-largeobjlru-spin-rootcause-and-fix.
-      #
       # ClusterCrossNg-Test spawns real `txnode` subprocesses and is slower /
       # heavier than the in-process unit tests; until it is proven stable across
-      # CI runs it stays non-gating, run for information only alongside
-      # LargeObjLRU-Test.
-      - name: Stress/cluster tests (non-gating; informational)
+      # CI runs it stays non-gating, run for information only.
+      - name: Cluster test (non-gating; informational)
         working-directory: bld
         continue-on-error: true
-        run: ctest --output-on-failure --timeout 180 -L "LargeObjLRU-Test|ClusterCrossNg-Test"
+        run: ctest --output-on-failure --timeout 180 -L "ClusterCrossNg-Test"
