@@ -202,10 +202,3 @@ TEST_CASE("CcPage clean tests", "[cc-page]")
 }
 
 }  // namespace txservice
-
-int main(int argc, char **argv)
-{
-    gflags::ParseCommandLineFlags(&argc, &argv, true);
-    int ret = Catch::Session().run(argc, argv);
-    return ret;
-}
