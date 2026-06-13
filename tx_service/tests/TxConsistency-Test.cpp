@@ -85,6 +85,17 @@ TEST_CASE("transaction consistency on TestNode", "[tx]")
         bool c1 = t1.Commit();
         bool c2 = t2.Commit();
         REQUIRE(c1 != c2);  // exactly one commits; the other fails validation
+
+        // The winning writer's value must be visible afterwards (t1 wrote 1,
+        // t2 wrote 2). This confirms the aborted writer's post-abort cleanup
+        // left the correct value in place rather than its own buffered write.
+        {
+            auto t = node.BeginTx();
+            int v = 0;
+            REQUIRE(t.Read(11, v));
+            REQUIRE(v == (c1 ? 1 : 2));
+            REQUIRE(t.Commit());
+        }
     }
 }
 

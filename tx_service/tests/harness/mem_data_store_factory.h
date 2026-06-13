@@ -45,6 +45,12 @@ public:
 
     DataStoreFactoryType DataStoreType() const override
     {
+        // This in-memory factory reports ROCKSDB_FACTORY because the only
+        // consumers branch on `!= ELOQSTORE_FACTORY` (a few FlushData /
+        // range-persist gates in data_store_service_client.cpp); those paths
+        // are no-ops or unused for MemDataStore, so any non-ELOQSTORE value
+        // works. A dedicated enumerator would be cleaner but requires changing
+        // the production DataStoreFactoryType; left as a follow-up.
         return DataStoreFactoryType::ROCKSDB_FACTORY;
     }
 

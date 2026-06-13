@@ -68,6 +68,16 @@ struct TestNodeOptions
         protocol = p;
         return *this;
     }
+    TestNodeOptions &SkipWal(bool b)
+    {
+        skip_wal = b;
+        return *this;
+    }
+    TestNodeOptions &Isolation(IsolationLevel iso)
+    {
+        isolation = iso;
+        return *this;
+    }
 };
 
 // A thin wrapper around a single TransactionExecution. Read/Write helpers are
@@ -82,6 +92,14 @@ public:
         : txm_(txm), table_(table), schema_version_(schema_version)
     {
     }
+
+    // A TxHandle owns a raw TransactionExecution* from the engine's pool.
+    // Copying it would alias the same txm (double-commit / use-after-recycle);
+    // move stays defaulted so BeginTx can return one by value.
+    TxHandle(const TxHandle &) = delete;
+    TxHandle &operator=(const TxHandle &) = delete;
+    TxHandle(TxHandle &&) = default;
+    TxHandle &operator=(TxHandle &&) = default;
 
     // TODO(C3): implement against a registered table.
     bool Upsert(int key, int value);

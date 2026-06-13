@@ -159,6 +159,93 @@ void Put(ServiceFixture &fx,
                                    /*parts_cnt_per_key=*/1,
                                    /*parts_cnt_per_record=*/1);
 }
+
+// Deletes one key through the production BatchWriteRecords local overload by
+// issuing a DELETE op (the record value is ignored for a delete).
+void DeleteKey(ServiceFixture &fx,
+               std::string_view table,
+               int32_t partition,
+               std::string_view key,
+               uint64_t ts,
+               remote::CommonResult &result)
+{
+    std::vector<std::string_view> key_parts{key};
+    std::vector<std::string_view> rec_parts{std::string_view{}};
+    std::vector<uint64_t> tss{ts};
+    std::vector<uint64_t> ttls{0};
+    std::vector<WriteOpType> ops{WriteOpType::DELETE};
+    NoopClosure done;
+
+    fx.service().BatchWriteRecords(table,
+                                   partition,
+                                   ServiceFixture::kShardId,
+                                   key_parts,
+                                   rec_parts,
+                                   tss,
+                                   ttls,
+                                   ops,
+                                   /*skip_wal=*/true,
+                                   result,
+                                   &done,
+                                   /*parts_cnt_per_key=*/1,
+                                   /*parts_cnt_per_record=*/1);
+}
+
+// Reads one key through the production Read local overload, returning the
+// result error code; out_record/out_ts are populated on a hit.
+int ReadKey(ServiceFixture &fx,
+            std::string_view table,
+            int32_t partition,
+            std::string_view key,
+            std::string &out_record,
+            uint64_t &out_ts)
+{
+    uint64_t out_ttl = 0;
+    remote::CommonResult result;
+    NoopClosure done;
+    fx.service().Read(table,
+                      partition,
+                      ServiceFixture::kShardId,
+                      key,
+                      &out_record,
+                      &out_ts,
+                      &out_ttl,
+                      &result,
+                      &done);
+    return result.error_code();
+}
+
+// Runs a single ScanNext batch through the production local overload.
+void Scan(ServiceFixture &fx,
+          std::string_view table,
+          int32_t partition,
+          std::string_view start_key,
+          std::string_view end_key,
+          bool inclusive_start,
+          bool inclusive_end,
+          bool scan_forward,
+          uint32_t batch_size,
+          std::vector<ScanTuple> &items,
+          remote::CommonResult &result)
+{
+    std::string session_id;
+    NoopClosure done;
+    fx.service().ScanNext(table,
+                          partition,
+                          ServiceFixture::kShardId,
+                          start_key,
+                          end_key,
+                          inclusive_start,
+                          inclusive_end,
+                          scan_forward,
+                          batch_size,
+                          /*search_conditions=*/nullptr,
+                          &items,
+                          &session_id,
+                          /*generate_session_id=*/false,
+                          &result,
+                          &done);
+}
 }  // namespace
 
 TEST_CASE("MemDataStore write then read round-trip", "[mem-data-store]")
@@ -270,7 +357,175 @@ TEST_CASE("MemDataStore forward scan returns keys in order", "[mem-data-store]")
     REQUIRE(items[2].key_ == "c");
     REQUIRE(items[3].key_ == "d");
     REQUIRE(items[0].value_ == "va");
+    REQUIRE(items[1].value_ == "vb");
+    REQUIRE(items[2].value_ == "vc");
     REQUIRE(items[3].value_ == "vd");
+}
+
+TEST_CASE("MemDataStore backward scan returns keys in descending order",
+          "[mem-data-store]")
+{
+    ServiceFixture fx;
+
+    const std::string table = "rscan_table";
+    const int32_t partition = 0;
+
+    const std::vector<std::pair<std::string, std::string>> kvs = {
+        {"a", "va"}, {"b", "vb"}, {"c", "vc"}, {"d", "vd"}};
+    for (const auto &[k, v] : kvs)
+    {
+        remote::CommonResult result;
+        Put(fx, table, partition, k, v, /*ts=*/200, result);
+        REQUIRE(result.error_code() == kNoError);
+    }
+
+    // Backward scan over the full range: start is the upper bound, end the
+    // lower bound. Empty bounds mean "from the greatest key down to the
+    // smallest"; exercises the reverse-iterator path in MemDataStore::ScanNext.
+    std::vector<ScanTuple> items;
+    remote::CommonResult result;
+    Scan(fx,
+         table,
+         partition,
+         /*start_key=*/"",
+         /*end_key=*/"",
+         /*inclusive_start=*/true,
+         /*inclusive_end=*/true,
+         /*scan_forward=*/false,
+         /*batch_size=*/100,
+         items,
+         result);
+
+    REQUIRE(result.error_code() == kNoError);
+    REQUIRE(items.size() == kvs.size());
+    REQUIRE(items[0].key_ == "d");
+    REQUIRE(items[1].key_ == "c");
+    REQUIRE(items[2].key_ == "b");
+    REQUIRE(items[3].key_ == "a");
+}
+
+TEST_CASE("MemDataStore bounded scan honors inclusive/exclusive ends",
+          "[mem-data-store]")
+{
+    ServiceFixture fx;
+
+    const std::string table = "bscan_table";
+    const int32_t partition = 0;
+
+    const std::vector<std::pair<std::string, std::string>> kvs = {
+        {"a", "va"}, {"b", "vb"}, {"c", "vc"}, {"d", "vd"}};
+    for (const auto &[k, v] : kvs)
+    {
+        remote::CommonResult result;
+        Put(fx, table, partition, k, v, /*ts=*/200, result);
+        REQUIRE(result.error_code() == kNoError);
+    }
+
+    // [start="b", end="c") with inclusive_start=true, inclusive_end=false must
+    // yield exactly {b}: b is included, c is excluded by the open upper bound.
+    std::vector<ScanTuple> items;
+    remote::CommonResult result;
+    Scan(fx,
+         table,
+         partition,
+         /*start_key=*/"b",
+         /*end_key=*/"c",
+         /*inclusive_start=*/true,
+         /*inclusive_end=*/false,
+         /*scan_forward=*/true,
+         /*batch_size=*/100,
+         items,
+         result);
+
+    REQUIRE(result.error_code() == kNoError);
+    REQUIRE(items.size() == 1);
+    REQUIRE(items[0].key_ == "b");
+    REQUIRE(items[0].value_ == "vb");
+}
+
+TEST_CASE("MemDataStore DELETE via BatchWriteRecords removes the key",
+          "[mem-data-store]")
+{
+    ServiceFixture fx;
+
+    const std::string table = "del_table";
+    const int32_t partition = 0;
+    const std::string key = "k1";
+
+    // PUT, confirm present, DELETE through the write path, confirm gone.
+    {
+        remote::CommonResult result;
+        Put(fx, table, partition, key, "v1", /*ts=*/100, result);
+        REQUIRE(result.error_code() == kNoError);
+    }
+    {
+        std::string out_record;
+        uint64_t out_ts = 0;
+        REQUIRE(ReadKey(fx, table, partition, key, out_record, out_ts) ==
+                kNoError);
+        REQUIRE(out_record == "v1");
+    }
+    {
+        remote::CommonResult result;
+        DeleteKey(fx, table, partition, key, /*ts=*/101, result);
+        REQUIRE(result.error_code() == kNoError);
+    }
+    {
+        std::string out_record;
+        uint64_t out_ts = 0;
+        REQUIRE(ReadKey(fx, table, partition, key, out_record, out_ts) ==
+                kKeyNotFound);
+    }
+}
+
+// Drives a write straight through a MemDataStore backend that has been switched
+// to read-only. The DataStoreService gates writes at the shard-status level
+// before they reach the backend, and the read-only switch on a live shard is
+// not part of the public service surface, so this test constructs a backend
+// directly (still wired to the fixture's service for the request closure's
+// write-counter bookkeeping) and drives a pooled WriteRecordsLocalRequest --
+// the same local request type the service hands the backend in production.
+TEST_CASE("MemDataStore rejects writes when read-only", "[mem-data-store]")
+{
+    ServiceFixture fx;
+
+    MemDataStore store(ServiceFixture::kShardId, &fx.service());
+    REQUIRE(store.Initialize());
+    store.SwitchToReadOnly();
+
+    const std::string table = "ro_table";
+    std::vector<std::string_view> key_parts{std::string_view("k1")};
+    std::vector<std::string_view> rec_parts{std::string_view("v1")};
+    std::vector<uint64_t> tss{100};
+    std::vector<uint64_t> ttls{0};
+    std::vector<WriteOpType> ops{WriteOpType::PUT};
+    remote::CommonResult result;
+    NoopClosure done;
+
+    WriteRecordsLocalRequest req;
+    req.Reset(&fx.service(),
+              table,
+              /*partition_id=*/0,
+              ServiceFixture::kShardId,
+              key_parts,
+              rec_parts,
+              tss,
+              ttls,
+              ops,
+              /*skip_wal=*/true,
+              result,
+              &done,
+              /*parts_cnt_per_key=*/1,
+              /*parts_cnt_per_record=*/1);
+
+    // SetFinish (called inside BatchWriteRecords) does
+    // DecreaseWriteReqCount(shard_id); balance it with a matching increase, as
+    // the service's own BatchWriteRecords overload would before dispatching.
+    fx.service().IncreaseWriteReqCount(ServiceFixture::kShardId);
+    store.BatchWriteRecords(&req);
+
+    REQUIRE(result.error_code() ==
+            static_cast<int>(remote::DataStoreError::WRITE_TO_READ_ONLY_DB));
 }
 
 // NOTE: no gflags::ParseCommandLineFlags here. catch_discover_tests runs this

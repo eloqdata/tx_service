@@ -31,6 +31,7 @@
 #include <cstdlib>
 #include <filesystem>
 #include <map>
+#include <stdexcept>
 #include <string>
 #include <string_view>
 #include <unordered_map>
@@ -53,13 +54,24 @@ namespace test
 {
 namespace
 {
+// Hard, build-mode-independent precondition check for fixture bring-up.
+// (assert() would compile out under NDEBUG and silently proceed past a failed
+// bring-up; Catch2 catches the exception and reports it with context.)
+[[noreturn]] void FailBringup(const char *what)
+{
+    throw std::runtime_error(std::string("TestNode bring-up failed: ") + what);
+}
+
 // Binds an ephemeral TCP port on loopback and returns (fd, port) without
 // closing the socket, so the kernel will not hand the same port to a later
 // call. Caller must close the fd once it has claimed the port.
 std::pair<int, uint16_t> BindEphemeralPort()
 {
     int fd = ::socket(AF_INET, SOCK_STREAM, 0);
-    assert(fd >= 0);
+    if (fd < 0)
+    {
+        FailBringup("socket");
+    }
     sockaddr_in addr{};
     addr.sin_family = AF_INET;
     // Probe on INADDR_ANY (0.0.0.0), matching how brpc binds the DSS/cc-node/
@@ -68,11 +80,17 @@ std::pair<int, uint16_t> BindEphemeralPort()
     // on 0.0.0.0), causing spurious "Fail to listen" under port pressure.
     addr.sin_addr.s_addr = htonl(INADDR_ANY);
     addr.sin_port = 0;  // let the kernel choose
-    [[maybe_unused]] int rc =
-        ::bind(fd, reinterpret_cast<sockaddr *>(&addr), sizeof(addr));
-    assert(rc == 0);
+    if (::bind(fd, reinterpret_cast<sockaddr *>(&addr), sizeof(addr)) != 0)
+    {
+        ::close(fd);
+        FailBringup("bind");
+    }
     socklen_t len = sizeof(addr);
-    ::getsockname(fd, reinterpret_cast<sockaddr *>(&addr), &len);
+    if (::getsockname(fd, reinterpret_cast<sockaddr *>(&addr), &len) != 0)
+    {
+        ::close(fd);
+        FailBringup("getsockname");
+    }
     return {fd, ntohs(addr.sin_port)};
 }
 
@@ -264,8 +282,14 @@ TestNode::TestNode(const TestNodeOptions &options)
             impl.dss.reset();
         }
     }
-    assert(dss_ok);
-    assert(impl.dss->GetClusterManager().IsOwnerOfShard(0));
+    if (!dss_ok)
+    {
+        FailBringup("DataStoreService StartService");
+    }
+    if (!impl.dss->GetClusterManager().IsOwnerOfShard(0))
+    {
+        FailBringup("DataStoreService not owner of shard 0");
+    }
 
     // 3. DataStoreServiceClient over the local DSS. The client ctor wants a
     // CatalogFactory*[3]; all engines share the mock factory in tests.
@@ -274,23 +298,29 @@ TestNode::TestNode(const TestNodeOptions &options)
         &impl.catalog_factory,
         &impl.catalog_factory,
     };
-    // bind_data_shard_with_ng MUST be false here. When true, the leader-start
-    // path (CcNode::OnLeaderStart -> DataStoreServiceClient::OnLeaderStart)
-    // calls ClearStandbySnapshotPayloadForEloqStore, which under
-    // DATA_STORE_TYPE_ELOQDSS_ELOQSTORE hard-casts data_store_factory_ to
-    // EloqStoreDataStoreFactory* and dereferences it -- but our factory is a
-    // MemDataStoreFactory, so that static_cast is undefined behavior and
-    // segfaults. With false, that whole ng-bound standby/migration path is
-    // skipped; the DSS shard 0 that StartService already opened stays open and
-    // owned, so reads/writes still route through it.
+    // bind_data_shard_with_ng=false keeps the DSS client out of the ng-bound
+    // leader/standby path. The EloqStoreDataStoreFactory* static_cast UB it
+    // would otherwise hit (CcNode::OnLeaderStart ->
+    // DataStoreServiceClient::OnLeaderStart -> ClearStandbySnapshotPayloadFor-
+    // EloqStore, which under DATA_STORE_TYPE_ELOQDSS_ELOQSTORE hard-casts
+    // data_store_factory_ to EloqStoreDataStoreFactory* and dereferences it --
+    // our factory is a MemDataStoreFactory) is a concern for a future
+    // skip_kv=false fixture. Today skip_kv=true (txservice_skip_kv) already
+    // guards that call with `if (!txservice_skip_kv)` in CcNode::OnLeaderStart,
+    // and store_hd is passed as nullptr below, so that path is unreached
+    // regardless. Keeping bind_data_shard_with_ng=false leaves the DSS shard 0
+    // that StartService already opened open and owned, so reads/writes still
+    // route through it.
     impl.store_hd = std::make_unique<EloqDS::DataStoreServiceClient>(
         /*is_bootstrap=*/true,
         catalog_factory_arr,
         impl.cluster_mgr,
         /*bind_data_shard_with_ng=*/false,
         impl.dss.get());
-    [[maybe_unused]] bool connected = impl.store_hd->Connect();
-    assert(connected);
+    if (!impl.store_hd->Connect())
+    {
+        FailBringup("DataStoreServiceClient Connect");
+    }
 
     // 4. Conf / catalog / prebuilt table -- all port-independent, built before
     // the tx port window is reserved (step 5) so nothing allocates sockets
@@ -342,10 +372,23 @@ TestNode::TestNode(const TestNodeOptions &options)
     // log-replay tx_port+3; no log agent is wired in (hm-less), so the txlog
     // port is never actually bound.
     uint16_t tx_port = 0;
-    do
     {
-        tx_port = ReserveTxPortWindow();
-    } while (dss_port >= tx_port && dss_port <= tx_port + 3);
+        constexpr int kMaxBindRetries = 16;
+        bool window_ok = false;
+        for (int attempt = 0; attempt < kMaxBindRetries; ++attempt)
+        {
+            tx_port = ReserveTxPortWindow();
+            if (dss_port < tx_port || dss_port > tx_port + 3)
+            {
+                window_ok = true;
+                break;
+            }
+        }
+        if (!window_ok)
+        {
+            FailBringup("tx port window");
+        }
+    }
     impl.ng_configs = {{0, {NodeConfig(0, "127.0.0.1", tx_port)}}};
     impl.tx_ips = {"127.0.0.1"};
     impl.tx_ports = {tx_port};
@@ -353,12 +396,14 @@ TestNode::TestNode(const TestNodeOptions &options)
     // store_hd is passed as nullptr here even though the DSS/MemDataStore is
     // brought up above. With skip_kv=true the engine keeps full entries in the
     // cc maps and never routes data through the KV store, so a store handler is
-    // unnecessary for the data path. Crucially, the checkpointer's main loop
-    // early-returns when store_hd_ == nullptr (checkpointer.cpp): if we instead
-    // passed the real handler, the periodic checkpoint would try to data-sync
-    // the in-memory-only prebuilt table and InitCcm would abort (it has no
-    // store-side range/statistics to flush). The DSS bring-up is retained as
-    // scaffolding for a future storage-backed (skip_kv=false) fixture.
+    // unnecessary for the data path. Crucially, the checkpointer thread is
+    // never spawned when store_hd_ == nullptr (Checkpointer ctor guard,
+    // checkpointer.cpp), so no periodic data-sync runs against the
+    // in-memory-only prebuilt table: if we instead passed the real handler, the
+    // periodic checkpoint would try to data-sync the in-memory-only prebuilt
+    // table and InitCcm would abort (it has no store-side range/statistics to
+    // flush). The DSS bring-up is retained as scaffolding for a future
+    // storage-backed (skip_kv=false) fixture.
     impl.tx_service =
         std::make_unique<TxService>(tx_catalog_factory,
                                     &MockSystemHandler::Instance(),
@@ -386,21 +431,23 @@ TestNode::TestNode(const TestNodeOptions &options)
     // hm-less Start: pass nullptr for hm_ip/hm_port/hm_bin_path and the log
     // agent. In the test env Sharder self-promotes node 0 to ng-0 leader and
     // finishes log replay directly (see sharder.cpp OnLeaderStart path).
-    [[maybe_unused]] int started =
-        impl.tx_service->Start(node_id,
-                               ng_id,
-                               &impl.ng_configs,
-                               cluster_config_version,
-                               &impl.tx_ips,
-                               &impl.tx_ports,
-                               /*hm_ip=*/nullptr,
-                               /*hm_port=*/nullptr,
-                               /*hm_bin_path=*/nullptr,
-                               impl.conf,
-                               /*log_agent=*/nullptr,
-                               local_path,
-                               cluster_config_path);
-    assert(started == 0);
+    int started = impl.tx_service->Start(node_id,
+                                         ng_id,
+                                         &impl.ng_configs,
+                                         cluster_config_version,
+                                         &impl.tx_ips,
+                                         &impl.tx_ports,
+                                         /*hm_ip=*/nullptr,
+                                         /*hm_port=*/nullptr,
+                                         /*hm_bin_path=*/nullptr,
+                                         impl.conf,
+                                         /*log_agent=*/nullptr,
+                                         local_path,
+                                         cluster_config_path);
+    if (started != 0)
+    {
+        FailBringup("TxService Start");
+    }
 
     impl.tx_service->WaitClusterReady();
 }
@@ -438,7 +485,10 @@ TxHandle TestNode::BeginTx(IsolationLevel isolation, CcProtocol protocol)
     // Fail fast and locally: never hand back a TxHandle over a txm whose
     // initialization failed, which would surface as confusing downstream
     // errors.
-    assert(!init.IsError());
+    if (init.IsError())
+    {
+        FailBringup("InitTxRequest");
+    }
     return TxHandle(txm, &impl.table, impl.schema_version);
 }
 

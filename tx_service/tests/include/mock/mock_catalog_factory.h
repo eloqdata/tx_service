@@ -67,6 +67,9 @@ public:
           version_(version),
           key_schema_(std::make_unique<MockKeySchema>())
     {
+        // Back VersionStringView() with an owning member; returning a view into
+        // a std::to_string() temporary would dangle.
+        version_str_ = std::to_string(version_);
         // A KV catalog info is required for any storage-backed use: the
         // checkpoint/data-sync path resolves the kv table name through
         // GetKVCatalogInfo()->GetKvTableName(). Mirror EloqBasicTableSchema:
@@ -128,7 +131,7 @@ public:
     }
     std::string_view VersionStringView() const override
     {
-        return std::string_view(std::to_string(version_));
+        return std::string_view(version_str_);
     }
     std::vector<TableName> IndexNames() const override
     {
@@ -195,6 +198,7 @@ private:
     TableName table_name_;  // string owner
     std::string schema_image_;
     uint64_t version_;
+    std::string version_str_;  // owning backing for VersionStringView()
     std::unique_ptr<MockKeySchema> key_schema_;
     MockRecordSchema record_schema_;
     KVCatalogInfo::uptr kv_info_;

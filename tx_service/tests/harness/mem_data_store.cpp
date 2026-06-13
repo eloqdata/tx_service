@@ -82,6 +82,9 @@ void MemDataStore::BatchWriteRecords(WriteRecordsRequest *req)
 {
     PoolableGuard poolable_guard(req);
 
+    // Set the result under the lock but call SetFinish (which runs the request
+    // closure) only after releasing mux_, so the closure never executes under
+    // the store mutex (a re-entrancy / lock-ordering hazard).
     ::EloqDS::remote::CommonResult result;
     {
         std::lock_guard<std::mutex> lk(mux_);
@@ -89,43 +92,43 @@ void MemDataStore::BatchWriteRecords(WriteRecordsRequest *req)
         {
             result.set_error_code(
                 ::EloqDS::remote::DataStoreError::WRITE_TO_READ_ONLY_DB);
-            req->SetFinish(result);
-            return;
         }
-
-        std::string table(req->GetTableName());
-        int32_t pid = req->GetPartitionId();
-        const uint16_t parts_per_key = req->PartsCountPerKey();
-        const uint16_t parts_per_rec = req->PartsCountPerRecord();
-
-        auto &partition = store_[table][pid];
-        for (size_t i = 0; i < req->RecordsCount(); i++)
+        else
         {
-            std::string key;
-            for (uint16_t kp = 0; kp < parts_per_key; kp++)
-            {
-                key.append(req->GetKeyPart(i * parts_per_key + kp));
-            }
+            std::string table(req->GetTableName());
+            int32_t pid = req->GetPartitionId();
+            const uint16_t parts_per_key = req->PartsCountPerKey();
+            const uint16_t parts_per_rec = req->PartsCountPerRecord();
 
-            if (req->KeyOpType(i) == WriteOpType::DELETE)
+            auto &partition = store_[table][pid];
+            for (size_t i = 0; i < req->RecordsCount(); i++)
             {
-                partition.erase(key);
-            }
-            else
-            {
-                std::string rec;
-                for (uint16_t rp = 0; rp < parts_per_rec; rp++)
+                std::string key;
+                for (uint16_t kp = 0; kp < parts_per_key; kp++)
                 {
-                    rec.append(req->GetRecordPart(i * parts_per_rec + rp));
+                    key.append(req->GetKeyPart(i * parts_per_key + kp));
                 }
-                Value &v = partition[key];
-                v.record_ = std::move(rec);
-                v.ts_ = req->GetRecordTs(i);
-                v.ttl_ = req->GetRecordTtl(i);
+
+                if (req->KeyOpType(i) == WriteOpType::DELETE)
+                {
+                    partition.erase(key);
+                }
+                else
+                {
+                    std::string rec;
+                    for (uint16_t rp = 0; rp < parts_per_rec; rp++)
+                    {
+                        rec.append(req->GetRecordPart(i * parts_per_rec + rp));
+                    }
+                    Value &v = partition[key];
+                    v.record_ = std::move(rec);
+                    v.ts_ = req->GetRecordTs(i);
+                    v.ttl_ = req->GetRecordTtl(i);
+                }
             }
+            result.set_error_code(::EloqDS::remote::DataStoreError::NO_ERROR);
         }
     }
-    result.set_error_code(::EloqDS::remote::DataStoreError::NO_ERROR);
     req->SetFinish(result);
 }
 
@@ -142,6 +145,8 @@ void MemDataStore::DeleteRange(DeleteRangeRequest *req)
 {
     PoolableGuard poolable_guard(req);
 
+    // Set the result under the lock but call SetFinish only after releasing
+    // mux_, so the request closure never runs under the store mutex.
     ::EloqDS::remote::CommonResult result;
     {
         std::string table(req->GetTableName());
@@ -154,24 +159,25 @@ void MemDataStore::DeleteRange(DeleteRangeRequest *req)
         {
             result.set_error_code(
                 ::EloqDS::remote::DataStoreError::WRITE_TO_READ_ONLY_DB);
-            req->SetFinish(result);
-            return;
         }
-        auto t_it = store_.find(table);
-        if (t_it != store_.end())
+        else
         {
-            auto p_it = t_it->second.find(pid);
-            if (p_it != t_it->second.end())
+            auto t_it = store_.find(table);
+            if (t_it != store_.end())
             {
-                auto &keys = p_it->second;
-                auto lo =
-                    start.empty() ? keys.begin() : keys.lower_bound(start);
-                auto hi = end.empty() ? keys.end() : keys.lower_bound(end);
-                keys.erase(lo, hi);
+                auto p_it = t_it->second.find(pid);
+                if (p_it != t_it->second.end())
+                {
+                    auto &keys = p_it->second;
+                    auto lo =
+                        start.empty() ? keys.begin() : keys.lower_bound(start);
+                    auto hi = end.empty() ? keys.end() : keys.lower_bound(end);
+                    keys.erase(lo, hi);
+                }
             }
+            result.set_error_code(::EloqDS::remote::DataStoreError::NO_ERROR);
         }
     }
-    result.set_error_code(::EloqDS::remote::DataStoreError::NO_ERROR);
     req->SetFinish(result);
 }
 
@@ -179,6 +185,8 @@ void MemDataStore::CreateTable(CreateTableRequest *req)
 {
     PoolableGuard poolable_guard(req);
 
+    // Set the result under the lock but call SetFinish only after releasing
+    // mux_, so the request closure never runs under the store mutex.
     ::EloqDS::remote::CommonResult result;
     {
         std::lock_guard<std::mutex> lk(mux_);
@@ -186,12 +194,13 @@ void MemDataStore::CreateTable(CreateTableRequest *req)
         {
             result.set_error_code(
                 ::EloqDS::remote::DataStoreError::WRITE_TO_READ_ONLY_DB);
-            req->SetFinish(result);
-            return;
         }
-        store_.try_emplace(std::string(req->GetTableName()));
+        else
+        {
+            store_.try_emplace(std::string(req->GetTableName()));
+            result.set_error_code(::EloqDS::remote::DataStoreError::NO_ERROR);
+        }
     }
-    result.set_error_code(::EloqDS::remote::DataStoreError::NO_ERROR);
     req->SetFinish(result);
 }
 
@@ -199,6 +208,8 @@ void MemDataStore::DropTable(DropTableRequest *req)
 {
     PoolableGuard poolable_guard(req);
 
+    // Set the result under the lock but call SetFinish only after releasing
+    // mux_, so the request closure never runs under the store mutex.
     ::EloqDS::remote::CommonResult result;
     {
         std::lock_guard<std::mutex> lk(mux_);
@@ -206,12 +217,13 @@ void MemDataStore::DropTable(DropTableRequest *req)
         {
             result.set_error_code(
                 ::EloqDS::remote::DataStoreError::WRITE_TO_READ_ONLY_DB);
-            req->SetFinish(result);
-            return;
         }
-        store_.erase(std::string(req->GetTableName()));
+        else
+        {
+            store_.erase(std::string(req->GetTableName()));
+            result.set_error_code(::EloqDS::remote::DataStoreError::NO_ERROR);
+        }
     }
-    result.set_error_code(::EloqDS::remote::DataStoreError::NO_ERROR);
     req->SetFinish(result);
 }
 
@@ -235,12 +247,16 @@ void MemDataStore::ScanNext(ScanRequest *req)
     bool scan_forward = req->ScanForward();
     uint32_t batch = req->BatchSize();
 
-    // The DataStoreServiceClient drives multi-batch scans statelessly: when a
-    // batch returns BatchSize() items it re-issues ScanNext with start_key set
-    // to the last returned key (inclusive_start=false). So this backend does
-    // not need a persistent iterator/session; it just emits the next batch in
-    // key order. The scan is treated as drained once fewer than BatchSize()
-    // items come back.
+    // Continuation differs from production. The real DataStoreService keeps a
+    // server-side iterator alive across batches and resumes it via a session_id
+    // (stored in scan_iter_cache_), so it does not re-seek per call. This
+    // MemDataStore instead clears the session and re-positions by key each
+    // call: when a batch returns BatchSize() items, the client re-issues
+    // ScanNext with start_key set to the last returned key
+    // (inclusive_start=false), and the backend re-seeks the ordered map from
+    // there. The scan is treated as drained once fewer than BatchSize() items
+    // come back. Re-seeking an in-memory std::map per batch is a valid
+    // simplification (no persistent iterator/session to keep alive).
     req->ClearSessionId();
 
     std::lock_guard<std::mutex> lk(mux_);

@@ -97,6 +97,10 @@ TEST_CASE("TxStartTsCollector GlobalMinSiTxStartTs unit test",
     CommitTxRequest commit_req1;
     txs[min_tx_index]->Execute(&commit_req1);
     commit_req1.Wait();
+    // A failed commit here would otherwise surface later as a confusing min-ts
+    // mismatch; assert it succeeded so the failure reports clearly.
+    REQUIRE_FALSE(commit_req1.IsError());
+    REQUIRE(commit_req1.Result());
     size_t committed_tx_index = min_tx_index;
 
     min_tx_ts = UINT64_MAX;
