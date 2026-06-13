@@ -182,6 +182,13 @@ struct TestNode::Impl
     std::vector<std::string> tx_ips;
     std::vector<uint16_t> tx_ports;
     std::map<std::string, uint32_t> conf;
+
+    // Prebuilt-tables map handed to the TxService ctor. With skip_kv=true the
+    // engine installs each entry's schema into table_catalogs_ at leader start
+    // (LocalCcShards::InitPrebuiltTables), so the table resolves without a KV
+    // catalog fetch. The image value is opaque to MockCatalogFactory (it stores
+    // it verbatim on MockTableSchema), so the table name itself is enough.
+    std::unordered_map<TableName, std::string> prebuilt_tables;
 };
 
 TestNode::TestNode(const TestNodeOptions &options)
@@ -308,6 +315,23 @@ TestNode::TestNode(const TestNodeOptions &options)
         &impl.catalog_factory,
     };
 
+    // Register the test table as a prebuilt table. With skip_kv=true the engine
+    // installs this schema into every shard's catalog at leader start, so
+    // Read/Upsert against impl.table resolve a CcMap without a KV catalog fetch
+    // (the MockCatalogFactory has no real catalog backing in the store). The
+    // image string is opaque to MockCatalogFactory::CreateTableSchema, so the
+    // table's own name serves as a self-describing placeholder.
+    impl.prebuilt_tables.try_emplace(impl.table, impl.table.String());
+
+    // store_hd is passed as nullptr here even though the DSS/MemDataStore is
+    // brought up above. With skip_kv=true the engine keeps full entries in the
+    // cc maps and never routes data through the KV store, so a store handler is
+    // unnecessary for the data path. Crucially, the checkpointer's main loop
+    // early-returns when store_hd_ == nullptr (checkpointer.cpp): if we instead
+    // passed the real handler, the periodic checkpoint would try to data-sync
+    // the in-memory-only prebuilt table and InitCcm would abort (it has no
+    // store-side range/statistics to flush). The DSS bring-up is retained as
+    // scaffolding for a future storage-backed (skip_kv=false) fixture.
     impl.tx_service =
         std::make_unique<TxService>(tx_catalog_factory,
                                     &MockSystemHandler::Instance(),
@@ -316,14 +340,16 @@ TestNode::TestNode(const TestNodeOptions &options)
                                     ng_id,
                                     &impl.ng_configs,
                                     cluster_config_version,
-                                    impl.store_hd.get(),
+                                    /*store_hd=*/nullptr,
                                     /*log_hd=*/nullptr,
                                     impl.options.enable_mvcc,
-                                    impl.options.skip_wal);
-
-    // Production wires the tx service back into the store handler so the kv
-    // path can reach it; harmless to mirror here.
-    impl.store_hd->SetTxService(impl.tx_service.get());
+                                    impl.options.skip_wal,
+                                    /*skip_kv=*/true,
+                                    /*enable_cache_replacement=*/false,
+                                    /*auto_redirect=*/true,
+                                    /*metrics_registry=*/nullptr,
+                                    /*common_labels=*/metrics::CommonLabels{},
+                                    &impl.prebuilt_tables);
 
     // braft needs a protocol prefix on the local path.
     const std::string local_path = "local://" + impl.dir.string();
@@ -420,21 +446,50 @@ bool TxHandle::Abort()
     return !req.IsError();
 }
 
-// TODO(C3): implement Upsert/Delete/Read once a table is registered with the
-// engine. Stubs keep the harness library linkable until then.
-bool TxHandle::Upsert(int /*key*/, int /*value*/)
+// The test table is registered as a prebuilt table (see the TxService ctor in
+// TestNode), so these requests resolve a CcMap and run to completion. The
+// schema_version passed must match what the cc layer derives from the table's
+// KeySchema (MockKeySchema::SchemaTs() == 1, mirrored by TestNode's
+// schema_version), or InitCcm rejects the request as a schema mismatch.
+
+bool TxHandle::Upsert(int key, int value)
 {
-    return false;
+    // OperationType::Upsert writes the record whether or not the key already
+    // exists, which is the behavior callers expect from a generic write helper.
+    UpsertTxRequest req(table_, Key(key), Rec(value), OperationType::Upsert);
+    txm_->Execute(&req);
+    req.Wait();
+    return !req.IsError();
 }
 
-bool TxHandle::Delete(int /*key*/)
+bool TxHandle::Delete(int key)
 {
-    return false;
+    UpsertTxRequest req(
+        table_, Key(key), /*rec=*/nullptr, OperationType::Delete);
+    txm_->Execute(&req);
+    req.Wait();
+    return !req.IsError();
 }
 
-bool TxHandle::Read(int /*key*/, int & /*value_out*/)
+bool TxHandle::Read(int key, int &value_out)
 {
-    return false;
+    TxKey tx_key = Key(key);
+    CompositeRecord<int> rec;
+    ReadTxRequest req(table_, schema_version_, &tx_key, &rec);
+    txm_->Execute(&req);
+    req.Wait();
+    if (req.IsError())
+    {
+        return false;
+    }
+    // Result is a pair<RecordStatus, commit_ts>. Only Normal means the key is
+    // present; Deleted / Unknown mean it is absent for the caller's purposes.
+    if (req.Result().first != RecordStatus::Normal)
+    {
+        return false;
+    }
+    value_out = std::get<0>(rec.Tuple());
+    return true;
 }
 
 }  // namespace test

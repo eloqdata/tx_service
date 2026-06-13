@@ -64,7 +64,8 @@ public:
                       table_name.Type(),
                       table_name.Engine()),
           schema_image_(std::move(catalog_image)),
-          version_(version)
+          version_(version),
+          key_schema_(std::make_unique<MockKeySchema>())
     {
     }
     ~MockTableSchema()
@@ -211,10 +212,17 @@ public:
                               txservice::NodeGroupId cc_ng_id) override
     {
         uint64_t schema_ts = table_schema->KeySchema()->SchemaTs();
+        // RangePartitioned=false: tables created through this factory are
+        // EloqKv-engine tables (TableName::IsHashPartitioned() == true), so the
+        // CcMap must be hash-partitioned. A range-partitioned map would route
+        // point reads through PinRangeSlice (which needs range slices and a KV
+        // catalog the mock does not provide) instead of the hash-partition fast
+        // path that, with full entries, resolves a cache miss to Deleted without
+        // touching the store.
         return std::make_unique<txservice::TemplateCcMap<CompositeKey<int>,
                                                          CompositeRecord<int>,
                                                          true,
-                                                         true>>(
+                                                         false>>(
             shard,
             cc_ng_id,
             table_name,
