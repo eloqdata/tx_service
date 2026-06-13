@@ -33,8 +33,7 @@ set(CATCH_MAIN_TESTS
 # Tests that define their own int main() (they need gflags::ParseCommandLineFlags
 # before brpc is used). They link Catch2::Catch2 (no bundled main).
 set(OWN_MAIN_TESTS
-    # StartTsCollector-Test  # re-enabled in Task C5 (its own main() rejects the
-    # flags catch_discover_tests passes at build time; rewritten there)
+    StartTsCollector-Test
     MemDataStore-Test
     TxConsistency-Test
     TestNodeSmoke-Test
