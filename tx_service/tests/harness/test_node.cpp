@@ -22,9 +22,6 @@
 #include "harness/test_node.h"
 
 #include <gflags/gflags.h>
-#include <netinet/in.h>
-#include <sys/socket.h>
-#include <unistd.h>
 
 #include <cassert>
 #include <cstdint>
@@ -42,6 +39,7 @@
 #include "eloq_data_store_service/data_store_service.h"
 #include "eloq_data_store_service/data_store_service_config.h"
 #include "harness/mem_data_store_factory.h"
+#include "harness/port_util.h"  // BindEphemeralPort, ReserveTxPortWindow
 #include "include/mock/mock_catalog_factory.h"  // MockCatalogFactory, MockSystemHandler
 #include "sharder.h"                            // NodeConfig
 #include "tx_execution.h"
@@ -62,105 +60,12 @@ namespace
     throw std::runtime_error(std::string("TestNode bring-up failed: ") + what);
 }
 
-// Binds an ephemeral TCP port on loopback and returns (fd, port) without
-// closing the socket, so the kernel will not hand the same port to a later
-// call. Caller must close the fd once it has claimed the port.
-std::pair<int, uint16_t> BindEphemeralPort()
-{
-    int fd = ::socket(AF_INET, SOCK_STREAM, 0);
-    if (fd < 0)
-    {
-        FailBringup("socket");
-    }
-    sockaddr_in addr{};
-    addr.sin_family = AF_INET;
-    // Probe on INADDR_ANY (0.0.0.0), matching how brpc binds the DSS/cc-node/
-    // log-replay servers. Probing loopback-only would not accurately reserve
-    // what the servers need (a port free on 127.0.0.1 can still be unbindable
-    // on 0.0.0.0), causing spurious "Fail to listen" under port pressure.
-    addr.sin_addr.s_addr = htonl(INADDR_ANY);
-    addr.sin_port = 0;  // let the kernel choose
-    if (::bind(fd, reinterpret_cast<sockaddr *>(&addr), sizeof(addr)) != 0)
-    {
-        ::close(fd);
-        FailBringup("bind");
-    }
-    socklen_t len = sizeof(addr);
-    if (::getsockname(fd, reinterpret_cast<sockaddr *>(&addr), &len) != 0)
-    {
-        ::close(fd);
-        FailBringup("getsockname");
-    }
-    return {fd, ntohs(addr.sin_port)};
-}
-
-// Tries to bind a specific port on INADDR_ANY (matching the servers; see
-// BindEphemeralPort). Returns the open fd on success or -1.
-int TryBindPort(uint16_t port)
-{
-    int fd = ::socket(AF_INET, SOCK_STREAM, 0);
-    if (fd < 0)
-    {
-        return -1;
-    }
-    sockaddr_in addr{};
-    addr.sin_family = AF_INET;
-    addr.sin_addr.s_addr = htonl(INADDR_ANY);
-    addr.sin_port = htons(port);
-    if (::bind(fd, reinterpret_cast<sockaddr *>(&addr), sizeof(addr)) != 0)
-    {
-        ::close(fd);
-        return -1;
-    }
-    return fd;
-}
-
-// The TxService derives several ports from a single base: cc-stream = base,
-// cc-node = base + 1, log-replay = base + 3 (see GET_CCNODE_RPC_PORT /
-// GET_LOG_REPLAY_RPC_PORT in sharder.h). A free-port picker that only reserves
-// the base is not enough -- base+1 / base+3 must be free too, or
-// TxService::Start() fails to listen. This finds a base whose whole +0..+3
-// window is simultaneously bindable, holding every socket open while probing so
-// the kernel cannot reissue one of them mid-window.
-uint16_t ReserveTxPortWindow()
-{
-    constexpr int kWindow = 4;  // base .. base+3
-    constexpr int kMaxAttempts = 64;
-    for (int attempt = 0; attempt < kMaxAttempts; ++attempt)
-    {
-        auto [base_fd, base] = BindEphemeralPort();
-        // Avoid wrapping uint16 at the top of the range.
-        if (base > 65535 - kWindow)
-        {
-            ::close(base_fd);
-            continue;
-        }
-        std::vector<int> fds{base_fd};
-        bool ok = true;
-        for (int off = 1; off < kWindow; ++off)
-        {
-            int fd = TryBindPort(static_cast<uint16_t>(base + off));
-            if (fd < 0)
-            {
-                ok = false;
-                break;
-            }
-            fds.push_back(fd);
-        }
-        for (int fd : fds)
-        {
-            ::close(fd);
-        }
-        if (ok)
-        {
-            return base;
-        }
-    }
-    // Extremely unlikely; let the caller's Start() surface the failure.
-    auto [fd, port] = BindEphemeralPort();
-    ::close(fd);
-    return port;
-}
+// BindEphemeralPort / TryBindPort / ReserveTxPortWindow now live in
+// harness/port_util.h (shared with the Phase 2 cluster driver). They are
+// brought into this anonymous namespace via the using-declarations below so the
+// rest of this file is unchanged.
+using txservice::test::BindEphemeralPort;
+using txservice::test::ReserveTxPortWindow;
 }  // namespace
 
 TxKey Key(int k)
