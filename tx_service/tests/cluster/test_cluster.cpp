@@ -137,13 +137,12 @@ TestCluster::TestCluster(const ClusterOptions &opts) : opts_(opts)
 
 TestCluster::~TestCluster()
 {
-    // Robust even if Start() was never called or threw midway: KillNode is a
-    // no-op for pid <= 0, hm_.Stop() is safe if Start was never called, and
-    // remove_all swallows errors.
-    for (NodeProc &node : nodes_)
-    {
-        KillNode(node);
-    }
+    // Robust even if Start() was never called or threw midway: KillAllNodes
+    // iterates every NodeProc defensively (a no-op for any with pid <= 0) and
+    // never throws, hm_.Stop() is safe if Start was never called, and
+    // remove_all swallows errors. The dtor must never throw, so all teardown
+    // work goes through noexcept helpers.
+    KillAllNodes();
     hm_.Stop();
     std::error_code ec;
     // Keep the per-node logs for post-mortem when TXCLUSTER_KEEP_LOGS is set;
@@ -587,14 +586,29 @@ void TestCluster::SpawnNode(NodeProc &node, const std::string &topology)
                                      0644);
     posix_spawn_file_actions_adddup2(&actions, STDOUT_FILENO, STDERR_FILENO);
 
+    // Put the child in its OWN process group (it becomes its own group leader,
+    // pgid == its pid). POSIX_SPAWN_SETPGROUP + a pgroup of 0 tells the spawned
+    // child to create a new process group rather than inherit the driver's. The
+    // dtor then SIGKILLs the whole group (kill(-pgid, ...)) as a backstop, so
+    // any process the txnode itself forks is reaped too -- no orphans survive a
+    // failed/aborted test.
+    posix_spawnattr_t attr;
+    posix_spawnattr_init(&attr);
+    posix_spawnattr_setflags(&attr, POSIX_SPAWN_SETPGROUP);
+    posix_spawnattr_setpgroup(&attr, 0);
+
     pid_t pid = -1;
-    int ret = posix_spawn(&pid, bin.c_str(), &actions, nullptr, argv, environ);
+    int ret = posix_spawn(&pid, bin.c_str(), &actions, &attr, argv, environ);
+    posix_spawnattr_destroy(&attr);
     posix_spawn_file_actions_destroy(&actions);
     if (ret != 0)
     {
         FailCluster("posix_spawn txnode");
     }
     node.pid = pid;
+    // With POSIX_SPAWN_SETPGROUP + pgroup 0, the child is its own group leader,
+    // so its pgid equals its pid.
+    node.pgid = pid;
 }
 
 void TestCluster::BuildClient(NodeProc &node)
@@ -616,14 +630,38 @@ void TestCluster::BuildClient(NodeProc &node)
     node.channel = std::move(channel);
 }
 
-void TestCluster::KillNode(NodeProc &node)
+void TestCluster::KillNode(NodeProc &node) noexcept
 {
     if (node.pid > 0)
     {
+        // SIGKILL the process group first (the child is its own group leader,
+        // pgid == pid) as a backstop against any descendants the txnode forked,
+        // then SIGKILL the process itself. Both kills tolerate ESRCH (already
+        // gone). We only need to reap the direct child we spawned; group
+        // members re-parent to init and are reaped by it.
+        if (node.pgid > 0)
+        {
+            ::kill(-node.pgid, SIGKILL);
+        }
         ::kill(node.pid, SIGKILL);
         int status = 0;
+        // Reap the direct child so it does not linger as a zombie. waitpid only
+        // works on a direct child; group members are not ours to reap.
         ::waitpid(node.pid, &status, 0);
         node.pid = -1;
+        node.pgid = -1;
+    }
+}
+
+void TestCluster::KillAllNodes() noexcept
+{
+    // Iterate every NodeProc defensively: even if Start() threw partway (some
+    // nodes spawned, some not), the not-yet-spawned ones have pid <= 0 and
+    // KillNode no-ops on them. Idempotent: a second call finds pid == -1
+    // everywhere and does nothing.
+    for (NodeProc &node : nodes_)
+    {
+        KillNode(node);
     }
 }
 

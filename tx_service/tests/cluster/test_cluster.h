@@ -58,6 +58,10 @@ struct NodeProc
     uint16_t tx_port{0};  // base of the reserved +0..+3 window
     uint16_t workload_port{0};
     pid_t pid{-1};
+    // Process-group id of the spawned child. SpawnNode puts each child in its
+    // OWN process group (pgid == child pid) so teardown can SIGKILL the whole
+    // group as a backstop against any descendants the txnode might fork.
+    pid_t pgid{-1};
     std::string data_dir;
     std::unique_ptr<brpc::Channel> channel;
     std::unique_ptr<txnode_workload::WorkloadService_Stub> stub;
@@ -145,7 +149,14 @@ private:
     void AwaitClusterReady(std::chrono::milliseconds timeout);
 
     // SIGKILL + waitpid one NodeProc; marks pid = -1. Safe if already reaped.
-    void KillNode(NodeProc &node);
+    // SIGKILLs both the process and (as a backstop) its process group, then
+    // reaps. Idempotent and never throws.
+    void KillNode(NodeProc &node) noexcept;
+
+    // SIGKILL + reap EVERY node defensively (idempotent, never throws). The
+    // dtor calls this so a failed/aborted/throwing test never leaks `txnode`
+    // processes.
+    void KillAllNodes() noexcept;
 
     // Find the NodeProc for node_id, or nullptr.
     NodeProc *FindNode(uint32_t node_id);
