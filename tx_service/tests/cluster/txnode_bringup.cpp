@@ -271,7 +271,16 @@ TxNode::TxNode(const TxNodeConfig &cfg) : impl_(std::make_unique<Impl>(cfg))
         group_config.reserve(members.size());
         for (const auto &[member_node_id, host, base_port] : members)
         {
-            group_config.emplace_back(member_node_id, host, base_port);
+            // is_candidate=true: in this 1-member-per-NG foundation each member
+            // is its NG's sole leader-capable node. NodeConfig defaults
+            // is_candidate=false (a non-candidate voter), which would make the
+            // node ineligible for leadership -- CcNode rejects a leader target
+            // that is not a candidate (cc_node.cpp). Production marks each NG's
+            // primary as a candidate the same way (util.h ParseNgConfig).
+            group_config.emplace_back(member_node_id,
+                                      host,
+                                      base_port,
+                                      /*is_candidate=*/true);
             if (member_node_id == node_id)
             {
                 impl.tx_ips.push_back(host);
