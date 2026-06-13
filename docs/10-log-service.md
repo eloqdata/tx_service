@@ -101,7 +101,6 @@ Key facts (all in `open_log_task.cpp` / `log_state_rocksdb_impl.cpp`):
 - **Durability**: `write_option_.sync = true; disableWAL = false` (`log_state_rocksdb_impl.cpp:508-509`). Every acknowledged `WriteLog` is fsynced through the RocksDB WAL. Batching across concurrently arriving requests amortizes the fsync.
 - `UpdateLatestCommittedTxnNumber(txn & 0xFFFFFFFF)` runs after every write.
 - On error, `SetWriteLogErrorResponse` returns `Unknown` for `retry=true` requests (client should re-resolve and retry) and `Fail` otherwise (`open_log_service.cpp:211-230`).
-- **Verified gap**: pass 1 batches *every* `kDataLog` task, and batched tasks never reach `HandleWriteLog`; therefore `DataLogMessage.schema_logs` (logical DDL embedded in a DML log, e.g. EloqDoc index-type changes) is **not** persisted via `UpsertSchemaOpWithinDML` on this path — that call is effectively dead code in `open_log_task.cpp:231-235`. Be careful if you touch the batching logic.
 
 ## 6. Checkpoint timestamp and truncation
 
@@ -163,7 +162,7 @@ The cloud variants are **only available with the closed-source implementation**:
 6. **Truncation is file-granular and lazy** — only whole L0 SSTs strictly below `ckpt_ts - 1` are deleted, and only when total SST size exceeds `txlog_rocksdb_sst_files_size_limit`; memtable contents are never proactively flushed for truncation.
 7. **Stage logs linger one hour past checkpoint** (clean-stage schema/split ops) to absorb stale retried prepare logs; `RecoverTx` treats *any* surviving multi-stage log as `Committed`.
 8. **Single shipping agent**: a new `ReplayLog` (e.g. quick double failover) terminates and replaces the running agent; termination is polled with `bthread_usleep` (`open_log_service.cpp:95-102`), consistent with the bthread-deadlock rules in `02-threading-model.md`.
-9. **Dead/empty surface**: cluster-scale and migration logs are accepted by the proto but ignored (`default:` in `HandleWriteLog`, empty `CheckClusterScaleStatus`/`CheckMigrationIsFinished`), so cluster scaling flows in `06-distribution-and-clustering.md` require the closed implementation. Likewise `DataLogMessage.schema_logs` is dropped on the batched write path (§5).
+9. **Dead/empty surface**: cluster-scale and migration logs are accepted by the proto but ignored (`default:` in `HandleWriteLog`, empty `CheckClusterScaleStatus`/`CheckMigrationIsFinished`), so cluster scaling flows in `06-distribution-and-clustering.md` require the closed implementation.
 10. The per-task wait in `SubmitAndWait` uses a `bthread::Mutex`+cv with exactly one waiter — the safe single-flight pattern; do not extend it to multi-waiter use.
 
 ## 11. Test utilities (`log_service/test/`)
