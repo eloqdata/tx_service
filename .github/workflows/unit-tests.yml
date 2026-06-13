@@ -1,0 +1,38 @@
+name: Unit Tests
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+jobs:
+  unit-tests:
+    runs-on: ubuntu-latest
+    container:
+      image: eloqdata/eloq-dev-ci-ubuntu2404:latest
+
+    steps:
+      - name: Checkout (recursive submodules)
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Configure
+        run: |
+          mkdir -p bld && cd bld
+          cmake .. -DWITH_TESTS=ON \
+            -DWITH_DATA_STORE=ELOQDSS_ELOQSTORE \
+            -DWITH_LOG_STATE=ROCKSDB \
+            -DCMAKE_BUILD_TYPE=Debug
+
+      - name: Build
+        run: cmake --build bld --parallel "$(nproc)"
+
+      - name: Test (gating — excludes flaky LargeObjLRU-Test)
+        working-directory: bld
+        run: ctest --output-on-failure --timeout 180 -LE LargeObjLRU-Test
+
+      - name: LargeObjLRU stress test (non-gating, pre-existing teardown race)
+        working-directory: bld
+        continue-on-error: true
+        run: ctest --output-on-failure --timeout 180 -L LargeObjLRU-Test

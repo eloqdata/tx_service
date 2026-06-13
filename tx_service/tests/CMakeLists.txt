@@ -45,7 +45,7 @@ function(add_substrate_test name catch_lib)
     target_link_libraries(${name} PRIVATE test_harness ${catch_lib})
     set_property(TARGET ${name} PROPERTY CXX_STANDARD 20)
     set_property(TARGET ${name} PROPERTY CXX_EXTENSIONS OFF)
-    catch_discover_tests(${name})
+    catch_discover_tests(${name} PROPERTIES LABELS "${name}")
 endfunction()
 
 foreach(name ${CATCH_MAIN_TESTS})
