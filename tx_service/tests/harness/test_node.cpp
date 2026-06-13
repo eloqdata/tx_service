@@ -62,7 +62,11 @@ std::pair<int, uint16_t> BindEphemeralPort()
     assert(fd >= 0);
     sockaddr_in addr{};
     addr.sin_family = AF_INET;
-    addr.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+    // Probe on INADDR_ANY (0.0.0.0), matching how brpc binds the DSS/cc-node/
+    // log-replay servers. Probing loopback-only would not accurately reserve
+    // what the servers need (a port free on 127.0.0.1 can still be unbindable
+    // on 0.0.0.0), causing spurious "Fail to listen" under port pressure.
+    addr.sin_addr.s_addr = htonl(INADDR_ANY);
     addr.sin_port = 0;  // let the kernel choose
     [[maybe_unused]] int rc =
         ::bind(fd, reinterpret_cast<sockaddr *>(&addr), sizeof(addr));
@@ -72,7 +76,8 @@ std::pair<int, uint16_t> BindEphemeralPort()
     return {fd, ntohs(addr.sin_port)};
 }
 
-// Tries to bind a specific loopback port. Returns the open fd on success or -1.
+// Tries to bind a specific port on INADDR_ANY (matching the servers; see
+// BindEphemeralPort). Returns the open fd on success or -1.
 int TryBindPort(uint16_t port)
 {
     int fd = ::socket(AF_INET, SOCK_STREAM, 0);
@@ -82,7 +87,7 @@ int TryBindPort(uint16_t port)
     }
     sockaddr_in addr{};
     addr.sin_family = AF_INET;
-    addr.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+    addr.sin_addr.s_addr = htonl(INADDR_ANY);
     addr.sin_port = htons(port);
     if (::bind(fd, reinterpret_cast<sockaddr *>(&addr), sizeof(addr)) != 0)
     {
@@ -225,33 +230,40 @@ TestNode::TestNode(const TestNodeOptions &options)
     std::filesystem::remove_all(impl.dir);
     std::filesystem::create_directories(impl.dir);
 
-    // 2. Reserve ports. The TxService needs a contiguous +0..+3 window from its
-    // base; the DSS gets a port from outside that window. ReserveTxPortWindow
-    // probes the whole window, and the DSS port comes from a separate ephemeral
-    // bind, so a retry loop here only guards against the rare case where the
-    // kernel hands the DSS the same value or one inside the tx window.
-    uint16_t tx_port = ReserveTxPortWindow();
+    // 2. In-process DataStoreService FIRST, on an ephemeral port. Ordering
+    // matters: brpc (the DSS server and its client below) lazily allocates
+    // ephemeral sockets when it first starts, and any of those could grab a
+    // port inside the TxService's +0..+3 window if that window were already
+    // reserved and closed. So we bring the DSS/client fully up first and
+    // reserve the tx window LAST (step 5), leaving only the socket-free
+    // TxService ctor between the probe and TxService::Start's bind.
+    // Initialize() creates a single-node topology that owns shard 0 in
+    // ReadWrite; StartService binds brpc to the port. Because a probed-free
+    // port can still be lost to a concurrent process between probe and bind
+    // (TOCTOU), retry StartService with a fresh port.
+    constexpr int kMaxBindRetries = 16;
     uint16_t dss_port = 0;
-    do
+    bool dss_ok = false;
+    for (int attempt = 0; attempt < kMaxBindRetries && !dss_ok; ++attempt)
     {
-        auto [dss_fd, port] = BindEphemeralPort();
-        ::close(dss_fd);
-        dss_port = port;
-    } while (dss_port >= tx_port && dss_port <= tx_port + 3);
-
-    // In-process DataStoreService on its free port. Initialize() creates a
-    // single-node topology that owns shard 0 in ReadWrite; StartService binds
-    // brpc to that port.
-    impl.cluster_mgr.Initialize("127.0.0.1", dss_port);
-
-    auto factory = std::make_unique<EloqDS::MemDataStoreFactory>();
-    impl.dss = std::make_unique<EloqDS::DataStoreService>(
-        impl.cluster_mgr,
-        (impl.dir / "dss_config.ini").string(),
-        (impl.dir / "DSMigrateLog").string(),
-        std::move(factory));
-    [[maybe_unused]] bool dss_ok =
-        impl.dss->StartService(/*create_db_if_missing=*/true);
+        {
+            auto [dss_fd, port] = BindEphemeralPort();
+            ::close(dss_fd);
+            dss_port = port;
+        }
+        impl.cluster_mgr.Initialize("127.0.0.1", dss_port);
+        auto factory = std::make_unique<EloqDS::MemDataStoreFactory>();
+        impl.dss = std::make_unique<EloqDS::DataStoreService>(
+            impl.cluster_mgr,
+            (impl.dir / "dss_config.ini").string(),
+            (impl.dir / "DSMigrateLog").string(),
+            std::move(factory));
+        dss_ok = impl.dss->StartService(/*create_db_if_missing=*/true);
+        if (!dss_ok)
+        {
+            impl.dss.reset();
+        }
+    }
     assert(dss_ok);
     assert(impl.dss->GetClusterManager().IsOwnerOfShard(0));
 
@@ -280,13 +292,9 @@ TestNode::TestNode(const TestNodeOptions &options)
     [[maybe_unused]] bool connected = impl.store_hd->Connect();
     assert(connected);
 
-    // 4. Single-node TxService topology: node 0, ng 0, on the reserved port
-    // window's base. cc-node binds tx_port+1 and log-replay binds tx_port+3.
-    // No log agent is wired in (hm-less test path), so the txlog port is never
-    // actually bound; pass tx_port to keep the conf well-formed.
-    impl.ng_configs = {{0, {NodeConfig(0, "127.0.0.1", tx_port)}}};
-    impl.tx_ips = {"127.0.0.1"};
-    impl.tx_ports = {tx_port};
+    // 4. Conf / catalog / prebuilt table -- all port-independent, built before
+    // the tx port window is reserved (step 5) so nothing allocates sockets
+    // between that reservation and TxService::Start.
 
     // Conf map mirrors StartTsCollector-Test's working hm-less configuration.
     impl.conf = {
@@ -322,6 +330,25 @@ TestNode::TestNode(const TestNodeOptions &options)
     // image string is opaque to MockCatalogFactory::CreateTableSchema, so the
     // table's own name serves as a self-describing placeholder.
     impl.prebuilt_tables.try_emplace(impl.table, impl.table.String());
+
+    // 5. Reserve the tx port window LAST -- after every DSS/client brpc socket
+    // is already allocated -- so the only thing between the probe and
+    // TxService::Start binding the window is the socket-free TxService ctor.
+    // The window must avoid the DSS port. We deliberately do NOT retry Start on
+    // failure: it initializes the process-wide Sharder singleton, which cannot
+    // be cleanly re-Init'd, so reserving the window this late (rather than
+    // retrying) is what makes a lost-race bind vanishingly unlikely outside
+    // truly-concurrent runs. cc-stream binds tx_port, cc-node tx_port+1,
+    // log-replay tx_port+3; no log agent is wired in (hm-less), so the txlog
+    // port is never actually bound.
+    uint16_t tx_port = 0;
+    do
+    {
+        tx_port = ReserveTxPortWindow();
+    } while (dss_port >= tx_port && dss_port <= tx_port + 3);
+    impl.ng_configs = {{0, {NodeConfig(0, "127.0.0.1", tx_port)}}};
+    impl.tx_ips = {"127.0.0.1"};
+    impl.tx_ports = {tx_port};
 
     // store_hd is passed as nullptr here even though the DSS/MemDataStore is
     // brought up above. With skip_kv=true the engine keeps full entries in the
@@ -408,6 +435,10 @@ TxHandle TestNode::BeginTx(IsolationLevel isolation, CcProtocol protocol)
     init.Reset();
     txm->Execute(&init);
     init.Wait();
+    // Fail fast and locally: never hand back a TxHandle over a txm whose
+    // initialization failed, which would surface as confusing downstream
+    // errors.
+    assert(!init.IsError());
     return TxHandle(txm, &impl.table, impl.schema_version);
 }
 

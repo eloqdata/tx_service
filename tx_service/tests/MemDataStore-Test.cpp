@@ -80,15 +80,27 @@ struct ServiceFixture
         std::filesystem::remove_all(dir_);
         std::filesystem::create_directories(dir_);
 
-        cluster_mgr_.Initialize("127.0.0.1", PickFreePort());
-
-        auto factory = std::make_unique<MemDataStoreFactory>();
-        service_ = std::make_unique<DataStoreService>(
-            cluster_mgr_,
-            (dir_ / "dss_config.ini").string(),
-            (dir_ / "DSMigrateLog").string(),
-            std::move(factory));
-        REQUIRE(service_->StartService(/*create_db_if_missing=*/true));
+        // A probed-free port can be lost to a concurrent process between the
+        // probe and the actual bind (TOCTOU). Retry StartService with a fresh
+        // port instead of failing the test, so parallel runs don't flake.
+        constexpr int kMaxBindRetries = 16;
+        bool started = false;
+        for (int attempt = 0; attempt < kMaxBindRetries && !started; ++attempt)
+        {
+            cluster_mgr_.Initialize("127.0.0.1", PickFreePort());
+            auto factory = std::make_unique<MemDataStoreFactory>();
+            service_ = std::make_unique<DataStoreService>(
+                cluster_mgr_,
+                (dir_ / "dss_config.ini").string(),
+                (dir_ / "DSMigrateLog").string(),
+                std::move(factory));
+            started = service_->StartService(/*create_db_if_missing=*/true);
+            if (!started)
+            {
+                service_.reset();
+            }
+        }
+        REQUIRE(started);
         REQUIRE(service_->GetClusterManager().IsOwnerOfShard(kShardId));
     }
 

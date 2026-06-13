@@ -142,6 +142,7 @@ void MemDataStore::DeleteRange(DeleteRangeRequest *req)
 {
     PoolableGuard poolable_guard(req);
 
+    ::EloqDS::remote::CommonResult result;
     {
         std::string table(req->GetTableName());
         int32_t pid = req->GetPartitionId();
@@ -149,6 +150,13 @@ void MemDataStore::DeleteRange(DeleteRangeRequest *req)
         std::string end(req->GetEndKey());
 
         std::lock_guard<std::mutex> lk(mux_);
+        if (read_only_)
+        {
+            result.set_error_code(
+                ::EloqDS::remote::DataStoreError::WRITE_TO_READ_ONLY_DB);
+            req->SetFinish(result);
+            return;
+        }
         auto t_it = store_.find(table);
         if (t_it != store_.end())
         {
@@ -163,7 +171,6 @@ void MemDataStore::DeleteRange(DeleteRangeRequest *req)
             }
         }
     }
-    ::EloqDS::remote::CommonResult result;
     result.set_error_code(::EloqDS::remote::DataStoreError::NO_ERROR);
     req->SetFinish(result);
 }
@@ -172,11 +179,18 @@ void MemDataStore::CreateTable(CreateTableRequest *req)
 {
     PoolableGuard poolable_guard(req);
 
+    ::EloqDS::remote::CommonResult result;
     {
         std::lock_guard<std::mutex> lk(mux_);
+        if (read_only_)
+        {
+            result.set_error_code(
+                ::EloqDS::remote::DataStoreError::WRITE_TO_READ_ONLY_DB);
+            req->SetFinish(result);
+            return;
+        }
         store_.try_emplace(std::string(req->GetTableName()));
     }
-    ::EloqDS::remote::CommonResult result;
     result.set_error_code(::EloqDS::remote::DataStoreError::NO_ERROR);
     req->SetFinish(result);
 }
@@ -185,11 +199,18 @@ void MemDataStore::DropTable(DropTableRequest *req)
 {
     PoolableGuard poolable_guard(req);
 
+    ::EloqDS::remote::CommonResult result;
     {
         std::lock_guard<std::mutex> lk(mux_);
+        if (read_only_)
+        {
+            result.set_error_code(
+                ::EloqDS::remote::DataStoreError::WRITE_TO_READ_ONLY_DB);
+            req->SetFinish(result);
+            return;
+        }
         store_.erase(std::string(req->GetTableName()));
     }
-    ::EloqDS::remote::CommonResult result;
     result.set_error_code(::EloqDS::remote::DataStoreError::NO_ERROR);
     req->SetFinish(result);
 }

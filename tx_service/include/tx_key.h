@@ -825,6 +825,17 @@ public:
 
     KeyType Type() const
     {
+        // Recognize the singleton ±∞ sentinels (mirrors CloneTxKey above and
+        // VoidKey::Type), so cloned/boundary keys report the correct enum
+        // through TxKey::Type() instead of always looking like Normal keys.
+        if (this == NegativeInfinity())
+        {
+            return KeyType::NegativeInf;
+        }
+        else if (this == PositiveInfinity())
+        {
+            return KeyType::PositiveInf;
+        }
         return KeyType::Normal;
     }
 

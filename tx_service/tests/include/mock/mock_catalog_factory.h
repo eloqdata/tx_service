@@ -69,9 +69,9 @@ public:
     {
         // A KV catalog info is required for any storage-backed use: the
         // checkpoint/data-sync path resolves the kv table name through
-        // GetKVCatalogInfo()->GetKvTableName(). Mirror EloqBasicTableSchema: the
-        // kv table name is just the base table name, which is unique per table
-        // and round-trips through KVCatalogInfo's Serialize/Deserialize.
+        // GetKVCatalogInfo()->GetKvTableName(). Mirror EloqBasicTableSchema:
+        // the kv table name is just the base table name, which is unique per
+        // table and round-trips through KVCatalogInfo's Serialize/Deserialize.
         kv_info_ = std::make_unique<KVCatalogInfo>();
         kv_info_->kv_table_name_ = table_name_.String();
     }
@@ -228,8 +228,8 @@ public:
         // CcMap must be hash-partitioned. A range-partitioned map would route
         // point reads through PinRangeSlice (which needs range slices and a KV
         // catalog the mock does not provide) instead of the hash-partition fast
-        // path that, with full entries, resolves a cache miss to Deleted without
-        // touching the store.
+        // path that, with full entries, resolves a cache miss to Deleted
+        // without touching the store.
         return std::make_unique<txservice::TemplateCcMap<CompositeKey<int>,
                                                          CompositeRecord<int>,
                                                          true,

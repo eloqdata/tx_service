@@ -10,6 +10,10 @@ jobs:
     runs-on: ubuntu-latest
     container:
       image: eloqdata/eloq-dev-ci-ubuntu2404:latest
+      # Run as root so actions/checkout can write the runner file-command files
+      # under /__w/_temp (mirrors eloqdata/eloqkv build.yml); otherwise checkout
+      # fails with EACCES inside this container image.
+      options: --user root
 
     steps:
       - name: Checkout (recursive submodules)

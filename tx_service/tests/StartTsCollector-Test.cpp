@@ -42,6 +42,13 @@ TEST_CASE("TxStartTsCollector GlobalMinSiTxStartTs unit test",
 
     TxStartTsCollector::Instance().SetDelaySeconds(2);
 
+    // NOTE: the sleeps in this test are intentional and semantic, not arbitrary
+    // synchronization. TxStartTsCollector samples active-tx start timestamps on
+    // a periodic background interval (SetDelaySeconds above); the test must let
+    // wall-clock time advance both to give transactions distinct ts_base_
+    // values and to let the collector run a sampling pass before asserting the
+    // global min it collected. These are the StartTsCollector-specific timing
+    // waits explicitly exempted from the "no fixed sleeps" guideline.
     sleep(3);
 
     //== Init several transactions

@@ -19,13 +19,25 @@ public:
         int64_t term = 0) override
     {
         auto ds = std::make_unique<MemDataStore>(shard_id, data_store_service);
-        ds->Initialize();
+        // Surface startup failures immediately (mirrors
+        // RocksDBDataStoreFactory) instead of returning a half-initialized
+        // store that fails later in request paths.
+        if (!ds->Initialize())
+        {
+            return nullptr;
+        }
         if (start_db)
         {
 #ifdef DATA_STORE_TYPE_ELOQDSS_ELOQSTORE
-            ds->StartDB(term, shard_id);
+            if (!ds->StartDB(term, shard_id))
+            {
+                return nullptr;
+            }
 #else
-            ds->StartDB(term);
+            if (!ds->StartDB(term))
+            {
+                return nullptr;
+            }
 #endif
         }
         return ds;
