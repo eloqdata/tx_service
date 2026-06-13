@@ -120,6 +120,12 @@ TEST_CASE("CcPage clean tests", "[cc-page]")
                   nullptr,
                   &ng_configs,
                   2);
+    // Bind this (main) thread to fast-meta-data shard 0 before touching the
+    // shard, exactly as TxProcessor::Run does in production
+    // (tx_service.h: BindThreadToFastMetaDataShard(thd_id_) then shard->Init()).
+    // Without this, tls_shard_idx stays SIZE_MAX and FastMetaDataMutex's
+    // per-core lock indexes mux_ptrs_ out of bounds.
+    local_cc_shards.BindThreadToFastMetaDataShard(0);
     shard.Init();
     std::string raft_path("");
     Sharder::Instance(0,

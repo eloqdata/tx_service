@@ -7510,6 +7510,11 @@ void LocalCcShards::FastMetaDataMutex::lock()
 
 void LocalCcShards::FastMetaDataMutex::lock_shared()
 {
+    // Readers must run on a thread bound to a fast-meta-data shard
+    // (BindThreadToFastMetaDataShard sets tls_shard_idx). An unbound thread
+    // (tls_shard_idx == SIZE_MAX) would index mux_ptrs_ out of bounds and
+    // dereference garbage, busy-spinning here or corrupting memory.
+    assert(tls_shard_idx < mux_ptrs_.size());
     auto *ptr = mux_ptrs_[tls_shard_idx];
     int32_t expected = ptr->load(std::memory_order_acquire);
     for (;;)
@@ -7544,6 +7549,7 @@ void LocalCcShards::FastMetaDataMutex::unlock()
 
 void LocalCcShards::FastMetaDataMutex::unlock_shared()
 {
+    assert(tls_shard_idx < mux_ptrs_.size());
     auto *ptr = mux_ptrs_[tls_shard_idx];
     assert(ptr != nullptr);
 

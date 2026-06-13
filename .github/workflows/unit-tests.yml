@@ -28,11 +28,16 @@ jobs:
       - name: Build
         run: cmake --build bld --parallel "$(nproc)"
 
-      - name: Test (gating — excludes flaky LargeObjLRU-Test)
+      - name: Test (gating — excludes LargeObjLRU-Test, see below)
         working-directory: bld
         run: ctest --output-on-failure --timeout 180 -LE LargeObjLRU-Test
 
-      - name: LargeObjLRU stress test (non-gating, pre-existing teardown race)
+      # LargeObjLRU-Test is now deterministic after the FastMetaDataMutex
+      # tls_shard_idx fix (14/15 cases pass), but TC-FE-01 hits a separate,
+      # pre-existing assert(!keys_.empty()) in the LO-LRU FindEmplace path that
+      # was previously masked by memory corruption. Kept non-gating until that
+      # is resolved. See docs/.../2026-06-13-largeobjlru-spin-rootcause-and-fix.
+      - name: LargeObjLRU stress test (non-gating; TC-FE-01 separate bug)
         working-directory: bld
         continue-on-error: true
         run: ctest --output-on-failure --timeout 180 -L LargeObjLRU-Test
