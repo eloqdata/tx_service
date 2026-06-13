@@ -14,6 +14,7 @@ option(OPEN_LOG_SERVICE "Compile with open log service." ON)
 option(SMALL_RANGE "Whether enable small range" OFF)
 option(STATISTICS "Whether enable table statistics" ON)
 option(EXT_TX_PROC_ENABLED "Allows external threads to move forward the tx service." ON)
+option(WITH_TESTS "Build data_substrate unit tests (Catch2)." OFF)
 option(ELOQ_MODULE_ENABLED "Register the tx service as an ELOQ module." ON)
 option(BUILD_SHARED_LIBS "Build shared libraries instead of static libraries" OFF)
 
@@ -407,4 +408,9 @@ install(TARGETS eloq-metrics
 if(FORK_HM_PROCESS) # Only install host_manager if it's built
     install(TARGETS host_manager
             RUNTIME DESTINATION bin)
+endif()
+
+if(WITH_TESTS)
+    enable_testing()
+    add_subdirectory(tx_service/tests)
 endif()
