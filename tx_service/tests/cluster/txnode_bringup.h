@@ -12,6 +12,14 @@ namespace txservice
 {
 namespace test
 {
+// The cluster_config_version the cluster runs at. Shared so the driver's
+// OnLeaderStart echoes exactly the version each node was brought up with: a
+// matching version makes the handler's UpdateInMemoryClusterConfig a no-op, so
+// the empty cluster_config/node_configs the driver sends do not clobber the
+// topology each node already built. Driver (test_cluster.cpp) and node
+// (txnode_bringup.cpp) must agree, hence one definition here.
+inline constexpr uint64_t kClusterConfigVersion = 2;
+
 // Parameters for one node in a multi-node test cluster.
 struct TxNodeConfig
 {

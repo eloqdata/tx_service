@@ -170,8 +170,9 @@ TxNode::TxNode(const TxNodeConfig &cfg) : impl_(std::make_unique<Impl>(cfg))
         FailBringup("DataStoreService not owner of shard 0");
     }
 
-    // 3. DataStoreServiceClient over the local DSS. The client ctor wants a
-    // CatalogFactory*[3]; all engines share the mock factory in tests.
+    // 3. DataStoreServiceClient over the local DSS. Both the client ctor and
+    // the TxService ctor (below) want a CatalogFactory*[3]; all engines share
+    // the mock factory in tests, so one array serves both.
     CatalogFactory *catalog_factory_arr[NUM_EXTERNAL_ENGINES] = {
         &impl.catalog_factory,
         &impl.catalog_factory,
@@ -211,15 +212,9 @@ TxNode::TxNode(const TxNodeConfig &cfg) : impl_(std::make_unique<Impl>(cfg))
         {"rep_group_cnt", 1},
     };
 
-    const uint64_t cluster_config_version = 2;
+    const uint64_t cluster_config_version = kClusterConfigVersion;
     const uint32_t node_id = impl.cfg.node_id;
     const uint32_t ng_id = impl.cfg.native_ng_id;
-
-    CatalogFactory *tx_catalog_factory[NUM_EXTERNAL_ENGINES] = {
-        &impl.catalog_factory,
-        &impl.catalog_factory,
-        &impl.catalog_factory,
-    };
 
     // Register the test table as a prebuilt table. With skip_kv=true the engine
     // installs this schema into every shard's catalog at leader start, so
@@ -273,7 +268,7 @@ TxNode::TxNode(const TxNodeConfig &cfg) : impl_(std::make_unique<Impl>(cfg))
     // in-memory-only prebuilt table. The DSS bring-up is retained as
     // scaffolding for a future storage-backed (skip_kv=false) fixture.
     impl.tx_service =
-        std::make_unique<TxService>(tx_catalog_factory,
+        std::make_unique<TxService>(catalog_factory_arr,
                                     &MockSystemHandler::Instance(),
                                     impl.conf,
                                     node_id,

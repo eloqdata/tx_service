@@ -107,10 +107,12 @@ private:
     // ';'-separated "ng:node@127.0.0.1:tx_port" members covering every node.
     std::string BuildTopologyString() const;
 
-    // posix_spawn one `txnode` for `node`, redirecting its stdout+stderr to
-    // <base_dir_>/node_<id>.log, and record its pid. C2 calls this from
-    // Start().
-    void SpawnNode(NodeProc &node, const std::string &topology);
+    // posix_spawn the `txnode` binary at `bin` for `node`, redirecting its
+    // stdout+stderr to <base_dir_>/node_<id>.log, and record its pid. C2 calls
+    // this from Start() with the once-resolved binary path and topology.
+    void SpawnNode(NodeProc &node,
+                   const std::string &bin,
+                   const std::string &topology);
 
     // Build the brpc channel + WorkloadService stub to 127.0.0.1:workload_port
     // for `node` (brpc connects lazily; connectivity is verified by an actual

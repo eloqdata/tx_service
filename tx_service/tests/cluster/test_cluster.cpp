@@ -40,10 +40,11 @@
 #include <thread>
 #include <vector>
 
-#include "bthread/bthread.h"    // bthread_usleep
-#include "cc_request.pb.h"      // CcRpcService_Stub, OnLeaderStartRequest, ...
-#include "harness/port_util.h"  // BindEphemeralPort, ReserveTxPortWindow
-#include "sharder.h"            // GET_CCNODE_RPC_PORT
+#include "bthread/bthread.h"  // bthread_usleep
+#include "cc_request.pb.h"    // CcRpcService_Stub, OnLeaderStartRequest, ...
+#include "cluster/txnode_bringup.h"  // kClusterConfigVersion
+#include "harness/port_util.h"       // BindEphemeralPort, ReserveTxPortWindow
+#include "sharder.h"                 // GET_CCNODE_RPC_PORT
 
 // posix_spawn needs the process environment to inherit; declared by the C
 // runtime, not in a public header.
@@ -55,12 +56,9 @@ namespace test
 {
 namespace
 {
-// The cluster_config_version every node is brought up with (txnode_bringup.cpp
-// uses a fixed `cluster_config_version = 2`). OnLeaderStart carries this same
-// version so Sharder::UpdateInMemoryClusterConfig early-returns (version not
-// advanced) and the empty cluster_config/node_configs we send do not clobber
-// the topology each node already built from its own ng_configs.
-constexpr uint64_t kClusterConfigVersion = 2;
+// kClusterConfigVersion is shared with txnode_bringup.h: the driver's
+// OnLeaderStart must echo exactly the version each node was brought up with
+// (see that header for why). DriveLeader sends it below.
 
 // The leader term the driver assigns every NG (single, never-changing term in
 // this foundation: nodes do not fail over).
@@ -171,11 +169,13 @@ void TestCluster::Start()
 
     // 2. Spawn every node with the shared topology, then build its workload
     //    stub. brpc connects lazily; step 3 verifies connectivity with a real
-    //    RPC.
+    //    RPC. The binary path and topology are identical for every node, so
+    //    resolve/build them once here rather than per spawn.
+    const std::string bin = LocateTxnodeBinary();
     const std::string topology = BuildTopologyString();
     for (NodeProc &node : nodes_)
     {
-        SpawnNode(node, topology);
+        SpawnNode(node, bin, topology);
         BuildClient(node);
     }
 
@@ -296,19 +296,22 @@ void TestCluster::DriveLeader(uint32_t ng_id,
         FailCluster("brpc::Channel::Init to cc-node service");
     }
 
+    // The stub and request are identical across retries (a stub is a stateless
+    // wrapper over the channel; the request fields never change), so build them
+    // once. Empty cluster_config / node_configs: the node already holds the
+    // full topology and config_version matches what it was started with, so the
+    // handler's UpdateInMemoryClusterConfig is a no-op (see header note).
+    ::txservice::remote::CcRpcService_Stub stub(&channel);
+    ::txservice::remote::OnLeaderStartRequest req;
+    req.set_node_group_id(ng_id);
+    req.set_node_group_term(kLeaderTerm);
+    req.set_config_version(kClusterConfigVersion);
+
     const auto deadline = std::chrono::steady_clock::now() + timeout;
     while (std::chrono::steady_clock::now() < deadline)
     {
-        ::txservice::remote::CcRpcService_Stub stub(&channel);
         brpc::Controller cntl;
         cntl.set_timeout_ms(5000);
-        ::txservice::remote::OnLeaderStartRequest req;
-        req.set_node_group_id(ng_id);
-        req.set_node_group_term(kLeaderTerm);
-        // Empty cluster_config / node_configs: the node already holds the full
-        // topology and config_version matches what it was started with, so the
-        // handler's UpdateInMemoryClusterConfig is a no-op (see header note).
-        req.set_config_version(kClusterConfigVersion);
         ::txservice::remote::OnLeaderStartResponse resp;
         stub.OnLeaderStart(&cntl, &req, &resp, nullptr);
         // Success only if the RPC landed AND the handler neither errored nor
@@ -334,20 +337,9 @@ void TestCluster::NotifyLeader(const NodeProc &target,
                                uint32_t leader_node_id,
                                std::chrono::milliseconds timeout)
 {
-    const NodeProc *leader = nullptr;
-    for (const NodeProc &n : nodes_)
-    {
-        if (n.node_id == leader_node_id)
-        {
-            leader = &n;
-            break;
-        }
-    }
-    if (leader == nullptr)
-    {
-        FailCluster("NotifyLeader: unknown leader node_id");
-    }
-
+    // leader_node_id and target come from the caller's iteration over
+    // opts_.ng_to_node / nodes_, so both are known-valid; the request needs
+    // only the id, not a NodeProc lookup.
     brpc::ChannelOptions options;
     options.protocol = brpc::PROTOCOL_BAIDU_STD;
     options.timeout_ms = 2000;
@@ -359,16 +351,18 @@ void TestCluster::NotifyLeader(const NodeProc &target,
         FailCluster("brpc::Channel::Init to cc-node service (notify)");
     }
 
+    // Stub and request are constant across retries; build them once.
+    ::txservice::remote::CcRpcService_Stub stub(&channel);
+    ::txservice::remote::NotifyNewLeaderStartRequest req;
+    req.set_ng_id(ng_id);
+    req.set_node_id(leader_node_id);
+    req.set_term(kLeaderTerm);
+
     const auto deadline = std::chrono::steady_clock::now() + timeout;
     while (std::chrono::steady_clock::now() < deadline)
     {
-        ::txservice::remote::CcRpcService_Stub stub(&channel);
         brpc::Controller cntl;
         cntl.set_timeout_ms(2000);
-        ::txservice::remote::NotifyNewLeaderStartRequest req;
-        req.set_ng_id(ng_id);
-        req.set_node_id(leader_node_id);
-        req.set_term(kLeaderTerm);
         ::txservice::remote::NotifyNewLeaderStartResponse resp;
         stub.NotifyNewLeaderStart(&cntl, &req, &resp, nullptr);
         if (!cntl.Failed() && !resp.error())
@@ -591,10 +585,10 @@ std::string TestCluster::BuildTopologyString() const
     return topology;
 }
 
-void TestCluster::SpawnNode(NodeProc &node, const std::string &topology)
+void TestCluster::SpawnNode(NodeProc &node,
+                            const std::string &bin,
+                            const std::string &topology)
 {
-    const std::string bin = LocateTxnodeBinary();
-
     // Build the flag strings (owned for the duration of posix_spawn; argv holds
     // pointers into them).
     const std::string arg_node_id = "--node_id=" + std::to_string(node.node_id);
