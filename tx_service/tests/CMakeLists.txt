@@ -37,6 +37,7 @@ set(OWN_MAIN_TESTS
     # flags catch_discover_tests passes at build time; rewritten there)
     MemDataStore-Test
     TxConsistency-Test
+    TestNodeSmoke-Test
 )
 
 function(add_substrate_test name catch_lib)
