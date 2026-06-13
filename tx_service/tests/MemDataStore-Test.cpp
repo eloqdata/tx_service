@@ -56,46 +56,19 @@ public:
     bool ran_{false};
 };
 
-// Factory that creates the in-memory backend AND captures the DataStore* that
-// DataStoreService::StartService() builds, so the test can drive the store
-// through the real (private) DataStore request path. We deliberately do NOT go
-// through DataStoreService::Read()/BatchWriteRecords()/ScanNext() because those
-// allocate the *LocalRequest from a thread_local ObjectPool whose entries are
-// only released by the asynchronous backend's completion path; with a
-// synchronous backend driven from the main thread the pooled request stays
-// in-use and the pool's destructor spins forever at thread exit. Stack
-// requests avoid the pool entirely.
-class CapturingMemDataStoreFactory : public MemDataStoreFactory
-{
-public:
-    std::unique_ptr<DataStore> CreateDataStore(
-        bool create_if_missing,
-        uint32_t shard_id,
-        DataStoreService *data_store_service,
-        bool start_db,
-        int64_t term) override
-    {
-        auto ds = MemDataStoreFactory::CreateDataStore(
-            create_if_missing, shard_id, data_store_service, start_db, term);
-        *captured_ = ds.get();
-        return ds;
-    }
-
-    // The factory is std::move()'d into the service; share the capture slot so
-    // the test still sees the pointer after the move.
-    explicit CapturingMemDataStoreFactory(std::shared_ptr<DataStore *> slot)
-        : captured_(std::move(slot))
-    {
-    }
-
-private:
-    std::shared_ptr<DataStore *> captured_;
-};
-
-// Stands up a single-shard, in-process DataStoreService backed by MemDataStore.
-// A single-node topology (Topology::InitWithSingleNode via
+// Stands up a single-shard, in-process DataStoreService backed by MemDataStore
+// and drives it through the production local request path. A single-node
+// topology (Topology::InitWithSingleNode via
 // DataStoreServiceClusterManager::Initialize) owns shard 0 in ReadWrite status;
 // the default ShardingAlgorithm maps every partition to shard 0.
+//
+// The test deliberately goes through DataStoreService's *public local
+// overloads* (Read/BatchWriteRecords/ScanNext). Those allocate the matching
+// *LocalRequest from a thread_local ObjectPool and hand it to the backend,
+// which is responsible for releasing it. MemDataStore now frees the request via
+// PoolableGuard (mirroring RocksDBDataStoreCommon); if it did not, the pool's
+// destructor would spin forever at thread exit. Exercising this path is exactly
+// what proves the fix.
 struct ServiceFixture
 {
     static constexpr uint32_t kShardId = 0;
@@ -109,8 +82,7 @@ struct ServiceFixture
 
         cluster_mgr_.Initialize("127.0.0.1", PickFreePort());
 
-        ds_slot_ = std::make_shared<DataStore *>(nullptr);
-        auto factory = std::make_unique<CapturingMemDataStoreFactory>(ds_slot_);
+        auto factory = std::make_unique<MemDataStoreFactory>();
         service_ = std::make_unique<DataStoreService>(
             cluster_mgr_,
             (dir_ / "dss_config.ini").string(),
@@ -118,9 +90,6 @@ struct ServiceFixture
             std::move(factory));
         REQUIRE(service_->StartService(/*create_db_if_missing=*/true));
         REQUIRE(service_->GetClusterManager().IsOwnerOfShard(kShardId));
-
-        ds_ = *ds_slot_;
-        REQUIRE(ds_ != nullptr);
     }
 
     ~ServiceFixture()
@@ -135,27 +104,20 @@ struct ServiceFixture
     {
         return *service_;
     }
-    DataStore &ds()
-    {
-        return *ds_;
-    }
 
     std::filesystem::path dir_;
     DataStoreServiceClusterManager cluster_mgr_;
-    std::shared_ptr<DataStore *> ds_slot_;
     std::unique_ptr<DataStoreService> service_;
-    DataStore *ds_{nullptr};
 };
 
 constexpr int kNoError = static_cast<int>(remote::DataStoreError::NO_ERROR);
 constexpr int kKeyNotFound =
     static_cast<int>(remote::DataStoreError::KEY_NOT_FOUND);
 
-// Drives a single PUT straight at the DataStore via a stack WriteRecordsLocal
-// request. WriteRecordsLocalRequest::SetFinish calls
-// DataStoreService::DecreaseWriteReqCount, so we balance it with an Increase
-// (mirrors DataStoreService::BatchWriteRecords) to keep the shard's write
-// counter at 0.
+// Writes one record through the production DataStoreService::BatchWriteRecords
+// local overload. The overload handles shard ownership / write-counter
+// bookkeeping and allocates a pooled WriteRecordsLocalRequest that MemDataStore
+// frees.
 void Put(ServiceFixture &fx,
          std::string_view table,
          int32_t partition,
@@ -171,24 +133,19 @@ void Put(ServiceFixture &fx,
     std::vector<WriteOpType> ops{WriteOpType::PUT};
     NoopClosure done;
 
-    WriteRecordsLocalRequest req;
-    req.Reset(&fx.service(),
-              table,
-              partition,
-              ServiceFixture::kShardId,
-              key_parts,
-              rec_parts,
-              tss,
-              ttls,
-              ops,
-              /*skip_wal=*/true,
-              result,
-              &done,
-              /*parts_cnt_per_key=*/1,
-              /*parts_cnt_per_record=*/1);
-
-    fx.service().IncreaseWriteReqCount(ServiceFixture::kShardId);
-    fx.ds().BatchWriteRecords(&req);
+    fx.service().BatchWriteRecords(table,
+                                   partition,
+                                   ServiceFixture::kShardId,
+                                   key_parts,
+                                   rec_parts,
+                                   tss,
+                                   ttls,
+                                   ops,
+                                   /*skip_wal=*/true,
+                                   result,
+                                   &done,
+                                   /*parts_cnt_per_key=*/1,
+                                   /*parts_cnt_per_record=*/1);
 }
 }  // namespace
 
@@ -217,18 +174,15 @@ TEST_CASE("MemDataStore write then read round-trip", "[mem-data-store]")
         remote::CommonResult result;
         NoopClosure done;
 
-        ReadLocalRequest req;
-        req.Reset(&fx.service(),
-                  table,
-                  partition,
-                  ServiceFixture::kShardId,
-                  key,
-                  &out_record,
-                  &out_ts,
-                  &out_ttl,
-                  &result,
-                  &done);
-        fx.ds().Read(&req);
+        fx.service().Read(table,
+                          partition,
+                          ServiceFixture::kShardId,
+                          key,
+                          &out_record,
+                          &out_ts,
+                          &out_ttl,
+                          &result,
+                          &done);
 
         REQUIRE(result.error_code() == kNoError);
         REQUIRE(out_record == value);
@@ -244,18 +198,15 @@ TEST_CASE("MemDataStore write then read round-trip", "[mem-data-store]")
         remote::CommonResult result;
         NoopClosure done;
 
-        ReadLocalRequest req;
-        req.Reset(&fx.service(),
-                  table,
-                  partition,
-                  ServiceFixture::kShardId,
-                  "missing",
-                  &out_record,
-                  &out_ts,
-                  &out_ttl,
-                  &result,
-                  &done);
-        fx.ds().Read(&req);
+        fx.service().Read(table,
+                          partition,
+                          ServiceFixture::kShardId,
+                          "missing",
+                          &out_record,
+                          &out_ts,
+                          &out_ttl,
+                          &result,
+                          &done);
 
         REQUIRE(result.error_code() == kKeyNotFound);
     }
@@ -284,24 +235,21 @@ TEST_CASE("MemDataStore forward scan returns keys in order", "[mem-data-store]")
     remote::CommonResult result;
     NoopClosure done;
 
-    ScanLocalRequest req;
-    req.Reset(&fx.service(),
-              table,
-              partition,
-              ServiceFixture::kShardId,
-              /*start_key=*/"",
-              /*end_key=*/"",
-              /*inclusive_start=*/true,
-              /*inclusive_end=*/true,
-              /*scan_forward=*/true,
-              /*batch_size=*/100,
-              /*search_conditions=*/nullptr,
-              &items,
-              &session_id,
-              /*generate_session_id=*/false,
-              &result,
-              &done);
-    fx.ds().ScanNext(&req);
+    fx.service().ScanNext(table,
+                          partition,
+                          ServiceFixture::kShardId,
+                          /*start_key=*/"",
+                          /*end_key=*/"",
+                          /*inclusive_start=*/true,
+                          /*inclusive_end=*/true,
+                          /*scan_forward=*/true,
+                          /*batch_size=*/100,
+                          /*search_conditions=*/nullptr,
+                          &items,
+                          &session_id,
+                          /*generate_session_id=*/false,
+                          &result,
+                          &done);
 
     REQUIRE(result.error_code() == kNoError);
     REQUIRE(items.size() == kvs.size());

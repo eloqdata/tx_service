@@ -44,6 +44,12 @@ uint64_t MemDataStore::ApproxStoreKeyCount()
 
 void MemDataStore::Read(ReadRequest *req)
 {
+    // Release the pooled request to its thread_local ObjectPool on every return
+    // path, after SetFinish has run (PoolableGuard destructs at method exit).
+    // Mirrors RocksDBDataStoreCommon::Read. Without this the pool's destructor
+    // spins forever at thread exit because the request stays InUse().
+    PoolableGuard poolable_guard(req);
+
     std::string table(req->GetTableName());
     int32_t pid = req->GetPartitionId();
     std::string key(req->GetKey());
@@ -74,6 +80,8 @@ void MemDataStore::Read(ReadRequest *req)
 
 void MemDataStore::BatchWriteRecords(WriteRecordsRequest *req)
 {
+    PoolableGuard poolable_guard(req);
+
     ::EloqDS::remote::CommonResult result;
     {
         std::lock_guard<std::mutex> lk(mux_);
@@ -123,6 +131,8 @@ void MemDataStore::BatchWriteRecords(WriteRecordsRequest *req)
 
 void MemDataStore::FlushData(FlushDataRequest *req)
 {
+    PoolableGuard poolable_guard(req);
+
     ::EloqDS::remote::CommonResult result;
     result.set_error_code(::EloqDS::remote::DataStoreError::NO_ERROR);
     req->SetFinish(result);
@@ -130,6 +140,8 @@ void MemDataStore::FlushData(FlushDataRequest *req)
 
 void MemDataStore::DeleteRange(DeleteRangeRequest *req)
 {
+    PoolableGuard poolable_guard(req);
+
     {
         std::string table(req->GetTableName());
         int32_t pid = req->GetPartitionId();
@@ -158,6 +170,8 @@ void MemDataStore::DeleteRange(DeleteRangeRequest *req)
 
 void MemDataStore::CreateTable(CreateTableRequest *req)
 {
+    PoolableGuard poolable_guard(req);
+
     {
         std::lock_guard<std::mutex> lk(mux_);
         store_.try_emplace(std::string(req->GetTableName()));
@@ -169,6 +183,8 @@ void MemDataStore::CreateTable(CreateTableRequest *req)
 
 void MemDataStore::DropTable(DropTableRequest *req)
 {
+    PoolableGuard poolable_guard(req);
+
     {
         std::lock_guard<std::mutex> lk(mux_);
         store_.erase(std::string(req->GetTableName()));
@@ -180,6 +196,15 @@ void MemDataStore::DropTable(DropTableRequest *req)
 
 void MemDataStore::ScanNext(ScanRequest *req)
 {
+    // The scan is stateless: each ScanNext is self-contained (the client
+    // re-issues with a new start key for the next batch), so there is no
+    // persistent iterator to keep alive and the request is freed per-call,
+    // after SetFinish. RocksDBDataStoreCommon::ScanNext frees its scan request
+    // the same way (PoolableGuard at the top of the worker lambda); it merely
+    // keeps a separate rocksdb iterator session in the service, which the
+    // stateless MemDataStore does not have.
+    PoolableGuard poolable_guard(req);
+
     std::string table(req->GetTableName());
     int32_t pid = req->GetPartitionId();
     std::string start(req->GetStartKey());
@@ -279,12 +304,16 @@ void MemDataStore::ScanNext(ScanRequest *req)
 
 void MemDataStore::ScanClose(ScanRequest *req)
 {
+    PoolableGuard poolable_guard(req);
+
     req->ClearSessionId();
     req->SetFinish(::EloqDS::remote::DataStoreError::NO_ERROR);
 }
 
 void MemDataStore::CreateSnapshotForBackup(CreateSnapshotForBackupRequest *req)
 {
+    PoolableGuard poolable_guard(req);
+
     // No snapshot artifacts for the in-memory store; backup paths are out of
     // Phase 1 scope. Still finish the request so the closure runs and the
     // write-request counter is decremented.
