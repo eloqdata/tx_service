@@ -61,6 +61,7 @@ set(CATCH_MAIN_TESTS
     CcEntry-Test
     CcPage-Test
     LargeObjLRU-Test
+    CcRequestWait-Test
 )
 
 # Tests that define their own int main() (they need gflags::ParseCommandLineFlags

@@ -107,15 +107,13 @@ private:
     void SendIndexes(
         const TableName &table_name,
         NodeGroupId dest_ng_id,
-        int64_t &ng_term,
+        std::atomic<int64_t> &ng_term,
         int32_t partition_id,
         const std::vector<std::pair<uint8_t, WriteEntry *>> &write_entry_vec,
         size_t batch_size,
         size_t start_key_idx,
-        bthread::Mutex &req_mux,
-        bthread::ConditionVariable &req_cv,
-        size_t &finished_req_cnt,
-        CcErrorCode &res_code);
+        std::atomic<size_t> &finished_req_cnt,
+        std::atomic<CcErrorCode> &res_code);
     // Acquire and release range read lock.
     CcErrorCode AcquireRangeReadLocks(
         TransactionExecution *acq_lock_txm,
