@@ -19,18 +19,19 @@
  *    <http://www.gnu.org/licenses/>.
  *
  */
-#include "harness/test_node.h"
+#include "cluster/txnode_bringup.h"
 
 #include <gflags/gflags.h>
+#include <unistd.h>
 
-#include <cassert>
 #include <cstdint>
-#include <cstdlib>
 #include <filesystem>
 #include <map>
+#include <memory>
 #include <stdexcept>
 #include <string>
 #include <string_view>
+#include <tuple>
 #include <unordered_map>
 #include <utility>
 #include <vector>
@@ -39,11 +40,9 @@
 #include "eloq_data_store_service/data_store_service.h"
 #include "eloq_data_store_service/data_store_service_config.h"
 #include "harness/mem_data_store_factory.h"
-#include "harness/port_util.h"  // BindEphemeralPort, ReserveTxPortWindow
+#include "harness/port_util.h"  // BindEphemeralPort (shared with test_node.cpp)
 #include "include/mock/mock_catalog_factory.h"  // MockCatalogFactory, MockSystemHandler
 #include "sharder.h"                            // NodeConfig
-#include "tx_execution.h"
-#include "tx_request.h"
 #include "tx_service.h"
 
 namespace txservice
@@ -54,37 +53,20 @@ namespace
 {
 // Hard, build-mode-independent precondition check for fixture bring-up.
 // (assert() would compile out under NDEBUG and silently proceed past a failed
-// bring-up; Catch2 catches the exception and reports it with context.)
+// bring-up; the caller catches the exception and reports it with context.)
 [[noreturn]] void FailBringup(const char *what)
 {
-    throw std::runtime_error(std::string("TestNode bring-up failed: ") + what);
+    throw std::runtime_error(std::string("TxNode bring-up failed: ") + what);
 }
-
-// BindEphemeralPort / TryBindPort / ReserveTxPortWindow now live in
-// harness/port_util.h (shared with the Phase 2 cluster driver). They are
-// brought into this anonymous namespace via the using-declarations below so the
-// rest of this file is unchanged.
-using txservice::test::BindEphemeralPort;
-using txservice::test::ReserveTxPortWindow;
 }  // namespace
 
-TxKey Key(int k)
+struct TxNode::Impl
 {
-    return TxKey(std::make_unique<CompositeKey<int>>(k));
-}
-
-std::unique_ptr<CompositeRecord<int>> Rec(int v)
-{
-    return std::make_unique<CompositeRecord<int>>(v);
-}
-
-struct TestNode::Impl
-{
-    explicit Impl(const TestNodeOptions &opts) : options(opts)
+    explicit Impl(const TxNodeConfig &c) : cfg(c)
     {
     }
 
-    TestNodeOptions options;
+    TxNodeConfig cfg;
 
     std::filesystem::path dir;
 
@@ -119,8 +101,7 @@ struct TestNode::Impl
     std::unordered_map<TableName, std::string> prebuilt_tables;
 };
 
-TestNode::TestNode(const TestNodeOptions &options)
-    : impl_(std::make_unique<Impl>(options))
+TxNode::TxNode(const TxNodeConfig &cfg) : impl_(std::make_unique<Impl>(cfg))
 {
     Impl &impl = *impl_;
 
@@ -139,31 +120,24 @@ TestNode::TestNode(const TestNodeOptions &options)
     // gflags::ParseCommandLineFlags (that breaks catch_discover_tests);
     // SetCommandLineOption is independent of parsing.
     GFLAGS_NAMESPACE::SetCommandLineOption(
-        "bthread_concurrency", std::to_string(impl.options.core_num).c_str());
+        "bthread_concurrency", std::to_string(impl.cfg.core_num).c_str());
 #ifdef ELOQ_MODULE_ENABLED
     GFLAGS_NAMESPACE::SetCommandLineOption("brpc_worker_as_ext_processor",
                                            "true");
     GFLAGS_NAMESPACE::SetCommandLineOption("worker_polling_time_us", "100000");
 #endif
 
-    // 1. Unique temp dir for the DSS config + migration log + cluster config.
-    impl.dir = std::filesystem::temp_directory_path() /
-               ("testnode_" + std::to_string(::getpid()) + "_" +
-                std::to_string(reinterpret_cast<uintptr_t>(this)));
+    // 1. Unique temp dir (per node) for the DSS config + migration log +
+    // cluster config.
+    impl.dir = std::filesystem::path(impl.cfg.data_dir);
     std::filesystem::remove_all(impl.dir);
     std::filesystem::create_directories(impl.dir);
 
-    // 2. In-process DataStoreService FIRST, on an ephemeral port. Ordering
-    // matters: brpc (the DSS server and its client below) lazily allocates
-    // ephemeral sockets when it first starts, and any of those could grab a
-    // port inside the TxService's +0..+3 window if that window were already
-    // reserved and closed. So we bring the DSS/client fully up first and
-    // reserve the tx window LAST (step 5), leaving only the socket-free
-    // TxService ctor between the probe and TxService::Start's bind.
-    // Initialize() creates a single-node topology that owns shard 0 in
-    // ReadWrite; StartService binds brpc to the port. Because a probed-free
-    // port can still be lost to a concurrent process between probe and bind
-    // (TOCTOU), retry StartService with a fresh port.
+    // 2. In-process DataStoreService FIRST, on an ephemeral port. Initialize()
+    // creates a single-node topology that owns shard 0 in ReadWrite;
+    // StartService binds brpc to the port. Because a probed-free port can still
+    // be lost to a concurrent process between probe and bind (TOCTOU), retry
+    // StartService with a fresh port. Unchanged from Phase 1 TestNode.
     constexpr int kMaxBindRetries = 16;
     uint16_t dss_port = 0;
     bool dss_ok = false;
@@ -196,26 +170,19 @@ TestNode::TestNode(const TestNodeOptions &options)
         FailBringup("DataStoreService not owner of shard 0");
     }
 
-    // 3. DataStoreServiceClient over the local DSS. The client ctor wants a
-    // CatalogFactory*[3]; all engines share the mock factory in tests.
+    // 3. DataStoreServiceClient over the local DSS. Both the client ctor and
+    // the TxService ctor (below) want a CatalogFactory*[3]; all engines share
+    // the mock factory in tests, so one array serves both.
     CatalogFactory *catalog_factory_arr[NUM_EXTERNAL_ENGINES] = {
         &impl.catalog_factory,
         &impl.catalog_factory,
         &impl.catalog_factory,
     };
     // bind_data_shard_with_ng=false keeps the DSS client out of the ng-bound
-    // leader/standby path. The EloqStoreDataStoreFactory* static_cast UB it
-    // would otherwise hit (CcNode::OnLeaderStart ->
-    // DataStoreServiceClient::OnLeaderStart -> ClearStandbySnapshotPayloadFor-
-    // EloqStore, which under DATA_STORE_TYPE_ELOQDSS_ELOQSTORE hard-casts
-    // data_store_factory_ to EloqStoreDataStoreFactory* and dereferences it --
-    // our factory is a MemDataStoreFactory) is a concern for a future
-    // skip_kv=false fixture. Today skip_kv=true (txservice_skip_kv) already
-    // guards that call with `if (!txservice_skip_kv)` in CcNode::OnLeaderStart,
-    // and store_hd is passed as nullptr below, so that path is unreached
-    // regardless. Keeping bind_data_shard_with_ng=false leaves the DSS shard 0
-    // that StartService already opened open and owned, so reads/writes still
-    // route through it.
+    // leader/standby path. With skip_kv=true and store_hd passed as nullptr to
+    // the TxService ctor below, that path is unreached regardless. Keeping
+    // bind_data_shard_with_ng=false leaves the DSS shard 0 that StartService
+    // already opened open and owned. Unchanged from Phase 1 TestNode.
     impl.store_hd = std::make_unique<EloqDS::DataStoreServiceClient>(
         /*is_bootstrap=*/true,
         catalog_factory_arr,
@@ -227,13 +194,10 @@ TestNode::TestNode(const TestNodeOptions &options)
         FailBringup("DataStoreServiceClient Connect");
     }
 
-    // 4. Conf / catalog / prebuilt table -- all port-independent, built before
-    // the tx port window is reserved (step 5) so nothing allocates sockets
-    // between that reservation and TxService::Start.
-
-    // Conf map mirrors StartTsCollector-Test's working hm-less configuration.
+    // 4. Conf map. Mirrors the Phase 1 hm-less configuration; rep_group_cnt = 1
+    // (foundation: 1 candidate per ng, no standbys).
     impl.conf = {
-        {"core_num", impl.options.core_num},
+        {"core_num", impl.cfg.core_num},
         {"range_split_worker_num", 0},
         {"range_slice_memory_limit_percent", 20},
         {"node_memory_limit_mb", 1000},
@@ -248,15 +212,9 @@ TestNode::TestNode(const TestNodeOptions &options)
         {"rep_group_cnt", 1},
     };
 
-    const uint64_t cluster_config_version = 2;
-    const uint32_t node_id = 0;
-    const uint32_t ng_id = 0;
-
-    CatalogFactory *tx_catalog_factory[NUM_EXTERNAL_ENGINES] = {
-        &impl.catalog_factory,
-        &impl.catalog_factory,
-        &impl.catalog_factory,
-    };
+    const uint64_t cluster_config_version = kClusterConfigVersion;
+    const uint32_t node_id = impl.cfg.node_id;
+    const uint32_t ng_id = impl.cfg.native_ng_id;
 
     // Register the test table as a prebuilt table. With skip_kv=true the engine
     // installs this schema into every shard's catalog at leader start, so
@@ -266,37 +224,40 @@ TestNode::TestNode(const TestNodeOptions &options)
     // table's own name serves as a self-describing placeholder.
     impl.prebuilt_tables.try_emplace(impl.table, impl.table.String());
 
-    // 5. Reserve the tx port window LAST -- after every DSS/client brpc socket
-    // is already allocated -- so the only thing between the probe and
-    // TxService::Start binding the window is the socket-free TxService ctor.
-    // The window must avoid the DSS port. We deliberately do NOT retry Start on
-    // failure: it initializes the process-wide Sharder singleton, which cannot
-    // be cleanly re-Init'd, so reserving the window this late (rather than
-    // retrying) is what makes a lost-race bind vanishingly unlikely outside
-    // truly-concurrent runs. cc-stream binds tx_port, cc-node tx_port+1,
-    // log-replay tx_port+3; no log agent is wired in (hm-less), so the txlog
-    // port is never actually bound.
-    uint16_t tx_port = 0;
+    // 4b. Build the FULL multi-node topology from cfg.ng_members: every node's
+    // ng_configs describes ALL node-groups and ALL members. The ports were
+    // assigned by the driver (it reserved a 4-wide window per node: cc-stream =
+    // base, cc-node = base+1, log-group = base+2, log-replay = base+3); we just
+    // plumb the assigned base port through as each member's NodeConfig port.
+    // tx_ips/tx_ports reflect THIS node's own (host, base port) entry.
+    for (const auto &[member_ng_id, members] : impl.cfg.ng_members)
     {
-        constexpr int kMaxBindRetries = 16;
-        bool window_ok = false;
-        for (int attempt = 0; attempt < kMaxBindRetries; ++attempt)
+        std::vector<NodeConfig> group_config;
+        group_config.reserve(members.size());
+        for (const auto &[member_node_id, host, base_port] : members)
         {
-            tx_port = ReserveTxPortWindow();
-            if (dss_port < tx_port || dss_port > tx_port + 3)
+            // is_candidate=true: in this 1-member-per-NG foundation each member
+            // is its NG's sole leader-capable node. NodeConfig defaults
+            // is_candidate=false (a non-candidate voter), which would make the
+            // node ineligible for leadership -- CcNode rejects a leader target
+            // that is not a candidate (cc_node.cpp). Production marks each NG's
+            // primary as a candidate the same way (util.h ParseNgConfig).
+            group_config.emplace_back(member_node_id,
+                                      host,
+                                      base_port,
+                                      /*is_candidate=*/true);
+            if (member_node_id == node_id)
             {
-                window_ok = true;
-                break;
+                impl.tx_ips.push_back(host);
+                impl.tx_ports.push_back(base_port);
             }
         }
-        if (!window_ok)
-        {
-            FailBringup("tx port window");
-        }
+        impl.ng_configs.try_emplace(member_ng_id, std::move(group_config));
     }
-    impl.ng_configs = {{0, {NodeConfig(0, "127.0.0.1", tx_port)}}};
-    impl.tx_ips = {"127.0.0.1"};
-    impl.tx_ports = {tx_port};
+    if (impl.tx_ports.empty())
+    {
+        FailBringup("node_id not found in ng_members");
+    }
 
     // store_hd is passed as nullptr here even though the DSS/MemDataStore is
     // brought up above. With skip_kv=true the engine keeps full entries in the
@@ -304,13 +265,10 @@ TestNode::TestNode(const TestNodeOptions &options)
     // unnecessary for the data path. Crucially, the checkpointer thread is
     // never spawned when store_hd_ == nullptr (Checkpointer ctor guard,
     // checkpointer.cpp), so no periodic data-sync runs against the
-    // in-memory-only prebuilt table: if we instead passed the real handler, the
-    // periodic checkpoint would try to data-sync the in-memory-only prebuilt
-    // table and InitCcm would abort (it has no store-side range/statistics to
-    // flush). The DSS bring-up is retained as scaffolding for a future
-    // storage-backed (skip_kv=false) fixture.
+    // in-memory-only prebuilt table. The DSS bring-up is retained as
+    // scaffolding for a future storage-backed (skip_kv=false) fixture.
     impl.tx_service =
-        std::make_unique<TxService>(tx_catalog_factory,
+        std::make_unique<TxService>(catalog_factory_arr,
                                     &MockSystemHandler::Instance(),
                                     impl.conf,
                                     node_id,
@@ -319,8 +277,8 @@ TestNode::TestNode(const TestNodeOptions &options)
                                     cluster_config_version,
                                     /*store_hd=*/nullptr,
                                     /*log_hd=*/nullptr,
-                                    impl.options.enable_mvcc,
-                                    impl.options.skip_wal,
+                                    /*enable_mvcc=*/true,
+                                    /*skip_wal=*/true,
                                     /*skip_kv=*/true,
                                     /*enable_cache_replacement=*/false,
                                     /*auto_redirect=*/true,
@@ -333,31 +291,40 @@ TestNode::TestNode(const TestNodeOptions &options)
     const std::string cluster_config_path =
         (impl.dir / "cluster_config.json").string();
 
-    // hm-less Start: pass nullptr for hm_ip/hm_port/hm_bin_path and the log
-    // agent. In the test env Sharder self-promotes node 0 to ng-0 leader and
-    // finishes log replay directly (see sharder.cpp OnLeaderStart path).
+    // Multi-node Start: pass a REAL hm_ip/hm_port (the driver's scripted host
+    // manager) and fork_host_manager=false, so Sharder::Init registers this
+    // node via a StartNode RPC to that external HM instead of forking one and
+    // does NOT self-promote to leader (the driver drives OnLeaderStart in a
+    // later task). The StartNode RPC retries until the HM is reachable, so the
+    // driver must have the HM up before starting this node; if it is not up,
+    // Start() returns non-0 after the retries and we FailBringup. Start() does
+    // NOT wait on cluster readiness internally (WaitClusterReady is a separate
+    // method); we deliberately do NOT call it here -- the node is not leader
+    // yet, and the driver waits for readiness separately.
     int started = impl.tx_service->Start(node_id,
                                          ng_id,
                                          &impl.ng_configs,
                                          cluster_config_version,
                                          &impl.tx_ips,
                                          &impl.tx_ports,
-                                         /*hm_ip=*/nullptr,
-                                         /*hm_port=*/nullptr,
+                                         &impl.cfg.hm_ip,
+                                         &impl.cfg.hm_port,
                                          /*hm_bin_path=*/nullptr,
                                          impl.conf,
                                          /*log_agent=*/nullptr,
                                          local_path,
-                                         cluster_config_path);
+                                         cluster_config_path,
+                                         /*fork_host_manager=*/false);
     if (started != 0)
     {
         FailBringup("TxService Start");
     }
 
-    impl.tx_service->WaitClusterReady();
+    // Intentionally NO WaitClusterReady(): the node is not leader yet; the
+    // driver drives leadership and waits for readiness separately.
 }
 
-TestNode::~TestNode()
+TxNode::~TxNode()
 {
     Impl &impl = *impl_;
     if (impl.tx_service)
@@ -374,108 +341,19 @@ TestNode::~TestNode()
     std::filesystem::remove_all(impl.dir, ec);
 }
 
-TxHandle TestNode::BeginTx()
-{
-    return BeginTx(impl_->options.isolation, impl_->options.protocol);
-}
-
-TxHandle TestNode::BeginTx(IsolationLevel isolation, CcProtocol protocol)
-{
-    Impl &impl = *impl_;
-    TransactionExecution *txm = impl.tx_service->NewTx();
-    InitTxRequest init(isolation, protocol);
-    init.Reset();
-    txm->Execute(&init);
-    init.Wait();
-    // Fail fast and locally: never hand back a TxHandle over a txm whose
-    // initialization failed, which would surface as confusing downstream
-    // errors.
-    if (init.IsError())
-    {
-        FailBringup("InitTxRequest");
-    }
-    return TxHandle(txm, &impl.table, impl.schema_version);
-}
-
-const TableName &TestNode::Table() const
-{
-    return impl_->table;
-}
-
-uint64_t TestNode::SchemaVersion() const
-{
-    return impl_->schema_version;
-}
-
-TxService *TestNode::Service()
+TxService *TxNode::Service()
 {
     return impl_->tx_service.get();
 }
 
-// ---- TxHandle ----
-
-bool TxHandle::Commit()
+const TableName &TxNode::Table() const
 {
-    CommitTxRequest req;
-    txm_->Execute(&req);
-    req.Wait();
-    return !req.IsError() && req.Result();
+    return impl_->table;
 }
 
-bool TxHandle::Abort()
+uint64_t TxNode::SchemaVersion() const
 {
-    AbortTxRequest req;
-    txm_->Execute(&req);
-    req.Wait();
-    // AbortTxRequest's result is true once the abort completes. Treat a
-    // non-errored abort as success.
-    return !req.IsError();
-}
-
-// The test table is registered as a prebuilt table (see the TxService ctor in
-// TestNode), so these requests resolve a CcMap and run to completion. The
-// schema_version passed must match what the cc layer derives from the table's
-// KeySchema (MockKeySchema::SchemaTs() == 1, mirrored by TestNode's
-// schema_version), or InitCcm rejects the request as a schema mismatch.
-
-bool TxHandle::Upsert(int key, int value)
-{
-    // OperationType::Upsert writes the record whether or not the key already
-    // exists, which is the behavior callers expect from a generic write helper.
-    UpsertTxRequest req(table_, Key(key), Rec(value), OperationType::Upsert);
-    txm_->Execute(&req);
-    req.Wait();
-    return !req.IsError();
-}
-
-bool TxHandle::Delete(int key)
-{
-    UpsertTxRequest req(
-        table_, Key(key), /*rec=*/nullptr, OperationType::Delete);
-    txm_->Execute(&req);
-    req.Wait();
-    return !req.IsError();
-}
-
-bool TxHandle::Read(int key, int &value_out)
-{
-    TxKey tx_key = Key(key);
-    CompositeRecord<int> rec;
-    ReadTxRequest req(table_, schema_version_, &tx_key, &rec);
-    txm_->Execute(&req);
-    req.Wait();
-    if (req.IsError())
-    {
-        return false;
-    }
-    // Result is a pair<RecordStatus, commit_ts>. Only Normal means the key is
-    // present; Deleted / Unknown mean it is absent for the caller's purposes.
-    if (req.Result().first != RecordStatus::Normal)
-    {
-        return false;
-    }
-    value_out = std::get<0>(rec.Tuple());
-    return true;
+    return impl_->schema_version;
 }
 
 }  // namespace test

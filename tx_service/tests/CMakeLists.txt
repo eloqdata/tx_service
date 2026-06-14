@@ -21,6 +21,39 @@ target_include_directories(test_harness PUBLIC
 target_link_libraries(test_harness PUBLIC data_substrate)
 set_property(TARGET test_harness PROPERTY CXX_STANDARD 20)
 
+# --- Phase 2 cluster harness: workload proto + driver lib ---
+set(WORKLOAD_PROTO ${CMAKE_CURRENT_SOURCE_DIR}/cluster/txnode_workload.proto)
+add_custom_command(
+    OUTPUT ${CMAKE_CURRENT_BINARY_DIR}/txnode_workload.pb.cc
+           ${CMAKE_CURRENT_BINARY_DIR}/txnode_workload.pb.h
+    COMMAND protoc --cpp_out=${CMAKE_CURRENT_BINARY_DIR}
+            -I ${CMAKE_CURRENT_SOURCE_DIR}/cluster ${WORKLOAD_PROTO}
+    DEPENDS ${WORKLOAD_PROTO}
+    COMMENT "Generating txnode_workload.pb.{h,cc}")
+add_library(cluster_harness STATIC
+    ${CMAKE_CURRENT_BINARY_DIR}/txnode_workload.pb.cc
+    ${CMAKE_CURRENT_SOURCE_DIR}/cluster/scripted_host_manager.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/cluster/test_cluster.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/cluster/txnode_bringup.cpp)
+target_include_directories(cluster_harness PUBLIC
+    ${CMAKE_CURRENT_SOURCE_DIR} ${CMAKE_CURRENT_BINARY_DIR} ${HARNESS_DIR})
+target_link_libraries(cluster_harness PUBLIC data_substrate)
+set_property(TARGET cluster_harness PROPERTY CXX_STANDARD 20)
+
+# --- Standalone tx-service node binary (driven by the cluster test driver) ---
+# Not a Catch test: it has its own main() and parses gflags. cluster_harness
+# provides TxNode + the generated WorkloadService; test_harness provides the
+# MemDataStore object whose vtable txnode_bringup.cpp references. The two
+# harness libs do not share sources, so linking both is duplicate-symbol-free.
+# Key/Rec are duplicated (as MakeKey/MakeRec) in txnode_main.cpp, so it does not
+# rely on test_harness's test_node.cpp symbols.
+add_executable(txnode ${CMAKE_CURRENT_SOURCE_DIR}/cluster/txnode_main.cpp)
+target_include_directories(txnode PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR} ${CMAKE_CURRENT_BINARY_DIR} ${HARNESS_DIR}
+    ${CMAKE_CURRENT_SOURCE_DIR}/cluster)
+target_link_libraries(txnode PRIVATE cluster_harness test_harness data_substrate)
+set_property(TARGET txnode PROPERTY CXX_STANDARD 20)
+
 # --- Test executables ---
 # Tests that rely on Catch2 to provide main() (the "Let Catch provide main()"
 # files). They link Catch2::Catch2WithMain.
@@ -55,3 +88,19 @@ endforeach()
 foreach(name ${OWN_MAIN_TESTS})
     add_substrate_test(${name} Catch2::Catch2)
 endforeach()
+
+# --- Phase 2 cross-NG cluster test (own main; links cluster_harness) ---
+# Drives a real 2-node out-of-process cluster, so it links cluster_harness (the
+# TestCluster driver + generated WorkloadService stub) and must be built after
+# the `txnode` binary it spawns (TestCluster locates txnode next to the test
+# binary, in the same tests/ dir).
+add_executable(ClusterCrossNg-Test ${TESTS_DIR}/ClusterCrossNg-Test.cpp)
+target_include_directories(ClusterCrossNg-Test PRIVATE
+    ${TESTS_DIR} ${HARNESS_DIR} ${CMAKE_CURRENT_BINARY_DIR}
+    ${CMAKE_CURRENT_SOURCE_DIR}/cluster)
+target_link_libraries(ClusterCrossNg-Test PRIVATE
+    cluster_harness test_harness data_substrate Catch2::Catch2)
+set_property(TARGET ClusterCrossNg-Test PROPERTY CXX_STANDARD 20)
+set_property(TARGET ClusterCrossNg-Test PROPERTY CXX_EXTENSIONS OFF)
+add_dependencies(ClusterCrossNg-Test txnode)
+catch_discover_tests(ClusterCrossNg-Test PROPERTIES LABELS "ClusterCrossNg-Test")

@@ -32,16 +32,14 @@ jobs:
       - name: Build
         run: cmake --build bld --parallel "$(nproc)"
 
-      - name: Test (gating — excludes LargeObjLRU-Test, see below)
+      - name: Test (gating — full suite)
         working-directory: bld
-        run: ctest --output-on-failure --timeout 180 -LE LargeObjLRU-Test
-
-      # LargeObjLRU-Test is now deterministic after the FastMetaDataMutex
-      # tls_shard_idx fix (14/15 cases pass), but TC-FE-01 hits a separate,
-      # pre-existing assert(!keys_.empty()) in the LO-LRU FindEmplace path that
-      # was previously masked by memory corruption. Kept non-gating until that
-      # is resolved. See docs/.../2026-06-13-largeobjlru-spin-rootcause-and-fix.
-      - name: LargeObjLRU stress test (non-gating; TC-FE-01 separate bug)
-        working-directory: bld
-        continue-on-error: true
-        run: ctest --output-on-failure --timeout 180 -L LargeObjLRU-Test
+        # The entire suite gates now. LargeObjLRU-Test: the FastMetaDataMutex
+        # tls_shard_idx spin, the FindEmplace LO-LRU last-page routing bug
+        # (assert(!keys_.empty())), and the dirty_data_key_count_ underflow
+        # (a test-setup bug) are all fixed; all 23 cases pass deterministically.
+        # ClusterCrossNg-Test spawns real `txnode` subprocesses but is
+        # stress-validated (sequential + heavy parallel) and self-heals
+        # port-contention bring-up failures by re-spawning on fresh ports, so it
+        # is stable in a solo CI run.
+        run: ctest --output-on-failure --timeout 180
