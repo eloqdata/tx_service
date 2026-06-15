@@ -19,7 +19,9 @@ if (INI_USE_HEAP)
 endif()
 
 SET(LOG_SOURCE_DIR ${CMAKE_CURRENT_SOURCE_DIR})
-SET(LOG_PROTO_SOURCE_DIR ${CMAKE_CURRENT_SOURCE_DIR}/tx-log-protos)
+# tx-log-protos was consolidated into tx_service/tx-log-protos; reference it there
+# (the eloq_log_service-local copy was removed).
+SET(LOG_PROTO_SOURCE_DIR ${CMAKE_CURRENT_SOURCE_DIR}/../tx_service/tx-log-protos)
 message(NOTICE "log_service source dir: ${LOG_SOURCE_DIR}")
 
 option(TEST_LOG_SERVICE "Test log service" ON)
@@ -284,7 +286,12 @@ set(PROTO_NAME log)
 execute_process(
 	COMMAND protoc ./${PROTO_NAME}.proto --cpp_out=./
 	WORKING_DIRECTORY ${PROTO_SRC}
+	RESULT_VARIABLE PROTOC_RESULT
+	ERROR_VARIABLE PROTOC_ERROR
 )
+if(NOT PROTOC_RESULT EQUAL 0)
+    message(FATAL_ERROR "protoc failed for ${PROTO_NAME}.proto: ${PROTOC_ERROR}")
+endif()
 
 set(LOG_INCLUDE_DIR
         ${LOG_INCLUDE_DIR}

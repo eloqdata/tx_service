@@ -56,26 +56,30 @@ public:
                 options.timeout_ms = 100;
                 options.max_retry = 3;
                 butil::ip_t ip_t;
-                int err;
                 size_t comma_pos = full_ip_.find(':');
                 assert(comma_pos != std::string::npos);
                 std::string node_ip_str = full_ip_.substr(0, comma_pos);
                 uint16_t node_port = std::stoi(full_ip_.substr(comma_pos + 1));
-                if (0 != butil::str2ip(node_ip_str.c_str(), &ip_t))
+                auto init_channel = [&]() -> int
                 {
-                    // for case `node_ip_str` is hostname format.
-                    std::string naming_service_url;
-                    braft::HostNameAddr hostname_addr(node_ip_str, node_port);
-                    braft::HostNameAddr2NSUrl(hostname_addr,
-                                              naming_service_url);
-                    err = channel_.Init(naming_service_url.c_str(),
-                                        braft::LOAD_BALANCER_NAME,
-                                        &options);
-                }
-                else
-                {
-                    err = channel_.Init(full_ip_.c_str(), &options);
-                }
+                    if (0 != butil::str2ip(node_ip_str.c_str(), &ip_t))
+                    {
+                        // for case `node_ip_str` is hostname format.
+                        std::string naming_service_url;
+                        braft::HostNameAddr hostname_addr(node_ip_str,
+                                                          node_port);
+                        braft::HostNameAddr2NSUrl(hostname_addr,
+                                                  naming_service_url);
+                        return channel_.Init(naming_service_url.c_str(),
+                                             braft::LOAD_BALANCER_NAME,
+                                             &options);
+                    }
+                    else
+                    {
+                        return channel_.Init(full_ip_.c_str(), &options);
+                    }
+                };
+                int err = init_channel();
                 while (err != 0)
                 {
                     if (shipping_agent_status_.load(
@@ -91,6 +95,7 @@ public:
                         << " fails to connect to the cc node at " << full_ip_;
                     using namespace std::chrono_literals;
                     std::this_thread::sleep_for(1s);
+                    err = init_channel();
                 }
 
                 while (ConnectStream() != 0)

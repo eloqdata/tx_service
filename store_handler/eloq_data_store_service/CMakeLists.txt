@@ -406,10 +406,11 @@ endif()
 include_directories(
         ${PROJECT_SOURCE_DIR}/
         ${CMAKE_CURRENT_LIST_DIR}/../../third_party/ini
-if(WITH_DATA_STORE STREQUAL "ELOQDSS_ELOQSTORE")
-        ${PROJECT_SOURCE_DIR}/eloqstore/
-endif ()
 )
+
+if(WITH_DATA_STORE STREQUAL "ELOQDSS_ELOQSTORE")
+    include_directories(${PROJECT_SOURCE_DIR}/eloqstore/)
+endif()
 
 # set(ABSEIL
 #         absl::btree

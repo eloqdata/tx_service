@@ -599,6 +599,7 @@ int main(int argc, char *argv[])
         LOG(ERROR)
             << "The argument `log_purger_schedule` has invalid time format. "
                "expected: HH:MM:SS";
+        return 1;
     }
     else
     {

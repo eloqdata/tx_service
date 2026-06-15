@@ -21,12 +21,7 @@ void run_direct(std::string ip,
                 std::string group,
                 std::string storage_path)
 {
-    txlog::RaftServer raftServer(FLAGS_ip,
-                                 FLAGS_port,
-                                 FLAGS_id,
-                                 FLAGS_raft_conf,
-                                 FLAGS_group,
-                                 FLAGS_storage_path);
+    txlog::RaftServer raftServer(ip, port, id, raft_conf, group, storage_path);
     raftServer.Run();
 }
 

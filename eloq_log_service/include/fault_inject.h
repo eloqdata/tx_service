@@ -2,6 +2,7 @@
 
 #include <cassert>
 #include <cstdint>
+#include <memory>
 #include <mutex>
 #include <string>
 #include <unordered_map>
@@ -135,14 +136,18 @@ public:
         return instance_;
     }
 
-    static FaultEntry *Entry(std::string fault_name)
+    // Returns a shared_ptr so the FaultEntry stays alive even if a concurrent
+    // InjectFault("remove") erases it from the map while the caller is still
+    // using it. The shared_ptr is a copy taken under the lock, ensuring the
+    // pointed-to object outlives any concurrent erase or rehash.
+    static std::shared_ptr<FaultEntry> Entry(std::string fault_name)
     {
         FaultInject &fi = Instance();
         std::lock_guard<std::mutex> lk(fi.mux_);
         auto iter = fi.injected_fault_map_.find(fault_name);
         if (iter != fi.injected_fault_map_.end())
         {
-            return &iter->second;
+            return iter->second;
         }
         else
         {
@@ -152,13 +157,13 @@ public:
 
     void TriggerAction(std::string fault_name)
     {
-        FaultEntry *entry;
+        std::shared_ptr<FaultEntry> entry;
         {
             std::lock_guard<std::mutex> lk(mux_);
             auto iter = injected_fault_map_.find(fault_name);
             if (iter != injected_fault_map_.end())
             {
-                entry = &iter->second;
+                entry = iter->second;
             }
             else
             {
@@ -166,7 +171,7 @@ public:
             }
         }
 
-        TriggerAction(entry);
+        TriggerAction(entry.get());
     }
 
     void TriggerAction(FaultEntry *entry);
@@ -180,16 +185,16 @@ public:
             return;
         }
 
-        FaultEntry fentry(fault_name, paras);
+        auto fentry = std::make_shared<FaultEntry>(fault_name, paras);
         if (fault_name.compare("at_once") == 0)
         {
             // If fault name equal "at_once", run it at once
-            TriggerAction(&fentry);
+            TriggerAction(fentry.get());
         }
         else
         {
             std::lock_guard<std::mutex> lk(mux_);
-            injected_fault_map_.try_emplace(fault_name, fentry);
+            injected_fault_map_.try_emplace(fault_name, std::move(fentry));
         }
     }
 
@@ -203,7 +208,8 @@ private:
     }
 
     uint32_t node_id_;
-    std::unordered_map<std::string, FaultEntry> injected_fault_map_;
+    std::unordered_map<std::string, std::shared_ptr<FaultEntry>>
+        injected_fault_map_;
     std::mutex mux_;
 };
 
@@ -212,11 +218,12 @@ private:
 #ifdef WITH_FAULT_INJECT
 #define ACTION_FAULT_INJECTOR(FaultName) \
     FaultInject::Instance().TriggerAction(FaultName)
-#define CODE_FAULT_INJECTOR(FaultName, code)                     \
-    {                                                            \
-        FaultEntry *fault_entry = FaultInject::Entry(FaultName); \
-        if (fault_entry != nullptr)                              \
-            code;                                                \
+#define CODE_FAULT_INJECTOR(FaultName, code)      \
+    {                                             \
+        std::shared_ptr<FaultEntry> fault_entry = \
+            FaultInject::Entry(FaultName);        \
+        if (fault_entry != nullptr)               \
+            code;                                 \
     }
 #define FAULT_INJECTOR_CONDITION_WRAP(FaultName, code) \
     (FaultInject::Entry(FaultName) ? true : false) || (code)

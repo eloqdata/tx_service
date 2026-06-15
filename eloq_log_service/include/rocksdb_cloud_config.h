@@ -175,6 +175,10 @@ inline rocksdb::Status NewCloudFileSystem(
     // Google cloud storage file system
     auto status = rocksdb::CloudFileSystemEnv::NewGcpFileSystem(
         rocksdb::FileSystem::Default(), cfs_options, nullptr, cfs);
+#else
+    auto status = rocksdb::Status::InvalidArgument(
+        "No cloud backend selected: define LOG_STATE_TYPE_RKDB_S3 or "
+        "LOG_STATE_TYPE_RKDB_GCS");
 #endif
     return status;
 };

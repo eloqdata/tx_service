@@ -22,6 +22,11 @@ public:
         brpc::ClosureGuard done_guard(done);
         brpc::StreamId streamId;
         auto cntl = dynamic_cast<brpc::Controller *>(controller);
+        if (cntl == nullptr)
+        {
+            LOG(ERROR) << "Failed to cast controller to brpc::Controller";
+            return;
+        }
         brpc::StreamOptions stream_options;
         stream_options.handler = this;
         if (brpc::StreamAccept(&streamId, *cntl, &stream_options) != 0)
@@ -74,13 +79,35 @@ private:
     {
         const char *p = log_records_blob.data();
         size_t offset = 0;
-        while (offset < log_records_blob.size())
+        const size_t blob_size = log_records_blob.size();
+        while (offset < blob_size)
         {
-            record_cnt_++;
-            uint64_t timestamp = *((uint64_t *) (p + offset));
+            if (offset + sizeof(uint64_t) > blob_size)
+            {
+                LOG(ERROR)
+                    << "Truncated log blob: not enough bytes for timestamp";
+                break;
+            }
+            uint64_t timestamp;
+            std::memcpy(&timestamp, p + offset, sizeof(uint64_t));
             offset += sizeof(uint64_t);
-            uint32_t length = *((uint32_t *) (p + offset));
+
+            if (offset + sizeof(uint32_t) > blob_size)
+            {
+                LOG(ERROR) << "Truncated log blob: not enough bytes for length";
+                break;
+            }
+            uint32_t length;
+            std::memcpy(&length, p + offset, sizeof(uint32_t));
             offset += sizeof(uint32_t);
+
+            if (offset + length > blob_size)
+            {
+                LOG(ERROR)
+                    << "Truncated log blob: not enough bytes for record data";
+                break;
+            }
+            record_cnt_++;
             std::string_view sv((p + offset), length);
             offset += length;
             LOG(INFO) << "timestamp: " << timestamp

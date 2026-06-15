@@ -6,6 +6,7 @@
 #include <chrono>
 #include <csignal>
 #include <iostream>
+#include <mutex>
 #include <random>
 #include <thread>
 
@@ -51,7 +52,8 @@ DEFINE_bool(scan_data, true, "Scan data");
 std::random_device rd;
 std::default_random_engine generator(rd());
 std::uniform_int_distribution<uint64_t> distribution(0, 0xFFFFFFFF);
-// key for query
+// key for query — guarded by random_query_key_mutex
+std::mutex random_query_key_mutex;
 std::array<char, 20> random_query_key;
 
 // cloud db
@@ -106,11 +108,12 @@ void populate_data(std::atomic<bool> &interrupt)
         Serialize(key, cnt % 3, timestamp, tx_number);
         if (tx_number % 100 == 1)
         {
-            // update random_query_key by 1/10 chance
+            // update random_query_key by 1/100 chance
+            std::lock_guard<std::mutex> lk(random_query_key_mutex);
             random_query_key = key;
         }
         std::string log_message = FLAGS_log_message;
-        log_message.append(key.data());
+        log_message.append(key.data(), key.size());
         auto status =
             db->Put(w_opt, rocksdb::Slice(key.data(), key.size()), log_message);
         if (!status.ok())
@@ -150,12 +153,17 @@ void populate_data(std::atomic<bool> &interrupt)
 
 void query_by_key()
 {
+    std::array<char, 20> key_snapshot;
+    {
+        std::lock_guard<std::mutex> lk(random_query_key_mutex);
+        key_snapshot = random_query_key;
+    }
     std::string value;
     auto s = now();
-    rocksdb::Status status = db->Get(
-        rocksdb::ReadOptions(),
-        rocksdb::Slice(random_query_key.data(), random_query_key.size()),
-        &value);
+    rocksdb::Status status =
+        db->Get(rocksdb::ReadOptions(),
+                rocksdb::Slice(key_snapshot.data(), key_snapshot.size()),
+                &value);
     auto e = now();
     if (!status.ok())
     {

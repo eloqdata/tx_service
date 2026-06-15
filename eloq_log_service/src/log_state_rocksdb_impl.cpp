@@ -247,8 +247,9 @@ std::vector<std::string> LogStateRocksDBImpl::WriteSnapshot(
     }
 
     // do rocksdb checkpoint, add checkpoint files to snapshot
-    rocksdb::Checkpoint *checkpoint;
-    auto status = rocksdb::Checkpoint::Create(db_, &checkpoint);
+    rocksdb::Checkpoint *checkpoint_raw = nullptr;
+    auto status = rocksdb::Checkpoint::Create(db_, &checkpoint_raw);
+    std::unique_ptr<rocksdb::Checkpoint> checkpoint(checkpoint_raw);
     if (!status.ok())
     {
         LOG(ERROR) << "Create checkpoint object failed: " << status.ToString();

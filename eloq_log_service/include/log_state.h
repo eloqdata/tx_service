@@ -1240,6 +1240,11 @@ protected:
     {
         uint32_t cnt;
         is.read(reinterpret_cast<char *>(&cnt), sizeof(uint32_t));
+        if (is.fail())
+        {
+            LOG(ERROR) << "snapshot read failed: could not read ng_info count";
+            return;
+        }
         LOG(INFO) << "read snapshot leader info size: " << cnt;
         for (uint32_t i = 0; i < cnt; i++)
         {
@@ -1268,6 +1273,12 @@ protected:
                     sizeof(uint64_t));
             // cc ng lat ckpt ts
             is.read(reinterpret_cast<char *>(&last_ckpt_ts), sizeof(uint64_t));
+            if (is.fail())
+            {
+                LOG(ERROR) << "snapshot read failed: truncated ng_info entry "
+                           << i << " of " << cnt;
+                return;
+            }
             cc_ng_info_.try_emplace(ng_id,
                                     term,
                                     leader_ip,
@@ -1285,6 +1296,12 @@ protected:
                       << ", last_ckpt_ts: " << last_ckpt_ts;
         }
         is.read(reinterpret_cast<char *>(&cnt), sizeof(uint32_t));
+        if (is.fail())
+        {
+            LOG(ERROR)
+                << "snapshot read failed: could not read catalog ops count";
+            return;
+        }
         LOG(INFO) << "read snapshot catalog ops size: " << cnt;
         std::string buf;
         for (uint32_t i = 0; i < cnt; i++)
@@ -1297,6 +1314,13 @@ protected:
 
             uint16_t schemas_cnt;
             is.read(reinterpret_cast<char *>(&schemas_cnt), sizeof(uint16_t));
+            if (is.fail())
+            {
+                LOG(ERROR)
+                    << "snapshot read failed: truncated catalog op header " << i
+                    << " of " << cnt;
+                return;
+            }
 
             std::vector<SchemaOpMessage> msgs;
             msgs.reserve(schemas_cnt);
@@ -1307,7 +1331,23 @@ protected:
                 is.read(reinterpret_cast<char *>(&length), sizeof(uint32_t));
                 buf.resize(length);
                 is.read(buf.data(), length);
-                msg.ParseFromString(buf);
+                if (is.fail())
+                {
+                    LOG(ERROR)
+                        << "snapshot read failed: truncated schema op message "
+                        << idx << " of " << schemas_cnt << " in catalog op "
+                        << i;
+                    return;
+                }
+                if (!msg.ParseFromString(buf))
+                {
+                    LOG(ERROR)
+                        << "snapshot read failed: could not parse schema op "
+                           "message "
+                        << idx << " of " << schemas_cnt << " in catalog op "
+                        << i;
+                    return;
+                }
                 LOG(INFO) << "read snapshot schema op, txn: " << txn
                           << ", table name: " << msg.table_name_str()
                           << ", stage: " << int(msg.stage())
@@ -1317,6 +1357,12 @@ protected:
             tx_catalog_ops_.try_emplace(txn, std::move(msgs), commit_ts);
         }
         is.read(reinterpret_cast<char *>(&cnt), sizeof(uint32_t));
+        if (is.fail())
+        {
+            LOG(ERROR)
+                << "snapshot read failed: could not read split range ops count";
+            return;
+        }
         LOG(INFO) << "read snapshot split range ops size: " << cnt;
         for (uint32_t i = 0; i < cnt; i++)
         {
@@ -1329,8 +1375,29 @@ protected:
             is.read(reinterpret_cast<char *>(&length), sizeof(uint32_t));
             buf.resize(length);
             is.read(buf.data(), length);
-            split_range_op_msg.ParseFromString(buf);
+            if (is.fail())
+            {
+                LOG(ERROR)
+                    << "snapshot read failed: truncated split range op entry "
+                    << i << " of " << cnt;
+                return;
+            }
+            if (!split_range_op_msg.ParseFromString(buf))
+            {
+                LOG(ERROR)
+                    << "snapshot read failed: could not parse split range op "
+                       "message "
+                    << i << " of " << cnt;
+                return;
+            }
             is.read(reinterpret_cast<char *>(&commit_ts), sizeof(uint64_t));
+            if (is.fail())
+            {
+                LOG(ERROR) << "snapshot read failed: truncated split range op "
+                              "commit_ts entry "
+                           << i << " of " << cnt;
+                return;
+            }
             tx_split_range_ops_.try_emplace(txn, split_range_op_msg, commit_ts);
             LOG(INFO) << "read snapshot split range op, txn: " << txn
                       << ", range table name: "
@@ -1340,6 +1407,12 @@ protected:
         }
 
         is.read(reinterpret_cast<char *>(&cnt), sizeof(uint32_t));
+        if (is.fail())
+        {
+            LOG(ERROR) << "snapshot read failed: could not read cluster scale "
+                          "ops count";
+            return;
+        }
         LOG(INFO) << "read snapshot cluster scale ops size: " << cnt;
         for (uint32_t i = 0; i < cnt; i++)
         {
@@ -1351,8 +1424,30 @@ protected:
             is.read(reinterpret_cast<char *>(&length), sizeof(uint32_t));
             buf.resize(length);
             is.read(buf.data(), length);
-            scale_op_msg.ParseFromString(buf);
+            if (is.fail())
+            {
+                LOG(ERROR)
+                    << "snapshot read failed: truncated cluster scale op entry "
+                    << i << " of " << cnt;
+                return;
+            }
+            if (!scale_op_msg.ParseFromString(buf))
+            {
+                LOG(ERROR)
+                    << "snapshot read failed: could not parse cluster scale op "
+                       "message "
+                    << i << " of " << cnt;
+                return;
+            }
             is.read(reinterpret_cast<char *>(&commit_ts), sizeof(uint64_t));
+            if (is.fail())
+            {
+                LOG(ERROR)
+                    << "snapshot read failed: truncated cluster scale op "
+                       "commit_ts entry "
+                    << i << " of " << cnt;
+                return;
+            }
             tx_cluster_scale_ops_.try_emplace(txn, scale_op_msg, commit_ts);
             LOG(INFO) << "read snapshot cluster scale op, txn: " << txn
                       << ", stage: " << int(scale_op_msg.stage())

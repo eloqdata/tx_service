@@ -148,18 +148,18 @@ inline bool DropBucket(std::string region,
     rocksdb::IOStatus io_status =
         storage_provider->ExistsBucket(bucket_name_with_prefix);
 
-    if (!io_status.ok())
+    if (io_status.IsNotFound())
+    {
+        LOG(INFO) << "Bucket " << bucket_name_with_prefix << " not found";
+        delete cfs;
+        return true;
+    }
+    else if (!io_status.ok())
     {
         LOG(ERROR) << "Failed to check bucket " << bucket_name_with_prefix
                    << ": " << io_status.ToString();
         delete cfs;
         return false;
-    }
-    else if (io_status.IsNotFound())
-    {
-        LOG(INFO) << "Bucket " << bucket_name_with_prefix << " not found";
-        delete cfs;
-        return true;
     }
 
     status = storage_provider->EmptyBucket(bucket_name_with_prefix, "");
@@ -196,10 +196,11 @@ inline bool DropBucket(std::string region,
     google::cloud::storage::Client client;
     google::cloud::Status delete_status =
         client.DeleteBucket(bucket_name_with_prefix);
-    if (!status.ok())
+    if (!delete_status.ok())
     {
         LOG(ERROR) << "Failed to delete bucket " << bucket_name_with_prefix
                    << ": " << delete_status.message();
+        return false;
     }
 #endif
 

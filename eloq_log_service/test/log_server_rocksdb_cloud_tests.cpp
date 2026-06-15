@@ -25,6 +25,7 @@
 #include <chrono>
 #include <filesystem>
 #include <iostream>
+#include <mutex>
 #include <random>
 #include <string>
 
@@ -153,6 +154,7 @@ public:
                              size_t size) override
     {
         DLOG(INFO) << "Receive replay messages, size: " << size;
+        std::lock_guard<std::mutex> lock(replay_mutex_);
         for (size_t idx = 0; idx < size; idx++)
         {
             std::unique_ptr<txlog::ReplayMessage> msg =
@@ -163,6 +165,11 @@ public:
             replay_messages_->push_back(std::move(msg));
         }
         return 0;
+    }
+
+    std::mutex &GetMutex()
+    {
+        return replay_mutex_;
     }
 
     void on_idle_timeout(brpc::StreamId id) override
@@ -196,6 +203,7 @@ private:
     txlog::LogAgent *log_agent_;
     brpc::StreamId stream_id_;
     std::vector<std::unique_ptr<txlog::ReplayMessage>> *replay_messages_;
+    std::mutex replay_mutex_;
 };
 
 class FakeReplayServer
@@ -233,6 +241,11 @@ public:
         brpc_server_.Stop(1);
         brpc_server_.Join();
         LOG(INFO) << "FakeReplayServer stopped";
+    }
+
+    std::mutex &GetMutex()
+    {
+        return replay_service_.GetMutex();
     }
 
 private:
@@ -407,6 +420,7 @@ void VerifyReplayMessages(
     const uint64_t verify_commit_ts,
     const std::string &verify_message)
 {
+    size_t record_count = 0;
     for (size_t i = 0; i < replay_messages->size(); i++)
     {
         auto &replay_message = replay_messages->at(i);
@@ -430,9 +444,11 @@ void VerifyReplayMessages(
                 std::string blob(log_records.data() + offset, blob_length);
                 CATCH_REQUIRE(blob == verify_message);
                 offset += blob_length;
+                record_count++;
             }
         }
     }
+    CATCH_REQUIRE(record_count > 0);
 }
 
 void populate_data(rocksdb::DBCloud *db,
@@ -1102,7 +1118,10 @@ CATCH_TEST_CASE("test_A_B_A_replay_B_not_start_rocksdb_cloud",
     replay(log_agent.get(), cc_ng_id, ng_term);
     LOG(INFO) << "replay done";
     sleep(5);
-    replay_messages->clear();
+    {
+        std::lock_guard<std::mutex> lock(replay_server.GetMutex());
+        replay_messages->clear();
+    }
 
     // write data log
     txlog::LogResponse response;
@@ -1194,12 +1213,15 @@ CATCH_TEST_CASE("test_A_B_A_replay_B_not_start_rocksdb_cloud",
                          8888,
                          0);
     sleep(5);
-    LOG(INFO) << "Replay message size: " << replay_messages->size();
-    CATCH_REQUIRE(replay_messages->size() == 1);
-    // verify replay message
-    VerifyReplayMessages(
-        replay_messages.get(), cc_ng_id, ng_term, commit_ts, message);
-    replay_messages->clear();
+    {
+        std::lock_guard<std::mutex> lock(replay_server.GetMutex());
+        LOG(INFO) << "Replay message size: " << replay_messages->size();
+        CATCH_REQUIRE(replay_messages->size() == 1);
+        // verify replay message
+        VerifyReplayMessages(
+            replay_messages.get(), cc_ng_id, ng_term, commit_ts, message);
+        replay_messages->clear();
+    }
 
     // shutdown log servers
     log_agent = nullptr;
@@ -1267,7 +1289,10 @@ CATCH_TEST_CASE("test_snapshot_flushdb", "[log_server_rocksdb_cloud_tests]")
     sleep(1);
     replay(log_agent.get(), cc_ng_id, ng_term);
     sleep(1);
-    replay_messages->clear();
+    {
+        std::lock_guard<std::mutex> lock(replay_server.GetMutex());
+        replay_messages->clear();
+    }
     // write data log
     txlog::LogResponse response;
     brpc::Controller cntl;
@@ -1301,9 +1326,12 @@ CATCH_TEST_CASE("test_snapshot_flushdb", "[log_server_rocksdb_cloud_tests]")
     replay(log_agent.get(), cc_ng_id, ng_term);
     sleep(5);
     // verify replay message
-    VerifyReplayMessages(
-        replay_messages.get(), cc_ng_id, ng_term, commit_ts, message);
-    replay_messages->clear();
+    {
+        std::lock_guard<std::mutex> lock(replay_server.GetMutex());
+        VerifyReplayMessages(
+            replay_messages.get(), cc_ng_id, ng_term, commit_ts, message);
+        replay_messages->clear();
+    }
 
     // shutdown log servers
     log_agent = nullptr;
@@ -1386,7 +1414,10 @@ CATCH_TEST_CASE("test_A_B_A_replay_A_refill_in_mem_state",
     sleep(5);
     replay(log_agent.get(), cc_ng_id, ng_term);
     sleep(5);
-    replay_messages->clear();
+    {
+        std::lock_guard<std::mutex> lock(replay_server.GetMutex());
+        replay_messages->clear();
+    }
 
     // stop prefer leader transfer
     txlog::FaultInject::Instance().InjectFault("disable_prefer_leader_transfer",
@@ -1445,13 +1476,16 @@ CATCH_TEST_CASE("test_A_B_A_replay_A_refill_in_mem_state",
     // replay without wait
     replay(log_agent.get(), cc_ng_id, ng_term);
     sleep(5);
-    LOG(INFO) << "Replay message size: " << replay_messages->size();
-    // guaranteed to succeed only during single-threaded scanning
-    CATCH_REQUIRE(replay_messages->size() == 3);
-    // verify replay message
-    VerifyReplayMessages(
-        replay_messages.get(), cc_ng_id, ng_term, commit_ts, message);
-    replay_messages->clear();
+    {
+        std::lock_guard<std::mutex> lock(replay_server.GetMutex());
+        LOG(INFO) << "Replay message size: " << replay_messages->size();
+        // guaranteed to succeed only during single-threaded scanning
+        CATCH_REQUIRE(replay_messages->size() == 3);
+        // verify replay message
+        VerifyReplayMessages(
+            replay_messages.get(), cc_ng_id, ng_term, commit_ts, message);
+        replay_messages->clear();
+    }
 
     txlog::FaultInject::Instance().InjectFault("disable_prefer_leader_transfer",
                                                "remove");
@@ -1533,7 +1567,10 @@ CATCH_TEST_CASE("test_A_B_A_replay", "[log_server_rocksdb_cloud_tests]")
     sleep(5);
     replay(log_agent.get(), cc_ng_id, ng_term);
     sleep(5);
-    replay_messages->clear();
+    {
+        std::lock_guard<std::mutex> lock(replay_server.GetMutex());
+        replay_messages->clear();
+    }
 
     // write data log
     txlog::LogResponse response;
@@ -1582,13 +1619,16 @@ CATCH_TEST_CASE("test_A_B_A_replay", "[log_server_rocksdb_cloud_tests]")
     // replay without wait
     replay(log_agent.get(), cc_ng_id, ng_term);
     sleep(5);
-    LOG(INFO) << "Replay message size: " << replay_messages->size();
-    // guaranteed to succeed only during single-threaded scanning
-    CATCH_REQUIRE(replay_messages->size() == 3);
-    // verify replay message
-    VerifyReplayMessages(
-        replay_messages.get(), cc_ng_id, ng_term, commit_ts, message);
-    replay_messages->clear();
+    {
+        std::lock_guard<std::mutex> lock(replay_server.GetMutex());
+        LOG(INFO) << "Replay message size: " << replay_messages->size();
+        // guaranteed to succeed only during single-threaded scanning
+        CATCH_REQUIRE(replay_messages->size() == 3);
+        // verify replay message
+        VerifyReplayMessages(
+            replay_messages.get(), cc_ng_id, ng_term, commit_ts, message);
+        replay_messages->clear();
+    }
 
     // shutdown log servers
     log_agent = nullptr;
@@ -1667,7 +1707,10 @@ CATCH_TEST_CASE("test_A_B_replay", "[log_server_rocksdb_cloud_tests]")
     sleep(5);
     replay(log_agent.get(), cc_ng_id, ng_term);
     sleep(5);
-    replay_messages->clear();
+    {
+        std::lock_guard<std::mutex> lock(replay_server.GetMutex());
+        replay_messages->clear();
+    }
 
     // write data log
     txlog::LogResponse response;
@@ -1688,12 +1731,14 @@ CATCH_TEST_CASE("test_A_B_replay", "[log_server_rocksdb_cloud_tests]")
     LOG(INFO) << "log_server_0 killed";
     replay(log_agent.get(), cc_ng_id, ng_term);
     sleep(5);
-    LOG(INFO) << "Replay message size: " << replay_messages->size();
-
-    // verify replay message
-    VerifyReplayMessages(
-        replay_messages.get(), cc_ng_id, ng_term, commit_ts, message);
-    replay_messages->clear();
+    {
+        std::lock_guard<std::mutex> lock(replay_server.GetMutex());
+        LOG(INFO) << "Replay message size: " << replay_messages->size();
+        // verify replay message
+        VerifyReplayMessages(
+            replay_messages.get(), cc_ng_id, ng_term, commit_ts, message);
+        replay_messages->clear();
+    }
 
     // shutdown log servers
     log_agent = nullptr;

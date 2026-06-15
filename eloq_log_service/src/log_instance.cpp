@@ -1218,6 +1218,7 @@ void *LogInstance::save_snapshot(void *arg)
         {
             // rocksdb cloud rolling up timeout
             sc->done->status().set_error(EPERM, "Flush RocksDB Cloud failed");
+            sc->log_state_ref->CleanSnapshotState();
             return nullptr;
         }
 
@@ -1237,6 +1238,7 @@ void *LogInstance::save_snapshot(void *arg)
             LOG(ERROR) << "Flush RocksDB Cloud Failed! Error: "
                        << status.ToString();
             sc->done->status().set_error(EPERM, "Flush RocksDB Cloud failed");
+            sc->log_state_ref->CleanSnapshotState();
             return nullptr;
         }
         uint64_t max_sst_file_num =
@@ -1262,6 +1264,7 @@ void *LogInstance::save_snapshot(void *arg)
             LOG(ERROR) << "Failed to serialize the PostSnapshotRequest request";
             sc->done->status().set_error(
                 EPERM, "Failed to serialize the PostSnapshotRequest request");
+            sc->log_state_ref->CleanSnapshotState();
             return nullptr;
         }
         else
@@ -1291,6 +1294,7 @@ void *LogInstance::save_snapshot(void *arg)
                 LOG(ERROR) << "Failed to apply PostSnapshotRequest request";
                 sc->done->status().set_error(
                     EPERM, "Failed to apply PostSnapshotRequest request");
+                sc->log_state_ref->CleanSnapshotState();
                 return nullptr;
             }
 

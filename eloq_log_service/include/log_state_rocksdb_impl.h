@@ -59,7 +59,15 @@ inline void Deserialize(rocksdb::Slice key,
                         uint32_t &ng_id,
                         uint64_t &tx_number)
 {
-    assert(key.size() == 20);
+    if (key.size() != 20)
+    {
+        LOG(ERROR) << "Deserialize: unexpected key size " << key.size()
+                   << " (expected 20); skipping record";
+        timestamp = 0;
+        ng_id = 0;
+        tx_number = 0;
+        return;
+    }
     const char *p = key.data();
     uint64_t ts_be, tx_no_be;
     std::memcpy(&ts_be, p, sizeof(uint64_t));
@@ -90,7 +98,7 @@ public:
         : ItemIterator(std::move(ddl_list)),
           db_(db),
           start_key_(start_key_storage_.data(), start_key_storage_.size()),
-          worker_num_(worker_num)
+          worker_num_(worker_num == 0 ? 1 : worker_num)
     {
         Serialize(start_key_storage_, start_ts, target_ng, 0);
         rocksdb::ReadOptions read_options;
@@ -99,16 +107,9 @@ public:
         //        read_options.readahead_size = 4 << 20;
         rocksdb_iterator_ =
             std::unique_ptr<rocksdb::Iterator>(db_->NewIterator(read_options));
-        uint64_t first_ts = 0;
         uint64_t last_ts = 0;
         uint32_t tmp_ng;
         uint64_t tmp_txn;
-        rocksdb_iterator_->SeekToFirst();
-        if (!rocksdb_iterator_->Valid())
-        {
-            return;
-        }
-        Deserialize(rocksdb_iterator_->key(), first_ts, tmp_ng, tmp_txn);
         rocksdb_iterator_->SeekToLast();
         if (!rocksdb_iterator_->Valid())
         {
@@ -117,12 +118,15 @@ public:
         keys_storage_.reserve(worker_num_ * 2);
         keys_.reserve(worker_num_ * 2);
         Deserialize(rocksdb_iterator_->key(), last_ts, tmp_ng, tmp_txn);
+        // Use start_ts (the caller's requested lower bound) as the first
+        // partition boundary so that per-worker iterators do not replay records
+        // older than requested.
         std::vector<uint64_t> ts_list;
-        ts_list.push_back(first_ts);
-        auto gap = (last_ts - first_ts) / worker_num_;
+        ts_list.push_back(start_ts);
+        auto gap = last_ts >= start_ts ? (last_ts - start_ts) / worker_num_ : 0;
         for (size_t i = 1; i < worker_num_; i++)
         {
-            ts_list.push_back(first_ts + gap * i);
+            ts_list.push_back(start_ts + gap * i);
         }
         ts_list.push_back(last_ts);
         for (size_t i = 0; i < ts_list.size() - 1; i++)

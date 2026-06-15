@@ -163,8 +163,9 @@ int main(int argc, char *argv[])
     gflags::ParseCommandLineFlags(&argc, &argv, true);
     LOG(INFO) << "Total records: " << FLAGS_total_records;
     LOG(INFO) << "Database path: " << FLAGS_database_path;
-    LOG(INFO) << "Aws access key id: " << FLAGS_aws_access_key_id;
-    LOG(INFO) << "Aws secret access key: " << FLAGS_aws_secret_access_key;
+    LOG(INFO) << "Aws access key id set: " << !FLAGS_aws_access_key_id.empty();
+    LOG(INFO) << "Aws secret access key set: "
+              << !FLAGS_aws_secret_access_key.empty();
     LOG(INFO) << "Aws region: " << FLAGS_aws_region;
     LOG(INFO) << "Aws s3 bucket prefix: " << FLAGS_aws_s3_bucket_prefix;
     LOG(INFO) << "Aws s3 bucket name: " << FLAGS_aws_s3_bucket_name;
@@ -297,8 +298,14 @@ int main(int argc, char *argv[])
             rocksdb::Slice(start_key.data(), start_key.size());
         rocksdb::Slice upper_bound =
             rocksdb::Slice(end_key.data(), end_key.size());
-        rocksdb::DeleteFilesInRange(
+        status = rocksdb::DeleteFilesInRange(
             db, db->DefaultColumnFamily(), &lower_bound, &upper_bound);
+        if (!status.ok())
+        {
+            LOG(ERROR) << "DeleteFilesInRange failed for ng_id " << ng_id
+                       << ", error: " << status.ToString();
+            return -1;
+        }
     }
     end_t = now().time_since_epoch();
     LOG(INFO) << "--- Delete files in range, takes "

@@ -78,19 +78,21 @@ static void *sender(void *arg)
 
             txlog::LogRequest general_request;
             txlog::WriteLogRequest *request =
-                general_request.mutable_log_request();
+                general_request.mutable_write_log_request();
             request->set_txn_number(1);
-            request->set_timestamp(1);
+            request->set_commit_timestamp(1);
             ::google::protobuf::Map< ::google::protobuf::uint32, ::std::string>
-                *txn_logs = request->mutable_node_txn_logs();
-            (*txn_logs)[1] = 'hello';
-            (*txn_logs)[2] = 'world';
+                *txn_logs = request->mutable_log_content()
+                                ->mutable_data_log()
+                                ->mutable_node_txn_logs();
+            (*txn_logs)[1] = "hello";
+            (*txn_logs)[2] = "world";
             ::google::protobuf::Map< ::google::protobuf::uint32,
-                                     ::google::protobuf::uint32> *shard_terms =
+                                     ::google::protobuf::int64> *shard_terms =
                 request->mutable_node_terms();
             (*shard_terms)[1] = 0;
             (*shard_terms)[2] = 0;
-            stub.Write(&cntl, &general_request, &response, NULL);
+            stub.WriteLog(&cntl, &general_request, &response, NULL);
 
             if (cntl.Failed())
             {
@@ -101,14 +103,16 @@ static void *sender(void *arg)
                 bthread_usleep(FLAGS_timeout_ms * 1000L);
                 continue;
             }
-            if (!response.log_response().success())
+            if (response.response_status() !=
+                txlog::LogResponse::ResponseStatus::
+                    LogResponse_ResponseStatus_Success)
             {
                 LOG(WARNING) << "Fail to send request to " << leader
                              << ", redirecting to "
-                             << response.log_response().redirect();
+                             << response.write_log_response().redirect();
                 // Update route table since we have redirect information
-                braft::rtb::update_leader(FLAGS_group,
-                                          response.log_response().redirect());
+                braft::rtb::update_leader(
+                    FLAGS_group, response.write_log_response().redirect());
                 continue;
             }
             g_latency_recorder << 1;

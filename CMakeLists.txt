@@ -380,9 +380,11 @@ install(TARGETS txservice
         ARCHIVE DESTINATION lib
         LIBRARY DESTINATION lib)
 
-install(TARGETS logservice
-        ARCHIVE DESTINATION lib
-        LIBRARY DESTINATION lib)
+if(WITH_LOG_SERVICE)
+    install(TARGETS logservice
+            ARCHIVE DESTINATION lib
+            LIBRARY DESTINATION lib)
+endif()
 
 install(TARGETS data_substrate
         ARCHIVE DESTINATION lib

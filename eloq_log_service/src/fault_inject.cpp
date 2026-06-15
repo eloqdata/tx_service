@@ -14,8 +14,8 @@ void FaultInject::TriggerAction(FaultEntry *entry)
     if (entry->start_strike_ >= 0 && entry->end_strike_ >= 0)
     {
         entry->count_strike_++;
-        if (entry->start_strike_ < entry->count_strike_ ||
-            entry->end_strike_ > entry->count_strike_)
+        if (entry->count_strike_ < entry->start_strike_ ||
+            entry->count_strike_ > entry->end_strike_)
         {
             return;
         }

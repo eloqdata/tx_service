@@ -19,8 +19,10 @@ std::uniform_int_distribution<uint64_t> distribution(0, 0xFFFFFFFF);
 
 void test_add_and_replay_log()
 {
-    txlog::LogStateRocksDBImpl ls("/tmp/log_state_test/rocksdb" +
-                                  std::to_string(distribution(generator)));
+    txlog::LogStateRocksDBImpl ls(
+        "/tmp/log_state_test/rocksdb" + std::to_string(distribution(generator)),
+        0,
+        1);
     ls.Start();
     for (int i = 0; i < 10; i++)
     {
@@ -38,19 +40,26 @@ void test_add_and_replay_log()
     {
         cout << "get replay log for node group: " << ng_id << ":\n";
         auto res = ls.GetLogReplayList(ng_id, 0);
-        for (auto &p : res.second)
+        if (res.first && res.second)
         {
-            std::cout << "tx number: " << p->tx_number_
-                      << ",\ttimestamp: " << p->timestamp_
-                      << ",\tlog message: " << p->log_message_ << "\n";
+            for (res.second->SeekToFirst(); res.second->Valid();
+                 res.second->Next())
+            {
+                const txlog::Item &item = res.second->GetItem();
+                std::cout << "tx number: " << item.tx_number_
+                          << ",\ttimestamp: " << item.timestamp_
+                          << ",\tlog message: " << item.log_message_ << "\n";
+            }
         }
     }
 }
 
 void test_truncate_log()
 {
-    txlog::LogStateRocksDBImpl ls("/tmp/log_state_test/rocksdb" +
-                                  std::to_string(distribution(generator)));
+    txlog::LogStateRocksDBImpl ls(
+        "/tmp/log_state_test/rocksdb" + std::to_string(distribution(generator)),
+        0,
+        1);
     ls.Start();
     uint32_t ng_id = 0;
     uint64_t truncate_timestamp = 0;
@@ -71,29 +80,43 @@ void test_truncate_log()
     cout << endl;
     cout << "before truncate: " << endl;
     auto res = ls.GetLogReplayList(0, 0);
-    for (auto p : res.second)
+    if (res.first && res.second)
     {
-        std::cout << "tx number: " << p->tx_number_
-                  << ",\ttimestamp: " << p->timestamp_
-                  << ",\tlog message: " << p->log_message_ << "\n";
+        for (res.second->SeekToFirst(); res.second->Valid(); res.second->Next())
+        {
+            const txlog::Item &item = res.second->GetItem();
+            std::cout << "tx number: " << item.tx_number_
+                      << ",\ttimestamp: " << item.timestamp_
+                      << ",\tlog message: " << item.log_message_ << "\n";
+        }
     }
     cout << "truncate log before(inclusive) timestamp: " << truncate_timestamp
          << endl;
+    // NOTE: DeleteLogItems has been removed from the current API; truncation is
+    // now driven by checkpoint timestamps via UpdateCkptTs /
+    // TryCleanMultiStageOps.
+    (void) truncate_timestamp;
     cout << "after truncate: " << endl;
-    ls.DeleteLogItems(ng_id, truncate_timestamp);
-    auto res = ls.GetLogReplayList(0, 0);
-    for (auto p : res.second)
+    auto res2 = ls.GetLogReplayList(0, 0);
+    if (res2.first && res2.second)
     {
-        std::cout << "tx number: " << p->tx_number_
-                  << ",\ttimestamp: " << p->timestamp_
-                  << ",\tlog message: " << p->log_message_ << "\n";
+        for (res2.second->SeekToFirst(); res2.second->Valid();
+             res2.second->Next())
+        {
+            const txlog::Item &item = res2.second->GetItem();
+            std::cout << "tx number: " << item.tx_number_
+                      << ",\ttimestamp: " << item.timestamp_
+                      << ",\tlog message: " << item.log_message_ << "\n";
+        }
     }
 }
 
 void test_recover_tx()
 {
-    txlog::LogStateRocksDBImpl ls("/tmp/log_state_test/rocksdb" +
-                                  std::to_string(distribution(generator)));
+    txlog::LogStateRocksDBImpl ls(
+        "/tmp/log_state_test/rocksdb" + std::to_string(distribution(generator)),
+        0,
+        1);
     ls.Start();
     vector<vector<uint64_t>> txs(3);
     for (int i = 0; i < 10; i++)
@@ -114,10 +137,17 @@ void test_recover_tx()
         cout << "get all transactions for node group: " << ng_id << ":\n";
         for (auto tx_number : txs[ng_id])
         {
-            auto p = ls.SearchTxLog(tx_number, ng_id);
-            std::cout << "tx number: " << p->tx_number_
-                      << ",\ttimestamp: " << p->timestamp_
-                      << ",\tlog message: " << p->log_message_ << "\n";
+            auto [found, p] = ls.SearchTxDataLog(tx_number, ng_id);
+            if (found && p)
+            {
+                std::cout << "tx number: " << p->tx_number_
+                          << ",\ttimestamp: " << p->timestamp_
+                          << ",\tlog message: " << p->log_message_ << "\n";
+            }
+            else
+            {
+                std::cout << "tx number: " << tx_number << " not found\n";
+            }
         }
     }
 }

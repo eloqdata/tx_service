@@ -22,8 +22,10 @@ namespace txlog
 {
 inline bool is_number(const std::string &str)
 {
-    // regular expression for matching number format
-    std::regex pattern("^[-+]?[0-9]*\\.?[0-9]+([eE][-+]?[0-9]+)?$");
+    // Only accept unsigned integers (used to validate the numeric prefix of
+    // size strings like "10GB"; fractional or signed values would be silently
+    // mis-parsed by std::stol in parse_size).
+    std::regex pattern("^[0-9]+$");
     return std::regex_match(str, pattern);
 }
 
@@ -48,6 +50,10 @@ inline std::string_view get_last_two(const std::string_view &str)
 inline bool ends_with(const std::string_view &str,
                       const std::string_view &suffix)
 {
+    if (str.size() < suffix.size())
+    {
+        return false;
+    }
     if (str.compare(str.size() - suffix.size(), suffix.size(), suffix) != 0)
     {
         return false;

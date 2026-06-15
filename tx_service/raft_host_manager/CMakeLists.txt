@@ -45,7 +45,7 @@ if ( CMAKE_COMPILER_IS_GNUCC )
 
     if(BRPC_WITH_GLOG)
         find_path(GLOG_INCLUDE_PATH NAMES glog/logging.h)
-        find_library(GLOG_LIB NAMES glog VERSION ">=0.6.0" REQUIRED)
+        find_library(GLOG_LIB NAMES glog)
         if((NOT GLOG_INCLUDE_PATH) OR (NOT GLOG_LIB))
             message(FATAL_ERROR "Fail to find glog")
         endif()
@@ -71,7 +71,6 @@ FetchContent_Declare(
     GIT_TAG yaml-cpp-0.7.0 # Can be a tag (yaml-cpp-x.x.x), a commit hash, or a branch name (master)
 )
 FetchContent_MakeAvailable(yaml-cpp)
-target_link_libraries(host_manager PRIVATE yaml-cpp::yaml-cpp)
 
 # Compile all protobuf files under proto directory.
 SET(PROTO_SRC ${CMAKE_SOURCE_DIR}/include/proto)
@@ -107,7 +106,7 @@ if ( CMAKE_COMPILER_IS_GNUCC )
        ${LEVELDB_LIB}
        ${BRAFT_LIB}
        ${BRPC_LIB}
-       ${OPENSSL_LIB}
+       ${OPENSSL_LIBRARIES}
     )
 endif()
 
@@ -125,4 +124,5 @@ set(EXECUTABLE_OUTPUT_PATH ${CMAKE_INSTALL_PREFIX}/bin)
 
 include_directories(${INCLUDE_DIR})
 add_executable(host_manager ${RaftHM_SOURCES})
-target_link_libraries(host_manager  ${LINK_LIB})
+target_link_libraries(host_manager ${LINK_LIB})
+target_link_libraries(host_manager PRIVATE yaml-cpp::yaml-cpp)

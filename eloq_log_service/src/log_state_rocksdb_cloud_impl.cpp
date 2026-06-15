@@ -567,7 +567,7 @@ void LogStateRocksDBCloudImpl::PurgeArchiveFiles(
 #ifdef WITH_FAULT_INJECT
     // Fault injection: override retention with seconds for unit testing
     CODE_FAULT_INJECTOR("override_log_retention_seconds", {
-        FaultEntry *entry =
+        std::shared_ptr<FaultEntry> entry =
             FaultInject::Entry("override_log_retention_seconds");
         DLOG(INFO) << "Fault inject: override_log_retention_seconds triggered"
                    << " ,map_para_ size: "
@@ -1788,7 +1788,8 @@ bool LogStateRocksDBCloudImpl::RefillInMemStateFromCloudDB(
             return false;
         }
         rocksdb::ReadOptions read_options;
-        rocksdb::Iterator *it = sst_reader.NewIterator(read_options);
+        std::unique_ptr<rocksdb::Iterator> it(
+            sst_reader.NewIterator(read_options));
         if (!it->status().ok())
         {
             LOG(ERROR)

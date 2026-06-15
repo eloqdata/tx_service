@@ -89,9 +89,19 @@ int LogStateMemoryImpl::ReadSnapshot(const std::string &snapshot_path,
                                      const std::vector<std::string> &files)
 {
     auto file_path = snapshot_path + "/data";
-    std::ifstream is(file_path.c_str());
+    std::ifstream is(file_path.c_str(), std::ios::binary);
     LoadNgInfoAndCatalogOpsFrom(is);
+    if (is.fail())
+    {
+        LOG(ERROR) << "ReadSnapshot failed after LoadNgInfoAndCatalogOpsFrom";
+        return -1;
+    }
     LoadNgStatesFrom(is);
+    if (is.fail())
+    {
+        LOG(ERROR) << "ReadSnapshot failed after LoadNgStatesFrom";
+        return -1;
+    }
     return 0;
 }
 
@@ -102,7 +112,7 @@ std::vector<std::string> LogStateMemoryImpl::WriteSnapshot(
     LOG(INFO) << "log state write snapshot path: " << snapshot_path
               << ", file path: " << path;
     {
-        std::ofstream os(path.c_str());
+        std::ofstream os(path.c_str(), std::ios::binary);
         WriteSnapshotNgInfoAndCatalogOpsTo(os);
         WriteSnapshotStatesTo(os);
     }  // close file
@@ -137,6 +147,12 @@ void LogStateMemoryImpl::LoadNgStatesFrom(std::ifstream &is)
 {
     uint32_t shard_size;
     is.read(reinterpret_cast<char *>(&shard_size), sizeof(shard_size));
+    if (is.fail())
+    {
+        LOG(ERROR)
+            << "snapshot read failed: could not read ng_state shard count";
+        return;
+    }
     LOG(INFO) << "read snapshot log state shard_size : " << shard_size;
     for (uint32_t i = 0; i < shard_size; i++)
     {
@@ -144,6 +160,13 @@ void LogStateMemoryImpl::LoadNgStatesFrom(std::ifstream &is)
         uint32_t count;
         is.read(reinterpret_cast<char *>(&shard_id), sizeof(shard_id));
         is.read(reinterpret_cast<char *>(&count), sizeof(count));
+        if (is.fail())
+        {
+            LOG(ERROR)
+                << "snapshot read failed: truncated ng_state shard header " << i
+                << " of " << shard_size;
+            return;
+        }
         LOG(INFO) << "read snapshot log state shard_id : " << shard_id
                   << " count : " << count;
         std::deque<Item::Pointer> list;
@@ -158,8 +181,22 @@ void LogStateMemoryImpl::LoadNgStatesFrom(std::ifstream &is)
             is.read(reinterpret_cast<char *>(&tx_number), sizeof(uint64_t));
             is.read(reinterpret_cast<char *>(&timestamp), sizeof(uint64_t));
             is.read(reinterpret_cast<char *>(&message_size), sizeof(size_t));
+            if (is.fail())
+            {
+                LOG(ERROR) << "snapshot read failed: truncated ng_state item "
+                           << j << " of " << count << " in shard " << shard_id;
+                return;
+            }
             log_message.resize(message_size);
             is.read(log_message.data(), message_size);
+            if (is.fail())
+            {
+                LOG(ERROR) << "snapshot read failed: truncated log_message in "
+                              "ng_state "
+                              "item "
+                           << j << " of " << count << " in shard " << shard_id;
+                return;
+            }
             list.emplace_back(std::make_shared<Item>(tx_number,
                                                      timestamp,
                                                      std::move(log_message),

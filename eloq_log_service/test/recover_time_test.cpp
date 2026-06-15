@@ -35,9 +35,12 @@ DEFINE_int32(replay_port, 8888, "Port of the replay service");
 
 bvar::LatencyRecorder g_latency_recorder("client");
 txlog::LogAgent log_agent;
-std::random_device rd;
-std::default_random_engine generator(rd());
 std::uniform_int_distribution<uint64_t> distribution(0, 0xFFFFFFFF);
+
+// Thread-local engine avoids data races when multiple sender threads call
+// distribution(generator) concurrently (std::default_random_engine is not
+// thread-safe).
+thread_local std::default_random_engine generator(std::random_device{}());
 
 auto now()
 {
@@ -107,7 +110,9 @@ void sender(int ng_term,
 
         // set log messages for each ng
         ::google::protobuf::Map<::google::protobuf::uint32, ::std::string>
-            *txn_logs = request->mutable_node_txn_logs();
+            *txn_logs = request->mutable_log_content()
+                            ->mutable_data_log()
+                            ->mutable_node_txn_logs();
 
         string s = to_string(cnt);
         s.append(string(50, 'a'));
@@ -142,7 +147,7 @@ void sender(int ng_term,
     tt_tm_us.fetch_add(time_us, memory_order_relaxed);
     LOG(INFO) << "thread " << std::this_thread::get_id() << " send " << cnt
               << " write log request, average response time: "
-              << (time_us / cnt) << " microseconds";
+              << (cnt == 0 ? 0 : time_us / cnt) << " microseconds";
 }
 
 void replay(int term)
@@ -198,8 +203,8 @@ void long_running_replay_time_test(int term)
 
         LOG(INFO) << "send " << cnt
                   << " write log request, qps: " << (cnt / send_time_s)
-                  << ", average response time: " << (time_us / cnt)
-                  << " microseconds";
+                  << ", average response time: "
+                  << (cnt == 0 ? 0 : time_us / cnt) << " microseconds";
 
         // replay
         replay(term + 1);

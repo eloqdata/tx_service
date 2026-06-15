@@ -1,4 +1,5 @@
 #include <brpc/server.h>
+#include <gflags/gflags.h>
 
 #include <iostream>
 
@@ -31,5 +32,6 @@ int start_replay_rpc_server()
 
 int main(int argc, char *argv[])
 {
-    start_replay_rpc_server();
+    GFLAGS_NAMESPACE::ParseCommandLineFlags(&argc, &argv, true);
+    return start_replay_rpc_server();
 }

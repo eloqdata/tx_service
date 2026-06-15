@@ -1,7 +1,9 @@
 #pragma once
 #include <glog/logging.h>
+#include <unistd.h>
 
 #include <cstddef>
+#include <cstring>
 #include <filesystem>
 #include <iomanip>
 #include <string>
@@ -56,17 +58,35 @@ inline void InitGoogleLogging(char **argv)
         if (FLAGS_log_dir.empty())
         {
             // Get the absolute path of the bin directory
-            char bin_path[PATH_MAX];
-            ssize_t len = readlink("/proc/self/exe", bin_path, PATH_MAX);
-            std::filesystem::path fullPath(std::string(bin_path, len));
-            std::filesystem::path dir_path =
-                fullPath.parent_path().parent_path();
-            FLAGS_log_dir = dir_path.string() + "/logs";
+            char bin_path[PATH_MAX - 1];
+            memset(bin_path, 0, sizeof(bin_path));
+            ssize_t len =
+                readlink("/proc/self/exe", bin_path, sizeof(bin_path));
+            if (len > 0)
+            {
+                std::filesystem::path fullPath(
+                    std::string(bin_path, static_cast<size_t>(len)));
+                std::filesystem::path dir_path =
+                    fullPath.parent_path().parent_path();
+                FLAGS_log_dir = dir_path.string() + "/logs";
+            }
+            else
+            {
+                FLAGS_log_dir = "./logs";
+            }
         }
 
         if (!std::filesystem::exists(FLAGS_log_dir))
         {
-            std::filesystem::create_directories(FLAGS_log_dir);
+            std::error_code ec;
+            std::filesystem::create_directories(FLAGS_log_dir, ec);
+            if (ec)
+            {
+                fprintf(stderr,
+                        "Warning: failed to create log directory '%s': %s\n",
+                        FLAGS_log_dir.c_str(),
+                        ec.message().c_str());
+            }
         }
 
         // Log to stderr and logfiles

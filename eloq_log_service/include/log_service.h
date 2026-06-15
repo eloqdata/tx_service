@@ -344,7 +344,8 @@ public:
             << notify_checkpointer_threshold_size_str
 #if defined(LOG_STATE_TYPE_RKDB_S3)
             << ", aws_access_key_id = " << aws_access_key_id
-            << ", aws_secret_key = " << aws_secret_key
+            << ", aws_secret_key = "
+            << (aws_secret_key.empty() ? "[not set]" : "[REDACTED]")
 #endif
 #if defined(LOG_STATE_TYPE_RKDB_ALL)
             << ", rocksdb_storage_path = " << rocksdb_storage_path
@@ -383,7 +384,7 @@ public:
         std::vector<std::string> ip_list;
         std::vector<uint16_t> port_list;
         std::vector<std::string> ip_port_list = txlog::split(conf, ",");
-        if ((uint16_t) node_id >= ip_port_list.size())
+        if (node_id < 0 || static_cast<size_t>(node_id) >= ip_port_list.size())
         {
             std::string err_msg =
                 "Invalid configuration: `node_id` must be less than node size, "
@@ -912,7 +913,11 @@ public:
         int err_code = 0;
         for (auto &logger_pair : log_replicas_)
         {
-            err_code = logger_pair.second.Start();
+            int ret = logger_pair.second.Start();
+            if (err_code == 0)
+            {
+                err_code = ret;
+            }
         }
 
         return err_code;
