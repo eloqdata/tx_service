@@ -10,7 +10,6 @@ set(WITH_DATA_STORE "ELOQDSS_ELOQSTORE" CACHE STRING "Which key-value storage to
 set_property(CACHE WITH_DATA_STORE PROPERTY STRINGS "DYNAMODB" "BIGTABLE" "ROCKSDB" "ELOQDSS_ROCKSDB" "ELOQDSS_ROCKSDB_CLOUD_S3" "ELOQDSS_ROCKSDB_CLOUD_GCS" "ELOQDSS_ELOQSTORE")
 
 option(WITH_LOG_SERVICE "Compile with built-in log service." ON)
-option(OPEN_LOG_SERVICE "Compile with open log service." ON)
 option(SMALL_RANGE "Whether enable small range" OFF)
 option(STATISTICS "Whether enable table statistics" ON)
 option(EXT_TX_PROC_ENABLED "Allows external threads to move forward the tx service." ON)
@@ -20,7 +19,6 @@ option(BUILD_SHARED_LIBS "Build shared libraries instead of static libraries" OF
 
 message(NOTICE "WITH_DATA_STORE: ${WITH_DATA_STORE}")
 message(NOTICE "WITH_LOG_SERVICE: ${WITH_LOG_SERVICE}")
-message(NOTICE "OPEN_LOG_SERVICE: ${OPEN_LOG_SERVICE}")
 message(NOTICE "BUILD_SHARED_LIBS: ${BUILD_SHARED_LIBS}")
 message(NOTICE "WITH_JEMALLOC: ${WITH_JEMALLOC}")
 
@@ -222,10 +220,6 @@ if(WITH_LOG_SERVICE)
     add_compile_definitions(WITH_LOG_SERVICE)
 endif()
 
-if(OPEN_LOG_SERVICE)
-    add_compile_definitions(OPEN_LOG_SERVICE=1)
-endif()
-
 if(EXT_TX_PROC_ENABLED)
     add_compile_definitions(EXT_TX_PROC_ENABLED)
 endif()
@@ -248,11 +242,7 @@ INCLUDE(build_tx_service.cmake)
 INCLUDE(build_eloq_metrics.cmake)
 
 if(WITH_LOG_SERVICE)
-    if(OPEN_LOG_SERVICE)
-        INCLUDE(build_log_service.cmake)
-    else()
-        INCLUDE(build_eloq_log_service.cmake)
-    endif()
+    INCLUDE(build_eloq_log_service.cmake)
 endif()
 
 # Find mimalloc
@@ -274,11 +264,7 @@ include_directories(
 )
 
 if(WITH_LOG_SERVICE)
-    if(OPEN_LOG_SERVICE)
-        include_directories(${CMAKE_CURRENT_SOURCE_DIR}/log_service/include)
-    else()
-        include_directories(${CMAKE_CURRENT_SOURCE_DIR}/eloq_log_service/include)
-    endif()
+    include_directories(${CMAKE_CURRENT_SOURCE_DIR}/eloq_log_service/include)
 endif()
 
 # Collect all source files for the library
@@ -405,10 +391,8 @@ install(TARGETS eloq-metrics
         ARCHIVE DESTINATION lib
         LIBRARY DESTINATION lib)
 
-if(FORK_HM_PROCESS) # Only install host_manager if it's built
-    install(TARGETS host_manager
-            RUNTIME DESTINATION bin)
-endif()
+install(TARGETS host_manager
+        RUNTIME DESTINATION bin)
 
 if(WITH_TESTS)
     enable_testing()

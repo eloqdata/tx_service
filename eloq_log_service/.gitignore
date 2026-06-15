@@ -1,0 +1,67 @@
+# Prerequisites
+*.d
+
+# Compiled Object files
+*.slo
+*.lo
+*.o
+*.obj
+
+# Precompiled Headers
+*.gch
+*.pch
+
+# Compiled Dynamic libraries
+*.so
+*.dylib
+*.dll
+
+# Fortran module files
+*.mod
+*.smod
+
+# Compiled Static libraries
+*.lai
+*.la
+*.a
+*.lib
+
+# Executables
+*.exe
+*.out
+*.app
+
+# IDE
+.vscode/
+
+# Build
+build/
+bld/
+bld*
+install/
+
+# Protocol Buffer files
+**/proto/*.pb.cc
+**/proto/*.pb.h
+
+# macOS garbage
+.DS_Store
+
+# pre-commit-config
+.pre-commit-config.yaml
+
+#other
+.cache/
+compile_commands.json
+*.vim
+
+mono_metrics
+.editorconfig
+*.vim
+compile_commands.json
+.cache
+
+.idea/
+cmake-build-debug
+
+logs

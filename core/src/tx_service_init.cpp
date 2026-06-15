@@ -201,7 +201,6 @@ bool DataSubstrate::InitializeTxService(const INIReader &config_reader)
             !CheckCommandLineFlagIsDefault("hm_bin_path")
                 ? FLAGS_hm_bin_path
                 : config_reader.Get("local", "hm_bin_path", FLAGS_hm_bin_path);
-#ifdef FORK_HM_PROCESS
         if (hm_ip.empty())
         {
             hm_ip = network_config_.local_ip;
@@ -227,7 +226,6 @@ bool DataSubstrate::InitializeTxService(const INIReader &config_reader)
             std::string parent_path = s_path.substr(0, pos);
             hm_bin_path = parent_path + "/host_manager";
         }
-#endif
     }
 
     txservice::CacheEvictPolicy cache_evict_policy =

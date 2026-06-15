@@ -27,7 +27,7 @@ Unit tests are Catch2-based, in `tx_service/tests/` (e.g. `CcEntry-Test.cpp`, `C
 
 Key CMake options (top-level `CMakeLists.txt`):
 - `WITH_DATA_STORE` — storage backend: `ELOQDSS_ELOQSTORE` (default), `ELOQDSS_ROCKSDB`, `ELOQDSS_ROCKSDB_CLOUD_S3/GCS`, `DYNAMODB`, `BIGTABLE`. RocksDB-based choices force a matching `WITH_LOG_STATE`; a mismatch is a fatal configure error.
-- `WITH_LOG_SERVICE` / `OPEN_LOG_SERVICE` — build with the WAL log service; `OPEN_LOG_SERVICE` selects `log_service/` (open) vs `eloq_log_service/`.
+- `WITH_LOG_SERVICE` — build with the in-tree WAL log service (`eloq_log_service/`); uses `build_eloq_log_service.cmake` (target `logservice`).
 - `EXT_TX_PROC_ENABLED` — external (brpc worker) threads may drive TxProcessors.
 - `ELOQ_MODULE_ENABLED` — register the tx service as an Eloq module on brpc workers (requires `EXT_TX_PROC_ENABLED`).
 
@@ -37,7 +37,7 @@ Top-level layout:
 - `core/` — `data_substrate` library glue: init/teardown of tx service, log service, storage, and metrics (`core/src/data_substrate.cpp` plus `*_init.cpp`). Parent projects call into this.
 - `tx_service/` — the engine (namespace `txservice`). The most important directory.
 - `store_handler/` — persistent storage backends behind `store::DataStoreHandler` (`kv_store.h`): `rocksdb_handler`, `dynamo_handler`, `bigtable_handler`, and `data_store_service_client` which talks to the **EloqDSS** standalone data-store service in `store_handler/eloq_data_store_service/` (its own brpc server, EloqStore or RocksDB backed).
-- `log_service/`, `eloq_log_service/` — replicated (braft) WAL services; protobuf definitions shared via `tx-log-protos/`.
+- `eloq_log_service/` — in-tree replicated (braft) WAL service; protobuf definitions and `LogAgent` client live in `tx_service/tx-log-protos/`.
 
 Inside `tx_service/`:
 - **Data & CC**: data is sharded into `CcShard`s (`include/cc/cc_shard.h`), each containing `CcMap`s of `CcEntry`s. Each shard is owned by one `TxProcessor` (`include/tx_service.h`) pinned to a core; all access to a shard happens by enqueueing `CcRequest`s (`include/cc/cc_request.h`, `cc_req_misc.h`) whose `Execute()` runs on that shard — a message-passing, mostly lock-free design. Locking/isolation is via `non_blocking_lock.h`; OCC and 2PL protocols, ReadCommitted/RepeatableRead isolation (`cc_protocol.h`).

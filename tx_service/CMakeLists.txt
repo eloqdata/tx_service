@@ -47,12 +47,6 @@ endif()
 
 option(BRPC_WITH_GLOG "With glog" ON)
 option(RUN_TX_SERVICE_TESTS "Run unit-tests" ON)
-option(FORK_HM_PROCESS "Whether fork host manager process" ON)
-message(NOTICE "FORK_HM_PROCESS : ${FORK_HM_PROCESS}")
-
-if(FORK_HM_PROCESS)
-    add_definitions(-DFORK_HM_PROCESS)
-endif()
 
 option(RUNNING_TXSERVICE_CTEST "running tx_service alone to run test" ON)
 message(STATUS "RUNNING_TXSERVICE_CTEST : ${RUNNING_TXSERVICE_CTEST}")

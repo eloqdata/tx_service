@@ -10,11 +10,11 @@ Data Substrate (repo name `tx_service`) is EloqData's API-agnostic database foun
 | `tx_service/` | The engine: CcShards, concurrency control, transaction state machines, distribution, checkpointing | [02](02-threading-model.md), [03](03-concurrency-control.md), [04](04-transaction-execution.md), [06](06-distribution-and-clustering.md), [07](07-durability-and-recovery.md), [08](08-range-and-bucket-management.md) |
 | `store_handler/` | `DataStoreHandler` backends: EloqDSS client, embedded RocksDB, DynamoDB, BigTable | [09-store-handler.md](09-store-handler.md) |
 | `store_handler/eloq_data_store_service/` | EloqDSS: a standalone (or in-process) brpc data-store service over RocksDB / RocksDB-Cloud / EloqStore | [09-store-handler.md](09-store-handler.md) |
-| `log_service/` | Open-source replicated WAL service (braft-based log groups), selected by `OPEN_LOG_SERVICE=ON` | [10-log-service.md](10-log-service.md) |
+| `eloq_log_service/` | In-tree replicated WAL service (braft-based log groups); compiled when `WITH_LOG_SERVICE` is set | [10-log-service.md](10-log-service.md) |
 | `tx_service/tx-log-protos/` | Shared protobuf definitions + `LogAgent` (log service client used by tx nodes) | [10-log-service.md](10-log-service.md) |
 | `eloq_metrics/` | Metrics library (`Meter`/`MetricsRegistry`, Prometheus collector) | — |
 | `tx_service/abseil-cpp/`, `store_handler/eloq_data_store_service/eloqstore/` | Vendored submodules | — |
-| `eloq_log_service/`, `tx_service/raft_host_manager/` | **Proprietary components — intentionally not covered by these docs** | — |
+| `tx_service/raft_host_manager/` | **Proprietary component — intentionally not covered by these docs** | — |
 
 ## The Big Picture
 
@@ -77,7 +77,7 @@ All knobs follow *gflag overrides ini section* (`[local]`, `[cluster]`, `[store]
 | `enable_io_uring` / `raft_log_async_fsync` | false | IO engine options |
 | `max_standby_lag` | 400000 | Max primary→standby message lag |
 
-Build-time options are described in the repo `CLAUDE.md` (`WITH_DATA_STORE`, `WITH_LOG_STATE`, `WITH_LOG_SERVICE`, `OPEN_LOG_SERVICE`, `EXT_TX_PROC_ENABLED`, `ELOQ_MODULE_ENABLED`).
+Build-time options are described in the repo `CLAUDE.md` (`WITH_DATA_STORE`, `WITH_LOG_STATE`, `WITH_LOG_SERVICE`, `EXT_TX_PROC_ENABLED`, `ELOQ_MODULE_ENABLED`).
 
 ## Global Singletons
 

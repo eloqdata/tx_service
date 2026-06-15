@@ -1,0 +1,8 @@
+TxService->>LogService: redo req
+LogService->>BraftStateMachine: redirect redo req
+Note right of BraftStateMachine: serialize redo_req into raft log\nand bind raft log into braft::task
+BraftStateMachine->>BraftService: apply the braft::task
+BraftService->BraftService: distributed persist the raft log and\nwait for the ack from majority nodes
+BraftService->>BraftStateMachine: call braft::on_apply interface to\niterate all the accepted raft logs
+BraftStateMachine->>LogState: update the log state based on the new raft log
+BraftStateMachine->>TxService: return the response to TxService by Closure 

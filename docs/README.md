@@ -15,12 +15,12 @@ Module-by-module design documentation for this repo, written so that an engineer
 | [07-durability-and-recovery.md](07-durability-and-recovery.md) | WAL writes, checkpointing, data sync, log replay recovery, MVCC archives | `checkpointer.*`, `txlog.h`, `fault/`, data sync |
 | [08-range-and-bucket-management.md](08-range-and-bucket-management.md) | Hash buckets vs range partitions, StoreRange/StoreSlice, range split, bucket migration, index build | `range_slice.*`, `range_*`, migration, `sk_generator.h` |
 | [09-store-handler.md](09-store-handler.md) | DataStoreHandler contract, EloqDSS service & client, RocksDB/cloud backends | `store_handler/` |
-| [10-log-service.md](10-log-service.md) | Open-source log service (`log_service/`), LogAgent client | WAL service, log replay plumbing |
+| [10-log-service.md](10-log-service.md) | Log service (`eloq_log_service/`), braft Raft replication, LogAgent client | WAL service, log replay plumbing |
 | [standby_replication_protocol.md](standby_replication_protocol.md) | Standby replication protocol (pre-existing design doc) | standby/follower reads |
 
 ## Scope and exclusions
 
-These docs cover the open-source components only. **`eloq_log_service/` and `tx_service/raft_host_manager/` are proprietary and intentionally undocumented here**; they are referenced only at their interface boundaries (the `LogService` RPC contract and the `HostMangerService` RPC contract, respectively). The `store_handler/eloq_data_store_service/eloqstore/` submodule (EloqStore engine) is likewise described only at its integration surface.
+`eloq_log_service/` is now documented in `10-log-service.md`. **`tx_service/raft_host_manager/` is proprietary and intentionally undocumented here**; it is referenced only at its interface boundary (the `HostMangerService` RPC contract). The `store_handler/eloq_data_store_service/eloqstore/` submodule (EloqStore engine) is likewise described only at its integration surface.
 
 ## Maintenance rules
 

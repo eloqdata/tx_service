@@ -127,7 +127,7 @@ Data pinning: `Sharder::TryPinNodeGroupData` / `UnpinNodeGroupData` bracket any 
 
 ### Host manager (interface only)
 
-The raft election/membership engine runs in a **separate process**. By default the tx service forks it at startup (`Sharder::Init`, `src/sharder.cpp:324-369`, guarded by `FORK_HM_PROCESS` / the `fork_host_manager` argument, spawning `hm_bin_path` via `posix_spawn`); alternatively an externally managed HM is reached at `hm_ip:hm_port`. The contract is `service HostMangerService` in `proto/cc_request.proto:692`:
+The raft election/membership engine runs in a **separate process**. The tx service always forks it at startup (`Sharder::Init`, `src/sharder.cpp:324-369`) when the `fork_host_manager` runtime argument is true (the default), spawning `hm_bin_path` via `posix_spawn`; alternatively an externally managed HM is reached at `hm_ip:hm_port`. The contract is `service HostMangerService` in `proto/cc_request.proto:692`:
 
 | RPC | Direction / purpose |
 |---|---|
