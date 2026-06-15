@@ -1346,6 +1346,7 @@ protected:
                            "message "
                         << idx << " of " << schemas_cnt << " in catalog op "
                         << i;
+                    is.setstate(std::ios::failbit);
                     return;
                 }
                 LOG(INFO) << "read snapshot schema op, txn: " << txn
@@ -1388,6 +1389,7 @@ protected:
                     << "snapshot read failed: could not parse split range op "
                        "message "
                     << i << " of " << cnt;
+                is.setstate(std::ios::failbit);
                 return;
             }
             is.read(reinterpret_cast<char *>(&commit_ts), sizeof(uint64_t));
@@ -1437,6 +1439,7 @@ protected:
                     << "snapshot read failed: could not parse cluster scale op "
                        "message "
                     << i << " of " << cnt;
+                is.setstate(std::ios::failbit);
                 return;
             }
             is.read(reinterpret_cast<char *>(&commit_ts), sizeof(uint64_t));

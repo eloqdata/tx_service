@@ -21,21 +21,13 @@ jobs:
       # Run as root so actions/checkout can write under /__w/_temp (mirrors
       # unit-tests.yml); otherwise checkout fails with EACCES in this image.
       options: --user root
-    services:
-      # bitnami/minio starts the server with its default entrypoint (no custom
-      # command needed, which GitHub `services:` cannot provide). Reachable from
-      # the job container by the service hostname `minio`.
-      minio:
-        image: bitnami/minio:latest
-        env:
-          MINIO_ROOT_USER: minioadmin
-          MINIO_ROOT_PASSWORD: minioadmin
-        ports:
-          - 9000:9000
     env:
       # Consumed by eloq_log_service/test/test_utils.h + the cloud test harness:
       # routes rocksdb-cloud's S3 client at MinIO with path-style addressing.
-      TEST_S3_ENDPOINT: http://minio:9000
+      # MinIO runs as a local binary in this job (see "Start MinIO"): GitHub
+      # `services:` can't run the official minio image (it needs a `server`
+      # command) and bitnami's `:latest` tag was retired.
+      TEST_S3_ENDPOINT: http://127.0.0.1:9000
       AWS_ACCESS_KEY_ID: minioadmin
       AWS_SECRET_ACCESS_KEY: minioadmin
       AWS_EC2_METADATA_DISABLED: "true"
@@ -58,15 +50,22 @@ jobs:
             -DCMAKE_BUILD_TYPE=Debug -DWITH_LOG_STATE=ROCKSDB_CLOUD_S3
           cmake --build eloq_log_service/bld_cloud --parallel "$(nproc)"
 
-      - name: Wait for MinIO
+      - name: Start MinIO (S3-compatible, local binary)
         run: |
+          curl -fsSL https://dl.min.io/server/minio/release/linux-amd64/minio \
+            -o /usr/local/bin/minio
+          chmod +x /usr/local/bin/minio
+          mkdir -p /tmp/minio-data
+          MINIO_ROOT_USER=minioadmin MINIO_ROOT_PASSWORD=minioadmin \
+            nohup minio server /tmp/minio-data --address ":9000" \
+            > /tmp/minio.log 2>&1 &
           for i in $(seq 1 60); do
-            if (echo > /dev/tcp/minio/9000) >/dev/null 2>&1; then
+            if (echo > /dev/tcp/127.0.0.1/9000) >/dev/null 2>&1; then
               echo "MinIO is up"; exit 0
             fi
             sleep 1
           done
-          echo "MinIO did not become reachable" >&2; exit 1
+          echo "MinIO failed to start:" >&2; cat /tmp/minio.log >&2; exit 1
 
       - name: Run cloud unit tests against MinIO
         working-directory: eloq_log_service/bld_cloud
