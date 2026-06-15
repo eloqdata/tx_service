@@ -16,8 +16,13 @@
 
 #if defined(LOG_STATE_TYPE_RKDB_S3)
 #include <aws/core/Aws.h>
+#include <aws/core/auth/AWSCredentialsProvider.h>
+#include <aws/core/auth/signer/AWSAuthV4Signer.h>
+#include <aws/core/http/Scheme.h>
 #include <aws/s3/S3Client.h>
 #include <aws/s3/model/DeleteBucketRequest.h>
+
+#include <cstdlib>
 #elif defined(LOG_STATE_TYPE_RKDB_GCS)
 #include <google/cloud/storage/client.h>
 #endif
@@ -120,6 +125,45 @@ inline uint64_t throughput(uint64_t size, uint64_t duration /*in milliseconds*/)
 }
 
 #if defined(LOG_STATE_TYPE_RKDB_CLOUD)
+// CI helper: when TEST_S3_ENDPOINT is set (e.g. a MinIO S3-compatible
+// endpoint), route rocksdb-cloud's S3 client at it using path-style addressing.
+// This is a no-op when the variable is unset, so real-AWS/production runs are
+// unaffected.
+inline std::string TestS3Endpoint()
+{
+    const char *ep = std::getenv("TEST_S3_ENDPOINT");
+    return ep != nullptr ? std::string(ep) : std::string();
+}
+
+inline void MaybeUseTestS3Endpoint(rocksdb::CloudFileSystemOptions &cfs_options)
+{
+#if defined(LOG_STATE_TYPE_RKDB_S3)
+    const std::string ep = TestS3Endpoint();
+    if (ep.empty())
+    {
+        return;
+    }
+    cfs_options.s3_client_factory =
+        [ep](const std::shared_ptr<Aws::Auth::AWSCredentialsProvider> &creds,
+             const Aws::Client::ClientConfiguration &base)
+        -> std::shared_ptr<Aws::S3::S3Client>
+    {
+        Aws::Client::ClientConfiguration cfg = base;
+        cfg.endpointOverride = ep;
+        cfg.scheme = Aws::Http::Scheme::HTTP;
+        cfg.verifySSL = false;
+        return Aws::MakeShared<Aws::S3::S3Client>(
+            "TestS3",
+            creds,
+            cfg,
+            Aws::Client::AWSAuthV4Signer::PayloadSigningPolicy::Never,
+            false /* useVirtualAddressing=false -> path-style for MinIO */);
+    };
+#else
+    (void) cfs_options;
+#endif
+}
+
 inline bool DropBucket(std::string region,
                        const std::string &bucket_prefix,
                        const std::string &bucket_name)
@@ -132,6 +176,8 @@ inline bool DropBucket(std::string region,
     cfs_options.dest_bucket.SetBucketName(bucket_name, bucket_prefix);
     cfs_options.dest_bucket.SetRegion(region);
     cfs_options.dest_bucket.SetObjectPath("rocksdb_cloud");
+
+    MaybeUseTestS3Endpoint(cfs_options);
 
     rocksdb::CloudFileSystem *cfs;
     auto status = txlog::NewCloudFileSystem(cfs_options, &cfs);
@@ -179,7 +225,23 @@ inline bool DropBucket(std::string region,
 #if defined(LOG_STATE_TYPE_RKDB_S3)
     Aws::Client::ClientConfiguration client_config;
     client_config.region = region;
-    Aws::S3::S3Client s3_client(client_config);
+    const std::string test_ep = TestS3Endpoint();
+    std::unique_ptr<Aws::S3::S3Client> s3_client_ptr;
+    if (!test_ep.empty())
+    {
+        client_config.endpointOverride = test_ep;
+        client_config.scheme = Aws::Http::Scheme::HTTP;
+        client_config.verifySSL = false;
+        s3_client_ptr = std::make_unique<Aws::S3::S3Client>(
+            client_config,
+            Aws::Client::AWSAuthV4Signer::PayloadSigningPolicy::Never,
+            false /* path-style for MinIO */);
+    }
+    else
+    {
+        s3_client_ptr = std::make_unique<Aws::S3::S3Client>(client_config);
+    }
+    Aws::S3::S3Client &s3_client = *s3_client_ptr;
     Aws::S3::Model::DeleteBucketRequest delete_bucket_request;
     delete_bucket_request.SetBucket(Aws::String(
         bucket_name_with_prefix.data(), bucket_name_with_prefix.size()));
@@ -220,6 +282,8 @@ inline bool CreateBucket(std::string region,
     cfs_options.dest_bucket.SetBucketName(bucket_name, bucket_prefix);
     cfs_options.dest_bucket.SetRegion(region);
     cfs_options.dest_bucket.SetObjectPath("rocksdb_cloud");
+
+    MaybeUseTestS3Endpoint(cfs_options);
 
     rocksdb::CloudFileSystem *cfs;
     auto status = txlog::NewCloudFileSystem(cfs_options, &cfs);

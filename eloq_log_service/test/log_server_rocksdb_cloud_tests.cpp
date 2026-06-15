@@ -671,6 +671,10 @@ void PrepareCFSOptions(rocksdb::CloudFileSystemOptions &cfs_options,
     cfs_options.cloud_file_deletion_delay =
         std::chrono::seconds(rocksdb_cloud_config.db_file_deletion_delay_);
     cfs_options.cloud_request_callback = nullptr;
+
+    // Route at a MinIO/S3-compatible endpoint when TEST_S3_ENDPOINT is set
+    // (CI).
+    MaybeUseTestS3Endpoint(cfs_options);
 }
 
 void PrepareCloudFileSystemSettings(

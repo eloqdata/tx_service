@@ -1,0 +1,82 @@
+name: Log Service Tests
+
+# Builds the in-tree eloq_log_service (compile-check for all test targets) and
+# runs its RocksDB-Cloud unit tests against a MinIO (S3-compatible) endpoint, so
+# no real AWS credentials or buckets are needed.
+on:
+  pull_request:
+    paths:
+      - 'eloq_log_service/**'
+      - 'tx_service/tx-log-protos/**'
+      - 'third_party/ini/**'
+      - '.github/workflows/log-service-tests.yml'
+  push:
+    branches: [main]
+
+jobs:
+  log-service-tests:
+    runs-on: ubuntu-latest
+    container:
+      image: eloqdata/eloq-dev-ci-ubuntu2404:latest
+      # Run as root so actions/checkout can write under /__w/_temp (mirrors
+      # unit-tests.yml); otherwise checkout fails with EACCES in this image.
+      options: --user root
+    services:
+      # bitnami/minio starts the server with its default entrypoint (no custom
+      # command needed, which GitHub `services:` cannot provide). Reachable from
+      # the job container by the service hostname `minio`.
+      minio:
+        image: bitnami/minio:latest
+        env:
+          MINIO_ROOT_USER: minioadmin
+          MINIO_ROOT_PASSWORD: minioadmin
+        ports:
+          - 9000:9000
+    env:
+      # Consumed by eloq_log_service/test/test_utils.h + the cloud test harness:
+      # routes rocksdb-cloud's S3 client at MinIO with path-style addressing.
+      TEST_S3_ENDPOINT: http://minio:9000
+      AWS_ACCESS_KEY_ID: minioadmin
+      AWS_SECRET_ACCESS_KEY: minioadmin
+      AWS_EC2_METADATA_DISABLED: "true"
+
+    steps:
+      - name: Checkout (recursive submodules)
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Compile-check (RocksDB, all test targets)
+        run: |
+          cmake -S eloq_log_service -B eloq_log_service/bld \
+            -DCMAKE_BUILD_TYPE=Debug -DWITH_LOG_STATE=ROCKSDB
+          cmake --build eloq_log_service/bld --parallel "$(nproc)"
+
+      - name: Build cloud variant (RocksDB-Cloud S3 + Catch2 tests)
+        run: |
+          cmake -S eloq_log_service -B eloq_log_service/bld_cloud \
+            -DCMAKE_BUILD_TYPE=Debug -DWITH_LOG_STATE=ROCKSDB_CLOUD_S3
+          cmake --build eloq_log_service/bld_cloud --parallel "$(nproc)"
+
+      - name: Wait for MinIO
+        run: |
+          for i in $(seq 1 60); do
+            if (echo > /dev/tcp/minio/9000) >/dev/null 2>&1; then
+              echo "MinIO is up"; exit 0
+            fi
+            sleep 1
+          done
+          echo "MinIO did not become reachable" >&2; exit 1
+
+      - name: Run cloud unit tests against MinIO
+        working-directory: eloq_log_service/bld_cloud
+        run: |
+          # test_rocksdb_cloud_sst_reader exercises the rocksdb-cloud storage
+          # provider end-to-end against MinIO. The DBCloud::Open-based cases
+          # currently crash inside librocksdb-cloud
+          # (CreateLoggerFromOptions -> GetAbsolutePath) regardless of backend
+          # and are tracked separately, so they are excluded here.
+          ./log_server_rocksdb_cloud_tests "test_rocksdb_cloud_sst_reader" \
+            --region us-east-1 \
+            --aws_access_key_id minioadmin \
+            --aws_secret_key minioadmin
