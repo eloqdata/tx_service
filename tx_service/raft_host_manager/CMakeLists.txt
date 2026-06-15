@@ -88,6 +88,7 @@ ENDFOREACH(PROTO_FILE)
 
 set(INCLUDE_DIR
    ${CMAKE_SOURCE_DIR}/include
+   ${CMAKE_CURRENT_LIST_DIR}/../../third_party/ini
    ${Protobuf_INCLUDE_DIR})
 
 if ( CMAKE_COMPILER_IS_GNUCC )
@@ -114,8 +115,8 @@ SET(RaftHM_SOURCES
     ${CMAKE_SOURCE_DIR}/src/main.cpp
     ${CMAKE_SOURCE_DIR}/src/raft_host_manager_service.cpp
     ${CMAKE_SOURCE_DIR}/src/raft_host_manager.cpp
-    ${HOST_MANAGER_SOURCE_DIR}/src/ini.c
-    ${HOST_MANAGER_SOURCE_DIR}/src/INIReader.cpp
+    ${CMAKE_CURRENT_LIST_DIR}/../../third_party/ini/ini.c
+    ${CMAKE_CURRENT_LIST_DIR}/../../third_party/ini/INIReader.cpp
     )
 
 set(INCLUDE_DIR ${INCLUDE_DIR} ${PROTO_SRC} ${OPENSSL_INCLUDE_DIR})

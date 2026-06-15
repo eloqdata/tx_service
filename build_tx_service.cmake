@@ -226,6 +226,7 @@ endif()
 SET(HOST_MANAGER_SOURCE_DIR ${CMAKE_CURRENT_SOURCE_DIR}/tx_service/raft_host_manager)
 set(HOST_MANAGER_INCLUDE_DIR
     ${HOST_MANAGER_SOURCE_DIR}/include
+    ${CMAKE_CURRENT_LIST_DIR}/third_party/ini
     ${TX_SERVICE_SOURCE_DIR}/tx-log-protos
     ${OPENSSL_INCLUDE_DIR}
     ${PROTO_SRC}
@@ -263,8 +264,8 @@ SET(RaftHM_SOURCES
     ${HOST_MANAGER_SOURCE_DIR}/src/main.cpp
     ${HOST_MANAGER_SOURCE_DIR}/src/raft_host_manager_service.cpp
     ${HOST_MANAGER_SOURCE_DIR}/src/raft_host_manager.cpp
-    ${HOST_MANAGER_SOURCE_DIR}/src/ini.c
-    ${HOST_MANAGER_SOURCE_DIR}/src/INIReader.cpp
+    ${CMAKE_CURRENT_LIST_DIR}/third_party/ini/ini.c
+    ${CMAKE_CURRENT_LIST_DIR}/third_party/ini/INIReader.cpp
     ${PROTO_SRC}/${PROTO_NAME}.pb.cc
     ${LOG_PROTO_SRC}/log_agent.cpp
     ${LOG_PROTO_SRC}/${LOG_PROTO_NAME}.pb.cc

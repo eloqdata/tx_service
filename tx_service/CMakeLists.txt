@@ -286,13 +286,14 @@ SET(RaftHM_SOURCES
     ${HOST_MANAGER_SOURCE_DIR}/src/main.cpp
     ${HOST_MANAGER_SOURCE_DIR}/src/raft_host_manager_service.cpp
     ${HOST_MANAGER_SOURCE_DIR}/src/raft_host_manager.cpp
-    ${HOST_MANAGER_SOURCE_DIR}/src/ini.c
-    ${HOST_MANAGER_SOURCE_DIR}/src/INIReader.cpp
+    ${CMAKE_CURRENT_LIST_DIR}/../third_party/ini/ini.c
+    ${CMAKE_CURRENT_LIST_DIR}/../third_party/ini/INIReader.cpp
     ${PROTO_SRC}/${PROTO_NAME}.pb.cc
     ${LOG_PROTO_SRC}/log_agent.cpp
     ${LOG_PROTO_SRC}/${LOG_PROTO_NAME}.pb.cc
 )
 
+set(HOST_MANAGER_INCLUDE_DIR ${HOST_MANAGER_INCLUDE_DIR} ${CMAKE_CURRENT_LIST_DIR}/../third_party/ini)
 include_directories(${HOST_MANAGER_INCLUDE_DIR})
 add_executable(host_manager ${RaftHM_SOURCES})
 target_link_libraries(host_manager ${HOST_MANAGER_LINK_LIB} yaml-cpp::yaml-cpp)

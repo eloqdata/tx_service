@@ -314,10 +314,11 @@ add_library(logservice STATIC
         ${LOG_SOURCE_DIR}/src/log_state_rocksdb_cloud_impl.cpp
         ${LOG_SOURCE_DIR}/src/log_state_memory_impl.cpp
         ${LOG_SOURCE_DIR}/src/fault_inject.cpp
-        ${LOG_SOURCE_DIR}/src/INIReader.cpp
-        ${LOG_SOURCE_DIR}/src/ini.c)
+        ${CMAKE_CURRENT_LIST_DIR}/../third_party/ini/INIReader.cpp
+        ${CMAKE_CURRENT_LIST_DIR}/../third_party/ini/ini.c)
 
 target_compile_definitions(logservice PUBLIC LOG_SHIPPING_THREADS_NUM=${LOG_SHIPPING_THREADS_NUM})
+list(APPEND LOG_INCLUDE_DIR ${CMAKE_CURRENT_LIST_DIR}/../third_party/ini)
 target_include_directories(logservice PUBLIC ${LOG_INCLUDE_DIR})
 
 target_link_libraries(logservice PUBLIC ${LOG_LIB})

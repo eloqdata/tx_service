@@ -370,8 +370,8 @@ SET(RESELOQ_SOURCES ${RESELOQ_SOURCES}
 # The INIReader definition in the eloqstore library was renamed to avoid
 # clashing with the other INIReader implementations (log service / core).
 SET(RESELOQ_SOURCES ${RESELOQ_SOURCES}
-    INIReader.cpp
-    ini.c
+    ${CMAKE_CURRENT_LIST_DIR}/../../third_party/ini/INIReader.cpp
+    ${CMAKE_CURRENT_LIST_DIR}/../../third_party/ini/ini.c
 )
 
 if ((WITH_DATA_STORE STREQUAL "ELOQDSS_ROCKSDB_CLOUD_S3") OR
@@ -405,6 +405,7 @@ endif()
 
 include_directories(
         ${PROJECT_SOURCE_DIR}/
+        ${CMAKE_CURRENT_LIST_DIR}/../../third_party/ini
 if(WITH_DATA_STORE STREQUAL "ELOQDSS_ELOQSTORE")
         ${PROJECT_SOURCE_DIR}/eloqstore/
 endif ()

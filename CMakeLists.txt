@@ -261,6 +261,7 @@ include_directories(
     ${CMAKE_CURRENT_SOURCE_DIR}/tx_service/tx-log-protos
     ${CMAKE_CURRENT_SOURCE_DIR}/eloq_metrics/include
     ${CMAKE_CURRENT_SOURCE_DIR}/store_handler
+    ${CMAKE_CURRENT_LIST_DIR}/third_party/ini
 )
 
 if(WITH_LOG_SERVICE)
@@ -284,8 +285,8 @@ if(WITH_DATA_STORE STREQUAL "ELOQDSS_ROCKSDB" OR WITH_DATA_STORE STREQUAL "ELOQD
         store_handler/data_store_service_client_closure.cpp
         store_handler/data_store_service_scanner.cpp
         store_handler/store_util.cpp
-        store_handler/eloq_data_store_service/ini.c
-        store_handler/eloq_data_store_service/INIReader.cpp
+        third_party/ini/ini.c
+        third_party/ini/INIReader.cpp
         store_handler/eloq_data_store_service/thread_worker_pool.cpp
         store_handler/eloq_data_store_service/data_store_service.cpp
         store_handler/eloq_data_store_service/data_store_fault_inject.cpp

@@ -256,6 +256,7 @@ add_compile_definitions(LOG_SHIPPING_THREADS_NUM=${LOG_SHIPPING_THREADS_NUM})
 set(LOG_INCLUDE_DIR
    ${LOG_SOURCE_DIR}/include
    ${TX_LOG_PROTOS_SOURCE_DIR}
+   ${CMAKE_CURRENT_LIST_DIR}/third_party/ini
    )
 
 set(LOG_LIB
@@ -281,8 +282,8 @@ ADD_LIBRARY(logservice
     ${LOG_SOURCE_DIR}/src/log_state_rocksdb_cloud_impl.cpp
     ${LOG_SOURCE_DIR}/src/log_state_memory_impl.cpp
     ${LOG_SOURCE_DIR}/src/fault_inject.cpp
-    ${LOG_SOURCE_DIR}/src/INIReader.cpp
-    ${LOG_SOURCE_DIR}/src/ini.c
+    ${CMAKE_CURRENT_LIST_DIR}/third_party/ini/INIReader.cpp
+    ${CMAKE_CURRENT_LIST_DIR}/third_party/ini/ini.c
     ${TX_LOG_PROTOS_SOURCE_DIR}/log.pb.cc
     )
 
