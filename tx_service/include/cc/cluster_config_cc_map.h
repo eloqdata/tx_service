@@ -272,8 +272,10 @@ public:
 
         if (lk_type != LockType::NoLock)
         {
+            bool was_dirty = neg_inf_.IsDirty();
             neg_inf_.SetCommitTsPayloadStatus(req.CommitTs(),
                                               RecordStatus::Normal);
+            OnCommittedUpdate(&neg_inf_, was_dirty);
             ReleaseCceLock(lock, &neg_inf_, txn, req.NodeGroupId());
         }
 
@@ -526,8 +528,13 @@ public:
                 cluster_scale_txn, tx_candidate_term, req.CommitTs());
             txm->RecoverClusterScale(scale_op_msg, dm_started, dm_finished);
         }
-        neg_inf_.SetCommitTsPayloadStatus(
-            Sharder::Instance().ClusterConfigVersion(), RecordStatus::Normal);
+        {
+            bool was_dirty = neg_inf_.IsDirty();
+            neg_inf_.SetCommitTsPayloadStatus(
+                Sharder::Instance().ClusterConfigVersion(),
+                RecordStatus::Normal);
+            OnCommittedUpdate(&neg_inf_, was_dirty);
+        }
 
         req.SetFinish();
         return true;
