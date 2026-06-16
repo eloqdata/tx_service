@@ -548,32 +548,6 @@ bool DataSubstrate::InitializeLogService(const INIReader &config_reader)
                           FLAGS_txlog_rocksdb_sst_files_size_limit));
 
             // Start internal logserver.
-#if defined(OPEN_LOG_SERVICE)
-            if (core_config_.bootstrap)
-            {
-                log_server_ = std::make_unique<::txlog::LogServer>(
-                    txlog_node_id,
-                    log_server_port,
-                    log_path,
-                    1,
-                    txlog_rocksdb_sst_files_size_limit_val,
-                    txlog_rocksdb_max_write_buffer_number,
-                    txlog_rocksdb_max_background_jobs,
-                    txlog_rocksdb_target_file_size_base_val);
-            }
-            else
-            {
-                log_server_ = std::make_unique<::txlog::LogServer>(
-                    txlog_node_id,
-                    log_server_port,
-                    log_path,
-                    1,
-                    txlog_rocksdb_sst_files_size_limit_val,
-                    txlog_rocksdb_max_write_buffer_number,
-                    txlog_rocksdb_max_background_jobs,
-                    txlog_rocksdb_target_file_size_base_val);
-            }
-#else
             if (core_config_.bootstrap)
             {
                 log_server_ = std::make_unique<::txlog::LogServer>(
@@ -613,7 +587,6 @@ bool DataSubstrate::InitializeLogService(const INIReader &config_reader)
                     check_replay_log_size_interval_sec,
                     notify_checkpointer_threshold_size_val);
             }
-#endif
 #endif
 #endif
             DLOG(INFO) << "Log server started, node_id: " << txlog_node_id

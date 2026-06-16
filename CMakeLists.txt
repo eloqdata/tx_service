@@ -10,7 +10,6 @@ set(WITH_DATA_STORE "ELOQDSS_ELOQSTORE" CACHE STRING "Which key-value storage to
 set_property(CACHE WITH_DATA_STORE PROPERTY STRINGS "DYNAMODB" "BIGTABLE" "ROCKSDB" "ELOQDSS_ROCKSDB" "ELOQDSS_ROCKSDB_CLOUD_S3" "ELOQDSS_ROCKSDB_CLOUD_GCS" "ELOQDSS_ELOQSTORE")
 
 option(WITH_LOG_SERVICE "Compile with built-in log service." ON)
-option(OPEN_LOG_SERVICE "Compile with open log service." ON)
 option(SMALL_RANGE "Whether enable small range" OFF)
 option(STATISTICS "Whether enable table statistics" ON)
 option(EXT_TX_PROC_ENABLED "Allows external threads to move forward the tx service." ON)
@@ -20,7 +19,6 @@ option(BUILD_SHARED_LIBS "Build shared libraries instead of static libraries" OF
 
 message(NOTICE "WITH_DATA_STORE: ${WITH_DATA_STORE}")
 message(NOTICE "WITH_LOG_SERVICE: ${WITH_LOG_SERVICE}")
-message(NOTICE "OPEN_LOG_SERVICE: ${OPEN_LOG_SERVICE}")
 message(NOTICE "BUILD_SHARED_LIBS: ${BUILD_SHARED_LIBS}")
 message(NOTICE "WITH_JEMALLOC: ${WITH_JEMALLOC}")
 
@@ -222,10 +220,6 @@ if(WITH_LOG_SERVICE)
     add_compile_definitions(WITH_LOG_SERVICE)
 endif()
 
-if(OPEN_LOG_SERVICE)
-    add_compile_definitions(OPEN_LOG_SERVICE=1)
-endif()
-
 if(EXT_TX_PROC_ENABLED)
     add_compile_definitions(EXT_TX_PROC_ENABLED)
 endif()
@@ -248,11 +242,7 @@ INCLUDE(build_tx_service.cmake)
 INCLUDE(build_eloq_metrics.cmake)
 
 if(WITH_LOG_SERVICE)
-    if(OPEN_LOG_SERVICE)
-        INCLUDE(build_log_service.cmake)
-    else()
-        INCLUDE(build_eloq_log_service.cmake)
-    endif()
+    INCLUDE(build_eloq_log_service.cmake)
 endif()
 
 # Find mimalloc
@@ -271,14 +261,11 @@ include_directories(
     ${CMAKE_CURRENT_SOURCE_DIR}/tx_service/tx-log-protos
     ${CMAKE_CURRENT_SOURCE_DIR}/eloq_metrics/include
     ${CMAKE_CURRENT_SOURCE_DIR}/store_handler
+    ${CMAKE_CURRENT_LIST_DIR}/third_party/ini
 )
 
 if(WITH_LOG_SERVICE)
-    if(OPEN_LOG_SERVICE)
-        include_directories(${CMAKE_CURRENT_SOURCE_DIR}/log_service/include)
-    else()
-        include_directories(${CMAKE_CURRENT_SOURCE_DIR}/eloq_log_service/include)
-    endif()
+    include_directories(${CMAKE_CURRENT_SOURCE_DIR}/eloq_log_service/include)
 endif()
 
 # Collect all source files for the library
@@ -298,8 +285,8 @@ if(WITH_DATA_STORE STREQUAL "ELOQDSS_ROCKSDB" OR WITH_DATA_STORE STREQUAL "ELOQD
         store_handler/data_store_service_client_closure.cpp
         store_handler/data_store_service_scanner.cpp
         store_handler/store_util.cpp
-        store_handler/eloq_data_store_service/ini.c
-        store_handler/eloq_data_store_service/INIReader.cpp
+        third_party/ini/ini.c
+        third_party/ini/INIReader.cpp
         store_handler/eloq_data_store_service/thread_worker_pool.cpp
         store_handler/eloq_data_store_service/data_store_service.cpp
         store_handler/eloq_data_store_service/data_store_fault_inject.cpp
@@ -393,9 +380,11 @@ install(TARGETS txservice
         ARCHIVE DESTINATION lib
         LIBRARY DESTINATION lib)
 
-install(TARGETS logservice
-        ARCHIVE DESTINATION lib
-        LIBRARY DESTINATION lib)
+if(WITH_LOG_SERVICE)
+    install(TARGETS logservice
+            ARCHIVE DESTINATION lib
+            LIBRARY DESTINATION lib)
+endif()
 
 install(TARGETS data_substrate
         ARCHIVE DESTINATION lib
@@ -405,10 +394,8 @@ install(TARGETS eloq-metrics
         ARCHIVE DESTINATION lib
         LIBRARY DESTINATION lib)
 
-if(FORK_HM_PROCESS) # Only install host_manager if it's built
-    install(TARGETS host_manager
-            RUNTIME DESTINATION bin)
-endif()
+install(TARGETS host_manager
+        RUNTIME DESTINATION bin)
 
 if(WITH_TESTS)
     enable_testing()

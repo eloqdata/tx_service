@@ -321,7 +321,6 @@ int Sharder::Init(
     {
         hm_ip_ = *hm_ip;
         hm_port_ = *hm_port;
-#ifdef FORK_HM_PROCESS
         // Fork host manager process.
         if (fork_host_manager)
         {
@@ -367,7 +366,6 @@ int Sharder::Init(
                 DLOG(INFO) << "Spawned host manager process with PID: " << pid;
             }
         }
-#endif
         int max_retries = 300;
         int retries = 0;
         int delay_ms = 200;

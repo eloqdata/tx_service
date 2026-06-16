@@ -1,0 +1,541 @@
+syntax = "proto3";
+package txlog;
+option cc_generic_services = true;
+
+import "google/protobuf/empty.proto";
+
+enum CcTableType {
+  Primary = 0;
+  Secondary = 1;
+  UniqueSecondary = 2;
+  Catalog = 3;
+  RangePartition = 4;
+  RangeBucket = 5;
+  ClusterConfig = 6;
+}
+
+enum TableEngine {
+  None = 0;
+  EloqSql = 1;
+  EloqKv = 2;
+  EloqDoc = 3;
+  InternalRange = 4;
+  InternalHash = 5;
+}
+
+message UpsertTableMessage {
+  uint32 op_type = 3;
+}
+
+message UpsertColumnMessage {
+  string column_name = 1;
+  bool is_deleted = 2;
+}
+
+message RenameColumnMessage {
+  string old_column_name = 2;
+  string new_column_name = 3;
+}
+
+message UpsertIndexMessage {
+  string index_name = 1;
+  bool is_deleted = 2;
+}
+
+message SchemaOpMessage {
+  string table_name_str = 1;
+  TableEngine table_engine = 2;
+  CcTableType table_type = 3;
+  bytes new_catalog_blob = 4;
+  bytes old_catalog_blob = 5;
+  bytes alter_table_info_blob = 6;
+  enum Stage {
+    PrepareSchema = 0;
+    PrepareData = 1;
+    CommitSchema = 2;
+    CleanSchema = 3;
+  }
+  Stage stage = 7;
+  // Old catalog_ts
+  uint64 catalog_ts = 8;
+  oneof schema_op {
+    UpsertTableMessage table_op = 9;
+    UpsertColumnMessage column_op = 10;
+    RenameColumnMessage column_rename_op = 11;
+    UpsertIndexMessage index_op = 12;
+  }
+  enum LastKeyType {
+    NormalKey = 0;
+    PosInfKey = 1;
+  }
+  LastKeyType last_key_type = 13;
+  bytes last_key_value = 14;
+}
+
+message UpdateCatalogMessage {
+  string table_name_str = 1;
+  TableEngine table_engine = 2;
+  CcTableType table_type = 3;
+  // The new name of the table. Empty if no renaming.
+  bytes new_table_name = 4;
+  CcTableType new_table_type = 5;
+  // Whether the table/schema is deleted
+  bool is_deleted = 6;
+  // The binary representation of the new catalog
+  bytes catalog_blob = 7;
+  // Two arrays for zero or more old, new column names
+  repeated string old_column_names = 8;
+  repeated string new_column_names = 9;
+  // Two arrays for zero or more old, new index names
+  repeated string old_index_names = 10;
+  repeated string new_index_names = 11;
+  // Zero or more added index names
+  // An index's indexed columns can be retrieved from
+  // the catalog decoded from catalog_blob using the name.
+  repeated string added_indexes = 12;
+  // Zero or more deleted index names
+  repeated string deleted_indexes = 13;
+}
+
+message SplitRangeOpMessage  {
+  string table_name = 1;
+  TableEngine table_engine = 2;
+  int32 partition_id = 3;
+  oneof range_key {
+    bytes range_key_value = 4;
+    bool range_key_neg_inf = 5;
+  }
+  repeated int32 slice_sizes = 6;
+  repeated bytes slice_keys = 7;
+  repeated int32 new_partition_id = 8;
+  repeated bytes new_range_key = 9;
+  enum Stage
+  {
+    PrepareSplit = 0;
+    CommitSplit = 1;
+    CleanSplit = 2;
+  }
+  Stage stage = 10;
+}
+
+message NodeConfig
+{
+  int32 node_id = 1;
+  string host_name = 2;
+  int32 port = 3;
+}
+
+message NodegroupConfig
+{
+  int32 ng_id = 1;
+  repeated int32 member_nodes = 2;
+  repeated bool is_candidate = 3;
+}
+
+enum BucketMigrateStage
+{
+  NotStarted = 0;
+  BeforeLocking = 1;
+  PrepareMigrate = 2;
+  CommitMigrate = 3;
+  CleanMigrate = 4;
+}
+
+message DataMigrateTxLogMessage {
+  enum Stage {
+    Prepare = 0;
+    Commit = 1;
+    Clean = 2;
+  }
+  Stage stage = 1;
+  uint64 cluster_scale_tx_number = 2;
+  // used in Prepare stage. tx numbers of all bucket 
+  // migrate workers.
+  repeated uint64 migration_txns = 3;
+
+  // used in Commit stage. The bucket ids that this migrate
+  // worker is working on this round.
+  repeated uint32 bucket_ids = 4;
+  BucketMigrateStage bucket_stage = 5;
+  uint64 migrate_ts = 6;
+  uint64 migrate_txn = 7;
+}
+
+message BucketMigrateMessage {
+  uint32 bucket_id = 1;
+  uint32 old_owner = 2;
+  uint32 new_owner = 3;
+  BucketMigrateStage stage = 4;
+  uint64 migrate_ts = 5;
+  uint64 migration_txn = 6;
+}
+
+message NodeGroupMigrateMessage {
+  enum Stage
+  {
+    NotStarted = 0;
+    Prepared = 1;
+    Cleaned = 2;
+  }
+  Stage stage = 1;
+  repeated uint64 migration_txns = 2;
+  uint32 old_owner = 3;
+  map<uint32, BucketMigrateMessage> bucket_migrate_process = 4;
+}
+
+enum ClusterScaleStage
+{
+  PrepareScale = 0;
+  ConfigUpdate = 1;
+  CleanScale = 2;
+}
+
+message CheckClusterScaleStatusRequest {
+  uint32 log_group_id = 1;
+  string id = 2;
+}
+
+message CheckClusterScaleStatusResponse {
+  enum Status
+  {
+    UNKNOWN = 0;
+    NO_STARTED = 1;
+    STARTED = 2;
+    FINISHED = 3;
+  }
+  
+  Status status = 1;
+}
+
+message ClusterScaleOpMessage {
+  enum ScaleOpType
+  {
+    AddNodeGroup = 0;
+    RemoveNode = 1;
+    AddNodeGroupPeers = 2;
+  }
+  ScaleOpType event_type = 1;
+  repeated NodegroupConfig new_ng_configs = 2;
+  repeated NodeConfig node_configs = 3;
+  string id = 4;
+
+  ClusterScaleStage stage = 5;
+  map<uint32, NodeGroupMigrateMessage> node_group_bucket_migrate_process = 6;
+}
+
+message DataLogMessage {
+  // A map mapping the cc node group ID to the records
+  // the tx commits in this cc node group.
+  map<uint32, bytes> node_txn_logs = 1;
+
+  // An insert operation triggers a logical update table operation.
+  // For example, when mongo insert an array value into a singlekey field,
+  // it will change the singlekey index to a multiKey index.
+  repeated SchemaOpMessage schema_logs = 2; 
+}
+
+message LogContentMessage {
+  oneof content {
+    DataLogMessage data_log = 1;
+    SchemaOpMessage schema_log = 2;
+    SplitRangeOpMessage split_range_log = 3;
+    ClusterScaleOpMessage cluster_scale_log = 4;
+    DataMigrateTxLogMessage migration_log = 5;
+  }
+}
+
+message WriteLogRequest {
+  uint64 txn_number = 1;
+  // Serve as new catalog_ts
+  uint64 commit_timestamp = 2;
+  // A map mapping the cc node group ID to the records
+  // the tx commits in this cc node group.
+  map<uint32, bytes> node_txn_logs = 3;
+  // A map mapping the cc node group ID to the term of
+  // the cc group leader when the tx acquires locks/intentions
+  // in that cc node group.
+  map<uint32, int64> node_terms = 4;
+  LogContentMessage log_content = 5;
+  // term of the ng leader sending this request, aka tx_term
+  int64 tx_term = 6;
+  bool retry = 7;
+  //log group id
+  uint32 log_group_id = 8;
+}
+
+message LeaderInfo {
+  int64 term = 1;
+  bytes ip = 2;
+  uint32 port = 3;
+}
+
+message WriteLogResponse {
+  string redirect = 1;
+  uint64 newest_cluster_scale_txn = 2;
+  // latest leader info of all node groups
+  map<uint32, LeaderInfo> node_group_leader_info = 3;
+}
+
+message ReplayLogRequest {
+  uint32 cc_node_group_id = 1;
+  int64 term = 2;
+  string source_ip = 3;
+  uint32 source_port = 4;
+  uint32 log_group_id = 5;
+  bool   no_replay = 6;   // only update ccng term to log service, simplifying test client
+  uint64 start_ts = 7;
+}
+
+message ReplayLogResponse {
+  message LogPair {
+    uint64 commit_timestamp = 1;
+    bytes log_item = 2;
+  }
+  repeated LogPair txn_logs = 1;
+  string redirect = 2;
+}
+
+message UpdateCheckpointTsRequest {
+  uint32 cc_node_group_id = 1;
+  uint64 ckpt_timestamp = 2;
+  uint32 log_group_id = 3;
+  int64 cc_ng_term = 4;
+}
+
+message UpdateCheckpointTsResponse {
+  string redirect = 1;
+}
+
+message RemoveCcNodeGroupRequest {
+  uint32 cc_node_group_id = 1;
+  int64 cc_ng_term = 2;
+  uint32 log_group_id = 3;
+}
+
+message RemoveCcNodeGroupResponse {
+    string redirect = 1;
+}
+
+message RecoverTxRequest {
+  uint64 lock_tx_number = 1;
+  int64 lock_tx_coord_term = 2;
+  uint32 cc_node_group_id = 3;
+  int64 cc_ng_term = 4;
+  string source_ip = 5;
+  uint32 source_port = 6;
+  uint32 log_group_id = 7;
+  uint64 write_lock_ts = 8;
+}
+
+message RecoverTxResponse {
+  enum TxStatus {
+    Alive = 0;
+    Committed = 1;
+    NotCommitted = 2;
+    RecoverError = 3;
+  }
+  TxStatus tx_status = 1;
+}
+
+message PostSnapshotRequest {
+  uint64 last_applied_tx_num = 1;
+}
+
+message LogRequest {
+  oneof request {
+    WriteLogRequest write_log_request = 1;
+    ReplayLogRequest replay_log_request = 2;
+    UpdateCheckpointTsRequest update_ckpt_ts_request = 3;
+    // post_snapshot_request is not serving as a RPC request,
+    // just for purpose of unifing the processing logic in on_apply 
+    PostSnapshotRequest post_snapshot_request = 4 ;
+    CheckClusterScaleStatusRequest check_scale_status_request = 5;
+    RemoveCcNodeGroupRequest remove_cc_node_group_request = 6;
+  }
+}
+
+message LogResponse {
+  enum ResponseStatus {
+    Success = 0;
+    Fail = 1; // WriteLog term not match or other failure
+    NotLeader = 2;
+    Unknown = 3;
+    DuplicateMigrationTx = 4;
+    DuplicateClusterScaleTx = 5;
+  }
+  ResponseStatus response_status = 1;
+  oneof response {
+    WriteLogResponse write_log_response = 2;
+    ReplayLogResponse replay_log_response = 3;
+    UpdateCheckpointTsResponse update_ckpt_ts_response = 4;
+    CheckClusterScaleStatusResponse check_scale_status_response = 5;
+  }
+}
+
+message TransferRequest {
+  uint32 lg_id = 1; //Log group id
+  // The index of new leader node in log group start from 0
+  uint32 leader_idx = 2;
+}
+
+message TransferResponse {
+  bool error = 1;
+}
+
+message HealthzHttpRequest {};
+
+message RaftStat {
+  string log_group = 1;
+  string state = 2;
+}
+
+message HealthzHttpResponse {
+  enum Status {
+    DETACHED = 0;
+    DETACHING = 1;
+    ATTACHED = 2;
+    ATTACHING = 3;
+  }
+
+  repeated RaftStat raft_stat = 1;
+  Status service_status = 2;
+}
+message CheckMigrationIsFinishedRequest {
+  uint32 log_group_id = 1;
+	uint64 cluster_scale_txn = 2;
+}
+
+message CheckMigrationIsFinishedResponse {
+	bool finished = 1;
+}
+
+message AttachLogRequest {
+  string config_path = 1;
+}
+
+enum AttachLogErrorCode {
+  NO_ERROR = 0;
+  CONFIG_PARSE_ERROR = 1;
+  INSTANCE_INIT_ERROR = 2;
+}
+
+message AttachLogResponse {
+  AttachLogErrorCode err_code = 1;
+  string err_msg = 2;
+}
+
+message AddPeerRequest {
+  repeated string ip = 1;
+  repeated uint32 port = 2;
+  uint32 log_group_id = 3;
+}
+
+message RemovePeerRequest {
+  repeated string ip = 1;
+  repeated uint32 port = 2;
+  uint32 log_group_id = 3;
+}
+
+message ChangePeersResponse {
+  bool success = 1;
+}
+
+message GetLogGroupConfigRequest {
+  uint32 log_group_id = 1;
+}
+
+message GetLogGroupConfigResponse {
+  bool error = 1;
+  repeated string ip = 2;
+  repeated uint32 port = 3;
+}
+
+service LogService {
+  rpc WriteLog(LogRequest) returns (LogResponse);
+  rpc ReplayLog(LogRequest) returns (LogResponse);
+  rpc UpdateCheckpointTs(LogRequest) returns (LogResponse);
+  rpc RemoveCcNodeGroup(LogRequest) returns (LogResponse);
+  rpc RecoverTx(RecoverTxRequest) returns (RecoverTxResponse);
+  rpc CheckMigrationIsFinished(CheckMigrationIsFinishedRequest) returns (CheckMigrationIsFinishedResponse);
+  rpc CheckClusterScaleStatus(LogRequest) returns (LogResponse);
+  // Add this function for test aim, but it can be used with other aims.
+  // Call this method will transfer the log group leader to the pointed node.
+  rpc TransferLeader(TransferRequest) returns (TransferResponse);
+  rpc CheckHealth(HealthzHttpRequest) returns (HealthzHttpResponse);
+  rpc AttachLog(AttachLogRequest) returns (AttachLogResponse);
+  rpc DetachLog(google.protobuf.Empty) returns (google.protobuf.Empty);
+  rpc AddPeer(AddPeerRequest) returns (ChangePeersResponse);
+  rpc RemovePeer(RemovePeerRequest) returns (ChangePeersResponse);
+  rpc GetLogGroupConfig(GetLogGroupConfigRequest) returns (GetLogGroupConfigResponse);
+}
+
+message ReplayRecordMsg {
+  uint64 commit_ts = 1;
+  bytes log_blob = 2;
+}
+
+message ReplaySchemaMsg {
+  uint64 commit_ts = 1;
+  bytes schema_op_blob = 2;
+  uint64 txn = 3;
+}
+
+message ReplaySplitRangeMsg {
+  uint64 commit_ts = 1;
+  bytes split_range_op_blob = 2;
+  uint64 txn = 3;
+}
+
+message ReplayClusterScaleMsg {
+  uint64 commit_ts = 1;
+  bytes cluster_scale_op_blob = 2;
+  uint64 txn = 3;
+}
+
+message ReplayFinishMsg {
+  uint32 log_group_id = 1;
+  uint32 latest_txn_no = 2;
+  uint64 latest_commit_ts = 3;
+  uint64 last_ckpt_ts = 4;
+}
+
+message ReplayMessage {
+  uint32 cc_node_group_id = 1;
+  int64 cc_node_group_term = 2;
+  bytes binary_log_records = 3;
+  repeated ReplaySchemaMsg schema_op_msgs = 4;
+  repeated ReplaySplitRangeMsg split_range_op_msgs = 5;
+  ReplayClusterScaleMsg cluster_scale_op_msg = 6;
+  ReplayFinishMsg finish = 7;
+  bool is_lock_recovery = 8;
+}
+
+message LogReplayConnectRequest {
+  uint32 log_group_id = 1;
+  uint32 cc_node_group_id = 2;
+  int64 cc_ng_term = 3;
+  uint64 replay_start_ts = 4;
+};
+
+message LogReplayConnectResponse {
+  bool success = 1;
+};
+
+
+message LogLeaderUpdateRequest {
+  uint32 lg_id = 1;
+  uint32 node_id = 2;
+}
+
+message LogLeaderUpdateResponse {
+  bool error = 1;
+}
+
+message NotifyCheckpointerRequest {}
+message NotifyCheckpointerResponse {}
+
+service LogReplayService {
+  rpc Connect(LogReplayConnectRequest) returns (LogReplayConnectResponse);
+  rpc UpdateLogGroupLeader(LogLeaderUpdateRequest) returns (LogLeaderUpdateResponse);
+  rpc NotifyCheckpointer(NotifyCheckpointerRequest) returns (NotifyCheckpointerResponse);
+}

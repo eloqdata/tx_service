@@ -1,0 +1,63 @@
+syntax = "proto3";
+package txlog;
+
+message ReplayMessageBatch {
+  uint32 cc_node_group_id = 1;
+  int64 cc_node_group_term = 2;
+  repeated ReplayMessage messages = 3;
+}
+
+message ReplayMessage {
+  oneof replay_msg {
+    ReplayRecordMsg log_record = 10;
+    ReplaySchemaMsg schema_op = 11;
+    ReplayFinishMsg finish = 12;
+  }
+}
+
+message ReplayRecordMsg {
+  uint64 commit_ts = 1;
+  bytes log_blob = 2;
+}
+
+message ReplaySchemaMsg {
+  uint64 commit_ts = 1;
+  bytes schema_op_blob = 2;
+  uint64 txn = 3;
+}
+
+message ReplayFinishMsg {
+  uint32 log_group_id = 1;
+}
+
+message Batch {
+  uint32 cc_node_group_id = 1;
+  int64 cc_node_group_term = 2;
+  repeated LogMessage log_msgs = 3;
+  repeated SchemaMessage schema_msgs = 4;
+}
+
+message LogMessage {
+  uint64 commit_ts = 1;
+  bytes log_blob = 2;
+}
+
+message SchemaMessage {
+  uint64 commit_ts = 1;
+  bytes schema_op_blob = 2;
+  uint64 txn = 3;
+}
+
+message MyMessage {
+  uint32 cc_node_group_id = 1;
+  int64 cc_node_group_term = 2;
+  bytes binary_log_records = 3;
+}
+
+//message ReplayBinaryRecordMsg1 {
+//  repeated ReplayRecordMsg;
+//}
+//
+//message ReplayBinaryRecordMsg2 {
+//  bytes raw_content;
+//}

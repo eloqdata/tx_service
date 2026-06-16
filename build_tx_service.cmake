@@ -20,9 +20,6 @@ if(ELOQ_MODULE_ENABLED)
 endif()
 
 
-option(FORK_HM_PROCESS "Whether fork host manager process" OFF)
-message(NOTICE "FORK_HM_PROCESS : ${FORK_HM_PROCESS}")
-
 option(STATISTICS "Whether enable table statistics" OFF)
 message(NOTICE "STATISTICS : ${STATISTICS}")
 
@@ -64,10 +61,6 @@ endif()
 
 if(SMALL_RANGE)
     add_compile_definitions(SMALL_RANGE)
-endif()
-
-if(FORK_HM_PROCESS)
-    add_compile_definitions(FORK_HM_PROCESS)
 endif()
 
 if(STATISTICS)
@@ -230,146 +223,75 @@ if(WITH_JEMALLOC)
     target_link_libraries(txservice PUBLIC jemalloc_cfg)
 endif()
 
-# if(FORK_HM_PROCESS)
-#     include(FetchContent)
-#     # Import yaml-cpp library used by host manager
-#     FetchContent_Declare(
-#         yaml-cpp
-#         GIT_REPOSITORY https://github.com/jbeder/yaml-cpp.git
-#         GIT_TAG yaml-cpp-0.7.0 # Can be a tag (yaml-cpp-x.x.x), a commit hash, or a branch name (master)
-#     )
-#     FetchContent_MakeAvailable(yaml-cpp)
+SET(HOST_MANAGER_SOURCE_DIR ${CMAKE_CURRENT_SOURCE_DIR}/tx_service/raft_host_manager)
+set(HOST_MANAGER_INCLUDE_DIR
+    ${HOST_MANAGER_SOURCE_DIR}/include
+    ${CMAKE_CURRENT_LIST_DIR}/third_party/ini
+    ${TX_SERVICE_SOURCE_DIR}/tx-log-protos
+    ${OPENSSL_INCLUDE_DIR}
+    ${PROTO_SRC}
+    ${LOG_PROTO_SRC})
 
-#     SET(HOST_MANAGER_SOURCE_DIR ${CMAKE_CURRENT_SOURCE_DIR}/tx_service/raft_host_manager)
-#     set(HOST_MANAGER_INCLUDE_DIR
-#         ${HOST_MANAGER_SOURCE_DIR}/include
-#         ${TX_SERVICE_SOURCE_DIR}/tx-log-protos
-#         ${OPENSSL_INCLUDE_DIR}
-#         ${LOG_PROTO_SRC}
-#         ${PROTO_SRC})
-
-#     if(CMAKE_COMPILER_IS_GNUCC)
-#         set(HOST_MANAGER_INCLUDE_DIR ${HOST_MANAGER_INCLUDE_DIR}
-#             ${BRPC_INCLUDE_PATH}
-#             ${BRAFT_INCLUDE_PATH}
-#             ${GLOG_INCLUDE_PATH}
-#             ${GFLAGS_INCLUDE_PATH})
-#     endif()
-
-#     set(HOST_MANAGER_LINK_LIB ${HOST_MANAGER_LINK_LIB} ${PROTOBUF_LIBRARIES})
-
-#     if(CMAKE_COMPILER_IS_GNUCC)
-#         find_path(BRAFT_INCLUDE_PATH NAMES braft/raft.h)
-#         find_library(BRAFT_LIB NAMES braft)
-
-#         if((NOT BRAFT_INCLUDE_PATH) OR(NOT BRAFT_LIB))
-#             message(FATAL_ERROR "Fail to find braft")
-#         endif()
-
-#         set(HOST_MANAGER_LINK_LIB ${HOST_MANAGER_LINK_LIB}
-#             ${GFLAGS_LIBRARY}
-#             ${LEVELDB_LIB}
-#             ${BRAFT_LIB}
-#             ${BRPC_LIB}
-#             ${OPENSSL_LIB})
-#         find_path(GLOG_INCLUDE_PATH NAMES glog/logging.h)
-#         find_library(GLOG_LIB NAMES glog VERSION ">=0.6.0" REQUIRED)
-
-#         if((NOT GLOG_INCLUDE_PATH) OR(NOT GLOG_LIB))
-#             message(FATAL_ERROR "Fail to find glog")
-#         endif()
-
-#         include_directories(${GLOG_INCLUDE_PATH})
-#         set(HOST_MANAGER_LINK_LIB ${HOST_MANAGER_LINK_LIB} ${GLOG_LIB})
-#     endif()
-
-#     SET(RaftHM_SOURCES
-#         ${HOST_MANAGER_SOURCE_DIR}/src/main.cpp
-#         ${HOST_MANAGER_SOURCE_DIR}/src/raft_host_manager_service.cpp
-#         ${HOST_MANAGER_SOURCE_DIR}/src/raft_host_manager.cpp
-#         ${HOST_MANAGER_SOURCE_DIR}/src/ini.c
-#         ${HOST_MANAGER_SOURCE_DIR}/src/INIReader.cpp
-#         ${LOG_PROTO_SRC}/log_agent.cpp
-#         ${LOG_PROTO_SRC}/${LOG_PROTO_NAME}.pb.cc
-#         ${PROTO_CC_FILES}
-#     )
-
-#     include_directories(${HOST_MANAGER_INCLUDE_DIR})
-#     MYSQL_ADD_EXECUTABLE(host_manager ${RaftHM_SOURCES} DESTINATION ${INSTALL_SBINDIR} COMPONENT Server)
-#     target_link_libraries(host_manager ${HOST_MANAGER_LINK_LIB} yaml-cpp::yaml-cpp)
-
-# endif()
-
-if (FORK_HM_PROCESS)
-    SET (HOST_MANAGER_SOURCE_DIR ${CMAKE_CURRENT_SOURCE_DIR}/tx_service/raft_host_manager)
-    set(HOST_MANAGER_INCLUDE_DIR
-        ${HOST_MANAGER_SOURCE_DIR}/include
-        ${TX_SERVICE_SOURCE_DIR}/tx-log-protos
-        ${OPENSSL_INCLUDE_DIR}
-        ${PROTO_SRC}
-        ${LOG_PROTO_SRC})
-
-    set(HOST_MANAGER_INCLUDE_DIR ${HOST_MANAGER_INCLUDE_DIR}
-        ${BRPC_INCLUDE_PATH}
-        ${BRAFT_INCLUDE_PATH}
-        ${GLOG_INCLUDE_PATH}
-        ${GFLAGS_INCLUDE_PATH})
-
-    set(HOST_MANAGER_LINK_LIB ${HOST_MANAGER_LINK_LIB} ${PROTOBUF_LIBRARIES})
-
-    find_path(BRAFT_INCLUDE_PATH NAMES braft/raft.h)
-    find_library(BRAFT_LIB NAMES braft)
-    if ((NOT BRAFT_INCLUDE_PATH) OR (NOT BRAFT_LIB))
-        message (FATAL_ERROR "Fail to find braft")
-    endif()
-    set(HOST_MANAGER_LINK_LIB ${HOST_MANAGER_LINK_LIB}
-        ${GFLAGS_LIBRARY}
-        ${GPERFTOOLS_LIBRARIES}
-        ${LEVELDB_LIB}
-        ${BRAFT_LIB}
-        ${BRPC_LIB}
-        ${OPENSSL_LIB})
-    find_path(GLOG_INCLUDE_PATH NAMES glog/logging.h)
-    find_library(GLOG_LIB NAMES glog VERSION ">=0.6.0" REQUIRED)
-    if((NOT GLOG_INCLUDE_PATH) OR (NOT GLOG_LIB))
-        message(FATAL_ERROR "Fail to find glog")
-    endif()
-    include_directories(${GLOG_INCLUDE_PATH})
-    set(HOST_MANAGER_LINK_LIB ${HOST_MANAGER_LINK_LIB} ${GLOG_LIB})
-
-    SET(RaftHM_SOURCES
-        ${HOST_MANAGER_SOURCE_DIR}/src/main.cpp
-        ${HOST_MANAGER_SOURCE_DIR}/src/raft_host_manager_service.cpp
-        ${HOST_MANAGER_SOURCE_DIR}/src/raft_host_manager.cpp
-        ${HOST_MANAGER_SOURCE_DIR}/src/ini.c
-        ${HOST_MANAGER_SOURCE_DIR}/src/INIReader.cpp
-        ${PROTO_SRC}/${PROTO_NAME}.pb.cc
-        ${LOG_PROTO_SRC}/log_agent.cpp
-        ${LOG_PROTO_SRC}/${LOG_PROTO_NAME}.pb.cc
-        )
-
-    include(FetchContent)
-
-    # Import yaml-cpp library used by host manager
-    FetchContent_Declare(
-            yaml-cpp
-            GIT_REPOSITORY https://github.com/jbeder/yaml-cpp.git
-            GIT_TAG yaml-cpp-0.7.0 # Can be a tag (yaml-cpp-x.x.x), a commit hash, or a branch name (master)
-    )
-    FetchContent_MakeAvailable(yaml-cpp)
-    if(BUILD_SHARED_LIBS)
-        install(TARGETS yaml-cpp EXPORT yaml-cppTargets DESTINATION lib)
-    endif()
-    set(HOST_MANAGER_LINK_LIB ${HOST_MANAGER_LINK_LIB} yaml-cpp::yaml-cpp)
-
-    include_directories(${HOST_MANAGER_INCLUDE_DIR})
-    add_executable(host_manager ${RaftHM_SOURCES})
-    target_link_libraries(host_manager PRIVATE ${HOST_MANAGER_LINK_LIB})
-
-    set_target_properties(host_manager PROPERTIES
-            BUILD_RPATH "$ORIGIN/../lib"
-            INSTALL_RPATH "$ORIGIN/../lib"
-            INSTALL_RPATH_USE_LINK_PATH TRUE)
-
-    install(TARGETS host_manager RUNTIME DESTINATION bin)
+find_path(BRAFT_INCLUDE_PATH NAMES braft/raft.h)
+find_library(BRAFT_LIB NAMES braft)
+if ((NOT BRAFT_INCLUDE_PATH) OR (NOT BRAFT_LIB))
+    message (FATAL_ERROR "Fail to find braft")
 endif()
+
+set(HOST_MANAGER_INCLUDE_DIR ${HOST_MANAGER_INCLUDE_DIR}
+    ${BRPC_INCLUDE_PATH}
+    ${BRAFT_INCLUDE_PATH}
+    ${GLOG_INCLUDE_PATH}
+    ${GFLAGS_INCLUDE_PATH})
+
+set(HOST_MANAGER_LINK_LIB ${HOST_MANAGER_LINK_LIB} ${PROTOBUF_LIBRARIES})
+set(HOST_MANAGER_LINK_LIB ${HOST_MANAGER_LINK_LIB}
+    ${GFLAGS_LIBRARY}
+    ${GPERFTOOLS_LIBRARIES}
+    ${LEVELDB_LIB}
+    ${BRAFT_LIB}
+    ${BRPC_LIB}
+    ${OPENSSL_LIB})
+find_path(GLOG_INCLUDE_PATH NAMES glog/logging.h)
+find_library(GLOG_LIB NAMES glog VERSION ">=0.6.0" REQUIRED)
+if((NOT GLOG_INCLUDE_PATH) OR (NOT GLOG_LIB))
+    message(FATAL_ERROR "Fail to find glog")
+endif()
+include_directories(${GLOG_INCLUDE_PATH})
+set(HOST_MANAGER_LINK_LIB ${HOST_MANAGER_LINK_LIB} ${GLOG_LIB})
+
+SET(RaftHM_SOURCES
+    ${HOST_MANAGER_SOURCE_DIR}/src/main.cpp
+    ${HOST_MANAGER_SOURCE_DIR}/src/raft_host_manager_service.cpp
+    ${HOST_MANAGER_SOURCE_DIR}/src/raft_host_manager.cpp
+    ${CMAKE_CURRENT_LIST_DIR}/third_party/ini/ini.c
+    ${CMAKE_CURRENT_LIST_DIR}/third_party/ini/INIReader.cpp
+    ${PROTO_SRC}/${PROTO_NAME}.pb.cc
+    ${LOG_PROTO_SRC}/log_agent.cpp
+    ${LOG_PROTO_SRC}/${LOG_PROTO_NAME}.pb.cc
+    )
+
+include(FetchContent)
+
+# Import yaml-cpp library used by host manager
+FetchContent_Declare(
+        yaml-cpp
+        GIT_REPOSITORY https://github.com/jbeder/yaml-cpp.git
+        GIT_TAG yaml-cpp-0.7.0 # Can be a tag (yaml-cpp-x.x.x), a commit hash, or a branch name (master)
+)
+FetchContent_MakeAvailable(yaml-cpp)
+if(BUILD_SHARED_LIBS)
+    install(TARGETS yaml-cpp EXPORT yaml-cppTargets DESTINATION lib)
+endif()
+set(HOST_MANAGER_LINK_LIB ${HOST_MANAGER_LINK_LIB} yaml-cpp::yaml-cpp)
+
+include_directories(${HOST_MANAGER_INCLUDE_DIR})
+add_executable(host_manager ${RaftHM_SOURCES})
+target_link_libraries(host_manager PRIVATE ${HOST_MANAGER_LINK_LIB})
+
+set_target_properties(host_manager PROPERTIES
+        BUILD_RPATH "$ORIGIN/../lib"
+        INSTALL_RPATH "$ORIGIN/../lib"
+        INSTALL_RPATH_USE_LINK_PATH TRUE)
+
+install(TARGETS host_manager RUNTIME DESTINATION bin)
