@@ -24,6 +24,7 @@
 #include <cstdint>
 #include <map>
 #include <memory>
+#include <optional>
 #include <string>
 #include <unordered_map>
 #include <unordered_set>
@@ -675,6 +676,7 @@ struct AsyncOp : public TransactionOperation
     void Reset();
 
     std::function<void(AsyncOp<ResultType> &async_op)> op_func_;
+    std::optional<int> timeout_secs_{10};
 
     // hd_result_ represents the async result, and op_func_ should finish it
     // after completes its work.
