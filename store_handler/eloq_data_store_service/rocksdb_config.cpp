@@ -277,6 +277,12 @@ DEFINE_bool(rocksdb_cloud_run_purger, true, "Rocksdb cloud run purger");
 DEFINE_uint32(rocksdb_cloud_purger_periodicity_secs,
               10 * 60, /*10 minutes*/
               "Rocksdb cloud purger periodicity seconds");
+DEFINE_bool(rocksdb_cloud_enable_bloom_filter,
+            false,
+            "Enable RocksDB Cloud bloom filter");
+DEFINE_double(rocksdb_cloud_bloom_filter_bits_per_key,
+              10,
+              "RocksDB Cloud bloom filter bits per key");
 #endif
 #if (defined(DATA_STORE_TYPE_ELOQDSS_ROCKSDB_CLOUD_S3))
 DEFINE_string(aws_access_key_id, "", "AWS SDK access key id");
@@ -590,6 +596,19 @@ RocksDBCloudConfig::RocksDBCloudConfig(const INIReader &config)
             : config.GetInteger("store",
                                 "rocksdb_cloud_purger_periodicity_secs",
                                 FLAGS_rocksdb_cloud_purger_periodicity_secs);
+    bool rocksdb_cloud_enable_bloom_filter =
+        !CheckCommandLineFlagIsDefault("rocksdb_cloud_enable_bloom_filter")
+            ? FLAGS_rocksdb_cloud_enable_bloom_filter
+            : config.GetBoolean("store",
+                                "rocksdb_cloud_enable_bloom_filter",
+                                FLAGS_rocksdb_cloud_enable_bloom_filter);
+    double rocksdb_cloud_bloom_filter_bits_per_key =
+        !CheckCommandLineFlagIsDefault(
+            "rocksdb_cloud_bloom_filter_bits_per_key")
+            ? FLAGS_rocksdb_cloud_bloom_filter_bits_per_key
+            : config.GetReal("store",
+                             "rocksdb_cloud_bloom_filter_bits_per_key",
+                             FLAGS_rocksdb_cloud_bloom_filter_bits_per_key);
 
     sst_file_cache_size_ =
         parse_size(rocksdb_cloud_sst_file_cache_size.c_str());
@@ -599,6 +618,8 @@ RocksDBCloudConfig::RocksDBCloudConfig(const INIReader &config)
     db_file_deletion_delay_ = rocksdb_cloud_db_file_deletion_delay_sec;
     run_purger_ = rocksdb_cloud_run_purger;
     purger_periodicity_millis_ = rocksdb_cloud_purger_periodicity_secs * 1000;
+    enable_bloom_filter_ = rocksdb_cloud_enable_bloom_filter;
+    bloom_filter_bits_per_key_ = rocksdb_cloud_bloom_filter_bits_per_key;
 
     s3_endpoint_url_ =
         !CheckCommandLineFlagIsDefault("rocksdb_cloud_s3_endpoint_url")
