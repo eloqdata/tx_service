@@ -213,6 +213,8 @@ RocksDBHandler::RocksDBHandler(const EloqShare::RocksDBConfig &config,
       write_rate_limit_(config.write_rate_limit_bytes_),
       batch_write_size_(config.batch_write_size_),
       periodic_compaction_seconds_(config.periodic_compaction_seconds_),
+      delete_obsolete_files_period_micros_(
+          config.delete_obsolete_files_period_micros_),
       dialy_offpeak_time_utc_(config.dialy_offpeak_time_utc_),
       db_path_(storage_path_ + "/db/"),
       ckpt_path_(storage_path_ + "/rocksdb_snapshot/"),
@@ -2939,6 +2941,8 @@ bool RocksDBCloudHandlerImpl::OpenCloudDB(
     // through the TTLCompactionFilter which is configurated for column family
     options.periodic_compaction_seconds = periodic_compaction_seconds_;
     options.daily_offpeak_time_utc = dialy_offpeak_time_utc_;
+    options.delete_obsolete_files_period_micros =
+        delete_obsolete_files_period_micros_;
 
     // The max_open_files default value is -1, it cause DB open all files on
     // DB::Open() This behavior causes 2 effects,
@@ -3453,6 +3457,8 @@ bool RocksDBHandlerImpl::StartDB(bool is_ng_leader, uint32_t *next_leader_node)
     // through the TTLCompactionFilter which is configurated for column family
     options.periodic_compaction_seconds = periodic_compaction_seconds_;
     options.daily_offpeak_time_utc = dialy_offpeak_time_utc_;
+    options.delete_obsolete_files_period_micros =
+        delete_obsolete_files_period_micros_;
 
     std::vector<rocksdb::ColumnFamilyDescriptor> cfds;
 

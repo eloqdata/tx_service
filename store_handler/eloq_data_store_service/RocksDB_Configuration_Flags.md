@@ -53,6 +53,7 @@ rocksdb_storage_path = /path/to/storage
 | `rocksdb_compaction_style` | No | `"level"` | String (options: "level", "universal", "fifo", "none") | Compaction style |
 | `rocksdb_max_subcompactions` | No | `1` | Integer | Maximum number of subcompactions |
 | `rocksdb_periodic_compaction_seconds` | No | `86400` (24 hours) | Integer | SST files older than this value will be picked up for compaction |
+| `rocksdb_delete_obsolete_files_period_micros` | No | `21600000000` (6 hours) | Integer | Period between full scans for obsolete files, in microseconds |
 
 ### Level-Based Compaction Configuration
 
@@ -166,4 +167,3 @@ Different flags have different format requirements:
 4. Size values must include units (`MB`, `GB`, or `TB`).
 5. A write rate limit of "0MB" means no limit is applied.
 6. The off-peak time is converted from local time to UTC by default.
-

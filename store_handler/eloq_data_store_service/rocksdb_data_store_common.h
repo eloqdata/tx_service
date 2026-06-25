@@ -146,6 +146,8 @@ public:
           write_rate_limit_(config.write_rate_limit_bytes_),
           batch_write_size_(config.batch_write_size_),
           periodic_compaction_seconds_(config.periodic_compaction_seconds_),
+          delete_obsolete_files_period_micros_(
+              config.delete_obsolete_files_period_micros_),
           dialy_offpeak_time_utc_(config.dialy_offpeak_time_utc_),
           db_path_(storage_path_ + "/db/"),
           ckpt_path_(storage_path_ + "/rocksdb_snapshot/"),
@@ -326,6 +328,7 @@ protected:
     const size_t write_rate_limit_;
     const size_t batch_write_size_;
     const size_t periodic_compaction_seconds_;
+    const uint64_t delete_obsolete_files_period_micros_;
     const std::string dialy_offpeak_time_utc_;
     const std::string db_path_;
     const std::string ckpt_path_;
