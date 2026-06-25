@@ -115,6 +115,9 @@ DEFINE_uint32(
     rocksdb_periodic_compaction_seconds,
     24 * 60 * 60, /*sst files older than 1 day will be pick up for compaction*/
     "RocksDB periodic compaction seconds");
+DEFINE_uint64(rocksdb_delete_obsolete_files_period_micros,
+              6ULL * 60 * 60 * 1000000,
+              "RocksDB obsolete file full scan period in microseconds");
 
 static std::tm parseTime(const std::string &timeStr)
 {
@@ -487,6 +490,14 @@ RocksDBConfig::RocksDBConfig(const INIReader &config,
             : config.GetInteger("store",
                                 "rocksdb_periodic_compaction_seconds",
                                 FLAGS_rocksdb_periodic_compaction_seconds);
+    delete_obsolete_files_period_micros_ =
+        !CheckCommandLineFlagIsDefault(
+            "rocksdb_delete_obsolete_files_period_micros")
+            ? FLAGS_rocksdb_delete_obsolete_files_period_micros
+            : config.GetInteger(
+                  "store",
+                  "rocksdb_delete_obsolete_files_period_micros",
+                  FLAGS_rocksdb_delete_obsolete_files_period_micros);
     dialy_offpeak_time_utc_ =
         !CheckCommandLineFlagIsDefault("rocksdb_dialy_offpeak_time_utc")
             ? FLAGS_rocksdb_dialy_offpeak_time_utc

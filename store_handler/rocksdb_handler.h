@@ -614,6 +614,7 @@ protected:
     const size_t write_rate_limit_;
     const size_t batch_write_size_;
     size_t periodic_compaction_seconds_;
+    uint64_t delete_obsolete_files_period_micros_;
     std::string dialy_offpeak_time_utc_;
     const std::string db_path_;
     const std::string ckpt_path_;

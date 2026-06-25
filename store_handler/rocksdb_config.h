@@ -21,6 +21,7 @@
  */
 #pragma once
 
+#include <cstdint>
 #include <string>
 
 #include "INIReader.h"
@@ -69,6 +70,7 @@ struct RocksDBConfig
     size_t query_worker_num_;
     size_t batch_write_size_;
     size_t periodic_compaction_seconds_;
+    uint64_t delete_obsolete_files_period_micros_;
     std::string dialy_offpeak_time_utc_;
     size_t snapshot_sync_worker_num_;
 };

@@ -577,6 +577,8 @@ bool RocksDBCloudDataStore::OpenCloudDB(
     // through the TTLCompactionFilter which is configurated for column family
     options.periodic_compaction_seconds = periodic_compaction_seconds_;
     options.daily_offpeak_time_utc = dialy_offpeak_time_utc_;
+    options.delete_obsolete_files_period_micros =
+        delete_obsolete_files_period_micros_;
 
     if (target_file_size_base_ > 0)
     {
