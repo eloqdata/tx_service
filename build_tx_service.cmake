@@ -26,6 +26,11 @@ message(NOTICE "STATISTICS : ${STATISTICS}")
 find_package(Protobuf REQUIRED)
 find_package(GFLAGS REQUIRED)
 find_package(MIMALLOC REQUIRED)
+find_package(absl CONFIG REQUIRED)
+eloq_assert_under_prefix(MIMALLOC_INCLUDE_DIR "mimalloc include directory")
+eloq_assert_target_under_prefix(absl::btree "Abseil btree")
+eloq_assert_target_under_prefix(absl::flat_hash_map "Abseil flat_hash_map")
+eloq_assert_target_under_prefix(absl::span "Abseil span")
 
 # boost_context for FlushDataWorker coroutine refactor (Phase 1)
 if(CMAKE_BUILD_TYPE STREQUAL "Debug" AND CMAKE_CXX_FLAGS MATCHES "fsanitize=address")
@@ -74,6 +79,7 @@ if(CMAKE_COMPILER_IS_GNUCC)
     if((NOT BRPC_INCLUDE_PATH) OR(NOT BRPC_LIB))
         message(FATAL_ERROR "Fail to find brpc")
     endif()
+    eloq_assert_under_prefix(BRPC_LIB "brpc library")
 
     if(BRPC_WITH_GLOG)
         message(NOTICE "TX BRPC WITH GLOG")
@@ -83,6 +89,7 @@ if(CMAKE_COMPILER_IS_GNUCC)
         if((NOT GLOG_INCLUDE_PATH) OR(NOT GLOG_LIB))
             message(FATAL_ERROR "Fail to find glog")
         endif()
+        eloq_assert_under_prefix(GLOG_LIB "glog library")
 
         include_directories(${GLOG_INCLUDE_PATH})
         set(LINK_LIB ${LINK_LIB} ${GLOG_LIB})
@@ -118,16 +125,8 @@ execute_process(
     WORKING_DIRECTORY ${LOG_PROTO_SRC}
 )
 
-if(BUILD_SHARED_LIBS)
-    set(ABSL_ENABLE_INSTALL ON CACHE INTERNAL "Install Abseil libs" FORCE)
-else()
-    set(ABSL_ENABLE_INSTALL OFF CACHE INTERNAL "Install Abseil libs" FORCE)
-endif()
-add_subdirectory(tx_service/abseil-cpp)
-
 message(${TX_SERVICE_SOURCE_DIR})
 set(INCLUDE_DIR
-    ${TX_SERVICE_SOURCE_DIR}/abseil-cpp
     ${TX_SERVICE_SOURCE_DIR}/include
     ${TX_SERVICE_SOURCE_DIR}/include/cc
     ${TX_SERVICE_SOURCE_DIR}/include/remote

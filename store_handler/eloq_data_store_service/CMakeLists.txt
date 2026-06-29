@@ -15,6 +15,13 @@
 cmake_minimum_required(VERSION 3.8)
 project(eloqkv C CXX)
 
+include(${CMAKE_CURRENT_SOURCE_DIR}/../../cmake/EloqThirdParty.cmake OPTIONAL)
+
+if(NOT COMMAND eloq_assert_under_prefix)
+    function(eloq_assert_under_prefix path_var description)
+    endfunction()
+endif()
+
 # Install dependencies to compile redis_cli:
 # With apt:
 # sudo apt-get install libreadline-dev
@@ -117,6 +124,7 @@ endif ()
 if ((NOT BRPC_INCLUDE_PATH) OR (NOT BRPC_LIB))
     message(FATAL_ERROR "Fail to find brpc")
 endif ()
+eloq_assert_under_prefix(BRPC_LIB "brpc library")
 
 include_directories(${BRPC_INCLUDE_PATH})
 
@@ -182,6 +190,7 @@ if (WITH_DATA_STORE STREQUAL "ELOQDSS_ROCKSDB")
   if (NOT ROCKSDB_LIB)
     message(FATAL_ERROR "Fail to find RocksDB lib path")
   endif()
+  eloq_assert_under_prefix(ROCKSDB_LIB "RocksDB library")
   message(STATUS "ROCKSDB_LIB: ${ROCKSDB_LIB}")
   set(ROCKSDB_LIBRARIES ${ROCKSDB_LIBRARIES} ${ROCKSDB_LIB})
 endif()
@@ -198,6 +207,7 @@ if ((WITH_DATA_STORE STREQUAL "ELOQDSS_ROCKSDB_CLOUD_S3") OR (WITH_DATA_STORE ST
         if((NOT AWS_CORE_LIB ))
           message(FATAL_ERROR "Fail to find aws-cpp-sdk-core lib")
         endif()
+        eloq_assert_under_prefix(AWS_CORE_LIB "AWS SDK core library")
         message(STATUS "aws-cpp-sdk-core library: ${AWS_CORE_LIB}")
 
         find_path(AWS_KINESIS_INCLUDE_PATH aws/kinesis/KinesisClient.h)
@@ -210,6 +220,7 @@ if ((WITH_DATA_STORE STREQUAL "ELOQDSS_ROCKSDB_CLOUD_S3") OR (WITH_DATA_STORE ST
         if((NOT AWS_KINESIS_LIB))
           message(FATAL_ERROR "Fail to find aws-cpp-sdk-kinesis lib")
         endif()
+        eloq_assert_under_prefix(AWS_KINESIS_LIB "AWS SDK Kinesis library")
         message(STATUS "aws-cpp-sdk-kinesis library: ${AWS_KINESIS_LIB}")
 
         find_path(AWS_KINESIS_INCLUDE_PATH aws/kinesis/KinesisClient.h)
@@ -222,6 +233,7 @@ if ((WITH_DATA_STORE STREQUAL "ELOQDSS_ROCKSDB_CLOUD_S3") OR (WITH_DATA_STORE ST
         if((NOT AWS_KINESIS_LIB))
           message(FATAL_ERROR "Fail to find aws-cpp-sdk-kinesis lib")
         endif()
+        eloq_assert_under_prefix(AWS_KINESIS_LIB "AWS SDK Kinesis library")
         message(STATUS "aws-cpp-sdk-kinesis library: ${AWS_KINESIS_LIB}")
 
         find_path(AWS_S3_INCLUDE_PATH aws/s3/S3Client.h)
@@ -234,6 +246,7 @@ if ((WITH_DATA_STORE STREQUAL "ELOQDSS_ROCKSDB_CLOUD_S3") OR (WITH_DATA_STORE ST
         if((NOT AWS_S3_LIB ))
           message(FATAL_ERROR "Fail to find aws-cpp-sdk-s3 lib")
         endif()
+        eloq_assert_under_prefix(AWS_S3_LIB "AWS SDK S3 library")
         message(STATUS "aws-cpp-sdk-s3 library: ${AWS_S3_LIB}")
 
         set(ROCKSDB_INCLUDE_PATH ${ROCKSDB_INCLUDE_PATH} ${AWS_CORE_INCLUDE_PATH})
@@ -257,12 +270,14 @@ if ((WITH_DATA_STORE STREQUAL "ELOQDSS_ROCKSDB_CLOUD_S3") OR (WITH_DATA_STORE ST
         if((NOT GCP_COMMON_LIB))
           message(FATAL_ERROR "Fail to find google_cloud_cpp_common lib")
         endif()
+        eloq_assert_under_prefix(GCP_COMMON_LIB "google-cloud-cpp common library")
         message(STATUS "google_cloud_cpp_common library: ${GCP_COMMON_LIB}")
 
         find_library(GCP_CS_LIB google_cloud_cpp_storage)
         if((NOT GCP_CS_LIB))
           message(FATAL_ERROR "Fail to find google_cloud_cpp_storage lib")
         endif()
+        eloq_assert_under_prefix(GCP_CS_LIB "google-cloud-cpp storage library")
         message(STATUS "google_cloud_cpp_storage library: ${GCP_CS_LIB}")
 
         set(ROCKSDB_LIBRARIES ${ROCKSDB_LIBRARIES} ${GCP_COMMON_LIB})
@@ -283,6 +298,7 @@ if ((WITH_DATA_STORE STREQUAL "ELOQDSS_ROCKSDB_CLOUD_S3") OR (WITH_DATA_STORE ST
     if (NOT ROCKSDB_CLOUD_LIB)
       message(FATAL_ERROR "Fail to find RocksDB Cloud lib path")
     endif ()
+    eloq_assert_under_prefix(ROCKSDB_CLOUD_LIB "RocksDB Cloud library")
     message(STATUS "ROCKSDB_CLOUD_LIB: ${ROCKSDB_CLOUD_LIB}")
     set(ROCKSDB_LIBRARIES ${ROCKSDB_LIBRARIES} ${ROCKSDB_CLOUD_LIB})
 elseif (WITH_DATA_STORE STREQUAL "ELOQDSS_ELOQSTORE")
@@ -329,6 +345,7 @@ if (BRPC_WITH_GLOG)
     if ((NOT GLOG_INCLUDE_PATH) OR(NOT GLOG_LIB))
         message(FATAL_ERROR "Fail to find glog")
     endif ()
+    eloq_assert_under_prefix(GLOG_LIB "glog library")
 
     include_directories(${GLOG_INCLUDE_PATH})
     set(DYNAMIC_LIB ${DYNAMIC_LIB} ${GLOG_LIB})

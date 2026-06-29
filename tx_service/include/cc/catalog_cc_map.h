@@ -31,6 +31,7 @@
 #include <vector>
 
 #include "absl/container/flat_hash_map.h"
+#include "absl/strings/string_view.h"
 #include "catalog_factory.h"
 #include "catalog_key_record.h"
 #include "cc_protocol.h"
@@ -2448,11 +2449,14 @@ public:
         uint64_t schema_version = 0;
         NonBlockingLock *lock_ptr = nullptr;
 
-        auto lock_it = table_locks_.find(table_name.StringView());
+        std::string_view table_name_sv = table_name.StringView();
+        absl::string_view absl_table_name_sv(table_name_sv.data(),
+                                             table_name_sv.size());
+        auto lock_it = table_locks_.find(absl_table_name_sv);
         if (lock_it == table_locks_.end())
         {
             CatalogKey table_key{
-                txservice::TableName{table_name.StringView(),
+                txservice::TableName{table_name_sv,
                                      txservice::TableType::Primary,
                                      table_name.Engine()}};
             TxKey catalog_tx_key(&table_key);
@@ -2484,7 +2488,7 @@ public:
             lock_ptr =
                 &catalog_cce->GetOrCreateKeyLock(shard_, this, catalog_ccp);
             auto [new_lock_it, _] = table_locks_.try_emplace(
-                table_name.StringView(), lock_ptr, schema_version);
+                std::string(table_name_sv), lock_ptr, schema_version);
             read_success =
                 new_lock_it->second.first->AcquireReadLockFast(tx_number);
 
@@ -2536,14 +2540,17 @@ private:
                           uint64_t schema_version,
                           NonBlockingLock *lock_ptr)
     {
-        auto table_locks_iter = table_locks_.find(table_name_sv);
+        absl::string_view absl_table_name_sv(table_name_sv.data(),
+                                             table_name_sv.size());
+        auto table_locks_iter = table_locks_.find(absl_table_name_sv);
         if (table_locks_iter != table_locks_.end())
         {
             table_locks_iter->second.second = schema_version;
         }
         else
         {
-            table_locks_.try_emplace(table_name_sv, lock_ptr, schema_version);
+            table_locks_.try_emplace(
+                std::string(table_name_sv), lock_ptr, schema_version);
         }
     }
 

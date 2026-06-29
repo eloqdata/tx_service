@@ -1,0 +1,152 @@
+From cdd947371c29d44a0c9e25970acb48b27f80777f Mon Sep 17 00:00:00 2001
+From: liunyl <lukeliu970702@gmail.com>
+Date: Fri, 31 May 2024 07:52:00 +0000
+Subject: [PATCH] Use release build by default and rename macro to avoid naming
+ conflict
+
+---
+ Makefile           |  4 ++--
+ src/debug.h        | 14 +++++++-------
+ src/packedtable.h  | 14 +++++++-------
+ src/permencoding.h |  4 ++--
+ 4 files changed, 18 insertions(+), 18 deletions(-)
+
+diff --git a/Makefile b/Makefile
+index 28ecf7f..f552bc1 100644
+--- a/Makefile
++++ b/Makefile
+@@ -3,8 +3,8 @@ AR = ar
+ PREFIX=/usr/local
+
+ # Uncomment one of the following to switch between debug and opt mode
+-#OPT = -O3 -DNDEBUG
+-OPT = -g -ggdb
++OPT = -O3 -DNDEBUG
++#OPT = -g -ggdb
+
+ CFLAGS += --std=c++11 -fno-strict-aliasing -Wall -c -I. -I./include -I./src/ $(OPT)
+
+diff --git a/src/debug.h b/src/debug.h
+index 519554b..ec12ade 100644
+--- a/src/debug.h
++++ b/src/debug.h
+@@ -9,7 +9,7 @@ namespace cuckoofilter {
+ //#define DEBUG
+ #endif
+
+-#define debug_level (DEBUG_ERRS | DEBUG_CUCKOO)
++#define cuckoofilter_debug_level (DEBUG_ERRS | DEBUG_CUCKOO)
+
+ #ifdef DEBUG
+ // extern unsigned int debug;
+@@ -18,13 +18,13 @@ namespace cuckoofilter {
+  * a combination of DEBUG_ERRS, DEBUG_CUCKOO, DEBUG_TABLE, DEBUG_ENCODE
+  */
+
+-#define DPRINTF(level, ...)                                    \
+-  do {                                                         \
+-    if (debug_level & (level)) fprintf(stdout, ##__VA_ARGS__); \
++#define DPRINTF(level, ...)                                                 \
++  do {                                                                      \
++    if (cuckoofilter_debug_level & (level)) fprintf(stdout, ##__VA_ARGS__); \
+   } while (0)
+-#define DEBUG_PERROR(errmsg)                      \
+-  do {                                            \
+-    if (debug_level & DEBUG_ERRS) perror(errmsg); \
++#define DEBUG_PERROR(errmsg)                                   \
++  do {                                                         \
++    if (cuckoofilter_debug_level & DEBUG_ERRS) perror(errmsg); \
+   } while (0)
+
+ #else
+diff --git a/src/packedtable.h b/src/packedtable.h
+index 5b84473..5a01c1f 100644
+--- a/src/packedtable.h
++++ b/src/packedtable.h
+@@ -200,7 +200,7 @@ class PackedTable {
+     tags[2] |= lowbits[2];
+     tags[3] |= lowbits[3];
+
+-    if (debug_level & DEBUG_TABLE) {
++    if (cuckoofilter_debug_level & DEBUG_TABLE) {
+       PrintTags(tags);
+     }
+     DPRINTF(DEBUG_TABLE, "PackedTable::ReadBucket done \n");
+@@ -216,7 +216,7 @@ class PackedTable {
+       DPRINTF(DEBUG_TABLE, "Sort tags\n");
+       SortTags(tags);
+     }
+-    if (debug_level & DEBUG_TABLE) {
++    if (cuckoofilter_debug_level & DEBUG_TABLE) {
+       PrintTags(tags);
+     }
+
+@@ -354,7 +354,7 @@ class PackedTable {
+     DPRINTF(DEBUG_TABLE, "PackedTable::FindTagInBucket %zu\n", i);
+     uint32_t tags[4];
+     ReadBucket(i, tags);
+-    if (debug_level & DEBUG_TABLE) {
++    if (cuckoofilter_debug_level & DEBUG_TABLE) {
+       PrintTags(tags);
+     }
+
+@@ -367,7 +367,7 @@ class PackedTable {
+   bool DeleteTagFromBucket(const size_t i, const uint32_t tag) {
+     uint32_t tags[4];
+     ReadBucket(i, tags);
+-    if (debug_level & DEBUG_TABLE) {
++    if (cuckoofilter_debug_level & DEBUG_TABLE) {
+       PrintTags(tags);
+     }
+     for (size_t j = 0; j < 4; j++) {
+@@ -388,7 +388,7 @@ class PackedTable {
+     DPRINTF(DEBUG_TABLE,
+             "PackedTable::InsertTagToBucket read bucket to tags\n");
+     ReadBucket(i, tags);
+-    if (debug_level & DEBUG_TABLE) {
++    if (cuckoofilter_debug_level & DEBUG_TABLE) {
+       PrintTags(tags);
+       PrintBucket(i);
+     }
+@@ -399,7 +399,7 @@ class PackedTable {
+
+         tags[j] = tag;
+         WriteBucket(i, tags);
+-        if (debug_level & DEBUG_TABLE) {
++        if (cuckoofilter_debug_level & DEBUG_TABLE) {
+           PrintBucket(i);
+           ReadBucket(i, tags);
+         }
+@@ -418,7 +418,7 @@ class PackedTable {
+       oldtag = tags[r];
+       tags[r] = tag;
+       WriteBucket(i, tags);
+-      if (debug_level & DEBUG_TABLE) {
++      if (cuckoofilter_debug_level & DEBUG_TABLE) {
+         PrintTags(tags);
+       }
+     }
+diff --git a/src/permencoding.h b/src/permencoding.h
+index 493e2ef..be88be4 100644
+--- a/src/permencoding.h
++++ b/src/permencoding.h
+@@ -54,7 +54,7 @@ class PermEncoding {
+   }
+
+   inline uint16_t encode(const uint8_t lowbits[4]) const {
+-    if (DEBUG_ENCODE & debug_level) {
++    if (DEBUG_ENCODE & cuckoofilter_debug_level) {
+       printf("Perm.encode\n");
+       for (int i = 0; i < 4; i++) {
+         printf("encode lowbits[%d]=%x\n", i, lowbits[i]);
+@@ -75,7 +75,7 @@ class PermEncoding {
+       } else {
+         dec_table[idx] = pack(dst);
+         enc_table[pack(dst)] = idx;
+-        if (DEBUG_ENCODE & debug_level) {
++        if (DEBUG_ENCODE & cuckoofilter_debug_level) {
+           printf("enc_table[%04x]=%04x\t%x %x %x %x\n", pack(dst), idx, dst[0],
+                  dst[1], dst[2], dst[3]);
+         }
+--
+2.43.0
