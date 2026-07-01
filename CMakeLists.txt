@@ -1,6 +1,8 @@
 cmake_minimum_required(VERSION 3.8)
 project(data_substrate)
 
+include(${CMAKE_CURRENT_SOURCE_DIR}/cmake/EloqThirdParty.cmake)
+
 # Set library name
 set(DATA_SUBSTRATE_LIB "data_substrate" CACHE STRING "Data substrate library name")
 set(METRICS_LIB "eloq-metrics" CACHE STRING "Metrics library name")
@@ -146,6 +148,7 @@ if(WITH_DATA_STORE STREQUAL "ELOQDSS_ROCKSDB" OR WITH_DATA_STORE STREQUAL "ROCKS
     if(NOT ROCKSDB_LIB)
         message(FATAL_ERROR "Fail to find RocksDB lib path")
     endif()
+    eloq_assert_under_prefix(ROCKSDB_LIB "RocksDB library")
     message(STATUS "ROCKSDB_LIB: ${ROCKSDB_LIB}")
     set(ROCKSDB_LIBRARIES ${ROCKSDB_LIBRARIES} ${ROCKSDB_LIB})
 endif()
@@ -164,6 +167,7 @@ if((WITH_DATA_STORE STREQUAL "ROCKSDB_CLOUD_S3") OR (WITH_DATA_STORE STREQUAL "R
         if((NOT AWS_CORE_LIB ))
             message(FATAL_ERROR "Fail to find aws-cpp-sdk-core lib")
         endif()
+        eloq_assert_under_prefix(AWS_CORE_LIB "AWS SDK core library")
         message(STATUS "aws-cpp-sdk-core library: ${AWS_CORE_LIB}")
 
         find_path(AWS_S3_INCLUDE_PATH aws/s3/S3Client.h)
@@ -176,6 +180,7 @@ if((WITH_DATA_STORE STREQUAL "ROCKSDB_CLOUD_S3") OR (WITH_DATA_STORE STREQUAL "R
         if((NOT AWS_S3_LIB ))
             message(FATAL_ERROR "Fail to find aws-cpp-sdk-s3 lib")
         endif()
+        eloq_assert_under_prefix(AWS_S3_LIB "AWS SDK S3 library")
         message(STATUS "aws-cpp-sdk-s3 library: ${AWS_S3_LIB}")
 
         set(ROCKSDB_INCLUDE_PATH ${ROCKSDB_INCLUDE_PATH} ${AWS_CORE_INCLUDE_PATH})
@@ -188,6 +193,7 @@ if((WITH_DATA_STORE STREQUAL "ROCKSDB_CLOUD_S3") OR (WITH_DATA_STORE STREQUAL "R
         if(NOT ROCKSDB_CLOUD_LIB)
             message(FATAL_ERROR "Fail to find RocksDB Cloud lib path")
         endif()
+        eloq_assert_under_prefix(ROCKSDB_CLOUD_LIB "RocksDB Cloud AWS library")
         message(STATUS "ROCKSDB_CLOUD_LIB: ${ROCKSDB_CLOUD_LIB}")
         set(ROCKSDB_LIBRARIES ${ROCKSDB_LIBRARIES} ${ROCKSDB_CLOUD_LIB})
     endif()
@@ -247,6 +253,7 @@ endif()
 
 # Find mimalloc
 find_package(MIMALLOC REQUIRED)
+eloq_assert_under_prefix(MIMALLOC_INCLUDE_DIR "mimalloc include directory")
 include_directories(${MIMALLOC_INCLUDE_DIR})
 
 # Include directories

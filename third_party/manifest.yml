@@ -1,0 +1,181 @@
+schema: 1
+owner: data_substrate
+source_root: third_party/src
+install_prefix: third_party/install
+policy:
+  source_management: hybrid
+  upstream_source_management: archive_or_pinned_git
+  retained_submodules: [brpc, braft, mimalloc, rocksdb-cloud]
+  cleanup_source_after_build: true
+  install_scope: repository_local
+  ci_install_prefix: /opt/eloq/third_party
+  system_install_allowed: false
+  generated_on: 2026-06-08
+dependencies:
+  - name: lua
+    repo: https://github.com/lua/lua.git
+    ref: v5.4.6
+    commit: 6443185167c77adcc8552a3fee7edab7895db1a9
+    kind: upstream
+    source: archive
+    consumers: [eloqkv-install-script]
+  - name: protobuf
+    repo: https://github.com/protocolbuffers/protobuf.git
+    ref: v21.12
+    commit: f0dc78d7e6e331b8c6bb2d5283e06aa26883ca7
+    kind: upstream
+    source: archive
+    consumers: [grpc, data_substrate, eloqkv]
+  - name: glog
+    repo: https://github.com/google/glog.git
+    ref: upstream-base-3a0d4d2
+    commit: 3a0d4d22c5ae0b9a2216988411cfa6bf860cc372
+    kind: upstream
+    source: archive
+    build_options: [-DWITH_GTEST=OFF]
+    consumers: [brpc, braft, data_substrate, eloqkv, eloqstore]
+  - name: liburing
+    repo: https://github.com/axboe/liburing.git
+    ref: liburing-2.6
+    commit: f7dcc1ea60819475dffd3a45059e16f04381bee7
+    kind: upstream
+    source: archive
+    consumers: [brpc, eloqstore]
+  - name: brpc
+    repo: https://github.com/eloqdata/brpc.git
+    ref: pinned-head-2026-06-04
+    commit: 3f74e38192da5ff3059ce060cb9966491da8df8d
+    kind: eloq-fork
+    source: git_submodule
+    consumers: [data_substrate, eloqkv, log_service]
+  - name: braft
+    repo: https://github.com/eloqdata/braft.git
+    ref: pinned-head-2026-06-04
+    commit: b24534029f23bcffc256914fe0638615652cc183
+    kind: eloq-fork
+    source: git_submodule
+    consumers: [log_service, host_manager]
+  - name: mimalloc
+    repo: https://github.com/eloqdata/mimalloc.git
+    ref: eloq-v2.1.2
+    commit: f58bb7633640b30d02078d05fd35cb6566275bd5
+    kind: eloq-fork
+    source: git_submodule
+    consumers: [data_substrate, tx_service]
+  - name: cuckoofilter
+    repo: https://github.com/efficient/cuckoofilter.git
+    ref: upstream-base-917583d
+    commit: 917583d6abef692dfa8e14453bd77d6e0b61eef3
+    kind: upstream-with-local-build-patch
+    source: archive
+    patches: [third_party/patches/cuckoofilter/0001-eloq-build-fixes.patch]
+    consumers: [data_substrate]
+  - name: aws-sdk-cpp
+    repo: https://github.com/aws/aws-sdk-cpp.git
+    ref: 1.11.446
+    commit: b5153b8309526738d498ee86a73ccc386fee0979
+    kind: upstream
+    source: pinned_git_with_submodules
+    consumers: [dynamodb, rocksdb-cloud-s3, eloqstore]
+  - name: rocksdb
+    repo: https://github.com/facebook/rocksdb.git
+    ref: v9.1.0
+    commit: bcf88d48ce8aa8b536aee4dd305533b3b83cf435
+    kind: upstream
+    source: archive
+    consumers: [data_substrate, log_service]
+  - name: prometheus-cpp
+    repo: https://github.com/jupp0r/prometheus-cpp.git
+    ref: v1.1.0
+    commit: c9ffcdda9086ffd9e1283ea7a0276d831f3c8a8d
+    kind: upstream
+    source: archive
+    build_options: [-DENABLE_PUSH=OFF, -DENABLE_TESTING=OFF]
+    extra_archives:
+      - name: civetweb
+        repo: https://github.com/civetweb/civetweb.git
+        commit: eefb26f82b233268fc98577d265352720d477ba4
+        path: third_party/src/prometheus-cpp/3rdparty/civetweb
+    consumers: [eloq_metrics]
+  - name: Catch2
+    repo: https://github.com/catchorg/Catch2.git
+    ref: v3.3.2
+    commit: 3f0283de7a9c43200033da996ff9093be3ac84dc
+    kind: upstream
+    source: archive
+    consumers: [unit-tests]
+  - name: abseil-cpp
+    repo: https://github.com/abseil/abseil-cpp.git
+    ref: 20230802.0
+    commit: 29bf8085f3bf17b84d30e34b3d7ff8248fda404e
+    kind: upstream-with-local-build-patch
+    source: archive
+    consumers: [grpc, protobuf, tx_service]
+  - name: re2
+    repo: https://github.com/google/re2.git
+    ref: 2023-08-01
+    commit: 960c861764ff54c9a12ff683ba55ccaad1a8f73b
+    kind: upstream
+    source: archive
+    consumers: [grpc]
+  - name: grpc
+    repo: https://github.com/grpc/grpc.git
+    ref: v1.51.1
+    commit: 0a82c02a9b817a53574994374dcff53f2e961df2
+    kind: upstream
+    source: archive
+    consumers: [tx_service-proto-tools]
+  - name: crc32c
+    repo: https://github.com/google/crc32c.git
+    ref: 1.1.2
+    commit: 02e65f4fd3065d27b2e29324800ca6d04df16126
+    kind: upstream
+    source: archive
+    consumers: [rocksdb, rocksdb-cloud]
+  - name: nlohmann-json
+    repo: https://github.com/nlohmann/json.git
+    ref: v3.11.2
+    commit: bc889afb4c5bf1c0d8ee29ef35eaaf4c8bef8a5d
+    kind: upstream
+    source: archive
+    consumers: [data_substrate, vector-index]
+  - name: google-cloud-cpp
+    repo: https://github.com/googleapis/google-cloud-cpp.git
+    ref: v2.24.0
+    commit: f55d86a04fc378fff7eebb29fcd44aac7dbcc32f
+    kind: upstream
+    source: archive
+    consumers: [bigtable, rocksdb-cloud-gcs]
+  - name: FakeIt
+    repo: https://github.com/eranpeer/FakeIt.git
+    ref: pinned-head-2026-06-04
+    commit: 70180b9870d4f2487fcf8feeaba14ffbb69a14f7
+    kind: upstream
+    source: archive
+    consumers: [unit-tests]
+  - name: rocksdb-cloud
+    repo: https://github.com/eloqdata/rocksdb-cloud.git
+    ref: main-pinned-2026-06-04
+    commit: b815dc3ebac93f4b3ccb6f1ed8189fe49a132810
+    kind: eloq-fork
+    source: git_submodule
+    consumers: [rocksdb-cloud-s3, rocksdb-cloud-gcs]
+  - name: usearch
+    repo: https://github.com/unum-cloud/usearch.git
+    ref: v2.21.0
+    commit: fd6279af6bc205baab1e0ad48651cc0f875cdb7d
+    kind: upstream
+    source: archive
+    extra_archives:
+      - name: fp16
+        repo: https://github.com/maratyszcza/fp16.git
+        commit: 0a92994d729ff76a58f692d3028ca1b64b145d91
+        path: third_party/src/usearch/fp16
+    consumers: [vector-index]
+  - name: yaml-cpp
+    repo: https://github.com/jbeder/yaml-cpp.git
+    ref: yaml-cpp-0.7.0
+    commit: 0579ae3d976091d7d664aa9d2527e0d0cff25763
+    kind: upstream
+    source: archive
+    consumers: [host_manager]

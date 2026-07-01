@@ -1,6 +1,15 @@
-[submodule "abseil-cpp"]
-	path = tx_service/abseil-cpp
-	url = https://github.com/abseil/abseil-cpp.git
 [submodule "store_handler/eloq_data_store_service/eloqstore"]
 	path = store_handler/eloq_data_store_service/eloqstore
 	url = https://github.com/eloqdata/eloqstore.git
+[submodule "third_party/src/brpc"]
+	path = third_party/src/brpc
+	url = https://github.com/eloqdata/brpc.git
+[submodule "third_party/src/braft"]
+	path = third_party/src/braft
+	url = https://github.com/eloqdata/braft.git
+[submodule "third_party/src/mimalloc"]
+	path = third_party/src/mimalloc
+	url = https://github.com/eloqdata/mimalloc.git
+[submodule "third_party/src/rocksdb-cloud"]
+	path = third_party/src/rocksdb-cloud
+	url = https://github.com/eloqdata/rocksdb-cloud.git
