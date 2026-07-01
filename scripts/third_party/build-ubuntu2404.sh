@@ -185,13 +185,20 @@ cmake_build_install yaml-cpp "${THIRD_PARTY_SRC}/yaml-cpp" \
 cleanup_source_after_build yaml-cpp
 
 cd "${THIRD_PARTY_SRC}/rocksdb-cloud"
-run make shared_lib -j"${JOBS}" LIBNAME=librocksdb-cloud-aws USE_RTTI=1 USE_AWS=1 ROCKSDB_DISABLE_TCMALLOC=1 ROCKSDB_DISABLE_JEMALLOC=1
+# USE_AWS and ROCKSDB_DISABLE_* are read by build_detect_platform from the
+# environment (they are not in the Makefile's make-var export whitelist), so
+# pass every build var before make as env vars, matching eloqkv's
+# scripts/install_dependency_ubuntu2404.sh. Drop the cached make_config.mk first
+# so platform detection re-runs.
+rm -f make_config.mk
+run env LIBNAME=librocksdb-cloud-aws USE_RTTI=1 USE_AWS=1 ROCKSDB_DISABLE_TCMALLOC=1 ROCKSDB_DISABLE_JEMALLOC=1 make shared_lib -j"${JOBS}"
 run make install-shared LIBNAME=librocksdb-cloud-aws PREFIX="${THIRD_PARTY_BUILD}/rocksdb-cloud-aws-output"
 mkdir -p "${THIRD_PARTY_PREFIX}/include/rocksdb_cloud_header" "${THIRD_PARTY_PREFIX}/lib"
 run rsync -a "${THIRD_PARTY_BUILD}/rocksdb-cloud-aws-output/include/" "${THIRD_PARTY_PREFIX}/include/rocksdb_cloud_header/"
 run rsync -a "${THIRD_PARTY_BUILD}/rocksdb-cloud-aws-output/lib/" "${THIRD_PARTY_PREFIX}/lib/"
 run make clean
-run make shared_lib -j"${JOBS}" LIBNAME=librocksdb-cloud-gcp USE_RTTI=1 USE_GCP=1 ROCKSDB_DISABLE_TCMALLOC=1 ROCKSDB_DISABLE_JEMALLOC=1
+rm -f make_config.mk
+run env LIBNAME=librocksdb-cloud-gcp USE_RTTI=1 USE_GCP=1 ROCKSDB_DISABLE_TCMALLOC=1 ROCKSDB_DISABLE_JEMALLOC=1 make shared_lib -j"${JOBS}"
 run make install-shared LIBNAME=librocksdb-cloud-gcp PREFIX="${THIRD_PARTY_BUILD}/rocksdb-cloud-gcp-output"
 run rsync -a "${THIRD_PARTY_BUILD}/rocksdb-cloud-gcp-output/lib/" "${THIRD_PARTY_PREFIX}/lib/"
 
