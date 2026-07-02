@@ -231,6 +231,7 @@ public:
      * @param partition_id Partition id
      * @param shard_id Shard id
      * @param key Key
+     * @param reopen Reopen before read
      * @param record Record (output)
      * @param ts Timestamp (output)
      * @param result Result (output)
@@ -240,6 +241,7 @@ public:
               int32_t partition_id,
               uint32_t shard_id,
               const std::string_view key,
+              bool reopen,
               std::string *record,
               uint64_t *ts,
               uint64_t *ttl,

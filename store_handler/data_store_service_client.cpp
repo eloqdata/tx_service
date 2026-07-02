@@ -4558,7 +4558,8 @@ DataStoreServiceClient::FetchRecord(
          shard_id,
          std::string_view(fetch_cc->tx_key_.Data(), fetch_cc->tx_key_.Size()),
          fetch_cc,
-         &FetchRecordCallback);
+         &FetchRecordCallback,
+         fetch_cc->reopen_);
 
     return txservice::store::DataStoreHandler::DataStoreOpStatus::Success;
 }
@@ -4681,7 +4682,8 @@ void DataStoreServiceClient::Read(const std::string_view kv_table_name,
                                   const uint32_t shard_id,
                                   const std::string_view key,
                                   void *callback_data,
-                                  DataStoreCallback callback)
+                                  DataStoreCallback callback,
+                                  bool reopen)
 {
     ReadClosure *read_clouse = read_closure_pool_.NextObject();
     read_clouse->Reset(this,
@@ -4689,6 +4691,7 @@ void DataStoreServiceClient::Read(const std::string_view kv_table_name,
                        partition_id,
                        shard_id,
                        key,
+                       reopen,
                        callback_data,
                        callback);
     ReadInternal(read_clouse);
@@ -4703,6 +4706,7 @@ void DataStoreServiceClient::ReadInternal(ReadClosure *read_closure)
                                   read_closure->PartitionId(),
                                   read_closure->ShardId(),
                                   read_closure->Key(),
+                                  read_closure->Reopen(),
                                   &read_closure->LocalValueRef(),
                                   &read_closure->LocalTsRef(),
                                   &read_closure->LocalTtlRef(),

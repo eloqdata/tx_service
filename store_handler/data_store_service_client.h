@@ -656,7 +656,8 @@ private:
               const uint32_t shard_id,
               const std::string_view key,
               void *callback_data,
-              DataStoreCallback callback);
+              DataStoreCallback callback,
+              bool reopen = false);
 
     void ReadInternal(ReadClosure *read_clouse);
 
