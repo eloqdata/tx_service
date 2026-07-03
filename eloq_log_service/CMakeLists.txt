@@ -244,6 +244,11 @@ if (WITH_LOG_STATE MATCHES "ROCKSDB|ROCKSDB_CLOUD_S3|ROCKSDB_CLOUD_GCS")
     	  message(FATAL_ERROR "Fail to find RocksDB Cloud include path")
       endif ()
       message(STATUS "ROCKSDB_CLOUD_INCLUDE_PATH: ${ROCKSDB_CLOUD_INCLUDE_PATH}")
+      # rocksdb-cloud and vanilla rocksdb both ship rocksdb/db.h under different
+      # prefixes, and the shared prefix (brpc/... headers) is on -I ahead of the
+      # cloud one. Force the cloud dir to the front so rocksdb/db.h resolves to
+      # it (has DBCloud::GetNextFileNumber), not the vanilla copy.
+      include_directories(BEFORE ${ROCKSDB_CLOUD_INCLUDE_PATH})
       set(ROCKSDB_INCLUDE_PATH ${ROCKSDB_INCLUDE_PATH} ${ROCKSDB_CLOUD_INCLUDE_PATH})
 
       if (NOT ROCKSDB_CLOUD_LIB)
