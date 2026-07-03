@@ -164,16 +164,8 @@ void EloqStoreDataStore::Read(ReadRequest *read_req)
     PoolableGuard op_guard(read_op);
 
     ::eloqstore::ReadRequest &kv_read_req = read_op->EloqStoreRequest();
-    bool should_reopen = read_req->GetReopen();
-    if (should_reopen)
-    {
-        kv_read_req.SetArgs(eloq_store_table_id, std::string(key));
-    }
-    else
-    {
-        kv_read_req.SetArgs(eloq_store_table_id, key);
-    }
-    kv_read_req.SetReopen(should_reopen);
+    kv_read_req.SetArgs(eloq_store_table_id, key);
+    kv_read_req.SetReopen(read_req->GetReopen());
 
     uint64_t user_data = reinterpret_cast<uint64_t>(read_op);
     if (!eloq_store_service_->ExecAsyn(&kv_read_req, user_data, OnRead))

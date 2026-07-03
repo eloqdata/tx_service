@@ -2092,13 +2092,12 @@ public:
                 else
                 {
 #ifdef DATA_STORE_TYPE_ELOQDSS_ELOQSTORE
-                    const KeyT *key_ptr = ccp->KeyOfEntry(cce);
                     int32_t part_id =
-                        Sharder::MapKeyHashToHashPartitionId(key_ptr->Hash());
+                        Sharder::MapKeyHashToHashPartitionId(look_key->Hash());
                     int64_t ng_term = Sharder::Instance().StandbyNodeTerm();
                     shard_->FetchRecord(this->table_name_,
                                         this->GetTableSchema(),
-                                        TxKey(key_ptr).Clone(),
+                                        TxKey(look_key),
                                         cce,
                                         this->cc_ng_id_,
                                         ng_term,

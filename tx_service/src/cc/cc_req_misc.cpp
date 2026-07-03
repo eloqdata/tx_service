@@ -862,6 +862,11 @@ bool FetchRecordCc::Execute(CcShard &ccs)
         return false;
     }
 
+#ifdef DATA_STORE_TYPE_ELOQDSS_ELOQSTORE
+    bool should_reopen = false;
+    TxKey reopen_key;
+#endif
+
     if (lock_->GetCcEntry() != nullptr)
     {
         assert(lock_->GetCcMap() != nullptr);
@@ -919,21 +924,23 @@ bool FetchRecordCc::Execute(CcShard &ccs)
                 }
             }
         }
+
+#ifdef DATA_STORE_TYPE_ELOQDSS_ELOQSTORE
+        should_reopen = error_code_ == 0 && cce_->HasBufferedCommandList();
+        if (should_reopen)
+        {
+            reopen_key = tx_key_.Clone();
+        }
+#endif
     }
 
 #ifdef DATA_STORE_TYPE_ELOQDSS_ELOQSTORE
-    bool should_reopen = error_code_ == 0 && cce_->HasBufferedCommandList();
     TableName reopen_table_name = table_name_;
     const TableSchema *reopen_table_schema = table_schema_;
-    TxKey reopen_key;
     LruEntry *reopen_cce = cce_;
     NodeGroupId reopen_cc_ng_id = cc_ng_id_;
     int64_t reopen_cc_ng_term = cc_ng_term_;
     int32_t reopen_partition_id = partition_id_;
-    if (should_reopen)
-    {
-        reopen_key = tx_key_.Clone();
-    }
 #endif
 
     ccs.RemoveFetchRecordRequest(cce_);
