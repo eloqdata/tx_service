@@ -128,6 +128,9 @@ DEFINE_bool(eloq_store_prewarm_cloud_cache,
 DEFINE_uint32(eloq_store_prewarm_task_count,
               3,
               "EloqStore prewarm task count per shard.");
+DEFINE_uint32(eloq_store_auto_reopen_pending_time_sec,
+              10,
+              "EloqStore auto-reopen pending time in seconds.");
 DEFINE_bool(eloq_store_reuse_local_files,
             true,
             "EloqStore reuse local files in cloud mode");
@@ -743,6 +746,16 @@ EloqStoreConfig::EloqStoreConfig(const INIReader &config_reader,
             : config_reader.GetInteger("store",
                                        "eloq_store_prewarm_task_count",
                                        FLAGS_eloq_store_prewarm_task_count);
+    eloqstore_configs_.auto_reopen_pending_time_us =
+        static_cast<uint64_t>(
+            !CheckCommandLineFlagIsDefault(
+                "eloq_store_auto_reopen_pending_time_sec")
+                ? FLAGS_eloq_store_auto_reopen_pending_time_sec
+                : config_reader.GetInteger(
+                      "store",
+                      "auto_reopen_pending_time_sec",
+                      FLAGS_eloq_store_auto_reopen_pending_time_sec)) *
+        1'000'000;
     eloqstore_configs_.allow_reuse_local_caches =
         !CheckCommandLineFlagIsDefault("eloq_store_reuse_local_files")
             ? FLAGS_eloq_store_reuse_local_files
