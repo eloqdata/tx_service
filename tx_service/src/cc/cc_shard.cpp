@@ -3171,6 +3171,22 @@ void CcShard::ForwardStandbyMessage(StandbyForwardEntry *entry)
             continue;
         });
 
+        // Drops exactly one forward message and advances the sequence id as
+        // if it were sent, so later messages still flow and the standby sees
+        // a permanent gap on this key. Self-disarms after the first hit.
+        CODE_FAULT_INJECTOR("skip_one_forward_standby_message", {
+            LOG(INFO) << "FaultInject skip_one_forward_standby_message, "
+                         "seq_id:"
+                      << seq_id;
+            FaultInject::Instance().InjectFault(
+                "skip_one_forward_standby_message", "remove");
+            if (last_sent_seq_id == seq_id - 1)
+            {
+                ++last_sent_seq_id;
+            }
+            continue;
+        });
+
         if (last_sent_seq_id == seq_id - 1)
         {
             CODE_FAULT_INJECTOR("forward_standby_message_eagain", {
