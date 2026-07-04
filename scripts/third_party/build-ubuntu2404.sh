@@ -190,15 +190,18 @@ cd "${THIRD_PARTY_SRC}/rocksdb-cloud"
 # pass every build var before make as env vars, matching eloqkv's
 # scripts/install_dependency_ubuntu2404.sh. Drop the cached make_config.mk first
 # so platform detection re-runs.
+# PORTABLE=1 matches vanilla rocksdb above: without it rocksdb defaults to
+# -march=native, baking the build host's ISA into the .so. Since this prefix is
+# cached/shipped and run on other (older) CPUs, native builds SIGILL at load.
 rm -f make_config.mk
-run env LIBNAME=librocksdb-cloud-aws USE_RTTI=1 USE_AWS=1 ROCKSDB_DISABLE_TCMALLOC=1 ROCKSDB_DISABLE_JEMALLOC=1 make shared_lib -j"${JOBS}"
+run env LIBNAME=librocksdb-cloud-aws USE_RTTI=1 USE_AWS=1 PORTABLE=1 ROCKSDB_DISABLE_TCMALLOC=1 ROCKSDB_DISABLE_JEMALLOC=1 make shared_lib -j"${JOBS}"
 run make install-shared LIBNAME=librocksdb-cloud-aws PREFIX="${THIRD_PARTY_BUILD}/rocksdb-cloud-aws-output"
 mkdir -p "${THIRD_PARTY_PREFIX}/include/rocksdb_cloud_header" "${THIRD_PARTY_PREFIX}/lib"
 run rsync -a "${THIRD_PARTY_BUILD}/rocksdb-cloud-aws-output/include/" "${THIRD_PARTY_PREFIX}/include/rocksdb_cloud_header/"
 run rsync -a "${THIRD_PARTY_BUILD}/rocksdb-cloud-aws-output/lib/" "${THIRD_PARTY_PREFIX}/lib/"
 run make clean
 rm -f make_config.mk
-run env LIBNAME=librocksdb-cloud-gcp USE_RTTI=1 USE_GCP=1 ROCKSDB_DISABLE_TCMALLOC=1 ROCKSDB_DISABLE_JEMALLOC=1 make shared_lib -j"${JOBS}"
+run env LIBNAME=librocksdb-cloud-gcp USE_RTTI=1 USE_GCP=1 PORTABLE=1 ROCKSDB_DISABLE_TCMALLOC=1 ROCKSDB_DISABLE_JEMALLOC=1 make shared_lib -j"${JOBS}"
 run make install-shared LIBNAME=librocksdb-cloud-gcp PREFIX="${THIRD_PARTY_BUILD}/rocksdb-cloud-gcp-output"
 run rsync -a "${THIRD_PARTY_BUILD}/rocksdb-cloud-gcp-output/lib/" "${THIRD_PARTY_PREFIX}/lib/"
 
