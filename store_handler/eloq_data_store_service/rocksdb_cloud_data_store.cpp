@@ -25,9 +25,11 @@
 #include <aws/s3/S3Client.h>
 #include <bthread/condition_variable.h>
 #include <rocksdb/db.h>
+#include <rocksdb/filter_policy.h>
 #include <rocksdb/listener.h>
 #include <rocksdb/rate_limiter.h>
 #include <rocksdb/statistics.h>
+#include <rocksdb/table.h>
 
 #include <algorithm>
 #include <boost/lexical_cast.hpp>
@@ -569,6 +571,16 @@ bool RocksDBCloudDataStore::OpenCloudDB(
     options.skip_stats_update_on_db_open = true;
     // Important! keep atomic_flush true, since we disabled WAL
     options.atomic_flush = true;
+
+    if (cloud_config_.enable_bloom_filter_)
+    {
+        rocksdb::BlockBasedTableOptions table_options;
+        table_options.filter_policy.reset(rocksdb::NewBloomFilterPolicy(
+            cloud_config_.bloom_filter_bits_per_key_, false));
+        table_options.whole_key_filtering = true;
+        options.table_factory.reset(
+            rocksdb::NewBlockBasedTableFactory(table_options));
+    }
 
     // The following two configuration items are setup for purpose of removing
     // expired kv data items according to their ttl Rocksdb will compact all sst
