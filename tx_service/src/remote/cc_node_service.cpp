@@ -1914,7 +1914,8 @@ void CcNodeService::UpdateStandbyCkptTs(
                << request->primary_succ_ckpt_ts()
                << ", has_data_store_write: " << (int) has_data_store_write;
 #else
-    if (Sharder::Instance().GetDataStoreHandler()->IsSharedStorage())
+    if (!txservice::txservice_skip_kv &&
+        Sharder::Instance().GetDataStoreHandler()->IsSharedStorage())
     {
         auto store_hd = Sharder::Instance().GetLocalCcShards()->store_hd_;
         const bool has_data_store_write = request->has_data_store_write();
