@@ -1909,7 +1909,10 @@ public:
         decoded_key.Deserialize(key_str->data(), offset, KeySchema());
         const KeyT *look_key = &decoded_key;
 
-        if (Sharder::Instance().StandbyNodeTerm() >= 0 &&
+        // In skip_kv mode there is no data store handler and nothing is
+        // checkpointed to shared storage, so the forward message must be
+        // applied.
+        if (!txservice_skip_kv && Sharder::Instance().StandbyNodeTerm() >= 0 &&
             Sharder::Instance().GetDataStoreHandler()->IsSharedStorage() &&
             commit_ts < Sharder::Instance().NativeNodeGroupCkptTs())
         {

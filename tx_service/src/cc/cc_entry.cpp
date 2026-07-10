@@ -60,7 +60,7 @@ void VersionedLruEntry<Versioned, RangePartitioned>::SetCommitTsPayloadStatus(
 template <bool Versioned, bool RangePartitioned>
 bool VersionedLruEntry<Versioned, RangePartitioned>::IsPersistent() const
 {
-    if (Sharder::Instance().StandbyNodeTerm() >= 0 &&
+    if (!txservice_skip_kv && Sharder::Instance().StandbyNodeTerm() >= 0 &&
         Sharder::Instance().GetDataStoreHandler()->IsSharedStorage())
     {
         // If this is a follower with shared kv, check the ng leader's ckpt_ts.

@@ -3524,6 +3524,12 @@ FlushUpdateTableOp::FlushUpdateTableOp(TransactionExecution *txm)
     update_kv_table_op_.op_func_ = [txm](AsyncOp<Void> &async_op)
     {
         CcHandlerResult<Void> &hd_res = async_op.hd_result_;
+        if (txservice_skip_kv)
+        {
+            // No kv store is attached. Skip updating the kv table.
+            hd_res.SetFinished();
+            return;
+        }
         hd_res.SetRefCnt(txm->rw_set_.CatalogWriteSetSize());
         for (const auto &[write_key, write_entry] :
              txm->rw_set_.CatalogWriteSet())
