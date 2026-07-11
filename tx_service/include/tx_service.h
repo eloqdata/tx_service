@@ -861,6 +861,21 @@ public:
 #endif
     }
 
+    /**
+     * @brief Number of live external transactions on this processor —
+     * transactions handed out to API layers (e.g. via TxService::NewTx) that
+     * have not yet finished. A relaxed read: momentarily approximate under
+     * concurrency, exact when the processor is quiesced.
+     */
+    size_t ExternActiveTxCount() const
+    {
+#ifdef EXT_TX_PROC_ENABLED
+        return ext_active_tx_cnt_.load(std::memory_order_relaxed);
+#else
+        return 0;
+#endif
+    }
+
     std::shared_ptr<TxProcCoordinator> GetTxProcCoordinator() const
     {
         return coordi_;
@@ -1376,6 +1391,22 @@ public:
                            pool_.end(),
                            [](const std::unique_ptr<TxProcessor> &tp)
                            { return tp->AllTxFinished(); });
+    }
+
+    /**
+     * @brief Total live external transactions across all tx processors. Sums
+     * each processor's relaxed counter; exact when the service is quiesced.
+     * Exposed so API layers can surface a leak-detection gauge (e.g. the
+     * EloqKV INFO field active_extern_txms).
+     */
+    size_t ExternActiveTxCount() const
+    {
+        size_t cnt = 0;
+        for (const auto &tp : pool_)
+        {
+            cnt += tp->ExternActiveTxCount();
+        }
+        return cnt;
     }
 
 #ifdef EXT_TX_PROC_ENABLED
