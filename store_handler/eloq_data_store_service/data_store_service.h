@@ -25,6 +25,7 @@
 #include <bthread/condition_variable.h>
 #include <bthread/mutex.h>
 
+#include <array>
 #include <atomic>
 #include <chrono>
 #include <condition_variable>
@@ -194,6 +195,9 @@ private:
 class DataStoreService : EloqDS::remote::DataStoreRpcService
 {
 public:
+    static constexpr uint32_t kMaxShardCount = 1000;
+    static constexpr uint32_t kReadSubmitSlotCount = 1000;
+
     DataStoreService(const DataStoreServiceClusterManager &config,
                      const std::string &config_file_path,
                      const std::string &migration_log_path,
@@ -648,13 +652,13 @@ public:
     void IncreaseWriteReqCount(uint32_t shard_id)
     {
         data_shards_.at(shard_id).ongoing_write_requests_.fetch_add(
-            1, std::memory_order_release);
+            1, std::memory_order_seq_cst);
     }
 
     void DecreaseWriteReqCount(uint32_t shard_id)
     {
         data_shards_.at(shard_id).ongoing_write_requests_.fetch_sub(
-            1, std::memory_order_release);
+            1, std::memory_order_seq_cst);
     }
 
     bool IsOwnerOfShard(uint32_t shard_id) const
@@ -709,6 +713,32 @@ public:
     }
 
 private:
+    struct DataShard;
+
+    struct alignas(64) ReadSubmitSlot
+    {
+        std::atomic<uint32_t> depth{0};
+    };
+
+    class ReadSubmitGuard
+    {
+    public:
+        ReadSubmitGuard() = default;
+        ReadSubmitGuard(DataStoreService *service,
+                        uint32_t shard_id,
+                        uint32_t slot_idx);
+        ReadSubmitGuard(const ReadSubmitGuard &) = delete;
+        ReadSubmitGuard &operator=(const ReadSubmitGuard &) = delete;
+        ReadSubmitGuard(ReadSubmitGuard &&other) noexcept;
+        ReadSubmitGuard &operator=(ReadSubmitGuard &&other) = delete;
+        ~ReadSubmitGuard();
+
+    private:
+        DataStoreService *service_{nullptr};
+        uint32_t shard_id_{UINT32_MAX};
+        uint32_t slot_idx_{UINT32_MAX};
+    };
+
     DataStore *GetDataStore(uint32_t shard_id)
     {
         if (data_shards_.at(shard_id).shard_id_ == shard_id)
@@ -729,6 +759,10 @@ private:
     bool SwitchReadWriteToReadOnly(uint32_t shard_id);
     bool SwitchReadOnlyToClosed(uint32_t shard_id);
     bool SwitchReadOnlyToReadWrite(uint32_t shard_id);
+    uint32_t GetReadSubmitSlotIndex();
+    ReadSubmitGuard EnterReadSubmitWindow(uint32_t shard_id);
+    void LeaveReadSubmitWindow(uint32_t shard_id, uint32_t slot_idx);
+    void WaitReadSubmitWindowsDrained(const DataShard &ds_ref) const;
     bool WriteMigrationLog(uint32_t shard_id,
                            const std::string &event_id,
                            const std::string &target_node_ip,
@@ -785,13 +819,15 @@ private:
         std::atomic<uint64_t> latest_snapshot_ts_{0};
         std::atomic<uint64_t> latest_delete_archive_ts_{0};
         std::unique_ptr<TTLWrapperCache> scan_iter_cache_{nullptr};
+        std::array<ReadSubmitSlot, kReadSubmitSlotCount> read_submit_slots_;
 
         // Whether the file cache sync is running. Used to avoid concurrent
         // local ssd file operations between db and file sync worker.
         std::atomic<bool> is_file_sync_running_{false};
     };
 
-    std::array<DataShard, 1000> data_shards_;
+    std::array<DataShard, kMaxShardCount> data_shards_;
+    std::atomic<uint32_t> next_read_submit_slot_idx_{0};
 
     std::unique_ptr<DataStoreFactory> data_store_factory_;
 
