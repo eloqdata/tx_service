@@ -83,9 +83,14 @@ command applies to an object and the shard has subscribers
 the cc entry's `StandbyForwardEntry`:
 
 - Regular commands: `StandbyForwardEntry::AddTxCommand`
-  (`tx_service/src/standby.cpp:72`). Local commands are serialized via
-  `cmd->Serialize()`; remote commands reuse the already-serialized
-  `CommandImage()`.
+  (`tx_service/src/standby.cpp:72`) serializes the **owner-side executed**
+  command (`cc_req.GetCommand()->Serialize()`) for both local and remote
+  `ApplyCc`. Previously the remote path forwarded the coordinator's
+  pre-`ExecuteOn` `CommandImage()`; because the standby applies commands
+  commit-only and never re-runs `ExecuteOn`, a command whose `ExecuteOn`
+  mutates itself — e.g. eloqkv ZADD NX/XX/GT/LT filtering, LTRIM index
+  normalization, SPOP member selection — then diverged on the standby
+  (eloqdata/eloqkv#509).
 - Internally generated full-object changes (TTL retirement, recovery):
   `AddOverWriteCommand`, which sets `has_overwrite`.
 - Once the commit timestamp is known, the entry is finalized and handed to
