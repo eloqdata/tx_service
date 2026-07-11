@@ -43,7 +43,7 @@ void txservice::remote::RemoteCcHandler::AcquireWrite(
     uint32_t key_shard_code,
     TxNumber txn,
     int64_t tx_term,
-    uint16_t command_id,
+    uint32_t command_id,
     uint64_t ts,
     bool is_insert,
     CcHandlerResult<std::vector<AcquireKeyResult>> &hres,
@@ -101,7 +101,7 @@ void txservice::remote::RemoteCcHandler::AcquireWriteAll(
     uint32_t node_group_id,
     TxNumber tx_number,
     int64_t tx_term,
-    uint16_t command_id,
+    uint32_t command_id,
     bool is_insert,
     CcHandlerResult<AcquireAllResult> &hres,
     CcProtocol proto,
@@ -153,7 +153,7 @@ void txservice::remote::RemoteCcHandler::PostWrite(
     uint32_t src_node_id,
     uint64_t tx_number,
     int64_t tx_term,
-    uint16_t command_id,
+    uint32_t command_id,
     uint64_t commit_ts,
     const CcEntryAddr &cce_addr,
     const TxRecord *record,
@@ -210,7 +210,7 @@ void txservice::remote::RemoteCcHandler::PostWriteAll(
     NodeGroupId ng_id,
     uint64_t tx_number,
     int64_t tx_term,
-    uint16_t command_id,
+    uint32_t command_id,
     uint64_t commit_ts,
     CcHandlerResult<PostProcessResult> &hres,
     OperationType op_type,
@@ -277,7 +277,7 @@ void txservice::remote::RemoteCcHandler::PostRead(
     uint32_t src_node_id,
     uint64_t tx_number,
     int64_t tx_term,
-    uint16_t command_id,
+    uint32_t command_id,
     uint64_t key_ts,
     uint64_t gap_ts,
     uint64_t commit_ts,
@@ -323,7 +323,7 @@ void txservice::remote::RemoteCcHandler::Read(
     ReadType read_type,
     uint64_t tx_number,
     int64_t tx_term,
-    uint16_t command_id,
+    uint32_t command_id,
     const uint64_t ts,
     CcHandlerResult<ReadKeyResult> &hres,
     IsolationLevel iso_level,
@@ -394,7 +394,7 @@ void txservice::remote::RemoteCcHandler::Read(
  */
 void txservice::remote::RemoteCcHandler::ReadOutside(
     int64_t tx_term,
-    uint16_t command_id,
+    uint32_t command_id,
     const TxRecord &record,
     bool is_deleted,
     uint64_t commit_ts,
@@ -455,7 +455,7 @@ void txservice::remote::RemoteCcHandler::ScanOpen(
     bool inclusive,
     uint64_t tx_number,
     int64_t tx_term,
-    uint16_t command_id,
+    uint32_t command_id,
     uint64_t ts,
     CcHandlerResult<ScanOpenResult> &hd_res,
     ScanDirection direction,
@@ -525,7 +525,7 @@ void txservice::remote::RemoteCcHandler::ScanNext(
     int64_t ng_term,
     uint64_t tx_number,
     int64_t tx_term,
-    uint16_t command_id,
+    uint32_t command_id,
     uint64_t start_ts,
     const TableName &table_name,
     const TxKey &start_key,
@@ -678,7 +678,7 @@ void txservice::remote::RemoteCcHandler::ScanNext(
     uint64_t read_ts,
     uint64_t tx_number,
     int64_t tx_term,
-    uint16_t command_id,
+    uint32_t command_id,
     CcHandlerResult<RangeScanSliceResult> &hd_res,
     IsolationLevel iso_level,
     CcProtocol proto)
@@ -752,7 +752,7 @@ void txservice::remote::RemoteCcHandler::ReloadCache(
     NodeGroupId ng_id,
     TxNumber tx_number,
     int64_t tx_term,
-    uint16_t command_id,
+    uint32_t command_id,
     CcHandlerResult<Void> &hres)
 {
     CcMessage send_msg;
@@ -776,7 +776,7 @@ void txservice::remote::RemoteCcHandler::FaultInject(
     const std::string &fault_name,
     const std::string &fault_paras,
     int64_t tx_term,
-    uint16_t command_id,
+    uint32_t command_id,
     const TxId &txid,
     int node_id,
     CcHandlerResult<bool> &hres)
@@ -805,7 +805,7 @@ void txservice::remote::RemoteCcHandler::AnalyzeTableAll(
     NodeGroupId ng_id,
     TxNumber tx_number,
     int64_t tx_term,
-    uint16_t command_id,
+    uint32_t command_id,
     CcHandlerResult<Void> &hres)
 {
     CcMessage send_msg;
@@ -839,7 +839,7 @@ void txservice::remote::RemoteCcHandler::BroadcastStatistics(
     NodeGroupId ng_id,
     TxNumber tx_number,
     int64_t tx_term,
-    uint16_t command_id,
+    uint32_t command_id,
     CcHandlerResult<Void> &hres)
 {
     CcMessage send_msg;
@@ -880,7 +880,7 @@ void txservice::remote::RemoteCcHandler::CleanCcEntryForTest(
     uint32_t key_shard_code,
     uint64_t tx_number,
     int64_t tx_term,
-    uint16_t command_id,
+    uint32_t command_id,
     CcHandlerResult<bool> &hres)
 {
     CcMessage send_msg;
@@ -915,7 +915,7 @@ void txservice::remote::RemoteCcHandler::BlockCcReqCheck(
     uint32_t src_node_id,
     uint64_t tx_number,
     int64_t tx_term,
-    uint16_t command_id,
+    uint32_t command_id,
     const CcEntryAddr &cce_addr,
     CcHandlerResultBase *hres,
     ResultTemplateType type,
@@ -957,7 +957,7 @@ void txservice::remote::RemoteCcHandler::BlockAcquireAllCcReqCheck(
     uint32_t node_group_id,
     uint64_t tx_number,
     int64_t tx_term,
-    uint16_t command_id,
+    uint32_t command_id,
     std::vector<CcEntryAddr> &cce_addrs,
     CcHandlerResultBase *hres)
 {
@@ -1051,7 +1051,7 @@ void txservice::remote::RemoteCcHandler::ObjectCommand(
     TxCommand &obj_cmd,
     TxNumber tx_number,
     int64_t tx_term,
-    uint16_t command_id,
+    uint32_t command_id,
     uint64_t tx_ts,
     CcHandlerResult<ObjectCommandResult> &hres,
     IsolationLevel iso_level,
@@ -1115,7 +1115,7 @@ void txservice::remote::RemoteCcHandler::UploadTxCommands(
     uint32_t src_node_id,
     uint64_t tx_number,
     int64_t tx_term,
-    uint16_t command_id,
+    uint32_t command_id,
     const CcEntryAddr &cce_addr,
     uint64_t obj_version,
     uint64_t commit_ts,
@@ -1163,7 +1163,7 @@ void txservice::remote::RemoteCcHandler::InvalidateTableCache(
     NodeGroupId ng_id,
     TxNumber tx_number,
     int64_t tx_term,
-    uint16_t command_id,
+    uint32_t command_id,
     CcHandlerResult<Void> &hres)
 {
     CcMessage send_msg;

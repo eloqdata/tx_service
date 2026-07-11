@@ -92,7 +92,7 @@ public:
         uint32_t key_shard_code,
         TxNumber tx_number,
         int64_t tx_term,
-        uint16_t command_id,
+        uint32_t command_id,
         uint64_t ts,
         bool is_insert,
         CcHandlerResult<std::vector<AcquireKeyResult>> &hres,
@@ -123,7 +123,7 @@ public:
                                  NodeGroupId ng_id,
                                  TxNumber txn,
                                  int64_t tx_term,
-                                 uint16_t command_id,
+                                 uint32_t command_id,
                                  bool is_insert,
                                  CcHandlerResult<AcquireAllResult> &hres,
                                  CcProtocol proto,
@@ -136,7 +136,7 @@ public:
                               NodeGroupId ng_id,
                               uint64_t tx_number,
                               int64_t tx_term,
-                              uint16_t command_id,
+                              uint32_t command_id,
                               uint64_t ts,
                               CcHandlerResult<PostProcessResult> &hres,
                               OperationType op_type,
@@ -160,7 +160,7 @@ public:
      */
     virtual CcReqStatus PostWrite(TxNumber tx_number,
                                   int64_t tx_term,
-                                  uint16_t command_id,
+                                  uint32_t command_id,
                                   uint64_t commit_ts,
                                   const CcEntryAddr &ccentry_addr,
                                   const TxRecord *record,
@@ -196,7 +196,7 @@ public:
     virtual CcReqStatus PostRead(
         uint64_t tx_number,
         int64_t tx_term,
-        uint16_t command_id,
+        uint32_t command_id,
         uint64_t key_ts,
         uint64_t gap_ts,
         uint64_t commit_ts,
@@ -234,7 +234,7 @@ public:
                       ReadType read_type,
                       uint64_t tx_number,
                       int64_t tx_term,
-                      uint16_t command_id,
+                      uint32_t command_id,
                       const uint64_t ts,
                       CcHandlerResult<ReadKeyResult> &hres,
                       IsolationLevel iso_level = IsolationLevel::ReadCommitted,
@@ -261,7 +261,7 @@ public:
      */
     virtual void ReadOutside(
         int64_t tx_term,
-        uint16_t command_id,
+        uint32_t command_id,
         TxRecord &rec,
         bool is_deleted,
         uint64_t commit_ts,
@@ -293,7 +293,7 @@ public:
         ReadType read_type,
         uint64_t tx_number,
         int64_t tx_term,
-        uint16_t command_id,
+        uint32_t command_id,
         const uint64_t ts,
         CcHandlerResult<ReadKeyResult> &hres,
         IsolationLevel iso_level = IsolationLevel::RepeatableRead,
@@ -309,7 +309,7 @@ public:
         ReadType read_type,
         uint64_t tx_number,
         int64_t tx_term,
-        uint16_t command_id,
+        uint32_t command_id,
         const uint64_t ts,
         CcHandlerResult<ReadKeyResult> &hres,
         IsolationLevel iso_level = IsolationLevel::RepeatableRead,
@@ -325,7 +325,7 @@ public:
         bool inclusive,
         uint64_t tx_number,
         int64_t tx_term,
-        uint16_t command_id,
+        uint32_t command_id,
         uint64_t start_ts,
         CcHandlerResult<ScanOpenResult> &hd_res,
         ScanDirection direction = ScanDirection::Forward,
@@ -347,7 +347,7 @@ public:
         bool inclusive,
         uint64_t tx_number,
         int64_t tx_term,
-        uint16_t command_id,
+        uint32_t command_id,
         uint64_t ts,
         CcHandlerResult<ScanOpenResult> &hd_res,
         ScanDirection direction = ScanDirection::Forward,
@@ -361,7 +361,7 @@ public:
         NodeGroupId node_group_id,
         uint64_t tx_number,
         int64_t tx_term,
-        uint16_t command_id,
+        uint32_t command_id,
         uint64_t start_ts,
         const TxKey &start_key,
         bool start_inclusive,
@@ -387,7 +387,7 @@ public:
         uint64_t read_ts,
         uint64_t tx_number,
         int64_t tx_term,
-        uint16_t command_id,
+        uint32_t command_id,
         CcHandlerResult<RangeScanSliceResult> &hd_res,
         IsolationLevel iso_level = IsolationLevel::ReadCommitted,
         CcProtocol proto = CcProtocol::OCC) = 0;
@@ -446,13 +446,13 @@ public:
     virtual void ReloadCache(NodeGroupId ng_id,
                              TxNumber tx_number,
                              int64_t tx_term,
-                             uint16_t command_id,
+                             uint32_t command_id,
                              CcHandlerResult<Void> &hres) = 0;
 
     virtual void FaultInject(const std::string &fault_name,
                              const std::string &fault_paras,
                              int64_t tx_term,
-                             uint16_t command_id,
+                             uint32_t command_id,
                              const TxId &txid,
                              std::vector<int> &vct_node_id,
                              CcHandlerResult<bool> &hres) = 0;
@@ -471,7 +471,7 @@ public:
                                  NodeGroupId ng_id,
                                  TxNumber tx_number,
                                  int64_t tx_term,
-                                 uint16_t command_id,
+                                 uint32_t command_id,
                                  CcHandlerResult<Void> &hres) = 0;
 
     virtual void BroadcastStatistics(
@@ -481,7 +481,7 @@ public:
         NodeGroupId ng_id,
         TxNumber tx_number,
         int64_t tx_term,
-        uint16_t command_id,
+        uint32_t command_id,
         CcHandlerResult<Void> &hres) = 0;
 
     virtual uint32_t GetNodeId() const = 0;
@@ -511,7 +511,7 @@ public:
                                TxCommand &obj_cmd,
                                TxNumber txn,
                                int64_t tx_term,
-                               uint16_t command_id,
+                               uint32_t command_id,
                                uint64_t tx_ts,
                                CcHandlerResult<ObjectCommandResult> &hres,
                                IsolationLevel iso_level,
@@ -533,7 +533,7 @@ public:
     virtual CcReqStatus UploadTxCommands(
         uint64_t tx_number,
         int64_t tx_term,
-        uint16_t command_id,
+        uint32_t command_id,
         const CcEntryAddr &cce_addr,
         uint64_t obj_version,
         uint64_t commit_ts,
@@ -547,12 +547,12 @@ public:
                                      bool flush,
                                      uint64_t tx_number,
                                      int64_t tx_term,
-                                     uint16_t command_id,
+                                     uint32_t command_id,
                                      CcHandlerResult<bool> &hres) = 0;
 
     virtual void BlockCcReqCheck(uint64_t tx_number,
                                  int64_t tx_term,
-                                 uint16_t command_id,
+                                 uint32_t command_id,
                                  const CcEntryAddr &cce_addr,
                                  CcHandlerResultBase *hres,
                                  ResultTemplateType type,
@@ -561,7 +561,7 @@ public:
     virtual void BlockAcquireAllCcReqCheck(uint32_t ng_id,
                                            uint64_t tx_number,
                                            int64_t tx_term,
-                                           uint16_t command_id,
+                                           uint32_t command_id,
                                            std::vector<CcEntryAddr> &cce_addr,
                                            CcHandlerResultBase *hres) = 0;
 

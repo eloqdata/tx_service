@@ -212,7 +212,7 @@ public:
 
     int64_t TxTerm() const;
 
-    uint16_t CommandId() const;
+    uint32_t CommandId() const;
 
     uint64_t CommitTs() const;
 
@@ -592,7 +592,7 @@ private:
     // the expired cc request's responses reaches before transaction finishing.
     // The {command_id_} increases when TxExectuion handle a new TxRequest or
     // send remote cc requests.
-    std::atomic<uint16_t> command_id_;
+    std::atomic<uint32_t> command_id_;
 
     // This latch is used to avoid concurrent update of txm status between
     // txm.Forward() and CcStreamReceiver. CcStreamReceiver will update hd_res

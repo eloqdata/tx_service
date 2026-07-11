@@ -21,6 +21,8 @@
  */
 #include <catch2/catch_all.hpp>
 #include <iostream>
+#include <type_traits>
+#include <utility>
 
 #include "harness/test_node.h"
 #include "tx_execution.h"
@@ -30,6 +32,10 @@
 
 using namespace txservice;
 using namespace txservice::test;
+
+static_assert(
+    std::is_same_v<decltype(std::declval<TransactionExecution>().CommandId()),
+                   uint32_t>);
 
 TEST_CASE("TxStartTsCollector GlobalMinSiTxStartTs unit test",
           "[start-ts-collector]")

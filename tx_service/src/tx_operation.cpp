@@ -2741,6 +2741,7 @@ void UpsertTableOp::Forward(TransactionExecution *txm)
             else
             {
                 ForceToFinish(txm);
+                return;
             }
         }
         op_ = &upsert_kv_table_op_;

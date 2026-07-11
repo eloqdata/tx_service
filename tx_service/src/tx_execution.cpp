@@ -217,7 +217,7 @@ int64_t TransactionExecution::TxTerm() const
     return tx_term_;
 }
 
-uint16_t TransactionExecution::CommandId() const
+uint32_t TransactionExecution::CommandId() const
 {
     return command_id_.load(std::memory_order_relaxed);
 }
@@ -5268,7 +5268,7 @@ void TransactionExecution::Process(PostProcessOp &post_process)
     post_process.is_running_ = true;
 
     uint64_t tx_number = TxNumber();
-    uint16_t command_id = command_id_.load(std::memory_order_relaxed);
+    uint32_t command_id = command_id_.load(std::memory_order_relaxed);
     size_t post_local_cnt = 0, post_remote_cnt = 0;
     auto update_post_cnt = [&](CcReqStatus status)
     {
