@@ -19,12 +19,13 @@
  *    <http://www.gnu.org/licenses/>.
  *
  */
-// Let Catch provide main():
-#include <catch2/catch_all.hpp>
 #include <memory>
 #include <string>
 #include <string_view>
 #include <utility>
+
+// Let Catch provide main():
+#include <catch2/catch_all.hpp>
 
 #include "cc/cc_request.h"  // ApplyCc
 #include "standby.h"        // StandbyForwardEntry
