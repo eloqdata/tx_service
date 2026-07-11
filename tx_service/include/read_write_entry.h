@@ -183,6 +183,18 @@ struct CmdSetEntry
         cmd_str_list_.emplace_back(std::move(cmd_str));
     }
 
+    // Adds a pre-serialized command image as an overwrite record, mirroring the
+    // IsOverwrite branch of AddCommand. Used when the owner (remote node group)
+    // already serialized a full-object snapshot the coordinator cannot rebuild
+    // from its own never-executed command (eloqdata/eloqkv#509 follow-up).
+    void AddOverwriteCommandImage(std::string cmd_image, uint64_t ttl)
+    {
+        cmd_str_list_.clear();
+        ignore_previous_version_ = true;
+        ttl_ = ttl;
+        cmd_str_list_.emplace_back(std::move(cmd_image));
+    }
+
     // No need to write to the log if there is no successful command.
     bool HasSuccessfulCommand() const
     {

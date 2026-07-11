@@ -123,6 +123,72 @@ public:
         }
     }
 
+    // Sibling of AddObjectCommand that logs a pre-serialized full-object
+    // snapshot image (from a remote owner) as an overwrite record instead of
+    // serializing a coordinator-held command. Entry lookup and bookkeeping are
+    // identical; only the command payload differs.
+    void AddObjectCommandImage(const TableName &table_name,
+                               const CcEntryAddr &cce_addr,
+                               RecordStatus payload_status,
+                               uint64_t cce_version,
+                               uint64_t lock_ts,
+                               uint64_t last_vali_ts,
+                               const TxKey *key,
+                               std::string cmd_image,
+                               uint64_t ttl,
+                               uint32_t forward_key_shard = UINT32_MAX)
+    {
+        auto [table_it, success] = cmd_set_internal_.try_emplace(table_name);
+        std::unordered_map<CcEntryAddr, CmdSetEntry> &table_cmd_set =
+            table_it->second;
+
+        auto cce_it = table_cmd_set.find(cce_addr);
+        if (cce_it == table_cmd_set.end())
+        {
+            std::string key_str;
+            key->Serialize(key_str);
+            bool inserted = false;
+            bool cmd_apply_on_deleted =
+                (payload_status == RecordStatus::Deleted);
+
+            std::tie(cce_it, inserted) =
+                table_cmd_set.try_emplace(cce_addr,
+                                          cce_version,
+                                          lock_ts,
+                                          last_vali_ts,
+                                          std::move(key_str),
+                                          cmd_apply_on_deleted);
+            assert(inserted);
+            cce_with_writelock_size_++;
+        }
+
+        CmdSetEntry &entry = cce_it->second;
+        // Update the entry fields since a txn might have many commands that
+        // operate on the same cce.
+        assert(entry.object_version_ == 0 ||
+               entry.object_version_ == cce_version);
+        entry.object_version_ = cce_version;
+        assert(lock_ts >= entry.lock_ts_);
+        entry.lock_ts_ = lock_ts;
+        assert(last_vali_ts >= entry.last_vali_ts_);
+        entry.last_vali_ts_ = last_vali_ts;
+
+        entry.object_modified_ = true;
+        // The image is a modifying command; put it into the command set for
+        // writing log and post-processing.
+        if (!txservice_skip_wal)
+        {
+            entry.AddOverwriteCommandImage(std::move(cmd_image), ttl);
+        }
+
+        if (forward_key_shard != UINT32_MAX && entry.forward_entry_ == nullptr)
+        {
+            entry.forward_entry_ = std::make_unique<CmdForwardEntry>(
+                key->Clone(), forward_key_shard);
+            need_forward_cmd_cnt_++;
+        }
+    }
+
     const CmdSetEntry *FindObjectCommand(const TableName &table_name,
                                          const CcEntryAddr &cce_addr) const
     {

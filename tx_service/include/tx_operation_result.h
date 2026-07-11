@@ -25,6 +25,7 @@
 #include <cstdint>
 #include <memory>  //unique_ptr
 #include <shared_mutex>
+#include <string>
 #include <utility>
 #include <vector>
 
@@ -924,6 +925,27 @@ struct PostProcessResult
     bool is_local_{true};
 };
 
+// Computes the ttl a coordinator reports to the WAL for a write command. The
+// ttl is the object's validity horizon; recovery discards any log record whose
+// ttl is already in the past. When replay is self-contained the horizon must
+// not gate it: ttl_reset logs a full-object snapshot, an overwrite ignores the
+// previous version, and ttl_expired means the old object was consumed and a
+// fresh one recreated with no TTL. In all three cases report UINT64_MAX;
+// otherwise report the pre-command ttl unchanged. Reporting the expired
+// pre-command ttl in the ttl_expired case makes recovery discard the
+// acknowledged recreation (eloqdata/eloqkv#509 follow-up, fix #4).
+inline uint64_t ComputeReportedTtl(bool ttl_reset,
+                                   bool ttl_expired,
+                                   bool is_overwrite,
+                                   uint64_t pre_command_ttl)
+{
+    if (ttl_reset || ttl_expired || is_overwrite)
+    {
+        return UINT64_MAX;
+    }
+    return pre_command_ttl;
+}
+
 struct ObjectCommandResult
 {
     void Reset()
@@ -941,6 +963,7 @@ struct ObjectCommandResult
         ttl_expired_ = false;
         ttl_ = UINT64_MAX;
         ttl_reset_ = false;
+        recover_cmd_image_.clear();
     }
 
     // cce commit_ts, used to set transaction's commit_ts.
@@ -976,6 +999,10 @@ struct ObjectCommandResult
     uint64_t ttl_{UINT64_MAX};
     // TTL reset
     bool ttl_reset_{false};
+    // Full-object snapshot image the remote owner serialized when it reset a
+    // live TTL. Empty on the local path (the coordinator's own command still
+    // produces the snapshot). Written to the WAL as an overwrite record.
+    std::string recover_cmd_image_{};
 };
 
 struct UploadBatchResult

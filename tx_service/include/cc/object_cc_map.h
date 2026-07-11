@@ -1330,19 +1330,10 @@ public:
             obj_result.rec_status_ = cce->PayloadStatus();
         }
 
-        if (obj_result.ttl_reset_ || cmd->IsOverwrite())
-        {
-            // If this command reset ttl or overwrite the object, the previous
-            // ttl on key might be changed. Just set ttl to UINT64_MAX since
-            // overwrite command and ttl reset command can always be
-            // successfully replayed.
-            obj_result.ttl_ = UINT64_MAX;
-        }
-        else
-        {
-            // ttl has not been changed, just used the current ttl value.
-            obj_result.ttl_ = ttl;
-        }
+        obj_result.ttl_ = ComputeReportedTtl(obj_result.ttl_reset_,
+                                             obj_result.ttl_expired_,
+                                             cmd->IsOverwrite(),
+                                             ttl);
 
         hd_res->SetFinished();
         return true;

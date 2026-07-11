@@ -34,6 +34,7 @@
 #include "cc_request.h"
 #include "cc_request.pb.h"
 #include "error_messages.h"  //CcErrorCode
+#include "remote/apply_response_util.h"
 #include "remote/remote_type.h"
 #include "sharder.h"
 #include "store/snapshot_manager.h"
@@ -45,6 +46,38 @@ namespace txservice
 {
 namespace remote
 {
+// Coordinator side: consume the owner's ApplyResponse into the local command
+// result the transaction post-processing reads. Mirrors FillApplyResponse.
+void BackfillObjectCommandResult(ObjectCommandResult &obj_cmd_result,
+                                 const ApplyResponse &apply_res)
+{
+    obj_cmd_result.rec_status_ =
+        ToLocalType::ConvertRecordStatusType(apply_res.rec_status());
+
+    if (obj_cmd_result.cmd_result_ != nullptr &&
+        apply_res.cmd_result().size() > 0)
+    {
+        size_t offset = 0;
+        obj_cmd_result.cmd_result_->Deserialize(apply_res.cmd_result().data(),
+                                                offset);
+        assert(offset == apply_res.cmd_result().size());
+    }
+
+    obj_cmd_result.commit_ts_ = apply_res.commit_ts();
+    obj_cmd_result.last_vali_ts_ = apply_res.last_vali_ts();
+    obj_cmd_result.lock_acquired_ =
+        ToLocalType::ConvertLockType(apply_res.lock_type());
+    obj_cmd_result.object_modified_ = apply_res.object_modified();
+
+    obj_cmd_result.ttl_reset_ = apply_res.ttl_reset();
+    obj_cmd_result.ttl_expired_ = apply_res.ttl_expired();
+    obj_cmd_result.recover_cmd_image_ = apply_res.recover_cmd_image();
+    // 0 is not a legal ttl here: an old owner that predates the field sends
+    // proto default 0, which must keep today's UINT64_MAX ("no horizon")
+    // behavior rather than being read as an already-past ttl.
+    obj_cmd_result.ttl_ = apply_res.ttl() == 0 ? UINT64_MAX : apply_res.ttl();
+}
+
 // Cc requests received via the stream are first de-serialized as remote cc
 // requests and then enqueued into the local cc shards for processing.
 thread_local CcRequestPool<RemoteAcquire> acquire_pool_;
@@ -1867,25 +1900,7 @@ void CcStreamReceiver::OnReceiveCcMsg(std::unique_ptr<CcMessage> msg)
 
             if (!apply_res.is_ack())
             {
-                obj_cmd_result.rec_status_ =
-                    ToLocalType::ConvertRecordStatusType(
-                        apply_res.rec_status());
-
-                if (obj_cmd_result.cmd_result_ != nullptr &&
-                    apply_res.cmd_result().size() > 0)
-                {
-                    size_t offset = 0;
-                    obj_cmd_result.cmd_result_->Deserialize(
-                        apply_res.cmd_result().data(), offset);
-                    assert(offset == apply_res.cmd_result().size());
-                }
-
-                obj_cmd_result.commit_ts_ = apply_res.commit_ts();
-                obj_cmd_result.last_vali_ts_ = apply_res.last_vali_ts();
-                obj_cmd_result.lock_acquired_ =
-                    ToLocalType::ConvertLockType(apply_res.lock_type());
-                obj_cmd_result.object_modified_ = apply_res.object_modified();
-
+                BackfillObjectCommandResult(obj_cmd_result, apply_res);
                 hd_res->SetFinished();
             }
         }
