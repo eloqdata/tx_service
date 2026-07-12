@@ -229,7 +229,10 @@ private:
         return entry;
     }
 
-    // Creates the standby-forward entry for a modifying command once per cce.
+    // Bucket-migration dual write: when the key's bucket has a dirty (new)
+    // owner, record where this entry's commands must additionally be uploaded
+    // at commit (UploadTxCommands to the new owner). Unrelated to standby
+    // forwarding, which happens owner-side in standby.cpp.
     void SetupForwardEntry(CmdSetEntry &entry,
                            const TxKey *key,
                            uint32_t forward_key_shard)
