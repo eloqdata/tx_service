@@ -999,9 +999,10 @@ struct ObjectCommandResult
     uint64_t ttl_{UINT64_MAX};
     // TTL reset
     bool ttl_reset_{false};
-    // Full-object snapshot image the remote owner serialized when it reset a
-    // live TTL. Empty on the local path (the coordinator's own command still
-    // produces the snapshot). Written to the WAL as an overwrite record.
+    // Full-object snapshot image the owner shard serialized when the command
+    // reset a live TTL — the single capture point for local and remote owners
+    // (remote responses carry it in ApplyResponse). Non-empty iff ttl_reset_.
+    // Written to the WAL as an overwrite record.
     std::string recover_cmd_image_{};
 };
 
