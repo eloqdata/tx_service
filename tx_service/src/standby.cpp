@@ -73,21 +73,19 @@ private:
 void StandbyForwardEntry::AddTxCommand(ApplyCc &cc_req)
 {
     auto &req = Request();
-    if (cc_req.IsLocal())
-    {
-        TxCommand *cmd = cc_req.CommandPtr();
+    // Serialize the owner-side executed command, not the coordinator's
+    // pre-ExecuteOn image. ExecuteOn may mutate the command in place (e.g.
+    // eloqkv ZADD NX/XX/GT/LT filtering); the standby applies commands
+    // commit-only and never re-runs ExecuteOn, so it must receive the
+    // executed command. GetCommand() returns the executed command for both
+    // local and remote ApplyCc.
+    TxCommand *cmd = cc_req.GetCommand();
+    assert(cmd != nullptr);
+    std::string cmd_str;
+    cmd->Serialize(cmd_str);
+    req.add_cmd_list(std::move(cmd_str));
 
-        std::string cmd_str;
-        cmd->Serialize(cmd_str);
-        req.add_cmd_list(std::move(cmd_str));
-    }
-    else
-    {
-        req.add_cmd_list(*cc_req.CommandImage());
-    }
-
-    assert(cc_req.GetCommand());
-    if (cc_req.GetCommand()->IsOverwrite())
+    if (cmd->IsOverwrite())
     {
         req.set_has_overwrite(true);
     }

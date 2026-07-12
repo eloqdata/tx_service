@@ -6820,24 +6820,26 @@ void TransactionExecution::PostProcess(ObjectCommandOp &obj_cmd_op)
             }
             if (ttl_reset)
             {
-                // write a recover obj cmd to log
-                // If ttl is reset, we did not record ttl in object result since
-                // recover ttl object command is a overwrite command, so
-                // commands in this tx can always be successfully replayed. We
-                // do not need to write post update ttl in this case.
+                // Log a full-object snapshot as an overwrite record. Because
+                // the snapshot ignores the previous version, the tx's commands
+                // always replay, so ttl carries no validity horizon here.
                 assert(ttl == UINT64_MAX);
-                auto recover_command =
-                    obj_cmd_.command_->RecoverTTLObjectCommand();
-                cmd_set_.AddObjectCommand(*table_name,
-                                          cce_addr,
-                                          obj_status,
-                                          commit_ts,
-                                          lock_ts,
-                                          last_vali_ts,
-                                          obj_cmd_.key_,
-                                          recover_command,
-                                          ttl,
-                                          obj_cmd_op.forward_key_shard_);
+                // The owner captured the snapshot into the command result at
+                // execution time — the same field for local and remote owners
+                // (local: set directly by the shard; remote: shipped in the
+                // ApplyResponse and back-filled). The coordinator never
+                // rebuilds it from its own (possibly never-executed) command.
+                assert(!cmd_result.recover_cmd_image_.empty());
+                cmd_set_.AddObjectCommandImage(*table_name,
+                                               cce_addr,
+                                               obj_status,
+                                               commit_ts,
+                                               lock_ts,
+                                               last_vali_ts,
+                                               obj_cmd_.key_,
+                                               cmd_result.recover_cmd_image_,
+                                               ttl,
+                                               obj_cmd_op.forward_key_shard_);
             }
 
             // The command modifies the object. Put it into the command set

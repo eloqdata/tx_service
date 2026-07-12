@@ -1330,18 +1330,23 @@ public:
             obj_result.rec_status_ = cce->PayloadStatus();
         }
 
-        if (obj_result.ttl_reset_ || cmd->IsOverwrite())
+        obj_result.ttl_ = ComputeReportedTtl(obj_result.ttl_reset_,
+                                             obj_result.ttl_expired_,
+                                             cmd->IsOverwrite(),
+                                             ttl);
+
+        if (obj_result.ttl_reset_)
         {
-            // If this command reset ttl or overwrite the object, the previous
-            // ttl on key might be changed. Just set ttl to UINT64_MAX since
-            // overwrite command and ttl reset command can always be
-            // successfully replayed.
-            obj_result.ttl_ = UINT64_MAX;
-        }
-        else
-        {
-            // ttl has not been changed, just used the current ttl value.
-            obj_result.ttl_ = ttl;
+            // The command resets a live TTL: WAL replay must not depend on a
+            // base object that may be gone, so ship the full-object snapshot
+            // in the result. Single capture point for local and remote
+            // coordinators alike — the coordinator always logs the image from
+            // the result, never from its own (possibly never-executed)
+            // command.
+            TxCommand *recover_cmd = cmd->RecoverTTLObjectCommand();
+            assert(recover_cmd != nullptr);
+            obj_result.recover_cmd_image_.clear();
+            recover_cmd->Serialize(obj_result.recover_cmd_image_);
         }
 
         hd_res->SetFinished();

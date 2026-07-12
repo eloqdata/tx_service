@@ -23,6 +23,7 @@
 
 #include <atomic>
 #include <memory>
+#include <string>
 #include <string_view>
 #include <utility>
 
@@ -31,10 +32,12 @@
 #include "cc_map.h"
 #include "cc_request.pb.h"
 #include "error_messages.h"  //CcErrorCode
+#include "remote/apply_response_util.h"
 #include "remote/remote_cc_handler.h"
 #include "remote/remote_type.h"  //ToRemoteType
 #include "sharder.h"
 #include "tx_key.h"
+#include "tx_operation_result.h"
 #include "type.h"
 
 txservice::remote::RemoteAcquire::RemoteAcquire()
@@ -2114,6 +2117,48 @@ void txservice::remote::RemoteKickoutCcEntry::Reset(
     }
 }
 
+void txservice::remote::FillApplyResponse(
+    ApplyResponse &resp,
+    const ObjectCommandResult &apply_result,
+    TxCommand *executed_cmd)
+{
+    resp.set_commit_ts(apply_result.commit_ts_);
+    resp.set_last_vali_ts(apply_result.last_vali_ts_);
+
+    CceAddr_msg *cce_addr_msg = resp.mutable_cce_addr();
+    cce_addr_msg->set_cce_lock_ptr(apply_result.cce_addr_.CceLockPtr());
+    cce_addr_msg->set_term(apply_result.cce_addr_.Term());
+    cce_addr_msg->set_core_id(apply_result.cce_addr_.CoreId());
+
+    resp.set_rec_status(
+        ToRemoteType::ConvertRecordStatus(apply_result.rec_status_));
+    resp.set_lock_type(
+        ToRemoteType::ConvertLockType(apply_result.lock_acquired_));
+    resp.set_object_modified(apply_result.object_modified_);
+
+    std::string *cmd_res_str = resp.mutable_cmd_result();
+    if (executed_cmd->GetResult() != nullptr)
+    {
+        executed_cmd->GetResult()->Serialize(*cmd_res_str);
+    }
+
+    // Owner-only facts the coordinator needs to log the WAL for a remotely
+    // owned key. ttl is reported unconditionally (never gated on the reset
+    // branch); the coordinator applies the old-owner fallback (0 -> no
+    // horizon).
+    resp.set_ttl_reset(apply_result.ttl_reset_);
+    resp.set_ttl(apply_result.ttl_);
+    resp.set_ttl_expired(apply_result.ttl_expired_);
+    if (apply_result.ttl_reset_)
+    {
+        // The owner reset a live TTL; the snapshot was captured into the
+        // result at execution time (single capture point shared with the
+        // local path) — copy it onto the wire.
+        assert(!apply_result.recover_cmd_image_.empty());
+        resp.set_recover_cmd_image(apply_result.recover_cmd_image_);
+    }
+}
+
 txservice::remote::RemoteApplyCc::RemoteApplyCc() : ApplyCc(false)
 {
     res_ = &cc_res_;
@@ -2137,27 +2182,9 @@ txservice::remote::RemoteApplyCc::RemoteApplyCc() : ApplyCc(false)
 
         if (!res->IsError())
         {
-            resp->set_commit_ts(apply_result.commit_ts_);
-            resp->set_last_vali_ts(apply_result.last_vali_ts_);
-
-            CceAddr_msg *cce_addr_msg = resp->mutable_cce_addr();
-            cce_addr_msg->set_cce_lock_ptr(apply_result.cce_addr_.CceLockPtr());
-            cce_addr_msg->set_term(apply_result.cce_addr_.Term());
-            cce_addr_msg->set_core_id(apply_result.cce_addr_.CoreId());
-
-            resp->set_rec_status(
-                ToRemoteType::ConvertRecordStatus(apply_result.rec_status_));
-            resp->set_lock_type(
-                ToRemoteType::ConvertLockType(apply_result.lock_acquired_));
-            resp->set_object_modified(apply_result.object_modified_);
-
             assert(!is_local_);
-            std::string *cmd_res_str = resp->mutable_cmd_result();
             assert(remote_input_.cmd_ != nullptr);
-            if (remote_input_.cmd_->GetResult() != nullptr)
-            {
-                remote_input_.cmd_->GetResult()->Serialize(*cmd_res_str);
-            }
+            FillApplyResponse(*resp, apply_result, remote_input_.cmd_);
         }
 
         const ApplyRequest &req = input_msg_->apply_cc_req();

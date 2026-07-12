@@ -1361,6 +1361,15 @@ message ApplyResponse {
     bool object_modified = 8;
     // The response is an acknowledgement or the result
     bool is_ack = 9;
+    // Owner-side facts the coordinator needs to log the WAL correctly for a
+    // key owned by a remote node group (eloqdata/eloqkv#509 follow-up).
+    bool ttl_reset = 10;
+    // Full-object snapshot image; set only when ttl_reset.
+    bytes recover_cmd_image = 11;
+    // Owner-computed POST-command object ttl.
+    uint64 ttl = 12;
+    // The command consumed an expired object.
+    bool ttl_expired = 13;
 }
 
 message UploadTxCommandsRequest {
