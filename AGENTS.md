@@ -35,5 +35,5 @@ and reviewer-facing documentation are consistent with the final diff.
   decisions, exact verification performed, risks, rollback, and reviewer focus.
 - State unrun checks and uncertainty explicitly; never claim a test passed unless
   it was run in the current workspace.
-- Use `$finish-pr` for completed non-trivial changes and `$respond-to-review` when
-  addressing review feedback.
+- In Codex, use `$finish-pr` and `$respond-to-review`; in Claude Code, invoke the
+  same shared skills as `/finish-pr` and `/respond-to-review`.
