@@ -1,7 +1,6 @@
 # AGENTS.md
 
-Agent guidance for **tx_service** (checked out as EloqKV's `data_substrate`
-submodule).
+Agent guidance for **tx_service**
 
 **Read [CLAUDE.md](CLAUDE.md) first** for architecture, build/test commands,
 threading constraints, and code style. Read the relevant design document under
