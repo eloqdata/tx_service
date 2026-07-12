@@ -1,7 +1,7 @@
 ## Context
 
 <!-- What problem does this solve, and why does it matter? Use
-     `Fixes eloqdb/tx_service#<issue_id>` when applicable and link the RFC. -->
+     `Fixes eloqdata/tx_service#<issue_id>` when applicable and link the RFC. -->
 
 ## Behavior before and after
 
@@ -20,7 +20,6 @@
 - [ ] Unit/CTest coverage
 - [ ] Parent-project integration or manual validation
 - [ ] Formatting/build checks
-- [ ] `./mtr --suite=mono_main,mono_multi,mono_basic`
 - [ ] Recovery, compatibility, or performance validation, when relevant
 - [ ] Documentation updated, when behavior changed
 
