@@ -33,9 +33,11 @@ class ApplyResponse;
 // Owner side: serialize an executed command's success result into the
 // ApplyResponse the owner ships back to the coordinator. Fills the result
 // fields plus the owner-only facts the coordinator needs to log the WAL
-// (ttl_reset / ttl / ttl_expired / recover_cmd_image). executed_cmd is the
-// owner's in-place executed command (remote_input_.cmd_), non-null on the
-// success path.
+// (ttl_reset / ttl / ttl_expired / recover_cmd_image; the snapshot image is
+// copied from apply_result, where the owner shard captured it at execution
+// time). executed_cmd is the owner's in-place executed command
+// (remote_input_.cmd_), non-null on the success path; used only to serialize
+// the command's client-facing result.
 void FillApplyResponse(ApplyResponse &resp,
                        const ObjectCommandResult &apply_result,
                        TxCommand *executed_cmd);

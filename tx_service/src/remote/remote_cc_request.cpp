@@ -2151,10 +2151,11 @@ void txservice::remote::FillApplyResponse(
     resp.set_ttl_expired(apply_result.ttl_expired_);
     if (apply_result.ttl_reset_)
     {
-        // The owner reset a live TTL; log a full-object snapshot instead of
-        // relying on a base object the coordinator never had.
-        executed_cmd->RecoverTTLObjectCommand()->Serialize(
-            *resp.mutable_recover_cmd_image());
+        // The owner reset a live TTL; the snapshot was captured into the
+        // result at execution time (single capture point shared with the
+        // local path) — copy it onto the wire.
+        assert(!apply_result.recover_cmd_image_.empty());
+        resp.set_recover_cmd_image(apply_result.recover_cmd_image_);
     }
 }
 

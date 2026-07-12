@@ -1335,6 +1335,20 @@ public:
                                              cmd->IsOverwrite(),
                                              ttl);
 
+        if (obj_result.ttl_reset_)
+        {
+            // The command resets a live TTL: WAL replay must not depend on a
+            // base object that may be gone, so ship the full-object snapshot
+            // in the result. Single capture point for local and remote
+            // coordinators alike — the coordinator always logs the image from
+            // the result, never from its own (possibly never-executed)
+            // command.
+            TxCommand *recover_cmd = cmd->RecoverTTLObjectCommand();
+            assert(recover_cmd != nullptr);
+            obj_result.recover_cmd_image_.clear();
+            recover_cmd->Serialize(obj_result.recover_cmd_image_);
+        }
+
         hd_res->SetFinished();
         return true;
     }

@@ -170,6 +170,9 @@ TEST_CASE("ApplyResponse propagates ttl_reset snapshot", "[apply-boundary]")
 
     FakeCommand cmd("payload");
     cmd.recover_ = std::make_unique<FakeCommand>("X");
+    // The owner captures the snapshot into the result at execution time; the
+    // response fill copies it from there (unified local/remote capture point).
+    cmd.RecoverTTLObjectCommand()->Serialize(owner_result.recover_cmd_image_);
 
     // Resend equivalence: two independent fills of the same owner result must
     // serialize to identical bytes (a resent response is byte-for-byte equal).
