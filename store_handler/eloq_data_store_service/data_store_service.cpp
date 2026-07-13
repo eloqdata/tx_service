@@ -85,6 +85,11 @@ thread_local ObjectPool<CreateSnapshotForBackupLocalRequest>
 thread_local ObjectPool<SyncFileCacheLocalRequest>
     local_sync_file_cache_req_pool_;
 
+thread_local const DataStoreService *tls_read_submit_slot_owner = nullptr;
+thread_local uint32_t tls_read_submit_slot_idx = UINT32_MAX;
+thread_local std::array<uint32_t, DataStoreService::kMaxShardCount>
+    tls_read_submit_depths{};
+
 TTLWrapperCache::TTLWrapperCache()
 {
     ttl_check_running_ = true;
@@ -270,6 +275,91 @@ DataStoreService::~DataStoreService()
     for (auto &it : data_shards_)
     {
         it.ShutDown();
+    }
+}
+
+DataStoreService::ReadSubmitGuard::ReadSubmitGuard(DataStoreService *service,
+                                                   uint32_t shard_id,
+                                                   uint32_t slot_idx)
+    : service_(service), shard_id_(shard_id), slot_idx_(slot_idx)
+{
+}
+
+DataStoreService::ReadSubmitGuard::ReadSubmitGuard(
+    ReadSubmitGuard &&other) noexcept
+    : service_(other.service_),
+      shard_id_(other.shard_id_),
+      slot_idx_(other.slot_idx_)
+{
+    other.service_ = nullptr;
+    other.shard_id_ = UINT32_MAX;
+    other.slot_idx_ = UINT32_MAX;
+}
+
+DataStoreService::ReadSubmitGuard::~ReadSubmitGuard()
+{
+    if (service_ != nullptr)
+    {
+        service_->LeaveReadSubmitWindow(shard_id_, slot_idx_);
+    }
+}
+
+uint32_t DataStoreService::GetReadSubmitSlotIndex()
+{
+    if (__builtin_expect(tls_read_submit_slot_owner == this &&
+                             tls_read_submit_slot_idx != UINT32_MAX,
+                         1))
+    {
+        return tls_read_submit_slot_idx;
+    }
+
+    uint32_t slot_idx =
+        next_read_submit_slot_idx_.fetch_add(1, std::memory_order_seq_cst);
+    CHECK_LT(slot_idx, kReadSubmitSlotCount)
+        << "Too many read submit threads for DataStoreService";
+
+    tls_read_submit_slot_owner = this;
+    tls_read_submit_slot_idx = slot_idx;
+    tls_read_submit_depths.fill(0);
+    return slot_idx;
+}
+
+DataStoreService::ReadSubmitGuard DataStoreService::EnterReadSubmitWindow(
+    uint32_t shard_id)
+{
+    uint32_t slot_idx = GetReadSubmitSlotIndex();
+    uint32_t depth = ++tls_read_submit_depths.at(shard_id);
+    data_shards_.at(shard_id).read_submit_slots_.at(slot_idx).depth.store(
+        depth, std::memory_order_seq_cst);
+    return ReadSubmitGuard(this, shard_id, slot_idx);
+}
+
+void DataStoreService::LeaveReadSubmitWindow(uint32_t shard_id,
+                                             uint32_t slot_idx)
+{
+    uint32_t &local_depth = tls_read_submit_depths.at(shard_id);
+    CHECK_GT(local_depth, 0);
+    uint32_t depth = --local_depth;
+    data_shards_.at(shard_id).read_submit_slots_.at(slot_idx).depth.store(
+        depth, std::memory_order_seq_cst);
+}
+
+void DataStoreService::WaitReadSubmitWindowsDrained(
+    const DataShard &ds_ref) const
+{
+    bool drained = false;
+    while (!drained)
+    {
+        drained = true;
+        for (const auto &slot : ds_ref.read_submit_slots_)
+        {
+            if (slot.depth.load(std::memory_order_seq_cst) != 0)
+            {
+                drained = false;
+                bthread_usleep(1000);
+                break;
+            }
+        }
     }
 }
 
@@ -477,7 +567,8 @@ void DataStoreService::Read(::google::protobuf::RpcController *controller,
     }
 
     DataShard &ds_ref = data_shards_.at(shard_id);
-    auto shard_status = ds_ref.shard_status_.load(std::memory_order_acquire);
+    auto read_submit_guard = EnterReadSubmitWindow(shard_id);
+    auto shard_status = ds_ref.shard_status_.load(std::memory_order_seq_cst);
     if (shard_status != DSShardStatus::ReadOnly &&
         shard_status != DSShardStatus::ReadWrite)
     {
@@ -514,7 +605,8 @@ void DataStoreService::Read(const std::string_view table_name,
     }
 
     DataShard &ds_ref = data_shards_.at(shard_id);
-    auto shard_status = ds_ref.shard_status_.load(std::memory_order_acquire);
+    auto read_submit_guard = EnterReadSubmitWindow(shard_id);
+    auto shard_status = ds_ref.shard_status_.load(std::memory_order_seq_cst);
     if (shard_status != DSShardStatus::ReadOnly &&
         shard_status != DSShardStatus::ReadWrite)
     {
@@ -559,7 +651,7 @@ void DataStoreService::FlushData(
     IncreaseWriteReqCount(shard_id);
     DataShard &ds_ref = data_shards_.at(shard_id);
 
-    auto shard_status = ds_ref.shard_status_.load(std::memory_order_acquire);
+    auto shard_status = ds_ref.shard_status_.load(std::memory_order_seq_cst);
     if (shard_status != DSShardStatus::ReadWrite)
     {
         DecreaseWriteReqCount(shard_id);
@@ -713,7 +805,7 @@ void DataStoreService::FlushData(const std::vector<std::string> &kv_table_names,
     IncreaseWriteReqCount(shard_id);
     DataShard &ds_ref = data_shards_.at(shard_id);
 
-    auto shard_status = ds_ref.shard_status_.load(std::memory_order_acquire);
+    auto shard_status = ds_ref.shard_status_.load(std::memory_order_seq_cst);
     if (shard_status != DSShardStatus::ReadWrite)
     {
         DecreaseWriteReqCount(shard_id);
@@ -759,7 +851,7 @@ void DataStoreService::DeleteRange(
     IncreaseWriteReqCount(shard_id);
 
     DataShard &ds_ref = data_shards_.at(shard_id);
-    auto shard_status = ds_ref.shard_status_.load(std::memory_order_acquire);
+    auto shard_status = ds_ref.shard_status_.load(std::memory_order_seq_cst);
     if (shard_status != DSShardStatus::ReadWrite)
     {
         DecreaseWriteReqCount(shard_id);
@@ -809,7 +901,7 @@ void DataStoreService::DeleteRange(const std::string_view table_name,
     IncreaseWriteReqCount(shard_id);
 
     DataShard &ds_ref = data_shards_.at(shard_id);
-    auto shard_status = ds_ref.shard_status_.load(std::memory_order_acquire);
+    auto shard_status = ds_ref.shard_status_.load(std::memory_order_seq_cst);
     if (shard_status != DSShardStatus::ReadWrite)
     {
         DecreaseWriteReqCount(shard_id);
@@ -863,7 +955,7 @@ void DataStoreService::CreateTable(
     IncreaseWriteReqCount(shard_id);
 
     DataShard &ds_ref = data_shards_.at(shard_id);
-    auto shard_status = ds_ref.shard_status_.load(std::memory_order_acquire);
+    auto shard_status = ds_ref.shard_status_.load(std::memory_order_seq_cst);
     if (shard_status != DSShardStatus::ReadWrite)
     {
         DecreaseWriteReqCount(shard_id);
@@ -907,7 +999,7 @@ void DataStoreService::CreateTable(const std::string_view table_name,
     IncreaseWriteReqCount(shard_id);
 
     DataShard &ds_ref = data_shards_.at(shard_id);
-    auto shard_status = ds_ref.shard_status_.load(std::memory_order_acquire);
+    auto shard_status = ds_ref.shard_status_.load(std::memory_order_seq_cst);
     if (shard_status != DSShardStatus::ReadWrite)
     {
         DecreaseWriteReqCount(shard_id);
@@ -953,7 +1045,7 @@ void DataStoreService::DropTable(
     IncreaseWriteReqCount(shard_id);
 
     DataShard &ds_ref = data_shards_.at(shard_id);
-    auto shard_status = ds_ref.shard_status_.load(std::memory_order_acquire);
+    auto shard_status = ds_ref.shard_status_.load(std::memory_order_seq_cst);
     if (shard_status != DSShardStatus::ReadWrite)
     {
         DecreaseWriteReqCount(shard_id);
@@ -997,7 +1089,7 @@ void DataStoreService::DropTable(const std::string_view table_name,
     IncreaseWriteReqCount(shard_id);
 
     DataShard &ds_ref = data_shards_.at(shard_id);
-    auto shard_status = ds_ref.shard_status_.load(std::memory_order_acquire);
+    auto shard_status = ds_ref.shard_status_.load(std::memory_order_seq_cst);
     if (shard_status != DSShardStatus::ReadWrite)
     {
         DecreaseWriteReqCount(shard_id);
@@ -1044,7 +1136,7 @@ void DataStoreService::BatchWriteRecords(
     IncreaseWriteReqCount(shard_id);
 
     DataShard &ds_ref = data_shards_.at(shard_id);
-    auto shard_status = ds_ref.shard_status_.load(std::memory_order_acquire);
+    auto shard_status = ds_ref.shard_status_.load(std::memory_order_seq_cst);
     if (shard_status != DSShardStatus::ReadWrite)
     {
         DecreaseWriteReqCount(shard_id);
@@ -1100,7 +1192,8 @@ void DataStoreService::ScanNext(
     }
 
     DataShard &ds_ref = data_shards_.at(shard_id);
-    auto shard_status = ds_ref.shard_status_.load(std::memory_order_acquire);
+    auto scan_submit_guard = EnterReadSubmitWindow(shard_id);
+    auto shard_status = ds_ref.shard_status_.load(std::memory_order_seq_cst);
     if (shard_status != DSShardStatus::ReadWrite &&
         shard_status != DSShardStatus::ReadOnly)
     {
@@ -1148,7 +1241,8 @@ void DataStoreService::ScanNext(::google::protobuf::RpcController *controller,
     }
 
     DataShard &ds_ref = data_shards_.at(shard_id);
-    auto shard_status = ds_ref.shard_status_.load(std::memory_order_acquire);
+    auto scan_submit_guard = EnterReadSubmitWindow(shard_id);
+    auto shard_status = ds_ref.shard_status_.load(std::memory_order_seq_cst);
     if (shard_status != DSShardStatus::ReadWrite &&
         shard_status != DSShardStatus::ReadOnly)
     {
@@ -1182,7 +1276,8 @@ void DataStoreService::ScanClose(::google::protobuf::RpcController *controller,
     }
 
     DataShard &ds_ref = data_shards_.at(shard_id);
-    auto shard_status = ds_ref.shard_status_.load(std::memory_order_acquire);
+    auto scan_submit_guard = EnterReadSubmitWindow(shard_id);
+    auto shard_status = ds_ref.shard_status_.load(std::memory_order_seq_cst);
     if (shard_status != DSShardStatus::ReadWrite &&
         shard_status != DSShardStatus::ReadOnly)
     {
@@ -1217,7 +1312,8 @@ void DataStoreService::ScanClose(const std::string_view table_name,
     }
 
     DataShard &ds_ref = data_shards_.at(shard_id);
-    auto shard_status = ds_ref.shard_status_.load(std::memory_order_acquire);
+    auto scan_submit_guard = EnterReadSubmitWindow(shard_id);
+    auto shard_status = ds_ref.shard_status_.load(std::memory_order_seq_cst);
     if (shard_status != DSShardStatus::ReadWrite &&
         shard_status != DSShardStatus::ReadOnly)
     {
@@ -1338,7 +1434,7 @@ void DataStoreService::BatchWriteRecords(
     IncreaseWriteReqCount(shard_id);
 
     DataShard &ds_ref = data_shards_.at(shard_id);
-    auto shard_status = ds_ref.shard_status_.load(std::memory_order_acquire);
+    auto shard_status = ds_ref.shard_status_.load(std::memory_order_seq_cst);
     if (shard_status != DSShardStatus::ReadWrite)
     {
         DecreaseWriteReqCount(shard_id);
@@ -1399,7 +1495,7 @@ void DataStoreService::CreateSnapshotForBackup(
     IncreaseWriteReqCount(shard_id);
 
     DataShard &ds_ref = data_shards_.at(shard_id);
-    auto shard_status = ds_ref.shard_status_.load(std::memory_order_acquire);
+    auto shard_status = ds_ref.shard_status_.load(std::memory_order_seq_cst);
     if (shard_status != DSShardStatus::ReadWrite)
     {
         DecreaseWriteReqCount(shard_id);
@@ -1445,7 +1541,7 @@ void DataStoreService::CreateSnapshotForBackup(
     IncreaseWriteReqCount(shard_id);
 
     DataShard &ds_ref = data_shards_.at(shard_id);
-    auto shard_status = ds_ref.shard_status_.load(std::memory_order_acquire);
+    auto shard_status = ds_ref.shard_status_.load(std::memory_order_seq_cst);
     if (shard_status != DSShardStatus::ReadWrite)
     {
         DecreaseWriteReqCount(shard_id);
@@ -3089,7 +3185,7 @@ bool DataStoreService::SwitchReadWriteToReadOnly(uint32_t shard_id)
     auto &ds_ref = data_shards_.at(shard_id);
     DSShardStatus expected = DSShardStatus::ReadWrite;
     if (!ds_ref.shard_status_.compare_exchange_strong(
-            expected, DSShardStatus::ReadOnly) &&
+            expected, DSShardStatus::ReadOnly, std::memory_order_seq_cst) &&
         expected != DSShardStatus::ReadOnly)
     {
         DLOG(ERROR) << "SwitchReadWriteToReadOnly failed, shard status is not "
@@ -3098,11 +3194,11 @@ bool DataStoreService::SwitchReadWriteToReadOnly(uint32_t shard_id)
     }
 
     // wait for all write requests to finish
-    while (ds_ref.ongoing_write_requests_.load(std::memory_order_acquire) > 0)
+    while (ds_ref.ongoing_write_requests_.load(std::memory_order_seq_cst) > 0)
     {
         bthread_usleep(1000);
     }
-    if (ds_ref.shard_status_.load(std::memory_order_acquire) ==
+    if (ds_ref.shard_status_.load(std::memory_order_seq_cst) ==
         DSShardStatus::ReadOnly)
     {
         cluster_manager_.SwitchShardToReadOnly(shard_id, expected);
@@ -3126,7 +3222,7 @@ bool DataStoreService::SwitchReadOnlyToClosed(uint32_t shard_id)
     auto &ds_ref = data_shards_.at(shard_id);
     DSShardStatus expected = DSShardStatus::ReadOnly;
     if (!ds_ref.shard_status_.compare_exchange_strong(
-            expected, DSShardStatus::Starting) &&
+            expected, DSShardStatus::Starting, std::memory_order_seq_cst) &&
         expected != DSShardStatus::Closed)
     {
         DLOG(ERROR) << "SwitchReadOnlyToClosed failed, shard status is not "
@@ -3138,10 +3234,13 @@ bool DataStoreService::SwitchReadOnlyToClosed(uint32_t shard_id)
     {
         DLOG(INFO) << "SwitchReadOnlyToClosed enter shutdown, shard "
                    << shard_id;
+        WaitReadSubmitWindowsDrained(ds_ref);
         ds_ref.data_store_->Shutdown();
         DSShardStatus expected_after_shutdown = DSShardStatus::Starting;
         const bool switched = ds_ref.shard_status_.compare_exchange_strong(
-            expected_after_shutdown, DSShardStatus::Closed);
+            expected_after_shutdown,
+            DSShardStatus::Closed,
+            std::memory_order_seq_cst);
         CHECK(switched);
         cluster_manager_.SwitchShardToClosed(shard_id, DSShardStatus::ReadOnly);
     }
