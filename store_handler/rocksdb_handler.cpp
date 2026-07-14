@@ -2257,7 +2257,7 @@ void RocksDBHandler::ParallelIterateTable(
                         // is marked as errored.
                         if (init_res.error != txservice::CcErrorCode::NO_ERROR)
                         {
-                            requester->AbortCcRequest(init_res.error);
+                            requester->SetErrorCode(init_res.error);
                             return true;
                         }
                         return false;
