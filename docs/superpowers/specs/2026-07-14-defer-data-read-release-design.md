@@ -88,6 +88,11 @@ The chosen behavior deliberately retains a scan's data-read footprint until comm
 - read locks under locking protocols may block writers longer; and
 - the read set can grow with a long scan.
 
+Scanner-only pins also make every node group holding such a pin part of the
+final post-read term check. A leadership change on one of those node groups can
+therefore abort a transaction that previously could finish after its early
+release was ignored.
+
 There is no added network round trip at scan close. Final post-reads are already fanned out in parallel by validation/post-processing. This trade-off was explicitly chosen because scans are common in the shared SQL/Mongo/Redis transaction engine and waiting for scan-close ACKs would add a synchronization barrier to every close.
 
 ## Deterministic tests
