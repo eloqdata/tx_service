@@ -6,6 +6,7 @@
 #include "cc/cc_req_misc.h"
 #include "cc/local_cc_shards.h"
 #include "harness/test_node.h"
+#include "read_write_set.h"
 #include "sharder.h"
 #include "tx_request.h"
 
@@ -137,6 +138,29 @@ ClosedScanRead ScanOneAndClose(TestNode &node, TxHandle &tx, int key)
 TEST_CASE("transaction consistency on TestNode", "[tx]")
 {
     TestNode node(TestNodeOptions{}.CoreNum(2));
+
+    // Scanner-only reads must not retain a view into a pooled request's table
+    // name. Short names exercise the in-object string buffer deterministically:
+    // reassigning pooled_name overwrites that buffer rather than merely making
+    // a dangling heap view.
+    {
+        ReadWriteSet read_set;
+        CcEntryAddr release_addr;
+        release_addr.SetCceLock(1, 1, 1, 1);
+
+        TableName pooled_name(
+            std::string("a"), TableType::Primary, node.Table().Engine());
+        TableName original_name(pooled_name);
+        REQUIRE(read_set.AddReadForRelease(release_addr, pooled_name));
+
+        pooled_name = TableName(
+            std::string("b"), TableType::Primary, node.Table().Engine());
+        REQUIRE(read_set.DataReadSet().begin()->second.second ==
+                original_name.StringView());
+
+        read_set.ClearReadSet(original_name);
+        REQUIRE(read_set.DataReadSetSize() == 0);
+    }
 
     // Scenario 1: an aborted write is invisible (key 10). A committed reader
     // started after the abort must not observe the rolled-back value.

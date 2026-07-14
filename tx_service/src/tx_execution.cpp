@@ -3524,8 +3524,8 @@ void TransactionExecution::ScanClose(uint64_t alias,
                     !last_tuple->cce_addr_.Empty() &&
                     rw_set_.GetReadCnt(table_name, last_tuple->cce_addr_) == 0)
                 {
-                    bool added =
-                        rw_set_.AddRead(last_tuple->cce_addr_, 0, &table_name);
+                    bool added = rw_set_.AddReadForRelease(
+                        last_tuple->cce_addr_, table_name);
                     assert(added);
                     (void) added;
                 }
@@ -3544,7 +3544,8 @@ void TransactionExecution::ScanClose(uint64_t alias,
         if (lk_type != LockType::NoLock && !tuple->cce_addr_.Empty() &&
             rw_set_.GetReadCnt(table_name, tuple->cce_addr_) == 0)
         {
-            bool added = rw_set_.AddRead(tuple->cce_addr_, 0, &table_name);
+            bool added =
+                rw_set_.AddReadForRelease(tuple->cce_addr_, table_name);
             assert(added);
             (void) added;
         }
@@ -5772,7 +5773,7 @@ void TransactionExecution::DrainScanner(CcScanner *scanner,
             rw_set_.GetReadCnt(table_name, cc_scan_tuple->cce_addr_) == 0)
         {
             bool added =
-                rw_set_.AddRead(cc_scan_tuple->cce_addr_, 0, &table_name);
+                rw_set_.AddReadForRelease(cc_scan_tuple->cce_addr_, table_name);
             assert(added);
             (void) added;
         }

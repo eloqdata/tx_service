@@ -26,6 +26,7 @@
 #include <map>
 #include <string>
 #include <unordered_map>
+#include <unordered_set>
 #include <vector>
 
 #include "absl/container/flat_hash_map.h"
@@ -66,6 +67,7 @@ public:
         wset_.clear();
         data_rset_.clear();
         meta_data_rset_.clear();
+        release_read_table_names_.clear();
         read_lock_ng_terms_.clear();
         wset_bytes_cnt_ = 0;
         forward_write_cnt_ = 0;
@@ -181,6 +183,25 @@ public:
             it->second.first.read_cnt_++;
         }
         return true;
+    }
+
+    /**
+     * @brief Retains a scanner-only data read for transaction-final cleanup.
+     *
+     * Scan-close requests are pooled and their owning TableName may be reused
+     * before the transaction finishes. Keep a transaction-owned table name so
+     * the read-set string_view remains valid for operations such as
+     * ClearReadSet(). Version 0 makes the entry release-only: it is sent
+     * through the normal final post-read path without OCC version validation.
+     */
+    bool AddReadForRelease(const CcEntryAddr &cce_addr,
+                           const TableName &table_name)
+    {
+        assert(!table_name.IsMeta());
+        auto [table_it, inserted] =
+            release_read_table_names_.emplace(table_name);
+        (void) inserted;
+        return AddRead(cce_addr, 0, &*table_it);
     }
 
     /**
@@ -676,6 +697,9 @@ private:
     absl::flat_hash_map<CcEntryAddr,
                         std::pair<ReadSetEntry, const std::string_view>>
         meta_data_rset_;
+    // Owns names referenced by scanner-only entries in data_rset_. Standard
+    // unordered-container rehashing preserves references to its elements.
+    std::unordered_set<TableName> release_read_table_names_;
     // the terms of read locks, for write log term check
     absl::flat_hash_map<uint32_t, int64_t> read_lock_ng_terms_;
     std::unordered_map<TableName, std::pair<uint64_t, TableWriteSet>> wset_;
