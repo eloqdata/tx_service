@@ -75,6 +75,9 @@ Modify:
   - document that scan-close/error cleanup retains data-read ownership for final validation/abort.
 - `tx_service/tests/TxConsistency-Test.cpp`
   - add deterministic scan-close retention coverage.
+- `tx_service/tests/include/mock/mock_catalog_factory.h`
+  - provide the primary hash scanner required by that coverage, matching the
+    mock factory's existing hash-partitioned `CcMap` type.
 
 Do not change public scan request types. `ScanCloseTxRequest::unlock_batch_` remains accepted for API compatibility even though it no longer triggers early release.
 
@@ -103,20 +106,25 @@ There is no added network round trip at scan close. Final post-reads are already
 
 Extend the existing in-process `TxConsistency-Test` fixture:
 
-1. Populate a key.
-2. Start a RepeatableRead/OccRead transaction and scan the key.
-3. Fetch the returned tuple that will be supplied in the close request's
+1. Teach `MockCatalogFactory` to construct the same
+   `HashParitionCcScanner<CompositeKey<int>, CompositeRecord<int>>` shape as
+   its hash-partitioned test `CcMap`.
+2. Populate a key.
+3. Build a one-bucket `BucketScanSavePoint`/`BucketScanPlan` for that key and
+   start a RepeatableRead/OccRead scan. This supplies the hash-scan state used
+   by production without scanning unrelated buckets.
+4. Fetch the returned tuple that will be supplied in the close request's
    `unlock_batch_`.
-4. On the CCE's owner shard, capture the concrete `LruEntry` and verify that
+5. On the CCE's owner shard, capture the concrete `LruEntry` and verify that
    its `NonBlockingLock` contains the transaction in `ReadIntents()` or
    `ReadLocks()`.
-5. Close the scan, then enqueue the ownership check on the same shard. This
+6. Close the scan, then enqueue the ownership check on the same shard. This
    request is ordered after the local early-release `PostReadCc` on current
    `main`, so current `main` deterministically reports that the transaction no
    longer owns the read; the fixed code still reports ownership.
-6. Commit and verify that the transaction no longer appears in either read
+7. Commit and verify that the transaction no longer appears in either read
    owner collection, proving final cleanup still happens.
-7. Repeat the retention/final-release check through abort.
+8. Repeat the retention/final-release check through abort.
 
 Run the focused test repeatedly to guard against timing sensitivity, then run the existing transaction and CC request test binaries.
 

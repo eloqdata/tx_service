@@ -23,16 +23,44 @@
 ### Task 1: Add a deterministic scan-close lifetime regression test
 
 **Files:**
+- Modify: `tx_service/tests/include/mock/mock_catalog_factory.h`
 - Modify: `tx_service/tests/TxConsistency-Test.cpp`
 
 **Interfaces:**
-- Consumes: `WaitableCc`, `CcEntryAddr::CoreId()`, `CcEntryAddr::ExtractCce()`, `LocalCcShards::EnqueueCcRequest()`, and the existing `TestNode`/`TxHandle` fixture.
+- Consumes: `HashParitionCcScanner`, `BucketScanSavePoint`, `BucketScanPlan`,
+  `WaitableCc`, `CcEntryAddr::CoreId()`, `CcEntryAddr::ExtractCce()`,
+  `LocalCcShards::EnqueueCcRequest()`, and the existing `TestNode`/`TxHandle`
+  fixture.
 - Produces: `CceOwner(const CcEntryAddr&)`, `TxOwnsScanRead(...)`,
   `ClosedScanRead`, and
   `ScanOneAndClose(TestNode&, TxHandle&, int)` test helpers plus commit/abort
   lifetime assertions.
 
-- [ ] **Step 1: Add owner-shard-safe test helpers**
+- [ ] **Step 1: Make the mock factory create a matching primary hash scanner**
+
+Add this include to `mock_catalog_factory.h`:
+
+```cpp
+#include "cc/ccm_scanner.h"
+```
+
+Replace the `CreatePkCcmScanner()` assertion stub with:
+
+```cpp
+    std::unique_ptr<CcScanner> CreatePkCcmScanner(
+        ScanDirection direction, const KeySchema *key_schema) override
+    {
+        return std::make_unique<HashParitionCcScanner<CompositeKey<int>,
+                                                         CompositeRecord<int>>>(
+            direction, ScanIndexType::Primary, key_schema);
+    }
+```
+
+This scanner's key/record and hash-partition shape exactly match the
+`TemplateCcMap<CompositeKey<int>, CompositeRecord<int>, true, false>` already
+created by the mock factory. Leave the secondary/range scanner stubs unchanged.
+
+- [ ] **Step 2: Add owner-shard-safe test helpers**
 
 Add the required headers to `TxConsistency-Test.cpp`:
 
@@ -112,6 +140,12 @@ ClosedScanRead ScanOneAndClose(TestNode &node, TxHandle &tx, int key)
 {
     TxKey start_key = Key(key);
     TxKey end_key = Key(key);
+
+    BucketScanSavePoint save_point;
+    auto &bucket_group = save_point.bucket_groups_.emplace_back();
+    bucket_group[0].push_back(
+        Sharder::MapKeyHashToBucketId(start_key.Hash()));
+
     ScanOpenTxRequest open_req(&node.Table(),
                                node.SchemaVersion(),
                                ScanIndexType::Primary,
@@ -120,10 +154,15 @@ ClosedScanRead ScanOneAndClose(TestNode &node, TxHandle &tx, int key)
                                &end_key,
                                true,
                                ScanDirection::Forward);
+    open_req.bucket_scan_save_point_ = &save_point;
     uint64_t alias = tx.Txm()->OpenTxScan(open_req);
+    open_req.Wait();
+    REQUIRE_FALSE(open_req.IsError());
 
+    BucketScanPlan plan = save_point.PickPlan(0);
     std::vector<ScanBatchTuple> batch;
     ScanBatchTxRequest batch_req(alias, node.Table(), &batch);
+    batch_req.bucket_scan_plan_ = &plan;
     tx.Txm()->Execute(&batch_req);
     batch_req.Wait();
     REQUIRE_FALSE(batch_req.IsError());
@@ -146,7 +185,11 @@ ClosedScanRead ScanOneAndClose(TestNode &node, TxHandle &tx, int key)
 }  // namespace
 ```
 
-- [ ] **Step 2: Add commit and abort retention scenarios**
+The explicit one-bucket save point is required because the fixture's EloqKV
+table is hash-partitioned. It avoids the null `bucket_scan_save_point_` and
+`bucket_scan_plan_` paths and scans only the bucket that owns the seeded key.
+
+- [ ] **Step 3: Add commit and abort retention scenarios**
 
 Append the following sequential blocks to the existing single `TestNode` test case. Use distinct keys to avoid state coupling with scenarios 1-3.
 
@@ -186,7 +229,7 @@ Append the following sequential blocks to the existing single `TestNode` test ca
     }
 ```
 
-- [ ] **Step 3: Build and run the focused test to prove it fails on current behavior**
+- [ ] **Step 4: Build and run the focused test to prove it fails on current behavior**
 
 Run:
 
@@ -360,6 +403,7 @@ Expected: all scenarios pass; CCE ownership remains attached after scan close an
 
 ```bash
 git add tx_service/tests/TxConsistency-Test.cpp \
+        tx_service/tests/include/mock/mock_catalog_factory.h \
         tx_service/src/tx_execution.cpp \
         tx_service/include/tx_execution.h
 git commit -m "fix: retain data reads until transaction finalization"
