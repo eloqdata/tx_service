@@ -6284,7 +6284,7 @@ void TransactionExecution::Process(KickoutDataOp &kickout_data_op)
 {
     TX_TRACE_ACTION_WITH_CONTEXT(
         this,
-        &kickout_data_all_op,
+        &kickout_data_op,
         [this]() -> std::string
         {
             return std::string("\"tx_number\":")

@@ -1,5 +1,6 @@
 #include <atomic>
 #include <catch2/catch_all.hpp>
+#include <string>
 #include <vector>
 
 #include "cc/cc_entry.h"
@@ -116,6 +117,10 @@ ClosedScanRead ScanOneAndClose(TestNode &node, TxHandle &tx, int key)
                     found = true;
                     break;
                 }
+            }
+            if (!found)
+            {
+                batch.clear();
             }
         }
     }
