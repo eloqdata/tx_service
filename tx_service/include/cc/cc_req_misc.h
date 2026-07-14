@@ -21,6 +21,7 @@
  */
 #pragma once
 
+#include <bthread/bthread.h>
 #include <bthread/condition_variable.h>
 #include <bthread/mutex.h>
 
@@ -869,8 +870,9 @@ public:
     {
         RunOnTxProcessorCc::Reset(std::move(task));
 
+        assert(active_finishers_.load(std::memory_order_seq_cst) == 0);
         error_code_.store(CcErrorCode::NO_ERROR, std::memory_order_relaxed);
-        unfinished_cnt_.store(core_cnt, std::memory_order_release);
+        unfinished_cnt_.store(core_cnt, std::memory_order_seq_cst);
     }
 
     void SetCoroCallbacks(const std::function<void()> *yield_fn,
@@ -895,8 +897,15 @@ public:
             return;
         }
         std::unique_lock<bthread::Mutex> lk(mux_);
-        while (unfinished_cnt_.load(std::memory_order_acquire) > 0)
+        while (!IsFinished())
         {
+            if (unfinished_cnt_.load(std::memory_order_seq_cst) == 0)
+            {
+                lk.unlock();
+                bthread_usleep(100);
+                lk.lock();
+                continue;
+            }
             waiting_.store(true, std::memory_order_release);
             lk.unlock();
             (*yield_fn)();
@@ -907,7 +916,8 @@ public:
 
     bool IsFinished() const
     {
-        return unfinished_cnt_.load(std::memory_order_acquire) == 0;
+        return unfinished_cnt_.load(std::memory_order_seq_cst) == 0 &&
+               active_finishers_.load(std::memory_order_seq_cst) == 0;
     }
 
     bool IsError() const
@@ -921,7 +931,10 @@ public:
         return error_code_.load(std::memory_order_acquire);
     }
 
-    void AbortCcRequest(CcErrorCode error_code) override
+    // Record an error without completing this request. Use this from a task
+    // body that will return true and let Execute() perform the single
+    // FinishOne() call for that shard.
+    void SetErrorCode(CcErrorCode error_code)
     {
         // Latch the first error; a later success on another core must not
         // erase it.
@@ -930,6 +943,11 @@ public:
                                             error_code,
                                             std::memory_order_acq_rel,
                                             std::memory_order_relaxed);
+    }
+
+    void AbortCcRequest(CcErrorCode error_code) override
+    {
+        SetErrorCode(error_code);
         FinishOne();
     }
 
@@ -945,7 +963,30 @@ public:
 private:
     void FinishOne()
     {
-        if (unfinished_cnt_.fetch_sub(1, std::memory_order_acq_rel) == 1)
+        active_finishers_.fetch_add(1, std::memory_order_seq_cst);
+
+        uint32_t unfinished = unfinished_cnt_.load(std::memory_order_seq_cst);
+        while (unfinished > 0)
+        {
+            if (unfinished_cnt_.compare_exchange_weak(
+                    unfinished,
+                    unfinished - 1,
+                    std::memory_order_seq_cst,
+                    std::memory_order_seq_cst))
+            {
+                break;
+            }
+        }
+
+        if (unfinished == 0)
+        {
+            LOG(ERROR) << "WaitableCc::FinishOne called after completion";
+            assert(false);
+            active_finishers_.fetch_sub(1, std::memory_order_seq_cst);
+            return;
+        }
+
+        if (unfinished == 1)
         {
             if (resume_fn_ != nullptr)
             {
@@ -963,6 +1004,8 @@ private:
                 }
             }
         }
+
+        active_finishers_.fetch_sub(1, std::memory_order_seq_cst);
     }
 
     void *operator new(size_t) noexcept
@@ -986,6 +1029,12 @@ private:
     const std::function<void()> *yield_fn_{nullptr};
     const std::function<void()> *resume_fn_{nullptr};
     std::atomic<bool> waiting_{false};
+
+    // Counts threads currently inside FinishOne(). unfinished_cnt_ may reach
+    // zero before the last finisher completes the resume handshake and stops
+    // touching this stack-allocated request, so waiters treat this as a
+    // lifetime fence before leaving the request's scope.
+    std::atomic<uint32_t> active_finishers_{0};
 };
 struct UpdateCceCkptTsCc : public CcRequestBase
 {

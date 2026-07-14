@@ -1139,7 +1139,7 @@ void WaitableCc::Wait()
 {
     uint64_t interval_us = 100;
     constexpr uint64_t max_interval = 100000;
-    while (unfinished_cnt_.load(std::memory_order_acquire) > 0)
+    while (!IsFinished())
     {
         bthread_usleep(interval_us);
         interval_us <<= 1;
