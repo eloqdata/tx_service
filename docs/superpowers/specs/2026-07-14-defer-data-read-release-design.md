@@ -41,7 +41,11 @@ Some scanner ownership is intentionally absent from the semantic read set today:
 
 These CCEs must be added to the existing data read set with version `0`. Version `0` is the existing convention for an entry retained only for release: it contributes no version validation but ensures the final `PostReadCc(Release)` clears all ownership for that transaction. Reusing the read-set map also deduplicates a scanner-only pin with a later semantic read of the same CCE.
 
-Gap/boundary tuples with an empty CCE address or `key_ts == 0` remain excluded under the existing no-gap-lock rule.
+`DrainScanner()` continues to exclude empty CCE addresses and `key_ts == 0`
+under its existing no-gap-lock rule. Range-scan last-tuple pins and locked
+trailing tuples are retained whenever their CCE address is non-empty: those
+paths already proved ownership by explicitly acquiring the pin or deducing a
+non-`NoLock` lock type.
 
 ### Final release
 
@@ -101,10 +105,18 @@ Extend the existing in-process `TxConsistency-Test` fixture:
 
 1. Populate a key.
 2. Start a RepeatableRead/OccRead transaction and scan the key.
-3. Close the scan with the returned tuple in `unlock_batch_`.
-4. Observe through the returned `CcEntryAddr`'s pooled lock owner that the CCE remains attached after scan close. Current `main` deterministically detaches it here, so the test fails before the fix without timing or sleeps.
-5. Commit and verify the pooled lock owner is detached, proving final cleanup still happens.
-6. Repeat the retention/final-release check through abort.
+3. Fetch the returned tuple that will be supplied in the close request's
+   `unlock_batch_`.
+4. On the CCE's owner shard, capture the concrete `LruEntry` and verify that
+   its `NonBlockingLock` contains the transaction in `ReadIntents()` or
+   `ReadLocks()`.
+5. Close the scan, then enqueue the ownership check on the same shard. This
+   request is ordered after the local early-release `PostReadCc` on current
+   `main`, so current `main` deterministically reports that the transaction no
+   longer owns the read; the fixed code still reports ownership.
+6. Commit and verify that the transaction no longer appears in either read
+   owner collection, proving final cleanup still happens.
+7. Repeat the retention/final-release check through abort.
 
 Run the focused test repeatedly to guard against timing sensitivity, then run the existing transaction and CC request test binaries.
 

@@ -27,7 +27,8 @@
 
 **Interfaces:**
 - Consumes: `WaitableCc`, `CcEntryAddr::CoreId()`, `CcEntryAddr::ExtractCce()`, `LocalCcShards::EnqueueCcRequest()`, and the existing `TestNode`/`TxHandle` fixture.
-- Produces: `CceOwnerAddress(const CcEntryAddr&)`, `ClosedScanCce`, and
+- Produces: `CceOwner(const CcEntryAddr&)`, `TxOwnsScanRead(...)`,
+  `ClosedScanRead`, and
   `ScanOneAndClose(TestNode&, TxHandle&, int)` test helpers plus commit/abort
   lifetime assertions.
 
@@ -37,28 +38,33 @@ Add the required headers to `TxConsistency-Test.cpp`:
 
 ```cpp
 #include <atomic>
-#include <cstdint>
 #include <vector>
 
+#include "cc/cc_entry.h"
 #include "cc/local_cc_shards.h"
 #include "cc/cc_req_misc.h"
 #include "sharder.h"
 #include "tx_request.h"
 ```
 
-Add these helpers in an anonymous namespace before the `TEST_CASE`. The `ExtractCce()` call must stay inside the `WaitableCc` lambda so it executes on the CCE's owner shard, as required by `CcEntryAddr`'s lifetime contract.
+Add these helpers in an anonymous namespace before the `TEST_CASE`.
+`ExtractCce()` and every later `LruEntry`/`NonBlockingLock` access must stay
+inside a `WaitableCc` lambda on the CCE's owner shard. The fixture performs no
+eviction, so the captured seeded-key `LruEntry` remains alive while the test
+checks whether its key lock still contains this transaction. The test observes
+actual transaction membership, not the pooled lock's stale `entry_`
+back-pointer.
 
 ```cpp
 namespace
 {
-uintptr_t CceOwnerAddress(const CcEntryAddr &cce_addr)
+LruEntry *CceOwner(const CcEntryAddr &cce_addr)
 {
-    std::atomic<uintptr_t> owner{0};
+    std::atomic<LruEntry *> owner{nullptr};
     WaitableCc check_owner(
         [&cce_addr, &owner](CcShard &)
         {
-            owner.store(reinterpret_cast<uintptr_t>(cce_addr.ExtractCce()),
-                        std::memory_order_release);
+            owner.store(cce_addr.ExtractCce(), std::memory_order_release);
             return true;
         });
 
@@ -69,13 +75,40 @@ uintptr_t CceOwnerAddress(const CcEntryAddr &cce_addr)
     return owner.load(std::memory_order_acquire);
 }
 
-struct ClosedScanCce
+struct ClosedScanRead
 {
     CcEntryAddr cce_addr_;
-    uintptr_t owner_before_close_;
+    LruEntry *cce_;
+    TxNumber txn_;
 };
 
-ClosedScanCce ScanOneAndClose(TestNode &node, TxHandle &tx, int key)
+bool TxOwnsScanRead(const ClosedScanRead &read)
+{
+    std::atomic<bool> owns_read{false};
+    WaitableCc check_ownership(
+        [&read, &owns_read](CcShard &)
+        {
+            NonBlockingLock *key_lock = read.cce_->GetKeyLock();
+            if (key_lock != nullptr)
+            {
+                const auto &read_locks = key_lock->ReadLocks();
+                const auto &read_intents = key_lock->ReadIntents();
+                owns_read.store(
+                    read_locks.find(read.txn_) != read_locks.end() ||
+                        read_intents.find(read.txn_) != read_intents.end(),
+                    std::memory_order_release);
+            }
+            return true;
+        });
+
+    Sharder::Instance().GetLocalCcShards()->EnqueueCcRequest(
+        read.cce_addr_.CoreId(), &check_ownership);
+    check_ownership.Wait();
+    REQUIRE_FALSE(check_ownership.IsError());
+    return owns_read.load(std::memory_order_acquire);
+}
+
+ClosedScanRead ScanOneAndClose(TestNode &node, TxHandle &tx, int key)
 {
     TxKey start_key = Key(key);
     TxKey end_key = Key(key);
@@ -98,14 +131,17 @@ ClosedScanCce ScanOneAndClose(TestNode &node, TxHandle &tx, int key)
     REQUIRE_FALSE(batch.front().cce_addr_.Empty());
 
     CcEntryAddr cce_addr = batch.front().cce_addr_;
-    uintptr_t owner_before_close = CceOwnerAddress(cce_addr);
-    REQUIRE(owner_before_close != 0);
+    ClosedScanRead read{cce_addr,
+                        CceOwner(cce_addr),
+                        tx.Txm()->TxNumber()};
+    REQUIRE(read.cce_ != nullptr);
+    REQUIRE(TxOwnsScanRead(read));
 
     ScanCloseTxRequest close_req(batch, 0, alias, node.Table());
     tx.Txm()->Execute(&close_req);
     close_req.Wait();
     REQUIRE_FALSE(close_req.IsError());
-    return {cce_addr, owner_before_close};
+    return read;
 }
 }  // namespace
 ```
@@ -115,50 +151,38 @@ ClosedScanCce ScanOneAndClose(TestNode &node, TxHandle &tx, int key)
 Append the following sequential blocks to the existing single `TestNode` test case. Use distinct keys to avoid state coupling with scenarios 1-3.
 
 ```cpp
-    // Scenario 4: scan close retains the CCE until commit validation releases
-    // it. The owner address is observed on the CCE's shard, never dereferenced
-    // from the test thread.
+    // Scenario 4: scan close retains the transaction's read ownership until
+    // commit validation releases it. Lock state is observed only on the CCE's
+    // owner shard.
     {
         auto seed = node.BeginTx();
         REQUIRE(seed.Upsert(20, 200));
-        REQUIRE(seed.Upsert(22, 220));
         REQUIRE(seed.Commit());
 
         auto tx =
             node.BeginTx(IsolationLevel::RepeatableRead, CcProtocol::OccRead);
-        ClosedScanCce scanned = ScanOneAndClose(node, tx, 20);
+        ClosedScanRead scanned = ScanOneAndClose(node, tx, 20);
 
-        // A following tx request is a deterministic barrier: current main
-        // cannot process it until its local scan-close release has finished.
-        int barrier_value = 0;
-        REQUIRE(tx.Read(22, barrier_value));
-        REQUIRE(barrier_value == 220);
-
-        CHECK(CceOwnerAddress(scanned.cce_addr_) ==
-              scanned.owner_before_close_);
+        // This owner-shard request is queued after current main's local
+        // scan-close PostReadCc, so no sleep or timing window is involved.
+        CHECK(TxOwnsScanRead(scanned));
         REQUIRE(tx.Commit());
-        CHECK(CceOwnerAddress(scanned.cce_addr_) == 0);
+        CHECK_FALSE(TxOwnsScanRead(scanned));
     }
 
     // Scenario 5: abort uses the same final read-set cleanup path.
     {
         auto seed = node.BeginTx();
         REQUIRE(seed.Upsert(21, 210));
-        REQUIRE(seed.Upsert(23, 230));
         REQUIRE(seed.Commit());
 
         auto tx =
             node.BeginTx(IsolationLevel::RepeatableRead, CcProtocol::OccRead);
-        ClosedScanCce scanned = ScanOneAndClose(node, tx, 21);
+        ClosedScanRead scanned = ScanOneAndClose(node, tx, 21);
 
-        int barrier_value = 0;
-        REQUIRE(tx.Read(23, barrier_value));
-        REQUIRE(barrier_value == 230);
-
-        CHECK(CceOwnerAddress(scanned.cce_addr_) ==
-              scanned.owner_before_close_);
+        CHECK(TxOwnsScanRead(scanned));
         REQUIRE(tx.Abort());
-        CHECK(CceOwnerAddress(scanned.cce_addr_) == 0);
+        CHECK_FALSE(TxOwnsScanRead(scanned));
     }
 ```
 
@@ -173,7 +197,10 @@ LD_LIBRARY_PATH=/data/workspace/eloqkv/data_substrate/third_party/install/lib \
 ./bld/tx_service/tests/TxConsistency-Test
 ```
 
-Expected: build succeeds; scenarios 4 and 5 report failed retention checks because current `ScanClose()` locally processes `ReleaseScanExtraLockOp` and detaches each returned tuple before finalization. The binary must exit normally rather than hang or crash.
+Expected: build succeeds; scenarios 4 and 5 report failed retention checks
+because current `ScanClose()` queues a local `PostReadCc(Release)` before each
+owner-shard membership check. The final commit/abort cleanup checks still pass,
+and the binary exits normally rather than hanging or crashing.
 
 ---
 
@@ -222,14 +249,18 @@ void TransactionExecution::ScanClose(uint64_t alias,
                                      const TableName &table_name)
 ```
 
-Delete the complete `unlock_batch` block. Returned scan tuples are already in `rw_set_`, so ignoring `unlock_batch_` retains rather than removes them.
+Delete the complete `unlock_batch` block. A normally returned locked scan tuple
+is already added to `rw_set_` by the scan-next path, so ignoring
+`unlock_batch_` retains rather than removes it. Tuples skipped because
+`CommandSet::FindObjectCommand()` already owns the CCE remain managed by the
+command set's final cleanup; `NoLock` tuples were skipped by the old close loop
+as well.
 
 Replace the range-partition last-tuple enqueue with release-only read-set retention:
 
 ```cpp
                 if (lk_type == LockType::NoLock &&
                     !last_tuple->cce_addr_.Empty() &&
-                    last_tuple->key_ts_ != 0 &&
                     rw_set_.GetReadCnt(table_name,
                                        last_tuple->cce_addr_) == 0)
                 {
@@ -245,7 +276,6 @@ Replace the trailing-tuple enqueue with:
 ```cpp
         if (lk_type != LockType::NoLock &&
             !tuple->cce_addr_.Empty() &&
-            tuple->key_ts_ != 0 &&
             rw_set_.GetReadCnt(table_name, tuple->cce_addr_) == 0)
         {
             bool added = rw_set_.AddRead(tuple->cce_addr_, 0, &table_name);
@@ -253,6 +283,13 @@ Replace the trailing-tuple enqueue with:
             (void) added;
         }
 ```
+
+Do not add a `key_ts_ != 0` filter to these two paths. The range-middle producer
+explicitly calls `AcquireReadIntent()` for its last CCE (after asserting a
+non-unknown payload), and `lk_type != NoLock` proves ownership for a trailing
+tuple. If either tuple carried an unexpected zero timestamp, version-0
+retention is still required to avoid leaking that ownership. `DrainScanner()`
+keeps its distinct existing `key_ts_ != 0` no-gap-lock rule.
 
 After this existing scanner-recycling call, delete the reset/push/process calls
 for `abundant_lock_op_`; retain the call and `scans_.erase(scan_it)`:
@@ -427,7 +464,7 @@ LD_LIBRARY_PATH=/data/workspace/eloqkv/data_substrate/third_party/install/lib \
 ./bld/tx_service/tests/CcRequestWait-Test
 ```
 
-Expected: both binaries build and pass; `TxConsistency-Test` reports all scenarios passing and `CcRequestWait-Test` reports 4 test cases / 2008 assertions passing.
+Expected: both binaries build and pass.
 
 - [ ] **Step 4: Commit cleanup and documentation**
 
