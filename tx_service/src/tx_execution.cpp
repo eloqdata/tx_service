@@ -2471,6 +2471,7 @@ void TransactionExecution::PostProcess(ScanOpenOperation &scan_open)
         open_result.scanner_->SetStatus(ScannerStatus::Blocked);
         scans_.try_emplace(open_result.scan_alias_,
                            std::move(open_result.scanner_),
+                           table_name,
                            scan_open.tx_req_->schema_version_,
                            scan_open.tx_req_->EndKey(),
                            scan_open.tx_req_->end_inclusive_,
@@ -2587,6 +2588,7 @@ void TransactionExecution::PostProcess(ScanOpenOperation &scan_open)
 
         scans_.try_emplace(open_result.scan_alias_,
                            std::move(open_result.scanner_),
+                           table_name,
                            std::move(search_cond),
                            scan_open.tx_req_->StartKey(),
                            scan_open.tx_req_->start_inclusive_,
@@ -3515,6 +3517,8 @@ void TransactionExecution::ScanClose(uint64_t alias,
         return;
     }
     scanner = scan_it->second.scanner_.get();
+    const TableName &scan_table_name = scan_it->second.table_name_;
+    assert(scan_table_name == table_name);
 
     if (scanner->Type() == CcmScannerType::RangePartition &&
         scan_it->second.slice_position_ == SlicePosition::Middle)
@@ -3533,16 +3537,17 @@ void TransactionExecution::ScanClose(uint64_t alias,
                 if (lk_type == LockType::NoLock &&
                     !last_tuple->cce_addr_.Empty())
                 {
-                    RetainScanReadForRelease(last_tuple, table_name);
+                    RetainScanReadForRelease(last_tuple, scan_table_name);
                 }
             }
         }
     }
 
-    RetainScanTrailingReads(scanner, table_name);
+    RetainScanTrailingReads(scanner, scan_table_name);
 
-    cc_handler_->ScanClose(
-        table_name, scanner->Direction(), std::move(scan_it->second.scanner_));
+    cc_handler_->ScanClose(scan_table_name,
+                           scanner->Direction(),
+                           std::move(scan_it->second.scanner_));
 
     scans_.erase(scan_it);
 }
@@ -5731,7 +5736,7 @@ void TransactionExecution::RetainScanReadForRelease(const ScanTuple *tuple,
         return;
     }
 
-    rw_set_.AddReadForRelease(tuple->cce_addr_, table_name);
+    (void) rw_set_.AddRead(tuple->cce_addr_, 0, &table_name);
 }
 
 void TransactionExecution::RetainScanTrailingReads(CcScanner *scanner,

@@ -9,6 +9,7 @@
 #include "harness/test_node.h"
 #include "read_write_set.h"
 #include "sharder.h"
+#include "tx_operation.h"
 #include "tx_request.h"
 
 using namespace txservice;
@@ -144,27 +145,35 @@ TEST_CASE("transaction consistency on TestNode", "[tx]")
 {
     TestNode node(TestNodeOptions{}.CoreNum(2));
 
-    // Scanner-only reads must not retain a view into a pooled request's table
-    // name. Short names exercise the in-object string buffer deterministically:
-    // reassigning pooled_name overwrites that buffer rather than merely making
-    // a dangling heap view.
+    // Scanner-only reads use the same long-lived table-name storage as regular
+    // reads, not the owning copy in a pooled scan-close request.
     {
         ReadWriteSet read_set;
         CcEntryAddr release_addr;
         release_addr.SetCceLock(1, 1, 1, 1);
 
-        TableName pooled_name(
+        TableName stable_name(
             std::string("a"), TableType::Primary, node.Table().Engine());
-        TableName original_name(pooled_name);
-        read_set.AddReadForRelease(release_addr, pooled_name);
+        ScanState scan_state(nullptr,
+                             stable_name,
+                             std::vector<DataStoreSearchCond>{},
+                             nullptr,
+                             false,
+                             nullptr,
+                             false);
+        REQUIRE(scan_state.table_name_.StringView().data() ==
+                stable_name.StringView().data());
+
+        TableName pooled_name(stable_name);
+        REQUIRE(read_set.AddRead(release_addr, 0, &scan_state.table_name_));
         REQUIRE(read_set.DataReadSetSize() == 1);
 
         pooled_name = TableName(
             std::string("b"), TableType::Primary, node.Table().Engine());
         REQUIRE(read_set.DataReadSet().begin()->second.second ==
-                original_name.StringView());
+                stable_name.StringView());
 
-        read_set.ClearReadSet(original_name);
+        read_set.ClearReadSet(stable_name);
         REQUIRE(read_set.DataReadSetSize() == 0);
     }
 
