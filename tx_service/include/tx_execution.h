@@ -484,7 +484,13 @@ private:
 
     void ReleaseMetaDataReadLock(CcHandlerResult<PostProcessResult> &hd_result);
     void ReleaseCatalogWriteAll(CcHandlerResult<PostProcessResult> &hd_result);
-    void DrainScanner(CcScanner *scanner, const TableName &table_name);
+    void RetainScanReadForRelease(const ScanTuple *tuple,
+                                  const TableName &table_name);
+    void RetainScanTrailingReads(CcScanner *scanner,
+                                 const TableName &table_name);
+    void DrainScanner(CcScanner *scanner,
+                      const TableName &table_name,
+                      bool retain_range_last_tuple = false);
 
     static TxErrorCode ConvertCcError(CcErrorCode error);
 

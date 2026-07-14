@@ -151,7 +151,8 @@ TEST_CASE("transaction consistency on TestNode", "[tx]")
         TableName pooled_name(
             std::string("a"), TableType::Primary, node.Table().Engine());
         TableName original_name(pooled_name);
-        REQUIRE(read_set.AddReadForRelease(release_addr, pooled_name));
+        read_set.AddReadForRelease(release_addr, pooled_name);
+        REQUIRE(read_set.DataReadSetSize() == 1);
 
         pooled_name = TableName(
             std::string("b"), TableType::Primary, node.Table().Engine());

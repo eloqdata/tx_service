@@ -194,14 +194,12 @@ public:
      * ClearReadSet(). Version 0 makes the entry release-only: it is sent
      * through the normal final post-read path without OCC version validation.
      */
-    bool AddReadForRelease(const CcEntryAddr &cce_addr,
+    void AddReadForRelease(const CcEntryAddr &cce_addr,
                            const TableName &table_name)
     {
         assert(!table_name.IsMeta());
-        auto [table_it, inserted] =
-            release_read_table_names_.emplace(table_name);
-        (void) inserted;
-        return AddRead(cce_addr, 0, &*table_it);
+        auto table_it = release_read_table_names_.emplace(table_name).first;
+        (void) AddRead(cce_addr, 0, &*table_it);
     }
 
     /**
@@ -544,27 +542,6 @@ public:
                 ++cce_it;
             }
         }
-    }
-
-    uint16_t RemoveDataReadEntry(const TableName &table_name,
-                                 const CcEntryAddr &addr)
-    {
-        assert(!table_name.IsMeta());
-
-        uint16_t read_cnt = 0;
-        auto cce_it = data_rset_.find(addr);
-        if (cce_it != data_rset_.end())
-        {
-            ReadSetEntry &read_entry = cce_it->second.first;
-            assert(read_entry.read_cnt_ > 0);
-            read_cnt = --read_entry.read_cnt_;
-            if (read_cnt == 0)
-            {
-                data_rset_.erase(cce_it);
-            }
-        }
-
-        return read_cnt;
     }
 
     void ResetForwardWriteCount()
