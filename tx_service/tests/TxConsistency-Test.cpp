@@ -1,6 +1,13 @@
+#include <atomic>
 #include <catch2/catch_all.hpp>
+#include <vector>
 
+#include "cc/cc_entry.h"
+#include "cc/cc_req_misc.h"
+#include "cc/local_cc_shards.h"
 #include "harness/test_node.h"
+#include "sharder.h"
+#include "tx_request.h"
 
 using namespace txservice;
 using namespace txservice::test;
@@ -11,6 +18,121 @@ using namespace txservice::test;
 // TEST_CASE body once per leaf SECTION, which would reconstruct the TestNode,
 // so this file uses a SINGLE TestNode and drives every scenario as a sequential
 // scoped block (distinct keys per scenario), with NO SECTIONs.
+
+namespace
+{
+LruEntry *CceOwner(const CcEntryAddr &cce_addr)
+{
+    std::atomic<LruEntry *> owner{nullptr};
+    WaitableCc check_owner(
+        [&cce_addr, &owner](CcShard &)
+        {
+            owner.store(cce_addr.ExtractCce(), std::memory_order_release);
+            return true;
+        });
+
+    Sharder::Instance().GetLocalCcShards()->EnqueueCcRequest(cce_addr.CoreId(),
+                                                             &check_owner);
+    check_owner.Wait();
+    REQUIRE_FALSE(check_owner.IsError());
+    return owner.load(std::memory_order_acquire);
+}
+
+struct ClosedScanRead
+{
+    CcEntryAddr cce_addr_;
+    LruEntry *cce_;
+    TxNumber txn_;
+};
+
+bool TxOwnsScanRead(const ClosedScanRead &read)
+{
+    std::atomic<bool> owns_read{false};
+    WaitableCc check_ownership(
+        [&read, &owns_read](CcShard &)
+        {
+            NonBlockingLock *key_lock = read.cce_->GetKeyLock();
+            if (key_lock != nullptr)
+            {
+                const auto &read_locks = key_lock->ReadLocks();
+                const auto &read_intents = key_lock->ReadIntents();
+                owns_read.store(
+                    read_locks.find(read.txn_) != read_locks.end() ||
+                        read_intents.find(read.txn_) != read_intents.end(),
+                    std::memory_order_release);
+            }
+            return true;
+        });
+
+    Sharder::Instance().GetLocalCcShards()->EnqueueCcRequest(
+        read.cce_addr_.CoreId(), &check_ownership);
+    check_ownership.Wait();
+    REQUIRE_FALSE(check_ownership.IsError());
+    return owns_read.load(std::memory_order_acquire);
+}
+
+ClosedScanRead ScanOneAndClose(TestNode &node, TxHandle &tx, int key)
+{
+    TxKey start_key(CompositeKey<int>::NegativeInfinity());
+    TxKey end_key(CompositeKey<int>::PositiveInfinity());
+    TxKey target_key = Key(key);
+
+    BucketScanSavePoint save_point;
+    ScanOpenTxRequest open_req(&node.Table(),
+                               node.SchemaVersion(),
+                               ScanIndexType::Primary,
+                               &start_key,
+                               true,
+                               &end_key,
+                               true,
+                               ScanDirection::Forward);
+    open_req.bucket_scan_save_point_ = &save_point;
+    uint64_t alias = tx.Txm()->OpenTxScan(open_req);
+    open_req.Wait();
+    REQUIRE_FALSE(open_req.IsError());
+
+    std::vector<ScanBatchTuple> batch;
+    size_t target_idx = 0;
+    bool found = false;
+    for (size_t plan_idx = 0; plan_idx < save_point.PlanSize() && !found;
+         ++plan_idx)
+    {
+        BucketScanPlan plan = save_point.PickPlan(plan_idx);
+        bool plan_finished = false;
+        while (!found && !plan_finished)
+        {
+            ScanBatchTxRequest batch_req(alias, node.Table(), &batch);
+            batch_req.bucket_scan_plan_ = &plan;
+            tx.Txm()->Execute(&batch_req);
+            batch_req.Wait();
+            REQUIRE_FALSE(batch_req.IsError());
+            plan_finished = batch_req.Result();
+
+            for (target_idx = 0; target_idx < batch.size(); ++target_idx)
+            {
+                if (batch[target_idx].key_ == target_key)
+                {
+                    found = true;
+                    break;
+                }
+            }
+        }
+    }
+    REQUIRE(found);
+    REQUIRE_FALSE(batch[target_idx].cce_addr_.Empty());
+
+    CcEntryAddr cce_addr = batch[target_idx].cce_addr_;
+    ClosedScanRead read{cce_addr, CceOwner(cce_addr), tx.Txm()->TxNumber()};
+    REQUIRE(read.cce_ != nullptr);
+    REQUIRE(TxOwnsScanRead(read));
+
+    ScanCloseTxRequest close_req(batch, target_idx, alias, node.Table());
+    tx.Txm()->Execute(&close_req);
+    close_req.Wait();
+    REQUIRE_FALSE(close_req.IsError());
+    return read;
+}
+}  // namespace
 
 TEST_CASE("transaction consistency on TestNode", "[tx]")
 {
@@ -97,6 +219,58 @@ TEST_CASE("transaction consistency on TestNode", "[tx]")
             REQUIRE(t.Commit());
         }
     }
+
+    bool commit_scan_retained = false;
+    bool abort_scan_retained = false;
+
+    // Scenario 4: scan close retains the transaction's read ownership until
+    // commit validation releases it. Lock state is observed only on the CCE's
+    // owner shard.
+    {
+        auto seed = node.BeginTx();
+        REQUIRE(seed.Upsert(20, 200));
+        REQUIRE(seed.Upsert(22, 220));
+        REQUIRE(seed.Commit());
+
+        auto tx =
+            node.BeginTx(IsolationLevel::RepeatableRead, CcProtocol::OccRead);
+        ClosedScanRead scanned = ScanOneAndClose(node, tx, 20);
+
+        // On pre-fix code, the next tx request cannot finish until the
+        // scan-close release operation has completed. Inspecting the captured
+        // CCE avoids ambiguity if its pooled lock is reused by this barrier
+        // read.
+        int barrier_value = 0;
+        REQUIRE(tx.Read(22, barrier_value));
+        REQUIRE(barrier_value == 220);
+
+        commit_scan_retained = TxOwnsScanRead(scanned);
+        REQUIRE(tx.Commit());
+        REQUIRE_FALSE(TxOwnsScanRead(scanned));
+    }
+
+    // Scenario 5: abort uses the same final read-set cleanup path.
+    {
+        auto seed = node.BeginTx();
+        REQUIRE(seed.Upsert(21, 210));
+        REQUIRE(seed.Upsert(23, 230));
+        REQUIRE(seed.Commit());
+
+        auto tx =
+            node.BeginTx(IsolationLevel::RepeatableRead, CcProtocol::OccRead);
+        ClosedScanRead scanned = ScanOneAndClose(node, tx, 21);
+
+        int barrier_value = 0;
+        REQUIRE(tx.Read(23, barrier_value));
+        REQUIRE(barrier_value == 230);
+
+        abort_scan_retained = TxOwnsScanRead(scanned);
+        REQUIRE(tx.Abort());
+        REQUIRE_FALSE(TxOwnsScanRead(scanned));
+    }
+
+    REQUIRE(commit_scan_retained);
+    REQUIRE(abort_scan_retained);
 }
 
 int main(int argc, char **argv)

@@ -1029,16 +1029,6 @@ private:
     std::vector<SplitRangeInfo> GenSplittedRangeInfos();
 };
 
-// To remove remainder records' lock when scan close
-struct ReleaseScanExtraLockOp : TransactionOperation
-{
-    explicit ReleaseScanExtraLockOp(TransactionExecution *txm);
-    void Reset();
-    void Forward(TransactionExecution *txm) override;
-
-    CcHandlerResult<PostProcessResult> hd_result_;
-};
-
 struct AnalyzeTableAllOp : TransactionOperation
 {
 private:

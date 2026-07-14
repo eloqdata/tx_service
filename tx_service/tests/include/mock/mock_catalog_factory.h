@@ -6,7 +6,8 @@
 #include <utility>  //pair
 #include <vector>
 
-#include "catalog_factory.h"     // TableSchema,CatalogFactory
+#include "catalog_factory.h"  // TableSchema,CatalogFactory
+#include "cc/ccm_scanner.h"
 #include "cc/template_cc_map.h"  // CcMap,TemplateCcMap
 #include "schema.h"              // Schema
 #include "tx_key.h"              // CompositeKey
@@ -278,8 +279,9 @@ public:
     std::unique_ptr<CcScanner> CreatePkCcmScanner(
         ScanDirection direction, const KeySchema *key_schema) override
     {
-        assert(false);
-        return nullptr;
+        return std::make_unique<
+            HashParitionCcScanner<CompositeKey<int>, CompositeRecord<int>>>(
+            direction, ScanIndexType::Primary, key_schema);
     }
 
     std::unique_ptr<CcScanner> CreateSkCcmScanner(

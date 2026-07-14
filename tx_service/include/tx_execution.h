@@ -441,9 +441,6 @@ private:
     template <typename ResultType>
     void PostProcess(AsyncOp<ResultType> &ds_op);
 
-    void Process(ReleaseScanExtraLockOp &unlock_op);
-    void PostProcess(ReleaseScanExtraLockOp &unlock_op);
-
     void Process(ObjectCommandOp &obj_cmd_op);
     void PostProcess(ObjectCommandOp &obj_cmd_op);
 
@@ -467,9 +464,7 @@ private:
 
     // Process TxRequests without Operations. These TxRequests can be executed
     // immediately without using CcRequests.
-    void ScanClose(const std::vector<UnlockTuple> &unlock_batch,
-                   size_t alias,
-                   const TableName &table_name);
+    void ScanClose(uint64_t alias, const TableName &table_name);
 
     void Upsert(const TableName &table_name,
                 uint64_t schema_version,
@@ -709,10 +704,6 @@ private:
     ReadOperation read_;
     ScanOpenOperation scan_open_;
     ScanNextOperation scan_next_;
-    // Temporarily save scan tuple when drain out the remainder scan tuples.
-    // To avoid ccentry address to be saved in stack
-    std::vector<DrainTuple> drain_batch_;
-
     std::unique_ptr<CircularQueue<std::unique_ptr<ScanCloseTxRequest>>>
         scan_close_req_pool_{nullptr};
 
@@ -760,7 +751,6 @@ private:
     // clean archives
     CleanCcEntryForTestOp clean_entry_op_;
 
-    ReleaseScanExtraLockOp abundant_lock_op_;
     BatchReadOperation batch_read_op_;
 
     metrics::TimePoint tx_duration_start_;
@@ -783,7 +773,6 @@ private:
     friend struct PostProcessOp;
     friend struct ScanOpenOperation;
     friend struct ScanNextOperation;
-    friend struct ReleaseScanExtraLockOp;
     friend struct ReloadCacheOperation;
     friend struct FaultInjectOp;
     friend struct AcquireAllOp;

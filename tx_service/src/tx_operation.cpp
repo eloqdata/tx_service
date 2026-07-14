@@ -5328,26 +5328,6 @@ bool SplitFlushRangeOp::ForwardKickoutIterator(TransactionExecution *txm)
     return true;
 }
 
-ReleaseScanExtraLockOp::ReleaseScanExtraLockOp(TransactionExecution *txm)
-    : hd_result_(txm)
-{
-}
-
-void ReleaseScanExtraLockOp::Reset()
-{
-    hd_result_.Reset();
-    hd_result_.Value().Clear();
-}
-
-void ReleaseScanExtraLockOp::Forward(TransactionExecution *txm)
-{
-    // do not wait on remote
-    if (hd_result_.IsFinished() || hd_result_.LocalRefCnt() == 0)
-    {
-        txm->PostProcess(*this);
-    }
-}
-
 AnalyzeTableAllOp::AnalyzeTableAllOp(TransactionExecution *txm)
     : hd_result_(txm)
 {
