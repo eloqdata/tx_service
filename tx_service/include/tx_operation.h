@@ -414,15 +414,12 @@ struct ScanState
 {
     ScanState() = delete;
     ScanState(std::unique_ptr<CcScanner> scanner,
-              const TableName &table_name,
               std::vector<DataStoreSearchCond> pushdown_cond,
               const TxKey *start_key,
               bool start_inclusive,
               const TxKey *end_key,
               bool end_inclusive)
         : scanner_(std::move(scanner)),
-          table_name_(
-              table_name.StringView(), table_name.Type(), table_name.Engine()),
           pushdown_condition_(std::move(pushdown_cond)),
           scan_start_key_(start_key),
           scan_start_inclusive_(start_inclusive),
@@ -433,10 +430,6 @@ struct ScanState
 
     size_t current_plan_index_{SIZE_MAX};
     std::unique_ptr<CcScanner> scanner_;
-    // References the same long-lived name storage used by regular read-set
-    // entries. Scan-close requests are pooled, so their owning copy must not
-    // become the source of a read-set string_view.
-    TableName table_name_;
     std::vector<DataStoreSearchCond> pushdown_condition_;
     const TxKey *scan_start_key_{nullptr};
     bool scan_start_inclusive_{false};
@@ -444,7 +437,6 @@ struct ScanState
     bool scan_end_inclusive_{false};
 
     ScanState(std::unique_ptr<CcScanner> scanner,
-              const TableName &table_name,
               uint64_t schema_version,
               const TxKey *end_key,
               bool end_inclusive,
@@ -454,8 +446,6 @@ struct ScanState
               bool inclusive,
               SlicePosition position)
         : scanner_(std::move(scanner)),
-          table_name_(
-              table_name.StringView(), table_name.Type(), table_name.Engine()),
           scan_end_key_(end_key),
           scan_end_inclusive_(end_inclusive),
           schema_version_(schema_version),

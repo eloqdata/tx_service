@@ -2471,7 +2471,6 @@ void TransactionExecution::PostProcess(ScanOpenOperation &scan_open)
         open_result.scanner_->SetStatus(ScannerStatus::Blocked);
         scans_.try_emplace(open_result.scan_alias_,
                            std::move(open_result.scanner_),
-                           table_name,
                            scan_open.tx_req_->schema_version_,
                            scan_open.tx_req_->EndKey(),
                            scan_open.tx_req_->end_inclusive_,
@@ -2588,7 +2587,6 @@ void TransactionExecution::PostProcess(ScanOpenOperation &scan_open)
 
         scans_.try_emplace(open_result.scan_alias_,
                            std::move(open_result.scanner_),
-                           table_name,
                            std::move(search_cond),
                            scan_open.tx_req_->StartKey(),
                            scan_open.tx_req_->start_inclusive_,
@@ -2683,7 +2681,7 @@ void TransactionExecution::Process(ScanNextOperation &scan_next)
 
         // Preserve ownership acquired beyond the prior batch's end before its
         // cache is reused. These tuples were never semantic scan results.
-        RetainScanTrailingReads(&scanner, scan_next.tx_req_->table_name_);
+        DrainScanner(&scanner, scan_next.tx_req_->table_name_);
 
         // Reset all caches, we need to scan next batch data
         scanner.ResetCaches();
@@ -2888,10 +2886,6 @@ void TransactionExecution::PostProcess(ScanNextOperation &scan_next)
 
     const TableName &table_name = scan_next.tx_req_->table_name_;
     CcScanner &scanner = *scan_next.scan_state_->scanner_;
-    bool retain_range_last_tuple =
-        scanner.Type() == CcmScannerType::RangePartition &&
-        scan_next.slice_hd_result_.Value().slice_position_ ==
-            SlicePosition::Middle;
     if (scanner.Type() == CcmScannerType::RangePartition &&
         metrics::enable_remote_request_metrics &&
         !scan_next.slice_hd_result_.Value().is_local_)
@@ -2913,8 +2907,6 @@ void TransactionExecution::PostProcess(ScanNextOperation &scan_next)
     if (scanner.Type() == CcmScannerType::HashPartition &&
         scan_next.hd_result_.IsError())
     {
-        DrainScanner(&scanner, table_name, retain_range_last_tuple);
-
         DLOG(ERROR) << "ScanNextOperation failed for cc error: "
                     << scan_next.hd_result_.ErrorMsg();
         bool_resp_->FinishError(
@@ -2926,8 +2918,6 @@ void TransactionExecution::PostProcess(ScanNextOperation &scan_next)
     else if (scanner.Type() == CcmScannerType::RangePartition &&
              scan_next.slice_hd_result_.IsError())
     {
-        DrainScanner(&scanner, table_name, retain_range_last_tuple);
-
         DLOG(ERROR) << "ScanNextOperation failed for cc error: "
                     << scan_next.slice_hd_result_.ErrorMsg()
                     << ", table: " << scan_next.tx_req_->table_name_.Trace();
@@ -3002,7 +2992,6 @@ void TransactionExecution::PostProcess(ScanNextOperation &scan_next)
                     cc_scan_tuple->cce_addr_, read_ts, &table_name);
                 if (!add_res)
                 {
-                    DrainScanner(&scanner, table_name, retain_range_last_tuple);
                     bool_resp_->FinishError(
                         TxErrorCode::OCC_BREAK_REPEATABLE_READ);
                     bool_resp_ = nullptr;
@@ -3145,8 +3134,6 @@ void TransactionExecution::PostProcess(ScanNextOperation &scan_next)
                             cc_scan_tuple->cce_addr_, read_ts, &table_name);
                         if (!add_res)
                         {
-                            DrainScanner(
-                                &scanner, table_name, retain_range_last_tuple);
                             bool_resp_->FinishError(
                                 TxErrorCode::OCC_BREAK_REPEATABLE_READ);
                             bool_resp_ = nullptr;
@@ -3365,8 +3352,6 @@ void TransactionExecution::PostProcess(ScanNextOperation &scan_next)
                             cc_scan_tuple->cce_addr_, read_ts, &table_name);
                         if (!add_res)
                         {
-                            DrainScanner(
-                                &scanner, table_name, retain_range_last_tuple);
                             bool_resp_->FinishError(
                                 TxErrorCode::OCC_BREAK_REPEATABLE_READ);
                             bool_resp_ = nullptr;
@@ -3517,37 +3502,15 @@ void TransactionExecution::ScanClose(uint64_t alias,
         return;
     }
     scanner = scan_it->second.scanner_.get();
-    const TableName &scan_table_name = scan_it->second.table_name_;
-    assert(scan_table_name == table_name);
+    // Only a range scan stopped in the middle of a slice pins its last tuple
+    // with a read intent for the next batch to resume from that CCE.
+    bool retain_range_resume_tuple =
+        scanner->Type() == CcmScannerType::RangePartition &&
+        scan_it->second.slice_position_ == SlicePosition::Middle;
+    DrainScanner(scanner, table_name, retain_range_resume_tuple);
 
-    if (scanner->Type() == CcmScannerType::RangePartition &&
-        scan_it->second.slice_position_ == SlicePosition::Middle)
-    {
-        // A range scan pins the last tuple with a read intent so the next batch
-        // can resume from its CCE address. A NoLock tuple is not otherwise in
-        // the semantic read set, so retain it for release-only final cleanup.
-        std::vector<const ScanTuple *> last_tuples;
-        scanner->MemoryShardCacheLastTuples(&last_tuples);
-        for (const ScanTuple *last_tuple : last_tuples)
-        {
-            if (last_tuple)
-            {
-                LockType lk_type =
-                    scanner->DeduceScanTupleLockType(last_tuple->rec_status_);
-                if (lk_type == LockType::NoLock &&
-                    !last_tuple->cce_addr_.Empty())
-                {
-                    RetainScanReadForRelease(last_tuple, scan_table_name);
-                }
-            }
-        }
-    }
-
-    RetainScanTrailingReads(scanner, scan_table_name);
-
-    cc_handler_->ScanClose(scan_table_name,
-                           scanner->Direction(),
-                           std::move(scan_it->second.scanner_));
+    cc_handler_->ScanClose(
+        table_name, scanner->Direction(), std::move(scan_it->second.scanner_));
 
     scans_.erase(scan_it);
 }
@@ -5726,42 +5689,23 @@ void TransactionExecution::ReleaseCatalogWriteAll(
     StartTiming();
 }
 
-void TransactionExecution::RetainScanReadForRelease(const ScanTuple *tuple,
-                                                    const TableName &table_name)
-{
-    if (tuple->cce_addr_.Empty() ||
-        rw_set_.GetReadCnt(table_name, tuple->cce_addr_) != 0 ||
-        cmd_set_.FindObjectCommand(table_name, tuple->cce_addr_))
-    {
-        return;
-    }
-
-    (void) rw_set_.AddRead(tuple->cce_addr_, 0, &table_name);
-}
-
-void TransactionExecution::RetainScanTrailingReads(CcScanner *scanner,
-                                                   const TableName &table_name)
-{
-    // Trailing tuples are scanned beyond the end key and are absent from the
-    // semantic read set. Retain their ownership for release-only cleanup so no
-    // post-read can cross a later acquisition by this transaction.
-    std::vector<const ScanTuple *> trailing_tuples;
-    scanner->MemoryShardCacheTrailingTuples(&trailing_tuples);
-    for (const ScanTuple *tuple : trailing_tuples)
-    {
-        if (scanner->DeduceScanTupleLockType(tuple->rec_status_) !=
-            LockType::NoLock)
-        {
-            RetainScanReadForRelease(tuple, table_name);
-        }
-    }
-}
-
 void TransactionExecution::DrainScanner(CcScanner *scanner,
                                         const TableName &table_name,
-                                        bool retain_range_last_tuple)
+                                        bool retain_range_resume_tuple)
 {
     assert(scanner != nullptr);
+    auto retain_for_release = [this, &table_name](const ScanTuple *tuple)
+    {
+        if (tuple == nullptr || tuple->cce_addr_.Empty() ||
+            rw_set_.GetReadCnt(table_name, tuple->cce_addr_) != 0 ||
+            cmd_set_.FindObjectCommand(table_name, tuple->cce_addr_))
+        {
+            return;
+        }
+
+        (void) rw_set_.AddRead(tuple->cce_addr_, 0, &table_name);
+    };
+
     // drain out the scan tuple in the scan cache
     // scanner->SetDrainCacheMode(true);
     scanner->Init();
@@ -5798,15 +5742,27 @@ void TransactionExecution::DrainScanner(CcScanner *scanner,
         if (scan_tuple_lock_type != LockType::NoLock &&
             !cc_scan_tuple->cce_addr_.Empty() && cc_scan_tuple->key_ts_ != 0)
         {
-            RetainScanReadForRelease(cc_scan_tuple, table_name);
+            retain_for_release(cc_scan_tuple);
         }
         scanner->MoveNext();
         cc_scan_tuple = scanner->Current();
     }
 
-    RetainScanTrailingReads(scanner, table_name);
+    // Trailing tuples are scanned beyond the end key and are absent from the
+    // semantic read set. Retain their ownership before closing or reusing the
+    // scanner cache.
+    std::vector<const ScanTuple *> trailing_tuples;
+    scanner->MemoryShardCacheTrailingTuples(&trailing_tuples);
+    for (const ScanTuple *tuple : trailing_tuples)
+    {
+        if (scanner->DeduceScanTupleLockType(tuple->rec_status_) !=
+            LockType::NoLock)
+        {
+            retain_for_release(tuple);
+        }
+    }
 
-    if (retain_range_last_tuple)
+    if (retain_range_resume_tuple)
     {
         std::vector<const ScanTuple *> last_tuples;
         scanner->MemoryShardCacheLastTuples(&last_tuples);
@@ -5815,7 +5771,7 @@ void TransactionExecution::DrainScanner(CcScanner *scanner,
             if (tuple != nullptr && scanner->DeduceScanTupleLockType(
                                         tuple->rec_status_) == LockType::NoLock)
             {
-                RetainScanReadForRelease(tuple, table_name);
+                retain_for_release(tuple);
             }
         }
     }

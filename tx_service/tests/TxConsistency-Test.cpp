@@ -9,7 +9,6 @@
 #include "harness/test_node.h"
 #include "read_write_set.h"
 #include "sharder.h"
-#include "tx_operation.h"
 #include "tx_request.h"
 
 using namespace txservice;
@@ -145,8 +144,8 @@ TEST_CASE("transaction consistency on TestNode", "[tx]")
 {
     TestNode node(TestNodeOptions{}.CoreNum(2));
 
-    // Scanner-only reads use the same long-lived table-name storage as regular
-    // reads, not the owning copy in a pooled scan-close request.
+    // Pooled scan-close requests preserve the same long-lived table-name
+    // backing used by regular scan reads.
     {
         ReadWriteSet read_set;
         CcEntryAddr release_addr;
@@ -154,22 +153,19 @@ TEST_CASE("transaction consistency on TestNode", "[tx]")
 
         TableName stable_name(
             std::string("a"), TableType::Primary, node.Table().Engine());
-        ScanState scan_state(nullptr,
-                             stable_name,
-                             std::vector<DataStoreSearchCond>{},
-                             nullptr,
-                             false,
-                             nullptr,
-                             false);
-        REQUIRE(scan_state.table_name_.StringView().data() ==
+        ScanCloseTxRequest close_req(1, stable_name);
+        REQUIRE_FALSE(close_req.table_name_.IsStringOwner());
+        REQUIRE(close_req.table_name_.StringView().data() ==
                 stable_name.StringView().data());
 
-        TableName pooled_name(stable_name);
-        REQUIRE(read_set.AddRead(release_addr, 0, &scan_state.table_name_));
+        REQUIRE(read_set.AddRead(release_addr, 0, &close_req.table_name_));
         REQUIRE(read_set.DataReadSetSize() == 1);
 
-        pooled_name = TableName(
+        TableName next_stable_name(
             std::string("b"), TableType::Primary, node.Table().Engine());
+        close_req.in_use_.store(false, std::memory_order_relaxed);
+        close_req.Reset(2, next_stable_name);
+        REQUIRE_FALSE(close_req.table_name_.IsStringOwner());
         REQUIRE(read_set.DataReadSet().begin()->second.second ==
                 stable_name.StringView());
 
