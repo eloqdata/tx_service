@@ -7959,7 +7959,7 @@ public:
         if (!ValidTermCheck())
         {
             SetError(CcErrorCode::REQUESTED_NODE_NOT_LEADER);
-            return true;
+            return false;
         }
 
         CcMap *ccm = ccs.GetCcm(*table_name_, node_group_id_);
@@ -8217,7 +8217,8 @@ public:
     {
         if (!ValidTermCheck())
         {
-            return SetError(CcErrorCode::REQUESTED_NODE_NOT_LEADER);
+            SetError(CcErrorCode::REQUESTED_NODE_NOT_LEADER);
+            return false;
         }
 
         CcMap *ccm = ccs.GetCcm(*table_name_, node_group_id_);
@@ -8239,7 +8240,8 @@ public:
                 // is marked as errored.
                 if (init_res.error != CcErrorCode::NO_ERROR)
                 {
-                    return SetError(init_res.error);
+                    SetError(init_res.error);
+                    return false;
                 }
                 // The req will be re-enqueued.
                 return false;
@@ -8281,10 +8283,7 @@ public:
         assert(err_code != CcErrorCode::NO_ERROR);
         DLOG(ERROR) << "Abort this uploadbatch request with error: "
                     << CcErrorMessage(err_code);
-        if (SetError(err_code))
-        {
-            Free();
-        }
+        SetError(err_code);
     }
 
     void Wait()
