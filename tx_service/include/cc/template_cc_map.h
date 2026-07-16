@@ -7427,7 +7427,8 @@ public:
         {
             LOG(INFO) << "Refuse to receive remote records for cache, range "
                       << req.RangeId();
-            return req.SetError(CcErrorCode::UPLOAD_BATCH_REJECTED);
+            req.SetError(CcErrorCode::UPLOAD_BATCH_REJECTED);
+            return false;
         }
 
         if (!req.Parsed())

@@ -39,7 +39,10 @@ Rules of the model (verified in `tx_service/src/cc/cc_shard.cpp::ProcessRequests
    `ProcessRequests()` dequeues in batches of up to 64 (`req_buf_`) and calls `Execute(*this)`;
    if `Execute` returns `true` it calls `req->Free()`, returning the request to its
    `CcRequestPool` (`cc_req_pool.h` — a circular vector of reusable request objects keyed on the
-   `in_use_` flag).
+   `in_use_` flag). Stack-owned requests that notify an external waiter before `Execute()`
+   unwinds must return `false`, or must keep `in_use_` set until the scheduler-side `Free()`
+   has completed; otherwise the owner can reset or destroy the stack object while
+   `ProcessRequests()` still holds its raw pointer.
 2. **`Execute()` must never block.** There are no waits inside `Execute()`; anything that cannot
    complete immediately returns `false` (so the request is *not* recycled) and arranges its own
    re-execution later. The four re-enqueue/retry patterns:
@@ -58,7 +61,9 @@ Rules of the model (verified in `tx_service/src/cc/cc_shard.cpp::ProcessRequests
    - **Multi-shard fan-out**: `CcMap::MoveRequest()` forwards a request to the next core; requests
      like `KickoutCcEntryCc` or scans re-enqueue *themselves* to yield after a batch.
 3. **Cancellation** goes through `AbortCcRequest(CcErrorCode)`, which must set the error on the
-   result and `Free()` the request (e.g. used by `CcShard::AbortCcRequests` and the OOM path).
+   result. Pool-owned requests must also `Free()` themselves on the final abort path so they can
+   be reused. Stack-owned requests use their own completion fence and must not call `Free()` after
+   waking the owner.
 4. A second queue, `low_priority_cc_queue_` (`EnqueueLowPriorityCcRequest`), carries background
    work; `ProcessLowPriorityRequests()` drains it one request at a time under a 50 µs budget per
    invocation. A third, `lazy_free_queue_`, destroys evicted `TxObject`s off the hot path.

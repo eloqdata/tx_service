@@ -21,11 +21,13 @@
  */
 #include "cc/local_cc_shards.h"
 
+#include <bthread/bthread.h>
 #include <bthread/mutex.h>
 #include <butil/time.h>
 #include <malloc.h>
 #include <sys/stat.h>
 
+#include <algorithm>
 #include <atomic>
 #include <chrono>
 #include <condition_variable>
@@ -82,6 +84,23 @@ DEFINE_uint64(hash_partition_data_sync_scan_data_size,
               1000 * 1024,
               "Per-batch memory budget (bytes) for data exported during a "
               "hash partition data-sync scan");
+
+namespace
+{
+void WaitForStackCcRequestFree(const CcRequestBase &req)
+{
+    // KickoutCcEntryCc signals its CcHandlerResult before ProcessRequests()
+    // calls Free(). Stack-owned requests must not be reset or destroyed until
+    // that final scheduler access is complete.
+    uint64_t interval_us = 100;
+    constexpr uint64_t max_interval_us = 100000;
+    while (req.InUse())
+    {
+        bthread_usleep(interval_us);
+        interval_us = std::min(interval_us << 1, max_interval_us);
+    }
+}
+}  // namespace
 
 std::atomic<uint64_t> LocalCcShards::local_clock(0);
 inline thread_local size_t tls_shard_idx = std::numeric_limits<size_t>::max();
@@ -6899,12 +6918,15 @@ void LocalCcShards::PurgeDeletedData()
                                &res,
                                Count(),
                                CleanType::CleanDeletedData);
+                purge_cc.Use();
                 for (auto &shard : cc_shards_)
                 {
                     shard->Enqueue(&purge_cc);
                 }
                 std::unique_lock<std::mutex> lk(mux);
                 cv.wait(lk, [&done] { return done; });
+                lk.unlock();
+                WaitForStackCcRequestFree(purge_cc);
             }
         }
     }
@@ -6988,6 +7010,7 @@ void LocalCcShards::KickoutDataForTest()
                                  &res,
                                  Count(),
                                  CleanType::CleanDataForTest);
+                kickout_cc.Use();
                 for (auto &shard : cc_shards_)
                 {
                     shard->Enqueue(&kickout_cc);
@@ -6995,6 +7018,8 @@ void LocalCcShards::KickoutDataForTest()
 
                 std::unique_lock<std::mutex> lk(mux);
                 cv.wait(lk, [&done] { return done; });
+                lk.unlock();
+                WaitForStackCcRequestFree(kickout_cc);
             }
         }
 
