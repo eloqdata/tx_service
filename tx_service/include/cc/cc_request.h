@@ -8642,12 +8642,17 @@ struct ScanSliceDeltaSizeCcForRangePartition : public CcRequestBase
         if (ccm == nullptr)
         {
             assert(!table_name_.IsMeta());
-            [[maybe_unused]] InitCcmResult init_res = ccs.InitCcm(
+            InitCcmResult init_res = ccs.InitCcm(
                 table_name_, node_group_id_, node_group_term_, this);
-            // Catalog entry should always exists and schema should not be null,
-            // since this cc request should be executed when table is locked by
-            // data sync txm.
-            assert(init_res.success);
+            if (!init_res.success)
+            {
+                if (init_res.error != CcErrorCode::NO_ERROR)
+                {
+                    SetError(init_res.error);
+                }
+                return false;
+            }
+
             assert(init_res.schema != nullptr);
             ccm = ccs.GetCcm(table_name_, node_group_id_);
             assert(ccm != nullptr);
@@ -8868,19 +8873,24 @@ struct ScanDeltaSizeCcForHashPartition : public CcRequestBase
         if (ccm == nullptr)
         {
             assert(!table_name_.IsMeta());
-            [[maybe_unused]] InitCcmResult init_res = ccs.InitCcm(
+            InitCcmResult init_res = ccs.InitCcm(
                 table_name_, node_group_id_, node_group_term_, this);
-            // Catalog entry should always exists and schema should not be null,
-            // since this cc request should be executed when table is locked by
-            // data sync txm.
-            assert(init_res.success);
+            if (!init_res.success)
+            {
+                if (init_res.error != CcErrorCode::NO_ERROR)
+                {
+                    SetError(init_res.error);
+                }
+                return false;
+            }
+
             assert(init_res.schema != nullptr);
             ccm = ccs.GetCcm(table_name_, node_group_id_);
             assert(ccm != nullptr);
         }
         ccm->Execute(*this);
 
-        // return false since ScanSliceDeltaSizeCcForRangePartition is not
+        // return false since ScanDeltaSizeCcForHashPartition is not
         // re-used and does not need to call CcRequestBase::Free
         return false;
     }
@@ -9070,12 +9080,17 @@ public:
         if (ccm == nullptr)
         {
             assert(!table_name_.IsMeta());
-            [[maybe_unused]] InitCcmResult init_res = ccs.InitCcm(
+            InitCcmResult init_res = ccs.InitCcm(
                 table_name_, node_group_id_, node_group_term_, this);
-            // Catalog entry should always exists and schema should not be null,
-            // since this cc request should be executed when table is locked by
-            // data sync txm.
-            assert(init_res.success);
+            if (!init_res.success)
+            {
+                if (init_res.error != CcErrorCode::NO_ERROR)
+                {
+                    SetError(init_res.error);
+                }
+                return false;
+            }
+
             assert(init_res.schema != nullptr);
             ccm = ccs.GetCcm(table_name_, node_group_id_);
             assert(ccm != nullptr);
