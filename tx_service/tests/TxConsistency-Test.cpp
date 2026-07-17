@@ -328,6 +328,9 @@ TEST_CASE("transaction consistency on TestNode", "[tx]")
     std::atomic<uint32_t> second_augmented_count{0};
     std::atomic<uint32_t> first_terminal_count{0};
     std::atomic<uint32_t> second_terminal_count{0};
+    std::atomic<uint64_t> second_continuation_lock_addr{0};
+    std::atomic<uint32_t> term_error_preserved_count{0};
+    std::atomic<bool> term_error_blocking_info_cleared{false};
     {
         constexpr uint16_t selected_bucket = 0;
         const NodeGroupId node_group_id = Sharder::Instance().NativeNodeGroup();
@@ -446,6 +449,8 @@ TEST_CASE("transaction consistency on TestNode", "[tx]")
 
                 const uint64_t cce_lock_addr =
                     scan_req.BlockingCceLockAddr(core_id).first;
+                second_continuation_lock_addr.store(cce_lock_addr,
+                                                    std::memory_order_release);
                 auto *continuation_lock =
                     reinterpret_cast<KeyGapLockAndExtraData *>(cce_lock_addr);
                 LruEntry *second_cce = continuation_lock == nullptr
@@ -525,6 +530,29 @@ TEST_CASE("transaction consistency on TestNode", "[tx]")
         }
         scan_completed_normally = !scan_result.IsError();
 
+        CcHandlerResult<ScanNextResult> term_error_result(nullptr);
+        term_error_result.Value().current_scan_plan_ = &plan;
+        term_error_result.Value().ccm_scanner_ = &scanner;
+        ScanNextBatchCc term_error_req;
+        term_error_req.Reset(node.Table(),
+                             node_group_id,
+                             plan.GetNodeGroupTerm(node_group_id),
+                             txn,
+                             tx.Txm()->GetStartTs(),
+                             end_key,
+                             true,
+                             &plan,
+                             nullptr,
+                             tx.Txm()->TxTerm(),
+                             &term_error_result,
+                             IsolationLevel::RepeatableRead,
+                             CcProtocol::OccRead,
+                             false,
+                             false,
+                             false,
+                             true,
+                             true);
+
         WaitableCc inspect_and_cleanup(
             [&](CcShard &ccs)
             {
@@ -536,6 +564,26 @@ TEST_CASE("transaction consistency on TestNode", "[tx]")
                                            std::memory_order_release);
                 second_terminal_count.store(read_intent_count(second_cce),
                                             std::memory_order_release);
+
+                // A term transition may recycle and reuse the saved lock
+                // wrapper before a queued request observes the error. Model
+                // that stale address as pointing at an unrelated live
+                // reference: the request must detach it without releasing it.
+                term_error_req.SetBlockingInfo(
+                    core_id,
+                    second_continuation_lock_addr.load(
+                        std::memory_order_acquire),
+                    0,
+                    ScanType::ScanBoth,
+                    ScanBlockingType::NoBlocking);
+                term_error_req.SetError(core_id,
+                                        CcErrorCode::REQUESTED_NODE_NOT_LEADER);
+                term_error_preserved_count.store(read_intent_count(second_cce),
+                                                 std::memory_order_release);
+                term_error_blocking_info_cleared.store(
+                    term_error_req.BlockingCceLockAddr(core_id).first == 0,
+                    std::memory_order_release);
+
                 ccs.ClearTx(txn);
                 return true;
             });
@@ -543,6 +591,7 @@ TEST_CASE("transaction consistency on TestNode", "[tx]")
             core_id, &inspect_and_cleanup);
         inspect_and_cleanup.Wait();
         REQUIRE_FALSE(inspect_and_cleanup.IsError());
+        REQUIRE(tx.Abort());
     }
 
     REQUIRE(commit_scan_retained);
@@ -565,6 +614,8 @@ TEST_CASE("transaction consistency on TestNode", "[tx]")
     CHECK(second_augmented_count.load(std::memory_order_acquire) == 2);
     CHECK(first_terminal_count.load(std::memory_order_acquire) == 1);
     CHECK(second_terminal_count.load(std::memory_order_acquire) == 1);
+    CHECK(term_error_blocking_info_cleared.load(std::memory_order_acquire));
+    CHECK(term_error_preserved_count.load(std::memory_order_acquire) == 1);
 }
 
 int main(int argc, char **argv)
