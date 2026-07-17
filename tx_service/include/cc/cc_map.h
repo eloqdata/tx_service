@@ -458,6 +458,5 @@ protected:
     const TableSchema *table_schema_;
     friend struct ReadCc;
     friend struct ApplyCc;
-    friend struct ScanNextBatchCc;
 };
 }  // namespace txservice

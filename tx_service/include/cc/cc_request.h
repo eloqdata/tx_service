@@ -1930,7 +1930,6 @@ public:
                                                                    protocol,
                                                                    iso_level);
 
-        err_.store(CcErrorCode::NO_ERROR, std::memory_order_relaxed);
         parallel_req_ = true;
 
         ng_term_ = ng_term;  // bucket owner term
@@ -1958,13 +1957,13 @@ public:
 
         wait_for_fetch_bucket_cnt_.clear();
         blocking_info_.clear();
-        for (auto &[core_id, scan_progress] : *bucket_scan_progress_)
+        for (const auto &[core_id, scan_progress] : *bucket_scan_progress_)
         {
-            scan_progress.memory_scan_is_finished_ =
-                scan_progress.AllFinished();
             wait_for_fetch_bucket_cnt_[core_id] = 0;
             auto [iter, inserted] = blocking_info_.try_emplace(core_id);
-            iter->second = {};
+            iter->second.cce_lock_addr_ = 0;
+            iter->second.scan_type_ = ScanType::ScanUnknow;
+            iter->second.type_ = ScanBlockingType::NoBlocking;
         }
     }
 
@@ -2005,9 +2004,8 @@ public:
                 {
                     if (catalog_entry->dirty_schema_ == nullptr)
                     {
-                        return SetError(
-                            ccs.core_id_,
-                            CcErrorCode::REQUESTED_TABLE_NOT_EXISTS);
+                        res_->SetError(CcErrorCode::REQUESTED_TABLE_NOT_EXISTS);
+                        return true;
                     }
                     else
                     {
@@ -2115,17 +2113,6 @@ public:
 
     bool SetFinish(uint16_t core_id)
     {
-        assert(blocking_info_.count(core_id) > 0);
-        ScanBlockingInfo blocking_info = blocking_info_[core_id];
-        blocking_info_[core_id] = {};
-        ClearBlockingInfo(blocking_info.cce_lock_addr_,
-                          blocking_info.cce_lock_generation_,
-                          blocking_info.end_cce_lock_addr_,
-                          blocking_info.end_cce_lock_generation_,
-                          blocking_info.type_,
-                          Txn(),
-                          NodeGroupId());
-
         if (WaitForFetchBucketCnt(core_id) > 0)
         {
             SetIsWaitForFetchBucket(core_id);
@@ -2169,97 +2156,14 @@ public:
     bool SetError(uint16_t core_id, CcErrorCode err)
     {
         SetErrorCode(err);
+
+        if (WaitForFetchBucketCnt(core_id) > 0)
+        {
+            SetIsWaitForFetchBucket(core_id);
+            return false;
+        }
+
         return SetFinish(core_id);
-    }
-
-    /**
-     * Returns the current identity of a live lock wrapper.
-     *
-     * Lock wrappers stay allocated long enough for queued requests to inspect
-     * them, but Reset() may reuse the same address for another CcEntry. The
-     * generation makes that reuse visible without treating the new lock as the
-     * scan's continuation.
-     */
-    static uint64_t LockGeneration(uint64_t lock_addr)
-    {
-        if (lock_addr == 0)
-        {
-            return 0;
-        }
-
-        auto *lock = reinterpret_cast<KeyGapLockAndExtraData *>(lock_addr);
-        return lock->Generation();
-    }
-
-    static bool LockAddressIsCurrent(uint64_t lock_addr, uint64_t generation)
-    {
-        if (lock_addr == 0)
-        {
-            return generation == 0;
-        }
-
-        // This runs on the lock's owning CcShard. A live continuation keeps
-        // the wrapper in use; after teardown, inspecting its generation relies
-        // on the lock pool's 30-second retirement grace for already-queued
-        // requests.
-        auto *lock = reinterpret_cast<KeyGapLockAndExtraData *>(lock_addr);
-        return lock->GetUsedStatus() && lock->Generation() == generation;
-    }
-
-    /**
-     * Releases one live continuation/end reference after its stored identity
-     * has been cleared, so repeated completion cannot consume it twice.
-     */
-    static void ClearBlockingInfo(uint64_t cce_lock_addr,
-                                  uint64_t cce_lock_generation,
-                                  uint64_t end_cce_lock_addr,
-                                  uint64_t end_cce_lock_generation,
-                                  ScanBlockingType blocking_type,
-                                  TxNumber txn,
-                                  txservice::NodeGroupId node_group_id)
-    {
-        auto decr_read_intent =
-            [txn, node_group_id](uint64_t lock_addr, uint64_t generation)
-        {
-            if (lock_addr == 0 || !LockAddressIsCurrent(lock_addr, generation))
-            {
-                return;
-            }
-
-            auto *lock = reinterpret_cast<KeyGapLockAndExtraData *>(lock_addr);
-            CcMap *ccm = lock->GetCcMap();
-            LruEntry *cce = lock->GetCcEntry();
-            if (ccm != nullptr && cce != nullptr)
-            {
-                ccm->DecrReadIntent(lock->KeyLock(), cce, txn, node_group_id);
-            }
-        };
-
-        decr_read_intent(end_cce_lock_addr, end_cce_lock_generation);
-        if (blocking_type == ScanBlockingType::NoBlocking)
-        {
-            decr_read_intent(cce_lock_addr, cce_lock_generation);
-        }
-        else if (cce_lock_addr != 0 &&
-                 LockAddressIsCurrent(cce_lock_addr, cce_lock_generation) &&
-                 (blocking_type == ScanBlockingType::BlockOnFuture ||
-                  blocking_type == ScanBlockingType::BlockOnLock))
-        {
-            auto *lock =
-                reinterpret_cast<KeyGapLockAndExtraData *>(cce_lock_addr);
-            CcMap *ccm = lock->GetCcMap();
-            LruEntry *cce = lock->GetCcEntry();
-            if (ccm != nullptr && cce != nullptr)
-            {
-                NonBlockingLock *key_lock = lock->KeyLock();
-                LockType lock_type = key_lock->SearchLock(txn);
-                if (lock_type != LockType::NoLock)
-                {
-                    ccm->ReleaseCceLock(
-                        key_lock, cce, txn, node_group_id, lock_type);
-                }
-            }
-        }
     }
 
     bool IsForWrite() const
@@ -2308,14 +2212,8 @@ public:
                          ScanBlockingType blocking_type)
     {
         assert(blocking_info_.count(core_id) > 0);
-        ScanBlockingInfo &blocking_info = blocking_info_[core_id];
-        blocking_info.cce_lock_addr_ = cce_lock_addr;
-        blocking_info.cce_lock_generation_ = LockGeneration(cce_lock_addr);
-        blocking_info.end_cce_lock_addr_ = end_cce_lock_addr;
-        blocking_info.end_cce_lock_generation_ =
-            LockGeneration(end_cce_lock_addr);
-        blocking_info.scan_type_ = scan_type;
-        blocking_info.type_ = blocking_type;
+        blocking_info_[core_id] = {
+            cce_lock_addr, end_cce_lock_addr, scan_type, blocking_type};
     }
 
     int32_t GetRedisObjectType() const
@@ -2424,12 +2322,10 @@ private:
 
     struct ScanBlockingInfo
     {
-        uint64_t cce_lock_addr_{0};
-        uint64_t cce_lock_generation_{0};
-        uint64_t end_cce_lock_addr_{0};
-        uint64_t end_cce_lock_generation_{0};
-        ScanType scan_type_{ScanType::ScanUnknow};
-        ScanBlockingType type_{ScanBlockingType::NoBlocking};
+        uint64_t cce_lock_addr_;
+        uint64_t end_cce_lock_addr_;
+        ScanType scan_type_;
+        ScanBlockingType type_;
     };
 
     absl::flat_hash_map<uint16_t, size_t> wait_for_fetch_bucket_cnt_;

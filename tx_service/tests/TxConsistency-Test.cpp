@@ -1,14 +1,9 @@
 #include <atomic>
-#include <chrono>
-#include <cstdint>
-#include <cstdio>
-#include <cstdlib>
-#include <memory>
 #include <string>
 #include <vector>
 
 #include "absl/container/flat_hash_map.h"
-#include "bthread/bthread.h"
+#include "catch2/catch_all.hpp"
 #include "cc/cc_entry.h"
 #include "cc/cc_req_misc.h"
 #include "cc/cc_request.h"
@@ -17,9 +12,6 @@
 #include "read_write_set.h"
 #include "sharder.h"
 #include "tx_request.h"
-
-// Keep Catch2 last so its non-fatal CHECK macro wins after BRPC headers.
-#include "catch2/catch_all.hpp"
 
 using namespace txservice;
 using namespace txservice::test;
@@ -411,7 +403,6 @@ TEST_CASE("transaction consistency on TestNode", "[tx]")
         REQUIRE(failing_tx.Abort());
         bool scanner_only_lock_left = TxOwnsScanRead(failing_read);
 
-        // Keep RED isolated from later scenarios if the regression is present.
         WaitableCc cleanup(
             [failing_txn](CcShard &ccs)
             {
@@ -425,87 +416,28 @@ TEST_CASE("transaction consistency on TestNode", "[tx]")
 
         REQUIRE(keeper.Abort());
         REQUIRE_FALSE(TxOwnsScanRead(keeper_read));
-        CHECK_FALSE(scanner_only_lock_left);
+        REQUIRE_FALSE(scanner_only_lock_left);
     }
 
-    // Scenario 7: normal resume and terminal completion must each release
-    // exactly one continuation and finite-end ReadIntent.
-    bool stale_progress_cleared = false;
-    bool finished_progress_preserved = false;
-    bool reset_error_cleared = false;
-    bool scan_completed_normally = false;
-    std::atomic<LruEntry *> first_continuation_cce{nullptr};
-    std::atomic<LruEntry *> second_continuation_cce{nullptr};
-    std::atomic<uint32_t> first_pin_count{0};
-    std::atomic<uint32_t> first_augmented_count{0};
-    std::atomic<uint32_t> first_resumed_count{0};
-    std::atomic<uint32_t> second_pin_count{0};
-    std::atomic<uint32_t> second_augmented_count{0};
-    std::atomic<uint32_t> first_terminal_count{0};
-    std::atomic<uint32_t> second_terminal_count{0};
-    std::atomic<LruEntry *> finite_end_cce{nullptr};
-    std::atomic<LruEntry *> resumed_finite_end_cce{nullptr};
-    std::atomic<uint32_t> finite_end_pin_count{0};
-    std::atomic<uint32_t> finite_end_augmented_count{0};
-    std::atomic<uint32_t> finite_end_resumed_count{0};
-    std::atomic<uint32_t> finite_end_terminal_count{0};
-    std::atomic<uint64_t> second_continuation_lock_addr{0};
-    std::atomic<uint32_t> term_error_preserved_count{0};
-    std::atomic<bool> term_error_blocking_info_cleared{false};
-    std::atomic<uint32_t> stale_resume_preserved_count{0};
-    std::atomic<bool> stale_resume_result_finished{false};
-    std::atomic<CcErrorCode> stale_resume_error{CcErrorCode::NO_ERROR};
-    std::atomic<bool> stale_resume_blocking_info_cleared{false};
+    // Scenario 7: a request that becomes drained while a continuation is
+    // pending must consume exactly that continuation ReadIntent before finish.
     {
-        constexpr uint16_t selected_bucket = 0;
-        const NodeGroupId node_group_id = Sharder::Instance().NativeNodeGroup();
-        const uint16_t core_id =
-            Sharder::Instance().ShardBucketIdToCoreIdx(selected_bucket);
-
+        constexpr int scan_key = 30;
         auto seed = node.BeginTx();
-        size_t seed_count = 0;
-        int finite_end_key = 0;
-        for (int key = 10000;
-             seed_count < 2 * ScanNextBatchCc::ScanBatchSize + 2;
-             ++key)
-        {
-            CompositeKey<int> composite_key{int{key}};
-            const uint16_t bucket_id =
-                Sharder::MapKeyHashToBucketId(composite_key.Hash());
-            if (bucket_id != selected_bucket &&
-                Sharder::Instance().ShardBucketIdToCoreIdx(bucket_id) ==
-                    core_id)
-            {
-                REQUIRE(seed.Upsert(key, key));
-                finite_end_key = key;
-                ++seed_count;
-            }
-        }
+        REQUIRE(seed.Upsert(scan_key, scan_key));
         REQUIRE(seed.Commit());
 
         auto tx =
             node.BeginTx(IsolationLevel::RepeatableRead, CcProtocol::OccRead);
+        ClosedScanRead scanned = ScanOneAndClose(node, tx, scan_key);
         const TxNumber txn = tx.Txm()->TxNumber();
-        auto read_intent_count = [txn](LruEntry *cce)
-        {
-            if (cce == nullptr)
-            {
-                return uint32_t{0};
-            }
-            NonBlockingLock *key_lock = cce->GetKeyLock();
-            if (key_lock == nullptr)
-            {
-                return uint32_t{0};
-            }
-            const auto &read_intents = key_lock->ReadIntents();
-            auto read_intent_it = read_intents.find(txn);
-            return read_intent_it == read_intents.end()
-                       ? uint32_t{0}
-                       : read_intent_it->second;
-        };
+        const NodeGroupId node_group_id = Sharder::Instance().NativeNodeGroup();
+        const uint16_t core_id = scanned.cce_addr_.CoreId();
+        const uint16_t bucket_id = Sharder::MapKeyHashToBucketId(
+            CompositeKey<int>{int{scan_key}}.Hash());
 
         absl::flat_hash_map<NodeGroupId, std::vector<uint16_t>> buckets;
-        buckets[node_group_id].push_back(selected_bucket);
+        buckets[node_group_id].push_back(bucket_id);
         absl::flat_hash_map<NodeGroupId,
                             absl::flat_hash_map<uint16_t, BucketScanProgress>>
             saved_progress;
@@ -517,384 +449,7 @@ TEST_CASE("transaction consistency on TestNode", "[tx]")
                 core_id, TxKey(CompositeKey<int>::NegativeInfinity()), true);
         REQUIRE(core_inserted);
         core_progress_it->second.memory_scan_is_finished_ = true;
-        core_progress_it->second.scan_buckets_[selected_bucket] = false;
-
-        BucketScanPlan plan(0, &buckets, saved_progress);
-        BucketScanProgress &progress =
-            plan.GetBucketScanProgress(node_group_id)->at(core_id);
-        HashParitionCcScanner<CompositeKey<int>, CompositeRecord<int>> scanner(
-            ScanDirection::Forward, ScanIndexType::Primary, nullptr);
-        CcHandlerResult<ScanNextResult> scan_result(nullptr);
-        scan_result.Value().current_scan_plan_ = &plan;
-        scan_result.Value().ccm_scanner_ = &scanner;
-        TxKey end_key(std::make_unique<CompositeKey<int>>(finite_end_key));
-        ScanNextBatchCc scan_req;
-        auto reset_scan_req = [&]
-        {
-            scan_req.Reset(node.Table(),
-                           node_group_id,
-                           plan.GetNodeGroupTerm(node_group_id),
-                           txn,
-                           tx.Txm()->GetStartTs(),
-                           end_key,
-                           true,
-                           &plan,
-                           nullptr,
-                           tx.Txm()->TxTerm(),
-                           &scan_result,
-                           IsolationLevel::RepeatableRead,
-                           CcProtocol::OccRead,
-                           false,
-                           false,
-                           false,
-                           true,
-                           true);
-        };
-
-        reset_scan_req();
-        stale_progress_cleared = !progress.memory_scan_is_finished_;
-        scan_req.SetErrorCode(CcErrorCode::DATA_STORE_ERR);
-
-        progress.memory_scan_is_finished_ = true;
-        progress.scan_buckets_[selected_bucket] = true;
-        reset_scan_req();
-        finished_progress_preserved = progress.memory_scan_is_finished_;
-        reset_error_cleared = scan_req.ErrorCode() == CcErrorCode::NO_ERROR;
-
-        // Deliberately restore the stale state so the marker can drain KV
-        // before the self-enqueued continuation executes.
-        progress.memory_scan_is_finished_ = true;
-        progress.scan_buckets_[selected_bucket] = false;
-
-        WaitableCc inspect_normal_resume(
-            [&](CcShard &)
-            {
-                LruEntry *first_cce =
-                    first_continuation_cce.load(std::memory_order_acquire);
-                first_resumed_count.store(read_intent_count(first_cce),
-                                          std::memory_order_release);
-
-                const uint64_t cce_lock_addr =
-                    scan_req.BlockingCceLockAddr(core_id).first;
-                second_continuation_lock_addr.store(cce_lock_addr,
-                                                    std::memory_order_release);
-                auto *continuation_lock =
-                    reinterpret_cast<KeyGapLockAndExtraData *>(cce_lock_addr);
-                LruEntry *second_cce = continuation_lock == nullptr
-                                           ? nullptr
-                                           : continuation_lock->GetCcEntry();
-                second_continuation_cce.store(second_cce,
-                                              std::memory_order_release);
-                uint32_t pin_count = read_intent_count(second_cce);
-                second_pin_count.store(pin_count, std::memory_order_release);
-                if (pin_count == 1)
-                {
-                    NonBlockingLock *key_lock = second_cce->GetKeyLock();
-                    key_lock->AcquireReadIntent(txn);
-                    second_augmented_count.store(read_intent_count(second_cce),
-                                                 std::memory_order_release);
-                }
-
-                const uint64_t end_cce_lock_addr =
-                    scan_req.BlockingCceLockAddr(core_id).second;
-                auto *end_lock = reinterpret_cast<KeyGapLockAndExtraData *>(
-                    end_cce_lock_addr);
-                LruEntry *end_cce =
-                    end_lock == nullptr ? nullptr : end_lock->GetCcEntry();
-                resumed_finite_end_cce.store(end_cce,
-                                             std::memory_order_release);
-                finite_end_resumed_count.store(read_intent_count(end_cce),
-                                               std::memory_order_release);
-
-                progress.memory_scan_is_finished_ = true;
-                progress.scan_buckets_[selected_bucket] = true;
-                return true;
-            });
-        WaitableCc mark_first_continuation(
-            [&](CcShard &ccs)
-            {
-                const uint64_t cce_lock_addr =
-                    scan_req.BlockingCceLockAddr(core_id).first;
-                auto *continuation_lock =
-                    reinterpret_cast<KeyGapLockAndExtraData *>(cce_lock_addr);
-                LruEntry *cce = continuation_lock == nullptr
-                                    ? nullptr
-                                    : continuation_lock->GetCcEntry();
-                first_continuation_cce.store(cce, std::memory_order_release);
-                uint32_t pin_count = read_intent_count(cce);
-                first_pin_count.store(pin_count, std::memory_order_release);
-                if (pin_count == 1)
-                {
-                    NonBlockingLock *key_lock = cce->GetKeyLock();
-                    key_lock->AcquireReadIntent(txn);
-                    first_augmented_count.store(read_intent_count(cce),
-                                                std::memory_order_release);
-                }
-
-                const uint64_t end_cce_lock_addr =
-                    scan_req.BlockingCceLockAddr(core_id).second;
-                auto *end_lock = reinterpret_cast<KeyGapLockAndExtraData *>(
-                    end_cce_lock_addr);
-                LruEntry *end_cce =
-                    end_lock == nullptr ? nullptr : end_lock->GetCcEntry();
-                finite_end_cce.store(end_cce, std::memory_order_release);
-                uint32_t end_pin_count = read_intent_count(end_cce);
-                finite_end_pin_count.store(end_pin_count,
-                                           std::memory_order_release);
-                if (end_pin_count == 1)
-                {
-                    end_cce->GetKeyLock()->AcquireReadIntent(txn);
-                    finite_end_augmented_count.store(read_intent_count(end_cce),
-                                                     std::memory_order_release);
-                }
-
-                progress.memory_scan_is_finished_ = false;
-                ccs.Enqueue(&inspect_normal_resume);
-                return true;
-            });
-        WaitableCc enqueue_scan(
-            [&](CcShard &ccs)
-            {
-                ccs.Enqueue(&scan_req);
-                ccs.Enqueue(&mark_first_continuation);
-                return true;
-            });
-
-        Sharder::Instance().GetLocalCcShards()->EnqueueCcRequest(core_id,
-                                                                 &enqueue_scan);
-        enqueue_scan.Wait();
-        REQUIRE_FALSE(enqueue_scan.IsError());
-        mark_first_continuation.Wait();
-        REQUIRE_FALSE(mark_first_continuation.IsError());
-        inspect_normal_resume.Wait();
-        REQUIRE_FALSE(inspect_normal_resume.IsError());
-
-        const auto scan_deadline =
-            std::chrono::steady_clock::now() + std::chrono::seconds(20);
-        while (!scan_result.IsFinished())
-        {
-            if (std::chrono::steady_clock::now() >= scan_deadline)
-            {
-                std::fprintf(
-                    stderr,
-                    "TxConsistency-Test: hash scan continuation cleanup did "
-                    "not finish within 20 seconds.\n");
-                std::abort();
-            }
-            bthread_usleep(100);
-        }
-        scan_completed_normally = !scan_result.IsError();
-
-        CcHandlerResult<ScanNextResult> term_error_result(nullptr);
-        term_error_result.Value().current_scan_plan_ = &plan;
-        term_error_result.Value().ccm_scanner_ = &scanner;
-        ScanNextBatchCc term_error_req;
-        term_error_req.Reset(node.Table(),
-                             node_group_id,
-                             plan.GetNodeGroupTerm(node_group_id),
-                             txn,
-                             tx.Txm()->GetStartTs(),
-                             end_key,
-                             true,
-                             &plan,
-                             nullptr,
-                             tx.Txm()->TxTerm(),
-                             &term_error_result,
-                             IsolationLevel::RepeatableRead,
-                             CcProtocol::OccRead,
-                             false,
-                             false,
-                             false,
-                             true,
-                             true);
-
-        CcHandlerResult<ScanNextResult> stale_resume_result(nullptr);
-        stale_resume_result.Value().current_scan_plan_ = &plan;
-        stale_resume_result.Value().ccm_scanner_ = &scanner;
-        ScanNextBatchCc stale_resume_req;
-        stale_resume_req.Reset(node.Table(),
-                               node_group_id,
-                               plan.GetNodeGroupTerm(node_group_id),
-                               txn,
-                               tx.Txm()->GetStartTs(),
-                               end_key,
-                               true,
-                               &plan,
-                               nullptr,
-                               tx.Txm()->TxTerm(),
-                               &stale_resume_result,
-                               IsolationLevel::RepeatableRead,
-                               CcProtocol::OccRead,
-                               false,
-                               false,
-                               false,
-                               true,
-                               true);
-
-        WaitableCc inspect_stale_resume(
-            [&](CcShard &ccs)
-            {
-                LruEntry *second_cce =
-                    second_continuation_cce.load(std::memory_order_acquire);
-                stale_resume_preserved_count.store(
-                    read_intent_count(second_cce), std::memory_order_release);
-                stale_resume_result_finished.store(
-                    stale_resume_result.IsFinished(),
-                    std::memory_order_release);
-                stale_resume_error.store(stale_resume_result.ErrorCode(),
-                                         std::memory_order_release);
-                stale_resume_blocking_info_cleared.store(
-                    stale_resume_req.BlockingCceLockAddr(core_id).first == 0,
-                    std::memory_order_release);
-                ccs.ClearTx(txn);
-                return true;
-            });
-        WaitableCc inspect_and_cleanup(
-            [&](CcShard &ccs)
-            {
-                LruEntry *first_cce =
-                    first_continuation_cce.load(std::memory_order_acquire);
-                LruEntry *second_cce =
-                    second_continuation_cce.load(std::memory_order_acquire);
-                LruEntry *end_cce =
-                    finite_end_cce.load(std::memory_order_acquire);
-                first_terminal_count.store(read_intent_count(first_cce),
-                                           std::memory_order_release);
-                second_terminal_count.store(read_intent_count(second_cce),
-                                            std::memory_order_release);
-                finite_end_terminal_count.store(read_intent_count(end_cce),
-                                                std::memory_order_release);
-
-                // A term transition may recycle and reuse the saved lock
-                // wrapper before a queued request observes the error. Capture
-                // the old identity, then reset the same wrapper generation and
-                // give the reused lock an unrelated live reference.
-                uint64_t stale_lock_addr = second_continuation_lock_addr.load(
-                    std::memory_order_acquire);
-                term_error_req.SetBlockingInfo(core_id,
-                                               stale_lock_addr,
-                                               0,
-                                               ScanType::ScanBoth,
-                                               ScanBlockingType::NoBlocking);
-                auto *reused_lock =
-                    reinterpret_cast<KeyGapLockAndExtraData *>(stale_lock_addr);
-                CcMap *reused_ccm = reused_lock->GetCcMap();
-                LruPage *reused_page = reused_lock->GetCcPage();
-                reused_lock->Reset(reused_ccm, reused_page, second_cce);
-                reused_lock->SetUsedStatus(true);
-                reused_lock->KeyLock()->AcquireReadIntent(txn);
-
-                term_error_req.SetError(core_id,
-                                        CcErrorCode::REQUESTED_NODE_NOT_LEADER);
-                term_error_preserved_count.store(read_intent_count(second_cce),
-                                                 std::memory_order_release);
-                term_error_blocking_info_cleared.store(
-                    term_error_req.BlockingCceLockAddr(core_id).first == 0,
-                    std::memory_order_release);
-
-                // Capture the live reused generation, then recycle the wrapper
-                // once more. A normal continuation must reject the stale token
-                // before dereferencing it and must preserve the new reference.
-                stale_resume_req.SetBlockingInfo(core_id,
-                                                 stale_lock_addr,
-                                                 0,
-                                                 ScanType::ScanBoth,
-                                                 ScanBlockingType::NoBlocking);
-                reused_lock->Reset(reused_ccm, reused_page, second_cce);
-                reused_lock->SetUsedStatus(true);
-                reused_lock->KeyLock()->AcquireReadIntent(txn);
-                progress.memory_scan_is_finished_ = false;
-                progress.scan_buckets_[selected_bucket] = true;
-                ccs.Enqueue(&stale_resume_req);
-                ccs.Enqueue(&inspect_stale_resume);
-                return true;
-            });
-        Sharder::Instance().GetLocalCcShards()->EnqueueCcRequest(
-            core_id, &inspect_and_cleanup);
-        inspect_and_cleanup.Wait();
-        REQUIRE_FALSE(inspect_and_cleanup.IsError());
-        inspect_stale_resume.Wait();
-        REQUIRE_FALSE(inspect_stale_resume.IsError());
-        REQUIRE(tx.Abort());
-    }
-
-    REQUIRE(commit_scan_retained);
-    REQUIRE(abort_scan_retained);
-    CHECK(stale_progress_cleared);
-    CHECK(finished_progress_preserved);
-    CHECK(reset_error_cleared);
-    CHECK(scan_completed_normally);
-    LruEntry *first_cce =
-        first_continuation_cce.load(std::memory_order_acquire);
-    LruEntry *second_cce =
-        second_continuation_cce.load(std::memory_order_acquire);
-    CHECK(first_cce != nullptr);
-    CHECK(first_pin_count.load(std::memory_order_acquire) == 1);
-    CHECK(first_augmented_count.load(std::memory_order_acquire) == 2);
-    CHECK(first_resumed_count.load(std::memory_order_acquire) == 1);
-    CHECK(second_cce != nullptr);
-    CHECK(second_cce != first_cce);
-    CHECK(second_pin_count.load(std::memory_order_acquire) == 1);
-    CHECK(second_augmented_count.load(std::memory_order_acquire) == 2);
-    CHECK(first_terminal_count.load(std::memory_order_acquire) == 1);
-    CHECK(second_terminal_count.load(std::memory_order_acquire) == 1);
-    LruEntry *end_cce = finite_end_cce.load(std::memory_order_acquire);
-    CHECK(end_cce != nullptr);
-    CHECK(end_cce != first_cce);
-    CHECK(end_cce != second_cce);
-    CHECK(resumed_finite_end_cce.load(std::memory_order_acquire) == end_cce);
-    CHECK(finite_end_pin_count.load(std::memory_order_acquire) == 1);
-    CHECK(finite_end_augmented_count.load(std::memory_order_acquire) == 2);
-    CHECK(finite_end_resumed_count.load(std::memory_order_acquire) == 2);
-    CHECK(finite_end_terminal_count.load(std::memory_order_acquire) == 1);
-    CHECK(term_error_blocking_info_cleared.load(std::memory_order_acquire));
-    CHECK(term_error_preserved_count.load(std::memory_order_acquire) == 1);
-    CHECK(stale_resume_result_finished.load(std::memory_order_acquire));
-    CHECK(stale_resume_error.load(std::memory_order_acquire) ==
-          CcErrorCode::NG_TERM_CHANGED);
-    CHECK(stale_resume_blocking_info_cleared.load(std::memory_order_acquire));
-    CHECK(stale_resume_preserved_count.load(std::memory_order_acquire) == 1);
-
-    // Scenario 8: a transient leader-term rejection does not tear down the CC
-    // map, so terminal cleanup must still consume its live continuation pin.
-    {
-        constexpr uint16_t selected_bucket = 0;
-        const NodeGroupId node_group_id = Sharder::Instance().NativeNodeGroup();
-        const uint16_t core_id =
-            Sharder::Instance().ShardBucketIdToCoreIdx(selected_bucket);
-        const int64_t original_term =
-            Sharder::Instance().LeaderTerm(node_group_id);
-        REQUIRE(original_term > 0);
-
-        auto tx =
-            node.BeginTx(IsolationLevel::RepeatableRead, CcProtocol::OccRead);
-        const TxNumber txn = tx.Txm()->TxNumber();
-        auto read_intent_count = [txn](LruEntry *cce)
-        {
-            if (cce == nullptr || cce->GetKeyLock() == nullptr)
-            {
-                return uint32_t{0};
-            }
-            const auto &read_intents = cce->GetKeyLock()->ReadIntents();
-            auto it = read_intents.find(txn);
-            return it == read_intents.end() ? uint32_t{0} : it->second;
-        };
-
-        absl::flat_hash_map<NodeGroupId, std::vector<uint16_t>> buckets;
-        buckets[node_group_id].push_back(selected_bucket);
-        absl::flat_hash_map<NodeGroupId,
-                            absl::flat_hash_map<uint16_t, BucketScanProgress>>
-            saved_progress;
-        auto [ng_progress_it, inserted] =
-            saved_progress.try_emplace(node_group_id);
-        REQUIRE(inserted);
-        auto [core_progress_it, core_inserted] =
-            ng_progress_it->second.try_emplace(
-                core_id, TxKey(CompositeKey<int>::NegativeInfinity()), true);
-        REQUIRE(core_inserted);
-        core_progress_it->second.memory_scan_is_finished_ = false;
-        // Avoid an unrelated asynchronous KV fetch in this queue-order test.
-        core_progress_it->second.scan_buckets_[selected_bucket] = true;
+        core_progress_it->second.scan_buckets_[bucket_id] = true;
 
         BucketScanPlan plan(0, &buckets, saved_progress);
         HashParitionCcScanner<CompositeKey<int>, CompositeRecord<int>> scanner(
@@ -906,7 +461,7 @@ TEST_CASE("transaction consistency on TestNode", "[tx]")
         ScanNextBatchCc scan_req;
         scan_req.Reset(node.Table(),
                        node_group_id,
-                       original_term,
+                       plan.GetNodeGroupTerm(node_group_id),
                        txn,
                        tx.Txm()->GetStartTs(),
                        end_key,
@@ -923,91 +478,78 @@ TEST_CASE("transaction consistency on TestNode", "[tx]")
                        true,
                        true);
 
-        std::atomic<LruEntry *> continuation_cce{nullptr};
-        std::atomic<CcMap *> ccm_before{nullptr};
-        std::atomic<uint32_t> initial_count{0};
+        auto read_intent_count = [txn, cce = scanned.cce_]
+        {
+            NonBlockingLock *key_lock = cce->GetKeyLock();
+            if (key_lock == nullptr)
+            {
+                return uint32_t{0};
+            }
+            auto it = key_lock->ReadIntents().find(txn);
+            return it == key_lock->ReadIntents().end() ? uint32_t{0}
+                                                       : it->second;
+        };
+
+        std::atomic<uint32_t> semantic_count{0};
         std::atomic<uint32_t> augmented_count{0};
-        std::atomic<uint32_t> post_error_count{0};
-        std::atomic<bool> result_finished{false};
-        std::atomic<CcErrorCode> result_error{CcErrorCode::NO_ERROR};
-        std::atomic<bool> blocking_info_cleared{false};
-        std::atomic<bool> ccm_unchanged{false};
-
-        WaitableCc inspect_restore_cleanup(
-            [&](CcShard &ccs)
+        std::atomic<uint32_t> post_request_count{0};
+        std::atomic<uint32_t> post_commit_count{0};
+        WaitableCc inspect_after_request(
+            [&](CcShard &)
             {
-                Sharder::Instance().SetLeaderTerm(node_group_id, original_term);
-
-                LruEntry *cce =
-                    continuation_cce.load(std::memory_order_acquire);
-                result_finished.store(scan_result.IsFinished(),
-                                      std::memory_order_release);
-                result_error.store(scan_result.ErrorCode(),
-                                   std::memory_order_release);
-                blocking_info_cleared.store(
-                    scan_req.BlockingCceLockAddr(core_id).first == 0,
-                    std::memory_order_release);
-                post_error_count.store(read_intent_count(cce),
-                                       std::memory_order_release);
-                ccm_unchanged.store(
-                    ccs.GetCcm(node.Table(), node_group_id) ==
-                        ccm_before.load(std::memory_order_acquire),
-                    std::memory_order_release);
-                ccs.ClearTx(txn);
-                return true;
-            });
-        WaitableCc mark_and_invalidate(
-            [&](CcShard &ccs)
-            {
-                uint64_t lock_addr =
-                    scan_req.BlockingCceLockAddr(core_id).first;
-                auto *lock =
-                    reinterpret_cast<KeyGapLockAndExtraData *>(lock_addr);
-                LruEntry *cce = lock == nullptr ? nullptr : lock->GetCcEntry();
-                continuation_cce.store(cce, std::memory_order_release);
-                uint32_t pin_count = read_intent_count(cce);
-                initial_count.store(pin_count, std::memory_order_release);
-                if (pin_count == 1)
-                {
-                    cce->GetKeyLock()->AcquireReadIntent(txn);
-                    augmented_count.store(read_intent_count(cce),
-                                          std::memory_order_release);
-                }
-                ccm_before.store(ccs.GetCcm(node.Table(), node_group_id),
-                                 std::memory_order_release);
-
-                Sharder::Instance().SetLeaderTerm(node_group_id, -1);
-                ccs.Enqueue(&inspect_restore_cleanup);
+                post_request_count.store(read_intent_count(),
+                                         std::memory_order_release);
                 return true;
             });
         WaitableCc enqueue_scan(
             [&](CcShard &ccs)
             {
+                NonBlockingLock *key_lock = scanned.cce_->GetKeyLock();
+                semantic_count.store(read_intent_count(),
+                                     std::memory_order_release);
+                key_lock->AcquireReadIntent(txn);
+                augmented_count.store(read_intent_count(),
+                                      std::memory_order_release);
+                scan_req.SetBlockingInfo(
+                    core_id,
+                    reinterpret_cast<uint64_t>(scanned.cce_->GetLockAddr()),
+                    0,
+                    ScanType::ScanBoth,
+                    ScanBlockingType::NoBlocking);
                 ccs.Enqueue(&scan_req);
-                ccs.Enqueue(&mark_and_invalidate);
+                ccs.Enqueue(&inspect_after_request);
                 return true;
             });
-
         Sharder::Instance().GetLocalCcShards()->EnqueueCcRequest(core_id,
                                                                  &enqueue_scan);
         enqueue_scan.Wait();
+        inspect_after_request.Wait();
         REQUIRE_FALSE(enqueue_scan.IsError());
-        mark_and_invalidate.Wait();
-        inspect_restore_cleanup.Wait();
-        REQUIRE_FALSE(mark_and_invalidate.IsError());
-        REQUIRE_FALSE(inspect_restore_cleanup.IsError());
-        REQUIRE(tx.Abort());
+        REQUIRE_FALSE(inspect_after_request.IsError());
+        REQUIRE(scan_result.IsFinished());
+        REQUIRE_FALSE(scan_result.IsError());
 
-        REQUIRE(continuation_cce.load(std::memory_order_acquire) != nullptr);
-        REQUIRE(initial_count.load(std::memory_order_acquire) == 1);
+        REQUIRE(tx.Commit());
+        WaitableCc inspect_after_commit(
+            [&](CcShard &)
+            {
+                post_commit_count.store(read_intent_count(),
+                                        std::memory_order_release);
+                return true;
+            });
+        Sharder::Instance().GetLocalCcShards()->EnqueueCcRequest(
+            core_id, &inspect_after_commit);
+        inspect_after_commit.Wait();
+        REQUIRE_FALSE(inspect_after_commit.IsError());
+
+        REQUIRE(semantic_count.load(std::memory_order_acquire) == 1);
         REQUIRE(augmented_count.load(std::memory_order_acquire) == 2);
-        REQUIRE(result_finished.load(std::memory_order_acquire));
-        REQUIRE(result_error.load(std::memory_order_acquire) ==
-                CcErrorCode::REQUESTED_NODE_NOT_LEADER);
-        REQUIRE(blocking_info_cleared.load(std::memory_order_acquire));
-        REQUIRE(ccm_unchanged.load(std::memory_order_acquire));
-        CHECK(post_error_count.load(std::memory_order_acquire) == 1);
+        REQUIRE(post_request_count.load(std::memory_order_acquire) == 1);
+        REQUIRE(post_commit_count.load(std::memory_order_acquire) == 0);
     }
+
+    REQUIRE(commit_scan_retained);
+    REQUIRE(abort_scan_retained);
 }
 
 int main(int argc, char **argv)

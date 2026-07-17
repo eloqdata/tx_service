@@ -518,18 +518,6 @@ public:
 
     bool SetFinish(uint16_t core_id)
     {
-        assert(blocking_info_.count(core_id) > 0);
-        ScanBlockingInfo blocking_info = blocking_info_[core_id];
-        blocking_info_[core_id] = {};
-        ScanNextBatchCc::ClearBlockingInfo(
-            blocking_info.cce_lock_addr_,
-            blocking_info.cce_lock_generation_,
-            blocking_info.end_cce_lock_addr_,
-            blocking_info.end_cce_lock_generation_,
-            blocking_info.type_,
-            Txn(),
-            NodeGroupId());
-
         if (WaitForFetchBucketCnt(core_id) > 0)
         {
             SetIsWaitForFetchBucket(core_id);
@@ -576,6 +564,13 @@ public:
     bool SetError(uint16_t core_id, CcErrorCode err)
     {
         SetErrorCode(err);
+
+        if (WaitForFetchBucketCnt(core_id) > 0)
+        {
+            SetIsWaitForFetchBucket(core_id);
+            return false;
+        }
+
         return SetFinish(core_id);
     }
 
@@ -626,15 +621,8 @@ public:
                          ScanBlockingType blocking_type)
     {
         assert(blocking_info_.count(core_id) > 0);
-        ScanBlockingInfo &blocking_info = blocking_info_[core_id];
-        blocking_info.cce_lock_addr_ = cce_lock_addr;
-        blocking_info.cce_lock_generation_ =
-            ScanNextBatchCc::LockGeneration(cce_lock_addr);
-        blocking_info.end_cce_lock_addr_ = end_cce_lock_addr;
-        blocking_info.end_cce_lock_generation_ =
-            ScanNextBatchCc::LockGeneration(end_cce_lock_addr);
-        blocking_info.scan_type_ = scan_type;
-        blocking_info.type_ = blocking_type;
+        blocking_info_[core_id] = {
+            cce_lock_addr, end_cce_lock_addr, scan_type, blocking_type};
     }
 
     size_t WaitForFetchBucketCnt(uint16_t core_id)
@@ -739,12 +727,10 @@ private:
 
     struct ScanBlockingInfo
     {
-        uint64_t cce_lock_addr_{0};
-        uint64_t cce_lock_generation_{0};
-        uint64_t end_cce_lock_addr_{0};
-        uint64_t end_cce_lock_generation_{0};
-        ScanType scan_type_{ScanType::ScanUnknow};
-        ScanBlockingType type_{ScanBlockingType::NoBlocking};
+        uint64_t cce_lock_addr_;
+        uint64_t end_cce_lock_addr_;
+        ScanType scan_type_;
+        ScanBlockingType type_;
     };
 
     TableName remote_table_name_{

@@ -335,14 +335,14 @@ intents/locks as it materializes.
 - `RangePartitionedCcmScanner<KeyT, ValueT, IsForward>`: a single `scan_cache_` since a range
   slice lives on one shard; used with `ScanSliceCc`, which itself merges memory entries with
   store-loaded slice data.
-- Within one `ScanNextBatchCc`, a bounded memory pass may self-reenqueue with counted internal
-  **read intents** on its continuation entry and any finite end entry. These pins are not carried
-  into a client-visible next batch, which restarts from the saved pause key. Normal resume or the
-  terminal lifecycle consumes each live pin exactly once. The request stores each lock wrapper's
-  generation with its address: a transient term rejection still releases a matching live pin,
-  while CC-map teardown/reuse changes the generation so stale cleanup cannot touch the new owner.
+- Within one hash `ScanNextBatchCc`, a bounded memory pass may self-reenqueue with **read
+  intents** on its continuation and finite-end entries. After validating the node-group term, a
+  resumed request consumes exactly those references before checking whether the shard is drained;
+  otherwise a KV callback could make the request finish while its pins were still held. A term
+  mismatch returns without dereferencing the saved addresses and relies on node-group/CC-map
+  cleanup.
 - Separately, a range scan stopped in the middle of a slice carries the last tuple's read intent
-  across a client-visible batch as the resume anchor for the next `ScanSliceCc`.
+  across a client-visible batch as the next `ScanSliceCc` resume anchor.
 
 ## 10. Gotchas / invariants
 

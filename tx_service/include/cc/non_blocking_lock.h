@@ -409,16 +409,6 @@ public:
 
     void Reset(CcMap *ccm, LruPage *page, LruEntry *entry)
     {
-        // Raw lock addresses may outlive the CcEntry they originally
-        // identified. Advance the generation before reinitializing the
-        // wrapper so queued requests can distinguish a live continuation from
-        // a recycled lock at the same address.
-        ++generation_;
-        if (generation_ == 0)
-        {
-            ++generation_;
-        }
-
         key_lock_.Reset();
         ccm_ = ccm;
         page_ = page;
@@ -437,11 +427,6 @@ public:
     bool GetUsedStatus() const
     {
         return in_use_;
-    }
-
-    uint64_t Generation() const
-    {
-        return generation_;
     }
 
     bool SafeToRecycle() const;
@@ -592,7 +577,6 @@ public:
 private:
     NonBlockingLock key_lock_;
     bool in_use_{false};
-    uint64_t generation_{0};
     uint64_t last_used_ts_{0};
     // the lock object can be recycled (released in memory) in 30 seconds since
     // it was last used
