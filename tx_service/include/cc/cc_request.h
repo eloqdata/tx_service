@@ -1957,11 +1957,14 @@ public:
 
         wait_for_fetch_bucket_cnt_.clear();
         blocking_info_.clear();
-        for (const auto &[core_id, scan_progress] : *bucket_scan_progress_)
+        for (auto &[core_id, scan_progress] : *bucket_scan_progress_)
         {
+            scan_progress.memory_scan_is_finished_ =
+                scan_progress.AllFinished();
             wait_for_fetch_bucket_cnt_[core_id] = 0;
             auto [iter, inserted] = blocking_info_.try_emplace(core_id);
             iter->second.cce_lock_addr_ = 0;
+            iter->second.end_cce_lock_addr_ = 0;
             iter->second.scan_type_ = ScanType::ScanUnknow;
             iter->second.type_ = ScanBlockingType::NoBlocking;
         }
@@ -2004,8 +2007,9 @@ public:
                 {
                     if (catalog_entry->dirty_schema_ == nullptr)
                     {
-                        res_->SetError(CcErrorCode::REQUESTED_TABLE_NOT_EXISTS);
-                        return true;
+                        return SetError(
+                            ccs.core_id_,
+                            CcErrorCode::REQUESTED_TABLE_NOT_EXISTS);
                     }
                     else
                     {
@@ -2113,6 +2117,16 @@ public:
 
     bool SetFinish(uint16_t core_id)
     {
+        assert(blocking_info_.count(core_id) > 0);
+        ScanBlockingInfo blocking_info = blocking_info_[core_id];
+        blocking_info_[core_id] = {
+            0, 0, ScanType::ScanUnknow, ScanBlockingType::NoBlocking};
+        ClearBlockingInfo(blocking_info.cce_lock_addr_,
+                          blocking_info.end_cce_lock_addr_,
+                          blocking_info.type_,
+                          Txn(),
+                          NodeGroupId());
+
         if (WaitForFetchBucketCnt(core_id) > 0)
         {
             SetIsWaitForFetchBucket(core_id);
@@ -2156,14 +2170,59 @@ public:
     bool SetError(uint16_t core_id, CcErrorCode err)
     {
         SetErrorCode(err);
-
-        if (WaitForFetchBucketCnt(core_id) > 0)
-        {
-            SetIsWaitForFetchBucket(core_id);
-            return false;
-        }
-
         return SetFinish(core_id);
+    }
+
+    /**
+     * Releases one continuation/end reference after its stored addresses have
+     * been cleared, so repeated completion cannot consume it twice.
+     */
+    static void ClearBlockingInfo(uint64_t cce_lock_addr,
+                                  uint64_t end_cce_lock_addr,
+                                  ScanBlockingType blocking_type,
+                                  TxNumber txn,
+                                  txservice::NodeGroupId node_group_id)
+    {
+        auto decr_read_intent = [txn, node_group_id](uint64_t lock_addr)
+        {
+            if (lock_addr == 0)
+            {
+                return;
+            }
+
+            auto *lock = reinterpret_cast<KeyGapLockAndExtraData *>(lock_addr);
+            CcMap *ccm = lock->GetCcMap();
+            LruEntry *cce = lock->GetCcEntry();
+            if (ccm != nullptr && cce != nullptr)
+            {
+                ccm->DecrReadIntent(lock->KeyLock(), cce, txn, node_group_id);
+            }
+        };
+
+        decr_read_intent(end_cce_lock_addr);
+        if (blocking_type == ScanBlockingType::NoBlocking)
+        {
+            decr_read_intent(cce_lock_addr);
+        }
+        else if (cce_lock_addr != 0 &&
+                 (blocking_type == ScanBlockingType::BlockOnFuture ||
+                  blocking_type == ScanBlockingType::BlockOnLock))
+        {
+            auto *lock =
+                reinterpret_cast<KeyGapLockAndExtraData *>(cce_lock_addr);
+            CcMap *ccm = lock->GetCcMap();
+            LruEntry *cce = lock->GetCcEntry();
+            if (ccm != nullptr && cce != nullptr)
+            {
+                NonBlockingLock *key_lock = lock->KeyLock();
+                LockType lock_type = key_lock->SearchLock(txn);
+                if (lock_type != LockType::NoLock)
+                {
+                    ccm->ReleaseCceLock(
+                        key_lock, cce, txn, node_group_id, lock_type);
+                }
+            }
+        }
     }
 
     bool IsForWrite() const

@@ -518,6 +518,16 @@ public:
 
     bool SetFinish(uint16_t core_id)
     {
+        assert(blocking_info_.count(core_id) > 0);
+        ScanBlockingInfo blocking_info = blocking_info_[core_id];
+        blocking_info_[core_id] = {
+            0, 0, ScanType::ScanUnknow, ScanBlockingType::NoBlocking};
+        ScanNextBatchCc::ClearBlockingInfo(blocking_info.cce_lock_addr_,
+                                           blocking_info.end_cce_lock_addr_,
+                                           blocking_info.type_,
+                                           Txn(),
+                                           NodeGroupId());
+
         if (WaitForFetchBucketCnt(core_id) > 0)
         {
             SetIsWaitForFetchBucket(core_id);
@@ -564,13 +574,6 @@ public:
     bool SetError(uint16_t core_id, CcErrorCode err)
     {
         SetErrorCode(err);
-
-        if (WaitForFetchBucketCnt(core_id) > 0)
-        {
-            SetIsWaitForFetchBucket(core_id);
-            return false;
-        }
-
         return SetFinish(core_id);
     }
 

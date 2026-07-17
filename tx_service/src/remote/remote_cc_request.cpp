@@ -1112,11 +1112,14 @@ void txservice::remote::RemoteScanNextBatch::Reset(
             scan_next.progress();
         for (const auto &[core_id, progress] : scan_progress_map.progress())
         {
-            memory_is_drained_[core_id] = progress.memory_is_drained();
+            bool all_kv_buckets_finished = true;
             for (const auto &[bucket_id, drained] : progress.scan_buckets())
             {
                 scan_buckets_[core_id].try_emplace(bucket_id, drained);
+                all_kv_buckets_finished = all_kv_buckets_finished && drained;
             }
+            memory_is_drained_[core_id] =
+                progress.memory_is_drained() && all_kv_buckets_finished;
         }
     }
     else
@@ -1150,6 +1153,7 @@ void txservice::remote::RemoteScanNextBatch::Reset(
         wait_for_fetch_bucket_cnt_[core_idx] = 0;
         auto [iter, inserted] = blocking_info_.try_emplace(core_idx);
         iter->second.cce_lock_addr_ = 0;
+        iter->second.end_cce_lock_addr_ = 0;
         iter->second.scan_type_ = ScanType::ScanUnknow;
         iter->second.type_ = ScanBlockingType::NoBlocking;
     }

@@ -2501,8 +2501,13 @@ public:
         Iterator scan_ccm_it;
         Iterator end_it = End();
         CcEntry<KeyT, ValueT, VersionedRecord, RangePartitioned> *prior_cce;
-        auto [cce_lock_addr, end_lock_addr] =
-            req.BlockingCceLockAddr(shard_->core_id_);
+        auto blocking_info = req.blocking_info_[shard_->core_id_];
+        req.blocking_info_[shard_->core_id_] = {
+            0, 0, ScanType::ScanUnknow, ScanBlockingType::NoBlocking};
+        uint64_t cce_lock_addr = blocking_info.cce_lock_addr_;
+        uint64_t end_lock_addr = blocking_info.end_cce_lock_addr_;
+        ScanBlockingType blocking_type = blocking_info.type_;
+        ScanType scan_type = blocking_info.scan_type_;
         if (cce_lock_addr == 0 &&
             table_name_.Type() != TableType::RangePartition &&
             Sharder::Instance().GetDataStoreHandler() != nullptr)
@@ -2561,27 +2566,18 @@ public:
 
                 // Release read intent lock
                 end_it = Iterator(end_cce, end_ccp, &neg_inf_);
-                ReleaseCceLock(end_cce->GetKeyLock(),
-                               end_cce,
-                               req.Txn(),
-                               ng_id,
-                               LockType::ReadIntent);
+                DecrReadIntent(
+                    end_cce->GetKeyLock(), end_cce, req.Txn(), ng_id);
             }
 
             scan_ccm_it = Iterator(prior_cce, ccp, &neg_inf_);
             const KeyT *prior_cce_key = scan_ccm_it->first;
 
-            auto [blocking_type, scan_type] =
-                req.BlockingPair(shard_->core_id_);
-
             if (blocking_type == ScanBlockingType::NoBlocking)
             {
                 // Release read intent lock
-                ReleaseCceLock(prior_cce->GetKeyLock(),
-                               prior_cce,
-                               req.Txn(),
-                               ng_id,
-                               LockType::ReadIntent);
+                DecrReadIntent(
+                    prior_cce->GetKeyLock(), prior_cce, req.Txn(), ng_id);
             }
             else
             {
@@ -3062,8 +3058,13 @@ public:
         Iterator scan_ccm_it;
         Iterator end_it = End();
         CcEntry<KeyT, ValueT, VersionedRecord, RangePartitioned> *prior_cce;
-        auto [cce_lock_addr, end_lock_addr] =
-            req.BlockingCceLockAddr(shard_->core_id_);
+        auto blocking_info = req.blocking_info_[shard_->core_id_];
+        req.blocking_info_[shard_->core_id_] = {
+            0, 0, ScanType::ScanUnknow, ScanBlockingType::NoBlocking};
+        uint64_t cce_lock_addr = blocking_info.cce_lock_addr_;
+        uint64_t end_lock_addr = blocking_info.end_cce_lock_addr_;
+        ScanBlockingType blocking_type = blocking_info.type_;
+        ScanType scan_type = blocking_info.scan_type_;
         TxKey start_key_owner;
         const KeyT *req_start_key = nullptr;
         const KeyT *req_end_key = nullptr;
@@ -3212,27 +3213,18 @@ public:
 
                 // Release read intent lock
                 end_it = Iterator(end_cce, ccp, &neg_inf_);
-                ReleaseCceLock(end_cce->GetKeyLock(),
-                               end_cce,
-                               req.Txn(),
-                               ng_id,
-                               LockType::ReadIntent);
+                DecrReadIntent(
+                    end_cce->GetKeyLock(), end_cce, req.Txn(), ng_id);
             }
 
             scan_ccm_it = Iterator(prior_cce, ccp, &neg_inf_);
             const KeyT *prior_cce_key = scan_ccm_it->first;
 
-            auto [blocking_type, scan_type] =
-                req.BlockingPair(shard_->core_id_);
-
             if (blocking_type == ScanBlockingType::NoBlocking)
             {
                 // Release read intent lock
-                ReleaseCceLock(prior_cce->GetKeyLock(),
-                               prior_cce,
-                               req.Txn(),
-                               ng_id,
-                               LockType::ReadIntent);
+                DecrReadIntent(
+                    prior_cce->GetKeyLock(), prior_cce, req.Txn(), ng_id);
             }
             else
             {
