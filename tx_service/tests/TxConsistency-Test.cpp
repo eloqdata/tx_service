@@ -452,6 +452,10 @@ TEST_CASE("transaction consistency on TestNode", "[tx]")
     std::atomic<uint64_t> second_continuation_lock_addr{0};
     std::atomic<uint32_t> term_error_preserved_count{0};
     std::atomic<bool> term_error_blocking_info_cleared{false};
+    std::atomic<uint32_t> stale_resume_preserved_count{0};
+    std::atomic<bool> stale_resume_result_finished{false};
+    std::atomic<CcErrorCode> stale_resume_error{CcErrorCode::NO_ERROR};
+    std::atomic<bool> stale_resume_blocking_info_cleared{false};
     {
         constexpr uint16_t selected_bucket = 0;
         const NodeGroupId node_group_id = Sharder::Instance().NativeNodeGroup();
@@ -704,6 +708,47 @@ TEST_CASE("transaction consistency on TestNode", "[tx]")
                              true,
                              true);
 
+        CcHandlerResult<ScanNextResult> stale_resume_result(nullptr);
+        stale_resume_result.Value().current_scan_plan_ = &plan;
+        stale_resume_result.Value().ccm_scanner_ = &scanner;
+        ScanNextBatchCc stale_resume_req;
+        stale_resume_req.Reset(node.Table(),
+                               node_group_id,
+                               plan.GetNodeGroupTerm(node_group_id),
+                               txn,
+                               tx.Txm()->GetStartTs(),
+                               end_key,
+                               true,
+                               &plan,
+                               nullptr,
+                               tx.Txm()->TxTerm(),
+                               &stale_resume_result,
+                               IsolationLevel::RepeatableRead,
+                               CcProtocol::OccRead,
+                               false,
+                               false,
+                               false,
+                               true,
+                               true);
+
+        WaitableCc inspect_stale_resume(
+            [&](CcShard &ccs)
+            {
+                LruEntry *second_cce =
+                    second_continuation_cce.load(std::memory_order_acquire);
+                stale_resume_preserved_count.store(
+                    read_intent_count(second_cce), std::memory_order_release);
+                stale_resume_result_finished.store(
+                    stale_resume_result.IsFinished(),
+                    std::memory_order_release);
+                stale_resume_error.store(stale_resume_result.ErrorCode(),
+                                         std::memory_order_release);
+                stale_resume_blocking_info_cleared.store(
+                    stale_resume_req.BlockingCceLockAddr(core_id).first == 0,
+                    std::memory_order_release);
+                ccs.ClearTx(txn);
+                return true;
+            });
         WaitableCc inspect_and_cleanup(
             [&](CcShard &ccs)
             {
@@ -747,13 +792,29 @@ TEST_CASE("transaction consistency on TestNode", "[tx]")
                     term_error_req.BlockingCceLockAddr(core_id).first == 0,
                     std::memory_order_release);
 
-                ccs.ClearTx(txn);
+                // Capture the live reused generation, then recycle the wrapper
+                // once more. A normal continuation must reject the stale token
+                // before dereferencing it and must preserve the new reference.
+                stale_resume_req.SetBlockingInfo(core_id,
+                                                 stale_lock_addr,
+                                                 0,
+                                                 ScanType::ScanBoth,
+                                                 ScanBlockingType::NoBlocking);
+                reused_lock->Reset(reused_ccm, reused_page, second_cce);
+                reused_lock->SetUsedStatus(true);
+                reused_lock->KeyLock()->AcquireReadIntent(txn);
+                progress.memory_scan_is_finished_ = false;
+                progress.scan_buckets_[selected_bucket] = true;
+                ccs.Enqueue(&stale_resume_req);
+                ccs.Enqueue(&inspect_stale_resume);
                 return true;
             });
         Sharder::Instance().GetLocalCcShards()->EnqueueCcRequest(
             core_id, &inspect_and_cleanup);
         inspect_and_cleanup.Wait();
         REQUIRE_FALSE(inspect_and_cleanup.IsError());
+        inspect_stale_resume.Wait();
+        REQUIRE_FALSE(inspect_stale_resume.IsError());
         REQUIRE(tx.Abort());
     }
 
@@ -788,6 +849,11 @@ TEST_CASE("transaction consistency on TestNode", "[tx]")
     CHECK(finite_end_terminal_count.load(std::memory_order_acquire) == 1);
     CHECK(term_error_blocking_info_cleared.load(std::memory_order_acquire));
     CHECK(term_error_preserved_count.load(std::memory_order_acquire) == 1);
+    CHECK(stale_resume_result_finished.load(std::memory_order_acquire));
+    CHECK(stale_resume_error.load(std::memory_order_acquire) ==
+          CcErrorCode::NG_TERM_CHANGED);
+    CHECK(stale_resume_blocking_info_cleared.load(std::memory_order_acquire));
+    CHECK(stale_resume_preserved_count.load(std::memory_order_acquire) == 1);
 
     // Scenario 8: a transient leader-term rejection does not tear down the CC
     // map, so terminal cleanup must still consume its live continuation pin.
