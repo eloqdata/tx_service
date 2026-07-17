@@ -335,8 +335,10 @@ intents/locks as it materializes.
 - `RangePartitionedCcmScanner<KeyT, ValueT, IsForward>`: a single `scan_cache_` since a range
   slice lives on one shard; used with `ScanSliceCc`, which itself merges memory entries with
   store-loaded slice data.
-- Between batches the scanner leaves a **read intent** on the last tuple's entry so it is not
-  evicted before `ScanNextBatch` resumes (`NonBlockingLock` comment on `read_intentions_`).
+- Within one `ScanNextBatchCc`, a bounded memory pass may self-reenqueue with counted internal
+  **read intents** on its continuation entry and any finite end entry. These pins are not carried
+  into a client-visible next batch, which restarts from the saved pause key; normal resume or
+  terminal `SetFinish`/`SetError` cleanup consumes each pin exactly once.
 
 ## 10. Gotchas / invariants
 
