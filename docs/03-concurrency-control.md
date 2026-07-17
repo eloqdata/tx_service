@@ -338,8 +338,9 @@ intents/locks as it materializes.
 - Within one `ScanNextBatchCc`, a bounded memory pass may self-reenqueue with counted internal
   **read intents** on its continuation entry and any finite end entry. These pins are not carried
   into a client-visible next batch, which restarts from the saved pause key. Normal resume or the
-  terminal lifecycle consumes each pin exactly once; term-change teardown owns the release when
-  its CC map is no longer safe to access.
+  terminal lifecycle consumes each live pin exactly once. The request stores each lock wrapper's
+  generation with its address: a transient term rejection still releases a matching live pin,
+  while CC-map teardown/reuse changes the generation so stale cleanup cannot touch the new owner.
 - Separately, a range scan stopped in the middle of a slice carries the last tuple's read intent
   across a client-visible batch as the resume anchor for the next `ScanSliceCc`.
 
