@@ -1,4 +1,8 @@
 #include <atomic>
+#include <chrono>
+#include <cstdint>
+#include <cstdio>
+#include <cstdlib>
 #include <string>
 #include <vector>
 
@@ -309,15 +313,21 @@ TEST_CASE("transaction consistency on TestNode", "[tx]")
         REQUIRE_FALSE(TxOwnsScanRead(scanned));
     }
 
-    // Scenario 6: completing a hash scan between its first memory pass and its
-    // self-enqueued continuation must release the continuation ReadIntent.
+    // Scenario 6: normal resume and terminal completion must each release
+    // exactly one continuation ReadIntent.
     bool stale_progress_cleared = false;
     bool finished_progress_preserved = false;
     bool reset_error_cleared = false;
     bool scan_completed_normally = false;
-    std::atomic<LruEntry *> continuation_cce{nullptr};
-    std::atomic<bool> continuation_pin_observed{false};
-    std::atomic<bool> continuation_read_intent_left{false};
+    std::atomic<LruEntry *> first_continuation_cce{nullptr};
+    std::atomic<LruEntry *> second_continuation_cce{nullptr};
+    std::atomic<uint32_t> first_pin_count{0};
+    std::atomic<uint32_t> first_augmented_count{0};
+    std::atomic<uint32_t> first_resumed_count{0};
+    std::atomic<uint32_t> second_pin_count{0};
+    std::atomic<uint32_t> second_augmented_count{0};
+    std::atomic<uint32_t> first_terminal_count{0};
+    std::atomic<uint32_t> second_terminal_count{0};
     {
         constexpr uint16_t selected_bucket = 0;
         const NodeGroupId node_group_id = Sharder::Instance().NativeNodeGroup();
@@ -326,7 +336,8 @@ TEST_CASE("transaction consistency on TestNode", "[tx]")
 
         auto seed = node.BeginTx();
         size_t seed_count = 0;
-        for (int key = 10000; seed_count <= ScanNextBatchCc::ScanBatchSize;
+        for (int key = 10000;
+             seed_count < 2 * ScanNextBatchCc::ScanBatchSize + 1;
              ++key)
         {
             CompositeKey<int> composite_key{int{key}};
@@ -345,6 +356,23 @@ TEST_CASE("transaction consistency on TestNode", "[tx]")
         auto tx =
             node.BeginTx(IsolationLevel::RepeatableRead, CcProtocol::OccRead);
         const TxNumber txn = tx.Txm()->TxNumber();
+        auto read_intent_count = [txn](LruEntry *cce)
+        {
+            if (cce == nullptr)
+            {
+                return uint32_t{0};
+            }
+            NonBlockingLock *key_lock = cce->GetKeyLock();
+            if (key_lock == nullptr)
+            {
+                return uint32_t{0};
+            }
+            const auto &read_intents = key_lock->ReadIntents();
+            auto read_intent_it = read_intents.find(txn);
+            return read_intent_it == read_intents.end()
+                       ? uint32_t{0}
+                       : read_intent_it->second;
+        };
 
         absl::flat_hash_map<NodeGroupId, std::vector<uint16_t>> buckets;
         buckets[node_group_id].push_back(selected_bucket);
@@ -408,8 +436,39 @@ TEST_CASE("transaction consistency on TestNode", "[tx]")
         progress.memory_scan_is_finished_ = true;
         progress.scan_buckets_[selected_bucket] = false;
 
-        WaitableCc mark_bucket_drained(
+        WaitableCc inspect_normal_resume(
             [&](CcShard &)
+            {
+                LruEntry *first_cce =
+                    first_continuation_cce.load(std::memory_order_acquire);
+                first_resumed_count.store(read_intent_count(first_cce),
+                                          std::memory_order_release);
+
+                const uint64_t cce_lock_addr =
+                    scan_req.BlockingCceLockAddr(core_id).first;
+                auto *continuation_lock =
+                    reinterpret_cast<KeyGapLockAndExtraData *>(cce_lock_addr);
+                LruEntry *second_cce = continuation_lock == nullptr
+                                           ? nullptr
+                                           : continuation_lock->GetCcEntry();
+                second_continuation_cce.store(second_cce,
+                                              std::memory_order_release);
+                uint32_t pin_count = read_intent_count(second_cce);
+                second_pin_count.store(pin_count, std::memory_order_release);
+                if (pin_count == 1)
+                {
+                    NonBlockingLock *key_lock = second_cce->GetKeyLock();
+                    key_lock->AcquireReadIntent(txn);
+                    second_augmented_count.store(read_intent_count(second_cce),
+                                                 std::memory_order_release);
+                }
+
+                progress.memory_scan_is_finished_ = true;
+                progress.scan_buckets_[selected_bucket] = true;
+                return true;
+            });
+        WaitableCc mark_first_continuation(
+            [&](CcShard &ccs)
             {
                 const uint64_t cce_lock_addr =
                     scan_req.BlockingCceLockAddr(core_id).first;
@@ -418,24 +477,26 @@ TEST_CASE("transaction consistency on TestNode", "[tx]")
                 LruEntry *cce = continuation_lock == nullptr
                                     ? nullptr
                                     : continuation_lock->GetCcEntry();
-                continuation_cce.store(cce, std::memory_order_release);
-                if (cce != nullptr)
+                first_continuation_cce.store(cce, std::memory_order_release);
+                uint32_t pin_count = read_intent_count(cce);
+                first_pin_count.store(pin_count, std::memory_order_release);
+                if (pin_count == 1)
                 {
                     NonBlockingLock *key_lock = cce->GetKeyLock();
-                    continuation_pin_observed.store(
-                        key_lock != nullptr &&
-                            key_lock->ReadIntents().find(txn) !=
-                                key_lock->ReadIntents().end(),
-                        std::memory_order_release);
+                    key_lock->AcquireReadIntent(txn);
+                    first_augmented_count.store(read_intent_count(cce),
+                                                std::memory_order_release);
                 }
-                progress.scan_buckets_[selected_bucket] = true;
+
+                progress.memory_scan_is_finished_ = false;
+                ccs.Enqueue(&inspect_normal_resume);
                 return true;
             });
         WaitableCc enqueue_scan(
             [&](CcShard &ccs)
             {
                 ccs.Enqueue(&scan_req);
-                ccs.Enqueue(&mark_bucket_drained);
+                ccs.Enqueue(&mark_first_continuation);
                 return true;
             });
 
@@ -443,10 +504,23 @@ TEST_CASE("transaction consistency on TestNode", "[tx]")
                                                                  &enqueue_scan);
         enqueue_scan.Wait();
         REQUIRE_FALSE(enqueue_scan.IsError());
-        mark_bucket_drained.Wait();
-        REQUIRE_FALSE(mark_bucket_drained.IsError());
+        mark_first_continuation.Wait();
+        REQUIRE_FALSE(mark_first_continuation.IsError());
+        inspect_normal_resume.Wait();
+        REQUIRE_FALSE(inspect_normal_resume.IsError());
+
+        const auto scan_deadline =
+            std::chrono::steady_clock::now() + std::chrono::seconds(20);
         while (!scan_result.IsFinished())
         {
+            if (std::chrono::steady_clock::now() >= scan_deadline)
+            {
+                std::fprintf(
+                    stderr,
+                    "TxConsistency-Test: hash scan continuation cleanup did "
+                    "not finish within 20 seconds.\n");
+                std::abort();
+            }
             bthread_usleep(100);
         }
         scan_completed_normally = !scan_result.IsError();
@@ -454,17 +528,14 @@ TEST_CASE("transaction consistency on TestNode", "[tx]")
         WaitableCc inspect_and_cleanup(
             [&](CcShard &ccs)
             {
-                LruEntry *cce =
-                    continuation_cce.load(std::memory_order_acquire);
-                if (cce != nullptr)
-                {
-                    NonBlockingLock *key_lock = cce->GetKeyLock();
-                    continuation_read_intent_left.store(
-                        key_lock != nullptr &&
-                            key_lock->ReadIntents().find(txn) !=
-                                key_lock->ReadIntents().end(),
-                        std::memory_order_release);
-                }
+                LruEntry *first_cce =
+                    first_continuation_cce.load(std::memory_order_acquire);
+                LruEntry *second_cce =
+                    second_continuation_cce.load(std::memory_order_acquire);
+                first_terminal_count.store(read_intent_count(first_cce),
+                                           std::memory_order_release);
+                second_terminal_count.store(read_intent_count(second_cce),
+                                            std::memory_order_release);
                 ccs.ClearTx(txn);
                 return true;
             });
@@ -480,9 +551,20 @@ TEST_CASE("transaction consistency on TestNode", "[tx]")
     CHECK(finished_progress_preserved);
     CHECK(reset_error_cleared);
     CHECK(scan_completed_normally);
-    CHECK(continuation_cce.load(std::memory_order_acquire) != nullptr);
-    CHECK(continuation_pin_observed.load(std::memory_order_acquire));
-    CHECK_FALSE(continuation_read_intent_left.load(std::memory_order_acquire));
+    LruEntry *first_cce =
+        first_continuation_cce.load(std::memory_order_acquire);
+    LruEntry *second_cce =
+        second_continuation_cce.load(std::memory_order_acquire);
+    CHECK(first_cce != nullptr);
+    CHECK(first_pin_count.load(std::memory_order_acquire) == 1);
+    CHECK(first_augmented_count.load(std::memory_order_acquire) == 2);
+    CHECK(first_resumed_count.load(std::memory_order_acquire) == 1);
+    CHECK(second_cce != nullptr);
+    CHECK(second_cce != first_cce);
+    CHECK(second_pin_count.load(std::memory_order_acquire) == 1);
+    CHECK(second_augmented_count.load(std::memory_order_acquire) == 2);
+    CHECK(first_terminal_count.load(std::memory_order_acquire) == 1);
+    CHECK(second_terminal_count.load(std::memory_order_acquire) == 1);
 }
 
 int main(int argc, char **argv)
