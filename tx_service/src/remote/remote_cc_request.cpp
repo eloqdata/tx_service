@@ -1152,10 +1152,7 @@ void txservice::remote::RemoteScanNextBatch::Reset(
     {
         wait_for_fetch_bucket_cnt_[core_idx] = 0;
         auto [iter, inserted] = blocking_info_.try_emplace(core_idx);
-        iter->second.cce_lock_addr_ = 0;
-        iter->second.end_cce_lock_addr_ = 0;
-        iter->second.scan_type_ = ScanType::ScanUnknow;
-        iter->second.type_ = ScanBlockingType::NoBlocking;
+        iter->second = {};
     }
 
     ccm_ = nullptr;

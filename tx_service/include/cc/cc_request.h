@@ -1964,10 +1964,7 @@ public:
                 scan_progress.AllFinished();
             wait_for_fetch_bucket_cnt_[core_id] = 0;
             auto [iter, inserted] = blocking_info_.try_emplace(core_id);
-            iter->second.cce_lock_addr_ = 0;
-            iter->second.end_cce_lock_addr_ = 0;
-            iter->second.scan_type_ = ScanType::ScanUnknow;
-            iter->second.type_ = ScanBlockingType::NoBlocking;
+            iter->second = {};
         }
     }
 
@@ -2116,20 +2113,18 @@ public:
         return err_.load(std::memory_order_relaxed);
     }
 
-    bool SetFinish(uint16_t core_id, bool can_access_lock_addresses = true)
+    bool SetFinish(uint16_t core_id)
     {
         assert(blocking_info_.count(core_id) > 0);
         ScanBlockingInfo blocking_info = blocking_info_[core_id];
-        blocking_info_[core_id] = {
-            0, 0, ScanType::ScanUnknow, ScanBlockingType::NoBlocking};
-        if (can_access_lock_addresses)
-        {
-            ClearBlockingInfo(blocking_info.cce_lock_addr_,
-                              blocking_info.end_cce_lock_addr_,
-                              blocking_info.type_,
-                              Txn(),
-                              NodeGroupId());
-        }
+        blocking_info_[core_id] = {};
+        ClearBlockingInfo(blocking_info.cce_lock_addr_,
+                          blocking_info.cce_lock_generation_,
+                          blocking_info.end_cce_lock_addr_,
+                          blocking_info.end_cce_lock_generation_,
+                          blocking_info.type_,
+                          Txn(),
+                          NodeGroupId());
 
         if (WaitForFetchBucketCnt(core_id) > 0)
         {
@@ -2174,29 +2169,59 @@ public:
     bool SetError(uint16_t core_id, CcErrorCode err)
     {
         SetErrorCode(err);
-
-        // A term transition may clear the CC map and recycle its lock wrappers
-        // before this queued request observes the error. Detach the one-shot
-        // addresses in SetFinish, but do not dereference them after teardown.
-        bool can_access_lock_addresses =
-            err != CcErrorCode::NG_TERM_CHANGED &&
-            err != CcErrorCode::REQUESTED_NODE_NOT_LEADER;
-        return SetFinish(core_id, can_access_lock_addresses);
+        return SetFinish(core_id);
     }
 
     /**
-     * Releases one continuation/end reference after its stored addresses have
-     * been cleared, so repeated completion cannot consume it twice.
+     * Returns the current identity of a live lock wrapper.
+     *
+     * Lock wrappers stay allocated long enough for queued requests to inspect
+     * them, but Reset() may reuse the same address for another CcEntry. The
+     * generation makes that reuse visible without treating the new lock as the
+     * scan's continuation.
+     */
+    static uint64_t LockGeneration(uint64_t lock_addr)
+    {
+        if (lock_addr == 0)
+        {
+            return 0;
+        }
+
+        auto *lock = reinterpret_cast<KeyGapLockAndExtraData *>(lock_addr);
+        return lock->Generation();
+    }
+
+    static bool LockAddressIsCurrent(uint64_t lock_addr, uint64_t generation)
+    {
+        if (lock_addr == 0)
+        {
+            return generation == 0;
+        }
+
+        // This runs on the lock's owning CcShard. A live continuation keeps
+        // the wrapper in use; after teardown, inspecting its generation relies
+        // on the lock pool's 30-second retirement grace for already-queued
+        // requests.
+        auto *lock = reinterpret_cast<KeyGapLockAndExtraData *>(lock_addr);
+        return lock->GetUsedStatus() && lock->Generation() == generation;
+    }
+
+    /**
+     * Releases one live continuation/end reference after its stored identity
+     * has been cleared, so repeated completion cannot consume it twice.
      */
     static void ClearBlockingInfo(uint64_t cce_lock_addr,
+                                  uint64_t cce_lock_generation,
                                   uint64_t end_cce_lock_addr,
+                                  uint64_t end_cce_lock_generation,
                                   ScanBlockingType blocking_type,
                                   TxNumber txn,
                                   txservice::NodeGroupId node_group_id)
     {
-        auto decr_read_intent = [txn, node_group_id](uint64_t lock_addr)
+        auto decr_read_intent =
+            [txn, node_group_id](uint64_t lock_addr, uint64_t generation)
         {
-            if (lock_addr == 0)
+            if (lock_addr == 0 || !LockAddressIsCurrent(lock_addr, generation))
             {
                 return;
             }
@@ -2210,12 +2235,13 @@ public:
             }
         };
 
-        decr_read_intent(end_cce_lock_addr);
+        decr_read_intent(end_cce_lock_addr, end_cce_lock_generation);
         if (blocking_type == ScanBlockingType::NoBlocking)
         {
-            decr_read_intent(cce_lock_addr);
+            decr_read_intent(cce_lock_addr, cce_lock_generation);
         }
         else if (cce_lock_addr != 0 &&
+                 LockAddressIsCurrent(cce_lock_addr, cce_lock_generation) &&
                  (blocking_type == ScanBlockingType::BlockOnFuture ||
                   blocking_type == ScanBlockingType::BlockOnLock))
         {
@@ -2282,8 +2308,14 @@ public:
                          ScanBlockingType blocking_type)
     {
         assert(blocking_info_.count(core_id) > 0);
-        blocking_info_[core_id] = {
-            cce_lock_addr, end_cce_lock_addr, scan_type, blocking_type};
+        ScanBlockingInfo &blocking_info = blocking_info_[core_id];
+        blocking_info.cce_lock_addr_ = cce_lock_addr;
+        blocking_info.cce_lock_generation_ = LockGeneration(cce_lock_addr);
+        blocking_info.end_cce_lock_addr_ = end_cce_lock_addr;
+        blocking_info.end_cce_lock_generation_ =
+            LockGeneration(end_cce_lock_addr);
+        blocking_info.scan_type_ = scan_type;
+        blocking_info.type_ = blocking_type;
     }
 
     int32_t GetRedisObjectType() const
@@ -2392,10 +2424,12 @@ private:
 
     struct ScanBlockingInfo
     {
-        uint64_t cce_lock_addr_;
-        uint64_t end_cce_lock_addr_;
-        ScanType scan_type_;
-        ScanBlockingType type_;
+        uint64_t cce_lock_addr_{0};
+        uint64_t cce_lock_generation_{0};
+        uint64_t end_cce_lock_addr_{0};
+        uint64_t end_cce_lock_generation_{0};
+        ScanType scan_type_{ScanType::ScanUnknow};
+        ScanBlockingType type_{ScanBlockingType::NoBlocking};
     };
 
     absl::flat_hash_map<uint16_t, size_t> wait_for_fetch_bucket_cnt_;

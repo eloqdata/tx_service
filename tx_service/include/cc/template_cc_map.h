@@ -2502,12 +2502,18 @@ public:
         Iterator end_it = End();
         CcEntry<KeyT, ValueT, VersionedRecord, RangePartitioned> *prior_cce;
         auto blocking_info = req.blocking_info_[shard_->core_id_];
-        req.blocking_info_[shard_->core_id_] = {
-            0, 0, ScanType::ScanUnknow, ScanBlockingType::NoBlocking};
         uint64_t cce_lock_addr = blocking_info.cce_lock_addr_;
         uint64_t end_lock_addr = blocking_info.end_cce_lock_addr_;
         ScanBlockingType blocking_type = blocking_info.type_;
         ScanType scan_type = blocking_info.scan_type_;
+        if (!ScanNextBatchCc::LockAddressIsCurrent(
+                cce_lock_addr, blocking_info.cce_lock_generation_) ||
+            !ScanNextBatchCc::LockAddressIsCurrent(
+                end_lock_addr, blocking_info.end_cce_lock_generation_))
+        {
+            return req.SetError(shard_->core_id_, CcErrorCode::NG_TERM_CHANGED);
+        }
+        req.blocking_info_[shard_->core_id_] = {};
         if (cce_lock_addr == 0 &&
             table_name_.Type() != TableType::RangePartition &&
             Sharder::Instance().GetDataStoreHandler() != nullptr)
@@ -3059,12 +3065,18 @@ public:
         Iterator end_it = End();
         CcEntry<KeyT, ValueT, VersionedRecord, RangePartitioned> *prior_cce;
         auto blocking_info = req.blocking_info_[shard_->core_id_];
-        req.blocking_info_[shard_->core_id_] = {
-            0, 0, ScanType::ScanUnknow, ScanBlockingType::NoBlocking};
         uint64_t cce_lock_addr = blocking_info.cce_lock_addr_;
         uint64_t end_lock_addr = blocking_info.end_cce_lock_addr_;
         ScanBlockingType blocking_type = blocking_info.type_;
         ScanType scan_type = blocking_info.scan_type_;
+        if (!ScanNextBatchCc::LockAddressIsCurrent(
+                cce_lock_addr, blocking_info.cce_lock_generation_) ||
+            !ScanNextBatchCc::LockAddressIsCurrent(
+                end_lock_addr, blocking_info.end_cce_lock_generation_))
+        {
+            return req.SetError(shard_->core_id_, CcErrorCode::NG_TERM_CHANGED);
+        }
+        req.blocking_info_[shard_->core_id_] = {};
         TxKey start_key_owner;
         const KeyT *req_start_key = nullptr;
         const KeyT *req_end_key = nullptr;
