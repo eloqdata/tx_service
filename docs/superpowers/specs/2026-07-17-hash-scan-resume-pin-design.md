@@ -15,6 +15,9 @@ The reachable datastore-backed race is:
 3. the final KV callback marks the shard drained before the continuation runs;
 4. the continuation returns through `ShardIsDrained` before normal pin release.
 
+This is a serialized queue-order interleaving on one `TxProcessor`, not a
+concurrent C++ memory/data race.
+
 ## Design
 
 - At the start of a new local or remote batch, clear the memory-finished flag
@@ -46,11 +49,11 @@ lifecycle change. This design does not claim to change that cancellation path.
 ## Verification
 
 Extend the existing single-`TestNode` transaction consistency test. Seed more
-than 128 keys on one shard, start with `memory=true/KV=false`, enqueue the scan
-and a same-shard marker in one shard callback, and let the marker flip the final
-bucket before the self-enqueued continuation. The regression check must fail on
-the current code because the continuation CCE still owns the transaction's
-`ReadIntent`, then pass after the fix.
+than two 128-entry passes on one shard, start with `memory=true/KV=false`,
+enqueue the scan and same-shard markers in one shard callback, and control
+whether the next continuation resumes or finishes. Add a second transaction
+reference to each continuation CCE so the checks distinguish exact-one
+decrement (`2 -> 1`) from both no cleanup (`2`) and release-all (`0`).
 
 To exercise both defenses independently, record that `Reset` clears the stale
 memory flag, then deliberately restore the old `true` value before enqueueing
@@ -58,10 +61,10 @@ the request. The interleaving must therefore enter the early `SetFinish` path,
 while the final assertions separately require the reset and cleanup behavior.
 
 Before restoring the race state, reset once with memory and all KV buckets
-finished and verify the completed flag remains true. In the marker, resolve the
-lock address to and retain the stable `LruEntry *` while the pin is still held;
-the lock wrapper itself can be recycled after cleanup. Require both a captured
-CCE and an observed `ReadIntent` before accepting the final absence check.
+finished and verify the completed flag remains true. In each marker, resolve
+the lock address to and retain the stable `LruEntry *` while the pin is still
+held. Require a captured CCE and an initial pin count of one, augment it to two,
+and require a count of one after normal resume or terminal cleanup.
 
 Resetting stale memory progress also prevents `Merge` from treating a partial
 memory pass as exhausted and advancing the pause key past unscanned entries.

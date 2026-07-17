@@ -2907,6 +2907,8 @@ void TransactionExecution::PostProcess(ScanNextOperation &scan_next)
     if (scanner.Type() == CcmScannerType::HashPartition &&
         scan_next.hd_result_.IsError())
     {
+        DrainScanner(&scanner, table_name);
+
         DLOG(ERROR) << "ScanNextOperation failed for cc error: "
                     << scan_next.hd_result_.ErrorMsg();
         bool_resp_->FinishError(
@@ -2918,6 +2920,8 @@ void TransactionExecution::PostProcess(ScanNextOperation &scan_next)
     else if (scanner.Type() == CcmScannerType::RangePartition &&
              scan_next.slice_hd_result_.IsError())
     {
+        DrainScanner(&scanner, table_name);
+
         DLOG(ERROR) << "ScanNextOperation failed for cc error: "
                     << scan_next.slice_hd_result_.ErrorMsg()
                     << ", table: " << scan_next.tx_req_->table_name_.Trace();
@@ -2926,6 +2930,10 @@ void TransactionExecution::PostProcess(ScanNextOperation &scan_next)
         bool_resp_ = nullptr;
         return;
     }
+
+    const bool retain_range_resume_tuple =
+        scanner.Type() == CcmScannerType::RangePartition &&
+        scan_next.scan_state_->slice_position_ == SlicePosition::Middle;
 
     enum struct AdvanceType
     {
@@ -2992,6 +3000,8 @@ void TransactionExecution::PostProcess(ScanNextOperation &scan_next)
                     cc_scan_tuple->cce_addr_, read_ts, &table_name);
                 if (!add_res)
                 {
+                    DrainScanner(
+                        &scanner, table_name, retain_range_resume_tuple);
                     bool_resp_->FinishError(
                         TxErrorCode::OCC_BREAK_REPEATABLE_READ);
                     bool_resp_ = nullptr;
@@ -3134,6 +3144,9 @@ void TransactionExecution::PostProcess(ScanNextOperation &scan_next)
                             cc_scan_tuple->cce_addr_, read_ts, &table_name);
                         if (!add_res)
                         {
+                            DrainScanner(&scanner,
+                                         table_name,
+                                         retain_range_resume_tuple);
                             bool_resp_->FinishError(
                                 TxErrorCode::OCC_BREAK_REPEATABLE_READ);
                             bool_resp_ = nullptr;
@@ -3352,6 +3365,9 @@ void TransactionExecution::PostProcess(ScanNextOperation &scan_next)
                             cc_scan_tuple->cce_addr_, read_ts, &table_name);
                         if (!add_res)
                         {
+                            DrainScanner(&scanner,
+                                         table_name,
+                                         retain_range_resume_tuple);
                             bool_resp_->FinishError(
                                 TxErrorCode::OCC_BREAK_REPEATABLE_READ);
                             bool_resp_ = nullptr;
@@ -5707,7 +5723,6 @@ void TransactionExecution::DrainScanner(CcScanner *scanner,
     };
 
     // drain out the scan tuple in the scan cache
-    // scanner->SetDrainCacheMode(true);
     scanner->Init();
     const ScanTuple *cc_scan_tuple = scanner->Current();
     // In case the scan status is blocked before
