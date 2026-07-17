@@ -3,6 +3,7 @@
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
+#include <memory>
 #include <string>
 #include <vector>
 
@@ -314,7 +315,7 @@ TEST_CASE("transaction consistency on TestNode", "[tx]")
     }
 
     // Scenario 6: normal resume and terminal completion must each release
-    // exactly one continuation ReadIntent.
+    // exactly one continuation and finite-end ReadIntent.
     bool stale_progress_cleared = false;
     bool finished_progress_preserved = false;
     bool reset_error_cleared = false;
@@ -328,6 +329,12 @@ TEST_CASE("transaction consistency on TestNode", "[tx]")
     std::atomic<uint32_t> second_augmented_count{0};
     std::atomic<uint32_t> first_terminal_count{0};
     std::atomic<uint32_t> second_terminal_count{0};
+    std::atomic<LruEntry *> finite_end_cce{nullptr};
+    std::atomic<LruEntry *> resumed_finite_end_cce{nullptr};
+    std::atomic<uint32_t> finite_end_pin_count{0};
+    std::atomic<uint32_t> finite_end_augmented_count{0};
+    std::atomic<uint32_t> finite_end_resumed_count{0};
+    std::atomic<uint32_t> finite_end_terminal_count{0};
     std::atomic<uint64_t> second_continuation_lock_addr{0};
     std::atomic<uint32_t> term_error_preserved_count{0};
     std::atomic<bool> term_error_blocking_info_cleared{false};
@@ -339,8 +346,9 @@ TEST_CASE("transaction consistency on TestNode", "[tx]")
 
         auto seed = node.BeginTx();
         size_t seed_count = 0;
+        int finite_end_key = 0;
         for (int key = 10000;
-             seed_count < 2 * ScanNextBatchCc::ScanBatchSize + 1;
+             seed_count < 2 * ScanNextBatchCc::ScanBatchSize + 2;
              ++key)
         {
             CompositeKey<int> composite_key{int{key}};
@@ -351,6 +359,7 @@ TEST_CASE("transaction consistency on TestNode", "[tx]")
                     core_id)
             {
                 REQUIRE(seed.Upsert(key, key));
+                finite_end_key = key;
                 ++seed_count;
             }
         }
@@ -400,7 +409,7 @@ TEST_CASE("transaction consistency on TestNode", "[tx]")
         CcHandlerResult<ScanNextResult> scan_result(nullptr);
         scan_result.Value().current_scan_plan_ = &plan;
         scan_result.Value().ccm_scanner_ = &scanner;
-        TxKey end_key(CompositeKey<int>::PositiveInfinity());
+        TxKey end_key(std::make_unique<CompositeKey<int>>(finite_end_key));
         ScanNextBatchCc scan_req;
         auto reset_scan_req = [&]
         {
@@ -468,6 +477,17 @@ TEST_CASE("transaction consistency on TestNode", "[tx]")
                                                  std::memory_order_release);
                 }
 
+                const uint64_t end_cce_lock_addr =
+                    scan_req.BlockingCceLockAddr(core_id).second;
+                auto *end_lock = reinterpret_cast<KeyGapLockAndExtraData *>(
+                    end_cce_lock_addr);
+                LruEntry *end_cce =
+                    end_lock == nullptr ? nullptr : end_lock->GetCcEntry();
+                resumed_finite_end_cce.store(end_cce,
+                                             std::memory_order_release);
+                finite_end_resumed_count.store(read_intent_count(end_cce),
+                                               std::memory_order_release);
+
                 progress.memory_scan_is_finished_ = true;
                 progress.scan_buckets_[selected_bucket] = true;
                 return true;
@@ -491,6 +511,23 @@ TEST_CASE("transaction consistency on TestNode", "[tx]")
                     key_lock->AcquireReadIntent(txn);
                     first_augmented_count.store(read_intent_count(cce),
                                                 std::memory_order_release);
+                }
+
+                const uint64_t end_cce_lock_addr =
+                    scan_req.BlockingCceLockAddr(core_id).second;
+                auto *end_lock = reinterpret_cast<KeyGapLockAndExtraData *>(
+                    end_cce_lock_addr);
+                LruEntry *end_cce =
+                    end_lock == nullptr ? nullptr : end_lock->GetCcEntry();
+                finite_end_cce.store(end_cce, std::memory_order_release);
+                uint32_t end_pin_count = read_intent_count(end_cce);
+                finite_end_pin_count.store(end_pin_count,
+                                           std::memory_order_release);
+                if (end_pin_count == 1)
+                {
+                    end_cce->GetKeyLock()->AcquireReadIntent(txn);
+                    finite_end_augmented_count.store(read_intent_count(end_cce),
+                                                     std::memory_order_release);
                 }
 
                 progress.memory_scan_is_finished_ = false;
@@ -560,10 +597,14 @@ TEST_CASE("transaction consistency on TestNode", "[tx]")
                     first_continuation_cce.load(std::memory_order_acquire);
                 LruEntry *second_cce =
                     second_continuation_cce.load(std::memory_order_acquire);
+                LruEntry *end_cce =
+                    finite_end_cce.load(std::memory_order_acquire);
                 first_terminal_count.store(read_intent_count(first_cce),
                                            std::memory_order_release);
                 second_terminal_count.store(read_intent_count(second_cce),
                                             std::memory_order_release);
+                finite_end_terminal_count.store(read_intent_count(end_cce),
+                                                std::memory_order_release);
 
                 // A term transition may recycle and reuse the saved lock
                 // wrapper before a queued request observes the error. Model
@@ -614,6 +655,15 @@ TEST_CASE("transaction consistency on TestNode", "[tx]")
     CHECK(second_augmented_count.load(std::memory_order_acquire) == 2);
     CHECK(first_terminal_count.load(std::memory_order_acquire) == 1);
     CHECK(second_terminal_count.load(std::memory_order_acquire) == 1);
+    LruEntry *end_cce = finite_end_cce.load(std::memory_order_acquire);
+    CHECK(end_cce != nullptr);
+    CHECK(end_cce != first_cce);
+    CHECK(end_cce != second_cce);
+    CHECK(resumed_finite_end_cce.load(std::memory_order_acquire) == end_cce);
+    CHECK(finite_end_pin_count.load(std::memory_order_acquire) == 1);
+    CHECK(finite_end_augmented_count.load(std::memory_order_acquire) == 2);
+    CHECK(finite_end_resumed_count.load(std::memory_order_acquire) == 2);
+    CHECK(finite_end_terminal_count.load(std::memory_order_acquire) == 1);
     CHECK(term_error_blocking_info_cleared.load(std::memory_order_acquire));
     CHECK(term_error_preserved_count.load(std::memory_order_acquire) == 1);
 }
