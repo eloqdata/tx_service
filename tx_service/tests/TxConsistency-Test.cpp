@@ -2,14 +2,18 @@
 #include <string>
 #include <vector>
 
-#include "catch2/catch_all.hpp"
+#include "bthread/bthread.h"
 #include "cc/cc_entry.h"
 #include "cc/cc_req_misc.h"
+#include "cc/cc_request.h"
 #include "cc/local_cc_shards.h"
 #include "harness/test_node.h"
 #include "read_write_set.h"
 #include "sharder.h"
 #include "tx_request.h"
+
+// Keep Catch2 last so its non-fatal CHECK macro wins after BRPC headers.
+#include "catch2/catch_all.hpp"
 
 using namespace txservice;
 using namespace txservice::test;
@@ -304,8 +308,176 @@ TEST_CASE("transaction consistency on TestNode", "[tx]")
         REQUIRE_FALSE(TxOwnsScanRead(scanned));
     }
 
+    // Scenario 6: completing a hash scan between its first memory pass and its
+    // self-enqueued continuation must release the continuation ReadIntent.
+    bool stale_progress_cleared = false;
+    bool finished_progress_preserved = false;
+    bool scan_completed_normally = false;
+    std::atomic<LruEntry *> continuation_cce{nullptr};
+    std::atomic<bool> continuation_pin_observed{false};
+    std::atomic<bool> continuation_read_intent_left{false};
+    {
+        constexpr uint16_t selected_bucket = 0;
+        const NodeGroupId node_group_id = Sharder::Instance().NativeNodeGroup();
+        const uint16_t core_id =
+            Sharder::Instance().ShardBucketIdToCoreIdx(selected_bucket);
+
+        auto seed = node.BeginTx();
+        size_t seed_count = 0;
+        for (int key = 10000; seed_count <= ScanNextBatchCc::ScanBatchSize;
+             ++key)
+        {
+            CompositeKey<int> composite_key{int{key}};
+            const uint16_t bucket_id =
+                Sharder::MapKeyHashToBucketId(composite_key.Hash());
+            if (bucket_id != selected_bucket &&
+                Sharder::Instance().ShardBucketIdToCoreIdx(bucket_id) ==
+                    core_id)
+            {
+                REQUIRE(seed.Upsert(key, key));
+                ++seed_count;
+            }
+        }
+        REQUIRE(seed.Commit());
+
+        auto tx =
+            node.BeginTx(IsolationLevel::RepeatableRead, CcProtocol::OccRead);
+        const TxNumber txn = tx.Txm()->TxNumber();
+
+        absl::flat_hash_map<NodeGroupId, std::vector<uint16_t>> buckets;
+        buckets[node_group_id].push_back(selected_bucket);
+        absl::flat_hash_map<NodeGroupId,
+                            absl::flat_hash_map<uint16_t, BucketScanProgress>>
+            saved_progress;
+        auto [ng_progress_it, inserted] =
+            saved_progress.try_emplace(node_group_id);
+        REQUIRE(inserted);
+        auto [core_progress_it, core_inserted] =
+            ng_progress_it->second.try_emplace(
+                core_id, TxKey(CompositeKey<int>::NegativeInfinity()), true);
+        REQUIRE(core_inserted);
+        core_progress_it->second.memory_scan_is_finished_ = true;
+        core_progress_it->second.scan_buckets_[selected_bucket] = false;
+
+        BucketScanPlan plan(0, &buckets, saved_progress);
+        BucketScanProgress &progress =
+            plan.GetBucketScanProgress(node_group_id)->at(core_id);
+        HashParitionCcScanner<CompositeKey<int>, CompositeRecord<int>> scanner(
+            ScanDirection::Forward, ScanIndexType::Primary, nullptr);
+        CcHandlerResult<ScanNextResult> scan_result(nullptr);
+        scan_result.Value().current_scan_plan_ = &plan;
+        scan_result.Value().ccm_scanner_ = &scanner;
+        TxKey end_key(CompositeKey<int>::PositiveInfinity());
+        ScanNextBatchCc scan_req;
+        auto reset_scan_req = [&]
+        {
+            scan_req.Reset(node.Table(),
+                           node_group_id,
+                           plan.GetNodeGroupTerm(node_group_id),
+                           txn,
+                           tx.Txm()->GetStartTs(),
+                           end_key,
+                           true,
+                           &plan,
+                           nullptr,
+                           tx.Txm()->TxTerm(),
+                           &scan_result,
+                           IsolationLevel::RepeatableRead,
+                           CcProtocol::OccRead,
+                           false,
+                           false,
+                           false,
+                           true,
+                           true);
+        };
+
+        reset_scan_req();
+        stale_progress_cleared = !progress.memory_scan_is_finished_;
+
+        progress.memory_scan_is_finished_ = true;
+        progress.scan_buckets_[selected_bucket] = true;
+        reset_scan_req();
+        finished_progress_preserved = progress.memory_scan_is_finished_;
+
+        // Deliberately restore the stale state so the marker can drain KV
+        // before the self-enqueued continuation executes.
+        progress.memory_scan_is_finished_ = true;
+        progress.scan_buckets_[selected_bucket] = false;
+
+        WaitableCc mark_bucket_drained(
+            [&](CcShard &)
+            {
+                const uint64_t cce_lock_addr =
+                    scan_req.BlockingCceLockAddr(core_id).first;
+                auto *continuation_lock =
+                    reinterpret_cast<KeyGapLockAndExtraData *>(cce_lock_addr);
+                LruEntry *cce = continuation_lock == nullptr
+                                    ? nullptr
+                                    : continuation_lock->GetCcEntry();
+                continuation_cce.store(cce, std::memory_order_release);
+                if (cce != nullptr)
+                {
+                    NonBlockingLock *key_lock = cce->GetKeyLock();
+                    continuation_pin_observed.store(
+                        key_lock != nullptr &&
+                            key_lock->ReadIntents().find(txn) !=
+                                key_lock->ReadIntents().end(),
+                        std::memory_order_release);
+                }
+                progress.scan_buckets_[selected_bucket] = true;
+                return true;
+            });
+        WaitableCc enqueue_scan(
+            [&](CcShard &ccs)
+            {
+                ccs.Enqueue(&scan_req);
+                ccs.Enqueue(&mark_bucket_drained);
+                return true;
+            });
+
+        Sharder::Instance().GetLocalCcShards()->EnqueueCcRequest(core_id,
+                                                                 &enqueue_scan);
+        enqueue_scan.Wait();
+        REQUIRE_FALSE(enqueue_scan.IsError());
+        mark_bucket_drained.Wait();
+        REQUIRE_FALSE(mark_bucket_drained.IsError());
+        while (!scan_result.IsFinished())
+        {
+            bthread_usleep(100);
+        }
+        scan_completed_normally = !scan_result.IsError();
+
+        WaitableCc inspect_and_cleanup(
+            [&](CcShard &ccs)
+            {
+                LruEntry *cce =
+                    continuation_cce.load(std::memory_order_acquire);
+                if (cce != nullptr)
+                {
+                    NonBlockingLock *key_lock = cce->GetKeyLock();
+                    continuation_read_intent_left.store(
+                        key_lock != nullptr &&
+                            key_lock->ReadIntents().find(txn) !=
+                                key_lock->ReadIntents().end(),
+                        std::memory_order_release);
+                }
+                ccs.ClearTx(txn);
+                return true;
+            });
+        Sharder::Instance().GetLocalCcShards()->EnqueueCcRequest(
+            core_id, &inspect_and_cleanup);
+        inspect_and_cleanup.Wait();
+        REQUIRE_FALSE(inspect_and_cleanup.IsError());
+    }
+
     REQUIRE(commit_scan_retained);
     REQUIRE(abort_scan_retained);
+    CHECK(stale_progress_cleared);
+    CHECK(finished_progress_preserved);
+    CHECK(scan_completed_normally);
+    CHECK(continuation_cce.load(std::memory_order_acquire) != nullptr);
+    CHECK(continuation_pin_observed.load(std::memory_order_acquire));
+    CHECK_FALSE(continuation_read_intent_left.load(std::memory_order_acquire));
 }
 
 int main(int argc, char **argv)
