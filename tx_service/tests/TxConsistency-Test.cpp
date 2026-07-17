@@ -314,7 +314,121 @@ TEST_CASE("transaction consistency on TestNode", "[tx]")
         REQUIRE_FALSE(TxOwnsScanRead(scanned));
     }
 
-    // Scenario 6: normal resume and terminal completion must each release
+    // Scenario 6: when scan post-processing detects a repeatable-read version
+    // mismatch, scanner-only locks must move into the read set so Abort can
+    // release them.
+    {
+        int conflict_key = -1;
+        int scanner_only_key = -1;
+        absl::flat_hash_map<uint16_t, int> first_key_by_bucket;
+        for (int key = 1000; scanner_only_key < 0; ++key)
+        {
+            CompositeKey<int> composite_key{int{key}};
+            uint16_t bucket_id =
+                Sharder::MapKeyHashToBucketId(composite_key.Hash());
+            auto [it, inserted] =
+                first_key_by_bucket.try_emplace(bucket_id, key);
+            if (!inserted)
+            {
+                conflict_key = it->second;
+                scanner_only_key = key;
+            }
+        }
+        REQUIRE(conflict_key < scanner_only_key);
+
+        auto seed = node.BeginTx();
+        REQUIRE(seed.Upsert(conflict_key, conflict_key));
+        REQUIRE(seed.Upsert(scanner_only_key, scanner_only_key));
+        REQUIRE(seed.Commit());
+
+        auto keeper =
+            node.BeginTx(IsolationLevel::RepeatableRead, CcProtocol::OccRead);
+        ClosedScanRead keeper_read =
+            ScanOneAndClose(node, keeper, scanner_only_key);
+
+        auto failing_tx =
+            node.BeginTx(IsolationLevel::RepeatableRead, CcProtocol::OccRead);
+        const TxNumber failing_txn = failing_tx.Txm()->TxNumber();
+        ClosedScanRead failing_read{
+            keeper_read.cce_addr_, keeper_read.cce_, failing_txn};
+        REQUIRE_FALSE(TxOwnsScanRead(failing_read));
+
+        int old_value = 0;
+        REQUIRE(failing_tx.Read(conflict_key, old_value));
+        REQUIRE(old_value == conflict_key);
+
+        auto updater = node.BeginTx();
+        REQUIRE(updater.Upsert(conflict_key, conflict_key + 1));
+        REQUIRE(updater.Commit());
+
+        TxKey start_key = Key(conflict_key);
+        TxKey end_key(CompositeKey<int>::PositiveInfinity());
+        BucketScanSavePoint save_point;
+        ScanOpenTxRequest open_req(&node.Table(),
+                                   node.SchemaVersion(),
+                                   ScanIndexType::Primary,
+                                   &start_key,
+                                   true,
+                                   &end_key,
+                                   true,
+                                   ScanDirection::Forward);
+        open_req.bucket_scan_save_point_ = &save_point;
+        uint64_t alias = failing_tx.Txm()->OpenTxScan(open_req);
+        open_req.Wait();
+        REQUIRE_FALSE(open_req.IsError());
+
+        bool mismatch_observed = false;
+        TxErrorCode mismatch_error = TxErrorCode::NO_ERROR;
+        std::vector<ScanBatchTuple> batch;
+        for (size_t plan_idx = 0;
+             plan_idx < save_point.PlanSize() && !mismatch_observed;
+             ++plan_idx)
+        {
+            BucketScanPlan plan = save_point.PickPlan(plan_idx);
+            bool plan_finished = false;
+            while (!plan_finished && !mismatch_observed)
+            {
+                ScanBatchTxRequest batch_req(alias, node.Table(), &batch);
+                batch_req.bucket_scan_plan_ = &plan;
+                failing_tx.Txm()->Execute(&batch_req);
+                batch_req.Wait();
+                if (batch_req.IsError())
+                {
+                    mismatch_observed = true;
+                    mismatch_error = batch_req.ErrorCode();
+                }
+                else
+                {
+                    plan_finished = batch_req.Result();
+                    batch.clear();
+                }
+            }
+        }
+        REQUIRE(mismatch_observed);
+        REQUIRE(mismatch_error == TxErrorCode::OCC_BREAK_REPEATABLE_READ);
+        REQUIRE(TxOwnsScanRead(failing_read));
+
+        REQUIRE(failing_tx.Abort());
+        bool scanner_only_lock_left = TxOwnsScanRead(failing_read);
+
+        // Keep RED isolated from later scenarios if the regression is present.
+        WaitableCc cleanup(
+            [failing_txn](CcShard &ccs)
+            {
+                ccs.ClearTx(failing_txn);
+                return true;
+            });
+        Sharder::Instance().GetLocalCcShards()->EnqueueCcRequest(
+            failing_read.cce_addr_.CoreId(), &cleanup);
+        cleanup.Wait();
+        REQUIRE_FALSE(cleanup.IsError());
+
+        REQUIRE(keeper.Abort());
+        REQUIRE_FALSE(TxOwnsScanRead(keeper_read));
+        CHECK_FALSE(scanner_only_lock_left);
+    }
+
+    // Scenario 7: normal resume and terminal completion must each release
     // exactly one continuation and finite-end ReadIntent.
     bool stale_progress_cleared = false;
     bool finished_progress_preserved = false;
