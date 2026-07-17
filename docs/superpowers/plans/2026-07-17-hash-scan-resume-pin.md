@@ -2,7 +2,7 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** Prevent hash-partition scans from leaving continuation or end CCE locks behind when a resumed request terminates before its normal resume block.
+**Goal:** Prevent hash-partition scans from leaving continuation or end CCE locks behind when a resumed request completes or errors before its normal resume block.
 
 **Architecture:** Keep resume ownership in the existing per-core `blocking_info_`. Terminal completion consumes it centrally and normal continuation takes it before resuming; local and remote requests use the same cleanup semantics. Reset only stale memory-finished progress at a new batch boundary.
 
@@ -24,6 +24,8 @@
 
 **Interfaces:**
 - Consumes: `ScanNextBatchCc`, `BucketScanPlan`, `HashParitionCcScanner`, `WaitableCc`, `CcShard::Enqueue`, and `NonBlockingLock::ReadIntents`.
+- Reuses: the stable-CCE ownership pattern from `ClosedScanRead` and
+  `TxOwnsScanRead` in the same test file.
 - Produces: one deterministic regression scenario in the existing `transaction consistency on TestNode` test.
 
 - [ ] **Step 1: Write the failing test**
@@ -34,14 +36,31 @@ Add a helper/scoped scenario that:
 // Seed > ScanNextBatchCc::ScanBatchSize keys on one core.
 // Build progress with memory_scan_is_finished_=true and one KV bucket=false.
 // Enqueue scan_req then mark_bucket_drained from one same-shard WaitableCc.
-// Capture scan_req.BlockingCceLockAddr(core) in the marker.
-// Wait for the scan result, inspect the captured CCE on its owner shard, and
+// Resolve and save the continuation LruEntry* in the marker while pinned.
+// Wait for the scan result, inspect the saved CCE on its owner shard, and
 // require that txn is absent from key_lock->ReadIntents().
 ```
 
 Use non-fatal observation for the stale flag so the same run reaches the orphan
-assertion. Always call `CcShard::ClearTx(txn)` after observing the result, before
-the final `REQUIRE`, so RED does not pollute later scenarios.
+assertion. After `Reset`, record that the stale memory flag was cleared, then
+set memory and the KV bucket to finished, reset the same unqueued request again,
+and record that the completed flag remains true. Finally restore
+`memory=true/KV=false` before enqueueing so this same run still forces the
+continuation through `ShardIsDrained -> SetFinish` after the marker drains KV.
+
+The single selected bucket keeps the memory cache capacity at 16; seed more
+than 128 same-core keys outside that bucket so the loop reaches
+`ScanBatchSize` without filling the cache. The marker must resolve the address
+to a stable `LruEntry *` while it is pinned and record that the transaction is
+present in `ReadIntents`. After the request, treat `GetKeyLock() == nullptr` as
+success because cleanup may recycle the lock wrapper. Always call
+`CcShard::ClearTx(txn)` before final assertions so RED does not pollute later
+scenarios. Require all of these independently:
+
+- stale unfinished progress was cleared;
+- fully finished progress stayed finished;
+- a continuation CCE was captured and its pin was observed;
+- the completed request left no RI on the saved CCE.
 
 - [ ] **Step 2: Run the focused test and verify RED**
 
@@ -59,6 +78,7 @@ transaction in `ReadIntents`; the request itself completes normally.
 ### Task 2: Consume resume ownership on every terminal path
 
 **Files:**
+- Modify: `tx_service/include/cc/cc_map.h`
 - Modify: `tx_service/include/cc/cc_request.h`
 - Modify: `tx_service/include/remote/remote_cc_request.h`
 - Modify: `tx_service/src/remote/remote_cc_request.cpp`
@@ -83,6 +103,9 @@ TxNumber txn;
 NodeGroupId node_group_id;
 ```
 
+Put the helper on `ScanNextBatchCc`, add only the narrow friendship it needs in
+`CcMap`, and reuse it from `RemoteScanNextBatch`.
+
 For the end CCE and a `NoBlocking` continuation, call
 `CcMap::DecrReadIntent`. For `BlockOnFuture`/`BlockOnLock`, query the CCE's
 actual held type with `SearchLock(txn)` and release that exact type. Ignore zero
@@ -94,6 +117,16 @@ error and delegate to `SetFinish`.
 
 In both normal resume blocks, copy `blocking_info_`, clear it immediately, and
 replace `ReleaseCceLock(..., ReadIntent)` with `DecrReadIntent`.
+
+Initialize both `cce_lock_addr_` and `end_cce_lock_addr_` to zero in local and
+remote reset. Route the local catalog-not-found branch through
+`SetError(core_id, REQUESTED_TABLE_NOT_EXISTS)` instead of writing `res_`
+directly.
+
+This cleanup covers the request's `SetFinish`/`SetError` completion paths,
+including outer term failures. It intentionally does not change inherited
+`AbortCcRequest` cancellation, whose base implementation bypasses per-core
+cleanup and parallel completion accounting.
 
 - [ ] **Step 2: Reset only stale memory progress**
 
@@ -127,6 +160,7 @@ finishes, and the captured CCE no longer owns the transaction RI.
 ```bash
 clang-format-18 -i \
   tx_service/tests/TxConsistency-Test.cpp \
+  tx_service/include/cc/cc_map.h \
   tx_service/include/cc/cc_request.h \
   tx_service/include/remote/remote_cc_request.h \
   tx_service/src/remote/remote_cc_request.cpp \
@@ -149,3 +183,7 @@ assertions.
 Confirm that local and remote request reset, terminal cleanup, and normal resume
 are symmetric; the test fails without the production hunk; no unrelated files
 or dependencies changed.
+
+Do not fold in the pre-existing remote end-iterator page mismatch
+(`Iterator(end_cce, ccp, ...)` versus the local `end_ccp`); it is outside this
+race fix.
