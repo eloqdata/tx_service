@@ -35,9 +35,15 @@ concurrent C++ memory/data race.
 - Normal resume takes and clears `blocking_info_` before continuing, then uses
   the copied state. This prevents terminal cleanup from touching stale or
   already-consumed lock addresses.
+- A term or leadership change still detaches the one-shot state but does not
+  dereference its saved lock addresses. CC-map teardown owns those releases
+  and may already have recycled the wrappers for unrelated entries.
 - Explicitly reset both stored lock addresses instead of relying on aggregate
   value-initialization, and route local catalog-not-found errors through
   `SetError`, so completion/error paths cannot bypass the cleanup.
+- Before an error return from scan post-processing, drain scanner-only and
+  trailing locks into the transaction read set so the normal abort path owns
+  their release.
 - Apply the same lifecycle to `ScanNextBatchCc` and
   `remote::RemoteScanNextBatch`.
 
@@ -54,6 +60,8 @@ enqueue the scan and same-shard markers in one shard callback, and control
 whether the next continuation resumes or finishes. Add a second transaction
 reference to each continuation CCE so the checks distinguish exact-one
 decrement (`2 -> 1`) from both no cleanup (`2`) and release-all (`0`).
+Use a finite end key and apply the same counted-reference checks to its pin
+across both normal resume and terminal completion.
 
 To exercise both defenses independently, record that `Reset` clears the stale
 memory flag, then deliberately restore the old `true` value before enqueueing
@@ -65,6 +73,12 @@ finished and verify the completed flag remains true. In each marker, resolve
 the lock address to and retain the stable `LruEntry *` while the pin is still
 held. Require a captured CCE and an initial pin count of one, augment it to two,
 and require a count of one after normal resume or terminal cleanup.
+
+Model a term-transition stale address by pointing a terminal request at an
+unrelated live reference. The request must detach the address without changing
+that reference. Separately, force a repeatable-read version mismatch after the
+CC layer has populated a multi-key scan cache; abort must release the
+scanner-only key, proving that error-path draining transfers its ownership.
 
 Resetting stale memory progress also prevents `Merge` from treating a partial
 memory pass as exhausted and advancing the pause key past unscanned entries.

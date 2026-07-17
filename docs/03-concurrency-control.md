@@ -337,8 +337,11 @@ intents/locks as it materializes.
   store-loaded slice data.
 - Within one `ScanNextBatchCc`, a bounded memory pass may self-reenqueue with counted internal
   **read intents** on its continuation entry and any finite end entry. These pins are not carried
-  into a client-visible next batch, which restarts from the saved pause key; normal resume or
-  terminal `SetFinish`/`SetError` cleanup consumes each pin exactly once.
+  into a client-visible next batch, which restarts from the saved pause key. Normal resume or the
+  terminal lifecycle consumes each pin exactly once; term-change teardown owns the release when
+  its CC map is no longer safe to access.
+- Separately, a range scan stopped in the middle of a slice carries the last tuple's read intent
+  across a client-visible batch as the resume anchor for the next `ScanSliceCc`.
 
 ## 10. Gotchas / invariants
 
