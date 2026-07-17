@@ -516,17 +516,20 @@ public:
         return err_.load(std::memory_order_relaxed);
     }
 
-    bool SetFinish(uint16_t core_id)
+    bool SetFinish(uint16_t core_id, bool can_access_lock_addresses = true)
     {
         assert(blocking_info_.count(core_id) > 0);
         ScanBlockingInfo blocking_info = blocking_info_[core_id];
         blocking_info_[core_id] = {
             0, 0, ScanType::ScanUnknow, ScanBlockingType::NoBlocking};
-        ScanNextBatchCc::ClearBlockingInfo(blocking_info.cce_lock_addr_,
-                                           blocking_info.end_cce_lock_addr_,
-                                           blocking_info.type_,
-                                           Txn(),
-                                           NodeGroupId());
+        if (can_access_lock_addresses)
+        {
+            ScanNextBatchCc::ClearBlockingInfo(blocking_info.cce_lock_addr_,
+                                               blocking_info.end_cce_lock_addr_,
+                                               blocking_info.type_,
+                                               Txn(),
+                                               NodeGroupId());
+        }
 
         if (WaitForFetchBucketCnt(core_id) > 0)
         {
@@ -574,7 +577,14 @@ public:
     bool SetError(uint16_t core_id, CcErrorCode err)
     {
         SetErrorCode(err);
-        return SetFinish(core_id);
+
+        // A term transition may clear the CC map and recycle its lock wrappers
+        // before this queued request observes the error. Detach the one-shot
+        // addresses in SetFinish, but do not dereference them after teardown.
+        bool can_access_lock_addresses =
+            err != CcErrorCode::NG_TERM_CHANGED &&
+            err != CcErrorCode::REQUESTED_NODE_NOT_LEADER;
+        return SetFinish(core_id, can_access_lock_addresses);
     }
 
     void SetUnfinishedCoreCnt(uint16_t core_cnt)
