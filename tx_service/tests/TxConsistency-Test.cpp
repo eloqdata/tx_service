@@ -721,16 +721,24 @@ TEST_CASE("transaction consistency on TestNode", "[tx]")
                                                 std::memory_order_release);
 
                 // A term transition may recycle and reuse the saved lock
-                // wrapper before a queued request observes the error. Model
-                // that stale address as pointing at an unrelated live
-                // reference: the request must detach it without releasing it.
-                term_error_req.SetBlockingInfo(
-                    core_id,
-                    second_continuation_lock_addr.load(
-                        std::memory_order_acquire),
-                    0,
-                    ScanType::ScanBoth,
-                    ScanBlockingType::NoBlocking);
+                // wrapper before a queued request observes the error. Capture
+                // the old identity, then reset the same wrapper generation and
+                // give the reused lock an unrelated live reference.
+                uint64_t stale_lock_addr = second_continuation_lock_addr.load(
+                    std::memory_order_acquire);
+                term_error_req.SetBlockingInfo(core_id,
+                                               stale_lock_addr,
+                                               0,
+                                               ScanType::ScanBoth,
+                                               ScanBlockingType::NoBlocking);
+                auto *reused_lock =
+                    reinterpret_cast<KeyGapLockAndExtraData *>(stale_lock_addr);
+                CcMap *reused_ccm = reused_lock->GetCcMap();
+                LruPage *reused_page = reused_lock->GetCcPage();
+                reused_lock->Reset(reused_ccm, reused_page, second_cce);
+                reused_lock->SetUsedStatus(true);
+                reused_lock->KeyLock()->AcquireReadIntent(txn);
+
                 term_error_req.SetError(core_id,
                                         CcErrorCode::REQUESTED_NODE_NOT_LEADER);
                 term_error_preserved_count.store(read_intent_count(second_cce),
@@ -780,6 +788,160 @@ TEST_CASE("transaction consistency on TestNode", "[tx]")
     CHECK(finite_end_terminal_count.load(std::memory_order_acquire) == 1);
     CHECK(term_error_blocking_info_cleared.load(std::memory_order_acquire));
     CHECK(term_error_preserved_count.load(std::memory_order_acquire) == 1);
+
+    // Scenario 8: a transient leader-term rejection does not tear down the CC
+    // map, so terminal cleanup must still consume its live continuation pin.
+    {
+        constexpr uint16_t selected_bucket = 0;
+        const NodeGroupId node_group_id = Sharder::Instance().NativeNodeGroup();
+        const uint16_t core_id =
+            Sharder::Instance().ShardBucketIdToCoreIdx(selected_bucket);
+        const int64_t original_term =
+            Sharder::Instance().LeaderTerm(node_group_id);
+        REQUIRE(original_term > 0);
+
+        auto tx =
+            node.BeginTx(IsolationLevel::RepeatableRead, CcProtocol::OccRead);
+        const TxNumber txn = tx.Txm()->TxNumber();
+        auto read_intent_count = [txn](LruEntry *cce)
+        {
+            if (cce == nullptr || cce->GetKeyLock() == nullptr)
+            {
+                return uint32_t{0};
+            }
+            const auto &read_intents = cce->GetKeyLock()->ReadIntents();
+            auto it = read_intents.find(txn);
+            return it == read_intents.end() ? uint32_t{0} : it->second;
+        };
+
+        absl::flat_hash_map<NodeGroupId, std::vector<uint16_t>> buckets;
+        buckets[node_group_id].push_back(selected_bucket);
+        absl::flat_hash_map<NodeGroupId,
+                            absl::flat_hash_map<uint16_t, BucketScanProgress>>
+            saved_progress;
+        auto [ng_progress_it, inserted] =
+            saved_progress.try_emplace(node_group_id);
+        REQUIRE(inserted);
+        auto [core_progress_it, core_inserted] =
+            ng_progress_it->second.try_emplace(
+                core_id, TxKey(CompositeKey<int>::NegativeInfinity()), true);
+        REQUIRE(core_inserted);
+        core_progress_it->second.memory_scan_is_finished_ = false;
+        // Avoid an unrelated asynchronous KV fetch in this queue-order test.
+        core_progress_it->second.scan_buckets_[selected_bucket] = true;
+
+        BucketScanPlan plan(0, &buckets, saved_progress);
+        HashParitionCcScanner<CompositeKey<int>, CompositeRecord<int>> scanner(
+            ScanDirection::Forward, ScanIndexType::Primary, nullptr);
+        CcHandlerResult<ScanNextResult> scan_result(nullptr);
+        scan_result.Value().current_scan_plan_ = &plan;
+        scan_result.Value().ccm_scanner_ = &scanner;
+        TxKey end_key(CompositeKey<int>::PositiveInfinity());
+        ScanNextBatchCc scan_req;
+        scan_req.Reset(node.Table(),
+                       node_group_id,
+                       original_term,
+                       txn,
+                       tx.Txm()->GetStartTs(),
+                       end_key,
+                       true,
+                       &plan,
+                       nullptr,
+                       tx.Txm()->TxTerm(),
+                       &scan_result,
+                       IsolationLevel::RepeatableRead,
+                       CcProtocol::OccRead,
+                       false,
+                       false,
+                       false,
+                       true,
+                       true);
+
+        std::atomic<LruEntry *> continuation_cce{nullptr};
+        std::atomic<CcMap *> ccm_before{nullptr};
+        std::atomic<uint32_t> initial_count{0};
+        std::atomic<uint32_t> augmented_count{0};
+        std::atomic<uint32_t> post_error_count{0};
+        std::atomic<bool> result_finished{false};
+        std::atomic<CcErrorCode> result_error{CcErrorCode::NO_ERROR};
+        std::atomic<bool> blocking_info_cleared{false};
+        std::atomic<bool> ccm_unchanged{false};
+
+        WaitableCc inspect_restore_cleanup(
+            [&](CcShard &ccs)
+            {
+                Sharder::Instance().SetLeaderTerm(node_group_id, original_term);
+
+                LruEntry *cce =
+                    continuation_cce.load(std::memory_order_acquire);
+                result_finished.store(scan_result.IsFinished(),
+                                      std::memory_order_release);
+                result_error.store(scan_result.ErrorCode(),
+                                   std::memory_order_release);
+                blocking_info_cleared.store(
+                    scan_req.BlockingCceLockAddr(core_id).first == 0,
+                    std::memory_order_release);
+                post_error_count.store(read_intent_count(cce),
+                                       std::memory_order_release);
+                ccm_unchanged.store(
+                    ccs.GetCcm(node.Table(), node_group_id) ==
+                        ccm_before.load(std::memory_order_acquire),
+                    std::memory_order_release);
+                ccs.ClearTx(txn);
+                return true;
+            });
+        WaitableCc mark_and_invalidate(
+            [&](CcShard &ccs)
+            {
+                uint64_t lock_addr =
+                    scan_req.BlockingCceLockAddr(core_id).first;
+                auto *lock =
+                    reinterpret_cast<KeyGapLockAndExtraData *>(lock_addr);
+                LruEntry *cce = lock == nullptr ? nullptr : lock->GetCcEntry();
+                continuation_cce.store(cce, std::memory_order_release);
+                uint32_t pin_count = read_intent_count(cce);
+                initial_count.store(pin_count, std::memory_order_release);
+                if (pin_count == 1)
+                {
+                    cce->GetKeyLock()->AcquireReadIntent(txn);
+                    augmented_count.store(read_intent_count(cce),
+                                          std::memory_order_release);
+                }
+                ccm_before.store(ccs.GetCcm(node.Table(), node_group_id),
+                                 std::memory_order_release);
+
+                Sharder::Instance().SetLeaderTerm(node_group_id, -1);
+                ccs.Enqueue(&inspect_restore_cleanup);
+                return true;
+            });
+        WaitableCc enqueue_scan(
+            [&](CcShard &ccs)
+            {
+                ccs.Enqueue(&scan_req);
+                ccs.Enqueue(&mark_and_invalidate);
+                return true;
+            });
+
+        Sharder::Instance().GetLocalCcShards()->EnqueueCcRequest(core_id,
+                                                                 &enqueue_scan);
+        enqueue_scan.Wait();
+        REQUIRE_FALSE(enqueue_scan.IsError());
+        mark_and_invalidate.Wait();
+        inspect_restore_cleanup.Wait();
+        REQUIRE_FALSE(mark_and_invalidate.IsError());
+        REQUIRE_FALSE(inspect_restore_cleanup.IsError());
+        REQUIRE(tx.Abort());
+
+        REQUIRE(continuation_cce.load(std::memory_order_acquire) != nullptr);
+        REQUIRE(initial_count.load(std::memory_order_acquire) == 1);
+        REQUIRE(augmented_count.load(std::memory_order_acquire) == 2);
+        REQUIRE(result_finished.load(std::memory_order_acquire));
+        REQUIRE(result_error.load(std::memory_order_acquire) ==
+                CcErrorCode::REQUESTED_NODE_NOT_LEADER);
+        REQUIRE(blocking_info_cleared.load(std::memory_order_acquire));
+        REQUIRE(ccm_unchanged.load(std::memory_order_acquire));
+        CHECK(post_error_count.load(std::memory_order_acquire) == 1);
+    }
 }
 
 int main(int argc, char **argv)
