@@ -313,6 +313,7 @@ TEST_CASE("transaction consistency on TestNode", "[tx]")
     // self-enqueued continuation must release the continuation ReadIntent.
     bool stale_progress_cleared = false;
     bool finished_progress_preserved = false;
+    bool reset_error_cleared = false;
     bool scan_completed_normally = false;
     std::atomic<LruEntry *> continuation_cce{nullptr};
     std::atomic<bool> continuation_pin_observed{false};
@@ -394,11 +395,13 @@ TEST_CASE("transaction consistency on TestNode", "[tx]")
 
         reset_scan_req();
         stale_progress_cleared = !progress.memory_scan_is_finished_;
+        scan_req.SetErrorCode(CcErrorCode::DATA_STORE_ERR);
 
         progress.memory_scan_is_finished_ = true;
         progress.scan_buckets_[selected_bucket] = true;
         reset_scan_req();
         finished_progress_preserved = progress.memory_scan_is_finished_;
+        reset_error_cleared = scan_req.ErrorCode() == CcErrorCode::NO_ERROR;
 
         // Deliberately restore the stale state so the marker can drain KV
         // before the self-enqueued continuation executes.
@@ -475,6 +478,7 @@ TEST_CASE("transaction consistency on TestNode", "[tx]")
     REQUIRE(abort_scan_retained);
     CHECK(stale_progress_cleared);
     CHECK(finished_progress_preserved);
+    CHECK(reset_error_cleared);
     CHECK(scan_completed_normally);
     CHECK(continuation_cce.load(std::memory_order_acquire) != nullptr);
     CHECK(continuation_pin_observed.load(std::memory_order_acquire));
