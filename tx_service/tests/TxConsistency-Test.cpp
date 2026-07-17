@@ -2,6 +2,7 @@
 #include <string>
 #include <vector>
 
+#include "absl/container/flat_hash_map.h"
 #include "bthread/bthread.h"
 #include "cc/cc_entry.h"
 #include "cc/cc_req_misc.h"
