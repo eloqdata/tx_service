@@ -89,10 +89,13 @@ and require a count of one after normal resume or terminal cleanup.
 Model teardown/reuse by capturing a token, resetting the same lock wrapper to
 advance its generation, and giving the reused wrapper an unrelated live
 reference. Terminal cleanup must detach the stale token without changing that
+reference. Pass another recycled token through normal resume; it must return
+`NG_TERM_CHANGED` before dereferencing the new owner and must preserve the new
 reference. Separately drive a real self-enqueued continuation through a
 temporary invalid leader term without clearing its CC map; terminal error
-cleanup must decrement the still-matching continuation exactly once. This
-proves the error code alone cannot decide whether a saved address is safe.
+cleanup must decrement the still-matching continuation exactly once. Together
+these cases prove the error code alone cannot decide whether a saved address is
+safe.
 
 Also force a repeatable-read version mismatch after the CC layer has populated
 a multi-key scan cache; abort must release the scanner-only key, proving that
