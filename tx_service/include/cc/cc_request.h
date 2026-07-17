@@ -1930,6 +1930,7 @@ public:
                                                                    protocol,
                                                                    iso_level);
 
+        err_.store(CcErrorCode::NO_ERROR, std::memory_order_relaxed);
         parallel_req_ = true;
 
         ng_term_ = ng_term;  // bucket owner term
