@@ -455,6 +455,12 @@ struct BucketScanSavePoint
         pause_position_;
 };
 
+/**
+ * @brief Opens a transaction scan.
+ *
+ * The character storage referenced by `tabname` must remain valid until the
+ * transaction ends. Scan read-set entries keep non-owning views of it.
+ */
 struct ScanOpenTxRequest : public TemplateTxRequest<ScanOpenTxRequest, size_t>
 {
     ScanOpenTxRequest() : TemplateTxRequest(nullptr, nullptr)
@@ -644,6 +650,12 @@ struct ScanBatchTuple
     CcEntryAddr cce_addr_;
 };
 
+/**
+ * @brief Fetches the next batch from an open transaction scan.
+ *
+ * The character storage referenced by `table_name` must remain valid until
+ * the transaction ends. Scan read-set entries keep non-owning views of it.
+ */
 struct ScanBatchTxRequest : public TemplateTxRequest<ScanBatchTxRequest, bool>
 {
     ScanBatchTxRequest() = delete;
@@ -695,6 +707,13 @@ struct UnlockTuple
     RecordStatus status_;
 };
 
+/**
+ * @brief Closes a transaction scan.
+ *
+ * The character storage referenced by `table_name` must remain valid until
+ * the transaction ends. This request and scan read-set entries keep non-owning
+ * views of it.
+ */
 struct ScanCloseTxRequest : public TemplateTxRequest<ScanCloseTxRequest, Void>
 {
     ScanCloseTxRequest() = delete;
@@ -706,10 +725,8 @@ struct ScanCloseTxRequest : public TemplateTxRequest<ScanCloseTxRequest, Void>
                        TransactionExecution *txm = nullptr)
         : TemplateTxRequest(yield_fptr, resume_fptr, txm),
           alias_(alias),
-          table_name_(table_name.StringView().data(),
-                      table_name.StringView().size(),
-                      table_name.Type(),
-                      table_name.Engine()),
+          table_name_(
+              table_name.StringView(), table_name.Type(), table_name.Engine()),
           in_use_(true)
     {
     }
@@ -723,10 +740,8 @@ struct ScanCloseTxRequest : public TemplateTxRequest<ScanCloseTxRequest, Void>
                        TransactionExecution *txm = nullptr)
         : TemplateTxRequest(yield_fptr, resume_fptr, txm),
           alias_(alias),
-          table_name_(table_name.StringView().data(),
-                      table_name.StringView().size(),
-                      table_name.Type(),
-                      table_name.Engine()),
+          table_name_(
+              table_name.StringView(), table_name.Type(), table_name.Engine()),
           in_use_(true)
     {
         for (size_t idx = scan_batch_idx; idx < scan_batch.size(); ++idx)
@@ -744,16 +759,14 @@ struct ScanCloseTxRequest : public TemplateTxRequest<ScanCloseTxRequest, Void>
         tx_result_.Reset();
         alias_ = alias;
 
-        table_name_ = TableName(table_name.StringView().data(),
-                                table_name.StringView().size(),
-                                table_name.Type(),
-                                table_name.Engine());
+        table_name_ = TableName(
+            table_name.StringView(), table_name.Type(), table_name.Engine());
         in_use_.store(true, std::memory_order_relaxed);
     }
 
     std::vector<UnlockTuple> unlock_batch_;
     uint64_t alias_{UINT64_MAX};
-    // TableName owner
+    // Non-owning view of the caller's transaction-lifetime name storage.
     TableName table_name_;
     std::atomic<bool> in_use_{false};
 };

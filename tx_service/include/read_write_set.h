@@ -525,27 +525,6 @@ public:
         }
     }
 
-    uint16_t RemoveDataReadEntry(const TableName &table_name,
-                                 const CcEntryAddr &addr)
-    {
-        assert(!table_name.IsMeta());
-
-        uint16_t read_cnt = 0;
-        auto cce_it = data_rset_.find(addr);
-        if (cce_it != data_rset_.end())
-        {
-            ReadSetEntry &read_entry = cce_it->second.first;
-            assert(read_entry.read_cnt_ > 0);
-            read_cnt = --read_entry.read_cnt_;
-            if (read_cnt == 0)
-            {
-                data_rset_.erase(cce_it);
-            }
-        }
-
-        return read_cnt;
-    }
-
     void ResetForwardWriteCount()
     {
         forward_write_cnt_ = 0;

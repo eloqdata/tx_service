@@ -35,6 +35,22 @@ All in `tx_service/include/tx_request.h`; each maps to `ProcessTxRequest(...)` o
 | Maintenance / cluster | `SplitFlushTxRequest`, `RangeSplitRecoveryTxRequest`, `ClusterScaleTxRequest`, `DataMigrationTxRequest`, `ReloadCacheTxRequest`, `CleanArchivesTxRequest` | composite multi-stage ops, see [08](08-range-and-bucket-management.md)/[06](06-distribution-and-clustering.md) |
 | Test | `FaultInjectTxRequest`, `CleanCcEntryForTestTxRequest` | Debug builds |
 
+### Scan read ownership
+
+Closing or draining a scanner does not release data read locks or read intents
+while the transaction can still execute requests.
+Returned locked CCEs already recorded as semantic data reads remain in the data
+read set; command/write-set tuples keep their existing ownership paths.
+Scanner-only last/trailing/error cleanup CCEs are stored there with version 0,
+which skips version validation but keeps the CCE non-evictable until final
+cleanup. Commit releases them through `ValidateOperation`; abort releases them
+through `PostProcessOp`.
+
+This retention can increase the read-set footprint and writer blocking for long
+locking scans. It also makes node groups touched only by scanner pins part of
+the final post-read term check, so a leadership change on one of those groups
+can abort the transaction.
+
 The read/write footprint accumulates in `ReadWriteSet` (`rw_set_`: read entries with version ts + lock info, table write sets) and `CommandSet` (`cmd_set_`: object commands for forwarding/logging). EloqKV database locks are cached in `locked_db_[16]`.
 
 ## The commit pipeline
