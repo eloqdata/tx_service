@@ -335,12 +335,16 @@ intents/locks as it materializes.
 - `RangePartitionedCcmScanner<KeyT, ValueT, IsForward>`: a single `scan_cache_` since a range
   slice lives on one shard; used with `ScanSliceCc`, which itself merges memory entries with
   store-loaded slice data.
+- A hash batch treats the CC map and store as separate sources: `FetchBucketData` fills a KV
+  cache, not the CC map. Reaching the CC-map end marks that core's memory source finished.
+  `Merge()` resets the flag if it trims memory tuples behind the new pause key; otherwise the
+  next batch starts any needed KV fetches and skips the finished CC-map source, acquiring no new
+  read intents from it.
 - Within one hash `ScanNextBatchCc`, a bounded memory pass may self-reenqueue with **read
-  intents** on its continuation and finite-end entries. After validating the node-group term, a
-  resumed request consumes exactly those references before checking whether the shard is drained;
-  otherwise a KV callback could make the request finish while its pins were still held. A term
-  mismatch returns without dereferencing the saved addresses and relies on node-group/CC-map
-  cleanup.
+  intents** on its continuation and finite-end entries. A live continuation always represents an
+  unfinished memory pass and is never in the store-fetch wait state. On resume it consumes exactly
+  those references before continuing the scan. A term mismatch returns without dereferencing the
+  saved addresses and relies on node-group/CC-map cleanup.
 - Separately, a range scan stopped in the middle of a slice carries the last tuple's read intent
   across a client-visible batch as the next `ScanSliceCc` resume anchor.
 

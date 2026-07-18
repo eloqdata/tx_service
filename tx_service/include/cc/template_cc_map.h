@@ -2449,21 +2449,14 @@ public:
             return req.SetError(shard_->core_id_, CcErrorCode::NG_TERM_CHANGED);
         }
 
-        auto [cce_lock_addr, end_lock_addr] =
-            req.BlockingCceLockAddr(shard_->core_id_);
-        auto [blocking_type, scan_type] = req.BlockingPair(shard_->core_id_);
-        if (cce_lock_addr == 0 ||
-            blocking_type == ScanBlockingType::BlockOnFetchBucket)
+        if (req.ShardIsDrained(shard_->core_id_))
         {
-            if (req.ShardIsDrained(shard_->core_id_))
-            {
-                return req.SetFinish(shard_->core_id_);
-            }
+            return req.SetFinish(shard_->core_id_);
+        }
 
-            if (req.IsWaitForFetchBucket(shard_->core_id_))
-            {
-                return req.SetFinish(shard_->core_id_);
-            }
+        if (req.IsWaitForFetchBucket(shard_->core_id_))
+        {
+            return req.SetFinish(shard_->core_id_);
         }
 
         IsolationLevel iso_lvl = req.Isolation();
@@ -2508,6 +2501,9 @@ public:
         Iterator scan_ccm_it;
         Iterator end_it = End();
         CcEntry<KeyT, ValueT, VersionedRecord, RangePartitioned> *prior_cce;
+        auto [cce_lock_addr, end_lock_addr] =
+            req.BlockingCceLockAddr(shard_->core_id_);
+        auto [blocking_type, scan_type] = req.BlockingPair(shard_->core_id_);
         if (cce_lock_addr == 0 &&
             table_name_.Type() != TableType::RangePartition &&
             Sharder::Instance().GetDataStoreHandler() != nullptr)
@@ -2625,21 +2621,19 @@ public:
                              req.is_require_keys_,
                              req.is_require_recs_);
             }
-
-            // A KV callback may drain the shard while this request is queued
-            // with continuation pins. Consume them before finishing.
-            if (req.ShardIsDrained(shard_->core_id_))
-            {
-                return req.SetFinish(shard_->core_id_);
-            }
-
-            if (req.IsWaitForFetchBucket(shard_->core_id_))
-            {
-                return req.SetFinish(shard_->core_id_);
-            }
         }
         else
         {
+            // A live continuation has a nonzero lock address and cannot reach
+            // this branch. Once Merge preserves a finished memory source for
+            // the next batch, only the separately cached KV source remains.
+            if (req.GetBucketScanProgress()
+                    ->at(shard_->core_id_)
+                    .memory_scan_is_finished_)
+            {
+                return req.SetFinish(shard_->core_id_);
+            }
+
             const KeyT *look_key = start_key.GetKey<KeyT>();
             const KeyT *end_key = req.end_key_.GetKey<KeyT>();
 
@@ -3023,21 +3017,14 @@ public:
             return req.SetError(shard_->core_id_, CcErrorCode::NG_TERM_CHANGED);
         }
 
-        auto [cce_lock_addr, end_lock_addr] =
-            req.BlockingCceLockAddr(shard_->core_id_);
-        auto [blocking_type, scan_type] = req.BlockingPair(shard_->core_id_);
-        if (cce_lock_addr == 0 ||
-            blocking_type == ScanBlockingType::BlockOnFetchBucket)
+        if (req.ShardIsDrained(shard_->core_id_))
         {
-            if (req.ShardIsDrained(shard_->core_id_))
-            {
-                return req.SetFinish(shard_->core_id_);
-            }
+            return req.SetFinish(shard_->core_id_);
+        }
 
-            if (req.IsWaitForFetchBucket(shard_->core_id_))
-            {
-                return req.SetFinish(shard_->core_id_);
-            }
+        if (req.IsWaitForFetchBucket(shard_->core_id_))
+        {
+            return req.SetFinish(shard_->core_id_);
         }
 
         IsolationLevel iso_lvl = req.Isolation();
@@ -3077,6 +3064,9 @@ public:
         Iterator scan_ccm_it;
         Iterator end_it = End();
         CcEntry<KeyT, ValueT, VersionedRecord, RangePartitioned> *prior_cce;
+        auto [cce_lock_addr, end_lock_addr] =
+            req.BlockingCceLockAddr(shard_->core_id_);
+        auto [blocking_type, scan_type] = req.BlockingPair(shard_->core_id_);
         TxKey start_key_owner;
         const KeyT *req_start_key = nullptr;
         const KeyT *req_end_key = nullptr;
@@ -3196,6 +3186,13 @@ public:
                     &req,
                     &BackfillForScanNextBatch<KeyT, ValueT, VersionedRecord>);
             }
+
+            // As in the local path, a finished memory source without a live
+            // continuation leaves only the separately cached KV source.
+            if (req.memory_is_drained_[shard_->core_id_])
+            {
+                return req.SetFinish(shard_->core_id_);
+            }
         }
 
         if (cce_lock_addr != 0)
@@ -3283,17 +3280,6 @@ public:
                                 req.is_ckpt_delta_,
                                 req.is_require_keys_,
                                 req.is_require_recs_);
-            }
-
-            // Keep remote resume ownership identical to the local path.
-            if (req.ShardIsDrained(shard_->core_id_))
-            {
-                return req.SetFinish(shard_->core_id_);
-            }
-
-            if (req.IsWaitForFetchBucket(shard_->core_id_))
-            {
-                return req.SetFinish(shard_->core_id_);
             }
         }
         else

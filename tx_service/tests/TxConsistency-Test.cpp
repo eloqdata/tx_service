@@ -419,8 +419,8 @@ TEST_CASE("transaction consistency on TestNode", "[tx]")
         REQUIRE_FALSE(scanner_only_lock_left);
     }
 
-    // Scenario 7: a request that becomes drained while a continuation is
-    // pending must consume exactly that continuation ReadIntent before finish.
+    // Scenario 7: a later batch must not rescan a memory source that Merge
+    // already marked finished or acquire another ReadIntent from that source.
     {
         constexpr int scan_key = 30;
         auto seed = node.BeginTx();
@@ -449,7 +449,7 @@ TEST_CASE("transaction consistency on TestNode", "[tx]")
                 core_id, TxKey(CompositeKey<int>::NegativeInfinity()), true);
         REQUIRE(core_inserted);
         core_progress_it->second.memory_scan_is_finished_ = true;
-        core_progress_it->second.scan_buckets_[bucket_id] = true;
+        core_progress_it->second.scan_buckets_[bucket_id] = false;
 
         BucketScanPlan plan(0, &buckets, saved_progress);
         HashParitionCcScanner<CompositeKey<int>, CompositeRecord<int>> scanner(
@@ -490,8 +490,8 @@ TEST_CASE("transaction consistency on TestNode", "[tx]")
                                                        : it->second;
         };
 
-        std::atomic<uint32_t> semantic_count{0};
-        std::atomic<uint32_t> augmented_count{0};
+        const uint32_t shard_code = (node_group_id << 10) + core_id;
+        std::atomic<uint32_t> initial_count{0};
         std::atomic<uint32_t> post_request_count{0};
         std::atomic<uint32_t> post_commit_count{0};
         WaitableCc inspect_after_request(
@@ -504,18 +504,8 @@ TEST_CASE("transaction consistency on TestNode", "[tx]")
         WaitableCc enqueue_scan(
             [&](CcShard &ccs)
             {
-                NonBlockingLock *key_lock = scanned.cce_->GetKeyLock();
-                semantic_count.store(read_intent_count(),
-                                     std::memory_order_release);
-                key_lock->AcquireReadIntent(txn);
-                augmented_count.store(read_intent_count(),
-                                      std::memory_order_release);
-                scan_req.SetBlockingInfo(
-                    core_id,
-                    reinterpret_cast<uint64_t>(scanned.cce_->GetLockAddr()),
-                    0,
-                    ScanType::ScanBoth,
-                    ScanBlockingType::NoBlocking);
+                initial_count.store(read_intent_count(),
+                                    std::memory_order_release);
                 ccs.Enqueue(&scan_req);
                 ccs.Enqueue(&inspect_after_request);
                 return true;
@@ -542,8 +532,8 @@ TEST_CASE("transaction consistency on TestNode", "[tx]")
         inspect_after_commit.Wait();
         REQUIRE_FALSE(inspect_after_commit.IsError());
 
-        REQUIRE(semantic_count.load(std::memory_order_acquire) == 1);
-        REQUIRE(augmented_count.load(std::memory_order_acquire) == 2);
+        REQUIRE(initial_count.load(std::memory_order_acquire) == 1);
+        REQUIRE(scanner.Cache(shard_code)->Size() == 0);
         REQUIRE(post_request_count.load(std::memory_order_acquire) == 1);
         REQUIRE(post_commit_count.load(std::memory_order_acquire) == 0);
     }
