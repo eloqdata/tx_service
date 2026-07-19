@@ -457,7 +457,7 @@ TxErrorCode TransactionExecution::ConvertCcError(CcErrorCode error)
 TxmStatus TransactionExecution::Forward()
 {
     TransactionOperation *prev_op = nullptr;
-    uint16_t cmd_id = 0;
+    uint32_t cmd_id = 0;
 
     if (!AcquireExclusiveForwardLatch())
     {
