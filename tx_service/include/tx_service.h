@@ -735,7 +735,7 @@ public:
             }
             // If the tx has been stuck on the same command for a while, enlists
             // the tx for execution.
-            uint16_t cmd_id = tx->CommandId();
+            uint32_t cmd_id = tx->CommandId();
             if (cmd_id == progress.cmd_id_)
             {
                 EnlistTx(tx);
@@ -759,7 +759,7 @@ public:
             }
             // If the tx has been stuck on the same command for a while, enlists
             // the tx for execution.
-            uint16_t cmd_id = tx->CommandId();
+            uint32_t cmd_id = tx->CommandId();
             if (cmd_id == progress.cmd_id_)
             {
                 EnlistTx(tx);
@@ -815,7 +815,7 @@ public:
 
     void EnlistWaitingTx(TransactionExecution *txm)
     {
-        uint16_t cmd_id = txm->CommandId();
+        uint32_t cmd_id = txm->CommandId();
         uint64_t clock_ts = LocalCcShards::ClockTs();
 
         auto op =
@@ -1021,12 +1021,12 @@ private:
     struct TxProgress
     {
         TxProgress() = delete;
-        TxProgress(uint16_t cmd_id, uint64_t clock_ts)
+        TxProgress(uint32_t cmd_id, uint64_t clock_ts)
             : cmd_id_(cmd_id), wait_clock_ts_(clock_ts)
         {
         }
 
-        uint16_t cmd_id_;
+        uint32_t cmd_id_;
         uint64_t wait_clock_ts_;
     };
 
