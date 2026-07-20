@@ -355,7 +355,7 @@ public:
         }
     }
 
-    uint16_t CommandId()
+    uint32_t CommandId()
     {
         return input_msg_->command_id();
     }
