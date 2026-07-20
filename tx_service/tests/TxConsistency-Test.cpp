@@ -1,5 +1,7 @@
 #include <atomic>
+#include <chrono>
 #include <string>
+#include <thread>
 #include <vector>
 
 #include "absl/container/flat_hash_map.h"
@@ -536,6 +538,139 @@ TEST_CASE("transaction consistency on TestNode", "[tx]")
         REQUIRE(scanner.Cache(shard_code)->Size() == 0);
         REQUIRE(post_request_count.load(std::memory_order_acquire) == 1);
         REQUIRE(post_commit_count.load(std::memory_order_acquire) == 0);
+    }
+
+    // Scenario 8: orphan-lock recovery for locally-coordinated transactions.
+    // Fabricate the residue shapes a lock leak leaves behind — a real
+    // ReadIntent owned by a tx that no longer exists, and registry
+    // bookkeeping claiming a write lock with no backing lock — verify the
+    // bookkeeping pins the checkpoint timestamp and CkptTsCc names it, then
+    // verify the CheckRecoverTx-launched probe (RecoverDeadTxCc) clears both
+    // while leaving a live transaction's intent alone. Recovery is driven by
+    // issuing CkptTsCc rounds, the same trigger production uses.
+    {
+        auto seed = node.BeginTx();
+        REQUIRE(seed.Upsert(50, 500));
+        REQUIRE(seed.Commit());
+
+        auto scan_tx =
+            node.BeginTx(IsolationLevel::RepeatableRead, CcProtocol::OccRead);
+        ClosedScanRead scanned = ScanOneAndClose(node, scan_tx, 50);
+
+        LocalCcShards *shards = Sharder::Instance().GetLocalCcShards();
+        const NodeGroupId ng = Sharder::Instance().NativeNodeGroup();
+        const uint16_t core_id = scanned.cce_addr_.CoreId();
+        const int64_t ng_term = Sharder::Instance().LeaderTerm(ng);
+        REQUIRE(ng_term >= 0);
+
+        const TxNumber core_prefix = static_cast<TxNumber>((ng << 10) | core_id)
+                                     << 32L;
+        // Idents far above anything this test allocates: LocateTx must not
+        // find them, so recovery treats their owners as finished.
+        const TxNumber dead_intent_txn = core_prefix | 0xFEED0001;
+        const TxNumber dead_book_txn = core_prefix | 0xFEED0002;
+
+        auto live_tx = node.BeginTx();
+        const TxNumber live_txn = live_tx.Txm()->TxNumber();
+
+        // Plant while scan_tx's retained read keeps the cce's lock struct
+        // alive. Mirrors CcMap::AcquireReadIntent: acquire on the lock, then
+        // register the first acquisition in the shard's registry.
+        std::atomic<bool> planted{false};
+        WaitableCc plant(
+            [&](CcShard &ccs)
+            {
+                NonBlockingLock *lock = scanned.cce_->GetKeyLock();
+                if (lock == nullptr)
+                {
+                    return true;
+                }
+                // The scan-leak shape: a real ReadIntent registered under a
+                // tx that no longer exists.
+                if (lock->AcquireReadIntent(dead_intent_txn))
+                {
+                    ccs.UpsertLockHoldingTx(dead_intent_txn,
+                                            ng_term,
+                                            scanned.cce_,
+                                            false,
+                                            ng,
+                                            TableType::Primary);
+                }
+                // The ident-wrap-adoption shape: bookkeeping claiming a
+                // write lock that does not exist on the entry.
+                ccs.UpsertLockHoldingTx(dead_book_txn,
+                                        ng_term,
+                                        scanned.cce_,
+                                        true,
+                                        ng,
+                                        TableType::Primary);
+                // A live tx's intent must survive recovery.
+                if (lock->AcquireReadIntent(live_txn))
+                {
+                    ccs.UpsertLockHoldingTx(live_txn,
+                                            ng_term,
+                                            scanned.cce_,
+                                            false,
+                                            ng,
+                                            TableType::Primary);
+                }
+                planted.store(true, std::memory_order_release);
+                return true;
+            });
+        shards->EnqueueCcRequest(core_id, &plant);
+        plant.Wait();
+        REQUIRE_FALSE(plant.IsError());
+        REQUIRE(planted.load(std::memory_order_acquire));
+
+        // Release the scan tx's own ownership; the fabricated intents keep
+        // the lock struct alive.
+        REQUIRE(scan_tx.Commit());
+        REQUIRE_FALSE(TxOwnsScanRead(scanned));
+
+        auto drive_recovery_round = [&]() -> TxNumber
+        {
+            CkptTsCc ckpt_req(shards->Count(), ng);
+            for (size_t core = 0; core < shards->Count(); ++core)
+            {
+                shards->EnqueueCcRequest(core, &ckpt_req);
+            }
+            ckpt_req.Wait();
+            return ckpt_req.GetPinningTx().txn_;
+        };
+        auto lock_cleared = [&](TxNumber txn)
+        {
+            return !TxOwnsScanRead(
+                ClosedScanRead{scanned.cce_addr_, scanned.cce_, txn});
+        };
+
+        // Within the 5s recovery gate no probe has launched yet, and the
+        // fabricated write-lock bookkeeping pins the checkpoint ts.
+        REQUIRE(drive_recovery_round() == dead_book_txn);
+
+        // Keep driving rounds: once the gate elapses, CheckRecoverTx probes
+        // the dead txns and their residue is cleared.
+        bool recovered = false;
+        for (int i = 0; i < 300 && !recovered; ++i)
+        {
+            std::this_thread::sleep_for(std::chrono::milliseconds(100));
+            TxNumber pinning_txn = drive_recovery_round();
+            recovered = lock_cleared(dead_intent_txn) && pinning_txn == 0;
+        }
+        REQUIRE(recovered);
+        // The live tx's intent survived recovery.
+        REQUIRE_FALSE(lock_cleared(live_txn));
+
+        // Once the live tx finishes, its (fabricated, hence never released)
+        // intent becomes recoverable residue too.
+        REQUIRE(live_tx.Commit());
+        recovered = false;
+        for (int i = 0; i < 300 && !recovered; ++i)
+        {
+            std::this_thread::sleep_for(std::chrono::milliseconds(100));
+            drive_recovery_round();
+            recovered = lock_cleared(live_txn);
+        }
+        REQUIRE(recovered);
     }
 
     REQUIRE(commit_scan_retained);

@@ -990,6 +990,58 @@ void FetchRecordCc::SetFinish(int err)
     ccs_.Enqueue(this);
 }
 
+bool RecoverDeadTxCc::Execute(CcShard &ccs)
+{
+    if (phase_ == Phase::Probe)
+    {
+        // Running on the tx's owner shard: read liveness inline. Dead when
+        // the TEntry slot has been reused (LocateTx misses) or still holds
+        // the ident with Aborted/Finished status — post-processing is
+        // provably done or never coming, so the tx will never release its
+        // locks itself. A resident Committed status gets its own verdict:
+        // the commit is decided but post-processing may still be in flight,
+        // which permits releasing read locks (the owner's release is an
+        // idempotent no-op) but forbids abort-clearing write locks — the
+        // pending value may not be installed yet.
+        TEntry *te = ccs.LocateTx(tx_number_);
+        if (te == nullptr || te->status_ == TxnStatus::Aborted ||
+            te->status_ == TxnStatus::Finished)
+        {
+            verdict_ = Verdict::Dead;
+        }
+        else if (te->status_ == TxnStatus::Committed)
+        {
+            verdict_ = Verdict::Committed;
+        }
+        else
+        {
+            verdict_ = Verdict::Alive;
+        }
+
+        phase_ = Phase::Resolve;
+        // Hop back to the shard holding the locks.
+        ccs.Enqueue(ccs.core_id_, origin_core_, this);
+        return false;
+    }
+
+    // Resolve phase, on the shard holding the locks. Stale registry
+    // references were already repaired in place by CheckRecoverTx when the
+    // probe was launched; only real locks remain to recover.
+    if (verdict_ != Verdict::Alive)
+    {
+        ccs.RecoverDeadTxLocks(tx_number_,
+                               cc_ng_id_,
+                               cc_ng_term_,
+                               tx_coord_term_,
+                               wlock_ts_,
+                               verdict_);
+    }
+
+    // Returning true lets the tx processor call Free(), recycling this
+    // request to its shard's pool.
+    return true;
+}
+
 void FetchBucketDataCc::Reset(
     const TableName *table_name,
     const TableSchema *table_schema,

@@ -30,6 +30,7 @@
 #include <unordered_map>
 #include <vector>
 
+#include "cc/cc_request.h"
 #include "cc/local_cc_shards.h"
 #include "metrics.h"
 #include "sharder.h"
@@ -57,8 +58,16 @@ public:
 
     void Ckpt(bool is_last_ckpt);
 
-    std::pair<uint64_t, uint64_t> GetNewCheckpointTs(uint32_t node_group_id,
-                                                     bool is_last_ckpt);
+    /**
+     * @brief Computes the node group's new checkpoint ts and memory usage.
+     * @param pinning_tx Out: the write-lock-holding tx that determined the
+     * ts (txn_ == 0 when the ts came from the clock). Consumed by
+     * WarnIfCkptStalled when the ts fails to advance.
+     */
+    std::pair<uint64_t, uint64_t> GetNewCheckpointTs(
+        uint32_t node_group_id,
+        bool is_last_ckpt,
+        CkptTsCc::PinningTxInfo &pinning_tx);
 
     /**
      * @brief Checkpoint one Entry to KvStore synchronously.
@@ -172,6 +181,30 @@ private:
 
     std::atomic<size_t> consecutive_fail_cnt_{0};
 
+    // Per-node-group checkpoint-stall tracking: how many consecutive Ckpt()
+    // rounds the checkpoint ts failed to advance (reset to 0 whenever it
+    // advances), and when a stall warning was last logged (rate-limits
+    // WarnIfCkptStalled to one warning per node group per minute). The
+    // default last_warn_time_ (epoch) never suppresses the first warning.
+    struct CkptStallState
+    {
+        uint32_t stall_rounds_{0};
+        std::chrono::steady_clock::time_point last_warn_time_;
+    };
+    // Node group id -> stall state. Only accessed from the checkpointer
+    // thread.
+    std::unordered_map<uint32_t, CkptStallState> ckpt_stall_states_;
+
     void NotifyLogOfCkptTs(uint32_t node_group, int64_t term, uint64_t ckpt_ts);
+
+    /**
+     * @brief Tracks consecutive rounds in which @p node_group's checkpoint ts
+     * failed to advance and, past a threshold, logs a rate-limited warning
+     * naming the pinning transaction. Called from the checkpointer thread.
+     */
+    void WarnIfCkptStalled(uint32_t node_group,
+                           uint64_t ckpt_ts,
+                           uint64_t last_ckpt_ts,
+                           const CkptTsCc::PinningTxInfo &pinning_tx);
 };
 }  // namespace txservice
