@@ -33,6 +33,7 @@
 #include <cstdint>
 #include <functional>
 #include <iostream>
+#include <iterator>
 #include <list>
 #include <map>
 #include <memory>
@@ -168,7 +169,10 @@ struct TxLockInfo
     // If tx has not acquired any write lock, set wlock_ts_ to 0.
     uint64_t wlock_ts_;
     // The last time when the tx is recovered or the tx acquired the latest
-    // lock.
+    // lock. Gates CheckRecoverTx to once per tx per 5s. The ctor/Reset zero
+    // is never observable: UpsertLockHoldingTx — the only path that puts an
+    // entry into lock_holding_txs_ — stamps this with Now() on every call,
+    // including entry creation, so the gate runs from acquisition time.
     uint64_t last_recover_ts_;
     // A list of cc entries on which the tx has acquired write/read locks.
     absl::flat_hash_set<LruEntry *> cce_list_;
@@ -612,14 +616,64 @@ public:
      * @param cc_ng_term Leader term of the cc node group
      */
     void CheckRecoverTx(TxNumber txn, uint32_t cc_ng_id, int64_t cc_ng_term);
-    void CheckRecoverTx(TxNumber txn,
+
+    /**
+     * @brief Once per tx per 5s: reconciles the tx's registry entry with the
+     * actual lock state in place — references whose lock no longer lists
+     * the tx are removed immediately (the check is one SearchLock; such a
+     * mismatch is a leak by invariant) — and, if real locks remain, starts
+     * orphan-lock recovery: a RecoverDeadTxCc probe for locally-coordinated
+     * txs, the log-consulting path for remote ones.
+     *
+     * @return True when the repair emptied the entry; the caller must
+     * recycle and erase it (this function cannot: ActiveTxMinTs calls it
+     * while iterating lock_holding_txs_).
+     */
+    bool CheckRecoverTx(TxNumber txn,
                         TxLockInfo &lk_info,
                         uint32_t cc_ng_id,
                         int64_t cc_ng_term);
 
     void ClearTx(TxNumber txn);
 
-    uint64_t ActiveTxMinTs(NodeGroupId cc_ng_id)
+    /**
+     * @brief Resolve phase of RecoverDeadTxCc, reached when the tx's owner
+     * shard reported a non-alive verdict. Runs on the shard holding the
+     * locks, against freshly-read state.
+     *
+     * @param verdict The owner shard's finding, which decides how write
+     * locks are handled:
+     * - Verdict::Dead — the owner will never run post-processing again (its
+     *   TEntry slot has been reused, or it is resident as Aborted/Finished;
+     *   post-processing always completes before either can happen). No code
+     *   path remains that would install pending values or release these
+     *   locks, so on non-meta tables without a data WAL the write locks are
+     *   abort-cleared here.
+     * - Verdict::Committed — the commit is decided but post-processing may
+     *   still be running, and post-processing is what installs each pending
+     *   value and then releases its write lock. Write locks are therefore
+     *   left to it, unless committed_write_recover_window_seconds has
+     *   passed since the write lock was granted (a wedged post-processing;
+     *   the pending write is then treated as lost per the no-WAL contract).
+     *
+     * Independent of the verdict: read locks, read intents and data write
+     * intents are released (none guard a pending value; the owner's own
+     * release, if any, is an idempotent no-op); write locks under a data
+     * WAL and all meta write locks/intents are handed to the log-consulting
+     * recovery path (Sharder::RecoverTx), which determines the outcome from
+     * the log and replays committed records before releasing. References
+     * whose lock no longer lists the tx are removed as in CheckRecoverTx.
+     */
+    void RecoverDeadTxLocks(TxNumber txn,
+                            NodeGroupId cc_ng_id,
+                            int64_t cc_ng_term,
+                            int64_t tx_coord_term,
+                            uint64_t wlock_ts,
+                            RecoverDeadTxCc::Verdict verdict);
+
+    uint64_t ActiveTxMinTs(NodeGroupId cc_ng_id,
+                           TxNumber *pinning_txn = nullptr,
+                           uint64_t *pinning_wlock_ts = nullptr)
     {
         uint64_t min_ts = UINT64_MAX;
 
@@ -632,20 +686,41 @@ public:
         auto it = lock_holding_txs_.find(cc_ng_id);
         if (it != lock_holding_txs_.end())
         {
-            for (auto &tx_pair : it->second)
+            for (auto tx_it = it->second.begin(); tx_it != it->second.end();)
             {
-                // Skip meta table because there is no need to do
-                // checkpoint for these type table.
-                if (!TableName::IsMeta(tx_pair.second->table_type_) &&
-                    tx_pair.second->wlock_ts_ != 0)
+                // Repairs stale registry references in place and launches
+                // orphan-lock recovery for locks that are really held. A
+                // true return means the entry emptied out and must be
+                // erased here: the callee cannot erase while this loop
+                // iterates the map. An erased entry stops contributing to
+                // the checkpoint watermark immediately.
+                if (CheckRecoverTx(
+                        tx_it->first, *tx_it->second, cc_ng_id, cc_ng_term))
                 {
-                    min_ts = std::min(min_ts, tx_pair.second->wlock_ts_ - 1);
+                    RecycleTxLockInfo(std::move(tx_it->second));
+                    auto next_it = std::next(tx_it);
+                    it->second.erase(tx_it);
+                    tx_it = next_it;
+                    continue;
                 }
 
-                // check and recover holding write lock transactions.
+                // Skip meta table because there is no need to do
+                // checkpoint for these type table.
+                if (!TableName::IsMeta(tx_it->second->table_type_) &&
+                    tx_it->second->wlock_ts_ != 0)
+                {
+                    if (tx_it->second->wlock_ts_ - 1 < min_ts)
+                    {
+                        min_ts = tx_it->second->wlock_ts_ - 1;
+                        if (pinning_txn != nullptr)
+                        {
+                            *pinning_txn = tx_it->first;
+                            *pinning_wlock_ts = tx_it->second->wlock_ts_;
+                        }
+                    }
+                }
 
-                CheckRecoverTx(
-                    tx_pair.first, *tx_pair.second, cc_ng_id, cc_ng_term);
+                ++tx_it;
             }
         }
 
@@ -1288,6 +1363,10 @@ private:
 
     // For concurrency execution of cpu-bound tasks.
     CcRequestPool<RunOnTxProcessorCc> run_on_tx_processor_cc_pool_;
+
+    // For orphan-lock recovery probes launched by CheckRecoverTx. Probe
+    // volume is bounded by the per-tx 5s gate (last_recover_ts_).
+    CcRequestPool<RecoverDeadTxCc> recover_dead_tx_cc_pool_;
 
     CcRequestPool<FillStoreSliceCc> fill_store_slice_cc_pool_;
     CcRequestPool<InitKeyCacheCc> init_key_cache_cc_pool_;

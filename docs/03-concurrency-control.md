@@ -383,8 +383,20 @@ intents/locks as it materializes.
   full; requests must use the memory wait list rather than spinning. Meta tables (catalog/range)
   bypass the limit.
 - **`lock_holding_txs_` must mirror lock state exactly** — it drives checkpoint watermarks
-  (`ActiveTxMinTs`), orphan-lock recovery (`CheckRecoverTx` for tx coordinators that died), and
-  deadlock detection. `VerifyOrphanLock` asserts a finished tx left nothing behind.
+  (`ActiveTxMinTs`), orphan-lock recovery (`CheckRecoverTx`), and deadlock detection. A registry
+  entry that outlives its owner persists forever and — via its non-zero `wlock_ts_` — silently
+  pins the checkpoint watermark. Two repair mechanisms address this: **registry/lock
+  discrepancies** — a reference whose cc entry lock no longer lists the tx — are repaired **in
+  place** by `CheckRecoverTx` the moment a long-held entry is examined (once per tx per 5s; the
+  check is one `SearchLock`, and such a mismatch is a leak regardless of the tx's liveness,
+  since registration and release are paired on the shard); an entry emptied by the repair is
+  erased immediately and stops pinning the watermark. Only when **real locks remain** does
+  `CheckRecoverTx` start orphan-lock recovery — a `RecoverDeadTxCc` probe for
+  locally-coordinated txs, whose resolve phase (`CcShard::RecoverDeadTxLocks`) releases a dead
+  tx's locks per the rules in [07-durability-and-recovery.md](07-durability-and-recovery.md)
+  §5.4 (reads always; writes when the data WAL is off and the table is non-meta; the rest
+  handed to log-based recovery). `VerifyOrphanLock` asserts a
+  finished tx left nothing behind.
 - **TxNumber encodes location.** `(txn >> 32) >> 10` is the owning node group, `(txn >> 32) &
   0x3FF` the core; code routes recovery/negotiation requests with this arithmetic — do not invent
   tx numbers.
