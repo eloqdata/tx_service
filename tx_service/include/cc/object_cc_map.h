@@ -1959,6 +1959,24 @@ public:
         assert(cce);
         ccp = it.GetPage();
 
+        const int32_t part_id =
+            Sharder::MapKeyHashToHashPartitionId(look_key->Hash());
+        // Loads the payload asynchronously. Passes null as the requester cc
+        // since the commands are buffered in the cce's buffered command list,
+        // so there is no need to put this req back in the queue after the
+        // record is fetched.
+        auto fetch_record = [&]()
+        {
+            shard_->FetchRecord(table_name_,
+                                table_schema_,
+                                TxKey(look_key),
+                                cce,
+                                cc_ng_id_,
+                                req.StandbyNodeTerm(),
+                                nullptr,
+                                part_id);
+        };
+
         if (commit_ts <= cce->CommitTs())
         {
             // Discard message since cce has a newer version.
@@ -1976,16 +1994,7 @@ public:
                         // Cannot find a cached version in memory. Fetch
                         // it from kv store if kv is synced with primary.
                         cce->GetOrCreateKeyLock(shard_, this, ccp);
-                        int32_t part_id = Sharder::MapKeyHashToHashPartitionId(
-                            look_key->Hash());
-                        shard_->FetchRecord(table_name_,
-                                            table_schema_,
-                                            TxKey(look_key),
-                                            cce,
-                                            cc_ng_id_,
-                                            req.StandbyNodeTerm(),
-                                            nullptr,
-                                            part_id);
+                        fetch_record();
                     }
                 }
                 else
@@ -2092,17 +2101,7 @@ public:
                 else
                 {
 #ifdef DATA_STORE_TYPE_ELOQDSS_ELOQSTORE
-                    int32_t part_id =
-                        Sharder::MapKeyHashToHashPartitionId(look_key->Hash());
-                    int64_t ng_term = Sharder::Instance().StandbyNodeTerm();
-                    shard_->FetchRecord(this->table_name_,
-                                        this->GetTableSchema(),
-                                        TxKey(look_key),
-                                        cce,
-                                        this->cc_ng_id_,
-                                        ng_term,
-                                        nullptr,  // requester
-                                        part_id);
+                    fetch_record();
 #endif
                 }
             }
