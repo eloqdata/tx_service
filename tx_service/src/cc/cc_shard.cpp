@@ -2004,14 +2004,9 @@ store::DataStoreHandler::DataStoreOpStatus CcShard::FetchRecord(
         }
         else
         {
-            auto res = local_shards_.store_hd_->FetchRecord(fetch_req);
+            auto res = SubmitFetchRecord(fetch_req, cce);
             if (res == store::DataStoreHandler::DataStoreOpStatus::Retry)
             {
-                // Remove fetch req
-                RemoveFetchRecordRequest(cce);
-                cce->GetKeyGapLockAndExtraData()->ReleasePin();
-                cce->RecycleKeyLock(*this);
-
                 return store::DataStoreHandler::DataStoreOpStatus::Retry;
             }
         }
@@ -2145,6 +2140,23 @@ store::DataStoreHandler::DataStoreOpStatus CcShard::FetchBucketData(
 void CcShard::RemoveFetchRecordRequest(LruEntry *cce)
 {
     fetch_record_reqs_.erase(cce);
+}
+
+store::DataStoreHandler::DataStoreOpStatus CcShard::SubmitFetchRecord(
+    FetchRecordCc *fetch_req, LruEntry *cce)
+{
+    auto res = local_shards_.store_hd_->FetchRecord(fetch_req);
+    if (res == store::DataStoreHandler::DataStoreOpStatus::Retry)
+    {
+        // Remove fetch req
+        RemoveFetchRecordRequest(cce);
+        cce->GetKeyGapLockAndExtraData()->ReleasePin();
+        cce->RecycleKeyLock(*this);
+
+        return store::DataStoreHandler::DataStoreOpStatus::Retry;
+    }
+
+    return store::DataStoreHandler::DataStoreOpStatus::Success;
 }
 
 CcMap *CcShard::CreateOrUpdatePkCcMap(const TableName &table_name,

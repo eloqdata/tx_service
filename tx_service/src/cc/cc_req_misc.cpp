@@ -864,7 +864,6 @@ bool FetchRecordCc::Execute(CcShard &ccs)
 
 #ifdef DATA_STORE_TYPE_ELOQDSS_ELOQSTORE
     bool should_reopen = false;
-    TxKey reopen_key;
 #endif
 
     if (lock_->GetCcEntry() != nullptr)
@@ -928,42 +927,39 @@ bool FetchRecordCc::Execute(CcShard &ccs)
 
 #ifdef DATA_STORE_TYPE_ELOQDSS_ELOQSTORE
         should_reopen = error_code_ == 0 && cce_->HasBufferedCommandList();
-        if (should_reopen)
-        {
-            reopen_key = tx_key_.Clone();
-        }
 #endif
     }
-
-#ifdef DATA_STORE_TYPE_ELOQDSS_ELOQSTORE
-    TableName reopen_table_name = table_name_;
-    const TableSchema *reopen_table_schema = table_schema_;
-    LruEntry *reopen_cce = cce_;
-    NodeGroupId reopen_cc_ng_id = cc_ng_id_;
-    int64_t reopen_cc_ng_term = cc_ng_term_;
-    int32_t reopen_partition_id = partition_id_;
-#endif
-
-    ccs.RemoveFetchRecordRequest(cce_);
 
 #ifdef DATA_STORE_TYPE_ELOQDSS_ELOQSTORE
     if (should_reopen)
     {
-        ccs.FetchRecord(reopen_table_name,
-                        reopen_table_schema,
-                        std::move(reopen_key),
-                        reopen_cce,
-                        reopen_cc_ng_id,
-                        reopen_cc_ng_term,
-                        nullptr,
-                        reopen_partition_id,
-                        false,
-                        0,
-                        0,
-                        false,
-                        true);  // reopen
+        // Re-arm this request in place rather than erasing it and issuing a
+        // new one: FetchRecord coalesces by cce, so a fresh call would be
+        // merged into this still-registered request and never dispatched,
+        // while erasing first would destroy *this along with the key and
+        // table name the reopen needs.
+        requesters_.clear();
+        rec_str_.clear();
+        rec_status_ = RecordStatus::Unknown;
+        rec_ts_ = 0;
+        error_code_ = 0;
+        fetch_from_primary_ = false;
+        snapshot_read_ts_ = 0;
+        only_fetch_archives_ = false;
+        archive_records_ = nullptr;
+        reopen_ = true;
+
+        // BackFill released the pin taken for the original fetch.
+        assert(cce_->GetKeyGapLockAndExtraData() != nullptr);
+        cce_->GetKeyGapLockAndExtraData()->AddPin();
+
+        // Destroys *this on Retry, so no member access below.
+        ccs.SubmitFetchRecord(this, cce_);
+        return false;
     }
 #endif
+
+    ccs.RemoveFetchRecordRequest(cce_);
     return false;
 }
 

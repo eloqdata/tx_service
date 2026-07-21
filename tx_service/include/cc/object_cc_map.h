@@ -2656,6 +2656,7 @@ public:
         // FetchRecord and the second ReplayLogCc/StandbyForwardCc has_overwrite
         // and overrides the cce. Overrides the cce if the BackFilled version is
         // newer.
+        bool s_obj_exist = (cce->PayloadStatus() == RecordStatus::Normal);
         if (cce->PayloadStatus() == RecordStatus::Unknown ||
             cce->CommitTs() < commit_ts)
         {
@@ -2769,7 +2770,10 @@ public:
             }
             if (cce->PayloadStatus() == RecordStatus::Normal)
             {
-                TemplateCcMap<KeyT, ValueT, false, false>::normal_obj_sz_++;
+                if (!s_obj_exist)
+                {
+                    TemplateCcMap<KeyT, ValueT, false, false>::normal_obj_sz_++;
+                }
                 if (cce->payload_.cur_payload_ &&
                     cce->payload_.cur_payload_->HasTTL() &&
                     ccp->smallest_ttl_ > cce->payload_.cur_payload_->GetTTL())
@@ -2780,6 +2784,10 @@ public:
             else
             {
                 assert(cce->PayloadStatus() == RecordStatus::Deleted);
+                if (s_obj_exist)
+                {
+                    TemplateCcMap<KeyT, ValueT, false, false>::normal_obj_sz_--;
+                }
                 ccp->smallest_ttl_ = 0;
             }
 
