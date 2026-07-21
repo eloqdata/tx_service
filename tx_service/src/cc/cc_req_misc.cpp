@@ -948,6 +948,11 @@ bool FetchRecordCc::Execute(CcShard &ccs)
         // of 1 and submit it to the data store a second time.
         requesters_.clear();
         requesters_.emplace_back(nullptr);
+
+        // Re-derive the key from the entry. It points into the entry's page,
+        // which outlives the fetch because the entry stays pinned.
+        tx_key_ = cce_->GetCcMap()->KeyOfEntry(cce_);
+
         rec_str_.clear();
         rec_status_ = RecordStatus::Unknown;
         rec_ts_ = 0;
@@ -957,9 +962,9 @@ bool FetchRecordCc::Execute(CcShard &ccs)
         only_fetch_archives_ = false;
         archive_records_ = nullptr;
         reopen_ = true;
+        assert(cce_->GetKeyGapLockAndExtraData() != nullptr);
 
         // BackFill released the pin taken for the original fetch.
-        assert(cce_->GetKeyGapLockAndExtraData() != nullptr);
         cce_->GetKeyGapLockAndExtraData()->AddPin();
 
         auto res = ccs.local_shards_.store_hd_->FetchRecord(this);

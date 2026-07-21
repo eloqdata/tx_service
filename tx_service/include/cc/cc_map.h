@@ -30,6 +30,7 @@
 #include "cc/cc_req_base.h"
 #include "cc_protocol.h"
 #include "error_messages.h"  // CcErrorCode
+#include "tx_key.h"          // TxKey
 #include "tx_record.h"       // RecordStatus
 #include "type.h"            // LockType, LockOpStatus
 
@@ -261,6 +262,12 @@ public:
     virtual TableType Type() const = 0;
     virtual const txservice::KeySchema *KeySchema() const = 0;
     virtual const txservice::RecordSchema *RecordSchema() const = 0;
+
+    /**
+     * Returns a non-owning key pointing into the entry's page. Valid for as
+     * long as the entry is not recycled.
+     */
+    virtual TxKey KeyOfEntry(LruEntry *entry) const = 0;
 
     /**
      * Called by FetchTableRangeSizeCc::Execute when async load completes.
