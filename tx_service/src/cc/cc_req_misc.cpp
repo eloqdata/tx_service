@@ -926,7 +926,11 @@ bool FetchRecordCc::Execute(CcShard &ccs)
         }
 
 #ifdef DATA_STORE_TYPE_ELOQDSS_ELOQSTORE
-        should_reopen = error_code_ == 0 && cce_->HasBufferedCommandList();
+        // An archives-only fetch goes through BackFillArchives instead of
+        // BackFill, so its buffered commands are untouched and their presence
+        // proves nothing.
+        should_reopen = error_code_ == 0 && !only_fetch_archives_ &&
+                        cce_->HasBufferedCommandList();
 #endif
     }
 
