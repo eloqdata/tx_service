@@ -1835,7 +1835,7 @@ public:
                 int64_t ng_term = Sharder::Instance().StandbyNodeTerm();
                 shard_->FetchRecord(this->table_name_,
                                     this->GetTableSchema(),
-                                    TxKey(key_ptr).Clone(),
+                                    TxKey(key_ptr),
                                     cce,
                                     this->cc_ng_id_,
                                     ng_term,
@@ -2324,6 +2324,23 @@ public:
             CcEntry<KeyT, ValueT, false, false> *cce = it->second;
             CcPage<KeyT, ValueT, false, false> *ccp = it.GetPage();
 
+            // Loads the payload asynchronously. Passes null as the requester
+            // cc since the commands are buffered in the cce's buffered
+            // command list, so there is no need to put this req back in the
+            // queue after the record is fetched.
+            auto fetch_record = [&](int64_t ng_term)
+            {
+                shard_->FetchRecord(
+                    table_name_,
+                    table_schema_,
+                    TxKey(&key),
+                    cce,
+                    cc_ng_id_,
+                    ng_term,
+                    nullptr,
+                    Sharder::MapKeyHashToHashPartitionId(key_hash));
+            };
+
             // For orphan lock recovery, verify if the transaction still holds
             // the lock on this CC entry.
             if (req.IsLockRecovery())
@@ -2447,21 +2464,7 @@ public:
                     // record will pin the cce to prevent it from being
                     // recycled before fetch record returns.
                     cce->GetOrCreateKeyLock(shard_, this, ccp);
-                    // load payload asynchronously, pass in null as
-                    // requester cc since we will buffer the cmd in replay
-                    // cmd list so there's no need to put this req back in
-                    // queue after record is fetched.
-
-                    int32_t part_id =
-                        Sharder::MapKeyHashToHashPartitionId(key.Hash());
-                    shard_->FetchRecord(table_name_,
-                                        table_schema_,
-                                        TxKey(&key),
-                                        cce,
-                                        cc_ng_id_,
-                                        ng_term,
-                                        nullptr,
-                                        part_id);
+                    fetch_record(ng_term);
                 }
                 // extract command list
                 const uint16_t cmd_cnt = *reinterpret_cast<decltype(cmd_cnt) *>(
@@ -2511,18 +2514,7 @@ public:
 #ifdef DATA_STORE_TYPE_ELOQDSS_ELOQSTORE
             else if (buffered_cmd_list != nullptr)
             {
-                const KeyT *key_ptr = ccp->KeyOfEntry(cce);
-                int32_t part_id =
-                    Sharder::MapKeyHashToHashPartitionId(key_ptr->Hash());
-                int64_t ng_term = Sharder::Instance().StandbyNodeTerm();
-                shard_->FetchRecord(this->table_name_,
-                                    this->GetTableSchema(),
-                                    TxKey(key_ptr).Clone(),
-                                    cce,
-                                    this->cc_ng_id_,
-                                    ng_term,
-                                    nullptr,  // requester
-                                    part_id);
+                fetch_record(Sharder::Instance().StandbyNodeTerm());
             }
 #endif
 

@@ -871,6 +871,7 @@ bool FetchRecordCc::Execute(CcShard &ccs)
     {
         assert(lock_->GetCcMap() != nullptr);
         assert(lock_->GetCcEntry() == cce_);
+        // if the referenced cce is already invalid, we do not need to care
         // about the fetch result and pending reqs since they are all
         // invalid.
         bool succ;
