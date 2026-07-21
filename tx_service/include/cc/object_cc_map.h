@@ -1826,9 +1826,25 @@ public:
             int64_t buffered_cmd_cnt_new = buffered_cmd_list.Size();
             shard_->UpdateBufferedCommandCnt(buffered_cmd_cnt_new -
                                              buffered_cmd_cnt_old);
+#ifdef DATA_STORE_TYPE_ELOQDSS_ELOQSTORE
+            if (!buffered_cmd_list.Empty())
+            {
+                const KeyT *key_ptr = ccp->KeyOfEntry(cce);
+                int32_t part_id =
+                    Sharder::MapKeyHashToHashPartitionId(key_ptr->Hash());
+                int64_t ng_term = Sharder::Instance().StandbyNodeTerm();
+                shard_->FetchRecord(this->table_name_,
+                                    this->GetTableSchema(),
+                                    TxKey(key_ptr),
+                                    cce,
+                                    this->cc_ng_id_,
+                                    ng_term,
+                                    nullptr,
+                                    part_id);
+            }
+#endif
             // update payload status
             payload_status = cce->PayloadStatus();
-
             if (s_obj_exist && payload_status != RecordStatus::Normal)
             {
                 TemplateCcMap<KeyT, ValueT, false, false>::normal_obj_sz_--;
@@ -1943,6 +1959,24 @@ public:
         assert(cce);
         ccp = it.GetPage();
 
+        const int32_t part_id =
+            Sharder::MapKeyHashToHashPartitionId(look_key->Hash());
+        // Loads the payload asynchronously. Passes null as the requester cc
+        // since the commands are buffered in the cce's buffered command list,
+        // so there is no need to put this req back in the queue after the
+        // record is fetched.
+        auto fetch_record = [&]()
+        {
+            shard_->FetchRecord(table_name_,
+                                table_schema_,
+                                TxKey(look_key),
+                                cce,
+                                cc_ng_id_,
+                                req.StandbyNodeTerm(),
+                                nullptr,
+                                part_id);
+        };
+
         if (commit_ts <= cce->CommitTs())
         {
             // Discard message since cce has a newer version.
@@ -1960,16 +1994,7 @@ public:
                         // Cannot find a cached version in memory. Fetch
                         // it from kv store if kv is synced with primary.
                         cce->GetOrCreateKeyLock(shard_, this, ccp);
-                        int32_t part_id = Sharder::MapKeyHashToHashPartitionId(
-                            look_key->Hash());
-                        shard_->FetchRecord(table_name_,
-                                            table_schema_,
-                                            TxKey(look_key),
-                                            cce,
-                                            cc_ng_id_,
-                                            req.StandbyNodeTerm(),
-                                            nullptr,
-                                            part_id);
+                        fetch_record();
                     }
                 }
                 else
@@ -2072,6 +2097,12 @@ public:
                     // Recycles the lock if this and prior commands have been
                     // applied and there is no pending command.
                     cce->RecycleKeyLock(*shard_);
+                }
+                else
+                {
+#ifdef DATA_STORE_TYPE_ELOQDSS_ELOQSTORE
+                    fetch_record();
+#endif
                 }
             }
         }
@@ -2292,6 +2323,23 @@ public:
             CcEntry<KeyT, ValueT, false, false> *cce = it->second;
             CcPage<KeyT, ValueT, false, false> *ccp = it.GetPage();
 
+            // Loads the payload asynchronously. Passes null as the requester
+            // cc since the commands are buffered in the cce's buffered
+            // command list, so there is no need to put this req back in the
+            // queue after the record is fetched.
+            auto fetch_record = [&](int64_t ng_term)
+            {
+                shard_->FetchRecord(
+                    table_name_,
+                    table_schema_,
+                    TxKey(&key),
+                    cce,
+                    cc_ng_id_,
+                    ng_term,
+                    nullptr,
+                    Sharder::MapKeyHashToHashPartitionId(key_hash));
+            };
+
             // For orphan lock recovery, verify if the transaction still holds
             // the lock on this CC entry.
             if (req.IsLockRecovery())
@@ -2415,21 +2463,7 @@ public:
                     // record will pin the cce to prevent it from being
                     // recycled before fetch record returns.
                     cce->GetOrCreateKeyLock(shard_, this, ccp);
-                    // load payload asynchronously, pass in null as
-                    // requester cc since we will buffer the cmd in replay
-                    // cmd list so there's no need to put this req back in
-                    // queue after record is fetched.
-
-                    int32_t part_id =
-                        Sharder::MapKeyHashToHashPartitionId(key.Hash());
-                    shard_->FetchRecord(table_name_,
-                                        table_schema_,
-                                        TxKey(&key),
-                                        cce,
-                                        cc_ng_id_,
-                                        ng_term,
-                                        nullptr,
-                                        part_id);
+                    fetch_record(ng_term);
                 }
                 // extract command list
                 const uint16_t cmd_cnt = *reinterpret_cast<decltype(cmd_cnt) *>(
@@ -2476,6 +2510,12 @@ public:
                 }
                 (void) lock_recycled;
             }
+#ifdef DATA_STORE_TYPE_ELOQDSS_ELOQSTORE
+            else if (buffered_cmd_list != nullptr)
+            {
+                fetch_record(Sharder::Instance().StandbyNodeTerm());
+            }
+#endif
 
             payload_status = cce->PayloadStatus();
 
@@ -2616,7 +2656,8 @@ public:
         // FetchRecord and the second ReplayLogCc/StandbyForwardCc has_overwrite
         // and overrides the cce. Overrides the cce if the BackFilled version is
         // newer.
-        if (cce->PayloadStatus() == RecordStatus::Unknown &&
+        bool s_obj_exist = (cce->PayloadStatus() == RecordStatus::Normal);
+        if (cce->PayloadStatus() == RecordStatus::Unknown ||
             cce->CommitTs() < commit_ts)
         {
             cce->SetCommitTsPayloadStatus(commit_ts, status);
@@ -2729,7 +2770,10 @@ public:
             }
             if (cce->PayloadStatus() == RecordStatus::Normal)
             {
-                TemplateCcMap<KeyT, ValueT, false, false>::normal_obj_sz_++;
+                if (!s_obj_exist)
+                {
+                    TemplateCcMap<KeyT, ValueT, false, false>::normal_obj_sz_++;
+                }
                 if (cce->payload_.cur_payload_ &&
                     cce->payload_.cur_payload_->HasTTL() &&
                     ccp->smallest_ttl_ > cce->payload_.cur_payload_->GetTTL())
@@ -2740,6 +2784,10 @@ public:
             else
             {
                 assert(cce->PayloadStatus() == RecordStatus::Deleted);
+                if (s_obj_exist)
+                {
+                    TemplateCcMap<KeyT, ValueT, false, false>::normal_obj_sz_--;
+                }
                 ccp->smallest_ttl_ = 0;
             }
 

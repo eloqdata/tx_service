@@ -8593,6 +8593,17 @@ public:
         return table_name_.Type();
     }
 
+    TxKey KeyOfEntry(LruEntry *entry) const override
+    {
+        auto *cce = static_cast<
+            CcEntry<KeyT, ValueT, VersionedRecord, RangePartitioned> *>(entry);
+        auto *ccp = static_cast<
+            CcPage<KeyT, ValueT, VersionedRecord, RangePartitioned> *>(
+            cce->GetCcPage());
+        assert(ccp != nullptr);
+        return TxKey(ccp->KeyOfEntry(cce));
+    }
+
     const txservice::KeySchema *KeySchema() const override
     {
         if (table_schema_ != nullptr)

@@ -800,7 +800,8 @@ FetchRecordCc::FetchRecordCc(const TableName *tbl_name,
                              int32_t partition_id,
                              bool fetch_from_primary,
                              uint64_t snapshot_read_ts,
-                             bool only_fetch_archives)
+                             bool only_fetch_archives,
+                             bool reopen)
     : FetchCc(ccs, cc_ng_id, cc_ng_term),
       table_name_(tbl_name->StringView(), tbl_name->Type(), tbl_name->Engine()),
       table_schema_(tbl_schema),
@@ -812,7 +813,8 @@ FetchRecordCc::FetchRecordCc(const TableName *tbl_name,
       partition_id_(partition_id),
       fetch_from_primary_(fetch_from_primary),
       snapshot_read_ts_(snapshot_read_ts),
-      only_fetch_archives_(only_fetch_archives)
+      only_fetch_archives_(only_fetch_archives),
+      reopen_(reopen)
 {
 }
 
@@ -859,6 +861,10 @@ bool FetchRecordCc::Execute(CcShard &ccs)
         ccs.RemoveFetchRecordRequest(cce_);
         return false;
     }
+
+#ifdef DATA_STORE_TYPE_ELOQDSS_ELOQSTORE
+    bool should_reopen = false;
+#endif
 
     if (lock_->GetCcEntry() != nullptr)
     {
@@ -912,13 +918,67 @@ bool FetchRecordCc::Execute(CcShard &ccs)
                 {
                     // Release the pin added by the ccrequest.
                     cce_->GetKeyGapLockAndExtraData()->ReleasePin();
-                    cce_->RecycleKeyLock(ccs);
-
                     req->AbortCcRequest(CcErrorCode::DATA_STORE_ERR);
                 }
             }
+            cce_->RecycleKeyLock(ccs);
         }
+
+#ifdef DATA_STORE_TYPE_ELOQDSS_ELOQSTORE
+        // An archives-only fetch goes through BackFillArchives instead of
+        // BackFill, so its buffered commands are untouched and their presence
+        // proves nothing.
+        should_reopen = error_code_ == 0 && !only_fetch_archives_ &&
+                        cce_->HasBufferedCommandList();
+#endif
     }
+
+#ifdef DATA_STORE_TYPE_ELOQDSS_ELOQSTORE
+    if (should_reopen)
+    {
+        // Re-arm this request in place rather than erasing it and issuing a
+        // new one: FetchRecord coalesces by cce, so a fresh call would be
+        // merged into this still-registered request and never dispatched,
+        // while erasing first would destroy *this along with the key and
+        // table name the reopen needs.
+        //
+        // The requesters were woken above. Keep a null placeholder so
+        // RequesterCount() stays non-zero while the reopen is in flight,
+        // otherwise a request that coalesces onto this one would see a count
+        // of 1 and submit it to the data store a second time.
+        requesters_.clear();
+        requesters_.emplace_back(nullptr);
+
+        // Re-derive the key from the entry. It points into the entry's page,
+        // which outlives the fetch because the entry stays pinned.
+        tx_key_ = cce_->GetCcMap()->KeyOfEntry(cce_);
+
+        rec_str_.clear();
+        rec_status_ = RecordStatus::Unknown;
+        rec_ts_ = 0;
+        error_code_ = 0;
+        fetch_from_primary_ = false;
+        snapshot_read_ts_ = 0;
+        only_fetch_archives_ = false;
+        archive_records_ = nullptr;
+        reopen_ = true;
+        assert(cce_->GetKeyGapLockAndExtraData() != nullptr);
+
+        // BackFill released the pin taken for the original fetch.
+        cce_->GetKeyGapLockAndExtraData()->AddPin();
+
+        auto res = ccs.local_shards_.store_hd_->FetchRecord(this);
+        if (res == store::DataStoreHandler::DataStoreOpStatus::Retry)
+        {
+            // Gives up on the reopen, as the previous shape did when its
+            // FetchRecord returned Retry.
+            ccs.RemoveFetchRecordRequest(cce_);
+            cce_->GetKeyGapLockAndExtraData()->ReleasePin();
+            cce_->RecycleKeyLock(ccs);
+        }
+        return false;
+    }
+#endif
 
     ccs.RemoveFetchRecordRequest(cce_);
     return false;

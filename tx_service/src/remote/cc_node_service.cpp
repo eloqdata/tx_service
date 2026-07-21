@@ -1884,12 +1884,23 @@ void CcNodeService::UpdateStandbyCkptTs(
     const uint32_t ng_id = request->node_group_id();
     const int64_t ng_term = request->ng_term();
     const uint64_t ckpt_ts = request->primary_succ_ckpt_ts();
+
+    // Suppresses the primary-driven ReloadData so that fresh data store
+    // content can only become visible through partition reopen. The ckpt ts
+    // still advances.
+    bool skip_reload_data = !has_data_store_write;
+    CODE_FAULT_INJECTOR("standby_skip_ckpt_reload_data", {
+        LOG(INFO) << "FaultInject standby_skip_ckpt_reload_data, ckpt_ts:"
+                  << ckpt_ts;
+        skip_reload_data = true;
+    });
+
     EnqueueStandbyTask(
         {StandbyTaskType::UpdateStandbyCkptTs,
          ng_id,
          ng_term,
          ckpt_ts,
-         [store_hd, ng_id, ng_term, ckpt_ts, has_data_store_write]()
+         [store_hd, ng_id, ng_term, ckpt_ts, skip_reload_data]()
          {
              const uint64_t current_ckpt_ts =
                  Sharder::Instance().NativeNodeGroupCkptTs();
@@ -1904,7 +1915,7 @@ void CcNodeService::UpdateStandbyCkptTs(
                  store_hd == nullptr
                      ? true
                      : store_hd->OnUpdateStandbyCkptTs(
-                           ng_id, ng_term, ckpt_ts, !has_data_store_write);
+                           ng_id, ng_term, ckpt_ts, skip_reload_data);
              if (ok)
              {
                  Sharder::Instance().UpdateNodeGroupCkptTs(ng_id, ckpt_ts);

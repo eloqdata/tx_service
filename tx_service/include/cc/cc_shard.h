@@ -875,7 +875,8 @@ public:
         bool fetch_from_primary = false,
         uint32_t key_shard_code = 0,
         uint64_t snapshot_read_ts = 0,
-        bool only_fetch_archives = false);
+        bool only_fetch_archives = false,
+        bool reopen = false);
 
     store::DataStoreHandler::DataStoreOpStatus FetchSnapshot(
         const TableName &table_name,
