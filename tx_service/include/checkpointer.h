@@ -198,6 +198,14 @@ private:
     void NotifyLogOfCkptTs(uint32_t node_group, int64_t term, uint64_t ckpt_ts);
 
     /**
+     * @brief Exports @p rounds as the checkpoint_stall_rounds gauge (per
+     * ng_id, node meter). Called on every round, stalled or not: a gauge that
+     * skips rounds reads as a flatline at its last value, which is exactly
+     * the silence this diagnoses.
+     */
+    void CollectCkptStallMetric(uint32_t node_group, uint32_t rounds);
+
+    /**
      * @brief Tracks consecutive rounds in which @p node_group's checkpoint ts
      * failed to advance and, past a threshold, logs a rate-limited warning
      * naming the pinning transaction. Called from the checkpointer thread.

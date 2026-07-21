@@ -300,12 +300,19 @@ LocalCcShards::LocalCcShards(
         leader_changes_metric_labels.emplace_back(
             "ng_id", std::move(ng_id_label_values));
         auto is_leader_metric_labels = leader_changes_metric_labels;
+        // The checkpointer reports stalls for the node groups it iterates
+        // (Sharder::LocalNodeGroups, plus the native ng on a standby), which
+        // is the same membership these labels are built from.
+        auto ckpt_stall_metric_labels = leader_changes_metric_labels;
         node_meter_->Register(metrics::NAME_LEADER_CHANGES,
                               metrics::Type::Counter,
                               std::move(leader_changes_metric_labels));
         node_meter_->Register(metrics::NAME_IS_LEADER,
                               metrics::Type::Gauge,
                               std::move(is_leader_metric_labels));
+        node_meter_->Register(metrics::NAME_CHECKPOINT_STALL_ROUNDS,
+                              metrics::Type::Gauge,
+                              std::move(ckpt_stall_metric_labels));
     }
 }
 
