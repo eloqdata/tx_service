@@ -915,12 +915,6 @@ public:
 
     void RemoveFetchRecordRequest(LruEntry *cce);
 
-    // Submits an already-registered fetch request to the data store. On Retry
-    // the request is removed and the pin taken for it is released, so the
-    // caller must not touch it afterwards.
-    store::DataStoreHandler::DataStoreOpStatus SubmitFetchRecord(
-        FetchRecordCc *fetch_req, LruEntry *cce);
-
     CcMap *CreateOrUpdatePkCcMap(const TableName &table_name,
                                  const TableSchema *table_schema,
                                  NodeGroupId ng_id,

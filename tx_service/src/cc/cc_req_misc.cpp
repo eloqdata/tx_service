@@ -918,11 +918,10 @@ bool FetchRecordCc::Execute(CcShard &ccs)
                 {
                     // Release the pin added by the ccrequest.
                     cce_->GetKeyGapLockAndExtraData()->ReleasePin();
-                    cce_->RecycleKeyLock(ccs);
-
                     req->AbortCcRequest(CcErrorCode::DATA_STORE_ERR);
                 }
             }
+            cce_->RecycleKeyLock(ccs);
         }
 
 #ifdef DATA_STORE_TYPE_ELOQDSS_ELOQSTORE
@@ -942,7 +941,13 @@ bool FetchRecordCc::Execute(CcShard &ccs)
         // merged into this still-registered request and never dispatched,
         // while erasing first would destroy *this along with the key and
         // table name the reopen needs.
+        //
+        // The requesters were woken above. Keep a null placeholder so
+        // RequesterCount() stays non-zero while the reopen is in flight,
+        // otherwise a request that coalesces onto this one would see a count
+        // of 1 and submit it to the data store a second time.
         requesters_.clear();
+        requesters_.emplace_back(nullptr);
         rec_str_.clear();
         rec_status_ = RecordStatus::Unknown;
         rec_ts_ = 0;
@@ -957,8 +962,15 @@ bool FetchRecordCc::Execute(CcShard &ccs)
         assert(cce_->GetKeyGapLockAndExtraData() != nullptr);
         cce_->GetKeyGapLockAndExtraData()->AddPin();
 
-        // Destroys *this on Retry, so no member access below.
-        ccs.SubmitFetchRecord(this, cce_);
+        auto res = ccs.local_shards_.store_hd_->FetchRecord(this);
+        if (res == store::DataStoreHandler::DataStoreOpStatus::Retry)
+        {
+            // Gives up on the reopen, as the previous shape did when its
+            // FetchRecord returned Retry.
+            ccs.RemoveFetchRecordRequest(cce_);
+            cce_->GetKeyGapLockAndExtraData()->ReleasePin();
+            cce_->RecycleKeyLock(ccs);
+        }
         return false;
     }
 #endif
