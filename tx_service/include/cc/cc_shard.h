@@ -672,8 +672,8 @@ public:
                             RecoverDeadTxCc::Verdict verdict);
 
     uint64_t ActiveTxMinTs(NodeGroupId cc_ng_id,
-                           TxNumber *pinning_txn = nullptr,
-                           uint64_t *pinning_wlock_ts = nullptr)
+                           TxNumber *pinning_txn,
+                           uint64_t *pinning_wlock_ts)
     {
         uint64_t min_ts = UINT64_MAX;
 
@@ -712,11 +712,8 @@ public:
                     if (tx_it->second->wlock_ts_ - 1 < min_ts)
                     {
                         min_ts = tx_it->second->wlock_ts_ - 1;
-                        if (pinning_txn != nullptr)
-                        {
-                            *pinning_txn = tx_it->first;
-                            *pinning_wlock_ts = tx_it->second->wlock_ts_;
-                        }
+                        *pinning_txn = tx_it->first;
+                        *pinning_wlock_ts = tx_it->second->wlock_ts_;
                     }
                 }
 

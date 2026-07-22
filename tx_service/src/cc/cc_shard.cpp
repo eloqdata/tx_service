@@ -81,7 +81,6 @@ BRPC_VALIDATE_GFLAG(committed_write_recover_window_seconds,
                     ValidateRecoverWindow);
 
 DECLARE_double(ckpt_buffer_ratio);
-extern bool txservice_skip_wal;
 CcShard::CcShard(
     uint16_t core_id,
     uint32_t core_cnt,
