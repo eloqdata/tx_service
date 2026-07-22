@@ -64,6 +64,13 @@ inline const metrics::Name NAME_STANDBY_OUT_OF_SYNC_COUNT{
 inline const metrics::Name NAME_IS_CONTINUOUS_CHECKPOINT_FAILURES{
     "is_continuous_checkpoint_failures"};
 
+// Consecutive checkpoint rounds in which the node group's checkpoint ts failed
+// to advance; 0 while it advances. A stall never reaches the data sync stage,
+// so it raises no failure and is invisible in
+// is_continuous_checkpoint_failures.
+inline const metrics::Name NAME_CHECKPOINT_STALL_ROUNDS{
+    "checkpoint_stall_rounds"};
+
 inline const metrics::Name NAME_LEADER_CHANGES{"leader_changes_seen_total"};
 inline const metrics::Name NAME_IS_LEADER{"is_leader"};
 

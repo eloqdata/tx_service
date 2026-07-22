@@ -22,6 +22,7 @@
 #include "cc/cc_shard.h"
 
 #include <brpc/controller.h>
+#include <brpc/reloadable_flags.h>
 #include <bthread/bthread.h>
 #include <bthread/remote_task_queue.h>
 
@@ -60,6 +61,25 @@ DECLARE_bool(cmd_read_catalog);
 
 namespace txservice
 {
+extern bool txservice_skip_wal;
+
+DEFINE_int32(
+    committed_write_recover_window_seconds,
+    300,
+    "Without a data WAL, release a vanished-coordinator committed tx's "
+    "write locks once they have been held longer than this window. "
+    "Post-processing retries cover transient failures within the window; "
+    "past it the pending write is considered lost, which is the accepted "
+    "durability contract when the WAL is disabled. <= 0 keeps such locks "
+    "forever.");
+
+static bool ValidateRecoverWindow(const char *, int32_t)
+{
+    return true;
+}
+BRPC_VALIDATE_GFLAG(committed_write_recover_window_seconds,
+                    ValidateRecoverWindow);
+
 DECLARE_double(ckpt_buffer_ratio);
 CcShard::CcShard(
     uint16_t core_id,
@@ -1251,10 +1271,15 @@ void CcShard::CheckRecoverTx(TxNumber lock_holding_txn,
         return;
     }
 
-    CheckRecoverTx(lock_holding_txn, *tx_it->second, cc_ng_id, cc_ng_term);
+    if (CheckRecoverTx(lock_holding_txn, *tx_it->second, cc_ng_id, cc_ng_term))
+    {
+        // The in-place repair emptied the entry.
+        RecycleTxLockInfo(std::move(tx_it->second));
+        ng_it->second.erase(tx_it);
+    }
 }
 
-void CcShard::CheckRecoverTx(TxNumber lock_holding_txn,
+bool CcShard::CheckRecoverTx(TxNumber lock_holding_txn,
                              TxLockInfo &lk_info,
                              uint32_t cc_ng_id,
                              int64_t cc_ng_term)
@@ -1267,90 +1292,108 @@ void CcShard::CheckRecoverTx(TxNumber lock_holding_txn,
     uint64_t now_ts = Now();
 
     // If the tx has been holding a lock/intention for an extended period of
-    // time (more than 5 seconds), inquires the tx's status. If the tx has
-    // failed or committed, recovers the orphan lock/intention. Or, does
-    // nothing and waits for the tx to make further actions.
-    if (now_ts - lk_info.last_recover_ts_ >= ts_gap)
+    // time (more than 5 seconds), reconciles its registry entry with the
+    // actual lock state and inquires the tx's status. If the tx has failed
+    // or committed, recovers the orphan lock/intention. Or, does nothing and
+    // waits for the tx to make further actions.
+    if (now_ts - lk_info.last_recover_ts_ < ts_gap)
     {
-        // Updates the last_recover_ts field, so that following
-        // conflicting tx's will not try recovery immediately,
-        // avoiding a flood of recovery requests.
-        lk_info.last_recover_ts_ = now_ts;
-
-        uint32_t txn_node_group = lock_holding_txn >> 42L;
-
-        CODE_FAULT_INJECTOR("recover_local_txn", { txn_node_group = 12345; })
-
-        // A local transaction might leave orphan locks when log service is
-        // unreachable and write log result is unknown. This rarely happens as
-        // we retry write log until this node is not group leader anymore. If
-        // this node is not group leader, the data and locks are to be cleared;
-        // orphan locks left on data belonging to other node groups that failed
-        // over to this node still need be recovered.
-        if (txn_node_group == Sharder::Instance().NativeNodeGroup() &&
-            cc_ng_id == txn_node_group)
-        {
-            DLOG(WARNING)
-                << "orphan lock detected, lock holding txn: "
-                << lock_holding_txn
-                << ", txn is initiated by this machine, try to recover";
-
-            std::unordered_map<std::string, std::unordered_set<LockType>>
-                tbl_set;
-            for (const auto &lru : lk_info.cce_list_)
-            {
-                CcMap *ccm = lru->GetCcMap();
-                if (ccm != nullptr)
-                {
-                    NonBlockingLock *lk = lru->GetKeyLock();
-                    assert(lk != nullptr);
-                    LockType lk_type = lk->SearchLock(lock_holding_txn);
-                    if (lk_type != LockType::WriteLock)
-                    {
-                        // The only case that an orhpahned lock will appear on
-                        // local node is that write log has failed with an
-                        // unknown result. In this case the modified data cces
-                        // will have orphan locks. But this won't leave any read
-                        // locks as orphaned locks.
-                        DLOG(INFO) << "read lock detected in tx "
-                                   << lock_holding_txn << ", skip recovery";
-                        return;
-                    }
-                    auto [it, is_insert] =
-                        tbl_set.try_emplace(ccm->table_name_.Trace());
-                    it->second.emplace(lk_type);
-                }
-            }
-
-            for (const auto &tbl_lk : tbl_set)
-            {
-                for (LockType lk_type : tbl_lk.second)
-                {
-                    LOG(INFO)
-                        << "Txn #" << lock_holding_txn << " locks "
-                        << tbl_lk.first << ", lock type: " << (int) lk_type;
-                }
-            }
-        }
-
-        if (Sharder::Instance().LeaderTerm(cc_ng_id) > 0)
-        {
-            LOG(WARNING) << "orphan lock detected, lock holding txn: "
-                         << lock_holding_txn << ", try to recover";
-            Sharder::Instance().RecoverTx(lock_holding_txn,
-                                          lk_info.tx_coord_term_,
-                                          lk_info.wlock_ts_,
-                                          cc_ng_id,
-                                          cc_ng_term);
-        }
-        // else:
-        // 1. The cc node group of the participant(where lock resides) has
-        // failed over to a new leader. There is no need to recover the orphan
-        // lock in the old leader because the cc map will be cleared anyway.
-
-        // 2. This is standby node, all locks are acquired by local transaction.
-        // There is no need to recover the orphan lock.
+        return false;
     }
+
+    // Updates the last_recover_ts field, so that following
+    // conflicting tx's will not try recovery immediately,
+    // avoiding a flood of recovery requests.
+    lk_info.last_recover_ts_ = now_ts;
+
+    // In-place registry/lock reconciliation: a reference whose cc entry lock
+    // no longer lists the tx is a leak regardless of the tx's liveness —
+    // registration and release are paired on this shard, so a live tx is
+    // never legitimately registered without holding the lock. The check is
+    // one SearchLock, so repair it right where it is discovered.
+    size_t removed_stale = 0;
+    bool has_real_lock = false;
+    for (auto cce_it = lk_info.cce_list_.begin();
+         cce_it != lk_info.cce_list_.end();)
+    {
+        LruEntry *cce = *cce_it;
+        NonBlockingLock *lock = cce->GetKeyLock();
+        LockType lk_type = lock != nullptr ? lock->SearchLock(lock_holding_txn)
+                                           : LockType::NoLock;
+        if (lk_type == LockType::NoLock)
+        {
+            auto next_it = std::next(cce_it);
+            lk_info.cce_list_.erase(cce_it);
+            cce_it = next_it;
+            ++removed_stale;
+        }
+        else
+        {
+            has_real_lock = true;
+            ++cce_it;
+        }
+    }
+
+    if (removed_stale > 0)
+    {
+        LOG(WARNING) << "Lock registry repair: removed " << removed_stale
+                     << " stale reference(s) of txn " << lock_holding_txn
+                     << " on core #" << core_id_ << " (ng#" << cc_ng_id
+                     << "): the cc entry lock no longer lists the tx.";
+    }
+
+    if (!has_real_lock)
+    {
+        // Nothing is really held; the entry is empty and the caller erases
+        // it, un-pinning the checkpoint watermark immediately.
+        return true;
+    }
+
+    uint32_t tx_node_group = lock_holding_txn >> 42L;
+
+    CODE_FAULT_INJECTOR("recover_local_txn", { tx_node_group = 12345; })
+
+    if (tx_node_group == Sharder::Instance().NativeNodeGroup() &&
+        cc_ng_id == tx_node_group)
+    {
+        // Locally-coordinated tx holding real locks: probe its liveness on
+        // the owner shard via a self-driving cc request. Lock mutation
+        // happens in the probe's resolve phase (RecoverDeadTxLocks), never
+        // here.
+        RecoverDeadTxCc *probe = recover_dead_tx_cc_pool_.NextRequest();
+        if (probe != nullptr)
+        {
+            probe->Reset(lock_holding_txn,
+                         cc_ng_id,
+                         cc_ng_term,
+                         lk_info.tx_coord_term_,
+                         lk_info.wlock_ts_,
+                         core_id_);
+            Enqueue(core_id_,
+                    static_cast<uint32_t>(lock_holding_txn >> 32L),
+                    probe);
+        }
+        return false;
+    }
+
+    // A tx coordinated by another node group: recovery must ask the
+    // remote coordinator (and possibly the log group) for the outcome.
+    if (Sharder::Instance().LeaderTerm(cc_ng_id) > 0)
+    {
+        LOG(WARNING) << "orphan lock detected, lock holding txn: "
+                     << lock_holding_txn << ", try to recover";
+        Sharder::Instance().RecoverTx(lock_holding_txn,
+                                      lk_info.tx_coord_term_,
+                                      lk_info.wlock_ts_,
+                                      cc_ng_id,
+                                      cc_ng_term);
+    }
+    // else: the cc node group of the participant (where the lock resides)
+    // has failed over to a new leader. There is no need to recover the
+    // orphan lock in the old leader because the cc map will be cleared
+    // anyway.
+
+    return false;
 }
 
 void CcShard::ClearTx(TxNumber txn)
@@ -1403,6 +1446,214 @@ void CcShard::ClearTx(TxNumber txn)
         RecycleTxLockInfo(std::move(lk_info));
         ng_pair.second.erase(tx_it);
     }
+}
+
+void CcShard::RecoverDeadTxLocks(TxNumber txn,
+                                 NodeGroupId cc_ng_id,
+                                 int64_t cc_ng_term,
+                                 int64_t tx_coord_term,
+                                 uint64_t wlock_ts,
+                                 RecoverDeadTxCc::Verdict verdict)
+{
+    assert(verdict != RecoverDeadTxCc::Verdict::Alive);
+
+    auto ng_it = lock_holding_txs_.find(cc_ng_id);
+    if (ng_it == lock_holding_txs_.end())
+    {
+        return;
+    }
+    auto tx_it = ng_it->second.find(txn);
+    if (tx_it == ng_it->second.end())
+    {
+        // Released (or cleared by a node-group wipe) between the probe and
+        // this resolve. Nothing to do.
+        return;
+    }
+
+    TxLockInfo &lk_info = *tx_it->second;
+    size_t released_reads = 0;
+    size_t released_writes = 0;
+    size_t removed_stale = 0;
+    size_t handoff_writes = 0;
+    size_t kept_writes = 0;
+
+    // Locks are released with the type-specific NonBlockingLock methods, so
+    // nothing in the loop mutates cce_list_ behind the iterator; a cleared
+    // reference is erased in place and the registry entry is finalized once
+    // after the loop.
+    for (auto cce_it = lk_info.cce_list_.begin();
+         cce_it != lk_info.cce_list_.end();)
+    {
+        LruEntry *cce = *cce_it;
+        CcMap *ccm = cce->GetCcMap();
+        NonBlockingLock *lock = cce->GetKeyLock();
+        LockType lk_type =
+            lock != nullptr ? lock->SearchLock(txn) : LockType::NoLock;
+        // Whether to return the cce's key-lock struct to the pool after
+        // releasing. Catalog entries are exempt while cmd_read_catalog is
+        // on: every command reads the catalog, so keeping the hot lock
+        // struct avoids recycle churn (mirrors CcShard::ClearTx). Note that
+        // whenever lock != nullptr the struct is attached to the cce, and
+        // an attached struct always carries the map binding its Reset()
+        // set, so ccm is non-null in every branch that consults this — the
+        // null check is unreachable hardening only.
+        bool recycle_lock =
+            ccm == nullptr || !(FLAGS_cmd_read_catalog &&
+                                ccm->table_name_.Type() == TableType::Catalog);
+        bool release_ref = false;
+        switch (lk_type)
+        {
+        case LockType::ReadLock:
+        {
+            // Releasing a finished tx's read lock never loses data: reads
+            // protect no pending value.
+            lock->ReleaseReadLock(txn, this);
+            release_ref = true;
+            ++released_reads;
+            break;
+        }
+        case LockType::ReadIntent:
+        {
+            // release_all drops the whole intent count: the owner is gone
+            // and will never decrement it itself.
+            lock->ReleaseReadIntent(txn, true);
+            release_ref = true;
+            ++released_reads;
+            break;
+        }
+        case LockType::WriteIntent:
+        {
+            bool is_meta = ccm != nullptr ? ccm->table_name_.IsMeta() : false;
+            if (is_meta)
+            {
+                // Meta intents are the prepare-stage locks of 2PC ops that
+                // log-based recovery owns across stages — hand off.
+                ++handoff_writes;
+            }
+            else
+            {
+                // A data write intent guards no pending value in any WAL
+                // mode: the upgrade to a full write lock happens before the
+                // commit decision, which happens before WriteLog, so a log
+                // record can never reference an intent-only key. The intent
+                // is a read-side reservation and is released like a read
+                // lock — no settle/window gating.
+                lock->ReleaseWriteIntent(txn, this);
+                release_ref = true;
+                ++released_writes;
+            }
+            break;
+        }
+        case LockType::WriteLock:
+        {
+            bool is_meta = ccm != nullptr ? ccm->table_name_.IsMeta() : false;
+            if (!txservice_skip_wal || is_meta)
+            {
+                // The log group is the sound authority here: data writes
+                // are logged when the WAL is on, and multi-stage 2PC (meta)
+                // logs are written even under skip_wal. Hand off regardless
+                // of the verdict — the log path determines the outcome and,
+                // for a committed tx, replays the records before releasing.
+                ++handoff_writes;
+            }
+            else if (
+                verdict == RecoverDeadTxCc::Verdict::Dead ||
+                (FLAGS_committed_write_recover_window_seconds > 0 &&
+                 Now() > wlock_ts +
+                             static_cast<uint64_t>(
+                                 FLAGS_committed_write_recover_window_seconds) *
+                                 1000000))
+            {
+                // Data write without a WAL: the log is blind to it, so the
+                // decision is local. Under Verdict::Dead the owner will
+                // never run post-processing again — the pending write was
+                // either fully installed before the TEntry settled, or
+                // never will be — so abort-clear is safe. For a
+                // resident Committed tx past the recover window, the
+                // pending write is considered lost: without a data WAL
+                // there is no sound way to recover it — post-processing
+                // retries cover transient failures only — and holding the
+                // lock forever pins the checkpoint and blocks writers for
+                // a value that is already beyond the durability contract.
+                //
+                // Abort-clearing a write is more than releasing the lock:
+                // the pending dirty payload/buffered commands must be
+                // discarded too (KeyGapLockAndExtraData::ClearTx). The
+                // object argument stays null: this is an abort-side
+                // release, the object is unchanged, so parked blocked
+                // commands' conditions cannot have become true and they
+                // correctly stay parked.
+                lock->ReleaseWriteLock(txn, this);
+                cce->GetKeyGapLockAndExtraData()->ClearTx();
+                release_ref = true;
+                ++released_writes;
+            }
+            else
+            {
+                // Verdict::Committed within the recover window: the owner's
+                // post-processing may still be running, and it is what
+                // installs the pending value and then releases this lock —
+                // leave it alone.
+                ++kept_writes;
+            }
+            break;
+        }
+        case LockType::NoLock:
+        default:
+        {
+            // Went stale between the probe's two hops; same repair as
+            // CheckRecoverTx's in-place reconciliation.
+            release_ref = true;
+            ++removed_stale;
+            break;
+        }
+        }
+
+        if (release_ref)
+        {
+            if (lk_type != LockType::NoLock && recycle_lock)
+            {
+                cce->RecycleKeyLock(*this);
+            }
+            auto next_it = std::next(cce_it);
+            lk_info.cce_list_.erase(cce_it);
+            cce_it = next_it;
+        }
+        else
+        {
+            ++cce_it;
+        }
+    }
+
+    // Finalize the registry entry once: recycle it when nothing is left.
+    if (lk_info.cce_list_.empty())
+    {
+        RecycleTxLockInfo(std::move(tx_it->second));
+        ng_it->second.erase(tx_it);
+    }
+
+    if (handoff_writes > 0)
+    {
+        // Hand these write locks to the log-consulting recovery path. This
+        // only enqueues a task; the RecoveryService's own thread makes the
+        // blocking log_agent_->RecoverTx RPC — it must not run here on the
+        // TxProcessor, and the log group replies by shipping committed
+        // records back over the RecoveryService's replay stream, which
+        // applies them before releasing the locks (a never-committed tx is
+        // cleared via ClearTxCc instead).
+        Sharder::Instance().RecoverTx(
+            txn, tx_coord_term, wlock_ts, cc_ng_id, cc_ng_term);
+    }
+
+    LOG(WARNING) << "Orphan lock recovery: txn " << txn
+                 << " is not alive but was registered on core #" << core_id_
+                 << " (ng#" << cc_ng_id << ", wlock_ts=" << wlock_ts
+                 << "): released " << released_reads
+                 << " read lock(s)/intent(s) and " << released_writes
+                 << " write lock(s)/intent(s), removed " << removed_stale
+                 << " stale reference(s), handed " << handoff_writes
+                 << " write lock(s)/intent(s) to log-based recovery, left "
+                 << kept_writes << " to the owner's post-processing.";
 }
 
 void CcShard::VerifyLruList()

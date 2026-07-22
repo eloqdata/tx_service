@@ -2994,6 +2994,8 @@ public:
             standby_msg_seq_id_vec_.emplace_back(0);
             total_key_cnt_vec_.emplace_back(0);
             dirty_key_cnt_vec_.emplace_back(0);
+            pinning_txn_vec_.emplace_back(0);
+            pinning_wlock_ts_vec_.emplace_back(UINT64_MAX);
         }
     }
 
@@ -3010,7 +3012,10 @@ public:
         }
         else
         {
-            tx_min_ts = ccs.ActiveTxMinTs(cc_ng_id_);
+            tx_min_ts =
+                ccs.ActiveTxMinTs(cc_ng_id_,
+                                  &pinning_txn_vec_[ccs.LocalCoreId()],
+                                  &pinning_wlock_ts_vec_[ccs.LocalCoreId()]);
             standby_msg_seq_id_vec_[ccs.core_id_] =
                 ccs.NextStandbyMessageSequence() - 1;
             if (ccs.core_id_ == 0)
@@ -3049,6 +3054,35 @@ public:
     uint64_t GetCkptTs() const
     {
         return ckpt_ts_.load(std::memory_order_relaxed);
+    }
+
+    struct PinningTxInfo
+    {
+        TxNumber txn_{0};
+        uint64_t wlock_ts_{UINT64_MAX};
+        uint16_t core_id_{0};
+    };
+
+    /**
+     * @brief The write-lock-holding tx that determined the node group's
+     * checkpoint timestamp, i.e. the tx with the minimum first-write-lock ts
+     * across all shards. txn_ == 0 when no such tx exists (the checkpoint ts
+     * came from the clock).
+     */
+    PinningTxInfo GetPinningTx() const
+    {
+        PinningTxInfo info;
+        for (size_t core = 0; core < pinning_wlock_ts_vec_.size(); ++core)
+        {
+            if (pinning_txn_vec_[core] != 0 &&
+                pinning_wlock_ts_vec_[core] < info.wlock_ts_)
+            {
+                info.txn_ = pinning_txn_vec_[core];
+                info.wlock_ts_ = pinning_wlock_ts_vec_[core];
+                info.core_id_ = static_cast<uint16_t>(core);
+            }
+        }
+        return info;
     }
 
     uint64_t GetMemUsage() const
@@ -3152,6 +3186,11 @@ private:
     std::vector<uint64_t> standby_msg_seq_id_vec_;
     std::vector<uint32_t> subscribed_node_ids_;
     std::vector<int8_t> heap_full_vec_;
+    // Per-shard tx (and its first-write-lock ts) that produced the shard's
+    // minimum in ActiveTxMinTs. 0 / UINT64_MAX when the shard has no
+    // write-lock-holding tx. Only filled on the leader path.
+    std::vector<TxNumber> pinning_txn_vec_;
+    std::vector<uint64_t> pinning_wlock_ts_vec_;
     NodeGroupId cc_ng_id_;
 };
 

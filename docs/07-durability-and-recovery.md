@@ -97,7 +97,7 @@ Notification sources: tx processors that find nothing clean to evict (`CcShard::
 For each local node group (`checkpointer.cpp:141-431`):
 
 1. Special cases first: a **candidate standby** doesn't checkpoint — it (re-)requests a storage snapshot from the primary via `RequestStorageSnapshotSync` (`:147-200`, §7); a synced **standby on shared storage** skips entirely (`:203-213`); a standby on private storage checkpoints its own kv store.
-2. Skip the ng unless leader/candidate-leader (term from `Sharder`); compute `ckpt_ts` (§3.2); skip if `ckpt_ts <= GetNodeGroupCkptTs(ng)`.
+2. Skip the ng unless leader/candidate-leader (term from `Sharder`); compute `ckpt_ts` (§3.2); skip if `ckpt_ts <= GetNodeGroupCkptTs(ng)`. Consecutive skips are counted per ng: after `ckpt_stall_warn_rounds` of them (default 3, 0 disables; runtime-mutable) a rate-limited (60 s) `WARNING` names the transaction pinning the timestamp — `CkptTsCc::GetPinningTx()`, filled by `ActiveTxMinTs` with the tx whose `wlock_ts_` produced the minimum — plus its core and write-lock age, so a wedged or leaked write-lock holder is diagnosable from the log alone (`Checkpointer::WarnIfCkptStalled`). The same count is exported as the `checkpoint_stall_rounds` gauge (per `ng_id`, node meter) by `Checkpointer::CollectCkptStallMetric`, called on every round: from `WarnIfCkptStalled` before `ckpt_stall_warn_rounds` and the 60 s log rate limit are consulted, so neither can suppress it, and with 0 from the advancing path in `Ckpt()`, so the gauge falls back to 0 instead of flatlining at its last stalled value. The stall is therefore alertable without scraping logs. Note that a stall returns before any data sync task is enqueued, so it raises no checkpoint failure and never shows up in `is_continuous_checkpoint_failures`; that gauge stays 0 throughout.
 3. `GetCatalogTableNameSnapshot(ng, ckpt_ts)` → map table → `is_dirty`. For each non-meta table: if not dirty and `GetTableLastCommitTsCc < last_ckpt_ts`, skip; else `EnqueueDataSyncTaskForTable(..., can_be_skipped = !is_last_ckpt, status)` (`:274-329`). The smallest valid per-table `last synced ts` may already allow an early `UpdateNodeGroupCkptTs` + `NotifyLogOfCkptTs` + `BrocastPrimaryCkptTs` (`:338-358`).
 4. Mark `status->all_task_started_`; if all scans finished but flushes are pending, force-flush the buffer (`FlushCurrentFlushBuffer`). On the last ckpt, block on `status->cv_` until `unfinished_tasks_ == 0` (`:360-375`).
 5. When all tasks are done without error and `need_truncate_log_`, truncate using `status->truncate_log_ts_` (which may exceed this round's `ckpt_ts` — see §8): `UpdateNodeGroupCkptTs` → `NotifyLogOfCkptTs` (→ `TxLog::UpdateCheckpointTs`, skipped under `txservice_skip_wal`) → `BrocastPrimaryCkptTs` to standbys (`:377-425`).
@@ -186,7 +186,39 @@ Every replay cc checks the **candidate term** (`CandidateLeaderTerm(ng)`, e.g. `
 
 ### 5.4 Orphan lock recovery — `CheckTxStatus` / `RecoverTx`
 
-Trigger: a conflicting tx observes a lock held > 5 s → `CcShard::CheckRecoverTx` (`tx_service/src/cc/cc_shard.cpp:1261-1358`, rate-limited per lock via `last_recover_ts_`) → `Sharder::RecoverTx` → `RecoveryService::RecoverTx` queue. `ProcessRecoverTxTask` (`log_replay_service.cpp:1017-1170`):
+Trigger: a conflicting tx observes a lock held > 5 s, or the per-round `ActiveTxMinTs` walk visits a
+lock-holding tx → `CcShard::CheckRecoverTx` (`tx_service/src/cc/cc_shard.cpp`, rate-limited per tx via
+`last_recover_ts_`). From there the path splits on the lock holder's coordinator:
+
+Before anything else, `CheckRecoverTx` reconciles the entry **in place**: references whose cc-entry
+lock no longer lists the tx are removed on the spot (one `SearchLock` per reference; such a
+registry/lock discrepancy is a leak by invariant regardless of the tx's liveness), and an entry
+emptied by the repair is erased, un-pinning the checkpoint watermark immediately. Recovery proper is
+started only for entries still holding **real** locks:
+
+**Locally-coordinated tx (its node group is this node's native ng)** — recovered without any waiting
+thread by a self-driving `RecoverDeadTxCc` (`cc/cc_req_misc.h`), launched from a per-shard pool. Probe
+phase (on the tx's owner shard): read liveness inline via `LocateTx`, yielding one of three verdicts —
+**Dead** (the `TEntry` slot was reused or carries Aborted/Finished status: post-processing is provably
+done or never coming), **Committed** (resident with the commit decided but post-processing possibly
+still installing pending writes), or **Alive** (anything else; the probe ends with no action). Resolve
+phase (back on the shard holding the locks, `CcShard::RecoverDeadTxLocks`): read locks/read intents
+are released for both Dead and Committed (reads guard no pending value; the owner's own release is an
+idempotent no-op), and so are **write intents** on non-meta tables in any WAL mode — an intent is a
+read-side reservation: the upgrade to a full write lock precedes the commit decision and the log
+write, so no log record can reference an intent-only key (meta intents belong to 2PC ops the log
+recovers across stages — those stay on the hand-off path). Write locks of a **Dead** tx on non-meta tables are abort-cleared when the
+data WAL is disabled (a settled tx has either fully applied its writes or never will); with a WAL, or
+on meta tables, they are handed to the log-consulting path below. A **Committed** tx's write locks are
+normally left to its own post-processing — but without a data WAL that patience is bounded: past
+`committed_write_recover_window_seconds` (default 300, runtime-mutable, <=0 waits forever) they are
+abort-cleared too. Post-processing retries cover transient failures only; with the WAL off, a
+permanently-lost pending write is the accepted durability contract, and holding its lock forever
+would pin the checkpoint for a value no mechanism can recover. A `WARNING` names every recovered txn
+and what was cleared.
+
+**Tx coordinated by another node group** — `Sharder::RecoverTx` → `RecoveryService::RecoverTx` queue,
+processed by the `replay_notify` thread. `ProcessRecoverTxTask` (`log_replay_service.cpp`):
 
 1. Ask the lock-holder's coordinator ng (`CheckTxStatus` RPC, `cc_node_service.cpp:295+`; term-checked → `NOT_FOUND` if the coordinator failed over): `ONGOING` → do nothing; `ABORTED` → `ClearTx` (broadcast `ClearTxCc` to all shards releases the tx's locks).
 2. Otherwise consult the tx's log group: `TxLog::RecoverTx(txn, tx_term, write_lock_ts, cc_ng_id, cc_ng_term, replay_addr)`. `RecoverTxStatus` semantics (`txlog.h:33-49`):

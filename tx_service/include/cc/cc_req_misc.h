@@ -1038,6 +1038,83 @@ private:
     // lifetime fence before leaving the request's scope.
     std::atomic<uint32_t> active_finishers_{0};
 };
+
+/**
+ * @brief Self-driving orphan-lock recovery for a locally-coordinated tx. No
+ * thread ever waits on this request; it hops between shards:
+ *
+ * 1. Probe (on the tx's owner shard): reads the tx's liveness inline from
+ *    the shard's tx array (LocateTx): Dead when the TEntry slot has been
+ *    reused or carries Aborted/Finished status, Committed when resident
+ *    with post-processing possibly in flight — then re-enqueues itself to
+ *    the origin shard.
+ * 2. Resolve (on the shard holding the locks): re-validates the registry
+ *    entry and repairs it via CcShard::RecoverDeadTxLocks. All lock/registry
+ *    mutation happens here, on the shard that owns the data, against
+ *    freshly-read state; the cross-hop verdict is only a hint.
+ *
+ * Launched by CcShard::CheckRecoverTx from a per-shard pool; recycled to the
+ * pool when Resolve finishes. The only stale-verdict hazard is the tx ident
+ * being reused between the two hops, which requires 2^32 transactions on one
+ * core within the hop window — negligible.
+ */
+struct RecoverDeadTxCc : public CcRequestBase
+{
+public:
+    enum struct Phase
+    {
+        Probe,
+        Resolve
+    };
+
+    RecoverDeadTxCc() = default;
+    RecoverDeadTxCc(const RecoverDeadTxCc &) = delete;
+    RecoverDeadTxCc &operator=(const RecoverDeadTxCc &) = delete;
+
+    /**
+     * @brief The probe's liveness verdict. Alive covers Ongoing and any
+     * non-terminal state. Committed means the TEntry is resident with the
+     * commit decided but post-processing possibly in flight: read
+     * locks/intents are releasable (the owner's own release is an
+     * idempotent no-op), while write locks must not be abort-cleared — the
+     * pending value may not be installed yet.
+     */
+    enum struct Verdict
+    {
+        Alive,
+        Committed,
+        Dead
+    };
+
+    void Reset(TxNumber txn,
+               NodeGroupId cc_ng_id,
+               int64_t cc_ng_term,
+               int64_t tx_coord_term,
+               uint64_t wlock_ts,
+               uint16_t origin_core)
+    {
+        tx_number_ = txn;
+        cc_ng_id_ = cc_ng_id;
+        cc_ng_term_ = cc_ng_term;
+        tx_coord_term_ = tx_coord_term;
+        wlock_ts_ = wlock_ts;
+        origin_core_ = origin_core;
+        phase_ = Phase::Probe;
+        verdict_ = Verdict::Alive;
+    }
+
+    bool Execute(CcShard &ccs) override;
+
+private:
+    NodeGroupId cc_ng_id_{0};
+    int64_t cc_ng_term_{-1};
+    int64_t tx_coord_term_{-1};
+    uint64_t wlock_ts_{0};
+    uint16_t origin_core_{0};
+    Phase phase_{Phase::Probe};
+    Verdict verdict_{Verdict::Alive};
+};
+
 struct UpdateCceCkptTsCc : public CcRequestBase
 {
 public:

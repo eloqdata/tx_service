@@ -36,6 +36,7 @@
 #include "sharder.h"
 #include "standby.h"
 #include "statistics.h"
+#include "tx_service_metrics.h"
 #include "tx_start_ts_collector.h"
 
 namespace txservice
@@ -46,11 +47,23 @@ DEFINE_bool(report_ckpt, false, "Print log on do checkpoint.");
 #else
 DEFINE_bool(report_ckpt, true, "Print log on do checkpoint.");
 #endif
+DEFINE_int32(
+    ckpt_stall_warn_rounds,
+    3,
+    "Log a warning when a node group's checkpoint timestamp fails to advance "
+    "for this many consecutive rounds, naming the pinning transaction. 0 "
+    "disables the warning.");
+
 bool PassValidate(const char *, bool)
 {
     return true;
 }
+bool PassValidateInt32(const char *, int32_t)
+{
+    return true;
+}
 BRPC_VALIDATE_GFLAG(report_ckpt, PassValidate);
+BRPC_VALIDATE_GFLAG(ckpt_stall_warn_rounds, PassValidateInt32);
 
 Checkpointer::Checkpointer(LocalCcShards &shards,
                            store::DataStoreHandler *write_hd,
@@ -96,7 +109,9 @@ Checkpointer::Checkpointer(LocalCcShards &shards,
 }
 
 std::pair<uint64_t, uint64_t> Checkpointer::GetNewCheckpointTs(
-    uint32_t node_group_id, bool is_last_ckpt)
+    uint32_t node_group_id,
+    bool is_last_ckpt,
+    CkptTsCc::PinningTxInfo &pinning_tx)
 {
     size_t core_cnt = local_shards_.Count();
     CkptTsCc ckpt_req(core_cnt, node_group_id);
@@ -117,6 +132,8 @@ std::pair<uint64_t, uint64_t> Checkpointer::GetNewCheckpointTs(
 
     ckpt_req.UpdateStandbyConsistentTs();
 
+    pinning_tx = ckpt_req.GetPinningTx();
+
     uint64_t ckpt_ts = UINT64_MAX;
     ckpt_ts = ckpt_req.GetCkptTs();
 
@@ -136,6 +153,88 @@ std::pair<uint64_t, uint64_t> Checkpointer::GetNewCheckpointTs(
     }
 
     return {ckpt_ts, ckpt_req.GetMemUsage()};
+}
+
+void Checkpointer::CollectCkptStallMetric(uint32_t node_group, uint32_t rounds)
+{
+    if (!metrics::enable_metrics)
+    {
+        return;
+    }
+
+    metrics::Meter *meter = local_shards_.GetNodeMeter();
+    if (meter != nullptr)
+    {
+        meter->Collect(metrics::NAME_CHECKPOINT_STALL_ROUNDS,
+                       static_cast<double>(rounds),
+                       std::to_string(node_group));
+    }
+}
+
+void Checkpointer::WarnIfCkptStalled(uint32_t node_group,
+                                     uint64_t ckpt_ts,
+                                     uint64_t last_ckpt_ts,
+                                     const CkptTsCc::PinningTxInfo &pinning_tx)
+{
+    // Counted (and exported) before the flag is consulted: ckpt_stall_warn_
+    // rounds gates the log line only. Gating the count on it would make
+    // setting the flag to 0 freeze the gauge at 0 for the whole stall.
+    auto stall_it = ckpt_stall_states_.try_emplace(node_group).first;
+    CkptStallState &stall = stall_it->second;
+    uint32_t rounds = ++stall.stall_rounds_;
+    CollectCkptStallMetric(node_group, rounds);
+
+    if (FLAGS_ckpt_stall_warn_rounds <= 0)
+    {
+        return;
+    }
+
+    if (rounds < static_cast<uint32_t>(FLAGS_ckpt_stall_warn_rounds))
+    {
+        return;
+    }
+
+    // Rate-limit to one warning per node group per minute: under memory
+    // pressure checkpoint rounds run every few seconds.
+    auto now = std::chrono::steady_clock::now();
+    if (now - stall.last_warn_time_ < std::chrono::seconds(60))
+    {
+        return;
+    }
+    stall.last_warn_time_ = now;
+
+    if (pinning_tx.txn_ != 0)
+    {
+        // wlock_ts_ comes from the shard ts base, which tracks the system
+        // clock; the derived age is approximate but adequate for diagnosis.
+        uint64_t now_us =
+            std::chrono::duration_cast<std::chrono::microseconds>(
+                std::chrono::system_clock::now().time_since_epoch())
+                .count();
+        uint64_t age_seconds = now_us > pinning_tx.wlock_ts_
+                                   ? (now_us - pinning_tx.wlock_ts_) / 1000000
+                                   : 0;
+        LOG(WARNING) << "Checkpoint of node group #" << node_group
+                     << " has not advanced for " << rounds
+                     << " consecutive rounds: ckpt_ts=" << ckpt_ts
+                     << " <= last_ckpt_ts=" << last_ckpt_ts
+                     << ". Pinned by txn " << pinning_tx.txn_ << " on core #"
+                     << pinning_tx.core_id_
+                     << ", which acquired its first write lock " << age_seconds
+                     << "s ago (wlock_ts=" << pinning_tx.wlock_ts_
+                     << "). If this transaction never finishes, dirty data "
+                        "cannot be flushed and memory cannot be reclaimed.";
+    }
+    else
+    {
+        LOG(WARNING) << "Checkpoint of node group #" << node_group
+                     << " has not advanced for " << rounds
+                     << " consecutive rounds: ckpt_ts=" << ckpt_ts
+                     << " <= last_ckpt_ts=" << last_ckpt_ts
+                     << ". No write-lock-holding transaction found; the "
+                        "timestamp may be capped by the MVCC minimum start ts "
+                        "or standby state.";
+    }
 }
 
 void Checkpointer::Ckpt(bool is_last_ckpt)
@@ -239,14 +338,22 @@ void Checkpointer::Ckpt(bool is_last_ckpt)
             continue;
         }
 
+        CkptTsCc::PinningTxInfo pinning_tx;
         auto [ckpt_ts, mem_usage] =
-            GetNewCheckpointTs(node_group, is_last_ckpt);
+            GetNewCheckpointTs(node_group, is_last_ckpt, pinning_tx);
         uint64_t last_ckpt_ts =
             Sharder::Instance().GetNodeGroupCkptTs(node_group);
 
         if (ckpt_ts <= last_ckpt_ts)
         {
+            WarnIfCkptStalled(node_group, ckpt_ts, last_ckpt_ts, pinning_tx);
             continue;
+        }
+        CollectCkptStallMetric(node_group, 0);
+        auto stall_it = ckpt_stall_states_.find(node_group);
+        if (stall_it != ckpt_stall_states_.end())
+        {
+            stall_it->second.stall_rounds_ = 0;
         }
 
         LOG_IF(INFO, FLAGS_report_ckpt)
