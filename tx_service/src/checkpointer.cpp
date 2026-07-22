@@ -36,6 +36,7 @@
 #include "sharder.h"
 #include "standby.h"
 #include "statistics.h"
+#include "tx_service_metrics.h"
 #include "tx_start_ts_collector.h"
 
 namespace txservice
@@ -154,19 +155,40 @@ std::pair<uint64_t, uint64_t> Checkpointer::GetNewCheckpointTs(
     return {ckpt_ts, ckpt_req.GetMemUsage()};
 }
 
+void Checkpointer::CollectCkptStallMetric(uint32_t node_group, uint32_t rounds)
+{
+    if (!metrics::enable_metrics)
+    {
+        return;
+    }
+
+    metrics::Meter *meter = local_shards_.GetNodeMeter();
+    if (meter != nullptr)
+    {
+        meter->Collect(metrics::NAME_CHECKPOINT_STALL_ROUNDS,
+                       static_cast<double>(rounds),
+                       std::to_string(node_group));
+    }
+}
+
 void Checkpointer::WarnIfCkptStalled(uint32_t node_group,
                                      uint64_t ckpt_ts,
                                      uint64_t last_ckpt_ts,
                                      const CkptTsCc::PinningTxInfo &pinning_tx)
 {
+    // Counted (and exported) before the flag is consulted: ckpt_stall_warn_
+    // rounds gates the log line only. Gating the count on it would make
+    // setting the flag to 0 freeze the gauge at 0 for the whole stall.
+    auto stall_it = ckpt_stall_states_.try_emplace(node_group).first;
+    CkptStallState &stall = stall_it->second;
+    uint32_t rounds = ++stall.stall_rounds_;
+    CollectCkptStallMetric(node_group, rounds);
+
     if (FLAGS_ckpt_stall_warn_rounds <= 0)
     {
         return;
     }
 
-    auto stall_it = ckpt_stall_states_.try_emplace(node_group).first;
-    CkptStallState &stall = stall_it->second;
-    uint32_t rounds = ++stall.stall_rounds_;
     if (rounds < static_cast<uint32_t>(FLAGS_ckpt_stall_warn_rounds))
     {
         return;
@@ -327,6 +349,7 @@ void Checkpointer::Ckpt(bool is_last_ckpt)
             WarnIfCkptStalled(node_group, ckpt_ts, last_ckpt_ts, pinning_tx);
             continue;
         }
+        CollectCkptStallMetric(node_group, 0);
         auto stall_it = ckpt_stall_states_.find(node_group);
         if (stall_it != ckpt_stall_states_.end())
         {
