@@ -69,14 +69,7 @@ DEFINE_string(tx_standby_ip_port_list, "", "Standby IP list");
 DEFINE_string(tx_voter_ip_port_list, "", "Voter IP list");
 
 DEFINE_string(cluster_config_file, "", "Cluster configuration file");
-DEFINE_int32(node_group_replica_num,
-#ifdef DATA_STORE_TYPE_ELOQDSS_ELOQSTORE
-             1
-#else
-             3
-#endif
-             ,
-             "Node group replica number");
+DEFINE_int32(node_group_replica_num, 3, "Node group replica number");
 DEFINE_bool(
     bind_all,
     false,
@@ -578,14 +571,6 @@ bool DataSubstrate::LoadNetworkConfig(bool is_bootstrap,
             : config_reader.GetInteger("cluster",
                                        "node_group_replica_num",
                                        FLAGS_node_group_replica_num);
-
-#ifdef DATA_STORE_TYPE_ELOQDSS_ELOQSTORE
-    if (network_config.node_group_replica_num > 1)
-    {
-        LOG(ERROR) << "EloqStore only supports node_group_replica_num=1.";
-        return false;
-    }
-#endif
 
     network_config.bind_all =
         !CheckCommandLineFlagIsDefault("bind_all")
