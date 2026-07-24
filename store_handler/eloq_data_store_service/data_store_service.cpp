@@ -373,6 +373,15 @@ bool DataStoreService::StartService(bool create_db_if_missing)
     auto dss_shards = cluster_manager_.GetShardsForThisNode();
     LOG(INFO) << "DataStoreService start with shards: " << dss_shards.size();
 
+#ifdef DATA_STORE_TYPE_ELOQDSS_ELOQSTORE
+    if (dss_shards.size() > 1)
+    {
+        LOG(ERROR)
+            << "EloqStore-backed DataStoreService supports at most one shard.";
+        return false;
+    }
+#endif
+
     if (!dss_shards.empty())
     {
         for (uint32_t shard_id : dss_shards)
