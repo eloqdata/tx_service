@@ -129,11 +129,10 @@ public:
     /**
      * @param write_time is used to maintain idempotence. For eventual
      * consistency storage, records with larger write_time wins. Cassandra
-     * supports microsecond precision write_time, BigTable supports milliseconds
-     * write_time, while DynamoDB and RocksDB don't support write_time. For
-     * commit, write_time is equal to commit_ts. For rollback, there is no
-     * commit_ts, and write_time is equal max(last_valid_ts..., last_write_time)
-     * + 1.
+     * supports microsecond precision write_time, while RocksDB does not support
+     * write_time. For commit, write_time is equal to commit_ts. For rollback,
+     * there is no commit_ts, and write_time is equal
+     * max(last_valid_ts..., last_write_time) + 1.
      */
     virtual void UpsertTable(
         const TableSchema *old_table_schema,

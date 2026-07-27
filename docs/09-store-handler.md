@@ -1,6 +1,6 @@
 # Store Handler (Persistent Storage)
 
-The store handler is the persistence layer below the in-memory cc maps: it stores checkpointed/cold row data plus all durable metadata (table catalogs, range/slice maps, statistics, databases, MVCC archives) behind the abstract interface `txservice::store::DataStoreHandler` (`tx_service/include/store/data_store_handler.h`). The default backend is **EloqDSS** — a brpc `DataStoreService` (`store_handler/eloq_data_store_service/`) that owns numbered *data shards*, each backed by a pluggable `DataStore` engine (EloqStore, RocksDB, or RocksDB-Cloud on S3/GCS) — accessed from the tx side by `EloqDS::DataStoreServiceClient` (`store_handler/data_store_service_client.h/.cpp`), which maps kv partitions to DSS shards, bypasses RPC entirely when the owning shard lives in the same process, and retries via re-resolvable closures when a shard moves. Legacy direct handlers (embedded RocksDB, DynamoDB, BigTable) implement the same interface without the DSS layer.
+The store handler is the persistence layer below the in-memory cc maps: it stores checkpointed/cold row data plus all durable metadata (table catalogs, range/slice maps, statistics, databases, MVCC archives) behind the abstract interface `txservice::store::DataStoreHandler` (`tx_service/include/store/data_store_handler.h`). The default backend is **EloqDSS** — a brpc `DataStoreService` (`store_handler/eloq_data_store_service/`) that owns numbered *data shards*, each backed by a pluggable `DataStore` engine (EloqStore, RocksDB, or RocksDB-Cloud on S3/GCS) — accessed from the tx side by `EloqDS::DataStoreServiceClient` (`store_handler/data_store_service_client.h/.cpp`), which maps kv partitions to DSS shards, bypasses RPC entirely when the owning shard lives in the same process, and retries via re-resolvable closures when a shard moves. The embedded RocksDB handler implements the same interface without the DSS layer.
 
 Related docs: [01-architecture-overview.md](01-architecture-overview.md) (startup wiring), [03-concurrency-control.md](03-concurrency-control.md) (CcRequest model the callbacks complete into), [07-durability-and-recovery.md](07-durability-and-recovery.md) (checkpointer/data-sync, who calls `PutAll`), [08-range-and-bucket-management.md](08-range-and-bucket-management.md) (ranges/slices/buckets persisted here), [10-log-service.md](10-log-service.md) (the WAL that makes unflushed data durable).
 
@@ -35,15 +35,15 @@ All in `tx_service/include/store/data_store_handler.h`:
 | Flag | Meaning | Verified consumers |
 |---|---|---|
 | `IsSharedStorage()` (default true) | kv store is reachable by all nodes (cloud/remote) vs per-node local disk | standby skips checkpointing when shared (`checkpointer.cpp:207`); `VersionedLruEntry::IsPersistent` trusts the leader's ckpt-ts on shared storage (`cc_entry.cpp:64`) — i.e. cache eviction correctness depends on it; failover/recovery paths in `fault/cc_node.cpp`, `snapshot_manager.cpp` |
-| `NeedCopyRange()` (pure virtual) | range split must physically copy rows to the new range's partition | `local_cc_shards.cpp:2623` (range split flush). True for DSS client and RocksDB handler, false for BigTable |
-| `ByPassDataStore()` (default false) | skip kv writes entirely (DDL-only test mode) | `tx_index_operation.cpp:894`; only BigTable returns non-constant (`ddl_skip_kv_ && !is_bootstrap_`) |
+| `NeedCopyRange()` (pure virtual) | range split must physically copy rows to the new range's partition | `local_cc_shards.cpp:2623` (range split flush). True for DSS client and RocksDB handler |
+| `ByPassDataStore()` (default false) | skip kv writes entirely | `tx_index_operation.cpp:894`; supported handlers use the default |
 | `NeedPersistKV()` (default false) | `PersistKV` is meaningful (write path buffers data; needs an explicit flush) | true for DSS client and RocksDB handler — their `PutAll` batches are written with `skip_wal=true` and made durable only by `PersistKV`→`FlushData` |
 
 ## 3. EloqDSS Architecture
 
 ### Deployment and wiring (`core/src/storage_init.cpp`)
 
-`WITH_DATA_STORE` (top-level `CMakeLists.txt:9`, default `ELOQDSS_ELOQSTORE`; options `DYNAMODB`, `BIGTABLE`, `ROCKSDB`, `ELOQDSS_ROCKSDB`, `ELOQDSS_ROCKSDB_CLOUD_S3/GCS`, `ELOQDSS_ELOQSTORE`) selects one backend at compile time via `DATA_STORE_TYPE_*` defines. RocksDB-based choices force a matching `WITH_LOG_STATE` (fatal configure error on mismatch). `build_eloq_store.cmake` builds the vendored EloqStore submodule (C++20, boost::context coroutines, liburing, AWS S3 SDK) when the EloqStore backend is chosen.
+`WITH_DATA_STORE` (top-level `CMakeLists.txt:9`, default `ELOQDSS_ELOQSTORE`; options `ROCKSDB`, `ELOQDSS_ROCKSDB`, `ELOQDSS_ROCKSDB_CLOUD_S3/GCS`, `ELOQDSS_ELOQSTORE`) selects one backend at compile time via `DATA_STORE_TYPE_*` defines. RocksDB-based choices force a matching `WITH_LOG_STATE` (fatal configure error on mismatch). `build_eloq_store.cmake` builds the vendored EloqStore submodule (C++20, boost::context coroutines, liburing, AWS S3 SDK) when the EloqStore backend is chosen.
 
 For all `ELOQDSS_*` variants, `DataSubstrate::InitializeStorageHandler` always starts an **in-process** `DataStoreService` (data path `<data_path>/eloq_dss`, DSS port = tx port + 7 via `TxPort2DssPort`) and then wraps it in a `DataStoreServiceClient`. Two topology sources:
 
@@ -119,9 +119,6 @@ For `ELOQDSS_ROCKSDB_CLOUD_S3`, a `FileCacheSyncWorker` periodically sends the p
 ## 5. Direct (Non-DSS) Handlers
 
 - **`RocksDBHandlerImpl` / `RocksDBCloudHandlerImpl`** (`store_handler/rocksdb_handler.h`, selected by `WITH_DATA_STORE=ROCKSDB` → `DATA_STORE_TYPE_ROCKSDB`): embedded RocksDB inside the tx process, used by EloqKV local-disk builds. One column family per kv table (`column_families_` map), `IsSharedStorage() = false`, `NeedPersistKV() = true`, supports `RestoreTxCache` (parallel full-table iteration to repopulate cc maps), standby snapshots via rsync-style `SendSnapshotToRemote`, and an EloqKV-specific `TTLCompactionFilter` that drops expired Redis TTL objects during compaction. Includes EloqKV headers (`redis_object.h`) — it is effectively EloqKV-only despite living in this repo. `rocksdb_config.h` maps ini options (write buffers, level triggers, rate limits, cloud bucket/region settings) onto it.
-- **`DynamoHandler`** (`store_handler/dynamo_handler.h`, `DATA_STORE_TYPE_DYNAMODB`): AWS DynamoDB backend via the AWS SDK with a worker pool; `NeedCopyRange() = true`. Maintained as an alternative shared-storage backend.
-- **`BigTableHandler`** (`store_handler/bigtable_handler.h`, `DATA_STORE_TYPE_BIGTABLE`): Google BigTable backend; `NeedCopyRange() = false` (server-side range semantics) and the only handler with a non-trivial `ByPassDataStore()` (`ddl_skip_kv_ && !is_bootstrap_`). Legacy/alternative; selected the same way via `storage_init.cpp`.
-
 `store_handler/store_util.h/.cpp` (`EloqShare` namespace) is shared plumbing: vector/string (de)serializers, endian converters used in archive-key encoding (commit-ts stored big-endian so newest sorts deterministically), and schema-image pack/unpack helpers (`SerializeSchemaImage` in `kv_store.h` packs frm + kv_info + key_schemas_ts).
 
 ## 6. TTL and Purge Mechanisms
@@ -198,5 +195,5 @@ fetch_cc->SetFinish(0)  → re-enqueued on the owning CcShard          [03]
 | DSS client | `store_handler/data_store_service_client.h/.cpp`, `data_store_service_client_closure.h/.cpp`, `data_store_service_scanner.h/.cpp` |
 | DSS service | `store_handler/eloq_data_store_service/data_store_service.h/.cpp`, `data_store_service_config.*`, `data_store_service_util.h`, `ds_request.proto`, `internal_request.h`, `object_pool.h`, `thread_worker_pool.h` |
 | DSS backends | `data_store.h`, `data_store_factory.h`, `rocksdb_data_store*.{h,cpp}`, `rocksdb_cloud_data_store*.{h,cpp}`, `purger_*`, `s3_file_downloader.*`, `eloq_store_data_store*.{h,cpp}`, `eloq_store_config.*` |
-| Direct handlers | `store_handler/rocksdb_handler.*`, `rocksdb_config.*`, `dynamo_handler.*`, `bigtable_handler.*`, `kv_store.h`, `store_util.*` |
+| Direct handlers | `store_handler/rocksdb_handler.*`, `rocksdb_config.*`, `kv_store.h`, `store_util.*` |
 | Wiring | `core/src/storage_init.cpp`, top-level `CMakeLists.txt` (`WITH_DATA_STORE`), `store_handler/eloq_data_store_service/build_eloq_store.cmake` |

@@ -300,8 +300,7 @@ void DataSubstrate::Shutdown()
 #endif
     txservice::Sequences::Destory();
 
-#if defined(DATA_STORE_TYPE_DYNAMODB) ||                 \
-    defined(DATA_STORE_TYPE_ELOQDSS_ROCKSDB_CLOUD_S3) || \
+#if defined(DATA_STORE_TYPE_ELOQDSS_ROCKSDB_CLOUD_S3) || \
     defined(LOG_STATE_TYPE_RKDB_S3)
     Aws::ShutdownAPI(aws_options_);
 #endif
@@ -913,8 +912,7 @@ bool DataSubstrate::LoadCoreAndNetworkConfig(const INIReader &config_reader)
                                            enable_io_uring ? "true" : "false");
     GFLAGS_NAMESPACE::SetCommandLineOption(
         "raft_use_bthread_fsync", raft_log_async_fsync ? "true" : "false");
-#if defined(DATA_STORE_TYPE_DYNAMODB) ||                 \
-    defined(DATA_STORE_TYPE_ELOQDSS_ROCKSDB_CLOUD_S3) || \
+#if defined(DATA_STORE_TYPE_ELOQDSS_ROCKSDB_CLOUD_S3) || \
     defined(LOG_STATE_TYPE_RKDB_S3)
     aws_options_.httpOptions.installSigPipeHandler = true;
     aws_options_.loggingOptions.logLevel = Aws::Utils::Logging::LogLevel::Info;

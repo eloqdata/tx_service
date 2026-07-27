@@ -48,32 +48,11 @@
 #include "eloq_data_store_service/eloq_store_data_store_factory.h"
 #endif
 
-#ifdef DATA_STORE_TYPE_DYNAMODB
-#include "store_handler/dynamo_handler.h"
-#endif
-
-#ifdef DATA_STORE_TYPE_BIGTABLE
-#include "store_handler/bigtable_handler.h"
-#endif
-
-#if defined(DATA_STORE_TYPE_DYNAMODB)
-DEFINE_string(dynamodb_endpoint, "", "Endpoint of KvStore Dynamodb");
-DEFINE_string(dynamodb_keyspace, "eloq", "KeySpace of Dynamodb KvStore");
-DEFINE_string(dynamodb_region,
-              "ap-northeast-1",
-              "Region of the used trable in DynamoDB");
-#endif
-
-#ifdef DATA_STORE_TYPE_BIGTABLE
-DEFINE_string(bigtable_project_id, "", "Project id of BigTable");
-DEFINE_string(bigtable_instance_id, "", "Instance id of BigTable");
-DEFINE_string(bigtable_keyspace, "eloq", "KeySpace of BigTable");
-#endif
 // aws_secret_key
 #if defined(DATA_STORE_TYPE_ELOQDSS_ROCKSDB_CLOUD_S3)
 DECLARE_string(aws_access_key_id);
 DECLARE_string(aws_secret_key);
-#elif defined(DATA_STORE_TYPE_DYNAMODB) || defined(LOG_STATE_TYPE_RKDB_S3)
+#elif defined(LOG_STATE_TYPE_RKDB_S3)
 DEFINE_string(aws_access_key_id, "", "AWS SDK access key id");
 DEFINE_string(aws_secret_key, "", "AWS SDK secret key");
 #endif
@@ -100,70 +79,7 @@ bool DataSubstrate::InitializeStorageHandler(const INIReader &config_reader)
         FLAGS_snapshot_sync_worker_num =
             std::max(core_config_.core_num / 4, static_cast<uint32_t>(1));
     }
-#if defined(DATA_STORE_TYPE_DYNAMODB)
-    std::string dynamodb_endpoint =
-        !CheckCommandLineFlagIsDefault("dynamodb_endpoint")
-            ? FLAGS_dynamodb_endpoint
-            : config_reader.GetString(
-                  "store", "dynamodb_endpoint", FLAGS_dynamodb_endpoint);
-    std::string dynamodb_keyspace =
-        !CheckCommandLineFlagIsDefault("dynamodb_keyspace")
-            ? FLAGS_dynamodb_keyspace
-            : config_reader.GetString(
-                  "store", "dynamodb_keyspace", FLAGS_dynamodb_keyspace);
-    std::string dynamodb_region =
-        !CheckCommandLineFlagIsDefault("dynamodb_region")
-            ? FLAGS_dynamodb_region
-            : config_reader.GetString(
-                  "store", "dynamodb_region", FLAGS_dynamodb_region);
-    std::string aws_access_key_id =
-        !CheckCommandLineFlagIsDefault("aws_access_key_id")
-            ? FLAGS_aws_access_key_id
-            : config_reader.GetString(
-                  "store", "aws_access_key_id", FLAGS_aws_access_key_id);
-    std::string aws_secret_key =
-        !CheckCommandLineFlagIsDefault("aws_secret_key")
-            ? FLAGS_aws_secret_key
-            : config_reader.GetString(
-                  "store", "aws_secret_key", FLAGS_aws_secret_key);
-    bool ddl_skip_kv = false;
-    uint16_t worker_pool_size = core_num_ * 2;
-
-    store_hd_ = std::make_unique<EloqDS::DynamoHandler>(dynamodb_keyspace,
-                                                        dynamodb_endpoint,
-                                                        dynamodb_region,
-                                                        aws_access_key_id,
-                                                        aws_secret_key,
-                                                        core_config_.bootstrap,
-                                                        ddl_skip_kv,
-                                                        worker_pool_size,
-                                                        false);
-
-#elif defined(DATA_STORE_TYPE_BIGTABLE)
-    std::string bigtable_keyspace =
-        !CheckCommandLineFlagIsDefault("bigtable_keyspace")
-            ? FLAGS_bigtable_keyspace
-            : config_reader.GetString(
-                  "store", "bigtable_keyspace", FLAGS_bigtable_keyspace);
-    std::string bigtable_project_id =
-        !CheckCommandLineFlagIsDefault("bigtable_project_id")
-            ? FLAGS_bigtable_project_id
-            : config_reader.GetString(
-                  "store", "bigtable_project_id", FLAGS_bigtable_project_id);
-    std::string bigtable_instance_id =
-        !CheckCommandLineFlagIsDefault("bigtable_instance_id")
-            ? FLAGS_bigtable_instance_id
-            : config_reader.GetString(
-                  "store", "bigtable_instance_id", FLAGS_bigtable_instance_id);
-    bool ddl_skip_kv = false;
-    store_hd_ =
-        std::make_unique<EloqDS::BigTableHandler>(bigtable_keyspace,
-                                                  bigtable_project_id,
-                                                  bigtable_instance_id,
-                                                  core_config_.bootstrap,
-                                                  ddl_skip_kv);
-
-#elif defined(DATA_STORE_TYPE_ROCKSDB)
+#if defined(DATA_STORE_TYPE_ROCKSDB)
     bool is_single_node = network_config_.IsSingleNode();
 
     EloqShare::RocksDBConfig rocksdb_config(config_reader,

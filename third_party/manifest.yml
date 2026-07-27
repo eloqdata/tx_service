@@ -76,7 +76,7 @@ dependencies:
     commit: b5153b8309526738d498ee86a73ccc386fee0979
     kind: upstream
     source: pinned_git_with_submodules
-    consumers: [dynamodb, rocksdb-cloud-s3, eloqstore]
+    consumers: [rocksdb-cloud-s3, eloqstore]
   - name: rocksdb
     repo: https://github.com/facebook/rocksdb.git
     ref: v9.1.0
@@ -145,7 +145,7 @@ dependencies:
     commit: f55d86a04fc378fff7eebb29fcd44aac7dbcc32f
     kind: upstream
     source: archive
-    consumers: [bigtable, rocksdb-cloud-gcs]
+    consumers: [rocksdb-cloud-gcs]
   - name: FakeIt
     repo: https://github.com/eranpeer/FakeIt.git
     ref: pinned-head-2026-06-04

@@ -26,7 +26,7 @@ ctest
 Unit tests are Catch2-based, in `tx_service/tests/` (e.g. `CcEntry-Test.cpp`, `CcPage-Test.cpp`); that directory is its own CMake project. Run a single test binary directly from the build tree, or `ctest -R <name>`.
 
 Key CMake options (top-level `CMakeLists.txt`):
-- `WITH_DATA_STORE` — storage backend: `ELOQDSS_ELOQSTORE` (default), `ELOQDSS_ROCKSDB`, `ELOQDSS_ROCKSDB_CLOUD_S3/GCS`, `DYNAMODB`, `BIGTABLE`. RocksDB-based choices force a matching `WITH_LOG_STATE`; a mismatch is a fatal configure error.
+- `WITH_DATA_STORE` — storage backend: `ELOQDSS_ELOQSTORE` (default), `ELOQDSS_ROCKSDB`, `ELOQDSS_ROCKSDB_CLOUD_S3/GCS`, or embedded `ROCKSDB`. RocksDB-based choices force a matching `WITH_LOG_STATE`; a mismatch is a fatal configure error.
 - `WITH_LOG_SERVICE` — build with the in-tree WAL log service (`eloq_log_service/`); uses `build_eloq_log_service.cmake` (target `logservice`).
 - `EXT_TX_PROC_ENABLED` — external (brpc worker) threads may drive TxProcessors.
 - `ELOQ_MODULE_ENABLED` — register the tx service as an Eloq module on brpc workers (requires `EXT_TX_PROC_ENABLED`).
@@ -36,7 +36,7 @@ Key CMake options (top-level `CMakeLists.txt`):
 Top-level layout:
 - `core/` — `data_substrate` library glue: init/teardown of tx service, log service, storage, and metrics (`core/src/data_substrate.cpp` plus `*_init.cpp`). Parent projects call into this.
 - `tx_service/` — the engine (namespace `txservice`). The most important directory.
-- `store_handler/` — persistent storage backends behind `store::DataStoreHandler` (`kv_store.h`): `rocksdb_handler`, `dynamo_handler`, `bigtable_handler`, and `data_store_service_client` which talks to the **EloqDSS** standalone data-store service in `store_handler/eloq_data_store_service/` (its own brpc server, EloqStore or RocksDB backed).
+- `store_handler/` — persistent storage backends behind `store::DataStoreHandler` (`kv_store.h`): embedded `rocksdb_handler` and `data_store_service_client`, which talks to the **EloqDSS** standalone data-store service in `store_handler/eloq_data_store_service/` (its own brpc server, EloqStore or RocksDB backed).
 - `eloq_log_service/` — in-tree replicated (braft) WAL service; protobuf definitions and `LogAgent` client live in `tx_service/tx-log-protos/`.
 
 Inside `tx_service/`:

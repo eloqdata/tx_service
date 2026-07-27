@@ -103,7 +103,7 @@ cmake_build_install aws-sdk-cpp "${THIRD_PARTY_SRC}/aws-sdk-cpp" \
     -DENABLE_TESTING=OFF \
     -DBUILD_SHARED_LIBS=ON \
     -DFORCE_SHARED_CRT=OFF \
-    -DBUILD_ONLY="dynamodb;sqs;s3;kinesis;kafka;transfer"
+    -DBUILD_ONLY="sqs;s3;kinesis;kafka;transfer"
 cleanup_source_after_build aws-sdk-cpp
 
 cd "${THIRD_PARTY_SRC}/rocksdb"
@@ -164,7 +164,7 @@ cmake_build_install google-cloud-cpp "${THIRD_PARTY_SRC}/google-cloud-cpp" \
     -DBUILD_TESTING=OFF \
     -DCMAKE_POSITION_INDEPENDENT_CODE=ON \
     -DGOOGLE_CLOUD_CPP_ENABLE_EXAMPLES=OFF \
-    -DGOOGLE_CLOUD_CPP_ENABLE=bigtable,storage
+    -DGOOGLE_CLOUD_CPP_ENABLE=storage
 cleanup_source_after_build google-cloud-cpp
 
 mkdir -p "${THIRD_PARTY_PREFIX}/include"

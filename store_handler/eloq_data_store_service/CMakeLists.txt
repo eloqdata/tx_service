@@ -59,7 +59,7 @@ option(ABSL_PROPAGATE_CXX_STD "ABSL PROPAGATE CXX STD" ON)
 option(WITH_ASAN "Enable memory sanitize" OFF)
 message(NOTICE "WITH ASAN: ${WITH_ASAN}")
 
-# KV data store backend for redis server, Cassandra, DynamoDB, RocksDB Cloud
+# KV data store backend for redis server: EloqStore, RocksDB, or RocksDB Cloud
 set(WITH_DATA_STORE "ELOQDSS_ROCKSDB_CLOUD_S3" CACHE STRING "The KV data store to compile with")
 set_property(CACHE WITH_DATA_STORE PROPERTY STRINGS "ELOQDSS_ROCKSDB_CLOUD_S3" "ELOQDSS_ROCKSDB_CLOUD_GCS" "ELOQDSS_ROCKSDB" "ELOQDSS_ELOQSTORE")
 message(NOTICE "With DATA_STORE: ${WITH_DATA_STORE}")
