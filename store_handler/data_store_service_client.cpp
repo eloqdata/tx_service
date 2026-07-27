@@ -1121,10 +1121,10 @@ void DataStoreServiceClient::FetchTableRanges(
     {
         auto &scan_state = fetch_cc->partition_scan_states_[kv_part_id];
 
-        scan_state.kv_start_key_.clear();
         scan_state.kv_start_key_.reserve(table_name_sv.size() +
                                          KEY_SEPARATOR.size());
-        scan_state.kv_start_key_.append(table_name_sv);
+        scan_state.kv_start_key_.assign(table_name_sv.data(),
+                                        table_name_sv.size());
         scan_state.kv_start_key_.append(KEY_SEPARATOR);
 
         scan_state.kv_end_key_ = scan_state.kv_start_key_;
