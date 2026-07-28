@@ -127,12 +127,11 @@ public:
     }
 
     /**
-     * @param write_time is used to maintain idempotence. For eventual
-     * consistency storage, records with larger write_time wins. Cassandra
-     * supports microsecond precision write_time, while RocksDB does not support
-     * write_time. For commit, write_time is equal to commit_ts. For rollback,
-     * there is no commit_ts, and write_time is equal
-     * max(last_valid_ts..., last_write_time) + 1.
+     * @param write_time Orders schema writes for idempotence. Commits use
+     * commit_ts. A failed CREATE INDEX rollback normally uses
+     * max(kv_create_index_op_.write_time_, commit_ts_bound_) + 1 so it
+     * overwrites the original catalog write. During recovery, rollback uses
+     * LocalCcHandler::GetTsBaseValue() instead.
      */
     virtual void UpsertTable(
         const TableSchema *old_table_schema,
