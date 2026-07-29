@@ -8,7 +8,7 @@ Data Substrate (repo name `tx_service`) is EloqData's API-agnostic database foun
 |---|---|---|
 | `core/` | `DataSubstrate` singleton: config loading, engine registration, ordered startup of log service → metrics → storage → tx service | this file |
 | `tx_service/` | The engine: CcShards, concurrency control, transaction state machines, distribution, checkpointing | [02](02-threading-model.md), [03](03-concurrency-control.md), [04](04-transaction-execution.md), [06](06-distribution-and-clustering.md), [07](07-durability-and-recovery.md), [08](08-range-and-bucket-management.md) |
-| `store_handler/` | `DataStoreHandler` backends: EloqDSS client, embedded RocksDB, DynamoDB, BigTable | [09-store-handler.md](09-store-handler.md) |
+| `store_handler/` | `DataStoreHandler` backends: EloqDSS client and embedded RocksDB | [09-store-handler.md](09-store-handler.md) |
 | `store_handler/eloq_data_store_service/` | EloqDSS: a standalone (or in-process) brpc data-store service over RocksDB / RocksDB-Cloud / EloqStore | [09-store-handler.md](09-store-handler.md) |
 | `eloq_log_service/` | In-tree replicated WAL service (braft-based log groups); compiled when `WITH_LOG_SERVICE` is set | [10-log-service.md](10-log-service.md) |
 | `tx_service/tx-log-protos/` | Shared protobuf definitions + `LogAgent` (log service client used by tx nodes) | [10-log-service.md](10-log-service.md) |

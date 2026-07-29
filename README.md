@@ -39,7 +39,7 @@ Ensures durability by storing transaction redo logs in the [Log Service](https:/
 Dynamically scales in or out to adapt to changing workloads.
 
 ### 💪 Fault Tolerance
-Stateless and resilient to node failures. Recovers data from the log service and underlying storage engines like **RocksDB**, **Cassandra**, **ScyllaDB**, **DynamoDB**, or object storage.
+Stateless and resilient to node failures. Recovers data from the log service and underlying storage engines such as **RocksDB** or **EloqStore**.
 
 ---
 
