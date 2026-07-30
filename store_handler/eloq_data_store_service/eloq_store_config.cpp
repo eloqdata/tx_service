@@ -108,9 +108,10 @@ DEFINE_uint64(
 DEFINE_uint32(eloq_store_rate_limit_burst_ms,
               2,
               "EloqStore rate-limit burst capacity in milliseconds.");
-DEFINE_string(eloq_store_rate_limit_io_unit,
-              "2KB",
-              "EloqStore IO size charged as one operation by the rate limiter.");
+DEFINE_string(
+    eloq_store_rate_limit_io_unit,
+    "2KB",
+    "EloqStore IO size charged as one operation by the rate limiter.");
 DEFINE_uint32(eloq_store_rate_bg_ratio,
               25,
               "EloqStore percentage of the rate budget reserved for "
@@ -667,24 +668,21 @@ EloqStoreConfig::EloqStoreConfig(const INIReader &config_reader,
     eloqstore_configs_.disk_rate_limit_iops =
         !CheckCommandLineFlagIsDefault("eloq_store_disk_rate_limit_iops")
             ? FLAGS_eloq_store_disk_rate_limit_iops
-            : config_reader.GetInteger(
-                  "store",
-                  "eloq_store_disk_rate_limit_iops",
-                  FLAGS_eloq_store_disk_rate_limit_iops);
+            : config_reader.GetInteger("store",
+                                       "eloq_store_disk_rate_limit_iops",
+                                       FLAGS_eloq_store_disk_rate_limit_iops);
     eloqstore_configs_.disk_rate_limit_mbps =
         !CheckCommandLineFlagIsDefault("eloq_store_disk_rate_limit_mbps")
             ? FLAGS_eloq_store_disk_rate_limit_mbps
-            : config_reader.GetInteger(
-                  "store",
-                  "eloq_store_disk_rate_limit_mbps",
-                  FLAGS_eloq_store_disk_rate_limit_mbps);
+            : config_reader.GetInteger("store",
+                                       "eloq_store_disk_rate_limit_mbps",
+                                       FLAGS_eloq_store_disk_rate_limit_mbps);
     eloqstore_configs_.rate_limit_burst_ms =
         !CheckCommandLineFlagIsDefault("eloq_store_rate_limit_burst_ms")
             ? FLAGS_eloq_store_rate_limit_burst_ms
-            : config_reader.GetInteger(
-                  "store",
-                  "eloq_store_rate_limit_burst_ms",
-                  FLAGS_eloq_store_rate_limit_burst_ms);
+            : config_reader.GetInteger("store",
+                                       "eloq_store_rate_limit_burst_ms",
+                                       FLAGS_eloq_store_rate_limit_burst_ms);
     std::string rate_limit_io_unit =
         !CheckCommandLineFlagIsDefault("eloq_store_rate_limit_io_unit")
             ? FLAGS_eloq_store_rate_limit_io_unit
