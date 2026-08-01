@@ -186,7 +186,7 @@ void FetchRecordCallback(void *data,
 
             fetch_cc->rec_status_ = txservice::RecordStatus::Normal;
             fetch_cc->rec_ts_ = read_closure->Ts();
-            fetch_cc->rec_str_.assign(val.data(), val.size());
+            fetch_cc->rec_str_ = read_closure->TakeValue();
             fetch_cc->SetFinish(0);
         }
         else

@@ -1018,6 +1018,18 @@ public:
         }
     }
 
+    // Transfers the completed read buffer to its consumer. ReadClosure is
+    // returned to its pool after the callback, so retaining a second copy here
+    // only adds allocation and memcpy cost on the cold-read path.
+    std::string TakeValue()
+    {
+        if (is_local_request_)
+        {
+            return std::move(value_);
+        }
+        return std::move(*response_.mutable_value());
+    }
+
     uint64_t Ts() const
     {
         if (is_local_request_)
