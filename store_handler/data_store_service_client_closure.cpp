@@ -168,14 +168,12 @@ void FetchRecordCallback(void *data,
     }
     else if (err_code == remote::DataStoreError::NO_ERROR)
     {
-        uint64_t now = txservice::LocalCcShards::ClockTsInMillseconds();
-        uint64_t rec_ttl = read_closure->Ttl();
-        std::string_view val = read_closure->Value();
-
         if (fetch_cc->table_name_.Engine() == txservice::TableEngine::EloqKv)
         {
             // Hash partition
-            if (rec_ttl > 0 && rec_ttl < now)
+            const uint64_t rec_ttl = read_closure->Ttl();
+            if (rec_ttl > 0 &&
+                rec_ttl < txservice::LocalCcShards::ClockTsInMillseconds())
             {
                 // expired record
                 fetch_cc->rec_status_ = txservice::RecordStatus::Deleted;
@@ -191,6 +189,7 @@ void FetchRecordCallback(void *data,
         }
         else
         {
+            const std::string_view val = read_closure->Value();
             // Range partition
             bool is_deleted = false;
             size_t offset = 0;
