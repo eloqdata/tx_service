@@ -2410,10 +2410,7 @@ store::DataStoreHandler::DataStoreOpStatus CcShard::FetchBucketData(
 void CcShard::RemoveFetchRecordRequest(LruEntry *cce)
 {
     auto fetch_it = fetch_record_reqs_.find(cce);
-    if (fetch_it == fetch_record_reqs_.end())
-    {
-        return;
-    }
+    assert(fetch_it != fetch_record_reqs_.end());
     FetchRecordCc *fetch_req = fetch_it->second;
     fetch_record_reqs_.erase(fetch_it);
 
