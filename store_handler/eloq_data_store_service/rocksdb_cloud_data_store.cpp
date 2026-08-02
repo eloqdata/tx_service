@@ -179,9 +179,9 @@ void RocksDBCloudDataStore::Shutdown()
         delete db_;
         DLOG(INFO) << "RocksDBCloudDataStore Shutdown, db_ = nullptr";
         db_ = nullptr;
-        DLOG(INFO) << "RocksDBCloudDataStore Shutdown, ttl_compaction_filter_ "
-                      "= nullptr";
-        ttl_compaction_filter_ = nullptr;
+        DLOG(INFO) << "RocksDBCloudDataStore Shutdown, "
+                      "ttl_compaction_filter_factory_ = nullptr";
+        ttl_compaction_filter_factory_ = nullptr;
         DLOG(INFO) << "RocksDBCloudDataStore Shutdown, cloud_env_ = nullptr";
         cloud_env_ = nullptr;
         DLOG(INFO) << "RocksDBCloudDataStore Shutdown, cloud_fs_ = nullptr";
@@ -679,11 +679,10 @@ bool RocksDBCloudDataStore::OpenCloudDB(
     options.max_open_files = 0;
 
     // set ttl compaction filter
-    assert(ttl_compaction_filter_ == nullptr);
-    ttl_compaction_filter_ = std::make_unique<EloqDS::TTLCompactionFilter>();
-
-    options.compaction_filter =
-        static_cast<rocksdb::CompactionFilter *>(ttl_compaction_filter_.get());
+    assert(ttl_compaction_filter_factory_ == nullptr);
+    ttl_compaction_filter_factory_ =
+        std::make_shared<EloqDS::TTLCompactionFilterFactory>();
+    options.compaction_filter_factory = ttl_compaction_filter_factory_;
 
     // Disable auto compactions before blocking purger
     options.disable_auto_compactions = true;
@@ -734,7 +733,7 @@ bool RocksDBCloudDataStore::OpenCloudDB(
 
     if (!status.ok())
     {
-        ttl_compaction_filter_ = nullptr;
+        ttl_compaction_filter_factory_ = nullptr;
 
         LOG(ERROR) << "Unable to open db at path " << storage_path_
                    << " with bucket " << cfs_options.src_bucket.GetBucketName()
@@ -762,7 +761,7 @@ bool RocksDBCloudDataStore::OpenCloudDB(
         db_->Close();
         delete db_;
         db_ = nullptr;
-        ttl_compaction_filter_ = nullptr;
+        ttl_compaction_filter_factory_ = nullptr;
         return false;
     }
 
@@ -777,7 +776,7 @@ bool RocksDBCloudDataStore::OpenCloudDB(
         db_->Close();
         delete db_;
         db_ = nullptr;
-        ttl_compaction_filter_ = nullptr;
+        ttl_compaction_filter_factory_ = nullptr;
         return false;
     }
     if (current_epoch.empty())
@@ -803,7 +802,7 @@ bool RocksDBCloudDataStore::OpenCloudDB(
         db_->Close();
         delete db_;
         db_ = nullptr;
-        ttl_compaction_filter_ = nullptr;
+        ttl_compaction_filter_factory_ = nullptr;
         return false;
     }
 
@@ -818,7 +817,7 @@ bool RocksDBCloudDataStore::OpenCloudDB(
         db_->Close();
         delete db_;
         db_ = nullptr;
-        ttl_compaction_filter_ = nullptr;
+        ttl_compaction_filter_factory_ = nullptr;
         return false;
     }
 

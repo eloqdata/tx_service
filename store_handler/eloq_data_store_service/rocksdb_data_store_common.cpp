@@ -30,17 +30,28 @@ bool TTLCompactionFilter::Filter(int level,
     uint64_t rec_ttl;
     std::memcpy(
         &rec_ttl, existing_value.data() + sizeof(uint64_t), sizeof(rec_ttl));
-    const uint64_t current_timestamp =
-        std::chrono::duration_cast<std::chrono::milliseconds>(
-            std::chrono::system_clock::now().time_since_epoch())
-            .count();
-
-    return rec_ttl < current_timestamp;
+    return rec_ttl < current_timestamp_;
 }
 
 const char *TTLCompactionFilter::Name() const
 {
     return "TTLCompactionFilter";
+}
+
+std::unique_ptr<rocksdb::CompactionFilter>
+TTLCompactionFilterFactory::CreateCompactionFilter(
+    const rocksdb::CompactionFilter::Context &)
+{
+    const uint64_t current_timestamp =
+        std::chrono::duration_cast<std::chrono::milliseconds>(
+            std::chrono::system_clock::now().time_since_epoch())
+            .count();
+    return std::make_unique<TTLCompactionFilter>(current_timestamp);
+}
+
+const char *TTLCompactionFilterFactory::Name() const
+{
+    return "TTLCompactionFilterFactory";
 }
 
 void RocksDBEventListener::OnCompactionBegin(

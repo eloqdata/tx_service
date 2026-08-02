@@ -25,6 +25,8 @@
 namespace
 {
 
+constexpr uint64_t kCompactionTimestamp = 100;
+
 std::string MakeValue(uint64_t encoded_ts, uint64_t expiration_ts)
 {
     std::string value(sizeof(uint64_t) * 2, '\0');
@@ -34,9 +36,9 @@ std::string MakeValue(uint64_t encoded_ts, uint64_t expiration_ts)
     return value;
 }
 
-bool ShouldFilter(const std::string &value)
+bool ShouldFilter(const std::string &value, uint64_t current_timestamp)
 {
-    EloqDS::TTLCompactionFilter filter;
+    EloqDS::TTLCompactionFilter filter(current_timestamp);
     return filter.Filter(
         0, rocksdb::Slice("key"), rocksdb::Slice(value), nullptr, nullptr);
 }
@@ -51,19 +53,19 @@ TEST_CASE(
     SECTION("expired TTL value is removed")
     {
         const std::string value = MakeValue(EloqDS::MSB | 42, 1);
-        REQUIRE(ShouldFilter(value));
+        REQUIRE(ShouldFilter(value, kCompactionTimestamp));
     }
 
     SECTION("unexpired TTL value is retained")
     {
         const std::string value =
             MakeValue(EloqDS::MSB | 42, std::numeric_limits<uint64_t>::max());
-        REQUIRE_FALSE(ShouldFilter(value));
+        REQUIRE_FALSE(ShouldFilter(value, kCompactionTimestamp));
     }
 
     SECTION("value without TTL is retained")
     {
         const std::string value(sizeof(uint64_t), '\0');
-        REQUIRE_FALSE(ShouldFilter(value));
+        REQUIRE_FALSE(ShouldFilter(value, kCompactionTimestamp));
     }
 }

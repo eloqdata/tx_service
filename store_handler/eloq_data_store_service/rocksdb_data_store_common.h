@@ -52,11 +52,33 @@ constexpr uint64_t MSB_MASK = ~MSB;   // Mask to clear Bit 63
 class TTLCompactionFilter : public rocksdb::CompactionFilter
 {
 public:
+    /**
+     * @param current_timestamp Epoch time in milliseconds captured when
+     * RocksDB creates this filter for compaction.
+     */
+    explicit TTLCompactionFilter(uint64_t current_timestamp)
+        : current_timestamp_(current_timestamp)
+    {
+    }
+
     bool Filter(int level,
                 const rocksdb::Slice &key,
                 const rocksdb::Slice &existing_value,
                 std::string *new_value,
                 bool *value_changed) const override;
+
+    const char *Name() const override;
+
+private:
+    const uint64_t current_timestamp_;
+};
+
+/** Creates TTL filters with one timestamp snapshot per compaction worker. */
+class TTLCompactionFilterFactory : public rocksdb::CompactionFilterFactory
+{
+public:
+    std::unique_ptr<rocksdb::CompactionFilter> CreateCompactionFilter(
+        const rocksdb::CompactionFilter::Context &) override;
 
     const char *Name() const override;
 };
@@ -155,7 +177,7 @@ public:
           received_snapshot_path_(storage_path_ + "/received_snapshot/"),
           create_db_if_missing_(create_if_missing),
           tx_enable_cache_replacement_(tx_enable_cache_replacement),
-          ttl_compaction_filter_(nullptr),
+          ttl_compaction_filter_factory_(nullptr),
           query_worker_number_(config.query_worker_num_)
     {
         info_log_level_ = StringToInfoLogLevel(config.info_log_level_);
@@ -336,8 +358,8 @@ protected:
     const std::string received_snapshot_path_;
     const bool create_db_if_missing_{false};
     bool tx_enable_cache_replacement_{true};
-    std::unique_ptr<EloqDS::TTLCompactionFilter> ttl_compaction_filter_{
-        nullptr};
+    std::shared_ptr<EloqDS::TTLCompactionFilterFactory>
+        ttl_compaction_filter_factory_{nullptr};
     size_t query_worker_number_{4};
 
     std::unique_ptr<ThreadWorkerPool> query_worker_pool_;
