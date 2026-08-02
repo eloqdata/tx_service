@@ -1,5 +1,6 @@
 #include "rocksdb_data_store_common.h"
 
+#include <cstring>
 #include <filesystem>
 
 #include "internal_request.h"
@@ -13,44 +14,35 @@ bool TTLCompactionFilter::Filter(int level,
                                  std::string *new_value,
                                  bool *value_changed) const
 {
-    assert(existing_value.size() >= sizeof(uint64_t));
-    bool has_ttl = false;
-    uint64_t ts = *(reinterpret_cast<const uint64_t *>(existing_value.data() +
-                                                       sizeof(uint64_t)));
-
-    // Check if the MSB is set
-    if (ts & MSB)
+    if (existing_value.size() < sizeof(uint64_t))
     {
-        has_ttl = true;
-        ts &= MSB_MASK;  // Clear the MSB
-    }
-    else
-    {
-        has_ttl = false;
+        return false;
     }
 
-    if (has_ttl)
+    // The first word is the encoded version timestamp. Its MSB indicates
+    // whether the second word contains a TTL expiration timestamp.
+    uint64_t encoded_ts;
+    std::memcpy(&encoded_ts, existing_value.data(), sizeof(encoded_ts));
+    if ((encoded_ts & MSB) == 0)
     {
-        assert(existing_value.size() >= sizeof(uint64_t) * 2);
-        uint64_t rec_ttl = *(reinterpret_cast<const uint64_t *>(
-            existing_value.data() + sizeof(uint64_t)));
-        // Get the current timestamp in microseconds
-        // auto current_timestamp =
-        // txservice::LocalCcShards::ClockTsInMillseconds();
-        // FIXME(lzx): only fetch the time at the begin of compaction.
-        uint64_t current_timestamp =
-            std::chrono::duration_cast<std::chrono::milliseconds>(
-                std::chrono::high_resolution_clock::now().time_since_epoch())
-                .count();
-
-        // Check if the timestamp is smaller than the current timestamp
-        if (rec_ttl < current_timestamp)
-        {
-            return true;  // Mark the key for deletion
-        }
+        return false;
     }
 
-    return false;  // Keep the key
+    if (existing_value.size() < sizeof(uint64_t) * 2)
+    {
+        return false;
+    }
+
+    uint64_t rec_ttl;
+    std::memcpy(&rec_ttl,
+                existing_value.data() + sizeof(uint64_t),
+                sizeof(rec_ttl));
+    const uint64_t current_timestamp =
+        std::chrono::duration_cast<std::chrono::milliseconds>(
+            std::chrono::system_clock::now().time_since_epoch())
+            .count();
+
+    return rec_ttl < current_timestamp;
 }
 
 const char *TTLCompactionFilter::Name() const

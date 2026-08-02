@@ -66,6 +66,12 @@ set(CATCH_MAIN_TESTS
     ApplyResponseBoundary-Test
 )
 
+if(WITH_DATA_STORE STREQUAL "ELOQDSS_ROCKSDB" OR
+   WITH_DATA_STORE STREQUAL "ELOQDSS_ROCKSDB_CLOUD_S3" OR
+   WITH_DATA_STORE STREQUAL "ELOQDSS_ROCKSDB_CLOUD_GCS")
+    list(APPEND CATCH_MAIN_TESTS TTLCompactionFilter-Test)
+endif()
+
 # Tests that define their own int main() (they need gflags::ParseCommandLineFlags
 # before brpc is used). They link Catch2::Catch2 (no bundled main).
 set(OWN_MAIN_TESTS
