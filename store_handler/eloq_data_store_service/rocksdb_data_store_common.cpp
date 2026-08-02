@@ -59,7 +59,16 @@ bool TTLCompactionFilter::Filter(int level,
         return false;
     }
 
-    return header.ttl < current_timestamp_;
+    if (header.ttl < current_timestamp_)
+    {
+        DLOG(INFO) << "TTL compaction filter removes expired key, key: "
+                   << key.ToString(true)
+                   << ", expiration_timestamp: " << header.ttl
+                   << ", compaction_timestamp: " << current_timestamp_;
+        return true;
+    }
+
+    return false;
 }
 
 const char *TTLCompactionFilter::Name() const
@@ -75,6 +84,8 @@ TTLCompactionFilterFactory::CreateCompactionFilter(
         std::chrono::duration_cast<std::chrono::milliseconds>(
             std::chrono::system_clock::now().time_since_epoch())
             .count();
+    DLOG(INFO) << "Create TTL compaction filter, current_timestamp: "
+               << current_timestamp;
     return std::make_unique<TTLCompactionFilter>(current_timestamp);
 }
 
