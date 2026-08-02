@@ -10,6 +10,10 @@ on:
   push:
     branches: [main]
 
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
 # The container's default run shell is `sh` (dash); force bash so array/here-doc
 # and `set -o pipefail` in any step behave predictably.
 defaults:
@@ -90,6 +94,23 @@ jobs:
 
       - name: Test (gating — full suite)
         working-directory: bld
+        run: ctest --output-on-failure --timeout 180
+
+      - name: Configure RocksDB Cloud S3
+        run: |
+          cmake -S . -B bld_rocksdb_cloud \
+            -DWITH_TESTS=ON \
+            -DWITH_DATA_STORE=ELOQDSS_ROCKSDB_CLOUD_S3 \
+            -DWITH_LOG_STATE=ROCKSDB_CLOUD_S3 \
+            -DCMAKE_BUILD_TYPE=Debug \
+            -DELOQ_THIRD_PARTY_PREFIX=/opt/eloq/third_party \
+            -DELOQ_THIRD_PARTY_REQUIRED=ON
+
+      - name: Build RocksDB Cloud S3
+        run: cmake --build bld_rocksdb_cloud --parallel "$(nproc)"
+
+      - name: Test (gating — RocksDB Cloud S3 full suite)
+        working-directory: bld_rocksdb_cloud
         run: ctest --output-on-failure --timeout 180
 
   log-service-tests:

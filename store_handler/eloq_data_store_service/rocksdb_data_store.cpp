@@ -78,7 +78,6 @@ void RocksDBDataStore::Shutdown()
         db_->Close();
         delete db_;
         db_ = nullptr;
-        ttl_compaction_filter_ = nullptr;
     }
 }
 
@@ -242,11 +241,8 @@ bool RocksDBDataStore::StartDB(int64_t term)
     }
 
     // set ttl compaction filter
-    assert(ttl_compaction_filter_ == nullptr);
-    ttl_compaction_filter_ = std::make_unique<EloqDS::TTLCompactionFilter>();
-
-    options.compaction_filter =
-        static_cast<rocksdb::CompactionFilter *>(ttl_compaction_filter_.get());
+    options.compaction_filter_factory =
+        std::make_shared<EloqDS::TTLCompactionFilterFactory>();
 
     auto start = std::chrono::system_clock::now();
     std::unique_lock<std::shared_mutex> db_lk(db_mux_);
@@ -259,8 +255,6 @@ bool RocksDBDataStore::StartDB(int64_t term)
 
     if (!status.ok())
     {
-        ttl_compaction_filter_ = nullptr;
-
         LOG(ERROR) << "Unable to open db at path " << storage_path_
                    << " with error: " << status.ToString();
 

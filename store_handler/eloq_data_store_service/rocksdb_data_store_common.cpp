@@ -1,5 +1,6 @@
 #include "rocksdb_data_store_common.h"
 
+#include <cstring>
 #include <filesystem>
 
 #include "internal_request.h"
@@ -7,55 +8,90 @@
 namespace EloqDS
 {
 
+namespace
+{
+
+struct DecodedValueHeader
+{
+    uint64_t version_ts;
+    uint64_t ttl;
+    size_t record_offset;
+    bool has_ttl;
+};
+
+// The value header written by TransformRecordToValueSlices always contains a
+// version timestamp and contains an expiration timestamp exactly when the
+// version timestamp's MSB is set.
+DecodedValueHeader DecodeValueHeader(const char *data, size_t size)
+{
+    assert(size >= sizeof(uint64_t));
+
+    DecodedValueHeader header;
+    std::memcpy(&header.version_ts, data, sizeof(header.version_ts));
+    header.has_ttl = (header.version_ts & MSB) != 0;
+    header.version_ts &= MSB_MASK;
+    header.record_offset = sizeof(uint64_t);
+    header.ttl = 0;
+
+    if (header.has_ttl)
+    {
+        assert(size >= sizeof(uint64_t) * 2);
+        std::memcpy(
+            &header.ttl, data + header.record_offset, sizeof(header.ttl));
+        header.record_offset += sizeof(uint64_t);
+    }
+
+    return header;
+}
+
+}  // namespace
+
 bool TTLCompactionFilter::Filter(int level,
                                  const rocksdb::Slice &key,
                                  const rocksdb::Slice &existing_value,
                                  std::string *new_value,
                                  bool *value_changed) const
 {
-    assert(existing_value.size() >= sizeof(uint64_t));
-    bool has_ttl = false;
-    uint64_t ts = *(reinterpret_cast<const uint64_t *>(existing_value.data() +
-                                                       sizeof(uint64_t)));
-
-    // Check if the MSB is set
-    if (ts & MSB)
+    const DecodedValueHeader header =
+        DecodeValueHeader(existing_value.data(), existing_value.size());
+    if (!header.has_ttl)
     {
-        has_ttl = true;
-        ts &= MSB_MASK;  // Clear the MSB
-    }
-    else
-    {
-        has_ttl = false;
+        return false;
     }
 
-    if (has_ttl)
+    if (header.ttl < current_timestamp_)
     {
-        assert(existing_value.size() >= sizeof(uint64_t) * 2);
-        uint64_t rec_ttl = *(reinterpret_cast<const uint64_t *>(
-            existing_value.data() + sizeof(uint64_t)));
-        // Get the current timestamp in microseconds
-        // auto current_timestamp =
-        // txservice::LocalCcShards::ClockTsInMillseconds();
-        // FIXME(lzx): only fetch the time at the begin of compaction.
-        uint64_t current_timestamp =
-            std::chrono::duration_cast<std::chrono::milliseconds>(
-                std::chrono::high_resolution_clock::now().time_since_epoch())
-                .count();
-
-        // Check if the timestamp is smaller than the current timestamp
-        if (rec_ttl < current_timestamp)
-        {
-            return true;  // Mark the key for deletion
-        }
+        DLOG(INFO) << "TTL compaction filter removes expired key, key: "
+                   << key.ToString(true)
+                   << ", expiration_timestamp: " << header.ttl
+                   << ", compaction_timestamp: " << current_timestamp_;
+        return true;
     }
 
-    return false;  // Keep the key
+    return false;
 }
 
 const char *TTLCompactionFilter::Name() const
 {
     return "TTLCompactionFilter";
+}
+
+std::unique_ptr<rocksdb::CompactionFilter>
+TTLCompactionFilterFactory::CreateCompactionFilter(
+    const rocksdb::CompactionFilter::Context &)
+{
+    const uint64_t current_timestamp =
+        std::chrono::duration_cast<std::chrono::milliseconds>(
+            std::chrono::system_clock::now().time_since_epoch())
+            .count();
+    DLOG(INFO) << "Create TTL compaction filter, current_timestamp: "
+               << current_timestamp;
+    return std::make_unique<TTLCompactionFilter>(current_timestamp);
+}
+
+const char *TTLCompactionFilterFactory::Name() const
+{
+    return "TTLCompactionFilterFactory";
 }
 
 void RocksDBEventListener::OnCompactionBegin(
@@ -1380,44 +1416,16 @@ uint16_t RocksDBDataStoreCommon::TransformRecordToValueSlices(
     return value_slice_idx + parts_cnt_per_record;
 }
 
-void RocksDBDataStoreCommon::DecodeHasTTLFromTs(uint64_t &ts, bool &has_ttl)
-{
-    // Check if the MSB is set
-    if (ts & MSB)
-    {
-        has_ttl = true;
-        ts &= MSB_MASK;  // Clear the MSB
-    }
-    else
-    {
-        has_ttl = false;
-    }
-}
-
 void RocksDBDataStoreCommon::DeserializeValueToRecord(const char *data,
                                                       const size_t size,
                                                       std::string &record,
                                                       uint64_t &ts,
                                                       uint64_t &ttl)
 {
-    assert(size >= sizeof(uint64_t));
-    size_t offset = 0;
-    ts = *reinterpret_cast<const uint64_t *>(data);
-    offset += sizeof(uint64_t);
-    bool has_ttl = false;
-    DecodeHasTTLFromTs(ts, has_ttl);
-    if (has_ttl)
-    {
-        assert(size >= sizeof(uint64_t) * 2);
-        ttl = *(reinterpret_cast<const uint64_t *>(data + offset));
-        offset += sizeof(uint64_t);
-    }
-    else
-    {
-        assert(size >= sizeof(uint64_t));
-        ttl = 0;
-    }
-    record.assign(data + offset, size - offset);
+    const DecodedValueHeader header = DecodeValueHeader(data, size);
+    ts = header.version_ts;
+    ttl = header.ttl;
+    record.assign(data + header.record_offset, size - header.record_offset);
 }
 
 rocksdb::InfoLogLevel RocksDBDataStoreCommon::StringToInfoLogLevel(
