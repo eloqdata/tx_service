@@ -34,9 +34,8 @@ bool TTLCompactionFilter::Filter(int level,
     }
 
     uint64_t rec_ttl;
-    std::memcpy(&rec_ttl,
-                existing_value.data() + sizeof(uint64_t),
-                sizeof(rec_ttl));
+    std::memcpy(
+        &rec_ttl, existing_value.data() + sizeof(uint64_t), sizeof(rec_ttl));
     const uint64_t current_timestamp =
         std::chrono::duration_cast<std::chrono::milliseconds>(
             std::chrono::system_clock::now().time_since_epoch())

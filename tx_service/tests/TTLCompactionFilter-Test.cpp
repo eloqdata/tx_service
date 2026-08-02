@@ -15,7 +15,6 @@
  */
 
 #include <catch2/catch_all.hpp>
-
 #include <cstdint>
 #include <cstring>
 #include <limits>
@@ -30,27 +29,24 @@ std::string MakeValue(uint64_t encoded_ts, uint64_t expiration_ts)
 {
     std::string value(sizeof(uint64_t) * 2, '\0');
     std::memcpy(value.data(), &encoded_ts, sizeof(encoded_ts));
-    std::memcpy(value.data() + sizeof(uint64_t),
-                &expiration_ts,
-                sizeof(expiration_ts));
+    std::memcpy(
+        value.data() + sizeof(uint64_t), &expiration_ts, sizeof(expiration_ts));
     return value;
 }
 
 bool ShouldFilter(const std::string &value)
 {
     EloqDS::TTLCompactionFilter filter;
-    return filter.Filter(0,
-                         rocksdb::Slice("key"),
-                         rocksdb::Slice(value),
-                         nullptr,
-                         nullptr);
+    return filter.Filter(
+        0, rocksdb::Slice("key"), rocksdb::Slice(value), nullptr, nullptr);
 }
 
 }  // namespace
 
-TEST_CASE("TTL compaction filter reads the TTL marker from the encoded "
-          "timestamp",
-          "[rocksdb][ttl]")
+TEST_CASE(
+    "TTL compaction filter reads the TTL marker from the encoded "
+    "timestamp",
+    "[rocksdb][ttl]")
 {
     SECTION("expired TTL value is removed")
     {
@@ -60,8 +56,8 @@ TEST_CASE("TTL compaction filter reads the TTL marker from the encoded "
 
     SECTION("unexpired TTL value is retained")
     {
-        const std::string value = MakeValue(
-            EloqDS::MSB | 42, std::numeric_limits<uint64_t>::max());
+        const std::string value =
+            MakeValue(EloqDS::MSB | 42, std::numeric_limits<uint64_t>::max());
         REQUIRE_FALSE(ShouldFilter(value));
     }
 
