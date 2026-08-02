@@ -302,8 +302,6 @@ protected:
         uint64_t &ts,
         const uint64_t &ttl,
         std::unique_ptr<rocksdb::Slice[]> &value_slices);
-    void DecodeHasTTLFromTs(uint64_t &ts, bool &has_ttl);
-
     void DeserializeValueToRecord(const char *data,
                                   const size_t size,
                                   std::string &record,
