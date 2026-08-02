@@ -10,6 +10,10 @@ on:
   push:
     branches: [main]
 
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
 # The container's default run shell is `sh` (dash); force bash so array/here-doc
 # and `set -o pipefail` in any step behave predictably.
 defaults:
