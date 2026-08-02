@@ -92,42 +92,12 @@ jobs:
         working-directory: bld
         run: ctest --output-on-failure --timeout 180
 
-  rocksdb-cloud-ttl-test:
-    needs: prime-third-party
-    name: rocksdb-cloud-ttl-test (${{ matrix.arch }})
-    strategy:
-      fail-fast: false
-      matrix:
-        arch: [amd64, arm64]
-    runs-on: ${{ matrix.arch == 'arm64' && 'ubuntu-24.04-arm' || 'ubuntu-24.04' }}
-    container:
-      image: eloqdata/ubuntu-dev:24.04
-      options: --user root
-    env:
-      ELOQ_THIRD_PARTY_PREFIX: /opt/eloq/third_party
-      CMAKE_PREFIX_PATH: /opt/eloq/third_party
-      CMAKE_INCLUDE_PATH: /opt/eloq/third_party/include
-      CMAKE_LIBRARY_PATH: /opt/eloq/third_party/lib
-      LD_LIBRARY_PATH: /opt/eloq/third_party/lib
-    steps:
-      - name: Checkout (recursive submodules)
-        uses: actions/checkout@v4
-        with:
-          submodules: recursive
-
-      - name: Setup third-party (cached)
-        uses: ./.github/actions/setup-third-party
-        with:
-          arch: ${{ matrix.arch }}
-          cache-scope: ubuntu-dev
-
       - name: Configure RocksDB Cloud S3 TTL test
         run: |
           cmake -S . -B bld_rocksdb_cloud_ttl \
             -DWITH_TESTS=ON \
             -DWITH_DATA_STORE=ELOQDSS_ROCKSDB_CLOUD_S3 \
             -DWITH_LOG_STATE=ROCKSDB_CLOUD_S3 \
-            -DWITH_LOG_SERVICE=OFF \
             -DCMAKE_BUILD_TYPE=Debug \
             -DELOQ_THIRD_PARTY_PREFIX=/opt/eloq/third_party \
             -DELOQ_THIRD_PARTY_REQUIRED=ON
