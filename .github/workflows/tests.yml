@@ -96,9 +96,9 @@ jobs:
         working-directory: bld
         run: ctest --output-on-failure --timeout 180
 
-      - name: Configure RocksDB Cloud S3 TTL test
+      - name: Configure RocksDB Cloud S3
         run: |
-          cmake -S . -B bld_rocksdb_cloud_ttl \
+          cmake -S . -B bld_rocksdb_cloud \
             -DWITH_TESTS=ON \
             -DWITH_DATA_STORE=ELOQDSS_ROCKSDB_CLOUD_S3 \
             -DWITH_LOG_STATE=ROCKSDB_CLOUD_S3 \
@@ -106,18 +106,12 @@ jobs:
             -DELOQ_THIRD_PARTY_PREFIX=/opt/eloq/third_party \
             -DELOQ_THIRD_PARTY_REQUIRED=ON
 
-      - name: Build TTL compaction filter test
-        run: |
-          cmake --build bld_rocksdb_cloud_ttl \
-            --target TTLCompactionFilter-Test \
-            --parallel "$(nproc)"
+      - name: Build RocksDB Cloud S3
+        run: cmake --build bld_rocksdb_cloud --parallel "$(nproc)"
 
-      - name: Run TTL compaction filter test
-        run: |
-          ctest --test-dir bld_rocksdb_cloud_ttl \
-            --output-on-failure \
-            --timeout 180 \
-            -R '^TTLCompactionFilter-Test$'
+      - name: Test (gating — RocksDB Cloud S3 full suite)
+        working-directory: bld_rocksdb_cloud
+        run: ctest --output-on-failure --timeout 180
 
   log-service-tests:
     needs: prime-third-party
