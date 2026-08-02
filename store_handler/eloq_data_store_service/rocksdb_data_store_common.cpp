@@ -14,10 +14,7 @@ bool TTLCompactionFilter::Filter(int level,
                                  std::string *new_value,
                                  bool *value_changed) const
 {
-    if (existing_value.size() < sizeof(uint64_t))
-    {
-        return false;
-    }
+    assert(existing_value.size() >= sizeof(uint64_t));
 
     // The first word is the encoded version timestamp. Its MSB indicates
     // whether the second word contains a TTL expiration timestamp.
@@ -28,10 +25,7 @@ bool TTLCompactionFilter::Filter(int level,
         return false;
     }
 
-    if (existing_value.size() < sizeof(uint64_t) * 2)
-    {
-        return false;
-    }
+    assert(existing_value.size() >= sizeof(uint64_t) * 2);
 
     uint64_t rec_ttl;
     std::memcpy(
