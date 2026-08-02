@@ -14,12 +14,14 @@
  *    General Public License or GNU General Public License for more details.
  */
 
+// clang-format off
 #include <cstdint>
 #include <cstring>
 #include <limits>
 #include <string>
 
 #include <catch2/catch_all.hpp>
+// clang-format on
 
 #include "eloq_data_store_service/rocksdb_data_store_common.h"
 

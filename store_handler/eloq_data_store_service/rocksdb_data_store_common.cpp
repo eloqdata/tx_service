@@ -36,9 +36,8 @@ DecodedValueHeader DecodeValueHeader(const char *data, size_t size)
     if (header.has_ttl)
     {
         assert(size >= sizeof(uint64_t) * 2);
-        std::memcpy(&header.ttl,
-                    data + header.record_offset,
-                    sizeof(header.ttl));
+        std::memcpy(
+            &header.ttl, data + header.record_offset, sizeof(header.ttl));
         header.record_offset += sizeof(uint64_t);
     }
 
