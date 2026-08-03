@@ -85,12 +85,13 @@ public:
     metrics::TimePoint start_;
 
 protected:
+    FetchCc() = default;
     FetchCc(CcShard &ccs, NodeGroupId cc_ng_id, int64_t cc_ng_term);
 
     std::vector<CcRequestBase *> requesters_;
-    CcShard &ccs_;
-    NodeGroupId cc_ng_id_;
-    int64_t cc_ng_term_;
+    CcShard *ccs_{nullptr};
+    NodeGroupId cc_ng_id_{0};
+    int64_t cc_ng_term_{-1};
 };
 
 struct FetchCatalogCc : public FetchCc
@@ -562,7 +563,7 @@ public:
 struct FetchRecordCc : public FetchCc
 {
 public:
-    FetchRecordCc() = delete;
+    FetchRecordCc() = default;
     FetchRecordCc(const TableName *tbl_name,
                   const TableSchema *tbl_schema,
                   TxKey tx_key,
@@ -577,6 +578,19 @@ public:
                   bool reopen = false);
     ~FetchRecordCc() = default;
 
+    void Reset(const TableName *tbl_name,
+               const TableSchema *tbl_schema,
+               TxKey tx_key,
+               LruEntry *cce,
+               CcShard &ccs,
+               NodeGroupId cc_ng_id,
+               int64_t cc_ng_term,
+               int32_t partition_id,
+               bool fetch_from_primary = false,
+               uint64_t snapshot_read_ts = 0,
+               bool only_fetch_archives = false,
+               bool reopen = false);
+
     bool ValidTermCheck();
 
     bool Execute(CcShard &ccs) override;
@@ -584,33 +598,35 @@ public:
     void SetFinish(int err);
 
     // table_name is a string view, cannot access it outside TxProcessor.
-    TableName table_name_;
+    TableName table_name_{
+        std::string(""), TableType::Primary, TableEngine::None};
     const TableSchema *table_schema_{nullptr};
     std::string kv_table_name_;
     TxKey tx_key_;
     LruEntry *cce_{nullptr};
     KeyGapLockAndExtraData *lock_{nullptr};
     uint64_t rec_ts_{0};
-    RecordStatus rec_status_{RecordStatus::Unknown};
-    std::string rec_str_;
-    int error_code_{0};
-    int partition_id_;
-    bool fetch_from_primary_{false};
-
     // If set snapshot_read_ts_ (not equal 0), the snapshot_read_ts_ will be
     // used to fetch record from archives table.
     uint64_t snapshot_read_ts_{0};
-    // If set only_fetch_archives_ (true), don't fetch record from base table.
-    bool only_fetch_archives_{false};
-    bool reopen_{false};
     std::unique_ptr<
         std::vector<std::tuple<uint64_t, RecordStatus, std::string>>>
         archive_records_{nullptr};
+
+    std::string rec_str_;
 
     // These variables only be used in DataStoreHandler
     std::string kv_session_id_;
     std::string kv_start_key_;
     std::string kv_end_key_;
+
+    int error_code_{0};
+    int partition_id_{0};
+    RecordStatus rec_status_{RecordStatus::Unknown};
+    bool fetch_from_primary_{false};
+    // If set only_fetch_archives_ (true), don't fetch record from base table.
+    bool only_fetch_archives_{false};
+    bool reopen_{false};
 };
 
 struct FetchBucketDataCc;

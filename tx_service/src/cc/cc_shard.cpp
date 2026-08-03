@@ -130,6 +130,8 @@ CcShard::CcShard(
       system_handler_(system_handler),
       active_si_txs_()
 {
+    fetch_record_reqs_.reserve(64);
+
     // Reserve range_slice_memory_limit_percent% for range slice info.
     // We update this to dynamically reserve the configured range slice
     // percentage.
@@ -2184,20 +2186,32 @@ store::DataStoreHandler::DataStoreOpStatus CcShard::FetchRecord(
     bool only_fetch_archives,
     bool reopen)
 {
-    auto tab_it = fetch_record_reqs_.try_emplace(cce,
-                                                 &table_name,
-                                                 tbl_schema,
-                                                 std::move(key),
-                                                 cce,
-                                                 *this,
-                                                 cc_ng_id,
-                                                 cc_ng_term,
-                                                 partition_id,
-                                                 fetch_from_primary,
-                                                 snapshot_read_ts,
-                                                 only_fetch_archives,
-                                                 reopen);
-    FetchRecordCc *fetch_req = &(tab_it.first->second);
+    auto tab_it = fetch_record_reqs_.find(cce);
+    FetchRecordCc *fetch_req = nullptr;
+    if (tab_it == fetch_record_reqs_.end())
+    {
+        fetch_req = fetch_record_cc_pool_.NextRequest();
+        fetch_req->Reset(&table_name,
+                         tbl_schema,
+                         std::move(key),
+                         cce,
+                         *this,
+                         cc_ng_id,
+                         cc_ng_term,
+                         partition_id,
+                         fetch_from_primary,
+                         snapshot_read_ts,
+                         only_fetch_archives,
+                         reopen);
+        const bool inserted =
+            fetch_record_reqs_.try_emplace(cce, fetch_req).second;
+        assert(inserted);
+        (void) inserted;
+    }
+    else
+    {
+        fetch_req = tab_it->second;
+    }
     fetch_req->AddRequester(requester);
 
     CODE_FAULT_INJECTOR("disable_fetch_record", {
@@ -2395,7 +2409,15 @@ store::DataStoreHandler::DataStoreOpStatus CcShard::FetchBucketData(
 
 void CcShard::RemoveFetchRecordRequest(LruEntry *cce)
 {
-    fetch_record_reqs_.erase(cce);
+    auto fetch_it = fetch_record_reqs_.find(cce);
+    assert(fetch_it != fetch_record_reqs_.end());
+    FetchRecordCc *fetch_req = fetch_it->second;
+    fetch_record_reqs_.erase(fetch_it);
+
+    // Free marks the request reusable while its Execute call is unwinding, but
+    // both FetchRecord and resumed requesters run on this shard, so NextRequest
+    // cannot observe it until control returns to the shard loop.
+    fetch_req->Free();
 }
 
 CcMap *CcShard::CreateOrUpdatePkCcMap(const TableName &table_name,

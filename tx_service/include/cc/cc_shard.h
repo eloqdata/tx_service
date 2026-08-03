@@ -1351,8 +1351,11 @@ private:
 
     std::unordered_map<TableName, std::unique_ptr<FetchCc>> fetch_reqs_;
 
-    // For load record from kvstore asynchronously
-    std::unordered_map<LruEntry *, FetchRecordCc> fetch_record_reqs_;
+    // FetchRecordCc addresses must remain stable while data-store callbacks are
+    // in flight. The pool owns the requests and the flat map only indexes the
+    // active single-flight fetch for each entry.
+    absl::flat_hash_map<LruEntry *, FetchRecordCc *> fetch_record_reqs_;
+    CcRequestPool<FetchRecordCc> fetch_record_cc_pool_;
 
     // For load snapshot from kvstore asynchronously
     CcRequestPool<FetchSnapshotCc> fetch_snapshot_cc_pool_;

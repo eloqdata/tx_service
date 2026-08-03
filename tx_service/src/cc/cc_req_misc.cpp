@@ -49,7 +49,7 @@
 namespace txservice
 {
 FetchCc::FetchCc(CcShard &ccs, NodeGroupId cc_ng_id, int64_t cc_ng_term)
-    : ccs_(ccs), cc_ng_id_(cc_ng_id), cc_ng_term_(cc_ng_term)
+    : ccs_(&ccs), cc_ng_id_(cc_ng_id), cc_ng_term_(cc_ng_term)
 {
 }
 
@@ -187,7 +187,7 @@ void FetchCatalogCc::SetFinish(RecordStatus status, int err)
         commit_ts_ = 0;
         catalog_image_.clear();
     });
-    ccs_.Enqueue(this);
+    ccs_->Enqueue(this);
 }
 
 FetchTableStatisticsCc::FetchTableStatisticsCc(const TableName &table_name,
@@ -256,7 +256,7 @@ void FetchTableStatisticsCc::SetFinish(int err)
         current_version_ = 0;
         sample_pool_map_.clear();
     });
-    ccs_.Enqueue(this);
+    ccs_->Enqueue(this);
 }
 
 FetchTableRangesCc::FetchTableRangesCc(const TableName &table_name,
@@ -343,7 +343,7 @@ void FetchTableRangesCc::SetFinish(int err)
         ranges_vec_.clear();
         partition_ranges_vec_.clear();
     });
-    ccs_.Enqueue(this);
+    ccs_->Enqueue(this);
 }
 
 void FetchTableRangesCc::Merge()
@@ -810,12 +810,57 @@ FetchRecordCc::FetchRecordCc(const TableName *tbl_name,
       tx_key_(std::move(tx_key)),
       cce_(cce),
       lock_(cce->GetKeyGapLockAndExtraData()),
+      snapshot_read_ts_(snapshot_read_ts),
       partition_id_(partition_id),
       fetch_from_primary_(fetch_from_primary),
-      snapshot_read_ts_(snapshot_read_ts),
       only_fetch_archives_(only_fetch_archives),
       reopen_(reopen)
 {
+}
+
+void FetchRecordCc::Reset(const TableName *tbl_name,
+                          const TableSchema *tbl_schema,
+                          TxKey tx_key,
+                          LruEntry *cce,
+                          CcShard &ccs,
+                          NodeGroupId cc_ng_id,
+                          int64_t cc_ng_term,
+                          int32_t partition_id,
+                          bool fetch_from_primary,
+                          uint64_t snapshot_read_ts,
+                          bool only_fetch_archives,
+                          bool reopen)
+{
+    // A request never migrates between shards: its pool and active-fetch map
+    // are both owned by the shard captured on first use.
+    assert(ccs_ == nullptr || ccs_ == &ccs);
+    ccs_ = &ccs;
+    cc_ng_id_ = cc_ng_id;
+    cc_ng_term_ = cc_ng_term;
+    requesters_.clear();
+    start_ = metrics::TimePoint{};
+
+    table_name_ =
+        TableName(tbl_name->StringView(), tbl_name->Type(), tbl_name->Engine());
+    table_schema_ = tbl_schema;
+    kv_table_name_ =
+        table_schema_->GetKVCatalogInfo()->GetKvTableName(table_name_);
+    tx_key_ = std::move(tx_key);
+    cce_ = cce;
+    lock_ = cce->GetKeyGapLockAndExtraData();
+    rec_ts_ = 0;
+    snapshot_read_ts_ = snapshot_read_ts;
+    archive_records_.reset();
+    rec_str_.clear();
+    kv_session_id_.clear();
+    kv_start_key_.clear();
+    kv_end_key_.clear();
+    error_code_ = 0;
+    partition_id_ = partition_id;
+    rec_status_ = RecordStatus::Unknown;
+    fetch_from_primary_ = fetch_from_primary;
+    only_fetch_archives_ = only_fetch_archives;
+    reopen_ = reopen;
 }
 
 bool FetchRecordCc::ValidTermCheck()
@@ -987,7 +1032,7 @@ bool FetchRecordCc::Execute(CcShard &ccs)
 void FetchRecordCc::SetFinish(int err)
 {
     error_code_ = err;
-    ccs_.Enqueue(this);
+    ccs_->Enqueue(this);
 }
 
 bool RecoverDeadTxCc::Execute(CcShard &ccs)
