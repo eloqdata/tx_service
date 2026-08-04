@@ -43,8 +43,8 @@ dependencies:
     consumers: [brpc, eloqstore]
   - name: brpc
     repo: https://github.com/eloqdata/brpc.git
-    ref: feature/eventfd-worker-wakeup
-    commit: a192af98010f873f669652aa5d07c31ceee19521
+    ref: master
+    commit: c12822d4931a59a9c2cc42df061975e114e93590
     kind: eloq-fork
     source: git_submodule
     consumers: [data_substrate, eloqkv, log_service]
