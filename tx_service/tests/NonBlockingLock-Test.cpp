@@ -47,21 +47,6 @@ struct StubCcRequest : public txservice::CcRequestBase
     }
 };
 
-/**
- * @brief NonBlockingLock's default constructor leaves write_lk_type_ and
- * wlock_ts_ indeterminate; production only ever reaches a lock through
- * KeyGapLockAndExtraData::Reset(), which resets the embedded lock. Tests that
- * construct one directly must do the same to be deterministic.
- */
-struct FreshLock
-{
-    FreshLock()
-    {
-        lock.Reset();
-    }
-
-    txservice::NonBlockingLock lock;
-};
 }  // namespace
 
 using txservice::CcProtocol;
@@ -78,8 +63,7 @@ TEST_CASE("write intent holder's upgrade is queued at the head",
     constexpr txservice::TxNumber kOtherWriter = 1002;
     constexpr txservice::TxNumber kReader = 2001;
 
-    FreshLock fresh;
-    NonBlockingLock &lock = fresh.lock;
+    NonBlockingLock lock;
     StubCcRequest holder_intent{kHolder};
     StubCcRequest other_intent{kOtherWriter};
     StubCcRequest holder_upgrade{kHolder};
@@ -111,8 +95,7 @@ TEST_CASE("upgrade still waits for outstanding read locks", "[NonBlockingLock]")
     constexpr txservice::TxNumber kHolder = 1001;
     constexpr txservice::TxNumber kReader = 2001;
 
-    FreshLock fresh;
-    NonBlockingLock &lock = fresh.lock;
+    NonBlockingLock lock;
     StubCcRequest holder_intent{kHolder};
     StubCcRequest holder_upgrade{kHolder};
 
@@ -125,8 +108,7 @@ TEST_CASE("upgrade still waits for outstanding read locks", "[NonBlockingLock]")
 
     // With no reader in the way the same upgrade succeeds outright, which is
     // the state TryPopBlockingQueue() reaches once the reader releases.
-    FreshLock fresh2;
-    NonBlockingLock &unblocked = fresh2.lock;
+    NonBlockingLock unblocked;
     StubCcRequest intent2{kHolder};
     StubCcRequest upgrade2{kHolder};
     REQUIRE(unblocked.AcquireWriteIntent(&intent2, CcProtocol::Locking));
@@ -141,8 +123,7 @@ TEST_CASE("a write lock request from a non-holder still queues FIFO",
     constexpr txservice::TxNumber kQueuedFirst = 1002;
     constexpr txservice::TxNumber kQueuedSecond = 1003;
 
-    FreshLock fresh;
-    NonBlockingLock &lock = fresh.lock;
+    NonBlockingLock lock;
     StubCcRequest holder_intent{kHolder};
     StubCcRequest first_intent{kQueuedFirst};
     StubCcRequest second_write{kQueuedSecond};
