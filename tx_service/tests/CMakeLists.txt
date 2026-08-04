@@ -62,6 +62,7 @@ set(CATCH_MAIN_TESTS
     CcPage-Test
     LargeObjLRU-Test
     CcRequestWait-Test
+    NonBlockingLock-Test
     StandbyForward-Test
     ApplyResponseBoundary-Test
 )

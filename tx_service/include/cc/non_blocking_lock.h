@@ -361,11 +361,11 @@ private:
     // path.
     int read_cnt_{};
 
-    WriteLockType write_lk_type_;
+    WriteLockType write_lk_type_{WriteLockType::NoWritelock};
     TxNumber write_txn_{0};
 
     // The time when a write tx acquires the write lock on this lock.
-    uint64_t wlock_ts_;
+    uint64_t wlock_ts_{0};
 
     // blocking_queue_ stores the requests that 1) want to acquire
     // lock/intent but failed due to conflict, or 2) want to read a pk

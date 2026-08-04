@@ -230,6 +230,19 @@ WL**. A read lock is also refused when a write lock sits at the head of the bloc
 requests (read-committed pk reads waiting for a newer pk version after an sk read) go to the
 *front* of the queue since they conflict with nothing.
 
+Queue placement is FIFO (`blocking_queue_.Enqueue`) with one exception: a **WriteLock request
+from the tx that already holds this entry's WriteIntent** — a lock upgrade — is inserted at the
+*front* instead. Everything else queued on the entry conflicts with that WriteIntent and cannot
+be granted until the upgrading tx finishes and releases it, so appending the upgrade behind them
+deadlocks the entry (`TryPopBlockingQueue` stops at the first head it cannot grant and never
+reaches the upgrade). Head placement is not an early grant: the upgrade is still gated on
+`NoReadLockConflict` and waits for outstanding read locks to drain. It also closes the reader
+admission gate above, which only admits new readers while the head is a WriteIntent — without
+that, arriving readers keep `NoReadLockConflict` false and starve the upgrade. Since WriteIntent
+is mutually exclusive among writers, at most one such upgrade exists per entry, and leading
+`ReadLock` entries are always drained by `TryPopBlockingQueue` before an intent holder can
+request the upgrade, so the head is never a read request at insertion time.
+
 Behavior on conflict by protocol (`AcquireLock`, `cc_protocol.h`):
 
 | Requested | OCC | OccRead | Locking |

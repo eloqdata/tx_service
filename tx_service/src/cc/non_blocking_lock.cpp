@@ -245,9 +245,32 @@ bool NonBlockingLock::AcquireWriteLock(CcRequestBase *cc_req,
         // lock fails.
         if (protocol == CcProtocol::Locking || protocol == CcProtocol::OccRead)
         {
-            // block the request by putting it into the blocking queue.
-            blocking_queue_.Enqueue(
-                LockQueueEntry(cc_req, LockType::WriteLock));
+            if (write_lk_type_ == WriteLockType::WriteIntent &&
+                write_txn_ == tx_number)
+            {
+                // This tx already holds the write intent and is upgrading it
+                // to the write lock. Every other request queued on this entry
+                // conflicts with that write intent, so none of them can be
+                // granted until this tx finishes and releases it. Appending
+                // the upgrade behind them would therefore deadlock the entry:
+                // TryPopBlockingQueue() stops at the first queue head it
+                // cannot grant and never reaches the upgrade.
+                //
+                // Putting it at the head is not an early grant - it is still
+                // gated on NoReadLockConflict() and keeps waiting for the
+                // outstanding read locks to drain. It also closes the reader
+                // admission gate in AcquireReadLock(Fast), which only lets new
+                // readers in while the queue head is a WriteIntent; without
+                // that a stream of readers can keep NoReadLockConflict() false
+                // forever and starve the upgrade.
+                InsertBlockingQueue(cc_req, LockType::WriteLock);
+            }
+            else
+            {
+                // block the request by putting it into the blocking queue.
+                blocking_queue_.Enqueue(
+                    LockQueueEntry(cc_req, LockType::WriteLock));
+            }
         }
         // OCC doesn't enqueue request.
         return false;
