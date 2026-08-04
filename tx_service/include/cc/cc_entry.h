@@ -814,14 +814,7 @@ struct VersionedPayload
 
     void PassInCurrentPayload(std::unique_ptr<TxRecord> payload)
     {
-        if (payload == nullptr)
-        {
-            cur_payload_ = nullptr;
-        }
-        else
-        {
-            cur_payload_.reset(static_cast<ValueT *>(payload.release()));
-        }
+        cur_payload_.reset(static_cast<ValueT *>(payload.release()));
     }
 
     void DeserializeCurrentPayload(const char *data, size_t &offset)
@@ -883,22 +876,11 @@ struct NonVersionedPayload
 
     void PassInCurrentPayload(std::unique_ptr<TxRecord> payload)
     {
-        if (payload == nullptr)
-        {
-            cur_payload_ = nullptr;
-        }
-        else
-        {
-            cur_payload_.reset(static_cast<ValueT *>(payload.release()));
-        }
+        cur_payload_.reset(static_cast<ValueT *>(payload.release()));
     }
 
     void DeserializeCurrentPayload(const char *data, size_t &offset)
     {
-        if (cur_payload_ == nullptr)
-        {
-            cur_payload_ = std::make_unique<ValueT>();
-        }
         ValueT tx_obj;
         cur_payload_.reset(static_cast<ValueT *>(
             tx_obj.DeserializeObject(data, offset).release()));
