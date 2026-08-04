@@ -33,18 +33,19 @@ runs:
       shell: bash
       run: |
         git config --global --add safe.directory '*'
-        # ls-files -s emits the blob SHA for regular files and the gitlink SHA
-        # for submodule paths, so one hash captures the build scripts, manifest,
-        # patches, system-package list, and the pinned source submodule commits
-        # (brpc / braft / mimalloc / rocksdb-cloud) — cheap (reads the index only).
-        h=$(git ls-files -s -- \
-              scripts/third_party \
-              third_party/manifest.yml \
-              third_party/patches \
-              third_party/system-packages.ubuntu2404.txt \
-              third_party/src/brpc third_party/src/braft \
-              third_party/src/mimalloc third_party/src/rocksdb-cloud \
-            | sha256sum | cut -c1-16)
+        # Mode 160000 entries are gitlinks. Hash them directly from the index,
+        # without initializing submodules or duplicating their commits in the
+        # dependency manifest.
+        h=$({
+              git ls-files -s -- \
+                .gitmodules \
+                scripts/third_party \
+                third_party/manifest.yml \
+                third_party/patches \
+                third_party/system-packages.ubuntu2404.txt
+              git ls-files -s -- third_party/src \
+                | awk '$1 == "160000"'
+            } | sha256sum | cut -c1-16)
         echo "key=tp-${{ inputs.arch }}-${{ inputs.cache-scope }}-${h}" >> "$GITHUB_OUTPUT"
 
     - name: Restore third-party cache
