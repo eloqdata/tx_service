@@ -33,17 +33,21 @@ runs:
       shell: bash
       run: |
         git config --global --add safe.directory '*'
-        # ls-files -s emits the blob SHA for regular files and the gitlink SHA
-        # for submodule paths, so one hash captures the build scripts, manifest,
-        # patches, system-package list, and the pinned source submodule commits
-        # (brpc / braft / mimalloc / rocksdb-cloud) — cheap (reads the index only).
+        # Discover retained third-party submodules from .gitmodules so their
+        # gitlinks are the sole version pins and new ones cannot be omitted from
+        # the cache key. ls-files -s emits the gitlink SHA without initializing
+        # the submodules.
+        mapfile -t submodule_paths < <(
+          git config -f .gitmodules --get-regexp '^submodule\..*\.path$' \
+            | awk '$2 ~ /^third_party\/src\// {print $2}'
+        )
         h=$(git ls-files -s -- \
+              .gitmodules \
               scripts/third_party \
               third_party/manifest.yml \
               third_party/patches \
               third_party/system-packages.ubuntu2404.txt \
-              third_party/src/brpc third_party/src/braft \
-              third_party/src/mimalloc third_party/src/rocksdb-cloud \
+              "${submodule_paths[@]}" \
             | sha256sum | cut -c1-16)
         echo "key=tp-${{ inputs.arch }}-${{ inputs.cache-scope }}-${h}" >> "$GITHUB_OUTPUT"
 

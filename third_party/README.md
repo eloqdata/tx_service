@@ -4,7 +4,10 @@
 
 Layout:
 
-- `manifest.yml` records every source-managed dependency, its repo, ref, pinned commit, source mode, patches, and consumers.
+- `manifest.yml` records non-submodule source-managed dependencies, their repos,
+  refs, commits, source modes, patches, and consumers.
+- `.gitmodules` records retained third-party submodule repositories, and each
+  gitlink is the sole version pin.
 - `system-packages.ubuntu2404.txt` records apt packages that remain system prerequisites.
 - `src/` contains transient upstream source archives and the retained Eloq fork submodules.
 - `install/` contains locally installed headers, libraries, and CMake package config files.
@@ -31,7 +34,9 @@ Policy:
 - Keep official upstream dependencies out of `.gitmodules` when they are only pinned to a tag or commit.
 - Keep small local source changes as patches under `patches/` unless the dependency needs an active Eloq fork.
 - Retained third-party submodules are limited to Eloq-maintained forks that still need independent Git history.
-- Update `manifest.yml` in the same commit that changes a dependency ref, patch, or retained submodule pointer.
+- Do not duplicate retained submodules in `manifest.yml`; discover their
+  repositories from `.gitmodules` and their versions from gitlinks.
+- Update `manifest.yml` when dependency metadata or patches change.
 - Upstream archive sources are removed after successful local installation unless `ELOQ_THIRD_PARTY_KEEP_SOURCES=1` is set.
 - Builder image `latest` must be rebuilt when dependencies or build scripts change.
 - Normal CI must not initialize `third_party/src`.
