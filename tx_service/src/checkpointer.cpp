@@ -31,6 +31,7 @@
 #include "catalog_key_record.h"
 #include "cc_request.h"
 #include "error_messages.h"
+#include "fault/fault_inject.h"
 #include "metrics.h"
 #include "range_slice.h"
 #include "sharder.h"
@@ -513,6 +514,18 @@ void Checkpointer::Ckpt(bool is_last_ckpt)
                         status->truncate_log_ts_ > last_ckpt_ts)
                     {
                         assert(status->truncate_log_ts_ >= ckpt_ts);
+                        // These bracket the §11 durability-watermark
+                        // boundary. Restrict them to checkpoints that really
+                        // wrote the data store: otherwise an idle checkpoint
+                        // armed between the test mutation and its flush could
+                        // consume the hook without testing this boundary.
+                        const bool has_data_store_write =
+                            status->HasDataStoreWrite();
+                        if (has_data_store_write)
+                        {
+                            ACTION_FAULT_INJECTOR(
+                                "checkpoint_before_log_truncate_advance");
+                        }
                         Sharder::Instance().UpdateNodeGroupCkptTs(
                             node_group, status->truncate_log_ts_);
 
@@ -526,7 +539,12 @@ void Checkpointer::Ckpt(bool is_last_ckpt)
                             BrocastPrimaryCkptTs(node_group,
                                                  leader_term,
                                                  status->truncate_log_ts_,
-                                                 status->HasDataStoreWrite());
+                                                 has_data_store_write);
+                        }
+                        if (has_data_store_write)
+                        {
+                            ACTION_FAULT_INJECTOR(
+                                "checkpoint_after_log_truncate_advance");
                         }
                     }
                 }

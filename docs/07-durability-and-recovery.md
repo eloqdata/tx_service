@@ -289,3 +289,12 @@ processed by the `replay_notify` thread. `ProcessRecoverTxTask` (`log_replay_ser
 | MVCC / archives | `tx_service/include/cc/cc_entry.h`, `tx_service/include/tx_start_ts_collector.h`, archive APIs in `tx_service/include/store/data_store_handler.h` |
 | Snapshots / backup | `tx_service/include/store/snapshot_manager.h`, `tx_service/src/store/snapshot_manager.cpp`, snapshot APIs in `data_store_handler.h:404-517` |
 | Bootstrapping | `core/src/log_init.cpp`, `core/src/tx_service_init.cpp` |
+
+## Appendix C — Paged objects in replay and standby apply
+
+Paged large objects (eloqkv `docs/08-paged-objects.md` §10) change one assumption: applying a replayed or forwarded command can require store I/O, because `CommitOn` on a paged payload may fault a non-resident page.
+
+- **The drain owns the fault.** `CcEntry::EmplaceAndCommitBufferedTxnCommand` returns whether the buffered drain finished; a `false` means a paged `CommitOn` stopped on a missing page and the caller (`ReplayLogCc`, the standby's buffered branch in `object_cc_map.h`) must call `IssueDrainFetches`, which issues the page fetches under the drain identity `kDrainTxnNumber` and stamps them with `DrainFetchTerm()` — the max of candidate/leader/standby terms, because during replay the leader is only a candidate and `LeaderTerm()` is still −1.
+- **The standby fast path diverts.** `Execute(KeyObjectStandbyForwardCc)` never direct-applies to a paged payload: per the #509 invariant no `ExecuteOn` ran, so no page is pinned and a mid-batch fault would be unrecoverable; every paged batch goes through the buffered-command path, where the fault protocol above handles it.
+- **Promotion is deferred until replay work drains.** `CcNode::StartDeferredPromotion` / `AwaitDrainsAndPromote` (`src/fault/cc_node.cpp`) hold the node a CANDIDATE until parked drains, buffered commands, and in-flight record fetches reach zero. The give-up condition is lack of PROGRESS, not elapsed time (a large healthy tail keeps resetting the clock). Replay work stuck with no progress means acknowledged writes cannot be reconstructed — data corruption — and is a `LOG(FATAL)`: the node shuts down rather than serving a hole or sitting unpromotable forever.
+- `FetchRecordCc` reopens a record fetch only on a genuine version hole (`front().obj_version_ > rec_ts_`), never on "buffer non-empty" — a page-blocked head would otherwise spin record fetches against the store.

@@ -175,6 +175,19 @@ protected:
 
     virtual void Reserve(uint8_t idx, bool is_clean_target) = 0;
 
+    /**
+     * @brief Offers `cce` partial eviction instead of a whole-entry free
+     * (docs/08 §8). Only the regular LRU clean pass overrides this; an explicit
+     * kickout wants the entry gone, so the default declines.
+     *
+     * @return true if the entry shed part of itself and must survive this pass.
+     */
+    virtual bool TryPartialEvict(
+        CcEntry<KeyT, ValueT, VersionedRecord, RangePartitioned> *cce) const
+    {
+        return false;
+    }
+
     virtual bool NeedInvalidateLockTerm() const = 0;
 
     virtual bool RemoveFromKeyCache() const = 0;
@@ -296,6 +309,17 @@ protected:
             page_->entries_[idx];
 
         bool is_clean_target = IsCleanTarget(key, cce.get());
+
+        if (is_clean_target && TryPartialEvict(cce.get()))
+        {
+            // A paged large object shed some of its pages rather than being
+            // evicted whole; keep the entry so its metadata -- ~0.01 % of the
+            // bytes but required to route every access, including the fetch
+            // that brings the pages back -- stays resident (docs/08 §8).
+            Reserve(idx, is_clean_target);
+            return;
+        }
+
         auto [can_be_cleaned, delay_free] = CanBeCleaned(cce.get());
 
         if (is_clean_target && can_be_cleaned)
@@ -398,7 +422,38 @@ private:
             return {false, false};
         }
 
-        return {(cce->IsFree() && !cce->GetBeingCkpt()), false};
+        // Attribute the refusal to its REASON while both clauses are still
+        // in hand (eloqkv docs/08 §8). IsFree() conflates "no locks or pins"
+        // with "persistent", but when a whole campaign frees nothing the two
+        // demand opposite responses: dirty candidates are waiting on a
+        // checkpoint that is already requested (wait — not a deadlock),
+        // while pinned candidates are a hold-and-wait cycle among concurrent
+        // faulters that only preemption breaks. This predicate already
+        // evaluates both clauses on every candidate, so counting is free.
+        const bool pin_blocked =
+            const_cast<
+                CcEntry<KeyT, ValueT, VersionedRecord, RangePartitioned> *>(cce)
+                ->GetKeyGapLockAndExtraData() != nullptr;
+        const bool dirty_blocked = !cce->IsPersistent();
+        if (pin_blocked || dirty_blocked || cce->GetBeingCkpt())
+        {
+            if (this->cc_shard_ != nullptr)
+            {
+                // Pins first: an entry that is BOTH pinned and dirty cannot
+                // be reclaimed by a checkpoint alone, so it belongs to the
+                // obstacle that needs preemption.
+                if (pin_blocked)
+                {
+                    this->cc_shard_->NotePinBlockedCandidate();
+                }
+                else if (dirty_blocked)
+                {
+                    this->cc_shard_->NoteDirtyBlockedCandidate();
+                }
+            }
+            return {false, false};
+        }
+        return {true, false};
     }
 
     bool IsCleanTarget(
@@ -409,6 +464,15 @@ private:
         // If we're just doing regular page clean, all cce is specific clean
         // target.
         return true;
+    }
+
+    bool TryPartialEvict(
+        CcEntry<KeyT, ValueT, VersionedRecord, RangePartitioned> *cce)
+        const override
+    {
+        // Regular memory-pressure clean: let a paged object shed pages instead
+        // of losing its metadata (docs/08 §8).
+        return this->page_->parent_map_->ShedPagesForEviction(cce);
     }
 
     void Reserve(uint8_t idx, bool is_clean_target) override

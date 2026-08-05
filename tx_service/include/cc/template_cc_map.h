@@ -51,6 +51,7 @@
 #include "local_cc_shards.h"
 #include "mimalloc.h"
 #include "non_blocking_lock.h"
+#include "page_key_codec.h"  // HasPageKeyMagic: internal page rows (docs/08 §5)
 #include "proto/cc_request.pb.h"
 #include "range_slice.h"
 #include "remote/remote_cc_handler.h"  //RemoteCcHandler
@@ -8632,6 +8633,63 @@ public:
     }
 
     /**
+     * @brief See CcMap::DescribeBufferedCommands. Walks every page and every
+     * entry; runs only on the promotion-stall failure path, on the shard
+     * core, immediately before the process aborts.
+     */
+    std::string DescribeBufferedCommands(size_t limit) override
+    {
+        std::string out;
+        size_t n = 0;
+        for (CcPage<KeyT, ValueT, VersionedRecord, RangePartitioned> *page =
+                 neg_inf_page_.next_page_;
+             page != &pos_inf_page_ && n < limit;
+             page = page->next_page_)
+        {
+            for (size_t i = 0; i < page->entries_.size() && n < limit; ++i)
+            {
+                CcEntry<KeyT, ValueT, VersionedRecord, RangePartitioned> *cce =
+                    page->entries_[i].get();
+                if (cce == nullptr || !cce->HasBufferedCommandList())
+                {
+                    continue;
+                }
+                const BufferedTxnCmdList &buffered = cce->BufferedCommandList();
+                if (buffered.Empty())
+                {
+                    continue;
+                }
+                const TxnCmd &head = buffered.txn_cmd_list_.front();
+                if (n++ > 0)
+                {
+                    out.append("; ");
+                }
+                out.append("{key=")
+                    .append(page->keys_[i].ToString())
+                    .append(", cce_commit_ts=")
+                    .append(std::to_string(cce->CommitTs()))
+                    .append(", payload_status=")
+                    .append(
+                        std::to_string(static_cast<int>(cce->PayloadStatus())))
+                    .append(", buffered=")
+                    .append(std::to_string(buffered.Size()))
+                    .append(", head{obj_version=")
+                    .append(std::to_string(head.obj_version_))
+                    .append(", new_version=")
+                    .append(std::to_string(head.new_version_))
+                    .append(", applied_prefix=")
+                    .append(std::to_string(head.applied_prefix_))
+                    .append(", ignore_prev=")
+                    .append(head.ignore_previous_version_ ? "1" : "0")
+                    .append(", cmds=")
+                    .append(std::to_string(head.cmd_list_.size()))
+                    .append("}}");
+            }
+        }
+        return out;
+    }
+
+    /**
      * Used for debug to verify the map_link is complete and keys are in
      * order.
      */
@@ -10028,8 +10086,12 @@ protected:
     bool BackFill(LruEntry *entry,
                   uint64_t commit_ts,
                   RecordStatus status,
-                  const std::string &rec_str) override
+                  const std::string &rec_str,
+                  bool *corrupt) override
     {
+        // Non-object maps keep their legacy trust-the-store behavior; the
+        // corrupt channel is reported only by maps that validate (docs/08 §5).
+        (void) corrupt;
         CcEntry<KeyT, ValueT, VersionedRecord, RangePartitioned> *cce =
             static_cast<
                 CcEntry<KeyT, ValueT, VersionedRecord, RangePartitioned> *>(
@@ -11739,6 +11801,27 @@ void BackfillForScanNextBatch(FetchBucketDataCc *fetch_cc,
         {
             if constexpr (!VersionedRecord)
             {
+                // Page rows of paged large objects share the object table's
+                // keyspace (eloqkv docs/08-paged-objects.md §5) but are NOT
+                // Redis keys: they must never reach a client. Discard them
+                // FIRST, before pattern or type processing — a page row's
+                // first value byte is a page-layout version, not an object
+                // type tag, so type filtering would both misclassify it (page
+                // layout 1 == the List tag) and hand the client an internal
+                // binary key it could feed back into other commands.
+                //
+                // Filtered HERE rather than where the rows are collected
+                // (FetchBucketDataCc::AddDataItem) on purpose: the scan's
+                // pagination cursor is the LAST raw row of the batch, so the
+                // deque must keep page rows for the cursor to advance past
+                // them. A batch that is entirely page rows must leave the
+                // scan cache empty and re-fetch from a cursor beyond them.
+                if (HasPageKeyMagic(std::string_view(item.key_str_.data(),
+                                                     item.key_str_.size())))
+                {
+                    continue;
+                }
+
                 if (!KeyT::IsMatch(
                         item.key_str_.data(), item.key_str_.size(), pattern))
                 {
@@ -11824,6 +11907,27 @@ void BackfillForScanNextBatch(FetchBucketDataCc *fetch_cc,
         {
             if constexpr (!VersionedRecord)
             {
+                // Page rows of paged large objects share the object table's
+                // keyspace (eloqkv docs/08-paged-objects.md §5) but are NOT
+                // Redis keys: they must never reach a client. Discard them
+                // FIRST, before pattern or type processing — a page row's
+                // first value byte is a page-layout version, not an object
+                // type tag, so type filtering would both misclassify it (page
+                // layout 1 == the List tag) and hand the client an internal
+                // binary key it could feed back into other commands.
+                //
+                // Filtered HERE rather than where the rows are collected
+                // (FetchBucketDataCc::AddDataItem) on purpose: the scan's
+                // pagination cursor is the LAST raw row of the batch, so the
+                // deque must keep page rows for the cursor to advance past
+                // them. A batch that is entirely page rows must leave the
+                // scan cache empty and re-fetch from a cursor beyond them.
+                if (HasPageKeyMagic(std::string_view(item.key_str_.data(),
+                                                     item.key_str_.size())))
+                {
+                    continue;
+                }
+
                 if (!KeyT::IsMatch(
                         item.key_str_.data(), item.key_str_.size(), pattern))
                 {

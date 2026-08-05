@@ -6992,6 +6992,18 @@ public:
         return abort_if_oom_;
     }
 
+    /**
+     * @brief Aborts this request, first undoing any page-fault parking.
+     *
+     * The base implementation Free()s the request back to its CcRequestPool,
+     * where it can immediately be handed to another command. A request parked
+     * on a page fault is still referenced by the entry's FetchHub, so it must
+     * stop being a waiter before that happens, and the pin the park took must
+     * be released. Defined out of line in cc_map.cpp: CcMap is only forward
+     * declared here. (docs/08 §6)
+     */
+    void AbortCcRequest(CcErrorCode err_code) override;
+
     union
     {
         LocalTuple local_input_;
@@ -7031,7 +7043,25 @@ public:
         BlockOnRead,  // this could be ReadLock or WriteIntent
         BlockOnWriteLock,
         BlockOnFetch,
-        BlockOnCondition  // for blocking commands like blpop
+        BlockOnCondition,  // for blocking commands like blpop
+        // Parked on one or more PAGE fetches of a paged object (eloqkv
+        // docs/08-paged-objects.md §6). Deliberately not BlockOnFetch: that
+        // state's resume contract is "the whole record was missing, no lock
+        // is held, release the fetch pin and proceed to acquire", which a
+        // page fault violates part of the time — a lock may be held (the
+        // contended re-run, or a later command of the same transaction) and
+        // acquisition is deferred rather than immediate. Keeping the states
+        // apart leaves the whole-record path and its assert untouched.
+        BlockOnPageFault,
+        // A §8 page-memory ADMISSION refusal. Unlike the two states above
+        // it holds NOTHING — no pin, no fetch, no claimed buffer — because
+        // the refusal path recycles the key lock and clears CcePtr before
+        // parking the request on the shard's memory wait list. This state
+        // exists for the window in which a retry still carries an entry
+        // pointer: without it the resume path mistook an admission retry for
+        // a fetch resume and tripped that branch's assert (a reported bug:
+        // real memory pressure crashed a Debug server).
+        BlockOnMemory
     };
     ApplyBlockType block_type_{ApplyBlockType::NoBlocking};
 

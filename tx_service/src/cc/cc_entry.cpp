@@ -22,11 +22,70 @@
 #include "cc/cc_entry.h"
 
 #include "cc/cc_shard.h"
+#include "cc/page_fetch.h"
 #include "error_messages.h"
 #include "tx_record.h"
 
 namespace txservice
 {
+TxObject *TxCommand::CommitOn(TxObject *obj_ptr, const PagedCommitContext &ctx)
+{
+    TxObject *out = CommitOn(obj_ptr);
+    if (out == nullptr &&
+        RetirePagedPayloadOnDelete(obj_ptr, ctx.lke_, ctx.shard_))
+    {
+        // The deleted paged block is RETAINED (tagged deletion-retained)
+        // so the checkpoint can read its page-id list; returning the same
+        // pointer keeps every caller's "pointer changed" logic inert.
+        return obj_ptr;
+    }
+    return out;
+}
+
+bool RetirePagedPayloadOnDelete(TxObject *obj,
+                                KeyGapLockAndExtraData *lke,
+                                CcShard *shard)
+{
+    PagedTxObject *dead = obj != nullptr ? obj->AsPaged() : nullptr;
+    if (dead == nullptr)
+    {
+        return false;
+    }
+    // Orphan first: a successor incarnation restarts page ids at 0, so a
+    // fetch issued for this block must never install into whatever a
+    // replayed recreate builds next (docs/08 §7).
+    if (lke != nullptr)
+    {
+        FetchHub *hub = lke->FetchHubPtr();
+        if (hub != nullptr)
+        {
+            hub->SpliceAllToOrphans();
+            std::vector<CcRequestBase *> parked = hub->TakeAllParked();
+            if (shard != nullptr)
+            {
+                for (CcRequestBase *req : parked)
+                {
+                    shard->Enqueue(shard->LocalCoreId(), req);
+                }
+            }
+            else
+            {
+                assert(parked.empty() &&
+                       "parked requests with no shard to wake them");
+            }
+        }
+    }
+    // The complete volatile teardown: frames, §8 admission reservations,
+    // pending faults, tx contexts, LRU. Only the page-id metadata the
+    // deletion flush reads survives. AbandonAllTxContexts alone was NOT
+    // enough — it clears contexts without decrementing per-slot pins, so a
+    // pin-respecting release left pinned frames and every reservation
+    // charged to the shard heap until the deletion checkpoint (a reported
+    // defect: a stalled checkpoint held that memory indefinitely).
+    dead->TeardownForDeletion();
+    dead->MarkDeletionRetained();
+    return true;
+}
 
 template <bool Versioned, bool RangePartitioned>
 RecordStatus VersionedLruEntry<Versioned, RangePartitioned>::PayloadStatus()

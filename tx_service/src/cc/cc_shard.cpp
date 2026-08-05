@@ -26,6 +26,7 @@
 #include <bthread/bthread.h>
 #include <bthread/remote_task_queue.h>
 
+#include <algorithm>
 #include <chrono>  // std::chrono
 #include <cstdint>
 #include <iomanip>  // std::setprecision
@@ -36,6 +37,7 @@
 #include "cc/cc_request.h"
 #include "cc/cluster_config_cc_map.h"
 #include "cc/non_blocking_lock.h"  // lock_vec_
+#include "cc/page_fetch.h"
 #include "cc/range_bucket_cc_map.h"
 #include "cc_req_misc.h"
 #include "cc_request.pb.h"
@@ -711,7 +713,35 @@ size_t CcShard::ProcessRequests()
 
         for (size_t i = 0; i < req_cnt; ++i)
         {
+#ifndef NDEBUG
+            // Requests come from CcRequestPool and are never deallocated, so a
+            // request's vtable pointer must be identical before and after its
+            // own Execute(). If it changes, something wrote over a live pooled
+            // request during that Execute -- catch it here, while the culprit
+            // is still on the stack, instead of one dispatch later when the
+            // corrupted vptr is finally called through.
+            void *vptr_before = *reinterpret_cast<void **>(req_buf_[i]);
+            // Captured while the object is still intact: names the victim's
+            // dynamic type, which the clobbered vptr can no longer tell us.
+            const char *req_type = typeid(*req_buf_[i]).name();
+#endif
             bool finish = req_buf_[i]->Execute(*this);
+#ifndef NDEBUG
+            // ONLY when finish == true. A request that returns false may
+            // legitimately have destroyed itself inside its own Execute --
+            // FetchCatalogCc ends with ccs.RemoveFetchRequest(table_name_),
+            // which erases the shard-owned request, then returns false. Reading
+            // its vptr afterwards would be a use-after-free by this check
+            // itself. When finish is true the caller is about to call Free(),
+            // so the object must still be alive and this comparison is valid.
+            void *vptr_after =
+                finish ? *reinterpret_cast<void **>(req_buf_[i]) : vptr_before;
+            LOG_IF(FATAL, vptr_before != vptr_after)
+                << "cc request corrupted during its own Execute(): req="
+                << static_cast<void *>(req_buf_[i]) << " vptr " << vptr_before
+                << " -> " << vptr_after << " finish=" << finish
+                << " victim_type=" << req_type << " core=" << core_id_;
+#endif
             if (finish)
             {
                 req_buf_[i]->Free();
@@ -2280,6 +2310,92 @@ store::DataStoreHandler::DataStoreOpStatus CcShard::FetchRecord(
     return store::DataStoreHandler::DataStoreOpStatus::Success;
 }
 
+store::DataStoreHandler::DataStoreOpStatus CcShard::FetchPage(
+    const TableName &table_name,
+    const TableSchema *tbl_schema,
+    const TxKey &object_key,
+    PageRowKind kind,
+    uint32_t page_id,
+    LruEntry *cce,
+    NodeGroupId cc_ng_id,
+    int64_t cc_ng_term,
+    uint64_t waiter_txn,
+    int32_t partition_id)
+{
+    KeyGapLockAndExtraData *lke = cce->GetKeyGapLockAndExtraData();
+    assert(lke != nullptr &&
+           "page fetches require the entry pinned; the caller creates the "
+           "lock structure first");
+    FetchHub &hub = lke->GetOrCreateFetchHub();
+
+    // Coalesce: at most one in-flight fetch per page id (docs/08 §4). A
+    // joining waiter registers its txn; the §4 per-txn context decides when
+    // it wakes.
+    auto hub_it = hub.live_.find(page_id);
+    if (hub_it != hub.live_.end())
+    {
+        if (waiter_txn != 0)
+        {
+            // Dedup: a re-run coalescing onto a fetch it already awaits must
+            // not register twice. Linear scan — the list is short.
+            std::vector<TxNumber> &waiters = hub_it->second->waiter_txns_;
+            if (std::find(waiters.begin(), waiters.end(), waiter_txn) ==
+                waiters.end())
+            {
+                waiters.emplace_back(waiter_txn);
+                hub.NoteAwaited(waiter_txn);
+            }
+        }
+        return store::DataStoreHandler::DataStoreOpStatus::Success;
+    }
+
+    // The composite key: encoded page-row bytes, the OBJECT key's hash (§5
+    // co-location — the page id decides which row, never which shard).
+    std::string encoded;
+    EncodePageKey(encoded,
+                  std::string_view(object_key.Data(), object_key.Size()),
+                  kind,
+                  page_id);
+    auto page_key =
+        std::make_unique<PageKey>(std::move(encoded), object_key.Hash());
+
+    auto fetch = std::make_unique<PageFetch>(&table_name,
+                                             tbl_schema,
+                                             TxKey(std::move(page_key)),
+                                             page_id,
+                                             cce,
+                                             *this,
+                                             cc_ng_id,
+                                             cc_ng_term,
+                                             partition_id);
+    if (waiter_txn != 0)
+    {
+        // A brand-new fetch: its waiter list is empty, so no scan is needed.
+        fetch->waiter_txns_.emplace_back(waiter_txn);
+        hub.NoteAwaited(waiter_txn);
+    }
+    PageFetch *fetch_ptr = fetch.get();
+    hub.live_.try_emplace(page_id, std::move(fetch));
+
+    // The entry pin spans the I/O: released by PageFetch::Execute. It keeps
+    // the metadata entry (and this lock structure, which owns the hub) alive
+    // while the page loads (docs/08 §5).
+    lke->AddPin();
+
+    auto res = local_shards_.store_hd_->FetchRecord(fetch_ptr);
+    if (res == store::DataStoreHandler::DataStoreOpStatus::Retry)
+    {
+        // Unwind exactly as the whole-record path does when the store is
+        // busy: the caller re-drives later.
+        hub.live_.erase(page_id);
+        lke->ReleasePin();
+        cce->RecycleKeyLock(*this);
+        return store::DataStoreHandler::DataStoreOpStatus::Retry;
+    }
+
+    return store::DataStoreHandler::DataStoreOpStatus::Success;
+}
+
 store::DataStoreHandler::DataStoreOpStatus CcShard::FetchSnapshot(
     const TableName &table_name,
     const TableSchema *tbl_schema,
@@ -3206,6 +3322,44 @@ bool CcShardHeap::Full(int64_t *alloc, int64_t *commit) const
 #endif
 }
 
+bool CcShardHeap::CanAllocate(size_t bytes) const
+{
+    // Deterministic integration hook for the refusal/retry path. Real heap
+    // exhaustion is allocator- and workload-timing dependent; forcing the
+    // admission answer here still exercises the production unwind, clean-pass
+    // kick, request re-enqueue, and eventual reservation/install path. The
+    // hook is Debug-only through CODE_FAULT_INJECTOR.
+    CODE_FAULT_INJECTOR("force_page_admission_refusal", {
+        LOG_EVERY_N(INFO, 100)
+            << "FAULTLOG force_page_admission_refusal bytes=" << bytes;
+        return false;
+    });
+
+    int64_t allocated = 0;
+#if defined(WITH_JEMALLOC)
+    size_t total_resident = 0;
+    size_t total_allocated = 0;
+    GetJemallocArenaStat(arena_id_, total_resident, total_allocated);
+    allocated = static_cast<int64_t>(total_allocated);
+#else
+    int64_t committed = 0;
+    mi_thread_stats(&allocated, &committed);
+#endif
+    bool admitted = allocated + static_cast<int64_t>(bytes) <=
+                    static_cast<int64_t>(memory_limit_);
+    if (!admitted)
+    {
+        // Unlike the force_page_admission_refusal injector, this records the
+        // real size-aware predicate. A heap may reject `bytes` while Full()
+        // is still false, so periodic "heap full" reports cannot diagnose
+        // this path. DLOG avoids flooding optimized production builds if a
+        // workload remains over budget and repeatedly retries.
+        DLOG(INFO) << "PAGELOG page_admission_refused allocated=" << allocated
+                   << " requested=" << bytes << " limit=" << memory_limit_;
+    }
+    return admitted;
+}
+
 bool CcShardHeap::NeedCleanShard(int64_t &alloc, int64_t &commit) const
 {
     return alloc >= static_cast<int64_t>(memory_limit_) ||
@@ -3906,6 +4060,98 @@ void CcShard::DequeueWaitListAfterSchemaUpdated()
 void CcShard::UpdateBufferedCommandCnt(int64_t delta)
 {
     buffered_cmd_cnt_ += delta;
+}
+
+void CcShard::NoteDrainBlocked(NodeGroupId ng_id,
+                               LruEntry *entry,
+                               std::string key_desc)
+{
+    drain_blocked_entries_.try_emplace(ng_id).first->second.insert_or_assign(
+        entry, std::move(key_desc));
+}
+
+void CcShard::NoteDrainUnblocked(NodeGroupId ng_id, LruEntry *entry)
+{
+    auto it = drain_blocked_entries_.find(ng_id);
+    if (it == drain_blocked_entries_.end())
+    {
+        return;
+    }
+    it->second.erase(entry);
+    if (it->second.empty())
+    {
+        drain_blocked_entries_.erase(it);
+    }
+}
+
+size_t CcShard::DrainBlockedCount(NodeGroupId ng_id) const
+{
+    auto it = drain_blocked_entries_.find(ng_id);
+    return it == drain_blocked_entries_.end() ? 0 : it->second.size();
+}
+
+void CcShard::ClearDrainBlocked(NodeGroupId ng_id)
+{
+    drain_blocked_entries_.erase(ng_id);
+}
+
+std::string CcShard::DescribeDrainBlocked(NodeGroupId ng_id, size_t limit) const
+{
+    auto it = drain_blocked_entries_.find(ng_id);
+    if (it == drain_blocked_entries_.end())
+    {
+        return "";
+    }
+    std::string out;
+    size_t n = 0;
+    for (const auto &[entry, key_desc] : it->second)
+    {
+        if (n++ == limit)
+        {
+            out.append(", ...");
+            break;
+        }
+        if (n > 1)
+        {
+            out.append(", ");
+        }
+        out.append(key_desc);
+    }
+    return out;
+}
+
+std::string CcShard::DescribeBufferedCommands(NodeGroupId ng_id, size_t limit)
+{
+    std::string out;
+    auto append_part = [&out](const TableName &table_name, std::string &&part)
+    {
+        if (part.empty())
+        {
+            return;
+        }
+        if (!out.empty())
+        {
+            out.append("; ");
+        }
+        out.append(table_name.String()).append(": ").append(std::move(part));
+    };
+    if (IsNative(ng_id))
+    {
+        for (auto &[table_name, ccm] : native_ccms_)
+        {
+            append_part(table_name, ccm->DescribeBufferedCommands(limit));
+        }
+    }
+    for (auto &[table_name, ng_ccms] : failover_ccms_)
+    {
+        auto ng_it = ng_ccms.find(ng_id);
+        if (ng_it != ng_ccms.end())
+        {
+            append_part(table_name,
+                        ng_it->second->DescribeBufferedCommands(limit));
+        }
+    }
+    return out;
 }
 
 void CcShard::CheckLagAndResubscribe() const

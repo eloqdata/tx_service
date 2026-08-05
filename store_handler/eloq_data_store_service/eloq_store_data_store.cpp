@@ -32,6 +32,10 @@
 
 #include "common.h"
 #include "eloq_store_data_store_factory.h"
+#ifdef WITH_FAULT_INJECT
+#include "fault/fault_inject.h"
+#include "page_key_codec.h"
+#endif
 #include "internal_request.h"
 
 #ifdef ELOQSTORE_WITH_TXSERVICE
@@ -74,6 +78,26 @@ inline void BuildKey(const WriteRecordsRequest &write_req,
         key_out.append(part.data(), part.size());
     }
 }
+
+#ifdef WITH_FAULT_INJECT
+bool ContainsPagedRow(const WriteRecordsRequest &write_req)
+{
+    const uint16_t parts_per_key = write_req.PartsCountPerKey();
+    size_t key_offset = 0;
+    std::string key;
+    for (size_t i = 0; i < write_req.RecordsCount(); ++i)
+    {
+        key.clear();
+        BuildKey(write_req, key_offset, parts_per_key, key);
+        if (txservice::HasPageKeyMagic(key))
+        {
+            return true;
+        }
+        key_offset += parts_per_key;
+    }
+    return false;
+}
+#endif
 
 inline void BuildValue(const WriteRecordsRequest &write_req,
                        const std::size_t rec_first_idx,
@@ -265,6 +289,9 @@ void EloqStoreDataStore::BatchWriteRecords(WriteRecordsRequest *write_req)
             entries, std::ranges::less{}, &::eloqstore::WriteDataEntry::key_);
     }
 
+#ifdef WITH_FAULT_INJECT
+    const bool contains_paged_row = ContainsPagedRow(*write_req);
+#endif
     kv_write_req.SetArgs(eloq_store_table_id, std::move(entries));
 
     uint64_t user_data = reinterpret_cast<uint64_t>(write_op);
@@ -280,6 +307,16 @@ void EloqStoreDataStore::BatchWriteRecords(WriteRecordsRequest *write_req)
         return;
     }
 
+#ifdef WITH_FAULT_INJECT
+    // The request has been accepted by EloqStore and its completion owns the
+    // operation.  A crash here exercises the in-flight side of the atomic
+    // metadata+page-row batch without firing for ordinary records.
+    if (contains_paged_row)
+    {
+        txservice::FaultInject::Instance().TriggerAction(
+            "paged_flush_store_inflight");
+    }
+#endif
     op_guard.Release();
 }
 
@@ -297,6 +334,18 @@ void EloqStoreDataStore::OnBatchWrite(::eloqstore::KvRequest *req)
 
     WriteRecordsRequest *ds_write_req =
         static_cast<WriteRecordsRequest *>(write_op->DataStoreRequest());
+
+#ifdef WITH_FAULT_INJECT
+    // EloqStore invokes this callback only after deciding the whole batch.
+    // On success, this is the deterministic §11 boundary after durable
+    // commit but before txservice is told to mark pages clean.
+    if (write_req->Error() == ::eloqstore::KvError::NoError &&
+        ContainsPagedRow(*ds_write_req))
+    {
+        txservice::FaultInject::Instance().TriggerAction(
+            "paged_flush_after_store_commit");
+    }
+#endif
 
     remote::CommonResult result;
     if (write_req->Error() != ::eloqstore::KvError::NoError)

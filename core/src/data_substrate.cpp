@@ -879,7 +879,22 @@ bool DataSubstrate::LoadCoreAndNetworkConfig(const INIReader &config_reader)
     GFLAGS_NAMESPACE::SetCommandLineOption(
         "bthread_concurrency", std::to_string(core_config_.core_num).c_str());
 #ifdef ELOQ_MODULE_ENABLED
-    GFLAGS_NAMESPACE::SetCommandLineOption("worker_polling_time_us", "100000");
+    // How long a brpc worker busy-polls before it is allowed to park. DEFAULT
+    // it rather than force it: an unconditional override silently discards
+    // whatever the config file or command line asked for, which makes the knob
+    // untunable and any experiment with it quietly meaningless.
+    //
+    // 1 ms because the window must stay well under brpc's own timer cadence
+    // (~19 wakes/sec, i.e. ~53 ms on an idle node). Every wake re-enters
+    // wait_task and restarts the window, so a window at or above that cadence
+    // never elapses, the worker never reaches its park check, and one core
+    // spins per node with no workload at all. Measured: 100 ms -> 1.18 cores
+    // idle, 1 ms -> 0.058 cores.
+    if (CheckCommandLineFlagIsDefault("worker_polling_time_us"))
+    {
+        GFLAGS_NAMESPACE::SetCommandLineOption("worker_polling_time_us",
+                                               "1000");
+    }
     GFLAGS_NAMESPACE::SetCommandLineOption("brpc_worker_as_ext_processor",
                                            "true");
 #endif

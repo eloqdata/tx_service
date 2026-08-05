@@ -400,3 +400,16 @@ intents/locks as it materializes.
 - **TxNumber encodes location.** `(txn >> 32) >> 10` is the owning node group, `(txn >> 32) &
   0x3FF` the core; code routes recovery/negotiation requests with this arithmetic — do not invent
   tx numbers.
+
+## 11. Paged large objects at the CC layer
+
+Design of record: eloqkv `docs/08-paged-objects.md` (an API-layer feature; the engine supplies the type-independent machinery). The split of state follows one scoping rule — **page STATE is payload-scoped, I/O REQUESTS are entry-scoped**:
+
+- `tx_service/include/page_frame_table.h` — `PageFrameTable`, the page manager every paged type contains: resident-page frames, both views of the pin fact (per-page `pin_count_` for eviction, per-txn `tx_contexts_` for release), the pending-fault set a yielding command records, the page-id lifecycle (free ranges, pending deletes, high-water), and the per-object eviction LRU with the shed policy the shard clean pass calls.
+- `tx_service/include/paged_tx_object.h` — `PagedTxObject`, the seam the engine reaches through `TxObject::AsPaged()`. It contains the frame table and implements the engine-facing virtuals once; a concrete type supplies only its metadata codec and page-row kind.
+- `tx_service/include/cc/page_fetch.h` — the ENTRY side: `FetchHub` on `KeyGapLockAndExtraData` owns every outstanding `PageFetch` (live map + discard-on-complete orphans) and the per-txn wake records (`TxWake`: parked request, awaited count, error flag). Page fetches bypass the shard's `fetch_record_reqs_` map entirely. Wake records live on the entry because a payload swap or DEL destroys the payload, and the record of who is waiting must outlive it.
+- `tx_service/include/cc/object_cc_map.h` — `ApplyPayloadSwapRule` runs before ANY replacement or removal of a committed paged payload: the hub splices live fetches to orphans, parked requests are taken from the hub (`TakeAllParked`) and re-enqueued, and the payload's contexts are abandoned (pins die with the block). The buffered-command drain's page faults are issued by `IssueDrainFetches` under the reserved drain identity `kDrainTxnNumber` (wake = re-drive the drain, not enqueue a request).
+
+Invariant worth repeating from the design doc: fetch waiter lists hold tx numbers, never request pointers, so a stale waiter resolves to nothing and no teardown deregistration protocol exists.
+
+**Page rows are invisible to the CcMap but NOT to store scans.** They share the object table's keyspace, so `BackfillForScanNextBatch` (`include/cc/template_cc_map.h`) discards keys carrying the `\x00EKVPAGE` magic before pattern/type processing, in both its local and remote branches — otherwise internal binary keys reach clients through `KEYS`/`SCAN`, and `SCAN TYPE` misreads a page's layout-version byte as an object type tag (layout 1 collides with the List tag). The filter sits at consumption rather than at `FetchBucketDataCc::AddDataItem` on purpose: the scan cursor is the last raw row of the fetched batch, so the deque must retain page rows for the cursor to advance past them; filtering at ingress would stall the cursor on an all-page-rows batch.

@@ -56,6 +56,22 @@ public:
            LocalCcShards &local_shards,
            uint32_t log_group_cnt);
 
+    /**
+     * @brief Stops and joins the deferred-promotion waiter.
+     *
+     * The waiter polls shard state through `this`, so it must not outlive the
+     * object. It checks the stop flag every iteration, so the join is bounded
+     * by one poll interval rather than by the promotion timeout.
+     */
+    ~CcNode()
+    {
+        stop_deferred_promotion_.store(true, std::memory_order_release);
+        if (deferred_promotion_thd_.joinable())
+        {
+            deferred_promotion_thd_.join();
+        }
+    }
+
     bool CheckLogGroupReplayFinished(uint32_t log_group_id, int64_t ng_term);
 
     void FinishLogGroupReplay(uint32_t log_group_id,
@@ -104,6 +120,75 @@ public:
     bool PromoteStandbyTermIfCandidate(int64_t standby_term);
 
 private:
+    /**
+     * @brief The three kinds of outstanding replay work, counted separately.
+     *
+     * They are reported apart rather than summed because they fail for
+     * different reasons, and a stuck recovery is only diagnosable if you know
+     * which one is not moving: a parked drain means a page fetch is not
+     * completing, buffered commands with no parked drain means nothing is
+     * re-driving them (a version hole, say), and in-flight record fetches mean
+     * the store has not answered yet.
+     */
+    struct ReplayWorkCounts
+    {
+        size_t parked_drains_{0};
+        size_t buffered_cmds_{0};
+        size_t record_fetches_{0};
+
+        size_t Total() const
+        {
+            return parked_drains_ + buffered_cmds_ + record_fetches_;
+        }
+    };
+
+    /**
+     * @brief How many of this node group's entries have a buffered-command
+     * drain waiting on a page fetch, summed across all shards.
+     *
+     * @return The count, zero when every replayed tail has been applied.
+     * Read on each shard's own core via WaitableCc rather than racing the
+     * shard-owned bookkeeping.
+     */
+    ReplayWorkCounts DrainBlockedCount() const;
+
+    /**
+     * @brief Names the keys whose replayed tail is still unapplied.
+     *
+     * @return A comma-separated list for logging, empty when nothing is
+     * blocked. A count tells you recovery is stuck; this tells you on what.
+     */
+    std::string DescribeDrainBlocked() const;
+
+    /**
+     * @brief Describes every entry still holding buffered replayed/standby
+     * commands, with each buffered head's version tuple (see
+     * CcMap::DescribeBufferedCommands). Failure-path evidence for the
+     * replay-stall FATAL: DescribeDrainBlocked covers only parked drains,
+     * which are legitimately absent when the stuck work is buffered commands.
+     *
+     * @return A per-shard "core N: ..." list for logging, empty when nothing
+     * is buffered anywhere.
+     */
+    std::string DescribeBufferedCommands() const;
+
+    /** @brief Turns the candidate term into the real term, opening this node
+     * group for service. */
+    void PromoteAfterReplay(int64_t candidate_term);
+
+    /** @brief Spawns the bthread that waits for replayed tails, then promotes.
+     */
+    void StartDeferredPromotion(int64_t candidate_term, size_t pending);
+
+    /**
+     * @brief Waits for every replayed tail to apply and then promotes.
+     *
+     * Polls with bthread_usleep backoff, abandons the promotion if the term
+     * moves, and on deadline leaves the node a candidate rather than serving a
+     * key that is missing acknowledged writes.
+     */
+    void AwaitDrainsAndPromote(int64_t candidate_term);
+
     void NotifyNewLeaderStart(uint32_t leader_ng_id, uint32_t leader_node_id);
     void SubscribePrimaryNode(uint32_t node_id, int64_t term, bool resubscribe);
     void ClearCcNodeGroupData();
@@ -136,6 +221,12 @@ private:
     // since it will be updated by replay thread and raft service thread
     // concurrently.
     std::mutex recovery_mux_;
+
+    // The deferred-promotion waiter (docs/08 §10) and its stop flag. Owned
+    // rather than detached so teardown cannot leave a thread dereferencing a
+    // destroyed CcNode.
+    std::thread deferred_promotion_thd_;
+    std::atomic<bool> stop_deferred_promotion_{false};
 
     uint32_t log_group_cnt_;
 };

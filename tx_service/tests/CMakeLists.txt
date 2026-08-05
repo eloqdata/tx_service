@@ -64,6 +64,9 @@ set(CATCH_MAIN_TESTS
     CcRequestWait-Test
     StandbyForward-Test
     ApplyResponseBoundary-Test
+    PageFetch-Test
+    LockGrantability-Test
+    PagedStoreBatch-Test
 )
 
 # Tests that define their own int main() (they need gflags::ParseCommandLineFlags

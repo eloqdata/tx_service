@@ -21,6 +21,8 @@
  */
 #include "fault/fault_inject.h"
 
+#include "cc/local_cc_shards.h"
+
 #if defined(WITH_LOG_SERVICE) && defined(LOG_STATE_TYPE_RKDB_S3)
 #include "../../../eloq_log_service/include/fault_inject.h"  // txlog::FaultInject from eloq_log_service
 #endif
@@ -45,6 +47,13 @@ void FaultInject::TriggerAction(FaultEntry *entry)
             return;
         }
     }
+
+    // A configured injector is not proof that the intended production path
+    // reached it.  Keep a durable hit marker immediately before executing
+    // the action so crash tests can reject vacuous runs, including PANIC
+    // actions whose process cannot report completion to the client.
+    LOG(INFO) << "FaultInject trigger name=" << entry->fault_name_
+              << " strike=" << entry->count_strike_;
 
     for (auto str : entry->vctAction_)
     {
@@ -263,6 +272,58 @@ void FaultInject::InjectFault(std::string fault_name, std::string paras)
         return;
     }
 #endif
+
+    // Test hook (docs/08 §8): run the LRU clean pass NOW, bypassing both gates
+    // that normally guard it. ShardCleanCc is only enqueued by
+    // WakeUpShardCleanCc() when the memory wait list is non-empty, and its
+    // Execute() then requires shard_heap->Full() AND NeedCleanShard() -- so
+    // without genuine memory pressure a test cannot make eviction happen at
+    // all, which is what blocked the paged swap/retire tests. This dispatches
+    // CcShard::Clean() directly onto every shard instead.
+    if (fault_name == "force_shard_clean_now")
+    {
+        LocalCcShards *shards = Sharder::Instance().GetLocalCcShards();
+        if (shards != nullptr)
+        {
+            for (size_t idx = 0; idx < shards->Count(); ++idx)
+            {
+                shards->GetCcShard(idx)->DispatchTask(
+                    static_cast<uint16_t>(idx),
+                    [](CcShard &ccs)
+                    {
+                        // Rewind the sweep cursor first. CcShard::Clean() is
+                        // RESUMABLE: it starts from clean_start_ccp_ and
+                        // leaves it wherever the sweep stopped — at the TAIL
+                        // once a drain completes. Without this reset the
+                        // SECOND force_shard_clean_now in a process starts
+                        // at the tail, scans zero pages, reports no yield,
+                        // and the drain below exits after one no-op round.
+                        // That silently shed nothing: a test whose first
+                        // phase swept successfully saw its second phase time
+                        // out waiting for a shed marker, at any timeout,
+                        // because it was never a timing problem (a reported
+                        // matrix failure).
+                        ccs.ResetCleanStart();
+                        // Clean() reports whether more remains; drain it so a
+                        // single trigger is enough for a test.
+                        // Drain fully: the sweep starts at the COLD end, so
+                        // a low cap never reaches a freshly written object,
+                        // which is exactly the one a test wants stripped.
+                        for (int round = 0; round < 4096; ++round)
+                        {
+                            auto [freed, yield] = ccs.Clean();
+                            (void) freed;
+                            if (!yield)
+                            {
+                                break;
+                            }
+                        }
+                        return true;
+                    });
+            }
+        }
+        return;
+    }
 
     // To remove the pointed fault inject.
     if (paras.compare("remove") == 0)

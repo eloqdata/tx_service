@@ -218,6 +218,7 @@ SET(TxService_SOURCES
     ${TX_SERVICE_SOURCE_DIR}/src/cc/local_cc_handler.cpp
     ${TX_SERVICE_SOURCE_DIR}/src/cc/local_cc_shards.cpp
     ${TX_SERVICE_SOURCE_DIR}/src/cc/non_blocking_lock.cpp
+    ${TX_SERVICE_SOURCE_DIR}/src/cc/page_fetch.cpp
     ${TX_SERVICE_SOURCE_DIR}/src/cc/cc_req_misc.cpp
     ${TX_SERVICE_SOURCE_DIR}/src/cc/range_slice.cpp
     ${TX_SERVICE_SOURCE_DIR}/src/cc/reader_writer_cntl.cpp

@@ -34,18 +34,65 @@
 #include <vector>
 
 #include "cc_req_base.h"
+#include "fault/fault_inject.h"
 #include "non_blocking_lock.h"
+#include "paged_tx_object.h"
 #include "slice_data_item.h"
 #include "tx_command.h"
 #include "tx_id.h"
 #include "tx_key.h"
+#include "tx_object.h"
 #include "tx_record.h"
 
 namespace txservice
 {
+/**
+ * @brief Decides whether a CommitOn that just ran actually applied.
+ *
+ * A paged object reports a missing page out of band, because CommitOn returns
+ * a TxObject* and has no in-band way to say "not ready". A faulting CommitOn
+ * is discover-then-mutate: it records every page it needs, leaves the object
+ * exactly as it was, and hands back the same pointer.
+ *
+ * @param before the object CommitOn was called on.
+ * @param after what CommitOn returned.
+ * @return False only for that case — same object back, and it is a paged
+ * object with pending faults. True for every non-paged object and for every
+ * paged commit that ran to completion, including one that replaced the object
+ * (a TTL wrap) or deleted it (nullptr).
+ */
+inline bool PagedCommitApplied(TxObject *before, TxObject *after)
+{
+    if (before == nullptr || after != before)
+    {
+        return true;
+    }
+    PagedTxObject *paged = before->AsPaged();
+    return paged == nullptr || !paged->HasPendingFaults();
+}
+
 class CcMap;
 class CcShardHeap;
 class CcShard;
+
+/**
+ * @brief The retire half of the paged-deletion rule (docs/08 §7, §9): splice
+ * the entry's in-flight fetches to the orphan list, re-enqueue its parked
+ * requests, abandon the block's tx contexts (dropping every pin), release
+ * every page buffer, and tag the block deletion-retained. Called by
+ * TxCommand::CommitOn(obj, ctx) — the central hook — and directly by the
+ * drain's valid-scope expiry, which deletes without running any command.
+ *
+ * A free function defined in cc_entry.cpp because it needs complete CcShard
+ * and FetchHub types, which this header only forward-declares. `lke` may be
+ * null (skip the hub half); `shard` may be null (no parked-request wake).
+ *
+ * @return true if `obj` was paged and was retired (the caller must KEEP the
+ * payload rather than nulling it); false if not paged.
+ */
+bool RetirePagedPayloadOnDelete(TxObject *obj,
+                                KeyGapLockAndExtraData *lke,
+                                CcShard *shard);
 struct StandbyForwardEntry;
 
 template <typename KeyT,
@@ -71,7 +118,13 @@ struct CcPage;
 struct FlushRecord
 {
 private:
-    std::variant<std::shared_ptr<TxRecord>, BlobTxRecord> payload_;
+    // The third alternative is the §9 indivisible flush unit of a paged
+    // large object (eloqkv docs/08-paged-objects.md): metadata row + dirty
+    // pages by reference + pending deletes, expanded into 1 + N store rows
+    // by the handler at write time. A single record cannot be split by the
+    // batching layer, which is what enforces all-or-nothing structurally.
+    std::variant<std::shared_ptr<TxRecord>, BlobTxRecord, PagedObjectFlush>
+        payload_;
 
     // Variant holds either TxKey or key index.
     std::variant<TxKey, size_t> flush_key_;
@@ -234,6 +287,38 @@ public:
         }
     }
 
+    /**
+     * @brief Installs the §9 paged flush unit as this record's payload.
+     */
+    void SetPagedPayload(PagedObjectFlush &&paged)
+    {
+        payload_.emplace<2>(std::move(paged));
+    }
+
+    bool HoldsPagedPayload() const
+    {
+        return payload_.index() == 2;
+    }
+
+    const PagedObjectFlush &GetPagedPayload() const
+    {
+        assert(payload_.index() == 2);
+        return std::get<2>(payload_);
+    }
+
+    /**
+     * @brief Moves the paged flush unit out, for the scan → data_sync_vec
+     * hand-off that carries an exported record to the flush worker. Moving
+     * rather than copying matters: the page list holds shared_ptrs to live
+     * page buffers, and §9's whole point is that page bytes are never copied
+     * on the flush path.
+     */
+    PagedObjectFlush ReleasePagedPayload()
+    {
+        assert(payload_.index() == 2);
+        return std::move(std::get<2>(payload_));
+    }
+
     const TxRecord *Payload() const
     {
         if (payload_.index() == 0)
@@ -244,13 +329,23 @@ public:
             }
             return std::get<0>(payload_).get();
         }
-        else
+        else if (payload_.index() == 1)
         {
             if (std::get<1>(payload_).value_.empty())
             {
                 return nullptr;
             }
             return &std::get<1>(payload_);
+        }
+        else
+        {
+            // A paged payload is not a TxRecord: consumers must branch on
+            // HoldsPagedPayload() first. Tripping here means a flush-path
+            // consumer was not ported to paged objects — fail loudly rather
+            // than have nullptr read as RecordStatus::Deleted.
+            assert(false &&
+                   "paged flush payload reached an unported Payload() call");
+            return nullptr;
         }
     }
 
@@ -262,6 +357,21 @@ public:
 
     size_t PayloadSize() const
     {
+        if (payload_.index() == 2)
+        {
+            // Metadata row plus every non-null page row: the real bytes the
+            // flush will write, so batch sizing stays honest (§9).
+            const PagedObjectFlush &paged = std::get<2>(payload_);
+            size_t size = paged.metadata_.size();
+            for (const PagedFlushPage &page : paged.pages_)
+            {
+                if (page.buf_ != nullptr)
+                {
+                    size += paged.page_size_;
+                }
+            }
+            return size;
+        }
         return Payload() == nullptr ? 0 : Payload()->Size();
     }
 
@@ -904,6 +1014,26 @@ struct NonVersionedPayload
             tx_obj.DeserializeObject(data, offset).release()));
     }
 
+    /**
+     * @brief Length-bounded, fallible variant for STORE-sourced rows
+     * (eloqkv docs/08 §5). On failure the current payload is left untouched
+     * — the caller decides how a corrupt row is surfaced.
+     * @return true if the row parsed and the payload was replaced.
+     */
+    bool DeserializeCurrentPayload(const char *data,
+                                   size_t avail,
+                                   size_t &offset)
+    {
+        ValueT tx_obj;
+        TxRecord::Uptr rec = tx_obj.DeserializeObject(data, avail, offset);
+        if (rec == nullptr)
+        {
+            return false;
+        }
+        cur_payload_.reset(static_cast<ValueT *>(rec.release()));
+        return true;
+    }
+
     std::shared_ptr<ValueT> VersionedCurrentPayload()
     {
         assert(false);
@@ -1492,26 +1622,60 @@ public:
                 const_cast<LruEntry *>(static_cast<const LruEntry *>(this));
             this->SetBeingCkpt();
 
-            if (rec_status == RecordStatus::Normal)
+            // A paged payload (eloqkv docs/08-paged-objects.md) exports the
+            // §9 indivisible unit — metadata row + every dirty page + every
+            // pending delete — instead of a serialized blob. Deletion
+            // exports the whole-object fan-out: every live page id as a
+            // delete, which is why a logically deleted paged object keeps
+            // its metadata block until the deletion flushes (§9). Only the
+            // non-versioned hash-partitioned object shape can be paged.
+            bool paged_export = false;
+            if constexpr (!VersionedRecord && !RangePartitioned &&
+                          std::is_base_of_v<TxObject, ValueT>)
             {
-                if (VersionedRecord)
+                if (payload_.cur_payload_ != nullptr)
                 {
-                    ref.SetVersionedPayload(payload_.VersionedCurrentPayload());
-                }
-                else
-                {
-                    ref.SetNonVersionedPayload(payload_.cur_payload_.get());
+                    if (const PagedTxObject *paged =
+                            payload_.cur_payload_->AsPaged())
+                    {
+                        // Named boundaries for the §11 crash matrix.  They
+                        // bracket the exact interval in which export takes
+                        // shared ownership of dirty page buffers; timing-only
+                        // process kills cannot prove which side of that
+                        // ownership boundary they reached.
+                        ACTION_FAULT_INJECTOR("paged_flush_before_export");
+                        ref.SetPagedPayload(paged->ExportPagedFlush(
+                            rec_status != RecordStatus::Normal));
+                        ACTION_FAULT_INJECTOR("paged_flush_after_export");
+                        paged_export = true;
+                    }
                 }
             }
-            else
+
+            if (!paged_export)
             {
-                if (VersionedRecord)
+                if (rec_status == RecordStatus::Normal)
                 {
-                    ref.SetVersionedPayload(nullptr);
+                    if (VersionedRecord)
+                    {
+                        ref.SetVersionedPayload(
+                            payload_.VersionedCurrentPayload());
+                    }
+                    else
+                    {
+                        ref.SetNonVersionedPayload(payload_.cur_payload_.get());
+                    }
                 }
                 else
                 {
-                    ref.SetNonVersionedPayload(nullptr);
+                    if (VersionedRecord)
+                    {
+                        ref.SetVersionedPayload(nullptr);
+                    }
+                    else
+                    {
+                        ref.SetNonVersionedPayload(nullptr);
+                    }
                 }
             }
 
@@ -1748,7 +1912,46 @@ public:
      *               expired.
      * @param cur_ver
      */
-    void TryCommitBufferedCommands(uint64_t &cur_ver, uint64_t now_ts)
+    /**
+     * @brief Applies buffered transaction commands in version order.
+     *
+     * @param cur_ver in/out: the object version applied so far. It advances
+     *        past every transaction this call commits, and stops at the first
+     *        one it cannot.
+     * @return True if the drain ran to the end of what it could apply. False
+     *         only when a paged CommitOn hit a non-resident page: the drain
+     *         stopped there, the faulting transaction is still at the head of
+     *         the buffered list with its applied prefix recorded, and the
+     *         caller must fetch the object's pending pages and re-drive
+     *         (docs/08 §10). A false return is not an error and loses nothing
+     *         — the commands remain buffered.
+     */
+    /**
+     * @brief The record status a buffered-command drain left behind. A null
+     * payload is Deleted; a paged block marked deletion-retained is ALSO
+     * Deleted — it survives only to give the deletion flush its page-id
+     * list (docs/08 §9). Every drain caller must use this instead of
+     * checking payload nullness, or a replayed deletion reads as Normal.
+     */
+    RecordStatus DrainedPayloadStatus() const
+    {
+        const TxObject *obj =
+            reinterpret_cast<const TxObject *>(payload_.cur_payload_.get());
+        if (obj == nullptr)
+        {
+            return RecordStatus::Deleted;
+        }
+        const PagedTxObject *paged = obj->AsPaged();
+        if (paged != nullptr && paged->IsDeletionRetained())
+        {
+            return RecordStatus::Deleted;
+        }
+        return RecordStatus::Normal;
+    }
+
+    bool TryCommitBufferedCommands(CcShard *shard,
+                                   uint64_t &cur_ver,
+                                   uint64_t now_ts)
     {
         BufferedTxnCmdList &buffered_cmd_list = this->BufferedCommandList();
         std::deque<TxnCmd> &txn_cmd_list = buffered_cmd_list.txn_cmd_list_;
@@ -1792,8 +1995,17 @@ public:
             if (it->valid_scope_ < now_ts)
             {
                 // If this key has gone out of its valid scope, we
-                // can treat this txn command as a delete command.
-                payload_.SetCurrentPayload(nullptr);
+                // can treat this txn command as a delete command. A DELETED
+                // paged block is retained for its page-id list — the
+                // deletion fan-out (docs/08 §9) — never nulled.
+                if (!RetirePagedPayloadOnDelete(
+                        reinterpret_cast<TxObject *>(
+                            payload_.cur_payload_.get()),
+                        this->GetKeyGapLockAndExtraData(),
+                        shard))
+                {
+                    payload_.SetCurrentPayload(nullptr);
+                }
             }
             else if (!it->cmd_list_.empty())
             {
@@ -1807,9 +2019,29 @@ public:
                 {
                     payload_.SetCurrentPayload(nullptr);
                 }
-                // apply the commands of this txn
-                for (auto &cmd : it->cmd_list_)
+                // Apply the commands of this txn, resuming after whatever
+                // prefix an earlier pass already applied (non-zero only after
+                // a paged page fault stopped this txn mid-way).
+                for (size_t idx = it->applied_prefix_;
+                     idx < it->cmd_list_.size();
+                     ++idx)
                 {
+                    auto &cmd = it->cmd_list_[idx];
+                    {
+                        // A deletion-retained block is logically ABSENT: a
+                        // replayed recreate must not mutate the dead object.
+                        // Replacing it drops the deletion's page-row
+                        // inventory — the accepted §14 replacement-orphan
+                        // case, identical to a live recreate-over-deleted.
+                        TxObject *cur_obj = reinterpret_cast<TxObject *>(
+                            payload_.cur_payload_.get());
+                        if (cur_obj != nullptr &&
+                            cur_obj->AsPaged() != nullptr &&
+                            cur_obj->AsPaged()->IsDeletionRetained())
+                        {
+                            payload_.SetCurrentPayload(nullptr);
+                        }
+                    }
                     if (payload_.cur_payload_ == nullptr)
                     {
                         std::unique_ptr<TxRecord> obj_ptr =
@@ -1818,8 +2050,27 @@ public:
                     }
                     TxObject *obj_ptr = reinterpret_cast<TxObject *>(
                         payload_.cur_payload_.get());
-                    TxObject *new_obj_ptr =
-                        reinterpret_cast<TxObject *>(cmd->CommitOn(obj_ptr));
+                    // The 2-arg overload applies the paged-deletion rule
+                    // centrally: a deleted paged block is retired and
+                    // RETAINED (same pointer back, tagged), so no branch
+                    // here may treat nullness as the deletion signal —
+                    // DrainedPayloadStatus reads the tag.
+                    TxObject *new_obj_ptr = cmd->CommitOn(
+                        obj_ptr,
+                        PagedCommitContext{shard,
+                                           this->GetKeyGapLockAndExtraData()});
+                    if (!PagedCommitApplied(obj_ptr, new_obj_ptr))
+                    {
+                        // This command needs a page that is not resident. The
+                        // object is untouched, so stop here rather than skip
+                        // it: commands must apply in order, and cur_ver must
+                        // not advance past a txn that has not fully applied.
+                        // Remember how far this txn got, drop the txns already
+                        // finished, and let the caller fetch and re-drive.
+                        it->applied_prefix_ = idx;
+                        txn_cmd_list.erase(txn_cmd_list.begin(), erase_it);
+                        return false;
+                    }
                     if (new_obj_ptr != obj_ptr)
                     {
                         // FIXME(lzx): should we use "new_obj_ptr->Clone()" ?
@@ -1827,6 +2078,7 @@ public:
                             std::unique_ptr<TxRecord>(new_obj_ptr));
                     }
                 }
+                it->applied_prefix_ = 0;
             }
 
             cur_ver = it->new_version_;
@@ -1848,12 +2100,22 @@ public:
                        << ", msg commit ts: "
                        << txn_cmd_list.front().new_version_;
         }
+        return true;
     }
     /**
      * The replayed commands must apply in order. Replayed commands are first
      * stored in buffered_cmd_list_ and committed in order.
      */
-    void EmplaceAndCommitBufferedTxnCommand(TxnCmd &txn_cmd, uint64_t now_ts)
+    /**
+     * @brief Buffers a replayed transaction's commands and drains what it can.
+     *
+     * @return True if the drain finished. False when a paged CommitOn stopped
+     * on a non-resident page: the commands stay buffered and the caller MUST
+     * issue the page fetches, because this class cannot reach the store.
+     */
+    bool EmplaceAndCommitBufferedTxnCommand(CcShard *shard,
+                                            TxnCmd &txn_cmd,
+                                            uint64_t now_ts)
     {
         uint64_t cur_ver = this->CommitTs();
         RecordStatus status = this->PayloadStatus();
@@ -1864,13 +2126,21 @@ public:
 
         buffered_cmd_list.EmplaceTxnCmd(txn_cmd, now_ts);
 
+        bool drained = true;
         if (try_commit)
         {
-            TryCommitBufferedCommands(cur_ver, now_ts);
-            status = payload_.cur_payload_ == nullptr ? RecordStatus::Deleted
-                                                      : RecordStatus::Normal;
+            // A page-fault stall MUST be reported to the caller. This function
+            // cannot issue the fetch itself -- CcEntry has no route to the
+            // store -- and the replay path drains through here, not through
+            // BackFill, so discarding the result left the fault detected and
+            // then dropped: the object recorded pending faults, no fetch was
+            // ever issued, and the drain re-ran thousands of times making no
+            // progress while the buffered list grew.
+            drained = TryCommitBufferedCommands(shard, cur_ver, now_ts);
+            status = DrainedPayloadStatus();
         }
         this->SetCommitTsPayloadStatus(cur_ver, status);
+        return drained;
     }
 
     void UpdateCcEntry(
@@ -1987,21 +2257,13 @@ public:
 
                     DLOG(INFO) << "Try commit buffered command on "
                                   "UpdateCcEntry(...)";
-                    TryCommitBufferedCommands(new_commit_ts, now_ts);
+                    TryCommitBufferedCommands(shard, new_commit_ts, now_ts);
                     int64_t buffered_cmd_cnt_new = buffered_cmd_list.Size();
                     this->UpdateBufferedCommandCnt(
                         shard, buffered_cmd_cnt_new - buffered_cmd_cnt_old);
 
-                    if (payload_.cur_payload_)
-                    {
-                        this->SetCommitTsPayloadStatus(new_commit_ts,
-                                                       RecordStatus::Normal);
-                    }
-                    else
-                    {
-                        this->SetCommitTsPayloadStatus(new_commit_ts,
-                                                       RecordStatus::Deleted);
-                    }
+                    this->SetCommitTsPayloadStatus(new_commit_ts,
+                                                   DrainedPayloadStatus());
 
                     if (buffered_cmd_list.Empty())
                     {

@@ -888,8 +888,44 @@ bool FetchRecordCc::Execute(CcShard &ccs)
                     cce_, *archive_records_, false);
             }
 
+            // Test hook: truncate the fetched row so the bounded metadata
+            // parse fails — the store-corruption path is otherwise
+            // unreachable from a client. Arm ONLY around a fetch of a paged
+            // key: legacy monolithic parsing is unbounded by contract and a
+            // truncated monolithic row would read out of bounds.
+            CODE_FAULT_INJECTOR("corrupt_record_bytes", {
+                if (rec_status_ == RecordStatus::Normal && !rec_str_.empty())
+                {
+                    LOG(INFO) << "FAULTLOG corrupt_record_bytes size="
+                              << rec_str_.size();
+                    rec_str_.resize(rec_str_.size() / 2);
+                }
+            });
+
+            // Test hook: the EMPTY-Normal-row corruption class (a review
+            // follow-up) — a row with status Normal and zero payload bytes,
+            // which must be refused by BackFill rather than stamping the
+            // entry Normal around the parse it skips.
+            CODE_FAULT_INJECTOR("empty_record_row", {
+                if (rec_status_ == RecordStatus::Normal && !rec_str_.empty())
+                {
+                    LOG(INFO) << "FAULTLOG empty_record_row size was "
+                              << rec_str_.size();
+                    rec_str_.clear();
+                }
+            });
+
+            // A corrupt row must NOT return false (false = retry, which
+            // would spin on the same bytes forever): BackFill reports it
+            // here, and the requesters take the same deterministic error
+            // path a transport failure takes.
+            bool corrupt = false;
             succ = lock_->GetCcMap()->BackFill(
-                cce_, rec_ts_, rec_status_, rec_str_);
+                cce_, rec_ts_, rec_status_, rec_str_, &corrupt);
+            if (corrupt && error_code_ == 0)
+            {
+                error_code_ = static_cast<int>(CcErrorCode::DATA_STORE_ERR);
+            }
         }
 
         if (!succ)
@@ -924,12 +960,39 @@ bool FetchRecordCc::Execute(CcShard &ccs)
             cce_->RecycleKeyLock(ccs);
         }
 
+        // Computed OUTSIDE the store-specific guard so it is compiled and
+        // syntax-checked in every configuration. Only the reopen itself is
+        // EloqStore-specific; getting this predicate wrong in a build that
+        // never compiles it is how dead-but-shipped code rots.
+        //
+        // A non-empty buffer is NOT sufficient (docs/08 §10, phase 6b). With
+        // paged objects a buffered head can be waiting on a PAGE, not on a
+        // missing version, and re-fetching the whole record then changes
+        // nothing: the reopen returns the same version, the head still cannot
+        // apply, and it reopens again -- spinning against the store while
+        // racing the page fetch already outstanding on this same entry.
+        //
+        // Reopen only when the head wants a version NEWER than the one this
+        // fetch just delivered, which is the only case a fresher record can
+        // resolve. Compared against rec_ts_ rather than the entry's commit ts
+        // because cce_ is an LruEntry here and the commit ts lives on the
+        // versioned subclass; rec_ts_ is also the more direct question -- "is
+        // what I just fetched too old for the head?".
+        bool version_hole = false;
+        if (cce_->HasBufferedCommandList())
+        {
+            const std::deque<TxnCmd> &cmds =
+                cce_->BufferedCommandList().txn_cmd_list_;
+            version_hole = !cmds.empty() && cmds.front().obj_version_ > rec_ts_;
+        }
+        (void) version_hole;
+
 #ifdef DATA_STORE_TYPE_ELOQDSS_ELOQSTORE
         // An archives-only fetch goes through BackFillArchives instead of
         // BackFill, so its buffered commands are untouched and their presence
         // proves nothing.
-        should_reopen = error_code_ == 0 && !only_fetch_archives_ &&
-                        cce_->HasBufferedCommandList();
+        should_reopen =
+            error_code_ == 0 && !only_fetch_archives_ && version_hole;
 #endif
     }
 
@@ -1344,6 +1407,11 @@ bool UpdateCceCkptTsCc::Execute(CcShard &ccs)
 
                 assert(v_entry->CommitTs() > 1);
                 bool was_dirty = v_entry->IsDirty();
+                // Paged large objects (eloqkv docs/08 §9): mark flushed
+                // pages and drain pending deletes under the ts guard. A
+                // virtual no-op for non-object maps and an AsPaged() null
+                // check for monolithic payloads.
+                ccm->OnPagedFlushApplied(v_entry, ref.commit_ts_);
                 v_entry->SetCkptTs(ref.commit_ts_);
                 v_entry->ClearBeingCkpt();
                 ccm->OnEntryFlushed(was_dirty, v_entry->IsPersistent());
@@ -1556,21 +1624,61 @@ void RestoreCcMapCc::DecodedDataItem(
 
 bool ShardCleanCc::Execute(CcShard &ccs)
 {
+    // Test hook: keep the cleaner alive but DRAIN NOTHING, so memory waiters
+    // accumulate past the 20-per-call dequeue batch. Without it the cleaner
+    // drains continuously and the wait list never exceeds one batch, which
+    // makes a >20-waiter regression impossible to stage from a client (the
+    // reason an earlier version of paged_admission_batch_drain.py reported
+    // waiters_remaining=0 on every terminal marker and proved nothing about
+    // the batch boundary). Debug-only.
+    CODE_FAULT_INJECTOR("defer_shard_clean_drain", {
+        LOG_EVERY_N(INFO, 50) << "FAULTLOG defer_shard_clean_drain waiters="
+                              << ccs.WaitListSizeForMemory();
+        ccs.Enqueue(this);
+        return false;
+    });
+
     CcShardHeap *shard_heap = ccs.GetShardHeap();
     int64_t heap_alloc, heap_commit;
-    if (shard_heap != nullptr && shard_heap->Full(&heap_alloc, &heap_commit))
+    // A page-admission refusal starts a campaign independently of Full():
+    // admission refuses at `allocated + requested > limit`, the heap reports
+    // full at `allocated >= limit`, and in the gap between them the cleaner
+    // used to reclaim nothing and wake the waiter straight back into the
+    // same refusal (docs/08 §8 — measured at ~130 k refusals/s, ~200 % CPU).
+    const bool admit_campaign = ccs.CleanCampaignRequested();
+    // Full() is the START trigger ONLY. Once a campaign is in flight it must
+    // run to its target on its own state, because the first thing a
+    // successful sweep does is make Full() false — after which this branch
+    // would be skipped, the campaign abandoned short of the 10 % target, and
+    // campaign_started_/free_count_ left set to leak into the next one (a
+    // reported defect; the same root cause as using Full() for both roles).
+    const bool campaign_in_flight = campaign_started_;
+    if (shard_heap != nullptr && (shard_heap->Full(&heap_alloc, &heap_commit) ||
+                                  admit_campaign || campaign_in_flight))
     {
         assert(txservice_enable_cache_replacement);
         bool need_yield = false;
-        if (shard_heap->NeedCleanShard(heap_alloc, heap_commit))
+        if (shard_heap->NeedCleanShard(heap_alloc, heap_commit) ||
+            admit_campaign || campaign_in_flight)
         {
+            // Attribution is per CAMPAIGN, so reset once at the start; later
+            // rounds (need_yield re-enqueues) accumulate into it.
+            if (!campaign_started_)
+            {
+                ccs.ResetCleanBlockedCounters();
+                free_count_ = 0;
+                campaign_started_ = true;
+            }
             size_t free_size = 0;
             std::tie(free_size, need_yield) = ccs.Clean();
             free_count_ += free_size;
         }
 
-        if (shard_heap->Full(&heap_alloc, &heap_commit) &&
-            shard_heap->NeedCleanShard(heap_alloc, heap_commit))
+        // Continue the campaign until the 10 % target is met, not merely
+        // until the heap dips back below its threshold — Full() refreshes
+        // the counters as a side effect.
+        shard_heap->Full(&heap_alloc, &heap_commit);
+        if (shard_heap->NeedMoreCleaning(heap_alloc))
         {
             if (need_yield)
             {
@@ -1580,28 +1688,111 @@ bool ShardCleanCc::Execute(CcShard &ccs)
             }
             else
             {
-                // Reach to the tail ccpage, but the allocated memory is
-                // still larger than the heap threshold, just abort the
-                // waiting ccrequests.
-                ccs.AbortRequestsAfterMemoryFree();
+                // The campaign swept to the tail and still cannot meet the
+                // target. WHY decides what happens next (eloqkv docs/08 §8)
+                // — but EVERY branch must leave the memory waiters either
+                // woken or aborted. AbortRequestsAfterMemoryFree only fails
+                // requests whose AbortIfOom() is set, which ordinary Redis
+                // object commands do NOT set, so a branch that only aborts
+                // leaves them parked with nothing left to re-trigger the
+                // cleaner: a hang, not a preemption (a reported defect).
+                const size_t dirty_blocked = ccs.CleanDirtyBlocked();
+                const size_t pin_blocked = ccs.CleanPinBlocked();
+                // Names the branch taken, so a test can prove WHICH terminal
+                // path it exercised rather than inferring it from timing.
+                const char *terminal_branch = "none";
 
-                // Notify the checkpointer thread to do checkpoint if there
-                // is not freeable entries to be kicked out from ccmap and
-                // if the shard is not doing defrag.
-                if (free_count_ == 0 && !shard_heap->IsDefragHeapCcOnFly() &&
-                    !Sharder::Instance().GetCheckpointer()->IsOngoingDataSync())
+                if (free_count_ > 0)
                 {
-                    ccs.NotifyCkpt(true);
+                    terminal_branch = "freed-short-of-target";
+                    // Reclaimed something, just not the full target: the
+                    // waiters may well fit now, so retry them rather than
+                    // treating this as a terminal failure.
+                }
+                else if (dirty_blocked > 0)
+                {
+                    terminal_branch = "dirty-blocked";
+                    // Dirty candidates dominate: a checkpoint makes them
+                    // reclaimable, so this is NOT a deadlock. Request it and
+                    // let the waiters retry; they re-request a campaign if
+                    // still unadmitted, which keeps the cleaner running
+                    // until the checkpoint lands.
+                    if (!shard_heap->IsDefragHeapCcOnFly() &&
+                        !Sharder::Instance()
+                             .GetCheckpointer()
+                             ->IsOngoingDataSync())
+                    {
+                        ccs.NotifyCkpt(true);
+                    }
+                }
+                else if (pin_blocked > 0)
+                {
+                    terminal_branch = "pin-blocked";
+                    // Nothing dirty, nothing freed: every candidate is
+                    // pinned by another in-flight faulter. The holders are
+                    // ordinary commands that finish on their own, so the
+                    // waiters retry until the pins drop; requests that
+                    // opted into OOM aborts are failed here.
+                    LOG_EVERY_N(WARNING, 1000)
+                        << "shard clean freed nothing with " << pin_blocked
+                        << " pin-blocked candidate(s) and none dirty; "
+                           "retrying memory waiters until holders release "
+                           "(docs/08 §8).";
+                    ccs.AbortRequestsAfterMemoryFree();
+                }
+                else
+                {
+                    terminal_branch = "nothing-reclaimable";
+                    // Nothing reclaimable at all.
+                    ccs.AbortRequestsAfterMemoryFree();
+                    if (!shard_heap->IsDefragHeapCcOnFly() &&
+                        !Sharder::Instance()
+                             .GetCheckpointer()
+                             ->IsOngoingDataSync())
+                    {
+                        ccs.NotifyCkpt(true);
+                    }
                 }
 
+                // ONE wake for every terminal branch, and it must honour the
+                // return value: DequeueWaitListAfterMemoryFree releases at
+                // most 20 requests per call, so discarding it stranded
+                // everyone past the twentieth. They would wait forever —
+                // the woken 20 may all succeed and never request another
+                // campaign, and releasing a pin does not wake the cleaner.
+                // Re-enqueueing while waiters remain drains them in batches
+                // instead of waking them all at once (a reported defect;
+                // the target-reached branch already did this, which is why
+                // a 25-waiter test passed there and only there).
+                bool wait_list_empty = ccs.DequeueWaitListAfterMemoryFree();
+                LOG_EVERY_N(INFO, 20)
+                    << "CLEANLOG terminal branch=" << terminal_branch
+                    << " freed=" << free_count_
+                    << " dirty_blocked=" << dirty_blocked
+                    << " pin_blocked=" << pin_blocked
+                    << " waiters_remaining=" << (!wait_list_empty);
                 free_count_ = 0;
-                // Return true will set the request as free, which means the
-                // request is not in working state.
-                return true;
+                campaign_started_ = false;
+                ccs.ClearCleanCampaignRequest();
+                if (!wait_list_empty)
+                {
+                    ccs.Enqueue(this);
+                }
+                return wait_list_empty;
             }
         }
         else
         {
+            // Target met: the campaign is over.
+            ccs.ClearCleanCampaignRequest();
+            // Always wake the waiters after a campaign. An earlier
+            // version failed them after three fruitless campaigns to stop
+            // the refuse/wake cycle; that traded a bounded spin for a HANG,
+            // because once parked, nothing else re-triggers the cleaner and
+            // the request was never resumed even after memory became
+            // available. Liveness first: wake them, let them retry, and let
+            // a genuinely unreclaimable shard be caught by the pin-blocked
+            // branch above.
             // Get the free memory, re-run a batch of the waiting ccrequest.
             bool wait_list_empty = ccs.DequeueWaitListAfterMemoryFree();
             if (!wait_list_empty)
@@ -1611,14 +1802,22 @@ bool ShardCleanCc::Execute(CcShard &ccs)
 
             // Reset the value if the ccrequest is finished.
             free_count_ = (wait_list_empty) ? 0 : free_count_;
+            if (wait_list_empty)
+            {
+                campaign_started_ = false;
+            }
             return wait_list_empty;
         }
     }
     else
     {
-        // There is available memory on this shard, re-run a batch of the
-        // waiting ccrequest if has any waiting request, otherwise, finish
-        // this shard clean ccrequests.
+        // No campaign is in flight and memory is available: re-run a batch of
+        // the waiting ccrequests, or finish. Clear the campaign accounting
+        // defensively — reaching here means no campaign is running, and stale
+        // free_count_/attribution must not leak into the next one.
+        campaign_started_ = false;
+        free_count_ = 0;
+        ccs.ClearCleanCampaignRequest();
         bool wait_list_empty = ccs.DequeueWaitListAfterMemoryFree();
         if (!wait_list_empty)
         {

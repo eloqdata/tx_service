@@ -26,6 +26,7 @@
 #include <bthread/mutex.h>
 
 #include <atomic>
+#include <deque>
 #include <functional>
 #include <memory>
 #include <queue>
@@ -438,6 +439,10 @@ struct PartitionBatchRequest
     std::vector<uint64_t> records_ttl;
     std::vector<size_t> record_tmp_mem_area;
     std::vector<WriteOpType> op_types;
+    // Owned storage for derived page-row keys of paged large objects (eloqkv
+    // docs/08-paged-objects.md §5): key_parts holds views into these. A
+    // deque so growth never invalidates references to earlier elements.
+    std::deque<std::string> paged_key_storage;
     uint16_t parts_cnt_per_key;
     uint16_t parts_cnt_per_record;
 
@@ -476,6 +481,7 @@ struct PartitionBatchRequest
         record_tmp_mem_area.shrink_to_fit();
         op_types.clear();
         op_types.shrink_to_fit();
+        paged_key_storage.clear();
         parts_cnt_per_key = 1;
         parts_cnt_per_record = 1;
     }

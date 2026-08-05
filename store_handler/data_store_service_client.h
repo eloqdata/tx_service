@@ -162,6 +162,11 @@ public:
     // The maximum number of retries for RPC requests.
     static const int retry_limit_ = 2;
 
+    // Narrow test seam for the paged record-to-row expansion. The accessor
+    // invokes only PreparePartitionBatches; production callers still cannot
+    // bypass PutAll's ownership and callback protocol.
+    friend class PagedStoreBatchTestAccess;
+
     /**
      * Connect to remote data store service.
      */

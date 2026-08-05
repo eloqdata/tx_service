@@ -378,6 +378,17 @@ void CcMap::ReleaseCceLock(NonBlockingLock *lock,
         return;
     }
 
+    // A transaction releasing its lock on the entry is done with the object,
+    // so any page pins it accumulated go with it (eloqkv
+    // docs/08-paged-objects.md §6: pins outlive the ApplyCc but not the
+    // transaction). This is the one choke point every commit, abort and
+    // teardown path passes through, so no caller has to remember.
+    //
+    // Only the surviving payload needs this. An aborted dirty payload is
+    // destroyed outright, and pins live *in* the object, so they die with it
+    // (§7 "pins die with the block").
+    ReleaseTxPagePins(cce, tx_number);
+
     LockType unlock_type = LockType::NoLock;
     switch (lk_type)
     {
@@ -515,4 +526,15 @@ void CcMap::ResetRangeStatus(uint32_t partition_id)
                << " status: " << std::boolalpha << std::get<2>(it->second);
 }
 
+void ApplyCc::AbortCcRequest(CcErrorCode err_code)
+{
+    if (block_type_ == ApplyCc::ApplyBlockType::BlockOnPageFault &&
+        CcePtr() != nullptr && ccm_ != nullptr)
+    {
+        ccm_->ClearPageFaultParking(CcePtr(), Txn());
+        block_type_ = ApplyCc::ApplyBlockType::NoBlocking;
+        SetCcePtr(nullptr);
+    }
+    TemplatedCcRequest<ApplyCc, ObjectCommandResult>::AbortCcRequest(err_code);
+}
 }  // namespace txservice

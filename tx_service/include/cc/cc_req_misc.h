@@ -1364,6 +1364,10 @@ public:
 
 private:
     size_t free_count_{0};
+    // True once this campaign's first sweep has run, so the per-campaign
+    // reclaim attribution (docs/08 §8) is reset once at the start rather
+    // than on every re-enqueued round.
+    bool campaign_started_{false};
 };
 
 struct FetchTableRangeSizeCc : public CcRequestBase

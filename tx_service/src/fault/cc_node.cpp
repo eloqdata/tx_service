@@ -27,9 +27,11 @@
 #include <bthread/mutex.h>
 
 #include <atomic>
+#include <chrono>
 #include <cstdio>
 #include <iostream>
 #include <mutex>
+#include <thread>
 
 #include "cc_map.h"
 #include "cc_node_service.h"
@@ -83,8 +85,10 @@ void CcNode::FinishLogGroupReplay(uint32_t log_group_id,
                                   uint64_t last_ckpt_ts)
 {
     // recovery_mux_ is used to protect recovered_log_groups_, since raft
-    // service thread will also modify it concurrently.
-    std::lock_guard<std::mutex> lk(recovery_mux_);
+    // service thread will also modify it concurrently. unique_lock rather than
+    // lock_guard because the promotion decision below is acted on AFTER this is
+    // released -- see the comment at that point.
+    std::unique_lock<std::mutex> lk(recovery_mux_);
 
     // ignore the FinishReplayMsg whose ng_term is smaller than the current
     // candidate_leader_term_ or if this cc node is not recovering.
@@ -113,21 +117,334 @@ void CcNode::FinishLogGroupReplay(uint32_t log_group_id,
         local_cc_shards_.SetTxIdent(latest_committed_txn_no);
     }
 
-    auto lg_it = recovered_log_groups_.emplace(log_group_id);
-    if (lg_it.second && recovered_log_groups_.size() == log_group_cnt_)
+    bool all_groups_replayed = false;
     {
-        // reset the recovered_log_groups_ since we have finished the log replay
-        // work for the current term.
-        recovered_log_groups_.clear();
+        auto lg_it = recovered_log_groups_.emplace(log_group_id);
+        if (lg_it.second && recovered_log_groups_.size() == log_group_cnt_)
+        {
+            // reset the recovered_log_groups_ since we have finished the log
+            // replay work for the current term.
+            recovered_log_groups_.clear();
+            candidate_term = Sharder::Instance().CandidateLeaderTerm(ng_id_);
+            all_groups_replayed = true;
+        }
+    }
+    lk.unlock();
 
-        candidate_term = Sharder::Instance().CandidateLeaderTerm(ng_id_);
-        Sharder::Instance().SetLeaderTerm(ng_id_, candidate_term);
-        LOG(INFO) << "The leader of cc node group ng#" << ng_id_
-                  << " with the term " << candidate_term
-                  << " has been recovered.";
-        Sharder::Instance().SetCandidateTerm(ng_id_, -1);
+    if (!all_groups_replayed)
+    {
+        return;
+    }
 
-        Sharder::Instance().NodeGroupFinishRecovery(ng_id_);
+    // Decided under recovery_mux_ above, ACTED ON after releasing it. The
+    // deferred waiter takes that mutex when it promotes, and holding it across
+    // a shard round trip while the raft service thread also wants it is a
+    // lock-ordering hazard even where it happens to resolve.
+    //
+    // Every log record is processed, but a paged object's replayed tail may
+    // still be buffered behind a page fetch (docs/08 §10): the drain stops on a
+    // page that is not resident, and a page read from the store takes far
+    // longer than replay itself. Promoting now would let this node serve a key
+    // whose acknowledged tail has not been applied.
+    ReplayWorkCounts work = DrainBlockedCount();
+    if (work.Total() == 0)
+    {
+        std::lock_guard<std::mutex> promote_lk(recovery_mux_);
+        PromoteAfterReplay(candidate_term);
+    }
+    else
+    {
+        StartDeferredPromotion(candidate_term, work.Total());
+    }
+}
+
+CcNode::ReplayWorkCounts CcNode::DrainBlockedCount() const
+{
+    std::atomic<size_t> drains{0};
+    std::atomic<size_t> buffered{0};
+    std::atomic<size_t> fetches{0};
+    size_t core_cnt = local_cc_shards_.Count();
+    WaitableCc count_cc(
+        [&drains, &buffered, &fetches, this](CcShard &ccs)
+        {
+            // Three things mean "recovery still has work", and all three are
+            // needed. A drain already parked on a page. Commands buffered and
+            // waiting. And record fetches still in flight -- replay reports a
+            // log group finished once it has PROCESSED the records, but a key
+            // not in the cache is still being read from the store, and its
+            // replayed commands are not buffered, so not counted anywhere,
+            // until that record lands in BackFill. Gating on the first two
+            // alone measured zero and promoted immediately.
+            drains.fetch_add(ccs.DrainBlockedCount(ng_id_),
+                             std::memory_order_relaxed);
+            int64_t shard_buffered = ccs.BufferedCommandCnt();
+            if (shard_buffered > 0)
+            {
+                buffered.fetch_add(static_cast<size_t>(shard_buffered),
+                                   std::memory_order_relaxed);
+            }
+            fetches.fetch_add(ccs.InFlightRecordFetchCnt(),
+                              std::memory_order_relaxed);
+            return true;
+        },
+        core_cnt);
+    for (uint16_t core_idx = 0; core_idx < core_cnt; ++core_idx)
+    {
+        local_cc_shards_.EnqueueToCcShard(core_idx, &count_cc);
+    }
+    count_cc.Wait();
+    return ReplayWorkCounts{drains.load(std::memory_order_relaxed),
+                            buffered.load(std::memory_order_relaxed),
+                            fetches.load(std::memory_order_relaxed)};
+}
+
+std::string CcNode::DescribeDrainBlocked() const
+{
+    std::string desc;
+    std::mutex desc_mux;
+    size_t core_cnt = local_cc_shards_.Count();
+    WaitableCc desc_cc(
+        [&desc, &desc_mux, this](CcShard &ccs)
+        {
+            std::string part = ccs.DescribeDrainBlocked(ng_id_, 4);
+            if (!part.empty())
+            {
+                std::lock_guard<std::mutex> lk(desc_mux);
+                if (!desc.empty())
+                {
+                    desc.append(", ");
+                }
+                desc.append(part);
+            }
+            return true;
+        },
+        core_cnt);
+    for (uint16_t core_idx = 0; core_idx < core_cnt; ++core_idx)
+    {
+        local_cc_shards_.EnqueueToCcShard(core_idx, &desc_cc);
+    }
+    desc_cc.Wait();
+    return desc;
+}
+
+std::string CcNode::DescribeBufferedCommands() const
+{
+    std::string desc;
+    std::mutex desc_mux;
+    size_t core_cnt = local_cc_shards_.Count();
+    WaitableCc desc_cc(
+        [&desc, &desc_mux, this](CcShard &ccs)
+        {
+            std::string part = ccs.DescribeBufferedCommands(ng_id_, 8);
+            if (!part.empty())
+            {
+                std::lock_guard<std::mutex> lk(desc_mux);
+                if (!desc.empty())
+                {
+                    desc.append(" | ");
+                }
+                desc.append("core ")
+                    .append(std::to_string(ccs.LocalCoreId()))
+                    .append(": ")
+                    .append(part);
+            }
+            return true;
+        },
+        core_cnt);
+    for (uint16_t core_idx = 0; core_idx < core_cnt; ++core_idx)
+    {
+        local_cc_shards_.EnqueueToCcShard(core_idx, &desc_cc);
+    }
+    desc_cc.Wait();
+    return desc;
+}
+
+void CcNode::PromoteAfterReplay(int64_t candidate_term)
+{
+    Sharder::Instance().SetLeaderTerm(ng_id_, candidate_term);
+    LOG(INFO) << "The leader of cc node group ng#" << ng_id_
+              << " with the term " << candidate_term << " has been recovered.";
+    Sharder::Instance().SetCandidateTerm(ng_id_, -1);
+
+    Sharder::Instance().NodeGroupFinishRecovery(ng_id_);
+}
+
+void CcNode::StartDeferredPromotion(int64_t candidate_term, size_t pending)
+{
+    // `pending` is passed in rather than re-counted: the caller already paid
+    // for one shard round trip, and this runs while recovery_mux_ is held.
+    LOG(INFO) << "ng#" << ng_id_ << " term " << candidate_term
+              << ": log replay done, deferring promotion until " << pending
+              << " unit(s) of replay work finish applying";
+
+    // A PTHREAD, deliberately not a bthread. The waiter calls
+    // WaitableCc::Wait(), and a bthread that blocks there without coroutine
+    // yield/resume callbacks pins the brpc worker it is running on -- including
+    // the worker that drives the very CcShard whose reply it is waiting for,
+    // which deadlocks outright. A std::thread waiter cannot capture a worker,
+    // so it is structurally safe (data_substrate/CLAUDE.md, "Threading Model").
+    // Recovery happens once per term, so a short-lived thread costs nothing.
+    try
+    {
+        // Owned and joined by ~CcNode, not detached: a detached thread holding
+        // `this` outlives the object at shutdown, which is a use-after-free
+        // waiting for an unlucky teardown. Any previous waiter has already
+        // finished (one promotion per term), so joining here does not block.
+        if (deferred_promotion_thd_.joinable())
+        {
+            deferred_promotion_thd_.join();
+        }
+        deferred_promotion_thd_ = std::thread(
+            [this, candidate_term] { AwaitDrainsAndPromote(candidate_term); });
+    }
+    catch (const std::system_error &e)
+    {
+        // Could not spawn the waiter. Promoting anyway could serve a key that
+        // is missing acknowledged writes, so stay a candidate and say why:
+        // recovery must be retried.
+        LOG(ERROR) << "ng#" << ng_id_
+                   << ": failed to start the deferred-promotion waiter ("
+                   << e.what()
+                   << "); staying a candidate so no stale key is served";
+    }
+}
+
+void CcNode::AwaitDrainsAndPromote(int64_t candidate_term)
+{
+    // Runs on a pthread (see StartDeferredPromotion), so it sleeps with
+    // std::this_thread rather than bthread_usleep and may block in
+    // WaitableCc::Wait() without capturing a brpc worker.
+    //
+    // The give-up condition is LACK OF PROGRESS, not elapsed time. An absolute
+    // deadline is the wrong shape here: the drain applies buffered commands one
+    // at a time and faults per page, so recovery time grows with the size of
+    // the replayed tail. A fixed 60 s limit wedged a node whose tail was merely
+    // large -- 3000 buffered commands left 238 units outstanding when it fired,
+    // and refusing to promote there left the node permanently unreachable,
+    // which is worse than the hazard the limit was guarding against.
+    //
+    // A drain that is genuinely stuck -- waiting on a page row that will never
+    // arrive -- holds the outstanding count CONSTANT. A drain that is working
+    // moves it, in either direction: down as commands apply, up as later
+    // commands stall on further pages. So any change in the count is treated as
+    // liveness and resets the clock, and only a completely static count for
+    // kStallLimitMs means something is wedged. A key stuck behind others still
+    // gets caught: once the healthy work finishes, the count plateaus on the
+    // stuck remainder and the timer runs out.
+    constexpr int64_t kStallLimitMs = 30 * 1000;
+    constexpr uint32_t kMaxBackoffUs = 50 * 1000;
+    uint32_t backoff_us = 200;
+
+    // Real elapsed time, from a monotonic clock. The previous version summed
+    // its own sleep intervals, which undercounts by the shard round trip that
+    // DrainBlockedCount() pays on every iteration -- so "60 s" was neither 60
+    // seconds nor predictable under load.
+    const auto started = std::chrono::steady_clock::now();
+    auto last_change = started;
+    size_t last_blocked = SIZE_MAX;
+    size_t best_blocked = SIZE_MAX;
+
+    while (true)
+    {
+        if (stop_deferred_promotion_.load(std::memory_order_acquire))
+        {
+            LOG(WARNING) << "ng#" << ng_id_
+                         << ": shutting down while waiting for replayed tails; "
+                            "abandoning this promotion";
+            return;
+        }
+
+        if (Sharder::Instance().CandidateLeaderTerm(ng_id_) != candidate_term)
+        {
+            // The term moved on; this promotion is moot and a later
+            // OnLeaderStart owns the outcome.
+            LOG(WARNING) << "ng#" << ng_id_ << ": term changed from "
+                         << candidate_term
+                         << " while waiting for replayed tails; abandoning "
+                            "this promotion";
+            return;
+        }
+
+        ReplayWorkCounts work = DrainBlockedCount();
+        size_t blocked = work.Total();
+        const auto now = std::chrono::steady_clock::now();
+        const int64_t elapsed_ms =
+            std::chrono::duration_cast<std::chrono::milliseconds>(now - started)
+                .count();
+        if (blocked != last_blocked)
+        {
+            last_change = now;
+            last_blocked = blocked;
+            best_blocked = std::min(best_blocked, blocked);
+        }
+        const int64_t stalled_ms =
+            std::chrono::duration_cast<std::chrono::milliseconds>(now -
+                                                                  last_change)
+                .count();
+        if (blocked == 0)
+        {
+            std::lock_guard<std::mutex> lk(recovery_mux_);
+            if (Sharder::Instance().CandidateLeaderTerm(ng_id_) !=
+                candidate_term)
+            {
+                return;
+            }
+            LOG(INFO) << "ng#" << ng_id_ << ": replayed tails applied after "
+                      << elapsed_ms << " ms; promoting";
+            PromoteAfterReplay(candidate_term);
+            return;
+        }
+
+        if (stalled_ms >= kStallLimitMs)
+        {
+            // Replay work that makes no progress at all means the node cannot
+            // reconstruct acknowledged writes -- the store is missing
+            // something replay depends on, i.e. data corruption. Neither of
+            // the two survivable answers is acceptable: promoting would serve
+            // an object missing acknowledged writes, and returning here (the
+            // previous behaviour) left the node a CANDIDATE forever -- the
+            // replay-done path kept spawning a fresh waiter that re-detected
+            // the same stall every 30 s, an unreachable node with no operator
+            // escape hatch. So die loudly instead: FATAL states the evidence
+            // and aborts, so the failure is a crashed process an operator can
+            // see and act on, not a silent hole or a zombie.
+            //
+            // "blocked" is a SUM of three different things -- parked drains,
+            // buffered commands, and in-flight record fetches -- so do not
+            // describe it as a count of objects. The key list is only ever
+            // populated by the first of the three, and is legitimately empty
+            // when the outstanding work is buffered commands.
+            std::string keys = DescribeDrainBlocked();
+            std::string buffered_detail = DescribeBufferedCommands();
+            LOG(FATAL) << "ng#" << ng_id_
+                       << ": replay work stuck with NO "
+                          "progress for "
+                       << stalled_ms << " ms (" << elapsed_ms
+                       << " ms since replay finished; best seen "
+                       << best_blocked
+                       << "). Outstanding: " << work.parked_drains_
+                       << " parked drain(s), " << work.buffered_cmds_
+                       << " buffered command(s), " << work.record_fetches_
+                       << " in-flight record fetch(es). Replayed commands "
+                          "cannot be applied, which means acknowledged writes "
+                          "cannot be reconstructed from the log and the store "
+                          "-- data corruption. Shutting down rather than "
+                          "serving an object missing acknowledged writes or "
+                          "sitting unpromoted forever. Keys with a parked "
+                          "drain: "
+                       << (keys.empty() ? "(none -- the outstanding work is "
+                                          "not parked drains)"
+                                        : keys)
+                       << ". Buffered-command entries (per key, with the "
+                          "head's version tuple): "
+                       << (buffered_detail.empty() ? "(none)"
+                                                   : buffered_detail);
+            // LOG(FATAL) aborts; this return is not reached.
+            return;
+        }
+
+        std::this_thread::sleep_for(std::chrono::microseconds(backoff_us));
+        backoff_us = std::min(backoff_us * 2, kMaxBackoffUs);
     }
 }
 

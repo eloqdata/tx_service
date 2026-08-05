@@ -39,6 +39,22 @@ namespace txservice
 struct TxObject;
 struct LruEntry;
 class CcShard;
+class KeyGapLockAndExtraData;
+
+/**
+ * @brief Optional context for TxCommand::CommitOn(obj, ctx): what the
+ * PAGED-DELETION rule needs to run its housekeeping at the one place the
+ * deletion DECISION is made, instead of at every commit path (docs/08 §9,
+ * §16). Both members may be null; a null lke_ skips the fetch-orphan /
+ * parked-wake half (the dirty-payload commit passes it null on purpose —
+ * that block is not yet the entry's current payload, and the dirty→committed
+ * install sites run the full swap rule when it is installed).
+ */
+struct PagedCommitContext
+{
+    CcShard *shard_{nullptr};
+    KeyGapLockAndExtraData *lke_{nullptr};
+};
 
 struct TxCommandResult
 {
@@ -55,7 +71,18 @@ enum class ExecResult
     Write,   // Success to execute the command and modified object.
     Delete,  // The object will be deleted by the command.
     Block,   // The command is blocked
-    Unlock   // There has not expected result and release ccentry lock
+    Unlock,  // There has not expected result and release ccentry lock
+    // The command needs pages that are not resident and has issued their
+    // fetches; execution is INCOMPLETE and produced no result or side effect
+    // (eloqkv docs/08-paged-objects.md §6, the Yield protocol). The apply
+    // path parks the request under ApplyCc::ApplyBlockType::BlockOnPageFault
+    // and re-runs ExecuteOn from the top when the pages arrive. Only paged
+    // objects ever return this; every monolithic command path is unchanged.
+    //
+    // Distinct from Block, which means "executed fully, now wait for a
+    // *condition*" (BLPOP) and releases the lock. A yield is not a wait: it
+    // is an unfinished execution that will be retried.
+    Yield
 };
 
 enum class BlockOperation
@@ -141,6 +168,30 @@ public:
         assert(false);
         return obj_ptr;
     }
+
+    /**
+     * @brief CommitOn with the paged-deletion rule applied centrally.
+     *
+     * Every commit path — normal execution, the replay/standby drain, backup
+     * and bucket migration — must not drop a PAGED object's block when a
+     * command deletes it: the deletion fan-out needs the block's page-id
+     * list (docs/08 §9, §16). Rather than each path re-implementing the
+     * retain (a reported round of defects: the live paths were fixed one by
+     * one and the replay drain was still installing the null), the rule
+     * lives here, at the single point where deletion is DECIDED: when the
+     * command's CommitOn returns null for a paged object, this overload
+     * retires the block (orphans its in-flight fetches, wakes its parked
+     * requests, drops every pin, releases every page buffer, tags it
+     * deletion-retained) and returns the SAME pointer. Callers detect the
+     * deletion through the tag — payload nullness alone is no longer the
+     * deletion signal; use CcEntry::DrainedPayloadStatus or
+     * PagedTxObject::IsDeletionRetained.
+     *
+     * Non-virtual on purpose: commands keep their existing contract (return
+     * null to delete) and never see the rule. Defined in cc_entry.cpp,
+     * where CcShard and FetchHub are complete.
+     */
+    TxObject *CommitOn(TxObject *obj_ptr, const PagedCommitContext &ctx);
 
     // serialize command for remote request and writing log
     virtual void Serialize(std::string &str) const
@@ -294,6 +345,15 @@ struct TxnCmd
 
         return os;
     }
+
+    // How many of cmd_list_'s commands the drain has already applied.
+    //
+    // Only ever non-zero for a paged object: a CommitOn that hits a
+    // non-resident page leaves the object untouched and the drain stops
+    // there, but the commands BEFORE it in this txn already ran and cannot be
+    // taken back. The drain resumes from this offset once the missing pages
+    // arrive, so no command is applied twice (docs/08 §10).
+    size_t applied_prefix_{0};
 
     // the commit_ts of the object when commands of this txn applies to
     // it

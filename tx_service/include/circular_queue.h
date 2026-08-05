@@ -214,6 +214,11 @@ public:
         return vec_[head_];
     }
 
+    const T &Peek() const
+    {
+        return vec_[head_];
+    }
+
     size_t Size() const
     {
         return cnt_;

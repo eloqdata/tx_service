@@ -43,6 +43,9 @@ void FaultInject::TriggerAction(FaultEntry *entry)
         }
     }
 
+    LOG(INFO) << "FaultInject trigger name=" << entry->fault_name_
+              << " strike=" << entry->count_strike_;
+
     for (auto str : entry->vctAction_)
     {
         std::string action, para;

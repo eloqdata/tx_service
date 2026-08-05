@@ -92,3 +92,12 @@ Set per tx at init (`iso_level_`, `protocol_`): `IsolationLevel` {ReadCommitted,
 - `ReadLocalOperation` reads node-local meta (cluster config, ranges, buckets) without remote hops; it relies on meta cc maps being replicated to every node ([03](03-concurrency-control.md)).
 - Blocking object commands (e.g. Redis BLPOP-style, `BlockOperation` in `tx_command.h`) park in `tx_progress_block_` on the processor and are re-enlisted by `CheckWaitingTxs()` (10ms cadence; regular stuck txs at 2s).
 - `RETRY_NUM` / `state_forward_cnt_` guard against infinite re-execution; `ForwardFailed` keeps a tx on the on-fly queue rather than spinning.
+
+## Paged objects: Yield and page faults
+
+Paged large objects (eloqkv `docs/08-paged-objects.md`) add one outcome to object-command execution: `ExecResult::Yield`. A command on a paged payload computes its fault set against the metadata, records missing page ids in the payload's `PageFrameTable`, and yields having produced no reply and touched nothing; `ApplyCc` drains the set (`TakePendingFaults`), issues the fetches, and parks under `ApplyBlockType::BlockOnPageFault`. The fetch completion pins arrived pages for the waiting txn and re-enqueues the request once its awaited count reaches zero — one wake for an N-page fault set.
+
+Two rules matter here:
+
+- **Lock acquisition is deferred** for paged, not-fully-resident objects only; the monolithic path is untouched. A yield never releases a lock: the speculative pass yields holding nothing, and a re-run under a retained lock resets its result before executing.
+- **Pins survive the WAL gap.** Pages fetched by `ExecuteOn` must still be resident when `CommitOn` runs inside `PostWriteCc`; the pins are keyed by tx number in the payload (the only handle that phase has) and released by `ReleaseTxPins` at commit/abort. `StampWrites` assigns the commit ts to every dirty page at payload install — `CommitOn` itself receives no ts, and needs none, because the uncommitted dirty payload is invisible to the checkpoint.

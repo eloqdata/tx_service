@@ -49,6 +49,9 @@
 #include "eloq_data_store_service/data_store_service_util.h"
 #include "eloq_data_store_service/object_pool.h"  // ObjectPool
 #include "eloq_data_store_service/thread_worker_pool.h"
+#ifdef WITH_FAULT_INJECT
+#include "fault/fault_inject.h"
+#endif
 #include "metrics.h"
 #include "sharder.h"
 #include "store_util.h"  // host_to_big_endian
@@ -414,6 +417,30 @@ bool DataStoreServiceClient::PutAllImpl(
                                     parts_cnt_per_key,
                                     parts_cnt_per_record,
                                     now);
+
+#ifdef WITH_FAULT_INJECT
+            // A paged record is an indivisible metadata+page-row batch.  This
+            // boundary is after all derived rows and their backing owners
+            // exist, but before any batch can be submitted to EloqStore.
+            // Restrict the hook to partitions that actually contain a paged
+            // record so crash tests cannot pass on unrelated checkpoint work.
+            bool contains_paged_record = false;
+            for (const auto &[entry_idx, record_idx] : flush_recs)
+            {
+                if (entries.at(entry_idx)
+                        ->data_sync_vec_->at(record_idx)
+                        .HoldsPagedPayload())
+                {
+                    contains_paged_record = true;
+                    break;
+                }
+            }
+            if (contains_paged_record)
+            {
+                txservice::FaultInject::Instance().TriggerAction(
+                    "paged_flush_after_dss_expansion");
+            }
+#endif
 
             sync_putall->partition_states_.push_back(partition_state);
             callback_data_list.push_back(callback_data);
@@ -5856,6 +5883,131 @@ void DataStoreServiceClient::PreparePartitionBatches(
                                  PartitionBatchRequest &batch_request)
     {
         txservice::TxKey tx_key = ckpt_rec.Key();
+
+        // A paged large object expands into 1 + N rows (eloqkv
+        // docs/08-paged-objects.md §9/§13): the metadata row under the
+        // object key, plus one row per dirty page or pending delete under
+        // derived keys. All rows of one record are appended inside this one
+        // call, and the caller's batch cut happens between records — so an
+        // object can never split across batches, which is what §9's
+        // all-or-nothing rests on. An oversized object simply makes an
+        // oversized batch (confirmed acceptable for EloqStore).
+        if (ckpt_rec.HoldsPagedPayload())
+        {
+            const txservice::PagedObjectFlush &paged =
+                ckpt_rec.GetPagedPayload();
+            bool obj_deleted =
+                ckpt_rec.payload_status_ != txservice::RecordStatus::Normal;
+
+            // Metadata row. Note: no expired-TTL shortcut here, unlike the
+            // monolithic branch below — converting an expired paged PUT
+            // into a metadata-row DELETE would orphan the page rows
+            // silently; expiry is handled by the lazy path plus the row's
+            // own store-TTL attribute (§9).
+            batch_request.key_parts.emplace_back(
+                std::string_view(tx_key.Data(), tx_key.Size()));
+            batch_size += tx_key.Size();
+            if (obj_deleted)
+            {
+                batch_request.record_parts.emplace_back(std::string_view());
+                batch_request.records_ttl.push_back(0);
+                batch_request.op_types.push_back(WriteOpType::DELETE);
+            }
+            else
+            {
+                batch_request.record_parts.emplace_back(std::string_view(
+                    paged.metadata_.data(), paged.metadata_.size()));
+                batch_size += paged.metadata_.size();
+                // Deadline + the protocol layer's slack, precomputed by the
+                // object (§9 "TTL and store-side reclamation").
+                batch_request.records_ttl.push_back(paged.metadata_row_ttl_);
+                batch_request.op_types.push_back(WriteOpType::PUT);
+            }
+            batch_request.records_ts.push_back(ckpt_rec.commit_ts_);
+            batch_size += 2 * sizeof(uint64_t) + sizeof(WriteOpType);
+
+            // Page rows. Keys are derived here through the single shared
+            // encoder the fetch path also uses (§5), into owned storage that
+            // outlives the dispatch.
+            //
+            // Three rules:
+            //
+            //  - A page row NEVER carries a store-TTL attribute, even when
+            //    the metadata row has one (§9). Page attributes cannot track
+            //    a TTL reset — only the metadata row is rewritten — so
+            //    annotating them would let the store compact pages of a live
+            //    object.
+            //  - An explicitly DELETEd or TTL-expired object DOES delete its
+            //    page rows here, together with the metadata row in this one
+            //    indivisible record (§9). It is cheap and worth doing: the
+            //    metadata is still resident (the dirty-entry gate holds it),
+            //    so the exact row set is known, and the deletes carry keys
+            //    only. Leaving them to the sweeper would strand a whole
+            //    object's pages — six figures of rows for a large hash —
+            //    until a sweep that may not exist yet.
+            //  - REPLACEMENT is the case that does rely on the sweeper (§9):
+            //    a SET/RESTORE-REPLACE over a paged key may not even have the
+            //    old metadata resident, so no page deletes are emitted there
+            //    and the rows are reclaimed later. That path never reaches
+            //    this branch, since the superseding record is not paged.
+            //
+            // Every row must append to all five parallel arrays. An earlier
+            // version pushed an op type only on the delete path, so a normal
+            // page PUT left op_types one short of key_parts and the store
+            // threw out_of_range reading that row's op type.
+            for (const txservice::PagedFlushPage &page : paged.pages_)
+            {
+                // A null buffer means "delete this page row": either the
+                // whole object is going away, or the page was freed and its
+                // id is awaiting reuse (§4's pending-delete list).
+                bool page_deleted = obj_deleted || page.buf_ == nullptr;
+
+                std::string &key_buf =
+                    batch_request.paged_key_storage.emplace_back();
+                txservice::EncodePageKey(
+                    key_buf,
+                    std::string_view(tx_key.Data(), tx_key.Size()),
+                    page.kind_,
+                    page.page_id_);
+                batch_request.key_parts.emplace_back(
+                    std::string_view(key_buf.data(), key_buf.size()));
+                batch_size += key_buf.size();
+
+                if (page_deleted)
+                {
+                    batch_request.record_parts.emplace_back(std::string_view());
+                    batch_request.op_types.push_back(WriteOpType::DELETE);
+                }
+                else
+                {
+                    // Zero copy: a view straight at the page buffer, kept
+                    // alive by the shared_ptr in the FlushRecord until the
+                    // flush completes (§9 "export by reference").
+                    batch_request.record_parts.emplace_back(std::string_view(
+                        reinterpret_cast<const char *>(page.buf_.get()),
+                        paged.page_size_));
+                    batch_size += paged.page_size_;
+                    batch_request.op_types.push_back(WriteOpType::PUT);
+                }
+                batch_request.records_ts.push_back(ckpt_rec.commit_ts_);
+                batch_request.records_ttl.push_back(0);
+                batch_size += 2 * sizeof(uint64_t) + sizeof(WriteOpType);
+            }
+
+            // The five arrays are parallel and must stay in lockstep: the
+            // store indexes op/ts/ttl by row.
+            assert(batch_request.key_parts.size() ==
+                       batch_request.record_parts.size() &&
+                   batch_request.key_parts.size() ==
+                       batch_request.op_types.size() &&
+                   batch_request.key_parts.size() ==
+                       batch_request.records_ts.size() &&
+                   batch_request.key_parts.size() ==
+                       batch_request.records_ttl.size());
+
+            return;
+        }
+
         uint64_t ttl =
             ckpt_rec.payload_status_ == txservice::RecordStatus::Normal
                 ? ckpt_rec.Payload()->GetTTL()

@@ -170,6 +170,11 @@ struct ClusterConfig
 class Sharder
 {
 public:
+    // Narrow unit-test seam: production PageFetch completion checks the
+    // Sharder term and key-lock recycling reads the local shard clock. Engine
+    // tests seed only those fields, without starting RPC listeners.
+    friend class SharderTestAccess;
+
     static Sharder &Instance(
         uint32_t node_id = 0,
         const std::unordered_map<NodeGroupId, std::vector<NodeConfig>>

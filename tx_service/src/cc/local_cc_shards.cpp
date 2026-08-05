@@ -5197,7 +5197,44 @@ void LocalCcShards::DataSyncForHashPartition(
                     // kv, so we don't need to put it into the flush vec.
                     int32_t part_id =
                         Sharder::MapKeyHashToHashPartitionId(rec.Key().Hash());
-                    if (table_name.Engine() == TableEngine::EloqKv)
+                    if (table_name.Engine() == TableEngine::EloqKv &&
+                        rec.HoldsPagedPayload())
+                    {
+                        // A paged object exports as the §9 indivisible unit
+                        // (metadata row + dirty pages + pending deletes), not
+                        // as a BlobTxRecord, so it cannot go through the
+                        // blob accessor below — that asserts on the variant
+                        // alternative.
+                        //
+                        // COPY it across — do not move. The scan heap's
+                        // contract (ReleaseDataSyncScanHeapCc) is that its
+                        // allocations are freed on the shard thread so its
+                        // stats reconcile; a moved-out unit is instead
+                        // destroyed by the flush worker on ITS thread, and
+                        // that cross-thread free never reconciles into the
+                        // scan heap (no mi_heap_collect by design). Each
+                        // export then ratchets the scan heap's `allocated`
+                        // until every future export is refused — a wedged
+                        // checkpoint, then a wedged key. The copy is cheap
+                        // and copies NO page bytes: the page list holds
+                        // shared_ptrs, so copying bumps refcounts, and only
+                        // the metadata row string and the id vector are
+                        // duplicated — under the ckpt heap this block
+                        // switched to above, whose records the flush
+                        // pipeline owns. The staging original stays in the
+                        // scan vec and is freed same-thread, exactly like a
+                        // monolithic record's serialized blob.
+                        FlushRecord &out = data_sync_vec->emplace_back();
+                        out.SetKey(rec.Key().Clone());
+                        out.SetPagedPayload(
+                            PagedObjectFlush(rec.GetPagedPayload()));
+                        out.payload_status_ = rec.payload_status_;
+                        out.commit_ts_ = rec.commit_ts_;
+                        out.cce_ = rec.cce_;
+                        out.post_flush_size_ = rec.post_flush_size_;
+                        out.partition_id_ = part_id;
+                    }
+                    else if (table_name.Engine() == TableEngine::EloqKv)
                     {
                         data_sync_vec->emplace_back(
                             rec.Key().Clone(),

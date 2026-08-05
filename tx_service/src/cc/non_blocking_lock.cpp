@@ -29,6 +29,7 @@
 #include "cc/cc_entry.h"
 #include "cc/cc_request.h"
 #include "cc/cc_shard.h"
+#include "cc/page_fetch.h"
 #include "error_messages.h"
 #include "remote_cc_request.h"
 
@@ -207,6 +208,85 @@ LockOpStatus NonBlockingLock::AcquireLock(CcRequestBase *cc_req,
     }
 
     return lock_status;
+}
+
+LockOpStatus NonBlockingLock::WouldAcquireLock(TxNumber tx_number,
+                                               CcProtocol cc_protocol,
+                                               LockType lock_type) const
+{
+    // Each branch mirrors the corresponding Acquire* body with every
+    // mutation and every blocking_queue_.Enqueue() removed. Keep the
+    // structure parallel to those functions so a future change to either is
+    // visibly a change to both (LockGrantability-Test fails loudly if not).
+    switch (lock_type)
+    {
+    case LockType::NoLock:
+        return LockOpStatus::Successful;
+
+    case LockType::ReadIntent:
+        // AcquireReadIntent only records an intention; it never fails.
+        return LockOpStatus::Successful;
+
+    case LockType::ReadLock:
+    {
+        // Fast path: already held, as a read lock or by this txn's write.
+        if (read_locks_.find(tx_number) != read_locks_.end() ||
+            (write_lk_type_ != WriteLockType::NoWritelock &&
+             write_txn_ == tx_number))
+        {
+            return LockOpStatus::Successful;
+        }
+        // A read lock does not conflict with a queued write INTENT, but a
+        // queued write LOCK holds readers off (fairness).
+        bool no_blocking_queue_conflict =
+            blocking_queue_.Size() == 0 ||
+            blocking_queue_.Peek().lk_type_ == LockType::WriteIntent;
+        bool success =
+            NoWriteLockConflict(tx_number) && no_blocking_queue_conflict;
+        // A failed read lock always enqueues in the real path (only Locking
+        // acquires read locks at all), so failure is Blocked.
+        return success ? LockOpStatus::Successful : LockOpStatus::Blocked;
+    }
+
+    case LockType::WriteIntent:
+    {
+        if (write_lk_type_ != WriteLockType::NoWritelock &&
+            write_txn_ == tx_number)
+        {
+            return LockOpStatus::Successful;
+        }
+        // The empty-queue requirement is what keeps a queued write lock from
+        // starving behind a stream of intents.
+        bool success =
+            NoWriteConflict(tx_number) && blocking_queue_.Size() == 0;
+        if (success)
+        {
+            return LockOpStatus::Successful;
+        }
+        return cc_protocol == CcProtocol::OCC ? LockOpStatus::Failed
+                                              : LockOpStatus::Blocked;
+    }
+
+    case LockType::WriteLock:
+    {
+        if (write_lk_type_ == WriteLockType::WriteLock &&
+            write_txn_ == tx_number)
+        {
+            return LockOpStatus::Successful;
+        }
+        bool success =
+            NoWriteConflict(tx_number) && NoReadLockConflict(tx_number);
+        if (success)
+        {
+            return LockOpStatus::Successful;
+        }
+        return cc_protocol == CcProtocol::OCC ? LockOpStatus::Failed
+                                              : LockOpStatus::Blocked;
+    }
+    }
+
+    assert(false && "unhandled LockType");
+    return LockOpStatus::Failed;
 }
 
 /**
@@ -765,5 +845,31 @@ std::unique_ptr<StandbyForwardEntry>
 KeyGapLockAndExtraData::ReleaseForwardEntry()
 {
     return std::move(forward_entry_);
+}
+
+// Out of line because FetchHub is forward-declared in the header
+// (cc/page_fetch.h; docs/08-paged-objects.md §7).
+KeyGapLockAndExtraData::~KeyGapLockAndExtraData() = default;
+
+FetchHub &KeyGapLockAndExtraData::GetOrCreateFetchHub()
+{
+    if (fetch_hub_ == nullptr)
+    {
+        fetch_hub_ = std::make_unique<FetchHub>();
+    }
+    return *fetch_hub_;
+}
+
+bool KeyGapLockAndExtraData::HasFetchHubWork() const
+{
+    return fetch_hub_ != nullptr && !fetch_hub_->Empty();
+}
+
+void KeyGapLockAndExtraData::ResetFetchHub()
+{
+    // IsEmpty() gates recycling on an empty hub, so a pooled structure being
+    // reset for reuse can never carry outstanding page fetches.
+    assert(fetch_hub_ == nullptr || fetch_hub_->Empty());
+    fetch_hub_.reset();
 }
 }  // namespace txservice

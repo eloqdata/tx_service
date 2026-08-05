@@ -25,6 +25,8 @@
 
 namespace txservice
 {
+class PagedTxObject;
+
 struct TxObject : public TxRecord
 {
 public:
@@ -41,6 +43,38 @@ public:
 
     virtual TxRecord::Uptr DeserializeObject(const char *buf,
                                              size_t &offset) const
+    {
+        return nullptr;
+    }
+
+    /**
+     * @brief Length-bounded, FALLIBLE variant for store-sourced rows: `avail`
+     * is the row's byte count and a malformed row yields nullptr instead of
+     * undefined reads (eloqkv docs/08 §5 "nothing from the store is trusted").
+     * Default delegates to the legacy unbounded form so existing types keep
+     * their behavior; types with store-side validation override.
+     */
+    virtual TxRecord::Uptr DeserializeObject(const char *buf,
+                                             size_t avail,
+                                             size_t &offset) const
+    {
+        (void) avail;
+        return DeserializeObject(buf, offset);
+    }
+
+    /**
+     * @brief The representation query for paged large objects (eloqkv
+     * docs/08-paged-objects.md §6): non-null iff this payload is paged. The
+     * engine's page fetch/flush paths and the protocol layer's per-command
+     * dispatch both branch on it; monolithic objects inherit the null
+     * default and are untouched.
+     */
+    virtual PagedTxObject *AsPaged()
+    {
+        return nullptr;
+    }
+
+    virtual const PagedTxObject *AsPaged() const
     {
         return nullptr;
     }

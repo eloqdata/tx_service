@@ -53,6 +53,7 @@
 #include "invasive_head_list.h"
 #include "local_cc_handler.h"
 #include "local_cc_shards.h"
+#include "page_frame_table.h"  // PageAdmissionScope (docs/08 §8)
 #include "sharder.h"
 #include "spinlock.h"
 #include "store/snapshot_manager.h"  // SnapshotManager
@@ -286,6 +287,14 @@ public:
 #if defined(WITH_JEMALLOC)
         auto prev_arena = shard_heap->SetAsDefaultArena();
 #endif
+        // Page-buffer admission (eloqkv docs/08 §8) is scoped to exactly the
+        // window in which this thread acts as this shard — the same binding
+        // the heap override above establishes. Outside it the gate is absent
+        // and every allocation is admitted, which is the behaviour of any
+        // thread with no shard identity.
+        PageAdmissionScope page_admission(&CcShardHeap::AdmitPageBytes,
+                                          &CcShardHeap::PageAdmissionCap,
+                                          shard_heap);
         if (is_ext_proc)
         {
             // Override thread id as well if current thread id is not heap owner
@@ -695,6 +704,11 @@ public:
 #if defined(WITH_JEMALLOC)
         coordi_->ext_tx_proc_arena_id_ = shard_heap->SetAsDefaultArena();
 #endif
+        // Same scoping as RunOneRound: admission is installed for as long as
+        // this thread is this shard (docs/08 §8).
+        PageAdmissionScope page_admission(&CcShardHeap::AdmitPageBytes,
+                                          &CcShardHeap::PageAdmissionCap,
+                                          shard_heap);
 
         TxmStatus txm_status = txm->Forward();
         if (txm_status == TxmStatus::Finished)

@@ -38,6 +38,7 @@
 #include <map>
 #include <memory>
 #include <string>
+#include <tuple>
 #include <unordered_map>
 #include <utility>
 #include <vector>
@@ -57,6 +58,7 @@
 #include "error_messages.h"
 #include "meter.h"
 #include "metrics.h"
+#include "page_key_codec.h"
 #include "range_bucket_key_record.h"
 #include "range_record.h"
 #include "reader_writer_cntl.h"
@@ -220,6 +222,15 @@ class CcShardHeap
 {
     static constexpr double high_water = 0.8;
     static constexpr double utilization = 0.8;
+    // A triggered cleaning campaign runs until this much of the budget is
+    // free (or until the sweep has nothing left to reclaim). Cleaning walks
+    // the LRU and can cascade into a checkpoint request, so it is expensive
+    // and must not be tuned to whatever the current allocation happens to
+    // need: stopping the instant the heap dips below its threshold leaves
+    // zero headroom, so the very next allocation cleans again. Freeing a
+    // BATCH instead bounds how OFTEN cleaning runs, which is the cost that
+    // matters.
+    static constexpr double clean_target_free_ratio = 0.10;
 
 public:
     CcShardHeap(CcShard *cc_shard, size_t limit);
@@ -234,7 +245,62 @@ public:
     // Check if this heap is full
     bool Full(int64_t *alloc = nullptr, int64_t *commit = nullptr) const;
 
+    /**
+     * @brief Whether `bytes` more can be allocated on this heap right now —
+     * the page-admission predicate (eloqkv docs/08 §8).
+     *
+     * Differs from Full() by asking about a SPECIFIC prospective allocation
+     * rather than the current level, which is what lets a large fault set be
+     * refused before it is taken rather than after it has already overshot.
+     *
+     * @return true if the allocation would stay within this heap's limit.
+     */
+    bool CanAllocate(size_t bytes) const;
+
+    /**
+     * @brief PageAdmission::Fn adapter — `ctx` is a CcShardHeap*.
+     * @return true if `bytes` may be allocated on that heap now.
+     */
+    static bool AdmitPageBytes(void *ctx, size_t bytes)
+    {
+        return static_cast<const CcShardHeap *>(ctx)->CanAllocate(bytes);
+    }
+
+    /**
+     * @brief PageAdmission::CapFn adapter — `ctx` is a CcShardHeap*.
+     * @return that heap's total limit, for "could this ever fit?" questions.
+     */
+    static size_t PageAdmissionCap(void *ctx)
+    {
+        return static_cast<const CcShardHeap *>(ctx)->MemoryLimit();
+    }
+
     bool NeedCleanShard(int64_t &alloc, int64_t &commit) const;
+
+    /**
+     * @brief Should a cleaning campaign keep going? True until the heap has
+     * `clean_target_free_ratio` of its budget free.
+     *
+     * Distinct from NeedCleanShard, which decides whether to START: that one
+     * fires at the threshold, this one keeps the campaign running past it so
+     * one campaign yields real headroom rather than the single page the
+     * triggering allocation needed.
+     */
+    bool NeedMoreCleaning(int64_t alloc) const
+    {
+        // Deterministic hook for the TERMINAL branch of a campaign (the path
+        // taken when a sweep reaches the LRU tail without meeting the
+        // target). On a test node the heap sits far below the target, so a
+        // campaign always takes the target-MET branch and the terminal path
+        // — where the waiter-stranding defect lived — is unreachable from a
+        // client. Debug-only via CODE_FAULT_INJECTOR.
+        CODE_FAULT_INJECTOR("force_clean_target_unmet", {
+            LOG_EVERY_N(INFO, 200) << "FAULTLOG force_clean_target_unmet";
+            return true;
+        });
+        return alloc > static_cast<int64_t>(memory_limit_ *
+                                            (1.0 - clean_target_free_ratio));
+    }
 
     bool NeedDefragment(int64_t *alloc, int64_t *commit) const;
 
@@ -416,6 +482,83 @@ public:
     size_t WaitListSizeForMemory();
 
     void WakeUpShardCleanCc();
+
+    /**
+     * @brief A page-admission refusal asks for a reclamation CAMPAIGN
+     * (eloqkv docs/08 §8).
+     *
+     * Deliberately a boolean, not a size: the campaign's amount is the fixed
+     * 10 % target, never tuned to the refused allocation. What this adds is a
+     * START signal independent of Full(), because the two predicates differ —
+     * admission refuses at `allocated + requested > limit` while the cleaner
+     * fired only at `allocated >= limit`. In the gap (limit 100, allocated
+     * 99, requested 2) the cleaner saw a heap that was not full, reclaimed
+     * nothing, woke the waiter, and the waiter refused again: a real
+     * production spin measured at ~130 k refusals/s and ~200 % CPU. Once
+     * requested, the campaign runs to its target even after `allocated`
+     * drops back below the hard limit.
+     */
+    void RequestCleanCampaign()
+    {
+        clean_campaign_requested_ = true;
+    }
+
+    bool CleanCampaignRequested() const
+    {
+        return clean_campaign_requested_;
+    }
+
+    void ClearCleanCampaignRequest()
+    {
+        clean_campaign_requested_ = false;
+    }
+
+    /**
+     * @brief Why a cleaning campaign could not reclaim (eloqkv docs/08 §8).
+     *
+     * When a campaign frees nothing, the right response depends entirely on
+     * WHICH obstacle dominated, and the two need opposite handling:
+     *
+     *   dirty-blocked  the candidates are unflushed. A checkpoint is already
+     *                  requested and will make them reclaimable, so this is
+     *                  not a deadlock — wait.
+     *   pin-blocked    the candidates are pinned by other in-flight
+     *                  faulters — a hold-and-wait cycle. The holders are
+     *                  ordinary commands that terminate on their own, so
+     *                  the waiters are woken to retry until the pins are
+     *                  released (identifying and killing the specific
+     *                  holding transaction would be a far larger mechanism
+     *                  for the same outcome).
+     *
+     * Counted in CcPageCleanGuard::CanBeCleaned, which already evaluates
+     * both clauses on every candidate, so attribution is free. Reset at the
+     * start of each campaign.
+     */
+    void NoteDirtyBlockedCandidate()
+    {
+        ++clean_dirty_blocked_;
+    }
+
+    void NotePinBlockedCandidate()
+    {
+        ++clean_pin_blocked_;
+    }
+
+    void ResetCleanBlockedCounters()
+    {
+        clean_dirty_blocked_ = 0;
+        clean_pin_blocked_ = 0;
+    }
+
+    size_t CleanDirtyBlocked() const
+    {
+        return clean_dirty_blocked_;
+    }
+
+    size_t CleanPinBlocked() const
+    {
+        return clean_pin_blocked_;
+    }
 
     /**
      * @brief Puts a cc request into the shard's request queue to be processed.
@@ -950,6 +1093,30 @@ public:
         bool only_fetch_archives = false,
         bool reopen = false);
 
+    /**
+     * @brief Issues (or joins) a page fetch for one page of a paged large
+     * object (eloqkv docs/08-paged-objects.md §13). Bypasses
+     * fetch_record_reqs_ entirely: the request lives in the entry's FetchHub
+     * (cc/page_fetch.h), keyed by page id — the coalescing unit for pages.
+     * The object key supplies both the encoded row key's middle bytes and
+     * the partition hash (§5 co-location); `waiter_txn` (0 = none) is
+     * registered on the fetch and resolved through the paged payload's
+     * per-txn contexts at completion.
+     * @return Retry when the store is busy — the caller unwinds exactly as
+     * for a whole-record fetch; Success otherwise.
+     */
+    store::DataStoreHandler::DataStoreOpStatus FetchPage(
+        const TableName &table_name,
+        const TableSchema *tbl_schema,
+        const TxKey &object_key,
+        PageRowKind kind,
+        uint32_t page_id,
+        LruEntry *cce,
+        NodeGroupId cc_ng_id,
+        int64_t cc_ng_term,
+        uint64_t waiter_txn,
+        int32_t partition_id);
+
     store::DataStoreHandler::DataStoreOpStatus FetchSnapshot(
         const TableName &table_name,
         const TableSchema *tbl_schema,
@@ -1232,6 +1399,91 @@ public:
 
     void UpdateBufferedCommandCnt(int64_t delta);
 
+    /**
+     * @brief Commands buffered on this shard, awaiting a version or a page.
+     *
+     * @return The count. Recovery gates promotion on this reaching zero as
+     * well as on DrainBlockedCount(): when log replay reports a group finished
+     * it has only PROCESSED the records, and the record fetches they triggered
+     * may still be in flight, so a drain that will stall has not stalled yet.
+     * This is shard-wide rather than per node group, which can over-wait in a
+     * multi-group deployment -- safe, since it only ever delays serving.
+     */
+    int64_t BufferedCommandCnt() const
+    {
+        return buffered_cmd_cnt_;
+    }
+
+    /**
+     * @brief Whole-record fetches in flight on this shard.
+     *
+     * @return The count. The third thing recovery must wait for: when replay
+     * reports a log group finished, a record fetch it issued may still be in
+     * flight, and the replayed commands for that key are not buffered — and so
+     * not yet counted anywhere — until the record lands in BackFill.
+     */
+    size_t InFlightRecordFetchCnt() const
+    {
+        return fetch_record_reqs_.size();
+    }
+
+    /**
+     * @brief Records that `entry`'s buffered-command drain is waiting on a page
+     * fetch, so log-replay completion must not be declared yet (docs/08 §10).
+     *
+     * Idempotent: the same entry stalls repeatedly, once per page it needs, and
+     * must be counted once. Shard-core only, like every other CcShard member.
+     *
+     * @param key_desc the key's text, for logging which keys hold up recovery.
+     */
+    void NoteDrainBlocked(NodeGroupId ng_id,
+                          LruEntry *entry,
+                          std::string key_desc);
+
+    /**
+     * @brief Records that `entry`'s drain is no longer waiting — it applied,
+     * its buffer was cleared, or it was abandoned on a term change.
+     */
+    void NoteDrainUnblocked(NodeGroupId ng_id, LruEntry *entry);
+
+    /**
+     * @brief How many entries of `ng_id` have a drain waiting on a page.
+     *
+     * @return The count, zero if none. Recovery gates the candidate-to-real
+     * term promotion on this reaching zero across all shards, so that a node
+     * never starts serving a key whose replayed tail has not been applied.
+     */
+    size_t DrainBlockedCount(NodeGroupId ng_id) const;
+
+    /**
+     * @brief Drops all drain-blocked bookkeeping for `ng_id`.
+     *
+     * Called when the node group's term changes: the pending drains are moot,
+     * and a stale entry here would block the next term's promotion forever.
+     */
+    void ClearDrainBlocked(NodeGroupId ng_id);
+
+    /**
+     * @brief Names up to `limit` keys whose drain is blocking `ng_id`.
+     *
+     * @return A human-readable list for logging. A bare count says recovery is
+     * stuck; this says which keys are holding it.
+     */
+    std::string DescribeDrainBlocked(NodeGroupId ng_id, size_t limit) const;
+
+    /**
+     * @brief Describes up to `limit` entries on this shard that hold buffered
+     * replayed/standby commands, across every cc map serving `ng_id`.
+     *
+     * The per-entry version tuple (see CcMap::DescribeBufferedCommands) is
+     * the post-mortem evidence for a stalled replay drain: it distinguishes a
+     * head waiting on a version hole from an applicable head the drain never
+     * drove. Failure-path only; walks whole maps.
+     *
+     * @return A human-readable list for logging; "" when nothing is buffered.
+     */
+    std::string DescribeBufferedCommands(NodeGroupId ng_id, size_t limit);
+
     void CheckLagAndResubscribe() const;
 
     bool EnableDefragment() const;
@@ -1408,6 +1660,16 @@ private:
     uint64_t total_standby_buffer_memory_usage_{0};
     // Memory limit for standby buffer (10% of node memory limit per shard)
     uint64_t standby_buffer_memory_limit_{0};
+
+    // Set by a page-admission refusal to start a campaign regardless of
+    // Full(); cleared when the campaign ends. See RequestCleanCampaign.
+    bool clean_campaign_requested_{false};
+
+    // Reclaim attribution for the current cleaning campaign; shard-core
+    // only. See NoteDirtyBlockedCandidate.
+    size_t clean_dirty_blocked_{0};
+    size_t clean_pin_blocked_{0};
+
     uint64_t next_forward_sequence_id_{1};
     std::unordered_map<uint32_t, std::pair<uint64_t, int64_t>>
         subscribed_standby_nodes_;
@@ -1425,6 +1687,20 @@ private:
     // too many commands buffered, it probably has fallen behind. Resubscribe
     // to the master node to get the full and latest snapshot.
     int64_t buffered_cmd_cnt_{0};
+
+    // Entries whose buffered-command drain is parked on a page fetch, keyed by
+    // node group because term promotion is per node group while a shard hosts
+    // entries of several. A set, not a counter: a drain re-stalls once per page
+    // it needs, so membership is what makes the accounting idempotent, and the
+    // keys are worth naming when recovery is slow.
+    //
+    // Entries here are pinned by IssueDrainFetches, so they cannot be freed
+    // while listed. The value is the key text, captured at stall time because
+    // KeyString() is only meaningful while the key lock is held and only the
+    // caller has the concrete CcEntry type.
+    absl::flat_hash_map<NodeGroupId,
+                        absl::flat_hash_map<LruEntry *, std::string>>
+        drain_blocked_entries_;
 
     // Reserved head and tail for the double-linked list of cc entries, which
     // simplifies handling of empty and one-element lists.

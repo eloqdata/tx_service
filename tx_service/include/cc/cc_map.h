@@ -46,6 +46,7 @@ struct RemoteReadOutside;
 struct LruEntry;
 struct LruPage;
 struct TxObject;
+struct PageFetch;
 
 struct AcquireCc;
 struct AcquireAllCc;
@@ -222,6 +223,74 @@ public:
     {
     }
 
+    /**
+     * @brief Partial-eviction hook for paged large objects (docs/08 §8). The
+     * regular LRU clean pass calls this before deciding to free `entry`: a
+     * paged object sheds a fraction of its clean, unpinned pages and survives
+     * the pass, keeping its metadata resident so it stays routable.
+     *
+     * Only the memory-pressure clean path calls this. An explicit kickout
+     * (KickoutCcEntryCc, drop table, bucket migration) wants the entry gone and
+     * bypasses it.
+     *
+     * @return true if the entry shed pages and must be kept for this pass.
+     *         The default is false: maps with no paged payloads are unaffected.
+     */
+    /**
+     * @brief Undoes what parking on a page fault left behind for `tx_number`
+     * on `entry`: the entry-scoped wake record, the pin the park took, and any
+     * page pins the transaction accumulated.
+     *
+     * Called by ApplyCc::AbortCcRequest, because an abort frees the request
+     * back to its pool while the entry's FetchHub still holds it as a waiter.
+     * No other path can do this: the abort sites tear down lock queues and
+     * fetch-record requesters, neither of which contains a page-fault waiter,
+     * and a lock-free reader never reaches ReleaseCceLock.
+     *
+     * Default no-op: maps with no paged payloads never park on a page fault.
+     */
+    virtual void ClearPageFaultParking(LruEntry *entry, TxNumber tx_number)
+    {
+    }
+
+    virtual bool ShedPagesForEviction(LruEntry *entry)
+    {
+        return false;
+    }
+
+    /**
+     * @brief Diagnostic dump of every entry holding buffered replayed/standby
+     * commands, up to `limit` entries: the key, the entry's local commit ts
+     * and payload status, and the buffered head's version tuple. The tuple is
+     * what makes a stalled drain attributable post-mortem: a head whose
+     * obj_version_ is AHEAD of the entry's commit ts is waiting for a
+     * predecessor version that never arrived (a replay hole), while a head at
+     * or behind it is applicable and points at the drain scheduling itself.
+     *
+     * Called on the shard core (a WaitableCc closure), so the full-map walk
+     * needs no locking; used only on the failure path, so cost is irrelevant.
+     *
+     * @return "" for maps that cannot hold buffered commands (the default).
+     */
+    virtual std::string DescribeBufferedCommands(size_t limit)
+    {
+        (void) limit;
+        return "";
+    }
+
+    /**
+     * @brief Releases any §8 page-buffer reservation held for `page_id` on
+     * `entry`'s payloads — the completion path that cannot install (a fetch
+     * finishing under a dead term skips BackFillPage entirely) still ends
+     * the fetch the reservation was claimed for. Default no-op: maps without
+     * paged payloads reserve nothing.
+     */
+    virtual void ReleasePageReservation(LruEntry *entry, uint32_t page_id)
+    {
+        (void) entry;
+        (void) page_id;
+    }
+
     virtual std::pair<size_t, LruPage *> CleanPageAndReBalance(
         LruPage *page,
         KickoutCcEntryCc *kickout_cc = nullptr,
@@ -235,13 +304,45 @@ public:
     // Called when FetchRecord returns. Backfill will clean up the read intent
     // added by fetch record and update cce status based on the fetch result.
     // If the fetch fails, cce will be erased if it is not used by other reqs.
+    /**
+     * @param corrupt Set to true when the fetched row exists but cannot be
+     * parsed (eloqkv docs/08 §5): the entry is left untouched and the caller
+     * must surface a deterministic error to the requesters — returning false
+     * instead would RETRY the same corrupt row forever.
+     */
     virtual bool BackFill(LruEntry *cce,
                           uint64_t commit_ts,
                           RecordStatus status,
-                          const std::string &rec_str)
+                          const std::string &rec_str,
+                          bool *corrupt)
     {
         assert(false);
         return false;
+    }
+
+    /**
+     * @brief The page mode of back-fill for paged large objects (eloqkv
+     * docs/08-paged-objects.md §13): installs a fetched page into the
+     * current paged payload and resolves the fetch's waiter txns. Unlike
+     * BackFill above it never touches the entry's commit ts or record
+     * status, and a missing store row for a live page id is corruption, not
+     * RecordStatus::Deleted. Overridden by ObjectCcMap; only object maps can
+     * host paged payloads.
+     */
+    virtual void BackFillPage(PageFetch &fetch)
+    {
+        assert(false);
+    }
+
+    /**
+     * @brief The per-page half of the post-flush callback for paged large
+     * objects (eloqkv docs/08 §9), invoked by UpdateCceCkptTsCc alongside
+     * SetCkptTs: routes the flushed commit ts to the current payload's
+     * OnPagedFlushApplied, which marks pages flushed and drains pending
+     * deletes under the ts guard. A no-op for every non-object map.
+     */
+    virtual void OnPagedFlushApplied(LruEntry *cce, uint64_t flushed_commit_ts)
+    {
     }
 
     virtual bool BackFillArchives(
@@ -446,6 +547,22 @@ protected:
                         LockType lk_type = LockType::NoLock,
                         bool recycle_lock = true,
                         TxObject *object = nullptr) const;
+
+    /**
+     * @brief Releases the page pins `tx_number` holds on this entry's paged
+     * payload, if it has one. Called from ReleaseCceLock, so every path that
+     * ends a transaction's interest in the entry is covered.
+     *
+     * Defined here rather than in ReleaseCceLock because reaching the payload
+     * needs the concrete map's value type; the default is a no-op, so
+     * non-object maps and monolithic payloads pay nothing (eloqkv
+     * docs/08-paged-objects.md §6).
+     */
+    virtual void ReleaseTxPagePins(LruEntry *cce, TxNumber tx_number) const
+    {
+        (void) cce;
+        (void) tx_number;
+    }
 
     void AcquireReadIntent(LruEntry *cce,
                            LruPage *page,

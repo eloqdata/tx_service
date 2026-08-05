@@ -168,9 +168,43 @@ public:
                              CcProtocol protocol,
                              LockType lock_type);
 
+    /**
+     * @brief Answers what AcquireLock() WOULD return for this request,
+     * without acquiring anything and without enqueuing the requester.
+     *
+     * This exists for the paged-object Yield protocol (eloqkv
+     * docs/08-paged-objects.md §6), which defers lock acquisition until
+     * ExecuteOn is known to complete: a command that will yield must leave
+     * behind neither a lock nor a blocking-queue entry.
+     *
+     * It must mirror AcquireLock EXACTLY — blocking-queue fairness, the
+     * already-held fast paths, and the per-protocol Failed/Blocked
+     * distinction included. The scheme's correctness rests on
+     * test-then-acquire being atomic on the shard core, so any divergence
+     * between this and the real acquisition is a correctness bug;
+     * LockGrantability-Test pins the two together across the lock lattice.
+     *
+     * Grantability itself is protocol-independent — the protocol only
+     * selects how a failure is reported (OCC fails, Locking/OccRead blocks)
+     * — but it is reproduced here so the two are directly comparable.
+     */
+    LockOpStatus WouldAcquireLock(TxNumber tx_number,
+                                  CcProtocol protocol,
+                                  LockType lock_type) const;
+
     void InsertBlockingQueue(CcRequestBase *cc_req, LockType lock_type);
 
     bool IsEmpty() const;
+
+    /**
+     * @brief The number of requests parked in the blocking queue. Read-only;
+     * exposed for the grantability test's side-effect check (a prediction
+     * must never enqueue) and for lock-contention observability.
+     */
+    size_t BlockingQueueSize() const
+    {
+        return blocking_queue_.Size();
+    }
 
     TxNumber WriteLockTx() const;
 
@@ -361,7 +395,11 @@ private:
     // path.
     int read_cnt_{};
 
-    WriteLockType write_lk_type_;
+    // Default-initialized, not merely set by Reset(): a pooled lock is always
+    // Reset() before use, but a default-constructed one (tests, or any future
+    // direct use) would otherwise start with an indeterminate write lock type
+    // and take conflict decisions on garbage.
+    WriteLockType write_lk_type_{WriteLockType::NoWritelock};
     TxNumber write_txn_{0};
 
     // The time when a write tx acquires the write lock on this lock.
@@ -400,12 +438,18 @@ private:
  * acquired. This structure is assigned on-demand to reduce CcEntry's memory
  * overhead.
  */
+struct FetchHub;
+
 class KeyGapLockAndExtraData
 {
 public:
     using uptr = std::unique_ptr<KeyGapLockAndExtraData>;
 
     KeyGapLockAndExtraData() = default;
+
+    // Out of line: fetch_hub_ is a unique_ptr over the forward-declared
+    // FetchHub (cc/page_fetch.h).
+    ~KeyGapLockAndExtraData();
 
     void Reset(CcMap *ccm, LruPage *page, LruEntry *entry)
     {
@@ -419,7 +463,11 @@ public:
         pending_cmd_ = nullptr;
         buffered_cmd_list_.Clear();
         forward_entry_.reset();
-        pin_count_ = 0;
+        entry_pin_count_ = 0;
+        // Recycle precedes reuse, and IsEmpty() forbids recycling with
+        // outstanding page fetches — so the hub must already be empty here
+        // (docs/08-paged-objects.md §7).
+        ResetFetchHub();
     }
 
     void SetUsedStatus(bool is_used);
@@ -476,7 +524,15 @@ public:
                    dirty_payload_ == nullptr &&
                    (dirty_payload_status_ == RecordStatus::NonExistent ||
                     dirty_payload_status_ == RecordStatus::Deleted));
-            return !HasBufferedCommandList() && pin_count_ == 0;
+            // The fetch-hub clause is the recycle gate for paged objects
+            // (docs/08-paged-objects.md §7): recycling this structure while
+            // the store handler still holds pointers into an outstanding
+            // PageFetch would be a use-after-free. Every page fetch also
+            // holds an entry pin from issue to completion, so a non-empty
+            // hub already implies entry_pin_count_ > 0 — the explicit test
+            // is defense in depth against the pin discipline drifting.
+            return !HasBufferedCommandList() && entry_pin_count_ == 0 &&
+                   !HasFetchHubWork();
         }
         else
         {
@@ -520,15 +576,42 @@ public:
     }
     void AddPin()
     {
-        pin_count_++;
+        entry_pin_count_++;
     }
     void ReleasePin()
     {
-        pin_count_--;
+        assert(entry_pin_count_ > 0);
+        entry_pin_count_--;
     }
+
+    /**
+     * @brief The page-fetch hub for paged large objects
+     * (docs/08-paged-objects.md §7; cc/page_fetch.h). Lazily allocated on
+     * the first page fetch; the accessors are out of line because FetchHub
+     * is forward-declared here.
+     */
+    FetchHub &GetOrCreateFetchHub();
+
+    FetchHub *FetchHubPtr()
+    {
+        return fetch_hub_.get();
+    }
+
+    bool HasFetchHubWork() const;
     std::unique_ptr<TxObject> DirtyPayload()
     {
         return std::move(dirty_payload_);
+    }
+
+    /**
+     * @brief Non-owning look at the dirty payload. DirtyPayload() above MOVES
+     * it out, which a caller that only needs to inspect the object must not do
+     * (docs/08 §7: a page-fetch completion has to reach the dirty payload's
+     * page state without taking it away from the transaction that owns it).
+     */
+    TxObject *PeekDirtyPayload() const
+    {
+        return dirty_payload_.get();
     }
 
     void SetDirtyPayload(std::unique_ptr<TxObject> dirty_payload)
@@ -591,12 +674,19 @@ private:
     // status of temporary object
     RecordStatus dirty_payload_status_{RecordStatus::NonExistent};
 
+    void ResetFetchHub();
+
     BufferedTxnCmdList buffered_cmd_list_;
     std::unique_ptr<StandbyForwardEntry> forward_entry_;
-    // The pins on the cce. For cases that we need to keep the cce in memory
-    // for a while and we are not in a transaction context, we use pins to
-    // prevent the cce from being recycled.
-    uint32_t pin_count_{0};
+    // The ENTRY pins on the cce (as distinct from the per-page pin counts a
+    // paged payload keeps, docs/08-paged-objects.md §4). For cases that we
+    // need to keep the cce in memory for a while and we are not in a
+    // transaction context, we use pins to prevent the cce from being
+    // recycled.
+    uint32_t entry_pin_count_{0};
+    // Outstanding page fetches for a paged payload (docs/08 §7): null for
+    // every entry that has never page-faulted.
+    std::unique_ptr<FetchHub> fetch_hub_;
 };
 
 }  // namespace txservice

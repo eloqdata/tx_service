@@ -29,6 +29,7 @@
 #include "cc_shard.h"
 #include "checkpointer.h"
 #include "error_messages.h"
+#include "fault/fault_inject.h"
 #include "local_cc_shards.h"
 #include "sharder.h"
 #include "standby.h"
@@ -139,6 +140,17 @@ void DataSyncTask::SetFinish()
                           << status_->truncate_log_ts_;
                 if (status_->truncate_log_ts_ != UINT64_MAX)
                 {
+                    // Normal checkpoints finish asynchronously here, not in
+                    // Checkpointer::Run.  Keep the same test boundaries on
+                    // both completion shapes so the crash matrix targets the
+                    // watermark that this flush actually advances.
+                    const bool has_data_store_write =
+                        status_->HasDataStoreWrite();
+                    if (has_data_store_write)
+                    {
+                        ACTION_FAULT_INJECTOR(
+                            "checkpoint_before_log_truncate_advance");
+                    }
                     Sharder::Instance().UpdateNodeGroupCkptTs(
                         node_group_id_, status_->truncate_log_ts_);
 
@@ -166,7 +178,12 @@ void DataSyncTask::SetFinish()
                         BrocastPrimaryCkptTs(node_group_id_,
                                              node_group_term_,
                                              status_->truncate_log_ts_,
-                                             status_->HasDataStoreWrite());
+                                             has_data_store_write);
+                    }
+                    if (has_data_store_write)
+                    {
+                        ACTION_FAULT_INJECTOR(
+                            "checkpoint_after_log_truncate_advance");
                     }
                 }
             }
