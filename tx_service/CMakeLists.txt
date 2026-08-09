@@ -73,6 +73,7 @@ eloq_assert_target_under_prefix(absl::flat_hash_map "Abseil flat_hash_map")
 eloq_assert_target_under_prefix(absl::span "Abseil span")
 
 set(ABSEIL
+    absl::base
     absl::btree
     absl::flat_hash_map
     absl::span
