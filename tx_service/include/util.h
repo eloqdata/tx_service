@@ -489,11 +489,9 @@ static void InitializeTscFrequency()
         tsc_frequency_initialized_,
         []()
         {
-            // sleep_for() may oversleep when the initializing thread is
-            // descheduled. Dividing the elapsed TSC ticks by the requested
-            // sleep duration then overestimates the frequency and makes
-            // scheduler budgets run long. Abseil calibrates the raw TSC
-            // against the actual elapsed monotonic time instead.
+            // Abseil calibrates the raw __rdtsc() counter against actual
+            // monotonic elapsed time. Dividing by a requested sleep duration
+            // would overestimate the frequency when the thread oversleeps.
             const double frequency_hz =
                 absl::base_internal::NominalCPUFrequency();
             const uint64_t cycles_per_microsecond = std::max<uint64_t>(
