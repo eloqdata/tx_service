@@ -49,7 +49,6 @@
 #include "data_store_service.h"
 #include "ds_request.pb.h"
 #include "internal_request.h"
-#include "purger_event_listener.h"
 #include "rocksdb/cloud/cloud_file_system_impl.h"
 #include "rocksdb/cloud/cloud_storage_provider.h"
 
@@ -352,6 +351,7 @@ bool RocksDBCloudDataStore::StartDB(int64_t term)
     // Disable cloud file deletion totally, since we defer file deletion to
     // purger
     cfs_options_.disable_cloud_file_deletion = true;
+    cfs_options_.publish_file_number_guard = true;
 
     // keep invisible files in cloud storage since they can be referenced
     // by other nodes with old valid cloud manifest files during leader transfer
@@ -650,23 +650,6 @@ bool RocksDBCloudDataStore::OpenCloudDB(
             max_bytes_for_level_multiplier_;
     }
 
-    // Add event listener for purger
-    rocksdb::CloudFileSystemImpl *cfs_impl =
-        dynamic_cast<rocksdb::CloudFileSystemImpl *>(cloud_fs_.get());
-    if (cfs_impl == nullptr)
-    {
-        LOG(ERROR) << "Fail to get CloudFileSystemImpl from cloud_fs_";
-        return false;
-    }
-    std::string bucket_name =
-        cloud_config_.bucket_prefix_ + cloud_config_.bucket_name_;
-    auto db_event_listener = std::make_shared<PurgerEventListener>(
-        "", /*We still don't know the epoch now*/
-        bucket_name,
-        cloud_config_.object_path_,
-        cfs_impl->GetStorageProvider());
-    options.listeners.emplace_back(db_event_listener);
-
     // The max_open_files default value is -1, it cause DB open all files on
     // DB::Open() This behavior causes 2 effects,
     // 1. DB::Open() will be slow
@@ -757,7 +740,7 @@ bool RocksDBCloudDataStore::OpenCloudDB(
         return false;
     }
 
-    // set epoch for purger event listener
+    // The file number guard published by DBCloud requires a valid epoch
     std::string current_epoch;
     status = db_->GetCurrentEpoch(&current_epoch);
     if (!status.ok())
@@ -776,8 +759,6 @@ bool RocksDBCloudDataStore::OpenCloudDB(
         db_->ContinueBackgroundWork();
         return false;
     }
-    db_event_listener->SetEpoch(current_epoch);
-    db_event_listener->BlockPurger();
 
     // Resume background work
     db_->ContinueBackgroundWork();
