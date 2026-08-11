@@ -223,6 +223,10 @@ public:
         else
         {
             std::get<1>(payload_).value_.clear();
+            // The BlobTxRecord is reused across scan batches; clear the
+            // previous record's TTL so a no-TTL record is not flushed with a
+            // stale expiration.
+            std::get<1>(payload_).ttl_ = UINT64_MAX;
         }
         if (ptr != nullptr)
         {
