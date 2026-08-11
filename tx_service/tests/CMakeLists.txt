@@ -63,6 +63,7 @@ set(CATCH_MAIN_TESTS
     LargeObjLRU-Test
     CcRequestWait-Test
     NonBlockingLock-Test
+    AcquireAllError-Test
     StandbyForward-Test
     ApplyResponseBoundary-Test
 )

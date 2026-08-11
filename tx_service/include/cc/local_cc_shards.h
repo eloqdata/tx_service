@@ -2017,6 +2017,22 @@ private:
                               const TableName &table_name,
                               uint32_t id);
 
+    /**
+     * Atomically removes and returns every pending task of the limiter
+     * identified by (ng_id, ng_term, table_name, id), erasing the limiter.
+     * Call while holding meta_data_mux_ so a concurrent re-creation of the
+     * same table cannot enqueue next-generation tasks into the limiter
+     * before it is detached. Finalize the returned tasks
+     * (SetError/SetScanTaskFinished) only after releasing the metadata
+     * lock -- task finalization can issue RPCs and must not park a worker
+     * that holds it (see DataSyncForRangePartition).
+     */
+    std::deque<std::shared_ptr<DataSyncTask>> DetachAllPendingTasks(
+        NodeGroupId ng_id,
+        int64_t ng_term,
+        const TableName &table_name,
+        uint32_t id);
+
     void PostProcessHashPartitionDataSyncTask(
         std::shared_ptr<DataSyncTask> task,
         TransactionExecution *data_sync_txm,

@@ -2079,6 +2079,51 @@ bool AcquireAllOp::IsDeadlock() const
     return false;
 }
 
+CcErrorCode AcquireAllOp::RepresentativeError() const
+{
+    CcErrorCode conflict = CcErrorCode::NO_ERROR;
+
+    // Iterate to upload_cnt_, not hd_results_.size(): the vector is reserved
+    // to 8 and grown, so its tail holds results of an earlier round.
+    for (size_t idx = 0; idx < upload_cnt_; ++idx)
+    {
+        if (!hd_results_[idx].IsError())
+        {
+            continue;
+        }
+
+        CcErrorCode err = hd_results_[idx].ErrorCode();
+        // An infrastructure failure must win over a lock conflict. Reporting
+        // a lost leadership as a retryable conflict makes the API layer retry
+        // forever against a node group that will never serve the request.
+        if (!IsConflictError(err))
+        {
+            return err;
+        }
+        if (conflict == CcErrorCode::NO_ERROR)
+        {
+            // Keep the first conflict in index order, so the reported code is
+            // deterministic across runs.
+            conflict = err;
+        }
+    }
+
+    if (conflict != CcErrorCode::NO_ERROR)
+    {
+        return conflict;
+    }
+
+    // fail_cnt_ was raised with every handler result successful. The only
+    // producer is the dedup read-version mismatch in Forward(), i.e. a broken
+    // repeatable read.
+    if (fail_cnt_.load(std::memory_order_relaxed) > 0)
+    {
+        return CcErrorCode::VALIDATION_FAILED_FOR_VERSION_MISMATCH;
+    }
+
+    return CcErrorCode::NO_ERROR;
+}
+
 PostWriteAllOp::PostWriteAllOp(TransactionExecution *txm) : hd_result_(txm)
 {
 }
@@ -2212,6 +2257,8 @@ void CatalogAcquireAllOp::Forward(TransactionExecution *txm)
         {
             LOG(ERROR) << "Upsert table read cluster config failed, tx_number:"
                        << txm->TxNumber();
+            txm->bool_resp_->SetErrorCode(TransactionExecution::ConvertCcError(
+                lock_cluster_config_op_.hd_result_->ErrorCode()));
             txm->PostProcess(*this);
         }
         else
@@ -2228,6 +2275,8 @@ void CatalogAcquireAllOp::Forward(TransactionExecution *txm)
         {
             LOG(ERROR) << "Upsert table acquire write intent failed, tx_number:"
                        << txm->TxNumber();
+            txm->bool_resp_->SetErrorCode(TransactionExecution::ConvertCcError(
+                acquire_all_intent_op_.RepresentativeError()));
             txm->PostProcess(*this);
         }
         else
@@ -2245,6 +2294,8 @@ void CatalogAcquireAllOp::Forward(TransactionExecution *txm)
             LOG(ERROR) << "Upsert table schema transaction failed to "
                           "acquire write lock, tx_number:"
                        << txm->TxNumber();
+            txm->bool_resp_->SetErrorCode(TransactionExecution::ConvertCcError(
+                acquire_all_lock_op_.RepresentativeError()));
             txm->PostProcess(*this);
         }
         else

@@ -1825,8 +1825,23 @@ void TransactionExecution::Process(ReadOperation &read)
         {
             // So far ReadLocal() is use exclusively for reading catalogs.
             // Reading catalogs needs to put read locks, regardless of the tx's
-            // concurrency control protocol. So for now, a read's isolation
-            // level and cc protocol is fixed.
+            // concurrency control protocol. So the isolation level is forced up
+            // to at least RepeatableRead.
+            //
+            // The cc protocol depends on what the read is for. A plain catalog
+            // read takes a read lock under Locking and waits, as before. A read
+            // for write takes a write intent, and under Locking it would wait
+            // in the entry's blocking queue. A catalog write intent is exactly
+            // where DDL and DML meet, so waiting there closes a lock cycle:
+            // the waiter holds this entry's read lock while the DDL holding the
+            // write intent waits for that read lock to be released so it can
+            // upgrade to a write lock. OCC makes the acquisition fail instead
+            // of enqueueing, so no wait edge is ever produced and the cycle
+            // cannot form. The lock type is unchanged either way --
+            // DeduceLockType returns WriteIntent for ReadForWrite under both
+            // protocols. UpsertTableIndexOp::acquire_all_intent_op_ and
+            // CatalogAcquireAllOp::acquire_all_intent_op_ already pick OCC for
+            // the same reason.
             if (iso_level_ < IsolationLevel::RepeatableRead)
             {
                 read.iso_level_ = IsolationLevel::RepeatableRead;
@@ -1835,7 +1850,9 @@ void TransactionExecution::Process(ReadOperation &read)
             {
                 read.iso_level_ = iso_level_;
             }
-            read.protocol_ = CcProtocol::Locking;
+            read.protocol_ = read.read_tx_req_->is_for_write_
+                                 ? CcProtocol::OCC
+                                 : CcProtocol::Locking;
 
             bool finished = true;
             if (!read.read_tx_req_->is_str_key_)
@@ -4026,6 +4043,20 @@ void TransactionExecution::PostProcess(
     }
     else
     {
+        // Every failure branch of CatalogAcquireAllOp::Forward sets the error
+        // code before it gets here. Leaving it at NO_ERROR would abort the
+        // transaction while TxErrorCodeToMongoStatus (and its equivalents in
+        // the other API layers) reports success to the client, silently
+        // dropping the writes. Guard against a future failure branch that
+        // forgets to set one.
+        assert(bool_resp_->ErrorCode() != TxErrorCode::NO_ERROR);
+        if (bool_resp_->ErrorCode() == TxErrorCode::NO_ERROR)
+        {
+            LOG(ERROR) << "CatalogAcquireAllOp failed without an error code, "
+                          "tx_number: "
+                       << TxNumber();
+            bool_resp_->SetErrorCode(TxErrorCode::UNDEFINED_ERR);
+        }
         catalog_acquire_all_.Reset();
         Abort();
     }

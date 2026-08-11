@@ -437,4 +437,34 @@ static inline const std::string CcErrorMessage(CcErrorCode error_code)
     }
     return "CcErrorCode:" + std::to_string(static_cast<int>(error_code));
 }
+
+/**
+ * @brief Whether the error means "another transaction got there first".
+ *
+ * Conflict errors are the ones an API layer is expected to resolve by
+ * re-running the whole transaction, so they map to a retryable error at the
+ * API boundary (e.g. mongo's WriteConflictException). Everything else --
+ * leadership changes, term changes, timeouts, transport failures -- is an
+ * infrastructure failure that retrying the same transaction will not clear,
+ * and reporting one of those as a conflict feeds a retry loop that may have
+ * no bound of its own.
+ *
+ * Keep this list aligned with the codes an API layer converts into its
+ * retryable exception.
+ */
+static inline bool IsConflictError(CcErrorCode error_code)
+{
+    switch (error_code)
+    {
+    case CcErrorCode::ACQUIRE_KEY_LOCK_FAILED_FOR_RW_CONFLICT:
+    case CcErrorCode::ACQUIRE_KEY_LOCK_FAILED_FOR_WW_CONFLICT:
+    case CcErrorCode::ACQUIRE_GAP_LOCK_FAILED:
+    case CcErrorCode::VALIDATION_FAILED_FOR_VERSION_MISMATCH:
+    case CcErrorCode::VALIDATION_FAILED_FOR_CONFILICTED_TXS:
+    case CcErrorCode::DEAD_LOCK_ABORT:
+        return true;
+    default:
+        return false;
+    }
+}
 }  // namespace txservice
