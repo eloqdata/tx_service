@@ -137,3 +137,100 @@ TEST_CASE("a write lock request from a non-holder still queues FIFO",
     REQUIRE(queued[0] == kQueuedFirst);
     REQUIRE(queued[1] == kQueuedSecond);
 }
+
+TEST_CASE("a write intent under OCC fails instead of queueing",
+          "[NonBlockingLock]")
+{
+    // Catalog reads-for-write run under OCC precisely so that a conflict does
+    // not produce a wait edge: the waiter would still be holding this entry's
+    // read lock, which is what the intent holder needs released before it can
+    // upgrade to a write lock. Under Locking the same request queues, which is
+    // the shape that closes the cycle.
+    constexpr txservice::TxNumber kHolder = 1001;
+    constexpr txservice::TxNumber kWaiter = 1002;
+
+    using txservice::LockOpStatus;
+    using txservice::LockType;
+
+    SECTION("OCC: Failed, and nothing is queued")
+    {
+        NonBlockingLock lock;
+        StubCcRequest holder_intent{kHolder};
+        StubCcRequest waiter_intent{kWaiter};
+
+        REQUIRE(lock.AcquireLock(
+                    &holder_intent, CcProtocol::OCC, LockType::WriteIntent) ==
+                LockOpStatus::Successful);
+        REQUIRE(lock.AcquireLock(
+                    &waiter_intent, CcProtocol::OCC, LockType::WriteIntent) ==
+                LockOpStatus::Failed);
+
+        REQUIRE_FALSE(lock.FindQueueRequest(kWaiter));
+        REQUIRE(lock.GetBlockTxIds(0).empty());
+    }
+
+    SECTION("Locking: Blocked, and the waiter is queued")
+    {
+        NonBlockingLock lock;
+        StubCcRequest holder_intent{kHolder};
+        StubCcRequest waiter_intent{kWaiter};
+
+        REQUIRE(lock.AcquireLock(&holder_intent,
+                                 CcProtocol::Locking,
+                                 LockType::WriteIntent) ==
+                LockOpStatus::Successful);
+        REQUIRE(lock.AcquireLock(&waiter_intent,
+                                 CcProtocol::Locking,
+                                 LockType::WriteIntent) ==
+                LockOpStatus::Blocked);
+
+        REQUIRE(lock.FindQueueRequest(kWaiter));
+        std::vector<txservice::TxNumber> queued = lock.GetBlockTxIds(0);
+        REQUIRE(queued.size() == 1);
+        REQUIRE(queued[0] == kWaiter);
+    }
+
+    SECTION("OccRead still queues -- only OCC skips the enqueue")
+    {
+        // Guards the comment at the enqueue site, which used to claim OccRead
+        // does not enqueue.
+        NonBlockingLock lock;
+        StubCcRequest holder_intent{kHolder};
+        StubCcRequest waiter_intent{kWaiter};
+
+        REQUIRE(lock.AcquireLock(&holder_intent,
+                                 CcProtocol::OccRead,
+                                 LockType::WriteIntent) ==
+                LockOpStatus::Successful);
+        REQUIRE(lock.AcquireLock(&waiter_intent,
+                                 CcProtocol::OccRead,
+                                 LockType::WriteIntent) ==
+                LockOpStatus::Blocked);
+        REQUIRE(lock.FindQueueRequest(kWaiter));
+    }
+}
+
+TEST_CASE("the protocol changes the failure status, never the lock type",
+          "[NonBlockingLock]")
+{
+    // The catalog fix relies on this: switching a read-for-write from Locking
+    // to OCC must not silently downgrade the lock it takes.
+    using txservice::CcOperation;
+    using txservice::IsolationLevel;
+    using txservice::LockType;
+    using txservice::LockTypeUtil;
+
+    for (CcProtocol proto :
+         {CcProtocol::OCC, CcProtocol::OccRead, CcProtocol::Locking})
+    {
+        for (IsolationLevel iso : {IsolationLevel::ReadCommitted,
+                                   IsolationLevel::Snapshot,
+                                   IsolationLevel::RepeatableRead,
+                                   IsolationLevel::Serializable})
+        {
+            REQUIRE(LockTypeUtil::DeduceLockType(
+                        CcOperation::ReadForWrite, iso, proto, false) ==
+                    LockType::WriteIntent);
+        }
+    }
+}

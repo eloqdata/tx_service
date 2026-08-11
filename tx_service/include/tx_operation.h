@@ -538,6 +538,16 @@ struct AcquireAllOp : public TransactionOperation
 
     bool IsDeadlock() const;
 
+    /**
+     * @brief Returns a concrete error code for a failed AcquireAllOp.
+     *
+     * fail_cnt_ alone cannot supply one: it is also raised on the dedup
+     * read-version mismatch path, where every handler result is successful.
+     * A failed AcquireAll must never be reported as NO_ERROR, or the caller
+     * aborts the transaction while telling the client it succeeded.
+     */
+    CcErrorCode RepresentativeError() const;
+
     std::vector<CcHandlerResult<AcquireAllResult>> hd_results_;
     uint32_t upload_cnt_{0};
     std::atomic<uint32_t> finish_cnt_{0};

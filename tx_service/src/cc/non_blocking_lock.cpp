@@ -459,7 +459,9 @@ bool NonBlockingLock::AcquireWriteIntent(CcRequestBase *cc_req,
             blocking_queue_.Enqueue(
                 LockQueueEntry(cc_req, LockType::WriteIntent));
         }
-        // OccRead doesn't enqueue request.
+        // OCC doesn't enqueue the request: the caller fails fast instead of
+        // waiting, so no wait edge is produced. OccRead and Locking both
+        // enqueue.
         return false;
     }
 }
