@@ -3700,6 +3700,18 @@ void LocalCcShards::DataSyncForRangePartition(
 
     if (!during_split_range)
     {
+        // Decide under the metadata lock, act after releasing it (see the
+        // switch below).
+        enum class PreCheck
+        {
+            Process,
+            TableDropped,
+            NotOwner,
+            AlreadySynced,
+        };
+        PreCheck outcome = PreCheck::Process;
+        std::deque<std::shared_ptr<DataSyncTask>> detached_tasks;
+
         std::shared_lock<std::shared_mutex> meta_lk(meta_data_mux_);
 
         TableName range_tbl_name{table_name.StringView(),
@@ -3709,11 +3721,13 @@ void LocalCcShards::DataSyncForRangePartition(
             GetTableRangeEntryInternal(range_tbl_name, ng_id, range_id);
         if (range_entry == nullptr)
         {
-            // table dropped
-            data_sync_task->SetError(CcErrorCode::REQUESTED_TABLE_NOT_EXISTS);
-            data_sync_task->SetScanTaskFinished();
-            data_sync_task->ResetRangeSplittingStatus();
-            ClearAllPendingTasks(ng_id, expected_ng_term, table_name, range_id);
+            // table dropped. Detach the limiter's pending tasks while the
+            // metadata lock still excludes a concurrent re-creation of the
+            // same table, so next-generation tasks cannot join the limiter
+            // between our unlock and their finalization below.
+            outcome = PreCheck::TableDropped;
+            detached_tasks = DetachAllPendingTasks(
+                ng_id, expected_ng_term, table_name, range_id);
         }
         else
         {
@@ -3748,12 +3762,7 @@ void LocalCcShards::DataSyncForRangePartition(
                 last_sync_ts = is_dirty ? 0 : range_entry->GetLastSyncTs();
                 if (data_sync_task->data_sync_ts_ <= last_sync_ts && !is_dirty)
                 {
-                    data_sync_task->SetFinish();
-                    data_sync_task->SetScanTaskFinished();
-                    data_sync_task->ResetRangeSplittingStatus();
-                    PopPendingTask(
-                        ng_id, expected_ng_term, table_name, range_id);
-                    assert(need_process == false);
+                    outcome = PreCheck::AlreadySynced;
                 }
                 else
                 {
@@ -3763,20 +3772,49 @@ void LocalCcShards::DataSyncForRangePartition(
             else
             {
                 // range no longer belong to this ng.
-                data_sync_task->SetError(
-                    CcErrorCode::REQUESTED_NODE_NOT_LEADER);
-                data_sync_task->SetScanTaskFinished();
-                data_sync_task->ResetRangeSplittingStatus();
-                PopPendingTask(ng_id, expected_ng_term, table_name, range_id);
+                outcome = PreCheck::NotOwner;
             }
         }
 
-        if (!need_process)
-        {
-            return;
-        }
-
         meta_lk.unlock();
+
+        // Act only after the metadata lock is released: SetFinish()'s
+        // last-task path issues RPCs (LogAgent::UpdateCheckpointTs,
+        // BrocastPrimaryCkptTs) that park this worker, and holding
+        // meta_data_mux_ across that wait blocks every catalog writer
+        // (CreateDirtyCatalog/UpdateDirtyCatalog) on the cc shard's
+        // processor slot and wedges the node. The helpers below only touch
+        // task bookkeeping guarded by task_limiter_mux_; none of them need
+        // the metadata lock.
+        switch (outcome)
+        {
+        case PreCheck::TableDropped:
+            data_sync_task->SetError(CcErrorCode::REQUESTED_TABLE_NOT_EXISTS);
+            data_sync_task->SetScanTaskFinished();
+            data_sync_task->ResetRangeSplittingStatus();
+            for (auto &task : detached_tasks)
+            {
+                task->SetError(CcErrorCode::REQUESTED_TABLE_NOT_EXISTS);
+                task->SetScanTaskFinished();
+            }
+            return;
+        case PreCheck::NotOwner:
+            data_sync_task->SetError(CcErrorCode::REQUESTED_NODE_NOT_LEADER);
+            data_sync_task->SetScanTaskFinished();
+            data_sync_task->ResetRangeSplittingStatus();
+            PopPendingTask(ng_id, expected_ng_term, table_name, range_id);
+            return;
+        case PreCheck::AlreadySynced:
+            assert(!need_process);
+            data_sync_task->SetFinish();
+            data_sync_task->SetScanTaskFinished();
+            data_sync_task->ResetRangeSplittingStatus();
+            PopPendingTask(ng_id, expected_ng_term, table_name, range_id);
+            return;
+        case PreCheck::Process:
+            assert(need_process);
+            break;
+        }
 
         // Check the leader
         // In order to avoid range entry be dropped by ClearCcNodeGroup, should
@@ -4627,6 +4665,18 @@ void LocalCcShards::DataSyncForHashPartition(
     int64_t expected_ng_term = data_sync_task->node_group_term_;
     bool is_dirty = data_sync_task->is_dirty_;
 
+    // Decide under the metadata lock, act after releasing it; see
+    // DataSyncForRangePartition for why task finalization must not run
+    // while meta_data_mux_ is held.
+    enum class PreCheck
+    {
+        Process,
+        TableDropped,
+        AlreadySynced,
+    };
+    PreCheck outcome = PreCheck::Process;
+    std::deque<std::shared_ptr<DataSyncTask>> detached_tasks;
+
     std::shared_lock<std::shared_mutex> meta_lk(meta_data_mux_);
     uint64_t last_sync_ts = 0;
     bool need_process = false;
@@ -4639,9 +4689,12 @@ void LocalCcShards::DataSyncForHashPartition(
 
     if (catalog_entry == nullptr)
     {
-        data_sync_task->SetError(CcErrorCode::REQUESTED_TABLE_NOT_EXISTS);
-        data_sync_task->SetScanTaskFinished();
-        ClearAllPendingTasks(ng_id, expected_ng_term, table_name, worker_idx);
+        // table dropped. Detach under the lock so a concurrent re-creation
+        // cannot enqueue next-generation tasks into the limiter before
+        // their finalization below.
+        outcome = PreCheck::TableDropped;
+        detached_tasks = DetachAllPendingTasks(
+            ng_id, expected_ng_term, table_name, worker_idx);
     }
     else
     {
@@ -4672,12 +4725,7 @@ void LocalCcShards::DataSyncForHashPartition(
         last_sync_ts = is_dirty ? 0 : catalog_entry->GetLastSyncTs(worker_idx);
         if (data_sync_task->data_sync_ts_ <= last_sync_ts && !is_dirty)
         {
-            data_sync_task->SetFinish();
-            data_sync_task->SetScanTaskFinished();
-
-            PopPendingTask(ng_id, expected_ng_term, table_name, worker_idx);
-
-            assert(need_process == false);
+            outcome = PreCheck::AlreadySynced;
         }
         else
         {
@@ -4685,12 +4733,29 @@ void LocalCcShards::DataSyncForHashPartition(
         }
     }
 
-    if (!need_process)
-    {
-        return;
-    }
-
     meta_lk.unlock();
+
+    switch (outcome)
+    {
+    case PreCheck::TableDropped:
+        data_sync_task->SetError(CcErrorCode::REQUESTED_TABLE_NOT_EXISTS);
+        data_sync_task->SetScanTaskFinished();
+        for (auto &task : detached_tasks)
+        {
+            task->SetError(CcErrorCode::REQUESTED_TABLE_NOT_EXISTS);
+            task->SetScanTaskFinished();
+        }
+        return;
+    case PreCheck::AlreadySynced:
+        assert(!need_process);
+        data_sync_task->SetFinish();
+        data_sync_task->SetScanTaskFinished();
+        PopPendingTask(ng_id, expected_ng_term, table_name, worker_idx);
+        return;
+    case PreCheck::Process:
+        assert(need_process);
+        break;
+    }
 
     int64_t ng_term = -1;
     if (data_sync_task->is_standby_node_ckpt_)
@@ -4958,7 +5023,13 @@ void LocalCcShards::DataSyncForHashPartition(
                 const auto bucket_infos = GetAllBucketInfosNoLocking(ng_id);
                 if (bucket_infos == nullptr)
                 {
-                    // no longer node group owner, abort the task
+                    // No longer node group owner, abort the task -- but only
+                    // after releasing the metadata lock:
+                    // PostProcessHashPartitionDataSyncTask's SCAN_ERROR path
+                    // reaches AbortTx()/CommitTxRequest::Wait(), and parking
+                    // this worker with meta_data_mux_ held blocks catalog
+                    // writers on the cc shard's processor slot.
+                    meta_lk.unlock();
                     LOG(ERROR) << "DataSync: Failed to get bucket infos for "
                                   "ng#"
                                << ng_id;
@@ -5409,6 +5480,30 @@ void LocalCcShards::PopPendingTask(NodeGroupId ng_id,
     {
         task_limiters_.erase(iter);
     }
+}
+
+std::deque<std::shared_ptr<DataSyncTask>> LocalCcShards::DetachAllPendingTasks(
+    NodeGroupId ng_id,
+    int64_t ng_term,
+    const TableName &table_name,
+    uint32_t id)
+{
+    assert(!table_name.IsMeta());
+
+    auto task_limiter_key = TaskLimiterKey(ng_id,
+                                           ng_term,
+                                           table_name.StringView(),
+                                           table_name.Type(),
+                                           table_name.Engine(),
+                                           id);
+
+    std::deque<std::shared_ptr<DataSyncTask>> detached;
+    std::lock_guard<std::mutex> task_limiter_lk(task_limiter_mux_);
+    auto iter = task_limiters_.find(task_limiter_key);
+    assert(iter != task_limiters_.end());
+    detached.swap(iter->second->pending_tasks_);
+    task_limiters_.erase(iter);
+    return detached;
 }
 
 void LocalCcShards::ClearAllPendingTasks(NodeGroupId ng_id,
