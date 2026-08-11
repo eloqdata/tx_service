@@ -86,6 +86,19 @@ Aborts run the same tail (UpdateTxnStatus → PostProcess with rollback). A txm 
 
 Set per tx at init (`iso_level_`, `protocol_`): `IsolationLevel` {ReadCommitted, Snapshot (requires `enable_mvcc`), RepeatableRead, Serializable} × `CcProtocol` {OCC, OccRead, Locking}. The lock type taken by each operation is decided by `LockTypeUtil::DeduceLockType` (`tx_service/include/cc_protocol.h`); `DeduceReadLockType` additionally special-cases meta tables and covering-key index reads. Snapshot reads use MVCC version chains and `TxStartTsCollector` ([07](07-durability-and-recovery.md)).
 
+**Read-local overrides the tx's settings** (`Process(ReadOperation&)`, `tx_service/src/tx_execution.cpp`). `ReadLocal` is used for catalog reads, which must take a real read lock whatever the tx asked for, so the isolation level is forced up to at least `RepeatableRead`. The protocol is then chosen by `is_for_write_`:
+
+| `is_for_write_` | protocol | lock | on conflict |
+|---|---|---|---|
+| `false` (catalog read) | `Locking` | `ReadLock` | blocks in the entry's queue |
+| `true` (catalog read for write) | `OCC` | `WriteIntent` | **fails fast** → `ACQUIRE_KEY_LOCK_FAILED_FOR_WW_CONFLICT` |
+
+The lock type is identical in both rows — `DeduceLockType` returns `WriteIntent` for `ReadForWrite` under every protocol. Only the failure status differs. Waiting on a catalog write intent closes a lock cycle against a DDL that is already past its prepare log and therefore cannot be aborted; see the rationale in [03](03-concurrency-control.md#5-nonblockinglock-non_blocking_lockh-non_blocking_lockcpp). `UpsertTableIndexOp::acquire_all_intent_op_` and `CatalogAcquireAllOp::acquire_all_intent_op_` already picked `OCC` for the same reason.
+
+`Process(ScanOpenOperation&)` still hardcodes `Locking` for read-local scans, so a read-local scan for write would take a blocking write intent. No in-tree caller constructs one today.
+
+A failed `CatalogAcquireAllOp` reports `AcquireAllOp::RepresentativeError()` on `bool_resp_` before aborting. `fail_cnt_` alone cannot supply a code — it is also raised on the dedup read-version-mismatch path where every handler result is successful — and an abort reported as `NO_ERROR` reads as success at the API boundary. Within one op, an infrastructure error (`REQUESTED_NODE_NOT_LEADER`, `NG_TERM_CHANGED`, timeouts) outranks a conflict error (`IsConflictError`, `error_messages.h`), because API layers retry conflicts and some of those retry loops have no bound of their own.
+
 ## Gotchas
 
 - Operation objects are *members* of the txm (`read_`, `acquire_write_`, `write_log_`, ...) — they are reused across requests; `Reset()` correctness on every path matters.
