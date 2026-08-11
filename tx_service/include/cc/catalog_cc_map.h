@@ -248,7 +248,12 @@ public:
         Iterator it =
             TemplateCcMap<CatalogKey, CatalogRecord, true, false>::Find(
                 *table_key);
-        CcEntry<CatalogKey, CatalogRecord, true, false> *cce_ptr = it->second;
+        // Find() returns End() when the key is absent, and End() is not
+        // dereferenceable. The null-entry case below is expected here (it is
+        // exactly the failed-over node group the comment describes), so the
+        // iterator has to be range-checked before it->second.
+        CcEntry<CatalogKey, CatalogRecord, true, false> *cce_ptr =
+            it == End() ? nullptr : it->second;
 
         // Check whether cce key lock holder is the given tx of the
         // PostWriteAllCc before applying change.
@@ -1312,7 +1317,12 @@ public:
         {
             CatalogKey table_key(table_name);
             Iterator it = Find(table_key);
-            CcEntry<CatalogKey, CatalogRecord, true, false> *cce = it->second;
+            // Find() returns End() when the key is absent (template_cc_map.h),
+            // and End() is not dereferenceable. During replay the catalog entry
+            // is normally absent -- that is the whole point of replaying it --
+            // so the iterator must be range-checked before it->second.
+            CcEntry<CatalogKey, CatalogRecord, true, false> *cce =
+                it == End() ? nullptr : it->second;
             if (cce != nullptr)
             {
                 req.SetFinish();
@@ -2236,7 +2246,31 @@ public:
         Iterator it =
             TemplateCcMap<CatalogKey, CatalogRecord, true, false>::Find(
                 catalog_key);
-        CcEntry<CatalogKey, CatalogRecord, true, false> *cce = it->second;
+        CcEntry<CatalogKey, CatalogRecord, true, false> *cce =
+            it == End() ? nullptr : it->second;
+
+        if (cce == nullptr)
+        {
+            // The catalog write lock was taken on the old leader by
+            // InvalidateTableCacheCompositeOp's acquire_all_lock_op_, and there
+            // is no leader-term re-check before this request is routed. If the
+            // node group failed over in between, this lands on a new leader
+            // whose catalog cc map has neither the entry nor the lock -- cc
+            // entries and locks do not survive failover. The ng_term check
+            // above still passes, because the new leader's term is valid. There
+            // is nothing cached to invalidate, so finish the request instead of
+            // dereferencing.
+            if (shard_->core_id_ < shard_->core_cnt_ - 1)
+            {
+                req.ResetCcm();
+                MoveRequest(&req, shard_->core_id_ + 1);
+                return false;
+            }
+            hd_res->SetFinished();
+            return true;
+        }
+
+        // Only meaningful when the entry survived, i.e. no failover happened.
         assert(cce->GetKeyLock()->HasWriteLock(req.Txn()));
 
         if (cce->PayloadStatus() == RecordStatus::Unknown)
