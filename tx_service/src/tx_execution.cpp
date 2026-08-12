@@ -562,9 +562,23 @@ void TransactionExecution::InitTx(IsolationLevel iso_level,
 
 bool TransactionExecution::CommitTx(CommitTxRequest &commit_req)
 {
+    // The immediate path below closes the tx without waiting, so it is only
+    // safe when the tx holds nothing that close-time post-processing has to
+    // release. Catalog reads are the subtle case: their locks live in two
+    // places -- the metadata read set, released by ReleaseMetaDataReadLock()
+    // during post-processing, and locked_db_, released by
+    // ReleaseCatalogsRead() from Reset(). Returning while either is still
+    // held lets a caller that immediately reopens a tx (a retry loop) keep a
+    // catalog entry's reader count non-zero, so a DDL write intent never
+    // upgrades.
+    bool holds_catalog_read = rw_set_.MetaDataReadSetSize() > 0;
+    for (const auto &locked : locked_db_)
+    {
+        holds_catalog_read = holds_catalog_read || locked.first != nullptr;
+    }
+
     if (rw_set_.DataReadSetSize() == 0 && rw_set_.WriteSetSize() == 0 &&
-        rw_set_.MetaDataReadSetSize() == 0 &&
-        rw_set_.CatalogWriteSetSize() == 0 &&
+        !holds_catalog_read && rw_set_.CatalogWriteSetSize() == 0 &&
         cmd_set_.ObjectCntWithWriteLock() == 0)
     {
         commit_tx_req_->Reset();
