@@ -562,8 +562,23 @@ void TransactionExecution::InitTx(IsolationLevel iso_level,
 
 bool TransactionExecution::CommitTx(CommitTxRequest &commit_req)
 {
+    // The immediate path below closes the tx without waiting, so it is only
+    // safe when the tx holds nothing that close-time post-processing has to
+    // release. Catalog reads are the subtle case: their locks live in two
+    // places -- the metadata read set, released by ReleaseMetaDataReadLock()
+    // during post-processing, and locked_db_, released by
+    // ReleaseCatalogsRead() from Reset(). Returning while either is still
+    // held lets a caller that immediately reopens a tx (a retry loop) keep a
+    // catalog entry's reader count non-zero, so a DDL write intent never
+    // upgrades.
+    bool holds_catalog_read = rw_set_.MetaDataReadSetSize() > 0;
+    for (const auto &locked : locked_db_)
+    {
+        holds_catalog_read = holds_catalog_read || locked.first != nullptr;
+    }
+
     if (rw_set_.DataReadSetSize() == 0 && rw_set_.WriteSetSize() == 0 &&
-        rw_set_.CatalogWriteSetSize() == 0 &&
+        !holds_catalog_read && rw_set_.CatalogWriteSetSize() == 0 &&
         cmd_set_.ObjectCntWithWriteLock() == 0)
     {
         commit_tx_req_->Reset();
@@ -1828,20 +1843,22 @@ void TransactionExecution::Process(ReadOperation &read)
             // concurrency control protocol. So the isolation level is forced up
             // to at least RepeatableRead.
             //
-            // The cc protocol depends on what the read is for. A plain catalog
-            // read takes a read lock under Locking and waits, as before. A read
-            // for write takes a write intent, and under Locking it would wait
-            // in the entry's blocking queue. A catalog write intent is exactly
-            // where DDL and DML meet, so waiting there closes a lock cycle:
-            // the waiter holds this entry's read lock while the DDL holding the
-            // write intent waits for that read lock to be released so it can
-            // upgrade to a write lock. OCC makes the acquisition fail instead
-            // of enqueueing, so no wait edge is ever produced and the cycle
-            // cannot form. The lock type is unchanged either way --
-            // DeduceLockType returns WriteIntent for ReadForWrite under both
-            // protocols. UpsertTableIndexOp::acquire_all_intent_op_ and
-            // CatalogAcquireAllOp::acquire_all_intent_op_ already pick OCC for
-            // the same reason.
+            // The cc protocol depends on what the read is for. A plain
+            // catalog read takes a read lock under Locking and waits, as
+            // before. A read for write takes a write intent, and every caller
+            // that asks for one is a DDL command (create/drop collection,
+            // create/drop indexes, rename); DML and queries read the catalog
+            // without the for-write flag. Two such commands touching the same
+            // table therefore both want the write intent, and under Locking
+            // the loser enqueues behind a holder that will not release until
+            // its own schema change completes -- with each side holding what
+            // the other waits for, neither finishes. OCC makes the acquisition
+            // fail instead of enqueueing, so no wait edge is produced and the
+            // caller retries at the command layer. The lock type is unchanged
+            // either way -- DeduceLockType returns WriteIntent for ReadForWrite
+            // under both protocols. UpsertTableIndexOp::acquire_all_intent_op_
+            // and CatalogAcquireAllOp::acquire_all_intent_op_ already pick OCC
+            // for the same reason.
             if (iso_level_ < IsolationLevel::RepeatableRead)
             {
                 read.iso_level_ = IsolationLevel::RepeatableRead;

@@ -262,15 +262,17 @@ Note that the protocol changes only the *status* of a failed acquisition, never 
 That is what lets a catalog read-for-write run under `OCC` while still taking a `WriteIntent`
 (see the read-local rule in [04](04-transaction-execution.md#isolation--protocols)).
 
-**Why catalog write intents must not wait.** A catalog entry is the one entry where DDL and DML
-meet, and an API layer typically holds its `ReadLock` on that entry before escalating to a
-`WriteIntent` on the same entry. If the escalation blocks, the resulting wait edge closes a
-cycle: the DDL holding the `WriteIntent` waits in `acquire_all_lock_op_` for `NoReadLockConflict`
-so it can upgrade to a `WriteLock`, which cannot happen until the blocked waiter releases the
-read lock it is still holding. The deadlock detector sees the cycle, but a DDL past its prepare
-log cannot be aborted, so its recovery action is a no-op and the cycle re-forms. Failing fast
-instead means the waiter never enters `blocking_queue_`, so no edge is produced and the cycle
-cannot form.
+**Why catalog write intents must not wait.** A catalog read-for-write is requested only by DDL
+paths -- an API layer's create/drop collection, create/drop indexes and rename all ask for it,
+while DML and queries read the catalog without the flag. A DDL command typically holds a lock on
+the catalog entry from an earlier step before escalating to a `WriteIntent` on the same entry, so
+two commands touching one table can each hold what the other needs. If the escalation blocks, the
+resulting wait edge closes a cycle: the DDL holding the `WriteIntent` waits in
+`acquire_all_lock_op_` for `NoReadLockConflict` so it can upgrade to a `WriteLock`, which cannot
+happen until the blocked waiter releases the lock it is still holding. The deadlock detector sees
+the cycle, but a DDL past its prepare log cannot be aborted, so its recovery action is a no-op and
+the cycle re-forms. Failing fast instead means the waiter never enters `blocking_queue_`, so no
+edge is produced and the caller retries at the command layer.
 
 Release paths (`ReleaseWriteLock`, `ReleaseReadLock`, `ClearTx`, `DowngradeWriteLock`) all end in
 `TryPopBlockingQueue(ccs)`: pop queue heads while they are now grantable, granting the lock
