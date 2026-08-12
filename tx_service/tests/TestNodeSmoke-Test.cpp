@@ -1,6 +1,11 @@
 #include <catch2/catch_all.hpp>
 
+#include "catalog_key_record.h"
 #include "harness/test_node.h"
+#include "tx_execution.h"
+#include "tx_key.h"
+#include "tx_request.h"
+#include "type.h"
 
 using namespace txservice;
 using namespace txservice::test;
@@ -21,6 +26,33 @@ TEST_CASE("TestNode write/read/delete round-trip", "[testnode]")
     {
         auto t = node.BeginTx();
         REQUIRE(t.Commit());
+    }
+
+    // A metadata-only transaction must use the caller-owned close request so
+    // CommitTx does not return before metadata post-processing has completed.
+    constexpr bool close_modes[] = {true, false};
+    for (bool to_commit : close_modes)
+    {
+        auto t = node.BeginTx();
+        CatalogKey catalog_key(node.Table());
+        TxKey tx_key(&catalog_key);
+        CatalogRecord catalog_record;
+        ReadTxRequest read_req(
+            &catalog_ccm_name, 0, &tx_key, &catalog_record, false, false, true);
+        t.Txm()->Execute(&read_req);
+        read_req.Wait();
+        REQUIRE_FALSE(read_req.IsError());
+
+        CommitTxRequest close_req(to_commit);
+        const bool closed = t.Txm()->CommitTx(close_req);
+        CAPTURE(to_commit,
+                closed,
+                close_req.IsFinished(),
+                close_req.IsError(),
+                close_req.ErrorCode());
+        REQUIRE(closed == to_commit);
+        REQUIRE(close_req.IsFinished());
+        REQUIRE_FALSE(close_req.IsError());
     }
 
     // Write 1 -> 100 and commit.
