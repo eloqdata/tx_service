@@ -563,6 +563,7 @@ void TransactionExecution::InitTx(IsolationLevel iso_level,
 bool TransactionExecution::CommitTx(CommitTxRequest &commit_req)
 {
     if (rw_set_.DataReadSetSize() == 0 && rw_set_.WriteSetSize() == 0 &&
+        rw_set_.MetaDataReadSetSize() == 0 &&
         rw_set_.CatalogWriteSetSize() == 0 &&
         cmd_set_.ObjectCntWithWriteLock() == 0)
     {
