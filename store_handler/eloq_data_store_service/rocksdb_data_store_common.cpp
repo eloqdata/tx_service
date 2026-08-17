@@ -742,6 +742,7 @@ void RocksDBDataStoreCommon::BatchWriteRecords(
 
             auto write_status = db->Write(write_options, &write_batch);
 
+            result.set_error_code(::EloqDS::remote::DataStoreError::NO_ERROR);
             if (!write_status.ok())
             {
                 LOG(ERROR) << "BatchWriteRecords failed, table:"
@@ -769,7 +770,6 @@ void RocksDBDataStoreCommon::BatchWriteRecords(
                 }
             }
 
-            result.set_error_code(::EloqDS::remote::DataStoreError::NO_ERROR);
             batch_write_req->SetFinish(result);
         });
 

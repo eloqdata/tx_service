@@ -137,7 +137,15 @@ void MemDataStore::FlushData(FlushDataRequest *req)
     PoolableGuard poolable_guard(req);
 
     ::EloqDS::remote::CommonResult result;
-    result.set_error_code(::EloqDS::remote::DataStoreError::NO_ERROR);
+    if (fail_flush_data_)
+    {
+        result.set_error_code(::EloqDS::remote::DataStoreError::FLUSH_FAILED);
+        result.set_error_msg("injected FlushData failure");
+    }
+    else
+    {
+        result.set_error_code(::EloqDS::remote::DataStoreError::NO_ERROR);
+    }
     req->SetFinish(result);
 }
 

@@ -53,10 +53,16 @@ published as durable until that barrier succeeds. A failed, skipped, or
 non-truncatable task prevents the affected checkpoint round from advancing the
 log-truncation boundary.
 
-Once every included task is durable, the checkpointer updates entry state,
-publishes the NG checkpoint timestamp, and reports the safe truncation point to
-the log service. Clean entries at or below their checkpoint timestamp may then
-be evicted and fetched from storage on demand.
+Entry checkpoint timestamps advance at the complete backend durability
+boundary. Non-MVCC EloqStore flushes publish each durable partition; RocksDB
+backends wait for `PersistKV`, and MVCC also waits for archive writes. A merged
+flush retains only the newest represented term for each NG, so discarded
+lower-term writes cannot publish checkpoint state. Split-child flushes update
+entries on their source range's owning shard.
+
+Clean entries can be evicted after their checkpoint state is published. The NG
+checkpoint timestamp and log-truncation boundary advance only after every
+included task succeeds, independently of earlier entry-level progress.
 
 The same data-sync machinery also supports range splits, index construction,
 bucket migration, snapshots, and shutdown flushing. Those callers can require

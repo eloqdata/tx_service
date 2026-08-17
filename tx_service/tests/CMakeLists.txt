@@ -66,7 +66,9 @@ set(CATCH_MAIN_TESTS
     CcRequestWait-Test
     CcRequestPool-Test
     CheckpointMetricsState-Test
+    CheckpointFlush-Test
     FetchRecordCc-Test
+    RealDataStore-Test
     NonBlockingLock-Test
     AcquireAllError-Test
     StandbyForward-Test

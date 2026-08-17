@@ -92,7 +92,9 @@ public:
             &flush_task,
         const std::function<void()> *yield_fptr = nullptr,
         const std::function<void()> *resume_fptr = nullptr,
-        const std::function<void()> *sync_yield_fptr = nullptr) = 0;
+        const std::function<void()> *sync_yield_fptr = nullptr,
+        const std::function<void(uint64_t, uint64_t)> *partition_progress_fptr =
+            nullptr) = 0;
 
     /**
      * @brief indicate end of flush entries in a single ckpt for \@param batch

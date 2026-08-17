@@ -34,7 +34,6 @@
 #include <functional>
 #include <iostream>
 #include <iterator>
-#include <list>
 #include <map>
 #include <memory>
 #include <string>
@@ -416,6 +415,24 @@ public:
     size_t WaitListSizeForMemory();
 
     void WakeUpShardCleanCc();
+
+    /**
+     * @brief Consumes the wake-up that arrived while the eviction pass was
+     * already running.
+     *
+     * A wake-up cannot be delivered while ShardCleanCc is in use, and the pass
+     * in flight may have already scanned past the entries the wake-up is about
+     * -- the memory freed by a checkpoint flush that lands mid-pass is a case
+     * in point. Since that pass stops itself once it frees nothing, the
+     * wake-up would be lost and the shard would hold its parked requests until
+     * some later flush. Recording it lets the pass re-run instead.
+     *
+     * @return Whether a wake-up was dropped since the last call.
+     */
+    bool TakeShardCleanCcWakeUp()
+    {
+        return std::exchange(shard_clean_cc_wake_pending_, false);
+    }
 
     /**
      * @brief Puts a cc request into the shard's request queue to be processed.
@@ -988,7 +1005,15 @@ public:
     store::DataStoreHandler::DataStoreOpStatus FetchBucketData(
         FetchBucketDataCc *fetch_bucket_data_cc);
 
-    void RemoveFetchRecordRequest(LruEntry *cce);
+    /**
+     * Removes the active fetch index and transfers ownership to the caller.
+     * Keep the returned owner alive while resuming requesters inline so a
+     * nested fetch cannot reuse the completing request. Releasing the owner
+     * recycles a pooled request or destroys a temporary one; Execute() must
+     * then return false to prevent the dispatcher from freeing it again.
+     * Callers abandoning a fetch may discard the returned owner immediately.
+     */
+    FetchRecordCc::uptr RemoveFetchRecordRequest(LruEntry *cce);
 
     CcMap *CreateOrUpdatePkCcMap(const TableName &table_name,
                                  const TableSchema *table_schema,
@@ -1362,7 +1387,7 @@ private:
     // Keep a bounded set of reusable shells after a burst of cold reads.
     // Saturation allocates temporary requests rather than limiting reads.
     CcRequestPool<FetchRecordCc> fetch_record_cc_pool_{128};
-    // Addresses stay stable across async callbacks. Erasing an active owner
+    // Addresses stay stable across async callbacks. Releasing an owner
     // recycles a pooled request or deletes a temporary one. Declare the map
     // after the pool so these owners are released before the pool is destroyed.
     absl::flat_hash_map<LruEntry *, FetchRecordCc::uptr> fetch_record_reqs_;
@@ -1394,8 +1419,10 @@ private:
     std::vector<moodycamel::ProducerToken> low_priority_thd_token_;
     std::vector<std::unique_ptr<TxObject>> lazy_free_queue_;
     std::atomic<uint32_t> lazy_free_queue_size_{0};
-    // Cc requests waiting for the free memory.
-    std::list<CcRequestBase *> cc_wait_list_for_memory_;
+    // Cc requests parked until memory is freed. Intrusive: parking allocates
+    // nothing, which matters because this list grows exactly when the shard
+    // heap is exhausted.
+    CcRequestList cc_wait_list_for_memory_;
 
     // all the transactions started on this ccshard. Some txs are Ongoing while
     // others are Available, new transaction request has to traverse the array
@@ -1427,12 +1454,17 @@ private:
     std::unique_ptr<RetryFailedStandbyMsgCc> retry_fwd_msg_cc_;
     // Shard clean cc
     std::unique_ptr<ShardCleanCc> shard_clean_cc_;
+    // Set when a wake-up arrives while shard_clean_cc_ is already in use, so
+    // that the pass in flight re-runs rather than dropping the wake-up. See
+    // TakeShardCleanCcWakeUp().
+    bool shard_clean_cc_wake_pending_{false};
 
     // Standby forward msg related members used on follower node
     CcRequestPool<KeyObjectStandbyForwardCc> key_obj_standby_msg_cc_pool_;
     absl::flat_hash_map<uint32_t, StandbySequenceGroup> standby_sequence_grps_;
-    // requests to execute after schema being modified
-    std::vector<CcRequestBase *> waiting_list_for_schema_;
+    // Cc requests parked until the table schema they saw is updated; intrusive
+    // like cc_wait_list_for_memory_, so parking allocates nothing.
+    CcRequestList waiting_list_for_schema_;
 
     // The total number of commands buffered on this shard. If standby node has
     // too many commands buffered, it probably has fallen behind. Resubscribe

@@ -85,10 +85,16 @@ them through `PutAll`. Some backends stage these batches without making them
 independently durable. When `NeedPersistKV` is true, `PersistKV` is the required
 barrier after all batches for the checkpoint have completed.
 
-The checkpointer may advance entry and NG checkpoint timestamps, make clean
-entries evictable, and report a WAL truncation point only after both the writes
-and any required persistence barrier succeed. This is the central contract
-between `DataStoreHandler` and the durability layer.
+EloqStore batch completion establishes durability, so non-MVCC flushes may
+publish entry checkpoint timestamps per completed partition. RocksDB-backed
+batches require `PersistKV`; MVCC also requires archive writes before entries
+become clean and evictable. Lower-term tasks in a merged flush are excluded
+from both datastore work and checkpoint publication. NG checkpoint timestamps
+and WAL truncation still wait for the entire included round to succeed.
+
+This distinction between entry-level progress and the NG-wide truncation
+boundary is the central contract between `DataStoreHandler` and the durability
+layer.
 
 Cache misses reverse the path: the handler returns a record or streams a bounded
 range slice, and the completion is installed on the owning shard. MVCC reads
