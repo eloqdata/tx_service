@@ -28,6 +28,7 @@
 #include <atomic>
 #include <functional>
 #include <memory>
+#include <optional>
 #include <queue>
 #include <string>
 #include <utility>
@@ -41,7 +42,8 @@
 namespace EloqDS
 {
 class DataStoreServiceClient;
-}
+struct SyncPutAllData;
+}  // namespace EloqDS
 
 namespace EloqDS
 {
@@ -175,7 +177,7 @@ private:
 };
 
 /**
- * @brief Per-partition state management for concurrent flushing
+ * @brief Per-partition state management for concurrent flushing.
  */
 struct PartitionFlushState : public Poolable
 {
@@ -185,6 +187,24 @@ struct PartitionFlushState : public Poolable
     bool failed = false;
     remote::CommonResult result;
     mutable bthread::Mutex mux;
+
+    // Serialized bytes this partition carries across all of its batches,
+    // accumulated while the batches are prepared. Used as the weight of this
+    // partition when the flush releases its memory quota progressively: byte
+    // weights track the real (uneven) split of the flush task far better than
+    // partition counts.
+    uint64_t serialized_bytes_{0};
+
+    // PutAll discards lower-term tasks per node group before partition
+    // grouping. All entries retained in one kv partition therefore share one
+    // node-group term and can be published by one request after durability.
+    const txservice::DataSyncTask *ckpt_ts_task_{nullptr};
+    absl::flat_hash_map<size_t,
+                        std::vector<txservice::UpdateCceCkptTsCc::CkptTsEntry>>
+        ckpt_ts_entries_;
+    // Declared after ckpt_ts_entries_ so it is destroyed first; the request
+    // retains a reference to the entries for its entire lifetime.
+    std::optional<txservice::UpdateCceCkptTsCc> ckpt_ts_update_;
 
     PartitionFlushState() : partition_id(0)
     {
@@ -201,6 +221,10 @@ struct PartitionFlushState : public Poolable
         }
         failed = false;
         result.Clear();
+        serialized_bytes_ = 0;
+        ckpt_ts_update_.reset();
+        ckpt_ts_entries_.clear();
+        ckpt_ts_task_ = nullptr;
     }
 
     void Clear() override
@@ -210,7 +234,26 @@ struct PartitionFlushState : public Poolable
         {
             pending_batches.pop();
         }
+        serialized_bytes_ = 0;
+        ckpt_ts_update_.reset();
+        ckpt_ts_entries_.clear();
+        ckpt_ts_task_ = nullptr;
     }
+
+    /**
+     * @brief Records a cc entry made durable by this partition.
+     *
+     * @param task The newest-term data-sync task selected for the partition.
+     * @param core_idx The cc shard that owns the entry.
+     */
+    void AddCkptTsEntry(const txservice::DataSyncTask *task,
+                        size_t core_idx,
+                        txservice::LruEntry *cce,
+                        uint64_t commit_ts,
+                        size_t post_flush_size);
+
+    /** Arms the partition's single ckpt-ts update after setup is complete. */
+    void ArmCkptTsUpdate(SyncPutAllData *sync_putall);
     bool IsFailed() const
     {
         std::unique_lock<bthread::Mutex> lk(mux);
@@ -264,18 +307,24 @@ struct SyncPutAllData : public Poolable
         partition_states_.clear();
         completed_partitions_ = 0;
         total_partitions_ = 0;
+        completed_bytes_ = 0;
+        total_bytes_ = 0;
         waiting_.store(false);
         yield_fn_ = nullptr;
         resume_fn_ = nullptr;
+        progress_fn_ = nullptr;
     }
 
     virtual void Clear() override
     {
         completed_partitions_ = 0;
         total_partitions_ = 0;
+        completed_bytes_ = 0;
+        total_bytes_ = 0;
         waiting_.store(false);
         yield_fn_ = nullptr;
         resume_fn_ = nullptr;
+        progress_fn_ = nullptr;
         for (auto *partition_state : partition_states_)
         {
             partition_state->Clear();
@@ -291,15 +340,57 @@ struct SyncPutAllData : public Poolable
         resume_fn_ = resume_fn;
     }
 
+    /**
+     * @brief Installs the flush-progress consumer, invoked directly from
+     * OnPartitionCompleted() on whichever thread completes a partition, with
+     * the cumulative serialized bytes of the finished partitions and the
+     * flush's total. Byte weights, not partition counts: partitions are
+     * unevenly sized, and the caller releases flush memory quota in
+     * proportion.
+     *
+     * The callback must be safe to run from any completion context (a
+     * storage callback thread, the flush coroutine, or a cc shard via the
+     * ckpt-ts continuation): it may take only short, leaf-level locks. Calls
+     * are serialized by mux_.
+     */
+    void SetProgressCallback(
+        const std::function<void(uint64_t, uint64_t)> *progress_fn)
+    {
+        progress_fn_ = progress_fn;
+    }
+
     void Wait();
 
     void Wait(const std::function<void()> *yield_fn,
               const std::function<void()> *resume_fn);
 
-    void OnPartitionCompleted()
+    /**
+     * @brief The single completion call for one partition (success or
+     * failure): folds its byte weight into the flush's progress, hands the
+     * corresponding memory quota back through the progress callback, and
+     * wakes the PutAll waiter when the last partition lands.
+     *
+     * The quota is released here, on the completing thread, rather than by
+     * waking the waiter to do it: mux_ serializes concurrent completions
+     * (which also protects the release watermark inside the callback), and
+     * the release itself only takes the data-sync memory controller's
+     * short-lived lock, whose sleepers are pthreads -- safe from any
+     * completion context. The waiter therefore sleeps exactly once. The
+     * final progress call precedes the final wake, so the callback's state,
+     * which lives on the waiter's frame, is still alive whenever the
+     * callback runs.
+     *
+     * @param done_bytes The serialized bytes the partition carried.
+     */
+    void OnPartitionCompleted(uint64_t done_bytes)
     {
         std::unique_lock<bthread::Mutex> lk(mux_);
         completed_partitions_++;
+        completed_bytes_ += done_bytes;
+        if (progress_fn_ != nullptr)
+        {
+            (*progress_fn_)(completed_bytes_, total_bytes_);
+        }
         if (completed_partitions_ >= total_partitions_)
         {
             if (resume_fn_ && waiting_.load(std::memory_order_acquire))
@@ -326,10 +417,17 @@ struct SyncPutAllData : public Poolable
     std::vector<PartitionFlushState *> partition_states_;
     int32_t completed_partitions_{0};
     int32_t total_partitions_{0};
+    // Serialized-byte progress mirror of the two counters above, passed to
+    // progress_fn_ as the weights for proportional quota release. Guarded by
+    // mux_ like the partition counters. total_bytes_ is written once before
+    // the sends start and is immutable while anyone waits.
+    uint64_t completed_bytes_{0};
+    uint64_t total_bytes_{0};
 
     // Coroutine yield/resume support
     const std::function<void()> *yield_fn_{nullptr};
     const std::function<void()> *resume_fn_{nullptr};
+    const std::function<void(uint64_t, uint64_t)> *progress_fn_{nullptr};
     std::atomic<bool> waiting_{false};
 };
 

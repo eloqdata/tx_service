@@ -15,8 +15,11 @@ namespace EloqDS
 class MemDataStore : public DataStore
 {
 public:
-    MemDataStore(uint32_t shard_id, DataStoreService *data_store_service)
-        : DataStore(shard_id, data_store_service)
+    MemDataStore(uint32_t shard_id,
+                 DataStoreService *data_store_service,
+                 bool fail_flush_data = false)
+        : DataStore(shard_id, data_store_service),
+          fail_flush_data_(fail_flush_data)
     {
     }
 
@@ -59,5 +62,6 @@ private:
     std::mutex mux_;
     std::map<std::string, TableMap> store_;
     bool read_only_{false};
+    const bool fail_flush_data_{false};
 };
 }  // namespace EloqDS

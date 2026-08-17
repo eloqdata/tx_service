@@ -278,7 +278,9 @@ public:
             std::vector<std::unique_ptr<txservice::FlushTaskEntry>>> &batch,
         const std::function<void()> *yield_fptr = nullptr,
         const std::function<void()> *resume_fptr = nullptr,
-        const std::function<void()> *sync_yield_fptr = nullptr) override;
+        const std::function<void()> *sync_yield_fptr = nullptr,
+        const std::function<void(uint64_t, uint64_t)> *partition_progress_fptr =
+            nullptr) override;
 
     /**
      * @brief indicate end of flush entries in a single ckpt for \@param

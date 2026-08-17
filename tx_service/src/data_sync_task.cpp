@@ -23,7 +23,10 @@
 
 #include <absl/container/flat_hash_map.h>
 
+#include <algorithm>
+#include <cassert>
 #include <mutex>
+#include <unordered_map>
 
 #include "cc_req_misc.h"
 #include "cc_shard.h"
@@ -37,6 +40,98 @@
 
 namespace txservice
 {
+
+NewestTermByNodeGroup FindNewestTerms(const FlushTaskEntryMap &flush_task)
+{
+    NewestTermByNodeGroup newest_terms;
+    for (const auto &[_, entries] : flush_task)
+    {
+        for (const auto &entry : entries)
+        {
+            const DataSyncTask *task = entry->data_sync_task_.get();
+            assert(task != nullptr);
+            auto [term_it, inserted] = newest_terms.try_emplace(
+                task->node_group_id_, task->node_group_term_);
+            if (!inserted)
+            {
+                term_it->second =
+                    std::max(term_it->second, task->node_group_term_);
+            }
+        }
+    }
+    return newest_terms;
+}
+
+bool IsNewestTerm(const FlushTaskEntry &entry,
+                  const NewestTermByNodeGroup &newest_terms)
+{
+    const DataSyncTask *task = entry.data_sync_task_.get();
+    assert(task != nullptr);
+    auto term_it = newest_terms.find(task->node_group_id_);
+    assert(term_it != newest_terms.end());
+    return task->node_group_term_ == term_it->second;
+}
+
+std::vector<CkptTsUpdateGroup> CollectCkptTsUpdateGroups(
+    const std::vector<std::unique_ptr<FlushTaskEntry>> &table_entries,
+    const NewestTermByNodeGroup &newest_terms,
+    size_t cc_shard_count)
+{
+    std::vector<CkptTsUpdateGroup> update_groups;
+    if (table_entries.empty())
+    {
+        return update_groups;
+    }
+
+    assert(cc_shard_count > 0);
+    const DataSyncTask *first_task =
+        table_entries.front()->data_sync_task_.get();
+    assert(first_task != nullptr);
+    const bool hash_partitioned = first_task->table_name_.IsHashPartitioned();
+    std::unordered_map<NodeGroupId, size_t> group_indices;
+
+    for (const auto &entry : table_entries)
+    {
+        const DataSyncTask *task = entry->data_sync_task_.get();
+        assert(task != nullptr);
+        assert(task->table_name_ == first_task->table_name_);
+        if (!IsNewestTerm(*entry, newest_terms) ||
+            !task->need_update_ckpt_ts_ || entry->data_sync_vec_ == nullptr)
+        {
+            continue;
+        }
+
+        const size_t core_idx =
+            hash_partitioned
+                ? static_cast<size_t>(task->id_)
+                : static_cast<size_t>((task->id_ & 0x3FF) % cc_shard_count);
+        assert(core_idx < cc_shard_count);
+
+        for (const FlushRecord &record : *entry->data_sync_vec_)
+        {
+            if (record.cce_ == nullptr)
+            {
+                continue;
+            }
+
+            auto [group_it, inserted] = group_indices.try_emplace(
+                task->node_group_id_, update_groups.size());
+            if (inserted)
+            {
+                update_groups.emplace_back(CkptTsUpdateGroup{
+                    task->node_group_id_, task->node_group_term_, {}});
+            }
+
+            CkptTsUpdateGroup &group = update_groups[group_it->second];
+            assert(group.node_group_id_ == task->node_group_id_);
+            assert(group.node_group_term_ == task->node_group_term_);
+            group.cce_entries_[core_idx].emplace_back(
+                record.cce_, record.commit_ts_, record.post_flush_size_);
+        }
+    }
+
+    return update_groups;
+}
 
 DataSyncStatus::DataSyncStatus(NodeGroupId node_group_id,
                                int64_t node_group_term,
@@ -104,7 +199,6 @@ DataSyncTask::DataSyncTask(const TableName &table_name,
     int32_t old_range_id = range_entry_->GetRangeInfo()->PartitionId();
     uint16_t old_range_owner_shard =
         static_cast<uint16_t>((old_range_id & 0x3FF) % local_shard_count);
-    cce_owner_core_ = old_range_owner_shard;
     uint16_t new_range_owner_shard =
         static_cast<uint16_t>((id_ & 0x3FF) % local_shard_count);
     need_update_ckpt_ts_ =

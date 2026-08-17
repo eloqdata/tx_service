@@ -28,9 +28,12 @@
 #include <cstdint>
 #include <deque>
 #include <functional>
+#include <memory>
 #include <mutex>
+#include <string_view>
 #include <unordered_map>
 #include <utility>
+#include <vector>
 
 #include "absl/container/flat_hash_map.h"
 #include "catalog_factory.h"
@@ -43,6 +46,13 @@
 namespace txservice
 {
 extern bool txservice_skip_wal;
+
+/** Returns whether ckpt-ts publication must wait beyond base-partition writes.
+ */
+inline bool DeferCkptTsUpdate(bool need_persist_kv, bool enable_mvcc)
+{
+    return need_persist_kv || enable_mvcc;
+}
 
 struct DataSyncTask;
 
@@ -205,6 +215,11 @@ public:
     }
 
     const TableName table_name_;
+    // What this identifies depends on the table's partitioning scheme. Hash
+    // partition: the cc shard / core index whose scan produces this task's
+    // records (a round creates one task per core). Range partition: the range
+    // id; the owning core is derived as (id_ & 0x3FF) % core_cnt, and one
+    // task covers one range.
     int32_t id_;
     uint64_t range_version_;
     uint32_t node_group_id_;
@@ -253,8 +268,6 @@ public:
     bool during_split_range_{false};
     bool export_base_table_items_{false};
     uint64_t tx_number_{0};
-    // Core that owns source CCEs collected while flushing a split range.
-    uint16_t cce_owner_core_{0};
 
     bthread::Mutex update_cce_mux_;
     std::string kv_table_name_;
@@ -296,6 +309,50 @@ public:
     std::shared_ptr<const TableSchema> table_schema_{nullptr};
     size_t size_{0};
 };
+
+using FlushTaskEntryMap =
+    std::unordered_map<std::string_view,
+                       std::vector<std::unique_ptr<FlushTaskEntry>>>;
+using NewestTermByNodeGroup = std::unordered_map<NodeGroupId, int64_t>;
+
+/**
+ * @brief Finds the highest task term represented for each node group.
+ * @param flush_task A merged flush batch, potentially spanning tables and
+ * node-group terms.
+ * @return The highest term in the whole batch for every represented node
+ * group.
+ */
+NewestTermByNodeGroup FindNewestTerms(const FlushTaskEntryMap &flush_task);
+
+/**
+ * @brief Returns whether an entry belongs to its node group's newest term.
+ * @param entry The entry to test.
+ * @param newest_terms Batch-wide newest terms returned by FindNewestTerms().
+ */
+bool IsNewestTerm(const FlushTaskEntry &entry,
+                  const NewestTermByNodeGroup &newest_terms);
+
+/** Deferred publication metadata for one table and node group. */
+struct CkptTsUpdateGroup
+{
+    NodeGroupId node_group_id_;
+    int64_t node_group_term_;
+    absl::flat_hash_map<size_t, std::vector<UpdateCceCkptTsCc::CkptTsEntry>>
+        cce_entries_;
+};
+
+/**
+ * @brief Collects deferred ckpt-ts updates for one table bucket.
+ * @param table_entries All entries grouped under one physical kv table.
+ * @param newest_terms Batch-wide newest terms returned by FindNewestTerms().
+ * @param cc_shard_count Number of local cc shards, used to map range ids.
+ * @return One update group per represented node group. Lower-term entries are
+ * omitted because their datastore writes are discarded from the same batch.
+ */
+std::vector<CkptTsUpdateGroup> CollectCkptTsUpdateGroups(
+    const std::vector<std::unique_ptr<FlushTaskEntry>> &table_entries,
+    const NewestTermByNodeGroup &newest_terms,
+    size_t cc_shard_count);
 
 struct FlushDataTask
 {
@@ -408,9 +465,7 @@ public:
         return nullptr;
     }
 
-    std::unordered_map<std::string_view,
-                       std::vector<std::unique_ptr<FlushTaskEntry>>>
-        flush_task_entries_;
+    FlushTaskEntryMap flush_task_entries_;
     size_t pending_flush_size_{0};
     size_t max_pending_flush_size_{0};
     bthread::Mutex flush_task_entries_mux_;
