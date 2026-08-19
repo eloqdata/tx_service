@@ -1346,29 +1346,18 @@ bool UpdateCceCkptTsCc::Execute(CcShard &ccs)
         const CkptTsEntry &ref = records[index];
         if (!update_ckpt_ts_)
         {
+            assert(range_partitioned);
+
             // The split copy is durable under its destination range, but the
             // source cce remains dirty. Only release its in-flight state.
-            if (range_partitioned)
+            if (versioned_payload)
             {
-                if (versioned_payload)
-                {
-                    static_cast<VersionedLruEntry<true, true> *>(ref.cce_)
-                        ->ClearBeingCkpt();
-                }
-                else
-                {
-                    static_cast<VersionedLruEntry<false, true> *>(ref.cce_)
-                        ->ClearBeingCkpt();
-                }
-            }
-            else if (versioned_payload)
-            {
-                static_cast<VersionedLruEntry<true, false> *>(ref.cce_)
+                static_cast<VersionedLruEntry<true, true> *>(ref.cce_)
                     ->ClearBeingCkpt();
             }
             else
             {
-                static_cast<VersionedLruEntry<false, false> *>(ref.cce_)
+                static_cast<VersionedLruEntry<false, true> *>(ref.cce_)
                     ->ClearBeingCkpt();
             }
             continue;
