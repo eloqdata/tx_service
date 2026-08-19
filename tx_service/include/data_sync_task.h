@@ -253,6 +253,8 @@ public:
     bool during_split_range_{false};
     bool export_base_table_items_{false};
     uint64_t tx_number_{0};
+    // Core that owns source CCEs collected while flushing a split range.
+    uint16_t cce_owner_core_{0};
 
     bthread::Mutex update_cce_mux_;
     std::string kv_table_name_;

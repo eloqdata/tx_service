@@ -1156,11 +1156,13 @@ public:
         NodeGroupId node_group_id,
         int64_t term,
         const TableName &table_name,
-        absl::flat_hash_map<size_t, std::vector<CkptTsEntry>> &cce_entries)
+        absl::flat_hash_map<size_t, std::vector<CkptTsEntry>> &cce_entries,
+        bool update_ckpt_ts)
         : cce_entries_(cce_entries),
           node_group_id_(node_group_id),
           term_(term),
-          table_name_(table_name)
+          table_name_(table_name),
+          update_ckpt_ts_(update_ckpt_ts)
     {
         unfinished_core_cnt_ = cce_entries_.size();
         assert(unfinished_core_cnt_ > 0);
@@ -1253,6 +1255,7 @@ private:
     NodeGroupId node_group_id_;
     int64_t term_;
     TableName table_name_;
+    bool update_ckpt_ts_;
     mutable bthread::Mutex mux_;
     bthread::ConditionVariable cv_;
 

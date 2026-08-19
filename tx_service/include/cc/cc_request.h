@@ -6226,8 +6226,8 @@ public:
         case CleanType::CleanBucketData:
         {
             // Cannot clean entries being checkpointed — the checkpoint
-            // callback (UpdateCceCkptTsCc) will decrement dirty count,
-            // and cleaning here would cause a double-decrement.
+            // callback still owns the cce pointer and normally decrements the
+            // dirty count, so cleaning here could cause a double-decrement.
             //
             // An alternative approach would be to have
             // DataSyncForHashPartition acquire bucket read locks (as
