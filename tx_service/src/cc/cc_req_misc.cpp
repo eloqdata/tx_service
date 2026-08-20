@@ -1332,15 +1332,37 @@ bool UpdateCceCkptTsCc::Execute(CcShard &ccs)
 
     size_t last_index = std::min(index + SCAN_BATCH_SIZE, records.size());
 
-    CcMap *ccm = ccs.GetCcm(table_name_, node_group_id_);
-    assert(ccm != nullptr);
-
     bool range_partitioned = !table_name_.IsHashPartitioned();
     bool versioned_payload = table_name_.Engine() != TableEngine::EloqKv;
+    CcMap *ccm = nullptr;
+    if (update_ckpt_ts_)
+    {
+        ccm = ccs.GetCcm(table_name_, node_group_id_);
+        assert(ccm != nullptr);
+    }
 
     for (; index < last_index; ++index)
     {
         const CkptTsEntry &ref = records[index];
+        if (!update_ckpt_ts_)
+        {
+            assert(range_partitioned);
+
+            // The split copy is durable under its destination range, but the
+            // source cce remains dirty. Only release its in-flight state.
+            if (versioned_payload)
+            {
+                static_cast<VersionedLruEntry<true, true> *>(ref.cce_)
+                    ->ClearBeingCkpt();
+            }
+            else
+            {
+                static_cast<VersionedLruEntry<false, true> *>(ref.cce_)
+                    ->ClearBeingCkpt();
+            }
+            continue;
+        }
+
         if (range_partitioned)
         {
             if (versioned_payload)

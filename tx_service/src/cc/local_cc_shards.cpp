@@ -6111,7 +6111,7 @@ void LocalCcShards::FlushDataImpl(FlushDataTask *cur_work,
     }
 
     std::unordered_set<uint16_t> updated_ckpt_ts_core_ids;
-    // Update cce ckpt ts in memory
+    // Finalize in-memory state for successfully flushed CCEs.
     if (succ)
     {
         size_t iterations_since_yield = 0;
@@ -6121,17 +6121,14 @@ void LocalCcShards::FlushDataImpl(FlushDataTask *cur_work,
         {
             for (auto &entry : entries)
             {
-                if (!entry->data_sync_task_->need_update_ckpt_ts_)
-                {
-                    continue;
-                }
-
                 absl::flat_hash_map<size_t,
                                     std::vector<UpdateCceCkptTsCc::CkptTsEntry>>
                     cce_entries_map;
 
                 auto &table_name =
                     entries.front()->data_sync_task_->table_name_;
+                bool update_ckpt_ts =
+                    entry->data_sync_task_->need_update_ckpt_ts_;
 
                 for (auto &rec : *(entry->data_sync_vec_))
                 {
@@ -6139,7 +6136,14 @@ void LocalCcShards::FlushDataImpl(FlushDataTask *cur_work,
                     if (cce != nullptr)
                     {
                         size_t key_core_idx = 0;
-                        if (!table_name.IsHashPartitioned())
+                        if (!update_ckpt_ts)
+                        {
+                            // Split scans collected these CCEs from the source
+                            // range; id_ identifies the destination range.
+                            key_core_idx =
+                                entry->data_sync_task_->cce_owner_core_;
+                        }
+                        else if (!table_name.IsHashPartitioned())
                         {
                             int32_t range_id = entry->data_sync_task_->id_;
                             key_core_idx = static_cast<size_t>(
@@ -6163,11 +6167,15 @@ void LocalCcShards::FlushDataImpl(FlushDataTask *cur_work,
                         entry->data_sync_task_->node_group_id_,
                         entry->data_sync_task_->node_group_term_,
                         table_name,
-                        cce_entries_map);
+                        cce_entries_map,
+                        update_ckpt_ts);
                     update_cce_req.SetCoroCallbacks(&yield_fn, &resume_fn);
                     for (auto &[core_idx, cce_entries] : cce_entries_map)
                     {
-                        updated_ckpt_ts_core_ids.insert(core_idx);
+                        if (update_ckpt_ts)
+                        {
+                            updated_ckpt_ts_core_ids.insert(core_idx);
+                        }
                         EnqueueToCcShard(core_idx, &update_cce_req);
                     }
 

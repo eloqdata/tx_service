@@ -104,6 +104,7 @@ DataSyncTask::DataSyncTask(const TableName &table_name,
     int32_t old_range_id = range_entry_->GetRangeInfo()->PartitionId();
     uint16_t old_range_owner_shard =
         static_cast<uint16_t>((old_range_id & 0x3FF) % local_shard_count);
+    cce_owner_core_ = old_range_owner_shard;
     uint16_t new_range_owner_shard =
         static_cast<uint16_t>((id_ & 0x3FF) % local_shard_count);
     need_update_ckpt_ts_ =
