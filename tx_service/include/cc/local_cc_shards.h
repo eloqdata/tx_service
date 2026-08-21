@@ -1614,6 +1614,15 @@ public:
                     range_entry->PinStoreRange());
                 if (store_range == nullptr)
                 {
+                    // The keys are kicked without slice bookkeeping (no
+                    // StoreRange in memory on this node, e.g. forwarded
+                    // dirty-range data on the new owner during a split).
+                    // The pending-split slice specs cached on this entry
+                    // may have been promoted to FullyCached based on these
+                    // keys being memory-resident, so invalidate them;
+                    // otherwise the new range would be installed with
+                    // hollow FullyCached slices after the split commits.
+                    range_entry->SetAcceptsDirtyRangeData(false);
                     clean_guard->MarkCleanForOrphanKey(idx);
                     idx++;
                     continue;
