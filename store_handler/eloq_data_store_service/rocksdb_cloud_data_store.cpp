@@ -368,9 +368,10 @@ bool RocksDBCloudDataStore::StartDB(int64_t term)
     // Temp fix for very slow open db issue
     // TODO(monkeyzilla): implement customized sst file manager
     cfs_options_.constant_sst_file_size_in_sst_file_manager = 64 * 1024 * 1024L;
-    // Skip listing cloud files in GetChildren when DumpDBSummary,
-    // SanitizeOptions, Recover(CheckConsistency), WriteOptions to speed up open
-    // db
+    // Skip listing cloud files while opening the DB and persisting the startup
+    // option changes below. Both SetOptions() and SetDBOptions() rewrite the
+    // local OPTIONS file, whose cleanup otherwise lists every object under the
+    // cloud DB path even though OPTIONS files are local-only.
     cfs_options_.skip_cloud_files_in_getchildren = true;
 
     DLOG(INFO) << "RocksDBCloudDataStore::StartDB, purger_periodicity_millis: "
@@ -709,6 +710,14 @@ bool RocksDBCloudDataStore::OpenCloudDB(
         std::chrono::duration_cast<std::chrono::milliseconds>(end - start);
     LOG(INFO) << "DBCloud Open took " << duration.count() << " ms";
 
+    auto restore_cloud_children_listing = [this]()
+    {
+        rocksdb::CloudFileSystem *cfs =
+            dynamic_cast<rocksdb::CloudFileSystem *>(cloud_fs_.get());
+        auto &cfs_options_ref = cfs->GetMutableCloudFileSystemOptions();
+        cfs_options_ref.skip_cloud_files_in_getchildren = false;
+    };
+
     if (!status.ok())
     {
         LOG(ERROR) << "Unable to open db at path " << storage_path_
@@ -718,13 +727,6 @@ bool RocksDBCloudDataStore::OpenCloudDB(
         // db does not exist. This node cannot escalate to be the ng leader.
         return false;
     }
-
-    // Restore skip_cloud_files_in_getchildren to false
-    // after DB::Open
-    rocksdb::CloudFileSystem *cfs =
-        dynamic_cast<rocksdb::CloudFileSystem *>(cloud_fs_.get());
-    auto &cfs_options_ref = cfs->GetMutableCloudFileSystemOptions();
-    cfs_options_ref.skip_cloud_files_in_getchildren = false;
 
     // Stop background work - memtable flush and compaction
     // before blocking purger
@@ -737,6 +739,7 @@ bool RocksDBCloudDataStore::OpenCloudDB(
         db_->Close();
         delete db_;
         db_ = nullptr;
+        restore_cloud_children_listing();
         return false;
     }
 
@@ -751,17 +754,16 @@ bool RocksDBCloudDataStore::OpenCloudDB(
         db_->Close();
         delete db_;
         db_ = nullptr;
+        restore_cloud_children_listing();
         return false;
     }
     if (current_epoch.empty())
     {
         LOG(ERROR) << "Current epoch from db is empty";
+        restore_cloud_children_listing();
         db_->ContinueBackgroundWork();
         return false;
     }
-
-    // Resume background work
-    db_->ContinueBackgroundWork();
 
     // Enable auto compactions after blocking purger
     status = db_->SetOptions({{"disable_auto_compactions", "false"}});
@@ -774,6 +776,7 @@ bool RocksDBCloudDataStore::OpenCloudDB(
         db_->Close();
         delete db_;
         db_ = nullptr;
+        restore_cloud_children_listing();
         return false;
     }
 
@@ -788,8 +791,18 @@ bool RocksDBCloudDataStore::OpenCloudDB(
         db_->Close();
         delete db_;
         db_ = nullptr;
+        restore_cloud_children_listing();
         return false;
     }
+
+    // Restore the normal cloud directory view after startup no longer needs to
+    // rewrite OPTIONS files. Changing this flag does not perform a listing;
+    // later GetChildren() calls retain their original cloud-aware behavior.
+    restore_cloud_children_listing();
+
+    // Resume only after restoring the cloud directory view so background flush
+    // and compaction jobs cannot observe the temporary startup-only setting.
+    db_->ContinueBackgroundWork();
 
     if (cloud_config_.warm_up_thread_num_ != 0)
     {
