@@ -153,7 +153,6 @@ public:
           is_dirty_(is_dirty),
           sync_ts_adjustable_(need_adjust_ts),
           task_res_(hres),
-          need_update_ckpt_ts_(true),
           high_priority_(high_priority)
     {
     }
@@ -198,6 +197,10 @@ public:
     {
         return sync_ts_adjustable_;
     }
+
+    // Range data is sharded by range ID. A split-child task scans CCEs that
+    // remain in the source range's CcMap until split cleanup completes.
+    size_t CheckpointCceOwnerCore(size_t cc_shard_count) const;
 
     void UnsetSyncTsAdjustable()
     {
@@ -259,7 +262,6 @@ public:
     absl::flat_hash_map<size_t, std::vector<UpdateCceCkptTsCc::CkptTsEntry>>
         cce_entries_;
 
-    bool need_update_ckpt_ts_{true};
     bool high_priority_{false};
 };
 

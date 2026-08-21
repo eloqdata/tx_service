@@ -5990,7 +5990,7 @@ void LocalCcShards::FlushDataImpl(FlushDataTask *cur_work,
     }
 
     std::unordered_set<uint16_t> updated_ckpt_ts_core_ids;
-    // Update cce ckpt ts in memory
+    // Update cce checkpoint state in its owning CC shard.
     if (succ)
     {
         size_t iterations_since_yield = 0;
@@ -6000,11 +6000,6 @@ void LocalCcShards::FlushDataImpl(FlushDataTask *cur_work,
         {
             for (auto &entry : entries)
             {
-                if (!entry->data_sync_task_->need_update_ckpt_ts_)
-                {
-                    continue;
-                }
-
                 absl::flat_hash_map<size_t,
                                     std::vector<UpdateCceCkptTsCc::CkptTsEntry>>
                     cce_entries_map;
@@ -6017,17 +6012,9 @@ void LocalCcShards::FlushDataImpl(FlushDataTask *cur_work,
                     auto cce = rec.cce_;
                     if (cce != nullptr)
                     {
-                        size_t key_core_idx = 0;
-                        if (!table_name.IsHashPartitioned())
-                        {
-                            int32_t range_id = entry->data_sync_task_->id_;
-                            key_core_idx = static_cast<size_t>(
-                                (range_id & 0x3FF) % Count());
-                        }
-                        else
-                        {
-                            key_core_idx = entry->data_sync_task_->id_;
-                        }
+                        size_t key_core_idx =
+                            entry->data_sync_task_->CheckpointCceOwnerCore(
+                                Count());
                         auto insert_it = cce_entries_map.try_emplace(
                             key_core_idx,
                             std::vector<UpdateCceCkptTsCc::CkptTsEntry>());
