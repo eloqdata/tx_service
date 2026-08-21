@@ -68,6 +68,7 @@ set(CATCH_MAIN_TESTS
     CheckpointMetricsState-Test
     CheckpointFlush-Test
     FetchRecordCc-Test
+    RangeSplitCheckpoint-Test
     RealDataStore-Test
     NonBlockingLock-Test
     AcquireAllError-Test
