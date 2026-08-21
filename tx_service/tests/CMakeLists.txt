@@ -64,6 +64,7 @@ set(CATCH_MAIN_TESTS
     CcRequestWait-Test
     CheckpointFlush-Test
     FetchRecordCc-Test
+    RangeSplitCheckpoint-Test
     RealDataStore-Test
     NonBlockingLock-Test
     AcquireAllError-Test

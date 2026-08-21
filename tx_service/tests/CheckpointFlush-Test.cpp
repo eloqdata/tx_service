@@ -882,11 +882,9 @@ TEST_CASE("deferred checkpoint publication aggregates only newest-term entries",
                                NodeGroupId node_group_id,
                                int32_t core_id,
                                uintptr_t cce_address,
-                               uint64_t commit_ts,
-                               bool need_update_ckpt_ts = true)
+                               uint64_t commit_ts)
     {
         auto task = MakeTaskPtr(table_name, term, node_group_id, core_id);
-        task->need_update_ckpt_ts_ = need_update_ckpt_ts;
         auto records = std::make_unique<std::vector<FlushRecord>>();
         records->push_back(MakeObjectRecord(static_cast<int>(commit_ts),
                                             "value",
@@ -910,14 +908,10 @@ TEST_CASE("deferred checkpoint publication aggregates only newest-term entries",
     add_hash_record("eloqkv_deferred_hash", hash_table, 31, 1, 1, 0x40, 103);
     add_hash_record("eloqkv_deferred_hash", hash_table, 8, 2, 2, 0x50, 104);
     add_hash_record("eloqkv_deferred_hash", hash_table, 31, 1, 3, 0, 105);
-    add_hash_record("eloqkv_deferred_hash",
-                    hash_table,
-                    31,
-                    1,
-                    3,
-                    0x60,
-                    106,
-                    /*need_update_ckpt_ts=*/false);
+    // Tasks flagged as no-ckpt-ts-report used to be excluded here; the flag is
+    // gone (every flushed record publishes so its cce leaves the in-flight
+    // checkpoint state), so this record must appear under core 3.
+    add_hash_record("eloqkv_deferred_hash", hash_table, 31, 1, 3, 0x60, 106);
     auto null_vector_entry = MakeFlushEntry(
         MakeTaskPtr(hash_table, /*term=*/31, /*node_group_id=*/1, /*id=*/3),
         std::make_unique<std::vector<FlushRecord>>());
@@ -951,13 +945,16 @@ TEST_CASE("deferred checkpoint publication aggregates only newest-term entries",
 
     REQUIRE(node_group_1 != nullptr);
     REQUIRE(node_group_1->node_group_term_ == 31);
-    REQUIRE(node_group_1->cce_entries_.size() == 2);
+    REQUIRE(node_group_1->cce_entries_.size() == 3);
     REQUIRE(node_group_1->cce_entries_.at(0).size() == 1);
     REQUIRE(node_group_1->cce_entries_.at(0).front().cce_ ==
             reinterpret_cast<LruEntry *>(uintptr_t{0x20}));
     REQUIRE(node_group_1->cce_entries_.at(1).size() == 1);
     REQUIRE(node_group_1->cce_entries_.at(1).front().cce_ ==
             reinterpret_cast<LruEntry *>(uintptr_t{0x40}));
+    REQUIRE(node_group_1->cce_entries_.at(3).size() == 1);
+    REQUIRE(node_group_1->cce_entries_.at(3).front().cce_ ==
+            reinterpret_cast<LruEntry *>(uintptr_t{0x60}));
 
     REQUIRE(node_group_2 != nullptr);
     REQUIRE(node_group_2->node_group_term_ == 8);

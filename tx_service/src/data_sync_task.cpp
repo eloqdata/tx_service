@@ -87,7 +87,6 @@ std::vector<CkptTsUpdateGroup> CollectCkptTsUpdateGroups(
     const DataSyncTask *first_task =
         table_entries.front()->data_sync_task_.get();
     assert(first_task != nullptr);
-    const bool hash_partitioned = first_task->table_name_.IsHashPartitioned();
     std::unordered_map<NodeGroupId, size_t> group_indices;
 
     for (const auto &entry : table_entries)
@@ -96,15 +95,12 @@ std::vector<CkptTsUpdateGroup> CollectCkptTsUpdateGroups(
         assert(task != nullptr);
         assert(task->table_name_ == first_task->table_name_);
         if (!IsNewestTerm(*entry, newest_terms) ||
-            !task->need_update_ckpt_ts_ || entry->data_sync_vec_ == nullptr)
+            entry->data_sync_vec_ == nullptr)
         {
             continue;
         }
 
-        const size_t core_idx =
-            hash_partitioned
-                ? static_cast<size_t>(task->id_)
-                : static_cast<size_t>((task->id_ & 0x3FF) % cc_shard_count);
+        const size_t core_idx = task->CheckpointCceOwnerCore(cc_shard_count);
         assert(core_idx < cc_shard_count);
 
         for (const FlushRecord &record : *entry->data_sync_vec_)
@@ -187,22 +183,29 @@ DataSyncTask::DataSyncTask(const TableName &table_name,
     {
         id_ = range_entry_->GetRangeInfo()->GetKeyNewRangeId(start_key_);
     }
+}
 
-    // For a data sync task during range split, we only need to update the ckpt
-    // ts if the new range owner is the current node group.
-    NodeGroupId range_owner = Sharder::Instance()
-                                  .GetLocalCcShards()
-                                  ->GetRangeOwner(id_, ng_id)
-                                  ->BucketOwner();
+size_t DataSyncTask::CheckpointCceOwnerCore(size_t cc_shard_count) const
+{
+    assert(cc_shard_count > 0);
+    assert(id_ >= 0);
 
-    size_t local_shard_count = Sharder::Instance().GetLocalCcShardsCount();
-    int32_t old_range_id = range_entry_->GetRangeInfo()->PartitionId();
-    uint16_t old_range_owner_shard =
-        static_cast<uint16_t>((old_range_id & 0x3FF) % local_shard_count);
-    uint16_t new_range_owner_shard =
-        static_cast<uint16_t>((id_ & 0x3FF) % local_shard_count);
-    need_update_ckpt_ts_ =
-        range_owner == ng_id && old_range_owner_shard == new_range_owner_shard;
+    if (table_name_.IsHashPartitioned())
+    {
+        // Hash-partition checkpoint tasks are created per local core.
+        return static_cast<size_t>(id_) % cc_shard_count;
+    }
+
+    int32_t range_id = id_;
+    if (during_split_range_)
+    {
+        assert(range_entry_ != nullptr);
+        // id_ is the child range ID, but the scanned CCEs are still owned by
+        // the parent range's CC shard.
+        range_id = range_entry_->GetRangeInfo()->PartitionId();
+    }
+
+    return static_cast<size_t>((range_id & 0x3FF) % cc_shard_count);
 }
 
 void DataSyncTask::SetFinish()

@@ -6019,8 +6019,7 @@ void DataStoreServiceClient::PreparePartitionBatches(
         // Remember which cc entry this record came from, so the partition can
         // advance its ckpt ts as soon as it is durable. A hash-partitioned
         // task's id is the owning cc shard.
-        if (publish_ckpt_ts_on_complete && ckpt_rec.cce_ != nullptr &&
-            flush_entry->data_sync_task_->need_update_ckpt_ts_)
+        if (publish_ckpt_ts_on_complete && ckpt_rec.cce_ != nullptr)
         {
             partition_state.AddCkptTsEntry(
                 flush_entry->data_sync_task_.get(),
@@ -6146,17 +6145,15 @@ void DataStoreServiceClient::PrepareRangePartitionBatches(
     for (auto idx : flush_recs)
     {
         const auto &flush_entry = entries.at(idx);
-        const bool collect_ckpt_ts =
-            publish_ckpt_ts_on_complete &&
-            flush_entry->data_sync_task_->need_update_ckpt_ts_;
+        const bool collect_ckpt_ts = publish_ckpt_ts_on_complete;
         size_t core_idx = 0;
         if (collect_ckpt_ts)
         {
             assert(local_shards != nullptr);
-            // A range task's id is the range id; its owning cc shard is
-            // derived from the low bits, matching how the scan sharded it.
-            core_idx = static_cast<size_t>(
-                (flush_entry->data_sync_task_->id_ & 0x3FF) %
+            // The owning cc shard derives from the range id -- the parent
+            // range's id while a split is in flight, since the scanned CCEs
+            // stay in the source range's CcMap until split cleanup.
+            core_idx = flush_entry->data_sync_task_->CheckpointCceOwnerCore(
                 local_shards->Count());
         }
 
