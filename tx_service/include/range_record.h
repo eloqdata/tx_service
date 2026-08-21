@@ -787,7 +787,42 @@ public:
 
         if (dirty_range_slices_ != nullptr)
         {
+            if (!accept && !std::get<0>(*dirty_range_slices_))
+            {
+                // Already invalidated (and any promoted slices demoted).
+                return;
+            }
             std::get<0>(*dirty_range_slices_) = accept;
+            if (!accept)
+            {
+                // Dirty-range data cached for the pending split has been
+                // (at least partially) evicted from memory. Any slice that
+                // was promoted to FullyCached no longer holds its complete
+                // content in memory, so demote every promoted slice back to
+                // PartiallyCached. Otherwise the new range would trust
+                // memory as authoritative after the split commits and never
+                // consult the data store for the evicted keys.
+                size_t demoted = 0;
+                for (auto &new_range_slices : std::get<2>(*dirty_range_slices_))
+                {
+                    for (auto &slice : new_range_slices.second)
+                    {
+                        if (slice.status_ == SliceStatus::FullyCached)
+                        {
+                            slice.status_ = SliceStatus::PartiallyCached;
+                            demoted++;
+                        }
+                    }
+                }
+                if (demoted > 0)
+                {
+                    LOG(WARNING)
+                        << "SLICE_DEMOTE range#" << range_info_.PartitionId()
+                        << " demoted=" << demoted
+                        << " dirty slices to PartiallyCached after dirty "
+                           "range data eviction";
+                }
+            }
         }
     }
 
