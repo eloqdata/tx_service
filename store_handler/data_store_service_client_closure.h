@@ -188,12 +188,16 @@ struct PartitionFlushState : public Poolable
     remote::CommonResult result;
     mutable bthread::Mutex mux;
 
-    // Serialized bytes this partition carries across all of its batches,
-    // accumulated while the batches are prepared. Used as the weight of this
-    // partition when the flush releases its memory quota progressively: byte
-    // weights track the real (uneven) split of the flush task far better than
-    // partition counts.
-    uint64_t serialized_bytes_{0};
+    // Records whose key/payload buffers this partition references
+    // exclusively -- every batch view into them belongs to this partition --
+    // together with their charged flush-memory bytes
+    // (FlushRecord::FlushSize(), the unit DataSyncScan charged against the
+    // flush memory quota). When the partition completes,
+    // ReleaseFlushRecordsMemory() frees these buffers, and the completion
+    // report returns charged_mem_bytes_ of quota: what is released is what
+    // has actually been freed.
+    std::vector<txservice::FlushRecord *> flush_records_;
+    uint64_t charged_mem_bytes_{0};
 
     // PutAll discards lower-term tasks per node group before partition
     // grouping. All entries retained in one kv partition therefore share one
@@ -221,7 +225,8 @@ struct PartitionFlushState : public Poolable
         }
         failed = false;
         result.Clear();
-        serialized_bytes_ = 0;
+        flush_records_.clear();
+        charged_mem_bytes_ = 0;
         ckpt_ts_update_.reset();
         ckpt_ts_entries_.clear();
         ckpt_ts_task_ = nullptr;
@@ -234,11 +239,30 @@ struct PartitionFlushState : public Poolable
         {
             pending_batches.pop();
         }
-        serialized_bytes_ = 0;
+        flush_records_.clear();
+        charged_mem_bytes_ = 0;
         ckpt_ts_update_.reset();
         ckpt_ts_entries_.clear();
         ckpt_ts_task_ = nullptr;
     }
+
+    /**
+     * @brief Takes ownership of a record's key/payload buffers for release
+     * when this partition completes, charging its FlushSize() to the
+     * partition.
+     */
+    void AddFlushRecord(txservice::FlushRecord *rec)
+    {
+        flush_records_.push_back(rec);
+        charged_mem_bytes_ += rec->FlushSize();
+    }
+
+    /**
+     * @brief Frees the key/payload memory of every record this partition
+     * carried and returns the charged bytes now actually free. Idempotent:
+     * the list is cleared, so a second call returns 0 and frees nothing.
+     */
+    uint64_t ReleaseFlushRecordsMemory();
 
     /**
      * @brief Records a cc entry made durable by this partition.
@@ -343,10 +367,10 @@ struct SyncPutAllData : public Poolable
     /**
      * @brief Installs the flush-progress consumer, invoked directly from
      * OnPartitionCompleted() on whichever thread completes a partition, with
-     * the cumulative serialized bytes of the finished partitions and the
-     * flush's total. Byte weights, not partition counts: partitions are
-     * unevenly sized, and the caller releases flush memory quota in
-     * proportion.
+     * the cumulative charged flush-memory bytes whose buffers the finished
+     * partitions have actually freed, and the flush's total charge. The
+     * caller returns exactly that much flush memory quota: release equals
+     * what has been freed.
      *
      * The callback must be safe to run from any completion context (a
      * storage callback thread, the flush coroutine, or a cc shard via the

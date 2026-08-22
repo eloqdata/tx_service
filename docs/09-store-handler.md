@@ -96,6 +96,10 @@ This distinction between entry-level progress and the NG-wide truncation
 boundary is the central contract between `DataStoreHandler` and the durability
 layer.
 
+Each completed partition relinquishes its record buffers before reporting the
+freed memory to data-sync admission. Buffers still needed by the flush round
+retain their quota until their consumers finish, including on failure paths.
+
 Cache misses reverse the path: the handler returns a record or streams a bounded
 range slice, and the completion is installed on the owning shard. MVCC reads
 may request the latest archive version visible at a timestamp rather than the
@@ -122,8 +126,8 @@ term writable again.
 
 - WAL decides transaction commit; the store handler supplies the later
   checkpoint durability boundary.
-- `PutAll` alone is sufficient only for a backend that does not require
-  `PersistKV`.
+- Base-partition completion permits checkpoint publication only when the
+  backend needs no further persistence barrier and MVCC archives are not pending.
 - Asynchronous storage completion mutates CC state only after returning to the
   owning shard.
 - Cache-miss coalescing retains fetch ownership through retries; pool saturation

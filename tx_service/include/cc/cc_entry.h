@@ -293,6 +293,29 @@ public:
             return sizeof(size_t) + PayloadSize();
         }
     }
+
+    /**
+     * @brief Frees the key and payload heap memory, keeping the flush
+     * metadata (cce_, commit_ts_, post_flush_size_, payload_status_,
+     * partition_id_) intact.
+     *
+     * Callable once nothing references this record's buffers any more -- for
+     * a partitioned flush, when the record's kv partition has completed and
+     * no batch views its memory again. Freeing per record is what lets the
+     * flush return memory quota as partitions land: the surrounding vector
+     * interleaves records of many partitions and is only destroyed when the
+     * whole flush task ends.
+     */
+    void ReleaseMemory()
+    {
+        // Destroys whichever alternative is held: drops a shared payload's
+        // reference, or frees a blob payload's buffer.
+        payload_.emplace<std::shared_ptr<TxRecord>>(nullptr);
+        if (std::holds_alternative<TxKey>(flush_key_))
+        {
+            flush_key_.emplace<TxKey>();
+        }
+    }
 };
 
 struct LruEntry

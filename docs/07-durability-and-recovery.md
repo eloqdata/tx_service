@@ -64,6 +64,12 @@ Clean entries can be evicted after their checkpoint state is published. The NG
 checkpoint timestamp and log-truncation boundary advance only after every
 included task succeeds, independently of earlier entry-level progress.
 
+Flush quota represents resident scan buffers. A completed partition releases
+quota only after freeing the key and payload allocations it owns; shared
+metadata and deferred buffers remain charged until the round releases them.
+This keeps admission accounting bounded by memory actually retained across
+successful, failed, and deferred writes.
+
 The same data-sync machinery also supports range splits, index construction,
 bucket migration, snapshots, and shutdown flushing. Those callers can require
 a flush without allowing log truncation; a task's origin and completion state
@@ -175,4 +181,4 @@ accepted-request event.
 | Replay restores metadata dependencies and resumes incomplete durable operations | `tx_service/include/cc/catalog_cc_map.h`; `tx_service/include/cc/range_cc_map.h`; `tx_service/include/cc/cluster_config_cc_map.h`; `tx_service/include/cc/range_bucket_cc_map.h` |
 | MVCC versions are archived, fetched, and reclaimed against active snapshots | `tx_service/include/cc/cc_entry.h`; `tx_service/include/tx_start_ts_collector.h`; `tx_service/include/store/data_store_handler.h` |
 | Standby and backup snapshots are coordinated above the storage interface | `tx_service/include/store/snapshot_manager.h`; `tx_service/src/store/snapshot_manager.cpp`; `tx_service/include/store/data_store_handler.h` |
-| Checkpoint state and MVCC behavior have focused unit coverage | `tx_service/tests/CheckpointMetricsState-Test.cpp`; `tx_service/tests/CcEntry-Test.cpp`; `tx_service/tests/StartTsCollector-Test.cpp` |
+| Checkpoint publication, split ownership, state and MVCC behavior have focused unit coverage | `tx_service/tests/CheckpointFlush-Test.cpp`; `tx_service/tests/RangeSplitCheckpoint-Test.cpp`; `tx_service/tests/CheckpointMetricsState-Test.cpp`; `tx_service/tests/CcEntry-Test.cpp`; `tx_service/tests/StartTsCollector-Test.cpp` |
