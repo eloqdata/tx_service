@@ -28,6 +28,7 @@
 #include <utility>
 
 #include "cc_req_misc.h"
+#include "eloq_data_store_service/ignore_redis_ttl.h"
 #include "error_messages.h"
 #include "store_util.h"  // host_to_big_endian
 #include "tx_service/include/cc/cc_request.h"
@@ -172,7 +173,7 @@ void FetchRecordCallback(void *data,
         {
             // Hash partition
             const uint64_t rec_ttl = read_closure->Ttl();
-            if (rec_ttl > 0 &&
+            if (!IgnoreRedisTTL() && rec_ttl > 0 &&
                 rec_ttl < txservice::LocalCcShards::ClockTsInMillseconds())
             {
                 // expired record
@@ -277,7 +278,7 @@ void FetchBucketDataCallback(void *data,
     {
         scan_next_closure->GetItem(item_idx, key_str, value_str, ts, ttl);
         last_scanned_key = key_str;
-        if (ttl > 0 && ttl < now)
+        if (!IgnoreRedisTTL() && ttl > 0 && ttl < now)
         {
             // fetch_bucket_data_cc->AddDataItem(std::move(tx_key), "", 1,
             // true);

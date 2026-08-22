@@ -30,6 +30,7 @@
 #include <vector>
 
 #include "data_store_service_client_closure.h"
+#include "eloq_data_store_service/ignore_redis_ttl.h"
 #include "eloq_data_store_service/object_pool.h"
 #include "tx_service/include/tx_key.h"
 
@@ -154,7 +155,7 @@ void SinglePartitionScanner::ProcessScanNextResult(
             sp_scanner->last_key_ = key;
         }
 
-        if (ttl > 0 && ttl < now)
+        if (!IgnoreRedisTTL() && ttl > 0 && ttl < now)
         {
             // TTL expired record
             DLOG(INFO) << "TTL expired record, key: " << key << ", ttl: " << ttl
