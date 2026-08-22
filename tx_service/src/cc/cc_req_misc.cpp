@@ -904,12 +904,13 @@ bool FetchRecordCc::Execute(CcShard &ccs)
             }
         }
         ccs.RemoveFetchRecordRequest(cce_);
-        return false;
+        return true;
     }
 
 #ifdef DATA_STORE_TYPE_ELOQDSS_ELOQSTORE
     bool should_reopen = false;
 #endif
+    bool resume_requesters_inline = false;
 
     if (lock_->GetCcEntry() != nullptr)
     {
@@ -945,13 +946,7 @@ bool FetchRecordCc::Execute(CcShard &ccs)
         }
         if (error_code_ == 0)
         {
-            for (CcRequestBase *req : requesters_)
-            {
-                if (req)
-                {
-                    ccs.Enqueue(ccs.core_id_, req);
-                }
-            }
+            resume_requesters_inline = true;
         }
         else
         {
@@ -981,6 +976,18 @@ bool FetchRecordCc::Execute(CcShard &ccs)
 #ifdef DATA_STORE_TYPE_ELOQDSS_ELOQSTORE
     if (should_reopen)
     {
+        // This fetch remains the active single-flight request while it is
+        // re-armed below. Keep a queue boundary so resumed requesters cannot
+        // coalesce a nested fetch into this request before the new operation
+        // has been installed.
+        for (CcRequestBase *req : requesters_)
+        {
+            if (req != nullptr)
+            {
+                ccs.Enqueue(ccs.core_id_, req);
+            }
+        }
+
         // Re-arm this request in place rather than erasing it and issuing a
         // new one: FetchRecord coalesces by cce, so a fresh call would be
         // merged into this still-registered request and never dispatched,
@@ -1020,13 +1027,35 @@ bool FetchRecordCc::Execute(CcShard &ccs)
             ccs.RemoveFetchRecordRequest(cce_);
             cce_->GetKeyGapLockAndExtraData()->ReleasePin();
             cce_->RecycleKeyLock(ccs);
+            return true;
         }
         return false;
     }
 #endif
 
+    std::vector<CcRequestBase *> ready_requesters;
+    if (resume_requesters_inline)
+    {
+        // Detach the list before making the key available for another fetch.
+        // A resumed snapshot reader may request another version of this same
+        // key, which must register a new FetchRecordCc rather than mutate the
+        // list being iterated here.
+        ready_requesters.swap(requesters_);
+    }
+
+    // Remove the completed single-flight operation before resuming waiters.
+    // This request remains in use until ProcessRequests observes the true
+    // return value, so a nested FetchRecord cannot recycle and Reset it while
+    // this Execute call is still on the stack.
     ccs.RemoveFetchRecordRequest(cce_);
-    return false;
+    for (CcRequestBase *req : ready_requesters)
+    {
+        if (req != nullptr && req->Execute(ccs))
+        {
+            req->Free();
+        }
+    }
+    return true;
 }
 
 void FetchRecordCc::SetFinish(int err)
@@ -1332,37 +1361,15 @@ bool UpdateCceCkptTsCc::Execute(CcShard &ccs)
 
     size_t last_index = std::min(index + SCAN_BATCH_SIZE, records.size());
 
+    CcMap *ccm = ccs.GetCcm(table_name_, node_group_id_);
+    assert(ccm != nullptr);
+
     bool range_partitioned = !table_name_.IsHashPartitioned();
     bool versioned_payload = table_name_.Engine() != TableEngine::EloqKv;
-    CcMap *ccm = nullptr;
-    if (update_ckpt_ts_)
-    {
-        ccm = ccs.GetCcm(table_name_, node_group_id_);
-        assert(ccm != nullptr);
-    }
 
     for (; index < last_index; ++index)
     {
         const CkptTsEntry &ref = records[index];
-        if (!update_ckpt_ts_)
-        {
-            assert(range_partitioned);
-
-            // The split copy is durable under its destination range, but the
-            // source cce remains dirty. Only release its in-flight state.
-            if (versioned_payload)
-            {
-                static_cast<VersionedLruEntry<true, true> *>(ref.cce_)
-                    ->ClearBeingCkpt();
-            }
-            else
-            {
-                static_cast<VersionedLruEntry<false, true> *>(ref.cce_)
-                    ->ClearBeingCkpt();
-            }
-            continue;
-        }
-
         if (range_partitioned)
         {
             if (versioned_payload)
@@ -1420,6 +1427,13 @@ bool UpdateCceCkptTsCc::Execute(CcShard &ccs)
 
     if (index == records.size())
     {
+        // This shard's entries are now clean, so entries the last eviction
+        // pass skipped as dirty are reclaimable. Restart its scan cursor and
+        // wake the pass if requests are parked waiting for memory -- doing it
+        // here, on the shard that was just updated, keeps the notification in
+        // step with the flush rather than deferring it to the end of the whole
+        // flush task.
+        ccs.OnDirtyDataFlushed();
         SetFinished();
     }
     else
@@ -1647,9 +1661,12 @@ bool ShardCleanCc::Execute(CcShard &ccs)
             }
             else
             {
-                // Reach to the tail ccpage, but the allocated memory is
-                // still larger than the heap threshold, just abort the
-                // waiting ccrequests.
+                // Reached the tail ccpage with the allocated memory still
+                // above the heap threshold. Abort only the parked requests
+                // that opted in via AbortIfOom() -- txs holding range read
+                // locks, which would deadlock reclaim by blocking the very
+                // data sync that frees memory. Ordinary requests stay parked
+                // until eviction or a flush makes room.
                 ccs.AbortRequestsAfterMemoryFree();
 
                 // Notify the checkpointer thread to do checkpoint if there
@@ -1662,6 +1679,20 @@ bool ShardCleanCc::Execute(CcShard &ccs)
                 }
 
                 free_count_ = 0;
+
+                // This pass decided there was nothing to free from state it
+                // gathered before any wake-up that arrived while it ran -- a
+                // checkpoint flush turning dirty entries evictable, say. Such
+                // a wake-up could not be delivered because this request was in
+                // use, so re-run rather than stopping with requests parked and
+                // nothing left to schedule another pass.
+                if (ccs.TakeShardCleanCcWakeUp() &&
+                    ccs.WaitListSizeForMemory() > 0)
+                {
+                    ccs.Enqueue(this);
+                    return false;
+                }
+
                 // Return true will set the request as free, which means the
                 // request is not in working state.
                 return true;
@@ -1678,6 +1709,12 @@ bool ShardCleanCc::Execute(CcShard &ccs)
 
             // Reset the value if the ccrequest is finished.
             free_count_ = (wait_list_empty) ? 0 : free_count_;
+            if (wait_list_empty)
+            {
+                // Nothing is parked any more, so a wake-up that arrived during
+                // this pass has already been served.
+                ccs.TakeShardCleanCcWakeUp();
+            }
             return wait_list_empty;
         }
     }
@@ -1690,6 +1727,10 @@ bool ShardCleanCc::Execute(CcShard &ccs)
         if (!wait_list_empty)
         {
             ccs.Enqueue(this);
+        }
+        else
+        {
+            ccs.TakeShardCleanCcWakeUp();
         }
         return wait_list_empty;
     }

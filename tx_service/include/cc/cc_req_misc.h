@@ -1156,16 +1156,16 @@ public:
         NodeGroupId node_group_id,
         int64_t term,
         const TableName &table_name,
-        absl::flat_hash_map<size_t, std::vector<CkptTsEntry>> &cce_entries,
-        bool update_ckpt_ts)
+        absl::flat_hash_map<size_t, std::vector<CkptTsEntry>> &cce_entries)
         : cce_entries_(cce_entries),
           node_group_id_(node_group_id),
           term_(term),
-          table_name_(table_name),
-          update_ckpt_ts_(update_ckpt_ts)
+          table_name_(table_name)
     {
-        unfinished_core_cnt_ = cce_entries_.size();
-        assert(unfinished_core_cnt_ > 0);
+        assert(cce_entries_.size() > 0 && cce_entries_.size() <= UINT32_MAX);
+        state_.store(
+            CompletionState{static_cast<uint32_t>(cce_entries_.size()), 0},
+            std::memory_order_relaxed);
 
         for (const auto &entry : cce_entries_)
         {
@@ -1181,56 +1181,162 @@ public:
     void SetCoroCallbacks(const std::function<void()> *yield_fn,
                           const std::function<void()> *resume_fn)
     {
+        // The coroutine mode (SetCoroCallbacks + Wait) and the continuation
+        // mode (SetOnFinished) are mutually exclusive; see SetFinished().
+        assert(on_finished_ == nullptr);
         yield_fn_ = yield_fn;
         resume_fn_ = resume_fn;
     }
 
+    /**
+     * @brief Continues execution on the last core to apply its slice, instead
+     * of waking a thread parked in Wait().
+     *
+     * For callers that cannot block: the flush path installs a continuation
+     * that reports its partition complete, which keeps "PutAll has returned"
+     * meaning "every ckpt ts is published" even though nothing waits for it.
+     *
+     * @p on_finished runs on a cc shard and may destroy this request's owner,
+     * so it must be the last thing that touches the request. Consumed on
+     * invocation.
+     */
+    void SetOnFinished(std::function<void()> on_finished)
+    {
+        // Mutually exclusive with the coroutine mode; see SetFinished().
+        assert(yield_fn_ == nullptr && resume_fn_ == nullptr);
+        on_finished_ = std::move(on_finished);
+    }
+
+    /**
+     * @brief Marks the calling core's slice applied. The core that brings the
+     * count to zero performs the completion action: the on-finished
+     * continuation, the coroutine resume, or the condition-variable notify.
+     *
+     * The three actions are mutually exclusive completion modes, not stages:
+     * exactly one fires, selected by what the creator installed. The
+     * continuation mode (SetOnFinished; the per-partition flush) returns
+     * without touching the wake machinery -- its consumer reports the
+     * partition complete and wakes the PutAll waiter itself. The resume and
+     * notify modes serve a caller blocked in this request's own Wait() (the
+     * deferred publication path). A request never has more than one waiter.
+     *
+     * Mutex-free except in condition-variable mode. In coroutine mode, count
+     * and waiter flag share one atomic word, so the decrement that reaches zero
+     * atomically collects whether a waiter has committed to suspending. The
+     * resume callback is captured before that decrement: once zero is visible,
+     * the terminal shard either uses only that local pointer or returns without
+     * touching the request, allowing a waiter that never suspended to destroy
+     * it safely. acquire/release suffices because all fan-in operations are
+     * RMWs on one release sequence.
+     *
+     * In condition-variable mode the decrement itself is protected by mux_. A
+     * waiter therefore cannot observe zero, return, and destroy the request
+     * before the terminal shard has finished notifying through cv_.
+     */
     void SetFinished()
     {
-        std::unique_lock<bthread::Mutex> lk(mux_);
-        unfinished_core_cnt_--;
-        if (unfinished_core_cnt_ == 0)
+        // Both modes are immutable once requests are published to the shards.
+        // Capture them before a coroutine-mode terminal decrement publishes
+        // zero, after which an unarmed waiter may return and destroy `this`.
+        const bool continuation_mode = static_cast<bool>(on_finished_);
+        const std::function<void()> *resume_fn = resume_fn_;
+
+        if (continuation_mode || resume_fn != nullptr)
         {
-            if (resume_fn_ != nullptr &&
-                waiting_.load(std::memory_order_acquire))
+            CompletionState prev = state_.load(std::memory_order_relaxed);
+            CompletionState next;
+            do
             {
-                waiting_.store(false, std::memory_order_release);
-                auto *fn = resume_fn_;
-                lk.unlock();
-                (*fn)();
+                assert(prev.unfinished_core_cnt_ >= 1);
+                next = prev;
+                --next.unfinished_core_cnt_;
+            } while (!state_.compare_exchange_weak(prev,
+                                                   next,
+                                                   std::memory_order_acq_rel,
+                                                   std::memory_order_relaxed));
+            if (prev.unfinished_core_cnt_ != 1)
+            {
+                return;
             }
-            else if (resume_fn_ == nullptr)
+
+            if (continuation_mode)
+            {
+                // May destroy this request's owner; nothing touches members
+                // afterwards.
+                auto fn = std::move(on_finished_);
+                on_finished_ = nullptr;
+                fn();
+            }
+            else if (prev.waiter_suspended_ != 0)
+            {
+                // The waiter committed to yielding before publishing the flag.
+                // resume_fn may queue that wake before yield_fn runs.
+                (*resume_fn)();
+            }
+        }
+        else
+        {
+            // Publish zero while holding the same mutex used by Wait(). Wait
+            // cannot return and destroy the request until notification is done
+            // and this critical section has released the mutex.
+            std::lock_guard<bthread::Mutex> lk(mux_);
+            CompletionState prev = state_.load(std::memory_order_relaxed);
+            assert(prev.waiter_suspended_ == 0);
+            assert(prev.unfinished_core_cnt_ >= 1);
+            --prev.unfinished_core_cnt_;
+            state_.store(prev, std::memory_order_release);
+            if (prev.unfinished_core_cnt_ == 0)
             {
                 cv_.notify_one();
             }
         }
     }
 
+    /**
+     * @brief Blocks the caller until every core has applied its slice.
+     *
+     * With coroutine callbacks installed (SetCoroCallbacks), suspends through
+     * them and never touches the mutex; otherwise waits on the condition
+     * variable under mux_.
+     */
     void Wait()
     {
-        std::unique_lock<bthread::Mutex> lk(mux_);
-        while (unfinished_core_cnt_ > 0)
+        assert((yield_fn_ == nullptr) == (resume_fn_ == nullptr));
+        // The continuation mode (SetOnFinished) completes asynchronously and
+        // never waits.
+        assert(on_finished_ == nullptr);
+        if (yield_fn_ != nullptr)
         {
-            cv_.wait_for(lk, 10000L);  // timeout_us, preserve original value
+            CompletionState cur = state_.load(std::memory_order_acquire);
+            while (cur.unfinished_core_cnt_ != 0)
+            {
+                assert(cur.waiter_suspended_ == 0);
+                // Publish the waiter and the count > 0 condition it depends
+                // on in one RMW: the flag can only be set while cores remain,
+                // so the terminal decrement either sees it (and resumes the
+                // suspension entered unconditionally below) or the CAS fails
+                // and the reloaded count exits the loop without suspending.
+                CompletionState suspended = cur;
+                suspended.waiter_suspended_ = 1;
+                if (state_.compare_exchange_weak(cur,
+                                                 suspended,
+                                                 std::memory_order_acq_rel,
+                                                 std::memory_order_acquire))
+                {
+                    (*yield_fn_)();
+                    cur = state_.load(std::memory_order_acquire);
+                }
+            }
         }
-    }
-
-    void Wait(const std::function<void()> *yield_fn,
-              const std::function<void()> *resume_fn)
-    {
-        if (yield_fn == nullptr || resume_fn == nullptr)
+        else
         {
-            Wait();
-            return;
-        }
-        std::unique_lock<bthread::Mutex> lk(mux_);
-        while (unfinished_core_cnt_ > 0)
-        {
-            waiting_.store(true, std::memory_order_release);
-            lk.unlock();
-            (*yield_fn)();
-            lk.lock();
-            waiting_.store(false, std::memory_order_release);
+            std::unique_lock<bthread::Mutex> lk(mux_);
+            while (state_.load(std::memory_order_acquire).unfinished_core_cnt_ >
+                   0)
+            {
+                // timeout_us, preserve original value
+                cv_.wait_for(lk, 10000L);
+            }
         }
     }
 
@@ -1242,8 +1348,7 @@ public:
 
     bool IsFinished() const
     {
-        std::lock_guard<bthread::Mutex> lk(mux_);
-        return unfinished_core_cnt_ == 0;
+        return state_.load(std::memory_order_acquire).unfinished_core_cnt_ == 0;
     }
 
 private:
@@ -1251,18 +1356,51 @@ private:
     // key: core_idx, value: entry_index
     absl::flat_hash_map<size_t, size_t> indices_;
 
-    size_t unfinished_core_cnt_;
+    /**
+     * @brief The fan-in count and the waiter's suspension flag, bundled in
+     * one 8-byte lock-free atomic so their consistency is maintained by
+     * single RMWs; see SetFinished() and Wait().
+     */
+    struct CompletionState
+    {
+        // Cores that have not yet applied their slice.
+        uint32_t unfinished_core_cnt_{0};
+        // 1 while the coroutine waiter is suspended. uint32_t rather than
+        // bool keeps the struct padding-free, so compare_exchange only ever
+        // compares meaningful bytes.
+        uint32_t waiter_suspended_{0};
+    };
+    static_assert(sizeof(CompletionState) == 8);
+
+    std::atomic<CompletionState> state_{CompletionState{}};
+    static_assert(std::atomic<CompletionState>::is_always_lock_free);
     NodeGroupId node_group_id_;
     int64_t term_;
     TableName table_name_;
-    bool update_ckpt_ts_;
-    mutable bthread::Mutex mux_;
+    // Guards the count transition and notification in condition-variable
+    // completion mode; the coroutine and continuation modes never touch it.
+    bthread::Mutex mux_;
     bthread::ConditionVariable cv_;
+
+    // What to run once every core has applied its slice, instead of waking a
+    // thread parked in Wait(). The flush path installs a continuation that
+    // reports the partition complete to its PutAll coordinator, so a partition
+    // is only counted as done after the cc entries it wrote are marked clean --
+    // preserving the guarantee that PutAll returns with every ckpt ts already
+    // published, without anyone blocking to get it. It exists because both ends
+    // sit on threads that must not park: SetFinished() runs on a cc shard, and
+    // the flush path is driven from a data store completion callback.
+    //
+    // Runs on whichever shard finishes last. It may destroy this request's
+    // owner (the request lives inside the pooled partition state that the
+    // continuation can free), so SetFinished() moves it out, drops the lock,
+    // and touches no member afterwards. Consumed on invocation, so a pooled
+    // request cannot fire a stale continuation from an earlier flush.
+    std::function<void()> on_finished_{nullptr};
 
     // Coroutine yield/resume support
     const std::function<void()> *yield_fn_{nullptr};
     const std::function<void()> *resume_fn_{nullptr};
-    std::atomic<bool> waiting_{false};
 };
 
 struct WaitNoNakedBucketRefCc : public CcRequestBase

@@ -317,9 +317,14 @@ bool DataStoreServiceClient::PutAll(
         &flush_task,
     const std::function<void()> *yield_fptr,
     const std::function<void()> *resume_fptr,
-    const std::function<void()> *sync_yield_fptr)
+    const std::function<void()> *sync_yield_fptr,
+    const std::function<void(uint64_t, uint64_t)> *partition_progress_fptr)
 {
-    return PutAllImpl(flush_task, yield_fptr, resume_fptr, sync_yield_fptr);
+    return PutAllImpl(flush_task,
+                      yield_fptr,
+                      resume_fptr,
+                      sync_yield_fptr,
+                      partition_progress_fptr);
 }
 
 bool DataStoreServiceClient::PutAllImpl(
@@ -328,7 +333,8 @@ bool DataStoreServiceClient::PutAllImpl(
         &flush_task,
     const std::function<void()> *yield_fptr,
     const std::function<void()> *resume_fptr,
-    const std::function<void()> *sync_yield_fptr)
+    const std::function<void()> *sync_yield_fptr,
+    const std::function<void(uint64_t, uint64_t)> *partition_progress_fptr)
 {
     DLOG(INFO) << "DataStoreServiceClient::PutAll called with "
                << flush_task.size() << " tables to flush.";
@@ -340,9 +346,35 @@ bool DataStoreServiceClient::PutAllImpl(
     size_t records_count = 0;
 
     std::vector<PartitionCallbackData *> callback_data_list;
+    const txservice::NewestTermByNodeGroup newest_terms =
+        txservice::FindNewestTerms(flush_task);
+
+    // Whether a partition may publish its cc entries' ckpt ts the moment its
+    // own writes complete. Only sound when the store guarantees durability on
+    // BatchWriteRecords return (EloqStore). Stores that defer durability to
+    // PersistKV (RocksDB-backed) must not mark entries clean that early: a
+    // later PersistKV failure would leave un-persisted records already marked
+    // clean and therefore never re-flushed. For those, no entries are
+    // collected and no request is armed here; FlushDataImpl publishes the
+    // ckpt ts after PersistKV succeeds.
+    // The caller only installs a progress callback when the rest of this
+    // flush becomes durable together with each base partition. MVCC archives
+    // are written after PutAll, so even EloqStore must defer publication in
+    // that mode until PutArchivesAll succeeds.
+    const bool ckpt_ts_on_partition_complete =
+        !NeedPersistKV() && partition_progress_fptr != nullptr;
+
     // Process each table
     for (auto &[kv_table_name, entries] : flush_task)
     {
+        // FlushDataTask normally creates a table bucket together with its
+        // first entry, but PutAll is a public handler API and callers may pass
+        // an empty bucket. It carries no work and, importantly, has no task
+        // from which a TableName could be derived.
+        if (entries.empty())
+        {
+            continue;
+        }
         auto &table_name = entries.front()->data_sync_task_->table_name_;
 
         // Group records by partition
@@ -350,16 +382,25 @@ bool DataStoreServiceClient::PutAllImpl(
             hash_partitions_map;
         std::unordered_map<uint32_t, std::vector<size_t>> range_partitions_map;
 
+        // A merged flush buffer can straddle a leader-term transition. Discard
+        // older tasks before grouping any records, even when their records
+        // occupy a kv partition with no newer-term record in this buffer: the
+        // new term's checkpoint owns the current in-memory contents. Terms
+        // from different node groups are unrelated.
         size_t flush_task_entry_idx = 0;
         for (auto &entry : entries)
         {
+            const size_t entry_idx = flush_task_entry_idx++;
+            if (!txservice::IsNewestTerm(*entry, newest_terms))
+            {
+                continue;
+            }
             auto &batch = *entry->data_sync_vec_;
             if (batch.empty())
             {
                 continue;
             }
             records_count += batch.size();
-
             if (table_name.IsHashPartitioned())
             {
                 for (size_t i = 0; i < batch.size(); ++i)
@@ -373,8 +414,7 @@ bool DataStoreServiceClient::PutAllImpl(
                         it->second.reserve(batch.size() / 1024 * 2 *
                                            entries.size());
                     }
-                    it->second.emplace_back(
-                        std::make_pair(flush_task_entry_idx, i));
+                    it->second.emplace_back(entry_idx, i);
                 }
             }
             else
@@ -383,11 +423,9 @@ bool DataStoreServiceClient::PutAllImpl(
                 // table
                 int32_t partition_id =
                     KvPartitionIdOf(batch[0].partition_id_, true);
-                auto [it, inserted] =
-                    range_partitions_map.try_emplace(partition_id);
-                it->second.emplace_back(flush_task_entry_idx);
+                auto [it, _] = range_partitions_map.try_emplace(partition_id);
+                it->second.emplace_back(entry_idx);
             }
-            flush_task_entry_idx++;
         }
 
         uint16_t parts_cnt_per_key = 1;
@@ -408,6 +446,8 @@ bool DataStoreServiceClient::PutAllImpl(
 
             // Prepare batches for this partition
             PreparePartitionBatches(*partition_state,
+                                    sync_putall,
+                                    ckpt_ts_on_partition_complete,
                                     flush_recs,
                                     entries,
                                     table_name,
@@ -431,6 +471,8 @@ bool DataStoreServiceClient::PutAllImpl(
 
             // Prepare batches for this partition
             PrepareRangePartitionBatches(*partition_state,
+                                         sync_putall,
+                                         ckpt_ts_on_partition_complete,
                                          flush_recs,
                                          entries,
                                          table_name,
@@ -447,13 +489,20 @@ bool DataStoreServiceClient::PutAllImpl(
 
     // Set up global coordinator
     sync_putall->total_partitions_ = sync_putall->partition_states_.size();
+    sync_putall->total_bytes_ = 0;
+    for (const auto *ps : sync_putall->partition_states_)
+    {
+        sync_putall->total_bytes_ += ps->charged_mem_bytes_;
+    }
 
-    // Set coroutine callbacks BEFORE starting async work (see plan risk
-    // analysis)
+    // Install coroutine callbacks before starting async writes: a local
+    // backend may complete synchronously and otherwise miss the wake-up
+    // handshake entirely.
     if (yield_fptr != nullptr && resume_fptr != nullptr)
     {
         sync_putall->SetCoroCallbacks(yield_fptr, resume_fptr);
     }
+    sync_putall->SetProgressCallback(partition_progress_fptr);
 
     // Start concurrent processing for each partition
     constexpr size_t MAX_BATCH_WRITES_WITHOUT_YIELD = 10;
@@ -494,7 +543,8 @@ bool DataStoreServiceClient::PutAllImpl(
         else
         {
             // No batches for this partition, mark as completed
-            sync_putall->OnPartitionCompleted();
+            sync_putall->OnPartitionCompleted(
+                partition_state->ReleaseFlushRecordsMemory());
         }
     }
     // Wait for all partitions to complete
@@ -3034,10 +3084,19 @@ bool DataStoreServiceClient::PutArchivesAllImpl(
         uint32_t,
         std::vector<std::pair<std::string_view, txservice::FlushRecord *>>>
         partitions_map;
+    const txservice::NewestTermByNodeGroup newest_terms =
+        txservice::FindNewestTerms(flush_task);
     for (auto &[kv_table_name, flush_task_entry] : flush_task)
     {
+        // Apply the same batch-wide term fence as PutAll. Otherwise an
+        // obsolete task rejected for the base table could still append its
+        // in-memory versions to the archive table.
         for (auto &entry : flush_task_entry)
         {
+            if (!txservice::IsNewestTerm(*entry, newest_terms))
+            {
+                continue;
+            }
             auto &archive_vec = *entry->archive_vec_;
 
             if (archive_vec.empty())
@@ -3276,18 +3335,28 @@ bool DataStoreServiceClient::CopyBaseToArchiveImpl(
                        std::vector<std::unique_ptr<txservice::FlushTaskEntry>>>
         archive_flush_task;
     constexpr uint32_t MAX_FLYING_READ_COUNT = 100;
+    const txservice::NewestTermByNodeGroup newest_terms =
+        txservice::FindNewestTerms(flush_task);
     for (auto &[base_kv_table_name, flush_task_entry] : flush_task)
     {
+        if (flush_task_entry.empty())
+        {
+            continue;
+        }
         auto &table_name =
             flush_task_entry.front()->data_sync_task_->table_name_;
-        auto &table_schema = flush_task_entry.front()->table_schema_;
         bool is_range_partitioned = !table_name.IsHashPartitioned();
-
+        // CopyBaseToArchive precedes PutAll, so it must fence old terms here;
+        // waiting for PutAll's grouping filter would already be too late.
         auto *catalog_factory = GetCatalogFactory(table_name.Engine());
         assert(catalog_factory != nullptr);
 
         for (auto &entry : flush_task_entry)
         {
+            if (!txservice::IsNewestTerm(*entry, newest_terms))
+            {
+                continue;
+            }
             auto &base_vec = *entry->mv_base_vec_;
             if (base_vec.empty())
             {
@@ -3450,8 +3519,8 @@ bool DataStoreServiceClient::CopyBaseToArchiveImpl(
                     std::move(archive_vec),
                     nullptr,
                     nullptr,
-                    flush_task_entry.front()->data_sync_task_,
-                    table_schema,
+                    entry->data_sync_task_,
+                    entry->table_schema_,
                     batch_size));
         }
     }
@@ -5838,6 +5907,8 @@ bool DataStoreServiceClient::DeleteCatalog(
 
 void DataStoreServiceClient::PreparePartitionBatches(
     EloqDS::PartitionFlushState &partition_state,
+    EloqDS::SyncPutAllData *sync_putall,
+    bool publish_ckpt_ts_on_complete,
     const std::vector<std::pair<size_t, size_t>> &flush_recs,
     const std::vector<std::unique_ptr<txservice::FlushTaskEntry>> &entries,
     const txservice::TableName &table_name,
@@ -5941,8 +6012,30 @@ void DataStoreServiceClient::PreparePartitionBatches(
     // Process records and create batches
     for (auto idx : flush_recs)
     {
+        const auto &flush_entry = entries.at(idx.first);
         txservice::FlushRecord &ckpt_rec =
-            entries.at(idx.first)->data_sync_vec_->at(idx.second);
+            flush_entry->data_sync_vec_->at(idx.second);
+
+        if (publish_ckpt_ts_on_complete)
+        {
+            // Every batch view into this record belongs to this partition,
+            // so the partition frees the record's buffers -- and returns
+            // their charged quota -- when it completes.
+            partition_state.AddFlushRecord(&ckpt_rec);
+        }
+
+        // Remember which cc entry this record came from, so the partition can
+        // advance its ckpt ts as soon as it is durable. A hash-partitioned
+        // task's id is the owning cc shard.
+        if (publish_ckpt_ts_on_complete && ckpt_rec.cce_ != nullptr)
+        {
+            partition_state.AddCkptTsEntry(
+                flush_entry->data_sync_task_.get(),
+                static_cast<size_t>(flush_entry->data_sync_task_->id_),
+                ckpt_rec.cce_,
+                ckpt_rec.commit_ts_,
+                ckpt_rec.post_flush_size_);
+        }
 
         // Start a new batch if size limit reached
         // or the record_tmp_mem_area is full. Since the record_parts is a
@@ -5978,10 +6071,14 @@ void DataStoreServiceClient::PreparePartitionBatches(
     {
         partition_state.AddBatch(std::move(batch_request));
     }
+
+    partition_state.ArmCkptTsUpdate(sync_putall);
 }
 
 void DataStoreServiceClient::PrepareRangePartitionBatches(
     EloqDS::PartitionFlushState &partition_state,
+    EloqDS::SyncPutAllData *sync_putall,
+    bool publish_ckpt_ts_on_complete,
     const std::vector<size_t> &flush_recs,
     const std::vector<std::unique_ptr<txservice::FlushTaskEntry>> &entries,
     const txservice::TableName &table_name,
@@ -5992,8 +6089,12 @@ void DataStoreServiceClient::PrepareRangePartitionBatches(
     size_t write_batch_size = 0;
     PartitionBatchRequest batch_request;
 
-    bool enabled_mvcc =
-        txservice::Sharder::Instance().GetLocalCcShards()->EnableMvcc();
+    auto *local_shards = txservice::Sharder::Instance().GetLocalCcShards();
+    // The public handler API is also used by datastore-only tests and tools
+    // that have no LocalCcShards. Those callers have no MVCC execution layer,
+    // so the range encoding follows the non-MVCC path.
+    const bool enabled_mvcc =
+        local_shards != nullptr && local_shards->EnableMvcc();
 
     auto PrepareRecordData = [&](txservice::FlushRecord &ckpt_rec,
                                  size_t &batch_size,
@@ -6049,8 +6150,39 @@ void DataStoreServiceClient::PrepareRangePartitionBatches(
     // Process records and create batches
     for (auto idx : flush_recs)
     {
-        for (auto &ckpt_rec : *entries.at(idx)->data_sync_vec_)
+        const auto &flush_entry = entries.at(idx);
+        const bool collect_ckpt_ts = publish_ckpt_ts_on_complete;
+        size_t core_idx = 0;
+        if (collect_ckpt_ts)
         {
+            assert(local_shards != nullptr);
+            // The owning cc shard derives from the range id -- the parent
+            // range's id while a split is in flight, since the scanned CCEs
+            // stay in the source range's CcMap until split cleanup.
+            core_idx = flush_entry->data_sync_task_->CheckpointCceOwnerCore(
+                local_shards->Count());
+        }
+
+        for (auto &ckpt_rec : *flush_entry->data_sync_vec_)
+        {
+            if (collect_ckpt_ts)
+            {
+                // Every batch view into this record belongs to this
+                // partition, so the partition frees the record's buffers --
+                // and returns their charged quota -- when it completes.
+                partition_state.AddFlushRecord(&ckpt_rec);
+            }
+
+            if (collect_ckpt_ts && ckpt_rec.cce_ != nullptr)
+            {
+                partition_state.AddCkptTsEntry(
+                    flush_entry->data_sync_task_.get(),
+                    core_idx,
+                    ckpt_rec.cce_,
+                    ckpt_rec.commit_ts_,
+                    ckpt_rec.post_flush_size_);
+            }
+
             // Start a new batch if size limit reached
             // or the record_tmp_mem_area is full. Since the record_parts is a
             // vector of string_view that references the record_tmp_mem_area, we
@@ -6081,6 +6213,8 @@ void DataStoreServiceClient::PrepareRangePartitionBatches(
     {
         partition_state.AddBatch(std::move(batch_request));
     }
+
+    partition_state.ArmCkptTsUpdate(sync_putall);
 }
 
 }  // namespace EloqDS

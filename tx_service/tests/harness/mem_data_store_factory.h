@@ -11,6 +11,11 @@ namespace EloqDS
 class MemDataStoreFactory : public DataStoreFactory
 {
 public:
+    explicit MemDataStoreFactory(bool fail_flush_data = false)
+        : fail_flush_data_(fail_flush_data)
+    {
+    }
+
     std::unique_ptr<DataStore> CreateDataStore(
         bool /*create_if_missing*/,
         uint32_t shard_id,
@@ -18,7 +23,8 @@ public:
         bool start_db = true,
         int64_t term = 0) override
     {
-        auto ds = std::make_unique<MemDataStore>(shard_id, data_store_service);
+        auto ds = std::make_unique<MemDataStore>(
+            shard_id, data_store_service, fail_flush_data_);
         // Surface startup failures immediately (mirrors
         // RocksDBDataStoreFactory) instead of returning a half-initialized
         // store that fails later in request paths.
@@ -90,5 +96,8 @@ public:
     {
         return false;
     }
+
+private:
+    const bool fail_flush_data_{false};
 };
 }  // namespace EloqDS

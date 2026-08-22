@@ -6791,7 +6791,7 @@ public:
             remote_input_.cmd_ = nullptr;
             remote_input_.is_owner_ = false;
         }
-        in_use_.store(false, std::memory_order_release);
+        CcRequestBase::Free();
     }
 
     void Reset(const TableName *table_name,

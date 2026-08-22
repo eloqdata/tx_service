@@ -563,57 +563,52 @@ void CcShard::Enqueue(uint32_t thd_id, uint32_t shard_code, CcRequestBase *req)
 
 void CcShard::EnqueueWaitListIfMemoryFull(CcRequestBase *req)
 {
-    cc_wait_list_for_memory_.emplace_back(req);
+    cc_wait_list_for_memory_.PushBack(req);
 }
 
 bool CcShard::DequeueWaitListAfterMemoryFree(bool deque_all)
 {
-    if (cc_wait_list_for_memory_.size() == 0)
-    {
-        return true;
-    }
-
+    // Releases a batch, not the whole list: the caller (ShardCleanCc)
+    // re-enqueues itself behind the released requests when this returns
+    // false, so between batches those requests execute and consume the freed
+    // memory, and the next pass re-checks the heap before releasing more.
+    // Releasing everything at once would send the tail of the list into a
+    // FindEmplace that fails and re-parks. The batch size only sets the
+    // sample period of that feedback loop; 20 vs. dequeue-all measured
+    // identically on the tail.
     uint32_t dequeue_cnt = 0;
-    auto it = cc_wait_list_for_memory_.begin();
-    for (; it != cc_wait_list_for_memory_.end() &&
-           (deque_all || dequeue_cnt < 20);)
+    while (!cc_wait_list_for_memory_.Empty() && (deque_all || dequeue_cnt < 20))
     {
-        this->Enqueue(LocalCoreId(), (*it));
-        ++it;
+        // Unlink before re-enqueueing: once on the cc queue, the request is
+        // free to execute and park itself again.
+        CcRequestBase *req = cc_wait_list_for_memory_.PopFront();
+        this->Enqueue(LocalCoreId(), req);
         ++dequeue_cnt;
     }
 
-    bool is_empty = it == cc_wait_list_for_memory_.end();
-    cc_wait_list_for_memory_.erase(cc_wait_list_for_memory_.begin(), it);
-
-    return is_empty;
+    return cc_wait_list_for_memory_.Empty();
 }
 
 void CcShard::AbortRequestsAfterMemoryFree()
 {
-    if (cc_wait_list_for_memory_.size() == 0)
+    for (CcRequestBase *req = cc_wait_list_for_memory_.Front(); req != nullptr;)
     {
-        return;
-    }
-
-    for (auto req_it = cc_wait_list_for_memory_.begin();
-         req_it != cc_wait_list_for_memory_.end();)
-    {
-        if ((*req_it)->AbortIfOom())
+        CcRequestBase *next = CcRequestList::NextOf(req);
+        if (req->AbortIfOom())
         {
-            (*req_it)->AbortCcRequest(CcErrorCode::OUT_OF_MEMORY);
-            req_it = cc_wait_list_for_memory_.erase(req_it);
+            // Unlink before aborting: AbortCcRequest may Free() the request
+            // back to its pool, where a producer can reuse and re-link it
+            // while stale links would still point into this list.
+            cc_wait_list_for_memory_.Remove(req);
+            req->AbortCcRequest(CcErrorCode::OUT_OF_MEMORY);
         }
-        else
-        {
-            ++req_it;
-        }
+        req = next;
     }
 }
 
 size_t CcShard::WaitListSizeForMemory()
 {
-    return cc_wait_list_for_memory_.size();
+    return cc_wait_list_for_memory_.Size();
 }
 
 void CcShard::WakeUpShardCleanCc()
@@ -622,6 +617,13 @@ void CcShard::WakeUpShardCleanCc()
     {
         shard_clean_cc_->Use();
         Enqueue(shard_clean_cc_.get());
+    }
+    else
+    {
+        // The pass in flight may already have scanned past whatever this
+        // wake-up is about. Remember it so the pass re-runs instead of
+        // stopping with requests still parked.
+        shard_clean_cc_wake_pending_ = true;
     }
 }
 
@@ -2237,6 +2239,7 @@ store::DataStoreHandler::DataStoreOpStatus CcShard::FetchRecord(
                 // channel is not established, retry later.
                 // Remove fetch req
                 RemoveFetchRecordRequest(cce);
+                fetch_req->Free();
                 cce->GetKeyGapLockAndExtraData()->ReleasePin();
                 cce->RecycleKeyLock(*this);
                 return store::DataStoreHandler::DataStoreOpStatus::Retry;
@@ -2274,6 +2277,7 @@ store::DataStoreHandler::DataStoreOpStatus CcShard::FetchRecord(
             {
                 // Remove fetch req
                 RemoveFetchRecordRequest(cce);
+                fetch_req->Free();
                 cce->GetKeyGapLockAndExtraData()->ReleasePin();
                 cce->RecycleKeyLock(*this);
 
@@ -2411,13 +2415,7 @@ void CcShard::RemoveFetchRecordRequest(LruEntry *cce)
 {
     auto fetch_it = fetch_record_reqs_.find(cce);
     assert(fetch_it != fetch_record_reqs_.end());
-    FetchRecordCc *fetch_req = fetch_it->second;
     fetch_record_reqs_.erase(fetch_it);
-
-    // Free marks the request reusable while its Execute call is unwinding, but
-    // both FetchRecord and resumed requesters run on this shard, so NextRequest
-    // cannot observe it until control returns to the shard loop.
-    fetch_req->Free();
 }
 
 CcMap *CcShard::CreateOrUpdatePkCcMap(const TableName &table_name,
@@ -3909,19 +3907,17 @@ void CcShard::SubsribeToPrimaryNode(uint32_t seq_grp, uint64_t seq_id)
 
 void CcShard::EnqueueWaitListIfSchemaMismatch(CcRequestBase *req)
 {
-    waiting_list_for_schema_.push_back(req);
+    waiting_list_for_schema_.PushBack(req);
 }
 
 void CcShard::DequeueWaitListAfterSchemaUpdated()
 {
-    if (waiting_list_for_schema_.size() > 0)
+    while (!waiting_list_for_schema_.Empty())
     {
-        for (auto req : waiting_list_for_schema_)
-        {
-            this->Enqueue(req);
-        }
-
-        waiting_list_for_schema_.clear();
+        // Unlink before re-enqueueing: once on the cc queue, the request is
+        // free to execute and park itself again.
+        CcRequestBase *req = waiting_list_for_schema_.PopFront();
+        this->Enqueue(req);
     }
 }
 

@@ -516,9 +516,13 @@ bool RocksDBHandler::PutAll(
         &batch,
     const std::function<void()> *yield_fptr,
     const std::function<void()> *resume_fptr,
-    const std::function<void()> *sync_yield_fptr)
+    const std::function<void()> *sync_yield_fptr,
+    const std::function<void(uint64_t, uint64_t)> *partition_progress_fptr)
 {
     (void) sync_yield_fptr;
+    // This backend writes the batch as a unit, so there is no partition
+    // progress to report.
+    (void) partition_progress_fptr;
     std::thread::id this_id = std::this_thread::get_id();
     if (batch.empty())
     {

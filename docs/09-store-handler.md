@@ -71,7 +71,9 @@ Shard-owner caching: `dss_shards_[shard_id]` (atomic index) points into `dss_nod
 
 Retry semantics (`ReadClosure::Run` et al.): on `REQUESTED_NODE_NOT_OWNER` the server attaches `new_key_sharding` (new primary node + `shard_version`) to `CommonResult`; the client's `HandleShardingError` spins on `UpgradeShardVersion` (CAS on the node slot, `bthread_usleep(10ms)` backoff) and re-issues the request, up to `retry_limit_ = 2` retries per closure. A `NodeGroupChanged` sharding error is currently `LOG(FATAL)` (topology change handling is a TODO at `data_store_service_client.cpp:4471`). `SetupConfig` (registered as the DSS `update_config_listener_`) applies pushed topology updates guarded by `dss_topology_version_`.
 
-`PutAll` (`PutAllImpl`) groups `FlushRecord`s by kv partition, builds ≤64 MB `BatchWriteRecords` batches (`MAX_WRITE_BATCH_SIZE`), and flushes **partitions concurrently but each partition serially** — `PartitionBatchCallback` chains the next batch of a partition only after the previous one completes; `SyncPutAllData`/`SyncConcurrentRequest` (max 32 in-flight) coordinate completion and support coroutine yield/resume. All checkpoint batches are written with `skip_wal=true`; durability comes from the subsequent `PersistKV` → `FlushData` across **all** shards. Synchronous helpers (`FetchTable`, `UpsertDatabase`, ...) use `SyncCallbackData` (bthread mutex/condvar, or yield/resume when provided). `UpsertTable` runs on a dedicated 1-thread `upsert_table_worker_` after pinning the node group and checking the tx term.
+`PutAll` (`PutAllImpl`) groups `FlushRecord`s by kv partition, builds ≤64 MB `BatchWriteRecords` batches (`MAX_WRITE_BATCH_SIZE`), and flushes **partitions concurrently but each partition serially** — `PartitionBatchCallback` chains the next batch only after the previous one completes; `SyncPutAllData`/`SyncConcurrentRequest` (max 32 in-flight) coordinate completion and support coroutine yield/resume. A merged flush buffer can contain `DataSyncTask`s from both sides of a node-group term transition. `CopyBaseToArchive`, `PutAll`, and `PutArchivesAll` each find the highest represented task term independently for every node group across the entire merged batch and skip all datastore work for that node group's lower-term tasks, even when the newer task belongs to another table bucket; a lower numeric term from another node group remains valid. The retained records in each kv partition share one term and one `UpdateCceCkptTsCc`.
+
+All checkpoint batches use `skip_wal=true`, but the completion durability contract is backend-specific. EloqStore reports a batch only after it is durable and its DSS `FlushData` is a no-op, so a non-MVCC flush publishes each completed partition's ckpt ts immediately, frees the key/payload buffers of the records that partition carried, and reports their charged flush-memory bytes so quota release matches memory actually freed. RocksDB/RocksDB-cloud writes remain in a WAL-disabled memtable: `NeedPersistKV()` is true, ckpt-ts publication stays deferred, and `PersistKV` → `FlushData` across all shards is the durability boundary. MVCC also defers publication on EloqStore until `PutArchivesAll` completes. The deferred path filters with the same batch-wide newest term used by the datastore and aggregates the retained entries into one `UpdateCceCkptTsCc` per table and node group. Synchronous helpers (`FetchTable`, `UpsertDatabase`, ...) use `SyncCallbackData` (bthread mutex/condvar, or yield/resume when provided). `UpsertTable` runs on a dedicated 1-thread `upsert_table_worker_` after pinning the node group and checking the tx term.
 
 Scans: `DataStoreServiceScanner` / `SinglePartitionScanner` (`store_handler/data_store_service_scanner.h`) implement `store::DataStoreScanner` (`tx_service/include/store/data_store_scanner.h`: `Current/MoveNext/End`) by fanning `ScanNext` RPCs over partitions and merge-sorting with the heap helpers in `store_handler/kv_store.h` (`ScanHeapTuple`, `CacheCompare`). Server-side scan sessions are identified by `session_id`.
 
@@ -148,9 +150,14 @@ per partition, serially:  BatchWriteRecords(..., skip_wal=true)
 PartitionBatchCallback ─► next batch of that partition, or
 SyncPutAllData::OnPartitionCompleted ─► resume_fn / cv when all done
   │
-  ▼ (caller, after all tables flushed)
-store_hd_->PersistKV(kv_table_names)              local_cc_shards.cpp:5964
-  └─► FlushData RPC/local on EVERY data shard  → only now is data durable
+  ├─► non-MVCC EloqStore: enqueue one UpdateCceCkptTsCc for this
+  │   partition; report completion/progress after its shard fan-in
+  └─► RocksDB-backed or MVCC: report PutAll completion without publishing
+  ▼ (caller, after archives where applicable)
+store_hd_->PersistKV(kv_table_names)              RocksDB-backed only
+  └─► FlushData RPC/local on EVERY data shard
+  ▼
+deferred UpdateCceCkptTsCc per retained table/ng    RocksDB-backed + all MVCC
 ```
 
 ### Cache-miss read (`FetchRecord`)
@@ -178,7 +185,7 @@ fetch_cc->SetFinish(0)  → re-enqueued on the owning CcShard          [03]
 ## 8. Gotchas and Invariants
 
 - **`is_range_partition` must match the table type.** Hash and range partition ids are mapped to buckets by different functions; the same integer routes to different DSS shards depending on the flag (`GetShardIdByPartitionId`). Several call sites derive it from `table_name.IsHashPartitioned()` — keep that pattern.
-- **`PutAll` alone is not durable.** Checkpoint batches set `skip_wal=true` on the DSS side; data is durable only after `PersistKV`/`FlushData` succeeds on every shard. The checkpointer must not advance ckpt-ts before `PersistKV` returns (see [07](07-durability-and-recovery.md)).
+- **`PutAll` durability depends on the backend.** EloqStore batch completion is durable; RocksDB-backed checkpoint batches set `skip_wal=true` and require `PersistKV`/`FlushData`. MVCC additionally requires archive writes. The checkpointer must not advance entry ckpt ts before the complete applicable boundary (see [07](07-durability-and-recovery.md)).
 - **Per-partition write ordering.** `PutAllImpl` allows at most one in-flight batch per kv partition; cross-partition writes are concurrent. Code that adds write paths must preserve per-partition ordering (last-writer-wins keyed by `records_ts`).
 - **Retries are bounded and not transparent.** `retry_limit_ = 2` per closure; after that the error surfaces to the caller (`PutAll` returns false; `FetchRecord` finishes the cc request with an error). `NodeGroupChanged` sharding errors crash the process today.
 - **`IsSharedStorage()` is correctness-critical**, not a hint: on shared storage a standby trusts the leader's checkpoint-ts when deciding whether an evicted entry is persistent (`cc_entry.cpp:64`); claiming shared storage on a local-disk backend would let standbys evict unpersisted data. Note the colocated DSS client returns true for EloqStore and `IsCloudMode()` for RocksDB variants — plain `ELOQDSS_ROCKSDB` colocated is *not* shared.

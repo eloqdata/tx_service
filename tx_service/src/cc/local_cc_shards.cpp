@@ -6053,10 +6053,68 @@ void LocalCcShards::FlushDataImpl(FlushDataTask *cur_work,
         }
     }
 
+    // Hand this task's flush memory quota back as its partitions land rather
+    // than all at once when the task ends. A task holds its whole share for the
+    // duration of PutAll, so with several tasks in flight the quota is what
+    // stalls DataSyncScan in AllocateFlushMemQuota.
+    //
+    // Quota returned tracks memory actually freed: when a partition
+    // completes, the store handler frees the key/payload buffers of the
+    // records that partition carried and reports the cumulative
+    // FlushRecord::FlushSize() bytes freed so far -- the same unit
+    // DataSyncScan charged -- so releasing quota never lets resident flush
+    // memory exceed what the quota claims. The progress is a cumulative
+    // watermark: one wake-up may coalesce several partition completions, and
+    // a report whose watermark has not advanced is a no-op, which also makes
+    // duplicate reports harmless. The watermark is capped by this task's
+    // charge, so a bookkeeping discrepancy can never release another task's
+    // quota; the remainder -- vector footprints, sizes not covered by
+    // partition reports, or the whole share when PutAll fails or is skipped
+    // -- is released by the unconditional DeallocateFlushMemQuota below,
+    // whose buffers are freed with the flush task right after. The amounts
+    // always sum to exactly what was taken.
+    // The state is bundled behind a single captured reference so the lambda
+    // fits std::function's small-buffer optimization (16 bytes on libstdc++)
+    // and constructing partition_progress_func does not heap-allocate.
+    struct FlushQuotaProgress
+    {
+        DataSyncMemoryController &mem_controller_;
+        const uint64_t task_flush_quota_;
+        uint64_t released_;
+    } quota_progress{
+        data_sync_mem_controller_, cur_work->pending_flush_size_, 0};
+    const std::function<void(uint64_t, uint64_t)> partition_progress_func =
+        [&quota_progress](uint64_t freed_bytes, uint64_t total_bytes)
+    {
+        (void) total_bytes;
+        const uint64_t target =
+            std::min(freed_bytes, quota_progress.task_flush_quota_);
+        if (target > quota_progress.released_)
+        {
+            quota_progress.mem_controller_.DeallocateFlushMemQuota(
+                target - quota_progress.released_);
+            quota_progress.released_ = target;
+        }
+    };
+
+    // Progressive quota release pairs with per-partition ckpt-ts publication:
+    // it only makes sense when partial-batch progress is actionable. For
+    // stores that defer durability to PersistKV, or MVCC flushes whose archive
+    // writes follow PutAll, nothing downstream can act on base-partition
+    // progress. Such a flush holds its quota to the end (released by the
+    // unconditional deallocation below) and wakes the PutAll waiter once.
+    const bool deferred_ckpt_ts_update =
+        DeferCkptTsUpdate(store_hd_->NeedPersistKV(), EnableMvcc());
+    const std::function<void(uint64_t, uint64_t)> *partition_progress_fptr =
+        deferred_ckpt_ts_update ? nullptr : &partition_progress_func;
+
     if (succ)
     {
-        succ = store_hd_->PutAll(
-            flush_task_entries, &yield_fn, &resume_fn, &sync_yield_func);
+        succ = store_hd_->PutAll(flush_task_entries,
+                                 &yield_fn,
+                                 &resume_fn,
+                                 &sync_yield_func,
+                                 partition_progress_fptr);
         if (!succ)
         {
             LOG(ERROR) << "DataSync PutAll flush to kv "
@@ -6085,6 +6143,43 @@ void LocalCcShards::FlushDataImpl(FlushDataTask *cur_work,
         succ = store_hd_->PersistKV(kv_table_names, &yield_fn, &resume_fn);
     }
 
+    if (succ && deferred_ckpt_ts_update)
+    {
+        // RocksDB-backed stores arrive here only after PersistKV makes their
+        // WAL-disabled writes durable. MVCC EloqStore arrives here after both
+        // PutAll and PutArchivesAll: publishing after base writes alone could
+        // make an entry clean and evictable even if its archive write failed,
+        // causing that history never to be retried. Use the datastore's same
+        // batch-wide term fence below: an older-term write was discarded and
+        // its cc entry must therefore remain dirty.
+        const NewestTermByNodeGroup newest_terms =
+            FindNewestTerms(flush_task_entries);
+        for (auto &[_, entries] : flush_task_entries)
+        {
+            assert(!entries.empty());
+            const TableName &table_name =
+                entries.front()->data_sync_task_->table_name_;
+            std::vector<CkptTsUpdateGroup> update_groups =
+                CollectCkptTsUpdateGroups(entries, newest_terms, Count());
+            for (CkptTsUpdateGroup &group : update_groups)
+            {
+                assert(!group.cce_entries_.empty());
+                UpdateCceCkptTsCc update_cce_req(group.node_group_id_,
+                                                 group.node_group_term_,
+                                                 table_name,
+                                                 group.cce_entries_);
+                update_cce_req.SetCoroCallbacks(&yield_fn, &resume_fn);
+                for (const auto &[core_idx, cce_entries] : group.cce_entries_)
+                {
+                    (void) cce_entries;
+                    EnqueueToCcShard(static_cast<uint16_t>(core_idx),
+                                     &update_cce_req);
+                }
+                update_cce_req.Wait();
+            }
+        }
+    }
+
     // Record that data was written in DataSyncStatus if flush succeeded.
     if (succ)
     {
@@ -6110,118 +6205,47 @@ void LocalCcShards::FlushDataImpl(FlushDataTask *cur_work,
         }
     }
 
-    std::unordered_set<uint16_t> updated_ckpt_ts_core_ids;
-    // Finalize in-memory state for successfully flushed CCEs.
-    if (succ)
-    {
-        size_t iterations_since_yield = 0;
-        constexpr size_t MAX_ITERATIONS_WITHOUT_YIELD = 10;
-
-        for (auto &[kv_table_name, entries] : flush_task_entries)
-        {
-            for (auto &entry : entries)
-            {
-                absl::flat_hash_map<size_t,
-                                    std::vector<UpdateCceCkptTsCc::CkptTsEntry>>
-                    cce_entries_map;
-
-                auto &table_name =
-                    entries.front()->data_sync_task_->table_name_;
-                bool update_ckpt_ts =
-                    entry->data_sync_task_->need_update_ckpt_ts_;
-
-                for (auto &rec : *(entry->data_sync_vec_))
-                {
-                    auto cce = rec.cce_;
-                    if (cce != nullptr)
-                    {
-                        size_t key_core_idx = 0;
-                        if (!update_ckpt_ts)
-                        {
-                            // Split scans collected these CCEs from the source
-                            // range; id_ identifies the destination range.
-                            key_core_idx =
-                                entry->data_sync_task_->cce_owner_core_;
-                        }
-                        else if (!table_name.IsHashPartitioned())
-                        {
-                            int32_t range_id = entry->data_sync_task_->id_;
-                            key_core_idx = static_cast<size_t>(
-                                (range_id & 0x3FF) % Count());
-                        }
-                        else
-                        {
-                            key_core_idx = entry->data_sync_task_->id_;
-                        }
-                        auto insert_it = cce_entries_map.try_emplace(
-                            key_core_idx,
-                            std::vector<UpdateCceCkptTsCc::CkptTsEntry>());
-                        insert_it.first->second.emplace_back(
-                            cce, rec.commit_ts_, rec.post_flush_size_);
-                    }
-                }
-
-                if (cce_entries_map.size() > 0)
-                {
-                    UpdateCceCkptTsCc update_cce_req(
-                        entry->data_sync_task_->node_group_id_,
-                        entry->data_sync_task_->node_group_term_,
-                        table_name,
-                        cce_entries_map,
-                        update_ckpt_ts);
-                    update_cce_req.SetCoroCallbacks(&yield_fn, &resume_fn);
-                    for (auto &[core_idx, cce_entries] : cce_entries_map)
-                    {
-                        if (update_ckpt_ts)
-                        {
-                            updated_ckpt_ts_core_ids.insert(core_idx);
-                        }
-                        EnqueueToCcShard(core_idx, &update_cce_req);
-                    }
-
-                    bool is_finished = update_cce_req.IsFinished();
-                    if (is_finished)
-                    {
-                        iterations_since_yield++;
-                        if (iterations_since_yield >=
-                            MAX_ITERATIONS_WITHOUT_YIELD)
-                        {
-                            sync_yield_func();
-                            iterations_since_yield = 0;
-                        }
-                    }
-
-                    update_cce_req.Wait(&yield_fn, &resume_fn);
-                }
-            }
-        }
-    }
-
-    // Notify cc shards that dirty data has been flushed. This will re-enqueue
-    // kickout data cc reqs if there are any.
-    WaitableCc reset_cc(
-        [&](CcShard &ccs)
-        {
-            ccs.OnDirtyDataFlushed();
-            return true;
-        },
-        updated_ckpt_ts_core_ids.size());
-    reset_cc.SetCoroCallbacks(&yield_fn, &resume_fn);
-    for (uint16_t core_idx : updated_ckpt_ts_core_ids)
-    {
-        EnqueueToCcShard(core_idx, &reset_cc);
-    }
-    reset_cc.Wait(&yield_fn, &resume_fn);
+    // Non-MVCC EloqStore publishes ckpt ts per partition from
+    // PartitionBatchCallback. Stores requiring PersistKV, and all MVCC
+    // flushes, publish in the deferred block above after the full durability
+    // boundary. UpdateCceCkptTsCc restarts each affected shard's eviction scan
+    // in either path.
 
     auto ckpt_err = succ ? DataSyncTask::CkptErrorCode::NO_ERROR
                          : DataSyncTask::CkptErrorCode::FLUSH_ERROR;
 
+    // Free every remaining flush buffer before returning the remainder of the
+    // quota, so the release below never precedes the memory it stands for:
+    // the interleaving vectors (holding the husks of records the partitions
+    // already freed), the records the per-partition path did not cover --
+    // lower-term discards, deferred and failed shares -- and the archive and
+    // move-base vectors. This matters most for stores that defer publication
+    // to PersistKV, where no per-partition release happened and the remainder
+    // is the task's whole share. Nothing past this point reads the vectors:
+    // the deferred publication block and the MarkDataStoreWrite scan above
+    // are their last readers, and PostProcessFlushTaskEntries and task
+    // finalization consume only the task and txm fields.
+    for (auto &[_, entries] : flush_task_entries)
+    {
+        for (auto &entry : entries)
+        {
+            entry->data_sync_vec_.reset();
+            entry->archive_vec_.reset();
+            entry->mv_base_vec_.reset();
+        }
+    }
+
     // notify waiting data sync scan thread
+    // Whatever the per-partition reports did not cover -- a failed or skipped
+    // PutAll, or integer division remainder.
     uint64_t old_usage = data_sync_mem_controller_.DeallocateFlushMemQuota(
-        cur_work->pending_flush_size_);
+        quota_progress.task_flush_quota_ - quota_progress.released_);
 
     DLOG(INFO) << "DelocateFlushDataMemQuota old_usage: " << old_usage
-               << " new_usage: " << old_usage - cur_work->pending_flush_size_
+               << " new_usage: "
+               << old_usage - (quota_progress.task_flush_quota_ -
+                               quota_progress.released_)
+               << " released_during_flush: " << quota_progress.released_
                << " quota: " << data_sync_mem_controller_.FlushMemoryQuota();
 
     PostProcessFlushTaskEntries(
