@@ -492,7 +492,7 @@ bool DataStoreServiceClient::PutAllImpl(
     sync_putall->total_bytes_ = 0;
     for (const auto *ps : sync_putall->partition_states_)
     {
-        sync_putall->total_bytes_ += ps->serialized_bytes_;
+        sync_putall->total_bytes_ += ps->charged_mem_bytes_;
     }
 
     // Install coroutine callbacks before starting async writes: a local
@@ -544,7 +544,7 @@ bool DataStoreServiceClient::PutAllImpl(
         {
             // No batches for this partition, mark as completed
             sync_putall->OnPartitionCompleted(
-                partition_state->serialized_bytes_);
+                partition_state->ReleaseFlushRecordsMemory());
         }
     }
     // Wait for all partitions to complete
@@ -6016,6 +6016,14 @@ void DataStoreServiceClient::PreparePartitionBatches(
         txservice::FlushRecord &ckpt_rec =
             flush_entry->data_sync_vec_->at(idx.second);
 
+        if (publish_ckpt_ts_on_complete)
+        {
+            // Every batch view into this record belongs to this partition,
+            // so the partition frees the record's buffers -- and returns
+            // their charged quota -- when it completes.
+            partition_state.AddFlushRecord(&ckpt_rec);
+        }
+
         // Remember which cc entry this record came from, so the partition can
         // advance its ckpt ts as soon as it is durable. A hash-partitioned
         // task's id is the owning cc shard.
@@ -6038,7 +6046,6 @@ void DataStoreServiceClient::PreparePartitionBatches(
             batch_request.record_tmp_mem_area.size() ==
                 batch_request.record_tmp_mem_area.capacity())
         {
-            partition_state.serialized_bytes_ += write_batch_size;
             partition_state.AddBatch(std::move(batch_request));
 
             batch_request.Reset(
@@ -6062,7 +6069,6 @@ void DataStoreServiceClient::PreparePartitionBatches(
     // Add the last batch if it has data
     if (batch_request.key_parts.size() > 0)
     {
-        partition_state.serialized_bytes_ += write_batch_size;
         partition_state.AddBatch(std::move(batch_request));
     }
 
@@ -6159,6 +6165,14 @@ void DataStoreServiceClient::PrepareRangePartitionBatches(
 
         for (auto &ckpt_rec : *flush_entry->data_sync_vec_)
         {
+            if (collect_ckpt_ts)
+            {
+                // Every batch view into this record belongs to this
+                // partition, so the partition frees the record's buffers --
+                // and returns their charged quota -- when it completes.
+                partition_state.AddFlushRecord(&ckpt_rec);
+            }
+
             if (collect_ckpt_ts && ckpt_rec.cce_ != nullptr)
             {
                 partition_state.AddCkptTsEntry(
@@ -6178,7 +6192,6 @@ void DataStoreServiceClient::PrepareRangePartitionBatches(
                 batch_request.record_tmp_mem_area.size() ==
                     batch_request.record_tmp_mem_area.capacity())
             {
-                partition_state.serialized_bytes_ += write_batch_size;
                 partition_state.AddBatch(std::move(batch_request));
 
                 batch_request.Reset(
@@ -6198,7 +6211,6 @@ void DataStoreServiceClient::PrepareRangePartitionBatches(
     // Add the last batch if it has data
     if (batch_request.key_parts.size() > 0)
     {
-        partition_state.serialized_bytes_ += write_batch_size;
         partition_state.AddBatch(std::move(batch_request));
     }
 

@@ -6058,20 +6058,21 @@ void LocalCcShards::FlushDataImpl(FlushDataTask *cur_work,
     // duration of PutAll, so with several tasks in flight the quota is what
     // stalls DataSyncScan in AllocateFlushMemQuota.
     //
-    // The release is proportional by serialized bytes -- quota * done_bytes /
-    // total_bytes. The store handler reports each finished partition's
-    // serialized weight, which tracks the real (uneven) split of the flush
-    // task; the quota itself was charged in in-memory bytes as one lump, so a
-    // proportion is still needed to convert between the two units. The
-    // progress is a cumulative watermark rather than a fixed amount per
-    // report: one wake-up may coalesce several partition completions, so
-    // `done_bytes` can jump arbitrarily between reports. Each report releases
-    // the difference between the new watermark and what has already been
-    // released; a report whose (truncated) watermark has not advanced is a
-    // no-op, which also makes duplicate reports harmless. The remainder --
-    // integer truncation, or the whole share when PutAll fails or is skipped
-    // -- is released by the unconditional DeallocateFlushMemQuota below, so
-    // the amounts always sum to exactly what was taken.
+    // Quota returned tracks memory actually freed: when a partition
+    // completes, the store handler frees the key/payload buffers of the
+    // records that partition carried and reports the cumulative
+    // FlushRecord::FlushSize() bytes freed so far -- the same unit
+    // DataSyncScan charged -- so releasing quota never lets resident flush
+    // memory exceed what the quota claims. The progress is a cumulative
+    // watermark: one wake-up may coalesce several partition completions, and
+    // a report whose watermark has not advanced is a no-op, which also makes
+    // duplicate reports harmless. The watermark is capped by this task's
+    // charge, so a bookkeeping discrepancy can never release another task's
+    // quota; the remainder -- vector footprints, sizes not covered by
+    // partition reports, or the whole share when PutAll fails or is skipped
+    // -- is released by the unconditional DeallocateFlushMemQuota below,
+    // whose buffers are freed with the flush task right after. The amounts
+    // always sum to exactly what was taken.
     // The state is bundled behind a single captured reference so the lambda
     // fits std::function's small-buffer optimization (16 bytes on libstdc++)
     // and constructing partition_progress_func does not heap-allocate.
@@ -6083,17 +6084,11 @@ void LocalCcShards::FlushDataImpl(FlushDataTask *cur_work,
     } quota_progress{
         data_sync_mem_controller_, cur_work->pending_flush_size_, 0};
     const std::function<void(uint64_t, uint64_t)> partition_progress_func =
-        [&quota_progress](uint64_t done_bytes, uint64_t total_bytes)
+        [&quota_progress](uint64_t freed_bytes, uint64_t total_bytes)
     {
-        if (total_bytes == 0 || done_bytes == 0)
-        {
-            return;
-        }
-        // 128-bit intermediate: quota and byte totals are both full-width
-        // uint64 counters, so the product can exceed 64 bits.
-        const uint64_t target = static_cast<uint64_t>(
-            static_cast<unsigned __int128>(quota_progress.task_flush_quota_) *
-            done_bytes / total_bytes);
+        (void) total_bytes;
+        const uint64_t target =
+            std::min(freed_bytes, quota_progress.task_flush_quota_);
         if (target > quota_progress.released_)
         {
             quota_progress.mem_controller_.DeallocateFlushMemQuota(
@@ -6218,6 +6213,27 @@ void LocalCcShards::FlushDataImpl(FlushDataTask *cur_work,
 
     auto ckpt_err = succ ? DataSyncTask::CkptErrorCode::NO_ERROR
                          : DataSyncTask::CkptErrorCode::FLUSH_ERROR;
+
+    // Free every remaining flush buffer before returning the remainder of the
+    // quota, so the release below never precedes the memory it stands for:
+    // the interleaving vectors (holding the husks of records the partitions
+    // already freed), the records the per-partition path did not cover --
+    // lower-term discards, deferred and failed shares -- and the archive and
+    // move-base vectors. This matters most for stores that defer publication
+    // to PersistKV, where no per-partition release happened and the remainder
+    // is the task's whole share. Nothing past this point reads the vectors:
+    // the deferred publication block and the MarkDataStoreWrite scan above
+    // are their last readers, and PostProcessFlushTaskEntries and task
+    // finalization consume only the task and txm fields.
+    for (auto &[_, entries] : flush_task_entries)
+    {
+        for (auto &entry : entries)
+        {
+            entry->data_sync_vec_.reset();
+            entry->archive_vec_.reset();
+            entry->mv_base_vec_.reset();
+        }
+    }
 
     // notify waiting data sync scan thread
     // Whatever the per-partition reports did not cover -- a failed or skipped

@@ -846,7 +846,7 @@ TEST_CASE("one partition combines checkpoint entries from one term",
 
     EloqDS::PartitionFlushState partition;
     partition.Reset(/*pid=*/7, /*is_range_partitioned=*/false);
-    partition.serialized_bytes_ = 99;
+    partition.charged_mem_bytes_ = 99;
     partition.AddCkptTsEntry(&first_task, 0, nullptr, 100, 1);
     partition.AddCkptTsEntry(&first_task, 0, nullptr, 101, 2);
     partition.AddCkptTsEntry(&second_task, 0, nullptr, 102, 3);
@@ -1241,7 +1241,7 @@ TEST_CASE("partition callback reports success and failure exactly once",
     SECTION("successful partition with no checkpoint entries")
     {
         partition.Reset(/*pid=*/3, /*is_range_partitioned=*/false);
-        partition.serialized_bytes_ = 17;
+        partition.charged_mem_bytes_ = 17;
         sync.Reset();
         sync.total_partitions_ = 1;
         sync.total_bytes_ = 17;
@@ -1258,10 +1258,13 @@ TEST_CASE("partition callback reports success and failure exactly once",
     SECTION("failed partition")
     {
         partition.Reset(/*pid=*/4, /*is_range_partitioned=*/false);
-        partition.serialized_bytes_ = 23;
+        FlushRecord failed_record = MakeObjectRecord(
+            9, "failed-payload", RecordStatus::Normal, 109, UINT64_MAX, 0);
+        const uint64_t failed_charge = failed_record.FlushSize();
+        partition.AddFlushRecord(&failed_record);
         sync.Reset();
         sync.total_partitions_ = 1;
-        sync.total_bytes_ = 23;
+        sync.total_bytes_ = failed_charge;
         callback.Reset(&partition, &sync, "table");
         result.set_error_code(EloqDS::remote::DataStoreError::WRITE_FAILED);
         result.set_error_msg("injected write failure");
@@ -1272,7 +1275,126 @@ TEST_CASE("partition callback reports success and failure exactly once",
         REQUIRE(partition.result.error_code() ==
                 EloqDS::remote::DataStoreError::WRITE_FAILED);
         REQUIRE(sync.completed_partitions_ == 1);
-        REQUIRE(sync.completed_bytes_ == 23);
+        REQUIRE(sync.completed_bytes_ == failed_charge);
+        REQUIRE(failed_record.Payload() == nullptr);
+        REQUIRE(failed_record.Key().KeyPtr() == nullptr);
+    }
+}
+
+TEST_CASE("partition completion frees record buffers and returns their charge",
+          "[checkpoint-flush][partition-memory]")
+{
+    FlushRecord rec_a = MakeObjectRecord(
+        1, "payload-aaaaaaaa", RecordStatus::Normal, 100, UINT64_MAX, 0);
+    FlushRecord rec_b = MakeObjectRecord(2,
+                                         "payload-bbbbbbbbbbbbbbbb",
+                                         RecordStatus::Normal,
+                                         101,
+                                         UINT64_MAX,
+                                         0);
+    rec_a.cce_ = reinterpret_cast<LruEntry *>(uintptr_t{0x10});
+    rec_a.post_flush_size_ = 77;
+
+    BlobTxRecord blob_payload;
+    blob_payload.value_ = "payload-owned-by-flush-record";
+    FlushRecord rec_c(TxKey(std::make_unique<EloqStringKey>("3")),
+                      blob_payload,
+                      RecordStatus::Normal,
+                      /*commit_ts=*/102,
+                      /*cce=*/nullptr,
+                      /*post_flush_size=*/0,
+                      /*partition_id=*/0);
+    REQUIRE_FALSE(rec_c.HoldsVersionedPayload());
+
+    EloqDS::PartitionFlushState partition;
+    partition.Reset(/*pid=*/5, /*is_range_partitioned=*/false);
+    const uint64_t expected_charge =
+        rec_a.FlushSize() + rec_b.FlushSize() + rec_c.FlushSize();
+    REQUIRE(expected_charge > 0);
+    partition.AddFlushRecord(&rec_a);
+    partition.AddFlushRecord(&rec_b);
+    partition.AddFlushRecord(&rec_c);
+    REQUIRE(partition.charged_mem_bytes_ == expected_charge);
+
+    // Completion frees the key/payload buffers and returns the exact charge.
+    REQUIRE(partition.ReleaseFlushRecordsMemory() == expected_charge);
+    REQUIRE(rec_a.Payload() == nullptr);
+    REQUIRE(rec_b.Payload() == nullptr);
+    REQUIRE(rec_c.Payload() == nullptr);
+    REQUIRE(rec_a.Key().KeyPtr() == nullptr);
+    REQUIRE(rec_c.Key().KeyPtr() == nullptr);
+    // Metadata needed by later stages survives the release.
+    REQUIRE(rec_a.cce_ == reinterpret_cast<LruEntry *>(uintptr_t{0x10}));
+    REQUIRE(rec_a.commit_ts_ == 100);
+    REQUIRE(rec_a.post_flush_size_ == 77);
+
+    // Idempotent: a failure report after a success path frees nothing more
+    // and releases no additional quota.
+    REQUIRE(partition.ReleaseFlushRecordsMemory() == 0);
+    REQUIRE(partition.charged_mem_bytes_ == 0);
+}
+
+TEST_CASE(
+    "PutAll releases record memory only at a per-partition durability "
+    "boundary",
+    "[checkpoint-flush][partition-memory][put-all]")
+{
+    PutAllFixture fixture;
+    const TableName table{std::string_view("partition_memory"),
+                          TableType::Primary,
+                          TableEngine::EloqKv};
+    auto records = std::make_unique<std::vector<FlushRecord>>();
+    BlobTxRecord blob_payload;
+    blob_payload.value_ = "checkpoint-owned-payload";
+    records->emplace_back(TxKey(std::make_unique<EloqStringKey>("memory-key")),
+                          blob_payload,
+                          RecordStatus::Normal,
+                          /*commit_ts=*/200,
+                          /*cce=*/nullptr,
+                          /*post_flush_size=*/0,
+                          /*partition_id=*/0);
+    FlushRecord *record = &records->front();
+    const uint64_t charge = record->FlushSize();
+
+    std::unordered_map<std::string_view,
+                       std::vector<std::unique_ptr<FlushTaskEntry>>>
+        flush_task;
+    flush_task["eloqkv_partition_memory"].push_back(
+        MakeFlushEntry(MakeTaskPtr(table, /*term=*/1), std::move(records)));
+
+    std::vector<std::pair<uint64_t, uint64_t>> progress;
+    const std::function<void(uint64_t, uint64_t)> report_progress =
+        [&](uint64_t done, uint64_t total)
+    { progress.emplace_back(done, total); };
+
+    // Match FlushDataImpl: RocksDB-backed stores do not install partition
+    // progress because PutAll is not their durability boundary.
+    const auto *progress_fptr =
+        fixture.Client().NeedPersistKV() ? nullptr : &report_progress;
+    REQUIRE(fixture.Client().PutAll(flush_task,
+                                    /*yield_fptr=*/nullptr,
+                                    /*resume_fptr=*/nullptr,
+                                    /*sync_yield_fptr=*/nullptr,
+                                    progress_fptr));
+
+    if (fixture.Client().NeedPersistKV())
+    {
+        // RocksDB-backed stores cannot report partition durability before
+        // PersistKV, so FlushDataImpl keeps the callback disabled and the
+        // record buffers alive.
+        REQUIRE(progress.empty());
+        REQUIRE(record->Payload() != nullptr);
+        REQUIRE(record->Key().KeyPtr() != nullptr);
+    }
+    else
+    {
+        // EloqStore makes the partition durable in BatchWriteRecords, so the
+        // callback frees the owned record buffers and reports their exact
+        // charge before PutAll returns.
+        REQUIRE(progress ==
+                std::vector<std::pair<uint64_t, uint64_t>>{{charge, charge}});
+        REQUIRE(record->Payload() == nullptr);
+        REQUIRE(record->Key().KeyPtr() == nullptr);
     }
 }
 
@@ -1830,7 +1952,7 @@ TEST_CASE("live shard dispatch covers checkpoint and intrusive wait lists",
 
     EloqDS::PartitionFlushState partition;
     partition.Reset(/*pid=*/0, /*is_range_partitioned=*/false);
-    partition.serialized_bytes_ = 31;
+    partition.charged_mem_bytes_ = 31;
     partition.AddCkptTsEntry(
         &stale_task, /*core_idx=*/0, nullptr, /*commit_ts=*/10, 0);
     partition.AddCkptTsEntry(
