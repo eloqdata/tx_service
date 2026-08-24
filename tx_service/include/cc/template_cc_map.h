@@ -4953,14 +4953,24 @@ public:
                     continue;
                 }
 
-                TemplateStoreRange<KeyT> *range_ptr =
-                    static_cast<TemplateStoreRange<KeyT> *>(
-                        req.StoreRangePtr());
-                const TemplateStoreSlice<KeyT> *candidate_slice =
-                    range_ptr->FindSlice(*start_key);
+                StoreRange *store_range = req.StoreRangePtr();
+                if (store_range == nullptr)
+                {
+                    // Export scans discover the range through the first pinned
+                    // slice.
+                    store_range =
+                        req.slice_coordinator_.first_slice_id_.Range();
+                }
 
-                uint64_t next_slice_bytes = std::max<uint64_t>(
-                    candidate_slice->Size(), StoreSlice::slice_upper_bound);
+                uint64_t next_slice_bytes = StoreSlice::slice_upper_bound;
+                if (store_range != nullptr)
+                {
+                    auto *range_ptr =
+                        static_cast<TemplateStoreRange<KeyT> *>(store_range);
+                    next_slice_bytes = std::max<uint64_t>(
+                        range_ptr->FindSlice(*start_key)->Size(),
+                        StoreSlice::slice_upper_bound);
+                }
 
                 CcShardHeap *shard_heap = shard_->GetShardHeap();
                 int64_t heap_alloc = 0;
@@ -4998,10 +5008,11 @@ public:
 
                 // Store the pinned slice
                 req.slice_coordinator_.StorePinnedSlice(new_slice_id);
-                prepared_bytes += next_slice_bytes;
                 const TemplateStoreSlice<KeyT> *slice =
                     static_cast<const TemplateStoreSlice<KeyT> *>(
                         new_slice_id.Slice());
+                prepared_bytes += std::max<uint64_t>(
+                    slice->Size(), StoreSlice::slice_upper_bound);
                 const KeyT *slice_end_key = slice->EndKey();
                 // update slice
                 req.slice_coordinator_.MoveNextSlice<KeyT>(slice_end_key,
