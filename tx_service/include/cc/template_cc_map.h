@@ -4922,6 +4922,17 @@ public:
         {
             uint16_t prepared_slice_cnt =
                 req.slice_coordinator_.PreparedSliceCnt();
+            constexpr uint64_t batch_byte_limit =
+                RangePartitionDataSyncScanCc::SliceCoordinator::
+                    MaxBatchSliceCount *
+                StoreSlice::slice_upper_bound;
+            uint64_t prepared_bytes = 0;
+            for (const StoreSlice *slice :
+                 req.slice_coordinator_.pinned_slices_)
+            {
+                prepared_bytes += std::max<uint64_t>(
+                    slice->Size(), StoreSlice::slice_upper_bound);
+            }
 
             for (; prepared_slice_cnt <
                        RangePartitionDataSyncScanCc::SliceCoordinator::
@@ -4942,6 +4953,35 @@ public:
                     continue;
                 }
 
+                TemplateStoreRange<KeyT> *range_ptr =
+                    static_cast<TemplateStoreRange<KeyT> *>(
+                        req.StoreRangePtr());
+                const TemplateStoreSlice<KeyT> *candidate_slice =
+                    range_ptr->FindSlice(*start_key);
+
+                uint64_t next_slice_bytes = std::max<uint64_t>(
+                    candidate_slice->Size(), StoreSlice::slice_upper_bound);
+
+                CcShardHeap *shard_heap = shard_->GetShardHeap();
+                int64_t heap_alloc = 0;
+                bool heap_memory_near_full =
+                    prepared_slice_cnt > 0 && shard_heap != nullptr &&
+                    (shard_heap->Full(&heap_alloc, nullptr) ||
+                     (heap_alloc >= 0 &&
+                      next_slice_bytes >=
+                          shard_heap->MemoryLimit() -
+                              static_cast<uint64_t>(heap_alloc)));
+
+                if (prepared_slice_cnt > 0 &&
+                    (prepared_bytes >= batch_byte_limit ||
+                     next_slice_bytes > batch_byte_limit - prepared_bytes ||
+                     heap_memory_near_full))
+                {
+                    // Seal the prepared batch before PinRangeSlice() can put
+                    // this request on another slice's load wait queue.
+                    break;
+                }
+
                 // Execute the pinslice operation.
                 auto [new_slice_id, succ] = pin_range_slice(*start_key);
                 if (!succ)
@@ -4958,6 +4998,7 @@ public:
 
                 // Store the pinned slice
                 req.slice_coordinator_.StorePinnedSlice(new_slice_id);
+                prepared_bytes += next_slice_bytes;
                 const TemplateStoreSlice<KeyT> *slice =
                     static_cast<const TemplateStoreSlice<KeyT> *>(
                         new_slice_id.Slice());
