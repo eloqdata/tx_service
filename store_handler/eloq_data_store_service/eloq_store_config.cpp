@@ -98,9 +98,28 @@ DEFINE_uint32(eloq_store_io_queue_size,
 DEFINE_uint32(eloq_store_max_inflight_write,
               64 << 10,
               "EloqStore max inflight write.");
-DEFINE_uint32(eloq_store_max_write_batch_pages,
-              32,
-              "EloqStore max write batch pages.");
+DEFINE_uint64(eloq_store_disk_rate_limit_iops,
+              275000,
+              "EloqStore per-disk IOPS limit; 0 disables IOPS limiting.");
+DEFINE_uint64(
+    eloq_store_disk_rate_limit_mbps,
+    0,
+    "EloqStore per-disk throughput limit in MB/s; 0 disables byte limiting.");
+DEFINE_uint32(eloq_store_rate_limit_burst_ms,
+              2,
+              "EloqStore rate-limit burst capacity in milliseconds.");
+DEFINE_string(
+    eloq_store_rate_limit_io_unit,
+    "2KB",
+    "EloqStore IO size charged as one operation by the rate limiter.");
+DEFINE_uint32(eloq_store_rate_bg_ratio,
+              25,
+              "EloqStore percentage of the rate budget reserved for "
+              "background IO.");
+DEFINE_uint32(
+    eloq_store_max_inflight_io,
+    0,
+    "EloqStore maximum in-flight device commands per shard; 0 disables it.");
 DEFINE_uint32(eloq_store_coroutine_stack_size,
               32 * 1024,
               "EloqStore coroutine stack size.");
@@ -646,12 +665,43 @@ EloqStoreConfig::EloqStoreConfig(const INIReader &config_reader,
                                        "eloq_store_max_inflight_write",
                                        FLAGS_eloq_store_max_inflight_write);
     eloqstore_configs_.max_inflight_write /= eloqstore_configs_.num_threads;
-    eloqstore_configs_.max_write_batch_pages =
-        !CheckCommandLineFlagIsDefault("eloq_store_max_write_batch_pages")
-            ? FLAGS_eloq_store_max_write_batch_pages
+    eloqstore_configs_.disk_rate_limit_iops =
+        !CheckCommandLineFlagIsDefault("eloq_store_disk_rate_limit_iops")
+            ? FLAGS_eloq_store_disk_rate_limit_iops
             : config_reader.GetInteger("store",
-                                       "eloq_store_max_write_batch_pages",
-                                       FLAGS_eloq_store_max_write_batch_pages);
+                                       "eloq_store_disk_rate_limit_iops",
+                                       FLAGS_eloq_store_disk_rate_limit_iops);
+    eloqstore_configs_.disk_rate_limit_mbps =
+        !CheckCommandLineFlagIsDefault("eloq_store_disk_rate_limit_mbps")
+            ? FLAGS_eloq_store_disk_rate_limit_mbps
+            : config_reader.GetInteger("store",
+                                       "eloq_store_disk_rate_limit_mbps",
+                                       FLAGS_eloq_store_disk_rate_limit_mbps);
+    eloqstore_configs_.rate_limit_burst_ms =
+        !CheckCommandLineFlagIsDefault("eloq_store_rate_limit_burst_ms")
+            ? FLAGS_eloq_store_rate_limit_burst_ms
+            : config_reader.GetInteger("store",
+                                       "eloq_store_rate_limit_burst_ms",
+                                       FLAGS_eloq_store_rate_limit_burst_ms);
+    std::string rate_limit_io_unit =
+        !CheckCommandLineFlagIsDefault("eloq_store_rate_limit_io_unit")
+            ? FLAGS_eloq_store_rate_limit_io_unit
+            : config_reader.GetString("store",
+                                      "eloq_store_rate_limit_io_unit",
+                                      FLAGS_eloq_store_rate_limit_io_unit);
+    eloqstore_configs_.rate_limit_io_unit = parse_size(rate_limit_io_unit);
+    eloqstore_configs_.rate_bg_ratio =
+        !CheckCommandLineFlagIsDefault("eloq_store_rate_bg_ratio")
+            ? FLAGS_eloq_store_rate_bg_ratio
+            : config_reader.GetInteger("store",
+                                       "eloq_store_rate_bg_ratio",
+                                       FLAGS_eloq_store_rate_bg_ratio);
+    eloqstore_configs_.max_inflight_io =
+        !CheckCommandLineFlagIsDefault("eloq_store_max_inflight_io")
+            ? FLAGS_eloq_store_max_inflight_io
+            : config_reader.GetInteger("store",
+                                       "eloq_store_max_inflight_io",
+                                       FLAGS_eloq_store_max_inflight_io);
     eloqstore_configs_.coroutine_stack_size =
         !CheckCommandLineFlagIsDefault("eloq_store_coroutine_stack_size")
             ? FLAGS_eloq_store_coroutine_stack_size
