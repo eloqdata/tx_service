@@ -49,6 +49,7 @@ struct PartitionFlushState;
 struct PartitionBatchRequest;
 struct PartitionCallbackData;
 struct SyncConcurrentRequest;
+struct SyncPutAllData;
 class DataStoreServiceClient;
 class BatchWriteRecordsClosure;
 class ReadClosure;
@@ -229,18 +230,28 @@ public:
      * @param node_group
      * @return whether all entries are written to data store successfully
      */
-    bool PutAll(
-        std::unordered_map<
-            std::string_view,
-            std::vector<std::unique_ptr<txservice::FlushTaskEntry>>>
-            &flush_task,
-        const std::function<void()> *yield_fptr = nullptr,
-        const std::function<void()> *resume_fptr = nullptr,
-        const std::function<void()> *sync_yield_fptr = nullptr) override;
+    bool PutAll(std::unordered_map<
+                    std::string_view,
+                    std::vector<std::unique_ptr<txservice::FlushTaskEntry>>>
+                    &flush_task,
+                const std::function<void()> *yield_fptr = nullptr,
+                const std::function<void()> *resume_fptr = nullptr,
+                const std::function<void()> *sync_yield_fptr = nullptr,
+                const std::function<void(uint64_t, uint64_t)>
+                    *partition_progress_fptr = nullptr) override;
 
     bool NeedPersistKV() override
     {
+#ifdef DATA_STORE_TYPE_ELOQDSS_ELOQSTORE
+        // EloqStore guarantees durability by the time BatchWriteRecords
+        // returns; its FlushData handler is a no-op, so there is nothing to
+        // persist after PutAll.
+        return false;
+#else
+        // The RocksDB-backed stores accept writes into memory (WAL skipped)
+        // and only make them durable in PersistKV.
         return true;
+#endif
     }
 
     uint64_t ApproxStoreKeyCount() override;
@@ -631,7 +642,9 @@ private:
                         &flush_task,
                     const std::function<void()> *yield_fptr = nullptr,
                     const std::function<void()> *resume_fptr = nullptr,
-                    const std::function<void()> *sync_yield_fptr = nullptr);
+                    const std::function<void()> *sync_yield_fptr = nullptr,
+                    const std::function<void(uint64_t, uint64_t)>
+                        *partition_progress_fptr = nullptr);
 
     bool CopyBaseToArchiveImpl(
         std::unordered_map<
@@ -681,10 +694,25 @@ private:
     void BatchWriteRecordsInternal(BatchWriteRecordsClosure *closure);
 
     /**
-     * Helper methods for concurrent PutAll implementation
+     * @brief Fully sets up one hash partition of a concurrent PutAll: builds
+     * its write batches, accumulates its serialized byte weight and ckpt-ts
+     * entries, and arms its ckpt-ts update request when there is anything to
+     * publish.
+     *
+     * @param partition_state The partition to set up.
+     * @param sync_putall The PutAll coordinator the armed request's completion
+     * hook reports to.
+     * @param publish_ckpt_ts_on_complete Whether the partition may publish its
+     * cc entries' ckpt ts as soon as its own writes complete. False for stores
+     * whose writes only become durable in PersistKV; no entries are collected
+     * and no request is armed, and FlushDataImpl publishes after PersistKV.
+     * @param flush_recs (entry index, record index) pairs selecting this
+     * partition's records within @p entries.
      */
     void PreparePartitionBatches(
         PartitionFlushState &partition_state,
+        SyncPutAllData *sync_putall,
+        bool publish_ckpt_ts_on_complete,
         const std::vector<std::pair<size_t, size_t>> &flush_recs,
         const std::vector<std::unique_ptr<txservice::FlushTaskEntry>> &entries,
         const txservice::TableName &table_name,
@@ -692,8 +720,15 @@ private:
         uint16_t parts_cnt_per_record,
         uint64_t now);
 
+    /**
+     * @brief Range-partition counterpart of PreparePartitionBatches; @p
+     * flush_recs selects whole entries, since a range table's flush entry
+     * belongs to a single partition.
+     */
     void PrepareRangePartitionBatches(
         PartitionFlushState &partition_state,
+        SyncPutAllData *sync_putall,
+        bool publish_ckpt_ts_on_complete,
         const std::vector<size_t> &flush_recs,
         const std::vector<std::unique_ptr<txservice::FlushTaskEntry>> &entries,
         const txservice::TableName &table_name,
