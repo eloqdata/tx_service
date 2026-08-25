@@ -5148,7 +5148,8 @@ public:
         for (size_t scan_cnt = 0;
              key_it != slice_end_it && key_it != slice_end_next_page_it &&
              scan_cnt < RangePartitionDataSyncScanCc::DataSyncScanBatchSize &&
-             req.accumulated_scan_cnt_ < req.scan_batch_size_;
+             req.accumulated_scan_cnt_ < req.scan_batch_size_ &&
+             !req.HasReachedFlushDataSizeLimit();
              ++scan_cnt)
         {
             const KeyT *key = key_it->first;
@@ -5296,8 +5297,8 @@ public:
         } /* End of loop */
 
         // The conditions for exiting the main loop are: reaching the maximum
-        // scan batch size, or reach to the end slice of the current batch
-        // slices.
+        // scan batch size or flush data size, or reaching the end slice of the
+        // current batch slices.
         assert((key_it != slice_end_it && key_it != slice_end_next_page_it) ||
                req.TheBatchEnd());
         // 4. Check whether the request is finished.
@@ -5326,6 +5327,7 @@ public:
 
         if (is_scan_mem_full || no_more_data ||
             req.accumulated_scan_cnt_ >= req.scan_batch_size_ ||
+            req.HasReachedFlushDataSizeLimit() ||
             req.TheBatchEnd())
         {
             // Request is finished

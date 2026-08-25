@@ -4252,6 +4252,14 @@ void LocalCcShards::DataSyncForRangePartition(
     // same Key can be generated. Our subsequent algorithms are based on this
     // assumption.
 
+    assert(worker_idx < cur_flush_buffers_.size());
+    // Keep one range scan batch within a quarter of this worker's flush
+    // buffer, leaving room for other batches accumulated by the same worker.
+    const uint64_t range_partition_data_sync_scan_data_size =
+        std::max<uint64_t>(
+            1,
+            cur_flush_buffers_[worker_idx]->GetFlushBufferSize() / 4);
+
     RangePartitionDataSyncScanCc scan_cc(table_name,
                                          data_sync_task->data_sync_ts_,
                                          ng_id,
@@ -4265,7 +4273,8 @@ void LocalCcShards::DataSyncForRangePartition(
                                          false,
                                          store_range,
                                          &slices_delta_size,
-                                         schema_version);
+                                         schema_version,
+                                         range_partition_data_sync_scan_data_size);
 
     {
         // DataSync Worker will call PostProcessDataSyncTask() to decrement
