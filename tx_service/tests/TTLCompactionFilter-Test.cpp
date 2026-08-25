@@ -23,6 +23,7 @@
 #include <catch2/catch_all.hpp>
 // clang-format on
 
+#include "eloq_data_store_service/ignore_redis_ttl.h"
 #include "eloq_data_store_service/rocksdb_data_store_common.h"
 
 namespace
@@ -55,8 +56,17 @@ TEST_CASE(
 {
     SECTION("expired TTL value is removed")
     {
+        FLAGS_ignore_redis_ttl = false;
         const std::string value = MakeValue(EloqDS::MSB | 42, 1);
         REQUIRE(ShouldFilter(value, kCompactionTimestamp));
+    }
+
+    SECTION("expired TTL value is retained in diagnostic mode")
+    {
+        FLAGS_ignore_redis_ttl = true;
+        const std::string value = MakeValue(EloqDS::MSB | 42, 1);
+        REQUIRE_FALSE(ShouldFilter(value, kCompactionTimestamp));
+        FLAGS_ignore_redis_ttl = false;
     }
 
     SECTION("unexpired TTL value is retained")

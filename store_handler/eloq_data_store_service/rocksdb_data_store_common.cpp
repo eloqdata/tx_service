@@ -3,6 +3,7 @@
 #include <cstring>
 #include <filesystem>
 
+#include "ignore_redis_ttl.h"
 #include "internal_request.h"
 
 namespace EloqDS
@@ -52,6 +53,14 @@ bool TTLCompactionFilter::Filter(int level,
                                  std::string *new_value,
                                  bool *value_changed) const
 {
+    // Diagnostic mode must not physically reclaim expired records. The value
+    // remains byte-for-byte unchanged, so normal compaction behavior resumes
+    // after the mode is disabled and the service is restarted.
+    if (IgnoreRedisTTL())
+    {
+        return false;
+    }
+
     const DecodedValueHeader header =
         DecodeValueHeader(existing_value.data(), existing_value.size());
     if (!header.has_ttl)

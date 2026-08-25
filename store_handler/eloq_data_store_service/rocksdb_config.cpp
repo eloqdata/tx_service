@@ -32,6 +32,10 @@
 #include "glog/logging.h"
 
 DEFINE_string(rocksdb_info_log_level, "INFO", "RocksDB store info log level");
+DEFINE_bool(ignore_redis_ttl,
+            false,
+            "Expose persisted EloqKV records without enforcing their TTL. "
+            "Intended only for diagnostic clusters");
 DEFINE_bool(rocksdb_enable_stats, false, "RocksDB store enable stats");
 DEFINE_uint32(rocksdb_stats_dump_period_sec,
               600,
@@ -334,6 +338,12 @@ bool CheckCommandLineFlagIsDefault(const char *name)
 RocksDBConfig::RocksDBConfig(const INIReader &config,
                              const std::string &eloq_data_path)
 {
+    if (CheckCommandLineFlagIsDefault("ignore_redis_ttl"))
+    {
+        FLAGS_ignore_redis_ttl =
+            config.GetBoolean("store", "ignore_redis_ttl", false);
+    }
+
     info_log_level_ = !CheckCommandLineFlagIsDefault("rocksdb_info_log_level")
                           ? FLAGS_rocksdb_info_log_level
                           : config.GetString("store",
