@@ -4257,24 +4257,24 @@ void LocalCcShards::DataSyncForRangePartition(
     // buffer, leaving room for other batches accumulated by the same worker.
     const uint64_t range_partition_data_sync_scan_data_size =
         std::max<uint64_t>(
-            1,
-            cur_flush_buffers_[worker_idx]->GetFlushBufferSize() / 4);
+            1, cur_flush_buffers_[worker_idx]->GetFlushBufferSize() / 4);
 
-    RangePartitionDataSyncScanCc scan_cc(table_name,
-                                         data_sync_task->data_sync_ts_,
-                                         ng_id,
-                                         ng_term,
-                                         DATA_SYNC_SCAN_BATCH_SIZE,
-                                         tx_number,
-                                         &start_tx_key,
-                                         &end_tx_key,
-                                         last_sync_ts,
-                                         export_base_table_items,
-                                         false,
-                                         store_range,
-                                         &slices_delta_size,
-                                         schema_version,
-                                         range_partition_data_sync_scan_data_size);
+    RangePartitionDataSyncScanCc scan_cc(
+        table_name,
+        data_sync_task->data_sync_ts_,
+        ng_id,
+        ng_term,
+        DATA_SYNC_SCAN_BATCH_SIZE,
+        tx_number,
+        &start_tx_key,
+        &end_tx_key,
+        last_sync_ts,
+        export_base_table_items,
+        false,
+        store_range,
+        &slices_delta_size,
+        schema_version,
+        range_partition_data_sync_scan_data_size);
 
     {
         // DataSync Worker will call PostProcessDataSyncTask() to decrement

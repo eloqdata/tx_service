@@ -5327,8 +5327,7 @@ public:
 
         if (is_scan_mem_full || no_more_data ||
             req.accumulated_scan_cnt_ >= req.scan_batch_size_ ||
-            req.HasReachedFlushDataSizeLimit() ||
-            req.TheBatchEnd())
+            req.HasReachedFlushDataSizeLimit() || req.TheBatchEnd())
         {
             // Request is finished
             req.SetFinish();
