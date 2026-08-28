@@ -75,7 +75,7 @@ All knobs follow *gflag overrides ini section* (`[local]`, `[cluster]`, `[store]
 | `auto_redirect` | false | Redirect object commands to remote owner NG internally |
 | `enable_key_cache` | false | Key cache (non-MVCC only) |
 | `enable_io_uring` / `raft_log_async_fsync` | false | IO engine options |
-| `maxclients` | 500000 | API-server connection admission limit; does not modify the process file-descriptor limits |
+| `maxclients` | 500000 | API-server connection admission limit; DataSubstrate leaves the API-server process's `RLIMIT_NOFILE` unchanged. The standalone DataStoreService still maps its separate setting to `RLIMIT_NOFILE` |
 | `max_standby_lag` | 400000 | Max primary→standby message lag |
 
 Build-time options are described in the repo `CLAUDE.md` (`WITH_DATA_STORE`, `WITH_LOG_STATE`, `WITH_LOG_SERVICE`, `EXT_TX_PROC_ENABLED`, `ELOQ_MODULE_ENABLED`).
