@@ -21,7 +21,6 @@
  */
 
 #include <gflags/gflags.h>
-#include <sys/resource.h>
 #include <sys/sysinfo.h>
 
 #include <filesystem>
@@ -667,15 +666,6 @@ bool DataSubstrate::LoadCoreAndNetworkConfig(const INIReader &config_reader)
         !CheckCommandLineFlagIsDefault("maxclients")
             ? FLAGS_maxclients
             : config_reader.GetInteger("local", "maxclients", FLAGS_maxclients);
-    struct rlimit ulimit
-    {
-    };
-    ulimit.rlim_cur = core_config_.maxclients;
-    ulimit.rlim_max = core_config_.maxclients;
-    if (setrlimit(RLIMIT_NOFILE, &ulimit) == -1)
-    {
-        LOG(WARNING) << "Failed to set maxclients.";
-    }
     core_config_.bootstrap =
         !CheckCommandLineFlagIsDefault("bootstrap")
             ? FLAGS_bootstrap
