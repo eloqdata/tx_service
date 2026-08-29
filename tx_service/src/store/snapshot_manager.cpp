@@ -1240,8 +1240,10 @@ bool SnapshotManager::RunOneRoundCheckpoint(uint32_t node_group,
         local_shards.GetCatalogTableNameSnapshot(node_group, UINT64_MAX);
 
     std::shared_ptr<DataSyncStatus> data_sync_status =
-        std::make_shared<DataSyncStatus>(node_group, ng_leader_term, true);
-    data_sync_status->SetNoTruncateLog();
+        std::make_shared<DataSyncStatus>(
+            node_group, ng_leader_term, true, DataSyncStatus::Origin::Snapshot);
+    data_sync_status->SetNoTruncateLog(
+        DataSyncStatus::NoTruncateReason::NotCheckpoint);
 
     bool can_be_skipped = false;
     uint64_t last_ckpt_ts = Sharder::Instance().GetNodeGroupCkptTs(node_group);

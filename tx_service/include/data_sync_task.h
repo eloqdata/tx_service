@@ -29,6 +29,7 @@
 #include <deque>
 #include <functional>
 #include <mutex>
+#include <optional>
 #include <unordered_map>
 #include <utility>
 
@@ -48,16 +49,71 @@ struct DataSyncTask;
 
 struct DataSyncStatus
 {
+    /** Identifies which subsystem owns this shared data-sync pipeline run. */
+    enum class Origin
+    {
+        Checkpoint,
+        Snapshot,
+        FlushData,
+        CreateIndex,
+        RangeSplit,
+        Migration
+    };
+
+    /** Explains why successful work cannot advance the checkpoint watermark. */
+    enum class NoTruncateReason
+    {
+        None,
+        Deduplicated,
+        EntriesSkipped,
+        NotCheckpoint
+    };
+
+    /** Terminal checkpoint classification consumed by observability state. */
+    enum class CheckpointOutcome
+    {
+        Success,
+        Failure,
+        Neutral,
+        Canceled
+    };
+
+    /** Stable low-cardinality stage attribution for checkpoint failures. */
+    enum class CheckpointFailureReason
+    {
+        None,
+        Scan,
+        CopyBase,
+        PutBase,
+        PutArchive,
+        Persist,
+        Metadata,
+        Unknown
+    };
+
+    /** Exactly-once terminal result returned by checkpoint finalization. */
+    struct CheckpointResult
+    {
+        CheckpointOutcome outcome_;
+        CheckpointFailureReason failure_reason_;
+    };
+
     explicit DataSyncStatus(NodeGroupId node_group_id,
                             int64_t node_group_term,
-                            bool need_truncate_log);
+                            bool need_truncate_log,
+                            Origin origin);
 
     ~DataSyncStatus();
 
-    void SetNoTruncateLog()
+    void SetNoTruncateLog(
+        NoTruncateReason reason = NoTruncateReason::Deduplicated)
     {
         std::lock_guard<std::mutex> lk(mux_);
         need_truncate_log_ = false;
+        if (no_truncate_reason_ == NoTruncateReason::None)
+        {
+            no_truncate_reason_ = reason;
+        }
     }
 
     void SetEntriesSkippedAndNoTruncateLog()
@@ -65,7 +121,17 @@ struct DataSyncStatus
         std::lock_guard<std::mutex> lk(mux_);
         has_skipped_entries_ = true;
         need_truncate_log_ = false;
+        no_truncate_reason_ = NoTruncateReason::EntriesSkipped;
     }
+
+    /** Records the first checkpoint failure stage observed by this sync. */
+    void RecordCheckpointFailure(CheckpointFailureReason reason);
+
+    /**
+     * Finalizes checkpoint observability exactly once after all tasks finish.
+     * The caller must hold mux_. Non-checkpoint data syncs return nullopt.
+     */
+    std::optional<CheckpointResult> TryFinalizeCheckpointLocked();
 
     void MarkDataStoreWrite()
     {
@@ -79,6 +145,7 @@ struct DataSyncStatus
 
     NodeGroupId node_group_id_;
     int64_t node_group_term_;
+    const Origin origin_;
     // Number of unfinished scan tasks. We keep track of this separately since
     // we need to flush the flush data buffer when all scan tasks are finished.
     int32_t unfinished_scan_tasks_{0};
@@ -90,6 +157,7 @@ struct DataSyncStatus
     CcErrorCode err_code_{CcErrorCode::NO_ERROR};
     // True if need to truncate redo log when all tasks succeed.
     bool need_truncate_log_{true};
+    NoTruncateReason no_truncate_reason_{NoTruncateReason::None};
     uint64_t truncate_log_ts_{0};
     // Collect from each data sync task.
     size_t total_entry_cnt_{0};
@@ -97,6 +165,10 @@ struct DataSyncStatus
     // Whether there are entries being skipped by DataSyncScan. For EloqKV,
     // entries with buffer commands might be skipped.
     bool has_skipped_entries_{false};
+
+    CheckpointFailureReason checkpoint_failure_reason_{
+        CheckpointFailureReason::None};
+    bool checkpoint_finalized_{false};
 
     // Whether there is any data written to datastore in this DataSync round.
     std::atomic<bool> has_data_store_write_{false};
@@ -174,7 +246,10 @@ public:
 
     void SetFinish();
 
-    void SetError(CcErrorCode err_code = CcErrorCode::DATA_STORE_ERR);
+    void SetError(
+        CcErrorCode err_code = CcErrorCode::DATA_STORE_ERR,
+        DataSyncStatus::CheckpointFailureReason checkpoint_failure_reason =
+            DataSyncStatus::CheckpointFailureReason::Unknown);
 
     // Decrease unfinished_scan_tasks_ by 1. If all scan tasks are finished,
     // and there are still unfinished data sync tasks, that means there might
@@ -188,10 +263,21 @@ public:
     // completes.
     void ResetRangeSplittingStatus();
 
-    void SetErrorCode(CcErrorCode err_code)
+    void SetErrorCode(
+        CcErrorCode err_code,
+        DataSyncStatus::CheckpointFailureReason checkpoint_failure_reason =
+            DataSyncStatus::CheckpointFailureReason::Unknown)
     {
         std::unique_lock<std::mutex> lk(status_->mux_);
         status_->err_code_ = err_code;
+        if (status_->origin_ == DataSyncStatus::Origin::Checkpoint &&
+            err_code != CcErrorCode::NG_TERM_CHANGED &&
+            err_code != CcErrorCode::REQUESTED_NODE_NOT_LEADER &&
+            status_->checkpoint_failure_reason_ ==
+                DataSyncStatus::CheckpointFailureReason::None)
+        {
+            status_->checkpoint_failure_reason_ = checkpoint_failure_reason;
+        }
     }
 
     bool SyncTsAdjustable() const

@@ -100,6 +100,23 @@ void WaitForStackCcRequestFree(const CcRequestBase &req)
         interval_us = std::min(interval_us << 1, max_interval_us);
     }
 }
+
+/**
+ * Validates a data-sync task against the term for the role that started it.
+ * Standby checkpoint work is valid only for the native NG's active standby
+ * term; treating a matching leader term as equivalent could let stale work
+ * advance checkpoint state after a role transition.
+ */
+bool IsCurrentDataSyncTerm(const DataSyncTask &task)
+{
+    Sharder &sharder = Sharder::Instance();
+    if (task.is_standby_node_ckpt_)
+    {
+        return task.node_group_id_ == sharder.NativeNodeGroup() &&
+               sharder.StandbyNodeTerm() == task.node_group_term_;
+    }
+    return sharder.CheckLeaderTerm(task.node_group_id_, task.node_group_term_);
+}
 }  // namespace
 
 std::atomic<uint64_t> LocalCcShards::local_clock(0);
@@ -238,6 +255,9 @@ LocalCcShards::LocalCcShards(
             ? conf.at("dirty_memory_size_threshold_mb")
             : 0;
     uint16_t core_cnt = conf.at("core_num");
+    // Per-node metrics must not inherit the last core_id assigned below.
+    // Keep an immutable copy of the labels supplied by the embedding server.
+    const metrics::CommonLabels node_common_labels = common_labels;
     for (uint16_t thd_idx = 0; thd_idx < core_cnt; ++thd_idx)
     {
         common_labels["core_id"] = std::to_string(thd_idx);
@@ -277,8 +297,8 @@ LocalCcShards::LocalCcShards(
 
     if (metrics::enable_metrics)
     {
-        node_meter_ =
-            std::make_unique<metrics::Meter>(metrics_registry, common_labels);
+        node_meter_ = std::make_unique<metrics::Meter>(metrics_registry,
+                                                       node_common_labels);
 
         node_meter_->Register(metrics::NAME_IS_CONTINUOUS_CHECKPOINT_FAILURES,
                               metrics::Type::Gauge);
@@ -300,19 +320,30 @@ LocalCcShards::LocalCcShards(
         leader_changes_metric_labels.emplace_back(
             "ng_id", std::move(ng_id_label_values));
         auto is_leader_metric_labels = leader_changes_metric_labels;
-        // The checkpointer reports stalls for the node groups it iterates
-        // (Sharder::LocalNodeGroups, plus the native ng on a standby), which
-        // is the same membership these labels are built from.
-        auto ckpt_stall_metric_labels = leader_changes_metric_labels;
         node_meter_->Register(metrics::NAME_LEADER_CHANGES,
                               metrics::Type::Counter,
                               std::move(leader_changes_metric_labels));
         node_meter_->Register(metrics::NAME_IS_LEADER,
                               metrics::Type::Gauge,
                               std::move(is_leader_metric_labels));
-        node_meter_->Register(metrics::NAME_CHECKPOINT_STALL_ROUNDS,
-                              metrics::Type::Gauge,
-                              std::move(ckpt_stall_metric_labels));
+        node_meter_->Register(metrics::NAME_CHECKPOINT_ATTEMPT_INTERVAL_SECONDS,
+                              metrics::Type::Histogram,
+                              {},
+                              metrics::CHECKPOINT_INTERVAL_SECONDS_BUCKETS);
+        node_meter_->Register(metrics::NAME_CHECKPOINT_ADVANCE_INTERVAL_SECONDS,
+                              metrics::Type::Histogram,
+                              {},
+                              metrics::CHECKPOINT_INTERVAL_SECONDS_BUCKETS);
+        node_meter_->Register(metrics::NAME_CHECKPOINT_FAILURES_TOTAL,
+                              metrics::Type::Counter,
+                              {{"reason",
+                                {"scan",
+                                 "copy_base",
+                                 "put_base",
+                                 "put_archive",
+                                 "persist",
+                                 "metadata",
+                                 "unknown"}}});
     }
 }
 
@@ -2587,6 +2618,13 @@ bool LocalCcShards::EnqueueRangeDataSyncTask(
                     // data before data sync ts is flushed.
                     std::lock_guard<std::mutex> status_lk(status->mux_);
                     status->err_code_ = CcErrorCode::PIN_RANGE_SLICE_FAILED;
+                    if (status->origin_ == DataSyncStatus::Origin::Checkpoint &&
+                        status->checkpoint_failure_reason_ ==
+                            DataSyncStatus::CheckpointFailureReason::None)
+                    {
+                        status->checkpoint_failure_reason_ =
+                            DataSyncStatus::CheckpointFailureReason::Metadata;
+                    }
                     break;
                 }
             }
@@ -2607,8 +2645,8 @@ void LocalCcShards::EnqueueDataSyncTaskForSplittingRange(
     uint64_t txn,
     CcHandlerResult<Void> *hres)
 {
-    std::shared_ptr<DataSyncStatus> status =
-        std::make_shared<DataSyncStatus>(ng_id, ng_term, false);
+    std::shared_ptr<DataSyncStatus> status = std::make_shared<DataSyncStatus>(
+        ng_id, ng_term, false, DataSyncStatus::Origin::RangeSplit);
     const std::vector<TxKey> *new_keys = range_entry->GetRangeInfo()->NewKey();
     const std::vector<int32_t> *new_range_ids =
         range_entry->GetRangeInfo()->NewPartitionId();
@@ -2940,8 +2978,8 @@ void LocalCcShards::EnqueueDataSyncTaskForBucket(
     CcHandlerResult<Void> *hres)
 {
     std::shared_lock<std::shared_mutex> meta_lk(meta_data_mux_);
-    std::shared_ptr<DataSyncStatus> status =
-        std::make_shared<DataSyncStatus>(ng_id, ng_term, false);
+    std::shared_ptr<DataSyncStatus> status = std::make_shared<DataSyncStatus>(
+        ng_id, ng_term, false, DataSyncStatus::Origin::Migration);
     uint32_t unfinished_task_cnt = 0;
     for (auto &[range_table_name, range_ids] : ranges_in_bucket_snapshot)
     {
@@ -3047,8 +3085,8 @@ void LocalCcShards::CreateSplitRangeDataSyncTask(const TableName &table_name,
         return;
     });
     std::shared_lock<std::shared_mutex> meta_lk(meta_data_mux_);
-    std::shared_ptr<DataSyncStatus> status =
-        std::make_shared<DataSyncStatus>(ng_id, ng_term, false);
+    std::shared_ptr<DataSyncStatus> status = std::make_shared<DataSyncStatus>(
+        ng_id, ng_term, false, DataSyncStatus::Origin::RangeSplit);
     TableName range_table_name(table_name.StringView(),
                                TableType::RangePartition,
                                table_name.Engine());
@@ -3468,7 +3506,9 @@ void LocalCcShards::PostProcessFlushTaskEntries(
                     err_code = CcErrorCode::REQUESTED_NODE_NOT_LEADER;
                 }
 
-                task->SetError(err_code);
+                task->SetError(
+                    err_code,
+                    DataSyncStatus::CheckpointFailureReason::Metadata);
                 task->ResetRangeSplittingStatus();
             }
         }
@@ -3789,12 +3829,16 @@ void LocalCcShards::DataSyncForRangePartition(
         switch (outcome)
         {
         case PreCheck::TableDropped:
-            data_sync_task->SetError(CcErrorCode::REQUESTED_TABLE_NOT_EXISTS);
+            data_sync_task->SetError(
+                CcErrorCode::REQUESTED_TABLE_NOT_EXISTS,
+                DataSyncStatus::CheckpointFailureReason::Metadata);
             data_sync_task->SetScanTaskFinished();
             data_sync_task->ResetRangeSplittingStatus();
             for (auto &task : detached_tasks)
             {
-                task->SetError(CcErrorCode::REQUESTED_TABLE_NOT_EXISTS);
+                task->SetError(
+                    CcErrorCode::REQUESTED_TABLE_NOT_EXISTS,
+                    DataSyncStatus::CheckpointFailureReason::Metadata);
                 task->SetScanTaskFinished();
             }
             return;
@@ -4028,7 +4072,9 @@ void LocalCcShards::DataSyncForRangePartition(
             // Use AbortTxRequest to release read lock.
             txservice::AbortTx(data_sync_txm);
 
-            data_sync_task->SetError();
+            data_sync_task->SetError(
+                CcErrorCode::DATA_STORE_ERR,
+                DataSyncStatus::CheckpointFailureReason::Metadata);
             data_sync_task->SetScanTaskFinished();
             data_sync_task->ResetRangeSplittingStatus();
             PopPendingTask(ng_id, expected_ng_term, table_name, range_id);
@@ -4044,7 +4090,9 @@ void LocalCcShards::DataSyncForRangePartition(
                 << "DataSync range version mismatch with data sync ts: "
                 << data_sync_task->data_sync_ts_;
             txservice::AbortTx(data_sync_txm);
-            data_sync_task->SetError(CcErrorCode::GET_RANGE_ID_ERR);
+            data_sync_task->SetError(
+                CcErrorCode::GET_RANGE_ID_ERR,
+                DataSyncStatus::CheckpointFailureReason::Metadata);
             data_sync_task->SetScanTaskFinished();
             data_sync_task->ResetRangeSplittingStatus();
             PopPendingTask(ng_id, expected_ng_term, table_name, range_id);
@@ -4190,7 +4238,9 @@ void LocalCcShards::DataSyncForRangePartition(
             LOG(ERROR) << "Calculate subranges key failed on table "
                        << table_name.StringView();
 
-            data_sync_task->SetError();
+            data_sync_task->SetError(
+                CcErrorCode::DATA_STORE_ERR,
+                DataSyncStatus::CheckpointFailureReason::Scan);
             data_sync_task->SetScanTaskFinished();
             data_sync_task->ResetRangeSplittingStatus();
             // Handle the pending tasks for the same range
@@ -4547,8 +4597,7 @@ void LocalCcShards::PostProcessHashPartitionDataSyncTask(
                     meta_data_mux_);
                 // Make sure that the term has not changed so that catalog entry
                 // is still valid.
-                if (!Sharder::Instance().CheckLeaderTerm(
-                        task->node_group_id_, task->node_group_term_))
+                if (!IsCurrentDataSyncTerm(*task))
                 {
                     err_code = CcErrorCode::NG_TERM_CHANGED;
                 }
@@ -4617,21 +4666,9 @@ void LocalCcShards::PostProcessHashPartitionDataSyncTask(
         {
             assert(task_ckpt_err == DataSyncTask::CkptErrorCode::FLUSH_ERROR);
             CcErrorCode err_code = CcErrorCode::DATA_STORE_ERR;
-            if (task->is_standby_node_ckpt_)
+            if (!IsCurrentDataSyncTerm(*task))
             {
-                if (Sharder::Instance().LeaderTerm(task->node_group_id_) !=
-                    task->node_group_term_)
-                {
-                    err_code = CcErrorCode::NG_TERM_CHANGED;
-                }
-            }
-            else
-            {
-                if (Sharder::Instance().StandbyNodeTerm() !=
-                    task->node_group_term_)
-                {
-                    err_code = CcErrorCode::NG_TERM_CHANGED;
-                }
+                err_code = CcErrorCode::NG_TERM_CHANGED;
             }
 
             txservice::AbortTx(data_sync_txm);
@@ -4738,11 +4775,14 @@ void LocalCcShards::DataSyncForHashPartition(
     switch (outcome)
     {
     case PreCheck::TableDropped:
-        data_sync_task->SetError(CcErrorCode::REQUESTED_TABLE_NOT_EXISTS);
+        data_sync_task->SetError(
+            CcErrorCode::REQUESTED_TABLE_NOT_EXISTS,
+            DataSyncStatus::CheckpointFailureReason::Metadata);
         data_sync_task->SetScanTaskFinished();
         for (auto &task : detached_tasks)
         {
-            task->SetError(CcErrorCode::REQUESTED_TABLE_NOT_EXISTS);
+            task->SetError(CcErrorCode::REQUESTED_TABLE_NOT_EXISTS,
+                           DataSyncStatus::CheckpointFailureReason::Metadata);
             task->SetScanTaskFinished();
         }
         return;
@@ -4851,7 +4891,9 @@ void LocalCcShards::DataSyncForHashPartition(
 
             // If table is deleted(!Normal), skip the table. Return finish
             // directly.
-            data_sync_task->SetError(CcErrorCode::REQUESTED_TABLE_NOT_EXISTS);
+            data_sync_task->SetError(
+                CcErrorCode::REQUESTED_TABLE_NOT_EXISTS,
+                DataSyncStatus::CheckpointFailureReason::Metadata);
             data_sync_task->SetScanTaskFinished();
 
             ClearAllPendingTasks(
@@ -5527,7 +5569,8 @@ void LocalCcShards::ClearAllPendingTasks(NodeGroupId ng_id,
     while (!iter->second->pending_tasks_.empty())
     {
         auto &task = iter->second->pending_tasks_.front();
-        task->SetError(CcErrorCode::REQUESTED_TABLE_NOT_EXISTS);
+        task->SetError(CcErrorCode::REQUESTED_TABLE_NOT_EXISTS,
+                       DataSyncStatus::CheckpointFailureReason::Metadata);
         task->SetScanTaskFinished();
         iter->second->pending_tasks_.pop_front();
     }
@@ -6041,6 +6084,8 @@ void LocalCcShards::FlushDataImpl(FlushDataTask *cur_work,
 {
     auto &flush_task_entries = cur_work->flush_task_entries_;
     bool succ = true;
+    DataSyncStatus::CheckpointFailureReason checkpoint_failure_reason =
+        DataSyncStatus::CheckpointFailureReason::None;
 
     if (EnableMvcc())
     {
@@ -6048,6 +6093,8 @@ void LocalCcShards::FlushDataImpl(FlushDataTask *cur_work,
             flush_task_entries, &yield_fn, &resume_fn);
         if (!succ)
         {
+            checkpoint_failure_reason =
+                DataSyncStatus::CheckpointFailureReason::CopyBase;
             LOG(ERROR) << "DataSync CopyBaseToArchive flush to kv "
                           "storage failed";
         }
@@ -6059,6 +6106,8 @@ void LocalCcShards::FlushDataImpl(FlushDataTask *cur_work,
             flush_task_entries, &yield_fn, &resume_fn, &sync_yield_func);
         if (!succ)
         {
+            checkpoint_failure_reason =
+                DataSyncStatus::CheckpointFailureReason::PutBase;
             LOG(ERROR) << "DataSync PutAll flush to kv "
                           "storage failed";
         }
@@ -6070,6 +6119,8 @@ void LocalCcShards::FlushDataImpl(FlushDataTask *cur_work,
             flush_task_entries, &yield_fn, &resume_fn);
         if (!succ)
         {
+            checkpoint_failure_reason =
+                DataSyncStatus::CheckpointFailureReason::PutArchive;
             LOG(ERROR) << "DataSync PutArchivesAll flush to "
                           "kv storage failed";
         }
@@ -6083,6 +6134,30 @@ void LocalCcShards::FlushDataImpl(FlushDataTask *cur_work,
             kv_table_names.push_back(table_name.data());
         }
         succ = store_hd_->PersistKV(kv_table_names, &yield_fn, &resume_fn);
+        if (!succ)
+        {
+            checkpoint_failure_reason =
+                DataSyncStatus::CheckpointFailureReason::Persist;
+            LOG(ERROR) << "DataSync PersistKV failed";
+        }
+    }
+
+    if (!succ)
+    {
+        // A flush batch can contain work from several checkpoint attempts.
+        // Preserve each status's first failing stage; terminal finalization
+        // later emits at most one failure for that checkpoint status.
+        for (auto &[_, entries] : flush_task_entries)
+        {
+            for (auto &entry : entries)
+            {
+                if (entry->data_sync_task_ && entry->data_sync_task_->status_)
+                {
+                    entry->data_sync_task_->status_->RecordCheckpointFailure(
+                        checkpoint_failure_reason);
+                }
+            }
+        }
     }
 
     // Record that data was written in DataSyncStatus if flush succeeded.

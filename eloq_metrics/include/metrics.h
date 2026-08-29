@@ -30,6 +30,7 @@
 #include <chrono>
 #include <memory>
 #include <string>
+#include <utility>
 #include <vector>
 
 namespace metrics
@@ -54,6 +55,9 @@ private:
 
 using Clock = std::chrono::steady_clock;
 using Labels = std::vector<std::pair<std::string, std::string>>;
+/** Explicit upper bounds for one histogram; empty selects collector defaults.
+ */
+using HistogramBuckets = std::vector<double>;
 using TimePoint = decltype(Clock::now());
 using MetricKey = size_t;
 
@@ -126,11 +130,18 @@ struct Metric
     std::string name_;
     Type type_;
     Labels labels_;
+    HistogramBuckets histogram_buckets_;
 
     Metric() = delete;
 
-    Metric(const std::string &name, metrics::Type type, const Labels &labels)
-        : name_(name), type_(type), labels_(labels)
+    Metric(const std::string &name,
+           metrics::Type type,
+           const Labels &labels,
+           HistogramBuckets histogram_buckets = {})
+        : name_(name),
+          type_(type),
+          labels_(labels),
+          histogram_buckets_(std::move(histogram_buckets))
     {
     }
 
@@ -184,7 +195,8 @@ public:
     virtual MetricsErrors Open() = 0;
     virtual MetricHandle Register(const Name &,
                                   metrics::Type,
-                                  const Labels &) = 0;
+                                  const Labels &,
+                                  const HistogramBuckets & = {}) = 0;
     virtual void Collect(const MetricHandle &, const Value &) = 0;
     virtual ~MetricsRegistry() = default;
 };

@@ -145,8 +145,10 @@ MetricHandle PrometheusCollector::SetMetric(std::unique_ptr<Metric> &metric_ptr)
         auto &histogram_family = prometheus::BuildHistogram()
                                      .Name(metric_ptr->name_)
                                      .Register(*registry_);
-        auto &histogram = histogram_family.Add(
-            prometheus_labels, PROMETHEUS_HISTOGRAM_DEF_BUCKETS);
+        const auto &buckets = metric_ptr->histogram_buckets_.empty()
+                                  ? PROMETHEUS_HISTOGRAM_DEF_BUCKETS
+                                  : metric_ptr->histogram_buckets_;
+        auto &histogram = histogram_family.Add(prometheus_labels, buckets);
         data = std::make_shared<PrometheusMetricData>(histogram);
         break;
     }

@@ -220,6 +220,10 @@ CcShard::CcShard(
     {
         meter_->Register(metrics::NAME_MEMORY_USAGE, metrics::Type::Gauge);
         meter_->Register(metrics::NAME_FRAGMENT_RATIO, metrics::Type::Gauge);
+        meter_->Register(metrics::NAME_RESIDENT_DATA_KEY_COUNT,
+                         metrics::Type::Gauge);
+        meter_->Register(metrics::NAME_DIRTY_DATA_KEY_COUNT,
+                         metrics::Type::Gauge);
     }
 
     if (metrics::enable_standby_metrics)
@@ -686,6 +690,13 @@ size_t CcShard::ProcessRequests()
             meter_->Collect(metrics::NAME_FRAGMENT_RATIO,
                             (100 * (static_cast<float>(committed - allocated) /
                                     committed)));
+            // These counters are maintained incrementally by all non-meta
+            // CCMaps on this shard and include deleted/unknown resident
+            // entries. Sampling them here avoids a full cache traversal.
+            meter_->Collect(metrics::NAME_RESIDENT_DATA_KEY_COUNT,
+                            static_cast<double>(data_key_count_));
+            meter_->Collect(metrics::NAME_DIRTY_DATA_KEY_COUNT,
+                            static_cast<double>(dirty_data_key_count_));
         }
     }
 

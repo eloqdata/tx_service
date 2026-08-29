@@ -803,7 +803,8 @@ void CcNodeService::FlushDataAll(::google::protobuf::RpcController *controller,
 
             uint64_t table_last_synced_ts = 0;
             std::shared_ptr<DataSyncStatus> status =
-                std::make_shared<DataSyncStatus>(ng_id, ng_term, false);
+                std::make_shared<DataSyncStatus>(
+                    ng_id, ng_term, false, DataSyncStatus::Origin::FlushData);
 
             local_shards.EnqueueDataSyncTaskForTable(table_name,
                                                      ng_id,

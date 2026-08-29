@@ -59,9 +59,11 @@ metrics::MetricsErrors MetricsRegistryImpl::Open()
 metrics::MetricHandle MetricsRegistryImpl::Register(
     const metrics::Name &name,
     metrics::Type type,
-    const metrics::Labels &labels)
+    const metrics::Labels &labels,
+    const metrics::HistogramBuckets &histogram_buckets)
 {
-    auto metric = metrics::Metric(name.GetName(), type, labels);
+    auto metric =
+        metrics::Metric(name.GetName(), type, labels, histogram_buckets);
 
     return metrics_mgr_result_.mgr_->MetricsRegistry(
         std::make_unique<metrics::Metric>(metric));
