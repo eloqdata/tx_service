@@ -28,6 +28,7 @@
 #include <cassert>
 #include <iostream>
 #include <memory>
+#include <stdexcept>
 
 #include "metrics.h"
 
@@ -142,12 +143,22 @@ MetricHandle PrometheusCollector::SetMetric(std::unique_ptr<Metric> &metric_ptr)
     {
     case Type::Histogram:
     {
+        const auto &configured_buckets = metric_ptr->histogram_buckets_;
+        if (std::adjacent_find(configured_buckets.begin(),
+                               configured_buckets.end(),
+                               [](double lower, double upper) {
+                                   return !(lower < upper);
+                               }) != configured_buckets.end())
+        {
+            throw std::invalid_argument(
+                "Histogram bucket bounds must be strictly increasing");
+        }
         auto &histogram_family = prometheus::BuildHistogram()
                                      .Name(metric_ptr->name_)
                                      .Register(*registry_);
-        const auto &buckets = metric_ptr->histogram_buckets_.empty()
+        const auto &buckets = configured_buckets.empty()
                                   ? PROMETHEUS_HISTOGRAM_DEF_BUCKETS
-                                  : metric_ptr->histogram_buckets_;
+                                  : configured_buckets;
         auto &histogram = histogram_family.Add(prometheus_labels, buckets);
         data = std::make_shared<PrometheusMetricData>(histogram);
         break;

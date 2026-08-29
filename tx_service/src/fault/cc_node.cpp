@@ -874,6 +874,9 @@ void CcNode::SubscribePrimaryNode(uint32_t leader_node_id,
 
             // clean old term ccm cache since this node was following on an
             // older term
+            // Candidate standbys return from Ckpt() before metrics are
+            // recorded. Only an active standby can own tenure state that this
+            // subscription transition must erase.
             bool had_active_standby_term =
                 Sharder::Instance().StandbyNodeTerm() > 0;
             Sharder::Instance().SetStandbyNodeTerm(-1);
@@ -1200,6 +1203,8 @@ void CcNode::SubscribePrimaryNode(uint32_t leader_node_id,
             return false;
         }
 
+        // A candidate standby has not checkpointed yet. Rollback therefore
+        // erases metrics only when it clears a promoted, active standby term.
         bool cleared_active_standby_term = false;
         if (Sharder::Instance().StandbyNodeTerm() == standby_term)
         {

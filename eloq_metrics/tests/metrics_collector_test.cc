@@ -19,9 +19,15 @@
  *    <http://www.gnu.org/licenses/>.
  *
  */
-#include <catch2/catch_all.hpp>
+// clang-format off
+#include <memory>
+#include <stdexcept>
+#include <string>
 #include <unordered_set>
 #include <vector>
+
+#include <catch2/catch_all.hpp>
+// clang-format on
 
 #include "meter.h"
 #include "prometheus_collector.h"
@@ -207,4 +213,37 @@ SCENARIO("Histograms can override default buckets", "[HistogramBuckets]")
     auto default_sample = collector.CollectClientMetrics(default_handle);
     REQUIRE(default_sample.histogram.bucket.size() ==
             metrics::PROMETHEUS_HISTOGRAM_DEF_BUCKETS.size() + 1);
+}
+
+SCENARIO("Invalid histogram buckets are rejected before registration",
+         "[HistogramBuckets]")
+{
+    metrics::PrometheusCollector collector{"0.0.0.0", 18084};
+    REQUIRE(collector.Open());
+
+    metrics::Metric descending_metric{"recoverable_bucket_histogram",
+                                      metrics::Type::Histogram,
+                                      {},
+                                      {5.0, 1.0}};
+    auto descending_metric_ptr =
+        std::make_unique<metrics::Metric>(descending_metric);
+    REQUIRE_THROWS_AS(collector.SetMetric(descending_metric_ptr),
+                      std::invalid_argument);
+
+    // Reusing the name proves validation happened before family registration.
+    metrics::Metric recovered_metric{"recoverable_bucket_histogram",
+                                     metrics::Type::Histogram,
+                                     {},
+                                     {1.0, 5.0}};
+    auto recovered_metric_ptr =
+        std::make_unique<metrics::Metric>(recovered_metric);
+    auto recovered_handle = collector.SetMetric(recovered_metric_ptr);
+    REQUIRE(recovered_handle.collector_data != nullptr);
+
+    metrics::Metric duplicate_metric{
+        "duplicate_bucket_histogram", metrics::Type::Histogram, {}, {1.0, 1.0}};
+    auto duplicate_metric_ptr =
+        std::make_unique<metrics::Metric>(duplicate_metric);
+    REQUIRE_THROWS_AS(collector.SetMetric(duplicate_metric_ptr),
+                      std::invalid_argument);
 }

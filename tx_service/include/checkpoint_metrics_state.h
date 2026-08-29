@@ -131,12 +131,21 @@ public:
         return update;
     }
 
+    /**
+     * Returns the retained failure streak, or zero when the NG is absent.
+     * Erase removes the NG; the first event for a new term replaces the old
+     * tenure before applying that event.
+     */
     size_t ConsecutiveFailures(NodeGroupId node_group_id) const
     {
         auto it = states_.find(node_group_id);
         return it == states_.end() ? 0 : it->second.consecutive_failures_;
     }
 
+    /**
+     * Returns false when the NG is absent or has been erased. A term-changing
+     * event replaces the old tenure with new state, so the NG remains present.
+     */
     bool Contains(NodeGroupId node_group_id) const
     {
         return states_.find(node_group_id) != states_.end();

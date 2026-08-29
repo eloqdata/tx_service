@@ -42,7 +42,7 @@ inline bool enable_metrics = false;
 class Name
 {
 public:
-    Name(std::string name) : name_(std::move(name)) {};
+    Name(std::string name) : name_(std::move(name)){};
 
     const std::string &GetName() const
     {
@@ -55,7 +55,9 @@ private:
 
 using Clock = std::chrono::steady_clock;
 using Labels = std::vector<std::pair<std::string, std::string>>;
-/** Explicit upper bounds for one histogram; empty selects collector defaults.
+/**
+ * Explicit upper bounds for one histogram. Non-empty bounds must be strictly
+ * increasing; an empty sequence selects collector defaults.
  */
 using HistogramBuckets = std::vector<double>;
 using TimePoint = decltype(Clock::now());

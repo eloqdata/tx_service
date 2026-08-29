@@ -154,10 +154,12 @@ exported through a node meter without `ng_id` or `core_id`:
 
 Successful and genuine no-work checkpoints clear only their NG's consecutive
 failure streak. Coalesced/skipped outcomes, stalls, and term cancellations are
-neutral. `CcNode::OnLeaderStop` erases that NG's streak and timing anchors after
-invalidating its term, while the cumulative failure counter remains. Metric
-callbacks revalidate the term while holding the same state mutex used for
-cleanup, so a callback from the old term cannot recreate erased state.
+neutral. Leader stop and active-standby subscription teardown erase that NG's
+streak and timing anchors after invalidating its term, while the cumulative
+failure counter remains. Candidate standbys do not checkpoint and therefore do
+not own metric state to erase. Metric callbacks revalidate the term while
+holding the same state mutex used for cleanup, so a callback from the old term
+cannot recreate erased state.
 
 ## 4. Data sync beyond checkpointing (overview)
 
