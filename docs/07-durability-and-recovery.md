@@ -97,10 +97,10 @@ Notification sources: tx processors that find nothing clean to evict (`CcShard::
 For each local node group (`checkpointer.cpp:141-431`):
 
 1. Special cases first: a **candidate standby** doesn't checkpoint — it (re-)requests a storage snapshot from the primary via `RequestStorageSnapshotSync` (`:147-200`, §7); a synced **standby on shared storage** skips entirely (`:203-213`); a standby on private storage checkpoints its own kv store.
-2. Skip the ng unless leader/candidate-leader (term from `Sharder`); compute `ckpt_ts` (§3.2); skip if `ckpt_ts <= GetNodeGroupCkptTs(ng)`. Consecutive skips are counted per ng: after `ckpt_stall_warn_rounds` of them (default 3, 0 disables; runtime-mutable) a rate-limited (60 s) `WARNING` names the transaction pinning the timestamp — `CkptTsCc::GetPinningTx()`, filled by `ActiveTxMinTs` with the tx whose `wlock_ts_` produced the minimum — plus its core and write-lock age, so a wedged or leaked write-lock holder is diagnosable from the log alone (`Checkpointer::WarnIfCkptStalled`). The same count is exported as the `checkpoint_stall_rounds` gauge (per `ng_id`, node meter) by `Checkpointer::CollectCkptStallMetric`, called on every round: from `WarnIfCkptStalled` before `ckpt_stall_warn_rounds` and the 60 s log rate limit are consulted, so neither can suppress it, and with 0 from the advancing path in `Ckpt()`, so the gauge falls back to 0 instead of flatlining at its last stalled value. The stall is therefore alertable without scraping logs. Note that a stall returns before any data sync task is enqueued, so it raises no checkpoint failure and never shows up in `is_continuous_checkpoint_failures`; that gauge stays 0 throughout.
+2. Skip the ng unless leader/candidate-leader (term from `Sharder`). Once eligibility is established, record a checkpoint attempt, compute `ckpt_ts` (§3.2), and skip if `ckpt_ts <= GetNodeGroupCkptTs(ng)`. Consecutive skips are counted per ng: after `ckpt_stall_warn_rounds` of them (default 3, 0 disables; runtime-mutable) a rate-limited (60 s) `WARNING` names the transaction pinning the timestamp — `CkptTsCc::GetPinningTx()`, filled by `ActiveTxMinTs` with the tx whose `wlock_ts_` produced the minimum — plus its core and write-lock age, so a wedged or leaked write-lock holder is diagnosable from the log alone (`Checkpointer::WarnIfCkptStalled`). A stall returns before any data sync task is enqueued: it contributes to the attempt-interval distribution but raises no checkpoint failure and does not change `is_continuous_checkpoint_failures`. There is intentionally no checkpoint-stall metric; the warning is the diagnostic signal.
 3. `GetCatalogTableNameSnapshot(ng, ckpt_ts)` → map table → `is_dirty`. For each non-meta table: if not dirty and `GetTableLastCommitTsCc < last_ckpt_ts`, skip; else `EnqueueDataSyncTaskForTable(..., can_be_skipped = !is_last_ckpt, status)` (`:274-329`). The smallest valid per-table `last synced ts` may already allow an early `UpdateNodeGroupCkptTs` + `NotifyLogOfCkptTs` + `BrocastPrimaryCkptTs` (`:338-358`).
-4. Mark `status->all_task_started_`; if all scans finished but flushes are pending, force-flush the buffer (`FlushCurrentFlushBuffer`). On the last ckpt, block on `status->cv_` until `unfinished_tasks_ == 0` (`:360-375`).
-5. When all tasks are done without error and `need_truncate_log_`, truncate using `status->truncate_log_ts_` (which may exceed this round's `ckpt_ts` — see §8): `UpdateNodeGroupCkptTs` → `NotifyLogOfCkptTs` (→ `TxLog::UpdateCheckpointTs`, skipped under `txservice_skip_wal`) → `BrocastPrimaryCkptTs` to standbys (`:377-425`).
+4. Mark `status->all_task_started_`; if all scans finished but flushes are pending, force-flush the buffer (`FlushCurrentFlushBuffer`). On the last ckpt, block on `status->cv_` until `unfinished_tasks_ == 0` (`:360-375`). The zero-task path explicitly runs the same checkpoint-outcome finalizer used by asynchronous completion.
+5. When all tasks are done without error and `need_truncate_log_`, truncate using `status->truncate_log_ts_` (which may exceed this round's `ckpt_ts` — see §8): `UpdateNodeGroupCkptTs` → `NotifyLogOfCkptTs` (→ `TxLog::UpdateCheckpointTs`, skipped under `txservice_skip_wal`) → `BrocastPrimaryCkptTs` to standbys (`:377-425`). A local `UpdateNodeGroupCkptTs` that actually changes the atomic checkpoint timestamp records a checkpoint-advance event; recovery and timestamps received from another node do not.
 
 `LogAgent::UpdateCheckpointTs` (`log_agent.cpp:437-469`) fires the `UpdateCheckpointTsRequest{ng, term, ckpt_ts}` at **every** log group (100 ms timeout, fire-and-forget — a missed update just delays truncation until the next round).
 
@@ -111,7 +111,7 @@ Machinery: `tx_service/include/data_sync_task.h` + `tx_service/include/cc/local_
 | Object | Granularity | Purpose |
 |---|---|---|
 | `DataSyncTask` | per core (hash-partitioned) or per range (range-partitioned) | one scan+flush unit; carries `data_sync_ts_`, ng id/term, flags (`is_dirty_`, `forward_cache_`, `is_standby_node_ckpt_`, `sync_ts_adjustable_`) |
-| `DataSyncStatus` | per ckpt round per ng | counts `unfinished_tasks_` / `unfinished_scan_tasks_`, accumulates `truncate_log_ts_`, `need_truncate_log_`, error code |
+| `DataSyncStatus` | per data-sync operation per ng | carries an immutable origin; counts `unfinished_tasks_` / `unfinished_scan_tasks_`; accumulates `truncate_log_ts_`, no-truncate reason, first checkpoint failure stage, and error code; finalizes checkpoint observability exactly once |
 | `FlushTaskEntry` | per scan batch | `data_sync_vec_` (base rows), `archive_vec_` (MVCC versions), `mv_base_vec_` (base→archive moves), schema, owning task |
 | `FlushDataTask` | per data-sync worker | buffer of `FlushTaskEntry`s keyed by kv table name; flushed when > `max_pending_flush_size_` (default 100 MB, `data_sync_task.h:301`) |
 
@@ -126,20 +126,50 @@ Flow:
    4. `PersistKV` if `store_hd_->NeedPersistKV()` (e.g. EloqStore) — batched fsync-equivalent;
    5. `UpdateCceCkptTsCc` per shard — stamp `cce->SetCkptTs(commit_ts)` on every flushed entry (only when `need_update_ckpt_ts_`);
    6. `WaitableCc` → `CcShard::OnDirtyDataFlushed()` — re-arm kickout requests blocked on dirty data.
-4. **Completion & truncation** — `DataSyncTask::SetFinish/SetError` (`tx_service/src/data_sync_task.cpp:113-198`) maintain `truncate_log_ts_ = min(data_sync_ts_)` over the round's tasks. The last task to finish (or `Ckpt()` itself) performs `UpdateNodeGroupCkptTs` + `UpdateCheckpointTs` + `BrocastPrimaryCkptTs` (`tx_service/src/standby.cpp:107`, the `UpdateStandbyCkptTs` RPC). **Truncation contract: never report a ckpt ts unless every entry with `commit_ts <= ts` of this ng is durable in the kv store.**
+4. **Completion & truncation** — `DataSyncTask::SetFinish/SetError` maintain `truncate_log_ts_ = min(data_sync_ts_)` over the operation's tasks. Once `all_task_started_` is true, the last task to finish (or `Ckpt()` for a zero-task round) performs exactly-once outcome finalization. Only `Origin::Checkpoint` can affect checkpoint failure metrics. Deduplicated/skipped success is neutral, a remaining task error is still a failure, and `NG_TERM_CHANGED` / `REQUESTED_NODE_NOT_LEADER` is cancellation. A successful truncatable operation performs `UpdateNodeGroupCkptTs` + `UpdateCheckpointTs` + `BrocastPrimaryCkptTs` (`tx_service/src/standby.cpp:107`, the `UpdateStandbyCkptTs` RPC). **Truncation contract: never report a ckpt ts unless every entry with `commit_ts <= ts` of this ng is durable in the kv store.**
 
 ### 3.5 ckpt_ts on entries, eviction, dirty-memory trigger
 
 - `CkptTs()` / monotonic `SetCkptTs()` live in `VersionedLruEntry`'s entry info (`tx_service/include/cc/cc_entry.h:580-662`). `IsDirty()` = `CommitTs > CkptTs` (versioned) or flush-bit unset (non-versioned); `IsFree()` (no locks ∧ not dirty) gates eviction — **only checkpointed entries can be kicked out** (`LocalCcShards::KickoutPage`, `local_cc_shards.h:1566`, additionally consults range `last_sync_ts`/dirty-range version for range tables). When eviction finds nothing free, the tx processor calls `ckpter_->Notify()` — memory pressure drives checkpointing.
 - `CcShard::CheckAndTriggerCkptByDirtyMemory` (`tx_service/src/cc/cc_shard.cpp:484-521`), checked every `dirty_memory_check_interval` (1000) key-stat updates: `dirty_memory = allocated_heap × dirty_key_ratio`; if it exceeds `dirty_memory_size_threshold_mb` (default 0 → 10% of the per-shard memory limit, min 1 MB, `cc_shard.cpp:126-141`), call `NotifyCkpt(true)`.
 
+### 3.6 Checkpoint and cache observability
+
+Cache gauges are sampled on each shard with the existing memory-metric cadence.
+`resident_data_key_count` exports the incrementally maintained number of
+entries in every non-meta CCMap, including deleted or transient entries until
+physical removal. `dirty_data_key_count` exports the subset still requiring a
+durable checkpoint. Consumers derive the node dirty-key ratio as the ratio of
+the sums, not the average of shard ratios.
+
+Checkpoint timing state is maintained per node group and leadership term but
+exported through a node meter without `ng_id` or `core_id`:
+
+| Metric | Meaning |
+|---|---|
+| `checkpoint_attempt_interval_seconds` | Start-to-start time between eligible attempts for the same NG; the first event establishes an anchor. Stalls, no-work rounds, and coalesced rounds remain attempts. |
+| `checkpoint_advance_interval_seconds` | Time between successful local durable checkpoint-ts advances for the same NG; the first advance establishes an anchor. |
+| `checkpoint_failures_total{reason}` | Exactly one increment for a terminal checkpoint-origin failure, attributed to `scan`, `copy_base`, `put_base`, `put_archive`, `persist`, `metadata`, or `unknown`. |
+| `is_continuous_checkpoint_failures` | Existing node alert signal: 1 if any locally tracked NG reaches three consecutive terminal failures, otherwise 0. |
+
+Successful and genuine no-work checkpoints clear only their NG's consecutive
+failure streak. Coalesced/skipped outcomes, stalls, and term cancellations are
+neutral. Leader stop and active-standby subscription teardown erase that NG's
+streak and timing anchors after invalidating its term, while the cumulative
+failure counter remains. Candidate standbys do not checkpoint and therefore do
+not own metric state to erase. Metric callbacks revalidate the term while
+holding the same state mutex used for cleanup, so a callback from the old term
+cannot recreate erased state.
+
 ## 4. Data sync beyond checkpointing (overview)
 
-The same task/scan/flush pipeline serves (all with `can_be_skipped=false`, usually waited on via a `CcHandlerResult`):
+The same task/scan/flush pipeline serves operations with explicit non-checkpoint
+origins (all with `can_be_skipped=false`, usually waited on via a
+`CcHandlerResult`):
 
 - **Range split** — sync a subrange before ownership changes (`EnqueueDataSyncTaskForSplittingRange`, `local_cc_shards.cpp:2573`; the second `DataSyncTask` constructor with `start_key/end_key/export_base_table_items`). See [08-range-and-bucket-management.md](08-range-and-bucket-management.md).
 - **Bucket migration / cluster scale** — `EnqueueDataSyncTaskForBucket` (`local_cc_shards.cpp:2905`) flushes bucket data and forwards cache to the new owner. See [06-distribution-and-clustering.md](06-distribution-and-clustering.md) and [08-range-and-bucket-management.md](08-range-and-bucket-management.md).
-- **Standby bootstrap & backup** — `SnapshotManager::RunOneRoundCheckpoint` (§7), `FlushDataAll` / `NotifyShutdownCkpt` RPCs.
+- **Standby bootstrap & backup** — `SnapshotManager::RunOneRoundCheckpoint` (§7), plus explicit `FlushDataAll` / `NotifyShutdownCkpt` RPC work.
 
 ## 5. Recovery
 
@@ -260,6 +290,7 @@ processed by the `replay_notify` thread. `ProcessRecoverTxTask` (`log_replay_ser
 - **Unknown log result ⇒ locks stay.** After exhausting retries the coordinator leaves write locks in place (status `Unknown`); correctness relies on `CheckTxStatus`/`RecoverTx`, never on lock timeouts.
 - **Eviction needs checkpointing.** Only entries with `CommitTs <= CkptTs` are evictable. With `skip_kv` there is no checkpointer at all; with cache replacement disabled, `RestoreTxCache` reloads the entire store on leader start.
 - **Standby checkpoints** happen only on non-shared storage (each replica owns its kv store) and never call `UpdateCheckpointTs` (`is_standby_node_ckpt_`, `data_sync_task.cpp:145-155`); on shared storage only the primary flushes and broadcasts its ckpt ts so standbys can advance entry `ckpt_ts` and evict.
+- **Checkpoint metric state is leadership-tenure scoped.** Attempt/advance anchors and consecutive-failure streaks are keyed by NG and term, and are erased when that NG leaves the node. Cumulative failure counters are process-lifetime history and are not reset by failover.
 - **bthread caveat**: `CkptTsCc::Wait` / `WaitableCc::Wait` poll atomics with `bthread_usleep` backoff (`cc_req_misc.cpp:1138-1149`) instead of bthread condition variables — see the wake-routing deadlock pattern in [02-threading-model.md](02-threading-model.md) and `CLAUDE.md` before adding any new waitable cc request to this module.
 
 ## Appendix A — Configuration knobs

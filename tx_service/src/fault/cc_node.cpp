@@ -35,6 +35,7 @@
 #include "cc_node_service.h"
 #include "cc_req_misc.h"
 #include "cc_request.pb.h"
+#include "checkpointer.h"
 #include "local_cc_shards.h"
 #include "metrics.h"
 #include "sharder.h"
@@ -363,6 +364,12 @@ bool CcNode::OnLeaderStart(int64_t term,
         // no longer subscribed to previous term
         Sharder::Instance().SetStandbyNodeTerm(-1);
         Sharder::Instance().SetCandidateStandbyNodeTerm(-1);
+        // Invalidate both standby term caches before erasing the native NG.
+        // A delayed checkpoint callback then revalidates to false while
+        // holding the metrics-state mutex and cannot recreate this tenure.
+        Sharder::Instance()
+            .GetCheckpointer()
+            ->ClearCheckpointMetricsForNodeGroup(ng_id_);
         Sharder::Instance().SetStandbyBecomingLeaderNodeTerm(-1);
     }
 
@@ -498,6 +505,12 @@ bool CcNode::OnLeaderStop(int64_t term)
         Sharder::Instance().SetLeaderTerm(ng_id_, -1);
         Sharder::Instance().SetCandidateTerm(ng_id_, -1);
     }
+    // The term caches are invalidated before the per-NG state is erased. A
+    // delayed checkpoint callback revalidates the term while holding the same
+    // metrics-state mutex and therefore cannot recreate this leadership
+    // tenure after cleanup.
+    Sharder::Instance().GetCheckpointer()->ClearCheckpointMetricsForNodeGroup(
+        ng_id_);
 
     if (!txservice_skip_kv)
     {
@@ -861,8 +874,19 @@ void CcNode::SubscribePrimaryNode(uint32_t leader_node_id,
 
             // clean old term ccm cache since this node was following on an
             // older term
+            // Candidate standbys return from Ckpt() before metrics are
+            // recorded. Only an active standby can own tenure state that this
+            // subscription transition must erase.
+            bool had_active_standby_term =
+                Sharder::Instance().StandbyNodeTerm() > 0;
             Sharder::Instance().SetStandbyNodeTerm(-1);
             Sharder::Instance().SetCandidateStandbyNodeTerm(-1);
+            if (had_active_standby_term)
+            {
+                Sharder::Instance()
+                    .GetCheckpointer()
+                    ->ClearCheckpointMetricsForNodeGroup(ng_id_);
+            }
 
             if (resubscribe)
             {
@@ -1179,13 +1203,23 @@ void CcNode::SubscribePrimaryNode(uint32_t leader_node_id,
             return false;
         }
 
+        // A candidate standby has not checkpointed yet. Rollback therefore
+        // erases metrics only when it clears a promoted, active standby term.
+        bool cleared_active_standby_term = false;
         if (Sharder::Instance().StandbyNodeTerm() == standby_term)
         {
             Sharder::Instance().SetStandbyNodeTerm(-1);
+            cleared_active_standby_term = true;
         }
         if (Sharder::Instance().CandidateStandbyNodeTerm() == standby_term)
         {
             Sharder::Instance().SetCandidateStandbyNodeTerm(-1);
+        }
+        if (cleared_active_standby_term)
+        {
+            Sharder::Instance()
+                .GetCheckpointer()
+                ->ClearCheckpointMetricsForNodeGroup(ng_id_);
         }
 
         return true;

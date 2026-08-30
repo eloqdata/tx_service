@@ -1001,8 +1001,8 @@ void UpsertTableIndexOp::Forward(TransactionExecution *txm)
             is_last_finished_key_str_ = false;
             finished_pk_range_count_ = scanned_pk_range_count_;
             LOG(INFO) << "Alter Table Index transaction write prepare index"
-                      << " log with last finished end key: "
-                      << ". Base table: " << table_key_.Name().StringView()
+                      << " log with last finished end key: " << ". Base table: "
+                      << table_key_.Name().StringView()
                       << ". Txn: " << txm->TxNumber();
             op_ = &prepare_data_log_op_;
             FillPrepareDataLogRequest(txm);
@@ -1930,7 +1930,8 @@ void UpsertTableIndexOp::FlushDataIntoDataStore(const TableName &table_name,
         }
         assert(ng_term > 0);
         uint64_t table_last_synced_ts = 0;
-        auto status = std::make_shared<DataSyncStatus>(ng_id, ng_term, false);
+        auto status = std::make_shared<DataSyncStatus>(
+            ng_id, ng_term, false, DataSyncStatus::Origin::CreateIndex);
         local_cc_shards->EnqueueDataSyncTaskForTable(table_name,
                                                      ng_id,
                                                      ng_term,
@@ -2590,9 +2591,9 @@ void UpsertTableIndexOp::HandleRangeTask(
         // Asynchronous mode
         stub.GenerateSkFromPk(cntl_ptr, req_ptr, resp_ptr, closure);
         DLOG(INFO) << "Acquire GenerateSkFromPk service for partition id: "
-                   << partition_id << " with start key: "
-                   << " and end key: "
-                   << " of ng#" << range_owner;
+                   << partition_id
+                   << " with start key: " << " and end key: " << " of ng#"
+                   << range_owner;
     }
 
     {

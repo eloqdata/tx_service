@@ -1049,7 +1049,9 @@ private:
     size_t busy_round_active_tx_count_{0};
     size_t empty_round_count_{0};
     size_t total_round_count_{0};
-    size_t empty_round_threshold_{1000};
+    // Accumulate empty-round samples on every loop, but publish their ratio
+    // once per 10,000 rounds to smooth loop-level noise and reduce metric I/O.
+    size_t empty_round_threshold_{10000};
 
     // tx_current_round_ is only utilized for sampling the tx_duration and
     // remote request metric.

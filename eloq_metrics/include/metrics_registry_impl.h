@@ -45,7 +45,8 @@ public:
     metrics::MetricsErrors Open() override;
     metrics::MetricHandle Register(const metrics::Name &,
                                    metrics::Type,
-                                   const metrics::Labels &) override;
+                                   const metrics::Labels &,
+                                   const metrics::HistogramBuckets &) override;
     void Collect(const metrics::MetricHandle &,
                  const metrics::Value &) override;
 

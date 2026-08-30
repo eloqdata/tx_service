@@ -37,12 +37,36 @@
 
 namespace txservice
 {
+namespace
+{
+bool IsCheckpointCancellation(CcErrorCode err_code)
+{
+    return err_code == CcErrorCode::NG_TERM_CHANGED ||
+           err_code == CcErrorCode::REQUESTED_NODE_NOT_LEADER;
+}
+
+void ReportCheckpointResult(
+    const DataSyncStatus &status,
+    const std::optional<DataSyncStatus::CheckpointResult> &result)
+{
+    if (result.has_value())
+    {
+        Sharder::Instance().GetCheckpointer()->ReportCheckpointOutcome(
+            status.node_group_id_,
+            status.node_group_term_,
+            result->outcome_,
+            result->failure_reason_);
+    }
+}
+}  // namespace
 
 DataSyncStatus::DataSyncStatus(NodeGroupId node_group_id,
                                int64_t node_group_term,
-                               bool need_truncate_log)
+                               bool need_truncate_log,
+                               Origin origin)
     : node_group_id_(node_group_id),
       node_group_term_(node_group_term),
+      origin_(origin),
       need_truncate_log_(need_truncate_log)
 {
     Sharder::Instance().GetCheckpointer()->IncrementOngoingDataSyncCnt();
@@ -51,6 +75,54 @@ DataSyncStatus::DataSyncStatus(NodeGroupId node_group_id,
 DataSyncStatus::~DataSyncStatus()
 {
     Sharder::Instance().GetCheckpointer()->DecrementOngoingDataSyncCnt();
+}
+
+void DataSyncStatus::RecordCheckpointFailure(CheckpointFailureReason reason)
+{
+    if (origin_ != Origin::Checkpoint ||
+        reason == CheckpointFailureReason::None)
+    {
+        return;
+    }
+
+    std::lock_guard<std::mutex> lk(mux_);
+    if (checkpoint_failure_reason_ == CheckpointFailureReason::None)
+    {
+        checkpoint_failure_reason_ = reason;
+    }
+}
+
+std::optional<DataSyncStatus::CheckpointResult>
+DataSyncStatus::TryFinalizeCheckpointLocked()
+{
+    if (origin_ != Origin::Checkpoint || checkpoint_finalized_ ||
+        !all_task_started_ || unfinished_tasks_ != 0)
+    {
+        return std::nullopt;
+    }
+
+    checkpoint_finalized_ = true;
+    if (IsCheckpointCancellation(err_code_))
+    {
+        return CheckpointResult{CheckpointOutcome::Canceled,
+                                CheckpointFailureReason::None};
+    }
+    if (err_code_ != CcErrorCode::NO_ERROR)
+    {
+        return CheckpointResult{
+            CheckpointOutcome::Failure,
+            checkpoint_failure_reason_ == CheckpointFailureReason::None
+                ? CheckpointFailureReason::Unknown
+                : checkpoint_failure_reason_};
+    }
+    if (no_truncate_reason_ == NoTruncateReason::Deduplicated ||
+        no_truncate_reason_ == NoTruncateReason::EntriesSkipped)
+    {
+        return CheckpointResult{CheckpointOutcome::Neutral,
+                                CheckpointFailureReason::None};
+    }
+    return CheckpointResult{CheckpointOutcome::Success,
+                            CheckpointFailureReason::None};
 }
 
 DataSyncTask::DataSyncTask(const TableName &table_name,
@@ -114,6 +186,7 @@ DataSyncTask::DataSyncTask(const TableName &table_name,
 void DataSyncTask::SetFinish()
 {
     std::unique_lock<std::mutex> task_sender_lk(status_->mux_);
+    std::optional<DataSyncStatus::CheckpointResult> checkpoint_result;
     status_->unfinished_tasks_--;
     // The default value of `truncate_log_ts_` is `0`.
     if (status_->truncate_log_ts_ == 0)
@@ -140,8 +213,16 @@ void DataSyncTask::SetFinish()
                           << status_->truncate_log_ts_;
                 if (status_->truncate_log_ts_ != UINT64_MAX)
                 {
-                    Sharder::Instance().UpdateNodeGroupCkptTs(
+                    bool advanced = Sharder::Instance().UpdateNodeGroupCkptTs(
                         node_group_id_, status_->truncate_log_ts_);
+                    if (advanced &&
+                        status_->origin_ == DataSyncStatus::Origin::Checkpoint)
+                    {
+                        Sharder::Instance()
+                            .GetCheckpointer()
+                            ->RecordCheckpointAdvance(node_group_id_,
+                                                      node_group_term_);
+                    }
 
                     if (!txservice_skip_wal)
                     {
@@ -180,8 +261,7 @@ void DataSyncTask::SetFinish()
             }
         }
 
-        Sharder::Instance().GetCheckpointer()->CollectCkptMetric(
-            status_->err_code_ == CcErrorCode::NO_ERROR);
+        checkpoint_result = status_->TryFinalizeCheckpointLocked();
 
         if (task_res_)
         {
@@ -196,13 +276,25 @@ void DataSyncTask::SetFinish()
         }
         status_->cv_.notify_all();
     }
+    task_sender_lk.unlock();
+    ReportCheckpointResult(*status_, checkpoint_result);
 }
 
-void DataSyncTask::SetError(CcErrorCode err_code)
+void DataSyncTask::SetError(
+    CcErrorCode err_code,
+    DataSyncStatus::CheckpointFailureReason checkpoint_failure_reason)
 {
     std::unique_lock<std::mutex> task_sender_lk(status_->mux_);
+    std::optional<DataSyncStatus::CheckpointResult> checkpoint_result;
     status_->unfinished_tasks_--;
     status_->err_code_ = err_code;
+    if (status_->origin_ == DataSyncStatus::Origin::Checkpoint &&
+        !IsCheckpointCancellation(err_code) &&
+        status_->checkpoint_failure_reason_ ==
+            DataSyncStatus::CheckpointFailureReason::None)
+    {
+        status_->checkpoint_failure_reason_ = checkpoint_failure_reason;
+    }
     // The default value of `truncate_log_ts_` is `0`.
     if (status_->truncate_log_ts_ == 0)
     {
@@ -218,12 +310,15 @@ void DataSyncTask::SetError(CcErrorCode err_code)
 
     if (status_->unfinished_tasks_ == 0 && status_->all_task_started_)
     {
+        checkpoint_result = status_->TryFinalizeCheckpointLocked();
         if (task_res_)
         {
             task_res_->SetError(status_->err_code_);
         }
         status_->cv_.notify_all();
     }
+    task_sender_lk.unlock();
+    ReportCheckpointResult(*status_, checkpoint_result);
 }
 
 void DataSyncTask::SetScanTaskFinished()

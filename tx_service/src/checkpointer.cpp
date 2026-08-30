@@ -155,20 +155,171 @@ std::pair<uint64_t, uint64_t> Checkpointer::GetNewCheckpointTs(
     return {ckpt_ts, ckpt_req.GetMemUsage()};
 }
 
-void Checkpointer::CollectCkptStallMetric(uint32_t node_group, uint32_t rounds)
+bool Checkpointer::IsCurrentCheckpointTerm(NodeGroupId node_group_id,
+                                           int64_t term) const
+{
+    if (term < 0)
+    {
+        return false;
+    }
+
+    Sharder &sharder = Sharder::Instance();
+    if (sharder.LeaderTerm(node_group_id) == term ||
+        sharder.CandidateLeaderTerm(node_group_id) == term)
+    {
+        return true;
+    }
+
+    return node_group_id == sharder.NativeNodeGroup() &&
+           (sharder.StandbyNodeTerm() == term ||
+            sharder.CandidateStandbyNodeTerm() == term);
+}
+
+void Checkpointer::ApplyCheckpointMetricsUpdateLocked(
+    const CheckpointMetricsState::Update &update,
+    const metrics::Name *interval_metric)
+{
+    metrics::Meter *meter = local_shards_.GetNodeMeter();
+    if (meter == nullptr)
+    {
+        return;
+    }
+    if (interval_metric != nullptr && update.interval_seconds_.has_value())
+    {
+        meter->Collect(*interval_metric, *update.interval_seconds_);
+    }
+    if (update.continuous_failure_gauge_.has_value())
+    {
+        meter->Collect(metrics::NAME_IS_CONTINUOUS_CHECKPOINT_FAILURES,
+                       *update.continuous_failure_gauge_ ? 1 : 0);
+    }
+}
+
+const char *Checkpointer::CheckpointFailureReasonLabel(
+    DataSyncStatus::CheckpointFailureReason reason)
+{
+    switch (reason)
+    {
+    case DataSyncStatus::CheckpointFailureReason::Scan:
+        return "scan";
+    case DataSyncStatus::CheckpointFailureReason::CopyBase:
+        return "copy_base";
+    case DataSyncStatus::CheckpointFailureReason::PutBase:
+        return "put_base";
+    case DataSyncStatus::CheckpointFailureReason::PutArchive:
+        return "put_archive";
+    case DataSyncStatus::CheckpointFailureReason::Persist:
+        return "persist";
+    case DataSyncStatus::CheckpointFailureReason::Metadata:
+        return "metadata";
+    case DataSyncStatus::CheckpointFailureReason::None:
+    case DataSyncStatus::CheckpointFailureReason::Unknown:
+        return "unknown";
+    }
+    return "unknown";
+}
+
+void Checkpointer::RecordCheckpointAttempt(NodeGroupId node_group_id,
+                                           int64_t term)
 {
     if (!metrics::enable_metrics)
     {
         return;
     }
 
-    metrics::Meter *meter = local_shards_.GetNodeMeter();
-    if (meter != nullptr)
+    auto now = std::chrono::steady_clock::now();
+    std::lock_guard<std::mutex> lk(checkpoint_metrics_mux_);
+    // Validate after taking the state mutex. OnLeaderStop invalidates the term
+    // before taking this mutex to erase the NG, so a delayed callback cannot
+    // recreate state after failover cleanup.
+    if (!IsCurrentCheckpointTerm(node_group_id, term))
     {
-        meter->Collect(metrics::NAME_CHECKPOINT_STALL_ROUNDS,
-                       static_cast<double>(rounds),
-                       std::to_string(node_group));
+        return;
     }
+
+    auto update =
+        checkpoint_metrics_state_.RecordAttempt(node_group_id, term, now);
+    ApplyCheckpointMetricsUpdateLocked(
+        update, &metrics::NAME_CHECKPOINT_ATTEMPT_INTERVAL_SECONDS);
+}
+
+void Checkpointer::RecordCheckpointAdvance(NodeGroupId node_group_id,
+                                           int64_t term)
+{
+    if (!metrics::enable_metrics)
+    {
+        return;
+    }
+
+    auto now = std::chrono::steady_clock::now();
+    std::lock_guard<std::mutex> lk(checkpoint_metrics_mux_);
+    if (!IsCurrentCheckpointTerm(node_group_id, term))
+    {
+        return;
+    }
+
+    auto update =
+        checkpoint_metrics_state_.RecordAdvance(node_group_id, term, now);
+    ApplyCheckpointMetricsUpdateLocked(
+        update, &metrics::NAME_CHECKPOINT_ADVANCE_INTERVAL_SECONDS);
+}
+
+void Checkpointer::ReportCheckpointOutcome(
+    NodeGroupId node_group_id,
+    int64_t term,
+    DataSyncStatus::CheckpointOutcome outcome,
+    DataSyncStatus::CheckpointFailureReason failure_reason)
+{
+    if (!metrics::enable_metrics ||
+        outcome == DataSyncStatus::CheckpointOutcome::Neutral ||
+        outcome == DataSyncStatus::CheckpointOutcome::Canceled)
+    {
+        return;
+    }
+
+    std::lock_guard<std::mutex> lk(checkpoint_metrics_mux_);
+    // The counter is process-lifetime history, so a terminal failure that was
+    // finalized just before failover must not disappear merely because its
+    // reporting callback acquired this mutex after failover cleanup. The
+    // tenure-scoped streak below still requires a current term.
+    if (outcome == DataSyncStatus::CheckpointOutcome::Failure)
+    {
+        metrics::Meter *meter = local_shards_.GetNodeMeter();
+        if (meter != nullptr)
+        {
+            meter->Collect(metrics::NAME_CHECKPOINT_FAILURES_TOTAL,
+                           1,
+                           CheckpointFailureReasonLabel(failure_reason));
+        }
+    }
+
+    if (!IsCurrentCheckpointTerm(node_group_id, term))
+    {
+        return;
+    }
+
+    if (outcome == DataSyncStatus::CheckpointOutcome::Success)
+    {
+        ApplyCheckpointMetricsUpdateLocked(
+            checkpoint_metrics_state_.RecordSuccess(node_group_id, term));
+        return;
+    }
+
+    assert(outcome == DataSyncStatus::CheckpointOutcome::Failure);
+    ApplyCheckpointMetricsUpdateLocked(
+        checkpoint_metrics_state_.RecordFailure(node_group_id, term));
+}
+
+void Checkpointer::ClearCheckpointMetricsForNodeGroup(NodeGroupId node_group_id)
+{
+    if (!metrics::enable_metrics)
+    {
+        return;
+    }
+
+    std::lock_guard<std::mutex> lk(checkpoint_metrics_mux_);
+    ApplyCheckpointMetricsUpdateLocked(
+        checkpoint_metrics_state_.Erase(node_group_id));
 }
 
 void Checkpointer::WarnIfCkptStalled(uint32_t node_group,
@@ -176,13 +327,9 @@ void Checkpointer::WarnIfCkptStalled(uint32_t node_group,
                                      uint64_t last_ckpt_ts,
                                      const CkptTsCc::PinningTxInfo &pinning_tx)
 {
-    // Counted (and exported) before the flag is consulted: ckpt_stall_warn_
-    // rounds gates the log line only. Gating the count on it would make
-    // setting the flag to 0 freeze the gauge at 0 for the whole stall.
     auto stall_it = ckpt_stall_states_.try_emplace(node_group).first;
     CkptStallState &stall = stall_it->second;
     uint32_t rounds = ++stall.stall_rounds_;
-    CollectCkptStallMetric(node_group, rounds);
 
     if (FLAGS_ckpt_stall_warn_rounds <= 0)
     {
@@ -338,6 +485,10 @@ void Checkpointer::Ckpt(bool is_last_ckpt)
             continue;
         }
 
+        const int64_t checkpoint_term =
+            is_standby_node ? standby_node_term : leader_term;
+        RecordCheckpointAttempt(node_group, checkpoint_term);
+
         CkptTsCc::PinningTxInfo pinning_tx;
         auto [ckpt_ts, mem_usage] =
             GetNewCheckpointTs(node_group, is_last_ckpt, pinning_tx);
@@ -349,7 +500,6 @@ void Checkpointer::Ckpt(bool is_last_ckpt)
             WarnIfCkptStalled(node_group, ckpt_ts, last_ckpt_ts, pinning_tx);
             continue;
         }
-        CollectCkptStallMetric(node_group, 0);
         auto stall_it = ckpt_stall_states_.find(node_group);
         if (stall_it != ckpt_stall_states_.end())
         {
@@ -370,7 +520,8 @@ void Checkpointer::Ckpt(bool is_last_ckpt)
             std::make_shared<DataSyncStatus>(
                 node_group,
                 is_standby_node ? standby_node_term : leader_term,
-                true);
+                true,
+                DataSyncStatus::Origin::Checkpoint);
 
         uint64_t last_succ_ckpt_ts = UINT64_MAX;
         bool can_be_skipped = !is_last_ckpt;
@@ -449,8 +600,12 @@ void Checkpointer::Ckpt(bool is_last_ckpt)
                 << "Checkpoint of node group #" << node_group
                 << " succeeded with timestamp: " << last_succ_ckpt_ts;
 
-            Sharder::Instance().UpdateNodeGroupCkptTs(node_group,
-                                                      last_succ_ckpt_ts);
+            bool advanced = Sharder::Instance().UpdateNodeGroupCkptTs(
+                node_group, last_succ_ckpt_ts);
+            if (advanced)
+            {
+                RecordCheckpointAdvance(node_group, checkpoint_term);
+            }
 
             if (!is_standby_node)
             {
@@ -464,6 +619,7 @@ void Checkpointer::Ckpt(bool is_last_ckpt)
             }
         }
 
+        std::optional<DataSyncStatus::CheckpointResult> checkpoint_result;
         {
             std::unique_lock<std::mutex> task_sender_lk(status->mux_);
             status->all_task_started_ = true;
@@ -513,8 +669,14 @@ void Checkpointer::Ckpt(bool is_last_ckpt)
                         status->truncate_log_ts_ > last_ckpt_ts)
                     {
                         assert(status->truncate_log_ts_ >= ckpt_ts);
-                        Sharder::Instance().UpdateNodeGroupCkptTs(
-                            node_group, status->truncate_log_ts_);
+                        bool advanced =
+                            Sharder::Instance().UpdateNodeGroupCkptTs(
+                                node_group, status->truncate_log_ts_);
+                        if (advanced)
+                        {
+                            RecordCheckpointAdvance(node_group,
+                                                    checkpoint_term);
+                        }
 
                         if (!is_standby_node)
                         {
@@ -531,8 +693,15 @@ void Checkpointer::Ckpt(bool is_last_ckpt)
                     }
                 }
 
-                CollectCkptMetric(status->err_code_ == CcErrorCode::NO_ERROR);
+                checkpoint_result = status->TryFinalizeCheckpointLocked();
             }
+        }
+        if (checkpoint_result.has_value())
+        {
+            ReportCheckpointOutcome(node_group,
+                                    checkpoint_term,
+                                    checkpoint_result->outcome_,
+                                    checkpoint_result->failure_reason_);
         }
     }
 }

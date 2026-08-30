@@ -33,6 +33,7 @@
 
 #include "cc/cc_request.h"
 #include "cc/local_cc_shards.h"
+#include "checkpoint_metrics_state.h"
 #include "metrics.h"
 #include "sharder.h"
 #include "txlog.h"
@@ -106,38 +107,24 @@ public:
 
     void Join();
 
-    void CollectCkptMetric(bool success)
-    {
-        if (metrics::enable_metrics)
-        {
-            if (success)
-            {
-                if (consecutive_fail_cnt_ > 0)
-                {
-                    Sharder::Instance()
-                        .GetLocalCcShards()
-                        ->GetNodeMeter()
-                        ->Collect(
-                            metrics::NAME_IS_CONTINUOUS_CHECKPOINT_FAILURES, 0);
-                }
-                // reset value
-                consecutive_fail_cnt_.store(0, std::memory_order_relaxed);
-            }
-            else
-            {
-                size_t fail_cnt = consecutive_fail_cnt_.fetch_add(
-                    1, std::memory_order_relaxed);
-                if (fail_cnt + 1 >= continuous_ckpt_fail_threshold)
-                {
-                    Sharder::Instance()
-                        .GetLocalCcShards()
-                        ->GetNodeMeter()
-                        ->Collect(
-                            metrics::NAME_IS_CONTINUOUS_CHECKPOINT_FAILURES, 1);
-                }
-            }
-        }
-    }
+    /** Records one eligible checkpoint attempt for interval telemetry. */
+    void RecordCheckpointAttempt(NodeGroupId node_group_id, int64_t term);
+
+    /** Records a successful local durable checkpoint-ts advance. */
+    void RecordCheckpointAdvance(NodeGroupId node_group_id, int64_t term);
+
+    /** Applies one terminal checkpoint outcome to per-NG failure state. */
+    void ReportCheckpointOutcome(
+        NodeGroupId node_group_id,
+        int64_t term,
+        DataSyncStatus::CheckpointOutcome outcome,
+        DataSyncStatus::CheckpointFailureReason failure_reason);
+
+    /**
+     * Drops leadership-tenure metrics state after this node loses an NG.
+     * Cumulative failure counters are intentionally retained.
+     */
+    void ClearCheckpointMetricsForNodeGroup(NodeGroupId node_group_id);
 
     void IncrementOngoingDataSyncCnt()
     {
@@ -180,7 +167,12 @@ private:
     TxService *tx_service_;
     TxLog *log_agent_;
 
-    std::atomic<size_t> consecutive_fail_cnt_{0};
+    // Checkpoint callbacks and raft leadership callbacks run on different
+    // threads. The term is revalidated while holding this mutex so a callback
+    // from a failed-over term cannot recreate erased NG state.
+    std::mutex checkpoint_metrics_mux_;
+    CheckpointMetricsState checkpoint_metrics_state_{
+        continuous_ckpt_fail_threshold};
 
     // Per-node-group checkpoint-stall tracking: how many consecutive Ckpt()
     // rounds the checkpoint ts failed to advance (reset to 0 whenever it
@@ -199,14 +191,6 @@ private:
     void NotifyLogOfCkptTs(uint32_t node_group, int64_t term, uint64_t ckpt_ts);
 
     /**
-     * @brief Exports @p rounds as the checkpoint_stall_rounds gauge (per
-     * ng_id, node meter). Called on every round, stalled or not: a gauge that
-     * skips rounds reads as a flatline at its last value, which is exactly
-     * the silence this diagnoses.
-     */
-    void CollectCkptStallMetric(uint32_t node_group, uint32_t rounds);
-
-    /**
      * @brief Tracks consecutive rounds in which @p node_group's checkpoint ts
      * failed to advance and, past a threshold, logs a rate-limited warning
      * naming the pinning transaction. Called from the checkpointer thread.
@@ -215,5 +199,12 @@ private:
                            uint64_t ckpt_ts,
                            uint64_t last_ckpt_ts,
                            const CkptTsCc::PinningTxInfo &pinning_tx);
+
+    bool IsCurrentCheckpointTerm(NodeGroupId node_group_id, int64_t term) const;
+    void ApplyCheckpointMetricsUpdateLocked(
+        const CheckpointMetricsState::Update &update,
+        const metrics::Name *interval_metric = nullptr);
+    static const char *CheckpointFailureReasonLabel(
+        DataSyncStatus::CheckpointFailureReason reason);
 };
 }  // namespace txservice

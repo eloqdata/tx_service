@@ -141,6 +141,8 @@ public:
      * @param type The type of the metric.
      * @param label_groups The deque of label groups. Each group contains a
      * label name and a vector of label types.
+     * @param histogram_buckets Explicit upper bounds for this histogram. An
+     * empty vector preserves the collector's default buckets.
      *
      * This function registers a metric with the provided name and type, along
      * with the specified label groups. The label groups represent different
@@ -157,7 +159,8 @@ public:
      */
     void Register(const Name &name,
                   const Type &type,
-                  std::vector<LabelGroup> &&dynamic_label_groups = {})
+                  std::vector<LabelGroup> &&dynamic_label_groups = {},
+                  const HistogramBuckets &histogram_buckets = {})
     {
         std::vector<Labels> all_labels;
 
@@ -172,8 +175,8 @@ public:
         auto name_str = name.GetName();
         for (const auto &labels : all_labels)
         {
-            auto metric_handle =
-                metrics_registry_->Register(name_str, type, labels);
+            auto metric_handle = metrics_registry_->Register(
+                name_str, type, labels, histogram_buckets);
             auto meter_key = Hash(name_str);
             for (size_t i = common_label_groups_.size(); i < labels.size(); ++i)
             {

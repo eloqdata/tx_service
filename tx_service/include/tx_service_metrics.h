@@ -40,6 +40,9 @@ inline const metrics::Name NAME_MEMORY_LIMIT{"memory_limit"};
 inline const metrics::Name NAME_CACHE_HIT_OR_MISS_TOTAL{
     "cache_hit_or_miss_total"};
 inline const metrics::Name NAME_MEMORY_USAGE{"memory_usage"};
+inline const metrics::Name NAME_RESIDENT_DATA_KEY_COUNT{
+    "resident_data_key_count"};
+inline const metrics::Name NAME_DIRTY_DATA_KEY_COUNT{"dirty_data_key_count"};
 
 inline const metrics::Name NAME_FRAGMENT_RATIO{"memory_fragment_ratio"};
 
@@ -63,13 +66,18 @@ inline const metrics::Name NAME_STANDBY_OUT_OF_SYNC_COUNT{
 
 inline const metrics::Name NAME_IS_CONTINUOUS_CHECKPOINT_FAILURES{
     "is_continuous_checkpoint_failures"};
+inline const metrics::Name NAME_CHECKPOINT_ATTEMPT_INTERVAL_SECONDS{
+    "checkpoint_attempt_interval_seconds"};
+inline const metrics::Name NAME_CHECKPOINT_ADVANCE_INTERVAL_SECONDS{
+    "checkpoint_advance_interval_seconds"};
+inline const metrics::Name NAME_CHECKPOINT_FAILURES_TOTAL{
+    "checkpoint_failures_total"};
 
-// Consecutive checkpoint rounds in which the node group's checkpoint ts failed
-// to advance; 0 while it advances. A stall never reaches the data sync stage,
-// so it raises no failure and is invisible in
-// is_continuous_checkpoint_failures.
-inline const metrics::Name NAME_CHECKPOINT_STALL_ROUNDS{
-    "checkpoint_stall_rounds"};
+// Checkpoint intervals are seconds-to-minutes operational signals. These
+// buckets retain useful resolution at the low end without losing visibility
+// into checkpoints delayed for up to one hour.
+inline const metrics::HistogramBuckets CHECKPOINT_INTERVAL_SECONDS_BUCKETS{
+    1, 2, 5, 10, 15, 30, 60, 120, 300, 600, 900, 1800, 3600};
 
 inline const metrics::Name NAME_LEADER_CHANGES{"leader_changes_seen_total"};
 inline const metrics::Name NAME_IS_LEADER{"is_leader"};
