@@ -34,6 +34,7 @@
 
 #include "cc/cc_handler_result.h"
 #include "proto/cc_request.pb.h"
+#include "remote/cc_message_pool.h"
 #include "sharder.h"
 
 namespace txservice
@@ -96,8 +97,7 @@ struct SendMessageResult
 class CcStreamSender
 {
 public:
-    CcStreamSender(
-        moodycamel::ConcurrentQueue<std::unique_ptr<CcMessage>> &msg_pool);
+    explicit CcStreamSender(CcMessagePool &msg_pool);
     ~CcStreamSender();
 
     void RecycleCcMsg(std::unique_ptr<CcMessage> msg);
@@ -169,7 +169,7 @@ private:
     int ConnectStream(uint32_t node_id, int64_t version);
     int ConnectLongMsgStream(uint32_t node_id, int64_t version);
 
-    moodycamel::ConcurrentQueue<std::unique_ptr<CcMessage>> &msg_pool_;
+    CcMessagePool &msg_pool_;
 
     brpc::StreamWriteOptions stream_write_options_;
 

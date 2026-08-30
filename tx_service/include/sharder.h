@@ -37,6 +37,7 @@
 #include "brpc/server.h"
 #include "butil/third_party/murmurhash3/murmurhash3.h"
 #include "proto/cc_request.pb.h"
+#include "remote/cc_message_pool.h"
 #include "tx_serialize.h"
 #include "txlog.h"
 #include "type.h"
@@ -839,7 +840,7 @@ private:
      */
     std::atomic<bool> cc_nodes_init_{false};
 
-    moodycamel::ConcurrentQueue<std::unique_ptr<remote::CcMessage>> msg_pool_;
+    remote::CcMessagePool msg_pool_;
 
     // The cc stream sender establishes connections to remote nodes and
     // sends cc requests and responses to remote nodes via streams. It is

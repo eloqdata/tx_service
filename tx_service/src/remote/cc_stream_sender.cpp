@@ -52,8 +52,7 @@ CcStreamSender::~CcStreamSender()
     resend_thd_.join();
 }
 
-CcStreamSender::CcStreamSender(
-    moodycamel::ConcurrentQueue<std::unique_ptr<CcMessage>> &msg_pool)
+CcStreamSender::CcStreamSender(CcMessagePool &msg_pool)
     : msg_pool_(msg_pool), terminate_(false), to_connect_flag_(false)
 {
     stream_write_options_.write_in_background = true;
@@ -65,7 +64,7 @@ CcStreamSender::CcStreamSender(
 
 void CcStreamSender::RecycleCcMsg(std::unique_ptr<CcMessage> msg)
 {
-    msg_pool_.enqueue(std::move(msg));
+    msg_pool_.Recycle(std::move(msg));
 }
 
 void CcStreamSender::ReConnectStream(uint32_t dest_node_id)

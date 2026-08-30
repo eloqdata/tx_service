@@ -59,6 +59,7 @@ set_property(TARGET txnode PROPERTY CXX_STANDARD 20)
 # files). They link Catch2::Catch2WithMain.
 set(CATCH_MAIN_TESTS
     CcEntry-Test
+    CcMessagePool-Test
     CcPage-Test
     LargeObjLRU-Test
     CcRequestWait-Test
