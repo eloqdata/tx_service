@@ -31,6 +31,7 @@
 
 #include "cc_req_pool.h"
 #include "proto/cc_request.pb.h"
+#include "remote/cc_message_pool.h"
 #include "tx_record.h"
 #include "type.h"
 
@@ -43,9 +44,7 @@ namespace remote
 class CcStreamReceiver : public brpc::StreamInputHandler, public CcStreamService
 {
 public:
-    explicit CcStreamReceiver(
-        LocalCcShards &local_shards,
-        moodycamel::ConcurrentQueue<std::unique_ptr<CcMessage>> &msg_pool);
+    CcStreamReceiver(LocalCcShards &local_shards, CcMessagePool &msg_pool);
     ~CcStreamReceiver() = default;
 
     void Shutdown();
@@ -82,7 +81,7 @@ private:
     // receives a message, de-serializes it and dispatches it to local shards
     // for processing. The message is put back into the pool after the cc
     // request is processed.
-    moodycamel::ConcurrentQueue<std::unique_ptr<CcMessage>> &msg_pool_;
+    CcMessagePool &msg_pool_;
     moodycamel::ConcurrentQueue<std::unique_ptr<ScanSliceResponse>>
         scan_resp_pool_;
 };

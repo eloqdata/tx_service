@@ -110,9 +110,8 @@ thread_local CcRequestPool<KeyObjectStandbyForwardCc>
     key_obj_standby_forward_pool_;
 thread_local CcRequestPool<ParseCcMsgCc> parse_standby_forward_pool_;
 
-CcStreamReceiver::CcStreamReceiver(
-    LocalCcShards &local_shards,
-    moodycamel::ConcurrentQueue<std::unique_ptr<CcMessage>> &msg_pool)
+CcStreamReceiver::CcStreamReceiver(LocalCcShards &local_shards,
+                                   CcMessagePool &msg_pool)
     : local_shards_(local_shards), msg_pool_(msg_pool)
 {
 }
@@ -278,7 +277,7 @@ int CcStreamReceiver::on_received_messages(brpc::StreamId stream_id,
                     remote::CcMessage::MessageType::
                         CcMessage_MessageType_KeyObjectStandbyForwardRequest)
                 {
-                    msg_pool_.enqueue(std::move(cc_msg));
+                    msg_pool_.Recycle(std::move(cc_msg));
                     continue;
                 }
                 OnReceiveCcMsg(std::move(cc_msg));
@@ -326,15 +325,7 @@ void CcStreamReceiver::on_closed(brpc::StreamId stream)
 
 std::unique_ptr<CcMessage> CcStreamReceiver::GetCcMsg()
 {
-    std::unique_ptr<CcMessage> msg;
-    if (msg_pool_.try_dequeue(msg))
-    {
-        return msg;
-    }
-    else
-    {
-        return std::make_unique<CcMessage>();
-    }
+    return msg_pool_.Acquire();
 }
 
 std::unique_ptr<ScanSliceResponse> CcStreamReceiver::GetScanSliceResp()
@@ -493,7 +484,7 @@ void CcStreamReceiver::OnReceiveCcMsg(std::unique_ptr<CcMessage> msg)
         if (!Sharder::Instance().CheckLeaderTerm(tx_node_id, tx_term))
         {
             // The tx node has failed. Pointer stability does not hold anymore.
-            msg_pool_.enqueue(std::move(msg));
+            msg_pool_.Recycle(std::move(msg));
             break;
         }
         else
@@ -512,7 +503,7 @@ void CcStreamReceiver::OnReceiveCcMsg(std::unique_ptr<CcMessage> msg)
                 // The original tx has terminated and the tx machine has been
                 // recycled. The response message is directed to an obsolete tx.
                 // Skips setting the cc handler result.
-                msg_pool_.enqueue(std::move(msg));
+                msg_pool_.Recycle(std::move(msg));
                 txm->ReleaseSharedForwardLatch();
                 break;
             }
@@ -525,7 +516,7 @@ void CcStreamReceiver::OnReceiveCcMsg(std::unique_ptr<CcMessage> msg)
 
         if (acq_res.IsRemoteHdResultSet(std::memory_order_acquire))
         {
-            msg_pool_.enqueue(std::move(msg));
+            msg_pool_.Recycle(std::move(msg));
             txm->ReleaseSharedForwardLatch();
             break;
         }
@@ -583,7 +574,7 @@ void CcStreamReceiver::OnReceiveCcMsg(std::unique_ptr<CcMessage> msg)
             txm->ReleaseSharedForwardLatch();
         }
 
-        msg_pool_.enqueue(std::move(msg));
+        msg_pool_.Recycle(std::move(msg));
         break;
     }
     case CcMessage::MessageType::CcMessage_MessageType_AcquireAllRequest:
@@ -606,7 +597,7 @@ void CcStreamReceiver::OnReceiveCcMsg(std::unique_ptr<CcMessage> msg)
         if (!Sharder::Instance().CheckLeaderTerm(tx_node_id, tx_term))
         {
             // The tx node has failed. Pointer stability does not hold anymore.
-            msg_pool_.enqueue(std::move(msg));
+            msg_pool_.Recycle(std::move(msg));
             break;
         }
         else
@@ -623,7 +614,7 @@ void CcStreamReceiver::OnReceiveCcMsg(std::unique_ptr<CcMessage> msg)
                 // The original tx has terminated and the tx machine has been
                 // recycled. The response message is directed to an obsolete tx.
                 // Skips setting the cc handler result.
-                msg_pool_.enqueue(std::move(msg));
+                msg_pool_.Recycle(std::move(msg));
                 txm->ReleaseSharedForwardLatch();
                 break;
             }
@@ -685,7 +676,7 @@ void CcStreamReceiver::OnReceiveCcMsg(std::unique_ptr<CcMessage> msg)
             txm->ReleaseSharedForwardLatch();
         }
 
-        msg_pool_.enqueue(std::move(msg));
+        msg_pool_.Recycle(std::move(msg));
         break;
     }
     case CcMessage::MessageType::CcMessage_MessageType_ValidateRequest:
@@ -725,7 +716,7 @@ void CcStreamReceiver::OnReceiveCcMsg(std::unique_ptr<CcMessage> msg)
                 Sharder::Instance().GetCcStreamSender();
 
             cc_stream_sender->SendMessageToNode(req.src_node_id(), return_msg);
-            msg_pool_.enqueue(std::move(msg));
+            msg_pool_.Recycle(std::move(msg));
         }
         else
         {
@@ -749,7 +740,7 @@ void CcStreamReceiver::OnReceiveCcMsg(std::unique_ptr<CcMessage> msg)
         if (!Sharder::Instance().CheckLeaderTerm(tx_node_id, tx_term))
         {
             // The tx node has failed. Pointer stability does not hold anymore.
-            msg_pool_.enqueue(std::move(msg));
+            msg_pool_.Recycle(std::move(msg));
             break;
         }
         else
@@ -767,7 +758,7 @@ void CcStreamReceiver::OnReceiveCcMsg(std::unique_ptr<CcMessage> msg)
                 // The original tx has terminated and the tx machine has been
                 // recycled. The response message is directed to an obsolete tx.
                 // Skips setting the cc handler result.
-                msg_pool_.enqueue(std::move(msg));
+                msg_pool_.Recycle(std::move(msg));
                 txm->ReleaseSharedForwardLatch();
                 break;
             }
@@ -791,7 +782,7 @@ void CcStreamReceiver::OnReceiveCcMsg(std::unique_ptr<CcMessage> msg)
 
         txm->ReleaseSharedForwardLatch();
 
-        msg_pool_.enqueue(std::move(msg));
+        msg_pool_.Recycle(std::move(msg));
         break;
     }
     case CcMessage::MessageType::CcMessage_MessageType_PostprocessResponse:
@@ -806,7 +797,7 @@ void CcStreamReceiver::OnReceiveCcMsg(std::unique_ptr<CcMessage> msg)
         if (!Sharder::Instance().CheckLeaderTerm(tx_node_id, tx_term))
         {
             // The tx node has failed. Pointer stability does not hold anymore.
-            msg_pool_.enqueue(std::move(msg));
+            msg_pool_.Recycle(std::move(msg));
             break;
         }
         else
@@ -824,7 +815,7 @@ void CcStreamReceiver::OnReceiveCcMsg(std::unique_ptr<CcMessage> msg)
                 // The original tx has terminated and the tx machine has been
                 // recycled. The response message is directed to an obsolete tx.
                 // Skips setting the cc handler result.
-                msg_pool_.enqueue(std::move(msg));
+                msg_pool_.Recycle(std::move(msg));
                 txm->ReleaseSharedForwardLatch();
                 break;
             }
@@ -845,7 +836,7 @@ void CcStreamReceiver::OnReceiveCcMsg(std::unique_ptr<CcMessage> msg)
 
         txm->ReleaseSharedForwardLatch();
 
-        msg_pool_.enqueue(std::move(msg));
+        msg_pool_.Recycle(std::move(msg));
         break;
     }
     case CcMessage::MessageType::CcMessage_MessageType_ReadRequest:
@@ -880,7 +871,7 @@ void CcStreamReceiver::OnReceiveCcMsg(std::unique_ptr<CcMessage> msg)
         if (!Sharder::Instance().CheckLeaderTerm(tx_node_id, tx_term))
         {
             // The tx node has failed. Pointer stability does not hold anymore.
-            msg_pool_.enqueue(std::move(msg));
+            msg_pool_.Recycle(std::move(msg));
             break;
         }
         else
@@ -900,7 +891,7 @@ void CcStreamReceiver::OnReceiveCcMsg(std::unique_ptr<CcMessage> msg)
                 // The original tx has terminated and the tx machine has been
                 // recycled. The response message is directed to an obsolete tx.
                 // Skips setting the cc handler result.
-                msg_pool_.enqueue(std::move(msg));
+                msg_pool_.Recycle(std::move(msg));
                 txm->ReleaseSharedForwardLatch();
                 break;
             }
@@ -950,7 +941,7 @@ void CcStreamReceiver::OnReceiveCcMsg(std::unique_ptr<CcMessage> msg)
 
             txm->ReleaseSharedForwardLatch();
         }
-        msg_pool_.enqueue(std::move(msg));
+        msg_pool_.Recycle(std::move(msg));
         break;
     }
     case CcMessage::MessageType::CcMessage_MessageType_PostCommitRequest:
@@ -990,7 +981,7 @@ void CcStreamReceiver::OnReceiveCcMsg(std::unique_ptr<CcMessage> msg)
                 Sharder::Instance().GetCcStreamSender();
             cc_stream_sender->SendMessageToNode(post_commit.src_node_id(),
                                                 return_msg);
-            msg_pool_.enqueue(std::move(msg));
+            msg_pool_.Recycle(std::move(msg));
         }
         else
         {
@@ -1026,7 +1017,7 @@ void CcStreamReceiver::OnReceiveCcMsg(std::unique_ptr<CcMessage> msg)
                 Sharder::Instance().GetCcStreamSender();
             cc_stream_sender->SendMessageToNode(post_commit.src_node_id(),
                                                 return_msg);
-            msg_pool_.enqueue(std::move(msg));
+            msg_pool_.Recycle(std::move(msg));
         }
         else
         {
@@ -1050,7 +1041,7 @@ void CcStreamReceiver::OnReceiveCcMsg(std::unique_ptr<CcMessage> msg)
     {
         assert(false && "Unimplemented");
         LOG(ERROR) << "ScanOpenRequest is unsupported; replying error.";
-        msg_pool_.enqueue(std::move(msg));
+        msg_pool_.Recycle(std::move(msg));
         break;
     }
     case CcMessage::MessageType::CcMessage_MessageType_ScanOpenResponse:
@@ -1064,7 +1055,7 @@ void CcStreamReceiver::OnReceiveCcMsg(std::unique_ptr<CcMessage> msg)
 
         assert(false && "Unimplemented");
         LOG(ERROR) << "ScanOpenResponse is unsupported; replying error.";
-        msg_pool_.enqueue(std::move(msg));
+        msg_pool_.Recycle(std::move(msg));
         break;
     }
     case CcMessage::MessageType::CcMessage_MessageType_ScanNextRequest:
@@ -1098,7 +1089,7 @@ void CcStreamReceiver::OnReceiveCcMsg(std::unique_ptr<CcMessage> msg)
         if (!Sharder::Instance().CheckLeaderTerm(tx_node_id, tx_term))
         {
             // The tx node has failed. Pointer stability does not hold anymore.
-            msg_pool_.enqueue(std::move(msg));
+            msg_pool_.Recycle(std::move(msg));
             break;
         }
         else
@@ -1116,7 +1107,7 @@ void CcStreamReceiver::OnReceiveCcMsg(std::unique_ptr<CcMessage> msg)
                 // The original tx has terminated and the tx machine has been
                 // recycled. The response message is directed to an obsolete tx.
                 // Skips setting the cc handler result.
-                msg_pool_.enqueue(std::move(msg));
+                msg_pool_.Recycle(std::move(msg));
                 txm->ReleaseSharedForwardLatch();
                 break;
             }
@@ -1137,7 +1128,7 @@ void CcStreamReceiver::OnReceiveCcMsg(std::unique_ptr<CcMessage> msg)
             // The handler result has been reset while this response is in
             // transit. Drops this stale response to avoid dereferencing a
             // recycled scanner pointer.
-            msg_pool_.enqueue(std::move(msg));
+            msg_pool_.Recycle(std::move(msg));
             txm->ReleaseSharedForwardLatch();
             break;
         }
@@ -1278,7 +1269,7 @@ void CcStreamReceiver::OnReceiveCcMsg(std::unique_ptr<CcMessage> msg)
 
         txm->ReleaseSharedForwardLatch();
 
-        msg_pool_.enqueue(std::move(msg));
+        msg_pool_.Recycle(std::move(msg));
         break;
     }
     case CcMessage::MessageType::CcMessage_MessageType_ScanSliceRequest:
@@ -1310,7 +1301,7 @@ void CcStreamReceiver::OnReceiveCcMsg(std::unique_ptr<CcMessage> msg)
         int64_t tx_term = msg->tx_term();
         if (!Sharder::Instance().CheckLeaderTerm(tx_node_id, tx_term))
         {
-            msg_pool_.enqueue(std::move(msg));
+            msg_pool_.Recycle(std::move(msg));
             break;
         }
         else
@@ -1328,7 +1319,7 @@ void CcStreamReceiver::OnReceiveCcMsg(std::unique_ptr<CcMessage> msg)
                 // The original tx has terminated and the tx machine has been
                 // recycled. The response message is directed to an obsolete tx.
                 // Skips setting the cc handler result.
-                msg_pool_.enqueue(std::move(msg));
+                msg_pool_.Recycle(std::move(msg));
                 txm->ReleaseSharedForwardLatch();
                 break;
             }
@@ -1347,7 +1338,7 @@ void CcStreamReceiver::OnReceiveCcMsg(std::unique_ptr<CcMessage> msg)
         }
 
         txm->ReleaseSharedForwardLatch();
-        msg_pool_.enqueue(std::move(msg));
+        msg_pool_.Recycle(std::move(msg));
         break;
     }
     case CcMessage::MessageType::CcMessage_MessageType_FaultInjectRequest:
@@ -1370,7 +1361,7 @@ void CcStreamReceiver::OnReceiveCcMsg(std::unique_ptr<CcMessage> msg)
         if (!Sharder::Instance().CheckLeaderTerm(tx_node_id, tx_term))
         {
             // The tx node has failed. Pointer stability does not hold anymore.
-            msg_pool_.enqueue(std::move(msg));
+            msg_pool_.Recycle(std::move(msg));
             break;
         }
         CcHandlerResult<bool> *hd_res =
@@ -1387,7 +1378,7 @@ void CcStreamReceiver::OnReceiveCcMsg(std::unique_ptr<CcMessage> msg)
             // The original tx has terminated and the tx machine has been
             // recycled. The response message is directed to an obsolete tx.
             // Skips setting the cc handler result.
-            msg_pool_.enqueue(std::move(msg));
+            msg_pool_.Recycle(std::move(msg));
             txm->ReleaseSharedForwardLatch();
             break;
         }
@@ -1406,7 +1397,7 @@ void CcStreamReceiver::OnReceiveCcMsg(std::unique_ptr<CcMessage> msg)
         }
         txm->ReleaseSharedForwardLatch();
 
-        msg_pool_.enqueue(std::move(msg));
+        msg_pool_.Recycle(std::move(msg));
         break;
     }
     case CcMessage::MessageType::CcMessage_MessageType_AnalyzeTableAllRequest:
@@ -1429,7 +1420,7 @@ void CcStreamReceiver::OnReceiveCcMsg(std::unique_ptr<CcMessage> msg)
         int64_t tx_term = msg->tx_term();
         if (!Sharder::Instance().CheckLeaderTerm(tx_node_id, tx_term))
         {
-            msg_pool_.enqueue(std::move(msg));
+            msg_pool_.Recycle(std::move(msg));
             break;
         }
         else
@@ -1447,7 +1438,7 @@ void CcStreamReceiver::OnReceiveCcMsg(std::unique_ptr<CcMessage> msg)
                 // The original tx has terminated and the tx machine has been
                 // recycled. The response message is directed to an obsolete tx.
                 // Skips setting the cc handler result.
-                msg_pool_.enqueue(std::move(msg));
+                msg_pool_.Recycle(std::move(msg));
                 txm->ReleaseSharedForwardLatch();
                 break;
             }
@@ -1467,7 +1458,7 @@ void CcStreamReceiver::OnReceiveCcMsg(std::unique_ptr<CcMessage> msg)
         }
 
         txm->ReleaseSharedForwardLatch();
-        msg_pool_.enqueue(std::move(msg));
+        msg_pool_.Recycle(std::move(msg));
         break;
     }
     case CcMessage::MessageType::
@@ -1492,7 +1483,7 @@ void CcStreamReceiver::OnReceiveCcMsg(std::unique_ptr<CcMessage> msg)
         if (!Sharder::Instance().CheckLeaderTerm(tx_node_id, tx_term))
         {
             // The tx node has failed. Pointer stability does not hold anymore.
-            msg_pool_.enqueue(std::move(msg));
+            msg_pool_.Recycle(std::move(msg));
             break;
         }
         CcHandlerResult<bool> *hd_res =
@@ -1511,7 +1502,7 @@ void CcStreamReceiver::OnReceiveCcMsg(std::unique_ptr<CcMessage> msg)
             hd_res->SetFinished();
         }
 
-        msg_pool_.enqueue(std::move(msg));
+        msg_pool_.Recycle(std::move(msg));
         break;
     }
     case CcMessage::MessageType::CcMessage_MessageType_RecoverStateCheckRequest:
@@ -1545,7 +1536,7 @@ void CcStreamReceiver::OnReceiveCcMsg(std::unique_ptr<CcMessage> msg)
 
         Sharder::Instance().GetCcStreamSender()->SendMessageToNode(
             req.src_node_id(), send_msg);
-        msg_pool_.enqueue(std::move(msg));
+        msg_pool_.Recycle(std::move(msg));
         break;
     }
     case CcMessage::MessageType::
@@ -1565,7 +1556,7 @@ void CcStreamReceiver::OnReceiveCcMsg(std::unique_ptr<CcMessage> msg)
                        << ", error_code:" << resp.error_code();
             Sharder::Instance().UpdateLeader(resp.node_group_id());
         }
-        msg_pool_.enqueue(std::move(msg));
+        msg_pool_.Recycle(std::move(msg));
         break;
     }
     case CcMessage::MessageType::CcMessage_MessageType_DeadLockRequest:
@@ -1584,7 +1575,7 @@ void CcStreamReceiver::OnReceiveCcMsg(std::unique_ptr<CcMessage> msg)
     {
         const DeadLockResponse &rsp = msg->dead_lock_response();
         DeadLockCheck::MergeRemoteWaitingLockInfo(&rsp);
-        msg_pool_.enqueue(std::move(msg));
+        msg_pool_.Recycle(std::move(msg));
         break;
     }
     case CcMessage::MessageType::
@@ -1612,7 +1603,7 @@ void CcStreamReceiver::OnReceiveCcMsg(std::unique_ptr<CcMessage> msg)
     }
     case CcMessage::MessageType::CcMessage_MessageType_AbortTransactionResponse:
     {
-        msg_pool_.enqueue(std::move(msg));
+        msg_pool_.Recycle(std::move(msg));
         break;
     }
     case CcMessage::MessageType::CcMessage_MessageType_BlockedCcReqCheckRequest:
@@ -1640,7 +1631,7 @@ void CcStreamReceiver::OnReceiveCcMsg(std::unique_ptr<CcMessage> msg)
         if (!Sharder::Instance().CheckLeaderTerm(tx_node_id, tx_term))
         {
             // The tx node has failed. Pointer stability does not hold anymore.
-            msg_pool_.enqueue(std::move(msg));
+            msg_pool_.Recycle(std::move(msg));
             break;
         }
 
@@ -1664,7 +1655,7 @@ void CcStreamReceiver::OnReceiveCcMsg(std::unique_ptr<CcMessage> msg)
                 // The original tx has terminated and the tx machine has been
                 // recycled. The response message is directed to an obsolete tx.
                 // Skips setting the cc handler result.
-                msg_pool_.enqueue(std::move(msg));
+                msg_pool_.Recycle(std::move(msg));
                 txm->ReleaseSharedForwardLatch();
                 break;
             }
@@ -1674,7 +1665,7 @@ void CcStreamReceiver::OnReceiveCcMsg(std::unique_ptr<CcMessage> msg)
             if (acq_key_result_vec.at(resp.acq_key_result_vec_idx())
                     .IsRemoteHdResultSet(std::memory_order_acquire))
             {
-                msg_pool_.enqueue(std::move(msg));
+                msg_pool_.Recycle(std::move(msg));
                 txm->ReleaseSharedForwardLatch();
                 break;
             }
@@ -1716,7 +1707,7 @@ void CcStreamReceiver::OnReceiveCcMsg(std::unique_ptr<CcMessage> msg)
                 // The original tx has terminated and the tx machine has been
                 // recycled. The response message is directed to an obsolete tx.
                 // Skips setting the cc handler result.
-                msg_pool_.enqueue(std::move(msg));
+                msg_pool_.Recycle(std::move(msg));
                 txm->ReleaseSharedForwardLatch();
                 break;
             }
@@ -1745,7 +1736,7 @@ void CcStreamReceiver::OnReceiveCcMsg(std::unique_ptr<CcMessage> msg)
             txm->ReleaseSharedForwardLatch();
         }
 
-        msg_pool_.enqueue(std::move(msg));
+        msg_pool_.Recycle(std::move(msg));
         break;
     }
     case CcMessage::MessageType::CcMessage_MessageType_KickoutDataRequest:
@@ -1787,7 +1778,7 @@ void CcStreamReceiver::OnReceiveCcMsg(std::unique_ptr<CcMessage> msg)
         {
             // The tx coordinator node has failed. Pointer stability
             // does not hold anymore.
-            msg_pool_.enqueue(std::move(msg));
+            msg_pool_.Recycle(std::move(msg));
             LOG(ERROR) << "Receive remote kickoutccentry response, but tx"
                           " coordinator has failed.";
             break;
@@ -1807,7 +1798,7 @@ void CcStreamReceiver::OnReceiveCcMsg(std::unique_ptr<CcMessage> msg)
                 // The original tx has terminated and the tx state machine has
                 // been recycled. The response message is directed to an
                 // obsolete tx.
-                msg_pool_.enqueue(std::move(msg));
+                msg_pool_.Recycle(std::move(msg));
                 txm->ReleaseSharedForwardLatch();
                 break;
             }
@@ -1830,7 +1821,7 @@ void CcStreamReceiver::OnReceiveCcMsg(std::unique_ptr<CcMessage> msg)
         txm->ReleaseSharedForwardLatch();
 
         // Recycle the cc message
-        msg_pool_.enqueue(std::move(msg));
+        msg_pool_.Recycle(std::move(msg));
         break;
     }
     case CcMessage::MessageType::CcMessage_MessageType_ApplyRequest:
@@ -1853,7 +1844,7 @@ void CcStreamReceiver::OnReceiveCcMsg(std::unique_ptr<CcMessage> msg)
         if (!Sharder::Instance().CheckLeaderTerm(tx_node_id, tx_term))
         {
             // The tx node has failed. Pointer stability does not hold anymore.
-            msg_pool_.enqueue(std::move(msg));
+            msg_pool_.Recycle(std::move(msg));
             break;
         }
         else
@@ -1871,7 +1862,7 @@ void CcStreamReceiver::OnReceiveCcMsg(std::unique_ptr<CcMessage> msg)
                 // The original tx has terminated and the tx machine has been
                 // recycled. The response message is directed to an obsolete tx.
                 // Skips setting the cc handler result.
-                msg_pool_.enqueue(std::move(msg));
+                msg_pool_.Recycle(std::move(msg));
                 txm->ReleaseSharedForwardLatch();
                 break;
             }
@@ -1905,7 +1896,7 @@ void CcStreamReceiver::OnReceiveCcMsg(std::unique_ptr<CcMessage> msg)
             }
         }
         txm->ReleaseSharedForwardLatch();
-        msg_pool_.enqueue(std::move(msg));
+        msg_pool_.Recycle(std::move(msg));
         break;
     }
     case CcMessage::MessageType::CcMessage_MessageType_PublishRequest:
@@ -1953,7 +1944,7 @@ void CcStreamReceiver::OnReceiveCcMsg(std::unique_ptr<CcMessage> msg)
         }
 
         dbcc->AddRemoteObjSize(resp.dbsize_term(), total_obj_sizes);
-        msg_pool_.enqueue(std::move(msg));
+        msg_pool_.Recycle(std::move(msg));
         break;
     }
     case CcMessage::MessageType::
@@ -1992,7 +1983,7 @@ void CcStreamReceiver::OnReceiveCcMsg(std::unique_ptr<CcMessage> msg)
         int64_t tx_term = msg->tx_term();
         if (!Sharder::Instance().CheckLeaderTerm(tx_node_id, tx_term))
         {
-            msg_pool_.enqueue(std::move(msg));
+            msg_pool_.Recycle(std::move(msg));
             break;
         }
         else
@@ -2007,7 +1998,7 @@ void CcStreamReceiver::OnReceiveCcMsg(std::unique_ptr<CcMessage> msg)
             if (txm->TxNumber() != msg->tx_number() ||
                 txm->CommandId() != msg->command_id())
             {
-                msg_pool_.enqueue(std::move(msg));
+                msg_pool_.Recycle(std::move(msg));
                 txm->ReleaseSharedForwardLatch();
                 break;
             }
@@ -2027,7 +2018,7 @@ void CcStreamReceiver::OnReceiveCcMsg(std::unique_ptr<CcMessage> msg)
         }
 
         txm->ReleaseSharedForwardLatch();
-        msg_pool_.enqueue(std::move(msg));
+        msg_pool_.Recycle(std::move(msg));
         break;
     }
     default:
