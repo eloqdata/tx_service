@@ -1070,6 +1070,11 @@ class TxServiceModule : public eloq::EloqModule
 public:
     TxServiceModule() = default;
 
+    eloq::ModuleType Type() const override
+    {
+        return eloq::ModuleType::kTxService;
+    }
+
     void Init(std::vector<std::unique_ptr<TxProcessor>> *tx_processors)
     {
         tx_processors_ = tx_processors;
