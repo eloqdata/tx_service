@@ -3714,6 +3714,16 @@ void LocalCcShards::PostProcessRangePartitionDataSyncTask(
     }
 }
 
+void LocalCcShards::ReleaseScanResultsAndWait(
+    uint16_t source_core, RangePartitionDataSyncScanCc &scan)
+{
+    ReleaseDataSyncScanHeapCc release_cc(&scan.DataSyncVec(),
+                                         &scan.ArchiveVec());
+    EnqueueLowPriorityCcRequestToShard(source_core, &release_cc);
+    // Keep the stack request alive through every incremental release round.
+    release_cc.Wait();
+}
+
 void LocalCcShards::DataSyncForRangePartition(
     std::shared_ptr<DataSyncTask> data_sync_task, size_t worker_idx)
 {
@@ -4346,6 +4356,9 @@ void LocalCcShards::DataSyncForRangePartition(
                        << " with error code: "
                        << static_cast<uint32_t>(scan_cc.ErrorCode());
 
+            // A failed scan may already have exported part of a batch. Return
+            // its references before completing the task and releasing its pins.
+            ReleaseScanResultsAndWait(dest_core, scan_cc);
             PostProcessRangePartitionDataSyncTask(
                 std::move(data_sync_task),
                 data_sync_txm,
@@ -4463,6 +4476,13 @@ void LocalCcShards::DataSyncForRangePartition(
             if (data_sync_vec->empty())
             {
                 LOG(WARNING) << "data_sync_vec is empty.";
+                // A full scan heap can stop this batch before its first export,
+                // leaving keys from the preceding batch in scan_cc. Release
+                // them before Reset clears the Full flag and we retry the same
+                // cursor. Any archive payloads already moved above stay owned
+                // by archive_vec; only the scan request's remaining refs are
+                // freed.
+                ReleaseScanResultsAndWait(dest_core, scan_cc);
                 // Reset
                 scan_cc.Reset();
                 // Return the quota to flush data memory usage pool since the
@@ -4540,15 +4560,7 @@ void LocalCcShards::DataSyncForRangePartition(
 
             if (scan_cc.scan_heap_is_full_ == 1)
             {
-                // Clear the FlushRecords' memory of scan cc since the
-                // DataSyncScan heap is full.
-                auto &data_sync_vec_ref = scan_cc.DataSyncVec();
-                auto &archive_vec_ref = scan_cc.ArchiveVec();
-                ReleaseDataSyncScanHeapCc release_scan_heap_cc(
-                    &data_sync_vec_ref, &archive_vec_ref);
-                EnqueueLowPriorityCcRequestToShard(dest_core,
-                                                   &release_scan_heap_cc);
-                release_scan_heap_cc.Wait();
+                ReleaseScanResultsAndWait(dest_core, scan_cc);
             }
             // Reset
             scan_cc.Reset();
@@ -4563,12 +4575,7 @@ void LocalCcShards::DataSyncForRangePartition(
     }
 
     // Release scan heap memory after scan finish.
-    auto &data_sync_vec_ref = scan_cc.DataSyncVec();
-    auto &archive_vec_ref = scan_cc.ArchiveVec();
-    ReleaseDataSyncScanHeapCc release_scan_heap_cc(&data_sync_vec_ref,
-                                                   &archive_vec_ref);
-    EnqueueLowPriorityCcRequestToShard(dest_core, &release_scan_heap_cc);
-    release_scan_heap_cc.Wait();
+    ReleaseScanResultsAndWait(dest_core, scan_cc);
 
     PostProcessRangePartitionDataSyncTask(std::move(data_sync_task),
                                           data_sync_txm,

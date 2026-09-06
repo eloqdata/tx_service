@@ -355,6 +355,19 @@ void SkGenerator::ScanAndEncodeIndex(const TxKey *start_key,
         cc_shards->EnqueueToCcShard(dest_core, &scan_req);
         scan_req.Wait();
 
+        // The completed scan owns cloned keys and PK payload references. Keep
+        // them through every encoder, then return them on their source shard
+        // before upload backpressure or a retry sleep. The guard also covers
+        // partial scan errors, encoding errors and term-change returns; it does
+        // not own the stack request itself. Never run it while a scan is
+        // active.
+        auto release_scan_batch =
+            [cc_shards, dest_core](RangePartitionDataSyncScanCc *scan)
+        { cc_shards->ReleaseScanResultsAndWait(dest_core, *scan); };
+        std::unique_ptr<RangePartitionDataSyncScanCc,
+                        decltype(release_scan_batch)>
+            completed_batch(&scan_req, release_scan_batch);
+
         if (scan_req.IsError())
         {
             scan_res = scan_req.ErrorCode();
@@ -372,7 +385,6 @@ void SkGenerator::ScanAndEncodeIndex(const TxKey *start_key,
             else if (scan_res == CcErrorCode::OUT_OF_MEMORY ||
                      scan_res == CcErrorCode::DATA_STORE_ERR)
             {
-                std::this_thread::sleep_for(std::chrono::seconds(30));
                 // Reset the paused key.
                 const TxKey &paused_key = scan_req.PausePos().first;
                 if (!scan_req.IsDrained())
@@ -383,9 +395,11 @@ void SkGenerator::ScanAndEncodeIndex(const TxKey *start_key,
                     assert(paused_key.IsOwner());
                     paused_key.Copy(last_finished_pos);
                 }
+                completed_batch.reset();
                 scan_req.Reset();
                 scan_pk_finished = false;
                 scan_res = CcErrorCode::NO_ERROR;
+                std::this_thread::sleep_for(std::chrono::seconds(30));
                 continue;
             }
             else
@@ -481,6 +495,12 @@ void SkGenerator::ScanAndEncodeIndex(const TxKey *start_key,
         } /* End of foreach new_indexes_name */
 
         scan_pk_finished = scan_data_drained;
+        // Encoded SK entries and last_finished_pos own their data. Drop aliases
+        // to the consumed PK batch before it is released and before Enqueue can
+        // wait for an upload slot. Release also handles a zero-row/full batch.
+        target_key = TxKey();
+        target_rec = nullptr;
+        completed_batch.reset();
         scan_req.Reset();
         scanned_items_count_ += batch_tuples;
         if (batch_tuples > 0)
