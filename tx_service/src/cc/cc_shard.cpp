@@ -538,7 +538,7 @@ void CcShard::CheckAndTriggerCkptByDirtyMemory()
                    << "MB), dirty_keys=" << dirty_data_key_count_ << "/"
                    << data_key_count_;
 
-        NotifyCkpt(true);  // Request immediate checkpoint
+        NotifyCkpt(true, "dirty_memory_threshold");
     }
 }
 
@@ -1767,11 +1767,11 @@ bool CcShard::FlushEntryForTest(
     }
 }
 
-void CcShard::NotifyCkpt(bool request_ckpt)
+void CcShard::NotifyCkpt(bool request_ckpt, const char *reason)
 {
     if (ckpter_ != nullptr)
     {
-        ckpter_->Notify(request_ckpt);
+        ckpter_->Notify(request_ckpt, reason);
     }
 }
 

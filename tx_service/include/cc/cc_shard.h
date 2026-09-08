@@ -501,8 +501,11 @@ public:
      * @param request_ckpt If true, request a new checkpoint. If false, just
      * notify the checkpoint thread to check whether there is a pending
      * checkpoint request.
+     * @param reason Diagnostic label forwarded to the checkpointer; consumed
+     * synchronously and ignored when request_ckpt is false.
      */
-    void NotifyCkpt(bool request_ckpt = true);
+    void NotifyCkpt(bool request_ckpt = true,
+                    const char *reason = "explicit_request");
 
     /**
      * @brief Dispatch heavy cpu-bound task, e.g. StoreRange::LoadSlice().

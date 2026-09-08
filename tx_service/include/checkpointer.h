@@ -93,8 +93,11 @@ public:
      * from ccmap. This will also be called by data sync worker thread when
      * it runs out of task.
      * @param  request_ckpt  If true, will request checkpoint immediately.
+     * @param reason Diagnostic label logged only when a request is accepted;
+     * consumed synchronously and ignored when request_ckpt is false.
      */
-    void Notify(bool request_ckpt = true);
+    void Notify(bool request_ckpt = true,
+                const char *reason = "explicit_request");
 
     bool IsTerminated();
 
