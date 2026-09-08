@@ -84,6 +84,8 @@ The log service keeps multi-stage records in its state machine until the Clean r
 
 Notification sources: tx processors that find nothing clean to evict (`CcShard::NotifyCkpt`), the dirty-memory trigger (§3.5), the log service's `NotifyCheckpointer` RPC (§1.2), data-sync workers running dry, and shutdown.
 
+Accepted checkpoint requests always log at INFO: `Checkpoint requested: reason=memory_pressure` (eviction cannot free entries), `reason=dirty_memory_threshold` (the configured threshold, default 10% of the per-shard memory limit), or `reason=explicit_request` (other explicit notifications). Rate-limited and coalesced requests do not log again. The checkpointer logs `Checkpoint triggered: reason=timer` with the interval for periodic rounds and `reason=shutdown` for the final round. These trigger logs do not depend on `report_ckpt`. A request log records acceptance, not completion; the existing per-node-group begin/completion logs describe checkpoint progress.
+
 ### 3.2 Choosing the checkpoint ts — `GetNewCheckpointTs`
 
 `GetNewCheckpointTs(ng, is_last_ckpt)` (`checkpointer.cpp:98-139`) broadcasts a `CkptTsCc` to every shard (`tx_service/include/cc/cc_request.h:2983-3156`) and takes the minimum:

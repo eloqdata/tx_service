@@ -1689,7 +1689,7 @@ bool ShardCleanCc::Execute(CcShard &ccs)
                 if (free_count_ == 0 && !shard_heap->IsDefragHeapCcOnFly() &&
                     !Sharder::Instance().GetCheckpointer()->IsOngoingDataSync())
                 {
-                    ccs.NotifyCkpt(true);
+                    ccs.NotifyCkpt(true, "memory_pressure");
                 }
 
                 free_count_ = 0;

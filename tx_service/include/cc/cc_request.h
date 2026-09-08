@@ -3945,7 +3945,8 @@ public:
         bool export_base_table_item_only = false,
         StoreRange *store_range = nullptr,
         const std::map<TxKey, int64_t> *old_slices_delta_size = nullptr,
-        uint64_t schema_version = 0)
+        uint64_t schema_version = 0,
+        uint64_t flush_data_size_limit = 0)
         : scan_heap_is_full_(false),
           table_name_(&table_name),
           node_group_id_(node_group_id),
@@ -3963,7 +3964,8 @@ public:
           slice_coordinator_(export_base_table_item_, &slices_to_scan_),
           export_base_table_item_only_(export_base_table_item_only),
           store_range_(store_range),
-          schema_version_(schema_version)
+          schema_version_(schema_version),
+          flush_data_size_limit_(flush_data_size_limit)
     {
         tx_number_ = txn;
         assert(scan_batch_size_ > DataSyncScanBatchSize);
@@ -4288,6 +4290,12 @@ public:
     uint32_t scan_heap_is_full_{0};
 
 private:
+    bool HasReachedFlushDataSizeLimit() const
+    {
+        return flush_data_size_limit_ > 0 &&
+               accumulated_flush_data_size_ >= flush_data_size_limit_;
+    }
+
     struct SliceCoordinator
     {
         static constexpr uint16_t MaxBatchSliceCount = 128;
@@ -4453,6 +4461,10 @@ private:
     // scan is part of range split which block the schema change
     // TODO(xxx) general solution for #1130
     const uint64_t schema_version_{0};
+    // Maximum payload bytes exported in one flush batch. Zero disables the
+    // limit for callers, such as secondary-index generation, that do not
+    // produce flush batches.
+    const uint64_t flush_data_size_limit_{0};
 
     OpType op_type_{OpType::Normal};
 
