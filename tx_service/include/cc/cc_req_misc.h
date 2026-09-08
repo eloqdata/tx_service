@@ -563,6 +563,18 @@ public:
 struct FetchRecordCc : public FetchCc
 {
 public:
+    /**
+     * Returns a completed pooled request to its pool, or destroys a temporary
+     * request. The active-fetch map keeps this owner until all fetch retries
+     * and backfill work have finished on the owning shard.
+     */
+    struct Deleter
+    {
+        bool pooled_{false};
+        void operator()(FetchRecordCc *request) const;
+    };
+    using uptr = std::unique_ptr<FetchRecordCc, Deleter>;
+
     FetchRecordCc() = default;
     FetchRecordCc(const TableName *tbl_name,
                   const TableSchema *tbl_schema,
@@ -596,6 +608,9 @@ public:
     bool Execute(CcShard &ccs) override;
 
     void SetFinish(int err);
+
+    /** Releases completed fetch data before publishing the request as idle. */
+    void Free() override;
 
     // table_name is a string view, cannot access it outside TxProcessor.
     TableName table_name_{

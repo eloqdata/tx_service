@@ -21,6 +21,7 @@
  */
 #pragma once
 
+#include <algorithm>
 #include <memory>
 #include <vector>
 
@@ -33,11 +34,17 @@ template <typename T>
 class CcRequestPool
 {
 public:
+    /**
+     * Retains at most max_size request objects; zero disables the pool.
+     * NextRequest returns nullptr when every retained request is in use and
+     * the limit has been reached. Acquisition runs on the owning shard.
+     */
     explicit CcRequestPool(size_t max_size = UINT64_MAX)
         : head_(0), max_size_(max_size)
     {
-        pool_.reserve(8);
-        for (size_t idx = 0; idx < 8; ++idx)
+        const size_t initial_size = std::min<size_t>(8, max_size_);
+        pool_.reserve(initial_size);
+        for (size_t idx = 0; idx < initial_size; ++idx)
         {
             pool_.emplace_back(std::make_unique<T>());
         }
@@ -64,20 +71,26 @@ public:
 
         if (count == pool_.size())
         {
-            if (count == max_size_)
+            if (count >= max_size_)
             {
                 return nullptr;
             }
 
-            size_t old_size = pool_.size();
-            pool_.resize((size_t) (old_size * 1.5));
-            for (size_t idx = old_size; idx < pool_.size(); ++idx)
+            const size_t old_size = pool_.size();
+            // Clamp the increment before adding it to avoid exceeding the
+            // limit or overflowing the unlimited default's size arithmetic.
+            const size_t growth = std::min(max_size_ - old_size,
+                                           std::max<size_t>(1, old_size / 2));
+            const size_t new_size = old_size + growth;
+            pool_.reserve(new_size);
+            for (size_t idx = old_size; idx < new_size; ++idx)
             {
-                pool_[idx] = std::make_unique<T>();
+                pool_.emplace_back(std::make_unique<T>());
             }
             req_ptr = static_cast<CcRequestBase *>(pool_[old_size].get());
             req_ptr->Use();
             head_ = old_size + 1;
+            head_ = head_ == pool_.size() ? 0 : head_;
             return pool_[old_size].get();
         }
         else

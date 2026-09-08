@@ -1354,11 +1354,13 @@ private:
 
     std::unordered_map<TableName, std::unique_ptr<FetchCc>> fetch_reqs_;
 
-    // FetchRecordCc addresses must remain stable while data-store callbacks are
-    // in flight. The pool owns the requests and the flat map only indexes the
-    // active single-flight fetch for each entry.
-    absl::flat_hash_map<LruEntry *, FetchRecordCc *> fetch_record_reqs_;
-    CcRequestPool<FetchRecordCc> fetch_record_cc_pool_;
+    // Keep a bounded set of reusable shells after a burst of cold reads.
+    // Saturation allocates temporary requests rather than limiting reads.
+    CcRequestPool<FetchRecordCc> fetch_record_cc_pool_{128};
+    // Addresses stay stable across async callbacks. Erasing an active owner
+    // recycles a pooled request or deletes a temporary one. Declare the map
+    // after the pool so these owners are released before the pool is destroyed.
+    absl::flat_hash_map<LruEntry *, FetchRecordCc::uptr> fetch_record_reqs_;
 
     // For load snapshot from kvstore asynchronously
     CcRequestPool<FetchSnapshotCc> fetch_snapshot_cc_pool_;

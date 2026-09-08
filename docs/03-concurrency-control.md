@@ -39,7 +39,10 @@ Rules of the model (verified in `tx_service/src/cc/cc_shard.cpp::ProcessRequests
    `ProcessRequests()` dequeues in batches of up to 64 (`req_buf_`) and calls `Execute(*this)`;
    if `Execute` returns `true` it calls `req->Free()`, returning the request to its
    `CcRequestPool` (`cc_req_pool.h` — a circular vector of reusable request objects keyed on the
-   `in_use_` flag). Stack-owned requests that notify an external waiter before `Execute()`
+   `in_use_` flag). A finite pool limit also caps its initial allocation and growth;
+   `NextRequest()` returns `nullptr` when that limit is exhausted (including a zero limit),
+   so callers using a finite limit must handle saturation. The default remains unbounded.
+   Stack-owned requests that notify an external waiter before `Execute()`
    unwinds must return `false`, or must keep `in_use_` set until the scheduler-side `Free()`
    has completed; otherwise the owner can reset or destroy the stack object while
    `ProcessRequests()` still holds its raw pointer.
@@ -102,6 +105,23 @@ the cursor after a checkpoint. The actual eviction loop is driven by the self-re
 **DispatchTask.** `CcShard::DispatchTask(idx, task)` wraps a `std::function<bool(CcShard&)>` in a
 pooled `RunOnTxProcessorCc` and enqueues it to another shard — the standard way to run CPU-bound
 work (e.g. `StoreRange::LoadSlice()`) on a specific shard's context.
+
+**Record-fetch pool retention.** `FetchRecordCc` keeps at most 128 reusable requests per
+shard. Saturation allocates a temporary request, preserving concurrent reads and single-flight
+coalescing. The active-fetch map owns both kinds through a deleter that calls `Free()` for a
+pooled request or deletes a temporary request on removal. Backfill and reopen retries keep
+that owner alive until the fetch reaches its existing terminal removal path.
+
+`FetchRecordCc::Free()` releases serialized values, archive records, owned keys,
+session/boundary strings and requester storage before publishing the pooled request as idle.
+`std::string::clear()` alone would retain the capacity of a previously fetched large value.
+Erasing an active owner can destroy the currently executing request: release pins and recycle
+locks first, then return without accessing the request. Declare the active map after the pool
+so its owners are released first during shard destruction; callbacks must already be quiescent.
+
+The 128-object limit bounds retained request shells, not in-flight bytes. Returning payload
+allocations to the allocator also does not guarantee an immediate RSS decrease. A fetched
+string moved from a DSS worker retains the heap ownership of its original allocation.
 
 ## 3. LocalCcShards — the node-level container (`local_cc_shards.h`)
 
