@@ -2201,7 +2201,15 @@ store::DataStoreHandler::DataStoreOpStatus CcShard::FetchRecord(
     FetchRecordCc *fetch_req = nullptr;
     if (tab_it == fetch_record_reqs_.end())
     {
-        fetch_req = fetch_record_cc_pool_.NextRequest();
+        FetchRecordCc::uptr request(fetch_record_cc_pool_.NextRequest(),
+                                    FetchRecordCc::Deleter{true});
+        if (request == nullptr)
+        {
+            request = FetchRecordCc::uptr(new FetchRecordCc(),
+                                          FetchRecordCc::Deleter{false});
+            request->Use();
+        }
+        fetch_req = request.get();
         fetch_req->Reset(&table_name,
                          tbl_schema,
                          std::move(key),
@@ -2215,13 +2223,13 @@ store::DataStoreHandler::DataStoreOpStatus CcShard::FetchRecord(
                          only_fetch_archives,
                          reopen);
         const bool inserted =
-            fetch_record_reqs_.try_emplace(cce, fetch_req).second;
+            fetch_record_reqs_.try_emplace(cce, std::move(request)).second;
         assert(inserted);
         (void) inserted;
     }
     else
     {
-        fetch_req = tab_it->second;
+        fetch_req = tab_it->second.get();
     }
     fetch_req->AddRequester(requester);
 
@@ -2422,13 +2430,10 @@ void CcShard::RemoveFetchRecordRequest(LruEntry *cce)
 {
     auto fetch_it = fetch_record_reqs_.find(cce);
     assert(fetch_it != fetch_record_reqs_.end());
-    FetchRecordCc *fetch_req = fetch_it->second;
+    // Both fetch completion and acquisition run on this shard. A pooled
+    // request cannot be reused until Execute unwinds; a temporary request is
+    // destroyed here, so the caller must not access it after this erasure.
     fetch_record_reqs_.erase(fetch_it);
-
-    // Free marks the request reusable while its Execute call is unwinding, but
-    // both FetchRecord and resumed requesters run on this shard, so NextRequest
-    // cannot observe it until control returns to the shard loop.
-    fetch_req->Free();
 }
 
 CcMap *CcShard::CreateOrUpdatePkCcMap(const TableName &table_name,

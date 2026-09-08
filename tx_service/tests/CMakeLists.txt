@@ -63,7 +63,9 @@ set(CATCH_MAIN_TESTS
     CcPage-Test
     LargeObjLRU-Test
     CcRequestWait-Test
+    CcRequestPool-Test
     CheckpointMetricsState-Test
+    FetchRecordCc-Test
     NonBlockingLock-Test
     AcquireAllError-Test
     StandbyForward-Test

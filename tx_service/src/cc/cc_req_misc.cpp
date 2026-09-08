@@ -818,6 +818,36 @@ FetchRecordCc::FetchRecordCc(const TableName *tbl_name,
 {
 }
 
+void FetchRecordCc::Deleter::operator()(FetchRecordCc *request) const
+{
+    if (pooled_)
+    {
+        request->Free();
+    }
+    else
+    {
+        delete request;
+    }
+}
+
+void FetchRecordCc::Free()
+{
+    // BackFill and all retry/reopen paths must be finished before the owner
+    // releases this request. clear() alone keeps large strings allocated in
+    // idle pool slots, including after a later missing-key or tiny-value read.
+    std::string().swap(rec_str_);
+    archive_records_.reset();
+    tx_key_ = TxKey();
+    std::string().swap(kv_session_id_);
+    std::string().swap(kv_start_key_);
+    std::string().swap(kv_end_key_);
+    std::vector<CcRequestBase *>().swap(requesters_);
+    cce_ = nullptr;
+    lock_ = nullptr;
+    table_schema_ = nullptr;
+    CcRequestBase::Free();
+}
+
 void FetchRecordCc::Reset(const TableName *tbl_name,
                           const TableSchema *tbl_schema,
                           TxKey tx_key,
@@ -1017,9 +1047,10 @@ bool FetchRecordCc::Execute(CcShard &ccs)
         {
             // Gives up on the reopen, as the previous shape did when its
             // FetchRecord returned Retry.
-            ccs.RemoveFetchRecordRequest(cce_);
             cce_->GetKeyGapLockAndExtraData()->ReleasePin();
             cce_->RecycleKeyLock(ccs);
+            // Removing the active owner can destroy a temporary request.
+            ccs.RemoveFetchRecordRequest(cce_);
         }
         return false;
     }

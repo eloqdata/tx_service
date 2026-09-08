@@ -157,7 +157,7 @@ store_hd_->PersistKV(kv_table_names)              local_cc_shards.cpp:5964
 
 ```
 CcMap::Execute miss (template_cc_map.h / object_cc_map.h)
-  │ CcShard::FetchRecord → may return Retry when saturated (cc_shard.cpp:1979)
+  │ CcShard::FetchRecord → reuse a pooled request or allocate a temporary one
   ▼
 DataStoreServiceClient::FetchRecord(fetch_cc)
   │ kv_partition = KvPartitionIdOf(partition_id, !IsHashPartitioned())
@@ -170,6 +170,12 @@ Read closure (local bypass or RPC) ─► FetchRecordCallback
   ▼
 fetch_cc->SetFinish(0)  → re-enqueued on the owning CcShard          [03]
 ```
+
+The record-fetch pool retains at most 128 reusable objects per shard; exceeding that limit
+does not reject a read. The active-fetch map owns temporary requests until the fetch reaches
+its terminal removal path, while backfill/reopen retries keep the request alive. Completed
+pooled requests release their value, archive and owned key buffers before reuse. A synchronous
+store `Retry` still unwinds the fetch as before.
 
 ### Slice load (`LoadRangeSlice`)
 
