@@ -746,6 +746,11 @@ void Checkpointer::Run()
         }
 
         last_checkpoint_ts_ = std::chrono::system_clock::now();
+        if (!request_ckpt_.load(std::memory_order_acquire))
+        {
+            LOG(INFO) << "Checkpoint triggered: reason=timer, interval="
+                      << checkpoint_interval_ << " seconds";
+        }
         lk.unlock();
         Ckpt(false);
         lk.lock();
@@ -758,6 +763,7 @@ void Checkpointer::Run()
     // ensure normal shutdown execute checkpoint since we could receive
     // terminating request during the last checkpoint.
     lk.unlock();
+    LOG(INFO) << "Checkpoint triggered: reason=shutdown";
     Ckpt(true);
     lk.lock();
     // notify all waiting that one round checkpoint is done.
@@ -770,7 +776,7 @@ void Checkpointer::Run()
  * to do checkpoint if there is no freeable entries to be kicked out
  * from ccmap.
  */
-void Checkpointer::Notify(bool request_ckpt)
+void Checkpointer::Notify(bool request_ckpt, const char *reason)
 {
     if (request_ckpt)
     {
@@ -788,6 +794,9 @@ void Checkpointer::Notify(bool request_ckpt)
         }
 
         last_checkpoint_request_ts_.store(now);
+        // Log accepted requests only: repeated pressure notifications can be
+        // frequent and are coalesced or rate-limited above.
+        LOG(INFO) << "Checkpoint requested: reason=" << reason;
     }
     std::unique_lock<std::mutex> lk(ckpt_mux_);
     ckpt_cv_.notify_one();
