@@ -1,90 +1,53 @@
-# Architecture Overview
+# Architecture overview
 
-Data Substrate (repo name `tx_service`) is EloqData's API-agnostic database foundation: a distributed, in-memory, transactional cache layer (the **tx service**) plus a pluggable WAL service (**log service**) and a pluggable persistent storage layer (**store handler / EloqDSS**). API engines — EloqKV (Redis), EloqSQL (MySQL), EloqDoc (MongoDB) — link this library as a git submodule, register a `CatalogFactory` that supplies their concrete key/record/schema types, and drive everything through `TxRequest`s. The core never knows what a "Redis hash" or a "SQL row" is; it sees type-erased keys, records, and commands (see [05-data-model-and-catalog.md](05-data-model-and-catalog.md)).
+Data Substrate is an API-agnostic database foundation embedded by API engines such as EloqKV. It combines an in-memory transactional service with pluggable replicated logging and persistent storage. API engines register concrete schema, key, record and command types, then submit `TxRequest`s without coupling the core to Redis, SQL or document semantics.
 
-## Component Map
+## Component responsibilities
 
-| Directory | What it is | Doc |
+| Component | Responsibility | Owned boundary |
 |---|---|---|
-| `core/` | `DataSubstrate` singleton: config loading, engine registration, ordered startup of log service → metrics → storage → tx service | this file |
-| `tx_service/` | The engine: CcShards, concurrency control, transaction state machines, distribution, checkpointing | [02](02-threading-model.md), [03](03-concurrency-control.md), [04](04-transaction-execution.md), [06](06-distribution-and-clustering.md), [07](07-durability-and-recovery.md), [08](08-range-and-bucket-management.md) |
-| `store_handler/` | `DataStoreHandler` backends: EloqDSS client and embedded RocksDB | [09-store-handler.md](09-store-handler.md) |
-| `store_handler/eloq_data_store_service/` | EloqDSS: a standalone (or in-process) brpc data-store service over RocksDB / RocksDB-Cloud / EloqStore | [09-store-handler.md](09-store-handler.md) |
-| `eloq_log_service/` | In-tree replicated WAL service (braft-based log groups); compiled when `WITH_LOG_SERVICE` is set | [10-log-service.md](10-log-service.md) |
-| `tx_service/tx-log-protos/` | Shared protobuf definitions + `LogAgent` (log service client used by tx nodes) | [10-log-service.md](10-log-service.md) |
-| `eloq_metrics/` | Metrics library (`Meter`/`MetricsRegistry`, Prometheus collector) | — |
-| `tx_service/abseil-cpp/`, `store_handler/eloq_data_store_service/eloqstore/` | Vendored submodules | — |
-| `tx_service/raft_host_manager/` | **Proprietary component — intentionally not covered by these docs** | — |
+| `core/` | Load configuration, register API engines, construct integrations, and order startup/shutdown | `DataSubstrate` public lifecycle |
+| `tx_service/` | Execute transactions over sharded in-memory state, coordinate distribution, checkpointing and recovery | `TxRequest`, catalog and store/log interfaces |
+| `store_handler/` | Adapt checkpoint and cache-miss operations to a selected persistent backend | `DataStoreHandler` asynchronous contract |
+| EloqDSS | Serve persistent data over brpc or through an in-process path | `ds_request.proto` service contract |
+| `eloq_log_service/` | Replicate WAL records and retain them until the engine advances a safe truncation point | log service protobuf and `LogAgent` |
+| `eloq_metrics/` | Export process and subsystem metrics | metrics registry and collectors |
+| API engine | Own protocol behavior and concrete data semantics | registered `CatalogFactory` and submitted requests |
 
-## The Big Picture
+The proprietary host manager participates through RPC-visible topology and leadership operations; its internal design is outside this documentation boundary.
 
-```
-   API engine (EloqKV / EloqSQL / EloqDoc)
-        │  TxRequest (read / scan / upsert / object command / DDL / commit)
-        ▼
-   TransactionExecution (async state machine, one per active tx)      [04]
-        │  CcRequest via CcHandler (Local- or Remote-)                [03][06]
-        ▼
-   CcShard 0..N-1  (one per core; CcMaps hold CcEntries + locks)      [03]
-     │ owned & driven by TxProcessor N / brpc worker N                [02]
-     │
-     ├─ commit: WriteLog ───────────────► Log Service (replicated WAL) [10]
-     ├─ checkpoint: flush dirty entries ► DataStoreHandler / EloqDSS   [07][09]
-     └─ cache miss / slice load ◄──────── DataStoreHandler / EloqDSS   [08][09]
-```
+## Lifecycle and data flow
 
-Key design decisions:
+`DataSubstrate::Init` loads process and cluster configuration. API layers then call `RegisterEngine` with their catalog factory and prebuilt tables. `Start` initializes log, metrics and storage dependencies before constructing and starting the transaction service. Shutdown reverses ownership so transaction work cannot outlive its persistence dependencies.
 
-- **Thread-per-core, message passing.** Data is sharded across `CcShard`s, one per core. A shard is touched only by its owning processor; everyone else (transactions, RPC handlers, background workers) enqueues `CcRequest`s. There are almost no data locks — the per-key `NonBlockingLock` is a *transactional* lock (2PL/OCC), not a mutex. See [02-threading-model.md](02-threading-model.md) and [03-concurrency-control.md](03-concurrency-control.md).
-- **Memory is the primary replica.** Committed data lives in cc maps; the WAL makes it durable; the kv store holds checkpointed/cold data. A node-group failover recovers memory state by replaying the log on top of the kv store. See [07-durability-and-recovery.md](07-durability-and-recovery.md).
-- **Everything transactional is a state machine.** `TransactionExecution::Forward()` advances a stack of `TransactionOperation`s without blocking; blocked operations simply yield the processor. See [04-transaction-execution.md](04-transaction-execution.md).
-- **Cluster = node groups + buckets.** Nodes form raft-replicated node groups (NG). Keys hash into 1024 buckets; each bucket is owned by an NG. Raft membership/election is delegated to an external *host manager* process (proprietary; interacted with only via RPC). See [06-distribution-and-clustering.md](06-distribution-and-clustering.md).
+A foreground request follows this path:
 
-## Startup Sequence (`core/`)
+1. An API engine submits a typed `TxRequest` to a `TransactionExecution`.
+2. The transaction state machine converts it into local or remote concurrency-control requests.
+3. The owning `CcShard` applies requests to catalog or data entries under transactional locking rules.
+4. Commit records durable mutations in the log before exposing a successful durable outcome.
+5. Checkpoint workers asynchronously flush committed state through `DataStoreHandler`; cache misses load through the same boundary.
+6. Recovery combines persisted state with retained WAL. Distribution code fences requests with current ownership and leadership terms.
 
-`core/src/data_substrate.cpp` implements a singleton with a strict three-phase lifecycle (`InitState`: NotInitialized → ConfigLoaded → Started):
+The engine is asynchronous: an operation that cannot progress yields and is resumed by a later completion or shard event rather than blocking the shard execution context.
 
-1. **`DataSubstrate::Init(config_file)`** — parses the ini file, loads core + network config (`LoadCoreAndNetworkConfig`). gflags take priority over ini values (`CheckCommandLineFlagIsDefault` pattern, used everywhere). Auto-configures `core_number` (~90% of vCPUs, minus reserved EloqStore cloud threads), `node_memory_limit_mb` (~80% of RAM), brpc `event_dispatcher_num`, `bthread_concurrency`. Resolves cluster topology from `cluster_config_file` (written by the host manager on config updates) or from `tx_ip_port_list`/standby/voter lists (`ParseNgConfig`), and verifies the local node is in the cluster. Adds the `Sequences` system table to prebuilt tables.
-2. **`DataSubstrate::RegisterEngine(engine_type, catalog_factory, system_handler, prebuilt_tables, engine_metrics, publish_func)`** — called by each API engine between Init and Start. Engine slots are indexed by `TableEngine` (EloqSql=1, EloqKv=2, EloqDoc=3). For converged binaries, `EnableEngine` + `WaitForEnabledEnginesRegistered` let the loader block until all expected engines registered.
-3. **`DataSubstrate::Start()`** — ordered phases:
-   1. `InitializeLogService` (`core/src/log_init.cpp`): when `WITH_LOG_SERVICE`, starts an in-process `txlog::LogServer` on `tx_port + 2` ([10-log-service.md](10-log-service.md)).
-   2. `InitializeMetrics` (`core/src/metrics_init.cpp`).
-   3. `InitializeStorageHandler` (`core/src/storage_init.cpp`) if `enable_data_store`: instantiates the backend selected by `WITH_DATA_STORE`, possibly starting an in-process `DataStoreService` ([09-store-handler.md](09-store-handler.md)).
-   4. `InitializeTxService` (`core/src/tx_service_init.cpp`): builds `TxService` → which constructs `LocalCcShards` (all shards) + `Checkpointer`, then `TxService::Start()` boots `SnapshotManager`, `Sharder` (incl. host manager fork), `TxStartTsCollector` (MVCC), `DeadLockCheck`, one `tx_proc_N` thread per core, registers the `TxServiceModule` into brpc (`ELOQ_MODULE_ENABLED`), and connects cc stream sender/receiver.
+## Cross-cutting invariants
 
-`Shutdown()` reverses this (tx service → storage → log service), with special bootstrap-mode cleanup that wipes log storage paths.
+- Each `CcShard` has one active execution owner at a time. Other contexts interact by enqueueing requests; direct concurrent shard access would violate the thread-per-core model.
+- Transaction locks protect logical consistency and are distinct from thread synchronization. Waiters must not block a shard or brpc worker main stack.
+- Leadership terms and ownership versions fence delayed local, remote and log work after topology changes.
+- WAL establishes the durability boundary. Checkpoint advancement and log truncation must not move beyond state successfully persisted by every required participant.
+- API-specific objects enter the core only through registered type-erased contracts. The engine must not interpret their protocol semantics.
+- Storage and log implementations are replaceable behind their contracts; backend-specific retry or deployment mechanics are not transaction semantics unless they affect an exposed guarantee.
 
-## Configuration Surface
+## Source map
 
-All knobs follow *gflag overrides ini section* (`[local]`, `[cluster]`, `[store]`). The most important ones (defined in `core/src/data_substrate.cpp` and `core/src/tx_service_init.cpp`):
-
-| Flag | Default | Meaning |
-|---|---|---|
-| `eloq_data_path` | /tmp/eloq_data | Root data path |
-| `core_number` | 8 / auto | Number of CcShards/TxProcessors |
-| `node_memory_limit_mb` | 8192 / auto | Per-node cc map memory budget |
-| `enable_wal` / `enable_data_store` | true | Durability toggles (`enable_wal` requires `enable_data_store`) |
-| `enable_mvcc` | false | MVCC version chains + snapshot reads |
-| `enable_cache_replacement` | true | LRU kickout of clean entries (requires data store) |
-| `tx_ip` / `tx_port` | 127.0.0.1:16379 | Local tx service address |
-| `tx_ip_port_list`, `tx_standby_ip_port_list`, `tx_voter_ip_port_list` | — | Cluster topology bootstrap |
-| `node_group_replica_num` | 3 | Members per node group |
-| `bootstrap` | false | Init system tables and exit |
-| `checkpointer_interval` | 10s | Ckpt cadence (also delay/min-interval variants) |
-| `fork_host_manager` / `hm_ip` / `hm_port` / `hm_bin_path` | true | Host manager process wiring |
-| `auto_redirect` | false | Redirect object commands to remote owner NG internally |
-| `enable_key_cache` | false | Key cache (non-MVCC only) |
-| `enable_io_uring` / `raft_log_async_fsync` | false | IO engine options |
-| `maxclients` | 500000 | API-server connection admission limit; does not modify process file-descriptor limits |
-| `max_standby_lag` | 400000 | Max primary→standby message lag |
-
-Build-time options are described in the repo `CLAUDE.md` (`WITH_DATA_STORE`, `WITH_LOG_STATE`, `WITH_LOG_SERVICE`, `EXT_TX_PROC_ENABLED`, `ELOQ_MODULE_ENABLED`).
-
-## Global Singletons
-
-A few process-wide singletons are referenced from everywhere; knowing them shortcuts a lot of code reading:
-
-- `Sharder::Instance()` — topology, leadership terms, bucket mapping ([06](06-distribution-and-clustering.md)).
-- `DataSubstrate::Instance()` — lifecycle + config (`core/include/data_substrate.h`).
-- `DeadLockCheck` (static instance), `TxStartTsCollector::Instance()`, `store::SnapshotManager::Instance()`.
-- Global behavior flags set by `TxService` ctor: `txservice_skip_wal`, `txservice_skip_kv`, `txservice_enable_cache_replacement`, `txservice_auto_redirect_redis_cmd`, `txservice_enable_key_cache`.
+| Claim | Repository source |
+|---|---|
+| Data Substrate lifecycle and integration construction | `core/include/data_substrate.h`, `core/src/data_substrate.cpp`, `core/src/log_init.cpp`, `core/src/storage_init.cpp`, `core/src/tx_service_init.cpp` |
+| Transaction service, processor and shard ownership | `tx_service/include/tx_service.h`, `tx_service/include/tx_service_common.h`, `tx_service/include/cc/cc_shard.h` |
+| Transaction state machine and request boundary | `tx_service/include/tx_request.h`, `tx_service/include/tx_execution.h`, `tx_service/include/tx_operation.h`, `tx_service/src/tx_execution.cpp` |
+| Local and remote concurrency-control routing | `tx_service/include/cc/local_cc_handler.h`, `tx_service/include/remote/remote_cc_handler.h`, `tx_service/include/sharder.h` |
+| WAL, checkpoint and recovery integration | `tx_service/include/txlog.h`, `tx_service/include/checkpointer.h`, `tx_service/include/fault/`, `tx_service/tx-log-protos/` |
+| Persistent-store contract and EloqDSS boundary | `tx_service/include/store/data_store_handler.h`, `store_handler/`, `store_handler/eloq_data_store_service/ds_request.proto` |
+| API-neutral catalog/type contracts | `tx_service/include/catalog_factory.h`, `tx_service/include/tx_key.h`, `tx_service/include/tx_record.h`, `tx_service/include/tx_object.h`, `tx_service/include/tx_command.h` |

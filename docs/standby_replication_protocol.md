@@ -1,294 +1,144 @@
 # Standby Replication Protocol
 
-This document describes the design and implementation of Data Substrate's
-internal primary–standby replication: how committed writes on a node group
-leader (the *primary*) are captured, sequenced, buffered, and streamed to
-*standby* nodes, and how standbys bootstrap from a storage snapshot and
-replay the stream idempotently.
+Standby replication maintains a warm in-memory copy of a node group's (NG's)
+committed state on data-bearing candidate nodes. It combines a storage snapshot
+with a continuously sequenced stream of committed commands. The snapshot gives
+the standby a durable base; version-aware stream replay closes the gap without
+pausing writes on the primary.
 
-Code references are given as `path:line` based on commit `887e352`. Line
-numbers drift as the code evolves; symbol names are authoritative.
+This protocol is distinct from WAL recovery. WAL remains the commit and leader
+recovery authority; standby replication reduces recovery work by keeping an
+additional in-memory replica close to current state.
 
-## 1. Overview
+## Roles and session identity
 
-Standby replication keeps a near-real-time in-memory replica of a node
-group on its standby nodes. It is built from three cooperating mechanisms:
+The NG leader is the primary for a standby session. A following node progresses
+through two states:
 
-1. **Incremental forwarding** — the primary captures every committed write
-   at the ccmap apply/commit point and streams it to subscribed standbys as
-   a per-shard ordered sequence.
-2. **Snapshot bootstrap** — a new standby obtains its base state from a
-   storage-layer snapshot (e.g., a RocksDB checkpoint).
-3. **Idempotent replay** — the standby applies forwarded commands with
-   `commit_ts` / `object_version` checks, which absorbs both the overlap
-   between snapshot and stream and any out-of-order arrival.
+- A candidate standby has registered a subscription but has not installed its
+  storage snapshot. The primary retains the stream history it may need.
+- A full standby has installed the snapshot and has a consistent incremental
+  replay position. It may later provide a warm base for leader recovery.
 
-Standby state machine:
+Each subscription has a standby term derived from the primary term and a unique
+subscription id. That term fences stream messages, snapshot callbacks, and
+checkpoint updates from an older session. Leadership change or re-subscription
+creates a new identity; delayed work from the prior identity is discarded.
 
-```
-                StandbyStartFollowing            ResetStandbySequenceId
-  (none) ──────────────────────────▶ candidate ─────────────────────────▶ receiving stream
-                                                                    (candidate standby term)
-                                                                              │
-                                                    snapshot fully received   │ OnSnapshotReceived
-                                                                              ▼
-                                                                      full standby
-                                                                      (standby term)
-```
+## Capture and sequencing
 
-Note that the primary starts streaming increments **before** the snapshot
-transfer completes (§5, §6); the overlap is resolved on the standby by
-versioned replay.
+Committed object changes are captured on the owner shard's apply path. A
+forwarded command represents the command after owner-side execution, because
+the standby performs commit replay and does not rerun the command's execution
+phase. Whole-object replacement is available for changes that cannot safely be
+expressed as an incremental command.
 
-## 2. Roles and Terms
+Each `CcShard` is an independent sequence group and assigns monotonically
+increasing forward sequence ids. This provides FIFO ordering within a shard and
+therefore for a key, since one key has one owner shard. There is no total order
+across shards; consumers must use commit timestamps and object versions rather
+than infer cross-shard serialization from arrival order.
 
-| Term | Meaning |
+The primary sends through the existing CC stream transport. Successful stream
+write is not an application acknowledgement. The standby tracks gaps, while the
+primary retains messages needed by a failed send or a bootstrapping candidate.
+
+## Bounded backlog and resynchronization
+
+The primary-side history is a bounded recovery backlog, not an unbounded audit
+log. Entries that every subscriber has passed and no candidate still needs are
+released. If a send fails, the primary retries from the subscriber's next
+sequence id while the required entries remain buffered.
+
+Memory pressure may evict an entry that a subscriber still needs. In that case
+the primary sends an explicit out-of-sync indication and stops advancing the
+affected session. The standby must create a new subscription and install a new
+snapshot; silently skipping the missing sequence is never valid.
+
+This bounded design prevents an unavailable standby from consuming unbounded
+primary memory, at the cost of requiring full re-bootstrap after excessive lag.
+
+## Subscription and snapshot bootstrap
+
+Bootstrap overlaps snapshot creation with incremental forwarding:
+
+1. The standby registers with the primary and receives a start sequence for
+   every shard.
+2. The primary records the candidate at those positions. Resetting the sequence
+   state activates streaming and establishes the subscription barrier.
+3. Checkpointing advances the storage image past that barrier, after which
+   `SnapshotManager` creates and transfers a snapshot for the NG.
+4. The standby installs the snapshot, reconciles the overlapping stream, and is
+   promoted to full standby only after snapshot completion.
+
+The subscription barrier is a lower bound, not an exact snapshot timestamp. It
+ensures the snapshot includes writes committed before subscription, but ongoing
+checkpoint work may also include later writes. Streaming begins before snapshot
+installation, so snapshot and stream intentionally overlap.
+
+Version-aware replay makes this fuzzy snapshot safe: effects already present in
+the snapshot are skipped, while effects whose base version has not arrived are
+buffered until the base record can be fetched or installed. A consumer that
+cannot compare commit timestamps and object versions cannot safely consume this
+snapshot-plus-stream protocol directly.
+
+## Standby apply and consistency
+
+Incoming messages are routed to their sequence group's shard and applied
+through the same CC-map path with standby semantics. Each shard tracks the next
+expected id, gaps, and the last contiguous sequence. Only the contiguous prefix
+advances that shard's consistent timestamp; later out-of-order messages do not
+make an earlier gap invisible.
+
+Replay is version-aware and idempotent. A command whose effect is already
+represented by an equal or newer local version is skipped. A command that
+depends on a missing base version waits with the entry until storage fill makes
+ordered replay possible. Whole-object replacement resets that dependency when
+the protocol explicitly marks the message as an overwrite.
+
+The primary also broadcasts its checkpoint progress. Standbys combine that
+watermark with their contiguous stream state for cache and failover decisions;
+term validation prevents checkpoint information from one session advancing
+another.
+
+## Failover boundary
+
+Cluster leadership owns the transition from standby to candidate leader. A full
+standby can retain its warm cache and request WAL replay after its minimum
+consistent standby timestamp. A candidate standby whose snapshot is incomplete
+cannot be trusted as a recovery base and falls back to cold recovery.
+
+The serving leader term is still published only after every log group completes
+WAL replay. Standby state reduces the replay interval but does not weaken the
+term or all-log-groups recovery barriers described in
+[06-distribution-and-clustering.md](06-distribution-and-clustering.md) and
+[07-durability-and-recovery.md](07-durability-and-recovery.md).
+
+## Protocol invariants
+
+- Ordering is FIFO per shard and per key; no cross-shard total order exists.
+- Session terms fence every stream and snapshot action from stale primaries or
+  prior subscriptions.
+- Snapshot and stream overlap is expected and requires version-aware,
+  idempotent replay.
+- The primary backlog is memory-bounded. Missing evicted history produces an
+  explicit out-of-sync state and full re-bootstrap.
+- A standby consistent timestamp advances only with the contiguous sequence
+  prefix.
+- Full-standby status requires snapshot installation; stream subscription alone
+  is not a complete recovery base.
+- Standby replication accelerates failover but never replaces WAL's commit
+  decision or final recovery fence.
+
+## Source map
+
+| Claim | Repository source |
 |---|---|
-| Primary | Node group leader; source of the replication stream. |
-| Candidate standby | A standby that has registered for the stream but has not finished snapshot bootstrap. The primary **buffers** messages for candidates without sending. |
-| Subscribed standby | A standby actively receiving the forward stream. |
-| Sequence group | The ordering domain of the stream. One per CPU core (= one per `CcShard`); group id equals `core_id_`. |
-| Standby term | `(primary_term << 32) | subscribe_id`; identifies one subscription session end-to-end. |
-| Out-of-sync | Signal from primary to standby that buffered messages it still needed were evicted; the standby must re-subscribe and re-bootstrap. |
-
-## 3. Message Format
-
-The forward message is `KeyObjectStandbyForwardRequest`
-(`tx_service/include/proto/cc_request.proto:345`):
-
-| Field | Description |
-|---|---|
-| `key` | Object key bytes. |
-| `cmd_list` | Serialized `TxCommand`s. First byte is the engine command type; decoded by the engine via `TableSchema::CreateTxCommand`. |
-| `commit_ts` | Commit timestamp of this write. |
-| `object_version` | Object version **before** the command applied; the standby validates its replay base against this. |
-| `has_overwrite` | The command list replaces the whole object (retire/recover etc.); replay discards prior state. |
-| `forward_seq_id`, `forward_seq_grp` | Monotonic per-shard sequence number and its sequence group (= core id). |
-| `table_name`, `table_type`, `table_engine`, `key_shard_code` | Routing and decoding metadata. |
-| `primary_leader_term` | Term fencing. |
-| `out_of_sync` | When set, this is a control message telling the standby it has fallen behind irrecoverably. |
-
-Related RPCs (same file, `:530-534`): `StandbyStartFollowing`,
-`ResetStandbySequenceId`, `RequestStorageSnapshotSync`, `OnSnapshotSynced`,
-`UpdateStandbyCkptTs`.
-
-## 4. Primary Node
-
-### 4.1 Change capture
-
-Capture happens on the `ApplyCc` execution path in
-`tx_service/include/cc/object_cc_map.h` (approx. `:871-1100`). When a write
-command applies to an object and the shard has subscribers
-(`shard_->GetSubscribedStandbys()` non-empty), the command is packed into
-the cc entry's `StandbyForwardEntry`:
-
-- Regular commands: `StandbyForwardEntry::AddTxCommand`
-  (`tx_service/src/standby.cpp:72`) serializes the **owner-side executed**
-  command (`cc_req.GetCommand()->Serialize()`) for both local and remote
-  `ApplyCc`. Previously the remote path forwarded the coordinator's
-  pre-`ExecuteOn` `CommandImage()`; because the standby applies commands
-  commit-only and never re-runs `ExecuteOn`, a command whose `ExecuteOn`
-  mutates itself — e.g. eloqkv ZADD NX/XX/GT/LT filtering, LTRIM index
-  normalization, SPOP member selection — then diverged on the standby
-  (eloqdata/eloqkv#509).
-- Internally generated full-object changes (TTL retirement, recovery):
-  `AddOverWriteCommand`, which sets `has_overwrite`.
-- Once the commit timestamp is known, the entry is finalized and handed to
-  `shard_->ForwardStandbyMessage()` (`object_cc_map.h:947-965`).
-
-Because every key is owned by exactly one shard and applies execute
-serially on the shard's thread, the capture point observes **all** writes
-to a key — including writes initiated by other nodes in a distributed
-transaction — in apply order.
-
-### 4.2 Sequencing and delivery
-
-`CcShard::ForwardStandbyMessage` (`tx_service/src/cc/cc_shard.cpp:3142`):
-
-- Each shard assigns a monotonically increasing
-  `next_forward_sequence_id_`. **Ordering is guaranteed only within a
-  shard**; there is no total order across shards.
-- For each node in `subscribed_standby_nodes_`, the message is written to
-  the brpc stream (`CcStreamSender::SendStandbyMessageToNode`) only if that
-  node's `last_sent_seq_id == seq_id - 1`; a successful write advances
-  `last_sent_seq_id`.
-- "Sent" means **the stream write succeeded**, not that the standby
-  acknowledged application. Loss is detected by the standby through
-  sequence gaps (§6).
-
-### 4.3 Forward-message buffer lifecycle
-
-The primary-side buffer is `history_standby_msg_` (a deque) plus
-`seq_id_to_entry_map_` (`tx_service/include/cc/cc_shard.h:1322-1337`).
-Entries are *not* retained until the buffer fills; the lifecycle is:
-
-1. **Fast path — never buffered.** If the message was written successfully
-   to every subscribed standby and no candidate needs it (no candidate with
-   `start_seq_id <= seq_id`), the entry is freed at the end of
-   `ForwardStandbyMessage` without entering the buffer.
-2. **Buffered when needed.** An entry enters the buffer only if some
-   subscriber's stream write failed (pending retry) or a candidate is
-   catching up.
-3. **Watermark cleanup.** `CheckAndFreeUnneededEntries`
-   (`cc_shard.cpp:3058`) computes
-   `min(last_sent_seq_id + 1 over subscribers, start_seq_id over candidates)`
-   and frees everything older. Invoked after a retry round
-   (`ResendFailedForwardMessages`), on unsubscribe
-   (`RemoveSubscribedStandby`), and when a candidate is promoted
-   (`AddSubscribedStandby`).
-4. **Memory-cap eviction.** Total buffered size is capped by
-   `standby_buffer_memory_limit_` (~10% of node memory per shard). On
-   overflow the oldest entries are evicted; if an evicted sequence is later
-   needed, the affected node is declared out-of-sync (§4.4).
-
-### 4.4 Retry and out-of-sync
-
-- `ResendFailedForwardMessages` (`cc_shard.cpp:3294`) resends from
-  `last_sent_seq_id + 1` using the buffer, at most 500 messages per round
-  to avoid starving the shard.
-- If a needed sequence id is missing from `seq_id_to_entry_map_` (evicted),
-  `NotifyStandbyOutOfSync` (`cc_shard.cpp:3358`) sends a control message
-  with `out_of_sync=true`, sets that node's `last_sent_seq_id` to
-  `UINT64_MAX` (stop sending), and propagates the stop to all other shards.
-  The standby must re-subscribe and re-bootstrap. Semantically this is the
-  analogue of a replication-backlog overflow forcing a full resync.
-
-## 5. Subscription Lifecycle
-
-The standby-side driver lives in `tx_service/src/fault/cc_node.cpp`
-(approx. `:900-1240`). Full sequence:
-
-```
-standby                                    primary
-   │  StandbyStartFollowing                   │
-   │─────────────────────────────────────────▶│ per shard: start_seq = NextForwardSequenceId()
-   │◀─────────────────────────────────────────│           AddCandidateStandby(node, start_seq)
-   │  resp: start_seq per shard, subscribe_id │           (candidate phase: buffer only, no send)
-   │                                          │
-   │  local: SubsribeToPrimaryNode(seq grps)  │
-   │  standby_term = (primary_term<<32)|subscribe_id
-   │  SetCandidateStandbyNodeTerm             │
-   │                                          │
-   │  ResetStandbySequenceId                  │
-   │─────────────────────────────────────────▶│ per shard: RemoveCandidateStandby
-   │                                          │           AddSubscribedStandby(node, start_seq, term)
-   │                                          │           (cc_node_service.cpp:2227 — streaming begins)
-   │                                          │ register subscription barrier (§6)
-   │◀━━━━━━ forward stream (continuous) ━━━━━━│
-   │                                          │
-   │  (in parallel) snapshot transfer:        │
-   │  RequestStorageSnapshotSync ────────────▶│ ship snapshot once checkpoint passes the barrier
-   │◀────── snapshot files (rsync / shared) ──│
-   │  OnSnapshotSynced / OnSnapshotReceived   │
-   │  SetStandbyNodeTerm (full standby)       │
-```
-
-Key points:
-
-- During the candidate phase the primary **buffers but does not send**.
-- Streaming starts at `ResetStandbySequenceId`, **before** the snapshot has
-  been transferred; the standby absorbs the stream while still a candidate.
-- The standby term `(primary_term << 32) | subscribe_id` fences every
-  message and RPC of the session.
-
-## 6. Snapshot Synchronization and the Subscription Barrier
-
-The snapshot is **not** a point-in-time cut at the subscription moment. Its
-contract (see `cc_node_service.cpp:2252-2269` and
-`tx_service/src/store/snapshot_manager.cpp`):
-
-- **Lower bound (guaranteed).** On `ResetStandbySequenceId` the primary
-  computes the max commit timestamp of active transactions across shards
-  (`ActiveTxMaxTsCc`) and registers it as the *subscription barrier*
-  (`RegisterSubscriptionBarrier`). The snapshot is shipped only after the
-  checkpoint has advanced past the barrier, so it contains every write
-  committed before the subscription moment.
-- **Upper bound (none).** Writes continue while the checkpoint runs, so the
-  snapshot may additionally contain data committed *after* the subscription
-  moment ("fuzzy snapshot").
-
-The overlap between the fuzzy snapshot and the forward stream is harmless
-to internal standbys because replay is version-checked (§7). Consumers
-without version-checking ability (e.g., a vanilla Redis replica) cannot
-consume this snapshot + stream directly; alignment must then be solved on
-the producer side (see invariant P5).
-
-Snapshot transport depends on the storage backend: rsync of a RocksDB
-checkpoint (`RequestStorageSnapshotSync`, `cc_node_service.cpp:1984`), or a
-path handoff for shared/cloud storage (`snapshot_path` in the
-`StandbyStartFollowing` response).
-
-## 7. Standby Node
-
-- **Receive path.** Messages arrive in
-  `tx_service/src/remote/cc_stream_receiver.cpp` (`KeyObjectStandbyForwardCc`,
-  approx. `:1947`) and are routed to the shard given by `forward_seq_grp`.
-- **Sequence tracking.** Each shard keeps a `StandbySequenceGroup`
-  (`tx_service/include/standby.h:83`): `next_expecting_standby_sequence_id_`,
-  `last_consistent_standby_sequence_id_`, and
-  `missing_standby_seqeunce_ids_` (the gap set).
-  `UpdateLastReceivedStandbySequenceId` (`cc_shard.cpp:3452`) maintains
-  contiguity; the contiguous prefix advances
-  `last_standby_consistent_ts_`, the standby's consistent-read watermark.
-- **Idempotent replay.** Forwarded commands run through the same `ApplyCc`
-  path flagged as `is_standby_tx`. The standby compares the message's
-  `object_version`/`commit_ts` with the local cc entry version: already
-  reflected commands are skipped. If the base version is not yet present
-  (snapshot not loaded, object not fetched), commands are parked in the cc
-  entry's `BufferedTxnCmdList` (`tx_service/include/cc/cc_entry.h:348`) and
-  replayed in version order after `FetchRecord` brings in the base.
-- Messages with `has_overwrite` rebuild the object from scratch, removing
-  any dependency on prior state.
-
-## 8. Checkpoint Broadcast and Heartbeats
-
-- The primary periodically broadcasts its checkpoint timestamp
-  (`BrocastPrimaryCkptTs`, `tx_service/include/standby.h:136`); standbys use
-  it to advance local truncation/read watermarks and report back via the
-  `UpdateStandbyCkptTs` RPC.
-- Subscriptions are tied to heartbeat target management
-  (`AddHeartbeatTargetNode` / `RemoveHeartbeatTargetNode`); heartbeat loss
-  triggers cleanup.
-
-## 9. Protocol Invariants
-
-Properties that external consumers (replication bridges, CDC, migration
-tooling) can rely on — or must explicitly work around:
-
-- **P1 — Per-shard FIFO.** Sequence numbers are monotonic per shard and
-  messages are delivered in sequence order within a shard. No cross-shard
-  total order exists.
-- **P2 — Per-key ordering.** A key is owned by exactly one shard, so the
-  forward order for a single key equals its apply order and its
-  `commit_ts` order.
-- **P3 — At-least-once + versioned idempotency.** Delivery is
-  at-least-once (retries may duplicate). Correctness relies on the consumer
-  performing version-checked replay using `commit_ts`/`object_version`.
-  The protocol is **not** directly usable by consumers that apply blindly.
-- **P4 — Bounded buffer with explicit desync.** The primary-side buffer is
-  memory-capped; overflow produces an explicit out-of-sync signal, and the
-  consumer must support full re-bootstrap.
-- **P5 — Fuzzy snapshot.** The bootstrap snapshot guarantees only a lower
-  bound (everything before the subscription barrier). Exact alignment with
-  the stream requires either consumer-side version filtering or
-  producer-side deduplication (record-level scan capturing per-key
-  versions, with prefix filtering by `commit_ts`, or whole-object
-  overwrite semantics).
-- **P6 — Stream-before-snapshot.** Streaming begins as soon as the
-  subscription is reset, in parallel with the snapshot transfer; buffering
-  pressure during bootstrap sits on the standby (`BufferedTxnCmdList`).
-
-## 10. Source Code Index
-
-| Topic | Location |
-|---|---|
-| Forward entry / sequence group types | `tx_service/include/standby.h` |
-| Command serialization into entries | `tx_service/src/standby.cpp` (`AddTxCommand`, `AddOverWriteCommand`) |
-| Capture point (apply/commit) | `tx_service/include/cc/object_cc_map.h:871-1100` |
-| Send / buffer / retry / out-of-sync | `tx_service/src/cc/cc_shard.cpp:3039-3460` |
-| Subscription state and APIs | `tx_service/include/cc/cc_shard.h:1064-1155, 1322-1347` |
-| Subscription RPC handlers | `tx_service/src/remote/cc_node_service.cpp` (`StandbyStartFollowing:1752`, `ResetStandbySequenceId:2201`, `RequestStorageSnapshotSync:1984`) |
-| Standby-side subscription driver | `tx_service/src/fault/cc_node.cpp:900-1240` |
-| Subscription barrier | `tx_service/src/store/snapshot_manager.cpp` (`RegisterSubscriptionBarrier:464`, `GetSubscriptionBarrier:630`) |
-| Receive and replay entry points | `tx_service/src/remote/cc_stream_receiver.cpp`; `tx_service/include/cc/cc_entry.h` (`BufferedCommandList:348`) |
-| Message and RPC definitions | `tx_service/include/proto/cc_request.proto:304-385, 530-534` |
+| Standby entries, sequence groups, session terms, and checkpoint broadcasts define the protocol state | `tx_service/include/standby.h`; `tx_service/src/standby.cpp` |
+| Committed commands are captured on the owner-side apply path with standby replay semantics | `tx_service/include/cc/object_cc_map.h`; `tx_service/tests/StandbyForward-Test.cpp` |
+| Per-shard sequencing, bounded buffering, retry, gap tracking, and out-of-sync handling live in `CcShard` | `tx_service/include/cc/cc_shard.h`; `tx_service/src/cc/cc_shard.cpp` |
+| Subscription, sequence reset, snapshot, and checkpoint RPCs cross the CC control plane | `tx_service/include/proto/cc_request.proto`; `tx_service/src/remote/cc_node_service.cpp` |
+| Stream receive routes standby messages back to their owning shard | `tx_service/src/remote/cc_stream_receiver.cpp`; `tx_service/src/remote/cc_stream_sender.cpp` |
+| Following and standby-to-leader transitions are coordinated by `CcNode` | `tx_service/include/fault/cc_node.h`; `tx_service/src/fault/cc_node.cpp` |
+| Snapshot transfer waits on the subscription/checkpoint barrier | `tx_service/include/store/snapshot_manager.h`; `tx_service/src/store/snapshot_manager.cpp`; `tx_service/src/checkpointer.cpp` |
+| WAL replay remains the final leader-recovery fence | `tx_service/include/fault/log_replay_service.h`; `tx_service/src/fault/log_replay_service.cpp`; `tx_service/src/fault/cc_node.cpp` |
