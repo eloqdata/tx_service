@@ -1385,6 +1385,9 @@ void LoadRangeSliceCallback(void *data,
     assert(data != nullptr);
     auto *fill_store_slice_req =
         static_cast<txservice::FillStoreSliceCc *>(data);
+    // SetKvFinish may recycle the request directly or let its owning shard
+    // finish it concurrently. Capture the pin's group before publishing it.
+    const auto ng_id = fill_store_slice_req->NodeGroup();
     ScanNextClosure *scan_next_closure =
         static_cast<ScanNextClosure *>(closure);
 
@@ -1393,8 +1396,7 @@ void LoadRangeSliceCallback(void *data,
         LOG(ERROR) << "DataStoreHandler: Failed to do LoadRangeSlice. "
                    << result.error_msg();
         fill_store_slice_req->SetKvFinish(false);
-        txservice::Sharder::Instance().UnpinNodeGroupData(
-            fill_store_slice_req->NodeGroup());
+        txservice::Sharder::Instance().UnpinNodeGroupData(ng_id);
         return;
     }
 
@@ -1505,8 +1507,7 @@ void LoadRangeSliceCallback(void *data,
     else
     {
         fill_store_slice_req->SetKvFinish(true);
-        txservice::Sharder::Instance().UnpinNodeGroupData(
-            fill_store_slice_req->NodeGroup());
+        txservice::Sharder::Instance().UnpinNodeGroupData(ng_id);
     }
 }
 

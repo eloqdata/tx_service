@@ -645,7 +645,11 @@ public:
 };
 
 struct FetchBucketDataCc;
-typedef void (*OnFetchedBucketData)(FetchBucketDataCc *fetch_cc,
+/**
+ * Returns true after the final batch, or false while another asynchronous fetch
+ * still owns this request and its scan boundaries.
+ */
+typedef bool (*OnFetchedBucketData)(FetchBucketDataCc *fetch_cc,
                                     CcRequestBase *requester);
 
 struct FetchBucketDataCc : public CcRequestBase
@@ -654,6 +658,9 @@ public:
     FetchBucketDataCc() = default;
 
     ~FetchBucketDataCc() = default;
+
+    /** Releases the completed batch before making this request reusable. */
+    void Free() override;
 
     void Reset(const TableName *table_name,
                const TableSchema *table_schema,
@@ -804,6 +811,9 @@ public:
     }
     ~FetchSnapshotCc() = default;
 
+    /** Releases fetched values and owned keys after backfill consumes them. */
+    void Free() override;
+
     void Reset(const TableName *tbl_name,
                const TableSchema *tbl_schema,
                TxKey tx_key,
@@ -882,6 +892,9 @@ public:
     }
 
     bool Execute(CcShard &ccs) override;
+
+    /** Destroys captures once execution and all continuations have finished. */
+    void Free() override;
 
 private:
     std::function<bool(CcShard &ccs)> task_;

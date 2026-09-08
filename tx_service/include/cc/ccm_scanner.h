@@ -226,6 +226,13 @@ public:
 
     ~TemplateScanCache() = default;
 
+    /** Releases tuple owners after the scanner has been closed and drained. */
+    void Release()
+    {
+        ScanCache::Reset();
+        std::vector<TemplateScanTuple<KeyT, ValueT>>{}.swap(cache_);
+    }
+
     bool IsFull() const
     {
         return mem_size_ >= mem_max_bytes_;
@@ -427,6 +434,13 @@ public:
     virtual void ResetCaches() = 0;
     virtual void Reset(const KeySchema *key_schema) = 0;
     virtual void Close() = 0;
+    /**
+     * Releases cached records before an idle scanner enters its reuse pool.
+     * The caller must first drain scan locks and close the scanner; no request
+     * or consumer may still borrow a cache tuple. Close alone is also used
+     * between live scan plans, where caches remain available for reuse.
+     */
+    virtual void ReleaseCaches() = 0;
     virtual void ShardCacheSizes(std::vector<std::pair<uint32_t, size_t>>
                                      *shard_code_and_sizes) const = 0;
     virtual void MemoryShardCacheLastTuples(
@@ -1017,6 +1031,12 @@ public:
         init_ = false;
     }
 
+    void ReleaseCaches() override
+    {
+        assert(status_ == ScannerStatus::Closed);
+        shard_caches_.clear();
+    }
+
     ShardCache *GetShardCache(uint32_t shard_code)
     {
         std::lock_guard<std::mutex> lk(mutex_);
@@ -1286,6 +1306,12 @@ public:
     {
         status_ = ScannerStatus::Closed;
         scan_cache_.Reset();
+    }
+
+    void ReleaseCaches() override
+    {
+        assert(status_ == ScannerStatus::Closed);
+        scan_cache_.Release();
     }
 
 private:

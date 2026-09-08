@@ -171,15 +171,20 @@ Read closure (local bypass or RPC) ─► FetchRecordCallback
 fetch_cc->SetFinish(0)  → re-enqueued on the owning CcShard          [03]
 ```
 
-The record-fetch pool retains at most 128 reusable objects per shard; exceeding that limit
-does not reject a read. The active-fetch map owns temporary requests until the fetch reaches
-its terminal removal path, while backfill/reopen retries keep the request alive. Completed
-pooled requests release their value, archive and owned key buffers before reuse. A synchronous
-store `Retry` still unwinds the fetch as before.
+The record-fetch pool retains at most 128 objects per shard; exceeding that pool limit does
+not reject a read. A temporary request stays owned by the active-fetch map until terminal
+completion. Backfill/reopen retries keep the same request alive, and completed pooled
+requests release their value, archive and owned key buffers before reuse. A synchronous
+store `Retry` still unwinds the fetch as before. Primary-fetch term errors must also notify
+the owning shard so its active-fetch entry and waiting requests are completed.
 
 ### Slice load (`LoadRangeSlice`)
 
-`range_slice.cpp:649` → `LoadRangeSlice(FillStoreSliceCc*)` pins the node group, encodes start/end keys (negative infinity uses the catalog factory's packed-neg-inf key, positive infinity is the empty string), and issues a sessioned `ScanNext` (batch 1000, forward, end key bounds the scan server-side) against the range's kv partition; `LoadRangeSliceCallback` feeds rows into the slice (`AddDataItem`) and re-issues `ScanNext` with the returned `session_id` as long as batches come back full, then `SetKvFinish` unpins the node group. The `Retry`/`Error` statuses propagate to the slice state machine (`range_slice.cpp:660,724`, see [08](08-range-and-bucket-management.md)).
+`range_slice.cpp:649` → `LoadRangeSlice(FillStoreSliceCc*)` pins the node group, encodes start/end keys (negative infinity uses the catalog factory's packed-neg-inf key, positive infinity is the empty string), and issues a sessioned `ScanNext` (batch 1000, forward, end key bounds the scan server-side) against the range's kv partition; `LoadRangeSliceCallback` feeds rows into the slice (`AddDataItem`) and re-issues `ScanNext` with the returned `session_id` as long as batches come back full, then marks completion with `SetKvFinish` and releases the node-group pin. The `Retry`/`Error` statuses propagate to the slice state machine (`range_slice.cpp:660,724`, see [08](08-range-and-bucket-management.md)).
+
+`SetKvFinish` can recycle the request directly or let its shard complete it concurrently.
+The callback captures the pinned node-group ID before this publication and must not read
+the request afterward when releasing the node-group pin.
 
 ## 8. Gotchas and Invariants
 

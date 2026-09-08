@@ -1337,6 +1337,7 @@ void txservice::LocalCcHandler::ScanClose(const TableName &table_name,
     assert(scanner->Direction() == direction);
 
     scanner->Close();
+    scanner->ReleaseCaches();
 
     if (table_name.Type() == TableType::Primary)
     {

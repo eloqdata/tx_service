@@ -89,7 +89,7 @@ One `CcShard` per core (`core_id_`, `core_cnt_`). Key state:
 | `lock_vec_` (`std::vector<KeyGapLockAndExtraData::uptr>`) | pooled lock objects (initial size `LOCK_ARRAY_INIT_SIZE` = 8192, doubles when exhausted; `TryResizeLockArray()` shrinks it again when sparse). `NewLock()` hands one to an entry; empty locks are recycled back. |
 | `lock_holding_txs_` | `ng -> {TxNumber -> TxLockInfo}`: every lock/intent a tx holds in this shard (`cce_list_`), when it took its first write lock (`wlock_ts_`), and the tx coordinator term. Feeds `ActiveTxMinTs()` (checkpoint watermark), orphan-lock recovery (`CheckRecoverTx`), and deadlock collection (`CollectLockWaitingInfo`). |
 | `head_ccp_`/`tail_ccp_`, `protected_head_page_`, `clean_start_ccp_` | LRU double-linked list of `LruPage`s: `head — [small pages] — protected_head_ — [large pages] — tail` (large objects get exclusive pages; SLRU-style policies share the divider). `UpdateLruList`/`DetachLru` maintain it; `access_counter_` stamps relative page order. |
-| `shard_heap_`, `shard_data_sync_scan_heap_` | per-shard **mimalloc heaps** (`CcShardHeap`). `memory_limit_` = node limit × (1 − range-slice %) / core_cnt; the main heap gets 90 % of that, the data-sync-scan heap 0.1 × 0.25. `Full()`/`NeedCleanShard()`/`NeedDefragment()` gate admission, eviction, and `DefragShardHeapCc`. |
+| `shard_heap_`, `shard_data_sync_scan_heap_` | per-shard **mimalloc heaps** (`CcShardHeap`). `memory_limit_` = node limit × (1 − range-slice % / 100 − `ckpt_buffer_ratio`) / core_cnt; the main heap gets 90 % of that, the data-sync-scan heap 0.1 × 0.25. `Full()`/`NeedCleanShard()`/`NeedDefragment()` gate admission, eviction, and `DefragShardHeapCc`. |
 | `last_read_ts_` | max read timestamp seen on this shard; write txs must commit above it (read-write coordination, see comment at the member). |
 | standby members | forward-message history queue + sequence bookkeeping for standby replication (primary side) and `standby_sequence_grps_` (follower side) — see `docs/standby_replication_protocol.md`. |
 
@@ -104,24 +104,63 @@ the cursor after a checkpoint. The actual eviction loop is driven by the self-re
 
 **DispatchTask.** `CcShard::DispatchTask(idx, task)` wraps a `std::function<bool(CcShard&)>` in a
 pooled `RunOnTxProcessorCc` and enqueues it to another shard — the standard way to run CPU-bound
-work (e.g. `StoreRange::LoadSlice()`) on a specific shard's context.
+work (e.g. `StoreRange::LoadSlice()`) on a specific shard's context. Final `Free()` destroys the
+task's captures; returning from one `Execute()` must not clear a task shared by `WaitableCc`
+across multiple shards.
 
-**Record-fetch pool retention.** `FetchRecordCc` keeps at most 128 reusable requests per
-shard. Saturation allocates a temporary request, preserving concurrent reads and single-flight
-coalescing. The active-fetch map owns both kinds through a deleter that calls `Free()` for a
-pooled request or deletes a temporary request on removal. Backfill and reopen retries keep
-that owner alive until the fetch reaches its existing terminal removal path.
+`FetchSnapshotCc` and `FetchBucketDataCc` release their owned result and boundary buffers in
+`Free()`, after backfill has consumed or transferred the results. A bucket-scan backfill can
+issue another fetch when every returned key is filtered out. Its callback then returns `false`
+through `Execute()`, keeping the request occupied and its next-page boundaries alive until the
+asynchronous continuation completes; only a terminal batch or error permits `Free()`.
 
-`FetchRecordCc::Free()` releases serialized values, archive records, owned keys,
-session/boundary strings and requester storage before publishing the pooled request as idle.
-`std::string::clear()` alone would retain the capacity of a previously fetched large value.
-Erasing an active owner can destroy the currently executing request: release pins and recycle
-locks first, then return without accessing the request. Declare the active map after the pool
-so its owners are released first during shard destruction; callbacks must already be quiescent.
+**Request-pool retention.** `FetchRecordCc` keeps at most 128 reusable requests per shard.
+When all retained requests are occupied, `CcShard::FetchRecord` allocates a temporary request;
+this is a bound on retained pool objects, not on concurrent reads. The active-fetch map owns
+each request through a deleter that either calls `Free()` or deletes the temporary object.
+Both variants remain indexed by entry for single-flight coalescing, including across backfill
+retries and EloqStore reopen. Erasing an active owner can destroy the currently executing
+request, so terminal paths return `false` without touching its members afterward. Declare the
+active map after the pool so map owners are released first during shard destruction; this
+does not replace the existing requirement to quiesce callbacks before destroying a shard.
 
-The 128-object limit bounds retained request shells, not in-flight bytes. Returning payload
-allocations to the allocator also does not guarantee an immediate RSS decrease. A fetched
-string moved from a DSS worker retains the heap ownership of its original allocation.
+For pooled record fetches, completion releases the serialized value, archive records, owned
+key, session/boundary strings and requester vector before publishing `in_use_ = false`.
+`std::string::clear()` is insufficient: an idle slot can otherwise retain a large allocation
+even after a subsequent missing-key or tiny-value read. A primary-fetch RPC whose term has
+changed also enqueues completion on the owner shard, rather than abandoning the active entry.
+
+The direct `CcShard` pool inventory is:
+
+| Pool request | Owned data and terminal retention policy | Retained object limit |
+|---|---|---|
+| `FetchRecordCc` | Value, archives, key and waiter/boundary storage released on completion; overflow objects destroyed. | 128 per shard |
+| `FetchSnapshotCc` | Value and owned key/boundary buffers released by `Free()` after the backfill callback. | Default unbounded |
+| `FetchBucketDataCc` | Batch key/value owners and boundaries released by `Free()` after the final batch or error, never during an async continuation. | Default unbounded |
+| `RunOnTxProcessorCc` | Task captures destroyed by terminal `Free()`. | Default unbounded |
+| `FillStoreSliceCc` | Value deque cleared on finish/error; boundary keys and session metadata may remain in idle slots until overwritten or destruction. | Default unbounded |
+| `InitKeyCacheCc` | Paused key released on completion; table metadata may remain. No value payload. | Default unbounded |
+| `FetchTableRangeSizeCc` | Range-start key may remain in idle slots until overwritten or destruction; fetched result is a numeric size. No value payload. | Default unbounded |
+| `RecoverDeadTxCc` | Transaction IDs, phase and routing state; no value payload. | Default unbounded |
+| `KeyObjectStandbyForwardCc` | The shard member pool is unused; actual forwarding uses thread-local pools and recycles the input protobuf message on completion. | Default unbounded |
+
+`LocalCcHandler` also owns request pools on each transaction. `PostWriteAllCc::Free()` releases
+its decoded key/value owners on both final-shard completion and abort; ordinary borrowed
+values are never deleted there. `ApplyCc::Free()` already releases owned decoded commands.
+`ReadCc`, `PostWriteCc` and `UploadTxCommandsCc` borrow their result/value/command storage.
+The remaining handler request pools carry keys, pointers or statistics/scan metadata rather
+than full values; their object counts retain the default unbounded policy.
+
+The handler's scanner reuse queues each retain up to 64 scanners. A scanner cache can own
+shared or unique records independently of its logical tuple count. Terminal
+`LocalCcHandler::ScanClose` therefore calls `ReleaseCaches()` after draining scan locks and
+closing the scanner, before pooling it. The per-batch `Reset()` and mid-plan `Close()` retain
+their caches because an ongoing scan can reuse them. Releasing an idle scanner must drop its
+references without destroying records still owned by another consumer.
+
+These are application ownership rules, not a promise that process RSS immediately falls.
+In particular, a fetched string moved from a DSS worker keeps its allocator heap ownership;
+the shard owning a request need not own the heap that allocated its value buffer.
 
 ## 3. LocalCcShards — the node-level container (`local_cc_shards.h`)
 

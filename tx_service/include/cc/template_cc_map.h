@@ -80,7 +80,7 @@ void BackfillSnapshotForScanSlice(FetchSnapshotCc *fetch_cc,
 
 template <typename KeyT, typename ValueT, bool VersionedRecord>
 
-void BackfillForScanNextBatch(FetchBucketDataCc *fetch_cc,
+bool BackfillForScanNextBatch(FetchBucketDataCc *fetch_cc,
                               CcRequestBase *requester);
 
 template <typename KeyT,
@@ -11766,7 +11766,7 @@ void BackfillSnapshotForScanSlice(FetchSnapshotCc *fetch_cc,
 }
 
 template <typename KeyT, typename ValueT, bool VersionedRecord>
-void BackfillForScanNextBatch(FetchBucketDataCc *fetch_cc,
+bool BackfillForScanNextBatch(FetchBucketDataCc *fetch_cc,
                               CcRequestBase *requester)
 {
     uint16_t bucket_id = fetch_cc->bucket_id_;
@@ -11860,7 +11860,7 @@ void BackfillForScanNextBatch(FetchBucketDataCc *fetch_cc,
                 shard.Enqueue(requester);
             }
 
-            return;
+            return true;
         }
     }
     else
@@ -11942,7 +11942,7 @@ void BackfillForScanNextBatch(FetchBucketDataCc *fetch_cc,
                 shard.Enqueue(requester);
             }
 
-            return;
+            return true;
         }
     }
 
@@ -11963,8 +11963,9 @@ void BackfillForScanNextBatch(FetchBucketDataCc *fetch_cc,
         fetch_cc->bucket_data_items_.clear();
 
         shard.FetchBucketData(fetch_cc);
-        return;
+        return false;
     }
+    return true;
 }
 
 }  // namespace txservice

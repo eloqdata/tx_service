@@ -35,6 +35,7 @@
 #include "cc/local_cc_shards.h"
 #include "data_store_service_client.h"
 #include "include/mock/mock_catalog_factory.h"
+#include "rpc_closure.h"
 #include "sharder.h"
 #include "tx_key.h"
 
@@ -413,5 +414,199 @@ TEST_CASE(
         REQUIRE(fixture.Store().requests_[i]->rec_str_.capacity() <=
                 std::string{}.capacity());
     }
+}
+
+TEST_CASE("FetchRecordClosure completes stale fetches on the owning shard",
+          "[fetch-record-cc]")
+{
+    class WaitingRequest : public CcRequestBase
+    {
+    public:
+        bool Execute(CcShard &) override
+        {
+            return true;
+        }
+        void AbortCcRequest(CcErrorCode error) override
+        {
+            ++abort_count_;
+            error_ = error;
+        }
+        size_t abort_count_{0};
+        CcErrorCode error_{CcErrorCode::NO_ERROR};
+    } waiter;
+
+    size_t destroyed_keys = 0;
+    FetchShardFixture fixture;
+    CcShard &shard = fixture.Shard();
+    const TableName table(
+        std::string("fetch-stale"), TableType::Primary, TableEngine::EloqSql);
+    MockTableSchema schema(table, "", 1);
+    LruEntry entry;
+    KeyGapLockAndExtraData lock;
+    lock.Reset(nullptr, nullptr, &entry);
+    entry.cc_lock_and_extra_ = &lock;
+
+    REQUIRE(shard.FetchRecord(
+                table,
+                &schema,
+                TxKey(std::make_unique<CountedKey>(&destroyed_keys)),
+                &entry,
+                0,
+                -2,
+                &waiter,
+                0) == store::DataStoreHandler::DataStoreOpStatus::Success);
+    FetchRecordCc *request = fixture.Store().requests_.back();
+    REQUIRE_FALSE(request->ValidTermCheck());
+
+    (new FetchRecordClosure(request))->Run();
+    REQUIRE(request->InUse());
+    REQUIRE(waiter.abort_count_ == 0);
+    REQUIRE(shard.ProcessRequests() == 1);
+    REQUIRE(waiter.abort_count_ == 1);
+    REQUIRE(waiter.error_ == CcErrorCode::NG_TERM_CHANGED);
+    REQUIRE_FALSE(request->InUse());
+    REQUIRE(destroyed_keys == 1);
+    REQUIRE(request->rec_str_.capacity() <= std::string{}.capacity());
+}
+
+TEST_CASE("FetchSnapshotCc drops owned results at final release",
+          "[fetch-value-pool]")
+{
+    size_t destroyed_keys = 0;
+    FetchSnapshotCc request;
+    request.Use();
+    request.tx_key_ = TxKey(std::make_unique<CountedKey>(&destroyed_keys));
+    for (std::string *buffer : {&request.rec_str_,
+                                &request.kv_table_name_,
+                                &request.kv_start_key_,
+                                &request.kv_end_key_})
+    {
+        buffer->assign(kPayloadSize, 'v');
+    }
+    CcRequestBase *base = &request;
+    base->Free();
+
+    REQUIRE_FALSE(request.InUse());
+    REQUIRE_FALSE(request.tx_key_.IsOwner());
+    REQUIRE(destroyed_keys == 1);
+    for (const std::string *buffer : {&request.rec_str_,
+                                      &request.kv_table_name_,
+                                      &request.kv_start_key_,
+                                      &request.kv_end_key_})
+    {
+        REQUIRE(buffer->empty());
+        REQUIRE(buffer->capacity() <= std::string{}.capacity());
+    }
+}
+
+TEST_CASE(
+    "RunOnTxProcessorCc retains captures through retry and releases on finish",
+    "[fetch-value-pool]")
+{
+    FetchShardFixture fixture;
+    CcShard &shard = fixture.Shard();
+    CcRequestPool<RunOnTxProcessorCc> pool(1);
+    RunOnTxProcessorCc *request = pool.NextRequest();
+    auto payload = std::make_shared<std::string>(kPayloadSize, 'v');
+    std::weak_ptr<std::string> retained = payload;
+    size_t calls = 0;
+    request->Reset(
+        [payload = std::move(payload), &calls](CcShard &)
+        {
+            REQUIRE(payload->size() == kPayloadSize);
+            return ++calls == 2;
+        });
+    shard.Enqueue(request);
+    REQUIRE(shard.ProcessRequests() == 1);
+    REQUIRE(request->InUse());
+    REQUIRE_FALSE(retained.expired());
+    REQUIRE(pool.NextRequest() == nullptr);
+
+    // Execute already enqueued its own retry when the task returned false.
+    REQUIRE(shard.ProcessRequests() == 1);
+    REQUIRE(calls == 2);
+    REQUIRE_FALSE(request->InUse());
+    REQUIRE(retained.expired());
+}
+
+TEST_CASE(
+    "FetchBucketDataCc stays occupied while a filtered batch is refetched",
+    "[fetch-value-pool]")
+{
+    class ScanContinuation : public CcRequestBase
+    {
+    public:
+        bool Execute(CcShard &) override
+        {
+            return true;
+        }
+        size_t callbacks_{0};
+        FetchBucketDataCc *pending_{nullptr};
+    } continuation;
+    FetchShardFixture fixture;
+    CcShard &shard = fixture.Shard();
+    CcRequestPool<FetchBucketDataCc> pool(1);
+    FetchBucketDataCc *request = pool.NextRequest();
+    const TableName table(std::string("bucket-refetch"),
+                          TableType::Primary,
+                          TableEngine::EloqSql);
+    MockTableSchema schema(table, "", 1);
+    request->Reset(&table,
+                   &schema,
+                   0,
+                   Sharder::Instance().LeaderTerm(0),
+                   &shard,
+                   true,
+                   0,
+                   nullptr,
+                   "",
+                   KeyType::NegativeInf,
+                   true,
+                   "",
+                   KeyType::PositiveInf,
+                   false,
+                   10,
+                   &continuation,
+                   [](FetchBucketDataCc *fetch, CcRequestBase *requester)
+                   {
+                       auto *scan = static_cast<ScanContinuation *>(requester);
+                       ++scan->callbacks_;
+                       if (!fetch->is_drained_)
+                       {
+                           // The first batch has no accepted rows. Keep its
+                           // request and owned continuation boundary until
+                           // asynchronous completion.
+                           fetch->bucket_data_items_.clear();
+                           fetch->start_key_ = std::string(kPayloadSize, 'k');
+                           scan->pending_ = fetch;
+                           return false;
+                       }
+                       REQUIRE(scan->pending_ == fetch);
+                       REQUIRE(fetch->StartKey().size() == kPayloadSize);
+                       REQUIRE(fetch->bucket_data_items_.size() == 1);
+                       scan->pending_ = nullptr;
+                       return true;
+                   });
+    request->kv_start_key_.assign(kPayloadSize, 'a');
+    request->kv_end_key_.assign(kPayloadSize, 'z');
+    request->AddDataItem("filtered", std::string(kPayloadSize, 'v'), 1, false);
+    request->SetFinish(0);
+    REQUIRE(shard.ProcessRequests() == 1);
+    REQUIRE(request->InUse());
+    REQUIRE(pool.NextRequest() == nullptr);
+    REQUIRE(continuation.pending_ == request);
+
+    request->AddDataItem("accepted", std::string(kPayloadSize, 'v'), 1, false);
+    request->is_drained_ = true;
+    request->SetFinish(0);
+    REQUIRE(shard.ProcessRequests() == 1);
+    REQUIRE(continuation.callbacks_ == 2);
+    REQUIRE(continuation.pending_ == nullptr);
+    REQUIRE_FALSE(request->InUse());
+    REQUIRE(request->bucket_data_items_.empty());
+    REQUIRE(request->StartKey().empty());
+    REQUIRE(request->EndKey().empty());
+    REQUIRE(request->kv_start_key_.capacity() <= std::string{}.capacity());
+    REQUIRE(request->kv_end_key_.capacity() <= std::string{}.capacity());
 }
 }  // namespace txservice

@@ -953,6 +953,22 @@ public:
     PostWriteAllCc(const PostWriteAllCc &rhs) = delete;
     PostWriteAllCc(PostWriteAllCc &&rhs) = delete;
 
+    /** Releases decoded owners after the final shard or an abort finishes. */
+    void Free() override
+    {
+        // A request visits the shards consecutively. Keep these owners while
+        // it is in flight, including retries; borrowed records remain owned
+        // by the caller and are never deleted here.
+        decoded_payload_.reset();
+        decoded_key_ = TxKey();
+        payload_ = nullptr;
+        key_ = nullptr;
+        payload_str_ = nullptr;
+        key_str_ = nullptr;
+        key_str_type_ = nullptr;
+        CcRequestBase::Free();
+    }
+
     void Reset(const TableName *tname,
                const TxKey *key,
                uint32_t node_group_id,
@@ -1123,9 +1139,9 @@ private:
      * request but dispatched to a non-native cc node group, decoded_payload_
      * owns a record on which the request is executed.
      *
-     * Need to set to nullptr after PostWriteAll is finished, in order to
-     * decrease the use count of TableSchema shared pointer inside
-     * CatalogRecord.
+     * Free() releases it on completion or abort, including the TableSchema
+     * shared pointer held by a CatalogRecord. Idle requests must not retain
+     * that schema ownership.
      *
      */
     std::unique_ptr<TxRecord> decoded_payload_{nullptr};

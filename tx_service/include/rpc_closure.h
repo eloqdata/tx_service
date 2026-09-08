@@ -787,6 +787,11 @@ public:
         if (!fetch_cc_->ValidTermCheck())
         {
             channel_ = nullptr;
+            // Term changes still complete the fetch on its owner shard. That
+            // path aborts the waiters and removes the deduplicated request;
+            // dropping only this RPC closure would leave the request in use.
+            fetch_cc_->SetFinish(
+                static_cast<int>(CcErrorCode::NG_TERM_CHANGED));
             return;
         }
         CcErrorCode err_code = CcErrorCode::NO_ERROR;

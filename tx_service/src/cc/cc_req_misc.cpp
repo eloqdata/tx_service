@@ -1118,6 +1118,18 @@ bool RecoverDeadTxCc::Execute(CcShard &ccs)
     return true;
 }
 
+void FetchBucketDataCc::Free()
+{
+    std::deque<RawSliceDataItem>().swap(bucket_data_items_);
+    start_key_ = std::string_view();
+    end_key_ = std::string_view();
+    std::string().swap(kv_start_key_);
+    std::string().swap(kv_end_key_);
+    std::string().swap(kv_table_name_);
+    // Publish reuse only after destroying buffers referenced by scan callbacks.
+    CcRequestBase::Free();
+}
+
 void FetchBucketDataCc::Reset(
     const TableName *table_name,
     const TableSchema *table_schema,
@@ -1225,7 +1237,9 @@ bool FetchBucketDataCc::Execute(CcShard &ccs)
     }
     else
     {
-        (*backfill_func_)(this, requester_);
+        // A filtered batch can start another fetch on this same request.
+        // Keep it occupied until that callback reaches a terminal batch.
+        return (*backfill_func_)(this, requester_);
     }
 
     return true;
@@ -1235,6 +1249,16 @@ void FetchBucketDataCc::SetFinish(int32_t err)
 {
     err_code_ = err;
     ccs_->Enqueue(this);
+}
+
+void FetchSnapshotCc::Free()
+{
+    tx_key_ = TxKey();
+    std::string().swap(rec_str_);
+    std::string().swap(kv_start_key_);
+    std::string().swap(kv_end_key_);
+    std::string().swap(kv_table_name_);
+    CcRequestBase::Free();
 }
 
 void FetchSnapshotCc::Reset(const TableName *tbl_name,
@@ -1307,6 +1331,14 @@ void FetchSnapshotCc::SetFinish(int err)
 {
     error_code_ = err;
     ccs_->Enqueue(this);
+}
+
+void RunOnTxProcessorCc::Free()
+{
+    // WaitableCc can invoke the same task on multiple shards. Execute must not
+    // clear its captures when just one shard finishes.
+    task_ = {};
+    CcRequestBase::Free();
 }
 
 bool RunOnTxProcessorCc::Execute(CcShard &ccs)
