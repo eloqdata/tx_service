@@ -96,7 +96,11 @@ void StandbyForwardEntry::AddOverWriteCommand(TxCommand *cmd)
     assert(cmd->IsOverwrite());
     auto &req = Request();
     req.set_has_overwrite(true);
-    req.clear_cmd_list();
+    // Clear() keeps the replaced strings and their capacities inside protobuf.
+    // They are no longer needed, and ByteSizeLong() would not account for them
+    // if this entry later waits in the standby history buffer.
+    google::protobuf::RepeatedPtrField<std::string>{}.Swap(
+        req.mutable_cmd_list());
     std::string cmd_str;
     cmd->Serialize(cmd_str);
     req.add_cmd_list(std::move(cmd_str));

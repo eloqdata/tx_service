@@ -31,7 +31,9 @@ Committed object changes are captured on the owner shard's apply path. A
 forwarded command represents the command after owner-side execution, because
 the standby performs commit replay and does not rerun the command's execution
 phase. Whole-object replacement is available for changes that cannot safely be
-expressed as an incremental command.
+expressed as an incremental command. It releases the superseded commands while
+preserving the entry's routing and version metadata. Subsequent commands follow
+the replacement in replay order.
 
 Each `CcShard` is an independent sequence group and assigns monotonically
 increasing forward sequence ids. This provides FIFO ordering within a shard and
@@ -136,6 +138,7 @@ term or all-log-groups recovery barriers described in
 |---|---|
 | Standby entries, sequence groups, session terms, and checkpoint broadcasts define the protocol state | `tx_service/include/standby.h`; `tx_service/src/standby.cpp` |
 | Committed commands are captured on the owner-side apply path with standby replay semantics | `tx_service/include/cc/object_cc_map.h`; `tx_service/tests/StandbyForward-Test.cpp` |
+| Whole-object replacement releases superseded command storage and preserves replay metadata | `tx_service/src/standby.cpp`; `tx_service/tests/StandbyForward-Test.cpp` |
 | Per-shard sequencing, bounded buffering, retry, gap tracking, and out-of-sync handling live in `CcShard` | `tx_service/include/cc/cc_shard.h`; `tx_service/src/cc/cc_shard.cpp` |
 | Subscription, sequence reset, snapshot, and checkpoint RPCs cross the CC control plane | `tx_service/include/proto/cc_request.proto`; `tx_service/src/remote/cc_node_service.cpp` |
 | Stream receive routes standby messages back to their owning shard | `tx_service/src/remote/cc_stream_receiver.cpp`; `tx_service/src/remote/cc_stream_sender.cpp` |
