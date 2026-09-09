@@ -102,6 +102,12 @@ A failed `CatalogAcquireAllOp` reports `AcquireAllOp::RepresentativeError()` on 
 ## Gotchas
 
 - Operation objects are *members* of the txm (`read_`, `acquire_write_`, `write_log_`, ...) — they are reused across requests; `Reset()` correctness on every path matters.
+- A TTL-reset object command may capture a full-object recovery image in its
+  handler result. Ordinary operation completion preserves the result for later
+  commit replies; terminal transaction reset releases the image's capacity
+  before the txm returns to its pool. Log records and standby forwarding use
+  independently owned storage. Capture remains enabled with WAL off; terminal
+  cleanup does not change the standby recovery contract.
 - `ReadLocalOperation` reads node-local meta (cluster config, ranges, buckets) without remote hops; it relies on meta cc maps being replicated to every node ([03](03-concurrency-control.md)).
 - Blocking object commands (e.g. Redis BLPOP-style, `BlockOperation` in `tx_command.h`) park in `tx_progress_block_` on the processor and are re-enlisted by `CheckWaitingTxs()` (10ms cadence; regular stuck txs at 2s).
 - `RETRY_NUM` / `state_forward_cnt_` guard against infinite re-execution; `ForwardFailed` keeps a tx on the on-fly queue rather than spinning.

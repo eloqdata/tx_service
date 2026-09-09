@@ -132,6 +132,11 @@ void TransactionExecution::Reset()
     commit_ts_bound_ = 0;
     rw_set_.Reset();
     cmd_set_.Reset();
+    // Commit/abort no longer needs this result image. Log and standby records
+    // use independently owned storage, so release its capacity before the txm
+    // returns to the reusable pool. Keep the other handler result fields intact
+    // until their ordinary operation reset.
+    std::string{}.swap(obj_cmd_.hd_result_.Value().recover_cmd_image_);
     wset_iters_.clear();
     wset_reverse_iters_.clear();
     scans_.clear();

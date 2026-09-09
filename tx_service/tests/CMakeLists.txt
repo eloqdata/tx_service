@@ -70,6 +70,7 @@ set(CATCH_MAIN_TESTS
     AcquireAllError-Test
     StandbyForward-Test
     ApplyResponseBoundary-Test
+    TransactionImageLifetime-Test
 )
 
 if(WITH_DATA_STORE STREQUAL "ELOQDSS_ROCKSDB" OR

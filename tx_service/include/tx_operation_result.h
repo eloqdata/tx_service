@@ -1001,8 +1001,8 @@ struct ObjectCommandResult
     bool ttl_reset_{false};
     // Full-object snapshot image the owner shard serialized when the command
     // reset a live TTL — the single capture point for local and remote owners
-    // (remote responses carry it in ApplyResponse). Non-empty iff ttl_reset_.
-    // Written to the WAL as an overwrite record.
+    // (remote responses carry it in ApplyResponse). Used for WAL overwrites.
+    // Terminal txm reset releases this image before the other reply fields.
     std::string recover_cmd_image_{};
 };
 
