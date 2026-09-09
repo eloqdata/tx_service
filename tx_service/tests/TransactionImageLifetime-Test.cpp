@@ -107,15 +107,13 @@ ObjectCommandResult &SeedImage(TransactionExecution &txm)
     return result;
 }
 
-void RequireImageReleased(const ObjectCommandResult &result)
+void RequireResultReset(const ObjectCommandResult &result)
 {
     REQUIRE(result.recover_cmd_image_.empty());
     REQUIRE(result.recover_cmd_image_.capacity() == std::string{}.capacity());
-    // Final request replies still depend on handler-result status. This change
-    // must not indiscriminately reset the rest of the operation result.
-    REQUIRE(result.rec_status_ == RecordStatus::Normal);
-    REQUIRE(result.commit_ts_ == 123);
-    REQUIRE(result.ttl_reset_);
+    REQUIRE(result.rec_status_ == RecordStatus::Unknown);
+    REQUIRE(result.commit_ts_ == 0);
+    REQUIRE_FALSE(result.ttl_reset_);
 }
 }  // namespace
 
@@ -135,7 +133,7 @@ TEST_CASE("Object commit tail releases the image after preserving the reply",
     REQUIRE(TransactionExecutionTestPeer::Forward(txm) == TxmStatus::Finished);
     REQUIRE(reply.Status() == TxResultStatus::Finished);
     REQUIRE(reply.Value() == RecordStatus::Normal);
-    RequireImageReleased(result);
+    RequireResultReset(result);
 }
 
 TEST_CASE("Explicit commit and abort tails release pooled recovery images",
@@ -151,19 +149,40 @@ TEST_CASE("Explicit commit and abort tails release pooled recovery images",
     REQUIRE(TransactionExecutionTestPeer::Forward(txm) == TxmStatus::Finished);
     REQUIRE(reply.Status() == TxResultStatus::Finished);
     REQUIRE(reply.Value() == commit);
-    RequireImageReleased(result);
+    RequireResultReset(result);
 }
 
-TEST_CASE("Terminal abort releases a large image after a small command reuse",
+TEST_CASE("Result reset releases the previous command image before reuse",
+          "[transaction-image]")
+{
+    const bool reset_through_operation = GENERATE(false, true);
+    TransactionExecution txm(nullptr, nullptr, nullptr);
+    auto &result = SeedImage(txm);
+    if (reset_through_operation)
+    {
+        TransactionExecutionTestPeer::ObjectOp(txm).Reset(
+            nullptr, nullptr, nullptr);
+    }
+    else
+    {
+        result.Reset();
+    }
+
+    REQUIRE(result.recover_cmd_image_.empty());
+    REQUIRE(result.recover_cmd_image_.capacity() == std::string{}.capacity());
+    REQUIRE(result.rec_status_ == RecordStatus::Unknown);
+    REQUIRE(result.commit_ts_ == 0);
+    REQUIRE_FALSE(result.ttl_reset_);
+}
+
+TEST_CASE("Terminal abort releases a large image capacity with short contents",
           "[transaction-image]")
 {
     TransactionExecution txm(nullptr, nullptr, nullptr);
     auto &result = SeedImage(txm);
-    auto &op = TransactionExecutionTestPeer::ObjectOp(txm);
-    op.Reset(nullptr, nullptr, nullptr);
-    REQUIRE(result.recover_cmd_image_.empty());
+    result.recover_cmd_image_.resize(5);
+    REQUIRE(result.recover_cmd_image_.size() == 5);
     REQUIRE(result.recover_cmd_image_.capacity() >= kLargeImageSize);
-    result.recover_cmd_image_ = "small";
 
     // An unstarted/fenced transaction takes the actual early-abort Reset path.
     AbortTxRequest abort;
@@ -204,7 +223,7 @@ TEST_CASE("Remote response and copied log image outlive transaction cleanup",
     TxResult<RecordStatus> reply(nullptr, nullptr);
     TransactionExecutionTestPeer::FinishObjectReply(txm, reply);
     REQUIRE(TransactionExecutionTestPeer::Forward(txm) == TxmStatus::Finished);
-    RequireImageReleased(result);
+    RequireResultReset(result);
     REQUIRE(received.recover_cmd_image() == std::string(kLargeImageSize, 'r'));
     REQUIRE(log_entry.cmd_str_list_.front() == received.recover_cmd_image());
 }
@@ -225,6 +244,6 @@ TEST_CASE("An active remote-result reader prevents terminal image release",
     txm.ReleaseSharedForwardLatch();
 
     REQUIRE(TransactionExecutionTestPeer::Forward(txm) == TxmStatus::Finished);
-    RequireImageReleased(result);
+    RequireResultReset(result);
 }
 }  // namespace txservice
