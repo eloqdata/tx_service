@@ -2242,9 +2242,7 @@ void CcNodeService::ResetStandbySequenceId(
             if (Sharder::Instance().CheckLeaderTerm(
                     ng_id, PrimaryTermFromStandbyTerm(standby_node_term)))
             {
-                // Remove from candidates and add to subscribed
-                ccs.RemoveCandidateStandby(node_id);
-                ccs.AddSubscribedStandby(
+                ccs.PromoteCandidateStandby(
                     node_id, seq_ids.at(ccs.core_id_), standby_node_term);
             }
             return true;

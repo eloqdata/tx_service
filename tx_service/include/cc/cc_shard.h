@@ -1140,6 +1140,11 @@ public:
     void ForwardStandbyMessage(StandbyForwardEntry *entry);
     void AddCandidateStandby(uint32_t node_id, uint64_t start_seq_id);
     void RemoveCandidateStandby(uint32_t node_id);
+    // Called on the owning shard. Install the subscriber watermark before
+    // removing its candidate so cleanup cannot discard the bootstrap history.
+    void PromoteCandidateStandby(uint32_t node_id,
+                                 uint64_t start_seq_id,
+                                 int64_t standby_node_term);
     void CheckAndFreeUnneededEntries();
     void AddSubscribedStandby(uint32_t node_id,
                               uint64_t start_seq_id,
@@ -1545,5 +1550,6 @@ private:
     friend class LocalCcHandler;
     friend class LocalCcShards;
     friend class Checkpointer;
+    friend class StandbyHistoryTestPeer;
 };
 }  // namespace txservice
