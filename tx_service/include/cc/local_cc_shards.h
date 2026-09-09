@@ -51,6 +51,7 @@
 #include "catalog_key_record.h"
 #include "cc_entry.h"
 #include "cc_page_clean_guard.h"
+#include "cc_request.h"
 #include "cc_shard.h"
 #include "data_sync_task.h"
 #include "eloq_basic_catalog_factory.h"
@@ -440,6 +441,17 @@ public:
         auto &ccs = cc_shards_[cc_shard_idx];
         ccs->EnqueueLowPriorityCcRequest(req);
     }
+
+    /**
+     * Release scan result elements on the source shard and wait for completion.
+     * The scan must have completed and its consumers must have finished using
+     * the results. source_core must be the shard that exported this batch.
+     * Call from a consumer context, never from a CC request, and keep scan
+     * alive until this returns. Does not Reset the scan or release payloads
+     * already transferred to flush tasks.
+     */
+    void ReleaseScanResultsAndWait(uint16_t source_core,
+                                   RangePartitionDataSyncScanCc &scan);
 
     static uint64_t ClockTs();
     static uint64_t ClockTsInMillseconds();

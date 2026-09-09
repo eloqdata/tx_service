@@ -105,6 +105,16 @@ foreach(name ${OWN_MAIN_TESTS})
     add_substrate_test(${name} Catch2::Catch2)
 endforeach()
 
+# Standalone component regression: real scan export/heap release on a TestNode.
+# A timeout bounds a regression in the source-shard completion handshake.
+add_executable(RangeScanMemory-Test ${TESTS_DIR}/RangeScanMemory-Test.cpp)
+target_link_libraries(RangeScanMemory-Test PRIVATE test_harness)
+set_property(TARGET RangeScanMemory-Test PROPERTY CXX_STANDARD 20)
+set_property(TARGET RangeScanMemory-Test PROPERTY CXX_EXTENSIONS OFF)
+add_test(NAME RangeScanMemory-Test COMMAND RangeScanMemory-Test)
+set_tests_properties(RangeScanMemory-Test PROPERTIES
+    LABELS "RangeScanMemory-Test" TIMEOUT 90)
+
 # --- Phase 2 cross-NG cluster test (own main; links cluster_harness) ---
 # Drives a real 2-node out-of-process cluster, so it links cluster_harness (the
 # TestCluster driver + generated WorkloadService stub) and must be built after

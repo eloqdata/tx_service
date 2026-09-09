@@ -4090,13 +4090,13 @@ public:
 
         accumulated_scan_cnt_ = 0;
         accumulated_flush_data_size_ = 0;
-        if (scan_heap_is_full_ == 1)
-        {
-            // vec has been cleared during ReleaseDataSyncScanHeapCc,
-            // resize to prepared size
-            data_sync_vec_.resize(scan_batch_size_);
-            scan_heap_is_full_ = 0;
-        }
+        // Consumers may release a completed batch before waiting for downstream
+        // capacity even when the scan heap was not full. ExportForCkpt writes
+        // existing elements with operator[], so reconstruct those slots after
+        // release. Keeping capacity alone is insufficient. Reset still does not
+        // release live records; consumers must do that on the source shard.
+        data_sync_vec_.resize(scan_batch_size_);
+        scan_heap_is_full_ = 0;
         if (export_base_table_item_)
         {
             curr_slice_index_ = 0;
