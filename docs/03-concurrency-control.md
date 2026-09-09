@@ -116,6 +116,8 @@ replacement. Entry addresses used across asynchronous steps are valid only
 while a lock, intent, or explicit pin preserves the associated indirection;
 page split, merge, compaction, and eviction may otherwise move or destroy the
 entry.
+Page maintenance owns temporary key copies through relocation and destroys
+those temporary objects after transferring their contents into resident keys.
 
 Only state that is no longer transactionally owned and is already persistent
 may be evicted. Dirty entries remain resident until checkpointing advances

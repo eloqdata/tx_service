@@ -9103,7 +9103,8 @@ protected:
                 auto it = keys.begin() + idx_in_page_;
                 assert(it != keys.end());
                 it = keys.erase(it);
-                it = keys.emplace(it, std::move(*(key_clone.release())));
+                // The page takes the key contents, not the temporary object.
+                it = keys.emplace(it, std::move(*key_clone));
                 defraged = true;
             }
 
