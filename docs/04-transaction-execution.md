@@ -1,116 +1,158 @@
 # Transaction Execution
 
-A transaction in the tx service is an asynchronous state machine: `TransactionExecution` (a "txm"). API engines hand it `TxRequest`s; the txm decomposes each request into a stack of `TransactionOperation`s; `Forward()` advances the top operation one step at a time, never blocking — when an operation waits on cc requests (local or remote), `Forward()` simply returns control to the processor so it can run other txs or drain the shard's cc queue. This file explains the txm lifecycle, the request/operation vocabulary, and the commit pipeline.
+`TransactionExecution` is the asynchronous coordinator for one transaction.
+API engines submit `TxRequest`s; the coordinator translates each request into
+one or more `TransactionOperation`s and advances them with `Forward()`. An
+operation waiting on local CC work, a remote node, the log service, or the store
+returns control to the owning processor instead of blocking it.
 
-Key files: `tx_service/include/tx_execution.h` + `tx_service/src/tx_execution.cpp`, `tx_service/include/tx_request.h`, `tx_service/include/tx_operation.h`, `tx_service/include/tx_req_result.h`, `tx_service/include/read_write_set.h`, `tx_service/include/command_set.h`, `tx_service/include/cc/cc_handler.h`.
+The state machine owns transaction-local coordination state, including the
+read/write set, object-command set, open scanners, operation stack, timestamps,
+leadership term, and pending results. It does not own table data or locks;
+those remain in the destination CC shards described in
+[03-concurrency-control.md](03-concurrency-control.md).
 
-## Lifecycle
+## Lifecycle and ownership
 
-1. **Creation.** `TxService::NewTx()` picks a `TxProcessor` (prime-offset round robin for load balance) and reuses a txm from the free pool or allocates one. With `EXT_TX_PROC_ENABLED`, `NewTx(shard_id)` creates an *external* txm pinned to a shard and tracked on that processor's external-active list — this is what API engines running on brpc workers use.
-2. **Request submission.** The engine calls `txm->Execute(tx_req)` which enqueues into `tx_req_queue_`, then typically blocks/yields on the request's `TxResult` (requests carry optional `yield_fptr`/`resume_fptr` so a bthread can yield instead of blocking; `TemplateTxRequest<Subtype, T>` dispatches back via `txm->ProcessTxRequest(subtype&)`).
-3. **Forwarding.** `Forward()` (called by the processor under the shard latch, or inline via `TxProcessor::ForwardTx` / `ExternalForward`) dequeues a request, lets it push operations onto `state_stack_`, then repeatedly `Process(op)` / checks completion / `PostProcess(op)` until the stack empties and the request's `TxResult` is finished.
-4. **Completion.** On the final request (commit/abort), status becomes `TxnStatus::Finished`, `Reset()` clears state, and the txm returns to the free pool for reuse.
+A `TxProcessor` creates or reuses a transaction coordinator and keeps it bound
+to the processor's shard. Initialization registers transaction identity and
+start-time state in the owner shard's transaction table and records the owner
+node group's leader term. Requests are then admitted one at a time through the
+coordinator's request queue.
 
-`InitTxRequest` starts the tx proper: `InitTxnOperation` registers a `TEntry` on the owner shard, yielding `TxId`/`tx_number_`, the **tx term** (the owner NG's current leader term — used for fencing everywhere), and `start_ts_`.
+`Forward()` processes the top operation until that operation either advances
+the stack or remains pending. When no operation is active, it dequeues the next
+request and lets the request install its operations. A commit or abort request
+drives final post-processing; after all CC ownership is released, `Reset()`
+clears transaction-local state and the coordinator returns to its processor's
+reuse pool.
 
-## Concurrency around a txm
+An object command that resets a live TTL may retain a full-object recovery
+image in its result. Ordinary operation completion preserves that result until
+the final reply and durability consumers have copied it. Terminal transaction
+reset then releases the image before returning the coordinator to its pool,
+including when WAL is disabled. WAL records and standby forwarding retain
+independently owned copies.
 
-- A txm is forwarded by exactly one thread at a time (shard latch, see [02-threading-model.md](02-threading-model.md)).
-- `forward_latch_` arbitrates between `Forward()` (exclusive, −1) and the `CcStreamReceiver` writing remote results into the txm's `CcHandlerResult` (shared, +k). This prevents a timeout/retry in `Forward()` from freeing a result a stream thread is filling. See [06-distribution-and-clustering.md](06-distribution-and-clustering.md).
-- `command_id_` increments per handled request / remote send; stale remote responses (from a timed-out, re-sent cc request) are discarded by matching `tx_number_` + command id.
-- `IsTimeOut()` drives re-execution of stuck remote operations; `CheckLeaderTerm()` / `CheckStandbyTerm()` abort txs fenced off by leadership changes.
+Submitted request storage must remain live until its result completes. The
+coordinator owns the reusable operation state and all buffered write/command
+material for the transaction lifetime. Records and keys moved into write sets
+remain owned there until commit/abort cleanup; read-set entry addresses remain
+valid only because the CC layer retains the corresponding lock, intent, or pin.
 
-## TxRequest vocabulary
+## Local and remote execution
 
-All in `tx_service/include/tx_request.h`; each maps to `ProcessTxRequest(...)` overloads in `tx_execution.h`.
+`CcHandler` is the state machine's concurrency-control boundary.
+`LocalCcHandler` enqueues work to local shards; remote routing sends equivalent
+requests to the current owner node. Both paths complete `CcHandlerResult`
+objects, which aggregate fan-out and allow the same operation logic to wait for
+multiple shards or node groups.
 
-| Group | Requests | Notes |
-|---|---|---|
-| Lifecycle | `InitTxRequest`, `CommitTxRequest`, `AbortTxRequest` | commit carries `to_commit` flag semantics via bool result |
-| Point data | `ReadTxRequest`, `ReadOutsideTxRequest`, `BatchReadTxRequest`, `UpsertTxRequest` | record model (SQL/doc); upsert buffers into the write set, real work at commit |
-| Scans | `ScanOpenTxRequest`, `ScanBatchTxRequest`, `ScanCloseTxRequest` | scan state kept per alias in `scans_`; see [03](03-concurrency-control.md) scanners |
-| Object commands | `ObjectCommandTxRequest`, `MultiObjectCommandTxRequest`, `PublishTxRequest` | command model (EloqKV): `TxCommand` ships to the owner shard and executes against the `TxObject` (`ApplyCc`); auto-commit unless inside an explicit tx |
-| DDL / schema | `UpsertTableTxRequest`, `SchemaRecoveryTxRequest`, `InvalidateTableCacheTxRequest` | drives `UpsertTableOp` multi-stage schema change |
-| Statistics | `AnalyzeTableTxRequest`, `BroadcastStatisticsTxRequest` | |
-| Maintenance / cluster | `SplitFlushTxRequest`, `RangeSplitRecoveryTxRequest`, `ClusterScaleTxRequest`, `DataMigrationTxRequest`, `ReloadCacheTxRequest`, `CleanArchivesTxRequest` | composite multi-stage ops, see [08](08-range-and-bucket-management.md)/[06](06-distribution-and-clustering.md) |
-| Test | `FaultInjectTxRequest`, `CleanCcEntryForTestTxRequest` | Debug builds |
+Only one context advances a coordinator at a time. A shard latch protects the
+processor-owned state machine, while `forward_latch_` arbitrates between
+`Forward()` and remote stream delivery updating an in-flight result. Responses
+carry the transaction number and a monotonically changing command identifier;
+late responses from a timed-out or retried operation are rejected instead of
+mutating reused result state.
 
-### Scan read ownership
+The transaction's node-group term fences transaction progress and destination
+CC requests. A leadership change causes them to fail rather than commit under
+stale ownership. Retriable remote-operation failures may re-run an
+operation after routing changes, while the transaction identity and command
+identifier keep old replies separate.
 
-Closing or draining a scanner does not release data read locks or read intents
-while the transaction can still execute requests.
-Returned locked CCEs already recorded as semantic data reads remain in the data
-read set; command/write-set tuples keep their existing ownership paths.
-Scanner-only last/trailing/error cleanup CCEs are stored there with version 0,
-which skips version validation but keeps the CCE non-evictable until final
-cleanup. Commit releases them through `ValidateOperation`; abort releases them
-through `PostProcessOp`.
+## Transaction footprint
 
-This retention can increase the read-set footprint and writer blocking for long
-locking scans. It also makes node groups touched only by scanner pins part of
-the final post-read term check, so a leadership change on one of those groups
-can abort the transaction.
+`ReadWriteSet` records semantic reads, metadata reads, buffered record writes,
+schema versions, and the node-group terms touched by locks. `CommandSet`
+records object commands that executed on owner shards and the version/timestamp
+facts needed to log and commit them. These collections are the source of
+commit-time acquisition, validation, WAL construction, installation, and
+cleanup.
 
-The read/write footprint accumulates in `ReadWriteSet` (`rw_set_`: read entries with version ts + lock info, table write sets) and `CommandSet` (`cmd_set_`: object commands for forwarding/logging). EloqKV database locks are cached in `locked_db_[16]`.
+Closing a scanner releases scanner machinery but does not discard reads whose
+locks or intents are still required by the transaction. Those reads remain in
+the transaction footprint until commit validation or abort cleanup. Thus scan
+batch and cursor lifetimes are narrower than transaction-level CC ownership.
 
-## The commit pipeline
+## Commit and abort protocol
 
-`TransactionExecution::Commit()` (`tx_execution.cpp`) chooses a path:
+The full decision path consists of these logical stages; a transaction skips a
+stage that is irrelevant or was already satisfied while executing a command:
 
-- **Object-command txs with forward writes** (commands executed on remote/standby-forwarded objects): `CmdForwardAcquireWriteOp` first.
-- **Data write set non-empty:** the full pipeline below.
-- **Catalog writes only:** `CatalogAcquireAllOp` path (schema changes acquire write-all on catalog entries across shards).
-- **Read-only:** skip straight to `SetCommitTsOperation` (or just validation when recovering).
+1. Read-lock the range or bucket metadata that determines placement of every
+   write, so routing cannot change underneath commit.
+2. Acquire write ownership for buffered record keys at their local or remote CC
+   shards. Object commands retain the owner-shard write ownership established
+   during execution and acquire any additional forwarding ownership they need.
+3. Choose a commit timestamp above the transaction's start/lower bound and the
+   version, lock, and read-validation bounds returned by touched entries.
+4. Validate optimistic reads and release the data-read ownership that no
+   longer needs to survive the decision.
+5. If data WAL is enabled, serialize the record values or object-command images
+   and append the transaction's data log. A successful append establishes the
+   durable commit decision. An indeterminate log result is surfaced as an
+   unknown transaction outcome for recovery to resolve.
+6. Record the transaction outcome, install committed values or commands (or
+   discard pending state on abort), release write and metadata ownership, and
+   wake blocked requests.
 
-Full write pipeline (each stage is a `TransactionOperation` pushed on the stack; all fan out cc requests through `CcHandler` and complete asynchronously):
+Read-only transactions skip write acquisition and logging but still validate
+and release any retained reads. Catalog-only writes use replicated
+acquire-all/post-write-all operations. Schema changes, range management, and
+cluster migration are composite operations built on the same stack and result
+model, but their subsystem-specific protocols live in the corresponding
+architecture documents rather than here.
 
-1. `LockWriteRangeBucketsOp` — read-lock the range/bucket meta entries covering every write key, pinning placement ([08](08-range-and-bucket-management.md)); this is also where the tx learns each key's owner NG.
-2. `AcquireWriteOperation` — `AcquireCc` write locks/intents on all write-set keys at their owner shards (2PL blocks, OCC fails fast; see [03](03-concurrency-control.md)).
-3. `SetCommitTsOperation` — negotiate the commit timestamp: max over (local clock, start_ts, per-entry last-read/commit ts bounds gathered during acquisition).
-4. `ValidateOperation` — OCC validation of the read set (`PostReadCc`: re-check versions / convert read intents), abort on conflict.
-5. `WriteToLogOp` — build the redo record (`FillDataLogRequest`: for object commands the *commands* are logged; for records the values) and call `TxLog::WriteLog` to the tx's log group. WAL is the commit point ([07](07-durability-and-recovery.md), [10](10-log-service.md)).
-6. `UpdateTxnStatus` — flip the `TEntry` to Committed/Aborted.
-7. `PostProcessOp` — install committed values / roll back, release locks (`PostWriteCc` / `PostWriteAllCc`), downgrade meta locks, notify standby forwarding.
+Abort uses the same post-processing ownership map: every successfully acquired
+read, intent, write lock, catalog lock, and placement lock is released through
+CC requests. A recovering coordinator may start with an already determined
+transaction identity and commit timestamp so it can resolve locks left by the
+original coordinator; see
+[07-durability-and-recovery.md](07-durability-and-recovery.md).
 
-Aborts run the same tail (UpdateTxnStatus → PostProcess with rollback). A txm whose coordinator died is finished by **recovery**: lock holders' `TEntry`s are resolved via `CheckTxStatus`/`RecoverTx` ([07](07-durability-and-recovery.md)), and `SetRecoverTxState` lets a replacement txm release orphaned locks with a predetermined commit ts.
+## Isolation model
 
-## Operations beyond the data path
+Transactions select an isolation level and CC protocol at initialization.
+`ReadCommitted`, `RepeatableRead`, and `Serializable` can use optimistic,
+optimistic-read/pessimistic-write, or locking control; snapshot reads require
+MVCC-capable optimistic reads. The CC layer derives concrete lock modes from
+this pair, while the transaction layer retains the versions needed for
+validation.
 
-`tx_service/include/tx_operation.h` also defines composite, multi-stage operations driven by the same Forward() loop; each owns its child ops and its own log records, and each has a recovery entry point:
+Node-local reads are reserved for metadata replicated locally. They still take
+the metadata ownership required to serialize catalog, range, bucket, and
+cluster changes. The local shortcut changes routing, not the consistency
+contract.
 
-- `UpsertTableOp` (schema/DDL: acquire-all catalog locks → log → kv `DsUpsertTableOp` → install dirty schema → flush → commit catalog), plus `UpsertTableIndexOp` for index builds (`tx_index_operation.h`, [08](08-range-and-bucket-management.md)).
-- `SplitFlushRangeOp` (range split), `ClusterScaleOp` + `DataMigrationOp` (bucket migration), `InvalidateTableCacheCompositeOp`.
-- `KickoutDataOp`/`KickoutDataAllOp` (cache eviction), `AnalyzeTableAllOp`/`BroadcastStatisticsOp` (statistics), `AsyncOp<T>` (generic kv-store async step), `NoOp`, `SleepOperation`.
+## Invariants
 
-## Isolation & protocols
+- `Forward()` never waits synchronously for an asynchronous operation; pending
+  operations yield the processor.
+- A coordinator is advanced by one context at a time, and remote result
+  delivery cannot race result timeout or reuse.
+- Every remote response is matched to both transaction identity and command
+  generation.
+- Placement and schema metadata used by a write remain protected through its
+  commit decision and post-processing.
+- A commit is not exposed as successful before its required WAL decision.
+- Object-command recovery images remain live through reply/log consumption but
+  are released at terminal transaction reset.
+- Reset/reuse occurs only after all transaction-owned CC state has been
+  released or handed to recovery.
 
-Set per tx at init (`iso_level_`, `protocol_`): `IsolationLevel` {ReadCommitted, Snapshot (requires `enable_mvcc`), RepeatableRead, Serializable} × `CcProtocol` {OCC, OccRead, Locking}. The lock type taken by each operation is decided by `LockTypeUtil::DeduceLockType` (`tx_service/include/cc_protocol.h`); `DeduceReadLockType` additionally special-cases meta tables and covering-key index reads. Snapshot reads use MVCC version chains and `TxStartTsCollector` ([07](07-durability-and-recovery.md)).
+## Source map
 
-**Read-local overrides the tx's settings** (`Process(ReadOperation&)`, `tx_service/src/tx_execution.cpp`). `ReadLocal` is used for catalog reads, which must take a real read lock whatever the tx asked for, so the isolation level is forced up to at least `RepeatableRead`. The protocol is then chosen by `is_for_write_`:
-
-| `is_for_write_` | protocol | lock | on conflict |
-|---|---|---|---|
-| `false` (catalog read) | `Locking` | `ReadLock` | blocks in the entry's queue |
-| `true` (catalog read for write) | `OCC` | `WriteIntent` | **fails fast** → `ACQUIRE_KEY_LOCK_FAILED_FOR_WW_CONFLICT` |
-
-The lock type is identical in both rows — `DeduceLockType` returns `WriteIntent` for `ReadForWrite` under every protocol. Only the failure status differs. Waiting on a catalog write intent closes a lock cycle against a DDL that is already past its prepare log and therefore cannot be aborted; see the rationale in [03](03-concurrency-control.md#5-nonblockinglock-non_blocking_lockh-non_blocking_lockcpp). `UpsertTableIndexOp::acquire_all_intent_op_` and `CatalogAcquireAllOp::acquire_all_intent_op_` already picked `OCC` for the same reason.
-
-`Process(ScanOpenOperation&)` still hardcodes `Locking` for read-local scans, so a read-local scan for write would take a blocking write intent. No in-tree caller constructs one today.
-
-A failed `CatalogAcquireAllOp` reports `AcquireAllOp::RepresentativeError()` on `bool_resp_` before aborting. `fail_cnt_` alone cannot supply a code — it is also raised on the dedup read-version-mismatch path where every handler result is successful — and an abort reported as `NO_ERROR` reads as success at the API boundary. Within one op, an infrastructure error (`REQUESTED_NODE_NOT_LEADER`, `NG_TERM_CHANGED`, timeouts) outranks a conflict error (`IsConflictError`, `error_messages.h`), because API layers retry conflicts and some of those retry loops have no bound of their own.
-
-## Gotchas
-
-- Operation objects are *members* of the txm (`read_`, `acquire_write_`, `write_log_`, ...) — they are reused across requests; `Reset()` correctness on every path matters.
-- A TTL-reset object command may capture a full-object recovery image in its
-  handler result. `ObjectCommandResult::Reset()` releases the image's capacity
-  when the result is reset for reuse. Ordinary operation completion preserves
-  the result for later commit replies. Once the reply has copied its result,
-  terminal transaction reset resets the handler value before the txm returns
-  to its pool, even if it is never reused. Log records and standby forwarding
-  use independently owned storage.
-  Capture remains enabled with WAL off; cleanup does not change the standby
-  recovery contract.
-- `ReadLocalOperation` reads node-local meta (cluster config, ranges, buckets) without remote hops; it relies on meta cc maps being replicated to every node ([03](03-concurrency-control.md)).
-- Blocking object commands (e.g. Redis BLPOP-style, `BlockOperation` in `tx_command.h`) park in `tx_progress_block_` on the processor and are re-enlisted by `CheckWaitingTxs()` (10ms cadence; regular stuck txs at 2s).
-- `RETRY_NUM` / `state_forward_cnt_` guard against infinite re-execution; `ForwardFailed` keeps a tx on the on-fly queue rather than spinning.
+| Claim | Repository source |
+|---|---|
+| `TransactionExecution` owns the request queue, operation stack, transaction footprint, and fencing state | `tx_service/include/tx_execution.h`; `tx_service/src/tx_execution.cpp` |
+| `Forward()` advances operations without blocking the processor | `tx_service/include/tx_execution.h`; `tx_service/src/tx_execution.cpp` (`TransactionExecution::Forward`) |
+| Processors create, bind, recycle, and exclusively advance coordinators | `tx_service/include/tx_service.h`; `tx_service/include/tx_service_common.h` |
+| Local and remote CC implementations share the `CcHandler` contract | `tx_service/include/cc/cc_handler.h`; `tx_service/include/cc/local_cc_handler.h`; `tx_service/include/remote/remote_cc_handler.h` |
+| Remote delivery is fenced by transaction number, command id, and the forward latch | `tx_service/include/tx_execution.h`; `tx_service/src/remote/cc_stream_receiver.cpp` |
+| Read/write and object-command footprints drive commit and cleanup | `tx_service/include/read_write_set.h`; `tx_service/include/command_set.h`; `tx_service/include/read_write_entry.h` |
+| The commit pipeline acquires placement and write ownership, sets a timestamp, validates, logs, and post-processes | `tx_service/src/tx_execution.cpp`; `tx_service/include/tx_operation.h`; `tx_service/src/tx_operation.cpp` |
+| WAL failures distinguish abort from an indeterminate outcome | `tx_service/src/tx_execution.cpp` (`Process`/`PostProcess(WriteToLogOp&)`) |
+| Object-command recovery images outlive operation completion and are released at terminal reset | `tx_service/include/tx_operation_result.h`; `tx_service/include/tx_execution.h`; `tx_service/src/tx_execution.cpp` |
+| Lock modes derive from isolation level and CC protocol | `tx_service/include/cc_protocol.h`; `tx_service/src/tx_execution.cpp` |
+| Transaction and cross-node commit behavior has integration coverage | `tx_service/tests/TxConsistency-Test.cpp`; `tx_service/tests/ClusterCrossNg-Test.cpp`; `tx_service/tests/TestNodeSmoke-Test.cpp` |
