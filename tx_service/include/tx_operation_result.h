@@ -963,7 +963,9 @@ struct ObjectCommandResult
         ttl_expired_ = false;
         ttl_ = UINT64_MAX;
         ttl_reset_ = false;
-        recover_cmd_image_.clear();
+        // Results may be reused inside a live transaction or pooled CC request.
+        // Release the old snapshot allocation when its contents are discarded.
+        std::string{}.swap(recover_cmd_image_);
     }
 
     // cce commit_ts, used to set transaction's commit_ts.
@@ -1001,8 +1003,8 @@ struct ObjectCommandResult
     bool ttl_reset_{false};
     // Full-object snapshot image the owner shard serialized when the command
     // reset a live TTL — the single capture point for local and remote owners
-    // (remote responses carry it in ApplyResponse). Non-empty iff ttl_reset_.
-    // Written to the WAL as an overwrite record.
+    // (remote responses carry it in ApplyResponse). Used for WAL overwrites.
+    // Released when this result is reset for reuse or transaction completion.
     std::string recover_cmd_image_{};
 };
 

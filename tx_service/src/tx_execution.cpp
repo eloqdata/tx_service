@@ -132,6 +132,10 @@ void TransactionExecution::Reset()
     commit_ts_bound_ = 0;
     rw_set_.Reset();
     cmd_set_.Reset();
+    // Final replies have copied the command result before terminal reset.
+    // Release its snapshot and stale metadata before the txm returns to its
+    // pool.
+    obj_cmd_.hd_result_.Value().Reset();
     wset_iters_.clear();
     wset_reverse_iters_.clear();
     scans_.clear();

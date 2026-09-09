@@ -808,5 +808,6 @@ private:
     friend struct InvalidateTableCacheOp;
     friend struct InvalidateTableCacheCompositeOp;
     friend class TxProcessor;
+    friend class TransactionExecutionTestPeer;
 };
 }  // namespace txservice
