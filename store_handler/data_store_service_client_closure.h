@@ -818,7 +818,9 @@ public:
         shard_id_ = UINT32_MAX;
         key_ = "";
         result_.Clear();
-        value_.clear();
+        // A callback may discard an expired value or copy it instead of taking
+        // ownership. Do not retain that buffer while this closure is idle.
+        std::string{}.swap(value_);
         ts_ = 0;
         callback_ = nullptr;
         callback_data_ = nullptr;

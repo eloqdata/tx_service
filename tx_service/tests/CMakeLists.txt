@@ -79,6 +79,10 @@ if(WITH_DATA_STORE STREQUAL "ELOQDSS_ROCKSDB" OR
     list(APPEND CATCH_MAIN_TESTS TTLCompactionFilter-Test)
 endif()
 
+if(WITH_DATA_STORE MATCHES "^ELOQDSS_")
+    list(APPEND CATCH_MAIN_TESTS ReadClosureLifetime-Test)
+endif()
+
 # Tests that define their own int main() (they need gflags::ParseCommandLineFlags
 # before brpc is used). They link Catch2::Catch2 (no bundled main).
 set(OWN_MAIN_TESTS

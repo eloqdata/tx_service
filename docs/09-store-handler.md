@@ -53,6 +53,11 @@ owner uses the same service operation through an in-process request path;
 otherwise the client uses the protobuf RPC surface. Local bypass changes
 transport cost, not storage semantics.
 
+A read closure keeps its returned value valid until the final callback returns.
+The consumer may transfer, copy, or discard that value; any unconsumed value
+buffer is released before the closure returns to its pool. Pending retries keep
+ownership of the closure until the operation reaches terminal completion.
+
 ## Shard ownership and retries
 
 `DataStoreService` gates requests by per-shard ownership and lifecycle state.
@@ -129,6 +134,7 @@ term writable again.
 | `DataStoreHandler` defines the tx/storage persistence and lifecycle boundary | `tx_service/include/store/data_store_handler.h` |
 | Startup selects embedded RocksDB or an EloqDSS client/backend composition | `core/src/storage_init.cpp`; `CMakeLists.txt`; `store_handler/eloq_data_store_service/CMakeLists.txt` |
 | EloqDSS client routing supports local service bypass and remote RPC completion | `store_handler/data_store_service_client.h`; `store_handler/data_store_service_client.cpp`; `store_handler/data_store_service_client_closure.h`; `store_handler/data_store_service_client_closure.cpp` |
+| Read closures retain values through callbacks and release unconsumed buffers before pool reuse | `store_handler/data_store_service_client_closure.h`; `store_handler/eloq_data_store_service/object_pool.h`; `tx_service/tests/ReadClosureLifetime-Test.cpp` |
 | EloqDSS owns versioned data shards behind a pluggable `DataStore` interface | `store_handler/eloq_data_store_service/data_store_service.h`; `store_handler/eloq_data_store_service/data_store_service.cpp`; `store_handler/eloq_data_store_service/data_store.h`; `store_handler/eloq_data_store_service/ds_request.proto` |
 | Embedded RocksDB implements the same handler contract without DSS transport | `store_handler/rocksdb_handler.h`; `store_handler/rocksdb_handler.cpp` |
 | Checkpoint data sync depends on `PutAll` and the optional persistence barrier | `tx_service/src/cc/local_cc_shards.cpp`; `tx_service/include/data_sync_task.h`; `tx_service/src/data_sync_task.cpp`; `tx_service/src/checkpointer.cpp` |
