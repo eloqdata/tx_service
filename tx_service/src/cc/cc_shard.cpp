@@ -3339,7 +3339,18 @@ void CcShard::RemoveCandidateStandby(uint32_t node_id)
         candidate_standby_nodes_.erase(it);
         LOG(INFO) << "Removed candidate standby node " << node_id
                   << " from shard " << core_id_;
+        // A candidate can be the only reason these entries were buffered.
+        // Successful writes do not schedule a retry that would collect them.
+        CheckAndFreeUnneededEntries();
     }
+}
+
+void CcShard::PromoteCandidateStandby(uint32_t node_id,
+                                      uint64_t start_seq_id,
+                                      int64_t standby_node_term)
+{
+    AddSubscribedStandby(node_id, start_seq_id, standby_node_term);
+    RemoveCandidateStandby(node_id);
 }
 
 void CcShard::CheckAndFreeUnneededEntries()
@@ -3558,6 +3569,7 @@ void CcShard::ForwardStandbyMessage(StandbyForwardEntry *entry)
         }
         if (largest_removed_seq_id > 0)
         {
+            bool removed_candidate = false;
             // Check and remove affected candidates (if evicted message's seq_id
             // >= candidate's start_seq_id)
             auto candidate_it = candidate_standby_nodes_.begin();
@@ -3573,11 +3585,18 @@ void CcShard::ForwardStandbyMessage(StandbyForwardEntry *entry)
                               << " is no longer in history (evicted seq_id: "
                               << largest_removed_seq_id << ")";
                     candidate_it = candidate_standby_nodes_.erase(candidate_it);
+                    removed_candidate = true;
                 }
                 else
                 {
                     ++candidate_it;
                 }
+            }
+            if (removed_candidate)
+            {
+                // Entries below the cap can still belong only to candidates
+                // whose bootstrap was invalidated by the eviction above.
+                CheckAndFreeUnneededEntries();
             }
         }
     }

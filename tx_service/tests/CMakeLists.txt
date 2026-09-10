@@ -70,6 +70,7 @@ set(CATCH_MAIN_TESTS
     NonBlockingLock-Test
     AcquireAllError-Test
     StandbyForward-Test
+    StandbyHistory-Test
     ApplyResponseBoundary-Test
     RemoteUploadTxCommands-Test
     TransactionImageLifetime-Test
