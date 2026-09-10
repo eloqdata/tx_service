@@ -81,11 +81,6 @@ pending bucket version so retries or delayed messages cannot overwrite a newer
 ownership decision. Staged migration logs let replay resume work that crossed
 a leader failure.
 
-A remote command upload owns only its current request's serialized commands.
-The receiver retains those images through consumption and the completion
-callback, then destroys them before publishing its pooled wrapper as reusable.
-Decoded commands require independent ownership if they outlive that upload.
-
 ## Secondary-index integration
 
 Building a secondary index traverses primary-key ranges because those ranges
@@ -130,5 +125,4 @@ not to the range architecture.
 | `StoreRange` and `StoreSlice` own cached-range, pin, load, and slice-spec lifecycles | `tx_service/include/cc/range_slice.h`; `tx_service/src/cc/range_slice.cpp`; `tx_service/include/cc/range_slice_type.h` |
 | Slice loading and range checkpointing cross the store-handler boundary | `tx_service/include/store/data_store_handler.h`; `tx_service/include/data_sync_task.h`; `tx_service/src/cc/local_cc_shards.cpp` |
 | Range split and bucket migration are staged, recoverable transaction operations | `tx_service/include/tx_operation.h`; `tx_service/src/tx_operation.cpp`; `tx_service/tx-log-protos/log.proto` |
-| Remote command uploads release request-owned images after consumption and completion, before pool reuse | `tx_service/include/remote/remote_cc_request.h`; `tx_service/src/remote/remote_cc_request.cpp`; `tx_service/include/cc/object_cc_map.h` |
 | Secondary-index build dispatches range work, releases consumed source batches, and uploads derived entries by ownership | `tx_service/include/tx_index_operation.h`; `tx_service/src/tx_index_operation.cpp`; `tx_service/include/sk_generator.h`; `tx_service/src/sk_generator.cpp`; `tx_service/include/cc/local_cc_shards.h` |
