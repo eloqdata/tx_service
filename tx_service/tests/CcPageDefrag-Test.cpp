@@ -20,11 +20,16 @@
  */
 #include <catch2/catch_all.hpp>
 #include <cstddef>
+#include <cstdint>
 #include <memory>
+#include <string>
+#include <string_view>
 #include <utility>
+#include <vector>
 
 #include "cc/cc_entry.h"
 #include "cc/template_cc_map.h"
+#include "eloq_string_key_record.h"
 #include "mimalloc.h"
 #include "tx_key.h"
 #include "tx_record.h"
@@ -82,15 +87,33 @@ public:
 };
 
 using TestRecord = CompositeRecord<int>;
-template <bool Versioned>
-class TestMap
-    : public TemplateCcMap<DefragTestKey, TestRecord, Versioned, false>
+template <bool Versioned, typename KeyT = DefragTestKey>
+class TestMap : public TemplateCcMap<KeyT, TestRecord, Versioned, false>
 {
-    using BaseMap = TemplateCcMap<DefragTestKey, TestRecord, Versioned, false>;
+    using BaseMap = TemplateCcMap<KeyT, TestRecord, Versioned, false>;
 
 public:
     using BaseMap::DEFRAGED;
     using BaseMap::Iterator;
+};
+
+// Retain the production string key's copy/move semantics while forcing the
+// relocation branch independently of allocator page occupancy.
+class DefragStringKey : public EloqStringKey
+{
+public:
+    using EloqStringKey::EloqStringKey;
+
+    bool NeedsDefrag(mi_heap_t *)
+    {
+        return true;
+    }
+
+    static const TxKeyInterface *TxKeyImpl()
+    {
+        static const TxKeyInterface interface{DefragStringKey{}};
+        return &interface;
+    }
 };
 }  // namespace
 
@@ -139,5 +162,54 @@ TEMPLATE_TEST_CASE_SIG("Page key defragmentation releases temporary owners",
         }
     }
     REQUIRE(DefragTestKey::live_count_ == 0);
+}
+
+TEMPLATE_TEST_CASE_SIG("Page key defragmentation refreshes full-page storage",
+                       "[cc-page][defrag]",
+                       ((bool Versioned), Versioned),
+                       true,
+                       false)
+{
+    using TestPage = CcPage<DefragStringKey, TestRecord, Versioned, false>;
+    using TestEntry = CcEntry<DefragStringKey, TestRecord, Versioned, false>;
+    TestPage page(nullptr, nullptr, nullptr);
+    std::vector<std::string> expected;
+    for (size_t index = 0; index < TestPage::split_threshold_; ++index)
+    {
+        expected.push_back(std::to_string(100 + index) + std::string(128, 'x'));
+        page.keys_.emplace_back(std::string_view(expected.back()));
+        auto entry = std::make_unique<TestEntry>();
+        entry->payload_.cur_payload_ =
+            std::make_unique<TestRecord>(static_cast<int>(index));
+        entry->SetCommitTsPayloadStatus(2, RecordStatus::Normal);
+        entry->SetCkptTs(2);
+        page.entries_.emplace_back(std::move(entry));
+    }
+    REQUIRE(page.Full());
+    const auto *page_keys = page.keys_.data();
+    const size_t capacity = page.keys_.capacity();
+
+    for (size_t index : {size_t{0}, expected.size() / 2, expected.size() - 1})
+    {
+        const uintptr_t old_buffer =
+            reinterpret_cast<uintptr_t>(page.keys_[index].Data());
+        typename TestMap<Versioned, DefragStringKey>::Iterator it(
+            &page, index, nullptr);
+        REQUIRE(it.DefragCurrentIfNecessary(mi_heap_get_default()) ==
+                TestMap<Versioned, DefragStringKey>::DEFRAGED);
+        REQUIRE(reinterpret_cast<uintptr_t>(page.keys_[index].Data()) !=
+                old_buffer);
+        REQUIRE(page.keys_.data() == page_keys);
+        REQUIRE(page.keys_.capacity() == capacity);
+        REQUIRE(page.keys_.size() == expected.size());
+        REQUIRE(it->first == &page.keys_[index]);
+        for (size_t pos = 0; pos < expected.size(); ++pos)
+        {
+            REQUIRE(page.keys_[pos].StringView() == expected[pos]);
+            REQUIRE(std::get<0>(
+                        page.entries_[pos]->payload_.cur_payload_->Tuple()) ==
+                    static_cast<int>(pos));
+        }
+    }
 }
 }  // namespace txservice
