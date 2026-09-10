@@ -47,13 +47,8 @@ primary retains messages needed by a failed send or a bootstrapping candidate.
 
 The primary-side history is a bounded recovery backlog, not an unbounded audit
 log. Entries that every subscriber has passed and no candidate still needs are
-released. Cancelling a candidate or removing it after history eviction also
-releases entries that no remaining consumer needs. Promotion establishes the
-subscriber's history protection before removing its candidate on the owner
-shard, so bootstrap history remains owned throughout the transition.
-
-If a send fails, the primary retries from the subscriber's next sequence id
-while the required entries remain buffered.
+released. If a send fails, the primary retries from the subscriber's next
+sequence id while the required entries remain buffered.
 
 Memory pressure may evict an entry that a subscriber still needs. In that case
 the primary sends an explicit out-of-sync indication and stops advancing the
@@ -142,7 +137,6 @@ term or all-log-groups recovery barriers described in
 | Standby entries, sequence groups, session terms, and checkpoint broadcasts define the protocol state | `tx_service/include/standby.h`; `tx_service/src/standby.cpp` |
 | Committed commands are captured on the owner-side apply path with standby replay semantics | `tx_service/include/cc/object_cc_map.h`; `tx_service/tests/StandbyForward-Test.cpp` |
 | Per-shard sequencing, bounded buffering, retry, gap tracking, and out-of-sync handling live in `CcShard` | `tx_service/include/cc/cc_shard.h`; `tx_service/src/cc/cc_shard.cpp` |
-| Candidate removal reclaims unneeded history, while promotion preserves continuous subscriber protection | `tx_service/include/cc/cc_shard.h`; `tx_service/src/cc/cc_shard.cpp`; `tx_service/src/remote/cc_node_service.cpp`; `tx_service/tests/StandbyHistory-Test.cpp` |
 | Subscription, sequence reset, snapshot, and checkpoint RPCs cross the CC control plane | `tx_service/include/proto/cc_request.proto`; `tx_service/src/remote/cc_node_service.cpp` |
 | Stream receive routes standby messages back to their owning shard | `tx_service/src/remote/cc_stream_receiver.cpp`; `tx_service/src/remote/cc_stream_sender.cpp` |
 | Following and standby-to-leader transitions are coordinated by `CcNode` | `tx_service/include/fault/cc_node.h`; `tx_service/src/fault/cc_node.cpp` |
