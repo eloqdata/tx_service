@@ -9098,13 +9098,14 @@ protected:
             TxKey tx_key = TxKey(key);
             if (tx_key.NeedsDefrag(heap))
             {
-                auto key_clone = std::make_unique<KeyT>(*key);
+                // Copy before erase invalidates key; the temporary needs no
+                // separate heap allocation.
+                KeyT key_copy(*key);
                 auto &keys = current_page_->keys_;
                 auto it = keys.begin() + idx_in_page_;
                 assert(it != keys.end());
                 it = keys.erase(it);
-                // The page takes the key contents, not the temporary object.
-                it = keys.emplace(it, std::move(*key_clone));
+                it = keys.emplace(it, std::move(key_copy));
                 defraged = true;
             }
 
