@@ -2307,6 +2307,9 @@ void txservice::remote::RemoteUploadTxCommandsCc::Reset(
         bool has_overwrite = cmds_req.has_overwrite();
 
         assert(commit_ts > 0);
+        // Each upload contains only this request's commands, including when
+        // an existing wrapper is reset without first returning to its pool.
+        cmds_vec_.clear();
         cmds_vec_.reserve(cmds_req.cmd_list_size());
         for (int idx = 0; idx < cmds_req.cmd_list_size(); ++idx)
         {
@@ -2335,6 +2338,14 @@ void txservice::remote::RemoteUploadTxCommandsCc::Reset(
     {
         hd_ = Sharder::Instance().GetCcStreamSender();
     }
+}
+
+void txservice::remote::RemoteUploadTxCommandsCc::Free()
+{
+    // Completion has sent the response and the consumer no longer needs these
+    // images. Destroy the strings before another thread can reuse this slot.
+    cmds_vec_.clear();
+    CcRequestBase::Free();
 }
 
 txservice::remote::RemoteDbSizeCc::RemoteDbSizeCc()

@@ -71,6 +71,7 @@ set(CATCH_MAIN_TESTS
     AcquireAllError-Test
     StandbyForward-Test
     ApplyResponseBoundary-Test
+    RemoteUploadTxCommands-Test
     TransactionImageLifetime-Test
 )
 

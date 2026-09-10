@@ -1037,6 +1037,10 @@ struct RemoteUploadTxCommandsCc : public UploadTxCommandsCc
 public:
     RemoteUploadTxCommandsCc();
     void Reset(std::unique_ptr<CcMessage> input_msg);
+    /**
+     * Releases owned command images before publishing the pool slot as idle.
+     */
+    void Free() override;
     uint64_t handler_addr()
     {
         if (input_msg_)
