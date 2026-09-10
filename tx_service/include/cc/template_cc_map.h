@@ -9098,12 +9098,10 @@ protected:
             TxKey tx_key = TxKey(key);
             if (tx_key.NeedsDefrag(heap))
             {
-                auto key_clone = std::make_unique<KeyT>(*key);
-                auto &keys = current_page_->keys_;
-                auto it = keys.begin() + idx_in_page_;
-                assert(it != keys.end());
-                it = keys.erase(it);
-                it = keys.emplace(it, std::move(*(key_clone.release())));
+                // Copy construction refreshes key-owned storage before the
+                // old value is released. Assign in place to preserve page
+                // positions and avoid growing the key vector on a full page.
+                *key = KeyT(*key);
                 defraged = true;
             }
 

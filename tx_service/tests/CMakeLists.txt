@@ -61,6 +61,7 @@ set(CATCH_MAIN_TESTS
     CcEntry-Test
     CcMessagePool-Test
     CcPage-Test
+    CcPageDefrag-Test
     LargeObjLRU-Test
     CcRequestWait-Test
     CcRequestPool-Test
