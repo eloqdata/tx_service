@@ -116,6 +116,16 @@ struct FakeObjectCommand : public TxCommand
 
     std::string payload_;
 };
+
+struct FakeOverwriteCommand : public FakeObjectCommand
+{
+    using FakeObjectCommand::FakeObjectCommand;
+
+    bool IsOverwrite() const override
+    {
+        return true;
+    }
+};
 }  // namespace
 
 // Remote ApplyCc: the coordinator forwards a pre-ExecuteOn command image
@@ -162,6 +172,95 @@ TEST_CASE("StandbyForward local serializes executed command",
     REQUIRE(entry.Request().cmd_list_size() == 1);
     REQUIRE(entry.Request().cmd_list(0) == "POST");
     REQUIRE(entry.Request().has_overwrite() == false);
+}
+
+TEST_CASE("Standby overwrite releases discarded command storage",
+          "[standby-forward][memory]")
+{
+    constexpr size_t image_size = 1024 * 1024;
+    constexpr size_t command_count = 8;
+    FakeObjectCommand large_command(std::string(image_size, 'x'));
+    ApplyCc cc_req(/*is_local=*/true);
+    cc_req.local_input_.key_ = nullptr;
+    cc_req.local_input_.cmd_ = &large_command;
+
+    StandbyForwardEntry entry;
+    for (size_t i = 0; i < command_count; ++i)
+    {
+        entry.AddTxCommand(cc_req);
+    }
+    REQUIRE(entry.Message().SpaceUsedLong() >= image_size * command_count);
+
+    FakeOverwriteCommand overwrite("replacement");
+    entry.AddOverWriteCommand(&overwrite);
+
+    REQUIRE(entry.Request().cmd_list_size() == 1);
+    REQUIRE(entry.Request().cmd_list(0) == "replacement");
+    REQUIRE(entry.Request().has_overwrite());
+
+    StandbyForwardEntry fresh_entry;
+    fresh_entry.AddOverWriteCommand(&overwrite);
+    // Compare owned protobuf storage, not just serialized bytes: Clear() made
+    // the old implementation small on the wire while keeping all 8 MiB alive.
+    REQUIRE(entry.Message().SpaceUsedLong() <=
+            fresh_entry.Message().SpaceUsedLong() + 4096);
+
+    // The same entry may accumulate more commands before another overwrite.
+    entry.AddTxCommand(cc_req);
+    entry.AddOverWriteCommand(&overwrite);
+    REQUIRE(entry.Request().cmd_list_size() == 1);
+    REQUIRE(entry.Message().SpaceUsedLong() <=
+            fresh_entry.Message().SpaceUsedLong() + 4096);
+}
+
+TEST_CASE("Standby overwrite preserves routing and following commands",
+          "[standby-forward]")
+{
+    StandbyForwardEntry entry;
+    entry.SetSequenceId(17);
+    auto &req = entry.Request();
+    req.set_key("key");
+    req.set_table_name("table");
+    req.set_key_shard_code(42);
+    req.set_primary_leader_term(3);
+    req.set_forward_seq_grp(2);
+    req.set_forward_seq_id(17);
+    req.set_object_version(19);
+    req.set_commit_ts(23);
+    req.set_schema_version(29);
+    req.set_tx_number(31);
+
+    FakeObjectCommand preceding("discarded");
+    ApplyCc cc_req(/*is_local=*/true);
+    cc_req.local_input_.key_ = nullptr;
+    cc_req.local_input_.cmd_ = &preceding;
+    entry.AddTxCommand(cc_req);
+
+    FakeOverwriteCommand overwrite("replacement");
+    entry.AddOverWriteCommand(&overwrite);
+    FakeObjectCommand following("following");
+    cc_req.local_input_.cmd_ = &following;
+    entry.AddTxCommand(cc_req);
+
+    remote::CcMessage received;
+    REQUIRE(received.ParseFromString(entry.Message().SerializeAsString()));
+    const auto &received_req = received.key_obj_standby_forward_req();
+    REQUIRE(received_req.cmd_list_size() == 2);
+    REQUIRE(received_req.cmd_list(0) == "replacement");
+    REQUIRE(received_req.cmd_list(1) == "following");
+    REQUIRE(received_req.has_overwrite());
+    REQUIRE_FALSE(received_req.out_of_sync());
+    REQUIRE(entry.SequenceId() == 17);
+    REQUIRE(received_req.key() == "key");
+    REQUIRE(received_req.table_name() == "table");
+    REQUIRE(received_req.key_shard_code() == 42);
+    REQUIRE(received_req.primary_leader_term() == 3);
+    REQUIRE(received_req.forward_seq_grp() == 2);
+    REQUIRE(received_req.forward_seq_id() == 17);
+    REQUIRE(received_req.object_version() == 19);
+    REQUIRE(received_req.commit_ts() == 23);
+    REQUIRE(received_req.schema_version() == 29);
+    REQUIRE(received_req.tx_number() == 31);
 }
 
 }  // namespace txservice
