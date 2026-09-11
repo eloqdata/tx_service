@@ -3698,6 +3698,75 @@ void LocalCcShards::DataSyncForRangePartition(
     // Guard to unpin node group on finish.
     std::shared_ptr<void> defer_unpin = nullptr;
 
+    using PerfClock = std::chrono::steady_clock;
+    const char *range_mode = during_split_range ? "split_range" : "normal";
+    const auto range_task_start = PerfClock::now();
+    auto elapsed_us_since = [](PerfClock::time_point start) -> uint64_t
+    {
+        return static_cast<uint64_t>(
+            std::chrono::duration_cast<std::chrono::microseconds>(
+                PerfClock::now() - start)
+                .count());
+    };
+    auto log_range_prepare = [&](const char *status,
+                                 uint64_t elapsed_us,
+                                 size_t slice_count,
+                                 size_t split_key_count)
+    {
+        LOG(INFO) << "CHECKPOINT_PERF event=range_prepare"
+                  << " worker_id=" << worker_idx << " mode=" << range_mode
+                  << " table=" << table_name.StringView()
+                  << " range_id=" << range_id << " ng_id=" << ng_id
+                  << " data_sync_ts=" << data_sync_task->data_sync_ts_
+                  << " status=" << status << " elapsed_us=" << elapsed_us
+                  << " slice_count=" << slice_count
+                  << " split_key_count=" << split_key_count;
+    };
+    auto log_range_scan = [&](const char *status,
+                              uint64_t elapsed_us,
+                              size_t batch_count,
+                              size_t scanned_record_count,
+                              size_t buffered_base_record_count,
+                              size_t buffered_archive_record_count)
+    {
+        LOG(INFO) << "CHECKPOINT_PERF event=range_scan"
+                  << " worker_id=" << worker_idx << " mode=" << range_mode
+                  << " table=" << table_name.StringView()
+                  << " range_id=" << range_id << " ng_id=" << ng_id
+                  << " data_sync_ts=" << data_sync_task->data_sync_ts_
+                  << " status=" << status << " elapsed_us=" << elapsed_us
+                  << " batch_count=" << batch_count
+                  << " scanned_record_count=" << scanned_record_count
+                  << " buffered_base_record_count="
+                  << buffered_base_record_count
+                  << " buffered_archive_record_count="
+                  << buffered_archive_record_count;
+    };
+    auto log_range_buffer = [&](const char *status,
+                                uint64_t elapsed_us,
+                                size_t entry_count,
+                                size_t base_record_count,
+                                size_t archive_record_count,
+                                uint64_t bytes)
+    {
+        LOG(INFO) << "CHECKPOINT_PERF event=range_buffer"
+                  << " worker_id=" << worker_idx << " mode=" << range_mode
+                  << " table=" << table_name.StringView()
+                  << " range_id=" << range_id << " ng_id=" << ng_id
+                  << " data_sync_ts=" << data_sync_task->data_sync_ts_
+                  << " status=" << status << " elapsed_us=" << elapsed_us
+                  << " entry_count=" << entry_count
+                  << " base_record_count=" << base_record_count
+                  << " archive_record_count=" << archive_record_count
+                  << " bytes=" << bytes;
+    };
+    auto log_skipped_range_phases = [&](const char *status)
+    {
+        log_range_prepare(status, elapsed_us_since(range_task_start), 0, 0);
+        log_range_scan(status, 0, 0, 0, 0, 0);
+        log_range_buffer(status, 0, 0, 0, 0, 0);
+    };
+
     if (!during_split_range)
     {
         // Decide under the metadata lock, act after releasing it (see the
@@ -3789,6 +3858,7 @@ void LocalCcShards::DataSyncForRangePartition(
         switch (outcome)
         {
         case PreCheck::TableDropped:
+            log_skipped_range_phases("table_dropped");
             data_sync_task->SetError(CcErrorCode::REQUESTED_TABLE_NOT_EXISTS);
             data_sync_task->SetScanTaskFinished();
             data_sync_task->ResetRangeSplittingStatus();
@@ -3799,6 +3869,7 @@ void LocalCcShards::DataSyncForRangePartition(
             }
             return;
         case PreCheck::NotOwner:
+            log_skipped_range_phases("not_owner");
             data_sync_task->SetError(CcErrorCode::REQUESTED_NODE_NOT_LEADER);
             data_sync_task->SetScanTaskFinished();
             data_sync_task->ResetRangeSplittingStatus();
@@ -3806,6 +3877,7 @@ void LocalCcShards::DataSyncForRangePartition(
             return;
         case PreCheck::AlreadySynced:
             assert(!need_process);
+            log_skipped_range_phases("already_synced");
             data_sync_task->SetFinish();
             data_sync_task->SetScanTaskFinished();
             data_sync_task->ResetRangeSplittingStatus();
@@ -4081,6 +4153,7 @@ void LocalCcShards::DataSyncForRangePartition(
     }
 
     // Scan the delta slice size
+    const auto range_prepare_start = PerfClock::now();
     std::map<TxKey, int64_t> slices_delta_size;
     ScanSliceDeltaSizeCcForRangePartition scan_delta_size_cc(
         table_name,
@@ -4103,6 +4176,10 @@ void LocalCcShards::DataSyncForRangePartition(
 
     if (scan_delta_size_cc.IsError())
     {
+        log_range_prepare(
+            "scan_error", elapsed_us_since(range_prepare_start), 0, 0);
+        log_range_scan("skipped", 0, 0, 0, 0, 0);
+        log_range_buffer("skipped", 0, 0, 0, 0, 0);
         LOG(ERROR) << "DataSync scan slice delta size failed on table "
                    << table_name.StringView() << " with error code: "
                    << static_cast<uint32_t>(scan_delta_size_cc.ErrorCode());
@@ -4129,6 +4206,10 @@ void LocalCcShards::DataSyncForRangePartition(
 
     if (!export_base_table_items && slices_delta_size.size() == 0)
     {
+        log_range_prepare(
+            "no_data", elapsed_us_since(range_prepare_start), 0, 0);
+        log_range_scan("no_data", 0, 0, 0, 0, 0);
+        log_range_buffer("no_data", 0, 0, 0, 0, 0);
         DLOG(INFO)
             << "No items need to be sync in this round data sync of range#"
             << range_id << " for table: " << table_name.StringView()
@@ -4174,6 +4255,7 @@ void LocalCcShards::DataSyncForRangePartition(
     // Update slice post ckpt size.
     UpdateSlicePostCkptSize(store_range, slices_delta_size);
 
+    size_t split_key_count = 0;
     if (!during_split_range)
     {
         // If the task comes from split range transaction, it is assumed that
@@ -4187,6 +4269,12 @@ void LocalCcShards::DataSyncForRangePartition(
                                         split_keys);
         if (!ret)
         {
+            log_range_prepare("metadata_error",
+                              elapsed_us_since(range_prepare_start),
+                              slices_delta_size.size(),
+                              0);
+            log_range_scan("skipped", 0, 0, 0, 0, 0);
+            log_range_buffer("skipped", 0, 0, 0, 0, 0);
             LOG(ERROR) << "Calculate subranges key failed on table "
                        << table_name.StringView();
 
@@ -4201,8 +4289,15 @@ void LocalCcShards::DataSyncForRangePartition(
             return;
         }
 
+        split_key_count = split_keys.size();
         if (!split_keys.empty())
         {
+            log_range_prepare("split_scheduled",
+                              elapsed_us_since(range_prepare_start),
+                              slices_delta_size.size(),
+                              split_key_count);
+            log_range_scan("split_scheduled", 0, 0, 0, 0, 0);
+            log_range_buffer("split_scheduled", 0, 0, 0, 0, 0);
             std::lock_guard<std::mutex> range_split_worker_lk(
                 range_split_worker_ctx_.mux_);
 
@@ -4219,6 +4314,11 @@ void LocalCcShards::DataSyncForRangePartition(
             return;
         }
     }
+
+    log_range_prepare("ok",
+                      elapsed_us_since(range_prepare_start),
+                      slices_delta_size.size(),
+                      split_key_count);
 
     // 3. Scan records.
     // Scan the FlushRecords.
@@ -4248,6 +4348,15 @@ void LocalCcShards::DataSyncForRangePartition(
     }
 
     bool scan_data_drained = false;
+    bool range_buffer_aborted = false;
+    uint64_t range_scan_elapsed_us = 0;
+    uint64_t range_buffer_elapsed_us = 0;
+    uint64_t buffered_bytes = 0;
+    size_t scan_batch_count = 0;
+    size_t scanned_record_count = 0;
+    size_t buffered_entry_count = 0;
+    size_t buffered_base_record_count = 0;
+    size_t buffered_archive_record_count = 0;
     // Note: `DataSyncScanCc` needs to ensure that no two ckpt_rec with the
     // same Key can be generated. Our subsequent algorithms are based on this
     // assumption.
@@ -4277,11 +4386,27 @@ void LocalCcShards::DataSyncForRangePartition(
 
     while (!scan_data_drained)
     {
+        const auto range_scan_start = PerfClock::now();
         EnqueueLowPriorityCcRequestToShard(dest_core, &scan_cc);
         scan_cc.Wait();
+        range_scan_elapsed_us += elapsed_us_since(range_scan_start);
+        ++scan_batch_count;
+        scanned_record_count += scan_cc.accumulated_scan_cnt_;
 
         if (scan_cc.IsError())
         {
+            log_range_scan("scan_error",
+                           range_scan_elapsed_us,
+                           scan_batch_count,
+                           scanned_record_count,
+                           buffered_base_record_count,
+                           buffered_archive_record_count);
+            log_range_buffer("scan_error",
+                             range_buffer_elapsed_us,
+                             buffered_entry_count,
+                             buffered_base_record_count,
+                             buffered_archive_record_count,
+                             buffered_bytes);
             LOG(ERROR) << "DataSync scan FlushRecords failed of range#"
                        << range_id << " on table: " << table_name.StringView()
                        << " with error code: "
@@ -4295,6 +4420,7 @@ void LocalCcShards::DataSyncForRangePartition(
         }
         else
         {
+            const auto range_buffer_start = PerfClock::now();
             scan_data_drained = true;
             uint64_t flush_data_size = scan_cc.accumulated_flush_data_size_;
 
@@ -4410,6 +4536,7 @@ void LocalCcShards::DataSyncForRangePartition(
                 // flush data task is not put into flush worker.
                 data_sync_mem_controller_.DeallocateFlushMemQuota(
                     flush_data_size);
+                range_buffer_elapsed_us += elapsed_us_since(range_buffer_start);
                 continue;
             }
 
@@ -4462,6 +4589,9 @@ void LocalCcShards::DataSyncForRangePartition(
                     // the flush data task is not put into flush worker.
                     data_sync_mem_controller_.DeallocateFlushMemQuota(
                         flush_data_size);
+                    range_buffer_elapsed_us +=
+                        elapsed_us_since(range_buffer_start);
+                    range_buffer_aborted = true;
                     break;
                 }
 
@@ -4470,6 +4600,8 @@ void LocalCcShards::DataSyncForRangePartition(
                 data_sync_task->flight_task_cnt_ += 1;
             }
 
+            size_t batch_base_record_count = data_sync_vec->size();
+            size_t batch_archive_record_count = archive_vec->size();
             AddFlushTaskEntry(
                 std::make_unique<FlushTaskEntry>(std::move(data_sync_vec),
                                                  std::move(archive_vec),
@@ -4478,6 +4610,11 @@ void LocalCcShards::DataSyncForRangePartition(
                                                  data_sync_task,
                                                  table_schema,
                                                  flush_data_size));
+            range_buffer_elapsed_us += elapsed_us_since(range_buffer_start);
+            ++buffered_entry_count;
+            buffered_base_record_count += batch_base_record_count;
+            buffered_archive_record_count += batch_archive_record_count;
+            buffered_bytes += flush_data_size;
 
             if (scan_cc.scan_heap_is_full_ == 1)
             {
@@ -4495,6 +4632,20 @@ void LocalCcShards::DataSyncForRangePartition(
             scan_cc.Reset();
         }
     }
+
+    const char *range_status = range_buffer_aborted ? "flush_error" : "ok";
+    log_range_scan(range_status,
+                   range_scan_elapsed_us,
+                   scan_batch_count,
+                   scanned_record_count,
+                   buffered_base_record_count,
+                   buffered_archive_record_count);
+    log_range_buffer(range_status,
+                     range_buffer_elapsed_us,
+                     buffered_entry_count,
+                     buffered_base_record_count,
+                     buffered_archive_record_count,
+                     buffered_bytes);
 
     if (need_send_range_cache)
     {
@@ -6055,8 +6206,43 @@ void LocalCcShards::FlushDataImpl(FlushDataTask *cur_work,
 
     if (succ)
     {
+        static std::atomic<uint64_t> next_putall_id{1};
+        const uint64_t putall_id =
+            next_putall_id.fetch_add(1, std::memory_order_relaxed);
+        size_t flush_entry_count = 0;
+        size_t base_record_count = 0;
+        for (const auto &[_, entries] : flush_task_entries)
+        {
+            flush_entry_count += entries.size();
+            for (const auto &entry : entries)
+            {
+                if (entry->data_sync_vec_)
+                {
+                    base_record_count += entry->data_sync_vec_->size();
+                }
+            }
+        }
+
+        LOG(INFO) << "CHECKPOINT_PERF event=putall_start"
+                  << " putall_id=" << putall_id << " worker_id=" << worker_idx
+                  << " table_count=" << flush_task_entries.size()
+                  << " entry_count=" << flush_entry_count
+                  << " base_record_count=" << base_record_count
+                  << " bytes=" << cur_work->pending_flush_size_;
+        const auto putall_start = std::chrono::steady_clock::now();
         succ = store_hd_->PutAll(
             flush_task_entries, &yield_fn, &resume_fn, &sync_yield_func);
+        const uint64_t putall_elapsed_us = static_cast<uint64_t>(
+            std::chrono::duration_cast<std::chrono::microseconds>(
+                std::chrono::steady_clock::now() - putall_start)
+                .count());
+        LOG(INFO) << "CHECKPOINT_PERF event=putall_finish"
+                  << " putall_id=" << putall_id << " worker_id=" << worker_idx
+                  << " table_count=" << flush_task_entries.size()
+                  << " entry_count=" << flush_entry_count
+                  << " base_record_count=" << base_record_count
+                  << " bytes=" << cur_work->pending_flush_size_
+                  << " elapsed_us=" << putall_elapsed_us << " success=" << succ;
         if (!succ)
         {
             LOG(ERROR) << "DataSync PutAll flush to kv "
@@ -6264,12 +6450,14 @@ void LocalCcShards::FlushDataWorker(size_t worker_idx)
     std::vector<size_t> previous_flush_sizes(data_sync_worker_ctx_.worker_num_,
                                              0);
     auto previous_size_update_time = clock::now();
+    bool idle_logged = false;
 
     std::unique_lock<std::mutex> flush_worker_lk(flush_data_worker_ctx_.mux_);
     while (flush_data_worker_ctx_.status_ == WorkerStatus::Active)
     {
         if (!pending_flush_work.empty())
         {
+            idle_logged = false;
             std::unique_ptr<FlushDataTask> cur_work =
                 std::move(pending_flush_work.front());
             pending_flush_work.pop_front();
@@ -6333,6 +6521,7 @@ void LocalCcShards::FlushDataWorker(size_t worker_idx)
 
         if (!resume_queue.empty())
         {
+            idle_logged = false;
             std::shared_ptr<CoroCtx> ctx = std::move(resume_queue.front());
             resume_queue.pop_front();
             flush_worker_lk.unlock();
@@ -6343,6 +6532,12 @@ void LocalCcShards::FlushDataWorker(size_t worker_idx)
             continue;
         }
 
+        if (!idle_logged)
+        {
+            LOG(INFO) << "CHECKPOINT_PERF event=flush_worker_idle"
+                      << " worker_id=" << worker_idx << " status=waiting";
+            idle_logged = true;
+        }
         flush_data_worker_ctx_.cv_.wait_for(
             flush_worker_lk,
             10s,

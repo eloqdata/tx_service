@@ -128,6 +128,21 @@ Flow:
    6. `WaitableCc` → `CcShard::OnDirtyDataFlushed()` — re-arm kickout requests blocked on dirty data.
 4. **Completion & truncation** — `DataSyncTask::SetFinish/SetError` (`tx_service/src/data_sync_task.cpp:113-198`) maintain `truncate_log_ts_ = min(data_sync_ts_)` over the round's tasks. The last task to finish (or `Ckpt()` itself) performs `UpdateNodeGroupCkptTs` + `UpdateCheckpointTs` + `BrocastPrimaryCkptTs` (`tx_service/src/standby.cpp:107`, the `UpdateStandbyCkptTs` RPC). **Truncation contract: never report a ckpt ts unless every entry with `commit_ts <= ts` of this ng is durable in the kv store.**
 
+Range-partition data sync and flush workers emit unconditional `INFO` records
+with the `CHECKPOINT_PERF` prefix for checkpoint performance diagnosis:
+
+| Event | Timing boundary and payload |
+|---|---|
+| `range_prepare` | First-pass slice-delta scan plus slice/range metadata calculation. Includes worker/mode/table/range/ng/target-ts identifiers, status, elapsed microseconds, and slice/split-key counts. |
+| `range_scan` | Per-range aggregate of all second-pass scan batches. Reports elapsed microseconds and scanned/buffered base and archive record counts; it is not emitted per batch. |
+| `range_buffer` | Per-range aggregate from each successful scan batch through memory-quota acquisition, record packaging, slice updates, and insertion into the data-sync worker's flush buffer. `entry_count`/`bytes` describe buffered entries and do not imply one `FlushDataTask` per range. |
+| `putall_start` / `putall_finish` | Paired by `putall_id` around the storage handler's `PutAll` call. The finish event reports end-to-end wall time, including coroutine suspension, and success; archive copy/write and `PersistKV` are outside this timer. |
+| `flush_worker_idle` | Emitted once when a flush worker transitions from processing work to waiting with both its pending-work and resume queues empty. Repeated 10-second idle timeouts are suppressed until the worker processes work again. |
+
+All elapsed values use a monotonic clock and are reported as `elapsed_us`.
+These records are independent of `report_ckpt`, which continues to control the
+existing per-round checkpoint reports.
+
 ### 3.5 ckpt_ts on entries, eviction, dirty-memory trigger
 
 - `CkptTs()` / monotonic `SetCkptTs()` live in `VersionedLruEntry`'s entry info (`tx_service/include/cc/cc_entry.h:580-662`). `IsDirty()` = `CommitTs > CkptTs` (versioned) or flush-bit unset (non-versioned); `IsFree()` (no locks ∧ not dirty) gates eviction — **only checkpointed entries can be kicked out** (`LocalCcShards::KickoutPage`, `local_cc_shards.h:1566`, additionally consults range `last_sync_ts`/dirty-range version for range tables). When eviction finds nothing free, the tx processor calls `ckpter_->Notify()` — memory pressure drives checkpointing.
