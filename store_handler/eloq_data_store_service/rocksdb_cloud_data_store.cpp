@@ -809,6 +809,14 @@ bool RocksDBCloudDataStore::OpenCloudDB(
         db_->WarmUp(cloud_config_.warm_up_thread_num_);
     }
 
+    // Restore skip_cloud_files_in_getchildren to false at the end of startup.
+    // Keep it true during SetOptions/SetDBOptions to avoid expensive cloud
+    // listing in WriteOptions/GetChildren path.
+    rocksdb::CloudFileSystem *cfs =
+        dynamic_cast<rocksdb::CloudFileSystem *>(cloud_fs_.get());
+    auto &cfs_options_ref = cfs->GetMutableCloudFileSystemOptions();
+    cfs_options_ref.skip_cloud_files_in_getchildren = false;
+
     LOG(INFO) << "RocksDB Cloud started";
     return true;
 }
