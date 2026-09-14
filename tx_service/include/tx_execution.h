@@ -256,6 +256,17 @@ public:
         return rw_set_.WriteSetSize();
     }
 
+    /**
+     * Serialized bytes charged by successful data upserts in this transaction.
+     * Like TxUpsert, this accessor is only safe on the owning API execution
+     * context, with no transaction request in flight. It does not synchronize
+     * with a TxProcessor or change transaction state.
+     */
+    size_t DataWriteSetBytes() const
+    {
+        return rw_set_.WriteSetBytes();
+    }
+
     TxProcessor *GetTxProcessor()
     {
         return tx_processor_;

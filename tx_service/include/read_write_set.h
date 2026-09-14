@@ -47,9 +47,24 @@ enum class ReadEntryResult : uint8_t
 
 class ReadWriteSet
 {
+public:
+    // Data writes (including index writes) are limited by serialized bytes, not
+    // the number or final net size of entries. Catalog writes are separate.
     static const uint32_t MaxWriteSetBytesCnt = 62 * 1024 * 1024;
 
-public:
+    /** Bytes charged by each successful AddWrite, including repeated keys. */
+    static size_t WriteBytes(const TxKey &key, const TxRecord *record)
+    {
+        return (key.KeyPtr() ? key.SerializedLength() : 0) +
+               (record ? record->SerializedLength() : 0);
+    }
+
+    /** Current data-write bytes; Reset starts a new accounting interval. */
+    size_t WriteSetBytes() const
+    {
+        return wset_bytes_cnt_;
+    }
+
     ReadWriteSet()
         : data_rset_(),
           meta_data_rset_(),
@@ -296,13 +311,15 @@ public:
                          OperationType op_type,
                          bool check_unique = false)
     {
-        // Check write set bytes count.
-        wset_bytes_cnt_ += ((tx_key.KeyPtr() ? tx_key.SerializedLength() : 0) +
-                            (rec.get() ? rec.get()->SerializedLength() : 0));
-        if (wset_bytes_cnt_ > ReadWriteSet::MaxWriteSetBytesCnt)
+        const size_t bytes = WriteBytes(tx_key, rec.get());
+        // Check before incrementing: rejected writes must neither overflow the
+        // counter nor change the admission budget observed by API layers.
+        if (bytes > MaxWriteSetBytesCnt ||
+            wset_bytes_cnt_ > MaxWriteSetBytesCnt - bytes)
         {
             return TxErrorCode::WRITE_SET_BYTES_COUNT_EXCEED_ERR;
         }
+        wset_bytes_cnt_ += bytes;
 
         auto iter = wset_.find(table_name);
         if (iter == wset_.end())
