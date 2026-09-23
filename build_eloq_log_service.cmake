@@ -281,6 +281,7 @@ ADD_LIBRARY(logservice
     ${LOG_SOURCE_DIR}/src/log_state_rocksdb_impl.cpp
     ${LOG_SOURCE_DIR}/src/log_state_rocksdb_cloud_impl.cpp
     ${LOG_SOURCE_DIR}/src/log_state_memory_impl.cpp
+    ${LOG_SOURCE_DIR}/src/cdc_scan.cpp
     ${LOG_SOURCE_DIR}/src/fault_inject.cpp
     ${CMAKE_CURRENT_LIST_DIR}/third_party/ini/INIReader.cpp
     ${CMAKE_CURRENT_LIST_DIR}/third_party/ini/ini.c

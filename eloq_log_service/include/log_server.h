@@ -60,7 +60,8 @@ public:
               uint32_t snapshot_interval = 600,
               bool enable_request_checkpoint = false,
               uint32_t check_replay_log_size_interval_sec = 10,
-              uint64_t notify_checkpointer_threshold_size = 128 * 1024 * 1024);
+              uint64_t notify_checkpointer_threshold_size = 128 * 1024 * 1024,
+              uint64_t cdc_retention_seconds = 0);
 
     ~LogServer()
     {

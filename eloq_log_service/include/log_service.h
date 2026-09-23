@@ -82,7 +82,8 @@ public:
                         uint32_t snapshot_interval,
                         bool enable_request_checkpoint,
                         uint32_t check_replay_log_size_interval_sec,
-                        uint64_t notify_checkpointer_threshold_size)
+                        uint64_t notify_checkpointer_threshold_size,
+                        uint64_t cdc_retention_seconds = 0)
     {
         std::pair<std::unordered_map<uint32_t, LogUtil::RaftGroupConfig>,
                   uint32_t>
@@ -152,7 +153,8 @@ public:
                         snapshot_interval,
                         enable_request_checkpoint,
                         check_replay_log_size_interval_sec,
-                        notify_checkpointer_threshold_size);
+                        notify_checkpointer_threshold_size,
+                        cdc_retention_seconds);
                 }
             }
         }
@@ -268,6 +270,8 @@ public:
         std::string notify_checkpointer_threshold_size_str =
             config_reader.GetString(
                 "local", "notify_checkpointer_threshold_size", "1GB");
+        uint64_t cdc_retention_seconds =
+            config_reader.GetInteger("local", "txlog_cdc_retention_seconds", 0);
 
 #if defined(LOG_STATE_TYPE_RKDB_ALL)
         std::string rocksdb_storage_path =
@@ -342,6 +346,7 @@ public:
             << check_replay_log_size_interval_sec
             << ", notify_checkpointer_threashold_size = "
             << notify_checkpointer_threshold_size_str
+            << ", txlog_cdc_retention_seconds = " << cdc_retention_seconds
 #if defined(LOG_STATE_TYPE_RKDB_S3)
             << ", aws_access_key_id = " << aws_access_key_id
             << ", aws_secret_key = "
@@ -520,7 +525,8 @@ public:
                        snapshot_interval,
                        enable_request_checkpoint,
                        check_replay_log_size_interval_sec,
-                       notify_checkpointer_threshold_size);
+                       notify_checkpointer_threshold_size,
+                       cdc_retention_seconds);
 
         assert(service_status_ == Status::DETACHED);
 
@@ -642,6 +648,37 @@ public:
 
         return logger_it->second.CheckMigrationIsFinished(
             request, response, done);
+    }
+
+    /**
+     * @brief Finds the raft log instance of the requested log group and
+     * serves one page of the CDC log scan from it.
+     *
+     * @param controller The RPC controller.
+     * @param request The scan request.
+     * @param[out] response The page, or NotLeader when this node holds no
+     *        replica of the group.
+     * @param done Run when the response is complete.
+     */
+    void CdcScan(::google::protobuf::RpcController *controller,
+                 const ::txlog::CdcScanRequest *request,
+                 ::txlog::CdcScanResponse *response,
+                 ::google::protobuf::Closure *done) override
+    {
+        auto logger_it = log_replicas_.find(request->log_group_id());
+        if (logger_it == log_replicas_.end())
+        {
+            // No replica of the group here, which includes a detached
+            // service. The caller finds the leader through its own cache.
+            brpc::ClosureGuard done_guard(done);
+            response->set_status(CdcScanResponse::NotLeader);
+            return;
+        }
+
+        logger_it->second.CdcScan(static_cast<brpc::Controller *>(controller),
+                                  request,
+                                  response,
+                                  done);
     }
 
     /*

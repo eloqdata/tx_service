@@ -4,6 +4,7 @@
 
 #include <algorithm>
 #include <array>
+#include <atomic>
 #include <cstdint>
 #include <fstream>
 #include <iostream>
@@ -14,6 +15,7 @@
 #include <utility>
 #include <vector>
 
+#include "cdc_scan.h"
 #include "log.pb.h"
 
 namespace txlog
@@ -113,6 +115,27 @@ public:
 
     virtual std::pair<bool, Item::Pointer> SearchTxDataLog(
         uint64_t tx_number, uint32_t cc_ng_id, uint64_t lower_bound_ts = 0) = 0;
+
+    /**
+     * @brief Serves one page of the CDC log scan (cdc_scan.h).
+     *
+     * Called from the RPC thread, concurrently with on_apply; only the leader
+     * calls it. Every implementation must read MinCkptTs() for
+     * `arrival_complete_ts` before it opens its view of the stores. The
+     * default is for states that keep no scannable history.
+     *
+     * @param request The scan request.
+     * @param[out] response The page; its `status` is left to the caller.
+     * @param[out] error Set to the reason when the result is not Ok.
+     * @return How the scan went; see CdcScanStatus.
+     */
+    virtual CdcScanStatus CdcScan(const CdcScanRequest & /*request*/,
+                                  CdcScanResponse * /*response*/,
+                                  std::string *error)
+    {
+        *error = "this log state keeps no history a CDC scan could read";
+        return CdcScanStatus::Unsupported;
+    }
 
     /**
      * Stores cc node group's latest state.
@@ -1075,6 +1098,38 @@ public:
         return min_ckpt_ts_;
     }
 
+    /**
+     * @brief Sets how far behind the checkpoint the data log is kept for CDC
+     * consumers (docs/cdc-change-stream.md in the EloqDoc repo, §4.5).
+     *
+     * @param seconds The retention window; 0 keeps no window, which is how
+     *        the purges behaved before it existed.
+     */
+    void SetCdcRetentionSeconds(uint64_t seconds)
+    {
+        cdc_retention_us_.store(seconds * 1000 * 1000,
+                                std::memory_order_relaxed);
+    }
+
+    /**
+     * @brief The CDC retention floor for a checkpoint.
+     *
+     * A purge may remove a file only if every key in it lies below the
+     * floor, so every record within the retention window behind the
+     * checkpoint stays readable.
+     *
+     * @param ckpt_ts The checkpoint timestamp, in microseconds like every
+     *        commit timestamp.
+     * @return `ckpt_ts` less the retention window, or 0 if the window reaches
+     *         past it.
+     */
+    uint64_t CdcRetentionFloor(uint64_t ckpt_ts) const
+    {
+        const uint64_t retention_us =
+            cdc_retention_us_.load(std::memory_order_relaxed);
+        return ckpt_ts > retention_us ? ckpt_ts - retention_us : 0;
+    }
+
     uint64_t LastCkptTimestamp(uint32_t cc_ng_id)
     {
         // this func is also called in RecoverTx rpc thread, which might be
@@ -1621,6 +1676,12 @@ protected:
 
     // to erase finished schema ops and split range ops after one hour
     uint64_t min_ckpt_ts_{};
+
+    /**
+     * @brief The CDC retention window in microseconds. Set once at start and
+     * read by the purge threads, hence atomic.
+     */
+    std::atomic<uint64_t> cdc_retention_us_{0};
 
     struct CatalogOp
     {

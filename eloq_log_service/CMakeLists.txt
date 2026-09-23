@@ -325,6 +325,7 @@ add_library(logservice STATIC
         ${LOG_SOURCE_DIR}/src/log_state_rocksdb_impl.cpp
         ${LOG_SOURCE_DIR}/src/log_state_rocksdb_cloud_impl.cpp
         ${LOG_SOURCE_DIR}/src/log_state_memory_impl.cpp
+        ${LOG_SOURCE_DIR}/src/cdc_scan.cpp
         ${LOG_SOURCE_DIR}/src/fault_inject.cpp
         ${CMAKE_CURRENT_LIST_DIR}/../third_party/ini/INIReader.cpp
         ${CMAKE_CURRENT_LIST_DIR}/../third_party/ini/ini.c)
@@ -360,8 +361,12 @@ if (TEST_LOG_SERVICE)
     if (WITH_LOG_STATE MATCHES "ROCKSDB|ROCKSDB_CLOUD_S3|ROCKSDB_CLOUD_GCS")
        add_executable(rocksdb_test ${LOG_SOURCE_DIR}/test/rocksdb_test.cpp)
        target_link_libraries(rocksdb_test PUBLIC logservice)
+       find_package(Catch2 CONFIG REQUIRED)
+       # Also built by the data_substrate test suite (tx_service/tests).
+       add_executable(CdcScan-Test ${LOG_SOURCE_DIR}/test/CdcScan-Test.cpp)
+       target_link_libraries(CdcScan-Test PUBLIC logservice Catch2::Catch2WithMain)
+       set_property(TARGET CdcScan-Test PROPERTY CXX_STANDARD 20)
        if (WITH_LOG_STATE MATCHES "ROCKSDB_CLOUD_S3|ROCKSDB_CLOUD_GCS")
-          find_package(Catch2 CONFIG REQUIRED)
           add_executable(log_server_rocksdb_cloud_tests ${LOG_SOURCE_DIR}/test/log_server_rocksdb_cloud_tests.cpp)
           target_link_libraries(log_server_rocksdb_cloud_tests PUBLIC logservice Catch2::Catch2)
           add_executable(rocksdb_cloud_delete_range_test ${LOG_SOURCE_DIR}/test/rocksdb_cloud_delete_range_test.cpp)
