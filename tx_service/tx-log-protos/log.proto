@@ -223,6 +223,25 @@ message ClusterScaleOpMessage {
   map<uint32, NodeGroupMigrateMessage> node_group_bucket_migrate_process = 6;
 }
 
+// Pauses and resumes the cluster gate, which CDC bootstrap closes so that no DDL runs while it
+// copies the catalog. Written by ClusterGateOp and applied by LogState::UpdateClusterGate; the
+// entry is not retained, like UpdateCkptTs it updates state rather than being kept. Every gate
+// transaction is pinned to log group 0, so that group's single slot is the ordered history of
+// the gate, overwritten in place by each entry. The slot never expires: only a resume clears a
+// pause.
+message ClusterGateLogMessage {
+  enum GateMode {
+    // Reject new create, drop and index operations. What CDC bootstrap uses.
+    GateDdl = 0;
+    // Also reject the first write of a transaction. For a consistent snapshot; not implemented.
+    GateDdlDml = 1;
+  }
+  GateMode mode = 1;
+  // Absent and "present with paused = false" are different values on purpose: the first says
+  // nothing, the second is a resume.
+  bool paused = 2;
+}
+
 message DataLogMessage {
   // A map mapping the cc node group ID to the records
   // the tx commits in this cc node group.
@@ -241,6 +260,7 @@ message LogContentMessage {
     SplitRangeOpMessage split_range_log = 3;
     ClusterScaleOpMessage cluster_scale_log = 4;
     DataMigrateTxLogMessage migration_log = 5;
+    ClusterGateLogMessage cluster_gate_log = 6;
   }
 }
 
@@ -409,6 +429,22 @@ message CheckMigrationIsFinishedResponse {
 	bool finished = 1;
 }
 
+// Read-only poll used by the cluster gate's pause to finish its drain: a pause is complete once
+// every log group reports no schema operation still in flight. The same reply carries the group's
+// highest DDL timestamp, whose maximum across groups bounds every DDL that ran before the gate
+// closed (max_ddl_ts), which bootstrap needs to pick T0.
+message CheckSchemaOpsInFlightRequest {
+  uint32 log_group_id = 1;
+}
+
+message CheckSchemaOpsInFlightResponse {
+  // Schema operations at a stage below CleanSchema, i.e. not yet finished.
+  uint32 in_flight_count = 1;
+  // Highest timestamp among this group's DDL records -- the commit timestamp for create and drop,
+  // the new catalog version for index operations -- or 0 when the group holds no DDL record.
+  uint64 lg_highest_ddl_ts = 2;
+}
+
 message AttachLogRequest {
   string config_path = 1;
 }
@@ -450,6 +486,96 @@ message GetLogGroupConfigResponse {
   repeated uint32 port = 3;
 }
 
+// ---------------------------------------------------------------------------
+// Change data capture (docs/cdc-change-stream.md in the EloqDoc repo, §4.1).
+//
+// CdcScan reads a log group's two timestamp-ordered streams -- committed data records and the
+// DDL store -- as one merged sequence, so that a caller pulling from every group can order
+// events across the cluster. It returns records as stored; the logger decodes nothing.
+//
+// `continuation` byte layout, frozen here because the EloqDoc runtime embeds it verbatim in the
+// resume tokens it hands to clients (§5.6), so the two must agree:
+//
+//     u16 len | data-stream key | u16 len | ddl-stream key
+//
+// with both lengths big-endian, matching the token encoding. The data-stream key is a data CF
+// key, bswap64(commit_ts) | bswap32(ng) | bswap64(txn); the ddl-stream key is a DDL store key,
+// (ddl_ts, namespace, class, key). Either may be empty when that stream has produced nothing.
+// Both are opaque to the caller: it stores them and passes them back, never interpreting them.
+// ---------------------------------------------------------------------------
+
+message CdcScanRequest {
+  uint32 log_group_id = 1;
+  // Where to start. Exactly one is set; neither set means the beginning of complete history,
+  // which the logger positions at retention_floor_ts and never below it.
+  oneof start {
+    // Returned by the previous response for this group: the last returned storage key of each
+    // stream, after which both resume, so pages neither omit nor duplicate records.
+    bytes  continuation = 2;
+    // First storage key with timestamp >= from_ts, in both streams. Used to open a fresh stream
+    // and to resume from a token, which needs the record *at* a key rather than after it.
+    uint64 from_ts      = 3;
+  }
+  // Soft cap on the response size. A page is cut at this, except that at least one record is
+  // always returned even when it alone exceeds the cap.
+  uint32 max_bytes    = 4;
+  // Long poll: hold the request until something becomes emittable, or until this expires. Only
+  // an advance of min_ckpt_ts_ can make a record emittable, so only that and the deadline
+  // complete a parked request.
+  uint32 wait_ms      = 5;
+}
+
+message CdcDataRecord {
+  uint64 commit_ts  = 1;
+  uint32 cc_ng_id   = 2;
+  uint64 txn_number = 3;
+  // The per-node-group blob exactly as stored, undecoded.
+  bytes  blob       = 4;
+}
+
+message CdcDdlRecord {
+  // The record's stream timestamp: the commit-stage timestamp for create and drop, and the
+  // catalog version D for index operations, which equals catalog_ts for those.
+  uint64 ddl_ts     = 1;
+  // D, the new catalog version.
+  uint64 catalog_ts = 2;
+  uint64 txn_number = 3;
+  SchemaOpMessage schema_op = 4;
+}
+
+message CdcScanResponse {
+  enum Status {
+    Success = 0;
+    NotLeader = 1;
+    // The requested position is at or below retention_floor_ts, so history from it is
+    // incomplete. Defined here but never returned while retention_floor_ts is untracked.
+    PositionTruncated = 2;
+  }
+  Status status = 1;
+  // Leader address, set on NotLeader.
+  string redirect = 2;
+
+  // Ascending by (commit_ts, ng, txn); every commit_ts <= arrival_complete_ts.
+  repeated CdcDataRecord data = 3;
+  // Ascending by (ddl_ts, namespace, class, key); every ddl_ts <= arrival_complete_ts.
+  repeated CdcDdlRecord ddl = 4;
+
+  // This group's min_ckpt_ts_, read *before* either stream is scanned. Nothing at or below it
+  // can still arrive, so a caller that has consumed through it from every group holds a complete
+  // prefix. Returned on every response, including empty ones, which is what lets an idle stream
+  // keep advancing.
+  uint64 arrival_complete_ts = 5;
+  // History is complete above this. 0 means the boundary is not tracked, which is the case
+  // today; correctness then assumes the requested history is still retained.
+  uint64 retention_floor_ts = 6;
+  // Pass back to resume both streams exactly after this page.
+  bytes continuation = 7;
+  // True when the page was cut: records at or below arrival_complete_ts remain beyond
+  // `continuation`, possibly at the page's last timestamp. A caller derives its completeness
+  // boundary from this -- last_ts - 1 when set, arrival_complete_ts when clear.
+  bool has_more = 8;
+}
+
 service LogService {
   rpc WriteLog(LogRequest) returns (LogResponse);
   rpc ReplayLog(LogRequest) returns (LogResponse);
@@ -458,6 +584,9 @@ service LogService {
   rpc RecoverTx(RecoverTxRequest) returns (RecoverTxResponse);
   rpc CheckMigrationIsFinished(CheckMigrationIsFinishedRequest) returns (CheckMigrationIsFinishedResponse);
   rpc CheckClusterScaleStatus(LogRequest) returns (LogResponse);
+  // Change data capture. Leader only; followers answer NotLeader with a redirect.
+  rpc CdcScan(CdcScanRequest) returns (CdcScanResponse);
+  rpc CheckSchemaOpsInFlight(CheckSchemaOpsInFlightRequest) returns (CheckSchemaOpsInFlightResponse);
   // Add this function for test aim, but it can be used with other aims.
   // Call this method will transfer the log group leader to the pointed node.
   rpc TransferLeader(TransferRequest) returns (TransferResponse);
