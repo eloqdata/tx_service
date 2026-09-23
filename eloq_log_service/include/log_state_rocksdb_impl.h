@@ -322,6 +322,10 @@ public:
         uint32_t ng_id,
         uint64_t lower_bound_ts = 0) override;
 
+    CdcScanStatus CdcScan(const CdcScanRequest &request,
+                          CdcScanResponse *response,
+                          std::string *error) override;
+
     void BeginSnapshot() override;
 
     /**
@@ -361,6 +365,17 @@ public:
 private:
     void StopRocksDB();
 
+    /**
+     * @brief Stops new CDC scans from reading db_ and waits until the scans
+     * already reading it have finished, so that db_ can be closed.
+     *
+     * Polls with bthread_usleep rather than blocking on a lock: it runs on the
+     * braft FSM bthread (snapshot load) and must not stall a worker. The wait
+     * is bounded by one page read per scan in flight. Start() lets scans in
+     * again once db_ is reopened.
+     */
+    void StopCdcScans();
+
     static void PrintKey(rocksdb::Slice key);
 
     /**
@@ -377,6 +392,16 @@ private:
      * looking for the log record committed by a specific tx.
      */
     rocksdb::DB *db_;
+    /**
+     * @brief Whether CDC scans may read db_: set once Start() has opened it,
+     * cleared by StopCdcScans() before db_ is closed.
+     */
+    std::atomic<bool> cdc_scans_allowed_{false};
+    /**
+     * @brief CDC scans that have registered to read db_ and not yet finished.
+     * StopCdcScans() waits for it to reach zero.
+     */
+    std::atomic<uint32_t> cdc_scans_in_flight_{0};
     std::string rocksdb_storage_path_;
     rocksdb::WriteOptions write_option_;
     rocksdb::WriteBatch write_batch_;
@@ -674,12 +699,16 @@ public:
         uint32_t ng_id,
         uint64_t lower_bound_ts = 0) override;
 
+    CdcScanStatus CdcScan(const CdcScanRequest &request,
+                          CdcScanResponse *response,
+                          std::string *error) override;
+
     void BeginSnapshot() override;
     void CleanSnapshotState() override;
 
     static void MoveFilesToArchive(
         const std::shared_ptr<DBCloudContainer> &dbc_move_log,
-        uint64_t min_ckpt_ts,
+        uint64_t purge_ts,
         const RocksDBCloudConfig &cloud_config);
 
     static void PurgeArchiveFiles(

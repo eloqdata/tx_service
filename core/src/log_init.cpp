@@ -115,6 +115,13 @@ DEFINE_string(notify_checkpointer_threshold_size,
               "When the replay log size reaches this threshold the txlog "
               "server sends a checkpoint request to tx_service.");
 
+DEFINE_uint64(txlog_cdc_retention_seconds,
+              0,
+              "How far behind the checkpoint the log state keeps the data log "
+              "for change data capture: no purge removes a record within this "
+              "window. Set it above the worst-case CDC consumer lag. 0 keeps "
+              "no window, so every checkpointed record may be purged.");
+
 bool DataSubstrate::InitializeLogService(const INIReader &config_reader)
 {
     std::string txlog_service =
@@ -283,6 +290,14 @@ bool DataSubstrate::InitializeLogService(const INIReader &config_reader)
                           "local",
                           "notify_checkpointer_threshold_size",
                           FLAGS_notify_checkpointer_threshold_size));
+
+            [[maybe_unused]] uint64_t txlog_cdc_retention_seconds =
+                !CheckCommandLineFlagIsDefault("txlog_cdc_retention_seconds")
+                    ? FLAGS_txlog_cdc_retention_seconds
+                    : config_reader.GetInteger(
+                          "local",
+                          "txlog_cdc_retention_seconds",
+                          FLAGS_txlog_cdc_retention_seconds);
 
 #if defined(LOG_STATE_TYPE_RKDB_ALL)
             std::string txlog_rocksdb_storage_path =
@@ -534,7 +549,8 @@ bool DataSubstrate::InitializeLogService(const INIReader &config_reader)
                     logserver_snapshot_interval,
                     enable_txlog_request_checkpoint,
                     check_replay_log_size_interval_sec,
-                    notify_checkpointer_threshold_size_val);
+                    notify_checkpointer_threshold_size_val,
+                    txlog_cdc_retention_seconds);
             }
 #else
             size_t txlog_rocksdb_sst_files_size_limit_val =
@@ -585,7 +601,8 @@ bool DataSubstrate::InitializeLogService(const INIReader &config_reader)
                     logserver_snapshot_interval,
                     enable_txlog_request_checkpoint,
                     check_replay_log_size_interval_sec,
-                    notify_checkpointer_threshold_size_val);
+                    notify_checkpointer_threshold_size_val,
+                    txlog_cdc_retention_seconds);
             }
 #endif
 #endif

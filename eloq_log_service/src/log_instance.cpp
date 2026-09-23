@@ -349,6 +349,73 @@ void LogInstance::CheckMigrationIsFinished(
     response->set_finished(all_finished);
 }
 
+void LogInstance::CdcScan(brpc::Controller *cntl,
+                          const CdcScanRequest *request,
+                          CdcScanResponse *response,
+                          google::protobuf::Closure *done)
+{
+    brpc::ClosureGuard done_guard(done);
+
+    // A read needs no raft round: a replica that still believes it leads
+    // but has been deposed serves only what it applied, and its own
+    // min_ckpt_ts_ bounds that view, so the page stays exact, merely older.
+    if (term_if_is_lg_leader_.load(butil::memory_order_acquire) < 0)
+    {
+        response->set_status(CdcScanResponse::NotLeader);
+        response->set_redirect(LeaderAddress());
+        return;
+    }
+
+    // The long poll (wait_ms) is not implemented yet: every scan returns at
+    // once, which the protocol allows, since an empty page is a valid answer.
+    std::string error;
+    switch (log_state_->CdcScan(*request, response, &error))
+    {
+    case CdcScanStatus::Ok:
+        response->set_status(CdcScanResponse::Success);
+        break;
+    case CdcScanStatus::NotReady:
+        LOG(INFO) << "CdcScan on log group " << log_group_id_
+                  << " is not ready: " << error;
+        response->Clear();
+        response->set_status(CdcScanResponse::NotLeader);
+        response->set_redirect(ip_ + ":" + std::to_string(port_));
+        break;
+    case CdcScanStatus::NotLeader:
+        // Leadership moved while the log state served the scan.
+        response->Clear();
+        response->set_status(CdcScanResponse::NotLeader);
+        response->set_redirect(LeaderAddress());
+        break;
+    case CdcScanStatus::Unsupported:
+        cntl->SetFailed(brpc::ENOMETHOD, "%s", error.c_str());
+        break;
+    case CdcScanStatus::InvalidArgument:
+        cntl->SetFailed(brpc::EREQUEST, "%s", error.c_str());
+        break;
+    case CdcScanStatus::StorageError:
+        LOG(ERROR) << "CdcScan on log group " << log_group_id_
+                   << " failed reading the log state: " << error;
+        cntl->SetFailed(brpc::EINTERNAL, "%s", error.c_str());
+        break;
+    }
+}
+
+std::string LogInstance::LeaderAddress() const
+{
+    const braft::PeerId leader = node_->leader_id();
+    if (leader.is_empty())
+    {
+        return {};
+    }
+    if (leader.type_ == braft::PeerId::Type::HostName)
+    {
+        return leader.hostname_addr.hostname + ":" +
+               std::to_string(leader.hostname_addr.port);
+    }
+    return butil::endpoint2str(leader.addr).c_str();
+}
+
 void LogInstance::CheckClusterScaleStatus(const LogRequest *request,
                                           LogResponse *response,
                                           google::protobuf::Closure *done)
@@ -405,6 +472,10 @@ bool LogInstance::BatchAddLogItems(
         }
     }
     log_state_->FlushLogItemBatch();
+    // Acknowledge only after the flush. CdcScan relies on it: a transaction
+    // keeps its write locks until its log write is acknowledged, so no
+    // checkpoint can cover a record before the record is readable here, and
+    // min_ckpt_ts_ never runs ahead of the stored data log.
     for (size_t i = 0; i < num; ++i)
     {
         LogStateAddLogItemTask task = write_log_tasks[i];

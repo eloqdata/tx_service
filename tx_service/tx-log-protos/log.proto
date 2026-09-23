@@ -493,15 +493,25 @@ message GetLogGroupConfigResponse {
 // DDL store -- as one merged sequence, so that a caller pulling from every group can order
 // events across the cluster. It returns records as stored; the logger decodes nothing.
 //
-// `continuation` byte layout, frozen here because the EloqDoc runtime embeds it verbatim in the
-// resume tokens it hands to clients (§5.6), so the two must agree:
+// The merged order is by timestamp, and at one timestamp every data record precedes every DDL
+// record. Each page is a prefix of that order.
+//
+// `continuation` byte layout, frozen here because the EloqDoc runtime's resume tokens use the
+// same two-key form for their per-group entries (§5.6), so the two must agree:
 //
 //     u16 len | data-stream key | u16 len | ddl-stream key
 //
-// with both lengths big-endian, matching the token encoding. The data-stream key is a data CF
-// key, bswap64(commit_ts) | bswap32(ng) | bswap64(txn); the ddl-stream key is a DDL store key,
-// (ddl_ts, namespace, class, key). Either may be empty when that stream has produced nothing.
-// Both are opaque to the caller: it stores them and passes them back, never interpreting them.
+// with both lengths big-endian, matching the token encoding. Each key is where that stream
+// resumes, strictly after it in the store's bytewise key order, and takes one of three shapes:
+//   - empty: the stream has returned nothing and starts at the beginning of complete history;
+//   - 8 bytes, a big-endian timestamp: the stream has returned nothing since a scan began at
+//     from_ts = that timestamp. Every storage key starts with its big-endian timestamp and is
+//     longer, so this sorts before each key at that timestamp and after each key below it;
+//   - a storage key the stream returned: for the data stream a data CF key,
+//     bswap64(commit_ts) | bswap32(ng) | bswap64(txn); for the DDL stream a DDL store key,
+//     (ddl_ts, namespace, class, key).
+// The caller stores a continuation and passes it back, never interpreting it. A token entry is
+// built from records the runtime produced, so its keys always have the third shape.
 // ---------------------------------------------------------------------------
 
 message CdcScanRequest {
@@ -509,8 +519,8 @@ message CdcScanRequest {
   // Where to start. Exactly one is set; neither set means the beginning of complete history,
   // which the logger positions at retention_floor_ts and never below it.
   oneof start {
-    // Returned by the previous response for this group: the last returned storage key of each
-    // stream, after which both resume, so pages neither omit nor duplicate records.
+    // Returned by the previous response for this group: the position of each stream (above),
+    // after which both resume, so pages neither omit nor duplicate records.
     bytes  continuation = 2;
     // First storage key with timestamp >= from_ts, in both streams. Used to open a fresh stream
     // and to resume from a token, which needs the record *at* a key rather than after it.
@@ -521,7 +531,9 @@ message CdcScanRequest {
   uint32 max_bytes    = 4;
   // Long poll: hold the request until something becomes emittable, or until this expires. Only
   // an advance of min_ckpt_ts_ can make a record emittable, so only that and the deadline
-  // complete a parked request.
+  // complete a parked request. The logger may still answer early with an empty page (it holds
+  // no more parked requests, or it does not park at all); a caller backs off before scanning
+  // the group again rather than re-issuing at once.
   uint32 wait_ms      = 5;
 }
 
@@ -552,7 +564,9 @@ message CdcScanResponse {
     PositionTruncated = 2;
   }
   Status status = 1;
-  // Leader address, set on NotLeader.
+  // On NotLeader, "host:port" of the group's leader as the answering node knows it; the
+  // answering node's own address when it leads but cannot serve a consistent view yet (retry
+  // there after a backoff); empty when no leader is known.
   string redirect = 2;
 
   // Ascending by (commit_ts, ng, txn); every commit_ts <= arrival_complete_ts.

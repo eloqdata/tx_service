@@ -379,10 +379,17 @@ bool LogStateRocksDBCloudImpl::CheckOrWaitForMemDBInSync(
     return true;
 }
 
-// Stage 1: Move files from active DB to archive based on min_ckpt_ts
+/**
+ * @brief Stage 1 of the purge: moves files from the active DB to the archive.
+ *
+ * @param dbc_move_log The active DB; skipped while it is not open.
+ * @param purge_ts Only files whose keys all lie below it move: min_ckpt_ts
+ *        less the CDC retention window.
+ * @param cloud_config Where the active DB and the archive live.
+ */
 void LogStateRocksDBCloudImpl::MoveFilesToArchive(
     const std::shared_ptr<DBCloudContainer> &dbc_move_log,
-    uint64_t min_ckpt_ts,
+    uint64_t purge_ts,
     const RocksDBCloudConfig &cloud_config)
 {
     if (!dbc_move_log->IsOpened())
@@ -407,12 +414,11 @@ void LogStateRocksDBCloudImpl::MoveFilesToArchive(
         return;
     }
 
-    // Use min_ckpt_ts as the purge threshold (files with keys before
-    // min_ckpt_ts are safe to move)
+    // Files whose keys all lie before purge_ts are safe to move
     std::array<char, 20> start_key{};
     std::array<char, 20> end_key{};
     Serialize(start_key, 0, 0, 0);
-    Serialize(end_key, min_ckpt_ts, 0, 0);
+    Serialize(end_key, purge_ts, 0, 0);
     rocksdb::Slice lower_bound =
         rocksdb::Slice(start_key.data(), start_key.size());
     rocksdb::Slice upper_bound = rocksdb::Slice(end_key.data(), end_key.size());
@@ -802,10 +808,12 @@ LogStateRocksDBCloudImpl::LogStateRocksDBCloudImpl(
                 dbc_move_log = dbc_;
             }
 
-            uint64_t min_ckpt_ts = MinCkptTs();
+            // Nothing at or above the CDC retention floor leaves the live DB:
+            // CDC scans read only the live DB, never the archive.
+            uint64_t purge_ts = CdcRetentionFloor(MinCkptTs());
 
             LogStateRocksDBCloudImpl::MoveFilesToArchive(
-                dbc_move_log, min_ckpt_ts, cloud_config_);
+                dbc_move_log, purge_ts, cloud_config_);
         });
 };
 
@@ -1113,6 +1121,78 @@ std::pair<bool, Item::Pointer> LogStateRocksDBCloudImpl::SearchTxDataLog(
         LOG(INFO) << "tx: " << tx_number << " not found in log state";
     }
     return std::make_pair(true, ptr);
+}
+
+namespace
+{
+/** @brief How many times a scan re-checks mem_db_in_sync_ before NotReady. */
+constexpr int kCdcScanInSyncRetries = 10;
+/** @brief The pause between those checks, in microseconds. */
+constexpr uint64_t kCdcScanInSyncRetryUs = 50 * 1000;
+}  // namespace
+
+CdcScanStatus LogStateRocksDBCloudImpl::CdcScan(const CdcScanRequest &request,
+                                                CdcScanResponse *response,
+                                                std::string *error)
+{
+    // Every leadership term opens its own DB container, and mem_db_in_sync_
+    // speaks only for the current term's. So the term is read first and read
+    // again once the page is built: if it moved, the in-sync flag seen and
+    // the container captured may belong to different terms (a container
+    // already open but not yet holding the records buffered while it opened),
+    // and the page is discarded. With the term unchanged, the container is
+    // the in-sync one of that term; the copy keeps it open to the end.
+    const int64_t term = term_if_is_lg_leader_.load(std::memory_order_acquire);
+    if (term < 0)
+    {
+        *error = "this node is not the leader";
+        return CdcScanStatus::NotLeader;
+    }
+
+    // A new leader opens the cloud DB asynchronously and buffers writes in
+    // memory meanwhile; only once that buffer has been dumped into the DB
+    // does the DB alone hold the whole log. Wait a little for that, as
+    // replay does, rather than read a partial view.
+    for (int retry = 0; !mem_db_in_sync_.load(std::memory_order_acquire);
+         ++retry)
+    {
+        if (term_if_is_lg_leader_.load(std::memory_order_acquire) != term)
+        {
+            *error = "leadership changed while RocksDB Cloud was opening";
+            return CdcScanStatus::NotLeader;
+        }
+        if (retry == kCdcScanInSyncRetries)
+        {
+            *error = "RocksDB Cloud is still being opened on the new leader";
+            return CdcScanStatus::NotReady;
+        }
+        bthread_usleep(kCdcScanInSyncRetryUs);
+    }
+
+    std::shared_ptr<DBCloudContainer> dbc_copy;
+    {
+        std::lock_guard<bthread::Mutex> lk(dbc_mutex_);
+        dbc_copy = dbc_;
+    }
+    if (!dbc_copy || !dbc_copy->IsOpened())
+    {
+        // Only a leadership change since the in-sync check leaves no open
+        // container; the check below would discard the page anyway.
+        *error = "RocksDB Cloud is not open";
+        return CdcScanStatus::NotReady;
+    }
+
+    // The bound before the view of the store (RunCdcScan).
+    const uint64_t arrival_complete_ts = MinCkptTs();
+    const CdcScanStatus status = CdcScanRocksDB(
+        dbc_copy->GetDBPtr(), arrival_complete_ts, request, response, error);
+    if (term_if_is_lg_leader_.load(std::memory_order_acquire) != term)
+    {
+        response->Clear();
+        *error = "leadership changed during the scan";
+        return CdcScanStatus::NotLeader;
+    }
+    return status;
 }
 
 void LogStateRocksDBCloudImpl::BeginSnapshot()

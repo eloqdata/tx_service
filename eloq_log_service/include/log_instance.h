@@ -115,7 +115,8 @@ public:
                          uint32_t snapshot_interval,
                          bool enable_request_checkpoint,
                          uint32_t check_replay_log_size_interval_sec,
-                         uint64_t notify_checkpointer_threshold_size)
+                         uint64_t notify_checkpointer_threshold_size,
+                         uint64_t cdc_retention_seconds)
         : log_group_id_(log_group_id),
           node_id_(node_id),
           node_(NULL),
@@ -189,6 +190,7 @@ public:
 #else
         log_state_ = std::make_unique<LogStateMemoryImpl>();
 #endif
+        log_state_->SetCdcRetentionSeconds(cdc_retention_seconds);
     }
 
     ~LogInstance() override
@@ -326,6 +328,27 @@ public:
     void CheckClusterScaleStatus(const LogRequest *request,
                                  LogResponse *response,
                                  google::protobuf::Closure *done);
+
+    /**
+     * @brief Serves one page of the CDC log scan (cdc_scan.h) from this
+     * replica.
+     *
+     * Only the leader serves. A follower, or a leader that lost its term
+     * while the log state built the page, answers NotLeader with the
+     * leader's address; a leader whose log state cannot serve a consistent
+     * view yet answers NotLeader with its own, so the caller backs off and
+     * retries here.
+     *
+     * @param cntl The RPC controller; failures that no retry fixes fail the
+     *        RPC through it.
+     * @param request The scan request.
+     * @param[out] response The page, or the NotLeader answer.
+     * @param done Run when the response is complete.
+     */
+    void CdcScan(brpc::Controller *cntl,
+                 const CdcScanRequest *request,
+                 CdcScanResponse *response,
+                 google::protobuf::Closure *done);
 
     void TransferLeader(const TransferRequest *request,
                         TransferResponse *response,
@@ -587,6 +610,12 @@ private:
     int SetDefaultOptions(braft::NodeOptions *node_options);
 
     void LogGroupLeaderUpdate();
+
+    /**
+     * @return The address of the group's leader as this node knows it,
+     *         "host:port", or empty while no leader is known.
+     */
+    std::string LeaderAddress() const;
 
     /**
      * If this node is the group's latest leader.
