@@ -4884,41 +4884,35 @@ void SplitFlushRangeOp::Forward(TransactionExecution *txm)
             GenSplittedRangeInfos();
 
         // Insert new ranges into data store range table. Update
-        // range slice size of the old range.
-        ds_upsert_range_op_.op_func_ =
+        // range slice size of the old range. On its own thread, not the
+        // worker pool, so that it is not blocked while the write lock is
+        // held. A failed upsert is retried (RetrySubOperation) with the same
+        // range_info, which UpsertRanges only reads.
+        ds_upsert_range_op_.SetBlockingWork(
             [&table_name = table_name_,
              range_info = std::move(splitted_range_info),
-             tx_ts = txm->commit_ts_](AsyncOp<Void> &async_op) mutable
-        {
-            CcHandlerResult<Void> &hd_res = async_op.hd_result_;
-#ifdef EXT_TX_PROC_ENABLED
-            hd_res.SetToBlock();
-            // The memory fence ensures that the block flag is set before the
-            // background data store thread is executed.
-            std::atomic_thread_fence(std::memory_order_release);
-#endif
-            // Launch a new thread instead of sending it to workerpool to
-            // avoid being blocked during write lock is held.
-            async_op.worker_thread_ = std::thread(
-                [table_name,
-                 range_info = std::move(range_info),
-                 tx_ts,
-                 &hd_res]() mutable
-                {
-                    store::DataStoreHandler *const store_hd =
-                        Sharder::Instance().GetLocalCcShards()->store_hd_;
-                    bool succ = store_hd->UpsertRanges(
-                        table_name, std::move(range_info), tx_ts);
-                    if (succ)
-                    {
-                        hd_res.SetFinished();
-                    }
-                    else
-                    {
-                        hd_res.SetError(CcErrorCode::DATA_STORE_ERR);
-                    }
+             tx_ts = txm->commit_ts_]()
+            {
+                store::DataStoreHandler *const store_hd =
+                    Sharder::Instance().GetLocalCcShards()->store_hd_;
+                // Fails one upsert before it writes, so that the retry must
+                // write the ranges.
+                CODE_FAULT_INJECTOR("split_flush_upsert_ranges_fail", {
+                    LOG(INFO) << "FaultInject split_flush_upsert_ranges_fail, "
+                                 "ranges: "
+                              << range_info.size();
+                    FaultInject::Instance().InjectFault(
+                        "split_flush_upsert_ranges_fail", "remove");
+                    return CcErrorCode::DATA_STORE_ERR;
                 });
-        };
+                LOG(INFO) << "Split Flush transaction upsert "
+                          << range_info.size()
+                          << " ranges into the data store, table: "
+                          << table_name.StringView();
+                return store_hd->UpsertRanges(table_name, range_info, tx_ts)
+                           ? CcErrorCode::NO_ERROR
+                           : CcErrorCode::DATA_STORE_ERR;
+            });
 
         LOG(INFO) << "Split Flush transaction upsert new range spec, range id "
                   << range_info_->PartitionId() << ", txn: " << txm->TxNumber();

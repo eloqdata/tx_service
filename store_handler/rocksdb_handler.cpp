@@ -1790,7 +1790,7 @@ bool RocksDBHandler::UpdateRangeSlices(
 
 bool RocksDBHandler::UpsertRanges(
     const txservice::TableName &table_name,
-    std::vector<txservice::SplitRangeInfo> range_info,
+    const std::vector<txservice::SplitRangeInfo> &range_info,
     uint64_t version)
 {
     LOG(ERROR) << "RocksDBHandler::UpsertRanges not implemented";

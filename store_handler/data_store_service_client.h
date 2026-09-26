@@ -360,7 +360,7 @@ public:
                            uint64_t range_version) override;
 
     bool UpsertRanges(const txservice::TableName &table_name,
-                      std::vector<txservice::SplitRangeInfo> range_info,
+                      const std::vector<txservice::SplitRangeInfo> &range_info,
                       uint64_t version) override;
 
     std::string EncodeRangeKey(const txservice::CatalogFactory *catalog_factory,

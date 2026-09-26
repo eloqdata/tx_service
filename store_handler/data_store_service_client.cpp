@@ -2213,7 +2213,7 @@ bool DataStoreServiceClient::UpdateRangeSlices(
  */
 bool DataStoreServiceClient::UpsertRanges(
     const txservice::TableName &table_name,
-    std::vector<txservice::SplitRangeInfo> range_info,
+    const std::vector<txservice::SplitRangeInfo> &range_info,
     uint64_t version)
 {
     assert(table_name.StringView() != txservice::empty_sv);
@@ -2232,7 +2232,7 @@ bool DataStoreServiceClient::UpsertRanges(
     slice_plans.reserve(TotalRangeSlicesKvPartitions());
     RangeMetadataAccumulator meta_acc;
 
-    for (auto &range : range_info)
+    for (const auto &range : range_info)
     {
         // Prepare slice batches for this range
         auto slice_plan = PrepareRangeSliceBatches(

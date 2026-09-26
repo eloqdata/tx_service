@@ -258,11 +258,20 @@ public:
     /**
      * @brief Upsert list of ranges into range table. This will also update
      * range slice sizes.
+     *
+     * @param table_name The table whose ranges are written.
+     * @param range_info The ranges to write. Only read: the caller keeps them,
+     * and retries the call with the same ranges after a failure.
+     * @param version The version the range entries are written at.
+     * @return true on success.
      */
     virtual bool UpsertRanges(const TableName &table_name,
-                              std::vector<SplitRangeInfo> range_info,
+                              const std::vector<SplitRangeInfo> &range_info,
                               uint64_t version)
     {
+        (void) table_name;
+        (void) range_info;
+        (void) version;
         return false;
     }
 

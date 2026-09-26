@@ -424,7 +424,7 @@ public:
         const std::function<void()> *sync_yield_fptr = nullptr) override;
 
     bool UpsertRanges(const txservice::TableName &table_name,
-                      std::vector<txservice::SplitRangeInfo> range_info,
+                      const std::vector<txservice::SplitRangeInfo> &range_info,
                       uint64_t version) override;
 
     bool FetchTable(
