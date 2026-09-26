@@ -129,8 +129,8 @@ public:
     /**
      * @param write_time Orders schema writes for idempotence. Commits use
      * commit_ts. A failed CREATE INDEX rollback normally uses
-     * max(kv_create_index_op_.write_time_, commit_ts_bound_) + 1 so it
-     * overwrites the original catalog write. During recovery, rollback uses
+     * max(the op's timestamp, commit_ts_bound_) + 1 so it overwrites any
+     * earlier catalog write for the op. During recovery, rollback uses
      * LocalCcHandler::GetTsBaseValue() instead.
      */
     virtual void UpsertTable(
@@ -296,6 +296,26 @@ public:
         std::vector<std::string> &dbnames,
         const std::function<void()> *yield_fptr = nullptr,
         const std::function<void()> *resume_fptr = nullptr) = 0;
+
+    /**
+     * @brief Creates a table's kv table, and nothing else: no catalog row.
+     *
+     * The counterpart of DropKvTable. Add index calls it for each index being
+     * added before its prepare log, so that the index's kv table exists in
+     * every state recovery can reach; the new schema reaches the kv catalog
+     * only after the commit log. Synchronous and idempotent. The default suits
+     * a store that keeps no per-table state.
+     *
+     * @param table_name The table to create.
+     * @param version The table's schema version.
+     * @return true on success.
+     */
+    virtual bool CreateKvTable(const TableName &table_name, uint64_t version)
+    {
+        (void) table_name;
+        (void) version;
+        return true;
+    }
 
     virtual bool DropKvTable(const std::string &kv_table_name) = 0;
 

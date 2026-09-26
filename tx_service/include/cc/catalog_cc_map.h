@@ -1718,6 +1718,28 @@ public:
             assert(op_type == OperationType::CreateTable);
             cce->SetCommitTsPayloadStatus(1, RecordStatus::Deleted);
         }
+        else if ((op_type == OperationType::AddIndex ||
+                  op_type == OperationType::DropIndex) &&
+                 (schema_op_msg.stage() ==
+                      ::txlog::SchemaOpMessage_Stage::
+                          SchemaOpMessage_Stage_PrepareSchema ||
+                  schema_op_msg.stage() ==
+                      ::txlog::SchemaOpMessage_Stage::
+                          SchemaOpMessage_Stage_PrepareData))
+        {
+            // Replaying a prepare-stage log restores the state after
+            // PrepareCommit, at which an index op published its timestamp on
+            // the entry under the prepare-stage write lock (TemplateCcMap,
+            // Execute(PostWriteAllCc&)). The recovered lock may be only an
+            // intent, but the entry must carry the same timestamp, so that a tx
+            // reading the dirty schema here still commits above the index op.
+            // The record set above is complete, so the entry is loaded now; an
+            // entry left Unknown must keep commit ts 0 (see TemplateCcMap). The
+            // commit ts only moves forward, so a repeated replay changes
+            // nothing.
+            cce->SetCommitTsPayloadStatus(catalog_entry->dirty_schema_version_,
+                                          RecordStatus::Normal);
+        }
 
         if (shard_->core_id_ < shard_->core_cnt_ - 1)
         {

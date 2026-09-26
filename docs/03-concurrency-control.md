@@ -84,7 +84,7 @@ One `CcShard` per core (`core_id_`, `core_cnt_`). Key state:
 | `cc_queue_`, `low_priority_cc_queue_`, `lazy_free_queue_`, `cc_wait_list_for_memory_` | the request queues described above (queue sizes tracked in relaxed atomics so `IsIdle()` is cheap). |
 | `tx_vec_` (`std::vector<TEntry>`) | per-shard transaction table. `NewTx()` scans circularly for a finished slot, grows ×1.5 when full. `TEntry` (`tentry.h`) holds `commit_ts_`, `lower_bound_` (start ts), `status_`, `ident_`, `term_`. TxNumber = `((ng_id << 10 \| core_id) << 32) \| ident` (`GlobalCoreId()`), so a tx number encodes its owning node group and core. |
 | `lock_vec_` (`std::vector<KeyGapLockAndExtraData::uptr>`) | pooled lock objects (initial size `LOCK_ARRAY_INIT_SIZE` = 8192, doubles when exhausted; `TryResizeLockArray()` shrinks it again when sparse). `NewLock()` hands one to an entry; empty locks are recycled back. |
-| `lock_holding_txs_` | `ng -> {TxNumber -> TxLockInfo}`: every lock/intent a tx holds in this shard (`cce_list_`), when it took its first write lock (`wlock_ts_`), and the tx coordinator term. Feeds `ActiveTxMinTs()` (checkpoint watermark), orphan-lock recovery (`CheckRecoverTx`), and deadlock collection (`CollectLockWaitingInfo`). |
+| `lock_holding_txs_` | `ng -> {TxNumber -> TxLockInfo}`: every lock/intent a tx holds in this shard (`cce_list_`), when it last acquired a write lock on any table (`wlock_ts_`, a lower bound on its commit timestamp), whether it holds a write lock that holds the checkpoint back (`holds_ckpt_wlock_`, see §10), and the tx coordinator term. Feeds `ActiveTxMinTs()` (checkpoint watermark), `ActiveTxMaxTs()` (standby subscription barrier), orphan-lock recovery (`CheckRecoverTx`), and deadlock collection (`CollectLockWaitingInfo`). |
 | `head_ccp_`/`tail_ccp_`, `protected_head_page_`, `clean_start_ccp_` | LRU double-linked list of `LruPage`s: `head — [small pages] — protected_head_ — [large pages] — tail` (large objects get exclusive pages; SLRU-style policies share the divider). `UpdateLruList`/`DetachLru` maintain it; `access_counter_` stamps relative page order. |
 | `shard_heap_`, `shard_data_sync_scan_heap_` | per-shard **mimalloc heaps** (`CcShardHeap`). `memory_limit_` = node limit × (1 − range-slice %) / core_cnt; the main heap gets 90 % of that, the data-sync-scan heap 0.1 × 0.25. `Full()`/`NeedCleanShard()`/`NeedDefragment()` gate admission, eviction, and `DefragShardHeapCc`. |
 | `last_read_ts_` | max read timestamp seen on this shard; write txs must commit above it (read-write coordination, see comment at the member). |
@@ -280,7 +280,9 @@ Release paths (`ReleaseWriteLock`, `ReleaseReadLock`, `ClearTx`, `DowngradeWrite
 lock). A second queue, `queue_block_cmds_`, holds blocked object commands (e.g. Redis
 BLMOVE/BLMPOP) that re-execute when the object changes; `CcShard::active_blocking_txs_` tracks
 those whose abort raced. Every grant/release also updates `CcShard::lock_holding_txs_` via
-`UpsertLockHoldingTx`/`DeleteLockHoldingTx`, which is what deadlock detection and recovery read.
+`UpsertLockHoldingTx`/`DeleteLockHoldingTx`, which is what deadlock detection and recovery read;
+a downgrade (`CcMap::DowngradeCceKeyWriteLock`) also calls `CcShard::OnWriteLockDowngraded`,
+so the lock stops holding the checkpoint back (§10).
 
 ## 6. CcHandlerResult (`cc_handler_result.h`)
 
@@ -413,8 +415,8 @@ intents/locks as it materializes.
   bypass the limit.
 - **`lock_holding_txs_` must mirror lock state exactly** — it drives checkpoint watermarks
   (`ActiveTxMinTs`), orphan-lock recovery (`CheckRecoverTx`), and deadlock detection. A registry
-  entry that outlives its owner persists forever and — via its non-zero `wlock_ts_` — silently
-  pins the checkpoint watermark. Two repair mechanisms address this: **registry/lock
+  entry that outlives its owner persists forever and — via `holds_ckpt_wlock_` and its
+  `wlock_ts_` — silently pins the checkpoint watermark. Two repair mechanisms address this: **registry/lock
   discrepancies** — a reference whose cc entry lock no longer lists the tx — are repaired **in
   place** by `CheckRecoverTx` the moment a long-held entry is examined (once per tx per 5s; the
   check is one `SearchLock`, and such a mismatch is a leak regardless of the tx's liveness,
@@ -426,6 +428,55 @@ intents/locks as it materializes.
   §5.4 (reads always; writes when the data WAL is off and the table is non-meta; the rest
   handed to log-based recovery). `VerifyOrphanLock` asserts a
   finished tx left nothing behind.
+- **`wlock_ts_` is the tx's latest write-lock grant; whether it holds the checkpoint back is
+  decided when each write lock is taken.** `UpsertLockHoldingTx` moves `wlock_ts_` to `Now()`
+  on every write lock, on any table.
+
+  The guarantee is this: while a tx holds a counting write lock, the checkpoint stays below its
+  latest write-lock grant. Outside that exclusive section the checkpoint may pass the tx; for a
+  DDL, that is expected.
+
+  DML chooses its commit timestamp after its last write lock, and each grant forces the commit
+  above the granting shard's clock (`last_vali_ts`, `TemplateCcMap::Execute(AcquireCc&)`). So
+  for DML the latest grant is also the tightest lower bound on the commit, and the freshest
+  sign that the tx is alive. Every reader wants that:
+  - the checkpoint;
+  - the log search in orphan-lock recovery, whose `write_lock_ts` is the scan's lower bound;
+  - the committed-write recover window;
+  - the checkpoint stall warning.
+
+  Schema operations choose their commit timestamp at prepare and rely only on the exclusive
+  section. Each writes one log under the catalog write lock: the prepare log for index ops,
+  the commit log for create, drop and truncate. Recovery resolves them by tx number, not by
+  this bound.
+
+  `ActiveTxMinTs` returns `min(wlock_ts_ − 1)` and `ActiveTxMaxTs` `max(wlock_ts_)`, both over
+  the entries with `holds_ckpt_wlock_`. A write lock sets that flag when
+  `TxLockInfo::WriteLockHoldsBackCheckpoint(table type)` holds:
+  - **Data tables: yes.** ckpt_ts must stay below every pending commit
+    ([07](07-durability-and-recovery.md) §3.2).
+  - **Catalog entries: yes.** A DDL's catalog write lock orders it against DML. A checkpoint
+    taken while the lock is held stays below the lock time, so the DDL's log record lands above
+    the log group's checkpoint. EloqDoc's change data capture depends on this.
+  - **Range, bucket and cluster-config entries: no.** Split and migration operations hold these
+    write locks for long stretches, and nothing downstream needs them ordered against the
+    checkpoint.
+
+  Intents and read locks never count and never move `wlock_ts_`.
+  `CcMap::DowngradeCceKeyWriteLock` (a DDL's `PrepareCommit`/`DowngradeLock` post-write)
+  calls `OnWriteLockDowngraded`. That clears `holds_ckpt_wlock_` unless another counting write
+  lock of the tx remains in the shard. It leaves `wlock_ts_` alone, since a downgrade acquires
+  nothing. The commit-stage upgrade sets the flag again and moves `wlock_ts_` to the upgrade
+  time.
+
+
+  `TxLockInfo` keeps no table type. A tx's locks span many tables, so one per-tx type cannot
+  describe them. Anything that depends on a lock's table decides per lock at registration
+  (`UpsertLockHoldingTx`'s `table_type` argument), or per entry from the entry's own map
+  (`cce->GetCcMap()->table_name_`, as `RecoverDeadTxLocks` and `ClearTx` do). The registry
+  used to keep a `table_type_` that every registration overwrote, and `ActiveTxMinTs` tested
+  `!IsMeta(table_type_)`. So a data write lock followed by, say, a range read lock dropped out
+  of the checkpoint.
 - **TxNumber encodes location.** `(txn >> 32) >> 10` is the owning node group, `(txn >> 32) &
   0x3FF` the core; code routes recovery/negotiation requests with this arithmetic — do not invent
   tx numbers.

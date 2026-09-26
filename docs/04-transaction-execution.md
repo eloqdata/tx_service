@@ -80,7 +80,7 @@ Aborts run the same tail (UpdateTxnStatus → PostProcess with rollback). A txm 
 
 - `UpsertTableOp` (schema/DDL: acquire-all catalog locks → log → kv `DsUpsertTableOp` → install dirty schema → flush → commit catalog), plus `UpsertTableIndexOp` for index builds (`tx_index_operation.h`, [08](08-range-and-bucket-management.md)).
 - `SplitFlushRangeOp` (range split), `ClusterScaleOp` + `DataMigrationOp` (bucket migration), `InvalidateTableCacheCompositeOp`.
-- `KickoutDataOp`/`KickoutDataAllOp` (cache eviction), `AnalyzeTableAllOp`/`BroadcastStatisticsOp` (statistics), `AsyncOp<T>` (generic kv-store async step), `NoOp`, `SleepOperation`.
+- `KickoutDataOp`/`KickoutDataAllOp` (cache eviction), `AnalyzeTableAllOp`/`BroadcastStatisticsOp` (statistics), `AsyncOp<T>` (generic kv-store async step; `SetBlockingWork` runs blocking work on the op's worker thread), `NoOp`, `SleepOperation`.
 
 ## Isolation & protocols
 

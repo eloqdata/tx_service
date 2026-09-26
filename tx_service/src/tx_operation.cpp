@@ -3922,6 +3922,36 @@ void AsyncOp<ResultType>::Reset()
     }
 }
 
+template <typename ResultType>
+void AsyncOp<ResultType>::SetBlockingWork(std::function<CcErrorCode()> work)
+{
+    op_func_ = [work = std::move(work)](AsyncOp<ResultType> &async_op)
+    {
+        // Forward() or Reset() joined the thread of an earlier run.
+        assert(!async_op.worker_thread_.joinable());
+        CcHandlerResult<ResultType> &hd_res = async_op.hd_result_;
+#ifdef EXT_TX_PROC_ENABLED
+        // Starting the thread orders the flag before the worker reads it.
+        hd_res.SetToBlock();
+#endif
+        // The thread uses the work stored in op_func_: op_func_ outlives the
+        // thread, which Forward(), Reset() and ~AsyncOp() join.
+        async_op.worker_thread_ = std::thread(
+            [&work, &hd_res]()
+            {
+                CcErrorCode err = work();
+                if (err == CcErrorCode::NO_ERROR)
+                {
+                    hd_res.SetFinished();
+                }
+                else
+                {
+                    hd_res.SetError(err);
+                }
+            });
+    };
+}
+
 template struct AsyncOp<PostProcessResult>;
 template struct AsyncOp<Void>;
 template struct AsyncOp<GenerateSkParallelResult>;

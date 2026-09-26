@@ -132,13 +132,36 @@ struct TxLockInfo
 {
     using uptr = std::unique_ptr<TxLockInfo>;
 
+    /**
+     * @brief Whether a write lock on a table of this type holds the
+     * checkpoint back.
+     *
+     * Data tables do: ckpt_ts must stay below every commit still pending
+     * (07-durability-and-recovery.md). So do catalog entries: a DDL's catalog
+     * write lock orders it against DML, and a checkpoint taken while it is
+     * held must stay below it, so that the DDL's log record lands above the
+     * log group's min_ckpt_ts_ (EloqDoc's change data capture relies on it;
+     * 03-concurrency-control.md). Range, bucket and cluster-config write
+     * locks do not: split and migration operations hold them for long
+     * stretches, and nothing downstream needs them ordered.
+     *
+     * @param type The table type of the locked entry.
+     * @return True if the write lock must hold the checkpoint back.
+     */
+    static bool WriteLockHoldsBackCheckpoint(TableType type)
+    {
+        return type != TableType::RangePartition &&
+               type != TableType::RangeBucket &&
+               type != TableType::ClusterConfig;
+    }
+
     TxLockInfo() = delete;
     explicit TxLockInfo(int64_t tx_coord_term)
         : tx_coord_term_(tx_coord_term),
           wlock_ts_(0),
+          holds_ckpt_wlock_(false),
           last_recover_ts_(0),
           cce_list_(),
-          table_type_(TableType::Primary),
           next_(nullptr)
     {
     }
@@ -157,17 +180,39 @@ struct TxLockInfo
     {
         tx_coord_term_ = tx_term;
         wlock_ts_ = 0;
+        holds_ckpt_wlock_ = false;
         last_recover_ts_ = 0;
         cce_list_.clear();
-        table_type_ = TableType::Primary;
         next_ = nullptr;
     }
 
     // tx coordinator's term.
     int64_t tx_coord_term_;
-    // The timestamp when the tx acquires the first write lock in the cc shard.
-    // If tx has not acquired any write lock, set wlock_ts_ to 0.
+    /**
+     * @brief When the tx last acquired a write lock in this shard, on any
+     * table; 0 if it never took one.
+     *
+     * While the tx holds a write lock that counts (holds_ckpt_wlock_),
+     * ActiveTxMinTs keeps the checkpoint below this. That is the guarantee;
+     * outside the exclusive section the checkpoint may pass the tx. DML
+     * chooses its commit timestamp after its last write lock, and each grant
+     * forces the commit above the granting shard's clock (last_vali_ts), so
+     * for DML this is also the tightest lower bound on the commit. It is the
+     * most recent sign that the tx is alive. Also read by ActiveTxMaxTs, by
+     * orphan-lock recovery (the log search's lower bound and the
+     * committed-write window), and by the checkpoint stall warning. A
+     * downgrade leaves it unchanged: it acquires nothing.
+     */
     uint64_t wlock_ts_;
+    /**
+     * @brief Whether the tx holds, in this shard, a write lock that holds the
+     * checkpoint back (WriteLockHoldsBackCheckpoint).
+     *
+     * Set when such a write lock is taken; cleared by OnWriteLockDowngraded
+     * once none remains. A tx's locks span many tables, so this is decided
+     * per write lock, from the locked entry's table.
+     */
+    bool holds_ckpt_wlock_;
     // The last time when the tx is recovered or the tx acquired the latest
     // lock. Gates CheckRecoverTx to once per tx per 5s. The ctor/Reset zero
     // is never observable: UpsertLockHoldingTx — the only path that puts an
@@ -176,9 +221,6 @@ struct TxLockInfo
     uint64_t last_recover_ts_;
     // A list of cc entries on which the tx has acquired write/read locks.
     absl::flat_hash_set<LruEntry *> cce_list_;
-    // This cc map type is used to skip the meta table(such as: catalog, range)
-    // during get ActiveTxMinTs()
-    TableType table_type_;
 
     std::unique_ptr<TxLockInfo> next_{nullptr};
 };
@@ -586,6 +628,24 @@ public:
                              LruEntry *cce_ptr,
                              NodeGroupId cc_ng_id);
 
+    /**
+     * @brief Called after the tx's write lock on an entry was downgraded to a
+     * write intent, so the lock stops holding the checkpoint back.
+     *
+     * Clears the tx's holds_ckpt_wlock_ unless another write lock of the tx
+     * in this shard still counts (TxLockInfo::WriteLockHoldsBackCheckpoint).
+     * A later upgrade of the intent back to a write lock sets it again and
+     * moves wlock_ts_ to the upgrade time. The downgrade itself leaves
+     * wlock_ts_ alone.
+     *
+     * @param txn The tx whose write lock was downgraded.
+     * @param cc_ng_id The node group of the entry.
+     * @param table_type The table type of the entry's cc map.
+     */
+    void OnWriteLockDowngraded(TxNumber txn,
+                               NodeGroupId cc_ng_id,
+                               TableType table_type);
+
     void DropLockHoldingTxs(NodeGroupId cc_ng_id);
 
     void VerifyOrphanLock(NodeGroupId cc_ng_id, TxNumber txn)
@@ -653,7 +713,8 @@ public:
      *   still be running, and post-processing is what installs each pending
      *   value and then releases its write lock. Write locks are therefore
      *   left to it, unless committed_write_recover_window_seconds has
-     *   passed since the write lock was granted (a wedged post-processing;
+     *   passed since the tx's latest write-lock grant in this shard
+     *   (@p wlock_ts; a wedged post-processing;
      *   the pending write is then treated as lost per the no-WAL contract).
      *
      * Independent of the verdict: read locks, read intents and data write
@@ -704,17 +765,15 @@ public:
                     continue;
                 }
 
-                // Skip meta table because there is no need to do
-                // checkpoint for these type table.
-                if (!TableName::IsMeta(tx_it->second->table_type_) &&
-                    tx_it->second->wlock_ts_ != 0)
+                // Only data-table and catalog write locks count; see
+                // TxLockInfo::WriteLockHoldsBackCheckpoint.
+                const TxLockInfo &lk_info = *tx_it->second;
+                if (lk_info.holds_ckpt_wlock_ && lk_info.wlock_ts_ - 1 < min_ts)
                 {
-                    if (tx_it->second->wlock_ts_ - 1 < min_ts)
-                    {
-                        min_ts = tx_it->second->wlock_ts_ - 1;
-                        *pinning_txn = tx_it->first;
-                        *pinning_wlock_ts = tx_it->second->wlock_ts_;
-                    }
+                    assert(lk_info.wlock_ts_ != 0);
+                    min_ts = lk_info.wlock_ts_ - 1;
+                    *pinning_txn = tx_it->first;
+                    *pinning_wlock_ts = lk_info.wlock_ts_;
                 }
 
                 ++tx_it;
@@ -760,8 +819,7 @@ public:
         {
             for (const auto &tx_pair : it->second)
             {
-                if (!TableName::IsMeta(tx_pair.second->table_type_) &&
-                    tx_pair.second->wlock_ts_ != 0)
+                if (tx_pair.second->holds_ckpt_wlock_)
                 {
                     max_ts = std::max(max_ts, tx_pair.second->wlock_ts_);
                 }

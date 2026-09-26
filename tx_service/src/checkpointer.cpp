@@ -220,7 +220,7 @@ void Checkpointer::WarnIfCkptStalled(uint32_t node_group,
                      << " <= last_ckpt_ts=" << last_ckpt_ts
                      << ". Pinned by txn " << pinning_tx.txn_ << " on core #"
                      << pinning_tx.core_id_
-                     << ", which acquired its first write lock " << age_seconds
+                     << ", which last acquired a write lock " << age_seconds
                      << "s ago (wlock_ts=" << pinning_tx.wlock_ts_
                      << "). If this transaction never finishes, dirty data "
                         "cannot be flushed and memory cannot be reclaimed.";

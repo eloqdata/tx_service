@@ -1157,8 +1157,9 @@ public:
                     req.CommitType() != PostWriteType::DowngradeLock)
                 {
                     cce_ptr->payload_.SetCurrentPayload(payload);
-                    // A prepare commit request only installs the dirty value,
-                    // and does not change the record status and commit_ts.
+                    // A prepare commit request installs the dirty value and
+                    // keeps the record status and commit_ts, except on a
+                    // catalog entry that is still write-locked (below).
                     if (req.CommitType() == PostWriteType::Commit ||
                         req.CommitType() == PostWriteType::PostCommit)
                     {
@@ -1180,6 +1181,31 @@ public:
                             // set the status to Deleted.
                             cce_ptr->SetCommitTsPayloadStatus(
                                 1, RecordStatus::Deleted);
+                        }
+                        else if (table_name_.Type() == TableType::Catalog &&
+                                 lk_type == LockType::WriteLock &&
+                                 payload != nullptr &&
+                                 commit_ts > cce_ptr->CommitTs())
+                        {
+                            // The DDL chose commit_ts under this write lock
+                            // (an index op, which holds it across the prepare
+                            // log). Publishing it as the entry's commit ts
+                            // makes every tx that reads the entry once the
+                            // lock is downgraded below, and so sees the dirty
+                            // schema, commit above it: a catalog read enters
+                            // the read set at the entry's commit ts. The node
+                            // clocks alone would not order such a tx after the
+                            // DDL. Replay of the prepare log does the same
+                            // (CatalogCcMap, Execute(ReplayLogCc&)).
+                            //
+                            // The entry is marked Normal: the payload just
+                            // installed is the complete record (CatalogCcMap
+                            // fills it from the node's catalog entry). An
+                            // entry left Unknown must keep commit ts 0,
+                            // because the catalog load path could not mark it
+                            // Normal at an unchanged timestamp.
+                            cce_ptr->SetCommitTsPayloadStatus(
+                                commit_ts, RecordStatus::Normal);
                         }
                     }
                 }

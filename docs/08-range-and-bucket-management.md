@@ -122,7 +122,24 @@ Per batch, `DataMigrationOp` (`tx_operation.h:1395`) stages — each log write c
 
 ## 6. Secondary index build
 
-`UpsertTableIndexOp` (`tx_index_operation.h:32`) is the DDL state machine (write-intent → prepare log → KV table creation → **`generate_sk_parallel_op_`** → flush old-tuple SK data → `PrepareData` log → … → commit/clean; skim the member comments for the full list). The parallel-generation granularity is the **PK range**: `DispatchRangeTask` sends each PK range to its owner NG — locally via `SkGenerator::ProcessTask`, remotely via the `GenerateSkFromPk` RPC (`proto/cc_request.proto:523`); the RPC handler (`src/remote/cc_node_service.cpp:1452`-region) spawns a `std::thread` and first waits for log replay if the node is still a candidate leader.
+`UpsertTableIndexOp` (`tx_index_operation.h:32`) is the DDL state machine: write intent → write lock → for add index, create the kv table of each new index (`create_kv_table_op_`, `DataStoreHandler::CreateKvTable`) → prepare log → install the dirty schema and downgrade to a write intent → seed the new index's range-id sequence → **`generate_sk_parallel_op_`** → flush old-tuple SK data → `PrepareData` log → … → commit-stage write lock → commit log → the new schema into the kv catalog (`kv_update_schema_image_op_`) → `PostCommit`/clean. Skim the member comments for the full list.
+
+The index's kv table is created before the prepare log, under the prepare-stage write lock, exactly as any table's kv table is created (`CreateKvTable`, no catalog row; for the DSS client, the initial range record).
+- Recovery returns a node to the state right after the prepare log: replay installs the dirty schema, and DML then writes the new index (the API layer writes every index that is in the dirty schema only). The checkpoint flushes a dirty schema's new index tables once `ckpt_ts` reaches the dirty schema version (`LocalCcShards::GetCatalogTableNameSnapshot`). So the kv table must exist in every state recovery can reach.
+- If the creation or the prepare log fails, the op drops the kv tables (`drop_kv_table_op_`, `DropKvTable`) and fails with no log. If the coordinator fails before that cleanup, they stay orphaned. That is harmless: no schema refers to them.
+- The prepare log carries the dirty schema for any node that recovers, so the kv catalog gets the new schema only after the commit log, once, at the op's timestamp. So the kv catalog version matches the in-memory one, and a kv write after the prepare log never has to be rolled back. The write is catalog-only: re-creating the index's ranges at that point would overwrite any split made during the build.
+- That write stays under the commit-stage write lock. Recovery alone would not need it: until the clean log the commit log is in the log state, so a participant that fails over restores the committed schema from it, and a recovered coordinator redoes the write. But once `PostCommit` releases the locks, another DDL on the table can start on any node and write its catalog row while this write still retries. A later drop index's newer row would be overwritten on the DSS RocksDB backends, which apply writes in arrival order (EloqStore and the embedded RocksDB handler keep the newer version). A later drop table deletes the row, and no backend keeps a deleted row's timestamp, so a late write would recreate the dropped table's catalog row. Create and drop table write their schema under the catalog lock for the same reason. The cost is B3's: DML and the checkpoint wait for the write, and its retries on a failing store.
+
+**Cost of that order.** The prepare-stage write lock spans the kv table creation and the prepare log.
+- DML on the table waits for the creation, since the catalog write lock refuses its catalog read lock.
+- The lock holds the node group's `ckpt_ts` back while it is held ([03](03-concurrency-control.md) §10).
+- On a slow store every write to the table waits for the store.
+- The creation is tried once, with no retry, so a failing store does not stall the table: the command fails at once. Nothing is logged yet, so failing is cheap, and the client retries the command.
+- Downgrading before the creation was rejected. Without the dirty-schema install, DML reads the old schema and commits above `D` without maintaining the new index, and the build's scan skips documents above `D`.
+
+The install also puts the op's timestamp `D` on the catalog cc entry ([05](05-data-model-and-catalog.md)), so every DML that sees the dirty schema commits above `D`. Its writes to the new index therefore survive replay, which skips records below the new index map's `schema_ts_` (= `D`).
+
+The parallel-generation granularity is the **PK range**: `DispatchRangeTask` sends each PK range to its owner NG — locally via `SkGenerator::ProcessTask`, remotely via the `GenerateSkFromPk` RPC (`proto/cc_request.proto:523`); the RPC handler (`src/remote/cc_node_service.cpp:1452`-region) spawns a `std::thread` and first waits for log replay if the node is still a candidate leader.
 
 `SkGenerator` (`sk_generator.h:150`):
 

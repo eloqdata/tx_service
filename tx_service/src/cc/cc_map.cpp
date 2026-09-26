@@ -362,6 +362,7 @@ void CcMap::DowngradeCceKeyWriteLock(LruEntry *cce, TxNumber tx_number)
     if (lock != nullptr)
     {
         lock->DowngradeWriteLock(tx_number, shard_);
+        shard_->OnWriteLockDowngraded(tx_number, cc_ng_id_, table_name_.Type());
     }
 }
 

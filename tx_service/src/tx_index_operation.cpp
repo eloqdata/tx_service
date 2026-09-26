@@ -62,10 +62,11 @@ UpsertTableIndexOp::UpsertTableIndexOp(
       lock_cluster_config_op_(),
       acquire_all_intent_op_(txm),
       upgrade_all_intent_to_lock_op_(txm),
+      create_kv_table_op_(txm),
+      drop_kv_table_op_(txm),
       prepare_log_op_(txm),
       downgrade_all_lock_to_intent_op_(txm),
       unlock_cluster_config_op_(txm),
-      kv_create_index_op_(&table_key_.Name(), OperationType::AddIndex, txm),
       update_sequence_table_op_(txm),
       generate_sk_parallel_op_(txm),
       flush_all_old_tuples_sk_op_(txm),
@@ -167,11 +168,12 @@ UpsertTableIndexOp::UpsertTableIndexOp(
     TX_TRACE_ASSOCIATE(this,
                        &upgrade_all_intent_to_lock_op_,
                        "upgrade_all_intent_to_lock_op_");
+    TX_TRACE_ASSOCIATE(this, &create_kv_table_op_, "create_kv_table_op_");
+    TX_TRACE_ASSOCIATE(this, &drop_kv_table_op_, "drop_kv_table_op_");
     TX_TRACE_ASSOCIATE(this, &prepare_log_op_, "prepare_log_op_");
     TX_TRACE_ASSOCIATE(this,
                        &downgrade_all_lock_to_intent_op_,
                        "downgrade_all_lock_to_intent_op_");
-    TX_TRACE_ASSOCIATE(this, &kv_create_index_op_, "kv_create_index_op_");
     TX_TRACE_ASSOCIATE(
         this, &update_sequence_table_op_, "update_sequence_table_op_");
     TX_TRACE_ASSOCIATE(
@@ -311,13 +313,69 @@ void UpsertTableIndexOp::Forward(TransactionExecution *txm)
             txm->commit_ts_ = std::max(txm->commit_ts_, ts);
         }
 
-        LOG(INFO) << "Alter Table Index transaction write prepare log, txn: "
-                  << txm->TxNumber()
-                  << ". The schema version: " << txm->commit_ts_;
-        op_ = &prepare_log_op_;
-        FillPrepareLogRequest(txm);
-        txm->PushOperation(&prepare_log_op_);
-        txm->Process(prepare_log_op_);
+        if (op_type_ == OperationType::AddIndex)
+        {
+            // Recovery returns to the state right after the prepare log, with
+            // the dirty schema installed, so the index's kv table must exist
+            // before the prepare log.
+            CreateKvTables(txm);
+        }
+        else
+        {
+            WritePrepareLog(txm);
+        }
+    }
+    else if (op_ == &create_kv_table_op_)
+    {
+        if (!txm->CheckLeaderTerm())
+        {
+            // The locks went with the leader. Whatever was created stays
+            // orphaned, which is accepted (drop_kv_table_op_).
+            txm->commit_ts_ = tx_op_failed_ts_;
+            ForceToFinish(txm);
+        }
+        else if (create_kv_table_op_.hd_result_.IsError())
+        {
+            LOG(ERROR) << "Alter Table Index for table: "
+                       << table_key_.Name().StringView()
+                       << ", failed to create the index kv tables, txn: "
+                       << txm->TxNumber();
+            // No log exists yet: the op fails, and the locks are released
+            // once whatever was created is dropped again.
+            txm->commit_ts_ = tx_op_failed_ts_;
+            txm->upsert_resp_->SetErrorCode(TxErrorCode::DATA_STORE_ERROR);
+            DropKvTables(txm);
+        }
+        else
+        {
+            WritePrepareLog(txm);
+        }
+    }
+    else if (op_ == &drop_kv_table_op_)
+    {
+        if (drop_kv_table_op_.hd_result_.IsError())
+        {
+            // Accepted: the kv tables stay orphaned. No schema refers to them.
+            LOG(WARNING) << "Alter Table Index for table: "
+                         << table_key_.Name().StringView()
+                         << ", failed to drop the kv tables of a failed add "
+                            "index, which stay orphaned, txn: "
+                         << txm->TxNumber();
+        }
+
+        if (txm->CheckLeaderTerm())
+        {
+            // commit_ts_ is tx_op_failed_ts_: the post write only removes the
+            // write intents/locks.
+            assert(txm->commit_ts_ == tx_op_failed_ts_);
+            op_ = &post_all_lock_op_;
+            txm->PushOperation(&post_all_lock_op_);
+            txm->Process(post_all_lock_op_);
+        }
+        else
+        {
+            ForceToFinish(txm);
+        }
     }
     else if (op_ == &prepare_log_op_)
     {
@@ -361,15 +419,23 @@ void UpsertTableIndexOp::Forward(TransactionExecution *txm)
                 // commit ts is set to 0 to signal that the following post write
                 // operation releases all write intents.
                 txm->commit_ts_ = tx_op_failed_ts_;
-                // Moves to the last operation that removes all write
-                // intents/locks.
-                op_ = &post_all_lock_op_;
-
                 txm->upsert_resp_->SetErrorCode(
                     TxErrorCode::UPSERT_TABLE_PREPARE_FAIL);
 
-                txm->PushOperation(&post_all_lock_op_);
-                txm->Process(post_all_lock_op_);
+                if (op_type_ == OperationType::AddIndex)
+                {
+                    // Drop the kv tables created before the prepare log, then
+                    // remove the write intents/locks.
+                    DropKvTables(txm);
+                }
+                else
+                {
+                    // Moves to the last operation that removes all write
+                    // intents/locks.
+                    op_ = &post_all_lock_op_;
+                    txm->PushOperation(&post_all_lock_op_);
+                    txm->Process(post_all_lock_op_);
+                }
             }
         }
         else
@@ -504,76 +570,11 @@ void UpsertTableIndexOp::Forward(TransactionExecution *txm)
         else
         {
             assert(op_type_ == OperationType::AddIndex);
-            LOG(INFO) << "Alter Table Index transaction upsert data store"
-                      << " info for base table: "
-                      << table_key_.Name().StringView()
-                      << ", txn: " << txm->TxNumber();
-            uint16_t retry_times = 100;
-            CODE_FAULT_INJECTOR("trigger_flush_kv_error", { retry_times = 3; });
-            op_ = &kv_create_index_op_;
-            // The post write request right after flushing the prepare log
-            // installs the dirty schema in the tx service and returns a
-            // local view (pointer) of the committed and dirty schema.
-            kv_create_index_op_.table_schema_old_ = catalog_rec_.Schema();
-            kv_create_index_op_.table_schema_ = catalog_rec_.DirtySchema();
-            kv_create_index_op_.alter_table_info_ = &alter_table_info_;
-            kv_create_index_op_.write_time_ = txm->commit_ts_;
-            txm->PushOperation(&kv_create_index_op_, retry_times);
-            txm->Process(kv_create_index_op_);
-        }
-    }
-    else if (op_ == &kv_create_index_op_)
-    {
-        if (kv_create_index_op_.hd_result_.IsError())
-        {
-            // The data store operation failed. Retries the operation if the
-            // tx node is the leader or the tx is in the recovery mode and
-            // the cc node is a leader candidate.
-            if (txm->CheckLeaderTerm())
-            {
-                // NOTE: The logic of this part is consistent with the logic in
-                // UpsertTableOp::Forward.
-                LOG(ERROR) << "Alter Table Index for table: "
-                           << table_key_.Name().StringView()
-                           << ", Failed to create tables in kv store"
-                           << ". Txn: " << txm->TxNumber();
-                // Set txm->commit_ts_ to 0 to indicate there is a flush
-                // error during upsert_kv_table_op_.
-                txm->commit_ts_ = tx_op_failed_ts_;
-
-                /*
-                After upsert kv fails, we need to flush a commit log to
-                indicate this error.
-                If we skip this commit log and jump to post_all_lock_op_
-                directly, once the participant crashes at the point between
-                it releases write intent and the coordinator flushes
-                clean_log, then during recovery, the participant sees a
-                prepare_log(whose commit_ts is not 0) and recovers write
-                lock and dirty_catalog.
-                Since the coordinator has finished its job, the write
-                lock recovered by participant becomes orphan lock, and the
-                dirty catalog can not be rejected either.
-                Also, in the current design, post_all_intent_op_ does not
-                release the write intent, which means the write intent is
-                still being held after upsert_kv_table_op_(during
-                CreateTable or AddIndex). If create table or add index in kv
-                fails, the only thing we should do after writing commit_log
-                is to reject dirty schema. So there is no need to upgrade
-                write intent to write lock, and it is safe to skip
-                acquire_all_lock_op_ and jump directly to commit_log_op_.
-                */
-                op_ = &commit_log_op_;
-                FillCommitLogRequest(txm);
-                txm->PushOperation(&commit_log_op_);
-                txm->Process(commit_log_op_);
-            }
-            else
-            {
-                ForceToFinish(txm);
-            }
-        }
-        else
-        {
+            // The index's kv table exists since before the prepare log
+            // (create_kv_table_op_), and the kv catalog gets the new schema
+            // after the commit log (kv_update_schema_image_op_). The range-id
+            // sequence is seeded before the build, whose uploads can split the
+            // index's ranges.
             LOG(INFO) << "Alter Table Index transaction init range id "
                       << "for table: " << table_key_.Name().StringView()
                       << ", txn: " << txm->TxNumber();
@@ -783,13 +784,10 @@ void UpsertTableIndexOp::Forward(TransactionExecution *txm)
                     // If creating index violates constraints, then the failure
                     // is unrecoverable, and the tx should do rollback.
                     //
-                    // Besides generate_sk_parallel_op_ set commit_ts to
-                    // tx_op_failed_ts_ when constrains violation,
-                    // kv_create_index_op_ also set commit_ts to
-                    // tx_op_failed_ts_ when flush kv failed. As a result,
-                    // `op_type == Operation::AddIndex && txm->commit_ts_ ==
-                    // tx_op_failed_ts_` doesn't means abort by constrains
-                    // violation.
+                    // This is the only way an add index commits with
+                    // tx_op_failed_ts_: a failure to create its kv tables
+                    // happens before the prepare log and writes no log
+                    // (create_kv_table_op_).
                     txm->commit_ts_ = tx_op_failed_ts_;
 
                     txm->upsert_resp_->SetErrorCode(
@@ -1244,99 +1242,71 @@ void UpsertTableIndexOp::Forward(TransactionExecution *txm)
         else if (op_type_ == OperationType::AddIndex &&
                  txm->CommitTs() == tx_op_failed_ts_)
         {
-            if (txm->TxStatus() == TxnStatus::Recovering ||
-                generate_sk_parallel_op_.hd_result_.IsError())
+            // An add index commits with a failed timestamp only when the
+            // build broke a constraint (generate_sk_parallel_op_), after the
+            // dirty schema was installed.
+            assert(txm->TxStatus() == TxnStatus::Recovering ||
+                   generate_sk_parallel_op_.hd_result_.IsError());
+            LOG(WARNING) << "Rollback Index transaction, txm: "
+                         << txm->TxNumber();
+
+            op_ = &kv_rollback_create_index_op_;
+            kv_rollback_create_index_op_.table_schema_old_ =
+                catalog_rec_.Schema();
+            kv_rollback_create_index_op_.table_schema_ =
+                catalog_rec_.DirtySchema();
+            kv_rollback_create_index_op_.alter_table_info_ = &alter_table_info_;
+
+            // Undo the CREATE INDEX operation with a DROP INDEX op.
+            assert(kv_rollback_create_index_op_.op_type_ ==
+                   OperationType::DropIndex);
+            std::swap(kv_rollback_create_index_op_.table_schema_old_,
+                      kv_rollback_create_index_op_.table_schema_);
+            std::swap(kv_rollback_create_index_op_.alter_table_info_
+                          ->index_add_names_,
+                      kv_rollback_create_index_op_.alter_table_info_
+                          ->index_drop_names_);
+            std::swap(kv_rollback_create_index_op_.alter_table_info_
+                          ->index_add_count_,
+                      kv_rollback_create_index_op_.alter_table_info_
+                          ->index_drop_count_);
+            if (txm->TxStatus() != TxnStatus::Recovering)
             {
-                // Rollback due to generate_sk_parallel_op_ break violations.
-                LOG(WARNING)
-                    << "Rollback Index transaction, txm: " << txm->TxNumber();
-
-                op_ = &kv_rollback_create_index_op_;
-                kv_rollback_create_index_op_.table_schema_old_ =
-                    catalog_rec_.Schema();
-                kv_rollback_create_index_op_.table_schema_ =
-                    catalog_rec_.DirtySchema();
-                kv_rollback_create_index_op_.alter_table_info_ =
-                    &alter_table_info_;
-
-                // Undo the CREATE INDEX operation with a DROP INDEX op.
-                assert(kv_rollback_create_index_op_.op_type_ ==
-                       OperationType::DropIndex);
-                std::swap(kv_rollback_create_index_op_.table_schema_old_,
-                          kv_rollback_create_index_op_.table_schema_);
-                std::swap(kv_rollback_create_index_op_.alter_table_info_
-                              ->index_add_names_,
-                          kv_rollback_create_index_op_.alter_table_info_
-                              ->index_drop_names_);
-                std::swap(kv_rollback_create_index_op_.alter_table_info_
-                              ->index_add_count_,
-                          kv_rollback_create_index_op_.alter_table_info_
-                              ->index_drop_count_);
-                if (txm->TxStatus() != TxnStatus::Recovering)
-                {
-                    kv_rollback_create_index_op_.write_time_ =
-                        std::max(kv_create_index_op_.write_time_,
-                                 txm->commit_ts_bound_) +
-                        1;
-                }
-                else
-                {
-                    kv_rollback_create_index_op_.write_time_ =
-                        static_cast<LocalCcHandler *>(txm->cc_handler_)
-                            ->GetTsBaseValue();
-                }
-                txm->PushOperation(&kv_rollback_create_index_op_);
-                txm->Process(kv_rollback_create_index_op_);
+                // The dirty schema's version is the op's timestamp.
+                kv_rollback_create_index_op_.write_time_ =
+                    std::max(catalog_rec_.DirtySchema()->Version(),
+                             txm->commit_ts_bound_) +
+                    1;
             }
             else
             {
-                ACTION_FAULT_INJECTOR("term_AlterTableIndex_PostCommitAllWLOp");
-                LOG(INFO) << "Alter Table Index transaction commit dirty table"
-                          << " schema, txn: " << txm->TxNumber();
-
-                assert(kv_create_index_op_.hd_result_.IsError());
-                assert(post_all_lock_op_.write_type_ ==
-                       PostWriteType::PostCommit);
-                op_ = &post_all_lock_op_;
-                txm->PushOperation(&post_all_lock_op_);
-                txm->Process(post_all_lock_op_);
+                kv_rollback_create_index_op_.write_time_ =
+                    static_cast<LocalCcHandler *>(txm->cc_handler_)
+                        ->GetTsBaseValue();
             }
+            txm->PushOperation(&kv_rollback_create_index_op_);
+            txm->Process(kv_rollback_create_index_op_);
         }
-        else if (op_type_ == OperationType::AddIndex && txm->CommitTs() > 0 &&
-                 AnyMultiKeyIndex(indexes_multikey_attr_))
+        else if (op_type_ == OperationType::AddIndex)
         {
+            // The op's only kv catalog write: the new schema, with the
+            // indexes' multikey attributes, at the op's timestamp, so the kv
+            // catalog version matches the in-memory one. Until now the
+            // prepare log carried the dirty schema for any node that recovers.
+            // It stays under the commit-stage write lock, so that no later DDL
+            // on the table writes its catalog row first: the DSS RocksDB
+            // backends apply writes in arrival order, not by version, and a
+            // later drop table deletes the row, leaving nothing a late write
+            // could be compared against.
+            assert(txm->CommitTs() > 0);
             op_ = &kv_update_schema_image_op_;
             kv_update_schema_image_op_.table_schema_old_ =
                 catalog_rec_.Schema();
             kv_update_schema_image_op_.table_schema_ =
                 catalog_rec_.DirtySchema();
-            if (txm->TxStatus() != TxnStatus::Recovering)
-            {
-                kv_update_schema_image_op_.write_time_ =
-                    std::max({kv_update_schema_image_op_.write_time_,
-                              kv_create_index_op_.write_time_,
-                              txm->commit_ts_bound_}) +
-                    1;
-            }
-            else
-            {
-                kv_update_schema_image_op_.write_time_ =
-                    static_cast<LocalCcHandler *>(txm->cc_handler_)
-                        ->GetTsBaseValue();
-            }
+            kv_update_schema_image_op_.write_time_ = txm->commit_ts_;
             txm->PushOperation(&kv_update_schema_image_op_);
             txm->Process(kv_update_schema_image_op_);
-        }
-        else
-        {
-            ACTION_FAULT_INJECTOR("term_AlterTableIndex_PostCommitAllWLOp");
-            LOG(INFO) << "Alter Table Index transaction commit dirty table"
-                      << " schema, txn: " << txm->TxNumber();
-
-            assert(post_all_lock_op_.write_type_ == PostWriteType::PostCommit);
-            op_ = &post_all_lock_op_;
-            txm->PushOperation(&post_all_lock_op_);
-            txm->Process(post_all_lock_op_);
         }
     }
     else if (op_ == &kv_drop_index_op_)
@@ -1455,7 +1425,17 @@ void UpsertTableIndexOp::Forward(TransactionExecution *txm)
     }
     else if (op_ == &kv_update_schema_image_op_)
     {
-        if (kv_update_schema_image_op_.hd_result_.IsError())
+        bool write_failed = kv_update_schema_image_op_.hd_result_.IsError();
+        // Fails one write, then disarms itself, so that the retry must write.
+        CODE_FAULT_INJECTOR("alter_table_index_update_schema_image_fail", {
+            LOG(INFO) << "FaultInject "
+                         "alter_table_index_update_schema_image_fail, txn: "
+                      << txm->TxNumber();
+            FaultInject::Instance().InjectFault(
+                "alter_table_index_update_schema_image_fail", "remove");
+            write_failed = true;
+        });
+        if (write_failed)
         {
             if (txm->CheckLeaderTerm())
             {
@@ -1469,6 +1449,7 @@ void UpsertTableIndexOp::Forward(TransactionExecution *txm)
         }
         else
         {
+            ACTION_FAULT_INJECTOR("term_AlterTableIndex_PostCommitAllWLOp");
             LOG(INFO) << "Alter Table Index transaction commit dirty table "
                          "schema, txn: "
                       << txm->TxNumber();
@@ -1682,9 +1663,10 @@ void UpsertTableIndexOp::Reset(const std::string_view table_name_str,
 
     indexes_multikey_attr_.clear();
 
+    create_kv_table_op_.Reset();
+    drop_kv_table_op_.Reset();
     prepare_log_op_.Reset();
     unlock_cluster_config_op_.Reset();
-    kv_create_index_op_.Reset();
     update_sequence_table_op_.Reset();
     generate_sk_parallel_op_.Reset();
     flush_all_old_tuples_sk_op_.Reset();
@@ -1717,10 +1699,6 @@ void UpsertTableIndexOp::Reset(const std::string_view table_name_str,
     downgrade_all_lock_to_intent_op_.recs_.push_back(&catalog_rec_);
     downgrade_all_lock_to_intent_op_.op_type_ = op_type_;
     downgrade_all_lock_to_intent_op_.write_type_ = PostWriteType::PrepareCommit;
-
-    kv_create_index_op_.alter_table_info_ = &alter_table_info_;
-    kv_create_index_op_.op_type_ = op_type_;
-    kv_create_index_op_.write_time_ = 0;
 
     broadcast_dirty_schema_image_op_.table_name_ = &catalog_ccm_name;
     broadcast_dirty_schema_image_op_.keys_.clear();
@@ -1759,10 +1737,11 @@ void UpsertTableIndexOp::Reset(const std::string_view table_name_str,
     // Reset cc_handler_res txm
     acquire_all_intent_op_.ResetHandlerTxm(txm);
     upgrade_all_intent_to_lock_op_.ResetHandlerTxm(txm);
+    create_kv_table_op_.ResetHandlerTxm(txm);
+    drop_kv_table_op_.ResetHandlerTxm(txm);
     prepare_log_op_.ResetHandlerTxm(txm);
     downgrade_all_lock_to_intent_op_.ResetHandlerTxm(txm);
     unlock_cluster_config_op_.ResetHandlerTxm(txm);
-    kv_create_index_op_.ResetHandlerTxm(txm);
     update_sequence_table_op_.ResetHandlerTxm(txm);
     generate_sk_parallel_op_.ResetHandlerTxm(txm);
     flush_all_old_tuples_sk_op_.ResetHandlerTxm(txm);
@@ -1881,9 +1860,95 @@ void UpsertTableIndexOp::FillCommitLogRequest(TransactionExecution *txm)
         commit_log_op_.log_closure_.LogRequest().mutable_write_log_request();
 
     assert(txm->commit_ts_ != tx_op_failed_ts_ ||
-           kv_create_index_op_.hd_result_.IsError() ||
            generate_sk_parallel_op_.hd_result_.IsError());
     commit_log_rec->set_commit_timestamp(txm->commit_ts_);
+}
+
+void UpsertTableIndexOp::CreateKvTables(TransactionExecution *txm)
+{
+    assert(op_type_ == OperationType::AddIndex);
+    LOG(INFO) << "Alter Table Index transaction create the index kv tables "
+              << "for base table: " << table_key_.Name().StringView()
+              << ", txn: " << txm->TxNumber();
+
+    const uint64_t schema_version = txm->commit_ts_;
+    create_kv_table_op_.SetBlockingWork(
+        [this, schema_version, txn = txm->TxNumber()]()
+        {
+            store::DataStoreHandler *const store_hd =
+                Sharder::Instance().GetLocalCcShards()->store_hd_;
+            // One attempt, no retry: this runs under the prepare-stage write
+            // lock, which blocks DML on the table and holds the checkpoint
+            // back, and a failure only fails the command.
+            bool succ =
+                store_hd == nullptr || store_hd->ByPassDataStore() ||
+                std::all_of(alter_table_info_.index_add_names_.begin(),
+                            alter_table_info_.index_add_names_.end(),
+                            [store_hd, schema_version](
+                                const std::pair<TableName, std::string> &p) {
+                                return store_hd->CreateKvTable(p.first,
+                                                               schema_version);
+                            });
+            // Fails the creation after the tables are created, so the cleanup
+            // has real tables to drop.
+            CODE_FAULT_INJECTOR("alter_table_index_create_kv_table_fail", {
+                LOG(INFO) << "FaultInject "
+                             "alter_table_index_create_kv_table_fail, txn: "
+                          << txn;
+                succ = false;
+            });
+            return succ ? CcErrorCode::NO_ERROR : CcErrorCode::DATA_STORE_ERR;
+        });
+
+    op_ = &create_kv_table_op_;
+    txm->PushOperation(&create_kv_table_op_);
+    txm->Process(create_kv_table_op_);
+}
+
+void UpsertTableIndexOp::DropKvTables(TransactionExecution *txm)
+{
+    assert(op_type_ == OperationType::AddIndex);
+    LOG(INFO) << "Alter Table Index transaction drop the kv tables of a "
+              << "failed add index, base table: "
+              << table_key_.Name().StringView() << ", txn: " << txm->TxNumber();
+
+    drop_kv_table_op_.SetBlockingWork(
+        [this]()
+        {
+            store::DataStoreHandler *const store_hd =
+                Sharder::Instance().GetLocalCcShards()->store_hd_;
+            // One attempt: a failure leaves the tables orphaned, which is
+            // accepted, and the locks must not wait on it.
+            bool succ =
+                store_hd == nullptr || store_hd->ByPassDataStore() ||
+                std::all_of(
+                    alter_table_info_.index_add_names_.begin(),
+                    alter_table_info_.index_add_names_.end(),
+                    [store_hd](const std::pair<TableName, std::string> &p)
+                    { return store_hd->DropKvTable(p.second); });
+            return succ ? CcErrorCode::NO_ERROR : CcErrorCode::DATA_STORE_ERR;
+        });
+
+    op_ = &drop_kv_table_op_;
+    txm->PushOperation(&drop_kv_table_op_);
+    txm->Process(drop_kv_table_op_);
+}
+
+void UpsertTableIndexOp::WritePrepareLog(TransactionExecution *txm)
+{
+    LOG(INFO) << "Alter Table Index transaction write prepare log, txn: "
+              << txm->TxNumber() << ". The schema version: " << txm->commit_ts_;
+    op_ = &prepare_log_op_;
+    FillPrepareLogRequest(txm);
+    txm->PushOperation(&prepare_log_op_);
+    CODE_FAULT_INJECTOR("alter_table_index_prepare_log_fail", {
+        LOG(INFO) << "FaultInject alter_table_index_prepare_log_fail, txn: "
+                  << txm->TxNumber();
+        prepare_log_op_.is_running_ = true;
+        prepare_log_op_.hd_result_.SetError(CcErrorCode::WRITE_LOG_FAILED);
+        return;
+    });
+    txm->Process(prepare_log_op_);
 }
 
 void UpsertTableIndexOp::ForceToFinish(TransactionExecution *txm)
@@ -2664,14 +2729,6 @@ bool UpsertTableIndexOp::IndexesMergeMultiKeyAttr(
         }
     }
     return changed;
-}
-
-bool UpsertTableIndexOp::AnyMultiKeyIndex(
-    const std::vector<MultiKeyAttr> &indexes_multikey_attr)
-{
-    return std::any_of(indexes_multikey_attr.begin(),
-                       indexes_multikey_attr.end(),
-                       [](const MultiKeyAttr &attr) { return attr.multikey_; });
 }
 
 std::string UpsertTableIndexOp::RebuildSchemaImage(

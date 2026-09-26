@@ -196,6 +196,20 @@ public:
     void TriggerAction(FaultEntry *entry);
     void InjectFault(std::string fault_name, std::string paras);
 
+    /**
+     * @brief Whether this build compiles the fault points in.
+     *
+     * The fault points (ACTION_FAULT_INJECTOR, CODE_FAULT_INJECTOR) expand to
+     * nothing unless the data substrate is built with WITH_FAULT_INJECT. The
+     * answer comes from the data substrate's own compilation, so a caller built
+     * with other flags (an API layer's command, a test) still gets it right.
+     * Without the fault points, InjectFault still records the fault, but the
+     * fault never fires.
+     *
+     * @return true if the fault points are compiled in.
+     */
+    static bool CompiledIn();
+
 private:
     FaultInject()
     {

@@ -66,6 +66,7 @@ set(CATCH_MAIN_TESTS
     AcquireAllError-Test
     StandbyForward-Test
     ApplyResponseBoundary-Test
+    CkptLockRegistry-Test
 )
 
 if(WITH_DATA_STORE STREQUAL "ELOQDSS_ROCKSDB" OR

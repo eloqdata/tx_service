@@ -3065,9 +3065,9 @@ public:
 
     /**
      * @brief The write-lock-holding tx that determined the node group's
-     * checkpoint timestamp, i.e. the tx with the minimum first-write-lock ts
-     * across all shards. txn_ == 0 when no such tx exists (the checkpoint ts
-     * came from the clock).
+     * checkpoint timestamp, i.e. the tx with the minimum wlock_ts (latest
+     * write-lock time) across all shards. txn_ == 0 when no such tx exists (the
+     * checkpoint ts came from the clock).
      */
     PinningTxInfo GetPinningTx() const
     {
@@ -3186,9 +3186,12 @@ private:
     std::vector<uint64_t> standby_msg_seq_id_vec_;
     std::vector<uint32_t> subscribed_node_ids_;
     std::vector<int8_t> heap_full_vec_;
-    // Per-shard tx (and its first-write-lock ts) that produced the shard's
-    // minimum in ActiveTxMinTs. 0 / UINT64_MAX when the shard has no
-    // write-lock-holding tx. Only filled on the leader path.
+    /**
+     * @brief Per-shard tx (and, in pinning_wlock_ts_vec_, its latest
+     * write-lock ts) that produced the shard's minimum in ActiveTxMinTs.
+     * 0 / UINT64_MAX when no tx in the shard holds the checkpoint back. Only
+     * filled on the leader path.
+     */
     std::vector<TxNumber> pinning_txn_vec_;
     std::vector<uint64_t> pinning_wlock_ts_vec_;
     NodeGroupId cc_ng_id_;

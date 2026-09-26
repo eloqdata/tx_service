@@ -684,6 +684,24 @@ struct AsyncOp : public TransactionOperation
     void Forward(TransactionExecution *txm) override;
     void Reset();
 
+    /**
+     * @brief Sets op_func_ to run blocking work on worker_thread_ and finish
+     * hd_result_ with the code it returns.
+     *
+     * For work that must not run on the tx processor thread, which calls
+     * op_func_: a synchronous store call, an RPC, a sleep. Each run starts a
+     * new thread that calls the stored work; Forward() joins it once
+     * hd_result_ is finished. Work with a result value sets it on hd_result_
+     * before returning.
+     *
+     * @param work Runs on the worker thread; returns CcErrorCode::NO_ERROR on
+     * success, else the error hd_result_ gets.
+     * @warning A retry runs the same work again, so the work must leave what
+     * it captured intact: pass captured data to callees by reference, never
+     * by std::move.
+     */
+    void SetBlockingWork(std::function<CcErrorCode()> work);
+
     std::function<void(AsyncOp<ResultType> &async_op)> op_func_;
 
     // hd_result_ represents the async result, and op_func_ should finish it

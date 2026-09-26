@@ -250,6 +250,15 @@ void FaultInject::TriggerAction(FaultEntry *entry)
     }
 }
 
+bool FaultInject::CompiledIn()
+{
+#ifdef WITH_FAULT_INJECT
+    return true;
+#else
+    return false;
+#endif
+}
+
 void FaultInject::InjectFault(std::string fault_name, std::string paras)
 {
     LOG(INFO) << "FaultInject name=" << fault_name << "  paras=" << paras;
