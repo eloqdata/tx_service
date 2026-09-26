@@ -60,6 +60,23 @@ public:
             log_group_id, cntl, &request, &response, &done);
     }
 
+    void CdcScan(uint32_t log_group_id,
+                 brpc::Controller *cntl,
+                 const ::txlog::CdcScanRequest &request,
+                 ::txlog::CdcScanResponse &response,
+                 std::optional<uint32_t> *node_id,
+                 google::protobuf::Closure &done) override
+    {
+        log_agent_.CdcScan(
+            log_group_id, cntl, &request, &response, node_id, &done);
+    }
+
+    std::optional<uint32_t> LogNodeByAddress(
+        uint32_t log_group_id, const std::string &address) override
+    {
+        return log_agent_.LogNodeByAddress(log_group_id, address);
+    }
+
     ::txlog::CheckClusterScaleStatusResponse::Status CheckClusterScaleStatus(
         uint32_t log_group_id, const std::string &id) override
     {

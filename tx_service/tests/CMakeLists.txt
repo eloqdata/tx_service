@@ -83,6 +83,7 @@ set(CATCH_MAIN_TESTS
     RemoteUploadTxCommands-Test
     TransactionImageLifetime-Test
     CkptLockRegistry-Test
+    LogAgentCdc-Test
 )
 
 if(WITH_DATA_STORE STREQUAL "ELOQDSS_ROCKSDB" OR

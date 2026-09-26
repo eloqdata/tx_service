@@ -23,6 +23,7 @@
 
 #include <brpc/controller.h>
 
+#include <optional>
 #include <string>
 #include <vector>
 
@@ -69,6 +70,59 @@ public:
 
     virtual ::txlog::CheckClusterScaleStatusResponse::Status
     CheckClusterScaleStatus(uint32_t log_group_id, const std::string &id) = 0;
+
+    /**
+     * @brief Sends a change-data scan (CdcScan) to the log group's cached
+     * leader, asynchronously.
+     *
+     * The default fails the call at once, for a log without change data
+     * capture.
+     *
+     * @param log_group_id The log group to scan.
+     * @param cntl The call's controller; its timeout bounds the call.
+     * @param request The scan request.
+     * @param[out] response The scan response.
+     * @param[out] node_id Set to the node ID the call is sent to, before it
+     * is sent; left empty when no leader is known and the call fails at once.
+     * A NotLeader redirect is compared with it by node ID, looked up with
+     * LogNodeByAddress, rather than by address format.
+     * @param done Run exactly once when the call completes, possibly before
+     * this returns.
+     */
+    virtual void CdcScan(uint32_t log_group_id,
+                         brpc::Controller *cntl,
+                         const ::txlog::CdcScanRequest &request,
+                         ::txlog::CdcScanResponse &response,
+                         std::optional<uint32_t> *node_id,
+                         google::protobuf::Closure &done)
+    {
+        (void) log_group_id;
+        (void) request;
+        (void) response;
+        (void) node_id;
+        cntl->SetFailed("CdcScan is not supported by this log");
+        done.Run();
+    }
+
+    /**
+     * @brief The node ID configured with the given "host:port" in the log
+     * group, as a CdcScan NotLeader response's redirect names it.
+     *
+     * Following a redirect is then UpdateLeaderCache with that node ID. The
+     * default finds none, for a log without a node configuration.
+     *
+     * @param log_group_id The log group.
+     * @param address A "host:port".
+     * @return The node ID, or empty if no node ID of the group is configured
+     * with that address.
+     */
+    virtual std::optional<uint32_t> LogNodeByAddress(uint32_t log_group_id,
+                                                     const std::string &address)
+    {
+        (void) log_group_id;
+        (void) address;
+        return std::nullopt;
+    }
 
     // Invoked by a cc node group's leader to update its checkpoint
     // timestamp in all log groups (so that the transaction logs before

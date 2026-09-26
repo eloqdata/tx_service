@@ -28,6 +28,7 @@
 
 #include <atomic>
 #include <condition_variable>
+#include <optional>
 #include <shared_mutex>
 #include <sstream>
 #include <string>
@@ -108,6 +109,30 @@ public:
         const CheckMigrationIsFinishedRequest *request,
         CheckMigrationIsFinishedResponse *response,
         ::google::protobuf::Closure *done);
+
+    /**
+     * @brief Sends a CdcScan to the group's cached leader, asynchronously.
+     *
+     * The caller handles NotLeader: it looks up the redirect's node ID with
+     * LogNodeByAddress, points the cache at it with UpdateLeaderCache or asks
+     * for a refresh, and scans again.
+     *
+     * @param log_group_id The log group to scan.
+     * @param controller The call's controller; its timeout bounds the call.
+     * @param request The scan request.
+     * @param[out] response The scan response.
+     * @param[out] node_id Set to the node ID the call is sent to, before it
+     * is sent; left as is when the group has no channel.
+     * @param done Run exactly once when the call completes. When the group has
+     * no channel, the controller reports the failure and done runs before this
+     * returns.
+     */
+    void CdcScan(uint32_t log_group_id,
+                 brpc::Controller *controller,
+                 const CdcScanRequest *request,
+                 CdcScanResponse *response,
+                 std::optional<uint32_t> *node_id,
+                 ::google::protobuf::Closure *done);
 
     CheckClusterScaleStatusResponse::Status CheckClusterScaleStatus(
         uint32_t log_group_id, const std::string &id);
@@ -209,6 +234,22 @@ public:
     std::shared_ptr<brpc::Channel> GetChannel(uint32_t log_group_id);
 
     void UpdateLeaderCache(uint32_t lg_id, uint32_t node_id);
+
+    /**
+     * @brief The node ID configured with the given address in the log group.
+     *
+     * For a CdcScan NotLeader response, whose redirect names the leader as the
+     * log service formats a peer address, "host:port"; matched against the
+     * addresses of the group's node IDs as RefreshLeader matches braft's
+     * leader.
+     *
+     * @param log_group_id The log group.
+     * @param address A "host:port".
+     * @return The node ID, or empty if no node ID of the group is configured
+     * with that address or the address is malformed.
+     */
+    std::optional<uint32_t> LogNodeByAddress(uint32_t log_group_id,
+                                             const std::string &address);
 
     bool UpdateLogGroupConfig(std::vector<std::string> &ips,
                               std::vector<uint16_t> &ports,

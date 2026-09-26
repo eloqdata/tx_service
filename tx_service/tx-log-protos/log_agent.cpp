@@ -374,6 +374,42 @@ void LogAgent::CheckMigrationIsFinished(
     stub.CheckMigrationIsFinished(controller, request, response, done);
 }
 
+void LogAgent::CdcScan(uint32_t log_group_id,
+                       brpc::Controller *controller,
+                       const CdcScanRequest *request,
+                       CdcScanResponse *response,
+                       std::optional<uint32_t> *node_id,
+                       ::google::protobuf::Closure *done)
+{
+    std::shared_ptr<brpc::Channel> channel;
+    uint32_t leader = 0;
+    {
+        std::shared_lock<std::shared_mutex> lock(config_map_mutex_);
+        auto cache_it = lg_leader_cache_.find(log_group_id);
+        if (cache_it != lg_leader_cache_.end())
+        {
+            leader = cache_it->second.load(std::memory_order_acquire);
+            auto channel_it = log_channel_map_.find(leader);
+            if (channel_it != log_channel_map_.end())
+            {
+                channel = channel_it->second;
+            }
+        }
+    }
+    if (channel == nullptr)
+    {
+        controller->SetFailed("Log channel not found for group " +
+                              std::to_string(log_group_id));
+        done->Run();
+        return;
+    }
+    // Before the call is sent: done may run on another thread before the stub
+    // returns, and the caller reads the node ID from it.
+    *node_id = leader;
+    LogService_Stub stub(channel.get());
+    stub.CdcScan(controller, request, response, done);
+}
+
 CheckClusterScaleStatusResponse::Status LogAgent::CheckClusterScaleStatus(
     uint32_t log_group_id, const std::string &id)
 {
@@ -702,6 +738,50 @@ void LogAgent::UpdateLeaderCache(uint32_t lg_id, uint32_t node_id)
 {
     std::shared_lock<std::shared_mutex> lock(config_map_mutex_);
     lg_leader_cache_.at(lg_id).store(node_id, std::memory_order_release);
+}
+
+std::optional<uint32_t> LogAgent::LogNodeByAddress(uint32_t log_group_id,
+                                                   const std::string &address)
+{
+    const size_t colon_pos = address.rfind(':');
+    if (colon_pos == std::string::npos || colon_pos == 0 ||
+        colon_pos + 1 == address.size())
+    {
+        return std::nullopt;
+    }
+    const std::string host = address.substr(0, colon_pos);
+    uint32_t port = 0;
+    for (size_t i = colon_pos + 1; i < address.size(); ++i)
+    {
+        const char c = address[i];
+        if (c < '0' || c > '9')
+        {
+            return std::nullopt;
+        }
+        port = port * 10 + static_cast<uint32_t>(c - '0');
+        if (port > UINT16_MAX)
+        {
+            return std::nullopt;
+        }
+    }
+
+    std::shared_lock<std::shared_mutex> lock(config_map_mutex_);
+    auto config_it = log_group_config_map_.find(log_group_id);
+    if (config_it == log_group_config_map_.end())
+    {
+        return std::nullopt;
+    }
+    // The group's config holds node IDs only; their addresses are in
+    // log_nodes_, which UpdateLogGroupConfig updates with it.
+    for (uint32_t node_id : config_it->second.group_nodes_)
+    {
+        const std::pair<std::string, uint16_t> &node = log_nodes_.at(node_id);
+        if (node.first == host && node.second == port)
+        {
+            return node_id;
+        }
+    }
+    return std::nullopt;
 }
 
 bool LogAgent::UpdateLogGroupConfig(std::vector<std::string> &ips,
