@@ -2709,6 +2709,19 @@ bool DataStoreServiceClient::FetchAllDatabase(
     return !callback_data->HasError();
 }
 
+bool DataStoreServiceClient::CreateKvTable(
+    const txservice::TableName &table_name, uint64_t version)
+{
+    // The data store service keeps no per-table state (its CreateTable is a
+    // no-op on every backend), so only a range-partitioned table has anything
+    // to write: its initial range record.
+    if (table_name.IsHashPartitioned())
+    {
+        return true;
+    }
+    return InitTableRanges(table_name, version);
+}
+
 bool DataStoreServiceClient::DropKvTable(const std::string &kv_table_name)
 {
     SyncCallbackData *callback_data = sync_callback_data_pool_.NextObject();

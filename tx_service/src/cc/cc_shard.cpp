@@ -1217,18 +1217,61 @@ TxLockInfo *CcShard::UpsertLockHoldingTx(TxNumber txn,
     {
         tx_it->second->cce_list_.emplace(cce_ptr);
     }
-    tx_it->second->last_recover_ts_ = Now();
-    tx_it->second->table_type_ = table_type;
+    const uint64_t now = Now();
+    tx_it->second->last_recover_ts_ = now;
 
-    if (is_key_write_lock && tx_it->second->wlock_ts_ == 0)
+    if (is_key_write_lock)
     {
-        // write lock should update ts if the txn exists, or the CkptTsCc
-        // request may get an older ckpt_ts.
-        // For txn that acquires write lock more than once, do not update
-        // wlock_ts_ with bigger Now().
-        tx_it->second->wlock_ts_ = Now();
+        // Every write lock moves the stamp: while a counting write lock is
+        // held, the checkpoint stays below the latest grant
+        // (TxLockInfo::wlock_ts_).
+        tx_it->second->wlock_ts_ = now;
+        // Decided per write lock, from the locked entry's table: the tx's
+        // locks span many tables.
+        if (!tx_it->second->holds_ckpt_wlock_ &&
+            TxLockInfo::WriteLockHoldsBackCheckpoint(table_type))
+        {
+            tx_it->second->holds_ckpt_wlock_ = true;
+        }
     }
     return tx_it->second.get();
+}
+
+void CcShard::OnWriteLockDowngraded(TxNumber txn,
+                                    NodeGroupId cc_ng_id,
+                                    TableType table_type)
+{
+    if (!TxLockInfo::WriteLockHoldsBackCheckpoint(table_type))
+    {
+        // This lock never set holds_ckpt_wlock_.
+        return;
+    }
+
+    auto ng_it = lock_holding_txs_.find(cc_ng_id);
+    if (ng_it == lock_holding_txs_.end())
+    {
+        return;
+    }
+    auto tx_it = ng_it->second.find(txn);
+    if (tx_it == ng_it->second.end())
+    {
+        return;
+    }
+    TxLockInfo &lk_info = *tx_it->second;
+
+    // holds_ckpt_wlock_ covers all of the tx's write locks in the shard. Keep
+    // it while another counting write lock remains.
+    for (LruEntry *cce : lk_info.cce_list_)
+    {
+        const NonBlockingLock *lock = cce->GetKeyLock();
+        const CcMap *ccm = cce->GetCcMap();
+        if (lock != nullptr && ccm != nullptr && lock->HasWriteLock(txn) &&
+            TxLockInfo::WriteLockHoldsBackCheckpoint(ccm->table_name_.Type()))
+        {
+            return;
+        }
+    }
+    lk_info.holds_ckpt_wlock_ = false;
 }
 
 void CcShard::DeleteLockHoldingTx(TxNumber txn,
@@ -1431,14 +1474,17 @@ void CcShard::ClearTx(TxNumber txn)
             NonBlockingLock *lock = lru_ptr->GetKeyLock();
             if (lock != nullptr)
             {
+                // The entry's own table, read before the lock is cleared: the
+                // tx's locks span many tables.
+                const CcMap *ccm = lru_ptr->GetCcMap();
                 LockType lt = lock->ClearTx(txn, this);
                 if (lt == LockType::WriteLock)
                 {
                     lru_ptr->GetKeyGapLockAndExtraData()->ClearTx();
                 }
 
-                if (FLAGS_cmd_read_catalog &&
-                    lk_info->table_type_ == TableType::Catalog)
+                if (FLAGS_cmd_read_catalog && ccm != nullptr &&
+                    ccm->table_name_.Type() == TableType::Catalog)
                 {
                     // Do not recycle the lock on Catalog since it's frequently
                     // accessed.

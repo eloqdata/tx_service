@@ -94,6 +94,24 @@ struct UpsertTableIndexOp : public SchemaOp
      */
     AcquireAllOp upgrade_all_intent_to_lock_op_;
     /**
+     * @brief For add index, creates the kv table of each index being added
+     * (DataStoreHandler::CreateKvTable), before the prepare log and under the
+     * prepare-stage write lock.
+     *
+     * Recovery returns a node to the state right after the prepare log, in
+     * which the dirty schema is installed and DML writes the new index, so its
+     * kv table must exist in every state recovery can reach. The kv catalog is
+     * written only after the commit log (kv_update_schema_image_op_).
+     */
+    AsyncOp<Void> create_kv_table_op_;
+    /**
+     * @brief Drops the kv tables create_kv_table_op_ created, when the add
+     * index fails before its prepare log is flushed. A coordinator failure
+     * before it finishes leaves them orphaned, which is harmless: no schema
+     * refers to them.
+     */
+    AsyncOp<Void> drop_kv_table_op_;
+    /**
      * @brief Flushes the prepare log to the log service. The schema operation
      * is guaranteed to succeed after this stage.
      */
@@ -107,11 +125,6 @@ struct UpsertTableIndexOp : public SchemaOp
      * @brief Release cluster config read lock after post write all.
      */
     PostReadOperation unlock_cluster_config_op_;
-    /**
-     * @brief Creates/deletes the data store table and persists/removes the
-     * binary representation of the catalog in the data store.
-     */
-    DsUpsertTableOp kv_create_index_op_;
     /**
      * @brief Update the sequence table for range id info.
      */
@@ -160,8 +173,19 @@ struct UpsertTableIndexOp : public SchemaOp
      */
     DsUpsertTableOp kv_rollback_create_index_op_;
     /**
-     * @brief For creating index, update the schema image inside kv-storage.
-     * Optional operation.
+     * @brief For creating index, writes the new schema (with the indexes'
+     * multikey attributes) to the kv catalog at the commit stage, after the
+     * commit log and under the commit-stage write lock.
+     *
+     * The index's kv table exists since before the prepare log
+     * (create_kv_table_op_), and until the commit log the prepare log carries
+     * the dirty schema for any node that recovers. Written at the op's
+     * timestamp, so the kv catalog version matches the in-memory schema
+     * version; retried until it succeeds, since after the commit log the op
+     * only rolls forward. The write lock keeps any later DDL on the table from
+     * writing its catalog row first: the DSS RocksDB backends apply writes in
+     * arrival order, not by version, and a later drop table deletes the row,
+     * leaving nothing a late write could be compared against.
      */
     DsUpsertTableOp kv_update_schema_image_op_;
     /**
@@ -200,6 +224,35 @@ private:
     void FillPrepareDataLogRequest(TransactionExecution *txm);
     void FillCommitLogRequest(TransactionExecution *txm);
     void ForceToFinish(TransactionExecution *txm);
+
+    /**
+     * @brief Starts create_kv_table_op_, which creates the kv table of each
+     * index being added.
+     *
+     * Called once `commit_ts_` is chosen under the prepare-stage write lock,
+     * before the prepare log.
+     *
+     * @param txm The transaction running this operation.
+     */
+    void CreateKvTables(TransactionExecution *txm);
+
+    /**
+     * @brief Starts drop_kv_table_op_, which drops the kv tables of the
+     * indexes being added, and then releases the locks.
+     *
+     * Called when the add index fails before its prepare log is flushed.
+     *
+     * @param txm The transaction running this operation.
+     */
+    void DropKvTables(TransactionExecution *txm);
+
+    /**
+     * @brief Writes the prepare log, once `commit_ts_` is chosen and, for add
+     * index, the kv tables exist.
+     *
+     * @param txm The transaction running this operation.
+     */
+    void WritePrepareLog(TransactionExecution *txm);
 
     // Flush pk or sk data from ccmap into data store.
     void FlushDataIntoDataStore(const TableName &table_name,
@@ -248,9 +301,6 @@ private:
 
     static bool IndexesMergeMultiKeyAttr(std::vector<MultiKeyAttr> &from,
                                          std::vector<MultiKeyAttr> &to);
-
-    static bool AnyMultiKeyIndex(
-        const std::vector<MultiKeyAttr> &indexes_multikey_attr);
 
     static std::string RebuildSchemaImage(
         const TableSchema *dirty_schema,

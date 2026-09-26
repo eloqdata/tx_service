@@ -428,6 +428,18 @@ public:
         const std::function<void()> *yield_fptr = nullptr,
         const std::function<void()> *resume_fptr = nullptr) override;
 
+    /**
+     * @brief Creates a table's kv table. The data store service keeps no
+     * per-table state to create, so this writes the initial range record of a
+     * range-partitioned table, as UpsertTable does when it creates a table.
+     *
+     * @param table_name The table to create.
+     * @param version The table's schema version, the range's version.
+     * @return true on success.
+     */
+    bool CreateKvTable(const txservice::TableName &table_name,
+                       uint64_t version) override;
+
     bool DropKvTable(const std::string &kv_table_name) override;
 
     void DropKvTableAsync(const std::string &kv_table_name) override;
