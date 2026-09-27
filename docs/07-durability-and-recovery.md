@@ -14,7 +14,7 @@ Related docs: [01-architecture-overview.md](01-architecture-overview.md), [02-th
 
 ### 1.1 Modes
 
-Two global switches, set from `TxService::Initialize` parameters (`tx_service/include/tx_service.h:1192`, wired in `core/src/tx_service_init.cpp:312-313` as `skip_wal = !enable_wal`, `skip_kv = !enable_data_store`):
+Two global switches, set from `TxService::Initialize` parameters (`tx_service/include/tx_service.h:1192`, wired in `core/src/tx_service_init.cpp:339-340` as `skip_wal = !enable_wal`, `skip_kv = !enable_data_store`):
 
 - `txservice_skip_wal` — data (DML) log records are not written: `TransactionExecution::Process(WriteToLogOp&)` short-circuits `TxLogType::DATA` requests (`tx_service/src/tx_execution.cpp:4985`). **Multi-stage 2PC logs (schema, range split, cluster scale, migration) are still written** so metadata stays consistent across the cluster. The checkpointer also skips `UpdateCheckpointTs` (`Checkpointer::NotifyLogOfCkptTs`, `tx_service/src/checkpointer.cpp:555-564`).
 - `txservice_skip_kv` — no store handler. The `Checkpointer` constructor only starts its thread when `store_hd_ != nullptr` (`checkpointer.cpp:86-90`), and `CcNode::OnLeaderStart` skips `store_hd_->OnLeaderStart` (`tx_service/src/fault/cc_node.cpp:303-311`). All data must then fit in memory (eviction requires a checkpointed entry, §3.4).
@@ -79,7 +79,7 @@ The log service keeps multi-stage records in its state machine until the Clean r
 
 `Checkpointer` (`tx_service/include/checkpointer.h`, `tx_service/src/checkpointer.cpp`) runs one `std::thread` named `checkpointer` (only if a store handler exists). Loop (`Run()`, `checkpointer.cpp:433-490`):
 
-- Wake every `checkpointer_interval` seconds (default 10, `core/src/tx_service_init.cpp:10`) **or** on `Notify(request_ckpt=true)`; explicit requests are rate-limited to one per `checkpointer_min_ckpt_request_interval` seconds (default 5, dedup via CAS on `request_ckpt_`, `checkpointer.cpp:497-518`).
+- Wake every `checkpointer_interval` seconds (default 10, `core/src/tx_service_init.cpp:10`; at least 5: `DataSubstrate::InitializeTxService` raises a smaller value to 5 with a warning and refuses to start on a negative one, which stored unsigned would stop the periodic rounds) **or** on `Notify(request_ckpt=true)`; explicit requests are rate-limited to one per `checkpointer_min_ckpt_request_interval` seconds (default 5, dedup via CAS on `request_ckpt_`, `checkpointer.cpp:497-518`).
 - On `Terminate()` the loop exits and runs one final `Ckpt(is_last_ckpt=true)` which **waits for all flush tasks** before the process may shut down (`checkpointer.cpp:368-375`, `Join()`).
 
 Notification sources: tx processors that find nothing clean to evict (`CcShard::NotifyCkpt`), the dirty-memory trigger (§3.5), the log service's `NotifyCheckpointer` RPC (§1.2), data-sync workers running dry, and shutdown.
@@ -90,7 +90,7 @@ Notification sources: tx processors that find nothing clean to evict (`CcShard::
 
 - **Leader**: each shard contributes `ActiveTxMinTs(ng)` (`tx_service/include/cc/cc_shard.h:622-676`) = `min(wlock_ts_ − 1)` over the lock-holding txs of that ng that hold a write lock on a data table or catalog entry. `wlock_ts_` is the tx's latest write-lock grant in the shard; for DML, which chooses its commit timestamp after its last write lock, that is a lower bound on the commit. Range, bucket and cluster-config write locks, intents and read locks never make a tx count; decision and downgrade handling are in [03](03-concurrency-control.md) §10. If none, the freshly re-synced wall clock − 1. So **ckpt_ts is always strictly below the earliest commit-pending write** — every record with `commit_ts <= ckpt_ts` is final. The same walk piggybacks `CheckRecoverTx` for locks held > 5 s (§5.4).
 - **Standby**: shards contribute `MinLastStandbyConsistentTs()` instead, and `CkptTsCc::UpdateStandbyConsistentTs` (`cc_request.h:3108-3143`) pushes the primary's consistent ts + per-shard message sequence ids to subscribed standbys.
-- **MVCC delay** (`checkpointer.cpp:123-136`): with MVCC on and not the final ckpt, let `delayed = raw − ckpt_delay_seconds·10⁶` (default 5 s, `tx_service_init.cpp:18`) and `min_si = TxStartTsCollector::GlobalMinSiTxStartTs()`; the result is `delayed` if `min_si < delayed`, else `min_si` if `min_si < raw`, else `raw` — i.e. clamped into `[delayed, raw]` around the oldest snapshot reader, so versions that active snapshot txs may read stay in memory.
+- **MVCC delay** (`checkpointer.cpp:123-136`): with MVCC on and not the final ckpt, let `delayed = raw − ckpt_delay_seconds·10⁶` (default 5 s, `tx_service_init.cpp:29`) and `min_si = TxStartTsCollector::GlobalMinSiTxStartTs()`; the result is `delayed` if `min_si < delayed`, else `min_si` if `min_si < raw`, else `raw` — i.e. clamped into `[delayed, raw]` around the oldest snapshot reader, so versions that active snapshot txs may read stay in memory.
 
 ### 3.3 One checkpoint round — `Ckpt()`
 
@@ -267,12 +267,12 @@ processed by the `replay_notify` thread. `ProcessRecoverTxTask` (`log_replay_ser
 
 | Flag (ini key in `[local]` unless noted) | Default | Effect | Defined in |
 |---|---|---|---|
-| `checkpointer_interval` | 10 s | periodic ckpt wakeup | `core/src/tx_service_init.cpp:10` |
-| `checkpointer_delay_seconds` | 5 s | MVCC ckpt-ts delay window (§3.2) | `tx_service_init.cpp:18` |
-| `checkpointer_min_ckpt_request_interval` | 5 s | rate limit for `Notify(true)` requests | `tx_service_init.cpp:11` |
-| `collect_active_tx_ts_interval_seconds` | 2 s | `TxStartTsCollector` period | `tx_service_init.cpp:19` |
-| `dirty_memory_check_interval` | 1000 calls | how often a shard re-evaluates dirty memory | `tx_service_init.cpp:58` |
-| `dirty_memory_size_threshold_mb` | 0 (= 10% shard limit) | dirty-memory ckpt trigger | `tx_service_init.cpp:61`, `cc_shard.cpp:126-141` |
+| `checkpointer_interval` | 10 s | periodic ckpt wakeup; below 5 s raised to 5 s, negative rejected at start-up; effective value from `Checkpointer::CheckpointInterval()` | `core/src/tx_service_init.cpp:10` |
+| `checkpointer_delay_seconds` | 5 s | MVCC ckpt-ts delay window (§3.2) | `tx_service_init.cpp:29` |
+| `checkpointer_min_ckpt_request_interval` | 5 s | rate limit for `Notify(true)` requests | `tx_service_init.cpp:22` |
+| `collect_active_tx_ts_interval_seconds` | 2 s | `TxStartTsCollector` period | `tx_service_init.cpp:30` |
+| `dirty_memory_check_interval` | 1000 calls | how often a shard re-evaluates dirty memory | `tx_service_init.cpp:69` |
+| `dirty_memory_size_threshold_mb` | 0 (= 10% shard limit) | dirty-memory ckpt trigger | `tx_service_init.cpp:72`, `cc_shard.cpp:126-141` |
 | `txlog_service_list` (`[cluster]`) | "" | external log service endpoints; empty = in-process log server | `core/src/log_init.cpp:10` |
 | `txlog_group_replica_num` (`[cluster]`) | 3 | replicas per log group | `log_init.cpp:11` |
 | `enable_txlog_request_checkpoint` | true | log server may RPC `NotifyCheckpointer` | `log_init.cpp:34` |

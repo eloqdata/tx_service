@@ -70,7 +70,7 @@ All knobs follow *gflag overrides ini section* (`[local]`, `[cluster]`, `[store]
 | `tx_ip_port_list`, `tx_standby_ip_port_list`, `tx_voter_ip_port_list` | — | Cluster topology bootstrap |
 | `node_group_replica_num` | 3 | Members per node group |
 | `bootstrap` | false | Init system tables and exit |
-| `checkpointer_interval` | 10s | Ckpt cadence (also delay/min-interval variants) |
+| `checkpointer_interval` | 10s | Ckpt cadence, at least 5 s; negative rejected at start-up (also delay/min-interval variants) |
 | `fork_host_manager` / `hm_ip` / `hm_port` / `hm_bin_path` | true | Host manager process wiring |
 | `auto_redirect` | false | Redirect object commands to remote owner NG internally |
 | `enable_key_cache` | false | Key cache (non-MVCC only) |
