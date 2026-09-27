@@ -102,6 +102,17 @@ public:
     bool IsTerminated();
 
     /**
+     * @brief The periodic checkpoint interval this checkpointer runs with.
+     *
+     * @return The interval in seconds, after start-up raised it to the
+     * minimum.
+     */
+    uint32_t CheckpointInterval() const
+    {
+        return checkpoint_interval_;
+    }
+
+    /**
      * @brief When TxService is stopping, this function will be called and
      * triggers checkpoint to flush data to KvStore.
      *
