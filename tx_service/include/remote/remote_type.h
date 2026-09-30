@@ -129,6 +129,8 @@ public:
             return CommitType::DowngradeLock;
         case PostWriteType::UpdateDirty:
             return CommitType::UpdateDirty;
+        case PostWriteType::Rollback:
+            return CommitType::Rollback;
         default:
             assert(false);
             return CommitType::PostCommit;
@@ -358,6 +360,8 @@ public:
             return PostWriteType::DowngradeLock;
         case CommitType::UpdateDirty:
             return PostWriteType::UpdateDirty;
+        case CommitType::Rollback:
+            return PostWriteType::Rollback;
         default:
             assert(false);
             return PostWriteType::PostCommit;

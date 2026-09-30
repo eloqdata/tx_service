@@ -21,6 +21,7 @@
  */
 #pragma once
 
+#include <algorithm>
 #include <memory>
 #include <shared_mutex>
 #include <string>
@@ -185,13 +186,21 @@ struct CatalogEntry
         }
     }
 
-    void CommitDirtySchema()
+    /**
+     * @brief Promotes the dirty schema to the current schema.
+     *
+     * @param commit_ts The op's commit timestamp, the schema record's new
+     * version. CREATE, DROP and TRUNCATE TABLE commit above the version the
+     * dirty schema was installed with (UpsertTableOp::AssignCommitStageTs);
+     * other ops commit at it. 0 keeps the installed version.
+     */
+    void CommitDirtySchema(uint64_t commit_ts = 0)
     {
         std::unique_lock<std::shared_mutex> lk(s_mux_);
         if (dirty_schema_version_ > schema_version_)
         {
             schema_ = std::move(dirty_schema_);
-            schema_version_ = dirty_schema_version_;
+            schema_version_ = std::max(dirty_schema_version_, commit_ts);
         }
         else
         {
@@ -200,11 +209,25 @@ struct CatalogEntry
         dirty_schema_version_ = 0;
     }
 
-    void RejectDirtySchema()
+    /**
+     * @brief Rolls back a schema op: drops the dirty schema and keeps the
+     * current schema, whose version becomes the op's commit timestamp if it
+     * has one.
+     *
+     * No table's version changes, so the schema object stays as it is.
+     *
+     * @param version The op's commit timestamp: 0 for an op that failed, which
+     * leaves the version alone; ignored unless above the current version.
+     */
+    void RollBackDirtySchema(uint64_t version)
     {
         std::unique_lock<std::shared_mutex> lk(s_mux_);
         dirty_schema_.reset();
         dirty_schema_version_ = 0;
+        if (version > schema_version_)
+        {
+            schema_version_ = version;
+        }
     }
 
     // FIXME(lokax):

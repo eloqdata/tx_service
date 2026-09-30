@@ -71,6 +71,7 @@ All knobs follow *gflag overrides ini section* (`[local]`, `[cluster]`, `[store]
 | `node_group_replica_num` | 3 | Members per node group |
 | `bootstrap` | false | Init system tables and exit |
 | `checkpointer_interval` | 10s | Ckpt cadence, at least 5 s; negative rejected at start-up (also delay/min-interval variants) |
+| `ddl_kv_retry_interval_seconds` | 30 | Pause before a schema op retries a data store step that failed after its point of no return (`SchemaOp::KvRetryInterval`); 0 raised to 1, negative rejected; the test fixtures use 1 |
 | `fork_host_manager` / `hm_ip` / `hm_port` / `hm_bin_path` | true | Host manager process wiring |
 | `auto_redirect` | false | Redirect object commands to remote owner NG internally |
 | `enable_key_cache` | false | Key cache (non-MVCC only) |

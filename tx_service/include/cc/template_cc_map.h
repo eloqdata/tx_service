@@ -952,7 +952,8 @@ public:
                 // Updates last_vali_ts such that it is no smaller than (1) all
                 // read transactions that have read the item in all shards, and
                 // (2) the local time.
-                req.SetLastValidTs(shard_->LastReadTs());
+                req.SetLastValidTs(
+                    std::max(shard_->LastReadTs(), shard_->Now()));
 
                 if (shard_->core_id_ == tx_core_id)
                 {
@@ -1078,11 +1079,13 @@ public:
         {
             payload = static_cast<const ValueT *>(req.Payload());
         }
-        // commit_ts = 0 means transaction failed (e.g. failed at prepare
-        // phase), we have nothing to upload, only need to release write intent.
-        else if (req.CommitTs() > 0 &&
-                 req.CommitType() != PostWriteType::DowngradeLock)
+        // A remote request that installs a value carries it serialized. A
+        // DowngradeLock installs nothing, and a Rollback installs only the
+        // value to keep that the cc map supplied, if any.
+        else if (req.CommitType() != PostWriteType::DowngradeLock &&
+                 req.CommitType() != PostWriteType::Rollback)
         {
+            assert(req.CommitTs() > 0);
             if (req.DecodedPayload() == nullptr)
             {
                 const std::string *payload_str = req.PayloadStr();
@@ -1153,98 +1156,124 @@ public:
 
             if (lk_type != LockType::NoLock)
             {
-                if (commit_ts > 0 &&
-                    req.CommitType() != PostWriteType::DowngradeLock)
+                // Do not recycle the lock on Catalog since it's frequently
+                // accessed.
+                const bool recycle_lock =
+                    table_name_.Type() != TableType::Catalog;
+                switch (req.CommitType())
                 {
+                case PostWriteType::PrepareCommit:
+                    // Installs the dirty value and keeps the write intent,
+                    // downgrading a write lock to one. Every op sends it after
+                    // its prepare log, so commit_ts is set. The entry keeps its
+                    // status and commit ts, except as below.
+                    assert(commit_ts > 0 && payload != nullptr);
                     cce_ptr->payload_.SetCurrentPayload(payload);
-                    // A prepare commit request installs the dirty value and
-                    // keeps the record status and commit_ts, except on a
-                    // catalog entry that is still write-locked (below).
-                    if (req.CommitType() == PostWriteType::Commit ||
-                        req.CommitType() == PostWriteType::PostCommit)
+                    if (req.OpType() == OperationType::CreateTable)
                     {
-                        RecordStatus status =
-                            (req.OpType() == OperationType::Delete ||
-                             req.OpType() == OperationType::DropTable)
-                                ? RecordStatus::Deleted
-                                : RecordStatus::Normal;
-
-                        bool was_dirty = cce_ptr->IsDirty();
-                        cce_ptr->SetCommitTsPayloadStatus(commit_ts, status);
-                        OnCommittedUpdate(cce_ptr, was_dirty);
+                        // For prepare commit of create table operation, set
+                        // the status to Deleted.
+                        cce_ptr->SetCommitTsPayloadStatus(
+                            1, RecordStatus::Deleted);
                     }
-                    else if (req.CommitType() == PostWriteType::PrepareCommit)
+                    else if (table_name_.Type() == TableType::Catalog &&
+                             lk_type == LockType::WriteLock &&
+                             commit_ts > cce_ptr->CommitTs())
                     {
-                        if (req.OpType() == OperationType::CreateTable)
-                        {
-                            // For prepare commit of create table operation,
-                            // set the status to Deleted.
-                            cce_ptr->SetCommitTsPayloadStatus(
-                                1, RecordStatus::Deleted);
-                        }
-                        else if (table_name_.Type() == TableType::Catalog &&
-                                 lk_type == LockType::WriteLock &&
-                                 payload != nullptr &&
-                                 commit_ts > cce_ptr->CommitTs())
-                        {
-                            // The DDL chose commit_ts under this write lock
-                            // (an index op, which holds it across the prepare
-                            // log). Publishing it as the entry's commit ts
-                            // makes every tx that reads the entry once the
-                            // lock is downgraded below, and so sees the dirty
-                            // schema, commit above it: a catalog read enters
-                            // the read set at the entry's commit ts. The node
-                            // clocks alone would not order such a tx after the
-                            // DDL. Replay of the prepare log does the same
-                            // (CatalogCcMap, Execute(ReplayLogCc&)).
-                            //
-                            // The entry is marked Normal: the payload just
-                            // installed is the complete record (CatalogCcMap
-                            // fills it from the node's catalog entry). An
-                            // entry left Unknown must keep commit ts 0,
-                            // because the catalog load path could not mark it
-                            // Normal at an unchanged timestamp.
-                            cce_ptr->SetCommitTsPayloadStatus(
-                                commit_ts, RecordStatus::Normal);
-                        }
+                        // The DDL chose commit_ts under this write lock (an
+                        // index op, which holds it across the prepare log).
+                        // Publishing it as the entry's commit ts makes every
+                        // tx that reads the entry once the lock is downgraded
+                        // below, and so sees the dirty schema, commit above
+                        // it: a catalog read enters the read set at the
+                        // entry's commit ts. The node clocks alone would not
+                        // order such a tx after the DDL. Replay of the prepare
+                        // log does the same (CatalogCcMap,
+                        // Execute(ReplayLogCc&)).
+                        //
+                        // The entry is marked Normal: the payload just
+                        // installed is the complete record (CatalogCcMap fills
+                        // it from the node's catalog entry). An entry left
+                        // Unknown must keep commit ts 0, because the catalog
+                        // load path could not mark it Normal at an unchanged
+                        // timestamp.
+                        cce_ptr->SetCommitTsPayloadStatus(commit_ts,
+                                                          RecordStatus::Normal);
                     }
-                }
-
-                // When commit_ts = 0, the request removes the write lock
-                // without installing a new value.
-
-                if (req.CommitType() == PostWriteType::PrepareCommit ||
-                    req.CommitType() == PostWriteType::DowngradeLock)
-                {
-                    // For PrepareCommit and DowngradeLock, the
-                    // post-write-all request keeps write intent or downgrades
-                    // the write lock to the write intent.
                     if (lk_type == LockType::WriteLock)
                     {
                         DowngradeCceKeyWriteLock(cce_ptr, txn);
                     }
-                }
-                else if (req.CommitType() == PostWriteType::Commit ||
-                         req.CommitType() == PostWriteType::PostCommit)
+                    break;
+                case PostWriteType::UpdateDirty:
+                    // Replaces an add index's dirty value; the lock stays.
+                    assert(req.OpType() == OperationType::AddIndex);
+                    assert(commit_ts > 0 && payload != nullptr);
+                    cce_ptr->payload_.SetCurrentPayload(payload);
+                    break;
+                case PostWriteType::Commit:
+                case PostWriteType::PostCommit:
                 {
-                    // For PostCommit or Commit, the post-write-all request
-                    // releases the write lock.
-
-                    // Do not recycle the lock on Catalog since it's frequently
-                    // accessed.
-                    bool recycle_lock =
-                        table_name_.Type() != TableType::Catalog;
+                    // Installs the committed value at commit_ts and releases
+                    // the lock. A tx that failed rolls back instead.
+                    assert(commit_ts > 0 && payload != nullptr);
+                    cce_ptr->payload_.SetCurrentPayload(payload);
+                    RecordStatus status =
+                        (req.OpType() == OperationType::Delete ||
+                         req.OpType() == OperationType::DropTable)
+                            ? RecordStatus::Deleted
+                            : RecordStatus::Normal;
+                    bool was_dirty = cce_ptr->IsDirty();
+                    cce_ptr->SetCommitTsPayloadStatus(commit_ts, status);
+                    // The data-key stats count data tables only; today every
+                    // post-write-all targets a meta table.
+                    if (!table_name_.IsMeta())
+                    {
+                        OnCommittedUpdate(cce_ptr, was_dirty);
+                    }
                     ReleaseCceLock(cce_ptr->GetKeyLock(),
                                    cce_ptr,
                                    txn,
                                    req.NodeGroupId(),
                                    lk_type,
                                    recycle_lock);
+                    break;
                 }
-                else
-                {
-                    assert(req.CommitType() == PostWriteType::UpdateDirty &&
-                           req.OpType() == OperationType::AddIndex);
+                case PostWriteType::Rollback:
+                    // Releases the lock. A payload is the value to keep, which
+                    // the cc map supplies to replace the dirty value the tx
+                    // installed; without one the tx installed nothing and the
+                    // entry keeps its value. A commit_ts above 0 moves the
+                    // entry's commit ts to it and keeps its status.
+                    if (payload != nullptr)
+                    {
+                        cce_ptr->payload_.SetCurrentPayload(payload);
+                    }
+                    if (commit_ts > 0)
+                    {
+                        bool was_dirty = cce_ptr->IsDirty();
+                        cce_ptr->SetCommitTsPayloadStatus(
+                            commit_ts, cce_ptr->PayloadStatus());
+                        if (!table_name_.IsMeta())
+                        {
+                            OnCommittedUpdate(cce_ptr, was_dirty);
+                        }
+                    }
+                    ReleaseCceLock(cce_ptr->GetKeyLock(),
+                                   cce_ptr,
+                                   txn,
+                                   req.NodeGroupId(),
+                                   lk_type,
+                                   recycle_lock);
+                    break;
+                case PostWriteType::DowngradeLock:
+                    // Downgrades a write lock to a write intent; commits
+                    // nothing.
+                    if (lk_type == LockType::WriteLock)
+                    {
+                        DowngradeCceKeyWriteLock(cce_ptr, txn);
+                    }
+                    break;
                 }
             }
         }

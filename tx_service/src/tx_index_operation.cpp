@@ -58,7 +58,8 @@ UpsertTableIndexOp::UpsertTableIndexOp(
                current_image,
                dirty_image,
                curr_schema_ts,
-               op_type),
+               op_type,
+               txm),
       lock_cluster_config_op_(),
       acquire_all_intent_op_(txm),
       upgrade_all_intent_to_lock_op_(txm),
@@ -135,6 +136,7 @@ UpsertTableIndexOp::UpsertTableIndexOp(
                                                   table_engine);
 
     is_force_finished_ = false;
+    rolled_back_ = false;
 
     new_indexes_name_.reserve(alter_table_info_.index_add_count_);
     for (auto index_it = alter_table_info_.index_add_names_.cbegin();
@@ -188,6 +190,7 @@ UpsertTableIndexOp::UpsertTableIndexOp(
         this, &kv_rollback_create_index_op_, "kv_rollback_create_index_op_");
     TX_TRACE_ASSOCIATE(
         this, &kv_update_schema_image_op_, "kv_update_schema_image_op_");
+    TX_TRACE_ASSOCIATE(this, &kv_retry_wait_op_, "kv_retry_wait_op_");
     TX_TRACE_ASSOCIATE(this, &clean_ccm_op_, "clean_ccm_op_");
     TX_TRACE_ASSOCIATE(this, &post_all_lock_op_, "post_all_lock_op_");
     TX_TRACE_ASSOCIATE(this, &clean_log_op_, "clean_log_op_");
@@ -209,37 +212,19 @@ void UpsertTableIndexOp::Forward(TransactionExecution *txm)
         {
             LOG(ERROR) << "Alter Table Index read cluster config failed, txn:"
                        << txm->TxNumber();
-            if (!prepare_log_op_.hd_result_.IsFinished() &&
-                !prepare_data_log_op_.hd_result_.IsFinished())
-            {
-                txm->commit_ts_ = tx_op_failed_ts_;
-            }
+            MarkFailed(txm);
             ForceToFinish(txm);
             return;
         }
-        if (prepare_log_op_.hd_result_.IsFinished() ||
-            prepare_data_log_op_.hd_result_.IsFinished())
-        {
-            assert(op_type_ == OperationType::AddIndex);
-            LOG(INFO) << "Alter Table Index transaction post acquire all"
-                      << " write lock, txn: " << txm->TxNumber();
-            op_ = &acquire_all_lock_op_;
-            txm->PushOperation(&acquire_all_lock_op_);
-            txm->Process(acquire_all_lock_op_);
-        }
-        else
-        {
-            // Acquire write intent, and then upgrade to write lock(Locking),
-            // rather than acquire write lock(OCC) directly, aim to avoid two
-            // situations: (1) concurrent DDL deadlock. (2) concurrent DML cause
-            // to always abort this tx.
-            LOG(INFO)
-                << "Alter Table Index transaction prepare acquire all write"
-                << " intent, txn: " << txm->TxNumber();
-            op_ = &acquire_all_intent_op_;
-            txm->PushOperation(&acquire_all_intent_op_);
-            txm->Process(acquire_all_intent_op_);
-        }
+        // Acquire write intent, and then upgrade to write lock(Locking),
+        // rather than acquire write lock(OCC) directly, aim to avoid two
+        // situations: (1) concurrent DDL deadlock. (2) concurrent DML cause
+        // to always abort this tx.
+        LOG(INFO) << "Alter Table Index transaction prepare acquire all write"
+                  << " intent, txn: " << txm->TxNumber();
+        op_ = &acquire_all_intent_op_;
+        txm->PushOperation(&acquire_all_intent_op_);
+        txm->Process(acquire_all_intent_op_);
     }
     else if (op_ == &acquire_all_intent_op_)
     {
@@ -258,7 +243,7 @@ void UpsertTableIndexOp::Forward(TransactionExecution *txm)
             // the schema operation. Set the commit ts to 0 to signal that
             // the following post write operation releases all write
             // intents.
-            txm->commit_ts_ = tx_op_failed_ts_;
+            MarkFailed(txm);
             // Moves to the last operation that removes all write
             // intents/locks.
             op_ = &post_all_lock_op_;
@@ -287,7 +272,7 @@ void UpsertTableIndexOp::Forward(TransactionExecution *txm)
                        << txm->TxNumber();
             // Set the commit ts to 0 to signal that the following post write
             // operation releases all write intents.
-            txm->commit_ts_ = tx_op_failed_ts_;
+            MarkFailed(txm);
             // Moves to the last operation that removes all write
             // intents/locks.
             op_ = &post_all_lock_op_;
@@ -312,6 +297,7 @@ void UpsertTableIndexOp::Forward(TransactionExecution *txm)
                                    upgrade_all_res.last_vali_ts_ + 1);
             txm->commit_ts_ = std::max(txm->commit_ts_, ts);
         }
+        ResolveSchemaImages(txm->commit_ts_);
 
         if (op_type_ == OperationType::AddIndex)
         {
@@ -331,7 +317,7 @@ void UpsertTableIndexOp::Forward(TransactionExecution *txm)
         {
             // The locks went with the leader. Whatever was created stays
             // orphaned, which is accepted (drop_kv_table_op_).
-            txm->commit_ts_ = tx_op_failed_ts_;
+            MarkFailed(txm);
             ForceToFinish(txm);
         }
         else if (create_kv_table_op_.hd_result_.IsError())
@@ -342,7 +328,7 @@ void UpsertTableIndexOp::Forward(TransactionExecution *txm)
                        << txm->TxNumber();
             // No log exists yet: the op fails, and the locks are released
             // once whatever was created is dropped again.
-            txm->commit_ts_ = tx_op_failed_ts_;
+            MarkFailed(txm);
             txm->upsert_resp_->SetErrorCode(TxErrorCode::DATA_STORE_ERROR);
             DropKvTables(txm);
         }
@@ -403,7 +389,7 @@ void UpsertTableIndexOp::Forward(TransactionExecution *txm)
                 }
                 else
                 {
-                    txm->commit_ts_ = tx_op_failed_ts_;
+                    MarkFailed(txm);
                     ForceToFinish(txm);
                 }
             }
@@ -418,7 +404,7 @@ void UpsertTableIndexOp::Forward(TransactionExecution *txm)
                 // considered failed if the prepare log is not flushed. The
                 // commit ts is set to 0 to signal that the following post write
                 // operation releases all write intents.
-                txm->commit_ts_ = tx_op_failed_ts_;
+                MarkFailed(txm);
                 txm->upsert_resp_->SetErrorCode(
                     TxErrorCode::UPSERT_TABLE_PREPARE_FAIL);
 
@@ -497,78 +483,6 @@ void UpsertTableIndexOp::Forward(TransactionExecution *txm)
         }
         else
         {
-            // Release cluster config op before doing data store op.
-            op_ = &unlock_cluster_config_op_;
-            // Get cce addr of cluster config read lock from rset.
-            const CcEntryAddr *cluster_config_addr = nullptr;
-            const ReadSetEntry *cluster_config_entry = nullptr;
-            const auto &meta_rset = txm->rw_set_.MetaDataReadSet();
-            for (const auto &[cce_addr, read_entry_pair] : meta_rset)
-            {
-                if (read_entry_pair.second == cluster_config_ccm_name_sv)
-                {
-                    cluster_config_addr = &cce_addr;
-                    cluster_config_entry = &read_entry_pair.first;
-                    break;
-                }
-            }
-            assert(cluster_config_addr && cluster_config_entry);
-            unlock_cluster_config_op_.Reset(cluster_config_addr,
-                                            cluster_config_entry);
-            LOG(INFO) << "Alter Table Index transaction release cluster config "
-                         "lock, txn: "
-                      << txm->TxNumber();
-            txm->PushOperation(&unlock_cluster_config_op_);
-            txm->Process(unlock_cluster_config_op_);
-        }
-    }
-    else if (op_ == &unlock_cluster_config_op_)
-    {
-        if (unlock_cluster_config_op_.hd_result_.IsError())
-        {
-            if (txm->CheckLeaderTerm())
-            {
-                const CcEntryAddr *cluster_config_addr = nullptr;
-                const auto &meta_rset = txm->rw_set_.MetaDataReadSet();
-                for (const auto &[cce_addr, read_entry_pair] : meta_rset)
-                {
-                    if (read_entry_pair.second == cluster_config_ccm_name_sv)
-                    {
-                        cluster_config_addr = &cce_addr;
-                        break;
-                    }
-                }
-
-                if (cluster_config_addr)
-                {
-                    DLOG(INFO)
-                        << "Alter Table Index transaction unlock cluster "
-                           "config "
-                           "lock failed, txn: "
-                        << txm->TxNumber() << ", error code: "
-                        << (int)
-                               unlock_cluster_config_op_.hd_result_.ErrorCode()
-                        << ", error message: "
-                        << unlock_cluster_config_op_.hd_result_.ErrorMsg()
-                        << ", cluster config addr term"
-                        << cluster_config_addr->Term()
-                        << ", cluster config addr node group id: "
-                        << cluster_config_addr->NodeGroupId()
-                        << ", node group term: "
-                        << Sharder::Instance().LeaderTerm(
-                               cluster_config_addr->NodeGroupId());
-                }
-                // Releasing a local read lock should never fail
-                assert(false);
-            }
-            else
-            {
-                ForceToFinish(txm);
-                return;
-            }
-        }
-        else
-        {
             assert(op_type_ == OperationType::AddIndex);
             // The index's kv table exists since before the prepare log
             // (create_kv_table_op_), and the kv catalog gets the new schema
@@ -626,26 +540,11 @@ void UpsertTableIndexOp::Forward(TransactionExecution *txm)
     {
         if (update_sequence_table_op_.hd_result_.IsError())
         {
-            if (txm->CheckLeaderTerm())
-            {
-                DLOG(INFO) << "Alter Table Index transaction retry update "
-                              "sequence table, base table: "
-                           << table_key_.Name().StringView()
-                           << ", txn: " << txm->TxNumber();
-                txm->PushOperation(&update_sequence_table_op_);
-                txm->Process(update_sequence_table_op_);
-            }
-            else
-            {
-                DLOG(INFO) << "Alter Table Index transaction ForceToFinish "
-                              "update sequence table, base table: "
-                           << table_key_.Name().StringView()
-                           << ", txn: " << txm->TxNumber();
-                ForceToFinish(txm);
-            }
+            // After the prepare log (add index) or the commit log (drop index,
+            // rolled-back add index): retried until it succeeds.
+            RetryKvStep(txm, &update_sequence_table_op_);
         }
-        else if ((op_type_ == OperationType::AddIndex &&
-                  txm->CommitTs() != tx_op_failed_ts_))
+        else if (op_type_ == OperationType::AddIndex && !rolled_back_)
         {
             if (txm->TxStatus() == TxnStatus::Recovering &&
                 Sharder::Instance().CandidateLeaderTerm(txm->TxCcNodeId()) > 0)
@@ -692,8 +591,7 @@ void UpsertTableIndexOp::Forward(TransactionExecution *txm)
             txm->Process(generate_sk_parallel_op_);
         }
         else if (op_type_ == OperationType::DropIndex ||
-                 (op_type_ == OperationType::AddIndex &&
-                  txm->CommitTs() == tx_op_failed_ts_))
+                 (op_type_ == OperationType::AddIndex && rolled_back_))
         {
             LOG(INFO) << "Alter Table Index transaction clean cc map, txn: "
                       << txm->TxNumber();
@@ -721,8 +619,7 @@ void UpsertTableIndexOp::Forward(TransactionExecution *txm)
     else if (op_ == &clean_ccm_op_)
     {
         assert(op_type_ == OperationType::DropIndex ||
-               (op_type_ == OperationType::AddIndex &&
-                txm->CommitTs() == tx_op_failed_ts_));
+               (op_type_ == OperationType::AddIndex && rolled_back_));
 
         if (clean_ccm_op_.hd_result_.IsError())
         {
@@ -784,11 +681,14 @@ void UpsertTableIndexOp::Forward(TransactionExecution *txm)
                     // If creating index violates constraints, then the failure
                     // is unrecoverable, and the tx should do rollback.
                     //
-                    // This is the only way an add index commits with
-                    // tx_op_failed_ts_: a failure to create its kv tables
-                    // happens before the prepare log and writes no log
-                    // (create_kv_table_op_).
-                    txm->commit_ts_ = tx_op_failed_ts_;
+                    // The only rollback after the prepare log: a failure to
+                    // create the kv tables happens before it and writes no log
+                    // (create_kv_table_op_). The rollback still commits, at a
+                    // timestamp chosen under the commit-stage lock
+                    // (acquire_all_lock_op_), with the mark in its commit log
+                    // and its PostCommit.
+                    rolled_back_ = true;
+                    post_all_lock_op_.write_type_ = PostWriteType::Rollback;
 
                     txm->upsert_resp_->SetErrorCode(
                         TransactionExecution::ConvertCcError(err_code));
@@ -969,17 +869,8 @@ void UpsertTableIndexOp::Forward(TransactionExecution *txm)
                 }
                 else
                 {
-                    LOG(WARNING)
-                        << "Alter table index flush all old sk tuples failed "
-                        << "for table: " << table_key_.Name().StringView()
-                        << " with error message: "
-                        << flush_all_old_tuples_sk_op_.hd_result_.ErrorMsg()
-                        << ". Retry flush old sk operation, txn: "
-                        << txm->TxNumber();
-
-                    op_ = &flush_all_old_tuples_sk_op_;
-                    txm->PushOperation(&flush_all_old_tuples_sk_op_);
-                    txm->Process(flush_all_old_tuples_sk_op_);
+                    // After the prepare log: retried until it succeeds.
+                    RetryKvStep(txm, &flush_all_old_tuples_sk_op_);
                 }
             }
             else
@@ -1053,12 +944,12 @@ void UpsertTableIndexOp::Forward(TransactionExecution *txm)
         if (!is_last_finished_key_str_ &&
             (last_finished_end_key_.Type() == KeyType::PositiveInf))
         {
-            // Reach the end.
-            LOG(INFO) << "Alter Table Index transaction lock cluster config"
-                      << ", txn: " << txm->TxNumber();
-            op_ = &lock_cluster_config_op_;
-            txm->PushOperation(&lock_cluster_config_op_);
-            txm->Process(lock_cluster_config_op_);
+            // Reach the end: the commit-stage write locks.
+            LOG(INFO) << "Alter Table Index transaction post acquire all"
+                      << " write lock, txn: " << txm->TxNumber();
+            op_ = &acquire_all_lock_op_;
+            txm->PushOperation(&acquire_all_lock_op_);
+            txm->Process(acquire_all_lock_op_);
         }
         else
         {
@@ -1114,12 +1005,12 @@ void UpsertTableIndexOp::Forward(TransactionExecution *txm)
         if (!is_last_finished_key_str_ &&
             (last_finished_end_key_.Type() == KeyType::PositiveInf))
         {
-            // Reach the end.
-            LOG(INFO) << "Alter Table Index transaction lock cluster config"
-                      << ", txn: " << txm->TxNumber();
-            op_ = &lock_cluster_config_op_;
-            txm->PushOperation(&lock_cluster_config_op_);
-            txm->Process(lock_cluster_config_op_);
+            // Reach the end: the commit-stage write locks.
+            LOG(INFO) << "Alter Table Index transaction post acquire all"
+                      << " write lock, txn: " << txm->TxNumber();
+            op_ = &acquire_all_lock_op_;
+            txm->PushOperation(&acquire_all_lock_op_);
+            txm->Process(acquire_all_lock_op_);
         }
         else
         {
@@ -1196,6 +1087,23 @@ void UpsertTableIndexOp::Forward(TransactionExecution *txm)
         }
         else
         {
+            if (rolled_back_)
+            {
+                // The rollback commits above the index's own timestamp D,
+                // where the index appeared, and above every DML the lock
+                // drained: P = max(D + 1, last_vali_ts + 1, commit_ts + 1).
+                txm->commit_ts_ += 1;
+                for (size_t idx = 0; idx < acquire_all_lock_op_.upload_cnt_;
+                     ++idx)
+                {
+                    const AcquireAllResult &acq_all_res =
+                        acquire_all_lock_op_.hd_results_[idx].Value();
+                    txm->commit_ts_ =
+                        std::max(txm->commit_ts_,
+                                 std::max(acq_all_res.last_vali_ts_ + 1,
+                                          acq_all_res.commit_ts_ + 1));
+                }
+            }
             LOG(INFO) << "Alter Table Index transaction write commit log"
                       << ", txn: " << txm->TxNumber();
             op_ = &commit_log_op_;
@@ -1236,15 +1144,16 @@ void UpsertTableIndexOp::Forward(TransactionExecution *txm)
             kv_drop_index_op_.table_schema_ = catalog_rec_.DirtySchema();
             kv_drop_index_op_.alter_table_info_ = &alter_table_info_;
             kv_drop_index_op_.write_time_ = txm->commit_ts_;
-            txm->PushOperation(&kv_drop_index_op_);
-            txm->Process(kv_drop_index_op_);
+            StartKvStep(txm, kv_drop_index_op_);
         }
-        else if (op_type_ == OperationType::AddIndex &&
-                 txm->CommitTs() == tx_op_failed_ts_)
+        else if (op_type_ == OperationType::AddIndex && rolled_back_)
         {
-            // An add index commits with a failed timestamp only when the
-            // build broke a constraint (generate_sk_parallel_op_), after the
-            // dirty schema was installed.
+            // Crashes the node with the rollback's commit log written and its
+            // data store step not yet done, which recovery must roll forward.
+            ACTION_FAULT_INJECTOR("alter_table_index_crash_after_commit_log");
+            // An add index is rolled back only when the build broke a
+            // constraint (generate_sk_parallel_op_), after the dirty schema was
+            // installed.
             assert(txm->TxStatus() == TxnStatus::Recovering ||
                    generate_sk_parallel_op_.hd_result_.IsError());
             LOG(WARNING) << "Rollback Index transaction, txm: "
@@ -1270,22 +1179,11 @@ void UpsertTableIndexOp::Forward(TransactionExecution *txm)
                           ->index_add_count_,
                       kv_rollback_create_index_op_.alter_table_info_
                           ->index_drop_count_);
-            if (txm->TxStatus() != TxnStatus::Recovering)
-            {
-                // The dirty schema's version is the op's timestamp.
-                kv_rollback_create_index_op_.write_time_ =
-                    std::max(catalog_rec_.DirtySchema()->Version(),
-                             txm->commit_ts_bound_) +
-                    1;
-            }
-            else
-            {
-                kv_rollback_create_index_op_.write_time_ =
-                    static_cast<LocalCcHandler *>(txm->cc_handler_)
-                        ->GetTsBaseValue();
-            }
-            txm->PushOperation(&kv_rollback_create_index_op_);
-            txm->Process(kv_rollback_create_index_op_);
+            // The catalog row keeps the current schema, at the rollback's
+            // commit timestamp, which PostCommit installs in memory too. A
+            // recovered op has the same timestamp from the commit log.
+            kv_rollback_create_index_op_.write_time_ = txm->commit_ts_;
+            StartKvStep(txm, kv_rollback_create_index_op_);
         }
         else if (op_type_ == OperationType::AddIndex)
         {
@@ -1305,23 +1203,15 @@ void UpsertTableIndexOp::Forward(TransactionExecution *txm)
             kv_update_schema_image_op_.table_schema_ =
                 catalog_rec_.DirtySchema();
             kv_update_schema_image_op_.write_time_ = txm->commit_ts_;
-            txm->PushOperation(&kv_update_schema_image_op_);
-            txm->Process(kv_update_schema_image_op_);
+            StartKvStep(txm, kv_update_schema_image_op_);
         }
     }
     else if (op_ == &kv_drop_index_op_)
     {
         if (kv_drop_index_op_.hd_result_.IsError())
         {
-            if (txm->CheckLeaderTerm())
-            {
-                txm->PushOperation(&kv_drop_index_op_);
-                txm->Process(kv_drop_index_op_);
-            }
-            else
-            {
-                ForceToFinish(txm);
-            }
+            // After the commit log: retried until it succeeds.
+            RetryKvStep(txm, &kv_drop_index_op_);
         }
         else
         {
@@ -1370,15 +1260,8 @@ void UpsertTableIndexOp::Forward(TransactionExecution *txm)
     {
         if (kv_rollback_create_index_op_.hd_result_.IsError())
         {
-            if (txm->CheckLeaderTerm())
-            {
-                txm->PushOperation(&kv_rollback_create_index_op_);
-                txm->Process(kv_rollback_create_index_op_);
-            }
-            else
-            {
-                ForceToFinish(txm);
-            }
+            // After the commit log: retried until it succeeds.
+            RetryKvStep(txm, &kv_rollback_create_index_op_);
         }
         else
         {
@@ -1426,7 +1309,7 @@ void UpsertTableIndexOp::Forward(TransactionExecution *txm)
     else if (op_ == &kv_update_schema_image_op_)
     {
         bool write_failed = kv_update_schema_image_op_.hd_result_.IsError();
-        // Fails one write, then disarms itself, so that the retry must write.
+        // Fails one write, then disarms itself, so that a retry must write.
         CODE_FAULT_INJECTOR("alter_table_index_update_schema_image_fail", {
             LOG(INFO) << "FaultInject "
                          "alter_table_index_update_schema_image_fail, txn: "
@@ -1437,15 +1320,8 @@ void UpsertTableIndexOp::Forward(TransactionExecution *txm)
         });
         if (write_failed)
         {
-            if (txm->CheckLeaderTerm())
-            {
-                txm->PushOperation(&kv_update_schema_image_op_);
-                txm->Process(kv_update_schema_image_op_);
-            }
-            else
-            {
-                ForceToFinish(txm);
-            }
+            // After the commit log: retried until it succeeds.
+            RetryKvStep(txm, &kv_update_schema_image_op_);
         }
         else
         {
@@ -1459,6 +1335,17 @@ void UpsertTableIndexOp::Forward(TransactionExecution *txm)
             txm->Process(post_all_lock_op_);
         }
     }
+    else if (op_ == &kv_retry_wait_op_)
+    {
+        // The pause is over: run the failed step again.
+        if (!txm->CheckLeaderTerm())
+        {
+            ForceToFinish(txm);
+            return;
+        }
+        op_ = kv_retry_step_;
+        RunKvStepAgain(txm);
+    }
     else if (op_ == &post_all_lock_op_)
     {
         if (!txm->CheckLeaderTerm())
@@ -1471,17 +1358,11 @@ void UpsertTableIndexOp::Forward(TransactionExecution *txm)
             // The schema operation failed without flushing the prepare log.
             // Do not retry post-processing (release write intents) even if
             // it fails. Remaining write intents on the schema, if there are
-            // any, will be recovered by individual cc nodes separately.
-            txm->upsert_resp_->Finish(UpsertResult::Failed);
-
-            txm->state_stack_.pop_back();
-            assert(txm->state_stack_.empty());
-            LocalCcShards *local_cc_shards =
-                Sharder::Instance().GetLocalCcShards();
-            std::unique_lock<std::mutex> lk(
-                local_cc_shards->table_index_op_pool_mux_);
-            local_cc_shards->table_index_op_pool_.emplace_back(
-                std::move(txm->index_op_));
+            // any, will be recovered by individual cc nodes separately. The
+            // cluster config lock is released next, then the op ends without
+            // a clean log.
+            op_ = &unlock_cluster_config_op_;
+            StartUnlockClusterConfig(txm, unlock_cluster_config_op_);
         }
         else if (post_all_lock_op_.hd_result_.IsError())
         {
@@ -1534,14 +1415,82 @@ void UpsertTableIndexOp::Forward(TransactionExecution *txm)
             {
                 assert(post_all_lock_op_.write_type_ !=
                        PostWriteType::DowngradeLock);
-                // Flush kv failed, or it is recovering from a flush kv failure.
-                // This schema op has already been rolled back by now, only need
-                // to flush clean log here.
-                // Also, flush kv failure does not require lock upgrade(write
-                // intent to write lock). So the CcEntryAddr needs to be kept in
-                // rset in order to release the read lock when committing.
+                // The op failed before its prepare log (the kv tables or the
+                // prepare log itself) and took no write lock, so the
+                // CcEntryAddr stays in the read set, whose read lock the tx
+                // releases when it commits. Only the release of the cluster
+                // config lock and the clean log are left. A rolled-back op
+                // commits at a real timestamp under the write lock and takes
+                // the branch above.
             }
 
+            // The op's last post write all: the cluster config lock can go.
+            op_ = &unlock_cluster_config_op_;
+            StartUnlockClusterConfig(txm, unlock_cluster_config_op_);
+        }
+    }
+    else if (op_ == &unlock_cluster_config_op_)
+    {
+        if (unlock_cluster_config_op_.hd_result_.IsError())
+        {
+            if (txm->CheckLeaderTerm())
+            {
+                const CcEntryAddr *cluster_config_addr = nullptr;
+                const auto &meta_rset = txm->rw_set_.MetaDataReadSet();
+                for (const auto &[cce_addr, read_entry_pair] : meta_rset)
+                {
+                    if (read_entry_pair.second == cluster_config_ccm_name_sv)
+                    {
+                        cluster_config_addr = &cce_addr;
+                        break;
+                    }
+                }
+
+                if (cluster_config_addr)
+                {
+                    DLOG(INFO)
+                        << "Alter Table Index transaction unlock cluster "
+                           "config "
+                           "lock failed, txn: "
+                        << txm->TxNumber() << ", error code: "
+                        << (int)
+                               unlock_cluster_config_op_.hd_result_.ErrorCode()
+                        << ", error message: "
+                        << unlock_cluster_config_op_.hd_result_.ErrorMsg()
+                        << ", cluster config addr term"
+                        << cluster_config_addr->Term()
+                        << ", cluster config addr node group id: "
+                        << cluster_config_addr->NodeGroupId()
+                        << ", node group term: "
+                        << Sharder::Instance().LeaderTerm(
+                               cluster_config_addr->NodeGroupId());
+                }
+                // Releasing a local read lock should never fail
+                assert(false);
+            }
+            else
+            {
+                ForceToFinish(txm);
+                return;
+            }
+        }
+        if (acquire_all_intent_op_.fail_cnt_.load(std::memory_order_relaxed) >
+            0)
+        {
+            // The write intents were never acquired: no log to clean.
+            txm->upsert_resp_->Finish(UpsertResult::Failed);
+
+            txm->state_stack_.pop_back();
+            assert(txm->state_stack_.empty());
+            LocalCcShards *local_cc_shards =
+                Sharder::Instance().GetLocalCcShards();
+            std::unique_lock<std::mutex> lk(
+                local_cc_shards->table_index_op_pool_mux_);
+            local_cc_shards->table_index_op_pool_.emplace_back(
+                std::move(txm->index_op_));
+        }
+        else
+        {
             LOG(INFO) << "Alter Table Index transaction write clean log"
                       << ", txn: " << txm->TxNumber();
             op_ = &clean_log_op_;
@@ -1573,11 +1522,10 @@ void UpsertTableIndexOp::Forward(TransactionExecution *txm)
                 LOG(INFO) << "FaultInject  alter_schema_term_changed";
                 is_force_finished_ = true;
             });
-            if (txm->commit_ts_ == tx_op_failed_ts_)
+            if (txm->commit_ts_ == tx_op_failed_ts_ || rolled_back_)
             {
-                // - Flush kv error.
-                // - Fail to flush prepare_log.
-                // - Violate constraints.
+                // - Fail to create the kv tables or flush prepare_log.
+                // - Violate constraints (rolled back).
                 txm->upsert_resp_->Finish(UpsertResult::Failed);
             }
             else
@@ -1675,6 +1623,7 @@ void UpsertTableIndexOp::Reset(const std::string_view table_name_str,
     kv_drop_index_op_.Reset();
     kv_rollback_create_index_op_.Reset();
     kv_update_schema_image_op_.Reset();
+    ResetKvRetry(txm);
     clean_log_op_.Reset();
 
     clean_ccm_op_.Clear();
@@ -1756,6 +1705,7 @@ void UpsertTableIndexOp::Reset(const std::string_view table_name_str,
     post_all_lock_op_.ResetHandlerTxm(txm);
     clean_log_op_.ResetHandlerTxm(txm);
     is_force_finished_ = false;
+    rolled_back_ = false;
 
     new_indexes_name_.clear();
     new_indexes_name_.reserve(alter_table_info_.index_add_count_);
@@ -1859,9 +1809,11 @@ void UpsertTableIndexOp::FillCommitLogRequest(TransactionExecution *txm)
     ::txlog::WriteLogRequest *commit_log_rec =
         commit_log_op_.log_closure_.LogRequest().mutable_write_log_request();
 
-    assert(txm->commit_ts_ != tx_op_failed_ts_ ||
-           generate_sk_parallel_op_.hd_result_.IsError());
+    assert(txm->commit_ts_ != tx_op_failed_ts_);
     commit_log_rec->set_commit_timestamp(txm->commit_ts_);
+    commit_log_rec->mutable_log_content()
+        ->mutable_schema_log()
+        ->set_rolled_back(rolled_back_);
 }
 
 void UpsertTableIndexOp::CreateKvTables(TransactionExecution *txm)
@@ -1932,6 +1884,61 @@ void UpsertTableIndexOp::DropKvTables(TransactionExecution *txm)
     op_ = &drop_kv_table_op_;
     txm->PushOperation(&drop_kv_table_op_);
     txm->Process(drop_kv_table_op_);
+}
+
+void UpsertTableIndexOp::MarkFailed(TransactionExecution *txm)
+{
+    txm->commit_ts_ = tx_op_failed_ts_;
+    post_all_lock_op_.write_type_ = PostWriteType::Rollback;
+}
+
+void UpsertTableIndexOp::RetryKvStep(TransactionExecution *txm,
+                                     TransactionOperation *step)
+{
+    if (!txm->CheckLeaderTerm())
+    {
+        ForceToFinish(txm);
+        return;
+    }
+    if (step == &update_sequence_table_op_)
+    {
+        ArmKvRetryWait(txm,
+                       step,
+                       "sequence table update",
+                       update_sequence_table_op_.hd_result_.ErrorMsg());
+    }
+    else if (step == &flush_all_old_tuples_sk_op_)
+    {
+        ArmKvRetryWait(txm,
+                       step,
+                       "index data flush",
+                       flush_all_old_tuples_sk_op_.hd_result_.ErrorMsg());
+    }
+    else if (step == &kv_drop_index_op_)
+    {
+        ArmKvRetryWait(txm,
+                       step,
+                       "index kv table drop",
+                       kv_drop_index_op_.hd_result_.ErrorMsg());
+    }
+    else if (step == &kv_rollback_create_index_op_)
+    {
+        ArmKvRetryWait(txm,
+                       step,
+                       "rolled-back index's kv table drop",
+                       kv_rollback_create_index_op_.hd_result_.ErrorMsg());
+    }
+    else
+    {
+        assert(step == &kv_update_schema_image_op_);
+        ArmKvRetryWait(txm,
+                       step,
+                       "catalog row write",
+                       kv_update_schema_image_op_.hd_result_.ErrorMsg());
+    }
+    op_ = &kv_retry_wait_op_;
+    txm->PushOperation(&kv_retry_wait_op_);
+    txm->Process(kv_retry_wait_op_);
 }
 
 void UpsertTableIndexOp::WritePrepareLog(TransactionExecution *txm)

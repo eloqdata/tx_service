@@ -79,7 +79,9 @@ struct UpsertTableIndexOp : public SchemaOp
     /**
      * @brief Acquire read lock on local cluster config ccmap to block cluster
      * config update during upsert table op. We cannot allow config update
-     * between acquire write all and post write all.
+     * between acquire write all and post write all. The op's first step; it
+     * holds the lock until its last post write all
+     * (unlock_cluster_config_op_).
      */
     ReadLocalOperation lock_cluster_config_op_;
     /**
@@ -122,7 +124,8 @@ struct UpsertTableIndexOp : public SchemaOp
      */
     PostWriteAllOp downgrade_all_lock_to_intent_op_;
     /**
-     * @brief Release cluster config read lock after post write all.
+     * @brief Release cluster config read lock after post write all: after the
+     * op's last one, post_all_lock_op_, before the clean log.
      */
     PostReadOperation unlock_cluster_config_op_;
     /**
@@ -216,6 +219,20 @@ struct UpsertTableIndexOp : public SchemaOp
     };
     bool is_last_finished_key_str_;
 
+    /**
+     * @brief Whether the ADD INDEX was rolled back: its build broke a
+     * constraint after the prepare log.
+     *
+     * The op still commits, at its commit-stage timestamp, and the commit log
+     * carries this mark instead of the zero commit timestamp that used to mean
+     * the same: the index's kv tables are dropped, the catalog row keeps the
+     * table's current schema at the commit timestamp, and the second phase, a
+     * Rollback at that timestamp, drops the index's cc maps and keeps the
+     * current schema instead of promoting the dirty one. Recovery reads it
+     * from the commit log.
+     */
+    bool rolled_back_{false};
+
 public:
     void RecoveryIndexesMultiKeyAttr(const TableSchema *dirty_schema);
 
@@ -253,6 +270,30 @@ private:
      * @param txm The transaction running this operation.
      */
     void WritePrepareLog(TransactionExecution *txm);
+
+    /**
+     * @brief Marks the op failed: commit timestamp 0, and a Rollback second
+     * phase that discards whatever dirty schema the op installed and leaves
+     * the catalog entry's version alone.
+     *
+     * @param txm The coordinating tx.
+     */
+    void MarkFailed(TransactionExecution *txm);
+
+    /**
+     * @brief Runs a data store step that failed after the prepare log again,
+     * KvRetryInterval() later (ArmKvRetryWait); ends the op if the node is no
+     * longer the leader.
+     *
+     * A failure before the prepare log (create_kv_table_op_) is not retried:
+     * the op fails.
+     *
+     * @param txm The coordinating tx.
+     * @param step The step to run again: update_sequence_table_op_,
+     * flush_all_old_tuples_sk_op_, kv_drop_index_op_,
+     * kv_rollback_create_index_op_ or kv_update_schema_image_op_.
+     */
+    void RetryKvStep(TransactionExecution *txm, TransactionOperation *step);
 
     // Flush pk or sk data from ccmap into data store.
     void FlushDataIntoDataStore(const TableName &table_name,

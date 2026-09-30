@@ -204,6 +204,12 @@ page's first key, with sentinel `neg_inf_page_`/`pos_inf_page_` and sentinel ent
   `last_vali_ts_ = max(shard.last_read_ts_, lock_ts)`; `ACQUIRE_LOCK_BLOCKED` returns false
   (request parked, remote requests send an ack first); other conflicts set an error (OCC
   back-off-and-retry).
+- **AcquireAllCc** (a key's write intent or lock on every core of every node group: schema,
+  range and bucket ops): success returns `last_vali_ts_ = max(shard.last_read_ts_, Now())`, so a
+  schema op's timestamps are above its catalog write lock's grant, and so above any checkpoint
+  taken while it holds the lock. A catalog reader reaches `last_read_ts_` on release: a regular read
+  lock through `PostReadCc`, EloqKV's fast catalog read (`ReadCatalog`) through
+  `LocalCcHandler::ReleaseCatalogRead`, which publishes the reader's commit ts first.
 - **ReadCc**: locate the key; deduce lock via `DeduceLockType`; on a memory miss with persistent
   data, install a read intent and `FetchRecord` (request re-executes after backfill); MVCC
   snapshot reads serve from `MvccGet` and may fetch archives from the store.

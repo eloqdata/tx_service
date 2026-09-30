@@ -182,7 +182,24 @@ public:
                 int64_t ng_term,
                 TxNumber tx_number) const;
 
-    bool ReleaseCatalogRead(NonBlockingLock *lock, TxNumber tx_number) const;
+    /**
+     * @brief Releases a catalog read lock taken on the fast path (ReadCatalog),
+     * on this handler's shard.
+     *
+     * A committed tx first publishes its commit ts in the shard's last read ts,
+     * as PostReadCc does for a regular read lock: a schema op that takes the
+     * catalog entry's write lock after this reader then commits above it
+     * (AcquireAllCc's last_vali_ts_). Without it, a TRUNCATE could commit
+     * below a write it erases, and replay would bring the write back.
+     *
+     * @param lock The catalog entry's lock.
+     * @param tx_number The reader.
+     * @param commit_ts The reader's commit ts; 0 if it has none.
+     * @return true.
+     */
+    bool ReleaseCatalogRead(NonBlockingLock *lock,
+                            TxNumber tx_number,
+                            uint64_t commit_ts) const;
 
     bool ReadLocal(const TableName &table_name,
                    const std::string &key_str,

@@ -633,6 +633,16 @@ public:
         const std::string &catalog_image,
         uint64_t commit_ts);
 
+    /**
+     * @brief Builds a table's schema object from its catalog image, through
+     * the table engine's CatalogFactory::CreateTableSchema, which documents
+     * how @p version applies to the tables the image records no version for.
+     *
+     * @param table_name The base table.
+     * @param catalog_image The table's catalog image.
+     * @param version The schema's version.
+     * @return The schema; null for an empty image.
+     */
     TableSchema::uptr CreateTableSchemaFromImage(
         const TableName &table_name,
         const std::string &catalog_image,
