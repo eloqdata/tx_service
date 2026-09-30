@@ -587,6 +587,15 @@ enum class PostWriteType
     // Update dirty value. Takes no effect on lock. An optional medium stage
     // between PrepareCommit and PostCommit.
     UpdateDirty,
+    /**
+     * Releases the write lock/intent of a tx that failed. If the tx installed
+     * a dirty value, the request's payload is the value to keep, which the cc
+     * map supplies; otherwise the request has none and the entry keeps its
+     * value. A commit ts above 0 moves the entry's commit ts to it (a schema op
+     * rolled back at its commit-stage timestamp); 0 leaves it alone. Every
+     * post-write-all at commit ts 0 is a Rollback or a DowngradeLock.
+     */
+    Rollback,
 };
 
 enum class PostReadType

@@ -757,6 +757,7 @@ enum CommitType {
     Commit = 2;
 	DowngradeLock = 3;
     UpdateDirty = 4;
+    Rollback = 5;
 }
 
 enum PostReadType {

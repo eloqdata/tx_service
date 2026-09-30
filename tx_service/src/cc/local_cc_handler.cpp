@@ -720,9 +720,15 @@ txservice::LocalCcHandler::ReadCatalog(const TableName &table_name,
 }
 
 bool txservice::LocalCcHandler::ReleaseCatalogRead(NonBlockingLock *lock,
-                                                   TxNumber tx_number) const
+                                                   TxNumber tx_number,
+                                                   uint64_t commit_ts) const
 {
     CcShard *shard_ = cc_shards_.cc_shards_[thd_id_].get();
+    if (commit_ts != 0)
+    {
+        // Before the release, which may resume a writer blocked on the lock.
+        shard_->UpdateLastReadTs(commit_ts);
+    }
     return lock->ReleaseReadLockFast(shard_, tx_number);
 }
 

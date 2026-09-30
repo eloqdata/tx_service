@@ -255,8 +255,13 @@ void txservice::remote::RemoteCcHandler::PostWriteAll(
     post_write_all->set_commit_ts(commit_ts);
 
     post_write_all->clear_record();
+    // A catalog PostCommit or Rollback carries no record: the receiver's
+    // catalog cc map fills one of its own from the node's catalog entry.
     if (commit_ts > 0 && op_type != OperationType::Delete &&
-        op_type != OperationType::DropTable)
+        op_type != OperationType::DropTable &&
+        !(table_name.Type() == TableType::Catalog &&
+          (post_write_type == PostWriteType::PostCommit ||
+           post_write_type == PostWriteType::Rollback)))
     {
         // The commit ts is 0, if the post-write request is used to clear the
         // write lock when the tx aborts.

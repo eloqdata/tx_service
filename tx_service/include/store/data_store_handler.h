@@ -312,9 +312,12 @@ public:
      * @brief Creates a table's kv table, and nothing else: no catalog row.
      *
      * The counterpart of DropKvTable. Add index calls it for each index being
-     * added before its prepare log, so that the index's kv table exists in
-     * every state recovery can reach; the new schema reaches the kv catalog
-     * only after the commit log. Synchronous and idempotent. The default suits
+     * added before its prepare log, and CREATE TABLE for the table and each
+     * of its indexes after its prepare log, so that the kv tables exist in
+     * every state recovery can reach from a commit log that commits the op;
+     * the new schema reaches the kv catalog only after the commit log.
+     * Synchronous and idempotent: a retry, or a later create of a table whose
+     * kv tables a failed op left behind, creates them again. The default suits
      * a store that keeps no per-table state.
      *
      * @param table_name The table to create.

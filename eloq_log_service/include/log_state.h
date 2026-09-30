@@ -250,13 +250,25 @@ public:
                             schema_op.new_catalog_blob());
                     }
 
-                    // Encounter flush error after write prepare log. Need to
-                    // set commit_ts_ to 0(previously set by prepare_log)
-                    if (commit_ts == 0 &&
-                        new_stage == SchemaOpMessage_Stage::
+                    // The commit log's timestamp replaces the prepare log's:
+                    // 0 for an op that failed after its prepare log, else the
+                    // commit timestamp, which CREATE, DROP and TRUNCATE TABLE
+                    // re-assign at the commit stage. An op recovered from its
+                    // commit log then resumes with the timestamp it committed
+                    // at.
+                    if (new_stage == SchemaOpMessage_Stage::
                                          SchemaOpMessage_Stage_CommitSchema)
                     {
-                        catalog_op.SetCommitTs(0);
+                        catalog_op.SetCommitTs(commit_ts);
+                        // A rolled-back add index commits at a real timestamp
+                        // too; recovery reads the mark instead.
+                        if (schema_op.rolled_back())
+                        {
+                            catalog_op
+                                .GetSchemaOpMsg(schema_op.table_name_str(),
+                                                schema_op.table_type())
+                                ->set_rolled_back(true);
+                        }
                     }
 
                     // Schema logs at CleanSchema stage will be kept in LogState

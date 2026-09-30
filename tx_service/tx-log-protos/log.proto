@@ -70,6 +70,10 @@ message SchemaOpMessage {
   }
   LastKeyType last_key_type = 13;
   bytes last_key_value = 14;
+  // Commit log of an ADD INDEX whose build broke a constraint: the op commits
+  // at its commit-stage timestamp and drops the index instead of installing
+  // it. Replaces the zero commit timestamp that used to mean the same.
+  bool rolled_back = 15;
 }
 
 message UpdateCatalogMessage {

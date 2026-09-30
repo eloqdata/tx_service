@@ -1403,6 +1403,9 @@ std::ostream &operator<<(std::ostream &outs, txservice::PostWriteType r)
     case txservice::PostWriteType::PostCommit:
         pwt = "PostCommit";
         break;
+    case txservice::PostWriteType::Rollback:
+        pwt = "Rollback";
+        break;
     default:
         pwt = "[Unknown Post Write Type]";
     };

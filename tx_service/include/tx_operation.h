@@ -21,6 +21,8 @@
  */
 #pragma once
 
+#include <boost/context/continuation.hpp>
+#include <chrono>
 #include <cstdint>
 #include <map>
 #include <memory>
@@ -43,6 +45,7 @@
 #include "tx_key.h"
 #include "tx_operation_result.h"
 #include "tx_record.h"
+#include "tx_req_result.h"
 #include "type.h"
 
 namespace txservice
@@ -720,7 +723,8 @@ struct SchemaOp : public TransactionOperation
              const std::string &current_image,
              const std::string &dirty_image,
              uint64_t schema_ts,
-             OperationType op_type);
+             OperationType op_type,
+             TransactionExecution *txm);
 
     void FillPrepareLogRequestCommon(TransactionExecution *txm,
                                      WriteToLogOp &prepare_log_op);
@@ -729,14 +733,177 @@ struct SchemaOp : public TransactionOperation
     void FillCleanLogRequestCommon(TransactionExecution *txm,
                                    WriteToLogOp &clean_log_op);
 
+    /**
+     * @brief Replaces the op's schema images, as the engine built them, with
+     * the images of schema objects built at known timestamps.
+     *
+     * An engine builds a DDL's new image before the DDL has a timestamp, so it
+     * may record a table the DDL creates without one (0, the unknown
+     * timestamp). Once the prepare stage has chosen the op's timestamp, and
+     * before anything is logged or installed, the op builds the new schema at
+     * that timestamp and the current schema at its version and keeps their
+     * images, in which the engine records every base and index table's real
+     * timestamp. Every log
+     * record, catalog row and copy sent to another node then carries each
+     * table's own version, whatever version a node later loads it at.
+     * CatalogFactory::CreateTableSchema states what each engine must do for
+     * this.
+     *
+     * @param dirty_version The op's prepare-stage timestamp: the version of a
+     * table the op creates.
+     */
+    void ResolveSchemaImages(uint64_t dirty_version);
+
     CatalogKey table_key_;  // string owner
     CatalogRecord catalog_rec_;
     std::string image_str_{""};
     std::string dirty_image_str_{""};
     uint64_t curr_schema_ts_;
     OperationType op_type_{OperationType::Insert};
+
+    /**
+     * @brief Sets the pause before a failed data store step that must succeed
+     * runs again: the ddl_kv_retry_interval_seconds setting. Called at
+     * start-up, before any schema op runs.
+     *
+     * @param interval The pause, at least one second.
+     */
+    static void SetKvRetryInterval(std::chrono::seconds interval)
+    {
+        assert(interval.count() > 0);
+        kv_retry_interval_ = interval;
+    }
+
+    /**
+     * @return The pause before a failed data store step that must succeed runs
+     * again.
+     */
+    static std::chrono::seconds KvRetryInterval()
+    {
+        return kv_retry_interval_;
+    }
+
+    /**
+     * @brief Waits KvRetryInterval() before a failed data store step runs
+     * again (ArmKvRetryWait).
+     */
+    AsyncOp<Void> kv_retry_wait_op_;
+    /** @brief The step to run again once kv_retry_wait_op_ ends. */
+    TransactionOperation *kv_retry_step_{nullptr};
+    /** @brief Failed attempts of kv_retry_step_, for the log. */
+    uint32_t kv_retry_failures_{0};
+
+protected:
+    /**
+     * @brief Starts a data store step as a single attempt.
+     *
+     * A DsUpsertTableOp retries on its own unless it is pushed with retry
+     * count 0; the schema op alone decides whether a failed step runs again.
+     *
+     * @param txm The coordinating tx.
+     * @param step The step.
+     */
+    void StartKvStep(TransactionExecution *txm, DsUpsertTableOp &step);
+
+    /**
+     * @brief Arms kv_retry_wait_op_ to wait KvRetryInterval() before a failed
+     * data store step runs again, and logs a warning.
+     *
+     * A data store step that fails before the op's point of no return, the
+     * commit log of UpsertTableOp or the prepare log of UpsertTableIndexOp, is
+     * not retried: the op rolls back. TRUNCATE TABLE, which never rolls back
+     * after its prepare log, retries the steps it runs before its commit log.
+     * A step that fails after the point of no return must succeed:
+     * the op retries it indefinitely, KvRetryInterval() apart, while its node
+     * is the leader, holding the table's catalog lock and keeping the client
+     * waiting. A node that loses leadership stops, and whoever recovers the op
+     * retries the step the same way. The caller makes kv_retry_wait_op_ its
+     * current stage, and once the wait ends runs the step again
+     * (RunKvStepAgain).
+     *
+     * @param txm The coordinating tx.
+     * @param step The failed step.
+     * @param step_name The step, for the log.
+     * @param error The step's error message, for the log.
+     */
+    void ArmKvRetryWait(TransactionExecution *txm,
+                        TransactionOperation *step,
+                        std::string_view step_name,
+                        const std::string &error);
+
+    /**
+     * @brief Runs kv_retry_step_ again, as a single attempt, once
+     * kv_retry_wait_op_ has ended.
+     *
+     * @param txm The coordinating tx.
+     */
+    void RunKvStepAgain(TransactionExecution *txm);
+
+    /**
+     * @brief Clears the retry state, when a pooled op is reused.
+     *
+     * @param txm The tx the op now runs in.
+     */
+    void ResetKvRetry(TransactionExecution *txm);
+
+    /**
+     * @brief Releases the cluster config read lock, which the op took at its
+     * first step, or which recovery took before resuming it
+     * (LocalCcShards::CreateSchemaRecoveryTx).
+     *
+     * A schema op holds the lock until its last post write all, so that each
+     * step it sends to all node groups reaches the same node groups: a cluster
+     * scale waits for it.
+     *
+     * @param txm The coordinating tx.
+     * @param unlock_op The op's unlock step, which the caller made its current
+     * stage.
+     */
+    void StartUnlockClusterConfig(TransactionExecution *txm,
+                                  PostReadOperation &unlock_op);
+
+private:
+    /**
+     * @brief The pause before a failed data store step that must succeed runs
+     * again (KvRetryInterval()); 30 seconds unless the
+     * ddl_kv_retry_interval_seconds setting says otherwise.
+     */
+    static inline std::chrono::seconds kv_retry_interval_{30};
 };
 
+/**
+ * @brief The schema op of CREATE, DROP, TRUNCATE and ALTER TABLE
+ * (tx_upsert_table_operation.cpp).
+ *
+ * The op runs as a stackful coroutine (boost::context) on a stack of its own:
+ * the first Forward() starts it and every later one resumes it, once the step
+ * it awaits has finished. Its path is written out flat, in three segments cut
+ * at the two log records, which are where recovery resumes an op:
+ * RunUntilPrepareLog (the cluster config read lock, the write intents, the
+ * prepare-stage timestamp, the prepare log), RunUntilCommitLog (the dirty
+ * schema's install, the op's own steps before its commit log, the write
+ * locks, the commit log) and RunAfterCommitLog (the op's own steps after its
+ * commit log, then RunEnding: the post write all, the release of the cluster
+ * config lock, which the op holds until then, and the clean log).
+ *
+ * Return values. A function on the coroutine's path that returns bool says
+ * whether the op proceeds to its following steps:
+ * - true: the function's steps are done, and the caller proceeds. That is not
+ *   always success: a create that gave up, or an ALTER whose catalog row write
+ *   failed, proceeds once its commit log at timestamp 0 is written, and its
+ *   ending rolls it back.
+ * - false: the op has ended and must not proceed: it failed at or before its
+ *   prepare log and was rolled back, or the node lost its leadership
+ *   (ForceFinish). result_ is set. Every caller returns at once, up to Run(),
+ *   and Forward() calls Finish().
+ *
+ * KvWriteFailed and PrepareSequenceStep run no step and are outside this rule:
+ * they return whether the write failed and whether the table has sequences.
+ *
+ * @warning The coroutine may be resumed on another thread than the one that
+ * suspended it, so its body must not access thread_local state directly: an
+ * address computed before a suspension would be the old thread's.
+ */
 struct UpsertTableOp : public SchemaOp
 {
     UpsertTableOp() = delete;
@@ -759,14 +926,28 @@ struct UpsertTableOp : public SchemaOp
     void Forward(TransactionExecution *txm) override;
 
     /**
-     * @brief The current stage of this multi-stage schema operation.
-     *
+     * @brief Where a recovered op resumes: after the log record it was
+     * recovered from.
+     */
+    enum class Entry
+    {
+        kStart,            ///< A new op, from its first step.
+        kAfterPrepareLog,  ///< Recovered from its prepare log.
+        kAfterCommitLog    ///< Recovered from its commit log.
+    };
+
+    /**
+     * @brief The step the coroutine awaits, for tracing.
      */
     TransactionOperation *op_{nullptr};
+    /** @brief Where Run() starts; recovery sets it. */
+    Entry entry_{Entry::kStart};
     /**
      * @brief Acquire read lock on local cluster config ccmap to block cluster
      * config update during upsert table op. We cannot allow config update
-     * between acquire write all and post write all.
+     * between acquire write all and post write all. The first step of every
+     * op, which holds the lock until its last post write all
+     * (unlock_cluster_config_op_).
      */
     ReadLocalOperation lock_cluster_config_op_;
     /**
@@ -788,18 +969,66 @@ struct UpsertTableOp : public SchemaOp
      */
     PostWriteAllOp post_all_intent_op_;
     /**
-     * @brief Release cluster config read lock after post write all.
+     * @brief Release cluster config read lock after post write all: after the
+     * op's last one, post_all_lock_op_, before the clean log.
      */
     PostReadOperation unlock_cluster_config_op_;
     /**
-     * @brief Creates/deletes the data store table and persists/removes the
-     * binary representation of the catalog in the data store.
+     * @brief CREATE TABLE only: creates the kv tables of the new table and of
+     * its indexes, after the prepare log and under the write intent.
      *
+     * On the data store service that is each range-partitioned table's
+     * initial range record, at the prepare-stage timestamp, which the
+     * in-memory ranges match (PostCommit). It precedes the commit log, so a
+     * failure is not retried: the create gives up (AbandonCreate). Every state
+     * recovery can reach from a commit log that commits the create has the kv
+     * tables.
+     */
+    AsyncOp<Void> create_kv_table_op_;
+    /**
+     * @brief CREATE TABLE only: once the create gives up, removes what
+     * create_kv_table_op_ created, before the commit log that fails the op.
+     *
+     * The store's drop-table path, over the dirty schema at the prepare-stage
+     * timestamp: the kv tables, their ranges and the catalog key, which the
+     * create has not written. One attempt: a failure leaves them orphaned,
+     * which is accepted: they hold no data, no schema refers to them, and a
+     * later create of the same name writes them again (CreateKvTable is
+     * idempotent).
+     */
+    DsUpsertTableOp drop_kv_table_op_;
+    /**
+     * @brief TRUNCATE TABLE on shared storage: drops the base table's kv table
+     * (DataStoreHandler::DropKvTable), under the write locks and before the
+     * commit log, retried until it succeeds; the catalog row follows after the
+     * commit log (upsert_kv_table_op_).
+     *
+     * That is all the store's own truncate (UpsertTable, TruncateTable) does to
+     * an EloqKV table's data, the only kind a truncate runs on: EloqKV tables
+     * are hash partitioned, have no indexes and keep no statistics, so there
+     * are no ranges or statistics to reset. The kv table keeps its name: the
+     * store keeps no per-table state.
+     */
+    AsyncOp<Void> truncate_kv_table_op_;
+    /**
+     * @brief Writes the data store side of the op; each run names its store
+     * operation (AwaitUpsertKvTable).
+     *
+     * CREATE TABLE and, on shared storage, TRUNCATE TABLE: the catalog row
+     * only, after the commit log, at the commit-stage timestamp (op type
+     * Update). DROP TABLE: deletes the kv tables, after the commit log. Those
+     * are retried until they succeed (AwaitKvRetry). ALTER TABLE (Update): the
+     * new catalog row, before the commit log, rolled back on failure.
      */
     DsUpsertTableOp upsert_kv_table_op_;
     /**
      * @brief Update the sequence table for range id info and the auto increment
      * value if this table has auto_increment column.
+     *
+     * CREATE TABLE runs it before the commit log, and gives up on a failure
+     * (AbandonCreate). TRUNCATE TABLE on shared storage runs it before the
+     * commit log and DROP TABLE after it, both retrying it until it succeeds
+     * (AwaitKvRetry).
      */
     AsyncOp<Void> update_sequence_table_op_;
     /**
@@ -807,6 +1036,12 @@ struct UpsertTableOp : public SchemaOp
      *
      */
     AcquireAllOp acquire_all_lock_op_;
+    /**
+     * @brief Downgrades the write locks to write intents when
+     * acquire_all_lock_op_ deadlocks, so that transactions waiting to read the
+     * catalog go ahead; the op then acquires the write locks again.
+     */
+    PostWriteAllOp downgrade_lock_op_;
     /**
      * @brief Flushes the commit log to the log service. The commit log confirms
      * that the data store operation succeeds and does not need redo upon
@@ -816,8 +1051,7 @@ struct UpsertTableOp : public SchemaOp
     WriteToLogOp commit_log_op_;
 
     /**
-     * @brief Clean ccmap on all node groups
-     *
+     * @brief Empties the table's cc maps on all node groups (CleanCcm).
      */
     KickoutDataAllOp clean_ccm_op_;
 
@@ -838,10 +1072,447 @@ struct UpsertTableOp : public SchemaOp
     ClusterConfigRecord cluster_conf_rec_;
 
 private:
+    /** @brief The state of the op's coroutine. */
+    enum class CoroStatus
+    {
+        kEmpty,    ///< Not started.
+        kRunning,  ///< Started, suspended while a step runs.
+        kFinished  ///< Its body has returned; Forward() ends the op.
+    };
+
+    /**
+     * @brief The coroutine's stack size: sub-operations can run cc requests
+     * inline and send remote requests on it.
+     */
+    static constexpr size_t kCoroStackSize = 128 * 1024;
+
     void FillPrepareLogRequest(TransactionExecution *txm);
     void FillCommitLogRequest(TransactionExecution *txm);
-    void ForceToFinish(TransactionExecution *txm);
-    // Due to term or other error, called ForceToFinish to terminate this
+
+    /**
+     * @brief Suspends the coroutine, back to Forward(), until a step has
+     * finished; returns at once if it already has.
+     *
+     * A step has finished once it has left the tx's stack: its PostProcess
+     * pops it, and the tx then forwards the op again, which resumes the
+     * coroutine. A step can finish inside its Process() already, and then the
+     * coroutine goes on without a suspension.
+     *
+     * @param txm The coordinating tx.
+     * @param op The step, which the caller pushed and started.
+     */
+    void SuspendUntilDone(TransactionExecution *txm,
+                          const TransactionOperation &op);
+
+    /**
+     * @brief Runs a sub-operation to its end: pushes and processes it, then
+     * suspends until it has finished and left the tx's stack
+     * (SuspendUntilDone).
+     *
+     * @note A retry awaits the same sub-operation again without resetting it:
+     * the tx's Process() for every sub-operation this op runs resets its
+     * result (and, for an AcquireAllOp, each result and the counters) before
+     * sending anything. The exception is the unlock step, a PostReadOperation,
+     * which StartUnlockClusterConfig resets and which never runs twice.
+     *
+     * @param txm The coordinating tx.
+     * @param op The sub-operation.
+     */
+    template <typename OpT>
+    void Await(TransactionExecution *txm, OpT &op);
+
+    /**
+     * @brief Await(txm, op) with a fault point: while the fault point is
+     * armed, the sub-operation fails with fault_error without running.
+     *
+     * A sub-operation failed this way is neither pushed nor awaited: its
+     * hd_result_ holds the error when the call returns, and the coroutine goes
+     * on without a suspension.
+     *
+     * For a sub-operation whose result is a single hd_result_; one without
+     * such a result does not compile with it.
+     *
+     * @param txm The coordinating tx.
+     * @param op The sub-operation.
+     * @param fault_point The fault point's name.
+     * @param fault_error The error the sub-operation reports when it fires.
+     */
+    template <typename OpT>
+    void Await(TransactionExecution *txm,
+               OpT &op,
+               const char *fault_point,
+               CcErrorCode fault_error);
+
+    /**
+     * @brief Runs a data store step to its end as a single attempt
+     * (StartKvStep).
+     *
+     * @param txm The coordinating tx.
+     * @param step The step.
+     */
+    void AwaitKvStep(TransactionExecution *txm, DsUpsertTableOp &step);
+
+    /**
+     * @brief The coroutine's body: the op's path, entered at entry_.
+     *
+     * @param txm The coordinating tx.
+     */
+    void Run(TransactionExecution *txm);
+
+    /**
+     * @brief The first segment, the same for every op: the cluster config read
+     * lock, the write intents, the prepare-stage timestamp D, the prepare log.
+     * A failure rolls the op back.
+     *
+     * @param txm The coordinating tx.
+     * @return true if the prepare log is written: the op proceeds to
+     * RunUntilCommitLog. false if the op has ended and must not proceed: it
+     * failed at or before the prepare log and was rolled back, or the node
+     * lost its leadership.
+     */
+    bool RunUntilPrepareLog(TransactionExecution *txm);
+
+    /**
+     * @brief The second segment: the dirty schema's install, then the op's own
+     * steps up to and including its commit log.
+     *
+     * @param txm The coordinating tx.
+     * @return true if the commit log is written: the op proceeds to
+     * RunAfterCommitLog, also when the commit log, at timestamp 0, rolls a
+     * failed op back. false if the op has ended and must not proceed: the node
+     * lost its leadership.
+     */
+    bool RunUntilCommitLog(TransactionExecution *txm);
+
+    /**
+     * @brief CREATE TABLE before its commit log: the kv tables, the sequence
+     * table, the write locks at the commit-stage timestamp P, the commit log.
+     * A data store failure gives the create up (AbandonCreate).
+     *
+     * @param txm The coordinating tx.
+     * @return true if the commit log is written, at the commit timestamp or,
+     * for a create that gave up, at timestamp 0: the op proceeds either way.
+     * false if the op has ended and must not proceed: the node lost its
+     * leadership.
+     */
+    bool CreateUntilCommitLog(TransactionExecution *txm);
+
+    /**
+     * @brief DROP TABLE before its commit log: the write locks at the
+     * commit-stage timestamp P, the commit log.
+     *
+     * @param txm The coordinating tx.
+     * @return true if the commit log is written: the op proceeds.
+     * false if the op has ended and must not proceed: the node lost its
+     * leadership.
+     */
+    bool DropUntilCommitLog(TransactionExecution *txm);
+
+    /**
+     * @brief TRUNCATE TABLE before its commit log: the write locks at the
+     * commit-stage timestamp P, on shared storage the table's data, each step
+     * retried until it succeeds, then the commit log.
+     *
+     * On shared storage the data is the cc maps (CleanCcm), then the kv table
+     * (truncate_kv_table_op_), then the sequences' reset; the catalog row waits
+     * for the commit log (TruncateAfterCommitLog). A participant that recovers
+     * from the commit log, and takes writes into the emptied table, then finds
+     * no later step that wipes them. Without shared storage every step comes
+     * after the commit log, as each node group truncates its own store: one
+     * that recovers from the commit log truncates its store in the replay,
+     * before it takes writes, and the coordinator's later request skips it.
+     *
+     * @param txm The coordinating tx.
+     * @return true if the commit log is written: the op proceeds.
+     * false if the op has ended and must not proceed: the node lost its
+     * leadership.
+     */
+    bool TruncateUntilCommitLog(TransactionExecution *txm);
+
+    /**
+     * @brief ALTER TABLE before its commit log: the new catalog row, the write
+     * locks, the commit log. A failed catalog row write rolls the op back with
+     * a commit log at timestamp 0.
+     *
+     * @param txm The coordinating tx.
+     * @return true if the commit log is written, at the commit timestamp or,
+     * after a failed catalog row write, at timestamp 0: the op proceeds either
+     * way. false if the op has ended and must not proceed: the node lost its
+     * leadership.
+     */
+    bool AlterUntilCommitLog(TransactionExecution *txm);
+
+    /**
+     * @brief The third segment: the op's own steps after its commit log, then
+     * RunEnding.
+     *
+     * @param txm The coordinating tx.
+     */
+    void RunAfterCommitLog(TransactionExecution *txm);
+
+    /**
+     * @brief CREATE TABLE after its commit log: the catalog row, retried until
+     * it is written; nothing for a create that gave up.
+     *
+     * @param txm The coordinating tx.
+     * @return true if the catalog row is written, or the create gave up and
+     * has none to write: the op proceeds to RunEnding.
+     * false if the op has ended and must not proceed: the node lost its
+     * leadership.
+     */
+    bool CreateAfterCommitLog(TransactionExecution *txm);
+
+    /**
+     * @brief DROP TABLE after its commit log: the kv table's deletion and the
+     * sequences' deletion, each retried until it succeeds, then the cc maps'
+     * emptying (CleanCcm), which PostCommit follows by dropping them.
+     *
+     * @param txm The coordinating tx.
+     * @return true if the kv table and the sequences are gone and the cc maps
+     * are empty: the op proceeds to RunEnding. false if the op has ended and
+     * must not proceed: the node lost its leadership.
+     */
+    bool DropAfterCommitLog(TransactionExecution *txm);
+
+    /**
+     * @brief TRUNCATE TABLE after its commit log: on shared storage, the
+     * catalog row at the commit timestamp, retried until it is written; without
+     * shared storage, each node group empties its cc maps and truncates its own
+     * store, catalog row included (CleanCcm).
+     *
+     * @param txm The coordinating tx.
+     * @return true if the catalog row is written, or the node groups truncated
+     * their stores: the op proceeds to RunEnding.
+     * false if the op has ended and must not proceed: the node lost its
+     * leadership.
+     */
+    bool TruncateAfterCommitLog(TransactionExecution *txm);
+
+    /**
+     * @brief The ending every op shares: the post write all (PostCommit, or
+     * Rollback for an op that failed), the release of the cluster config lock,
+     * the clean log; then sets result_.
+     *
+     * @param txm The coordinating tx.
+     */
+    void RunEnding(TransactionExecution *txm);
+
+    /**
+     * @brief Upgrades the write intents to write locks on every node group,
+     * retried until held; a deadlock first downgrades the locks
+     * (downgrade_lock_op_).
+     *
+     * @param txm The coordinating tx.
+     * @return true if the write locks are held: the op proceeds.
+     * false if the op has ended and must not proceed: the node lost its
+     * leadership.
+     */
+    bool AcquireWriteLocks(TransactionExecution *txm);
+
+    /**
+     * @brief Writes the commit log at the op's commit timestamp, 0 for an op
+     * that failed, retried until it is written.
+     *
+     * @param txm The coordinating tx.
+     * @return true if the commit log is written: the op proceeds.
+     * false if the op has ended and must not proceed: the node lost its
+     * leadership.
+     */
+    bool WriteCommitLog(TransactionExecution *txm);
+
+    /**
+     * @brief Runs post_all_lock_op_: PostCommit, or Rollback for an op that
+     * failed.
+     *
+     * @param txm The coordinating tx.
+     * @param retry Whether to retry a failed attempt until one succeeds; if
+     * false, one attempt, whatever its outcome.
+     * @return true if the post write all has run: it succeeded, or, with
+     * retry false, it was attempted; the op proceeds.
+     * false if the op has ended and must not proceed: the node lost its
+     * leadership.
+     */
+    bool RunPostWriteAll(TransactionExecution *txm, bool retry);
+
+    /**
+     * @brief Releases the cluster config read lock, after the op's last post
+     * write all.
+     *
+     * @param txm The coordinating tx.
+     * @return true if the lock is released: the op proceeds.
+     * false if the op has ended and must not proceed: the node lost its
+     * leadership.
+     */
+    bool ReleaseClusterConfig(TransactionExecution *txm);
+
+    /**
+     * @brief Runs upsert_kv_table_op_ once over the current and dirty schema,
+     * at the op's commit timestamp.
+     *
+     * @param txm The coordinating tx.
+     * @param op_type What the store does: Update writes the catalog row only
+     * (CREATE and TRUNCATE TABLE after their commit log, ALTER TABLE);
+     * DropTable deletes the kv tables, their ranges and statistics and the
+     * catalog row.
+     */
+    void AwaitUpsertKvTable(TransactionExecution *txm, OperationType op_type);
+
+    /**
+     * @brief Whether upsert_kv_table_op_ failed, counting the
+     * upsert_table_kv_write_fail fault point.
+     *
+     * @param txm The coordinating tx, for the log.
+     * @return true if the write failed.
+     */
+    bool KvWriteFailed(TransactionExecution *txm);
+
+    /**
+     * @brief Waits KvRetryInterval() before a data store step that failed
+     * after the commit log runs again, and logs a warning (ArmKvRetryWait).
+     *
+     * @param txm The coordinating tx.
+     * @param step The failed step.
+     * @param step_name The step, for the log.
+     * @param error The step's error message, for the log.
+     * @return true if the pause is over: the caller runs the step again.
+     * false if the op has ended and must not proceed: the node lost its
+     * leadership.
+     */
+    bool AwaitKvRetry(TransactionExecution *txm,
+                      TransactionOperation *step,
+                      std::string_view step_name,
+                      const std::string &error);
+
+    /**
+     * @brief Sets update_sequence_table_op_'s work if the table has sequences.
+     *
+     * @return false if the table has none, so the step is skipped.
+     */
+    bool PrepareSequenceStep();
+
+    /**
+     * @brief Sets truncate_kv_table_op_'s work: drops the base table's kv
+     * table, which keeps its name.
+     *
+     * @param txm The coordinating tx, for the log.
+     */
+    void PrepareTruncateKvTable(TransactionExecution *txm);
+
+    /**
+     * @brief Sets create_kv_table_op_'s work: creates the kv tables of the new
+     * table and of its indexes, at the op's prepare-stage timestamp.
+     *
+     * @param txm The coordinating tx.
+     */
+    void PrepareCreateKvTables(TransactionExecution *txm);
+
+    /**
+     * @brief Empties the table's cc maps on every node group
+     * (clean_ccm_op_), retried until it succeeds.
+     *
+     * Each core frees a map's pages 32 at a time and yields between batches
+     * (CcShard::CleanCcmPages). For DROP TABLE, PostCommit then drops the
+     * emptied maps: a full map would free all its pages inside that one
+     * post-write request, which cannot yield, stalling the core. For TRUNCATE
+     * TABLE, whose maps stay, this is what empties them; without shared
+     * storage, core 0 of each node group also truncates its own kv table in
+     * the same request.
+     *
+     * @param txm The coordinating tx.
+     * @param base_table_only Whether to clean only the base table: a truncate
+     * without shared storage, whose node groups truncate their kv tables as
+     * part of it.
+     * @return true if the cc maps are cleaned: the op proceeds.
+     * false if the op has ended and must not proceed: the node lost its
+     * leadership.
+     */
+    bool CleanCcm(TransactionExecution *txm, bool base_table_only);
+
+    /**
+     * @brief Re-assigns the commit timestamp after the commit-stage write lock:
+     * P = max(the prepare-stage timestamp, the lock results' last_vali_ts + 1
+     * and commit_ts + 1).
+     *
+     * For CREATE, DROP and TRUNCATE TABLE, whose prepare stage holds only a
+     * write intent: DML of the old table can commit after the prepare stage,
+     * and the checkpoint can pass its timestamp. Under the lock, P is above
+     * every DML the lock drained and above the checkpoint, so the commit log,
+     * the DDL record and PostCommit all carry a timestamp that orders the op
+     * after the old table's writes and before the new table's.
+     *
+     * @param txm The coordinating tx.
+     */
+    void AssignCommitStageTs(TransactionExecution *txm);
+
+    /**
+     * @brief Gives up a CREATE TABLE whose kv tables or sequence table update
+     * failed, before its commit log: marks the op failed and removes the kv
+     * tables it created.
+     *
+     * The op has only a prepare log, so it may still fail, as it did before
+     * the prepare log: drop_kv_table_op_ removes whatever was created, once,
+     * then the caller writes a commit log with commit timestamp 0, which fails
+     * the op; the ending rejects the dirty schema and releases the write
+     * intents, and the client gets DATA_STORE_ERROR. The failed op appends no
+     * DDL record. Sequence entries it wrote stay, which is harmless: a later
+     * create of the same name writes them again. A node that recovers the op
+     * from its prepare log tries its data store steps again, once.
+     *
+     * @param txm The coordinating tx.
+     * @return true if the kv tables' removal has run, whatever its outcome:
+     * the op proceeds to its commit log at timestamp 0. false if the op has
+     * ended and must not proceed: the node lost its leadership.
+     */
+    bool AbandonCreate(TransactionExecution *txm);
+
+    /**
+     * @brief Marks the op failed: commit timestamp 0, and a Rollback second
+     * phase that discards whatever dirty schema the op installed and leaves
+     * the catalog entry's version alone.
+     *
+     * @param txm The coordinating tx.
+     */
+    void MarkFailed(TransactionExecution *txm);
+
+    /**
+     * @brief Ends the op on the node's loss of leadership: whoever recovers it
+     * takes over.
+     *
+     * @param txm The coordinating tx.
+     */
+    void ForceFinish(TransactionExecution *txm);
+
+    /**
+     * @brief The result of an op that got to its clean log, or that ended on a
+     * loss of leadership: Failed for a failed op, Unverified for one forced
+     * to finish, Succeeded otherwise.
+     *
+     * @param txm The coordinating tx.
+     * @return The result.
+     */
+    UpsertResult CleanLogResult(TransactionExecution *txm);
+
+    /**
+     * @brief Ends the op once its coroutine has finished: answers the client
+     * with result_, pops the op and returns it to the pool. Runs on the tx's
+     * own stack, not the coroutine's, which the pooled op owns.
+     *
+     * @param txm The coordinating tx.
+     */
+    void Finish(TransactionExecution *txm);
+
+    /** @brief The coroutine, while it is suspended. */
+    boost::context::continuation coro_;
+    /**
+     * @brief Forward()'s side of the switch, which lives on the coroutine's
+     * stack: set from the coroutine's start until its body returns.
+     */
+    boost::context::continuation *caller_{nullptr};
+    CoroStatus coro_status_{CoroStatus::kEmpty};  ///< The coroutine's state.
+    /** @brief The op's result, which Finish() reports. */
+    UpsertResult result_{UpsertResult::Failed};
+
+    // Due to term or other error, called ForceFinish to terminate this
     // operation
     bool is_force_finished;
 };

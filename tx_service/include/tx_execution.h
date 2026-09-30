@@ -780,6 +780,7 @@ private:
     friend struct AcquireAllOp;
     friend struct PostWriteAllOp;
     friend struct CatalogAcquireAllOp;
+    friend struct SchemaOp;
     friend struct UpsertTableOp;
     friend struct DsUpsertTableOp;
     friend struct FlushUpdateTableOp;

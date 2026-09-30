@@ -40,6 +40,34 @@ TEST_CASE("CcEntry Init", "[cc-entry]")
     REQUIRE(entry.ArchiveRecordsCount() == 0);
 }
 
+TEST_CASE("VersionedPayload installs a payload copy-on-write", "[cc-entry]")
+{
+    CcEntry<CompositeKey<int>, CompositeRecord<int>, true, true> entry;
+    const CompositeRecord<int> first(1);
+    const CompositeRecord<int> second(2);
+    const CompositeRecord<int> third(3);
+
+    // No payload yet: the entry gets its own copy.
+    entry.payload_.SetCurrentPayload(&first);
+    CompositeRecord<int> *own = entry.payload_.cur_payload_.get();
+    REQUIRE(own != &first);
+    REQUIRE(std::get<0>(own->Tuple()) == 1);
+
+    // Held by the entry alone: the content is copied in place.
+    entry.payload_.SetCurrentPayload(&second);
+    REQUIRE(entry.payload_.cur_payload_.get() == own);
+    REQUIRE(std::get<0>(own->Tuple()) == 2);
+
+    // Held by a reader too: the entry gets a new payload, and the reader keeps
+    // the value it has.
+    std::shared_ptr<CompositeRecord<int>> reader =
+        entry.payload_.VersionedCurrentPayload();
+    entry.payload_.SetCurrentPayload(&third);
+    REQUIRE(entry.payload_.cur_payload_.get() != reader.get());
+    REQUIRE(std::get<0>(reader->Tuple()) == 2);
+    REQUIRE(std::get<0>(entry.payload_.cur_payload_->Tuple()) == 3);
+}
+
 TEST_CASE("CcEntry ArchiveBeforeUpdate", "[cc-entry]")
 {
     CcEntry<CompositeKey<int>, CompositeRecord<int>, true, true> entry;

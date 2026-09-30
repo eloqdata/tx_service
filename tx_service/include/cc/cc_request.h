@@ -6446,9 +6446,16 @@ private:
     // Target buckets to be cleaned if clean type is CleanBucketData.
     std::vector<uint16_t> *bucket_ids_{nullptr};
 
-    // 1. CleanForAlterTable: kickout all cce with commit ts <= clean_ts_
-    // 2. CleanForTruncateTable: the commit ts of UpsertTableOp. We truncate ccm
-    // only if catalog_entry->DirtyVersion() == clean_ts_.
+    /**
+     * @brief The timestamp that bounds a clean.
+     *
+     * CleanForAlterTable: kicks out every cc entry committed at or below it.
+     * CleanCcm (DROP and TRUNCATE TABLE, DROP INDEX): the schema op's commit
+     * ts, which for a table op is its commit-stage timestamp P, not the dirty
+     * schema's version D. A node group whose catalog entry's schema version is
+     * at or above it, or a cc map whose schema ts is, treats the request as
+     * outdated and skips it.
+     */
     uint64_t clean_ts_{0};
     // Only used by migration
     int32_t range_id_{INT32_MAX};

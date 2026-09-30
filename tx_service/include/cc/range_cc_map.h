@@ -440,16 +440,22 @@ public:
             return false;
         }
 
-        // When the commit ts is 0 or the commit type is DowngradeLock, the
-        // request commits nothing and only removes the write intents/locks
-        // acquired earlier.
-        if (req.CommitTs() == TransactionOperation::tx_op_failed_ts_ ||
-            req.CommitType() == PostWriteType::DowngradeLock)
+        if (req.CommitType() == PostWriteType::Rollback)
         {
+            // A split rolls back only if it fails before its prepare log, so
+            // it installed no dirty range: there is no value to keep, only the
+            // write locks to release. The request's record is the split's
+            // own, which must not be installed.
+            assert(req.CommitTs() == TransactionOperation::tx_op_failed_ts_);
+            req.SetDecodedPayload(nullptr);
             return TemplateCcMap<KeyT, RangeRecord, true, false>::Execute(req);
         }
-
-        assert(req.CommitType() != PostWriteType::DowngradeLock);
+        if (req.CommitType() == PostWriteType::DowngradeLock)
+        {
+            // Downgrades the write locks to write intents; commits nothing.
+            return TemplateCcMap<KeyT, RangeRecord, true, false>::Execute(req);
+        }
+        assert(req.CommitTs() > 0);
 
         // Prepare RangeRecord
         RangeRecord *upload_range_rec = nullptr;

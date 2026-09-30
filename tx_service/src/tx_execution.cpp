@@ -315,13 +315,16 @@ void TransactionExecution::ReleaseCatalogsRead()
     }
 
     uint64_t tx_number = TxNumber();
+    // The commit ts, if the tx got one: 0 from its start until then, and
+    // UINT64_MAX before its first start.
+    const uint64_t commit_ts = commit_ts_ == UINT64_MAX ? 0 : commit_ts_;
     for (auto &db_idx : locked_db_)
     {
         if (db_idx.first != nullptr)
         {
             LocalCcHandler *local_hd =
                 static_cast<LocalCcHandler *>(cc_handler_);
-            local_hd->ReleaseCatalogRead(db_idx.first, tx_number);
+            local_hd->ReleaseCatalogRead(db_idx.first, tx_number, commit_ts);
         }
     }
     locked_db_ = {};
@@ -1432,8 +1435,8 @@ void TransactionExecution::ProcessTxRequest(
                 ::txlog::SchemaOpMessage::Stage::
                     SchemaOpMessage_Stage_PrepareSchema)
             {
-                schema_op_->prepare_log_op_.hd_result_.SetFinished();
-                schema_op_->op_ = &schema_op_->prepare_log_op_;
+                // The op resumes after its prepare log.
+                schema_op_->entry_ = UpsertTableOp::Entry::kAfterPrepareLog;
             }
             else
             {
@@ -1467,8 +1470,13 @@ void TransactionExecution::ProcessTxRequest(
 
                 schema_op_->catalog_rec_.Set(
                     schema_ptr, dirty_schema_ptr, schema_ts);
-                schema_op_->commit_log_op_.hd_result_.SetFinished();
-                schema_op_->op_ = &schema_op_->commit_log_op_;
+                // A commit log that rolled the op back, at timestamp 0: its
+                // second phase discards the dirty schema.
+                schema_op_->post_all_lock_op_.write_type_ =
+                    schema_op_msg.rolled_back() ? PostWriteType::Rollback
+                                                : PostWriteType::PostCommit;
+                // The op resumes after its commit log.
+                schema_op_->entry_ = UpsertTableOp::Entry::kAfterCommitLog;
             }
 
             PushOperation(schema_op_.get());
@@ -1621,6 +1629,13 @@ void TransactionExecution::ProcessTxRequest(
 
                 // Recovery indexes_multikey_attr_.
                 index_op_->RecoveryIndexesMultiKeyAttr(dirty_schema_ptr.get());
+
+                // A rolled-back add index commits at a real timestamp; the
+                // commit log's mark tells the recovered op to drop the index.
+                index_op_->rolled_back_ = schema_op_msg.rolled_back();
+                index_op_->post_all_lock_op_.write_type_ =
+                    schema_op_msg.rolled_back() ? PostWriteType::Rollback
+                                                : PostWriteType::PostCommit;
 
                 index_op_->commit_log_op_.hd_result_.SetFinished();
                 index_op_->op_ = &index_op_->commit_log_op_;
@@ -5704,9 +5719,14 @@ void TransactionExecution::ReleaseMetaDataReadLock(
 void TransactionExecution::ReleaseCatalogWriteAll(
     CcHandlerResult<PostProcessResult> &catalog_post_all_hd_result)
 {
-    uint64_t commit_ts = TxStatus() == TxnStatus::Committed
-                             ? commit_ts_
-                             : TransactionOperation::tx_op_failed_ts_;
+    // A committed tx promotes the dirty schema its FlushUpdateTableOp
+    // installed; an aborted one prepared nothing on the catalog and rolls back
+    // at timestamp 0, only releasing its locks.
+    const bool committed = TxStatus() == TxnStatus::Committed;
+    const uint64_t commit_ts =
+        committed ? commit_ts_ : TransactionOperation::tx_op_failed_ts_;
+    const PostWriteType write_type =
+        committed ? PostWriteType::PostCommit : PostWriteType::Rollback;
 
     std::shared_ptr<std::set<uint32_t>> all_node_groups =
         Sharder::Instance().AllNodeGroups();
@@ -5733,7 +5753,7 @@ void TransactionExecution::ReleaseCatalogWriteAll(
                 commit_ts,
                 catalog_post_all_hd_result,
                 OperationType::Update,
-                PostWriteType::PostCommit,
+                write_type,
                 abort_if_oom);
         }
     }
@@ -5750,7 +5770,7 @@ void TransactionExecution::ReleaseCatalogWriteAll(
                                   commit_ts,
                                   catalog_post_all_hd_result,
                                   OperationType::Update,
-                                  PostWriteType::PostCommit,
+                                  write_type,
                                   abort_if_oom);
     }
 

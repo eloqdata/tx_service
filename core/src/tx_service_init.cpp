@@ -53,6 +53,11 @@ DEFINE_string(hm_bin_path,
 DEFINE_uint32(deadlock_check_interval_seconds,
               10,
               "Deadlock check interval in seconds");
+DEFINE_int32(ddl_kv_retry_interval_seconds,
+             30,
+             "Pause in seconds before a schema op runs a failed data store "
+             "step again after its point of no return; 0 is raised to 1, "
+             "negative values are rejected");
 DEFINE_bool(realtime_sampling,
             true,
             "Whether enable realtime sampling. If disable it, user may need "
@@ -170,6 +175,31 @@ bool DataSubstrate::InitializeTxService(const INIReader &config_reader)
                                        "deadlock_check_interval_seconds",
                                        FLAGS_deadlock_check_interval_seconds);
     txservice::DeadLockCheck::SetTimeInterval(deadlock_check_interval_seconds);
+
+    // Read signed, as checkpointer_interval is: a negative value stored as
+    // unsigned would stall a retrying schema op for decades.
+    int64_t ddl_kv_retry_interval_seconds =
+        !CheckCommandLineFlagIsDefault("ddl_kv_retry_interval_seconds")
+            ? FLAGS_ddl_kv_retry_interval_seconds
+            : config_reader.GetInteger("local",
+                                       "ddl_kv_retry_interval_seconds",
+                                       FLAGS_ddl_kv_retry_interval_seconds);
+    if (ddl_kv_retry_interval_seconds < 0)
+    {
+        LOG(ERROR) << "Invalid `ddl_kv_retry_interval_seconds` "
+                   << ddl_kv_retry_interval_seconds
+                   << ": it must not be negative";
+        return false;
+    }
+    if (ddl_kv_retry_interval_seconds == 0)
+    {
+        // Retries need a pause between them.
+        LOG(WARNING) << "`ddl_kv_retry_interval_seconds` 0 is below the "
+                        "minimum of 1 second; using 1";
+        ddl_kv_retry_interval_seconds = 1;
+    }
+    txservice::SchemaOp::SetKvRetryInterval(
+        std::chrono::seconds(ddl_kv_retry_interval_seconds));
 
     bool realtime_sampling =
         !CheckCommandLineFlagIsDefault("realtime_sampling")
