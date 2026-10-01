@@ -28,6 +28,8 @@
 #include <mutex>
 #include <random>
 #include <string>
+#include <utility>
+#include <vector>
 
 #include "fault_inject.h"
 #include "log.pb.h"
@@ -1786,7 +1788,6 @@ txlog::CdcScanResponse CdcScanOk(txlog::LogStateRocksDBCloudImpl &state,
     std::string error;
     CATCH_REQUIRE(state.CdcScan(request, &page, &error) ==
                   txlog::CdcScanStatus::Ok);
-    CATCH_REQUIRE(page.ddl_size() == 0);
     return page;
 }
 }  // namespace
@@ -2022,10 +2023,78 @@ std::vector<uint64_t> CloudWaitForScan(txlog::LogStateRocksDBCloudImpl &state,
 }
 }  // namespace
 
+namespace
+{
+/**
+ * @brief Polls until the cloud state serves CdcScan, which it does once its
+ * DB container of the current term is open and in sync, or a minute passes.
+ *
+ * @param state The cloud log state, leading.
+ * @return Whether it serves.
+ */
+bool CloudWaitInSync(txlog::LogStateRocksDBCloudImpl &state)
+{
+    txlog::CdcScanStatus status = txlog::CdcScanStatus::NotReady;
+    for (int i = 0; i < 600 && status == txlog::CdcScanStatus::NotReady; ++i)
+    {
+        txlog::CdcScanResponse page;
+        std::string error;
+        status = state.CdcScan(CdcScanFrom(0), &page, &error);
+        if (status == txlog::CdcScanStatus::NotReady)
+        {
+            usleep(100 * 1000);
+        }
+    }
+    return status == txlog::CdcScanStatus::Ok;
+}
+
+/**
+ * @brief Logs an EloqDoc schema op's prepare and commit logs.
+ *
+ * @param state The log state.
+ * @param txn The op's tx.
+ * @param op_type The txservice::OperationType.
+ * @param prepare_ts The prepare log's timestamp, the op's catalog version.
+ * @param commit_ts The commit log's timestamp.
+ */
+void CloudLogSchemaOp(txlog::LogStateRocksDBCloudImpl &state,
+                      uint64_t txn,
+                      uint32_t op_type,
+                      uint64_t prepare_ts,
+                      uint64_t commit_ts)
+{
+    txlog::SchemaOpMessage msg;
+    msg.set_table_name_str("db.cdc");
+    msg.set_table_engine(txlog::TableEngine::EloqDoc);
+    msg.set_table_type(txlog::CcTableType::Primary);
+    msg.mutable_table_op()->set_op_type(op_type);
+    msg.set_stage(txlog::SchemaOpMessage_Stage_PrepareSchema);
+    state.UpsertSchemaOp(txn, prepare_ts, msg);
+    msg.set_stage(txlog::SchemaOpMessage_Stage_CommitSchema);
+    state.UpsertSchemaOp(txn, commit_ts, msg);
+}
+
+/**
+ * @param page A scan page.
+ * @return (ddl_ts, txn) of its DDL records.
+ */
+std::vector<std::pair<uint64_t, uint64_t>> CloudDdlRows(
+    const txlog::CdcScanResponse &page)
+{
+    std::vector<std::pair<uint64_t, uint64_t>> out;
+    for (const txlog::CdcDdlRecord &record : page.ddl())
+    {
+        out.emplace_back(record.ddl_ts(), record.txn_number());
+    }
+    return out;
+}
+}  // namespace
+
 /**
  * The CDC retention floor in the cloud state's archive mover (Stage 1): it
  * moves out of the live DB only files wholly below the checkpoint less the
- * retention window, since CDC scans read the live DB and never the archive.
+ * retention window, since CDC scans read the live DB and never the archive,
+ * and trims the CDC DDL history by the same floor.
  */
 CATCH_TEST_CASE("test_cdc_retention_floor_cloud_state",
                 "[log_server_rocksdb_cloud_tests]")
@@ -2096,21 +2165,52 @@ CATCH_TEST_CASE("test_cdc_retention_floor_cloud_state",
     write_file(1'000'000);
     write_file(5'000'000);
     write_file(9'000'000);
+    // A DDL record beside each file (txservice::OperationType CreateTable).
+    for (uint64_t s : {1, 5, 9})
+    {
+        CloudLogSchemaOp(state, 50 + s, 5, s * 1'000'000 - 1, s * 1'000'000);
+    }
+    const auto history = [&]
+    {
+        std::vector<txlog::CdcDdlRecord> records;
+        state.CopyCdcDdlHistory({}, UINT64_MAX, &records);
+        std::vector<uint64_t> out;
+        for (const txlog::CdcDdlRecord &record : records)
+        {
+            out.push_back(record.ddl_ts());
+        }
+        return out;
+    };
+    const auto wait_for_history = [&](const std::vector<uint64_t> &expected)
+    {
+        std::vector<uint64_t> ts = history();
+        for (int i = 0; i < 600 && ts != expected; ++i)
+        {
+            usleep(100 * 1000);
+            ts = history();
+        }
+        return ts;
+    };
 
     // Checkpoint at 8 s. The floor is 8 s - 4 s = 4 s: A leaves the live DB,
-    // B stays.
+    // B stays, and so do the DDL records at 5 s and 9 s.
     state.UpdateCkptTs(0, 8'000'000);
     std::vector<uint64_t> ts =
         CloudWaitForScan(state,
                          [](const std::vector<uint64_t> &t)
                          { return !t.empty() && t.front() >= 5'000'000; });
     CATCH_REQUIRE(ts == std::vector<uint64_t>{5'000'000, 5'000'001, 5'000'002});
+    CATCH_REQUIRE(wait_for_history({5'000'000, 9'000'000}) ==
+                  std::vector<uint64_t>{5'000'000, 9'000'000});
 
-    // With no window the mover takes everything checkpointed, B included.
+    // With no window the mover takes everything checkpointed, B included, and
+    // the DDL record at 5 s.
     state.SetCdcRetentionSeconds(0);
     ts = CloudWaitForScan(
         state, [](const std::vector<uint64_t> &t) { return t.empty(); });
     CATCH_REQUIRE(ts.empty());
+    CATCH_REQUIRE(wait_for_history({9'000'000}) ==
+                  std::vector<uint64_t>{9'000'000});
 
     // C, above the checkpoint, survived. Widen the window before moving the
     // checkpoint past it, so no later mover run can take it.
@@ -2119,6 +2219,124 @@ CATCH_TEST_CASE("test_cdc_retention_floor_cloud_state",
     CATCH_REQUIRE(CloudScannedTimestamps(state) ==
                   std::vector<uint64_t>{9'000'000, 9'000'001, 9'000'002});
 
+    DropBucket(FLAGS_region, bucket_prefix, bucket_name);
+}
+
+/**
+ * The CDC DDL history on the cloud log state (plan A8): the scan merges it
+ * with the data log in the DB, and a replica that installs the leader's raft
+ * snapshot, which carries the history in a file of its own, serves the same
+ * records once it leads the next term and its DB container is in sync.
+ */
+CATCH_TEST_CASE("test_cdc_ddl_history_cloud_state",
+                "[log_server_rocksdb_cloud_tests]")
+{
+    LOG(INFO) << "TEST_CASE: test_cdc_ddl_history_cloud_state";
+    std::string bucket_name =
+        "rocksdb-cloud-tests" + std::to_string(time(NULL));
+    std::string bucket_prefix = "log-server-test-";
+    PrepareBucket(FLAGS_region, bucket_prefix, bucket_name);
+
+    txlog::RocksDBCloudConfig rocksdb_cloud_config;
+    PrepareCloudConfig(rocksdb_cloud_config, bucket_prefix, bucket_name);
+    rocksdb_cloud_config.object_path_ = "rocksdb_cloud";
+    rocksdb_cloud_config.log_retention_days_ = 90;
+    rocksdb_cloud_config.log_purger_starting_hour_ = 0;
+    rocksdb_cloud_config.log_purger_starting_minute_ = 0;
+    rocksdb_cloud_config.log_purger_starting_second_ = 1;
+    rocksdb_cloud_config.endpoint_url_ = TestS3Endpoint();
+
+    std::filesystem::path current_dir = std::filesystem::current_path();
+    std::string leader_path = current_dir / "log_server_rocksdb_tests/cdc2";
+    std::string follower_path = current_dir / "log_server_rocksdb_tests/cdc3";
+    PrepareLogStoragePaths({leader_path, follower_path});
+
+    // The leader of term 1.
+    std::atomic<int64_t> leader_term{1};
+    NoSnapshotObserver observer;
+    txlog::LogStateRocksDBCloudImpl leader(leader_path + "/rocksdb",
+                                           rocksdb_cloud_config,
+                                           leader_term,
+                                           &observer,
+                                           1000 * 1000,
+                                           8,
+                                           8,
+                                           64 * 1024 * 1024,
+                                           1);
+    CATCH_REQUIRE(leader.Start() == 0);
+    leader.UpdateNgTerm(0, 1, "127.0.0.1", 8888);
+    // A window keeps the DDL records the checkpoint passes.
+    leader.SetCdcRetentionSeconds(3600);
+    leader.AsyncStartCloudDB(0, 1);
+    CATCH_REQUIRE(CloudWaitInSync(leader));
+
+    for (uint64_t ts : {1000, 2000, 3000})
+    {
+        leader.AddLogItem(0, ts, ts, "d" + std::to_string(ts));
+    }
+    // A create committed at 2000, the timestamp of a data record, and an add
+    // index at 2500 (txservice::OperationType CreateTable and AddIndex).
+    CloudLogSchemaOp(leader, 50, 5, 1500, 2000);
+    CloudLogSchemaOp(leader, 51, 8, 2500, 2500);
+    leader.UpdateCkptTs(0, 2600);
+
+    const std::vector<std::pair<uint64_t, uint64_t>> ddl{{2000, 50},
+                                                         {2500, 51}};
+    txlog::CdcScanResponse page = CdcScanOk(leader, CdcScanFrom(0));
+    CATCH_REQUIRE(page.data_size() == 2);
+    CATCH_REQUIRE(CloudDdlRows(page) == ddl);
+    CATCH_REQUIRE(page.ddl(0).catalog_ts() == 1500);
+
+    // One record per page: at 2000 the data record comes first.
+    std::vector<std::pair<bool, uint64_t>> merged;
+    txlog::CdcScanRequest request = CdcScanFrom(0, 1);
+    for (int i = 0; i < 4; ++i)
+    {
+        page = CdcScanOk(leader, request);
+        CATCH_REQUIRE(page.data_size() + page.ddl_size() == 1);
+        merged.emplace_back(page.ddl_size() == 1,
+                            page.ddl_size() == 1 ? page.ddl(0).ddl_ts()
+                                                 : page.data(0).commit_ts());
+        request.set_continuation(page.continuation());
+    }
+    CATCH_REQUIRE(
+        merged ==
+        std::vector<std::pair<bool, uint64_t>>{
+            {false, 1000}, {false, 2000}, {true, 2000}, {true, 2500}});
+
+    // The leader's raft snapshot, then its step-down.
+    const std::string snapshot_dir = leader_path + "/snapshot";
+    std::filesystem::create_directories(snapshot_dir);
+    leader.BeginSnapshot();
+    const std::vector<std::string> files = leader.WriteSnapshot(snapshot_dir);
+    leader_term.store(-1);
+    leader.StopRocksDB();
+
+    // Another replica installs the snapshot and leads term 2, in a DB
+    // container of its own over the same cloud storage.
+    std::atomic<int64_t> follower_term{-1};
+    txlog::LogStateRocksDBCloudImpl follower(follower_path + "/rocksdb",
+                                             rocksdb_cloud_config,
+                                             follower_term,
+                                             &observer,
+                                             1000 * 1000,
+                                             8,
+                                             8,
+                                             64 * 1024 * 1024,
+                                             1);
+    follower.SetCdcRetentionSeconds(3600);
+    CATCH_REQUIRE(follower.ReadSnapshot(snapshot_dir, files) == 0);
+    follower_term.store(2);
+    follower.AsyncStartCloudDB(1, 2);
+    CATCH_REQUIRE(CloudWaitInSync(follower));
+    // The bound is rebuilt at the next checkpoint.
+    follower.UpdateCkptTs(0, 2601);
+    page = CdcScanOk(follower, CdcScanFrom(0));
+    CATCH_REQUIRE(page.data_size() == 2);
+    CATCH_REQUIRE(CloudDdlRows(page) == ddl);
+
+    follower_term.store(-1);
+    follower.StopRocksDB();
     DropBucket(FLAGS_region, bucket_prefix, bucket_name);
 }
 

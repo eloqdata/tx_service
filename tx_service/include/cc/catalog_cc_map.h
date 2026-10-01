@@ -835,25 +835,26 @@ public:
         case ::txlog::SchemaOpMessage_Stage::SchemaOpMessage_Stage_CommitSchema:
         {
             // Only the coordinator's node group restores a lock at the commit
-            // stage: its write lock on the schema, under which the recovered
+            // stage: a write intent on the schema, under which the recovered
             // op redoes its steps after the commit log, data store writes
             // among them, and which the op's PostCommit or Rollback releases.
-            // Without it a newer DDL could run first, and a late write of the
-            // recovered op would land after it. The condition is the one below
-            // that starts the recovered op. A participant installs the
-            // committed schema with no lock, and the op's later post writes,
-            // finding no lock of theirs, finish at once
-            // (Execute(PostWriteAllCc&)). A range split holding the catalog
-            // read lock leaves room only for a write intent, which still keeps
-            // a newer DDL out; docs/range-split-schema-op-recovery.md has why,
-            // and the deferred redesign that drops this weakening.
+            // The intent keeps a newer DDL on the table out until then, so no
+            // late write of the recovered op lands after one. It is not a
+            // write lock: the entry already holds the committed schema (step
+            // 1), so the op's effect is in place for everyone else, and a read
+            // of the entry must not wait for the op. The op's PostWriteAll
+            // needs the node group's leader term, which comes only once the
+            // log replay has finished, and that replay reads this entry to
+            // replay the table's data (CcShard::InitCcm, which fails on a
+            // write lock). The condition is the one below that starts the
+            // recovered op. A participant installs the committed schema with
+            // no lock, and the op's later post writes, finding no lock of
+            // theirs, finish at once (Execute(PostWriteAllCc&)).
             const uint32_t tx_node_id = (req.Txn() >> 32L) >> 10;
             if (tx_node_id == req.NodeGroupId() &&
                 Sharder::Instance().CandidateLeaderTerm(tx_node_id) >= 0)
             {
-                lock_type = req.RangeSplitting(base_table_name)
-                                ? LockType::WriteIntent
-                                : LockType::WriteLock;
+                lock_type = LockType::WriteIntent;
             }
             break;
         }

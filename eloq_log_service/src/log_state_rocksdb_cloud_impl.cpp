@@ -814,6 +814,13 @@ LogStateRocksDBCloudImpl::LogStateRocksDBCloudImpl(
 
             LogStateRocksDBCloudImpl::MoveFilesToArchive(
                 dbc_move_log, purge_ts, cloud_config_);
+            // The CDC DDL history goes with the data, by the same floor,
+            // whenever the mover could move files.
+            if (dbc_move_log != nullptr && dbc_move_log->IsOpened() &&
+                !cloud_config_.archive_object_path_.empty())
+            {
+                TrimCdcDdlHistory(purge_ts);
+            }
         });
 };
 
@@ -1184,8 +1191,13 @@ CdcScanStatus LogStateRocksDBCloudImpl::CdcScan(const CdcScanRequest &request,
 
     // The bound before the view of the store (RunCdcScan).
     const uint64_t arrival_complete_ts = MinCkptTs();
-    const CdcScanStatus status = CdcScanRocksDB(
-        dbc_copy->GetDBPtr(), arrival_complete_ts, request, response, error);
+    CdcDdlHistoryCursor ddl = CdcDdlStream();
+    const CdcScanStatus status = CdcScanRocksDB(dbc_copy->GetDBPtr(),
+                                                ddl,
+                                                arrival_complete_ts,
+                                                request,
+                                                response,
+                                                error);
     if (term_if_is_lg_leader_.load(std::memory_order_acquire) != term)
     {
         response->Clear();
@@ -1233,6 +1245,16 @@ int LogStateRocksDBCloudImpl::ReadSnapshot(
         auto file_path = snapshot_path + "/nginfo_and_catalog";
         std::ifstream is(file_path.c_str());
         LoadNgInfoAndCatalogOpsFrom(is);
+    }
+
+    // The CDC DDL history, absent from snapshots taken before it existed.
+    {
+        auto file_path = snapshot_path + "/" + kCdcDdlHistoryFile;
+        std::ifstream is(file_path.c_str(), std::ios::binary);
+        if (is.good() && !LoadCdcDdlHistoryFrom(is))
+        {
+            return -1;
+        }
     }
 
     // load in mem data log
@@ -1300,6 +1322,13 @@ std::vector<std::string> LogStateRocksDBCloudImpl::WriteSnapshot(
             }
         }
         res.emplace_back("nginfo_and_catalog");
+
+        {
+            auto path = snapshot_path + "/" + kCdcDdlHistoryFile;
+            std::ofstream os(path.c_str(), std::ios::binary);
+            WriteSnapshotCdcDdlHistoryTo(os);
+        }
+        res.emplace_back(kCdcDdlHistoryFile);
 
         {
             auto path = snapshot_path + "/in_mem_data_log";

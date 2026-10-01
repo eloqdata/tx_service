@@ -102,8 +102,8 @@ bool DecodeCdcContinuation(std::string_view bytes,
         return false;
     }
     // A data position is empty, a timestamp, or a real data key; a DDL
-    // position is empty, a timestamp, or a real DDL key, which is always
-    // longer than its timestamp prefix.
+    // position is empty, a timestamp, or a record's position (CdcDdlPosition),
+    // which is always longer than its timestamp prefix.
     const size_t data_len = decoded.data.size();
     if (data_len != 0 && data_len != kTimestampSize && data_len != kDataKeySize)
     {
@@ -126,6 +126,41 @@ std::string CdcTimestampPosition(uint64_t ts)
 {
     const uint64_t be = __builtin_bswap64(ts);
     return std::string(reinterpret_cast<const char *>(&be), sizeof(be));
+}
+
+std::string CdcDdlPosition(uint64_t ddl_ts, uint64_t txn)
+{
+    std::string position = CdcTimestampPosition(ddl_ts);
+    position.append(CdcTimestampPosition(txn));
+    return position;
+}
+
+void CdcDdlHistoryCursor::Seek(const std::string &after, uint64_t upper_ts)
+{
+    records_.clear();
+    pos_ = 0;
+    source_(after, upper_ts, &records_);
+    LoadKey();
+}
+
+void CdcDdlHistoryCursor::AppendTo(CdcScanResponse *response) const
+{
+    *response->add_ddl() = records_[pos_];
+}
+
+void CdcDdlHistoryCursor::Next()
+{
+    ++pos_;
+    LoadKey();
+}
+
+void CdcDdlHistoryCursor::LoadKey()
+{
+    if (Valid())
+    {
+        key_ = CdcDdlPosition(records_[pos_].ddl_ts(),
+                              records_[pos_].txn_number());
+    }
 }
 
 bool ParseCdcScanStart(const CdcScanRequest &request,
@@ -388,6 +423,7 @@ private:
 }  // namespace
 
 CdcScanStatus CdcScanRocksDB(rocksdb::DB *db,
+                             CdcStreamCursor &ddl,
                              uint64_t arrival_complete_ts,
                              const CdcScanRequest &request,
                              CdcScanResponse *response,
@@ -399,7 +435,6 @@ CdcScanStatus CdcScanRocksDB(rocksdb::DB *db,
         return CdcScanStatus::InvalidArgument;
     }
     RocksDBDataCursor data(db);
-    EmptyCdcStreamCursor ddl;
     if (!RunCdcScan(data,
                     ddl,
                     start,

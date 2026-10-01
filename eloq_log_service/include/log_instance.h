@@ -24,6 +24,7 @@
 #include <utility>
 #include <vector>
 
+#include "cdc_long_poll.h"
 #include "log.pb.h"
 #include "log_shipping_agent.h"
 #include "log_state.h"
@@ -331,19 +332,21 @@ public:
 
     /**
      * @brief Serves one page of the CDC log scan (cdc_scan.h) from this
-     * replica.
+     * replica, holding it first if the request asks to wait.
      *
-     * Only the leader serves. A follower, or a leader that lost its term
-     * while the log state built the page, answers NotLeader with the
-     * leader's address; a leader whose log state cannot serve a consistent
-     * view yet answers NotLeader with its own, so the caller backs off and
-     * retries here.
+     * A page with nothing emittable whose request has a wait_ms is parked
+     * (the long poll, cdc_long_poll.h) and served again once the group's
+     * arrival_complete_ts advances or the wait elapses; it is answered with
+     * NotLeader if this node stops leading meanwhile, and with the empty page
+     * if the client cancels. With cdc_scan_max_parked scans already parked,
+     * the empty page is answered at once.
      *
      * @param cntl The RPC controller; failures that no retry fixes fail the
      *        RPC through it.
      * @param request The scan request.
      * @param[out] response The page, or the NotLeader answer.
-     * @param done Run when the response is complete.
+     * @param done Run when the response is complete, possibly after this
+     *        returns.
      */
     void CdcScan(brpc::Controller *cntl,
                  const CdcScanRequest *request,
@@ -526,6 +529,7 @@ private:
 
     void on_shutdown() override
     {
+        cdc_long_poll_.CompleteAll(CdcLongPoll::Wake::kStop);
     }
 
     void on_error(const ::braft::Error &e) override
@@ -618,6 +622,26 @@ private:
     std::string LeaderAddress() const;
 
     /**
+     * @brief Serves one page of the CDC log scan at once.
+     *
+     * Only the leader serves. A follower, or a leader that lost its term
+     * while the log state built the page, answers NotLeader with the
+     * leader's address; a leader whose log state cannot serve a consistent
+     * view yet answers NotLeader with its own, so the caller backs off and
+     * retries here.
+     *
+     * @param cntl The RPC controller; failures that no retry fixes fail the
+     *        RPC through it.
+     * @param request The scan request.
+     * @param[out] response The page, or the NotLeader answer.
+     * @return True if the page holds no record and none is left below its
+     *         bound: nothing was emittable, and the scan may wait.
+     */
+    bool ServeCdcScan(brpc::Controller *cntl,
+                      const CdcScanRequest *request,
+                      CdcScanResponse *response);
+
+    /**
      * If this node is the group's latest leader.
      * Only available when all nodes in the raft group set
      * |raft_enable_leader_lease| flag to true.
@@ -632,6 +656,13 @@ private:
     void ProposeTaskAndWait(braft::Task &task,
                             const LogRequest *request,
                             LogResponse *response);
+
+    /**
+     * @brief The parked long-poll CdcScan requests. Declared last so that it
+     * is destroyed first: its destructor waits for the completions, which
+     * serve scans from the members above.
+     */
+    CdcLongPoll cdc_long_poll_;
 };
 
 /**

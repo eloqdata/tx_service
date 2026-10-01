@@ -5,6 +5,7 @@
 #include <butil/endpoint.h>
 #include <pthread.h>
 
+#include <algorithm>
 #include <atomic>
 #include <mutex>
 #include <string>
@@ -12,6 +13,14 @@
 
 #include "closure.h"
 #include "log_service.h"
+
+DEFINE_uint32(cdc_scan_max_parked,
+              1024,
+              "Most CdcScan long polls a log group holds at once; beyond it a "
+              "scan with nothing to return is answered at once");
+DEFINE_uint32(cdc_scan_max_park_ms,
+              60000,
+              "Longest a CdcScan long poll is held, whatever its wait_ms asks");
 
 namespace txlog
 {
@@ -355,7 +364,65 @@ void LogInstance::CdcScan(brpc::Controller *cntl,
                           google::protobuf::Closure *done)
 {
     brpc::ClosureGuard done_guard(done);
+    if (!ServeCdcScan(cntl, request, response) || request->wait_ms() == 0 ||
+        cdc_long_poll_.Size() >= FLAGS_cdc_scan_max_parked)
+    {
+        return;
+    }
 
+    // Nothing is emittable, and the caller may wait: hold the scan until
+    // something may have become emittable (cdc_long_poll.h). The completion
+    // runs once, on a bthread, and ends the call.
+    const uint64_t bound = response->arrival_complete_ts();
+    std::shared_ptr<CdcLongPoll::Request> parked = cdc_long_poll_.Prepare(
+        [this, cntl, request, response, done](CdcLongPoll::Wake why)
+        {
+            brpc::ClosureGuard done_guard(done);
+            switch (why)
+            {
+            case CdcLongPoll::Wake::kAdvance:
+            case CdcLongPoll::Wake::kDeadline:
+                response->Clear();
+                ServeCdcScan(cntl, request, response);
+                break;
+            case CdcLongPoll::Wake::kStop:
+                response->Clear();
+                response->set_status(CdcScanResponse::NotLeader);
+                response->set_redirect(LeaderAddress());
+                break;
+            case CdcLongPoll::Wake::kCancel:
+                // No one reads the answer; the empty page will do.
+                break;
+            }
+        });
+    done_guard.release();
+    // Before the park: once parked, the scan may complete and end the call at
+    // any moment, and the call must not be used after that.
+    cntl->NotifyOnCancel(brpc::NewCallback(&CdcLongPoll::Cancel, parked));
+    // Capped: the cancellation fires only when the connection breaks, not
+    // when the client gives up on the call, so an abandoned scan would hold
+    // its slot until the checkpoint next advances, however long it stalls.
+    cdc_long_poll_.Park(
+        parked, std::min(request->wait_ms(), FLAGS_cdc_scan_max_park_ms));
+
+    // A checkpoint applied, or a step-down, since the page was built found
+    // nothing parked to complete. Both update their state before they
+    // complete the parked scans, and the park took the same mutex after
+    // them, so these reads see their updates.
+    if (term_if_is_lg_leader_.load(butil::memory_order_acquire) < 0)
+    {
+        cdc_long_poll_.Complete(parked, CdcLongPoll::Wake::kStop);
+    }
+    else if (log_state_->MinCkptTs() > bound)
+    {
+        cdc_long_poll_.Complete(parked, CdcLongPoll::Wake::kAdvance);
+    }
+}
+
+bool LogInstance::ServeCdcScan(brpc::Controller *cntl,
+                               const CdcScanRequest *request,
+                               CdcScanResponse *response)
+{
     // A read needs no raft round: a replica that still believes it leads
     // but has been deposed serves only what it applied, and its own
     // min_ckpt_ts_ bounds that view, so the page stays exact, merely older.
@@ -363,17 +430,16 @@ void LogInstance::CdcScan(brpc::Controller *cntl,
     {
         response->set_status(CdcScanResponse::NotLeader);
         response->set_redirect(LeaderAddress());
-        return;
+        return false;
     }
 
-    // The long poll (wait_ms) is not implemented yet: every scan returns at
-    // once, which the protocol allows, since an empty page is a valid answer.
     std::string error;
     switch (log_state_->CdcScan(*request, response, &error))
     {
     case CdcScanStatus::Ok:
         response->set_status(CdcScanResponse::Success);
-        break;
+        return response->data_size() == 0 && response->ddl_size() == 0 &&
+               !response->has_more();
     case CdcScanStatus::NotReady:
         LOG(INFO) << "CdcScan on log group " << log_group_id_
                   << " is not ready: " << error;
@@ -399,6 +465,7 @@ void LogInstance::CdcScan(brpc::Controller *cntl,
         cntl->SetFailed(brpc::EINTERNAL, "%s", error.c_str());
         break;
     }
+    return false;
 }
 
 std::string LogInstance::LeaderAddress() const
@@ -1049,7 +1116,14 @@ LogInstance::ExecuteResult LogInstance::execute(const LogRequest *request,
 
             // log_state_->DeleteLogItems(node_id, timestamp);
 
+            const uint64_t arrival_complete_ts = log_state_->MinCkptTs();
             log_state_->UpdateCkptTs(node_group, timestamp);
+            // Only this advance can make a record emittable, so it completes
+            // the parked long polls, which then scan again.
+            if (log_state_->MinCkptTs() > arrival_complete_ts)
+            {
+                cdc_long_poll_.CompleteAll(CdcLongPoll::Wake::kAdvance);
+            }
         }
         if (response)
         {
@@ -1437,6 +1511,9 @@ void LogInstance::on_leader_stop(const butil::Status &status)
     std::unique_lock lk(log_replay_workers_mutex_);
 
     term_if_is_lg_leader_.store(-1, butil::memory_order_release);
+    // After the term is cleared: a scan parked later sees it and completes
+    // itself.
+    cdc_long_poll_.CompleteAll(CdcLongPoll::Wake::kStop);
     // clear log_replay_workers_, as new leader will reship on_leader_start
     log_replay_workers_.clear();
 
