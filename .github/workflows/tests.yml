@@ -186,13 +186,15 @@ jobs:
             echo "MinIO failed to start:" >&2; cat /tmp/minio.log >&2; exit 1
           fi
           # test_rocksdb_cloud_sst_reader exercises the rocksdb-cloud storage
-          # provider end-to-end against MinIO; test_cdc_scan_cloud_state and
-          # test_cdc_retention_floor_cloud_state the CDC log scan and the CDC
-          # retention floor on the cloud log state. The DBCloud::Open-based
-          # cases currently crash inside librocksdb-cloud (ABI/vtable mismatch)
-          # and are tracked separately, so they are excluded here.
+          # provider end-to-end against MinIO; test_cdc_scan_cloud_state,
+          # test_cdc_retention_floor_cloud_state and
+          # test_cdc_ddl_history_cloud_state the CDC log scan, the CDC
+          # retention floor and the CDC DDL history on the cloud log state.
+          # The DBCloud::Open-based cases currently crash inside
+          # librocksdb-cloud (ABI/vtable mismatch) and are tracked separately,
+          # so they are excluded here.
           cd eloq_log_service/bld_cloud
-          ./log_server_rocksdb_cloud_tests "test_rocksdb_cloud_sst_reader,test_cdc_scan_cloud_state,test_cdc_retention_floor_cloud_state" \
+          ./log_server_rocksdb_cloud_tests "test_rocksdb_cloud_sst_reader,test_cdc_scan_cloud_state,test_cdc_retention_floor_cloud_state,test_cdc_ddl_history_cloud_state" \
             --region us-east-1 \
             --aws_access_key_id minioadmin \
             --aws_secret_key minioadmin

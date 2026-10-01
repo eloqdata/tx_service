@@ -3,7 +3,7 @@
  * The CDC log scan behind the CdcScan RPC.
  *
  * CdcScan reads a log group's two timestamp-ordered streams, the committed
- * data records and the DDL store, as one sequence merged by timestamp, and
+ * data records and the DDL history, as one sequence merged by timestamp, and
  * returns it in pages. Its contract is in log.proto next to CdcScanRequest;
  * the pieces below implement it.
  *
@@ -19,8 +19,10 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <functional>
 #include <string>
 #include <string_view>
+#include <vector>
 
 #include "log.pb.h"
 
@@ -83,6 +85,22 @@ bool DecodeCdcContinuation(std::string_view bytes,
  * @return The big-endian `ts`.
  */
 std::string CdcTimestampPosition(uint64_t ts);
+
+/**
+ * @brief A DDL record's position in the DDL stream: its storage key.
+ *
+ * DDLs on one table hold its catalog write lock in turn, so they have distinct
+ * timestamps; records at one timestamp belong to different transactions, and
+ * the transaction number orders them stably. The position begins with the
+ * big-endian timestamp and is longer than eight bytes, as the continuation's
+ * timestamp form requires, and the runtime rebuilds it from a record's ddl_ts
+ * and txn_number.
+ *
+ * @param ddl_ts The record's stream timestamp.
+ * @param txn The schema op's transaction number.
+ * @return be64 ddl_ts ‖ be64 txn.
+ */
+std::string CdcDdlPosition(uint64_t ddl_ts, uint64_t txn);
 
 /**
  * @brief Where a scan starts.
@@ -164,19 +182,35 @@ public:
 };
 
 /**
- * @brief A stream with no records.
+ * @brief The DDL stream: a log state's in-memory DDL history.
  *
- * The DDL stream is one until the DDL store exists.
+ * Seek() has the source copy, under the log state's lock, every record
+ * strictly after the position and at or below the upper bound; the cursor then
+ * walks the copy. DDLs are rare, so the copy is small, and the history can
+ * change under the scan without affecting it.
  */
-class EmptyCdcStreamCursor final : public CdcStreamCursor
+class CdcDdlHistoryCursor final : public CdcStreamCursor
 {
 public:
-    void Seek(const std::string &, uint64_t) override
+    /**
+     * @brief Copies the history's records strictly after `after` whose
+     * ddl_ts is at most `upper_ts`, in position order.
+     */
+    using Source = std::function<void(const std::string &after,
+                                      uint64_t upper_ts,
+                                      std::vector<CdcDdlRecord> *records)>;
+
+    /**
+     * @param source Where Seek() copies the records from.
+     */
+    explicit CdcDdlHistoryCursor(Source source) : source_(std::move(source))
     {
     }
+
+    void Seek(const std::string &after, uint64_t upper_ts) override;
     bool Valid() const override
     {
-        return false;
+        return pos_ < records_.size();
     }
     bool Ok() const override
     {
@@ -188,22 +222,27 @@ public:
     }
     uint64_t Timestamp() const override
     {
-        return 0;
+        return records_[pos_].ddl_ts();
     }
     std::string_view Key() const override
     {
-        return {};
+        return key_;
     }
     size_t ByteSize() const override
     {
-        return 0;
+        return records_[pos_].ByteSizeLong();
     }
-    void AppendTo(CdcScanResponse *) const override
-    {
-    }
-    void Next() override
-    {
-    }
+    void AppendTo(CdcScanResponse *response) const override;
+    void Next() override;
+
+private:
+    /** @brief Sets key_ to the current record's position, if there is one. */
+    void LoadKey();
+
+    Source source_;                      ///< The history's copy function.
+    std::vector<CdcDdlRecord> records_;  ///< The copy Seek() took.
+    size_t pos_{0};                      ///< The current record's index.
+    std::string key_;                    ///< The current record's position.
 };
 
 /**
@@ -251,11 +290,11 @@ enum struct CdcScanStatus
 /**
  * @brief Runs a whole scan against a RocksDB-backed log state.
  *
- * The DDL stream is empty until the DDL store exists. The page's `status` is
- * left to the caller.
+ * The page's `status` is left to the caller.
  *
  * @param db The log state's data stream: an open database that outlives the
  *        call.
+ * @param ddl The log state's DDL stream, positioned by the scan.
  * @param arrival_complete_ts Subject to the read-order rule of RunCdcScan.
  * @param request The scan request.
  * @param[out] response The page.
@@ -263,6 +302,7 @@ enum struct CdcScanStatus
  * @return Ok, InvalidArgument for a malformed continuation, or StorageError.
  */
 CdcScanStatus CdcScanRocksDB(rocksdb::DB *db,
+                             CdcStreamCursor &ddl,
                              uint64_t arrival_complete_ts,
                              const CdcScanRequest &request,
                              CdcScanResponse *response,

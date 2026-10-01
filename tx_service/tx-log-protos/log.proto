@@ -494,7 +494,7 @@ message GetLogGroupConfigResponse {
 // Change data capture (docs/cdc-change-stream.md in the EloqDoc repo, §4.1).
 //
 // CdcScan reads a log group's two timestamp-ordered streams -- committed data records and the
-// DDL store -- as one merged sequence, so that a caller pulling from every group can order
+// DDL history -- as one merged sequence, so that a caller pulling from every group can order
 // events across the cluster. It returns records as stored; the logger decodes nothing.
 //
 // The merged order is by timestamp, and at one timestamp every data record precedes every DDL
@@ -509,11 +509,12 @@ message GetLogGroupConfigResponse {
 // resumes, strictly after it in the store's bytewise key order, and takes one of three shapes:
 //   - empty: the stream has returned nothing and starts at the beginning of complete history;
 //   - 8 bytes, a big-endian timestamp: the stream has returned nothing since a scan began at
-//     from_ts = that timestamp. Every storage key starts with its big-endian timestamp and is
-//     longer, so this sorts before each key at that timestamp and after each key below it;
-//   - a storage key the stream returned: for the data stream a data CF key,
-//     bswap64(commit_ts) | bswap32(ng) | bswap64(txn); for the DDL stream a DDL store key,
-//     (ddl_ts, namespace, class, key).
+//     from_ts = that timestamp. Every key starts with its big-endian timestamp and is longer, so
+//     this sorts before each key at that timestamp and after each key below it;
+//   - the key of a record the stream returned: for the data stream its data CF key,
+//     bswap64(commit_ts) | bswap32(ng) | bswap64(txn); for the DDL stream its position in the
+//     DDL history, bswap64(ddl_ts) | bswap64(txn_number), which the caller can rebuild from the
+//     record.
 // The caller stores a continuation and passes it back, never interpreting it. A token entry is
 // built from records the runtime produced, so its keys always have the third shape.
 // ---------------------------------------------------------------------------
@@ -535,9 +536,10 @@ message CdcScanRequest {
   uint32 max_bytes    = 4;
   // Long poll: hold the request until something becomes emittable, or until this expires. Only
   // an advance of min_ckpt_ts_ can make a record emittable, so only that and the deadline
-  // complete a parked request. The logger may still answer early with an empty page (it holds
-  // no more parked requests, or it does not park at all); a caller backs off before scanning
-  // the group again rather than re-issuing at once.
+  // complete a parked request with a page; a step-down answers it NotLeader. The logger may
+  // still answer early with an empty page (it holds no more parked requests, its own cap on the
+  // wait is shorter, or it does not park at all); a caller backs off before scanning the group
+  // again rather than re-issuing at once.
   uint32 wait_ms      = 5;
 }
 
@@ -549,13 +551,23 @@ message CdcDataRecord {
   bytes  blob       = 4;
 }
 
+// One record per recorded schema op: EloqDoc's create and drop collection and its index
+// operations. An index operation's message is a table_op whose index names are in
+// alter_table_info_blob. An add index whose build broke a constraint has a second record, at its
+// commit-stage timestamp, whose schema_op.rolled_back is set: the indexes it added are dropped
+// there.
 message CdcDdlRecord {
-  // The record's stream timestamp: the commit-stage timestamp for create and drop, and the
-  // catalog version D for index operations, which equals catalog_ts for those.
+  // The record's stream timestamp: the commit log's timestamp for create and drop and for a
+  // rolled-back add index's second record, and the prepare log's timestamp (the op's catalog
+  // version) for index operations otherwise.
   uint64 ddl_ts     = 1;
-  // D, the new catalog version.
+  // The op's catalog version: the timestamp its prepare log carried, at which it installed its
+  // dirty schema. Create and drop commit the catalog entry at ddl_ts instead; their tables keep
+  // this version.
   uint64 catalog_ts = 2;
   uint64 txn_number = 3;
+  // The op's message as the log state holds it when the record is appended: the prepare log's,
+  // with the commit log's stage and rolled-back mark for a record appended at the commit log.
   SchemaOpMessage schema_op = 4;
 }
 
@@ -575,7 +587,7 @@ message CdcScanResponse {
 
   // Ascending by (commit_ts, ng, txn); every commit_ts <= arrival_complete_ts.
   repeated CdcDataRecord data = 3;
-  // Ascending by (ddl_ts, namespace, class, key); every ddl_ts <= arrival_complete_ts.
+  // Ascending by (ddl_ts, txn_number); every ddl_ts <= arrival_complete_ts.
   repeated CdcDdlRecord ddl = 4;
 
   // This group's min_ckpt_ts_, read *before* either stream is scanned. Nothing at or below it

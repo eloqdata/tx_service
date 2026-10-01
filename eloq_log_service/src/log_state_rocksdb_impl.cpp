@@ -196,7 +196,9 @@ CdcScanStatus LogStateRocksDBImpl::CdcScan(const CdcScanRequest &request,
         *error = "the log state is being closed or reopened";
         return CdcScanStatus::NotReady;
     }
-    return CdcScanRocksDB(db_, arrival_complete_ts, request, response, error);
+    CdcDdlHistoryCursor ddl = CdcDdlStream();
+    return CdcScanRocksDB(
+        db_, ddl, arrival_complete_ts, request, response, error);
 }
 
 void LogStateRocksDBImpl::StopCdcScans()
@@ -233,6 +235,17 @@ int LogStateRocksDBImpl::ReadSnapshot(const std::string &snapshot_path,
         {
             std::ifstream is(path.c_str());
             LoadNgInfoAndCatalogOpsFrom(is);
+            continue;
+        }
+        if (file == kCdcDdlHistoryFile)
+        {
+            // A snapshot taken before the history existed has no such file,
+            // and the history stays empty.
+            std::ifstream is(path.c_str(), std::ios::binary);
+            if (!LoadCdcDdlHistoryFrom(is))
+            {
+                return -1;
+            }
             continue;
         }
 
@@ -283,6 +296,14 @@ std::vector<std::string> LogStateRocksDBImpl::WriteSnapshot(
             WriteSnapshotNgInfoAndCatalogOpsTo(os);
         }  // close file
         res.emplace_back("data");
+    }
+    {
+        auto path = snapshot_path + "/" + kCdcDdlHistoryFile;
+        {
+            std::ofstream os(path.c_str(), std::ios::binary);
+            WriteSnapshotCdcDdlHistoryTo(os);
+        }
+        res.emplace_back(kCdcDdlHistoryFile);
     }
 
     // do rocksdb checkpoint, add checkpoint files to snapshot
@@ -633,6 +654,8 @@ void LogStateRocksDBImpl::PurgingSstFiles()
             {
                 continue;
             }
+            // The CDC DDL history goes with the data, by the same floor.
+            TrimCdcDdlHistory(min_last_ckpt_ts);
             std::array<char, 20> start_key{};
             std::array<char, 20> end_key{};
             Serialize(start_key, 0, 0, 0);

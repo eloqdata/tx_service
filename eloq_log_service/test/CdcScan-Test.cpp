@@ -2,7 +2,8 @@
  * @file
  * Tests for the CDC log scan (cdc_scan.h): the continuation codec, the page
  * merge over the data and DDL streams, the scan served by the RocksDB log
- * state, and the CDC retention floor in its purge.
+ * state over its data log and its DDL history, and the CDC retention floor in
+ * its purge.
  */
 
 #include <unistd.h>
@@ -568,7 +569,8 @@ public:
 
     /**
      * @brief Writes a snapshot into a new directory, as a leader does for a
-     * follower that lags. Flushes the memtables first, like Flush().
+     * follower that lags: copies the in-memory state, then writes it.
+     * Flushes the memtables first, like Flush().
      *
      * @return The snapshot directory, and its files relative to it.
      */
@@ -577,6 +579,7 @@ public:
         const std::filesystem::path snapshot =
             path_ / ("snapshot_" + std::to_string(snapshots_++));
         std::filesystem::create_directories(snapshot);
+        state_->BeginSnapshot();
         return {snapshot.string(), state_->WriteSnapshot(snapshot.string())};
     }
 
@@ -609,7 +612,6 @@ CdcScanResponse StateScan(LogStateRocksDBImpl &state,
     std::string error;
     REQUIRE(state.CdcScan(request, &page, &error) == CdcScanStatus::Ok);
     CHECK(error.empty());
-    CHECK(page.ddl_size() == 0);
     return page;
 }
 
@@ -701,6 +703,114 @@ TEST_CASE("The RocksDB log state scans its data log through min_ckpt_ts",
     from_150.set_from_ts(150);
     page = StateScan(*state, from_150);
     CHECK(Rows(page) == std::vector<DataRow>(rows.begin() + 2, rows.end()));
+}
+
+namespace
+{
+/**
+ * @brief Logs an EloqDoc schema op's prepare and commit logs.
+ *
+ * @param state The log state.
+ * @param txn The op's tx.
+ * @param table The table name.
+ * @param op_type The txservice::OperationType.
+ * @param prepare_ts The prepare log's timestamp, the op's catalog version.
+ * @param commit_ts The commit log's timestamp.
+ */
+void LogSchemaOp(LogStateRocksDBImpl &state,
+                 uint64_t txn,
+                 const std::string &table,
+                 uint32_t op_type,
+                 uint64_t prepare_ts,
+                 uint64_t commit_ts)
+{
+    SchemaOpMessage msg;
+    msg.set_table_name_str(table);
+    msg.set_table_engine(TableEngine::EloqDoc);
+    msg.set_table_type(CcTableType::Primary);
+    msg.mutable_table_op()->set_op_type(op_type);
+    msg.set_stage(SchemaOpMessage_Stage_PrepareSchema);
+    state.UpsertSchemaOp(txn, prepare_ts, msg);
+    msg.set_stage(SchemaOpMessage_Stage_CommitSchema);
+    state.UpsertSchemaOp(txn, commit_ts, msg);
+}
+
+/**
+ * @param page A scan page.
+ * @return (ddl_ts, txn) of its DDL records.
+ */
+std::vector<std::pair<uint64_t, uint64_t>> DdlRows(const CdcScanResponse &page)
+{
+    std::vector<std::pair<uint64_t, uint64_t>> out;
+    for (const CdcDdlRecord &r : page.ddl())
+    {
+        out.emplace_back(r.ddl_ts(), r.txn_number());
+    }
+    return out;
+}
+}  // namespace
+
+TEST_CASE("The RocksDB log state scans its DDL history with its data log",
+          "[cdc_scan][rocksdb]")
+{
+    ScratchLogState state;
+    state->UpdateNgTerm(0, 1, "127.0.0.1", 1);
+    // A window keeps the DDL records a checkpoint passes.
+    state->SetCdcRetentionSeconds(1);
+    for (uint64_t ts : {100, 200, 300})
+    {
+        state->AddLogItem(0, ts, ts, "d" + std::to_string(ts));
+    }
+    // A create committed at 200, the data record's timestamp, and an add
+    // index at 250 (txservice::OperationType CreateTable and AddIndex).
+    LogSchemaOp(*state, 50, "db.a", 5, 150, 200);
+    LogSchemaOp(*state, 51, "db.a", 8, 250, 250);
+    state->UpdateCkptTs(0, 260);
+
+    CdcScanRequest from_start;
+    from_start.set_from_ts(0);
+    CdcScanResponse page = StateScan(*state, from_start);
+    CHECK(page.data_size() == 2);
+    CHECK(DdlRows(page) ==
+          std::vector<std::pair<uint64_t, uint64_t>>{{200, 50}, {250, 51}});
+    CHECK(page.ddl(0).catalog_ts() == 150);
+    CHECK(page.ddl(0).schema_op().table_name_str() == "db.a");
+    CHECK_FALSE(page.has_more());
+
+    // One record per page: at 200 the data record comes first.
+    std::vector<std::pair<bool, uint64_t>> merged;
+    CdcScanRequest request = from_start;
+    request.set_max_bytes(1);
+    for (int i = 0; i < 4; ++i)
+    {
+        page = StateScan(*state, request);
+        REQUIRE(page.data_size() + page.ddl_size() == 1);
+        merged.emplace_back(page.ddl_size() == 1,
+                            page.ddl_size() == 1 ? page.ddl(0).ddl_ts()
+                                                 : page.data(0).commit_ts());
+        CHECK(page.has_more() == (i < 3));
+        request.set_continuation(page.continuation());
+    }
+    CHECK(merged == std::vector<std::pair<bool, uint64_t>>{
+                        {false, 100}, {false, 200}, {true, 200}, {true, 250}});
+    CdcScanPosition position;
+    std::string error;
+    REQUIRE(DecodeCdcContinuation(page.continuation(), &position, &error));
+    CHECK(position.ddl == CdcDdlPosition(250, 51));
+    page = StateScan(*state, request);
+    CHECK(page.data_size() + page.ddl_size() == 0);
+
+    // A follower that installs the snapshot has the same history.
+    auto [snapshot_dir, files] = state.Snapshot();
+    ScratchLogState follower;
+    follower->SetCdcRetentionSeconds(1);
+    REQUIRE(follower->ReadSnapshot(snapshot_dir, files) == 0);
+    // The bound is rebuilt at the next checkpoint.
+    follower->UpdateCkptTs(0, 261);
+    page = StateScan(*follower, from_start);
+    CHECK(page.data_size() == 2);
+    CHECK(DdlRows(page) ==
+          std::vector<std::pair<uint64_t, uint64_t>>{{200, 50}, {250, 51}});
 }
 
 TEST_CASE("The CDC retention floor is the checkpoint less the window",
@@ -808,6 +918,86 @@ TEST_CASE("The RocksDB purge keeps the CDC retention window",
     CHECK(ScannedTimestamps(*state) ==
           std::vector<uint64_t>{
               9'000'000, 9'000'001, 9'000'002, 9'500'000, 9'600'000});
+}
+
+namespace
+{
+/**
+ * @param state The log state.
+ * @return The ddl_ts of every record in its CDC DDL history.
+ */
+std::vector<uint64_t> HistoryTs(LogStateRocksDBImpl &state)
+{
+    std::vector<CdcDdlRecord> records;
+    state.CopyCdcDdlHistory({}, UINT64_MAX, &records);
+    std::vector<uint64_t> out;
+    for (const CdcDdlRecord &r : records)
+    {
+        out.push_back(r.ddl_ts());
+    }
+    return out;
+}
+
+/**
+ * @brief Polls until the CDC DDL history holds the given timestamps, or ten
+ * seconds pass.
+ *
+ * @param state The log state.
+ * @param expected The ddl_ts of every record, in order.
+ * @return The last history seen.
+ */
+std::vector<uint64_t> WaitForHistory(LogStateRocksDBImpl &state,
+                                     const std::vector<uint64_t> &expected)
+{
+    std::vector<uint64_t> ts = HistoryTs(state);
+    for (int i = 0; i < 100 && ts != expected; ++i)
+    {
+        usleep(100 * 1000);
+        ts = HistoryTs(state);
+    }
+    return ts;
+}
+}  // namespace
+
+TEST_CASE("The RocksDB purge trims the CDC DDL history by its floor",
+          "[cdc_scan][rocksdb]")
+{
+    // A one-byte size limit makes every flush trigger a purge.
+    ScratchLogState state(1);
+    state->UpdateNgTerm(0, 1, "127.0.0.1", 1);
+    // Creates committed at 1 s, 5 s and 9 s, in microseconds.
+    for (uint64_t s : {1, 5, 9})
+    {
+        LogSchemaOp(*state,
+                    50 + s,
+                    "db.a" + std::to_string(s),
+                    5,
+                    s * 1'000'000 - 1,
+                    s * 1'000'000);
+    }
+
+    // With no retention window a checkpoint trims nothing: the records it
+    // passes are what a scan returns.
+    state->UpdateCkptTs(0, 8'000'000);
+    CdcScanRequest from_start;
+    from_start.set_from_ts(0);
+    CHECK(DdlRows(StateScan(*state, from_start)) ==
+          std::vector<std::pair<uint64_t, uint64_t>>{{1'000'000, 51},
+                                                     {5'000'000, 55}});
+
+    // A purge by the floor 8 s - 4 s = 4 s, woken by the next flush, takes
+    // the record at 1 s.
+    state->SetCdcRetentionSeconds(4);
+    WriteBatchFile(state, 9'500'000, 1);
+    CHECK(WaitForHistory(*state, {5'000'000, 9'000'000}) ==
+          std::vector<uint64_t>{5'000'000, 9'000'000});
+
+    // With no window the next purge's floor is just below the checkpoint.
+    state->SetCdcRetentionSeconds(0);
+    state->UpdateCkptTs(0, 8'100'000);
+    WriteBatchFile(state, 9'600'000, 1);
+    CHECK(WaitForHistory(*state, {9'000'000}) ==
+          std::vector<uint64_t>{9'000'000});
 }
 
 TEST_CASE("A CDC scan never reads the RocksDB state while it is reopened",

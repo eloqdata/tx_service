@@ -2,8 +2,9 @@
 
 **Status: open, deferred.** Found while reviewing the recovery of schema ops in the EloqDoc CDC
 project (PR 7, 2026-09-29). Nothing described under "Target design" is implemented. The current
-behavior works, but it weakens a recovered schema op's catalog lock to keep recovery from waiting
-on a range split.
+behavior works, but it weakens the catalog lock of a schema op recovered from its prepare log to
+keep recovery from waiting on a range split. An op recovered from its commit log restores a write
+intent in any case (PR 8, 2026-09-30), so the commit stage is not affected.
 
 Key files: `tx_service/src/fault/log_replay_service.cpp` (replay order, barriers),
 `tx_service/include/cc/catalog_cc_map.h` (`Execute(ReplayLogCc&)`, the schema record's lock),
@@ -47,7 +48,7 @@ A schema record restores the catalog lock by stage (`catalog_cc_map.h`):
 |---|---|---|
 | `PrepareSchema` | every node group | write lock; **write intent if the table is in the split set**, or for add index |
 | `PrepareData` | every node group | write intent |
-| `CommitSchema` | coordinator | write lock; **write intent if the table is in the split set** |
+| `CommitSchema` | coordinator | write intent: the entry already holds the committed schema |
 | `CommitSchema` | participant | none |
 
 A split record restores (`range_cc_map.h`):
@@ -65,10 +66,10 @@ task limiter, and only then finishes the replay request (`SetFinish()`), after w
 split.
 
 **The coupling.** Recovery counts as finished only once every recovered split holds its catalog
-read lock. A schema op's write lock on the same table would hold that up until the recovered
-schema op releases it at `PostCommit`, possibly after retrying a failing data store step for as
-long as the store is down. To avoid the stall, the schema record restores only a write intent when
-its table is in the split set.
+read lock. The write lock a prepare-stage schema record restores on the same table would hold that
+up until the recovered schema op releases it at `PostCommit`, possibly after retrying a failing
+data store step for as long as the store is down. To avoid the stall, the schema record restores
+only a write intent when its table is in the split set.
 
 ## 3. The flaw
 
@@ -76,10 +77,6 @@ The schema op's recovered lock is weakened so that a split can finish its part o
 in normal execution a split never overlaps a schema op's write-lock section. The weakening follows
 only from where "recovery finished" is drawn, and it costs:
 
-- **A weaker commit-stage lock.** The coordinator's lock after a commit log exists so that no newer
-  DDL runs before the recovered op's steps after the commit log, data store writes among them. An
-  intent still keeps a newer DDL out, but it lets DML reach the table on the coordinator's node
-  group while those steps run.
 - **Recovered state that depends on an unrelated op.** Whether a schema op comes back with a lock
   or an intent depends on whether some split happened to be in flight on the table.
 - **Global over-reach.** The split set is global: a split whose coordinator is another node group,
@@ -89,8 +86,8 @@ only from where "recovery finished" is drawn, and it costs:
 
 - **Schema records restore the lock their stage implies.** `PrepareSchema`: a write lock (an intent
   for add index, for add index's own reason: between its prepare log and its prepare index log it
-  holds only an intent, and its build takes range read locks). `CommitSchema`: the coordinator's
-  write lock. No split-set check.
+  holds only an intent, and its build takes range read locks). No split-set check. `CommitSchema`
+  already restores the coordinator's write intent whatever the split set holds.
 - **A recovered split finishes its part of recovery once it holds what recovery must guarantee**:
   its range write locks, which the range map restores, and its data-sync task limiter entry. The
   limiter is a per-range marker (node group, term, table, range id): while it exists, a new data
@@ -137,7 +134,7 @@ only from where "recovery finished" is drawn, and it costs:
    the clean log, pop the pending data-sync task.
 3. The recovery tx's failure path after `SetFinish()` (section 5).
 4. `catalog_cc_map.h`, `Execute(ReplayLogCc&)`: drop `req.RangeSplitting(...)` from the
-   `PrepareSchema` and `CommitSchema` cases.
+   `PrepareSchema` case, its only use.
 5. `log_replay_service.cpp`: remove barrier #1's collection of split tables and the
    `range_splitting_` plumbing into `ReplayLogCc` (`RangeSplitting`, the pointer passed with each
    schema record); it has no other consumer.
