@@ -31,6 +31,7 @@
 #include <cassert>
 #include <mutex>
 #include <string>
+#include <thread>
 #include <utility>
 #include <vector>
 
@@ -412,6 +413,9 @@ bool UpsertTableOp::RunUntilCommitLog(TransactionExecution *txm)
         catalog_rec_.SetSchemaImage(image_str_);
         Await(txm, post_all_intent_op_);
     }
+
+    CODE_FAULT_INJECTOR("upsert_table_hold_before_commit_lock",
+                        { HoldBeforeCommitLock(txm); });
 
     // The op's own steps, up to and including its commit log.
     switch (op_type_)
@@ -880,6 +884,33 @@ bool UpsertTableOp::ReleaseClusterConfig(TransactionExecution *txm)
         assert(false);
     }
     return true;
+}
+
+void UpsertTableOp::HoldBeforeCommitLock(TransactionExecution *txm)
+{
+    static constexpr char kHold[] = "upsert_table_hold_before_commit_lock";
+    static constexpr char kHeld[] = "upsert_table_held_before_commit_lock";
+    LOG(INFO) << "FaultInject " << kHold << ": holding the schema op on table "
+              << table_key_.Name().StringView()
+              << " before its commit-stage write locks, txn: "
+              << txm->TxNumber();
+    FaultInject::Instance().InjectFault(kHeld, "");
+    kv_retry_wait_op_.SetBlockingWork(
+        []()
+        {
+            const auto deadline =
+                std::chrono::steady_clock::now() + std::chrono::seconds(60);
+            while (FaultInject::Entry(kHold) != nullptr &&
+                   std::chrono::steady_clock::now() < deadline)
+            {
+                std::this_thread::sleep_for(std::chrono::milliseconds(100));
+            }
+            return CcErrorCode::NO_ERROR;
+        });
+    Await(txm, kv_retry_wait_op_);
+    FaultInject::Instance().InjectFault(kHeld, "remove");
+    LOG(INFO) << "FaultInject " << kHold << ": released the schema op on table "
+              << table_key_.Name().StringView() << ", txn: " << txm->TxNumber();
 }
 
 bool UpsertTableOp::AwaitKvRetry(TransactionExecution *txm,

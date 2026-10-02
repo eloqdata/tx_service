@@ -1367,6 +1367,32 @@ private:
     bool KvWriteFailed(TransactionExecution *txm);
 
     /**
+     * @brief Holds the op between its prepare log and its commit-stage write
+     * locks while a test keeps the upsert_table_hold_before_commit_lock fault
+     * armed, so that the test can commit DML in that window (EloqDoc
+     * docs/cdc-change-stream.md §4.4(b), plan B6).
+     *
+     * Arms upsert_table_held_before_commit_lock, which the test polls to learn
+     * that the op is held, then waits on kv_retry_wait_op_, idle before the
+     * commit log, whose worker thread polls the hold fault every 100 ms; the
+     * coroutine is suspended meanwhile, so the TxProcessor keeps serving other
+     * requests. The wait ends when the test disarms the hold, or after 60 s,
+     * and then disarms the marker. Only fault-injection builds call it.
+     *
+     * @warning The fault point sits before RunUntilCommitLog's op-type switch,
+     * so while the fault is armed it holds every table op that gets there, of
+     * any table: creates, drops, truncates and ALTERs (index ops run another
+     * state machine and are not held), each for up to 60 s. The marker does not
+     * say which op is held. A test arms the fault only around the one DDL it
+     * means to hold and disarms it in a finally (as EloqDoc's
+     * eloq_fault/ddl_drop_order.js does), or every later DDL of its suite
+     * stalls.
+     *
+     * @param txm The coordinating tx.
+     */
+    void HoldBeforeCommitLock(TransactionExecution *txm);
+
+    /**
      * @brief Waits KvRetryInterval() before a data store step that failed
      * after the commit log runs again, and logs a warning (ArmKvRetryWait).
      *
