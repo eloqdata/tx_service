@@ -1039,6 +1039,9 @@ LogStateRocksDBCloudImpl::GetLogReplayList(uint32_t ng_id,
     size_t rs_size = ddl_list.size() - scale_size - schema_size;
     LOG(INFO) << "split_range_op_list size: " << rs_size;
 
+    // After the cluster scale list, which asserts it holds at most one item.
+    GetClusterGateList(ddl_list);
+
     result = std::make_unique<ItemIteratorRocksDBImpl>(rocksdb_scan_threads_,
                                                        std::move(ddl_list),
                                                        dbc_copy->GetDBPtr(),
@@ -1257,6 +1260,16 @@ int LogStateRocksDBCloudImpl::ReadSnapshot(
         }
     }
 
+    // The cluster gate slot, likewise absent from older snapshots.
+    {
+        auto file_path = snapshot_path + "/" + kClusterGateFile;
+        std::ifstream is(file_path.c_str(), std::ios::binary);
+        if (is.good() && !LoadClusterGateFrom(is))
+        {
+            return -1;
+        }
+    }
+
     // load in mem data log
     {
         auto file_path = snapshot_path + "/in_mem_data_log";
@@ -1321,6 +1334,13 @@ std::vector<std::string> LogStateRocksDBCloudImpl::WriteSnapshot(
             WriteSnapshotCdcDdlHistoryTo(os);
         }
         res.emplace_back(kCdcDdlHistoryFile);
+
+        {
+            auto path = snapshot_path + "/" + kClusterGateFile;
+            std::ofstream os(path.c_str(), std::ios::binary);
+            WriteSnapshotClusterGateTo(os);
+        }
+        res.emplace_back(kClusterGateFile);
 
         {
             auto path = snapshot_path + "/in_mem_data_log";

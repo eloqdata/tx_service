@@ -67,6 +67,7 @@ set(CATCH_MAIN_TESTS
     StandbyForward-Test
     ApplyResponseBoundary-Test
     CkptLockRegistry-Test
+    ClusterGate-Test
     LogAgentCdc-Test
 )
 
@@ -106,7 +107,8 @@ endforeach()
 # Their sources live beside the log service they test; they need only the
 # logservice library, not the tx-service harness.
 set(LOG_SERVICE_TESTS_DIR ${CMAKE_CURRENT_SOURCE_DIR}/../../eloq_log_service/test)
-foreach(name CdcScan-Test CdcLongPoll-Test LogStateSchemaOp-Test)
+foreach(name CdcScan-Test CdcLongPoll-Test LogStateSchemaOp-Test
+             LogStateClusterGate-Test)
     add_executable(${name} ${LOG_SERVICE_TESTS_DIR}/${name}.cpp)
     target_link_libraries(${name} PRIVATE logservice Catch2::Catch2WithMain)
     set_property(TARGET ${name} PROPERTY CXX_STANDARD 20)

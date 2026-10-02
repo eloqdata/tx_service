@@ -136,6 +136,7 @@ UpsertTableIndexOp::UpsertTableIndexOp(
                                                   table_engine);
 
     is_force_finished_ = false;
+    gated_ = false;
     rolled_back_ = false;
 
     new_indexes_name_.reserve(alter_table_info_.index_add_count_);
@@ -214,6 +215,23 @@ void UpsertTableIndexOp::Forward(TransactionExecution *txm)
                        << txm->TxNumber();
             MarkFailed(txm);
             ForceToFinish(txm);
+            return;
+        }
+        // The cluster gate admits new ops only here, where an op takes the
+        // cluster config read lock (EloqDoc docs/cdc-change-stream.md §6.2).
+        // An op past this step, or a recovered one, which enters after it, is
+        // never gated: those are what a pause drains. Nothing but the lock is
+        // held yet, so the op releases it and ends without a log to clean.
+        if (cluster_conf_rec_.GatesSchemaOps())
+        {
+            LOG(WARNING) << "Alter Table Index on " << table_key_.Name().Trace()
+                         << " refused: the cluster gate is paused, txn: "
+                         << txm->TxNumber();
+            txm->upsert_resp_->SetErrorCode(TxErrorCode::CLUSTER_GATED);
+            MarkFailed(txm);
+            gated_ = true;
+            op_ = &unlock_cluster_config_op_;
+            StartUnlockClusterConfig(txm, unlock_cluster_config_op_);
             return;
         }
         // Acquire write intent, and then upgrade to write lock(Locking),
@@ -1474,8 +1492,8 @@ void UpsertTableIndexOp::Forward(TransactionExecution *txm)
                 return;
             }
         }
-        if (acquire_all_intent_op_.fail_cnt_.load(std::memory_order_relaxed) >
-            0)
+        if (gated_ || acquire_all_intent_op_.fail_cnt_.load(
+                          std::memory_order_relaxed) > 0)
         {
             // The write intents were never acquired: no log to clean.
             txm->upsert_resp_->Finish(UpsertResult::Failed);
@@ -1705,6 +1723,7 @@ void UpsertTableIndexOp::Reset(const std::string_view table_name_str,
     post_all_lock_op_.ResetHandlerTxm(txm);
     clean_log_op_.ResetHandlerTxm(txm);
     is_force_finished_ = false;
+    gated_ = false;
     rolled_back_ = false;
 
     new_indexes_name_.clear();

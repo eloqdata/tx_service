@@ -348,6 +348,14 @@ private:
                 scale_msg->set_cluster_scale_op_blob(item->log_message_);
                 scale_msg->set_txn(item->tx_number_);
             }
+            else if (item->item_type_ == LogItemType::ClusterGateLog)
+            {
+                ReplayClusterGateMsg *gate_msg =
+                    replay_msg.mutable_cluster_gate_msg();
+                gate_msg->set_commit_ts(item->timestamp_);
+                gate_msg->set_cluster_gate_blob(item->log_message_);
+                gate_msg->set_txn(item->tx_number_);
+            }
             else if (item->item_type_ == LogItemType::SchemaLog)
             {
                 ReplaySchemaMsg *schema_msg = replay_msg.add_schema_op_msgs();
@@ -440,6 +448,14 @@ private:
                 scale_msg->clear_cluster_scale_op_blob();
                 scale_msg->set_cluster_scale_op_blob(item.log_message_);
                 scale_msg->set_txn(item.tx_number_);
+            }
+            else if (item.item_type_ == LogItemType::ClusterGateLog)
+            {
+                ReplayClusterGateMsg *gate_msg =
+                    replay_msg.mutable_cluster_gate_msg();
+                gate_msg->set_commit_ts(item.timestamp_);
+                gate_msg->set_cluster_gate_blob(item.log_message_);
+                gate_msg->set_txn(item.tx_number_);
             }
             else if (item.item_type_ == LogItemType::SchemaLog)
             {

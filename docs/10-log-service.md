@@ -48,7 +48,7 @@ Protocol files live at `tx_service/tx-log-protos/` (`log.proto`, `log_agent.h/.c
 - `on_leader_start(term)`: stores `term` in `term_if_is_lg_leader_`, starts the RocksDB Cloud DB asynchronously if cloud-backed, calls `LogGroupLeaderUpdate` to notify the tx-side `LogAgent` of the new leader, and optionally starts the replay-log-size checker thread.
 - `on_leader_stop`: clears `term_if_is_lg_leader_` (set to -1), terminates active shipping agents.
 - `on_apply(iter)`: dispatches each committed raft entry to the appropriate handler — `WriteLog` tasks are batch-applied (`BatchAddLogItems`), DDL/split-range/cluster-scale/replay/checkpoint entries are applied individually.
-- `on_snapshot_save`/`on_snapshot_load`: snapshots the in-memory portion of `LogState` (ng-info map, schema/split-range/cluster-scale op maps) to binary files via `WriteSnapshot`/`ReadSnapshot`. The data log is handled per variant: the local RocksDB state hard-links its SST files into the snapshot (after a memtable flush), so taking a snapshot copies no data, and a follower that installs the snapshot receives those files and rebuilds its DB from them; the cloud state leaves the data log out of the snapshot, since it lives in shared object storage (§10).
+- `on_snapshot_save`/`on_snapshot_load`: snapshots the in-memory portion of `LogState` (ng-info map, schema/split-range/cluster-scale op maps, the cluster gate slot) to binary files via `WriteSnapshot`/`ReadSnapshot`. The data log is handled per variant: the local RocksDB state hard-links its SST files into the snapshot (after a memtable flush), so taking a snapshot copies no data, and a follower that installs the snapshot receives those files and rebuilds its DB from them; the cloud state leaves the data log out of the snapshot, since it lives in shared object storage (§10).
 
 Writes go through braft: `WriteLog` → serialize request to IOBuf → bind to `braft::Task` → `node_->apply(task)` → on majority-commit → `on_apply`. This gives true replication durability for `replica_num >= 3`.
 
@@ -61,7 +61,7 @@ Writes go through braft: `WriteLog` → serialize request to IOBuf → bind to `
 | `WriteLog(LogRequest)` | tx commit path | `LogServiceImpl` routes by `log_group_id`; `LogInstance::WriteLog` checks leadership (returns `NotLeader` if not leader), proposes via braft, waits for apply; returns `Success`/`Fail`/`NotLeader`/`Unknown` |
 | `ReplayLog(LogRequest)` | recovering cc ng leader (`LogAgent::ReplayLog`, sync, retried every 2s until `Success`) | Updates ng term + leader info in `LogState` via braft, then spawns/replaces a `LogShippingAgent` for this ng |
 | `UpdateCheckpointTs(LogRequest)` | checkpointer (`LogAgent::UpdateCheckpointTs`, fire-and-forget to every group) | Proposed via braft; on apply, `LogState::UpdateCkptTs` updates `last_ckpt_ts_` for the ng, recomputes `min_ckpt_ts_`, triggers `TryCleanMultiStageOps` |
-| `RecoverTx(RecoverTxRequest)` | tx hitting an orphan lock | Searches `LogState` for the tx's data/DDL/split-range/cluster-scale log and the ng's current term; answers `Committed`/`NotCommitted`; ships data log asynchronously if committed |
+| `RecoverTx(RecoverTxRequest)` | tx hitting an orphan lock | Searches `LogState` for the tx's data/DDL/split-range/cluster-scale/cluster-gate log and the ng's current term; answers `Committed`/`NotCommitted`; ships data log asynchronously if committed |
 | `RemoveCcNodeGroup(LogRequest)` | cluster scale-in | Proposed via braft; on apply, erases ng info from `LogState` |
 | `CheckClusterScaleStatus` | cluster-scale coordinator | Routes to `LogInstance::CheckClusterScaleStatus`; inspects in-memory `tx_cluster_scale_ops_` |
 | `CheckMigrationIsFinished` | bucket-migration coordinator | Routes to `LogInstance::CheckMigrationIsFinished` |
@@ -82,7 +82,7 @@ Writes go through braft: `WriteLog` → serialize request to IOBuf → bind to `
 
 ## 5. What is stored per log record
 
-A `WriteLogRequest` (`log.proto`) carries: `txn_number`, `commit_timestamp`, `log_content` (oneof: `data_log` / `schema_log` / `split_range_log` / `cluster_scale_log` / `migration_log`), per-ng terms (`node_terms`), `tx_term`, `retry`, `log_group_id`. `DataLogMessage.node_txn_logs` is a map `cc_ng_id → opaque blob` — the blob is the tx's serialized writes for that ng.
+A `WriteLogRequest` (`log.proto`) carries: `txn_number`, `commit_timestamp`, `log_content` (oneof: `data_log` / `schema_log` / `split_range_log` / `cluster_scale_log` / `migration_log` / `cluster_gate_log`), per-ng terms (`node_terms`), `tx_term`, `retry`, `log_group_id`. `DataLogMessage.node_txn_logs` is a map `cc_ng_id → opaque blob` — the blob is the tx's serialized writes for that ng.
 
 `LogStateRocksDBImpl` stores data logs in a single RocksDB column family:
 
@@ -98,8 +98,9 @@ In memory, `LogState` additionally keeps:
 - `tx_cluster_scale_ops_` (`txn → ClusterScaleOp`) — ongoing **cluster-scale ops** (`PrepareScale → ConfigUpdate/… → CleanScale`).
 - `tx_data_migration_ops_` — set of in-flight data migration tx numbers (populated from cluster-scale op tracking).
 - `min_ckpt_ts_` — minimum of `last_ckpt_ts_` across all known ngs; updated on each `UpdateCkptTs`; triggers `TryCleanMultiStageOps`.
+- The **cluster gate slot** — the latest `cluster_gate_log` entry, with its commit timestamp (the slot's version) and the gate transaction's number. Every gate transaction writes to log group 0, so only that group's slot is ever set; each entry overwrites it unless the slot already holds a version at or above the entry's commit timestamp. The slot is never purged: a pause stays until a resume replaces it.
 
-The in-memory op maps are rebuilt from the braft snapshot on `on_snapshot_load`. For the RocksDB data, `LogStateRocksDBImpl::WriteSnapshot` creates a RocksDB checkpoint in the snapshot directory: it flushes the memtables (the log state writes with the WAL disabled, so this is what puts the newest records into SSTs), hard-links the SST files, and copies only the small metadata files (MANIFEST, CURRENT, OPTIONS). Taking a snapshot therefore copies no data. The linked files are registered with the snapshot, so a follower that installs it receives them, and `ReadSnapshot` closes the follower's DB, deletes its files, links the received ones in and reopens.
+The in-memory op maps and the cluster gate slot are rebuilt from the braft snapshot on `on_snapshot_load` (the slot from its own `cluster_gate` file; a snapshot without one leaves the slot empty, and a truncated one fails the load). The memory log state does not save the slot. For the RocksDB data, `LogStateRocksDBImpl::WriteSnapshot` creates a RocksDB checkpoint in the snapshot directory: it flushes the memtables (the log state writes with the WAL disabled, so this is what puts the newest records into SSTs), hard-links the SST files, and copies only the small metadata files (MANIFEST, CURRENT, OPTIONS). Taking a snapshot therefore copies no data. The linked files are registered with the snapshot, so a follower that installs it receives them, and `ReadSnapshot` closes the follower's DB, deletes its files, links the received ones in and reopens.
 
 ## 6. Write path
 
@@ -112,7 +113,7 @@ tx commit (WriteLogOp)
   → braft replication to majority of replicas
   → on_apply (leader + followers):
        kDataLog: BatchAddLogItems → single rocksdb::WriteBatch → db_->Write(sync=true)
-       kSchemaLog / kSplitRangeLog / kClusterScaleLog / kMigrationLog: individual handlers
+       kSchemaLog / kSplitRangeLog / kClusterScaleLog / kMigrationLog / kClusterGateLog: individual handlers
        kReplayLog: UpdateNgTerm + spawn LogShippingAgent
        kUpdateCkptTs: UpdateCkptTs + TryCleanMultiStageOps
   → braft closure: notify original WriteLog caller (Success/Fail)
@@ -148,7 +149,7 @@ new cc ng leader (tx side, RecoveryService / Sharder failover)
   → LogShippingAgent thread:
        ConnectStream → LogReplayService::Connect(my_ip:my_port)
        ship all DDL items first (schema ops not CleanSchema, split-range not CleanSplit,
-         cluster-scale not CleanScale)
+         cluster-scale not CleanScale, then the cluster gate slot if set)
        then ship data logs: scan_threads partitions of the key range in parallel,
          each packed into ReplayMessage blobs (entry = ts ‖ ng ‖ txn ‖ len ‖ blob)
        finally ReplayFinishMsg{log_group_id, latest_txn_no, last_ckpt_ts, latest_commit_ts}
@@ -163,7 +164,7 @@ Details:
 - Multiple simultaneous ngs can each have their own shipping agent; `LogInstance` keeps a `std::unordered_map<uint32_t, std::unique_ptr<LogShippingAgent>> log_replay_workers_` keyed by ng id.
 - The cc ng term carried in replay messages is the actual braft term from `cc_ng_info_`, not a hard-coded constant.
 
-**RecoverTx (orphan lock resolution).** When a tx hits a lock owned by a dead coordinator, `LogAgent::RecoverTx` queries the lock-owner's log group. `LogInstance::RecoverTx` checks (a) `LogState::SearchTxDataLog` (scans the RocksDB CF from near the write_lock_ts for a record matching the tx number and ng), (b) `SearchTxSchemaLog`, (c) `SearchTxSplitRangeOp`, (d) `SearchTxClusterScaleOp`, (e) `SearchTxDataMigrationOp`, and (f) `GetNgLeaderTerm` vs the request's term. Outcome: record found → `Committed` (data log handed to the shipping agent for replay, which releases the lock); multi-stage op found → `Committed`; term mismatch or nothing found → `NotCommitted` (locks are stale; tx can be safely killed).
+**RecoverTx (orphan lock resolution).** When a tx hits a lock owned by a dead coordinator, `LogAgent::RecoverTx` queries the lock-owner's log group. `LogInstance::RecoverTx` checks (a) `LogState::SearchTxDataLog` (scans the RocksDB CF from near the write_lock_ts for a record matching the tx number and ng), (b) `SearchTxSchemaLog`, (c) `SearchTxSplitRangeOp`, (d) `SearchTxClusterScaleOp`, (e) `SearchTxDataMigrationOp`, (f) `SearchTxClusterGate` (whether the cluster gate slot was set by that tx; a gate tx that logged keeps its cluster-config write lock until its coordinator's replay installs the gate), and (g) `GetNgLeaderTerm` vs the request's term. Outcome: record found → `Committed` (data log handed to the shipping agent for replay, which releases the lock); multi-stage op found → `Committed`; term mismatch or nothing found → `NotCommitted` (locks are stale; tx can be safely killed).
 
 ## 9. LogAgent (client, `tx-log-protos/log_agent.cpp`)
 
@@ -210,7 +211,7 @@ Include directories exported: `eloq_log_service/include/` and `tx_service/tx-log
 3. **RocksDB key layout**: `bswap64(ts) ‖ bswap32(ng_id) ‖ bswap64(txn)` (20 bytes). The `ng_id` is embedded in the key (unlike the old open service which had separate per-ng CFs). Replay filters by `ng_id` at scan time using `ItemIteratorRocksDBImpl`.
 4. **Parallel replay scan.** `GetLogReplayList` partitions the `[first_ts, last_ts]` key range into `scan_threads` sub-ranges, each backed by its own RocksDB iterator. `LogShippingAgent` ships the partitions in parallel from separate threads.
 5. **Multiple shipping agents per instance.** `LogInstance` can have one shipping agent per cc ng; a new `ReplayLog` for the same ng terminates and replaces the existing agent atomically.
-6. **Snapshots copy no data log.** The braft snapshot serializes `cc_ng_info_`, `tx_catalog_ops_`, `tx_split_range_ops_`, `tx_cluster_scale_ops_` to binary files. The local RocksDB state adds its SST files as hard links, so the data log is part of the snapshot without being copied, and a follower installing it gets the files; the cloud state adds its in-memory queue instead and keeps the data log in object storage (§10).
+6. **Snapshots copy no data log.** The braft snapshot serializes `cc_ng_info_`, `tx_catalog_ops_`, `tx_split_range_ops_`, `tx_cluster_scale_ops_` and the cluster gate slot to binary files. The local RocksDB state adds its SST files as hard links, so the data log is part of the snapshot without being copied, and a follower installing it gets the files; the cloud state adds its in-memory queue instead and keeps the data log in object storage (§10).
 7. **Stage logs linger one hour past `min_ckpt_ts_`** (clean-stage schema/split-range/cluster-scale ops) to absorb stale retried prepare logs. `RecoverTx` treats any surviving multi-stage log as `Committed`.
 8. **Truncation is file-granular and lazy** (RocksDB variant): only whole L0 SSTs strictly below `min_ckpt_ts - 1` are deleted, only when total SST size exceeds `sst_files_size_limit`; memtable contents are never proactively flushed for truncation.
 9. **Fsync per group-commit batch**: data-log `WriteBatch` uses `sync=true`. Additionally, braft fsyncs its raft log on the majority path. The `raft_use_bthread_fsync`/`use_io_uring` gflags affect braft's fsync behavior.

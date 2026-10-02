@@ -130,6 +130,12 @@ enum struct TxErrorCode : uint16_t
     UPDATE_SEQUENCE_TABLE_FAIL,
 
     INVALID_CURSOR,
+
+    /**
+     * A new schema op met a paused cluster gate (EloqDoc
+     * docs/cdc-change-stream.md §6.2). Retriable once the gate resumes.
+     */
+    CLUSTER_GATED,
 };
 
 static const std::unordered_map<TxErrorCode, std::string> tx_error_messages{
@@ -217,6 +223,8 @@ static const std::unordered_map<TxErrorCode, std::string> tx_error_messages{
     {TxErrorCode::RPC_CALL_ERR, "RPC call error."},
     {TxErrorCode::UPDATE_SEQUENCE_TABLE_FAIL, "Update sequence table fail."},
     {TxErrorCode::INVALID_CURSOR, "ERR invalid cursor"},
+    {TxErrorCode::CLUSTER_GATED,
+     "Schema changes are paused by the cluster gate; retry after it resumes."},
 };
 
 static inline const std::string &TxErrorMessage(TxErrorCode err_code)

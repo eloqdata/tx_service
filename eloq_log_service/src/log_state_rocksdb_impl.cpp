@@ -92,6 +92,9 @@ LogStateRocksDBImpl::GetLogReplayList(uint32_t ng_id, uint64_t start_timestamp)
     size_t rs_size = ddl_list.size() - scale_size - schema_size;
     LOG(INFO) << "split_range_op_list size: " << rs_size;
 
+    // After the cluster scale list, which asserts it holds at most one item.
+    GetClusterGateList(ddl_list);
+
     std::unique_ptr<ItemIterator> result =
         std::make_unique<ItemIteratorRocksDBImpl>(rocksdb_scan_threads_,
                                                   std::move(ddl_list),
@@ -248,6 +251,16 @@ int LogStateRocksDBImpl::ReadSnapshot(const std::string &snapshot_path,
             }
             continue;
         }
+        if (file == kClusterGateFile)
+        {
+            // Likewise for the cluster gate slot, which stays empty.
+            std::ifstream is(path.c_str(), std::ios::binary);
+            if (!LoadClusterGateFrom(is))
+            {
+                return -1;
+            }
+            continue;
+        }
 
         // rocksdb checkpoint file
         // create hard links to checkpoint file in rocksdb storage path
@@ -304,6 +317,14 @@ std::vector<std::string> LogStateRocksDBImpl::WriteSnapshot(
             WriteSnapshotCdcDdlHistoryTo(os);
         }
         res.emplace_back(kCdcDdlHistoryFile);
+    }
+    {
+        auto path = snapshot_path + "/" + kClusterGateFile;
+        {
+            std::ofstream os(path.c_str(), std::ios::binary);
+            WriteSnapshotClusterGateTo(os);
+        }
+        res.emplace_back(kClusterGateFile);
     }
 
     // do rocksdb checkpoint, add checkpoint files to snapshot

@@ -205,7 +205,8 @@ page's first key, with sentinel `neg_inf_page_`/`pos_inf_page_` and sentinel ent
   (request parked, remote requests send an ack first); other conflicts set an error (OCC
   back-off-and-retry).
 - **AcquireAllCc** (a key's write intent or lock on every core of every node group: schema,
-  range and bucket ops): success returns `last_vali_ts_ = max(shard.last_read_ts_, Now())`, so a
+  range and bucket ops; `ClusterConfigCcMap`'s override, core 0 only, for cluster scale and the
+  cluster gate, returns the same): success returns `last_vali_ts_ = max(shard.last_read_ts_, Now())`, so a
   schema op's timestamps are above its catalog write lock's grant, and so above any checkpoint
   taken while it holds the lock. A catalog reader reaches `last_read_ts_` on release: a regular read
   lock through `PostReadCc`, EloqKV's fast catalog read (`ReadCatalog`) through
