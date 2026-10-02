@@ -141,7 +141,8 @@ public:
             // Updates last_vali_ts such that it is no smaller than (1) all
             // read transactions that have read the item in all shards, and
             // (2) the local time.
-            acquire_all_result.last_vali_ts_ = shard_->LastReadTs();
+            acquire_all_result.last_vali_ts_ =
+                std::max(shard_->LastReadTs(), shard_->Now());
             uint64_t lock_addr =
                 cce_ptr == nullptr ? 0
                                    : reinterpret_cast<uint64_t>(
@@ -238,8 +239,16 @@ public:
             req.SetDecodedPayload(std::move(decoded_rec));
             ACTION_FAULT_INJECTOR("cluster_config_PostWriteAll_remote");
         }
+        // A cluster gate's post write all (EloqDoc docs/cdc-change-stream.md
+        // §6.2) carries no node group configs and changes no topology, so it
+        // skips Sharder: its commit timestamp, raised above the acquire-all
+        // results, is always above the topology version, and the update below
+        // would read the configs it does not carry.
+        const bool gate_only = config_rec->GetClusterGate().has_value();
+
         // First we need to update cluster configs in Sharder.
-        if (Sharder::Instance().ClusterConfigVersion() < req.CommitTs())
+        if (!gate_only &&
+            Sharder::Instance().ClusterConfigVersion() < req.CommitTs())
         {
             // async call to host manager to update ng is made. cc req will be
             // put back in queue once it's done.
@@ -251,8 +260,8 @@ public:
             return false;
         }
 
-        // Lastly release/downgrade lock. We do not need to update the record in
-        // cluster config cc map since it is always empty.
+        // Lastly release/downgrade lock. The record in cluster config cc map
+        // stays empty but for the cluster gate, stored below.
         LockType lk_type = LockType::NoLock;
         TxNumber txn = req.Txn();
         if (lock != nullptr)
@@ -272,6 +281,17 @@ public:
 
         if (lk_type != LockType::NoLock)
         {
+            if (gate_only)
+            {
+                // Only while the request's tx owns the lock: a post write all
+                // retried after its tx completed elsewhere must not overwrite
+                // the value a newer gate op installed since, such as an old
+                // resume arriving after a newer pause. Updated in place, not
+                // replaced: cluster scale's replay caches node group configs
+                // in this payload for an asynchronous Sharder update.
+                neg_inf_.payload_.cur_payload_->SetClusterGate(
+                    *config_rec->GetClusterGate());
+            }
             bool was_dirty = neg_inf_.IsDirty();
             neg_inf_.SetCommitTsPayloadStatus(req.CommitTs(),
                                               RecordStatus::Normal);

@@ -10,6 +10,7 @@
 #include <iostream>
 #include <map>
 #include <memory>
+#include <optional>
 #include <shared_mutex>
 #include <string>
 #include <unordered_map>
@@ -26,7 +27,8 @@ enum struct LogItemType
     DataLog,
     SchemaLog,
     SplitRangeLog,
-    ClusterScaleLog
+    ClusterScaleLog,
+    ClusterGateLog  ///< The log group's cluster gate slot, while it has one.
 };
 
 struct Item
@@ -1009,6 +1011,7 @@ public:
         snapshot_tx_split_range_ops_.clear();
         snapshot_tx_cluster_scale_ops_.clear();
         snapshot_cdc_ddl_history_.clear();
+        snapshot_cluster_gate_.reset();
     }
 
     virtual void Clear()
@@ -1018,6 +1021,8 @@ public:
         std::unique_lock lk(log_state_mutex_);
         cdc_ddl_history_.clear();
         snapshot_cdc_ddl_history_.clear();
+        cluster_gate_.reset();
+        snapshot_cluster_gate_.reset();
         cc_ng_info_.clear();
         snapshot_cc_ng_info_.clear();
         tx_catalog_ops_.clear();
@@ -1257,6 +1262,12 @@ protected:
     static constexpr const char *kCdcDdlHistoryFile = "cdc_ddl_history";
 
     /**
+     * @brief The snapshot file of the cluster gate slot, in the states that
+     * serve CDC scans.
+     */
+    static constexpr const char *kClusterGateFile = "cluster_gate";
+
+    /**
      * @brief A scan's DDL stream over this state's CDC DDL history.
      *
      * @return A cursor that copies from the history when it is positioned.
@@ -1270,6 +1281,72 @@ protected:
             { CopyCdcDdlHistory(after, upper_ts, records); });
     }
 
+public:
+    /**
+     * @brief Applies a cluster gate log entry (EloqDoc
+     * docs/cdc-change-stream.md §6.2): the slot takes the entry's value if
+     * the entry is newer than the value it holds.
+     *
+     * The slot is one value overwritten in place, not a per-operation record,
+     * and is never purged: only a resume clears a pause. Every gate
+     * transaction is pinned to log group 0, so only that group's slot is ever
+     * set, and its successive entries carry increasing commit timestamps.
+     *
+     * @param txn The gate transaction.
+     * @param commit_ts The entry's commit timestamp, the value's version.
+     * @param msg The gate's new value.
+     */
+    void UpdateClusterGate(uint64_t txn,
+                           uint64_t commit_ts,
+                           const ClusterGateLogMessage &msg)
+    {
+        // on_apply writes; RecoverTx reads from an RPC thread.
+        std::unique_lock lk(log_state_mutex_);
+        if (cluster_gate_.has_value() && cluster_gate_->version >= commit_ts)
+        {
+            return;
+        }
+        cluster_gate_ = ClusterGateSlot{msg, commit_ts, txn};
+    }
+
+    /**
+     * @brief Whether a gate transaction's log entry was applied, for a write
+     * log retried after its result went unknown and for orphan lock recovery
+     * (RecoverTx), which must not clear a logged gate tx's lock.
+     *
+     * @param txn The gate transaction.
+     * @return true if the slot holds that transaction's value.
+     */
+    bool SearchTxClusterGate(uint64_t txn) const
+    {
+        std::shared_lock s_lk(log_state_mutex_);
+        return cluster_gate_.has_value() && cluster_gate_->txn == txn;
+    }
+
+    /**
+     * @brief The cluster gate slot, for tests and for the gate's replay.
+     *
+     * @param[out] msg The gate's value, when the slot holds one.
+     * @param[out] version Its commit timestamp.
+     * @param[out] txn The transaction that set it.
+     * @return false if the slot is empty.
+     */
+    bool GetClusterGate(ClusterGateLogMessage *msg,
+                        uint64_t *version,
+                        uint64_t *txn) const
+    {
+        std::shared_lock s_lk(log_state_mutex_);
+        if (!cluster_gate_.has_value())
+        {
+            return false;
+        }
+        *msg = cluster_gate_->value;
+        *version = cluster_gate_->version;
+        *txn = cluster_gate_->txn;
+        return true;
+    }
+
+protected:
     void MakeCopyOfNgInfoAndCatalogOps()
     {
         snapshot_cc_ng_info_ = cc_ng_info_;
@@ -1278,6 +1355,8 @@ protected:
         snapshot_tx_cluster_scale_ops_ = tx_cluster_scale_ops_;
         // A purge thread may trim the history meanwhile (TrimCdcDdlHistory).
         std::shared_lock s_lk(log_state_mutex_);
+        // Under the lock for the reason GetClusterGateList() gives.
+        snapshot_cluster_gate_ = cluster_gate_;
         snapshot_cdc_ddl_history_.clear();
         snapshot_cdc_ddl_history_.reserve(cdc_ddl_history_.size());
         for (const auto &[position, record] : cdc_ddl_history_)
@@ -1366,6 +1445,92 @@ protected:
         LOG(INFO) << "read CDC DDL history size: " << cnt;
         std::unique_lock lk(log_state_mutex_);
         cdc_ddl_history_ = std::move(history);
+        return true;
+    }
+
+    /**
+     * @brief Writes the snapshot's copy of the cluster gate slot.
+     *
+     * The slot has a file of its own, as the CDC DDL history does, so the
+     * file the memory state shares keeps its format. Layout: a u8 that is 1
+     * when the slot holds a value, then the u64 version, the u64 txn, a u32
+     * length and the serialized ClusterGateLogMessage.
+     *
+     * @param os The snapshot file.
+     */
+    void WriteSnapshotClusterGateTo(std::ofstream &os)
+    {
+        uint8_t present = snapshot_cluster_gate_.has_value() ? 1 : 0;
+        os.write(reinterpret_cast<char *>(&present), sizeof(uint8_t));
+        if (!present)
+        {
+            return;
+        }
+        std::string buf;
+        snapshot_cluster_gate_->value.SerializeToString(&buf);
+        uint32_t length = buf.size();
+        os.write(reinterpret_cast<char *>(&snapshot_cluster_gate_->version),
+                 sizeof(uint64_t));
+        os.write(reinterpret_cast<char *>(&snapshot_cluster_gate_->txn),
+                 sizeof(uint64_t));
+        os.write(reinterpret_cast<char *>(&length), sizeof(uint32_t));
+        os.write(buf.data(), length);
+        LOG(INFO) << "write cluster gate, version: "
+                  << snapshot_cluster_gate_->version
+                  << ", paused: " << snapshot_cluster_gate_->value.paused();
+    }
+
+    /**
+     * @brief Loads a cluster gate slot that WriteSnapshotClusterGateTo()
+     * wrote, replacing the current one.
+     *
+     * @param is The snapshot file.
+     * @return False if the file is truncated, the value's length runs past
+     *         the file's end, or the value does not parse; the slot is then
+     *         left as it was.
+     */
+    bool LoadClusterGateFrom(std::ifstream &is)
+    {
+        const std::streampos begin = is.tellg();
+        is.seekg(0, std::ios::end);
+        const std::streampos end = is.tellg();
+        is.seekg(begin);
+
+        uint8_t present;
+        is.read(reinterpret_cast<char *>(&present), sizeof(uint8_t));
+        if (is.fail() || present > 1)
+        {
+            LOG(ERROR) << "snapshot read failed: corrupt cluster gate file";
+            return false;
+        }
+        std::optional<ClusterGateSlot> slot;
+        if (present)
+        {
+            ClusterGateSlot read;
+            uint32_t length;
+            is.read(reinterpret_cast<char *>(&read.version), sizeof(uint64_t));
+            is.read(reinterpret_cast<char *>(&read.txn), sizeof(uint64_t));
+            is.read(reinterpret_cast<char *>(&length), sizeof(uint32_t));
+            if (is.fail() || length > end - is.tellg())
+            {
+                LOG(ERROR) << "snapshot read failed: the cluster gate is "
+                              "truncated or corrupt";
+                return false;
+            }
+            std::string buf(length, '\0');
+            is.read(buf.data(), length);
+            if (is.fail() || !read.value.ParseFromString(buf))
+            {
+                LOG(ERROR) << "snapshot read failed: the cluster gate is "
+                              "truncated or corrupt";
+                return false;
+            }
+            slot = std::move(read);
+            LOG(INFO) << "read cluster gate, version: " << slot->version
+                      << ", paused: " << slot->value.paused();
+        }
+        std::unique_lock lk(log_state_mutex_);
+        cluster_gate_ = std::move(slot);
         return true;
     }
 
@@ -1783,6 +1948,32 @@ protected:
         assert(res.size() <= 1);
     }
 
+    /**
+     * @brief Adds the cluster gate slot to a replay list, as one item, when
+     * the slot holds a value: a recovering node group reinstalls the gate
+     * from it, however old the value is.
+     *
+     * @param[out] res The replay list.
+     */
+    void GetClusterGateList(std::vector<Item::Pointer> &res)
+    {
+        // The list is built while the ReplayLog entry applies, on the thread
+        // that writes the slot, so no write interleaves today. The lock keeps
+        // the read safe if a list is ever built elsewhere: a torn copy of the
+        // protobuf would crash, not ship a stale item.
+        std::shared_lock s_lk(log_state_mutex_);
+        if (!cluster_gate_.has_value())
+        {
+            return;
+        }
+        std::string gate_str;
+        cluster_gate_->value.AppendToString(&gate_str);
+        res.emplace_back(std::make_shared<Item>(cluster_gate_->txn,
+                                                cluster_gate_->version,
+                                                std::move(gate_str),
+                                                LogItemType::ClusterGateLog));
+    }
+
     bool UpdateMinCkptTsOfAllNodeGroups()
     {
         uint64_t min_ts = UINT64_MAX;
@@ -2003,6 +2194,27 @@ protected:
      * loading rebuilds each record's position.
      */
     std::vector<CdcDdlRecord> snapshot_cdc_ddl_history_;
+
+    /**
+     * @brief The cluster gate slot's value, as UpdateClusterGate keeps it.
+     */
+    struct ClusterGateSlot
+    {
+        ClusterGateLogMessage value;  ///< The gate's latest value.
+        uint64_t version{0};          ///< Commit timestamp of its entry.
+        uint64_t txn{0};              ///< The gate transaction that set it.
+    };
+
+    /**
+     * @brief The cluster gate slot (EloqDoc docs/cdc-change-stream.md
+     * §6.2): set by cluster gate log entries, saved in the raft snapshot by
+     * the states that serve CDC scans, replayed to recovering node groups,
+     * and never purged. Empty until the first gate entry, and in every log
+     * group but group 0.
+     */
+    std::optional<ClusterGateSlot> cluster_gate_;
+    /** @brief The slot as of the snapshot being saved. */
+    std::optional<ClusterGateSlot> snapshot_cluster_gate_;
 
     std::unordered_map<uint32_t, CcNgInfo> cc_ng_info_;
     std::unordered_map<uint32_t, CcNgInfo> snapshot_cc_ng_info_;

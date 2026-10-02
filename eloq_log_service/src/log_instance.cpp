@@ -288,6 +288,18 @@ void LogInstance::RecoverTx(const RecoverTxRequest *request,
             log_state_->SearchTxDataMigrationOp(request->lock_tx_number());
     }
 
+    if (!has_multi_stage_log)
+    {
+        // A gate tx that logged holds the cluster config write lock until
+        // its coordinator's replay installs the gate and releases it.
+        // Clearing the lock on a node group that has not installed the gate
+        // yet would let that group admit DDL during a pause. The slot names
+        // only the latest gate tx, which is enough: a later one could not
+        // have logged while this tx's lock was still held anywhere.
+        has_multi_stage_log =
+            log_state_->SearchTxClusterGate(request->lock_tx_number());
+    }
+
     if (record == nullptr && !has_multi_stage_log)
     {
         // No log record found for the specified tx. The tx is deemed aborted.
@@ -834,6 +846,13 @@ LogInstance::ExecuteResult LogInstance::execute(const LogRequest *request,
                         committed = (found && flushed_stage >= stage);
                         break;
                     }
+                    case LogContentMessage::ContentCase::kClusterGateLog:
+                    {
+                        // A gate entry is applied once: the slot holds its
+                        // transaction's value until a newer entry replaces it.
+                        committed = log_state_->SearchTxClusterGate(tx_number);
+                        break;
+                    }
                     default:
                         break;
                     }
@@ -913,6 +932,15 @@ LogInstance::ExecuteResult LogInstance::execute(const LogRequest *request,
                         req.txn_number(), timestamp, migration_tx_log_message);
                 break;
             }
+            case LogContentMessage::ContentCase::kClusterGateLog:
+            {
+                // Updates the gate slot, like UpdateCkptTs updates state; the
+                // entry itself is not retained.
+                log_state_->UpdateClusterGate(req.txn_number(),
+                                              timestamp,
+                                              log_content.cluster_gate_log());
+                break;
+            }
             default:
                 break;
             }
@@ -955,7 +983,9 @@ LogInstance::ExecuteResult LogInstance::execute(const LogRequest *request,
                     log_content.content_case() ==
                         LogContentMessage::ContentCase::kClusterScaleLog ||
                     log_content.content_case() ==
-                        LogContentMessage::ContentCase::kMigrationLog)
+                        LogContentMessage::ContentCase::kMigrationLog ||
+                    log_content.content_case() ==
+                        LogContentMessage::ContentCase::kClusterGateLog)
                 {
                     // Pass all node group latest leader info to the multi-stage
                     // txn coordinator. So that the coordinator can send

@@ -433,22 +433,6 @@ message CheckMigrationIsFinishedResponse {
 	bool finished = 1;
 }
 
-// Read-only poll used by the cluster gate's pause to finish its drain: a pause is complete once
-// every log group reports no schema operation still in flight. The same reply carries the group's
-// highest DDL timestamp, whose maximum across groups bounds every DDL that ran before the gate
-// closed (max_ddl_ts), which bootstrap needs to pick T0.
-message CheckSchemaOpsInFlightRequest {
-  uint32 log_group_id = 1;
-}
-
-message CheckSchemaOpsInFlightResponse {
-  // Schema operations at a stage below CleanSchema, i.e. not yet finished.
-  uint32 in_flight_count = 1;
-  // Highest timestamp among this group's DDL records -- the commit timestamp for create and drop,
-  // the new catalog version for index operations -- or 0 when the group holds no DDL record.
-  uint64 lg_highest_ddl_ts = 2;
-}
-
 message AttachLogRequest {
   string config_path = 1;
 }
@@ -616,7 +600,6 @@ service LogService {
   rpc CheckClusterScaleStatus(LogRequest) returns (LogResponse);
   // Change data capture. Leader only; followers answer NotLeader with a redirect.
   rpc CdcScan(CdcScanRequest) returns (CdcScanResponse);
-  rpc CheckSchemaOpsInFlight(CheckSchemaOpsInFlightRequest) returns (CheckSchemaOpsInFlightResponse);
   // Add this function for test aim, but it can be used with other aims.
   // Call this method will transfer the log group leader to the pointed node.
   rpc TransferLeader(TransferRequest) returns (TransferResponse);
@@ -651,6 +634,18 @@ message ReplayClusterScaleMsg {
   uint64 txn = 3;
 }
 
+// A log group's cluster gate slot, shipped to a recovering node group so that
+// it can reinstall the gate however old it is. Only log group 0 ever holds
+// one, so a replay carries at most one.
+message ReplayClusterGateMsg {
+  // The version: the commit timestamp of the entry that set the slot.
+  uint64 commit_ts = 1;
+  // The serialized ClusterGateLogMessage.
+  bytes cluster_gate_blob = 2;
+  // The gate transaction that set it; its coordinator's node group resumes it.
+  uint64 txn = 3;
+}
+
 message ReplayFinishMsg {
   uint32 log_group_id = 1;
   uint32 latest_txn_no = 2;
@@ -667,6 +662,7 @@ message ReplayMessage {
   ReplayClusterScaleMsg cluster_scale_op_msg = 6;
   ReplayFinishMsg finish = 7;
   bool is_lock_recovery = 8;
+  ReplayClusterGateMsg cluster_gate_msg = 9;
 }
 
 message LogReplayConnectRequest {

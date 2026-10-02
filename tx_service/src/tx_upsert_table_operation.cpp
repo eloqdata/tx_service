@@ -290,6 +290,22 @@ bool UpsertTableOp::RunUntilPrepareLog(TransactionExecution *txm)
         return false;
     }
 
+    // The cluster gate admits new ops only here, where an op takes the cluster
+    // config read lock (EloqDoc docs/cdc-change-stream.md §6.2). An op past
+    // this step, or a recovered one, which enters after it, is never gated:
+    // those are what a pause drains. Nothing but the lock is held yet.
+    if (cluster_conf_rec_.GatesSchemaOps())
+    {
+        LOG(WARNING) << "Upsert table on " << table_key_.Name().StringView()
+                     << " refused: the cluster gate is paused, tx_number:"
+                     << txm->TxNumber();
+        txm->upsert_resp_->SetErrorCode(TxErrorCode::CLUSTER_GATED);
+        MarkFailed(txm);
+        ReleaseClusterConfig(txm);
+        result_ = UpsertResult::Failed;
+        return false;
+    }
+
     // Write intents on the table's catalog entry, on every node group.
     DLOG(INFO) << "txn: " << txm->TxNumber()
                << " process acquire_all_intent_op_";

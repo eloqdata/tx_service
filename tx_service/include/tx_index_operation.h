@@ -364,6 +364,12 @@ private:
     // operation
     bool is_force_finished_{false};
 
+    /**
+     * The cluster gate refused the op at its first step: it holds nothing but
+     * the cluster config read lock, releases it and ends without a log.
+     */
+    bool gated_{false};
+
 #ifdef NDEBUG
     static constexpr uint8_t scan_batch_range_size_{10};
 #else
